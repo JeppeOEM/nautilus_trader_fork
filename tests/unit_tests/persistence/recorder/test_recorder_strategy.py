@@ -67,6 +67,33 @@ def test_on_start_raises_listing_all_missing_instruments(mocker, mock_cache):
         strategy.on_start()
 
 
+def test_on_start_missing_instrument_does_not_call_stop(mocker, mock_cache):
+    # A3 RESULT: on_start's RuntimeError propagates out of Strategy.start()
+    # (Component.start() re-raises -- component.pyx "raise  # Halt state
+    # transition"), through Trader._start() and TradingNode.run_async(), and is
+    # caught (but NOT re-raised by default) in TradingNode.run(). The strategy
+    # itself never calls self.stop() on this path -- this is proven at the unit
+    # level here. recorder.py's main() now calls node.run(raise_exception=True)
+    # so the RuntimeError propagates out of main() and the process exits
+    # non-zero (verified empirically by running `python -c "..."` against a
+    # built-but-unconnectable node: RuntimeError propagated, exit code 1).
+    # A full subprocess exit-code check against the real entrypoint
+    # (scripts/bybit_recorder/recorder.py) requires Bybit connectivity to reach
+    # on_start (TradingNode.run_async only calls trader.start() after
+    # _await_engines_connected() succeeds) -- that live confirmation is
+    # deferred to the Task 3 human-verify checkpoint (D-05/D-06/T-01-10).
+
+    # Arrange
+    strategy, _ = _build_strategy(mocker, mock_cache, [INSTRUMENT_ID_LINEAR, INSTRUMENT_ID_SPOT])
+    stop_spy = mocker.patch.object(strategy, "stop")
+
+    # Act / Assert
+    with pytest.raises(RuntimeError, match="Missing instruments"):
+        strategy.on_start()
+
+    stop_spy.assert_not_called()
+
+
 def test_on_start_subscribes_trade_ticks_per_instrument(mocker, mock_cache):
     # Arrange
     instrument = TestInstrumentProvider.btcusdt_perp_binance()

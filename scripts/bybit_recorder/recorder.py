@@ -92,7 +92,12 @@ def main(config_path: str) -> None:
     node.build()
 
     try:
-        node.run()
+        # WHY: raise_exception=True so an on_start failure (e.g. missing
+        # instruments, D-05/D-06) propagates out of main() and exits the
+        # process non-zero -- systemd/journald must surface this (T-01-10/A3).
+        # The default (False) only logs and swallows the error, which would
+        # otherwise look like a clean exit.
+        node.run(raise_exception=True)
     finally:
         node.dispose()
 
