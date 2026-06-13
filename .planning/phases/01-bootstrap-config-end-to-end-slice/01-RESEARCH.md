@@ -404,22 +404,25 @@ assert all(isinstance(t, TradeTick) for t in trades)
 | A3 | Raising in `on_start` yields a non-zero process exit code under `TradingNode.run()` | Pattern 3 / D-05 | If the runner swallows the exception into a clean stop, systemd won't see failure. Add an acceptance test that asserts non-zero exit. |
 | A4 | `streaming_path` and `catalog_path` (D-08) should be reconciled to a shared root so conversion finds feather files | Pitfall 5 | If kept distinct without redirection, conversion finds no feather data. Planner must define the relationship. |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Daily rotation vs CONTEXT silence on rotation mode**
    - What we know: catalog "day partitioning" only emerges from feather rotation; `SCHEDULED_DATES` gives UTC-midnight daily files.
    - What's unclear: whether the user wants strict per-day files or accepts interval-named files for the Phase 1 slice.
    - Recommendation: Plan with `RotationMode.SCHEDULED_DATES` daily/UTC; flag A1 for user confirmation in discuss/plan-check.
+   - **RESOLVED:** Plan 01-02's `build_streaming_config()` constructs `StreamingConfig` with `rotation_mode=RotationMode.SCHEDULED_DATES`, `rotation_interval=pd.Timedelta(days=1)`, `rotation_time=time(0,0,0)`, `rotation_timezone="UTC"` (01-02-PLAN.md task verifying `RotationMode\.SCHEDULED_DATES`).
 
 2. **Partial-day re-conversion behavior (D-04)**
    - What we know: non-disjoint intervals raise; identical intervals are skipped idempotently.
    - What's unclear: exact behavior when the current-day feather grows between conversions.
    - Recommendation: Add an explicit verification task (run conversion twice mid-day, observe). If it raises, gate to closed days or catch the `ValueError`.
+   - **RESOLVED:** see 01-04 Task 1 (`test_double_conversion_same_day_behavior`) — converts the same UTC-day feather data twice and asserts whichever real behavior the framework exhibits (idempotent skip vs `ValueError` on non-disjoint intervals), pinned with an `# A2 RESULT:` comment.
 
 3. **Exit-code on `on_start` raise**
    - What we know: D-05 wants a non-zero exit.
    - What's unclear: how `TradingNode.run()` propagates an `on_start` exception to the process exit code.
    - Recommendation: Verification task asserting non-zero exit on a deliberately-missing instrument.
+   - **RESOLVED:** see 01-04 Task 2 — runs the recorder with a deliberately-missing instrument and asserts the process exits non-zero (D-05/A3).
 
 ## Environment Availability
 
