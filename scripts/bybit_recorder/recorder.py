@@ -21,6 +21,7 @@ from nautilus_trader.adapters.bybit import BybitDataClientConfig
 from nautilus_trader.adapters.bybit import BybitEnvironment
 from nautilus_trader.adapters.bybit import BybitLiveDataClientFactory
 from nautilus_trader.adapters.bybit import BybitProductType
+from nautilus_trader.common.config import CUSTOM_ENCODINGS
 from nautilus_trader.config import InstrumentProviderConfig
 from nautilus_trader.config import LoggingConfig
 from nautilus_trader.config import TradingNodeConfig
@@ -38,6 +39,14 @@ from scripts.bybit_recorder.strategy import RecorderStrategyConfig
 RECORDER_INSTANCE_ID = "8f1b9c2e-1d3a-4b6c-8e7f-0a1b2c3d4e5f"
 
 _DEFAULT_CONFIG_PATH = Path(__file__).resolve().parent / "recorder.toml"
+
+# WHY: NautilusKernel._setup_streaming() serializes the full TradingNodeConfig
+# (including data_clients) via config.json(). msgspec_encoding_hook has no
+# branch for pyo3-native adapter enums like BybitProductType/BybitEnvironment,
+# so encoding raises TypeError. Register them via the official CUSTOM_ENCODINGS
+# extension point rather than patching the framework hook.
+CUSTOM_ENCODINGS[BybitProductType] = lambda value: value.name
+CUSTOM_ENCODINGS[BybitEnvironment] = lambda value: value.name
 
 
 def main(config_path: str) -> None:
