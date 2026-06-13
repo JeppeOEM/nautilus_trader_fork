@@ -1,0 +1,98 @@
+# Requirements: Bybit Data Collector
+
+**Defined:** 2026-06-13
+**Core Value:** Reliable, continuous capture of Bybit market data into a Nautilus-catalog-compatible parquet archive — usable for both backtesting and live strategy research, with no data loss across restarts/disconnects.
+
+## v1 Requirements
+
+### Configuration
+
+- [ ] **CONF-01**: User can configure which Bybit instruments to record (linear perpetuals USDT + spot symbols) via a TOML config file
+- [ ] **CONF-02**: User can configure per-instrument order book depth and bar intervals via the TOML config file
+- [ ] **CONF-03**: Recorder validates all configured instruments against Bybit's instrument cache on startup and fails fast with a clear error if any are missing
+
+### Recording
+
+- [ ] **REC-01**: Recorder subscribes to and records trade ticks for each configured instrument
+- [ ] **REC-02**: Recorder subscribes to and records quote ticks (best bid/ask) for each configured instrument
+- [ ] **REC-03**: Recorder subscribes to and records order book deltas (per configured depth) for each configured instrument
+- [ ] **REC-04**: Recorder subscribes to and records bars/klines (per configured intervals) for each configured instrument
+- [ ] **REC-05**: Recorder subscribes to and records funding rate updates for linear perpetuals
+- [ ] **REC-06**: Recorder subscribes to and records mark price and index price updates for linear perpetuals
+- [ ] **REC-07**: All recorded data is persisted via Nautilus's `StreamingConfig`/`StreamingFeatherWriter` (not custom writers)
+
+### Reliability
+
+- [ ] **REL-01**: A scheduled job converts streamed data into the partitioned `ParquetDataCatalog` format, partitioned by day
+- [ ] **REL-02**: On shutdown (SIGTERM), the recorder flushes/converts any buffered data before exiting, so a restart does not lose recent data
+- [ ] **REL-03**: Recorder logs per-stream heartbeats and warns if any subscribed stream goes quiet beyond an expected threshold
+- [ ] **REL-04**: Recorder relies entirely on the Bybit adapter's built-in WebSocket reconnect/resubscribe — no custom reconnect logic
+
+### Open Interest (Spike)
+
+- [ ] **OI-01**: Recorder records open interest for linear perpetuals via a custom Nautilus `Data` type with Arrow serializer registration, isolated as its own phase due to no native framework support
+
+### Operations
+
+- [ ] **OPS-01**: A pandas-based utility can load and query slices of the catalog (by instrument, data type, and time range) for ad-hoc inspection
+- [ ] **OPS-02**: A systemd unit file is provided for 24/7 process supervision with `Restart=always`
+- [ ] **OPS-03**: A deployment guide documents installation, TOML configuration, secrets/API key setup, starting/stopping the service, and monitoring via journald and Nautilus file logs
+
+## v2 Requirements
+
+Deferred to future release. Tracked but not in current roadmap.
+
+### Historical Data
+
+- **HIST-01**: Historical backfill of Bybit data for gap-filling and pre-recorder history
+
+### Operations
+
+- **OPS-04**: Disk-usage/retention sweep for old catalog partitions
+- **OPS-05**: Reconnect/disconnect counters and explicit gap markers recorded in the catalog
+
+## Out of Scope
+
+Explicitly excluded. Documented to prevent scope creep.
+
+| Feature | Reason |
+|---------|--------|
+| Redis-backed message bus / multi-process pipeline | Single-process collector handles the target instrument count; adapter multiplexes all subscriptions over one WS connection |
+| Options market data | Only linear perpetuals (USDT) and spot are in scope |
+| Inverse perpetuals | Only linear perpetuals (USDT) and spot are in scope |
+| Auto-discovery / "all instruments" / top-N selection | User provides an explicit configurable instrument list (CONF-01) |
+| Historical backfill (v1) | Live-streaming only for v1; deferred to v2 (HIST-01) |
+
+## Traceability
+
+Which phases cover which requirements. Updated during roadmap creation.
+
+| Requirement | Phase | Status |
+|-------------|-------|--------|
+| CONF-01 | TBD | Pending |
+| CONF-02 | TBD | Pending |
+| CONF-03 | TBD | Pending |
+| REC-01 | TBD | Pending |
+| REC-02 | TBD | Pending |
+| REC-03 | TBD | Pending |
+| REC-04 | TBD | Pending |
+| REC-05 | TBD | Pending |
+| REC-06 | TBD | Pending |
+| REC-07 | TBD | Pending |
+| REL-01 | TBD | Pending |
+| REL-02 | TBD | Pending |
+| REL-03 | TBD | Pending |
+| REL-04 | TBD | Pending |
+| OI-01 | TBD | Pending |
+| OPS-01 | TBD | Pending |
+| OPS-02 | TBD | Pending |
+| OPS-03 | TBD | Pending |
+
+**Coverage:**
+- v1 requirements: 18 total
+- Mapped to phases: 0
+- Unmapped: 18 ⚠️ (to be filled by roadmap)
+
+---
+*Requirements defined: 2026-06-13*
+*Last updated: 2026-06-13 after initial definition*
