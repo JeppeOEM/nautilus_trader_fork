@@ -357,17 +357,19 @@ catalog.query(data_cls=IndexPriceUpdate, identifiers=["BTCUSDT-LINEAR.BYBIT"])
 
 **Note:** Bybit's exact set of valid kline interval strings (1/3/5/15/30/60/120/240/360/720-MINUTE, DAY, WEEK, MONTH equivalents) was not enumerated from source in this session; the `"1-MINUTE"` form is verified. If the user configures unusual intervals, validate empirically. `[ASSUMED]`
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Funding dedup persistence + read-back path (D-01).**
    - What we know: auto-writer cannot be deduped; strategy must own the gate; `publish_data` reaches the writer as `CustomData`.
    - What's unclear: whether the deduped funding object round-trips as a native `catalog.funding_rates(...)` read or only as `catalog.custom_data(FundingRateUpdate)`, and which the operator/backtest consumer expects.
    - Recommendation: a tiny empirical spike during planning/execution (write 2 deduped funding rows, convert, read back both ways) — mirrors Phase 1's A2/A3 discipline. Pick the path that reads back as a native `FundingRateUpdate`.
+   - **RESOLVED:** Plan 02 Task 1 is a concrete empirical spike — a strategy-owned `StreamingFeatherWriter` that includes `FundingRateUpdate` (separate from the kernel `"*"` writer, which excludes it), read back via `catalog.funding_rates(...)`, with `catalog.custom_data(FundingRateUpdate)` documented as fallback if the native accessor doesn't round-trip.
 
 2. **Spot depth validation policy (D-03 vs venue reality).**
    - What we know: locked decision = fail on spot `depth > 50`; venue actually supports {1,50,200,1000} for spot.
    - What's unclear: whether the user wants to keep the strict 50 cap or adopt the discrete valid-set check across all product types.
    - Recommendation: implement D-03 as written to honor the lock, but flag the discrepancy in the plan's checkpoint so the user can confirm or relax. Strongly consider validating `depth ∈ {1,50,200,1000}` for ALL instruments as an additional fail-fast (a bad value yields silent no-data).
+   - **RESOLVED:** D-03 is honored literally for spot — `depth > 50` fails fast (Plan 01 Task 2, `_SPOT_MAX_DEPTH`). Linear instruments additionally validate against the discrete set `{1,50,200,1000}` (`_LINEAR_VALID_DEPTHS`) as additive defense-in-depth — no contradiction, no policy substitution, no operator sign-off required.
 
 ## Environment Availability
 
