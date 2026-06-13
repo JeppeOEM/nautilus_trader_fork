@@ -1,0 +1,21 @@
+# Bybit Data Collector configuration.
+#
+# Credentials (BYBIT_API_KEY, BYBIT_API_SECRET, BYBIT_TESTNET_*) are sourced
+# from environment variables only — never place them in this file (D-09).
+
+[recorder]
+trader_id = "BYBIT-COLLECTOR-001"
+catalog_path = "catalog"
+streaming_path = "catalog/streaming"
+conversion_interval_minutes = 60
+environment = "mainnet"
+
+[[instruments.linear]]
+id = "BTCUSDT-LINEAR.BYBIT"
+depth = 50
+bar_intervals = ["1-MINUTE"]
+
+[[instruments.spot]]
+id = "ETHUSDT-SPOT.BYBIT"
+depth = 50
+bar_intervals = ["1-MINUTE"]
