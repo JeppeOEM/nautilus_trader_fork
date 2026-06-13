@@ -4,12 +4,12 @@ milestone: v1.0
 milestone_name: milestone
 status: executing
 stopped_at: Phase 1 context gathered
-last_updated: "2026-06-13T14:04:15.438Z"
-last_activity: 2026-06-13 — Roadmap created (5 phases, vertical MVP, 18/18 requirements mapped)
+last_updated: "2026-06-13T14:07:14.358Z"
+last_activity: 2026-06-13 -- Phase 01 execution started
 progress:
   total_phases: 5
   completed_phases: 0
-  total_plans: 0
+  total_plans: 4
   completed_plans: 0
   percent: 0
 ---
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-06-13)
 
 **Core value:** Reliable, continuous capture of Bybit market data into a Nautilus-catalog-compatible parquet archive — no data loss across restarts/disconnects.
-**Current focus:** Phase 1 — Bootstrap, Config & End-to-End Slice
+**Current focus:** Phase 01 — bootstrap-config-end-to-end-slice
 
 ## Current Position
 
-Phase: 1 of 5 (Bootstrap, Config & End-to-End Slice)
-Plan: 0 of TBD in current phase
-Status: Ready to execute
-Last activity: 2026-06-13 — Roadmap created (5 phases, vertical MVP, 18/18 requirements mapped)
+Phase: 01 (bootstrap-config-end-to-end-slice) — EXECUTING
+Plan: 1 of 4
+Status: Executing Phase 01
+Last activity: 2026-06-13 -- Phase 01 execution started
 
 Progress: [░░░░░░░░░░] 0%
 
