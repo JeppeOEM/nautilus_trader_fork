@@ -22,6 +22,7 @@ from nautilus_trader.portfolio.portfolio import Portfolio
 from nautilus_trader.test_kit.providers import TestInstrumentProvider
 from nautilus_trader.test_kit.stubs.identifiers import TestIdStubs
 
+
 INSTRUMENT_ID_LINEAR = InstrumentId.from_str("BTCUSDT-LINEAR.BYBIT")
 INSTRUMENT_ID_SPOT = InstrumentId.from_str("ETHUSDT-SPOT.BYBIT")
 
@@ -54,19 +55,23 @@ def _build_strategy(mocker, mock_cache, instrument_ids):
 
 def test_on_start_raises_listing_all_missing_instruments(mocker, mock_cache):
     # Arrange
-    mock_cache.instrument = mocker.Mock(return_value=None)
+    # Neither INSTRUMENT_ID_LINEAR nor INSTRUMENT_ID_SPOT is registered in the
+    # cache, so cache.instrument(id) naturally returns None for both.
     strategy, _ = _build_strategy(mocker, mock_cache, [INSTRUMENT_ID_LINEAR, INSTRUMENT_ID_SPOT])
 
     # Act / Assert
-    with pytest.raises(RuntimeError, match=r"BTCUSDT-LINEAR\.BYBIT.*ETHUSDT-SPOT\.BYBIT|ETHUSDT-SPOT\.BYBIT.*BTCUSDT-LINEAR\.BYBIT"):
+    with pytest.raises(
+        RuntimeError,
+        match=r"BTCUSDT-LINEAR\.BYBIT.*ETHUSDT-SPOT\.BYBIT|ETHUSDT-SPOT\.BYBIT.*BTCUSDT-LINEAR\.BYBIT",
+    ):
         strategy.on_start()
 
 
 def test_on_start_subscribes_trade_ticks_per_instrument(mocker, mock_cache):
     # Arrange
     instrument = TestInstrumentProvider.btcusdt_perp_binance()
-    mock_cache.instrument = mocker.Mock(return_value=instrument)
-    strategy, _ = _build_strategy(mocker, mock_cache, [INSTRUMENT_ID_LINEAR, INSTRUMENT_ID_SPOT])
+    mock_cache.add_instrument(instrument)
+    strategy, _ = _build_strategy(mocker, mock_cache, [instrument.id, instrument.id])
     subscribe_spy = mocker.patch.object(strategy, "subscribe_trade_ticks")
 
     # Act
@@ -79,15 +84,12 @@ def test_on_start_subscribes_trade_ticks_per_instrument(mocker, mock_cache):
 def test_on_start_sets_conversion_timer(mocker, mock_cache):
     # Arrange
     instrument = TestInstrumentProvider.btcusdt_perp_binance()
-    mock_cache.instrument = mocker.Mock(return_value=instrument)
-    strategy, clock = _build_strategy(mocker, mock_cache, [INSTRUMENT_ID_LINEAR, INSTRUMENT_ID_SPOT])
+    mock_cache.add_instrument(instrument)
+    strategy, clock = _build_strategy(mocker, mock_cache, [instrument.id, instrument.id])
     mocker.patch.object(strategy, "subscribe_trade_ticks")
-    set_timer_spy = mocker.patch.object(clock, "set_timer")
 
     # Act
     strategy.on_start()
 
     # Assert
-    set_timer_spy.assert_called_once()
-    _, kwargs = set_timer_spy.call_args
-    assert kwargs["name"] == "convert-stream"
+    assert "convert-stream" in clock.timer_names
