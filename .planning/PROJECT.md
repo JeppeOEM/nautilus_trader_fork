@@ -57,6 +57,7 @@ Reliable, continuous capture of Bybit market data into a Nautilus-catalog-compat
 |----------|-----------|---------|
 | No Redis / single process | A single Bybit data client can multiplex 10+ instrument subscriptions; Redis only helps multi-process pub/sub or persisted cache state, neither needed here | — Pending |
 | Official `ParquetDataCatalog` format (not custom pandas parquet) | Lets the recorded data be reused directly in Nautilus backtests later, unlike the existing example's custom format | — Pending |
+| Persistence via `StreamingConfig` + `StreamingFeatherWriter` + `catalog.convert_stream_to_data()` (not a hand-rolled `CatalogWriter`) | User preference: always leverage existing Nautilus framework functionality over custom code, even where the framework path is less individually verified for edge cases — extend later only if it proves insufficient | — Pending |
 | Partition by day, retain everything | Keeps disk management simple; old partitions can be manually archived/deleted later if disk fills up | — Pending |
 | systemd for process supervision | Low-effort on Linux; journald captures crash/restart logs automatically, Nautilus file logging covers detailed traces | — Pending |
 | Live-streaming only for v1 | Keeps scope focused; historical backfill deferred | — Pending |
