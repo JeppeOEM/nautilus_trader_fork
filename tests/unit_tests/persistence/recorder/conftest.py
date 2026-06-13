@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from nautilus_trader.cache.cache import Cache
 from nautilus_trader.model.data import TradeTick
 from nautilus_trader.test_kit.providers import TestInstrumentProvider
 from nautilus_trader.test_kit.stubs.data import TestDataStubs
@@ -60,14 +61,15 @@ bar_intervals = ["1-MINUTE"]
 
 
 @pytest.fixture
-def mock_cache(mocker):
+def mock_cache():
     """
-    Provide a mock cache whose `.instrument(instrument_id)` is configurable per-test
-    to return either an instrument stub or `None`.
+    Provide a real `Cache` instance (required by `Portfolio`'s PyO3 `CacheFacade`
+    type check). `cache.instrument(instrument_id)` naturally returns `None` for any
+    instrument not registered via `cache.add_instrument(...)`, so tests configure
+    "present" instruments by calling `add_instrument` and leave others unregistered
+    to simulate "missing" (Cython `cdef class` methods cannot be monkeypatched).
     """
-    cache = mocker.Mock()
-    cache.instrument = mocker.Mock(return_value=None)
-    return cache
+    return Cache(database=None)
 
 
 @pytest.fixture
