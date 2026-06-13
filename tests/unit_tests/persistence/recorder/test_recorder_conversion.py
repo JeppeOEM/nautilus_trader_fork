@@ -14,6 +14,12 @@
 # -------------------------------------------------------------------------------------------------
 
 from nautilus_trader.common.component import TestClock
+from nautilus_trader.model.data import Bar
+from nautilus_trader.model.data import IndexPriceUpdate
+from nautilus_trader.model.data import MarkPriceUpdate
+from nautilus_trader.model.data import OrderBookDelta
+from nautilus_trader.model.data import OrderBookDeltas
+from nautilus_trader.model.data import QuoteTick
 from nautilus_trader.model.data import TradeTick
 from nautilus_trader.persistence.catalog.parquet import ParquetDataCatalog
 from nautilus_trader.persistence.writer import StreamingFeatherWriter
@@ -108,3 +114,170 @@ def test_double_conversion_same_day_behavior(catalog_dir, sample_trade_ticks):
     assert len(trades_after_first) > 0
     assert len(trades_after_second) == len(trades_after_first)
     assert all(isinstance(t, TradeTick) for t in trades_after_second)
+
+
+def test_convert_stream_to_data_roundtrips_quote_ticks(catalog_dir, sample_quote_ticks):
+    # Arrange
+    catalog = ParquetDataCatalog(str(catalog_dir))
+    cache = TestComponentStubs.cache()
+    cache.add_instrument(TestInstrumentProvider.btcusdt_perp_binance())
+    clock = TestClock()
+
+    writer = StreamingFeatherWriter(
+        path=f"{catalog_dir}/live/{RECORDER_INSTANCE_ID}",
+        cache=cache,
+        clock=clock,
+        fs_protocol="file",
+        include_types=[QuoteTick],
+    )
+    for quote in sample_quote_ticks:
+        writer.write(quote)
+    writer.close()
+
+    # Act
+    catalog.convert_stream_to_data(
+        instance_id=RECORDER_INSTANCE_ID,
+        data_cls=QuoteTick,
+        subdirectory="live",
+    )
+    quotes = catalog.quote_ticks(instrument_ids=[str(sample_quote_ticks[0].instrument_id)])
+
+    # Assert
+    assert len(quotes) > 0
+    assert all(isinstance(q, QuoteTick) for q in quotes)
+
+
+def test_convert_stream_to_data_roundtrips_order_book_deltas(catalog_dir, sample_order_book_deltas):
+    # Arrange
+    catalog = ParquetDataCatalog(str(catalog_dir))
+    cache = TestComponentStubs.cache()
+    cache.add_instrument(TestInstrumentProvider.btcusdt_perp_binance())
+    clock = TestClock()
+
+    writer = StreamingFeatherWriter(
+        path=f"{catalog_dir}/live/{RECORDER_INSTANCE_ID}",
+        cache=cache,
+        clock=clock,
+        fs_protocol="file",
+        # NOTE: the writer's include_types filter compares against
+        # `obj.__class__`, which is `OrderBookDeltas` for the deltas wrapper
+        # object actually published on the message bus (the per-instrument
+        # writer schema is then mapped internally to OrderBookDelta).
+        include_types=[OrderBookDeltas],
+    )
+    for deltas in sample_order_book_deltas:
+        writer.write(deltas)
+    writer.close()
+
+    # Act
+    catalog.convert_stream_to_data(
+        instance_id=RECORDER_INSTANCE_ID,
+        data_cls=OrderBookDelta,
+        subdirectory="live",
+    )
+    deltas_read = catalog.order_book_deltas(
+        instrument_ids=[str(sample_order_book_deltas[0].instrument_id)],
+    )
+
+    # Assert
+    assert len(deltas_read) > 0
+    assert all(isinstance(d, OrderBookDelta) for d in deltas_read)
+
+
+def test_convert_stream_to_data_roundtrips_bars(catalog_dir, sample_bars):
+    # Arrange
+    catalog = ParquetDataCatalog(str(catalog_dir))
+    cache = TestComponentStubs.cache()
+    cache.add_instrument(TestInstrumentProvider.btcusdt_perp_binance())
+    clock = TestClock()
+
+    writer = StreamingFeatherWriter(
+        path=f"{catalog_dir}/live/{RECORDER_INSTANCE_ID}",
+        cache=cache,
+        clock=clock,
+        fs_protocol="file",
+        include_types=[Bar],
+    )
+    for bar in sample_bars:
+        writer.write(bar)
+    writer.close()
+
+    # Act
+    catalog.convert_stream_to_data(
+        instance_id=RECORDER_INSTANCE_ID,
+        data_cls=Bar,
+        subdirectory="live",
+    )
+    bars = catalog.bars(bar_types=[str(sample_bars[0].bar_type)])
+
+    # Assert
+    assert len(bars) > 0
+    assert all(isinstance(b, Bar) for b in bars)
+
+
+def test_convert_stream_to_data_roundtrips_mark_prices(catalog_dir, sample_mark_prices):
+    # Arrange
+    catalog = ParquetDataCatalog(str(catalog_dir))
+    cache = TestComponentStubs.cache()
+    cache.add_instrument(TestInstrumentProvider.btcusdt_perp_binance())
+    clock = TestClock()
+
+    writer = StreamingFeatherWriter(
+        path=f"{catalog_dir}/live/{RECORDER_INSTANCE_ID}",
+        cache=cache,
+        clock=clock,
+        fs_protocol="file",
+        include_types=[MarkPriceUpdate],
+    )
+    for mark_price in sample_mark_prices:
+        writer.write(mark_price)
+    writer.close()
+
+    # Act
+    catalog.convert_stream_to_data(
+        instance_id=RECORDER_INSTANCE_ID,
+        data_cls=MarkPriceUpdate,
+        subdirectory="live",
+    )
+    marks = catalog.query(
+        data_cls=MarkPriceUpdate,
+        identifiers=[str(sample_mark_prices[0].instrument_id)],
+    )
+
+    # Assert
+    assert len(marks) > 0
+    assert all(isinstance(m, MarkPriceUpdate) for m in marks)
+
+
+def test_convert_stream_to_data_roundtrips_index_prices(catalog_dir, sample_index_prices):
+    # Arrange
+    catalog = ParquetDataCatalog(str(catalog_dir))
+    cache = TestComponentStubs.cache()
+    cache.add_instrument(TestInstrumentProvider.btcusdt_perp_binance())
+    clock = TestClock()
+
+    writer = StreamingFeatherWriter(
+        path=f"{catalog_dir}/live/{RECORDER_INSTANCE_ID}",
+        cache=cache,
+        clock=clock,
+        fs_protocol="file",
+        include_types=[IndexPriceUpdate],
+    )
+    for index_price in sample_index_prices:
+        writer.write(index_price)
+    writer.close()
+
+    # Act
+    catalog.convert_stream_to_data(
+        instance_id=RECORDER_INSTANCE_ID,
+        data_cls=IndexPriceUpdate,
+        subdirectory="live",
+    )
+    indices = catalog.query(
+        data_cls=IndexPriceUpdate,
+        identifiers=[str(sample_index_prices[0].instrument_id)],
+    )
+
+    # Assert
+    assert len(indices) > 0
+    assert all(isinstance(i, IndexPriceUpdate) for i in indices)

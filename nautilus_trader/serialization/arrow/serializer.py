@@ -343,6 +343,9 @@ class ArrowSerializer:
             pyo3_greeks = _option_greeks_decoder(table)
             return [OptionGreeks.from_pyo3(item) for item in pyo3_greeks]
 
+        if data_cls in (MarkPriceUpdate, IndexPriceUpdate):
+            return _price_update_decoder(table, data_cls)
+
         if Wrangler is None:
             raise NotImplementedError
 
@@ -593,6 +596,57 @@ def _option_greeks_decoder(table) -> list:
     writer.close()
     ipc_bytes = sink.getvalue().to_pybytes()
     return nautilus_pyo3.option_greeks_from_arrow_record_batch_bytes(ipc_bytes)
+
+
+def _price_update_decoder(table: pa.Table, data_cls: type) -> list:
+    """
+    Decode a `MarkPriceUpdate` or `IndexPriceUpdate` arrow table back into native
+    pyo3 objects.
+
+    There is no Rust-side `*_from_arrow_record_batch_bytes` decoder for either type
+    (unlike `OptionGreeks`/`InstrumentStatus`), so this reconstructs each row
+    directly from the `value` (FixedSizeBinary(16) little-endian i128 raw price),
+    `ts_event`, and `ts_init` columns, using `instrument_id` and `price_precision`
+    carried in the table's schema metadata (written by
+    `StreamingFeatherWriter._extract_obj_metadata` / the Rust `*_to_arrow_record_batch_bytes`
+    encoders).
+
+    """
+    if isinstance(table, pa.RecordBatch):
+        table = pa.Table.from_batches([table])
+
+    metadata = table.schema.metadata or {}
+    instrument_id_str = metadata[b"instrument_id"].decode()
+    price_precision = int(metadata[b"price_precision"].decode())
+
+    instrument_id = nautilus_pyo3.InstrumentId.from_str(instrument_id_str)
+    cls = nautilus_pyo3.MarkPriceUpdate if data_cls == MarkPriceUpdate else nautilus_pyo3.IndexPriceUpdate
+
+    values = table.column("value").to_pylist()
+    ts_events = table.column("ts_event").to_pylist()
+    ts_inits = table.column("ts_init").to_pylist()
+
+    updates = []
+    for value_bytes, ts_event, ts_init in zip(values, ts_events, ts_inits, strict=True):
+        raw = int.from_bytes(value_bytes, byteorder="little", signed=True)
+        price = nautilus_pyo3.Price.from_raw(raw, price_precision)
+        updates.append(
+            cls(
+                instrument_id=instrument_id,
+                value=price,
+                ts_event=ts_event,
+                ts_init=ts_init,
+            ),
+        )
+
+    # NOTE: `from_pyo3_list` on these compiled Cython types delegates to a
+    # `from_pyo3_c` classmethod that does not exist on `IndexPriceUpdate` /
+    # `MarkPriceUpdate` (only `from_pyo3` does) -- use the per-item conversion
+    # to avoid that AttributeError.
+    if data_cls == MarkPriceUpdate:
+        return [MarkPriceUpdate.from_pyo3(item) for item in updates]
+
+    return [IndexPriceUpdate.from_pyo3(item) for item in updates]
 
 
 register_arrow(

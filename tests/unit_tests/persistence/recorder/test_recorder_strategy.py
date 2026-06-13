@@ -27,7 +27,14 @@ INSTRUMENT_ID_LINEAR = InstrumentId.from_str("BTCUSDT-LINEAR.BYBIT")
 INSTRUMENT_ID_SPOT = InstrumentId.from_str("ETHUSDT-SPOT.BYBIT")
 
 
-def _build_strategy(mocker, mock_cache, instrument_ids):
+def _build_strategy(
+    mocker,
+    mock_cache,
+    instrument_ids,
+    linear_instrument_ids=None,
+    instrument_depths=None,
+    instrument_bar_intervals=None,
+):
     from scripts.bybit_recorder.strategy import RecorderStrategy
     from scripts.bybit_recorder.strategy import RecorderStrategyConfig
 
@@ -36,8 +43,16 @@ def _build_strategy(mocker, mock_cache, instrument_ids):
     msgbus = MessageBus(trader_id=trader_id, clock=clock)
     portfolio = Portfolio(msgbus=msgbus, cache=mock_cache, clock=clock)
 
+    if instrument_depths is None:
+        instrument_depths = {instrument_id: 50 for instrument_id in instrument_ids}
+    if instrument_bar_intervals is None:
+        instrument_bar_intervals = {instrument_id: ["1-MINUTE"] for instrument_id in instrument_ids}
+
     config = RecorderStrategyConfig(
         instrument_ids=instrument_ids,
+        linear_instrument_ids=linear_instrument_ids or [],
+        instrument_depths=instrument_depths,
+        instrument_bar_intervals=instrument_bar_intervals,
         catalog_path="catalog",
         instance_id_str="8f1b9c2e-1d3a-4b6c-8e7f-0a1b2c3d4e5f",
         conversion_interval_minutes=60,
@@ -120,3 +135,161 @@ def test_on_start_sets_conversion_timer(mocker, mock_cache):
 
     # Assert
     assert "convert-stream" in clock.timer_names
+
+
+def test_on_start_subscribes_quote_ticks_per_instrument(mocker, mock_cache):
+    # Arrange
+    instrument = TestInstrumentProvider.btcusdt_perp_binance()
+    mock_cache.add_instrument(instrument)
+    strategy, _ = _build_strategy(mocker, mock_cache, [instrument.id, instrument.id])
+    mocker.patch.object(strategy, "subscribe_trade_ticks")
+    subscribe_spy = mocker.patch.object(strategy, "subscribe_quote_ticks")
+
+    # Act
+    strategy.on_start()
+
+    # Assert
+    assert subscribe_spy.call_count == 2
+
+
+def test_on_start_subscribes_order_book_deltas_per_instrument(mocker, mock_cache):
+    # Arrange
+    from nautilus_trader.model.enums import BookType
+
+    instrument = TestInstrumentProvider.btcusdt_perp_binance()
+    mock_cache.add_instrument(instrument)
+    strategy, _ = _build_strategy(
+        mocker,
+        mock_cache,
+        [instrument.id],
+        instrument_depths={instrument.id: 50},
+    )
+    mocker.patch.object(strategy, "subscribe_trade_ticks")
+    mocker.patch.object(strategy, "subscribe_quote_ticks")
+    subscribe_spy = mocker.patch.object(strategy, "subscribe_order_book_deltas")
+
+    # Act
+    strategy.on_start()
+
+    # Assert
+    assert subscribe_spy.call_count == 1
+    _, kwargs = subscribe_spy.call_args
+    assert kwargs["book_type"] == BookType.L2_MBP
+    assert kwargs["depth"] == 50
+
+
+def test_on_start_subscribes_bars_per_interval(mocker, mock_cache):
+    # Arrange
+    instrument = TestInstrumentProvider.btcusdt_perp_binance()
+    mock_cache.add_instrument(instrument)
+    strategy, _ = _build_strategy(
+        mocker,
+        mock_cache,
+        [instrument.id],
+        instrument_bar_intervals={instrument.id: ["1-MINUTE"]},
+    )
+    mocker.patch.object(strategy, "subscribe_trade_ticks")
+    mocker.patch.object(strategy, "subscribe_quote_ticks")
+    mocker.patch.object(strategy, "subscribe_order_book_deltas")
+    subscribe_spy = mocker.patch.object(strategy, "subscribe_bars")
+
+    # Act
+    strategy.on_start()
+
+    # Assert
+    assert subscribe_spy.call_count == 1
+    (bar_type,), _ = subscribe_spy.call_args
+    assert str(bar_type) == f"{instrument.id}-1-MINUTE-LAST-EXTERNAL"
+
+
+def test_on_start_linear_only_mark_index_gating(mocker, mock_cache):
+    # Arrange
+    instrument_linear = TestInstrumentProvider.btcusdt_perp_binance()
+    instrument_spot = TestInstrumentProvider.adabtc_binance()
+    mock_cache.add_instrument(instrument_linear)
+    mock_cache.add_instrument(instrument_spot)
+    strategy, _ = _build_strategy(
+        mocker,
+        mock_cache,
+        [instrument_linear.id, instrument_spot.id],
+        linear_instrument_ids=[instrument_linear.id],
+        instrument_depths={instrument_linear.id: 50, instrument_spot.id: 50},
+        instrument_bar_intervals={instrument_linear.id: ["1-MINUTE"], instrument_spot.id: ["1-MINUTE"]},
+    )
+    mocker.patch.object(strategy, "subscribe_trade_ticks")
+    mocker.patch.object(strategy, "subscribe_quote_ticks")
+    mocker.patch.object(strategy, "subscribe_order_book_deltas")
+    mocker.patch.object(strategy, "subscribe_bars")
+    mark_spy = mocker.patch.object(strategy, "subscribe_mark_prices")
+    index_spy = mocker.patch.object(strategy, "subscribe_index_prices")
+
+    # Act
+    strategy.on_start()
+
+    # Assert
+    mark_spy.assert_called_once_with(instrument_linear.id)
+    index_spy.assert_called_once_with(instrument_linear.id)
+
+
+def _write_recorder_toml(tmp_path, linear_depth=50, spot_depth=50):
+    config_path = tmp_path / "recorder.toml"
+    config_path.write_text(
+        f"""
+[recorder]
+trader_id = "BYBIT-COLLECTOR-001"
+catalog_path = "catalog"
+streaming_path = "catalog/streaming"
+conversion_interval_minutes = 60
+environment = "mainnet"
+
+[[instruments.linear]]
+id = "BTCUSDT-LINEAR.BYBIT"
+depth = {linear_depth}
+bar_intervals = ["1-MINUTE"]
+
+[[instruments.spot]]
+id = "ETHUSDT-SPOT.BYBIT"
+depth = {spot_depth}
+bar_intervals = ["1-MINUTE"]
+""",
+    )
+    return config_path
+
+
+def test_load_recorder_config_rejects_spot_depth_over_50(tmp_path):
+    from scripts.bybit_recorder.config import load_recorder_config
+
+    config_path = _write_recorder_toml(tmp_path, linear_depth=50, spot_depth=200)
+
+    with pytest.raises(ValueError, match=r"200"):
+        load_recorder_config(config_path)
+
+
+def test_load_recorder_config_accepts_spot_depth_50(tmp_path):
+    from scripts.bybit_recorder.config import load_recorder_config
+
+    config_path = _write_recorder_toml(tmp_path, linear_depth=50, spot_depth=50)
+
+    recorder_cfg, _ = load_recorder_config(config_path)
+
+    assert recorder_cfg is not None
+
+
+def test_load_recorder_config_rejects_linear_depth_not_in_discrete_set(tmp_path):
+    from scripts.bybit_recorder.config import load_recorder_config
+
+    config_path = _write_recorder_toml(tmp_path, linear_depth=75, spot_depth=50)
+
+    with pytest.raises(ValueError, match=r"75"):
+        load_recorder_config(config_path)
+
+
+def test_load_recorder_config_accepts_linear_depth_200_and_1000(tmp_path):
+    from scripts.bybit_recorder.config import load_recorder_config
+
+    for linear_depth in (200, 1000):
+        config_path = _write_recorder_toml(tmp_path, linear_depth=linear_depth, spot_depth=50)
+
+        recorder_cfg, _ = load_recorder_config(config_path)
+
+        assert recorder_cfg is not None

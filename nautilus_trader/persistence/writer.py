@@ -140,6 +140,8 @@ class StreamingFeatherWriter:
             "trade_tick",
             "funding_rate_update",
             "option_greeks",
+            "mark_price_update",
+            "index_price_update",
         }
         self.rotation_mode = rotation_mode
         self.max_file_size = max_file_size
