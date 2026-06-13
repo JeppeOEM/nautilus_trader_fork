@@ -51,7 +51,10 @@ Decimal phases appear between their surrounding integers in numeric order.
   4. Funding-rate updates are recorded for linear perpetuals without flooding the catalog with redundant rows (deduped to actual changes)
   5. Mark price and index price updates are recorded for linear perpetuals
 
-**Plans**: TBD
+**Plans**: 2 plans
+- [ ] 02-01-PLAN.md — Record quotes, order-book deltas, bars, and mark/index prices (5 auto-written types) with fail-fast depth validation
+- [ ] 02-02-PLAN.md — Funding-rate dedup (linear-only) with empirical persistence spike, recorder wiring, and all-six-feeds live smoke
+
 
 ### Phase 3: Reliability for 24/7 Operation
 
@@ -104,7 +107,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Bootstrap, Config & End-to-End Slice | 4/4 | Complete   | 2026-06-13 |
-| 2. Full Data-Type Coverage | 0/TBD | Not started | - |
+| 2. Full Data-Type Coverage | 0/2 | In progress | - |
 | 3. Reliability for 24/7 Operation | 0/TBD | Not started | - |
 | 4. Open Interest Spike | 0/TBD | Not started | - |
 | 5. Inspection & Deployment | 0/TBD | Not started | - |
