@@ -52,9 +52,13 @@ Decimal phases appear between their surrounding integers in numeric order.
   5. Mark price and index price updates are recorded for linear perpetuals
 
 **Plans**: 2 plans
-- [ ] 02-01-PLAN.md — Record quotes, order-book deltas, bars, and mark/index prices (5 auto-written types) with fail-fast depth validation
-- [ ] 02-02-PLAN.md — Funding-rate dedup (linear-only) with empirical persistence spike, recorder wiring, and all-six-feeds live smoke
+**Wave 1**
 
+- [ ] 02-01-PLAN.md — Record quotes, order-book deltas, bars, and mark/index prices (5 auto-written types) with fail-fast depth validation
+
+**Wave 2** *(blocked on Wave 1 completion)*
+
+- [ ] 02-02-PLAN.md — Funding-rate dedup (linear-only) with empirical persistence spike, recorder wiring, and all-six-feeds live smoke
 
 ### Phase 3: Reliability for 24/7 Operation
 
