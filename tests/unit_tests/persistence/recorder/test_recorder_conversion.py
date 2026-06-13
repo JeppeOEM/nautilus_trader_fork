@@ -13,8 +13,6 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 
-import pytest
-
 from nautilus_trader.common.component import TestClock
 from nautilus_trader.model.data import TradeTick
 from nautilus_trader.persistence.catalog.parquet import ParquetDataCatalog
@@ -58,10 +56,55 @@ def test_convert_stream_to_data_roundtrips_trade_ticks(catalog_dir, sample_trade
     assert all(isinstance(t, TradeTick) for t in trades)
 
 
-@pytest.mark.skip(reason="A2 — empirical: verified in plan 04")
-def test_double_conversion_same_day_behavior():
+def test_double_conversion_same_day_behavior(catalog_dir, sample_trade_ticks):
     # Documents the partial-day re-conversion question (Pitfall 2 / A2):
-    # converting the same in-progress feather file twice in one day may raise
-    # ValueError on the second call (non-disjoint interval). This contract is
-    # recorded here but not yet asserted; Plan 04 verifies the actual behavior.
-    ...
+    # converting the same in-progress feather file twice in one day, without any
+    # new data being appended in between, is IDEMPOTENT — the second call observes
+    # the same start/end timestamps, derives the same target parquet filename
+    # ({start}_{end}.parquet), finds it already exists, prints
+    # "already exists, skipping write", and returns without raising (parquet.py
+    # ~2602-2604). This is the case that matters for the recorder's in-process
+    # conversion timer: re-running convert_stream_to_data on an un-rotated (open)
+    # feather file between daily rotations is safe and a no-op on the second+ call.
+    #
+    # A2 RESULT: (a) idempotent skip with stable reloaded row count — NOT a raise.
+    # Arrange
+    catalog = ParquetDataCatalog(str(catalog_dir))
+    cache = TestComponentStubs.cache()
+    cache.add_instrument(TestInstrumentProvider.btcusdt_perp_binance())
+    clock = TestClock()
+
+    writer = StreamingFeatherWriter(
+        path=f"{catalog_dir}/live/{RECORDER_INSTANCE_ID}",
+        cache=cache,
+        clock=clock,
+        fs_protocol="file",
+        include_types=[TradeTick],
+    )
+    for tick in sample_trade_ticks:
+        writer.write(tick)
+    writer.close()
+
+    # Act: convert the same un-rotated feather file twice in a row.
+    catalog.convert_stream_to_data(
+        instance_id=RECORDER_INSTANCE_ID,
+        data_cls=TradeTick,
+        subdirectory="live",
+    )
+    trades_after_first = catalog.trade_ticks(
+        instrument_ids=[str(sample_trade_ticks[0].instrument_id)],
+    )
+
+    catalog.convert_stream_to_data(
+        instance_id=RECORDER_INSTANCE_ID,
+        data_cls=TradeTick,
+        subdirectory="live",
+    )
+    trades_after_second = catalog.trade_ticks(
+        instrument_ids=[str(sample_trade_ticks[0].instrument_id)],
+    )
+
+    # Assert: second conversion is a no-op — same stable row count, no exception.
+    assert len(trades_after_first) > 0
+    assert len(trades_after_second) == len(trades_after_first)
+    assert all(isinstance(t, TradeTick) for t in trades_after_second)
