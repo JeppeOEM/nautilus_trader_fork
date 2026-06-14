@@ -14,7 +14,7 @@ This roadmap delivers a 24/7 Bybit market-data recorder as a vertical MVP: first
 Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Bootstrap, Config & End-to-End Slice** - Config-driven node records trades for one instrument all the way into the day-partitioned catalog (completed 2026-06-13)
-- [ ] **Phase 2: Full Data-Type Coverage** - Quotes, order-book deltas, bars, funding, and mark/index price recorded across all configured instruments
+- [x] **Phase 2: Full Data-Type Coverage** - Quotes, order-book deltas, bars, funding, and mark/index price recorded across all configured instruments (completed 2026-06-14)
 - [ ] **Phase 3: Reliability for 24/7 Operation** - Graceful shutdown flush, stale-stream heartbeats, and adapter-driven reconnect resilience
 - [ ] **Phase 4: Open Interest Spike** - Custom open-interest `Data` type recorded into the catalog via Arrow registration
 - [ ] **Phase 5: Inspection & Deployment** - Pandas catalog-inspection utility, systemd unit, and deployment guide
