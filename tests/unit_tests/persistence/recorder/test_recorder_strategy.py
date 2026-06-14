@@ -13,12 +13,15 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 
+import logging
 from decimal import Decimal
 
 import pytest
 
 from nautilus_trader.common.component import MessageBus
 from nautilus_trader.common.component import TestClock
+from nautilus_trader.common.component import TimeEvent
+from nautilus_trader.core.uuid import UUID4
 from nautilus_trader.model.data import FundingRateUpdate
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.portfolio.portfolio import Portfolio
@@ -558,8 +561,18 @@ def test_on_funding_rate_dedup_is_per_instrument(mocker, mock_cache):
     assert persist_spy.call_count == 2
 
 
-def _write_recorder_toml(tmp_path, linear_depth=50, spot_depth=50):
+def _write_recorder_toml(
+    tmp_path,
+    linear_depth=50,
+    spot_depth=50,
+    heartbeat_interval_seconds=None,
+):
     config_path = tmp_path / "recorder.toml"
+    heartbeat_line = (
+        f"heartbeat_interval_seconds = {heartbeat_interval_seconds}\n"
+        if heartbeat_interval_seconds is not None
+        else ""
+    )
     config_path.write_text(
         f"""
 [recorder]
@@ -567,7 +580,7 @@ trader_id = "BYBIT-COLLECTOR-001"
 catalog_path = "catalog"
 streaming_path = "catalog/streaming"
 conversion_interval_minutes = 60
-environment = "mainnet"
+{heartbeat_line}environment = "mainnet"
 
 [[instruments.linear]]
 id = "BTCUSDT-LINEAR.BYBIT"
@@ -620,3 +633,150 @@ def test_load_recorder_config_accepts_linear_depth_200_and_1000(tmp_path):
         recorder_cfg, _ = load_recorder_config(config_path)
 
         assert recorder_cfg is not None
+
+
+def _make_time_event(name: str, ts_ns: int) -> TimeEvent:
+    return TimeEvent(name, UUID4(), ts_ns, ts_ns)
+
+
+def test_on_start_sets_heartbeat_timer(mocker, mock_cache):
+    # REL-03: a second native timer named "heartbeat" is registered alongside
+    # the existing "convert-stream" timer.
+    instrument = TestInstrumentProvider.btcusdt_perp_binance()
+    mock_cache.add_instrument(instrument)
+    strategy, clock = _build_strategy(mocker, mock_cache, [instrument.id, instrument.id])
+    mocker.patch.object(strategy, "subscribe_trade_ticks")
+    mocker.patch.object(strategy, "subscribe_quote_ticks")
+    mocker.patch.object(strategy, "subscribe_order_book_deltas")
+    mocker.patch.object(strategy, "subscribe_bars")
+
+    # Act
+    strategy.on_start()
+
+    # Assert
+    assert "convert-stream" in clock.timer_names
+    assert "heartbeat" in clock.timer_names
+
+
+def test_on_trade_tick_updates_last_seen(mocker, mock_cache):
+    # REL-03: on_trade_tick records ("trade", instrument_id) -> timestamp_ns().
+    from nautilus_trader.test_kit.stubs.data import TestDataStubs
+
+    instrument = TestInstrumentProvider.btcusdt_perp_binance()
+    mock_cache.add_instrument(instrument)
+    strategy, clock = _build_strategy(mocker, mock_cache, [instrument.id])
+
+    ts = 1_700_000_000_000_000_000
+    clock.set_time(ts)
+    tick = TestDataStubs.trade_tick(instrument=instrument, ts_event=ts, ts_init=ts)
+
+    # Act
+    strategy.on_trade_tick(tick)
+
+    # Assert
+    assert strategy._last_seen[("trade", instrument.id)] == clock.timestamp_ns()
+
+
+def test_on_funding_rate_updates_last_seen_before_dedup(mocker, mock_cache):
+    # REL-03 / Pitfall 4: even though the SAME funding rate twice only persists
+    # once (dedup), the last-seen timestamp must still be recorded both times --
+    # i.e. recorded BEFORE the dedup early-return.
+    instrument = TestInstrumentProvider.btcusdt_perp_binance()
+    mock_cache.add_instrument(instrument)
+    strategy, clock = _build_strategy(
+        mocker,
+        mock_cache,
+        [instrument.id],
+        linear_instrument_ids=[instrument.id],
+    )
+    persist_spy = mocker.patch.object(strategy, "_persist_funding_rate")
+
+    # Act: same rate twice
+    strategy.on_funding_rate(_funding_rate(instrument.id, "0.0001", 1_000_000_000))
+    strategy.on_funding_rate(_funding_rate(instrument.id, "0.0001", 2_000_000_000))
+
+    # Assert: persisted only once, but last-seen recorded regardless
+    persist_spy.assert_called_once()
+    assert ("funding", instrument.id) in strategy._last_seen
+    assert strategy._last_seen[("funding", instrument.id)] == clock.timestamp_ns()
+
+
+def test_heartbeat_warns_when_stream_stale(mocker, mock_cache, caplog):
+    # REL-03: when idle time for a stream exceeds its configured stale
+    # threshold, _heartbeat logs a WARNING containing "Stale stream" and the
+    # instrument id.
+    from nautilus_trader.test_kit.stubs.data import TestDataStubs
+
+    instrument = TestInstrumentProvider.btcusdt_perp_binance()
+    mock_cache.add_instrument(instrument)
+    strategy, clock = _build_strategy(mocker, mock_cache, [instrument.id])
+
+    ts = 1_700_000_000_000_000_000
+    clock.set_time(ts)
+    tick = TestDataStubs.trade_tick(instrument=instrument, ts_event=ts, ts_init=ts)
+    strategy.on_trade_tick(tick)
+
+    # Advance the clock PAST the "trade" stale threshold.
+    threshold_s = strategy._stale_threshold_s("trade")
+    clock.set_time(ts + int((threshold_s + 1) * 1e9))
+
+    # Act
+    with caplog.at_level(logging.WARNING, logger="scripts.bybit_recorder.strategy"):
+        strategy._heartbeat(_make_time_event("heartbeat", clock.timestamp_ns()))
+
+    # Assert
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any("Stale stream" in r.getMessage() and str(instrument.id) in r.getMessage() for r in warnings)
+
+
+def test_heartbeat_no_warn_when_stream_fresh(mocker, mock_cache, caplog):
+    # REL-03: when idle time is UNDER the stale threshold, _heartbeat must not
+    # emit a "Stale stream" WARNING.
+    from nautilus_trader.test_kit.stubs.data import TestDataStubs
+
+    instrument = TestInstrumentProvider.btcusdt_perp_binance()
+    mock_cache.add_instrument(instrument)
+    strategy, clock = _build_strategy(mocker, mock_cache, [instrument.id])
+
+    ts = 1_700_000_000_000_000_000
+    clock.set_time(ts)
+    tick = TestDataStubs.trade_tick(instrument=instrument, ts_event=ts, ts_init=ts)
+    strategy.on_trade_tick(tick)
+
+    # Advance the clock but stay UNDER the "trade" stale threshold.
+    threshold_s = strategy._stale_threshold_s("trade")
+    clock.set_time(ts + int((threshold_s - 1) * 1e9))
+
+    # Act
+    with caplog.at_level(logging.WARNING, logger="scripts.bybit_recorder.strategy"):
+        strategy._heartbeat(_make_time_event("heartbeat", clock.timestamp_ns()))
+
+    # Assert
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert not any("Stale stream" in r.getMessage() for r in warnings)
+
+
+def test_load_recorder_config_rejects_nonpositive_heartbeat_interval(tmp_path):
+    # REL-03 / T-3-05 (V5 fail-fast): a non-positive heartbeat_interval_seconds
+    # must raise ValueError echoing the bad value, mirroring the existing depth
+    # validation.
+    from scripts.bybit_recorder.config import load_recorder_config
+
+    config_path = _write_recorder_toml(tmp_path, heartbeat_interval_seconds=0)
+
+    with pytest.raises(ValueError, match=r"heartbeat_interval_seconds"):
+        load_recorder_config(config_path)
+
+
+def test_load_recorder_config_accepts_default_heartbeat_config(tmp_path):
+    # REL-03: when heartbeat_interval_seconds / stale thresholds are absent from
+    # recorder.toml, load_recorder_config carries the documented defaults.
+    from scripts.bybit_recorder.config import load_recorder_config
+
+    config_path = _write_recorder_toml(tmp_path)
+
+    recorder_cfg, _ = load_recorder_config(config_path)
+
+    assert recorder_cfg.heartbeat_interval_seconds == 30
+    assert recorder_cfg.stale_threshold_default_seconds == 90
+    assert recorder_cfg.stale_threshold_seconds == {}

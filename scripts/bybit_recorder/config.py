@@ -102,6 +102,16 @@ class RecorderConfig(NautilusConfig, frozen=True):
         On `on_start`, if the gap since the last recorded `ts_init` for an
         instrument exceeds this threshold, the recorder logs a WARNING so
         restart-induced gaps are visible in journald (REL-02 gap visibility, D-06).
+    heartbeat_interval_seconds : PositiveInt, default 30
+        How often the heartbeat timer fires (REL-03). Each firing logs an INFO
+        heartbeat and a WARNING for any stream whose idle time exceeds its
+        per-data-type stale threshold.
+    stale_threshold_default_seconds : PositiveInt, default 90
+        The fallback stale threshold (in seconds) for any stream label not
+        present in `stale_threshold_seconds` (REL-03).
+    stale_threshold_seconds : dict[str, int], default {}
+        Per-stream-label stale thresholds (in seconds), e.g. ``{"trade": 90,
+        "mark": 30}`` (REL-03).
     environment : str, default 'mainnet'
         The Bybit environment to connect to.
     instruments : list[InstrumentEntry]
@@ -115,6 +125,9 @@ class RecorderConfig(NautilusConfig, frozen=True):
     conversion_interval_minutes: PositiveInt = 60
     rotation_interval_minutes: PositiveInt = 1440
     restart_gap_threshold_seconds: PositiveInt = 60
+    heartbeat_interval_seconds: PositiveInt = 30
+    stale_threshold_default_seconds: PositiveInt = 90
+    stale_threshold_seconds: dict[str, int] = {}
     environment: str = "mainnet"
     instruments: list[InstrumentEntry] = []
 
@@ -240,6 +253,31 @@ def load_recorder_config(path: str | Path) -> tuple[RecorderConfig, list[Instrum
             ),
         )
 
+    heartbeat_interval_seconds = recorder_raw.get("heartbeat_interval_seconds", 30)
+    stale_threshold_default_seconds = recorder_raw.get("stale_threshold_default_seconds", 90)
+    stale_threshold_seconds = recorder_raw.get("stale_threshold_seconds", {})
+
+    # V5 fail-fast (T-3-05 DoS-of-logs mitigation): an absurd interval/threshold
+    # would either spam logs (too small) or never warn (too large/negative), so
+    # reject any non-positive value at load time, mirroring the depth validation
+    # above.
+    if heartbeat_interval_seconds <= 0:
+        raise ValueError(
+            f"Invalid heartbeat_interval_seconds {heartbeat_interval_seconds}: must be positive",
+        )
+
+    if stale_threshold_default_seconds <= 0:
+        raise ValueError(
+            f"Invalid stale_threshold_default_seconds {stale_threshold_default_seconds}: "
+            "must be positive",
+        )
+
+    for stream, threshold in stale_threshold_seconds.items():
+        if threshold <= 0:
+            raise ValueError(
+                f"Invalid stale_threshold_seconds[{stream!r}] {threshold}: must be positive",
+            )
+
     recorder_cfg = RecorderConfig(
         trader_id=recorder_raw["trader_id"],
         catalog_path=_resolve_catalog_path(recorder_raw["catalog_path"]),
@@ -247,6 +285,9 @@ def load_recorder_config(path: str | Path) -> tuple[RecorderConfig, list[Instrum
         conversion_interval_minutes=recorder_raw.get("conversion_interval_minutes", 60),
         rotation_interval_minutes=recorder_raw.get("rotation_interval_minutes", 1440),
         restart_gap_threshold_seconds=recorder_raw.get("restart_gap_threshold_seconds", 60),
+        heartbeat_interval_seconds=heartbeat_interval_seconds,
+        stale_threshold_default_seconds=stale_threshold_default_seconds,
+        stale_threshold_seconds=stale_threshold_seconds,
         environment=recorder_raw.get("environment", "mainnet"),
         instruments=instruments,
     )

@@ -15,7 +15,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 - [x] **Phase 1: Bootstrap, Config & End-to-End Slice** - Config-driven node records trades for one instrument all the way into the day-partitioned catalog (completed 2026-06-13)
 - [x] **Phase 2: Full Data-Type Coverage** - Quotes, order-book deltas, bars, funding, and mark/index price recorded across all configured instruments (completed 2026-06-14)
-- [ ] **Phase 3: Reliability for 24/7 Operation** - Graceful shutdown flush, stale-stream heartbeats, and adapter-driven reconnect resilience
+- [x] **Phase 3: Reliability for 24/7 Operation** - Graceful shutdown flush, stale-stream heartbeats, and adapter-driven reconnect resilience (completed 2026-06-14)
 - [ ] **Phase 4: Open Interest Spike** - Custom open-interest `Data` type recorded into the catalog via Arrow registration
 - [ ] **Phase 5: Inspection & Deployment** - Pandas catalog-inspection utility, systemd unit, and deployment guide
 
@@ -80,7 +80,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 **Wave 2** *(blocked on Wave 1 completion — shares strategy.py)*
 
-- [ ] 03-02-PLAN.md — Per-stream heartbeat + stale-stream WARNING with configurable per-type thresholds (REL-03)
+- [x] 03-02-PLAN.md — Per-stream heartbeat + stale-stream WARNING with configurable per-type thresholds (REL-03)
 
 ### Phase 4: Open Interest Spike
 
@@ -120,6 +120,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 |-------|----------------|--------|-----------|
 | 1. Bootstrap, Config & End-to-End Slice | 4/4 | Complete   | 2026-06-13 |
 | 2. Full Data-Type Coverage | 1/2 | In Progress|  |
-| 3. Reliability for 24/7 Operation | 0/2 | Planned | - |
+| 3. Reliability for 24/7 Operation | 2/2 | Complete   | 2026-06-14 |
 | 4. Open Interest Spike | 0/TBD | Not started | - |
 | 5. Inspection & Deployment | 0/TBD | Not started | - |

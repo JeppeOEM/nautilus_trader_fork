@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: executing
-stopped_at: Phase 3 Plan 01 complete (on_stop flush+convert, restart gap-log D-06, REL-04 structural proof, live mainnet checkpoint verified); Plan 02 (heartbeat) up next
-last_updated: "2026-06-14T19:10:00.000Z"
+status: verifying
+stopped_at: Phase 3 replan complete (03-RESEARCH.md + 03-01-PLAN.md amended for Approach B + gap-log D-06)
+last_updated: "2026-06-14T19:18:53.600Z"
 last_activity: 2026-06-14 -- Phase 03 Plan 01 (Wave 1) complete and merged
 progress:
   total_phases: 5
-  completed_phases: 2
+  completed_phases: 3
   total_plans: 8
-  completed_plans: 7
-  percent: 40
+  completed_plans: 8
+  percent: 60
 ---
 
 # Project State
@@ -27,7 +27,7 @@ See: .planning/PROJECT.md (updated 2026-06-13)
 
 Phase: 03 (reliability-for-24-7-operation) — EXECUTING
 Plan: 2 of 2
-Status: Executing Phase 03 -- Plan 01 (Wave 1) complete, Plan 02 (Wave 2, heartbeat REL-03) up next
+Status: Phase complete — ready for verification
 Last activity: 2026-06-14 -- Phase 03 Plan 01 (Wave 1) complete and merged
 
 Progress: [██████████] 100% (of Phases 1-2; milestone has 5 phases total)
@@ -59,6 +59,7 @@ Progress: [██████████] 100% (of Phases 1-2; milestone has 5 
 | 01 | P04 | 45min | 3 tasks | 4 files |
 | 02 | P01 | ~25min | 3 tasks | 5 files |
 | 02 | P02 | ~40min | 3 tasks | 6 files |
+| Phase 03-reliability-for-24-7-operation P02 | 25min | 2 tasks | 5 files |
 
 ## Accumulated Context
 
@@ -82,6 +83,8 @@ Recent decisions affecting current work:
 - [Phase 3-01]: Conversion is Approach B (`_convert_finalized_feather_files`); `on_stop()` flush+convert + per-process timestamped feather filenames give a one-cycle visibility delay on restart but never lose data (D-02/D-03)
 - [Phase 3-01]: `_log_restart_gaps()` on_start WARNING (D-06, `restart_gap_threshold_seconds` config, default 60) verified live on real Bybit mainnet: gap-log fires correctly, no data loss/non-disjoint-interval error across SIGTERM restarts
 - [Phase 3-01]: REL-04 (reconnect) verified structurally only -- zero custom reconnect/resubscribe code in scripts/bybit_recorder/, fully adapter-driven; forced-disconnect live test deferred (treated as satisfied)
+- [Phase 03-reliability-for-24-7-operation]: on_funding_rate records _last_seen BEFORE its dedup early-return (Pitfall 4)
+- [Phase 03-reliability-for-24-7-operation]: Per-data-type stale thresholds (trade/quote/bar=90s, deltas=60s, mark/index/funding=30s) with 90s default, validated positive at load
 
 ### Pending Todos
 
@@ -103,6 +106,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-06-14T18:16:55.459Z
+Last session: 2026-06-14T19:18:29.613Z
 Stopped at: Phase 3 replan complete (03-RESEARCH.md + 03-01-PLAN.md amended for Approach B + gap-log D-06)
 Resume file: .planning/phases/03-reliability-for-24-7-operation/03-01-PLAN.md

@@ -88,6 +88,18 @@ class RecorderStrategyConfig(StrategyConfig, frozen=True):
         On `on_start`, if the gap since the last recorded `ts_init` for an
         instrument exceeds this threshold, log a WARNING so restart-induced gaps
         are visible in journald (REL-02 gap visibility, D-06).
+    heartbeat_interval_seconds : PositiveInt, default 30
+        How often the heartbeat timer fires (REL-03). Each firing logs an INFO
+        heartbeat and a WARNING for any stream whose idle time exceeds its
+        per-data-type stale threshold.
+    stale_threshold_seconds : dict[str, int], default {}
+        Per-stream-label stale thresholds (in seconds), keyed by the labels used
+        in `_last_seen` (e.g. ``"trade"``, ``"quote"``, ``"deltas"``, ``"bar"``,
+        ``"mark"``, ``"index"``, ``"funding"``). A stream label not present in
+        this dict falls back to `stale_threshold_default_seconds`.
+    stale_threshold_default_seconds : PositiveInt, default 90
+        The fallback stale threshold (in seconds) for any stream label not
+        present in `stale_threshold_seconds`.
 
     """
 
@@ -100,6 +112,9 @@ class RecorderStrategyConfig(StrategyConfig, frozen=True):
     conversion_interval_minutes: PositiveInt = 60
     rotation_interval_minutes: PositiveInt = 1440
     restart_gap_threshold_seconds: PositiveInt = 60
+    heartbeat_interval_seconds: PositiveInt = 30
+    stale_threshold_seconds: dict[str, int] = {}
+    stale_threshold_default_seconds: PositiveInt = 90
 
 
 class RecorderStrategy(Strategy):
@@ -122,6 +137,11 @@ class RecorderStrategy(Strategy):
         # drop unchanged values (D-01 dedup gate, Pitfall 1). Keyed by
         # InstrumentId so dedup is per-instrument (T-2-02).
         self._last_funding_rate: dict[InstrumentId, object] = {}
+
+        # Per-stream last-seen timestamp (ns), keyed by (stream, instrument_id)
+        # (REL-03). Updated in every `on_*` handler; consulted by `_heartbeat`
+        # to detect a stream that has gone quiet beyond its stale threshold.
+        self._last_seen: dict[tuple[str, InstrumentId], int] = {}
 
         # Strategy-owned StreamingFeatherWriter for deduped FundingRateUpdate
         # rows (Task 1 resolved path) -- lazily created on first persisted
@@ -183,6 +203,12 @@ class RecorderStrategy(Strategy):
             callback=self._convert_stream,
         )
 
+        self.clock.set_timer(
+            name="heartbeat",
+            interval=pd.Timedelta(seconds=self.config.heartbeat_interval_seconds),
+            callback=self._heartbeat,
+        )
+
     def _log_restart_gaps(self) -> None:
         """
         Log a WARNING per instrument when the gap since the last recorded
@@ -222,6 +248,59 @@ class RecorderStrategy(Strategy):
                     instrument_id,
                 )
 
+    def _stale_threshold_s(self, stream: str) -> float:
+        """
+        Return the stale threshold (in seconds) for `stream`.
+
+        Looks up `stream` in `self.config.stale_threshold_seconds`; falls back to
+        `self.config.stale_threshold_default_seconds` for any stream label not
+        present in that dict (REL-03 / Pitfall 3 — per-data-type thresholds, no
+        blanket short threshold).
+
+        Parameters
+        ----------
+        stream : str
+            The stream label, e.g. ``"trade"``, ``"quote"``, ``"deltas"``,
+            ``"bar"``, ``"mark"``, ``"index"``, ``"funding"``.
+
+        Returns
+        -------
+        float
+
+        """
+        return float(
+            self.config.stale_threshold_seconds.get(
+                stream,
+                self.config.stale_threshold_default_seconds,
+            ),
+        )
+
+    def _heartbeat(self, event: TimeEvent) -> None:
+        """
+        Periodic heartbeat/stale-check timer callback (REL-03).
+
+        Logs an INFO heartbeat summarizing the number of active streams, and a
+        WARNING for any stream whose idle time exceeds its per-data-type stale
+        threshold (`_stale_threshold_s`) -- giving the operator early visibility
+        into a dead stream even while the WebSocket connection stays up.
+
+        """
+        now_ns = self.clock.timestamp_ns()
+
+        for (stream, instrument_id), last_ns in self._last_seen.items():
+            idle_s = (now_ns - last_ns) / 1e9
+            threshold_s = self._stale_threshold_s(stream)
+            if idle_s > threshold_s:
+                logger.warning(
+                    "Stale stream: %s %s idle %.1fs (> %.0fs threshold)",
+                    stream,
+                    instrument_id,
+                    idle_s,
+                    threshold_s,
+                )
+
+        logger.info("Heartbeat: %d active streams", len(self._last_seen))
+
     def on_trade_tick(self, tick: TradeTick) -> None:
         """
         Actions to be performed when a trade tick is received.
@@ -230,6 +309,7 @@ class RecorderStrategy(Strategy):
         `StreamingFeatherWriter` via the kernel's "*" msgbus subscription (REC-07).
 
         """
+        self._last_seen[("trade", tick.instrument_id)] = self.clock.timestamp_ns()
         logger.debug("Received %s", tick)
 
     def on_quote_tick(self, tick: QuoteTick) -> None:
@@ -240,6 +320,7 @@ class RecorderStrategy(Strategy):
         via the kernel's "*" msgbus subscription (REC-02 / REC-07).
 
         """
+        self._last_seen[("quote", tick.instrument_id)] = self.clock.timestamp_ns()
         logger.debug("Received %s", tick)
 
     def on_order_book_deltas(self, deltas: OrderBookDeltas) -> None:
@@ -250,6 +331,7 @@ class RecorderStrategy(Strategy):
         via the kernel's "*" msgbus subscription (REC-03 / REC-07).
 
         """
+        self._last_seen[("deltas", deltas.instrument_id)] = self.clock.timestamp_ns()
         logger.debug("Received %s", deltas)
 
     def on_bar(self, bar: Bar) -> None:
@@ -260,6 +342,7 @@ class RecorderStrategy(Strategy):
         via the kernel's "*" msgbus subscription (REC-04 / REC-07).
 
         """
+        self._last_seen[("bar", bar.bar_type.instrument_id)] = self.clock.timestamp_ns()
         logger.debug("Received %s", bar)
 
     def on_mark_price(self, mark_price: MarkPriceUpdate) -> None:
@@ -271,6 +354,7 @@ class RecorderStrategy(Strategy):
         (REC-06 / REC-07).
 
         """
+        self._last_seen[("mark", mark_price.instrument_id)] = self.clock.timestamp_ns()
         logger.debug("Received %s", mark_price)
 
     def on_index_price(self, index_price: IndexPriceUpdate) -> None:
@@ -282,6 +366,7 @@ class RecorderStrategy(Strategy):
         (REC-06 / REC-07).
 
         """
+        self._last_seen[("index", index_price.instrument_id)] = self.clock.timestamp_ns()
         logger.debug("Received %s", index_price)
 
     def on_funding_rate(self, funding_rate: FundingRateUpdate) -> None:
@@ -294,7 +379,13 @@ class RecorderStrategy(Strategy):
         value-change is persisted via the strategy-owned funding writer
         (Task 1 resolved path).
 
+        Last-seen is recorded BEFORE the dedup early-return (REL-03 / Pitfall 4)
+        so a rarely-changing funding stream is not falsely flagged stale by
+        `_heartbeat` just because most updates are deduped rather than persisted.
+
         """
+        self._last_seen[("funding", funding_rate.instrument_id)] = self.clock.timestamp_ns()
+
         last_rate = self._last_funding_rate.get(funding_rate.instrument_id)
         if last_rate is not None and last_rate == funding_rate.rate:
             logger.debug("Dropping unchanged funding rate for %s", funding_rate.instrument_id)
