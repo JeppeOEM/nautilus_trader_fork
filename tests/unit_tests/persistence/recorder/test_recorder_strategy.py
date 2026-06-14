@@ -13,10 +13,13 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 
+from decimal import Decimal
+
 import pytest
 
 from nautilus_trader.common.component import MessageBus
 from nautilus_trader.common.component import TestClock
+from nautilus_trader.model.data import FundingRateUpdate
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.portfolio.portfolio import Portfolio
 from nautilus_trader.test_kit.providers import TestInstrumentProvider
@@ -214,7 +217,10 @@ def test_on_start_linear_only_mark_index_gating(mocker, mock_cache):
         [instrument_linear.id, instrument_spot.id],
         linear_instrument_ids=[instrument_linear.id],
         instrument_depths={instrument_linear.id: 50, instrument_spot.id: 50},
-        instrument_bar_intervals={instrument_linear.id: ["1-MINUTE"], instrument_spot.id: ["1-MINUTE"]},
+        instrument_bar_intervals={
+            instrument_linear.id: ["1-MINUTE"],
+            instrument_spot.id: ["1-MINUTE"],
+        },
     )
     mocker.patch.object(strategy, "subscribe_trade_ticks")
     mocker.patch.object(strategy, "subscribe_quote_ticks")
@@ -229,6 +235,109 @@ def test_on_start_linear_only_mark_index_gating(mocker, mock_cache):
     # Assert
     mark_spy.assert_called_once_with(instrument_linear.id)
     index_spy.assert_called_once_with(instrument_linear.id)
+
+
+def test_on_start_subscribes_funding_rates_linear_only(mocker, mock_cache):
+    # Arrange
+    instrument_linear = TestInstrumentProvider.btcusdt_perp_binance()
+    instrument_spot = TestInstrumentProvider.adabtc_binance()
+    mock_cache.add_instrument(instrument_linear)
+    mock_cache.add_instrument(instrument_spot)
+    strategy, _ = _build_strategy(
+        mocker,
+        mock_cache,
+        [instrument_linear.id, instrument_spot.id],
+        linear_instrument_ids=[instrument_linear.id],
+        instrument_depths={instrument_linear.id: 50, instrument_spot.id: 50},
+        instrument_bar_intervals={
+            instrument_linear.id: ["1-MINUTE"],
+            instrument_spot.id: ["1-MINUTE"],
+        },
+    )
+    mocker.patch.object(strategy, "subscribe_trade_ticks")
+    mocker.patch.object(strategy, "subscribe_quote_ticks")
+    mocker.patch.object(strategy, "subscribe_order_book_deltas")
+    mocker.patch.object(strategy, "subscribe_bars")
+    mocker.patch.object(strategy, "subscribe_mark_prices")
+    mocker.patch.object(strategy, "subscribe_index_prices")
+    funding_spy = mocker.patch.object(strategy, "subscribe_funding_rates")
+
+    # Act
+    strategy.on_start()
+
+    # Assert
+    funding_spy.assert_called_once_with(instrument_linear.id)
+
+
+def _funding_rate(instrument_id, rate, ts: int) -> FundingRateUpdate:
+    return FundingRateUpdate(
+        instrument_id=instrument_id,
+        rate=Decimal(rate),
+        ts_event=ts,
+        ts_init=ts,
+    )
+
+
+def test_on_funding_rate_dedups_unchanged_rate(mocker, mock_cache):
+    # Arrange
+    instrument = TestInstrumentProvider.btcusdt_perp_binance()
+    mock_cache.add_instrument(instrument)
+    strategy, _ = _build_strategy(
+        mocker,
+        mock_cache,
+        [instrument.id],
+        linear_instrument_ids=[instrument.id],
+    )
+    persist_spy = mocker.patch.object(strategy, "_persist_funding_rate")
+
+    # Act: same rate twice
+    strategy.on_funding_rate(_funding_rate(instrument.id, "0.0001", 1_000_000_000))
+    strategy.on_funding_rate(_funding_rate(instrument.id, "0.0001", 2_000_000_000))
+
+    # Assert: persisted only once
+    persist_spy.assert_called_once()
+
+
+def test_on_funding_rate_persists_changed_rate(mocker, mock_cache):
+    # Arrange
+    instrument = TestInstrumentProvider.btcusdt_perp_binance()
+    mock_cache.add_instrument(instrument)
+    strategy, _ = _build_strategy(
+        mocker,
+        mock_cache,
+        [instrument.id],
+        linear_instrument_ids=[instrument.id],
+    )
+    persist_spy = mocker.patch.object(strategy, "_persist_funding_rate")
+
+    # Act: rate A then rate B (changed)
+    strategy.on_funding_rate(_funding_rate(instrument.id, "0.0001", 1_000_000_000))
+    strategy.on_funding_rate(_funding_rate(instrument.id, "0.0002", 2_000_000_000))
+
+    # Assert: persisted twice
+    assert persist_spy.call_count == 2
+
+
+def test_on_funding_rate_dedup_is_per_instrument(mocker, mock_cache):
+    # Arrange
+    instrument_a = TestInstrumentProvider.btcusdt_perp_binance()
+    instrument_b = TestInstrumentProvider.adabtc_binance()
+    mock_cache.add_instrument(instrument_a)
+    mock_cache.add_instrument(instrument_b)
+    strategy, _ = _build_strategy(
+        mocker,
+        mock_cache,
+        [instrument_a.id, instrument_b.id],
+        linear_instrument_ids=[instrument_a.id, instrument_b.id],
+    )
+    persist_spy = mocker.patch.object(strategy, "_persist_funding_rate")
+
+    # Act: same numeric rate for two different instruments
+    strategy.on_funding_rate(_funding_rate(instrument_a.id, "0.0001", 1_000_000_000))
+    strategy.on_funding_rate(_funding_rate(instrument_b.id, "0.0001", 1_000_000_000))
+
+    # Assert: both persisted — dedup is per-instrument
+    assert persist_spy.call_count == 2
 
 
 def _write_recorder_toml(tmp_path, linear_depth=50, spot_depth=50):
