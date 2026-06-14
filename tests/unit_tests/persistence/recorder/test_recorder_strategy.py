@@ -561,8 +561,18 @@ def test_on_funding_rate_dedup_is_per_instrument(mocker, mock_cache):
     assert persist_spy.call_count == 2
 
 
-def _write_recorder_toml(tmp_path, linear_depth=50, spot_depth=50):
+def _write_recorder_toml(
+    tmp_path,
+    linear_depth=50,
+    spot_depth=50,
+    heartbeat_interval_seconds=None,
+):
     config_path = tmp_path / "recorder.toml"
+    heartbeat_line = (
+        f"heartbeat_interval_seconds = {heartbeat_interval_seconds}\n"
+        if heartbeat_interval_seconds is not None
+        else ""
+    )
     config_path.write_text(
         f"""
 [recorder]
@@ -570,7 +580,7 @@ trader_id = "BYBIT-COLLECTOR-001"
 catalog_path = "catalog"
 streaming_path = "catalog/streaming"
 conversion_interval_minutes = 60
-environment = "mainnet"
+{heartbeat_line}environment = "mainnet"
 
 [[instruments.linear]]
 id = "BTCUSDT-LINEAR.BYBIT"
@@ -744,3 +754,29 @@ def test_heartbeat_no_warn_when_stream_fresh(mocker, mock_cache, caplog):
     # Assert
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert not any("Stale stream" in r.getMessage() for r in warnings)
+
+
+def test_load_recorder_config_rejects_nonpositive_heartbeat_interval(tmp_path):
+    # REL-03 / T-3-05 (V5 fail-fast): a non-positive heartbeat_interval_seconds
+    # must raise ValueError echoing the bad value, mirroring the existing depth
+    # validation.
+    from scripts.bybit_recorder.config import load_recorder_config
+
+    config_path = _write_recorder_toml(tmp_path, heartbeat_interval_seconds=0)
+
+    with pytest.raises(ValueError, match=r"heartbeat_interval_seconds"):
+        load_recorder_config(config_path)
+
+
+def test_load_recorder_config_accepts_default_heartbeat_config(tmp_path):
+    # REL-03: when heartbeat_interval_seconds / stale thresholds are absent from
+    # recorder.toml, load_recorder_config carries the documented defaults.
+    from scripts.bybit_recorder.config import load_recorder_config
+
+    config_path = _write_recorder_toml(tmp_path)
+
+    recorder_cfg, _ = load_recorder_config(config_path)
+
+    assert recorder_cfg.heartbeat_interval_seconds == 30
+    assert recorder_cfg.stale_threshold_default_seconds == 90
+    assert recorder_cfg.stale_threshold_seconds == {}

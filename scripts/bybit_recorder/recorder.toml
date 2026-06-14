@@ -9,7 +9,20 @@ catalog_path = "catalog"
 streaming_path = "catalog/streaming"
 conversion_interval_minutes = 1
 # restart_gap_threshold_seconds = 60  # WARN on on_start if the gap since the last recorded ts_init exceeds this (D-06)
+heartbeat_interval_seconds = 30
+stale_threshold_default_seconds = 90
 environment = "mainnet"
+
+# Per-stream stale thresholds (seconds) for the REL-03 heartbeat WARNING. A
+# stream label not listed here falls back to stale_threshold_default_seconds.
+[recorder.stale_threshold_seconds]
+trade = 90
+quote = 90
+deltas = 60
+bar = 90
+mark = 30
+index = 30
+funding = 30
 
 [[instruments.linear]]
 id = "BTCUSDT-LINEAR.BYBIT"
