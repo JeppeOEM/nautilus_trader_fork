@@ -269,6 +269,83 @@ def test_on_start_subscribes_funding_rates_linear_only(mocker, mock_cache):
     funding_spy.assert_called_once_with(instrument_linear.id)
 
 
+def test_on_stop_runs_final_conversion_per_type(mocker, mock_cache):
+    # REL-02: on_stop() runs a final flush+convert (via _run_conversion ->
+    # _convert_finalized_feather_files per type) before the kernel closes its "*"
+    # writer. Spy on _convert_finalized_feather_files so no real filesystem write
+    # happens; assert one call per recorded type + FundingRateUpdate (7 total).
+    from nautilus_trader.model.data import Bar
+    from nautilus_trader.model.data import FundingRateUpdate as _FundingRateUpdate
+    from nautilus_trader.model.data import IndexPriceUpdate
+    from nautilus_trader.model.data import MarkPriceUpdate
+    from nautilus_trader.model.data import OrderBookDeltas
+    from nautilus_trader.model.data import QuoteTick
+    from nautilus_trader.model.data import TradeTick
+    from scripts.bybit_recorder.strategy import RecorderStrategy
+
+    # Arrange
+    strategy, _ = _build_strategy(mocker, mock_cache, [])
+    convert_spy = mocker.patch.object(RecorderStrategy, "_convert_finalized_feather_files")
+
+    # Act
+    strategy.on_stop()
+
+    # Assert: one convert call per type, in the expected order, with a catalog
+    # instance and the corresponding data_cls.
+    expected_types = [
+        TradeTick,
+        QuoteTick,
+        OrderBookDeltas,
+        Bar,
+        MarkPriceUpdate,
+        IndexPriceUpdate,
+        _FundingRateUpdate,
+    ]
+    assert convert_spy.call_count == 7
+    called_types = [call.args[1] for call in convert_spy.call_args_list]
+    assert called_types == expected_types
+
+
+def test_on_stop_flushes_funding_writer(mocker, mock_cache):
+    # REL-02 / Pitfall 1: on_stop flushes the STRATEGY-OWNED funding writer (never
+    # the kernel "*" writer). When the funding writer is None, on_stop must not raise.
+    from scripts.bybit_recorder.strategy import RecorderStrategy
+
+    # Arrange: stub the per-type convert so no real conversion runs.
+    mocker.patch.object(RecorderStrategy, "_convert_finalized_feather_files")
+    strategy, _ = _build_strategy(mocker, mock_cache, [])
+
+    # Case A: funding writer present -> flushed.
+    funding_writer = mocker.Mock()
+    strategy._funding_writer = funding_writer
+    strategy.on_stop()
+    funding_writer.flush.assert_called_once()
+
+    # Case B: funding writer None -> no raise.
+    strategy._funding_writer = None
+    strategy.on_stop()  # must not raise
+
+
+def test_on_stop_swallows_per_type_conversion_error(mocker, mock_cache):
+    # T-3-02: a transient convert error for one type must not re-raise out of the
+    # on_stop hook nor block the remaining types. With a side_effect raising for the
+    # FIRST type, on_stop still attempts all 7 types and does not raise.
+    from scripts.bybit_recorder.strategy import RecorderStrategy
+
+    # Arrange
+    strategy, _ = _build_strategy(mocker, mock_cache, [])
+    side_effects = [RuntimeError("boom")] + [None] * 6
+    convert_spy = mocker.patch.object(
+        RecorderStrategy,
+        "_convert_finalized_feather_files",
+        side_effect=side_effects,
+    )
+
+    # Act / Assert: does not raise.
+    strategy.on_stop()
+    assert convert_spy.call_count == 7
+
+
 def _funding_rate(instrument_id, rate, ts: int) -> FundingRateUpdate:
     return FundingRateUpdate(
         instrument_id=instrument_id,
