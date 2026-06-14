@@ -2,15 +2,15 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: completed
-stopped_at: Phase 3 replan complete (03-RESEARCH.md + 03-01-PLAN.md amended for Approach B + gap-log D-06)
-last_updated: "2026-06-14T18:16:55.463Z"
-last_activity: 2026-06-14 -- Phase 02 plan 02-02 complete, Phase 02 verified PASSED
+status: executing
+stopped_at: Phase 3 Plan 01 complete (on_stop flush+convert, restart gap-log D-06, REL-04 structural proof, live mainnet checkpoint verified); Plan 02 (heartbeat) up next
+last_updated: "2026-06-14T19:10:00.000Z"
+last_activity: 2026-06-14 -- Phase 03 Plan 01 (Wave 1) complete and merged
 progress:
   total_phases: 5
   completed_phases: 2
   total_plans: 8
-  completed_plans: 6
+  completed_plans: 7
   percent: 40
 ---
 
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-06-13)
 
 **Core value:** Reliable, continuous capture of Bybit market data into a Nautilus-catalog-compatible parquet archive — no data loss across restarts/disconnects.
-**Current focus:** Phase 03 — reliability-for-24-7-operation (not yet started)
+**Current focus:** Phase 03 — reliability-for-24-7-operation
 
 ## Current Position
 
-Phase: 02 (full-data-type-coverage) — COMPLETE, VERIFIED PASSED
+Phase: 03 (reliability-for-24-7-operation) — EXECUTING
 Plan: 2 of 2
-Status: Phase 02 complete; Phase 03 not yet started
-Last activity: 2026-06-14 -- Phase 02 plan 02-02 complete, Phase 02 verified PASSED
+Status: Executing Phase 03 -- Plan 01 (Wave 1) complete, Plan 02 (Wave 2, heartbeat REL-03) up next
+Last activity: 2026-06-14 -- Phase 03 Plan 01 (Wave 1) complete and merged
 
 Progress: [██████████] 100% (of Phases 1-2; milestone has 5 phases total)
 
@@ -79,6 +79,9 @@ Recent decisions affecting current work:
 - [Phase 2-02]: Deduped FundingRateUpdate persists via a strategy-owned second StreamingFeatherWriter (include_types=[FundingRateUpdate]), separate from the kernel "*" writer; reads back natively via catalog.funding_rates()
 - [Phase 2-02]: Live mainnet smoke (Task 3) PASSED -- all 7 feeds (trade/quote/order_book_deltas/bar/mark/index/funding) landed in catalog/streaming for both LINEAR and SPOT instruments
 - [Phase 2]: catalog_path in recorder.toml is dead/unused; streaming_path ("catalog/streaming") is the real catalog root -- any inspection tooling must point there
+- [Phase 3-01]: Conversion is Approach B (`_convert_finalized_feather_files`); `on_stop()` flush+convert + per-process timestamped feather filenames give a one-cycle visibility delay on restart but never lose data (D-02/D-03)
+- [Phase 3-01]: `_log_restart_gaps()` on_start WARNING (D-06, `restart_gap_threshold_seconds` config, default 60) verified live on real Bybit mainnet: gap-log fires correctly, no data loss/non-disjoint-interval error across SIGTERM restarts
+- [Phase 3-01]: REL-04 (reconnect) verified structurally only -- zero custom reconnect/resubscribe code in scripts/bybit_recorder/, fully adapter-driven; forced-disconnect live test deferred (treated as satisfied)
 
 ### Pending Todos
 

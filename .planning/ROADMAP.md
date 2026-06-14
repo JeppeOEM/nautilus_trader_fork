@@ -76,7 +76,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 **Wave 1**
 
-- [ ] 03-01-PLAN.md — Graceful-shutdown flush+convert via on_stop (REL-02) and adapter-driven reconnect proof (REL-04)
+- [x] 03-01-PLAN.md — Graceful-shutdown flush+convert via on_stop (REL-02) and adapter-driven reconnect proof (REL-04)
 
 **Wave 2** *(blocked on Wave 1 completion — shares strategy.py)*
 
