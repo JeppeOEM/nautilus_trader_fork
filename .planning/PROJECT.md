@@ -16,14 +16,14 @@ Reliable, continuous capture of Bybit market data into a Nautilus-catalog-compat
 
 ### Active
 
-- [ ] User can configure which instruments to collect (linear perpetuals USDT + spot symbols, explicit list)
-- [ ] Collector subscribes to and records trade ticks for each configured instrument
-- [ ] Collector subscribes to and records quote ticks (best bid/ask) for each configured instrument
-- [ ] Collector subscribes to and records order book depth (deltas) for each configured instrument
-- [ ] Collector subscribes to and records bars/klines (standard intervals) for each configured instrument
-- [ ] Collector subscribes to and records funding rate updates for linear perpetuals
+- [x] User can configure which instruments to collect (linear perpetuals USDT + spot symbols, explicit list)
+- [x] Collector subscribes to and records trade ticks for each configured instrument
+- [x] Collector subscribes to and records quote ticks (best bid/ask) for each configured instrument
+- [x] Collector subscribes to and records order book depth (deltas) for each configured instrument
+- [x] Collector subscribes to and records bars/klines (standard intervals) for each configured instrument
+- [x] Collector subscribes to and records funding rate updates for linear perpetuals
 - [ ] Collector subscribes to and records open interest for linear perpetuals
-- [ ] All recorded data is written using the official `ParquetDataCatalog` format, partitioned by day
+- [x] All recorded data is written using the official `ParquetDataCatalog` format, partitioned by day
 - [ ] A pandas-based utility can load and view slices of the catalog for data inspection
 - [ ] Collector reconnects automatically and resumes recording after disconnects (24/7 reliability)
 - [ ] systemd unit file provided for process supervision with auto-restart
