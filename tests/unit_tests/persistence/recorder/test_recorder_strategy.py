@@ -37,6 +37,8 @@ def _build_strategy(
     linear_instrument_ids=None,
     instrument_depths=None,
     instrument_bar_intervals=None,
+    catalog_path="catalog",
+    restart_gap_threshold_seconds=60,
 ):
     from scripts.bybit_recorder.strategy import RecorderStrategy
     from scripts.bybit_recorder.strategy import RecorderStrategyConfig
@@ -56,9 +58,10 @@ def _build_strategy(
         linear_instrument_ids=linear_instrument_ids or [],
         instrument_depths=instrument_depths,
         instrument_bar_intervals=instrument_bar_intervals,
-        catalog_path="catalog",
+        catalog_path=str(catalog_path),
         instance_id_str="8f1b9c2e-1d3a-4b6c-8e7f-0a1b2c3d4e5f",
         conversion_interval_minutes=60,
+        restart_gap_threshold_seconds=restart_gap_threshold_seconds,
     )
     strategy = RecorderStrategy(config=config)
     strategy.register(
@@ -267,6 +270,144 @@ def test_on_start_subscribes_funding_rates_linear_only(mocker, mock_cache):
 
     # Assert
     funding_spy.assert_called_once_with(instrument_linear.id)
+
+
+def _seed_catalog_trade_ticks(catalog_path, instrument, last_ts_init):
+    # Seed the catalog with TradeTick rows for `instrument` whose latest ts_init
+    # is `last_ts_init`, so _log_restart_gaps can read a "last data" timestamp.
+    from nautilus_trader.persistence.catalog.parquet import ParquetDataCatalog
+    from nautilus_trader.test_kit.stubs.data import TestDataStubs
+
+    catalog = ParquetDataCatalog(str(catalog_path))
+    ticks = [
+        TestDataStubs.trade_tick(
+            instrument=instrument,
+            price=50_000.0 + i,
+            size=0.01,
+            ts_event=last_ts_init - 1_000_000_000 * (2 - i),
+            ts_init=last_ts_init - 1_000_000_000 * (2 - i),
+        )
+        for i in range(3)
+    ]
+    catalog.write_data(ticks)
+    return catalog
+
+
+def test_on_start_logs_warning_for_restart_gap_exceeding_threshold(
+    mocker,
+    mock_cache,
+    tmp_path,
+    caplog,
+):
+    # D-06 / REL-02 gap visibility: when the gap since the last recorded ts_init
+    # exceeds restart_gap_threshold_seconds, on_start logs a WARNING naming the
+    # instrument and the gap duration so restart-induced gaps are visible in journald.
+    import logging
+
+    instrument = TestInstrumentProvider.btcusdt_perp_binance()
+    mock_cache.add_instrument(instrument)
+    catalog_path = tmp_path / "catalog"
+    last_ts = 1_700_000_000_000_000_000
+    _seed_catalog_trade_ticks(catalog_path, instrument, last_ts)
+
+    threshold_s = 60
+    strategy, clock = _build_strategy(
+        mocker,
+        mock_cache,
+        [instrument.id],
+        linear_instrument_ids=[instrument.id],
+        catalog_path=catalog_path,
+        restart_gap_threshold_seconds=threshold_s,
+    )
+    # Advance the clock past the threshold relative to the last recorded ts_init.
+    clock.set_time(last_ts + int((threshold_s + 1) * 1e9))
+    mocker.patch.object(strategy, "subscribe_trade_ticks")
+    mocker.patch.object(strategy, "subscribe_quote_ticks")
+    mocker.patch.object(strategy, "subscribe_order_book_deltas")
+    mocker.patch.object(strategy, "subscribe_bars")
+    mocker.patch.object(strategy, "subscribe_mark_prices")
+    mocker.patch.object(strategy, "subscribe_index_prices")
+    mocker.patch.object(strategy, "subscribe_funding_rates")
+
+    # Act
+    with caplog.at_level(logging.WARNING, logger="scripts.bybit_recorder.strategy"):
+        strategy.on_start()
+
+    # Assert: a WARNING naming the instrument and a gap >= threshold.
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(str(instrument.id) in r.getMessage() for r in warnings)
+    assert any("gap" in r.getMessage().lower() for r in warnings)
+
+
+def test_on_start_does_not_warn_when_gap_within_threshold_or_no_prior_data(
+    mocker,
+    mock_cache,
+    tmp_path,
+    caplog,
+):
+    # D-06: no WARNING when the gap is within threshold (a), and none (no exception)
+    # when the catalog has no prior data for the instrument (b).
+    import logging
+
+    instrument = TestInstrumentProvider.btcusdt_perp_binance()
+    mock_cache.add_instrument(instrument)
+
+    # (a) Gap well under threshold.
+    catalog_path_a = tmp_path / "catalog_a"
+    last_ts = 1_700_000_000_000_000_000
+    _seed_catalog_trade_ticks(catalog_path_a, instrument, last_ts)
+    strategy_a, clock_a = _build_strategy(
+        mocker,
+        mock_cache,
+        [instrument.id],
+        linear_instrument_ids=[instrument.id],
+        catalog_path=catalog_path_a,
+        restart_gap_threshold_seconds=60,
+    )
+    clock_a.set_time(last_ts + 1)
+    for name in (
+        "subscribe_trade_ticks",
+        "subscribe_quote_ticks",
+        "subscribe_order_book_deltas",
+        "subscribe_bars",
+        "subscribe_mark_prices",
+        "subscribe_index_prices",
+        "subscribe_funding_rates",
+    ):
+        mocker.patch.object(strategy_a, name)
+
+    with caplog.at_level(logging.WARNING, logger="scripts.bybit_recorder.strategy"):
+        strategy_a.on_start()
+    assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+
+    caplog.clear()
+
+    # (b) Empty catalog — no prior ts_init for the instrument.
+    catalog_path_b = tmp_path / "catalog_b"
+    catalog_path_b.mkdir(parents=True, exist_ok=True)
+    strategy_b, clock_b = _build_strategy(
+        mocker,
+        mock_cache,
+        [instrument.id],
+        linear_instrument_ids=[instrument.id],
+        catalog_path=catalog_path_b,
+        restart_gap_threshold_seconds=60,
+    )
+    clock_b.set_time(last_ts + int(120 * 1e9))
+    for name in (
+        "subscribe_trade_ticks",
+        "subscribe_quote_ticks",
+        "subscribe_order_book_deltas",
+        "subscribe_bars",
+        "subscribe_mark_prices",
+        "subscribe_index_prices",
+        "subscribe_funding_rates",
+    ):
+        mocker.patch.object(strategy_b, name)
+
+    with caplog.at_level(logging.WARNING, logger="scripts.bybit_recorder.strategy"):
+        strategy_b.on_start()  # must not raise
+    assert not [r for r in caplog.records if r.levelno == logging.WARNING]
 
 
 def test_on_stop_runs_final_conversion_per_type(mocker, mock_cache):
