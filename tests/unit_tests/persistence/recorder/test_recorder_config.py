@@ -19,7 +19,7 @@ import pytest
 from nautilus_trader.model.data import Bar
 from nautilus_trader.model.data import IndexPriceUpdate
 from nautilus_trader.model.data import MarkPriceUpdate
-from nautilus_trader.model.data import OrderBookDelta
+from nautilus_trader.model.data import OrderBookDeltas
 from nautilus_trader.model.data import QuoteTick
 from nautilus_trader.model.data import TradeTick
 from nautilus_trader.model.identifiers import InstrumentId
@@ -79,14 +79,58 @@ def test_build_streaming_config_uses_scheduled_dates_daily_rotation(tmp_path, sa
     # Phase 2 widened include_types to the six auto-written types (REC-02..REC-04,
     # REC-06). FundingRateUpdate is intentionally excluded (deduped via strategy in
     # Plan 02, per D-01 / Pitfall 1).
+    # OrderBookDeltas (plural) is required, not OrderBookDelta (singular): the live
+    # DataEngine always publishes the plural container on the message bus, and
+    # StreamingFeatherWriter.write() filters on obj.__class__ before any
+    # OrderBookDeltas->OrderBookDelta schema mapping.
     assert streaming_config.include_types == [
         TradeTick,
         QuoteTick,
-        OrderBookDelta,
+        OrderBookDeltas,
         Bar,
         MarkPriceUpdate,
         IndexPriceUpdate,
     ]
+
+
+def test_load_recorder_config_resolves_relative_paths_to_repo_root(tmp_path, sample_toml):
+    # Arrange: sample_toml uses relative "catalog" / "catalog/streaming" paths.
+    from pathlib import Path
+
+    from scripts.bybit_recorder.config import load_recorder_config
+
+    toml_path = tmp_path / "recorder.toml"
+    toml_path.write_text(sample_toml)
+
+    repo_root = Path(__file__).resolve().parents[4]
+
+    # Act
+    recorder_cfg, _ = load_recorder_config(toml_path)
+
+    # Assert: relative paths resolve to the repo root, NOT tmp_path or cwd --
+    # the catalog must land in the same place regardless of where the recorder
+    # process is launched from.
+    assert recorder_cfg.catalog_path == str(repo_root / "catalog")
+    assert recorder_cfg.streaming_path == str(repo_root / "catalog/streaming")
+
+
+def test_load_recorder_config_keeps_absolute_paths_unchanged(tmp_path, sample_toml):
+    # Arrange: an absolute streaming_path must pass through unchanged.
+    absolute_streaming = tmp_path / "custom_catalog" / "streaming"
+    custom_toml = sample_toml.replace(
+        'streaming_path = "catalog/streaming"',
+        f'streaming_path = "{absolute_streaming.as_posix()}"',
+    )
+    toml_path = tmp_path / "recorder.toml"
+    toml_path.write_text(custom_toml)
+
+    from scripts.bybit_recorder.config import load_recorder_config
+
+    # Act
+    recorder_cfg, _ = load_recorder_config(toml_path)
+
+    # Assert
+    assert recorder_cfg.streaming_path == str(absolute_streaming)
 
 
 def test_load_recorder_config_rejects_malformed_instrument_id(tmp_path, sample_toml):

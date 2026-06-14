@@ -25,7 +25,7 @@ from nautilus_trader.common.config import PositiveInt
 from nautilus_trader.model.data import Bar
 from nautilus_trader.model.data import IndexPriceUpdate
 from nautilus_trader.model.data import MarkPriceUpdate
-from nautilus_trader.model.data import OrderBookDelta
+from nautilus_trader.model.data import OrderBookDeltas
 from nautilus_trader.model.data import QuoteTick
 from nautilus_trader.model.data import TradeTick
 from nautilus_trader.model.identifiers import InstrumentId
@@ -34,6 +34,11 @@ from nautilus_trader.persistence.writer import RotationMode
 
 
 logger = logging.getLogger(__name__)
+
+# Anchor for resolving relative `catalog_path` / `streaming_path` values so the
+# catalog always lands in the same place regardless of the process's cwd
+# (parents[2] from scripts/bybit_recorder/config.py is the repo root).
+_REPO_ROOT = Path(__file__).resolve().parents[2]
 
 # D-03 (literal): SPOT order book depth is capped at 50 by the venue.
 _SPOT_MAX_DEPTH = 50
@@ -125,6 +130,22 @@ class RecorderConfig(NautilusConfig, frozen=True):
         return [entry.id for entry in self.instruments if entry.product_type == "linear"]
 
 
+def _resolve_catalog_path(raw_path: str) -> str:
+    """
+    Resolve a configured catalog/streaming path against the repo root.
+
+    A relative path in `recorder.toml` (e.g. ``"catalog"``) must always resolve
+    to the same on-disk location regardless of the cwd the recorder is launched
+    from (e.g. systemd `WorkingDirectory`, repo root, or `scripts/bybit_recorder/`).
+    Absolute paths are returned unchanged.
+    """
+    path = Path(raw_path)
+    if path.is_absolute():
+        return str(path)
+
+    return str(_REPO_ROOT / path)
+
+
 def load_recorder_config(path: str | Path) -> tuple[RecorderConfig, list[InstrumentId]]:
     """
     Load and parse a recorder TOML configuration file.
@@ -208,8 +229,8 @@ def load_recorder_config(path: str | Path) -> tuple[RecorderConfig, list[Instrum
 
     recorder_cfg = RecorderConfig(
         trader_id=recorder_raw["trader_id"],
-        catalog_path=recorder_raw["catalog_path"],
-        streaming_path=recorder_raw["streaming_path"],
+        catalog_path=_resolve_catalog_path(recorder_raw["catalog_path"]),
+        streaming_path=_resolve_catalog_path(recorder_raw["streaming_path"]),
         conversion_interval_minutes=recorder_raw.get("conversion_interval_minutes", 60),
         environment=recorder_raw.get("environment", "mainnet"),
         instruments=instruments,
@@ -256,5 +277,18 @@ def build_streaming_config(recorder_cfg: RecorderConfig) -> StreamingConfig:
         # FundingRateUpdate is intentionally OMITTED here: it is deduped on
         # value-change by the strategy and persisted via a separate writer
         # (D-01 / Plan 02), not auto-written through this passthrough.
-        include_types=[TradeTick, QuoteTick, OrderBookDelta, Bar, MarkPriceUpdate, IndexPriceUpdate],
+        # NOTE: the live DataEngine always publishes the plural `OrderBookDeltas`
+        # container on the message bus (even for a single delta with
+        # buffer_deltas=False) -- StreamingFeatherWriter.write() filters on
+        # `obj.__class__` BEFORE any OrderBookDeltas->OrderBookDelta schema
+        # mapping, so the singular `OrderBookDelta` here would silently drop
+        # all order-book data.
+        include_types=[
+            TradeTick,
+            QuoteTick,
+            OrderBookDeltas,
+            Bar,
+            MarkPriceUpdate,
+            IndexPriceUpdate,
+        ],
     )

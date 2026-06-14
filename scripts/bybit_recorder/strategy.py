@@ -25,7 +25,6 @@ from nautilus_trader.model.data import BarType
 from nautilus_trader.model.data import FundingRateUpdate
 from nautilus_trader.model.data import IndexPriceUpdate
 from nautilus_trader.model.data import MarkPriceUpdate
-from nautilus_trader.model.data import OrderBookDelta
 from nautilus_trader.model.data import OrderBookDeltas
 from nautilus_trader.model.data import QuoteTick
 from nautilus_trader.model.data import TradeTick
@@ -44,7 +43,7 @@ logger = logging.getLogger(__name__)
 _RECORDED_TYPES = [
     TradeTick,
     QuoteTick,
-    OrderBookDelta,
+    OrderBookDeltas,
     Bar,
     MarkPriceUpdate,
     IndexPriceUpdate,
