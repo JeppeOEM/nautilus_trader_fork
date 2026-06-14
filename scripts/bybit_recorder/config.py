@@ -22,6 +22,11 @@ import pandas as pd
 
 from nautilus_trader.common.config import NautilusConfig
 from nautilus_trader.common.config import PositiveInt
+from nautilus_trader.model.data import Bar
+from nautilus_trader.model.data import IndexPriceUpdate
+from nautilus_trader.model.data import MarkPriceUpdate
+from nautilus_trader.model.data import OrderBookDelta
+from nautilus_trader.model.data import QuoteTick
 from nautilus_trader.model.data import TradeTick
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.config import StreamingConfig
@@ -29,6 +34,14 @@ from nautilus_trader.persistence.writer import RotationMode
 
 
 logger = logging.getLogger(__name__)
+
+# D-03 (literal): SPOT order book depth is capped at 50 by the venue.
+_SPOT_MAX_DEPTH = 50
+
+# Defense-in-depth (RESEARCH Pitfall 3 / Open Question 2): the Bybit adapter does
+# not validate LINEAR depth and a value off this discrete venue set silently
+# yields no data, so reject anything outside it at config-load time.
+_LINEAR_VALID_DEPTHS = {1, 50, 200, 1000}
 
 
 class InstrumentEntry(NautilusConfig, frozen=True):
@@ -45,12 +58,17 @@ class InstrumentEntry(NautilusConfig, frozen=True):
     bar_intervals : list[str]
         The bar interval strings to subscribe to (parsed now per CONF-02, not yet
         consumed in Phase 1).
+    product_type : str
+        Either ``"linear"`` or ``"spot"`` -- drives per-product-type order book
+        depth validation (D-03 / Pitfall 3) and linear-only mark/index price
+        subscription gating (D-04).
 
     """
 
     id: InstrumentId
     depth: PositiveInt
     bar_intervals: list[str]
+    product_type: str
 
 
 class RecorderConfig(NautilusConfig, frozen=True):
@@ -94,6 +112,18 @@ class RecorderConfig(NautilusConfig, frozen=True):
         """
         return [entry.id for entry in self.instruments]
 
+    @property
+    def linear_instrument_ids(self) -> list[InstrumentId]:
+        """
+        Return the resolved LINEAR instrument identifiers (D-04 gating).
+
+        Returns
+        -------
+        list[InstrumentId]
+
+        """
+        return [entry.id for entry in self.instruments if entry.product_type == "linear"]
+
 
 def load_recorder_config(path: str | Path) -> tuple[RecorderConfig, list[InstrumentId]]:
     """
@@ -130,14 +160,49 @@ def load_recorder_config(path: str | Path) -> tuple[RecorderConfig, list[Instrum
     spot_raw: list[dict] = instruments_raw.get("spot", [])
 
     instruments: list[InstrumentEntry] = []
-    for entry_raw in (*linear_raw, *spot_raw):
+    for entry_raw in linear_raw:
         # InstrumentId.from_str is the V5 boundary: raises ValueError on a
         # malformed instrument id, intentionally failing fast (T-01-03).
+        instrument_id = InstrumentId.from_str(entry_raw["id"])
+        depth = entry_raw["depth"]
+
+        # Defense-in-depth (RESEARCH Pitfall 3 / Open Question 2): the Bybit
+        # adapter does not validate LINEAR depth and a value off this discrete
+        # venue set silently yields no data, so reject it at config-load time.
+        if depth not in _LINEAR_VALID_DEPTHS:
+            raise ValueError(
+                f"Invalid linear order book depth {depth} for {instrument_id}: "
+                f"must be one of {sorted(_LINEAR_VALID_DEPTHS)}",
+            )
+
         instruments.append(
             InstrumentEntry(
-                id=InstrumentId.from_str(entry_raw["id"]),
-                depth=entry_raw["depth"],
+                id=instrument_id,
+                depth=depth,
                 bar_intervals=entry_raw["bar_intervals"],
+                product_type="linear",
+            ),
+        )
+
+    for entry_raw in spot_raw:
+        # InstrumentId.from_str is the V5 boundary: raises ValueError on a
+        # malformed instrument id, intentionally failing fast (T-01-03).
+        instrument_id = InstrumentId.from_str(entry_raw["id"])
+        depth = entry_raw["depth"]
+
+        # D-03 (literal): spot order book depth is capped at 50 by the venue.
+        if depth > _SPOT_MAX_DEPTH:
+            raise ValueError(
+                f"Invalid spot order book depth {depth} for {instrument_id}: "
+                f"spot depth is capped at {_SPOT_MAX_DEPTH} by the venue (D-03)",
+            )
+
+        instruments.append(
+            InstrumentEntry(
+                id=instrument_id,
+                depth=depth,
+                bar_intervals=entry_raw["bar_intervals"],
+                product_type="spot",
             ),
         )
 
@@ -172,8 +237,8 @@ def build_streaming_config(recorder_cfg: RecorderConfig) -> StreamingConfig:
     Returns
     -------
     StreamingConfig
-        A daily-rotating streaming configuration with `include_types=[TradeTick]`
-        (REC-07, Phase 1 records only trades).
+        A daily-rotating streaming configuration with `include_types` covering
+        all six auto-written types recorded by Phase 2 (REC-02 to REC-04, REC-06).
 
     """
     return StreamingConfig(
@@ -188,6 +253,8 @@ def build_streaming_config(recorder_cfg: RecorderConfig) -> StreamingConfig:
         rotation_interval=pd.Timedelta(days=1),
         rotation_time=time(0, 0, 0),
         rotation_timezone="UTC",
-        # Phase 1 records only trades; widened in Phase 2.
-        include_types=[TradeTick],
+        # FundingRateUpdate is intentionally OMITTED here: it is deduped on
+        # value-change by the strategy and persisted via a separate writer
+        # (D-01 / Plan 02), not auto-written through this passthrough.
+        include_types=[TradeTick, QuoteTick, OrderBookDelta, Bar, MarkPriceUpdate, IndexPriceUpdate],
     )

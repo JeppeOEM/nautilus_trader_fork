@@ -16,6 +16,11 @@
 import pandas as pd
 import pytest
 
+from nautilus_trader.model.data import Bar
+from nautilus_trader.model.data import IndexPriceUpdate
+from nautilus_trader.model.data import MarkPriceUpdate
+from nautilus_trader.model.data import OrderBookDelta
+from nautilus_trader.model.data import QuoteTick
 from nautilus_trader.model.data import TradeTick
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.writer import RotationMode
@@ -68,7 +73,17 @@ def test_build_streaming_config_uses_scheduled_dates_daily_rotation(tmp_path, sa
     assert streaming_config.rotation_mode == RotationMode.SCHEDULED_DATES
     assert streaming_config.rotation_interval == pd.Timedelta(days=1)
     assert streaming_config.rotation_timezone == "UTC"
-    assert streaming_config.include_types == [TradeTick]
+    # Phase 2 widened include_types to the six auto-written types (REC-02..REC-04,
+    # REC-06). FundingRateUpdate is intentionally excluded (deduped via strategy in
+    # Plan 02, per D-01 / Pitfall 1).
+    assert streaming_config.include_types == [
+        TradeTick,
+        QuoteTick,
+        OrderBookDelta,
+        Bar,
+        MarkPriceUpdate,
+        IndexPriceUpdate,
+    ]
 
 
 def test_load_recorder_config_rejects_malformed_instrument_id(tmp_path, sample_toml):
