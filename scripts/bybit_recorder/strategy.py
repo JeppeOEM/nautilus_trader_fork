@@ -288,10 +288,9 @@ class RecorderStrategy(Strategy):
         self._funding_writer.write(funding_rate)
         self._funding_writer.flush()
 
-    def _convert_stream(self, event: TimeEvent) -> None:
+    def _run_conversion(self) -> None:
         """
-        Convert streamed feather data for this instance into the `ParquetDataCatalog`
-        (REL-01).
+        Convert streamed feather data for this instance into the `ParquetDataCatalog`.
 
         Only feather files that have already been ROTATED OUT (i.e. a newer file
         for the same instrument/bar-type already exists, so the file will never
@@ -306,6 +305,9 @@ class RecorderStrategy(Strategy):
 
         A transient conversion error is logged and swallowed PER TYPE so it does not
         crash the recorder nor block the remaining types.
+
+        This shared body is invoked both by the periodic `_convert_stream` timer
+        (REL-01) and by `on_stop` for a final flush+convert on shutdown (REL-02).
 
         """
         catalog = ParquetDataCatalog(self.config.catalog_path)
@@ -328,6 +330,38 @@ class RecorderStrategy(Strategy):
                     "Failed to convert %s stream to catalog",
                     data_cls.__name__,
                 )
+
+    def _convert_stream(self, event: TimeEvent) -> None:
+        """
+        Periodic conversion timer callback (REL-01) — delegates to the shared
+        `_run_conversion()` body.
+        """
+        self._run_conversion()
+
+    def on_stop(self) -> None:
+        """
+        Actions to be performed on strategy stop (REL-02, Pattern 1).
+
+        On SIGTERM the live runner calls `kernel.stop_async()`, which fires this
+        hook (via `_trader.stop()`) BEFORE the kernel closes its `"*"`
+        `StreamingFeatherWriter` (`_close_writer()`), and `Strategy._stop()` runs
+        `on_stop()` BEFORE cancelling this strategy's timers. So the kernel
+        writer's feather files are still on disk and the strategy-owned funding
+        writer is still open here — a final flush+convert via `_run_conversion()`
+        catches any feather files already finalized mid-session by a
+        `SCHEDULED_DATES` rotation that the periodic timer had not yet converted.
+
+        `_convert_finalized_feather_files` deliberately SKIPS each identifier's
+        still-active file, so THIS session's active-file tail is not converted
+        here; it becomes convertible on the NEXT restart's first conversion cycle
+        when a new process creates a new file that finalizes this one (D-02/D-03 —
+        no data loss, accepted one-cycle parquet-visibility delay).
+
+        This hook never references, flushes, or closes the kernel `"*"`
+        streaming writer: the strategy cannot reach it and the kernel closes it
+        itself afterwards (Pitfall 1 / Anti-Pattern).
+        """
+        self._run_conversion()
 
     def _convert_finalized_feather_files(
         self,
