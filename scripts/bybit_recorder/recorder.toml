@@ -7,7 +7,10 @@
 trader_id = "BYBIT-COLLECTOR-001"
 catalog_path = "catalog"
 streaming_path = "catalog/streaming"
-conversion_interval_minutes = 60
+# TEMPORARY for Task 3 live smoke run (Phase 2 Plan 02): set to 1 so the
+# in-process conversion timer fires within the ~2-3 minute smoke window.
+# Restore to 60 after the operator approves the smoke run.
+conversion_interval_minutes = 1
 environment = "mainnet"
 
 [[instruments.linear]]
