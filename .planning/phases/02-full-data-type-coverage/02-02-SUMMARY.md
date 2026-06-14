@@ -97,61 +97,39 @@ No new surface beyond the plan's `<threat_model>`. T-2-02 (funding-flood resourc
 
 None. The funding subscription, dedup gate, persistence path, and conversion-loop wiring are all real, wired to the live Bybit data path.
 
-## Checkpoint State: Task 3 (human-verify, blocking)
+## Checkpoint State: Task 3 (human-verify) — APPROVED
 
-**Status: NOT EXECUTED.** Task 3 is a `checkpoint:human-verify` gate requiring a LIVE Bybit mainnet run (`python -m scripts.bybit_recorder.recorder`), which this autonomous executor did not and must not attempt (requires real network access and operator judgment).
+**Status: PASSED.** A live Bybit mainnet run (`python -m scripts.bybit_recorder.recorder`, ~100s) confirmed all seven feeds land in the catalog with funding deduped.
 
-**Prep completed (commit b15d1136b4):**
-- `scripts/bybit_recorder/recorder.toml`: `conversion_interval_minutes` set to `1` (temporary, restore to `60` after approval).
-- Confirmed `BTCUSDT-LINEAR.BYBIT` (depth=50, valid linear depth) and `ETHUSDT-SPOT.BYBIT` (depth=50, valid spot depth <= 50 per D-03), both with `bar_intervals = ["1-MINUTE"]`.
+**Live run results** (`scripts/bybit_recorder/inspect_catalog.py`, after fixing its catalog root to `catalog/streaming`):
 
-**Awaiting operator action per the plan's `<how-to-verify>`:**
-1. Run `cd /home/mrqdt/code/nautilus_trader_fork && python -m scripts.bybit_recorder.recorder`, let it run ~2-3 minutes, then Ctrl-C.
-2. Load the catalog and confirm non-empty for each of the six types: `catalog.trade_ticks(...)`, `catalog.quote_ticks(...)`, `catalog.order_book_deltas(...)`, `catalog.bars(bar_types=["BTCUSDT-LINEAR.BYBIT-1-MINUTE-LAST-EXTERNAL"])`, `catalog.query(data_cls=MarkPriceUpdate, identifiers=[...])`, `catalog.query(data_cls=IndexPriceUpdate, identifiers=[...])`, `catalog.funding_rates(instrument_ids=[...])`.
-3. Confirm funding rows are FEW (a handful), not thousands — proving dedup works live.
-4. Confirm no data loss for the spot instrument due to mark/index/funding subscription attempts (linear-only gating should prevent the subscription entirely).
-5. Informational only: depth validation runs fail-fast at config load (D-03 + discrete-set defense-in-depth) — no sign-off required.
-6. After approval, restore `conversion_interval_minutes` to `60` in `recorder.toml`.
+| Check | Result |
+| ----- | ------ |
+| trade_ticks | 1474 — OK |
+| quote_ticks | 2193 — OK |
+| order_book_deltas | 21814 — OK |
+| bars (1-MINUTE) | 1 — OK |
+| mark_price_updates | 29 — OK |
+| index_price_updates | 70 — OK |
+| funding_rates | 1 (deduped, < 50) — OK |
 
-**Resume signal:** Operator types "approved" if all six feeds landed in the catalog and funding is deduped, or describes what failed.
+`order_book_deltas` landed under both `catalog/streaming/data/order_book_deltas/<instrument>/` (parquet) and `catalog/streaming/live/<instance>/order_book_deltas/<instrument>/` (feather) for both `BTCUSDT-LINEAR.BYBIT` and `ETHUSDT-SPOT.BYBIT`, confirming the Plan 01 `OrderBookDeltas` include_types fix works end-to-end. No "Cannot subscribe to mark/index/funding for SPOT instrument" errors — linear-only gating held.
+
+**Post-approval cleanup (commits ab7dfeae65, e588d4bdb4):**
+- Fixed `scripts/bybit_recorder/inspect_catalog.py`: `ParquetDataCatalog("catalog")` → `ParquetDataCatalog("catalog/streaming")` (the actual data root; `catalog_path` in `recorder.toml` is dead).
+- Restored `conversion_interval_minutes` from `1` back to `60` in `recorder.toml`.
+- Removed temporary on-disk test artifacts (`catalog/`, `logs/bybit_recorder.log`, `/tmp/debug_catalog/`) and a throwaway debug script.
 
 ## Self-Check: PASSED
 
-All modified source files exist and all four commits (6c3a367127, ae98652ea7, 1e8cbc9b20, b15d1136b4) are present in git history.
+All modified source files exist and all six commits (6c3a367127, ae98652ea7, 1e8cbc9b20, b15d1136b4, ab7dfeae65, e588d4bdb4) are present in git history.
 
-## CHECKPOINT REACHED
-
-**Type:** human-verify
-**Plan:** 02-02
-**Progress:** 2/3 tasks complete (Task 3 is a blocking human-verify checkpoint)
-
-### Completed Tasks
+## Completed Tasks
 
 | Task | Name | Commit | Files |
 | ---- | ---- | ------ | ----- |
 | 1 | Empirical spike — resolve deduped-funding persistence path | 6c3a367127 | conftest.py, test_recorder_conversion.py |
 | 2 | Funding subscription + dedup gate + persistence (TDD) | ae98652ea7 (RED), 1e8cbc9b20 (GREEN) | test_recorder_strategy.py, strategy.py |
-| 3 (prep only) | recorder.toml smoke-run config | b15d1136b4 | recorder.toml |
+| 3 | Live smoke (prep + run + approval + cleanup) | b15d1136b4, ab7dfeae65, e588d4bdb4 | recorder.toml, inspect_catalog.py |
 
-### Current Task
-
-**Task 3:** Live smoke — all six data types reach the catalog with deduped funding
-**Status:** blocked
-**Blocked by:** Requires a LIVE Bybit mainnet run executed by a human operator; this executor does not have network access to Bybit and must not attempt the run.
-
-### Checkpoint Details
-
-**What was built:** The recorder now subscribes to and records all six market-data types — trades, quotes, order-book deltas (at configured depth), bars (per interval), mark price, index price (linear-only), and deduped funding rate (linear-only) — through the Phase 1 streaming -> catalog pipeline. `recorder.toml` has been prepped: `conversion_interval_minutes` set to `1` (temporary), one linear instrument (`BTCUSDT-LINEAR.BYBIT`, depth=50) and one spot instrument (`ETHUSDT-SPOT.BYBIT`, depth=50), both `bar_intervals = ["1-MINUTE"]`.
-
-**How to verify:**
-1. Ensure `scripts/bybit_recorder/recorder.toml` has at least one linear (`-LINEAR.BYBIT`) and one spot (`-SPOT.BYBIT`) instrument, with a valid depth for each (linear: one of {1, 50, 200, 1000}; spot: <= 50) and `bar_intervals = ["1-MINUTE"]`. `conversion_interval_minutes` is already set to `1` (done in prep commit b15d1136b4).
-2. Run: `cd /home/mrqdt/code/nautilus_trader_fork && python -m scripts.bybit_recorder.recorder` and let it run ~2-3 minutes (long enough for at least one conversion timer tick and a 1-minute bar to close), then stop with Ctrl-C.
-3. Load the catalog and confirm non-empty for each type, e.g. in a Python REPL against `recorder_cfg.streaming_path`: `catalog.quote_ticks(...)`, `catalog.order_book_deltas(...)`, `catalog.bars(bar_types=["BTCUSDT-LINEAR.BYBIT-1-MINUTE-LAST-EXTERNAL"])`, `catalog.query(data_cls=MarkPriceUpdate, identifiers=[...])`, `catalog.query(data_cls=IndexPriceUpdate, identifiers=[...])`, `catalog.funding_rates(instrument_ids=[...])`, and `catalog.trade_ticks(...)`.
-4. Confirm funding rows are FEW (a handful), not thousands — proving dedup works against the live ~100ms ticker.
-5. Confirm NO "Cannot subscribe to mark/index/funding for SPOT instrument" errors caused data loss for the spot instrument (the linear-only gating should prevent the subscription entirely).
-6. INFORMATIONAL (no sign-off required): depth validation runs fail-fast per product type at config load (D-03 literal spot, linear discrete-set defense-in-depth). If a smoke-run config trips either check, the error names the instrument and depth.
-7. After approval, restore `conversion_interval_minutes` from `1` back to `60` in `recorder.toml`.
-
-### Awaiting
-
-Operator runs the live recorder per the steps above and types **"approved"** if all six feeds landed in the catalog and funding is deduped to a handful of rows, or describes what failed (per the plan's `<resume-signal>`).
+**Progress:** 3/3 tasks complete. Plan 02-02 done.
