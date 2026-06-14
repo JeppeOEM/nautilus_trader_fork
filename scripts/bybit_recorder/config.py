@@ -98,6 +98,10 @@ class RecorderConfig(NautilusConfig, frozen=True):
         such files (REL-01/Pitfall 2). Defaults to 1440 (1 day) for daily
         partitioning (REL-02); lower values (e.g. 1) are useful for testing the
         conversion path without waiting a full day.
+    restart_gap_threshold_seconds : PositiveInt, default 60
+        On `on_start`, if the gap since the last recorded `ts_init` for an
+        instrument exceeds this threshold, the recorder logs a WARNING so
+        restart-induced gaps are visible in journald (REL-02 gap visibility, D-06).
     environment : str, default 'mainnet'
         The Bybit environment to connect to.
     instruments : list[InstrumentEntry]
@@ -110,6 +114,7 @@ class RecorderConfig(NautilusConfig, frozen=True):
     streaming_path: str
     conversion_interval_minutes: PositiveInt = 60
     rotation_interval_minutes: PositiveInt = 1440
+    restart_gap_threshold_seconds: PositiveInt = 60
     environment: str = "mainnet"
     instruments: list[InstrumentEntry] = []
 
@@ -241,6 +246,7 @@ def load_recorder_config(path: str | Path) -> tuple[RecorderConfig, list[Instrum
         streaming_path=_resolve_catalog_path(recorder_raw["streaming_path"]),
         conversion_interval_minutes=recorder_raw.get("conversion_interval_minutes", 60),
         rotation_interval_minutes=recorder_raw.get("rotation_interval_minutes", 1440),
+        restart_gap_threshold_seconds=recorder_raw.get("restart_gap_threshold_seconds", 60),
         environment=recorder_raw.get("environment", "mainnet"),
         instruments=instruments,
     )

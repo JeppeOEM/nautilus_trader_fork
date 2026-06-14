@@ -84,6 +84,10 @@ class RecorderStrategyConfig(StrategyConfig, frozen=True):
         match the kernel "*" writer's `rotation_interval` (set via
         `build_streaming_config`) so `_convert_stream` finds a consistent set of
         rotated-out (finalized) feather files across all converted types.
+    restart_gap_threshold_seconds : PositiveInt, default 60
+        On `on_start`, if the gap since the last recorded `ts_init` for an
+        instrument exceeds this threshold, log a WARNING so restart-induced gaps
+        are visible in journald (REL-02 gap visibility, D-06).
 
     """
 
@@ -95,6 +99,7 @@ class RecorderStrategyConfig(StrategyConfig, frozen=True):
     instance_id_str: str
     conversion_interval_minutes: PositiveInt = 60
     rotation_interval_minutes: PositiveInt = 1440
+    restart_gap_threshold_seconds: PositiveInt = 60
 
 
 class RecorderStrategy(Strategy):
@@ -145,6 +150,10 @@ class RecorderStrategy(Strategy):
         if missing:
             raise RuntimeError(f"Missing instruments: {', '.join(sorted(missing))}")
 
+        # Surface restart-induced gaps in the logs before subscribing (D-06) — a
+        # failure here is logged but must not prevent subscriptions.
+        self._log_restart_gaps()
+
         for instrument_id in self.config.instrument_ids:
             self.subscribe_trade_ticks(instrument_id)
             self.subscribe_quote_ticks(instrument_id)
@@ -173,6 +182,45 @@ class RecorderStrategy(Strategy):
             interval=pd.Timedelta(minutes=self.config.conversion_interval_minutes),
             callback=self._convert_stream,
         )
+
+    def _log_restart_gaps(self) -> None:
+        """
+        Log a WARNING per instrument when the gap since the last recorded
+        `ts_init` exceeds `restart_gap_threshold_seconds` (REL-02 gap visibility,
+        D-06).
+
+        A restart with the fixed `instance_id` resumes recording, but any wall-clock
+        time the process was down is an unrecoverable gap in the data. Logging it at
+        startup makes restart-induced gaps visible/alertable via journald.
+
+        Reads the most-recent `TradeTick` `ts_init` per instrument from the catalog.
+        The per-instrument body is wrapped in try/except so a catalog-read error for
+        one instrument cannot suppress warnings for others or block startup
+        (consistent with the per-type swallow in `_run_conversion`).
+        """
+        catalog = ParquetDataCatalog(self.config.catalog_path)
+        now_ns = self.clock.timestamp_ns()
+
+        for instrument_id in self.config.instrument_ids:
+            try:
+                trades = catalog.trade_ticks(instrument_ids=[str(instrument_id)])
+                if not trades:
+                    continue
+
+                last_ts_init = max(tick.ts_init for tick in trades)
+                gap_s = (now_ns - last_ts_init) / 1e9
+                if gap_s > self.config.restart_gap_threshold_seconds:
+                    logger.warning(
+                        "Resuming after gap of %.1fs for %s (last data: %s)",
+                        gap_s,
+                        instrument_id,
+                        pd.Timestamp(last_ts_init, unit="ns"),
+                    )
+            except Exception:
+                logger.exception(
+                    "Failed to check restart gap for %s",
+                    instrument_id,
+                )
 
     def on_trade_tick(self, tick: TradeTick) -> None:
         """

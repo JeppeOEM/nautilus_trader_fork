@@ -8,6 +8,7 @@ trader_id = "BYBIT-COLLECTOR-001"
 catalog_path = "catalog"
 streaming_path = "catalog/streaming"
 conversion_interval_minutes = 1
+# restart_gap_threshold_seconds = 60  # WARN on on_start if the gap since the last recorded ts_init exceeds this (D-06)
 environment = "mainnet"
 
 [[instruments.linear]]

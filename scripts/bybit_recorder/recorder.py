@@ -102,6 +102,8 @@ def main(config_path: str) -> None:
         instance_id_str=RECORDER_INSTANCE_ID,
         conversion_interval_minutes=recorder_cfg.conversion_interval_minutes,
         rotation_interval_minutes=recorder_cfg.rotation_interval_minutes,
+        # D-06 gap-visibility threshold for the on_start restart-gap WARNING.
+        restart_gap_threshold_seconds=recorder_cfg.restart_gap_threshold_seconds,
     )
 
     node = TradingNode(config=config_node)
