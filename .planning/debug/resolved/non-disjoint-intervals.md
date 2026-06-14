@@ -168,45 +168,91 @@ root_cause: |
   `ValueError: ... would create non-disjoint intervals`.
 
 fix: |
-  In `_convert_feather_table_to_parquet`, after resolving `identifier`/`directory`,
-  fetch `current_intervals = used_catalog._get_directory_intervals(directory)`
-  BEFORE computing `(start, end)`. If `current_intervals` is non-empty and the
-  re-read table's minimum `ts_init` is `<= max(end for _, end in
-  current_intervals)`, filter the table down to rows with
-  `ts_init > max_converted_end` via `table.filter(pc.greater(table["ts_init"],
-  max_converted_end))`. If the filtered table becomes empty (everything already
-  converted), return early (idempotent no-op, matches existing
-  test_double_conversion_same_day_behavior). Otherwise recompute `(start, end)`
-  from the trimmed table and proceed as before. This makes each conversion cycle
-  persist only the genuinely new tail of data, restoring the disjoint-intervals
-  invariant without requiring per-cycle feather rotation (preserves REL-02
-  same-day-restart / daily SCHEDULED_DATES rotation design).
+  REVISED AGAIN (2026-06-14): the previous revision introduced a
+  `RecorderParquetDataCatalog(ParquetDataCatalog)` subclass overriding
+  `_convert_feather_table_to_parquet` with trimming logic, to avoid touching core
+  while still re-converting the still-growing active feather file each cycle. On
+  further review (user: "the code works perfectly as IS, no need to change
+  anything except just use it the right way"), that override is unnecessary: the
+  REAL fix is to never re-convert a feather file that can still receive new rows
+  in the first place.
+
+  `scripts/bybit_recorder/strategy.py`'s `_convert_stream` now calls a new
+  recorder-only method, `_convert_finalized_feather_files`, which:
+    - Lists feather files for a `data_cls` via the existing (unmodified)
+      `catalog._list_feather_data_files(...)`.
+    - Groups them by directory (one group per instrument/bar-type identifier).
+    - Within each group, skips the LAST (most-recently-created, still-active)
+      file and converts every earlier file via the existing, unmodified
+      `catalog._read_feather_file(...)` + `catalog._convert_feather_table_to_parquet(...)`.
+
+  A file is only "earlier" (finalized) once `StreamingFeatherWriter` has rotated
+  to a new file for that identifier, so a finalized file's row set -- and
+  therefore its `(start, end)` interval -- never changes again. Conversion of
+  each file happens exactly once and repeat cycles are naturally idempotent (the
+  file is simply absent from `files[:-1]` once it's no longer last, but by then
+  it's already converted; if a cycle is missed, it just converts on a later
+  cycle, still as an `files[:-1]` entry, with the same unchanged content).
+
+  To make this rotation-based finalization actually happen on a useful cadence
+  (and to make it testable without waiting a full day), `rotation_interval_minutes`
+  (default 1440 = 1 day, REL-02) is now a config knob threaded through to BOTH
+  feather writers that matter for `_convert_stream`:
+    - the kernel "*" writer, via `StreamingConfig` in
+      `scripts/bybit_recorder/config.py: build_streaming_config`
+      (`rotation_mode=SCHEDULED_DATES`, `rotation_interval=Timedelta(minutes=...)`,
+      `rotation_time=00:00 UTC`)
+    - the strategy-owned funding writer, via
+      `RecorderStrategyConfig.rotation_interval_minutes` in
+      `scripts/bybit_recorder/strategy.py: _persist_funding_rate` (same
+      SCHEDULED_DATES/00:00 UTC settings)
+
+  Both writers must rotate on the same schedule so `_convert_finalized_feather_files`
+  sees a consistent "finalized" cutoff across all converted types each cycle.
+
+  `nautilus_trader/persistence/catalog/parquet.py` remains completely unmodified
+  (core untouched) -- no override, no subclass, no core edits at all. The
+  previously-introduced `scripts/bybit_recorder/catalog.py`
+  (`RecorderParquetDataCatalog`) and its test
+  (`tests/unit_tests/persistence/recorder/test_recorder_catalog.py`) have been
+  deleted as no longer needed.
 
 verification: |
-  1. Reproduced the exact failure first (temporary test): write 3 TradeTicks,
+  1. Reproduced the original failure (prior revision): write 3 TradeTicks,
      convert (cycle 1, writes 1e9_3e9.parquet), append 3 more TradeTicks with
      later ts_init without rotating the writer, convert again (cycle 2) -> raised
      `ValueError: ... interval (1000000000, 12000000000) would create non-disjoint
-     intervals. Existing intervals: [(1000000000, 3000000000)]` (matches reported
-     traceback shape).
-  2. Applied the fix to nautilus_trader/persistence/catalog/parquet.py.
-  3. Re-ran the same reproduction -> PASSED (cycle 2 no longer raises;
-     catalog.trade_ticks(...) returns all 6 rows across two disjoint parquet
-     files).
+     intervals. Existing intervals: [(1000000000, 3000000000)]`.
+  2. Implemented `_convert_finalized_feather_files` in `strategy.py` (no override,
+     no subclass) and removed `scripts/bybit_recorder/catalog.py` +
+     `RecorderParquetDataCatalog`.
+  3. Made rotation configurable end-to-end via `rotation_interval_minutes`
+     (`recorder.toml` -> `RecorderConfig` -> `build_streaming_config` for the
+     kernel writer, and `RecorderStrategyConfig` -> `_persist_funding_rate` for
+     the funding writer).
   4. Added permanent regression test
-     `test_repeated_conversion_with_new_appended_rows_does_not_raise` to
-     tests/unit_tests/persistence/recorder/test_recorder_conversion.py (appends
-     new rows to an open feather file between two convert_stream_to_data calls,
-     asserts no raise and correct cumulative row count).
-  5. Full regression suites pass:
-     - tests/unit_tests/persistence/recorder/ -> 32 passed
-     - tests/unit_tests/persistence/test_catalog.py -> 96 passed, 1 skipped
-       (development_only, pre-existing skip)
-     - ruff check on modified file -> all checks passed
-  6. tests/unit_tests/persistence/test_streaming.py collection error
-     (ModuleNotFoundError: aiohttp) confirmed PRE-EXISTING and unrelated (same
-     error on `git stash` of this change).
+     `tests/unit_tests/persistence/recorder/test_recorder_rotation_conversion.py`
+     (`test_convert_finalized_feather_files_skips_active_file`): writes ticks
+     across multiple 60s `RotationMode.INTERVAL` rotations, runs
+     `_convert_finalized_feather_files` twice across cycles, asserts the active
+     (most-recently-created) file is always skipped, finalized files convert
+     exactly once, no data loss, and no non-disjoint-interval raise -> PASSED.
+  5. tests/unit_tests/persistence/recorder/ -> 31 passed.
+  6. ruff check on `config.py`, `strategy.py`, `recorder.py`, and the new test
+     file -> all checks passed.
+  7. nautilus_trader/persistence/catalog/parquet.py is unmodified (core
+     untouched), and no subclass/override of any core class exists either.
+  8. `rotation_interval_minutes` defaults to 1440 (1 day, REL-02 daily
+     partitioning) but is fully testable at short intervals -- the regression
+     test exercises a 60s rotation interval, and `recorder.toml` can set
+     `rotation_interval_minutes = 1` for a live mainnet smoke test without
+     waiting a full day.
 
 files_changed:
-  - nautilus_trader/persistence/catalog/parquet.py
-  - tests/unit_tests/persistence/recorder/test_recorder_conversion.py
+  - scripts/bybit_recorder/strategy.py
+  - scripts/bybit_recorder/config.py
+  - scripts/bybit_recorder/recorder.py
+  - scripts/bybit_recorder/recorder.toml
+  - tests/unit_tests/persistence/recorder/test_recorder_rotation_conversion.py (new)
+  - scripts/bybit_recorder/catalog.py (deleted, was added in prior revision)
+  - tests/unit_tests/persistence/recorder/test_recorder_catalog.py (deleted, was added in prior revision)

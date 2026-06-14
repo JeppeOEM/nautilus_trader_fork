@@ -7,7 +7,7 @@
 trader_id = "BYBIT-COLLECTOR-001"
 catalog_path = "catalog"
 streaming_path = "catalog/streaming"
-conversion_interval_minutes = 60
+conversion_interval_minutes = 1
 environment = "mainnet"
 
 [[instruments.linear]]

@@ -101,6 +101,7 @@ def main(config_path: str) -> None:
         catalog_path=recorder_cfg.streaming_path,
         instance_id_str=RECORDER_INSTANCE_ID,
         conversion_interval_minutes=recorder_cfg.conversion_interval_minutes,
+        rotation_interval_minutes=recorder_cfg.rotation_interval_minutes,
     )
 
     node = TradingNode(config=config_node)

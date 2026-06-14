@@ -26,7 +26,6 @@ from nautilus_trader.persistence.catalog.parquet import ParquetDataCatalog
 from nautilus_trader.persistence.writer import StreamingFeatherWriter
 from nautilus_trader.test_kit.providers import TestInstrumentProvider
 from nautilus_trader.test_kit.stubs.component import TestComponentStubs
-from nautilus_trader.test_kit.stubs.data import TestDataStubs
 
 
 # Hardcoded valid v4 UUID string (D-03) — same constant used by the recorder strategy.
@@ -116,84 +115,6 @@ def test_double_conversion_same_day_behavior(catalog_dir, sample_trade_ticks):
     assert len(trades_after_first) > 0
     assert len(trades_after_second) == len(trades_after_first)
     assert all(isinstance(t, TradeTick) for t in trades_after_second)
-
-
-def test_repeated_conversion_with_new_appended_rows_does_not_raise(
-    catalog_dir,
-    sample_trade_ticks,
-):
-    # Regression test for the "non-disjoint intervals" ValueError raised by a
-    # long-running recorder's periodic `_convert_stream` timer (REL-01). Unlike
-    # `test_double_conversion_same_day_behavior` (no new data between calls), this
-    # test appends NEW rows to the still-open feather file between two
-    # `convert_stream_to_data` calls -- the scenario that previously raised
-    # `ValueError: ... would create non-disjoint intervals` because the second
-    # conversion re-read the whole feather file and recomputed an (start, end)
-    # interval that overlapped the first conversion's already-written parquet
-    # file (same start, later end).
-    #
-    # FIX: `_convert_feather_table_to_parquet` now trims the re-read feather table
-    # down to rows newer than the latest already-converted interval before
-    # computing (start, end), so the second conversion only persists the new tail
-    # and the two parquet files have disjoint intervals.
-    # Arrange
-    catalog = ParquetDataCatalog(str(catalog_dir))
-    cache = TestComponentStubs.cache()
-    instrument = TestInstrumentProvider.btcusdt_perp_binance()
-    cache.add_instrument(instrument)
-    clock = TestClock()
-
-    writer = StreamingFeatherWriter(
-        path=f"{catalog_dir}/live/{RECORDER_INSTANCE_ID}",
-        cache=cache,
-        clock=clock,
-        fs_protocol="file",
-        include_types=[TradeTick],
-        flush_interval_ms=0,
-    )
-
-    for tick in sample_trade_ticks:
-        writer.write(tick)
-    writer.flush()
-
-    # Act: first conversion cycle.
-    catalog.convert_stream_to_data(
-        instance_id=RECORDER_INSTANCE_ID,
-        data_cls=TradeTick,
-        subdirectory="live",
-    )
-    trades_after_first = catalog.trade_ticks(
-        instrument_ids=[str(sample_trade_ticks[0].instrument_id)],
-    )
-
-    # New rows arrive and are appended to the SAME (un-rotated) feather file.
-    more_ticks = [
-        TestDataStubs.trade_tick(
-            instrument=instrument,
-            price=51_000.0 + i,
-            size=0.01,
-            ts_event=1_000_000_000 * (i + 10),
-            ts_init=1_000_000_000 * (i + 10),
-        )
-        for i in range(3)
-    ]
-    for tick in more_ticks:
-        writer.write(tick)
-    writer.flush()
-
-    # Act: second conversion cycle -- must NOT raise.
-    catalog.convert_stream_to_data(
-        instance_id=RECORDER_INSTANCE_ID,
-        data_cls=TradeTick,
-        subdirectory="live",
-    )
-    trades_after_second = catalog.trade_ticks(
-        instrument_ids=[str(sample_trade_ticks[0].instrument_id)],
-    )
-
-    # Assert: no data loss, and the new rows are now present too.
-    assert len(trades_after_first) == len(sample_trade_ticks)
-    assert len(trades_after_second) == len(sample_trade_ticks) + len(more_ticks)
 
 
 def test_convert_stream_to_data_roundtrips_quote_ticks(catalog_dir, sample_quote_ticks):

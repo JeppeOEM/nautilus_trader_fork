@@ -14,6 +14,7 @@
 # -------------------------------------------------------------------------------------------------
 
 import logging
+from datetime import time
 
 import pandas as pd
 
@@ -31,6 +32,7 @@ from nautilus_trader.model.data import TradeTick
 from nautilus_trader.model.enums import BookType
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog.parquet import ParquetDataCatalog
+from nautilus_trader.persistence.writer import RotationMode
 from nautilus_trader.persistence.writer import StreamingFeatherWriter
 from nautilus_trader.trading.strategy import Strategy
 
@@ -77,6 +79,11 @@ class RecorderStrategyConfig(StrategyConfig, frozen=True):
         The fixed UUID4 string shared with the `TradingNode` instance_id (D-03).
     conversion_interval_minutes : PositiveInt, default 60
         How often the in-process conversion timer fires (REL-01/D-01).
+    rotation_interval_minutes : PositiveInt, default 1440
+        How often the strategy-owned funding writer rotates to a new file. Must
+        match the kernel "*" writer's `rotation_interval` (set via
+        `build_streaming_config`) so `_convert_stream` finds a consistent set of
+        rotated-out (finalized) feather files across all converted types.
 
     """
 
@@ -87,6 +94,7 @@ class RecorderStrategyConfig(StrategyConfig, frozen=True):
     catalog_path: str
     instance_id_str: str
     conversion_interval_minutes: PositiveInt = 60
+    rotation_interval_minutes: PositiveInt = 1440
 
 
 class RecorderStrategy(Strategy):
@@ -268,6 +276,13 @@ class RecorderStrategy(Strategy):
                 clock=self.clock,
                 fs_protocol="file",
                 include_types=[FundingRateUpdate],
+                # WHY: must rotate like the kernel "*" writer (Pitfall 1/REL-02) so
+                # `_convert_stream` finds rotated-out, finalized funding feather
+                # files to convert (Pitfall 2).
+                rotation_mode=RotationMode.SCHEDULED_DATES,
+                rotation_interval=pd.Timedelta(minutes=self.config.rotation_interval_minutes),
+                rotation_time=time(0, 0, 0),
+                rotation_timezone="UTC",
             )
 
         self._funding_writer.write(funding_rate)
@@ -278,17 +293,27 @@ class RecorderStrategy(Strategy):
         Convert streamed feather data for this instance into the `ParquetDataCatalog`
         (REL-01).
 
+        Only feather files that have already been ROTATED OUT (i.e. a newer file
+        for the same instrument/bar-type already exists, so the file will never
+        receive new rows) are converted. `convert_stream_to_data` re-reads a
+        feather file in full and recomputes its `(start, end)` interval, so
+        converting the still-open (most-recently-created) file on a later cycle
+        -- once it has grown -- would overlap the interval already written for it
+        and raise "non-disjoint intervals" (Pitfall 2). Restricting conversion to
+        finalized files makes each file convert exactly once and keeps repeat
+        conversions idempotent (the file's content, and therefore its interval,
+        never changes again).
+
         A transient conversion error is logged and swallowed PER TYPE so it does not
-        crash the recorder nor block the remaining types; Pitfall 2 (non-disjoint
-        intervals on mid-day re-conversion) is empirically verified in Plan 04.
+        crash the recorder nor block the remaining types.
 
         """
         catalog = ParquetDataCatalog(self.config.catalog_path)
 
         # Flush the strategy-owned funding writer before conversion so any
-        # deduped funding rows persisted since the last tick are visible to
-        # convert_stream_to_data (the kernel "*" writer is flushed separately
-        # by the framework).
+        # deduped funding rows persisted since the last tick are visible in its
+        # feather file (the kernel "*" writer is flushed separately by the
+        # framework).
         if self._funding_writer is not None:
             self._funding_writer.flush()
 
@@ -297,13 +322,48 @@ class RecorderStrategy(Strategy):
                 # WHY: subdirectory default is "backtest"; live runs write under
                 # live/ (Pitfall 3). Per-type try/except so one type's transient
                 # error does not block the others (A2 / Pitfall 2).
-                catalog.convert_stream_to_data(
-                    instance_id=self.config.instance_id_str,
-                    data_cls=data_cls,
-                    subdirectory="live",
-                )
+                self._convert_finalized_feather_files(catalog, data_cls)
             except Exception:
                 logger.exception(
                     "Failed to convert %s stream to catalog",
                     data_cls.__name__,
+                )
+
+    def _convert_finalized_feather_files(
+        self,
+        catalog: ParquetDataCatalog,
+        data_cls: type,
+    ) -> None:
+        """
+        Convert every ROTATED-OUT feather file for `data_cls` into the catalog.
+
+        Feather files are written per-instrument/bar-type under
+        `{table_name}/{identifier}/{identifier}_{timestamp}.feather`, with
+        filenames sorted chronologically by `_list_feather_data_files`. Within
+        each identifier's directory, the most-recently-created file is still open
+        for writes -- it is skipped -- and all earlier files are finalized
+        (rotation already moved on to a newer file, so they will never be
+        appended to again).
+
+        """
+        files_by_directory: dict[str, list] = {}
+        for feather_file in catalog._list_feather_data_files(
+            kind="live",
+            instance_id=self.config.instance_id_str,
+            data_cls=data_cls,
+        ):
+            directory = feather_file.path.rsplit("/", 1)[0]
+            files_by_directory.setdefault(directory, []).append(feather_file)
+
+        for files in files_by_directory.values():
+            for feather_file in files[:-1]:
+                table = catalog._read_feather_file(feather_file.path)
+                if table is None:
+                    continue
+
+                catalog._convert_feather_table_to_parquet(
+                    feather_table=table,
+                    feather_path=feather_file.path,
+                    data_cls=data_cls,
+                    used_catalog=catalog,
                 )

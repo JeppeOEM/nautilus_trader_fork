@@ -2591,30 +2591,11 @@ class ParquetDataCatalog(BaseDataCatalog):
             return
 
         identifier = self._identifier_from_table_or_path(table, data_cls, feather_path)
-        directory = used_catalog._make_path(data_cls=data_cls, identifier=identifier)
-        used_catalog.fs.mkdirs(directory, exist_ok=True)
-
-        current_intervals = used_catalog._get_directory_intervals(directory)
-
-        # A streaming feather file is re-read in full on every conversion cycle (it is
-        # only rotated/truncated on a schedule, e.g. daily). If a prior cycle already
-        # converted a prefix of this table into a parquet file, re-converting that same
-        # prefix would produce an overlapping (start, end) interval. Trim the table down
-        # to only the rows newer than the latest already-converted interval so each
-        # cycle persists just the new tail.
-        if current_intervals:
-            max_converted_end = max(end for _, end in current_intervals)
-            min_ts_init = int(pa.compute.min(table["ts_init"]).as_py())
-
-            if min_ts_init <= max_converted_end:
-                table = table.filter(pc.greater(table["ts_init"], max_converted_end))
-
-                if len(table) == 0:
-                    # Everything in this feather file has already been converted.
-                    return
-
         start = int(pa.compute.min(table["ts_init"]).as_py())
         end = int(pa.compute.max(table["ts_init"]).as_py())
+
+        directory = used_catalog._make_path(data_cls=data_cls, identifier=identifier)
+        used_catalog.fs.mkdirs(directory, exist_ok=True)
         filename = _timestamps_to_filename(start, end)
         parquet_file = f"{directory}/{filename}"
 
@@ -2622,6 +2603,7 @@ class ParquetDataCatalog(BaseDataCatalog):
             print(f"File {parquet_file} already exists, skipping write")
             return
 
+        current_intervals = used_catalog._get_directory_intervals(directory)
         new_intervals = [*current_intervals, (start, end)]
         if not _are_intervals_disjoint(new_intervals):
             raise ValueError(

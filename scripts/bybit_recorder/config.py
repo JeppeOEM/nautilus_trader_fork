@@ -91,6 +91,13 @@ class RecorderConfig(NautilusConfig, frozen=True):
     conversion_interval_minutes : PositiveInt, default 60
         How often the recorder converts streamed feather files into the catalog
         (D-02 — configurable, not hardcoded).
+    rotation_interval_minutes : PositiveInt, default 1440
+        How often the streaming feather writers rotate to a new file. Only a
+        ROTATED-OUT (no longer the most-recently-created) feather file is
+        guaranteed to never receive new rows, so `_convert_stream` only converts
+        such files (REL-01/Pitfall 2). Defaults to 1440 (1 day) for daily
+        partitioning (REL-02); lower values (e.g. 1) are useful for testing the
+        conversion path without waiting a full day.
     environment : str, default 'mainnet'
         The Bybit environment to connect to.
     instruments : list[InstrumentEntry]
@@ -102,6 +109,7 @@ class RecorderConfig(NautilusConfig, frozen=True):
     catalog_path: str
     streaming_path: str
     conversion_interval_minutes: PositiveInt = 60
+    rotation_interval_minutes: PositiveInt = 1440
     environment: str = "mainnet"
     instruments: list[InstrumentEntry] = []
 
@@ -232,6 +240,7 @@ def load_recorder_config(path: str | Path) -> tuple[RecorderConfig, list[Instrum
         catalog_path=_resolve_catalog_path(recorder_raw["catalog_path"]),
         streaming_path=_resolve_catalog_path(recorder_raw["streaming_path"]),
         conversion_interval_minutes=recorder_raw.get("conversion_interval_minutes", 60),
+        rotation_interval_minutes=recorder_raw.get("rotation_interval_minutes", 1440),
         environment=recorder_raw.get("environment", "mainnet"),
         instruments=instruments,
     )
@@ -269,9 +278,11 @@ def build_streaming_config(recorder_cfg: RecorderConfig) -> StreamingConfig:
         catalog_path=recorder_cfg.streaming_path,
         fs_protocol="file",
         # WHY: day-partitioning is a consequence of daily feather rotation, not a
-        # free catalog property (Pitfall 1).
+        # free catalog property (Pitfall 1). `rotation_interval_minutes` defaults
+        # to 1440 (1 day) but is configurable for testing the conversion path
+        # without waiting a full day.
         rotation_mode=RotationMode.SCHEDULED_DATES,
-        rotation_interval=pd.Timedelta(days=1),
+        rotation_interval=pd.Timedelta(minutes=recorder_cfg.rotation_interval_minutes),
         rotation_time=time(0, 0, 0),
         rotation_timezone="UTC",
         # FundingRateUpdate is intentionally OMITTED here: it is deduped on
