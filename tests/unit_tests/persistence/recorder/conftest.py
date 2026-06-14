@@ -13,6 +13,7 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,7 @@ import pytest
 from nautilus_trader.cache.cache import Cache
 from nautilus_trader.model.data import Bar
 from nautilus_trader.model.data import BarType
+from nautilus_trader.model.data import FundingRateUpdate
 from nautilus_trader.model.data import IndexPriceUpdate
 from nautilus_trader.model.data import MarkPriceUpdate
 from nautilus_trader.model.data import OrderBookDeltas
@@ -186,6 +188,27 @@ def sample_mark_prices() -> list[MarkPriceUpdate]:
             ts_init=1_000_000_000 * (i + 1),
         )
         for i in range(3)
+    ]
+
+
+@pytest.fixture
+def sample_funding_rates() -> list[FundingRateUpdate]:
+    """
+    Provide a short list of `FundingRateUpdate` objects with two DISTINCT `rate`
+    values and strictly monotonically increasing `ts_init` (required by the
+    catalog's monotonic-ts_init contract). `FundingRateUpdate` has no
+    `TestDataStubs` factory, so it is constructed directly.
+    """
+    instrument = TestInstrumentProvider.btcusdt_perp_binance()
+    rates = ["0.0001", "0.0002"]
+    return [
+        FundingRateUpdate(
+            instrument_id=instrument.id,
+            rate=Decimal(rate),
+            ts_event=1_000_000_000 * (i + 1),
+            ts_init=1_000_000_000 * (i + 1),
+        )
+        for i, rate in enumerate(rates)
     ]
 
 

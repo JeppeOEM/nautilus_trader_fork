@@ -15,6 +15,7 @@
 
 from nautilus_trader.common.component import TestClock
 from nautilus_trader.model.data import Bar
+from nautilus_trader.model.data import FundingRateUpdate
 from nautilus_trader.model.data import IndexPriceUpdate
 from nautilus_trader.model.data import MarkPriceUpdate
 from nautilus_trader.model.data import OrderBookDelta
@@ -247,6 +248,54 @@ def test_convert_stream_to_data_roundtrips_mark_prices(catalog_dir, sample_mark_
     # Assert
     assert len(marks) > 0
     assert all(isinstance(m, MarkPriceUpdate) for m in marks)
+
+
+# RESOLVED PERSISTENCE PATH (Open Question 1, Task 1 empirical spike):
+#
+# `FundingRateUpdate` is intentionally EXCLUDED from the kernel's "*" writer
+# `include_types` (Plan 01 / D-01) — auto-writing the ~100ms funding ticker would
+# flood the catalog. The deduped funding row is therefore persisted via a
+# STRATEGY-OWNED `StreamingFeatherWriter` whose `include_types` DOES include
+# `FundingRateUpdate` (a second writer, separate from the kernel's "*" writer).
+# `class_to_filename(FundingRateUpdate)` resolves to the NATIVE
+# `funding_rate_update` table (no `custom_` prefix — verified empirically and via
+# nautilus_trader/persistence/funcs.py), so `catalog.convert_stream_to_data(...)`
+# converts it like any other native type, and it reads back natively through
+# `catalog.funding_rates(instrument_ids=[...])` as `FundingRateUpdate` instances.
+# This is the contract Task 2's `on_funding_rate` dedup-and-persist path implements.
+def test_convert_stream_to_data_roundtrips_funding_rates(catalog_dir, sample_funding_rates):
+    # Arrange
+    catalog = ParquetDataCatalog(str(catalog_dir))
+    cache = TestComponentStubs.cache()
+    cache.add_instrument(TestInstrumentProvider.btcusdt_perp_binance())
+    clock = TestClock()
+
+    # A strategy-owned writer (separate from the kernel's "*" writer, which
+    # excludes FundingRateUpdate per D-01) that DOES include FundingRateUpdate.
+    writer = StreamingFeatherWriter(
+        path=f"{catalog_dir}/live/{RECORDER_INSTANCE_ID}",
+        cache=cache,
+        clock=clock,
+        fs_protocol="file",
+        include_types=[FundingRateUpdate],
+    )
+    for funding_rate in sample_funding_rates:
+        writer.write(funding_rate)
+    writer.close()
+
+    # Act
+    catalog.convert_stream_to_data(
+        instance_id=RECORDER_INSTANCE_ID,
+        data_cls=FundingRateUpdate,
+        subdirectory="live",
+    )
+    funding_rates = catalog.funding_rates(
+        instrument_ids=[str(sample_funding_rates[0].instrument_id)],
+    )
+
+    # Assert
+    assert len(funding_rates) > 0
+    assert all(isinstance(f, FundingRateUpdate) for f in funding_rates)
 
 
 def test_convert_stream_to_data_roundtrips_index_prices(catalog_dir, sample_index_prices):
