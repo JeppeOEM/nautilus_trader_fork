@@ -37,6 +37,8 @@ def _build_strategy(
     linear_instrument_ids=None,
     instrument_depths=None,
     instrument_bar_intervals=None,
+    catalog_path="catalog",
+    restart_gap_threshold_seconds=60,
 ):
     from scripts.bybit_recorder.strategy import RecorderStrategy
     from scripts.bybit_recorder.strategy import RecorderStrategyConfig
@@ -47,7 +49,7 @@ def _build_strategy(
     portfolio = Portfolio(msgbus=msgbus, cache=mock_cache, clock=clock)
 
     if instrument_depths is None:
-        instrument_depths = {instrument_id: 50 for instrument_id in instrument_ids}
+        instrument_depths = dict.fromkeys(instrument_ids, 50)
     if instrument_bar_intervals is None:
         instrument_bar_intervals = {instrument_id: ["1-MINUTE"] for instrument_id in instrument_ids}
 
@@ -56,9 +58,10 @@ def _build_strategy(
         linear_instrument_ids=linear_instrument_ids or [],
         instrument_depths=instrument_depths,
         instrument_bar_intervals=instrument_bar_intervals,
-        catalog_path="catalog",
+        catalog_path=str(catalog_path),
         instance_id_str="8f1b9c2e-1d3a-4b6c-8e7f-0a1b2c3d4e5f",
         conversion_interval_minutes=60,
+        restart_gap_threshold_seconds=restart_gap_threshold_seconds,
     )
     strategy = RecorderStrategy(config=config)
     strategy.register(
@@ -267,6 +270,221 @@ def test_on_start_subscribes_funding_rates_linear_only(mocker, mock_cache):
 
     # Assert
     funding_spy.assert_called_once_with(instrument_linear.id)
+
+
+def _seed_catalog_trade_ticks(catalog_path, instrument, last_ts_init):
+    # Seed the catalog with TradeTick rows for `instrument` whose latest ts_init
+    # is `last_ts_init`, so _log_restart_gaps can read a "last data" timestamp.
+    from nautilus_trader.persistence.catalog.parquet import ParquetDataCatalog
+    from nautilus_trader.test_kit.stubs.data import TestDataStubs
+
+    catalog = ParquetDataCatalog(str(catalog_path))
+    ticks = [
+        TestDataStubs.trade_tick(
+            instrument=instrument,
+            price=50_000.0 + i,
+            size=0.01,
+            ts_event=last_ts_init - 1_000_000_000 * (2 - i),
+            ts_init=last_ts_init - 1_000_000_000 * (2 - i),
+        )
+        for i in range(3)
+    ]
+    catalog.write_data(ticks)
+    return catalog
+
+
+def test_on_start_logs_warning_for_restart_gap_exceeding_threshold(
+    mocker,
+    mock_cache,
+    tmp_path,
+    caplog,
+):
+    # D-06 / REL-02 gap visibility: when the gap since the last recorded ts_init
+    # exceeds restart_gap_threshold_seconds, on_start logs a WARNING naming the
+    # instrument and the gap duration so restart-induced gaps are visible in journald.
+    import logging
+
+    instrument = TestInstrumentProvider.btcusdt_perp_binance()
+    mock_cache.add_instrument(instrument)
+    catalog_path = tmp_path / "catalog"
+    last_ts = 1_700_000_000_000_000_000
+    _seed_catalog_trade_ticks(catalog_path, instrument, last_ts)
+
+    threshold_s = 60
+    strategy, clock = _build_strategy(
+        mocker,
+        mock_cache,
+        [instrument.id],
+        linear_instrument_ids=[instrument.id],
+        catalog_path=catalog_path,
+        restart_gap_threshold_seconds=threshold_s,
+    )
+    # Advance the clock past the threshold relative to the last recorded ts_init.
+    clock.set_time(last_ts + int((threshold_s + 1) * 1e9))
+    mocker.patch.object(strategy, "subscribe_trade_ticks")
+    mocker.patch.object(strategy, "subscribe_quote_ticks")
+    mocker.patch.object(strategy, "subscribe_order_book_deltas")
+    mocker.patch.object(strategy, "subscribe_bars")
+    mocker.patch.object(strategy, "subscribe_mark_prices")
+    mocker.patch.object(strategy, "subscribe_index_prices")
+    mocker.patch.object(strategy, "subscribe_funding_rates")
+
+    # Act
+    with caplog.at_level(logging.WARNING, logger="scripts.bybit_recorder.strategy"):
+        strategy.on_start()
+
+    # Assert: a WARNING naming the instrument and a gap >= threshold.
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(str(instrument.id) in r.getMessage() for r in warnings)
+    assert any("gap" in r.getMessage().lower() for r in warnings)
+
+
+def test_on_start_does_not_warn_when_gap_within_threshold_or_no_prior_data(
+    mocker,
+    mock_cache,
+    tmp_path,
+    caplog,
+):
+    # D-06: no WARNING when the gap is within threshold (a), and none (no exception)
+    # when the catalog has no prior data for the instrument (b).
+    import logging
+
+    instrument = TestInstrumentProvider.btcusdt_perp_binance()
+    mock_cache.add_instrument(instrument)
+
+    # (a) Gap well under threshold.
+    catalog_path_a = tmp_path / "catalog_a"
+    last_ts = 1_700_000_000_000_000_000
+    _seed_catalog_trade_ticks(catalog_path_a, instrument, last_ts)
+    strategy_a, clock_a = _build_strategy(
+        mocker,
+        mock_cache,
+        [instrument.id],
+        linear_instrument_ids=[instrument.id],
+        catalog_path=catalog_path_a,
+        restart_gap_threshold_seconds=60,
+    )
+    clock_a.set_time(last_ts + 1)
+    for name in (
+        "subscribe_trade_ticks",
+        "subscribe_quote_ticks",
+        "subscribe_order_book_deltas",
+        "subscribe_bars",
+        "subscribe_mark_prices",
+        "subscribe_index_prices",
+        "subscribe_funding_rates",
+    ):
+        mocker.patch.object(strategy_a, name)
+
+    with caplog.at_level(logging.WARNING, logger="scripts.bybit_recorder.strategy"):
+        strategy_a.on_start()
+    assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+
+    caplog.clear()
+
+    # (b) Empty catalog — no prior ts_init for the instrument.
+    catalog_path_b = tmp_path / "catalog_b"
+    catalog_path_b.mkdir(parents=True, exist_ok=True)
+    strategy_b, clock_b = _build_strategy(
+        mocker,
+        mock_cache,
+        [instrument.id],
+        linear_instrument_ids=[instrument.id],
+        catalog_path=catalog_path_b,
+        restart_gap_threshold_seconds=60,
+    )
+    clock_b.set_time(last_ts + int(120 * 1e9))
+    for name in (
+        "subscribe_trade_ticks",
+        "subscribe_quote_ticks",
+        "subscribe_order_book_deltas",
+        "subscribe_bars",
+        "subscribe_mark_prices",
+        "subscribe_index_prices",
+        "subscribe_funding_rates",
+    ):
+        mocker.patch.object(strategy_b, name)
+
+    with caplog.at_level(logging.WARNING, logger="scripts.bybit_recorder.strategy"):
+        strategy_b.on_start()  # must not raise
+    assert not [r for r in caplog.records if r.levelno == logging.WARNING]
+
+
+def test_on_stop_runs_final_conversion_per_type(mocker, mock_cache):
+    # REL-02: on_stop() runs a final flush+convert (via _run_conversion ->
+    # _convert_finalized_feather_files per type) before the kernel closes its "*"
+    # writer. Spy on _convert_finalized_feather_files so no real filesystem write
+    # happens; assert one call per recorded type + FundingRateUpdate (7 total).
+    from nautilus_trader.model.data import Bar
+    from nautilus_trader.model.data import FundingRateUpdate as _FundingRateUpdate
+    from nautilus_trader.model.data import IndexPriceUpdate
+    from nautilus_trader.model.data import MarkPriceUpdate
+    from nautilus_trader.model.data import OrderBookDeltas
+    from nautilus_trader.model.data import QuoteTick
+    from nautilus_trader.model.data import TradeTick
+    from scripts.bybit_recorder.strategy import RecorderStrategy
+
+    # Arrange
+    strategy, _ = _build_strategy(mocker, mock_cache, [])
+    convert_spy = mocker.patch.object(RecorderStrategy, "_convert_finalized_feather_files")
+
+    # Act
+    strategy.on_stop()
+
+    # Assert: one convert call per type, in the expected order, with a catalog
+    # instance and the corresponding data_cls.
+    expected_types = [
+        TradeTick,
+        QuoteTick,
+        OrderBookDeltas,
+        Bar,
+        MarkPriceUpdate,
+        IndexPriceUpdate,
+        _FundingRateUpdate,
+    ]
+    assert convert_spy.call_count == 7
+    called_types = [call.args[1] for call in convert_spy.call_args_list]
+    assert called_types == expected_types
+
+
+def test_on_stop_flushes_funding_writer(mocker, mock_cache):
+    # REL-02 / Pitfall 1: on_stop flushes the STRATEGY-OWNED funding writer (never
+    # the kernel "*" writer). When the funding writer is None, on_stop must not raise.
+    from scripts.bybit_recorder.strategy import RecorderStrategy
+
+    # Arrange: stub the per-type convert so no real conversion runs.
+    mocker.patch.object(RecorderStrategy, "_convert_finalized_feather_files")
+    strategy, _ = _build_strategy(mocker, mock_cache, [])
+
+    # Case A: funding writer present -> flushed.
+    funding_writer = mocker.Mock()
+    strategy._funding_writer = funding_writer
+    strategy.on_stop()
+    funding_writer.flush.assert_called_once()
+
+    # Case B: funding writer None -> no raise.
+    strategy._funding_writer = None
+    strategy.on_stop()  # must not raise
+
+
+def test_on_stop_swallows_per_type_conversion_error(mocker, mock_cache):
+    # T-3-02: a transient convert error for one type must not re-raise out of the
+    # on_stop hook nor block the remaining types. With a side_effect raising for the
+    # FIRST type, on_stop still attempts all 7 types and does not raise.
+    from scripts.bybit_recorder.strategy import RecorderStrategy
+
+    # Arrange
+    strategy, _ = _build_strategy(mocker, mock_cache, [])
+    side_effects = [RuntimeError("boom")] + [None] * 6
+    convert_spy = mocker.patch.object(
+        RecorderStrategy,
+        "_convert_finalized_feather_files",
+        side_effect=side_effects,
+    )
+
+    # Act / Assert: does not raise.
+    strategy.on_stop()
+    assert convert_spy.call_count == 7
 
 
 def _funding_rate(instrument_id, rate, ts: int) -> FundingRateUpdate:

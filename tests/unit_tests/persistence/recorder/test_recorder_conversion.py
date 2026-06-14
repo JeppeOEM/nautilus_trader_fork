@@ -26,10 +26,33 @@ from nautilus_trader.persistence.catalog.parquet import ParquetDataCatalog
 from nautilus_trader.persistence.writer import StreamingFeatherWriter
 from nautilus_trader.test_kit.providers import TestInstrumentProvider
 from nautilus_trader.test_kit.stubs.component import TestComponentStubs
+from nautilus_trader.test_kit.stubs.data import TestDataStubs
+from scripts.bybit_recorder.strategy import RecorderStrategy
+from scripts.bybit_recorder.strategy import RecorderStrategyConfig
 
 
 # Hardcoded valid v4 UUID string (D-03) — same constant used by the recorder strategy.
 RECORDER_INSTANCE_ID = "8f1b9c2e-1d3a-4b6c-8e7f-0a1b2c3d4e5f"
+
+# A realistic (19-digit) base wall-clock time so feather filenames (which embed
+# `clock.timestamp_ns()` at creation) share a constant digit width and therefore
+# sort chronologically under `_list_feather_data_files`'s lexical sort (mirrors
+# `test_recorder_rotation_conversion.py`).
+_BASE_TIME_NS = 1_700_000_000_000_000_000
+
+
+def _build_strategy(catalog_dir) -> RecorderStrategy:
+    config = RecorderStrategyConfig(
+        instrument_ids=[],
+        linear_instrument_ids=[],
+        instrument_depths={},
+        instrument_bar_intervals={},
+        catalog_path=str(catalog_dir),
+        instance_id_str=RECORDER_INSTANCE_ID,
+        conversion_interval_minutes=1,
+        rotation_interval_minutes=1,
+    )
+    return RecorderStrategy(config=config)
 
 
 def test_convert_stream_to_data_roundtrips_trade_ticks(catalog_dir, sample_trade_ticks):
@@ -330,3 +353,76 @@ def test_convert_stream_to_data_roundtrips_index_prices(catalog_dir, sample_inde
     # Assert
     assert len(indices) > 0
     assert all(isinstance(i, IndexPriceUpdate) for i in indices)
+
+
+def test_restart_shaped_conversion_converts_finalized_file_without_raise(
+    catalog_dir,
+    sample_trade_ticks,
+):
+    # REL-02 restart-shaped regression (03-CONTEXT.md D-02/D-03 + the resolved
+    # non-disjoint-intervals debug note, Approach B): model TWO PROCESS STARTS
+    # against the SAME instance_id path. Process 1 writes a feather file; process 2
+    # (a NEW StreamingFeatherWriter with a strictly-later creation timestamp)
+    # finalizes process 1's file by creating its own active file. On process 2's
+    # FIRST conversion cycle, `_convert_finalized_feather_files` (files[:-1] per
+    # identifier) must convert process 1's now-finalized file IN FULL while
+    # correctly SKIPPING process 2's still-active file — no raise, no gap, no
+    # overlap, no "non-disjoint intervals" ValueError. parquet.py is NOT modified
+    # (Pitfall 2: do not re-introduce interval bookkeeping).
+    catalog = ParquetDataCatalog(str(catalog_dir))
+    cache = TestComponentStubs.cache()
+    instrument = TestInstrumentProvider.btcusdt_perp_binance()
+    cache.add_instrument(instrument)
+
+    # --- Process 1: write sample_trade_ticks, flush -> process 1's active file. ---
+    clock_p1 = TestClock()
+    clock_p1.set_time(_BASE_TIME_NS)
+    writer_p1 = StreamingFeatherWriter(
+        path=f"{catalog_dir}/live/{RECORDER_INSTANCE_ID}",
+        cache=cache,
+        clock=clock_p1,
+        fs_protocol="file",
+        include_types=[TradeTick],
+        flush_interval_ms=0,
+    )
+    for tick in sample_trade_ticks:
+        writer_p1.write(tick)
+    writer_p1.flush()
+
+    # --- Process 2: a NEW writer against the SAME path with a strictly-later
+    # creation timestamp. Creating it stamps a new filename, finalizing process
+    # 1's file. Write 3 more strictly-later ticks to process 2's active file. ---
+    clock_p2 = TestClock()
+    clock_p2.set_time(_BASE_TIME_NS + 70_000_000_000)
+    writer_p2 = StreamingFeatherWriter(
+        path=f"{catalog_dir}/live/{RECORDER_INSTANCE_ID}",
+        cache=cache,
+        clock=clock_p2,
+        fs_protocol="file",
+        include_types=[TradeTick],
+        flush_interval_ms=0,
+    )
+    base_ts = sample_trade_ticks[-1].ts_init
+    for i in range(3):
+        ts = base_ts + 1_000_000_000 * (i + 1)
+        writer_p2.write(
+            TestDataStubs.trade_tick(
+                instrument=instrument,
+                price=60_000.0 + i,
+                size=0.01,
+                ts_event=ts,
+                ts_init=ts,
+            ),
+        )
+    writer_p2.flush()
+
+    # --- Process 2's first conversion cycle. ---
+    strategy = _build_strategy(catalog_dir)
+    strategy._convert_finalized_feather_files(catalog, TradeTick)
+
+    # Assert: process 1's finalized file converted in full (exactly its row count);
+    # process 2's still-active file correctly skipped (no premature conversion, no
+    # data loss for the finalized file, no non-disjoint raise).
+    trades = catalog.trade_ticks(instrument_ids=[str(sample_trade_ticks[0].instrument_id)])
+    assert len(trades) == len(sample_trade_ticks)
+    assert all(isinstance(t, TradeTick) for t in trades)
