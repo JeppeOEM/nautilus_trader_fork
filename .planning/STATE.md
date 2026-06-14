@@ -3,9 +3,9 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: verifying
-stopped_at: Phase 3 replan complete (03-RESEARCH.md + 03-01-PLAN.md amended for Approach B + gap-log D-06)
-last_updated: "2026-06-14T19:18:53.600Z"
-last_activity: 2026-06-14 -- Phase 03 Plan 01 (Wave 1) complete and merged
+stopped_at: Phase 3 verification found 1 gap (CR-01/REL-02 unguarded on_stop conversion); run /gsd:plan-phase 03 --gaps next
+last_updated: "2026-06-14T19:45:00.000Z"
+last_activity: 2026-06-14 -- Phase 03 fully executed (Waves 1+2 merged), code-reviewed, verified with gaps_found
 progress:
   total_phases: 5
   completed_phases: 3
@@ -25,10 +25,10 @@ See: .planning/PROJECT.md (updated 2026-06-13)
 
 ## Current Position
 
-Phase: 03 (reliability-for-24-7-operation) — EXECUTING
-Plan: 2 of 2
-Status: Phase complete — ready for verification
-Last activity: 2026-06-14 -- Phase 03 Plan 01 (Wave 1) complete and merged
+Phase: 03 (reliability-for-24-7-operation) — VERIFYING (gaps_found)
+Plan: 2 of 2 complete; gap-closure plan needed before phase can be marked done
+Status: Both waves merged, code review + verification done. 1 gap open (see Pending Todos).
+Last activity: 2026-06-14 -- Phase 03 fully executed (Waves 1+2 merged), code-reviewed, verified with gaps_found
 
 Progress: [██████████] 100% (of Phases 1-2; milestone has 5 phases total)
 
@@ -88,7 +88,8 @@ Recent decisions affecting current work:
 
 ### Pending Todos
 
-None yet.
+- [Phase 3]: Gap-closure for 03-VERIFICATION.md (status=gaps_found, 6/7 must-haves). CR-01 from 03-REVIEW.md: `_run_conversion()` in `scripts/bybit_recorder/strategy.py` (~lines 452-459) has an unguarded `ParquetDataCatalog(self.config.catalog_path)` construction and an unguarded `self._funding_writer.flush()` call OUTSIDE the per-type try/except that protects the rest of the function. If either raises during `on_stop()` (SIGTERM), the exception propagates and faults the strategy component mid-shutdown, undermining REL-02's "no data loss on restart" guarantee. Fix: wrap catalog construction in try/except (log + return early on failure); wrap `self._funding_writer.flush()` in its own try/except (log + continue), matching the existing per-type swallow pattern just below. Next step: `/gsd:plan-phase 03 --gaps` to create the gap-closure plan, then re-run execute-phase.
+- [Phase 3, lower priority]: WR-01 from 03-REVIEW.md: `restart_gap_threshold_seconds` (config.py ~line 287) lacks the same fail-fast `> 0` validation applied to `heartbeat_interval_seconds`/`stale_threshold_*`. A `0`/negative value silently passes through and triggers a restart-gap WARNING on nearly every startup. Worth fixing alongside the CR-01 gap-closure.
 
 ### Blockers/Concerns
 
