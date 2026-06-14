@@ -49,7 +49,7 @@ def _build_strategy(
     portfolio = Portfolio(msgbus=msgbus, cache=mock_cache, clock=clock)
 
     if instrument_depths is None:
-        instrument_depths = {instrument_id: 50 for instrument_id in instrument_ids}
+        instrument_depths = dict.fromkeys(instrument_ids, 50)
     if instrument_bar_intervals is None:
         instrument_bar_intervals = {instrument_id: ["1-MINUTE"] for instrument_id in instrument_ids}
 
