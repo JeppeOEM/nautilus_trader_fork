@@ -43,7 +43,7 @@ decisions:
 metrics:
   duration: ~30min
   completed: 2026-06-14
-  tasks_completed: 3
+  tasks_completed: 4
   tasks_total: 4
   files_changed: 6
 ---
@@ -101,9 +101,24 @@ This worktree did not contain the compiled Nautilus `.so` artifacts (gitignored,
 
 ## Checkpoint Status
 
-Task 4 is a `checkpoint:human-verify` (gate="blocking") — a live Bybit mainnet integration proof (same-day SIGTERM restart no-loss + gap-log WARNING on restart + forced-disconnect auto-resume). It cannot be unit-tested and was NOT auto-approved per the plan instruction. Awaiting human verification.
+Task 4 (`checkpoint:human-verify`, gate="blocking") — **approved**. Verified live against real Bybit mainnet (public market data, no API credentials required) using a scratch catalog (`/tmp/bybit_verify/catalog`), subscribing to `BTCUSDT-LINEAR.BYBIT` and `ETHUSDT-SPOT.BYBIT` across 9 data streams (trades, quotes, order book deltas, bars, funding rate, mark/index price), with `restart_gap_threshold_seconds = 5` and `conversion_interval_minutes = 1`.
+
+**Session 1** (18:53:36–18:58:13Z, ~4.5min): all 9 streams subscribed, all `StreamingFeatherWriter` instances created, periodic conversion ran with nothing to convert (expected — nothing finalized yet). Clean SIGTERM.
+
+**Session 2** (started 18:58:48Z, 8s after session 1's stop): no gap-log line (correctly skipped — no prior catalog data exists yet to compare against, per `_log_restart_gaps`'s "no prior data, don't warn" branch). ~80s in, the periodic conversion converted all 14 of session 1's now-finalized feather files into parquet across both instruments and all data types (verified via `find /tmp/bybit_verify/catalog -iname "*.parquet"`), ending at `2026-06-14T18-58-13...Z` — matching session 1's stop time exactly, confirming no data loss across the restart and no `non-disjoint intervals` error (REL-02, Approach B). Clean SIGTERM.
+
+**Session 3** (started 19:00:49Z, ~160s after session 2's stop): `_log_restart_gaps()` fired the expected WARNING for both instruments (D-06):
+```
+Resuming after gap of 160.7s for BTCUSDT-LINEAR.BYBIT (last data: 2026-06-14 18:58:13.533673930)
+Resuming after gap of 160.7s for ETHUSDT-SPOT.BYBIT (last data: 2026-06-14 18:58:13.505630547)
+```
+This is a plain `logger.warning()` (Python stdlib `logging`, module-level `logger = logging.getLogger(__name__)`), so it lacks the colored Rust-native log prefix but is still journald-greppable as intended. No errors on clean SIGTERM exit.
+
+**REL-04 (forced-disconnect auto-resume):** the plan's 4th verification step (kill network mid-session, confirm adapter-driven auto-resubscribe) was assessed as too risky to perform via live network manipulation in this shared sandbox. Per explicit user decision, this is treated as satisfied by Task 2's existing structural proof: `grep -rniE "reconnect|resubscribe" scripts/bybit_recorder/` (excluding comments) is empty — the recorder has zero custom reconnect/resubscribe code, so reconnection is fully owned by the Bybit adapter in unmodified `nautilus_trader/` core.
+
+Scratch verification artifacts (`/tmp/bybit_verify/`) are outside the repo and not part of any commit.
 
 ## Self-Check: PASSED
 
 - Files: all 6 plan files present (verified on disk).
-- Commits: all 6 commits present in `git log 728ac54..HEAD` (0ff488d7e4, f12a2b4386, b26e50e79b, 5faa32f81b, e22a6f064c, d500b0618e).
+- Commits: all 6 commits present in `git log 728ac54..HEAD` (0ff488d7e4, f12a2b4386, b26e50e79b, 5faa32f81b, e22a6f064c, d500b0618e), plus this Task 4 documentation commit.
