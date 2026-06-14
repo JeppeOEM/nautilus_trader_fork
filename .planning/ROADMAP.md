@@ -54,7 +54,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Plans**: 2 plans
 **Wave 1**
 
-- [ ] 02-01-PLAN.md — Record quotes, order-book deltas, bars, and mark/index prices (5 auto-written types) with fail-fast depth validation
+- [x] 02-01-PLAN.md — Record quotes, order-book deltas, bars, and mark/index prices (5 auto-written types) with fail-fast depth validation
 
 **Wave 2** *(blocked on Wave 1 completion)*
 
@@ -111,7 +111,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Bootstrap, Config & End-to-End Slice | 4/4 | Complete   | 2026-06-13 |
-| 2. Full Data-Type Coverage | 0/2 | In progress | - |
+| 2. Full Data-Type Coverage | 1/2 | In Progress|  |
 | 3. Reliability for 24/7 Operation | 0/TBD | Not started | - |
 | 4. Open Interest Spike | 0/TBD | Not started | - |
 | 5. Inspection & Deployment | 0/TBD | Not started | - |
