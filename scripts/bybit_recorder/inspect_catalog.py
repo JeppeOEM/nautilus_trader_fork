@@ -12,7 +12,7 @@ from nautilus_trader.model.data import IndexPriceUpdate, MarkPriceUpdate
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
-catalog = ParquetDataCatalog("catalog")
+catalog = ParquetDataCatalog("catalog/streaming")
 
 linear_id = InstrumentId.from_str("BTCUSDT-LINEAR.BYBIT")
 spot_id = InstrumentId.from_str("ETHUSDT-SPOT.BYBIT")
