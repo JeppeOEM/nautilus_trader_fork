@@ -54,7 +54,10 @@ def test_load_recorder_config_parses_depth_and_bar_intervals(tmp_path, sample_to
     recorder_cfg, _ = load_recorder_config(toml_path)
 
     # Assert
-    assert all(entry.depth == 50 and entry.bar_intervals == ["1-MINUTE"] for entry in recorder_cfg.instruments)
+    assert all(
+        entry.depth == 50 and entry.bar_intervals == ["1-MINUTE"]
+        for entry in recorder_cfg.instruments
+    )
 
 
 def test_build_streaming_config_uses_scheduled_dates_daily_rotation(tmp_path, sample_toml):

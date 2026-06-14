@@ -88,6 +88,14 @@ def main(config_path: str) -> None:
 
     strategy_cfg = RecorderStrategyConfig(
         instrument_ids=instrument_ids,
+        # D-04 linear-only gating for mark/index price subscriptions.
+        linear_instrument_ids=recorder_cfg.linear_instrument_ids,
+        # Per-instrument depth and bar intervals carried from the parsed entries
+        # so the strategy can issue order-book and bar subscriptions.
+        instrument_depths={entry.id: entry.depth for entry in recorder_cfg.instruments},
+        instrument_bar_intervals={
+            entry.id: entry.bar_intervals for entry in recorder_cfg.instruments
+        },
         # CRITICAL: must equal the catalog_path used in build_streaming_config so
         # conversion finds feather under {root}/live/{instance_id}/ (Pitfall 5/A4).
         catalog_path=recorder_cfg.streaming_path,
