@@ -490,6 +490,44 @@ def test_on_stop_swallows_per_type_conversion_error(mocker, mock_cache):
     assert convert_spy.call_count == 7
 
 
+def test_on_stop_swallows_catalog_construction_error(mocker, mock_cache):
+    # CR-01 / T-3-01: if ParquetDataCatalog(...) construction raises during
+    # _run_conversion (e.g. transient filesystem error on SIGTERM), on_stop()
+    # must not raise, and the per-type convert loop must NOT be reached (early
+    # return -- nothing to convert into without a catalog).
+    from scripts.bybit_recorder.strategy import RecorderStrategy
+
+    # Arrange
+    strategy, _ = _build_strategy(mocker, mock_cache, [])
+    convert_spy = mocker.patch.object(RecorderStrategy, "_convert_finalized_feather_files")
+    mocker.patch(
+        "scripts.bybit_recorder.strategy.ParquetDataCatalog",
+        side_effect=RuntimeError("boom"),
+    )
+
+    # Act / Assert: does not raise.
+    strategy.on_stop()
+    assert convert_spy.call_count == 0
+
+
+def test_on_stop_swallows_funding_writer_flush_error(mocker, mock_cache):
+    # CR-01 / T-3-01: if the strategy-owned funding writer's flush() raises
+    # during _run_conversion, on_stop() must not raise, and the per-type
+    # convert loop must still run for all 7 types.
+    from scripts.bybit_recorder.strategy import RecorderStrategy
+
+    # Arrange
+    strategy, _ = _build_strategy(mocker, mock_cache, [])
+    convert_spy = mocker.patch.object(RecorderStrategy, "_convert_finalized_feather_files")
+    funding_writer = mocker.Mock()
+    funding_writer.flush.side_effect = RuntimeError("boom")
+    strategy._funding_writer = funding_writer
+
+    # Act / Assert: does not raise.
+    strategy.on_stop()
+    assert convert_spy.call_count == 7
+
+
 def _funding_rate(instrument_id, rate, ts: int) -> FundingRateUpdate:
     return FundingRateUpdate(
         instrument_id=instrument_id,
