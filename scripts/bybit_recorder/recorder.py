@@ -27,6 +27,7 @@ from nautilus_trader.config import LoggingConfig
 from nautilus_trader.config import TradingNodeConfig
 from nautilus_trader.core.uuid import UUID4
 from nautilus_trader.live.node import TradingNode
+from nautilus_trader.model.identifiers import ClientId
 from nautilus_trader.model.identifiers import TraderId
 from scripts.bybit_recorder.config import build_streaming_config
 from scripts.bybit_recorder.config import load_recorder_config
@@ -108,12 +109,34 @@ def main(config_path: str) -> None:
         heartbeat_interval_seconds=recorder_cfg.heartbeat_interval_seconds,
         stale_threshold_default_seconds=recorder_cfg.stale_threshold_default_seconds,
         stale_threshold_seconds=recorder_cfg.stale_threshold_seconds,
+        # HOT-01 / D-08: lifetime hot-add WARNING threshold (informational).
+        max_hot_added_instruments=recorder_cfg.max_hot_added_instruments,
+        # HOT-01 / D-01: the absolute toml path `_on_config_reload` re-reads each
+        # poll to diff against the running subscription set. Pass the same path the
+        # recorder was launched with so the reload sees the operator's live edits.
+        reload_config_path=str(config_path),
     )
 
     node = TradingNode(config=config_node)
-    node.trader.add_strategy(RecorderStrategy(config=strategy_cfg))
+    strategy = RecorderStrategy(config=strategy_cfg)
+    node.trader.add_strategy(strategy)
     node.add_data_client_factory(BYBIT, BybitLiveDataClientFactory)
     node.build()
+
+    # HOT-01 / Pattern 3: inject the live Bybit data client into the strategy so
+    # its config-reload ADD branch can load a brand-new instrument at runtime via
+    # `client.instrument_provider`.
+    #
+    # WHY the private `_clients` registry: `Actor.request_instrument()` is the
+    # public path for runtime instrument loading, but the Bybit live data client
+    # does NOT implement it — `nautilus_trader/live/data_client.py:1099` raises
+    # NotImplementedError (Pitfall 1). The verified fallback reaches the client's
+    # `instrument_provider` directly. There is no public `DataEngine.get_client`;
+    # the registry is the private `_clients` dict (engine.pyx), reached via the
+    # public `node.kernel.data_engine` property. This wiring stays entirely in
+    # scripts/bybit_recorder/ — no core edit.
+    data_client = node.kernel.data_engine._clients[ClientId(BYBIT)]
+    strategy.set_data_client(data_client)
 
     try:
         # WHY: raise_exception=True so an on_start failure (e.g. missing
