@@ -359,17 +359,21 @@ for interval in added:
 | A3 | Scheduling `provider.load_async` onto the running live event loop from the synchronous `clock` timer callback (via `provider.load(id)` sync wrapper or `data_client.create_task`) executes correctly without blocking the single-threaded strategy loop. | Pattern 3 (async note) | If the load blocks or races the subscribe, new-instrument data may be missed on first poll — covered by the human-verify smoke. |
 | A4 | Default `max_hot_added_instruments` of 50 is "sensible" for this collector. | Open Question 1 | Purely informational WARNING (D-08 never blocks); wrong default only changes when an info-WARNING fires. Low risk. |
 
-## Open Questions
+## Open Questions (RESOLVED)
+
+> Both discretion items below were given a concrete recommendation during research and ACCEPTED AS FINAL before planning. The plans (06-01, 06-02) implement exactly these resolved decisions. Nothing in this section remains open.
 
 1. **Default value & key name for the D-08 instrument-count WARNING threshold.**
    - What we know: must be a new `recorder.toml` key, validated `> 0` like siblings, default chosen by Claude, WARNING-only (never blocks).
    - What's unclear: a "right" number is operator-dependent.
    - Recommendation: key `max_hot_added_instruments`, default `50`. Rationale: a single-process collector multiplexing all subscriptions over one WS connection; tens of hot-adds over a lifetime is normal, hundreds suggests config thrash worth flagging. Add the field to `RecorderStrategyConfig` (`PositiveInt = 50`) and `RecorderConfig`, validated in `load_recorder_config` with the existing `<= 0` raise pattern, and threaded through `recorder.py`.
+   - **RESOLVED:** Accepted as final — key `max_hot_added_instruments`, default `50`, `PositiveInt`, fail-fast `> 0` validation. This is the locked decision used for planning; Plan 06-01 Task 1 adds the knob exactly as recommended and 06-02 threads it through `recorder.py`. No alternative remains under consideration.
 
 2. **Exact event-loop invocation for the runtime provider load (sync timer → async load).**
    - What we know: timer callback is sync; `load_async` is a coroutine; the Bybit client owns the live loop; `providers.py:244 load()` is a sync wrapper that schedules a task on the running loop.
    - What's unclear: whether to use `provider.load(id)` (fire-and-forget task; subscribe must then happen in a follow-up poll once `find(id)` is non-None) or `data_client.create_task(...)` with an explicit completion that does cache.add + subscribe.
    - Recommendation: use the two-phase approach — poll N schedules the load; poll N+1 (or a completion callback) sees the instrument in `provider.find(id)`/`cache`, then subscribes (naturally satisfies D-10's "wait until confirmed"). Pin the exact call in the plan and verify in smoke.
+   - **RESOLVED:** Accepted as final — the two-phase poll-N (schedule via the synchronous `provider.load(id)` wrapper, `providers.py:244`) / poll-N+1 (confirm via `provider.find(id)`, then `cache.add_instrument` + `_cache_instruments` + subscribe) approach is the locked decision used for planning. A `_pending_loads` set distinguishes "in-flight" from "resolved-empty" (D-11). Plan 06-02 implements exactly this; the live human-verify smoke confirms the loop invocation (A3) and additive cache (A1). No alternative remains under consideration.
 
 ## Environment Availability
 
