@@ -128,15 +128,19 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | 3. Reliability for 24/7 Operation | 3/3 | Complete    | 2026-06-15 |
 | 4. Open Interest Spike | 0/TBD | Not started | - |
 | 5. Inspection & Deployment | 0/TBD | Not started | - |
-| 6. Hot-Reload Config Changes | 0/TBD | Not started | - |
+| 6. Hot-Reload Config Changes | 0/2 | Not started | - |
 
 ### Phase 6: Hot-Reload Config Changes
 
 **Goal:** While the recorder is running, periodically detect changes to `recorder.toml`'s instrument list and parameters — additions, removals, and depth/bar_interval changes for existing instruments — and apply them live: load new instruments via the instrument provider and subscribe to the same data feeds (trades, quotes, order book deltas, bars, and for linear instruments mark/index/funding) used for existing instruments, unsubscribe feeds for removed instruments, and clean-swap subscriptions for changed parameters — all without restarting the process or disrupting recording for unaffected instruments.
 **Requirements**: HOT-01
 **Depends on:** Phase 5
-**Plans:** 0 plans
+**Plans:** 2 plans
 
-Plans:
+**Wave 1**
 
-- [ ] TBD (run /gsd-plan-phase 6 to break down)
+- [ ] 06-01-PLAN.md — Config-reload timer + diff engine + REMOVAL/PARAM-CHANGE branches + `max_hot_added_instruments` knob (D-01/D-02/D-03/D-05/D-06/D-08) + unit tests
+
+**Wave 2** *(blocked on Wave 1 — shares strategy.py)*
+
+- [ ] 06-02-PLAN.md — ADDITION branch: runtime instrument load (Pattern 3 / D-09 fallback, D-10), failure tracking (D-07/D-11), data-client injection wiring, + live mainnet hot-add smoke
