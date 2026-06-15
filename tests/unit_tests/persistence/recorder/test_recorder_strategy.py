@@ -604,11 +604,17 @@ def _write_recorder_toml(
     linear_depth=50,
     spot_depth=50,
     heartbeat_interval_seconds=None,
+    restart_gap_threshold_seconds=None,
 ):
     config_path = tmp_path / "recorder.toml"
     heartbeat_line = (
         f"heartbeat_interval_seconds = {heartbeat_interval_seconds}\n"
         if heartbeat_interval_seconds is not None
+        else ""
+    )
+    restart_gap_line = (
+        f"restart_gap_threshold_seconds = {restart_gap_threshold_seconds}\n"
+        if restart_gap_threshold_seconds is not None
         else ""
     )
     config_path.write_text(
@@ -618,7 +624,7 @@ trader_id = "BYBIT-COLLECTOR-001"
 catalog_path = "catalog"
 streaming_path = "catalog/streaming"
 conversion_interval_minutes = 60
-{heartbeat_line}environment = "mainnet"
+{heartbeat_line}{restart_gap_line}environment = "mainnet"
 
 [[instruments.linear]]
 id = "BTCUSDT-LINEAR.BYBIT"
@@ -818,3 +824,16 @@ def test_load_recorder_config_accepts_default_heartbeat_config(tmp_path):
     assert recorder_cfg.heartbeat_interval_seconds == 30
     assert recorder_cfg.stale_threshold_default_seconds == 90
     assert recorder_cfg.stale_threshold_seconds == {}
+
+
+def test_load_recorder_config_rejects_nonpositive_restart_gap_threshold(tmp_path):
+    # WR-01 / T-3-05 (V5 fail-fast): a non-positive restart_gap_threshold_seconds
+    # must raise ValueError echoing the field name, mirroring the existing
+    # heartbeat-interval validation. A 0/negative value would invert the
+    # intended restart-gap-warning behavior (fire on every restart).
+    from scripts.bybit_recorder.config import load_recorder_config
+
+    config_path = _write_recorder_toml(tmp_path, restart_gap_threshold_seconds=0)
+
+    with pytest.raises(ValueError, match=r"restart_gap_threshold_seconds"):
+        load_recorder_config(config_path)
