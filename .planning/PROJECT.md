@@ -8,6 +8,18 @@ A Python live data collector built on NautilusTrader's `TradingNode`/`Strategy` 
 
 Reliable, continuous capture of Bybit market data into a Nautilus-catalog-compatible parquet archive — so the data can be loaded directly into backtests or analyzed in pandas, with no data loss across restarts/disconnects.
 
+## Current Milestone: v1.1 dYdX Data Collector
+
+**Goal:** Extend the recorder to capture dYdX perpetuals market data into the same `ParquetDataCatalog`, sharing infrastructure with the Bybit recorder.
+
+**Target features:**
+- Config-driven dYdX recorder (perpetual instruments, depth, bar intervals)
+- Record trades, quotes (synthesized top-of-book), order book deltas, bars, funding rate, mark/index price for configured dYdX perpetuals
+- Extract shared exchange-agnostic infra (catalog conversion, hot-reload, heartbeat/reliability) into a common module reused by both recorders
+- 24/7 reliability parity with Bybit recorder (reconnect, graceful shutdown, stale-stream heartbeats)
+
+**Out of scope for v1.1:** dYdX spot (doesn't exist on dYdX v4), open interest (not supported by dYdX adapter)
+
 ## Requirements
 
 ### Validated
@@ -27,6 +39,9 @@ Reliable, continuous capture of Bybit market data into a Nautilus-catalog-compat
 - [ ] A pandas-based utility can load and view slices of the catalog for data inspection
 - [ ] systemd unit file provided for process supervision with auto-restart
 - [ ] Detailed deployment/run guide documenting setup, configuration, starting/stopping, and monitoring via journald
+- [ ] Shared exchange-agnostic recorder infra (catalog conversion, hot-reload, heartbeat/reliability) extracted into a common module
+- [ ] dYdX recorder records trades, quotes, order book deltas, bars, funding rate, and mark/index price for configured perpetual instruments
+- [ ] dYdX recorder has 24/7 reliability parity with the Bybit recorder (reconnect, graceful shutdown, stale-stream heartbeats)
 
 ### Out of Scope
 
@@ -35,11 +50,14 @@ Reliable, continuous capture of Bybit market data into a Nautilus-catalog-compat
 - Options market data — only linear perpetuals (USDT) and spot are in scope
 - Inverse perpetuals — only linear perpetuals (USDT) and spot are in scope
 - Auto-discovery / "all instruments" / top-N selection — user provides an explicit configurable instrument list
+- dYdX spot market data — dYdX v4 has no spot market
+- dYdX open interest — not supported by the existing dYdX adapter's data client
 
 ## Context
 
 - This is a fork of NautilusTrader (Rust-native, multi-asset, multi-venue trading engine with Python bindings)
 - A Bybit adapter already exists at `crates/adapters/bybit` (WebSocket protocol, API key/secret auth)
+- A dYdX adapter already exists at `nautilus_trader/adapters/dydx/` (data client supports trades, quotes synthesized from top-of-book, order book deltas, bars, funding rates, mark/index prices; no open interest)
 - A similar pattern exists at `examples/live/bybit/bybit_options_data_collector.py` — a `Strategy`-based data collector for Bybit options/spot, but it writes custom pandas-based parquet files rather than the official `ParquetDataCatalog` format. This project follows the same general strategy-based approach but targets linear perps + spot, captures more data types, and writes catalog-compatible parquet.
 - Bybit's WebSocket allows multiplexing many topic subscriptions per connection; the adapter manages connection/topic allocation internally, so a single process can handle 10+ instruments across multiple data types.
 
@@ -79,4 +97,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-06-15 after Phase 3 completion*
+*Last updated: 2026-06-15 after starting milestone v1.1 (dYdX Data Collector)*

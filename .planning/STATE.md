@@ -1,17 +1,16 @@
 ---
 gsd_state_version: 1.0
-milestone: v1.0
-milestone_name: milestone
-status: executing
-stopped_at: Phase 6 complete; HOT-01 live mainnet hot-add smoke passed
-last_updated: "2026-06-15T19:05:00.000Z"
-last_activity: 2026-06-15 -- Phase 06 Wave 1 + Wave 2 (Tasks 1-4) executed and merged; live mainnet hot-add smoke PASSED, HOT-01 complete
+milestone: v1.1
+milestone_name: dYdX Data Collector
+status: planning
+last_updated: "2026-06-15T19:23:31.696Z"
+last_activity: 2026-06-15
 progress:
-  total_phases: 6
-  completed_phases: 3
-  total_plans: 11
-  completed_plans: 11
-  percent: 50
+  total_phases: 0
+  completed_phases: 0
+  total_plans: 0
+  completed_plans: 0
+  percent: 0
 ---
 
 # Project State
@@ -25,12 +24,10 @@ See: .planning/PROJECT.md (updated 2026-06-13)
 
 ## Current Position
 
-Phase: 06 (hot-reload-new-instruments) — COMPLETE
-Plan: 2 of 2 (both code-complete and merged; 06-02 Task 4 live mainnet smoke PASSED 2026-06-15)
-Status: Phase 06 fully complete. HOT-01 marked complete in REQUIREMENTS.md.
-Last activity: 2026-06-15 -- Phase 06 Wave 1 + Wave 2 executed, merged to gg; live mainnet hot-add smoke run against real Bybit mainnet (no API credentials needed), confirmed two-phase load+subscribe of a newly added LINEAR instrument across config-reload polls, continuity of pre-existing instruments' recording, and streaming writers/files for all 7 feeds of the new instrument
-
-Progress: [██████████] 100% (of Phases 1-2; milestone has 5 phases total)
+Phase: Not started (defining requirements)
+Plan: —
+Status: Defining requirements
+Last activity: 2026-06-15 — Milestone v1.1 started
 
 ## Performance Metrics
 
