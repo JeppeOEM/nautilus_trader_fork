@@ -42,6 +42,9 @@ def _build_strategy(
     instrument_bar_intervals=None,
     catalog_path="catalog",
     restart_gap_threshold_seconds=60,
+    reload_config_path=None,
+    max_hot_added_instruments=50,
+    data_client=None,
 ):
     from scripts.bybit_recorder.strategy import RecorderStrategy
     from scripts.bybit_recorder.strategy import RecorderStrategyConfig
@@ -65,6 +68,8 @@ def _build_strategy(
         instance_id_str="8f1b9c2e-1d3a-4b6c-8e7f-0a1b2c3d4e5f",
         conversion_interval_minutes=60,
         restart_gap_threshold_seconds=restart_gap_threshold_seconds,
+        max_hot_added_instruments=max_hot_added_instruments,
+        reload_config_path=reload_config_path,
     )
     strategy = RecorderStrategy(config=config)
     strategy.register(
@@ -74,6 +79,8 @@ def _build_strategy(
         cache=mock_cache,
         clock=clock,
     )
+    if data_client is not None:
+        strategy.set_data_client(data_client)
     return strategy, clock
 
 

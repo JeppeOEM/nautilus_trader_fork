@@ -106,6 +106,12 @@ class RecorderConfig(NautilusConfig, frozen=True):
         How often the heartbeat timer fires (REL-03). Each firing logs an INFO
         heartbeat and a WARNING for any stream whose idle time exceeds its
         per-data-type stale threshold.
+    max_hot_added_instruments : PositiveInt, default 50
+        The maximum number of instruments that may be hot-added over the
+        recorder's lifetime before a WARNING is logged (HOT-01 / D-08). This is
+        informational only — it NEVER blocks further hot-adds — but surfaces
+        runaway config thrash. Validated `> 0` at load like its sibling
+        thresholds.
     stale_threshold_default_seconds : PositiveInt, default 90
         The fallback stale threshold (in seconds) for any stream label not
         present in `stale_threshold_seconds` (REL-03).
@@ -126,6 +132,7 @@ class RecorderConfig(NautilusConfig, frozen=True):
     rotation_interval_minutes: PositiveInt = 1440
     restart_gap_threshold_seconds: PositiveInt = 60
     heartbeat_interval_seconds: PositiveInt = 30
+    max_hot_added_instruments: PositiveInt = 50
     stale_threshold_default_seconds: PositiveInt = 90
     stale_threshold_seconds: dict[str, int] = {}
     environment: str = "mainnet"
@@ -257,6 +264,7 @@ def load_recorder_config(path: str | Path) -> tuple[RecorderConfig, list[Instrum
     stale_threshold_default_seconds = recorder_raw.get("stale_threshold_default_seconds", 90)
     stale_threshold_seconds = recorder_raw.get("stale_threshold_seconds", {})
     restart_gap_threshold_seconds = recorder_raw.get("restart_gap_threshold_seconds", 60)
+    max_hot_added_instruments = recorder_raw.get("max_hot_added_instruments", 50)
 
     # V5 fail-fast (T-3-05 DoS-of-logs mitigation): an absurd interval/threshold
     # would either spam logs (too small) or never warn (too large/negative), so
@@ -285,6 +293,11 @@ def load_recorder_config(path: str | Path) -> tuple[RecorderConfig, list[Instrum
             "must be positive",
         )
 
+    if max_hot_added_instruments <= 0:
+        raise ValueError(
+            f"Invalid max_hot_added_instruments {max_hot_added_instruments}: must be positive",
+        )
+
     recorder_cfg = RecorderConfig(
         trader_id=recorder_raw["trader_id"],
         catalog_path=_resolve_catalog_path(recorder_raw["catalog_path"]),
@@ -293,6 +306,7 @@ def load_recorder_config(path: str | Path) -> tuple[RecorderConfig, list[Instrum
         rotation_interval_minutes=recorder_raw.get("rotation_interval_minutes", 1440),
         restart_gap_threshold_seconds=restart_gap_threshold_seconds,
         heartbeat_interval_seconds=heartbeat_interval_seconds,
+        max_hot_added_instruments=max_hot_added_instruments,
         stale_threshold_default_seconds=stale_threshold_default_seconds,
         stale_threshold_seconds=stale_threshold_seconds,
         environment=recorder_raw.get("environment", "mainnet"),

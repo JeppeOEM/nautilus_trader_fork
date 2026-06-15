@@ -36,6 +36,8 @@ from nautilus_trader.persistence.writer import RotationMode
 from nautilus_trader.persistence.writer import StreamingFeatherWriter
 from nautilus_trader.trading.strategy import Strategy
 
+from scripts.bybit_recorder.config import load_recorder_config
+
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +93,18 @@ class RecorderStrategyConfig(StrategyConfig, frozen=True):
     heartbeat_interval_seconds : PositiveInt, default 30
         How often the heartbeat timer fires (REL-03). Each firing logs an INFO
         heartbeat and a WARNING for any stream whose idle time exceeds its
-        per-data-type stale threshold.
+        per-data-type stale threshold. The ``config-reload`` timer (HOT-01) reuses
+        this same cadence (D-02).
+    max_hot_added_instruments : PositiveInt, default 50
+        The maximum number of instruments that may be hot-added over the
+        recorder's lifetime before a WARNING is logged (HOT-01 / D-08).
+        Informational only — never blocks further hot-adds.
+    reload_config_path : str | None, default None
+        The absolute path to ``recorder.toml`` that ``_on_config_reload`` re-reads
+        each poll to diff against the running subscription set (HOT-01 / D-01).
+        When ``None`` the reload callback is a logged no-op (the timer is still
+        registered); the wiring of this value from ``recorder.py`` lands in
+        Plan 02.
     stale_threshold_seconds : dict[str, int], default {}
         Per-stream-label stale thresholds (in seconds), keyed by the labels used
         in `_last_seen` (e.g. ``"trade"``, ``"quote"``, ``"deltas"``, ``"bar"``,
@@ -113,6 +126,8 @@ class RecorderStrategyConfig(StrategyConfig, frozen=True):
     rotation_interval_minutes: PositiveInt = 1440
     restart_gap_threshold_seconds: PositiveInt = 60
     heartbeat_interval_seconds: PositiveInt = 30
+    max_hot_added_instruments: PositiveInt = 50
+    reload_config_path: str | None = None
     stale_threshold_seconds: dict[str, int] = {}
     stale_threshold_default_seconds: PositiveInt = 90
 
@@ -148,6 +163,47 @@ class RecorderStrategy(Strategy):
         # funding rate so `self.cache`/`self.clock` are available (set during
         # `register`, not `__init__`).
         self._funding_writer: StreamingFeatherWriter | None = None
+
+        # --- Hot-reload (HOT-01) bookkeeping (RESEARCH Pattern 2) ---------------
+        # What params each instrument is currently subscribed at -- drives the
+        # depth/bar-interval swap detection in `_diff_config` (depth, bar_intervals).
+        self._subscribed_params: dict[InstrumentId, tuple[int, frozenset[str]]] = {}
+        # Product type ("linear"/"spot") per currently-subscribed instrument, so a
+        # REMOVAL can gate the linear-only mark/index/funding unsubscribes
+        # (Pitfall 5) without re-deriving from a config that no longer lists the id.
+        self._product_types: dict[InstrumentId, str] = {}
+        # Instrument ids that failed to load/validate for the CURRENT toml snapshot
+        # (D-07/D-11) -- not re-attempted until the toml changes. Consumed by the
+        # Plan 02 ADDITION branch.
+        self._failed_instrument_ids: set[InstrumentId] = set()
+        # Stable signature of the last-seen parsed config; `_failed_instrument_ids`
+        # is reset whenever this changes (D-07: only re-attempt on toml change).
+        self._last_config_signature: int | None = None
+        # Count of instruments hot-added over the process lifetime (D-08 threshold).
+        self._hot_added_count: int = 0
+        # Reference to the live Bybit data client, injected by Plan 02's
+        # `set_data_client` for the runtime instrument load (Pattern 3). Unused in
+        # this plan (additions are a no-op placeholder here).
+        self._bybit_client = None
+
+    def set_data_client(self, client) -> None:
+        """
+        Inject a reference to the live Bybit data client (HOT-01 / Pattern 3).
+
+        Plan 02's ADDITION branch reaches the client's `instrument_provider` to
+        load a brand-new instrument at runtime (the Bybit adapter does not
+        implement `request_instrument`, RESEARCH Pitfall 1). In THIS plan the
+        stored reference is unused — additions are a marked placeholder — so this
+        setter is a harmless state assignment that keeps the wiring seam stable
+        for Plan 02.
+
+        Parameters
+        ----------
+        client : object
+            The live ``BybitDataClient`` instance from the built node.
+
+        """
+        self._bybit_client = client
 
     def on_start(self) -> None:
         """
@@ -207,6 +263,27 @@ class RecorderStrategy(Strategy):
             name="heartbeat",
             interval=pd.Timedelta(seconds=self.config.heartbeat_interval_seconds),
             callback=self._heartbeat,
+        )
+
+        # HOT-01: seed the running-state bookkeeping from the startup config so
+        # the FIRST config-reload diffs against the real subscribed set (Pattern 2).
+        linear_ids = set(self.config.linear_instrument_ids)
+        for instrument_id in self.config.instrument_ids:
+            self._subscribed_params[instrument_id] = (
+                self.config.instrument_depths[instrument_id],
+                frozenset(self.config.instrument_bar_intervals[instrument_id]),
+            )
+            self._product_types[instrument_id] = (
+                "linear" if instrument_id in linear_ids else "spot"
+            )
+
+        # HOT-01 reload trigger (D-01/D-02): a dedicated named timer reusing the
+        # heartbeat cadence. The callback re-reads recorder.toml and applies the
+        # diff (removals + param-swaps here; additions land in Plan 02).
+        self.clock.set_timer(
+            name="config-reload",
+            interval=pd.Timedelta(seconds=self.config.heartbeat_interval_seconds),
+            callback=self._on_config_reload,
         )
 
     def _log_restart_gaps(self) -> None:
@@ -311,6 +388,269 @@ class RecorderStrategy(Strategy):
                 )
 
         logger.info("Heartbeat: %d active streams", len(self._last_seen))
+
+    def _config_signature(self, parsed_cfg) -> int:
+        """
+        Return a stable signature of the parsed instrument entries (HOT-01 / D-07).
+
+        Used to detect when ``recorder.toml`` has actually changed so
+        `_failed_instrument_ids` is reset only on a real edit (D-07: "only
+        re-attempt if recorder.toml changes again"), not on every poll. The
+        signature folds in each instrument's id, depth, bar intervals, and product
+        type — i.e. exactly the fields the diff branches act on.
+
+        Parameters
+        ----------
+        parsed_cfg : RecorderConfig
+            The freshly parsed recorder configuration.
+
+        Returns
+        -------
+        int
+
+        """
+        return hash(
+            tuple(
+                sorted(
+                    (str(e.id), e.depth, tuple(e.bar_intervals), e.product_type)
+                    for e in parsed_cfg.instruments
+                ),
+            ),
+        )
+
+    def _diff_config(self, parsed_cfg) -> tuple[list, list, list]:
+        """
+        Diff a freshly-parsed config against the running subscription set (HOT-01).
+
+        Compares the parsed instrument entries against `self._subscribed_params`
+        (seeded in `on_start`, mutated by every applied diff) and returns three
+        lists of parsed `InstrumentEntry` items:
+
+        - additions: ids present in `parsed_cfg` but NOT currently subscribed.
+        - removals: ids currently subscribed but NOT in `parsed_cfg` (carries the
+          PARSED entry where available; for an id absent from the new config a
+          synthetic entry is not needed — removal only needs the running params +
+          product type, tracked separately).
+        - param_changes: ids in BOTH whose ``(depth, frozenset(bar_intervals))``
+          differs from the running params.
+
+        Parameters
+        ----------
+        parsed_cfg : RecorderConfig
+            The freshly parsed recorder configuration.
+
+        Returns
+        -------
+        tuple[list, list, list]
+            ``(additions, removals, param_changes)`` of `InstrumentEntry` items.
+            Removals carry the REMOVED instrument's id (not present in the parsed
+            config) so callers resolve params/product-type from the running
+            bookkeeping.
+
+        """
+        parsed_by_id = {entry.id: entry for entry in parsed_cfg.instruments}
+        running_ids = set(self._subscribed_params)
+
+        additions = [entry for entry in parsed_cfg.instruments if entry.id not in running_ids]
+        removals = [
+            instrument_id for instrument_id in running_ids if instrument_id not in parsed_by_id
+        ]
+
+        param_changes = []
+        for instrument_id, entry in parsed_by_id.items():
+            if instrument_id not in running_ids:
+                continue
+            if self._subscribed_params[instrument_id] != (
+                entry.depth,
+                frozenset(entry.bar_intervals),
+            ):
+                param_changes.append(entry)
+
+        return additions, removals, param_changes
+
+    def _unsubscribe_instrument(
+        self,
+        instrument_id: InstrumentId,
+        bar_intervals,
+        is_linear: bool,
+    ) -> None:
+        """
+        Unsubscribe ALL feeds for a removed instrument and prune its state (D-06).
+
+        Mirrors `on_start`'s subscribe set in reverse: trade, quote, order-book
+        deltas, and one `unsubscribe_bars` per current interval. Mark/index/funding
+        are linear-only (Pitfall 5), so they are gated on ``is_linear``. After
+        unsubscribing, every ``(stream, instrument_id)`` entry is pruned from
+        `_last_seen` (Pitfall 4 — otherwise `_heartbeat` perpetually WARNs "stale"
+        for a deliberately-removed instrument), and the running bookkeeping
+        (`_subscribed_params`, `_product_types`) is cleared.
+
+        Parameters
+        ----------
+        instrument_id : InstrumentId
+            The instrument being removed from `recorder.toml`.
+        bar_intervals : Iterable[str]
+            The bar intervals the instrument is currently subscribed at.
+        is_linear : bool
+            Whether the instrument is a linear perpetual (gates mark/index/funding).
+
+        """
+        self.unsubscribe_trade_ticks(instrument_id)
+        self.unsubscribe_quote_ticks(instrument_id)
+        self.unsubscribe_order_book_deltas(instrument_id)
+        for interval in bar_intervals:
+            self.unsubscribe_bars(BarType.from_str(f"{instrument_id}-{interval}-LAST-EXTERNAL"))
+        if is_linear:
+            self.unsubscribe_mark_prices(instrument_id)
+            self.unsubscribe_index_prices(instrument_id)
+            self.unsubscribe_funding_rates(instrument_id)
+
+        # D-06 / Pitfall 4: drop every _last_seen entry for this instrument so it
+        # no longer appears in heartbeat/stale-stream checks.
+        for stream in ("trade", "quote", "deltas", "bar", "mark", "index", "funding"):
+            self._last_seen.pop((stream, instrument_id), None)
+
+        self._subscribed_params.pop(instrument_id, None)
+        self._product_types.pop(instrument_id, None)
+
+    def _apply_param_change(
+        self,
+        instrument_id: InstrumentId,
+        old_depth: int,
+        old_intervals,
+        new_depth: int,
+        new_intervals,
+    ) -> None:
+        """
+        Apply a depth and/or bar-interval change as a clean swap (D-05).
+
+        Order-book DEPTH change: ``unsubscribe_order_book_deltas`` FIRST, then
+        ``subscribe_order_book_deltas`` at the new depth. The order is load-bearing
+        (RESEARCH Pitfall 2): the DataEngine dedups order-book subscriptions by
+        ``instrument_id`` only, so subscribing before unsubscribing silently drops
+        the new depth and the feed stays at the old granularity.
+
+        BAR-INTERVAL change: subscribe ONLY the added intervals and unsubscribe
+        ONLY the removed ones (the set delta) — trade/quote/mark/index/funding are
+        untouched (D-05).
+
+        Parameters
+        ----------
+        instrument_id : InstrumentId
+            The instrument whose params changed.
+        old_depth : int
+            The currently-subscribed order book depth.
+        old_intervals : Iterable[str]
+            The currently-subscribed bar intervals.
+        new_depth : int
+            The new order book depth from the parsed config.
+        new_intervals : Iterable[str]
+            The new bar intervals from the parsed config.
+
+        """
+        if new_depth != old_depth:
+            # Pitfall 2: unsubscribe-then-subscribe; order matters.
+            self.unsubscribe_order_book_deltas(instrument_id)
+            self.subscribe_order_book_deltas(
+                instrument_id,
+                book_type=BookType.L2_MBP,
+                depth=new_depth,
+            )
+
+        old_set = set(old_intervals)
+        new_set = set(new_intervals)
+        for interval in old_set - new_set:
+            self.unsubscribe_bars(BarType.from_str(f"{instrument_id}-{interval}-LAST-EXTERNAL"))
+        for interval in new_set - old_set:
+            self.subscribe_bars(BarType.from_str(f"{instrument_id}-{interval}-LAST-EXTERNAL"))
+
+        self._subscribed_params[instrument_id] = (new_depth, frozenset(new_intervals))
+
+    def _check_hot_added_threshold(self) -> None:
+        """
+        Log a WARNING when the lifetime hot-add count exceeds the D-08 knob.
+
+        Informational only — `max_hot_added_instruments` NEVER blocks further
+        hot-adds (D-08); it surfaces runaway config thrash. Called by the Plan 02
+        ADDITION branch after each successful hot-add; isolated here so the
+        threshold behavior is unit-testable independently of the (Plan 02) load.
+
+        """
+        if self._hot_added_count > self.config.max_hot_added_instruments:
+            logger.warning(
+                "Hot-added instrument count %d exceeds max_hot_added_instruments %d "
+                "(informational; not blocked)",
+                self._hot_added_count,
+                self.config.max_hot_added_instruments,
+            )
+
+    def _on_config_reload(self, event: TimeEvent) -> None:
+        """
+        Periodic config-reload timer callback (HOT-01 / D-01).
+
+        Re-reads `recorder.toml`, diffs it against the running subscription set,
+        and applies REMOVALS (D-06) and PARAM-CHANGES (D-05). ADDITIONS are a
+        marked no-op placeholder filled by Plan 02 (runtime instrument load,
+        Pattern 3).
+
+        The WHOLE body is wrapped in `try/except Exception` (mirrors the
+        `_run_conversion` swallow): a malformed/half-written toml read mid-edit
+        (TOCTOU, Security V7 / T-06-01) must be logged once and skipped so the
+        recorder keeps running on its last-good config — a bad reload must never
+        fault the strategy component.
+
+        """
+        try:
+            if self.config.reload_config_path is None:
+                logger.debug("No reload_config_path configured; skipping config reload")
+                return
+
+            parsed_cfg, _ = load_recorder_config(self.config.reload_config_path)
+
+            # D-07: reset the per-snapshot failed set only when the toml actually
+            # changes, so a failed load is re-attempted on edit but not every poll.
+            signature = self._config_signature(parsed_cfg)
+            if signature != self._last_config_signature:
+                self._failed_instrument_ids.clear()
+                self._last_config_signature = signature
+
+            additions, removals, param_changes = self._diff_config(parsed_cfg)
+
+            for instrument_id in removals:
+                is_linear = self._product_types.get(instrument_id) == "linear"
+                _, bar_intervals = self._subscribed_params.get(
+                    instrument_id,
+                    (0, frozenset()),
+                )
+                self._unsubscribe_instrument(instrument_id, bar_intervals, is_linear)
+
+            for entry in param_changes:
+                old_depth, old_intervals = self._subscribed_params[entry.id]
+                self._apply_param_change(
+                    entry.id,
+                    old_depth,
+                    old_intervals,
+                    entry.depth,
+                    entry.bar_intervals,
+                )
+
+            # Plan 02: runtime instrument load (Pattern 3) + subscribe for each
+            # addition. Intentionally a no-op here — this plan stops short of the
+            # one risky live-wiring seam. `additions` is computed so the INFO log
+            # below reports an accurate count.
+            for _entry in additions:
+                pass
+
+            logger.info(
+                "Config reload: %d added, %d removed, %d changed",
+                len(additions),
+                len(removals),
+                len(param_changes),
+            )
+        except Exception:
+            # T-06-01 / Security V7: never let a bad reload fault the component.
+            logger.exception("Config reload failed")
+            return
 
     def on_trade_tick(self, tick: TradeTick) -> None:
         """

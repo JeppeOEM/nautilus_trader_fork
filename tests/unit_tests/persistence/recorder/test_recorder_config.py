@@ -144,3 +144,41 @@ def test_load_recorder_config_rejects_malformed_instrument_id(tmp_path, sample_t
     # Act / Assert
     with pytest.raises(ValueError):
         load_recorder_config(toml_path)
+
+
+@pytest.mark.parametrize("bad_value", [0, -1])
+def test_load_recorder_config_rejects_non_positive_max_hot_added_instruments(
+    tmp_path,
+    sample_toml,
+    bad_value,
+):
+    # D-08: the new max_hot_added_instruments knob must be validated `> 0` at load,
+    # mirroring the existing sibling-threshold fail-fast pattern.
+    # Arrange
+    from scripts.bybit_recorder.config import load_recorder_config
+
+    bad_toml = sample_toml.replace(
+        'environment = "mainnet"',
+        f'environment = "mainnet"\nmax_hot_added_instruments = {bad_value}',
+    )
+    toml_path = tmp_path / "recorder.toml"
+    toml_path.write_text(bad_toml)
+
+    # Act / Assert
+    with pytest.raises(ValueError, match="max_hot_added_instruments"):
+        load_recorder_config(toml_path)
+
+
+def test_load_recorder_config_defaults_max_hot_added_instruments_to_50(tmp_path, sample_toml):
+    # D-08: with the key omitted, max_hot_added_instruments defaults to 50.
+    # Arrange (sample_toml deliberately omits max_hot_added_instruments)
+    from scripts.bybit_recorder.config import load_recorder_config
+
+    toml_path = tmp_path / "recorder.toml"
+    toml_path.write_text(sample_toml)
+
+    # Act
+    recorder_cfg, _ = load_recorder_config(toml_path)
+
+    # Assert
+    assert recorder_cfg.max_hot_added_instruments == 50
