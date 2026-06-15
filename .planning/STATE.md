@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Phase 4 context gathered
-last_updated: "2026-06-15T09:19:54.452Z"
+stopped_at: Phase 6 context gathered
+last_updated: "2026-06-15T11:41:37.697Z"
 last_activity: 2026-06-15
 progress:
-  total_phases: 5
+  total_phases: 6
   completed_phases: 3
   total_plans: 9
   completed_plans: 9
-  percent: 60
+  percent: 50
 ---
 
 # Project State
@@ -64,6 +64,10 @@ Progress: [██████████] 100% (of Phases 1-2; milestone has 5 
 
 ## Accumulated Context
 
+### Roadmap Evolution
+
+- Phase 6 added: Hot-Reload Config Changes (retitled from "Hot-Reload New Instruments" after discuss-phase broadened scope to the full diff): periodically detect changes to recorder.toml's instrument list/params while running -- additions, removals, and depth/bar_interval changes -- and apply them live (load+subscribe new instruments, unsubscribe removed, clean-swap changed params) without restarting the process or disrupting recording for unaffected instruments. New requirement HOT-01 added.
+
 ### Decisions
 
 Decisions are logged in PROJECT.md Key Decisions table.
@@ -114,6 +118,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-06-15T09:19:54.448Z
-Stopped at: Phase 4 context gathered
-Resume file: .planning/phases/04-open-interest-spike/04-CONTEXT.md
+Last session: 2026-06-15T11:41:37.690Z
+Stopped at: Phase 6 context gathered
+Resume file: .planning/phases/06-hot-reload-new-instruments/06-CONTEXT.md
