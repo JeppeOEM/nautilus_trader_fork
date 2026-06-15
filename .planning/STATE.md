@@ -98,6 +98,12 @@ Recent decisions affecting current work:
 - [Phase 2]: Funding-rate ticker pushes ~100ms but changes rarely — dedup strategy needed to avoid millions of redundant rows
 - [Phase 1/3]: Catalog `write_data` contract (monotonic ts_init, disjoint intervals, filename-collision silent skip) must hold across restarts — verify the StreamingConfig path handles this
 
+### Quick Tasks Completed
+
+| # | Description | Date | Commit | Directory |
+|---|-------------|------|--------|-----------|
+| 260615-acs | Fix WR-02 (03-REVIEW.md): guard _log_restart_gaps ParquetDataCatalog construction in scripts/bybit_recorder/strategy.py with try/except, mirroring _run_conversion's pattern, plus a unit test | 2026-06-15 | 8342b92024 | [260615-acs-fix-wr-02-03-review-md-guard-log-restart](./quick/260615-acs-fix-wr-02-03-review-md-guard-log-restart/) |
+
 ## Deferred Items
 
 Items acknowledged and carried forward from previous milestone close:
@@ -108,6 +114,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-06-14T19:18:29.613Z
-Stopped at: Phase 3 replan complete (03-RESEARCH.md + 03-01-PLAN.md amended for Approach B + gap-log D-06)
+Last session: 2026-06-15T07:27:20.901Z
+Stopped at: Quick task 260615-acs complete - Completed quick task 260615-acs: Fix WR-02 (03-REVIEW.md) catalog construction guard in _log_restart_gaps
 Resume file: .planning/phases/03-reliability-for-24-7-operation/03-01-PLAN.md
