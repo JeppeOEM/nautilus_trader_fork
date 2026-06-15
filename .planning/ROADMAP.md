@@ -84,7 +84,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 
 **Wave 3** *(gap closure — blocked on Wave 1/2; shares strategy.py + config.py)*
 
-- [ ] 03-03-PLAN.md — Guard _run_conversion() catalog/flush (CR-01, REL-02) + fail-fast restart_gap_threshold validation (WR-01) + reconcile REQUIREMENTS.md
+- [x] 03-03-PLAN.md — Guard _run_conversion() catalog/flush (CR-01, REL-02) + fail-fast restart_gap_threshold validation (WR-01) + reconcile REQUIREMENTS.md
 
 ### Phase 4: Open Interest Spike
 
@@ -124,6 +124,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 |-------|----------------|--------|-----------|
 | 1. Bootstrap, Config & End-to-End Slice | 4/4 | Complete   | 2026-06-13 |
 | 2. Full Data-Type Coverage | 1/2 | In Progress|  |
-| 3. Reliability for 24/7 Operation | 2/3 | In Progress | 2026-06-14 |
+| 3. Reliability for 24/7 Operation | 3/3 | Complete   | 2026-06-15 |
 | 4. Open Interest Spike | 0/TBD | Not started | - |
 | 5. Inspection & Deployment | 0/TBD | Not started | - |
