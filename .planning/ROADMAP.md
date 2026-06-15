@@ -18,6 +18,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 3: Reliability for 24/7 Operation** - Graceful shutdown flush, stale-stream heartbeats, and adapter-driven reconnect resilience (completed 2026-06-14)
 - [ ] **Phase 4: Open Interest Spike** - Custom open-interest `Data` type recorded into the catalog via Arrow registration
 - [ ] **Phase 5: Inspection & Deployment** - Pandas catalog-inspection utility, systemd unit, and deployment guide
+- [ ] **Phase 6: Hot-Reload Config Changes** - Detect and apply instrument-list/param changes from `recorder.toml` while running, without a restart
 
 ## Phase Details
 
@@ -118,7 +119,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
+Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
@@ -127,3 +128,15 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 | 3. Reliability for 24/7 Operation | 3/3 | Complete    | 2026-06-15 |
 | 4. Open Interest Spike | 0/TBD | Not started | - |
 | 5. Inspection & Deployment | 0/TBD | Not started | - |
+| 6. Hot-Reload Config Changes | 0/TBD | Not started | - |
+
+### Phase 6: Hot-Reload Config Changes
+
+**Goal:** While the recorder is running, periodically detect changes to `recorder.toml`'s instrument list and parameters — additions, removals, and depth/bar_interval changes for existing instruments — and apply them live: load new instruments via the instrument provider and subscribe to the same data feeds (trades, quotes, order book deltas, bars, and for linear instruments mark/index/funding) used for existing instruments, unsubscribe feeds for removed instruments, and clean-swap subscriptions for changed parameters — all without restarting the process or disrupting recording for unaffected instruments.
+**Requirements**: HOT-01
+**Depends on:** Phase 5
+**Plans:** 0 plans
+
+Plans:
+
+- [ ] TBD (run /gsd-plan-phase 6 to break down)

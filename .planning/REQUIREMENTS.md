@@ -38,6 +38,10 @@
 - [ ] **OPS-02**: A systemd unit file is provided for 24/7 process supervision with `Restart=always`
 - [ ] **OPS-03**: A deployment guide documents installation, TOML configuration, secrets/API key setup, starting/stopping the service, and monitoring via journald and Nautilus file logs
 
+### Hot-Reload
+
+- [ ] **HOT-01**: While running, the recorder periodically detects changes to `recorder.toml`'s instrument list/params (additions, removals, depth/bar_interval changes) and applies them live — loading new instruments and subscribing/unsubscribing the affected feeds — without restarting the process or disrupting recording for unaffected instruments
+
 ## v2 Requirements
 
 Deferred to future release. Tracked but not in current roadmap.
@@ -87,11 +91,12 @@ Which phases cover which requirements. Updated during roadmap creation.
 | OPS-01 | Phase 5 | Pending |
 | OPS-02 | Phase 5 | Pending |
 | OPS-03 | Phase 5 | Pending |
+| HOT-01 | Phase 6 | Pending |
 
 **Coverage:**
 
-- v1 requirements: 18 total
-- Mapped to phases: 18
+- v1 requirements: 19 total
+- Mapped to phases: 19
 - Unmapped: 0 ✓
 
 ---
