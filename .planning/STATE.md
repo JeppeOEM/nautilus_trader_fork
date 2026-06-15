@@ -4,12 +4,12 @@ milestone: v1.0
 milestone_name: milestone
 status: executing
 stopped_at: Phase 6 context gathered
-last_updated: "2026-06-15T12:15:50.480Z"
-last_activity: 2026-06-15 -- Phase 6 planning complete
+last_updated: "2026-06-15T12:40:44.639Z"
+last_activity: 2026-06-15 -- Phase 06 execution started
 progress:
   total_phases: 6
   completed_phases: 3
-  total_plans: 9
+  total_plans: 11
   completed_plans: 9
   percent: 50
 ---
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-06-13)
 
 **Core value:** Reliable, continuous capture of Bybit market data into a Nautilus-catalog-compatible parquet archive — no data loss across restarts/disconnects.
-**Current focus:** Phase 03 — reliability-for-24-7-operation
+**Current focus:** Phase 06 — hot-reload-new-instruments
 
 ## Current Position
 
-Phase: 4
-Plan: Not started
-Status: Ready to execute
-Last activity: 2026-06-15 -- Phase 6 planning complete
+Phase: 06 (hot-reload-new-instruments) — EXECUTING
+Plan: 1 of 2
+Status: Executing Phase 06
+Last activity: 2026-06-15 -- Phase 06 execution started
 
 Progress: [██████████] 100% (of Phases 1-2; milestone has 5 phases total)
 
