@@ -35,7 +35,6 @@ from nautilus_trader.persistence.catalog.parquet import ParquetDataCatalog
 from nautilus_trader.persistence.writer import RotationMode
 from nautilus_trader.persistence.writer import StreamingFeatherWriter
 from nautilus_trader.trading.strategy import Strategy
-
 from scripts.bybit_recorder.config import load_recorder_config
 
 
@@ -181,21 +180,24 @@ class RecorderStrategy(Strategy):
         self._last_config_signature: int | None = None
         # Count of instruments hot-added over the process lifetime (D-08 threshold).
         self._hot_added_count: int = 0
-        # Reference to the live Bybit data client, injected by Plan 02's
-        # `set_data_client` for the runtime instrument load (Pattern 3). Unused in
-        # this plan (additions are a no-op placeholder here).
+        # Ids whose runtime load was scheduled on a prior poll and is still
+        # in-flight (D-11). Distinguishes "load scheduled, awaiting resolution"
+        # from "load resolved empty" so a load is fired at most once per snapshot
+        # and an unresolved id can be declared Bybit-unknown on the NEXT poll.
+        self._pending_loads: set[InstrumentId] = set()
+        # Reference to the live Bybit data client, injected at build time by
+        # `set_data_client` (recorder.py, Pattern 3). The ADDITION branch reaches
+        # `client.instrument_provider` to load a brand-new instrument at runtime.
         self._bybit_client = None
 
     def set_data_client(self, client) -> None:
         """
         Inject a reference to the live Bybit data client (HOT-01 / Pattern 3).
 
-        Plan 02's ADDITION branch reaches the client's `instrument_provider` to
-        load a brand-new instrument at runtime (the Bybit adapter does not
-        implement `request_instrument`, RESEARCH Pitfall 1). In THIS plan the
-        stored reference is unused — additions are a marked placeholder — so this
-        setter is a harmless state assignment that keeps the wiring seam stable
-        for Plan 02.
+        The ADDITION branch (`_load_and_subscribe_addition`) reaches the client's
+        `instrument_provider` to load a brand-new instrument at runtime, because
+        the Bybit adapter does not implement `request_instrument` (RESEARCH
+        Pitfall 1). Called once from `recorder.py` after `node.build()`.
 
         Parameters
         ----------
@@ -204,6 +206,58 @@ class RecorderStrategy(Strategy):
 
         """
         self._bybit_client = client
+
+    def _subscribe_instrument(
+        self,
+        instrument_id: InstrumentId,
+        depth: int,
+        bar_intervals: list[str],
+        is_linear: bool,
+    ) -> None:
+        """
+        Subscribe ALL recorded feeds for a single instrument (shared by `on_start`
+        and the HOT-01 ADDITION branch).
+
+        Issues exactly the same per-instrument subscribe calls, in the same order,
+        that `on_start` historically issued inline: trade ticks, quote ticks,
+        order-book deltas (`BookType.L2_MBP` at `depth`), one `subscribe_bars` per
+        interval (venue-native `LAST-EXTERNAL` kline, D-02), and — only when
+        `is_linear` — mark/index prices and funding rates (D-04 linear-only
+        gating, Pitfall 5).
+
+        Pure subscribe issuance: this helper deliberately does NOT touch
+        `_subscribed_params`, `_product_types`, `_hot_added_count`, or `_last_seen`
+        — `on_start` and the ADDITION branch own that bookkeeping around it.
+
+        Parameters
+        ----------
+        instrument_id : InstrumentId
+            The instrument to subscribe to.
+        depth : int
+            The order book depth for `subscribe_order_book_deltas`.
+        bar_intervals : list[str]
+            The bar interval strings (e.g. ``["1-MINUTE"]``) to subscribe.
+        is_linear : bool
+            Whether the instrument is a linear perpetual (gates mark/index/funding).
+
+        """
+        self.subscribe_trade_ticks(instrument_id)
+        self.subscribe_quote_ticks(instrument_id)
+        self.subscribe_order_book_deltas(
+            instrument_id,
+            book_type=BookType.L2_MBP,
+            depth=depth,
+        )
+        for interval in bar_intervals:
+            # Venue-native EXTERNAL kline stream (D-02) — NOT derived from
+            # trades. LAST price type, EXTERNAL aggregation source.
+            self.subscribe_bars(
+                BarType.from_str(f"{instrument_id}-{interval}-LAST-EXTERNAL"),
+            )
+        if is_linear:
+            self.subscribe_mark_prices(instrument_id)
+            self.subscribe_index_prices(instrument_id)
+            self.subscribe_funding_rates(instrument_id)
 
     def on_start(self) -> None:
         """
@@ -230,28 +284,17 @@ class RecorderStrategy(Strategy):
         # failure here is logged but must not prevent subscriptions.
         self._log_restart_gaps()
 
+        # D-04 linear-only gating: mark/index/funding exist for derivatives only.
+        # The Bybit adapter merely warns + early-returns for spot, so gate on the
+        # configured linear set (Pitfall 4/5) — passed into the shared helper.
+        linear_ids_set = set(self.config.linear_instrument_ids)
         for instrument_id in self.config.instrument_ids:
-            self.subscribe_trade_ticks(instrument_id)
-            self.subscribe_quote_ticks(instrument_id)
-            self.subscribe_order_book_deltas(
+            self._subscribe_instrument(
                 instrument_id,
-                book_type=BookType.L2_MBP,
                 depth=self.config.instrument_depths[instrument_id],
+                bar_intervals=self.config.instrument_bar_intervals[instrument_id],
+                is_linear=instrument_id in linear_ids_set,
             )
-            for interval in self.config.instrument_bar_intervals[instrument_id]:
-                # Venue-native EXTERNAL kline stream (D-02) — NOT derived from
-                # trades. LAST price type, EXTERNAL aggregation source.
-                self.subscribe_bars(
-                    BarType.from_str(f"{instrument_id}-{interval}-LAST-EXTERNAL"),
-                )
-
-        # D-04 linear-only gating: mark/index prices exist for derivatives only.
-        # The Bybit adapter merely warns + early-returns for spot, so never iterate
-        # the full instrument list here (Pitfall 4).
-        for instrument_id in self.config.linear_instrument_ids:
-            self.subscribe_mark_prices(instrument_id)
-            self.subscribe_index_prices(instrument_id)
-            self.subscribe_funding_rates(instrument_id)
 
         self.clock.set_timer(
             name="convert-stream",
@@ -571,9 +614,9 @@ class RecorderStrategy(Strategy):
         Log a WARNING when the lifetime hot-add count exceeds the D-08 knob.
 
         Informational only — `max_hot_added_instruments` NEVER blocks further
-        hot-adds (D-08); it surfaces runaway config thrash. Called by the Plan 02
-        ADDITION branch after each successful hot-add; isolated here so the
-        threshold behavior is unit-testable independently of the (Plan 02) load.
+        hot-adds (D-08); it surfaces runaway config thrash. Called by the ADDITION
+        branch after each successful hot-add; isolated here so the threshold
+        behavior is unit-testable independently of the load.
 
         """
         if self._hot_added_count > self.config.max_hot_added_instruments:
@@ -584,14 +627,117 @@ class RecorderStrategy(Strategy):
                 self.config.max_hot_added_instruments,
             )
 
+    def _load_and_subscribe_addition(self, entry) -> None:
+        """
+        Load a brand-new instrument at runtime and subscribe it (HOT-01 / D-09).
+
+        Two-phase, driven across successive `_on_config_reload` polls because the
+        reload timer callback is synchronous while the Bybit provider's
+        `load_async` is a coroutine on the live event loop (RESEARCH Open
+        Question 2 (RESOLVED) / A3):
+
+        - **Poll N (schedule):** the id is unknown to both the provider and the
+          cache, so `provider.load(id)` is fired (the sync wrapper schedules
+          `load_async` on the running loop, fire-and-forget) and the id is added
+          to `_pending_loads`. Nothing is subscribed this cycle — confirmation is
+          deferred (D-10 "wait until confirmed").
+        - **Poll N+1 (resolve):** if `provider.find(id)` is non-None the load
+          completed → add the instrument to the cache (the on_start-style
+          presence guard, D-10), repopulate the client's WS/HTTP precision caches
+          additively (`_cache_instruments`, A1 / Pitfall 3), increment the
+          lifetime hot-add count (with the D-08 threshold WARNING), then issue the
+          full subscribe set via the shared `_subscribe_instrument` helper. If the
+          id is in `_pending_loads` but `find(id)` is STILL None, treat it as
+          Bybit-unknown (D-11): log a single ERROR and mark it failed so it is not
+          re-attempted until the config signature changes (D-07).
+
+        The whole per-id body is wrapped in try/except so one bad id cannot abort
+        the other additions or fault the component (mirrors the per-step swallow
+        in `_run_conversion`); on exception the id is marked failed and dropped
+        from `_pending_loads`.
+
+        Parameters
+        ----------
+        entry : InstrumentEntry
+            The parsed config entry for the newly-added instrument.
+
+        """
+        instrument_id = entry.id
+
+        # D-07: a failed id is not re-attempted until the toml signature changes.
+        if instrument_id in self._failed_instrument_ids:
+            return
+
+        if self._bybit_client is None:
+            # No live client wired (e.g. mis-wired build) — cannot load. Warn once
+            # per poll and skip; never fault the component.
+            logger.warning(
+                "No Bybit data client injected; cannot hot-load %s",
+                instrument_id,
+            )
+            return
+
+        try:
+            provider = self._bybit_client.instrument_provider
+            instrument = provider.find(instrument_id)
+
+            if instrument is None and self.cache.instrument(instrument_id) is None:
+                # Phase 1: schedule the runtime load exactly once per snapshot.
+                if instrument_id not in self._pending_loads:
+                    provider.load(instrument_id)
+                    self._pending_loads.add(instrument_id)
+                    logger.info("Hot-loading new instrument %s (scheduled)", instrument_id)
+                    return
+
+                # Phase 2 (still unresolved): the load came back empty — Bybit did
+                # not recognize the id (D-11). Fail it for this snapshot.
+                logger.error(
+                    "Failed to load new instrument %s (Bybit did not recognize it); skipping",
+                    instrument_id,
+                )
+                self._failed_instrument_ids.add(instrument_id)
+                self._pending_loads.discard(instrument_id)
+                return
+
+            # Phase 2 (resolved): confirm in cache + repopulate precision caches.
+            if instrument is not None:
+                self.cache.add_instrument(instrument)
+            self._bybit_client._cache_instruments()
+            self._pending_loads.discard(instrument_id)
+
+            # D-08: count the hot-add and surface a WARNING when over threshold
+            # (never blocks the subscribe).
+            self._hot_added_count += 1
+            self._check_hot_added_threshold()
+
+            # Subscribe the full feed set via the shared helper (Pitfall 5 linear
+            # gating from the parsed product_type) and record running bookkeeping.
+            is_linear = entry.product_type == "linear"
+            self._subscribe_instrument(
+                instrument_id,
+                depth=entry.depth,
+                bar_intervals=entry.bar_intervals,
+                is_linear=is_linear,
+            )
+            self._subscribed_params[instrument_id] = (
+                entry.depth,
+                frozenset(entry.bar_intervals),
+            )
+            self._product_types[instrument_id] = entry.product_type
+            logger.info("Hot-added instrument %s", instrument_id)
+        except Exception:
+            logger.exception("Failed to hot-add instrument %s", instrument_id)
+            self._failed_instrument_ids.add(instrument_id)
+            self._pending_loads.discard(instrument_id)
+
     def _on_config_reload(self, event: TimeEvent) -> None:
         """
         Periodic config-reload timer callback (HOT-01 / D-01).
 
         Re-reads `recorder.toml`, diffs it against the running subscription set,
-        and applies REMOVALS (D-06) and PARAM-CHANGES (D-05). ADDITIONS are a
-        marked no-op placeholder filled by Plan 02 (runtime instrument load,
-        Pattern 3).
+        and applies REMOVALS (D-06), PARAM-CHANGES (D-05), and ADDITIONS via the
+        two-phase runtime instrument load (`_load_and_subscribe_addition`,
+        Pattern 3 / D-09).
 
         The WHOLE body is wrapped in `try/except Exception` (mirrors the
         `_run_conversion` swallow): a malformed/half-written toml read mid-edit
@@ -634,12 +780,11 @@ class RecorderStrategy(Strategy):
                     entry.bar_intervals,
                 )
 
-            # Plan 02: runtime instrument load (Pattern 3) + subscribe for each
-            # addition. Intentionally a no-op here — this plan stops short of the
-            # one risky live-wiring seam. `additions` is computed so the INFO log
-            # below reports an accurate count.
-            for _entry in additions:
-                pass
+            # ADDITIONS: two-phase runtime instrument load + subscribe (D-09/D-10).
+            # Each call is self-contained (try/except inside) so one bad id never
+            # aborts the others.
+            for entry in additions:
+                self._load_and_subscribe_addition(entry)
 
             logger.info(
                 "Config reload: %d added, %d removed, %d changed",

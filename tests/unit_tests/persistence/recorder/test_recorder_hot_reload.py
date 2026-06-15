@@ -26,8 +26,6 @@ so they are explicitly skipped here to keep the suite green between waves.
 
 import logging
 
-import pytest
-
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.test_kit.providers import TestInstrumentProvider
 from tests.unit_tests.persistence.recorder.test_recorder_strategy import _build_strategy
@@ -35,6 +33,46 @@ from tests.unit_tests.persistence.recorder.test_recorder_strategy import _build_
 
 INSTRUMENT_ID_LINEAR = InstrumentId.from_str("BTCUSDT-LINEAR.BYBIT")
 INSTRUMENT_ID_SPOT = InstrumentId.from_str("ETHUSDT-SPOT.BYBIT")
+# A brand-new instrument not present at startup (the hot-add subject).
+INSTRUMENT_ID_NEW = InstrumentId.from_str("SOLUSDT-LINEAR.BYBIT")
+
+
+def _make_mock_client(mocker, find_returns):
+    """
+    Build a mock Bybit data client whose ``instrument_provider`` drives the
+    two-phase load.
+
+    Parameters
+    ----------
+    mocker : MockerFixture
+        The pytest-mock fixture.
+    find_returns : list
+        The sequence of return values for successive ``provider.find(id)`` calls
+        (e.g. ``[None, instrument]`` simulates "load in flight on poll N, resolved
+        on poll N+1"). The last value is repeated for any further calls.
+
+    Returns
+    -------
+    Mock
+        A mock client with ``.instrument_provider.find`` / ``.load`` /
+        ``._cache_instruments`` and a no-op ``client._cache_instruments``.
+    """
+    client = mocker.Mock()
+    provider = client.instrument_provider
+
+    seq = list(find_returns)
+
+    def _find(_instrument_id):
+        if len(seq) > 1:
+            return seq.pop(0)
+        return seq[0] if seq else None
+
+    provider.find.side_effect = _find
+    provider.load.return_value = None
+    # client._cache_instruments() repopulates the WS/HTTP precision caches; a
+    # no-op mock keeps the unit test off the real adapter machinery (A1).
+    client._cache_instruments.return_value = None
+    return client
 
 
 def _make_parsed_cfg(instruments):
@@ -129,8 +167,101 @@ def test_detects_addition(mocker, mock_cache):
     assert param_changes == []
 
 
-def test_addition_subscribes(mocker, mock_cache):
-    pytest.skip("covered in Plan 02 — runtime instrument load")
+def _new_instrument_stub():
+    """
+    Return a stub `Instrument` whose id is `INSTRUMENT_ID_NEW`.
+
+    Built from a real `TestInstrumentProvider` instrument so `cache.add_instrument`
+    accepts it; the cache lookup in the ADD branch matches on the id the provider
+    `find` returns.
+    """
+    from nautilus_trader.model.instruments import CryptoPerpetual
+    from nautilus_trader.model.objects import Price
+    from nautilus_trader.model.objects import Quantity
+
+    base = TestInstrumentProvider.btcusdt_perp_binance()
+    return CryptoPerpetual(
+        instrument_id=INSTRUMENT_ID_NEW,
+        raw_symbol=base.raw_symbol,
+        base_currency=base.base_currency,
+        quote_currency=base.quote_currency,
+        settlement_currency=base.settlement_currency,
+        is_inverse=False,
+        price_precision=base.price_precision,
+        size_precision=base.size_precision,
+        price_increment=base.price_increment,
+        size_increment=base.size_increment,
+        margin_init=base.margin_init,
+        margin_maint=base.margin_maint,
+        maker_fee=base.maker_fee,
+        taker_fee=base.taker_fee,
+        ts_event=0,
+        ts_init=0,
+        max_quantity=Quantity.from_str("1000"),
+        min_quantity=Quantity.from_str("0.001"),
+        max_price=Price.from_str("1000000"),
+        min_price=Price.from_str("0.01"),
+    )
+
+
+def _seed_running(strategy, instrument_id, depth=50, intervals=("1-MINUTE",), product="linear"):
+    strategy._subscribed_params[instrument_id] = (depth, frozenset(intervals))
+    strategy._product_types[instrument_id] = product
+
+
+def test_addition_subscribes(mocker, mock_cache, tmp_path):
+    # A new id absent at startup is loaded at runtime (two-phase) and subscribed
+    # once the provider confirms it: find() returns None on poll N (schedule the
+    # load) then the instrument on poll N+1 (confirm + cache + subscribe).
+    new_instrument = _new_instrument_stub()
+    client = _make_mock_client(mocker, find_returns=[None, new_instrument])
+    strategy, _ = _build_strategy(
+        mocker,
+        mock_cache,
+        [INSTRUMENT_ID_LINEAR],
+        linear_instrument_ids=[INSTRUMENT_ID_LINEAR],
+        reload_config_path=str(tmp_path / "recorder.toml"),
+        data_client=client,
+    )
+    _seed_running(strategy, INSTRUMENT_ID_LINEAR)
+    parent = _patch_all_feed_methods(mocker, strategy)
+
+    # Parsed config adds the new LINEAR instrument alongside the existing one.
+    parsed = _make_parsed_cfg(
+        [
+            _make_entry(INSTRUMENT_ID_LINEAR, 50, ["1-MINUTE"], "linear"),
+            _make_entry(INSTRUMENT_ID_NEW, 50, ["1-MINUTE"], "linear"),
+        ],
+    )
+    mocker.patch(
+        "scripts.bybit_recorder.strategy.load_recorder_config",
+        return_value=(parsed, []),
+    )
+
+    # Poll N: load scheduled, NO subscribe yet, id pending.
+    strategy._on_config_reload(event=None)
+    client.instrument_provider.load.assert_called_once_with(INSTRUMENT_ID_NEW)
+    parent.subscribe_trade_ticks.assert_not_called()
+    assert INSTRUMENT_ID_NEW not in strategy._subscribed_params
+
+    # Poll N+1: find resolves -> confirm + cache + subscribe full feed set.
+    strategy._on_config_reload(event=None)
+
+    parent.subscribe_trade_ticks.assert_called_once_with(INSTRUMENT_ID_NEW)
+    parent.subscribe_quote_ticks.assert_called_once_with(INSTRUMENT_ID_NEW)
+    parent.subscribe_order_book_deltas.assert_called_once()
+    parent.subscribe_bars.assert_called_once()
+    # Linear => mark/index/funding also subscribed.
+    parent.subscribe_mark_prices.assert_called_once_with(INSTRUMENT_ID_NEW)
+    parent.subscribe_index_prices.assert_called_once_with(INSTRUMENT_ID_NEW)
+    parent.subscribe_funding_rates.assert_called_once_with(INSTRUMENT_ID_NEW)
+    # Bookkeeping updated: subscribed params recorded, count incremented, cache
+    # populated, precision caches repopulated, load NOT re-scheduled.
+    assert INSTRUMENT_ID_NEW in strategy._subscribed_params
+    assert strategy._hot_added_count == 1
+    assert mock_cache.instrument(INSTRUMENT_ID_NEW) is not None
+    client._cache_instruments.assert_called_once()
+    client.instrument_provider.load.assert_called_once()  # still once, not re-loaded
 
 
 def test_removal_unsubscribes(mocker, mock_cache, tmp_path):
@@ -239,19 +370,99 @@ def test_bar_interval_delta(mocker, mock_cache):
     parent.subscribe_bars.assert_not_called()
 
 
-def test_failed_not_retried(mocker, mock_cache):
-    pytest.skip("covered in Plan 02 — runtime instrument load")
+def test_failed_not_retried(mocker, mock_cache, tmp_path, caplog):
+    # A Bybit-unknown id: find() returns None on BOTH polls. Poll N schedules the
+    # load (pending); poll N+1 sees it still unresolved -> ERROR once, mark failed,
+    # NO subscribe. A third poll with the SAME toml does NOT re-load (single
+    # attempt per snapshot, D-07/D-11).
+    client = _make_mock_client(mocker, find_returns=[None])  # always None
+    strategy, _ = _build_strategy(
+        mocker,
+        mock_cache,
+        [INSTRUMENT_ID_LINEAR],
+        linear_instrument_ids=[INSTRUMENT_ID_LINEAR],
+        reload_config_path=str(tmp_path / "recorder.toml"),
+        data_client=client,
+    )
+    _seed_running(strategy, INSTRUMENT_ID_LINEAR)
+    parent = _patch_all_feed_methods(mocker, strategy)
+
+    parsed = _make_parsed_cfg(
+        [
+            _make_entry(INSTRUMENT_ID_LINEAR, 50, ["1-MINUTE"], "linear"),
+            _make_entry(INSTRUMENT_ID_NEW, 50, ["1-MINUTE"], "linear"),
+        ],
+    )
+    mocker.patch(
+        "scripts.bybit_recorder.strategy.load_recorder_config",
+        return_value=(parsed, []),
+    )
+
+    # Poll N: schedule load (pending). Poll N+1: still None -> ERROR + mark failed.
+    strategy._on_config_reload(event=None)
+    with caplog.at_level(logging.ERROR, logger="scripts.bybit_recorder.strategy"):
+        strategy._on_config_reload(event=None)
+
+    assert INSTRUMENT_ID_NEW in strategy._failed_instrument_ids
+    assert any(str(INSTRUMENT_ID_NEW) in r.getMessage() for r in caplog.records)
+    parent.subscribe_trade_ticks.assert_not_called()
+
+    # Poll 3 with the SAME toml signature: failed id is NOT re-loaded.
+    strategy._on_config_reload(event=None)
+    client.instrument_provider.load.assert_called_once_with(INSTRUMENT_ID_NEW)
 
 
-def test_failed_resets_on_change(mocker, mock_cache):
-    pytest.skip("covered in Plan 02 — runtime instrument load")
+def test_failed_resets_on_change(mocker, mock_cache, tmp_path):
+    # After a failed id, changing the parsed config SIGNATURE clears
+    # _failed_instrument_ids so the id is retried (D-07 reset).
+    client = _make_mock_client(mocker, find_returns=[None])
+    strategy, _ = _build_strategy(
+        mocker,
+        mock_cache,
+        [INSTRUMENT_ID_LINEAR],
+        linear_instrument_ids=[INSTRUMENT_ID_LINEAR],
+        reload_config_path=str(tmp_path / "recorder.toml"),
+        data_client=client,
+    )
+    _seed_running(strategy, INSTRUMENT_ID_LINEAR)
+    _patch_all_feed_methods(mocker, strategy)
+
+    parsed_fail = _make_parsed_cfg(
+        [
+            _make_entry(INSTRUMENT_ID_LINEAR, 50, ["1-MINUTE"], "linear"),
+            _make_entry(INSTRUMENT_ID_NEW, 50, ["1-MINUTE"], "linear"),
+        ],
+    )
+    load_mock = mocker.patch(
+        "scripts.bybit_recorder.strategy.load_recorder_config",
+        return_value=(parsed_fail, []),
+    )
+
+    # Drive the failure (poll N schedule, poll N+1 mark failed).
+    strategy._on_config_reload(event=None)
+    strategy._on_config_reload(event=None)
+    assert INSTRUMENT_ID_NEW in strategy._failed_instrument_ids
+    assert client.instrument_provider.load.call_count == 1
+
+    # Now the toml signature changes (depth edit on the failed id) -> reset.
+    parsed_changed = _make_parsed_cfg(
+        [
+            _make_entry(INSTRUMENT_ID_LINEAR, 50, ["1-MINUTE"], "linear"),
+            _make_entry(INSTRUMENT_ID_NEW, 200, ["1-MINUTE"], "linear"),
+        ],
+    )
+    load_mock.return_value = (parsed_changed, [])
+
+    strategy._on_config_reload(event=None)
+
+    # Failed set cleared and the load re-attempted under the new signature.
+    assert INSTRUMENT_ID_NEW not in strategy._failed_instrument_ids
+    assert client.instrument_provider.load.call_count == 2
 
 
 def test_threshold_warning(mocker, mock_cache, caplog):
-    # The ADD branch lands in Plan 02, so drive the counter directly: when
-    # _hot_added_count exceeds max_hot_added_instruments, a WARNING is logged.
-    # Here we assert the threshold-check helper logs at WARNING when the count
-    # exceeds the knob (D-08, informational-only).
+    # Direct check: when _hot_added_count exceeds max_hot_added_instruments, the
+    # threshold helper logs a WARNING (D-08, informational-only).
     strategy, _ = _build_strategy(
         mocker,
         mock_cache,
@@ -267,6 +478,47 @@ def test_threshold_warning(mocker, mock_cache, caplog):
         "max_hot_added_instruments" in rec.message or "hot-add" in rec.message.lower()
         for rec in caplog.records
     )
+
+
+def test_threshold_warning_through_add_branch_does_not_block(mocker, mock_cache, tmp_path, caplog):
+    # End-to-end through the ADD branch: with max_hot_added_instruments already
+    # exceeded, a hot-add still WARNs AND still subscribes (never blocks, D-08).
+    new_instrument = _new_instrument_stub()
+    client = _make_mock_client(mocker, find_returns=[None, new_instrument])
+    strategy, _ = _build_strategy(
+        mocker,
+        mock_cache,
+        [INSTRUMENT_ID_LINEAR],
+        linear_instrument_ids=[INSTRUMENT_ID_LINEAR],
+        reload_config_path=str(tmp_path / "recorder.toml"),
+        max_hot_added_instruments=1,
+        data_client=client,
+    )
+    _seed_running(strategy, INSTRUMENT_ID_LINEAR)
+    # Pretend the lifetime count is already at the knob; the next add exceeds it.
+    strategy._hot_added_count = 1
+    parent = _patch_all_feed_methods(mocker, strategy)
+
+    parsed = _make_parsed_cfg(
+        [
+            _make_entry(INSTRUMENT_ID_LINEAR, 50, ["1-MINUTE"], "linear"),
+            _make_entry(INSTRUMENT_ID_NEW, 50, ["1-MINUTE"], "linear"),
+        ],
+    )
+    mocker.patch(
+        "scripts.bybit_recorder.strategy.load_recorder_config",
+        return_value=(parsed, []),
+    )
+
+    strategy._on_config_reload(event=None)  # schedule
+    with caplog.at_level(logging.WARNING, logger="scripts.bybit_recorder.strategy"):
+        strategy._on_config_reload(event=None)  # confirm + subscribe
+
+    # WARNING logged ...
+    assert any("max_hot_added_instruments" in r.getMessage() for r in caplog.records)
+    # ... but the subscribe still proceeded (never blocked).
+    parent.subscribe_trade_ticks.assert_called_once_with(INSTRUMENT_ID_NEW)
+    assert INSTRUMENT_ID_NEW in strategy._subscribed_params
 
 
 def test_linear_gating(mocker, mock_cache, tmp_path):
