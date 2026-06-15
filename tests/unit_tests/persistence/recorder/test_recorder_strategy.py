@@ -510,6 +510,31 @@ def test_on_stop_swallows_catalog_construction_error(mocker, mock_cache):
     assert convert_spy.call_count == 0
 
 
+def test_log_restart_gaps_swallows_catalog_construction_error(mocker, mock_cache, caplog):
+    # WR-02: if ParquetDataCatalog(...) construction raises during
+    # _log_restart_gaps (e.g. transient filesystem error at startup), the call
+    # must not raise -- otherwise it propagates out of on_start() and aborts the
+    # recorder before any subscriptions are made. The per-instrument gap-check
+    # loop must NOT be reached (early return), so no per-instrument WARNING
+    # records are emitted.
+
+    # Arrange: a non-empty instrument list so a reached loop would have work.
+    strategy, _ = _build_strategy(mocker, mock_cache, [INSTRUMENT_ID_LINEAR])
+    mocker.patch(
+        "scripts.bybit_recorder.strategy.ParquetDataCatalog",
+        side_effect=RuntimeError("boom"),
+    )
+
+    # Act / Assert: does not raise.
+    with caplog.at_level(logging.WARNING, logger="scripts.bybit_recorder.strategy"):
+        strategy._log_restart_gaps()
+
+    # Assert the early-return path was taken: the per-instrument loop (which is
+    # the only source of WARNING records here) was skipped.
+    warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert warning_records == []
+
+
 def test_on_stop_swallows_funding_writer_flush_error(mocker, mock_cache):
     # CR-01 / T-3-01: if the strategy-owned funding writer's flush() raises
     # during _run_conversion, on_stop() must not raise, and the per-type
