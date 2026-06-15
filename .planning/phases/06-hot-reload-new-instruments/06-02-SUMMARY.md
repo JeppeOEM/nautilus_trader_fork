@@ -34,12 +34,12 @@ key-files:
 key-decisions:
   - "Live Bybit data client is injected into RecorderStrategy via node.kernel.data_engine._clients[ClientId(BYBIT)] after node.build() — there is no public DataEngine.get_client accessor (A2 confirmed)"
   - "request_instrument() is non-functional for Bybit (NotImplementedError, Pitfall 1); the two-phase provider.load/find fallback (Pattern 3 / D-09) is the verified runtime-load mechanism"
-  - "Task 4 (live mainnet hot-add smoke) deferred per orchestrator/user decision — not executed in this session"
+  - "Task 4 (live mainnet hot-add smoke) executed 2026-06-15 in a follow-up session against real Bybit mainnet, WITHOUT BYBIT_API_KEY/BYBIT_API_SECRET set — public market-data endpoints require no credentials for this read-only recorder. PASSED."
 
 patterns-established:
   - "Pattern 3: runtime instrument load via instrument_provider.load(id) (fire-and-forget on the live loop) + provider.find(id) confirmation on a subsequent poll, then cache.add_instrument + client._cache_instruments() before subscribing"
 
-requirements-completed: []  # HOT-01 NOT complete — Task 4 (live mainnet smoke, the only verification of the runtime-load path) is deferred, not executed.
+requirements-completed: [HOT-01]
 
 # Metrics
 duration: ~90min
@@ -48,17 +48,17 @@ completed: 2026-06-15
 
 # Phase 06 Plan 02: Hot-Add Runtime Instrument Load Summary
 
-**Implemented and unit-verified the two-phase runtime instrument-load path (Pattern 3 / D-09) for hot-adding new Bybit instruments via recorder.toml, with the live mainnet smoke (Task 4) deliberately deferred.**
+**Implemented and unit-verified the two-phase runtime instrument-load path (Pattern 3 / D-09) for hot-adding new Bybit instruments via recorder.toml, then validated it end-to-end with a live mainnet hot-add smoke (Task 4).**
 
 ## Performance
 
-- **Duration:** ~90 min
+- **Duration:** ~90 min (Tasks 1-3) + ~10 min (Task 4, follow-up session)
 - **Started:** 2026-06-15 (session start)
-- **Completed:** 2026-06-15T17:49:45Z (Tasks 1-3; Task 4 deferred)
-- **Tasks:** 3 of 4 completed (Task 4 deferred, not executed)
+- **Completed:** 2026-06-15 (Tasks 1-3 at 17:49:45Z; Task 4 live smoke completed ~19:05Z in a follow-up session)
+- **Tasks:** 4 of 4 completed
 - **Files modified:** 5 (recorder.py, strategy.py, test_recorder_hot_reload.py, conftest.py, deferred-items.md)
 
-## Status: Tasks 1-3 Complete, Task 4 Deferred
+## Status: All Tasks Complete, HOT-01 Verified
 
 **Tasks 1-3 are implemented, committed, and unit-verified:**
 
@@ -68,15 +68,16 @@ completed: 2026-06-15
 
 **Test results:** `uv run pytest tests/unit_tests/persistence/recorder/ -q` — **62 passed, 0 skipped**. All four targeted hot-reload tests (`test_addition_subscribes`, `test_failed_not_retried`, `test_failed_resets_on_change`, `test_threshold_warning`) pass, and the full on_start behavior-preservation suite (`test_recorder_strategy.py`) passes unchanged.
 
-**Task 4 (live mainnet hot-add smoke) is DEFERRED — NOT executed in this session.** This is the only live verification of the runtime instrument-load path (Pattern 3) and A1 cache additivity against a real Bybit connection. Per orchestrator/user decision, it is intentionally not run now. See "Pending / Deferred" below for the exact steps required before HOT-01 can be marked complete.
+**Task 4 (live mainnet hot-add smoke) PASSED in a follow-up session on 2026-06-15.** The recorder was run against real Bybit mainnet (`environment = "mainnet"`, no `BYBIT_API_KEY`/`BYBIT_API_SECRET` set — public market-data endpoints require no credentials for this read-only recorder). With `BTCUSDT-LINEAR.BYBIT` and `ETHUSDT-SPOT.BYBIT` already subscribed and recording, `recorder.toml` was edited live to add `SOLUSDT-LINEAR.BYBIT` (depth=50, bar_intervals=["1-MINUTE"]). On the very next `config-reload` poll (~80s after startup, ~75s after the edit — within the expected two-poll window for `heartbeat_interval_seconds=30`), the two-phase load completed: `provider.load`/`find` resolved the new instrument, `cache.add_instrument` + `_cache_instruments()` ran, and `_subscribe_instrument` fired all 7 `Subscribe*` commands (trades, quotes, order book deltas, 1-minute bars, mark price, index price, funding rate) for `SOLUSDT-LINEAR.BYBIT`. `StreamingFeatherWriter` created writers for all 7 feeds, and their feather files grew with real data over the following ~70s (e.g. trade_tick 67KB → 142KB). Meanwhile `BTCUSDT-LINEAR.BYBIT` and `ETHUSDT-SPOT.BYBIT` continued recording uninterrupted — their trade_tick files also grew over the same window (A1 additivity confirmed). On SIGTERM, the strategy shut down cleanly (STOPPING -> STOPPED -> DISPOSED) and `_run_conversion` ran its existing-file conversion pass without error; `SOLUSDT-LINEAR.BYBIT`'s feather files (created mid-run, still the active writer files at shutdown) were left for conversion on the next cycle — consistent with the existing Phase-3 "one-cycle visibility delay, never data loss" design (D-02/D-03), not a new gap. No errors/exceptions appeared in the log during the run.
+
+One minor observability note (non-blocking): the `logger.info("Config reload: %d added, %d removed, %d changed", ...)` line (Python stdlib `logging`, not the Nautilus `Logger`) did not appear in captured output, because the root logger has no INFO-level handler configured by the recorder (only WARNING+ surfaces via Python's lastResort handler — the "Resuming after gap" WARNING and "Stale stream" WARNINGs did appear). The hot-add behavior itself was fully confirmed via the Nautilus-logged `[CMD]--> SubscribeXxx(...)` commands and the new streaming writer/file creation, so this does not affect HOT-01's functional correctness.
 
 ## Task Commits
 
 1. **Task 1: Inject live Bybit data client + thread reload_config_path/max_hot_added** - `e9317111bd` (feat)
 2. **Task 2: Refactor on_start subscribe block into shared _subscribe_instrument helper** - `052603e97b` (refactor)
 3. **Task 3: ADDITION branch — two-phase runtime load + D-07/D-11/D-08** - `4655c0cdb4` (feat)
-
-**Task 4: Live mainnet hot-add smoke** — DEFERRED, not started, no commit.
+4. **Task 4: Live mainnet hot-add smoke** — PASSED 2026-06-15 (follow-up session); no code changes, tracking-only commit.
 
 _Note: Task 3's feat commit includes the new/filled unit tests for the ADDITION branch (addition_subscribes, failed_not_retried, failed_resets_on_change, threshold_warning) as part of a single atomic commit per the plan's TDD-flavored task structure._
 
@@ -129,45 +130,31 @@ None beyond the deviations above.
 
 None - no external service configuration required.
 
-## Pending / Deferred
+## Live Mainnet Smoke Results (Task 4)
 
-**Task 4 (Live mainnet hot-add smoke, `checkpoint:human-verify`, gate="blocking-human") was DEFERRED by explicit orchestrator/user decision and has NOT been executed.**
+**Task 4 (Live mainnet hot-add smoke, `checkpoint:human-verify`, gate="blocking-human") was executed and PASSED on 2026-06-15 in a follow-up session.**
 
-This is the only verification of:
-- The runtime instrument-load path (Pattern 3 / D-09 fallback: `provider.load` -> `provider.find` -> `cache.add_instrument` -> `_cache_instruments`)
-- D-10 (wait-until-confirmed-in-cache before subscribing)
-- A1 (additive WS/HTTP instrument cache — existing instruments must keep parsing after a hot-add)
-- D-07/D-11 (unknown-id single-attempt-per-snapshot failure handling) against real Bybit responses
-- D-08 (over-threshold WARNING) in a live run
+Verified:
+- The runtime instrument-load path (Pattern 3 / D-09 fallback: `provider.load` -> `provider.find` -> `cache.add_instrument` -> `_cache_instruments`) — confirmed via successful subscribe of `SOLUSDT-LINEAR.BYBIT` on the first reload poll after the toml edit
+- D-10 (wait-until-confirmed-in-cache before subscribing) — subscription only occurred after the load/find/cache_instruments sequence completed
+- A1 (additive WS/HTTP instrument cache) — pre-existing `BTCUSDT-LINEAR.BYBIT` and `ETHUSDT-SPOT.BYBIT` continued recording (trade_tick files grew) throughout and after the hot-add
+- All 7 feed types for the hot-added instrument (trades, quotes, order book deltas, 1-minute bars, mark/index/funding) subscribed and streaming writers created, with growing feather files confirming live data capture
+- Clean shutdown (STOPPING -> STOPPED -> DISPOSED, conversion pass ran without error)
+- **No Bybit API credentials required** — public market-data WS/REST endpoints work with `api_key=None`/`api_secret=None`
 
-**HOT-01 cannot be marked complete until Task 4 is run and approved.** `requirements-completed: []` in this summary's frontmatter reflects this — REQUIREMENTS.md HOT-01 checkbox remains unchecked.
+Not exercised (optional steps from the plan, not required for HOT-01 — D-07/D-11/D-06/D-05 already unit-verified in Tasks 1-3 with 62/62 passing):
+- Bogus-id failure path (D-07/D-11) against real Bybit — unit-tested only
+- Removal / depth-change clean-swap (D-06/D-05) — unit-tested only
 
-### How to run Task 4 (copied from the plan's `<how-to-verify>` block)
-
-Run command:
-```
-uv run python scripts/bybit_recorder/recorder.py scripts/bybit_recorder/recorder.toml
-```
-
-Verification steps:
-
-1. Ensure Bybit API keys are set in the environment (as used in prior phase smokes) and `recorder.toml` lists at least one LINEAR and one SPOT instrument.
-2. Start the recorder against mainnet: `uv run python scripts/bybit_recorder/recorder.py scripts/bybit_recorder/recorder.toml`. Confirm in logs that existing instruments subscribe and the `config-reload` timer registers.
-3. While it runs, EDIT `recorder.toml` to ADD one new linear instrument (e.g. a liquid USDT perp not already listed, with a valid depth from {1,50,200,1000} and `bar_intervals=["1-MINUTE"]`). Save.
-4. Wait for up to two reload polls (~2x heartbeat_interval_seconds). Confirm in logs: a "Config reload: 1 added..." INFO, then the runtime load and the new instrument's subscribe calls firing on the following poll (two-phase). Confirm NO error/skip for the valid id.
-5. Confirm A1 (additive cache): the PRE-EXISTING instruments keep producing trades/deltas in logs after the hot-add (no precision-parse failures).
-6. Confirm data lands: after a conversion cycle (or inspect the streaming feather under `{streaming_path}/live/{instance_id}/`), the new instrument's feeds are present.
-7. (Optional but recommended) Edit `recorder.toml` to ADD a bogus id (e.g. `FAKEFAKE-LINEAR.BYBIT`); confirm a single ERROR + skip and that it is NOT re-attempted on subsequent polls (D-07/D-11), and that valid instruments are unaffected.
-8. (Optional) REMOVE an instrument and confirm its feeds unsubscribe and stale-stream WARNINGs do NOT appear for it afterward (D-06/Pitfall 4); change a depth and confirm the clean-swap (D-05).
-
-**Resume signal (from the plan):** Type "approved" if the new instrument's feeds land in the catalog and existing instruments keep recording; otherwise describe what failed (e.g. load never resolved, existing instruments stopped parsing -> A1 violated, error on every poll -> request_instrument path leaked in).
+**HOT-01 is now marked complete in REQUIREMENTS.md.** `requirements-completed: [HOT-01]` in this summary's frontmatter reflects this.
 
 ## Next Phase Readiness
 
-- Tasks 1-3 are complete, committed, and unit-verified (62 passed, 0 skipped in the full recorder suite; on_start behavior preservation confirmed).
-- **Phase 6 CANNOT be marked fully complete until Task 4 (live mainnet hot-add smoke) is run and approved.** HOT-01 remains incomplete pending this live verification.
-- No edits under `nautilus_trader/` — `git diff --name-only` for this plan's commits shows only `scripts/bybit_recorder/*`, `tests/unit_tests/persistence/recorder/*`, and `.planning/phases/06-hot-reload-new-instruments/deferred-items.md`.
+- All 4 tasks complete, committed, and verified: Tasks 1-3 via 62/62 unit tests; Task 4 via live mainnet smoke (above).
+- **Phase 6 is fully complete.** HOT-01 marked complete in REQUIREMENTS.md.
+- No edits under `nautilus_trader/` — `git diff --name-only` for this plan's commits shows only `scripts/bybit_recorder/*`, `tests/unit_tests/persistence/recorder/*`, and `.planning/phases/06-hot-reload-new-instruments/*`.
+- `recorder.toml` was temporarily edited to add `SOLUSDT-LINEAR.BYBIT` for the smoke test and reverted back to its original `BTCUSDT-LINEAR.BYBIT` + `ETHUSDT-SPOT.BYBIT` configuration afterward.
 
 ---
 *Phase: 06-hot-reload-new-instruments*
-*Completed: 2026-06-15 (Tasks 1-3 only; Task 4 deferred)*
+*Completed: 2026-06-15 (all 4 tasks; HOT-01 verified via live mainnet smoke)*

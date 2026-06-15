@@ -40,7 +40,7 @@
 
 ### Hot-Reload
 
-- [ ] **HOT-01**: While running, the recorder periodically detects changes to `recorder.toml`'s instrument list/params (additions, removals, depth/bar_interval changes) and applies them live — loading new instruments and subscribing/unsubscribing the affected feeds — without restarting the process or disrupting recording for unaffected instruments
+- [x] **HOT-01**: While running, the recorder periodically detects changes to `recorder.toml`'s instrument list/params (additions, removals, depth/bar_interval changes) and applies them live — loading new instruments and subscribing/unsubscribing the affected feeds — without restarting the process or disrupting recording for unaffected instruments
 
 ## v2 Requirements
 
@@ -91,7 +91,7 @@ Which phases cover which requirements. Updated during roadmap creation.
 | OPS-01 | Phase 5 | Pending |
 | OPS-02 | Phase 5 | Pending |
 | OPS-03 | Phase 5 | Pending |
-| HOT-01 | Phase 6 | Pending |
+| HOT-01 | Phase 6 | Complete |
 
 **Coverage:**
 

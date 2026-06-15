@@ -18,7 +18,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 3: Reliability for 24/7 Operation** - Graceful shutdown flush, stale-stream heartbeats, and adapter-driven reconnect resilience (completed 2026-06-14)
 - [ ] **Phase 4: Open Interest Spike** - Custom open-interest `Data` type recorded into the catalog via Arrow registration
 - [ ] **Phase 5: Inspection & Deployment** - Pandas catalog-inspection utility, systemd unit, and deployment guide
-- [x] **Phase 6: Hot-Reload Config Changes** - Detect and apply instrument-list/param changes from `recorder.toml` while running, without a restart (code complete 2026-06-15; HOT-01 live mainnet smoke deferred, see Pending Todos)
+- [x] **Phase 6: Hot-Reload Config Changes** - Detect and apply instrument-list/param changes from `recorder.toml` while running, without a restart (completed 2026-06-15; HOT-01 live mainnet hot-add smoke passed)
 
 ## Phase Details
 
@@ -143,4 +143,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 
 **Wave 2** *(blocked on Wave 1 — shares strategy.py)*
 
-- [x] 06-02-PLAN.md — ADDITION branch: runtime instrument load (Pattern 3 / D-09 fallback, D-10), failure tracking (D-07/D-11), data-client injection wiring (Tasks 1-3 done, unit-verified); Task 4 (live mainnet hot-add smoke) DEFERRED — HOT-01 not yet marked complete in REQUIREMENTS.md pending that smoke
+- [x] 06-02-PLAN.md — ADDITION branch: runtime instrument load (Pattern 3 / D-09 fallback, D-10), failure tracking (D-07/D-11), data-client injection wiring (Tasks 1-3 unit-verified); Task 4 (live mainnet hot-add smoke) PASSED 2026-06-15 — HOT-01 marked complete in REQUIREMENTS.md

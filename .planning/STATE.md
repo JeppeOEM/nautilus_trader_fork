@@ -3,9 +3,9 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Phase 6 code complete; HOT-01 live mainnet smoke deferred
-last_updated: "2026-06-15T17:54:00.000Z"
-last_activity: 2026-06-15 -- Phase 06 Wave 1 + Wave 2 (Tasks 1-3) executed and merged; Task 4 live smoke deferred
+stopped_at: Phase 6 complete; HOT-01 live mainnet hot-add smoke passed
+last_updated: "2026-06-15T19:05:00.000Z"
+last_activity: 2026-06-15 -- Phase 06 Wave 1 + Wave 2 (Tasks 1-4) executed and merged; live mainnet hot-add smoke PASSED, HOT-01 complete
 progress:
   total_phases: 6
   completed_phases: 3
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-06-13)
 
 **Core value:** Reliable, continuous capture of Bybit market data into a Nautilus-catalog-compatible parquet archive — no data loss across restarts/disconnects.
-**Current focus:** Phase 06 — hot-reload-new-instruments (code complete; HOT-01 live smoke pending)
+**Current focus:** Phase 06 complete (HOT-01 live smoke passed); next is Phase 4 (Open Interest Spike)
 
 ## Current Position
 
-Phase: 06 (hot-reload-new-instruments) — CODE COMPLETE, AWAITING LIVE VERIFICATION
-Plan: 2 of 2 (both code-complete and merged; 06-02 Task 4 live mainnet smoke deferred)
-Status: Phase 06 implementation done; HOT-01 cannot be marked complete in REQUIREMENTS.md until the live hot-add smoke (06-02 Task 4) is run and approved
-Last activity: 2026-06-15 -- Phase 06 Wave 1 + Wave 2 (Tasks 1-3) executed, merged to gg; Task 4 live smoke deferred
+Phase: 06 (hot-reload-new-instruments) — COMPLETE
+Plan: 2 of 2 (both code-complete and merged; 06-02 Task 4 live mainnet smoke PASSED 2026-06-15)
+Status: Phase 06 fully complete. HOT-01 marked complete in REQUIREMENTS.md.
+Last activity: 2026-06-15 -- Phase 06 Wave 1 + Wave 2 executed, merged to gg; live mainnet hot-add smoke run against real Bybit mainnet (no API credentials needed), confirmed two-phase load+subscribe of a newly added LINEAR instrument across config-reload polls, continuity of pre-existing instruments' recording, and streaming writers/files for all 7 feeds of the new instrument
 
 Progress: [██████████] 100% (of Phases 1-2; milestone has 5 phases total)
 
@@ -93,7 +93,6 @@ Recent decisions affecting current work:
 
 ### Pending Todos
 
-- [Phase 6]: HOT-01 live mainnet hot-add smoke (06-02 Task 4, `checkpoint:human-verify`) is DEFERRED — not yet run. Run: `uv run python scripts/bybit_recorder/recorder.py scripts/bybit_recorder/recorder.toml` against mainnet, then edit `recorder.toml` to add a new LINEAR instrument while running. Confirm: (1) "Config reload: 1 added..." INFO then the two-phase load/subscribe on the following poll; (2) pre-existing instruments keep producing trades/deltas (cache stays additive, A1); (3) the new instrument's feeds land in the streaming catalog; (optional) a bogus id logs one ERROR and is not retried (D-07/D-11), and a removal/depth-change clean-swaps correctly. Full steps in `.planning/phases/06-hot-reload-new-instruments/06-02-SUMMARY.md` and `06-02-PLAN.md` Task 4. Once approved, mark HOT-01 complete in `.planning/REQUIREMENTS.md` and update this entry.
 - [Phase 3]: Gap-closure for 03-VERIFICATION.md (status=gaps_found, 6/7 must-haves). CR-01 from 03-REVIEW.md: `_run_conversion()` in `scripts/bybit_recorder/strategy.py` (~lines 452-459) has an unguarded `ParquetDataCatalog(self.config.catalog_path)` construction and an unguarded `self._funding_writer.flush()` call OUTSIDE the per-type try/except that protects the rest of the function. If either raises during `on_stop()` (SIGTERM), the exception propagates and faults the strategy component mid-shutdown, undermining REL-02's "no data loss on restart" guarantee. Fix: wrap catalog construction in try/except (log + return early on failure); wrap `self._funding_writer.flush()` in its own try/except (log + continue), matching the existing per-type swallow pattern just below. Next step: `/gsd:plan-phase 03 --gaps` to create the gap-closure plan, then re-run execute-phase.
 - [Phase 3, lower priority]: WR-01 from 03-REVIEW.md: `restart_gap_threshold_seconds` (config.py ~line 287) lacks the same fail-fast `> 0` validation applied to `heartbeat_interval_seconds`/`stale_threshold_*`. A `0`/negative value silently passes through and triggers a restart-gap WARNING on nearly every startup. Worth fixing alongside the CR-01 gap-closure.
 
@@ -119,6 +118,6 @@ Items acknowledged and carried forward from previous milestone close:
 
 ## Session Continuity
 
-Last session: 2026-06-15T11:41:37.690Z
-Stopped at: Phase 6 context gathered
-Resume file: .planning/phases/06-hot-reload-new-instruments/06-CONTEXT.md
+Last session: 2026-06-15T19:05:00.000Z
+Stopped at: Phase 6 complete (HOT-01 live mainnet smoke passed)
+Resume file: none — next up is Phase 4 (Open Interest Spike), needs /gsd:plan-phase 4
