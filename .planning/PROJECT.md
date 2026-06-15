@@ -12,7 +12,7 @@ Reliable, continuous capture of Bybit market data into a Nautilus-catalog-compat
 
 ### Validated
 
-(None yet — ship to validate)
+- [x] Collector reconnects automatically and resumes recording after disconnects (24/7 reliability) — Validated in Phase 3: Reliability for 24/7 Operation (graceful SIGTERM flush/convert, adapter-driven reconnect, heartbeat/stale-stream warnings, restart-gap logging)
 
 ### Active
 
@@ -25,7 +25,6 @@ Reliable, continuous capture of Bybit market data into a Nautilus-catalog-compat
 - [ ] Collector subscribes to and records open interest for linear perpetuals
 - [x] All recorded data is written using the official `ParquetDataCatalog` format, partitioned by day
 - [ ] A pandas-based utility can load and view slices of the catalog for data inspection
-- [ ] Collector reconnects automatically and resumes recording after disconnects (24/7 reliability)
 - [ ] systemd unit file provided for process supervision with auto-restart
 - [ ] Detailed deployment/run guide documenting setup, configuration, starting/stopping, and monitoring via journald
 
@@ -80,4 +79,4 @@ This document evolves at phase transitions and milestone boundaries.
 4. Update Context with current state
 
 ---
-*Last updated: 2026-06-13 after initialization*
+*Last updated: 2026-06-15 after Phase 3 completion*
