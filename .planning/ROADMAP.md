@@ -18,7 +18,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [x] **Phase 3: Reliability for 24/7 Operation** - Graceful shutdown flush, stale-stream heartbeats, and adapter-driven reconnect resilience (completed 2026-06-14)
 - [ ] **Phase 4: Open Interest Spike** - Custom open-interest `Data` type recorded into the catalog via Arrow registration
 - [ ] **Phase 5: Inspection & Deployment** - Pandas catalog-inspection utility, systemd unit, and deployment guide
-- [ ] **Phase 6: Hot-Reload Config Changes** - Detect and apply instrument-list/param changes from `recorder.toml` while running, without a restart
+- [x] **Phase 6: Hot-Reload Config Changes** - Detect and apply instrument-list/param changes from `recorder.toml` while running, without a restart (code complete 2026-06-15; HOT-01 live mainnet smoke deferred, see Pending Todos)
 
 ## Phase Details
 
@@ -128,14 +128,14 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | 3. Reliability for 24/7 Operation | 3/3 | Complete    | 2026-06-15 |
 | 4. Open Interest Spike | 0/TBD | Not started | - |
 | 5. Inspection & Deployment | 0/TBD | Not started | - |
-| 6. Hot-Reload Config Changes | 1/2 | In Progress|  |
+| 6. Hot-Reload Config Changes | 2/2 | Complete   | 2026-06-15 |
 
 ### Phase 6: Hot-Reload Config Changes
 
 **Goal:** While the recorder is running, periodically detect changes to `recorder.toml`'s instrument list and parameters — additions, removals, and depth/bar_interval changes for existing instruments — and apply them live: load new instruments via the instrument provider and subscribe to the same data feeds (trades, quotes, order book deltas, bars, and for linear instruments mark/index/funding) used for existing instruments, unsubscribe feeds for removed instruments, and clean-swap subscriptions for changed parameters — all without restarting the process or disrupting recording for unaffected instruments.
 **Requirements**: HOT-01
 **Depends on:** Phase 5
-**Plans:** 1/2 plans executed
+**Plans:** 2/2 plans complete
 
 **Wave 1**
 
@@ -143,4 +143,4 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 
 **Wave 2** *(blocked on Wave 1 — shares strategy.py)*
 
-- [ ] 06-02-PLAN.md — ADDITION branch: runtime instrument load (Pattern 3 / D-09 fallback, D-10), failure tracking (D-07/D-11), data-client injection wiring, + live mainnet hot-add smoke
+- [x] 06-02-PLAN.md — ADDITION branch: runtime instrument load (Pattern 3 / D-09 fallback, D-10), failure tracking (D-07/D-11), data-client injection wiring (Tasks 1-3 done, unit-verified); Task 4 (live mainnet hot-add smoke) DEFERRED — HOT-01 not yet marked complete in REQUIREMENTS.md pending that smoke
