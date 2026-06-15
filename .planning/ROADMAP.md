@@ -72,7 +72,7 @@ Decimal phases appear between their surrounding integers in numeric order.
   2. After a forced WebSocket disconnect the recorder resumes recording automatically with no custom reconnect code (adapter-driven resubscribe)
   3. The recorder logs per-stream heartbeats and emits a warning when any subscribed stream goes quiet beyond its expected threshold
 
-**Plans**: 2 plans
+**Plans**: 3 plans
 
 **Wave 1**
 
@@ -81,6 +81,10 @@ Decimal phases appear between their surrounding integers in numeric order.
 **Wave 2** *(blocked on Wave 1 completion — shares strategy.py)*
 
 - [x] 03-02-PLAN.md — Per-stream heartbeat + stale-stream WARNING with configurable per-type thresholds (REL-03)
+
+**Wave 3** *(gap closure — blocked on Wave 1/2; shares strategy.py + config.py)*
+
+- [ ] 03-03-PLAN.md — Guard _run_conversion() catalog/flush (CR-01, REL-02) + fail-fast restart_gap_threshold validation (WR-01) + reconcile REQUIREMENTS.md
 
 ### Phase 4: Open Interest Spike
 
@@ -120,6 +124,6 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5
 |-------|----------------|--------|-----------|
 | 1. Bootstrap, Config & End-to-End Slice | 4/4 | Complete   | 2026-06-13 |
 | 2. Full Data-Type Coverage | 1/2 | In Progress|  |
-| 3. Reliability for 24/7 Operation | 2/2 | Complete   | 2026-06-14 |
+| 3. Reliability for 24/7 Operation | 2/3 | In Progress | 2026-06-14 |
 | 4. Open Interest Spike | 0/TBD | Not started | - |
 | 5. Inspection & Deployment | 0/TBD | Not started | - |
