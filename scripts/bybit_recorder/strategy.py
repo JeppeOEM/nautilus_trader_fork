@@ -224,7 +224,18 @@ class RecorderStrategy(Strategy):
         one instrument cannot suppress warnings for others or block startup
         (consistent with the per-type swallow in `_run_conversion`).
         """
-        catalog = ParquetDataCatalog(self.config.catalog_path)
+        try:
+            # WHY: opening the catalog touches the filesystem; a transient I/O
+            # error here must not propagate out of _log_restart_gaps() and then
+            # out of on_start(), which would abort the recorder before any
+            # subscriptions are made (WR-02 / the on_start + docstring "logged
+            # but must not prevent subscriptions" guarantee). With no catalog
+            # there are no prior ts_init values to compare, so return early.
+            catalog = ParquetDataCatalog(self.config.catalog_path)
+        except Exception:
+            logger.exception("Failed to open catalog for restart-gap check")
+            return
+
         now_ns = self.clock.timestamp_ns()
 
         for instrument_id in self.config.instrument_ids:
