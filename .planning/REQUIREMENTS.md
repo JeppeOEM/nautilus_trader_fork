@@ -24,9 +24,9 @@
 ### Reliability
 
 - [x] **REL-01**: A scheduled job converts streamed data into the partitioned `ParquetDataCatalog` format, partitioned by day
-- [ ] **REL-02**: On shutdown (SIGTERM), the recorder flushes/converts any buffered data before exiting, so a restart does not lose recent data
+- [x] **REL-02**: On shutdown (SIGTERM), the recorder flushes/converts any buffered data before exiting, so a restart does not lose recent data
 - [x] **REL-03**: Recorder logs per-stream heartbeats and warns if any subscribed stream goes quiet beyond an expected threshold
-- [ ] **REL-04**: Recorder relies entirely on the Bybit adapter's built-in WebSocket reconnect/resubscribe — no custom reconnect logic
+- [x] **REL-04**: Recorder relies entirely on the Bybit adapter's built-in WebSocket reconnect/resubscribe — no custom reconnect logic
 
 ### Open Interest (Spike)
 
@@ -80,9 +80,9 @@ Which phases cover which requirements. Updated during roadmap creation.
 | REC-04 | Phase 2 | Pending |
 | REC-05 | Phase 2 | Pending |
 | REC-06 | Phase 2 | Pending |
-| REL-02 | Phase 3 | Pending |
+| REL-02 | Phase 3 | Complete |
 | REL-03 | Phase 3 | Complete |
-| REL-04 | Phase 3 | Pending |
+| REL-04 | Phase 3 | Complete |
 | OI-01 | Phase 4 | Pending |
 | OPS-01 | Phase 5 | Pending |
 | OPS-02 | Phase 5 | Pending |

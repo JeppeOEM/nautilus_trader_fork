@@ -256,6 +256,7 @@ def load_recorder_config(path: str | Path) -> tuple[RecorderConfig, list[Instrum
     heartbeat_interval_seconds = recorder_raw.get("heartbeat_interval_seconds", 30)
     stale_threshold_default_seconds = recorder_raw.get("stale_threshold_default_seconds", 90)
     stale_threshold_seconds = recorder_raw.get("stale_threshold_seconds", {})
+    restart_gap_threshold_seconds = recorder_raw.get("restart_gap_threshold_seconds", 60)
 
     # V5 fail-fast (T-3-05 DoS-of-logs mitigation): an absurd interval/threshold
     # would either spam logs (too small) or never warn (too large/negative), so
@@ -278,13 +279,19 @@ def load_recorder_config(path: str | Path) -> tuple[RecorderConfig, list[Instrum
                 f"Invalid stale_threshold_seconds[{stream!r}] {threshold}: must be positive",
             )
 
+    if restart_gap_threshold_seconds <= 0:
+        raise ValueError(
+            f"Invalid restart_gap_threshold_seconds {restart_gap_threshold_seconds}: "
+            "must be positive",
+        )
+
     recorder_cfg = RecorderConfig(
         trader_id=recorder_raw["trader_id"],
         catalog_path=_resolve_catalog_path(recorder_raw["catalog_path"]),
         streaming_path=_resolve_catalog_path(recorder_raw["streaming_path"]),
         conversion_interval_minutes=recorder_raw.get("conversion_interval_minutes", 60),
         rotation_interval_minutes=recorder_raw.get("rotation_interval_minutes", 1440),
-        restart_gap_threshold_seconds=recorder_raw.get("restart_gap_threshold_seconds", 60),
+        restart_gap_threshold_seconds=restart_gap_threshold_seconds,
         heartbeat_interval_seconds=heartbeat_interval_seconds,
         stale_threshold_default_seconds=stale_threshold_default_seconds,
         stale_threshold_seconds=stale_threshold_seconds,

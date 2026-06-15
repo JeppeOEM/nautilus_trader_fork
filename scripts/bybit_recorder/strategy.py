@@ -449,14 +449,28 @@ class RecorderStrategy(Strategy):
         (REL-01) and by `on_stop` for a final flush+convert on shutdown (REL-02).
 
         """
-        catalog = ParquetDataCatalog(self.config.catalog_path)
+        try:
+            # WHY: opening the catalog touches the filesystem; a transient I/O
+            # error here (e.g. during SIGTERM shutdown) must not propagate out
+            # of on_stop() and fault the component (CR-01 / T-3-01). Without a
+            # catalog there is nothing to convert into, so return early.
+            catalog = ParquetDataCatalog(self.config.catalog_path)
+        except Exception:
+            logger.exception("Failed to open catalog for conversion")
+            return
 
         # Flush the strategy-owned funding writer before conversion so any
         # deduped funding rows persisted since the last tick are visible in its
         # feather file (the kernel "*" writer is flushed separately by the
         # framework).
         if self._funding_writer is not None:
-            self._funding_writer.flush()
+            try:
+                # WHY: a flush error must not block conversion of already
+                # finalized files, nor propagate out of on_stop() (CR-01 /
+                # T-3-01).
+                self._funding_writer.flush()
+            except Exception:
+                logger.exception("Failed to flush funding writer")
 
         for data_cls in [*_RECORDED_TYPES, FundingRateUpdate]:
             try:
