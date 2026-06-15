@@ -35,7 +35,6 @@ from nautilus_trader.persistence.catalog.parquet import ParquetDataCatalog
 from nautilus_trader.persistence.writer import RotationMode
 from nautilus_trader.persistence.writer import StreamingFeatherWriter
 from nautilus_trader.trading.strategy import Strategy
-
 from scripts.bybit_recorder.config import load_recorder_config
 
 
@@ -205,6 +204,58 @@ class RecorderStrategy(Strategy):
         """
         self._bybit_client = client
 
+    def _subscribe_instrument(
+        self,
+        instrument_id: InstrumentId,
+        depth: int,
+        bar_intervals: list[str],
+        is_linear: bool,
+    ) -> None:
+        """
+        Subscribe ALL recorded feeds for a single instrument (shared by `on_start`
+        and the HOT-01 ADDITION branch).
+
+        Issues exactly the same per-instrument subscribe calls, in the same order,
+        that `on_start` historically issued inline: trade ticks, quote ticks,
+        order-book deltas (`BookType.L2_MBP` at `depth`), one `subscribe_bars` per
+        interval (venue-native `LAST-EXTERNAL` kline, D-02), and — only when
+        `is_linear` — mark/index prices and funding rates (D-04 linear-only
+        gating, Pitfall 5).
+
+        Pure subscribe issuance: this helper deliberately does NOT touch
+        `_subscribed_params`, `_product_types`, `_hot_added_count`, or `_last_seen`
+        — `on_start` and the ADDITION branch own that bookkeeping around it.
+
+        Parameters
+        ----------
+        instrument_id : InstrumentId
+            The instrument to subscribe to.
+        depth : int
+            The order book depth for `subscribe_order_book_deltas`.
+        bar_intervals : list[str]
+            The bar interval strings (e.g. ``["1-MINUTE"]``) to subscribe.
+        is_linear : bool
+            Whether the instrument is a linear perpetual (gates mark/index/funding).
+
+        """
+        self.subscribe_trade_ticks(instrument_id)
+        self.subscribe_quote_ticks(instrument_id)
+        self.subscribe_order_book_deltas(
+            instrument_id,
+            book_type=BookType.L2_MBP,
+            depth=depth,
+        )
+        for interval in bar_intervals:
+            # Venue-native EXTERNAL kline stream (D-02) — NOT derived from
+            # trades. LAST price type, EXTERNAL aggregation source.
+            self.subscribe_bars(
+                BarType.from_str(f"{instrument_id}-{interval}-LAST-EXTERNAL"),
+            )
+        if is_linear:
+            self.subscribe_mark_prices(instrument_id)
+            self.subscribe_index_prices(instrument_id)
+            self.subscribe_funding_rates(instrument_id)
+
     def on_start(self) -> None:
         """
         Actions to be performed on strategy start.
@@ -230,28 +281,17 @@ class RecorderStrategy(Strategy):
         # failure here is logged but must not prevent subscriptions.
         self._log_restart_gaps()
 
+        # D-04 linear-only gating: mark/index/funding exist for derivatives only.
+        # The Bybit adapter merely warns + early-returns for spot, so gate on the
+        # configured linear set (Pitfall 4/5) — passed into the shared helper.
+        linear_ids_set = set(self.config.linear_instrument_ids)
         for instrument_id in self.config.instrument_ids:
-            self.subscribe_trade_ticks(instrument_id)
-            self.subscribe_quote_ticks(instrument_id)
-            self.subscribe_order_book_deltas(
+            self._subscribe_instrument(
                 instrument_id,
-                book_type=BookType.L2_MBP,
                 depth=self.config.instrument_depths[instrument_id],
+                bar_intervals=self.config.instrument_bar_intervals[instrument_id],
+                is_linear=instrument_id in linear_ids_set,
             )
-            for interval in self.config.instrument_bar_intervals[instrument_id]:
-                # Venue-native EXTERNAL kline stream (D-02) — NOT derived from
-                # trades. LAST price type, EXTERNAL aggregation source.
-                self.subscribe_bars(
-                    BarType.from_str(f"{instrument_id}-{interval}-LAST-EXTERNAL"),
-                )
-
-        # D-04 linear-only gating: mark/index prices exist for derivatives only.
-        # The Bybit adapter merely warns + early-returns for spot, so never iterate
-        # the full instrument list here (Pitfall 4).
-        for instrument_id in self.config.linear_instrument_ids:
-            self.subscribe_mark_prices(instrument_id)
-            self.subscribe_index_prices(instrument_id)
-            self.subscribe_funding_rates(instrument_id)
 
         self.clock.set_timer(
             name="convert-stream",
