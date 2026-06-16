@@ -138,6 +138,12 @@ def main(config_path: str) -> None:
     data_client = node.kernel.data_engine._clients[ClientId(BYBIT)]
     strategy.set_data_client(data_client)
 
+    # DYDX-01 / RESEARCH Pitfall 1: inject the Bybit config loader so the
+    # hot-reload path re-reads recorder.toml exactly as before. The loader is
+    # INJECTED (not imported by the common strategy) to keep common_recorder
+    # venue-agnostic.
+    strategy.set_config_loader(load_recorder_config)
+
     try:
         # WHY: raise_exception=True so an on_start failure (e.g. missing
         # instruments, D-05/D-06) propagates out of main() and exits the
