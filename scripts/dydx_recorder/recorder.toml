@@ -1,0 +1,34 @@
+# dYdX Data Collector configuration.
+#
+# The dYdX DATA client needs NO credentials — wallet address and mnemonic/key
+# are EXECUTION-only. Never place any secrets in this file.
+
+[recorder]
+trader_id = "DYDX-COLLECTOR-001"
+catalog_path = "catalog"
+streaming_path = "catalog/streaming"   # SAME shared catalog root as Bybit
+conversion_interval_minutes = 60
+heartbeat_interval_seconds = 30
+stale_threshold_default_seconds = 90
+environment = "mainnet"                # -> DydxNetwork.MAINNET (case-insensitive)
+
+# Per-stream stale thresholds (seconds) for the heartbeat WARNING. A stream label
+# not listed here falls back to stale_threshold_default_seconds.
+[recorder.stale_threshold_seconds]
+trade = 90
+quote = 600        # DYDX-05: relaxed — synthesized quotes only fire on top-of-book change
+deltas = 60        # tight — book updates often; silence here = real fault
+bar = 90
+mark = 30
+index = 30
+funding = 30
+
+# Flat perpetual list — dYdX exposes full L2 order books (no level cap to
+# configure) and trades only perpetuals (no product-type split).
+[[instruments]]
+id = "BTC-USD-PERP.DYDX"
+bar_intervals = ["1-MINUTE"]
+
+[[instruments]]
+id = "ETH-USD-PERP.DYDX"
+bar_intervals = ["1-MINUTE"]
