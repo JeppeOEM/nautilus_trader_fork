@@ -1,180 +1,186 @@
 # Feature Research
 
-**Domain:** 24/7 live market-data recorder (Bybit linear perps + spot) on NautilusTrader, writing to `ParquetDataCatalog`
-**Researched:** 2026-06-13
-**Confidence:** HIGH (core findings read directly from the fork's adapter source and catalog implementation)
+**Domain:** dYdX v4 perpetuals market-data recorder (NautilusTrader fork, v1.1 milestone)
+**Researched:** 2026-06-15
+**Confidence:** HIGH (all findings traced to adapter source in `nautilus_trader/adapters/dydx/` and `crates/adapters/dydx/`)
 
-## Context Anchors (verified from this codebase)
+## Scope Note
 
-These facts drive every categorization below. All read directly from source — HIGH confidence.
-
-- **Reconnect + resubscribe is fully owned by the adapter.** `crates/adapters/bybit/src/websocket/client.rs` implements exponential backoff (`reconnect_delay_initial_ms: 500`, `reconnect_delay_max_ms: 5000`, `backoff_factor: 1.5`, `jitter_ms: 250`, unlimited attempts) and a `resubscribe_all()` closure that replays every tracked topic after a reconnect, re-authenticates first if needed. `data.rs` clears quote/funding caches on `Reconnected`. **The recorder must NOT reimplement any of this.**
-- **`ParquetDataCatalog.write_data()` is the official sink** (`nautilus_trader/persistence/catalog/parquet.py:253`). Each call writes **one parquet file per (data_cls, identifier)** named `{start_ts}-{end_ts}.parquet` under `{path}/data/{type}/{identifier}/`.
-- **Two hard write invariants:** (1) data in a single write must be **monotonically non-decreasing by `ts_init`** or it raises `ValueError`; (2) the new file's `(start, end)` interval must be **disjoint** from all existing files in that directory or it raises `ValueError` (`_are_intervals_disjoint`). If the exact filename already exists, the write is silently skipped (prints, returns).
-- **The catalog is NOT natively day-partitioned.** Layout is `{path}/data/{type}/{identifier}/{ts}-{ts}.parquet`. "Partition by day" (PROJECT.md) means *the recorder* must cut buffers at UTC midnight so each flush file covers one day — disjointness then falls out naturally.
-- **Funding rate, mark price, index price ARE first-class:** `actor.pyx` exposes `subscribe_funding_rates`, `subscribe_mark_prices`, `subscribe_index_prices`; the Bybit adapter parses the linear ticker into `FundingRateUpdate` / `MarkPriceUpdate` / `IndexPriceUpdate`.
-- **Open interest is NOT a first-class Nautilus data type.** OI exists in the raw Bybit ticker payload (`messages.rs: open_interest`) but there is no `subscribe_open_interest`, no `OpenInterestUpdate` class, and `FundingRateUpdate` has no OI field. Capturing OI requires a **custom `Data` subclass** recorded via `catalog.write_data` as custom data. This is the single biggest hidden-complexity item in the project.
+This research covers ONLY the NEW dYdX recorder feature set. The shared recorder infra
+(catalog conversion via `StreamingConfig`/`convert_stream_to_data`, hot-reload, heartbeat,
+graceful SIGTERM, reconnect) already exists from the Bybit milestone and is reused as-is.
+Each feature below is assessed for how the dYdX adapter behaves vs. the Bybit adapter the
+existing recorder was built against, so the roadmap knows where dYdX needs special handling.
 
 ## Feature Landscape
 
 ### Table Stakes (Users Expect These)
 
-Missing any of these and the recorder is not trustworthy for 24/7 archival / backtest reuse.
+Data types the recorder must capture for dYdX perpetuals to reach parity with the Bybit recorder.
 
 | Feature | Why Expected | Complexity | Notes |
 |---------|--------------|------------|-------|
-| Configurable explicit instrument list (linear-USDT + spot) | Core requirement; no auto-discovery in scope | LOW | Config field `list[InstrumentId]`; validate each exists in cache before subscribing |
-| Load instrument definitions before subscribing | Subscriptions and book/serialization need instrument metadata (price/size precision); the options example pulls from `self.cache.instrument(...)` after the provider loads | MEDIUM | Use `InstrumentProviderConfig(load_ids=...)` (preferred) or `load_all` with filters. On `on_start`, assert each configured instrument resolved; stop with a clear error if not. **Also write the `Instrument` objects to the catalog** so backtests can load them. |
-| Subscribe + record: trades, quotes, order-book deltas, bars/klines, funding rate | The explicit data-type list in PROJECT.md | MEDIUM | One `on_*` handler per type appends to a per-(type,instrument) buffer of native Nautilus objects (`TradeTick`, `QuoteTick`, `OrderBookDeltas`, `Bar`, `FundingRateUpdate`) — NOT pandas dicts like the options example |
-| Write to official `ParquetDataCatalog` (not custom pandas parquet) | Key decision in PROJECT.md; lets data load straight into backtests | MEDIUM | Buffer native objects, `catalog.write_data(buffer)` per flush. The options example's custom `pd.read_parquet`+concat+overwrite pattern is explicitly the thing to replace |
-| Time-ordered buffering per (type, instrument) | `write_data` raises if not monotonically non-decreasing by `ts_init` | MEDIUM | Append in arrival order (already ts-ordered per stream); sort defensively before flush. Never merge two instruments' data into one write — group by identifier |
-| Day-partition rollover at UTC midnight | "Partitioned by day" requirement; also keeps files disjoint and query-friendly | HIGH | On a clock timer (or on first message whose UTC date > current partition date), flush all buffers for the closing day, then start new day's buffers. This is the rollover behavior the question asks about — see Pitfalls dependency |
-| Batched flush cadence (not per-message) | Per-message writes = one tiny parquet file per message = catastrophic small-file explosion and I/O; per-day-only writes = up to 24h of data lost on crash | MEDIUM | Flush on a timer (e.g. every 30–60s) OR size threshold (e.g. N records), whichever first, **plus** a forced flush at day rollover. Each timed flush makes a file covering `[prev_flush_end, now]` — disjoint by construction. Tune so files are MBs not KBs |
-| Graceful shutdown / flush on SIGTERM | systemd sends SIGTERM on stop/restart; un-flushed in-memory buffers = silent data loss every restart | MEDIUM | Flush all buffers in `on_stop()`. Ensure `node.run()` is wrapped so SIGTERM → `node.stop()`/`dispose()` path runs `on_stop`. Set `timeout_post_stop` generously enough for the final flush. The options example does flush in `on_stop` — keep that behavior |
-| Auto-reconnect + auto-resubscribe across drops | 24/7 reliability requirement | LOW (adapter-provided) | **Do nothing in the recorder** beyond letting the adapter reconnect. Confirm via integration test that data resumes after a forced disconnect. See Anti-Features |
-| Idempotent / crash-safe restart (no overwrite, no dup) | systemd `Restart=always` will restart mid-day; must not clobber the day's already-written files | MEDIUM | Catalog skips writing a filename that already exists and rejects overlapping intervals. Design flush intervals so a restart resumes with a *later* start ts (new disjoint interval). Accept a small gap at the crash point rather than risk overlap errors that halt the process |
-| systemd unit with `Restart=always` + run guide | Explicit deliverable | LOW | `Restart=always`, `RestartSec`, `KillSignal=SIGTERM`, `TimeoutStopSec` ≥ flush time, `EnvironmentFile` for API keys, journald logging |
-| pandas inspection utility over the catalog | Explicit deliverable | LOW | Thin wrapper around `ParquetDataCatalog.query(...)` / `quote_ticks(...)` returning DataFrames for a time slice + instrument; do NOT hand-roll parquet reads |
-| Health/heartbeat logging on an interval | Operator needs to see it's alive and ingesting; journald is the monitoring surface | LOW | Per-interval log: per-instrument counts since last interval, totals, last-message age. The options example's `log_interval` summary is a good template |
-| Stale-stream / no-data warning | A silently-connected-but-dead socket looks "up" to systemd but records nothing | LOW | Track `last_data_time`; warn if no messages for N seconds (options example does exactly this with a 120s threshold). Distinct from reconnect — adapter reconnects, but a topic can go quiet without a drop |
+| Trade ticks | Core data type; native `v4_trades` channel | LOW | `subscribe_trades` → native trade channel. No surprises; behaves like Bybit. |
+| Order book deltas (L2) | Core data type; native `v4_orderbook` channel | MEDIUM | Full-depth L2_MBP deltas, NO level cap, NO depth param (see Q1). Only `BookType.L2_MBP` accepted — L1/L3 subscriptions are rejected with a warning (`data.py:377-381`). |
+| Quote ticks (synthesized top-of-book) | Recorder requirement; dYdX has no native quote channel | MEDIUM | Synthesized from order-book top-of-book on each delta; already deduped in adapter (see Q2). Requires an active order-book stream underneath. |
+| Bars / klines | Core data type; native `v4_candles` channel | LOW-MEDIUM | Native candles for a fixed resolution set; unsupported steps raise `ValueError` at subscribe time (see Q5). No internal aggregation needed for supported intervals. |
+| Funding rate | Perp-specific requirement | MEDIUM | Emitted on the `markets` channel with NO adapter-side dedup (see Q3). Recorder MUST dedup, same as Bybit requirement. |
+| Mark price | Perp-specific requirement | LOW | Derived from oracle price on `markets` channel (see Q4). |
+| Index price | Perp-specific requirement | LOW | Derived from the SAME oracle price as mark price — values are identical (see Q4). |
 
 ### Differentiators (Competitive Advantage)
 
-Valuable, not required for a correct v1. Most are v1.x/v2.
+Not a competitive product; "differentiators" here = capabilities worth capturing because dYdX exposes them cheaply.
 
 | Feature | Value Proposition | Complexity | Notes |
 |---------|-------------------|------------|-------|
-| Open-interest recording via custom `Data` type | PROJECT.md lists OI as a required data type, but Nautilus has no native OI object — so this is real net-new work, sitting between "table stake by requirement" and "differentiator by effort" | HIGH | Define an `OpenInterest(Data)` subclass + Arrow serializer registration, source OI from the ticker. **Flag for deeper phase research.** If too costly for v1, the honest fallback is recording mark/index price (which ARE native) and deferring OI |
-| Mark price + index price recording | Native and cheap once funding is wired; valuable context for perps research | LOW | `subscribe_mark_prices` / `subscribe_index_prices` already exist; near-free incremental data type |
-| Gap detection + gap markers in catalog | Backtests need to distinguish "no trades" from "recorder was down" | MEDIUM | `write_data` supports the empty-data + `start/end/data_cls` form to record a gap by extending filenames. Emit a gap marker around known downtime windows |
-| Reconnect / disconnect event counters in health log | Quantifies connection quality over a 24h window | LOW | Count `Reconnected` events surfaced by the adapter; include in heartbeat log |
-| Per-day file consolidation pass | Many small timed-flush files per day → consolidate into one file/day/type for query speed | MEDIUM | Catalog already ships `consolidate_data_by_period` / `consolidate_catalog`; run as a nightly post-rollover job, not inline |
-| Disk-usage guard / retention sweep | 24/7 capture fills disks; PROJECT.md leaves pruning manual | MEDIUM | Warn at a free-space threshold; optional age-based partition deletion. v2 |
-| Prometheus/textfile metrics export | Real monitoring beyond grepping journald | MEDIUM | v2; journald + heartbeat logs are sufficient for v1 |
-| Config-driven data-type selection per instrument | Some instruments may only need trades, not full depth | LOW | Per-instrument toggle of which streams to subscribe; reduces topic count and disk |
+| Full-depth L2 book | dYdX streams the entire book, not a truncated top-N | LOW (free) | Unlike Bybit's depth-capped snapshots, dYdX deltas are uncapped — richer backtest data at no extra config cost. Just subscribe to deltas. |
+| Instrument status | Trading-halt / market-status events on `markets` channel | LOW | Adapter supports `subscribe_instrument_status`; already parsed (`data.py:431`). Optional, not in the stated v1.1 target list — treat as future. |
 
 ### Anti-Features (Commonly Requested, Often Problematic)
 
 | Feature | Why Requested | Why Problematic | Alternative |
 |---------|---------------|-----------------|-------------|
-| Custom reconnect/resubscribe logic in the recorder | "We need 24/7 resilience" | The adapter already does exponential-backoff reconnect, topic replay, and re-auth (`client.rs`). Reimplementing it duplicates state, fights the adapter, and causes double-subscribes | Rely on the adapter; only *observe* `Reconnected` for metrics and verify resumption in a test |
-| Per-message / per-tick parquet writes | "Don't lose any data on crash" | Each `write_data` = one file; per-message = millions of KB-sized files, disk-killing I/O, and the small-file problem destroys query performance | Timed/size batched flush + flush-on-rollover + flush-on-SIGTERM. Bounded loss window (seconds), not data integrity loss |
-| Custom pandas-parquet format (the options example's approach) | It exists and "works" | Read-existing→concat→overwrite is O(file size) per flush, not crash-safe (overwrite can corrupt), and produces files that backtests can't load. Rejected in PROJECT.md Key Decisions | `ParquetDataCatalog.write_data` with native objects |
-| Maintaining a live `OrderBook` just to record depth | The options example rebuilds books and stores best bid/ask snapshots | For *recording*, you want the raw `OrderBookDeltas` (full fidelity, replayable), not a derived top-of-book snapshot. Rebuilding the book wastes CPU and loses data | Subscribe to and record `OrderBookDeltas` directly; reconstruct books later at read time if needed |
-| Storing redundant `pd.Timestamp.now()` wall-clock fields | "Know when we received it" | Duplicates `ts_init`; native objects already carry `ts_event`/`ts_init`. Extra columns break catalog schema compatibility | Trust native `ts_event`/`ts_init`; the catalog records both |
-| Historical backfill in v1 | "Fill gaps after downtime" | Out of scope per PROJECT.md; mixing backfilled REST data with live WS data risks overlapping (non-disjoint) intervals → write errors | Live-stream only for v1; gap markers note downtime; backfill is a separate v2 tool that writes to a staging path |
-| Redis / multi-process message bus | "Scale to many instruments" | Out of scope; a single WS connection multiplexes 10+ topics. Redis adds ops burden with no benefit at this scale | Single-process in-memory bus (PROJECT.md decision) |
-| Auto-discover "all instruments" | Convenience | Out of scope; explodes topic count, disk, and risks hitting WS topic limits unpredictably | Explicit configured list |
-| Writing on a wall-clock timer ignoring message `ts_init` for partition boundaries | Simpler to code | Partitioning by *receipt* wall-clock instead of event `ts_init` can split a day's data across files in a way that conflicts with how the catalog queries by `ts_init` | Cut day boundaries on event/init timestamps consistent with what `write_data` records |
+| Recording index price as a separate, distinct series | "Bybit records both mark and index, so record both" | On dYdX, index == mark == oracle price (single `oracle_price` field, `data.rs:1326-1345`). Recording both writes duplicate values to two catalog series. | Record mark price; optionally record index as an explicit alias of oracle, but flag in docs that they are identical. Do NOT expect divergence. |
+| Order-book depth subscription (`subscribe_order_book_depth`) | Mirror Bybit's depth-limited snapshot stream | dYdX adapter explicitly does NOT support it — `_subscribe_order_book_depth` logs a warning and no-ops (`data.py:388-392`). | Use `subscribe_order_book_deltas` with a managed book (already the recorder's approach). |
+| Open interest | Parity with Bybit recorder | dYdX adapter has no OI support at all — out of scope per PROJECT.md. | None; explicitly excluded for v1.1. |
+| dYdX spot | Parity with Bybit (perps + spot) | dYdX v4 has no spot market. | Perpetuals only. |
+| Historical quote backfill | "Fill gaps on restart" | `_request_quote_ticks` warns "not published by dYdX" (`data.py:555-560`). No historical quotes exist. | Live synthesis only; gaps are unrecoverable for quotes (matches v1 live-only decision). |
+
+## Per-Question Findings (Evidence)
+
+### Q1 — Order book depth: levels / limits
+
+- dYdX exposes a single full-depth `v4_orderbook` channel. `subscribe_orderbook` takes only an instrument id — **no depth/level parameter** (`websocket/client.rs:715-729`).
+- The book is full L2 (MBP). `_subscribe_order_book_deltas` rejects any non-`L2_MBP` book type (`data.py:377-381`); Rust enforces the same (`data.rs:445-447`).
+- A `depth` argument on snapshot requests is **ignored** with a warning: "Requesting book snapshot ... with specified `depth` which has no effect" (`data.rs:830-832`).
+- **Implication:** No analog to Bybit's spot-50-level cap. dYdX is full-depth. The recorder's per-instrument "depth" config knob is meaningless for dYdX — either ignore it or validate that it isn't set for dYdX instruments.
+- The adapter includes crossed-book resolution logic (`resolve_crossed_order_book`, `data.rs:1547+`), so transient crossed states are handled internally — no recorder action needed.
+
+### Q2 — Quotes: synthesis gotchas
+
+- No native quote channel. Quotes are synthesized in Python from order-book deltas (`_handle_orderbook_deltas`, `data.py:318-366`).
+- **Gotcha 1 — quote requires an order book:** A quote is only emitted when an order-book subscription feeds the synthesizer. `_subscribe_quote_ticks` internally calls `subscribe_orderbook` (`data.py:404-405`), so subscribing to quotes implicitly subscribes to the book even if deltas aren't being recorded. If the recorder wants quotes, it gets a book stream whether or not it records deltas.
+- **Gotcha 2 — emitted only on top-of-book change:** Quotes fire only when bid/ask price OR size changes vs. the last quote (`data.py:342-351`). Already deduped in-adapter. A quiet top-of-book emits NO quotes — so quote-stream silence is normal, not a fault.
+- **Gotcha 3 — needs both sides:** No quote is emitted until both best bid and best ask exist (`data.py:336-341`). Early after (re)connect, before the book fills, expect a quote gap.
+- **Heartbeat/staleness implication:** Quote inter-arrival is event-driven and bursty. A stale-stream heartbeat threshold tuned to Bybit's native quote cadence will produce false "stale" warnings on quiet dYdX markets. The recorder's heartbeat threshold for dYdX quote streams should be relaxed, OR heartbeat should track the underlying book/delta stream (which updates far more often) rather than the synthesized quote stream.
+
+### Q3 — Funding rate: cadence and dedup
+
+- Funding rate is published on the `markets` channel as `next_funding_rate`, emitted on EVERY trading update that carries the field (`data.rs:1415-1434`).
+- **NO adapter-side dedup** — unlike synthesized quotes, the funding path emits a `FundingRateUpdate` whenever `next_funding_rate` is present, even if unchanged. The markets channel pushes frequent updates, so expect many repeated identical funding values.
+- Funding interval is hardcoded to `Some(60)` (60 minutes — dYdX funds hourly), `data.rs:1421`.
+- **Implication:** Same dedup concern as Bybit (REC requirement was "deduped to actual changes"). The recorder MUST apply its existing funding dedup (emit only on rate change) to the dYdX stream. This reuses the Bybit recorder's dedup mechanism directly — confirm it keys on (instrument_id, rate) and is exchange-agnostic.
+
+### Q4 — Mark / index price: source and cadence
+
+- Both mark and index price are derived from the dYdX **oracle price**, delivered via the `markets` channel `oracle_prices` map on a continuous cadence (`data.rs:1322-1345`), plus a one-time snapshot value from the per-market `oracle_price` field (`data.rs:1436-1457`).
+- **Mark price == index price == oracle price.** They are built from the same `oracle_price` value (`data.rs:1326`, used for both `MarkPriceUpdate` and `IndexPriceUpdate`). There is no separate index feed.
+- Cadence is driven by oracle updates on the markets channel — frequent but irregular (not a fixed funding-style tick).
+- **Difference vs. Bybit:** Bybit delivers mark and index as distinct values on a ticker stream. dYdX collapses them into one oracle-derived value. Recording both produces duplicate series.
+- **Dedup note:** Mark/index are NOT deduped in-adapter. If the recorder cares about file size, dedup-on-change applies here too (oracle price can repeat between updates), though price moves more than funding so dedup yield is lower.
+
+### Q5 — Bars / klines: native vs. internal aggregation
+
+- Bars come from the native `v4_candles` channel (`websocket/client.rs:761`, `subscribe_candles`). No Nautilus internal `BarAggregator` is needed for supported intervals.
+- Supported resolutions (`DydxCandleResolution`, `common/enums.rs:679-709` + `from_bar_spec` mapping `:717-734`):
+  - `1-MINUTE`, `5-MINUTE`, `15-MINUTE`, `30-MINUTE`, `1-HOUR`, `4-HOUR`, `1-DAY`.
+- **Gotcha — fail-fast on unsupported intervals:** `py_subscribe_bars` calls `from_bar_spec`, which raises `ValueError` for any step/aggregation not in the list above (e.g. `3-MINUTE`, `2-HOUR`, tick/volume bars), `python/websocket.rs:961-967`. The recorder's config validation should restrict dYdX bar intervals to the supported set, OR catch the error at subscribe time so a bad config doesn't crash startup. This mirrors the existing recorder's fail-fast-against-instrument-cache pattern but adds a per-venue valid-interval whitelist.
+- Bars must be price-aggregation on standard time intervals; non-time aggregations are unsupported.
 
 ## Feature Dependencies
 
 ```
-Instrument provider load (load_ids)
-    └──requires──> Instrument validation in on_start
-                       └──requires──> Stream subscriptions (trades/quotes/depth/bars/funding)
-                                          └──requires──> Per-(type,instrument) time-ordered buffers
-                                                             └──requires──> Batched flush to catalog (write_data)
-                                                                                ├──requires──> Day-partition rollover (UTC midnight cut)
-                                                                                ├──requires──> Disjoint-interval discipline (no overlap on restart)
-                                                                                └──requires──> Graceful SIGTERM flush (on_stop)
+Quote ticks (synthesized)
+    └──requires──> Order book deltas (L2) subscription (implicit, auto-subscribed)
 
-Adapter auto-reconnect/resubscribe ──enables──> 24/7 capture  (recorder is a passive beneficiary)
-Reconnected event ──feeds──> reconnect counters & gap detection (differentiators)
+Funding rate recording
+    └──requires──> Funding dedup mechanism (reused from Bybit recorder)
 
-Open-interest recording ──requires──> custom OpenInterest(Data) subclass + Arrow serializer
-                                          (no native path; HIGH complexity)
+Mark price ≡ Index price  (both ← oracle price; recording both = duplicate series)
 
-Write Instrument objects to catalog ──enables──> backtest loadability of recorded data
-Heartbeat logging ──enhances──> stale-stream detection (share last_data_time state)
-Per-day consolidation ──conflicts──> inline frequent flushing (run consolidation AFTER rollover, never during active write)
+Bars (dYdX)
+    └──requires──> Per-venue valid-interval whitelist in config validation
+
+All data types
+    └──requires──> Shared catalog/heartbeat/reconnect infra (already built; extracted to common module per v1.1 plan)
+
+Heartbeat staleness (dYdX quotes)
+    └──conflicts──> Bybit-tuned heartbeat thresholds (event-driven quotes go quiet → false stale)
 ```
 
 ### Dependency Notes
 
-- **Buffers require time-ordering because** `write_data` raises `ValueError` on non-monotonic `ts_init` and on non-disjoint intervals. Day-rollover and restart logic both exist primarily to keep written intervals disjoint.
-- **Day-partition rollover requires SIGTERM-flush coordination:** both flush the same buffers. Centralize flush in one method called from (a) timer, (b) rollover, (c) `on_stop` to avoid double-write / overlap bugs.
-- **Open-interest recording is the critical-path unknown:** it is required by PROJECT.md but unsupported natively. Sequence a focused spike for it; it may slip to v1.x with mark/index price recorded in its place.
-- **Consolidation conflicts with active writes:** never consolidate a directory the recorder is currently flushing into — schedule it for completed (prior-day) partitions only.
+- **Quotes require a book subscription:** Subscribing to quotes implicitly subscribes to the order book (`data.py:404-405`). Recording quotes therefore incurs book traffic regardless of whether deltas are also recorded.
+- **Funding dedup is shared:** The dYdX funding stream has no adapter dedup, so the recorder's existing Bybit dedup must apply venue-agnostically. Verify it keys on (instrument_id, rate).
+- **Heartbeat thresholds conflict with Bybit defaults:** dYdX synthesized quotes are event-driven and silent on quiet markets; Bybit-tuned stale thresholds will misfire. The shared heartbeat module needs per-venue (or per-stream-type) thresholds, or should monitor the book/delta stream instead of the quote stream for dYdX.
+- **Bar interval validation is new:** dYdX rejects non-standard intervals at subscribe time. Config validation must whitelist supported resolutions per venue.
 
 ## MVP Definition
 
-### Launch With (v1)
+### Launch With (v1.1)
 
-- [ ] Explicit instrument-list config (linear-USDT + spot) — core requirement
-- [ ] Instrument provider load + `on_start` validation + write `Instrument`s to catalog — prerequisite for everything and for backtest loadability
-- [ ] Record trades, quotes, order-book **deltas**, bars, funding rate as native objects via `write_data` — the required data types
-- [ ] Per-(type,instrument) time-ordered buffering — required by catalog invariants
-- [ ] Batched flush (timer + size) — avoids small-file explosion and bounds data-loss window
-- [ ] UTC day-partition rollover with forced flush — the "partitioned by day" requirement
-- [ ] Graceful SIGTERM flush in `on_stop` — prevents per-restart data loss
-- [ ] Disjoint/idempotent restart behavior — survives `Restart=always` mid-day
-- [ ] Heartbeat + stale-stream warning logging — minimum 24/7 observability
-- [ ] systemd unit + deployment/run guide — explicit deliverable
-- [ ] pandas catalog-inspection utility — explicit deliverable
+Minimum to record the stated dYdX target feature set into the shared catalog.
+
+- [ ] Trade ticks — native, no special handling
+- [ ] Order book deltas (L2 full-depth) — drop/ignore any `depth` config for dYdX
+- [ ] Quote ticks (synthesized) — relax heartbeat threshold for event-driven quotes
+- [ ] Bars — whitelist supported resolutions in config validation; fail-fast on unsupported
+- [ ] Funding rate — apply existing dedup (adapter does NOT dedup)
+- [ ] Mark price — record from oracle-derived stream
+- [ ] Index price — record, but document it equals mark price (no divergence on dYdX)
 
 ### Add After Validation (v1.x)
 
-- [ ] Open-interest recording via custom `Data` type — trigger: spike confirms feasible cost; until then record mark/index price as the native stand-in
-- [ ] Mark price + index price recording — trigger: nearly free; can land in v1 if funding wiring is done early
-- [ ] Reconnect/disconnect counters in heartbeat — trigger: after observing real connection behavior in prod
-- [ ] Gap markers in catalog around downtime — trigger: first observed multi-minute outage
+- [ ] Instrument status recording — adapter supports it; capture trading halts. Trigger: when halt/listing events become analytically useful.
+- [ ] Dedup mark/index on-change to shrink catalog — Trigger: if oracle-price file volume becomes a disk concern.
 
 ### Future Consideration (v2+)
 
-- [ ] Nightly per-day consolidation job — defer: only matters once query speed degrades from many small files
-- [ ] Disk-usage guard + retention sweep — defer: manual pruning acceptable until disk pressure appears
-- [ ] Prometheus/textfile metrics — defer: journald sufficient for single-host v1
-- [ ] Historical backfill tool — defer: explicitly out of scope; needs separate staging-path design to avoid interval overlaps
+- [ ] Historical backfill for trades/bars/funding — dYdX HTTP supports `request_trade_ticks`/`request_bars`/`request_funding_rates` (`data.py:562-669`), but quotes cannot be backfilled. Defer per v1 live-only decision.
 
 ## Feature Prioritization Matrix
 
 | Feature | User Value | Implementation Cost | Priority |
 |---------|------------|---------------------|----------|
-| Instrument load + validation + catalog-write | HIGH | MEDIUM | P1 |
-| Native-object recording of 5 data types | HIGH | MEDIUM | P1 |
-| Batched flush + day rollover | HIGH | HIGH | P1 |
-| Graceful SIGTERM flush | HIGH | MEDIUM | P1 |
-| Disjoint/idempotent restart | HIGH | MEDIUM | P1 |
-| Heartbeat + stale-stream logging | MEDIUM | LOW | P1 |
-| systemd unit + run guide | HIGH | LOW | P1 |
-| pandas inspection utility | MEDIUM | LOW | P1 |
-| Rely on adapter reconnect (do nothing) | HIGH | LOW | P1 |
-| Open-interest custom data type | MEDIUM | HIGH | P2 |
-| Mark/index price recording | MEDIUM | LOW | P2 |
-| Reconnect counters / gap markers | MEDIUM | LOW | P2 |
-| Per-day consolidation | MEDIUM | MEDIUM | P3 |
-| Disk guard / retention | MEDIUM | MEDIUM | P3 |
-| Prometheus metrics | LOW | MEDIUM | P3 |
-| Historical backfill | MEDIUM | HIGH | P3 |
+| Trade ticks | HIGH | LOW | P1 |
+| Order book deltas (L2) | HIGH | LOW | P1 |
+| Quote ticks (synthesized) | HIGH | MEDIUM (heartbeat tuning) | P1 |
+| Bars (native candles) | HIGH | LOW-MEDIUM (interval whitelist) | P1 |
+| Funding rate (with dedup) | HIGH | MEDIUM (reuse dedup) | P1 |
+| Mark price | MEDIUM | LOW | P1 |
+| Index price | LOW (== mark) | LOW | P2 |
+| Instrument status | LOW | LOW | P3 |
+| Mark/index on-change dedup | LOW | LOW | P3 |
 
-**Priority key:** P1 = must have for launch · P2 = should have, add when possible · P3 = nice to have, future.
+**Priority key:**
+- P1: Must have for v1.1 launch
+- P2: Should have; low marginal value because index duplicates mark
+- P3: Nice to have, future consideration
 
-## Competitor Feature Analysis
+## dYdX vs. Bybit Adapter Behavior (drives special handling)
 
-"Competitors" here are reference recorder patterns rather than products.
-
-| Feature | Existing options collector (`bybit_options_data_collector.py`) | Generic exchange tick-recorder norm | Our Approach |
-|---------|----------------------------------------------------------------|-------------------------------------|--------------|
-| Storage format | Custom pandas parquet (read→concat→overwrite) | Often raw JSON/CSV or custom parquet | Official `ParquetDataCatalog`, native objects, backtest-loadable |
-| Order book | Rebuilds `OrderBook`, stores top-of-book snapshot | Varies | Record raw `OrderBookDeltas` (full fidelity) |
-| Flush cadence | Timer (`log_interval`) on whole-file rewrite | Per-batch append | Timer+size batched `write_data`, one file per flush, disjoint intervals |
-| Day partitioning | None (single growing file per instrument) | Sometimes hourly/daily dirs | Explicit UTC-midnight rollover → one file/day/type/instrument |
-| Reconnect | Relies on adapter; adds a 120s stale-data warning | Custom reconnect loops (anti-pattern) | Rely on adapter; keep the stale-data warning |
-| Shutdown flush | Flushes in `on_stop` (good) | Often missing → data loss | Flush in `on_stop`, SIGTERM-driven, generous `timeout_post_stop` |
-| Open interest | Not recorded | Rarely | Custom `Data` type (P2); mark/index price native stand-in |
+| Feature | Bybit (existing recorder built for this) | dYdX (new) | Recorder Special Handling |
+|---------|------------------------------------------|------------|---------------------------|
+| Order book depth | Depth-capped (e.g. spot 50 levels); per-instrument depth config | Full L2, no cap, no depth param | Ignore/forbid `depth` config for dYdX instruments |
+| Quotes | Native quote stream | Synthesized from book top-of-book, deduped in-adapter, emitted only on change | Relax heartbeat staleness threshold; expect gaps on quiet markets and post-reconnect |
+| Funding rate | Deduped to actual changes (REC req) | Emitted every markets update, NO adapter dedup, hourly interval | Reuse existing dedup; verify venue-agnostic |
+| Mark / Index | Distinct ticker-stream values | Both = oracle price (identical) | Document equality; consider recording mark only |
+| Bars | Standard intervals via adapter | Native candles, fixed resolution set, ValueError on unsupported | Per-venue interval whitelist + fail-fast at config validation |
+| Open interest | Recorded | Not supported by adapter | Excluded (out of scope) |
+| Spot | Recorded | No spot market on dYdX v4 | Excluded (out of scope) |
 
 ## Sources
 
-- `crates/adapters/bybit/src/websocket/client.rs` (reconnect backoff + `resubscribe_all`) — HIGH
-- `crates/adapters/bybit/src/data.rs` (cache clear on `Reconnected`) — HIGH
-- `crates/adapters/bybit/src/websocket/parse.rs` & `messages.rs` (linear ticker → funding/mark/index; OI only raw) — HIGH
-- `nautilus_trader/persistence/catalog/parquet.py` (`write_data`, `_write_chunk`, disjoint-interval check, `_make_path`, `consolidate_*`) — HIGH
-- `nautilus_trader/common/actor.pyx` (subscribe methods incl. funding/mark/index; no open-interest) — HIGH
-- `nautilus_trader/model/data.pyx` (`FundingRateUpdate`; no native `OpenInterest`) — HIGH
-- `examples/live/bybit/bybit_options_data_collector.py` + README (reference patterns: log_interval, stale-data warning, on_stop flush; anti-patterns: custom parquet, book rebuild) — HIGH
-- `.planning/PROJECT.md` (scope, data types, key decisions) — HIGH
+- `nautilus_trader/adapters/dydx/data.py` — Python data client: quote synthesis & dedup (318-366), book-type/depth rejection (377-392), bar subscribe (421-425), market-data update routing without dedup (260-287), historical-quote unavailability (555-560). HIGH confidence (source-of-truth).
+- `nautilus_trader/adapters/dydx/providers.py` — instrument provider (full HTTP-loaded instrument list). HIGH.
+- `crates/adapters/dydx/src/data.rs` — mark/index from single oracle price (1322-1345, 1436-1457), funding emitted with no dedup + hardcoded 60-min interval (1415-1434), depth param ignored (830-832), L2-only enforcement (445-447), crossed-book resolution (1547+). HIGH.
+- `crates/adapters/dydx/src/websocket/client.rs` — orderbook subscribe with no depth arg (715-729), candle subscribe (761-780), heartbeat plumbing. HIGH.
+- `crates/adapters/dydx/src/common/enums.rs` — `DydxCandleResolution` supported set + `from_bar_spec` validation (679-734). HIGH.
+- `crates/adapters/dydx/src/python/websocket.rs` — `py_subscribe_bars` raising ValueError for unsupported specs (961-1009). HIGH.
+- `crates/adapters/dydx/src/websocket/enums.rs` / `messages.rs` / `handler.rs` — channel routing for `v4_orderbook`, `v4_candles`, `markets`. HIGH.
+- `.planning/PROJECT.md` — v1.1 scope, out-of-scope (OI, spot), existing Bybit recorder mechanisms. HIGH.
 
 ---
-*Feature research for: Bybit 24/7 market-data recorder on NautilusTrader*
-*Researched: 2026-06-13*
+*Feature research for: dYdX v4 perpetuals data recorder (v1.1)*
+*Researched: 2026-06-15*
