@@ -19,9 +19,9 @@ trade = 90
 quote = 600        # DYDX-05: relaxed — synthesized quotes only fire on top-of-book change
 deltas = 60        # tight — book updates often; silence here = real fault
 bar = 90
-mark = 30
-index = 30
-funding = 30
+mark = 300       # dYdX oracle price only fires on significant price change
+index = 300      # same oracle source as mark
+funding = 3600   # dYdX funding rate updates once per hour
 
 # Flat perpetual list — dYdX exposes full L2 order books (no level cap to
 # configure) and trades only perpetuals (no product-type split).

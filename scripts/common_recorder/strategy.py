@@ -526,7 +526,12 @@ class RecorderStrategy(Strategy):
         return hash(
             tuple(
                 sorted(
-                    (str(e.id), e.depth, tuple(e.bar_intervals), e.product_type)
+                    (
+                        str(e.id),
+                        getattr(e, "depth", None),
+                        tuple(e.bar_intervals),
+                        getattr(e, "product_type", None),
+                    )
                     for e in parsed_cfg.instruments
                 ),
             ),
