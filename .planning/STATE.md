@@ -1,10 +1,11 @@
 ---
 gsd_state_version: 1.0
 milestone: v1.1
-milestone_name: dYdX Data Collector
-status: planning
-last_updated: "2026-06-15T19:23:31.696Z"
-last_activity: 2026-06-15
+milestone_name: milestone
+status: executing
+stopped_at: Phase 6 complete (HOT-01 live mainnet smoke passed)
+last_updated: "2026-06-16T14:57:25.523Z"
+last_activity: 2026-06-15 — Milestone v1.1 started
 progress:
   total_phases: 0
   completed_phases: 0
@@ -26,7 +27,7 @@ See: .planning/PROJECT.md (updated 2026-06-13)
 
 Phase: Not started (defining requirements)
 Plan: —
-Status: Defining requirements
+Status: Ready to execute
 Last activity: 2026-06-15 — Milestone v1.1 started
 
 ## Performance Metrics
