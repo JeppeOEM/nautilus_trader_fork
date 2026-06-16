@@ -130,7 +130,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 | 4. Open Interest Spike | 0/TBD | Not started | - |
 | 5. Inspection & Deployment | 0/TBD | Not started | - |
 | 6. Hot-Reload Config Changes | 2/2 | Complete   | 2026-06-15 |
-| 7. Common Recorder Module + dYdX Recorder | 0/TBD | Not started | - |
+| 7. Common Recorder Module + dYdX Recorder | 0/4 | Planned | - |
 
 ### Phase 6: Hot-Reload Config Changes
 
@@ -153,4 +153,20 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 **Mode:** mvp
 **Requirements**: DYDX-01, DYDX-02, DYDX-03, DYDX-04, DYDX-05, DYDX-06, DYDX-07
 **Depends on:** Phase 6
-**Plans:** TBD
+**Plans:** 4 plans
+
+**Wave 1**
+
+- [ ] 07-01-PLAN.md — Extract exchange-agnostic recorder infra into scripts/common_recorder/ (RecorderStrategy + shared config helpers + injected config loader); re-export shims in bybit_recorder; existing 62-test suite is the no-behavior-change gate (DYDX-01)
+
+**Wave 2** *(blocked on Wave 1 — imports common_recorder helpers)*
+
+- [ ] 07-02-PLAN.md — dYdX recorder config: flat-perp TOML parser + bar-interval whitelist fail-fast + DydxNetwork mapping + relaxed-quote thresholds + config tests (DYDX-02, DYDX-05, DYDX-06)
+
+**Wave 3** *(blocked on Wave 2 — imports dydx_recorder/config.py)*
+
+- [ ] 07-03-PLAN.md — dYdX recorder.py wiring (CUSTOM_ENCODINGS[DydxNetwork], factory, RecorderStrategy reuse, client+loader injection) + 7-feed subscribe & funding-dedup tests (DYDX-02, DYDX-03, DYDX-04, DYDX-07)
+
+**Wave 4** *(blocked on Wave 3 — optional/deferrable live smoke, HOT-01 precedent)*
+
+- [ ] 07-04-PLAN.md — Live dYdX mainnet smoke: all 7 feeds land in shared catalog + clean SIGTERM flush (DYDX-03, DYDX-07)
