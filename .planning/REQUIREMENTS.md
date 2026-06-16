@@ -42,6 +42,32 @@
 
 - [x] **HOT-01**: While running, the recorder periodically detects changes to `recorder.toml`'s instrument list/params (additions, removals, depth/bar_interval changes) and applies them live — loading new instruments and subscribing/unsubscribing the affected feeds — without restarting the process or disrupting recording for unaffected instruments
 
+## v1.1 Requirements — dYdX Data Collector
+
+**Added:** 2026-06-16
+
+### Shared Infra
+
+- [ ] **DYDX-01**: Exchange-agnostic recorder infra (catalog conversion, heartbeat/stale-stream, graceful shutdown, hot-reload) extracted from `scripts/bybit_recorder/` into a `scripts/common_recorder/` module; `scripts/bybit_recorder/` updated to import from it with no behavior change
+
+### dYdX Recorder Wiring
+
+- [ ] **DYDX-02**: A new `scripts/dydx_recorder/` records dYdX perpetual market data using `DydxDataClientConfig` + `DydxLiveDataClientFactory` + `DydxNetwork` (with `CUSTOM_ENCODINGS` registration), TOML-driven instrument list, and `InstrumentProviderConfig(load_ids=...)` for startup instrument validation
+
+### Data Types
+
+- [ ] **DYDX-03**: dYdX recorder subscribes to and records trades, synthesized quotes (top-of-book), L2 order-book deltas (full-depth), bars, funding rate, mark price, and index price for each configured perpetual instrument into the shared `ParquetDataCatalog`
+
+### dYdX-Specific Handling
+
+- [ ] **DYDX-04**: Funding rate updates are deduplicated to actual rate changes before persisting — the dYdX adapter does not dedup, so the recorder must apply the existing Bybit dedup mechanism (verify it keys on instrument_id + rate and is exchange-agnostic)
+- [ ] **DYDX-05**: Heartbeat/stale-stream thresholds for dYdX synthesized quote streams are relaxed vs. Bybit defaults — event-driven quotes go quiet on calm markets, so per-type thresholds or underlying book stream monitoring must prevent false stale-stream warnings
+- [ ] **DYDX-06**: dYdX bar subscriptions validate configured intervals against the supported resolution set (`1-MINUTE`, `5-MINUTE`, `15-MINUTE`, `30-MINUTE`, `1-HOUR`, `4-HOUR`, `1-DAY`) at config load; unsupported intervals fail fast with a clear error before the node starts
+
+### Reliability
+
+- [ ] **DYDX-07**: dYdX recorder has 24/7 reliability parity with the Bybit recorder: graceful SIGTERM flush+convert, adapter-driven WebSocket reconnect/resubscribe, per-stream stale-stream heartbeat warnings, and restart-gap logging
+
 ## v2 Requirements
 
 Deferred to future release. Tracked but not in current roadmap.
@@ -92,11 +118,19 @@ Which phases cover which requirements. Updated during roadmap creation.
 | OPS-02 | Phase 5 | Pending |
 | OPS-03 | Phase 5 | Pending |
 | HOT-01 | Phase 6 | Complete |
+| DYDX-01 | Phase 7 | Pending |
+| DYDX-02 | Phase 7 | Pending |
+| DYDX-03 | Phase 7 | Pending |
+| DYDX-04 | Phase 7 | Pending |
+| DYDX-05 | Phase 7 | Pending |
+| DYDX-06 | Phase 7 | Pending |
+| DYDX-07 | Phase 7 | Pending |
 
 **Coverage:**
 
-- v1 requirements: 19 total
-- Mapped to phases: 19
+- v1 requirements: 19 total (12 complete, 7 pending)
+- v1.1 requirements: 7 total (DYDX-01 through DYDX-07)
+- Mapped to phases: 26 total
 - Unmapped: 0 ✓
 
 ---

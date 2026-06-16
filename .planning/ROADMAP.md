@@ -19,6 +19,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 - [ ] **Phase 4: Open Interest Spike** - Custom open-interest `Data` type recorded into the catalog via Arrow registration
 - [ ] **Phase 5: Inspection & Deployment** - Pandas catalog-inspection utility, systemd unit, and deployment guide
 - [x] **Phase 6: Hot-Reload Config Changes** - Detect and apply instrument-list/param changes from `recorder.toml` while running, without a restart (completed 2026-06-15; HOT-01 live mainnet hot-add smoke passed)
+- [ ] **Phase 7: Common Recorder Module + dYdX Recorder** - Extract shared infra into common module, wire dYdX recorder for all 7 perpetual data types with dYdX-specific handling (dedup, heartbeat, interval whitelist)
 
 ## Phase Details
 
@@ -119,7 +120,7 @@ Decimal phases appear between their surrounding integers in numeric order.
 ## Progress
 
 **Execution Order:**
-Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
+Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
@@ -129,6 +130,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 | 4. Open Interest Spike | 0/TBD | Not started | - |
 | 5. Inspection & Deployment | 0/TBD | Not started | - |
 | 6. Hot-Reload Config Changes | 2/2 | Complete   | 2026-06-15 |
+| 7. Common Recorder Module + dYdX Recorder | 0/TBD | Not started | - |
 
 ### Phase 6: Hot-Reload Config Changes
 
@@ -144,3 +146,11 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6
 **Wave 2** *(blocked on Wave 1 — shares strategy.py)*
 
 - [x] 06-02-PLAN.md — ADDITION branch: runtime instrument load (Pattern 3 / D-09 fallback, D-10), failure tracking (D-07/D-11), data-client injection wiring (Tasks 1-3 unit-verified); Task 4 (live mainnet hot-add smoke) PASSED 2026-06-15 — HOT-01 marked complete in REQUIREMENTS.md
+
+### Phase 7: Common Recorder Module + dYdX Recorder
+
+**Goal:** Extract the shared exchange-agnostic recorder infra (catalog conversion, heartbeat/stale-stream, graceful SIGTERM flush+convert, hot-reload) from `scripts/bybit_recorder/` into a `scripts/common_recorder/` module, update `scripts/bybit_recorder/` to import from it with no behavior change, then build `scripts/dydx_recorder/` that wires `DydxLiveDataClientFactory` + `DydxDataClientConfig` + `DydxNetwork` to record all 7 dYdX perpetual data types — trades, synthesized quotes (top-of-book), L2 order-book deltas (full-depth), bars (interval-whitelisted), funding rate (deduped), mark price, and index price — with relaxed heartbeat thresholds for event-driven quote streams, verified by a live mainnet smoke test.
+**Mode:** mvp
+**Requirements**: DYDX-01, DYDX-02, DYDX-03, DYDX-04, DYDX-05, DYDX-06, DYDX-07
+**Depends on:** Phase 6
+**Plans:** TBD
