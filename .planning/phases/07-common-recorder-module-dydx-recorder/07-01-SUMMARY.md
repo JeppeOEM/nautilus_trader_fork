@@ -132,3 +132,10 @@ None - no external service configuration required.
 ---
 *Phase: 07-common-recorder-module-dydx-recorder*
 *Completed: 2026-06-16*
+
+## Self-Check: PASSED
+
+All created files exist on disk and all task + metadata commits exist in git history:
+- Files: scripts/common_recorder/{__init__.py, config.py, strategy.py}, 07-01-SUMMARY.md — all FOUND.
+- Commits: 81df8bfc56 (Task 1), b6033bc39a (Task 2), 86938d258a (Task 3), 30c2277337 (SUMMARY) — all FOUND.
+- Gate: full recorder suite 62 passed / 0 failed.
