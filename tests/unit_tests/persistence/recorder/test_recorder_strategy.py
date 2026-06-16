@@ -507,8 +507,10 @@ def test_on_stop_swallows_catalog_construction_error(mocker, mock_cache):
     # Arrange
     strategy, _ = _build_strategy(mocker, mock_cache, [])
     convert_spy = mocker.patch.object(RecorderStrategy, "_convert_finalized_feather_files")
+    # RecorderStrategy moved to scripts.common_recorder.strategy (DYDX-01), so the
+    # module-global ParquetDataCatalog it constructs is patched at the new path.
     mocker.patch(
-        "scripts.bybit_recorder.strategy.ParquetDataCatalog",
+        "scripts.common_recorder.strategy.ParquetDataCatalog",
         side_effect=RuntimeError("boom"),
     )
 
@@ -527,13 +529,15 @@ def test_log_restart_gaps_swallows_catalog_construction_error(mocker, mock_cache
 
     # Arrange: a non-empty instrument list so a reached loop would have work.
     strategy, _ = _build_strategy(mocker, mock_cache, [INSTRUMENT_ID_LINEAR])
+    # RecorderStrategy moved to scripts.common_recorder.strategy (DYDX-01), so the
+    # module-global ParquetDataCatalog it constructs is patched at the new path.
     mocker.patch(
-        "scripts.bybit_recorder.strategy.ParquetDataCatalog",
+        "scripts.common_recorder.strategy.ParquetDataCatalog",
         side_effect=RuntimeError("boom"),
     )
 
     # Act / Assert: does not raise.
-    with caplog.at_level(logging.WARNING, logger="scripts.bybit_recorder.strategy"):
+    with caplog.at_level(logging.WARNING, logger="scripts.common_recorder.strategy"):
         strategy._log_restart_gaps()
 
     # Assert the early-return path was taken: the per-instrument loop (which is

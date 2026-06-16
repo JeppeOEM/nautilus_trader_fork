@@ -15,30 +15,31 @@
 
 import logging
 import tomllib
-from datetime import time
 from pathlib import Path
-
-import pandas as pd
 
 from nautilus_trader.common.config import NautilusConfig
 from nautilus_trader.common.config import PositiveInt
-from nautilus_trader.model.data import Bar
-from nautilus_trader.model.data import IndexPriceUpdate
-from nautilus_trader.model.data import MarkPriceUpdate
-from nautilus_trader.model.data import OrderBookDeltas
-from nautilus_trader.model.data import QuoteTick
-from nautilus_trader.model.data import TradeTick
 from nautilus_trader.model.identifiers import InstrumentId
-from nautilus_trader.persistence.config import StreamingConfig
-from nautilus_trader.persistence.writer import RotationMode
+
+# Shared, exchange-agnostic config helpers now live in scripts.common_recorder.config
+# (DYDX-01). They are re-exported below so existing imports like
+# `from scripts.bybit_recorder.config import build_streaming_config` still resolve.
+from scripts.common_recorder.config import _resolve_catalog_path
+from scripts.common_recorder.config import _validate_positive_thresholds
+from scripts.common_recorder.config import build_streaming_config
 
 
 logger = logging.getLogger(__name__)
 
-# Anchor for resolving relative `catalog_path` / `streaming_path` values so the
-# catalog always lands in the same place regardless of the process's cwd
-# (parents[2] from scripts/bybit_recorder/config.py is the repo root).
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+# Re-export the shared helpers so back-compat imports from this module keep working.
+__all__ = [
+    "InstrumentEntry",
+    "RecorderConfig",
+    "_resolve_catalog_path",
+    "_validate_positive_thresholds",
+    "build_streaming_config",
+    "load_recorder_config",
+]
 
 # D-03 (literal): SPOT order book depth is capped at 50 by the venue.
 _SPOT_MAX_DEPTH = 50
@@ -163,22 +164,6 @@ class RecorderConfig(NautilusConfig, frozen=True):
         return [entry.id for entry in self.instruments if entry.product_type == "linear"]
 
 
-def _resolve_catalog_path(raw_path: str) -> str:
-    """
-    Resolve a configured catalog/streaming path against the repo root.
-
-    A relative path in `recorder.toml` (e.g. ``"catalog"``) must always resolve
-    to the same on-disk location regardless of the cwd the recorder is launched
-    from (e.g. systemd `WorkingDirectory`, repo root, or `scripts/bybit_recorder/`).
-    Absolute paths are returned unchanged.
-    """
-    path = Path(raw_path)
-    if path.is_absolute():
-        return str(path)
-
-    return str(_REPO_ROOT / path)
-
-
 def load_recorder_config(path: str | Path) -> tuple[RecorderConfig, list[InstrumentId]]:
     """
     Load and parse a recorder TOML configuration file.
@@ -266,37 +251,15 @@ def load_recorder_config(path: str | Path) -> tuple[RecorderConfig, list[Instrum
     restart_gap_threshold_seconds = recorder_raw.get("restart_gap_threshold_seconds", 60)
     max_hot_added_instruments = recorder_raw.get("max_hot_added_instruments", 50)
 
-    # V5 fail-fast (T-3-05 DoS-of-logs mitigation): an absurd interval/threshold
-    # would either spam logs (too small) or never warn (too large/negative), so
-    # reject any non-positive value at load time, mirroring the depth validation
-    # above.
-    if heartbeat_interval_seconds <= 0:
-        raise ValueError(
-            f"Invalid heartbeat_interval_seconds {heartbeat_interval_seconds}: must be positive",
-        )
-
-    if stale_threshold_default_seconds <= 0:
-        raise ValueError(
-            f"Invalid stale_threshold_default_seconds {stale_threshold_default_seconds}: "
-            "must be positive",
-        )
-
-    for stream, threshold in stale_threshold_seconds.items():
-        if threshold <= 0:
-            raise ValueError(
-                f"Invalid stale_threshold_seconds[{stream!r}] {threshold}: must be positive",
-            )
-
-    if restart_gap_threshold_seconds <= 0:
-        raise ValueError(
-            f"Invalid restart_gap_threshold_seconds {restart_gap_threshold_seconds}: "
-            "must be positive",
-        )
-
-    if max_hot_added_instruments <= 0:
-        raise ValueError(
-            f"Invalid max_hot_added_instruments {max_hot_added_instruments}: must be positive",
-        )
+    # V5 fail-fast (T-3-05): reject any non-positive interval/threshold at load
+    # time via the shared validator (same messages as the previous inline blocks).
+    _validate_positive_thresholds(
+        heartbeat_interval_seconds,
+        stale_threshold_default_seconds,
+        stale_threshold_seconds,
+        restart_gap_threshold_seconds,
+        max_hot_added_instruments,
+    )
 
     recorder_cfg = RecorderConfig(
         trader_id=recorder_raw["trader_id"],
@@ -321,53 +284,3 @@ def load_recorder_config(path: str | Path) -> tuple[RecorderConfig, list[Instrum
     )
 
     return recorder_cfg, recorder_cfg.instrument_ids
-
-
-def build_streaming_config(recorder_cfg: RecorderConfig) -> StreamingConfig:
-    """
-    Build the `StreamingConfig` used by the recorder's `TradingNode`.
-
-    Parameters
-    ----------
-    recorder_cfg : RecorderConfig
-        The parsed recorder configuration.
-
-    Returns
-    -------
-    StreamingConfig
-        A daily-rotating streaming configuration with `include_types` covering
-        all six auto-written types recorded by Phase 2 (REC-02 to REC-04, REC-06).
-
-    """
-    return StreamingConfig(
-        # `catalog_path` is set to the recorder's single shared streaming/catalog
-        # root (Pitfall 5 / A4) so the conversion `ParquetDataCatalog` later finds
-        # the feather files written under `{root}/live/{instance_id}/`.
-        catalog_path=recorder_cfg.streaming_path,
-        fs_protocol="file",
-        # WHY: day-partitioning is a consequence of daily feather rotation, not a
-        # free catalog property (Pitfall 1). `rotation_interval_minutes` defaults
-        # to 1440 (1 day) but is configurable for testing the conversion path
-        # without waiting a full day.
-        rotation_mode=RotationMode.SCHEDULED_DATES,
-        rotation_interval=pd.Timedelta(minutes=recorder_cfg.rotation_interval_minutes),
-        rotation_time=time(0, 0, 0),
-        rotation_timezone="UTC",
-        # FundingRateUpdate is intentionally OMITTED here: it is deduped on
-        # value-change by the strategy and persisted via a separate writer
-        # (D-01 / Plan 02), not auto-written through this passthrough.
-        # NOTE: the live DataEngine always publishes the plural `OrderBookDeltas`
-        # container on the message bus (even for a single delta with
-        # buffer_deltas=False) -- StreamingFeatherWriter.write() filters on
-        # `obj.__class__` BEFORE any OrderBookDeltas->OrderBookDelta schema
-        # mapping, so the singular `OrderBookDelta` here would silently drop
-        # all order-book data.
-        include_types=[
-            TradeTick,
-            QuoteTick,
-            OrderBookDeltas,
-            Bar,
-            MarkPriceUpdate,
-            IndexPriceUpdate,
-        ],
-    )
