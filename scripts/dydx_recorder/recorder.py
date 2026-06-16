@@ -98,7 +98,7 @@ def main(config_path: str) -> None:
         # RESEARCH A1: dYdX is full-depth L2 with no depth knob — the adapter
         # ignores the depth argument. A dummy fixed depth satisfies the shared
         # strategy's per-instrument depth requirement for subscribe_order_book_deltas.
-        instrument_depths={instrument_id: 50 for instrument_id in instrument_ids},
+        instrument_depths=dict.fromkeys(instrument_ids, 50),
         # Per-instrument bar intervals carried from the parsed entries so the
         # strategy can issue the bar subscriptions.
         instrument_bar_intervals={
