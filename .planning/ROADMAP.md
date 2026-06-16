@@ -130,7 +130,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 | 4. Open Interest Spike | 0/TBD | Not started | - |
 | 5. Inspection & Deployment | 0/TBD | Not started | - |
 | 6. Hot-Reload Config Changes | 2/2 | Complete   | 2026-06-15 |
-| 7. Common Recorder Module + dYdX Recorder | 1/4 | In Progress|  |
+| 7. Common Recorder Module + dYdX Recorder | 2/4 | In Progress|  |
 
 ### Phase 6: Hot-Reload Config Changes
 
@@ -153,7 +153,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 **Mode:** mvp
 **Requirements**: DYDX-01, DYDX-02, DYDX-03, DYDX-04, DYDX-05, DYDX-06, DYDX-07
 **Depends on:** Phase 6
-**Plans:** 1/4 plans executed
+**Plans:** 2/4 plans executed
 
 **Wave 1**
 
@@ -161,7 +161,7 @@ Phases execute in numeric order: 1 → 2 → 3 → 4 → 5 → 6 → 7
 
 **Wave 2** *(blocked on Wave 1 — imports common_recorder helpers)*
 
-- [ ] 07-02-PLAN.md — dYdX recorder config: flat-perp TOML parser + bar-interval whitelist fail-fast + DydxNetwork mapping + relaxed-quote thresholds + config tests (DYDX-02, DYDX-05, DYDX-06)
+- [x] 07-02-PLAN.md — dYdX recorder config: flat-perp TOML parser + bar-interval whitelist fail-fast + DydxNetwork mapping + relaxed-quote thresholds + config tests (DYDX-02, DYDX-05, DYDX-06)
 
 **Wave 3** *(blocked on Wave 2 — imports dydx_recorder/config.py)*
 
