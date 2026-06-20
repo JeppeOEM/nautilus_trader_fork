@@ -10,6 +10,11 @@ streaming_path = "catalog/streaming"   # SAME shared catalog root as Bybit
 conversion_interval_minutes = 60
 heartbeat_interval_seconds = 30
 stale_threshold_default_seconds = 90
+# MEM-04: seconds after Ctrl+C before the recorder force-exits (os._exit) if the
+# node has not finished disposing — guards against the nautilus-core data-queue
+# sentinel-loss race that can wedge the event loop so the process cannot be
+# stopped. Generous enough for a healthy shutdown; bounded so a wedge cannot hang.
+shutdown_watchdog_grace_seconds = 20
 environment = "mainnet"                # -> DydxNetwork.MAINNET (case-insensitive)
 
 # Per-stream stale thresholds (seconds) for the heartbeat WARNING. A stream label

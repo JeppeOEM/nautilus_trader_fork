@@ -13,6 +13,10 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 
+import os
+
+import pytest
+
 from nautilus_trader.common.component import TestClock
 from nautilus_trader.model.data import Bar
 from nautilus_trader.model.data import FundingRateUpdate
@@ -416,6 +420,21 @@ def test_restart_shaped_conversion_converts_finalized_file_without_raise(
         )
     writer_p2.flush()
 
+    # Snapshot the on-disk feather files BEFORE conversion (real filesystem) so the
+    # MEM-06 deletion assertions below operate on actual paths the catalog will list.
+    listed_before = list(
+        catalog._list_feather_data_files(
+            kind="live",
+            instance_id=RECORDER_INSTANCE_ID,
+            data_cls=TradeTick,
+        ),
+    )
+    paths_before = sorted(f.path for f in listed_before)
+    assert len(paths_before) == 2  # process-1 finalized + process-2 active
+    finalized_path, active_path = paths_before[0], paths_before[1]
+    assert os.path.exists(finalized_path)
+    assert os.path.exists(active_path)
+
     # --- Process 2's first conversion cycle. ---
     strategy = _build_strategy(catalog_dir)
     strategy._convert_finalized_feather_files(catalog, TradeTick)
@@ -426,3 +445,184 @@ def test_restart_shaped_conversion_converts_finalized_file_without_raise(
     trades = catalog.trade_ticks(instrument_ids=[str(sample_trade_ticks[0].instrument_id)])
     assert len(trades) == len(sample_trade_ticks)
     assert all(isinstance(t, TradeTick) for t in trades)
+
+    # MEM-06 (real-filesystem): the finalized feather source is now DELETED (never to
+    # be re-read on a future pass), while the still-active file is UNTOUCHED on disk.
+    assert not os.path.exists(finalized_path)
+    assert os.path.exists(active_path)
+
+
+# =====================================================================================
+# MEM-06 — feather source deletion after conversion (cycle-5 memory-leak fix)
+# =====================================================================================
+#
+# Root cause (code-confirmed): `_convert_finalized_feather_files` re-read EVERY
+# already-converted feather file into an in-memory pyarrow Table on EVERY conversion
+# pass (periodic + every Ctrl+C/on_stop) because feather sources were never deleted.
+# The "already exists, skipping write" parquet skip lives INSIDE
+# `_convert_feather_table_to_parquet`, AFTER the expensive read, so it never spared
+# the read. Backlog (and per-pass RAM) therefore grew with total recorder uptime.
+# FIX: delete each finalized feather source after a successful read+convert so it is
+# never listed/re-read again. The tests below lock the four safety properties.
+
+
+class _FakeFeatherFile:
+    # Mirrors the `.path` attribute `_list_feather_data_files` yields (the only
+    # attribute `_convert_finalized_feather_files` touches).
+    def __init__(self, path: str) -> None:
+        self.path = path
+
+
+class _FakeCatalogFs:
+    def __init__(self) -> None:
+        self.removed: list[str] = []
+
+    def rm(self, path: str) -> None:
+        self.removed.append(path)
+
+
+class _FakeCatalog:
+    # Minimal stand-in for ParquetDataCatalog exposing only the methods
+    # `_convert_finalized_feather_files` calls, so deletion-vs-no-deletion can be
+    # asserted deterministically without a real filesystem write.
+    def __init__(
+        self,
+        feather_files: list[_FakeFeatherFile],
+        *,
+        read_returns_none_for: set[str] | None = None,
+        convert_raises_for: set[str] | None = None,
+    ) -> None:
+        self._feather_files = feather_files
+        self._read_returns_none_for = read_returns_none_for or set()
+        self._convert_raises_for = convert_raises_for or set()
+        self.fs = _FakeCatalogFs()
+        self.read_calls: list[str] = []
+        self.convert_calls: list[str] = []
+
+    def _list_feather_data_files(self, **kwargs) -> list[_FakeFeatherFile]:
+        return list(self._feather_files)
+
+    def _read_feather_file(self, path: str):
+        self.read_calls.append(path)
+        if path in self._read_returns_none_for:
+            return None
+        return object()  # non-None sentinel "table"
+
+    def _convert_feather_table_to_parquet(self, *, feather_path, **kwargs) -> None:
+        self.convert_calls.append(feather_path)
+        if feather_path in self._convert_raises_for:
+            raise RuntimeError(f"convert boom for {feather_path}")
+        # NOTE: the already-exists/skip-write case ALSO returns normally (no raise)
+        # in real parquet.py — so "returns normally" is the success signal the
+        # deletion keys off, exactly as in production.
+
+
+def test_mem06_deletes_feather_source_after_successful_conversion(catalog_dir):
+    # (a) A finalized feather file IS deleted once read+convert succeeds, so it is
+    # never re-listed/re-read on a future pass.
+    finalized = _FakeFeatherFile("/cat/data/trade_tick/BTC/file_finalized.feather")
+    active = _FakeFeatherFile("/cat/data/trade_tick/BTC/file_active.feather")
+    catalog = _FakeCatalog([finalized, active])
+    strategy = _build_strategy(catalog_dir)
+
+    strategy._convert_finalized_feather_files(catalog, TradeTick)
+
+    assert catalog.convert_calls == [finalized.path]  # active never converted
+    assert catalog.fs.removed == [finalized.path]  # finalized deleted
+
+
+def test_mem06_deletes_feather_source_even_when_parquet_write_skipped(catalog_dir):
+    # (b) The USER'S EXACT OBSERVED SCENARIO: the parquet destination already exists,
+    # so `_convert_feather_table_to_parquet` prints "already exists, skipping write"
+    # and returns WITHOUT raising. The data is durably in parquet either way, so the
+    # feather source must STILL be deleted — otherwise it is re-read forever.
+    # The _FakeCatalog convert returns normally (no raise) for this file, exactly
+    # mirroring the already-exists early-return in real parquet.py (line ~2603).
+    finalized = _FakeFeatherFile("/cat/data/quote_tick/ETH/file_already_converted.feather")
+    active = _FakeFeatherFile("/cat/data/quote_tick/ETH/file_active.feather")
+    catalog = _FakeCatalog([finalized, active])  # convert never raises -> skip-write success
+    strategy = _build_strategy(catalog_dir)
+
+    strategy._convert_finalized_feather_files(catalog, QuoteTick)
+
+    assert catalog.read_calls == [finalized.path]
+    assert catalog.fs.removed == [finalized.path]
+
+
+def test_mem06_does_not_delete_when_conversion_raises(catalog_dir):
+    # (c) If `_convert_feather_table_to_parquet` raises, the data is NOT confirmed
+    # durable in parquet — the source must be KEPT (the per-type try/except in
+    # `_run_conversion` swallows the raise upstream; the rm must never run for it).
+    finalized = _FakeFeatherFile("/cat/data/trade_tick/BTC/file_finalized.feather")
+    active = _FakeFeatherFile("/cat/data/trade_tick/BTC/file_active.feather")
+    catalog = _FakeCatalog([finalized, active], convert_raises_for={finalized.path})
+    strategy = _build_strategy(catalog_dir)
+
+    with pytest.raises(RuntimeError, match="convert boom"):
+        strategy._convert_finalized_feather_files(catalog, TradeTick)
+
+    assert catalog.fs.removed == []  # nothing deleted on failed convert
+
+
+def test_mem06_does_not_delete_when_read_returns_none(catalog_dir):
+    # (c, variant) A missing/corrupt read (`_read_feather_file` -> None) is `continue`d
+    # BEFORE convert; the source must be KEPT for a retry next pass (never deleted, and
+    # never even handed to convert).
+    finalized = _FakeFeatherFile("/cat/data/trade_tick/BTC/file_corrupt.feather")
+    active = _FakeFeatherFile("/cat/data/trade_tick/BTC/file_active.feather")
+    catalog = _FakeCatalog([finalized, active], read_returns_none_for={finalized.path})
+    strategy = _build_strategy(catalog_dir)
+
+    strategy._convert_finalized_feather_files(catalog, TradeTick)
+
+    assert catalog.convert_calls == []  # None read never reaches convert
+    assert catalog.fs.removed == []  # and is never deleted
+
+
+def test_mem06_never_touches_the_still_active_file(catalog_dir):
+    # (d) The most-recent (still actively-written) file per directory — excluded via
+    # `files[:-1]` — must NEVER be read, converted, OR deleted. Two directories, so the
+    # last file in EACH is protected.
+    btc_old = _FakeFeatherFile("/cat/data/trade_tick/BTC/file_old.feather")
+    btc_active = _FakeFeatherFile("/cat/data/trade_tick/BTC/file_active.feather")
+    eth_active = _FakeFeatherFile("/cat/data/trade_tick/ETH/file_active.feather")
+    catalog = _FakeCatalog([btc_old, btc_active, eth_active])
+    strategy = _build_strategy(catalog_dir)
+
+    strategy._convert_finalized_feather_files(catalog, TradeTick)
+
+    # Only the BTC old file is finalized; both active files are untouched entirely.
+    assert catalog.read_calls == [btc_old.path]
+    assert catalog.convert_calls == [btc_old.path]
+    assert catalog.fs.removed == [btc_old.path]
+    assert btc_active.path not in catalog.fs.removed
+    assert eth_active.path not in catalog.fs.removed
+
+
+def test_mem06_deletion_failure_does_not_crash_the_pass(catalog_dir):
+    # (e) A deletion failure (e.g. permissions / vanished file) must be logged via
+    # self.log (MEM-05 pyo3) but NEVER crash the conversion pass — the data is already
+    # durably in parquet, so the pass must continue and still process later files.
+    file_a = _FakeFeatherFile("/cat/data/trade_tick/BTC/file_a.feather")
+    file_b = _FakeFeatherFile("/cat/data/trade_tick/BTC/file_b.feather")
+    active = _FakeFeatherFile("/cat/data/trade_tick/BTC/file_active.feather")
+    catalog = _FakeCatalog([file_a, file_b, active])
+
+    # rm raises for file_a only; the pass must still convert+delete file_b after.
+    original_rm = catalog.fs.rm
+
+    def _rm(path: str) -> None:
+        if path == file_a.path:
+            raise PermissionError("cannot remove")
+        original_rm(path)
+
+    catalog.fs.rm = _rm  # type: ignore[method-assign]
+    strategy = _build_strategy(catalog_dir)
+
+    # Must not raise despite the rm failure on file_a.
+    strategy._convert_finalized_feather_files(catalog, TradeTick)
+
+    # Both finalized files were converted; file_b was still deleted after file_a's
+    # rm failure (the failure did not abort the remaining work).
+    assert catalog.convert_calls == [file_a.path, file_b.path]
+    assert catalog.fs.removed == [file_b.path]

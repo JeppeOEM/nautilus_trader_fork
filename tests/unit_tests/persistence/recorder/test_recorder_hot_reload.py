@@ -399,12 +399,21 @@ def test_failed_not_retried(mocker, mock_cache, tmp_path, caplog):
     )
 
     # Poll N: schedule load (pending). Poll N+1: still None -> ERROR + mark failed.
+    # MEM-05: the "venue did not recognize it" ERROR now routes via the immutable
+    # self.log (pyo3) rather than the stdlib logger, so it is no longer observable
+    # via caplog. The failed-state contract (_failed_instrument_ids membership) is
+    # the stronger observable assertion and is unchanged. The stdlib logger must
+    # carry NO ERROR record for this id anymore.
     strategy._on_config_reload(event=None)
     with caplog.at_level(logging.ERROR, logger="scripts.bybit_recorder.strategy"):
         strategy._on_config_reload(event=None)
 
     assert INSTRUMENT_ID_NEW in strategy._failed_instrument_ids
-    assert any(str(INSTRUMENT_ID_NEW) in r.getMessage() for r in caplog.records)
+    assert not [
+        r
+        for r in caplog.records
+        if r.levelno == logging.ERROR and str(INSTRUMENT_ID_NEW) in r.getMessage()
+    ]
     parent.subscribe_trade_ticks.assert_not_called()
 
     # Poll 3 with the SAME toml signature: failed id is NOT re-loaded.
@@ -460,9 +469,12 @@ def test_failed_resets_on_change(mocker, mock_cache, tmp_path):
     assert client.instrument_provider.load.call_count == 2
 
 
-def test_threshold_warning(mocker, mock_cache, caplog):
-    # Direct check: when _hot_added_count exceeds max_hot_added_instruments, the
-    # threshold helper logs a WARNING (D-08, informational-only).
+def test_threshold_warning(mocker, mock_cache):
+    # Direct check (MEM-05): when _hot_added_count exceeds max_hot_added_instruments,
+    # the threshold helper emits a WARNING via the immutable self.log (D-08,
+    # informational-only). self.log is unspyable, so the routing is verified by
+    # spying on the extracted `_hot_added_threshold_message` builder and asserting
+    # its content names the knob.
     strategy, _ = _build_strategy(
         mocker,
         mock_cache,
@@ -471,13 +483,11 @@ def test_threshold_warning(mocker, mock_cache, caplog):
     )
     strategy._hot_added_count = 2
 
-    with caplog.at_level(logging.WARNING):
-        strategy._check_hot_added_threshold()
+    msg_spy = mocker.spy(strategy, "_hot_added_threshold_message")
+    strategy._check_hot_added_threshold()
 
-    assert any(
-        "max_hot_added_instruments" in rec.message or "hot-add" in rec.message.lower()
-        for rec in caplog.records
-    )
+    msg_spy.assert_called_once()
+    assert "max_hot_added_instruments" in msg_spy.spy_return
 
 
 def test_threshold_warning_through_add_branch_does_not_block(mocker, mock_cache, tmp_path, caplog):
@@ -510,12 +520,17 @@ def test_threshold_warning_through_add_branch_does_not_block(mocker, mock_cache,
         return_value=(parsed, []),
     )
 
+    # MEM-05: the threshold WARNING now routes via the immutable self.log, so it is
+    # verified through the extracted `_hot_added_threshold_message` builder spy.
+    msg_spy = mocker.spy(strategy, "_hot_added_threshold_message")
+
     strategy._on_config_reload(event=None)  # schedule
     with caplog.at_level(logging.WARNING, logger="scripts.bybit_recorder.strategy"):
         strategy._on_config_reload(event=None)  # confirm + subscribe
 
-    # WARNING logged ...
-    assert any("max_hot_added_instruments" in r.getMessage() for r in caplog.records)
+    # WARNING built (over-threshold) ...
+    msg_spy.assert_called_once()
+    assert "max_hot_added_instruments" in msg_spy.spy_return
     # ... but the subscribe still proceeded (never blocked).
     parent.subscribe_trade_ticks.assert_called_once_with(INSTRUMENT_ID_NEW)
     assert INSTRUMENT_ID_NEW in strategy._subscribed_params

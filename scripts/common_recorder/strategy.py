@@ -23,6 +23,7 @@ package: the only venue coupling — the hot-reload config loader — is INJECTE
 imports a venue config module.
 """
 
+import asyncio
 import logging
 from datetime import time
 
@@ -92,6 +93,73 @@ def set_default_config_loader(loader) -> None:
     """
     global _default_config_loader
     _default_config_loader = loader
+
+
+def _read_self_rss_mb() -> float | None:
+    """
+    Return this process's resident set size in MiB, or ``None`` if unavailable.
+
+    Reads ``/proc/self/status`` (Linux-only, stdlib-only — no psutil dependency)
+    so the heartbeat memory sample adds no new runtime requirement. Returns
+    ``None`` on any non-Linux platform or read error so the heartbeat never fails
+    just because the RSS probe is unsupported (MEM-03 observability).
+    """
+    try:
+        with open("/proc/self/status") as status:
+            for line in status:
+                if line.startswith("VmRSS:"):
+                    # Format: "VmRSS:\t   123456 kB"
+                    kib = int(line.split()[1])
+                    return kib / 1024.0
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def _pending_task_count(loop: asyncio.AbstractEventLoop | None = None) -> int | None:
+    """
+    Return the number of asyncio tasks alive on ``loop``, or ``None``.
+
+    The ThrottledEnqueuer overflow hypothesis (MEM-03) predicts this count climbs
+    in lockstep with RSS during steady-state overload, because a saturated data
+    queue spawns one ``create_task(queue.put(...))`` per excess datum. Sampling it
+    alongside RSS distinguishes "memory held by pending put() tasks" from other
+    growth.
+
+    CRITICAL (cycle 3b root cause): the heartbeat is fired by a Nautilus
+    ``LiveTimer``, whose Python callback runs on the GLOBAL TOKIO RUNTIME worker
+    thread (``crates/common/src/live/timer.rs`` ``rt.spawn`` -> ``callback.call``),
+    NOT on the asyncio event-loop thread. ``asyncio.get_running_loop()`` therefore
+    raises ``RuntimeError`` ("no running event loop") on that worker thread, which
+    the old ``except RuntimeError: return None`` swallowed -> ``pending_tasks=n/a``
+    on every sample (confirmed by the cycle-3b live run). The fix is to pass an
+    EXPLICIT loop reference (captured at build time, see ``set_loop`` /
+    ``_resolve_loop``): ``asyncio.all_tasks(loop)`` only reads the loop's task
+    registry and does not require the loop to be running on the calling thread, so
+    it returns a real integer from the tokio worker thread.
+
+    Parameters
+    ----------
+    loop : asyncio.AbstractEventLoop | None
+        The event loop whose tasks to count. When ``None`` (no loop wired and no
+        running loop discoverable) the probe degrades to ``None`` rather than
+        raising, so the heartbeat never fails just because the loop is unknown.
+
+    """
+    if loop is None:
+        # Best-effort fallback: a running loop on THIS thread (e.g. unit tests that
+        # call from within an asyncio loop). On the live tokio worker thread this
+        # still raises -> None, which is why the caller passes an explicit loop.
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return None
+    try:
+        return len(asyncio.all_tasks(loop))
+    except RuntimeError:
+        # all_tasks can raise if the loop is closed/disposed mid-shutdown; degrade
+        # gracefully so the heartbeat line stays well-formed.
+        return None
 
 
 class RecorderStrategyConfig(StrategyConfig, frozen=True):
@@ -230,6 +298,22 @@ class RecorderStrategy(Strategy):
         # venue's recorder.py via `set_config_loader` so this common strategy
         # never imports a venue config module. None until injected.
         self._config_loader = None
+        # Injected venue shutdown hook (MEM-02). Wired by the venue's recorder.py
+        # via `set_shutdown_hook` (parallel to set_config_loader) so this common
+        # strategy never imports a venue module. Called FIRST in `on_stop` to halt
+        # the venue WebSocket producer immediately, BEFORE the kernel's own delayed
+        # disconnect. For dYdX this closes the WS so the Rust handler stops flooding
+        # `loop.call_soon_threadsafe` during the multi-second teardown window — the
+        # mechanism behind the Ctrl+C RAM escalation. None until injected.
+        self._shutdown_hook = None
+        # Reference to the kernel asyncio event loop, injected at build time by
+        # `set_loop` (recorder.py, parallel to set_data_client). REQUIRED for the
+        # MEM-03 pending-task probe: the heartbeat fires on a Nautilus LiveTimer
+        # tokio worker thread (NOT the asyncio loop thread), so the probe cannot
+        # discover the loop via asyncio.get_running_loop() — it must be handed an
+        # explicit loop reference to call asyncio.all_tasks(loop). None until
+        # injected (the probe then degrades to "n/a").
+        self._event_loop = None
 
     def set_data_client(self, client) -> None:
         """
@@ -266,6 +350,74 @@ class RecorderStrategy(Strategy):
 
         """
         self._config_loader = loader
+
+    def set_shutdown_hook(self, hook) -> None:
+        """
+        Inject a venue-specific shutdown hook run first in ``on_stop`` (MEM-02).
+
+        Parallel to ``set_data_client``/``set_config_loader``: each venue's
+        ``recorder.py`` injects a zero-arg callable after ``node.build()`` so this
+        common strategy never imports a venue module. ``on_stop`` invokes the hook
+        BEFORE flushing/converting, so the venue can halt its WebSocket producer
+        immediately — ahead of the kernel's own delayed client disconnect.
+
+        For dYdX the hook schedules the WS client's ``disconnect()`` on the loop.
+        The dYdX Rust WS handler runs on a separate runtime and schedules every
+        parsed datum onto the asyncio loop via ``call_soon_threadsafe`` with no
+        subscription gate and no backpressure; it only stops once the WS closes.
+        The kernel does not disconnect the data client until AFTER ``on_stop`` and a
+        post-stop residual sleep (and the dYdX adapter then waits another second
+        before closing), so without this hook the producer floods the loop's
+        unbounded ready-queue for several seconds on Ctrl+C, ballooning RAM
+        (MEM-02). Closing the WS here collapses that window.
+
+        Parameters
+        ----------
+        hook : callable
+            A zero-arg callable invoked from ``on_stop`` on the event-loop thread.
+
+        """
+        self._shutdown_hook = hook
+
+    def set_loop(self, loop) -> None:
+        """
+        Inject the kernel asyncio event loop for the MEM-03 task-count probe.
+
+        Parallel to ``set_data_client``/``set_shutdown_hook``: each venue's
+        ``recorder.py`` injects ``node.kernel.loop`` after ``node.build()`` so the
+        ``_mem_watch_message`` heartbeat probe can count pending asyncio tasks.
+
+        WHY this is required: the heartbeat timer is fired by a Nautilus
+        ``LiveTimer`` whose Python callback runs on the GLOBAL TOKIO RUNTIME worker
+        thread (``crates/common/src/live/timer.rs`` ``rt.spawn`` -> ``callback.call``),
+        not on the asyncio event-loop thread. ``asyncio.get_running_loop()`` raises
+        ``RuntimeError`` on that worker thread, so the probe must be handed an
+        explicit loop reference. ``asyncio.all_tasks(loop)`` only reads the loop's
+        task registry, so it works from the timer worker thread.
+
+        Parameters
+        ----------
+        loop : asyncio.AbstractEventLoop
+            The kernel event loop (``node.kernel.loop``).
+
+        """
+        self._event_loop = loop
+
+    def _resolve_loop(self):
+        """
+        Resolve the asyncio event loop for the MEM-03 pending-task probe.
+
+        Returns the loop injected via ``set_loop`` (wired by ``recorder.py`` from
+        ``node.kernel.loop`` after build), or ``None`` when it was never injected
+        (the probe then degrades to ``n/a`` rather than raising).
+
+        NOTE: the registered executor (``register_executor``) also holds the kernel
+        loop as ``ActorExecutor._loop``, but the strategy's ``_executor`` is a
+        Cython ``cdef object`` attribute NOT exposed across the Python boundary
+        (``getattr`` returns ``None``), so it cannot serve as a fallback. The
+        explicit ``set_loop`` injection is therefore the single source of truth.
+        """
+        return self._event_loop
 
     def _resolve_config_loader(self):
         """
@@ -318,6 +470,7 @@ class RecorderStrategy(Strategy):
             instrument_id,
             book_type=BookType.L2_MBP,
             depth=depth,
+            managed=False,
         )
         for interval in bar_intervals:
             # Venue-native EXTERNAL kline stream (D-02) — NOT derived from
@@ -387,9 +540,7 @@ class RecorderStrategy(Strategy):
                 self.config.instrument_depths[instrument_id],
                 frozenset(self.config.instrument_bar_intervals[instrument_id]),
             )
-            self._product_types[instrument_id] = (
-                "linear" if instrument_id in linear_ids else "spot"
-            )
+            self._product_types[instrument_id] = "linear" if instrument_id in linear_ids else "spot"
 
         # HOT-01 reload trigger (D-01/D-02): a dedicated named timer reusing the
         # heartbeat cadence. The callback re-reads recorder.toml and applies the
@@ -423,8 +574,9 @@ class RecorderStrategy(Strategy):
             # but must not prevent subscriptions" guarantee). With no catalog
             # there are no prior ts_init values to compare, so return early.
             catalog = ParquetDataCatalog(self.config.catalog_path)
-        except Exception:
-            logger.exception("Failed to open catalog for restart-gap check")
+        except Exception as exc:
+            # MEM-05: route via self.log (pyo3) so it lands in the visible log file.
+            self.log.exception("Failed to open catalog for restart-gap check", exc)
             return
 
         now_ns = self.clock.timestamp_ns()
@@ -438,17 +590,35 @@ class RecorderStrategy(Strategy):
                 last_ts_init = max(tick.ts_init for tick in trades)
                 gap_s = (now_ns - last_ts_init) / 1e9
                 if gap_s > self.config.restart_gap_threshold_seconds:
-                    logger.warning(
-                        "Resuming after gap of %.1fs for %s (last data: %s)",
-                        gap_s,
-                        instrument_id,
-                        pd.Timestamp(last_ts_init, unit="ns"),
+                    # MEM-05: route via self.log (pyo3) — the stdlib `logger` here
+                    # was invisible in the use_pyo3 log file (the whole point of
+                    # this gap WARNING). Message built by an extracted helper so the
+                    # content is unit-testable without the immutable self.log.
+                    self.log.warning(
+                        self._restart_gap_message(instrument_id, gap_s, last_ts_init),
                     )
-            except Exception:
-                logger.exception(
-                    "Failed to check restart gap for %s",
-                    instrument_id,
+            except Exception as exc:
+                self.log.exception(
+                    f"Failed to check restart gap for {instrument_id}",
+                    exc,
                 )
+
+    def _restart_gap_message(
+        self,
+        instrument_id: InstrumentId,
+        gap_s: float,
+        last_ts_init: int,
+    ) -> str:
+        """
+        Build the REL-02 restart-gap WARNING line (MEM-05).
+
+        Factored out of ``_log_restart_gaps`` so the WARNING content is
+        unit-testable without touching the immutable Cython ``self.log`` object
+        (it cannot be patched/spied — cycle-3b). ``self.log`` takes a pre-formatted
+        string, not printf-style args, so the formatting is done here.
+        """
+        last_data = pd.Timestamp(last_ts_init, unit="ns")
+        return f"Resuming after gap of {gap_s:.1f}s for {instrument_id} (last data: {last_data})"
 
     def _stale_threshold_s(self, stream: str) -> float:
         """
@@ -493,15 +663,71 @@ class RecorderStrategy(Strategy):
             idle_s = (now_ns - last_ns) / 1e9
             threshold_s = self._stale_threshold_s(stream)
             if idle_s > threshold_s:
-                logger.warning(
-                    "Stale stream: %s %s idle %.1fs (> %.0fs threshold)",
-                    stream,
-                    instrument_id,
-                    idle_s,
-                    threshold_s,
+                # MEM-05: route via self.log (pyo3) so the gap WARNING actually
+                # lands in logs/<recorder>.log. The stdlib `logger` was NOT captured
+                # by the node's use_pyo3 backend, so this stale-stream signal — the
+                # user's stated TOP PRIORITY ("visible where there are holes in the
+                # data") — was effectively invisible. Message built by an extracted
+                # helper so the content is unit-testable (self.log is immutable).
+                self.log.warning(
+                    self._stale_stream_message(stream, instrument_id, idle_s, threshold_s),
                 )
 
-        logger.info("Heartbeat: %d active streams", len(self._last_seen))
+        # MEM-05: heartbeat INFO via self.log (pyo3). Below stderr's WARNING
+        # threshold, the stdlib `logger.info` line was lost ENTIRELY before this.
+        self.log.info(f"Heartbeat: {len(self._last_seen)} active streams")
+
+        # MEM-03: emit RSS + asyncio task-count through `self.log` (the Nautilus
+        # pyo3-routed logger) — NOT the stdlib `logger` above, which earlier log
+        # audits proved is NOT captured by the node's use_pyo3 log file. This is
+        # the only heartbeat line that actually lands in logs/<recorder>.log, so
+        # it is the runtime-evidence probe for the memory-growth investigation:
+        # a normal (no-Ctrl+C) run yields an rss_mb + pending_tasks time-series
+        # that confirms (or refutes) steady-state ThrottledEnqueuer overflow.
+        self.log.info(self._mem_watch_message())
+
+    def _stale_stream_message(
+        self,
+        stream: str,
+        instrument_id: InstrumentId,
+        idle_s: float,
+        threshold_s: float,
+    ) -> str:
+        """
+        Build the REL-03 stale-stream WARNING line (MEM-05).
+
+        Factored out of ``_heartbeat`` so the WARNING content is unit-testable
+        without touching the immutable Cython ``self.log`` object (it cannot be
+        patched/spied — cycle-3b). ``self.log`` takes a pre-formatted string, not
+        printf-style args, so the formatting is done here.
+        """
+        return (
+            f"Stale stream: {stream} {instrument_id} idle {idle_s:.1f}s "
+            f"(> {threshold_s:.0f}s threshold)"
+        )
+
+    def _mem_watch_message(self) -> str:
+        """
+        Build the MEM-03 memory-watch heartbeat line.
+
+        Samples this process's RSS and the asyncio pending-task count and formats
+        them into a single ``mem-watch:`` line. Factored out of ``_heartbeat`` so
+        the probe content is unit-testable without touching the immutable Cython
+        ``self.log`` object. ``n/a`` is substituted for any sample that is
+        unavailable (non-Linux RSS, or no running loop) so the line is always
+        well-formed.
+        """
+        rss_mb = _read_self_rss_mb()
+        # Pass the EXPLICIT kernel loop (cycle-3b root cause): the heartbeat runs on
+        # a tokio worker thread where asyncio.get_running_loop() raises, so without
+        # this the count is always "n/a".
+        pending_tasks = _pending_task_count(self._resolve_loop())
+        rss_str = f"{rss_mb:.1f}" if rss_mb is not None else "n/a"
+        tasks_str = str(pending_tasks) if pending_tasks is not None else "n/a"
+        return (
+            f"mem-watch: rss_mb={rss_str} pending_tasks={tasks_str} "
+            f"active_streams={len(self._last_seen)}"
+        )
 
     def _config_signature(self, parsed_cfg) -> int:
         """
@@ -674,6 +900,7 @@ class RecorderStrategy(Strategy):
                 instrument_id,
                 book_type=BookType.L2_MBP,
                 depth=new_depth,
+                managed=False,
             )
 
         old_set = set(old_intervals)
@@ -696,12 +923,23 @@ class RecorderStrategy(Strategy):
 
         """
         if self._hot_added_count > self.config.max_hot_added_instruments:
-            logger.warning(
-                "Hot-added instrument count %d exceeds max_hot_added_instruments %d "
-                "(informational; not blocked)",
-                self._hot_added_count,
-                self.config.max_hot_added_instruments,
-            )
+            # MEM-05: route via self.log (pyo3) so this lands in the visible log.
+            # Message built by an extracted helper so the content is unit-testable
+            # without the immutable self.log.
+            self.log.warning(self._hot_added_threshold_message())
+
+    def _hot_added_threshold_message(self) -> str:
+        """
+        Build the D-08 hot-add-threshold WARNING line (MEM-05).
+
+        Factored out of ``_check_hot_added_threshold`` so the WARNING content is
+        unit-testable without touching the immutable Cython ``self.log`` object.
+        """
+        return (
+            f"Hot-added instrument count {self._hot_added_count} exceeds "
+            f"max_hot_added_instruments {self.config.max_hot_added_instruments} "
+            f"(informational; not blocked)"
+        )
 
     def _load_and_subscribe_addition(self, entry) -> None:
         """
@@ -746,9 +984,9 @@ class RecorderStrategy(Strategy):
         if self._data_client is None:
             # No live client wired (e.g. mis-wired build) — cannot load. Warn once
             # per poll and skip; never fault the component.
-            logger.warning(
-                "No data client injected; cannot hot-load %s",
-                instrument_id,
+            # MEM-05: route via self.log (pyo3) so it lands in the visible log.
+            self.log.warning(
+                f"No data client injected; cannot hot-load {instrument_id}",
             )
             return
 
@@ -761,14 +999,15 @@ class RecorderStrategy(Strategy):
                 if instrument_id not in self._pending_loads:
                     provider.load(instrument_id)
                     self._pending_loads.add(instrument_id)
-                    logger.info("Hot-loading new instrument %s (scheduled)", instrument_id)
+                    # MEM-05: route via self.log (pyo3) for visible-log capture.
+                    self.log.info(f"Hot-loading new instrument {instrument_id} (scheduled)")
                     return
 
                 # Phase 2 (still unresolved): the load came back empty — the venue
                 # did not recognize the id (D-11). Fail it for this snapshot.
-                logger.error(
-                    "Failed to load new instrument %s (venue did not recognize it); skipping",
-                    instrument_id,
+                self.log.error(
+                    f"Failed to load new instrument {instrument_id} "
+                    f"(venue did not recognize it); skipping",
                 )
                 self._failed_instrument_ids.add(instrument_id)
                 self._pending_loads.discard(instrument_id)
@@ -799,9 +1038,9 @@ class RecorderStrategy(Strategy):
                 frozenset(entry.bar_intervals),
             )
             self._product_types[instrument_id] = entry.product_type
-            logger.info("Hot-added instrument %s", instrument_id)
-        except Exception:
-            logger.exception("Failed to hot-add instrument %s", instrument_id)
+            self.log.info(f"Hot-added instrument {instrument_id}")
+        except Exception as exc:
+            self.log.exception(f"Failed to hot-add instrument {instrument_id}", exc)
             self._failed_instrument_ids.add(instrument_id)
             self._pending_loads.discard(instrument_id)
 
@@ -823,14 +1062,14 @@ class RecorderStrategy(Strategy):
         """
         try:
             if self.config.reload_config_path is None:
-                logger.debug("No reload_config_path configured; skipping config reload")
+                self.log.debug("No reload_config_path configured; skipping config reload")
                 return
 
             loader = self._resolve_config_loader()
             if loader is None:
                 # No venue config loader wired (DYDX-01). The timer still fires;
                 # without a loader there is nothing to diff against, so skip.
-                logger.debug("No config loader injected; skipping config reload")
+                self.log.debug("No config loader injected; skipping config reload")
                 return
 
             parsed_cfg, _ = loader(self.config.reload_config_path)
@@ -868,15 +1107,14 @@ class RecorderStrategy(Strategy):
             for entry in additions:
                 self._load_and_subscribe_addition(entry)
 
-            logger.info(
-                "Config reload: %d added, %d removed, %d changed",
-                len(additions),
-                len(removals),
-                len(param_changes),
+            # MEM-05: route via self.log (pyo3) so reload activity is visible.
+            self.log.info(
+                f"Config reload: {len(additions)} added, {len(removals)} removed, "
+                f"{len(param_changes)} changed",
             )
-        except Exception:
+        except Exception as exc:
             # T-06-01 / Security V7: never let a bad reload fault the component.
-            logger.exception("Config reload failed")
+            self.log.exception("Config reload failed", exc)
             return
 
     def on_trade_tick(self, tick: TradeTick) -> None:
@@ -1005,9 +1243,40 @@ class RecorderStrategy(Strategy):
         self._funding_writer.write(funding_rate)
         self._funding_writer.flush()
 
+    def _flush_funding_writer(self) -> None:
+        """
+        Flush the strategy-owned funding writer ON THE EVENT-LOOP THREAD.
+
+        Must be called on the loop thread (never from the conversion worker) so it
+        never races `on_funding_rate` -> `_persist_funding_rate.write/flush`, which
+        also run on the loop thread (MEM-01). Flushing here makes any deduped
+        funding rows persisted since the last tick visible in the feather file
+        before the off-thread conversion reads finalized files.
+        """
+        if self._funding_writer is not None:
+            try:
+                # WHY: a flush error must not block conversion of already
+                # finalized files, nor propagate out of on_stop() (CR-01 /
+                # T-3-01).
+                self._funding_writer.flush()
+            except Exception as exc:
+                # MEM-05: route via self.log (pyo3) so the failure is visible.
+                self.log.exception("Failed to flush funding writer", exc)
+
     def _run_conversion(self) -> None:
         """
         Convert streamed feather data for this instance into the `ParquetDataCatalog`.
+
+        MEM-01: this body runs on a WORKER THREAD (via `self.run_in_executor`), NOT
+        on the asyncio event loop. The live dYdX WebSocket runtime schedules every
+        parsed delta onto the loop via `call_soon_threadsafe` into an unbounded
+        ready-queue with no backpressure, so any loop-blocking work here (opening the
+        catalog, reading/converting feather files) would let that queue flood and
+        balloon RAM until OOM. Offloading keeps the loop free to drain WS messages.
+        It reads only ROTATED-OUT (finalized, immutable) feather files and writes
+        parquet -- it never touches loop-thread mutable state (the funding writer is
+        flushed separately on the loop thread BEFORE offload via
+        `_flush_funding_writer`), so it is safe to run off-thread.
 
         Only feather files that have already been ROTATED OUT (i.e. a newer file
         for the same instrument/bar-type already exists, so the file will never
@@ -1022,33 +1291,19 @@ class RecorderStrategy(Strategy):
 
         A transient conversion error is logged and swallowed PER TYPE so it does not
         crash the recorder nor block the remaining types.
-
-        This shared body is invoked both by the periodic `_convert_stream` timer
-        (REL-01) and by `on_stop` for a final flush+convert on shutdown (REL-02).
-
         """
         try:
             # WHY: opening the catalog touches the filesystem; a transient I/O
             # error here (e.g. during SIGTERM shutdown) must not propagate out
-            # of on_stop() and fault the component (CR-01 / T-3-01). Without a
+            # of the worker and fault the component (CR-01 / T-3-01). Without a
             # catalog there is nothing to convert into, so return early.
             catalog = ParquetDataCatalog(self.config.catalog_path)
-        except Exception:
-            logger.exception("Failed to open catalog for conversion")
+        except Exception as exc:
+            # MEM-05: route via self.log (pyo3). NOTE this runs on the conversion
+            # WORKER thread; the pyo3 logger is thread-safe (the mem-watch probe
+            # already logs via self.log from a tokio worker thread).
+            self.log.exception("Failed to open catalog for conversion", exc)
             return
-
-        # Flush the strategy-owned funding writer before conversion so any
-        # deduped funding rows persisted since the last tick are visible in its
-        # feather file (the kernel "*" writer is flushed separately by the
-        # framework).
-        if self._funding_writer is not None:
-            try:
-                # WHY: a flush error must not block conversion of already
-                # finalized files, nor propagate out of on_stop() (CR-01 /
-                # T-3-01).
-                self._funding_writer.flush()
-            except Exception:
-                logger.exception("Failed to flush funding writer")
 
         for data_cls in [*_RECORDED_TYPES, FundingRateUpdate]:
             try:
@@ -1056,18 +1311,25 @@ class RecorderStrategy(Strategy):
                 # live/ (Pitfall 3). Per-type try/except so one type's transient
                 # error does not block the others (A2 / Pitfall 2).
                 self._convert_finalized_feather_files(catalog, data_cls)
-            except Exception:
-                logger.exception(
-                    "Failed to convert %s stream to catalog",
-                    data_cls.__name__,
+            except Exception as exc:
+                self.log.exception(
+                    f"Failed to convert {data_cls.__name__} stream to catalog",
+                    exc,
                 )
 
     def _convert_stream(self, event: TimeEvent) -> None:
         """
-        Periodic conversion timer callback (REL-01) — delegates to the shared
-        `_run_conversion()` body.
+        Periodic conversion timer callback (REL-01).
+
+        MEM-01: flush the funding writer on the loop thread, then OFFLOAD the
+        catalog conversion to the registered worker executor via
+        `self.run_in_executor` so it never blocks the event loop. When no executor
+        is registered, `run_in_executor` runs `_run_conversion` inline (back-compat
+        for tests); production wiring in `recorder.py` registers a single-thread
+        executor so the offload is real.
         """
-        self._run_conversion()
+        self._flush_funding_writer()
+        self.run_in_executor(self._run_conversion)
 
     def on_stop(self) -> None:
         """
@@ -1091,8 +1353,41 @@ class RecorderStrategy(Strategy):
         This hook never references, flushes, or closes the kernel `"*"`
         streaming writer: the strategy cannot reach it and the kernel closes it
         itself afterwards (Pitfall 1 / Anti-Pattern).
+
+        MEM-01: `on_stop` MUST NOT block the event loop. `kernel.stop_async()`
+        fires this hook (via `_trader.stop()`) BEFORE it disconnects the live data
+        client, so the dYdX WebSocket is still producing here. The old code ran the
+        full synchronous catalog conversion inline on the loop; while it blocked,
+        the WS runtime kept scheduling deltas onto the loop's unbounded ready-queue
+        via `call_soon_threadsafe`, ballooning RAM until OOM and making Ctrl+C
+        appear to hang. Instead we flush the funding writer on the loop thread and
+        OFFLOAD the conversion to the worker executor (non-blocking). If the
+        executor is torn down before the conversion runs, the only consequence is
+        that already-finalized feather files are converted on the NEXT restart's
+        first conversion cycle (the still-active file was never convertible here
+        anyway) -- no data loss (D-02/D-03).
+
+        MEM-02: BEFORE any flush/convert, invoke the injected venue shutdown hook
+        (if wired) to halt the venue WebSocket producer immediately. `on_stop` is
+        the FIRST step of `kernel.stop_async()`; the kernel does not disconnect the
+        data client until after this hook AND a post-stop residual sleep, and the
+        dYdX adapter then waits a further second before closing its WS. Throughout
+        that multi-second window the dYdX Rust WS handler keeps scheduling every
+        full-depth L2 delta onto the loop via `call_soon_threadsafe` (no
+        backpressure), saturating the bounded data queue and spawning unbounded
+        `create_task(put)` coroutines -> the Ctrl+C RAM escalation. Closing the WS
+        here stops the producer at the source. The hook is wrapped so a teardown
+        error never prevents the funding flush / conversion offload below.
         """
-        self._run_conversion()
+        if self._shutdown_hook is not None:
+            try:
+                self._shutdown_hook()
+            except Exception as exc:
+                # MEM-05: route via self.log (pyo3) so a teardown error is visible.
+                self.log.exception("Shutdown hook failed", exc)
+
+        self._flush_funding_writer()
+        self.run_in_executor(self._run_conversion)
 
     def _convert_finalized_feather_files(
         self,
@@ -1106,10 +1401,34 @@ class RecorderStrategy(Strategy):
         `{table_name}/{identifier}/{identifier}_{timestamp}.feather`, with
         filenames sorted chronologically by `_list_feather_data_files`. Within
         each identifier's directory, the most-recently-created file is still open
-        for writes -- it is skipped -- and all earlier files are finalized
-        (rotation already moved on to a newer file, so they will never be
-        appended to again).
+        for writes -- it is skipped (`files[:-1]`) -- and all earlier files are
+        finalized (rotation already moved on to a newer file, so they will never
+        be appended to again).
 
+        MEM-06: once a finalized feather file has been read AND converted, its
+        source is DELETED so it is never listed or re-read again on a future
+        pass. Without this, `_list_feather_data_files` returns the entire growing
+        backlog of already-converted feather files on EVERY conversion pass
+        (periodic every `conversion_interval_minutes` AND on every Ctrl+C/on_stop),
+        and `_read_feather_file` unconditionally materializes each one into an
+        in-memory pyarrow Table -- BEFORE the cheap "already exists, skipping
+        write" parquet-level skip can fire (that skip lives inside
+        `_convert_feather_table_to_parquet`, AFTER the read). The redundant read
+        cost therefore scaled with total recorder uptime, re-reading hours of
+        already-durable history into RAM at every shutdown -- the surviving memory
+        growth behind cycles 1-4. Deletion is safe: nautilus's interval tracking
+        (`_get_directory_intervals`) reads the PARQUET output directory only and
+        never depends on feather sources surviving, and `files[:-1]` guarantees
+        the still-active file is never a deletion candidate.
+
+        A file is deleted only after a SUCCESSFUL read+convert: a `None` read
+        (missing/corrupt) and a raising convert are both skipped (we do not know
+        the data reached parquet, so we keep the source). The already-exists case
+        IS a success -- `_convert_feather_table_to_parquet` returns without
+        raising once the parquet destination is confirmed present, so the data is
+        durably captured either way. A deletion failure (e.g. permissions) is
+        logged via `self.log` (pyo3, per MEM-05) but never crashes the conversion
+        pass nor loses track of the data already being durably converted.
         """
         files_by_directory: dict[str, list] = {}
         for feather_file in catalog._list_feather_data_files(
@@ -1124,11 +1443,29 @@ class RecorderStrategy(Strategy):
             for feather_file in files[:-1]:
                 table = catalog._read_feather_file(feather_file.path)
                 if table is None:
+                    # Missing/corrupt read: data is not confirmed durable in
+                    # parquet, so do NOT delete the source -- retry next pass.
                     continue
 
+                # If this raises, the per-type try/except in `_run_conversion`
+                # swallows it BEFORE the rm below runs, so a failed convert never
+                # deletes its source. The already-exists case returns normally
+                # (data confirmed in parquet) and DOES fall through to deletion.
                 catalog._convert_feather_table_to_parquet(
                     feather_table=table,
                     feather_path=feather_file.path,
                     data_cls=data_cls,
                     used_catalog=catalog,
                 )
+
+                # MEM-06: source is now durably in parquet -- delete it so it is
+                # never re-listed/re-read on a future pass. Guard the rm so a
+                # deletion failure cannot crash the pass (the data is already
+                # safely converted regardless).
+                try:
+                    catalog.fs.rm(feather_file.path)
+                except Exception as exc:
+                    self.log.exception(
+                        f"Failed to delete converted feather file {feather_file.path}",
+                        exc,
+                    )

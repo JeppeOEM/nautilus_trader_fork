@@ -199,3 +199,36 @@ def test_dydx_config_has_no_depth_or_product_split():
     assert "depth" not in entry_fields
     assert "product_type" not in entry_fields
     assert not hasattr(DydxRecorderConfig, "linear_instrument_ids")
+
+
+def test_load_dydx_recorder_config_defaults_shutdown_watchdog_grace_seconds(tmp_path):
+    # MEM-04: when shutdown_watchdog_grace_seconds is omitted, the config defaults
+    # to a sane bounded value (20s) so the force-exit safety valve is always active.
+    from scripts.dydx_recorder.config import load_dydx_recorder_config
+
+    toml_path = tmp_path / "recorder.toml"
+    toml_path.write_text(_VALID_DYDX_TOML)
+
+    # Act
+    recorder_cfg, _ = load_dydx_recorder_config(toml_path)
+
+    # Assert
+    assert recorder_cfg.shutdown_watchdog_grace_seconds == 20
+
+
+def test_load_dydx_recorder_config_parses_shutdown_watchdog_grace_seconds(tmp_path):
+    # MEM-04: an operator-configured watchdog grace period round-trips into config.
+    from scripts.dydx_recorder.config import load_dydx_recorder_config
+
+    custom_toml = _VALID_DYDX_TOML.replace(
+        'environment = "mainnet"',
+        'environment = "mainnet"\nshutdown_watchdog_grace_seconds = 45',
+    )
+    toml_path = tmp_path / "recorder.toml"
+    toml_path.write_text(custom_toml)
+
+    # Act
+    recorder_cfg, _ = load_dydx_recorder_config(toml_path)
+
+    # Assert
+    assert recorder_cfg.shutdown_watchdog_grace_seconds == 45

@@ -16,9 +16,11 @@
 dYdX recorder config parsing.
 
 dYdX's config shape differs from Bybit's: it is a FLAT perpetual list (dYdX v4
-has no spot market) with full-depth L2 order books (no `depth` knob) and a bar
-interval whitelist instead of a depth whitelist. Path-resolution, streaming, and
-threshold-validation helpers are reused from ``scripts.common_recorder.config``.
+has no spot market) with L2 order books fixed at 100 levels per side (the dYdX
+v4 indexer always sends 100 bids + 100 asks; there is no client-side depth knob)
+and a bar interval whitelist instead of a depth whitelist. Path-resolution,
+streaming, and threshold-validation helpers are reused from
+``scripts.common_recorder.config``.
 """
 
 import logging
@@ -70,8 +72,9 @@ class DydxInstrumentEntry(NautilusConfig, frozen=True):
     """
     Represent a single configured dYdX perpetual with its recording parameters.
 
-    Unlike the Bybit ``InstrumentEntry`` there is no ``depth`` field (dYdX is
-    full-depth L2) and no ``product_type`` axis (dYdX v4 has no spot market — all
+    Unlike the Bybit ``InstrumentEntry`` there is no ``depth`` field (the dYdX
+    v4 indexer always sends 100 levels per side; there is no client-configurable
+    depth) and no ``product_type`` axis (dYdX v4 has no spot market — all
     instruments are perpetual derivatives).
 
     Parameters
@@ -86,6 +89,17 @@ class DydxInstrumentEntry(NautilusConfig, frozen=True):
 
     id: InstrumentId
     bar_intervals: list[str]
+
+    @property
+    def depth(self) -> int:
+        # dYdX indexer sends 100 levels per side; no client depth knob exists.
+        # 0 = "take all levels" in Nautilus subscribe_order_book_deltas.
+        return 0
+
+    @property
+    def product_type(self) -> str:
+        # dYdX v4 has no spot market — all instruments are linear perpetuals.
+        return "linear"
 
 
 class DydxRecorderConfig(NautilusConfig, frozen=True):
@@ -119,6 +133,13 @@ class DydxRecorderConfig(NautilusConfig, frozen=True):
     stale_threshold_default_seconds : PositiveInt, default 90
         The fallback stale threshold for any stream label not present in
         `stale_threshold_seconds`.
+    shutdown_watchdog_grace_seconds : PositiveInt, default 20
+        MEM-04: seconds after Ctrl+C / shutdown is initiated before the recorder's
+        force-exit watchdog calls ``os._exit`` if the node has not finished
+        disposing. Guards against the nautilus-core data-queue sentinel-loss race
+        that can wedge the event loop so the process cannot otherwise be stopped.
+        Generous enough for a healthy graceful shutdown; bounded so a wedged loop
+        cannot hang indefinitely.
     stale_threshold_seconds : dict[str, int], default {}
         Per-stream-label stale thresholds. For dYdX, `quote` is typically
         relaxed (synthesized quotes fire only on top-of-book change) and
@@ -140,6 +161,7 @@ class DydxRecorderConfig(NautilusConfig, frozen=True):
     heartbeat_interval_seconds: PositiveInt = 30
     max_hot_added_instruments: PositiveInt = 50
     stale_threshold_default_seconds: PositiveInt = 90
+    shutdown_watchdog_grace_seconds: PositiveInt = 20
     stale_threshold_seconds: dict[str, int] = {}
     environment: str = "mainnet"
     instruments: list[DydxInstrumentEntry] = []
@@ -245,6 +267,7 @@ def load_dydx_recorder_config(
     stale_threshold_seconds = recorder_raw.get("stale_threshold_seconds", {})
     restart_gap_threshold_seconds = recorder_raw.get("restart_gap_threshold_seconds", 60)
     max_hot_added_instruments = recorder_raw.get("max_hot_added_instruments", 50)
+    shutdown_watchdog_grace_seconds = recorder_raw.get("shutdown_watchdog_grace_seconds", 20)
 
     # V5 fail-fast (T-07-05): reject any non-positive interval/threshold at load
     # time via the shared validator extracted in Plan 01.
@@ -266,6 +289,7 @@ def load_dydx_recorder_config(
         heartbeat_interval_seconds=heartbeat_interval_seconds,
         max_hot_added_instruments=max_hot_added_instruments,
         stale_threshold_default_seconds=stale_threshold_default_seconds,
+        shutdown_watchdog_grace_seconds=shutdown_watchdog_grace_seconds,
         stale_threshold_seconds=stale_threshold_seconds,
         environment=recorder_raw.get("environment", "mainnet"),
         instruments=instruments,

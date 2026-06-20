@@ -14,6 +14,7 @@
 # -------------------------------------------------------------------------------------------------
 
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from nautilus_trader.adapters.dydx import DYDX
@@ -28,6 +29,7 @@ from nautilus_trader.core.uuid import UUID4
 from nautilus_trader.live.node import TradingNode
 from nautilus_trader.model.identifiers import ClientId
 from nautilus_trader.model.identifiers import TraderId
+from scripts.common_recorder.shutdown_watchdog import ShutdownWatchdog
 from scripts.common_recorder.strategy import RecorderStrategy
 from scripts.common_recorder.strategy import RecorderStrategyConfig
 from scripts.dydx_recorder.config import _map_network
@@ -95,10 +97,10 @@ def main(config_path: str) -> None:
         # RESEARCH A1: ALL dYdX perps are linear, so mark/index/funding are
         # subscribed for every configured instrument.
         linear_instrument_ids=instrument_ids,
-        # RESEARCH A1: dYdX is full-depth L2 with no depth knob — the adapter
-        # ignores the depth argument. A dummy fixed depth satisfies the shared
-        # strategy's per-instrument depth requirement for subscribe_order_book_deltas.
-        instrument_depths=dict.fromkeys(instrument_ids, 50),
+        # RESEARCH A1: dYdX is full-depth L2 with no depth knob — 0 means full
+        # depth in Nautilus, matching DydxInstrumentEntry.depth so config-reload
+        # diffs never see a spurious depth change.
+        instrument_depths=dict.fromkeys(instrument_ids, 0),
         # Per-instrument bar intervals carried from the parsed entries so the
         # strategy can issue the bar subscriptions.
         instrument_bar_intervals={
@@ -152,6 +154,101 @@ def main(config_path: str) -> None:
     # to keep common_recorder venue-agnostic.
     strategy.set_config_loader(load_dydx_recorder_config)
 
+    # MEM-01: register a single-thread executor so the strategy's periodic +
+    # on_stop ParquetDataCatalog conversion runs OFF the asyncio event loop. The
+    # dYdX WebSocket runtime schedules every parsed delta onto the loop via
+    # call_soon_threadsafe into an unbounded ready-queue with no backpressure; any
+    # loop-blocking conversion lets that queue flood and balloon RAM (the OOM-on-
+    # Ctrl+C crash). One worker thread is enough — conversions never overlap (the
+    # 60-min timer interval dwarfs a conversion) and the work is filesystem-bound.
+    # max_workers=1 also serializes conversions so two never read the same finalized
+    # feather set concurrently.
+    conversion_executor = ThreadPoolExecutor(
+        max_workers=1,
+        thread_name_prefix="dydx-recorder-convert",
+    )
+    strategy.register_executor(node.kernel.loop, conversion_executor)
+
+    # MEM-03: inject the kernel event loop so the heartbeat mem-watch probe can
+    # count pending asyncio tasks. The heartbeat fires on a Nautilus LiveTimer
+    # tokio worker thread (crates/common/src/live/timer.rs), NOT the asyncio loop
+    # thread, so asyncio.get_running_loop() raises there and pending_tasks logged
+    # as "n/a" every sample (cycle-3b root cause). Handing the strategy the explicit
+    # loop lets asyncio.all_tasks(loop) return a real count from the worker thread.
+    strategy.set_loop(node.kernel.loop)
+
+    # MEM-02: inject a shutdown hook so the strategy's on_stop halts the dYdX
+    # WebSocket producer IMMEDIATELY, ahead of the kernel's own (delayed) client
+    # disconnect. on_stop is the first step of kernel.stop_async(); the kernel does
+    # not disconnect the data client until after on_stop AND a post-stop residual
+    # sleep, and the dYdX adapter then sleeps another second before closing its WS.
+    # During that ~3-4s window the dYdX Rust WS handler (separate runtime, unbounded
+    # mpsc, no subscription gate, no backpressure) keeps calling
+    # loop.call_soon_threadsafe() for every full-depth L2 delta across all
+    # instruments; the loop saturates the bounded data queue and then spawns
+    # UNBOUNDED create_task(put) coroutines -> RAM balloons on Ctrl+C (the OOM
+    # crash). Closing the WS here closes the Rust mpsc receiver, so the handler loop
+    # exits and the flood stops at the source. The call is idempotent with the
+    # kernel's later disconnect (the Rust disconnect take()s the handler task and
+    # the adapter _disconnect guards on is_closed()).
+    loop = node.kernel.loop
+
+    # MEM-04: recorder-side force-exit safety valve. A CONFIRMED race in nautilus
+    # CORE (off-limits) can drop the data-queue shutdown sentinel under the dYdX
+    # full-depth L2 flood, wedging the event loop so node.run() never returns; and
+    # the kernel replaces the loop-level SIGINT handler with a no-op after the first
+    # Ctrl+C, so the user "CANNOT on multiple ctrl c even close the process AT ALL"
+    # (see debug session findings A/B/C). This watchdog runs on its OWN daemon
+    # thread, independent of the (possibly wedged) asyncio loop: it ARMS at the
+    # first shutdown signal (via the shutdown hook below) and, if the node has not
+    # finished disposing within the configured grace period, calls os._exit() so
+    # the process can ALWAYS be terminated within a bounded time. It does NOT fire
+    # on a healthy shutdown — `mark_completed()` in the finally disarms it once
+    # node.run() returns. The watchdog cannot fix the core race; it guarantees the
+    # symptom "cannot close it" is eliminated.
+    # MEM-04 (cycle 4c): DURABLE force-exit record. stderr is ephemeral (lost unless
+    # the process runs under journald), so on a force-exit the watchdog ALSO appends
+    # a timestamped line to a dedicated sibling file derived from the same logs
+    # directory the TradingNodeConfig uses (log_directory="logs" above). This file
+    # PERSISTS across restarts so the operator can correlate a watchdog kill — and
+    # the data gap it implies — with the catalog AFTER the fact. It is a DEDICATED
+    # file (NOT dydx_recorder.log, which the pyo3 writer owns) to avoid file-handle
+    # contention with Nautilus's own log rotation/management. The write is bare
+    # stdlib (open/write/flush/fsync) — deliberately NOT the pyo3 pipeline, which
+    # may itself be wedged at the exact moment of a force-exit.
+    watchdog_record_file = Path("logs") / "dydx_recorder_watchdog.log"
+    watchdog_record_file.parent.mkdir(parents=True, exist_ok=True)
+
+    watchdog = ShutdownWatchdog(
+        grace_seconds=float(recorder_cfg.shutdown_watchdog_grace_seconds),
+        # Bare stderr line: the asyncio-routed logger may itself be wedged when the
+        # watchdog fires, so write directly to stderr (flushed) before os._exit.
+        log=lambda message: print(message, file=sys.stderr, flush=True),
+        record_file=watchdog_record_file,
+    )
+    watchdog.start()
+
+    def _shutdown_hook() -> None:
+        # MEM-04: arm the force-exit watchdog at the FIRST shutdown signal. on_stop
+        # is the first step of kernel.stop_async() (fired right after the first
+        # Ctrl+C), so arming here starts the bounded grace countdown exactly when
+        # graceful shutdown begins. Arming is idempotent; a second Ctrl+C will not
+        # shorten the deadline.
+        watchdog.arm()
+
+        # MEM-02: halt the dYdX WS producer immediately, ahead of the kernel's own
+        # delayed client disconnect, to collapse the call_soon_threadsafe flood
+        # window that balloons RAM on Ctrl+C.
+        ws_client = getattr(data_client, "_ws_client", None)
+        if ws_client is None or ws_client.is_closed():
+            return
+        # on_stop runs on the loop thread; schedule the pyo3 disconnect coroutine
+        # so the WS closes on the next loop turn (one turn, not the kernel's
+        # multi-second delayed path).
+        loop.create_task(ws_client.disconnect())
+
+    strategy.set_shutdown_hook(_shutdown_hook)
+
     try:
         # WHY: raise_exception=True so an on_start failure (e.g. missing
         # instruments, D-05/D-06) propagates out of main() and exits the process
@@ -159,6 +256,35 @@ def main(config_path: str) -> None:
         # logs and swallows the error, which would otherwise look like a clean exit.
         node.run(raise_exception=True)
     finally:
+        # MEM-04: DISARM the watchdog FIRST, before draining the executor or
+        # disposing the node. Reaching this finally at all already proves
+        # node.run() returned (i.e. loop.run_until_complete completed) — which is
+        # precisely the ONLY failure mode this watchdog is evidenced to guard
+        # against: the documented nautilus-core data-queue sentinel-loss race that
+        # wedges the loop so node.run() never returns. Once node.run() returns,
+        # that race did NOT occur, so the watchdog has done its job and must stand
+        # down immediately.
+        #
+        # WHY ordering matters (data-integrity): the watchdog's grace deadline
+        # starts at the FIRST Ctrl+C (armed in the on_stop hook). The on_stop hook
+        # also triggers a final ParquetDataCatalog conversion offloaded to
+        # conversion_executor. For a large backlog (conversion_interval_minutes=60,
+        # full L2 depth, multiple instruments) that conversion can legitimately run
+        # LONGER than the grace period. If we disarmed only AFTER
+        # conversion_executor.shutdown(wait=True), a perfectly healthy but slow
+        # final conversion would trip the watchdog and os._exit() MID-CONVERSION,
+        # truncating an in-progress parquet/feather write. Disarming here scopes the
+        # watchdog correctly to the loop-wedge race and never force-kills a
+        # legitimately slow drain/dispose.
+        watchdog.mark_completed()
+        watchdog.stop()
+
+        # MEM-01: drain the conversion worker before disposing the node so a
+        # final on_stop conversion (offloaded above) can complete and no thread is
+        # leaked. wait=True blocks only THIS (main) thread post-run — the event
+        # loop is already stopping — so it cannot reintroduce the loop-blocking
+        # behavior the executor was added to avoid.
+        conversion_executor.shutdown(wait=True)
         node.dispose()
 
 
