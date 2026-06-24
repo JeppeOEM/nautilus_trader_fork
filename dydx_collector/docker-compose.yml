@@ -6,6 +6,9 @@ services:
       dockerfile: dydx_collector/collector.dockerfile
     environment:
       PYTHONUNBUFFERED: "1"
+    # ponytail: hardcoded to host uid/gid (single-user box), so ./catalog
+    # writes land owned by you, not root. Switch to ${UID}:${GID} if shared.
+    user: "1000:1000"
     volumes:
       - ./config.toml:/app/dydx_collector/config.toml:ro
       - ./catalog:/app/catalog
