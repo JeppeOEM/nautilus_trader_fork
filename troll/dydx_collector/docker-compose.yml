@@ -2,8 +2,8 @@ services:
   collector:
     container_name: dydx-collector
     build:
-      context: ..
-      dockerfile: dydx_collector/collector.dockerfile
+      context: ../..
+      dockerfile: troll/dydx_collector/collector.dockerfile
     environment:
       PYTHONUNBUFFERED: "1"
     # ponytail: hardcoded to host uid/gid (single-user box), so ./catalog

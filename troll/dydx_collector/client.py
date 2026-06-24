@@ -28,6 +28,7 @@ import logging
 from collections.abc import Callable
 
 from nautilus_trader.core import nautilus_pyo3
+from nautilus_trader.core.nautilus_pyo3 import FIXED_PRECISION
 from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
 from nautilus_trader.model.data import FundingRateUpdate
 from nautilus_trader.model.data import IndexPriceUpdate
@@ -35,9 +36,34 @@ from nautilus_trader.model.data import InstrumentStatus
 from nautilus_trader.model.data import MarkPriceUpdate
 from nautilus_trader.model.data import capsule_to_data
 from nautilus_trader.model.instruments import Instrument
+from nautilus_trader.model.objects import Price
 
 
 logger = logging.getLogger(__name__)
+
+
+def _at_fixed_precision(price: Price) -> Price:
+    """
+    Re-stamp a Price at nautilus's max fixed-point precision, exactly.
+
+    dYdX's oracle (mark/index) price feed derives each tick's `Price.precision`
+    from however many decimal digits that specific value has left after
+    stripping trailing zeros (crates/adapters/dydx/src/common/parse.rs's
+    parse_price), so consecutive ticks for the same instrument can carry
+    different precision labels. ParquetDataCatalog stamps that label into
+    each file's Arrow metadata and correctly refuses to read/merge files
+    whose labels disagree -- which is the actual error this works around.
+
+    Uses Decimal.scaleb() (exact power-of-ten shift) + Price.from_raw()
+    (stores the integer as-is) rather than `Price(decimal, precision)`:
+    the latter has a real bug in this nautilus_trader version for some
+    decimal/precision combinations -- e.g. `Price(Decimal("61090.59855"), 16)`
+    silently returns `61090.5985500000026624` via what looks like an internal
+    float64 round-trip. scaleb()+from_raw() never touches a float, so no
+    digit is ever invented or dropped.
+    """
+    raw = int(price.as_decimal().scaleb(FIXED_PRECISION))
+    return Price.from_raw(raw, FIXED_PRECISION)
 
 
 class DydxClient:
@@ -114,9 +140,25 @@ class DydxClient:
             return
 
         if isinstance(message, nautilus_pyo3.MarkPriceUpdate):
-            self._on_data(MarkPriceUpdate.from_pyo3(message))
+            update = MarkPriceUpdate.from_pyo3(message)
+            self._on_data(
+                MarkPriceUpdate(
+                    instrument_id=update.instrument_id,
+                    value=_at_fixed_precision(update.value),
+                    ts_event=update.ts_event,
+                    ts_init=update.ts_init,
+                ),
+            )
         elif isinstance(message, nautilus_pyo3.IndexPriceUpdate):
-            self._on_data(IndexPriceUpdate.from_pyo3(message))
+            update = IndexPriceUpdate.from_pyo3(message)
+            self._on_data(
+                IndexPriceUpdate(
+                    instrument_id=update.instrument_id,
+                    value=_at_fixed_precision(update.value),
+                    ts_event=update.ts_event,
+                    ts_init=update.ts_init,
+                ),
+            )
         elif isinstance(message, nautilus_pyo3.FundingRateUpdate):
             self._on_data(FundingRateUpdate.from_pyo3(message))
         elif isinstance(message, nautilus_pyo3.InstrumentStatus):

@@ -207,4 +207,4 @@ tests/
 !docs/tutorials
 
 # dYdX collector collected data, never bake into the image
-dydx_collector/catalog/
+troll/dydx_collector/catalog/

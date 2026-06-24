@@ -28,15 +28,15 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
-from nautilus_trader.model.data import Bar
-from nautilus_trader.model.instruments import instruments_from_pyo3
-from nautilus_trader.persistence.catalog import ParquetDataCatalog
 from dydx_collector.client import DydxClient
 from dydx_collector.config import CollectorConfig
 from dydx_collector.config import InstrumentEntry
 from dydx_collector.config import diff_instruments
 from dydx_collector.config import load_config
 from dydx_collector.open_interest import fetch_open_interest
+from nautilus_trader.model.data import Bar
+from nautilus_trader.model.instruments import instruments_from_pyo3
+from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
 
 logger = logging.getLogger(__name__)

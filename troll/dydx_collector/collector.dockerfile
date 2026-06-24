@@ -3,6 +3,6 @@
 FROM nautilus-trader-base:1.229.0
 
 WORKDIR /app
-COPY dydx_collector ./dydx_collector
+COPY troll/dydx_collector ./dydx_collector
 
 CMD ["python3", "-m", "dydx_collector.collector"]
