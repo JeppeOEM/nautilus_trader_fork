@@ -1,0 +1,21 @@
+services:
+  collector:
+    container_name: dydx-collector
+    build:
+      context: ..
+      dockerfile: dydx_collector/collector.dockerfile
+    environment:
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ./config.toml:/app/dydx_collector/config.toml:ro
+      - ./catalog:/app/catalog
+    restart: unless-stopped
+
+  dozzle:
+    container_name: dydx-collector-dozzle
+    image: amir20/dozzle:latest
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    ports:
+      - "127.0.0.1:8080:8080"
+    restart: unless-stopped

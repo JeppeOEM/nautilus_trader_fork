@@ -205,3 +205,6 @@ cython_debug/
 docs/
 tests/
 !docs/tutorials
+
+# dYdX collector collected data, never bake into the image
+dydx_collector/catalog/

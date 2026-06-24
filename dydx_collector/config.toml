@@ -1,0 +1,14 @@
+# dYdX market data collector configuration.
+network = "mainnet"
+catalog_path = "catalog"
+flush_interval_seconds = 60
+config_reload_seconds = 30
+open_interest_poll_seconds = 300
+
+[[instruments]]
+id = "BTC-USD-PERP.DYDX"
+bar_intervals = ["1-MINUTE"]
+
+[[instruments]]
+id = "ETH-USD-PERP.DYDX"
+bar_intervals = ["1-MINUTE"]
