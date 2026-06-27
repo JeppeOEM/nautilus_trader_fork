@@ -8,6 +8,18 @@ A standalone research platform for dYdX perpetual markets running on the `pony` 
 
 Continuous, reliable collection of all dYdX market data into a Nautilus-catalog-compatible Parquet archive — feeding a live rankings dashboard and event chart explorer that make it immediately obvious which coins deserve attention, with the same data powering production-quality backtests via Nautilus's native BacktestNode.
 
+## Current Milestone: v1.0 Project Guardrails
+
+**Goal:** Write a `troll/CLAUDE.md` that gives Claude clear, enforceable rules for working on this codebase — preventing over-engineering, memory leaks, and Nautilus core contamination before any feature work starts.
+
+**Target features:**
+- Fork safety rule: never touch `nautilus_trader/` or `crates/`
+- YAGNI / no over-engineering rule
+- Memory discipline rule: streaming/windowed patterns, no bulk catalog loads
+- Test rule: unit + integration when calculations must be correct; skip for trivial glue
+- Readable Python rule: short functions, clear names, no clever tricks
+- Decoupling rule: separate concerns at natural seams so components change independently
+
 ## Requirements
 
 ### Validated
@@ -71,7 +83,7 @@ Continuous, reliable collection of all dYdX market data into a Nautilus-catalog-
 | DuckDB removed | Pandas via Nautilus catalog API covers same need without extra service | ✓ Good |
 
 ---
-*Last updated: 2026-06-26 after GSD project initialization*
+*Last updated: 2026-06-27 after milestone v1.0 start*
 
 ## Evolution
 
