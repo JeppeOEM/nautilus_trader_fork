@@ -36,4 +36,4 @@ Milestone v1.0 delivers a single artifact: `troll/CLAUDE.md`, a set of actionabl
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Project Guardrails | 1/1 | Complete   | 2026-06-27 |
+| 1. Project Guardrails | 1/1 | Complete    | 2026-06-27 |
