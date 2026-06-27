@@ -32,6 +32,7 @@ from nautilus_trader.model.enums import BookType
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
+from dydx_collector.minute_bars import DydxMinuteBar
 from ml_signals.book_features import CancellationTracker
 from ml_signals.book_features import compute_features
 from ml_signals.indicators import Microprice
@@ -65,29 +66,29 @@ def compute_chart_series(
 
     deltas = catalog.order_book_deltas(instrument_ids=[instrument_id], start=start_ns, end=end_ns)
     trades = catalog.trade_ticks(instrument_ids=[instrument_id], start=start_ns, end=end_ns)
-    bars   = catalog.bars(instrument_ids=[instrument_id], start=bars_start_ns, end=end_ns)
+    # DydxMinuteBar is the primary candle source (computed by the collector from trades).
+    # Fall back to standard bars for backward compat with old catalog data.
+    minute_bars = catalog.query(DydxMinuteBar, identifiers=[instrument_id], start=bars_start_ns, end=end_ns)
+    if not minute_bars:
+        minute_bars = catalog.bars(instrument_ids=[instrument_id], start=bars_start_ns, end=end_ns)
 
-    # Price pane: 1-min bars for candles, trades as fallback line
     candles: list[dict] = []
     trade_line: list[dict] = []
-
-    # Trend EMA — feed all bars (including warmup), emit series only from start_ns
     trend_fast = ExponentialMovingAverage(trend_ema_fast)
     trend_slow = ExponentialMovingAverage(trend_ema_slow)
     trend_fast_series: list[dict] = []
     trend_slow_series: list[dict] = []
 
-    for bar in sorted(bars, key=lambda b: b.ts_event):
-        close = bar.close.as_double()
+    for bar in sorted(minute_bars, key=lambda b: b.ts_event):
+        close = bar.close if isinstance(bar, DydxMinuteBar) else bar.close.as_double()
+        open_ = bar.open if isinstance(bar, DydxMinuteBar) else bar.open.as_double()
+        high  = bar.high if isinstance(bar, DydxMinuteBar) else bar.high.as_double()
+        low   = bar.low  if isinstance(bar, DydxMinuteBar) else bar.low.as_double()
         trend_fast.update_raw(close)
         trend_slow.update_raw(close)
         if bar.ts_event >= start_ns:
             t = bar.ts_event / 1e9
-            candles.append({
-                "time": t, "open": bar.open.as_double(),
-                "high": bar.high.as_double(), "low": bar.low.as_double(),
-                "close": close,
-            })
+            candles.append({"time": t, "open": open_, "high": high, "low": low, "close": close})
             if trend_fast.initialized:
                 trend_fast_series.append({"time": t, "value": trend_fast.value})
             if trend_slow.initialized:

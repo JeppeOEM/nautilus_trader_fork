@@ -15,26 +15,38 @@
 """
 dYdX market data collector entrypoint.
 
-Owns its own asyncio loop and a plain in-memory buffer flushed periodically to a
-ParquetDataCatalog. No TradingNode/Strategy/DataEngine involved -- see client.py
-and memory project_dydx_collector_python_pivot for why.
+Owns its own asyncio loop, a typed in-memory buffer, and a MinuteBarBuilder.
+No TradingNode/Strategy/DataEngine involved -- see client.py for why.
 
+Instrument tiers
+----------------
+pinned      : listed in config.toml [[instruments]] -- always subscribed, kept forever.
+liquid      : OI >= liquidity_min_oi_usd -- subscribed, data pruned after non_config_retain_hours.
+illiquid    : OI below threshold -- NOT subscribed to trades/book; re-checked every
+              liquidity_check_seconds; graduated to liquid if OI crosses the threshold.
+              Still receives mark/index/funding/status from subscribe_markets() (global).
 """
 
 import asyncio
 import logging
 import signal
+import time
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
 from dydx_collector.client import DydxClient
 from dydx_collector.config import CollectorConfig
-from dydx_collector.config import InstrumentEntry
-from dydx_collector.config import diff_instruments
 from dydx_collector.config import load_config
+from dydx_collector.minute_bars import DydxMinuteBar
+from dydx_collector.minute_bars import MinuteBarBuilder
+from dydx_collector.open_interest import _fetch_markets_json
+from dydx_collector.open_interest import classify_liquidity
 from dydx_collector.open_interest import fetch_open_interest
-from nautilus_trader.model.data import Bar
+from dydx_collector.prune_catalog import prune_instrument
+from nautilus_trader.model.data import MarkPriceUpdate
+from nautilus_trader.model.data import OrderBookDeltas
+from nautilus_trader.model.data import TradeTick
 from nautilus_trader.model.instruments import instruments_from_pyo3
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
@@ -45,13 +57,7 @@ CONFIG_PATH = Path(__file__).parent / "config.toml"
 
 
 def _buffer_key(data: Any) -> tuple[type, str]:
-    if isinstance(data, Bar):
-        return type(data), str(data.bar_type)
     return type(data), str(data.instrument_id)
-
-
-def _bar_type(instrument_id: str, interval: str) -> str:
-    return f"{instrument_id}-{interval}-LAST-EXTERNAL"
 
 
 class Collector:
@@ -64,21 +70,59 @@ class Collector:
 
         self._client = DydxClient(on_data=self._on_data, network=config.network)
         self._buffer: dict[tuple[type, str], list[Any]] = defaultdict(list)
-        self._active: dict[str, InstrumentEntry] = {e.id: e for e in config.instruments}
+        self._bar_builder = MinuteBarBuilder()
+
+        # Instrument tiers (populated in run())
+        self._pinned: set[str] = {e.id for e in config.instruments}
+        self._liquid: set[str] = set()
+        self._illiquid: set[str] = set()
+
         self._stop = asyncio.Event()
 
     def _on_data(self, data: Any) -> None:
         self._buffer[_buffer_key(data)].append(data)
 
     def _flush_once(self) -> None:
+        now_ns = time.time_ns()
+        trades_by_iid: dict[str, list[TradeTick]] = defaultdict(list)
+        deltas_by_iid: dict[str, list[OrderBookDeltas]] = defaultdict(list)
+        marks_by_iid: dict[str, list[MarkPriceUpdate]] = defaultdict(list)
+
         for key, items in list(self._buffer.items()):
             if not items:
                 continue
             self._buffer[key] = []
+            dtype, iid = key
+
+            if dtype is TradeTick:
+                trades_by_iid[iid].extend(items)
+            elif dtype is OrderBookDeltas:
+                deltas_by_iid[iid].extend(items)
+            elif dtype is MarkPriceUpdate:
+                marks_by_iid[iid].extend(items)
+
             try:
                 self._catalog.write_data(items)
             except Exception:
                 logger.exception(f"Failed to write {key}, dropping {len(items)} items")
+
+        # Build enriched 1-min bars for subscribed instruments that had book/trade activity
+        subscribed = self._pinned | self._liquid
+        bar_instruments = (set(trades_by_iid) | set(deltas_by_iid)) & subscribed
+        bars: list[DydxMinuteBar] = []
+        for iid in bar_instruments:
+            bars.extend(self._bar_builder.update(
+                instrument_id=iid,
+                trades=trades_by_iid.get(iid, []),
+                delta_batches=deltas_by_iid.get(iid, []),
+                marks=marks_by_iid.get(iid, []),
+                now_ns=now_ns,
+            ))
+        if bars:
+            try:
+                self._catalog.write_data(bars)
+            except Exception:
+                logger.exception(f"Failed to write {len(bars)} minute bars")
 
     async def _flush_loop(self) -> None:
         while not self._stop.is_set():
@@ -94,88 +138,110 @@ class Collector:
             except Exception:
                 logger.exception("Failed to poll open interest")
 
-    async def _subscribe(self, entry: InstrumentEntry) -> None:
-        await self._client.subscribe_trades(entry.id)
-        await self._client.subscribe_orderbook(entry.id)
-        for interval in entry.bar_intervals:
-            await self._client.subscribe_bars(_bar_type(entry.id, interval))
-        logger.info(f"Subscribed {entry.id}")
+    async def _subscribe(self, iid: str) -> None:
+        await self._client.subscribe_trades(iid)
+        await self._client.subscribe_orderbook(iid)
+        logger.info(f"Subscribed {iid}")
 
-    async def _unsubscribe(self, entry: InstrumentEntry) -> None:
-        await self._client.unsubscribe_trades(entry.id)
-        await self._client.unsubscribe_orderbook(entry.id)
-        for interval in entry.bar_intervals:
-            await self._client.unsubscribe_bars(_bar_type(entry.id, interval))
-        logger.info(f"Unsubscribed {entry.id}")
+    async def _unsubscribe(self, iid: str) -> None:
+        await self._client.unsubscribe_trades(iid)
+        await self._client.unsubscribe_orderbook(iid)
+        logger.info(f"Unsubscribed {iid}")
+
+    async def _liquidity_check_loop(self) -> None:
+        """Periodically graduate illiquid→liquid (subscribe) or liquid→illiquid (unsubscribe)."""
+        while not self._stop.is_set():
+            await asyncio.sleep(self._config.liquidity_check_seconds)
+            try:
+                markets_json = await asyncio.to_thread(_fetch_markets_json, self._config.network)
+                liquid, illiquid = classify_liquidity(markets_json, self._config.liquidity_min_oi_usd)
+
+                for iid in liquid & self._illiquid:
+                    await self._subscribe(iid)
+                    self._liquid.add(iid)
+                    self._illiquid.discard(iid)
+
+                for iid in illiquid & self._liquid:
+                    await self._unsubscribe(iid)
+                    self._illiquid.add(iid)
+                    self._liquid.discard(iid)
+
+                logger.info(
+                    f"Liquidity check: {len(self._liquid)} liquid, "
+                    f"{len(self._illiquid)} illiquid, {len(self._pinned)} pinned"
+                )
+            except Exception:
+                logger.exception("Liquidity check failed")
 
     async def _reload_config_loop(self) -> None:
+        """Hot-reload: only updates the pinned set; subscriptions are managed by liquidity tier."""
         while not self._stop.is_set():
             await asyncio.sleep(self._config.config_reload_seconds)
             new_config = load_config(CONFIG_PATH)
+            old_pinned = self._pinned
+            self._pinned = {e.id for e in new_config.instruments}
 
-            if not new_config.instruments:
-                # All-instruments mode — nothing to diff; subscriptions are managed at startup.
-                self._config = new_config
-                continue
-
-            added, removed = diff_instruments(
-                tuple(self._active.values()),
-                new_config.instruments,
-            )
-            for entry in added:
-                await self._subscribe(entry)
-                self._active[entry.id] = entry
-            for entry in removed:
-                await self._unsubscribe(entry)
-                del self._active[entry.id]
+            # Subscribe any newly-pinned coins that were sitting in the illiquid pool
+            for iid in self._pinned - old_pinned:
+                if iid in self._illiquid:
+                    await self._subscribe(iid)
+                    self._illiquid.discard(iid)
 
             self._config = new_config
 
+    async def _prune_loop(self) -> None:
+        """Prune non-pinned instruments' catalog data older than non_config_retain_hours."""
+        # Run roughly 4x per retention window (every retain/4 hours, minimum 15 min)
+        interval = max(self._config.non_config_retain_hours * 900, 900)
+        while not self._stop.is_set():
+            await asyncio.sleep(interval)
+            catalog_path = str(Path(self._config.catalog_path).resolve())
+            non_pinned = (self._liquid | self._illiquid) - self._pinned
+            freed = 0
+            for iid in non_pinned:
+                freed += prune_instrument(catalog_path, iid, self._config.non_config_retain_hours)
+            if freed:
+                logger.info(f"Pruned {freed / 1024 / 1024:.1f} MB from {len(non_pinned)} non-pinned instruments")
+
     async def run(self) -> None:
-        # Raw pyo3-native instruments: what connect()'s instrument cache expects.
         instruments = await self._client.fetch_instruments()
         instruments_by_id = {i.id.value: i for i in instruments}
 
-        if not self._active:
-            # No explicit list → subscribe to every instrument on dYdX.
-            # bar_intervals=() skips bar subscriptions to avoid hitting the
-            # 2/sec subscribe rate limit during the long startup burst.
-            self._active = {
-                iid: InstrumentEntry(id=iid, bar_intervals=())
-                for iid in instruments_by_id
-            }
-            logger.info(f"Auto-subscribing all {len(self._active)} dYdX instruments")
-
-        wanted = [
-            instruments_by_id[entry.id]
-            for entry in self._active.values()
-            if entry.id in instruments_by_id
-        ]
-        missing = [entry.id for entry in self._active.values() if entry.id not in instruments_by_id]
-        if missing:
-            logger.warning(f"Configured instruments not found on dYdX: {missing}")
-        if wanted:
-            # Catalog/Arrow serializer needs the Cython model, not the pyo3 one.
-            self._catalog.write_data(instruments_from_pyo3(wanted))
+        self._catalog.write_data(instruments_from_pyo3(list(instruments_by_id.values())))
 
         loop = asyncio.get_running_loop()
-        await self._client.connect(loop, wanted)
+        await self._client.connect(loop, list(instruments_by_id.values()))
         await self._client.subscribe_markets()
 
-        for entry in self._active.values():
-            if entry.id in instruments_by_id:
-                await self._subscribe(entry)
+        # Classify by open interest; pinned coins bypass the threshold
+        markets_json = await asyncio.to_thread(_fetch_markets_json, self._config.network)
+        liquid, illiquid = classify_liquidity(markets_json, self._config.liquidity_min_oi_usd)
+
+        known = set(instruments_by_id)
+        to_subscribe = (self._pinned | liquid) & known
+        self._liquid = (liquid & known) - self._pinned
+        self._illiquid = known - to_subscribe
+
+        for iid in sorted(to_subscribe):
+            await self._subscribe(iid)
+
+        logger.info(
+            f"Started: {len(to_subscribe)} subscribed "
+            f"({len(self._pinned)} pinned, {len(self._liquid)} liquid), "
+            f"{len(self._illiquid)} illiquid (monitoring)"
+        )
 
         flush_task = asyncio.create_task(self._flush_loop())
         reload_task = asyncio.create_task(self._reload_config_loop())
         oi_task = asyncio.create_task(self._open_interest_loop())
+        liquidity_task = asyncio.create_task(self._liquidity_check_loop())
+        prune_task = asyncio.create_task(self._prune_loop())
 
         try:
             await self._stop.wait()
         finally:
-            flush_task.cancel()
-            reload_task.cancel()
-            oi_task.cancel()
+            for task in (flush_task, reload_task, oi_task, liquidity_task, prune_task):
+                task.cancel()
             await self._client.disconnect()
             self._flush_once()
 

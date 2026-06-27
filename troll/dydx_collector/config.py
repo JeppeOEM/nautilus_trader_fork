@@ -24,7 +24,6 @@ from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
 @dataclass(frozen=True)
 class InstrumentEntry:
     id: str
-    bar_intervals: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -34,6 +33,9 @@ class CollectorConfig:
     flush_interval_seconds: int
     config_reload_seconds: int
     open_interest_poll_seconds: int
+    non_config_retain_hours: float
+    liquidity_min_oi_usd: float
+    liquidity_check_seconds: int
     instruments: tuple[InstrumentEntry, ...]
 
 
@@ -42,7 +44,7 @@ def load_config(path: Path) -> CollectorConfig:
         raw = tomllib.load(f)
 
     instruments = tuple(
-        InstrumentEntry(id=entry["id"], bar_intervals=tuple(entry.get("bar_intervals", [])))
+        InstrumentEntry(id=entry["id"])
         for entry in raw.get("instruments", [])
     )
 
@@ -54,19 +56,10 @@ def load_config(path: Path) -> CollectorConfig:
         flush_interval_seconds=raw.get("flush_interval_seconds", 60),
         config_reload_seconds=raw.get("config_reload_seconds", 30),
         open_interest_poll_seconds=raw.get("open_interest_poll_seconds", 300),
+        non_config_retain_hours=raw.get("non_config_retain_hours", 4.0),
+        liquidity_min_oi_usd=raw.get("liquidity_min_oi_usd", 100_000.0),
+        liquidity_check_seconds=raw.get("liquidity_check_seconds", 1800),
         instruments=instruments,
     )
 
 
-def diff_instruments(
-    old: tuple[InstrumentEntry, ...],
-    new: tuple[InstrumentEntry, ...],
-) -> tuple[list[InstrumentEntry], list[InstrumentEntry]]:
-    """Return (added, removed) entries by `id`, comparing old config state to new."""
-    old_by_id = {entry.id: entry for entry in old}
-    new_by_id = {entry.id: entry for entry in new}
-
-    added = [entry for entry_id, entry in new_by_id.items() if entry_id not in old_by_id]
-    removed = [entry for entry_id, entry in old_by_id.items() if entry_id not in new_by_id]
-
-    return added, removed

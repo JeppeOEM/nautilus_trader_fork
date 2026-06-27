@@ -84,6 +84,35 @@ def prune(catalog_path: str, data_types: list[str], retain_days: int, dry_run: b
     print(f"\n{action} {total_freed / 1024 / 1024:.1f} MB")
 
 
+def prune_instrument(catalog_path: str, instrument_id: str, retain_hours: float) -> int:
+    """
+    Delete all Parquet files for `instrument_id` whose end timestamp is older than
+    `retain_hours` hours ago, across every data type directory in the catalog.
+
+    Returns the total bytes freed.
+    """
+    cutoff_ns = time.time_ns() - int(retain_hours * 3_600 * 1_000_000_000)
+    import datetime
+    cutoff_str = (
+        datetime.datetime.fromtimestamp(cutoff_ns / 1e9, tz=datetime.timezone.utc)
+        .strftime("%Y-%m-%dT%H-%M-%S")
+    )
+    freed = 0
+    data_root = Path(catalog_path) / "data"
+    if not data_root.exists():
+        return 0
+    for type_dir in data_root.iterdir():
+        iid_dir = type_dir / instrument_id
+        if not iid_dir.is_dir():
+            continue
+        for f in sorted(iid_dir.glob("*.parquet")):
+            end_str = _filename_end_ns(f)
+            if end_str and end_str < cutoff_str:
+                freed += f.stat().st_size
+                f.unlink()
+    return freed
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--catalog", default="troll/dydx_collector/catalog")

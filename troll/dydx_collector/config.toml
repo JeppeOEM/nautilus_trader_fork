@@ -5,5 +5,22 @@ flush_interval_seconds = 60
 config_reload_seconds = 30
 open_interest_poll_seconds = 300
 
-# Empty instruments list = subscribe to every dYdX perpetual automatically.
-# Add [[instruments]] entries here to restrict collection to specific coins.
+# Liquidity tiers
+# Coins with open interest >= liquidity_min_oi_usd are subscribed (trades + orderbook).
+# Coins below the threshold are tracked in an illiquid pool and re-checked periodically.
+liquidity_min_oi_usd = 100000      # $100k OI = subscribed
+liquidity_check_seconds = 1800     # re-check illiquid coins every 30 min
+
+# Data retention
+# Pinned coins (listed in [[instruments]] below) are kept indefinitely.
+# All other subscribed coins have their catalog data pruned after this many hours.
+non_config_retain_hours = 4
+
+# Pinned instruments: kept forever regardless of liquidity tier.
+# Add [[instruments]] entries here for coins you want to study long-term.
+# Example:
+# [[instruments]]
+# id = "ETH-USD-PERP.DYDX"
+#
+# [[instruments]]
+# id = "BTC-USD-PERP.DYDX"

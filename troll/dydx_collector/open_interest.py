@@ -106,6 +106,31 @@ register_arrow(
 )
 
 
+def classify_liquidity(
+    markets_json: dict,
+    min_oi_usd: float,
+) -> tuple[set[str], set[str]]:
+    """
+    Split all dYdX markets into (liquid, illiquid) by open-interest threshold.
+
+    Returns sets of instrument ID strings (`"{ticker}-PERP.DYDX"` format).
+    Markets with missing or unparseable OI are treated as illiquid.
+    """
+    liquid: set[str] = set()
+    illiquid: set[str] = set()
+    for market in markets_json.get("markets", {}).values():
+        ticker = market.get("ticker")
+        if ticker is None:
+            continue
+        iid = f"{ticker}-PERP.DYDX"
+        try:
+            oi = float(market.get("openInterest") or 0)
+        except (ValueError, TypeError):
+            oi = 0.0
+        (liquid if oi >= min_oi_usd else illiquid).add(iid)
+    return liquid, illiquid
+
+
 def _fetch_markets_json(network: DydxNetwork) -> dict:
     url = f"{get_dydx_http_url(network)}/v4/perpetualMarkets"
     # dYdX's indexer rejects urllib's default User-Agent (403); needs a real one.

@@ -12,10 +12,14 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
-"""Self-check: gap/outage detection finds obvious cases and ignores regular spacing."""
+"""Self-check: gap/outage detection finds obvious cases and ignores regular spacing; price_stats arithmetic."""
+
+from unittest.mock import MagicMock
 
 from ml_signals.catalog_stats import _overlapping_intervals
 from ml_signals.catalog_stats import find_gaps
+from ml_signals.catalog_stats import price_series
+from ml_signals.catalog_stats import price_stats
 
 
 def test_finds_a_single_obvious_gap() -> None:
@@ -52,9 +56,81 @@ def test_overlapping_intervals_empty_when_no_shared_window() -> None:
     assert _overlapping_intervals([(100, 200)], [(300, 400)]) == []
 
 
+# ---- price_stats ----
+
+# Timestamps: 1 h = 3_600_000_000_000 ns, 24 h = 86_400_000_000_000 ns
+_1H_NS  = 3_600 * 1_000_000_000
+_24H_NS = 86_400 * 1_000_000_000
+
+
+def _patched_price_stats(series: list[tuple[int, float]]) -> dict:
+    """Run price_stats with a fixed series, bypassing the catalog."""
+    with MagicMock() as mock_catalog:
+        with __import__("unittest.mock", fromlist=["patch"]).patch(
+            "ml_signals.catalog_stats.price_series", return_value=series
+        ):
+            return price_stats(mock_catalog, "ANY")
+
+
+def test_price_stats_empty_returns_all_none() -> None:
+    result = _patched_price_stats([])
+    assert result == {"price": None, "pct_change_1h": None, "pct_change_24h": None, "volatility": None}
+
+
+def test_price_stats_single_point_returns_price_only() -> None:
+    result = _patched_price_stats([(1_000_000_000, 42.0)])
+    assert result["price"] == 42.0
+    assert result["pct_change_1h"] is None     # only one point, no history span
+    assert result["pct_change_24h"] is None
+    assert result["volatility"] is None        # need 2+ returns
+
+
+def test_price_stats_pct_1h_correct() -> None:
+    # series spans 2 h: base-2h → 100, base-1h → 110, base → 120
+    base = 200 * _1H_NS
+    series = [(base - 2 * _1H_NS, 100.0), (base - _1H_NS, 110.0), (base, 120.0)]
+    result = _patched_price_stats(series)
+    # pct_change_1h: base price at base-1h = 110; (120-110)/110 * 100 ≈ 9.09
+    assert result["pct_change_1h"] is not None
+    assert abs(result["pct_change_1h"] - (120 - 110) / 110 * 100) < 1e-6
+
+
+def test_price_stats_pct_24h_none_when_series_too_short() -> None:
+    base = 200 * _1H_NS
+    series = [(base - 2 * _1H_NS, 100.0), (base, 120.0)]
+    result = _patched_price_stats(series)
+    assert result["pct_change_24h"] is None  # series only spans 2h, not 24
+
+
+def test_price_stats_pct_24h_correct() -> None:
+    base = 30 * _24H_NS
+    series = [(base - _24H_NS, 80.0), (base, 100.0)]
+    result = _patched_price_stats(series)
+    # (100-80)/80 * 100 = 25%
+    assert result["pct_change_24h"] is not None
+    assert abs(result["pct_change_24h"] - 25.0) < 1e-6
+
+
+def test_price_stats_volatility_is_std_of_returns() -> None:
+    # 3 points with returns [0.1, 0.1] → std = 0.0
+    base = 30 * _24H_NS
+    series = [(base - 2 * _1H_NS, 100.0), (base - _1H_NS, 110.0), (base, 121.0)]
+    result = _patched_price_stats(series)
+    import numpy as np
+    returns = [0.1, 121.0 / 110.0 - 1.0]
+    assert result["volatility"] is not None
+    assert abs(result["volatility"] - float(np.std(returns))) < 1e-9
+
+
 if __name__ == "__main__":
     test_finds_a_single_obvious_gap()
     test_no_gaps_in_regularly_spaced_series()
     test_overlapping_intervals_finds_only_shared_outage()
     test_overlapping_intervals_empty_when_no_shared_window()
+    test_price_stats_empty_returns_all_none()
+    test_price_stats_single_point_returns_price_only()
+    test_price_stats_pct_1h_correct()
+    test_price_stats_pct_24h_none_when_series_too_short()
+    test_price_stats_pct_24h_correct()
+    test_price_stats_volatility_is_std_of_returns()
     print("ok")
