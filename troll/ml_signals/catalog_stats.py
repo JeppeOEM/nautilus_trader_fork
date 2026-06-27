@@ -165,27 +165,35 @@ def coverage(catalog: ParquetDataCatalog, instrument_id: str) -> dict[str, dict]
     return result
 
 
-def price_series(catalog: ParquetDataCatalog, instrument_id: str) -> list[tuple[int, float]]:
+def price_series(
+    catalog: ParquetDataCatalog,
+    instrument_id: str,
+    start_ns: int | None = None,
+) -> list[tuple[int, float]]:
     """(ts_event, price) pairs, preferring trade ticks and falling back to bar closes."""
-    trades = catalog.trade_ticks(instrument_ids=[instrument_id])
+    trades = catalog.trade_ticks(instrument_ids=[instrument_id], start=start_ns)
     if trades:
         return sorted((t.ts_event, t.price.as_double()) for t in trades)
 
-    bars = catalog.bars(instrument_ids=[instrument_id])
+    bars = catalog.bars(instrument_ids=[instrument_id], start=start_ns)
     if bars:
         return sorted((b.ts_event, b.close.as_double()) for b in bars)
 
     return []
 
 
-def price_stats(catalog: ParquetDataCatalog, instrument_id: str) -> dict:
+def price_stats(
+    catalog: ParquetDataCatalog,
+    instrument_id: str,
+    start_ns: int | None = None,
+) -> dict:
     """
     Latest price, pct change over the last 1h/24h, and return volatility (stdev).
 
     `pct_change_1h`/`pct_change_24h` are None when the catalog doesn't yet span
     that long — no extrapolation from partial history.
     """
-    series = price_series(catalog, instrument_id)
+    series = price_series(catalog, instrument_id, start_ns=start_ns)
     if not series:
         return {"price": None, "pct_change_1h": None, "pct_change_24h": None, "volatility": None}
 

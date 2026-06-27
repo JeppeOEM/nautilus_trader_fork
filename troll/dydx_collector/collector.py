@@ -113,6 +113,11 @@ class Collector:
             await asyncio.sleep(self._config.config_reload_seconds)
             new_config = load_config(CONFIG_PATH)
 
+            if not new_config.instruments:
+                # All-instruments mode — nothing to diff; subscriptions are managed at startup.
+                self._config = new_config
+                continue
+
             added, removed = diff_instruments(
                 tuple(self._active.values()),
                 new_config.instruments,
@@ -130,6 +135,16 @@ class Collector:
         # Raw pyo3-native instruments: what connect()'s instrument cache expects.
         instruments = await self._client.fetch_instruments()
         instruments_by_id = {i.id.value: i for i in instruments}
+
+        if not self._active:
+            # No explicit list → subscribe to every instrument on dYdX.
+            # bar_intervals=() skips bar subscriptions to avoid hitting the
+            # 2/sec subscribe rate limit during the long startup burst.
+            self._active = {
+                iid: InstrumentEntry(id=iid, bar_intervals=())
+                for iid in instruments_by_id
+            }
+            logger.info(f"Auto-subscribing all {len(self._active)} dYdX instruments")
 
         wanted = [
             instruments_by_id[entry.id]

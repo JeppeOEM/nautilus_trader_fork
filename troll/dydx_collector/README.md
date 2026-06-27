@@ -1,0 +1,138 @@
+# dYdX Market Data Collector
+
+Continuously records dYdX market data (trades, order book deltas, bars, mark/index prices, funding rates, open interest) to a local `ParquetDataCatalog`. The catalog is Nautilus-native — load it directly into backtests with zero conversion.
+
+---
+
+## Prerequisites
+
+- Docker + Docker Compose
+- The `nautilus-trader-base` image built once (see below)
+
+---
+
+## Quick reference
+
+Run all `make` commands from `troll/dydx_collector/`:
+
+| Command | What it does |
+|---|---|
+| `make build-base` | Build the base Nautilus image (~15 min, once only) |
+| `make up` | Build collector image and start collecting |
+| `make down` | Stop containers (catalog data is preserved) |
+| `make logs` | Tail collector logs |
+| `make web` | Open Dozzle log viewer in browser |
+| `make prune` | Delete `order_book_deltas` older than 14 days |
+| `make prune-dry` | Preview what `prune` would delete |
+| `make dashboard` | Start the ml_signals dashboard on port 8765 |
+
+---
+
+## First-time setup: build the base image
+
+The base image compiles Nautilus from source. It takes ~15 minutes but only needs to be rebuilt when `nautilus_trader` core changes.
+
+From `troll/dydx_collector/`:
+
+```bash
+make build-base
+```
+
+---
+
+## Configure instruments
+
+Edit `troll/dydx_collector/config.toml`:
+
+```toml
+network = "mainnet"
+catalog_path = "catalog"          # relative to the container's /app — maps to ./catalog on the host
+flush_interval_seconds = 60
+config_reload_seconds = 30        # hot-reload: edit this file while running to add/remove instruments
+open_interest_poll_seconds = 300
+
+[[instruments]]
+id = "BTC-USD-PERP.DYDX"
+bar_intervals = ["1-MINUTE"]
+
+[[instruments]]
+id = "ETH-USD-PERP.DYDX"
+bar_intervals = ["1-MINUTE"]
+```
+
+Add any dYdX perpetual in `<BASE>-USD-PERP.DYDX` format. The collector hot-reloads this file every `config_reload_seconds` — no restart needed.
+
+---
+
+## Deploy
+
+From `troll/dydx_collector/`:
+
+```bash
+make up        # build collector image (seconds) and start everything
+make logs      # tail live collector output
+make web       # open Dozzle log viewer (http://localhost:8080)
+```
+
+The catalog appears at `troll/dydx_collector/catalog/` on the host, owned by your user (uid 1000).
+
+**OFI / data dashboard:** run `make dashboard` in a separate terminal to start the ml_signals dashboard on `http://localhost:8765`. Shows per-coin footprint charts, Microprice, Order Flow Imbalance, and data coverage/gap detection. Reads directly from the catalog — no collector restart needed.
+
+---
+
+## Stop / restart
+
+```bash
+make down   # stop containers, catalog persists
+make up     # restart (rebuilds collector image automatically)
+```
+
+---
+
+## Rebuild the base image
+
+Only needed when `nautilus_trader` Python/Rust core changes (e.g. after a `git pull` that touches `crates/` or `nautilus_trader/`):
+
+```bash
+make build-base   # ~15 min
+make up           # rebuild collector layer on top and restart
+```
+
+---
+
+## Inspect the catalog
+
+```python
+from nautilus_trader.persistence.catalog import ParquetDataCatalog
+
+catalog = ParquetDataCatalog("troll/dydx_collector/catalog")
+catalog.instruments()
+catalog.trade_ticks(instrument_ids=["BTC-USD-PERP.DYDX"])
+catalog.order_book_deltas(instrument_ids=["BTC-USD-PERP.DYDX"])
+```
+
+---
+
+## Run a backtest
+
+```bash
+cd troll/ml_signals
+python backtest_dydx.py
+```
+
+Streams trade ticks from the catalog and aggregates 20-tick bars internally. Adjust `tick_bar_size`, `buy_threshold`, `sell_threshold` by passing args to `run()`.
+
+---
+
+## What gets collected
+
+| Data type | Nautilus type | Source |
+|---|---|---|
+| Trades | `TradeTick` | WebSocket trades channel |
+| Order book | `OrderBookDelta` | WebSocket orderbook channel |
+| Bars | `Bar` | WebSocket candles channel |
+| Mark price | `MarkPriceUpdate` | WebSocket markets channel |
+| Index price | `IndexPriceUpdate` | WebSocket markets channel |
+| Funding rate | `FundingRateUpdate` | WebSocket markets channel |
+| Instruments | `CryptoPerpetual` | REST on startup |
+| Open interest | `DydxOpenInterest` | REST poll every 5 min |
