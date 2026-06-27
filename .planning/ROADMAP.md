@@ -24,7 +24,8 @@ Milestone v1.0 delivers a single artifact: `troll/CLAUDE.md`, a set of actionabl
   3. The memory section names the specific anti-pattern (`catalog.trade_ticks()` with no time bounds) and mandates `BacktestDataConfig` streaming or time-bounded queries as the alternative
   4. The Nautilus section documents the `Price(decimal, precision)` silent precision bug and mandates `Decimal.scaleb()` + `Price.from_raw()` / `Quantity.from_raw()` for any re-stamping operation
   5. The testing section clearly distinguishes required tests (financial calculations, Nautilus type integrations) from optional tests (trivial glue, config parsing) so the rule is actionable without judgment calls
-**Plans**: TBD
+**Plans**: 1 plan
+- [ ] 01-PLAN.md — Write `troll/CLAUDE.md` with all six rule-category sections (17 requirements)
 
 ## Progress
 
