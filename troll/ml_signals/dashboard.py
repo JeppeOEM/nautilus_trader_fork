@@ -590,6 +590,16 @@ def _compute_multilevel(snaps: list, levels: int) -> tuple[float | None, float |
     return ofi, obi
 
 
+def _trade_aggregates(snaps: list) -> tuple[float, float, int, int]:
+    """Return (total_buy_vol, total_sell_vol, total_buy_count, total_sell_count) over window."""
+    return (
+        sum(s.buy_volume for s in snaps),
+        sum(s.sell_volume for s in snaps),
+        sum(s.buy_count for s in snaps),
+        sum(s.sell_count for s in snaps),
+    )
+
+
 def _metrics_from_rolling(rolling: dict) -> list[dict]:
     """Compute live metrics from in-process 1s rolling snapshots — no Parquet read."""
     now_ns = time.time_ns()
@@ -602,6 +612,15 @@ def _metrics_from_rolling(rolling: dict) -> list[dict]:
         ofi_3, obi_3 = _compute_multilevel(snaps, levels=3)
         ofi_5, obi_5 = _compute_multilevel(snaps, levels=5)
         ofi_10, obi_10 = _compute_multilevel(snaps, levels=10)
+        tb_vol, ts_vol, tb_cnt, ts_cnt = _trade_aggregates(snaps)
+        total_count = tb_cnt + ts_cnt
+        mid = (latest.bid_prices[0] + latest.ask_prices[0]) / 2 if latest.bid_prices and latest.ask_prices else None
+        has_tob = latest.bid_prices and latest.ask_prices and (latest.bid_sizes[0] + latest.ask_sizes[0]) > 0
+        microprice = (
+            (latest.bid_prices[0] * latest.ask_sizes[0] + latest.ask_prices[0] * latest.bid_sizes[0])
+            / (latest.bid_sizes[0] + latest.ask_sizes[0])
+            if has_tob else None
+        )
         result.append({
             "ts": now_ns,
             "instrument_id": iid,
@@ -612,13 +631,14 @@ def _metrics_from_rolling(rolling: dict) -> list[dict]:
             "obi_3": obi_3,
             "obi_5": obi_5,
             "obi_10": obi_10,
-            "microprice": (
-                (latest.bid_prices[0] * latest.ask_sizes[0] + latest.ask_prices[0] * latest.bid_sizes[0])
-                / (latest.bid_sizes[0] + latest.ask_sizes[0])
-                if latest.bid_prices and latest.ask_prices and (latest.bid_sizes[0] + latest.ask_sizes[0]) > 0
-                else None
-            ),
+            "microprice": microprice,
+            "microprice_lean": (microprice - mid) if microprice is not None and mid is not None else None,
             "spread": (latest.ask_prices[0] - latest.bid_prices[0]) if latest.ask_prices and latest.bid_prices else None,
+            "cvd": tb_vol - ts_vol,
+            "volume_delta": latest.buy_volume - latest.sell_volume,
+            "buy_count": latest.buy_count,
+            "sell_count": latest.sell_count,
+            "avg_trade_size": (tb_vol + ts_vol) / total_count if total_count > 0 else None,
         })
     return result
 
@@ -640,16 +660,7 @@ def _fast_loop(catalog_path: str, rolling: dict | None = None) -> None:
                 interval = LIVE_INTERVAL_SECONDS
             with _METRICS_LOCK:
                 for m in book_metrics:
-                    iid = m["instrument_id"]
-                    if iid in _LIVE:
-                        _LIVE[iid].update({
-                            "ts":         m["ts"],
-                            "ofi":        m.get("ofi"),
-                            "microprice": m.get("microprice"),
-                            "spread":     m.get("spread"),
-                        })
-                    else:
-                        _LIVE[iid] = m
+                    _LIVE[m["instrument_id"]] = {**_LIVE.get(m["instrument_id"], {}), **m}
         except Exception:
             logger.exception("Fast metrics loop failed")
         time.sleep(interval)
