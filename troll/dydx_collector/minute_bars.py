@@ -29,6 +29,7 @@ from nautilus_trader.model.book import OrderBook
 from nautilus_trader.model.data import MarkPriceUpdate
 from nautilus_trader.model.data import OrderBookDeltas
 from nautilus_trader.model.data import TradeTick
+from nautilus_trader.model.enums import AggressorSide
 from nautilus_trader.model.enums import BookType
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.serialization.arrow.serializer import make_dict_deserializer
@@ -56,6 +57,10 @@ class DydxMinuteBar(Data):
         low: float,
         close: float,
         volume: float,
+        buy_volume: float,
+        sell_volume: float,
+        buy_absorption: float,
+        sell_absorption: float,
         trade_count: int,
         mark_price: float | None,
         ofi: float | None,
@@ -70,6 +75,10 @@ class DydxMinuteBar(Data):
         self.low = low
         self.close = close
         self.volume = volume
+        self.buy_volume = buy_volume
+        self.sell_volume = sell_volume
+        self.buy_absorption = buy_absorption
+        self.sell_absorption = sell_absorption
         self.trade_count = trade_count
         self.mark_price = mark_price
         self.ofi = ofi
@@ -96,6 +105,10 @@ class DydxMinuteBar(Data):
                 "low": pa.float64(),
                 "close": pa.float64(),
                 "volume": pa.float64(),
+                "buy_volume": pa.float64(),
+                "sell_volume": pa.float64(),
+                "buy_absorption": pa.float64(),
+                "sell_absorption": pa.float64(),
                 "trade_count": pa.int32(),
                 "mark_price": pa.float64(),
                 "ofi": pa.float64(),
@@ -116,6 +129,10 @@ class DydxMinuteBar(Data):
             "low": obj.low,
             "close": obj.close,
             "volume": obj.volume,
+            "buy_volume": obj.buy_volume,
+            "sell_volume": obj.sell_volume,
+            "buy_absorption": obj.buy_absorption,
+            "sell_absorption": obj.sell_absorption,
             "trade_count": obj.trade_count,
             "mark_price": obj.mark_price,
             "ofi": obj.ofi,
@@ -134,6 +151,10 @@ class DydxMinuteBar(Data):
             low=float(values["low"]),
             close=float(values["close"]),
             volume=float(values["volume"]),
+            buy_volume=float(values["buy_volume"]),
+            sell_volume=float(values["sell_volume"]),
+            buy_absorption=float(values["buy_absorption"]),
+            sell_absorption=float(values["sell_absorption"]),
             trade_count=int(values["trade_count"]),
             mark_price=values.get("mark_price"),
             ofi=values.get("ofi"),
@@ -168,12 +189,16 @@ class _BarAccum:
     low: float
     close: float
     volume: float
+    buy_volume: float
+    sell_volume: float
     trade_count: int
     last_mark: float | None = None
     ofi_sum: float = 0.0
     has_ofi: bool = False
     last_microprice: float | None = None
     last_spread: float | None = None
+    buy_absorption: float = 0.0
+    sell_absorption: float = 0.0
 
 
 class MinuteBarBuilder:
@@ -199,6 +224,9 @@ class MinuteBarBuilder:
         self._pending_ofi_sum: dict[str, float] = {}
         self._pending_ofi_minute: dict[str, int] = {}
         self._pending_has_ofi: dict[str, bool] = {}
+        # Absorption: buy/sell volume since last delta, resolved when next delta arrives
+        self._abs_pending_buy: dict[str, float] = {}
+        self._abs_pending_sell: dict[str, float] = {}
 
     def update(
         self,
@@ -233,13 +261,17 @@ class MinuteBarBuilder:
             if kind == "trade":
                 price = obj.price.as_double()  # type: ignore[union-attr]
                 size = obj.size.as_double()  # type: ignore[union-attr]
+                is_buy = obj.aggressor_side == AggressorSide.BUYER  # type: ignore[union-attr]
                 accum = self._accums.get(instrument_id)
 
                 if accum is None:
                     accum = _BarAccum(
                         minute_ts=minute_ts,
                         open=price, high=price, low=price, close=price,
-                        volume=size, trade_count=1,
+                        volume=size,
+                        buy_volume=size if is_buy else 0.0,
+                        sell_volume=0.0 if is_buy else size,
+                        trade_count=1,
                         # Seed enrichment from deltas that arrived before this first trade
                         last_microprice=self._last_microprice.get(instrument_id),
                         last_spread=self._last_spread.get(instrument_id),
@@ -255,7 +287,10 @@ class MinuteBarBuilder:
                     accum = _BarAccum(
                         minute_ts=minute_ts,
                         open=price, high=price, low=price, close=price,
-                        volume=size, trade_count=1,
+                        volume=size,
+                        buy_volume=size if is_buy else 0.0,
+                        sell_volume=0.0 if is_buy else size,
+                        trade_count=1,
                         last_microprice=self._last_microprice.get(instrument_id),
                         last_spread=self._last_spread.get(instrument_id),
                     )
@@ -268,9 +303,25 @@ class MinuteBarBuilder:
                     accum.low = min(accum.low, price)
                     accum.close = price
                     accum.volume += size
+                    if is_buy:
+                        accum.buy_volume += size
+                    else:
+                        accum.sell_volume += size
                     accum.trade_count += 1
 
+                # Accumulate pending absorption volume for resolution on next delta
+                if is_buy:
+                    self._abs_pending_buy[instrument_id] = self._abs_pending_buy.get(instrument_id, 0.0) + size
+                else:
+                    self._abs_pending_sell[instrument_id] = self._abs_pending_sell.get(instrument_id, 0.0) + size
+
             elif kind == "delta":
+                # Capture best prices before delta to resolve absorption
+                ask_before_obj = book.best_ask_price()
+                bid_before_obj = book.best_bid_price()
+                ask_before = ask_before_obj.as_double() if ask_before_obj is not None else None
+                bid_before = bid_before_obj.as_double() if bid_before_obj is not None else None
+
                 book.apply_delta(obj)  # type: ignore[arg-type]
                 bid_p_obj = book.best_bid_price()
                 ask_p_obj = book.best_ask_price()
@@ -281,6 +332,19 @@ class MinuteBarBuilder:
                 bs = book.best_bid_size().as_double()
                 ap = ask_p_obj.as_double()
                 as_ = book.best_ask_size().as_double()
+
+                # Resolve absorption: if best price held across this delta, pending
+                # aggressive volume was absorbed by the resting side
+                accum = self._accums.get(instrument_id)
+                if accum is not None:
+                    if ask_before is not None and ap == ask_before:
+                        accum.buy_absorption += self._abs_pending_buy.pop(instrument_id, 0.0)
+                    else:
+                        self._abs_pending_buy.pop(instrument_id, None)
+                    if bid_before is not None and bp == bid_before:
+                        accum.sell_absorption += self._abs_pending_sell.pop(instrument_id, 0.0)
+                    else:
+                        self._abs_pending_sell.pop(instrument_id, None)
 
                 ofi_c = self._ofi_contribution(instrument_id, bp, bs, ap, as_)
                 total = bs + as_
@@ -375,6 +439,10 @@ class MinuteBarBuilder:
             low=accum.low,
             close=accum.close,
             volume=accum.volume,
+            buy_volume=accum.buy_volume,
+            sell_volume=accum.sell_volume,
+            buy_absorption=accum.buy_absorption,
+            sell_absorption=accum.sell_absorption,
             trade_count=accum.trade_count,
             mark_price=accum.last_mark,
             ofi=accum.ofi_sum if accum.has_ofi else None,

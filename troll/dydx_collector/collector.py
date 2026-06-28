@@ -32,6 +32,7 @@ import logging
 import signal
 import time
 from collections import defaultdict
+from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -44,9 +45,12 @@ from dydx_collector.open_interest import _fetch_markets_json
 from dydx_collector.open_interest import classify_liquidity
 from dydx_collector.open_interest import fetch_open_interest
 from dydx_collector.prune_catalog import prune_instrument
+from dydx_collector.second_snapshot import DydxSecondSnapshot
+from ml_signals.dashboard import serve_in_background
 from nautilus_trader.model.data import MarkPriceUpdate
 from nautilus_trader.model.data import OrderBookDeltas
 from nautilus_trader.model.data import TradeTick
+from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.instruments import instruments_from_pyo3
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
@@ -76,6 +80,11 @@ class Collector:
         self._pinned: set[str] = {e.id for e in config.instruments}
         self._liquid: set[str] = set()
         self._illiquid: set[str] = set()
+
+        # 1-second rolling snapshots: 300 entries = 5 min; shared with dashboard
+        self._second_rolling: dict[str, deque] = defaultdict(lambda: deque(maxlen=300))
+        # Previous 1s top-of-book per instrument for OFI delta computation
+        self._prev_tob: dict[str, tuple[float, float, float, float]] = {}
 
         self._stop = asyncio.Event()
 
@@ -189,6 +198,47 @@ class Collector:
 
             self._config = new_config
 
+    async def _second_loop(self) -> None:
+        """Sample top-of-book every second; compute 1s OFI + microprice for all subscribed coins."""
+        while not self._stop.is_set():
+            await asyncio.sleep(1.0)
+            now_ns = time.time_ns()
+            for iid in self._pinned | self._liquid:
+                book = self._bar_builder._books.get(iid)
+                if book is None:
+                    continue
+                bid_p_obj = book.best_bid_price()
+                ask_p_obj = book.best_ask_price()
+                if bid_p_obj is None or ask_p_obj is None:
+                    continue
+
+                bp = bid_p_obj.as_double()
+                bs = book.best_bid_size().as_double()
+                ap = ask_p_obj.as_double()
+                as_ = book.best_ask_size().as_double()
+
+                ofi: float | None = None
+                prev = self._prev_tob.get(iid)
+                if prev is not None:
+                    prev_bp, prev_bs, prev_ap, prev_as = prev
+                    bid_term = bs if bp > prev_bp else (bs - prev_bs if bp == prev_bp else -prev_bs)
+                    ask_term = as_ if ap < prev_ap else (as_ - prev_as if ap == prev_ap else -prev_as)
+                    ofi = bid_term - ask_term
+                self._prev_tob[iid] = (bp, bs, ap, as_)
+
+                total = bs + as_
+                micro = (bp * as_ + ap * bs) / total if total > 0 else None
+
+                snapshot = DydxSecondSnapshot(
+                    instrument_id=InstrumentId.from_str(iid),
+                    bid_price=bp, bid_size=bs,
+                    ask_price=ap, ask_size=as_,
+                    ofi=ofi, microprice=micro,
+                    ts_event=now_ns, ts_init=now_ns,
+                )
+                self._second_rolling[iid].append(snapshot)
+                self._on_data(snapshot)  # routes to buffer → Parquet flush
+
     async def _prune_loop(self) -> None:
         """Prune non-pinned instruments' catalog data older than non_config_retain_hours."""
         # Run roughly 4x per retention window (every retain/4 hours, minimum 15 min)
@@ -231,16 +281,23 @@ class Collector:
             f"{len(self._illiquid)} illiquid (monitoring)"
         )
 
+        serve_in_background(
+            port=self._config.dashboard_port,
+            catalog_path=str(Path(self._config.catalog_path).resolve()),
+            rolling=self._second_rolling,
+        )
+
         flush_task = asyncio.create_task(self._flush_loop())
         reload_task = asyncio.create_task(self._reload_config_loop())
         oi_task = asyncio.create_task(self._open_interest_loop())
         liquidity_task = asyncio.create_task(self._liquidity_check_loop())
         prune_task = asyncio.create_task(self._prune_loop())
+        second_task = asyncio.create_task(self._second_loop())
 
         try:
             await self._stop.wait()
         finally:
-            for task in (flush_task, reload_task, oi_task, liquidity_task, prune_task):
+            for task in (flush_task, reload_task, oi_task, liquidity_task, prune_task, second_task):
                 task.cancel()
             await self._client.disconnect()
             self._flush_once()

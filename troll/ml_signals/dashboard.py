@@ -576,15 +576,42 @@ def _render_live_page() -> str:
     return _page("ml_signals live", body, refresh_seconds=1)
 
 
-def _fast_loop(catalog_path: str) -> None:
-    """Update OFI/microprice/spread for all coins every LIVE_INTERVAL_SECONDS.
+def _metrics_from_rolling(rolling: dict) -> list[dict]:
+    """Compute live metrics from in-process 1s rolling snapshots — no Parquet read."""
+    now_ns = time.time_ns()
+    result = []
+    for iid, dq in list(rolling.items()):
+        if not dq:
+            continue
+        snaps = list(dq)
+        latest = snaps[-1]
+        # 1-min windowed OFI: sum last 60 contributions
+        ofi = sum(s.ofi for s in snaps[-60:] if s.ofi is not None) or None
+        result.append({
+            "ts": now_ns,
+            "instrument_id": iid,
+            "ofi": ofi,
+            "microprice": latest.microprice,
+            "spread": latest.ask_price - latest.bid_price,
+        })
+    return result
 
-    Only reads 60s of order book deltas per coin — fast enough for ~300 coins.
-    Merges into existing _LIVE entries so price/pct fields are preserved.
+
+def _fast_loop(catalog_path: str, rolling: dict | None = None) -> None:
+    """Update OFI/microprice/spread for all coins every second (rolling) or 5s (Parquet).
+
+    When `rolling` is provided (collector-embedded mode), reads from the in-process
+    1s snapshot buffer — no catalog I/O, always fresh.
+    Falls back to reading 60s of order book deltas from Parquet when running standalone.
     """
     while True:
         try:
-            book_metrics = metrics_computer.compute_book_metrics_all(catalog_path)
+            if rolling is not None:
+                book_metrics = _metrics_from_rolling(rolling)
+                interval = 1
+            else:
+                book_metrics = metrics_computer.compute_book_metrics_all(catalog_path)
+                interval = LIVE_INTERVAL_SECONDS
             with _METRICS_LOCK:
                 for m in book_metrics:
                     iid = m["instrument_id"]
@@ -599,7 +626,7 @@ def _fast_loop(catalog_path: str) -> None:
                         _LIVE[iid] = m
         except Exception:
             logger.exception("Fast metrics loop failed")
-        time.sleep(LIVE_INTERVAL_SECONDS)
+        time.sleep(interval)
 
 
 def _slow_loop(catalog_path: str) -> None:
@@ -673,7 +700,7 @@ class _Handler(BaseHTTPRequestHandler):
         pass  # ponytail: silence per-request access logs
 
 
-def serve_in_background(port: int = 8765, catalog_path: str = CATALOG_PATH) -> HTTPServer:
+def serve_in_background(port: int = 8765, catalog_path: str = CATALOG_PATH, rolling: dict | None = None) -> HTTPServer:
     global CATALOG_PATH
     CATALOG_PATH = catalog_path
     # Pre-populate _LIVE from the last SQLite snapshot so the rankings table
@@ -692,7 +719,7 @@ def serve_in_background(port: int = 8765, catalog_path: str = CATALOG_PATH) -> H
 
     server = HTTPServer(("127.0.0.1", port), _Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    threading.Thread(target=_fast_loop, args=(catalog_path,), daemon=True).start()
+    threading.Thread(target=_fast_loop, args=(catalog_path, rolling), daemon=True).start()
     threading.Thread(target=_slow_loop, args=(catalog_path,), daemon=True).start()
     return server
 
