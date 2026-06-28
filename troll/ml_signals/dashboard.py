@@ -76,9 +76,7 @@ DB_WRITE_INTERVAL_SECONDS: int = 60
 # Reorder, add, or remove rows here to control what's shown and how.
 # color_fn receives the raw float value and returns a CSS color string.
 RANKING_COLS: list[tuple[str, str, object, object]] = [
-    ("ofi_10",         "OFI10",  lambda v: f"{v:+.1f}",  lambda v: "#2a9d2a" if v > 0 else "#c0392b"),
-    ("ofi_5",          "OFI5",   lambda v: f"{v:+.1f}",  lambda v: "#2a9d2a" if v > 0 else "#c0392b"),
-    ("ofi_3",          "OFI3",   lambda v: f"{v:+.1f}",  lambda v: "#2a9d2a" if v > 0 else "#c0392b"),
+    ("ofi_10_z",       "OFI10z", lambda v: f"{v:+.2f}",  lambda v: "#2a9d2a" if v > 0 else "#c0392b"),
     ("obi_10",         "OBI10",  lambda v: f"{v:.3f}",   lambda v: "#2a9d2a" if v > 0.5 else "#c0392b"),
     ("obi_5",          "OBI5",   lambda v: f"{v:.3f}",   lambda v: "#2a9d2a" if v > 0.5 else "#c0392b"),
     ("obi_3",          "OBI3",   lambda v: f"{v:.3f}",   lambda v: "#2a9d2a" if v > 0.5 else "#c0392b"),
@@ -105,6 +103,12 @@ _LIVE: dict[str, dict] = {}  # instrument_id → latest snapshot
 # Module-level reference to the _second_rolling deque passed by the collector.
 # Set in serve_in_background(); None in standalone mode.
 _ROLLING: dict | None = None
+
+# Persistent per-coin OFI10 indicators for z-score — fed incrementally so history
+# accumulates across render calls. Fresh indicators always return 0 until warm.
+_OFI_ZSCORE_WINDOW = 3600  # 1 hour of 1s readings to establish mean/std
+_OFI_INDS: dict[str, MultiLevelOFI] = {}   # instrument_id → persistent indicator
+_LAST_FED: dict[str, int] = {}             # instrument_id → ts_event of last fed snap
 
 _NAV = '<p><a href="/">Rankings</a> | <a href="/live">Live signals</a></p>'
 
@@ -154,7 +158,7 @@ def _page(title: str, body: str, refresh_seconds: int = 60) -> str:
     )
 
 
-def _render_rankings_page(sort_col: str = "ofi", direction: str = "desc") -> str:
+def _render_rankings_page(sort_col: str = "ofi_10_z", direction: str = "desc") -> str:
     with _METRICS_LOCK:
         rows = list(_LIVE.values())
     if not rows:  # fallback at startup before first compute cycle finishes
@@ -166,7 +170,7 @@ def _render_rankings_page(sort_col: str = "ofi", direction: str = "desc") -> str
 
     valid_cols = {k for k, *_ in RANKING_COLS}
     if sort_col not in valid_cols:
-        sort_col = "ofi"
+        sort_col = "ofi_10_z"
     reverse = direction != "asc"
     subscribed_rows.sort(
         key=lambda r: (r.get(sort_col) is None, r.get(sort_col) or 0.0),
@@ -186,20 +190,21 @@ def _render_rankings_page(sort_col: str = "ofi", direction: str = "desc") -> str
         + "<th>History</th></tr>"
     )
 
-    def _cell(value: float | None, fmt_fn: object, color_fn: object) -> str:
+    def _cell(key: str, iid_raw: str, value: float | None, fmt_fn: object, color_fn: object) -> str:
+        attr = f' data-iid="{html.escape(iid_raw)}" data-col="{key}"'
         if value is None:
-            return "<td>&mdash;</td>"
+            return f"<td{attr}>&mdash;</td>"
         text = html.escape(fmt_fn(value))  # type: ignore[operator]
         color = color_fn(value) if color_fn else None  # type: ignore[operator]
         style = f' style="color:{color}"' if color else ""
-        return f"<td{style}>{text}</td>"
+        return f"<td{attr}{style}>{text}</td>"
 
     body_rows = ""
     for i, row in enumerate(subscribed_rows, 1):
         iid = html.escape(row["instrument_id"])
         # Short ticker label: "ETH-USD-PERP.DYDX" → "ETH-USD"
         label = html.escape("-".join(row["instrument_id"].split("-")[:2]))
-        cells = "".join(_cell(row.get(k), fmt_fn, color_fn) for k, _, fmt_fn, color_fn in RANKING_COLS)
+        cells = "".join(_cell(k, row["instrument_id"], row.get(k), fmt_fn, color_fn) for k, _, fmt_fn, color_fn in RANKING_COLS)
         body_rows += (
             f"<tr><td>{i}</td>"
             f"<td><a href='/coin/{iid}'>{label}</a> <small><a href='/chart/{iid}'>chart</a></small></td>"
@@ -227,13 +232,38 @@ def _render_rankings_page(sort_col: str = "ofi", direction: str = "desc") -> str
         f"<div style='line-height:2.4'>{chips}</div>"
     )
 
+    poll_script = """<script>
+(function(){
+  var cells={};
+  document.querySelectorAll('td[data-iid]').forEach(function(el){
+    var iid=el.dataset.iid,col=el.dataset.col;
+    if(!cells[iid])cells[iid]={};
+    cells[iid][col]=el;
+  });
+  setInterval(function(){
+    fetch('/data/rankings').then(function(r){return r.json();}).then(function(rows){
+      rows.forEach(function(row){
+        var iid=row.instrument_id,cols=cells[iid];
+        if(!cols)return;
+        Object.entries(row.cells).forEach(function(e){
+          var el=cols[e[0]];
+          if(!el)return;
+          el.textContent=e[1].text;
+          el.style.color=e[1].color||'';
+        });
+      });
+    }).catch(function(){});
+  },1000);
+})();
+</script>"""
     body = (
         f"<h1>dYdX Monitor</h1>"
         f"<h2>Subscribed ({len(subscribed_rows)})</h2>"
         f"{subscribed_table}"
         f"{illiquid_section}"
+        f"{poll_script}"
     )
-    return _page("dYdX Monitor", body, refresh_seconds=5)
+    return _page("dYdX Monitor", body, refresh_seconds=86400)
 
 
 def _render_history_page(symbol: str) -> str:
@@ -512,6 +542,18 @@ def _metrics_from_rolling(rolling: dict) -> list[dict]:
         ofi_3, obi_3 = _compute_multilevel(snaps, levels=3)
         ofi_5, obi_5 = _compute_multilevel(snaps, levels=5)
         ofi_10, obi_10 = _compute_multilevel(snaps, levels=10)
+
+        # Feed new snapshots into the persistent per-coin indicator to build z-score history.
+        if iid not in _OFI_INDS:
+            _OFI_INDS[iid] = MultiLevelOFI(levels=10, window=50, zscore_window=_OFI_ZSCORE_WINDOW)
+        ind = _OFI_INDS[iid]
+        last_fed = _LAST_FED.get(iid, 0)
+        for s in snaps:
+            if s.ts_event > last_fed:
+                ind.update_raw(s.bid_prices, s.bid_sizes, s.ask_prices, s.ask_sizes)
+        if snaps:
+            _LAST_FED[iid] = snaps[-1].ts_event
+        ofi_10_z = ind.value if ind.initialized else None
         tb_vol, ts_vol, tb_cnt, ts_cnt = _trade_aggregates(snaps)
         total_count = tb_cnt + ts_cnt
         mid = (latest.bid_prices[0] + latest.ask_prices[0]) / 2 if latest.bid_prices and latest.ask_prices else None
@@ -528,6 +570,7 @@ def _metrics_from_rolling(rolling: dict) -> list[dict]:
             "ofi_3": ofi_3,
             "ofi_5": ofi_5,
             "ofi_10": ofi_10,
+            "ofi_10_z": ofi_10_z,
             "obi_3": obi_3,
             "obi_5": obi_5,
             "obi_10": obi_10,
@@ -541,6 +584,29 @@ def _metrics_from_rolling(rolling: dict) -> list[dict]:
             "avg_trade_size": (tb_vol + ts_vol) / total_count if total_count > 0 else None,
         })
     return result
+
+
+def _rankings_json() -> str:
+    """Return pre-formatted cell values for all live instruments as JSON."""
+    with _METRICS_LOCK:
+        rows = list(_LIVE.values())
+    result = []
+    for row in rows:
+        cells: dict[str, dict] = {}
+        for key, _, fmt_fn, color_fn in RANKING_COLS:
+            v = row.get(key)
+            if v is None:
+                cells[key] = {"text": "—", "color": None}
+            else:
+                try:
+                    cells[key] = {
+                        "text": fmt_fn(v),  # type: ignore[operator]
+                        "color": color_fn(v) if color_fn else None,  # type: ignore[operator]
+                    }
+                except Exception:
+                    cells[key] = {"text": "—", "color": None}
+        result.append({"instrument_id": row["instrument_id"], "cells": cells})
+    return json.dumps(result)
 
 
 def _fast_loop(catalog_path: str, rolling: dict | None = None) -> None:
@@ -591,7 +657,15 @@ class _Handler(BaseHTTPRequestHandler):
         path = unquote(parsed.path)
         qs = parse_qs(parsed.query)
 
-        if path == "/live":
+        if path == "/data/rankings":
+            payload = _rankings_json().encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+        elif path == "/live":
             html_doc = _render_live_page()
         elif path.startswith("/history/"):
             symbol = path.removeprefix("/history/")
