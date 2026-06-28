@@ -62,3 +62,21 @@ These rules govern all code under `troll/` (`dydx_collector/` and `ml_signals/`)
 - **NAUT-02** — All data written via `ParquetDataCatalog.write_data()`. No hand-rolled Parquet schemas. The catalog API owns the Arrow schema and partitioning; working around it breaks catalog reads.
 
 - **NAUT-03** — Backtests use `BacktestNode` + `BacktestDataConfig`. No custom simulation engine. Reference strategies via `ImportableStrategyConfig` by string path so parameter sweeps and time-range filtering require no code changes.
+
+---
+
+## Signal Architecture: 1s-Based, Not Event-Driven
+
+HFT signals are computed from **1-second sampled snapshots** (`DydxSecondSnapshot`), not from raw order book delta events.
+
+**What is stored in Parquet (`DydxSecondSnapshot`):**
+- Top-20 bid/ask levels: `bid_prices`, `bid_sizes`, `ask_prices`, `ask_sizes` (lists)
+- Per-side trade volume: `buy_volume`, `sell_volume`
+
+**What is NOT stored — computed on read via `ml_signals/indicators.py`:**
+- `microprice` = `Microprice().update_raw(bp, bs, ap, as_)` — derivable from level 0
+- `spread` = `ask_prices[0] - bid_prices[0]` — derivable from level 0
+- `ofi_N` = `MultiLevelOFI(levels=N)` replayed over consecutive snapshots
+- `obi_N` = `MultiLevelOBI(levels=N).update_raw(bid_sizes, ask_sizes)`
+
+**- SIGNAL-01** — If a value can be derived exactly from stored level data, do not store it. Store raw inputs; compute signals. Keeps the schema minimal and lets strategies try any N-level variant without re-collecting.
