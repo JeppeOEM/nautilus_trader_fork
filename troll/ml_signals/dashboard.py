@@ -61,6 +61,8 @@ from ml_signals.catalog_stats import likely_outages
 from ml_signals.catalog_stats import list_instruments
 from ml_signals.footprint import build_footprint
 from ml_signals.indicators import Microprice
+from ml_signals.indicators import MultiLevelOBI
+from ml_signals.indicators import MultiLevelOFI
 from ml_signals.indicators import OrderFlowImbalance
 from ml_signals import chart_data as _chart_data
 from ml_signals import metrics_computer
@@ -576,6 +578,18 @@ def _render_live_page() -> str:
     return _page("ml_signals live", body, refresh_seconds=1)
 
 
+def _compute_multilevel(snaps: list, levels: int) -> tuple[float | None, float | None]:
+    """Return (ofi, obi) at `levels` by replaying snapshots through fresh indicators."""
+    ofi_ind = MultiLevelOFI(levels=levels, window=len(snaps))
+    obi_ind = MultiLevelOBI(levels=levels)
+    for s in snaps:
+        ofi_ind.update_raw(s.bid_prices, s.bid_sizes, s.ask_prices, s.ask_sizes)
+        obi_ind.update_raw(s.bid_sizes, s.ask_sizes)
+    ofi = ofi_ind.value if ofi_ind.initialized else None
+    obi = obi_ind.value if obi_ind.initialized else None
+    return ofi, obi
+
+
 def _metrics_from_rolling(rolling: dict) -> list[dict]:
     """Compute live metrics from in-process 1s rolling snapshots — no Parquet read."""
     now_ns = time.time_ns()
@@ -585,12 +599,16 @@ def _metrics_from_rolling(rolling: dict) -> list[dict]:
             continue
         snaps = list(dq)
         latest = snaps[-1]
-        # 1-min windowed OFI: sum last 60 contributions
-        ofi = sum(s.ofi for s in snaps[-60:] if s.ofi is not None) or None
+        ofi_5, obi_5 = _compute_multilevel(snaps, levels=5)
+        ofi_10, obi_10 = _compute_multilevel(snaps, levels=10)
         result.append({
             "ts": now_ns,
             "instrument_id": iid,
-            "ofi": ofi,
+            "ofi": ofi_10,
+            "ofi_5": ofi_5,
+            "ofi_10": ofi_10,
+            "obi_5": obi_5,
+            "obi_10": obi_10,
             "microprice": latest.microprice,
             "spread": (latest.ask_prices[0] - latest.bid_prices[0]) if latest.ask_prices and latest.bid_prices else None,
         })

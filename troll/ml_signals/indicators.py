@@ -215,3 +215,115 @@ class OrderFlowImbalance(Indicator):
         self._prev_bid_size = None
         self._prev_ask_price = None
         self._prev_ask_size = None
+
+
+class MultiLevelOBI(Indicator):
+    """
+    Order Book Imbalance across the top N price levels.
+
+    value = sum(bid_sizes[:levels]) / (sum(bid_sizes[:levels]) + sum(ask_sizes[:levels]))
+
+    1.0 = all depth on the bid side. 0.5 = balanced. 0.0 = all ask.
+    Feed with `update_raw(bid_sizes, ask_sizes)` from DydxSecondSnapshot.
+
+    Parameters
+    ----------
+    levels : int
+        Number of price levels to include (> 0).
+    """
+
+    def __init__(self, levels: int = 10) -> None:
+        PyCondition.positive_int(levels, "levels")
+        super().__init__(params=[levels])
+        self.levels = levels
+        self.value = 0.5
+
+    def update_raw(self, bid_sizes: list[float], ask_sizes: list[float]) -> None:
+        bid = sum(bid_sizes[:self.levels])
+        ask = sum(ask_sizes[:self.levels])
+        total = bid + ask
+        if total == 0.0:
+            return
+        self.value = bid / total
+        self._set_has_inputs(True)
+        self._set_initialized(True)
+
+    def _reset(self) -> None:
+        self.value = 0.5
+
+
+class MultiLevelOFI(Indicator):
+    """
+    Order Flow Imbalance summed across the top N price levels.
+
+    Applies the Cont-Kukanov-Stoikov delta formula independently at each level
+    and sums the contributions, giving a richer signal than top-of-book OFI alone.
+
+    Feed with `update_raw(bid_prices, bid_sizes, ask_prices, ask_sizes)` from
+    DydxSecondSnapshot — the lists are the full depth profile up to 20 levels.
+
+    Parameters
+    ----------
+    levels : int
+        Number of price levels to include (> 0).
+    window : int
+        Rolling window of per-update contributions summed into `value` (> 0).
+    """
+
+    def __init__(self, levels: int = 10, window: int = 50) -> None:
+        PyCondition.positive_int(levels, "levels")
+        PyCondition.positive_int(window, "window")
+        super().__init__(params=[levels, window])
+        self.levels = levels
+        self.window = window
+        self.value = 0.0
+        self._contributions: deque[float] = deque(maxlen=window)
+        self._prev_bid_prices: list[float] | None = None
+        self._prev_bid_sizes: list[float] | None = None
+        self._prev_ask_prices: list[float] | None = None
+        self._prev_ask_sizes: list[float] | None = None
+
+    def update_raw(
+        self,
+        bid_prices: list[float],
+        bid_sizes: list[float],
+        ask_prices: list[float],
+        ask_sizes: list[float],
+    ) -> None:
+        if self._prev_bid_prices is None:
+            self._prev_bid_prices = bid_prices[:self.levels]
+            self._prev_bid_sizes = bid_sizes[:self.levels]
+            self._prev_ask_prices = ask_prices[:self.levels]
+            self._prev_ask_sizes = ask_sizes[:self.levels]
+            return
+
+        n = min(self.levels, len(bid_prices), len(self._prev_bid_prices))
+        contribution = 0.0
+        for i in range(n):
+            bp, bs = bid_prices[i], bid_sizes[i]
+            pbp, pbs = self._prev_bid_prices[i], self._prev_bid_sizes[i]
+            bid_term = bs if bp > pbp else (bs - pbs if bp == pbp else -pbs)
+
+            ap, as_ = ask_prices[i], ask_sizes[i]
+            pap, pas = self._prev_ask_prices[i], self._prev_ask_sizes[i]
+            ask_term = as_ if ap < pap else (as_ - pas if ap == pap else -pas)
+
+            contribution += bid_term - ask_term
+
+        self._contributions.append(contribution)
+        self.value = float(sum(self._contributions))
+        self._set_has_inputs(True)
+        self._set_initialized(True)
+
+        self._prev_bid_prices = bid_prices[:self.levels]
+        self._prev_bid_sizes = bid_sizes[:self.levels]
+        self._prev_ask_prices = ask_prices[:self.levels]
+        self._prev_ask_sizes = ask_sizes[:self.levels]
+
+    def _reset(self) -> None:
+        self.value = 0.0
+        self._contributions.clear()
+        self._prev_bid_prices = None
+        self._prev_bid_sizes = None
+        self._prev_ask_prices = None
+        self._prev_ask_sizes = None
