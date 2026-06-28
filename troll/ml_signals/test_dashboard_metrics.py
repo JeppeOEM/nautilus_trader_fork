@@ -14,11 +14,13 @@
 # -------------------------------------------------------------------------------------------------
 """Unit tests for new financial calculations in _metrics_from_rolling()."""
 
+import json
 from collections import deque
 
 import pytest
 
 from dydx_collector.second_snapshot import DydxSecondSnapshot
+from ml_signals.dashboard import _coin_chart_json
 from ml_signals.dashboard import _metrics_from_rolling
 from nautilus_trader.model.identifiers import InstrumentId
 
@@ -106,3 +108,18 @@ def test_metrics_keys() -> None:
     )
     result = _metrics_from_rolling(rolling)
     assert expected_keys.issubset(result[0].keys())
+
+
+def test_chart_json_no_rolling() -> None:
+    result = json.loads(_coin_chart_json("ETH-USD-PERP.DYDX", None))
+    assert result == {"ts": [], "mid": [], "bid": [], "ask": [], "micro": []}
+
+
+def test_chart_json_ts_conversion() -> None:
+    ts_ns = 1_700_000_000_000_000_000
+    rolling = _rolling(
+        _snap([100.0], [1.0], [101.0], [1.0], buy_volume=1.0, sell_volume=1.0,
+              buy_count=1, sell_count=1, ts_event=ts_ns),
+    )
+    result = json.loads(_coin_chart_json("ETH-USD-PERP.DYDX", rolling))
+    assert result["ts"][0] == ts_ns // 1_000_000

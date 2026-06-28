@@ -21,7 +21,8 @@ framework. Swap for Streamlit/Dash if you need richer UX later.
 
 Pages:
 - `/`               rankings table — all coins sortable by any metric
-- `/coin/{id}`      per-coin data coverage + footprint chart + OFI/Microprice panel
+- `/coin/{id}`      live indicator panel + 1s-updating mid/bid/ask/microprice chart
+- `/chart/{id}`     per-event microstructure chart (Parquet-backed, date-picker controlled)
 - `/history/{id}`   31-day metric history charts for one coin
 - `/live`           in-process live signal monitor (see `record()` below)
 
@@ -37,6 +38,7 @@ Usage from a running strategy::
 """
 
 import html
+import json
 import logging
 import threading
 import time
@@ -53,29 +55,17 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from ml_signals.book_features import top_of_book_series
-from ml_signals.candles import TIMEFRAMES
-from ml_signals.candles import build_candles
-from ml_signals.catalog_stats import coverage
-from ml_signals.catalog_stats import likely_outages
 from ml_signals.catalog_stats import list_instruments
-from ml_signals.footprint import build_footprint
-from ml_signals.indicators import Microprice
 from ml_signals.indicators import MultiLevelOBI
 from ml_signals.indicators import MultiLevelOFI
-from ml_signals.indicators import OrderFlowImbalance
 from ml_signals import chart_data as _chart_data
 from ml_signals import metrics_computer
 from ml_signals import metrics_store
-from nautilus_trader.model.identifiers import InstrumentId
-from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
 
 logger = logging.getLogger(__name__)
 
 CATALOG_PATH = "troll/dydx_collector/catalog"
-MAX_FOOTPRINT_CANDLES = 30
-FOOTPRINT_BANDS_PER_CANDLE = 4
 
 # How often the background thread recomputes live OFI/microprice from the catalog.
 LIVE_INTERVAL_SECONDS: int = 5
@@ -86,13 +76,22 @@ DB_WRITE_INTERVAL_SECONDS: int = 60
 # Reorder, add, or remove rows here to control what's shown and how.
 # color_fn receives the raw float value and returns a CSS color string.
 RANKING_COLS: list[tuple[str, str, object, object]] = [
-    ("price",      "Price",      lambda v: f"{v:.4f}",   None),
-    ("ofi",        "OFI",        lambda v: f"{v:+.2f}",  lambda v: "#2a9d2a" if v > 0 else "#c0392b"),
-    ("microprice", "Microprice", lambda v: f"{v:.4f}",   None),
-    ("spread",     "Spread",     lambda v: f"{v:.6f}",   None),
-    ("pct_1h",     "1h %",       lambda v: f"{v:+.2f}%", lambda v: "#2a9d2a" if v > 0 else "#c0392b"),
-    ("pct_24h",    "24h %",      lambda v: f"{v:+.2f}%", lambda v: "#2a9d2a" if v > 0 else "#c0392b"),
-    ("volatility", "Volatility", lambda v: f"{v:.6f}",   None),
+    ("ofi_10",         "OFI10",  lambda v: f"{v:+.1f}",  lambda v: "#2a9d2a" if v > 0 else "#c0392b"),
+    ("ofi_5",          "OFI5",   lambda v: f"{v:+.1f}",  lambda v: "#2a9d2a" if v > 0 else "#c0392b"),
+    ("ofi_3",          "OFI3",   lambda v: f"{v:+.1f}",  lambda v: "#2a9d2a" if v > 0 else "#c0392b"),
+    ("obi_10",         "OBI10",  lambda v: f"{v:.3f}",   lambda v: "#2a9d2a" if v > 0.5 else "#c0392b"),
+    ("obi_5",          "OBI5",   lambda v: f"{v:.3f}",   lambda v: "#2a9d2a" if v > 0.5 else "#c0392b"),
+    ("obi_3",          "OBI3",   lambda v: f"{v:.3f}",   lambda v: "#2a9d2a" if v > 0.5 else "#c0392b"),
+    ("cvd",            "CVD",    lambda v: f"{v:+.2f}",  lambda v: "#2a9d2a" if v > 0 else "#c0392b"),
+    ("spread",         "Spread", lambda v: f"{v:.6f}",   None),
+    ("microprice_lean","u lean", lambda v: f"{v:+.6f}",  lambda v: "#2a9d2a" if v > 0 else "#c0392b"),
+    ("volume_delta",   "Vol d",  lambda v: f"{v:+.2f}",  lambda v: "#2a9d2a" if v > 0 else "#c0392b"),
+    ("buy_count",      "Buy#",   lambda v: f"{int(v)}",  None),
+    ("sell_count",     "Sell#",  lambda v: f"{int(v)}",  None),
+    ("price",          "Price",  lambda v: f"{v:.4f}",   None),
+    ("pct_1h",         "1h %",   lambda v: f"{v:+.2f}%", lambda v: "#2a9d2a" if v > 0 else "#c0392b"),
+    ("pct_24h",        "24h %",  lambda v: f"{v:+.2f}%", lambda v: "#2a9d2a" if v > 0 else "#c0392b"),
+    ("volatility",     "Vol",    lambda v: f"{v:.6f}",   None),
 ]
 
 _LOCK = threading.Lock()
@@ -102,6 +101,10 @@ _SERIES: dict[str, deque[tuple[int, float]]] = defaultdict(lambda: deque(maxlen=
 # Rankings page reads from here instead of SQLite so it never blocks on a DB query.
 _METRICS_LOCK = threading.Lock()
 _LIVE: dict[str, dict] = {}  # instrument_id → latest snapshot
+
+# Module-level reference to the _second_rolling deque passed by the collector.
+# Set in serve_in_background(); None in standalone mode.
+_ROLLING: dict | None = None
 
 _NAV = '<p><a href="/">Rankings</a> | <a href="/live">Live signals</a></p>'
 
@@ -199,7 +202,7 @@ def _render_rankings_page(sort_col: str = "ofi", direction: str = "desc") -> str
         cells = "".join(_cell(row.get(k), fmt_fn, color_fn) for k, _, fmt_fn, color_fn in RANKING_COLS)
         body_rows += (
             f"<tr><td>{i}</td>"
-            f"<td><a href='/chart/{iid}'>{label}</a> <small><a href='/coin/{iid}'>cov</a></small></td>"
+            f"<td><a href='/coin/{iid}'>{label}</a> <small><a href='/chart/{iid}'>chart</a></small></td>"
             f"{cells}"
             f"<td><a href='/history/{iid}'>31d</a></td></tr>"
         )
@@ -359,203 +362,100 @@ def _render_chart_page(symbol: str, start_ms: int, end_ms: int) -> str:
     return _page(f"{sym} chart", body, refresh_seconds=86400)  # no auto-refresh; user controls via form
 
 
-def _fmt_intervals(intervals: list[tuple[int, int]], limit: int = 5) -> str:
-    if not intervals:
-        return "none"
-    shown = ", ".join(f"{a}&rarr;{b}" for a, b in intervals[:limit])
-    extra = f" (+{len(intervals) - limit} more)" if len(intervals) > limit else ""
-    return shown + extra
+def _coin_chart_json(iid: str, rolling: dict | None) -> str:
+    """Return JSON string with ts/mid/bid/ask/micro arrays from the rolling deque.
+
+    Returns empty arrays when rolling is None (standalone mode guard).
+    Timestamps are converted from nanoseconds to milliseconds for Plotly.
+    """
+    if rolling is None:
+        return json.dumps({"ts": [], "mid": [], "bid": [], "ask": [], "micro": []})
+    snaps = list(rolling.get(iid, []))
+    ts: list[int] = []
+    mid_vals: list[float] = []
+    bid_vals: list[float] = []
+    ask_vals: list[float] = []
+    micro_vals: list[float] = []
+    for s in snaps:
+        if not s.bid_prices or not s.ask_prices:
+            continue
+        bp, ap = s.bid_prices[0], s.ask_prices[0]
+        bs, as_ = s.bid_sizes[0], s.ask_sizes[0]
+        total = bs + as_
+        ts.append(s.ts_event // 1_000_000)  # ns → ms for Plotly datetime axis
+        mid_vals.append((bp + ap) / 2)
+        bid_vals.append(bp)
+        ask_vals.append(ap)
+        micro_vals.append((bp * as_ + ap * bs) / total if total > 0 else (bp + ap) / 2)
+    return json.dumps({"ts": ts, "mid": mid_vals, "bid": bid_vals, "ask": ask_vals, "micro": micro_vals})
 
 
-def _render_footprint_chart(candles: list, cells: list, period_seconds: int) -> go.Figure:
-    period_ns = period_seconds * 1_000_000_000
-    cells_by_candle: dict[int, list] = defaultdict(list)
-    for cell in cells:
-        cells_by_candle[cell.ts_open].append(cell)
+def _render_live_coin_page(symbol: str, rolling: dict | None) -> str:
+    """Live indicator panel and 1s-polled Plotly chart — no Parquet read."""
+    with _METRICS_LOCK:
+        m = dict(_LIVE.get(symbol, {}))
 
-    fig = go.Figure()
-    for candle in candles:
-        x0 = pd.Timestamp(candle.ts_open, unit="ns")
-        x1 = pd.Timestamp(candle.ts_open + period_ns, unit="ns")
-        x_mid = pd.Timestamp(candle.ts_open + period_ns // 2, unit="ns")
-        tick_width = (x1 - x0) * 0.3
+    def _row(label: str, key: str, fmt: str) -> str:
+        v = m.get(key)
+        val = f"{v:{fmt}}" if v is not None else "&mdash;"
+        return f"<tr><td>{html.escape(label)}</td><td>{val}</td></tr>"
 
-        for cell in cells_by_candle.get(candle.ts_open, []):
-            fillcolor = (
-                "rgba(0,150,0,0.12)" if cell.bid_net >= cell.ask_net else "rgba(200,0,0,0.12)"
-            )
-            fig.add_shape(
-                type="rect",
-                x0=x0,
-                x1=x1,
-                y0=cell.price_low,
-                y1=cell.price_high,
-                line={"width": 0.5, "color": "lightgray"},
-                fillcolor=fillcolor,
-                layer="below",
-            )
-            y_mid = (cell.price_low + cell.price_high) / 2
-            fig.add_annotation(
-                x=x0,
-                y=y_mid,
-                xanchor="left",
-                yanchor="middle",
-                text=f"+{cell.bid_added:.0f}<br>-{cell.bid_removed:.0f}<br>={cell.bid_net:+.0f}",
-                showarrow=False,
-                align="left",
-                font={"size": 9, "color": "green" if cell.bid_net >= 0 else "red"},
-            )
-            fig.add_annotation(
-                x=x1,
-                y=y_mid,
-                xanchor="right",
-                yanchor="middle",
-                text=f"+{cell.ask_added:.0f}<br>-{cell.ask_removed:.0f}<br>={cell.ask_net:+.0f}",
-                showarrow=False,
-                align="right",
-                font={"size": 9, "color": "green" if cell.ask_net >= 0 else "red"},
-            )
-
-        # Thin OHLC representation behind the footprint cells (no filled body,
-        # so it doesn't hide the cells drawn on top of it).
-        fig.add_shape(
-            type="line",
-            x0=x_mid,
-            x1=x_mid,
-            y0=candle.low,
-            y1=candle.high,
-            line={"color": "black", "width": 1},
-        )
-        fig.add_shape(
-            type="line",
-            x0=x_mid - tick_width,
-            x1=x_mid,
-            y0=candle.open,
-            y1=candle.open,
-            line={"color": "black", "width": 1.5},
-        )
-        fig.add_shape(
-            type="line",
-            x0=x_mid,
-            x1=x_mid + tick_width,
-            y0=candle.close,
-            y1=candle.close,
-            line={"color": "black", "width": 1.5},
-        )
-
-    fig.update_layout(
-        title="Footprint: bid (left) / ask (right) added, removed, net resting size per band",
-        height=700,
-    )
-    return fig
-
-
-def _render_coin_page(symbol: str, timeframe: str = "1m") -> str:
-    catalog = ParquetDataCatalog(CATALOG_PATH)
-    cov = coverage(catalog, symbol)
-
-    coverage_rows = "".join(
-        f"<tr><td>{html.escape(data_type)}</td><td>{info['count']}</td>"
-        f"<td>{info['start']}</td><td>{info['end']}</td>"
-        f"<td>{info['duration_seconds']:.1f}s</td>"
-        f"<td>{_fmt_intervals(info['gaps'])}</td></tr>"
-        for data_type, info in cov.items()
+    panel = (
+        "<h2>Indicators (live)</h2><table>"
+        + _row("OFI10",          "ofi_10",          "+.2f")
+        + _row("OFI5",           "ofi_5",           "+.2f")
+        + _row("OFI3",           "ofi_3",           "+.2f")
+        + _row("OBI10",          "obi_10",          ".4f")
+        + _row("OBI5",           "obi_5",           ".4f")
+        + _row("OBI3",           "obi_3",           ".4f")
+        + _row("Microprice",     "microprice",       ".6f")
+        + _row("u lean",         "microprice_lean",  "+.6f")
+        + _row("Spread",         "spread",           ".6f")
+        + _row("CVD",            "cvd",              "+.4f")
+        + _row("Vol delta",      "volume_delta",     "+.4f")
+        + _row("Buy#",           "buy_count",        ".0f")
+        + _row("Sell#",          "sell_count",       ".0f")
+        + _row("Avg trade size", "avg_trade_size",   ".4f")
+        + "</table>"
     )
 
-    sym = html.escape(symbol)
-    body = f"<h1>{sym} &nbsp;<small><a href='/chart/{sym}'>📈 TradingView chart</a></small></h1>"
-    body += (
-        "<h2>Data coverage</h2>"
-        '<p>"Irregular spacing" is a per-stream timing heuristic, not error detection &mdash; '
-        "for trade-driven types (trades, book deltas, bars) it can't tell a quiet market apart "
-        "from a dropped connection.</p>"
-        "<table border='1' cellpadding='4'>"
-        "<tr><th>Type</th><th>Count</th><th>Start</th><th>End</th>"
-        "<th>Duration</th><th>Irregular spacing</th></tr>"
-        f"{coverage_rows}</table>"
+    standalone_note = (
+        "" if rolling is not None
+        else "<p><em>Live data unavailable - running standalone.</em></p>"
     )
 
-    outages = likely_outages(catalog, symbol)
-    body += (
-        "<h2>Likely outages</h2>"
-        "<p>Periods where mark price AND order book were both silent at once "
-        "&mdash; mark price is venue-pushed independent of trading, so this is a much "
-        "stronger signal than a single-stream gap.</p>"
-        f"<p>{_fmt_intervals(outages, limit=20)}</p>"
+    iid_js = json.dumps(symbol)  # XSS-safe JS string literal (T-02-03)
+    chart_block = f"""<div id="live-chart" style="height:350px"></div>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<script>
+(function(){{
+  var iid={iid_js};
+  var layout={{height:350,template:"plotly_dark",xaxis:{{type:"date"}},
+               margin:{{t:30,b:30}},legend:{{orientation:"h"}}}};
+  function update(d){{
+    var x=d.ts.map(function(t){{return new Date(t);}});
+    Plotly.react("live-chart",[
+      {{x:x,y:d.mid,  name:"mid",        mode:"lines",line:{{color:"#aaa",width:1}}}},
+      {{x:x,y:d.bid,  name:"bid",        mode:"lines",line:{{color:"#26a69a",width:1}}}},
+      {{x:x,y:d.ask,  name:"ask",        mode:"lines",line:{{color:"#ef5350",width:1}}}},
+      {{x:x,y:d.micro,name:"microprice", mode:"lines",line:{{color:"#f0883e",width:1.5,dash:"dot"}}}}
+    ],layout);
+  }}
+  function poll(){{
+    fetch("/data/coin/"+encodeURIComponent(iid))
+      .then(function(r){{return r.json();}}).then(update).catch(function(){{}});
+  }}
+  poll(); setInterval(poll,1000);
+}})();
+</script>"""
+
+    body = (
+        f"<h1>{html.escape(symbol)} <small><a href='/chart/{html.escape(symbol)}'>historical chart</a></small></h1>"
+        + standalone_note
+        + panel
+        + chart_block
     )
-
-    body += "<h2>Candlestick (footprint)</h2>"
-    options = "".join(
-        f"<option value='{tf}'{' selected' if tf == timeframe else ''}>{tf}</option>"
-        for tf in TIMEFRAMES
-    )
-    body += (
-        f"<select onchange=\"location.href='/coin/{html.escape(symbol)}?tf=' + this.value\">"
-        f"{options}</select>"
-    )
-
-    deltas_info = cov.get("order_book_deltas")
-    period_seconds = TIMEFRAMES[timeframe]
-    start_ns = time.time_ns() - MAX_FOOTPRINT_CANDLES * period_seconds * 1_000_000_000
-    trades = catalog.trade_ticks(instrument_ids=[symbol], start=start_ns)
-    plotlyjs_included = False
-
-    if not trades:
-        body += "<p>No trade data yet &mdash; no candles to show.</p>"
-    elif deltas_info is None:
-        body += "<p>No order book data yet &mdash; footprint unavailable.</p>"
-    else:
-        candle_rows = [(t.ts_event, t.price.as_double()) for t in trades]
-        candles = build_candles(candle_rows, period_seconds)[-MAX_FOOTPRINT_CANDLES:]
-        deltas = catalog.order_book_deltas(instrument_ids=[symbol], start=start_ns)
-        cells = build_footprint(
-            deltas, candles, period_seconds, bands_per_candle=FOOTPRINT_BANDS_PER_CANDLE
-        )
-        footprint_fig = _render_footprint_chart(candles, cells, period_seconds)
-        body += footprint_fig.to_html(full_html=False, include_plotlyjs="cdn")
-        plotlyjs_included = True
-
-    if deltas_info is None:
-        body += (
-            "<h2>Indicators</h2><p>No order book data yet &mdash; Microprice/OFI unavailable.</p>"
-        )
-        return _page(symbol, body)
-
-    deltas = catalog.order_book_deltas(instrument_ids=[symbol], start=start_ns)
-    instrument_id = InstrumentId.from_str(symbol)
-
-    micro = Microprice()
-    ofi = OrderFlowImbalance(window=50)
-    # ponytail: rolling deques, not a downsampled/decimated series — caps page
-    # size as the collector accumulates deltas, at the cost of only ever
-    # charting the most recent window. Fine for "what's happening now"; swap
-    # for real downsampling if you need the full history plotted.
-    max_chart_points = 2_000
-    micro_points: deque[tuple[int, float]] = deque(maxlen=max_chart_points)
-    ofi_points: deque[tuple[int, float]] = deque(maxlen=max_chart_points)
-    for ts, bid_price, bid_size, ask_price, ask_size in top_of_book_series(deltas, instrument_id):
-        micro.update_raw(bid_price, bid_size, ask_price, ask_size)
-        ofi.update_raw(bid_price, bid_size, ask_price, ask_size)
-        micro_points.append((ts, micro.value))
-        ofi_points.append((ts, ofi.value))
-
-    micro_fig = go.Figure(
-        go.Scatter(x=[t for t, _ in micro_points], y=[v for _, v in micro_points], mode="lines"),
-    )
-    micro_fig.update_layout(title="Microprice", height=300)
-
-    ofi_fig = go.Figure(
-        go.Scatter(x=[t for t, _ in ofi_points], y=[v for _, v in ofi_points], mode="lines"),
-    )
-    ofi_fig.update_layout(title=f"Order Flow Imbalance (window={ofi.window})", height=300)
-
-    body += "<h2>Indicators</h2>"
-    body += micro_fig.to_html(
-        full_html=False, include_plotlyjs=False if plotlyjs_included else "cdn"
-    )
-    body += ofi_fig.to_html(full_html=False, include_plotlyjs=False)
-
-    return _page(symbol, body)
+    return _page(symbol, body, refresh_seconds=86400)
 
 
 def _render_live_page() -> str:
@@ -696,16 +596,22 @@ class _Handler(BaseHTTPRequestHandler):
         elif path.startswith("/history/"):
             symbol = path.removeprefix("/history/")
             html_doc = _render_history_page(symbol)
+        elif path.startswith("/data/coin/"):
+            symbol = path.removeprefix("/data/coin/")
+            payload = _coin_chart_json(symbol, _ROLLING).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
         elif path.startswith("/coin/"):
             symbol = path.removeprefix("/coin/")
             if symbol not in list_instruments(CATALOG_PATH):
                 self.send_response(404)
                 self.end_headers()
                 return
-            timeframe = qs.get("tf", ["1m"])[0]
-            if timeframe not in TIMEFRAMES:
-                timeframe = "1m"
-            html_doc = _render_coin_page(symbol, timeframe)
+            html_doc = _render_live_coin_page(symbol, _ROLLING)
         elif path.startswith("/chart/"):
             symbol = path.removeprefix("/chart/")
             import datetime as _dt
@@ -739,7 +645,9 @@ class _Handler(BaseHTTPRequestHandler):
 
 def serve_in_background(port: int = 8765, catalog_path: str = CATALOG_PATH, rolling: dict | None = None) -> HTTPServer:
     global CATALOG_PATH
+    global _ROLLING
     CATALOG_PATH = catalog_path
+    _ROLLING = rolling
     # Pre-populate _LIVE from the last SQLite snapshot so the rankings table
     # shows something immediately on startup instead of waiting for the first
     # compute cycle.
