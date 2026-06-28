@@ -599,14 +599,17 @@ def _metrics_from_rolling(rolling: dict) -> list[dict]:
             continue
         snaps = list(dq)
         latest = snaps[-1]
+        ofi_3, obi_3 = _compute_multilevel(snaps, levels=3)
         ofi_5, obi_5 = _compute_multilevel(snaps, levels=5)
         ofi_10, obi_10 = _compute_multilevel(snaps, levels=10)
         result.append({
             "ts": now_ns,
             "instrument_id": iid,
             "ofi": ofi_10,
+            "ofi_3": ofi_3,
             "ofi_5": ofi_5,
             "ofi_10": ofi_10,
+            "obi_3": obi_3,
             "obi_5": obi_5,
             "obi_10": obi_10,
             "microprice": latest.microprice,
