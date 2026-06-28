@@ -85,11 +85,15 @@ class Collector:
         self._second_rolling: dict[str, deque] = defaultdict(lambda: deque(maxlen=300))
         # Previous 1s top-of-book per instrument for OFI delta computation
         self._prev_tob: dict[str, tuple[float, float, float, float]] = {}
+        # Trade volume accumulated between consecutive 1s ticks, reset each second
+        self._second_volume: dict[str, float] = defaultdict(float)
 
         self._stop = asyncio.Event()
 
     def _on_data(self, data: Any) -> None:
         self._buffer[_buffer_key(data)].append(data)
+        if isinstance(data, TradeTick):
+            self._second_volume[str(data.instrument_id)] += data.size.as_double()
 
     def _flush_once(self) -> None:
         now_ns = time.time_ns()
@@ -234,10 +238,13 @@ class Collector:
                 depth_total = bid_depth + ask_depth
                 obi = bid_depth / depth_total if depth_total > 0 else None
 
+                volume = self._second_volume.pop(iid, 0.0)
+
                 snapshot = DydxSecondSnapshot(
                     instrument_id=InstrumentId.from_str(iid),
                     bid_price=bp, bid_size=bs,
                     ask_price=ap, ask_size=as_,
+                    volume=volume,
                     ofi=ofi, microprice=micro, obi=obi,
                     ts_event=now_ns, ts_init=now_ns,
                 )
