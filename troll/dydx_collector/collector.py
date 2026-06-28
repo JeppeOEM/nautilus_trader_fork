@@ -45,6 +45,7 @@ from dydx_collector.open_interest import _fetch_markets_json
 from dydx_collector.open_interest import classify_liquidity
 from dydx_collector.open_interest import fetch_open_interest
 from dydx_collector.prune_catalog import prune_instrument
+from dydx_collector.second_snapshot import BOOK_DEPTH
 from dydx_collector.second_snapshot import DydxSecondSnapshot
 from ml_signals.dashboard import serve_in_background
 from nautilus_trader.model.data import MarkPriceUpdate
@@ -239,20 +240,19 @@ class Collector:
                 total = bs + as_
                 micro = (bp * as_ + ap * bs) / total if total > 0 else None
 
-                bid_depth = sum(lv.size() for lv in book.bids()[:10])
-                ask_depth = sum(lv.size() for lv in book.asks()[:10])
-                depth_total = bid_depth + ask_depth
-                obi = bid_depth / depth_total if depth_total > 0 else None
-
+                bid_levels = book.bids()[:BOOK_DEPTH]
+                ask_levels = book.asks()[:BOOK_DEPTH]
                 buy_volume = self._second_buy_volume.pop(iid, 0.0)
                 sell_volume = self._second_sell_volume.pop(iid, 0.0)
 
                 snapshot = DydxSecondSnapshot(
                     instrument_id=InstrumentId.from_str(iid),
-                    bid_price=bp, bid_size=bs,
-                    ask_price=ap, ask_size=as_,
+                    bid_prices=[lv.price.as_double() for lv in bid_levels],
+                    bid_sizes=[lv.size() for lv in bid_levels],
+                    ask_prices=[lv.price.as_double() for lv in ask_levels],
+                    ask_sizes=[lv.size() for lv in ask_levels],
                     buy_volume=buy_volume, sell_volume=sell_volume,
-                    ofi=ofi, microprice=micro, obi=obi,
+                    ofi=ofi, microprice=micro,
                     ts_event=now_ns, ts_init=now_ns,
                 )
                 self._second_rolling[iid].append(snapshot)

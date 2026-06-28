@@ -592,7 +592,7 @@ def _metrics_from_rolling(rolling: dict) -> list[dict]:
             "instrument_id": iid,
             "ofi": ofi,
             "microprice": latest.microprice,
-            "spread": latest.ask_price - latest.bid_price,
+            "spread": (latest.ask_prices[0] - latest.bid_prices[0]) if latest.ask_prices and latest.bid_prices else None,
         })
     return result
 
