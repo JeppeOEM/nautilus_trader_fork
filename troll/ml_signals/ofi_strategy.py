@@ -88,6 +88,7 @@ class OFIStrategyConfig(StrategyConfig, frozen=True):
     """
 
     instrument_id: InstrumentId
+    warmup_seconds: int = 1800  # seconds of data to consume before trading; 1800 = 30 min
     ofi_window: int = 20
     ma_period: int = 10
     buy_threshold: float = 0.5
@@ -121,6 +122,8 @@ class OFIStrategy(Strategy):
         super().__init__(config)
         self.instrument: Instrument | None = None
         self._book: OrderBook | None = None
+        self._warmup_complete: bool = False
+        self._first_ts_ns: int | None = None
         self._ofi = OrderFlowImbalance(window=config.ofi_window)
         self._ofi_history: deque[float] = deque(maxlen=config.ma_period)
         self._prev_ma: float = 0.0
@@ -156,6 +159,16 @@ class OFIStrategy(Strategy):
             f"ema={self.config.trend_ema_fast}/{self.config.trend_ema_slow}"
         )
 
+    def _check_warmup(self, ts_ns: int) -> bool:
+        if self._warmup_complete:
+            return True
+        if self._first_ts_ns is None:
+            self._first_ts_ns = ts_ns
+        if ts_ns - self._first_ts_ns >= self.config.warmup_seconds * 1_000_000_000:
+            self._warmup_complete = True
+            self.log.info(f"Warmup complete after {self.config.warmup_seconds}s")
+        return self._warmup_complete
+
     # ------------------------------------------------------------------
     # Trade ticks — feed cumulative delta
     # ------------------------------------------------------------------
@@ -190,7 +203,7 @@ class OFIStrategy(Strategy):
         self.publish_signal("trend_bull", float(self._trend_bull), bar.ts_event)
 
         # Trend flipped — close any position that's now counter-trend
-        if prev_bull is not None and self._trend_bull != prev_bull:
+        if prev_bull is not None and self._trend_bull != prev_bull and self._warmup_complete:
             self.log.info(f"Trend flipped → {'BULL' if self._trend_bull else 'BEAR'}, closing counter-trend positions")
             if self._trend_bull and self.portfolio.is_net_short(self.config.instrument_id):
                 self._submit(OrderSide.BUY)
@@ -242,7 +255,8 @@ class OFIStrategy(Strategy):
 
         ma = sum(self._ofi_history) / len(self._ofi_history)
         self.publish_signal("ofi_ma", ma, deltas.ts_event)
-        self._evaluate_signal(ma, deltas.ts_event)
+        if self._check_warmup(deltas.ts_event):
+            self._evaluate_signal(ma, deltas.ts_event)
         self._prev_ma = ma
 
     # ------------------------------------------------------------------
@@ -333,6 +347,8 @@ class OFIStrategy(Strategy):
         self.submit_order(order)
 
     def on_reset(self) -> None:
+        self._warmup_complete = False
+        self._first_ts_ns = None
         self._ofi._reset()
         self._ofi_history.clear()
         self._prev_ma = 0.0
