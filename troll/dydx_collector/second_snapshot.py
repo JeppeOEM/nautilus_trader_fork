@@ -13,13 +13,16 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-1-second L2 book snapshot with OFI, microprice, and per-side volume.
+1-second L2 book snapshot — raw data only, no derived signals.
 
-Stores the top 20 price levels on each side so OBI can be computed at any N
-during analysis: obi_N = sum(bid_sizes[:N]) / (sum(bid_sizes[:N]) + sum(ask_sizes[:N])).
+Stores the top 20 price levels on each side plus per-side trade volume.
+All signals (OFI, OBI, microprice, spread) are computed from this data
+via indicator classes in ml_signals/indicators.py — never stored here.
 
-OFI is the Cont-Kukanov-Stoikov delta between consecutive 1s snapshots (top of book).
-Spread is omitted — derive as ask_prices[0] - bid_prices[0].
+  spread      = ask_prices[0] - bid_prices[0]
+  microprice  = Microprice().update_raw(bid_prices[0], bid_sizes[0], ask_prices[0], ask_sizes[0])
+  ofi_N       = MultiLevelOFI(levels=N) replayed over consecutive snapshots
+  obi_N       = MultiLevelOBI(levels=N).update_raw(bid_sizes, ask_sizes)
 """
 
 import pyarrow as pa
@@ -51,8 +54,6 @@ class DydxSecondSnapshot(Data):
         ask_sizes: list[float],
         buy_volume: float,
         sell_volume: float,
-        ofi: float | None,
-        microprice: float | None,
         ts_event: int,
         ts_init: int,
     ) -> None:
@@ -63,8 +64,6 @@ class DydxSecondSnapshot(Data):
         self.ask_sizes = ask_sizes
         self.buy_volume = buy_volume
         self.sell_volume = sell_volume
-        self.ofi = ofi
-        self.microprice = microprice
         self._ts_event = ts_event
         self._ts_init = ts_init
 
@@ -87,8 +86,6 @@ class DydxSecondSnapshot(Data):
                 "ask_sizes": pa.list_(pa.float64()),
                 "buy_volume": pa.float64(),
                 "sell_volume": pa.float64(),
-                "ofi": pa.float64(),
-                "microprice": pa.float64(),
                 "ts_event": pa.uint64(),
                 "ts_init": pa.uint64(),
             },
@@ -105,8 +102,6 @@ class DydxSecondSnapshot(Data):
             "ask_sizes": obj.ask_sizes,
             "buy_volume": obj.buy_volume,
             "sell_volume": obj.sell_volume,
-            "ofi": obj.ofi,
-            "microprice": obj.microprice,
             "ts_event": obj.ts_event,
             "ts_init": obj.ts_init,
         }
@@ -121,8 +116,6 @@ class DydxSecondSnapshot(Data):
             ask_sizes=list(values["ask_sizes"]),
             buy_volume=float(values.get("buy_volume") or 0.0),
             sell_volume=float(values.get("sell_volume") or 0.0),
-            ofi=values.get("ofi"),
-            microprice=values.get("microprice"),
             ts_event=int(values["ts_event"]),
             ts_init=int(values["ts_init"]),
         )

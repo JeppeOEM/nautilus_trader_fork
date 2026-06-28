@@ -612,7 +612,12 @@ def _metrics_from_rolling(rolling: dict) -> list[dict]:
             "obi_3": obi_3,
             "obi_5": obi_5,
             "obi_10": obi_10,
-            "microprice": latest.microprice,
+            "microprice": (
+                (latest.bid_prices[0] * latest.ask_sizes[0] + latest.ask_prices[0] * latest.bid_sizes[0])
+                / (latest.bid_sizes[0] + latest.ask_sizes[0])
+                if latest.bid_prices and latest.ask_prices and (latest.bid_sizes[0] + latest.ask_sizes[0]) > 0
+                else None
+            ),
             "spread": (latest.ask_prices[0] - latest.bid_prices[0]) if latest.ask_prices and latest.bid_prices else None,
         })
     return result

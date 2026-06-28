@@ -85,8 +85,6 @@ class Collector:
 
         # 1-second rolling snapshots: 300 entries = 5 min; shared with dashboard
         self._second_rolling: dict[str, deque] = defaultdict(lambda: deque(maxlen=300))
-        # Previous 1s top-of-book per instrument for OFI delta computation
-        self._prev_tob: dict[str, tuple[float, float, float, float]] = {}
         # Trade volume accumulated between consecutive 1s ticks, reset each second
         self._second_buy_volume: dict[str, float] = defaultdict(float)
         self._second_sell_volume: dict[str, float] = defaultdict(float)
@@ -210,7 +208,7 @@ class Collector:
             self._config = new_config
 
     async def _second_loop(self) -> None:
-        """Sample top-of-book every second; compute 1s OFI + microprice for all subscribed coins."""
+        """Sample L2 book every second; raw levels + trade volume only — signals computed on read."""
         while not self._stop.is_set():
             await asyncio.sleep(1.0)
             now_ns = time.time_ns()
@@ -218,27 +216,8 @@ class Collector:
                 book = self._bar_builder._books.get(iid)
                 if book is None:
                     continue
-                bid_p_obj = book.best_bid_price()
-                ask_p_obj = book.best_ask_price()
-                if bid_p_obj is None or ask_p_obj is None:
+                if book.best_bid_price() is None or book.best_ask_price() is None:
                     continue
-
-                bp = bid_p_obj.as_double()
-                bs = book.best_bid_size().as_double()
-                ap = ask_p_obj.as_double()
-                as_ = book.best_ask_size().as_double()
-
-                ofi: float | None = None
-                prev = self._prev_tob.get(iid)
-                if prev is not None:
-                    prev_bp, prev_bs, prev_ap, prev_as = prev
-                    bid_term = bs if bp > prev_bp else (bs - prev_bs if bp == prev_bp else -prev_bs)
-                    ask_term = as_ if ap < prev_ap else (as_ - prev_as if ap == prev_ap else -prev_as)
-                    ofi = bid_term - ask_term
-                self._prev_tob[iid] = (bp, bs, ap, as_)
-
-                total = bs + as_
-                micro = (bp * as_ + ap * bs) / total if total > 0 else None
 
                 bid_levels = book.bids()[:BOOK_DEPTH]
                 ask_levels = book.asks()[:BOOK_DEPTH]
@@ -251,9 +230,10 @@ class Collector:
                     bid_sizes=[lv.size() for lv in bid_levels],
                     ask_prices=[lv.price.as_double() for lv in ask_levels],
                     ask_sizes=[lv.size() for lv in ask_levels],
-                    buy_volume=buy_volume, sell_volume=sell_volume,
-                    ofi=ofi, microprice=micro,
-                    ts_event=now_ns, ts_init=now_ns,
+                    buy_volume=buy_volume,
+                    sell_volume=sell_volume,
+                    ts_event=now_ns,
+                    ts_init=now_ns,
                 )
                 self._second_rolling[iid].append(snapshot)
                 self._on_data(snapshot)  # routes to buffer → Parquet flush
