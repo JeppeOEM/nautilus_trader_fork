@@ -103,6 +103,22 @@ _LIVE: dict[str, dict] = {}  # instrument_id → latest snapshot
 
 _NAV = '<p><a href="/">Rankings</a> | <a href="/live">Live signals</a></p>'
 
+
+def _split_tiers(catalog_path: str) -> tuple[set[str], set[str]]:
+    """
+    Return (subscribed_iids, illiquid_iids) by checking trade_tick directory presence.
+
+    Subscribed = has trade_tick data (collector is writing trades for this coin).
+    Illiquid   = appears in catalog (via mark/index price) but no trade data.
+    """
+    import glob
+    import os as _os
+    subscribed: set[str] = set()
+    for path in glob.glob(_os.path.join(catalog_path, "data", "trade_tick", "*")):
+        subscribed.add(Path(path).name)
+    all_iids = set(list_instruments(catalog_path))
+    return subscribed, all_iids - subscribed
+
 _CSS = """
 <style>
 body { font-family: monospace; font-size: 13px; margin: 20px; background: #0d1117; color: #c9d1d9; }
@@ -140,12 +156,14 @@ def _render_rankings_page(sort_col: str = "ofi", direction: str = "desc") -> str
         db_path = str(Path(CATALOG_PATH).parent / "metrics.db")
         rows = metrics_store.latest(db_path)
 
+    subscribed_iids, illiquid_iids = _split_tiers(CATALOG_PATH)
+    subscribed_rows = [r for r in rows if r["instrument_id"] in subscribed_iids]
+
     valid_cols = {k for k, *_ in RANKING_COLS}
     if sort_col not in valid_cols:
         sort_col = "ofi"
     reverse = direction != "asc"
-
-    rows.sort(
+    subscribed_rows.sort(
         key=lambda r: (r.get(sort_col) is None, r.get(sort_col) or 0.0),
         reverse=reverse,
     )
@@ -172,21 +190,45 @@ def _render_rankings_page(sort_col: str = "ofi", direction: str = "desc") -> str
         return f"<td{style}>{text}</td>"
 
     body_rows = ""
-    for i, row in enumerate(rows, 1):
+    for i, row in enumerate(subscribed_rows, 1):
         iid = html.escape(row["instrument_id"])
+        # Short ticker label: "ETH-USD-PERP.DYDX" → "ETH-USD"
+        label = html.escape("-".join(row["instrument_id"].split("-")[:2]))
         cells = "".join(_cell(row.get(k), fmt_fn, color_fn) for k, _, fmt_fn, color_fn in RANKING_COLS)
         body_rows += (
             f"<tr><td>{i}</td>"
-            f"<td><a href='/coin/{iid}'>{iid}</a></td>"
+            f"<td><a href='/chart/{iid}'>{label}</a> <small><a href='/coin/{iid}'>cov</a></small></td>"
             f"{cells}"
-            f"<td><a href='/history/{iid}'>31d</a>&nbsp;<a href='/chart/{iid}'>📈</a></td></tr>"
+            f"<td><a href='/history/{iid}'>31d</a></td></tr>"
         )
 
-    if not rows:
+    if not subscribed_rows:
         body_rows = f"<tr><td colspan='{2 + len(RANKING_COLS) + 1}'>No snapshots yet — first compute in progress (runs every {LIVE_INTERVAL_SECONDS}s).</td></tr>"
 
-    body = f"<h1>dYdX Rankings</h1><table>{header}{body_rows}</table>"
-    return _page("dYdX Rankings", body, refresh_seconds=5)
+    subscribed_table = f"<table>{header}{body_rows}</table>"
+
+    # Illiquid: compact clickable chips — only mark/index/funding data, no book metrics
+    chips = "".join(
+        f'<a href="/chart/{html.escape(iid)}" title="{html.escape(iid)}" '
+        f'style="display:inline-block;margin:3px;padding:2px 8px;'
+        f'background:#161b22;border:1px solid #30363d;border-radius:4px">'
+        f'{html.escape("-".join(iid.split("-")[:2]))}</a>'
+        for iid in sorted(illiquid_iids)
+    )
+    illiquid_section = (
+        f"<h2>Illiquid — monitoring ({len(illiquid_iids)})</h2>"
+        f"<p style='font-size:11px;color:#8b949e'>OI below threshold — not subscribed to "
+        f"trades/orderbook. Re-checked every 30 min. Click to see mark price data.</p>"
+        f"<div style='line-height:2.4'>{chips}</div>"
+    )
+
+    body = (
+        f"<h1>dYdX Monitor</h1>"
+        f"<h2>Subscribed ({len(subscribed_rows)})</h2>"
+        f"{subscribed_table}"
+        f"{illiquid_section}"
+    )
+    return _page("dYdX Monitor", body, refresh_seconds=5)
 
 
 def _render_history_page(symbol: str) -> str:
@@ -451,7 +493,9 @@ def _render_coin_page(symbol: str, timeframe: str = "1m") -> str:
     )
 
     deltas_info = cov.get("order_book_deltas")
-    trades = catalog.trade_ticks(instrument_ids=[symbol])
+    period_seconds = TIMEFRAMES[timeframe]
+    start_ns = time.time_ns() - MAX_FOOTPRINT_CANDLES * period_seconds * 1_000_000_000
+    trades = catalog.trade_ticks(instrument_ids=[symbol], start=start_ns)
     plotlyjs_included = False
 
     if not trades:
@@ -459,10 +503,9 @@ def _render_coin_page(symbol: str, timeframe: str = "1m") -> str:
     elif deltas_info is None:
         body += "<p>No order book data yet &mdash; footprint unavailable.</p>"
     else:
-        period_seconds = TIMEFRAMES[timeframe]
         candle_rows = [(t.ts_event, t.price.as_double()) for t in trades]
         candles = build_candles(candle_rows, period_seconds)[-MAX_FOOTPRINT_CANDLES:]
-        deltas = catalog.order_book_deltas(instrument_ids=[symbol])
+        deltas = catalog.order_book_deltas(instrument_ids=[symbol], start=start_ns)
         cells = build_footprint(
             deltas, candles, period_seconds, bands_per_candle=FOOTPRINT_BANDS_PER_CANDLE
         )
@@ -476,7 +519,7 @@ def _render_coin_page(symbol: str, timeframe: str = "1m") -> str:
         )
         return _page(symbol, body)
 
-    deltas = catalog.order_book_deltas(instrument_ids=[symbol])
+    deltas = catalog.order_book_deltas(instrument_ids=[symbol], start=start_ns)
     instrument_id = InstrumentId.from_str(symbol)
 
     micro = Microprice()

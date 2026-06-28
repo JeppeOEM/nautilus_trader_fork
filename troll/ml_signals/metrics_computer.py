@@ -39,7 +39,9 @@ logger = logging.getLogger(__name__)
 # 1-minute window keeps catalog reads fast and OFI/microprice responsive.
 # Wider windows are more stable but slower and staler.
 OFI_LOOKBACK_SECONDS: int = 60
-OFI_WINDOW: int = 50   # reduced from 200 since window is now 60s not 1h
+# ponytail: small window so OFI initializes even on quiet coins (< 10 events/min).
+# The signal is noisier than a 50-update window but at least non-None for all active coins.
+OFI_WINDOW: int = 5
 
 # 25h covers the full 24h pct-change calc with a small buffer.
 # Bounding price queries avoids scanning months of trade history on every tick.
