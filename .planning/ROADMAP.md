@@ -32,7 +32,7 @@ Milestone v1.0 delivers a single artifact: `troll/CLAUDE.md`, a set of actionabl
 
 - [x] 01-PLAN.md — Write `troll/CLAUDE.md` with all six rule-category sections (17 requirements)
 
-- [ ] **Phase 2: Dashboard Upgrade** - Meaningful metrics table with clickable coins + single-coin view showing all derivable indicators from DydxSecondSnapshot and a real-time line chart (mid, bid, ask, microprice as lines at 1s resolution)
+- [x] **Phase 2: Dashboard Upgrade** - Meaningful metrics table with clickable coins + single-coin view showing all derivable indicators from DydxSecondSnapshot and a real-time line chart (mid, bid, ask, microprice as lines at 1s resolution) (completed 2026-06-28)
 
 ### Phase 2: Dashboard Upgrade
 
@@ -47,14 +47,14 @@ Milestone v1.0 delivers a single artifact: `troll/CLAUDE.md`, a set of actionabl
   4. Single-coin view includes a real-time line chart with 4 lines: mid, bid, ask, microprice — 1s resolution, rolling 5-min window, updates live
   5. All live data comes from the in-process `_second_rolling` deque — no Parquet reads on the live path
 
-**Plans**: 1/2 plans executed
+**Plans**: 2/2 plans complete
 
 - [x] 02-01-PLAN.md — Extend live metrics (CVD, volume delta, microprice lean, buy/sell count, avg trade size) + fix `_fast_loop` write path + tests
-- [ ] 02-02-PLAN.md — Expand rankings columns, clickable rows, deque-backed live `/coin/{id}` view with 1s 4-line chart + `/data/coin/{id}` JSON endpoint
+- [x] 02-02-PLAN.md — Expand rankings columns, clickable rows, deque-backed live `/coin/{id}` view with 1s 4-line chart + `/data/coin/{id}` JSON endpoint
 
 ## Progress
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Project Guardrails | 1/1 | Complete    | 2026-06-27 |
-| 2. Dashboard Upgrade | 1/2 | In Progress|  |
+| 2. Dashboard Upgrade | 2/2 | Complete   | 2026-06-28 |
