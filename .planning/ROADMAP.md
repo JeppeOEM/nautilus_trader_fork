@@ -32,8 +32,29 @@ Milestone v1.0 delivers a single artifact: `troll/CLAUDE.md`, a set of actionabl
 
 - [x] 01-PLAN.md — Write `troll/CLAUDE.md` with all six rule-category sections (17 requirements)
 
+- [ ] **Phase 2: Dashboard Upgrade** - Meaningful metrics table with clickable coins + single-coin view showing all derivable indicators from DydxSecondSnapshot and a real-time line chart (mid, bid, ask, microprice as lines at 1s resolution)
+
+### Phase 2: Dashboard Upgrade
+
+**Goal**: The dashboard shows a ranked metrics table (OFI_3/5/10, OBI_3/5/10, CVD, spread, microprice lean, volume delta, buy/sell count) with clickable rows that navigate to a single-coin view showing all derivable indicators plus a real-time line chart with mid price, bid, ask, and microprice as separate lines updating every second from the in-process rolling deque — no Parquet reads for the live path, no bar chart.
+**Depends on**: Phase 1
+**Requirements**: DASH-01, DASH-02, DASH-03, DASH-04
+**Success Criteria**:
+
+  1. Main rankings table shows at minimum: OFI_10, OBI_10, CVD (60s), spread, microprice lean, volume delta, buy/sell count per coin
+  2. Clicking any coin row navigates to `/coin/{id}` single-coin view
+  3. Single-coin view shows a panel of all derivable indicators (OFI_3/5/10, OBI_3/5/10, microprice, spread, CVD, volume imbalance, buy/sell avg size)
+  4. Single-coin view includes a real-time line chart with 4 lines: mid, bid, ask, microprice — 1s resolution, rolling 5-min window, updates live
+  5. All live data comes from the in-process `_second_rolling` deque — no Parquet reads on the live path
+
+**Plans**: 2 plans
+
+- [ ] 02-01-PLAN.md — Extend live metrics (CVD, volume delta, microprice lean, buy/sell count, avg trade size) + fix `_fast_loop` write path + tests
+- [ ] 02-02-PLAN.md — Expand rankings columns, clickable rows, deque-backed live `/coin/{id}` view with 1s 4-line chart + `/data/coin/{id}` JSON endpoint
+
 ## Progress
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Project Guardrails | 1/1 | Complete    | 2026-06-27 |
+| 2. Dashboard Upgrade | 0/? | Pending | — |
