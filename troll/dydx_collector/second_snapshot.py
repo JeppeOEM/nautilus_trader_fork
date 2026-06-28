@@ -47,6 +47,7 @@ class DydxSecondSnapshot(Data):
         ask_size: float,
         ofi: float | None,
         microprice: float | None,
+        obi: float | None,
         ts_event: int,
         ts_init: int,
     ) -> None:
@@ -57,6 +58,7 @@ class DydxSecondSnapshot(Data):
         self.ask_size = ask_size
         self.ofi = ofi
         self.microprice = microprice
+        self.obi = obi
         self._ts_event = ts_event
         self._ts_init = ts_init
 
@@ -79,6 +81,7 @@ class DydxSecondSnapshot(Data):
                 "ask_size": pa.float64(),
                 "ofi": pa.float64(),
                 "microprice": pa.float64(),
+                "obi": pa.float64(),
                 "ts_event": pa.uint64(),
                 "ts_init": pa.uint64(),
             },
@@ -95,6 +98,7 @@ class DydxSecondSnapshot(Data):
             "ask_size": obj.ask_size,
             "ofi": obj.ofi,
             "microprice": obj.microprice,
+            "obi": obj.obi,
             "ts_event": obj.ts_event,
             "ts_init": obj.ts_init,
         }
@@ -109,6 +113,7 @@ class DydxSecondSnapshot(Data):
             ask_size=float(values["ask_size"]),
             ofi=values.get("ofi"),
             microprice=values.get("microprice"),
+            obi=values.get("obi"),
             ts_event=int(values["ts_event"]),
             ts_init=int(values["ts_init"]),
         )

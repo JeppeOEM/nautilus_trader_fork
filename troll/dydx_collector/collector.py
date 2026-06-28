@@ -229,11 +229,16 @@ class Collector:
                 total = bs + as_
                 micro = (bp * as_ + ap * bs) / total if total > 0 else None
 
+                bid_depth = sum(lv.size() for lv in book.bids()[:10])
+                ask_depth = sum(lv.size() for lv in book.asks()[:10])
+                depth_total = bid_depth + ask_depth
+                obi = bid_depth / depth_total if depth_total > 0 else None
+
                 snapshot = DydxSecondSnapshot(
                     instrument_id=InstrumentId.from_str(iid),
                     bid_price=bp, bid_size=bs,
                     ask_price=ap, ask_size=as_,
-                    ofi=ofi, microprice=micro,
+                    ofi=ofi, microprice=micro, obi=obi,
                     ts_event=now_ns, ts_init=now_ns,
                 )
                 self._second_rolling[iid].append(snapshot)

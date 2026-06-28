@@ -23,8 +23,8 @@ NOTE on what dYdX L2 can and cannot tell you:
   - Both require L3/MBO data which dYdX does not expose publicly.
 
 What IS available and implemented here:
-  - Depth profile levels 1-4 (sizes and prices on both sides)
-  - Book imbalance per level and aggregate across levels 1-4
+  - Depth profile levels 1-10 (sizes and prices on both sides)
+  - Book imbalance per level and aggregate across levels 1-10
   - Volume-weighted price distance to liquidity (how far 80% of depth sits)
   - Cancellation rate at best levels (tracked via delta ADD/DELETE actions)
 """
@@ -89,7 +89,7 @@ class DepthProfile:
         return sum(self.ask_sizes)
 
 
-def depth_profile(book: OrderBook, levels: int = 4) -> DepthProfile | None:
+def depth_profile(book: OrderBook, levels: int = 10) -> DepthProfile | None:
     """
     Extract size and price at the top `levels` levels on each side.
 
@@ -269,7 +269,7 @@ class BookFeatures:
 def compute_features(
     book: OrderBook,
     cancel_tracker: CancellationTracker,
-    levels: int = 4,
+    levels: int = 10,
     liquidity_pct: float = 0.8,
 ) -> BookFeatures | None:
     profile = depth_profile(book, levels)
