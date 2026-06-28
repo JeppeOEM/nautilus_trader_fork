@@ -24,6 +24,7 @@ from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
 @dataclass(frozen=True)
 class InstrumentEntry:
     id: str
+    store_order_book_deltas: bool = False
 
 
 @dataclass(frozen=True)
@@ -37,7 +38,6 @@ class CollectorConfig:
     liquidity_min_oi_usd: float
     liquidity_check_seconds: int
     dashboard_port: int
-    store_order_book_deltas: bool
     instruments: tuple[InstrumentEntry, ...]
 
 
@@ -46,7 +46,10 @@ def load_config(path: Path) -> CollectorConfig:
         raw = tomllib.load(f)
 
     instruments = tuple(
-        InstrumentEntry(id=entry["id"])
+        InstrumentEntry(
+            id=entry["id"],
+            store_order_book_deltas=entry.get("store_order_book_deltas", False),
+        )
         for entry in raw.get("instruments", [])
     )
 
@@ -62,7 +65,6 @@ def load_config(path: Path) -> CollectorConfig:
         liquidity_min_oi_usd=raw.get("liquidity_min_oi_usd", 100_000.0),
         liquidity_check_seconds=raw.get("liquidity_check_seconds", 1800),
         dashboard_port=raw.get("dashboard_port", 8765),
-        store_order_book_deltas=raw.get("store_order_book_deltas", False),
         instruments=instruments,
     )
 

@@ -82,6 +82,8 @@ class Collector:
         self._pinned: set[str] = {e.id for e in config.instruments}
         self._liquid: set[str] = set()
         self._illiquid: set[str] = set()
+        # Instruments for which raw OrderBookDeltas are written to the catalog
+        self._delta_store: set[str] = {e.id for e in config.instruments if e.store_order_book_deltas}
 
         # 1-second rolling snapshots: 300 entries = 5 min; shared with dashboard
         self._second_rolling: dict[str, deque] = defaultdict(lambda: deque(maxlen=300))
@@ -116,7 +118,7 @@ class Collector:
                 trades_by_iid[iid].extend(items)
             elif dtype is OrderBookDeltas:
                 deltas_by_iid[iid].extend(items)
-                if not self._config.store_order_book_deltas:
+                if iid not in self._delta_store:
                     continue
             elif dtype is MarkPriceUpdate:
                 marks_by_iid[iid].extend(items)
