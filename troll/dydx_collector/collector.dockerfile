@@ -4,5 +4,6 @@ FROM nautilus-trader-base:1.229.0
 
 WORKDIR /app
 COPY troll/dydx_collector ./dydx_collector
+COPY troll/ml_signals ./ml_signals
 
 CMD ["python3", "-m", "dydx_collector.collector"]
