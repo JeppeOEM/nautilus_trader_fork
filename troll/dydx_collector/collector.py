@@ -50,6 +50,7 @@ from ml_signals.dashboard import serve_in_background
 from nautilus_trader.model.data import MarkPriceUpdate
 from nautilus_trader.model.data import OrderBookDeltas
 from nautilus_trader.model.data import TradeTick
+from nautilus_trader.model.enums import AggressorSide
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.instruments import instruments_from_pyo3
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
@@ -86,14 +87,19 @@ class Collector:
         # Previous 1s top-of-book per instrument for OFI delta computation
         self._prev_tob: dict[str, tuple[float, float, float, float]] = {}
         # Trade volume accumulated between consecutive 1s ticks, reset each second
-        self._second_volume: dict[str, float] = defaultdict(float)
+        self._second_buy_volume: dict[str, float] = defaultdict(float)
+        self._second_sell_volume: dict[str, float] = defaultdict(float)
 
         self._stop = asyncio.Event()
 
     def _on_data(self, data: Any) -> None:
         self._buffer[_buffer_key(data)].append(data)
         if isinstance(data, TradeTick):
-            self._second_volume[str(data.instrument_id)] += data.size.as_double()
+            iid = str(data.instrument_id)
+            if data.aggressor_side == AggressorSide.BUYER:
+                self._second_buy_volume[iid] += data.size.as_double()
+            else:
+                self._second_sell_volume[iid] += data.size.as_double()
 
     def _flush_once(self) -> None:
         now_ns = time.time_ns()
@@ -238,13 +244,14 @@ class Collector:
                 depth_total = bid_depth + ask_depth
                 obi = bid_depth / depth_total if depth_total > 0 else None
 
-                volume = self._second_volume.pop(iid, 0.0)
+                buy_volume = self._second_buy_volume.pop(iid, 0.0)
+                sell_volume = self._second_sell_volume.pop(iid, 0.0)
 
                 snapshot = DydxSecondSnapshot(
                     instrument_id=InstrumentId.from_str(iid),
                     bid_price=bp, bid_size=bs,
                     ask_price=ap, ask_size=as_,
-                    volume=volume,
+                    buy_volume=buy_volume, sell_volume=sell_volume,
                     ofi=ofi, microprice=micro, obi=obi,
                     ts_event=now_ns, ts_init=now_ns,
                 )

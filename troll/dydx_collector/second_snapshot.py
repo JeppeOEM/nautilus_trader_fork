@@ -45,7 +45,8 @@ class DydxSecondSnapshot(Data):
         bid_size: float,
         ask_price: float,
         ask_size: float,
-        volume: float,
+        buy_volume: float,
+        sell_volume: float,
         ofi: float | None,
         microprice: float | None,
         obi: float | None,
@@ -57,7 +58,8 @@ class DydxSecondSnapshot(Data):
         self.bid_size = bid_size
         self.ask_price = ask_price
         self.ask_size = ask_size
-        self.volume = volume
+        self.buy_volume = buy_volume
+        self.sell_volume = sell_volume
         self.ofi = ofi
         self.microprice = microprice
         self.obi = obi
@@ -81,7 +83,8 @@ class DydxSecondSnapshot(Data):
                 "bid_size": pa.float64(),
                 "ask_price": pa.float64(),
                 "ask_size": pa.float64(),
-                "volume": pa.float64(),
+                "buy_volume": pa.float64(),
+                "sell_volume": pa.float64(),
                 "ofi": pa.float64(),
                 "microprice": pa.float64(),
                 "obi": pa.float64(),
@@ -99,7 +102,8 @@ class DydxSecondSnapshot(Data):
             "bid_size": obj.bid_size,
             "ask_price": obj.ask_price,
             "ask_size": obj.ask_size,
-            "volume": obj.volume,
+            "buy_volume": obj.buy_volume,
+            "sell_volume": obj.sell_volume,
             "ofi": obj.ofi,
             "microprice": obj.microprice,
             "obi": obj.obi,
@@ -115,7 +119,8 @@ class DydxSecondSnapshot(Data):
             bid_size=float(values["bid_size"]),
             ask_price=float(values["ask_price"]),
             ask_size=float(values["ask_size"]),
-            volume=float(values.get("volume") or 0.0),
+            buy_volume=float(values.get("buy_volume") or 0.0),
+            sell_volume=float(values.get("sell_volume") or 0.0),
             ofi=values.get("ofi"),
             microprice=values.get("microprice"),
             obi=values.get("obi"),
