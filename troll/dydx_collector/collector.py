@@ -87,9 +87,11 @@ class Collector:
 
         # 1-second rolling snapshots: 300 entries = 5 min; shared with dashboard
         self._second_rolling: dict[str, deque] = defaultdict(lambda: deque(maxlen=300))
-        # Trade volume accumulated between consecutive 1s ticks, reset each second
+        # Trade volume/count accumulated between consecutive 1s ticks, reset each second
         self._second_buy_volume: dict[str, float] = defaultdict(float)
         self._second_sell_volume: dict[str, float] = defaultdict(float)
+        self._second_buy_count: dict[str, int] = defaultdict(int)
+        self._second_sell_count: dict[str, int] = defaultdict(int)
 
         self._stop = asyncio.Event()
 
@@ -99,8 +101,10 @@ class Collector:
             iid = str(data.instrument_id)
             if data.aggressor_side == AggressorSide.BUYER:
                 self._second_buy_volume[iid] += data.size.as_double()
+                self._second_buy_count[iid] += 1
             else:
                 self._second_sell_volume[iid] += data.size.as_double()
+                self._second_sell_count[iid] += 1
 
     def _flush_once(self) -> None:
         now_ns = time.time_ns()
@@ -227,6 +231,8 @@ class Collector:
                 ask_levels = book.asks()[:BOOK_DEPTH]
                 buy_volume = self._second_buy_volume.pop(iid, 0.0)
                 sell_volume = self._second_sell_volume.pop(iid, 0.0)
+                buy_count = self._second_buy_count.pop(iid, 0)
+                sell_count = self._second_sell_count.pop(iid, 0)
 
                 snapshot = DydxSecondSnapshot(
                     instrument_id=InstrumentId.from_str(iid),
@@ -236,6 +242,8 @@ class Collector:
                     ask_sizes=[lv.size() for lv in ask_levels],
                     buy_volume=buy_volume,
                     sell_volume=sell_volume,
+                    buy_count=buy_count,
+                    sell_count=sell_count,
                     ts_event=now_ns,
                     ts_init=now_ns,
                 )

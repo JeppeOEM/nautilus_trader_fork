@@ -54,6 +54,8 @@ class DydxSecondSnapshot(Data):
         ask_sizes: list[float],
         buy_volume: float,
         sell_volume: float,
+        buy_count: int,
+        sell_count: int,
         ts_event: int,
         ts_init: int,
     ) -> None:
@@ -64,6 +66,8 @@ class DydxSecondSnapshot(Data):
         self.ask_sizes = ask_sizes
         self.buy_volume = buy_volume
         self.sell_volume = sell_volume
+        self.buy_count = buy_count
+        self.sell_count = sell_count
         self._ts_event = ts_event
         self._ts_init = ts_init
 
@@ -86,6 +90,8 @@ class DydxSecondSnapshot(Data):
                 "ask_sizes": pa.list_(pa.float64()),
                 "buy_volume": pa.float64(),
                 "sell_volume": pa.float64(),
+                "buy_count": pa.uint32(),
+                "sell_count": pa.uint32(),
                 "ts_event": pa.uint64(),
                 "ts_init": pa.uint64(),
             },
@@ -102,6 +108,8 @@ class DydxSecondSnapshot(Data):
             "ask_sizes": obj.ask_sizes,
             "buy_volume": obj.buy_volume,
             "sell_volume": obj.sell_volume,
+            "buy_count": obj.buy_count,
+            "sell_count": obj.sell_count,
             "ts_event": obj.ts_event,
             "ts_init": obj.ts_init,
         }
@@ -116,6 +124,8 @@ class DydxSecondSnapshot(Data):
             ask_sizes=list(values["ask_sizes"]),
             buy_volume=float(values.get("buy_volume") or 0.0),
             sell_volume=float(values.get("sell_volume") or 0.0),
+            buy_count=int(values.get("buy_count") or 0),
+            sell_count=int(values.get("sell_count") or 0),
             ts_event=int(values["ts_event"]),
             ts_init=int(values["ts_init"]),
         )
