@@ -116,6 +116,8 @@ class Collector:
                 trades_by_iid[iid].extend(items)
             elif dtype is OrderBookDeltas:
                 deltas_by_iid[iid].extend(items)
+                if not self._config.store_order_book_deltas:
+                    continue
             elif dtype is MarkPriceUpdate:
                 marks_by_iid[iid].extend(items)
 

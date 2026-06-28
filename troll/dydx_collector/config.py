@@ -37,6 +37,7 @@ class CollectorConfig:
     liquidity_min_oi_usd: float
     liquidity_check_seconds: int
     dashboard_port: int
+    store_order_book_deltas: bool
     instruments: tuple[InstrumentEntry, ...]
 
 
@@ -61,6 +62,7 @@ def load_config(path: Path) -> CollectorConfig:
         liquidity_min_oi_usd=raw.get("liquidity_min_oi_usd", 100_000.0),
         liquidity_check_seconds=raw.get("liquidity_check_seconds", 1800),
         dashboard_port=raw.get("dashboard_port", 8765),
+        store_order_book_deltas=raw.get("store_order_book_deltas", False),
         instruments=instruments,
     )
 
