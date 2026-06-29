@@ -37,7 +37,6 @@ class CollectorConfig:
     non_config_retain_hours: float
     liquidity_min_oi_usd: float
     liquidity_check_seconds: int
-    dashboard_port: int
     instruments: tuple[InstrumentEntry, ...]
 
 
@@ -64,7 +63,6 @@ def load_config(path: Path) -> CollectorConfig:
         non_config_retain_hours=raw.get("non_config_retain_hours", 4.0),
         liquidity_min_oi_usd=raw.get("liquidity_min_oi_usd", 100_000.0),
         liquidity_check_seconds=raw.get("liquidity_check_seconds", 1800),
-        dashboard_port=raw.get("dashboard_port", 8765),
         instruments=instruments,
     )
 
