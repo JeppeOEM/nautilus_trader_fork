@@ -2,8 +2,9 @@ services:
   collector:
     container_name: dydx-collector
     build:
-      context: ../..
-      dockerfile: troll/dydx_collector/collector.dockerfile
+      context: ..
+      dockerfile: troll/collector.dockerfile
+      network: host
     environment:
       PYTHONUNBUFFERED: "1"
     # ponytail: hardcoded to host uid/gid (single-user box), so ./catalog
@@ -11,7 +12,9 @@ services:
     user: "1000:1000"
     volumes:
       - ./config.toml:/app/dydx_collector/config.toml:ro
-      - ./catalog:/app/catalog
+      - ./dydx_collector/catalog:/app/catalog
+      - ./dydx_collector/metrics.db:/app/metrics.db
+    network_mode: host
     restart: unless-stopped
 
   dozzle:

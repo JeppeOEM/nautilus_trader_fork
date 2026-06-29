@@ -1,4 +1,6 @@
 REPO_ROOT := $(shell git -C $(dir $(abspath $(lastword $(MAKEFILE_LIST)))) rev-parse --show-toplevel)
+TROLL_DIR  := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
+COMPOSE    := docker compose -f $(TROLL_DIR)docker-compose.yml
 BASE_IMAGE := nautilus-trader-base:1.229.0
 
 .PHONY: build-base up down logs web
@@ -13,15 +15,16 @@ build-base:
 
 ## Build collector image and start collecting data
 up:
-	docker compose up -d --build
+	$(COMPOSE) up -d --build
+	@echo "Dashboard: http://localhost:8765"
 
 ## Stop containers (catalog data is preserved)
 down:
-	docker compose down
+	$(COMPOSE) down
 
 ## Tail collector logs
 logs:
-	docker compose logs -f collector
+	$(COMPOSE) logs -f collector
 
 ## Open Dozzle log viewer in browser
 web:
@@ -41,5 +44,5 @@ prune-dry:
 
 ## Run the ml_signals dashboard (OFI, Microprice, footprint charts) on port 8765
 dashboard:
-	xdg-open http://localhost:8765 &
-	cd $(REPO_ROOT) && PYTHONPATH=$(REPO_ROOT)/troll python -m ml_signals.dashboard
+	fuser -k 8765/tcp || true
+	cd $(REPO_ROOT) && PYTHONPATH=$(REPO_ROOT)/troll python -m ml_signals.dashboard --open

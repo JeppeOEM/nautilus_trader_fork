@@ -1,2 +1,2 @@
-plotly
-pandas
+plotly==6.8.0
+pandas==3.0.4

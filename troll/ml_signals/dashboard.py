@@ -40,6 +40,7 @@ Usage from a running strategy::
 import html
 import json
 import logging
+import statistics
 import threading
 import time
 from collections import defaultdict
@@ -104,11 +105,12 @@ _LIVE: dict[str, dict] = {}  # instrument_id → latest snapshot
 # Set in serve_in_background(); None in standalone mode.
 _ROLLING: dict | None = None
 
-# Persistent per-coin OFI10 indicators for z-score — fed incrementally so history
-# accumulates across render calls. Fresh indicators always return 0 until warm.
+# Persistent per-coin OFI indicators — fed incrementally (1 new snap/sec) instead of
+# replaying the full 300-snap window each tick. Reduces per-second work ~300x.
 _OFI_ZSCORE_WINDOW = 3600  # 1 hour of 1s readings to establish mean/std
-_OFI_INDS: dict[str, MultiLevelOFI] = {}   # instrument_id → persistent indicator
-_LAST_FED: dict[str, int] = {}             # instrument_id → ts_event of last fed snap
+_OFI_INDS: dict[str, MultiLevelOFI] = {}              # OFI10 with z-score
+_OFI_RAW_INDS: dict[str, dict[int, MultiLevelOFI]] = {}  # raw OFI at levels 3, 5, 10
+_LAST_FED: dict[str, int] = {}                        # instrument_id → ts_event of last fed snap
 
 _NAV = '<p><a href="/">Rankings</a> | <a href="/live">Live signals</a></p>'
 
@@ -190,9 +192,12 @@ def _render_rankings_page(sort_col: str = "ofi_10_z", direction: str = "desc") -
         + "<th>History</th></tr>"
     )
 
-    def _cell(key: str, iid_raw: str, value: float | None, fmt_fn: object, color_fn: object) -> str:
+    def _cell(key: str, iid_raw: str, row: dict, fmt_fn: object, color_fn: object) -> str:
         attr = f' data-iid="{html.escape(iid_raw)}" data-col="{key}"'
+        value = row.get(key)
         if value is None:
+            if row.get("_err"):
+                return f'<td{attr} style="color:#f85149" title="{html.escape(row["_err"])}">!</td>'
             return f"<td{attr}>&mdash;</td>"
         text = html.escape(fmt_fn(value))  # type: ignore[operator]
         color = color_fn(value) if color_fn else None  # type: ignore[operator]
@@ -204,10 +209,15 @@ def _render_rankings_page(sort_col: str = "ofi_10_z", direction: str = "desc") -
         iid = html.escape(row["instrument_id"])
         # Short ticker label: "ETH-USD-PERP.DYDX" → "ETH-USD"
         label = html.escape("-".join(row["instrument_id"].split("-")[:2]))
-        cells = "".join(_cell(k, row["instrument_id"], row.get(k), fmt_fn, color_fn) for k, _, fmt_fn, color_fn in RANKING_COLS)
+        err = row.get("_err")
+        err_badge = (
+            f' <span style="color:#f85149;cursor:help" title="{html.escape(err)}">!</span>'
+            if err else ""
+        )
+        cells = "".join(_cell(k, row["instrument_id"], row, fmt_fn, color_fn) for k, _, fmt_fn, color_fn in RANKING_COLS)
         body_rows += (
             f"<tr><td>{i}</td>"
-            f"<td><a href='/coin/{iid}'>{label}</a> <small><a href='/chart/{iid}'>chart</a></small></td>"
+            f"<td><a href='/coin/{iid}'>{label}</a>{err_badge} <small><a href='/chart/{iid}'>chart</a></small></td>"
             f"{cells}"
             f"<td><a href='/history/{iid}'>31d</a></td></tr>"
         )
@@ -508,17 +518,6 @@ def _render_live_page() -> str:
     return _page("ml_signals live", body, refresh_seconds=1)
 
 
-def _compute_multilevel(snaps: list, levels: int) -> tuple[float | None, float | None]:
-    """Return (ofi, obi) at `levels` by replaying snapshots through fresh indicators."""
-    ofi_ind = MultiLevelOFI(levels=levels, window=len(snaps))
-    obi_ind = MultiLevelOBI(levels=levels)
-    for s in snaps:
-        ofi_ind.update_raw(s.bid_prices, s.bid_sizes, s.ask_prices, s.ask_sizes)
-        obi_ind.update_raw(s.bid_sizes, s.ask_sizes)
-    ofi = ofi_ind.value if ofi_ind.initialized else None
-    obi = obi_ind.value if obi_ind.initialized else None
-    return ofi, obi
-
 
 def _trade_aggregates(snaps: list) -> tuple[float, float, int, int]:
     """Return (total_buy_vol, total_sell_vol, total_buy_count, total_sell_count) over window."""
@@ -537,52 +536,89 @@ def _metrics_from_rolling(rolling: dict) -> list[dict]:
     for iid, dq in list(rolling.items()):
         if not dq:
             continue
-        snaps = list(dq)
-        latest = snaps[-1]
-        ofi_3, obi_3 = _compute_multilevel(snaps, levels=3)
-        ofi_5, obi_5 = _compute_multilevel(snaps, levels=5)
-        ofi_10, obi_10 = _compute_multilevel(snaps, levels=10)
+        try:
+            snaps = list(dq)
+            latest = snaps[-1]
 
-        # Feed new snapshots into the persistent per-coin indicator to build z-score history.
-        if iid not in _OFI_INDS:
-            _OFI_INDS[iid] = MultiLevelOFI(levels=10, window=50, zscore_window=_OFI_ZSCORE_WINDOW)
-        ind = _OFI_INDS[iid]
-        last_fed = _LAST_FED.get(iid, 0)
-        for s in snaps:
-            if s.ts_event > last_fed:
-                ind.update_raw(s.bid_prices, s.bid_sizes, s.ask_prices, s.ask_sizes)
-        if snaps:
-            _LAST_FED[iid] = snaps[-1].ts_event
-        ofi_10_z = ind.value if ind.initialized else None
-        tb_vol, ts_vol, tb_cnt, ts_cnt = _trade_aggregates(snaps)
-        total_count = tb_cnt + ts_cnt
-        mid = (latest.bid_prices[0] + latest.ask_prices[0]) / 2 if latest.bid_prices and latest.ask_prices else None
-        has_tob = latest.bid_prices and latest.ask_prices and (latest.bid_sizes[0] + latest.ask_sizes[0]) > 0
-        microprice = (
-            (latest.bid_prices[0] * latest.ask_sizes[0] + latest.ask_prices[0] * latest.bid_sizes[0])
-            / (latest.bid_sizes[0] + latest.ask_sizes[0])
-            if has_tob else None
-        )
-        result.append({
-            "ts": now_ns,
-            "instrument_id": iid,
-            "ofi": ofi_10,
-            "ofi_3": ofi_3,
-            "ofi_5": ofi_5,
-            "ofi_10": ofi_10,
-            "ofi_10_z": ofi_10_z,
-            "obi_3": obi_3,
-            "obi_5": obi_5,
-            "obi_10": obi_10,
-            "microprice": microprice,
-            "microprice_lean": (microprice - mid) if microprice is not None and mid is not None else None,
-            "spread": (latest.ask_prices[0] - latest.bid_prices[0]) if latest.ask_prices and latest.bid_prices else None,
-            "cvd": tb_vol - ts_vol,
-            "volume_delta": latest.buy_volume - latest.sell_volume,
-            "buy_count": latest.buy_count,
-            "sell_count": latest.sell_count,
-            "avg_trade_size": (tb_vol + ts_vol) / total_count if total_count > 0 else None,
-        })
+            # Persistent incremental OFI — only new snapshots fed each tick, not full replay.
+            if iid not in _OFI_INDS:
+                _OFI_INDS[iid] = MultiLevelOFI(levels=10, window=50, zscore_window=_OFI_ZSCORE_WINDOW)
+            if iid not in _OFI_RAW_INDS:
+                _OFI_RAW_INDS[iid] = {
+                    3:  MultiLevelOFI(levels=3,  window=300),
+                    5:  MultiLevelOFI(levels=5,  window=300),
+                    10: MultiLevelOFI(levels=10, window=300),
+                }
+            last_fed = _LAST_FED.get(iid, 0)
+            new_snaps = [s for s in snaps if s.ts_event > last_fed]
+            if new_snaps and last_fed > 0 and (new_snaps[0].ts_event - last_fed) > 3_000_000_000:
+                # Gap >3s since last snapshot — reconnect detected. Clear stale _prev
+                # state so the next contribution isn't computed against pre-disconnect prices.
+                _OFI_INDS[iid].clear_prev_state()
+                for raw_ind in _OFI_RAW_INDS[iid].values():
+                    raw_ind.clear_prev_state()
+            for s in new_snaps:
+                _OFI_INDS[iid].update_raw(s.bid_prices, s.bid_sizes, s.ask_prices, s.ask_sizes)
+                for raw_ind in _OFI_RAW_INDS[iid].values():
+                    raw_ind.update_raw(s.bid_prices, s.bid_sizes, s.ask_prices, s.ask_sizes)
+            if snaps:
+                _LAST_FED[iid] = snaps[-1].ts_event
+            ofi_10_z = _OFI_INDS[iid].value if _OFI_INDS[iid].initialized else None
+            ofi_3  = _OFI_RAW_INDS[iid][3].value  if _OFI_RAW_INDS[iid][3].initialized  else None
+            ofi_5  = _OFI_RAW_INDS[iid][5].value  if _OFI_RAW_INDS[iid][5].initialized  else None
+            ofi_10 = _OFI_RAW_INDS[iid][10].value if _OFI_RAW_INDS[iid][10].initialized else None
+
+            # OBI is stateless — just the current book snapshot, no window needed.
+            obi3 = MultiLevelOBI(levels=3)
+            obi5 = MultiLevelOBI(levels=5)
+            obi10 = MultiLevelOBI(levels=10)
+            if latest.bid_sizes and latest.ask_sizes:
+                obi3.update_raw(latest.bid_sizes, latest.ask_sizes)
+                obi5.update_raw(latest.bid_sizes, latest.ask_sizes)
+                obi10.update_raw(latest.bid_sizes, latest.ask_sizes)
+            obi_3  = obi3.value  if obi3.initialized  else None
+            obi_5  = obi5.value  if obi5.initialized  else None
+            obi_10 = obi10.value if obi10.initialized else None
+            tb_vol, ts_vol, tb_cnt, ts_cnt = _trade_aggregates(snaps)
+            total_count = tb_cnt + ts_cnt
+            mid = (latest.bid_prices[0] + latest.ask_prices[0]) / 2 if latest.bid_prices and latest.ask_prices else None
+            has_tob = latest.bid_prices and latest.ask_prices and (latest.bid_sizes[0] + latest.ask_sizes[0]) > 0
+            microprice = (
+                (latest.bid_prices[0] * latest.ask_sizes[0] + latest.ask_prices[0] * latest.bid_sizes[0])
+                / (latest.bid_sizes[0] + latest.ask_sizes[0])
+                if has_tob else None
+            )
+            mids = [
+                (s.bid_prices[0] + s.ask_prices[0]) / 2
+                for s in snaps if s.bid_prices and s.ask_prices
+            ]
+            rets = [(mids[i] - mids[i - 1]) / mids[i - 1] for i in range(1, len(mids))]
+            volatility = statistics.stdev(rets) if len(rets) >= 2 else None
+            result.append({
+                "ts": now_ns,
+                "instrument_id": iid,
+                "_err": None,
+                "ofi": ofi_10,
+                "ofi_3": ofi_3,
+                "ofi_5": ofi_5,
+                "ofi_10": ofi_10,
+                "ofi_10_z": ofi_10_z,
+                "obi_3": obi_3,
+                "obi_5": obi_5,
+                "obi_10": obi_10,
+                "microprice": microprice,
+                "microprice_lean": (microprice - mid) if microprice is not None and mid is not None else None,
+                "spread": (latest.ask_prices[0] - latest.bid_prices[0]) if latest.ask_prices and latest.bid_prices else None,
+                "price": mid,
+                "volatility": volatility,
+                "cvd": tb_vol - ts_vol,
+                "volume_delta": latest.buy_volume - latest.sell_volume,
+                "buy_count": latest.buy_count,
+                "sell_count": latest.sell_count,
+                "avg_trade_size": (tb_vol + ts_vol) / total_count if total_count > 0 else None,
+            })
+        except Exception as e:
+            result.append({"instrument_id": iid, "ts": now_ns, "_err": str(e)})
     return result
 
 
@@ -593,10 +629,11 @@ def _rankings_json() -> str:
     result = []
     for row in rows:
         cells: dict[str, dict] = {}
+        err = row.get("_err")
         for key, _, fmt_fn, color_fn in RANKING_COLS:
             v = row.get(key)
             if v is None:
-                cells[key] = {"text": "—", "color": None}
+                cells[key] = {"text": "!", "color": "#f85149"} if err else {"text": "—", "color": None}
             else:
                 try:
                     cells[key] = {
@@ -604,7 +641,7 @@ def _rankings_json() -> str:
                         "color": color_fn(v) if color_fn else None,  # type: ignore[operator]
                     }
                 except Exception:
-                    cells[key] = {"text": "—", "color": None}
+                    cells[key] = {"text": "ERR", "color": "#f85149"}
         result.append({"instrument_id": row["instrument_id"], "cells": cells})
     return json.dumps(result)
 
@@ -619,8 +656,8 @@ def _fast_loop(catalog_path: str, rolling: dict | None = None) -> None:
     while True:
         try:
             if rolling is not None:
+                interval = 1  # set before call so a first-call failure doesn't crash with NameError
                 book_metrics = _metrics_from_rolling(rolling)
-                interval = 1
             else:
                 book_metrics = metrics_computer.compute_book_metrics_all(catalog_path)
                 interval = LIVE_INTERVAL_SECONDS
@@ -653,6 +690,12 @@ def _slow_loop(catalog_path: str) -> None:
 
 class _Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
+        try:
+            self._do_GET()
+        except BrokenPipeError:
+            pass  # client disconnected mid-response (JS poll fired a new request)
+
+    def _do_GET(self) -> None:
         parsed = urlparse(self.path)
         path = unquote(parsed.path)
         qs = parse_qs(parsed.query)
@@ -736,6 +779,7 @@ def serve_in_background(port: int = 8765, catalog_path: str = CATALOG_PATH, roll
     except Exception:
         logger.warning("Could not pre-load metrics.db — starting cold", exc_info=True)
 
+    HTTPServer.allow_reuse_address = True
     server = HTTPServer(("127.0.0.1", port), _Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     threading.Thread(target=_fast_loop, args=(catalog_path, rolling), daemon=True).start()
@@ -745,14 +789,19 @@ def serve_in_background(port: int = 8765, catalog_path: str = CATALOG_PATH, roll
 
 if __name__ == "__main__":
     import argparse
+    import webbrowser
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--catalog", default=CATALOG_PATH)
+    parser.add_argument("--open", action="store_true", help="Open browser after server starts")
     args = parser.parse_args()
 
     serve_in_background(port=args.port, catalog_path=args.catalog)
-    print(f"Dashboard running at http://localhost:{args.port}")
+    url = f"http://localhost:{args.port}"
+    print(f"Dashboard running at {url}")
+    if args.open:
+        webbrowser.open(url)
     try:
         while True:
             time.sleep(3600)

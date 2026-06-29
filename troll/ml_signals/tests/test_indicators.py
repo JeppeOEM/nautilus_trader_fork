@@ -102,6 +102,47 @@ def test_multilevel_ofi_respects_window() -> None:
     assert ofi.value == -5.0
 
 
+def test_multilevel_ofi_usd_notional_scales_by_price() -> None:
+    ofi_raw = MultiLevelOFI(levels=1, window=10)
+    ofi_usd = MultiLevelOFI(levels=1, window=10, usd_notional=True)
+    # seed both
+    ofi_raw.update_raw([100.0], [5.0], [101.0], [4.0])
+    ofi_usd.update_raw([100.0], [5.0], [101.0], [4.0])
+    # bid price 100→101 (up), new size=6:  raw bid_term=6,      usd bid_term=6*101=606
+    # ask price same 101,  size 4→3:       raw ask_term=3-4=-1, usd ask_term=(3-4)*101=-101
+    # raw contribution: 6 - (-1) = 7
+    # usd contribution: 606 - (-101) = 707
+    ofi_raw.update_raw([101.0], [6.0], [101.0], [3.0])
+    ofi_usd.update_raw([101.0], [6.0], [101.0], [3.0])
+    assert ofi_raw.value == 7.0
+    assert ofi_usd.value == 707.0
+
+
+def test_multilevel_ofi_zscore_zero_for_constant_signal() -> None:
+    # When all history entries are identical, std=0 → z-score returns 0.0
+    ofi = MultiLevelOFI(levels=1, window=1, zscore_window=5)
+    ofi.update_raw([100.0], [5.0], [101.0], [5.0])  # seed
+    for _ in range(10):
+        # no price change: bid_term=5-5=0, ask_term=5-5=0 → contribution=0 every time
+        ofi.update_raw([100.0], [5.0], [101.0], [5.0])
+    assert ofi.value == 0.0
+
+
+def test_multilevel_ofi_zscore_direction_matches_signal() -> None:
+    # Build history with alternating +5/-5 so mean=0, std=5.
+    # A bid-up update should give z ≈ +1.0, a bid-down update z ≈ -1.0.
+    ofi = MultiLevelOFI(levels=1, window=1, zscore_window=10)
+    ofi.update_raw([100.0], [5.0], [101.0], [5.0])  # seed
+    for _ in range(5):
+        ofi.update_raw([101.0], [5.0], [101.0], [5.0])  # bid up   → contribution +5
+        ofi.update_raw([100.0], [5.0], [101.0], [5.0])  # bid down → contribution -5
+    # zscore_history is now full: [+5,-5,+5,-5,+5,-5,+5,-5,+5,-5], mean=0, std=5
+    ofi.update_raw([101.0], [5.0], [101.0], [5.0])   # bid up → raw=+5 → z=(5-0)/5=+1.0
+    assert abs(ofi.value - 1.0) < 0.01
+    ofi.update_raw([100.0], [5.0], [101.0], [5.0])   # bid down → raw=-5 → z≈-1.0
+    assert ofi.value < 0.0
+
+
 if __name__ == "__main__":
     test_uptrend_converges_above_half()
     test_downtrend_converges_below_half()
@@ -111,4 +152,7 @@ if __name__ == "__main__":
     test_multilevel_obi_levels_capped()
     test_multilevel_ofi_two_level_known_contribution()
     test_multilevel_ofi_respects_window()
+    test_multilevel_ofi_usd_notional_scales_by_price()
+    test_multilevel_ofi_zscore_zero_for_constant_signal()
+    test_multilevel_ofi_zscore_direction_matches_signal()
     print("ok")

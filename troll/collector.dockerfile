@@ -3,7 +3,8 @@
 FROM nautilus-trader-base:1.229.0
 
 WORKDIR /app
-COPY troll/dydx_collector/troll-requirements.txt ./troll-requirements.txt
+RUN chown 1000:1000 /app
+COPY troll/troll-requirements.txt ./troll-requirements.txt
 RUN pip install --no-cache-dir -r troll-requirements.txt
 COPY troll/dydx_collector ./dydx_collector
 COPY troll/ml_signals ./ml_signals

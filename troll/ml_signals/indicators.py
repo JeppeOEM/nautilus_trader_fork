@@ -268,16 +268,40 @@ class MultiLevelOFI(Indicator):
         Number of price levels to include (> 0).
     window : int
         Rolling window of per-update contributions summed into `value` (> 0).
+    usd_notional : bool
+        If True, each size term is multiplied by its price level before summing,
+        so `value` is in dollars rather than native token units. Makes the signal
+        comparable across instruments with very different price scales (e.g. BTC
+        vs FLOKI).
+    zscore_window : int | None
+        If set, normalises `value` to a z-score over the last `zscore_window`
+        readings: ``(value - mean) / std``. Returns 0.0 when std is zero.
+        Must be >= 2. A window 10–20× the OFI `window` works well in practice.
     """
 
-    def __init__(self, levels: int = 10, window: int = 50) -> None:
+    def __init__(
+        self,
+        levels: int = 10,
+        window: int = 50,
+        usd_notional: bool = False,
+        zscore_window: int | None = None,
+    ) -> None:
         PyCondition.positive_int(levels, "levels")
         PyCondition.positive_int(window, "window")
+        if zscore_window is not None:
+            PyCondition.positive_int(zscore_window, "zscore_window")
+            if zscore_window < 2:
+                raise ValueError("zscore_window must be >= 2")
         super().__init__(params=[levels, window])
         self.levels = levels
         self.window = window
+        self.usd_notional = usd_notional
+        self.zscore_window = zscore_window
         self.value = 0.0
         self._contributions: deque[float] = deque(maxlen=window)
+        self._zscore_history: deque[float] | None = (
+            deque(maxlen=zscore_window) if zscore_window is not None else None
+        )
         self._prev_bid_prices: list[float] | None = None
         self._prev_bid_sizes: list[float] | None = None
         self._prev_ask_prices: list[float] | None = None
@@ -297,21 +321,37 @@ class MultiLevelOFI(Indicator):
             self._prev_ask_sizes = ask_sizes[:self.levels]
             return
 
-        n = min(self.levels, len(bid_prices), len(self._prev_bid_prices))
+        n = min(self.levels, len(bid_prices), len(ask_prices), len(self._prev_bid_prices), len(self._prev_ask_prices))
         contribution = 0.0
         for i in range(n):
             bp, bs = bid_prices[i], bid_sizes[i]
             pbp, pbs = self._prev_bid_prices[i], self._prev_bid_sizes[i]
-            bid_term = bs if bp > pbp else (bs - pbs if bp == pbp else -pbs)
-
             ap, as_ = ask_prices[i], ask_sizes[i]
             pap, pas = self._prev_ask_prices[i], self._prev_ask_sizes[i]
-            ask_term = as_ if ap < pap else (as_ - pas if ap == pap else -pas)
+
+            if self.usd_notional:
+                bid_term = bs * bp if bp > pbp else ((bs - pbs) * bp if bp == pbp else -pbs * pbp)
+                ask_term = as_ * ap if ap < pap else ((as_ - pas) * ap if ap == pap else -pas * pap)
+            else:
+                bid_term = bs if bp > pbp else (bs - pbs if bp == pbp else -pbs)
+                ask_term = as_ if ap < pap else (as_ - pas if ap == pap else -pas)
 
             contribution += bid_term - ask_term
 
         self._contributions.append(contribution)
-        self.value = float(sum(self._contributions))
+        raw_value = float(sum(self._contributions))
+
+        if self._zscore_history is not None:
+            self._zscore_history.append(raw_value)
+            if len(self._zscore_history) >= 2:
+                arr = np.array(self._zscore_history)
+                std = float(arr.std())
+                self.value = float((raw_value - float(arr.mean())) / std) if std > 0.0 else 0.0
+            else:
+                self.value = 0.0
+        else:
+            self.value = raw_value
+
         self._set_has_inputs(True)
         self._set_initialized(True)
 
@@ -320,9 +360,23 @@ class MultiLevelOFI(Indicator):
         self._prev_ask_prices = ask_prices[:self.levels]
         self._prev_ask_sizes = ask_sizes[:self.levels]
 
+    def clear_prev_state(self) -> None:
+        """Clear stale previous-tick state without losing contribution/z-score history.
+
+        Call this when the book has been rebuilt after a reconnect so the next
+        update_raw is treated as the first observation rather than computing a
+        delta against pre-disconnect prices.
+        """
+        self._prev_bid_prices = None
+        self._prev_bid_sizes = None
+        self._prev_ask_prices = None
+        self._prev_ask_sizes = None
+
     def _reset(self) -> None:
         self.value = 0.0
         self._contributions.clear()
+        if self._zscore_history is not None:
+            self._zscore_history.clear()
         self._prev_bid_prices = None
         self._prev_bid_sizes = None
         self._prev_ask_prices = None
