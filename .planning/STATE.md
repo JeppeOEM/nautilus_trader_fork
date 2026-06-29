@@ -2,27 +2,27 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: dYdX Research Platform
-current_phase: 2
-status: complete
-last_updated: "2026-06-28T00:00:00.000Z"
-last_activity: 2026-06-28
-last_activity_desc: Phase 2 complete — dashboard upgraded
+current_phase: 03
+current_phase_name: collector-dashboard-split
+status: executing
+last_updated: "2026-06-29T17:50:55.949Z"
+last_activity: 2026-06-29
+last_activity_desc: Phase 03 execution started
 progress:
-  total_phases: 2
+  total_phases: 3
   completed_phases: 2
-  total_plans: 3
+  total_plans: 4
   completed_plans: 3
-  percent: 100
-current_phase_name: dashboard-upgrade
+  percent: 67
 ---
 
 # Project State
 
 ## Current Position
 
-Phase: 2
-Status: Complete
-Last activity: 2026-06-28 — Phase 2 complete
+Phase: 03 (collector-dashboard-split) — EXECUTING
+Status: Executing Phase 03
+Last activity: 2026-06-29 — Phase 03 execution started
 
 Progress: ██████████ 100%
 

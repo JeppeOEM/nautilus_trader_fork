@@ -52,9 +52,29 @@ Milestone v1.0 delivers a single artifact: `troll/CLAUDE.md`, a set of actionabl
 - [x] 02-01-PLAN.md — Extend live metrics (CVD, volume delta, microprice lean, buy/sell count, avg trade size) + fix `_fast_loop` write path + tests
 - [x] 02-02-PLAN.md — Expand rankings columns, clickable rows, deque-backed live `/coin/{id}` view with 1s 4-line chart + `/data/coin/{id}` JSON endpoint
 
+- [x] **Phase 3: Collector/Dashboard Split** - Decouple dashboard from collector process via Redis pub/sub + aiohttp SSE; browser EventSource replaces polling; no shared Python process, no GIL contention (completed 2026-06-29)
+
+### Phase 3: Collector/Dashboard Split
+
+**Goal**: Collector becomes a pure data pipeline (no HTTP server, no dashboard threads). Dashboard becomes a standalone aiohttp service that subscribes to Redis pub/sub for 1s snapshots, maintains its own in-memory metric cache, and pushes updates to the browser via Server-Sent Events — eliminating polling latency and GIL competition between collection and rendering.
+**Depends on**: Phase 2
+**Requirements**: ARCH-01, ARCH-02, ARCH-03
+**Success Criteria**:
+
+  1. Collector process has zero dashboard imports — `serve_in_background` call removed, `_second_loop` publishes JSON snapshot batches to Redis channel `snapshots:1s`
+  2. Dashboard runs as a separate Docker service using aiohttp; browser connects via `EventSource('/stream')` not `setInterval`
+  3. Rankings table updates arrive in browser within 100ms of the collector publishing a snapshot batch (measurable via browser DevTools EventStream)
+  4. Restarting the collector does not crash or hang the dashboard — it reconnects to Redis automatically and resumes streaming
+  5. Restarting the dashboard does not affect the collector in any way
+
+**Plans**: 1/1 plans complete
+
+- [x] 03-PLAN.md — Decouple collector/dashboard: Redis pub/sub in _second_loop, aiohttp SSE at /stream, EventSource in browser, redis + dashboard Docker services (6 tasks)
+
 ## Progress
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Project Guardrails | 1/1 | Complete    | 2026-06-27 |
 | 2. Dashboard Upgrade | 2/2 | Complete   | 2026-06-28 |
+| 3. Collector/Dashboard Split | 1/1 | Complete   | 2026-06-29 |
