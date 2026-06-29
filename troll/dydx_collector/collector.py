@@ -28,13 +28,16 @@ illiquid    : OI below threshold -- NOT subscribed to trades/book; re-checked ev
 """
 
 import asyncio
+import json
 import logging
+import os
 import signal
 import time
 from collections import defaultdict
-from collections import deque
 from pathlib import Path
 from typing import Any
+
+import redis.asyncio as aioredis
 
 from dydx_collector.client import DydxClient
 from dydx_collector.config import CollectorConfig
@@ -47,7 +50,6 @@ from dydx_collector.open_interest import fetch_open_interest
 from dydx_collector.prune_catalog import prune_instrument
 from dydx_collector.second_snapshot import BOOK_DEPTH
 from dydx_collector.second_snapshot import DydxSecondSnapshot
-from ml_signals.dashboard import serve_in_background
 from nautilus_trader.model.data import MarkPriceUpdate
 from nautilus_trader.model.data import OrderBookDeltas
 from nautilus_trader.model.data import TradeTick
@@ -64,6 +66,21 @@ CONFIG_PATH = Path(__file__).parent / "config.toml"
 
 def _buffer_key(data: Any) -> tuple[type, str]:
     return type(data), str(data.instrument_id)
+
+
+async def _publish_snapshot_batch(redis_client: aioredis.Redis, snapshots: list) -> None:
+    """Publish a batch of DydxSecondSnapshot objects to Redis channel snapshots:1s.
+
+    Empty batches are silently dropped. Publish failures are logged and swallowed —
+    missing one tick is acceptable per the architecture.
+    """
+    if not snapshots:
+        return
+    payload = json.dumps([DydxSecondSnapshot.to_dict(s) for s in snapshots])
+    try:
+        await redis_client.publish("snapshots:1s", payload)
+    except Exception as e:
+        logger.warning("Redis publish failed: %s", e)
 
 
 class Collector:
@@ -85,14 +102,13 @@ class Collector:
         # Instruments for which raw OrderBookDeltas are written to the catalog
         self._delta_store: set[str] = {e.id for e in config.instruments if e.store_order_book_deltas}
 
-        # 1-second rolling snapshots: 300 entries = 5 min; shared with dashboard
-        self._second_rolling: dict[str, deque] = defaultdict(lambda: deque(maxlen=300))
         # Trade volume/count accumulated between consecutive 1s ticks, reset each second
         self._second_buy_volume: dict[str, float] = defaultdict(float)
         self._second_sell_volume: dict[str, float] = defaultdict(float)
         self._second_buy_count: dict[str, int] = defaultdict(int)
         self._second_sell_count: dict[str, int] = defaultdict(int)
 
+        self._redis: aioredis.Redis | None = None
         self._stop = asyncio.Event()
 
     def _on_data(self, data: Any) -> None:
@@ -220,6 +236,7 @@ class Collector:
         while not self._stop.is_set():
             await asyncio.sleep(1.0)
             now_ns = time.time_ns()
+            batch: list[DydxSecondSnapshot] = []
             for iid in self._pinned | self._liquid:
                 book = self._bar_builder._books.get(iid)
                 if book is None:
@@ -247,8 +264,10 @@ class Collector:
                     ts_event=now_ns,
                     ts_init=now_ns,
                 )
-                self._second_rolling[iid].append(snapshot)
+                batch.append(snapshot)
                 self._on_data(snapshot)  # routes to buffer → Parquet flush
+
+            await _publish_snapshot_batch(self._redis, batch)
 
     async def _prune_loop(self) -> None:
         """Prune non-pinned instruments' catalog data older than non_config_retain_hours."""
@@ -265,6 +284,10 @@ class Collector:
                 logger.info(f"Pruned {freed / 1024 / 1024:.1f} MB from {len(non_pinned)} non-pinned instruments")
 
     async def run(self) -> None:
+        self._redis = aioredis.Redis.from_url(
+            os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
+        )
+
         instruments = await self._client.fetch_instruments()
         instruments_by_id = {i.id.value: i for i in instruments}
 
@@ -292,12 +315,6 @@ class Collector:
             f"{len(self._illiquid)} illiquid (monitoring)"
         )
 
-        serve_in_background(
-            port=self._config.dashboard_port,
-            catalog_path=str(Path(self._config.catalog_path).resolve()),
-            rolling=self._second_rolling,
-        )
-
         flush_task = asyncio.create_task(self._flush_loop())
         reload_task = asyncio.create_task(self._reload_config_loop())
         oi_task = asyncio.create_task(self._open_interest_loop())
@@ -312,6 +329,8 @@ class Collector:
                 task.cancel()
             await self._client.disconnect()
             self._flush_once()
+            if self._redis is not None:
+                await self._redis.aclose()
 
     def stop(self) -> None:
         self._stop.set()

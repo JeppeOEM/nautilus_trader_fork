@@ -3,7 +3,7 @@ TROLL_DIR  := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 COMPOSE    := docker compose -f $(TROLL_DIR)docker-compose.yml
 BASE_IMAGE := nautilus-trader-base:1.229.0
 
-.PHONY: build-base up down logs web
+.PHONY: build-base up down logs logs-dash web
 
 ## Build the base nautilus image (~15 min, only needed once or after core changes)
 build-base:
@@ -25,6 +25,10 @@ down:
 ## Tail collector logs
 logs:
 	$(COMPOSE) logs -f collector
+
+## Tail dashboard logs
+logs-dash:
+	$(COMPOSE) logs -f dydx-dashboard
 
 ## Open Dozzle log viewer in browser
 web:
