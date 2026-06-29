@@ -1,4 +1,11 @@
 services:
+  redis:
+    container_name: dydx-redis
+    image: redis:7-alpine
+    ports:
+      - "127.0.0.1:6379:6379"
+    restart: unless-stopped
+
   collector:
     container_name: dydx-collector
     build:
@@ -7,12 +14,32 @@ services:
       network: host
     environment:
       PYTHONUNBUFFERED: "1"
+      REDIS_URL: "redis://127.0.0.1:6379"
     # ponytail: hardcoded to host uid/gid (single-user box), so ./catalog
     # writes land owned by you, not root. Switch to ${UID}:${GID} if shared.
     user: "1000:1000"
     volumes:
       - ./config.toml:/app/dydx_collector/config.toml:ro
       - ./dydx_collector/catalog:/app/catalog
+      - ./dydx_collector/metrics.db:/app/metrics.db
+    network_mode: host
+    restart: unless-stopped
+
+  dashboard:
+    container_name: dydx-dashboard
+    build:
+      context: ..
+      dockerfile: troll/collector.dockerfile
+      network: host
+    command: python3 -m ml_signals.dashboard
+    environment:
+      PYTHONUNBUFFERED: "1"
+      REDIS_URL: "redis://127.0.0.1:6379"
+      CATALOG_PATH: "/app/catalog"
+      DASHBOARD_PORT: "8765"
+    user: "1000:1000"
+    volumes:
+      - ./dydx_collector/catalog:/app/catalog:ro
       - ./dydx_collector/metrics.db:/app/metrics.db
     network_mode: host
     restart: unless-stopped
