@@ -13,40 +13,38 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-Lightweight local dashboard over the dYdX catalog and live strategy signals.
+Standalone aiohttp dashboard for the dYdX collector.
 
-ponytail: a polling dashboard (stdlib http.server + plotly.to_html, no client
-JS dependency, no caching), not push-based SSE/websockets, not a real web
-framework. Swap for Streamlit/Dash if you need richer UX later.
+Subscribes to Redis channel snapshots:1s (published by the collector every second),
+maintains a rolling in-process snapshot window, and pushes live rankings to browsers
+via Server-Sent Events at /stream. Reconnects to Redis automatically after collector
+restart (ARCH-03).
 
 Pages:
-- `/`               rankings table — all coins sortable by any metric
-- `/coin/{id}`      live indicator panel + 1s-updating mid/bid/ask/microprice chart
+- `/`               rankings table — all coins sortable by any metric (SSE-updated)
+- `/stream`         SSE endpoint — push rankings JSON to all connected browsers
+- `/coin/{id}`      live indicator panel + 1s-polled mid/bid/ask/microprice chart
 - `/chart/{id}`     per-event microstructure chart (Parquet-backed, date-picker controlled)
 - `/history/{id}`   31-day metric history charts for one coin
 - `/live`           in-process live signal monitor (see `record()` below)
 
-Usage from a running strategy::
+Usage::
 
-    from ml_signals.dashboard import record, serve_in_background
+    from ml_signals.dashboard import record
 
-    serve_in_background(port=8765)  # once, e.g. in on_start
-
-
-    def on_signal(self, signal):
-        record("logistic_trend", signal.value, signal.ts_event)
+    record("logistic_trend", signal.value, signal.ts_event)
 """
 
+import asyncio
 import html
 import json
 import logging
+import os
 import statistics
-import threading
 import time
 from collections import defaultdict
 from collections import deque
-from http.server import BaseHTTPRequestHandler
-from http.server import HTTPServer
+from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import parse_qs
 from urllib.parse import unquote
@@ -54,6 +52,8 @@ from urllib.parse import urlparse
 
 import pandas as pd
 import plotly.graph_objects as go
+import redis.asyncio as aioredis
+from aiohttp import web
 from plotly.subplots import make_subplots
 
 from ml_signals.catalog_stats import list_instruments
@@ -66,11 +66,11 @@ from ml_signals import metrics_store
 
 logger = logging.getLogger(__name__)
 
-CATALOG_PATH = "troll/dydx_collector/catalog"
+CATALOG_PATH: str = os.environ.get("CATALOG_PATH", "troll/dydx_collector/catalog")
 
-# How often the background thread recomputes live OFI/microprice from the catalog.
+# How often the slow loop recomputes full snapshot metrics from Parquet.
 LIVE_INTERVAL_SECONDS: int = 5
-# How often the live snapshot is flushed to SQLite for bookkeeping history.
+# How often the slow loop flushes to SQLite for historical bookkeeping.
 DB_WRITE_INTERVAL_SECONDS: int = 60
 
 # Rankings table columns. Each entry: (store_key, header_label, format_fn, color_fn|None).
@@ -93,20 +93,19 @@ RANKING_COLS: list[tuple[str, str, object, object]] = [
     ("volatility",     "Vol",    lambda v: f"{v:.6f}",   None),
 ]
 
-_LOCK = threading.Lock()
 _SERIES: dict[str, deque[tuple[int, float]]] = defaultdict(lambda: deque(maxlen=2000))
 
-# In-memory live snapshot cache — updated every LIVE_INTERVAL_SECONDS.
-# Rankings page reads from here instead of SQLite so it never blocks on a DB query.
-_METRICS_LOCK = threading.Lock()
+# In-memory live snapshot cache — updated from Redis snapshots every second.
+# Rankings page reads from here via SSE so it never blocks on a DB query.
 _LIVE: dict[str, dict] = {}  # instrument_id → latest snapshot
 
-# Module-level reference to the _second_rolling deque passed by the collector.
-# Set in serve_in_background(); None in standalone mode.
-_ROLLING: dict | None = None
+# Per-client SSE queues. Fanout drops messages for slow clients (QueueFull).
+_SSE_QUEUES: set[asyncio.Queue] = set()
 
-# Persistent per-coin OFI indicators — fed incrementally (1 new snap/sec) instead of
-# replaying the full 300-snap window each tick. Reduces per-second work ~300x.
+# Rolling 1s snapshots received from Redis (plain dicts from DydxSecondSnapshot.to_dict()).
+_second_rolling: dict[str, deque] = defaultdict(lambda: deque(maxlen=300))
+
+# Persistent per-coin OFI indicators — fed incrementally (1 new snap/sec).
 _OFI_ZSCORE_WINDOW = 3600  # 1 hour of 1s readings to establish mean/std
 _OFI_INDS: dict[str, MultiLevelOFI] = {}              # OFI10 with z-score
 _OFI_RAW_INDS: dict[str, dict[int, MultiLevelOFI]] = {}  # raw OFI at levels 3, 5, 10
@@ -130,6 +129,7 @@ def _split_tiers(catalog_path: str) -> tuple[set[str], set[str]]:
     all_iids = set(list_instruments(catalog_path))
     return subscribed, all_iids - subscribed
 
+
 _CSS = """
 <style>
 body { font-family: monospace; font-size: 13px; margin: 20px; background: #0d1117; color: #c9d1d9; }
@@ -147,8 +147,7 @@ td:first-child, th:first-child { text-align: left; }
 
 
 def record(name: str, value: float, ts_event: int) -> None:
-    with _LOCK:
-        _SERIES[name].append((ts_event, value))
+    _SERIES[name].append((ts_event, value))
 
 
 def _page(title: str, body: str, refresh_seconds: int = 60) -> str:
@@ -161,8 +160,7 @@ def _page(title: str, body: str, refresh_seconds: int = 60) -> str:
 
 
 def _render_rankings_page(sort_col: str = "ofi_10_z", direction: str = "desc") -> str:
-    with _METRICS_LOCK:
-        rows = list(_LIVE.values())
+    rows = list(_LIVE.values())
     if not rows:  # fallback at startup before first compute cycle finishes
         db_path = str(Path(CATALOG_PATH).parent / "metrics.db")
         rows = metrics_store.latest(db_path)
@@ -242,6 +240,7 @@ def _render_rankings_page(sort_col: str = "ofi_10_z", direction: str = "desc") -
         f"<div style='line-height:2.4'>{chips}</div>"
     )
 
+    # SSE-based live updates — replaces setInterval/fetch polling (ARCH-02)
     poll_script = """<script>
 (function(){
   var cells={};
@@ -250,20 +249,20 @@ def _render_rankings_page(sort_col: str = "ofi_10_z", direction: str = "desc") -
     if(!cells[iid])cells[iid]={};
     cells[iid][col]=el;
   });
-  setInterval(function(){
-    fetch('/data/rankings').then(function(r){return r.json();}).then(function(rows){
-      rows.forEach(function(row){
-        var iid=row.instrument_id,cols=cells[iid];
-        if(!cols)return;
-        Object.entries(row.cells).forEach(function(e){
-          var el=cols[e[0]];
-          if(!el)return;
-          el.textContent=e[1].text;
-          el.style.color=e[1].color||'';
-        });
+  var es=new EventSource('/stream');
+  es.onmessage=function(e){
+    var rows=JSON.parse(e.data);
+    rows.forEach(function(row){
+      var iid=row.instrument_id,cols=cells[iid];
+      if(!cols)return;
+      Object.entries(row.cells).forEach(function(e){
+        var el=cols[e[0]];
+        if(!el)return;
+        el.textContent=e[1].text;
+        el.style.color=e[1].color||'';
       });
-    }).catch(function(){});
-  },1000);
+    });
+  };
 })();
 </script>"""
     body = (
@@ -402,27 +401,27 @@ def _render_chart_page(symbol: str, start_ms: int, end_ms: int) -> str:
     return _page(f"{sym} chart", body, refresh_seconds=86400)  # no auto-refresh; user controls via form
 
 
-def _coin_chart_json(iid: str, rolling: dict | None) -> str:
-    """Return JSON string with ts/mid/bid/ask/micro arrays from the rolling deque.
+def _coin_chart_json(iid: str) -> str:
+    """Return JSON string with ts/mid/bid/ask/micro arrays from the module-level _second_rolling.
 
-    Returns empty arrays when rolling is None (standalone mode guard).
+    Returns empty arrays when no snapshots exist for this iid.
     Timestamps are converted from nanoseconds to milliseconds for Plotly.
     """
-    if rolling is None:
+    snaps = list(_second_rolling.get(iid, []))
+    if not snaps:
         return json.dumps({"ts": [], "mid": [], "bid": [], "ask": [], "micro": []})
-    snaps = list(rolling.get(iid, []))
     ts: list[int] = []
     mid_vals: list[float] = []
     bid_vals: list[float] = []
     ask_vals: list[float] = []
     micro_vals: list[float] = []
     for s in snaps:
-        if not s.bid_prices or not s.ask_prices:
+        if not s["bid_prices"] or not s["ask_prices"]:
             continue
-        bp, ap = s.bid_prices[0], s.ask_prices[0]
-        bs, as_ = s.bid_sizes[0], s.ask_sizes[0]
+        bp, ap = s["bid_prices"][0], s["ask_prices"][0]
+        bs, as_ = s["bid_sizes"][0], s["ask_sizes"][0]
         total = bs + as_
-        ts.append(s.ts_event // 1_000_000)  # ns → ms for Plotly datetime axis
+        ts.append(s["ts_event"] // 1_000_000)  # ns → ms for Plotly datetime axis
         mid_vals.append((bp + ap) / 2)
         bid_vals.append(bp)
         ask_vals.append(ap)
@@ -430,10 +429,9 @@ def _coin_chart_json(iid: str, rolling: dict | None) -> str:
     return json.dumps({"ts": ts, "mid": mid_vals, "bid": bid_vals, "ask": ask_vals, "micro": micro_vals})
 
 
-def _render_live_coin_page(symbol: str, rolling: dict | None) -> str:
+def _render_live_coin_page(symbol: str) -> str:
     """Live indicator panel and 1s-polled Plotly chart — no Parquet read."""
-    with _METRICS_LOCK:
-        m = dict(_LIVE.get(symbol, {}))
+    m = dict(_LIVE.get(symbol, {}))
 
     def _row(label: str, key: str, fmt: str) -> str:
         v = m.get(key)
@@ -457,11 +455,6 @@ def _render_live_coin_page(symbol: str, rolling: dict | None) -> str:
         + _row("Sell#",          "sell_count",       ".0f")
         + _row("Avg trade size", "avg_trade_size",   ".4f")
         + "</table>"
-    )
-
-    standalone_note = (
-        "" if rolling is not None
-        else "<p><em>Live data unavailable - running standalone.</em></p>"
     )
 
     iid_js = json.dumps(symbol)  # XSS-safe JS string literal (T-02-03)
@@ -491,7 +484,6 @@ def _render_live_coin_page(symbol: str, rolling: dict | None) -> str:
 
     body = (
         f"<h1>{html.escape(symbol)} <small><a href='/chart/{html.escape(symbol)}'>historical chart</a></small></h1>"
-        + standalone_note
         + panel
         + chart_block
     )
@@ -499,8 +491,7 @@ def _render_live_coin_page(symbol: str, rolling: dict | None) -> str:
 
 
 def _render_live_page() -> str:
-    with _LOCK:
-        series = {name: list(points) for name, points in _SERIES.items()}
+    series = {name: list(points) for name, points in _SERIES.items()}
 
     fig = go.Figure()
     for name, points in series.items():
@@ -518,114 +509,19 @@ def _render_live_page() -> str:
     return _page("ml_signals live", body, refresh_seconds=1)
 
 
-
 def _trade_aggregates(snaps: list) -> tuple[float, float, int, int]:
     """Return (total_buy_vol, total_sell_vol, total_buy_count, total_sell_count) over window."""
     return (
-        sum(s.buy_volume for s in snaps),
-        sum(s.sell_volume for s in snaps),
-        sum(s.buy_count for s in snaps),
-        sum(s.sell_count for s in snaps),
+        sum(s["buy_volume"] for s in snaps),
+        sum(s["sell_volume"] for s in snaps),
+        sum(s["buy_count"] for s in snaps),
+        sum(s["sell_count"] for s in snaps),
     )
-
-
-def _metrics_from_rolling(rolling: dict) -> list[dict]:
-    """Compute live metrics from in-process 1s rolling snapshots — no Parquet read."""
-    now_ns = time.time_ns()
-    result = []
-    for iid, dq in list(rolling.items()):
-        if not dq:
-            continue
-        try:
-            snaps = list(dq)
-            latest = snaps[-1]
-
-            # Persistent incremental OFI — only new snapshots fed each tick, not full replay.
-            if iid not in _OFI_INDS:
-                _OFI_INDS[iid] = MultiLevelOFI(levels=10, window=50, zscore_window=_OFI_ZSCORE_WINDOW)
-            if iid not in _OFI_RAW_INDS:
-                _OFI_RAW_INDS[iid] = {
-                    3:  MultiLevelOFI(levels=3,  window=300),
-                    5:  MultiLevelOFI(levels=5,  window=300),
-                    10: MultiLevelOFI(levels=10, window=300),
-                }
-            last_fed = _LAST_FED.get(iid, 0)
-            new_snaps = [s for s in snaps if s.ts_event > last_fed]
-            if new_snaps and last_fed > 0 and (new_snaps[0].ts_event - last_fed) > 3_000_000_000:
-                # Gap >3s since last snapshot — reconnect detected. Clear stale _prev
-                # state so the next contribution isn't computed against pre-disconnect prices.
-                _OFI_INDS[iid].clear_prev_state()
-                for raw_ind in _OFI_RAW_INDS[iid].values():
-                    raw_ind.clear_prev_state()
-            for s in new_snaps:
-                _OFI_INDS[iid].update_raw(s.bid_prices, s.bid_sizes, s.ask_prices, s.ask_sizes)
-                for raw_ind in _OFI_RAW_INDS[iid].values():
-                    raw_ind.update_raw(s.bid_prices, s.bid_sizes, s.ask_prices, s.ask_sizes)
-            if snaps:
-                _LAST_FED[iid] = snaps[-1].ts_event
-            ofi_10_z = _OFI_INDS[iid].value if _OFI_INDS[iid].initialized else None
-            ofi_3  = _OFI_RAW_INDS[iid][3].value  if _OFI_RAW_INDS[iid][3].initialized  else None
-            ofi_5  = _OFI_RAW_INDS[iid][5].value  if _OFI_RAW_INDS[iid][5].initialized  else None
-            ofi_10 = _OFI_RAW_INDS[iid][10].value if _OFI_RAW_INDS[iid][10].initialized else None
-
-            # OBI is stateless — just the current book snapshot, no window needed.
-            obi3 = MultiLevelOBI(levels=3)
-            obi5 = MultiLevelOBI(levels=5)
-            obi10 = MultiLevelOBI(levels=10)
-            if latest.bid_sizes and latest.ask_sizes:
-                obi3.update_raw(latest.bid_sizes, latest.ask_sizes)
-                obi5.update_raw(latest.bid_sizes, latest.ask_sizes)
-                obi10.update_raw(latest.bid_sizes, latest.ask_sizes)
-            obi_3  = obi3.value  if obi3.initialized  else None
-            obi_5  = obi5.value  if obi5.initialized  else None
-            obi_10 = obi10.value if obi10.initialized else None
-            tb_vol, ts_vol, tb_cnt, ts_cnt = _trade_aggregates(snaps)
-            total_count = tb_cnt + ts_cnt
-            mid = (latest.bid_prices[0] + latest.ask_prices[0]) / 2 if latest.bid_prices and latest.ask_prices else None
-            has_tob = latest.bid_prices and latest.ask_prices and (latest.bid_sizes[0] + latest.ask_sizes[0]) > 0
-            microprice = (
-                (latest.bid_prices[0] * latest.ask_sizes[0] + latest.ask_prices[0] * latest.bid_sizes[0])
-                / (latest.bid_sizes[0] + latest.ask_sizes[0])
-                if has_tob else None
-            )
-            mids = [
-                (s.bid_prices[0] + s.ask_prices[0]) / 2
-                for s in snaps if s.bid_prices and s.ask_prices
-            ]
-            rets = [(mids[i] - mids[i - 1]) / mids[i - 1] for i in range(1, len(mids))]
-            volatility = statistics.stdev(rets) if len(rets) >= 2 else None
-            result.append({
-                "ts": now_ns,
-                "instrument_id": iid,
-                "_err": None,
-                "ofi": ofi_10,
-                "ofi_3": ofi_3,
-                "ofi_5": ofi_5,
-                "ofi_10": ofi_10,
-                "ofi_10_z": ofi_10_z,
-                "obi_3": obi_3,
-                "obi_5": obi_5,
-                "obi_10": obi_10,
-                "microprice": microprice,
-                "microprice_lean": (microprice - mid) if microprice is not None and mid is not None else None,
-                "spread": (latest.ask_prices[0] - latest.bid_prices[0]) if latest.ask_prices and latest.bid_prices else None,
-                "price": mid,
-                "volatility": volatility,
-                "cvd": tb_vol - ts_vol,
-                "volume_delta": latest.buy_volume - latest.sell_volume,
-                "buy_count": latest.buy_count,
-                "sell_count": latest.sell_count,
-                "avg_trade_size": (tb_vol + ts_vol) / total_count if total_count > 0 else None,
-            })
-        except Exception as e:
-            result.append({"instrument_id": iid, "ts": now_ns, "_err": str(e)})
-    return result
 
 
 def _rankings_json() -> str:
     """Return pre-formatted cell values for all live instruments as JSON."""
-    with _METRICS_LOCK:
-        rows = list(_LIVE.values())
+    rows = list(_LIVE.values())
     result = []
     for row in rows:
         cells: dict[str, dict] = {}
@@ -646,164 +542,311 @@ def _rankings_json() -> str:
     return json.dumps(result)
 
 
-def _fast_loop(catalog_path: str, rolling: dict | None = None) -> None:
-    """Update OFI/microprice/spread for all coins every second (rolling) or 5s (Parquet).
+def _ingest_batch(batch: list[dict]) -> None:
+    """Ingest a batch of snapshot dicts received from Redis; update rolling state and _LIVE."""
+    now_ns = time.time_ns()
+    for snap_dict in batch:
+        iid = snap_dict["instrument_id"]
+        _second_rolling[iid].append(snap_dict)
 
-    When `rolling` is provided (collector-embedded mode), reads from the in-process
-    1s snapshot buffer — no catalog I/O, always fresh.
-    Falls back to reading 60s of order book deltas from Parquet when running standalone.
+        # Initialize OFI indicators on first sight
+        if iid not in _OFI_INDS:
+            _OFI_INDS[iid] = MultiLevelOFI(levels=10, window=50, zscore_window=_OFI_ZSCORE_WINDOW)
+        if iid not in _OFI_RAW_INDS:
+            _OFI_RAW_INDS[iid] = {
+                3:  MultiLevelOFI(levels=3,  window=300),
+                5:  MultiLevelOFI(levels=5,  window=300),
+                10: MultiLevelOFI(levels=10, window=300),
+            }
+
+        # Gap detection: >3s gap means collector reconnected — clear stale prev state
+        last_fed = _LAST_FED.get(iid, 0)
+        if last_fed > 0 and (snap_dict["ts_event"] - last_fed) > 3_000_000_000:
+            _OFI_INDS[iid].clear_prev_state()
+            for raw_ind in _OFI_RAW_INDS[iid].values():
+                raw_ind.clear_prev_state()
+
+        # Feed OFI incrementally (one new snap per tick — O(1), not O(window))
+        _OFI_INDS[iid].update_raw(
+            snap_dict["bid_prices"], snap_dict["bid_sizes"],
+            snap_dict["ask_prices"], snap_dict["ask_sizes"],
+        )
+        for raw_ind in _OFI_RAW_INDS[iid].values():
+            raw_ind.update_raw(
+                snap_dict["bid_prices"], snap_dict["bid_sizes"],
+                snap_dict["ask_prices"], snap_dict["ask_sizes"],
+            )
+        _LAST_FED[iid] = snap_dict["ts_event"]
+
+        # Compute window metrics from rolling buffer (plain dict access)
+        snaps = list(_second_rolling[iid])
+        latest = snap_dict  # already appended above
+
+        ofi_10_z = _OFI_INDS[iid].value if _OFI_INDS[iid].initialized else None
+        ofi_3  = _OFI_RAW_INDS[iid][3].value  if _OFI_RAW_INDS[iid][3].initialized  else None
+        ofi_5  = _OFI_RAW_INDS[iid][5].value  if _OFI_RAW_INDS[iid][5].initialized  else None
+        ofi_10 = _OFI_RAW_INDS[iid][10].value if _OFI_RAW_INDS[iid][10].initialized else None
+
+        obi3 = MultiLevelOBI(levels=3)
+        obi5 = MultiLevelOBI(levels=5)
+        obi10 = MultiLevelOBI(levels=10)
+        if latest["bid_sizes"] and latest["ask_sizes"]:
+            obi3.update_raw(latest["bid_sizes"], latest["ask_sizes"])
+            obi5.update_raw(latest["bid_sizes"], latest["ask_sizes"])
+            obi10.update_raw(latest["bid_sizes"], latest["ask_sizes"])
+        obi_3  = obi3.value  if obi3.initialized  else None
+        obi_5  = obi5.value  if obi5.initialized  else None
+        obi_10 = obi10.value if obi10.initialized else None
+
+        tb_vol, ts_vol, tb_cnt, ts_cnt = _trade_aggregates(snaps)
+        total_count = tb_cnt + ts_cnt
+        mid = (
+            (latest["bid_prices"][0] + latest["ask_prices"][0]) / 2
+            if latest["bid_prices"] and latest["ask_prices"] else None
+        )
+        has_tob = (
+            latest["bid_prices"] and latest["ask_prices"]
+            and (latest["bid_sizes"][0] + latest["ask_sizes"][0]) > 0
+        )
+        microprice = (
+            (
+                latest["bid_prices"][0] * latest["ask_sizes"][0]
+                + latest["ask_prices"][0] * latest["bid_sizes"][0]
+            ) / (latest["bid_sizes"][0] + latest["ask_sizes"][0])
+            if has_tob else None
+        )
+        mids = [
+            (s["bid_prices"][0] + s["ask_prices"][0]) / 2
+            for s in snaps if s["bid_prices"] and s["ask_prices"]
+        ]
+        rets = [(mids[i] - mids[i - 1]) / mids[i - 1] for i in range(1, len(mids))]
+        volatility = statistics.stdev(rets) if len(rets) >= 2 else None
+
+        _LIVE[iid] = {
+            "ts": now_ns,
+            "instrument_id": iid,
+            "_err": None,
+            "ofi": ofi_10,
+            "ofi_3": ofi_3,
+            "ofi_5": ofi_5,
+            "ofi_10": ofi_10,
+            "ofi_10_z": ofi_10_z,
+            "obi_3": obi_3,
+            "obi_5": obi_5,
+            "obi_10": obi_10,
+            "microprice": microprice,
+            "microprice_lean": (microprice - mid) if microprice is not None and mid is not None else None,
+            "spread": (
+                latest["ask_prices"][0] - latest["bid_prices"][0]
+                if latest["ask_prices"] and latest["bid_prices"] else None
+            ),
+            "price": mid,
+            "volatility": volatility,
+            "cvd": tb_vol - ts_vol,
+            "volume_delta": latest["buy_volume"] - latest["sell_volume"],
+            "buy_count": latest["buy_count"],
+            "sell_count": latest["sell_count"],
+            "avg_trade_size": (tb_vol + ts_vol) / total_count if total_count > 0 else None,
+        }
+
+    _fanout_to_sse_clients()
+
+
+def _fanout_to_sse_clients() -> None:
+    """Push current rankings JSON to all connected SSE clients; drop slow clients."""
+    payload = b"data: " + _rankings_json().encode() + b"\n\n"
+    for q in list(_SSE_QUEUES):
+        try:
+            q.put_nowait(payload)
+        except asyncio.QueueFull:
+            pass  # T-03-02: drop for slow clients — subscriber never blocks
+
+
+async def sse_handler(request: web.Request) -> web.StreamResponse:
+    """Server-Sent Events handler — one persistent connection per browser tab."""
+    q: asyncio.Queue[bytes] = asyncio.Queue(maxsize=2)
+    _SSE_QUEUES.add(q)
+    resp = web.StreamResponse()
+    resp.headers["Content-Type"] = "text/event-stream"
+    resp.headers["Cache-Control"] = "no-cache"
+    resp.headers["X-Accel-Buffering"] = "no"
+    await resp.prepare(request)
+    try:
+        while True:
+            try:
+                data = await asyncio.wait_for(q.get(), timeout=15.0)
+                await resp.write(data)
+            except asyncio.TimeoutError:
+                await resp.write(b": keepalive\n\n")
+    except (ConnectionResetError, ConnectionAbortedError, asyncio.CancelledError):
+        pass
+    finally:
+        _SSE_QUEUES.discard(q)
+    return resp
+
+
+# --- aiohttp route handlers ---
+
+
+async def rankings_handler(request: web.Request) -> web.Response:
+    sort_col = request.rel_url.query.get("sort", "ofi_10_z")
+    direction = request.rel_url.query.get("dir", "desc")
+    return web.Response(text=_render_rankings_page(sort_col, direction), content_type="text/html")
+
+
+async def stream_handler(request: web.Request) -> web.StreamResponse:
+    return await sse_handler(request)
+
+
+async def coin_handler(request: web.Request) -> web.Response:
+    symbol = request.match_info["id"]
+    if symbol not in list_instruments(CATALOG_PATH):
+        raise web.HTTPNotFound()
+    return web.Response(text=_render_live_coin_page(symbol), content_type="text/html")
+
+
+async def coin_json_handler(request: web.Request) -> web.Response:
+    symbol = request.match_info["id"]
+    return web.Response(text=_coin_chart_json(symbol), content_type="application/json")
+
+
+async def chart_handler(request: web.Request) -> web.Response:
+    symbol = request.match_info["id"]
+    qs = dict(request.rel_url.query)
+    import datetime as _dt
+    now_ms = int(time.time() * 1000)
+
+    def _parse_dt(key: str, default_ms: int) -> int:
+        v = qs.get(key)
+        if v:
+            try:
+                return int(_dt.datetime.fromisoformat(v).timestamp() * 1000)
+            except ValueError:
+                pass
+        return default_ms
+
+    start_ms = _parse_dt("start", now_ms - 4 * 3600 * 1000)
+    end_ms = _parse_dt("end", now_ms)
+    html_str = await asyncio.to_thread(_render_chart_page, symbol, start_ms, end_ms)
+    return web.Response(text=html_str, content_type="text/html")
+
+
+async def history_handler(request: web.Request) -> web.Response:
+    symbol = request.match_info["id"]
+    html_str = await asyncio.to_thread(_render_history_page, symbol)
+    return web.Response(text=html_str, content_type="text/html")
+
+
+async def live_handler(request: web.Request) -> web.Response:
+    return web.Response(text=_render_live_page(), content_type="text/html")
+
+
+# --- background tasks ---
+
+
+@asynccontextmanager
+async def redis_subscriber_ctx(app: web.Application):  # type: ignore[type-arg]
+    """Lifecycle context: run _redis_listener as a background task."""
+    task = asyncio.create_task(_redis_listener(app["redis_url"]))
+    try:
+        yield
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+async def _redis_listener(redis_url: str) -> None:
+    """Subscribe to snapshots:1s and call _ingest_batch on each message.
+
+    Outer while True reconnects on any non-cancellation exception (ARCH-03).
+    Malformed JSON is logged and skipped — subscriber always continues (T-03-01).
     """
     while True:
         try:
-            if rolling is not None:
-                interval = 1  # set before call so a first-call failure doesn't crash with NameError
-                book_metrics = _metrics_from_rolling(rolling)
-            else:
-                book_metrics = metrics_computer.compute_book_metrics_all(catalog_path)
-                interval = LIVE_INTERVAL_SECONDS
-            with _METRICS_LOCK:
-                for m in book_metrics:
-                    _LIVE[m["instrument_id"]] = {**_LIVE.get(m["instrument_id"], {}), **m}
-        except Exception:
-            logger.exception("Fast metrics loop failed")
-        time.sleep(interval)
+            async with aioredis.Redis.from_url(redis_url, decode_responses=True) as client:
+                pubsub = client.pubsub()
+                await pubsub.subscribe("snapshots:1s")
+                async for message in pubsub.listen():
+                    if message["type"] != "message":
+                        continue
+                    try:
+                        batch = json.loads(message["data"])
+                        _ingest_batch(batch)
+                    except Exception as exc:
+                        logger.warning("Redis message parse/ingest error: %s", exc)
+        except asyncio.CancelledError:
+            raise  # propagate cancellation cleanly
+        except Exception as exc:
+            logger.warning("Redis subscriber error — reconnecting in 2s: %s", exc)
+            await asyncio.sleep(2)
 
 
-def _slow_loop(catalog_path: str) -> None:
-    """Full snapshot (price/pct/vol + book metrics) every DB_WRITE_INTERVAL_SECONDS.
+@asynccontextmanager
+async def slow_loop_ctx(app: web.Application):  # type: ignore[type-arg]
+    """Lifecycle context: run _slow_loop_task as a background task."""
+    task = asyncio.create_task(_slow_loop_task(app["catalog_path"]))
+    try:
+        yield
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
 
-    Writes 1-min aggregates to SQLite for historical bookkeeping.
-    """
+
+async def _slow_loop_task(catalog_path: str) -> None:
+    """Full snapshot (price/pct/vol + book metrics) every DB_WRITE_INTERVAL_SECONDS."""
     db_path = str(Path(catalog_path).parent / "metrics.db")
     while True:
         try:
-            snapshots = metrics_computer.compute_all(catalog_path)
+            snapshots = await asyncio.to_thread(metrics_computer.compute_all, catalog_path)
             if snapshots:
-                with _METRICS_LOCK:
-                    for s in snapshots:
-                        _LIVE[s["instrument_id"]] = s
-                metrics_store.write(snapshots, db_path)
+                for s in snapshots:
+                    _LIVE[s["instrument_id"]] = s
+                await asyncio.to_thread(metrics_store.write, snapshots, db_path)
         except Exception:
             logger.exception("Slow metrics loop failed")
-        time.sleep(DB_WRITE_INTERVAL_SECONDS)
+        await asyncio.sleep(DB_WRITE_INTERVAL_SECONDS)
 
 
-class _Handler(BaseHTTPRequestHandler):
-    def do_GET(self) -> None:
-        try:
-            self._do_GET()
-        except BrokenPipeError:
-            pass  # client disconnected mid-response (JS poll fired a new request)
-
-    def _do_GET(self) -> None:
-        parsed = urlparse(self.path)
-        path = unquote(parsed.path)
-        qs = parse_qs(parsed.query)
-
-        if path == "/data/rankings":
-            payload = _rankings_json().encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
-            return
-        elif path == "/live":
-            html_doc = _render_live_page()
-        elif path.startswith("/history/"):
-            symbol = path.removeprefix("/history/")
-            html_doc = _render_history_page(symbol)
-        elif path.startswith("/data/coin/"):
-            symbol = path.removeprefix("/data/coin/")
-            payload = _coin_chart_json(symbol, _ROLLING).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(payload)))
-            self.end_headers()
-            self.wfile.write(payload)
-            return
-        elif path.startswith("/coin/"):
-            symbol = path.removeprefix("/coin/")
-            if symbol not in list_instruments(CATALOG_PATH):
-                self.send_response(404)
-                self.end_headers()
-                return
-            html_doc = _render_live_coin_page(symbol, _ROLLING)
-        elif path.startswith("/chart/"):
-            symbol = path.removeprefix("/chart/")
-            import datetime as _dt
-            def _parse_dt(key: str, default_ms: int) -> int:
-                v = qs.get(key, [None])[0]
-                if v:
-                    try:
-                        return int(_dt.datetime.fromisoformat(v).timestamp() * 1000)
-                    except ValueError:
-                        pass
-                return default_ms
-            now_ms   = int(time.time() * 1000)
-            start_ms = _parse_dt("start", now_ms - 4 * 3600 * 1000)
-            end_ms   = _parse_dt("end",   now_ms)
-            html_doc = _render_chart_page(symbol, start_ms, end_ms)
-        else:
-            sort_col = qs.get("sort", ["ofi"])[0]
-            direction = qs.get("dir", ["desc"])[0]
-            html_doc = _render_rankings_page(sort_col, direction)
-
-        body = html_doc.encode()
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def log_message(self, *args: object) -> None:
-        pass  # ponytail: silence per-request access logs
-
-
-def serve_in_background(port: int = 8765, catalog_path: str = CATALOG_PATH, rolling: dict | None = None) -> HTTPServer:
-    global CATALOG_PATH
-    global _ROLLING
-    CATALOG_PATH = catalog_path
-    _ROLLING = rolling
-    # Pre-populate _LIVE from the last SQLite snapshot so the rankings table
-    # shows something immediately on startup instead of waiting for the first
-    # compute cycle.
+def make_app(redis_url: str, catalog_path: str) -> web.Application:
+    """Return a configured aiohttp Application with all routes and background tasks."""
+    # Pre-populate _LIVE from last SQLite snapshot so rankings show immediately
     db_path = str(Path(catalog_path).parent / "metrics.db")
     try:
         rows = metrics_store.latest(db_path)
-        with _METRICS_LOCK:
-            for r in rows:
-                _LIVE[r["instrument_id"]] = r
+        for r in rows:
+            _LIVE[r["instrument_id"]] = r
         if rows:
             logger.info("Pre-loaded %d instruments from metrics.db", len(rows))
     except Exception:
         logger.warning("Could not pre-load metrics.db — starting cold", exc_info=True)
 
-    HTTPServer.allow_reuse_address = True
-    server = HTTPServer(("127.0.0.1", port), _Handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    threading.Thread(target=_fast_loop, args=(catalog_path, rolling), daemon=True).start()
-    threading.Thread(target=_slow_loop, args=(catalog_path,), daemon=True).start()
-    return server
+    app = web.Application()
+    app["redis_url"] = redis_url
+    app["catalog_path"] = catalog_path
+
+    app.cleanup_ctx.append(redis_subscriber_ctx)
+    app.cleanup_ctx.append(slow_loop_ctx)
+
+    app.router.add_get("/", rankings_handler)
+    app.router.add_get("/stream", stream_handler)
+    app.router.add_get("/coin/{id}", coin_handler)
+    app.router.add_get("/data/coin/{id}", coin_json_handler)
+    app.router.add_get("/chart/{id}", chart_handler)
+    app.router.add_get("/history/{id}", history_handler)
+    app.router.add_get("/live", live_handler)
+
+    return app
 
 
 if __name__ == "__main__":
-    import argparse
-    import webbrowser
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--port", type=int, default=8765)
-    parser.add_argument("--catalog", default=CATALOG_PATH)
-    parser.add_argument("--open", action="store_true", help="Open browser after server starts")
-    args = parser.parse_args()
-
-    serve_in_background(port=args.port, catalog_path=args.catalog)
-    url = f"http://localhost:{args.port}"
-    print(f"Dashboard running at {url}")
-    if args.open:
-        webbrowser.open(url)
-    try:
-        while True:
-            time.sleep(3600)
-    except KeyboardInterrupt:
-        pass
+    logging.basicConfig(level=logging.INFO)
+    redis_url = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
+    catalog_path = os.environ.get("CATALOG_PATH", "troll/dydx_collector/catalog")
+    port = int(os.environ.get("DASHBOARD_PORT", "8765"))
+    web.run_app(make_app(redis_url, catalog_path), host="0.0.0.0", port=port)
