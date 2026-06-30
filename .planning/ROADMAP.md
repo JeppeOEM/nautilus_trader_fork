@@ -78,3 +78,22 @@ Milestone v1.0 delivers a single artifact: `troll/CLAUDE.md`, a set of actionabl
 | 1. Project Guardrails | 1/1 | Complete    | 2026-06-27 |
 | 2. Dashboard Upgrade | 2/2 | Complete   | 2026-06-28 |
 | 3. Collector/Dashboard Split | 1/1 | Complete   | 2026-06-29 |
+
+### Phase 4: Signal Library + Live Dashboard Fix
+
+**Goal:** Fix the dashboard's 1s live updates — the root cause is `_ingest_batch` blocking the event loop (OBI recreated fresh per call instead of kept as persistent state, plus synchronous compute running on the async loop thread). Fix: make OBI persistent like OFI already is, offload `_ingest_batch` to a thread so the event loop stays free for SSE writes. Also fix the slow loop overwriting 1s-fresh OFI/OBI values every 60s by splitting into separate fast (Redis) and slow (Parquet) caches merged at display time.
+**Depends on:** Phase 3
+**Requirements**: DASH-05, DASH-06, DASH-07, DASH-08
+**Success Criteria**:
+
+  1. Rankings table in browser updates visibly every ~1s — SSE frames arrive on schedule with no batching or skipping
+  2. `/coin/{id}` page updates every ~1s — no timer drift or missed frames
+  3. `_ingest_batch` no longer creates `MultiLevelOBI` instances per call — OBI state is persistent across calls (same pattern as `_OFI_INDS`)
+  4. `_slow_loop_task` never overwrites ofi/obi/microprice/spread/cvd/volume_delta keys — slow loop writes only to a separate `_LIVE_SLOW` dict; rankings merge both
+  5. SSE drops are logged with a rate counter (not silently discarded)
+
+**Plans:** 1 plan
+
+Plans:
+
+- [ ] 04-01-PLAN.md — Persistent OBI (_OBI_INDS), offload _ingest_batch via asyncio.to_thread, split _LIVE_FAST/_LIVE_SLOW with merge-on-read, log SSE drops (4 tasks)
