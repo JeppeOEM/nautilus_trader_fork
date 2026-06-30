@@ -8,7 +8,7 @@ open_interest_poll_seconds = 300
 # Liquidity tiers
 # Coins with open interest >= liquidity_min_oi_usd are subscribed (trades + orderbook).
 # Coins below the threshold are tracked in an illiquid pool and re-checked periodically.
-liquidity_min_oi_usd = 100000      # $100k OI = subscribed
+liquidity_min_oi_usd = 1000        # $1k 24h volume = subscribed (field is volume24H in USD, not openInterest in tokens)
 liquidity_check_seconds = 1800     # re-check illiquid coins every 30 min
 
 # Data retention
@@ -17,10 +17,11 @@ liquidity_check_seconds = 1800     # re-check illiquid coins every 30 min
 non_config_retain_hours = 4
 
 # Pinned instruments: kept forever regardless of liquidity tier.
-# Add [[instruments]] entries here for coins you want to study long-term.
-# Example:
-# [[instruments]]
-# id = "ETH-USD-PERP.DYDX"
-#
-# [[instruments]]
-# id = "BTC-USD-PERP.DYDX"
+[[instruments]]
+id = "BTC-USD-PERP.DYDX"
+
+[[instruments]]
+id = "ETH-USD-PERP.DYDX"
+
+[[instruments]]
+id = "SOL-USD-PERP.DYDX"

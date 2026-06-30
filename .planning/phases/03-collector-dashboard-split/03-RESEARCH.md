@@ -640,22 +640,16 @@ def _sse_push(rankings_json: str) -> None:
 | A2 | The dashboard image can reuse the collector Dockerfile with a different CMD | Docker Compose | True if both need the same Python deps. If dashboard-only deps (e.g. aiohttp) bloat the collector image, a second Dockerfile may be warranted. |
 | A3 | One Redis message per second per batch (all instruments in one JSON array) is sufficient throughput | Snapshot serialization | At 100 active instruments with 20 bid/ask levels each, one message ≈ 100 × (20+20) × 2 floats × 8 bytes ≈ ~130 KB. This is well within Redis pub/sub limits (default 1 MB client buffer). |
 
-## Open Questions
+## Open Questions (RESOLVED)
 
 1. **Does the dYdX Rust/PyO3 client require `network_mode: host`?**
-   - What we know: The collector dockerfile has no host-network-specific code; it connects to external dYdX APIs outbound.
-   - What's unclear: Whether `nautilus_pyo3.DydxWebSocketClient` binds any local port that requires host mode.
-   - Recommendation: Test by switching collector to bridge network in a local run and verifying the dYdX WebSocket connection succeeds.
+   - RESOLVED: Plan retains `network_mode: host` for the collector as the conservative default (Assumption A1 per Assumptions Log). Switching to bridge is deferred until A1 is verified by a production test run. Dashboard also uses host mode so it can bind port 8765 directly without a ports: mapping conflict.
 
 2. **Should `/data/coin/{id}` (live per-coin chart data) also use SSE or stay as XHR polling?**
-   - What we know: The current coin page uses `setInterval(poll, 1000)` on `/data/coin/{id}`.
-   - What's unclear: Whether converting this to a per-coin SSE stream is worth the added complexity.
-   - Recommendation: Leave `/data/coin/{id}` as XHR polling for now (YAGNI — the rankings SSE is the high-frequency path). Convert later if per-coin latency becomes an issue.
+   - RESOLVED: `/data/coin/{id}` stays as XHR polling per YAGNI. Rankings SSE is the high-frequency path; per-coin chart data is low-frequency enough that 1s XHR is fine.
 
 3. **Redis `maxmemory` and client buffer limits with 100+ instruments at 1 Hz?**
-   - What we know: One message per second ≈ 50-130 KB per tick, ~6 MB/min. Redis default `client-output-buffer-limit` for pub/sub is 32 MB hard / 8 MB soft. At 1 subscriber this is not an issue.
-   - What's unclear: Behavior under a sustained slow subscriber (dashboard restarting).
-   - Recommendation: No custom Redis config needed for this throughput. The `redis:7-alpine` default config is sufficient.
+   - RESOLVED: Not an issue at this throughput. One message ≈ 50–130 KB/s with 1 subscriber is well within Redis defaults (32 MB hard limit). No custom Redis config needed.
 
 ## Environment Availability
 

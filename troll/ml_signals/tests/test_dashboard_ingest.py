@@ -18,7 +18,8 @@ import pytest
 
 import ml_signals.dashboard
 from ml_signals.dashboard import _LAST_FED
-from ml_signals.dashboard import _LIVE
+from ml_signals.dashboard import _LIVE_FAST
+from ml_signals.dashboard import _OBI_INDS
 from ml_signals.dashboard import _OFI_INDS
 from ml_signals.dashboard import _OFI_RAW_INDS
 from ml_signals.dashboard import _ingest_batch
@@ -29,7 +30,8 @@ _IID = "BTC-USD-PERP.DYDX"
 
 def _reset_state() -> None:
     """Clear all module-level state before each test."""
-    _LIVE.clear()
+    _LIVE_FAST.clear()
+    _OBI_INDS.clear()
     _OFI_INDS.clear()
     _OFI_RAW_INDS.clear()
     _LAST_FED.clear()
@@ -106,7 +108,7 @@ def test_ingest_updates_live_with_required_keys() -> None:
     _reset_state()
     snap = _default_snap()
     _ingest_batch([snap])
-    live = _LIVE[_IID]
+    live = _LIVE_FAST[_IID]
     for key in ("instrument_id", "microprice", "spread", "cvd", "buy_count", "sell_count"):
         assert key in live, f"Missing key: {key}"
 
@@ -166,7 +168,7 @@ def test_cvd_is_sum_over_window() -> None:
     _ingest_batch([snap1])
     _ingest_batch([snap2])
     expected_cvd = (10.0 + 3.0) - (4.0 + 7.0)  # sum over window
-    assert _LIVE[_IID]["cvd"] == pytest.approx(expected_cvd)
+    assert _LIVE_FAST[_IID]["cvd"] == pytest.approx(expected_cvd)
 
 
 def test_volume_delta_is_last_snap_only() -> None:
@@ -186,4 +188,14 @@ def test_volume_delta_is_last_snap_only() -> None:
     _ingest_batch([snap1])
     _ingest_batch([snap2])
     # volume_delta = last snap only: 3.0 - 7.0 = -4.0
-    assert _LIVE[_IID]["volume_delta"] == pytest.approx(3.0 - 7.0)
+    assert _LIVE_FAST[_IID]["volume_delta"] == pytest.approx(3.0 - 7.0)
+
+
+def test_obi_instances_persist_across_ingest_calls() -> None:
+    _reset_state()
+    snap1 = _default_snap(ts_event=1_000_000_000)
+    _ingest_batch([snap1])
+    obi10_id = id(_OBI_INDS[_IID][10])
+    snap2 = _default_snap(ts_event=2_000_000_000)
+    _ingest_batch([snap2])
+    assert id(_OBI_INDS[_IID][10]) == obi10_id, "OBI instance was recreated — should be reused"

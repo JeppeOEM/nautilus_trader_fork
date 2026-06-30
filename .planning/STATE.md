@@ -40,6 +40,10 @@ Progress: ██████████ 100%
 
 None.
 
+### Roadmap Evolution
+
+- Phase 4 added: Signal Library + Live Dashboard Fix — extract LiveMetricsEngine, fix event-loop blocking, split 1s/slow caches, SSE for coin page
+
 ### Session Continuity
 
-Both phases complete. Next: define Phase 3 (strategy research / backtest pipeline).
+All 3 phases complete. Phase 4 added: signal library extraction + live dashboard SSE fix.

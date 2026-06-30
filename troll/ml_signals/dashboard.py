@@ -21,8 +21,8 @@ via Server-Sent Events at /stream. Reconnects to Redis automatically after colle
 restart (ARCH-03).
 
 Pages:
-- `/`               rankings table — all coins sortable by any metric (SSE-updated)
-- `/stream`         SSE endpoint — push rankings JSON to all connected browsers
+- `/`               rankings table — all coins sortable by any metric (1s poll)
+- `/api/rankings`   JSON endpoint polled every 1s by the rankings page JS
 - `/coin/{id}`      live indicator panel + 1s-polled mid/bid/ask/microprice chart
 - `/chart/{id}`     per-event microstructure chart (Parquet-backed, date-picker controlled)
 - `/history/{id}`   31-day metric history charts for one coin
@@ -46,8 +46,6 @@ from collections import defaultdict
 from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
-from urllib.parse import parse_qs
-from urllib.parse import unquote
 from urllib.parse import urlparse
 
 import pandas as pd
@@ -95,12 +93,13 @@ RANKING_COLS: list[tuple[str, str, object, object]] = [
 
 _SERIES: dict[str, deque[tuple[int, float]]] = defaultdict(lambda: deque(maxlen=2000))
 
-# In-memory live snapshot cache — updated from Redis snapshots every second.
-# Rankings page reads from here via SSE so it never blocks on a DB query.
-_LIVE: dict[str, dict] = {}  # instrument_id → latest snapshot
+# 1s-fresh metrics from Redis — written by _ingest_batch, wins on overlap.
+_LIVE_FAST: dict[str, dict] = {}
+# Parquet/SQLite-derived metrics — written by _slow_loop_task and make_app pre-load.
+_LIVE_SLOW: dict[str, dict] = {}
 
-# Per-client SSE queues. Fanout drops messages for slow clients (QueueFull).
-_SSE_QUEUES: set[asyncio.Queue] = set()
+_INGEST_COUNT: int = 0       # total batches ingested; increments ~1/s; visible in API
+_LAST_INGEST_TS: float = 0.0  # wall-clock seconds of last successful ingest
 
 # Rolling 1s snapshots received from Redis (plain dicts from DydxSecondSnapshot.to_dict()).
 _second_rolling: dict[str, deque] = defaultdict(lambda: deque(maxlen=300))
@@ -109,18 +108,25 @@ _second_rolling: dict[str, deque] = defaultdict(lambda: deque(maxlen=300))
 _OFI_ZSCORE_WINDOW = 3600  # 1 hour of 1s readings to establish mean/std
 _OFI_INDS: dict[str, MultiLevelOFI] = {}              # OFI10 with z-score
 _OFI_RAW_INDS: dict[str, dict[int, MultiLevelOFI]] = {}  # raw OFI at levels 3, 5, 10
+_OBI_INDS: dict[str, dict[int, MultiLevelOBI]] = {}   # persistent OBI at levels 3, 5, 10
 _LAST_FED: dict[str, int] = {}                        # instrument_id → ts_event of last fed snap
 
 _NAV = '<p><a href="/">Rankings</a> | <a href="/live">Live signals</a></p>'
 
 
-def _split_tiers(catalog_path: str) -> tuple[set[str], set[str]]:
-    """
-    Return (subscribed_iids, illiquid_iids) by checking trade_tick directory presence.
+def _merged_live(iid: str) -> dict:
+    """Merge slow and fast caches; fast wins on key overlap."""
+    return {**_LIVE_SLOW.get(iid, {}), **_LIVE_FAST.get(iid, {})}
 
-    Subscribed = has trade_tick data (collector is writing trades for this coin).
-    Illiquid   = appears in catalog (via mark/index price) but no trade data.
-    """
+
+def _merged_rows() -> list[dict]:
+    """All instruments from both caches, merged per instrument."""
+    all_iids = _LIVE_SLOW.keys() | _LIVE_FAST.keys()
+    return [_merged_live(iid) for iid in all_iids]
+
+
+def _split_tiers(catalog_path: str) -> tuple[set[str], set[str]]:
+    """Return (subscribed_iids, illiquid_iids) by checking trade_tick directory presence."""
     import glob
     import os as _os
     subscribed: set[str] = set()
@@ -128,6 +134,19 @@ def _split_tiers(catalog_path: str) -> tuple[set[str], set[str]]:
         subscribed.add(Path(path).name)
     all_iids = set(list_instruments(catalog_path))
     return subscribed, all_iids - subscribed
+
+
+_TIER_CACHE: tuple[set[str], set[str]] | None = None
+_TIER_CACHE_TS: float = 0.0
+_TIER_TTL: float = 1800.0  # re-scan every 30 min
+
+
+def _get_tiers() -> tuple[set[str], set[str]]:
+    global _TIER_CACHE, _TIER_CACHE_TS
+    if _TIER_CACHE is None or time.time() - _TIER_CACHE_TS > _TIER_TTL:
+        _TIER_CACHE = _split_tiers(CATALOG_PATH)
+        _TIER_CACHE_TS = time.time()
+    return _TIER_CACHE
 
 
 _CSS = """
@@ -141,9 +160,160 @@ th { background: #161b22; position: sticky; top: 0; }
 th a { color: #c9d1d9; }
 tr:hover td { background: #161b22; }
 td:first-child, th:first-child { text-align: left; }
-.sort-active { color: #f0883e; }
 </style>
 """
+
+_INDEX_HTML = """<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>dYdX Monitor</title>
+<style>
+body{font-family:monospace;font-size:13px;margin:20px;background:#0d1117;color:#c9d1d9}
+a{color:#58a6ff;cursor:pointer;text-decoration:none}
+a:hover{text-decoration:underline}
+table{border-collapse:collapse;width:100%}
+th,td{padding:6px 12px;text-align:right;border-bottom:1px solid #21262d}
+th{background:#161b22;position:sticky;top:0}
+tr:hover td{background:#161b22}
+td:first-child,th:first-child{text-align:left}
+#status{color:#8b949e;font-size:11px;margin:4px 0 10px}
+</style>
+</head>
+<body>
+<p><a onclick="showRankings();return false" href="/">Rankings</a> | <a href="/live">Live signals</a></p>
+<div id="status">Loading…</div>
+<div id="app"></div>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<script>
+var COLS=[
+  ["ofi_10_z","OFI10z"],["obi_10","OBI10"],["obi_5","OBI5"],["obi_3","OBI3"],
+  ["cvd","CVD"],["spread","Spread"],["microprice_lean","u lean"],
+  ["volume_delta","Vol d"],["buy_count","Buy#"],["sell_count","Sell#"],
+  ["price","Price"],["pct_1h","1h %"],["pct_24h","24h %"],["volatility","Vol"]
+];
+var IND=[
+  ["ofi_10","OFI10"],["ofi_5","OFI5"],["ofi_3","OFI3"],
+  ["obi_10","OBI10"],["obi_5","OBI5"],["obi_3","OBI3"],
+  ["microprice","Microprice"],["microprice_lean","u lean"],
+  ["spread","Spread"],["cvd","CVD"],["volume_delta","Vol delta"],
+  ["buy_count","Buy#"],["sell_count","Sell#"],["avg_trade_size","Avg size"]
+];
+var timer=null;
+
+function esc(s){
+  return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+}
+function setStatus(s){document.getElementById("status").innerHTML=s;}
+function setApp(h){document.getElementById("app").innerHTML=h;}
+
+function showRankings(){
+  clearInterval(timer);
+  history.pushState({},"","/");
+  pollRankings();
+  timer=setInterval(pollRankings,5000);
+}
+
+function pollRankings(){
+  fetch("/api/rankings")
+    .then(function(r){return r.json();})
+    .then(function(data){renderRankings(data.rows,data.ingest_count,data.age_s,data.stale);})
+    .catch(function(err){setStatus("Fetch error: "+err);});
+}
+
+function renderRankings(rows,ingestCount,ageS,stale){
+  var sub=rows.filter(function(r){return r.tier==="subscribed";});
+  var ill=rows.filter(function(r){return r.tier==="illiquid";});
+  var hdr="<tr><th>#</th><th>Instrument</th>"
+    +COLS.map(function(c){return "<th>"+esc(c[1])+"</th>";}).join("")
+    +"<th>History</th></tr>";
+  var tbody=sub.map(function(row,i){
+    var iid=row.instrument_id;
+    var label=iid.split("-").slice(0,2).join("-");
+    var cells=COLS.map(function(c){
+      var v=row.cells[c[0]];
+      if(!v||!v.text||v.text==="\\u2014")return "<td>&mdash;</td>";
+      var col=v.color?' style="color:'+esc(v.color)+'"':"";
+      return "<td"+col+">"+esc(v.text)+"</td>";
+    }).join("");
+    return "<tr><td>"+(i+1)+"</td>"
+      +"<td><a onclick=\\"showCoin('"+esc(iid)+"');return false\\" href=\\"/coin/"+esc(iid)+"\\">"+esc(label)+"</a>"
+      +" <small><a href=\\"/chart/"+esc(iid)+"\\">chart</a></small></td>"
+      +cells
+      +"<td><a href=\\"/history/"+esc(iid)+"\\">31d</a></td></tr>";
+  }).join("");
+  var chips=ill.map(function(r){
+    var iid=r.instrument_id;
+    var label=iid.split("-").slice(0,2).join("-");
+    return "<a href=\\"/chart/"+esc(iid)+"\\" style=\\"display:inline-block;margin:3px;padding:2px 8px;"
+      +"background:#161b22;border:1px solid #30363d;border-radius:4px\\">"+esc(label)+"</a>";
+  }).join("");
+  setApp("<h1>dYdX Monitor</h1>"
+    +"<h2>Subscribed ("+sub.length+")</h2>"
+    +"<table>"+hdr+tbody+"</table>"
+    +"<h2>Illiquid ("+ill.length+")</h2>"
+    +"<div style=\\"line-height:2.4\\">"+chips+"</div>");
+  var staleTxt=stale?" ⚠️ STALE (no data "+ageS+"s)":" ↺"+ingestCount;
+  var col=stale?"color:#f85149":"color:#3fb950";
+  setStatus("Updated "+new Date().toLocaleTimeString()+" — "+sub.length+" instruments — <span style=\\""+col+"\\">"+esc(staleTxt)+"</span>");
+}
+
+function showCoin(iid){
+  clearInterval(timer);
+  history.pushState({iid:iid},"","/coin/"+encodeURIComponent(iid));
+  pollCoin(iid);
+  timer=setInterval(function(){pollCoin(iid);},5000);
+}
+
+function pollCoin(iid){
+  Promise.all([
+    fetch("/data/live/"+encodeURIComponent(iid)).then(function(r){return r.json();}),
+    fetch("/data/coin/"+encodeURIComponent(iid)).then(function(r){return r.json();})
+  ]).then(function(res){
+    renderCoin(iid,res[0],res[1]);
+    setStatus("Updated "+new Date().toLocaleTimeString());
+  }).catch(function(err){setStatus("Error: "+err);});
+}
+
+function renderCoin(iid,ind,chart){
+  var label=iid.split("-").slice(0,2).join("-");
+  var rows=IND.map(function(k){
+    var v=ind[k[0]];
+    return "<tr><td>"+esc(k[1])+"</td><td>"+(v!=null?esc(String(v)):"&mdash;")+"</td></tr>";
+  }).join("");
+  setApp("<h1>"+esc(label)
+    +" <small><a href=\\"/chart/"+esc(iid)+"\\">chart</a>"
+    +" | <a onclick=\\"showRankings();return false\\" href=\\"/\\">back</a></small></h1>"
+    +"<h2>Indicators</h2><table>"+rows+"</table>"
+    +"<div id=\\"live-chart\\" style=\\"height:350px;margin-top:16px\\"></div>");
+  if(chart.ts&&chart.ts.length){
+    var x=chart.ts.map(function(t){return new Date(t);});
+    Plotly.react("live-chart",[
+      {x:x,y:chart.mid, name:"mid",        mode:"lines",line:{color:"#aaa",width:1}},
+      {x:x,y:chart.bid, name:"bid",        mode:"lines",line:{color:"#26a69a",width:1}},
+      {x:x,y:chart.ask, name:"ask",        mode:"lines",line:{color:"#ef5350",width:1}},
+      {x:x,y:chart.micro,name:"microprice",mode:"lines",line:{color:"#f0883e",width:1.5,dash:"dot"}}
+    ],{height:350,template:"plotly_dark",xaxis:{type:"date"},
+       margin:{t:30,b:30},legend:{orientation:"h"}});
+  }
+}
+
+window.onpopstate=function(){
+  if(location.pathname.startsWith("/coin/")){
+    showCoin(decodeURIComponent(location.pathname.slice(6)));
+  }else{
+    showRankings();
+  }
+};
+
+if(location.pathname.startsWith("/coin/")){
+  showCoin(decodeURIComponent(location.pathname.slice(6)));
+}else{
+  showRankings();
+}
+</script>
+</body>
+</html>"""
 
 
 def record(name: str, value: float, ts_event: int) -> None:
@@ -157,122 +327,6 @@ def _page(title: str, body: str, refresh_seconds: int = 60) -> str:
         f"{_CSS}</head>"
         f"<body>{_NAV}{body}</body></html>"
     )
-
-
-def _render_rankings_page(sort_col: str = "ofi_10_z", direction: str = "desc") -> str:
-    rows = list(_LIVE.values())
-    if not rows:  # fallback at startup before first compute cycle finishes
-        db_path = str(Path(CATALOG_PATH).parent / "metrics.db")
-        rows = metrics_store.latest(db_path)
-
-    subscribed_iids, illiquid_iids = _split_tiers(CATALOG_PATH)
-    subscribed_rows = [r for r in rows if r["instrument_id"] in subscribed_iids]
-
-    valid_cols = {k for k, *_ in RANKING_COLS}
-    if sort_col not in valid_cols:
-        sort_col = "ofi_10_z"
-    reverse = direction != "asc"
-    subscribed_rows.sort(
-        key=lambda r: (r.get(sort_col) is None, r.get(sort_col) or 0.0),
-        reverse=reverse,
-    )
-
-    def _sort_link(col: str, label: str) -> str:
-        new_dir = "asc" if (col == sort_col and direction == "desc") else "desc"
-        active = ' class="sort-active"' if col == sort_col else ""
-        arrow = (" ↓" if direction == "desc" else " ↑") if col == sort_col else ""
-        return f'<a href="/?sort={col}&dir={new_dir}"{active}>{html.escape(label)}{arrow}</a>'
-
-    header = (
-        "<tr><th>#</th>"
-        f"<th>{_sort_link('instrument_id', 'Instrument')}</th>"
-        + "".join(f"<th>{_sort_link(k, label)}</th>" for k, label, *_ in RANKING_COLS)
-        + "<th>History</th></tr>"
-    )
-
-    def _cell(key: str, iid_raw: str, row: dict, fmt_fn: object, color_fn: object) -> str:
-        attr = f' data-iid="{html.escape(iid_raw)}" data-col="{key}"'
-        value = row.get(key)
-        if value is None:
-            if row.get("_err"):
-                return f'<td{attr} style="color:#f85149" title="{html.escape(row["_err"])}">!</td>'
-            return f"<td{attr}>&mdash;</td>"
-        text = html.escape(fmt_fn(value))  # type: ignore[operator]
-        color = color_fn(value) if color_fn else None  # type: ignore[operator]
-        style = f' style="color:{color}"' if color else ""
-        return f"<td{attr}{style}>{text}</td>"
-
-    body_rows = ""
-    for i, row in enumerate(subscribed_rows, 1):
-        iid = html.escape(row["instrument_id"])
-        # Short ticker label: "ETH-USD-PERP.DYDX" → "ETH-USD"
-        label = html.escape("-".join(row["instrument_id"].split("-")[:2]))
-        err = row.get("_err")
-        err_badge = (
-            f' <span style="color:#f85149;cursor:help" title="{html.escape(err)}">!</span>'
-            if err else ""
-        )
-        cells = "".join(_cell(k, row["instrument_id"], row, fmt_fn, color_fn) for k, _, fmt_fn, color_fn in RANKING_COLS)
-        body_rows += (
-            f"<tr><td>{i}</td>"
-            f"<td><a href='/coin/{iid}'>{label}</a>{err_badge} <small><a href='/chart/{iid}'>chart</a></small></td>"
-            f"{cells}"
-            f"<td><a href='/history/{iid}'>31d</a></td></tr>"
-        )
-
-    if not subscribed_rows:
-        body_rows = f"<tr><td colspan='{2 + len(RANKING_COLS) + 1}'>No snapshots yet — first compute in progress (runs every {LIVE_INTERVAL_SECONDS}s).</td></tr>"
-
-    subscribed_table = f"<table>{header}{body_rows}</table>"
-
-    # Illiquid: compact clickable chips — only mark/index/funding data, no book metrics
-    chips = "".join(
-        f'<a href="/chart/{html.escape(iid)}" title="{html.escape(iid)}" '
-        f'style="display:inline-block;margin:3px;padding:2px 8px;'
-        f'background:#161b22;border:1px solid #30363d;border-radius:4px">'
-        f'{html.escape("-".join(iid.split("-")[:2]))}</a>'
-        for iid in sorted(illiquid_iids)
-    )
-    illiquid_section = (
-        f"<h2>Illiquid — monitoring ({len(illiquid_iids)})</h2>"
-        f"<p style='font-size:11px;color:#8b949e'>OI below threshold — not subscribed to "
-        f"trades/orderbook. Re-checked every 30 min. Click to see mark price data.</p>"
-        f"<div style='line-height:2.4'>{chips}</div>"
-    )
-
-    # SSE-based live updates — replaces setInterval/fetch polling (ARCH-02)
-    poll_script = """<script>
-(function(){
-  var cells={};
-  document.querySelectorAll('td[data-iid]').forEach(function(el){
-    var iid=el.dataset.iid,col=el.dataset.col;
-    if(!cells[iid])cells[iid]={};
-    cells[iid][col]=el;
-  });
-  var es=new EventSource('/stream');
-  es.onmessage=function(e){
-    var rows=JSON.parse(e.data);
-    rows.forEach(function(row){
-      var iid=row.instrument_id,cols=cells[iid];
-      if(!cols)return;
-      Object.entries(row.cells).forEach(function(e){
-        var el=cols[e[0]];
-        if(!el)return;
-        el.textContent=e[1].text;
-        el.style.color=e[1].color||'';
-      });
-    });
-  };
-})();
-</script>"""
-    body = (
-        f"<h1>dYdX Monitor</h1>"
-        f"<h2>Subscribed ({len(subscribed_rows)})</h2>"
-        f"{subscribed_table}"
-        f"{illiquid_section}"
-        f"{poll_script}"
-    )
-    return _page("dYdX Monitor", body, refresh_seconds=86400)
 
 
 def _render_history_page(symbol: str) -> str:
@@ -429,67 +483,6 @@ def _coin_chart_json(iid: str) -> str:
     return json.dumps({"ts": ts, "mid": mid_vals, "bid": bid_vals, "ask": ask_vals, "micro": micro_vals})
 
 
-def _render_live_coin_page(symbol: str) -> str:
-    """Live indicator panel and 1s-polled Plotly chart — no Parquet read."""
-    m = dict(_LIVE.get(symbol, {}))
-
-    def _row(label: str, key: str, fmt: str) -> str:
-        v = m.get(key)
-        val = f"{v:{fmt}}" if v is not None else "&mdash;"
-        return f"<tr><td>{html.escape(label)}</td><td>{val}</td></tr>"
-
-    panel = (
-        "<h2>Indicators (live)</h2><table>"
-        + _row("OFI10",          "ofi_10",          "+.2f")
-        + _row("OFI5",           "ofi_5",           "+.2f")
-        + _row("OFI3",           "ofi_3",           "+.2f")
-        + _row("OBI10",          "obi_10",          ".4f")
-        + _row("OBI5",           "obi_5",           ".4f")
-        + _row("OBI3",           "obi_3",           ".4f")
-        + _row("Microprice",     "microprice",       ".6f")
-        + _row("u lean",         "microprice_lean",  "+.6f")
-        + _row("Spread",         "spread",           ".6f")
-        + _row("CVD",            "cvd",              "+.4f")
-        + _row("Vol delta",      "volume_delta",     "+.4f")
-        + _row("Buy#",           "buy_count",        ".0f")
-        + _row("Sell#",          "sell_count",       ".0f")
-        + _row("Avg trade size", "avg_trade_size",   ".4f")
-        + "</table>"
-    )
-
-    iid_js = json.dumps(symbol)  # XSS-safe JS string literal (T-02-03)
-    chart_block = f"""<div id="live-chart" style="height:350px"></div>
-<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
-<script>
-(function(){{
-  var iid={iid_js};
-  var layout={{height:350,template:"plotly_dark",xaxis:{{type:"date"}},
-               margin:{{t:30,b:30}},legend:{{orientation:"h"}}}};
-  function update(d){{
-    var x=d.ts.map(function(t){{return new Date(t);}});
-    Plotly.react("live-chart",[
-      {{x:x,y:d.mid,  name:"mid",        mode:"lines",line:{{color:"#aaa",width:1}}}},
-      {{x:x,y:d.bid,  name:"bid",        mode:"lines",line:{{color:"#26a69a",width:1}}}},
-      {{x:x,y:d.ask,  name:"ask",        mode:"lines",line:{{color:"#ef5350",width:1}}}},
-      {{x:x,y:d.micro,name:"microprice", mode:"lines",line:{{color:"#f0883e",width:1.5,dash:"dot"}}}}
-    ],layout);
-  }}
-  function poll(){{
-    fetch("/data/coin/"+encodeURIComponent(iid))
-      .then(function(r){{return r.json();}}).then(update).catch(function(){{}});
-  }}
-  poll(); setInterval(poll,1000);
-}})();
-</script>"""
-
-    body = (
-        f"<h1>{html.escape(symbol)} <small><a href='/chart/{html.escape(symbol)}'>historical chart</a></small></h1>"
-        + panel
-        + chart_block
-    )
-    return _page(symbol, body, refresh_seconds=86400)
-
-
 def _render_live_page() -> str:
     series = {name: list(points) for name, points in _SERIES.items()}
 
@@ -520,10 +513,13 @@ def _trade_aggregates(snaps: list) -> tuple[float, float, int, int]:
 
 
 def _rankings_json() -> str:
-    """Return pre-formatted cell values for all live instruments as JSON."""
-    rows = list(_LIVE.values())
+    """Return pre-formatted cell values for all live and illiquid instruments as JSON."""
+    subscribed_iids, illiquid_iids = _get_tiers()
+    rows = _merged_rows()
     result = []
     for row in rows:
+        iid = row["instrument_id"]
+        tier = "subscribed" if iid in subscribed_iids else "illiquid"
         cells: dict[str, dict] = {}
         err = row.get("_err")
         for key, _, fmt_fn, color_fn in RANKING_COLS:
@@ -538,18 +534,26 @@ def _rankings_json() -> str:
                     }
                 except Exception:
                     cells[key] = {"text": "ERR", "color": "#f85149"}
-        result.append({"instrument_id": row["instrument_id"], "cells": cells})
-    return json.dumps(result)
+        result.append({"instrument_id": iid, "tier": tier, "cells": cells})
+    # Also include illiquid instruments not in _LIVE_SLOW yet
+    seen = {r["instrument_id"] for r in rows}
+    for iid in sorted(illiquid_iids):
+        if iid not in seen:
+            result.append({"instrument_id": iid, "tier": "illiquid", "cells": {}})
+    age_s = round(time.time() - _LAST_INGEST_TS, 1) if _LAST_INGEST_TS else None
+    stale = age_s is None or age_s > 10
+    return json.dumps({"rows": result, "ingest_count": _INGEST_COUNT, "age_s": age_s, "stale": stale})
 
 
 def _ingest_batch(batch: list[dict]) -> None:
-    """Ingest a batch of snapshot dicts received from Redis; update rolling state and _LIVE."""
+    """Ingest a batch of snapshot dicts received from Redis; update rolling state and _LIVE_FAST."""
+    global _INGEST_COUNT, _LAST_INGEST_TS
     now_ns = time.time_ns()
     for snap_dict in batch:
         iid = snap_dict["instrument_id"]
         _second_rolling[iid].append(snap_dict)
 
-        # Initialize OFI indicators on first sight
+        # Initialize OFI/OBI indicators on first sight
         if iid not in _OFI_INDS:
             _OFI_INDS[iid] = MultiLevelOFI(levels=10, window=50, zscore_window=_OFI_ZSCORE_WINDOW)
         if iid not in _OFI_RAW_INDS:
@@ -557,6 +561,12 @@ def _ingest_batch(batch: list[dict]) -> None:
                 3:  MultiLevelOFI(levels=3,  window=300),
                 5:  MultiLevelOFI(levels=5,  window=300),
                 10: MultiLevelOFI(levels=10, window=300),
+            }
+        if iid not in _OBI_INDS:
+            _OBI_INDS[iid] = {
+                3:  MultiLevelOBI(levels=3),
+                5:  MultiLevelOBI(levels=5),
+                10: MultiLevelOBI(levels=10),
             }
 
         # Gap detection: >3s gap means collector reconnected — clear stale prev state
@@ -587,16 +597,12 @@ def _ingest_batch(batch: list[dict]) -> None:
         ofi_5  = _OFI_RAW_INDS[iid][5].value  if _OFI_RAW_INDS[iid][5].initialized  else None
         ofi_10 = _OFI_RAW_INDS[iid][10].value if _OFI_RAW_INDS[iid][10].initialized else None
 
-        obi3 = MultiLevelOBI(levels=3)
-        obi5 = MultiLevelOBI(levels=5)
-        obi10 = MultiLevelOBI(levels=10)
         if latest["bid_sizes"] and latest["ask_sizes"]:
-            obi3.update_raw(latest["bid_sizes"], latest["ask_sizes"])
-            obi5.update_raw(latest["bid_sizes"], latest["ask_sizes"])
-            obi10.update_raw(latest["bid_sizes"], latest["ask_sizes"])
-        obi_3  = obi3.value  if obi3.initialized  else None
-        obi_5  = obi5.value  if obi5.initialized  else None
-        obi_10 = obi10.value if obi10.initialized else None
+            for obi_ind in _OBI_INDS[iid].values():
+                obi_ind.update_raw(latest["bid_sizes"], latest["ask_sizes"])
+        obi_3  = _OBI_INDS[iid][3].value  if _OBI_INDS[iid][3].initialized  else None
+        obi_5  = _OBI_INDS[iid][5].value  if _OBI_INDS[iid][5].initialized  else None
+        obi_10 = _OBI_INDS[iid][10].value if _OBI_INDS[iid][10].initialized else None
 
         tb_vol, ts_vol, tb_cnt, ts_cnt = _trade_aggregates(snaps)
         total_count = tb_cnt + ts_cnt
@@ -622,7 +628,7 @@ def _ingest_batch(batch: list[dict]) -> None:
         rets = [(mids[i] - mids[i - 1]) / mids[i - 1] for i in range(1, len(mids))]
         volatility = statistics.stdev(rets) if len(rets) >= 2 else None
 
-        _LIVE[iid] = {
+        _LIVE_FAST[iid] = {
             "ts": now_ns,
             "instrument_id": iid,
             "_err": None,
@@ -648,66 +654,60 @@ def _ingest_batch(batch: list[dict]) -> None:
             "sell_count": latest["sell_count"],
             "avg_trade_size": (tb_vol + ts_vol) / total_count if total_count > 0 else None,
         }
-
-    _fanout_to_sse_clients()
-
-
-def _fanout_to_sse_clients() -> None:
-    """Push current rankings JSON to all connected SSE clients; drop slow clients."""
-    payload = b"data: " + _rankings_json().encode() + b"\n\n"
-    for q in list(_SSE_QUEUES):
-        try:
-            q.put_nowait(payload)
-        except asyncio.QueueFull:
-            pass  # T-03-02: drop for slow clients — subscriber never blocks
-
-
-async def sse_handler(request: web.Request) -> web.StreamResponse:
-    """Server-Sent Events handler — one persistent connection per browser tab."""
-    q: asyncio.Queue[bytes] = asyncio.Queue(maxsize=2)
-    _SSE_QUEUES.add(q)
-    resp = web.StreamResponse()
-    resp.headers["Content-Type"] = "text/event-stream"
-    resp.headers["Cache-Control"] = "no-cache"
-    resp.headers["X-Accel-Buffering"] = "no"
-    await resp.prepare(request)
-    try:
-        while True:
-            try:
-                data = await asyncio.wait_for(q.get(), timeout=15.0)
-                await resp.write(data)
-            except asyncio.TimeoutError:
-                await resp.write(b": keepalive\n\n")
-    except (ConnectionResetError, ConnectionAbortedError, asyncio.CancelledError):
-        pass
-    finally:
-        _SSE_QUEUES.discard(q)
-    return resp
+    _INGEST_COUNT += len(batch)
+    _LAST_INGEST_TS = time.time()
 
 
 # --- aiohttp route handlers ---
 
 
 async def rankings_handler(request: web.Request) -> web.Response:
-    sort_col = request.rel_url.query.get("sort", "ofi_10_z")
-    direction = request.rel_url.query.get("dir", "desc")
-    return web.Response(text=_render_rankings_page(sort_col, direction), content_type="text/html")
+    return web.Response(text=_INDEX_HTML, content_type="text/html")
 
 
-async def stream_handler(request: web.Request) -> web.StreamResponse:
-    return await sse_handler(request)
+async def rankings_json_handler(request: web.Request) -> web.Response:
+    return web.Response(text=_rankings_json(), content_type="application/json")
+
+
+async def debug_handler(request: web.Request) -> web.Response:
+    fast_iids = list(_LIVE_FAST.keys())
+    sample = {}
+    if fast_iids:
+        iid = fast_iids[0]
+        e = _LIVE_FAST[iid]
+        sample = {"iid": iid, "ts": e.get("ts"), "price": e.get("price"),
+                  "buy_count": e.get("buy_count"), "ofi_10_z": e.get("ofi_10_z")}
+    return web.Response(
+        text=json.dumps({
+            "live_fast_count": len(_LIVE_FAST),
+            "live_slow_count": len(_LIVE_SLOW),
+            "ofi_inds_count": len(_OFI_INDS),
+            "sample": sample,
+        }),
+        content_type="application/json",
+    )
 
 
 async def coin_handler(request: web.Request) -> web.Response:
-    symbol = request.match_info["id"]
-    if symbol not in list_instruments(CATALOG_PATH):
-        raise web.HTTPNotFound()
-    return web.Response(text=_render_live_coin_page(symbol), content_type="text/html")
+    return web.Response(text=_INDEX_HTML, content_type="text/html")
 
 
 async def coin_json_handler(request: web.Request) -> web.Response:
     symbol = request.match_info["id"]
     return web.Response(text=_coin_chart_json(symbol), content_type="application/json")
+
+
+async def live_coin_json_handler(request: web.Request) -> web.Response:
+    """Raw indicator values for /coin/{id} live panel — polled every 5s."""
+    symbol = request.match_info["id"]
+    m = _merged_live(symbol)
+    ind_keys = [
+        "ofi_10", "ofi_5", "ofi_3", "obi_10", "obi_5", "obi_3",
+        "microprice", "microprice_lean", "spread", "cvd",
+        "volume_delta", "buy_count", "sell_count", "avg_trade_size",
+    ]
+    result = {k: m.get(k) for k in ind_keys}
+    return web.Response(text=json.dumps(result), content_type="application/json")
 
 
 async def chart_handler(request: web.Request) -> web.Response:
@@ -764,17 +764,21 @@ async def _redis_listener(redis_url: str) -> None:
     Outer while True reconnects on any non-cancellation exception (ARCH-03).
     Malformed JSON is logged and skipped — subscriber always continues (T-03-01).
     """
+    logger.info("Redis listener starting, url=%s", redis_url)
     while True:
         try:
+            logger.info("Redis listener connecting...")
             async with aioredis.Redis.from_url(redis_url, decode_responses=True) as client:
                 pubsub = client.pubsub()
                 await pubsub.subscribe("snapshots:1s")
+                logger.info("Redis listener subscribed to snapshots:1s")
                 async for message in pubsub.listen():
                     if message["type"] != "message":
                         continue
                     try:
                         batch = json.loads(message["data"])
                         _ingest_batch(batch)
+                        logger.info("Ingested batch: %d instruments, live_fast now %d", len(batch), len(_LIVE_FAST))
                     except Exception as exc:
                         logger.warning("Redis message parse/ingest error: %s", exc)
         except asyncio.CancelledError:
@@ -806,7 +810,7 @@ async def _slow_loop_task(catalog_path: str) -> None:
             snapshots = await asyncio.to_thread(metrics_computer.compute_all, catalog_path)
             if snapshots:
                 for s in snapshots:
-                    _LIVE[s["instrument_id"]] = s
+                    _LIVE_SLOW[s["instrument_id"]] = s
                 await asyncio.to_thread(metrics_store.write, snapshots, db_path)
         except Exception:
             logger.exception("Slow metrics loop failed")
@@ -815,12 +819,12 @@ async def _slow_loop_task(catalog_path: str) -> None:
 
 def make_app(redis_url: str, catalog_path: str) -> web.Application:
     """Return a configured aiohttp Application with all routes and background tasks."""
-    # Pre-populate _LIVE from last SQLite snapshot so rankings show immediately
+    # Pre-populate _LIVE_SLOW from last SQLite snapshot so rankings show immediately
     db_path = str(Path(catalog_path).parent / "metrics.db")
     try:
         rows = metrics_store.latest(db_path)
         for r in rows:
-            _LIVE[r["instrument_id"]] = r
+            _LIVE_SLOW[r["instrument_id"]] = r
         if rows:
             logger.info("Pre-loaded %d instruments from metrics.db", len(rows))
     except Exception:
@@ -834,9 +838,11 @@ def make_app(redis_url: str, catalog_path: str) -> web.Application:
     app.cleanup_ctx.append(slow_loop_ctx)
 
     app.router.add_get("/", rankings_handler)
-    app.router.add_get("/stream", stream_handler)
+    app.router.add_get("/api/rankings", rankings_json_handler)
+    app.router.add_get("/debug", debug_handler)
     app.router.add_get("/coin/{id}", coin_handler)
     app.router.add_get("/data/coin/{id}", coin_json_handler)
+    app.router.add_get("/data/live/{id}", live_coin_json_handler)
     app.router.add_get("/chart/{id}", chart_handler)
     app.router.add_get("/history/{id}", history_handler)
     app.router.add_get("/live", live_handler)

@@ -200,7 +200,7 @@ class OFIStrategy(Strategy):
 
         prev_bull = self._trend_bull
         self._trend_bull = self._trend_fast.value > self._trend_slow.value
-        self.publish_signal("trend_bull", float(self._trend_bull), bar.ts_event)
+        self.publish_signal("trend_bull", float((self._trend_bull), bar.ts_event)
 
         # Trend flipped — close any position that's now counter-trend
         if prev_bull is not None and self._trend_bull != prev_bull and self._warmup_complete:

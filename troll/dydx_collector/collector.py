@@ -50,9 +50,11 @@ from dydx_collector.open_interest import fetch_open_interest
 from dydx_collector.prune_catalog import prune_instrument
 from dydx_collector.second_snapshot import BOOK_DEPTH
 from dydx_collector.second_snapshot import DydxSecondSnapshot
+from nautilus_trader.model.book import OrderBook
 from nautilus_trader.model.data import MarkPriceUpdate
 from nautilus_trader.model.data import OrderBookDeltas
 from nautilus_trader.model.data import TradeTick
+from nautilus_trader.model.enums import BookType
 from nautilus_trader.model.enums import AggressorSide
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.instruments import instruments_from_pyo3
@@ -108,12 +110,23 @@ class Collector:
         self._second_buy_count: dict[str, int] = defaultdict(int)
         self._second_sell_count: dict[str, int] = defaultdict(int)
 
+        # Real-time order books — updated immediately on every OrderBookDeltas callback,
+        # independent of the 60s flush cycle. _second_loop reads from here, not _bar_builder._books.
+        self._live_books: dict[str, OrderBook] = {}
+
         self._redis: aioredis.Redis | None = None
         self._stop = asyncio.Event()
 
     def _on_data(self, data: Any) -> None:
         self._buffer[_buffer_key(data)].append(data)
-        if isinstance(data, TradeTick):
+        if isinstance(data, OrderBookDeltas):
+            iid = str(data.instrument_id)
+            if iid not in self._live_books:
+                self._live_books[iid] = OrderBook(data.instrument_id, BookType.L2_MBP)
+            book = self._live_books[iid]
+            for delta in data.deltas:
+                book.apply_delta(delta)
+        elif isinstance(data, TradeTick):
             iid = str(data.instrument_id)
             if data.aggressor_side == AggressorSide.BUYER:
                 self._second_buy_volume[iid] += data.size.as_double()
@@ -238,7 +251,7 @@ class Collector:
             now_ns = time.time_ns()
             batch: list[DydxSecondSnapshot] = []
             for iid in self._pinned | self._liquid:
-                book = self._bar_builder._books.get(iid)
+                book = self._live_books.get(iid)
                 if book is None:
                     continue
                 if book.best_bid_price() is None or book.best_ask_price() is None:

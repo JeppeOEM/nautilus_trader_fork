@@ -111,10 +111,14 @@ def classify_liquidity(
     min_oi_usd: float,
 ) -> tuple[set[str], set[str]]:
     """
-    Split all dYdX markets into (liquid, illiquid) by open-interest threshold.
+    Split all dYdX markets into (liquid, illiquid) by 24-hour volume (USD).
+
+    Uses volume24H (already in USD) rather than openInterest (base-token units).
+    openInterest is in tokens, not USD — comparing it directly to a USD threshold
+    incorrectly marks BTC/ETH/SOL as illiquid (BTC=458 tokens < 100_000).
 
     Returns sets of instrument ID strings (`"{ticker}-PERP.DYDX"` format).
-    Markets with missing or unparseable OI are treated as illiquid.
+    Markets with missing or unparseable volume are treated as illiquid.
     """
     liquid: set[str] = set()
     illiquid: set[str] = set()
@@ -124,10 +128,10 @@ def classify_liquidity(
             continue
         iid = f"{ticker}-PERP.DYDX"
         try:
-            oi = float(market.get("openInterest") or 0)
+            vol = float(market.get("volume24H") or 0)
         except (ValueError, TypeError):
-            oi = 0.0
-        (liquid if oi >= min_oi_usd else illiquid).add(iid)
+            vol = 0.0
+        (liquid if vol >= min_oi_usd else illiquid).add(iid)
     return liquid, illiquid
 
 

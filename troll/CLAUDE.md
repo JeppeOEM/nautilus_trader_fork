@@ -12,6 +12,14 @@ These rules govern all code under `troll/` (`dydx_collector/` and `ml_signals/`)
 
 ---
 
+## Observability Rules
+
+- **OBS-01** — **Zero book updates across N liquid instruments is a failure mode, not market behavior.** BTC/ETH/SOL perpetuals trade 24/7. If `buy_count == 0` and `sell_count == 0` and bid prices are frozen for all subscribed instruments for more than 30 seconds, the data pipeline has failed — diagnose it, do not accept it as "quiet market." Root cause seen in production: (a) `classify_liquidity` using `openInterest` (token units) instead of `volume24H` (USD), causing BTC=458 tokens to fail a `>= 100_000 USD` threshold; (b) `_bar_builder._books` only updated every 60s at flush time, making `_second_loop` read a 60-snapshot-old book.
+- **OBS-02** — **OFI z-score changing while price is frozen does NOT prove the data pipeline is healthy.** The OFI z-score is a rolling 3600-point window mean/std — it evolves as historical values age off even when current OFI input is zero. A changing z-score with a frozen price is consistent with a dead book feed. Check `buy_count`, `sell_count`, and raw bid/ask changes across consecutive snapshots, not derived indicators.
+- **OBS-03** — **Liquidity classification must use volume (USD), not open interest (tokens).** `openInterest` from dYdX's indexer is in base-token units. BTC at 458 tokens looks "illiquid" against a $100k threshold. Always classify by `volume24H` (already USD) or by `openInterest × oraclePrice`. The config key `liquidity_min_oi_usd` means "minimum USD liquidity" — enforce it with a USD-denominated field.
+
+---
+
 ## Design Principles
 
 - **DESIGN-01** — YAGNI. No abstractions, interfaces, factories, or config for values that don't change. No scaffolding for hypothetical future use. Build the simplest thing that solves the present problem.
