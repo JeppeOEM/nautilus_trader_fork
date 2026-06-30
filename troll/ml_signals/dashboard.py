@@ -104,6 +104,10 @@ _LAST_INGEST_TS: float = 0.0  # wall-clock seconds of last successful ingest
 # Rolling 1s snapshots received from Redis (plain dicts from DydxSecondSnapshot.to_dict()).
 _second_rolling: dict[str, deque] = defaultdict(lambda: deque(maxlen=300))
 
+# Rolling per-second indicator values for the signal chart (same window as _second_rolling).
+# Each entry: {"ts": ms, "ofi_10_z": float|None, "obi_10": float|None, "lean": float|None}
+_ind_rolling: dict[str, deque] = defaultdict(lambda: deque(maxlen=300))
+
 # Persistent per-coin OFI indicators — fed incrementally (1 new snap/sec).
 _OFI_ZSCORE_WINDOW = 3600  # 1 hour of 1s readings to establish mean/std
 _OFI_INDS: dict[str, MultiLevelOFI] = {}              # OFI10 with z-score
@@ -199,6 +203,7 @@ var IND=[
   ["buy_count","Buy#"],["sell_count","Sell#"],["avg_trade_size","Avg size"]
 ];
 var timer=null;
+var _chartData=null,_diffA=null,_diffB=null,_diffBoxHTML='';
 
 function esc(s){
   return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
@@ -206,7 +211,53 @@ function esc(s){
 function setStatus(s){document.getElementById("status").innerHTML=s;}
 function setApp(h){document.getElementById("app").innerHTML=h;}
 
+function clearDiff(){
+  _diffA=null;_diffB=null;_diffBoxHTML='';
+  var db=document.getElementById('diff-box');
+  if(db)db.innerHTML='';
+}
+function _setDiffWaiting(snap){
+  _diffA=snap;_diffB=null;
+  _diffBoxHTML='<span style="color:#8b949e;font-size:11px">&#9679; A: '+new Date(snap.ts).toLocaleTimeString()+' — click second point  <a onclick="clearDiff();return false" href="#" style="color:#8b949e">[cancel]</a></span>';
+  var db=document.getElementById('diff-box');
+  if(db)db.innerHTML=_diffBoxHTML;
+}
+function handleChartClick(data){
+  if(!data.points.length||!_chartData)return;
+  var pt=data.points[0];
+  var idx=pt.pointIndex;
+  if(idx==null||idx>=_chartData.ts.length)return;
+  var snap={ts:_chartData.ts[idx],bid:_chartData.bid[idx],ask:_chartData.ask[idx],
+            mid:_chartData.mid[idx],micro:_chartData.micro[idx],price:_chartData.price[idx]};
+  if(_diffB){
+    _setDiffWaiting(snap);
+  }else if(!_diffA){
+    _setDiffWaiting(snap);
+  }else{
+    _diffB=snap;
+    _diffBoxHTML=buildDiff(_diffA,snap);
+    var db=document.getElementById('diff-box');
+    if(db)db.innerHTML=_diffBoxHTML;
+  }
+}
+function fmtP(v){if(v==null)return'—';return v>100?v.toFixed(2):v>1?v.toFixed(4):v.toFixed(6);}
+function buildDiff(a,b){
+  var metrics=[['bid','Bid'],['ask','Ask'],['mid','Mid'],['micro','Microprice'],['price','Eff Price']];
+  var parts=metrics.map(function(m){
+    var va=a[m[0]],vb=b[m[0]];
+    if(va==null||vb==null||va===0)return'';
+    var pct=(vb-va)/Math.abs(va)*100;
+    var sign=pct>=0?'+':'';
+    var col=pct>0?'#3fb950':pct<0?'#f85149':'#8b949e';
+    return '<span style="margin-right:16px"><b>'+m[1]+'</b> <span style="color:'+col+'">'+sign+pct.toFixed(4)+'%</span></span>';
+  }).filter(Boolean).join('');
+  var tA=new Date(a.ts).toLocaleTimeString(),tB=new Date(b.ts).toLocaleTimeString();
+  return '<span style="color:#8b949e;font-size:11px">'+tA+' → '+tB+'</span>  '+parts
+    +'<a style="color:#8b949e;font-size:11px;margin-left:8px" onclick="clearDiff();return false" href="#">×</a>';
+}
+
 function showRankings(){
+  clearDiff();
   clearInterval(timer);
   history.pushState({},"","/");
   pollRankings();
@@ -251,7 +302,7 @@ function showCoin(iid){
   clearInterval(timer);
   history.pushState({iid:iid},"","/coin/"+encodeURIComponent(iid));
   pollCoin(iid);
-  timer=setInterval(function(){pollCoin(iid);},2000);
+  timer=setInterval(function(){pollCoin(iid);},1000);
 }
 
 function pollCoin(iid){
@@ -265,6 +316,7 @@ function pollCoin(iid){
 }
 
 function renderCoin(iid,ind,chart){
+  _chartData=chart;
   var label=iid.split("-").slice(0,2).join("-");
   var rows=IND.map(function(k){
     var v=ind[k[0]];
@@ -274,16 +326,58 @@ function renderCoin(iid,ind,chart){
     +" <small><a href=\\"/chart/"+esc(iid)+"\\">chart</a>"
     +" | <a onclick=\\"showRankings();return false\\" href=\\"/\\">back</a></small></h1>"
     +"<h2>Indicators</h2><table>"+rows+"</table>"
-    +"<div id=\\"live-chart\\" style=\\"height:350px;margin-top:16px\\"></div>");
+    +"<div id=\\"price-ticker\\" style=\\"padding:6px 0 2px;font-size:14px;font-family:monospace;letter-spacing:0.04em;border-top:1px solid #21262d;margin-top:10px\\"></div>"
+    +"<div id=\\"sig-chart\\" style=\\"height:180px;margin-top:8px\\"></div>"
+    +"<div id=\\"live-chart\\" style=\\"height:300px;margin-top:4px\\"></div>"
+    +"<div id=\\"diff-box\\" style=\\"min-height:22px;padding:5px 2px;border-top:1px solid #21262d;font-size:12px;font-family:monospace\\"></div>");
+  if(chart.sig_ts&&chart.sig_ts.length){
+    var sx=chart.sig_ts.map(function(t){return new Date(t);});
+    var sigTraces=[];
+    if(chart.ofi_10_z&&chart.ofi_10_z.some(function(v){return v!=null;}))
+      sigTraces.push({x:sx,y:chart.ofi_10_z,name:"OFI10z",mode:"lines",line:{color:"#79c0ff",width:1.5}});
+    if(chart.obi_10&&chart.obi_10.some(function(v){return v!=null;}))
+      sigTraces.push({x:sx,y:chart.obi_10,name:"OBI10",mode:"lines",line:{color:"#d2a8ff",width:1.5}});
+    if(sigTraces.length)
+      Plotly.react("sig-chart",sigTraces,{height:180,template:"plotly_dark",
+        xaxis:{type:"date"},yaxis:{zeroline:true,zerolinecolor:"#444"},
+        margin:{t:20,b:20,l:50,r:10},legend:{orientation:"h",y:1.15}});
+  }
   if(chart.ts&&chart.ts.length){
     var x=chart.ts.map(function(t){return new Date(t);});
-    Plotly.react("live-chart",[
-      {x:x,y:chart.mid, name:"mid",        mode:"lines",line:{color:"#aaa",width:1}},
-      {x:x,y:chart.bid, name:"bid",        mode:"lines",line:{color:"#26a69a",width:1}},
-      {x:x,y:chart.ask, name:"ask",        mode:"lines",line:{color:"#ef5350",width:1}},
-      {x:x,y:chart.micro,name:"microprice",mode:"lines",line:{color:"#f0883e",width:1.5,dash:"dot"}}
-    ],{height:350,template:"plotly_dark",xaxis:{type:"date"},
-       margin:{t:30,b:30},legend:{orientation:"h"}});
+    var traces=[
+      {x:x,y:chart.bid,   name:"bid",        mode:"lines",line:{color:"#26a69a",width:1}},
+      {x:x,y:chart.ask,   name:"ask",        mode:"lines",line:{color:"#ef5350",width:1}},
+      {x:x,y:chart.mid,   name:"mid",        mode:"lines",line:{color:"#aaa",width:1,dash:"dot"}},
+      {x:x,y:chart.micro, name:"microprice", mode:"lines",line:{color:"#f0883e",width:1.5,dash:"dot"}},
+      {x:x,y:chart.price, name:"price",      mode:"lines",line:{color:"#e3b341",width:1.5}}
+    ];
+    if(_diffA&&_diffA.price!=null)
+      traces.push({x:[new Date(_diffA.ts)],y:[_diffA.price],name:"A",mode:"markers+text",
+        text:["A"],textposition:"top center",showlegend:false,
+        marker:{color:"#ffffff",size:10,symbol:"circle",line:{color:"#e3b341",width:2}}});
+    if(_diffB&&_diffB.price!=null)
+      traces.push({x:[new Date(_diffB.ts)],y:[_diffB.price],name:"B",mode:"markers+text",
+        text:["B"],textposition:"top center",showlegend:false,
+        marker:{color:"#e3b341",size:10,symbol:"circle",line:{color:"#ffffff",width:2}}});
+    Plotly.react("live-chart",traces,{height:300,template:"plotly_dark",xaxis:{type:"date"},
+       margin:{t:10,b:30,l:60,r:10},legend:{orientation:"h"}});
+  }
+  var tickerEl=document.getElementById('price-ticker');
+  if(tickerEl&&chart.ts&&chart.ts.length){
+    var n=chart.ts.length-1;
+    tickerEl.innerHTML=
+      '<span style="color:#26a69a">Bid</span> '+fmtP(chart.bid[n])
+      +'&emsp;<span style="color:#ef5350">Ask</span> '+fmtP(chart.ask[n])
+      +'&emsp;<span style="color:#aaa">Mid</span> '+fmtP(chart.mid[n])
+      +'&emsp;<span style="color:#f0883e">Micro</span> '+fmtP(chart.micro[n])
+      +'&emsp;<span style="color:#e3b341">Price</span> '+fmtP(chart.price[n]);
+  }
+  var diffEl=document.getElementById('diff-box');
+  if(diffEl)diffEl.innerHTML=_diffBoxHTML;
+  var liveEl=document.getElementById('live-chart');
+  if(liveEl){
+    liveEl.removeAllListeners&&liveEl.removeAllListeners('plotly_click');
+    liveEl.on('plotly_click',handleChartClick);
   }
 }
 
@@ -445,31 +539,50 @@ def _render_chart_page(symbol: str, start_ms: int, end_ms: int) -> str:
 
 
 def _coin_chart_json(iid: str) -> str:
-    """Return JSON string with ts/mid/bid/ask/micro arrays from the module-level _second_rolling.
+    """Return JSON with price series (bid/ask/mid/micro/price) and signal series (ofi_10_z/obi_10).
 
-    Returns empty arrays when no snapshots exist for this iid.
-    Timestamps are converted from nanoseconds to milliseconds for Plotly.
+    price = CVD-weighted effective trade price: skews from mid toward ask on net buying,
+    toward bid on net selling. Equals mid when no trades occurred in that second.
+    sig_ts/ofi_10_z/obi_10 come from _ind_rolling (same 300-point window).
+    Timestamps are milliseconds for Plotly.
     """
     snaps = list(_second_rolling.get(iid, []))
+    inds = list(_ind_rolling.get(iid, []))
     if not snaps:
-        return json.dumps({"ts": [], "mid": [], "bid": [], "ask": [], "micro": []})
+        return json.dumps({"ts": [], "mid": [], "bid": [], "ask": [], "micro": [], "price": [],
+                           "sig_ts": [], "ofi_10_z": [], "obi_10": []})
     ts: list[int] = []
     mid_vals: list[float] = []
     bid_vals: list[float] = []
     ask_vals: list[float] = []
     micro_vals: list[float] = []
+    price_vals: list[float] = []
     for s in snaps:
         if not s["bid_prices"] or not s["ask_prices"]:
             continue
         bp, ap = s["bid_prices"][0], s["ask_prices"][0]
         bs, as_ = s["bid_sizes"][0], s["ask_sizes"][0]
         total = bs + as_
-        ts.append(s["ts_event"] // 1_000_000)  # ns → ms for Plotly datetime axis
-        mid_vals.append((bp + ap) / 2)
+        mid = (bp + ap) / 2
+        micro = (bp * as_ + ap * bs) / total if total > 0 else mid
+        tv = s["buy_volume"] + s["sell_volume"]
+        if tv > 0:
+            price = mid + ((s["buy_volume"] - s["sell_volume"]) / tv) * (ap - bp) * 0.5
+        else:
+            price = mid
+        ts.append(s["ts_event"] // 1_000_000)
+        mid_vals.append(mid)
         bid_vals.append(bp)
         ask_vals.append(ap)
-        micro_vals.append((bp * as_ + ap * bs) / total if total > 0 else (bp + ap) / 2)
-    return json.dumps({"ts": ts, "mid": mid_vals, "bid": bid_vals, "ask": ask_vals, "micro": micro_vals})
+        micro_vals.append(micro)
+        price_vals.append(price)
+    return json.dumps({
+        "ts": ts, "mid": mid_vals, "bid": bid_vals, "ask": ask_vals,
+        "micro": micro_vals, "price": price_vals,
+        "sig_ts": [e["ts"] for e in inds],
+        "ofi_10_z": [e["ofi_10_z"] for e in inds],
+        "obi_10": [e["obi_10"] for e in inds],
+    })
 
 
 def _render_live_page() -> str:
@@ -636,6 +749,14 @@ def _ingest_batch(batch: list[dict]) -> None:
             "sell_count": latest["sell_count"],
             "avg_trade_size": (tb_vol + ts_vol) / total_count if total_count > 0 else None,
         }
+        # Append per-second indicator snapshot for the signal chart.
+        lean = (microprice - mid) if microprice is not None and mid is not None else None
+        _ind_rolling[iid].append({
+            "ts": latest["ts_event"] // 1_000_000,
+            "ofi_10_z": ofi_10_z,
+            "obi_10": obi_10,
+            "lean": lean,
+        })
     _INGEST_COUNT += len(batch)
     _LAST_INGEST_TS = time.time()
 
