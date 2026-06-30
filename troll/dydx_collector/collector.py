@@ -258,6 +258,15 @@ class Collector:
                     continue
                 if book.best_bid_price() is None or book.best_ask_price() is None:
                     continue
+                # Skip crossed/touched book — can occur briefly during reconnect snapshot replay
+                if book.best_bid_price().as_double() >= book.best_ask_price().as_double():
+                    logger.warning(
+                        "Crossed book for %s (bid=%.6f >= ask=%.6f) — skipping snapshot",
+                        iid,
+                        book.best_bid_price().as_double(),
+                        book.best_ask_price().as_double(),
+                    )
+                    continue
 
                 bid_levels = book.bids()[:BOOK_DEPTH]
                 ask_levels = book.asks()[:BOOK_DEPTH]

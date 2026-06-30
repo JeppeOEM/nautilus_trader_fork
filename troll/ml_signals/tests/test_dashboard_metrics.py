@@ -28,7 +28,10 @@ from ml_signals.dashboard import _coin_chart_json
 def test_chart_json_no_rolling() -> None:
     ml_signals.dashboard._second_rolling.clear()
     result = json.loads(_coin_chart_json("ETH-USD-PERP.DYDX"))
-    assert result == {"ts": [], "mid": [], "bid": [], "ask": [], "micro": []}
+    assert result == {
+        "ts": [], "mid": [], "bid": [], "ask": [], "micro": [], "price": [],
+        "sig_ts": [], "ofi_10_z": [], "obi_10": [],
+    }
 
 
 def test_chart_json_ts_conversion() -> None:

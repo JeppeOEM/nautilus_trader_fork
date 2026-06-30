@@ -561,6 +561,8 @@ def _coin_chart_json(iid: str) -> str:
         if not s["bid_prices"] or not s["ask_prices"]:
             continue
         bp, ap = s["bid_prices"][0], s["ask_prices"][0]
+        if bp >= ap:  # crossed/touched snapshot — skip (stale data from reconnect)
+            continue
         bs, as_ = s["bid_sizes"][0], s["ask_sizes"][0]
         total = bs + as_
         mid = (bp + ap) / 2
