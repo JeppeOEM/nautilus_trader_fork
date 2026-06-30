@@ -120,9 +120,8 @@ def _merged_live(iid: str) -> dict:
 
 
 def _merged_rows() -> list[dict]:
-    """All instruments from both caches, merged per instrument."""
-    all_iids = _LIVE_SLOW.keys() | _LIVE_FAST.keys()
-    return [_merged_live(iid) for iid in all_iids]
+    """Only instruments currently being collected (_LIVE_FAST). _LIVE_SLOW enriches but never adds rows."""
+    return [_merged_live(iid) for iid in _LIVE_FAST]
 
 
 def _split_tiers(catalog_path: str) -> tuple[set[str], set[str]]:
@@ -211,7 +210,7 @@ function showRankings(){
   clearInterval(timer);
   history.pushState({},"","/");
   pollRankings();
-  timer=setInterval(pollRankings,5000);
+  timer=setInterval(pollRankings,2000);
 }
 
 function pollRankings(){
@@ -222,12 +221,10 @@ function pollRankings(){
 }
 
 function renderRankings(rows,ingestCount,ageS,stale){
-  var sub=rows.filter(function(r){return r.tier==="subscribed";});
-  var ill=rows.filter(function(r){return r.tier==="illiquid";});
   var hdr="<tr><th>#</th><th>Instrument</th>"
     +COLS.map(function(c){return "<th>"+esc(c[1])+"</th>";}).join("")
     +"<th>History</th></tr>";
-  var tbody=sub.map(function(row,i){
+  var tbody=rows.map(function(row,i){
     var iid=row.instrument_id;
     var label=iid.split("-").slice(0,2).join("-");
     var cells=COLS.map(function(c){
@@ -242,27 +239,19 @@ function renderRankings(rows,ingestCount,ageS,stale){
       +cells
       +"<td><a href=\\"/history/"+esc(iid)+"\\">31d</a></td></tr>";
   }).join("");
-  var chips=ill.map(function(r){
-    var iid=r.instrument_id;
-    var label=iid.split("-").slice(0,2).join("-");
-    return "<a href=\\"/chart/"+esc(iid)+"\\" style=\\"display:inline-block;margin:3px;padding:2px 8px;"
-      +"background:#161b22;border:1px solid #30363d;border-radius:4px\\">"+esc(label)+"</a>";
-  }).join("");
   setApp("<h1>dYdX Monitor</h1>"
-    +"<h2>Subscribed ("+sub.length+")</h2>"
-    +"<table>"+hdr+tbody+"</table>"
-    +"<h2>Illiquid ("+ill.length+")</h2>"
-    +"<div style=\\"line-height:2.4\\">"+chips+"</div>");
-  var staleTxt=stale?" ⚠️ STALE (no data "+ageS+"s)":" ↺"+ingestCount;
+    +"<h2>Collecting ("+rows.length+")</h2>"
+    +"<table>"+hdr+tbody+"</table>");
+  var staleTxt=stale?" STALE (no data "+ageS+"s)":" ↺"+ingestCount;
   var col=stale?"color:#f85149":"color:#3fb950";
-  setStatus("Updated "+new Date().toLocaleTimeString()+" — "+sub.length+" instruments — <span style=\\""+col+"\\">"+esc(staleTxt)+"</span>");
+  setStatus("Updated "+new Date().toLocaleTimeString()+" — "+rows.length+" instruments — <span style=\\""+col+"\\">"+esc(staleTxt)+"</span>");
 }
 
 function showCoin(iid){
   clearInterval(timer);
   history.pushState({iid:iid},"","/coin/"+encodeURIComponent(iid));
   pollCoin(iid);
-  timer=setInterval(function(){pollCoin(iid);},5000);
+  timer=setInterval(function(){pollCoin(iid);},2000);
 }
 
 function pollCoin(iid){
@@ -513,13 +502,11 @@ def _trade_aggregates(snaps: list) -> tuple[float, float, int, int]:
 
 
 def _rankings_json() -> str:
-    """Return pre-formatted cell values for all live and illiquid instruments as JSON."""
-    subscribed_iids, illiquid_iids = _get_tiers()
+    """Return pre-formatted cell values for all currently-collected instruments as JSON."""
     rows = _merged_rows()
     result = []
     for row in rows:
         iid = row["instrument_id"]
-        tier = "subscribed" if iid in subscribed_iids else "illiquid"
         cells: dict[str, dict] = {}
         err = row.get("_err")
         for key, _, fmt_fn, color_fn in RANKING_COLS:
@@ -534,12 +521,7 @@ def _rankings_json() -> str:
                     }
                 except Exception:
                     cells[key] = {"text": "ERR", "color": "#f85149"}
-        result.append({"instrument_id": iid, "tier": tier, "cells": cells})
-    # Also include illiquid instruments not in _LIVE_SLOW yet
-    seen = {r["instrument_id"] for r in rows}
-    for iid in sorted(illiquid_iids):
-        if iid not in seen:
-            result.append({"instrument_id": iid, "tier": "illiquid", "cells": {}})
+        result.append({"instrument_id": iid, "cells": cells})
     age_s = round(time.time() - _LAST_INGEST_TS, 1) if _LAST_INGEST_TS else None
     stale = age_s is None or age_s > 10
     return json.dumps({"rows": result, "ingest_count": _INGEST_COUNT, "age_s": age_s, "stale": stale})

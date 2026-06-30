@@ -109,6 +109,7 @@ register_arrow(
 def classify_liquidity(
     markets_json: dict,
     min_oi_usd: float,
+    exclude: frozenset[str] | None = None,
 ) -> tuple[set[str], set[str]]:
     """
     Split all dYdX markets into (liquid, illiquid) by 24-hour volume (USD).
@@ -117,9 +118,12 @@ def classify_liquidity(
     openInterest is in tokens, not USD — comparing it directly to a USD threshold
     incorrectly marks BTC/ETH/SOL as illiquid (BTC=458 tokens < 100_000).
 
+    Instruments in `exclude` are placed in illiquid regardless of volume.
+
     Returns sets of instrument ID strings (`"{ticker}-PERP.DYDX"` format).
     Markets with missing or unparseable volume are treated as illiquid.
     """
+    _exclude = exclude or frozenset()
     liquid: set[str] = set()
     illiquid: set[str] = set()
     for market in markets_json.get("markets", {}).values():
@@ -127,6 +131,9 @@ def classify_liquidity(
         if ticker is None:
             continue
         iid = f"{ticker}-PERP.DYDX"
+        if iid in _exclude:
+            illiquid.add(iid)
+            continue
         try:
             vol = float(market.get("volume24H") or 0)
         except (ValueError, TypeError):

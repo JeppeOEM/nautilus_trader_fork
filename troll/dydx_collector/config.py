@@ -38,6 +38,7 @@ class CollectorConfig:
     liquidity_min_oi_usd: float
     liquidity_check_seconds: int
     instruments: tuple[InstrumentEntry, ...]
+    exclude: frozenset[str]
 
 
 def load_config(path: Path) -> CollectorConfig:
@@ -64,6 +65,7 @@ def load_config(path: Path) -> CollectorConfig:
         liquidity_min_oi_usd=raw.get("liquidity_min_oi_usd", 100_000.0),
         liquidity_check_seconds=raw.get("liquidity_check_seconds", 1800),
         instruments=instruments,
+        exclude=frozenset(raw.get("exclude", [])),
     )
 
 

@@ -209,7 +209,9 @@ class Collector:
             await asyncio.sleep(self._config.liquidity_check_seconds)
             try:
                 markets_json = await asyncio.to_thread(_fetch_markets_json, self._config.network)
-                liquid, illiquid = classify_liquidity(markets_json, self._config.liquidity_min_oi_usd)
+                liquid, illiquid = classify_liquidity(
+                    markets_json, self._config.liquidity_min_oi_usd, self._config.exclude
+                )
 
                 for iid in liquid & self._illiquid:
                     await self._subscribe(iid)
@@ -310,12 +312,14 @@ class Collector:
         await self._client.connect(loop, list(instruments_by_id.values()))
         await self._client.subscribe_markets()
 
-        # Classify by open interest; pinned coins bypass the threshold
+        # Classify by volume; pinned coins bypass the threshold; excluded coins never subscribed
         markets_json = await asyncio.to_thread(_fetch_markets_json, self._config.network)
-        liquid, illiquid = classify_liquidity(markets_json, self._config.liquidity_min_oi_usd)
+        liquid, illiquid = classify_liquidity(
+            markets_json, self._config.liquidity_min_oi_usd, self._config.exclude
+        )
 
         known = set(instruments_by_id)
-        to_subscribe = (self._pinned | liquid) & known
+        to_subscribe = ((self._pinned | liquid) & known) - self._config.exclude
         self._liquid = (liquid & known) - self._pinned
         self._illiquid = known - to_subscribe
 

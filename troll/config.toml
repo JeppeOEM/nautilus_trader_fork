@@ -12,11 +12,15 @@ liquidity_min_oi_usd = 1000        # $1k 24h volume = subscribed (field is volum
 liquidity_check_seconds = 1800     # re-check illiquid coins every 30 min
 
 # Data retention
-# Pinned coins (listed in [[instruments]] below) are kept indefinitely.
-# All other subscribed coins have their catalog data pruned after this many hours.
+# Pinned coins are kept indefinitely. All other subscribed coins pruned after this many hours.
 non_config_retain_hours = 4
 
-# Pinned instruments: kept forever regardless of liquidity tier.
+# Instruments to never collect, even if they'd qualify by volume or are pinned.
+exclude = []
+
+# Pinned instruments: locked in forever regardless of volume tier.
+# Run `python3 -m dydx_collector.update_pinned` to refresh this list to top 40 by volume.
+
 [[instruments]]
 id = "BTC-USD-PERP.DYDX"
 
@@ -25,3 +29,114 @@ id = "ETH-USD-PERP.DYDX"
 
 [[instruments]]
 id = "SOL-USD-PERP.DYDX"
+
+[[instruments]]
+id = "XRP-USD-PERP.DYDX"
+
+[[instruments]]
+id = "DOGE-USD-PERP.DYDX"
+
+[[instruments]]
+id = "PAXG-USD-PERP.DYDX"
+
+[[instruments]]
+id = "UNI-USD-PERP.DYDX"
+
+[[instruments]]
+id = "ZEC-USD-PERP.DYDX"
+
+[[instruments]]
+id = "NEAR-USD-PERP.DYDX"
+
+[[instruments]]
+id = "BNB-USD-PERP.DYDX"
+
+[[instruments]]
+id = "INJ-USD-PERP.DYDX"
+
+[[instruments]]
+id = "AVAX-USD-PERP.DYDX"
+
+[[instruments]]
+id = "WLD-USD-PERP.DYDX"
+
+[[instruments]]
+id = "DYDX-USD-PERP.DYDX"
+
+[[instruments]]
+id = "APE-USD-PERP.DYDX"
+
+[[instruments]]
+id = "TIA-USD-PERP.DYDX"
+
+[[instruments]]
+id = "BONK-USD-PERP.DYDX"
+
+[[instruments]]
+id = "XLM-USD-PERP.DYDX"
+
+[[instruments]]
+id = "BCH-USD-PERP.DYDX"
+
+[[instruments]]
+id = "LINK-USD-PERP.DYDX"
+
+[[instruments]]
+id = "ARB-USD-PERP.DYDX"
+
+[[instruments]]
+id = "SEI-USD-PERP.DYDX"
+
+[[instruments]]
+id = "WIF-USD-PERP.DYDX"
+
+[[instruments]]
+id = "APT-USD-PERP.DYDX"
+
+[[instruments]]
+id = "PEPE-USD-PERP.DYDX"
+
+[[instruments]]
+id = "DOT-USD-PERP.DYDX"
+
+[[instruments]]
+id = "ADA-USD-PERP.DYDX"
+
+[[instruments]]
+id = "TRX-USD-PERP.DYDX"
+
+[[instruments]]
+id = "HYPE-USD-PERP.DYDX"
+
+[[instruments]]
+id = "ALGO-USD-PERP.DYDX"
+
+[[instruments]]
+id = "ATOM-USD-PERP.DYDX"
+
+[[instruments]]
+id = "1INCH-USD-PERP.DYDX"
+
+[[instruments]]
+id = "SNX-USD-PERP.DYDX"
+
+[[instruments]]
+id = "FIL-USD-PERP.DYDX"
+
+[[instruments]]
+id = "LTC-USD-PERP.DYDX"
+
+[[instruments]]
+id = "OP-USD-PERP.DYDX"
+
+[[instruments]]
+id = "SUI-USD-PERP.DYDX"
+
+[[instruments]]
+id = "TAO-USD-PERP.DYDX"
+
+[[instruments]]
+id = "PUMP-USD-PERP.DYDX"
+
+[[instruments]]
+id = "JUP-USD-PERP.DYDX"
