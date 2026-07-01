@@ -161,11 +161,6 @@ claude.config.json
 .review_scratch/
 superpowers/
 
-AGENTS.md
-CLAUDE.md
-CODEX.md
-GEMINI.md
-
 # Nautilus specific
 .ipynb_checkpoints/
 /docs/getting_started/*.ipynb

@@ -1,0 +1,57 @@
+installation:
+  version: 6.9.1-next.19
+  installDate: 2026-07-01T05:35:40.380Z
+  lastUpdated: 2026-07-01T05:35:40.380Z
+modules:
+  - name: core
+    version: 6.9.1-next.19
+    installDate: 2026-07-01T05:35:40.136Z
+    lastUpdated: 2026-07-01T05:35:40.371Z
+    source: built-in
+    npmPackage: null
+    repoUrl: null
+  - name: bmm
+    version: 6.9.1-next.19
+    installDate: 2026-07-01T05:35:40.120Z
+    lastUpdated: 2026-07-01T05:35:40.372Z
+    source: built-in
+    npmPackage: null
+    repoUrl: null
+  - name: tea
+    version: main
+    installDate: 2026-07-01T05:35:40.243Z
+    lastUpdated: 2026-07-01T05:35:40.374Z
+    source: external
+    npmPackage: bmad-method-test-architecture-enterprise
+    repoUrl: https://github.com/bmad-code-org/bmad-method-test-architecture-enterprise
+    channel: next
+    sha: 8734d51f24071ddbcb3617390b5fcddb4128ef77
+  - name: bmb
+    version: main
+    installDate: 2026-07-01T05:35:40.272Z
+    lastUpdated: 2026-07-01T05:35:40.376Z
+    source: external
+    npmPackage: bmad-builder
+    repoUrl: https://github.com/bmad-code-org/bmad-builder
+    channel: next
+    sha: e6935f2776c34ffd9b18f4ef1e334584ef10a50f
+  - name: bauto
+    version: main
+    installDate: 2026-07-01T05:35:40.282Z
+    lastUpdated: 2026-07-01T05:35:40.378Z
+    source: external
+    npmPackage: null
+    repoUrl: https://github.com/bmad-code-org/bmad-auto
+    channel: next
+    sha: f79bd122d117241266622e1233721bbd780be31d
+  - name: cis
+    version: main
+    installDate: 2026-07-01T05:35:40.294Z
+    lastUpdated: 2026-07-01T05:35:40.380Z
+    source: external
+    npmPackage: bmad-creative-intelligence-suite
+    repoUrl: https://github.com/bmad-code-org/bmad-module-creative-intelligence-suite
+    channel: next
+    sha: 07a8dd03d196a762f21c241d985293fe5b0f90e7
+ides:
+  - claude-code
