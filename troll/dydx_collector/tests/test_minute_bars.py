@@ -28,7 +28,6 @@ from nautilus_trader.model.objects import Quantity
 
 from dydx_collector.minute_bars import DydxMinuteBar
 from dydx_collector.minute_bars import MinuteBarBuilder
-from dydx_collector.open_interest import classify_liquidity
 
 
 IID = "ETH-USD-PERP.DYDX"
@@ -232,26 +231,6 @@ def test_no_absorption_when_ask_moves() -> None:
     assert bars[0].buy_absorption == 0.0
 
 
-# ---- classify_liquidity ----
-
-def test_classify_liquidity_splits_by_threshold() -> None:
-    markets = {"markets": {
-        "BTC": {"ticker": "BTC-USD", "openInterest": "500000"},
-        "SHIB": {"ticker": "SHIB-USD", "openInterest": "500"},
-        "ETH": {"ticker": "ETH-USD", "openInterest": "100000"},  # exactly at threshold
-    }}
-    liquid, illiquid = classify_liquidity(markets, min_oi_usd=100_000.0)
-    assert "BTC-USD-PERP.DYDX" in liquid
-    assert "ETH-USD-PERP.DYDX" in liquid
-    assert "SHIB-USD-PERP.DYDX" in illiquid
-
-
-def test_classify_liquidity_missing_oi_is_illiquid() -> None:
-    markets = {"markets": {"X": {"ticker": "X-USD"}}}  # no openInterest field
-    liquid, illiquid = classify_liquidity(markets, min_oi_usd=1.0)
-    assert "X-USD-PERP.DYDX" in illiquid
-
-
 if __name__ == "__main__":
     test_single_trade_emitted_on_next_minute()
     test_ohlcv_across_multiple_trades_in_one_minute()
@@ -259,6 +238,4 @@ if __name__ == "__main__":
     test_no_bar_without_trades()
     test_spread_and_microprice_populated_from_deltas()
     test_ofi_accumulated_from_deltas()
-    test_classify_liquidity_splits_by_threshold()
-    test_classify_liquidity_missing_oi_is_illiquid()
     print("ok")

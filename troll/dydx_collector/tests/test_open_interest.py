@@ -12,10 +12,11 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
-"""Unit tests for open_interest.parse_open_interest."""
+"""Unit tests for open_interest.parse_open_interest and classify_liquidity."""
 
 from decimal import Decimal
 
+from dydx_collector.open_interest import classify_liquidity
 from dydx_collector.open_interest import parse_open_interest
 
 
@@ -67,6 +68,45 @@ def test_empty_markets_returns_empty_list() -> None:
     assert parse_open_interest({"markets": {}}, ts=_TS) == []
 
 
+def _markets_by_volume(**markets: dict) -> dict:
+    return {"markets": markets}
+
+
+def test_classify_liquidity_splits_by_volume24h_threshold() -> None:
+    markets = _markets_by_volume(
+        BTC={"ticker": "BTC-USD", "volume24H": "500000"},
+        SHIB={"ticker": "SHIB-USD", "volume24H": "500"},
+        ETH={"ticker": "ETH-USD", "volume24H": "100000"},  # exactly at threshold
+    )
+    liquid, illiquid = classify_liquidity(markets, min_oi_usd=100_000.0)
+    assert "BTC-USD-PERP.DYDX" in liquid
+    assert "ETH-USD-PERP.DYDX" in liquid
+    assert "SHIB-USD-PERP.DYDX" in illiquid
+
+
+def test_classify_liquidity_low_token_count_high_volume_is_liquid() -> None:
+    # Regression for the production incident AD-7 exists to prevent: BTC at 458
+    # tokens of raw openInterest looks illiquid, but its USD volume24H is huge.
+    markets = _markets_by_volume(BTC={"ticker": "BTC-USD", "openInterest": "458", "volume24H": "50000000"})
+    liquid, _illiquid = classify_liquidity(markets, min_oi_usd=100_000.0)
+    assert "BTC-USD-PERP.DYDX" in liquid
+
+
+def test_classify_liquidity_missing_volume_is_illiquid() -> None:
+    markets = _markets_by_volume(X={"ticker": "X-USD"})  # no volume24H field
+    liquid, illiquid = classify_liquidity(markets, min_oi_usd=1.0)
+    assert "X-USD-PERP.DYDX" in illiquid
+
+
+def test_classify_liquidity_excluded_coin_is_always_illiquid() -> None:
+    markets = _markets_by_volume(BTC={"ticker": "BTC-USD", "volume24H": "50000000"})
+    liquid, illiquid = classify_liquidity(
+        markets, min_oi_usd=1.0, exclude=frozenset({"BTC-USD-PERP.DYDX"})
+    )
+    assert "BTC-USD-PERP.DYDX" in illiquid
+    assert "BTC-USD-PERP.DYDX" not in liquid
+
+
 if __name__ == "__main__":
     test_parses_single_market()
     test_parses_multiple_markets()
@@ -74,4 +114,8 @@ if __name__ == "__main__":
     test_skips_market_missing_open_interest()
     test_open_interest_preserved_as_decimal()
     test_empty_markets_returns_empty_list()
+    test_classify_liquidity_splits_by_volume24h_threshold()
+    test_classify_liquidity_low_token_count_high_volume_is_liquid()
+    test_classify_liquidity_missing_volume_is_illiquid()
+    test_classify_liquidity_excluded_coin_is_always_illiquid()
     print("ok")

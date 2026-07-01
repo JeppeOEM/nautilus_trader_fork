@@ -1,0 +1,68 @@
+# generated: 2026-07-01
+# last_updated: 2026-07-01
+# project: nautilus_trader_fork
+# project_key: NOKEY
+# tracking_system: file-system
+# story_location: {project-root}/_bmad-output/implementation-artifacts
+
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+#
+# Epic Status Transitions:
+#   - backlog → in-progress: Automatically when first story is created (via create-story)
+#   - in-progress → done: Manually when all stories reach 'done' status
+#
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - ready-for-dev: Story file created in stories folder
+#   - in-progress: Developer actively working on implementation
+#   - review: Ready for code review (via Dev's code-review workflow)
+#   - done: Story completed
+#
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#   - done: Retrospective has been completed
+#
+# Action Item Status:
+#   - open: Committed during a retrospective, not yet addressed
+#   - in-progress: Actively being worked on
+#   - done: Completed
+#
+# WORKFLOW NOTES:
+# ===============
+# - Epic transitions to 'in-progress' automatically when first story is created
+# - Stories can be worked in parallel if team capacity allows
+# - Developer typically creates next story after previous one is 'done' to incorporate learnings
+# - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
+# - Retrospective appends its action items to action_items; sprint-status surfaces open ones
+
+generated: 2026-07-01
+last_updated: 2026-07-01
+project: nautilus_trader_fork
+project_key: NOKEY
+tracking_system: file-system
+story_location: "{project-root}/_bmad-output/implementation-artifacts"
+
+development_status:
+  epic-1: in-progress
+  1-1-verify-the-data-integrity-gate-end-to-end: done
+  1-2-default-the-ranking-table-to-volume-sort: backlog
+  1-3-expose-the-live-watchlist-as-a-queryable-backtest-consumable-coin-set: backlog
+  1-4-persist-and-query-historical-coin-ranking: backlog
+  epic-1-retrospective: optional
+
+  epic-2: backlog
+  2-1-bring-the-jupyter-research-environment-in-line-with-nautilus-conventions: backlog
+  2-2-single-indicator-implementation-reused-across-research-backtest-and-live: backlog
+  2-3-hft-granularity-and-configurable-timeframe-backtesting-on-the-same-underlying-data: backlog
+  2-4-multi-coin-backtest-runs-across-the-live-watchlist: backlog
+  epic-2-retrospective: optional
+
+  epic-3: backlog
+  3-1-scaffold-the-isolated-live-paper-trading-module: backlog
+  3-2-dummy-strategy-consumes-every-produced-signal-and-runs-live-in-paper-mode: backlog
+  epic-3-retrospective: optional

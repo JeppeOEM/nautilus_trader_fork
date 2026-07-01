@@ -26,6 +26,8 @@ The _second_loop logic is extracted into a helper that mirrors its exact snapsho
 path so we can unit-test it without running the full asyncio collector.
 """
 
+from pathlib import Path
+
 from nautilus_trader.model.book import OrderBook
 from nautilus_trader.model.data import BookOrder
 from nautilus_trader.model.data import OrderBookDelta
@@ -36,6 +38,8 @@ from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
 
+from dydx_collector.collector import _prune_delta_retention
+from dydx_collector.collector import _prune_interval_seconds
 from dydx_collector.second_snapshot import BOOK_DEPTH
 from dydx_collector.second_snapshot import DydxSecondSnapshot
 
@@ -234,3 +238,48 @@ def test_stale_book_emits_identical_snapshots_each_second() -> None:
     asks = [s.ask_prices[0] for s in snaps]  # type: ignore[index]
     assert len(set(bids)) == 1, f"bids should be identical (stale): {bids}"
     assert len(set(asks)) == 1, f"asks should be identical (stale): {asks}"
+
+
+# ---------------------------------------------------------------------------
+# Per-coin raw-delta retention (_prune_delta_retention, _prune_interval_seconds)
+# ---------------------------------------------------------------------------
+
+def test_prune_delta_retention_skips_unlimited_instrument(tmp_path: Path) -> None:
+    deltas_dir = tmp_path / "data" / "order_book_deltas" / "BTC-USD-PERP.DYDX"
+    deltas_dir.mkdir(parents=True)
+    old = deltas_dir / "2020-01-01T00-00-00Z_2020-01-01T01-00-00Z.parquet"
+    old.write_bytes(b"x")
+
+    freed = _prune_delta_retention(str(tmp_path), {"BTC-USD-PERP.DYDX": None})
+
+    assert freed == 0
+    assert old.exists(), "retain_hours=None must mean unlimited -- never pruned"
+
+
+def test_prune_delta_retention_prunes_finite_retention_instrument(tmp_path: Path) -> None:
+    deltas_dir = tmp_path / "data" / "order_book_deltas" / "ETH-USD-PERP.DYDX"
+    deltas_dir.mkdir(parents=True)
+    old = deltas_dir / "2020-01-01T00-00-00Z_2020-01-01T01-00-00Z.parquet"
+    old.write_bytes(b"x")
+
+    freed = _prune_delta_retention(str(tmp_path), {"ETH-USD-PERP.DYDX": 48.0})
+
+    assert freed > 0
+    assert not old.exists()
+
+
+def test_prune_interval_uses_shortest_active_retention_window() -> None:
+    # A short per-coin retain_hours must shorten the check cadence below the
+    # global non_config_retain_hours, or the per-coin window goes stale.
+    interval = _prune_interval_seconds(24.0, {"BTC-USD-PERP.DYDX": 1.0})
+    assert interval == 1.0 * 900
+
+
+def test_prune_interval_ignores_unlimited_instruments() -> None:
+    interval = _prune_interval_seconds(4.0, {"BTC-USD-PERP.DYDX": None})
+    assert interval == 4.0 * 900
+
+
+def test_prune_interval_has_a_minimum_floor() -> None:
+    interval = _prune_interval_seconds(0.01, {})
+    assert interval == 900

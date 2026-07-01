@@ -29,9 +29,13 @@ Usage:
 """
 
 import argparse
+import logging
 import re
 import time
 from pathlib import Path
+
+
+logger = logging.getLogger(__name__)
 
 
 # Timestamp is nanoseconds since epoch encoded in the filename.
@@ -84,10 +88,19 @@ def prune(catalog_path: str, data_types: list[str], retain_days: int, dry_run: b
     print(f"\n{action} {total_freed / 1024 / 1024:.1f} MB")
 
 
-def prune_instrument(catalog_path: str, instrument_id: str, retain_hours: float) -> int:
+def prune_instrument(
+    catalog_path: str,
+    instrument_id: str,
+    retain_hours: float,
+    data_types: list[str] | None = None,
+) -> int:
     """
     Delete all Parquet files for `instrument_id` whose end timestamp is older than
-    `retain_hours` hours ago, across every data type directory in the catalog.
+    `retain_hours` hours ago.
+
+    Scoped to every data type directory in the catalog by default; pass `data_types`
+    to prune only specific ones (e.g. `["order_book_deltas"]` for per-coin raw-delta
+    retention, leaving that instrument's other data types untouched).
 
     Returns the total bytes freed.
     """
@@ -101,7 +114,19 @@ def prune_instrument(catalog_path: str, instrument_id: str, retain_hours: float)
     data_root = Path(catalog_path) / "data"
     if not data_root.exists():
         return 0
-    for type_dir in data_root.iterdir():
+
+    if data_types is not None:
+        type_dirs = []
+        for name in data_types:
+            type_dir = data_root / name
+            if not type_dir.is_dir():
+                logger.warning(f"Prune data_type {name!r} does not exist under {data_root} — skipping")
+                continue
+            type_dirs.append(type_dir)
+    else:
+        type_dirs = list(data_root.iterdir())
+
+    for type_dir in type_dirs:
         iid_dir = type_dir / instrument_id
         if not iid_dir.is_dir():
             continue

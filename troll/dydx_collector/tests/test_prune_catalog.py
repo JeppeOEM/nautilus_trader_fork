@@ -14,11 +14,15 @@
 # -------------------------------------------------------------------------------------------------
 """Unit tests for prune_catalog._filename_end_ns: the guard for file-deletion logic."""
 
+import logging
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from dydx_collector.prune_catalog import _filename_end_ns
 from dydx_collector.prune_catalog import prune
+from dydx_collector.prune_catalog import prune_instrument
 
 
 def test_parses_valid_catalog_filename() -> None:
@@ -68,6 +72,57 @@ def test_prune_dry_run_deletes_nothing(tmp_path: Path) -> None:
     assert old.exists()
 
 
+def _write_parquet(data_dir: Path, start: str, end: str) -> Path:
+    data_dir.mkdir(parents=True, exist_ok=True)
+    path = data_dir / f"{start}_{end}.parquet"
+    path.write_bytes(b"x")
+    return path
+
+
+def test_prune_instrument_scoped_to_data_types_only_prunes_listed_type(tmp_path: Path) -> None:
+    deltas_dir = tmp_path / "data" / "order_book_deltas" / "BTC-USD-PERP.DYDX"
+    bars_dir = tmp_path / "data" / "dydx_minute_bar" / "BTC-USD-PERP.DYDX"
+    old_delta = _write_parquet(deltas_dir, "2020-01-01T00-00-00Z", "2020-01-01T01-00-00Z")
+    old_bar = _write_parquet(bars_dir, "2020-01-01T00-00-00Z", "2020-01-01T01-00-00Z")
+
+    prune_instrument(
+        str(tmp_path), "BTC-USD-PERP.DYDX", retain_hours=1.0, data_types=["order_book_deltas"]
+    )
+
+    assert not old_delta.exists()
+    assert old_bar.exists()  # untouched: not in data_types, mirrors "unlimited" for other data
+
+
+def test_prune_instrument_without_data_types_prunes_every_type(tmp_path: Path) -> None:
+    deltas_dir = tmp_path / "data" / "order_book_deltas" / "BTC-USD-PERP.DYDX"
+    bars_dir = tmp_path / "data" / "dydx_minute_bar" / "BTC-USD-PERP.DYDX"
+    old_delta = _write_parquet(deltas_dir, "2020-01-01T00-00-00Z", "2020-01-01T01-00-00Z")
+    old_bar = _write_parquet(bars_dir, "2020-01-01T00-00-00Z", "2020-01-01T01-00-00Z")
+
+    prune_instrument(str(tmp_path), "BTC-USD-PERP.DYDX", retain_hours=1.0)
+
+    assert not old_delta.exists()
+    assert not old_bar.exists()
+
+
+def test_prune_instrument_warns_and_skips_nonexistent_data_type(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    deltas_dir = tmp_path / "data" / "order_book_deltas" / "BTC-USD-PERP.DYDX"
+    old_delta = _write_parquet(deltas_dir, "2020-01-01T00-00-00Z", "2020-01-01T01-00-00Z")
+
+    with caplog.at_level(logging.WARNING):
+        prune_instrument(
+            str(tmp_path),
+            "BTC-USD-PERP.DYDX",
+            retain_hours=1.0,
+            data_types=["order_book_deltas", "typo_data_type"],
+        )
+
+    assert not old_delta.exists()  # the valid entry in data_types still gets pruned
+    assert "typo_data_type" in caplog.text
+
+
 if __name__ == "__main__":
     test_parses_valid_catalog_filename()
     test_returns_none_for_non_catalog_filename()
@@ -75,4 +130,6 @@ if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as d:
         test_prune_deletes_old_files_and_keeps_new(Path(d) / "a")
         test_prune_dry_run_deletes_nothing(Path(d) / "b")
+        test_prune_instrument_scoped_to_data_types_only_prunes_listed_type(Path(d) / "c")
+        test_prune_instrument_without_data_types_prunes_every_type(Path(d) / "d")
     print("ok")

@@ -20,7 +20,12 @@ No TradingNode/Strategy/DataEngine involved -- see client.py for why.
 
 Instrument tiers
 ----------------
-pinned      : listed in config.toml [[instruments]] -- always subscribed, kept forever.
+pinned      : listed in config.toml [[instruments]] -- always subscribed, never demoted
+              to illiquid or pruned by non_config_retain_hours. Raw order-book-delta data
+              (store_order_book_deltas=True) is still subject to that instrument's own
+              retain_hours, if one is configured -- pinned only guarantees the subscription
+              and non-delta data are kept forever, not that an explicit per-coin retention
+              setting is overridden.
 liquid      : OI >= liquidity_min_oi_usd -- subscribed, data pruned after non_config_retain_hours.
 illiquid    : OI below threshold -- NOT subscribed to trades/book; re-checked every
               liquidity_check_seconds; graduated to liquid if OI crosses the threshold.
@@ -78,6 +83,35 @@ def _buffer_key(data: Any) -> tuple[type, str]:
     return type(data), str(data.instrument_id)
 
 
+def _prune_interval_seconds(
+    non_config_retain_hours: float, delta_retain_hours: dict[str, float | None]
+) -> float:
+    """Prune-loop cadence: roughly 4x per the shortest active retention window, minimum 15 min.
+
+    Considers both the global non_config_retain_hours and any finite per-coin
+    retain_hours, so a short per-coin window isn't left stale by a larger global one.
+    """
+    active_retain_hours = [
+        non_config_retain_hours,
+        *(h for h in delta_retain_hours.values() if h is not None),
+    ]
+    return max(min(active_retain_hours) * 900, 900)
+
+
+def _prune_delta_retention(catalog_path: str, delta_retain_hours: dict[str, float | None]) -> int:
+    """Prune order_book_deltas for instruments with a finite per-coin retain_hours.
+
+    A `None` value means unlimited retention -- that instrument is skipped entirely.
+    Extracted from _prune_loop so the None-skip behavior can be unit-tested directly.
+    """
+    freed = 0
+    for iid, retain_hours in delta_retain_hours.items():
+        if retain_hours is None:
+            continue
+        freed += prune_instrument(catalog_path, iid, retain_hours, data_types=["order_book_deltas"])
+    return freed
+
+
 async def _publish_snapshot_batch(redis_client: aioredis.Redis, snapshots: list) -> None:
     """Publish a batch of DydxSecondSnapshot objects to Redis channel snapshots:1s.
 
@@ -111,6 +145,11 @@ class Collector:
         self._illiquid: set[str] = set()
         # Instruments for which raw OrderBookDeltas are written to the catalog
         self._delta_store: set[str] = {e.id for e in config.instruments if e.store_order_book_deltas}
+        # Per-coin raw-delta retention, in hours; None means unlimited (never pruned).
+        # Independent of the pinned/non-pinned tier split used for non_config_retain_hours below.
+        self._delta_retain_hours: dict[str, float | None] = {
+            e.id: e.retain_hours for e in config.instruments if e.store_order_book_deltas
+        }
 
         # Trade volume/count accumulated between consecutive 1s ticks, reset each second
         self._second_buy_volume: dict[str, float] = defaultdict(float)
@@ -243,12 +282,16 @@ class Collector:
                 logger.exception("Liquidity check failed")
 
     async def _reload_config_loop(self) -> None:
-        """Hot-reload: only updates the pinned set; subscriptions are managed by liquidity tier."""
+        """Hot-reload: updates the pinned set and per-coin delta-store/retention config."""
         while not self._stop.is_set():
             await asyncio.sleep(self._config.config_reload_seconds)
             new_config = load_config(CONFIG_PATH)
             old_pinned = self._pinned
             self._pinned = {e.id for e in new_config.instruments}
+            self._delta_store = {e.id for e in new_config.instruments if e.store_order_book_deltas}
+            self._delta_retain_hours = {
+                e.id: e.retain_hours for e in new_config.instruments if e.store_order_book_deltas
+            }
 
             # Subscribe any newly-pinned coins that were sitting in the illiquid pool
             for iid in self._pinned - old_pinned:
@@ -259,9 +302,9 @@ class Collector:
             self._config = new_config
 
     async def _second_loop(self) -> None:
-        """Sample L2 book every second; raw levels + trade volume only — signals computed on read."""
+        """Sample the L2 book on a configurable interval; raw levels + trade volume only — signals computed on read."""
         while not self._stop.is_set():
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(self._config.snapshot_interval_seconds)
             now_ns = time.time_ns()
             batch: list[DydxSecondSnapshot] = []
             for iid in self._pinned | self._liquid:
@@ -319,10 +362,12 @@ class Collector:
             await _publish_snapshot_batch(self._redis, batch)
 
     async def _prune_loop(self) -> None:
-        """Prune non-pinned instruments' catalog data older than non_config_retain_hours."""
-        # Run roughly 4x per retention window (every retain/4 hours, minimum 15 min)
-        interval = max(self._config.non_config_retain_hours * 900, 900)
+        """Prune non-pinned instruments' catalog data, and any per-coin raw-delta retention."""
         while not self._stop.is_set():
+            # Recomputed each iteration so a hot-reloaded retain_hours takes effect promptly.
+            interval = _prune_interval_seconds(
+                self._config.non_config_retain_hours, self._delta_retain_hours
+            )
             await asyncio.sleep(interval)
             catalog_path = str(Path(self._config.catalog_path).resolve())
             non_pinned = (self._liquid | self._illiquid) - self._pinned
@@ -331,6 +376,10 @@ class Collector:
                 freed += prune_instrument(catalog_path, iid, self._config.non_config_retain_hours)
             if freed:
                 logger.info(f"Pruned {freed / 1024 / 1024:.1f} MB from {len(non_pinned)} non-pinned instruments")
+
+            delta_freed = _prune_delta_retention(catalog_path, self._delta_retain_hours)
+            if delta_freed:
+                logger.info(f"Pruned {delta_freed / 1024 / 1024:.1f} MB of raw order-book deltas (per-coin retention)")
 
     async def run(self) -> None:
         self._redis = aioredis.Redis.from_url(
