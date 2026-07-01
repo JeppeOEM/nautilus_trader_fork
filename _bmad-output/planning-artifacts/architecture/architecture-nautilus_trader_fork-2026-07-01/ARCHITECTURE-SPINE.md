@@ -85,11 +85,12 @@ Namespace mapping: `dydx_collector/` = the gate (ingest, validate, write); `ml_s
 - **Prevents:** repeating the production incident where raw `openInterest` (base-token units) was compared against a USD threshold, misclassifying BTC as illiquid
 - **Rule:** Liquidity tiering uses `volume24H` (already USD) or `openInterest × oraclePrice` — never raw `openInterest` alone. `[ADOPTED]` — reference: `dydx_collector/open_interest.py:109` (`classify_liquidity`).
 
-### AD-8 — No live-runtime engine in `troll/`
+### AD-8 — No live-runtime engine in the data-collection path; `TradingNode` is for trading, not collecting
 
-- **Binds:** `dydx_collector`, `ml_signals`
-- **Prevents:** repeating the OOM/shutdown-wedge failure of the earlier `Strategy`/`TradingNode`-based recorder (`gg` branch)
-- **Rule:** `nautilus_trader` is used as a library only. Never instantiate `TradingNode`, `Strategy`, or `DataEngine` inside `troll/`. The collector owns its own asyncio loop, in-memory buffer, and flush timer, driving `nautilus_pyo3.DydxHttpClient`/`DydxWebSocketClient` directly. `[ADOPTED]` — reference: `collector.py:17-18` (module docstring), `collector.py:369` (`asyncio.create_task(self._flush_loop())`, the collector's own loop, no `TradingNode`).
+- **Binds:** `dydx_collector`, `ml_signals` (data collection, storage, and read paths only)
+- **Prevents:** repeating the OOM/shutdown-wedge failure of the earlier `Strategy`/`TradingNode`-based *recorder* (`gg` branch) — where `TradingNode`/`DataEngine` was misused as a data-capture mechanism
+- **Rule:** `dydx_collector` and `ml_signals`'s reader modules (`dashboard`, `catalog_stats`, `chart_data`, `metrics_computer`, `backtest_dydx`, `backtest_ofi`) use `nautilus_trader` as a library only — never instantiate `TradingNode`, `Strategy`, or `DataEngine` for the purpose of *collecting or reading* market data. The collector owns its own asyncio loop, in-memory buffer, and flush timer, driving `nautilus_pyo3.DydxHttpClient`/`DydxWebSocketClient` directly. `[ADOPTED]` — reference: `collector.py:17-18` (module docstring), `collector.py:369` (`asyncio.create_task(self._flush_loop())`, the collector's own loop, no `TradingNode`).
+- **Explicitly not banned:** `TradingNode`/`Strategy` used for their intended purpose — running an actual (paper or live) trading strategy — is in scope for a new, separate module outside `dydx_collector`/`ml_signals`'s data path. The prior incident was `TradingNode` misused as a recorder, not `TradingNode` used to trade; this distinction is load-bearing and must not collapse back into a blanket ban.
 
 ## Consistency Conventions
 

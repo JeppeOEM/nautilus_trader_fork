@@ -1,7 +1,8 @@
 services:
   redis:
     container_name: dydx-redis
-    image: redis:7-alpine
+    # paired with the redis client pin in troll-requirements.txt -- bump both together, RESP3 (8.x) is not wire-compatible with 7.x servers
+    image: redis:8-alpine
     ports:
       - "127.0.0.1:6379:6379"
     restart: unless-stopped
