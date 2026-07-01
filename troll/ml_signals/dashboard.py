@@ -70,6 +70,11 @@ CATALOG_PATH: str = os.environ.get("CATALOG_PATH", "troll/dydx_collector/catalog
 LIVE_INTERVAL_SECONDS: int = 5
 # How often the slow loop flushes to SQLite for historical bookkeeping.
 DB_WRITE_INTERVAL_SECONDS: int = 60
+# Gap threshold for coin chart: if consecutive snapshots are further apart than this
+# (in milliseconds), insert a null data point to break the Plotly line. This converts
+# a misleading horizontal "flatline" (Plotly connecting across a gap) into an honest
+# visual break. Gaps arise when the collector's staleness guard skips stale books.
+_CHART_GAP_THRESHOLD_MS: int = 2500  # 2.5 seconds
 
 # Rankings table columns. Each entry: (store_key, header_label, format_fn, color_fn|None).
 # Reorder, add, or remove rows here to control what's shown and how.
@@ -552,17 +557,32 @@ def _coin_chart_json(iid: str) -> str:
         return json.dumps({"ts": [], "mid": [], "bid": [], "ask": [], "micro": [], "price": [],
                            "sig_ts": [], "ofi_10_z": [], "obi_10": []})
     ts: list[int] = []
-    mid_vals: list[float] = []
-    bid_vals: list[float] = []
-    ask_vals: list[float] = []
-    micro_vals: list[float] = []
-    price_vals: list[float] = []
+    mid_vals: list[float | None] = []
+    bid_vals: list[float | None] = []
+    ask_vals: list[float | None] = []
+    micro_vals: list[float | None] = []
+    price_vals: list[float | None] = []
+    prev_ts_ms: int | None = None
     for s in snaps:
         if not s["bid_prices"] or not s["ask_prices"]:
             continue
         bp, ap = s["bid_prices"][0], s["ask_prices"][0]
         if bp >= ap:  # crossed/touched snapshot — skip (stale data from reconnect)
             continue
+        curr_ts_ms = s["ts_event"] // 1_000_000
+        # Gap detection: if consecutive valid snapshots are further apart than the
+        # threshold, insert a null data point to break the Plotly line.  Without this,
+        # Plotly mode="lines" draws a horizontal line across the gap, producing a
+        # misleading flatline at the last-known price.  Gaps arise when the collector's
+        # staleness guard (_STALE_BOOK_NS) skips stale books during WS reconnect recovery.
+        if prev_ts_ms is not None and (curr_ts_ms - prev_ts_ms) > _CHART_GAP_THRESHOLD_MS:
+            ts.append(curr_ts_ms - 1)
+            bid_vals.append(None)
+            ask_vals.append(None)
+            mid_vals.append(None)
+            micro_vals.append(None)
+            price_vals.append(None)
+        prev_ts_ms = curr_ts_ms
         bs, as_ = s["bid_sizes"][0], s["ask_sizes"][0]
         total = bs + as_
         mid = (bp + ap) / 2
@@ -572,7 +592,7 @@ def _coin_chart_json(iid: str) -> str:
             price = mid + ((s["buy_volume"] - s["sell_volume"]) / tv) * (ap - bp) * 0.5
         else:
             price = mid
-        ts.append(s["ts_event"] // 1_000_000)
+        ts.append(curr_ts_ms)
         mid_vals.append(mid)
         bid_vals.append(bp)
         ask_vals.append(ap)

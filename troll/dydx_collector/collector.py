@@ -65,6 +65,14 @@ logger = logging.getLogger(__name__)
 
 CONFIG_PATH = Path(__file__).parent / "config.toml"
 
+# Skip snapshot if book hasn't received OrderBookDeltas in this many nanoseconds.
+# During WS reconnect recovery the Rust client re-subscribes at 2/sec, so the last
+# instrument in the sorted queue can wait up to N/2 seconds for a fresh snapshot.
+# Emitting the pre-reconnect stale book state during that window produces flatlines
+# on the coin chart. 5 seconds is conservative — liquid dYdX instruments receive
+# book updates multiple times per second under normal conditions.
+_STALE_BOOK_NS: int = 5_000_000_000  # 5 seconds
+
 
 def _buffer_key(data: Any) -> tuple[type, str]:
     return type(data), str(data.instrument_id)
@@ -113,6 +121,9 @@ class Collector:
         # Real-time order books — updated immediately on every OrderBookDeltas callback,
         # independent of the 60s flush cycle. _second_loop reads from here, not _bar_builder._books.
         self._live_books: dict[str, OrderBook] = {}
+        # Wall-clock ns of the last OrderBookDeltas received per instrument.
+        # Used by _second_loop to skip stale books (staleness = no updates for > _STALE_BOOK_NS).
+        self._last_book_update_ns: dict[str, int] = {}
 
         self._redis: aioredis.Redis | None = None
         self._stop = asyncio.Event()
@@ -126,6 +137,7 @@ class Collector:
             book = self._live_books[iid]
             for delta in data.deltas:
                 book.apply_delta(delta)
+            self._last_book_update_ns[iid] = time.time_ns()
         elif isinstance(data, TradeTick):
             iid = str(data.instrument_id)
             if data.aggressor_side == AggressorSide.BUYER:
@@ -265,6 +277,19 @@ class Collector:
                         iid,
                         book.best_bid_price().as_double(),
                         book.best_ask_price().as_double(),
+                    )
+                    continue
+
+                # Staleness guard: skip if no OrderBookDeltas have arrived recently.
+                # During WS reconnect recovery the book retains its pre-reconnect state
+                # until the re-subscription snapshot arrives. Emitting that stale state
+                # produces a flatline on the coin chart. See _STALE_BOOK_NS for threshold.
+                last_book_update_ns = self._last_book_update_ns.get(iid, 0)
+                if now_ns - last_book_update_ns > _STALE_BOOK_NS:
+                    logger.warning(
+                        "Stale book for %s (no OrderBookDeltas for %.1fs) — skipping snapshot",
+                        iid,
+                        (now_ns - last_book_update_ns) / 1e9,
                     )
                     continue
 

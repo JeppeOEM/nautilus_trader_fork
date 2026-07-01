@@ -214,11 +214,16 @@ def test_normal_book_after_fix_emits_snapshot() -> None:
 
 def test_stale_book_emits_identical_snapshots_each_second() -> None:
     """
-    Root cause of flat lines: if no new OrderBookDeltas arrive, _live_books[iid]
-    stays unchanged. _second_loop samples the same book state each second and
-    emits identical bid/ask prices → flat horizontal line on the chart.
-    There is no staleness check in the snapshot path; the flatness IS the signal
-    that the feed is down. This test documents the expected behaviour.
+    If no new OrderBookDeltas arrive, _live_books[iid] stays unchanged and
+    _snapshot_from_book() returns identical snapshots each call.
+
+    In production this path is now blocked by the staleness guard added to
+    collector._second_loop: if _last_book_update_ns[iid] is more than
+    _STALE_BOOK_NS (5s) in the past, _second_loop skips snapshot emission
+    entirely.  This helper (_snapshot_from_book) does not include that guard,
+    so the identical-snapshot behaviour remains testable in isolation —
+    confirming that the fix must live in _second_loop, not in the snapshot
+    helper itself.
     """
     book = _book((50000.0, 1.5), ask_levels=[(50001.0, 2.0)])
 

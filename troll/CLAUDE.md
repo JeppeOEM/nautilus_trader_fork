@@ -12,6 +12,12 @@ These rules govern all code under `troll/` (`dydx_collector/` and `ml_signals/`)
 
 ---
 
+## Data Integrity
+
+- **DATA-01** — **Correct data is the #1 priority. Never display stale or fabricated values as live market data.** If data is genuinely unavailable (e.g., during WS reconnect recovery when the Rust client re-subscribes instruments at 2/sec), the gap must be flagged visually rather than papered over with a flatline. **Implementation:** `collector._second_loop` uses `_STALE_BOOK_NS = 5s` to skip snapshot emission when no `OrderBookDeltas` have arrived for an instrument; `dashboard._coin_chart_json` inserts `None` at timestamp gaps > `_CHART_GAP_THRESHOLD_MS = 2.5s` so Plotly renders an honest break instead of a misleading horizontal line. When adding new data sources or display paths, apply the same principle: skip or flag, never silently perpetuate stale state.
+
+---
+
 ## Observability Rules
 
 - **OBS-01** — **Zero book updates across N liquid instruments is a failure mode, not market behavior.** BTC/ETH/SOL perpetuals trade 24/7. If `buy_count == 0` and `sell_count == 0` and bid prices are frozen for all subscribed instruments for more than 30 seconds, the data pipeline has failed — diagnose it, do not accept it as "quiet market." Root cause seen in production: (a) `classify_liquidity` using `openInterest` (token units) instead of `volume24H` (USD), causing BTC=458 tokens to fail a `>= 100_000 USD` threshold; (b) `_bar_builder._books` only updated every 60s at flush time, making `_second_loop` read a 60-snapshot-old book.

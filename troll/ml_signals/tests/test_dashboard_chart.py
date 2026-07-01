@@ -276,10 +276,14 @@ def test_empty_ask_prices_snap_is_skipped() -> None:
 
 def test_stale_feed_produces_identical_bid_ask_across_ticks() -> None:
     """
-    Root cause of flat lines: when no new OrderBookDeltas arrive, the collector's
-    _live_books[iid] stays frozen. _second_loop samples the same book every second
-    and emits identical bid/ask prices. The dashboard faithfully plots them as a
-    flat horizontal line. This is correct behaviour — the flatness signals a stale feed.
+    When no new OrderBookDeltas arrive the collector's _live_books[iid] stays frozen.
+    _second_loop now has a staleness guard (_STALE_BOOK_NS=5s) that skips emission, so
+    in practice this path is not reached for instruments with a live feed.
+
+    If stale snapshots DO reach _second_rolling (e.g. gap threshold not yet exceeded,
+    or during the first few seconds after reconnect), consecutive 1-second snapshots
+    with the same bid/ask produce a flat chart line.  No gap-null is inserted here
+    because the timestamps are only 1s apart (below _CHART_GAP_THRESHOLD_MS=2500ms).
     """
     _reset()
     frozen_bid, frozen_ask = 50000.0, 50001.0
@@ -303,3 +307,87 @@ def test_ts_event_converted_from_ns_to_ms() -> None:
     ml_signals.dashboard._second_rolling[_IID] = deque([_snap(100.0, 102.0, ts_ns=ts_ns)])
     result = _chart()
     assert result["ts"] == [ts_ns // 1_000_000]
+
+
+# ---------------------------------------------------------------------------
+# Gap detection — null insertion for stale-book gaps (_CHART_GAP_THRESHOLD_MS)
+# ---------------------------------------------------------------------------
+
+def test_gap_below_threshold_does_not_insert_null() -> None:
+    """Consecutive snapshots within 2.5s do NOT get a null break inserted."""
+    _reset()
+    ts1 = _TS_NS
+    ts2 = ts1 + 2_000_000_000  # 2s gap — below 2.5s threshold
+    ml_signals.dashboard._second_rolling[_IID] = deque([
+        _snap(100.0, 102.0, ts_ns=ts1),
+        _snap(101.0, 103.0, ts_ns=ts2),
+    ])
+    result = _chart()
+    assert result["ts"] == [ts1 // 1_000_000, ts2 // 1_000_000]
+    assert len(result["bid"]) == 2
+    assert None not in result["bid"]
+
+
+def test_gap_above_threshold_inserts_null_break() -> None:
+    """
+    Consecutive snapshots with a gap > 2.5s get a null data point inserted just
+    before the second snapshot.  This breaks the Plotly line, preventing a
+    misleading horizontal flatline from being drawn across the missing seconds.
+    The null is inserted at (ts2_ms - 1) so Plotly stops the line before the gap.
+    """
+    _reset()
+    ts1 = _TS_NS
+    ts2 = ts1 + 5_000_000_000  # 5s gap — exceeds 2.5s threshold
+    ts1_ms = ts1 // 1_000_000
+    ts2_ms = ts2 // 1_000_000
+    ml_signals.dashboard._second_rolling[_IID] = deque([
+        _snap(100.0, 102.0, ts_ns=ts1),
+        _snap(101.0, 103.0, ts_ns=ts2),
+    ])
+    result = _chart()
+    # Expected: [ts1_ms, ts2_ms-1 (null), ts2_ms (valid)]
+    assert len(result["ts"]) == 3
+    assert result["ts"] == [ts1_ms, ts2_ms - 1, ts2_ms]
+    # Middle entry is the null break
+    assert result["bid"][1] is None
+    assert result["ask"][1] is None
+    assert result["mid"][1] is None
+    assert result["micro"][1] is None
+    assert result["price"][1] is None
+    # Flanking entries are valid
+    assert result["bid"][0] == 100.0
+    assert result["ask"][0] == 102.0
+    assert result["bid"][2] == 101.0
+    assert result["ask"][2] == 103.0
+
+
+def test_multiple_gaps_each_inserts_one_null() -> None:
+    """Multiple gaps each get their own null break."""
+    _reset()
+    ts1 = _TS_NS
+    ts2 = ts1 + 6_000_000_000   # 6s gap
+    ts3 = ts2 + 8_000_000_000   # 8s gap
+    ml_signals.dashboard._second_rolling[_IID] = deque([
+        _snap(100.0, 102.0, ts_ns=ts1),
+        _snap(101.0, 103.0, ts_ns=ts2),
+        _snap(102.0, 104.0, ts_ns=ts3),
+    ])
+    result = _chart()
+    # 3 valid points + 2 null breaks = 5 total entries
+    assert len(result["ts"]) == 5
+    assert result["bid"][1] is None   # null after first gap
+    assert result["bid"][3] is None   # null after second gap
+    assert result["bid"][0] == 100.0
+    assert result["bid"][2] == 101.0
+    assert result["bid"][4] == 102.0
+
+
+def test_first_snapshot_never_gets_null_prefix() -> None:
+    """No null is inserted before the very first snapshot — gaps only tracked after first point."""
+    _reset()
+    ml_signals.dashboard._second_rolling[_IID] = deque([
+        _snap(100.0, 102.0, ts_ns=_TS_NS),
+    ])
+    result = _chart()
+    assert len(result["ts"]) == 1
+    assert result["bid"] == [100.0]
