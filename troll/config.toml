@@ -2,6 +2,7 @@
 network = "mainnet"
 catalog_path = "catalog"
 flush_interval_seconds = 60
+snapshot_interval_seconds = 1.0
 config_reload_seconds = 30
 open_interest_poll_seconds = 300
 

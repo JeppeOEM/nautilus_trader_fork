@@ -15,7 +15,7 @@
 """
 dYdX market data collector entrypoint.
 
-Owns its own asyncio loop, a typed in-memory buffer, and a MinuteBarBuilder.
+Owns its own asyncio loop, a typed in-memory buffer, and a configurable snapshot loop.
 No TradingNode/Strategy/DataEngine involved -- see client.py for why.
 
 Instrument tiers
@@ -47,8 +47,6 @@ import redis.asyncio as aioredis
 from dydx_collector.client import DydxClient
 from dydx_collector.config import CollectorConfig
 from dydx_collector.config import load_config
-from dydx_collector.minute_bars import DydxMinuteBar
-from dydx_collector.minute_bars import MinuteBarBuilder
 from dydx_collector.open_interest import _fetch_markets_json
 from dydx_collector.open_interest import classify_liquidity
 from dydx_collector.open_interest import fetch_open_interest
@@ -56,11 +54,10 @@ from dydx_collector.prune_catalog import prune_instrument
 from dydx_collector.second_snapshot import BOOK_DEPTH
 from dydx_collector.second_snapshot import DydxSecondSnapshot
 from nautilus_trader.model.book import OrderBook
-from nautilus_trader.model.data import MarkPriceUpdate
 from nautilus_trader.model.data import OrderBookDeltas
 from nautilus_trader.model.data import TradeTick
-from nautilus_trader.model.enums import BookType
 from nautilus_trader.model.enums import AggressorSide
+from nautilus_trader.model.enums import BookType
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.instruments import instruments_from_pyo3
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
@@ -113,7 +110,7 @@ def _prune_delta_retention(catalog_path: str, delta_retain_hours: dict[str, floa
 
 
 async def _publish_snapshot_batch(redis_client: aioredis.Redis, snapshots: list) -> None:
-    """Publish a batch of DydxSecondSnapshot objects to Redis channel snapshots:1s.
+    """Publish a batch of DydxSecondSnapshot objects to Redis channel snapshots:raw.
 
     Empty batches are silently dropped. Publish failures are logged and swallowed —
     missing one tick is acceptable per the architecture.
@@ -122,7 +119,7 @@ async def _publish_snapshot_batch(redis_client: aioredis.Redis, snapshots: list)
         return
     payload = json.dumps([DydxSecondSnapshot.to_dict(s) for s in snapshots])
     try:
-        await redis_client.publish("snapshots:1s", payload)
+        await redis_client.publish("snapshots:raw", payload)
     except Exception as e:
         logger.warning("Redis publish failed: %s", e)
 
@@ -137,7 +134,6 @@ class Collector:
 
         self._client = DydxClient(on_data=self._on_data, network=config.network)
         self._buffer: dict[tuple[type, str], list[Any]] = defaultdict(list)
-        self._bar_builder = MinuteBarBuilder()
 
         # Instrument tiers (populated in run())
         self._pinned: set[str] = {e.id for e in config.instruments}
@@ -187,48 +183,19 @@ class Collector:
                 self._second_sell_count[iid] += 1
 
     def _flush_once(self) -> None:
-        now_ns = time.time_ns()
-        trades_by_iid: dict[str, list[TradeTick]] = defaultdict(list)
-        deltas_by_iid: dict[str, list[OrderBookDeltas]] = defaultdict(list)
-        marks_by_iid: dict[str, list[MarkPriceUpdate]] = defaultdict(list)
-
         for key, items in list(self._buffer.items()):
             if not items:
                 continue
             self._buffer[key] = []
             dtype, iid = key
 
-            if dtype is TradeTick:
-                trades_by_iid[iid].extend(items)
-            elif dtype is OrderBookDeltas:
-                deltas_by_iid[iid].extend(items)
-                if iid not in self._delta_store:
-                    continue
-            elif dtype is MarkPriceUpdate:
-                marks_by_iid[iid].extend(items)
+            if dtype is OrderBookDeltas and iid not in self._delta_store:
+                continue
 
             try:
                 self._catalog.write_data(items)
             except Exception:
                 logger.exception(f"Failed to write {key}, dropping {len(items)} items")
-
-        # Build enriched 1-min bars for subscribed instruments that had book/trade activity
-        subscribed = self._pinned | self._liquid
-        bar_instruments = (set(trades_by_iid) | set(deltas_by_iid)) & subscribed
-        bars: list[DydxMinuteBar] = []
-        for iid in bar_instruments:
-            bars.extend(self._bar_builder.update(
-                instrument_id=iid,
-                trades=trades_by_iid.get(iid, []),
-                delta_batches=deltas_by_iid.get(iid, []),
-                marks=marks_by_iid.get(iid, []),
-                now_ns=now_ns,
-            ))
-        if bars:
-            try:
-                self._catalog.write_data(bars)
-            except Exception:
-                logger.exception(f"Failed to write {len(bars)} minute bars")
 
     async def _flush_loop(self) -> None:
         while not self._stop.is_set():
@@ -302,7 +269,7 @@ class Collector:
             self._config = new_config
 
     async def _second_loop(self) -> None:
-        """Sample the L2 book on a configurable interval; raw levels + trade volume only — signals computed on read."""
+        """Sample L2 book at snapshot_interval_seconds; raw levels + trade volume only — signals computed on read."""
         while not self._stop.is_set():
             await asyncio.sleep(self._config.snapshot_interval_seconds)
             now_ns = time.time_ns()

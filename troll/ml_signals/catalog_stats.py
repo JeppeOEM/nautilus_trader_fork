@@ -25,8 +25,6 @@ from nautilus_trader.model.data import IndexPriceUpdate
 from nautilus_trader.model.data import MarkPriceUpdate
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
-from dydx_collector.minute_bars import DydxMinuteBar
-
 
 # Order matters only for price_series()'s fallback preference below.
 DATA_TYPES = (
@@ -172,22 +170,19 @@ def price_series(
     instrument_id: str,
     start_ns: int | None = None,
 ) -> list[tuple[int, float]]:
-    """
-    (ts_event, price) pairs in ascending order.
-
-    Preference: trade_tick → DydxMinuteBar close → standard bar close.
-    """
+    """(ts_event, price) pairs in ascending order. Preference: trade_tick → mark price."""
     trades = catalog.trade_ticks(instrument_ids=[instrument_id], start=start_ns)
     if trades:
         return sorted((t.ts_event, t.price.as_double()) for t in trades)
 
-    minute_bars = catalog.query(DydxMinuteBar, identifiers=[instrument_id], start=start_ns)
-    if minute_bars:
-        return sorted((b.ts_event, b.close) for b in minute_bars)
-
-    bars = catalog.bars(instrument_ids=[instrument_id], start=start_ns)
-    if bars:
-        return sorted((b.ts_event, b.close.as_double()) for b in bars)
+    # Fallback for instruments with no trades (illiquid/new): use mark price.
+    # catalog.bars() is intentionally omitted — the collector never writes Bar objects.
+    try:
+        marks = catalog.query(MarkPriceUpdate, identifiers=[instrument_id], start=start_ns)
+    except (NotImplementedError, RuntimeError):
+        marks = []
+    if marks:
+        return sorted((m.ts_event, m.value.as_double()) for m in marks)
 
     return []
 

@@ -36,6 +36,7 @@ class CollectorConfig:
     network: DydxNetwork
     catalog_path: str
     flush_interval_seconds: int
+    snapshot_interval_seconds: float
     config_reload_seconds: int
     open_interest_poll_seconds: int
     snapshot_interval_seconds: float
@@ -72,6 +73,7 @@ def load_config(path: Path) -> CollectorConfig:
         ),
         catalog_path=raw.get("catalog_path", "catalog"),
         flush_interval_seconds=raw.get("flush_interval_seconds", 60),
+        snapshot_interval_seconds=float(raw.get("snapshot_interval_seconds", 1.0)),
         config_reload_seconds=raw.get("config_reload_seconds", 30),
         open_interest_poll_seconds=raw.get("open_interest_poll_seconds", 300),
         snapshot_interval_seconds=snapshot_interval_seconds,

@@ -32,9 +32,9 @@ from nautilus_trader.model.enums import BookType
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
-from dydx_collector.minute_bars import DydxMinuteBar
 from ml_signals.book_features import CancellationTracker
 from ml_signals.book_features import compute_features
+from ml_signals.candles import build_candles
 from ml_signals.indicators import Microprice
 from ml_signals.indicators import OrderFlowImbalance
 
@@ -65,12 +65,13 @@ def compute_chart_series(
     bars_start_ns = start_ns - trend_ema_slow * 30 * 60 * 1_000_000_000
 
     deltas = catalog.order_book_deltas(instrument_ids=[instrument_id], start=start_ns, end=end_ns)
-    trades = catalog.trade_ticks(instrument_ids=[instrument_id], start=start_ns, end=end_ns)
-    # DydxMinuteBar is the primary candle source (computed by the collector from trades).
-    # Fall back to standard bars for backward compat with old catalog data.
-    minute_bars = catalog.query(DydxMinuteBar, identifiers=[instrument_id], start=bars_start_ns, end=end_ns)
-    if not minute_bars:
-        minute_bars = catalog.bars(instrument_ids=[instrument_id], start=bars_start_ns, end=end_ns)
+    # Load trades from bars_start_ns for EMA warmup; filter to start_ns for the trade_line.
+    all_trades = catalog.trade_ticks(instrument_ids=[instrument_id], start=bars_start_ns, end=end_ns)
+    trades = [t for t in all_trades if t.ts_event >= start_ns]
+    minute_candles = build_candles(
+        [(t.ts_event, t.price.as_double()) for t in all_trades],
+        period_seconds=60,
+    )
 
     candles: list[dict] = []
     trade_line: list[dict] = []
@@ -79,39 +80,39 @@ def compute_chart_series(
     trend_fast_series: list[dict] = []
     trend_slow_series: list[dict] = []
 
-    for bar in sorted(minute_bars, key=lambda b: b.ts_event):
-        close = bar.close if isinstance(bar, DydxMinuteBar) else bar.close.as_double()
-        open_ = bar.open if isinstance(bar, DydxMinuteBar) else bar.open.as_double()
-        high  = bar.high if isinstance(bar, DydxMinuteBar) else bar.high.as_double()
-        low   = bar.low  if isinstance(bar, DydxMinuteBar) else bar.low.as_double()
-        trend_fast.update_raw(close)
-        trend_slow.update_raw(close)
-        if bar.ts_event >= start_ns:
-            t = bar.ts_event / 1e9
-            candles.append({"time": t, "open": open_, "high": high, "low": low, "close": close})
+    for candle in minute_candles:
+        trend_fast.update_raw(candle.close)
+        trend_slow.update_raw(candle.close)
+        if candle.ts_open >= start_ns:
+            t = candle.ts_open / 1e9
+            candles.append({"time": t, "open": candle.open, "high": candle.high, "low": candle.low, "close": candle.close})
             if trend_fast.initialized:
                 trend_fast_series.append({"time": t, "value": trend_fast.value})
             if trend_slow.initialized:
                 trend_slow_series.append({"time": t, "value": trend_slow.value})
 
-    for tick in sorted(trades, key=lambda t: t.ts_event):
+    sorted_trades = sorted(trades, key=lambda t: t.ts_event)
+    for tick in sorted_trades:
         trade_line.append({"time": tick.ts_event / 1e9, "value": tick.price.as_double()})
 
     # 5-min rolling cumulative delta from trade ticks
     cum_delta_series: list[dict] = []
     window_ns = _CUM_DELTA_SECONDS * 1_000_000_000
     cum_buf: deque[tuple[int, float]] = deque()
-    for tick in sorted(trades, key=lambda t: t.ts_event):
+    running_total = 0.0
+    for tick in sorted_trades:
         signed = tick.size.as_double()
         if tick.aggressor_side == AggressorSide.SELLER:
             signed = -signed
         cum_buf.append((tick.ts_event, signed))
+        running_total += signed
         cutoff = tick.ts_event - window_ns
         while cum_buf and cum_buf[0][0] < cutoff:
-            cum_buf.popleft()
+            _, removed = cum_buf.popleft()
+            running_total -= removed
         cum_delta_series.append({
             "time": tick.ts_event / 1e9,
-            "value": sum(sz for _, sz in cum_buf),
+            "value": running_total,
         })
 
     if not deltas:

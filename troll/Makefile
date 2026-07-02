@@ -6,8 +6,14 @@ BASE_IMAGE := nautilus-trader-base:1.229.0
 .PHONY: build-base up down logs logs-dash web
 
 ## Build the base nautilus image (~15 min, only needed once or after core changes)
+## On networks with TLS inspection (e.g. Zscaler), export your root CA to
+## ~/.docker/corporate-ca.pem and it will be injected automatically.
 build-base:
-	docker build --network=host \
+	@CA_SECRET=""; \
+	if [ -f "$(HOME)/.docker/corporate-ca.pem" ]; then \
+		CA_SECRET="--secret id=ca-cert,src=$(HOME)/.docker/corporate-ca.pem"; \
+	fi; \
+	docker build $$CA_SECRET --network=host \
 		-f $(REPO_ROOT)/.docker/nautilus_trader.dockerfile \
 		--target application \
 		-t $(BASE_IMAGE) \

@@ -53,7 +53,7 @@ def test_single_snapshot_calls_publish() -> None:
     asyncio.run(_publish_snapshot_batch(redis_client, [snap]))
     redis_client.publish.assert_called_once()
     call_args = redis_client.publish.call_args
-    assert call_args[0][0] == "snapshots:1s"
+    assert call_args[0][0] == "snapshots:raw"
 
 
 def test_payload_is_valid_json() -> None:

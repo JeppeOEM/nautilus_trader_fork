@@ -15,7 +15,7 @@
 """
 Standalone aiohttp dashboard for the dYdX collector.
 
-Subscribes to Redis channel snapshots:1s (published by the collector every second),
+Subscribes to Redis channel snapshots:raw (published by the collector every second),
 maintains a rolling in-process snapshot window, and pushes live rankings to browsers
 via Server-Sent Events at /stream. Reconnects to Redis automatically after collector
 restart (ARCH-03).
@@ -209,6 +209,7 @@ var IND=[
 ];
 var timer=null;
 var _chartData=null,_diffA=null,_diffB=null,_diffBoxHTML='';
+var _coinIid=null,_coinMode='lines',_coinBarSeconds=60,_coinHistStart=null,_coinHistEnd=null;
 
 function esc(s){
   return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
@@ -261,6 +262,60 @@ function buildDiff(a,b){
     +'<a style="color:#8b949e;font-size:11px;margin-left:8px" onclick="clearDiff();return false" href="#">×</a>';
 }
 
+function _fmtDTL(d){var p=function(n){return n<10?'0'+n:String(n);};return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+'T'+p(d.getHours())+':'+p(d.getMinutes());}
+function setCoinMode(m){_coinMode=m;_updateModeButtons();if(_coinHistStart)_fetchHistCoin(_coinIid,_coinHistStart,_coinHistEnd);}
+function _updateModeButtons(){
+  var bl=document.getElementById('btn-lines'),bc=document.getElementById('btn-candles');
+  if(bl)bl.style.borderColor=_coinMode==='lines'?'#58a6ff':'#444';
+  if(bc)bc.style.borderColor=_coinMode==='candles'?'#58a6ff':'#444';
+}
+function onBarChange(){
+  var sel=document.getElementById('bar-sel');
+  if(sel)_coinBarSeconds=parseInt(sel.value);
+  if(_coinHistStart)_fetchHistCoin(_coinIid,_coinHistStart,_coinHistEnd);
+}
+function loadCoinDateRange(){
+  var s=document.getElementById('coin-start'),e=document.getElementById('coin-end');
+  if(!s||!e)return;
+  _coinHistStart=s.value;_coinHistEnd=e.value;
+  clearInterval(timer);
+  var b=document.getElementById('btn-live');
+  if(b){b.style.color='#8b949e';b.style.borderColor='#444';}
+  _fetchHistCoin(_coinIid,_coinHistStart,_coinHistEnd);
+}
+function resetCoinLive(){
+  _coinHistStart=null;_coinHistEnd=null;
+  var b=document.getElementById('btn-live');
+  if(b){b.style.color='#3fb950';b.style.borderColor='#3fb950';}
+  clearInterval(timer);
+  pollCoin(_coinIid);
+  timer=setInterval(function(){if(!_coinHistStart)pollCoin(_coinIid);},1000);
+}
+function _fetchHistCoin(iid,start,end){
+  setStatus('Loading…');
+  var bar=_coinBarSeconds;
+  fetch('/data/coin/'+encodeURIComponent(iid)+'/candles?start='+encodeURIComponent(start)+'&end='+encodeURIComponent(end)+'&bar='+bar)
+    .then(function(r){return r.json();})
+    .then(function(d){_renderCandleChart(d.candles);setStatus('Loaded '+d.candles.length+' candles');})
+    .catch(function(err){setStatus('Error: '+err);});
+}
+function _renderCandleChart(candles){
+  if(!candles||!candles.length)return;
+  var x=candles.map(function(c){return new Date(c.t);});
+  Plotly.react('live-chart',[{
+    type:'candlestick',x:x,
+    open:candles.map(function(c){return c.o;}),
+    high:candles.map(function(c){return c.h;}),
+    low:candles.map(function(c){return c.l;}),
+    close:candles.map(function(c){return c.c;}),
+    name:'price',
+    increasing:{line:{color:'#26a69a'}},
+    decreasing:{line:{color:'#ef5350'}},
+  }],{height:300,template:'plotly_dark',
+    xaxis:{type:'date',rangeslider:{visible:false}},
+    margin:{t:10,b:30,l:60,r:10}});
+}
+
 function showRankings(){
   clearDiff();
   clearInterval(timer);
@@ -304,10 +359,34 @@ function renderRankings(rows,ingestCount,ageS,stale){
 }
 
 function showCoin(iid){
+  clearDiff();
   clearInterval(timer);
+  _coinIid=iid;_coinHistStart=null;_coinHistEnd=null;_coinMode='lines';
   history.pushState({iid:iid},"","/coin/"+encodeURIComponent(iid));
+  var label=iid.split("-").slice(0,2).join("-");
+  var now=new Date(),endV=_fmtDTL(now),startV=_fmtDTL(new Date(now.getTime()-4*3600*1000));
+  setApp(
+    "<h1>"+esc(label)+" <small><a href=\\"/chart/"+esc(iid)+"\\">chart</a>"
+    +" | <a onclick=\\"showRankings();return false\\" href=\\"/\\">back</a></small></h1>"
+    +"<div style=\\"display:flex;gap:8px;align-items:center;padding:6px 0;flex-wrap:wrap;border-bottom:1px solid #21262d;margin-bottom:6px\\">"
+    +"<button id=\\"btn-lines\\" onclick=\\"setCoinMode('lines')\\" style=\\"background:#21262d;color:#c9d1d9;border:1px solid #58a6ff;padding:3px 10px;cursor:pointer\\">Lines</button>"
+    +"<button id=\\"btn-candles\\" onclick=\\"setCoinMode('candles')\\" style=\\"background:#21262d;color:#c9d1d9;border:1px solid #444;padding:3px 10px;cursor:pointer\\">Candles</button>"
+    +"<select id='bar-sel' onchange='onBarChange()' style=\\"background:#21262d;color:#c9d1d9;border:1px solid #444;padding:3px\\">"
+    +"<option value='30'>30s</option><option value='60' selected>1m</option><option value='300'>5m</option>"
+    +"<option value='900'>15m</option><option value='3600'>1h</option></select>"
+    +" &nbsp;|&nbsp; From <input type='datetime-local' id='coin-start' value='"+startV+"' style=\\"background:#21262d;color:#c9d1d9;border:1px solid #444;padding:2px\\">"
+    +" To <input type='datetime-local' id='coin-end' value='"+endV+"' style=\\"background:#21262d;color:#c9d1d9;border:1px solid #444;padding:2px\\">"
+    +" <button onclick='loadCoinDateRange()' style=\\"background:#21262d;color:#c9d1d9;border:1px solid #444;padding:3px 10px;cursor:pointer\\">Load</button>"
+    +" <button id='btn-live' onclick='resetCoinLive()' style=\\"background:#21262d;color:#3fb950;border:1px solid #3fb950;padding:3px 10px;cursor:pointer\\">&#9679; Live</button>"
+    +"</div>"
+    +"<h2>Indicators</h2><table id='ind-tbl'></table>"
+    +"<div id='price-ticker' style=\\"padding:6px 0 2px;font-size:14px;font-family:monospace;letter-spacing:0.04em;border-top:1px solid #21262d;margin-top:10px\\"></div>"
+    +"<div id='sig-chart' style=\\"height:180px;margin-top:8px\\"></div>"
+    +"<div id='live-chart' style=\\"height:300px;margin-top:4px\\"></div>"
+    +"<div id='diff-box' style=\\"min-height:22px;padding:5px 2px;border-top:1px solid #21262d;font-size:12px;font-family:monospace\\"></div>"
+  );
   pollCoin(iid);
-  timer=setInterval(function(){pollCoin(iid);},1000);
+  timer=setInterval(function(){if(!_coinHistStart)pollCoin(iid);},1000);
 }
 
 function pollCoin(iid){
@@ -322,19 +401,12 @@ function pollCoin(iid){
 
 function renderCoin(iid,ind,chart){
   _chartData=chart;
-  var label=iid.split("-").slice(0,2).join("-");
   var rows=IND.map(function(k){
     var v=ind[k[0]];
     return "<tr><td>"+esc(k[1])+"</td><td>"+(v!=null?esc(String(v)):"&mdash;")+"</td></tr>";
   }).join("");
-  setApp("<h1>"+esc(label)
-    +" <small><a href=\\"/chart/"+esc(iid)+"\\">chart</a>"
-    +" | <a onclick=\\"showRankings();return false\\" href=\\"/\\">back</a></small></h1>"
-    +"<h2>Indicators</h2><table>"+rows+"</table>"
-    +"<div id=\\"price-ticker\\" style=\\"padding:6px 0 2px;font-size:14px;font-family:monospace;letter-spacing:0.04em;border-top:1px solid #21262d;margin-top:10px\\"></div>"
-    +"<div id=\\"sig-chart\\" style=\\"height:180px;margin-top:8px\\"></div>"
-    +"<div id=\\"live-chart\\" style=\\"height:300px;margin-top:4px\\"></div>"
-    +"<div id=\\"diff-box\\" style=\\"min-height:22px;padding:5px 2px;border-top:1px solid #21262d;font-size:12px;font-family:monospace\\"></div>");
+  var tbl=document.getElementById('ind-tbl');
+  if(tbl)tbl.innerHTML=rows;
   if(chart.sig_ts&&chart.sig_ts.length){
     var sx=chart.sig_ts.map(function(t){return new Date(t);});
     var sigTraces=[];
@@ -347,7 +419,13 @@ function renderCoin(iid,ind,chart){
         xaxis:{type:"date"},yaxis:{zeroline:true,zerolinecolor:"#444"},
         margin:{t:20,b:20,l:50,r:10},legend:{orientation:"h",y:1.15}});
   }
-  if(chart.ts&&chart.ts.length){
+  if(_coinMode==='candles'){
+    var sel=document.getElementById('bar-sel');
+    var bar=sel?sel.value:'60';
+    fetch('/data/coin/'+encodeURIComponent(iid)+'/candles?bar='+bar)
+      .then(function(r){return r.json();})
+      .then(function(d){_renderCandleChart(d.candles);});
+  }else if(chart.ts&&chart.ts.length){
     var x=chart.ts.map(function(t){return new Date(t);});
     var traces=[
       {x:x,y:chart.bid,   name:"bid",        mode:"lines",line:{color:"#26a69a",width:1}},
@@ -366,6 +444,11 @@ function renderCoin(iid,ind,chart){
         marker:{color:"#e3b341",size:10,symbol:"circle",line:{color:"#ffffff",width:2}}});
     Plotly.react("live-chart",traces,{height:300,template:"plotly_dark",xaxis:{type:"date"},
        margin:{t:10,b:30,l:60,r:10},legend:{orientation:"h"}});
+    var liveEl=document.getElementById('live-chart');
+    if(liveEl){
+      liveEl.removeAllListeners&&liveEl.removeAllListeners('plotly_click');
+      liveEl.on('plotly_click',handleChartClick);
+    }
   }
   var tickerEl=document.getElementById('price-ticker');
   if(tickerEl&&chart.ts&&chart.ts.length){
@@ -379,11 +462,6 @@ function renderCoin(iid,ind,chart){
   }
   var diffEl=document.getElementById('diff-box');
   if(diffEl)diffEl.innerHTML=_diffBoxHTML;
-  var liveEl=document.getElementById('live-chart');
-  if(liveEl){
-    liveEl.removeAllListeners&&liveEl.removeAllListeners('plotly_click');
-    liveEl.on('plotly_click',handleChartClick);
-  }
 }
 
 window.onpopstate=function(){
@@ -541,6 +619,47 @@ def _render_chart_page(symbol: str, start_ms: int, end_ms: int) -> str:
     )
     body = form + fig.to_html(full_html=False, include_plotlyjs="cdn")
     return _page(f"{sym} chart", body, refresh_seconds=86400)  # no auto-refresh; user controls via form
+
+
+def _live_candles_json(iid: str, bar_seconds: int) -> str:
+    """Build OHLC candles from the rolling 1s snapshot buffer (mid price)."""
+    snaps = list(_second_rolling.get(iid, []))
+    if not snaps:
+        return json.dumps({"candles": []})
+    buckets: dict[int, list[float]] = {}
+    for s in snaps:
+        if not s["bid_prices"] or not s["ask_prices"]:
+            continue
+        bp, ap = s["bid_prices"][0], s["ask_prices"][0]
+        if bp >= ap:
+            continue
+        mid = (bp + ap) / 2
+        bucket = (s["ts_event"] // 1_000_000_000 // bar_seconds) * bar_seconds
+        buckets.setdefault(bucket, []).append(mid)
+    candles = [
+        {"t": t * 1000, "o": mids[0], "h": max(mids), "l": min(mids), "c": mids[-1]}
+        for t, mids in sorted(buckets.items())
+    ]
+    return json.dumps({"candles": candles})
+
+
+def _historical_candles_json(iid: str, start_ms: int, end_ms: int, bar_seconds: int) -> str:
+    """Build OHLC candles from trade_ticks in the Parquet catalog."""
+    from nautilus_trader.persistence.catalog import ParquetDataCatalog
+    from ml_signals.candles import build_candles as _build
+    catalog = ParquetDataCatalog(CATALOG_PATH)
+    start_ns = start_ms * 1_000_000
+    end_ns = end_ms * 1_000_000
+    trades = catalog.trade_ticks(instrument_ids=[iid], start=start_ns, end=end_ns)
+    raw = [(t.ts_event, t.price.as_double()) for t in trades]
+    if not raw:
+        return json.dumps({"candles": []})
+    candle_data = _build(raw, period_seconds=bar_seconds)
+    candles = [
+        {"t": c.ts_open // 1_000_000, "o": c.open, "h": c.high, "l": c.low, "c": c.close}
+        for c in candle_data
+    ]
+    return json.dumps({"candles": candles})
 
 
 def _coin_chart_json(iid: str) -> str:
@@ -822,6 +941,30 @@ async def coin_json_handler(request: web.Request) -> web.Response:
     return web.Response(text=_coin_chart_json(symbol), content_type="application/json")
 
 
+async def coin_candles_handler(request: web.Request) -> web.Response:
+    symbol = request.match_info["id"]
+    qs = dict(request.rel_url.query)
+    import datetime as _dt
+    bar_seconds = max(1, int(qs.get("bar", "60")))
+
+    def _parse_ms(key: str) -> int | None:
+        v = qs.get(key)
+        if v:
+            try:
+                return int(_dt.datetime.fromisoformat(v).timestamp() * 1000)
+            except ValueError:
+                pass
+        return None
+
+    start_ms = _parse_ms("start")
+    end_ms = _parse_ms("end")
+    if start_ms is not None and end_ms is not None:
+        data = await asyncio.to_thread(_historical_candles_json, symbol, start_ms, end_ms, bar_seconds)
+    else:
+        data = _live_candles_json(symbol, bar_seconds)
+    return web.Response(text=data, content_type="application/json")
+
+
 async def live_coin_json_handler(request: web.Request) -> web.Response:
     """Raw indicator values for /coin/{id} live panel — polled every 5s."""
     symbol = request.match_info["id"]
@@ -884,7 +1027,7 @@ async def redis_subscriber_ctx(app: web.Application):  # type: ignore[type-arg]
 
 
 async def _redis_listener(redis_url: str) -> None:
-    """Subscribe to snapshots:1s and call _ingest_batch on each message.
+    """Subscribe to snapshots:raw and call _ingest_batch on each message.
 
     Outer while True reconnects on any non-cancellation exception (ARCH-03).
     Malformed JSON is logged and skipped — subscriber always continues (T-03-01).
@@ -895,8 +1038,8 @@ async def _redis_listener(redis_url: str) -> None:
             logger.info("Redis listener connecting...")
             async with aioredis.Redis.from_url(redis_url, decode_responses=True) as client:
                 pubsub = client.pubsub()
-                await pubsub.subscribe("snapshots:1s")
-                logger.info("Redis listener subscribed to snapshots:1s")
+                await pubsub.subscribe("snapshots:raw")
+                logger.info("Redis listener subscribed to snapshots:raw")
                 async for message in pubsub.listen():
                     if message["type"] != "message":
                         continue
@@ -967,6 +1110,7 @@ def make_app(redis_url: str, catalog_path: str) -> web.Application:
     app.router.add_get("/debug", debug_handler)
     app.router.add_get("/coin/{id}", coin_handler)
     app.router.add_get("/data/coin/{id}", coin_json_handler)
+    app.router.add_get("/data/coin/{id}/candles", coin_candles_handler)
     app.router.add_get("/data/live/{id}", live_coin_json_handler)
     app.router.add_get("/chart/{id}", chart_handler)
     app.router.add_get("/history/{id}", history_handler)
