@@ -49,13 +49,22 @@ def top_of_book_series(
     deltas: list[OrderBookDelta],
     instrument_id: InstrumentId,
 ) -> Iterator[tuple[int, float, float, float, float]]:
-    """Yield (ts_event, bid_price, bid_size, ask_price, ask_size) after each delta."""
+    """
+    Yield (ts_event, bid_price, bid_size, ask_price, ask_size) after each delta.
+
+    Skips crossed/touched states (bid >= ask): dYdX's venue feed can transiently
+    cross mid-replay (validator ack delays -- see collector.py's crossed-book
+    resync watchdog), and yielding that state here would feed a negative spread
+    straight into OFI/microprice. Mirrors the guard in collector._second_loop.
+    """
     book = OrderBook(instrument_id, book_type=BookType.L2_MBP)
     for delta in sorted(deltas, key=lambda d: d.ts_init):
         book.apply_delta(delta)
         bid_price = book.best_bid_price()
         ask_price = book.best_ask_price()
         if bid_price is None or ask_price is None:
+            continue
+        if bid_price.as_double() >= ask_price.as_double():
             continue
         yield (
             delta.ts_event,

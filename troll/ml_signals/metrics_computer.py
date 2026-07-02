@@ -47,6 +47,13 @@ OFI_WINDOW: int = 5
 # Bounding price queries avoids scanning months of trade history on every tick.
 PRICE_LOOKBACK_HOURS: float = 25.0
 
+# A gap this large between consecutive top-of-book updates means the book was
+# desynced/reconnecting for a while (see collector.py's crossed-book resync
+# watchdog) -- treat the next update as a fresh start rather than feeding OFI
+# a delta computed across the missing period. Matches the dashboard's live-path
+# gap threshold in _ingest_batch.
+_BOOK_GAP_NS: int = 3_000_000_000  # 3 seconds
+
 
 def _book_metrics(
     catalog: ParquetDataCatalog,
@@ -65,11 +72,15 @@ def _book_metrics(
     ofi = OrderFlowImbalance(window=OFI_WINDOW)
     micro = Microprice()
     last_bid = last_ask = None
+    prev_ts = None
 
-    for _, bid_p, bid_s, ask_p, ask_s in top_of_book_series(deltas, InstrumentId.from_str(instrument_id)):
+    for ts, bid_p, bid_s, ask_p, ask_s in top_of_book_series(deltas, InstrumentId.from_str(instrument_id)):
+        if prev_ts is not None and ts - prev_ts > _BOOK_GAP_NS:
+            ofi.reset()  # discard OFI window spanning the gap, don't feed it a stale delta
         ofi.update_raw(bid_p, bid_s, ask_p, ask_s)
         micro.update_raw(bid_p, bid_s, ask_p, ask_s)
         last_bid, last_ask = bid_p, ask_p
+        prev_ts = ts
 
     return {
         "ofi": ofi.value if ofi.initialized else None,

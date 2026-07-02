@@ -1,0 +1,852 @@
+<title>Order Book Integrity — dYdX Sequence Forensics</title>
+<style>
+  :root {
+    --void: #0a0d12;
+    --void-2: #0d1118;
+    --panel: #12161d;
+    --panel-raised: #161c26;
+    --line: #232c3a;
+    --line-soft: rgba(148, 166, 190, 0.14);
+    --ink: #e4eaf1;
+    --ink-dim: #99a9bd;
+    --ink-faint: #5c6b80;
+    --cyan: #3fd8cb;
+    --cyan-dim: rgba(63, 216, 203, 0.12);
+    --cyan-line: rgba(63, 216, 203, 0.4);
+    --amber: #f0a83c;
+    --amber-dim: rgba(240, 168, 60, 0.12);
+    --amber-line: rgba(240, 168, 60, 0.4);
+    --rejected: #ec835a;
+    --critical: #d03b3b;
+    --critical-text: #ff6f6f;
+    --critical-dim: rgba(208, 59, 59, 0.14);
+    --good: #0ca30c;
+    --font-display: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+    --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    --font-mono: ui-monospace, "SFMono-Regular", "SF Mono", Consolas, "Liberation Mono", Menlo, monospace;
+  }
+
+  * { box-sizing: border-box; }
+
+  html { background: var(--void); }
+
+  body {
+    margin: 0;
+    background:
+      radial-gradient(ellipse 900px 500px at 15% -10%, rgba(63,216,203,0.06), transparent 60%),
+      radial-gradient(ellipse 700px 500px at 100% 20%, rgba(240,168,60,0.05), transparent 55%),
+      repeating-linear-gradient(180deg, rgba(255,255,255,0.012) 0px, rgba(255,255,255,0.012) 1px, transparent 1px, transparent 3px),
+      var(--void);
+    color: var(--ink);
+    font-family: var(--font-body);
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+    font-size: 16px;
+  }
+
+  ::selection { background: var(--cyan-dim); color: var(--cyan); }
+
+  a { color: var(--cyan); }
+
+  :focus-visible {
+    outline: 2px solid var(--cyan);
+    outline-offset: 3px;
+  }
+
+  h1, h2, h3 { font-family: var(--font-display); text-wrap: balance; color: var(--ink); margin: 0; }
+
+  .container {
+    max-width: 860px;
+    margin: 0 auto;
+    padding: clamp(28px, 6vw, 72px) clamp(18px, 5vw, 32px) 100px;
+  }
+
+  .prose { max-width: 62ch; color: var(--ink-dim); font-size: 1.02rem; }
+  .prose strong { color: var(--ink); font-weight: 600; }
+  .prose em { color: var(--ink); font-style: normal; border-bottom: 1px solid var(--cyan-line); }
+
+  .eyebrow {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+  .eyebrow .num { color: var(--cyan); font-weight: 600; }
+  .eyebrow::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+
+  .stack { display: flex; flex-direction: column; }
+
+  /* ---------- Sections rhythm ---------- */
+  section { display: flex; flex-direction: column; gap: 18px; margin-top: 88px; }
+  section:first-of-type { margin-top: 0; }
+
+  /* ---------- Cover ---------- */
+  .cover { display: flex; flex-direction: column; gap: 22px; }
+  .cover .kicker {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--amber);
+  }
+  .cover h1 {
+    font-size: clamp(2.1rem, 5.4vw, 3.4rem);
+    font-weight: 500;
+    line-height: 1.08;
+    letter-spacing: -0.01em;
+  }
+  .cover .dek {
+    font-size: 1.12rem;
+    color: var(--ink-dim);
+    max-width: 56ch;
+    font-family: var(--font-body);
+  }
+
+  .case-meta {
+    margin-top: 12px;
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    background: var(--panel);
+    padding: 18px 22px;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 14px 28px;
+    font-family: var(--font-mono);
+    font-size: 12.5px;
+  }
+  .case-meta dt { color: var(--ink-faint); text-transform: uppercase; letter-spacing: 0.08em; font-size: 10.5px; margin-bottom: 4px; }
+  .case-meta dd { margin: 0; color: var(--ink); }
+  .case-meta .status-pill {
+    display: inline-flex; align-items: center; gap: 6px;
+    color: var(--good); font-weight: 600;
+  }
+  .case-meta .status-pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--good); box-shadow: 0 0 6px var(--good); }
+
+  /* ---------- Hero trace (SVG) ---------- */
+  .hero-trace { margin-top: 40px; }
+  .hero-trace figcaption {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--ink-faint);
+    margin-top: 10px;
+    text-align: center;
+  }
+  .hero-trace svg { width: 100%; height: auto; display: block; }
+
+  /* ---------- Axioms ---------- */
+  .axioms { display: grid; grid-template-columns: repeat(2, minmax(0,1fr)); gap: 16px; }
+  .axiom {
+    border: 1px solid var(--line);
+    background: var(--panel);
+    border-radius: 4px;
+    padding: 22px 22px 20px;
+    position: relative;
+  }
+  .axiom .tag {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.1em;
+    color: var(--amber);
+    text-transform: uppercase;
+    margin-bottom: 10px;
+    display: block;
+  }
+  .axiom p { margin: 0; font-family: var(--font-display); font-size: 1.18rem; color: var(--ink); line-height: 1.4; }
+
+  /* ---------- Evidence chip ---------- */
+  .evidence {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    padding: 4px 10px 4px 8px;
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    background: var(--panel-raised);
+    color: var(--ink-dim);
+    white-space: nowrap;
+  }
+  .evidence::before { content: "›"; color: var(--cyan); font-weight: 700; }
+  .evidence.verified { color: var(--cyan); border-color: var(--cyan-line); }
+  .evidence.verified::before { color: var(--cyan); content: "✓"; }
+
+  /* ---------- Flow diagram ---------- */
+  .flow {
+    display: flex;
+    align-items: stretch;
+    gap: 0;
+    overflow-x: auto;
+    padding: 4px 2px 14px;
+    margin-top: 6px;
+  }
+  .flow-box {
+    flex: 0 0 auto;
+    width: 178px;
+    border: 1px solid var(--line);
+    background: var(--panel);
+    border-radius: 4px;
+    padding: 14px 14px;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--ink-dim);
+  }
+  .flow-box .label { color: var(--ink); font-size: 12px; font-weight: 600; margin-bottom: 6px; display: block; }
+  .flow-box.has { border-color: var(--cyan-line); box-shadow: inset 0 0 0 1px rgba(63,216,203,0.08); }
+  .flow-box.gone { border-style: dashed; border-color: var(--critical); color: var(--ink-faint); }
+  .flow-box.gone .label { color: var(--critical-text); }
+  .flow-arrow {
+    flex: 0 0 auto;
+    width: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--ink-faint);
+    font-family: var(--font-mono);
+    font-size: 16px;
+  }
+
+  /* ---------- Draft / provisional block ---------- */
+  .draft {
+    border: 1px dashed var(--line);
+    border-radius: 4px;
+    background: var(--panel);
+    padding: 22px 24px;
+    position: relative;
+  }
+  .draft-flag {
+    position: absolute; top: -11px; right: 18px;
+    background: var(--void);
+    padding: 0 8px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    color: var(--amber);
+    text-transform: uppercase;
+  }
+  .draft ul { margin: 12px 0 0; padding-left: 20px; color: var(--ink-dim); }
+  .draft li { margin-bottom: 8px; }
+  .draft li::marker { color: var(--amber); }
+
+  /* ---------- Peak: pivot (challenge/reject/resolve) ---------- */
+  .peak {
+    margin-left: calc(50% - 50vw);
+    margin-right: calc(50% - 50vw);
+    padding: 56px calc(50vw - 50% + 18px);
+  }
+  @media (min-width: 900px) {
+    .peak { padding-left: calc(50vw - 430px + 18px); padding-right: calc(50vw - 430px + 18px); }
+  }
+
+  .peak-pivot {
+    background: linear-gradient(180deg, var(--void-2), var(--void));
+    border-top: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+  }
+  .pivot-inner { max-width: 824px; margin: 0 auto; display: flex; flex-direction: column; gap: 26px; }
+  .pivot-q {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--amber);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+  }
+  .pivot-title {
+    font-size: clamp(1.7rem, 4vw, 2.5rem);
+    font-weight: 500;
+  }
+  .rejected-card {
+    border: 1px solid var(--line);
+    background: var(--panel);
+    border-radius: 4px;
+    padding: 18px 22px;
+    position: relative;
+    display: flex;
+    align-items: baseline;
+    gap: 14px;
+    flex-wrap: wrap;
+  }
+  .rejected-card .old-text {
+    text-decoration: line-through;
+    text-decoration-color: var(--rejected);
+    text-decoration-thickness: 1.5px;
+    color: var(--ink-faint);
+    font-family: var(--font-mono);
+    font-size: 13.5px;
+  }
+  .stamp {
+    display: inline-block;
+    transform: rotate(-6deg);
+    border: 2px solid var(--rejected);
+    color: var(--rejected);
+    font-family: var(--font-mono);
+    font-weight: 700;
+    font-size: 11px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    padding: 3px 10px;
+    border-radius: 3px;
+    margin-left: auto;
+  }
+  .resolve-arrow { align-self: center; color: var(--cyan); font-size: 20px; font-family: var(--font-mono); }
+  .resolved-card {
+    border-left: 3px solid var(--cyan);
+    background: var(--cyan-dim);
+    border-radius: 0 4px 4px 0;
+    padding: 22px 26px;
+    box-shadow: 0 0 40px -12px rgba(63,216,203,0.25);
+  }
+  .resolved-card p { margin: 0 0 14px; color: var(--ink); font-size: 1.02rem; }
+  .resolved-card p:last-of-type { margin-bottom: 0; }
+  .resolved-card .verdict { font-family: var(--font-mono); font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--cyan); margin-bottom: 10px; display: block; }
+
+  /* ---------- Pillars ---------- */
+  .pillars { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 14px; }
+  .pillar {
+    border: 1px solid var(--line);
+    background: var(--panel);
+    border-radius: 4px;
+    padding: 18px 16px;
+  }
+  .pillar .n { font-family: var(--font-mono); color: var(--ink-faint); font-size: 12px; margin-bottom: 10px; display: block; }
+  .pillar h4 { font-family: var(--font-body); font-size: 0.95rem; font-weight: 700; color: var(--ink); margin: 0 0 8px; }
+  .pillar p { margin: 0; font-size: 0.87rem; color: var(--ink-dim); }
+
+  /* ---------- Anchor problem (mini pivot) ---------- */
+  .mini-pivot {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    gap: 20px;
+    align-items: center;
+    border: 1px solid var(--line);
+    background: var(--panel);
+    border-radius: 4px;
+    padding: 24px;
+  }
+  .mini-pivot .col h4 {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    margin: 0 0 8px;
+  }
+  .mini-pivot .problem h4 { color: var(--rejected); }
+  .mini-pivot .solution h4 { color: var(--cyan); }
+  .mini-pivot .col p { margin: 0; font-size: 0.92rem; color: var(--ink-dim); }
+  .mini-pivot .callback { text-align: center; font-family: var(--font-mono); font-size: 18px; color: var(--cyan); }
+  .mini-pivot .callback span { display: block; font-size: 9px; color: var(--ink-faint); margin-top: 4px; letter-spacing: 0.06em; text-transform: uppercase; white-space: nowrap; }
+
+  .ring-note {
+    display: flex;
+    gap: 14px;
+    align-items: flex-start;
+    border-left: 2px solid var(--line);
+    padding-left: 18px;
+  }
+  .ring-note .tag {
+    font-family: var(--font-mono); font-size: 10.5px; color: var(--amber);
+    text-transform: uppercase; letter-spacing: 0.08em; flex: 0 0 auto; margin-top: 3px;
+  }
+  .ring-note p { margin: 0; color: var(--ink-dim); font-size: 0.95rem; }
+
+  /* ---------- Peak: critical ---------- */
+  .peak-critical {
+    background:
+      radial-gradient(ellipse 700px 300px at 30% 0%, rgba(208,59,59,0.16), transparent 65%),
+      linear-gradient(180deg, #150c0c, var(--void) 85%);
+    border-top: 1px solid rgba(208,59,59,0.35);
+    border-bottom: 1px solid rgba(208,59,59,0.35);
+  }
+  .critical-inner { max-width: 824px; margin: 0 auto; }
+  .critical-badge {
+    display: inline-flex; align-items: center; gap: 10px;
+    margin-bottom: 22px;
+  }
+  .warn-tri {
+    width: 0; height: 0;
+    border-left: 11px solid transparent;
+    border-right: 11px solid transparent;
+    border-bottom: 19px solid var(--critical);
+    position: relative;
+    filter: drop-shadow(0 0 8px rgba(208,59,59,0.6));
+  }
+  .warn-tri::after {
+    content: "!";
+    position: absolute;
+    top: 7px; left: -3px;
+    font-family: var(--font-mono);
+    font-weight: 700;
+    font-size: 10px;
+    color: var(--void);
+  }
+  .critical-label {
+    font-family: var(--font-mono);
+    font-weight: 700;
+    font-size: 13px;
+    letter-spacing: 0.16em;
+    color: var(--critical-text);
+    padding: 5px 12px;
+    border: 1px solid rgba(208,59,59,0.55);
+    border-radius: 3px;
+    background: rgba(208,59,59,0.1);
+  }
+  .critical-panel {
+    border: 1px solid rgba(208,59,59,0.45);
+    border-radius: 6px;
+    background: rgba(15,8,8,0.55);
+    padding: 32px clamp(20px, 4vw, 36px);
+    animation: critical-glow 2.6s ease-in-out infinite;
+  }
+  @keyframes critical-glow {
+    0%, 100% { box-shadow: 0 0 0px rgba(208,59,59,0); }
+    50% { box-shadow: 0 0 46px rgba(208,59,59,0.28); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .critical-panel { animation: none; box-shadow: 0 0 30px rgba(208,59,59,0.18); }
+  }
+  .critical-panel h3 {
+    font-size: clamp(1.6rem, 3.6vw, 2.2rem);
+    font-weight: 500;
+    margin-bottom: 18px;
+    color: #fff;
+  }
+  .critical-panel p { color: #e9c9c9; font-size: 1.02rem; max-width: 62ch; margin: 0 0 14px; }
+  .critical-panel p strong { color: #fff; }
+  .critical-conditions {
+    display: flex; flex-wrap: wrap; gap: 8px;
+    margin: 18px 0 22px;
+  }
+  .critical-conditions span {
+    font-family: var(--font-mono); font-size: 11px;
+    border: 1px solid rgba(208,59,59,0.4);
+    color: var(--critical-text);
+    padding: 4px 9px; border-radius: 3px;
+    background: rgba(208,59,59,0.08);
+  }
+  .moscow-shift {
+    margin-top: 22px;
+    display: inline-flex; align-items: center; gap: 10px;
+    font-family: var(--font-mono); font-size: 12px;
+    color: var(--ink);
+  }
+  .moscow-shift .from { color: var(--ink-faint); text-decoration: line-through; }
+  .moscow-shift .to { color: var(--critical-text); font-weight: 700; }
+
+  /* ---------- Synthesis ---------- */
+  .synthesis-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0,1fr));
+    gap: 14px;
+    margin-top: 6px;
+  }
+  .defense {
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 18px;
+    background: var(--panel);
+  }
+  .defense .k { font-family: var(--font-mono); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--cyan); display: block; margin-bottom: 8px; }
+  .defense p { margin: 0; font-size: 0.9rem; color: var(--ink-dim); }
+
+  /* ---------- MoSCoW ---------- */
+  .moscow-grid {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0,1fr));
+    gap: 14px;
+  }
+  .mo-col {
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    background: var(--panel);
+    display: flex;
+    flex-direction: column;
+    min-height: 100%;
+  }
+  .mo-head {
+    padding: 12px 14px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    font-weight: 700;
+    border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; justify-content: space-between;
+  }
+  .mo-head .count { color: var(--ink-faint); font-weight: 400; }
+  .mo-col.must .mo-head { color: var(--cyan); }
+  .mo-col.should .mo-head { color: var(--amber); }
+  .mo-col.could .mo-head { color: var(--ink-faint); }
+  .mo-col.wont .mo-head { color: var(--rejected); }
+  .mo-items { list-style: none; margin: 0; padding: 12px 14px 16px; display: flex; flex-direction: column; gap: 12px; flex: 1; }
+  .mo-items li { font-size: 0.84rem; color: var(--ink-dim); line-height: 1.5; padding-left: 14px; position: relative; }
+  .mo-items li::before { content: "";  position: absolute; left: 0; top: 7px; width: 6px; height: 6px; border-radius: 50%; }
+  .mo-col.must .mo-items li::before { background: var(--cyan); }
+  .mo-col.should .mo-items li::before { background: var(--amber); }
+  .mo-col.could .mo-items li::before { background: var(--ink-faint); }
+  .mo-col.wont .mo-items li { text-decoration: line-through; text-decoration-color: var(--line); color: var(--ink-faint); }
+  .mo-col.wont .mo-items li::before { background: var(--rejected); }
+  .mo-empty { padding: 14px; font-size: 0.82rem; color: var(--ink-faint); font-style: normal; }
+  .mo-highlight { border: 1px solid var(--cyan-line); background: var(--cyan-dim); border-radius: 3px; padding: 2px 4px; margin: 0 -4px; }
+
+  /* ---------- Footer stamp ---------- */
+  .footer-stamp {
+    margin-top: 100px;
+    border-top: 1px solid var(--line);
+    padding-top: 28px;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-end;
+    flex-wrap: wrap;
+    gap: 16px;
+  }
+  .footer-stamp .seal {
+    font-family: var(--font-display);
+    font-size: 1.1rem;
+    color: var(--ink-dim);
+    border: 1px solid var(--line);
+    border-radius: 50%;
+    width: 92px; height: 92px;
+    display: flex; align-items: center; justify-content: center;
+    text-align: center;
+    transform: rotate(-8deg);
+    line-height: 1.2;
+    padding: 6px;
+  }
+  .footer-meta { font-family: var(--font-mono); font-size: 11px; color: var(--ink-faint); text-align: right; }
+  .footer-meta div { margin-bottom: 3px; }
+
+  /* ---------- Responsive ---------- */
+  @media (max-width: 760px) {
+    .axioms, .pillars, .synthesis-grid, .moscow-grid { grid-template-columns: 1fr; }
+    .mini-pivot { grid-template-columns: 1fr; }
+    .mini-pivot .callback { transform: rotate(90deg); margin: 4px 0; }
+    .case-meta { grid-template-columns: 1fr; }
+    .footer-stamp { flex-direction: column; align-items: flex-start; }
+    .footer-meta { text-align: left; }
+  }
+</style>
+
+<div class="container">
+
+  <!-- ============ COVER ============ -->
+  <header class="cover">
+    <div class="kicker">Incident Dossier · First Principles Session</div>
+    <h1>Order Book Integrity</h1>
+    <p class="dek">Tracing dYdX's 1-second aggregates back to bedrock — and building the tripwire for the moment the venue tells a lie the gap detector can't see.</p>
+
+    <dl class="case-meta">
+      <div>
+        <dt>Topic</dt>
+        <dd>High-quality orderbook data for 1s aggregates; flag bad data from external causes (crossed books, resync artifacts)</dd>
+      </div>
+      <div>
+        <dt>Goal</dt>
+        <dd>Always get correct data into the snapshot; reliably flag what's wrong for venue/external reasons</dd>
+      </div>
+      <div>
+        <dt>Mode / Technique</dt>
+        <dd>Partner session · First Principles Thinking</dd>
+      </div>
+      <div>
+        <dt>Status</dt>
+        <dd class="status-pill">Complete — locked 2026-07-02T21:11</dd>
+      </div>
+    </dl>
+  </header>
+
+  <!-- ============ HERO TRACE ============ -->
+  <figure class="hero-trace">
+    <svg viewBox="0 0 900 130" role="img" aria-labelledby="traceTitle traceDesc">
+      <title id="traceTitle">Sequence trace with one missing message_id</title>
+      <desc id="traceDesc">Ten evenly spaced ticks representing dYdX message_id values; the seventh is missing, flagged as a gap, followed by resync.</desc>
+      <line x1="60" y1="66" x2="843" y2="66" stroke="#232c3a" stroke-width="1.5" />
+      <!-- ticks 1-6 -->
+      <g fill="#3fd8cb">
+        <circle cx="60" cy="66" r="5" />
+        <circle cx="147" cy="66" r="5" />
+        <circle cx="234" cy="66" r="5" />
+        <circle cx="321" cy="66" r="5" />
+        <circle cx="408" cy="66" r="5" />
+        <circle cx="495" cy="66" r="5" />
+      </g>
+      <g font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" fill="#5c6b80">
+        <text x="60" y="90" text-anchor="middle">0001</text>
+        <text x="495" y="90" text-anchor="middle">0006</text>
+      </g>
+      <!-- gap at 7 -->
+      <line x1="582" y1="30" x2="582" y2="102" stroke="#d03b3b" stroke-width="1" stroke-dasharray="3 3" opacity="0.7" />
+      <rect x="576" y="60" width="12" height="12" fill="none" stroke="#d03b3b" stroke-width="2" transform="rotate(45 582 66)" />
+      <text x="582" y="24" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="11" font-weight="700" fill="#ff6f6f" letter-spacing="1">GAP · 0007</text>
+      <!-- ticks 8-10, first emphasized -->
+      <circle cx="669" cy="66" r="7" fill="none" stroke="#3fd8cb" stroke-width="2" />
+      <circle cx="669" cy="66" r="2.5" fill="#3fd8cb" />
+      <g fill="#3fd8cb">
+        <circle cx="756" cy="66" r="5" />
+        <circle cx="843" cy="66" r="5" />
+      </g>
+      <text x="669" y="104" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="9.5" fill="#3fd8cb" letter-spacing="0.5">RESYNC</text>
+      <text x="843" y="90" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="10" fill="#5c6b80">0010</text>
+    </svg>
+    <figcaption>message_id — the counter dYdX sends and the Rust layer already tracks, that never reached Python</figcaption>
+  </figure>
+
+  <!-- ============ 01 GROUND ZERO ============ -->
+  <section>
+    <div class="eyebrow"><span class="num">01</span> First Principles</div>
+    <h2>Strip it to bedrock.</h2>
+    <p class="prose">The session opened by refusing every assumption about how order book quality gets protected, down to two facts nobody could argue with — the floor everything else had to be rebuilt on.</p>
+
+    <div class="axioms">
+      <div class="axiom">
+        <span class="tag">Axiom 01 — User</span>
+        <p>Every WebSocket message carries some information about the order book.</p>
+      </div>
+      <div class="axiom">
+        <span class="tag">Axiom 02 — User</span>
+        <p>Messages arrive ordered — in-sequence delivery.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 02 DISCOVERY ============ -->
+  <section>
+    <div class="eyebrow"><span class="num">02</span> Research</div>
+    <h2>The signal nobody reads.</h2>
+    <p class="prose">If messages arrive ordered, something on the wire should prove it. Digging into the adapter found exactly that — and found it thrown away one layer before it could matter.</p>
+    <p class="prose">Every dYdX orderbook message carries <strong>message_id</strong>, a monotonic per-subscription counter, plus a version string. The Rust handler already tracks a <code>book_sequence</code> per market and checks for regressions and duplicates — but only <em>logs a warning</em>. It never checks for a <strong>gap</strong> (message_id == last_id + 1), and it never drops or resyncs on one.</p>
+
+    <div class="flow" role="img" aria-label="Data flow: dYdX venue sends message_id, Rust handler tracks it but never checks gaps, the field is stripped before the enum layer, Python collector never sees it">
+      <div class="flow-box has">
+        <span class="label">dYdX venue</span>
+        message_id + version on every orderbook frame
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box has">
+        <span class="label">handler.rs</span>
+        book_sequence tracked · regression/dupe check only
+        <div class="evidence" style="margin-top:8px">handler.rs · L381–402</div>
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box gone">
+        <span class="label">enums.rs</span>
+        DydxWsOutputMessage::Orderbook* — sequence field stripped
+      </div>
+      <div class="flow-arrow">→</div>
+      <div class="flow-box gone">
+        <span class="label">Python collector</span>
+        blind — zero access to the signal
+      </div>
+    </div>
+
+    <p class="prose">A second pass confirmed the counter is safe to key per market: dYdX's own docs describe it as "the sequence number sent on the subscription," and fixtures show every channel starting its own count at 1. The existing <code>book_sequence</code> map is already keyed by symbol — so an <strong>exact</strong> per-market gap check (<code>expected == last_id + 1</code>) is architecturally sound, no cross-channel collision risk. <span class="evidence verified">docs + fixtures verified</span></p>
+  </section>
+
+  <!-- ============ 03 FIRST DRAFT ============ -->
+  <section>
+    <div class="eyebrow"><span class="num">03</span> First Draft</div>
+    <h2>Taint, resubscribe, discard.</h2>
+    <p class="prose">With the gap check validated, a first rebuild sketch went down on paper — reflexive, not yet interrogated.</p>
+
+    <div class="draft">
+      <span class="draft-flag">Provisional</span>
+      <p class="prose" style="margin:0">On a message_id gap or regression:</p>
+      <ul>
+        <li>Instantly taint the market's book</li>
+        <li>Stop emitting 1s snapshots for that market</li>
+        <li>Fire a targeted per-market resubscribe</li>
+        <li>Clear the taint only once a fresh full snapshot applies cleanly</li>
+      </ul>
+    </div>
+
+    <p class="prose">One piece of that sketch survived the session untouched — what happens to the data itself once corruption is caught: <strong>discard the 1s bar entirely</strong> from the parquet catalog, leaving a genuine gap rather than a flagged-but-present row, so ML and backtests skip forward naturally. Separately, log the full order book context — before and after, with timestamps — to a housekeeping log for postmortem.</p>
+  </section>
+
+  <!-- ============ 04 PEAK: PIVOT ============ -->
+  <div class="peak peak-pivot">
+    <div class="pivot-inner">
+      <div class="eyebrow" style="margin-bottom:0"><span class="num">04</span> The Challenge</div>
+      <h3 class="pivot-title">Why resubscribe at all?</h3>
+      <div class="pivot-q">User, on the v1 sketch</div>
+
+      <div class="rejected-card">
+        <span class="old-text">taint → stop emitting → resubscribe → wait for a clean full snapshot</span>
+        <span class="stamp">Rejected</span>
+      </div>
+
+      <div class="resolve-arrow">↓</div>
+
+      <div class="resolved-card">
+        <span class="verdict">Resolved by research</span>
+        <p>dYdX orderbook updates are <strong>absolute-per-level</strong>, not relative deltas — a size <em>replaces</em> the level, <code>size = 0</code> <em>deletes</em> it. There is no read-modify-write to corrupt.</p>
+        <p>Which means a missed message only staleifies the specific levels it would have touched. That's <strong>bounded, self-healing damage</strong> — not systemic corruption. No resubscribe. No full snapshot. The book heals itself the instant those levels get touched again.</p>
+        <div class="evidence verified">parse.rs · L668–720 · confirmed no read-modify-write</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 05 PROFESSIONAL GRADE ============ -->
+  <section>
+    <div class="eyebrow"><span class="num">05</span> Escalation</div>
+    <h2>Four pillars, not one heuristic.</h2>
+    <p class="prose">The resubscribe reflex was gone, but so was the comfort of a single rule. The design that replaced it stands on four independent legs, each answering a question the last one couldn't.</p>
+
+    <div class="pillars">
+      <div class="pillar">
+        <span class="n">01</span>
+        <h4>Exact sequence check</h4>
+        <p>expected == received, not just regression — a skipped message_id is caught the instant it happens.</p>
+      </div>
+      <div class="pillar">
+        <span class="n">02</span>
+        <h4>Buffer + replay resync</h4>
+        <p>On a real gap: a real snapshot, buffered messages, idempotent replay — not a blind resubscribe, not a cooldown timer.</p>
+      </div>
+      <div class="pillar">
+        <span class="n">03</span>
+        <h4>Trade cross-check</h4>
+        <p>Trade-print reconciliation running continuously as a free, independent second opinion on the book.</p>
+      </div>
+      <div class="pillar">
+        <span class="n">04</span>
+        <h4>Bounded raw capture</h4>
+        <p>Immutable context wanted for postmortem — without paying for it at TB scale, 24/7.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ 06 ANCHOR PROBLEM ============ -->
+  <section>
+    <div class="eyebrow"><span class="num">06</span> Second Challenge</div>
+    <h2>No anchor. Replay it anyway.</h2>
+    <p class="prose">Pillar 02 needs a base to resync from. Binance solves this with <code>lastUpdateId</code> — an anchor stamped on its REST snapshot that a WS replay can align to. dYdX's REST orderbook snapshot has no such field — just bids, asks, and a coarse ISO timestamp. A precise, Binance-style buffer-and-replay looked closed off.</p>
+
+    <div class="mini-pivot">
+      <div class="col problem">
+        <h4>Problem</h4>
+        <p>REST snapshot carries no sequence or anchor field to align a WS replay to.</p>
+      </div>
+      <div class="callback">↺<span>Solved by 04's finding</span></div>
+      <div class="col solution">
+        <h4>Resolution</h4>
+        <p>Updates are already known to be absolute-per-level, so replay is <strong>idempotent</strong>. Fetch the REST snapshot as a new base, then replay every buffered WS message from slightly before that call, with generous overlap. Reapplying an already-included update is a harmless no-op — no anchor needed.</p>
+      </div>
+    </div>
+
+    <div class="ring-note">
+      <span class="tag">Storage</span>
+      <p>Raw capture stays bounded: a small rolling in-memory ring buffer (~30–60s) per market, only flushed to the housekeeping log when a gap or corruption actually fires. Storage cost scales with the number of corruption <strong>events</strong>, not connection uptime.</p>
+    </div>
+  </section>
+
+  <!-- ============ 07 PEAK: CRITICAL ============ -->
+  <div class="peak peak-critical">
+    <div class="critical-inner">
+      <div class="critical-badge">
+        <span class="warn-tri" aria-hidden="true"></span>
+        <span class="critical-label">Critical</span>
+      </div>
+      <div class="eyebrow" style="margin-bottom:0"><span class="num">07</span> Escalation</div>
+
+      <div class="critical-panel" style="margin-top:18px">
+        <h3>The book crosses. Nothing else is wrong.</h3>
+        <p>A crossed book — best bid at or above best ask — is normally a routine symptom of a known gap, caught and explained by the sequence check. But sometimes it fires in <strong>steady state</strong>, with none of the usual excuses available.</p>
+
+        <div class="critical-conditions">
+          <span>no known sequence gap</span>
+          <span>not mid-reconnect</span>
+          <span>not mid-resync</span>
+        </div>
+
+        <p>When a crossed book shows up under those conditions, it means exactly one of two things: <strong>a local bug</strong>, or <strong>dYdX sent bad data the gap detector can't see</strong>. Either way it must be loud — a separate high-severity event log, never mixed in with routine gap-triggered bar discards.</p>
+
+        <div class="moscow-shift">
+          <span class="from">Should</span>
+          <span>→</span>
+          <span class="to">Must</span>
+          <span style="color:var(--ink-faint)">— explicitly re-prioritized this session</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ============ 08 SYNTHESIS ============ -->
+  <section>
+    <div class="eyebrow"><span class="num">08</span> Synthesis</div>
+    <h2>Three defenses, one answer.</h2>
+    <p class="prose">The shape of the whole session: every time a heuristic got proposed — resubscribe, a cooldown timer — it got killed by the same question, <em>why is this needed</em>, and answered by going one layer deeper into the actual protocol. What's left is not one detector but three, each covering what the others structurally cannot.</p>
+
+    <div class="synthesis-grid">
+      <div class="defense">
+        <span class="k">Known cause</span>
+        <p>Gap detection + idempotent resync — catches a missed message the instant the counter proves it, and repairs without guessing.</p>
+      </div>
+      <div class="defense">
+        <span class="k">Silent cause</span>
+        <p>Trade-consistency cross-check — an independent signal that doesn't depend on the WS stream being honest about itself.</p>
+      </div>
+      <div class="defense">
+        <span class="k">Unknown cause</span>
+        <p>Crossed-book escalation — the tripwire for damage that leaves no sequence footprint at all.</p>
+      </div>
+    </div>
+
+    <p class="prose">Together they answer the original ask precisely: not just <em>detect</em> corruption, but tell known-cause corruption — recoverable, self-healing, logged routinely — apart from unknown-cause corruption, which has to be loud.</p>
+  </section>
+
+  <!-- ============ 09 MOSCOW ============ -->
+  <section>
+    <div class="eyebrow"><span class="num">09</span> Locked Backlog</div>
+    <h2>Ready for story creation.</h2>
+    <p class="prose">Converged by MoSCoW at the user's call to move straight to implementation. Notably thin in the middle — almost nothing this session survived as a "nice to have": every heuristic either earned <strong>Must</strong> on its merits or got killed outright.</p>
+
+    <div class="moscow-grid">
+      <div class="mo-col must">
+        <div class="mo-head">Must <span class="count">5</span></div>
+        <ul class="mo-items">
+          <li>Per-market exact sequence check on every message — <code>expected == last_id + 1</code></li>
+          <li>Buffer + idempotent replay resync via REST snapshot on a detected gap — no anchor required</li>
+          <li>Discard the corrupted 1s bar entirely from the catalog; leave a genuine gap</li>
+          <li>Trade-print reconciliation as a continuous, independent cross-check</li>
+          <li class="mo-highlight">Crossed-book in steady state → separate CRITICAL event log <span style="color:var(--ink-faint)">(moved from Should)</span></li>
+        </ul>
+      </div>
+      <div class="mo-col should">
+        <div class="mo-head">Should <span class="count">2</span></div>
+        <ul class="mo-items">
+          <li>Bounded ring-buffer raw capture (~30–60s/market), flushed only on a detected event</li>
+          <li>Full before/after order book context logged to the housekeeping log on every discard</li>
+        </ul>
+      </div>
+      <div class="mo-col could">
+        <div class="mo-head">Could <span class="count">0</span></div>
+        <div class="mo-empty">Nothing surfaced this round — every proposal either earned Must or was killed. That's the session's real signature.</div>
+      </div>
+      <div class="mo-col wont">
+        <div class="mo-head">Won't <span class="count">4</span></div>
+        <ul class="mo-items">
+          <li>Blind per-market resubscribe on every gap</li>
+          <li>Cooldown/timer-based healing before resuming snapshots</li>
+          <li>Binance-style precise anchor-based resync</li>
+          <li>Unbounded 24/7 immutable raw capture</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============ FOOTER ============ -->
+  <div class="footer-stamp">
+    <div class="seal">Case<br/>Closed</div>
+    <div class="footer-meta">
+      <div>MODE — Partner</div>
+      <div>TECHNIQUE — First Principles Thinking</div>
+      <div>STATUS — Complete</div>
+      <div>UPDATED — 2026-07-02T21:11</div>
+    </div>
+  </div>
+
+</div>

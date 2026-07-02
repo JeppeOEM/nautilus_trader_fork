@@ -14,6 +14,13 @@
 # -------------------------------------------------------------------------------------------------
 """Unit tests for book_features: depth_profile, imbalance, liquidity_distance, CancellationTracker."""
 
+from ml_signals.book_features import CancellationTracker
+from ml_signals.book_features import DepthProfile
+from ml_signals.book_features import book_imbalance
+from ml_signals.book_features import compute_features
+from ml_signals.book_features import depth_profile
+from ml_signals.book_features import liquidity_distance
+from ml_signals.book_features import top_of_book_series
 from nautilus_trader.model.book import OrderBook
 from nautilus_trader.model.data import BookOrder
 from nautilus_trader.model.data import OrderBookDelta
@@ -23,13 +30,6 @@ from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
-
-from ml_signals.book_features import CancellationTracker
-from ml_signals.book_features import DepthProfile
-from ml_signals.book_features import book_imbalance
-from ml_signals.book_features import compute_features
-from ml_signals.book_features import depth_profile
-from ml_signals.book_features import liquidity_distance
 
 
 IID = InstrumentId.from_str("TEST-PERP.SIM")
@@ -208,6 +208,38 @@ def test_compute_features_empty_book_returns_none() -> None:
     assert compute_features(OrderBook(IID, BookType.L2_MBP), CancellationTracker()) is None
 
 
+# ---- top_of_book_series crossed-book guard ----
+
+def test_top_of_book_series_skips_crossed_state() -> None:
+    """
+    A synthetic-correction replay can transiently cross mid-batch (venue delta
+    applied before its correction) -- top_of_book_series must not yield that tick,
+    mirroring collector._second_loop's guard, or OFI/microprice get fed a negative
+    spread.
+    """
+    deltas = [
+        _delta(BookAction.ADD, OrderSide.BUY, 102.0, 1.0, ts=0),
+        _delta(BookAction.ADD, OrderSide.SELL, 101.0, 1.0, ts=1),  # crossed: bid > ask
+        _delta(BookAction.DELETE, OrderSide.SELL, 101.0, 0.0, ts=2),
+        _delta(BookAction.ADD, OrderSide.SELL, 103.0, 1.0, ts=3),  # fixed: ask > bid
+    ]
+    rows = list(top_of_book_series(deltas, IID))
+    assert all(bid_p < ask_p for _, bid_p, _, ask_p, _ in rows), (
+        f"crossed tick leaked through: {rows}"
+    )
+    assert rows[-1][1] == 102.0
+    assert rows[-1][3] == 103.0
+
+
+def test_top_of_book_series_skips_touched_state() -> None:
+    deltas = [
+        _delta(BookAction.ADD, OrderSide.BUY, 100.0, 1.0, ts=0),
+        _delta(BookAction.ADD, OrderSide.SELL, 100.0, 1.0, ts=1),  # zero spread
+    ]
+    rows = list(top_of_book_series(deltas, IID))
+    assert rows == [], "zero-spread tick must be skipped, not yielded"
+
+
 if __name__ == "__main__":
     test_depth_profile_extracts_correct_levels()
     test_depth_profile_empty_book_returns_none()
@@ -229,4 +261,6 @@ if __name__ == "__main__":
     test_cancel_tracker_window_rolls_off_old_events()
     test_compute_features_populated_book()
     test_compute_features_empty_book_returns_none()
+    test_top_of_book_series_skips_crossed_state()
+    test_top_of_book_series_skips_touched_state()
     print("ok")

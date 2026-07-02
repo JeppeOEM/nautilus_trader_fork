@@ -13,20 +13,24 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-Tests for VPS-longevity safety behaviors: WS callback fault isolation and the
-startup corrupt-parquet quarantine scan (see collector.py's `_on_data` /
-`quarantine_corrupt_parquet`).
+Tests for VPS-longevity safety behaviors: WS callback fault isolation, the
+startup corrupt-parquet quarantine scan, and the crossed-book resync watchdog
+(see collector.py's `_on_data` / `quarantine_corrupt_parquet` / `_resync_book`).
 """
 
 from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 from dydx_collector.collector import Collector
 from dydx_collector.collector import quarantine_corrupt_parquet
 from dydx_collector.config import CollectorConfig
 from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
+from nautilus_trader.model.book import OrderBook
+from nautilus_trader.model.enums import BookType
+from nautilus_trader.model.identifiers import InstrumentId
 
 
 def _make_config(catalog_path: Path) -> CollectorConfig:
@@ -78,3 +82,38 @@ def test_quarantine_corrupt_parquet_moves_only_bad_files(tmp_path: Path) -> None
 
 def test_quarantine_corrupt_parquet_missing_catalog_is_noop(tmp_path: Path) -> None:
     quarantine_corrupt_parquet(str(tmp_path / "does-not-exist"))  # must not raise
+
+
+class _FakeClient:
+    """Records subscribe/unsubscribe calls without touching the network."""
+
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def unsubscribe_orderbook(self, iid: str) -> None:
+        self.calls.append(f"unsubscribe:{iid}")
+
+    async def subscribe_orderbook(self, iid: str) -> None:
+        self.calls.append(f"subscribe:{iid}")
+
+
+@pytest.mark.asyncio
+async def test_resync_book_resubscribes_and_drops_local_state(tmp_path: Path) -> None:
+    """
+    A desynced book (never self-heals from deltas alone) must be rebuilt from
+    a fresh venue snapshot -- _resync_book forces that via unsubscribe+subscribe
+    and clears the local book so the next OrderBookDeltas rebuilds it clean.
+    """
+    collector = Collector(_make_config(tmp_path / "catalog"))
+    fake_client = _FakeClient()
+    collector._client = fake_client  # type: ignore[assignment]
+
+    iid = "BTC-USD-PERP.DYDX"
+    collector._live_books[iid] = OrderBook(InstrumentId.from_str(iid), BookType.L2_MBP)
+    collector._crossed_since_ns[iid] = 123
+
+    await collector._resync_book(iid)
+
+    assert fake_client.calls == [f"unsubscribe:{iid}", f"subscribe:{iid}"]
+    assert iid not in collector._live_books
+    assert iid not in collector._crossed_since_ns

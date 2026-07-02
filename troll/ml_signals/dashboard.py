@@ -1243,4 +1243,8 @@ if __name__ == "__main__":
     redis_url = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
     catalog_path = os.environ.get("CATALOG_PATH", "troll/dydx_collector/catalog")
     port = int(os.environ.get("DASHBOARD_PORT", "8765"))
-    web.run_app(make_app(redis_url, catalog_path), host="0.0.0.0", port=port)
+    # loopback-only: network_mode: host means this container shares the host's real
+    # network stack, so 127.0.0.1 here is 127.0.0.1 on the host -- nothing remote
+    # (LAN, Tailscale, public internet) can reach it, matching Dozzle's existing
+    # 127.0.0.1-only port binding in docker-compose.yml.
+    web.run_app(make_app(redis_url, catalog_path), host="127.0.0.1", port=port)

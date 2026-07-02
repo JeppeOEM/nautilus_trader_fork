@@ -122,6 +122,13 @@ def quarantine_corrupt_parquet(catalog_path: str) -> None:
 # book updates multiple times per second under normal conditions.
 _STALE_BOOK_NS: int = 5_000_000_000  # 5 seconds
 
+# A real crossed book gets matched by the exchange within milliseconds -- it can't
+# persist. If ours stays crossed this long, the local book has desynced from the
+# venue (most likely a dropped/misordered delta during the startup subscribe-throttle
+# scramble) and will never self-heal from more deltas alone. Force a resubscribe,
+# which always starts with a Clear + fresh full snapshot.
+_CROSSED_RESYNC_NS: int = 15_000_000_000  # 15 seconds
+
 
 def _buffer_key(data: Any) -> tuple[type, str]:
     return type(data), str(data.instrument_id)
@@ -207,6 +214,10 @@ class Collector:
         # Used by _second_loop to skip stale books (staleness = no updates for > _STALE_BOOK_NS).
         self._last_book_update_ns: dict[str, int] = {}
 
+        # Wall-clock ns when a book was first observed continuously crossed;
+        # cleared as soon as it's seen uncrossed. Drives the resync watchdog below.
+        self._crossed_since_ns: dict[str, int] = {}
+
         self._redis: aioredis.Redis | None = None
         self._stop = asyncio.Event()
 
@@ -276,6 +287,14 @@ class Collector:
         await self._client.unsubscribe_orderbook(iid)
         logger.info(f"Unsubscribed {iid}")
 
+    async def _resync_book(self, iid: str) -> None:
+        """Force a fresh order-book snapshot for a desynced instrument via resubscribe."""
+        logger.warning(f"Resyncing desynced order book for {iid}")
+        await self._client.unsubscribe_orderbook(iid)
+        await self._client.subscribe_orderbook(iid)
+        self._live_books.pop(iid, None)
+        self._crossed_since_ns.pop(iid, None)
+
     async def _liquidity_check_loop(self) -> None:
         """Periodically graduate illiquid→liquid (subscribe) or liquid→illiquid (unsubscribe)."""
         while not self._stop.is_set():
@@ -343,7 +362,11 @@ class Collector:
                         book.best_bid_price().as_double(),
                         book.best_ask_price().as_double(),
                     )
+                    crossed_since = self._crossed_since_ns.setdefault(iid, now_ns)
+                    if now_ns - crossed_since > _CROSSED_RESYNC_NS:
+                        await self._resync_book(iid)
                     continue
+                self._crossed_since_ns.pop(iid, None)
 
                 # Staleness guard: skip if no OrderBookDeltas have arrived recently.
                 # During WS reconnect recovery the book retains its pre-reconnect state
