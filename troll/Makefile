@@ -3,7 +3,7 @@ TROLL_DIR  := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 COMPOSE    := docker compose -f $(TROLL_DIR)docker-compose.yml
 BASE_IMAGE := nautilus-trader-base:1.229.0
 
-.PHONY: build-base up down logs logs-dash web
+.PHONY: build-base up down logs logs-dash web enable-boot
 
 ## Build the base nautilus image (~15 min, only needed once or after core changes)
 ## On networks with TLS inspection (e.g. Zscaler), export your root CA to
@@ -39,6 +39,12 @@ logs-dash:
 ## Open Dozzle log viewer in browser
 web:
 	xdg-open http://localhost:8080
+
+## One-time VPS setup: enable the Docker daemon on boot so `restart: always`
+## containers actually come back after a host reboot (Docker's own auto-start
+## does nothing if the daemon itself isn't enabled).
+enable-boot:
+	sudo systemctl enable docker
 
 ## Prune order_book_deltas older than 14 days (run daily to bound storage)
 prune:

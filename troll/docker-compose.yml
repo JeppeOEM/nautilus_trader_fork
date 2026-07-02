@@ -1,3 +1,12 @@
+x-logging: &default-logging
+  # ponytail: json-file driver rotates by size/file-count, not calendar days -- 20x20MB
+  # is a size-based proxy for "~1 month" at typical log volume, not an exact day cutoff.
+  # Revisit if log volume changes enough to drift that estimate.
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "20"
+
 services:
   redis:
     container_name: dydx-redis
@@ -5,7 +14,8 @@ services:
     image: redis:8-alpine
     ports:
       - "127.0.0.1:6379:6379"
-    restart: unless-stopped
+    restart: always
+    logging: *default-logging
 
   collector:
     container_name: dydx-collector
@@ -24,7 +34,8 @@ services:
       - ./dydx_collector/catalog:/app/catalog
       - ./dydx_collector/metrics.db:/app/metrics.db
     network_mode: host
-    restart: unless-stopped
+    restart: always
+    logging: *default-logging
 
   dashboard:
     container_name: dydx-dashboard
@@ -43,7 +54,8 @@ services:
       - ./dydx_collector/catalog:/app/catalog:ro
       - ./dydx_collector/metrics.db:/app/metrics.db
     network_mode: host
-    restart: unless-stopped
+    restart: always
+    logging: *default-logging
 
   dozzle:
     container_name: dydx-collector-dozzle
@@ -52,4 +64,5 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
     ports:
       - "127.0.0.1:8080:8080"
-    restart: unless-stopped
+    restart: always
+    logging: *default-logging

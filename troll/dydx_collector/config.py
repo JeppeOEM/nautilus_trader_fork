@@ -63,7 +63,7 @@ def load_config(path: Path) -> CollectorConfig:
         if entry.retain_hours is not None and entry.retain_hours < 0:
             raise ValueError(f"retain_hours must be >= 0 for instrument {entry.id!r}, got {entry.retain_hours}")
 
-    snapshot_interval_seconds = raw.get("snapshot_interval_seconds", 0.5)
+    snapshot_interval_seconds = float(raw.get("snapshot_interval_seconds", 0.5))
     if snapshot_interval_seconds <= 0:
         raise ValueError(f"snapshot_interval_seconds must be > 0, got {snapshot_interval_seconds}")
 
@@ -73,7 +73,6 @@ def load_config(path: Path) -> CollectorConfig:
         ),
         catalog_path=raw.get("catalog_path", "catalog"),
         flush_interval_seconds=raw.get("flush_interval_seconds", 60),
-        snapshot_interval_seconds=float(raw.get("snapshot_interval_seconds", 1.0)),
         config_reload_seconds=raw.get("config_reload_seconds", 30),
         open_interest_poll_seconds=raw.get("open_interest_poll_seconds", 300),
         snapshot_interval_seconds=snapshot_interval_seconds,

@@ -36,12 +36,14 @@ import asyncio
 import json
 import logging
 import os
+import shutil
 import signal
 import time
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+import pyarrow.parquet as pq
 import redis.asyncio as aioredis
 
 from dydx_collector.client import DydxClient
@@ -66,6 +68,51 @@ from nautilus_trader.persistence.catalog import ParquetDataCatalog
 logger = logging.getLogger(__name__)
 
 CONFIG_PATH = Path(__file__).parent / "config.toml"
+
+_QUARANTINE_DIRNAME = "_quarantine"
+
+# ponytail: ParquetDataCatalog.write_data() (pinned nautilus_trader 1.229.0) has no
+# compression passthrough -- it calls pq.write_table() with pyarrow's "snappy" default,
+# and nautilus_trader/persistence/catalog/parquet.py can't be modified (fork rule). Patch
+# pyarrow's default here instead. `pq` is a shared module object (Python caches modules in
+# sys.modules), so this reaches nautilus's `import pyarrow.parquet as pq` call site too.
+# Ceiling: if a future nautilus_trader version passes `compression=` explicitly, this patch
+# is silently ignored -- revisit on version bump.
+_orig_write_table = pq.write_table
+
+
+def _write_table_zstd(*args: Any, **kwargs: Any) -> None:
+    kwargs.setdefault("compression", "zstd")
+    _orig_write_table(*args, **kwargs)
+
+
+pq.write_table = _write_table_zstd
+
+
+def quarantine_corrupt_parquet(catalog_path: str) -> None:
+    """Move any unreadable .parquet file (e.g. left by a mid-write crash) out of the way.
+
+    Runs once at process start, before any new writes. A half-written file from a killed
+    process would otherwise sit forever next to good data and can break catalog reads or
+    consolidation. ponytail: full recursive scan on every process start; if the catalog
+    grows into the hundreds of thousands of files, switch to only checking files newer
+    than the last clean shutdown.
+    """
+    root = Path(catalog_path).resolve()
+    if not root.exists():
+        return
+
+    quarantine_root = root / _QUARANTINE_DIRNAME
+    for path in root.rglob("*.parquet"):
+        if quarantine_root in path.parents:
+            continue
+        try:
+            pq.ParquetFile(path)
+        except Exception:
+            dest = quarantine_root / path.relative_to(root)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(path), str(dest))
+            logger.warning(f"Quarantined corrupt parquet file: {path} -> {dest}")
 
 # Skip snapshot if book hasn't received OrderBookDeltas in this many nanoseconds.
 # During WS reconnect recovery the Rust client re-subscribes at 2/sec, so the last
@@ -164,6 +211,14 @@ class Collector:
         self._stop = asyncio.Event()
 
     def _on_data(self, data: Any) -> None:
+        # Called directly from the Rust WS client's callback thread/loop -- one malformed
+        # or unexpected message must never take down the whole connection, so isolate it here.
+        try:
+            self._on_data_unsafe(data)
+        except Exception:
+            logger.exception(f"Failed to process {type(data).__name__}, dropping")
+
+    def _on_data_unsafe(self, data: Any) -> None:
         self._buffer[_buffer_key(data)].append(data)
         if isinstance(data, OrderBookDeltas):
             iid = str(data.instrument_id)
@@ -382,17 +437,30 @@ class Collector:
             f"{len(self._illiquid)} illiquid (monitoring)"
         )
 
-        flush_task = asyncio.create_task(self._flush_loop())
-        reload_task = asyncio.create_task(self._reload_config_loop())
-        oi_task = asyncio.create_task(self._open_interest_loop())
-        liquidity_task = asyncio.create_task(self._liquidity_check_loop())
-        prune_task = asyncio.create_task(self._prune_loop())
-        second_task = asyncio.create_task(self._second_loop())
+        tasks = [
+            asyncio.create_task(self._flush_loop()),
+            asyncio.create_task(self._reload_config_loop()),
+            asyncio.create_task(self._open_interest_loop()),
+            asyncio.create_task(self._liquidity_check_loop()),
+            asyncio.create_task(self._prune_loop()),
+            asyncio.create_task(self._second_loop()),
+        ]
+        stop_task = asyncio.create_task(self._stop.wait())
 
         try:
-            await self._stop.wait()
+            # Each loop already retries recoverable per-iteration errors internally (network
+            # blips, etc). If one still dies, that's an unexpected bug -- surface it here so
+            # the top-level restart loop in main() can do a full clean reconnect rather than
+            # silently running degraded forever.
+            done, _pending = await asyncio.wait(
+                [*tasks, stop_task], return_when=asyncio.FIRST_COMPLETED
+            )
+            for task in done:
+                if task is not stop_task:
+                    task.result()  # re-raises if the task died with an exception
         finally:
-            for task in (flush_task, reload_task, oi_task, liquidity_task, prune_task, second_task):
+            stop_task.cancel()
+            for task in tasks:
                 task.cancel()
             await self._client.disconnect()
             self._flush_once()
@@ -406,13 +474,32 @@ class Collector:
 async def main() -> None:
     logging.basicConfig(level=logging.INFO)
     config = load_config(CONFIG_PATH)
-    collector = Collector(config)
 
+    quarantine_corrupt_parquet(config.catalog_path)
+
+    shutting_down = asyncio.Event()
     loop = asyncio.get_running_loop()
-    loop.add_signal_handler(signal.SIGINT, collector.stop)
-    loop.add_signal_handler(signal.SIGTERM, collector.stop)
+    loop.add_signal_handler(signal.SIGINT, shutting_down.set)
+    loop.add_signal_handler(signal.SIGTERM, shutting_down.set)
 
-    await collector.run()
+    backoff_seconds = 1.0
+    while not shutting_down.is_set():
+        collector = Collector(config)
+        watcher = asyncio.create_task(_stop_on_shutdown(shutting_down, collector))
+        try:
+            await collector.run()
+            backoff_seconds = 1.0  # clean stop (signal) -- reset for any future crash
+        except Exception:
+            logger.exception(f"Collector crashed, restarting in {backoff_seconds:.0f}s")
+            await asyncio.sleep(backoff_seconds)
+            backoff_seconds = min(backoff_seconds * 2, 60.0)
+        finally:
+            watcher.cancel()
+
+
+async def _stop_on_shutdown(shutting_down: asyncio.Event, collector: Collector) -> None:
+    await shutting_down.wait()
+    collector.stop()
 
 
 if __name__ == "__main__":

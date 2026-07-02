@@ -41,7 +41,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-07-01
-last_updated: 2026-07-01
+last_updated: 2026-07-02
 project: nautilus_trader_fork
 project_key: NOKEY
 tracking_system: file-system
@@ -50,7 +50,7 @@ story_location: "{project-root}/_bmad-output/implementation-artifacts"
 development_status:
   epic-1: in-progress
   1-1-verify-the-data-integrity-gate-end-to-end: done
-  1-2-default-the-ranking-table-to-volume-sort: backlog
+  1-2-default-the-ranking-table-to-volume-sort: in-progress
   1-3-expose-the-live-watchlist-as-a-queryable-backtest-consumable-coin-set: backlog
   1-4-persist-and-query-historical-coin-ranking: backlog
   epic-1-retrospective: optional

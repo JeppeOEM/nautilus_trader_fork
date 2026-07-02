@@ -42,6 +42,7 @@ import logging
 import os
 import statistics
 import time
+import urllib.request
 from collections import defaultdict
 from collections import deque
 from contextlib import asynccontextmanager
@@ -53,6 +54,9 @@ import plotly.graph_objects as go
 import redis.asyncio as aioredis
 from aiohttp import web
 from plotly.subplots import make_subplots
+
+from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
+from nautilus_trader.core.nautilus_pyo3 import get_dydx_http_url  # type: ignore[attr-defined]
 
 from ml_signals.catalog_stats import list_instruments
 from ml_signals.indicators import MultiLevelOBI
@@ -70,6 +74,8 @@ CATALOG_PATH: str = os.environ.get("CATALOG_PATH", "troll/dydx_collector/catalog
 LIVE_INTERVAL_SECONDS: int = 5
 # How often the slow loop flushes to SQLite for historical bookkeeping.
 DB_WRITE_INTERVAL_SECONDS: int = 60
+# How often the volume-24h poll refreshes _VOLUME_24H (used for the default rankings sort).
+VOLUME_POLL_SECONDS: int = 60
 # Gap threshold for coin chart: if consecutive snapshots are further apart than this
 # (in milliseconds), insert a null data point to break the Plotly line. This converts
 # a misleading horizontal "flatline" (Plotly connecting across a gap) into an honest
@@ -94,6 +100,7 @@ RANKING_COLS: list[tuple[str, str, object, object]] = [
     ("pct_1h",         "1h %",   lambda v: f"{v:+.2f}%", lambda v: "#2a9d2a" if v > 0 else "#c0392b"),
     ("pct_24h",        "24h %",  lambda v: f"{v:+.2f}%", lambda v: "#2a9d2a" if v > 0 else "#c0392b"),
     ("volatility",     "Vol",    lambda v: f"{v:.6f}",   None),
+    ("volume24h",      "Vol24h", lambda v: f"{v / 1e6:.1f}M", None),
 ]
 
 _SERIES: dict[str, deque[tuple[int, float]]] = defaultdict(lambda: deque(maxlen=2000))
@@ -102,6 +109,11 @@ _SERIES: dict[str, deque[tuple[int, float]]] = defaultdict(lambda: deque(maxlen=
 _LIVE_FAST: dict[str, dict] = {}
 # Parquet/SQLite-derived metrics — written by _slow_loop_task and make_app pre-load.
 _LIVE_SLOW: dict[str, dict] = {}
+
+# volume24H (USD) per instrument, polled independently from dYdX's public indexer —
+# not available anywhere else in the dashboard's data pipeline. Drives the default
+# rankings sort. Written by _volume_loop_task.
+_VOLUME_24H: dict[str, float] = {}
 
 _INGEST_COUNT: int = 0       # total batches ingested; increments ~1/s; visible in API
 _LAST_INGEST_TS: float = 0.0  # wall-clock seconds of last successful ingest
@@ -198,8 +210,10 @@ var COLS=[
   ["ofi_10_z","OFI10z"],["obi_10","OBI10"],["obi_5","OBI5"],["obi_3","OBI3"],
   ["cvd","CVD"],["spread","Spread"],["microprice_lean","u lean"],
   ["volume_delta","Vol d"],["buy_count","Buy#"],["sell_count","Sell#"],
-  ["price","Price"],["pct_1h","1h %"],["pct_24h","24h %"],["volatility","Vol"]
+  ["price","Price"],["pct_1h","1h %"],["pct_24h","24h %"],["volatility","Vol"],
+  ["volume24h","Vol24h"]
 ];
+var currentSort=null;  // {key,dir} | null. null = server's default volume-sorted order.
 var IND=[
   ["ofi_10","OFI10"],["ofi_5","OFI5"],["ofi_3","OFI3"],
   ["obi_10","OBI10"],["obi_5","OBI5"],["obi_3","OBI3"],
@@ -324,16 +338,48 @@ function showRankings(){
   timer=setInterval(pollRankings,2000);
 }
 
+var _lastRankings=null;  // {rows,ingestCount,ageS,stale} from the last /api/rankings poll
+
 function pollRankings(){
   fetch("/api/rankings")
     .then(function(r){return r.json();})
-    .then(function(data){renderRankings(data.rows,data.ingest_count,data.age_s,data.stale);})
+    .then(function(data){
+      _lastRankings={rows:data.rows,ingestCount:data.ingest_count,ageS:data.age_s,stale:data.stale};
+      renderRankings(sortRows(data.rows),data.ingest_count,data.age_s,data.stale);
+    })
     .catch(function(err){setStatus("Fetch error: "+err);});
+}
+
+function sortRows(rows){
+  // null currentSort = keep the server's order (already volume-sorted descending).
+  if(!currentSort)return rows;
+  var key=currentSort.key,dir=currentSort.dir;
+  return rows.slice().sort(function(a,b){
+    var va=a.cells[key]?a.cells[key].raw:null,vb=b.cells[key]?b.cells[key].raw:null;
+    if(va==null&&vb==null)return 0;
+    if(va==null)return 1;
+    if(vb==null)return -1;
+    var cmp=va<vb?-1:va>vb?1:0;
+    return dir==="asc"?cmp:-cmp;
+  });
+}
+
+function setSort(key){
+  if(currentSort&&currentSort.key===key){
+    currentSort.dir=currentSort.dir==="desc"?"asc":"desc";
+  }else{
+    currentSort={key:key,dir:"desc"};
+  }
+  if(_lastRankings)
+    renderRankings(sortRows(_lastRankings.rows),_lastRankings.ingestCount,_lastRankings.ageS,_lastRankings.stale);
 }
 
 function renderRankings(rows,ingestCount,ageS,stale){
   var hdr="<tr><th>#</th><th>Instrument</th>"
-    +COLS.map(function(c){return "<th>"+esc(c[1])+"</th>";}).join("")
+    +COLS.map(function(c){
+      var arrow=currentSort&&currentSort.key===c[0]?(currentSort.dir==="desc"?" &#9660;":" &#9650;"):"";
+      return "<th style=\\"cursor:pointer\\" onclick=\\"setSort('"+c[0]+"');return false\\">"+esc(c[1])+arrow+"</th>";
+    }).join("")
     +"<th>History</th></tr>";
   var tbody=rows.map(function(row,i){
     var iid=row.instrument_id;
@@ -756,25 +802,35 @@ def _trade_aggregates(snaps: list) -> tuple[float, float, int, int]:
 
 
 def _rankings_json() -> str:
-    """Return pre-formatted cell values for all currently-collected instruments as JSON."""
-    rows = _merged_rows()
+    """Return pre-formatted cell values for all currently-collected instruments as JSON.
+
+    Rows are sorted by descending volume24H (USD) on every call -- not a one-time
+    computation -- so the default order stays live as _VOLUME_24H and _LIVE_FAST change.
+    Missing volume24H (e.g. a newly-subscribed coin, or before the first poll completes)
+    sorts as 0.0, not to the top.
+    """
+    rows = sorted(_merged_rows(), key=lambda r: _VOLUME_24H.get(r["instrument_id"], 0.0), reverse=True)
     result = []
     for row in rows:
         iid = row["instrument_id"]
+        row = {**row, "volume24h": _VOLUME_24H.get(iid)}
         cells: dict[str, dict] = {}
         err = row.get("_err")
         for key, _, fmt_fn, color_fn in RANKING_COLS:
             v = row.get(key)
             if v is None:
-                cells[key] = {"text": "!", "color": "#f85149"} if err else {"text": "—", "color": None}
+                cells[key] = {"text": "!", "color": "#f85149", "raw": None} if err else {
+                    "text": "—", "color": None, "raw": None,
+                }
             else:
                 try:
                     cells[key] = {
                         "text": fmt_fn(v),  # type: ignore[operator]
                         "color": color_fn(v) if color_fn else None,  # type: ignore[operator]
+                        "raw": v,
                     }
                 except Exception:
-                    cells[key] = {"text": "ERR", "color": "#f85149"}
+                    cells[key] = {"text": "ERR", "color": "#f85149", "raw": None}
         result.append({"instrument_id": iid, "cells": cells})
     age_s = round(time.time() - _LAST_INGEST_TS, 1) if _LAST_INGEST_TS else None
     stale = age_s is None or age_s > 10
@@ -1085,6 +1141,68 @@ async def _slow_loop_task(catalog_path: str) -> None:
         await asyncio.sleep(DB_WRITE_INTERVAL_SECONDS)
 
 
+def _fetch_volume_24h_json(network: DydxNetwork) -> dict:
+    """GET dYdX's public indexer perpetualMarkets endpoint.
+
+    Deliberately independent of dydx_collector.open_interest._fetch_markets_json,
+    which hits the same endpoint for the same reason: that function performs network
+    I/O, and AD-4 only permits cross-namespace imports of shared data types and pure,
+    I/O-free utilities -- a network-calling function does not qualify for reuse across
+    the dydx_collector/ml_signals module boundary.
+    """
+    url = f"{get_dydx_http_url(network)}/v4/perpetualMarkets"
+    request = urllib.request.Request(  # noqa: S310 (fixed https indexer URL)
+        url,
+        headers={"User-Agent": "nautilus-dydx-dashboard/1.0"},
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310
+        return json.load(response)
+
+
+def parse_volume_24h(markets_json: dict) -> dict[str, float]:
+    """Parse volume24H (USD) per instrument from a dYdX perpetualMarkets response."""
+    result: dict[str, float] = {}
+    for market in markets_json.get("markets", {}).values():
+        ticker = market.get("ticker")
+        if ticker is None:
+            continue
+        try:
+            vol = float(market.get("volume24H") or 0)
+        except (ValueError, TypeError):
+            vol = 0.0
+        result[f"{ticker}-PERP.DYDX"] = vol
+    return result
+
+
+async def _fetch_volume_24h(network: DydxNetwork) -> dict[str, float]:
+    markets_json = await asyncio.to_thread(_fetch_volume_24h_json, network)
+    return parse_volume_24h(markets_json)
+
+
+@asynccontextmanager
+async def volume_loop_ctx(app: web.Application):  # type: ignore[type-arg]
+    """Lifecycle context: run _volume_loop_task as a background task."""
+    task = asyncio.create_task(_volume_loop_task(app.get("dydx_network", DydxNetwork.MAINNET)))
+    try:
+        yield
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+async def _volume_loop_task(network: DydxNetwork) -> None:
+    """Refresh _VOLUME_24H every VOLUME_POLL_SECONDS -- drives the default rankings sort."""
+    while True:
+        try:
+            _VOLUME_24H.update(await _fetch_volume_24h(network))
+        except Exception:
+            logger.exception("Volume-24h poll failed")
+        await asyncio.sleep(VOLUME_POLL_SECONDS)
+
+
 def make_app(redis_url: str, catalog_path: str) -> web.Application:
     """Return a configured aiohttp Application with all routes and background tasks."""
     # Pre-populate _LIVE_SLOW from last SQLite snapshot so rankings show immediately
@@ -1104,6 +1222,7 @@ def make_app(redis_url: str, catalog_path: str) -> web.Application:
 
     app.cleanup_ctx.append(redis_subscriber_ctx)
     app.cleanup_ctx.append(slow_loop_ctx)
+    app.cleanup_ctx.append(volume_loop_ctx)
 
     app.router.add_get("/", rankings_handler)
     app.router.add_get("/api/rankings", rankings_json_handler)
