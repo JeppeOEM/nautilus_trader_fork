@@ -51,7 +51,7 @@ development_status:
   epic-1: in-progress
   1-1-verify-the-data-integrity-gate-end-to-end: done
   1-2-default-the-ranking-table-to-volume-sort: done
-  1-3-expose-the-live-watchlist-as-a-queryable-backtest-consumable-coin-set: ready-for-dev
+  1-3-expose-the-live-watchlist-as-a-queryable-backtest-consumable-coin-set: review
   1-4-persist-and-query-historical-coin-ranking: backlog
   1-5-sequence-verified-order-book-resync: done
   1-6-taint-window-bar-discard-and-bounded-raw-capture-housekeeping-log: done

@@ -119,6 +119,13 @@ _VOLUME_24H: dict[str, float] = {}
 _INGEST_COUNT: int = 0       # total batches ingested; increments ~1/s; visible in API
 _LAST_INGEST_TS: float = 0.0  # wall-clock seconds of last successful ingest
 
+# A coin the collector stops sending snapshots for (unsubscribed/reclassified illiquid/
+# disconnected) must eventually drop out of the Watchlist (troll/dydx_collector's
+# OBS-01: >30s of silence on a liquid instrument is a pipeline failure, not "quiet
+# market") -- reused here as the watchlist-freshness cutoff. _LIVE_FAST entries are
+# never deleted, so this is enforced at read time (_is_fresh), not by pruning the dict.
+_WATCHLIST_STALE_NS = 30_000_000_000
+
 # Rolling 1s snapshots received from Redis (plain dicts from DydxSecondSnapshot.to_dict()).
 _second_rolling: dict[str, deque] = defaultdict(lambda: deque(maxlen=300))
 
@@ -139,6 +146,12 @@ _NAV = '<p><a href="/">Rankings</a> | <a href="/live">Live signals</a></p>'
 def _merged_live(iid: str) -> dict:
     """Merge slow and fast caches; fast wins on key overlap."""
     return {**_LIVE_SLOW.get(iid, {}), **_LIVE_FAST.get(iid, {})}
+
+
+def _is_fresh(iid: str, now_ns: int) -> bool:
+    """Check whether iid has an in-window _LIVE_FAST entry -- evicts dead coins from the watchlist."""
+    entry = _LIVE_FAST.get(iid)
+    return entry is not None and (now_ns - entry["ts"]) <= _WATCHLIST_STALE_NS
 
 
 def _merged_rows() -> list[dict]:
@@ -802,6 +815,19 @@ def _trade_aggregates(snaps: list) -> tuple[float, float, int, int]:
     )
 
 
+def _watchlist_ids() -> list[str]:
+    """Return the current live Watchlist: fresh instrument IDs, sorted by descending volume24H.
+
+    Unlike _rankings_json (the human-facing table), stale/delisted coins are excluded
+    outright rather than merely flagged -- an automated backtest consumer must never
+    silently include a dead coin (see _is_fresh).
+    """
+    now_ns = time.time_ns()
+    fresh_rows = [r for r in _merged_rows() if _is_fresh(r["instrument_id"], now_ns)]
+    fresh_rows.sort(key=lambda r: _VOLUME_24H.get(r["instrument_id"], 0.0), reverse=True)
+    return [r["instrument_id"] for r in fresh_rows]
+
+
 def _rankings_json() -> str:
     """Return pre-formatted cell values for all currently-collected instruments as JSON.
 
@@ -971,6 +997,13 @@ async def rankings_handler(request: web.Request) -> web.Response:
 
 async def rankings_json_handler(request: web.Request) -> web.Response:
     return web.Response(text=_rankings_json(), content_type="application/json")
+
+
+async def watchlist_json_handler(request: web.Request) -> web.Response:
+    """FR-7: the live, queryable Watchlist coin-set -- see ml_signals.watchlist.fetch_watchlist."""
+    return web.Response(
+        text=json.dumps({"instrument_ids": _watchlist_ids()}), content_type="application/json",
+    )
 
 
 async def debug_handler(request: web.Request) -> web.Response:
@@ -1233,6 +1266,7 @@ def make_app(
 
     app.router.add_get("/", rankings_handler)
     app.router.add_get("/api/rankings", rankings_json_handler)
+    app.router.add_get("/api/watchlist", watchlist_json_handler)
     app.router.add_get("/debug", debug_handler)
     app.router.add_get("/coin/{id}", coin_handler)
     app.router.add_get("/data/coin/{id}", coin_json_handler)
