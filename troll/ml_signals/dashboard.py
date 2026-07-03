@@ -39,6 +39,7 @@ import asyncio
 import html
 import json
 import logging
+import math
 import os
 import statistics
 import time
@@ -827,7 +828,10 @@ def _rankings_json() -> str:
                     cells[key] = {
                         "text": fmt_fn(v),  # type: ignore[operator]
                         "color": color_fn(v) if color_fn else None,  # type: ignore[operator]
-                        "raw": v,
+                        # NaN/Infinity are valid Python floats but not valid JSON tokens --
+                        # json.dumps would emit them literally and break the client's
+                        # JSON.parse for the whole payload. Null them out instead.
+                        "raw": None if isinstance(v, float) and not math.isfinite(v) else v,
                     }
                 except Exception:
                     cells[key] = {"text": "ERR", "color": "#f85149", "raw": None}
@@ -1203,7 +1207,9 @@ async def _volume_loop_task(network: DydxNetwork) -> None:
         await asyncio.sleep(VOLUME_POLL_SECONDS)
 
 
-def make_app(redis_url: str, catalog_path: str) -> web.Application:
+def make_app(
+    redis_url: str, catalog_path: str, network: DydxNetwork = DydxNetwork.MAINNET,
+) -> web.Application:
     """Return a configured aiohttp Application with all routes and background tasks."""
     # Pre-populate _LIVE_SLOW from last SQLite snapshot so rankings show immediately
     db_path = str(Path(catalog_path).parent / "metrics.db")
@@ -1219,6 +1225,7 @@ def make_app(redis_url: str, catalog_path: str) -> web.Application:
     app = web.Application()
     app["redis_url"] = redis_url
     app["catalog_path"] = catalog_path
+    app["dydx_network"] = network
 
     app.cleanup_ctx.append(redis_subscriber_ctx)
     app.cleanup_ctx.append(slow_loop_ctx)
@@ -1243,8 +1250,13 @@ if __name__ == "__main__":
     redis_url = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
     catalog_path = os.environ.get("CATALOG_PATH", "troll/dydx_collector/catalog")
     port = int(os.environ.get("DASHBOARD_PORT", "8765"))
+    # Must match the collector's configured network (collector.toml's [network]) or
+    # volume24H/rankings silently reflect the wrong network's data -- see DYDX_NETWORK.
+    network = DydxNetwork.from_str(  # type: ignore[attr-defined]
+        os.environ.get("DYDX_NETWORK", "mainnet").lower(),
+    )
     # loopback-only: network_mode: host means this container shares the host's real
     # network stack, so 127.0.0.1 here is 127.0.0.1 on the host -- nothing remote
     # (LAN, Tailscale, public internet) can reach it, matching Dozzle's existing
     # 127.0.0.1-only port binding in docker-compose.yml.
-    web.run_app(make_app(redis_url, catalog_path), host="127.0.0.1", port=port)
+    web.run_app(make_app(redis_url, catalog_path, network), host="127.0.0.1", port=port)

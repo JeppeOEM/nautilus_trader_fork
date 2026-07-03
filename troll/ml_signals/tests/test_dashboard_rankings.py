@@ -19,7 +19,9 @@ import json
 from ml_signals.dashboard import _LIVE_FAST
 from ml_signals.dashboard import _VOLUME_24H
 from ml_signals.dashboard import _rankings_json
+from ml_signals.dashboard import make_app
 from ml_signals.dashboard import parse_volume_24h
+from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
 
 
 def _reset_state() -> None:
@@ -106,3 +108,49 @@ def test_rankings_json_cells_include_raw_value() -> None:
     cell = payload["rows"][0]["cells"]["price"]
 
     assert cell["raw"] == 50000.1234
+
+
+def test_rankings_json_sort_updates_live_not_cached() -> None:
+    """AC2: sort order must reflect _VOLUME_24H mutated between two calls, not a frozen order."""
+    _reset_state()
+    _LIVE_FAST["AAA-USD-PERP.DYDX"] = _live_row("AAA-USD-PERP.DYDX")
+    _LIVE_FAST["BBB-USD-PERP.DYDX"] = _live_row("BBB-USD-PERP.DYDX")
+    _VOLUME_24H["AAA-USD-PERP.DYDX"] = 100.0
+    _VOLUME_24H["BBB-USD-PERP.DYDX"] = 1.0
+
+    first = [r["instrument_id"] for r in json.loads(_rankings_json())["rows"]]
+    assert first == ["AAA-USD-PERP.DYDX", "BBB-USD-PERP.DYDX"]
+
+    _VOLUME_24H["BBB-USD-PERP.DYDX"] = 1_000.0  # now BBB outranks AAA
+
+    second = [r["instrument_id"] for r in json.loads(_rankings_json())["rows"]]
+    assert second == ["BBB-USD-PERP.DYDX", "AAA-USD-PERP.DYDX"]
+
+
+def test_rankings_json_cells_null_out_non_finite_raw_value() -> None:
+    """NaN/Infinity are valid Python floats but invalid JSON tokens -- must be nulled, not emitted."""
+    _reset_state()
+    row = _live_row("BTC-USD-PERP.DYDX")
+    row["pct_24h"] = float("nan")
+    row["volatility"] = float("inf")
+    _LIVE_FAST["BTC-USD-PERP.DYDX"] = row
+
+    raw_text = _rankings_json()
+    assert "NaN" not in raw_text
+    assert "Infinity" not in raw_text
+
+    payload = json.loads(raw_text)  # would raise if a literal NaN/Infinity leaked through
+    cells = payload["rows"][0]["cells"]
+    assert cells["pct_24h"]["raw"] is None
+    assert cells["volatility"]["raw"] is None
+
+
+def test_make_app_wires_configured_network_for_volume_poll() -> None:
+    """The volume-24h poll must use the collector's configured network, not always MAINNET."""
+    app = make_app("redis://127.0.0.1:6379", "/nonexistent/catalog", DydxNetwork.TESTNET)
+    assert app["dydx_network"] == DydxNetwork.TESTNET
+
+
+def test_make_app_defaults_network_to_mainnet() -> None:
+    app = make_app("redis://127.0.0.1:6379", "/nonexistent/catalog")
+    assert app["dydx_network"] == DydxNetwork.MAINNET
