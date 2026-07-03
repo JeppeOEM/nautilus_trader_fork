@@ -518,6 +518,7 @@ pub fn parse_orderbook_snapshot(
     price_precision: u8,
     size_precision: u8,
     ts_init: UnixNanos,
+    message_id: u64,
 ) -> DydxWsResult<OrderBookDeltas> {
     let bids = contents.bids.as_deref().unwrap_or(&[]);
     let asks = contents.asks.as_deref().unwrap_or(&[]);
@@ -528,14 +529,14 @@ pub fn parse_orderbook_snapshot(
     // Empty book snapshot: Clear alone must carry F_SNAPSHOT | F_LAST
     if bids.is_empty() && asks.is_empty() {
         let clear_flags = snapshot_flag | RecordFlag::F_LAST as u8;
-        let mut clear_delta = OrderBookDelta::clear(*instrument_id, 0, ts_init, ts_init);
+        let mut clear_delta = OrderBookDelta::clear(*instrument_id, message_id, ts_init, ts_init);
         clear_delta.flags = clear_flags;
         deltas.push(clear_delta);
         return Ok(OrderBookDeltas::new(*instrument_id, deltas));
     }
 
     // Non-empty: Clear carries F_SNAPSHOT (not last)
-    let mut clear_delta = OrderBookDelta::clear(*instrument_id, 0, ts_init, ts_init);
+    let mut clear_delta = OrderBookDelta::clear(*instrument_id, message_id, ts_init, ts_init);
     clear_delta.flags = snapshot_flag;
     deltas.push(clear_delta);
 
@@ -572,7 +573,7 @@ pub fn parse_orderbook_snapshot(
             BookAction::Add,
             order,
             flags,
-            0,
+            message_id,
             ts_init,
             ts_init,
         ));
@@ -608,7 +609,7 @@ pub fn parse_orderbook_snapshot(
             BookAction::Add,
             order,
             flags,
-            0,
+            message_id,
             ts_init,
             ts_init,
         ));
@@ -628,6 +629,7 @@ pub fn parse_orderbook_deltas(
     price_precision: u8,
     size_precision: u8,
     ts_init: UnixNanos,
+    message_id: u64,
 ) -> DydxWsResult<OrderBookDeltas> {
     let deltas = parse_orderbook_deltas_with_flag(
         instrument_id,
@@ -636,6 +638,7 @@ pub fn parse_orderbook_deltas(
         size_precision,
         ts_init,
         true,
+        message_id,
     )?;
     Ok(OrderBookDeltas::new(*instrument_id, deltas))
 }
@@ -652,6 +655,7 @@ pub fn parse_orderbook_deltas_with_flag(
     size_precision: u8,
     ts_init: UnixNanos,
     is_last_message: bool,
+    message_id: u64,
 ) -> DydxWsResult<Vec<OrderBookDelta>> {
     let mut deltas = Vec::new();
 
@@ -694,7 +698,7 @@ pub fn parse_orderbook_deltas_with_flag(
             action,
             order,
             flags,
-            0,
+            message_id,
             ts_init,
             ts_init,
         ));
@@ -733,7 +737,7 @@ pub fn parse_orderbook_deltas_with_flag(
             action,
             order,
             flags,
-            0,
+            message_id,
             ts_init,
             ts_init,
         ));
@@ -1808,11 +1812,17 @@ mod tests {
         let instrument_id = InstrumentId::from("BTC-USD-PERP.DYDX");
         let ts_init = UnixNanos::from(1_000_000_000u64);
 
-        let deltas = parse_orderbook_snapshot(&instrument_id, &contents, 2, 8, ts_init)
+        let deltas = parse_orderbook_snapshot(&instrument_id, &contents, 2, 8, ts_init, 42)
             .expect("Failed to parse orderbook snapshot");
 
         // 1 clear + 3 bids + 3 asks = 7 deltas
         assert_eq!(deltas.deltas.len(), 7);
+
+        // Every delta in the snapshot must carry the venue message_id as its sequence,
+        // so Python-side gap detection sees a real value instead of the old hardcoded 0.
+        for delta in &deltas.deltas {
+            assert_eq!(delta.sequence, 42);
+        }
 
         assert_eq!(deltas.deltas[0].action, BookAction::Clear);
         assert_eq!(deltas.deltas[1].action, BookAction::Add);
@@ -1885,7 +1895,7 @@ mod tests {
         let instrument_id = InstrumentId::from("BTC-USD-PERP.DYDX");
         let ts_init = UnixNanos::from(1_000_000_000u64);
 
-        let deltas = parse_orderbook_snapshot(&instrument_id, &contents, 2, 8, ts_init)
+        let deltas = parse_orderbook_snapshot(&instrument_id, &contents, 2, 8, ts_init, 7)
             .expect("Failed to parse orderbook snapshot");
 
         let snapshot = RecordFlag::F_SNAPSHOT as u8;
@@ -1915,11 +1925,16 @@ mod tests {
         let instrument_id = InstrumentId::from("BTC-USD-PERP.DYDX");
         let ts_init = UnixNanos::from(1_000_000_000u64);
 
-        let deltas = parse_orderbook_deltas(&instrument_id, &contents, 2, 8, ts_init)
+        let deltas = parse_orderbook_deltas(&instrument_id, &contents, 2, 8, ts_init, 99)
             .expect("Failed to parse orderbook deltas");
 
         // 2 bids + 2 asks = 4 deltas
         assert_eq!(deltas.deltas.len(), 4);
+
+        // Every delta must carry the venue message_id as its sequence.
+        for delta in &deltas.deltas {
+            assert_eq!(delta.sequence, 99);
+        }
 
         assert_eq!(deltas.deltas[0].action, BookAction::Update);
         assert_eq!(deltas.deltas[0].order.side, OrderSide::Buy);

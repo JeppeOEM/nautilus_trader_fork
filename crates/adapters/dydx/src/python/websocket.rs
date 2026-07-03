@@ -243,7 +243,11 @@ impl DydxWebSocketClient {
                                     Err(e) => log::error!("Failed to parse trade ticks for {id}: {e}"),
                                 }
                             }
-                            DydxWsOutputMessage::OrderbookSnapshot { id, contents } => {
+                            DydxWsOutputMessage::OrderbookSnapshot {
+                                id,
+                                contents,
+                                message_id,
+                            } => {
                                 let Some(instrument) = _client.instrument_cache().get_by_market(&id) else {
                                     log::warn!("No instrument cached for market {id}");
                                     continue;
@@ -258,6 +262,7 @@ impl DydxWebSocketClient {
                                     price_precision,
                                     size_precision,
                                     ts_init,
+                                    message_id,
                                 ) {
                                     Ok(deltas) => {
                                         Python::attach(|py| {
@@ -269,7 +274,11 @@ impl DydxWebSocketClient {
                                     Err(e) => log::error!("Failed to parse orderbook snapshot for {id}: {e}"),
                                 }
                             }
-                            DydxWsOutputMessage::OrderbookUpdate { id, contents } => {
+                            DydxWsOutputMessage::OrderbookUpdate {
+                                id,
+                                contents,
+                                message_id,
+                            } => {
                                 let Some(instrument) = _client.instrument_cache().get_by_market(&id) else {
                                     log::warn!("No instrument cached for market {id}");
                                     continue;
@@ -284,6 +293,7 @@ impl DydxWebSocketClient {
                                     price_precision,
                                     size_precision,
                                     ts_init,
+                                    message_id,
                                 ) {
                                     Ok(deltas) => {
                                         Python::attach(|py| {
@@ -295,7 +305,11 @@ impl DydxWebSocketClient {
                                     Err(e) => log::error!("Failed to parse orderbook deltas for {id}: {e}"),
                                 }
                             }
-                            DydxWsOutputMessage::OrderbookBatch { id, updates } => {
+                            DydxWsOutputMessage::OrderbookBatch {
+                                id,
+                                updates,
+                                message_id,
+                            } => {
                                 let Some(instrument) = _client.instrument_cache().get_by_market(&id) else {
                                     log::warn!("No instrument cached for market {id}");
                                     continue;
@@ -317,6 +331,7 @@ impl DydxWebSocketClient {
                                             size_precision,
                                             ts_init,
                                             false,
+                                            message_id,
                                         ) {
                                             Ok(deltas) => all_deltas.extend(deltas),
                                             Err(e) => {
@@ -332,6 +347,7 @@ impl DydxWebSocketClient {
                                             price_precision,
                                             size_precision,
                                             ts_init,
+                                            message_id,
                                         ) {
                                             Ok(last_deltas) => all_deltas.extend(last_deltas.deltas),
                                             Err(e) => {

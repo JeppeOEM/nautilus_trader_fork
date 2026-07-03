@@ -200,6 +200,80 @@ So that I can decide whether it warrants opt-in Raw Delta Capture (FR2).
 **When** its past ranking history is queried
 **Then** historical data for it is still retrievable if it was previously ranked within the retention window — ranking history is not deleted merely because a coin drops out of the current Watchlist
 
+### Story 1.5: Sequence-verified order book resync
+
+Added post-hoc from a first-principles brainstorming session (`_bmad-output/brainstorming/brainstorm-orderbook-data-quality-2026-07-02/`) that found the existing gate (Story 1.1) only detects corruption symptomatically (crossed book) and never proves recovery. dYdX's WS orderbook channel carries a per-market `message_id` sequence counter that is currently discarded before reaching Python (FR3/FR4 extension).
+
+As the collector,
+I want to detect a dropped WebSocket message by its exact sequence number and provably resync the local order book afterward,
+So that a gap is caught the instant it happens rather than inferred later from a crossed-book symptom, and the book is known-correct again rather than assumed healed.
+
+**Acceptance Criteria:**
+
+**Given** the Rust dYdX adapter's WS orderbook envelope (`DydxWsChannelDataMsg`/`DydxWsChannelBatchDataMsg`)
+**When** it is converted to `DydxWsOutputMessage::Orderbook{Snapshot,Update,Batch}` and crosses the PyO3 boundary
+**Then** the message's `message_id` is no longer discarded — it is available to the Python collector per market
+
+**Given** a market with a known last-confirmed `message_id`
+**When** the next message for that market arrives
+**Then** the collector checks `message_id == last_id + 1` exactly (not just `message_id > last_id` regression), and a gap is detected the instant it fails
+
+**Given** a sequence gap is detected for market X
+**When** the collector enters resync mode for X
+**Then** it stops applying incoming WS messages to X's local book state and instead buffers them in order, and halts 1s snapshot emission for X (does not touch the taint/discard/parquet-gap mechanics — that is Story 1.6)
+
+**Given** resync mode is active for market X
+**When** a REST order book snapshot for X is fetched
+**Then** X's local book state is replaced wholesale with the snapshot, then every buffered message is replayed on top of it in order, relying on absolute-per-level update semantics (confirmed: dYdX updates replace a level's size, they are not relative deltas) so replay is idempotent and no precise anchor/cut-point is required
+
+**Given** the snapshot-swap-and-replay sequence
+**When** it executes
+**Then** it runs as one synchronous block with no `await` between swapping state and finishing the buffered replay, relying on the collector's single-threaded asyncio loop so no WS message for that market can be processed concurrently and slip through unbuffered
+
+**Given** replay of the buffer completes
+**When** resync mode exits for market X
+**Then** `last_message_id` is reset to the last replayed message's id and live per-message processing resumes normally
+
+### Story 1.6: Taint-window bar discard and bounded raw-capture housekeeping log
+
+Depends on Story 1.5's resync-mode flag. From the same brainstorming session: corrupted 1s bars must never be fabricated, flagged-but-kept, or interpolated — and postmortem diagnosis needs raw context without unbounded storage growth (FR3/FR4 extension, NFR3 memory-bounded discipline).
+
+As the collector,
+I want to discard 1s snapshots produced during an active resync window and separately capture bounded raw context around the triggering event,
+So that ML/backtest consumers see a genuine parquet gap (never a fabricated or silently-wrong bar) and a human can later diagnose exactly what went wrong.
+
+**Acceptance Criteria:**
+
+**Given** market X is in resync mode (per Story 1.5) for some time window
+**When** the 1s snapshot loop would otherwise emit a bar for X during that window
+**Then** the bar is discarded entirely — not written to the catalog, not flagged-but-present — leaving a genuine gap in the parquet output
+
+**Given** each market being tracked
+**When** WS messages arrive during normal operation
+**Then** the collector keeps only a small rolling in-memory ring buffer of raw messages per market (~30-60s), never an unbounded or continuously-archived raw capture
+
+**Given** a sequence gap fires for market X (Story 1.5)
+**When** the housekeeping log is written
+**Then** it flushes that market's ring buffer (raw messages from shortly before and after the trigger) plus the event timestamp to a separate housekeeping log, so storage cost scales with number of corruption events, not with uptime
+
+### Story 1.7: Crossed-book CRITICAL escalation for steady-state desync
+
+Depends on Story 1.5's resync-mode flag (to distinguish steady-state from an expected transient window). From the same session: a crossed book observed *outside* any known-cause window (not mid-reconnect CLEAR-replay, not mid-resync buffer-replay) means either a local reconstruction bug or dYdX sent bad data with an intact, gap-free sequence — a cause `message_id` checking structurally cannot see. This is flagged as the highest-severity, most-visible event in the system.
+
+As the operator,
+I want a crossed book detected during steady-state (no known gap, no active resync, no active reconnect) to be loud and unmistakable,
+So that I am alerted to failure causes no existing mechanism predicted, instead of it blending into routine gap-triggered bar discards.
+
+**Acceptance Criteria:**
+
+**Given** a market's local book is observed crossed (`best_bid >= best_ask`)
+**When** this occurs while the market is in an expected transient window (mid-reconnect CLEAR-replay, or mid-resync buffer-replay per Story 1.5)
+**Then** it is a silent skip exactly as today — no escalation, no snapshot emitted
+
+**Given** a market's local book is observed crossed
+**When** this occurs in steady state — no known sequence gap (Story 1.5), not mid-resync, not mid-reconnect
+**Then** it is logged at CRITICAL severity to a distinct high-danger event log, separate from routine gap-triggered bar discards (Story 1.6), and is immediately visible (not buried in routine INFO/WARNING volume)
+
 ## Epic 2: Reusable Signal Research & Multi-Coin Backtesting
 
 Builder writes an indicator once in Jupyter (Nautilus notebook conventions) and runs it unmodified in a multi-coin, dual-timeframe `BacktestNode` run across the current Watchlist. Existing code already covers part of this: `ml_signals/indicators.py` has `Microprice`, `OrderFlowImbalance`, `MultiLevelOBI`, `MultiLevelOFI`, `OnlineLogisticTrend` as proper Nautilus `Indicator` subclasses, and `backtest_dydx.py` already uses `BacktestNode`/`BacktestDataConfig`/`ImportableStrategyConfig`. Gaps found during review: the existing notebook (`dydx_collector/notebooks/dydx_catalog_pandas.ipynb`) calls `catalog.trade_ticks()` with no time bound (violates NFR3), and `backtest_dydx.py` is single-symbol/single-timeframe only (no multi-coin, no raw-Snapshot-granularity path).

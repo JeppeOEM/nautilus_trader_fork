@@ -3248,7 +3248,10 @@ async fn test_orderbook_produces_update() {
         matches!(m, DydxWsOutputMessage::OrderbookUpdate { .. })
     })
     .await;
-    let DydxWsOutputMessage::OrderbookUpdate { id, contents } = msg else {
+    let DydxWsOutputMessage::OrderbookUpdate {
+        id, contents, ..
+    } = msg
+    else {
         unreachable!()
     };
     assert_eq!(id, "BTC-USD");

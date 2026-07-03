@@ -213,16 +213,25 @@ pub enum DydxWsOutputMessage {
     OrderbookSnapshot {
         id: String,
         contents: DydxOrderbookSnapshotContents,
+        /// The venue-assigned sequence number for this subscription, forwarded into
+        /// every resulting `OrderBookDelta.sequence` so consumers can detect gaps.
+        message_id: u64,
     },
     /// Order book delta update.
     OrderbookUpdate {
         id: String,
         contents: DydxOrderbookContents,
+        /// The venue-assigned sequence number for this subscription, forwarded into
+        /// every resulting `OrderBookDelta.sequence` so consumers can detect gaps.
+        message_id: u64,
     },
     /// Order book batch update (multiple deltas).
     OrderbookBatch {
         id: String,
         updates: Vec<DydxOrderbookContents>,
+        /// The venue-assigned sequence number for this subscription, forwarded into
+        /// every resulting `OrderBookDelta.sequence` so consumers can detect gaps.
+        message_id: u64,
     },
     /// Candle data for a market.
     Candles { id: String, contents: DydxCandle },

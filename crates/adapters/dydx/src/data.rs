@@ -1124,7 +1124,11 @@ impl DydxDataClient {
                     Err(e) => log::error!("Failed to parse trade ticks for {id}: {e}"),
                 }
             }
-            DydxWsOutputMessage::OrderbookSnapshot { id, contents } => {
+            DydxWsOutputMessage::OrderbookSnapshot {
+                id,
+                contents,
+                message_id,
+            } => {
                 let Some(instrument) = ctx.instrument_cache.get_by_market(&id) else {
                     log::warn!("No instrument cached for market {id}");
                     return;
@@ -1137,6 +1141,7 @@ impl DydxDataClient {
                     instrument.price_precision(),
                     instrument.size_precision(),
                     ts_init,
+                    message_id,
                 ) {
                     Ok(deltas) => {
                         Self::handle_deltas_message(
@@ -1152,7 +1157,11 @@ impl DydxDataClient {
                     Err(e) => log::error!("Failed to parse orderbook snapshot for {id}: {e}"),
                 }
             }
-            DydxWsOutputMessage::OrderbookUpdate { id, contents } => {
+            DydxWsOutputMessage::OrderbookUpdate {
+                id,
+                contents,
+                message_id,
+            } => {
                 let Some(instrument) = ctx.instrument_cache.get_by_market(&id) else {
                     log::warn!("No instrument cached for market {id}");
                     return;
@@ -1165,6 +1174,7 @@ impl DydxDataClient {
                     instrument.price_precision(),
                     instrument.size_precision(),
                     ts_init,
+                    message_id,
                 ) {
                     Ok(deltas) => {
                         Self::handle_deltas_message(
@@ -1180,7 +1190,11 @@ impl DydxDataClient {
                     Err(e) => log::error!("Failed to parse orderbook deltas for {id}: {e}"),
                 }
             }
-            DydxWsOutputMessage::OrderbookBatch { id, updates } => {
+            DydxWsOutputMessage::OrderbookBatch {
+                id,
+                updates,
+                message_id,
+            } => {
                 let Some(instrument) = ctx.instrument_cache.get_by_market(&id) else {
                     log::warn!("No instrument cached for market {id}");
                     return;
@@ -1201,6 +1215,7 @@ impl DydxDataClient {
                             price_precision,
                             size_precision,
                             ts_init,
+                            message_id,
                         )
                         .map(|d| d.deltas)
                     } else {
@@ -1211,6 +1226,7 @@ impl DydxDataClient {
                             size_precision,
                             ts_init,
                             false,
+                            message_id,
                         )
                     };
 

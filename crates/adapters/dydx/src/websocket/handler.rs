@@ -548,7 +548,11 @@ impl FeedHandler {
         };
 
         match serde_json::from_value::<DydxOrderbookSnapshotContents>(data.contents.clone()) {
-            Ok(contents) => vec![DydxWsOutputMessage::OrderbookSnapshot { id, contents }],
+            Ok(contents) => vec![DydxWsOutputMessage::OrderbookSnapshot {
+                id,
+                contents,
+                message_id: data.message_id,
+            }],
             Err(e) => {
                 log::error!("Failed to deserialize orderbook snapshot: {e}");
                 vec![]
@@ -566,7 +570,11 @@ impl FeedHandler {
         };
 
         match serde_json::from_value::<DydxOrderbookContents>(data.contents.clone()) {
-            Ok(contents) => vec![DydxWsOutputMessage::OrderbookUpdate { id, contents }],
+            Ok(contents) => vec![DydxWsOutputMessage::OrderbookUpdate {
+                id,
+                contents,
+                message_id: data.message_id,
+            }],
             Err(e) => {
                 log::error!("Failed to deserialize orderbook contents: {e}");
                 vec![]
@@ -584,7 +592,11 @@ impl FeedHandler {
         };
 
         match serde_json::from_value::<Vec<DydxOrderbookContents>>(data.contents.clone()) {
-            Ok(updates) => vec![DydxWsOutputMessage::OrderbookBatch { id, updates }],
+            Ok(updates) => vec![DydxWsOutputMessage::OrderbookBatch {
+                id,
+                updates,
+                message_id: data.message_id,
+            }],
             Err(e) => {
                 log::error!("Failed to deserialize orderbook batch: {e}");
                 vec![]

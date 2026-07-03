@@ -34,6 +34,7 @@ from nautilus_trader.model.data import FundingRateUpdate
 from nautilus_trader.model.data import IndexPriceUpdate
 from nautilus_trader.model.data import InstrumentStatus
 from nautilus_trader.model.data import MarkPriceUpdate
+from nautilus_trader.model.data import OrderBookDeltas
 from nautilus_trader.model.data import capsule_to_data
 from nautilus_trader.model.instruments import Instrument
 from nautilus_trader.model.objects import Price
@@ -129,6 +130,25 @@ class DydxClient:
     async def subscribe_markets(self) -> None:
         """Subscribe to mark/index price + instrument status updates for all instruments."""
         await self._ws.subscribe_markets()
+
+    async def request_orderbook_snapshot(self, instrument_id: str) -> OrderBookDeltas:
+        """
+        Fetch a full order book snapshot via REST (used to resync after a WS sequence gap).
+
+        Returns a synthetic CLEAR+ADD `OrderBookDeltas` built from the REST bids/asks
+        (`request_orderbook_snapshot` on the Rust HTTP client, `crates/adapters/dydx/src/http/client.rs`).
+        The response carries no sequence/anchor field -- confirmed via `OrderbookResponse`
+        in `crates/adapters/dydx/src/http/models.rs`, unlike e.g. Binance's `lastUpdateId`.
+
+        Returns the Cython `OrderBookDeltas` (matches every other data path in this
+        collector), not the raw pyo3-native type the Rust client returns -- same
+        `.from_pyo3()` conversion the official adapter uses at
+        `nautilus_trader/adapters/dydx/data.py:527-531`.
+        """
+        pyo3_deltas = await self._http.request_orderbook_snapshot(
+            nautilus_pyo3.InstrumentId.from_str(instrument_id),
+        )
+        return OrderBookDeltas.from_pyo3(pyo3_deltas)
 
     def _handle_message(self, message: object) -> None:
         # Trades/orderbook/bars arrive wrapped in a PyCapsule; markets-channel
