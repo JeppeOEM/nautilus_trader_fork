@@ -693,6 +693,7 @@ class Collector:
         instruments_by_id = {i.id.value: i for i in instruments}
 
         self._catalog.write_data(instruments_from_pyo3(list(instruments_by_id.values())))
+        self._client.cache_instruments(list(instruments_by_id.values()))
 
         loop = asyncio.get_running_loop()
         await self._client.connect(loop, list(instruments_by_id.values()))

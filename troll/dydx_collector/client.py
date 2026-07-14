@@ -101,6 +101,18 @@ class DydxClient:
         """
         return await self._http.request_instruments(None, None)
 
+    def cache_instruments(self, instruments: list[Instrument]) -> None:
+        """
+        Populate the HTTP client's own instrument cache.
+
+        `self._http` and `self._ws` are separate Rust client instances with
+        separate instrument caches -- `connect()` only populates the WS
+        client's cache. `request_orderbook_snapshot()` runs against
+        `self._http`, so without this call it raises "Instrument not found
+        in cache" for every symbol on every resync.
+        """
+        self._http.cache_instruments(instruments)
+
     async def connect(self, loop: asyncio.AbstractEventLoop, instruments: list[Instrument]) -> None:
         await self._ws.connect(loop_=loop, instruments=instruments, callback=self._handle_message)
         await self._ws.wait_until_active(timeout_secs=30.0)
