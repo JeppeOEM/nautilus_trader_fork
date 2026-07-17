@@ -63,7 +63,7 @@ development_status:
   2-2-single-indicator-implementation-reused-across-research-backtest-and-live: done
   2-3-hft-granularity-and-configurable-timeframe-backtesting-on-the-same-underlying-data: done
   2-4-multi-coin-backtest-runs-across-the-live-watchlist: done
-  epic-2-retrospective: optional
+  epic-2-retrospective: done
 
   epic-3: backlog
   3-1-scaffold-the-isolated-live-paper-trading-module: backlog
@@ -79,3 +79,11 @@ action_items:
     action: "Add an integration-test convention: any function reachable via two live code paths (e.g. a background loop and an HTTP handler) needs at least one test driving the real integration surface, not just the pure function underneath (this is what let Story 1.4's query-encoding bug ship untested)."
     owner: "Murat"
     status: done
+  - epic: 2
+    action: "Root-cause the BacktestEngine/BacktestNode native crash (Fatal Python error: Aborted at kernel.py:231) documented across Stories 2.2/2.3's deferred-work.md entries before the test suite grows further or Epic 3 needs a larger battery of Nautilus engine-construction tests. Current mitigation (filename-collection-order + one-construction-per-file) is fragile and invocation-method-sensitive."
+    owner: "Amelia"
+    status: open
+  - epic: 2
+    action: "When a story's core design decision exists specifically to survive a named failure mode (e.g. Story 2.4's id-based result attribution surviving a dropped BacktestNode result), write a test that actually exercises that failure mode before considering the story done -- not just the happy path where a simpler implementation would also pass."
+    owner: "Murat"
+    status: open
