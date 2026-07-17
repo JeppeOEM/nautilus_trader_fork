@@ -56,7 +56,7 @@ development_status:
   1-5-sequence-verified-order-book-resync: done
   1-6-taint-window-bar-discard-and-bounded-raw-capture-housekeeping-log: done
   1-7-crossed-book-critical-escalation-for-steady-state-desync: done
-  epic-1-retrospective: optional
+  epic-1-retrospective: done
 
   epic-2: backlog
   2-1-bring-the-jupyter-research-environment-in-line-with-nautilus-conventions: backlog
@@ -69,3 +69,13 @@ development_status:
   3-1-scaffold-the-isolated-live-paper-trading-module: backlog
   3-2-dummy-strategy-consumes-every-produced-signal-and-runs-live-in-paper-mode: backlog
   epic-3-retrospective: optional
+
+action_items:
+  - epic: 1
+    action: "Add a lifecycle-cleanup checklist item: any subscribe/unsubscribe/resubscribe/shutdown transition must explicitly state what tracking state gets reset or removed (4 bugs across 3 stories in Epic 1 were this exact shape)."
+    owner: "Amelia"
+    status: open
+  - epic: 1
+    action: "Add an integration-test convention: any function reachable via two live code paths (e.g. a background loop and an HTTP handler) needs at least one test driving the real integration surface, not just the pure function underneath (this is what let Story 1.4's query-encoding bug ship untested)."
+    owner: "Murat"
+    status: done
