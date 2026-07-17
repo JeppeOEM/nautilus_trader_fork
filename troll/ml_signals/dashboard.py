@@ -104,6 +104,15 @@ RANKING_COLS: list[tuple[str, str, object, object]] = [
     ("volume24h",      "Vol24h", lambda v: f"{v / 1e6:.1f}M", None),
 ]
 
+# History-only columns (Story 1.4): plotted on /history/{id} from metrics_store rows, but
+# deliberately NOT in RANKING_COLS -- that list is also used to render the *live* rankings
+# table from _LIVE_FAST/_LIVE_SLOW, which never carries a "rank" key, so adding it there
+# would either show a permanently-empty column or (worse) leak a stale, once-per-60s rank
+# value if _LIVE_SLOW ever gained one. The live table's row order already shows live rank.
+_HISTORY_ONLY_COLS: list[tuple[str, str]] = [
+    ("rank", "Rank"),
+]
+
 _SERIES: dict[str, deque[tuple[int, float]]] = defaultdict(lambda: deque(maxlen=2000))
 
 # 1s-fresh metrics from Redis — written by _ingest_batch, wins on overlap.
@@ -566,7 +575,7 @@ def _render_history_page(symbol: str) -> str:
     body = f"<h1>{html.escape(symbol)} — 31-day history</h1>"
     plotlyjs = "cdn"
 
-    for field, label, *_ in RANKING_COLS:
+    for field, label, *_ in [*RANKING_COLS, *_HISTORY_ONLY_COLS]:
         vals = [r.get(field) for r in rows]
         if all(v is None for v in vals):
             continue
@@ -828,6 +837,30 @@ def _watchlist_ids() -> list[str]:
     return [r["instrument_id"] for r in fresh_rows]
 
 
+def _current_ranks() -> dict[str, int]:
+    """1-indexed live rank (by descending volume24H) of every currently-fresh instrument.
+
+    Reuses _watchlist_ids's freshness/sort convention exactly -- an instrument absent
+    from the returned dict simply isn't ranked right now (not an error).
+    """
+    return {iid: i + 1 for i, iid in enumerate(_watchlist_ids())}
+
+
+def _merge_rank_into_snapshots(
+    snapshots: list[dict], ranks: dict[str, int], volumes: dict[str, float],
+) -> list[dict]:
+    """Attach the current live rank/volume24h to each snapshot before persisting to metrics_store.
+
+    Deliberately NOT merged into _LIVE_SLOW (the live rankings table's data source) --
+    only this persisted copy carries rank, so the live table (whose row order already
+    shows live rank) doesn't grow a second, up-to-60s-stale "Rank" column.
+    """
+    return [
+        {**s, "rank": ranks.get(s["instrument_id"]), "volume24h": volumes.get(s["instrument_id"])}
+        for s in snapshots
+    ]
+
+
 def _rankings_json() -> str:
     """Return pre-formatted cell values for all currently-collected instruments as JSON.
 
@@ -1006,6 +1039,28 @@ async def watchlist_json_handler(request: web.Request) -> web.Response:
     )
 
 
+async def rank_history_json_handler(request: web.Request) -> web.Response:
+    """FR-8: historical rank/volume24h nearest a timestamp -- see ml_signals.rank_history."""
+    symbol = request.match_info["id"]
+    qs = dict(request.rel_url.query)
+    import datetime as _dt
+
+    ts_v = qs.get("ts")
+    if ts_v:
+        try:
+            dt = _dt.datetime.fromisoformat(ts_v)
+            dt = dt.replace(tzinfo=dt.tzinfo or _dt.timezone.utc)
+            ts_ns = int(dt.timestamp() * 1_000_000_000)
+        except (ValueError, OverflowError, OSError):
+            ts_ns = time.time_ns()
+    else:
+        ts_ns = time.time_ns()
+
+    db_path = str(Path(CATALOG_PATH).parent / "metrics.db")
+    row = await asyncio.to_thread(metrics_store.nearest, symbol, ts_ns, db_path)
+    return web.Response(text=json.dumps(row or {}), content_type="application/json")
+
+
 async def debug_handler(request: web.Request) -> web.Response:
     fast_iids = list(_LIVE_FAST.keys())
     sample = {}
@@ -1172,7 +1227,8 @@ async def _slow_loop_task(catalog_path: str) -> None:
             if snapshots:
                 for s in snapshots:
                     _LIVE_SLOW[s["instrument_id"]] = s
-                await asyncio.to_thread(metrics_store.write, snapshots, db_path)
+                persisted = _merge_rank_into_snapshots(snapshots, _current_ranks(), _VOLUME_24H)
+                await asyncio.to_thread(metrics_store.write, persisted, db_path)
         except Exception:
             logger.exception("Slow metrics loop failed")
         await asyncio.sleep(DB_WRITE_INTERVAL_SECONDS)
@@ -1267,6 +1323,7 @@ def make_app(
     app.router.add_get("/", rankings_handler)
     app.router.add_get("/api/rankings", rankings_json_handler)
     app.router.add_get("/api/watchlist", watchlist_json_handler)
+    app.router.add_get("/api/rank_history/{id}", rank_history_json_handler)
     app.router.add_get("/debug", debug_handler)
     app.router.add_get("/coin/{id}", coin_handler)
     app.router.add_get("/data/coin/{id}", coin_json_handler)

@@ -23,11 +23,15 @@ import sqlite3
 import threading
 import time
 
-_lock = threading.Lock()
+# RLock: write() holds _lock while calling _conn(), which also takes _lock internally
+# on first-open -- must be reentrant for the same thread to avoid deadlocking itself.
+_lock = threading.RLock()
 _connections: dict[str, sqlite3.Connection] = {}
 
 # Metric columns stored per snapshot. Extend here to track new metrics.
-COLS = ("price", "pct_1h", "pct_24h", "volatility", "ofi", "microprice", "spread")
+COLS = (
+    "price", "pct_1h", "pct_24h", "volatility", "ofi", "microprice", "spread", "rank", "volume24h",
+)
 
 _SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS snapshots (
@@ -40,12 +44,28 @@ CREATE INDEX IF NOT EXISTS idx_iid_ts ON snapshots(instrument_id, ts);
 """
 
 
+def _migrate(db: sqlite3.Connection) -> None:
+    """Add any COLS missing from an already-existing table (CREATE TABLE IF NOT EXISTS is a no-op
+    against a pre-existing db, so extending COLS alone would otherwise break on deployed data).
+    """
+    existing = {row[1] for row in db.execute("PRAGMA table_info(snapshots)")}
+    for col in COLS:
+        if col not in existing:
+            db.execute(f"ALTER TABLE snapshots ADD COLUMN {col} REAL")
+
+
 def _conn(db_path: str) -> sqlite3.Connection:
     if db_path not in _connections:
-        db = sqlite3.connect(db_path, check_same_thread=False)
-        db.execute("PRAGMA journal_mode=WAL")
-        db.executescript(_SCHEMA)
-        _connections[db_path] = db
+        # First-open (schema create + migration) is serialized so two concurrent callers
+        # can't both run _migrate()'s ALTER TABLE against the same fresh db and collide.
+        with _lock:
+            if db_path not in _connections:
+                db = sqlite3.connect(db_path, check_same_thread=False)
+                db.execute("PRAGMA journal_mode=WAL")
+                db.executescript(_SCHEMA)
+                _migrate(db)
+                db.commit()
+                _connections[db_path] = db
     return _connections[db_path]
 
 
@@ -89,3 +109,17 @@ def history(instrument_id: str, db_path: str, days: int = 31) -> list[dict]:
     ).fetchall()
     keys = ("ts", *COLS)
     return [dict(zip(keys, r)) for r in rows]
+
+
+def nearest(instrument_id: str, ts: int, db_path: str) -> dict | None:
+    """Snapshot for instrument_id with ts closest to the given ts (ns). None if never stored."""
+    db = _conn(db_path)
+    row = db.execute(
+        f"SELECT ts, {', '.join(COLS)} FROM snapshots WHERE instrument_id=? "
+        "ORDER BY ABS(ts - ?) LIMIT 1",
+        (instrument_id, ts),
+    ).fetchone()
+    if row is None:
+        return None
+    keys = ("ts", *COLS)
+    return dict(zip(keys, row))

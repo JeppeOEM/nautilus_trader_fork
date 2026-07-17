@@ -15,12 +15,16 @@
 """Unit tests for the rankings default volume-sort (_rankings_json) and volume24H parsing."""
 
 import json
+import tempfile
 import time
 
+import ml_signals.metrics_store as metrics_store
 from ml_signals.dashboard import _LIVE_FAST
 from ml_signals.dashboard import _VOLUME_24H
 from ml_signals.dashboard import _WATCHLIST_STALE_NS
+from ml_signals.dashboard import _current_ranks
 from ml_signals.dashboard import _is_fresh
+from ml_signals.dashboard import _merge_rank_into_snapshots
 from ml_signals.dashboard import _rankings_json
 from ml_signals.dashboard import _watchlist_ids
 from ml_signals.dashboard import make_app
@@ -202,3 +206,83 @@ def test_watchlist_ids_sorted_by_descending_volume() -> None:
         _VOLUME_24H[iid] = vol
 
     assert _watchlist_ids() == ["BTC-USD-PERP.DYDX", "SHIB-USD-PERP.DYDX"]
+
+
+def test_current_ranks_assigns_1_indexed_positions_by_volume() -> None:
+    _reset_state()
+    now_ns = time.time_ns()
+    for iid, vol in (("BTC-USD-PERP.DYDX", 50_000_000.0), ("SHIB-USD-PERP.DYDX", 100.0)):
+        _LIVE_FAST[iid] = {**_live_row(iid), "ts": now_ns}
+        _VOLUME_24H[iid] = vol
+
+    assert _current_ranks() == {"BTC-USD-PERP.DYDX": 1, "SHIB-USD-PERP.DYDX": 2}
+
+
+def test_current_ranks_excludes_stale_instrument() -> None:
+    _reset_state()
+    now_ns = time.time_ns()
+    _LIVE_FAST["BTC-USD-PERP.DYDX"] = {**_live_row("BTC-USD-PERP.DYDX"), "ts": now_ns}
+    _LIVE_FAST["DEAD-USD-PERP.DYDX"] = {
+        **_live_row("DEAD-USD-PERP.DYDX"), "ts": now_ns - _WATCHLIST_STALE_NS - 1,
+    }
+
+    assert "DEAD-USD-PERP.DYDX" not in _current_ranks()
+
+
+def test_merge_rank_into_snapshots_attaches_rank_and_volume() -> None:
+    snapshots = [{"instrument_id": "BTC-USD-PERP.DYDX", "price": 1.0}]
+    ranks = {"BTC-USD-PERP.DYDX": 1}
+    volumes = {"BTC-USD-PERP.DYDX": 50_000_000.0}
+
+    merged = _merge_rank_into_snapshots(snapshots, ranks, volumes)
+
+    assert merged[0]["rank"] == 1
+    assert merged[0]["volume24h"] == 50_000_000.0
+    assert merged[0]["price"] == 1.0  # original fields preserved
+
+
+def test_merge_rank_into_snapshots_none_for_unranked_instrument() -> None:
+    snapshots = [{"instrument_id": "DEAD-USD-PERP.DYDX", "price": 1.0}]
+
+    merged = _merge_rank_into_snapshots(snapshots, ranks={}, volumes={})
+
+    assert merged[0]["rank"] is None
+    assert merged[0]["volume24h"] is None
+
+
+def test_ac4_delisted_coin_keeps_its_rank_history() -> None:
+    """AC4: a coin's earlier ranked snapshots stay queryable after it drops off the Watchlist."""
+    _reset_state()
+    db_path = tempfile.mktemp(suffix=".db")
+    iid = "BTC-USD-PERP.DYDX"
+    now_ns = time.time_ns()
+
+    # Cycle 1: coin is live and ranked -- persist a snapshot carrying that rank.
+    _LIVE_FAST[iid] = {**_live_row(iid), "ts": now_ns}
+    _VOLUME_24H[iid] = 50_000_000.0
+    ranked_ts = now_ns
+    metrics_store.write(
+        _merge_rank_into_snapshots(
+            [{"instrument_id": iid, "ts": ranked_ts, "price": 1.0}], _current_ranks(), _VOLUME_24H,
+        ),
+        db_path,
+    )
+
+    # Cycle 2: the coin goes stale and drops out of the Watchlist -- this cycle persists rank=None.
+    _LIVE_FAST[iid] = {**_live_row(iid), "ts": now_ns - _WATCHLIST_STALE_NS - 1}
+    delisted_ts = ranked_ts + 60_000_000_000
+    metrics_store.write(
+        _merge_rank_into_snapshots(
+            [{"instrument_id": iid, "ts": delisted_ts, "price": 1.0}], _current_ranks(), _VOLUME_24H,
+        ),
+        db_path,
+    )
+
+    # The earlier ranked row is still retrievable -- delisting doesn't erase history.
+    row = metrics_store.nearest(iid, ranked_ts, db_path)
+    assert row["rank"] == 1
+
+    rows = metrics_store.history(iid, db_path, days=31)
+    assert len(rows) == 2
+    assert rows[0]["rank"] == 1
+    assert rows[1]["rank"] is None

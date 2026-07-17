@@ -12,8 +12,9 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
-"""Unit tests for metrics_store: write/latest/history roundtrip and pruning."""
+"""Unit tests for metrics_store: write/latest/history/nearest roundtrip, pruning, and migration."""
 
+import sqlite3
 import tempfile
 import time
 
@@ -33,6 +34,7 @@ def _row(ts: int, instrument_id: str = "BTC-USD-PERP.DYDX", **kwargs) -> dict:
         "ts": ts, "instrument_id": instrument_id,
         "price": None, "pct_1h": None, "pct_24h": None, "volatility": None,
         "ofi": None, "microprice": None, "spread": None,
+        "rank": None, "volume24h": None,
     }
     return {**base, **kwargs}
 
@@ -124,6 +126,61 @@ def test_write_empty_list_is_noop() -> None:
     assert store.latest(path) == []
 
 
+def test_rank_and_volume24h_persisted() -> None:
+    path = _path()
+    store.write([_row(_NOW, rank=1, volume24h=123.0)], path)
+    rows = store.latest(path)
+    assert rows[0]["rank"] == 1
+    assert rows[0]["volume24h"] == 123.0
+
+
+def test_nearest_returns_closest_row() -> None:
+    path = _path()
+    store.write([
+        _row(_NOW - 3_000_000_000, rank=2),
+        _row(_NOW - 1_000_000_000, rank=1),
+    ], path)
+    row = store.nearest("BTC-USD-PERP.DYDX", _NOW - 2_500_000_000, path)
+    assert row["rank"] == 2
+    row = store.nearest("BTC-USD-PERP.DYDX", _NOW, path)
+    assert row["rank"] == 1
+
+
+def test_nearest_returns_none_for_unknown_instrument() -> None:
+    path = _path()
+    store.write([_row(_NOW, rank=1)], path)
+    assert store.nearest("ETH-USD-PERP.DYDX", _NOW, path) is None
+
+
+def test_migration_adds_new_columns_to_existing_table() -> None:
+    """Simulates a pre-existing metrics.db written before rank/volume24h existed."""
+    path = _path()
+    old_cols = ("price", "pct_1h", "pct_24h", "volatility", "ofi", "microprice", "spread")
+    db = sqlite3.connect(path)
+    db.executescript(f"""
+        CREATE TABLE snapshots (
+            ts INTEGER NOT NULL, instrument_id TEXT NOT NULL,
+            {", ".join(f"{c} REAL" for c in old_cols)},
+            PRIMARY KEY (ts, instrument_id)
+        );
+        CREATE INDEX idx_iid_ts ON snapshots(instrument_id, ts);
+    """)
+    old_ts = _NOW - 1_000_000_000
+    db.execute(
+        "INSERT INTO snapshots(ts, instrument_id, price) VALUES (?, ?, ?)",
+        (old_ts, "BTC-USD-PERP.DYDX", 9.0),
+    )
+    db.commit()
+    db.close()
+
+    store.write([_row(_NOW, rank=3, volume24h=50.0)], path)
+    rows = store.history("BTC-USD-PERP.DYDX", path, days=1)
+    assert len(rows) == 2
+    assert rows[0]["ts"] == old_ts
+    assert rows[0]["rank"] is None
+    assert rows[1]["rank"] == 3
+
+
 if __name__ == "__main__":
     test_write_and_latest_roundtrip()
     test_all_metric_columns_persisted()
@@ -135,4 +192,8 @@ if __name__ == "__main__":
     test_write_prunes_rows_older_than_retain_days()
     test_upsert_replaces_same_ts_and_instrument()
     test_write_empty_list_is_noop()
+    test_rank_and_volume24h_persisted()
+    test_nearest_returns_closest_row()
+    test_nearest_returns_none_for_unknown_instrument()
+    test_migration_adds_new_columns_to_existing_table()
     print("ok")
