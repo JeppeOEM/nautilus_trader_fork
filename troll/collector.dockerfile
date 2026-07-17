@@ -5,7 +5,11 @@ FROM nautilus-trader-base:1.229.0
 WORKDIR /app
 RUN chown 1000:1000 /app
 COPY troll/troll-requirements.txt ./troll-requirements.txt
-RUN pip install --no-cache-dir -r troll-requirements.txt
+# PIP_INSECURE_ARGS is empty by default (normal TLS-verified install). Set via
+# --build-arg when behind a TLS-intercepting proxy (e.g. Zscaler) that breaks pip's
+# cert verification against PyPI -- see `make build-insecure`.
+ARG PIP_INSECURE_ARGS=
+RUN pip install --no-cache-dir $PIP_INSECURE_ARGS -r troll-requirements.txt
 COPY troll/dydx_collector ./dydx_collector
 COPY troll/ml_signals ./ml_signals
 

@@ -80,6 +80,40 @@ The catalog appears at `troll/dydx_collector/catalog/` on the host, owned by you
 
 ---
 
+## Remote access via Tailscale + SSH tunnel
+
+The dashboard, Redis, and Dozzle all bind to `127.0.0.1` only (see `docker-compose.yml`) —
+nothing is reachable from the public internet or even the tailnet directly. Access is via
+an SSH tunnel over Tailscale, so the only thing ever exposed is SSH itself.
+
+**One-time VPS setup:**
+
+```bash
+curl -fsSL https://tailscale.com/install.sh | sh
+sudo tailscale up          # follow the auth link, note the VPS's tailscale IP (tailscale ip -4)
+make enable-boot           # docker starts on reboot
+make enable-firewall       # default-deny inbound + rate-limited SSH + tailscale0
+make harden-ssh            # key-only SSH auth -- confirm your key works first!
+```
+
+**From your PC**, with Tailscale running locally too:
+
+```bash
+ssh -N -L 8765:127.0.0.1:8765 -L 8080:127.0.0.1:8080 you@<vps-tailscale-ip>
+```
+
+Leave that running, then open `http://localhost:8765` (dashboard) or
+`http://localhost:8080` (Dozzle logs) in your own browser. `-N` means the SSH session
+does nothing but hold the tunnel open — no shell needed.
+
+**Feed-health alerts:** since nobody is watching the dashboard continuously behind
+the tunnel, set `WATCHDOG_NTFY_URL` (e.g. `https://ntfy.sh/<your-private-topic>`) as
+an environment variable on the `collector` service in `docker-compose.yml` to get a
+push notification if every subscribed instrument's order book goes stale for 30s+
+(see OBS-01 in `CLAUDE.md`). Without it, the same condition is only logged.
+
+---
+
 ## Stop / restart
 
 ```bash

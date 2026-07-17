@@ -26,6 +26,9 @@ services:
     environment:
       PYTHONUNBUFFERED: "1"
       REDIS_URL: "redis://127.0.0.1:6379"
+      # Push alert (ntfy.sh-compatible) when every subscribed instrument's book goes
+      # stale for 30s+ -- see OBS-01 in CLAUDE.md. Unset means log-only (no push).
+      # WATCHDOG_NTFY_URL: "https://ntfy.sh/your-private-topic-here"
     # ponytail: hardcoded to host uid/gid (single-user box), so ./catalog
     # writes land owned by you, not root. Switch to ${UID}:${GID} if shared.
     user: "1000:1000"

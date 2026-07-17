@@ -39,6 +39,7 @@ import os
 import shutil
 import signal
 import time
+import urllib.request
 from collections import defaultdict
 from collections import deque
 from pathlib import Path
@@ -142,6 +143,15 @@ _CROSSED_RESYNC_NS: int = 15_000_000_000  # 15 seconds
 # rates vary. Raw messages older than this are dropped from the ring on every append.
 _RING_BUFFER_NS: int = 45_000_000_000  # 45 seconds
 
+# OBS-01: zero book updates across all liquid instruments for 30s+ is a pipeline
+# failure, not a quiet market -- BTC/ETH/SOL perpetuals trade 24/7. Deployed behind
+# an SSH tunnel nobody is watching the dashboard continuously, so this needs to push
+# a notification rather than rely on someone noticing a frozen chart.
+_WATCHDOG_CHECK_SECONDS: float = 30.0
+_WATCHDOG_STALE_NS: int = 30_000_000_000  # 30 seconds
+_WATCHDOG_STARTUP_GRACE_NS: int = 60_000_000_000  # subscriptions need time to establish
+_WATCHDOG_REMINDER_NS: int = 600_000_000_000  # re-notify at most every 10 min while down
+
 
 def _buffer_key(data: Any) -> tuple[type, str]:
     return type(data), str(data.instrument_id)
@@ -160,6 +170,60 @@ def _prune_interval_seconds(
         *(h for h in delta_retain_hours.values() if h is not None),
     ]
     return max(min(active_retain_hours) * 900, 900)
+
+
+def _watchdog_transition(
+    now_ns: int,
+    is_stale: bool,
+    down_since_ns: int | None,
+    last_reminder_ns: int,
+) -> tuple[str | None, int | None, int]:
+    """Pure state-machine step for the feed watchdog: (message_or_None, down_since_ns, last_reminder_ns).
+
+    Kept separate from the asyncio loop and the notify transport so the alerting/
+    debounce logic is unit-testable without mocking network calls.
+    """
+    if is_stale:
+        if down_since_ns is None:
+            return (
+                "dydx-collector: all live instruments' order books have gone stale "
+                "(no OrderBookDeltas for 30s+) — feed may be down",
+                now_ns,
+                now_ns,
+            )
+        if now_ns - last_reminder_ns > _WATCHDOG_REMINDER_NS:
+            down_for_s = (now_ns - down_since_ns) / 1e9
+            return (
+                f"dydx-collector: still down, no book updates for {down_for_s:.0f}s",
+                down_since_ns,
+                now_ns,
+            )
+        return (None, down_since_ns, last_reminder_ns)
+
+    if down_since_ns is not None:
+        down_for_s = (now_ns - down_since_ns) / 1e9
+        return (f"dydx-collector: recovered after {down_for_s:.0f}s", None, 0)
+
+    return (None, None, last_reminder_ns)
+
+
+def _notify(message: str) -> None:
+    """POST to a ntfy.sh-compatible topic URL. No-op if WATCHDOG_NTFY_URL isn't set."""
+    url = os.environ.get("WATCHDOG_NTFY_URL")
+    if not url:
+        logger.critical(message)
+        return
+    request = urllib.request.Request(  # noqa: S310 (fixed, operator-configured URL)
+        url,
+        data=message.encode(),
+        headers={"Title": "dydx-collector"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10):  # noqa: S310
+            pass
+    except OSError:
+        logger.exception("Watchdog notification failed")
 
 
 def _prune_delta_retention(catalog_path: str, delta_retain_hours: dict[str, float | None]) -> int:
@@ -226,6 +290,12 @@ class Collector:
         # Wall-clock ns of the last OrderBookDeltas received per instrument.
         # Used by _second_loop to skip stale books (staleness = no updates for > _STALE_BOOK_NS).
         self._last_book_update_ns: dict[str, int] = {}
+
+        # _watchdog_loop state: when the all-instruments-stale condition started (None
+        # while healthy), and when the last reminder notification was sent.
+        self._watchdog_started_ns: int = time.time_ns()
+        self._watchdog_down_since_ns: int | None = None
+        self._watchdog_last_reminder_ns: int = 0
 
         # Wall-clock ns when a book was first observed continuously crossed;
         # cleared as soon as it's seen uncrossed. Drives the resync watchdog below.
@@ -684,6 +754,33 @@ class Collector:
             if delta_freed:
                 logger.info(f"Pruned {delta_freed / 1024 / 1024:.1f} MB of raw order-book deltas (per-coin retention)")
 
+    async def _watchdog_loop(self) -> None:
+        """Notify when every live-tier instrument's book has gone stale. See OBS-01 and
+        _WATCHDOG_STALE_NS: this deployment runs unattended behind an SSH tunnel, so
+        a frozen feed needs to page someone rather than wait to be noticed on the dashboard.
+        """
+        while not self._stop.is_set():
+            await asyncio.sleep(_WATCHDOG_CHECK_SECONDS)
+            now_ns = time.time_ns()
+            if now_ns - self._watchdog_started_ns < _WATCHDOG_STARTUP_GRACE_NS:
+                continue
+
+            live = self._pinned | self._liquid
+            if not live:
+                continue
+            is_stale = all(
+                now_ns - self._last_book_update_ns.get(iid, 0) > _WATCHDOG_STALE_NS
+                for iid in live
+            )
+
+            message, down_since_ns, reminder_ns = _watchdog_transition(
+                now_ns, is_stale, self._watchdog_down_since_ns, self._watchdog_last_reminder_ns
+            )
+            self._watchdog_down_since_ns = down_since_ns
+            self._watchdog_last_reminder_ns = reminder_ns
+            if message is not None:
+                await asyncio.to_thread(_notify, message)
+
     async def run(self) -> None:
         self._redis = aioredis.Redis.from_url(
             os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
@@ -726,6 +823,7 @@ class Collector:
             asyncio.create_task(self._liquidity_check_loop()),
             asyncio.create_task(self._prune_loop()),
             asyncio.create_task(self._second_loop()),
+            asyncio.create_task(self._watchdog_loop()),
         ]
         stop_task = asyncio.create_task(self._stop.wait())
 

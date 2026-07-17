@@ -12,6 +12,12 @@ These rules govern all code under `troll/` (`dydx_collector/` and `ml_signals/`)
 
 ---
 
+## Version Control
+
+- **GIT-01** — Never run `git push` (including force-push) without asking the user first and getting explicit confirmation, regardless of permission mode. Always state what would be pushed (branch, commits) before asking.
+
+---
+
 ## Data Integrity
 
 - **DATA-01** — **Correct data is the #1 priority. Never display stale or fabricated values as live market data.** If data is genuinely unavailable (e.g., during WS reconnect recovery when the Rust client re-subscribes instruments at 2/sec), the gap must be flagged visually rather than papered over with a flatline. **Implementation:** `collector._second_loop` uses `_STALE_BOOK_NS = 5s` to skip snapshot emission when no `OrderBookDeltas` have arrived for an instrument; `dashboard._coin_chart_json` inserts `None` at timestamp gaps > `_CHART_GAP_THRESHOLD_MS = 2.5s` so Plotly renders an honest break instead of a misleading horizontal line. When adding new data sources or display paths, apply the same principle: skip or flag, never silently perpetuate stale state.
