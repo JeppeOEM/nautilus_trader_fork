@@ -58,8 +58,8 @@ development_status:
   1-7-crossed-book-critical-escalation-for-steady-state-desync: done
   epic-1-retrospective: done
 
-  epic-2: backlog
-  2-1-bring-the-jupyter-research-environment-in-line-with-nautilus-conventions: backlog
+  epic-2: in-progress
+  2-1-bring-the-jupyter-research-environment-in-line-with-nautilus-conventions: done
   2-2-single-indicator-implementation-reused-across-research-backtest-and-live: backlog
   2-3-hft-granularity-and-configurable-timeframe-backtesting-on-the-same-underlying-data: backlog
   2-4-multi-coin-backtest-runs-across-the-live-watchlist: backlog
