@@ -4,7 +4,7 @@ baseline_commit: e95c3d4fbbe239c3bff3e8c38dd171ae913b02e3
 
 # Story 1.3: Expose the live watchlist as a queryable, backtest-consumable coin set
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -52,6 +52,16 @@ so that a multi-coin backtest can use it directly without manually editing a per
   - [x] `fetch_watchlist()`: stub the HTTP layer (e.g. monkeypatch `urllib.request.urlopen` to return a canned JSON body) — never make a real network call in a test, per existing project convention (`test_open_interest.py`'s pattern)
   - [x] Full regression: `PYTHONPATH=troll .venv/bin/python -m pytest troll/dydx_collector troll/ml_signals -q` must show no new failures beyond the existing, pre-existing `test_ofi_strategy.py::test_ofi_strategy_generates_long_entry_on_bid_pressure` (unrelated, documented in Stories 1.2/1.5-1.7)
   - [x] `ruff check`/`ruff format --check` on all touched files — confirm 0 *new* findings via `git stash` diff against the pre-story baseline (dashboard.py already carries pre-existing, documented findings — see Stories 1.2/1.5-1.7's Dev Agent Records; do not attempt to fix those as part of this story)
+
+### Review Findings
+
+- [x] [Review][Patch] `fetch_watchlist` builds a double-slash URL if `dashboard_url` has a trailing slash [troll/ml_signals/watchlist.py:35] — fixed via `dashboard_url.rstrip('/')`
+- [x] [Review][Patch] `test_fetch_watchlist_empty_list` uses a different, untyped mocking idiom (`unittest.mock.patch.object` + local import) instead of the `monkeypatch` idiom used by every other test in the file [troll/ml_signals/tests/test_watchlist.py:53-61] — rewritten to use `monkeypatch.setattr`, matching its sibling tests
+- [x] [Review][Patch] `# noqa: S310` on `fetch_watchlist`'s `Request(...)` line justifies itself as "fixed scheme" even though `dashboard_url` is a caller-overridable parameter [troll/ml_signals/watchlist.py:36] — reworded to "local dashboard, not a remote host"
+- [x] [Review][Defer] `fetch_watchlist` has no error handling around `urlopen`/`json.load` — a strategy script gets a raw `URLError`/`JSONDecodeError` if the dashboard is down [troll/ml_signals/watchlist.py:36-38] — deferred, pre-existing (mirrors `_fetch_volume_24h_json`'s identical shape; that helper's only caller wraps it in try/except, `fetch_watchlist` currently has no equivalent external safety net)
+- [x] [Review][Defer] `_is_fresh` treats a `_LIVE_FAST` entry with a future timestamp (system clock moved backward) as fresh indefinitely, since a negative delta still satisfies `<= _WATCHLIST_STALE_NS` [troll/ml_signals/dashboard.py:151-154] — deferred, pre-existing (same clock-comparison shape already used by `_STALE_BOOK_NS`/`_CROSSED_RESYNC_NS` elsewhere; not introduced by this story)
+
+**Dismissed as noise (12):** unreachable `KeyError` claims on `entry["ts"]`/`row["instrument_id"]` (the single `_LIVE_FAST` write site always sets both keys); the route handler "swallowing no exceptions" (moot once the KeyErrors above are unreachable, and matches `rankings_json_handler`'s identical pattern); a claimed misplaced `noqa: S310` on the `Request()` line (contradicted by this story's own verified 0-lint-findings pass); no tie-break in `_watchlist_ids()`'s sort (deliberately reuses `_rankings_json`'s pre-existing Story 1.2 sort key); a cwd-dependent relative `catalog_path` in the Task 4 test (confirmed twice — once in this story's Dev Notes, once by an independent audit sub-agent reading Nautilus source — that `BacktestDataConfig` never resolves this path at construction); an undemonstrated docstring claim about `_rankings_json` (verified true by reading its untouched code); a "duplicate" `_WATCHLIST_STALE_NS` constant vs. `dydx_collector` (no such constant existed there at authoring time, and cross-module constant-sharing would cut against this project's own module-boundary rules); missing auth/rate-limiting on the new route (the entire dashboard has none, by design, for its single-operator/SSH-tunnel deployment); no end-to-end handler+client contract test (no aiohttp route handler in this codebase has one); ambiguity between "zero live coins" and "pipeline dead" at the API boundary (explicitly out of this story's 4 ACs, same shape as Story 1.2's own deferred staleness-indicator item); thin AC2 "newly-qualifying coin" coverage (`_watchlist_ids()` is a pure function of current state — no distinguishable "newly qualifying" case exists to test separately from "any fresh coin is included," which all 4 new tests already exercise).
 
 ## Dev Notes
 

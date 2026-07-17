@@ -50,14 +50,13 @@ def test_fetch_watchlist_parses_instrument_ids(monkeypatch) -> None:
     assert result == ["BTC-USD-PERP.DYDX", "ETH-USD-PERP.DYDX"]
 
 
-def test_fetch_watchlist_empty_list() -> None:
-    def _urlopen(request, timeout=None):
-        return _FakeResponse({"instrument_ids": []})
-
-    import unittest.mock
-
-    with unittest.mock.patch.object(urllib.request, "urlopen", _urlopen):
-        assert watchlist.fetch_watchlist() == []
+def test_fetch_watchlist_empty_list(monkeypatch) -> None:
+    monkeypatch.setattr(
+        urllib.request,
+        "urlopen",
+        lambda request, timeout=None: _FakeResponse({"instrument_ids": []}),
+    )
+    assert watchlist.fetch_watchlist() == []
 
 
 def test_watchlist_ids_are_backtest_data_config_compatible(monkeypatch) -> None:

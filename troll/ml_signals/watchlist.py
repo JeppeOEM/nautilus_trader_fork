@@ -32,7 +32,7 @@ def fetch_watchlist(dashboard_url: str = "http://127.0.0.1:8765") -> list[str]:
     the live Watchlist only exists in that process's memory (fed from Redis), there is
     no other queryable store of "current live ranking" yet (see Story 1.4 for history).
     """
-    url = f"{dashboard_url}/api/watchlist"
-    request = urllib.request.Request(url)  # noqa: S310 (local dashboard, fixed scheme)
+    url = f"{dashboard_url.rstrip('/')}/api/watchlist"
+    request = urllib.request.Request(url)  # noqa: S310 (local dashboard, not a remote host)
     with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310
         return json.load(response)["instrument_ids"]
