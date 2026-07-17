@@ -41,7 +41,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-07-01
-last_updated: 2026-07-16
+last_updated: 2026-07-17
 project: nautilus_trader_fork
 project_key: NOKEY
 tracking_system: file-system
@@ -65,8 +65,8 @@ development_status:
   2-4-multi-coin-backtest-runs-across-the-live-watchlist: done
   epic-2-retrospective: done
 
-  epic-3: backlog
-  3-1-scaffold-the-isolated-live-paper-trading-module: backlog
+  epic-3: in-progress
+  3-1-scaffold-the-isolated-live-paper-trading-module: done
   3-2-dummy-strategy-consumes-every-produced-signal-and-runs-live-in-paper-mode: backlog
   epic-3-retrospective: optional
 

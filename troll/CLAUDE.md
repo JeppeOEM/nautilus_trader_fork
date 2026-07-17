@@ -1,14 +1,18 @@
 # troll/ Working Rules
 
-These rules govern all code under `troll/` (`dydx_collector/` and `ml_signals/`).
-`nautilus_trader` is consumed as a library only — never as a live runtime.
+These rules govern all code under `troll/dydx_collector/` and `troll/ml_signals/`.
+`nautilus_trader` is consumed as a library only — never as a live runtime — in those two
+modules. **Exception:** `troll/live_paper/` is a separate, structurally isolated module
+(architecture spine's AD-8 amendment) where `TradingNode`/`Strategy` usage is sanctioned —
+it is the one place in `troll/` this file's `TradingNode`/`DataEngine` ban does not apply.
+See `troll/live_paper/node.py`'s module docstring for the full rationale.
 
 ---
 
 ## Fork Safety
 
 - **FORK-01** — Never modify `nautilus_trader/` or `crates/`. All `troll/` code is additive-only. The fork must stay untouched so upstream merges remain possible.
-- **FORK-02** — `nautilus_trader` is a library here: use its domain types (`Price`, `Quantity`, `InstrumentId`, …) and `ParquetDataCatalog.write_data()`. Never instantiate `TradingNode` or `DataEngine` in `troll/` code. **Why:** the live `DataEngine` has a documented unbounded-queue-growth + shutdown-wedge bug under sustained high-message-load that OOM-crashed the earlier `Strategy`/`TradingNode`-based recorder on the `gg` branch.
+- **FORK-02** — `nautilus_trader` is a library here: use its domain types (`Price`, `Quantity`, `InstrumentId`, …) and `ParquetDataCatalog.write_data()`. Never instantiate `TradingNode` or `DataEngine` in `dydx_collector/`/`ml_signals/` code. **Why:** the live `DataEngine` has a documented unbounded-queue-growth + shutdown-wedge bug under sustained high-message-load that OOM-crashed the earlier `Strategy`/`TradingNode`-based recorder on the `gg` branch. **Does not apply to `live_paper/`** — that module's entire purpose is running an actual (paper or, behind an explicit separate gate, real) trading strategy via `TradingNode`, which AD-8 explicitly carves out as a distinct, sanctioned usage from the recorder-misuse this rule prevents.
 
 ---
 

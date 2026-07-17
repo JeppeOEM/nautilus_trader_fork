@@ -60,6 +60,28 @@ services:
     restart: always
     logging: *default-logging
 
+  live-paper:
+    container_name: dydx-live-paper
+    # Not started by plain `make up`/`docker compose up -d` -- this profile keeps the
+    # paper-trading node an explicit, opt-in action (`make up-live-paper`), consistent
+    # with Story 3.1's "unreachable by any default or accidental config state" goal.
+    profiles: ["live-paper"]
+    build:
+      context: ..
+      dockerfile: troll/live_paper.dockerfile
+      network: host
+    environment:
+      PYTHONUNBUFFERED: "1"
+      # Set to an explicit, differently-named file path to enable real-money execution --
+      # never set by default here. See live_paper/config.py's module docstring.
+      # LIVE_PAPER_REAL_MONEY_CONFIG: "/app/live_paper/real_money.toml"
+    user: "1000:1000"
+    volumes:
+      - ./live_paper/config.toml:/app/live_paper/config.toml:ro
+    network_mode: host
+    restart: always
+    logging: *default-logging
+
   dozzle:
     container_name: dydx-collector-dozzle
     image: amir20/dozzle:latest

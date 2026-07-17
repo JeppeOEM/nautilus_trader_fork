@@ -3,7 +3,7 @@ TROLL_DIR  := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 COMPOSE    := docker compose -f $(TROLL_DIR)docker-compose.yml
 BASE_IMAGE := nautilus-trader-base:1.229.0
 
-.PHONY: build-base up build-insecure test down logs logs-dash web enable-boot enable-firewall harden-ssh
+.PHONY: build-base up up-live-paper build-insecure test test-live-paper down logs logs-dash web enable-boot enable-firewall harden-ssh
 
 ## Build the base nautilus image (~15 min, only needed once or after core changes)
 ## On networks with TLS inspection (e.g. Zscaler), export your root CA to
@@ -26,16 +26,23 @@ up:
 	$(COMPOSE) up -d
 	@echo "Dashboard: http://localhost:8765"
 
-## Build the collector/dashboard image bypassing pip's TLS verification, for
+## Start the paper-trading node (Epic 3, live_paper module). Not part of plain `make up`
+## -- gated behind the `live-paper` compose profile so it's never started by accident.
+## Runs in paper mode only by default (SandboxExecutionClientConfig, no wallet/private
+## key) -- see troll/live_paper/config.py for how real-money mode is separately gated.
+up-live-paper:
+	$(COMPOSE) --profile live-paper up -d live-paper
+
+## Build the collector/dashboard/live-paper images bypassing pip's TLS verification, for
 ## networks with a TLS-intercepting proxy (e.g. Zscaler) where pip can't validate
 ## PyPI's cert chain. No corporate CA is trusted into the image -- this just skips
 ## verification for pip's own install step. Run this (not plain `docker compose
-## build`) whenever troll-requirements.txt or collector.dockerfile changes, on
-## a TLS-intercepting network -- `make up` no longer builds for you.
+## build`) whenever troll-requirements.txt or *.dockerfile changes, on
+## a TLS-intercepting network -- `make up`/`make up-live-paper` no longer build for you.
 build-insecure:
 	$(COMPOSE) build \
 		--build-arg PIP_INSECURE_ARGS="--trusted-host pypi.org --trusted-host files.pythonhosted.org --trusted-host pypi.python.org" \
-		collector dashboard
+		collector dashboard live-paper
 
 ## Run the troll test suite inside the collector image. Can't run against host
 ## Python -- nautilus_trader is only compiled/installed inside this image (see
@@ -45,6 +52,15 @@ build-insecure:
 test:
 	$(COMPOSE) run --rm --no-deps collector \
 		python3 -m pytest dydx_collector/tests ml_signals/tests -q
+
+## Run live_paper's test suite inside its own image (not the collector image -- that
+## image deliberately does not copy in live_paper/, per AD-8's module isolation).
+## -e HOME=/tmp -e USER=collector works around the same pre-existing "OSError: No
+## username set" pytest tmp_path issue documented in deferred-work.md for
+## dydx_collector/tests (image runs as uid 1000 with no matching /etc/passwd entry).
+test-live-paper:
+	$(COMPOSE) --profile live-paper run --rm --no-deps -e HOME=/tmp -e USER=collector live-paper \
+		python3 -m pytest live_paper/tests -q
 
 ## Stop containers (catalog data is preserved)
 down:

@@ -1,0 +1,7 @@
+# Paper-mode config -- safe to commit. Loaded by live_paper.config.load_paper_config(),
+# which hard-errors if this file ever contains a `mode` key (see config.py's docstring for
+# why real-money execution is a separate file/loader, never a field toggle here).
+network = "mainnet"
+starting_balances = ["10_000 USDC"]
+account_type = "MARGIN"
+log_level = "INFO"
