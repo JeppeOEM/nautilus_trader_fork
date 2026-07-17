@@ -79,7 +79,11 @@ services:
     volumes:
       - ./live_paper/config.toml:/app/live_paper/config.toml:ro
     network_mode: host
-    restart: always
+    # on-failure (not `always`, unlike collector/dashboard) -- Story 3.2 attached a real
+    # Strategy that submits live paper orders, so a persistent bad-config or transient
+    # startup failure must not crash-loop against dYdX's API as fast as Docker allows.
+    # Flagged in deferred-work.md's Story 3.1 entry to revisit exactly here.
+    restart: on-failure:5
     logging: *default-logging
 
   dozzle:

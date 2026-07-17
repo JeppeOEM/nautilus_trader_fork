@@ -10,9 +10,11 @@ COPY troll/troll-requirements.txt ./troll-requirements.txt
 # cert verification against PyPI -- see `make build-insecure`.
 ARG PIP_INSECURE_ARGS=
 RUN pip install --no-cache-dir $PIP_INSECURE_ARGS -r troll-requirements.txt
-# Deliberately does NOT copy dydx_collector/ml_signals -- Story 3.1 keeps live_paper's
-# image minimal and structurally separate (AD-8), not bundled with the collector/dashboard
-# image the way dashboard reuses collector.dockerfile via a command override.
+# Story 3.2 imports ml_signals.indicators directly (AD-4: shared, pure indicator classes,
+# no I/O, no stateful internals) -- ml_signals must be present in this image now. Still
+# deliberately does NOT copy dydx_collector -- live_paper never imports it (AD-8 keeps the
+# module structurally separate from the collector's write path either way).
+COPY troll/ml_signals ./ml_signals
 COPY troll/live_paper ./live_paper
 
 CMD ["python3", "-m", "live_paper.node"]

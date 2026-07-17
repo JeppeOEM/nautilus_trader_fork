@@ -41,7 +41,9 @@ def test_paper_config_builds_node_with_sandbox_exec_client_and_zero_strategies()
         exec_client_config = node._config.exec_clients["DYDX"]
         assert isinstance(exec_client_config, SandboxExecutionClientConfig)
         assert not isinstance(exec_client_config, DydxExecClientConfig)
-        assert list(node.trader.strategy_states().keys()) == []
+        # Story 3.2: the DummyStrategy is now attached by default (Story 3.1 built with
+        # zero strategies since it predates the strategy's existence).
+        assert len(node.trader.strategy_states()) == 1
     finally:
         node.dispose()
 

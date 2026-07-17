@@ -12,6 +12,8 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
+from decimal import Decimal
+
 import pytest
 from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
 
@@ -98,3 +100,50 @@ def test_paper_config_rejects_a_bare_string_starting_balances(tmp_path) -> None:
     )
     with pytest.raises(ValueError, match="must be a TOML array"):
         load_paper_config(path)
+
+
+def test_default_paper_config_has_instrument_id_and_trade_size(tmp_path) -> None:
+    path = _write(tmp_path, "config.toml", 'network = "mainnet"\n')
+    config = load_paper_config(path)
+    assert config.instrument_id == "BTC-USD-PERP.DYDX"
+    assert config.trade_size == Decimal("0.001")
+
+
+def test_paper_config_reads_explicit_instrument_id_and_trade_size(tmp_path) -> None:
+    path = _write(
+        tmp_path,
+        "config.toml",
+        'network = "mainnet"\ninstrument_id = "ETH-USD-PERP.DYDX"\ntrade_size = "0.05"\n',
+    )
+    config = load_paper_config(path)
+    assert config.instrument_id == "ETH-USD-PERP.DYDX"
+    assert config.trade_size == Decimal("0.05")
+
+
+def test_paper_config_rejects_an_unquoted_trade_size(tmp_path) -> None:
+    path = _write(tmp_path, "config.toml", 'network = "mainnet"\ntrade_size = 0.05\n')
+    with pytest.raises(ValueError, match="trade_size must be a quoted TOML string"):
+        load_paper_config(path)
+
+
+def test_paper_config_reads_explicit_thresholds(tmp_path) -> None:
+    path = _write(
+        tmp_path,
+        "config.toml",
+        'network = "mainnet"\n'
+        "trend_buy_threshold = 0.7\ntrend_sell_threshold = 0.3\nofi_confirm_threshold = 1.5\n",
+    )
+    config = load_paper_config(path)
+    assert config.trend_buy_threshold == 0.7
+    assert config.trend_sell_threshold == 0.3
+    assert config.ofi_confirm_threshold == 1.5
+
+
+def test_real_money_config_rejects_an_unquoted_trade_size(tmp_path) -> None:
+    path = _write(
+        tmp_path,
+        "real_money.toml",
+        'mode = "real_money"\nnetwork = "mainnet"\ntrade_size = 0.05\n',
+    )
+    with pytest.raises(ValueError, match="trade_size must be a quoted TOML string"):
+        load_real_money_config(path)

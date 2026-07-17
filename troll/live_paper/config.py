@@ -36,6 +36,7 @@ closed, since load_paper_config rejects any `mode` key outright.
 
 import tomllib
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 
 from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
@@ -47,6 +48,11 @@ class PaperConfig:
     starting_balances: tuple[str, ...]
     account_type: str
     log_level: str
+    instrument_id: str = "BTC-USD-PERP.DYDX"
+    trade_size: Decimal = Decimal("0.001")
+    trend_buy_threshold: float = 0.6
+    trend_sell_threshold: float = 0.4
+    ofi_confirm_threshold: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -55,6 +61,22 @@ class RealMoneyConfig:
     network: DydxNetwork
     subaccount: int
     log_level: str
+    instrument_id: str = "BTC-USD-PERP.DYDX"
+    trade_size: Decimal = Decimal("0.001")
+    trend_buy_threshold: float = 0.6
+    trend_sell_threshold: float = 0.4
+    ofi_confirm_threshold: float = 0.0
+
+
+def _parse_trade_size(raw: dict, path: Path) -> Decimal:
+    trade_size = raw.get("trade_size", "0.001")
+    if not isinstance(trade_size, str):
+        raise ValueError(
+            f'{path}: trade_size must be a quoted TOML string (e.g. "0.001"), got '
+            f"{trade_size!r} -- an unquoted TOML float would round-trip through float64 "
+            "before becoming a Decimal, risking precision drift (AD-5)."
+        )
+    return Decimal(trade_size)
 
 
 def load_paper_config(path: Path) -> PaperConfig:
@@ -82,6 +104,11 @@ def load_paper_config(path: Path) -> PaperConfig:
         starting_balances=tuple(starting_balances),
         account_type=raw.get("account_type", "MARGIN"),
         log_level=raw.get("log_level", "INFO"),
+        instrument_id=raw.get("instrument_id", "BTC-USD-PERP.DYDX"),
+        trade_size=_parse_trade_size(raw, path),
+        trend_buy_threshold=raw.get("trend_buy_threshold", 0.6),
+        trend_sell_threshold=raw.get("trend_sell_threshold", 0.4),
+        ofi_confirm_threshold=raw.get("ofi_confirm_threshold", 0.0),
     )
 
 
@@ -101,6 +128,11 @@ def load_real_money_config(path: Path) -> RealMoneyConfig:
         network=DydxNetwork.from_str(raw.get("network", "mainnet").lower()),  # type: ignore[attr-defined]
         subaccount=raw.get("subaccount", 0),
         log_level=raw.get("log_level", "INFO"),
+        instrument_id=raw.get("instrument_id", "BTC-USD-PERP.DYDX"),
+        trade_size=_parse_trade_size(raw, path),
+        trend_buy_threshold=raw.get("trend_buy_threshold", 0.6),
+        trend_sell_threshold=raw.get("trend_sell_threshold", 0.4),
+        ofi_confirm_threshold=raw.get("ofi_confirm_threshold", 0.0),
     )
 
 

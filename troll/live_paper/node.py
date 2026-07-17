@@ -27,8 +27,10 @@ structurally unreachable, not merely gated by a disabled flag. Real money uses
 DydxExecClientConfig/DydxLiveExecClientFactory instead, which does sign and submit real
 on-chain transactions -- only reachable via the separate, explicit path in config.py.
 
-No strategy is attached to the node here (Story 3.2's job) -- this module only proves the
-node builds and disposes cleanly with live data + simulated execution wired in.
+The Dummy Strategy (Story 3.2, `live_paper.strategy.DummyStrategy`) is attached directly
+via `node.trader.add_strategy(...)`, mirroring `examples/sandbox/dydx_sandbox.py`'s exact
+pattern -- not `ImportableStrategyConfig`/string-path referencing, which is a BacktestNode
+parameter-sweep convenience (AD-6) that this repo's live reference examples don't use.
 """
 
 import logging
@@ -46,11 +48,14 @@ from nautilus_trader.config import InstrumentProviderConfig
 from nautilus_trader.config import LoggingConfig
 from nautilus_trader.config import TradingNodeConfig
 from nautilus_trader.live.node import TradingNode
+from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.identifiers import TraderId
 
 from live_paper.config import PaperConfig
 from live_paper.config import RealMoneyConfig
 from live_paper.config import resolve_config
+from live_paper.strategy import DummyStrategy
+from live_paper.strategy import DummyStrategyConfig
 
 
 logger = logging.getLogger(__name__)
@@ -97,7 +102,18 @@ def build_node(config: PaperConfig | RealMoneyConfig) -> TradingNode:
         exec_clients=exec_clients,
     )
 
+    strategy = DummyStrategy(
+        config=DummyStrategyConfig(
+            instrument_id=InstrumentId.from_str(config.instrument_id),
+            trade_size=config.trade_size,
+            trend_buy_threshold=config.trend_buy_threshold,
+            trend_sell_threshold=config.trend_sell_threshold,
+            ofi_confirm_threshold=config.ofi_confirm_threshold,
+        ),
+    )
+
     node = TradingNode(config=node_config)
+    node.trader.add_strategy(strategy)
     node.add_data_client_factory(DYDX, DydxLiveDataClientFactory)
     node.add_exec_client_factory(DYDX, exec_factory)
     node.build()

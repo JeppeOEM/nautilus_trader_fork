@@ -67,7 +67,7 @@ development_status:
 
   epic-3: in-progress
   3-1-scaffold-the-isolated-live-paper-trading-module: done
-  3-2-dummy-strategy-consumes-every-produced-signal-and-runs-live-in-paper-mode: backlog
+  3-2-dummy-strategy-consumes-every-produced-signal-and-runs-live-in-paper-mode: done
   epic-3-retrospective: optional
 
 action_items:
