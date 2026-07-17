@@ -65,16 +65,16 @@ development_status:
   2-4-multi-coin-backtest-runs-across-the-live-watchlist: done
   epic-2-retrospective: done
 
-  epic-3: in-progress
+  epic-3: done
   3-1-scaffold-the-isolated-live-paper-trading-module: done
   3-2-dummy-strategy-consumes-every-produced-signal-and-runs-live-in-paper-mode: done
-  epic-3-retrospective: optional
+  epic-3-retrospective: done
 
 action_items:
   - epic: 1
     action: "Add a lifecycle-cleanup checklist item: any subscribe/unsubscribe/resubscribe/shutdown transition must explicitly state what tracking state gets reset or removed (4 bugs across 3 stories in Epic 1 were this exact shape)."
     owner: "Amelia"
-    status: open
+    status: done
   - epic: 1
     action: "Add an integration-test convention: any function reachable via two live code paths (e.g. a background loop and an HTTP handler) needs at least one test driving the real integration surface, not just the pure function underneath (this is what let Story 1.4's query-encoding bug ship untested)."
     owner: "Murat"
@@ -86,4 +86,12 @@ action_items:
   - epic: 2
     action: "When a story's core design decision exists specifically to survive a named failure mode (e.g. Story 2.4's id-based result attribution surviving a dropped BacktestNode result), write a test that actually exercises that failure mode before considering the story done -- not just the happy path where a simpler implementation would also pass."
     owner: "Murat"
+    status: open
+  - epic: 3
+    action: "Recurrence of the Epic 2 action item above: Story 3.2's orders_inflight() guard (survives a signal staying true across ticks while an order is in flight) has no test forcing that exact race -- BacktestEngine's near-synchronous market-order fills make it hard to construct without mocking, which TEST-03 bars. Needs a team discussion on a different testing strategy (e.g. a live/soak check) rather than another unit-test attempt."
+    owner: "Murat"
+    status: open
+  - epic: 3
+    action: "Schedule an actual live dYdX connection test to determine whether EXTERNAL bar aggregation is viable for DummyStrategy's trend indicator -- currently INTERNAL, chosen only because it is guaranteed-correct without live credentials to verify, not because EXTERNAL was checked and found worse."
+    owner: "Amelia"
     status: open
