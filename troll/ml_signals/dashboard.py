@@ -86,6 +86,13 @@ _CHART_GAP_THRESHOLD_MS: int = 2500  # 2.5 seconds
 # Rankings table columns. Each entry: (store_key, header_label, format_fn, color_fn|None).
 # Reorder, add, or remove rows here to control what's shown and how.
 # color_fn receives the raw float value and returns a CSS color string.
+# Unit contract for direct consumers of /api/rankings and /data/live/{id}: "cvd" and
+# "volume_delta" are raw base-asset-token deltas, "spread"/"microprice_lean" are raw
+# price-unit deltas -- neither is scaled by price server-side. The rankings/coin-detail
+# HTML pages normalize these client-side (see the inline JS's usdFromTokens/
+# bpsFromPriceUnits) using each row's own "price" field; a script hitting the JSON
+# endpoints directly must do the same multiplication/division itself to get comparable
+# USD/bps units.
 RANKING_COLS: list[tuple[str, str, object, object]] = [
     ("ofi_10_z",       "OFI10z", lambda v: f"{v:+.2f}",  lambda v: "#2a9d2a" if v > 0 else "#c0392b"),
     ("obi_10",         "OBI10",  lambda v: f"{v:.3f}",   lambda v: "#2a9d2a" if v > 0.5 else "#c0392b"),
@@ -231,17 +238,24 @@ td:first-child,th:first-child{text-align:left}
 <script>
 var COLS=[
   ["ofi_10_z","OFI10z"],["obi_10","OBI10"],["obi_5","OBI5"],["obi_3","OBI3"],
-  ["cvd","CVD"],["spread","Spread"],["microprice_lean","u lean"],
-  ["volume_delta","Vol d"],["buy_count","Buy#"],["sell_count","Sell#"],
+  ["cvd","CVD($)"],["spread","Spread(bps)"],["microprice_lean","u lean(bps)"],
+  ["volume_delta","Vol d($)"],["buy_count","Buy#"],["sell_count","Sell#"],
   ["price","Price"],["pct_1h","1h %"],["pct_24h","24h %"],["volatility","Vol"],
   ["volume24h","Vol24h"]
 ];
+// Keys normalized client-side from raw token/price-unit deltas -- see usdFromTokens/
+// bpsFromPriceUnits. The backend's own computation of these values is untouched --
+// the one backend change this feature needed was exposing "price" on the
+// /data/live/{id} endpoint (live_coin_json_handler), which already computed it but
+// didn't send it. Never add "price" itself to either list below (self-referential).
+var USD_KEYS=["cvd","volume_delta"];
+var BPS_KEYS=["spread","microprice_lean"];
 var currentSort=null;  // {key,dir} | null. null = server's default volume-sorted order.
 var IND=[
   ["ofi_10","OFI10"],["ofi_5","OFI5"],["ofi_3","OFI3"],
   ["obi_10","OBI10"],["obi_5","OBI5"],["obi_3","OBI3"],
-  ["microprice","Microprice"],["microprice_lean","u lean"],
-  ["spread","Spread"],["cvd","CVD"],["volume_delta","Vol delta"],
+  ["microprice","Microprice"],["microprice_lean","u lean(bps)"],
+  ["spread","Spread(bps)"],["cvd","CVD($)"],["volume_delta","Vol delta($)"],
   ["buy_count","Buy#"],["sell_count","Sell#"],["avg_trade_size","Avg size"]
 ];
 var timer=null;
@@ -284,6 +298,56 @@ function handleChartClick(data){
   }
 }
 function fmtP(v){if(v==null)return'—';return v>100?v.toFixed(2):v>1?v.toFixed(4):v.toFixed(6);}
+
+// Raw values (token-unit deltas, price-unit deltas) stay raw in the backend --
+// normalized here so they're comparable across instruments of wildly different
+// price scale (a token-count delta or price-unit spread means very different
+// things for a $100k coin vs. a sub-cent one). Guard against non-finite inputs
+// (NaN/Infinity) explicitly -- `==null` alone doesn't catch NaN, and a JSON payload
+// (esp. /data/live/{id}, which has no NaN-scrubbing today) could in principle carry one.
+function usdFromTokens(raw,price){
+  if(typeof raw!=='number'||!Number.isFinite(raw))return null;
+  if(typeof price!=='number'||!Number.isFinite(price)||price<=0)return null;
+  var v=raw*price;
+  return Number.isFinite(v)?v:null;
+}
+function bpsFromPriceUnits(raw,price){
+  if(typeof raw!=='number'||!Number.isFinite(raw))return null;
+  if(typeof price!=='number'||!Number.isFinite(price)||price<=0)return null;
+  var v=raw/price*10000;
+  return Number.isFinite(v)?v:null;
+}
+// Rounds at the display precision *before* deciding the sign prefix, so a value that
+// rounds to zero (e.g. -0.0000016) never renders the confusing "-0.00"/"-0" that
+// plain toFixed()/toLocaleString() would otherwise produce for a tiny negative input.
+function fmtSigned(v,decimals){
+  if(v==null)return'—';
+  var scale=Math.pow(10,decimals);
+  var rounded=Math.round(v*scale)/scale;
+  if(rounded===0)rounded=0;  // normalizes -0 to 0
+  var text=decimals===0
+    ? Math.abs(rounded).toLocaleString(undefined,{maximumFractionDigits:0})
+    : Math.abs(rounded).toFixed(decimals);
+  return (rounded<0?'-':rounded>0?'+':'')+text;
+}
+function fmtUsd(v){
+  if(v==null)return'—';
+  // Sub-$1 notional (common for micro-cap tokens) would otherwise round to a
+  // meaningless "$0" at 0 decimal places -- show more precision below $1. An exact
+  // zero is exempted so it renders as a plain "0", not a verbose "0.0000".
+  return fmtSigned(v,(v!==0&&Math.abs(v)<1)?4:0);
+}
+function fmtBps(v){return fmtSigned(v,2);}
+// Shared by renderRankings (rankings table) and renderCoin (coin-detail Indicators
+// table) so the USD/BPS-key dispatch logic lives in exactly one place. Returns null
+// for a key that isn't normalized (caller should fall back to its own passthrough
+// text), or the formatted string ("—" included) for one that is.
+function fmtNormalizedCell(key,raw,price){
+  if(USD_KEYS.indexOf(key)>=0)return fmtUsd(usdFromTokens(raw,price));
+  if(BPS_KEYS.indexOf(key)>=0)return fmtBps(bpsFromPriceUnits(raw,price));
+  return null;
+}
+
 function buildDiff(a,b){
   var metrics=[['bid','Bid'],['ask','Ask'],['mid','Mid'],['micro','Microprice'],['price','Eff Price']];
   var parts=metrics.map(function(m){
@@ -408,10 +472,16 @@ function renderRankings(rows,ingestCount,ageS,stale){
     var iid=row.instrument_id;
     var label=iid.split("-").slice(0,2).join("-");
     var cells=COLS.map(function(c){
-      var v=row.cells[c[0]];
+      var key=c[0];
+      var v=row.cells[key];
       if(!v||!v.text||v.text==="\\u2014")return "<td>&mdash;</td>";
       var col=v.color?' style="color:'+esc(v.color)+'"':"";
-      return "<td"+col+">"+esc(v.text)+"</td>";
+      // "!" (row-level fetch error) and "ERR" (this column's own format_fn raised) are
+      // both pre-formatted error markers from the server -- show them as-is, never
+      // route them through normalization (their .raw is always null either way).
+      if(v.text==="!"||v.text==="ERR")return "<td"+col+">"+esc(v.text)+"</td>";
+      var norm=fmtNormalizedCell(key,v.raw,row.cells['price']?row.cells['price'].raw:null);
+      return "<td"+col+">"+esc(norm!=null?norm:v.text)+"</td>";
     }).join("");
     return "<tr><td>"+(i+1)+"</td>"
       +"<td><a onclick=\\"showCoin('"+esc(iid)+"');return false\\" href=\\"/coin/"+esc(iid)+"\\">"+esc(label)+"</a>"
@@ -471,7 +541,10 @@ function pollCoin(iid){
 function renderCoin(iid,ind,chart){
   _chartData=chart;
   var rows=IND.map(function(k){
-    var v=ind[k[0]];
+    var key=k[0];
+    var v=ind[key];
+    var norm=fmtNormalizedCell(key,v,ind['price']);
+    if(norm!=null)return "<tr><td>"+esc(k[1])+"</td><td>"+esc(norm)+"</td></tr>";
     return "<tr><td>"+esc(k[1])+"</td><td>"+(v!=null?esc(String(v)):"&mdash;")+"</td></tr>";
   }).join("");
   var tbl=document.getElementById('ind-tbl');
@@ -1120,7 +1193,7 @@ async def live_coin_json_handler(request: web.Request) -> web.Response:
     ind_keys = [
         "ofi_10", "ofi_5", "ofi_3", "obi_10", "obi_5", "obi_3",
         "microprice", "microprice_lean", "spread", "cvd",
-        "volume_delta", "buy_count", "sell_count", "avg_trade_size",
+        "volume_delta", "buy_count", "sell_count", "avg_trade_size", "price",
     ]
     result = {k: m.get(k) for k in ind_keys}
     return web.Response(text=json.dumps(result), content_type="application/json")
