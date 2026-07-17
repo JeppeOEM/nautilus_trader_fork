@@ -18,6 +18,12 @@ Integration test: OFIStrategy in BacktestEngine with synthetic L2 book data.
 Uses ofi_window=2, ma_period=2 so only 5 delta batches are needed to
 trigger the first MA evaluation.  Bid size grows each batch → positive OFI
 → MA > buy_threshold → long entry.
+
+Note: a second BacktestEngine-constructing test file that collects (alphabetically) BEFORE
+this file causes a fatal native abort partway through this file's own engine construction --
+see test_ofi_strategy_indicator_consistency.py's module docstring and deferred-work.md for the
+full investigation. Any new BacktestEngine-based test file must be named to collect after this
+one until that's root-caused.
 """
 
 from decimal import Decimal

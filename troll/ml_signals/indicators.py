@@ -12,7 +12,21 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
-"""Indicators for use as buy/sell signals across strategies: trend, microprice, OFI."""
+"""
+Indicators for use as buy/sell signals across strategies: trend, microprice, OFI.
+
+Every indicator here is meant to be reused unmodified across research (Jupyter), backtest,
+and live contexts (Story 2.2, FR10) -- never redefined locally in a notebook or strategy file.
+Real consuming-context coverage as of Story 2.2 (not a requirement that every indicator be used
+everywhere -- FR10 is conditional on actual usage, not a coverage mandate): OrderFlowImbalance
+has both a backtest Strategy consumer (ofi_strategy.py) and a direct-replay consumer
+(metrics_computer.py/chart_data.py), but no research-notebook demo yet. Microprice has the
+direct-replay consumer and the research notebook, but no backtest Strategy consumer yet.
+OnlineLogisticTrend is only consumed by a backtest Strategy (example_strategy.py).
+MultiLevelOBI/MultiLevelOFI are only consumed by dashboard.py's live monitor loop (not a
+Nautilus Strategy). This is an honest
+note, not a gap to close here.
+"""
 
 from collections import deque
 

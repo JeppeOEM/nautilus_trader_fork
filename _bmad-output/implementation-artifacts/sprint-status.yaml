@@ -60,7 +60,7 @@ development_status:
 
   epic-2: in-progress
   2-1-bring-the-jupyter-research-environment-in-line-with-nautilus-conventions: done
-  2-2-single-indicator-implementation-reused-across-research-backtest-and-live: backlog
+  2-2-single-indicator-implementation-reused-across-research-backtest-and-live: done
   2-3-hft-granularity-and-configurable-timeframe-backtesting-on-the-same-underlying-data: backlog
   2-4-multi-coin-backtest-runs-across-the-live-watchlist: backlog
   epic-2-retrospective: optional
