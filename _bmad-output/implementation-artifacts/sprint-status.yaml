@@ -82,7 +82,7 @@ action_items:
   - epic: 2
     action: "Root-cause the BacktestEngine/BacktestNode native crash (Fatal Python error: Aborted at kernel.py:231) documented across Stories 2.2/2.3's deferred-work.md entries before the test suite grows further or Epic 3 needs a larger battery of Nautilus engine-construction tests. Current mitigation (filename-collection-order + one-construction-per-file) is fragile and invocation-method-sensitive."
     owner: "Amelia"
-    status: open
+    status: done
   - epic: 2
     action: "When a story's core design decision exists specifically to survive a named failure mode (e.g. Story 2.4's id-based result attribution surviving a dropped BacktestNode result), write a test that actually exercises that failure mode before considering the story done -- not just the happy path where a simpler implementation would also pass."
     owner: "Murat"
