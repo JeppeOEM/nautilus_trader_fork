@@ -154,7 +154,7 @@ cd troll/ml_signals
 python backtest_dydx.py
 ```
 
-Streams trade ticks from the catalog and aggregates 20-tick bars internally. Adjust `tick_bar_size`, `buy_threshold`, `sell_threshold` by passing args to `run()`.
+Streams trade ticks from the catalog and aggregates bars internally at a configurable wall-clock interval. Adjust `bar_interval` (e.g. `"1-SECOND"`, `"1-MINUTE"`, `"5-MINUTE"`), `buy_threshold`, `sell_threshold` by passing args to `run()`.
 
 ---
 
