@@ -12,11 +12,33 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
+import asyncio
+
 import pytest
 
 from nautilus_trader.backtest.engine import BacktestEngine
 from nautilus_trader.backtest.engine import BacktestEngineConfig
 from nautilus_trader.config import LoggingConfig
+
+
+@pytest.fixture(autouse=True)
+def _fresh_event_loop():
+    """
+    TradingNode's kernel construction calls asyncio.get_event_loop(), which returns
+    the same thread-global "current" loop across every test in this process once one
+    exists -- a loop closed by a previous test's node.dispose() would otherwise be
+    handed to the next test's TradingNode construction too. Story 4.4 surfaced this:
+    build_node now schedules a task via loop.create_task(...) eagerly (see
+    live_paper/node.py), which raises "Event loop is closed" against a stale loop from
+    an earlier test in the same file. Force a fresh, open loop before every test here,
+    for the same reason bot_tui/app.py's run() explicitly creates its own loop rather
+    than trusting get_event_loop().
+    """
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    yield
+    if not loop.is_closed():
+        loop.close()
 
 
 @pytest.fixture(scope="session", autouse=True)

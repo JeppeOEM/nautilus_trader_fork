@@ -31,12 +31,24 @@ The Dummy Strategy (Story 3.2, `live_paper.strategy.DummyStrategy`) is attached 
 via `node.trader.add_strategy(...)`, mirroring `examples/sandbox/dydx_sandbox.py`'s exact
 pattern -- not `ImportableStrategyConfig`/string-path referencing, which is a BacktestNode
 parameter-sweep convenience (AD-6) that this repo's live reference examples don't use.
+
+`build_node` also schedules `bot_status.run(...)` on the node's own event loop (Story
+4.4, architecture AD-10) -- this is bot_tui/the web dashboard's only path to this
+process's PnL/position state and start/stop control, via the bots:status/bots:control
+Redis channels; see bot_status.py's own module docstring for why this lives outside the
+Strategy's component lifecycle rather than inside one of its clock timers.
 """
 
 import logging
 import os
 from pathlib import Path
 
+from live_paper import bot_status
+from live_paper.config import PaperConfig
+from live_paper.config import RealMoneyConfig
+from live_paper.config import resolve_config
+from live_paper.strategy import DummyStrategy
+from live_paper.strategy import DummyStrategyConfig
 from nautilus_trader.adapters.dydx.config import DydxDataClientConfig
 from nautilus_trader.adapters.dydx.config import DydxExecClientConfig
 from nautilus_trader.adapters.dydx.constants import DYDX
@@ -51,18 +63,13 @@ from nautilus_trader.live.node import TradingNode
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.identifiers import TraderId
 
-from live_paper.config import PaperConfig
-from live_paper.config import RealMoneyConfig
-from live_paper.config import resolve_config
-from live_paper.strategy import DummyStrategy
-from live_paper.strategy import DummyStrategyConfig
-
 
 logger = logging.getLogger(__name__)
 
 _MODULE_DIR = Path(__file__).parent
 _DEFAULT_PAPER_CONFIG_PATH = _MODULE_DIR / "config.toml"
 _REAL_MONEY_ENV_VAR = "LIVE_PAPER_REAL_MONEY_CONFIG"
+_REDIS_URL = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
 
 
 def build_node(config: PaperConfig | RealMoneyConfig) -> TradingNode:
@@ -117,6 +124,17 @@ def build_node(config: PaperConfig | RealMoneyConfig) -> TradingNode:
     node.add_data_client_factory(DYDX, DydxLiveDataClientFactory)
     node.add_exec_client_factory(DYDX, exec_factory)
     node.build()
+
+    # Scheduled on the node's own loop, outside the strategy's component lifecycle
+    # (Story 4.4; see bot_status.run's own docstring for why -- a Strategy-internal
+    # timer would stop firing once Stopped, and could never later hear a "start").
+    mode = "live" if isinstance(config, RealMoneyConfig) else "paper"
+    loop = node.get_event_loop()
+    assert loop is not None, "TradingNode's kernel loop must exist once constructed"
+    loop.create_task(
+        bot_status.run(strategy, bot_id=config.bot_id, mode=mode, redis_url=_REDIS_URL)
+    )
+
     return node
 
 

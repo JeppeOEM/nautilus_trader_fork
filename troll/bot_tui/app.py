@@ -13,11 +13,18 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-bot_tui urwid app shell (Story 4.1, AC1-AC4; Story 4.2, AC1-AC5; Story 4.3, AC1-AC7):
-MainLoop wiring, breadcrumb/footer, Coins pane, a Bots-pane stub, the `:` command bar,
-the `/` inline filter, the `m` Ranking-Mode toggle, a pane-level stale badge, a
+bot_tui urwid app shell (Story 4.1, AC1-AC4; Story 4.2, AC1-AC5; Story 4.3, AC1-AC7;
+Story 4.4, AC1-AC4): MainLoop wiring, breadcrumb/footer, Coins pane, the `:` command
+bar, the `/` inline filter, the `m` Ranking-Mode toggle, a pane-level stale badge, a
 full-screen Coin-detail view (live indicators + collapsible order-book ladder + `o`
-dashboard deep-link), and `esc`/`:q` navigation.
+dashboard deep-link), a Bots pane (live per-bot PnL/status rows, per-row stale badges,
+`s` start/stop with a footer-echo confirmation), and `esc`/`:q` navigation.
+
+`s` on a running bot does not stop it immediately -- it opens a type-to-confirm prompt
+(operator must type "stop" + Enter) before the stop command is published, per an
+explicit operator request: a bare `s` keypress is too easy to hit by accident to let it
+directly stop a live/paper bot. Starting a stopped bot has no such guard -- only
+stopping a running one carries real-world consequence.
 
 This is the only file in this story allowed to import urwid and hold live async
 state. Command dispatch and view-stack pop-back are implemented as plain, urwid-free
@@ -43,6 +50,8 @@ import webbrowser
 
 import urwid
 
+from bot_tui import bots_pane
+from bot_tui import bots_state
 from bot_tui import coin_detail
 from bot_tui import coin_detail_state
 from bot_tui import ranking_state
@@ -65,10 +74,22 @@ _FOOTER_HINT_TEXT = "/ filter  m mode  : command  esc back  :q quit"
 # Coin-detail's own footer -- distinct keys, distinct hints (Story 4.3).
 _COIN_DETAIL_FOOTER_HINT_TEXT = "d expand book  o dashboard  esc back  :q quit"
 
+# Bots pane's own footer (Story 4.4) -- `/`/`m`/Enter are Coins-pane-only (see
+# _handle_global_key), `s` is Bots-pane-only.
+_BOTS_FOOTER_HINT_TEXT = "s start/stop  : command  esc back  :q quit"
+
+# Bot-detail's own footer (Story 4.5) -- only the live-snapshot-header region exists
+# in this story (AC4), so no j/k (scroll), t (time-range), or o (dashboard) here --
+# those belong to Story 4.7's blotter/PnL-chart regions. Advertise only what's
+# actually bound, same discipline Story 4.3's Coin-detail footer established.
+_BOT_DETAIL_FOOTER_HINT_TEXT = "s start/stop  esc back  :q quit"
+
 _PALETTE = [
     ("stale", "yellow", "default"),
     ("bid", "dark green", "default"),
     ("ask", "dark red", "default"),
+    ("pnl-pos", "dark green", "default"),
+    ("pnl-neg", "dark red", "default"),
 ]
 
 _LADDER_COLLAPSED_LEVELS = 1
@@ -142,6 +163,26 @@ class _SelectableCoinRow(urwid.Text):
         return key
 
 
+class _SelectableBotRow(urwid.Text):
+    """
+    Same selectable-but-non-consuming shape as _SelectableCoinRow (Story 4.3),
+    applied to Bots-pane rows so `s` can act on whichever row is highlighted.
+    """
+
+    def __init__(self, markup: object, bot_id: str) -> None:
+        # markup is really urwid's own private _TagMarkup union (str | tuple | list),
+        # not importable from outside urwid -- same stub-gap precedent Story 4.3's
+        # review already established (scoped type: ignore, not a broader Any).
+        super().__init__(markup)  # type: ignore[arg-type]
+        self.bot_id = bot_id
+
+    def selectable(self) -> bool:
+        return True
+
+    def keypress(self, size: object, key: str) -> str:
+        return key
+
+
 class BotTuiApp:
     """Owns the urwid Frame, the view stack, and the async wiring to ranking_state."""
 
@@ -160,6 +201,19 @@ class BotTuiApp:
         self._ladder_expanded = False
         self._dashboard_base_url = os.environ.get("DASHBOARD_BASE_URL", "http://127.0.0.1:8765")
 
+        # Bot-detail state (Story 4.5). No open_bot()/close_bot() lifecycle pair is
+        # needed here, unlike coin_detail_state's open_coin()/close_coin() -- bots:status
+        # is already accumulated unconditionally for every bot regardless of which view
+        # is active (see _open_bot_detail's own comment).
+        self._bot_detail_bot_id: str | None = None
+
+        # Stop-confirmation guard: active while the operator must type "stop" + Enter
+        # to actually stop the bot named by _stop_confirm_bot_id (captured at open
+        # time so it can't drift if state changes while the prompt is up -- nothing
+        # else can happen while it's active, every key is captured below).
+        self._stop_confirm_active = False
+        self._stop_confirm_bot_id: str | None = None
+
         # The Coins-pane body is a persistent object, mutated in place rather than
         # rebuilt on every view switch (Story 4.3, AC6 -- see _refresh_coins_body).
         # _coins_shape is None until the first _refresh_coins_body() call below builds
@@ -174,6 +228,7 @@ class BotTuiApp:
         self._command_edit = urwid.Edit(":")
         self._filter_edit = urwid.Edit("/")
         urwid.connect_signal(self._filter_edit, "change", self._on_filter_change)
+        self._stop_confirm_edit = urwid.Edit("")
         self._body = urwid.WidgetPlaceholder(self._build_body())
         self._frame = urwid.Frame(
             header=self._breadcrumb,
@@ -254,18 +309,116 @@ class BotTuiApp:
 
     def _build_body(self) -> urwid.Widget:
         if self._view == "bots":
-            # Stub placeholder (Story 4.4 builds real content) -- deliberately distinct
-            # from the "Bots" breadcrumb label so the pane doesn't look like a rendering
-            # bug (bare repeat of the pane name).
-            return urwid.Filler(urwid.Text("no bots yet"), valign="top")
+            return self._build_bots_body()
 
         if self._view == "coin_detail":
             return self._build_coin_detail_body()
+
+        if self._view == "bot_detail":
+            return self._build_bot_detail_body()
 
         # "coins" -- returned as-is, whatever it currently holds. Never rebuilt here;
         # only _refresh_coins_body() (called when the Coins pane's own data actually
         # changes, not on a mere view switch) ever changes what this holds.
         return self._coins_body
+
+    def _build_bots_body(self) -> urwid.Widget:
+        # Unlike the Coins pane (Story 4.3, AC6), this is rebuilt fresh on every call --
+        # a deliberate, scoped-out YAGNI choice: this story has no drill-in/esc round
+        # trip to preserve scroll position across yet (Bot-detail's Enter/esc is Story
+        # 4.5), so a persistent-body refactor here would be speculative. Known
+        # consequence: scroll position resets on every bots:status heartbeat-driven
+        # rebuild (~5s) -- acceptable for now, revisit if/when Story 4.5 actually needs
+        # a round trip through this pane the way Story 4.3 needed one through Coins.
+        statuses = bots_state._LATEST_STATUSES
+        if not statuses:
+            return urwid.Filler(urwid.Text(bots_pane.COLD_OPEN_TEXT), valign="top")
+
+        now = time.time()
+        rows = bots_pane.bot_rows(statuses)
+        widgets = [
+            self._build_bot_row_widget(row, bots_state.is_stale(row["bot_id"], now=now), now)
+            for row in rows
+        ]
+        return urwid.ListBox(urwid.SimpleListWalker(widgets))
+
+    def _build_bot_row_widget(self, row: dict, stale: bool, now: float) -> urwid.Widget:
+        # Color applied only to the PnL segment (sign, not magnitude) -- mirrors Story
+        # 4.3's bid/ask ladder-column precedent of "fixed position + color, never color
+        # alone"; the sign is also always in the text itself via bots_pane.format_pnl.
+        pnl_value = row["realized_pnl"] + row["unrealized_pnl"]
+        pnl_color = "pnl-pos" if pnl_value >= 0 else "pnl-neg"
+        prefix = "~ " if stale else "  "
+        running_text = "run" if row["running"] else "off"
+        markup = [
+            prefix,
+            f"{row['bot_id']:<12} ",
+            (pnl_color, bots_pane.format_pnl(pnl_value)),
+            f"  {row['symbol']:<18} {row['mode']:<5} {running_text:<3} {row['position_side']:<5} "
+            f"{bots_pane.format_exposure(row['net_exposure'])}  "
+            f"up {bots_pane.format_uptime(row['started_at'], now)}  "
+            f"wr {bots_pane.format_win_rate(row['win_rate'])}",
+        ]
+        return _SelectableBotRow(markup, bot_id=row["bot_id"])
+
+    def _highlighted_bot_id(self) -> str | None:
+        """
+        Return the Bots-pane row currently focused, mirroring
+        _highlighted_instrument_id's (Story 4.3) same read-the-ListBox's-own-focus
+        pattern, applied to the Bots pane.
+        """
+        body = self._body.original_widget
+        if not isinstance(body, urwid.ListBox):
+            return None
+        focus_widget = body.focus
+        if focus_widget is None:
+            return None
+        assert isinstance(focus_widget, _SelectableBotRow)
+        return focus_widget.bot_id
+
+    def _active_bot_id(self) -> str | None:
+        """
+        Which bot `s` (start/stop) should act on -- the open bot while in Bot-detail,
+        otherwise the Bots-pane's currently-highlighted row (Story 4.5, AC3). A single
+        seam `_toggle_bot()` reads through, rather than two forked copies of that
+        method for the two views it's reachable from.
+        """
+        if self._view == "bot_detail":
+            return self._bot_detail_bot_id
+        return self._highlighted_bot_id()
+
+    def _build_bot_detail_body(self) -> urwid.Widget:
+        # Guarded defensively (unlike most of this codebase's AD-3 "readers trust the
+        # gate" precedent): Enter is only reachable from an already-status-backed row,
+        # so status should never actually be None here, but this method has no
+        # pre-existing None-threaded shape to inherit that discipline from the way
+        # _build_coin_detail_body does (Story 4.5, Dev Notes item 7).
+        bot_id = self._bot_detail_bot_id
+        status = bots_state._LATEST_STATUSES.get(bot_id) if bot_id is not None else None
+        if status is None:
+            return urwid.Filler(urwid.Text("no status yet"), valign="top")
+
+        pnl_value = status["realized_pnl"] + status["unrealized_pnl"]
+        pnl_color = "pnl-pos" if pnl_value >= 0 else "pnl-neg"
+        lines = bots_pane.bot_detail_lines(status, now=time.time())
+        # Color only the PnL segment within line 2 -- same "fixed position + color,
+        # never color alone" precedent as the Bots-pane row (_build_bot_row_widget)
+        # and Coin-detail's bid/ask ladder columns.
+        pnl_text = bots_pane.format_pnl(pnl_value)
+        pnl_line = lines[1]
+        pnl_start = pnl_line.index(pnl_text)
+        pnl_end = pnl_start + len(pnl_text)
+        line_widgets = [
+            urwid.Text(lines[0]),
+            urwid.Text(
+                [pnl_line[:pnl_start], (pnl_color, pnl_text), pnl_line[pnl_end:]],
+            ),
+            urwid.Text(lines[2]),
+        ]
+        snapshot_box = urwid.LineBox(
+            urwid.Pile(line_widgets), title=f"{self._bot_detail_bot_id}  snapshot"
+        )
+        return urwid.Filler(snapshot_box, valign="top")
 
     def _build_coin_detail_body(self) -> urwid.Widget:
         # AC7: every value below is always the single most-recently-received
@@ -364,6 +517,17 @@ class BotTuiApp:
             else:
                 self._breadcrumb.set_text(breadcrumb_text)
             return
+        if self._view == "bot_detail":
+            # Verbatim mockup format (mockups/key-bot-detail.html: "Bots > bot-03").
+            # Stale-badge source is bots_state.is_stale (Story 4.4's own per-bot
+            # function, a different heartbeat producer/threshold than
+            # coin_detail_state's snapshots:raw badge above) -- not ranking_state.is_stale.
+            breadcrumb_text = f"Bots > {self._bot_detail_bot_id}"
+            if self._bot_detail_bot_id is not None and bots_state.is_stale(self._bot_detail_bot_id):
+                self._breadcrumb.set_text([breadcrumb_text, "  ", ("stale", "~ STALE")])
+            else:
+                self._breadcrumb.set_text(breadcrumb_text)
+            return
         label = _BREADCRUMB_LABELS[self._view]
         if self._stale_badge_active():
             # DESIGN.md's stale-badge component: "~" glyph, "STALE" text-suffix,
@@ -376,6 +540,10 @@ class BotTuiApp:
     def _refresh_footer_hint(self) -> None:
         if self._view == "coin_detail":
             self._footer_hint.set_text(_COIN_DETAIL_FOOTER_HINT_TEXT)
+        elif self._view == "bots":
+            self._footer_hint.set_text(_BOTS_FOOTER_HINT_TEXT)
+        elif self._view == "bot_detail":
+            self._footer_hint.set_text(_BOT_DETAIL_FOOTER_HINT_TEXT)
         else:
             self._footer_hint.set_text(_FOOTER_HINT_TEXT)
 
@@ -456,6 +624,78 @@ class BotTuiApp:
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
 
+    def _toggle_bot(self) -> None:
+        # _active_bot_id() (Story 4.5) makes this identical from the Bots pane
+        # (highlighted row) and from Bot-detail (the open bot). Starting a stopped bot
+        # is low-risk and stays immediate; stopping a running one routes through the
+        # type-to-confirm guard instead of publishing directly -- see this module's
+        # docstring for why only the stop direction needs it.
+        bot_id = self._active_bot_id()
+        if bot_id is None:
+            return
+        status = bots_state._LATEST_STATUSES.get(bot_id)
+        running = bool(status.get("running")) if status is not None else False
+        if running:
+            self._open_stop_confirm(bot_id)
+            return
+        self._publish_bot_action(bot_id, "start")
+
+    def _publish_bot_action(self, bot_id: str, action: str) -> None:
+        # Publish-and-wait, never optimistic (AC3, same discipline as _toggle_mode):
+        # no local running/stopped flip happens here -- the row only reflects the new
+        # state once live_paper's own next bots:status heartbeat carries it back.
+        task = asyncio.ensure_future(bots_state.publish_control(self._redis_url, bot_id, action))
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        # AC3's literal footer-echo format: "sent: start bot-07" -- confirms the
+        # command was sent, not that it succeeded.
+        self._footer_hint.set_text(f"sent: {action} {bot_id}")
+
+    def _open_stop_confirm(self, bot_id: str) -> None:
+        self._stop_confirm_active = True
+        self._stop_confirm_bot_id = bot_id
+        self._stop_confirm_edit.set_caption(f"stop {bot_id}? type 'stop' + enter, esc to cancel: ")
+        self._stop_confirm_edit.set_edit_text("")
+        self._frame.footer = self._stop_confirm_edit
+        self._frame.focus_position = "footer"
+
+    def _close_stop_confirm(self) -> None:
+        self._stop_confirm_active = False
+        self._stop_confirm_bot_id = None
+        self._frame.footer = self._footer_hint
+        self._frame.focus_position = "body"
+
+    def _handle_command_bar_key(self, key: str) -> None:
+        # Extracted from _unhandled_input, same complexity-threshold reasoning as the
+        # other _handle_*_key extractions.
+        if key == "enter":
+            self._submit_command()
+        elif key == "esc":
+            self._close_command_bar()
+
+    def _handle_stop_confirm_key(self, key: str) -> None:
+        # Extracted from _unhandled_input (same cognitive-complexity-threshold
+        # reasoning as _handle_bots_pane_key/_handle_bot_detail_key above).
+        if key == "enter":
+            self._submit_stop_confirm()
+        elif key == "esc":
+            self._close_stop_confirm()
+
+    def _submit_stop_confirm(self) -> None:
+        bot_id = self._stop_confirm_bot_id
+        assert bot_id is not None  # only reachable while _stop_confirm_active is True
+        text = self._stop_confirm_edit.edit_text.strip().lower()
+        if text != "stop":
+            # Same "stay open, echo, let them retry" idiom as _submit_command's
+            # unknown-command case -- never silently ignores a wrong answer.
+            self._stop_confirm_edit.set_caption(
+                f"type 'stop' to confirm -- stop {bot_id}? esc to cancel: "
+            )
+            self._stop_confirm_edit.set_edit_text("")
+            return
+        self._close_stop_confirm()
+        self._publish_bot_action(bot_id, "stop")
+
     def _open_coin_detail(self, instrument_id: str) -> None:
         # Same plain-stack mechanism _dispatch_command already uses -- Story 4.1's
         # Dev Notes built this stack expecting exactly this kind of later full-screen
@@ -467,6 +707,20 @@ class BotTuiApp:
         # any other coin (AC2) -- this is the entire mechanism behind that AC.
         self._ladder_expanded = False
         coin_detail_state.open_coin(instrument_id)
+        self._refresh_breadcrumb()
+        self._refresh_footer_hint()
+        self._body.original_widget = self._build_body()
+        self._frame.focus_position = "body"
+
+    def _open_bot_detail(self, bot_id: str) -> None:
+        # Same plain-stack push _open_coin_detail already uses. No subscription-
+        # lifecycle call is needed here (unlike coin_detail_state.open_coin()) --
+        # bots_state.py already accumulates every bot's latest status unconditionally,
+        # regardless of which view is active (Story 4.4's design has no per-bot
+        # subscribe/unsubscribe concept to open/close on entry/exit here).
+        self._stack = [*self._stack, self._view]
+        self._view = "bot_detail"
+        self._bot_detail_bot_id = bot_id
         self._refresh_breadcrumb()
         self._refresh_footer_hint()
         self._body.original_widget = self._build_body()
@@ -513,10 +767,11 @@ class BotTuiApp:
             return None
 
         if self._command_active:
-            if key == "enter":
-                self._submit_command()
-            elif key == "esc":
-                self._close_command_bar()
+            self._handle_command_bar_key(key)
+            return None
+
+        if self._stop_confirm_active:
+            self._handle_stop_confirm_key(key)
             return None
 
         if self._filter_active:
@@ -533,6 +788,10 @@ class BotTuiApp:
 
         if self._view == "coin_detail":
             self._handle_coin_detail_key(key)
+            return None
+
+        if self._view == "bot_detail":
+            self._handle_bot_detail_key(key)
             return None
 
         self._handle_global_key(key)
@@ -556,6 +815,29 @@ class BotTuiApp:
             instrument_id = self._highlighted_instrument_id()
             if instrument_id is not None:
                 self._open_coin_detail(instrument_id)
+        elif self._view == "bots":
+            self._handle_bots_pane_key(key)
+
+    def _handle_bots_pane_key(self, key: str) -> None:
+        # Extracted from _handle_global_key (Story 4.5) -- same cognitive-complexity-
+        # threshold reasoning as _handle_coin_detail_key/_handle_bot_detail_key below.
+        if key == "enter":
+            bot_id = self._highlighted_bot_id()
+            if bot_id is not None:
+                self._open_bot_detail(bot_id)
+        elif key == "s":
+            self._toggle_bot()
+
+    def _handle_bot_detail_key(self, key: str) -> None:
+        # Extracted from _handle_global_key, same rationale as _handle_coin_detail_key
+        # (Story 4.3): keeps each dispatch function under this codebase's cognitive-
+        # complexity threshold as more per-view keys accumulate.
+        if key == "s":
+            self._toggle_bot()
+        elif key == "esc":
+            self._bot_detail_bot_id = None
+            new_view, new_stack = _pop_view(self._view, self._stack)
+            self._switch_view(new_view, new_stack)
 
     def _handle_coin_detail_key(self, key: str) -> None:
         # Extracted from _handle_global_key (same reason Story 4.2 extracted that
@@ -604,8 +886,7 @@ class BotTuiApp:
                         self._last_seen_ranking = current
                         self._refresh_coins_body()
                         self._body.original_widget = self._coins_body
-                    if self._main_loop is not None:
-                        self._main_loop.draw_screen()
+                    self._draw_screen()
                 elif self._view == "coin_detail":
                     # Breadcrumb refreshed every tick too (Review finding, post-4.3) --
                     # same reasoning as the Coins-pane breadcrumb above: its stale badge
@@ -614,11 +895,34 @@ class BotTuiApp:
                     # changes again.
                     self._refresh_breadcrumb()
                     self._body.original_widget = self._build_body()
-                    if self._main_loop is not None:
-                        self._main_loop.draw_screen()
+                    self._draw_screen()
+                elif self._view == "bots":
+                    # Rebuilt unconditionally every tick, same as Coin-detail -- each
+                    # row's own stale badge and uptime text must keep advancing purely
+                    # from the passage of time, and (per _build_bots_body's own Dev
+                    # Notes) this pane has no scroll-position-preservation contract to
+                    # protect yet, unlike the Coins pane.
+                    self._body.original_widget = self._build_bots_body()
+                    self._draw_screen()
+                elif self._view == "bot_detail":
+                    # Same reasoning as Coin-detail/Bots above: breadcrumb (and its
+                    # stale badge) and the header body both need to keep advancing
+                    # purely from wall-clock time -- no scroll-position contract to
+                    # protect here either (a single-bot header, no per-row selection).
+                    self._refresh_breadcrumb()
+                    self._body.original_widget = self._build_bot_detail_body()
+                    self._draw_screen()
             except Exception:
                 logger.exception("redraw loop iteration failed")
             await asyncio.sleep(_REDRAW_POLL_SECONDS)
+
+    def _draw_screen(self) -> None:
+        # Extracted from _redraw_loop (Story 4.5, cognitive-complexity fix) -- urwid's
+        # MainLoop is unset in widget-construction-level tests, so every redraw-loop
+        # branch guards this the same way; factoring the guard out here is what keeps
+        # _redraw_loop itself under this codebase's complexity threshold.
+        if self._main_loop is not None:
+            self._main_loop.draw_screen()
 
     def run(self) -> None:
         # Python 3.14 raises RuntimeError from asyncio.get_event_loop() when no loop
@@ -640,12 +944,14 @@ class BotTuiApp:
         snapshot_listener_task = loop.create_task(
             coin_detail_state._redis_listener(self._redis_url)
         )
+        bots_listener_task = loop.create_task(bots_state._redis_listener(self._redis_url))
         redraw_task = loop.create_task(self._redraw_loop())
         try:
             self._main_loop.run()
         finally:
             listener_task.cancel()
             snapshot_listener_task.cancel()
+            bots_listener_task.cancel()
             redraw_task.cancel()
 
 

@@ -15,13 +15,13 @@
 from decimal import Decimal
 
 import pytest
-from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
 
 from live_paper.config import PaperConfig
 from live_paper.config import RealMoneyConfig
 from live_paper.config import load_paper_config
 from live_paper.config import load_real_money_config
 from live_paper.config import resolve_config
+from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
 
 
 def _write(tmp_path, name: str, content: str):
@@ -147,3 +147,25 @@ def test_real_money_config_rejects_an_unquoted_trade_size(tmp_path) -> None:
     )
     with pytest.raises(ValueError, match="trade_size must be a quoted TOML string"):
         load_real_money_config(path)
+
+
+def test_default_paper_config_has_bot_id(tmp_path) -> None:
+    path = _write(tmp_path, "config.toml", 'network = "mainnet"\n')
+    config = load_paper_config(path)
+    assert config.bot_id == "bot-01"
+
+
+def test_paper_config_reads_explicit_bot_id(tmp_path) -> None:
+    path = _write(tmp_path, "config.toml", 'network = "mainnet"\nbot_id = "bot-btc"\n')
+    config = load_paper_config(path)
+    assert config.bot_id == "bot-btc"
+
+
+def test_real_money_config_reads_explicit_bot_id(tmp_path) -> None:
+    path = _write(
+        tmp_path,
+        "real_money.toml",
+        'mode = "real_money"\nnetwork = "mainnet"\nbot_id = "bot-btc-live"\n',
+    )
+    config = load_real_money_config(path)
+    assert config.bot_id == "bot-btc-live"

@@ -709,28 +709,3 @@ So that I can diagnose a bad day without leaving the terminal, using the same nu
 **When** Bot-detail renders
 **Then** regions 2 and 3 each independently render `history unavailable` in the neutral/quiet color, while region 1 (live snapshot) is unaffected since it has no dependency on the history read path (UX-DR6)
 
-### Story 4.8: Accessibility, keyboard-completeness, and voice/tone verification across the TUI
-
-Closing verification story for Epic 4, mirroring Story 1.1's pattern of confirming invariants hold end-to-end rather than trusting each prior story in isolation.
-
-As the builder,
-I want confirmation that every accessibility, keyboard-only, and voice/tone rule actually holds across every view built in this epic,
-So that I can trust the TUI is fully usable and consistent without re-auditing it myself.
-
-**Acceptance Criteria:**
-
-**Given** every attention-colored state introduced across Stories 4.1–4.7 (stale badges, PnL sign, bid/ask sides)
-**When** each is inspected
-**Then** every one also carries a non-color marker (glyph, text suffix, or fixed column position) — color is never the sole carrier of a state signal (UX-DR8)
-
-**Given** every state-changing action across the TUI (navigate, filter, drill in, toggle depth, start/stop, deep-link, quit)
-**When** each is exercised
-**Then** it has a keybinding and none requires a mouse (FR17, UX-DR8)
-
-**Given** every user-visible string introduced across Stories 4.1–4.7
-**When** each is reviewed against EXPERIENCE.md's Voice and Tone table
-**Then** it is a data value, state label, or keybinding hint — no marketing copy, no emoji, no exclamation marks, no encouragement copy (UX-DR9)
-
-**Given** the two independent staleness signals (Coins-pane/`ranking_engine`, per-bot/`live_paper`)
-**When** both are triggered simultaneously in a test scenario
-**Then** they render as two distinct indicators, never merged into one "something's stale" signal (UX-DR7, Data Sources & Staleness)

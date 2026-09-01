@@ -33,6 +33,8 @@ _READER_MODULES = (
     "coins_pane.py",
     "coin_detail.py",
     "coin_detail_state.py",
+    "bots_pane.py",
+    "bots_state.py",
 )
 
 _BANNED_SUBSTRINGS = ("TradingNode", "DataEngine", "import Strategy")

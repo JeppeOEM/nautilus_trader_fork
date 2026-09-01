@@ -21,8 +21,16 @@ LOGGING_INITIALIZED native-abort guard fixture that ml_signals/tests/conftest.py
 
 import pytest
 
+from bot_tui import bots_state
 from bot_tui import coin_detail_state
 from bot_tui import ranking_state
+
+
+@pytest.fixture(autouse=True)
+def _reset_bots_state() -> None:
+    """Guarantee the same cross-test-file isolation as above, for bots_state's globals."""
+    bots_state._LATEST_STATUSES = {}
+    bots_state._LATEST_RECEIVED_AT = {}
 
 
 @pytest.fixture(autouse=True)

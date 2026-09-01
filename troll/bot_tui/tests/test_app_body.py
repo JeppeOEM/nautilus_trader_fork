@@ -79,8 +79,12 @@ def test_build_body_renders_rows_once_ranks_are_present() -> None:
     assert "BTC-USD-PERP" in row_texts[0]
 
 
-def test_build_body_bots_view_is_stub_placeholder() -> None:
+def test_build_body_bots_view_cold_open_before_any_bots_status() -> None:
+    # Story 4.4 replaced this pane's stub placeholder with real bots:status-driven
+    # content -- see test_app_bots.py for the full Bots-pane test suite; this test is
+    # kept here only to confirm _build_body's own "bots" dispatch branch still routes
+    # to it correctly.
     _reset()
     app = BotTuiApp()
     app._view = "bots"
-    assert _filler_text(app._build_body()) == "no bots yet"
+    assert _filler_text(app._build_body()) == "waiting for bots:status…"

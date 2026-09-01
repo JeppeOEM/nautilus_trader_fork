@@ -6,6 +6,7 @@ starting_balances = ["10_000 USDC"]
 account_type = "MARGIN"
 log_level = "INFO"
 instrument_id = "BTC-USD-PERP.DYDX"
+bot_id = "bot-01"
 trade_size = "0.001"
 trend_buy_threshold = 0.6
 trend_sell_threshold = 0.4

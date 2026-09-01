@@ -53,6 +53,12 @@ class PaperConfig:
     trend_buy_threshold: float = 0.6
     trend_sell_threshold: float = 0.4
     ofi_confirm_threshold: float = 0.0
+    # bots:status/bots:control identity (Story 4.4, architecture AD-10) -- must stay
+    # distinct between a bot's paper and live-mode configs, or its status/control/
+    # history would silently merge across paper and real-money trading (no automated
+    # check exists for this; see epic-4-context.md's own flagged operator-discipline
+    # note).
+    bot_id: str = "bot-01"
 
 
 @dataclass(frozen=True)
@@ -66,6 +72,7 @@ class RealMoneyConfig:
     trend_buy_threshold: float = 0.6
     trend_sell_threshold: float = 0.4
     ofi_confirm_threshold: float = 0.0
+    bot_id: str = "bot-01"
 
 
 def _parse_trade_size(raw: dict, path: Path) -> Decimal:
@@ -109,6 +116,7 @@ def load_paper_config(path: Path) -> PaperConfig:
         trend_buy_threshold=raw.get("trend_buy_threshold", 0.6),
         trend_sell_threshold=raw.get("trend_sell_threshold", 0.4),
         ofi_confirm_threshold=raw.get("ofi_confirm_threshold", 0.0),
+        bot_id=raw.get("bot_id", "bot-01"),
     )
 
 
@@ -133,6 +141,7 @@ def load_real_money_config(path: Path) -> RealMoneyConfig:
         trend_buy_threshold=raw.get("trend_buy_threshold", 0.6),
         trend_sell_threshold=raw.get("trend_sell_threshold", 0.4),
         ofi_confirm_threshold=raw.get("ofi_confirm_threshold", 0.0),
+        bot_id=raw.get("bot_id", "bot-01"),
     )
 
 

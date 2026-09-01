@@ -146,6 +146,7 @@ services:
       network: host
     environment:
       PYTHONUNBUFFERED: "1"
+      REDIS_URL: "redis://127.0.0.1:6379"
       # Set to an explicit, differently-named file path to enable real-money execution --
       # never set by default here. See live_paper/config.py's module docstring.
       # LIVE_PAPER_REAL_MONEY_CONFIG: "/app/live_paper/real_money.toml"
