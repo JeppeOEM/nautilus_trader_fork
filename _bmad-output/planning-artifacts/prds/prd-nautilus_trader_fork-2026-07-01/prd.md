@@ -1,8 +1,8 @@
 ---
 title: 'dYdX Signal Research & Trading Platform'
-status: 'draft'
+status: 'final'
 created: '2026-07-01'
-updated: '2026-07-01'
+updated: '2026-07-24'
 ---
 
 # PRD: dYdX Signal Research & Trading Platform
@@ -31,6 +31,7 @@ A solo research-to-live pipeline for trading dYdX perpetuals. Raw market data is
 - **UJ-1.** Builder opens the ranking view, sees which coins are currently hot by HFT + structural signals, and flags one for opt-in raw-delta capture to study further.
 - **UJ-2.** Builder writes a new indicator in Jupyter against captured data, then runs it — same code, no rewrite — inside a multi-coin `BacktestNode` run across the current watchlist.
 - **UJ-3.** Builder starts the paper-trading dummy strategy and watches it place (paper) orders driven by the same signals just validated in backtest.
+- **UJ-4.** Builder SSHes into the Hetzner box, opens the terminal UI, and at a glance sees per-bot PnL/health and which coins are hot right now (by volume or volatility mode); drills into a coin's live indicators and order book with a keypress, hands off to the web dashboard for graphs with another, and starts/stops a bot without leaving the terminal.
 
 ## 3. Glossary
 
@@ -41,6 +42,8 @@ A solo research-to-live pipeline for trading dYdX perpetuals. Raw market data is
 - **Indicator / Signal** — A computed quantity (OFI, OBI, microprice, spread, or a new ML-derived signal) implemented once and consumed identically in Jupyter, backtest, and live contexts.
 - **Gatekeeper** — The architecture paradigm binding `dydx_collector` as the sole writer and sole validator of market data (see architecture spine AD-1 through AD-7).
 - **Dummy Strategy** — The v1 live paper-trading reference strategy that consumes every signal produced by the research side; not intended as a profitable strategy, but as an integration proof that the full loop (research → backtest → live) actually closes.
+- **Ranking Mode** — The active sort basis for Coin Ranking: either pure volume (FR-6) or cross-sectional volatility (FR-16), user-selectable — not a single blended weighted score.
+- **Bot Monitoring TUI** — A keyboard-only terminal UI (urwid) that mirrors the web dashboard's live coin ranking and adds a bots-status view, for fast SSH-based monitoring and light control without a browser.
 
 ## 4. Features
 
@@ -91,12 +94,23 @@ Open interest is polled separately and liquidity is classified using USD-denomin
 **Functional Requirements:**
 
 #### FR-6: Coin ranking, sorted by volume
-The system ranks all subscribed coins, refreshed continuously. For v1, the sort order is strictly by volume (USD, per FR-5's `volume24H` convention) — highest volume first. HFT indicators (OFI, OBI, microprice, spread) and slower/structural indicators (standard technical-analysis indicators, e.g. RSI and others, sourced from ta-lib/pandas-based Python libraries) are computed and displayed per coin alongside the rank, but do not currently affect sort order. `[NOTE FOR PM]` A composite ranking rule that combines all indicators into a single weighted score is a deliberately deferred research question — see §8.
+The system ranks all subscribed coins, refreshed continuously. In volume Ranking Mode (the default), the sort order is strictly by volume (USD, per FR-5's `volume24H` convention) — highest volume first. HFT indicators (OFI, OBI, microprice, spread) and slower/structural indicators (standard technical-analysis indicators, e.g. RSI and others, sourced from ta-lib/pandas-based Python libraries) are computed and displayed per coin alongside the rank, but do not affect sort order in this mode. See FR-16 for the volatility-based alternative Ranking Mode.
 
 **Consequences (testable):**
-- Coins are ordered strictly by descending `volume24H` (USD); this ordering is independent of any HFT/TA indicator value.
+- Coins are ordered strictly by descending `volume24H` (USD) in volume mode; this ordering is independent of any HFT/TA indicator value.
 - Ranking updates as new Snapshot data arrives, not on a static/one-time schedule.
 - Ranking is inspectable historically (which coin ranked where, when) — realizes the research JTBD.
+
+#### FR-16: Volatility-based ranking mode
+The system computes a volatility indicator (standard deviation of price/returns) per coin and ranks coins by relative volatility — cross-sectional comparison against all other subscribed coins, highest relative volatility first — as a user-selectable alternative Ranking Mode to FR-6's volume sort.
+
+**Consequences (testable):**
+- The user can switch the Watchlist's active Ranking Mode between volume (FR-6) and volatility (FR-16) without a code change.
+- Volatility is implemented once and consumed identically per §4.3's single-implementation convention — Jupyter, backtest, live, web dashboard, and TUI all read the same computed value, never a per-surface reimplementation.
+- A coin with higher relative volatility than its peers ranks higher in volatility mode; ranking is independent of that coin's volume rank.
+- The volatility lookback window is a configurable value (mirroring FR-1's configurable-interval pattern), defaulting to 1 hour; changing it requires no code change.
+
+**Notes:** Resolves OQ-1 (see §8) — composite ranking is realized as user-selectable Ranking Modes, not a single blended weighted score across all indicators. Volume Ranking Mode (FR-6) intentionally stays pinned to dYdX's fixed `volume24H` indexer figure for v1 — an in-house, similarly configurable-window volume calculation would require computing volume from raw captured trades rather than reading the exchange's fixed field, and is a future direction, not v1 scope.
 
 #### FR-7: Live watchlist
 The ranked list is queryable live and can be used directly to select a coin set for a multi-coin backtest.
@@ -172,27 +186,111 @@ Live paper-trading strategy execution lives in a module separate from `dydx_coll
 
 **Notes:** Real-money execution is expected eventually, as a mode/config change to this same strategy — not new capability. No additional safeguards beyond FR-15's config-gated isolation are defined for v1.
 
+### 4.6 Bot Monitoring TUI
+**Description:** A keyboard-only terminal UI (urwid) for fast SSH-based monitoring of running bots and coin rankings, without needing a browser; the web dashboard remains the tool for graphs and historical analysis. Realizes UJ-4.
+
+**Functional Requirements:**
+
+#### FR-17: Keyboard-only TUI over the shared live feed
+The system provides a terminal UI (urwid-based) that subscribes to the same live Redis pub/sub feed the web dashboard reads from, navigable entirely by keyboard.
+
+**Consequences (testable):**
+- No separate data pipeline/feed is created for the TUI; it reads the identical live stream as the dashboard.
+- Every navigation action has a keybinding; no feature requires mouse input.
+
+#### FR-18: Bots pane
+The TUI shows a list of running bots with PnL and other per-bot metrics, updated live.
+
+**Consequences (testable):**
+- The bot list refreshes as PnL/metrics change; no manual refresh action is needed.
+
+#### FR-19: Coin list pane mirroring the dashboard
+The TUI shows the Coin Ranking/Watchlist (§4.2, including FR-16's Ranking Mode) as a live mirror of what the web dashboard shows.
+
+**Consequences (testable):**
+- The TUI's coin order matches the web dashboard's coin order at all times, because both read the same ranking engine (§4.2) — never two independently-computed lists.
+
+#### FR-20: Coin-detail view
+Selecting a coin shows its live-calculated indicators (OFI/OBI/microprice/spread, per §4.3) and the full order-book depth (20 levels per side, not just top-of-book).
+
+**Consequences (testable):**
+- Depth is never truncated to top-of-book only in this view.
+- Indicator values shown are computed via the same §4.3 code path used everywhere else — no TUI-local reimplementation.
+
+#### FR-21: k9s-style navigation model
+Navigation adopts k9s's interaction pattern: a `:`-command bar to jump between views, `esc` to pop back a level, `/` to fuzzy-filter the coin list, and a breadcrumb header showing current location.
+
+**Consequences (testable):**
+- Every view is reachable via the `:` command bar.
+- `esc` always returns to the immediately previous view; it never exits the program.
+
+#### FR-22: Attention-only color coding
+Color is used exclusively to draw the eye to what needs attention (e.g. a stale/dead feed, a large PnL swing); baseline/healthy state renders in a quiet/neutral color, never decoratively elsewhere. Text is uniform monospace size throughout — no enlarged/ASCII-art scaling.
+
+**Consequences (testable):**
+- A row in normal/healthy state and one in a genuinely flagged state are visually distinguishable by color alone.
+- No UI element changes font size to indicate importance.
+- The coin-list pane's ranking order (FR-19) is plain and uninflected by color — sort position alone conveys rank; color coding applies to bot/feed health signals, not to the ranking list.
+
+#### FR-23: Bot start/stop controls
+The user can start and stop a bot directly from the TUI, for both paper-mode (FR-14) and live-mode execution, gated by the same isolation/config-gate as FR-15.
+
+**Consequences (testable):**
+- Starting/stopping a bot from the TUI does not bypass FR-15's config-gated separation between paper and real-money execution.
+- This control surface exists even though v1 trading itself remains paper-only per §5 — the control is built live-ready, not itself an enabling of real-money trading.
+
+#### FR-24: Live-only, no in-TUI history for market data
+The TUI shows only current/latest state for market data (coin ranking, order book, live indicators); it provides no historical replay or scrollback for this data. Historical/graph analysis of market data remains the web dashboard's responsibility.
+
+**Consequences (testable):**
+- No time-scrubbing or history view for market data exists in the TUI.
+
+**Notes:** `[UPDATED 2026-07-24]` This restriction is scoped to market data specifically, not "any history anywhere in the TUI" — see FR-27, a distinct data domain (bot/trade performance) that the TUI does show history for.
+
+#### FR-25: Deep-linked browser handoff (Should — next phase, not MVP-blocking)
+A keybinding on a selected coin opens that coin's graph view in the web dashboard, deep-linked to the exact coin and the TUI's current time-window/zoom context.
+
+**Consequences (testable):**
+- The opened browser page reflects the same coin and time context the TUI was showing, not a generic dashboard landing page.
+
+**Notes:** Should-tier per brainstorm convergence (2026-07-23) — implement once the Must-tier panes/navigation (FR-17–FR-24) are stable; does not block MVP sign-off (see §6.2).
+
+#### FR-27 `[ADDED 2026-07-24]`: Bot-detail trade/PnL history
+The Bot-detail view shows a trades blotter (individual fills) and a PnL-over-time chart (day/week/month/all preset toggle, no free-form scrubbing), sourced from a durable trade/position history that both the web dashboard and the TUI read — read-only, zero duplicate computation between the two surfaces. A keybinding on the open bot opens the dashboard's fuller trades/PnL view for the same bot, mirroring FR-25's coin deep-link.
+
+**Consequences (testable):**
+- The trades blotter and PnL chart are never computed independently by the TUI — both the TUI and the dashboard read the same underlying history, so the numbers always match.
+- The PnL-over-time chart's time range is restricted to the day/week/month/all presets — no arbitrary date-range scrubbing.
+- The dashboard deep-link opens the same bot's fuller trades/PnL view, not a generic landing page.
+
+**Notes:** Surfaced during the 2026-07-24 UX design pass (see `_bmad-output/planning-artifacts/ux-designs/ux-nautilus_trader_fork-2026-07-24/EXPERIENCE.md`'s Data Sources & Staleness section) and backed by an architecture decision the same day (`ARCHITECTURE-SPINE.md`'s AD-10): sourced from Nautilus's own `Cache` (via `live_paper`'s `TradingNodeConfig` enabling `CacheConfig(database=DatabaseConfig(type="redis", ...))`), not a bespoke new store. Already story-planned (`epics.md` Epic 4, Stories 4.6–4.7). This FR was originally going to reuse number "26," but FR-26 had already been assigned and retired earlier the same day for an unrelated, explicitly-rejected feature (auto-surfacing coins via color) — FR-27 avoids that collision.
+
 ## 5. Non-Goals (Explicit)
 
 - Not a multi-user product — no auth, accounts, or access control.
 - Not a multi-exchange product in v1 — dYdX only.
 - Not a mobile app.
 - Not real-money live trading in v1 — the Dummy Strategy is paper-mode only (see FR-15). Real-money trading is expected to enter scope later, but as a config/mode change to the same strategy rather than new capability — not a v1 concern.
-- Not a polished consumer UI — the dashboard exists to serve the builder's own research, not a general audience.
+- Not a polished consumer UI — the dashboard exists to serve the builder's own research, not a general audience. Applies equally to the Bot Monitoring TUI.
+- The TUI does not manage tmux/pane layout — that remains the user's own terminal setup, outside the product's concern.
+- The TUI does not add secondary resource-management views beyond what §4.6 specifies (e.g. no k9s-style `:xray` view or resource-count badges) — explicit non-goal per brainstorm convergence.
+- The TUI does not provide historical replay/scrollback for market data (FR-24) — that stays the web dashboard's job. (Bot/trade performance history is a distinct data domain and is in-scope per FR-27.)
 
 ## 6. MVP Scope
 
 ### 6.1 In Scope
 - Data collection: configurable-interval Snapshots (default 0.5s) + opt-in per-coin Raw Delta Capture, fail-closed integrity gate, reconnect/gap resilience, USD-denominated liquidity.
-- Coin Ranking & Watchlist, both as a research view and a live backtest-input feed.
+- Coin Ranking & Watchlist, both as a research view and a live backtest-input feed, with user-selectable Ranking Mode (volume per FR-6, volatility per FR-16).
 - Jupyter research environment with indicators reusable, unmodified, across research/backtest/live.
 - Nautilus-native (`BacktestNode`) backtesting, dual timeframe (HFT + candlestick), multi-coin across the Watchlist.
 - Live paper-trading Dummy Strategy wired to every signal produced.
+- Bot Monitoring TUI (FR-17–FR-24, FR-27): urwid keyboard-only interface, bots pane, coin-list pane mirroring the dashboard's plain sorted ranking, coin-detail view with live indicators and full book depth, k9s-style navigation, attention-only color coding (bot/feed health only, not the ranking list), start/stop bot controls (paper-ready-for-live), bot-detail trade/PnL history (FR-27) sourced from a shared durable history read by both dashboard and TUI.
 
 ### 6.2 Out of Scope for MVP
 - Real-money live trading — the natural next step after the Dummy Strategy proves out, achieved via a config/mode change rather than new capability; revisit once paper results are trusted.
 - Alerts/notifications (e.g. push/Slack when a coin's ranking spikes).
 - CLI polish / packaging beyond what's needed to run the pieces locally and in Docker.
+- Deep-linked browser handoff from the TUI to the web dashboard (FR-25) — Should-tier, planned as the next increment after the TUI's Must-tier scope ships.
 
 ## 7. Success Metrics
 
@@ -202,14 +300,16 @@ Live paper-trading strategy execution lives in a module separate from `dydx_coll
 
 **Secondary**
 - **SM-3**: The Dummy Strategy runs continuously in paper mode against live data without manual intervention for at least one week. Validates FR-14, FR-15.
+- **SM-4**: The Bot Monitoring TUI's coin list and the web dashboard's coin list never diverge in ranking order at the same point in time, under either Ranking Mode. Validates FR-16, FR-19 (shared-ranking-engine constraint).
+- **SM-5** `[ADDED 2026-07-24]`: The Bot Monitoring TUI's trades/PnL figures for a given bot and the web dashboard's figures for the same bot never disagree at the same point in time. Validates FR-27 (shared-history-source constraint).
 
 **Counter-metrics (do not optimize)**
 - **SM-C1**: Coverage (number of coins captured) is not optimized at the expense of data integrity — a rejected/flagged Snapshot is a success of the gate, not a failure to fix by relaxing validation. Counterbalances SM-2.
 
 ## 8. Open Questions
 
-1. Composite multi-indicator ranking rule — FR-6 sorts by volume alone for v1; whether/how to combine HFT and TA indicators into a single weighted rank is deferred to future research.
+1. `[RESOLVED 2026-07-24]` Composite multi-indicator ranking rule — resolved via FR-16: ranking is user-selectable between volume (FR-6) and cross-sectional volatility (FR-16) Modes, not a single blended weighted score across all indicators.
 
 ## 9. Assumptions Index
 
-None outstanding — both discovery-time assumptions (FR-9's Jupyter convention, FR-13's dynamic-Watchlist scope) were confirmed and folded into the FR text directly.
+None outstanding — FR-16's volatility lookback window default (1h, configurable) was confirmed and folded into the FR text directly.

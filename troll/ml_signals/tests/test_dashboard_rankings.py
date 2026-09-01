@@ -12,34 +12,34 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
-"""Unit tests for the rankings default volume-sort (_rankings_json) and volume24H parsing."""
+"""
+Unit tests for dashboard as a pure reader of rankings:live (Story 1.8, Task 8).
 
+Story 1.2/1.4's inline volume-sort/watchlist/rank logic has been extracted into
+ranking_engine -- dashboard._rankings_json() now renders whatever order
+ranking_engine's rankings:live message dictates, never re-sorting locally. See
+ranking_engine/tests/test_engine.py for the relocated ranking-computation tests.
+"""
+
+import asyncio
 import json
-import tempfile
 import time
 
-import ml_signals.metrics_store as metrics_store
+import ml_signals.dashboard as dashboard_module
 from ml_signals.dashboard import _LIVE_FAST
-from ml_signals.dashboard import _VOLUME_24H
-from ml_signals.dashboard import _WATCHLIST_STALE_NS
-from ml_signals.dashboard import _current_ranks
-from ml_signals.dashboard import _is_fresh
-from ml_signals.dashboard import _merge_rank_into_snapshots
 from ml_signals.dashboard import _rankings_json
-from ml_signals.dashboard import _watchlist_ids
-from ml_signals.dashboard import make_app
-from ml_signals.dashboard import parse_volume_24h
-from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
+from ml_signals.dashboard import watchlist_json_handler
 
 
 def _reset_state() -> None:
     _LIVE_FAST.clear()
-    _VOLUME_24H.clear()
+    dashboard_module._LATEST_RANKING = None
+    dashboard_module._LATEST_RANKING_RECEIVED_AT = 0.0
 
 
 def _live_row(iid: str) -> dict:
     return {
-        "ts": 1_000_000_000,
+        "ts": time.time_ns(),
         "instrument_id": iid,
         "_err": None,
         "ofi_10_z": None,
@@ -59,51 +59,69 @@ def _live_row(iid: str) -> dict:
     }
 
 
-def test_parse_volume_24h_extracts_usd_volume_per_market() -> None:
-    markets_json = {"markets": {
-        "BTC": {"ticker": "BTC-USD", "volume24H": "50000000"},
-        "ETH": {"ticker": "ETH-USD", "volume24H": "10000000"},
-    }}
-    result = parse_volume_24h(markets_json)
-    assert result == {"BTC-USD-PERP.DYDX": 50000000.0, "ETH-USD-PERP.DYDX": 10000000.0}
+def _ranking_message(ranks: list[dict], mode: str = "volume") -> dict:
+    return {"mode": mode, "updated_at": time.time_ns(), "ranks": ranks}
 
 
-def test_parse_volume_24h_missing_field_defaults_to_zero() -> None:
-    markets_json = {"markets": {"X": {"ticker": "X-USD"}}}
-    result = parse_volume_24h(markets_json)
-    assert result == {"X-USD-PERP.DYDX": 0.0}
+def _rank_row(iid: str, rank: int, volume24h: float = 1.0) -> dict:
+    return {"instrument_id": iid, "rank": rank, "volume24h": volume24h, "volatility_score": None}
 
 
-def test_parse_volume_24h_skips_market_missing_ticker() -> None:
-    markets_json = {"markets": {"X": {"volume24H": "100"}}}
-    assert parse_volume_24h(markets_json) == {}
-
-
-def test_rankings_json_sorted_by_descending_volume24h() -> None:
+def test_rankings_json_renders_ranks_in_engines_exact_order() -> None:
+    """Rows follow rankings:live's own order -- never re-sorted client- or server-side."""
     _reset_state()
     _LIVE_FAST["SHIB-USD-PERP.DYDX"] = _live_row("SHIB-USD-PERP.DYDX")
     _LIVE_FAST["BTC-USD-PERP.DYDX"] = _live_row("BTC-USD-PERP.DYDX")
-    _LIVE_FAST["ETH-USD-PERP.DYDX"] = _live_row("ETH-USD-PERP.DYDX")
-    _VOLUME_24H["SHIB-USD-PERP.DYDX"] = 100.0
-    _VOLUME_24H["BTC-USD-PERP.DYDX"] = 50_000_000.0
-    _VOLUME_24H["ETH-USD-PERP.DYDX"] = 10_000_000.0
+    dashboard_module._LATEST_RANKING = _ranking_message([
+        _rank_row("BTC-USD-PERP.DYDX", 1, 50_000_000.0),
+        _rank_row("SHIB-USD-PERP.DYDX", 2, 100.0),
+    ])
 
     payload = json.loads(_rankings_json())
     ordered_iids = [row["instrument_id"] for row in payload["rows"]]
 
-    assert ordered_iids == ["BTC-USD-PERP.DYDX", "ETH-USD-PERP.DYDX", "SHIB-USD-PERP.DYDX"]
+    assert ordered_iids == ["BTC-USD-PERP.DYDX", "SHIB-USD-PERP.DYDX"]
 
 
-def test_rankings_json_missing_volume_sorts_as_zero() -> None:
+def test_rankings_json_ranked_row_volume24h_cell_comes_from_ranks_entry() -> None:
     _reset_state()
     _LIVE_FAST["BTC-USD-PERP.DYDX"] = _live_row("BTC-USD-PERP.DYDX")
-    _LIVE_FAST["NEW-USD-PERP.DYDX"] = _live_row("NEW-USD-PERP.DYDX")  # no _VOLUME_24H entry
-    _VOLUME_24H["BTC-USD-PERP.DYDX"] = 1.0
+    dashboard_module._LATEST_RANKING = _ranking_message([
+        _rank_row("BTC-USD-PERP.DYDX", 1, 50_000_000.0),
+    ])
+
+    payload = json.loads(_rankings_json())
+
+    assert payload["rows"][0]["cells"]["volume24h"]["raw"] == 50_000_000.0
+
+
+def test_rankings_json_unranked_instrument_appears_after_ranked_rows_with_null_cells() -> None:
+    """An instrument in _LIVE_FAST but absent from ranks[] is appended after all ranked
+    rows, with no rank/volume24h cell values (never dropped, never an error).
+    """
+    _reset_state()
+    _LIVE_FAST["BTC-USD-PERP.DYDX"] = _live_row("BTC-USD-PERP.DYDX")
+    _LIVE_FAST["NEW-USD-PERP.DYDX"] = _live_row("NEW-USD-PERP.DYDX")  # not yet ranked
+    dashboard_module._LATEST_RANKING = _ranking_message([
+        _rank_row("BTC-USD-PERP.DYDX", 1, 50_000_000.0),
+    ])
 
     payload = json.loads(_rankings_json())
     ordered_iids = [row["instrument_id"] for row in payload["rows"]]
 
     assert ordered_iids == ["BTC-USD-PERP.DYDX", "NEW-USD-PERP.DYDX"]
+    assert payload["rows"][1]["cells"]["volume24h"]["raw"] is None
+
+
+def test_rankings_json_cold_start_with_no_ranking_message_does_not_raise() -> None:
+    """_LATEST_RANKING is None (no message received yet) must render cleanly."""
+    _reset_state()
+    _LIVE_FAST["BTC-USD-PERP.DYDX"] = _live_row("BTC-USD-PERP.DYDX")
+
+    payload = json.loads(_rankings_json())  # must not raise
+
+    assert [row["instrument_id"] for row in payload["rows"]] == ["BTC-USD-PERP.DYDX"]
+    assert payload["rows"][0]["cells"]["volume24h"]["raw"] is None
 
 
 def test_rankings_json_cells_include_raw_value() -> None:
@@ -111,28 +129,12 @@ def test_rankings_json_cells_include_raw_value() -> None:
     row = _live_row("BTC-USD-PERP.DYDX")
     row["price"] = 50000.1234
     _LIVE_FAST["BTC-USD-PERP.DYDX"] = row
+    dashboard_module._LATEST_RANKING = _ranking_message([_rank_row("BTC-USD-PERP.DYDX", 1)])
 
     payload = json.loads(_rankings_json())
     cell = payload["rows"][0]["cells"]["price"]
 
     assert cell["raw"] == 50000.1234
-
-
-def test_rankings_json_sort_updates_live_not_cached() -> None:
-    """AC2: sort order must reflect _VOLUME_24H mutated between two calls, not a frozen order."""
-    _reset_state()
-    _LIVE_FAST["AAA-USD-PERP.DYDX"] = _live_row("AAA-USD-PERP.DYDX")
-    _LIVE_FAST["BBB-USD-PERP.DYDX"] = _live_row("BBB-USD-PERP.DYDX")
-    _VOLUME_24H["AAA-USD-PERP.DYDX"] = 100.0
-    _VOLUME_24H["BBB-USD-PERP.DYDX"] = 1.0
-
-    first = [r["instrument_id"] for r in json.loads(_rankings_json())["rows"]]
-    assert first == ["AAA-USD-PERP.DYDX", "BBB-USD-PERP.DYDX"]
-
-    _VOLUME_24H["BBB-USD-PERP.DYDX"] = 1_000.0  # now BBB outranks AAA
-
-    second = [r["instrument_id"] for r in json.loads(_rankings_json())["rows"]]
-    assert second == ["BBB-USD-PERP.DYDX", "AAA-USD-PERP.DYDX"]
 
 
 def test_rankings_json_cells_null_out_non_finite_raw_value() -> None:
@@ -142,6 +144,7 @@ def test_rankings_json_cells_null_out_non_finite_raw_value() -> None:
     row["pct_24h"] = float("nan")
     row["volatility"] = float("inf")
     _LIVE_FAST["BTC-USD-PERP.DYDX"] = row
+    dashboard_module._LATEST_RANKING = _ranking_message([_rank_row("BTC-USD-PERP.DYDX", 1)])
 
     raw_text = _rankings_json()
     assert "NaN" not in raw_text
@@ -153,136 +156,144 @@ def test_rankings_json_cells_null_out_non_finite_raw_value() -> None:
     assert cells["volatility"]["raw"] is None
 
 
-def test_make_app_wires_configured_network_for_volume_poll() -> None:
-    """The volume-24h poll must use the collector's configured network, not always MAINNET."""
-    app = make_app("redis://127.0.0.1:6379", "/nonexistent/catalog", DydxNetwork.TESTNET)
-    assert app["dydx_network"] == DydxNetwork.TESTNET
-
-
-def test_make_app_defaults_network_to_mainnet() -> None:
-    app = make_app("redis://127.0.0.1:6379", "/nonexistent/catalog")
-    assert app["dydx_network"] == DydxNetwork.MAINNET
-
-
-def test_is_fresh_true_within_window() -> None:
+def test_rankings_json_ranking_stale_false_under_threshold() -> None:
     _reset_state()
-    now_ns = time.time_ns()
-    _LIVE_FAST["BTC-USD-PERP.DYDX"] = {**_live_row("BTC-USD-PERP.DYDX"), "ts": now_ns}
-    assert _is_fresh("BTC-USD-PERP.DYDX", now_ns) is True
+    dashboard_module._LATEST_RANKING = _ranking_message([])
+    dashboard_module._LATEST_RANKING_RECEIVED_AT = time.time()
+
+    payload = json.loads(_rankings_json())
+
+    assert payload["ranking_stale"] is False
 
 
-def test_is_fresh_false_past_stale_window() -> None:
+def test_rankings_json_ranking_stale_true_past_threshold() -> None:
     _reset_state()
-    now_ns = time.time_ns()
-    stale_ts = now_ns - _WATCHLIST_STALE_NS - 1
-    _LIVE_FAST["BTC-USD-PERP.DYDX"] = {**_live_row("BTC-USD-PERP.DYDX"), "ts": stale_ts}
-    assert _is_fresh("BTC-USD-PERP.DYDX", now_ns) is False
-
-
-def test_is_fresh_false_for_unknown_instrument() -> None:
-    _reset_state()
-    assert _is_fresh("NOPE-USD-PERP.DYDX", time.time_ns()) is False
-
-
-def test_watchlist_ids_excludes_stale_instrument_ac2() -> None:
-    """AC2: a coin that stops receiving snapshots must drop out of the Watchlist."""
-    _reset_state()
-    now_ns = time.time_ns()
-    _LIVE_FAST["BTC-USD-PERP.DYDX"] = {**_live_row("BTC-USD-PERP.DYDX"), "ts": now_ns}
-    _LIVE_FAST["DEAD-USD-PERP.DYDX"] = {
-        **_live_row("DEAD-USD-PERP.DYDX"), "ts": now_ns - _WATCHLIST_STALE_NS - 1,
-    }
-    _VOLUME_24H["BTC-USD-PERP.DYDX"] = 1.0
-    _VOLUME_24H["DEAD-USD-PERP.DYDX"] = 1_000_000.0  # would sort first if not excluded
-
-    assert _watchlist_ids() == ["BTC-USD-PERP.DYDX"]
-
-
-def test_watchlist_ids_sorted_by_descending_volume() -> None:
-    _reset_state()
-    now_ns = time.time_ns()
-    for iid, vol in (("BTC-USD-PERP.DYDX", 50_000_000.0), ("SHIB-USD-PERP.DYDX", 100.0)):
-        _LIVE_FAST[iid] = {**_live_row(iid), "ts": now_ns}
-        _VOLUME_24H[iid] = vol
-
-    assert _watchlist_ids() == ["BTC-USD-PERP.DYDX", "SHIB-USD-PERP.DYDX"]
-
-
-def test_current_ranks_assigns_1_indexed_positions_by_volume() -> None:
-    _reset_state()
-    now_ns = time.time_ns()
-    for iid, vol in (("BTC-USD-PERP.DYDX", 50_000_000.0), ("SHIB-USD-PERP.DYDX", 100.0)):
-        _LIVE_FAST[iid] = {**_live_row(iid), "ts": now_ns}
-        _VOLUME_24H[iid] = vol
-
-    assert _current_ranks() == {"BTC-USD-PERP.DYDX": 1, "SHIB-USD-PERP.DYDX": 2}
-
-
-def test_current_ranks_excludes_stale_instrument() -> None:
-    _reset_state()
-    now_ns = time.time_ns()
-    _LIVE_FAST["BTC-USD-PERP.DYDX"] = {**_live_row("BTC-USD-PERP.DYDX"), "ts": now_ns}
-    _LIVE_FAST["DEAD-USD-PERP.DYDX"] = {
-        **_live_row("DEAD-USD-PERP.DYDX"), "ts": now_ns - _WATCHLIST_STALE_NS - 1,
-    }
-
-    assert "DEAD-USD-PERP.DYDX" not in _current_ranks()
-
-
-def test_merge_rank_into_snapshots_attaches_rank_and_volume() -> None:
-    snapshots = [{"instrument_id": "BTC-USD-PERP.DYDX", "price": 1.0}]
-    ranks = {"BTC-USD-PERP.DYDX": 1}
-    volumes = {"BTC-USD-PERP.DYDX": 50_000_000.0}
-
-    merged = _merge_rank_into_snapshots(snapshots, ranks, volumes)
-
-    assert merged[0]["rank"] == 1
-    assert merged[0]["volume24h"] == 50_000_000.0
-    assert merged[0]["price"] == 1.0  # original fields preserved
-
-
-def test_merge_rank_into_snapshots_none_for_unranked_instrument() -> None:
-    snapshots = [{"instrument_id": "DEAD-USD-PERP.DYDX", "price": 1.0}]
-
-    merged = _merge_rank_into_snapshots(snapshots, ranks={}, volumes={})
-
-    assert merged[0]["rank"] is None
-    assert merged[0]["volume24h"] is None
-
-
-def test_ac4_delisted_coin_keeps_its_rank_history() -> None:
-    """AC4: a coin's earlier ranked snapshots stay queryable after it drops off the Watchlist."""
-    _reset_state()
-    db_path = tempfile.mktemp(suffix=".db")
-    iid = "BTC-USD-PERP.DYDX"
-    now_ns = time.time_ns()
-
-    # Cycle 1: coin is live and ranked -- persist a snapshot carrying that rank.
-    _LIVE_FAST[iid] = {**_live_row(iid), "ts": now_ns}
-    _VOLUME_24H[iid] = 50_000_000.0
-    ranked_ts = now_ns
-    metrics_store.write(
-        _merge_rank_into_snapshots(
-            [{"instrument_id": iid, "ts": ranked_ts, "price": 1.0}], _current_ranks(), _VOLUME_24H,
-        ),
-        db_path,
+    dashboard_module._LATEST_RANKING = _ranking_message([])
+    dashboard_module._LATEST_RANKING_RECEIVED_AT = (
+        time.time() - dashboard_module._RANKING_STALE_SECONDS - 1
     )
 
-    # Cycle 2: the coin goes stale and drops out of the Watchlist -- this cycle persists rank=None.
-    _LIVE_FAST[iid] = {**_live_row(iid), "ts": now_ns - _WATCHLIST_STALE_NS - 1}
-    delisted_ts = ranked_ts + 60_000_000_000
-    metrics_store.write(
-        _merge_rank_into_snapshots(
-            [{"instrument_id": iid, "ts": delisted_ts, "price": 1.0}], _current_ranks(), _VOLUME_24H,
-        ),
-        db_path,
-    )
+    payload = json.loads(_rankings_json())
 
-    # The earlier ranked row is still retrievable -- delisting doesn't erase history.
-    row = metrics_store.nearest(iid, ranked_ts, db_path)
-    assert row["rank"] == 1
+    assert payload["ranking_stale"] is True
 
-    rows = metrics_store.history(iid, db_path, days=31)
-    assert len(rows) == 2
-    assert rows[0]["rank"] == 1
-    assert rows[1]["rank"] is None
+
+def test_rankings_json_ranking_stale_true_when_no_message_ever_received() -> None:
+    _reset_state()
+
+    payload = json.loads(_rankings_json())
+
+    assert payload["ranking_stale"] is True
+    assert payload["ranking_age_s"] is None
+
+
+def test_watchlist_json_handler_reads_instrument_ids_from_latest_ranking() -> None:
+    """FR-7 proxy: /api/watchlist is now a thin read of rankings:live's own ranked
+    instrument-id list -- no new Redis call, no local re-derivation.
+    """
+    _reset_state()
+    dashboard_module._LATEST_RANKING = _ranking_message([
+        _rank_row("BTC-USD-PERP.DYDX", 1),
+        _rank_row("ETH-USD-PERP.DYDX", 2, 0.5),
+    ])
+
+    response = asyncio.run(watchlist_json_handler(None))
+    body = json.loads(response.text)
+
+    assert body["instrument_ids"] == ["BTC-USD-PERP.DYDX", "ETH-USD-PERP.DYDX"]
+
+
+def test_watchlist_json_handler_empty_before_first_ranking_message() -> None:
+    _reset_state()
+
+    response = asyncio.run(watchlist_json_handler(None))
+    body = json.loads(response.text)
+
+    assert body["instrument_ids"] == []
+
+
+def test_watchlist_json_handler_skips_malformed_rank_row_missing_instrument_id() -> None:
+    _reset_state()
+    dashboard_module._LATEST_RANKING = _ranking_message([
+        {"rank": 1, "volume24h": 1.0, "volatility_score": None},  # missing instrument_id
+        _rank_row("BTC-USD-PERP.DYDX", 2),
+    ])
+
+    response = asyncio.run(watchlist_json_handler(None))  # must not raise
+    body = json.loads(response.text)
+
+    assert body["instrument_ids"] == ["BTC-USD-PERP.DYDX"]
+
+
+def test_handle_rankings_message_sets_latest_ranking_and_received_at() -> None:
+    _reset_state()
+    message = _ranking_message([_rank_row("BTC-USD-PERP.DYDX", 1)])
+
+    before = time.time()
+    dashboard_module._handle_rankings_message(message)
+    after = time.time()
+
+    assert dashboard_module._LATEST_RANKING == message
+    assert before <= dashboard_module._LATEST_RANKING_RECEIVED_AT <= after
+
+
+def test_handle_rankings_message_missing_ranks_key_is_ignored() -> None:
+    _reset_state()
+
+    dashboard_module._handle_rankings_message({"mode": "volume", "updated_at": 1})
+
+    assert dashboard_module._LATEST_RANKING is None
+
+
+def test_handle_rankings_message_non_list_ranks_is_ignored() -> None:
+    _reset_state()
+
+    dashboard_module._handle_rankings_message({"mode": "volume", "ranks": "not-a-list"})
+
+    assert dashboard_module._LATEST_RANKING is None
+
+
+def test_handle_rankings_message_malformed_preserves_previous_valid_state() -> None:
+    """A malformed message must not corrupt _LATEST_RANKING -- the last good ranking is
+    kept, not overwritten with garbage.
+    """
+    _reset_state()
+    good_message = _ranking_message([_rank_row("BTC-USD-PERP.DYDX", 1)])
+    dashboard_module._handle_rankings_message(good_message)
+
+    dashboard_module._handle_rankings_message({"mode": "volume"})  # missing ranks
+
+    assert dashboard_module._LATEST_RANKING == good_message
+
+
+def test_rankings_json_ranked_instrument_absent_from_live_fast_uses_fallback_row() -> None:
+    """Reverse of the already-tested 'live but unranked' case: an instrument
+    ranking_engine has ranked but dashboard's own _LIVE_FAST hasn't seen yet (redis
+    ingest race, cold start) still renders via live_by_iid.get(iid, {"instrument_id":
+    iid})'s fallback, rather than being dropped or raising a KeyError.
+    """
+    _reset_state()
+    dashboard_module._LATEST_RANKING = _ranking_message([
+        _rank_row("BRANDNEW-USD-PERP.DYDX", 1, 12_345.0),
+    ])
+
+    payload = json.loads(_rankings_json())
+
+    assert [row["instrument_id"] for row in payload["rows"]] == ["BRANDNEW-USD-PERP.DYDX"]
+    assert payload["rows"][0]["cells"]["volume24h"]["raw"] == 12_345.0
+
+
+def test_rankings_json_malformed_rank_row_missing_instrument_id_is_skipped() -> None:
+    """One malformed entry (missing instrument_id) in an otherwise-valid ranks list
+    must not crash the render -- it is skipped, the rest of the list still renders.
+    """
+    _reset_state()
+    _LIVE_FAST["BTC-USD-PERP.DYDX"] = _live_row("BTC-USD-PERP.DYDX")
+    dashboard_module._LATEST_RANKING = _ranking_message([
+        {"rank": 1, "volume24h": 1.0, "volatility_score": None},  # missing instrument_id
+        _rank_row("BTC-USD-PERP.DYDX", 2),
+    ])
+
+    payload = json.loads(_rankings_json())  # must not raise
+
+    assert [row["instrument_id"] for row in payload["rows"]] == ["BTC-USD-PERP.DYDX"]

@@ -1,0 +1,135 @@
+<title>Bot Monitoring TUI — Bots pane</title>
+<style>
+/*
+  Governs: DESIGN.md Colors (attention-positive/negative/stale), Components
+  (breadcrumb-header, footer-hint-bar, list-row-bot, stale-badge).
+  EXPERIENCE.md Information Architecture (Bots pane row), Component Patterns
+  (Bots-pane list row, Start/stop control), State Patterns (Bot feed stale --
+  per-row, independent), Data Sources & Staleness (per-bot heartbeat, never
+  merged with Coins-pane signal), Key Flow 1 step 7 and Key Flow 2 steps 1-2.
+  memlog decision: "Bots pane columns confirmed: bot_id, PnL, strategy/symbol,
+  mode, position size/exposure, uptime/last-heartbeat, win rate/trade count."
+
+  Terminal theme rendered below is ONE concrete illustrative choice
+  (dark "One Dark"-family scheme). DESIGN.md's actual rule is "inherit
+  the terminal's own default fg/bg" -- no fixed hex palette in the
+  product itself.
+*/
+:root {
+  color-scheme: light dark;
+  --page-bg: #f2f4f2;
+  --page-fg: #17201a;
+  --caption-fg: #5b6b60;
+  --accent: #3f7a57;
+  --rule: #c9d2cb;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --page-bg: #12140f; --page-fg: #e6e9e4; --caption-fg: #93a394; --accent: #7fb88f; --rule: #2a3128; }
+}
+:root[data-theme="light"] { --page-bg: #f2f4f2; --page-fg: #17201a; --caption-fg: #5b6b60; --accent: #3f7a57; --rule: #c9d2cb; }
+:root[data-theme="dark"] { --page-bg: #12140f; --page-fg: #e6e9e4; --caption-fg: #93a394; --accent: #7fb88f; --rule: #2a3128; }
+
+* { box-sizing: border-box; }
+body {
+  background: var(--page-bg);
+  color: var(--page-fg);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  padding: 24px 16px 48px;
+  margin: 0;
+}
+.eyebrow {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.7rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin: 0 0 6px;
+}
+h1 {
+  font-size: 1.15rem;
+  font-weight: 600;
+  margin: 0 0 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--rule);
+}
+p.lede { color: var(--caption-fg); font-size: 0.85rem; margin: 0 0 24px; max-width: 74ch; }
+.stack { display: flex; flex-direction: column; gap: 28px; max-width: 100%; }
+.state-label { font-size: 0.78rem; color: var(--caption-fg); margin: 0 0 6px; font-weight: 600; letter-spacing: 0.02em; }
+.state-caption { font-size: 0.78rem; color: var(--caption-fg); margin: 6px 0 0; max-width: 74ch; }
+
+.term-wrap { overflow-x: auto; max-width: 100%; }
+.term {
+  --t-bg: #1e1e1e;
+  --t-fg: #cccccc;
+  --t-dim: #7f7f7f;
+  --t-yellow: #e5c07b;
+  --t-red: #e06c75;
+  --t-green: #98c379;
+  width: max-content;
+  min-width: 100%;
+  background: var(--t-bg);
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 6px 24px rgba(0,0,0,0.35);
+}
+.titlebar {
+  background: #303030;
+  padding: 7px 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.dot.r { background: #ff5f57; }
+.dot.y { background: #febc2e; }
+.dot.g { background: #28c840; }
+.titletext {
+  flex: 1;
+  text-align: center;
+  color: #9a9a9a;
+  font-size: 0.75rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  margin-right: 24px;
+}
+pre.content {
+  margin: 0;
+  padding: 10px 0 10px 1ch;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--t-fg);
+  white-space: pre;
+}
+.dim { color: var(--t-dim); }
+.stale { color: var(--t-yellow); }
+.pos { color: var(--t-green); }
+.neg { color: var(--t-red); }
+</style>
+
+<p class="eyebrow">Bot Monitoring TUI · key screen 3 of 4</p>
+<h1>Bots pane</h1>
+<p class="lede">Reached via <code>:bots</code>. One row per bot from <code>bots:status</code>. PnL sign carries color; staleness is tracked per bot's own heartbeat, independent of every other row and independent of the Coins pane's own stale signal.</p>
+
+<div class="stack">
+
+<div>
+<p class="state-label">at rest</p>
+<div class="term-wrap"><div class="term">
+<div class="titlebar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="titletext">ssh hetzner-box -- bot_tui</span></div>
+<pre class="content">Bots
+
+<span class="dim">bot_id  strategy / symbol           mode      pnl  position    uptime            win rate</span>
+bot-01  ofi_scalp/BTC-USD-PERP      paper  <span class="pos">   +142.30</span>  long 0.42   up 3d04h         58% (142)
+bot-03  microprice_rev/SOL-USD-PERP paper  <span class="neg">   -812.40</span>  short 180.0 up 1d11h          41% (63)
+bot-05  obi_mm/ETH-USD-PERP         live   <span class="pos">    +38.15</span>  flat        up 9h22m         52% (211)
+bot-07  ofi_scalp/AVAX-USD-PERP     paper  <span class="pos">     +9.80</span>  long 12.0   <span class="stale">hb 41m ago ~ STALE</span>  49% (30)
+bot-09  obi_mm/OP-USD-PERP          paper  <span class="neg">     -4.20</span>  short 220.0 up 6h48m          50% (18)
+
+
+
+<span class="dim">j/k move  Enter open  s start/stop  : command  esc back  :q quit</span></pre>
+</div></div>
+<p class="state-caption"><code>bot-03</code> shows a large negative PnL swing in <code>attention-negative</code> — everything else renders in the terminal's quiet default color, so the eye goes straight there (Key Flow 2, step 2). <code>bot-07</code> carries its own independent stale badge (heartbeat lost 41m ago) while <code>bot-01/05/09</code> stay healthy — one stale row among healthy ones, never a pane-wide flag (DESIGN.md Do's and Don'ts).</p>
+</div>
+
+</div>

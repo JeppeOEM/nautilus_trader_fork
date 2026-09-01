@@ -1,60 +1,107 @@
 # Review: Version/Reality-Check Verification — ARCHITECTURE-SPINE.md
 
 **Reviewer lens:** Verify every committed decision was web-researched or reality-checked rather than asserted from training data.
-**Date of review:** 2026-07-01
+**Date of this review pass:** 2026-07-24 (supersedes/extends the 2026-07-01 pass archived below)
 **File reviewed:** `_bmad-output/planning-artifacts/architecture/architecture-nautilus_trader_fork-2026-07-01/ARCHITECTURE-SPINE.md`
+**Trigger for this pass:** one new Stack entry added this run — `urwid | 4.0.2 (verified current on PyPI 2026-07-24; native AsyncioEventLoop, compatible with Python 3.7+, fits the 3.12–3.14 pin)` — plus a light spot-check of the pre-existing entries.
 
 ---
 
-## 1. Stack version verification (web-checked against current date 2026-07-01)
+## PRIMARY FINDING — `urwid 4.0.2` is NOT current on PyPI; the "verified current on PyPI 2026-07-24" claim is false
 
-I ran live web searches (PyPI/GitHub/Docker Hub release data) against every pinned version in the "Stack" table. Results:
+**Spine text (Stack table):**
+> `urwid | 4.0.2 (verified current on PyPI 2026-07-24; native AsyncioEventLoop, compatible with Python 3.7+, fits the 3.12–3.14 pin)`
+
+**Fresh checks performed** (PyPI project page, PyPI JSON API, upstream changelog cross-checked against two independent sources, GitHub releases page):
+
+| Version | Release date |
+|---|---|
+| 4.0.0 | 2026-03-30 |
+| 4.0.1 | 2026-05-26 |
+| **4.0.2** | **2026-06-02** |
+| 4.0.3 | 2026-06-25 |
+| 4.0.4 | 2026-07-13 |
+| 4.0.5 | 2026-07-20 |
+| **4.0.6** | **2026-07-23** |
+
+All sources (`pypi.org/project/urwid/`, `pypi.org/pypi/urwid/json` → `info.version`, `urwid.org/changelog.html`, the project's raw `docs/changelog.rst`, and `github.com/urwid/urwid/releases`) independently agree: **4.0.6 is current as of the review date**, not 4.0.2. The pin is four patch releases stale. More pointedly, 4.0.6 shipped 2026-07-23 — one day *before* the date the spine claims to have verified 4.0.2 as current on live PyPI. Either that check was not actually performed against live data on the stated date, or it was performed and the result was misread/mis-recorded. Either way, a specific, falsifiable "verified current" claim in the document does not hold up under a same-day re-check — exactly the failure mode this gate exists to catch.
+
+**The two sub-claims bundled into the same entry:**
+
+- *"native `AsyncioEventLoop`"* — **holds up**. Confirmed via `urwid.readthedocs.io/en/latest/reference/main_loop.html` and the changelog: `AsyncioEventLoop` is a first-party class shipped in urwid's own `event_loop` module (present since urwid 1.3.0), not a third-party add-on. No issue.
+- *"compatible with Python 3.7+"* — **stale/inaccurate**. The current package's actual floor, confirmed twice (PyPI classifiers and the JSON API's `requires_python` field), is `Python >=3.9.0`. 3.7 was the floor several major versions back (changelog shows a "Python <3.7 support dropped" note around the 2.2.0 era); by 4.x the floor moved to 3.9. This doesn't break anything for this project — 3.9 is still below the 3.12–3.14 pin — but it's a second inaccurate factual claim riding on the same line that says "verified."
+
+**Net assessment:** Block-worthy. Recommend either (a) bump the pin to 4.0.6, having skimmed the 4.0.3–4.0.6 changelog entries (typing improvements, a ListBox pagination bugfix, column-width optimization, scrollbar layout, session-id security hardening for the web display — all additive/bugfix, nothing that reads as breaking for a TUI-only use case), or (b) if there's a deliberate reason to stay on 4.0.2, rewrite the claim honestly ("pinned to 4.0.2 as of <date> for <reason>, not tracking latest") and correct "Python 3.7+" to "Python 3.9+."
+
+## Spot-checks on pre-existing Stack entries (light pass, as instructed — these predate this run)
+
+| Entry | Spine claim | Fresh check | Verdict |
+|---|---|---|---|
+| `nautilus_trader` | 1.229.0, PyPI-tagged Beta, 6 days old at pin | Re-confirmed: 1.229.0 exists, released ~2026-06-25/26, still Beta-tagged. Consistent with the spine's own self-flagged caveat from the prior pass (see Appendix below) — no new issue. | OK (previously flagged, still accurate) |
+| `plotly` | 6.8.0 | Current PyPI version is now **6.9.0** (released 2026-07-09). Matched exactly at the prior review pass (2026-07-01); one minor version has since shipped. No "verified current" claim is attached to this entry, so this is ordinary drift, not a broken claim. | Minor — refresh on next pass |
+| `pandas` | 3.0.4 | Current PyPI version is now **3.0.5** (released 2026-07-22). Matched at the prior pass; one patch has since shipped. Same caveat — no explicit "as of" claim attached. | Minor — refresh on next pass |
+| `redis` (client) | `>=8.0.1` | Current PyPI version is exactly **8.0.1** (2026-06-23). Floor pin (`>=`), so trivially still satisfied regardless of any future patch. | OK |
+| `aiohttp` | `>=3.14.1` | Current PyPI version is **3.14.3** (2026-07-23). Floor pin, still satisfied. | OK |
+| `redis` (broker image) | `redis:8-alpine` | Confirmed via Docker Hub search that `redis:8-alpine` remains an actively maintained floating tag on the 8.x line. Floating tags track forward automatically, unlike the exact-pinned libraries above, so there's no "went stale" risk the way there is for urwid/plotly/pandas. Still coherently paired with `redis-py>=8.0.1` per the RESP3 convention already documented in the spine's Consistency Conventions table (this pairing was the subject of the 2026-07-01 pass's one real finding, since resolved — see Appendix). | OK |
+
+None of these are suspicious or contradictory; `plotly` and `pandas` are each one release behind current, but neither carries a specific "verified as of date X" claim the way `urwid` does, so this is routine drift rather than a false statement.
+
+## Searches performed this pass (audit trail)
+
+- WebFetch `https://pypi.org/project/urwid/` — current version, release date, Python classifiers
+- WebSearch "urwid 4.0.2 PyPI release AsyncioEventLoop"
+- WebFetch `https://raw.githubusercontent.com/urwid/urwid/master/docs/changelog.rst` — full version/date table, AsyncioEventLoop + Python-compat history
+- WebFetch `https://github.com/urwid/urwid/releases` — cross-check of release dates
+- WebFetch `https://pypi.org/project/urwid/#history` — release history cross-check
+- WebFetch `https://urwid.org/changelog.html` — per-version changelog detail (4.0.0–4.0.2)
+- WebFetch `https://pypi.org/pypi/urwid/json` — authoritative `info.version` / `info.requires_python`
+- WebFetch `https://urwid.readthedocs.io/en/latest/reference/main_loop.html` — confirms AsyncioEventLoop is native to the package
+- WebSearch "nautilus_trader 1.229.0 PyPI release"
+- WebSearch "plotly 6.8.0 pandas 3.0.4 release PyPI 2026"
+- WebFetch `https://pypi.org/project/pandas/` — current version/date
+- WebFetch `https://pypi.org/project/plotly/` — current version/date
+- WebSearch "aiohttp 3.14.1 redis-py 8.0.1 redis:8-alpine docker hub"
+- WebFetch `https://pypi.org/project/redis/` — current version/date
+- WebFetch `https://pypi.org/project/aiohttp/` — current version/date
+
+## Recommendation
+
+**Block/return for correction** on the `urwid` Stack line specifically: fix the version number (bump to 4.0.6, or relabel the pin as an intentional, non-latest choice) and fix the "Python 3.7+" sub-claim to "Python 3.9+" (the current package's real floor). **Non-blocking:** refresh `plotly` → 6.9.0 and `pandas` → 3.0.5 whenever convenient; no action needed on the two floor-pinned (`>=`) client libraries or the floating Docker broker tag.
+
+## Summary of findings (this pass)
+
+1. **`urwid 4.0.2`'s "verified current on PyPI 2026-07-24" claim is false** — current is 4.0.6, four patch releases ahead, with the newest of those four shipping the day before the claimed verification date. This is the headline finding.
+2. **`urwid`'s "compatible with Python 3.7+" sub-claim is also stale** — the current package's actual floor is Python 3.9+, not 3.7+ (doesn't break the project's 3.12–3.14 pin, but it's a second inaccuracy on the same line).
+3. **`urwid`'s "native AsyncioEventLoop" sub-claim is accurate** — genuinely first-party, present since urwid 1.3.0.
+4. **`plotly` (6.8.0 → current 6.9.0) and `pandas` (3.0.4 → current 3.0.5) are each one release behind** as of this review, but neither makes an explicit "verified as of" claim, so this is ordinary drift rather than a broken assertion — low severity, worth a routine refresh.
+5. **Floor-pinned entries (`redis` client `>=8.0.1`, `aiohttp` `>=3.14.1`) and the floating `redis:8-alpine` broker tag all check out** with no drift risk inherent to how they're pinned.
+
+---
+
+## Appendix — prior pass archived (2026-07-01, pre-`urwid`)
+
+The following is the full text of the previous version-verify review, retained for context since it covered the rest of the Stack table and several `[ADOPTED]` invariant citations not re-litigated in depth this pass (the task instructions asked for depth on `urwid` and only a light spot-check on the rest).
+
+### 1. Stack version verification (web-checked against date 2026-07-01)
 
 | Name | Spine version | Verified reality | Verdict |
 | --- | --- | --- | --- |
 | Python | 3.12–3.14 | 3.14 released Oct 2025; well-established by July 2026 | OK |
-| nautilus_trader | 1.229.0 | Confirmed on PyPI, released **June 25, 2026** — 6 days before the spine's `updated` date. Search result flags it as tagged "Beta latest" on PyPI. | Accurate version number, but **pinning to a build released 6 days earlier and marked beta is a real risk that the spine does not call out** — it only notes the *rationale* for pinning (PyO3 precision bindings), not the beta/freshness risk itself. |
-| plotly | 6.8.0 | Confirmed: plotly 6.8.0 released **June 3, 2026** on PyPI. Matches exactly. | Verified accurate — reads as genuinely researched, not guessed. |
-| pandas | 3.0.4 | Confirmed: pandas 3.0.0 shipped **Jan 21, 2026**; 3.0.4 is a plausible patch release by July 2026 (3.0.1/3.0.3 patches independently confirmed). Note pandas 3.0 was *not yet released* as of most LLM training cutoffs (Jan 2026 for this model) — a version-from-memory guess would very likely have said "2.2.x," not "3.0.4." This specific, correct major-version bump is strong evidence of an actual lookup, not a training-data assertion. | Verified accurate. |
-| redis (client) | >=8.0.1 | Confirmed: redis-py 8.0.1 released **June 23, 2026**, with 8.0.0 GA May 28, 2026. Matches exactly, and again postdates typical training cutoffs — cannot have been asserted from memory. | Verified accurate. |
-| aiohttp | >=3.14.1 | Confirmed: aiohttp 3.14.1 released **June 7, 2026**. Matches exactly. | Verified accurate. |
-| redis (broker image) | redis:7-alpine | Current Docker Hub `redis` official image tags as of the search are dominated by the 8.x line (`8.8.0`, `8.8`, `8`, `8-alpine`, `latest`, `trixie`); no evidence 7-alpine is still the recommended/current tag. **This is inconsistent with the redis-py client pin one row above it**: redis-py 8.0.1 changed its *default* wire protocol from RESP2 to RESP3 and unified ~84 command response types — described by its own release notes as breaking relative to 7.x-era servers. Pairing a 8.0.1 client against a `redis:7-alpine` server is a real, unreconciled version mismatch. | **Flag — not obviously wrong in isolation, but internally inconsistent with the client-library row directly above it, and the spine does not acknowledge or resolve this.** |
-| Dozzle | amir20/dozzle:latest | Confirmed Dozzle is active; latest tagged release v10.0.4 (Feb 21, 2026). Project fits its stated purpose (real-time Docker log viewer). | OK on identity/fit. Using the floating `:latest` tag (rather than pinning, as done for every other component) is a minor reproducibility inconsistency but not a factual error — flagged as a nit, not a defect. |
+| nautilus_trader | 1.229.0 | Confirmed on PyPI, released June 25, 2026 — 6 days before the spine's `updated` date. Tagged "Beta latest" on PyPI. | Accurate version number, but pinning to a build released 6 days earlier and marked beta is a real risk the spine notes the *rationale* for (PyO3 precision bindings) but not the freshness/stability risk itself. |
+| plotly | 6.8.0 | Confirmed: plotly 6.8.0 released June 3, 2026 on PyPI. Matches exactly. | Verified accurate at the time. |
+| pandas | 3.0.4 | Confirmed: pandas 3.0.0 shipped Jan 21, 2026; 3.0.4 a plausible patch by July 2026. Postdates typical training cutoffs — strong evidence of a real lookup, not a guess. | Verified accurate at the time. |
+| redis (client) | >=8.0.1 | Confirmed: redis-py 8.0.1 released June 23, 2026, 8.0.0 GA May 28, 2026. Matches exactly. | Verified accurate. |
+| aiohttp | >=3.14.1 | Confirmed: aiohttp 3.14.1 released June 7, 2026. Matches exactly. | Verified accurate. |
+| redis (broker image) | redis:7-alpine | Docker Hub tags dominated by the 8.x line at the time of that search; no evidence 7-alpine was still current. Inconsistent with the redis-py 8.0.1 client pin (RESP3 default, ~84 command response types changed) — a real, unreconciled mismatch. | Flagged. **Resolved 2026-07-01** per the spine's own Deferred section: broker bumped to `redis:8-alpine`. |
+| Dozzle | amir20/dozzle:latest | Confirmed active; latest tagged release v10.0.4 (Feb 21, 2026). Fits stated purpose. | OK on identity/fit; floating `:latest` tag is a minor reproducibility nit, not an error. |
 
-**Overall stack verdict:** Five of the seven pinned dependency versions (nautilus_trader, plotly, pandas, redis client, aiohttp) match live release data almost exactly, including several that postdate any plausible LLM training cutoff (pandas 3.0.x, redis-py 8.0.1, aiohttp 3.14.1, plotly 6.8.0 all shipped within the ~5 weeks before this document's `updated` date). This is strong positive evidence the Stack table was genuinely researched at authoring time, not hallucinated from training data. The one real issue is the **redis:7-alpine broker image vs. redis-py>=8.0.1 client mismatch**, which looks like a version was pinned without cross-checking compatibility with the row above it.
+### 2. Technology existence / fit-for-purpose (2026-07-01 pass)
 
-## 2. Technology existence / fit-for-purpose
+Redis pub/sub, `ParquetDataCatalog`, Dozzle, and Docker Compose were all confirmed real, current, and fit for their stated purposes. No technology named was defunct, renamed, or repurposed from what was claimed.
 
-- **Redis for pub/sub** (`snapshots:1s` channel) — Redis pub/sub is a real, current, appropriate mechanism for this use case. OK.
-- **Parquet / ParquetDataCatalog** — real Nautilus construct, consistent with the project's own CLAUDE.md description of `ParquetDataCatalog.write_data()`. OK.
-- **Dozzle for log viewing** — verified active project, correct purpose (container log streaming), matches CLAUDE.md's stated use ("Dozzle for live log visibility"). OK.
-- **Docker Compose for deployment** — standard, unremarkable, fits the two-image split described elsewhere in the project's CLAUDE.md. OK.
+### 3. Grounding of internal-reality claims (2026-07-01 pass)
 
-No technology named in the spine is defunct, renamed, or repurposed from what's claimed.
+- **Well-grounded** (`[ADOPTED]` tags citing a specific file/function): AD-4, AD-5, and the Deferred section's symbol references (`collector._second_loop`, `_CHART_GAP_THRESHOLD_MS`, `_flush_once()`, etc.) — all specific, checkable, and consistent with the project's own `CLAUDE.md`.
+- **Weaker / asserted without direct evidence**: AD-2, AD-6, AD-7, AD-8 — tagged `[ADOPTED]` but without file:line grounding at the same level of specificity as AD-4/AD-5. Not demonstrably false, just harder to independently verify from the document alone.
 
-## 3. Grounding of internal-reality claims (file refs, `[ADOPTED]` tags, mechanism specificity)
-
-Assessed each `[ADOPTED]`-tagged invariant for whether it cites concrete evidence (file path, function name, specific mechanism) versus asserting a state without evidence:
-
-**Well-grounded (cite a specific file, function, or mechanism):**
-- **AD-4** — "`[ADOPTED]` — confirmed: `ml_signals/catalog_stats.py` and `chart_data.py` import only `DydxMinuteBar`; no reverse imports exist." Specific files named, specific claim (import sweep), falsifiable.
-- **AD-5** — "`[ADOPTED]` — reference: `dydx_collector/client.py:_at_fixed_precision()`." Matches the exact fix location independently documented in the top-level project `CLAUDE.md` ("Fixed in `troll/dydx_collector/client.py`'s `_at_fixed_precision()`"), which corroborates this claim rather than merely repeating it verbatim without traceability.
-- **Deferred section** (not `[ADOPTED]` but reality claims) — cites `collector._second_loop`, `dashboard._coin_chart_json`, `_CHART_GAP_THRESHOLD_MS`, `_flush_once()`, `flush_interval_seconds` — all specific, checkable symbol names, consistent with the naming in the project's own `CLAUDE.md` (`_STALE_BOOK_NS`, `_CHART_GAP_THRESHOLD_MS` are independently documented there too).
-
-**Weaker / asserted without direct evidence in this document:**
-- **AD-2** — tagged `[ADOPTED]` but cites no file or line for where the fail-closed WARNING-log behavior is implemented; the only supporting detail (Dozzle as audit trail) appears later in the Deployment section, not attached to the invariant itself.
-- **AD-6** — tagged `[ADOPTED]` with no file/line reference at all; the rule is stated as a policy, not tied to an observed code location the way AD-4/AD-5 are.
-- **AD-7** — tagged `[ADOPTED]`, names a function (`open_interest.classify_liquidity`) but no file:line and no evidence the USD-denominated fix is actually in place versus merely intended (cf. OBS-03 in `troll/CLAUDE.md`, which describes this as a known-fixed incident — plausible but not independently re-cited here with a code pointer).
-- **AD-8** — tagged `[ADOPTED]`, no file reference; asserts "the collector owns its own asyncio loop... driving `nautilus_pyo3.DydxHttpClient`/`DydxWebSocketClient` directly" as fact without pointing at where in `collector.py` this is implemented.
-
-None of these four are necessarily *wrong* — AD-2/AD-6/AD-7/AD-8 read as consistent with the project's own `CLAUDE.md` narrative — but they are asserted at a coarser grain (module/function name only, sometimes not even that) than AD-4 and AD-5, which name exact files and describe how the claim was checked ("confirmed," "reference"). A reviewer without access to the codebase cannot distinguish "verified by re-reading the file" from "restated from the PRD/CLAUDE.md without re-checking" for AD-2/AD-6/AD-7/AD-8.
-
-## Summary of findings
-
-1. **Stack versions are genuinely researched, not guessed** — plotly 6.8.0, pandas 3.0.4, redis-py>=8.0.1, and aiohttp>=3.14.1 all match real release dates within ~5 weeks of the document date, several postdating any plausible training cutoff. This is the strongest positive signal in the review.
-2. **Unreconciled mismatch: `redis:7-alpine` broker vs. `redis (client) >=8.0.1`** — redis-py 8.0.1 defaults to RESP3 and is documented upstream as breaking relative to 7.x; the spine pins an old server image against a very new client without acknowledging or resolving the gap.
-3. **nautilus_trader 1.229.0 is accurate but freshly-released/beta-tagged** (shipped 6 days before the doc's `updated` date, flagged "Beta" on PyPI) — the spine's rationale note covers *why* it's pinned but not the freshness/stability risk of pinning to a just-shipped beta.
-4. **AD-2, AD-6, AD-7, AD-8 carry `[ADOPTED]` tags without the file/line-level grounding that AD-4 and AD-5 provide** — not demonstrably false, but weaker evidentiary support; a future editor should tighten these with the same "confirmed:"/"reference:" pattern used elsewhere in the document.
-5. **Dozzle pinned via floating `:latest` tag** while every other image/library in the Stack table is version-pinned — a minor reproducibility inconsistency, not a factual error.
-
-No findings suggest any named technology is defunct, mis-scoped, or doesn't exist. No stack version is implausible for the stated timeframe; if anything the precision of the matches (down to exact release dates) is unusually strong evidence of real lookups.
+*(End of archived 2026-07-01 material.)*

@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SCAMPER :: bot-monitoring-tui</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%96%A5%EF%B8%8F%3C/text%3E%3C/svg%3E">
+<style>
+  :root{
+    --bg:#0a0f0d;
+    --bg-raise:#0f1613;
+    --pane:#111a16;
+    --pane-head:#152019;
+    --border:#25443a;
+    --border-soft:#1c332b;
+    --text:#c9f2d8;
+    --text-dim:#7fa694;
+    --text-mute:#4d6b5e;
+    --green:#4ee39a;
+    --green-soft:#2f8f66;
+    --amber:#f0c14b;
+    --cyan:#6ad4e8;
+    --red:#ff7369;
+    --violet:#c792ea;
+    --shadow: 0 0 0 1px rgba(0,0,0,.4);
+    color-scheme: dark;
+  }
+  :root[data-theme="light"]{
+    --bg:#f3f0e6;
+    --bg-raise:#ece7d8;
+    --pane:#fbf9f1;
+    --pane-head:#eee8d6;
+    --border:#c9c0a0;
+    --border-soft:#dcd4b8;
+    --text:#20281f;
+    --text-dim:#5a6350;
+    --text-mute:#8b8770;
+    --green:#1f8f5c;
+    --green-soft:#2f8f66;
+    --amber:#a3760a;
+    --cyan:#0f7f96;
+    --red:#c2352b;
+    --violet:#7a4fa0;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: light){
+    :root:not([data-theme="dark"]){
+      --bg:#f3f0e6;
+      --bg-raise:#ece7d8;
+      --pane:#fbf9f1;
+      --pane-head:#eee8d6;
+      --border:#c9c0a0;
+      --border-soft:#dcd4b8;
+      --text:#20281f;
+      --text-dim:#5a6350;
+      --text-mute:#8b8770;
+      --green:#1f8f5c;
+      --green-soft:#2f8f66;
+      --amber:#a3760a;
+      --cyan:#0f7f96;
+      --red:#c2352b;
+      --violet:#7a4fa0;
+      color-scheme: light;
+    }
+  }
+
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:var(--bg);
+    color:var(--text);
+    font-family: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Consolas, Menlo, "Liberation Mono", monospace;
+    font-size:14px;
+    line-height:1.55;
+    -webkit-font-smoothing:antialiased;
+  }
+  a{color:var(--cyan);}
+
+  /* scanline / crt vignette, subtle, dark mode only */
+  .crt-overlay{
+    position:fixed; inset:0; pointer-events:none; z-index:5;
+    background:repeating-linear-gradient(
+      to bottom, rgba(255,255,255,0.014) 0px, rgba(255,255,255,0.014) 1px,
+      transparent 1px, transparent 3px
+    );
+    mix-blend-mode:overlay;
+    opacity:.5;
+  }
+  :root[data-theme="light"] ~ .crt-overlay,
+  @media (prefers-color-scheme: light){ .crt-overlay{ opacity:.08; } }
+
+  ::selection{ background:var(--green-soft); color:#04120c; }
+
+  .termbar{
+    position:sticky; top:0; z-index:10;
+    display:flex; align-items:center; justify-content:space-between;
+    gap:.75rem; flex-wrap:wrap;
+    padding:.5rem .9rem;
+    background:var(--pane-head);
+    border-bottom:1px solid var(--border);
+    backdrop-filter: blur(6px);
+  }
+  .termbar .dots{display:flex; gap:6px;}
+  .termbar .dots span{width:10px;height:10px;border-radius:50%;display:inline-block;}
+  .dot-r{background:#ff5f57;} .dot-y{background:#febc2e;} .dot-g{background:#28c840;}
+  .termbar .title{color:var(--text-dim); font-size:12.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+  .termbar .left{display:flex; align-items:center; gap:.7rem; min-width:0;}
+  .termbar .right{display:flex; align-items:center; gap:.6rem; flex-wrap:wrap;}
+  .badge-count{
+    font-size:11px; padding:.15rem .5rem; border-radius:3px;
+    border:1px solid var(--border); color:var(--text-dim); white-space:nowrap;
+  }
+  .badge-count b{color:var(--green);}
+  .theme-btn{
+    font: inherit; font-size:11.5px; cursor:pointer;
+    background:transparent; color:var(--text-dim);
+    border:1px solid var(--border); border-radius:3px;
+    padding:.25rem .55rem;
+  }
+  .theme-btn:hover{ color:var(--text); border-color:var(--text-dim); }
+
+  .wrap{ max-width:920px; margin:0 auto; padding:1.6rem 1rem 5rem; }
+
+  .ascii{
+    overflow-x:auto; white-space:pre; color:var(--green);
+    font-size:12px; line-height:1.35; margin:0 0 1.5rem;
+    padding:.75rem 0;
+  }
+
+  .meta-grid{
+    display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr));
+    gap:.6rem; margin-bottom:2.2rem;
+  }
+  .meta-cell{
+    border:1px solid var(--border-soft); background:var(--pane);
+    padding:.55rem .7rem; border-radius:4px;
+  }
+  .meta-cell .k{ color:var(--text-mute); font-size:11px; text-transform:uppercase; letter-spacing:.06em; }
+  .meta-cell .v{ color:var(--text); font-size:13px; margin-top:.15rem; }
+  .meta-cell.status .v{ color:var(--green); }
+
+  .jumpbar{
+    display:flex; flex-wrap:wrap; gap:.4rem;
+    margin-bottom:2.4rem; padding:.6rem .7rem;
+    border:1px dashed var(--border); border-radius:5px; background:var(--bg-raise);
+  }
+  .jumpbar .prompt{ color:var(--green); margin-right:.3rem; }
+  .jumpbar a{
+    text-decoration:none; color:var(--text-dim);
+    border:1px solid var(--border-soft); padding:.15rem .5rem; border-radius:3px;
+    font-size:12px; white-space:nowrap;
+  }
+  .jumpbar a:hover{ color:var(--green); border-color:var(--green-soft); }
+
+  section.pane{
+    margin-bottom:1.9rem; border:1px solid var(--border);
+    border-radius:6px; background:var(--pane); box-shadow:var(--shadow);
+    scroll-margin-top:4.2rem;
+    overflow:hidden;
+  }
+  .pane-head{
+    display:flex; align-items:baseline; gap:.55rem; flex-wrap:wrap;
+    padding:.6rem .9rem; background:var(--pane-head);
+    border-bottom:1px solid var(--border-soft);
+    font-weight:600; letter-spacing:.03em;
+  }
+  .pane-head .tag{
+    color:var(--bg); background:var(--green); padding:.05rem .4rem; border-radius:3px;
+    font-size:12px; font-weight:700;
+  }
+  .pane-head .sub{ font-weight:400; color:var(--text-mute); font-size:12px; }
+  .pane-body{ padding:.85rem .9rem 1rem; }
+
+  .entry{
+    display:flex; gap:.6rem; padding:.5rem 0;
+    border-bottom:1px dotted var(--border-soft);
+    align-items:flex-start;
+  }
+  .entry:last-child{ border-bottom:none; }
+  .badge{
+    flex:0 0 auto; font-size:10.5px; font-weight:700; letter-spacing:.04em;
+    padding:.12rem .4rem; border-radius:3px; margin-top:.1rem; white-space:nowrap;
+  }
+  .entry.idea .badge{ background:transparent; border:1px solid var(--amber); color:var(--amber); }
+  .entry.decision .badge{ background:transparent; border:1px solid var(--cyan); color:var(--cyan); }
+  .entry p{ margin:0; color:var(--text); }
+  .entry .who{ color:var(--text-mute); font-size:11px; margin-left:.1rem; }
+
+  .split{ display:grid; grid-template-columns:1fr 1fr; gap:.9rem; }
+  @media (max-width:620px){ .split{ grid-template-columns:1fr; } }
+  .split .box{ border:1px solid var(--border-soft); border-radius:4px; padding:.6rem .7rem; }
+  .split .box h4{ margin:0 0 .5rem; font-size:11.5px; letter-spacing:.06em; text-transform:uppercase; }
+  .box.cut h4{ color:var(--red); }
+  .box.keep h4{ color:var(--green); }
+  .box.cut p{ color:var(--text-dim); text-decoration:line-through; text-decoration-color:var(--red); }
+  .box.keep p{ color:var(--text); }
+
+  .supersede{ display:flex; flex-direction:column; gap:.4rem; }
+  .supersede .old{
+    opacity:.6; padding:.5rem .65rem; border:1px dashed var(--border-soft); border-radius:4px;
+  }
+  .supersede .old .flag{ color:var(--red); font-size:10.5px; font-weight:700; }
+  .supersede .old p{ text-decoration:line-through; text-decoration-color:var(--text-mute); margin:.25rem 0 0; color:var(--text-dim);}
+  .supersede .arrow{ color:var(--text-mute); padding-left:.7rem; font-size:13px; }
+  .supersede .new{
+    padding:.55rem .7rem; border:1px solid var(--green-soft); border-radius:4px;
+    background:rgba(78,227,154,0.06);
+  }
+  .supersede .new .flag{ color:var(--green); font-size:10.5px; font-weight:700; }
+  .supersede .new p{ margin:.25rem 0 0; }
+
+  /* MoSCoW */
+  .moscow-grid{ display:grid; grid-template-columns:1fr 1fr; gap:.9rem; }
+  @media (max-width:620px){ .moscow-grid{ grid-template-columns:1fr; } }
+  .tier{
+    border-radius:6px; border:1px solid var(--border); overflow:hidden;
+    background:var(--pane);
+  }
+  .tier-head{ padding:.55rem .8rem; font-weight:700; letter-spacing:.04em; font-size:13px; }
+  .tier-body{ padding:.7rem .9rem 1rem; }
+  .tier-body ul{ margin:0; padding-left:1.1rem; }
+  .tier-body li{ margin-bottom:.4rem; }
+  .tier.must .tier-head{ background:rgba(78,227,154,.14); color:var(--green); border-bottom:1px solid var(--green-soft); }
+  .tier.should .tier-head{ background:rgba(106,212,232,.14); color:var(--cyan); border-bottom:1px solid var(--cyan); }
+  .tier.could .tier-head{ background:rgba(160,160,160,.1); color:var(--text-dim); border-bottom:1px solid var(--border-soft); }
+  .tier.wont .tier-head{ background:rgba(255,115,105,.14); color:var(--red); border-bottom:1px solid var(--red); }
+  .tier.could .tier-body{ color:var(--text-mute); font-style:italic; }
+  .tier.wont li{ text-decoration:line-through; text-decoration-color:var(--red); color:var(--text-dim); }
+  .tier.wont li em{ display:block; text-decoration:none; font-style:normal; color:var(--text-mute); font-size:11.5px; margin-top:.1rem;}
+
+  /* Synthesis */
+  section#synthesis{
+    border-color:var(--green-soft);
+    box-shadow: 0 0 0 1px var(--green-soft), 0 0 40px -12px var(--green-soft);
+  }
+  #synthesis .pane-head{ background:linear-gradient(90deg, rgba(78,227,154,.16), transparent); }
+  .pairs{ display:flex; flex-direction:column; gap:1rem; margin-bottom:1.6rem; }
+  .pair{
+    display:grid; grid-template-columns:1fr auto 1fr; align-items:center; gap:.6rem;
+  }
+  @media (max-width:620px){ .pair{ grid-template-columns:1fr; } .pair .link{ transform:rotate(90deg); margin:.1rem auto;} }
+  .pair .node{
+    border:1px solid var(--border-soft); border-radius:5px; padding:.55rem .7rem;
+    font-size:12.8px; color:var(--text-dim);
+  }
+  .pair .link{ color:var(--green); font-size:16px; }
+  .pair .result{
+    grid-column:1 / -1; margin-top:.15rem;
+    border-left:2px solid var(--green); padding-left:.7rem;
+    color:var(--text); font-size:13px;
+  }
+  .pair .result b{ color:var(--green); }
+
+  .shape{
+    margin-top:1.6rem; padding:.9rem 1rem; border:1px solid var(--border-soft);
+    border-radius:6px; background:var(--bg-raise);
+  }
+  .shape h4{ margin:0 0 .6rem; color:var(--green); font-size:12.5px; letter-spacing:.06em; text-transform:uppercase;}
+  .shape ul{ list-style:none; margin:0; padding:0; columns:2; column-gap:1.4rem; }
+  @media (max-width:560px){ .shape ul{ columns:1; } }
+  .shape li{ margin-bottom:.45rem; break-inside:avoid; font-size:13px; }
+  .shape li::before{ content:"[x] "; color:var(--green); }
+
+  footer{
+    margin-top:2.4rem; padding-top:1rem; border-top:1px dashed var(--border);
+    color:var(--text-mute); font-size:12px; display:flex; justify-content:space-between; flex-wrap:wrap; gap:.5rem;
+  }
+  .blink{ animation:blink 1.1s steps(2) infinite; }
+  @keyframes blink{ 50%{ opacity:0; } }
+
+  .note{ color:var(--text-mute); font-size:12px; margin-top:.6rem; }
+</style>
+</head>
+<body>
+
+<div class="crt-overlay"></div>
+
+<div class="termbar">
+  <div class="left">
+    <span class="dots"><span class="dot-r"></span><span class="dot-y"></span><span class="dot-g"></span></span>
+    <span class="title">ssh trading-box — scamper-log — bot-monitoring-tui</span>
+  </div>
+  <div class="right">
+    <span class="badge-count">IDEAS <b>6</b></span>
+    <span class="badge-count">DECISIONS <b>13</b></span>
+    <span class="badge-count">STATUS <b>complete</b></span>
+    <button class="theme-btn" id="themeToggle" type="button">:toggle-theme</button>
+  </div>
+</div>
+
+<div class="wrap">
+
+  <pre class="ascii">┌──────────────────────────────────────────────────────────────────┐
+│  SCAMPER SESSION :: TUI for monitoring running bots                │
+│  keyboard-only · no mouse · k9s-inspired · shared Redis feed       │
+└──────────────────────────────────────────────────────────────────┘</pre>
+
+  <div class="meta-grid">
+    <div class="meta-cell"><div class="k">Topic</div><div class="v">Monitoring bots: PnL, per-bot metrics, coin rankings</div></div>
+    <div class="meta-cell"><div class="k">Goal</div><div class="v">Fast SSH/tmux monitoring, no browser — web dashboard keeps graphs</div></div>
+    <div class="meta-cell"><div class="k">Mode</div><div class="v">partner</div></div>
+    <div class="meta-cell status"><div class="k">Status</div><div class="v">complete <span class="blink">▍</span></div></div>
+    <div class="meta-cell"><div class="k">Updated</div><div class="v">2026-07-23 16:44</div></div>
+  </div>
+
+  <div class="jumpbar">
+    <span class="prompt">:</span>
+    <a href="#substitute">substitute</a>
+    <a href="#combine">combine</a>
+    <a href="#adapt">adapt</a>
+    <a href="#modify">modify</a>
+    <a href="#other-use">put-to-other-use</a>
+    <a href="#eliminate">eliminate</a>
+    <a href="#reverse">reverse</a>
+    <a href="#moscow">moscow</a>
+    <a href="#synthesis">synthesis</a>
+  </div>
+
+  <!-- SUBSTITUTE -->
+  <section class="pane" id="substitute">
+    <div class="pane-head"><span class="tag">S</span> SUBSTITUTE <span class="sub">— swap the tool, not just the feature</span></div>
+    <div class="pane-body">
+      <div class="entry idea">
+        <span class="badge">IDEA</span>
+        <p>Pure curses (Python wrapper), keyboard-only nav, no mouse — must async-consume many coins concurrently. <span class="who">— user</span></p>
+      </div>
+      <div class="entry decision">
+        <span class="badge">DECISION</span>
+        <p>Adopt <b>urwid</b> as the TUI framework (asyncio-native curses wrapper), used broadly wherever it fits. <span class="who">— user</span></p>
+      </div>
+      <div class="entry decision">
+        <span class="badge">DECISION</span>
+        <p>Data source: the TUI subscribes to the <b>same Redis pub/sub channel</b> the web dashboard already reads from — no separate feed. <span class="who">— user</span></p>
+      </div>
+    </div>
+  </section>
+
+  <!-- COMBINE -->
+  <section class="pane" id="combine">
+    <div class="pane-head"><span class="tag">C</span> COMBINE <span class="sub">— fuse panes and hand off between surfaces</span></div>
+    <div class="pane-body">
+      <div class="entry idea">
+        <span class="badge">IDEA</span>
+        <p>Select-coin view shows live-calculated metrics (OFI / OBI / microprice / spread, etc.) for that coin inline in the TUI. <span class="who">— user</span></p>
+      </div>
+      <div class="entry idea">
+        <span class="badge">IDEA</span>
+        <p>A keybinding on the selected coin opens that coin's graph view in the web dashboard (browser). <span class="who">— user</span></p>
+      </div>
+      <div class="entry decision">
+        <span class="badge">DECISION</span>
+        <p>tmux is just the user's own pane layout (multiple TUI instances side by side) — not a feature the TUI itself needs to manage. <span class="who">— user</span></p>
+      </div>
+      <div class="entry idea">
+        <span class="badge">IDEA</span>
+        <p>Need: a bots-list pane showing PnL + other per-bot metrics. <span class="who">— user</span></p>
+      </div>
+      <div class="entry idea">
+        <span class="badge">IDEA</span>
+        <p>Need: a coin-list pane mirroring the coin rankings already shown on the web dashboard. <span class="who">— user</span></p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ADAPT -->
+  <section class="pane" id="adapt">
+    <div class="pane-head"><span class="tag">A</span> ADAPT <span class="sub">— borrow k9s wholesale</span></div>
+    <div class="pane-body">
+      <div class="entry decision">
+        <span class="badge">DECISION</span>
+        <p>Adapt k9s UX wholesale: <b>':'</b> command bar to jump views, <b>esc</b> to pop back, <b>'/'</b> fuzzy-filter the coin list, breadcrumb header, color-coded PnL/stale rows, resource-count badges in the header. <span class="who">— user</span></p>
+      </div>
+      <p class="note">Note: the resource-count badges borrowed here get walked back later — see MoSCoW → Won't.</p>
+    </div>
+  </section>
+
+  <!-- MODIFY -->
+  <section class="pane" id="modify">
+    <div class="pane-head"><span class="tag">M</span> MODIFY <span class="sub">— emphasis is a color, never a size</span></div>
+    <div class="pane-body">
+      <div class="entry decision">
+        <span class="badge">DECISION</span>
+        <p>Uniform monospace text everywhere, no big ASCII-art scaling — all emphasis / de-emphasis done via <b>color</b>, not size. <span class="who">— user</span></p>
+      </div>
+      <div class="entry decision">
+        <span class="badge">DECISION</span>
+        <p>Color discipline: highlight only what needs attention (stale feed, big PnL swing) — healthy/normal stays quiet/gray so the eye jumps to what's wrong, not used decoratively everywhere. <span class="who">— user</span></p>
+      </div>
+    </div>
+  </section>
+
+  <!-- PUT TO OTHER USE -->
+  <section class="pane" id="other-use">
+    <div class="pane-head"><span class="tag">P</span> PUT TO OTHER USE <span class="sub">— from watching bots to running them</span></div>
+    <div class="pane-body">
+      <div class="supersede">
+        <div class="old">
+          <span class="flag">SUPERSEDED</span>
+          <p>Scope: v1 is read-only monitoring only (paper-trading phase) — control-panel actions (kill/restart bot, close position, pause coin) are a deliberate future expansion, not MVP. <span class="who">— user</span></p>
+        </div>
+        <div class="arrow">↓ revised mid-session</div>
+        <div class="new">
+          <span class="flag">CURRENT</span>
+          <p>Scope revision: include <b>start/stop bot controls now</b>, built ready for both paper and live trading — since paper is close to going live. <span class="who">— user</span></p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ELIMINATE -->
+  <section class="pane" id="eliminate">
+    <div class="pane-head"><span class="tag">E</span> ELIMINATE <span class="sub">— cut the archive, keep the depth</span></div>
+    <div class="pane-body">
+      <div class="split">
+        <div class="box cut">
+          <h4>Cut</h4>
+          <p>No historical replay / scrollback in the TUI — strictly live-only, latest-state. Historical viewing stays on the website. <span class="who">— user</span></p>
+        </div>
+        <div class="box keep">
+          <h4>Kept</h4>
+          <p>Full 20 order-book levels still rendered in coin-detail view, not just top-of-book — depth is not eliminated. <span class="who">— user</span></p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- REVERSE -->
+  <section class="pane" id="reverse">
+    <div class="pane-head"><span class="tag">R</span> REVERSE <span class="sub">— the TUI comes looking for you</span></div>
+    <div class="pane-body">
+      <div class="entry idea">
+        <span class="badge">IDEA</span>
+        <p>Reverse: the TUI should <b>auto-surface</b> coins that are good-to-trade right now, not just wait for the user to scan. <span class="who">— user</span></p>
+      </div>
+      <div class="entry decision">
+        <span class="badge">DECISION</span>
+        <p>Critical constraint: the coin-ranking / good-to-trade logic must be a <b>single shared source of truth</b> used identically by both the web dashboard and the TUI — not two separately-implemented ranking lists that can drift. <span class="who">— user</span></p>
+      </div>
+    </div>
+  </section>
+
+  <!-- MOSCOW -->
+  <section id="moscow">
+    <div class="pane-head" style="border:1px solid var(--border); border-bottom:none; border-radius:6px 6px 0 0; background:var(--pane-head); padding:.7rem .9rem;">
+      <span class="tag" style="background:var(--violet);">✓</span> MOSCOW CONVERGENCE
+      <span class="sub">— the SCAMPER pass sorted into ship / defer / cut</span>
+    </div>
+    <div class="moscow-grid" style="border:1px solid var(--border); border-top:none; border-radius:0 0 6px 6px; padding:.9rem; background:var(--pane);">
+      <div class="tier must">
+        <div class="tier-head">Must Have</div>
+        <div class="tier-body">
+          <ul>
+            <li>urwid keyboard-only TUI, asyncio-native</li>
+            <li>Shared Redis pub/sub feed — same channel as the web dashboard</li>
+            <li>Bots pane (PnL + per-bot metrics) and Coins pane (mirrored rankings)</li>
+            <li>Coin-detail view: live OFI/OBI/microprice/spread + full 20 book levels</li>
+            <li>k9s-style nav: <code>:</code> command bar, esc, <code>/</code> fuzzy filter, breadcrumb header, color-coded rows</li>
+            <li>Uniform monospace + attention-only color discipline</li>
+            <li>Start/stop bot controls, built paper-ready-for-live</li>
+            <li>Shared ranking / good-to-trade engine as one source of truth</li>
+            <li>Auto-surfaced good-to-trade coins</li>
+          </ul>
+        </div>
+      </div>
+      <div class="tier should">
+        <div class="tier-head">Should Have</div>
+        <div class="tier-body">
+          <ul>
+            <li>Browser-handoff keybinding, <b>deep-linked</b> to the exact coin + time-window/zoom — merged in here rather than left as a bare Could. <span class="who">— user</span></li>
+          </ul>
+        </div>
+      </div>
+      <div class="tier could">
+        <div class="tier-head">Could Have</div>
+        <div class="tier-body">
+          No items surfaced this round — the session converged straight from Must to explicit Should/Won't calls.
+        </div>
+      </div>
+      <div class="tier wont">
+        <div class="tier-head">Won't Have (this time)</div>
+        <div class="tier-body">
+          <ul>
+            <li>k9s resource-count badges<em>borrowed in Adapt, explicitly walked back here</em></li>
+            <li>:xray-style secondary views<em>explicit non-goal, not a deferred Could</em></li>
+            <li>Historical replay / scrollback in the TUI<em>stays website-only, per Eliminate</em></li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- SYNTHESIS -->
+  <section class="pane" id="synthesis">
+    <div class="pane-head"><span class="tag" style="background:var(--green);">◆</span> SYNTHESIS <span class="sub">— three separate calls turn out to be one idea, twice over</span></div>
+    <div class="pane-body">
+
+      <div class="pairs">
+        <div class="pair">
+          <div class="node">Shared ranking source of truth <span class="who">(Reverse)</span></div>
+          <div class="link">⇄</div>
+          <div class="node">Coin-list "mirrors" the dashboard <span class="who">(Combine)</span></div>
+          <div class="result">Makes the mirror <b>actually true over time</b> — not two implementations quietly drifting apart.</div>
+        </div>
+        <div class="pair">
+          <div class="node">Live-only TUI, no history <span class="who">(Eliminate)</span></div>
+          <div class="link">⇄</div>
+          <div class="node">Deep-linked browser handoff <span class="who">(Combine / Should)</span></div>
+          <div class="result">One idea, not two: cutting history only works <b>because</b> one keypress restores the exact coin + time-window on the website.</div>
+        </div>
+        <div class="pair">
+          <div class="node">Scope-reversal to controls <span class="who">(Put to Other Use)</span></div>
+          <div class="link">⇄</div>
+          <div class="node">Color discipline <span class="who">(Modify)</span></div>
+          <div class="result">Same design principle underneath: <b>minimum surface area, maximum leverage</b> — rare, deliberate signals over either seeing or acting.</div>
+        </div>
+      </div>
+
+      <div class="shape">
+        <h4>Chosen shape</h4>
+        <ul>
+          <li>urwid keyboard-only TUI</li>
+          <li>Shared Redis feed</li>
+          <li>Bots + Coins panes</li>
+          <li>Coin-detail w/ live indicators + 20 levels</li>
+          <li>k9s-style nav</li>
+          <li>Start/stop controls (paper-ready-for-live)</li>
+          <li>Shared ranking engine</li>
+          <li>Deep-linked browser handoff</li>
+          <li>Auto-surfaced good-to-trade coins</li>
+        </ul>
+      </div>
+
+    </div>
+  </section>
+
+  <footer>
+    <span>~/scamper/bot-monitoring-tui $ <span class="blink">█</span></span>
+    <span>session closed · 2026-07-23 16:44 · status: complete</span>
+  </footer>
+
+</div>
+
+<script>
+  (function(){
+    var btn = document.getElementById('themeToggle');
+    var root = document.documentElement;
+    var stored = null;
+    try { stored = localStorage.getItem('scamper-theme'); } catch(e){}
+    if(stored){ root.setAttribute('data-theme', stored); }
+    btn.addEventListener('click', function(){
+      var prefersLight = window.matchMedia && window.matchMedia('(prefers-color-scheme: light)').matches;
+      var current = root.getAttribute('data-theme') || (prefersLight ? 'light' : 'dark');
+      var next = current === 'dark' ? 'light' : 'dark';
+      root.setAttribute('data-theme', next);
+      try { localStorage.setItem('scamper-theme', next); } catch(e){}
+    });
+  })();
+</script>
+
+</body>
+</html>

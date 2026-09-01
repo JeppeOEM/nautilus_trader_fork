@@ -18,7 +18,7 @@ import sqlite3
 import tempfile
 import time
 
-import ml_signals.metrics_store as store
+import ranking_engine.metrics_store as store
 
 
 _NOW = time.time_ns()

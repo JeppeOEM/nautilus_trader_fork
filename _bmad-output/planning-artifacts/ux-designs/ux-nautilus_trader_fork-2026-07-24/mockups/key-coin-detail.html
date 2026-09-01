@@ -1,0 +1,178 @@
+<title>Bot Monitoring TUI — Coin detail</title>
+<style>
+/*
+  Governs: DESIGN.md Elevation & Depth, Shapes (border-linebox), Components
+  (breadcrumb-header, depth-ladder-row, border-linebox), Colors (bid/ask
+  attention-positive/negative).
+  EXPERIENCE.md Information Architecture (Coin-detail row), Component
+  Patterns (Coin-detail view: book collapsed by default, `d` toggles depth),
+  State Patterns (Book collapsed/expanded), Key Flow 1 steps 3-6 (`d` expand,
+  `o` deep-link, `esc` pop-back). Thin-book handling is spec'd in
+  EXPERIENCE.md's State Patterns table but not mocked as a separate screen
+  here — collapsed/expanded is the pair the user asked to see.
+
+  Terminal theme rendered below is ONE concrete illustrative choice
+  (dark "One Dark"-family scheme). DESIGN.md's actual rule is "inherit
+  the terminal's own default fg/bg" -- no fixed hex palette in the
+  product itself. Bid/ask green/red and the LineBox line-drawing
+  convention are the load-bearing parts of this mock.
+*/
+:root {
+  color-scheme: light dark;
+  --page-bg: #f2f4f2;
+  --page-fg: #17201a;
+  --caption-fg: #5b6b60;
+  --accent: #3f7a57;
+  --rule: #c9d2cb;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --page-bg: #12140f; --page-fg: #e6e9e4; --caption-fg: #93a394; --accent: #7fb88f; --rule: #2a3128; }
+}
+:root[data-theme="light"] { --page-bg: #f2f4f2; --page-fg: #17201a; --caption-fg: #5b6b60; --accent: #3f7a57; --rule: #c9d2cb; }
+:root[data-theme="dark"] { --page-bg: #12140f; --page-fg: #e6e9e4; --caption-fg: #93a394; --accent: #7fb88f; --rule: #2a3128; }
+
+* { box-sizing: border-box; }
+body {
+  background: var(--page-bg);
+  color: var(--page-fg);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  padding: 24px 16px 48px;
+  margin: 0;
+}
+.eyebrow {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.7rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin: 0 0 6px;
+}
+h1 {
+  font-size: 1.15rem;
+  font-weight: 600;
+  margin: 0 0 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--rule);
+}
+p.lede { color: var(--caption-fg); font-size: 0.85rem; margin: 0 0 24px; max-width: 74ch; }
+.stack { display: flex; flex-direction: column; gap: 28px; max-width: 100%; }
+.state-label { font-size: 0.78rem; color: var(--caption-fg); margin: 0 0 6px; font-weight: 600; letter-spacing: 0.02em; }
+.state-caption { font-size: 0.78rem; color: var(--caption-fg); margin: 6px 0 0; max-width: 74ch; }
+
+.term-wrap { overflow-x: auto; max-width: 100%; }
+.term {
+  --t-bg: #1e1e1e;
+  --t-fg: #cccccc;
+  --t-dim: #7f7f7f;
+  --t-yellow: #e5c07b;
+  --t-red: #e06c75;
+  --t-green: #98c379;
+  width: max-content;
+  min-width: 100%;
+  background: var(--t-bg);
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 6px 24px rgba(0,0,0,0.35);
+}
+.titlebar {
+  background: #303030;
+  padding: 7px 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.dot.r { background: #ff5f57; }
+.dot.y { background: #febc2e; }
+.dot.g { background: #28c840; }
+.titletext {
+  flex: 1;
+  text-align: center;
+  color: #9a9a9a;
+  font-size: 0.75rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  margin-right: 24px;
+}
+pre.content {
+  margin: 0;
+  padding: 10px 0 10px 1ch;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.45;
+  color: var(--t-fg);
+  white-space: pre;
+}
+.dim { color: var(--t-dim); }
+.stale { color: var(--t-yellow); }
+.bid { color: var(--t-green); }
+.ask { color: var(--t-red); }
+</style>
+
+<p class="eyebrow">Bot Monitoring TUI · key screen 2 of 4</p>
+<h1>Coin detail</h1>
+<p class="lede">Full-screen replace from a Coins-pane row (<code>Enter</code>). Live indicators computed via <code>ml_signals.indicators</code> (never re-derived locally). The order-book region opens <strong>collapsed to top-of-book only</strong> by default — <code>d</code> toggles it open to the full depth ladder (up to 20 levels/side, bid left / ask right, fixed column position per DESIGN.md's Accessibility Floor). Full depth is always reachable, never removed — just not the default rendering (clarifies FR-20's "never truncated to top-of-book only" as a capability guarantee, not a default-open mandate).</p>
+
+<div class="stack">
+
+<div>
+<p class="state-label">(a) default on entry — BTC-USD-PERP, book collapsed to top-of-book</p>
+<div class="term-wrap"><div class="term">
+<div class="titlebar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="titletext">ssh hetzner-box -- bot_tui</span></div>
+<pre class="content">Coins &gt; BTC-USD-PERP
+
+┌─ live indicators ────────────────────────────────────────────────────────────────────────┐
+│ microprice   68421.372        spread    0.05                                             │
+│ ofi(10)      +0.1823          obi(10)   0.5124                                           │
+└──────────────────────────────────────────────────────────────────────────────────────────┘
+
+┌─ order book  BTC-USD-PERP  top-of-book  (d: expand) ─────────────────────────────────────┐
+<span class="dim">│     bid size     bid price     ask price     ask size                                    │</span>
+│<span class="bid">        0.420      68421.35 </span>  <span class="ask">68421.40      0.380</span>                                         │
+└──────────────────────────────────────────────────────────────────────────────────────────┘
+
+<span class="dim">j/k move  d expand book  o dashboard  esc back  : command  :q quit</span></pre>
+</div></div>
+<p class="state-caption">One row only — best bid / best ask. This is the resting state every time Coin-detail opens; the ladder does not auto-expand. <code>d</code> toggles to state (b).</p>
+</div>
+
+<div>
+<p class="state-label">(b) expanded — same coin, <code>d</code> pressed, full 20 levels/side</p>
+<div class="term-wrap"><div class="term">
+<div class="titlebar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="titletext">ssh hetzner-box -- bot_tui</span></div>
+<pre class="content">Coins &gt; BTC-USD-PERP
+
+┌─ live indicators ────────────────────────────────────────────────────────────────────────┐
+│ microprice   68421.372        spread    0.05                                             │
+│ ofi(10)      +0.1823          obi(10)   0.5124                                           │
+└──────────────────────────────────────────────────────────────────────────────────────────┘
+
+┌─ order book  BTC-USD-PERP  20 lvl  (d: collapse) ────────────────────────────────────────┐
+<span class="dim">│     bid size     bid price   ask price     ask size                                      │</span>
+│<span class="bid">        0.420      68421.35 </span>  <span class="ask">68421.40      0.380</span>                                         │
+│<span class="bid">        0.600      68421.30 </span>  <span class="ask">68421.45      0.520</span>                                         │
+│<span class="bid">        0.780      68421.25 </span>  <span class="ask">68421.50      0.660</span>                                         │
+│<span class="bid">        0.750      68421.20 </span>  <span class="ask">68421.55      0.800</span>                                         │
+│<span class="bid">        0.930      68421.15 </span>  <span class="ask">68421.60      0.740</span>                                         │
+│<span class="bid">        1.110      68421.10 </span>  <span class="ask">68421.65      0.880</span>                                         │
+│<span class="bid">        1.080      68421.05 </span>  <span class="ask">68421.70      1.020</span>                                         │
+│<span class="bid">        1.260      68421.00 </span>  <span class="ask">68421.75      1.160</span>                                         │
+│<span class="bid">        1.440      68420.95 </span>  <span class="ask">68421.80      1.100</span>                                         │
+│<span class="bid">        1.410      68420.90 </span>  <span class="ask">68421.85      1.240</span>                                         │
+│<span class="bid">        1.590      68420.85 </span>  <span class="ask">68421.90      1.380</span>                                         │
+│<span class="bid">        1.770      68420.80 </span>  <span class="ask">68421.95      1.520</span>                                         │
+│<span class="bid">        1.740      68420.75 </span>  <span class="ask">68422.00      1.460</span>                                         │
+│<span class="bid">        1.920      68420.70 </span>  <span class="ask">68422.05      1.600</span>                                         │
+│<span class="bid">        2.100      68420.65 </span>  <span class="ask">68422.10      1.740</span>                                         │
+│<span class="bid">        2.070      68420.60 </span>  <span class="ask">68422.15      1.880</span>                                         │
+│<span class="bid">        2.250      68420.55 </span>  <span class="ask">68422.20      1.820</span>                                         │
+│<span class="bid">        2.430      68420.50 </span>  <span class="ask">68422.25      1.960</span>                                         │
+│<span class="bid">        2.400      68420.45 </span>  <span class="ask">68422.30      2.100</span>                                         │
+│<span class="bid">        2.580      68420.40 </span>  <span class="ask">68422.35      2.240</span>                                         │
+└──────────────────────────────────────────────────────────────────────────────────────────┘
+
+<span class="dim">j/k move  d collapse book  o dashboard  esc back  : command  :q quit</span></pre>
+</div></div>
+<p class="state-caption">Two LineBox regions (single-line box-drawing, DESIGN.md Shapes): indicators, then depth ladder. <code>d</code> is a pure toggle on this one region — it does not change breadcrumb, pane, or <code>esc</code>'s meaning (Flow 1, step 4).</p>
+</div>
+
+</div>

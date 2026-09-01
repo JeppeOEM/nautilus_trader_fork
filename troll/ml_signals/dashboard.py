@@ -43,12 +43,10 @@ import math
 import os
 import statistics
 import time
-import urllib.request
 from collections import defaultdict
 from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
-from urllib.parse import urlparse
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -56,27 +54,31 @@ import redis.asyncio as aioredis
 from aiohttp import web
 from plotly.subplots import make_subplots
 
-from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
-from nautilus_trader.core.nautilus_pyo3 import get_dydx_http_url  # type: ignore[attr-defined]
-
 from ml_signals.catalog_stats import list_instruments
 from ml_signals.indicators import MultiLevelOBI
 from ml_signals.indicators import MultiLevelOFI
 from ml_signals import chart_data as _chart_data
-from ml_signals import metrics_computer
-from ml_signals import metrics_store
+from ranking_engine import metrics_store
 
 
 logger = logging.getLogger(__name__)
 
 CATALOG_PATH: str = os.environ.get("CATALOG_PATH", "troll/dydx_collector/catalog")
 
+# Path to the shared SQLite metrics store -- ranking_engine is the sole writer (Task
+# 7); dashboard only ever reads it (metrics_store.latest/nearest/history). Mounted from
+# a dedicated *directory* in docker-compose.yml (not a single-file mount): SQLite WAL
+# mode creates metrics.db-wal/metrics.db-shm sidecar files next to the main file, which
+# a single-file bind mount can't expose on a path shared with ranking_engine's own
+# read-write mount of the same store.
+METRICS_DB_PATH: str = os.environ.get(
+    "METRICS_DB_PATH", str(Path(CATALOG_PATH).parent / "metrics" / "metrics.db"),
+)
+
 # How often the slow loop recomputes full snapshot metrics from Parquet.
 LIVE_INTERVAL_SECONDS: int = 5
 # How often the slow loop flushes to SQLite for historical bookkeeping.
 DB_WRITE_INTERVAL_SECONDS: int = 60
-# How often the volume-24h poll refreshes _VOLUME_24H (used for the default rankings sort).
-VOLUME_POLL_SECONDS: int = 60
 # Gap threshold for coin chart: if consecutive snapshots are further apart than this
 # (in milliseconds), insert a null data point to break the Plotly line. This converts
 # a misleading horizontal "flatline" (Plotly connecting across a gap) into an honest
@@ -108,6 +110,7 @@ RANKING_COLS: list[tuple[str, str, object, object]] = [
     ("pct_1h",         "1h %",   lambda v: f"{v:+.2f}%", lambda v: "#2a9d2a" if v > 0 else "#c0392b"),
     ("pct_24h",        "24h %",  lambda v: f"{v:+.2f}%", lambda v: "#2a9d2a" if v > 0 else "#c0392b"),
     ("volatility",     "Vol",    lambda v: f"{v:.6f}",   None),
+    ("volatility_score", "Vol Score", lambda v: f"{v:.6f}" if v is not None else "—", None),
     ("volume24h",      "Vol24h", lambda v: f"{v / 1e6:.1f}M", None),
 ]
 
@@ -127,20 +130,16 @@ _LIVE_FAST: dict[str, dict] = {}
 # Parquet/SQLite-derived metrics — written by _slow_loop_task and make_app pre-load.
 _LIVE_SLOW: dict[str, dict] = {}
 
-# volume24H (USD) per instrument, polled independently from dYdX's public indexer —
-# not available anywhere else in the dashboard's data pipeline. Drives the default
-# rankings sort. Written by _volume_loop_task.
-_VOLUME_24H: dict[str, float] = {}
-
 _INGEST_COUNT: int = 0       # total batches ingested; increments ~1/s; visible in API
 _LAST_INGEST_TS: float = 0.0  # wall-clock seconds of last successful ingest
 
-# A coin the collector stops sending snapshots for (unsubscribed/reclassified illiquid/
-# disconnected) must eventually drop out of the Watchlist (troll/dydx_collector's
-# OBS-01: >30s of silence on a liquid instrument is a pipeline failure, not "quiet
-# market") -- reused here as the watchlist-freshness cutoff. _LIVE_FAST entries are
-# never deleted, so this is enforced at read time (_is_fresh), not by pruning the dict.
-_WATCHLIST_STALE_NS = 30_000_000_000
+# rankings:live is now the sole source of Coin Ranking (AD-9/Story 1.8) -- dashboard is
+# a pure reader, never recomputing rank/volume24h/volatility_score itself.
+_LATEST_RANKING: dict | None = None
+_LATEST_RANKING_RECEIVED_AT: float = 0.0
+# 3x ranking_engine's own RANKING_HEARTBEAT_SECONDS default (5s) -- a single missed
+# heartbeat shouldn't immediately flag stale, but two consecutive misses should (AD-9).
+_RANKING_STALE_SECONDS: float = 15.0
 
 # Rolling 1s snapshots received from Redis (plain dicts from DydxSecondSnapshot.to_dict()).
 _second_rolling: dict[str, deque] = defaultdict(lambda: deque(maxlen=300))
@@ -162,12 +161,6 @@ _NAV = '<p><a href="/">Rankings</a> | <a href="/live">Live signals</a></p>'
 def _merged_live(iid: str) -> dict:
     """Merge slow and fast caches; fast wins on key overlap."""
     return {**_LIVE_SLOW.get(iid, {}), **_LIVE_FAST.get(iid, {})}
-
-
-def _is_fresh(iid: str, now_ns: int) -> bool:
-    """Check whether iid has an in-window _LIVE_FAST entry -- evicts dead coins from the watchlist."""
-    entry = _LIVE_FAST.get(iid)
-    return entry is not None and (now_ns - entry["ts"]) <= _WATCHLIST_STALE_NS
 
 
 def _merged_rows() -> list[dict]:
@@ -638,8 +631,7 @@ def _page(title: str, body: str, refresh_seconds: int = 60) -> str:
 
 
 def _render_history_page(symbol: str) -> str:
-    db_path = str(Path(CATALOG_PATH).parent / "metrics.db")
-    rows = metrics_store.history(symbol, db_path, days=31)
+    rows = metrics_store.history(symbol, METRICS_DB_PATH, days=31)
 
     if not rows:
         return _page(symbol, f"<h1>{html.escape(symbol)}</h1><p>No history yet.</p>")
@@ -897,80 +889,80 @@ def _trade_aggregates(snaps: list) -> tuple[float, float, int, int]:
     )
 
 
-def _watchlist_ids() -> list[str]:
-    """Return the current live Watchlist: fresh instrument IDs, sorted by descending volume24H.
-
-    Unlike _rankings_json (the human-facing table), stale/delisted coins are excluded
-    outright rather than merely flagged -- an automated backtest consumer must never
-    silently include a dead coin (see _is_fresh).
-    """
-    now_ns = time.time_ns()
-    fresh_rows = [r for r in _merged_rows() if _is_fresh(r["instrument_id"], now_ns)]
-    fresh_rows.sort(key=lambda r: _VOLUME_24H.get(r["instrument_id"], 0.0), reverse=True)
-    return [r["instrument_id"] for r in fresh_rows]
-
-
-def _current_ranks() -> dict[str, int]:
-    """1-indexed live rank (by descending volume24H) of every currently-fresh instrument.
-
-    Reuses _watchlist_ids's freshness/sort convention exactly -- an instrument absent
-    from the returned dict simply isn't ranked right now (not an error).
-    """
-    return {iid: i + 1 for i, iid in enumerate(_watchlist_ids())}
-
-
-def _merge_rank_into_snapshots(
-    snapshots: list[dict], ranks: dict[str, int], volumes: dict[str, float],
-) -> list[dict]:
-    """Attach the current live rank/volume24h to each snapshot before persisting to metrics_store.
-
-    Deliberately NOT merged into _LIVE_SLOW (the live rankings table's data source) --
-    only this persisted copy carries rank, so the live table (whose row order already
-    shows live rank) doesn't grow a second, up-to-60s-stale "Rank" column.
-    """
-    return [
-        {**s, "rank": ranks.get(s["instrument_id"]), "volume24h": volumes.get(s["instrument_id"])}
-        for s in snapshots
-    ]
+def _cells_for_row(row: dict) -> dict[str, dict]:
+    """Build the pre-formatted {key: {text, color, raw}} cell dict for one rankings row."""
+    cells: dict[str, dict] = {}
+    err = row.get("_err")
+    for key, _, fmt_fn, color_fn in RANKING_COLS:
+        v = row.get(key)
+        if v is None:
+            cells[key] = {"text": "!", "color": "#f85149", "raw": None} if err else {
+                "text": "—", "color": None, "raw": None,
+            }
+        else:
+            try:
+                cells[key] = {
+                    "text": fmt_fn(v),  # type: ignore[operator]
+                    "color": color_fn(v) if color_fn else None,  # type: ignore[operator]
+                    # NaN/Infinity are valid Python floats but not valid JSON tokens --
+                    # json.dumps would emit them literally and break the client's
+                    # JSON.parse for the whole payload. Null them out instead.
+                    "raw": None if isinstance(v, float) and not math.isfinite(v) else v,
+                }
+            except Exception:
+                cells[key] = {"text": "ERR", "color": "#f85149", "raw": None}
+    return cells
 
 
 def _rankings_json() -> str:
     """Return pre-formatted cell values for all currently-collected instruments as JSON.
 
-    Rows are sorted by descending volume24H (USD) on every call -- not a one-time
-    computation -- so the default order stays live as _VOLUME_24H and _LIVE_FAST change.
-    Missing volume24H (e.g. a newly-subscribed coin, or before the first poll completes)
-    sorts as 0.0, not to the top.
+    Row order comes entirely from ranking_engine's rankings:live message (AD-9) --
+    dashboard never re-sorts locally. An instrument dashboard sees live (_LIVE_FAST) but
+    that ranking_engine hasn't classified as fresh yet is appended after every ranked
+    row, in _merged_rows()'s own iteration order, with null rank/volume24h/
+    volatility_score cells -- mirrors the pre-existing "absent = not currently ranked,
+    not an error" convention, never dropped.
     """
-    rows = sorted(_merged_rows(), key=lambda r: _VOLUME_24H.get(r["instrument_id"], 0.0), reverse=True)
+    live_by_iid = {r["instrument_id"]: r for r in _merged_rows()}
+    ranked_iids: set[str] = set()
     result = []
-    for row in rows:
-        iid = row["instrument_id"]
-        row = {**row, "volume24h": _VOLUME_24H.get(iid)}
-        cells: dict[str, dict] = {}
-        err = row.get("_err")
-        for key, _, fmt_fn, color_fn in RANKING_COLS:
-            v = row.get(key)
-            if v is None:
-                cells[key] = {"text": "!", "color": "#f85149", "raw": None} if err else {
-                    "text": "—", "color": None, "raw": None,
-                }
-            else:
-                try:
-                    cells[key] = {
-                        "text": fmt_fn(v),  # type: ignore[operator]
-                        "color": color_fn(v) if color_fn else None,  # type: ignore[operator]
-                        # NaN/Infinity are valid Python floats but not valid JSON tokens --
-                        # json.dumps would emit them literally and break the client's
-                        # JSON.parse for the whole payload. Null them out instead.
-                        "raw": None if isinstance(v, float) and not math.isfinite(v) else v,
-                    }
-                except Exception:
-                    cells[key] = {"text": "ERR", "color": "#f85149", "raw": None}
-        result.append({"instrument_id": iid, "cells": cells})
+
+    if _LATEST_RANKING is not None:
+        for rank_row in _LATEST_RANKING["ranks"]:
+            # Defensive .get()s: one malformed entry (missing key, wrong shape) in an
+            # otherwise-valid ranks list must not crash the whole render -- skip just
+            # that entry, keep rendering the rest (_handle_rankings_message already
+            # validates the list itself, but not every entry inside it).
+            if not isinstance(rank_row, dict):
+                continue
+            iid = rank_row.get("instrument_id")
+            if iid is None:
+                continue
+            ranked_iids.add(iid)
+            row = {
+                **live_by_iid.get(iid, {"instrument_id": iid}),
+                "volume24h": rank_row.get("volume24h"),
+                "volatility_score": rank_row.get("volatility_score"),
+            }
+            result.append({"instrument_id": iid, "cells": _cells_for_row(row)})
+
+    for iid, live in live_by_iid.items():
+        if iid in ranked_iids:
+            continue
+        row = {**live, "volume24h": None, "volatility_score": None}
+        result.append({"instrument_id": iid, "cells": _cells_for_row(row)})
+
     age_s = round(time.time() - _LAST_INGEST_TS, 1) if _LAST_INGEST_TS else None
     stale = age_s is None or age_s > 10
-    return json.dumps({"rows": result, "ingest_count": _INGEST_COUNT, "age_s": age_s, "stale": stale})
+    ranking_age_s = (
+        round(time.time() - _LATEST_RANKING_RECEIVED_AT, 1) if _LATEST_RANKING_RECEIVED_AT else None
+    )
+    ranking_stale = ranking_age_s is None or ranking_age_s > _RANKING_STALE_SECONDS
+    return json.dumps({
+        "rows": result, "ingest_count": _INGEST_COUNT, "age_s": age_s, "stale": stale,
+        "ranking_stale": ranking_stale, "ranking_age_s": ranking_age_s,
+    })
 
 
 def _ingest_batch(batch: list[dict]) -> None:
@@ -1106,9 +1098,21 @@ async def rankings_json_handler(request: web.Request) -> web.Response:
 
 
 async def watchlist_json_handler(request: web.Request) -> web.Response:
-    """FR-7: the live, queryable Watchlist coin-set -- see ml_signals.watchlist.fetch_watchlist."""
+    """FR-7: the live, queryable Watchlist coin-set -- see ml_signals.watchlist.fetch_watchlist.
+
+    Thin proxy over rankings:live's own ranked instrument-id list (Task 8) --
+    ranking_engine already applies the freshness gate before including an instrument,
+    so this avoids a second live Redis call/subscription just to reconstruct what
+    rankings:live already tells us.
+    """
+    ranks = _LATEST_RANKING["ranks"] if _LATEST_RANKING else []
+    # Defensive .get(): a malformed entry (missing instrument_id) is skipped rather
+    # than crashing this handler -- same guard as _rankings_json's ranks[] iteration.
+    instrument_ids = [
+        iid for r in ranks if isinstance(r, dict) and (iid := r.get("instrument_id")) is not None
+    ]
     return web.Response(
-        text=json.dumps({"instrument_ids": _watchlist_ids()}), content_type="application/json",
+        text=json.dumps({"instrument_ids": instrument_ids}), content_type="application/json",
     )
 
 
@@ -1129,8 +1133,7 @@ async def rank_history_json_handler(request: web.Request) -> web.Response:
     else:
         ts_ns = time.time_ns()
 
-    db_path = str(Path(CATALOG_PATH).parent / "metrics.db")
-    row = await asyncio.to_thread(metrics_store.nearest, symbol, ts_ns, db_path)
+    row = await asyncio.to_thread(metrics_store.nearest, symbol, ts_ns, METRICS_DB_PATH)
     return web.Response(text=json.dumps(row or {}), content_type="application/json")
 
 
@@ -1247,8 +1250,26 @@ async def redis_subscriber_ctx(app: web.Application):  # type: ignore[type-arg]
             pass
 
 
+def _handle_rankings_message(message: dict) -> None:
+    """Record the latest rankings:live message and its receipt time (for staleness).
+
+    Validates the message has a list-shaped "ranks" before storing it -- a malformed
+    payload (unexpected shape, wrong producer, truncated JSON that still parses) must
+    not corrupt _LATEST_RANKING. The previous valid ranking is kept instead, mirroring
+    T-03-01's "one bad message never takes down the rest of the subscriber" discipline.
+    """
+    global _LATEST_RANKING, _LATEST_RANKING_RECEIVED_AT
+    if not isinstance(message.get("ranks"), list):
+        logger.warning("rankings:live message missing list-shaped 'ranks', ignoring: %r", message)
+        return
+    _LATEST_RANKING = message
+    _LATEST_RANKING_RECEIVED_AT = time.time()
+
+
 async def _redis_listener(redis_url: str) -> None:
-    """Subscribe to snapshots:raw and call _ingest_batch on each message.
+    """Subscribe to snapshots:raw and rankings:live on one connection, branching on
+    message["channel"] -- one subscriber, two channels, per AD-9 (dashboard never opens
+    a second live Redis connection).
 
     Outer while True reconnects on any non-cancellation exception (ARCH-03).
     Malformed JSON is logged and skipped — subscriber always continues (T-03-01).
@@ -1259,15 +1280,21 @@ async def _redis_listener(redis_url: str) -> None:
             logger.info("Redis listener connecting...")
             async with aioredis.Redis.from_url(redis_url, decode_responses=True) as client:
                 pubsub = client.pubsub()
-                await pubsub.subscribe("snapshots:raw")
-                logger.info("Redis listener subscribed to snapshots:raw")
+                await pubsub.subscribe("snapshots:raw", "rankings:live")
+                logger.info("Redis listener subscribed to snapshots:raw, rankings:live")
                 async for message in pubsub.listen():
                     if message["type"] != "message":
                         continue
                     try:
-                        batch = json.loads(message["data"])
-                        _ingest_batch(batch)
-                        logger.info("Ingested batch: %d instruments, live_fast now %d", len(batch), len(_LIVE_FAST))
+                        payload = json.loads(message["data"])
+                        if message["channel"] == "snapshots:raw":
+                            _ingest_batch(payload)
+                            logger.info(
+                                "Ingested batch: %d instruments, live_fast now %d",
+                                len(payload), len(_LIVE_FAST),
+                            )
+                        elif message["channel"] == "rankings:live":
+                            _handle_rankings_message(payload)
                     except Exception as exc:
                         logger.warning("Redis message parse/ingest error: %s", exc)
         except asyncio.CancelledError:
@@ -1291,107 +1318,41 @@ async def slow_loop_ctx(app: web.Application):  # type: ignore[type-arg]
             pass
 
 
-async def _slow_loop_task(catalog_path: str) -> None:
-    """Full snapshot (price/pct/vol + book metrics) every DB_WRITE_INTERVAL_SECONDS."""
-    db_path = str(Path(catalog_path).parent / "metrics.db")
-    while True:
-        try:
-            snapshots = await asyncio.to_thread(metrics_computer.compute_all, catalog_path)
-            if snapshots:
-                for s in snapshots:
-                    _LIVE_SLOW[s["instrument_id"]] = s
-                persisted = _merge_rank_into_snapshots(snapshots, _current_ranks(), _VOLUME_24H)
-                await asyncio.to_thread(metrics_store.write, persisted, db_path)
-        except Exception:
-            logger.exception("Slow metrics loop failed")
-        await asyncio.sleep(DB_WRITE_INTERVAL_SECONDS)
+def _refresh_live_slow(db_path: str) -> None:
+    """Populate _LIVE_SLOW from metrics_store's read-only latest() query.
 
-
-def _fetch_volume_24h_json(network: DydxNetwork) -> dict:
-    """GET dYdX's public indexer perpetualMarkets endpoint.
-
-    Deliberately independent of dydx_collector.open_interest._fetch_markets_json,
-    which hits the same endpoint for the same reason: that function performs network
-    I/O, and AD-4 only permits cross-namespace imports of shared data types and pure,
-    I/O-free utilities -- a network-calling function does not qualify for reuse across
-    the dydx_collector/ml_signals module boundary.
+    Replaces the old catalog-scanning/computing/writing _slow_loop_task (Task 7):
+    ranking_engine is now the sole caller of metrics_computer.compute_all() and the
+    sole writer of metrics_store, so this loop only needs to read the persisted result
+    back -- exactly like make_app()'s existing one-time startup preload already does,
+    just repeated periodically instead of once.
     """
-    url = f"{get_dydx_http_url(network)}/v4/perpetualMarkets"
-    request = urllib.request.Request(  # noqa: S310 (fixed https indexer URL)
-        url,
-        headers={"User-Agent": "nautilus-dydx-dashboard/1.0"},
-    )
-    with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310
-        return json.load(response)
-
-
-def parse_volume_24h(markets_json: dict) -> dict[str, float]:
-    """Parse volume24H (USD) per instrument from a dYdX perpetualMarkets response."""
-    result: dict[str, float] = {}
-    for market in markets_json.get("markets", {}).values():
-        ticker = market.get("ticker")
-        if ticker is None:
-            continue
-        try:
-            vol = float(market.get("volume24H") or 0)
-        except (ValueError, TypeError):
-            vol = 0.0
-        result[f"{ticker}-PERP.DYDX"] = vol
-    return result
-
-
-async def _fetch_volume_24h(network: DydxNetwork) -> dict[str, float]:
-    markets_json = await asyncio.to_thread(_fetch_volume_24h_json, network)
-    return parse_volume_24h(markets_json)
-
-
-@asynccontextmanager
-async def volume_loop_ctx(app: web.Application):  # type: ignore[type-arg]
-    """Lifecycle context: run _volume_loop_task as a background task."""
-    task = asyncio.create_task(_volume_loop_task(app.get("dydx_network", DydxNetwork.MAINNET)))
-    try:
-        yield
-    finally:
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-
-
-async def _volume_loop_task(network: DydxNetwork) -> None:
-    """Refresh _VOLUME_24H every VOLUME_POLL_SECONDS -- drives the default rankings sort."""
-    while True:
-        try:
-            _VOLUME_24H.update(await _fetch_volume_24h(network))
-        except Exception:
-            logger.exception("Volume-24h poll failed")
-        await asyncio.sleep(VOLUME_POLL_SECONDS)
-
-
-def make_app(
-    redis_url: str, catalog_path: str, network: DydxNetwork = DydxNetwork.MAINNET,
-) -> web.Application:
-    """Return a configured aiohttp Application with all routes and background tasks."""
-    # Pre-populate _LIVE_SLOW from last SQLite snapshot so rankings show immediately
-    db_path = str(Path(catalog_path).parent / "metrics.db")
     try:
         rows = metrics_store.latest(db_path)
         for r in rows:
             _LIVE_SLOW[r["instrument_id"]] = r
-        if rows:
-            logger.info("Pre-loaded %d instruments from metrics.db", len(rows))
     except Exception:
-        logger.warning("Could not pre-load metrics.db — starting cold", exc_info=True)
+        logger.warning("Could not refresh _LIVE_SLOW from metrics.db", exc_info=True)
+
+
+async def _slow_loop_task(catalog_path: str) -> None:
+    """Refresh _LIVE_SLOW from metrics_store every DB_WRITE_INTERVAL_SECONDS."""
+    while True:
+        await asyncio.to_thread(_refresh_live_slow, METRICS_DB_PATH)
+        await asyncio.sleep(DB_WRITE_INTERVAL_SECONDS)
+
+
+def make_app(redis_url: str, catalog_path: str) -> web.Application:
+    """Return a configured aiohttp Application with all routes and background tasks."""
+    # Pre-populate _LIVE_SLOW from last SQLite snapshot so rankings show immediately.
+    _refresh_live_slow(METRICS_DB_PATH)
 
     app = web.Application()
     app["redis_url"] = redis_url
     app["catalog_path"] = catalog_path
-    app["dydx_network"] = network
 
     app.cleanup_ctx.append(redis_subscriber_ctx)
     app.cleanup_ctx.append(slow_loop_ctx)
-    app.cleanup_ctx.append(volume_loop_ctx)
 
     app.router.add_get("/", rankings_handler)
     app.router.add_get("/api/rankings", rankings_json_handler)
@@ -1414,13 +1375,8 @@ if __name__ == "__main__":
     redis_url = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
     catalog_path = os.environ.get("CATALOG_PATH", "troll/dydx_collector/catalog")
     port = int(os.environ.get("DASHBOARD_PORT", "8765"))
-    # Must match the collector's configured network (collector.toml's [network]) or
-    # volume24H/rankings silently reflect the wrong network's data -- see DYDX_NETWORK.
-    network = DydxNetwork.from_str(  # type: ignore[attr-defined]
-        os.environ.get("DYDX_NETWORK", "mainnet").lower(),
-    )
     # loopback-only: network_mode: host means this container shares the host's real
     # network stack, so 127.0.0.1 here is 127.0.0.1 on the host -- nothing remote
     # (LAN, Tailscale, public internet) can reach it, matching Dozzle's existing
     # 127.0.0.1-only port binding in docker-compose.yml.
-    web.run_app(make_app(redis_url, catalog_path, network), host="127.0.0.1", port=port)
+    web.run_app(make_app(redis_url, catalog_path), host="127.0.0.1", port=port)

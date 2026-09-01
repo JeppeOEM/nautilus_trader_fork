@@ -1,0 +1,188 @@
+<title>Bot Monitoring TUI — Coins pane</title>
+<style>
+/*
+  Governs: DESIGN.md Colors, Typography, Components (breadcrumb-header,
+  command-bar, footer-hint-bar, list-row-coin, stale-badge).
+  EXPERIENCE.md Information Architecture (Coins pane row), Component Patterns
+  (Coins-pane list row, Command bar), State Patterns (Cold open, Coin feed
+  stale, Command bar unknown command), Key Flow 1 steps 1-2 and 7 (staleness
+  independence).
+
+  Terminal theme rendered below is ONE concrete illustrative choice
+  (a common dark "One Dark"-family scheme: #1e1e1e bg / #cccccc fg).
+  DESIGN.md's actual rule is "inherit the terminal's own default fg/bg" --
+  there is no fixed hex palette in the product itself. Only the four
+  semantic accents (stale/critical/positive/negative) are load-bearing;
+  the base colors here exist purely so this HTML file renders something
+  concrete.
+*/
+:root {
+  color-scheme: light dark;
+  --page-bg: #f2f4f2;
+  --page-fg: #17201a;
+  --caption-fg: #5b6b60;
+  --accent: #3f7a57;
+  --rule: #c9d2cb;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --page-bg: #12140f; --page-fg: #e6e9e4; --caption-fg: #93a394; --accent: #7fb88f; --rule: #2a3128; }
+}
+:root[data-theme="light"] { --page-bg: #f2f4f2; --page-fg: #17201a; --caption-fg: #5b6b60; --accent: #3f7a57; --rule: #c9d2cb; }
+:root[data-theme="dark"] { --page-bg: #12140f; --page-fg: #e6e9e4; --caption-fg: #93a394; --accent: #7fb88f; --rule: #2a3128; }
+
+* { box-sizing: border-box; }
+body {
+  background: var(--page-bg);
+  color: var(--page-fg);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  padding: 24px 16px 48px;
+  margin: 0;
+}
+.eyebrow {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.7rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin: 0 0 6px;
+}
+h1 {
+  font-size: 1.15rem;
+  font-weight: 600;
+  margin: 0 0 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--rule);
+}
+p.lede { color: var(--caption-fg); font-size: 0.85rem; margin: 0 0 24px; max-width: 74ch; }
+.stack { display: flex; flex-direction: column; gap: 28px; max-width: 100%; }
+.state-label { font-size: 0.78rem; color: var(--caption-fg); margin: 0 0 6px; font-weight: 600; letter-spacing: 0.02em; }
+.state-caption { font-size: 0.78rem; color: var(--caption-fg); margin: 6px 0 0; max-width: 74ch; }
+
+.term-wrap { overflow-x: auto; max-width: 100%; }
+.term {
+  --t-bg: #1e1e1e;
+  --t-fg: #cccccc;
+  --t-dim: #7f7f7f;
+  --t-yellow: #e5c07b;
+  --t-red: #e06c75;
+  --t-green: #98c379;
+  width: max-content;
+  min-width: 100%;
+  background: var(--t-bg);
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 6px 24px rgba(0,0,0,0.35);
+}
+.titlebar {
+  background: #303030;
+  padding: 7px 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.dot.r { background: #ff5f57; }
+.dot.y { background: #febc2e; }
+.dot.g { background: #28c840; }
+.titletext {
+  flex: 1;
+  text-align: center;
+  color: #9a9a9a;
+  font-size: 0.75rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  margin-right: 24px;
+}
+pre.content {
+  margin: 0;
+  padding: 10px 0 10px 1ch;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--t-fg);
+  white-space: pre;
+  tab-size: 2;
+}
+.dim { color: var(--t-dim); }
+.stale { color: var(--t-yellow); }
+.pos { color: var(--t-green); }
+.neg { color: var(--t-red); }
+.cursor { background: var(--t-fg); color: var(--t-bg); }
+</style>
+
+<p class="eyebrow">Bot Monitoring TUI · key screen 1 of 4</p>
+<h1>Coins pane</h1>
+<p class="lede">Canonical entry surface. Default view on TUI launch, reachable anytime via <code>:coins</code>. Sorted by whichever Ranking Mode is active (here: volume) — rank order itself carries no color, per DESIGN.md's Colors section.</p>
+
+<div class="stack">
+
+<div>
+<p class="state-label">(a) normal / at rest — Ranking Mode: volume</p>
+<div class="term-wrap"><div class="term">
+<div class="titlebar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="titletext">ssh hetzner-box -- bot_tui</span></div>
+<pre class="content">Coins
+<span class="dim">sort: volume  (m to toggle volatility)</span>
+
+<span class="dim">  #  symbol             vol24h   ofi(10)  obi(10)     microprice    spread</span>
+  1  BTC-USD-PERP       482.6M    +0.182    0.512      68421.372      0.05
+  2  ETH-USD-PERP       201.3M    -0.071    0.487       3184.220      0.02
+  3  SOL-USD-PERP        96.4M    +0.244    0.601        162.115     0.005
+  4  AVAX-USD-PERP       41.2M    -0.033    0.455        28.4410     0.003
+  5  LINK-USD-PERP       33.8M    +0.091    0.522        13.9820     0.002
+  6  ARB-USD-PERP        22.1M    -0.118    0.402        0.81340    0.0004
+  7  DOGE-USD-PERP       19.6M    +0.055    0.531        0.14220    0.0001
+  8  OP-USD-PERP         14.9M    +0.203    0.488        1.72300    0.0007
+  9  MATIC-USD-PERP      11.3M    -0.089    0.471        0.52180    0.0002
+ 10  ATOM-USD-PERP        9.7M    +0.012    0.498        6.34500    0.0015
+
+
+
+<span class="dim">j/k move  Enter open  / filter  m mode  : command  esc back  :q quit</span></pre>
+</div></div>
+<p class="state-caption">Footer hint bar quiet in <code>attention-neutral</code>. No row is colored for rank — position in the list is the only ranking signal (DESIGN.md Do's and Don'ts).</p>
+</div>
+
+<div>
+<p class="state-label">(b) command bar activated — <code>:</code> pressed, "bo" typed toward <code>:bots</code></p>
+<div class="term-wrap"><div class="term">
+<div class="titlebar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="titletext">ssh hetzner-box -- bot_tui</span></div>
+<pre class="content">Coins
+<span class="dim">sort: volume  (m to toggle volatility)</span>
+
+<span class="dim">  #  symbol             vol24h   ofi(10)  obi(10)     microprice    spread</span>
+  1  BTC-USD-PERP       482.6M    +0.182    0.512      68421.372      0.05
+  2  ETH-USD-PERP       201.3M    -0.071    0.487       3184.220      0.02
+  3  SOL-USD-PERP        96.4M    +0.244    0.601        162.115     0.005
+  4  AVAX-USD-PERP       41.2M    -0.033    0.455        28.4410     0.003
+  5  LINK-USD-PERP       33.8M    +0.091    0.522        13.9820     0.002
+  6  ARB-USD-PERP        22.1M    -0.118    0.402        0.81340    0.0004
+  7  DOGE-USD-PERP       19.6M    +0.055    0.531        0.14220    0.0001
+  8  OP-USD-PERP         14.9M    +0.203    0.488        1.72300    0.0007
+  9  MATIC-USD-PERP      11.3M    -0.089    0.471        0.52180    0.0002
+ 10  ATOM-USD-PERP        9.7M    +0.012    0.498        6.34500    0.0015
+
+
+:bo<span class="cursor"> </span></pre>
+</div></div>
+<p class="state-caption">Command bar (bottom row) overlays the footer hint bar for its duration — list above is untouched. <code>Enter</code> would execute <code>:bots</code>; <code>esc</code> cancels and restores the footer hint bar without acting.</p>
+</div>
+
+<div>
+<p class="state-label">(c) Coins-pane-level stale flag — <code>rankings:live</code> heartbeat lost</p>
+<div class="term-wrap"><div class="term">
+<div class="titlebar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="titletext">ssh hetzner-box -- bot_tui</span></div>
+<pre class="content">Coins  <span class="stale">~ STALE</span>
+<span class="dim">sort: volume  (m to toggle volatility)  -- last-known ranks, ranking_engine heartbeat lost</span>
+
+<span class="dim">  #  symbol             vol24h   ofi(10)  obi(10)     microprice    spread</span>
+<span class="stale">  1  BTC-USD-PERP       482.6M    +0.182    0.512      68421.372      0.05</span>
+<span class="stale">  2  ETH-USD-PERP       201.3M    -0.071    0.487       3184.220      0.02</span>
+<span class="stale">  3  SOL-USD-PERP        96.4M    +0.244    0.601        162.115     0.005</span>
+<span class="dim">  ... (7 more rows, all last-known, all rendered stale)</span>
+
+
+<span class="dim">j/k move  Enter open  / filter  m mode  : command  esc back  :q quit</span></pre>
+</div></div>
+<p class="state-caption">Coins-pane staleness is pane-level, tied to the shared <code>ranking_engine</code> heartbeat (EXPERIENCE.md Data Sources &amp; Staleness) — when it fires every row goes stale together, never a single row alone (that per-row independence is the Bots pane's own, separate signal). Shown abbreviated to 3 rows here; production renders all rows this way. Last-known ranks stay visible, never silently frozen.</p>
+</div>
+
+</div>

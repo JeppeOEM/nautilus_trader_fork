@@ -39,10 +39,13 @@ up-live-paper:
 ## verification for pip's own install step. Run this (not plain `docker compose
 ## build`) whenever troll-requirements.txt or *.dockerfile changes, on
 ## a TLS-intercepting network -- `make up`/`make up-live-paper` no longer build for you.
+## Story 4.1 note: ranking_engine was missing from this list since Story 1.8 first
+## added its service (a pre-existing gap, not introduced here) -- added alongside
+## bot_tui while touching this line for the same reason.
 build-insecure:
 	$(COMPOSE) build \
 		--build-arg PIP_INSECURE_ARGS="--trusted-host pypi.org --trusted-host files.pythonhosted.org --trusted-host pypi.python.org" \
-		collector dashboard live-paper
+		collector dashboard ranking_engine bot_tui live-paper
 
 ## Run the troll test suite inside the collector image. Can't run against host
 ## Python -- nautilus_trader is only compiled/installed inside this image (see
@@ -51,7 +54,14 @@ build-insecure:
 ## intercepting network).
 test:
 	$(COMPOSE) run --rm --no-deps collector \
-		python3 -m pytest dydx_collector/tests ml_signals/tests -q
+		python3 -m pytest dydx_collector/tests ml_signals/tests ranking_engine/tests bot_tui/tests -q
+
+## Launch the bot_tui terminal UI (Story 4.1) -- an interactive urwid app, not a
+## daemon, so it's run via `docker compose run` (never `up -d`) and gated behind the
+## `tui` profile so it's never started by `make up`. Must be run from an actual TTY
+## (an SSH session or local terminal) -- piping/backgrounding this defeats the point.
+tui:
+	$(COMPOSE) --profile tui run --rm bot_tui python3 -m bot_tui.app
 
 ## Run live_paper's test suite inside its own image (not the collector image -- that
 ## image deliberately does not copy in live_paper/, per AD-8's module isolation).

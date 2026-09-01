@@ -12,5 +12,7 @@ ARG PIP_INSECURE_ARGS=
 RUN pip install --no-cache-dir $PIP_INSECURE_ARGS -r troll-requirements.txt
 COPY troll/dydx_collector ./dydx_collector
 COPY troll/ml_signals ./ml_signals
+COPY troll/ranking_engine ./ranking_engine
+COPY troll/bot_tui ./bot_tui
 
 CMD ["python3", "-m", "dydx_collector.collector"]

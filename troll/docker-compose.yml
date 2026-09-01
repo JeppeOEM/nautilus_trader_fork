@@ -52,12 +52,86 @@ services:
       REDIS_URL: "redis://127.0.0.1:6379"
       CATALOG_PATH: "/app/catalog"
       DASHBOARD_PORT: "8765"
+      METRICS_DB_PATH: "/app/metrics_dir/metrics.db"
     user: "1000:1000"
     volumes:
       - ./dydx_collector/catalog:/app/catalog:ro
-      - ./dydx_collector/metrics.db:/app/metrics.db
+      # ranking_engine is now the sole writer of metrics.db (Story 1.8, Task 7) --
+      # dashboard only ever reads it (metrics_store.latest/nearest/history), so this
+      # mount gains :ro, mirroring the same structural enforcement the catalog mount
+      # above already demonstrates for AD-3.
+      #
+      # Mounted as a *directory* (./dydx_collector/metrics/), not the single metrics.db
+      # file: SQLite WAL mode creates metrics.db-wal/metrics.db-shm sidecar files next
+      # to the main file, and a single-file bind mount can't expose those sidecars on a
+      # path shared with another container -- ranking_engine's writes could land in
+      # this container's own private overlay instead of becoming visible here. Mounting
+      # the containing directory lets every sidecar land on the same shared host path.
+      - ./dydx_collector/metrics:/app/metrics_dir:ro
     network_mode: host
     restart: always
+    logging: *default-logging
+
+  ranking_engine:
+    container_name: dydx-ranking-engine
+    build:
+      context: ..
+      dockerfile: troll/collector.dockerfile
+      network: host
+    command: python3 -m ranking_engine.engine
+    environment:
+      PYTHONUNBUFFERED: "1"
+      REDIS_URL: "redis://127.0.0.1:6379"
+      CATALOG_PATH: "/app/catalog"
+      DYDX_NETWORK: "mainnet"
+      RANKING_VOLATILITY_LOOKBACK_SECONDS: "3600"
+      RANKING_HEARTBEAT_SECONDS: "5"
+      METRICS_DB_PATH: "/app/metrics_dir/metrics.db"
+    user: "1000:1000"
+    volumes:
+      # Catalog is read-only -- ranking_engine only reads it via
+      # ml_signals.metrics_computer.compute_all(), same AD-3 "reader trusts the gate"
+      # discipline as dashboard's mount above. metrics/ is read-write -- this is now
+      # the sole writer (Task 7), matching the same reasoning that put :ro on
+      # dashboard's mount. Mounted as a directory, not the single metrics.db file --
+      # see dashboard's mount comment above for why (WAL/SHM sidecar visibility).
+      - ./dydx_collector/catalog:/app/catalog:ro
+      - ./dydx_collector/metrics:/app/metrics_dir
+    network_mode: host
+    restart: always
+    logging: *default-logging
+
+  bot_tui:
+    container_name: dydx-bot-tui
+    # Not part of `make up` / `docker compose up -d` at all -- bot_tui is an
+    # interactive urwid app (Story 4.1, architecture spine's Deployment &
+    # Environments section: "not a long-running background service... not a
+    # restart: always daemon"), launched via `docker compose run`, never `up -d`.
+    # profiles: ["tui"] keeps it out of the default `up` service set for that reason
+    # -- a different rationale than live-paper's profile gating above (that one is
+    # about crash-loop safety for a daemon; this one is about "never auto-started,
+    # period", since a one-shot interactive process has no meaningful "up" state).
+    profiles: ["tui"]
+    build:
+      context: ..
+      dockerfile: troll/collector.dockerfile
+      network: host
+    environment:
+      PYTHONUNBUFFERED: "1"
+      REDIS_URL: "redis://127.0.0.1:6379"
+      BOT_TUI_LOG_PATH: "/app/bot_tui_logs/bot_tui.log"
+      # Story 4.3's `o` deep-link target -- 127.0.0.1:8765 is reachable here exactly
+      # as it is from the host, since both `dashboard` and `bot_tui` run
+      # network_mode: host with no separate port mapping.
+      DASHBOARD_BASE_URL: "http://127.0.0.1:8765"
+    user: "1000:1000"
+    volumes:
+      # bot_tui.log is written here instead of stderr/stdout to avoid corrupting the
+      # full-screen urwid display (see app.py's main()). `docker compose run --rm`
+      # discards the container's writable layer on exit, so without this bind mount the
+      # log -- including any crash traceback -- would be lost the instant the run ends.
+      - ./bot_tui_logs:/app/bot_tui_logs
+    network_mode: host
     logging: *default-logging
 
   live-paper:

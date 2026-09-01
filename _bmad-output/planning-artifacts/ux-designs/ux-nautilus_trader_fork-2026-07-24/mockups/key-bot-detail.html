@@ -1,0 +1,140 @@
+<title>Bot Monitoring TUI — Bot detail</title>
+<style>
+/*
+  Governs: DESIGN.md Elevation & Depth, Shapes (border-linebox), Components
+  (border-linebox, pnl-sparkline), Colors (attention-positive/negative).
+  EXPERIENCE.md Information Architecture (Bot-detail row), Component Patterns
+  (Bot-detail view -- 3 bordered regions, Start/stop control), Data Sources &
+  Staleness (trades/PnL history via live_paper's own read surface over
+  Nautilus Cache, never re-implemented), Key Flow 2 "Bot post-mortem after a
+  rough day" steps 3-8 in full (this is that flow's hero screen).
+
+  Terminal theme rendered below is ONE concrete illustrative choice
+  (dark "One Dark"-family scheme). DESIGN.md's actual rule is "inherit
+  the terminal's own default fg/bg" -- no fixed hex palette in the
+  product itself. The sparkline glyph set and positive/negative coloring
+  are the load-bearing parts of this mock.
+*/
+:root {
+  color-scheme: light dark;
+  --page-bg: #f2f4f2;
+  --page-fg: #17201a;
+  --caption-fg: #5b6b60;
+  --accent: #3f7a57;
+  --rule: #c9d2cb;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --page-bg: #12140f; --page-fg: #e6e9e4; --caption-fg: #93a394; --accent: #7fb88f; --rule: #2a3128; }
+}
+:root[data-theme="light"] { --page-bg: #f2f4f2; --page-fg: #17201a; --caption-fg: #5b6b60; --accent: #3f7a57; --rule: #c9d2cb; }
+:root[data-theme="dark"] { --page-bg: #12140f; --page-fg: #e6e9e4; --caption-fg: #93a394; --accent: #7fb88f; --rule: #2a3128; }
+
+* { box-sizing: border-box; }
+body {
+  background: var(--page-bg);
+  color: var(--page-fg);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  padding: 24px 16px 48px;
+  margin: 0;
+}
+.eyebrow {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.7rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin: 0 0 6px;
+}
+h1 {
+  font-size: 1.15rem;
+  font-weight: 600;
+  margin: 0 0 10px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--rule);
+}
+p.lede { color: var(--caption-fg); font-size: 0.85rem; margin: 0 0 24px; max-width: 74ch; }
+.state-caption { font-size: 0.78rem; color: var(--caption-fg); margin: 10px 0 0; max-width: 74ch; }
+
+.term-wrap { overflow-x: auto; max-width: 100%; }
+.term {
+  --t-bg: #1e1e1e;
+  --t-fg: #cccccc;
+  --t-dim: #7f7f7f;
+  --t-yellow: #e5c07b;
+  --t-red: #e06c75;
+  --t-green: #98c379;
+  width: max-content;
+  min-width: 100%;
+  background: var(--t-bg);
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 6px 24px rgba(0,0,0,0.35);
+}
+.titlebar {
+  background: #303030;
+  padding: 7px 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+.dot.r { background: #ff5f57; }
+.dot.y { background: #febc2e; }
+.dot.g { background: #28c840; }
+.titletext {
+  flex: 1;
+  text-align: center;
+  color: #9a9a9a;
+  font-size: 0.75rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  margin-right: 24px;
+}
+pre.content {
+  margin: 0;
+  padding: 10px 0 10px 1ch;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--t-fg);
+  white-space: pre;
+}
+.dim { color: var(--t-dim); }
+.pos { color: var(--t-green); }
+.neg { color: var(--t-red); }
+</style>
+
+<p class="eyebrow">Bot Monitoring TUI · key screen 4 of 4</p>
+<h1>Bot detail</h1>
+<p class="lede">Full-screen replace from a Bots-pane row (<code>Enter</code>). Three bordered regions stacked top-to-bottom, one blank line between them (DESIGN.md section-gap): live snapshot header, trades blotter, PnL-over-time chart. This is Key Flow 2's hero screen — <code>bot-03</code>, the bot with the large overnight PnL drop from the Bots pane.</p>
+
+<div class="term-wrap"><div class="term">
+<div class="titlebar"><span class="dot r"></span><span class="dot y"></span><span class="dot g"></span><span class="titletext">ssh hetzner-box -- bot_tui</span></div>
+<pre class="content">Bots &gt; bot-03
+
+┌─ bot-03  snapshot ───────────────────────────────────────────────────────────────────────┐
+│ strategy   microprice_rev / SOL-USD-PERP        mode      paper                          │
+│ pnl      <span class="neg">  -812.40</span>                              position  short 180.0                    │
+│ uptime     1d11h                                win rate  41% (63 trades)                │
+└──────────────────────────────────────────────────────────────────────────────────────────┘
+
+┌─ trades  bot-03 ─────────────────────────────────────────────────────────────────────────┐
+<span class="dim">│ time      side       price       qty    realized pnl                                     │</span>
+│ 03:14:02  sell     168.220      20.0    <span class="neg">        -4.10</span>                                     │
+│ 03:14:55  sell     167.980      20.0    <span class="neg">        -8.60</span>                                     │
+│ 03:22:10  sell     165.410      40.0    <span class="neg">      -142.30</span>                                     │
+│ 03:22:41  sell     163.955      40.0    <span class="neg">      -198.20</span>                                     │
+│ 03:31:07  buy      164.500      30.0    <span class="pos">       +12.40</span>                                     │
+│ 03:41:33  sell     161.200      30.0    <span class="neg">      -276.90</span>                                     │
+│ 04:02:19  sell     162.115      20.0    <span class="neg">       -68.50</span>                                     │
+└──────────────────────────────────────────────────────────────────────────────────────────┘
+
+┌─ pnl over time   day  [week]  month  all   (t to cycle) ─────────────────────────────────┐
+│ <span class="pos">▅</span>  <span class="pos">▆</span>  <span class="pos">▇</span>  <span class="pos">▇</span>  <span class="pos">▆</span>  <span class="neg">▂</span>  <span class="neg">▃</span>                                                                      │
+│ mon tue wed thu fri sat sun                                                               │
+│ week pnl  +210.40 -&gt; -812.40   (drop: wed, see trades blotter)                            │
+└──────────────────────────────────────────────────────────────────────────────────────────┘
+
+<span class="dim">j/k scroll  t time-range  s stop bot  o dashboard  esc back  :q quit</span></pre>
+</div></div>
+
+<p class="state-caption">Region 1 (snapshot) is always live from <code>bots:status</code>. Regions 2-3 read <code>live_paper</code>'s own trade/PnL history surface (built over Nautilus's <code>Cache</code>, not a bespoke store — EXPERIENCE.md Data Sources &amp; Staleness). Sparkline bars use only the DESIGN.md-specified block-element glyph set, colored by sign per bar. Flow 2's narrative beat: builder cycles day→week with <code>t</code> to find when the drop happened (bar 6 turns negative, wed), scrolls the blotter to the matching fills, confirms it's a bad market move rather than a bug, then hits <code>o</code> for the dashboard's fuller view and <code>s</code> to stop the bot for the day.</p>

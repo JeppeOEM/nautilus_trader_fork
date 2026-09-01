@@ -26,7 +26,7 @@ from aiohttp.test_utils import TestClient
 from aiohttp.test_utils import TestServer
 
 import ml_signals.dashboard as dashboard_module
-import ml_signals.metrics_store as metrics_store
+import ranking_engine.metrics_store as metrics_store
 from ml_signals import rank_history
 
 
@@ -110,6 +110,10 @@ async def test_fetch_rank_history_resolves_real_historical_timestamp_via_http(mo
     tmp_dir = tempfile.mkdtemp()
     monkeypatch.setattr(dashboard_module, "CATALOG_PATH", str(Path(tmp_dir) / "catalog"))
     db_path = str(Path(tmp_dir) / "metrics.db")
+    # METRICS_DB_PATH is its own module constant (Story 1.8 review fix #4 -- the
+    # metrics store now lives in a dedicated directory, decoupled from CATALOG_PATH's
+    # parent), so redirecting it for this test needs its own monkeypatch too.
+    monkeypatch.setattr(dashboard_module, "METRICS_DB_PATH", db_path)
     iid = "BTC-USD-PERP.DYDX"
     old_ts = 1_700_000_000_000_000_000
     new_ts = old_ts + 60_000_000_000
