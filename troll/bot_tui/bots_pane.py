@@ -28,9 +28,33 @@ snapshot-header region (a different text layout from the Bots-pane row, sharing 
 same underlying bots:status row shape and the same format_pnl/format_exposure/
 format_uptime helpers -- format_win_rate/format_bot_line, the Bots-pane row's own
 already-shipped Story 4.4 formatting, are deliberately left untouched).
+
+Story 4.7 adds the trades-blotter/PnL-sparkline formatters for Bot-detail's other two
+regions (bots:history:{bot_id}:{range}, read via bot_history_state.py -- a distinct
+wire contract from bots:status, so these take a `dict | None` history entry directly
+rather than the `row: dict` shape every function above takes) plus next_range() and
+dashboard_bot_url(), the pure logic behind the `t`/`o` keys app.py wires in.
 """
 
+from datetime import UTC
+from datetime import datetime
+
+
 COLD_OPEN_TEXT = "waiting for bots:status…"
+
+# Distinct from COLD_OPEN_TEXT (that's "no bots:status message has ever arrived for
+# any bot"): these two describe bots:history:{bot_id}:{range}'s own three-state shape
+# for whichever single bot/range Bot-detail currently has open (Story 4.7, AC1/AC4).
+# "unavailable" (never fetched, or stale past bot_history_state's own timeout) must
+# stay visually distinct from "fetched, genuinely has zero trades" -- collapsing them
+# would make a bot that's simply never traded indistinguishable from a broken read
+# path, the same "None is not 0.0" discipline format_win_rate_detail already applies
+# to win_rate.
+HISTORY_UNAVAILABLE_TEXT = "history unavailable"
+NO_TRADES_YET_TEXT = "no trades yet"
+
+_RANGE_CYCLE = ("day", "week", "month", "all")
+_SPARK_CHARS = "▁▂▃▄▅▆▇█"
 
 
 def bot_rows(statuses: dict[str, dict]) -> list[dict]:
@@ -130,3 +154,80 @@ def bot_detail_lines(row: dict, now: float) -> list[str]:
         f"position  {row['position_side']} {format_exposure(row['net_exposure']).strip()}",
         f"uptime     {uptime_text}                                win rate  {win_rate_text}",
     ]
+
+
+def next_range(current: str) -> str:
+    """Day -> week -> month -> all -> day..., never free-form (Story 4.7, AC2)."""
+    idx = _RANGE_CYCLE.index(current)
+    return _RANGE_CYCLE[(idx + 1) % len(_RANGE_CYCLE)]
+
+
+def format_trade_line(trade: dict) -> str:
+    """
+    One blotter row: timestamp (from trade["ts"], UNIX nanoseconds per Story 4.6's wire
+    contract), side, price, qty, realized PnL -- blank (not "0.00") for a non-closing
+    fill, matching trade["realized_pnl"] being None rather than a fabricated zero.
+    """
+    ts_text = datetime.fromtimestamp(trade["ts"] / 1_000_000_000, tz=UTC).strftime("%m-%d %H:%M:%S")
+    pnl = trade["realized_pnl"]
+    # Width matches format_pnl's own output exactly (not a hardcoded literal) so a
+    # future change to that function's formatting can't silently misalign this column.
+    pnl_text = format_pnl(pnl) if pnl is not None else " " * len(format_pnl(0.0))
+    return (
+        f"{ts_text}  {trade['side']:<4} {trade['price']:>12.2f} {trade['qty']:>10.4f}  {pnl_text}"
+    )
+
+
+def trades_blotter_lines(entry: dict | None) -> list[str]:
+    """
+    Bot-detail's trades-blotter region (Story 4.7, AC1/AC4): `entry` is
+    bot_history_state.get_history()'s result for the currently-open bot/range --
+    already None whenever that read surface is unavailable (never fetched or stale),
+    so this function only has to distinguish "unavailable" from "fetched but empty"
+    from "has real fills"; ordering (oldest-first) is inherited as-is from Story 4.6's
+    wire contract, never re-sorted here.
+    """
+    if entry is None:
+        return [HISTORY_UNAVAILABLE_TEXT]
+    trades = entry.get("trades", [])
+    if not trades:
+        return [NO_TRADES_YET_TEXT]
+    return [format_trade_line(trade) for trade in trades]
+
+
+def pnl_sparkline_text(entry: dict | None) -> str:
+    """
+    Bot-detail's PnL-over-time region (Story 4.7, AC1/AC4) as a compact one-line
+    unicode bar-per-bucket sparkline over `entry["pnl_series"]`, scaled to this
+    series' own min/max (never a fixed absolute scale -- a single outlier day would
+    otherwise flatten every other bucket's bar to the same lowest glyph). A flat
+    series (every bucket equal, including the single-point case) renders the middle
+    glyph throughout rather than dividing by a zero range.
+    """
+    if entry is None:
+        return HISTORY_UNAVAILABLE_TEXT
+    series = entry.get("pnl_series", [])
+    if not series:
+        return NO_TRADES_YET_TEXT
+    values = [point["pnl"] for point in series]
+    lo, hi = min(values), max(values)
+    if hi == lo:
+        return _SPARK_CHARS[len(_SPARK_CHARS) // 2] * len(values)
+    span = hi - lo
+    return "".join(
+        _SPARK_CHARS[
+            min(len(_SPARK_CHARS) - 1, round((value - lo) / span * (len(_SPARK_CHARS) - 1)))
+        ]
+        for value in values
+    )
+
+
+def dashboard_bot_url(base_url: str, bot_id: str) -> str:
+    """
+    `/bot/{bot_id}` (Story 4.7, AC3) -- mirrors coin_detail.dashboard_chart_url()'s
+    exact URL-building shape. The web dashboard has no route there yet (checked: its
+    route list has nothing bot-shaped) -- that gap pre-dates this story and building
+    it is explicitly out of this story's scope (spec's Never section); this function's
+    only job is producing the URL bot_tui itself opens.
+    """
+    return f"{base_url.rstrip('/')}/bot/{bot_id}"

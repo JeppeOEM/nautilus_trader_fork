@@ -152,3 +152,93 @@ def test_bot_detail_lines_third_line_has_uptime_and_win_rate() -> None:
     lines = bots_pane.bot_detail_lines(row, now=1_005.0)
     assert "5s" in lines[2] or "0m05s" in lines[2]
     assert "41% (63 trades)" in lines[2]
+
+
+def test_next_range_cycles_day_week_month_all_day() -> None:
+    assert bots_pane.next_range("day") == "week"
+    assert bots_pane.next_range("week") == "month"
+    assert bots_pane.next_range("month") == "all"
+    assert bots_pane.next_range("all") == "day"
+
+
+def _history_entry(**overrides: object) -> dict:
+    base = {
+        "bot_id": "bot-01",
+        "range": "day",
+        "updated_at": 1_000_000_000,
+        "trades": [
+            {"ts": 1_000_000_000, "side": "BUY", "price": 100.0, "qty": 1.0, "realized_pnl": None},
+            {"ts": 2_000_000_000, "side": "SELL", "price": 105.0, "qty": 1.0, "realized_pnl": 5.0},
+        ],
+        "pnl_series": [{"period_start": 0, "pnl": 5.0}],
+    }
+    base.update(overrides)
+    return base
+
+
+def test_trades_blotter_lines_none_entry_is_unavailable() -> None:
+    assert bots_pane.trades_blotter_lines(None) == [bots_pane.HISTORY_UNAVAILABLE_TEXT]
+
+
+def test_trades_blotter_lines_empty_trades_is_no_trades_yet() -> None:
+    entry = _history_entry(trades=[])
+    assert bots_pane.trades_blotter_lines(entry) == [bots_pane.NO_TRADES_YET_TEXT]
+
+
+def test_trades_blotter_lines_one_line_per_fill_in_wire_order() -> None:
+    lines = bots_pane.trades_blotter_lines(_history_entry())
+    assert len(lines) == 2
+    assert "BUY" in lines[0]
+    assert "SELL" in lines[1]
+
+
+def test_trades_blotter_lines_non_closing_fill_has_no_pnl_number() -> None:
+    lines = bots_pane.trades_blotter_lines(_history_entry())
+    assert bots_pane.format_pnl(5.0) not in lines[0]
+
+
+def test_trades_blotter_lines_closing_fill_shows_its_pnl() -> None:
+    lines = bots_pane.trades_blotter_lines(_history_entry())
+    assert bots_pane.format_pnl(5.0) in lines[1]
+
+
+def test_pnl_sparkline_text_none_entry_is_unavailable() -> None:
+    assert bots_pane.pnl_sparkline_text(None) == bots_pane.HISTORY_UNAVAILABLE_TEXT
+
+
+def test_pnl_sparkline_text_empty_series_is_no_trades_yet() -> None:
+    entry = _history_entry(pnl_series=[])
+    assert bots_pane.pnl_sparkline_text(entry) == bots_pane.NO_TRADES_YET_TEXT
+
+
+def test_pnl_sparkline_text_one_char_per_bucket() -> None:
+    entry = _history_entry(
+        pnl_series=[
+            {"period_start": 0, "pnl": -5.0},
+            {"period_start": 1, "pnl": 0.0},
+            {"period_start": 2, "pnl": 10.0},
+        ]
+    )
+    text = bots_pane.pnl_sparkline_text(entry)
+    assert len(text) == 3
+    # Monotonically increasing pnl must map to non-decreasing bar height.
+    assert text[0] <= text[1] <= text[2]
+
+
+def test_pnl_sparkline_text_flat_series_does_not_divide_by_zero() -> None:
+    entry = _history_entry(pnl_series=[{"period_start": 0, "pnl": 3.0}] * 4)
+    text = bots_pane.pnl_sparkline_text(entry)
+    assert len(text) == 4
+    assert len(set(text)) == 1
+
+
+def test_dashboard_bot_url_shape() -> None:
+    assert bots_pane.dashboard_bot_url("http://127.0.0.1:8765", "bot-01") == (
+        "http://127.0.0.1:8765/bot/bot-01"
+    )
+
+
+def test_dashboard_bot_url_strips_trailing_slash_on_base() -> None:
+    assert bots_pane.dashboard_bot_url("http://127.0.0.1:8765/", "bot-01") == (
+        "http://127.0.0.1:8765/bot/bot-01"
+    )

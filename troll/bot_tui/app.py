@@ -14,11 +14,14 @@
 # -------------------------------------------------------------------------------------------------
 """
 bot_tui urwid app shell (Story 4.1, AC1-AC4; Story 4.2, AC1-AC5; Story 4.3, AC1-AC7;
-Story 4.4, AC1-AC4): MainLoop wiring, breadcrumb/footer, Coins pane, the `:` command
-bar, the `/` inline filter, the `m` Ranking-Mode toggle, a pane-level stale badge, a
-full-screen Coin-detail view (live indicators + collapsible order-book ladder + `o`
-dashboard deep-link), a Bots pane (live per-bot PnL/status rows, per-row stale badges,
-`s` start/stop with a footer-echo confirmation), and `esc`/`:q` navigation.
+Story 4.4, AC1-AC4; Story 4.7, AC1-AC4): MainLoop wiring, breadcrumb/footer, Coins
+pane, the `:` command bar, the `/` inline filter, the `m` Ranking-Mode toggle, a
+pane-level stale badge, a full-screen Coin-detail view (live indicators + collapsible
+order-book ladder + `o` dashboard deep-link), a Bots pane (live per-bot PnL/status
+rows, per-row stale badges, `s` start/stop with a footer-echo confirmation), a
+full-screen Bot-detail view (live-snapshot header, `t`-cycled trades blotter + PnL
+sparkline sourced from Story 4.6's bots:history:* keys, `o` dashboard deep-link), and
+`esc`/`:q` navigation.
 
 `s` on a running bot does not stop it immediately -- it opens a type-to-confirm prompt
 (operator must type "stop" + Enter) before the stop command is published, per an
@@ -50,6 +53,7 @@ import webbrowser
 
 import urwid
 
+from bot_tui import bot_history_state
 from bot_tui import bots_pane
 from bot_tui import bots_state
 from bot_tui import coin_detail
@@ -78,11 +82,10 @@ _COIN_DETAIL_FOOTER_HINT_TEXT = "d expand book  o dashboard  esc back  :q quit"
 # _handle_global_key), `s` is Bots-pane-only.
 _BOTS_FOOTER_HINT_TEXT = "s start/stop  : command  esc back  :q quit"
 
-# Bot-detail's own footer (Story 4.5) -- only the live-snapshot-header region exists
-# in this story (AC4), so no j/k (scroll), t (time-range), or o (dashboard) here --
-# those belong to Story 4.7's blotter/PnL-chart regions. Advertise only what's
-# actually bound, same discipline Story 4.3's Coin-detail footer established.
-_BOT_DETAIL_FOOTER_HINT_TEXT = "s start/stop  esc back  :q quit"
+# Bot-detail's own footer (Story 4.5 added s/esc; Story 4.7 adds t/o for the new
+# blotter/PnL-sparkline regions). No j/k (scroll) hint -- the blotter's own ListBox
+# scrolling is "free" the same way the Coins-pane's j/k movement already is.
+_BOT_DETAIL_FOOTER_HINT_TEXT = "s start/stop  t range  o dashboard  esc back  :q quit"
 
 _PALETTE = [
     ("stale", "yellow", "default"),
@@ -94,6 +97,12 @@ _PALETTE = [
 
 _LADDER_COLLAPSED_LEVELS = 1
 _LADDER_EXPANDED_LEVELS = 20
+
+# Bot-detail's trades-blotter region (Story 4.7) -- a fixed visible height inside a
+# scrollable ListBox (BoxAdapter), not "however many fills happen to exist" (Story
+# 4.6 already caps the wire contract at 500 trades; this caps what's visible at once
+# on screen, independently, via ordinary urwid scrolling for the rest).
+_BOT_DETAIL_BLOTTER_HEIGHT = 8
 
 # Returned by _dispatch_command to signal `:q` -- kept out of urwid's ExitMainLoop so
 # this function stays a plain, urwid-free, directly-testable function.
@@ -206,6 +215,14 @@ class BotTuiApp:
         # is already accumulated unconditionally for every bot regardless of which view
         # is active (see _open_bot_detail's own comment).
         self._bot_detail_bot_id: str | None = None
+
+        # Bot-detail's history state (Story 4.7). Unlike the bots:status snapshot
+        # above, bots:history *does* have an explicit open/close lifecycle
+        # (bot_history_state.open_bot()/close_bot()) -- see that module's own
+        # docstring for why. Always resets to "day" on a fresh Bot-detail open
+        # (_open_bot_detail), never carried over from a previous bot, mirroring
+        # _ladder_expanded's identical reset-on-entry discipline for Coin-detail.
+        self._bot_history_range: str = "day"
 
         # Stop-confirmation guard: active while the operator must type "stop" + Enter
         # to actually stop the bot named by _stop_confirm_bot_id (captured at open
@@ -418,7 +435,25 @@ class BotTuiApp:
         snapshot_box = urwid.LineBox(
             urwid.Pile(line_widgets), title=f"{self._bot_detail_bot_id}  snapshot"
         )
-        return urwid.Filler(snapshot_box, valign="top")
+
+        # Story 4.7: two more bordered regions, independent of the snapshot above --
+        # bot_history_state.get_history() already folds "never fetched" and "stale"
+        # into a single None (AC4: the snapshot region above has no dependency on this
+        # read path at all, so it can never be affected by whatever these two do).
+        history_entry = bot_history_state.get_history(self._bot_history_range)
+        blotter_lines = bots_pane.trades_blotter_lines(history_entry)
+        blotter_box = urwid.LineBox(
+            urwid.BoxAdapter(
+                urwid.ListBox(urwid.SimpleListWalker([urwid.Text(line) for line in blotter_lines])),
+                height=_BOT_DETAIL_BLOTTER_HEIGHT,
+            ),
+            title="trades",
+        )
+        sparkline_box = urwid.LineBox(
+            urwid.Text(bots_pane.pnl_sparkline_text(history_entry)),
+            title=f"pnl ({self._bot_history_range})",
+        )
+        return urwid.Filler(urwid.Pile([snapshot_box, blotter_box, sparkline_box]), valign="top")
 
     def _build_coin_detail_body(self) -> urwid.Widget:
         # AC7: every value below is always the single most-recently-received
@@ -721,6 +756,11 @@ class BotTuiApp:
         self._stack = [*self._stack, self._view]
         self._view = "bot_detail"
         self._bot_detail_bot_id = bot_id
+        # Reset to "day" and start tracking this bot's history fresh on every entry
+        # (Story 4.7) -- never carries over a previous bot's range or stale data,
+        # same reset-on-entry discipline _open_coin_detail applies to _ladder_expanded.
+        self._bot_history_range = "day"
+        bot_history_state.open_bot(bot_id)
         self._refresh_breadcrumb()
         self._refresh_footer_hint()
         self._body.original_widget = self._build_body()
@@ -740,6 +780,27 @@ class BotTuiApp:
         # browser when bot_tui is run on-host -- both are real deployment shapes, so
         # the footer text below is shown unconditionally, never gated on this
         # attempt's (unreliable, environment-dependent) outcome.
+        try:
+            webbrowser.open(url)
+        except Exception:
+            logger.warning("webbrowser.open failed for %s", url)
+        self._footer_hint.set_text(f"dashboard: {url}")
+
+    def _cycle_bot_history_range(self) -> None:
+        # Footer-echoes the new range and redraws immediately (Story 4.7, AC2) --
+        # doesn't wait for the redraw loop's own next tick, same "keystroke handled
+        # synchronously" idiom _on_filter_change already uses.
+        self._bot_history_range = bots_pane.next_range(self._bot_history_range)
+        self._footer_hint.set_text(f"range: {self._bot_history_range}")
+        self._body.original_widget = self._build_body()
+
+    def _open_dashboard_bot(self) -> None:
+        # Only reachable via "o" while self._view == "bot_detail", which
+        # _open_bot_detail always sets alongside a real bot_id -- same never-None-in-
+        # practice precedent _open_dashboard_chart's own assert already documents for
+        # Coin-detail.
+        assert self._bot_detail_bot_id is not None
+        url = bots_pane.dashboard_bot_url(self._dashboard_base_url, self._bot_detail_bot_id)
         try:
             webbrowser.open(url)
         except Exception:
@@ -834,8 +895,13 @@ class BotTuiApp:
         # complexity threshold as more per-view keys accumulate.
         if key == "s":
             self._toggle_bot()
+        elif key == "t":
+            self._cycle_bot_history_range()
+        elif key == "o":
+            self._open_dashboard_bot()
         elif key == "esc":
             self._bot_detail_bot_id = None
+            bot_history_state.close_bot()
             new_view, new_stack = _pop_view(self._view, self._stack)
             self._switch_view(new_view, new_stack)
 
@@ -945,6 +1011,7 @@ class BotTuiApp:
             coin_detail_state._redis_listener(self._redis_url)
         )
         bots_listener_task = loop.create_task(bots_state._redis_listener(self._redis_url))
+        history_poll_task = loop.create_task(bot_history_state.poll_loop(self._redis_url))
         redraw_task = loop.create_task(self._redraw_loop())
         try:
             self._main_loop.run()
@@ -952,6 +1019,7 @@ class BotTuiApp:
             listener_task.cancel()
             snapshot_listener_task.cancel()
             bots_listener_task.cancel()
+            history_poll_task.cancel()
             redraw_task.cancel()
 
 
