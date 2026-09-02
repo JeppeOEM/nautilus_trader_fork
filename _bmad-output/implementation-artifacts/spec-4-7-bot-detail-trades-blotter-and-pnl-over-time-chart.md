@@ -2,12 +2,13 @@
 title: 'Story 4.7: Bot-detail trades blotter and PnL-over-time chart'
 type: 'feature'
 created: '2026-09-02'
-status: 'in-review'
+status: 'done'
 review_loop_iteration: 0
 followup_review_recommended: true
 context: []
 warnings: []
 baseline_revision: '656e936879a4e69717df60281e4eca7a22d31c2d'
+final_revision: '0efaf0df97504315d14604f0692d5c269d0b312e'
 ---
 
 <intent-contract>

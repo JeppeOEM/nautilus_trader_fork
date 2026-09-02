@@ -13,7 +13,7 @@ Continuously records dYdX market data (trades, order book deltas, bars, mark/ind
 
 ## Quick reference
 
-Run all `make` commands from `troll/dydx_collector/`:
+Run all `make` commands from `troll/`:
 
 | Command | What it does |
 |---|---|
@@ -32,7 +32,7 @@ Run all `make` commands from `troll/dydx_collector/`:
 
 The base image compiles Nautilus from source. It takes ~15 minutes but only needs to be rebuilt when `nautilus_trader` core changes.
 
-From `troll/dydx_collector/`:
+From `troll/`:
 
 ```bash
 make build-base
@@ -66,7 +66,7 @@ Add any dYdX perpetual in `<BASE>-USD-PERP.DYDX` format. The collector hot-reloa
 
 ## Deploy
 
-From `troll/dydx_collector/`:
+From `troll/`:
 
 ```bash
 make up        # build collector image (seconds) and start everything
