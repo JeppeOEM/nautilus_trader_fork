@@ -34,7 +34,6 @@ from nautilus_trader.model.data import FundingRateUpdate
 from nautilus_trader.model.data import IndexPriceUpdate
 from nautilus_trader.model.data import InstrumentStatus
 from nautilus_trader.model.data import MarkPriceUpdate
-from nautilus_trader.model.data import OrderBookDeltas
 from nautilus_trader.model.data import capsule_to_data
 from nautilus_trader.model.instruments import Instrument
 from nautilus_trader.model.objects import Price
@@ -101,18 +100,6 @@ class DydxClient:
         """
         return await self._http.request_instruments(None, None)
 
-    def cache_instruments(self, instruments: list[Instrument]) -> None:
-        """
-        Populate the HTTP client's own instrument cache.
-
-        `self._http` and `self._ws` are separate Rust client instances with
-        separate instrument caches -- `connect()` only populates the WS
-        client's cache. `request_orderbook_snapshot()` runs against
-        `self._http`, so without this call it raises "Instrument not found
-        in cache" for every symbol on every resync.
-        """
-        self._http.cache_instruments(instruments)
-
     async def connect(self, loop: asyncio.AbstractEventLoop, instruments: list[Instrument]) -> None:
         await self._ws.connect(loop_=loop, instruments=instruments, callback=self._handle_message)
         await self._ws.wait_until_active(timeout_secs=30.0)
@@ -142,25 +129,6 @@ class DydxClient:
     async def subscribe_markets(self) -> None:
         """Subscribe to mark/index price + instrument status updates for all instruments."""
         await self._ws.subscribe_markets()
-
-    async def request_orderbook_snapshot(self, instrument_id: str) -> OrderBookDeltas:
-        """
-        Fetch a full order book snapshot via REST (used to resync after a WS sequence gap).
-
-        Returns a synthetic CLEAR+ADD `OrderBookDeltas` built from the REST bids/asks
-        (`request_orderbook_snapshot` on the Rust HTTP client, `crates/adapters/dydx/src/http/client.rs`).
-        The response carries no sequence/anchor field -- confirmed via `OrderbookResponse`
-        in `crates/adapters/dydx/src/http/models.rs`, unlike e.g. Binance's `lastUpdateId`.
-
-        Returns the Cython `OrderBookDeltas` (matches every other data path in this
-        collector), not the raw pyo3-native type the Rust client returns -- same
-        `.from_pyo3()` conversion the official adapter uses at
-        `nautilus_trader/adapters/dydx/data.py:527-531`.
-        """
-        pyo3_deltas = await self._http.request_orderbook_snapshot(
-            nautilus_pyo3.InstrumentId.from_str(instrument_id),
-        )
-        return OrderBookDeltas.from_pyo3(pyo3_deltas)
 
     def _handle_message(self, message: object) -> None:
         # Trades/orderbook/bars arrive wrapped in a PyCapsule; markets-channel

@@ -41,7 +41,6 @@ import signal
 import time
 import urllib.request
 from collections import defaultdict
-from collections import deque
 from pathlib import Path
 from typing import Any
 
@@ -68,11 +67,8 @@ from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
 
 logger = logging.getLogger(__name__)
-# Distinct logger name (not a new file/volume) so postmortem raw-context dumps are
-# separable from routine rejected-data WARNING lines, while staying stdout/Dozzle-based.
-housekeeping_logger = logging.getLogger("dydx_collector.housekeeping")
-# Reserved for desync with NO known cause (Story 1.7) -- distinct from both `logger`
-# (routine operation) and `housekeeping_logger` (known-cause sequence gaps, Story 1.6).
+# Distinct logger name (not a new file/volume) so a steady-state desync escalation is
+# separable from routine collector WARNING lines, while staying stdout/Dozzle-based.
 critical_logger = logging.getLogger("dydx_collector.critical")
 
 CONFIG_PATH = Path(__file__).parent / "config.toml"
@@ -136,12 +132,6 @@ _STALE_BOOK_NS: int = 5_000_000_000  # 5 seconds
 # scramble) and will never self-heal from more deltas alone. Force a resubscribe,
 # which always starts with a Clear + fresh full snapshot.
 _CROSSED_RESYNC_NS: int = 15_000_000_000  # 15 seconds
-
-# Time-bounded (not count-bounded) so the window means the same ~45s on both a
-# high-message-rate liquid market and a quiet one -- a fixed maxlen would represent
-# wildly different real time spans across markets given how differently their message
-# rates vary. Raw messages older than this are dropped from the ring on every append.
-_RING_BUFFER_NS: int = 45_000_000_000  # 45 seconds
 
 # OBS-01: zero book updates across all liquid instruments for 30s+ is a pipeline
 # failure, not a quiet market -- BTC/ETH/SOL perpetuals trade 24/7. Deployed behind
@@ -301,25 +291,6 @@ class Collector:
         # cleared as soon as it's seen uncrossed. Drives the resync watchdog below.
         self._crossed_since_ns: dict[str, int] = {}
 
-        # Last confirmed dYdX WS sequence number (OrderBookDelta.sequence) per instrument.
-        # Absent means "no confirmed sequence yet" -- the next message is never treated
-        # as a gap in that case (nothing to compare against).
-        self._last_sequence: dict[str, int] = {}
-        # Presence of a key = that market is in sequence-resync mode: incoming
-        # OrderBookDeltas are buffered here (not applied to _live_books) until a fresh
-        # REST snapshot arrives and the buffer is replayed on top of it. See
-        # _resync_sequence_gap.
-        self._resync_buffers: dict[str, list[OrderBookDeltas]] = {}
-        # Keeps references to in-flight resync tasks so they aren't garbage-collected
-        # mid-await (a known asyncio footgun for fire-and-forget create_task calls).
-        self._resync_tasks: set[asyncio.Task] = set()
-
-        # Bounded per-market raw-message ring (~_RING_BUFFER_NS) -- always-on for every
-        # subscribed market, not itself corruption-triggered; it's the *housekeeping-log
-        # flush* (only on a sequence gap) whose output cost scales with corruption events,
-        # not connection uptime. See _record_raw/_flush_housekeeping_log.
-        self._raw_ring: dict[str, deque[tuple[int, OrderBookDeltas]]] = defaultdict(deque)
-
         self._redis: aioredis.Redis | None = None
         self._stop = asyncio.Event()
 
@@ -331,38 +302,11 @@ class Collector:
         except Exception:
             logger.exception(f"Failed to process {type(data).__name__}, dropping")
 
-    def _record_raw(self, iid: str, data: OrderBookDeltas) -> None:
-        """Append to the per-market raw ring, then prune anything older than _RING_BUFFER_NS."""
-        # monotonic, not wall-clock: a backward wall-clock step (NTP correction, VM
-        # pause/resume) would otherwise make `ring[-1][0] - _RING_BUFFER_NS` stop
-        # exceeding older entries' timestamps, silently pausing pruning and letting the
-        # ring grow past its bound until the clock caught back up.
-        ring = self._raw_ring[iid]
-        ring.append((time.monotonic_ns(), data))
-        cutoff = ring[-1][0] - _RING_BUFFER_NS
-        while ring and ring[0][0] < cutoff:
-            ring.popleft()
-
     def _on_data_unsafe(self, data: Any) -> None:
         self._buffer[_buffer_key(data)].append(data)
         if isinstance(data, OrderBookDeltas):
             iid = str(data.instrument_id)
-            # Recorded unconditionally (before the resync/gap branches below) so the ring
-            # keeps covering a market's traffic through an active resync too -- giving the
-            # eventual housekeeping-log flush context from both before and after the trigger.
-            self._record_raw(iid, data)
-
-            # Mid-resync: buffer instead of applying. This also absorbs any further
-            # sequence irregularities that show up while the REST fetch is in flight --
-            # they just ride along in the buffer and get replayed with everything else,
-            # no separate handling needed (see _resync_sequence_gap).
-            if iid in self._resync_buffers:
-                self._resync_buffers[iid].append(data)
-                return
-
-            if not self._apply_or_flag_gap(iid, data):
-                return
-
+            self._apply_deltas(iid, data)
             self._last_book_update_ns[iid] = time.time_ns()
         elif isinstance(data, TradeTick):
             iid = str(data.instrument_id)
@@ -373,167 +317,31 @@ class Collector:
                 self._second_sell_volume[iid] += data.size.as_double()
                 self._second_sell_count[iid] += 1
 
-    def _apply_or_flag_gap(self, iid: str, data: OrderBookDeltas) -> bool:
+    def _apply_deltas(self, iid: str, data: OrderBookDeltas) -> None:
         """
-        Apply deltas to the live book, or start a resync if a WS sequence gap is found.
+        Apply deltas to the live book.
 
-        Returns True if applied, False if a gap was detected (resync now owns this batch).
-        Every delta in one `OrderBookDeltas` batch shares one dYdX message_id (Rust sets
-        it uniformly per WS message -- see crates/adapters/dydx/src/websocket/parse.rs),
-        so any delta's `.sequence` is representative of the whole batch.
+        No gap-detection against `OrderBookDelta.sequence` here: that field is dYdX's
+        WS *connection-level* message_id (confirmed via the Rust adapter's own test
+        fixtures -- a subscribe-ack, an unrelated market's trade, and this market's
+        orderbook update share one incrementing counter), not a per-market orderbook
+        sequence. Comparing consecutive values for one instrument therefore "gaps" on
+        every bit of interleaved traffic from any other channel/market on the same
+        connection -- a false positive on effectively every message once more than a
+        handful of instruments share the connection, not a sign of a dropped delta.
+        WebSocket/TCP already guarantees ordered, lossless delivery while connected;
+        a genuine disconnect is handled by the Rust client's reconnect + resubscribe,
+        which always starts with a fresh Clear + snapshot (self-healing regardless of
+        sequence tracking). Steady-state local corruption with no such known cause is
+        still caught structurally by the crossed-book escalation in `_second_loop`.
         """
         if not data.deltas:
-            # A content-less update carries no delta to read `.sequence` from at all --
-            # nothing to apply and nothing to gap-check against, same as the old
-            # unconditional-loop behavior (a safe no-op).
-            return True
-
-        sequence = data.deltas[-1].sequence
-        last_sequence = self._last_sequence.get(iid)
-
-        if last_sequence is not None and sequence != last_sequence + 1:
-            # WARNING, not CRITICAL: this is a known cause with a known fix (resync
-            # below). CRITICAL is reserved for desync with NO known cause -- see the
-            # steady-state crossed-book escalation (Story 1.7), a deliberately
-            # different signal from this one.
-            logger.warning(
-                "Sequence gap for %s: expected %d, got %d — entering resync",
-                iid,
-                last_sequence + 1,
-                sequence,
-            )
-            self._resync_buffers[iid] = [data]
-            task = asyncio.create_task(
-                self._resync_sequence_gap(iid, expected=last_sequence + 1, received=sequence)
-            )
-            self._resync_tasks.add(task)
-            task.add_done_callback(self._resync_tasks.discard)
-            return False
-
+            return
         if iid not in self._live_books:
             self._live_books[iid] = OrderBook(data.instrument_id, BookType.L2_MBP)
         book = self._live_books[iid]
         for delta in data.deltas:
             book.apply_delta(delta)
-        # Written only after every delta in the batch applied without raising -- writing
-        # this first would let a mid-batch apply_delta() exception (silently swallowed by
-        # _on_data's outer try/except) leave the book partially-applied while the tracker
-        # claims the batch fully landed, masking real corruption on the next message.
-        self._last_sequence[iid] = sequence
-        return True
-
-    def _flush_housekeeping_log(self, iid: str, expected: int, received: int) -> None:
-        """
-        Flush market `iid`'s raw ring to the housekeeping log for postmortem diagnosis.
-
-        Cleared after flushing (not just left to the time-bound prune in `_record_raw`)
-        so a burst of repeated gaps for the same market doesn't re-log near-identical,
-        heavily-overlapping windows -- storage cost scales with corruption events, not
-        with how long the ring had been silently accumulating.
-        """
-        ring = self._raw_ring.pop(iid, deque())
-        # Ring entries carry monotonic timestamps (see _record_raw); converted back to
-        # wall-clock here, once, for a human-readable postmortem log -- relative ordering
-        # is exact (monotonic), only the wall-clock anchor point is computed just-in-time.
-        wall_now_ns = time.time_ns()
-        mono_now_ns = time.monotonic_ns()
-        messages = [
-            {
-                "ts_ns": wall_now_ns - (mono_now_ns - mono_ns),
-                "deltas": [
-                    {
-                        "action": delta.action.name,
-                        "side": delta.order.side.name,
-                        "price": delta.order.price.as_double(),
-                        "size": delta.order.size.as_double(),
-                        "sequence": delta.sequence,
-                    }
-                    for delta in batch.deltas
-                ],
-            }
-            for mono_ns, batch in ring
-        ]
-        housekeeping_logger.warning(
-            json.dumps(
-                {
-                    "instrument_id": iid,
-                    "reason": "sequence_gap",
-                    "expected_sequence": expected,
-                    "received_sequence": received,
-                    "ts_event_ns": wall_now_ns,
-                    "raw_messages": messages,
-                }
-            )
-        )
-
-    async def _resync_sequence_gap(self, iid: str, expected: int, received: int) -> None:
-        """
-        Provably resync a market's book after a detected WS sequence gap.
-
-        Buffering into `_resync_buffers[iid]` started the instant the gap was detected
-        (see `_apply_or_flag_gap`) and continues for the whole REST round trip below --
-        safe because dYdX orderbook updates are absolute-per-level, never relative
-        deltas (confirmed: crates/adapters/dydx/src/websocket/parse.rs's
-        parse_orderbook_deltas_with_flag sets each level's size directly, no
-        read-modify-write against prior state), so replaying a buffered message the
-        snapshot already reflects is a harmless no-op. There is no REST anchor field
-        to compute a precise cut point with (confirmed: OrderbookResponse has no
-        lastUpdateId-equivalent, just bids/asks + a coarse isoTimestamp) -- buffering
-        generously plus idempotent replay is the only correct approach here.
-        """
-        # Capped backoff, not a fixed 1s retry: an extended REST outage must not hammer
-        # the endpoint indefinitely while _resync_buffers[iid] grows for the same span.
-        retry_seconds = 1.0
-        while True:
-            try:
-                snapshot = await self._client.request_orderbook_snapshot(iid)
-                break
-            except Exception:
-                logger.exception(
-                    "Resync snapshot fetch failed for %s, retrying in %.0fs", iid, retry_seconds
-                )
-                await asyncio.sleep(retry_seconds)
-                retry_seconds = min(retry_seconds * 2, 30.0)
-
-        # Everything from here to the end of the buffered replay must not `await` --
-        # that's what makes this swap-and-replay atomic. _on_data_unsafe always runs
-        # as a plain callback on this same event loop (never a separate thread), so
-        # without a yield point here, no other message for `iid` can be processed
-        # in between and slip through unbuffered.
-        buffered = self._resync_buffers.pop(iid, [])
-        book = OrderBook(InstrumentId.from_str(iid), BookType.L2_MBP)
-        for delta in snapshot.deltas:
-            book.apply_delta(delta)
-
-        last_sequence: int | None = None
-        for batch in buffered:
-            if not batch.deltas:
-                # Content-less update (see _apply_or_flag_gap's identical guard) -- it
-                # bypassed that guard by landing straight in the resync buffer instead,
-                # so it must be re-checked here too: nothing to apply, no sequence to
-                # read via batch.deltas[-1].
-                continue
-            for delta in batch.deltas:
-                book.apply_delta(delta)
-            last_sequence = batch.deltas[-1].sequence
-
-        self._live_books[iid] = book
-        self._last_book_update_ns[iid] = time.time_ns()
-        if last_sequence is not None:
-            self._last_sequence[iid] = last_sequence
-        else:
-            # Nothing arrived during the round trip to reset the tracker from. The
-            # REST snapshot itself carries no sequence value to seed with (see
-            # docstring), so drop the stale pre-gap value entirely rather than risk
-            # comparing the next live message against it -- the next message is then
-            # treated as "first message for this market" (no gap check), same as a
-            # fresh subscription.
-            self._last_sequence.pop(iid, None)
-        # Flushed here (not at gap-detection) so the ring's already captured both the
-        # pre-gap context and everything that arrived during the resync round trip --
-        # _record_raw keeps recording through the resync window (see _on_data_unsafe).
-        self._flush_housekeeping_log(iid, expected=expected, received=received)
-        logger.warning("Resync complete for %s, replayed %d buffered batch(es)", iid, len(buffered))
 
     def _flush_once(self) -> None:
         for key, items in list(self._buffer.items()):
@@ -572,14 +380,6 @@ class Collector:
     async def _unsubscribe(self, iid: str) -> None:
         await self._client.unsubscribe_trades(iid)
         await self._client.unsubscribe_orderbook(iid)
-        # A fresh subscription later restarts dYdX's message_id from its own base, unrelated
-        # to whatever this market's counter was at before -- a stale entry here would make
-        # the first post-resubscribe snapshot fail the gap check and misfire into resync.
-        self._last_sequence.pop(iid, None)
-        # No further OrderBookDeltas will arrive to prune this via _record_raw -- without
-        # this, an unsubscribed market's ring freezes holding its last ~45s of messages
-        # forever (MEM-02: non-configured/demoted coins must age out, not accumulate).
-        self._raw_ring.pop(iid, None)
         logger.info(f"Unsubscribed {iid}")
 
     async def _resync_book(self, iid: str) -> None:
@@ -589,9 +389,6 @@ class Collector:
         await self._client.subscribe_orderbook(iid)
         self._live_books.pop(iid, None)
         self._crossed_since_ns.pop(iid, None)
-        # Same reasoning as _unsubscribe: the resubscribe restarts message_id, so the stale
-        # pre-resubscribe value must not survive to gap-check the fresh snapshot.
-        self._last_sequence.pop(iid, None)
 
     async def _liquidity_check_loop(self) -> None:
         """Periodically graduate illiquid→liquid (subscribe) or liquid→illiquid (unsubscribe)."""
@@ -647,13 +444,6 @@ class Collector:
             now_ns = time.time_ns()
             batch: list[DydxSecondSnapshot] = []
             for iid in self._pinned | self._liquid:
-                # Mid sequence-gap resync: local state is known-stale until the buffered
-                # replay finishes (see _resync_sequence_gap). Emitting from it now would
-                # be exactly the "displaying stale data as live" this collector exists
-                # to prevent -- wait for resync to clear the entry instead.
-                if iid in self._resync_buffers:
-                    continue
-
                 book = self._live_books.get(iid)
                 if book is None:
                     continue
@@ -670,12 +460,10 @@ class Collector:
                     crossed_since = self._crossed_since_ns.setdefault(iid, now_ns)
                     if now_ns - crossed_since > _CROSSED_RESYNC_NS:
                         # Persisted past the grace window this system already uses as its
-                        # tolerance for reconnect/resync-replay noise (see _CROSSED_RESYNC_NS's
-                        # definition) with no known cause (sequence-gap resync, Story 1.5,
-                        # already excluded -- this iid never reaches here while resyncing) --
-                        # that combination is exactly steady-state desync with an unknown
-                        # cause: either a local reconstruction bug or intact-sequence bad data
-                        # from dYdX. Not gated to "once ever": _resync_book (below) resets
+                        # tolerance for reconnect-replay noise (see _CROSSED_RESYNC_NS's
+                        # definition) -- that's steady-state desync with an unknown cause:
+                        # either a local reconstruction bug or bad data from dYdX. Not
+                        # gated to "once ever": _resync_book (below) resets
                         # crossed_since on every call, so for a book that keeps failing to
                         # recover this naturally repeats roughly every _CROSSED_RESYNC_NS,
                         # not every _second_loop tick -- an unresolved CRITICAL incident
@@ -790,7 +578,6 @@ class Collector:
         instruments_by_id = {i.id.value: i for i in instruments}
 
         self._catalog.write_data(instruments_from_pyo3(list(instruments_by_id.values())))
-        self._client.cache_instruments(list(instruments_by_id.values()))
 
         loop = asyncio.get_running_loop()
         await self._client.connect(loop, list(instruments_by_id.values()))
@@ -841,11 +628,6 @@ class Collector:
         finally:
             stop_task.cancel()
             for task in tasks:
-                task.cancel()
-            # _resync_tasks are spawned ad-hoc by _apply_or_flag_gap, outside the fixed
-            # `tasks` list -- without cancelling them here, one mid-retry-loop when the
-            # collector restarts keeps hitting the (now-disconnected) client forever.
-            for task in self._resync_tasks:
                 task.cancel()
             await self._client.disconnect()
             self._flush_once()
