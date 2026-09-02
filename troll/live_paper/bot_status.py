@@ -38,6 +38,7 @@ import time
 
 import redis.asyncio as aioredis
 
+from live_paper import fills_store
 from nautilus_trader.trading.strategy import Strategy
 
 
@@ -55,6 +56,7 @@ def build_status(
     mode: str,
     started_at: float,
     now: float,
+    db_path: str,
 ) -> dict:
     """
     Compute one bots:status wire-contract payload for a single running strategy/bot
@@ -65,6 +67,16 @@ def build_status(
     "None means genuinely unknown, not a fabricated default" convention (see
     coin_detail.py's format_indicator "warming up..." sentinel for the same idea
     applied to a different signal).
+
+    closed_trades/win_rate are read from fills_store (Story 4.6's durable, event-
+    sourced fill log), never cache.positions_closed() -- under OmsType.NETTING, a
+    position's ID is fixed for a strategy's whole lifetime, so Cache overwrites the
+    same PositionId (and discards the prior closed entry) every time it reopens. A bot
+    that has traded more than once could show a closed_trades/win_rate count that only
+    reflects its latest open-close cycle if read from positions_closed() -- confirmed
+    directly against nautilus_trader/execution/engine.pyx + cache/cache.pyx and
+    reproduced in trade_history.py's own tests (Story 4.6's story file, second AC2
+    correction). fills_store, by contrast, is append-only and never overwritten.
     """
     instrument_id = strategy.config.instrument_id
 
@@ -78,13 +90,8 @@ def build_status(
     realized_pnl_money = strategy.portfolio.realized_pnl(instrument_id)
     unrealized_pnl_money = strategy.portfolio.unrealized_pnl(instrument_id)
 
-    closed_positions = strategy.cache.positions_closed(strategy_id=strategy.id)
-    wins = sum(
-        1
-        for position in closed_positions
-        if position.realized_pnl is not None and position.realized_pnl.as_double() > 0
-    )
-    win_rate = wins / len(closed_positions) if closed_positions else None
+    closed_trades, wins = fills_store.win_rate_stats(bot_id, db_path)
+    win_rate = wins / closed_trades if closed_trades else None
 
     return {
         "bot_id": bot_id,
@@ -99,7 +106,7 @@ def build_status(
             unrealized_pnl_money.as_double() if unrealized_pnl_money is not None else 0.0
         ),
         "win_rate": win_rate,
-        "closed_trades": len(closed_positions),
+        "closed_trades": closed_trades,
         "started_at": started_at,
         "updated_at": now,
     }
@@ -123,11 +130,34 @@ def _parse_control_message(payload: dict, bot_id: str) -> str | None:
 
 
 async def _heartbeat_loop(
-    client: aioredis.Redis, strategy: Strategy, bot_id: str, mode: str, started_at: float
+    client: aioredis.Redis,
+    strategy: Strategy,
+    bot_id: str,
+    mode: str,
+    started_at: float,
+    db_path: str,
 ) -> None:
     while True:
-        status = build_status(strategy, bot_id, mode, started_at, now=time.time())
-        await client.publish("bots:status", json.dumps(status))
+        # build_status() can briefly raise during live startup -- portfolio methods
+        # like net_exposure()/unrealized_pnl() need a last quote price that doesn't
+        # exist yet if the heartbeat loop's first tick lands before the data client's
+        # first quote arrives (this loop is scheduled independently of the Strategy's
+        # own lifecycle -- see this module's docstring -- so there's no ordering
+        # guarantee against TradingNode's own startup sequencing). Confirmed live
+        # 2026-09-02: self-heals within ~2 ticks once the first quote lands. Catching
+        # it here (instead of letting it propagate to run()'s outer except) means one
+        # bad tick just skips a publish, rather than tearing down the whole
+        # connection -- which would also cancel _control_loop's pubsub.listen() via
+        # asyncio.gather and risk missing a bots:control message during the same
+        # startup window for no reason related to the control channel itself.
+        try:
+            status = build_status(
+                strategy, bot_id, mode, started_at, now=time.time(), db_path=db_path
+            )
+        except Exception as exc:
+            logger.debug("bots:status build skipped this tick (expected at startup): %s", exc)
+        else:
+            await client.publish("bots:status", json.dumps(status))
         await asyncio.sleep(_STATUS_HEARTBEAT_SECONDS)
 
 
@@ -147,7 +177,7 @@ async def _control_loop(pubsub: aioredis.client.PubSub, strategy: Strategy, bot_
             strategy.stop()
 
 
-async def run(strategy: Strategy, bot_id: str, mode: str, redis_url: str) -> None:
+async def run(strategy: Strategy, bot_id: str, mode: str, redis_url: str, db_path: str) -> None:
     """
     Publish bots:status on a heartbeat and act on bots:control start/stop commands
     addressed to this bot_id, for the lifetime of the TradingNode's own event loop.
@@ -168,7 +198,7 @@ async def run(strategy: Strategy, bot_id: str, mode: str, redis_url: str) -> Non
                 pubsub = client.pubsub()
                 await pubsub.subscribe("bots:control")
                 await asyncio.gather(
-                    _heartbeat_loop(client, strategy, bot_id, mode, started_at),
+                    _heartbeat_loop(client, strategy, bot_id, mode, started_at, db_path),
                     _control_loop(pubsub, strategy, bot_id),
                 )
         except asyncio.CancelledError:

@@ -102,6 +102,23 @@ def recent_trades(bot_id: str, db_path: str, cutoff_ns: int | None, limit: int) 
     ]
 
 
+def win_rate_stats(bot_id: str, db_path: str) -> tuple[int, int]:
+    """
+    (closed_trades, wins) for a bot, all-time -- closing fills only (realized_pnl
+    IS NOT NULL); a win is a closing fill with realized_pnl > 0.
+    """
+    db = _conn(db_path)
+    closed_trades, wins = db.execute(
+        """
+        SELECT COUNT(*), SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END)
+        FROM fills
+        WHERE bot_id = ? AND realized_pnl IS NOT NULL
+        """,
+        (bot_id,),
+    ).fetchone()
+    return closed_trades, wins or 0
+
+
 def pnl_by_day(bot_id: str, db_path: str, cutoff_ns: int | None) -> list[dict]:
     """Net realized PnL per UTC day (only closing fills carry a non-NULL realized_pnl)."""
     db = _conn(db_path)

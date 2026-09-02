@@ -22,8 +22,15 @@ and Portfolio/Cache have no lightweight stand-in that would still exercise this
 function's real branching logic (position side, win-rate) correctly.
 """
 
+import asyncio
+import contextlib
+import json
 from decimal import Decimal
 
+import live_paper.bot_status as bot_status_module
+from live_paper import fills_store
+from live_paper import trade_history
+from live_paper.bot_status import _heartbeat_loop
 from live_paper.bot_status import _parse_control_message
 from live_paper.bot_status import build_status
 from live_paper.strategy import DummyStrategy
@@ -127,21 +134,34 @@ def _config(**overrides: object) -> DummyStrategyConfig:
     return DummyStrategyConfig(**defaults)
 
 
-def _run_strategy(**config_overrides: object) -> tuple[BacktestEngine, DummyStrategy]:
+def _run_strategy(
+    db_path: str, bot_id: str = "bot-01", **config_overrides: object
+) -> tuple[BacktestEngine, DummyStrategy]:
     engine = _engine()
     engine.add_data(_quotes_and_deltas(n_seconds=15, levels_per_side=2))
     strategy = DummyStrategy(_config(**config_overrides))
     engine.add_strategy(strategy)
+    # closed_trades/win_rate now come from fills_store (Story 4.6), not
+    # cache.positions_closed() -- subscribe before run() the same way
+    # test_trade_history.py's harness does, or fills_store stays empty and every
+    # status read below would see closed_trades=0 regardless of what actually traded.
+    trade_history.subscribe(strategy, bot_id=bot_id, db_path=db_path)
     engine.run()
     return engine, strategy
 
 
-def test_build_status_after_a_real_run_has_expected_shape() -> None:
+def test_build_status_after_a_real_run_has_expected_shape(tmp_path) -> None:
+    db_path = str(tmp_path / "fills.db")
     engine, strategy = _run_strategy(
-        trend_buy_threshold=0.49, trend_sell_threshold=0.1, ofi_confirm_threshold=-999_999.0
+        db_path,
+        trend_buy_threshold=0.49,
+        trend_sell_threshold=0.1,
+        ofi_confirm_threshold=-999_999.0,
     )
 
-    status = build_status(strategy, bot_id="bot-01", mode="paper", started_at=1_000.0, now=2_000.0)
+    status = build_status(
+        strategy, bot_id="bot-01", mode="paper", started_at=1_000.0, now=2_000.0, db_path=db_path
+    )
 
     assert status["bot_id"] == "bot-01"
     assert status["strategy"] == "DummyStrategy"
@@ -154,19 +174,25 @@ def test_build_status_after_a_real_run_has_expected_shape() -> None:
     assert isinstance(status["unrealized_pnl"], float)
     assert status["started_at"] == 1_000.0
     assert status["updated_at"] == 2_000.0
-    closed_positions = strategy.cache.positions_closed(strategy_id=strategy.id)
-    assert status["closed_trades"] == len(closed_positions)
+    closed_trades, _wins = fills_store.win_rate_stats("bot-01", db_path)
+    assert status["closed_trades"] == closed_trades
 
     engine.reset()
     engine.dispose()
 
 
-def test_build_status_position_side_matches_portfolio() -> None:
+def test_build_status_position_side_matches_portfolio(tmp_path) -> None:
+    db_path = str(tmp_path / "fills.db")
     engine, strategy = _run_strategy(
-        trend_buy_threshold=0.49, trend_sell_threshold=0.1, ofi_confirm_threshold=-999_999.0
+        db_path,
+        trend_buy_threshold=0.49,
+        trend_sell_threshold=0.1,
+        ofi_confirm_threshold=-999_999.0,
     )
 
-    status = build_status(strategy, bot_id="bot-01", mode="paper", started_at=0.0, now=1.0)
+    status = build_status(
+        strategy, bot_id="bot-01", mode="paper", started_at=0.0, now=1.0, db_path=db_path
+    )
 
     if strategy.portfolio.is_net_long(_IID):
         assert status["position_side"] == "long"
@@ -179,11 +205,16 @@ def test_build_status_position_side_matches_portfolio() -> None:
     engine.dispose()
 
 
-def test_build_status_win_rate_none_before_any_closed_position() -> None:
+def test_build_status_win_rate_none_before_any_closed_position(tmp_path) -> None:
+    db_path = str(tmp_path / "fills.db")
     # Impossible thresholds -> no entries ever fire -> no closed positions exist.
-    engine, strategy = _run_strategy(trend_buy_threshold=0.999_999, trend_sell_threshold=0.000_001)
+    engine, strategy = _run_strategy(
+        db_path, trend_buy_threshold=0.999_999, trend_sell_threshold=0.000_001
+    )
 
-    status = build_status(strategy, bot_id="bot-01", mode="paper", started_at=0.0, now=1.0)
+    status = build_status(
+        strategy, bot_id="bot-01", mode="paper", started_at=0.0, now=1.0, db_path=db_path
+    )
     assert status["win_rate"] is None
     assert status["closed_trades"] == 0
 
@@ -191,10 +222,48 @@ def test_build_status_win_rate_none_before_any_closed_position() -> None:
     engine.dispose()
 
 
-def test_build_status_mode_is_passed_through_verbatim() -> None:
-    engine, strategy = _run_strategy(trend_buy_threshold=0.999_999, trend_sell_threshold=0.000_001)
-    status = build_status(strategy, bot_id="bot-01", mode="live", started_at=0.0, now=1.0)
+def test_build_status_mode_is_passed_through_verbatim(tmp_path) -> None:
+    db_path = str(tmp_path / "fills.db")
+    engine, strategy = _run_strategy(
+        db_path, trend_buy_threshold=0.999_999, trend_sell_threshold=0.000_001
+    )
+    status = build_status(
+        strategy, bot_id="bot-01", mode="live", started_at=0.0, now=1.0, db_path=db_path
+    )
     assert status["mode"] == "live"
+
+    engine.reset()
+    engine.dispose()
+
+
+def test_build_status_closed_trades_survives_a_netting_reopen(tmp_path) -> None:
+    """
+    Regression: cache.positions_closed() silently drops a NETTING position's closed
+    history the instant it reopens (see trade_history.py's module docstring for the
+    full diagnosis), so a bot with 2 completed round trips could show closed_trades=0
+    or 1 -- never 2 -- if build_status() read it directly. Seed fills_store with 2
+    synthetic closing fills (mirroring what 2 real round trips would have written) and
+    confirm build_status() counts both, using a strategy that itself traded zero times
+    (impossible thresholds) so cache.positions_closed() is provably empty here -- any
+    non-zero closed_trades/win_rate the status shows can only have come from
+    fills_store, not the Cache.
+    """
+    db_path = str(tmp_path / "fills.db")
+    engine, strategy = _run_strategy(
+        db_path, trend_buy_threshold=0.999_999, trend_sell_threshold=0.000_001
+    )
+    assert strategy.cache.positions_closed(strategy_id=strategy.id) == []
+
+    fills_store.write_fill("bot-01", 1, "BUY", 100.0, 1.0, None, db_path)
+    fills_store.write_fill("bot-01", 2, "SELL", 105.0, 1.0, 5.0, db_path)  # win
+    fills_store.write_fill("bot-01", 3, "BUY", 105.0, 1.0, None, db_path)
+    fills_store.write_fill("bot-01", 4, "SELL", 103.0, 1.0, -2.0, db_path)  # loss
+
+    status = build_status(
+        strategy, bot_id="bot-01", mode="paper", started_at=0.0, now=1.0, db_path=db_path
+    )
+    assert status["closed_trades"] == 2
+    assert status["win_rate"] == 0.5
 
     engine.reset()
     engine.dispose()
@@ -225,3 +294,54 @@ def test_parse_control_message_ignores_a_mode_field_if_present() -> None:
     # message that happens to include one anyway must not change the parsed action.
     payload = {"bot_id": "bot-01", "action": "start", "mode": "real_money"}
     assert _parse_control_message(payload, "bot-01") == "start"
+
+
+class _FakePublishClient:
+    def __init__(self) -> None:
+        self.published: list[str] = []
+
+    async def publish(self, _channel: str, message: str) -> None:
+        self.published.append(message)
+
+
+def test_heartbeat_loop_skips_a_failing_build_status_tick_without_crashing(monkeypatch) -> None:
+    """
+    Regression for a live startup race (2026-09-02): build_status() can briefly raise
+    (TypeError from a Cython portfolio call hit before the first quote arrives) --
+    _heartbeat_loop must swallow that on a single tick and keep publishing on
+    subsequent ticks, not propagate and tear down the whole connection (which would
+    also cancel _control_loop's pubsub.listen() via the shared asyncio.gather in run()).
+    """
+    monkeypatch.setattr(bot_status_module, "_STATUS_HEARTBEAT_SECONDS", 0.0)
+    calls = {"n": 0}
+
+    def _flaky_build_status(*_args: object, **_kwargs: object) -> dict:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise TypeError("float() argument must be a string or a real number, not 'NoneType'")
+        return {"tick": calls["n"]}
+
+    monkeypatch.setattr(bot_status_module, "build_status", _flaky_build_status)
+    client = _FakePublishClient()
+
+    async def _run_briefly() -> None:
+        task = asyncio.create_task(
+            _heartbeat_loop(
+                client,
+                strategy=object(),
+                bot_id="bot-01",
+                mode="paper",
+                started_at=0.0,
+                db_path="unused",
+            )
+        )
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    asyncio.run(_run_briefly())
+
+    assert calls["n"] >= 2  # the failing tick did not stop later ticks from running
+    assert len(client.published) >= 1  # at least one tick after the failure published
+    assert all(json.loads(msg)["tick"] > 1 for msg in client.published)

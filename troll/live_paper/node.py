@@ -149,7 +149,13 @@ def build_node(config: PaperConfig | RealMoneyConfig) -> TradingNode:
     loop = node.get_event_loop()
     assert loop is not None, "TradingNode's kernel loop must exist once constructed"
     loop.create_task(
-        bot_status.run(strategy, bot_id=config.bot_id, mode=mode, redis_url=_REDIS_URL)
+        bot_status.run(
+            strategy,
+            bot_id=config.bot_id,
+            mode=mode,
+            redis_url=_REDIS_URL,
+            db_path=_FILLS_DB_PATH,
+        )
     )
     # Same event-loop-lifecycle reasoning as bot_status.run() above (Story 4.6).
     loop.create_task(
