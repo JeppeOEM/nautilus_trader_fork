@@ -42,8 +42,10 @@ Strategy's component lifecycle rather than inside one of its clock timers.
 import logging
 import os
 from pathlib import Path
+from urllib.parse import urlparse
 
 from live_paper import bot_status
+from live_paper import trade_history
 from live_paper.config import PaperConfig
 from live_paper.config import RealMoneyConfig
 from live_paper.config import resolve_config
@@ -56,6 +58,8 @@ from nautilus_trader.adapters.dydx.factories import DydxLiveDataClientFactory
 from nautilus_trader.adapters.dydx.factories import DydxLiveExecClientFactory
 from nautilus_trader.adapters.sandbox.config import SandboxExecutionClientConfig
 from nautilus_trader.adapters.sandbox.factory import SandboxLiveExecClientFactory
+from nautilus_trader.config import CacheConfig
+from nautilus_trader.config import DatabaseConfig
 from nautilus_trader.config import InstrumentProviderConfig
 from nautilus_trader.config import LoggingConfig
 from nautilus_trader.config import TradingNodeConfig
@@ -70,6 +74,10 @@ _MODULE_DIR = Path(__file__).parent
 _DEFAULT_PAPER_CONFIG_PATH = _MODULE_DIR / "config.toml"
 _REAL_MONEY_ENV_VAR = "LIVE_PAPER_REAL_MONEY_CONFIG"
 _REDIS_URL = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
+# Shared across every bot (Story 4.6) -- mirrors ranking_engine's METRICS_DB_PATH
+# env-override convention. Directory (not the bare file) must be volume-mounted for
+# fills to survive a container restart -- see docker-compose.yml's live-paper service.
+_FILLS_DB_PATH = os.environ.get("FILLS_DB_PATH", str(_MODULE_DIR / "data" / "fills.db"))
 
 
 def build_node(config: PaperConfig | RealMoneyConfig) -> TradingNode:
@@ -102,9 +110,18 @@ def build_node(config: PaperConfig | RealMoneyConfig) -> TradingNode:
         }
         exec_factory = SandboxLiveExecClientFactory
 
+    # Redis-backed Cache (Story 4.6, AD-10) -- orders/positions/fills persist beyond
+    # this process's lifetime instead of defaulting to in-memory-only. Parsed from the
+    # same _REDIS_URL bot_status.py already connects to, rather than a second hardcoded
+    # host/port literal, so an overridden REDIS_URL env var can't silently split the
+    # Cache and the bots:status/bots:control channels onto different Redis instances.
+    redis_url = urlparse(_REDIS_URL)
     node_config = TradingNodeConfig(
         trader_id=TraderId("LIVE-PAPER-001"),
         logging=LoggingConfig(log_level=config.log_level, use_pyo3=True),
+        cache=CacheConfig(
+            database=DatabaseConfig(type="redis", host=redis_url.hostname, port=redis_url.port),
+        ),
         data_clients=data_clients,
         exec_clients=exec_clients,
     )
@@ -133,6 +150,12 @@ def build_node(config: PaperConfig | RealMoneyConfig) -> TradingNode:
     assert loop is not None, "TradingNode's kernel loop must exist once constructed"
     loop.create_task(
         bot_status.run(strategy, bot_id=config.bot_id, mode=mode, redis_url=_REDIS_URL)
+    )
+    # Same event-loop-lifecycle reasoning as bot_status.run() above (Story 4.6).
+    loop.create_task(
+        trade_history.run(
+            strategy, bot_id=config.bot_id, redis_url=_REDIS_URL, db_path=_FILLS_DB_PATH
+        )
     )
 
     return node

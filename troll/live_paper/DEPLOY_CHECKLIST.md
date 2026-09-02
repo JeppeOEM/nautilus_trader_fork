@@ -20,6 +20,17 @@ Baseline before starting: `make test-live-paper` passes (34/34 as of writing).
       size.
 - [ ] `starting_balances` / `account_type` give enough margin that a single
       order won't get rejected by the sandbox exec client.
+- [ ] `mkdir -p live_paper/data` **before** the first `docker compose up`/`run` for
+      `live-paper`, owned by the host user. If Docker creates this bind-mount target
+      itself (directory doesn't exist yet), it lands `root:root` — the container runs
+      as `user: "1000:1000"`, so every `fills.db` write then fails with "unable to open
+      database file". The `bots:history` refresh timer degrades gracefully (AC4: logs a
+      warning, keeps stale data), but confirmed live 2026-09-02 that the on-fill write
+      path does not — an unhandled exception in the synchronous `OrderFilled` handler
+      crashed the whole node on the very first real fill (now fixed to catch-and-log
+      instead, but a wrong-permission data dir still means **no trade history gets
+      recorded at all**, silently). Same gotcha applies to any other bind-mounted
+      writable dir first created by a container run as a non-default UID.
 
 ## Build & static checks
 

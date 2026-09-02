@@ -58,3 +58,19 @@ def test_real_money_config_builds_node_with_dydx_exec_client() -> None:
         assert isinstance(exec_client_config, DydxExecClientConfig)
     finally:
         node.dispose()
+
+
+def test_build_node_configures_redis_backed_cache() -> None:
+    # Story 4.6, AC1: Cache must be Redis-backed (durable), host/port derived from the
+    # same REDIS_URL bot_status.py already connects to (node.py's module-level
+    # _REDIS_URL, parsed via urlparse) -- not a second, independently hardcoded literal.
+    node = build_node(_paper_config())
+    try:
+        cache_config = node._config.cache
+        assert cache_config is not None
+        assert cache_config.database is not None
+        assert cache_config.database.type == "redis"
+        assert cache_config.database.host == "127.0.0.1"
+        assert cache_config.database.port == 6379
+    finally:
+        node.dispose()

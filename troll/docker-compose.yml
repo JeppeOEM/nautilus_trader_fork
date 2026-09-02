@@ -147,12 +147,18 @@ services:
     environment:
       PYTHONUNBUFFERED: "1"
       REDIS_URL: "redis://127.0.0.1:6379"
+      FILLS_DB_PATH: "/app/live_paper/data/fills.db"
       # Set to an explicit, differently-named file path to enable real-money execution --
       # never set by default here. See live_paper/config.py's module docstring.
       # LIVE_PAPER_REAL_MONEY_CONFIG: "/app/live_paper/real_money.toml"
     user: "1000:1000"
     volumes:
       - ./live_paper/config.toml:/app/live_paper/config.toml:ro
+      # Directory mount, not the single fills.db file (Story 4.6) -- SQLite WAL mode
+      # creates fills.db-wal/fills.db-shm sidecar files next to the main file, which a
+      # single-file bind mount can't expose (same gotcha already documented on
+      # ranking_engine/dashboard's metrics.db mounts above).
+      - ./live_paper/data:/app/live_paper/data
     network_mode: host
     # on-failure (not `always`, unlike collector/dashboard) -- Story 3.2 attached a real
     # Strategy that submits live paper orders, so a persistent bad-config or transient

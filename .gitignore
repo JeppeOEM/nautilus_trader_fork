@@ -177,6 +177,7 @@ bench_data/
 /troll/dydx_collector/catalog/
 /troll/dydx_collector/metrics/
 /troll/bot_tui_logs/
+/troll/live_paper/data/
 nautilus_trader/**/.gitignore
 nautilus_trader/test_kit/mocks/.nautilus/
 nautilus_trader.egg-info
