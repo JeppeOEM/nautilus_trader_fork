@@ -3,7 +3,7 @@ TROLL_DIR  := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 COMPOSE    := docker compose -f $(TROLL_DIR)docker-compose.yml
 BASE_IMAGE := nautilus-trader-base:1.229.0
 
-.PHONY: build-base up up-live-paper build-insecure test test-live-paper down logs logs-dash web enable-boot enable-firewall harden-ssh remote-tui remote-web remote-web-stop
+.PHONY: build-base up redeploy up-live-paper build-insecure test test-live-paper down logs logs-dash web enable-boot enable-firewall harden-ssh remote-tui remote-web remote-web-stop
 
 REMOTE_HOST := nifelheim
 REMOTE_DIR  := ~/nautilus_trader_fork/troll
@@ -22,11 +22,27 @@ build-base:
 		-t $(BASE_IMAGE) \
 		$(REPO_ROOT)
 
-## Start collecting data, rebuilding the collector image first (seconds -- it's just
-## the thin troll/dydx_collector layer on top of the base image). Run `make build-base`
-## once beforehand for the base image itself.
+## Start collecting data, rebuilding every default-profile service (collector included)
+## first (seconds -- it's just the thin troll/ layer on top of the base image). Run
+## `make build-base` once beforehand for the base image itself. Use this only for first
+## bring-up or when dydx_collector/ itself changed -- otherwise use `make redeploy` so
+## the collector's live WS connection/book state is never disturbed.
 up:
 	$(COMPOSE) up -d --build
+	@echo "Dashboard: http://localhost:8765"
+
+## Rebuild and restart everything that doesn't collect market data (dashboard,
+## ranking_engine, live-paper, bot_tui's image) -- never touches the collector
+## container, so its WS connection/book state stays untouched. Use this for all
+## non-collector iteration; reach for `make up` (or `docker compose up -d --build
+## collector`) only when dydx_collector/ itself changed. live-paper is rebuilt+restarted
+## under its profile same as `make up-live-paper` -- only run this if you actually want
+## live-paper (re)started. bot_tui is `run`-only (never a daemon), so it's just rebuilt
+## here for a fresh image; `make tui` also rebuilds it on every invocation regardless.
+redeploy:
+	$(COMPOSE) up -d --build dashboard ranking_engine
+	$(COMPOSE) --profile live-paper up -d --build live-paper
+	$(COMPOSE) --profile tui build bot_tui
 	@echo "Dashboard: http://localhost:8765"
 
 ## Start the paper-trading node (Epic 3, live_paper module). Not part of plain `make up`
