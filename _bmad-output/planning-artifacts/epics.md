@@ -48,7 +48,7 @@ FR28 `[NEW — 2026-09-06, not yet in PRD, PM should fold in]`: Per-chart settin
 
 FR29 `[NEW — 2026-09-06, not yet in PRD, PM should fold in]`: TradingView-style pan/zoom parity, x-axis-linked across all coin-detail charts — click-drag pans (never zooms) and scroll/pinch zooms, on every chart on the coin-detail page, not only the price chart (extends Story 7.1's price-chart-only implementation to the signal chart and any oscillator panel from FR30). The price/candle chart is the "mother" panel: every oscillator/sub-panel it spawns (signal chart, RSI/MACD panel) shares its x-axis range and follows it in lockstep on pan or zoom, from any panel a drag/zoom originates in — panels never drift out of alignment with each other along the timeline.
 
-FR30 `[NEW — 2026-09-06, not yet in PRD, PM should fold in]`: Selectable technical indicators via `pandas_ta_classic` — the user can toggle standard technical indicators (moving averages, Bollinger Bands, VWAP, RSI, MACD) on/off from the price chart's settings pane; every indicator is computed via `pandas_ta_classic` (or, for indicators it doesn't cover, a stateless function in `ml_signals/indicators.py` following the existing SSOT-01 pattern) — never a second, independent implementation of the same formula. Overlay-type indicators (moving averages, Bollinger Bands, VWAP) render as additional traces on the price chart itself; oscillator-type indicators (RSI, MACD) render in a dedicated indicator panel with its own y-scale, reusing the existing signal-chart sub-panel pattern.
+FR30 `[NEW — 2026-09-06, not yet in PRD, PM should fold in]`: Selectable technical indicators from `nautilus_trader`'s own built-in indicator library — the user can choose from every concrete indicator class in `nautilus_trader.indicators` (confirmed ~45 as of this repo's pinned version: `SimpleMovingAverage`, `ExponentialMovingAverage`, `WeightedMovingAverage`, `HullMovingAverage`, `AdaptiveMovingAverage`, `DoubleExponentialMovingAverage`, `VariableIndexDynamicAverage`, `WilderMovingAverage`, `BollingerBands`, `KeltnerChannel`, `DonchianChannel`, `RelativeStrengthIndex`, `MovingAverageConvergenceDivergence`, `Stochastics`, `CommodityChannelIndex`, `AverageTrueRange`, `VolatilityRatio`, `AroonOscillator`, `DirectionalMovement`, `RateOfChange`, `ChandeMomentumOscillator`, `OnBalanceVolume`, `VolumeWeightedAveragePrice`, and the rest of that module's indicators) and add it to the candlestick chart. **No third-party TA library** — `pandas_ta`/`pandas_ta_classic` are explicitly rejected; every indicator is the exact same `nautilus_trader.indicators.Indicator` class already usable by research/backtest/live contexts (FR10), fed via its own `update_raw`/`handle_bar`, never reimplemented. Indicators whose natural output overlays price (moving averages, Bollinger/Keltner/Donchian bands, VWAP) render as additional traces directly on the candlestick chart; indicators whose output is a bounded oscillator on a different scale (RSI, Stochastics, MACD, CCI, AROON, etc.) render in the oscillator panel from FR29, which follows the candlestick chart's x-axis like every other spawned panel.
 
 FR31 `[NEW — 2026-09-06, not yet in PRD, PM should fold in]`: Combined candlestick + order-book overlay — in Candles display mode, a per-chart setting overlays live best-bid/best-ask lines on top of the OHLC candlesticks in the same chart, sourced from data already returned alongside candles (no new backend data pipeline).
 
@@ -82,8 +82,8 @@ NFR5: Precision correctness — price/quantity precision changes only via `Decim
 - **Ranking history retention** (`metrics_store`, relocated per AD-9) is not yet tied to the collector's catalog retention — flagged Deferred in the architecture spine; worth a story-level note if a ranking-history story touches this.
 - **PRD gap (FR-27):** the trades/PnL-history requirement and its symmetric bot-deep-link keybinding were surfaced during the UX design pass, not originally in PRD §4.6 — PM should fold FR-27 into the PRD proper once these epics/stories ship.
 - **Charting library decision stands (Story 7.1, reconfirmed 2026-09-06): stay on Plotly, do not introduce TradingView's Lightweight Charts or any other charting library.** Epic 8 extends Story 7.1's hand-rolled pan/zoom/pagination machinery rather than replacing it.
-- **New dependency: `pandas_ta_classic`** (community-maintained fork of the abandoned `pandas_ta`; package name `pandas_ta_classic`, PyPI `pandas-ta-classic`) — pinned in `troll/troll-requirements.txt`. Used server-side only (Python), never reimplemented in the dashboard's inline JS. Per the paired-dependency-version convention, cross-reference its pin against the already-pinned `pandas` version if the two ever need to move together.
-- **Indicator placement (FR30) follows FR10/SSOT-01 precedent, even though these are chart-only, not strategy-consumed today:** new technical-indicator functions live in `ml_signals/indicators.py` as stateless functions (mirroring `spread`/`mid_price`), not inlined in `dashboard.py`, so a future backtest/live/`bot_tui` consumer never has to duplicate them (SSOT-03: check for an existing implementation before adding a new metric).
+- **No new dependency for FR30 (revised 2026-09-06) — explicitly rejected `pandas_ta`/`pandas_ta_classic`.** `nautilus_trader.indicators` already ships ~45 concrete TA indicator classes (moving averages, bands, oscillators, volume indicators); FR30 uses those directly. Nothing to add to `troll/troll-requirements.txt`.
+- **Indicator placement (FR30) follows FR10 precedent:** the indicator *classes* already live in the one shared place (`nautilus_trader.indicators`) usable by research/backtest/live — this epic adds only a chart-specific registry/dispatch layer (which class + params + which OHLCV fields feed its `update_raw` + which output attribute(s) to read + overlay-vs-oscillator classification) in `ml_signals/`, never a reimplementation of any indicator's math.
 - **FR30/FR31 data is not net-new collection** — technical indicators are computed from candle OHLC data `_historical_candles_json`/`build_candles()` already produce; the bid/ask overlay (FR31) uses the same per-snapshot bid/ask arrays the existing Lines-mode trace already plots (`chart.bid`/`chart.ask`, dashboard.py:643-644). No collector or catalog schema change.
 
 ### UX Design Requirements
@@ -131,7 +131,7 @@ FR27: Epic 4 - Bot-detail trade/PnL history
 UX-DR1–UX-DR9: Epic 4 - all Bot Monitoring TUI UX design requirements
 FR28: Epic 8 - Per-chart settings/navigation panes
 FR29: Epic 8 - TradingView-style pan/zoom parity across all coin-detail charts
-FR30: Epic 8 - Selectable technical indicators via pandas_ta_classic
+FR30: Epic 8 - Selectable technical indicators from nautilus_trader.indicators
 FR31: Epic 8 - Combined candlestick + order-book overlay
 
 ## Epic List
@@ -153,7 +153,7 @@ Builder SSHes into the box, opens a keyboard-only urwid terminal UI, and at a gl
 **FRs covered:** FR17, FR18, FR19, FR20, FR21, FR22, FR23, FR24, FR25, FR27, UX-DR1, UX-DR2, UX-DR3, UX-DR4, UX-DR5, UX-DR6, UX-DR7, UX-DR8, UX-DR9
 
 ### Epic 8: TradingView-Style Multi-Chart Navigation & Indicator Overlays
-Builder opens a coin's chart on the web dashboard and it behaves like a professional charting site: every chart (not just the price chart) pans on drag and zooms on scroll, each chart carries its own settings toolbar instead of one shared bar, the price chart can show selectable technical indicators (moving averages, Bollinger Bands, VWAP, RSI, MACD) computed via `pandas_ta_classic`, and Candles mode can overlay live bid/ask lines on top of the OHLC candlesticks. Extends Story 7.1 (drag-to-pan/scroll-zoom, Lines/Candles/Ticks modes) rather than replacing it — stays on Plotly, no new charting library. Numbered 8 (not 5) to avoid colliding with the standalone bypass-epics 5–7 already tracked in `sprint-status.yaml`.
+Builder opens a coin's chart on the web dashboard and it behaves like a professional charting site: every chart (not just the price chart) pans on drag and zooms on scroll and stays x-axis-linked to the candlestick chart, each chart carries its own settings toolbar instead of one shared bar, the candlestick chart can show any indicator from `nautilus_trader.indicators`' own built-in library (no third-party TA dependency), and Candles mode can overlay live bid/ask lines on top of the OHLC candlesticks. Extends Story 7.1 (drag-to-pan/scroll-zoom, Lines/Candles/Ticks modes) rather than replacing it — stays on Plotly, no new charting library. Numbered 8 (not 5) to avoid colliding with the standalone bypass-epics 5–7 already tracked in `sprint-status.yaml`.
 **FRs covered:** FR28, FR29, FR30, FR31
 
 ## Epic 1: Trustworthy Coin Ranking & Watchlist
@@ -731,125 +731,125 @@ So that I can diagnose a bad day without leaving the terminal, using the same nu
 
 ## Epic 8: TradingView-Style Multi-Chart Navigation & Indicator Overlays
 
-Builder opens a coin's chart on the web dashboard (`/coin/{iid}`) and it behaves like a professional charting site. Extends Story 7.1 (drag-to-pan/scroll-zoom, Lines/Candles/Ticks modes, `_chartState`/`_loadOlderChunk` pagination) rather than replacing it — confirmed via code review: `live-chart` already has `dragmode:'pan'`+`scrollZoom` wired (dashboard.py:455-457, 467-469, 657-658), but `sig-chart` (dashboard.py:625-627) has no pan/zoom config at all, and both charts' settings currently live in one shared toolbar (dashboard.py:568-581) that only actually controls the price chart. Stays on Plotly — no new charting library (Story 7.1 Dev Notes, reconfirmed here).
+Builder opens a coin's chart on the web dashboard and it behaves like a professional charting site. Since this epic was first drafted, the drag-to-pan candlestick widget (Story 7.1) was refactored into a shared JS module (`_LIVE_CHART_JS`, dashboard.py) embedded on **both** `/coin/{id}` and `/chart/{id}` — but the two pages have diverged: `/coin/{id}`'s "Lines" mode is a separate, bespoke implementation (bid/ask/mid/microprice/price multi-line, plus click-to-diff A/B markers) that never joined the shared pan-to-load-more/pagination machinery, while `/chart/{id}`'s "Lines" mode (via the shared widget) is a single close-price line derived from candle data, with full pagination but none of the richer bid/ask view. Story 8.1 (revised 2026-09-06, replacing an earlier per-chart-toolbar draft that's now largely moot — both pages already have their own toolbars) consolidates the interactive chart widget onto `/chart/{id}` only, bringing its Lines mode to full parity first. Remaining stories (8.2-8.5) build the indicator functionality on top of that consolidated widget. Stays on Plotly — no new charting library (Story 7.1 Dev Notes, reconfirmed here).
 
-### Story 8.1: Per-chart settings panes and pan/zoom parity for the signal chart
+### Story 8.1: Consolidate the interactive chart widget onto `/chart/{id}` only
 
-As a user of the coin-detail page,
-I want the signal chart to pan/zoom exactly like the price chart, and each chart to carry its own settings toolbar,
-So that browsing history and adjusting display options is consistent and unambiguous across every chart on the page, not just the price chart.
+As a user of the web dashboard,
+I want the full Candles/Lines/Ticks charting experience (including the rich bid/ask/mid/microprice/price Lines view and click-to-diff) to live in exactly one place, `/chart/{id}`,
+So that there's one charting surface to learn and extend, instead of two divergent, partially-overlapping implementations on `/coin/{id}` and `/chart/{id}`.
 
 **Acceptance Criteria:**
 
-**Given** the `sig-chart` div (dashboard.py:625-627)
-**When** it renders
-**Then** its `Plotly.react` call gains `dragmode:'pan'` in its layout object and `{scrollZoom:true}` as its config argument, matching `live-chart`'s existing config (dashboard.py:455-457) (FR29)
-
-**Given** a user drags or scroll-zooms the signal chart
-**When** the interaction fires
-**Then** it is wired through the same `plotly_relayout` freeze-live-polling mechanism as `live-chart` (`_wireChartRelayout`/`_onChartRelayout`, dashboard.py:409-441) — dragging one chart freezes the shared 1s poll for both, since both charts read from the same live poll cycle (`pollCoin`, dashboard.py:592-600)
-
-**Given** `live-chart` (the "mother" panel per FR29) and `sig-chart`
-**When** the user drags or scroll-zooms **either** chart
-**Then** the resulting x-axis range is applied to the other chart too via `Plotly.relayout(otherDivId, {'xaxis.range': rng})`, so both charts always show the same visible time window — implemented as a small shared helper (e.g. `_syncChartXRange(sourceDivId, rng)` iterating a fixed list of the page's other chart div ids) called from both charts' `_onChartRelayout` handlers
-
-**Given** the x-axis sync helper
-**When** it applies a range to another chart via `Plotly.relayout`
-**Then** it does not re-trigger that chart's own `plotly_relayout` listener into another sync call — guarded (e.g. a module-level `_syncingChartXRange` boolean set before the `Plotly.relayout` call and cleared after) so panning one chart can never enter an infinite relayout loop across the two panels
-
-**Given** the existing shared toolbar (dashboard.py:568-581: mode buttons, `bar-sel`, date-range inputs, Live button)
+**Given** `/chart/{id}`'s "Lines" mode (`_renderLineChart`, currently a single `scattergl` trace of candle close prices, dashboard.py:358-368)
 **When** this story is implemented
-**Then** it is split into two per-chart toolbar rows: a price-chart toolbar (directly above `live-chart`, retaining all existing controls unchanged in behavior) and a signal-chart toolbar (directly above `sig-chart`, initially empty/minimal — a placeholder row future stories populate) (FR28)
+**Then** it is replaced with the same multi-trace rendering `/coin/{id}`'s `renderCoin` currently does for its own Lines branch (dashboard.py:721-749): `bid`/`ask`/`mid`/`microprice`/`price` lines with the same colors/styling, plotted against a rows array shaped `{t,bid,ask,mid,micro,price}` (not the candle `{t,o,h,l,c}` shape) — the shared widget's mode dispatch (`_renderChartRows`, dashboard.py:251-256) routes `'lines'` to this new renderer
 
-**Given** the split toolbars
-**When** either chart's controls are used
-**Then** no control's existing behavior changes — this story is a structural/layout change (which toolbar row a control lives in, plus sig-chart's new pan/zoom config), not a behavior change to any existing control
+**Given** Lines mode needs its own data source (bid/ask/mid/micro/price are order-book-state values, not derivable from the trade-tick-based candle pipeline)
+**When** this story adds it
+**Then** two new functions mirror the existing live/historical split already used by Candles (`_live_candles_json`/`_historical_candles_json`) and Ticks: `_live_lines_json(iid)` (extracted from `_coin_chart_json`'s existing bid/ask/mid/micro/price computation over `_second_rolling`, dashboard.py — reused, not duplicated) for the current/live window, and a new `_historical_lines_json(iid, start_ms, end_ms)` reading `DydxSecondSnapshot` records from the catalog for the requested window (same catalog-query pattern as `_historical_ticks_json`, dashboard.py:971 area) for paginated/older windows — both returning `{"rows": [...], "truncated": bool}`, matching the existing candles/ticks endpoint contract exactly
+
+**Given** the new endpoints (`GET /data/coin/{id}/lines?start=&end=` mirroring `coin_candles_handler`'s pattern) and the shared JS's fetch dispatch (`_fetchModeWindow`, `_fetchLiveWindow`, dashboard.py:221-232)
+**When** mode is `'lines'`
+**Then** `_fetchModeWindow`/`_fetchLiveWindow` route to the new lines endpoints instead of falling through to the candles fetch as they do today, so Lines mode gets its own live+historical data and joins `_chartState`/`_loadOlderChunk`'s pan-to-load-more pagination exactly like Candles/Ticks already do (dragging left in Lines mode now loads older bid/ask/mid/micro/price history from the catalog, which it cannot do today)
+
+**Given** click-to-diff (`handleChartClick`/`buildDiff`/the A/B markers, currently wired only on `/coin/{id}`'s `live-chart` in `renderCoin`, dashboard.py:475-... and 730-737)
+**When** this story is implemented
+**Then** it moves to `/chart/{id}`'s Lines mode: `handleChartClick` reads from `_chartState.rows[idx]` (the new `{t,bid,ask,mid,micro,price}` shape) instead of the old `_chartData` global tied to `/coin/{id}`'s live poll, `_renderLineChart` wires `plotly_click`→`handleChartClick` (mirroring `_wireChartRelayout`'s existing wiring pattern), and `_render_chart_page` gains a `diff-box` div; the feature is unavailable in Candles/Ticks mode (as it always has been — diff was always price-line-specific) and unavailable on `/coin/{id}` after this story (its only home is now `/chart/{id}`)
+
+**Given** `/coin/{id}`'s page (`showCoin`/`renderCoin`, dashboard.py:646-762)
+**When** this story is implemented
+**Then** the `live-chart` div, its toolbar (Lines/Candles/Ticks buttons, `bar-sel`, date-range inputs, Live button), and all Candles/Ticks/Lines rendering logic in `renderCoin` are removed — `/coin/{id}` keeps only `ind-groups` (indicator table), `price-ticker`, `sig-chart` (OFI10z/OBI10), and the `/chart/{id}` link; `pollCoin`/`renderCoin` still poll `/data/live/{id}` and `/data/coin/{id}` for the indicator table, ticker, and sig-chart (all unaffected by this story) but no longer touch any chart-mode/pagination state
+
+**Given** `_coin_chart_json`'s existing `sig_ts`/`ofi_10_z`/`obi_10` fields (consumed by `/coin/{id}`'s `sig-chart`, unrelated to the price-line data this story extracts out of the same function)
+**When** `_coin_chart_json` is refactored to share its bid/ask/mid/micro/price computation with the new `_live_lines_json`
+**Then** `sig_ts`/`ofi_10_z`/`obi_10` continue to be returned unchanged from `_coin_chart_json` — this story does not touch sig-chart's data path
 
 **Given** `cd troll && python -m pytest ml_signals/tests/test_dashboard_chart.py -q`
 **When** the test suite runs after this story
-**Then** it still passes with no regressions (this story touches only the inline JS template and layout HTML, not any Python data-building function)
+**Then** it passes, with new tests for `_historical_lines_json` (catalog-backed, mirrors `test_historical_candles_json_builds_from_catalog_trades`'s temp-catalog pattern, writing `DydxSecondSnapshot` records instead of `TradeTick`s) and for the extracted `_live_lines_json`/`_coin_chart_json` shared computation (asserting both still return correct bid/ask/mid/micro/price values from a known `_second_rolling` buffer, no behavior change vs. today's `_coin_chart_json` output)
 
-### Story 8.2: Technical indicator computation via `pandas_ta_classic`
+### Story 8.2: Technical indicator computation via `nautilus_trader.indicators`
 
-Depends on nothing (backend-only, additive). Adds the indicator math this epic's UI stories (8.3) consume.
+Depends on nothing (backend-only, additive). Adds the indicator dispatch mechanism this epic's UI stories (8.3) consume. No new dependency — every indicator class already ships in the pinned `nautilus_trader` (confirmed: `SimpleMovingAverage`, `ExponentialMovingAverage`, `WeightedMovingAverage`, `HullMovingAverage`, `AdaptiveMovingAverage`, `DoubleExponentialMovingAverage`, `VariableIndexDynamicAverage`, `WilderMovingAverage`, `BollingerBands`, `KeltnerChannel`, `DonchianChannel`, `RelativeStrengthIndex`, `MovingAverageConvergenceDivergence`, `Stochastics`, `CommodityChannelIndex`, `AverageTrueRange`, `VolatilityRatio`, `AroonOscillator`, `DirectionalMovement`, `RateOfChange`, `ChandeMomentumOscillator`, `OnBalanceVolume`, `VolumeWeightedAveragePrice`, plus the rest of `nautilus_trader.indicators`'s ~45 concrete classes — all confirmed importable in this repo's pinned version, each exposing `update_raw(...)` for numeric feeding alongside `handle_bar`/`.value` or multi-attribute output).
 
 As a strategy developer/builder,
-I want standard technical indicators (SMA, EMA, Bollinger Bands, VWAP, RSI, MACD) computed once from the existing candle data, via `pandas_ta_classic`,
-So that the chart can offer indicator toggles without a second, hand-rolled implementation of any of these formulas.
+I want every indicator in `nautilus_trader.indicators` computed once from the existing candle data using the real indicator classes, and selectable for the chart,
+So that the chart offers the full built-in indicator toolkit with zero reimplementation and zero new dependency.
 
 **Acceptance Criteria:**
 
-**Given** `troll/troll-requirements.txt`
+**Given** a new `ml_signals/chart_indicators.py` module (dispatch/metadata only — no indicator math of its own, per DESIGN-02 module boundaries)
 **When** this story is implemented
-**Then** `pandas-ta-classic` is added as a new pinned dependency (exact version pinned, not a floating range), importable as `pandas_ta_classic`
+**Then** it defines `INDICATOR_CATALOG: dict[str, IndicatorSpec]` covering every concrete class in `nautilus_trader.indicators` (excluding `Indicator`/`MovingAverage`/`MovingAverageFactory`/`MovingAverageType`/module-name entries, which are base/factory/enum, not indicators), each entry recording: the class, its constructor parameter names/types/defaults, which OHLCV field(s) and in what order feed its `update_raw` (e.g. SMA/EMA/RSI/MACD/OBV: close only; ATR/Stochastics/CCI/AroonOscillator: high, low, close; VWAP: high, low, close, volume — determined per-indicator by inspecting its `update_raw` signature/docstring, not assumed uniform), which attribute(s) hold its output (`value` for single-line indicators; `upper`/`middle`/`lower` for band indicators; `value_k`/`value_d` for Stochastics; etc.), and a panel classification (`"overlay"` for price-scale indicators — moving averages, bands, VWAP — vs `"oscillator"` for bounded/differently-scaled indicators — RSI, MACD, Stochastics, CCI, AROON, etc.) (FR30)
 
-**Given** `ml_signals/indicators.py`
-**When** this story is implemented
-**Then** it gains new stateless functions — `sma(closes, period)`, `ema(closes, period)`, `bollinger_bands(closes, period, std)`, `vwap(highs, lows, closes, volumes)`, `rsi(closes, period)`, `macd(closes, fast, slow, signal)` — each a thin wrapper over the corresponding `pandas_ta_classic` call (`pandas_ta_classic.sma`, etc.) taking/returning plain lists or a `pandas.Series`, following the existing SSOT-01 pattern (mirrors `spread`/`mid_price`) rather than living inline in `dashboard.py` (FR30)
+**Given** a new `replay_indicator(candles: list[dict], name: str, params: dict) -> dict[str, list[float | None]]` function in `chart_indicators.py`
+**When** it is called with a candle list (each with `o`/`h`/`l`/`c`/`v`/`t`) and a registered indicator name + params
+**Then** it instantiates the real `nautilus_trader.indicators` class from the catalog with the given params, replays it by calling `update_raw` once per candle in chronological order with that indicator's registered OHLCV feed, and returns each configured output attribute as a list of values aligned 1:1 with the input candles — `None` for every candle before `indicator.initialized` becomes true (the indicator's own warm-up state, not a hand-computed guess at warm-up length)
 
-**Given** a new `_indicators_json(candles: list[dict], specs: list[tuple[str, dict]]) -> str` helper in `dashboard.py` (mirrors `_historical_candles_json`'s existing shape/pattern)
-**When** it is called with a candle list and a spec like `[("sma", {"period": 20}), ("rsi", {"period": 14})]`
-**Then** it returns a JSON object keyed by a stable indicator id (e.g. `"sma_20"`, `"rsi_14"`) each mapping to a list of `{t, value}` points aligned to the input candles' timestamps, with `null` for any point before the indicator has enough history to compute (e.g. first 19 points of a 20-period SMA)
-
-**Given** a new `GET /data/coin/{id}/indicators?bar=&start=&end=&spec=sma:20,rsi:14` endpoint (mirrors `coin_candles_handler`'s pattern, dashboard.py:1014)
+**Given** a new `GET /data/coin/{id}/indicators?bar=&start=&end=&spec=SimpleMovingAverage:period=20,RelativeStrengthIndex:period=14` endpoint in `dashboard.py` (mirrors `coin_candles_handler`'s pattern, dashboard.py:1014)
 **When** it is called
-**Then** it fetches candles for the given window/bar via the existing `_historical_candles_json`'s underlying candle-building path (reused, not duplicated), computes the requested indicators via `_indicators_json`, and returns them; an unknown indicator name in `spec` returns a 400 with a clear error message rather than silently ignoring it
+**Then** it fetches candles for the given window/bar via the existing candle-building path (reused, not duplicated), calls `replay_indicator` once per requested spec entry, and returns a JSON object keyed by a stable id (e.g. `"SimpleMovingAverage_period=20"`) each mapping to `{t, value}`-shaped points per output attribute; a name not present in `INDICATOR_CATALOG` returns a 400 with a clear error message rather than silently ignoring it
 
-**Given** the new indicator functions in `ml_signals/indicators.py`
-**When** they are tested (TEST-01: financial calculations require tests)
-**Then** `ml_signals/tests/test_indicators.py` gains cases asserting each new function's output against a known small input (e.g. a 20-close series with a hand-computable SMA), plus a test for `_indicators_json`/the new endpoint asserting correct alignment and `null`-padding of the warm-up period
+**Given** a new `GET /data/indicators/catalog` endpoint
+**When** it is called
+**Then** it returns `INDICATOR_CATALOG` serialized to JSON (name, params with defaults, panel classification) for every registered indicator — the single source Story 8.4's picker UI builds its list from, so the picker never hardcodes a name list that could drift from what the backend actually supports
 
-### Story 8.3: Indicator picker on the price chart's settings pane
+**Given** the new dispatch mechanism (TEST-01: financial calculations require tests)
+**When** it is tested
+**Then** `ml_signals/tests/test_chart_indicators.py` (new file, one file per module under test) asserts `replay_indicator` against a known small candle series for at least one indicator from each output-shape category confirmed in this story — single-value (e.g. `SimpleMovingAverage`, hand-computable expected values), banded (e.g. `BollingerBands`, asserting all three of `upper`/`middle`/`lower`), and dual-line (e.g. `Stochastics`, asserting both `value_k`/`value_d`) — plus a warm-up test confirming `None`-padding matches the indicator's own `initialized` transition; exhaustive per-indicator tests for all ~45 catalog entries are not required (the mechanism is generic and class-driven, not per-indicator bespoke code), but every catalog entry must be confirmed importable and instantiable with its default params in a single smoke-test loop over `INDICATOR_CATALOG`
 
-Depends on Story 8.1 (per-chart toolbar exists to add controls to) and Story 8.2 (indicator endpoint to call).
+### Story 8.4: Indicator picker on the chart page's settings toolbar
 
-As a user of the coin chart,
-I want to toggle technical indicators on/off from the price chart's own settings pane and see them appear on the chart immediately,
+Depends on Story 8.1 (the consolidated widget on `/chart/{id}`, whose existing toolbar this adds controls to) and Story 8.2 (indicator endpoint to call).
+
+As a user of the chart page,
+I want to toggle technical indicators on/off from `/chart/{id}`'s own settings toolbar and see them appear on the chart immediately,
 So that I can inspect a coin with the same indicator toolkit a professional charting site offers, without editing config or reloading the page.
 
 **Acceptance Criteria:**
 
-**Given** the price-chart toolbar (from Story 8.1)
+**Given** `/chart/{id}`'s toolbar (consolidated onto this page by Story 8.1)
 **When** this story is implemented
-**Then** it gains an indicator picker (a multi-select control, e.g. a dropdown-with-checkboxes or a row of toggle chips) listing SMA, EMA, Bollinger Bands, VWAP, RSI, MACD, each with its configurable parameter(s) (e.g. SMA period) defaulting to a sensible value (SMA/EMA: 20, Bollinger Bands: 20/2, RSI: 14, MACD: 12/26/9) (FR30)
+**Then** it gains an indicator picker (a multi-select control, e.g. a searchable dropdown-with-checkboxes — a plain flat list of ~45 toggle chips would be unusable) populated entirely from Story 8.2's `/data/indicators/catalog` endpoint, never a hardcoded name list in JS — every indicator the backend registers is selectable, and each selected indicator's own registered parameters (e.g. SMA's `period`) render as inline editable fields defaulting to the catalog's default values (FR30)
 
-**Given** the user toggles an overlay-type indicator on (SMA, EMA, Bollinger Bands, VWAP)
+**Given** the user selects an indicator whose catalog entry is classified `"overlay"` (moving averages, Bollinger/Keltner/Donchian bands, VWAP, etc.)
 **When** it renders
-**Then** it is fetched via Story 8.2's `/data/coin/{id}/indicators` endpoint for the currently-loaded chart window and added as an additional trace directly on the `live-chart` price chart (same x-axis/timescale, sharing the pan/zoom-triggered pagination refresh from Story 7.1/8.1 — an indicator trace is refetched/extended whenever `_loadOlderChunk` loads more candle history, never left stale/truncated relative to the price trace)
+**Then** it is fetched via Story 8.2's `/data/coin/{id}/indicators` endpoint for the currently-loaded chart window and added as additional trace(s) directly on the `live-chart` candlestick chart (one trace per output attribute — e.g. Bollinger Bands adds three traces for `upper`/`middle`/`lower`), sharing the pan/zoom-triggered pagination refresh from Story 7.1/8.1 — an indicator trace is refetched/extended whenever `_loadOlderChunk` loads more candle history, never left stale/truncated relative to the candlestick trace
 
-**Given** the user toggles an oscillator-type indicator on (RSI, MACD)
+**Given** the user selects an indicator whose catalog entry is classified `"oscillator"` (RSI, Stochastics, MACD, CCI, AROON, etc.)
 **When** it renders
-**Then** it appears in a new dedicated indicator panel (its own Plotly chart div, own y-scale, positioned below `live-chart`) rather than overlaid on the price chart's y-axis — reusing `sig-chart`'s existing sub-panel pattern (its own div, template, pan/zoom config from Story 8.1) rather than inventing a second panel mechanism; RSI and MACD share this one new panel (stacked traces), not one panel each
+**Then** it appears in a new dedicated indicator panel on `/chart/{id}` (a new Plotly chart div, own y-scale, positioned directly below `live-chart` and above the page's existing static 7-row microstructure subplot figure) rather than overlaid on the candlestick chart's y-axis; every active oscillator-type indicator shares this one panel (stacked traces, one per output attribute), not one panel per indicator — this is a new panel introduced by this story, not a reuse of `/coin/{id}`'s `sig-chart` (a different page, out of scope after Story 8.1)
 
-**Given** the new indicator panel exists and the user drags/zooms it, `live-chart`, or `sig-chart`
-**When** any of the three panels' x-axis changes
-**Then** it joins Story 8.1's `_syncChartXRange` group (its div id added to the fixed list of synced panels) — panning or zooming from any one of the three panels moves the visible time window on all three in lockstep, since the price chart's x-axis is what every spawned panel follows (FR29)
+**Given** the new indicator panel and `live-chart`, both on `/chart/{id}`
+**When** the user drags/zooms either one
+**Then** the resulting x-axis range is applied to the other via a small shared helper (e.g. `_syncChartXRange(sourceDivId, rng)`, guarded against re-triggering its own `plotly_relayout` listener) so both panels always show the same visible time window — the candlestick chart is the "mother" panel every spawned oscillator panel follows (FR29)
 
 **Given** an active indicator selection
 **When** the user changes chart mode (Lines/Candles/Ticks), changes the bar-size (`onBarChange`), or hits Live/Load
-**Then** all active indicators are refetched for the new window/mode rather than left showing stale data from the previous mode (mirrors `_chartState=null` + refetch pattern already used by `onBarChange`/`resetCoinLive`, dashboard.py:338-343, 353-360); an indicator that requires Candles-derived data (all of them, since they're computed from OHLC candles) is disabled (not silently blank) while in Ticks mode, with a one-line note why
+**Then** all active indicators are refetched for the new window/mode rather than left showing stale data from the previous mode (mirrors the existing `_chartState=null` + refetch pattern already used by `onBarChange`/`resetCoinLive`); an indicator that requires Candles-derived data (all of them, since they're computed from OHLC candles) is disabled (not silently blank) while in Ticks or Lines mode, with a one-line note why
 
 **Given** `cd troll && python -m pytest ml_signals/tests/test_dashboard_chart.py -q`
 **When** it runs after this story
 **Then** it passes, with a new test asserting the indicator-fetch JS helper builds the correct `spec=` query string for a given active-indicator selection (JS verified via the same `node --check` + stubbed-harness method used in Story 7.1, since no browser is available in this environment — flag for manual in-browser confirmation before considering this story fully verified, same caveat 7.1 documented)
 
-### Story 8.4: Combined candlestick + bid/ask overlay mode
+### Story 8.5: Combined candlestick + bid/ask overlay mode
 
-Depends on Story 8.1 (per-chart toolbar). Independent of Stories 8.2/8.3 — no indicator dependency.
+Depends on Story 8.1 (consolidated widget/toolbar on `/chart/{id}`). Independent of Stories 8.2-8.4 — no indicator dependency.
 
-As a user of the coin chart,
+As a user of the chart page,
 I want to see the live best-bid/best-ask lines drawn on top of the candlesticks in Candles mode,
 So that I can see the current spread and candle structure together without switching to Lines mode and losing the OHLC view.
 
 **Acceptance Criteria:**
 
-**Given** the price-chart toolbar in Candles mode
+**Given** `/chart/{id}`'s toolbar in Candles mode
 **When** this story is implemented
 **Then** it gains a "Bid/Ask overlay" toggle, off by default, that persists only for the current session (not remembered across page loads — matches this codebase's existing no-persisted-UI-prefs convention)
 
 **Given** the toggle is on and the chart is in Candles mode
-**When** `_renderCandleChart` (dashboard.py:443-459) runs
-**Then** it adds two additional line traces (`bid`, `ask`) alongside the existing candlestick trace, sourced from the same per-candle-window bid/ask data the existing Lines-mode trace already plots (`chart.bid`/`chart.ask`, dashboard.py:643-644) — no new backend endpoint; if the historical-candles response doesn't already carry bid/ask arrays for the requested window, `_historical_candles_json` (dashboard.py:762) is extended to include them (FR31)
+**When** `_renderCandleChart` runs
+**Then** it adds two additional line traces (`bid`, `ask`) alongside the existing candlestick trace, sourced from the same per-window bid/ask data Story 8.1's new lines endpoints (`_live_lines_json`/`_historical_lines_json`) already produce — fetched alongside the candle window rather than duplicating a second bid/ask query path (FR31)
 
 **Given** the toggle is on
 **When** the user pans/zooms and older candles load via `_loadOlderChunk` (Story 7.1)
@@ -862,8 +862,4 @@ So that I can see the current spread and candle structure together without switc
 **Given** the toggle
 **When** the user switches to Lines or Ticks mode
 **Then** the toggle has no effect (it's Candles-mode-specific) and its own UI control is hidden/disabled while in those modes, rather than shown-but-inert
-
-**Given** `_historical_candles_json`'s tests (`test_historical_candles_json_builds_from_catalog_trades`, added in Story 7.1)
-**When** this story extends that function to include bid/ask arrays
-**Then** the existing test is extended (not duplicated) to also assert the new bid/ask fields are present and correct, per this project's testing convention of one file per module under test
 

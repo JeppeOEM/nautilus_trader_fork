@@ -121,6 +121,7 @@
 
 ## Deferred from: code review of 7-1-candle-chart-drag-to-pan-history (2026-09-06)
 
+- **AC #2's "no jump on pan" behavior relies on `Plotly.react()` preserving zoom/pan across a redraw when no explicit `xaxis.range` is set — never exercised in a real browser**, only via a Node harness that stubs `Plotly` itself and can't observe this. User chose to verify this themselves directly in a browser (drag the chart, confirm the view doesn't reset) rather than have it fixed/simulated here. `troll/ml_signals/dashboard.py` (`_renderCandleChart`/`_renderTickChart`).
 - **`_second_rolling`/`_ind_rolling` maxlen bump (300→3600) and the oldest-bucket-drop in `_live_candles_json`** predate story 7.1's own work — per the story's Dev Notes, both changes and their tests were made earlier in the same session (a separate, already-tested bugfix bundled into the same uncommitted working tree), not introduced by this story's tasks. `troll/ml_signals/dashboard.py:110,116,855-856`.
 - **`_historical_ticks_json` returns a `size` field per trade that `_renderTickChart` never reads.** Harmless unused payload; plausible future use (tooltip/marker sizing by trade size). Not worth its own diff. `troll/ml_signals/dashboard.py:899`.
 

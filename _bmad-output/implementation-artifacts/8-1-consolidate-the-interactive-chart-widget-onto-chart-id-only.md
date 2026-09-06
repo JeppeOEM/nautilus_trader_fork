@@ -1,0 +1,113 @@
+---
+baseline_commit: 55cf91b7685c9860aa8deccfa729a97351ea6df4
+---
+
+# Story 8.1: Consolidate the interactive chart widget onto `/chart/{id}` only
+
+Status: review
+
+<!-- No epics.md entry existed for Epic 8 when stories 5.1/6.1/7.1 were created, but it does
+     now (added 2026-09-06, then this story rewritten 2026-09-06 after the user pointed out
+     that /chart/{id} and /coin/{id} had diverged mid-refactor) -- see epics.md's Epic 8
+     section for the authoritative AC this story implements. Requested directly by the user
+     as "the first quick story" before the indicator-overlay work (Stories 8.2/8.4/8.5). -->
+
+## Story
+
+As a user of the web dashboard,
+I want the full Candles/Lines/Ticks charting experience (including the rich bid/ask/mid/microprice/price Lines view and click-to-diff) to live in exactly one place, `/chart/{id}`,
+so that there's one charting surface to learn and extend, instead of two divergent, partially-overlapping implementations on `/coin/{id}` and `/chart/{id}`.
+
+## Acceptance Criteria
+
+1. **Lines mode on `/chart/{id}` gains full bid/ask/mid/microprice/price parity.** `_renderLineChart` (currently a single `scattergl` close-price trace built from candle rows) is replaced with the same 5-trace rendering `/coin/{id}`'s `renderCoin` does today for its Lines branch: `bid` (`#26a69a`), `ask` (`#ef5350`), `mid` (`#aaa`, dotted), `microprice` (`#f0883e`, dotted), `price` (`#e3b341`) — plotted against a rows array shaped `{t,bid,ask,mid,micro,price}`, not the candle `{t,o,h,l,c}` shape. `_renderChartRows`'s existing `'lines'` dispatch branch now calls this new renderer.
+2. **Lines mode gets its own live+historical data source.** Two new functions mirror the existing live/historical split already used by Candles (`_live_candles_json`/`_historical_candles_json`): `_live_lines_json(iid)` for the current/live window, extracted from `_coin_chart_json`'s existing bid/ask/mid/micro/price computation (reused verbatim, including its crossed-book skip and `_CHART_GAP_THRESHOLD_MS` gap-`None` insertion — never re-derived), and a new `_historical_lines_json(iid, start_ms, end_ms)` reading `DydxSecondSnapshot` records from the Parquet catalog for the requested window (same catalog-query pattern as `_historical_ticks_json`, using `catalog.query(data_cls=DydxSecondSnapshot, identifiers=[iid], start=..., end=...)` since `DydxSecondSnapshot` is a custom `Data` type with no `trade_ticks()`-style convenience wrapper). Both apply the identical crossed-book skip (`bp >= ap`) and gap-`None` insertion as `_coin_chart_json`, and both return `{"rows": [...], "truncated": bool}` — the same shape `_fetchCandlesWindow`/`_fetchTicksWindow` already return, so the shared JS pagination code needs no new response-shape handling.
+3. **New endpoint wires the historical path in.** `GET /data/coin/{id}/lines?start=&end=` (mirrors `coin_candles_handler`'s pattern) calls `_historical_lines_json` and is registered in `setup_routes`/wherever `app.router.add_get` is called for the sibling `/data/coin/{id}/candles` and `/data/coin/{id}/ticks` routes.
+4. **Shared JS fetch dispatch routes `'lines'` to the new endpoints.** `_fetchModeWindow`/`_fetchLiveWindow` (currently: `mode==='ticks' ? ... : _fetchCandlesWindow(...)`, so `'lines'` silently falls through to candles today) gain a real `'lines'` branch calling the new `/data/coin/{id}/lines` endpoint (historical/paginated) or the live-window equivalent (current window, no `start`/`end`). As a direct consequence, dragging left in Lines mode on `/chart/{id}` now loads older bid/ask/mid/micro/price history from the catalog via `_loadOlderChunk` — which it cannot do today (a drag in Lines mode currently just freezes live polling with nothing to page in, since `_chartState.rows` holds candle data mislabeled as lines).
+5. **Click-to-diff moves to `/chart/{id}`.** `handleChartClick`/`buildDiff`/the A/B marker traces (currently wired only inside `/coin/{id}`'s `renderCoin`, reading a `_chartData` global populated by the live poll) move into the shared `_LIVE_CHART_JS` module and are wired into the new `_renderLineChart` via `plotly_click` (mirroring `_wireChartRelayout`'s existing `removeAllListeners`-then-`.on` pattern). `handleChartClick` reads from the currently-rendered lines rows (`_chartState.rows[idx]`, shape `{t,bid,ask,mid,micro,price}`) instead of the old `_chartData` global, so it works identically whether the visible window is live or a paginated/historical one. `_render_chart_page` gains a `diff-box` div. The feature stays Lines-mode-only (as it always has been — bid/ask/mid/micro/price is what gets diffed) and is not available in Candles/Ticks mode.
+6. **`/coin/{id}` loses the entire chart widget.** `showCoin`'s template drops the `live-chart` div and its toolbar (Lines/Candles/Ticks buttons, `bar-sel`, date-range inputs, Live button). `renderCoin` drops all Candles/Ticks/Lines rendering branches, the `_fetchLiveWindow`/`_setChartRows` calls, and the `plotly_click`/diff wiring. `/coin/{id}` keeps exactly: `ind-groups` (indicator table), `price-ticker`, `sig-chart` (OFI10z/OBI10), and the existing `/chart/{id}` link. `pollCoin` still polls `/data/live/{id}` and `/data/coin/{id}` every 1s for the indicator table, ticker, and sig-chart — all three are unaffected by this story — but no longer references `_coinMode`/`_chartState`/any pagination state.
+7. **`_coin_chart_json`'s sig-chart fields are untouched.** After `_coin_chart_json`'s bid/ask/mid/micro/price computation is extracted into a function shared with `_live_lines_json`, `_coin_chart_json` still returns `sig_ts`/`ofi_10_z`/`obi_10` unchanged — `/coin/{id}`'s `sig-chart` keeps working exactly as today; this story does not touch that data path.
+8. **No regressions.** `cd troll && python -m pytest ml_signals/tests/test_dashboard_chart.py -q` passes, including new tests for `_historical_lines_json` (catalog-backed, mirrors `test_historical_candles_json_builds_from_catalog_trades`'s temp-catalog pattern but writing `DydxSecondSnapshot` records instead of `TradeTick`s) and for the extracted bid/ask/mid/micro/price computation shared by `_live_lines_json`/`_coin_chart_json` (asserting identical output to today's `_coin_chart_json`, including the crossed-book skip and gap-`None` behavior — no behavior change, only an extraction).
+
+## Tasks / Subtasks
+
+- [x] Task 1 — Extract `_coin_chart_json`'s price-series computation into a shared function (AC: #2, #7)
+  - [x] Extracted into `_price_series_rows(snaps) -> list[dict]` (row-dict shape `{t,bid,ask,mid,micro,price}`), preserving the crossed-book skip and gap-`None` insertion verbatim.
+  - [x] `_coin_chart_json` calls it, transposes rows into its existing parallel-array response shape; `sig_ts`/`ofi_10_z`/`obi_10` untouched (including the pre-existing early-return-on-empty-`snaps` quirk, preserved exactly for behavioral parity).
+  - [x] `_live_lines_json(iid)` calls the same function against `_second_rolling.get(iid, [])`, returns `{"rows": [...], "truncated": False}`.
+- [x] Task 2 — Catalog-backed `_historical_lines_json` (AC: #2, #3)
+  - [x] `_historical_lines_json` added; `catalog.query()` wraps custom `Data` subclasses in `CustomData` (confirmed via a test failure, not assumed) — unwrapped via `.data` before reading snapshot fields.
+  - [x] `coin_lines_handler` added (mirrors `coin_candles_handler`'s live/historical dispatch on presence of `start`/`end`), registered `GET /data/coin/{id}/lines`.
+- [x] Task 3 — Shared JS: fetch dispatch, renderer, pagination (AC: #1, #4)
+  - [x] `_fetchLinesWindow`, `_fetchModeWindow`/`_fetchLiveWindow` `'lines'` branches, `_chunkSpanMs` `'lines'` branch (15-min chunks, matching Ticks).
+  - [x] `_renderLineChart` rewritten to 5 traces (bid/ask/mid/microprice/price) from row-dicts; wires both `_wireChartRelayout` and the new `_wireChartClick`.
+- [x] Task 4 — Click-to-diff relocation (AC: #5)
+  - [x] `handleChartClick`/`buildDiff`/`_setDiffWaiting`/`clearDiff`/`_diffA`/`_diffB`/`_diffBoxHTML` moved into `_LIVE_CHART_JS`; `handleChartClick` now reads `_chartState.rows[idx]` (guarded to Lines mode only) instead of the deleted `_chartData` global.
+  - [x] `_render_chart_page` gained a `diff-box` div.
+- [x] Task 5 — Strip the chart widget from `/coin/{id}` (AC: #6, #7)
+  - [x] `showCoin`/`renderCoin` stripped to `ind-groups`/`price-ticker`/`sig-chart` only.
+  - [x] Went further than "remove now-dead globals": since `/coin/{id}` (`_INDEX_HTML`) no longer calls anything in `_LIVE_CHART_JS`, removed the `+ _LIVE_CHART_JS +` splice from `_INDEX_HTML` entirely (not just the dead globals) — cleaner than leaving a fully-unused copy of the widget's ~250 lines parsed into every rankings/coin-detail page load. `_LIVE_CHART_JS` now embeds only in `_render_chart_page`/`/chart/{id}`.
+- [x] Task 6 — Tests (AC: #8)
+  - [x] `test_historical_lines_json_builds_from_catalog_snapshots` — added; first attempt used 60s-spaced snapshots and incorrectly asserted 5 rows (got 9 — the 60s gaps correctly tripped `_CHART_GAP_THRESHOLD_MS`'s None-insertion, a real behavior being exercised, not a bug); fixed by using realistic 1s-spaced snapshots.
+  - [x] `test_live_lines_json_matches_coin_chart_json_price_series` — added, asserts `_live_lines_json` rows match `_coin_chart_json`'s parallel arrays field-for-field.
+  - [x] `test_dashboard_chart_pan_js.py` needed updating (not just a check): it previously extracted `_INDEX_HTML`'s `<script>` block and exercised `_chunkSpanMs`/`_onChartRelayout`/`_loadOlderChunk` directly — all of which moved/were removed from `_INDEX_HTML` in Task 5. Changed it to extract `dashboard._LIVE_CHART_JS` directly and declare the globals `_render_chart_page`'s `init_script` would declare (previously supplied by `_INDEX_HTML`'s own now-removed global-var block).
+  - [x] `ml_signals/tests/test_dashboard_chart.py` (33 passed) and `ml_signals` full suite (140 passed, 1 pre-existing unrelated failure — see Debug Log) both green. Full repo-wide `python -m pytest -q` run was attempted but hung (see Debug Log) on `live_paper`, a module this story never touches; `dydx_collector` (104 passed), `bot_tui` (245 passed), `ranking_engine` (47 passed) all independently verified clean.
+
+## Dev Notes
+
+- **Read before touching anything:** `renderCoin` and `_coin_chart_json` in full (current dashboard.py — line numbers have shifted since this story was written; search for the function names, don't trust any line number cited here). The 5-trace Lines rendering, the diff-click wiring, and the CVD-weighted `price` formula all live in these two places today and must be ported faithfully, not reinvented.
+- **`_LIVE_CHART_JS` is the shared module** (`/coin/{id}` and `/chart/{id}` both embed it verbatim) — it currently declares `_fetchModeWindow`, `_fetchLiveWindow`, `_fetchHistCoin`, `_setChartRows`, `_renderChartRows`, `_chunkSpanMs`, `_loadOlderChunk`, `_relayoutXRange`, `_onChartRelayout`, `_reconcilePriceBasisOnFirstPan`, `_maybeLoadOlder`, `_wireChartRelayout`, `_renderCandleChart`, `_renderLineChart`, `_renderTickChart`. This story edits several of these in place (points 3, 4 above) and adds the diff-click functions to this same module (Task 4) since they now belong to the widget, not to `/coin/{id}` specifically.
+- **`_render_chart_page`'s `init_script`** currently declares page-local globals (`_coinIid`, `_coinMode='candles'` default, `_coinBarSeconds`, `_coinHistStart`/`_coinHistEnd`, `_coinPanning`, `_chartState`, `_relayoutTimer`, `timer`, `_MAX_CHUNK_MS`) and calls `_updateModeButtons();_fetchHistCoin(...)`. It will additionally need `_diffA`/`_diffB`/`_diffBoxHTML`/`_chartData`-equivalent globals (or reuse the exact names `_LIVE_CHART_JS` already assumes, if the diff functions are written to expect them as pre-declared globals like the rest of the widget's dependencies) and a call wiring `plotly_click` — verify against `_LIVE_CHART_JS`'s doc-comment block ("Depends on globals the embedding page must declare: ...") and update that comment once this story adds new dependencies (`_diffA`, `_diffB`, `_diffBoxHTML`).
+- **Data source mismatch is real, not a simplification to skip:** bid/ask/mid/microprice/price are order-book-state values (from `DydxSecondSnapshot`, 1s L2 snapshots), fundamentally different from the trade-tick-based OHLC candles `_historical_candles_json` builds. There is no way to derive Lines-mode data from the candles endpoint — it needs its own live buffer read (`_second_rolling`, already exists) and its own catalog read (`DydxSecondSnapshot` via `catalog.query`, net-new).
+- **`ParquetDataCatalog.query()` signature** (confirmed via direct introspection this session, pinned nautilus_trader version): `query(self, data_cls: type, identifiers: list[str] | None = None, start=None, end=None, where=None, files=None, **kwargs) -> list[Data | CustomData]`. Note the parameter is `identifiers`, not `instrument_ids` — `trade_ticks()` is a `TradeTick`-specific convenience wrapper over this same generic method; `DydxSecondSnapshot` has no such wrapper, so call `query` directly: `catalog.query(data_cls=DydxSecondSnapshot, identifiers=[iid], start=start_ns, end=end_ns)`.
+- **`DydxSecondSnapshot` constructor** (`troll/dydx_collector/second_snapshot.py:48`): `DydxSecondSnapshot(instrument_id, bid_prices, bid_sizes, ask_prices, ask_sizes, buy_volume, sell_volume, buy_count, sell_count, ts_event, ts_init)` — all list fields are `list[float]`, `buy_count`/`sell_count` are `int`. Registered for Arrow via `register_arrow`/`schema()`/`to_dict`/`from_dict` in the same file — already importable and catalog-writable (confirmed: the collector writes these to the catalog today via `self._catalog.write_data(items)` in `dydx_collector/collector.py`).
+- **Preserve DATA-01/the crossed-book guard exactly.** `_coin_chart_json`'s `if bp >= ap: continue` (crossed/stale snapshot skip) and its `_CHART_GAP_THRESHOLD_MS`-based gap-`None` insertion are load-bearing data-integrity behavior (troll/CLAUDE.md DATA-01) — the extracted shared function and `_historical_lines_json` must both apply them identically, not approximate or drop them for the historical path.
+- **`microprice` calc** uses `calc_microprice` (imported in dashboard.py as `from ml_signals.indicators import microprice as calc_microprice`) — reuse this import, don't reimplement.
+- **Don't scope-creep into Story 8.5's bid/ask-on-candles overlay.** This story's Lines mode shows bid/ask as part of its 5-trace view; Story 8.5 (later) adds a *toggle* to overlay bid/ask on top of *Candles* mode specifically. Different feature, don't conflate them — this story does not touch `_renderCandleChart`.
+- **Follow troll/CLAUDE.md:** MEM-01 (bounded catalog reads — `_historical_lines_json`'s window is caller-bounded by `start_ms`/`end_ms` same as the sibling candles/ticks readers; no unbounded query), TEST-01 (this touches financial/chart data-building functions — tests required, per AC #8/Task 6), SSOT-03 (the whole point of Task 1 is reusing `_coin_chart_json`'s existing math rather than re-deriving it for the historical path), READ-01 (keep the extracted function and `_historical_lines_json` each under ~30 lines — split further if the extraction balloons).
+
+### Project Structure Notes
+
+- Single file for the Python/JS side (same as Story 7.1): `troll/ml_signals/dashboard.py`.
+- Tests: `troll/ml_signals/tests/test_dashboard_chart.py` (existing file, extend it — matches its current scope). Check `troll/ml_signals/tests/test_dashboard_chart_pan_js.py` (new in the current working tree, added since Story 7.1's own story file was written) for any `/coin/{id}`-specific JS assertions that need updating alongside this consolidation.
+- No changes to `troll/dydx_collector/`, `troll/bot_tui/`, `troll/live_paper/`, or `troll/ranking_engine/` — entirely within `ml_signals/dashboard.py`'s chart surface, same as Story 7.1.
+
+### References
+
+- [Source: troll/ml_signals/dashboard.py] — `_LIVE_CHART_JS` (shared widget module), `_render_chart_page`/`chart_handler` (`/chart/{id}`), `showCoin`/`renderCoin`/`pollCoin` (`/coin/{id}`), `_coin_chart_json`, `_historical_candles_json`, `_historical_ticks_json`, `_live_candles_json` — read all of these in full before editing, current line numbers unreliable (file has been refactored twice since Story 7.1 shipped).
+- [Source: troll/dydx_collector/second_snapshot.py] — `DydxSecondSnapshot` class, constructor, Arrow schema/registration.
+- [Source: troll/dydx_collector/collector.py] — confirms `DydxSecondSnapshot` batches are written via `self._catalog.write_data(items)`.
+- [Source: troll/ml_signals/tests/test_dashboard_chart.py] — `_write_trades_to_catalog`, `test_historical_candles_json_builds_from_catalog_trades` (catalog-backed test pattern to mirror with `DydxSecondSnapshot` instead of `TradeTick`), `_snap`/`_reset` helpers (reuse for the price-series regression test).
+- [Source: `ParquetDataCatalog.query`/`trade_ticks` signatures] — confirmed via direct Python introspection this session (`inspect.signature`), pinned nautilus_trader version in this repo.
+- [Source: _bmad-output/planning-artifacts/epics.md#Epic 8, Story 8.1] — authoritative AC source, rewritten 2026-09-06 to match current dashboard.py state.
+- [Source: _bmad-output/implementation-artifacts/7-1-candle-chart-drag-to-pan-history.md] — prior story establishing `_chartState`/`_loadOlderChunk`/pan-to-load-more pagination and the `{rows,truncated}` endpoint contract this story's new lines endpoint must match.
+- [Source: troll/CLAUDE.md] — DATA-01 (crossed/stale-book skip, gap flagging), MEM-01 (bounded catalog reads), TEST-01 (financial calc tests required), SSOT-03 (reuse before duplicating), READ-01 (function length).
+
+## Dev Agent Record
+
+### Agent Model Used
+
+Claude Sonnet 5 (claude-sonnet-5)
+
+### Debug Log References
+
+- `catalog.query(data_cls=DydxSecondSnapshot, ...)` returns results wrapped in `nautilus_trader.model.data.CustomData`, not raw `DydxSecondSnapshot` instances — caught by a test failure (`AttributeError: 'CustomData' object has no attribute 'bid_prices'`), not assumed in advance. Fixed by unwrapping via `.data` (confirmed attribute via direct introspection) before reading snapshot fields in `_historical_lines_json`.
+- First version of `test_historical_lines_json_builds_from_catalog_snapshots` used 60s-spaced synthetic snapshots and asserted exactly 5 output rows; got 9. Not a bug — `_price_series_rows`'s gap-detection (`_CHART_GAP_THRESHOLD_MS = 2500ms`) correctly inserted a `None` row between each 60s-apart pair, exactly as designed for a real stalled-feed gap. Fixed the test fixture to use realistic 1s-apart snapshots (matching production `DydxSecondSnapshot` cadence) rather than loosening the gap threshold or the assertion.
+- `sed`/`Edit` string-replace failed once on a block containing `buildDiff` — root cause: the source file uses a non-breaking space (U+00A0, not a regular space) between `</b>` and `<span` in one HTML-building line, invisible in the tool's rendered output. Resolved by deleting the block via `sed -i '<range>d'` (line-number-addressed) instead of exact-string match.
+- Full repo-root `python -m pytest -q` (no path scoping) ran for 10+ minutes accumulating only ~12s of CPU time (i.e. blocked/waiting, not computing) — killed and re-run scoped to `troll/`'s own subpackages instead. Isolated to `live_paper` specifically (`dydx_collector` 104 passed/10.84s, `bot_tui` 245 passed/0.89s, `ranking_engine` 47 passed/1.13s all completed quickly; `live_paper` alone hung past a `timeout 25` wrapper). This story's File List touches only `ml_signals/`; `live_paper`'s hang is a pre-existing environment/test issue outside this story's scope, not investigated further here — flagged for a separate look, not silently ignored (troll/CLAUDE.md DATA-02 spirit, applied to test-suite health rather than data ingestion).
+- `test_ofi_strategy.py::test_ofi_strategy_generates_long_entry_on_bid_pressure` fails identically with or without this story's changes — pre-existing, matches the documented BacktestEngine-construction fragility already tracked as an open Epic 2 action item in `sprint-status.yaml` (same failure Story 7.1's Dev Notes recorded). Not caused by this story.
+
+### Completion Notes List
+
+- Consolidated the Candles/Lines/Ticks chart widget onto `/chart/{id}` only. `/coin/{id}` now shows only the indicator table, price ticker, and signal chart (OFI10z/OBI10) — no chart, no toolbar, no pagination state.
+- Lines mode gained real bid/ask/mid/microprice/price rendering (previously a stub: a single close-price line derived from candle data) plus its own live (`_live_lines_json`, rolling in-memory buffer) and historical (`_historical_lines_json`, catalog-backed via `DydxSecondSnapshot`) data sources, wired into the existing pan-to-load-more pagination machinery (`_chartState`/`_loadOlderChunk`) exactly like Candles/Ticks already were.
+- Click-to-diff (A/B bid/ask/mid/micro/price comparison) moved from `/coin/{id}` to `/chart/{id}`'s Lines mode, now driven by whatever's currently rendered (`_chartState.rows`) rather than a live-poll-only global, so it works identically whether the visible window is live or a paginated historical one.
+- `ml_signals/indicators.py`'s `calc_microprice` import and the CVD-weighted `price` formula are computed in exactly one place (`_price_series_rows`) shared by both the live poll (`/coin/{id}`'s indicator panel data, via `_coin_chart_json`) and the new Lines-mode data sources — no duplicated math (SSOT-03).
+- Full verification: `ml_signals/tests/test_dashboard_chart.py` (33 passed, includes 2 new tests for this story), `ml_signals/tests/test_dashboard_chart_pan_js.py` (1 passed, updated to extract from the widget's new sole location), full `ml_signals` suite (140 passed, 1 pre-existing unrelated failure), `dydx_collector`/`bot_tui`/`ranking_engine` suites (104/245/47 passed, all clean, confirming nothing outside `ml_signals` was affected).
+- **Not verified in a real browser** (no display available in this environment) — same caveat Story 7.1 documented. JS correctness verified via `node --check` (implicit in the Node harness successfully running) and the updated `test_dashboard_chart_pan_js.py` harness exercising the actual extracted functions against representative inputs, not a substitute for interactively dragging/clicking the real `/chart/{id}` page in a browser, which should be done before considering this story fully verified end-to-end.
+
+### File List
+
+- Modified: `troll/ml_signals/dashboard.py`
+- Modified: `troll/ml_signals/tests/test_dashboard_chart.py`
+- Modified: `troll/ml_signals/tests/test_dashboard_chart_pan_js.py`

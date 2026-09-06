@@ -40,12 +40,16 @@ from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
+from dydx_collector.second_snapshot import DydxSecondSnapshot
+
 import ml_signals.dashboard
 from ml_signals.dashboard import (
     _coin_chart_json,
     _historical_candles_json,
+    _historical_lines_json,
     _historical_ticks_json,
     _live_candles_json,
+    _live_lines_json,
 )
 
 _IID = "BTC-USD-PERP.DYDX"
@@ -498,5 +502,107 @@ def test_historical_ticks_json_respects_row_cap(monkeypatch: pytest.MonkeyPatch)
         monkeypatch.setattr(ml_signals.dashboard, "CATALOG_PATH", tmp)
         start_ms = first_ns // 1_000_000 - 1
         end_ms = last_ns // 1_000_000 + 1
-        ticks = json.loads(_historical_ticks_json(_IID, start_ms, end_ms, max_rows=3))["ticks"]
-        assert len(ticks) == 3
+        body = json.loads(_historical_ticks_json(_IID, start_ms, end_ms, max_rows=3))
+        assert len(body["ticks"]) == 3
+        assert body["truncated"] is True
+
+
+def test_historical_ticks_json_not_truncated_under_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No truncation flagged when the window/row count are both within bounds."""
+    with tempfile.TemporaryDirectory() as tmp:
+        first_ns, last_ns = _write_trades_to_catalog(tmp, n=5)
+        monkeypatch.setattr(ml_signals.dashboard, "CATALOG_PATH", tmp)
+        start_ms = first_ns // 1_000_000 - 1
+        end_ms = last_ns // 1_000_000 + 1
+        body = json.loads(_historical_ticks_json(_IID, start_ms, end_ms))
+        assert len(body["ticks"]) == 5
+        assert body["truncated"] is False
+
+
+def test_historical_ticks_json_clamps_wide_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A request window wider than _MAX_TICK_WINDOW_NS is clamped before hitting the
+    catalog (MEM-01) -- trades older than the clamped start are excluded and the
+    response is flagged truncated so the client's pagination cursor doesn't skip them."""
+    with tempfile.TemporaryDirectory() as tmp:
+        # 5 trades 2.5h apart (0,2.5,5,7.5,10h) -- a 10h span, wider than the 6h clamp,
+        # with the clamp boundary (4h before the last trade) landing well clear of any
+        # trade timestamp so this isn't sensitive to ms-rounding at the edges.
+        base_ns = _TS_NS
+        step_ns = int(2.5 * 3600 * 1_000_000_000)
+        trades = [
+            TradeTick(
+                instrument_id=InstrumentId.from_str(_IID), price=Price(100.0 + i, 1),
+                size=Quantity(1.0, 1), aggressor_side=AggressorSide.BUYER,
+                trade_id=TradeId(str(i)), ts_event=base_ns + i * step_ns,
+                ts_init=base_ns + i * step_ns,
+            )
+            for i in range(5)
+        ]
+        ParquetDataCatalog(tmp).write_data(trades)
+        monkeypatch.setattr(ml_signals.dashboard, "CATALOG_PATH", tmp)
+        start_ms = trades[0].ts_event // 1_000_000 - 1
+        end_ms = trades[-1].ts_event // 1_000_000 + 1
+        body = json.loads(_historical_ticks_json(_IID, start_ms, end_ms))
+        assert body["truncated"] is True
+        # Clamped to the last 6h of the requested window: only the 6h/9h/12h trades survive.
+        assert len(body["ticks"]) == 3
+
+
+# ---------------------------------------------------------------------------
+# Lines mode (Story 8.1) -- catalog-backed historical rows, and a regression guard
+# proving the extracted price-series computation didn't change _coin_chart_json's output.
+# ---------------------------------------------------------------------------
+
+def _write_snapshots_to_catalog(tmp_path: str, n: int = 5) -> tuple[int, int]:
+    """Write n DydxSecondSnapshots 1s apart (realistic cadence -- wider spacing would
+    trip the gap-detection None-insertion in _price_series_rows), bid/ask prices
+    climbing by 1 each step, into a temp catalog. Mirrors _write_trades_to_catalog's pattern."""
+    base_ns = _TS_NS
+    step_ns = 1_000_000_000
+    snapshots = [
+        DydxSecondSnapshot(
+            instrument_id=InstrumentId.from_str(_IID),
+            bid_prices=[100.0 + i], bid_sizes=[1.0],
+            ask_prices=[102.0 + i], ask_sizes=[1.0],
+            buy_volume=0.0, sell_volume=0.0, buy_count=0, sell_count=0,
+            ts_event=base_ns + i * step_ns, ts_init=base_ns + i * step_ns,
+        )
+        for i in range(n)
+    ]
+    catalog = ParquetDataCatalog(tmp_path)
+    catalog.write_data(snapshots)
+    return snapshots[0].ts_event, snapshots[-1].ts_event
+
+
+def test_historical_lines_json_builds_from_catalog_snapshots(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Round-trips real DydxSecondSnapshots through the catalog into bid/ask/mid/micro/price rows."""
+    with tempfile.TemporaryDirectory() as tmp:
+        first_ns, last_ns = _write_snapshots_to_catalog(tmp, n=5)
+        monkeypatch.setattr(ml_signals.dashboard, "CATALOG_PATH", tmp)
+        start_ms = first_ns // 1_000_000 - 1
+        end_ms = last_ns // 1_000_000 + 1
+        rows = json.loads(_historical_lines_json(_IID, start_ms, end_ms))["rows"]
+        assert len(rows) == 5
+        assert rows[0]["bid"] == pytest.approx(100.0)
+        assert rows[0]["ask"] == pytest.approx(102.0)
+        assert rows[0]["mid"] == pytest.approx(101.0)
+        assert rows[-1]["bid"] == pytest.approx(104.0)
+
+
+def test_live_lines_json_matches_coin_chart_json_price_series() -> None:
+    """The extracted price-series computation (Story 8.1) must produce identical
+    bid/ask/mid/micro/price values to _coin_chart_json's own fields for the same
+    buffer -- a pure extraction, not a behavior change."""
+    _reset()
+    ml_signals.dashboard._second_rolling[_IID] = deque([
+        _snap(100.0, 102.0, ts_ns=_TS_NS),
+        _snap(101.0, 103.0, ts_ns=_TS_NS + 1_000_000_000),
+    ])
+    chart = _chart()
+    rows = json.loads(_live_lines_json(_IID))["rows"]
+    assert [r["t"] for r in rows] == chart["ts"]
+    assert [r["bid"] for r in rows] == chart["bid"]
+    assert [r["ask"] for r in rows] == chart["ask"]
+    assert [r["mid"] for r in rows] == chart["mid"]
+    assert [r["micro"] for r in rows] == chart["micro"]
+    assert [r["price"] for r in rows] == chart["price"]

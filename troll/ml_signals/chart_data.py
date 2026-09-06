@@ -25,7 +25,6 @@ The chart page defaults to 4 hours. Let the user expand via the time pickers.
 
 from collections import deque
 
-from nautilus_trader.indicators import ExponentialMovingAverage
 from nautilus_trader.model.book import OrderBook
 from nautilus_trader.model.enums import AggressorSide
 from nautilus_trader.model.enums import BookType
@@ -34,7 +33,6 @@ from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
 from ml_signals.book_features import CancellationTracker
 from ml_signals.book_features import compute_features
-from ml_signals.candles import build_candles
 from ml_signals.indicators import Microprice
 from ml_signals.indicators import OrderFlowImbalance
 
@@ -48,52 +46,24 @@ def compute_chart_series(
     start_ns: int,
     end_ns: int,
     ofi_window: int = 20,
-    trend_ema_fast: int = 8,
-    trend_ema_slow: int = 21,
 ) -> dict[str, list[dict]]:
     """
     Replay book deltas for the time window and return per-event series.
 
     Returns a dict keyed by series name, each value a list of
-    {"time": <unix_seconds_float>, "value": <float>} dicts for
-    Lightweight Charts line series, plus "candles" for the price pane.
+    {"time": <unix_seconds_float>, "value": <float>} dicts. The price pane
+    itself is rendered client-side (candlestick/line/tick widget, see
+    dashboard._render_chart_page) from /data/coin/{id}/candles|ticks, not from
+    this series.
     """
     catalog = ParquetDataCatalog(catalog_path)
     iid = InstrumentId.from_str(instrument_id)
 
-    # Extend start slightly for trend EMA warmup on bars (load extra history)
-    bars_start_ns = start_ns - trend_ema_slow * 30 * 60 * 1_000_000_000
-
     deltas = catalog.order_book_deltas(instrument_ids=[instrument_id], start=start_ns, end=end_ns)
-    # Load trades from bars_start_ns for EMA warmup; filter to start_ns for the trade_line.
-    all_trades = catalog.trade_ticks(instrument_ids=[instrument_id], start=bars_start_ns, end=end_ns)
-    trades = [t for t in all_trades if t.ts_event >= start_ns]
-    minute_candles = build_candles(
-        [(t.ts_event, t.price.as_double()) for t in all_trades],
-        period_seconds=60,
+    sorted_trades = sorted(
+        catalog.trade_ticks(instrument_ids=[instrument_id], start=start_ns, end=end_ns),
+        key=lambda t: t.ts_event,
     )
-
-    candles: list[dict] = []
-    trade_line: list[dict] = []
-    trend_fast = ExponentialMovingAverage(trend_ema_fast)
-    trend_slow = ExponentialMovingAverage(trend_ema_slow)
-    trend_fast_series: list[dict] = []
-    trend_slow_series: list[dict] = []
-
-    for candle in minute_candles:
-        trend_fast.update_raw(candle.close)
-        trend_slow.update_raw(candle.close)
-        if candle.ts_open >= start_ns:
-            t = candle.ts_open / 1e9
-            candles.append({"time": t, "open": candle.open, "high": candle.high, "low": candle.low, "close": candle.close})
-            if trend_fast.initialized:
-                trend_fast_series.append({"time": t, "value": trend_fast.value})
-            if trend_slow.initialized:
-                trend_slow_series.append({"time": t, "value": trend_slow.value})
-
-    sorted_trades = sorted(trades, key=lambda t: t.ts_event)
-    for tick in sorted_trades:
-        trade_line.append({"time": tick.ts_event / 1e9, "value": tick.price.as_double()})
 
     # 5-min rolling cumulative delta from trade ticks
     cum_delta_series: list[dict] = []
@@ -117,12 +87,10 @@ def compute_chart_series(
 
     if not deltas:
         return {
-            "candles": candles, "trades": trade_line,
             "ofi": [], "microprice": [], "spread": [],
             "imbalance": [], "mid_imbalance": [], "bid_depth": [], "ask_depth": [],
             "bid_cancel": [], "ask_cancel": [],
             "cum_delta": cum_delta_series,
-            "trend_fast": trend_fast_series, "trend_slow": trend_slow_series,
         }
 
     # Replay deltas — compute features at every event
@@ -183,9 +151,5 @@ def compute_chart_series(
         series["bid_cancel"].append({"time": t, "value": cr.bid_pressure})
         series["ask_cancel"].append({"time": t, "value": cr.ask_pressure})
 
-    series["candles"]     = candles
-    series["trades"]      = trade_line
-    series["cum_delta"]   = cum_delta_series
-    series["trend_fast"]  = trend_fast_series
-    series["trend_slow"]  = trend_slow_series
+    series["cum_delta"] = cum_delta_series
     return series

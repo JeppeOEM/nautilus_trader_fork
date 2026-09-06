@@ -23,8 +23,8 @@ restart (ARCH-03).
 Pages:
 - `/`               rankings table — all coins sortable by any metric (1s poll)
 - `/api/rankings`   JSON endpoint polled every 1s by the rankings page JS
-- `/coin/{id}`      live indicator panel + 1s-polled mid/bid/ask/microprice chart
-- `/chart/{id}`     per-event microstructure chart (Parquet-backed, date-picker controlled)
+- `/coin/{id}`      live indicator panel (1s poll) -- no chart here, see `/chart/{id}`
+- `/chart/{id}`     interactive Candles/Lines/Ticks chart + per-event microstructure panes (Parquet-backed)
 - `/history/{id}`   31-day metric history charts for one coin
 - `/live`           in-process live signal monitor (see `record()` below)
 
@@ -52,12 +52,12 @@ import plotly.graph_objects as go
 import redis.asyncio as aioredis
 from aiohttp import web
 from plotly.subplots import make_subplots
+from ranking_engine import metrics_store
 
-from ml_signals.catalog_stats import list_instruments
-from ml_signals.indicators import microprice as calc_microprice
 from ml_signals import chart_data as _chart_data
 from ml_signals import ranking_columns as _ranking_columns
-from ranking_engine import metrics_store
+from ml_signals.catalog_stats import list_instruments
+from ml_signals.indicators import microprice as calc_microprice
 
 
 logger = logging.getLogger(__name__)
@@ -156,181 +156,19 @@ td:first-child, th:first-child { text-align: left; }
 </style>
 """
 
-_INDEX_HTML = """<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<title>dYdX Monitor</title>
-<style>
-body{font-family:monospace;font-size:13px;margin:20px;background:#0d1117;color:#c9d1d9}
-a{color:#58a6ff;cursor:pointer;text-decoration:none}
-a:hover{text-decoration:underline}
-table{border-collapse:collapse;width:100%}
-th,td{padding:6px 12px;text-align:right;border-bottom:1px solid #21262d}
-th{background:#161b22;position:sticky;top:0}
-tr:hover td{background:#161b22}
-td:first-child,th:first-child{text-align:left}
-#status{color:#8b949e;font-size:11px;margin:4px 0 10px}
-</style>
-</head>
-<body>
-<p><a onclick="showRankings();return false" href="/">Rankings</a> | <a href="/live">Live signals</a></p>
-<div id="status">Loading…</div>
-<div id="app"></div>
-<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
-<script>
-var COLS=[
-  ["ofi_10_z","OFI10z"],["obi_10","OBI10"],["obi_5","OBI5"],["obi_3","OBI3"],
-  ["cvd","CVD($)"],["spread","Spread(bps)"],["microprice_lean","u lean(bps)"],
-  ["volume_delta","Vol d($)"],
-  ["price","Price"],["pct_1h","1h %"],["pct_24h","24h %"],["volatility","Vol"],
-  ["volume24h","Vol24h"]
-];
-// Keys normalized client-side from raw token/price-unit deltas -- see usdFromTokens/
-// bpsFromPriceUnits. The backend's own computation of these values is untouched --
-// the one backend change this feature needed was exposing "price" on the
-// /data/live/{id} endpoint (live_coin_json_handler), which already computed it but
-// didn't send it. Never add "price" itself to either list below (self-referential).
-var USD_KEYS=["cvd","volume_delta"];
-var BPS_KEYS=["spread","microprice_lean"];
-var currentSort=null;  // {key,dir} | null. null = server's default volume-sorted order.
-// Indicators grouped by update cadence (matches bot_tui's Coin-detail grouping) --
-// the box a value sits in tells you how often it can actually change without reading
-// ranking_engine.py. "Volatility & Market" is a cadence grouping by convention, not
-// strictly: pct_1h/pct_24h/volume24h aren't volatility, but they update on the same
-// 60s-or-slower cadence as the volatility fields.
-var IND_GROUPS=[
-  ["Live (1s book state)",[
-    ["microprice","Microprice"],["microprice_lean","u lean(bps)"],
-    ["spread","Spread(bps)"],
-    ["obi_10","OBI10"],["obi_5","OBI5"],["obi_3","OBI3"],
-    ["price","Price"]
-  ]],
-  ["Order Flow (~5m rolling)",[
-    ["ofi_10","OFI10"],["ofi_5","OFI5"],["ofi_3","OFI3"],["ofi_10_z","OFI10z"],
-    ["cvd","CVD($)"],["volume_delta","Vol delta($)"],
-    ["buy_count","Buy#"],["sell_count","Sell#"],["avg_trade_size","Avg size"]
-  ]],
-  ["Volatility & Market (60s-1h)",[
-    ["volatility_fast","Vol (fast)"],["volatility","Vol (catalog)"],
-    ["volatility_score","Vol score"],
-    ["pct_1h","1h %"],["pct_24h","24h %"],["volume24h","Vol24h"]
-  ]]
-];
-var timer=null;
-var _chartData=null,_diffA=null,_diffB=null,_diffBoxHTML='';
-var _coinIid=null,_coinMode='lines',_coinBarSeconds=60,_coinHistStart=null,_coinHistEnd=null;
-// Candles/Ticks pan-to-load-more state: {iid,mode,barSeconds,rows,cursorStart,exhaustedLeft,loading}.
-// Rebuilt from scratch by _setChartRows() on every fresh fetch (live poll, Load button, bar/mode
-// change) and extended in place by _loadOlderChunk() as the user drags the chart left.
-var _chartState=null;
-var _relayoutTimer=null;
-// Separate from _coinHistStart (a real Load-button date-range string) so onBarChange/
-// setCoinMode never mistake a pan-triggered freeze for an explicit historical range.
-var _coinPanning=false;
-var _MAX_CHUNK_MS=30*24*3600*1000;  // caps _chunkSpanMs() so the new 1d/1w bar options can't request a multi-year window per pan step
-
-function esc(s){
-  return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
-}
-function setStatus(s){document.getElementById("status").innerHTML=s;}
-function setApp(h){document.getElementById("app").innerHTML=h;}
-
-function clearDiff(){
-  _diffA=null;_diffB=null;_diffBoxHTML='';
-  var db=document.getElementById('diff-box');
-  if(db)db.innerHTML='';
-}
-function _setDiffWaiting(snap){
-  _diffA=snap;_diffB=null;
-  _diffBoxHTML='<span style="color:#8b949e;font-size:11px">&#9679; A: '+new Date(snap.ts).toLocaleTimeString()+' — click second point  <a onclick="clearDiff();return false" href="#" style="color:#8b949e">[cancel]</a></span>';
-  var db=document.getElementById('diff-box');
-  if(db)db.innerHTML=_diffBoxHTML;
-}
-function handleChartClick(data){
-  if(!data.points.length||!_chartData)return;
-  var pt=data.points[0];
-  var idx=pt.pointIndex;
-  if(idx==null||idx>=_chartData.ts.length)return;
-  var snap={ts:_chartData.ts[idx],bid:_chartData.bid[idx],ask:_chartData.ask[idx],
-            mid:_chartData.mid[idx],micro:_chartData.micro[idx],price:_chartData.price[idx]};
-  if(_diffB){
-    _setDiffWaiting(snap);
-  }else if(!_diffA){
-    _setDiffWaiting(snap);
-  }else{
-    _diffB=snap;
-    _diffBoxHTML=buildDiff(_diffA,snap);
-    var db=document.getElementById('diff-box');
-    if(db)db.innerHTML=_diffBoxHTML;
-  }
-}
-function fmtP(v){if(v==null)return'—';return v>100?v.toFixed(2):v>1?v.toFixed(4):v.toFixed(6);}
-
-// Raw values (token-unit deltas, price-unit deltas) stay raw in the backend --
-// normalized here so they're comparable across instruments of wildly different
-// price scale (a token-count delta or price-unit spread means very different
-// things for a $100k coin vs. a sub-cent one). Guard against non-finite inputs
-// (NaN/Infinity) explicitly -- `==null` alone doesn't catch NaN, and a JSON payload
-// (esp. /data/live/{id}, which has no NaN-scrubbing today) could in principle carry one.
-function usdFromTokens(raw,price){
-  if(typeof raw!=='number'||!Number.isFinite(raw))return null;
-  if(typeof price!=='number'||!Number.isFinite(price)||price<=0)return null;
-  var v=raw*price;
-  return Number.isFinite(v)?v:null;
-}
-function bpsFromPriceUnits(raw,price){
-  if(typeof raw!=='number'||!Number.isFinite(raw))return null;
-  if(typeof price!=='number'||!Number.isFinite(price)||price<=0)return null;
-  var v=raw/price*10000;
-  return Number.isFinite(v)?v:null;
-}
-// Rounds at the display precision *before* deciding the sign prefix, so a value that
-// rounds to zero (e.g. -0.0000016) never renders the confusing "-0.00"/"-0" that
-// plain toFixed()/toLocaleString() would otherwise produce for a tiny negative input.
-function fmtSigned(v,decimals){
-  if(v==null)return'—';
-  var scale=Math.pow(10,decimals);
-  var rounded=Math.round(v*scale)/scale;
-  if(rounded===0)rounded=0;  // normalizes -0 to 0
-  var text=decimals===0
-    ? Math.abs(rounded).toLocaleString(undefined,{maximumFractionDigits:0})
-    : Math.abs(rounded).toFixed(decimals);
-  return (rounded<0?'-':rounded>0?'+':'')+text;
-}
-function fmtUsd(v){
-  if(v==null)return'—';
-  // Sub-$1 notional (common for micro-cap tokens) would otherwise round to a
-  // meaningless "$0" at 0 decimal places -- show more precision below $1. An exact
-  // zero is exempted so it renders as a plain "0", not a verbose "0.0000".
-  return fmtSigned(v,(v!==0&&Math.abs(v)<1)?4:0);
-}
-function fmtBps(v){return fmtSigned(v,2);}
-// Shared by renderRankings (rankings table) and renderCoin (coin-detail Indicators
-// table) so the USD/BPS-key dispatch logic lives in exactly one place. Returns null
-// for a key that isn't normalized (caller should fall back to its own passthrough
-// text), or the formatted string ("—" included) for one that is.
-function fmtNormalizedCell(key,raw,price){
-  if(USD_KEYS.indexOf(key)>=0)return fmtUsd(usdFromTokens(raw,price));
-  if(BPS_KEYS.indexOf(key)>=0)return fmtBps(bpsFromPriceUnits(raw,price));
-  return null;
-}
-
-function buildDiff(a,b){
-  var metrics=[['bid','Bid'],['ask','Ask'],['mid','Mid'],['micro','Microprice'],['price','Eff Price']];
-  var parts=metrics.map(function(m){
-    var va=a[m[0]],vb=b[m[0]];
-    if(va==null||vb==null||va===0)return'';
-    var pct=(vb-va)/Math.abs(va)*100;
-    var sign=pct>=0?'+':'';
-    var col=pct>0?'#3fb950':pct<0?'#f85149':'#8b949e';
-    return '<span style="margin-right:16px"><b>'+m[1]+'</b> <span style="color:'+col+'">'+sign+pct.toFixed(4)+'%</span></span>';
-  }).filter(Boolean).join('');
-  var tA=new Date(a.ts).toLocaleTimeString(),tB=new Date(b.ts).toLocaleTimeString();
-  return '<span style="color:#8b949e;font-size:11px">'+tA+' → '+tB+'</span>  '+parts
-    +'<a style="color:#8b949e;font-size:11px;margin-left:8px" onclick="clearDiff();return false" href="#">×</a>';
-}
-
+# Candles/Lines/Ticks interactive chart widget -- lives only on _render_chart_page's
+# /chart/{id} page (consolidated there by Story 8.1; previously also duplicated into
+# /coin/{id}, which now has no chart at all -- see /coin/{id}'s ind-groups/price-ticker/
+# sig-chart for what remains there). Keeps the drag-to-pan/scroll-to-zoom state machine
+# (Story 7.1) and its test coverage (test_dashboard_chart_pan_js.py) in exactly one place.
+# Depends on globals the embedding page must declare: _chartState, _relayoutTimer,
+# _coinPanning, _coinMode, _coinHistStart, _coinBarSeconds, _coinIid, timer, plus a
+# setStatus(s) function, a #live-chart div, and a #diff-box div (Lines-mode click-to-diff,
+# Story 8.1 -- _diffA/_diffB/_diffBoxHTML are declared inside this module, not by the
+# embedder). Lines mode is backed by /data/coin/{id}/lines (_live_lines_json/
+# _historical_lines_json, Story 8.1) -- a different data source than Candles/Ticks
+# (order-book bid/ask/mid/micro/price snapshots, not trade-tick OHLC/prints).
+_LIVE_CHART_JS = """
 function _fmtDTL(d){var p=function(n){return n<10?'0'+n:String(n);};return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+'T'+p(d.getHours())+':'+p(d.getMinutes());}
 function setCoinMode(m){
   _coinMode=m;_chartState=null;_updateModeButtons();
@@ -385,8 +223,14 @@ function _fetchTicksWindow(iid,startMs,endMs){
   return fetch('/data/coin/'+encodeURIComponent(iid)+'/ticks?start='+encodeURIComponent(_fmtDTL(new Date(startMs)))+'&end='+encodeURIComponent(_fmtDTL(new Date(endMs))))
     .then(function(r){return r.json();}).then(function(d){return {rows:d.ticks,truncated:!!d.truncated};});
 }
+function _fetchLinesWindow(iid,startMs,endMs){
+  return fetch('/data/coin/'+encodeURIComponent(iid)+'/lines?start='+encodeURIComponent(_fmtDTL(new Date(startMs)))+'&end='+encodeURIComponent(_fmtDTL(new Date(endMs))))
+    .then(function(r){return r.json();}).then(function(d){return {rows:d.rows,truncated:!!d.truncated};});
+}
 function _fetchModeWindow(mode,iid,startMs,endMs,barSeconds){
-  return mode==='ticks'?_fetchTicksWindow(iid,startMs,endMs):_fetchCandlesWindow(iid,startMs,endMs,barSeconds);
+  if(mode==='ticks')return _fetchTicksWindow(iid,startMs,endMs);
+  if(mode==='lines')return _fetchLinesWindow(iid,startMs,endMs);
+  return _fetchCandlesWindow(iid,startMs,endMs,barSeconds);
 }
 // Plain-array fetch for the "live" (unfrozen or just-unfroze) default window -- used by
 // renderCoin's poll loop and by a bar/mode change that happens mid-pan (_refreshPanningWindow).
@@ -394,6 +238,10 @@ function _fetchLiveWindow(iid,mode,bar){
   if(mode==='ticks'){
     var nowMs=Date.now();
     return _fetchTicksWindow(iid,nowMs-30*60*1000,nowMs).then(function(r){return r.rows;});
+  }
+  if(mode==='lines'){
+    return fetch('/data/coin/'+encodeURIComponent(iid)+'/lines')
+      .then(function(r){return r.json();}).then(function(d){return d.rows;});
   }
   return fetch('/data/coin/'+encodeURIComponent(iid)+'/candles?bar='+bar)
     .then(function(r){return r.json();}).then(function(d){return d.candles;});
@@ -418,11 +266,13 @@ function _setChartRows(iid,mode,barSeconds,rows){
 function _renderChartRows(){
   if(!_chartState)return;
   if(_chartState.mode==='ticks')_renderTickChart(_chartState.rows);
+  else if(_chartState.mode==='lines')_renderLineChart(_chartState.rows);
   else _renderCandleChart(_chartState.rows);
 }
 function _chunkSpanMs(state){
   var s=state||_chartState;
-  return s.mode==='ticks'?15*60*1000:Math.min(Math.max(s.barSeconds*1000*200,3600*1000),_MAX_CHUNK_MS);
+  if(s.mode==='ticks'||s.mode==='lines')return 15*60*1000;
+  return Math.min(Math.max(s.barSeconds*1000*200,3600*1000),_MAX_CHUNK_MS);
 }
 function _loadOlderChunk(){
   if(!_chartState||_chartState.exhaustedLeft||_chartState.cursorStart==null||_chartState.loading)return;
@@ -521,6 +371,79 @@ function _renderCandleChart(candles){
     margin:{t:10,b:30,l:60,r:10}},{scrollZoom:true});
   _wireChartRelayout();
 }
+// Click-to-diff (bid/ask/mid/micro/price A/B comparison) -- Lines-mode-only, moved here
+// from /coin/{id}'s old bespoke renderCoin implementation (Story 8.1) so it works
+// wherever Lines mode is rendered (/chart/{id} now, previously /coin/{id} only).
+var _diffA=null,_diffB=null,_diffBoxHTML='';
+function clearDiff(){
+  _diffA=null;_diffB=null;_diffBoxHTML='';
+  var db=document.getElementById('diff-box');
+  if(db)db.innerHTML='';
+}
+function _setDiffWaiting(snap){
+  _diffA=snap;_diffB=null;
+  _diffBoxHTML='<span style="color:#8b949e;font-size:11px">&#9679; A: '+new Date(snap.t).toLocaleTimeString()+' — click second point  <a onclick="clearDiff();return false" href="#" style="color:#8b949e">[cancel]</a></span>';
+  var db=document.getElementById('diff-box');
+  if(db)db.innerHTML=_diffBoxHTML;
+}
+function buildDiff(a,b){
+  var metrics=[['bid','Bid'],['ask','Ask'],['mid','Mid'],['micro','Microprice'],['price','Eff Price']];
+  var parts=metrics.map(function(m){
+    var va=a[m[0]],vb=b[m[0]];
+    if(va==null||vb==null||va===0)return'';
+    var pct=(vb-va)/Math.abs(va)*100;
+    var sign=pct>=0?'+':'';
+    var col=pct>0?'#3fb950':pct<0?'#f85149':'#8b949e';
+    return '<span style="margin-right:16px"><b>'+m[1]+'</b> <span style="color:'+col+'">'+sign+pct.toFixed(4)+'%</span></span>';
+  }).filter(Boolean).join('');
+  var tA=new Date(a.t).toLocaleTimeString(),tB=new Date(b.t).toLocaleTimeString();
+  return '<span style="color:#8b949e;font-size:11px">'+tA+' → '+tB+'</span>  '+parts
+    +'<a style="color:#8b949e;font-size:11px;margin-left:8px" onclick="clearDiff();return false" href="#">×</a>';
+}
+function handleChartClick(data){
+  if(!data.points.length||!_chartState||_chartState.mode!=='lines')return;
+  var pt=data.points[0];
+  var idx=pt.pointIndex;
+  if(idx==null||idx>=_chartState.rows.length)return;
+  var snap=_chartState.rows[idx];
+  if(_diffB){
+    _setDiffWaiting(snap);
+  }else if(!_diffA){
+    _setDiffWaiting(snap);
+  }else{
+    _diffB=snap;
+    _diffBoxHTML=buildDiff(_diffA,snap);
+    var db=document.getElementById('diff-box');
+    if(db)db.innerHTML=_diffBoxHTML;
+  }
+}
+function _wireChartClick(){
+  var liveEl=document.getElementById('live-chart');
+  if(liveEl){
+    liveEl.removeAllListeners&&liveEl.removeAllListeners('plotly_click');
+    liveEl.on('plotly_click',handleChartClick);
+  }
+}
+function _renderLineChart(rows){
+  if(!rows||!rows.length)return;
+  var x=rows.map(function(r){return new Date(r.t);});
+  Plotly.react('live-chart',[
+    {type:'scattergl',mode:'lines',x:x,y:rows.map(function(r){return r.bid;}),
+      line:{color:'#26a69a',width:1},name:'bid'},
+    {type:'scattergl',mode:'lines',x:x,y:rows.map(function(r){return r.ask;}),
+      line:{color:'#ef5350',width:1},name:'ask'},
+    {type:'scattergl',mode:'lines',x:x,y:rows.map(function(r){return r.mid;}),
+      line:{color:'#aaa',width:1,dash:'dot'},name:'mid'},
+    {type:'scattergl',mode:'lines',x:x,y:rows.map(function(r){return r.micro;}),
+      line:{color:'#f0883e',width:1.5,dash:'dot'},name:'microprice'},
+    {type:'scattergl',mode:'lines',x:x,y:rows.map(function(r){return r.price;}),
+      line:{color:'#e3b341',width:1.5},name:'price'},
+  ],{height:300,template:'plotly_dark',dragmode:'pan',
+    xaxis:{type:'date',rangeslider:{visible:false}},
+    margin:{t:10,b:30,l:60,r:10},legend:{orientation:'h'}},{scrollZoom:true});
+  _wireChartRelayout();
+  _wireChartClick();
+}
 function _renderTickChart(ticks){
   if(!ticks||!ticks.length)return;
   var x=ticks.map(function(t){return new Date(t.t);});
@@ -533,9 +456,131 @@ function _renderTickChart(ticks){
     margin:{t:10,b:30,l:60,r:10}},{scrollZoom:true});
   _wireChartRelayout();
 }
+"""
+
+
+_INDEX_HTML = """<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>dYdX Monitor</title>
+<style>
+body{font-family:monospace;font-size:13px;margin:20px;background:#0d1117;color:#c9d1d9}
+a{color:#58a6ff;cursor:pointer;text-decoration:none}
+a:hover{text-decoration:underline}
+table{border-collapse:collapse;width:100%}
+th,td{padding:6px 12px;text-align:right;border-bottom:1px solid #21262d}
+th{background:#161b22;position:sticky;top:0}
+tr:hover td{background:#161b22}
+td:first-child,th:first-child{text-align:left}
+#status{color:#8b949e;font-size:11px;margin:4px 0 10px}
+</style>
+</head>
+<body>
+<p><a onclick="showRankings();return false" href="/">Rankings</a> | <a href="/live">Live signals</a></p>
+<div id="status">Loading…</div>
+<div id="app"></div>
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<script>
+var COLS=[
+  ["ofi_10_z","OFI10z"],["obi_10","OBI10"],["obi_5","OBI5"],["obi_3","OBI3"],
+  ["cvd","CVD($)"],["spread","Spread(bps)"],["microprice_lean","u lean(bps)"],
+  ["volume_delta","Vol d($)"],
+  ["price","Price"],["pct_1h","1h %"],["pct_24h","24h %"],["volatility","Vol"],
+  ["volume24h","Vol24h"]
+];
+// Keys normalized client-side from raw token/price-unit deltas -- see usdFromTokens/
+// bpsFromPriceUnits. The backend's own computation of these values is untouched --
+// the one backend change this feature needed was exposing "price" on the
+// /data/live/{id} endpoint (live_coin_json_handler), which already computed it but
+// didn't send it. Never add "price" itself to either list below (self-referential).
+var USD_KEYS=["cvd","volume_delta"];
+var BPS_KEYS=["spread","microprice_lean"];
+var currentSort=null;  // {key,dir} | null. null = server's default volume-sorted order.
+// Indicators grouped by update cadence (matches bot_tui's Coin-detail grouping) --
+// the box a value sits in tells you how often it can actually change without reading
+// ranking_engine.py. "Volatility & Market" is a cadence grouping by convention, not
+// strictly: pct_1h/pct_24h/volume24h aren't volatility, but they update on the same
+// 60s-or-slower cadence as the volatility fields.
+var IND_GROUPS=[
+  ["Live (1s book state)",[
+    ["microprice","Microprice"],["microprice_lean","u lean(bps)"],
+    ["spread","Spread(bps)"],
+    ["obi_10","OBI10"],["obi_5","OBI5"],["obi_3","OBI3"],
+    ["price","Price"]
+  ]],
+  ["Order Flow (~5m rolling)",[
+    ["ofi_10","OFI10"],["ofi_5","OFI5"],["ofi_3","OFI3"],["ofi_10_z","OFI10z"],
+    ["cvd","CVD($)"],["volume_delta","Vol delta($)"],
+    ["buy_count","Buy#"],["sell_count","Sell#"],["avg_trade_size","Avg size"]
+  ]],
+  ["Volatility & Market (60s-1h)",[
+    ["volatility_fast","Vol (fast)"],["volatility","Vol (catalog)"],
+    ["volatility_score","Vol score"],
+    ["pct_1h","1h %"],["pct_24h","24h %"],["volume24h","Vol24h"]
+  ]]
+];
+var timer=null;
+var _coinIid=null;
+
+function esc(s){
+  return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+}
+function setStatus(s){document.getElementById("status").innerHTML=s;}
+function setApp(h){document.getElementById("app").innerHTML=h;}
+
+function fmtP(v){if(v==null)return'—';return v>100?v.toFixed(2):v>1?v.toFixed(4):v.toFixed(6);}
+
+// Raw values (token-unit deltas, price-unit deltas) stay raw in the backend --
+// normalized here so they're comparable across instruments of wildly different
+// price scale (a token-count delta or price-unit spread means very different
+// things for a $100k coin vs. a sub-cent one). Guard against non-finite inputs
+// (NaN/Infinity) explicitly -- `==null` alone doesn't catch NaN, and a JSON payload
+// (esp. /data/live/{id}, which has no NaN-scrubbing today) could in principle carry one.
+function usdFromTokens(raw,price){
+  if(typeof raw!=='number'||!Number.isFinite(raw))return null;
+  if(typeof price!=='number'||!Number.isFinite(price)||price<=0)return null;
+  var v=raw*price;
+  return Number.isFinite(v)?v:null;
+}
+function bpsFromPriceUnits(raw,price){
+  if(typeof raw!=='number'||!Number.isFinite(raw))return null;
+  if(typeof price!=='number'||!Number.isFinite(price)||price<=0)return null;
+  var v=raw/price*10000;
+  return Number.isFinite(v)?v:null;
+}
+// Rounds at the display precision *before* deciding the sign prefix, so a value that
+// rounds to zero (e.g. -0.0000016) never renders the confusing "-0.00"/"-0" that
+// plain toFixed()/toLocaleString() would otherwise produce for a tiny negative input.
+function fmtSigned(v,decimals){
+  if(v==null)return'—';
+  var scale=Math.pow(10,decimals);
+  var rounded=Math.round(v*scale)/scale;
+  if(rounded===0)rounded=0;  // normalizes -0 to 0
+  var text=decimals===0
+    ? Math.abs(rounded).toLocaleString(undefined,{maximumFractionDigits:0})
+    : Math.abs(rounded).toFixed(decimals);
+  return (rounded<0?'-':rounded>0?'+':'')+text;
+}
+function fmtUsd(v){
+  if(v==null)return'—';
+  // Sub-$1 notional (common for micro-cap tokens) would otherwise round to a
+  // meaningless "$0" at 0 decimal places -- show more precision below $1. An exact
+  // zero is exempted so it renders as a plain "0", not a verbose "0.0000".
+  return fmtSigned(v,(v!==0&&Math.abs(v)<1)?4:0);
+}
+function fmtBps(v){return fmtSigned(v,2);}
+// Shared by renderRankings (rankings table) and renderCoin (coin-detail Indicators
+// table) so the USD/BPS-key dispatch logic lives in exactly one place. Returns null
+// for a key that isn't normalized (caller should fall back to its own passthrough
+// text), or the formatted string ("—" included) for one that is.
+function fmtNormalizedCell(key,raw,price){
+  if(USD_KEYS.indexOf(key)>=0)return fmtUsd(usdFromTokens(raw,price));
+  if(BPS_KEYS.indexOf(key)>=0)return fmtBps(bpsFromPriceUnits(raw,price));
+  return null;
+}
 
 function showRankings(){
-  clearDiff();
   clearInterval(timer);
   history.pushState({},"","/");
   pollRankings();
@@ -620,37 +665,19 @@ function renderRankings(rows,ingestCount,ageS,stale,staleIds){
 }
 
 function showCoin(iid){
-  clearDiff();
   clearInterval(timer);
-  _coinIid=iid;_coinHistStart=null;_coinHistEnd=null;_coinPanning=false;_coinMode='lines';_chartState=null;
+  _coinIid=iid;
   history.pushState({iid:iid},"","/coin/"+encodeURIComponent(iid));
   var label=iid.split("-").slice(0,2).join("-");
-  var now=new Date(),endV=_fmtDTL(now),startV=_fmtDTL(new Date(now.getTime()-4*3600*1000));
   setApp(
     "<h1>"+esc(label)+" <small><a href=\\"/chart/"+esc(iid)+"\\">chart</a>"
     +" | <a onclick=\\"showRankings();return false\\" href=\\"/\\">back</a></small></h1>"
-    +"<div style=\\"display:flex;gap:8px;align-items:center;padding:6px 0;flex-wrap:wrap;border-bottom:1px solid #21262d;margin-bottom:6px\\">"
-    +"<button id=\\"btn-lines\\" onclick=\\"setCoinMode('lines')\\" style=\\"background:#21262d;color:#c9d1d9;border:1px solid #58a6ff;padding:3px 10px;cursor:pointer\\">Lines</button>"
-    +"<button id=\\"btn-candles\\" onclick=\\"setCoinMode('candles')\\" style=\\"background:#21262d;color:#c9d1d9;border:1px solid #444;padding:3px 10px;cursor:pointer\\">Candles</button>"
-    +"<button id=\\"btn-ticks\\" onclick=\\"setCoinMode('ticks')\\" style=\\"background:#21262d;color:#c9d1d9;border:1px solid #444;padding:3px 10px;cursor:pointer\\">Ticks</button>"
-    +"<select id='bar-sel' onchange='onBarChange()' style=\\"background:#21262d;color:#c9d1d9;border:1px solid #444;padding:3px\\">"
-    +"<option value='5'>5s</option><option value='15'>15s</option>"
-    +"<option value='30'>30s</option><option value='60' selected>1m</option><option value='300'>5m</option>"
-    +"<option value='900'>15m</option><option value='3600'>1h</option>"
-    +"<option value='14400'>4h</option><option value='86400'>1d</option><option value='604800'>1w</option></select>"
-    +" &nbsp;|&nbsp; From <input type='datetime-local' id='coin-start' value='"+startV+"' style=\\"background:#21262d;color:#c9d1d9;border:1px solid #444;padding:2px\\">"
-    +" To <input type='datetime-local' id='coin-end' value='"+endV+"' style=\\"background:#21262d;color:#c9d1d9;border:1px solid #444;padding:2px\\">"
-    +" <button onclick='loadCoinDateRange()' style=\\"background:#21262d;color:#c9d1d9;border:1px solid #444;padding:3px 10px;cursor:pointer\\">Load</button>"
-    +" <button id='btn-live' onclick='resetCoinLive()' style=\\"background:#21262d;color:#3fb950;border:1px solid #3fb950;padding:3px 10px;cursor:pointer\\">&#9679; Live</button>"
-    +"</div>"
     +"<div id='ind-groups'></div>"
     +"<div id='price-ticker' style=\\"padding:6px 0 2px;font-size:14px;font-family:monospace;letter-spacing:0.04em;border-top:1px solid #21262d;margin-top:10px\\"></div>"
     +"<div id='sig-chart' style=\\"height:180px;margin-top:8px\\"></div>"
-    +"<div id='live-chart' style=\\"height:300px;margin-top:4px\\"></div>"
-    +"<div id='diff-box' style=\\"min-height:22px;padding:5px 2px;border-top:1px solid #21262d;font-size:12px;font-family:monospace\\"></div>"
   );
   pollCoin(iid);
-  timer=setInterval(function(){if(!_coinHistStart&&!_coinPanning)pollCoin(iid);},1000);
+  timer=setInterval(function(){pollCoin(iid);},1000);
 }
 
 function pollCoin(iid){
@@ -663,8 +690,10 @@ function pollCoin(iid){
   }).catch(function(err){setStatus("Error: "+err);});
 }
 
+// /coin/{id}'s live indicator panel: ind-groups table, price-ticker, sig-chart (OFI10z/
+// OBI10). The Candles/Lines/Ticks chart widget moved to /chart/{id} only (Story 8.1) --
+// this function no longer touches chart mode, pagination, or click-to-diff state.
 function renderCoin(iid,ind,chart){
-  _chartData=chart;
   var groupsHTML=IND_GROUPS.map(function(g){
     var title=g[0],specs=g[1];
     var rows=specs.map(function(k){
@@ -690,39 +719,6 @@ function renderCoin(iid,ind,chart){
         xaxis:{type:"date"},yaxis:{zeroline:true,zerolinecolor:"#444"},
         margin:{t:20,b:20,l:50,r:10},legend:{orientation:"h",y:1.15}});
   }
-  if(_coinMode==='candles'||_coinMode==='ticks'){
-    _fetchLiveWindow(iid,_coinMode,_coinBarSeconds)
-      .then(function(rows){if(_coinHistStart||_coinPanning)return;_setChartRows(iid,_coinMode,_coinBarSeconds,rows);})
-      .catch(function(err){setStatus('Error: '+err);});
-  }else if(chart.ts&&chart.ts.length){
-    var x=chart.ts.map(function(t){return new Date(t);});
-    var traces=[
-      {x:x,y:chart.bid,   name:"bid",        mode:"lines",line:{color:"#26a69a",width:1}},
-      {x:x,y:chart.ask,   name:"ask",        mode:"lines",line:{color:"#ef5350",width:1}},
-      {x:x,y:chart.mid,   name:"mid",        mode:"lines",line:{color:"#aaa",width:1,dash:"dot"}},
-      {x:x,y:chart.micro, name:"microprice", mode:"lines",line:{color:"#f0883e",width:1.5,dash:"dot"}},
-      {x:x,y:chart.price, name:"price",      mode:"lines",line:{color:"#e3b341",width:1.5}}
-    ];
-    if(_diffA&&_diffA.price!=null)
-      traces.push({x:[new Date(_diffA.ts)],y:[_diffA.price],name:"A",mode:"markers+text",
-        text:["A"],textposition:"top center",showlegend:false,
-        marker:{color:"#ffffff",size:10,symbol:"circle",line:{color:"#e3b341",width:2}}});
-    if(_diffB&&_diffB.price!=null)
-      traces.push({x:[new Date(_diffB.ts)],y:[_diffB.price],name:"B",mode:"markers+text",
-        text:["B"],textposition:"top center",showlegend:false,
-        marker:{color:"#e3b341",size:10,symbol:"circle",line:{color:"#ffffff",width:2}}});
-    Plotly.react("live-chart",traces,{height:300,template:"plotly_dark",dragmode:'pan',xaxis:{type:"date"},
-       margin:{t:10,b:30,l:60,r:10},legend:{orientation:"h"}},{scrollZoom:true});
-    var liveEl=document.getElementById('live-chart');
-    if(liveEl){
-      liveEl.removeAllListeners&&liveEl.removeAllListeners('plotly_click');
-      liveEl.on('plotly_click',handleChartClick);
-    }
-    // Same drag-to-pan/scroll-to-zoom interaction as Candles/Ticks (uniform across all
-    // three modes); Lines has no pagination source, so a drag just freezes live polling
-    // (_maybeLoadOlder no-ops with _chartState null) -- "Live" resumes it.
-    _wireChartRelayout();
-  }
   var tickerEl=document.getElementById('price-ticker');
   if(tickerEl&&chart.ts&&chart.ts.length){
     var n=chart.ts.length-1;
@@ -733,8 +729,6 @@ function renderCoin(iid,ind,chart){
       +'&emsp;<span style="color:#f0883e">Micro</span> '+fmtP(chart.micro[n])
       +'&emsp;<span style="color:#e3b341">Price</span> '+fmtP(chart.price[n]);
   }
-  var diffEl=document.getElementById('diff-box');
-  if(diffEl)diffEl.innerHTML=_diffBoxHTML;
 }
 
 window.onpopstate=function(){
@@ -791,7 +785,16 @@ def _render_history_page(symbol: str) -> str:
 
 
 def _render_chart_page(symbol: str, start_ms: int, end_ms: int) -> str:
-    """Per-event microstructure chart — Plotly subplots with shared x-axis."""
+    """
+    Per-event microstructure chart page.
+
+    Price pane is the interactive Candles/Lines/Ticks drag-to-pan widget (_LIVE_CHART_JS)
+    -- the sole home for this widget since Story 8.1 consolidated it here from /coin/{id}
+    -- fed by /data/coin/{id}/candles|ticks|lines. The remaining OFI/imbalance/depth/
+    cancel/cum-delta/spread panes stay server-rendered Plotly subplots from
+    _chart_data.compute_chart_series for the same [start_ms, end_ms) window picked by
+    the date-range form below.
+    """
     data = _chart_data.compute_chart_series(
         CATALOG_PATH, symbol,
         start_ns=start_ms * 1_000_000,
@@ -805,12 +808,11 @@ def _render_chart_page(symbol: str, start_ms: int, end_ms: int) -> str:
         return [p["value"] for p in series]
 
     fig = make_subplots(
-        rows=8, cols=1, shared_xaxes=True,
-        row_heights=[0.22, 0.10, 0.10, 0.10, 0.12, 0.12, 0.12, 0.12],
-        vertical_spacing=0.015,
+        rows=7, cols=1, shared_xaxes=True,
+        row_heights=[0.14, 0.14, 0.14, 0.15, 0.15, 0.14, 0.14],
+        vertical_spacing=0.02,
         subplot_titles=[
-            "Price + 30m EMA trend", "OFI",
-            "Book imbalance L1 agg (4-level)", "Mid-layer imbalance (L2-3)",
+            "OFI", "Book imbalance L1 agg (4-level)", "Mid-layer imbalance (L2-3)",
             "Depth (4-level)", "Cancel pressure",
             "5-min cumulative delta", "Spread",
         ],
@@ -823,60 +825,47 @@ def _render_chart_page(symbol: str, start_ms: int, end_ms: int) -> str:
                 mode="lines", name=name, line_color=color, line_width=1,
             ), row=row, col=1)
 
-    # Row 1: price + trend EMAs overlaid
-    if data["candles"]:
-        c = data["candles"]
-        fig.add_trace(go.Candlestick(
-            x=pd.to_datetime([p["time"] for p in c], unit="s", utc=True),
-            open=[p["open"] for p in c], high=[p["high"] for p in c],
-            low=[p["low"] for p in c], close=[p["close"] for p in c],
-            name="price", increasing_line_color="#26a69a", decreasing_line_color="#ef5350",
-        ), row=1, col=1)
-    elif data["trades"]:
-        _add("trades", 1, "price", "#2962ff")
-    _add("trend_fast", 1, f"EMA{8}",  "#ffd700")
-    _add("trend_slow", 1, f"EMA{21}", "#ff8c00")
-
-    # Row 2: OFI
-    _add("ofi", 2, "OFI", "#f0883e")
+    # Row 1: OFI
+    _add("ofi", 1, "OFI", "#f0883e")
     if data.get("ofi"):
-        fig.add_hline(y=0, line_color="#555", line_width=1, row=2, col=1)
+        fig.add_hline(y=0, line_color="#555", line_width=1, row=1, col=1)
 
-    # Row 3: 4-level aggregate imbalance
-    _add("imbalance", 3, "imbalance", "#ab71ff")
+    # Row 2: 4-level aggregate imbalance
+    _add("imbalance", 2, "imbalance", "#ab71ff")
     if data.get("imbalance"):
+        fig.add_hline(y=0.5, line_color="#555", line_width=1, row=2, col=1)
+
+    # Row 3: mid-layer imbalance (levels 2-3)
+    _add("mid_imbalance", 3, "mid imbalance", "#c792ea")
+    if data.get("mid_imbalance"):
         fig.add_hline(y=0.5, line_color="#555", line_width=1, row=3, col=1)
 
-    # Row 4: mid-layer imbalance (levels 2-3)
-    _add("mid_imbalance", 4, "mid imbalance", "#c792ea")
-    if data.get("mid_imbalance"):
-        fig.add_hline(y=0.5, line_color="#555", line_width=1, row=4, col=1)
+    # Row 4: depth
+    _add("bid_depth", 4, "bid depth", "#26a69a")
+    _add("ask_depth", 4, "ask depth", "#ef5350")
 
-    # Row 5: depth
-    _add("bid_depth", 5, "bid depth", "#26a69a")
-    _add("ask_depth", 5, "ask depth", "#ef5350")
+    # Row 5: cancel pressure
+    _add("bid_cancel", 5, "bid cancel", "#26a69a")
+    _add("ask_cancel", 5, "ask cancel", "#ef5350")
 
-    # Row 6: cancel pressure
-    _add("bid_cancel", 6, "bid cancel", "#26a69a")
-    _add("ask_cancel", 6, "ask cancel", "#ef5350")
-
-    # Row 7: 5-min cumulative delta
-    _add("cum_delta", 7, "cum delta", "#64b5f6")
+    # Row 6: 5-min cumulative delta
+    _add("cum_delta", 6, "cum delta", "#64b5f6")
     if data.get("cum_delta"):
-        fig.add_hline(y=0, line_color="#555", line_width=1, row=7, col=1)
+        fig.add_hline(y=0, line_color="#555", line_width=1, row=6, col=1)
 
-    # Row 8: spread
-    _add("spread", 8, "spread", "#78909c")
+    # Row 7: spread
+    _add("spread", 7, "spread", "#78909c")
 
     n = len(data.get("ofi", []))
     fig.update_layout(
-        height=1400, template="plotly_dark",
+        height=1250, template="plotly_dark",
         title=f"{symbol} — {n:,} delta events",
         xaxis_rangeslider_visible=False,
         showlegend=True,
         legend={"orientation": "h", "y": 1.01},
     )
-    # Datetime pickers above the chart — submits as GET params
+    # Datetime pickers above the chart — submits as GET params, also seeds the
+    # interactive price widget's initial historical window (below).
     sym = html.escape(symbol)
     import datetime as _dt
     fmt = "%Y-%m-%dT%H:%M"
@@ -884,12 +873,41 @@ def _render_chart_page(symbol: str, start_ms: int, end_ms: int) -> str:
     end_val   = _dt.datetime.fromtimestamp(end_ms   / 1000).strftime(fmt)
     form = (
         f"<form method='get' style='margin:8px 0'>"
-        f"From <input type='datetime-local' name='start' value='{start_val}'> &nbsp;"
-        f"To <input type='datetime-local' name='end' value='{end_val}'> &nbsp;"
+        f"From <input type='datetime-local' id='coin-start' name='start' value='{start_val}'> &nbsp;"
+        f"To <input type='datetime-local' id='coin-end' name='end' value='{end_val}'> &nbsp;"
         f"<button type='submit'>Load</button>"
         f"</form>"
     )
-    body = form + fig.to_html(full_html=False, include_plotlyjs="cdn")
+    widget = (
+        '<div style="display:flex;gap:8px;align-items:center;padding:6px 0;flex-wrap:wrap">'
+        "<button id=\"btn-lines\" onclick=\"setCoinMode('lines')\" style=\"background:#21262d;color:#c9d1d9;border:1px solid #444;padding:3px 10px;cursor:pointer\">Lines</button>"
+        "<button id=\"btn-candles\" onclick=\"setCoinMode('candles')\" style=\"background:#21262d;color:#c9d1d9;border:1px solid #58a6ff;padding:3px 10px;cursor:pointer\">Candles</button>"
+        "<button id=\"btn-ticks\" onclick=\"setCoinMode('ticks')\" style=\"background:#21262d;color:#c9d1d9;border:1px solid #444;padding:3px 10px;cursor:pointer\">Ticks</button>"
+        "<select id='bar-sel' onchange='onBarChange()' style=\"background:#21262d;color:#c9d1d9;border:1px solid #444;padding:3px\">"
+        "<option value='5'>5s</option><option value='15'>15s</option>"
+        "<option value='30'>30s</option><option value='60' selected>1m</option><option value='300'>5m</option>"
+        "<option value='900'>15m</option><option value='3600'>1h</option>"
+        "<option value='14400'>4h</option><option value='86400'>1d</option><option value='604800'>1w</option></select>"
+        "</div>"
+        "<div id='status' style='color:#8b949e;font-size:11px;margin:4px 0'></div>"
+        "<div id='live-chart' style='height:300px;margin-bottom:8px'></div>"
+        "<div id='diff-box' style='min-height:22px;padding:5px 2px;border-top:1px solid #21262d;font-size:12px;font-family:monospace'></div>"
+    )
+    init_script = (
+        "<script>"
+        f"var _coinIid={json.dumps(symbol)};var _coinMode='candles';var _coinBarSeconds=60;"
+        f"var _coinHistStart={json.dumps(start_val)};var _coinHistEnd={json.dumps(end_val)};"
+        "var _coinPanning=false,_chartState=null,_relayoutTimer=null,timer=null;"
+        "var _MAX_CHUNK_MS=30*24*3600*1000;"
+        "function setStatus(s){var el=document.getElementById('status');if(el)el.innerHTML=s;}"
+        "_updateModeButtons();_fetchHistCoin(_coinIid,_coinHistStart,_coinHistEnd);"
+        "</script>"
+    )
+    body = (
+        form + widget
+        + fig.to_html(full_html=False, include_plotlyjs="cdn")
+        + f"<script>{_LIVE_CHART_JS}</script>" + init_script
+    )
     return _page(f"{sym} chart", body, refresh_seconds=86400)  # no auto-refresh; user controls via form
 
 
@@ -924,8 +942,8 @@ def _live_candles_json(iid: str, bar_seconds: int) -> str:
 
 def _historical_candles_json(iid: str, start_ms: int, end_ms: int, bar_seconds: int) -> str:
     """Build OHLC candles from trade_ticks in the Parquet catalog."""
-    from nautilus_trader.persistence.catalog import ParquetDataCatalog
     from ml_signals.candles import build_candles as _build
+    from nautilus_trader.persistence.catalog import ParquetDataCatalog
     catalog = ParquetDataCatalog(CATALOG_PATH)
     start_ns = start_ms * 1_000_000
     end_ns = end_ms * 1_000_000
@@ -945,7 +963,8 @@ _MAX_TICK_WINDOW_NS = 6 * 3600 * 1_000_000_000  # 6h -- Ticks mode is a zoomed-i
 
 
 def _historical_ticks_json(iid: str, start_ms: int, end_ms: int, max_rows: int = 20_000) -> str:
-    """Return individual trade prints from the catalog -- the raw data candles are built from.
+    """
+    Return individual trade prints from the catalog -- the raw data candles are built from.
 
     Bounded two ways (MEM-01): the query window itself is clamped to _MAX_TICK_WINDOW_NS
     *before* hitting the catalog (never materialize an unbounded read just to slice it
@@ -974,25 +993,18 @@ def _historical_ticks_json(iid: str, start_ms: int, end_ms: int, max_rows: int =
     return json.dumps({"ticks": ticks, "truncated": window_clamped or row_capped})
 
 
-def _coin_chart_json(iid: str) -> str:
-    """Return JSON with price series (bid/ask/mid/micro/price) and signal series (ofi_10_z/obi_10).
+def _price_series_rows(snaps: list[dict]) -> list[dict]:
+    """
+    Build bid/ask/mid/micro/price rows from a snapshot list, in time order.
 
     price = CVD-weighted effective trade price: skews from mid toward ask on net buying,
     toward bid on net selling. Equals mid when no trades occurred in that second.
-    sig_ts/ofi_10_z/obi_10 come from _ind_rolling (same 3600-point window).
-    Timestamps are milliseconds for Plotly.
+    Timestamps are milliseconds for Plotly. Shared by `_coin_chart_json` (live poll,
+    parallel-array response for /coin/{id}'s indicator table/ticker/sig-chart) and
+    `_live_lines_json`/`_historical_lines_json` (row-dict response for /chart/{id}'s
+    Lines mode, Story 8.1) -- the math must never be reimplemented a second time (SSOT-03).
     """
-    snaps = list(_second_rolling.get(iid, []))
-    inds = list(_ind_rolling.get(iid, []))
-    if not snaps:
-        return json.dumps({"ts": [], "mid": [], "bid": [], "ask": [], "micro": [], "price": [],
-                           "sig_ts": [], "ofi_10_z": [], "obi_10": []})
-    ts: list[int] = []
-    mid_vals: list[float | None] = []
-    bid_vals: list[float | None] = []
-    ask_vals: list[float | None] = []
-    micro_vals: list[float | None] = []
-    price_vals: list[float | None] = []
+    rows: list[dict] = []
     prev_ts_ms: int | None = None
     for s in snaps:
         if not s["bid_prices"] or not s["ask_prices"]:
@@ -1007,12 +1019,8 @@ def _coin_chart_json(iid: str) -> str:
         # misleading flatline at the last-known price.  Gaps arise when the collector's
         # staleness guard (_STALE_BOOK_NS) skips stale books during WS reconnect recovery.
         if prev_ts_ms is not None and (curr_ts_ms - prev_ts_ms) > _CHART_GAP_THRESHOLD_MS:
-            ts.append(curr_ts_ms - 1)
-            bid_vals.append(None)
-            ask_vals.append(None)
-            mid_vals.append(None)
-            micro_vals.append(None)
-            price_vals.append(None)
+            rows.append({"t": curr_ts_ms - 1, "bid": None, "ask": None, "mid": None,
+                         "micro": None, "price": None})
         prev_ts_ms = curr_ts_ms
         mid = (bp + ap) / 2
         micro_value = calc_microprice(s)
@@ -1022,19 +1030,65 @@ def _coin_chart_json(iid: str) -> str:
             price = mid + ((s["buy_volume"] - s["sell_volume"]) / tv) * (ap - bp) * 0.5
         else:
             price = mid
-        ts.append(curr_ts_ms)
-        mid_vals.append(mid)
-        bid_vals.append(bp)
-        ask_vals.append(ap)
-        micro_vals.append(micro)
-        price_vals.append(price)
+        rows.append({"t": curr_ts_ms, "bid": bp, "ask": ap, "mid": mid,
+                     "micro": micro, "price": price})
+    return rows
+
+
+def _coin_chart_json(iid: str) -> str:
+    """
+    Return JSON with price series (bid/ask/mid/micro/price) and signal series (ofi_10_z/obi_10).
+
+    sig_ts/ofi_10_z/obi_10 come from _ind_rolling (same 3600-point window). Price series
+    is built by `_price_series_rows` (shared with /chart/{id}'s Lines mode, Story 8.1).
+    """
+    snaps = list(_second_rolling.get(iid, []))
+    inds = list(_ind_rolling.get(iid, []))
+    if not snaps:
+        return json.dumps({"ts": [], "mid": [], "bid": [], "ask": [], "micro": [], "price": [],
+                           "sig_ts": [], "ofi_10_z": [], "obi_10": []})
+    rows = _price_series_rows(snaps)
     return json.dumps({
-        "ts": ts, "mid": mid_vals, "bid": bid_vals, "ask": ask_vals,
-        "micro": micro_vals, "price": price_vals,
+        "ts": [r["t"] for r in rows],
+        "mid": [r["mid"] for r in rows],
+        "bid": [r["bid"] for r in rows],
+        "ask": [r["ask"] for r in rows],
+        "micro": [r["micro"] for r in rows],
+        "price": [r["price"] for r in rows],
         "sig_ts": [e["ts"] for e in inds],
         "ofi_10_z": [e["ofi_10_z"] for e in inds],
         "obi_10": [e["obi_10"] for e in inds],
     })
+
+
+def _live_lines_json(iid: str) -> str:
+    """Live bid/ask/mid/micro/price rows from the rolling 1s snapshot buffer."""
+    rows = _price_series_rows(list(_second_rolling.get(iid, [])))
+    return json.dumps({"rows": rows, "truncated": False})
+
+
+def _historical_lines_json(iid: str, start_ms: int, end_ms: int) -> str:
+    """Build bid/ask/mid/micro/price rows from DydxSecondSnapshot records in the catalog."""
+    from dydx_collector.second_snapshot import DydxSecondSnapshot
+    from nautilus_trader.persistence.catalog import ParquetDataCatalog
+    catalog = ParquetDataCatalog(CATALOG_PATH)
+    start_ns = start_ms * 1_000_000
+    end_ns = end_ms * 1_000_000
+    results = catalog.query(data_cls=DydxSecondSnapshot, identifiers=[iid], start=start_ns, end=end_ns)
+    # query() wraps custom Data subclasses in CustomData -- unwrap via .data to reach the
+    # actual DydxSecondSnapshot (confirmed via direct introspection this session).
+    snapshots = [r.data if hasattr(r, "data") else r for r in results]
+    snaps = [
+        {
+            "bid_prices": s.bid_prices, "bid_sizes": s.bid_sizes,
+            "ask_prices": s.ask_prices, "ask_sizes": s.ask_sizes,
+            "buy_volume": s.buy_volume, "sell_volume": s.sell_volume,
+            "ts_event": s.ts_event,
+        }
+        for s in snapshots
+    ]
+    rows = _price_series_rows(snaps)
+    return json.dumps({"rows": rows, "truncated": False})
 
 
 def _render_live_page() -> str:
@@ -1082,7 +1136,8 @@ def _cells_for_row(row: dict) -> dict[str, dict]:
 
 
 def _rankings_json() -> str:
-    """Return pre-formatted cell values for every currently-ranked instrument as JSON.
+    """
+    Return pre-formatted cell values for every currently-ranked instrument as JSON.
 
     Row order and every column value come entirely from ranking_engine's rankings:live
     message (AD-9, troll/CLAUDE.md SSOT-01/02) -- dashboard never computes or re-sorts
@@ -1119,7 +1174,8 @@ def _rankings_json() -> str:
 
 
 def _ingest_batch(batch: list[dict]) -> None:
-    """Append each snapshot to the rolling window feeding candle/live-chart rendering.
+    """
+    Append each snapshot to the rolling window feeding candle/live-chart rendering.
 
     Every derived metric (OFI/OBI/microprice/spread/cvd/volume_delta/etc) now comes
     from ranking_engine's rankings:live message instead (SSOT-02, troll/CLAUDE.md) --
@@ -1146,7 +1202,8 @@ async def rankings_json_handler(request: web.Request) -> web.Response:
 
 
 async def watchlist_json_handler(request: web.Request) -> web.Response:
-    """FR-7: the live, queryable Watchlist coin-set -- see ml_signals.watchlist.fetch_watchlist.
+    """
+    FR-7: the live, queryable Watchlist coin-set -- see ml_signals.watchlist.fetch_watchlist.
 
     Thin proxy over rankings:live's own ranked instrument-id list (Task 8) --
     ranking_engine already applies the freshness gate before including an instrument,
@@ -1174,7 +1231,7 @@ async def rank_history_json_handler(request: web.Request) -> web.Response:
     if ts_v:
         try:
             dt = _dt.datetime.fromisoformat(ts_v)
-            dt = dt.replace(tzinfo=dt.tzinfo or _dt.timezone.utc)
+            dt = dt.replace(tzinfo=dt.tzinfo or _dt.UTC)
             ts_ns = int(dt.timestamp() * 1_000_000_000)
         except (ValueError, OverflowError, OSError):
             ts_ns = time.time_ns()
@@ -1231,6 +1288,18 @@ async def coin_candles_handler(request: web.Request) -> web.Response:
     return web.Response(text=data, content_type="application/json")
 
 
+async def coin_lines_handler(request: web.Request) -> web.Response:
+    symbol = request.match_info["id"]
+    qs = dict(request.rel_url.query)
+    start_ms = _parse_query_ms(qs, "start")
+    end_ms = _parse_query_ms(qs, "end")
+    if start_ms is not None and end_ms is not None:
+        data = await asyncio.to_thread(_historical_lines_json, symbol, start_ms, end_ms)
+    else:
+        data = _live_lines_json(symbol)
+    return web.Response(text=data, content_type="application/json")
+
+
 async def coin_ticks_handler(request: web.Request) -> web.Response:
     symbol = request.match_info["id"]
     qs = dict(request.rel_url.query)
@@ -1243,7 +1312,8 @@ async def coin_ticks_handler(request: web.Request) -> web.Response:
 
 
 async def live_coin_json_handler(request: web.Request) -> web.Response:
-    """Raw indicator values for /coin/{id} live panel — polled every 1s.
+    """
+    Raw indicator values for /coin/{id} live panel — polled every 1s.
 
     Sourced entirely from ranking_engine's rankings:live message (SSOT-02,
     troll/CLAUDE.md) -- dashboard computes none of this itself. Full field parity with
@@ -1314,7 +1384,8 @@ async def redis_subscriber_ctx(app: web.Application):  # type: ignore[type-arg]
 
 
 def _handle_rankings_message(message: dict) -> None:
-    """Record the latest rankings:live message and its receipt time (for staleness).
+    """
+    Record the latest rankings:live message and its receipt time (for staleness).
 
     Validates the message has a list-shaped "ranks" before storing it -- a malformed
     payload (unexpected shape, wrong producer, truncated JSON that still parses) must
@@ -1349,7 +1420,8 @@ def _handle_rankings_message(message: dict) -> None:
 
 
 async def _redis_listener(redis_url: str) -> None:
-    """Subscribe to snapshots:raw and rankings:live on one connection, branching on
+    """
+    Subscribe to snapshots:raw and rankings:live on one connection, branching on
     message["channel"] -- one subscriber, two channels, per AD-9 (dashboard never opens
     a second live Redis connection).
 
@@ -1383,7 +1455,8 @@ async def _redis_listener(redis_url: str) -> None:
 
 
 def make_app(redis_url: str, catalog_path: str) -> web.Application:
-    """Return a configured aiohttp Application with all routes and background tasks.
+    """
+    Return a configured aiohttp Application with all routes and background tasks.
 
     No slow-loop/metrics_store-polling task here anymore -- ranking_engine folds
     price/pct_1h/pct_24h/volatility into rankings:live directly now (SSOT-02,
@@ -1406,6 +1479,7 @@ def make_app(redis_url: str, catalog_path: str) -> web.Application:
     app.router.add_get("/data/coin/{id}", coin_json_handler)
     app.router.add_get("/data/coin/{id}/candles", coin_candles_handler)
     app.router.add_get("/data/coin/{id}/ticks", coin_ticks_handler)
+    app.router.add_get("/data/coin/{id}/lines", coin_lines_handler)
     app.router.add_get("/data/live/{id}", live_coin_json_handler)
     app.router.add_get("/chart/{id}", chart_handler)
     app.router.add_get("/history/{id}", history_handler)
