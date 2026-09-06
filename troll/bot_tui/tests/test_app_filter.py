@@ -68,7 +68,7 @@ def test_filter_change_narrows_body_to_matching_rows() -> None:
     app._on_filter_change(app._filter_edit, "eth")
     body = app._body.original_widget
     assert isinstance(body, urwid.ListBox)
-    row_texts = [w.text for w in body.body]  # type: ignore[attr-defined]
+    row_texts = [w.original_widget.text for w in body.body]  # type: ignore[attr-defined]
     assert len(row_texts) == 1
     assert "ETH-USD-PERP" in row_texts[0]
 
@@ -95,7 +95,7 @@ def test_close_filter_restores_full_unfiltered_list_and_clears_active() -> None:
     assert app._frame.footer is app._footer_hint
     body = app._body.original_widget
     assert isinstance(body, urwid.ListBox)
-    row_texts = [w.text for w in body.body]  # type: ignore[attr-defined]
+    row_texts = [w.original_widget.text for w in body.body]  # type: ignore[attr-defined]
     assert len(row_texts) == 2
 
 
@@ -125,7 +125,7 @@ def test_confirm_filter_keeps_narrowing_and_returns_focus_to_body() -> None:
     assert app._frame.footer is app._footer_hint
     body = app._body.original_widget
     assert isinstance(body, urwid.ListBox)
-    row_texts = [w.text for w in body.body]  # type: ignore[attr-defined]
+    row_texts = [w.original_widget.text for w in body.body]  # type: ignore[attr-defined]
     assert len(row_texts) == 1
     assert "ETH-USD-PERP" in row_texts[0]
 

@@ -27,6 +27,7 @@ import urwid
 from bot_tui import coin_detail_state
 from bot_tui import ranking_state
 from bot_tui.app import BotTuiApp
+from bot_tui.app import _LADDER_COLLAPSED_LEVELS
 
 
 def _reset() -> None:
@@ -147,13 +148,17 @@ def test_order_book_region_line_count_changes_between_collapsed_and_expanded() -
         "ts_init": 1,
     }
     collapsed_body = app._build_coin_detail_body()
-    collapsed_ladder_rows = collapsed_body.original_widget.contents[1][0].original_widget.contents
+    # Body is a ListBox (scrollable -- see _build_coin_detail_body); the ladder box
+    # is the last item in its walker, itself Padding(LineBox(Pile(rows))) -- one
+    # original_widget hop through the Padding, one through the LineBox.
+    collapsed_ladder_rows = list(collapsed_body.body)[-1].original_widget.original_widget.contents
     app._ladder_expanded = True
     expanded_body = app._build_coin_detail_body()
-    expanded_ladder_rows = expanded_body.original_widget.contents[1][0].original_widget.contents
+    expanded_ladder_rows = list(expanded_body.body)[-1].original_widget.original_widget.contents
+    # Classic ladder rows = ask levels + one mid-price divider + bid levels.
     assert len(expanded_ladder_rows) > len(collapsed_ladder_rows)
-    assert len(collapsed_ladder_rows) == 1
-    assert len(expanded_ladder_rows) == 20
+    assert len(collapsed_ladder_rows) == 2 * _LADDER_COLLAPSED_LEVELS + 1
+    assert len(expanded_ladder_rows) == 2 * 20 + 1
 
 
 def test_breadcrumb_format_is_coins_gt_instrument_id() -> None:
@@ -182,7 +187,10 @@ def test_o_key_sets_footer_to_dashboard_url() -> None:
     app = BotTuiApp()
     app._open_coin_detail("BTC-USD-PERP")
     app._handle_coin_detail_key("o")
-    assert app._footer_hint.text == "dashboard: http://127.0.0.1:8765/chart/BTC-USD-PERP"
+    assert (
+        app._footer_hint.text
+        == "dashboard (copied to clipboard): http://127.0.0.1:8765/chart/BTC-USD-PERP"
+    )
 
 
 # --- Task 6: esc preserves Coins-pane scroll position and active filter ---
@@ -222,7 +230,7 @@ def test_esc_from_coin_detail_preserves_active_filter() -> None:
     assert app._filter_text == "eth"
     body = app._coins_body
     assert isinstance(body, urwid.ListBox)
-    row_texts = [w.text for w in body.body]  # type: ignore[attr-defined]
+    row_texts = [w.original_widget.text for w in body.body]  # type: ignore[attr-defined]
     assert len(row_texts) == 1
     assert "ETH-USD-PERP" in row_texts[0]
 

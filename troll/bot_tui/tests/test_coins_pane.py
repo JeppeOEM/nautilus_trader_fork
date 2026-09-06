@@ -13,86 +13,52 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-Tests for bot_tui.coins_pane -- Story 4.1 (AC2/AC5) and Story 4.2 (AC1, filter_rows).
+Tests for bot_tui.coins_pane -- Story 4.1 (AC2/AC5), Story 4.2 (AC1, filter_rows), and
+the full-metric-parity redesign (troll/CLAUDE.md SSOT-03): coin_rows now returns
+whole rank-entry dicts verbatim (every RANKING_COLS field ranking_engine publishes),
+not a narrow (rank, id, score) tuple.
 
 Pure functions only, no urwid import -- see Story 4.1's Dev Notes "Testing strategy:
 pure logic vs. urwid wiring" for why.
 """
 
+from ml_signals.ranking_columns import NEGATIVE_COLOR
+from ml_signals.ranking_columns import POSITIVE_COLOR
+from ml_signals.ranking_columns import RANKING_COLS
+
 from bot_tui.coins_pane import COLD_OPEN_TEXT
 from bot_tui.coins_pane import NO_MATCHES_TEXT
+from bot_tui.coins_pane import coin_header_text
 from bot_tui.coins_pane import coin_rows
 from bot_tui.coins_pane import filter_rows
+from bot_tui.coins_pane import format_coin_row
+from bot_tui.coins_pane import stale_feed_banner_text
+
+
+def _row(iid: str, rank: int, **overrides: object) -> dict:
+    row = {"instrument_id": iid, "rank": rank, "volume24h": 1.0, "volatility_score": None}
+    row.update(overrides)
+    return row
 
 
 def test_coin_rows_none_ranking_returns_empty_list() -> None:
     assert coin_rows(None) == []
 
 
-def test_coin_rows_volume_mode_uses_volume24h_in_given_order() -> None:
+def test_coin_rows_returns_rank_entries_verbatim_in_given_order() -> None:
+    # Deliberately out-of-volume-order -- row order must be preserved exactly as given,
+    # and every field on the entry (not just rank/instrument_id/score) passes through.
     ranking = {
         "mode": "volume",
         "ranks": [
-            {
-                "instrument_id": "BTC-USD-PERP",
-                "rank": 1,
-                "volume24h": 482.6,
-                "volatility_score": 0.01,
-            },
-            {
-                "instrument_id": "ETH-USD-PERP",
-                "rank": 2,
-                "volume24h": 201.3,
-                "volatility_score": 0.02,
-            },
-        ],
-    }
-    assert coin_rows(ranking) == [
-        (1, "BTC-USD-PERP", 482.6),
-        (2, "ETH-USD-PERP", 201.3),
-    ]
-
-
-def test_coin_rows_volatility_mode_uses_volatility_score_in_given_order() -> None:
-    ranking = {
-        "mode": "volatility",
-        "ranks": [
-            {
-                "instrument_id": "SOL-USD-PERP",
-                "rank": 1,
-                "volume24h": 96.4,
-                "volatility_score": 0.244,
-            },
-            {
-                "instrument_id": "BTC-USD-PERP",
-                "rank": 2,
-                "volume24h": 482.6,
-                "volatility_score": 0.182,
-            },
-        ],
-    }
-    assert coin_rows(ranking) == [
-        (1, "SOL-USD-PERP", 0.244),
-        (2, "BTC-USD-PERP", 0.182),
-    ]
-
-
-def test_coin_rows_never_resorts_locally() -> None:
-    # Deliberately out-of-volume-order -- row order must be preserved exactly as given.
-    ranking = {
-        "mode": "volume",
-        "ranks": [
-            {"instrument_id": "LOW-USD-PERP", "rank": 1, "volume24h": 1.0, "volatility_score": 0.0},
-            {
-                "instrument_id": "HIGH-USD-PERP",
-                "rank": 2,
-                "volume24h": 999.0,
-                "volatility_score": 0.0,
-            },
+            _row("LOW-USD-PERP", 1, volume24h=1.0, spread=0.5),
+            _row("HIGH-USD-PERP", 2, volume24h=999.0, spread=0.1),
         ],
     }
     rows = coin_rows(ranking)
-    assert [iid for _, iid, _ in rows] == ["LOW-USD-PERP", "HIGH-USD-PERP"]
+    assert [row["instrument_id"] for row in rows] == ["LOW-USD-PERP", "HIGH-USD-PERP"]
+    assert rows[0]["spread"] == 0.5
+    assert rows[1]["spread"] == 0.1
 
 
 def test_cold_open_text_is_exact_ux_copy() -> None:
@@ -100,18 +66,18 @@ def test_cold_open_text_is_exact_ux_copy() -> None:
 
 
 _FILTER_ROWS = [
-    (1, "BTC-USD-PERP", 482.6),
-    (2, "ETH-USD-PERP", 201.3),
-    (3, "SOL-USD-PERP", 96.4),
+    _row("BTC-USD-PERP", 1),
+    _row("ETH-USD-PERP", 2),
+    _row("SOL-USD-PERP", 3),
 ]
 
 
 def test_filter_rows_substring_match_returns_only_matching_row() -> None:
-    assert filter_rows(_FILTER_ROWS, "eth") == [(2, "ETH-USD-PERP", 201.3)]
+    assert filter_rows(_FILTER_ROWS, "eth") == [_row("ETH-USD-PERP", 2)]
 
 
 def test_filter_rows_is_case_insensitive() -> None:
-    assert filter_rows(_FILTER_ROWS, "btc") == [(1, "BTC-USD-PERP", 482.6)]
+    assert filter_rows(_FILTER_ROWS, "btc") == [_row("BTC-USD-PERP", 1)]
 
 
 def test_filter_rows_empty_filter_text_returns_all_rows_unchanged() -> None:
@@ -126,14 +92,11 @@ def test_filter_rows_matching_multiple_but_not_all_rows_preserves_relative_order
     # A genuine subset match (2 of 3 rows, "t" appears in BTC/ETH but not SOL) -- unlike
     # "usd-perp", which would match all three and not actually exercise dropping a
     # non-matching row while preserving order.
-    assert filter_rows(_FILTER_ROWS, "t") == [
-        (1, "BTC-USD-PERP", 482.6),
-        (2, "ETH-USD-PERP", 201.3),
-    ]
+    assert filter_rows(_FILTER_ROWS, "t") == [_row("BTC-USD-PERP", 1), _row("ETH-USD-PERP", 2)]
 
 
 def test_filter_rows_strips_leading_and_trailing_whitespace() -> None:
-    assert filter_rows(_FILTER_ROWS, "  btc  ") == [(1, "BTC-USD-PERP", 482.6)]
+    assert filter_rows(_FILTER_ROWS, "  btc  ") == [_row("BTC-USD-PERP", 1)]
 
 
 def test_filter_rows_whitespace_only_filter_text_returns_all_rows_unchanged() -> None:
@@ -142,3 +105,59 @@ def test_filter_rows_whitespace_only_filter_text_returns_all_rows_unchanged() ->
 
 def test_no_matches_text_is_exact_ux_copy() -> None:
     assert NO_MATCHES_TEXT == "no matches"
+
+
+def test_coin_header_text_includes_rank_instrument_and_every_ranking_col_label() -> None:
+    header = coin_header_text()
+    assert "#" in header
+    assert "INSTRUMENT" in header
+    assert "OFI10z" in header
+    assert "Vol24h" in header
+
+
+def test_format_coin_row_missing_value_renders_em_dash() -> None:
+    row = _row("BTC-USD-PERP", 1, ofi_10_z=None)
+    segments = format_coin_row(row)
+    assert any(isinstance(s, str) and "—" in s for s in segments)
+
+
+def test_format_coin_row_positive_color_maps_to_pnl_pos() -> None:
+    row = _row("BTC-USD-PERP", 1, ofi_10_z=1.5)
+    segments = format_coin_row(row)
+    colored = [s for s in segments if isinstance(s, tuple)]
+    assert ("pnl-pos", "     +1.50 ") in colored
+
+
+def test_format_coin_row_negative_color_maps_to_pnl_neg() -> None:
+    row = _row("BTC-USD-PERP", 1, ofi_10_z=-1.5)
+    segments = format_coin_row(row)
+    colored = [s for s in segments if isinstance(s, tuple)]
+    assert ("pnl-neg", "     -1.50 ") in colored
+
+
+def test_format_coin_row_uncolored_column_stays_plain_string() -> None:
+    row = _row("BTC-USD-PERP", 1, spread=0.123456)
+    segments = format_coin_row(row)
+    assert any(isinstance(s, str) and "0.123456" in s for s in segments)
+
+
+def test_stale_feed_banner_text_empty_when_nothing_stale() -> None:
+    assert stale_feed_banner_text([]) == ""
+
+
+def test_stale_feed_banner_text_lists_ids() -> None:
+    assert stale_feed_banner_text(["SOL-USD-PERP.DYDX"]) == "stale feed: SOL-USD-PERP.DYDX"
+
+
+def test_stale_feed_banner_text_truncates_with_more_count() -> None:
+    ids = ["A", "B", "C", "D", "E"]
+    assert stale_feed_banner_text(ids) == "stale feed: A, B, C (+2 more)"
+
+
+def test_ranking_columns_only_uses_the_two_shared_colors() -> None:
+    # Sanity check underpinning format_coin_row's color-name mapping: if a column ever
+    # returns a third color, it would silently render uncolored instead of erroring.
+    for _key, _label, _fmt, color_fn in RANKING_COLS:
+        if color_fn is not None:
+            assert color_fn(1.0) in (POSITIVE_COLOR, NEGATIVE_COLOR)
+            assert color_fn(-1.0) in (POSITIVE_COLOR, NEGATIVE_COLOR)

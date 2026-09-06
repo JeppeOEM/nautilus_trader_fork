@@ -18,29 +18,51 @@ dYdX market data collector entrypoint.
 Owns its own asyncio loop, a typed in-memory buffer, and a configurable snapshot loop.
 No TradingNode/Strategy/DataEngine involved -- see client.py for why.
 
-Instrument tiers
-----------------
-pinned      : listed in config.toml [[instruments]] -- always subscribed, never demoted
-              to illiquid or pruned by non_config_retain_hours. Raw order-book-delta data
-              (store_order_book_deltas=True) is still subject to that instrument's own
-              retain_hours, if one is configured -- pinned only guarantees the subscription
-              and non-delta data are kept forever, not that an explicit per-coin retention
-              setting is overridden.
-liquid      : OI >= liquidity_min_oi_usd -- subscribed, data pruned after non_config_retain_hours.
-illiquid    : OI below threshold -- NOT subscribed to trades/book; re-checked every
-              liquidity_check_seconds; graduated to liquid if OI crosses the threshold.
-              Still receives mark/index/funding/status from subscribe_markets() (global).
+Instrument control (Story 6.1)
+-------------------------------
+`config.toml`'s [[instruments]] list is the single, always-authoritative source of what
+gets collected -- at startup the collector subscribes to exactly that list and nothing
+else. There is no automatic, timer-driven reclassification: the collected set only
+changes in response to an explicit `collector:control` Redis message (see
+`_control_loop`), never on its own.
+
+Every instrument in `instruments` is pinned by definition -- there is no "collected but
+not pinned" middle state. The four control actions:
+
+start          : add a brand-new (or previously-unpinned) id and start collecting it,
+                 pinned immediately -- also removes it from `config.exclude` if it was
+                 there. Rejected past `_MAX_COLLECTED_INSTRUMENTS`.
+unpin          : stop collecting an id and add it to `config.exclude` (persisted) --
+                 same permanent denylist a hand-edited exclude entry uses, so an
+                 unpinned coin is also excluded from any future liquidity ranking, not
+                 just out of the collected set. `:start <ID>` reverses this. This is
+                 the only way an actively-collected id stops via the TUI's `p` key.
+stop           : stop collecting an id, same as unpin, but without excluding it --
+                 use for an id you don't want bot_tui listing as "available to re-add."
+pin_top_liquid : fill any empty collector slots (up to the cap) with the current
+                 top-by-volume coins not already collected, pinned immediately. Never
+                 removes or replaces an existing entry -- there's nothing left for it to
+                 protect against, since every entry is already pinned.
+
+`_MAX_WS_SUBSCRIPTIONS` (32) is dYdX's real per-connection WS hard subscription limit;
+`_MAX_COLLECTED_INSTRUMENTS` (29) is this collector's own, smaller operating cap
+(3-slot safety margin) enforced on `start`/`pin_top_liquid` -- never exceed it.
 """
 
 import asyncio
+import dataclasses
 import json
 import logging
 import os
+import re
 import shutil
 import signal
+import threading
 import time
 import urllib.request
 from collections import defaultdict
+from datetime import UTC
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -49,20 +71,29 @@ import redis.asyncio as aioredis
 
 from dydx_collector.client import DydxClient
 from dydx_collector.config import CollectorConfig
+from dydx_collector.config import InstrumentEntry
 from dydx_collector.config import load_config
+from dydx_collector.config import save_config
 from dydx_collector.open_interest import _fetch_markets_json
 from dydx_collector.open_interest import classify_liquidity
 from dydx_collector.open_interest import fetch_open_interest
 from dydx_collector.prune_catalog import prune_instrument
 from dydx_collector.second_snapshot import BOOK_DEPTH
 from dydx_collector.second_snapshot import DydxSecondSnapshot
+from nautilus_trader.core import nautilus_pyo3
 from nautilus_trader.model.book import OrderBook
+from nautilus_trader.model.data import BookOrder
+from nautilus_trader.model.data import OrderBookDelta
 from nautilus_trader.model.data import OrderBookDeltas
 from nautilus_trader.model.data import TradeTick
 from nautilus_trader.model.enums import AggressorSide
+from nautilus_trader.model.enums import BookAction
 from nautilus_trader.model.enums import BookType
+from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.instruments import instruments_from_pyo3
+from nautilus_trader.model.objects import Price
+from nautilus_trader.model.objects import Quantity
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
 
@@ -94,7 +125,8 @@ pq.write_table = _write_table_zstd
 
 
 def quarantine_corrupt_parquet(catalog_path: str) -> None:
-    """Move any unreadable .parquet file (e.g. left by a mid-write crash) out of the way.
+    """
+    Move any unreadable .parquet file (e.g. left by a mid-write crash) out of the way.
 
     Runs once at process start, before any new writes. A half-written file from a killed
     process would otherwise sit forever next to good data and can break catalog reads or
@@ -118,6 +150,7 @@ def quarantine_corrupt_parquet(catalog_path: str) -> None:
             shutil.move(str(path), str(dest))
             logger.warning(f"Quarantined corrupt parquet file: {path} -> {dest}")
 
+
 # Skip snapshot if book hasn't received OrderBookDeltas in this many nanoseconds.
 # During WS reconnect recovery the Rust client re-subscribes at 2/sec, so the last
 # instrument in the sorted queue can wait up to N/2 seconds for a fresh snapshot.
@@ -126,12 +159,70 @@ def quarantine_corrupt_parquet(catalog_path: str) -> None:
 # book updates multiple times per second under normal conditions.
 _STALE_BOOK_NS: int = 5_000_000_000  # 5 seconds
 
-# A real crossed book gets matched by the exchange within milliseconds -- it can't
-# persist. If ours stays crossed this long, the local book has desynced from the
-# venue (most likely a dropped/misordered delta during the startup subscribe-throttle
-# scramble) and will never self-heal from more deltas alone. Force a resubscribe,
-# which always starts with a Clear + fresh full snapshot.
-_CROSSED_RESYNC_NS: int = 15_000_000_000  # 15 seconds
+# dYdX's WS server hard-caps subscriptions per channel per connection at 32 (confirmed
+# live via its own error: "Per-connection subscription limit reached for v4_trades
+# (limit=32)"). Every liquid/pinned instrument subscribes both v4_trades and
+# v4_orderbook, so this must bound the *combined* pinned+liquid instrument count, not
+# just liquid alone -- going over it doesn't just drop the overflow, the repeated
+# rejections get the whole connection detected as dead and endlessly reconnected/
+# rejected again, which is what produced permanent "Stale book" warnings on every
+# instrument (not just the overflow ones) rather than a one-off blip.
+_MAX_WS_SUBSCRIPTIONS: int = 32
+
+# This collector's own operating cap (Story 6.1) -- a deliberate 3-slot safety margin
+# below dYdX's real _MAX_WS_SUBSCRIPTIONS above, enforced on `start`/`pin_top_liquid`
+# control actions. Intentionally a separate constant from _MAX_WS_SUBSCRIPTIONS: one is
+# the venue's hard ceiling, the other is our own choice of how close to run to it.
+_MAX_COLLECTED_INSTRUMENTS: int = 29
+
+# Redis channels for live instrument control (Story 6.1) -- mirrors the bots:control/
+# bots:status pattern already used between bot_tui and live_paper (bot_status.py).
+_CONTROL_CHANNEL = "collector:control"
+_STATUS_CHANNEL = "collector:status"
+
+# CONFIRMED root cause, category 2 (2026-09-04, cross-checked live against dYdX's own
+# REST orderbook endpoint during ~25 live episodes across BTC/ETH/ETC/UNI): one side of
+# our local reconstruction gets stuck holding a stale price level -- some delta that
+# should have removed/updated it never took effect locally -- while the other side keeps
+# tracking the real venue almost exactly. A raw per-delta trace of a full episode also
+# showed zero deltas ever touched the frozen price again during the whole window. This
+# never self-heals from more deltas: the missing update is gone, not merely delayed, so
+# waiting out THIS category is pure downside. There is no per-market sequence number to
+# detect the drop directly -- dYdX's `sequence` field is the WS *connection-global*
+# message_id (shared by every channel/market on the connection), not a per-instrument
+# orderbook sequence, so per-instrument gap detection false-positives on any other
+# channel's traffic (see _apply_deltas's docstring). The crossed-book symptom is the
+# only detection signal available for this category.
+#
+# BUT (2026-09-06, Story 5.1 in-progress, independent reference-client cross-check):
+# category 1 (genuine crossing already present in dYdX's own broadcast, not a local
+# loss -- see crossed-book-root-cause.md) can ALSO persist a full 3s: a live BTC episode
+# was confirmed byte-for-byte identical between our collector and a zero-shared-code
+# reference client at every tick for the whole 3s window, yet still tripped this timer
+# and got force-resynced -- a destructive no-op on an already-healthy book (see DATA-03
+# in troll/CLAUDE.md). Duration alone cannot distinguish the two categories; only the
+# reference-client cross-check can, and that isn't wired into production. Raised
+# 3s -> 10s as an evidence-informed but still provisional widening of the grace window
+# (trades a longer stale-book gap for a genuine category-2 desync -- which never
+# self-heals regardless of window size -- against fewer wasted resyncs of category-1
+# episodes) while Story 5.1 keeps gathering real duration data on both categories.
+# Revisit this number, don't treat it as settled, once more episodes are classified.
+_CROSSED_RESYNC_NS: int = 10_000_000_000  # 10 seconds (was 3s -- see comment above)
+
+# Story 5.2 / DATA-04: defensive bound on how many stale levels `_uncross_step` will
+# drop in one _handle_crossed_book call before giving up and falling back to the
+# existing resync path. A genuine crossed-book episode is normally one or two levels
+# deep -- this is a safety cap against a pathological/many-levels-deep cross, not a
+# value expected to be hit in practice.
+_UNCROSS_MAX_STEPS: int = 5
+
+# _ingest_loop yields to the event loop every this-many processed messages, so
+# _second_loop's sleep-based wakeup gets a fair chance to run during a burst instead of
+# waiting behind the entire backlog. Smaller = _second_loop wakes sooner but more
+# event-loop round-trip overhead per message; larger = less overhead but a longer worst
+# case gap. 64 is an arbitrary small value, not a measured optimum -- ponytail: retune
+# only if _second_loop's own staleness canary (below) still fires after this shipped.
+_INGEST_YIELD_EVERY: int = 64
 
 # OBS-01: zero book updates across all liquid instruments for 30s+ is a pipeline
 # failure, not a quiet market -- BTC/ETH/SOL perpetuals trade 24/7. Deployed behind
@@ -142,6 +233,15 @@ _WATCHDOG_STALE_NS: int = 30_000_000_000  # 30 seconds
 _WATCHDOG_STARTUP_GRACE_NS: int = 60_000_000_000  # subscriptions need time to establish
 _WATCHDOG_REMINDER_NS: int = 600_000_000_000  # re-notify at most every 10 min while down
 
+# _second_loop staleness canary: complementary safety net to _ingest_loop's yielding --
+# that queue shrinks the risk of the event loop being monopolized during a message
+# burst, it can't eliminate it (see _ingest_loop's docstring). If _second_loop's own
+# wakeup still arrives this much later than the configured interval, the crossed-book
+# detection/resync guard was silently not running for that whole gap -- surface it
+# rather than let it look like a quiet market. 2s of slack tolerates normal scheduling
+# jitter without false-positiving on every tick.
+_SECOND_LOOP_LAG_WARN_NS: int = 2_000_000_000  # 2 seconds
+
 
 def _buffer_key(data: Any) -> tuple[type, str]:
     return type(data), str(data.instrument_id)
@@ -150,7 +250,8 @@ def _buffer_key(data: Any) -> tuple[type, str]:
 def _prune_interval_seconds(
     non_config_retain_hours: float, delta_retain_hours: dict[str, float | None]
 ) -> float:
-    """Prune-loop cadence: roughly 4x per the shortest active retention window, minimum 15 min.
+    """
+    Prune-loop cadence: roughly 4x per the shortest active retention window, minimum 15 min.
 
     Considers both the global non_config_retain_hours and any finite per-coin
     retain_hours, so a short per-coin window isn't left stale by a larger global one.
@@ -162,13 +263,31 @@ def _prune_interval_seconds(
     return max(min(active_retain_hours) * 900, 900)
 
 
+def _prune_candidates(instruments: tuple[InstrumentEntry, ...], known_markets: set[str]) -> set[str]:
+    """
+    Ids whose catalog data is subject to non_config_retain_hours pruning (Story 6.1).
+
+    Two groups, matching the pre-6.1 `(self._liquid | self._illiquid) - self._pinned`
+    behavior exactly: currently-collected non-pinned instruments (a legacy state --
+    nothing creates one anymore, since every instrument is pinned by definition; this
+    stays a no-op group rather than a group that can never exist, for any config.toml
+    hand-edited before this change), UNION every known market not currently collected
+    at all (covers an instrument dropped by `stop` or `unpin` -- its leftover catalog
+    data must still age out).
+    """
+    collected_ids = {e.id for e in instruments}
+    non_pinned_collected = {e.id for e in instruments if not e.pinned}
+    return non_pinned_collected | (known_markets - collected_ids)
+
+
 def _watchdog_transition(
     now_ns: int,
     is_stale: bool,
     down_since_ns: int | None,
     last_reminder_ns: int,
 ) -> tuple[str | None, int | None, int]:
-    """Pure state-machine step for the feed watchdog: (message_or_None, down_since_ns, last_reminder_ns).
+    """
+    Pure state-machine step for the feed watchdog: (message_or_None, down_since_ns, last_reminder_ns).
 
     Kept separate from the asyncio loop and the notify transport so the alerting/
     debounce logic is unit-testable without mocking network calls.
@@ -217,7 +336,8 @@ def _notify(message: str) -> None:
 
 
 def _prune_delta_retention(catalog_path: str, delta_retain_hours: dict[str, float | None]) -> int:
-    """Prune order_book_deltas for instruments with a finite per-coin retain_hours.
+    """
+    Prune order_book_deltas for instruments with a finite per-coin retain_hours.
 
     A `None` value means unlimited retention -- that instrument is skipped entirely.
     Extracted from _prune_loop so the None-skip behavior can be unit-tested directly.
@@ -231,7 +351,8 @@ def _prune_delta_retention(catalog_path: str, delta_retain_hours: dict[str, floa
 
 
 async def _publish_snapshot_batch(redis_client: aioredis.Redis, snapshots: list) -> None:
-    """Publish a batch of DydxSecondSnapshot objects to Redis channel snapshots:raw.
+    """
+    Publish a batch of DydxSecondSnapshot objects to Redis channel snapshots:raw.
 
     Empty batches are silently dropped. Publish failures are logged and swallowed —
     missing one tick is acceptable per the architecture.
@@ -255,13 +376,27 @@ class Collector:
 
         self._client = DydxClient(on_data=self._on_data, network=config.network)
         self._buffer: dict[tuple[type, str], list[Any]] = defaultdict(list)
+        # Set in run() -- None until then, so a Collector built for a unit test (never
+        # calling run()) can still exercise control-action handling; _publish_status
+        # guards on this being set rather than requiring a real Redis connection.
+        self._redis: aioredis.Redis | None = None
 
-        # Instrument tiers (populated in run())
-        self._pinned: set[str] = {e.id for e in config.instruments}
-        self._liquid: set[str] = set()
-        self._illiquid: set[str] = set()
+        # All ids dYdX currently lists, whether collected or not -- refreshed by
+        # _status_loop. Used only by _prune_loop to clean up catalog data left behind
+        # by an instrument that's no longer in config.instruments (dropped by a stop or
+        # unpin control action) -- see that loop's docstring. Empty until the first
+        # _status_loop tick.
+        self._known_markets: set[str] = set()
+        # Most recent volume-based liquidity classification, keyed by id -- refreshed by
+        # _status_loop, reused by _publish_status for an immediate post-control-action
+        # publish so pin/start/stop show up in the TUI without waiting up to
+        # liquidity_check_seconds for the next periodic tick. Empty (so "liquid" reads
+        # False for everyone) until the first _status_loop tick.
+        self._last_liquid_by_volume: set[str] = set()
         # Instruments for which raw OrderBookDeltas are written to the catalog
-        self._delta_store: set[str] = {e.id for e in config.instruments if e.store_order_book_deltas}
+        self._delta_store: set[str] = {
+            e.id for e in config.instruments if e.store_order_book_deltas
+        }
         # Per-coin raw-delta retention, in hours; None means unlimited (never pruned).
         # Independent of the pinned/non-pinned tier split used for non_config_retain_hours below.
         self._delta_retain_hours: dict[str, float | None] = {
@@ -280,6 +415,13 @@ class Collector:
         # Wall-clock ns of the last OrderBookDeltas received per instrument.
         # Used by _second_loop to skip stale books (staleness = no updates for > _STALE_BOOK_NS).
         self._last_book_update_ns: dict[str, int] = {}
+        # Wall-clock ns of the last delta seen *for that side specifically*, keyed by
+        # instrument. _last_book_update_ns updates on ANY delta (either side), which
+        # can't tell "book is crossed because bid-side deltas stopped arriving" apart
+        # from "book is crossed while both sides keep updating normally" (a genuine
+        # venue-level cross). Split per-side so the crossed-book log can say which one.
+        self._last_bid_delta_ns: dict[str, int] = {}
+        self._last_ask_delta_ns: dict[str, int] = {}
 
         # _watchdog_loop state: when the all-instruments-stale condition started (None
         # while healthy), and when the last reminder notification was sent.
@@ -290,19 +432,73 @@ class Collector:
         # Wall-clock ns when a book was first observed continuously crossed;
         # cleared as soon as it's seen uncrossed. Drives the resync watchdog below.
         self._crossed_since_ns: dict[str, int] = {}
+        # (bid, ask) at the moment a crossing was first observed -- lets the resolution
+        # log line prove a real price change happened (not a spurious/no-op clear).
+        self._crossed_prices: dict[str, tuple[float, float]] = {}
+        # Story 5.2: per-price-level tag of the dYdX connection-global message_id
+        # (OrderBookDelta.sequence) that last touched it, keyed by (side, price). This is
+        # a DIFFERENT use of that field than the per-instrument gap detection removed in
+        # commit 944891bbba -- here it's a local "which of these two specific levels was
+        # touched more recently" comparator, exactly as dYdX's own Indexer uses it
+        # (Roundtable's uncross-orderbook.ts) to resolve a crossed book without a full
+        # resync. See DATA-04 in troll/CLAUDE.md and _uncross_step below.
+        self._level_msg_id: dict[str, dict[tuple[OrderSide, float], int]] = {}
+
+        # _on_data (the WS callback, scheduled via the Rust client's call_soon_threadsafe)
+        # only enqueues -- _ingest_loop does the real per-message work (_process_data).
+        # Keeps the callback itself cheap enough that a burst of incoming messages can't
+        # monopolize the event loop and starve _second_loop's crossed-book detection (two
+        # real episodes took 10-19s to resync instead of ~3s before this queue existed --
+        # see _ingest_loop's docstring). Unbounded: a real overflow would mean the process
+        # can't keep up with the exchange at all, which is a different problem than this
+        # queue can solve -- ponytail: revisit with a maxsize + drop policy only if that's
+        # ever observed.
+        self._ingest_queue: asyncio.Queue[Any] = asyncio.Queue()
+        # Wall-clock ns of the previous _second_loop tick, for the staleness canary below.
+        self._last_second_loop_tick_ns: int | None = None
 
         self._redis: aioredis.Redis | None = None
         self._stop = asyncio.Event()
 
     def _on_data(self, data: Any) -> None:
-        # Called directly from the Rust WS client's callback thread/loop -- one malformed
-        # or unexpected message must never take down the whole connection, so isolate it here.
+        # Called directly from the Rust WS client's callback thread/loop via
+        # call_soon_threadsafe. Must stay this cheap: this scheduled callback and
+        # _second_loop's sleep-based wakeup compete for the same event loop, and asyncio
+        # drains every ready callback before honoring a timer. Real per-message work
+        # (_process_data) happens in _ingest_loop instead, off this hot path.
         try:
-            self._on_data_unsafe(data)
+            self._ingest_queue.put_nowait(data)
         except Exception:
-            logger.exception(f"Failed to process {type(data).__name__}, dropping")
+            logger.exception(f"Failed to enqueue {type(data).__name__}, dropping")
 
-    def _on_data_unsafe(self, data: Any) -> None:
+    async def _ingest_loop(self) -> None:
+        """
+        Drain `_on_data`'s queue and apply each message off the WS callback's hot path.
+
+        Yields to the event loop every _INGEST_YIELD_EVERY messages so a burst of
+        incoming deltas can't monopolize it and starve _second_loop's crossed-book
+        detection/resync -- confirmed in production: two real episodes took 10-19s to
+        resync instead of the intended ~3s because this loop didn't exist yet and
+        _apply_deltas ran directly on `_on_data`'s callback. This shrinks the risk to
+        "how long N messages take", not eliminates it -- a sustained enough message rate
+        can still delay any single-threaded consumer, which is what _second_loop's own
+        staleness canary (see its docstring) is for.
+        """
+        processed = 0
+        while not self._stop.is_set():
+            try:
+                data = await asyncio.wait_for(self._ingest_queue.get(), timeout=1.0)
+            except TimeoutError:
+                continue
+            try:
+                self._process_data(data)
+            except Exception:
+                logger.exception(f"Failed to process {type(data).__name__}, dropping")
+            processed += 1
+            if processed % _INGEST_YIELD_EVERY == 0:
+                await asyncio.sleep(0)
+
+    def _process_data(self, data: Any) -> None:
         self._buffer[_buffer_key(data)].append(data)
         if isinstance(data, OrderBookDeltas):
             iid = str(data.instrument_id)
@@ -340,10 +536,37 @@ class Collector:
         if iid not in self._live_books:
             self._live_books[iid] = OrderBook(data.instrument_id, BookType.L2_MBP)
         book = self._live_books[iid]
+        level_msg_id = self._level_msg_id.setdefault(iid, {})
+        now_ns = time.time_ns()
         for delta in data.deltas:
             book.apply_delta(delta)
+            if delta.is_clear:
+                # A Clear wipes the whole book -- every prior per-level tag is now stale.
+                level_msg_id.clear()
+            elif delta.is_delete:
+                level_msg_id.pop((delta.order.side, delta.order.price.as_double()), None)
+            else:
+                level_msg_id[(delta.order.side, delta.order.price.as_double())] = delta.sequence
+            if delta.is_clear or delta.order.side == OrderSide.BUY:
+                self._last_bid_delta_ns[iid] = now_ns
+            if delta.is_clear or delta.order.side == OrderSide.SELL:
+                self._last_ask_delta_ns[iid] = now_ns
 
-    def _flush_once(self) -> None:
+    async def _flush_once(self) -> None:
+        """
+        Write every buffered instrument/datatype's pending items to the catalog.
+
+        `ParquetDataCatalog.write_data()` is real synchronous disk I/O (Arrow/zstd
+        serialization + file writes) -- confirmed in production to take multiple seconds
+        per flush cycle. Offload each write via `asyncio.to_thread` so it can't block
+        _second_loop's crossed-book detection the same way delta processing used to
+        (see _ingest_loop's docstring) -- this was the actual cause of a ~60s-periodic
+        event-loop stall the staleness canary caught (_flush_interval_seconds' periodicity
+        gave it away), not delta-processing bursts as originally suspected. The buffer
+        swap itself (`self._buffer[key] = []`) stays synchronous on this thread -- only
+        the already-extracted, thread-local `items` list crosses to the executor thread,
+        so `self._buffer` is still only ever mutated from the event loop thread.
+        """
         for key, items in list(self._buffer.items()):
             if not items:
                 continue
@@ -354,14 +577,14 @@ class Collector:
                 continue
 
             try:
-                self._catalog.write_data(items)
+                await asyncio.to_thread(self._catalog.write_data, items)
             except Exception:
                 logger.exception(f"Failed to write {key}, dropping {len(items)} items")
 
     async def _flush_loop(self) -> None:
         while not self._stop.is_set():
             await asyncio.sleep(self._config.flush_interval_seconds)
-            self._flush_once()
+            await self._flush_once()
 
     async def _open_interest_loop(self) -> None:
         while not self._stop.is_set():
@@ -389,100 +612,411 @@ class Collector:
         await self._client.subscribe_orderbook(iid)
         self._live_books.pop(iid, None)
         self._crossed_since_ns.pop(iid, None)
+        self._crossed_prices.pop(iid, None)
+        self._level_msg_id.pop(iid, None)
 
-    async def _liquidity_check_loop(self) -> None:
-        """Periodically graduate illiquid→liquid (subscribe) or liquid→illiquid (unsubscribe)."""
+    async def _apply_config(self, new_config: CollectorConfig) -> None:
+        """
+        Diff old vs. new `instruments` and subscribe/unsubscribe accordingly, then adopt
+        `new_config`. The one shared place this diffing happens (Story 6.1) -- used by
+        both the periodic file-reload loop and every control-action handler below, so
+        there is exactly one implementation of "what changed."
+        """
+        old_ids = {e.id for e in self._config.instruments}
+        new_ids = {e.id for e in new_config.instruments}
+
+        for iid in new_ids - old_ids:
+            await self._subscribe(iid)
+        for iid in old_ids - new_ids:
+            await self._unsubscribe(iid)
+
+        self._delta_store = {e.id for e in new_config.instruments if e.store_order_book_deltas}
+        self._delta_retain_hours = {
+            e.id: e.retain_hours for e in new_config.instruments if e.store_order_book_deltas
+        }
+        self._config = new_config
+
+    async def _status_loop(self) -> None:
+        """
+        Publish collector:status (an informational liquid/illiquid label per currently-
+        collected instrument) and refresh self._known_markets for _prune_loop's cleanup
+        of abandoned instruments' catalog data (Story 6.1).
+
+        Read-only: unlike the auto-resubscribing loop this replaces, it never
+        subscribes/unsubscribes anything itself -- the collected set only changes via an
+        explicit collector:control message (see this module's docstring and
+        _handle_control_message).
+
+        Publishes immediately on the first iteration, then every
+        liquidity_check_seconds after that -- run-then-sleep, not sleep-then-run.
+        liquidity_check_seconds defaults to 1800s (30 min); a sleep-first loop would
+        leave the bot_tui Collector page showing "waiting for collector:status" for up
+        to half an hour after every collector restart, which is exactly the bug a user
+        hit in production before this fix.
+        """
         while not self._stop.is_set():
-            await asyncio.sleep(self._config.liquidity_check_seconds)
             try:
                 markets_json = await asyncio.to_thread(_fetch_markets_json, self._config.network)
-                liquid, illiquid = classify_liquidity(
+                self._known_markets = {
+                    f"{m['ticker']}-PERP.DYDX"
+                    for m in markets_json.get("markets", {}).values()
+                    if m.get("ticker")
+                }
+                # No max_liquid cap here -- this is a display label, not a selection.
+                self._last_liquid_by_volume, _ = classify_liquidity(
                     markets_json, self._config.liquidity_min_oi_usd, self._config.exclude
                 )
-
-                for iid in liquid & self._illiquid:
-                    await self._subscribe(iid)
-                    self._liquid.add(iid)
-                    self._illiquid.discard(iid)
-
-                for iid in illiquid & self._liquid:
-                    await self._unsubscribe(iid)
-                    self._illiquid.add(iid)
-                    self._liquid.discard(iid)
-
-                logger.info(
-                    f"Liquidity check: {len(self._liquid)} liquid, "
-                    f"{len(self._illiquid)} illiquid, {len(self._pinned)} pinned"
-                )
+                await self._publish_status()
             except Exception:
-                logger.exception("Liquidity check failed")
+                logger.exception("Status loop failed")
+            await asyncio.sleep(self._config.liquidity_check_seconds)
+
+    async def _publish_status(self) -> None:
+        """
+        Publish one collector:status message per currently-collected instrument, using
+        the most recent volume classification (self._last_liquid_by_volume, refreshed by
+        _status_loop), plus one aggregate message carrying config.exclude (bot_tui's
+        "unpinned" section -- everything excluded, whether by hand or via unpin). Called
+        both by _status_loop's own periodic tick and by _apply_and_persist, so a
+        start/unpin/stop/pin_top_liquid action is reflected in the TUI immediately
+        rather than waiting up to liquidity_check_seconds.
+
+        No-op if self._redis isn't set yet (e.g. a control action fired before run()'s
+        first _status_loop tick, or a unit test driving _handle_control_message directly
+        without a real Redis connection).
+        """
+        if self._redis is None:
+            return
+        for entry in self._config.instruments:
+            payload = {
+                "id": entry.id,
+                "pinned": entry.pinned,
+                "liquid": entry.id in self._last_liquid_by_volume,
+                "last_trade_ts": self._last_book_update_ns.get(entry.id, 0),
+            }
+            await self._redis.publish(_STATUS_CHANNEL, json.dumps(payload))
+        await self._redis.publish(
+            _STATUS_CHANNEL, json.dumps({"unpinned_ids": sorted(self._config.exclude)})
+        )
 
     async def _reload_config_loop(self) -> None:
-        """Hot-reload: updates the pinned set and per-coin delta-store/retention config."""
+        """Hot-reload: picks up a hand-edited config.toml (e.g. after a git pull) without a restart."""
         while not self._stop.is_set():
             await asyncio.sleep(self._config.config_reload_seconds)
             new_config = load_config(CONFIG_PATH)
-            old_pinned = self._pinned
-            self._pinned = {e.id for e in new_config.instruments}
-            self._delta_store = {e.id for e in new_config.instruments if e.store_order_book_deltas}
-            self._delta_retain_hours = {
-                e.id: e.retain_hours for e in new_config.instruments if e.store_order_book_deltas
-            }
+            await self._apply_config(new_config)
 
-            # Subscribe any newly-pinned coins that were sitting in the illiquid pool
-            for iid in self._pinned - old_pinned:
-                if iid in self._illiquid:
-                    await self._subscribe(iid)
-                    self._illiquid.discard(iid)
+    async def _apply_and_persist(self, new_config: CollectorConfig) -> None:
+        await self._apply_config(new_config)
+        save_config(self._config, CONFIG_PATH)
+        await self._publish_status()
 
-            self._config = new_config
+    async def _handle_control_message(self, action: str | None, iid: str | None) -> None:
+        """Dispatch one collector:control message (Story 6.1, AC #3/#4/#5)."""
+        entries = {e.id: e for e in self._config.instruments}
+
+        if action == "start":
+            if iid in entries:
+                logger.warning("Cannot start %s: already collected", iid)
+                return
+            if len(entries) >= _MAX_COLLECTED_INSTRUMENTS:
+                logger.warning(
+                    "Cannot start %s: at %s-instrument cap", iid, _MAX_COLLECTED_INSTRUMENTS
+                )
+                return
+            new_instruments = (*self._config.instruments, InstrumentEntry(id=iid, pinned=True))
+            new_config = dataclasses.replace(
+                self._config, instruments=new_instruments, exclude=self._config.exclude - {iid}
+            )
+            await self._apply_and_persist(new_config)
+
+        elif action == "unpin":
+            if iid not in entries:
+                logger.warning("Cannot unpin %s: not currently collected", iid)
+                return
+            del entries[iid]
+            new_config = dataclasses.replace(
+                self._config,
+                instruments=tuple(entries.values()),
+                exclude=self._config.exclude | {iid},
+            )
+            await self._apply_and_persist(new_config)
+            await self._publish_removed(iid)
+
+        elif action == "stop":
+            if iid not in entries:
+                logger.warning("Cannot stop %s: not currently collected", iid)
+                return
+            del entries[iid]
+            new_config = dataclasses.replace(self._config, instruments=tuple(entries.values()))
+            await self._apply_and_persist(new_config)
+            await self._publish_removed(iid)
+
+        elif action == "pin_top_liquid":
+            await self._pin_top_liquid()
+
+        else:
+            logger.warning("Unknown collector:control action: %r", action)
+
+    async def _publish_removed(self, iid: str) -> None:
+        """
+        Tell bot_tui to drop `iid` immediately rather than waiting up to
+        collector_state._STATUS_STALE_SECONDS for it to notice `iid` is no longer being
+        republished by _publish_status -- stop/unpin both fully remove an instrument
+        from collection, so its row should disappear from the Collector pane right away.
+        """
+        if self._redis is None:
+            return
+        await self._redis.publish(_STATUS_CHANNEL, json.dumps({"id": iid, "removed": True}))
+
+    async def _pin_top_liquid(self) -> None:
+        """
+        Fill any empty collector slots (up to _MAX_COLLECTED_INSTRUMENTS) with the
+        current top-by-volume coins not already collected and not in config.exclude,
+        pinning them immediately.
+
+        Additive only -- never removes or replaces an existing entry. Unlike the old
+        refresh_top_coins this replaces, there is no "collected but not pinned" state
+        left for it to overwrite; every entry is already pinned and stays put.
+
+        An explicitly-unpinned id is excluded from the candidate set for free here --
+        unpin adds it to config.exclude, and classify_liquidity already treats every
+        excluded id as illiquid regardless of volume. Re-adding one is always
+        `:start <ID>`, never automatic.
+        """
+        existing_ids = {e.id for e in self._config.instruments}
+        free_slots = max(0, _MAX_COLLECTED_INSTRUMENTS - len(existing_ids))
+        if free_slots == 0:
+            return
+        markets_json = await asyncio.to_thread(_fetch_markets_json, self._config.network)
+        top, _ = classify_liquidity(
+            markets_json,
+            self._config.liquidity_min_oi_usd,
+            self._config.exclude | existing_ids,
+            max_liquid=free_slots,
+        )
+        new_instruments = self._config.instruments + tuple(
+            InstrumentEntry(id=iid, pinned=True) for iid in sorted(top)
+        )
+        new_config = dataclasses.replace(self._config, instruments=new_instruments)
+        await self._apply_and_persist(new_config)
+
+    async def _control_loop(self) -> None:
+        """
+        Act on start/unpin/stop/pin_top_liquid messages published to collector:control
+        (Story 6.1). Own connection + reconnect loop, mirroring
+        bot_tui/bots_state.py's _redis_listener shape -- independent of self._redis
+        (used for publishing snapshots/status).
+        """
+        redis_url = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
+        while not self._stop.is_set():
+            try:
+                async with aioredis.Redis.from_url(redis_url, decode_responses=True) as client:
+                    pubsub = client.pubsub()
+                    await pubsub.subscribe(_CONTROL_CHANNEL)
+                    logger.info("collector:control listener subscribed")
+                    async for message in pubsub.listen():
+                        if message["type"] != "message":
+                            continue
+                        try:
+                            payload = json.loads(message["data"])
+                            await self._handle_control_message(payload.get("action"), payload.get("id"))
+                        except Exception:
+                            logger.exception("collector:control message failed: %r", message)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("collector:control listener error — reconnecting in 2s: %s", exc)
+                await asyncio.sleep(2)
+
+    def _uncross_step(self, iid: str, book: OrderBook) -> bool:
+        """
+        One active-uncrossing correction step (DATA-04, Story 5.2).
+
+        Ports dYdX's own Indexer remediation (Roundtable's `uncross-orderbook.ts`)
+        instead of forcing a full resync: drop only the stale side of a crossed book,
+        using each level's tagged message-id (`self._level_msg_id`, set in
+        `_apply_deltas`) to decide which side is stale -- the level with the strictly
+        older (smaller) message-id, or on a tie, the side with the smaller resting size
+        (dYdX's own documented tie-break). Applies a synthetic `BookAction.DELETE` via
+        `book.apply_delta()`, identical to how a real dYdX-sent deletion is applied.
+
+        Returns True if a level was dropped (caller should re-check crossed state and
+        may loop). Returns False if the book isn't crossed, or either level lacks a
+        tag (can't arbitrate -- caller falls back to the existing resync path).
+        """
+        bid, ask = book.best_bid_price(), book.best_ask_price()
+        if bid is None or ask is None or bid.as_double() < ask.as_double():
+            return False
+        level_msg_id = self._level_msg_id.get(iid, {})
+        bid_key = (OrderSide.BUY, bid.as_double())
+        ask_key = (OrderSide.SELL, ask.as_double())
+        bid_seq = level_msg_id.get(bid_key)
+        ask_seq = level_msg_id.get(ask_key)
+        if bid_seq is None or ask_seq is None:
+            return False
+
+        if bid_seq == ask_seq:
+            bid_stale = book.best_bid_size().as_double() <= book.best_ask_size().as_double()
+        else:
+            bid_stale = bid_seq < ask_seq
+        if bid_stale:
+            stale_side, stale_price, stale_key, stale_seq, other_seq = (
+                OrderSide.BUY, bid, bid_key, bid_seq, ask_seq,
+            )
+        else:
+            stale_side, stale_price, stale_key, stale_seq, other_seq = (
+                OrderSide.SELL, ask, ask_key, ask_seq, bid_seq,
+            )
+
+        delete_order = BookOrder(
+            side=stale_side,
+            price=stale_price,
+            size=Quantity(0.0, stale_price.precision),
+            order_id=0,
+        )
+        now_ns = time.time_ns()
+        book.apply_delta(
+            OrderBookDelta(
+                instrument_id=book.instrument_id,
+                action=BookAction.DELETE,
+                order=delete_order,
+                flags=0,
+                sequence=max(bid_seq, ask_seq),
+                ts_event=now_ns,
+                ts_init=now_ns,
+            )
+        )
+        level_msg_id.pop(stale_key, None)
+        logger.info(
+            "Crossed book for %s actively uncrossed: dropped stale %s @ %.6f "
+            "(msg_id %d, surviving side msg_id %d)",
+            iid,
+            stale_side.name,
+            stale_price.as_double(),
+            stale_seq,
+            other_seq,
+        )
+        return True
+
+    async def _handle_crossed_book(self, iid: str, book: OrderBook, now_ns: int) -> bool:
+        """
+        Detect/escalate/resolve a crossed book for one instrument. Returns True if
+        currently crossed (caller should skip this tick's snapshot for it).
+
+        Extracted from _second_loop to keep that loop's own cyclomatic complexity down --
+        this is a self-contained state machine (crossed / resolved / stuck-past-grace),
+        not something _second_loop's per-tick iteration needs to inline.
+        """
+        if book.best_bid_price().as_double() < book.best_ask_price().as_double():
+            crossed_since = self._crossed_since_ns.pop(iid, None)
+            crossed_prices = self._crossed_prices.pop(iid, None)
+            if crossed_since is not None and crossed_prices is not None:
+                # Proves this was a real book update (the price actually moved), not a
+                # no-op or a silently-forced resync -- distinguishes a genuine, harmless
+                # sub-second touch (self-heals via normal delta activity, matches
+                # _CROSSED_RESYNC_NS's documented tolerance) from a stuck desync that
+                # only recovers via _resync_book's forced resubscribe (logged separately,
+                # below, as a CRITICAL).
+                logger.info(
+                    "Crossed book for %s resolved after %.2fs "
+                    "(was bid=%.6f/ask=%.6f, now bid=%.6f/ask=%.6f)",
+                    iid,
+                    (now_ns - crossed_since) / 1e9,
+                    crossed_prices[0],
+                    crossed_prices[1],
+                    book.best_bid_price().as_double(),
+                    book.best_ask_price().as_double(),
+                )
+            return False
+
+        # DATA-04: try dYdX's own non-destructive fix first -- drop only the stale
+        # level(s), never the whole book -- before falling back to the existing
+        # WARNING/timer/CRITICAL/_resync_book machinery below. The cap bounds a
+        # pathological/many-levels-deep cross; a genuine crossed-book episode is
+        # normally one or two levels.
+        for _ in range(_UNCROSS_MAX_STEPS):
+            if not self._uncross_step(iid, book):
+                break
+            new_bid, new_ask = book.best_bid_price(), book.best_ask_price()
+            if new_bid is None or new_ask is None or new_bid.as_double() < new_ask.as_double():
+                self._crossed_since_ns.pop(iid, None)
+                self._crossed_prices.pop(iid, None)
+                return False
+
+        # Diagnostic: _last_book_update_ns refreshes on a delta for EITHER side, so it
+        # can't tell "bid deltas stopped arriving" apart from "both sides keep updating
+        # and are genuinely crossed". These per-side timestamps can.
+        bid_stale_s = (now_ns - self._last_bid_delta_ns.get(iid, 0)) / 1e9
+        ask_stale_s = (now_ns - self._last_ask_delta_ns.get(iid, 0)) / 1e9
+        logger.warning(
+            "Crossed book for %s (bid=%.6f >= ask=%.6f) — skipping snapshot "
+            "[last bid delta %.1fs ago, last ask delta %.1fs ago]",
+            iid,
+            book.best_bid_price().as_double(),
+            book.best_ask_price().as_double(),
+            bid_stale_s,
+            ask_stale_s,
+        )
+        crossed_since = self._crossed_since_ns.setdefault(iid, now_ns)
+        self._crossed_prices.setdefault(
+            iid, (book.best_bid_price().as_double(), book.best_ask_price().as_double())
+        )
+        if now_ns - crossed_since > _CROSSED_RESYNC_NS:
+            # Persisted past the grace window this system already uses as its tolerance
+            # for a genuine sub-second touch (see _CROSSED_RESYNC_NS's definition) --
+            # confirmed local desync (a lost delta our reconstruction never recovers from
+            # on its own), not bad data from dYdX. Not gated to "once ever": _resync_book
+            # (below) resets crossed_since on every call, so for a book that keeps failing
+            # to recover this naturally repeats roughly every _CROSSED_RESYNC_NS, not
+            # every _second_loop tick -- an unresolved CRITICAL incident should keep
+            # alerting, not go silent after a single log line.
+            critical_logger.critical(
+                json.dumps(
+                    {
+                        "instrument_id": iid,
+                        "reason": "steady_state_crossed_book",
+                        "best_bid": book.best_bid_price().as_double(),
+                        "best_ask": book.best_ask_price().as_double(),
+                        "crossed_duration_ns": now_ns - crossed_since,
+                        "bid_delta_stale_s": bid_stale_s,
+                        "ask_delta_stale_s": ask_stale_s,
+                        "ts_event_ns": now_ns,
+                    }
+                )
+            )
+            await self._resync_book(iid)
+        return True
 
     async def _second_loop(self) -> None:
         """Sample L2 book at snapshot_interval_seconds; raw levels + trade volume only — signals computed on read."""
         while not self._stop.is_set():
             await asyncio.sleep(self._config.snapshot_interval_seconds)
             now_ns = time.time_ns()
+
+            if self._last_second_loop_tick_ns is not None:
+                expected_ns = int(self._config.snapshot_interval_seconds * 1e9)
+                lag_ns = now_ns - self._last_second_loop_tick_ns - expected_ns
+                if lag_ns > _SECOND_LOOP_LAG_WARN_NS:
+                    logger.warning(
+                        "_second_loop tick arrived %.1fs late (expected every %.1fs) -- "
+                        "event loop was busy; crossed-book detection/resync was not "
+                        "running during this gap",
+                        lag_ns / 1e9,
+                        self._config.snapshot_interval_seconds,
+                    )
+            self._last_second_loop_tick_ns = now_ns
+
             batch: list[DydxSecondSnapshot] = []
-            for iid in self._pinned | self._liquid:
+            for iid in {e.id for e in self._config.instruments}:
                 book = self._live_books.get(iid)
                 if book is None:
                     continue
                 if book.best_bid_price() is None or book.best_ask_price() is None:
                     continue
                 # Skip crossed/touched book — can occur briefly during reconnect snapshot replay
-                if book.best_bid_price().as_double() >= book.best_ask_price().as_double():
-                    logger.warning(
-                        "Crossed book for %s (bid=%.6f >= ask=%.6f) — skipping snapshot",
-                        iid,
-                        book.best_bid_price().as_double(),
-                        book.best_ask_price().as_double(),
-                    )
-                    crossed_since = self._crossed_since_ns.setdefault(iid, now_ns)
-                    if now_ns - crossed_since > _CROSSED_RESYNC_NS:
-                        # Persisted past the grace window this system already uses as its
-                        # tolerance for reconnect-replay noise (see _CROSSED_RESYNC_NS's
-                        # definition) -- that's steady-state desync with an unknown cause:
-                        # either a local reconstruction bug or bad data from dYdX. Not
-                        # gated to "once ever": _resync_book (below) resets
-                        # crossed_since on every call, so for a book that keeps failing to
-                        # recover this naturally repeats roughly every _CROSSED_RESYNC_NS,
-                        # not every _second_loop tick -- an unresolved CRITICAL incident
-                        # should keep alerting, not go silent after a single log line.
-                        critical_logger.critical(
-                            json.dumps(
-                                {
-                                    "instrument_id": iid,
-                                    "reason": "steady_state_crossed_book",
-                                    "best_bid": book.best_bid_price().as_double(),
-                                    "best_ask": book.best_ask_price().as_double(),
-                                    "crossed_duration_ns": now_ns - crossed_since,
-                                    "ts_event_ns": now_ns,
-                                }
-                            )
-                        )
-                        await self._resync_book(iid)
+                if await self._handle_crossed_book(iid, book, now_ns):
                     continue
-                self._crossed_since_ns.pop(iid, None)
 
                 # Staleness guard: skip if no OrderBookDeltas have arrived recently.
                 # During WS reconnect recovery the book retains its pre-reconnect state
@@ -531,19 +1065,24 @@ class Collector:
             )
             await asyncio.sleep(interval)
             catalog_path = str(Path(self._config.catalog_path).resolve())
-            non_pinned = (self._liquid | self._illiquid) - self._pinned
+            non_pinned = _prune_candidates(self._config.instruments, self._known_markets)
             freed = 0
             for iid in non_pinned:
                 freed += prune_instrument(catalog_path, iid, self._config.non_config_retain_hours)
             if freed:
-                logger.info(f"Pruned {freed / 1024 / 1024:.1f} MB from {len(non_pinned)} non-pinned instruments")
+                logger.info(
+                    f"Pruned {freed / 1024 / 1024:.1f} MB from {len(non_pinned)} non-pinned instruments"
+                )
 
             delta_freed = _prune_delta_retention(catalog_path, self._delta_retain_hours)
             if delta_freed:
-                logger.info(f"Pruned {delta_freed / 1024 / 1024:.1f} MB of raw order-book deltas (per-coin retention)")
+                logger.info(
+                    f"Pruned {delta_freed / 1024 / 1024:.1f} MB of raw order-book deltas (per-coin retention)"
+                )
 
     async def _watchdog_loop(self) -> None:
-        """Notify when every live-tier instrument's book has gone stale. See OBS-01 and
+        """
+        Notify when every live-tier instrument's book has gone stale. See OBS-01 and
         _WATCHDOG_STALE_NS: this deployment runs unattended behind an SSH tunnel, so
         a frozen feed needs to page someone rather than wait to be noticed on the dashboard.
         """
@@ -553,12 +1092,11 @@ class Collector:
             if now_ns - self._watchdog_started_ns < _WATCHDOG_STARTUP_GRACE_NS:
                 continue
 
-            live = self._pinned | self._liquid
+            live = {e.id for e in self._config.instruments}
             if not live:
                 continue
             is_stale = all(
-                now_ns - self._last_book_update_ns.get(iid, 0) > _WATCHDOG_STALE_NS
-                for iid in live
+                now_ns - self._last_book_update_ns.get(iid, 0) > _WATCHDOG_STALE_NS for iid in live
             )
 
             message, down_since_ns, reminder_ns = _watchdog_transition(
@@ -570,9 +1108,7 @@ class Collector:
                 await asyncio.to_thread(_notify, message)
 
     async def run(self) -> None:
-        self._redis = aioredis.Redis.from_url(
-            os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
-        )
+        self._redis = aioredis.Redis.from_url(os.environ.get("REDIS_URL", "redis://127.0.0.1:6379"))
 
         instruments = await self._client.fetch_instruments()
         instruments_by_id = {i.id.value: i for i in instruments}
@@ -583,34 +1119,35 @@ class Collector:
         await self._client.connect(loop, list(instruments_by_id.values()))
         await self._client.subscribe_markets()
 
-        # Classify by volume; pinned coins bypass the threshold; excluded coins never subscribed
-        markets_json = await asyncio.to_thread(_fetch_markets_json, self._config.network)
-        liquid, illiquid = classify_liquidity(
-            markets_json, self._config.liquidity_min_oi_usd, self._config.exclude
-        )
-
+        # config.toml's [[instruments]] list is the sole subscribe source (Story 6.1) --
+        # no classify_liquidity call here; that's only used by the pin_top_liquid
+        # control action and _status_loop's informational display label now.
         known = set(instruments_by_id)
-        to_subscribe = ((self._pinned | liquid) & known) - self._config.exclude
-        self._liquid = (liquid & known) - self._pinned
-        self._illiquid = known - to_subscribe
+        configured = {e.id for e in self._config.instruments}
+        to_subscribe = configured & known
+        unknown = configured - known
+        if unknown:
+            logger.warning("Configured instruments not found on dYdX, skipping: %s", sorted(unknown))
 
         for iid in sorted(to_subscribe):
             await self._subscribe(iid)
 
-        logger.info(
-            f"Started: {len(to_subscribe)} subscribed "
-            f"({len(self._pinned)} pinned, {len(self._liquid)} liquid), "
-            f"{len(self._illiquid)} illiquid (monitoring)"
-        )
+        logger.info(f"Started: {len(to_subscribe)} subscribed")
 
         tasks = [
+            asyncio.create_task(self._ingest_loop()),
             asyncio.create_task(self._flush_loop()),
             asyncio.create_task(self._reload_config_loop()),
             asyncio.create_task(self._open_interest_loop()),
-            asyncio.create_task(self._liquidity_check_loop()),
+            asyncio.create_task(self._status_loop()),
+            asyncio.create_task(self._control_loop()),
             asyncio.create_task(self._prune_loop()),
             asyncio.create_task(self._second_loop()),
             asyncio.create_task(self._watchdog_loop()),
+            # ponytail: temporary crossed-book root-cause debug (Story 5.1), remove once
+            # resolved. Rust's file logger only flushes its BufWriter to disk on an
+            # explicit Sync event -- without this, [WS_RAW] lines sit in memory forever.
+            asyncio.create_task(_ws_raw_debug_flush_loop()),
         ]
         stop_task = asyncio.create_task(self._stop.wait())
 
@@ -630,7 +1167,7 @@ class Collector:
             for task in tasks:
                 task.cancel()
             await self._client.disconnect()
-            self._flush_once()
+            await self._flush_once()
             if self._redis is not None:
                 await self._redis.aclose()
 
@@ -638,8 +1175,276 @@ class Collector:
         self._stop.set()
 
 
+# ponytail: temporary crossed-book root-cause debug (Story 5.1), remove once resolved.
+async def _ws_raw_debug_flush_loop() -> None:
+    while True:
+        await asyncio.sleep(2.0)
+        nautilus_pyo3.logging_sync_to_disk()
+
+
+# ---------------------------------------------------------------------------
+# Incident reporting (Story 5.1): any WARNING+ log line, from any logger in this
+# process, gets a permanent human-readable report snapshotting the relevant
+# [WS_RAW] rolling-buffer window -- turns "grep a 500MB debug file by hand" into
+# an automatic, standing capability. Generic by design: classification is a
+# best-effort heuristic over the already-formatted message text (no changes
+# needed at existing logger.warning()/critical() call sites), so any *new*
+# warning added later gets this for free too.
+# ---------------------------------------------------------------------------
+
+_WS_RAW_LOG_DIR = Path("/tmp/nautilus_logs")  # noqa: S108 -- deliberate: ephemeral rolling
+# buffer inside a single-purpose container (docker-compose's `collector` service, PID 1),
+# not a shared multi-tenant host -- no symlink/race risk this rule guards against applies.
+_INCIDENT_DIR = Path("/app/incident_reports")
+
+# Debounce window per (incident_type, instrument) -- a crossed book logs a fresh
+# WARNING on every _second_loop tick while it persists (up to ~3 before CRITICAL
+# escalation); without this, one ongoing incident would produce a report per tick.
+_INCIDENT_DEBOUNCE_NS: int = 10_000_000_000  # 10 seconds
+
+# How far back the raw-evidence window reaches from the triggering log line.
+_INCIDENT_LOOKBACK_NS: int = 10_000_000_000  # 10 seconds
+
+# Bounded like the other two log sinks (docker json-file: 400MB, ws_raw_debug: 500MB) --
+# unlike those, nothing was capping this directory before, so it grew forever.
+_INCIDENT_DIR_MAX_BYTES: int = 200_000_000  # 200MB, oldest files pruned past this
+# Extraction is deferred this long after the trigger so the window also captures
+# whatever resolves the incident (e.g. the delete that un-crosses a book), not
+# just the run-up to it.
+_INCIDENT_LOOKAHEAD_DELAY_S: float = 2.0
+
+_IID_RE = re.compile(r"\b([A-Z0-9]+-USD-PERP\.DYDX)\b")
+
+# _write_incident_report runs via asyncio.to_thread, and the default executor has
+# multiple worker threads -- two incidents close together (different type/instrument,
+# so neither is debounced) can each land on their own thread and call
+# _prune_incident_reports() at the same time. Without this, both glob() the directory
+# independently and can race to stat/unlink the same file: one thread deletes it after
+# the other has already listed it but before that thread's own stat() call, raising
+# FileNotFoundError (seen in production). Only _prune_incident_reports touches this
+# directory's files, so a plain lock around the whole function is sufficient --
+# nothing else can delete out from under it once serialized.
+_INCIDENT_PRUNE_LOCK = threading.Lock()
+
+
+def _classify_incident(message: str) -> tuple[str, str | None]:
+    """Best-effort (incident_type, instrument_id) from an already-formatted log message."""
+    try:
+        payload = json.loads(message)
+    except (json.JSONDecodeError, TypeError):
+        payload = None
+    if isinstance(payload, dict) and "reason" in payload:
+        # CRITICAL escalations already log structured JSON (see _second_loop) -- exact,
+        # no heuristics needed.
+        return str(payload["reason"]), payload.get("instrument_id")
+
+    iid_match = _IID_RE.search(message)
+    iid = iid_match.group(1) if iid_match else None
+    if "Crossed book" in message:
+        return "crossed_book", iid
+    if "Stale book" in message:
+        return "stale_book", iid
+    if "_second_loop tick arrived" in message:
+        return "second_loop_lag", None
+    if "Resyncing" in message:
+        return "resync", iid
+    return "unclassified", iid
+
+
+def _ns_to_iso(ns: int) -> str:
+    """
+    Nanosecond-precision UTC ISO string matching handler.rs's [WS_RAW] line prefix
+    format exactly (same width), so plain string comparison is chronologically correct.
+    """
+    dt = datetime.fromtimestamp(ns // 1_000_000_000, tz=UTC)
+    frac_ns = ns % 1_000_000_000
+    return f"{dt.strftime('%Y-%m-%dT%H:%M:%S')}.{frac_ns:09d}Z"
+
+
+def _scan_ws_raw_window(ticker: str, start_ns: int, end_ns: int) -> list[str]:
+    """
+    Blocking file I/O -- always call via asyncio.to_thread. Scans every rotated file
+    currently present (bounded by _INCIDENT_DEBOUNCE_NS keeping incidents infrequent, and
+    the rolling buffer itself bounded to ~500MB) rather than tracking per-file byte ranges
+    -- simplest thing that works, not a measured bottleneck.
+    """
+    start_ts = _ns_to_iso(start_ns)
+    end_ts = _ns_to_iso(end_ns)
+    needle = f'"id":"{ticker}"'
+    matches: list[str] = []
+    for path in sorted(_WS_RAW_LOG_DIR.glob("ws_raw_debug_*.log")):
+        try:
+            with path.open("r", errors="replace") as f:
+                for line in f:
+                    if needle not in line:
+                        continue
+                    ts = line.split(" ", 1)[0]
+                    if start_ts <= ts <= end_ts:
+                        matches.append(line)
+        except OSError:
+            continue
+    return matches
+
+
+def _write_incident_report(
+    incident_type: str,
+    iid: str | None,
+    level: str,
+    logger_name: str,
+    message: str,
+    trigger_ns: int,
+) -> str:
+    """Blocking -- always call via asyncio.to_thread."""
+    _INCIDENT_DIR.mkdir(parents=True, exist_ok=True)
+    start_ns = trigger_ns - _INCIDENT_LOOKBACK_NS
+    end_ns = trigger_ns + int(_INCIDENT_LOOKAHEAD_DELAY_S * 1e9)
+    ticker = iid.split("-PERP")[0] if iid else None
+    lines = _scan_ws_raw_window(ticker, start_ns, end_ns) if ticker else []
+
+    ts_str = _ns_to_iso(trigger_ns)
+    safe_iid = iid or "system"
+    path = _INCIDENT_DIR / f"{incident_type}_{safe_iid}_{trigger_ns // 1_000_000_000}.log"
+    with path.open("w") as f:
+        f.write("=== dYdX Collector Incident Report ===\n")
+        f.write(f"Time: {ts_str}\n")
+        f.write(f"Level: {level}\n")
+        f.write(f"Logger: {logger_name}\n")
+        f.write(f"Type: {incident_type}\n")
+        f.write(f"Instrument: {iid or '-'}\n")
+        f.write(f"Message: {message}\n\n")
+        if ticker:
+            f.write(f"--- Raw WS evidence ({ticker}, {len(lines)} messages) ---\n")
+            f.writelines(lines)
+        else:
+            f.write(
+                "--- No instrument identified in this message; no raw WS evidence attached ---\n"
+            )
+    _prune_incident_reports()
+    return str(path)
+
+
+def _prune_incident_reports() -> None:
+    """
+    Delete oldest incident reports until the directory is back under the size cap.
+
+    Runs on a worker thread (via asyncio.to_thread) -- see _INCIDENT_PRUNE_LOCK for why
+    this must be serialized against concurrent calls from other incident writes.
+    """
+    with _INCIDENT_PRUNE_LOCK:
+        files = sorted(_INCIDENT_DIR.glob("*.log"), key=lambda p: p.stat().st_mtime)
+        total = sum(f.stat().st_size for f in files)
+        for f in files:
+            if total <= _INCIDENT_DIR_MAX_BYTES:
+                break
+            total -= f.stat().st_size
+            f.unlink()
+
+
+async def _report_incident(
+    incident_type: str, iid: str | None, level: str, logger_name: str, message: str, trigger_ns: int
+) -> None:
+    await asyncio.sleep(_INCIDENT_LOOKAHEAD_DELAY_S)
+    report_path = await asyncio.to_thread(
+        _write_incident_report, incident_type, iid, level, logger_name, message, trigger_ns
+    )
+    logger.info("Incident report written [%s/%s]: %s", incident_type, iid or "-", report_path)
+
+
+class _IncidentHandler(logging.Handler):
+    """
+    Attached to the root logger at WARNING level -- catches every current and future
+    warning/error/critical in this process (both `logger`/__main__ and `critical_logger`
+    propagate to root by default), without needing changes at each call site.
+    """
+
+    def __init__(self, loop: asyncio.AbstractEventLoop | None = None) -> None:
+        super().__init__(level=logging.WARNING)
+        # Captured once, not looked up in emit(): _notify() (run via asyncio.to_thread
+        # from _watchdog_loop) calls logger.exception() on its own notification-failure
+        # path, which reaches this handler from a plain ThreadPoolExecutor worker thread
+        # -- one with no running event loop of its own. asyncio.get_running_loop() would
+        # raise there, silently dropping that incident report (swallowed below) and
+        # spamming stderr. Storing the loop up front and scheduling with
+        # run_coroutine_threadsafe (below) works correctly from either the loop's own
+        # thread or any other thread.
+        self._loop = loop or asyncio.get_running_loop()
+        self._last_report_ns: dict[tuple[str, str | None], int] = {}
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            message = record.getMessage()
+            incident_type, iid = _classify_incident(message)
+            key = (incident_type, iid)
+            now_ns = time.time_ns()
+            if now_ns - self._last_report_ns.get(key, 0) < _INCIDENT_DEBOUNCE_NS:
+                return
+            self._last_report_ns[key] = now_ns
+            asyncio.run_coroutine_threadsafe(
+                _report_incident(
+                    incident_type, iid, record.levelname, record.name, message, now_ns
+                ),
+                self._loop,
+            )
+        except Exception:
+            # logging.Handler's own documented convention: emit() must never propagate --
+            # a broken incident report must not crash the collector or the logging system
+            # it's attached to. handleError() (not a bare pass) surfaces it to stderr.
+            self.handleError(record)
+
+
 async def main() -> None:
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(
+        level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+    )
+    logging.getLogger().addHandler(_IncidentHandler())
+    # Rust's `log` crate is a no-op until a logger is installed -- without this, any
+    # `log::warn!`/`log::error!` inside the Rust WS client (including the exact path that
+    # reports a failed `call_soon_threadsafe` scheduling, i.e. a delta silently never
+    # reaching `_on_data`) is completely invisible: not filtered out, never emitted at all.
+    # This was never wired up because this collector never touches TradingNode/Kernel
+    # (the usual place nautilus_trader calls it). WARNING+ only -- surfaces hidden
+    # failures without adding Rust-side INFO/DEBUG noise on top of the Python logging above.
+    # init_logging() returns a LogGuard that MUST be kept alive for the process lifetime --
+    # LogGuard's Drop impl (crates/common/src/logging/logger.rs:1343) treats the LAST guard
+    # being dropped as subsystem shutdown: it sets a global bypass flag, disables the log
+    # crate's max level, and joins/closes the logging thread. Discarding the return value
+    # (as this call used to) means Python garbage-collects the guard within microseconds of
+    # this call returning -- Rust-side logging was silently DEAD immediately after every
+    # single startup, this whole time. `_log_guard` must stay a live reference for `main()`'s
+    # entire lifetime (it does, since this coroutine runs until shutdown).
+    _log_guard = nautilus_pyo3.init_logging(
+        trader_id=nautilus_pyo3.TraderId("COLLECTOR-001"),
+        instance_id=nautilus_pyo3.UUID4(),
+        level_stdout=nautilus_pyo3.LogLevel.WARNING,
+        # ponytail: temporary crossed-book root-cause debug (Story 5.1). DEBUG+ goes to a
+        # file, not stdout -- component_levels/log_components_only can only make Logger's
+        # filtering MORE restrictive than the global stdout/fileout level, never less
+        # (see Logger::enabled() in crates/common/src/logging/logger.rs), so there is no
+        # way to raise just handler.rs's [WS_RAW] debug! line above stdout=WARNING without
+        # a separate, permissive file sink. Remove alongside handler.rs's [WS_RAW] line
+        # once the investigation concludes.
+        level_file=nautilus_pyo3.LogLevel.DEBUG,
+        directory=str(_WS_RAW_LOG_DIR),
+        file_name="ws_raw_debug",
+        # Bounded rolling buffer, not a growing archive: [WS_RAW] is ~1MB/s, so 250MB x 2
+        # backups is ~500MB nominal / ~12 minutes of retention -- a debugging aid,
+        # self-cleaning by design. It doesn't need to survive long: _IncidentHandler
+        # (below) snapshots the relevant window into a permanent incident report the
+        # moment something WARNING+ worthy happens, well within this retention window (a
+        # fixed 100MB x 3 attempt was measured too short at ~6 min for a human to notice
+        # and go check manually -- this one only needs to outlast
+        # _INCIDENT_LOOKAHEAD_DELAY_S, not a human).
+        #
+        # Rotation size, not backup count, is what was raised here (was 50MB x 10, same
+        # ~500MB nominal budget): nautilus_trader's file writer unconditionally
+        # `eprintln!`s "Rotated log file..." on every rotation regardless of configured
+        # log level (crates/common/src/logging/writer.rs's rotate_file(), not routed
+        # through the `log` crate at all) -- that fired every ~50s at the old size, purely
+        # docker-logs noise nothing in this codebase reads (_scan_ws_raw_window globs
+        # every rotated file, never depends on which one is "current"). Fewer, bigger
+        # files cut that print's frequency ~5x for the same nominal retention budget.
+        file_rotate=(250_000_000, 2),
+    )
     config = load_config(CONFIG_PATH)
 
     quarantine_corrupt_parquet(config.catalog_path)

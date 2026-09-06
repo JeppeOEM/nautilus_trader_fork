@@ -110,6 +110,7 @@ def classify_liquidity(
     markets_json: dict,
     min_oi_usd: float,
     exclude: frozenset[str] | None = None,
+    max_liquid: int | None = None,
 ) -> tuple[set[str], set[str]]:
     """
     Split all dYdX markets into (liquid, illiquid) by 24-hour volume (USD).
@@ -120,12 +121,19 @@ def classify_liquidity(
 
     Instruments in `exclude` are placed in illiquid regardless of volume.
 
+    `max_liquid`, if given, keeps only the highest-volume markets in `liquid` and
+    demotes the rest to `illiquid` -- the caller is responsible for sizing this to
+    leave room for pinned instruments (see collector.py's _MAX_WS_SUBSCRIPTIONS:
+    dYdX's WS connection hard-caps subscriptions per channel at 32, so subscribing
+    more markets than that gets the overflow rejected and the whole connection
+    stuck in a reconnect loop, not just those markets skipped).
+
     Returns sets of instrument ID strings (`"{ticker}-PERP.DYDX"` format).
     Markets with missing or unparseable volume are treated as illiquid.
     """
     _exclude = exclude or frozenset()
-    liquid: set[str] = set()
     illiquid: set[str] = set()
+    volumes: dict[str, float] = {}
     for market in markets_json.get("markets", {}).values():
         ticker = market.get("ticker")
         if ticker is None:
@@ -138,8 +146,18 @@ def classify_liquidity(
             vol = float(market.get("volume24H") or 0)
         except (ValueError, TypeError):
             vol = 0.0
-        (liquid if vol >= min_oi_usd else illiquid).add(iid)
-    return liquid, illiquid
+        if vol >= min_oi_usd:
+            volumes[iid] = vol
+        else:
+            illiquid.add(iid)
+
+    if max_liquid is not None and len(volumes) > max_liquid:
+        overflow = sorted(volumes, key=volumes.get)[: len(volumes) - max_liquid]
+        illiquid.update(overflow)
+        for iid in overflow:
+            del volumes[iid]
+
+    return set(volumes), illiquid
 
 
 def _fetch_markets_json(network: DydxNetwork) -> dict:

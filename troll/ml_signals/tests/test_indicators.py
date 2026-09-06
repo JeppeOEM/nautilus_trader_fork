@@ -19,6 +19,10 @@ from ml_signals.indicators import MultiLevelOBI
 from ml_signals.indicators import MultiLevelOFI
 from ml_signals.indicators import OnlineLogisticTrend
 from ml_signals.indicators import OrderFlowImbalance
+from ml_signals.indicators import mid_price
+from ml_signals.indicators import spread
+from ml_signals.indicators import trade_aggregates
+from ml_signals.indicators import volume_delta
 
 
 def test_uptrend_converges_above_half() -> None:
@@ -143,6 +147,50 @@ def test_multilevel_ofi_zscore_direction_matches_signal() -> None:
     assert ofi.value < 0.0
 
 
+def _snap(bid_prices=None, ask_prices=None, buy_volume=0.0, sell_volume=0.0, buy_count=0, sell_count=0) -> dict:
+    return {
+        "bid_prices": bid_prices if bid_prices is not None else [100.0],
+        "ask_prices": ask_prices if ask_prices is not None else [101.0],
+        "buy_volume": buy_volume,
+        "sell_volume": sell_volume,
+        "buy_count": buy_count,
+        "sell_count": sell_count,
+    }
+
+
+def test_spread_is_ask_minus_bid() -> None:
+    assert spread(_snap(bid_prices=[100.0], ask_prices=[101.0])) == 1.0
+
+
+def test_spread_none_on_thin_book() -> None:
+    assert spread(_snap(bid_prices=[], ask_prices=[101.0])) is None
+    assert spread(_snap(bid_prices=[100.0], ask_prices=[])) is None
+
+
+def test_mid_price_averages_top_of_book() -> None:
+    assert mid_price(_snap(bid_prices=[100.0], ask_prices=[102.0])) == 101.0
+
+
+def test_mid_price_none_on_thin_book() -> None:
+    assert mid_price(_snap(bid_prices=[], ask_prices=[101.0])) is None
+
+
+def test_volume_delta_is_buy_minus_sell() -> None:
+    assert volume_delta(_snap(buy_volume=5.0, sell_volume=2.0)) == 3.0
+
+
+def test_trade_aggregates_sums_across_snapshots() -> None:
+    snaps = [
+        _snap(buy_volume=1.0, sell_volume=2.0, buy_count=1, sell_count=3),
+        _snap(buy_volume=4.0, sell_volume=0.0, buy_count=2, sell_count=0),
+    ]
+    assert trade_aggregates(snaps) == (5.0, 2.0, 3, 3)
+
+
+def test_trade_aggregates_empty_list() -> None:
+    assert trade_aggregates([]) == (0.0, 0.0, 0, 0)
+
+
 if __name__ == "__main__":
     test_uptrend_converges_above_half()
     test_downtrend_converges_below_half()
@@ -155,4 +203,11 @@ if __name__ == "__main__":
     test_multilevel_ofi_usd_notional_scales_by_price()
     test_multilevel_ofi_zscore_zero_for_constant_signal()
     test_multilevel_ofi_zscore_direction_matches_signal()
+    test_spread_is_ask_minus_bid()
+    test_spread_none_on_thin_book()
+    test_mid_price_averages_top_of_book()
+    test_mid_price_none_on_thin_book()
+    test_volume_delta_is_buy_minus_sell()
+    test_trade_aggregates_sums_across_snapshots()
+    test_trade_aggregates_empty_list()
     print("ok")

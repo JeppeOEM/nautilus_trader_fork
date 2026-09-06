@@ -25,13 +25,18 @@ function's real branching logic (position side, win-rate) correctly.
 import asyncio
 import contextlib
 import json
+import types
 from decimal import Decimal
 
 import live_paper.bot_status as bot_status_module
 from live_paper import fills_store
 from live_paper import trade_history
+from live_paper.bot_status import _close_orphaned_incident
 from live_paper.bot_status import _heartbeat_loop
+from live_paper.bot_status import _incident_transition
 from live_paper.bot_status import _parse_control_message
+from live_paper.bot_status import _record_process_start
+from live_paper.bot_status import _trim_incidents
 from live_paper.bot_status import build_status
 from live_paper.strategy import DummyStrategy
 from live_paper.strategy import DummyStrategyConfig
@@ -148,6 +153,12 @@ def _run_strategy(
     trade_history.subscribe(strategy, bot_id=bot_id, db_path=db_path)
     engine.run()
     return engine, strategy
+
+
+def test_strategy_last_data_ns_tracks_the_most_recent_quote_tick(tmp_path) -> None:
+    db_path = str(tmp_path / "fills.db")
+    _engine_unused, strategy = _run_strategy(db_path)
+    assert strategy.last_data_ns == _TS_START + 15 * _STEP_NS
 
 
 def test_build_status_after_a_real_run_has_expected_shape(tmp_path) -> None:
@@ -289,6 +300,57 @@ def test_parse_control_message_missing_bot_id_returns_none() -> None:
     assert _parse_control_message({"action": "start"}, "bot-01") is None
 
 
+def test_incident_transition_opens_a_new_incident_on_stale_start() -> None:
+    incidents, changed = _incident_transition(now=100.0, is_stale=True, incidents=[])
+    assert changed is True
+    assert incidents == [{"type": "data_stale", "started_at": 100.0, "ended_at": None}]
+
+
+def test_incident_transition_does_not_reopen_while_already_stale() -> None:
+    open_incident = [{"type": "data_stale", "started_at": 100.0, "ended_at": None}]
+    incidents, changed = _incident_transition(now=110.0, is_stale=True, incidents=open_incident)
+    assert changed is False
+    assert incidents == open_incident
+
+
+def test_incident_transition_closes_open_incident_on_recovery() -> None:
+    open_incident = [{"type": "data_stale", "started_at": 100.0, "ended_at": None}]
+    incidents, changed = _incident_transition(now=135.0, is_stale=False, incidents=open_incident)
+    assert changed is True
+    assert incidents == [{"type": "data_stale", "started_at": 100.0, "ended_at": 135.0}]
+
+
+def test_incident_transition_is_a_no_op_while_healthy() -> None:
+    closed = [{"type": "data_stale", "started_at": 100.0, "ended_at": 135.0}]
+    incidents, changed = _incident_transition(now=200.0, is_stale=False, incidents=closed)
+    assert changed is False
+    assert incidents == closed
+
+
+def test_close_orphaned_incident_closes_a_dangling_open_span() -> None:
+    orphaned = [{"type": "data_stale", "started_at": 100.0, "ended_at": None}]
+    closed = _close_orphaned_incident(orphaned, now=999.0)
+    assert closed[0]["ended_at"] == 999.0
+    assert closed[0]["note"] == "closed by restart"
+
+
+def test_close_orphaned_incident_is_a_no_op_when_nothing_is_open() -> None:
+    incidents = [{"type": "data_stale", "started_at": 100.0, "ended_at": 135.0}]
+    assert _close_orphaned_incident(incidents, now=999.0) == incidents
+
+
+def test_record_process_start_appends_zero_duration_marker() -> None:
+    incidents = _record_process_start([], now=50.0)
+    assert incidents == [{"type": "process_start", "started_at": 50.0, "ended_at": 50.0}]
+
+
+def test_trim_incidents_keeps_only_the_most_recent() -> None:
+    incidents = [{"i": i} for i in range(60)]
+    trimmed = _trim_incidents(incidents)
+    assert len(trimmed) == 50
+    assert trimmed[-1] == {"i": 59}
+
+
 def test_parse_control_message_ignores_a_mode_field_if_present() -> None:
     # AC4: the control channel must never carry a mode/paper-live parameter -- a
     # message that happens to include one anyway must not change the parsed action.
@@ -328,11 +390,12 @@ def test_heartbeat_loop_skips_a_failing_build_status_tick_without_crashing(monke
         task = asyncio.create_task(
             _heartbeat_loop(
                 client,
-                strategy=object(),
+                strategy=types.SimpleNamespace(last_data_ns=0),
                 bot_id="bot-01",
                 mode="paper",
                 started_at=0.0,
                 db_path="unused",
+                incidents=[],
             )
         )
         await asyncio.sleep(0.05)

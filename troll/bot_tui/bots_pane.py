@@ -53,6 +53,11 @@ COLD_OPEN_TEXT = "waiting for bots:status…"
 HISTORY_UNAVAILABLE_TEXT = "history unavailable"
 NO_TRADES_YET_TEXT = "no trades yet"
 
+# Same "unavailable vs genuinely empty" distinction as HISTORY_UNAVAILABLE_TEXT/
+# NO_TRADES_YET_TEXT, applied to bot_incidents_state's own read surface.
+INCIDENTS_UNAVAILABLE_TEXT = "incidents unavailable"
+NO_INCIDENTS_TEXT = "no incidents recorded"
+
 _RANGE_CYCLE = ("day", "week", "month", "all")
 _SPARK_CHARS = "▁▂▃▄▅▆▇█"
 
@@ -222,6 +227,47 @@ def pnl_sparkline_text(entry: dict | None) -> str:
     )
 
 
+def format_stat(value: float | None, fmt: str = "{:.2f}") -> str:
+    """
+    "n/a" for an unavailable stat -- not fetched, or genuinely undefined (e.g. a
+    zero-variance return series makes Sharpe undefined) -- never a fabricated 0.00
+    (mirrors format_win_rate's own "None is not 0.0" convention).
+    """
+    if value is None:
+        return "n/a"
+    return fmt.format(value)
+
+
+def metrics_lines(entry: dict | None) -> list[str]:
+    """
+    Bot-detail's performance-metrics region: Sharpe, Sortino, Calmar, max drawdown,
+    profit factor, expectancy, avg win/loss -- sourced from bots:history's "metrics"
+    field, which ml_signals.performance_metrics.all_metrics() computes as the single
+    shared implementation (SSOT-02) this function only formats, never recomputes.
+
+    A missing "metrics" key (e.g. a stale cached payload from before this field
+    existed) is treated the same as every individual stat being unavailable -- each
+    renders "n/a" via format_stat rather than this function special-casing it.
+    """
+    if entry is None:
+        return [HISTORY_UNAVAILABLE_TEXT]
+    metrics = entry.get("metrics") or {}
+    return [
+        (
+            f"sharpe  {format_stat(metrics.get('sharpe_ratio')):>7}  "
+            f"sortino {format_stat(metrics.get('sortino_ratio')):>7}  "
+            f"calmar  {format_stat(metrics.get('calmar_ratio')):>7}  "
+            f"max dd  {format_stat(metrics.get('max_drawdown'), '{:.2%}'):>8}"
+        ),
+        (
+            f"profit factor {format_stat(metrics.get('profit_factor')):>7}  "
+            f"expectancy {format_stat(metrics.get('expectancy')):>9}  "
+            f"avg win {format_stat(metrics.get('avg_win')):>9}  "
+            f"avg loss {format_stat(metrics.get('avg_loss')):>9}"
+        ),
+    ]
+
+
 def dashboard_bot_url(base_url: str, bot_id: str) -> str:
     """
     `/bot/{bot_id}` (Story 4.7, AC3) -- mirrors coin_detail.dashboard_chart_url()'s
@@ -231,3 +277,38 @@ def dashboard_bot_url(base_url: str, bot_id: str) -> str:
     only job is producing the URL bot_tui itself opens.
     """
     return f"{base_url.rstrip('/')}/bot/{bot_id}"
+
+
+def format_incident_line(incident: dict, now: float) -> str:
+    """
+    One incidents-log row: timestamp (from incident["started_at"], UNIX seconds --
+    live_paper/bot_status.py's own time.time()-based wire contract, distinct from the
+    trades blotter's ts_event-derived nanosecond timestamps), a type label, and a
+    duration -- "ongoing (Nm..)" while ended_at is still None (an open incident, per
+    bot_status._incident_transition), a fixed duration once it closes. "process_start"
+    incidents are zero-duration markers (no duration text).
+    """
+    ts_text = datetime.fromtimestamp(incident["started_at"], tz=UTC).strftime("%m-%d %H:%M:%S")
+    if incident["type"] == "process_start":
+        return f"{ts_text}  {'restarted':<11}"
+    ended_at = incident.get("ended_at")
+    if ended_at is None:
+        duration_text = f"ongoing ({format_uptime(incident['started_at'], now)})"
+    else:
+        duration_text = format_uptime(incident["started_at"], ended_at)
+    return f"{ts_text}  {'stale feed':<11}{duration_text}"
+
+
+def incidents_lines(incidents: list[dict] | None, now: float) -> list[str]:
+    """
+    Bot-detail's incidents-log region: `incidents` is
+    bot_incidents_state.get_incidents()'s result for the currently-open bot -- already
+    None whenever that read surface is unavailable (never fetched yet), distinct from
+    "fetched, genuinely has no incidents". Most-recent-first -- bot_status.py's own
+    wire contract appends new incidents oldest-last.
+    """
+    if incidents is None:
+        return [INCIDENTS_UNAVAILABLE_TEXT]
+    if not incidents:
+        return [NO_INCIDENTS_TEXT]
+    return [format_incident_line(inc, now) for inc in reversed(incidents)]

@@ -29,6 +29,17 @@ the component transitions to Stopped -- it could publish a final status on stop,
 could never later act on a "start" command, since a stopped component's timers don't
 run. This loop's own task is unaffected by the Strategy's Running/Stopped state, so it
 can always hear a future "start" and call strategy.start() again.
+
+Also owns bots:incidents:{bot_id} (operator request: a WS/feed-health incident log
+viewable from bot_tui without digging through logs): a bounded, Redis-persisted list of
+{type, started_at, ended_at} spans -- "data_stale" (strategy.last_data_ns silent for
+_DATA_STALE_NS, this module's own OBS-01-derived proxy for "this bot's WS feed is
+having problems", since no typed reconnect event exists to hook) and "process_start"
+(zero-duration marker, logged once per container start so a restart is never invisible
+just because no data-staleness incident happened to accompany it). See
+_incident_transition's own docstring for the append-on-stale/close-on-recover state
+machine, and run()'s own comments for why seeding/orphan-closing happens once per
+process life, not once per Redis reconnect.
 """
 
 import asyncio
@@ -48,6 +59,76 @@ logger = logging.getLogger(__name__)
 # (5s), the precedent this project already established for "published on change +
 # heartbeat" Redis channels (architecture AD-9/AD-10).
 _STATUS_HEARTBEAT_SECONDS = 5.0
+
+# WS/feed-health incident log (operator request: "monitor WS connection of the bots,
+# flag interruptions, keep a log of restarts/downtime/stale connections viewable from
+# the TUI"). No typed reconnect event exists to hook -- the dYdX adapter's Rust client
+# handles reconnects internally with no Python callback for it -- so this reuses
+# dydx_collector's own OBS-01 doctrine instead: 30s+ silence on a live instrument's
+# quote feed is a pipeline failure, never a quiet market. Same threshold value as
+# dydx_collector.collector._WATCHDOG_STALE_NS, applied here to a single bot's own feed.
+_DATA_STALE_NS: int = 30_000_000_000  # 30 seconds
+
+# Bounded incident history (MEM-01) -- oldest entries drop off first.
+_MAX_INCIDENTS: int = 50
+
+
+def _incidents_redis_key(bot_id: str) -> str:
+    return f"bots:incidents:{bot_id}"
+
+
+def _incident_transition(
+    now: float, is_stale: bool, incidents: list[dict]
+) -> tuple[list[dict], bool]:
+    """
+    Pure state-machine step for the per-bot data-staleness incident log. Mirrors the
+    shape of dydx_collector.collector._watchdog_transition (not reused directly -- AD-4
+    only permits cross-module reuse of pure, I/O-free *utilities*, and this one
+    persists a different representation: a list of {started_at, ended_at} spans, not a
+    notify-string).
+
+    Appends a new open incident (ended_at=None) on a stale-start transition; closes the
+    most recent open incident on recovery; otherwise returns incidents unchanged.
+    Returns (incidents, changed) so the caller only writes to Redis on an actual
+    transition, never on every heartbeat tick.
+    """
+    open_incident = incidents[-1] if incidents and incidents[-1]["ended_at"] is None else None
+    if is_stale:
+        if open_incident is None:
+            new_incident = {"type": "data_stale", "started_at": now, "ended_at": None}
+            return [*incidents, new_incident], True
+        return incidents, False
+    if open_incident is not None:
+        closed = {**open_incident, "ended_at": now}
+        return [*incidents[:-1], closed], True
+    return incidents, False
+
+
+def _close_orphaned_incident(incidents: list[dict], now: float) -> list[dict]:
+    """
+    Close any incident left open (ended_at=None) by a previous process life. A crash/
+    restart mid-incident means the loop that would have closed it is gone -- without
+    this the log would show a permanently "ongoing" incident from a process that isn't
+    even the one currently running. Called once at process startup, before the
+    heartbeat loop's own transitions begin.
+    """
+    if not incidents or incidents[-1]["ended_at"] is not None:
+        return incidents
+    closed = {**incidents[-1], "ended_at": now, "note": "closed by restart"}
+    return [*incidents[:-1], closed]
+
+
+def _record_process_start(incidents: list[dict], now: float) -> list[dict]:
+    """
+    Zero-duration marker appended once per process start -- "has there been a
+    restart" must be visible in the same log as data-staleness spans, not just
+    inferred from their absence.
+    """
+    return [*incidents, {"type": "process_start", "started_at": now, "ended_at": now}]
+
+
+def _trim_incidents(incidents: list[dict]) -> list[dict]:
+    return incidents[-_MAX_INCIDENTS:]
 
 
 def build_status(
@@ -136,8 +217,24 @@ async def _heartbeat_loop(
     mode: str,
     started_at: float,
     db_path: str,
+    incidents: list[dict],
 ) -> None:
     while True:
+        # incidents is mutated in place (not reassigned) so the same list object
+        # run() holds keeps reflecting reality across a Redis reconnect -- this
+        # function is re-scheduled fresh each reconnect (see run()'s docstring), but
+        # incidents itself must survive that so a reconnect doesn't look like a data
+        # gap ever happened.
+        last_data_ns = strategy.last_data_ns
+        now_ns = time.time_ns()
+        is_stale = last_data_ns != 0 and (now_ns - last_data_ns) > _DATA_STALE_NS
+        new_incidents, changed = _incident_transition(time.time(), is_stale, incidents)
+        if changed:
+            incidents[:] = _trim_incidents(new_incidents)
+            try:
+                await client.set(_incidents_redis_key(bot_id), json.dumps(incidents))
+            except Exception:
+                logger.exception("bots:incidents write failed for %s", bot_id)
         # build_status() can briefly raise during live startup -- portfolio methods
         # like net_exposure()/unrealized_pnl() need a last quote price that doesn't
         # exist yet if the heartbeat loop's first tick lands before the data client's
@@ -192,13 +289,38 @@ async def run(strategy: Strategy, bot_id: str, mode: str, redis_url: str, db_pat
     """
     started_at = time.time()
     logger.info("bots:status/control loop starting for bot_id=%s, url=%s", bot_id, redis_url)
+
+    # Seeded once per process life, not once per Redis reconnect below -- otherwise a
+    # mere Redis blip (unrelated to this bot's own market-data feed) would relogin as
+    # a spurious "process_start" and re-run orphan-closing every time. incidents is
+    # then mutated in place by every _heartbeat_loop invocation across reconnects
+    # (see that function's own comment).
+    incidents: list[dict] = []
+    try:
+        async with aioredis.Redis.from_url(redis_url, decode_responses=True) as seed_client:
+            raw = await seed_client.get(_incidents_redis_key(bot_id))
+            if raw is not None:
+                incidents = json.loads(raw)
+            now = time.time()
+            incidents = _trim_incidents(
+                _record_process_start(_close_orphaned_incident(incidents, now), now)
+            )
+            await seed_client.set(_incidents_redis_key(bot_id), json.dumps(incidents))
+    except Exception as exc:
+        logger.warning(
+            "bots:incidents seed failed for %s, starting this run with an empty log: %s",
+            bot_id,
+            exc,
+        )
+        incidents = []
+
     while True:
         try:
             async with aioredis.Redis.from_url(redis_url, decode_responses=True) as client:
                 pubsub = client.pubsub()
                 await pubsub.subscribe("bots:control")
                 await asyncio.gather(
-                    _heartbeat_loop(client, strategy, bot_id, mode, started_at, db_path),
+                    _heartbeat_loop(client, strategy, bot_id, mode, started_at, db_path, incidents),
                     _control_loop(pubsub, strategy, bot_id),
                 )
         except asyncio.CancelledError:

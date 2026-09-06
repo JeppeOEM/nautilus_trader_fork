@@ -41,7 +41,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-07-01
-last_updated: 2026-09-02 (4-1 done) (4-2 done) (4-3 done) (4-4 done) (4-5 done) (4-6 done) (4-7 done)
+last_updated: 2026-09-06 (5-2 review)
 project: nautilus_trader_fork
 project_key: NOKEY
 tracking_system: file-system
@@ -80,6 +80,25 @@ development_status:
   4-6-durable-bot-trade-position-history-via-nautilus-cache: done
   4-7-bot-detail-trades-blotter-and-pnl-over-time-chart: done
   epic-4-retrospective: optional
+
+  # epic-5 has no epics.md entry -- standalone investigation story created directly via
+  # create-story at the user's request, continuing troll/.planning/debug/crossed-book-root-cause.md
+  epic-5: in-progress
+  5-1-prove-crossed-book-root-cause: in-progress
+  5-2-per-level-message-id-uncrossing-for-crossed-order-books: review
+
+  # epic-6 has no epics.md entry -- standalone feature story created directly via
+  # create-story at the user's request (same precedent as epic-5), following an
+  # interactive plan-mode design session for the dYdX collector's instrument control.
+  epic-6: in-progress
+  6-1-collector-instrument-control: review
+
+  # epic-7 has no epics.md entry -- standalone feature story created directly via
+  # create-story at the user's request (same precedent as epic-5/6), following an
+  # interactive plan-mode design session for the coin chart's drag-to-pan history
+  # browsing and tick-level zoom.
+  epic-7: in-progress
+  7-1-candle-chart-drag-to-pan-history: review
 
 action_items:
   - epic: 1

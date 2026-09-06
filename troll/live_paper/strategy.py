@@ -144,6 +144,15 @@ class DummyStrategy(Strategy):
         self.obi = MultiLevelOBI(levels=config.obi_levels)
         self.mlofi = MultiLevelOFI(levels=config.ofi_levels, window=config.ofi_window)
         self.trend = OnlineLogisticTrend(lookback=config.trend_lookback)
+        # ts_event (ns) of the last QuoteTick received -- read externally by
+        # bot_status.py's own heartbeat loop as a proxy for "is this bot's WS feed
+        # alive" (OBS-01: 30s+ silence on a live instrument is a pipeline failure,
+        # same doctrine dydx_collector's own watchdog already applies). Deliberately a
+        # plain public attribute set from a market-data callback (subscriptions stay
+        # active regardless of Strategy.is_running), not a Strategy-internal clock
+        # timer -- see bot_status.py's own module docstring for why a Strategy-internal
+        # timer is the wrong home for anything that must keep working while stopped.
+        self.last_data_ns: int = 0
 
     def on_start(self) -> None:
         self.instrument = self.cache.instrument(self.config.instrument_id)
@@ -197,6 +206,8 @@ class DummyStrategy(Strategy):
         self.log.info(f"DummyStrategy started for {self.config.instrument_id}")
 
     def on_quote_tick(self, tick: QuoteTick) -> None:
+        self.last_data_ns = tick.ts_event
+
         bid_price = tick.bid_price.as_double()
         bid_size = tick.bid_size.as_double()
         ask_price = tick.ask_price.as_double()

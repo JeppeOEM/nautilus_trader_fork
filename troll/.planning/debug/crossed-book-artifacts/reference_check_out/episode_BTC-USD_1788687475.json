@@ -1,0 +1,12 @@
+{
+  "collector_claim": {
+    "iid": "BTC-USD-PERP.DYDX",
+    "bid": "79943.000000",
+    "ask": "79921.000000"
+  },
+  "reference_book": {
+    "bid": "79943",
+    "ask": "79921"
+  },
+  "messages_touching_frozen_prices": []
+}

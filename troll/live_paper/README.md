@@ -149,6 +149,8 @@ is.
 | `s` | Bots pane or Bot-detail | start/stop the highlighted or open bot. Stopping a *running* bot opens a type-to-confirm prompt (type `stop` + Enter) — starting has no such guard |
 | `t` | Bot-detail | cycle the trades blotter / PnL sparkline's range: day → week → month → all |
 | `o` | Bot-detail | open this bot's chart in the web dashboard (browser) |
+| `v` | Bot-detail | view this bot's strategy source, read-only, scrollable (`esc` back) |
+| `i` | Bot-detail | view this bot's incidents log: restarts + WS/data-stale spans (`esc` back) |
 | `Esc` | any sub-view | go back one level |
 
 The Bots pane shows `bot_id`, mode (`paper`/`live`), running state, position side,
@@ -157,6 +159,17 @@ Bot-detail additionally shows the trades blotter and PnL-over-time sparkline sou
 from `bots:history:{bot_id}:{range}` (Story 4.6/4.7) — empty until the bot has at least
 one closed position and `trade_history.py`'s 30s Redis-publish cycle has run at least
 once.
+
+**Incidents log (`i` key):** `bot_status.py`'s own heartbeat loop watches
+`strategy.last_data_ns` (the last `QuoteTick`'s timestamp) and treats 30s+ of silence as
+a WS/data-feed problem — the same OBS-01 doctrine `dydx_collector`'s watchdog already
+applies, since no typed "WS reconnected" event exists to hook from Python (the dYdX
+adapter's Rust client handles reconnects internally). Each stale span is logged with a
+start time immediately and its end filled in once the feed recovers — a still-open span
+shows as `ongoing (Nm..)`. A zero-duration `restarted` marker is also logged once per
+container start, so a crash/restart is visible in the same log even with no
+accompanying data-staleness incident. Persisted in Redis under `bots:incidents:{bot_id}`
+(bounded to the most recent 50), so this history survives a `bot_tui` restart too.
 
 ---
 

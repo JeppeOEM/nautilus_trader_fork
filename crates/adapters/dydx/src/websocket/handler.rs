@@ -212,6 +212,13 @@ impl FeedHandler {
                     return vec![DydxWsOutputMessage::Reconnected];
                 }
 
+                // ponytail: temporary crossed-book root-cause debug, remove once resolved.
+                // debug!, not trace! -- the workspace's `log` crate feature
+                // `release_max_level_debug` (root Cargo.toml) strips trace! calls entirely
+                // from release builds at compile time; debug! is the highest level that
+                // survives release compilation.
+                log::debug!("[WS_RAW] {txt}");
+
                 // Hot path: zero-copy parse for feed messages (orderbook/trades/candles)
                 match serde_json::from_str::<DydxWsFeedMessage>(&txt) {
                     Ok(feed_msg) => {

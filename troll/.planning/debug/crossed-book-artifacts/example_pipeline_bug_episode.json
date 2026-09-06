@@ -1,0 +1,51 @@
+{
+  "collector_claim": {
+    "iid": "BTC-USD-PERP.DYDX",
+    "bid": "79271.000000",
+    "ask": "79269.000000"
+  },
+  "reference_book": {
+    "bid": "79271",
+    "ask": "79273"
+  },
+  "messages_touching_frozen_prices": [
+    {
+      "ts_ns": 1788532838620381319,
+      "data": {
+        "type": "channel_data",
+        "connection_id": "24b11cc3-3feb-4c68-8fde-ea6bed4edb2d",
+        "message_id": 88675,
+        "id": "BTC-USD",
+        "channel": "v4_orderbook",
+        "version": "1.0.0",
+        "contents": {
+          "asks": [
+            [
+              "79269",
+              "0.063"
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "ts_ns": 1788532839171633988,
+      "data": {
+        "type": "channel_data",
+        "connection_id": "24b11cc3-3feb-4c68-8fde-ea6bed4edb2d",
+        "message_id": 88959,
+        "id": "BTC-USD",
+        "channel": "v4_orderbook",
+        "version": "1.0.0",
+        "contents": {
+          "asks": [
+            [
+              "79269",
+              "0"
+            ]
+          ]
+        }
+      }
+    }
+  ]
+}

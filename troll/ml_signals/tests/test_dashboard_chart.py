@@ -28,12 +28,25 @@ Why these bugs occur
 """
 
 import json
+import tempfile
 from collections import deque
 
 import pytest
+from nautilus_trader.model.data import TradeTick
+from nautilus_trader.model.enums import AggressorSide
+from nautilus_trader.model.identifiers import InstrumentId
+from nautilus_trader.model.identifiers import TradeId
+from nautilus_trader.model.objects import Price
+from nautilus_trader.model.objects import Quantity
+from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
 import ml_signals.dashboard
-from ml_signals.dashboard import _coin_chart_json
+from ml_signals.dashboard import (
+    _coin_chart_json,
+    _historical_candles_json,
+    _historical_ticks_json,
+    _live_candles_json,
+)
 
 _IID = "BTC-USD-PERP.DYDX"
 _TS_NS = 1_700_000_000_000_000_000  # arbitrary fixed nanosecond timestamp
@@ -391,3 +404,99 @@ def test_first_snapshot_never_gets_null_prefix() -> None:
     result = _chart()
     assert len(result["ts"]) == 1
     assert result["bid"] == [100.0]
+
+
+# ---------------------------------------------------------------------------
+# Live candles — leading-bucket churn
+# ---------------------------------------------------------------------------
+
+def test_live_candles_drops_partial_leading_bucket() -> None:
+    """The oldest bucket loses members every second as the deque evicts old snapshots
+    (maxlen), so its open/high/low would otherwise change on every poll even though
+    it isn't the currently-forming candle. Only fully-aged buckets should be returned.
+    """
+    _reset()
+    bar = 60
+    ml_signals.dashboard._second_rolling[_IID] = deque([
+        _snap(100.0, 102.0, ts_ns=_TS_NS),  # oldest bucket -- must be dropped
+        _snap(110.0, 112.0, ts_ns=_TS_NS + bar * 1_000_000_000),
+    ])
+    candles = json.loads(_live_candles_json(_IID, bar))["candles"]
+    assert len(candles) == 1
+    assert candles[0]["o"] == 111.0
+
+
+def test_live_candles_keeps_only_bucket_when_alone() -> None:
+    """With just one bucket there's nothing to drop -- it's the only data available."""
+    _reset()
+    ml_signals.dashboard._second_rolling[_IID] = deque([_snap(100.0, 102.0)])
+    candles = json.loads(_live_candles_json(_IID, 60))["candles"]
+    assert len(candles) == 1
+    assert candles[0]["o"] == 101.0
+
+
+# ---------------------------------------------------------------------------
+# Catalog-backed candles/ticks (_historical_candles_json / _historical_ticks_json)
+# ---------------------------------------------------------------------------
+
+def _write_trades_to_catalog(tmp_path: str, n: int = 10) -> tuple[int, int]:
+    """Write n TradeTicks 60s apart, prices 100,101,...,100+n-1, into a temp catalog.
+
+    Mirrors the temp-catalog-with-real-TradeTicks pattern from
+    ml_signals/tests/test_timeframe_backtest.py's _catalog_with_trades. Returns
+    (first_ts_ns, last_ts_ns) for the caller to build a bounding [start_ms, end_ms].
+    """
+    base_ns = _TS_NS
+    step_ns = 60 * 1_000_000_000
+    trades = [
+        TradeTick(
+            instrument_id=InstrumentId.from_str(_IID), price=Price(100.0 + i, 1), size=Quantity(1.0 + i, 1),
+            aggressor_side=AggressorSide.BUYER if i % 2 == 0 else AggressorSide.SELLER,
+            trade_id=TradeId(str(i)), ts_event=base_ns + i * step_ns, ts_init=base_ns + i * step_ns,
+        )
+        for i in range(n)
+    ]
+    catalog = ParquetDataCatalog(tmp_path)
+    catalog.write_data(trades)
+    return trades[0].ts_event, trades[-1].ts_event
+
+
+def test_historical_candles_json_builds_from_catalog_trades(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Round-trips real TradeTicks through the catalog into OHLC candles."""
+    with tempfile.TemporaryDirectory() as tmp:
+        first_ns, last_ns = _write_trades_to_catalog(tmp, n=10)
+        monkeypatch.setattr(ml_signals.dashboard, "CATALOG_PATH", tmp)
+        start_ms = first_ns // 1_000_000 - 1
+        end_ms = last_ns // 1_000_000 + 1
+        # bar_seconds wide enough that all 10 trades (9 minutes apart) land in one candle
+        candles = json.loads(_historical_candles_json(_IID, start_ms, end_ms, 3600))["candles"]
+        assert len(candles) == 1
+        assert candles[0]["o"] == 100.0
+        assert candles[0]["h"] == 109.0
+        assert candles[0]["l"] == 100.0
+        assert candles[0]["c"] == 109.0
+
+
+def test_historical_ticks_json_returns_raw_trades(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Returns individual trade prints, not aggregated candles."""
+    with tempfile.TemporaryDirectory() as tmp:
+        first_ns, last_ns = _write_trades_to_catalog(tmp, n=5)
+        monkeypatch.setattr(ml_signals.dashboard, "CATALOG_PATH", tmp)
+        start_ms = first_ns // 1_000_000 - 1
+        end_ms = last_ns // 1_000_000 + 1
+        ticks = json.loads(_historical_ticks_json(_IID, start_ms, end_ms))["ticks"]
+        assert len(ticks) == 5
+        assert [t["price"] for t in ticks] == [100.0, 101.0, 102.0, 103.0, 104.0]
+        assert ticks[0]["side"] == "BUYER"
+        assert ticks[1]["side"] == "SELLER"
+
+
+def test_historical_ticks_json_respects_row_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    """max_rows caps the response even when more trades exist in the requested window."""
+    with tempfile.TemporaryDirectory() as tmp:
+        first_ns, last_ns = _write_trades_to_catalog(tmp, n=10)
+        monkeypatch.setattr(ml_signals.dashboard, "CATALOG_PATH", tmp)
+        start_ms = first_ns // 1_000_000 - 1
+        end_ms = last_ns // 1_000_000 + 1
+        ticks = json.loads(_historical_ticks_json(_IID, start_ms, end_ms, max_rows=3))["ticks"]
+        assert len(ticks) == 3

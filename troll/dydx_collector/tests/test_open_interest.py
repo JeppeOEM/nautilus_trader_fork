@@ -107,6 +107,34 @@ def test_classify_liquidity_excluded_coin_is_always_illiquid() -> None:
     assert "BTC-USD-PERP.DYDX" not in liquid
 
 
+def test_classify_liquidity_max_liquid_keeps_highest_volume() -> None:
+    # dYdX's WS server hard-caps subscriptions per channel at 32 per connection --
+    # exceeding it gets every subscription rejected in a loop (see collector.py's
+    # _MAX_WS_SUBSCRIPTIONS), so overflow must be demoted by volume, not left in.
+    markets = _markets_by_volume(
+        BTC={"ticker": "BTC-USD", "volume24H": "500000"},
+        ETH={"ticker": "ETH-USD", "volume24H": "300000"},
+        SOL={"ticker": "SOL-USD", "volume24H": "200000"},
+    )
+    liquid, illiquid = classify_liquidity(markets, min_oi_usd=100_000.0, max_liquid=2)
+    assert liquid == {"BTC-USD-PERP.DYDX", "ETH-USD-PERP.DYDX"}
+    assert illiquid == {"SOL-USD-PERP.DYDX"}
+
+
+def test_classify_liquidity_max_liquid_zero_demotes_everything() -> None:
+    markets = _markets_by_volume(BTC={"ticker": "BTC-USD", "volume24H": "500000"})
+    liquid, illiquid = classify_liquidity(markets, min_oi_usd=100_000.0, max_liquid=0)
+    assert liquid == set()
+    assert illiquid == {"BTC-USD-PERP.DYDX"}
+
+
+def test_classify_liquidity_max_liquid_above_count_is_noop() -> None:
+    markets = _markets_by_volume(BTC={"ticker": "BTC-USD", "volume24H": "500000"})
+    liquid, illiquid = classify_liquidity(markets, min_oi_usd=100_000.0, max_liquid=32)
+    assert liquid == {"BTC-USD-PERP.DYDX"}
+    assert illiquid == set()
+
+
 if __name__ == "__main__":
     test_parses_single_market()
     test_parses_multiple_markets()

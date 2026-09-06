@@ -14,11 +14,14 @@
 # -------------------------------------------------------------------------------------------------
 """Config loading: snapshot interval default/override, per-coin raw-delta retention."""
 
+import dataclasses
 from pathlib import Path
 
 import pytest
 
+from dydx_collector.config import InstrumentEntry
 from dydx_collector.config import load_config
+from dydx_collector.config import save_config
 
 
 def _write_toml(tmp_path: Path, body: str) -> Path:
@@ -90,3 +93,60 @@ def test_negative_snapshot_interval_is_rejected(tmp_path: Path) -> None:
     path = _write_toml(tmp_path, "snapshot_interval_seconds = -0.5\n")
     with pytest.raises(ValueError, match="snapshot_interval_seconds"):
         load_config(path)
+
+
+def test_instrument_pinned_defaults_to_false(tmp_path: Path) -> None:
+    path = _write_toml(
+        tmp_path,
+        """
+        [[instruments]]
+        id = "BTC-USD-PERP.DYDX"
+        """,
+    )
+    config = load_config(path)
+    assert config.instruments[0].pinned is False
+
+
+def test_save_config_round_trips_pinned_and_all_other_fields(tmp_path: Path) -> None:
+    path = _write_toml(
+        tmp_path,
+        """
+        network = "testnet"
+        catalog_path = "my_catalog"
+        flush_interval_seconds = 30
+        config_reload_seconds = 15
+        open_interest_poll_seconds = 120
+        snapshot_interval_seconds = 1.0
+        non_config_retain_hours = 8.0
+        liquidity_min_oi_usd = 250000.0
+        liquidity_check_seconds = 900
+        exclude = ["BAD-USD-PERP.DYDX"]
+
+        [[instruments]]
+        id = "BTC-USD-PERP.DYDX"
+        pinned = true
+        store_order_book_deltas = true
+        retain_hours = 24.0
+
+        [[instruments]]
+        id = "ETH-USD-PERP.DYDX"
+        pinned = false
+        """,
+    )
+    original = load_config(path)
+
+    save_config(original, path)
+    round_tripped = load_config(path)
+
+    assert round_tripped == original
+
+
+def test_save_config_omits_retain_hours_when_none(tmp_path: Path) -> None:
+    path = _write_toml(tmp_path, "")
+    config = load_config(path)
+    config = dataclasses.replace(config, instruments=(InstrumentEntry(id="SOL-USD-PERP.DYDX"),))
+
+    save_config(config, path)
+    round_tripped = load_config(path)
+
+    assert round_tripped.instruments[0].retain_hours is None

@@ -242,3 +242,88 @@ def test_dashboard_bot_url_strips_trailing_slash_on_base() -> None:
     assert bots_pane.dashboard_bot_url("http://127.0.0.1:8765/", "bot-01") == (
         "http://127.0.0.1:8765/bot/bot-01"
     )
+
+
+def test_format_stat_none_is_na() -> None:
+    assert bots_pane.format_stat(None) == "n/a"
+
+
+def test_format_stat_formats_with_given_fmt() -> None:
+    assert bots_pane.format_stat(1.5, "{:.2f}") == "1.50"
+    assert bots_pane.format_stat(-0.042, "{:.2%}") == "-4.20%"
+
+
+def test_metrics_lines_none_entry_is_unavailable() -> None:
+    assert bots_pane.metrics_lines(None) == [bots_pane.HISTORY_UNAVAILABLE_TEXT]
+
+
+def test_metrics_lines_missing_metrics_key_renders_every_stat_as_na() -> None:
+    entry = _history_entry()  # base fixture has no "metrics" key
+    lines = bots_pane.metrics_lines(entry)
+    assert "n/a" in lines[0]
+    assert "n/a" in lines[1]
+
+
+def test_metrics_lines_renders_every_stat_value() -> None:
+    entry = _history_entry(
+        metrics={
+            "sharpe_ratio": 1.23,
+            "sortino_ratio": 2.34,
+            "calmar_ratio": 0.56,
+            "max_drawdown": -0.042,
+            "profit_factor": 1.87,
+            "expectancy": 6.4,
+            "avg_win": 15.0,
+            "avg_loss": -6.5,
+            "max_win": 20.0,
+            "max_loss": -8.0,
+            "win_rate": 0.6,
+        }
+    )
+    lines = bots_pane.metrics_lines(entry)
+    assert "1.23" in lines[0]
+    assert "2.34" in lines[0]
+    assert "0.56" in lines[0]
+    assert "-4.20%" in lines[0]
+    assert "1.87" in lines[1]
+    assert "6.40" in lines[1]
+    assert "15.00" in lines[1]
+    assert "-6.50" in lines[1]
+
+
+def test_incidents_lines_none_is_unavailable() -> None:
+    assert bots_pane.incidents_lines(None, now=1_000.0) == [bots_pane.INCIDENTS_UNAVAILABLE_TEXT]
+
+
+def test_incidents_lines_empty_is_no_incidents_recorded() -> None:
+    assert bots_pane.incidents_lines([], now=1_000.0) == [bots_pane.NO_INCIDENTS_TEXT]
+
+
+def test_incidents_lines_most_recent_first() -> None:
+    incidents = [
+        {"type": "process_start", "started_at": 100.0, "ended_at": 100.0},
+        {"type": "data_stale", "started_at": 200.0, "ended_at": 235.0},
+    ]
+    lines = bots_pane.incidents_lines(incidents, now=1_000.0)
+    assert "stale feed" in lines[0]
+    assert "restarted" in lines[1]
+
+
+def test_format_incident_line_process_start_has_no_duration() -> None:
+    incident = {"type": "process_start", "started_at": 100.0, "ended_at": 100.0}
+    line = bots_pane.format_incident_line(incident, now=1_000.0)
+    assert "restarted" in line
+    assert "ongoing" not in line
+
+
+def test_format_incident_line_open_incident_shows_ongoing_duration() -> None:
+    incident = {"type": "data_stale", "started_at": 100.0, "ended_at": None}
+    line = bots_pane.format_incident_line(incident, now=160.0)
+    assert "ongoing (1m00s)" in line
+
+
+def test_format_incident_line_closed_incident_shows_fixed_duration() -> None:
+    incident = {"type": "data_stale", "started_at": 100.0, "ended_at": 135.0}
+    line = bots_pane.format_incident_line(incident, now=999.0)
+    assert "0m35s" in line
+    assert "ongoing" not in line

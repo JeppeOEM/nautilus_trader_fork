@@ -1,0 +1,12 @@
+{
+  "collector_claim": {
+    "iid": "ETH-USD-PERP.DYDX",
+    "bid": "2482.900000",
+    "ask": "2482.600000"
+  },
+  "reference_book": {
+    "bid": "2498.4",
+    "ask": "2503.1"
+  },
+  "messages_touching_frozen_prices": []
+}

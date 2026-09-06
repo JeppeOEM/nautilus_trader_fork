@@ -119,6 +119,11 @@
 - **No manual/interactive smoke check performed this session** (no running `live_paper` process publishing genuine `bots:status` heartbeats, no interactive TTY available) -- same disclosed gap as Story 4.4, not silently normalized into a permanent skip. A real keypress-driven `Enter` → `s` → `esc` check against a running bot is recommended before production reliance. See the story's own Dev Agent Record.
 - **`git stash`-based "confirm mypy/lint findings are pre-existing" checks are unreliable in this repository** -- nothing between Epic 4 stories has ever been committed, so `git stash` reverts *all* uncommitted work back to the last real commit (Story 4.3's baseline as of this writing), not just the current story's own diff. Story 4.4's Dev Agent Record made this exact claim ("3 pre-existing mypy errors, confirmed via git stash") using a check that, on inspection, could not have isolated Story 4.4's own changes from Story 4.3's either. Not re-verified retroactively here (out of this story's scope), but flagged so a future story doesn't repeat the same unreliable check -- use `git diff <file>` plus direct reasoning about which lines the current story's own edits touch instead. No specific file/line -- a process note, not a code defect.
 
+## Deferred from: code review of 7-1-candle-chart-drag-to-pan-history (2026-09-06)
+
+- **`_second_rolling`/`_ind_rolling` maxlen bump (300→3600) and the oldest-bucket-drop in `_live_candles_json`** predate story 7.1's own work — per the story's Dev Notes, both changes and their tests were made earlier in the same session (a separate, already-tested bugfix bundled into the same uncommitted working tree), not introduced by this story's tasks. `troll/ml_signals/dashboard.py:110,116,855-856`.
+- **`_historical_ticks_json` returns a `size` field per trade that `_renderTickChart` never reads.** Harmless unused payload; plausible future use (tooltip/marker sizing by trade size). Not worth its own diff. `troll/ml_signals/dashboard.py:899`.
+
 ## Deferred from: code review of spec-4-7-bot-detail-trades-blotter-and-pnl-over-time-chart.md (2026-09-02)
 
 - source_spec: `_bmad-output/implementation-artifacts/spec-4-7-bot-detail-trades-blotter-and-pnl-over-time-chart.md`

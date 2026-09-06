@@ -102,6 +102,24 @@ def recent_trades(bot_id: str, db_path: str, cutoff_ns: int | None, limit: int) 
     ]
 
 
+def realized_pnls(bot_id: str, db_path: str, cutoff_ns: int | None) -> list[float]:
+    """
+    Closing fills' realized_pnl (dollars) at/after cutoff_ns (all time if None), in
+    chronological order -- feeds ml_signals.performance_metrics.trade_stats()/
+    all_metrics().
+    """
+    db = _conn(db_path)
+    rows = db.execute(
+        """
+        SELECT realized_pnl FROM fills
+        WHERE bot_id = ? AND realized_pnl IS NOT NULL AND (? IS NULL OR ts >= ?)
+        ORDER BY ts ASC
+        """,
+        (bot_id, cutoff_ns, cutoff_ns),
+    ).fetchall()
+    return [pnl for (pnl,) in rows]
+
+
 def win_rate_stats(bot_id: str, db_path: str) -> tuple[int, int]:
     """
     (closed_trades, wins) for a bot, all-time -- closing fills only (realized_pnl

@@ -16,12 +16,19 @@
 Pure Coins-pane row/state functions (Story 4.1, AC2/AC5; Story 4.2, AC1 filter) -- no
 urwid import, no I/O.
 
-Deliberately excludes OFI/OBI/microprice/spread columns: rankings:live only carries
-{instrument_id, rank, volume24h, volatility_score} (architecture AD-9), and this
-story's ACs only require rendering that data -- see Story 4.1's Dev Notes "No indicator
-columns in this story" for the full reasoning (the mockup's extra columns illustrate
-the finished pane, not this story's scope).
+Full metric parity with the web dashboard's rankings table (troll/CLAUDE.md SSOT-03):
+every rank entry ranking_engine publishes already carries every RANKING_COLS field
+(ofi_10_z/obi_10/5/3/cvd/spread/microprice/pct_1h/pct_24h/volatility/... -- see
+ml_signals/ranking_columns.py, the single column-metadata definition both this pane and
+the dashboard's HTML table render from), so this module does no computation of its own
+-- format_coin_row/coin_header_text just re-shape that same shared metadata into urwid
+markup/header text.
 """
+
+from ml_signals.ranking_columns import NEGATIVE_COLOR
+from ml_signals.ranking_columns import POSITIVE_COLOR
+from ml_signals.ranking_columns import RANKING_COLS
+
 
 # Verbatim UX copy (EXPERIENCE.md State Patterns: Cold open) -- keep exact, per
 # UX-DR9's terse/no-marketing-copy discipline.
@@ -31,15 +38,15 @@ COLD_OPEN_TEXT = "waiting for rankings:live…"
 # exact, same discipline as COLD_OPEN_TEXT.
 NO_MATCHES_TEXT = "no matches"
 
+_MISSING_CELL_TEXT = "—"
 
-def coin_rows(ranking: dict | None) -> list[tuple[int, str, float]]:
+
+def coin_rows(ranking: dict | None) -> list[dict]:
     """
-    Extract (rank, instrument_id, score) tuples in the exact order rankings:live
-    provides -- never re-sorted locally (row order is the wire contract, matching
-    ml_signals.dashboard's post-Story-1.8 "render in rankings:live's own order" rule).
-
-    score is volume24h when mode == "volume", volatility_score otherwise -- both
-    fields are always present per AD-9, so this lookup never needs a fallback.
+    Every rankings:live rank entry, verbatim, in exact wire order -- never re-sorted
+    locally (row order is the wire contract, matching ml_signals.dashboard's post-Story
+    -1.8 "render in rankings:live's own order" rule). Each entry already carries every
+    RANKING_COLS field; this function does no filtering/reshaping of its own.
 
     Assumes ranking, if not None, is already validated shape (ranking_state's
     _handle_rankings_message guard runs upstream) -- AD-3's "readers trust the gate"
@@ -47,14 +54,28 @@ def coin_rows(ranking: dict | None) -> list[tuple[int, str, float]]:
     """
     if ranking is None:
         return []
-
-    score_key = "volume24h" if ranking["mode"] == "volume" else "volatility_score"
-    return [(row["rank"], row["instrument_id"], row[score_key]) for row in ranking["ranks"]]
+    return list(ranking["ranks"])
 
 
-def filter_rows(
-    rows: list[tuple[int, str, float]], filter_text: str
-) -> list[tuple[int, str, float]]:
+def stale_feed_banner_text(stale_instrument_ids: list[str]) -> str:
+    """
+    OBS-01/OBS-02: a per-coin companion to the Coins-pane's own pane-level stale badge
+    (which only fires if the whole rankings:live heartbeat itself stops). ranking_engine
+    silently drops an individual instrument from the ranked list once its own feed goes
+    stale (_current_ranks()'s fresh-only filter) -- this surfaces *which* one, so a dead
+    coin never just quietly vanishes with no trace (DATA-02).
+
+    Empty string when nothing is stale -- callers skip rendering entirely in that case.
+    """
+    if not stale_instrument_ids:
+        return ""
+    shown = stale_instrument_ids[:3]
+    more = len(stale_instrument_ids) - len(shown)
+    suffix = f" (+{more} more)" if more else ""
+    return f"stale feed: {', '.join(shown)}{suffix}"
+
+
+def filter_rows(rows: list[dict], filter_text: str) -> list[dict]:
     """
     Narrow coin_rows()'s output to rows whose instrument_id contains filter_text
     (Story 4.2, AC1) -- case-insensitive substring match, row order preserved exactly
@@ -77,4 +98,45 @@ def filter_rows(
     needle = filter_text.strip().lower()
     if needle == "":
         return rows
-    return [row for row in rows if needle in row[1].lower()]
+    return [row for row in rows if needle in row["instrument_id"].lower()]
+
+
+def coin_header_text() -> str:
+    """
+    Column-header row shown above the Coins-pane ranking list -- rank/instrument_id
+    columns plus every RANKING_COLS label, same order as format_coin_row's cells below
+    (and the same order the web dashboard's own `<th>` row renders in).
+    """
+    header = f"{'#':>4}  {'INSTRUMENT':<20} "
+    header += "".join(f"{label:>10} " for _key, label, _fmt, _color in RANKING_COLS)
+    return header.rstrip()
+
+
+def format_coin_row(row: dict) -> list:
+    """
+    One full-width Coins-pane row as urwid markup: rank, instrument_id, then every
+    RANKING_COLS column in shared order. A column whose value is None (ranking_engine
+    hasn't initialized that indicator/field yet) renders "—", matching the web
+    dashboard's own missing-cell convention.
+
+    Only two colors are ever used across RANKING_COLS (POSITIVE_COLOR/NEGATIVE_COLOR,
+    ml_signals/ranking_columns.py) -- mapped here onto this product's own
+    "pnl-pos"/"pnl-neg" palette entries rather than reimplementing each column's own
+    sign/threshold rule (e.g. OBI's ">0.5" boundary) a second time. Returns a list of
+    plain strings and (attr, text) tuples, ready to hand straight to urwid.Text.
+    """
+    segments: list = [f"{row['rank']:>4}  {row['instrument_id']:<20} "]
+    for key, _label, format_fn, color_fn in RANKING_COLS:
+        value = row.get(key)
+        if value is None:
+            segments.append(f"{_MISSING_CELL_TEXT:>10} ")
+            continue
+        text = f"{format_fn(value):>10} "  # type: ignore[operator]
+        color = color_fn(value) if color_fn else None  # type: ignore[operator]
+        if color == POSITIVE_COLOR:
+            segments.append(("pnl-pos", text))
+        elif color == NEGATIVE_COLOR:
+            segments.append(("pnl-neg", text))
+        else:
+            segments.append(text)
+    return segments

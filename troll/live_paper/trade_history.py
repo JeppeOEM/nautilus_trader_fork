@@ -45,6 +45,7 @@ import logging
 import time
 
 import redis.asyncio as aioredis
+from ml_signals import performance_metrics
 
 from live_paper import fills_store
 from nautilus_trader.model.enums import OrderSide
@@ -126,8 +127,28 @@ def subscribe(strategy: Strategy, bot_id: str, db_path: str) -> None:
     )
 
 
-def compute_history(bot_id: str, range_name: str, now_ns: int, db_path: str) -> dict:
-    """Assemble one bots:history:{bot_id}:{range_name} wire-contract payload (AC2/AC3)."""
+def compute_history(
+    bot_id: str,
+    range_name: str,
+    now_ns: int,
+    db_path: str,
+    starting_balance: float | None = None,
+) -> dict:
+    """
+    Assemble one bots:history:{bot_id}:{range_name} wire-contract payload (AC2/AC3),
+    now including a "metrics" dict (Sharpe/Sortino/Calmar/max drawdown/profit factor/
+    win rate/expectancy/avg-max win-loss) computed via
+    ml_signals.performance_metrics.all_metrics -- the single shared implementation
+    bot_tui and any future ML/backtest evaluation code both read (SSOT-02).
+
+    starting_balance anchors the equity curve return-based stats (Sharpe etc.) are
+    computed from; None (real-money mode has no fixed config value for this) skips
+    those and returns only the trade-level stats -- see all_metrics()'s own docstring.
+    all-time pnl_by_day (not range-cutoff) is always what equity is built from, so a
+    day/week/month view's returns are still anchored against true account history, not
+    a fabricated in-window starting balance -- see performance_metrics.equity_returns's
+    own docstring for why.
+    """
     window_ns = _RANGE_WINDOW_NS[range_name]
     cutoff_ns = now_ns - window_ns if window_ns is not None else None
     return {
@@ -136,29 +157,45 @@ def compute_history(bot_id: str, range_name: str, now_ns: int, db_path: str) -> 
         "updated_at": now_ns,
         "trades": fills_store.recent_trades(bot_id, db_path, cutoff_ns, _MAX_TRADES),
         "pnl_series": fills_store.pnl_by_day(bot_id, db_path, cutoff_ns),
+        "metrics": performance_metrics.all_metrics(
+            realized_pnls=fills_store.realized_pnls(bot_id, db_path, cutoff_ns),
+            pnl_by_day=fills_store.pnl_by_day(bot_id, db_path, cutoff_ns=None),
+            starting_balance=starting_balance,
+            cutoff_ns=cutoff_ns,
+        ),
     }
 
 
-async def _refresh_cycle(client: aioredis.Redis, bot_id: str, db_path: str) -> None:
+async def _refresh_cycle(
+    client: aioredis.Redis, bot_id: str, db_path: str, starting_balance: float | None
+) -> None:
     now_ns = time.time_ns()
     for range_name in _RANGE_WINDOW_NS:
-        blob = compute_history(bot_id, range_name, now_ns, db_path)
+        blob = compute_history(bot_id, range_name, now_ns, db_path, starting_balance)
         await client.set(f"bots:history:{bot_id}:{range_name}", json.dumps(blob))
 
 
-async def _history_loop(client: aioredis.Redis, bot_id: str, db_path: str) -> None:
+async def _history_loop(
+    client: aioredis.Redis, bot_id: str, db_path: str, starting_balance: float | None
+) -> None:
     while True:
         # AC4: a bad cycle must not overwrite already-published, still-valid keys with
         # an empty fallback -- skip the whole cycle's writes and let the previous
         # blob's now-aging updated_at signal staleness to readers instead.
         try:
-            await _refresh_cycle(client, bot_id, db_path)
+            await _refresh_cycle(client, bot_id, db_path, starting_balance)
         except Exception as exc:
             logger.warning("bots:history refresh cycle failed, keeping stale data: %s", exc)
         await asyncio.sleep(_HISTORY_REFRESH_SECONDS)
 
 
-async def run(strategy: Strategy, bot_id: str, redis_url: str, db_path: str) -> None:
+async def run(
+    strategy: Strategy,
+    bot_id: str,
+    redis_url: str,
+    db_path: str,
+    starting_balance: float | None = None,
+) -> None:
     """
     Record this strategy's fills into fills_store as they happen, and publish
     bots:history:{bot_id}:{day,week,month,all} on a heartbeat, for the lifetime of the
@@ -169,7 +206,7 @@ async def run(strategy: Strategy, bot_id: str, redis_url: str, db_path: str) -> 
     while True:
         try:
             async with aioredis.Redis.from_url(redis_url, decode_responses=True) as client:
-                await _history_loop(client, bot_id, db_path)
+                await _history_loop(client, bot_id, db_path, starting_balance)
         except asyncio.CancelledError:
             raise
         except Exception as exc:

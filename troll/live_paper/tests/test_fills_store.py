@@ -103,3 +103,22 @@ def test_pnl_by_day_matches_sum_of_recent_trades_realized_pnl(tmp_path) -> None:
     trades_total = sum(t["realized_pnl"] for t in trades if t["realized_pnl"] is not None)
     series_total = sum(entry["pnl"] for entry in pnl_series)
     assert trades_total == series_total == 13.0
+
+
+def test_realized_pnls_returns_only_closing_fills_in_chronological_order(tmp_path) -> None:
+    db_path = _db_path(tmp_path)
+    fills_store.write_fill("bot-01", _DAY0, "BUY", 100.0, 1.0, None, db_path)
+    fills_store.write_fill("bot-01", _DAY0 + 10, "SELL", 105.0, 1.0, 5.0, db_path)
+    fills_store.write_fill("bot-01", _DAY0 + 20, "BUY", 105.0, 1.0, None, db_path)
+    fills_store.write_fill("bot-01", _DAY0 + 30, "SELL", 103.0, 1.0, -2.0, db_path)
+
+    assert fills_store.realized_pnls("bot-01", db_path, cutoff_ns=None) == [5.0, -2.0]
+
+
+def test_realized_pnls_respects_cutoff_and_bot_id(tmp_path) -> None:
+    db_path = _db_path(tmp_path)
+    fills_store.write_fill("bot-01", _DAY0, "SELL", 100.0, 1.0, 3.0, db_path)
+    fills_store.write_fill("bot-01", _DAY0 + _NS_PER_DAY, "SELL", 105.0, 1.0, 7.0, db_path)
+    fills_store.write_fill("bot-02", _DAY0 + _NS_PER_DAY, "SELL", 105.0, 1.0, 99.0, db_path)
+
+    assert fills_store.realized_pnls("bot-01", db_path, cutoff_ns=_DAY0 + 1) == [7.0]

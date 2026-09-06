@@ -395,3 +395,73 @@ class MultiLevelOFI(Indicator):
         self._prev_bid_sizes = None
         self._prev_ask_prices = None
         self._prev_ask_sizes = None
+
+
+# -----------------------------------------------------------------------------------
+# Plain, stateless single-snapshot derivations (SSOT-01, troll/CLAUDE.md) -- pure
+# functions of one DydxSecondSnapshot.to_dict()-shaped dict, no window/history state.
+# Every caller (ranking_engine, dashboard, bot_tui) must call these rather than
+# reimplementing the formula locally, so two processes fed the same snapshot can never
+# compute a different number for it.
+# -----------------------------------------------------------------------------------
+
+
+def microprice(snapshot: dict) -> float | None:
+    """(bid_price * ask_size + ask_price * bid_size) / (bid_size + ask_size); None if
+    either side is empty or total top-of-book size is zero.
+
+    Pure/stateless companion to the `Microprice` indicator class above -- use this for
+    a one-off point-in-time read (a historical chart point, a per-instrument snapshot
+    with no meaningful "previous tick" to track state against). The class's own
+    update_raw is itself memoryless per call, but silently *keeps* its last value on a
+    zero-total tick rather than resetting -- this function returns None instead, which
+    is the honest answer for a stateless read (never silently reports a stale value).
+    """
+    bid_prices = snapshot["bid_prices"]
+    ask_prices = snapshot["ask_prices"]
+    if not bid_prices or not ask_prices:
+        return None
+    bid_size, ask_size = snapshot["bid_sizes"][0], snapshot["ask_sizes"][0]
+    total = bid_size + ask_size
+    if total <= 0:
+        return None
+    return (bid_prices[0] * ask_size + ask_prices[0] * bid_size) / total
+
+
+def spread(snapshot: dict) -> float | None:
+    """ask_prices[0] - bid_prices[0]; None if either side is empty (thin/no book)."""
+    bid_prices = snapshot["bid_prices"]
+    ask_prices = snapshot["ask_prices"]
+    if not bid_prices or not ask_prices:
+        return None
+    return ask_prices[0] - bid_prices[0]
+
+
+def mid_price(snapshot: dict) -> float | None:
+    """(bid_prices[0] + ask_prices[0]) / 2; None if either side is empty."""
+    bid_prices = snapshot["bid_prices"]
+    ask_prices = snapshot["ask_prices"]
+    if not bid_prices or not ask_prices:
+        return None
+    return (bid_prices[0] + ask_prices[0]) / 2.0
+
+
+def volume_delta(snapshot: dict) -> float:
+    """buy_volume - sell_volume for one snapshot (single-tick, not a rolling window)."""
+    return snapshot["buy_volume"] - snapshot["sell_volume"]
+
+
+def trade_aggregates(snapshots: list[dict]) -> tuple[float, float, int, int]:
+    """
+    Sum (buy_volume, sell_volume, buy_count, sell_count) across a list of snapshots --
+    feeds CVD (buy_vol - sell_vol) and avg_trade_size ((buy_vol + sell_vol) / total
+    count). Pure reduction over whatever list it's given; the rolling-window *buffer*
+    is the caller's own state (exactly one process should own it -- SSOT-02), not
+    anything this function keeps itself.
+    """
+    return (
+        sum(s["buy_volume"] for s in snapshots),
+        sum(s["sell_volume"] for s in snapshots),
+        sum(s["buy_count"] for s in snapshots),
+        sum(s["sell_count"] for s in snapshots),
+    )

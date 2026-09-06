@@ -28,6 +28,12 @@ def _reset_state() -> None:
     lookback = engine.RANKING_VOLATILITY_LOOKBACK_SECONDS
     engine._VOLATILITY = engine.VolatilityTracker(lookback_seconds=lookback)
     engine._ACTIVE_MODE = "volume"
+    engine._OFI_INDS.clear()
+    engine._OFI_RAW_INDS.clear()
+    engine._OBI_INDS.clear()
+    engine._LAST_FED.clear()
+    engine._SECOND_ROLLING.clear()
+    engine._SLOW_METRICS.clear()
 
 
 def test_parse_volume_24h_extracts_usd_volume_per_market() -> None:
@@ -59,10 +65,24 @@ def _feed_volatility(iid: str, prices: list[float]) -> None:
         engine._VOLATILITY.update(iid, i * 1_000_000_000, price)
 
 
-def _snap(iid: str, bid: float, ask: float, ts_event: int = 0) -> dict:
+def _snap(
+    iid: str,
+    bid: float,
+    ask: float,
+    ts_event: int = 0,
+    bid_size: float = 1.0,
+    ask_size: float = 1.0,
+    buy_volume: float = 0.0,
+    sell_volume: float = 0.0,
+    buy_count: int = 0,
+    sell_count: int = 0,
+) -> dict:
     return {
         "instrument_id": iid, "ts_event": ts_event,
         "bid_prices": [bid], "ask_prices": [ask],
+        "bid_sizes": [bid_size], "ask_sizes": [ask_size],
+        "buy_volume": buy_volume, "sell_volume": sell_volume,
+        "buy_count": buy_count, "sell_count": sell_count,
     }
 
 
@@ -159,6 +179,43 @@ def test_current_ranks_excludes_stale_instrument() -> None:
     ranks = engine._current_ranks()
 
     assert [r["instrument_id"] for r in ranks] == ["BTC-USD-PERP.DYDX"]
+
+
+def test_recently_stale_iids_includes_recently_gone_stale_instrument() -> None:
+    _reset_state()
+    now_ns = time.time_ns()
+    _mark_fresh("BTC-USD-PERP.DYDX", now_ns)
+    _mark_fresh("SOL-USD-PERP.DYDX", now_ns - engine._WATCHLIST_STALE_NS - 1)
+
+    assert engine._recently_stale_iids(now_ns) == ["SOL-USD-PERP.DYDX"]
+
+
+def test_recently_stale_iids_excludes_long_dead_instrument() -> None:
+    _reset_state()
+    now_ns = time.time_ns()
+    _mark_fresh("DEAD-USD-PERP.DYDX", now_ns - engine._RECENTLY_STALE_WINDOW_NS - 1)
+
+    assert engine._recently_stale_iids(now_ns) == []
+
+
+def test_recently_stale_iids_excludes_currently_fresh_instrument() -> None:
+    _reset_state()
+    now_ns = time.time_ns()
+    _mark_fresh("BTC-USD-PERP.DYDX", now_ns)
+
+    assert engine._recently_stale_iids(now_ns) == []
+
+
+def test_build_rankings_message_carries_stale_instrument_ids() -> None:
+    _reset_state()
+    now_ns = time.time_ns()
+    _mark_fresh("BTC-USD-PERP.DYDX", now_ns)
+    _mark_fresh("SOL-USD-PERP.DYDX", now_ns - engine._WATCHLIST_STALE_NS - 1)
+
+    message = engine._build_rankings_message()
+
+    assert message["stale_instrument_ids"] == ["SOL-USD-PERP.DYDX"]
+    assert [r["instrument_id"] for r in message["ranks"]] == ["BTC-USD-PERP.DYDX"]
 
 
 def test_handle_control_message_switches_active_mode() -> None:
@@ -271,9 +328,67 @@ def test_build_rankings_message_matches_wire_schema() -> None:
 
     assert message["mode"] == "volume"
     assert isinstance(message["updated_at"], int)
-    assert message["ranks"][0] == {
-        "instrument_id": "BTC-USD-PERP.DYDX", "rank": 1, "volume24h": 5.0, "volatility_score": None,
+    row = message["ranks"][0]
+    # Only the pre-SSOT-migration fields checked for exact match here -- the full
+    # live-tick field set (ofi_10_z/spread/cvd/etc, all None with no snapshot fed) is
+    # covered by test_current_ranks_includes_live_tick_fields_from_ingested_snapshots
+    # and test_current_ranks_falls_back_to_slow_metrics_price_pct_and_volatility below.
+    assert row["instrument_id"] == "BTC-USD-PERP.DYDX"
+    assert row["rank"] == 1
+    assert row["volume24h"] == 5.0
+    assert row["volatility_score"] is None
+
+
+def test_current_ranks_includes_live_tick_fields_from_ingested_snapshots() -> None:
+    """SSOT-02 migration: OFI/OBI/microprice/spread/cvd/price now come from
+    ranking_engine's own snapshots:raw ingest (relocated from dashboard.py), not left
+    None/absent -- two ingested ticks are enough for the z-scored/gap-aware trackers to
+    report a real (non-None) value.
+    """
+    _reset_state()
+    iid = "BTC-USD-PERP.DYDX"
+    now_ns = time.time_ns()
+    engine._ingest_snapshot_batch(
+        [_snap(iid, 100.0, 101.0, ts_event=0, buy_volume=3.0, sell_volume=1.0, buy_count=2, sell_count=1)],
+    )
+    engine._ingest_snapshot_batch(
+        [_snap(iid, 101.0, 102.0, ts_event=1_000_000_000, buy_volume=2.0, sell_volume=0.0, buy_count=1, sell_count=0)],
+    )
+    _mark_fresh(iid, now_ns)
+
+    row = engine._current_ranks()[0]
+
+    assert row["ofi_10"] is not None  # second update_raw call, tracker is initialized
+    assert row["obi_10"] == 0.5  # bid_size == ask_size == 1.0 on every ingested snap
+    assert row["microprice"] is not None
+    assert row["spread"] == 1.0  # last ingested snap: 102.0 - 101.0
+    assert row["price"] == 101.5  # last ingested snap mid: (101.0 + 102.0) / 2
+    assert row["cvd"] == 4.0  # (3+2) buy - (1+0) sell across both snapshots
+    assert row["volume_delta"] == 2.0  # last snap only: 2.0 - 0.0
+    assert row["buy_count"] == 3  # summed across both snapshots: 2 + 1
+    assert row["sell_count"] == 1  # summed across both snapshots: 1 + 0
+    assert row["avg_trade_size"] == 1.5  # (5.0 buy + 1.0 sell) / (3 buy_cnt + 1 sell_cnt)
+
+
+def test_current_ranks_falls_back_to_slow_metrics_price_pct_and_volatility() -> None:
+    """pct_1h/pct_24h/volatility(catalog) have no live-tick equivalent -- always come
+    from the cached _SLOW_METRICS snapshot _slow_loop_task populates; "price" falls
+    back to it too, but only when no live snapshot has arrived yet for that instrument.
+    """
+    _reset_state()
+    iid = "BTC-USD-PERP.DYDX"
+    now_ns = time.time_ns()
+    _mark_fresh(iid, now_ns)
+    engine._SLOW_METRICS[iid] = {
+        "instrument_id": iid, "price": 99.0, "pct_1h": 0.01, "pct_24h": 0.05, "volatility": 0.002,
     }
+
+    row = engine._current_ranks()[0]
+
+    assert row["pct_1h"] == 0.01
+    assert row["pct_24h"] == 0.05
+    assert row["volatility"] == 0.002
+    assert row["price"] == 99.0  # no live snapshot ingested -- falls back to slow cache
 
 
 def test_merge_rank_into_snapshots_attaches_rank_and_volume() -> None:

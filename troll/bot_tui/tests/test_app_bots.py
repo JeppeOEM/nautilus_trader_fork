@@ -76,9 +76,9 @@ def test_rows_sorted_by_bot_id_and_selectable() -> None:
     bots_state._handle_status_message(_status("bot-01"))
     app = BotTuiApp()
     body = app._build_bots_body()
-    assert isinstance(body.body[0], _SelectableBotRow)
-    assert body.body[0].bot_id == "bot-01"
-    assert body.body[1].bot_id == "bot-02"
+    assert isinstance(body.body[0].original_widget, _SelectableBotRow)
+    assert body.body[0].original_widget.bot_id == "bot-01"
+    assert body.body[1].original_widget.bot_id == "bot-02"
 
 
 def test_highlighted_bot_id_reads_listbox_focus() -> None:
@@ -107,7 +107,7 @@ def test_stale_row_has_marker_fresh_row_does_not() -> None:
     bots_state._LATEST_STATUSES["bot-stale"] = _status("bot-stale")
     app = BotTuiApp()
     body = app._build_bots_body()
-    rows = {widget.bot_id: widget.text for widget in body.body}
+    rows = {widget.original_widget.bot_id: widget.original_widget.text for widget in body.body}
     assert rows["bot-stale"].startswith("~")
     assert not rows["bot-fresh"].startswith("~")
 
@@ -117,7 +117,7 @@ def test_stopped_bot_row_shows_off() -> None:
     bots_state._handle_status_message(_status("bot-01", running=False))
     app = BotTuiApp()
     body = app._build_bots_body()
-    assert "off" in body.body[0].text
+    assert "off" in body.body[0].original_widget.text
 
 
 def test_bots_pane_footer_hint_switches_on_entry() -> None:

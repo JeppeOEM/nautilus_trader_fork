@@ -1,0 +1,70 @@
+{
+  "collector_claim": {
+    "iid": "ETH-USD-PERP.DYDX",
+    "bid": "2451.700000",
+    "ask": "2450.400000"
+  },
+  "reference_book": {
+    "bid": "2451.7",
+    "ask": "2450.4"
+  },
+  "messages_touching_frozen_prices": [
+    {
+      "ts_ns": 1788532863144756762,
+      "data": {
+        "type": "channel_data",
+        "connection_id": "24b11cc3-3feb-4c68-8fde-ea6bed4edb2d",
+        "message_id": 100660,
+        "id": "ETH-USD",
+        "channel": "v4_orderbook",
+        "version": "1.0.0",
+        "contents": {
+          "asks": [
+            [
+              "2451.7",
+              "0"
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "ts_ns": 1788532863172254467,
+      "data": {
+        "type": "channel_data",
+        "connection_id": "24b11cc3-3feb-4c68-8fde-ea6bed4edb2d",
+        "message_id": 100684,
+        "id": "ETH-USD",
+        "channel": "v4_orderbook",
+        "version": "1.0.0",
+        "contents": {
+          "asks": [
+            [
+              "2450.4",
+              "6.802"
+            ]
+          ]
+        }
+      }
+    },
+    {
+      "ts_ns": 1788532863507256826,
+      "data": {
+        "type": "channel_data",
+        "connection_id": "24b11cc3-3feb-4c68-8fde-ea6bed4edb2d",
+        "message_id": 100773,
+        "id": "ETH-USD",
+        "channel": "v4_orderbook",
+        "version": "1.0.0",
+        "contents": {
+          "asks": [
+            [
+              "2450.4",
+              "6.801"
+            ]
+          ]
+        }
+      }
+    }
+  ]
+}

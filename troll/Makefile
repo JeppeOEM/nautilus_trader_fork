@@ -3,7 +3,10 @@ TROLL_DIR  := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 COMPOSE    := docker compose -f $(TROLL_DIR)docker-compose.yml
 BASE_IMAGE := nautilus-trader-base:1.229.0
 
-.PHONY: build-base up up-live-paper build-insecure test test-live-paper down logs logs-dash web enable-boot enable-firewall harden-ssh
+.PHONY: build-base up up-live-paper build-insecure test test-live-paper down logs logs-dash web enable-boot enable-firewall harden-ssh remote-tui remote-web remote-web-stop
+
+REMOTE_HOST := nifelheim
+REMOTE_DIR  := ~/nautilus_trader_fork/troll
 
 ## Build the base nautilus image (~15 min, only needed once or after core changes)
 ## On networks with TLS inspection (e.g. Zscaler), export your root CA to
@@ -19,11 +22,11 @@ build-base:
 		-t $(BASE_IMAGE) \
 		$(REPO_ROOT)
 
-## Start collecting data. Does NOT build -- run `make build-base` (once) and
-## `make build-insecure` (or `docker compose build` on a non-intercepting network)
-## first, and again after any change to troll-requirements.txt or collector.dockerfile.
+## Start collecting data, rebuilding the collector image first (seconds -- it's just
+## the thin troll/dydx_collector layer on top of the base image). Run `make build-base`
+## once beforehand for the base image itself.
 up:
-	$(COMPOSE) up -d
+	$(COMPOSE) up -d --build
 	@echo "Dashboard: http://localhost:8765"
 
 ## Start the paper-trading node (Epic 3, live_paper module). Not part of plain `make up`
@@ -31,7 +34,7 @@ up:
 ## Runs in paper mode only by default (SandboxExecutionClientConfig, no wallet/private
 ## key) -- see troll/live_paper/config.py for how real-money mode is separately gated.
 up-live-paper:
-	$(COMPOSE) --profile live-paper up -d live-paper
+	$(COMPOSE) --profile live-paper up -d --build live-paper
 
 ## Build the collector/dashboard/live-paper images bypassing pip's TLS verification, for
 ## networks with a TLS-intercepting proxy (e.g. Zscaler) where pip can't validate
@@ -52,15 +55,25 @@ build-insecure:
 ## build-base), not on the host. Build the image first with `make build-insecure`
 ## (or plain `docker compose -f docker-compose.yml build collector` off a TLS-
 ## intercepting network).
+## uid 1000 has no /etc/passwd entry in the image, so pytest's tmp_path fixture
+## (which shells out to getpass.getuser() to name its basetemp dir) raises OSError --
+## same class of bug as the bot_tui_logs one above. test-live-paper already works
+## around it with -e USER; mirror that here.
 test:
-	$(COMPOSE) run --rm --no-deps collector \
+	$(COMPOSE) run --rm --no-deps -e HOME=/tmp -e USER=collector collector \
 		python3 -m pytest dydx_collector/tests ml_signals/tests ranking_engine/tests bot_tui/tests -q
 
 ## Launch the bot_tui terminal UI (Story 4.1) -- an interactive urwid app, not a
 ## daemon, so it's run via `docker compose run` (never `up -d`) and gated behind the
 ## `tui` profile so it's never started by `make up`. Must be run from an actual TTY
 ## (an SSH session or local terminal) -- piping/backgrounding this defeats the point.
+## bot_tui_logs is gitignored, so it won't exist on a fresh clone. Compose's bind
+## mount auto-creates missing host dirs as root (dockerd runs as root), but the
+## container writes as uid 1000 -- permission denied on first run for everyone.
+## Creating it here, as the invoking user, before Compose ever sees it avoids that.
 tui:
+	mkdir -p bot_tui_logs
+	$(COMPOSE) --profile tui build bot_tui
 	$(COMPOSE) --profile tui run --rm bot_tui python3 -m bot_tui.app
 
 ## Run live_paper's test suite inside its own image (not the collector image -- that
@@ -87,6 +100,24 @@ logs-dash:
 ## Open Dozzle log viewer in browser
 web:
 	xdg-open http://localhost:8080
+
+## Launch bot_tui on nifelheim over SSH (needs a real TTY, hence -t). Uses the
+## `nifelheim` alias from ~/.ssh/config (host/port/user/key already set there).
+remote-tui:
+	ssh -t $(REMOTE_HOST) "cd $(REMOTE_DIR) && make tui"
+
+## Tunnel the remote ml_signals dashboard (port 8765) to localhost and open it.
+## The VPS firewall (make enable-firewall) only allows inbound on 22 + tailscale,
+## so port 8765 isn't reachable directly -- an SSH tunnel is the way in.
+## `-f` backgrounds ssh only after the tunnel is up, so the xdg-open below always
+## races a live tunnel, not a not-yet-connected one. Stop it with `make remote-web-stop`.
+remote-web:
+	ssh -f -N -L 8765:localhost:8765 $(REMOTE_HOST)
+	xdg-open http://localhost:8765
+
+## Kill the SSH tunnel opened by `make remote-web`
+remote-web-stop:
+	pkill -f "ssh -f -N -L 8765:localhost:8765 $(REMOTE_HOST)" || true
 
 ## One-time VPS setup: enable the Docker daemon on boot so `restart: always`
 ## containers actually come back after a host reboot (Docker's own auto-start

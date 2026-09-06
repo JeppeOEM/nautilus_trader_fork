@@ -12,11 +12,13 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
-"""Collector configuration: TOML loading + hot-reload diffing."""
+"""Collector configuration: TOML loading/saving + hot-reload diffing."""
 
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
+
+import tomli_w
 
 from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
 
@@ -24,6 +26,13 @@ from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
 @dataclass(frozen=True)
 class InstrumentEntry:
     id: str
+    # Always True for any entry added going forward (collector.py's "start" and
+    # "pin_top_liquid" control actions) -- every currently-collected instrument is
+    # pinned by definition, there is no more "collected but not pinned" state. Kept as
+    # a field (rather than removed) only so a config.toml saved before this change still
+    # loads; see _prune_candidates' non_pinned_collected group for the one place that
+    # legacy False still matters.
+    pinned: bool = False
     store_order_book_deltas: bool = False
     # Retention for this instrument's raw order-book-delta data, in hours.
     # None means unlimited (never pruned) -- distinct from the global
@@ -36,7 +45,6 @@ class CollectorConfig:
     network: DydxNetwork
     catalog_path: str
     flush_interval_seconds: int
-    snapshot_interval_seconds: float
     config_reload_seconds: int
     open_interest_poll_seconds: int
     snapshot_interval_seconds: float
@@ -44,6 +52,12 @@ class CollectorConfig:
     liquidity_min_oi_usd: float
     liquidity_check_seconds: int
     instruments: tuple[InstrumentEntry, ...]
+    # Permanent denylist: classify_liquidity always treats these as illiquid regardless
+    # of volume, so nothing (including pin_top_liquid) ever picks them. Also doubles as
+    # where a collector:control "unpin" action lands an id -- unpinning a coin is
+    # exactly "add it to exclude", so it also stays out of any future liquidity ranking,
+    # not just out of the collected set. bot_tui shows this whole list, whatever its
+    # origin (hand-edited or via unpin), as its "unpinned" section.
     exclude: frozenset[str]
 
 
@@ -54,6 +68,7 @@ def load_config(path: Path) -> CollectorConfig:
     instruments = tuple(
         InstrumentEntry(
             id=entry["id"],
+            pinned=entry.get("pinned", False),
             store_order_book_deltas=entry.get("store_order_book_deltas", False),
             retain_hours=entry.get("retain_hours"),
         )
@@ -77,10 +92,45 @@ def load_config(path: Path) -> CollectorConfig:
         open_interest_poll_seconds=raw.get("open_interest_poll_seconds", 300),
         snapshot_interval_seconds=snapshot_interval_seconds,
         non_config_retain_hours=raw.get("non_config_retain_hours", 4.0),
-        liquidity_min_oi_usd=raw.get("liquidity_min_oi_usd", 100_000.0),
+        liquidity_min_oi_usd=raw.get("liquidity_min_oi_usd", 20_000.0),
         liquidity_check_seconds=raw.get("liquidity_check_seconds", 1800),
         instruments=instruments,
         exclude=frozenset(raw.get("exclude", [])),
     )
+
+
+def _instrument_to_raw(entry: InstrumentEntry) -> dict:
+    raw: dict = {"id": entry.id, "pinned": entry.pinned}
+    if entry.store_order_book_deltas:
+        raw["store_order_book_deltas"] = entry.store_order_book_deltas
+    if entry.retain_hours is not None:
+        raw["retain_hours"] = entry.retain_hours
+    return raw
+
+
+def save_config(config: CollectorConfig, path: Path) -> None:
+    """
+    Persist `config` back to `path` as TOML.
+
+    Full rewrite, not a patch -- `tomli_w` has no comment-preservation support, so any
+    hand-written comments in the file are lost on a control-action-triggered save. This
+    is an accepted, deliberate tradeoff (see Story 6.1 Dev Notes); revisit only if it
+    becomes a real complaint.
+    """
+    raw = {
+        "network": str(config.network),
+        "catalog_path": config.catalog_path,
+        "flush_interval_seconds": config.flush_interval_seconds,
+        "config_reload_seconds": config.config_reload_seconds,
+        "open_interest_poll_seconds": config.open_interest_poll_seconds,
+        "snapshot_interval_seconds": config.snapshot_interval_seconds,
+        "non_config_retain_hours": config.non_config_retain_hours,
+        "liquidity_min_oi_usd": config.liquidity_min_oi_usd,
+        "liquidity_check_seconds": config.liquidity_check_seconds,
+        "instruments": [_instrument_to_raw(e) for e in config.instruments],
+        "exclude": sorted(config.exclude),
+    }
+    with path.open("wb") as f:
+        tomli_w.dump(raw, f)
 
 

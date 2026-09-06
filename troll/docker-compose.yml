@@ -33,9 +33,16 @@ services:
     # writes land owned by you, not root. Switch to ${UID}:${GID} if shared.
     user: "1000:1000"
     volumes:
-      - ./config.toml:/app/dydx_collector/config.toml:ro
+      # rw (not ro): the collector itself writes this file back after a pin/unpin/
+      # start/stop/refresh_top_coins control action (Story 6.1) -- still only this
+      # container mounts it, bot_tui coordinates via Redis only, never the filesystem.
+      - ./config.toml:/app/dydx_collector/config.toml:rw
       - ./dydx_collector/catalog:/app/catalog
       - ./dydx_collector/metrics.db:/app/metrics.db
+      # Story 5.1: permanent incident reports (crossed book, stale book, resync, etc.),
+      # auto-snapshotted from the [WS_RAW] rolling debug buffer -- see collector.py's
+      # _IncidentHandler. Must survive container restarts, unlike /tmp/nautilus_logs.
+      - ./dydx_collector/incident_reports:/app/incident_reports
     network_mode: host
     restart: always
     logging: *default-logging
@@ -120,6 +127,13 @@ services:
       PYTHONUNBUFFERED: "1"
       REDIS_URL: "redis://127.0.0.1:6379"
       BOT_TUI_LOG_PATH: "/app/bot_tui_logs/bot_tui.log"
+      # `docker compose run` never forwards the host's TERM -- without it urwid's
+      # raw_display.Screen can't decode arrow-key escape sequences at all (single-byte
+      # keys like enter/esc/:/s/d/o still work, which is why only arrow-key navigation
+      # broke). Hardcoded to a value guaranteed present in the image's terminfo db,
+      # not the host's own TERM -- an unusual host terminal (e.g. "xterm-ghostty") has
+      # no matching terminfo entry inside the container at all.
+      TERM: "xterm-256color"
       # Story 4.3's `o` deep-link target -- 127.0.0.1:8765 is reachable here exactly
       # as it is from the host, since both `dashboard` and `bot_tui` run
       # network_mode: host with no separate port mapping.
@@ -131,6 +145,10 @@ services:
       # discards the container's writable layer on exit, so without this bind mount the
       # log -- including any crash traceback -- would be lost the instant the run ends.
       - ./bot_tui_logs:/app/bot_tui_logs
+      # Read-only: bot_tui's own image (collector.dockerfile) never COPYs live_paper/
+      # in, per AD-8's module isolation. This mount only lets the `v` key display the
+      # strategy's source text -- no live_paper code is imported or run here.
+      - ./live_paper/strategy.py:/app/live_paper/strategy.py:ro
     network_mode: host
     logging: *default-logging
 

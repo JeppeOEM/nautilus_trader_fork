@@ -66,6 +66,7 @@ from nautilus_trader.config import TradingNodeConfig
 from nautilus_trader.live.node import TradingNode
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.identifiers import TraderId
+from nautilus_trader.model.objects import Money
 
 
 logger = logging.getLogger(__name__)
@@ -157,10 +158,27 @@ def build_node(config: PaperConfig | RealMoneyConfig) -> TradingNode:
             db_path=_FILLS_DB_PATH,
         )
     )
+    # Anchors performance_metrics.equity_returns()'s equity curve (Sharpe/Sortino/etc.
+    # in bots:history's "metrics" field) -- only PaperConfig has a fixed config value
+    # for this; real-money mode's actual balance lives on-chain, not in a config file,
+    # so those return-based stats are skipped there (None) rather than computed
+    # against a fabricated number (see all_metrics()'s own docstring). Money.from_str
+    # reuses the same "10_000 USDC"-style parser SandboxExecutionClientConfig already
+    # trusts above, rather than a second hand-rolled one.
+    starting_balance = (
+        Money.from_str(config.starting_balances[0]).as_double()
+        if isinstance(config, PaperConfig) and config.starting_balances
+        else None
+    )
+
     # Same event-loop-lifecycle reasoning as bot_status.run() above (Story 4.6).
     loop.create_task(
         trade_history.run(
-            strategy, bot_id=config.bot_id, redis_url=_REDIS_URL, db_path=_FILLS_DB_PATH
+            strategy,
+            bot_id=config.bot_id,
+            redis_url=_REDIS_URL,
+            db_path=_FILLS_DB_PATH,
+            starting_balance=starting_balance,
         )
     )
 

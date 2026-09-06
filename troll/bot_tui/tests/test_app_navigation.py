@@ -23,6 +23,7 @@ Story 4.1's Dev Notes "Testing strategy: pure logic vs. urwid wiring."
 
 from bot_tui.app import _QUIT_SENTINEL
 from bot_tui.app import _dispatch_command
+from bot_tui.app import _parse_collector_command
 from bot_tui.app import _pop_view
 
 
@@ -48,10 +49,42 @@ def test_dispatch_empty_command_is_unrecognized() -> None:
     assert echo == "unknown command: "
 
 
+def test_dispatch_h_alias_opens_help_same_as_full_name() -> None:
+    new_view, stack, echo = _dispatch_command("coins", [], "h")
+    assert (new_view, stack, echo) == ("help", ["coins"], None)
+
+
 def test_dispatch_quit_returns_quit_sentinel() -> None:
     new_view, stack, echo = _dispatch_command("coins", [], "q")
     assert new_view == _QUIT_SENTINEL
     assert echo is None
+
+
+def test_dispatch_data_command_opens_collector_view() -> None:
+    new_view, stack, echo = _dispatch_command("coins", [], "data")
+    assert (new_view, stack, echo) == ("collector", ["coins"], None)
+
+
+def test_dispatch_old_collector_command_no_longer_recognized() -> None:
+    new_view, stack, echo = _dispatch_command("coins", [], "collector")
+    assert new_view == "coins"
+    assert echo == "unknown command: collector"
+
+
+def test_parse_collector_command_pintop() -> None:
+    assert _parse_collector_command("pintop") == ("pin_top_liquid", None)
+
+
+def test_parse_collector_command_start_with_id() -> None:
+    assert _parse_collector_command("start BTC-USD-PERP.DYDX") == ("start", "BTC-USD-PERP.DYDX")
+
+
+def test_parse_collector_command_start_without_id_falls_through() -> None:
+    assert _parse_collector_command("start ") is None
+
+
+def test_parse_collector_command_old_refresh_no_longer_recognized() -> None:
+    assert _parse_collector_command("refresh") is None
 
 
 def test_pop_view_from_non_root_returns_to_previous() -> None:

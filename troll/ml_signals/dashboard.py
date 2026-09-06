@@ -41,7 +41,6 @@ import json
 import logging
 import math
 import os
-import statistics
 import time
 from collections import defaultdict
 from collections import deque
@@ -55,9 +54,9 @@ from aiohttp import web
 from plotly.subplots import make_subplots
 
 from ml_signals.catalog_stats import list_instruments
-from ml_signals.indicators import MultiLevelOBI
-from ml_signals.indicators import MultiLevelOFI
+from ml_signals.indicators import microprice as calc_microprice
 from ml_signals import chart_data as _chart_data
+from ml_signals import ranking_columns as _ranking_columns
 from ranking_engine import metrics_store
 
 
@@ -75,66 +74,27 @@ METRICS_DB_PATH: str = os.environ.get(
     "METRICS_DB_PATH", str(Path(CATALOG_PATH).parent / "metrics" / "metrics.db"),
 )
 
-# How often the slow loop recomputes full snapshot metrics from Parquet.
-LIVE_INTERVAL_SECONDS: int = 5
-# How often the slow loop flushes to SQLite for historical bookkeeping.
-DB_WRITE_INTERVAL_SECONDS: int = 60
 # Gap threshold for coin chart: if consecutive snapshots are further apart than this
 # (in milliseconds), insert a null data point to break the Plotly line. This converts
 # a misleading horizontal "flatline" (Plotly connecting across a gap) into an honest
 # visual break. Gaps arise when the collector's staleness guard skips stale books.
 _CHART_GAP_THRESHOLD_MS: int = 2500  # 2.5 seconds
 
-# Rankings table columns. Each entry: (store_key, header_label, format_fn, color_fn|None).
-# Reorder, add, or remove rows here to control what's shown and how.
-# color_fn receives the raw float value and returns a CSS color string.
-# Unit contract for direct consumers of /api/rankings and /data/live/{id}: "cvd" and
-# "volume_delta" are raw base-asset-token deltas, "spread"/"microprice_lean" are raw
-# price-unit deltas -- neither is scaled by price server-side. The rankings/coin-detail
-# HTML pages normalize these client-side (see the inline JS's usdFromTokens/
-# bpsFromPriceUnits) using each row's own "price" field; a script hitting the JSON
-# endpoints directly must do the same multiplication/division itself to get comparable
-# USD/bps units.
-RANKING_COLS: list[tuple[str, str, object, object]] = [
-    ("ofi_10_z",       "OFI10z", lambda v: f"{v:+.2f}",  lambda v: "#2a9d2a" if v > 0 else "#c0392b"),
-    ("obi_10",         "OBI10",  lambda v: f"{v:.3f}",   lambda v: "#2a9d2a" if v > 0.5 else "#c0392b"),
-    ("obi_5",          "OBI5",   lambda v: f"{v:.3f}",   lambda v: "#2a9d2a" if v > 0.5 else "#c0392b"),
-    ("obi_3",          "OBI3",   lambda v: f"{v:.3f}",   lambda v: "#2a9d2a" if v > 0.5 else "#c0392b"),
-    ("cvd",            "CVD",    lambda v: f"{v:+.2f}",  lambda v: "#2a9d2a" if v > 0 else "#c0392b"),
-    ("spread",         "Spread", lambda v: f"{v:.6f}",   None),
-    ("microprice_lean","u lean", lambda v: f"{v:+.6f}",  lambda v: "#2a9d2a" if v > 0 else "#c0392b"),
-    ("volume_delta",   "Vol d",  lambda v: f"{v:+.2f}",  lambda v: "#2a9d2a" if v > 0 else "#c0392b"),
-    ("buy_count",      "Buy#",   lambda v: f"{int(v)}",  None),
-    ("sell_count",     "Sell#",  lambda v: f"{int(v)}",  None),
-    ("price",          "Price",  lambda v: f"{v:.4f}",   None),
-    ("pct_1h",         "1h %",   lambda v: f"{v:+.2f}%", lambda v: "#2a9d2a" if v > 0 else "#c0392b"),
-    ("pct_24h",        "24h %",  lambda v: f"{v:+.2f}%", lambda v: "#2a9d2a" if v > 0 else "#c0392b"),
-    ("volatility",     "Vol",    lambda v: f"{v:.6f}",   None),
-    ("volatility_score", "Vol Score", lambda v: f"{v:.6f}" if v is not None else "—", None),
-    ("volume24h",      "Vol24h", lambda v: f"{v / 1e6:.1f}M", None),
-]
-
-# History-only columns (Story 1.4): plotted on /history/{id} from metrics_store rows, but
-# deliberately NOT in RANKING_COLS -- that list is also used to render the *live* rankings
-# table from _LIVE_FAST/_LIVE_SLOW, which never carries a "rank" key, so adding it there
-# would either show a permanently-empty column or (worse) leak a stale, once-per-60s rank
-# value if _LIVE_SLOW ever gained one. The live table's row order already shows live rank.
-_HISTORY_ONLY_COLS: list[tuple[str, str]] = [
-    ("rank", "Rank"),
-]
+# Rankings-table column metadata is now shared with bot_tui's Coins pane (SSOT-03,
+# troll/CLAUDE.md) -- see ml_signals/ranking_columns.py for the single definition both
+# UIs render from.
+RANKING_COLS = _ranking_columns.RANKING_COLS
+_HISTORY_ONLY_COLS = _ranking_columns._HISTORY_ONLY_COLS
 
 _SERIES: dict[str, deque[tuple[int, float]]] = defaultdict(lambda: deque(maxlen=2000))
-
-# 1s-fresh metrics from Redis — written by _ingest_batch, wins on overlap.
-_LIVE_FAST: dict[str, dict] = {}
-# Parquet/SQLite-derived metrics — written by _slow_loop_task and make_app pre-load.
-_LIVE_SLOW: dict[str, dict] = {}
 
 _INGEST_COUNT: int = 0       # total batches ingested; increments ~1/s; visible in API
 _LAST_INGEST_TS: float = 0.0  # wall-clock seconds of last successful ingest
 
-# rankings:live is now the sole source of Coin Ranking (AD-9/Story 1.8) -- dashboard is
-# a pure reader, never recomputing rank/volume24h/volatility_score itself.
+# rankings:live is now the sole source of every rankings-table/coin-panel metric (AD-9,
+# troll/CLAUDE.md SSOT-01/02) -- dashboard is a pure reader, never computing OFI/OBI/
+# microprice/spread/cvd/pct_1h/pct_24h/volatility/rank/volume24h/volatility_score
+# itself. ranking_engine is the sole computer of all of it.
 _LATEST_RANKING: dict | None = None
 _LATEST_RANKING_RECEIVED_AT: float = 0.0
 # 3x ranking_engine's own RANKING_HEARTBEAT_SECONDS default (5s) -- a single missed
@@ -142,30 +102,20 @@ _LATEST_RANKING_RECEIVED_AT: float = 0.0
 _RANKING_STALE_SECONDS: float = 15.0
 
 # Rolling 1s snapshots received from Redis (plain dicts from DydxSecondSnapshot.to_dict()).
-_second_rolling: dict[str, deque] = defaultdict(lambda: deque(maxlen=300))
+# Feeds only candle/live-chart rendering below (_live_candles_json/_coin_chart_json) --
+# every derived metric that has a rankings:live equivalent now comes from there instead
+# of being recomputed from this raw stream a second time.
+# 3600 (1hr) rather than a few minutes so live candle mode has enough bars to be
+# readable zoomed out -- a short window only ever renders a handful of candles.
+_second_rolling: dict[str, deque] = defaultdict(lambda: deque(maxlen=3600))
 
-# Rolling per-second indicator values for the signal chart (same window as _second_rolling).
-# Each entry: {"ts": ms, "ofi_10_z": float|None, "obi_10": float|None, "lean": float|None}
-_ind_rolling: dict[str, deque] = defaultdict(lambda: deque(maxlen=300))
-
-# Persistent per-coin OFI indicators — fed incrementally (1 new snap/sec).
-_OFI_ZSCORE_WINDOW = 3600  # 1 hour of 1s readings to establish mean/std
-_OFI_INDS: dict[str, MultiLevelOFI] = {}              # OFI10 with z-score
-_OFI_RAW_INDS: dict[str, dict[int, MultiLevelOFI]] = {}  # raw OFI at levels 3, 5, 10
-_OBI_INDS: dict[str, dict[int, MultiLevelOBI]] = {}   # persistent OBI at levels 3, 5, 10
-_LAST_FED: dict[str, int] = {}                        # instrument_id → ts_event of last fed snap
+# Rolling per-second indicator values for the signal chart (same window as
+# _second_rolling). Each entry: {"ts": ms, "ofi_10_z": float|None, "obi_10": float|None,
+# "lean": float|None} -- fed from each arriving rankings:live message's own per-rank
+# fields (_handle_rankings_message below), not computed locally.
+_ind_rolling: dict[str, deque] = defaultdict(lambda: deque(maxlen=3600))
 
 _NAV = '<p><a href="/">Rankings</a> | <a href="/live">Live signals</a></p>'
-
-
-def _merged_live(iid: str) -> dict:
-    """Merge slow and fast caches; fast wins on key overlap."""
-    return {**_LIVE_SLOW.get(iid, {}), **_LIVE_FAST.get(iid, {})}
-
-
-def _merged_rows() -> list[dict]:
-    """Only instruments currently being collected (_LIVE_FAST). _LIVE_SLOW enriches but never adds rows."""
-    return [_merged_live(iid) for iid in _LIVE_FAST]
 
 
 def _split_tiers(catalog_path: str) -> tuple[set[str], set[str]]:
@@ -232,7 +182,7 @@ td:first-child,th:first-child{text-align:left}
 var COLS=[
   ["ofi_10_z","OFI10z"],["obi_10","OBI10"],["obi_5","OBI5"],["obi_3","OBI3"],
   ["cvd","CVD($)"],["spread","Spread(bps)"],["microprice_lean","u lean(bps)"],
-  ["volume_delta","Vol d($)"],["buy_count","Buy#"],["sell_count","Sell#"],
+  ["volume_delta","Vol d($)"],
   ["price","Price"],["pct_1h","1h %"],["pct_24h","24h %"],["volatility","Vol"],
   ["volume24h","Vol24h"]
 ];
@@ -244,16 +194,41 @@ var COLS=[
 var USD_KEYS=["cvd","volume_delta"];
 var BPS_KEYS=["spread","microprice_lean"];
 var currentSort=null;  // {key,dir} | null. null = server's default volume-sorted order.
-var IND=[
-  ["ofi_10","OFI10"],["ofi_5","OFI5"],["ofi_3","OFI3"],
-  ["obi_10","OBI10"],["obi_5","OBI5"],["obi_3","OBI3"],
-  ["microprice","Microprice"],["microprice_lean","u lean(bps)"],
-  ["spread","Spread(bps)"],["cvd","CVD($)"],["volume_delta","Vol delta($)"],
-  ["buy_count","Buy#"],["sell_count","Sell#"],["avg_trade_size","Avg size"]
+// Indicators grouped by update cadence (matches bot_tui's Coin-detail grouping) --
+// the box a value sits in tells you how often it can actually change without reading
+// ranking_engine.py. "Volatility & Market" is a cadence grouping by convention, not
+// strictly: pct_1h/pct_24h/volume24h aren't volatility, but they update on the same
+// 60s-or-slower cadence as the volatility fields.
+var IND_GROUPS=[
+  ["Live (1s book state)",[
+    ["microprice","Microprice"],["microprice_lean","u lean(bps)"],
+    ["spread","Spread(bps)"],
+    ["obi_10","OBI10"],["obi_5","OBI5"],["obi_3","OBI3"],
+    ["price","Price"]
+  ]],
+  ["Order Flow (~5m rolling)",[
+    ["ofi_10","OFI10"],["ofi_5","OFI5"],["ofi_3","OFI3"],["ofi_10_z","OFI10z"],
+    ["cvd","CVD($)"],["volume_delta","Vol delta($)"],
+    ["buy_count","Buy#"],["sell_count","Sell#"],["avg_trade_size","Avg size"]
+  ]],
+  ["Volatility & Market (60s-1h)",[
+    ["volatility_fast","Vol (fast)"],["volatility","Vol (catalog)"],
+    ["volatility_score","Vol score"],
+    ["pct_1h","1h %"],["pct_24h","24h %"],["volume24h","Vol24h"]
+  ]]
 ];
 var timer=null;
 var _chartData=null,_diffA=null,_diffB=null,_diffBoxHTML='';
 var _coinIid=null,_coinMode='lines',_coinBarSeconds=60,_coinHistStart=null,_coinHistEnd=null;
+// Candles/Ticks pan-to-load-more state: {iid,mode,barSeconds,rows,cursorStart,exhaustedLeft,loading}.
+// Rebuilt from scratch by _setChartRows() on every fresh fetch (live poll, Load button, bar/mode
+// change) and extended in place by _loadOlderChunk() as the user drags the chart left.
+var _chartState=null;
+var _relayoutTimer=null;
+// Separate from _coinHistStart (a real Load-button date-range string) so onBarChange/
+// setCoinMode never mistake a pan-triggered freeze for an explicit historical range.
+var _coinPanning=false;
+var _MAX_CHUNK_MS=30*24*3600*1000;  // caps _chunkSpanMs() so the new 1d/1w bar options can't request a multi-year window per pan step
 
 function esc(s){
   return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
@@ -357,16 +332,30 @@ function buildDiff(a,b){
 }
 
 function _fmtDTL(d){var p=function(n){return n<10?'0'+n:String(n);};return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+'T'+p(d.getHours())+':'+p(d.getMinutes());}
-function setCoinMode(m){_coinMode=m;_updateModeButtons();if(_coinHistStart)_fetchHistCoin(_coinIid,_coinHistStart,_coinHistEnd);}
+function setCoinMode(m){
+  _coinMode=m;_chartState=null;_updateModeButtons();
+  if(_coinHistStart)_fetchHistCoin(_coinIid,_coinHistStart,_coinHistEnd);
+  else if(_coinPanning)_refreshPanningWindow();
+}
 function _updateModeButtons(){
-  var bl=document.getElementById('btn-lines'),bc=document.getElementById('btn-candles');
+  var bl=document.getElementById('btn-lines'),bc=document.getElementById('btn-candles'),bt=document.getElementById('btn-ticks');
   if(bl)bl.style.borderColor=_coinMode==='lines'?'#58a6ff':'#444';
   if(bc)bc.style.borderColor=_coinMode==='candles'?'#58a6ff':'#444';
+  if(bt)bt.style.borderColor=_coinMode==='ticks'?'#58a6ff':'#444';
 }
 function onBarChange(){
   var sel=document.getElementById('bar-sel');
   if(sel)_coinBarSeconds=parseInt(sel.value);
+  _chartState=null;
   if(_coinHistStart)_fetchHistCoin(_coinIid,_coinHistStart,_coinHistEnd);
+  else if(_coinPanning)_refreshPanningWindow();
+}
+// Bar/mode change while frozen from a drag (no explicit Load range): load a fresh,
+// coherent default window instead of leaving the stale pan-extended trace on screen.
+function _refreshPanningWindow(){
+  _fetchLiveWindow(_coinIid,_coinMode,_coinBarSeconds)
+    .then(function(rows){_setChartRows(_coinIid,_coinMode,_coinBarSeconds,rows);})
+    .catch(function(err){setStatus('Error: '+err);});
 }
 function loadCoinDateRange(){
   var s=document.getElementById('coin-start'),e=document.getElementById('coin-end');
@@ -378,20 +367,142 @@ function loadCoinDateRange(){
   _fetchHistCoin(_coinIid,_coinHistStart,_coinHistEnd);
 }
 function resetCoinLive(){
-  _coinHistStart=null;_coinHistEnd=null;
+  _coinHistStart=null;_coinHistEnd=null;_coinPanning=false;_chartState=null;
   var b=document.getElementById('btn-live');
   if(b){b.style.color='#3fb950';b.style.borderColor='#3fb950';}
   clearInterval(timer);
   pollCoin(_coinIid);
-  timer=setInterval(function(){if(!_coinHistStart)pollCoin(_coinIid);},1000);
+  timer=setInterval(function(){if(!_coinHistStart&&!_coinPanning)pollCoin(_coinIid);},1000);
+}
+// Resolve to {rows,truncated} -- truncated means the server clamped the query window
+// and/or the row cap, so the caller must not advance its paging cursor past what it
+// actually got back (silently skipping data otherwise -- see _loadOlderChunk).
+function _fetchCandlesWindow(iid,startMs,endMs,barSeconds){
+  return fetch('/data/coin/'+encodeURIComponent(iid)+'/candles?start='+encodeURIComponent(_fmtDTL(new Date(startMs)))+'&end='+encodeURIComponent(_fmtDTL(new Date(endMs)))+'&bar='+barSeconds)
+    .then(function(r){return r.json();}).then(function(d){return {rows:d.candles,truncated:false};});
+}
+function _fetchTicksWindow(iid,startMs,endMs){
+  return fetch('/data/coin/'+encodeURIComponent(iid)+'/ticks?start='+encodeURIComponent(_fmtDTL(new Date(startMs)))+'&end='+encodeURIComponent(_fmtDTL(new Date(endMs))))
+    .then(function(r){return r.json();}).then(function(d){return {rows:d.ticks,truncated:!!d.truncated};});
+}
+function _fetchModeWindow(mode,iid,startMs,endMs,barSeconds){
+  return mode==='ticks'?_fetchTicksWindow(iid,startMs,endMs):_fetchCandlesWindow(iid,startMs,endMs,barSeconds);
+}
+// Plain-array fetch for the "live" (unfrozen or just-unfroze) default window -- used by
+// renderCoin's poll loop and by a bar/mode change that happens mid-pan (_refreshPanningWindow).
+function _fetchLiveWindow(iid,mode,bar){
+  if(mode==='ticks'){
+    var nowMs=Date.now();
+    return _fetchTicksWindow(iid,nowMs-30*60*1000,nowMs).then(function(r){return r.rows;});
+  }
+  return fetch('/data/coin/'+encodeURIComponent(iid)+'/candles?bar='+bar)
+    .then(function(r){return r.json();}).then(function(d){return d.candles;});
 }
 function _fetchHistCoin(iid,start,end){
   setStatus('Loading…');
   var bar=_coinBarSeconds;
-  fetch('/data/coin/'+encodeURIComponent(iid)+'/candles?start='+encodeURIComponent(start)+'&end='+encodeURIComponent(end)+'&bar='+bar)
-    .then(function(r){return r.json();})
-    .then(function(d){_renderCandleChart(d.candles);setStatus('Loaded '+d.candles.length+' candles');})
+  var startMs=new Date(start).getTime(),endMs=new Date(end).getTime();
+  _fetchModeWindow(_coinMode,iid,startMs,endMs,bar)
+    .then(function(result){
+      _setChartRows(iid,_coinMode,bar,result.rows);
+      setStatus('Loaded '+result.rows.length+' rows'+(result.truncated?' (truncated -- window too wide)':''));
+    })
     .catch(function(err){setStatus('Error: '+err);});
+}
+// -- Shared pan-to-load-more state (candles + ticks) --------------------------------------
+function _setChartRows(iid,mode,barSeconds,rows){
+  _chartState={iid:iid,mode:mode,barSeconds:barSeconds,rows:rows.slice(),
+    cursorStart:rows.length?rows[0].t:null,exhaustedLeft:false,loading:false};
+  _renderChartRows();
+}
+function _renderChartRows(){
+  if(!_chartState)return;
+  if(_chartState.mode==='ticks')_renderTickChart(_chartState.rows);
+  else _renderCandleChart(_chartState.rows);
+}
+function _chunkSpanMs(state){
+  var s=state||_chartState;
+  return s.mode==='ticks'?15*60*1000:Math.min(Math.max(s.barSeconds*1000*200,3600*1000),_MAX_CHUNK_MS);
+}
+function _loadOlderChunk(){
+  if(!_chartState||_chartState.exhaustedLeft||_chartState.cursorStart==null||_chartState.loading)return;
+  var state=_chartState;
+  state.loading=true;
+  var span=_chunkSpanMs(state);
+  var newEnd=state.cursorStart,newStart=newEnd-span;
+  return _fetchModeWindow(state.mode,state.iid,newStart,newEnd,state.barSeconds)
+    .then(function(result){
+      // A coin/mode/bar switch (or another pan session) may have replaced _chartState
+      // with a new object while this fetch was in flight -- never mutate/render a chart
+      // this response no longer belongs to.
+      if(_chartState!==state)return;
+      state.loading=false;
+      var rows=result.rows;
+      if(!rows||!rows.length){state.exhaustedLeft=true;setStatus('Reached start of history');return;}
+      state.rows=rows.concat(state.rows);
+      // A truncated response (server clamped the window or hit its row cap) didn't cover
+      // the full [newStart,newEnd) span -- advance the cursor only to the oldest row
+      // actually returned, never past data we never received (silent permanent skip).
+      state.cursorStart=result.truncated?rows[0].t:newStart;
+      if(result.truncated)setStatus('Busy window truncated -- pan again to keep loading');
+      _renderChartRows();
+    })
+    .catch(function(err){if(_chartState===state)state.loading=false;setStatus('Error: '+err);});
+}
+function _relayoutXRange(ev){
+  if(!ev)return null;
+  if(ev['xaxis.range[0]']!=null&&ev['xaxis.range[1]']!=null)return[ev['xaxis.range[0]'],ev['xaxis.range[1]']];
+  if(ev['xaxis.range'])return ev['xaxis.range'];
+  return null;
+}
+function _onChartRelayout(ev){
+  var rng=_relayoutXRange(ev);
+  if(!rng)return;  // not a real pan/zoom (e.g. legend click, resize/autosize)
+  if(!_coinPanning){
+    // First drag/zoom: freeze live polling exactly like clicking "Load" does, so the
+    // 1s poll loop stops overwriting the candle/tick trace out from under the user. A
+    // dedicated flag (not _coinHistStart, which onBarChange/setCoinMode read as a real
+    // Load date-range string) so bar/mode changes during a pan session stay coherent.
+    _coinPanning=true;
+    clearInterval(timer);
+    var b=document.getElementById('btn-live');
+    if(b){b.style.color='#8b949e';b.style.borderColor='#444';}
+    _reconcilePriceBasisOnFirstPan();
+  }
+  if(_relayoutTimer)clearTimeout(_relayoutTimer);
+  _relayoutTimer=setTimeout(function(){_maybeLoadOlder(rng);},200);
+}
+// Live candles are mid-price based (_live_candles_json); historical/paginated candles
+// are trade-price based (_historical_candles_json). Panning left on a live (never
+// clicked "Load") candles session would otherwise concat trade-price rows onto a
+// mid-price series with a visible seam at the join. Reload the currently-shown window
+// from the trade-price source once, on the first pan, so the whole series is consistent
+// going forward. Ticks mode has no such mismatch -- live and historical ticks both come
+// from the same raw-trade endpoint.
+function _reconcilePriceBasisOnFirstPan(){
+  if(_coinMode!=='candles'||_coinHistStart||!_chartState||!_chartState.rows.length)return;
+  var state=_chartState;
+  var firstT=state.rows[0].t,lastT=state.rows[state.rows.length-1].t+state.barSeconds*1000;
+  _fetchCandlesWindow(state.iid,firstT,lastT,state.barSeconds).then(function(result){
+    if(_chartState!==state||!result.rows.length)return;
+    state.rows=result.rows;
+    state.cursorStart=result.rows[0].t;
+    _renderChartRows();
+  });
+}
+function _maybeLoadOlder(rng){
+  if(!_chartState||_chartState.exhaustedLeft||_chartState.cursorStart==null)return;
+  var leftMs=new Date(rng[0]).getTime();
+  if(isNaN(leftMs))return;
+  var margin=_chunkSpanMs(_chartState)*0.5;
+  if(leftMs<=_chartState.cursorStart+margin)_loadOlderChunk();
+}
+function _wireChartRelayout(){
+  var liveEl=document.getElementById('live-chart');
+  if(liveEl){
+    liveEl.removeAllListeners&&liveEl.removeAllListeners('plotly_relayout');
+    liveEl.on('plotly_relayout',_onChartRelayout);
+  }
 }
 function _renderCandleChart(candles){
   if(!candles||!candles.length)return;
@@ -405,9 +516,22 @@ function _renderCandleChart(candles){
     name:'price',
     increasing:{line:{color:'#26a69a'}},
     decreasing:{line:{color:'#ef5350'}},
-  }],{height:300,template:'plotly_dark',
+  }],{height:300,template:'plotly_dark',dragmode:'pan',
     xaxis:{type:'date',rangeslider:{visible:false}},
-    margin:{t:10,b:30,l:60,r:10}});
+    margin:{t:10,b:30,l:60,r:10}},{scrollZoom:true});
+  _wireChartRelayout();
+}
+function _renderTickChart(ticks){
+  if(!ticks||!ticks.length)return;
+  var x=ticks.map(function(t){return new Date(t.t);});
+  var colors=ticks.map(function(t){return t.side==='BUYER'?'#26a69a':t.side==='SELLER'?'#ef5350':'#8b949e';});
+  Plotly.react('live-chart',[{
+    type:'scattergl',mode:'markers',x:x,y:ticks.map(function(t){return t.price;}),
+    marker:{color:colors,size:4},name:'trades',
+  }],{height:300,template:'plotly_dark',dragmode:'pan',
+    xaxis:{type:'date',rangeslider:{visible:false}},
+    margin:{t:10,b:30,l:60,r:10}},{scrollZoom:true});
+  _wireChartRelayout();
 }
 
 function showRankings(){
@@ -418,14 +542,14 @@ function showRankings(){
   timer=setInterval(pollRankings,2000);
 }
 
-var _lastRankings=null;  // {rows,ingestCount,ageS,stale} from the last /api/rankings poll
+var _lastRankings=null;  // {rows,ingestCount,ageS,stale,staleIds} from the last /api/rankings poll
 
 function pollRankings(){
   fetch("/api/rankings")
     .then(function(r){return r.json();})
     .then(function(data){
-      _lastRankings={rows:data.rows,ingestCount:data.ingest_count,ageS:data.age_s,stale:data.stale};
-      renderRankings(sortRows(data.rows),data.ingest_count,data.age_s,data.stale);
+      _lastRankings={rows:data.rows,ingestCount:data.ingest_count,ageS:data.age_s,stale:data.stale,staleIds:data.stale_instrument_ids||[]};
+      renderRankings(sortRows(data.rows),data.ingest_count,data.age_s,data.stale,data.stale_instrument_ids||[]);
     })
     .catch(function(err){setStatus("Fetch error: "+err);});
 }
@@ -451,10 +575,10 @@ function setSort(key){
     currentSort={key:key,dir:"desc"};
   }
   if(_lastRankings)
-    renderRankings(sortRows(_lastRankings.rows),_lastRankings.ingestCount,_lastRankings.ageS,_lastRankings.stale);
+    renderRankings(sortRows(_lastRankings.rows),_lastRankings.ingestCount,_lastRankings.ageS,_lastRankings.stale,_lastRankings.staleIds);
 }
 
-function renderRankings(rows,ingestCount,ageS,stale){
+function renderRankings(rows,ingestCount,ageS,stale,staleIds){
   var hdr="<tr><th>#</th><th>Instrument</th>"
     +COLS.map(function(c){
       var arrow=currentSort&&currentSort.key===c[0]?(currentSort.dir==="desc"?" &#9660;":" &#9650;"):"";
@@ -487,13 +611,18 @@ function renderRankings(rows,ingestCount,ageS,stale){
     +"<table>"+hdr+tbody+"</table>");
   var staleTxt=stale?" STALE (no data "+ageS+"s)":" ↺"+ingestCount;
   var col=stale?"color:#f85149":"color:#3fb950";
-  setStatus("Updated "+new Date().toLocaleTimeString()+" — "+rows.length+" instruments — <span style=\\""+col+"\\">"+esc(staleTxt)+"</span>");
+  // Per-coin companion to the pane-level staleTxt above (OBS-01/OBS-02): an instrument
+  // ranking_engine has silently dropped from rows[] for having gone stale on its own
+  // (rows[] only ever contains currently-fresh instruments) -- surfaced here instead
+  // of the coin just vanishing from the table with no trace (DATA-02).
+  var staleIdsTxt=(staleIds&&staleIds.length)?" — <span style=\\"color:#f85149\\">stale feed: "+esc(staleIds.slice(0,3).join(", "))+(staleIds.length>3?" (+"+(staleIds.length-3)+" more)":"")+"</span>":"";
+  setStatus("Updated "+new Date().toLocaleTimeString()+" — "+rows.length+" instruments — <span style=\\""+col+"\\">"+esc(staleTxt)+"</span>"+staleIdsTxt);
 }
 
 function showCoin(iid){
   clearDiff();
   clearInterval(timer);
-  _coinIid=iid;_coinHistStart=null;_coinHistEnd=null;_coinMode='lines';
+  _coinIid=iid;_coinHistStart=null;_coinHistEnd=null;_coinPanning=false;_coinMode='lines';_chartState=null;
   history.pushState({iid:iid},"","/coin/"+encodeURIComponent(iid));
   var label=iid.split("-").slice(0,2).join("-");
   var now=new Date(),endV=_fmtDTL(now),startV=_fmtDTL(new Date(now.getTime()-4*3600*1000));
@@ -503,22 +632,25 @@ function showCoin(iid){
     +"<div style=\\"display:flex;gap:8px;align-items:center;padding:6px 0;flex-wrap:wrap;border-bottom:1px solid #21262d;margin-bottom:6px\\">"
     +"<button id=\\"btn-lines\\" onclick=\\"setCoinMode('lines')\\" style=\\"background:#21262d;color:#c9d1d9;border:1px solid #58a6ff;padding:3px 10px;cursor:pointer\\">Lines</button>"
     +"<button id=\\"btn-candles\\" onclick=\\"setCoinMode('candles')\\" style=\\"background:#21262d;color:#c9d1d9;border:1px solid #444;padding:3px 10px;cursor:pointer\\">Candles</button>"
+    +"<button id=\\"btn-ticks\\" onclick=\\"setCoinMode('ticks')\\" style=\\"background:#21262d;color:#c9d1d9;border:1px solid #444;padding:3px 10px;cursor:pointer\\">Ticks</button>"
     +"<select id='bar-sel' onchange='onBarChange()' style=\\"background:#21262d;color:#c9d1d9;border:1px solid #444;padding:3px\\">"
+    +"<option value='5'>5s</option><option value='15'>15s</option>"
     +"<option value='30'>30s</option><option value='60' selected>1m</option><option value='300'>5m</option>"
-    +"<option value='900'>15m</option><option value='3600'>1h</option></select>"
+    +"<option value='900'>15m</option><option value='3600'>1h</option>"
+    +"<option value='14400'>4h</option><option value='86400'>1d</option><option value='604800'>1w</option></select>"
     +" &nbsp;|&nbsp; From <input type='datetime-local' id='coin-start' value='"+startV+"' style=\\"background:#21262d;color:#c9d1d9;border:1px solid #444;padding:2px\\">"
     +" To <input type='datetime-local' id='coin-end' value='"+endV+"' style=\\"background:#21262d;color:#c9d1d9;border:1px solid #444;padding:2px\\">"
     +" <button onclick='loadCoinDateRange()' style=\\"background:#21262d;color:#c9d1d9;border:1px solid #444;padding:3px 10px;cursor:pointer\\">Load</button>"
     +" <button id='btn-live' onclick='resetCoinLive()' style=\\"background:#21262d;color:#3fb950;border:1px solid #3fb950;padding:3px 10px;cursor:pointer\\">&#9679; Live</button>"
     +"</div>"
-    +"<h2>Indicators</h2><table id='ind-tbl'></table>"
+    +"<div id='ind-groups'></div>"
     +"<div id='price-ticker' style=\\"padding:6px 0 2px;font-size:14px;font-family:monospace;letter-spacing:0.04em;border-top:1px solid #21262d;margin-top:10px\\"></div>"
     +"<div id='sig-chart' style=\\"height:180px;margin-top:8px\\"></div>"
     +"<div id='live-chart' style=\\"height:300px;margin-top:4px\\"></div>"
     +"<div id='diff-box' style=\\"min-height:22px;padding:5px 2px;border-top:1px solid #21262d;font-size:12px;font-family:monospace\\"></div>"
   );
   pollCoin(iid);
-  timer=setInterval(function(){if(!_coinHistStart)pollCoin(iid);},1000);
+  timer=setInterval(function(){if(!_coinHistStart&&!_coinPanning)pollCoin(iid);},1000);
 }
 
 function pollCoin(iid){
@@ -533,15 +665,19 @@ function pollCoin(iid){
 
 function renderCoin(iid,ind,chart){
   _chartData=chart;
-  var rows=IND.map(function(k){
-    var key=k[0];
-    var v=ind[key];
-    var norm=fmtNormalizedCell(key,v,ind['price']);
-    if(norm!=null)return "<tr><td>"+esc(k[1])+"</td><td>"+esc(norm)+"</td></tr>";
-    return "<tr><td>"+esc(k[1])+"</td><td>"+(v!=null?esc(String(v)):"&mdash;")+"</td></tr>";
+  var groupsHTML=IND_GROUPS.map(function(g){
+    var title=g[0],specs=g[1];
+    var rows=specs.map(function(k){
+      var key=k[0];
+      var v=ind[key];
+      var norm=fmtNormalizedCell(key,v,ind['price']);
+      var cell=norm!=null?esc(norm):(v!=null?esc(String(v)):"&mdash;");
+      return "<tr><td>"+esc(k[1])+"</td><td>"+cell+"</td></tr>";
+    }).join("");
+    return "<h2>"+esc(title)+"</h2><table>"+rows+"</table>";
   }).join("");
-  var tbl=document.getElementById('ind-tbl');
-  if(tbl)tbl.innerHTML=rows;
+  var box=document.getElementById('ind-groups');
+  if(box)box.innerHTML=groupsHTML;
   if(chart.sig_ts&&chart.sig_ts.length){
     var sx=chart.sig_ts.map(function(t){return new Date(t);});
     var sigTraces=[];
@@ -554,12 +690,10 @@ function renderCoin(iid,ind,chart){
         xaxis:{type:"date"},yaxis:{zeroline:true,zerolinecolor:"#444"},
         margin:{t:20,b:20,l:50,r:10},legend:{orientation:"h",y:1.15}});
   }
-  if(_coinMode==='candles'){
-    var sel=document.getElementById('bar-sel');
-    var bar=sel?sel.value:'60';
-    fetch('/data/coin/'+encodeURIComponent(iid)+'/candles?bar='+bar)
-      .then(function(r){return r.json();})
-      .then(function(d){_renderCandleChart(d.candles);});
+  if(_coinMode==='candles'||_coinMode==='ticks'){
+    _fetchLiveWindow(iid,_coinMode,_coinBarSeconds)
+      .then(function(rows){if(_coinHistStart||_coinPanning)return;_setChartRows(iid,_coinMode,_coinBarSeconds,rows);})
+      .catch(function(err){setStatus('Error: '+err);});
   }else if(chart.ts&&chart.ts.length){
     var x=chart.ts.map(function(t){return new Date(t);});
     var traces=[
@@ -577,13 +711,17 @@ function renderCoin(iid,ind,chart){
       traces.push({x:[new Date(_diffB.ts)],y:[_diffB.price],name:"B",mode:"markers+text",
         text:["B"],textposition:"top center",showlegend:false,
         marker:{color:"#e3b341",size:10,symbol:"circle",line:{color:"#ffffff",width:2}}});
-    Plotly.react("live-chart",traces,{height:300,template:"plotly_dark",xaxis:{type:"date"},
-       margin:{t:10,b:30,l:60,r:10},legend:{orientation:"h"}});
+    Plotly.react("live-chart",traces,{height:300,template:"plotly_dark",dragmode:'pan',xaxis:{type:"date"},
+       margin:{t:10,b:30,l:60,r:10},legend:{orientation:"h"}},{scrollZoom:true});
     var liveEl=document.getElementById('live-chart');
     if(liveEl){
       liveEl.removeAllListeners&&liveEl.removeAllListeners('plotly_click');
       liveEl.on('plotly_click',handleChartClick);
     }
+    // Same drag-to-pan/scroll-to-zoom interaction as Candles/Ticks (uniform across all
+    // three modes); Lines has no pagination source, so a drag just freezes live polling
+    // (_maybeLoadOlder no-ops with _chartState null) -- "Live" resumes it.
+    _wireChartRelayout();
   }
   var tickerEl=document.getElementById('price-ticker');
   if(tickerEl&&chart.ts&&chart.ts.length){
@@ -770,6 +908,13 @@ def _live_candles_json(iid: str, bar_seconds: int) -> str:
         mid = (bp + ap) / 2
         bucket = (s["ts_event"] // 1_000_000_000 // bar_seconds) * bar_seconds
         buckets.setdefault(bucket, []).append(mid)
+    # The oldest bucket is necessarily partial: snapshots older than it have already
+    # aged out of the rolling deque (maxlen), so its member count keeps shrinking every
+    # second as more of them evict, which changes its open/high/low live. That reads as
+    # the candle "moving" even though it's not the currently-forming (rightmost) bar.
+    # Drop it -- every other bucket has its full complement of seconds.
+    if len(buckets) > 1:
+        del buckets[min(buckets)]
     candles = [
         {"t": t * 1000, "o": mids[0], "h": max(mids), "l": min(mids), "c": mids[-1]}
         for t, mids in sorted(buckets.items())
@@ -796,12 +941,45 @@ def _historical_candles_json(iid: str, start_ms: int, end_ms: int, bar_seconds: 
     return json.dumps({"candles": candles})
 
 
+_MAX_TICK_WINDOW_NS = 6 * 3600 * 1_000_000_000  # 6h -- Ticks mode is a zoomed-in view only (AC #8)
+
+
+def _historical_ticks_json(iid: str, start_ms: int, end_ms: int, max_rows: int = 20_000) -> str:
+    """Return individual trade prints from the catalog -- the raw data candles are built from.
+
+    Bounded two ways (MEM-01): the query window itself is clamped to _MAX_TICK_WINDOW_NS
+    *before* hitting the catalog (never materialize an unbounded read just to slice it
+    afterward), and max_rows caps the response as a second defensive backstop. Either
+    clamp sets "truncated" so the client's pagination cursor never advances past data it
+    didn't actually receive.
+    """
+    from nautilus_trader.persistence.catalog import ParquetDataCatalog
+    catalog = ParquetDataCatalog(CATALOG_PATH)
+    start_ns = start_ms * 1_000_000
+    end_ns = end_ms * 1_000_000
+    window_clamped = end_ns - start_ns > _MAX_TICK_WINDOW_NS
+    if window_clamped:
+        start_ns = end_ns - _MAX_TICK_WINDOW_NS
+    trades = catalog.trade_ticks(instrument_ids=[iid], start=start_ns, end=end_ns)
+    row_capped = len(trades) > max_rows
+    ticks = [
+        {
+            "t": t.ts_event // 1_000_000,
+            "price": t.price.as_double(),
+            "size": t.size.as_double(),
+            "side": t.aggressor_side.name,
+        }
+        for t in trades[:max_rows]
+    ]
+    return json.dumps({"ticks": ticks, "truncated": window_clamped or row_capped})
+
+
 def _coin_chart_json(iid: str) -> str:
     """Return JSON with price series (bid/ask/mid/micro/price) and signal series (ofi_10_z/obi_10).
 
     price = CVD-weighted effective trade price: skews from mid toward ask on net buying,
     toward bid on net selling. Equals mid when no trades occurred in that second.
-    sig_ts/ofi_10_z/obi_10 come from _ind_rolling (same 300-point window).
+    sig_ts/ofi_10_z/obi_10 come from _ind_rolling (same 3600-point window).
     Timestamps are milliseconds for Plotly.
     """
     snaps = list(_second_rolling.get(iid, []))
@@ -836,10 +1014,9 @@ def _coin_chart_json(iid: str) -> str:
             micro_vals.append(None)
             price_vals.append(None)
         prev_ts_ms = curr_ts_ms
-        bs, as_ = s["bid_sizes"][0], s["ask_sizes"][0]
-        total = bs + as_
         mid = (bp + ap) / 2
-        micro = (bp * as_ + ap * bs) / total if total > 0 else mid
+        micro_value = calc_microprice(s)
+        micro = micro_value if micro_value is not None else mid
         tv = s["buy_volume"] + s["sell_volume"]
         if tv > 0:
             price = mid + ((s["buy_volume"] - s["sell_volume"]) / tv) * (ap - bp) * 0.5
@@ -879,16 +1056,6 @@ def _render_live_page() -> str:
     return _page("ml_signals live", body, refresh_seconds=1)
 
 
-def _trade_aggregates(snaps: list) -> tuple[float, float, int, int]:
-    """Return (total_buy_vol, total_sell_vol, total_buy_count, total_sell_count) over window."""
-    return (
-        sum(s["buy_volume"] for s in snaps),
-        sum(s["sell_volume"] for s in snaps),
-        sum(s["buy_count"] for s in snaps),
-        sum(s["sell_count"] for s in snaps),
-    )
-
-
 def _cells_for_row(row: dict) -> dict[str, dict]:
     """Build the pre-formatted {key: {text, color, raw}} cell dict for one rankings row."""
     cells: dict[str, dict] = {}
@@ -915,22 +1082,16 @@ def _cells_for_row(row: dict) -> dict[str, dict]:
 
 
 def _rankings_json() -> str:
-    """Return pre-formatted cell values for all currently-collected instruments as JSON.
+    """Return pre-formatted cell values for every currently-ranked instrument as JSON.
 
-    Row order comes entirely from ranking_engine's rankings:live message (AD-9) --
-    dashboard never re-sorts locally. An instrument dashboard sees live (_LIVE_FAST) but
-    that ranking_engine hasn't classified as fresh yet is appended after every ranked
-    row, in _merged_rows()'s own iteration order, with null rank/volume24h/
-    volatility_score cells -- mirrors the pre-existing "absent = not currently ranked,
-    not an error" convention, never dropped.
+    Row order and every column value come entirely from ranking_engine's rankings:live
+    message (AD-9, troll/CLAUDE.md SSOT-01/02) -- dashboard never computes or re-sorts
+    anything locally anymore.
     """
-    live_by_iid = {r["instrument_id"]: r for r in _merged_rows()}
-    ranked_iids: set[str] = set()
     result = []
-
     if _LATEST_RANKING is not None:
         for rank_row in _LATEST_RANKING["ranks"]:
-            # Defensive .get()s: one malformed entry (missing key, wrong shape) in an
+            # Defensive check: one malformed entry (missing key, wrong shape) in an
             # otherwise-valid ranks list must not crash the whole render -- skip just
             # that entry, keep rendering the rest (_handle_rankings_message already
             # validates the list itself, but not every entry inside it).
@@ -939,19 +1100,7 @@ def _rankings_json() -> str:
             iid = rank_row.get("instrument_id")
             if iid is None:
                 continue
-            ranked_iids.add(iid)
-            row = {
-                **live_by_iid.get(iid, {"instrument_id": iid}),
-                "volume24h": rank_row.get("volume24h"),
-                "volatility_score": rank_row.get("volatility_score"),
-            }
-            result.append({"instrument_id": iid, "cells": _cells_for_row(row)})
-
-    for iid, live in live_by_iid.items():
-        if iid in ranked_iids:
-            continue
-        row = {**live, "volume24h": None, "volatility_score": None}
-        result.append({"instrument_id": iid, "cells": _cells_for_row(row)})
+            result.append({"instrument_id": iid, "cells": _cells_for_row(rank_row)})
 
     age_s = round(time.time() - _LAST_INGEST_TS, 1) if _LAST_INGEST_TS else None
     stale = age_s is None or age_s > 10
@@ -959,129 +1108,28 @@ def _rankings_json() -> str:
         round(time.time() - _LATEST_RANKING_RECEIVED_AT, 1) if _LATEST_RANKING_RECEIVED_AT else None
     )
     ranking_stale = ranking_age_s is None or ranking_age_s > _RANKING_STALE_SECONDS
+    stale_instrument_ids = (
+        _LATEST_RANKING.get("stale_instrument_ids", []) if _LATEST_RANKING is not None else []
+    )
     return json.dumps({
         "rows": result, "ingest_count": _INGEST_COUNT, "age_s": age_s, "stale": stale,
         "ranking_stale": ranking_stale, "ranking_age_s": ranking_age_s,
+        "stale_instrument_ids": stale_instrument_ids,
     })
 
 
 def _ingest_batch(batch: list[dict]) -> None:
-    """Ingest a batch of snapshot dicts received from Redis; update rolling state and _LIVE_FAST."""
+    """Append each snapshot to the rolling window feeding candle/live-chart rendering.
+
+    Every derived metric (OFI/OBI/microprice/spread/cvd/volume_delta/etc) now comes
+    from ranking_engine's rankings:live message instead (SSOT-02, troll/CLAUDE.md) --
+    this loop no longer computes any of them itself, only keeps the raw tick history
+    _live_candles_json/_coin_chart_json need (there is no scalar-message equivalent for
+    a full depth-array chart series).
+    """
     global _INGEST_COUNT, _LAST_INGEST_TS
-    now_ns = time.time_ns()
     for snap_dict in batch:
-        iid = snap_dict["instrument_id"]
-        _second_rolling[iid].append(snap_dict)
-
-        # Initialize OFI/OBI indicators on first sight
-        if iid not in _OFI_INDS:
-            _OFI_INDS[iid] = MultiLevelOFI(levels=10, window=50, zscore_window=_OFI_ZSCORE_WINDOW)
-        if iid not in _OFI_RAW_INDS:
-            _OFI_RAW_INDS[iid] = {
-                3:  MultiLevelOFI(levels=3,  window=300),
-                5:  MultiLevelOFI(levels=5,  window=300),
-                10: MultiLevelOFI(levels=10, window=300),
-            }
-        if iid not in _OBI_INDS:
-            _OBI_INDS[iid] = {
-                3:  MultiLevelOBI(levels=3),
-                5:  MultiLevelOBI(levels=5),
-                10: MultiLevelOBI(levels=10),
-            }
-
-        # Gap detection: >3s gap means collector reconnected — clear stale prev state
-        last_fed = _LAST_FED.get(iid, 0)
-        if last_fed > 0 and (snap_dict["ts_event"] - last_fed) > 3_000_000_000:
-            _OFI_INDS[iid].clear_prev_state()
-            for raw_ind in _OFI_RAW_INDS[iid].values():
-                raw_ind.clear_prev_state()
-
-        # Feed OFI incrementally (one new snap per tick — O(1), not O(window))
-        _OFI_INDS[iid].update_raw(
-            snap_dict["bid_prices"], snap_dict["bid_sizes"],
-            snap_dict["ask_prices"], snap_dict["ask_sizes"],
-        )
-        for raw_ind in _OFI_RAW_INDS[iid].values():
-            raw_ind.update_raw(
-                snap_dict["bid_prices"], snap_dict["bid_sizes"],
-                snap_dict["ask_prices"], snap_dict["ask_sizes"],
-            )
-        _LAST_FED[iid] = snap_dict["ts_event"]
-
-        # Compute window metrics from rolling buffer (plain dict access)
-        snaps = list(_second_rolling[iid])
-        latest = snap_dict  # already appended above
-
-        ofi_10_z = _OFI_INDS[iid].value if _OFI_INDS[iid].initialized else None
-        ofi_3  = _OFI_RAW_INDS[iid][3].value  if _OFI_RAW_INDS[iid][3].initialized  else None
-        ofi_5  = _OFI_RAW_INDS[iid][5].value  if _OFI_RAW_INDS[iid][5].initialized  else None
-        ofi_10 = _OFI_RAW_INDS[iid][10].value if _OFI_RAW_INDS[iid][10].initialized else None
-
-        if latest["bid_sizes"] and latest["ask_sizes"]:
-            for obi_ind in _OBI_INDS[iid].values():
-                obi_ind.update_raw(latest["bid_sizes"], latest["ask_sizes"])
-        obi_3  = _OBI_INDS[iid][3].value  if _OBI_INDS[iid][3].initialized  else None
-        obi_5  = _OBI_INDS[iid][5].value  if _OBI_INDS[iid][5].initialized  else None
-        obi_10 = _OBI_INDS[iid][10].value if _OBI_INDS[iid][10].initialized else None
-
-        tb_vol, ts_vol, tb_cnt, ts_cnt = _trade_aggregates(snaps)
-        total_count = tb_cnt + ts_cnt
-        mid = (
-            (latest["bid_prices"][0] + latest["ask_prices"][0]) / 2
-            if latest["bid_prices"] and latest["ask_prices"] else None
-        )
-        has_tob = (
-            latest["bid_prices"] and latest["ask_prices"]
-            and (latest["bid_sizes"][0] + latest["ask_sizes"][0]) > 0
-        )
-        microprice = (
-            (
-                latest["bid_prices"][0] * latest["ask_sizes"][0]
-                + latest["ask_prices"][0] * latest["bid_sizes"][0]
-            ) / (latest["bid_sizes"][0] + latest["ask_sizes"][0])
-            if has_tob else None
-        )
-        mids = [
-            (s["bid_prices"][0] + s["ask_prices"][0]) / 2
-            for s in snaps if s["bid_prices"] and s["ask_prices"]
-        ]
-        rets = [(mids[i] - mids[i - 1]) / mids[i - 1] for i in range(1, len(mids))]
-        volatility = statistics.stdev(rets) if len(rets) >= 2 else None
-
-        _LIVE_FAST[iid] = {
-            "ts": now_ns,
-            "instrument_id": iid,
-            "_err": None,
-            "ofi": ofi_10,
-            "ofi_3": ofi_3,
-            "ofi_5": ofi_5,
-            "ofi_10": ofi_10,
-            "ofi_10_z": ofi_10_z,
-            "obi_3": obi_3,
-            "obi_5": obi_5,
-            "obi_10": obi_10,
-            "microprice": microprice,
-            "microprice_lean": (microprice - mid) if microprice is not None and mid is not None else None,
-            "spread": (
-                latest["ask_prices"][0] - latest["bid_prices"][0]
-                if latest["ask_prices"] and latest["bid_prices"] else None
-            ),
-            "price": mid,
-            "volatility": volatility,
-            "cvd": tb_vol - ts_vol,
-            "volume_delta": latest["buy_volume"] - latest["sell_volume"],
-            "buy_count": latest["buy_count"],
-            "sell_count": latest["sell_count"],
-            "avg_trade_size": (tb_vol + ts_vol) / total_count if total_count > 0 else None,
-        }
-        # Append per-second indicator snapshot for the signal chart.
-        lean = (microprice - mid) if microprice is not None and mid is not None else None
-        _ind_rolling[iid].append({
-            "ts": latest["ts_event"] // 1_000_000,
-            "ofi_10_z": ofi_10_z,
-            "obi_10": obi_10,
-            "lean": lean,
-        })
+        _second_rolling[snap_dict["instrument_id"]].append(snap_dict)
     _INGEST_COUNT += len(batch)
     _LAST_INGEST_TS = time.time()
 
@@ -1138,18 +1186,12 @@ async def rank_history_json_handler(request: web.Request) -> web.Response:
 
 
 async def debug_handler(request: web.Request) -> web.Response:
-    fast_iids = list(_LIVE_FAST.keys())
-    sample = {}
-    if fast_iids:
-        iid = fast_iids[0]
-        e = _LIVE_FAST[iid]
-        sample = {"iid": iid, "ts": e.get("ts"), "price": e.get("price"),
-                  "buy_count": e.get("buy_count"), "ofi_10_z": e.get("ofi_10_z")}
+    ranks = _LATEST_RANKING["ranks"] if _LATEST_RANKING is not None else []
+    sample = ranks[0] if ranks else {}
     return web.Response(
         text=json.dumps({
-            "live_fast_count": len(_LIVE_FAST),
-            "live_slow_count": len(_LIVE_SLOW),
-            "ofi_inds_count": len(_OFI_INDS),
+            "ranked_count": len(ranks),
+            "second_rolling_count": len(_second_rolling),
             "sample": sample,
         }),
         content_type="application/json",
@@ -1165,23 +1207,23 @@ async def coin_json_handler(request: web.Request) -> web.Response:
     return web.Response(text=_coin_chart_json(symbol), content_type="application/json")
 
 
+def _parse_query_ms(qs: dict[str, str], key: str) -> int | None:
+    v = qs.get(key)
+    if v:
+        import datetime as _dt
+        try:
+            return int(_dt.datetime.fromisoformat(v).timestamp() * 1000)
+        except ValueError:
+            pass
+    return None
+
+
 async def coin_candles_handler(request: web.Request) -> web.Response:
     symbol = request.match_info["id"]
     qs = dict(request.rel_url.query)
-    import datetime as _dt
     bar_seconds = max(1, int(qs.get("bar", "60")))
-
-    def _parse_ms(key: str) -> int | None:
-        v = qs.get(key)
-        if v:
-            try:
-                return int(_dt.datetime.fromisoformat(v).timestamp() * 1000)
-            except ValueError:
-                pass
-        return None
-
-    start_ms = _parse_ms("start")
-    end_ms = _parse_ms("end")
+    start_ms = _parse_query_ms(qs, "start")
+    end_ms = _parse_query_ms(qs, "end")
     if start_ms is not None and end_ms is not None:
         data = await asyncio.to_thread(_historical_candles_json, symbol, start_ms, end_ms, bar_seconds)
     else:
@@ -1189,14 +1231,35 @@ async def coin_candles_handler(request: web.Request) -> web.Response:
     return web.Response(text=data, content_type="application/json")
 
 
-async def live_coin_json_handler(request: web.Request) -> web.Response:
-    """Raw indicator values for /coin/{id} live panel — polled every 5s."""
+async def coin_ticks_handler(request: web.Request) -> web.Response:
     symbol = request.match_info["id"]
-    m = _merged_live(symbol)
+    qs = dict(request.rel_url.query)
+    start_ms = _parse_query_ms(qs, "start")
+    end_ms = _parse_query_ms(qs, "end")
+    if start_ms is None or end_ms is None:
+        return web.Response(text=json.dumps({"ticks": [], "truncated": False}), content_type="application/json")
+    data = await asyncio.to_thread(_historical_ticks_json, symbol, start_ms, end_ms)
+    return web.Response(text=data, content_type="application/json")
+
+
+async def live_coin_json_handler(request: web.Request) -> web.Response:
+    """Raw indicator values for /coin/{id} live panel — polled every 1s.
+
+    Sourced entirely from ranking_engine's rankings:live message (SSOT-02,
+    troll/CLAUDE.md) -- dashboard computes none of this itself. Full field parity with
+    bot_tui's Coin-detail (SSOT-05) -- every metric ranking_engine publishes for the
+    open instrument, not just the fast-tick subset this endpoint used to expose.
+    """
+    symbol = request.match_info["id"]
+    ranks = _LATEST_RANKING["ranks"] if _LATEST_RANKING is not None else []
+    m = next(
+        (r for r in ranks if isinstance(r, dict) and r.get("instrument_id") == symbol), {},
+    )
     ind_keys = [
-        "ofi_10", "ofi_5", "ofi_3", "obi_10", "obi_5", "obi_3",
+        "ofi_10", "ofi_5", "ofi_3", "ofi_10_z", "obi_10", "obi_5", "obi_3",
         "microprice", "microprice_lean", "spread", "cvd",
         "volume_delta", "buy_count", "sell_count", "avg_trade_size", "price",
+        "volatility_fast", "volatility", "volatility_score", "pct_1h", "pct_24h", "volume24h",
     ]
     result = {k: m.get(k) for k in ind_keys}
     return web.Response(text=json.dumps(result), content_type="application/json")
@@ -1257,6 +1320,11 @@ def _handle_rankings_message(message: dict) -> None:
     payload (unexpected shape, wrong producer, truncated JSON that still parses) must
     not corrupt _LATEST_RANKING. The previous valid ranking is kept instead, mirroring
     T-03-01's "one bad message never takes down the rest of the subscriber" discipline.
+
+    Also feeds _ind_rolling (the /coin/{id} signal chart's rolling window) from each
+    rank entry's own ofi_10_z/obi_10/microprice_lean fields -- these are computed by
+    ranking_engine now (SSOT-02, troll/CLAUDE.md), not locally; this just re-shapes
+    them into that chart's existing per-message window format.
     """
     global _LATEST_RANKING, _LATEST_RANKING_RECEIVED_AT
     if not isinstance(message.get("ranks"), list):
@@ -1264,6 +1332,20 @@ def _handle_rankings_message(message: dict) -> None:
         return
     _LATEST_RANKING = message
     _LATEST_RANKING_RECEIVED_AT = time.time()
+
+    ts_ms = message["updated_at"] // 1_000_000
+    for rank_row in message["ranks"]:
+        if not isinstance(rank_row, dict):
+            continue
+        iid = rank_row.get("instrument_id")
+        if iid is None:
+            continue
+        _ind_rolling[iid].append({
+            "ts": ts_ms,
+            "ofi_10_z": rank_row.get("ofi_10_z"),
+            "obi_10": rank_row.get("obi_10"),
+            "lean": rank_row.get("microprice_lean"),
+        })
 
 
 async def _redis_listener(redis_url: str) -> None:
@@ -1289,10 +1371,6 @@ async def _redis_listener(redis_url: str) -> None:
                         payload = json.loads(message["data"])
                         if message["channel"] == "snapshots:raw":
                             _ingest_batch(payload)
-                            logger.info(
-                                "Ingested batch: %d instruments, live_fast now %d",
-                                len(payload), len(_LIVE_FAST),
-                            )
                         elif message["channel"] == "rankings:live":
                             _handle_rankings_message(payload)
                     except Exception as exc:
@@ -1304,55 +1382,20 @@ async def _redis_listener(redis_url: str) -> None:
             await asyncio.sleep(2)
 
 
-@asynccontextmanager
-async def slow_loop_ctx(app: web.Application):  # type: ignore[type-arg]
-    """Lifecycle context: run _slow_loop_task as a background task."""
-    task = asyncio.create_task(_slow_loop_task(app["catalog_path"]))
-    try:
-        yield
-    finally:
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-
-
-def _refresh_live_slow(db_path: str) -> None:
-    """Populate _LIVE_SLOW from metrics_store's read-only latest() query.
-
-    Replaces the old catalog-scanning/computing/writing _slow_loop_task (Task 7):
-    ranking_engine is now the sole caller of metrics_computer.compute_all() and the
-    sole writer of metrics_store, so this loop only needs to read the persisted result
-    back -- exactly like make_app()'s existing one-time startup preload already does,
-    just repeated periodically instead of once.
-    """
-    try:
-        rows = metrics_store.latest(db_path)
-        for r in rows:
-            _LIVE_SLOW[r["instrument_id"]] = r
-    except Exception:
-        logger.warning("Could not refresh _LIVE_SLOW from metrics.db", exc_info=True)
-
-
-async def _slow_loop_task(catalog_path: str) -> None:
-    """Refresh _LIVE_SLOW from metrics_store every DB_WRITE_INTERVAL_SECONDS."""
-    while True:
-        await asyncio.to_thread(_refresh_live_slow, METRICS_DB_PATH)
-        await asyncio.sleep(DB_WRITE_INTERVAL_SECONDS)
-
-
 def make_app(redis_url: str, catalog_path: str) -> web.Application:
-    """Return a configured aiohttp Application with all routes and background tasks."""
-    # Pre-populate _LIVE_SLOW from last SQLite snapshot so rankings show immediately.
-    _refresh_live_slow(METRICS_DB_PATH)
+    """Return a configured aiohttp Application with all routes and background tasks.
 
+    No slow-loop/metrics_store-polling task here anymore -- ranking_engine folds
+    price/pct_1h/pct_24h/volatility into rankings:live directly now (SSOT-02,
+    troll/CLAUDE.md), so dashboard has nothing left to periodically re-poll for live
+    values. metrics_store is still read directly (not cached) by
+    rank_history_json_handler/_render_history_page for the historical-only views.
+    """
     app = web.Application()
     app["redis_url"] = redis_url
     app["catalog_path"] = catalog_path
 
     app.cleanup_ctx.append(redis_subscriber_ctx)
-    app.cleanup_ctx.append(slow_loop_ctx)
 
     app.router.add_get("/", rankings_handler)
     app.router.add_get("/api/rankings", rankings_json_handler)
@@ -1362,6 +1405,7 @@ def make_app(redis_url: str, catalog_path: str) -> web.Application:
     app.router.add_get("/coin/{id}", coin_handler)
     app.router.add_get("/data/coin/{id}", coin_json_handler)
     app.router.add_get("/data/coin/{id}/candles", coin_candles_handler)
+    app.router.add_get("/data/coin/{id}/ticks", coin_ticks_handler)
     app.router.add_get("/data/live/{id}", live_coin_json_handler)
     app.router.add_get("/chart/{id}", chart_handler)
     app.router.add_get("/history/{id}", history_handler)

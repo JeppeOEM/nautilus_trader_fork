@@ -26,8 +26,10 @@ import asyncio
 import json
 import logging
 import os
+import statistics
 import time
 import urllib.request
+from collections import deque
 from collections.abc import Callable
 from pathlib import Path
 
@@ -37,6 +39,13 @@ from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
 from nautilus_trader.core.nautilus_pyo3 import get_dydx_http_url  # type: ignore[attr-defined]
 
 from ml_signals import metrics_computer
+from ml_signals.indicators import MultiLevelOBI
+from ml_signals.indicators import MultiLevelOFI
+from ml_signals.indicators import microprice as calc_microprice
+from ml_signals.indicators import mid_price as calc_mid_price
+from ml_signals.indicators import spread as calc_spread
+from ml_signals.indicators import trade_aggregates
+from ml_signals.indicators import volume_delta as calc_volume_delta
 from ranking_engine import metrics_store
 from ranking_engine.volatility import VolatilityTracker
 
@@ -89,12 +98,43 @@ RANKING_HEARTBEAT_SECONDS: int = int(os.environ.get("RANKING_HEARTBEAT_SECONDS",
 _WATCHLIST_STALE_NS: int = 30_000_000_000
 
 # Wall-clock ns of last-received snapshots:raw entry per instrument -- this module's
-# own freshness state, deliberately leaner than dashboard's _LIVE_FAST (no OFI/OBI/
-# microprice state; that's dashboard's/ml_signals.indicators' job, irrelevant here).
+# own freshness state.
 _LAST_SEEN: dict[str, int] = {}
 
 # Cross-sectional volatility tracker, fed on every snapshots:raw ingest.
 _VOLATILITY = VolatilityTracker(lookback_seconds=RANKING_VOLATILITY_LOOKBACK_SECONDS)
+
+# Live per-tick indicator state, one instance per instrument, fed on every
+# snapshots:raw ingest -- relocated from ml_signals.dashboard's own independent copy
+# (troll/CLAUDE.md SSOT-02): ranking_engine is now the sole computer of these,
+# dashboard/bot_tui are pure readers of the rankings:live fields they produce below.
+_OFI_INDS: dict[str, MultiLevelOFI] = {}
+_OFI_RAW_INDS: dict[str, dict[int, MultiLevelOFI]] = {}
+_OBI_INDS: dict[str, dict[int, MultiLevelOBI]] = {}
+# No persistent Microprice() instance -- ml_signals.indicators.microprice() is a pure
+# function of one snapshot (no meaningful state to hold between calls), computed fresh
+# per rank-building pass in _fast_metrics_for below.
+
+# ts_event (ns) of the last snapshot actually fed to the OFI trackers above, per
+# instrument -- used only to detect a reconnect gap (see _OFI_GAP_NS) and clear stale
+# previous-tick state, mirroring dashboard.py's identical precedent.
+_LAST_FED: dict[str, int] = {}
+
+# Gap threshold before an OFI tracker's previous-tick state is dropped rather than
+# diffed against a stale pre-gap book -- same 3s threshold dashboard.py used.
+_OFI_GAP_NS: int = 3_000_000_000
+
+# Rolling 300-second window of raw snapshot dicts per instrument -- feeds
+# trade_aggregates() (cvd/avg_trade_size) and the fast live-tick volatility stdev
+# below. Relocated from dashboard.py's _second_rolling.
+_SECOND_ROLLING: dict[str, deque] = {}
+
+# Latest catalog-derived slow-loop snapshot per instrument (price/pct_1h/pct_24h/
+# volatility) -- relocated from dashboard's _LIVE_SLOW; refreshed every
+# DB_WRITE_INTERVAL_SECONDS by _slow_loop_task and folded into _current_ranks() below
+# so dashboard/bot_tui get it via rankings:live instead of touching metrics_store
+# directly.
+_SLOW_METRICS: dict[str, dict] = {}
 
 # The single global Ranking Mode -- module-level mutable state, switched atomically by
 # a ranking:control message. Defaults to "volume", matching FR6's existing default.
@@ -168,8 +208,33 @@ def _is_fresh(iid: str, now_ns: int) -> bool:
     return ts is not None and (now_ns - ts) <= _WATCHLIST_STALE_NS
 
 
+# Bounds _recently_stale_iids() below so an instrument that stopped being liquid/
+# subscribed weeks ago doesn't clutter that list forever -- only instruments seen at
+# all within the last hour are reported as "recently" stale.
+_RECENTLY_STALE_WINDOW_NS: int = 3_600_000_000_000  # 1 hour
+
+
+def _recently_stale_iids(now_ns: int) -> list[str]:
+    """
+    Instruments this engine has seen recently but that have since gone stale --
+    exactly the instruments _current_ranks() silently drops from the ranked list
+    (OBS-01: a liquid instrument's book going silent for 30s+ is a pipeline failure,
+    never a quiet market). Surfacing this separately (as rankings:live's own
+    stale_instrument_ids field, additive -- _current_ranks()'s fresh-only filter is
+    untouched) lets an operator see *which* coin's feed died instead of it just
+    vanishing from the table with no trace.
+    """
+    return sorted(
+        iid
+        for iid, ts in _LAST_SEEN.items()
+        if not _is_fresh(iid, now_ns) and (now_ns - ts) <= _RECENTLY_STALE_WINDOW_NS
+    )
+
+
 def _ingest_snapshot_batch(batch: list[dict]) -> None:
-    """Update freshness state and feed the volatility tracker from a snapshots:raw batch.
+    """Update freshness state and feed every live indicator tracker from a
+    snapshots:raw batch -- volatility, OFI (z-scored + raw 3/5/10), OBI (3/5/10),
+    microprice, and the 300s rolling window (cvd/avg_trade_size/fast volatility).
 
     Each snap is processed in its own try/except: one malformed entry (missing key,
     bad shape) is logged and skipped rather than aborting every remaining snap in the
@@ -180,14 +245,96 @@ def _ingest_snapshot_batch(batch: list[dict]) -> None:
             iid = snap["instrument_id"]
             _LAST_SEEN[iid] = time.time_ns()
             bid_prices, ask_prices = snap["bid_prices"], snap["ask_prices"]
+            bid_sizes, ask_sizes = snap["bid_sizes"], snap["ask_sizes"]
             if not bid_prices or not ask_prices:  # thin/one-sided book -- legitimate, skip
                 continue
             mid = (bid_prices[0] + ask_prices[0]) / 2
             if mid <= 0:  # not a legitimate market state -- fail closed (AD-2), skip this snap
                 continue
             _VOLATILITY.update(iid, snap["ts_event"], mid)
+
+            last_fed = _LAST_FED.get(iid)
+            gapped = last_fed is not None and (snap["ts_event"] - last_fed) > _OFI_GAP_NS
+
+            ofi_z = _OFI_INDS.setdefault(
+                iid, MultiLevelOFI(levels=10, window=50, zscore_window=3600),
+            )
+            if gapped:
+                ofi_z.clear_prev_state()
+            ofi_z.update_raw(bid_prices, bid_sizes, ask_prices, ask_sizes)
+
+            raw_ofis = _OFI_RAW_INDS.setdefault(
+                iid, {n: MultiLevelOFI(levels=n, window=300) for n in (3, 5, 10)},
+            )
+            for raw_ofi in raw_ofis.values():
+                if gapped:
+                    raw_ofi.clear_prev_state()
+                raw_ofi.update_raw(bid_prices, bid_sizes, ask_prices, ask_sizes)
+
+            if bid_sizes and ask_sizes:
+                obis = _OBI_INDS.setdefault(iid, {n: MultiLevelOBI(levels=n) for n in (3, 5, 10)})
+                for obi in obis.values():
+                    obi.update_raw(bid_sizes, ask_sizes)
+
+            _LAST_FED[iid] = snap["ts_event"]
+            _SECOND_ROLLING.setdefault(iid, deque(maxlen=300)).append(snap)
         except Exception:
             logger.warning("Malformed snapshots:raw entry skipped: %r", snap, exc_info=True)
+
+
+def _fast_metrics_for(iid: str) -> dict:
+    """Re-shape one instrument's already-updated tracker state + rolling window into
+    the live-tick fields of a rankings:live rank entry. Pure read of state
+    _ingest_snapshot_batch already maintains -- computes nothing new itself.
+    """
+    snapshots = list(_SECOND_ROLLING.get(iid, ()))
+    latest = snapshots[-1] if snapshots else None
+
+    ofi_z_ind = _OFI_INDS.get(iid)
+    raw_ofis = _OFI_RAW_INDS.get(iid, {})
+    obis = _OBI_INDS.get(iid, {})
+
+    def _value(ind) -> float | None:
+        return ind.value if ind is not None and ind.initialized else None
+
+    buy_vol, sell_vol, buy_cnt, sell_cnt = (
+        trade_aggregates(snapshots) if snapshots else (0.0, 0.0, 0, 0)
+    )
+    total_cnt = buy_cnt + sell_cnt
+
+    mid = calc_mid_price(latest) if latest is not None else None
+    microprice_value = calc_microprice(latest) if latest is not None else None
+
+    # Fast, 300-point live-tick volatility -- deliberately distinct from
+    # volatility_score (VolatilityTracker's 3600s cross-sectional stdev) and the
+    # catalog-derived "volatility" folded in from _SLOW_METRICS below (existing
+    # design: ranking_engine.volatility's own docstring calls out these as
+    # legitimately separate metrics, not to be merged -- only single-sourced).
+    mids = [m for m in (calc_mid_price(s) for s in snapshots) if m is not None]
+    rets = [(mids[i] - mids[i - 1]) / mids[i - 1] for i in range(1, len(mids))]
+    volatility_fast = statistics.stdev(rets) if len(rets) >= 2 else None
+
+    return {
+        "ofi_10_z": _value(ofi_z_ind),
+        "ofi_3": _value(raw_ofis.get(3)),
+        "ofi_5": _value(raw_ofis.get(5)),
+        "ofi_10": _value(raw_ofis.get(10)),
+        "obi_3": _value(obis.get(3)),
+        "obi_5": _value(obis.get(5)),
+        "obi_10": _value(obis.get(10)),
+        "microprice": microprice_value,
+        "microprice_lean": (
+            microprice_value - mid if microprice_value is not None and mid is not None else None
+        ),
+        "spread": calc_spread(latest) if latest is not None else None,
+        "cvd": buy_vol - sell_vol,
+        "volume_delta": calc_volume_delta(latest) if latest is not None else None,
+        "buy_count": buy_cnt,
+        "sell_count": sell_cnt,
+        "avg_trade_size": (buy_vol + sell_vol) / total_cnt if total_cnt > 0 else None,
+        "volatility_fast": volatility_fast,
+        "price": mid,
+    }
 
 
 def _handle_control_message(message: dict) -> None:
@@ -215,11 +362,19 @@ def _current_ranks() -> list[dict]:
     for iid in fresh_iids:
         volume24h = _VOLUME_24H.get(iid, 0.0)
         volatility_score = _VOLATILITY.score(iid)
-        rows.append({
+        slow = _SLOW_METRICS.get(iid, {})
+        row = {
             "instrument_id": iid,
             "volume24h": volume24h,
             "volatility_score": volatility_score,
-        })
+            **_fast_metrics_for(iid),
+            "pct_1h": slow.get("pct_1h"),
+            "pct_24h": slow.get("pct_24h"),
+            "volatility": slow.get("volatility"),
+        }
+        if row["price"] is None:  # no fresh snapshot yet -- fall back to the last
+            row["price"] = slow.get("price")  # catalog-derived price, same as before
+        rows.append(row)
 
     if _ACTIVE_MODE == "volatility":
         rows.sort(key=lambda r: r["volatility_score"] or 0.0, reverse=True)
@@ -286,6 +441,7 @@ async def _slow_loop_task(catalog_path: str) -> None:
         try:
             snapshots = await asyncio.to_thread(metrics_computer.compute_all, catalog_path)
             if snapshots:
+                _SLOW_METRICS.update({s["instrument_id"]: s for s in snapshots})
                 persisted = _merge_rank_into_snapshots(snapshots, _ranks_by_iid(), _VOLUME_24H)
                 await asyncio.to_thread(metrics_store.write, persisted, METRICS_DB_PATH)
         except Exception:
@@ -296,8 +452,17 @@ async def _slow_loop_task(catalog_path: str) -> None:
 def _build_rankings_message() -> dict:
     """The exact rankings:live wire schema -- AD-9/Consistency Conventions table field
     names, nesting, and per-rank shape are load-bearing; never rename for "clarity."
+
+    stale_instrument_ids is an additive field (dashboard/bot_tui readers predating it
+    simply never look at it) -- never renamed either, once shipped.
     """
-    return {"mode": _ACTIVE_MODE, "updated_at": time.time_ns(), "ranks": _current_ranks()}
+    now_ns = time.time_ns()
+    return {
+        "mode": _ACTIVE_MODE,
+        "updated_at": now_ns,
+        "ranks": _current_ranks(),
+        "stale_instrument_ids": _recently_stale_iids(now_ns),
+    }
 
 
 class RankingsPublisher:
@@ -318,7 +483,24 @@ class RankingsPublisher:
 
     @staticmethod
     def _ranks_key(ranks: list[dict]) -> tuple:
-        return tuple((r["instrument_id"], r["rank"]) for r in ranks)
+        # A representative subset of the live-tick fields, not every one of them --
+        # spread/cvd/microprice/price/ofi_10_z are all derived from the same incoming
+        # book/trade data, so if none of these five changed nothing else meaningfully
+        # did either. Broadened here (was rank-only) so the new per-tick fields
+        # (SSOT-02 migration from dashboard.py) actually refresh live instead of only
+        # on the RANKING_HEARTBEAT_SECONDS heartbeat.
+        return tuple(
+            (
+                r["instrument_id"],
+                r["rank"],
+                r.get("ofi_10_z"),
+                r.get("spread"),
+                r.get("cvd"),
+                r.get("microprice"),
+                r.get("price"),
+            )
+            for r in ranks
+        )
 
     def should_publish(self, ranks: list[dict], mode: str) -> bool:
         if self._last_published_at is None:

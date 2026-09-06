@@ -27,7 +27,10 @@ documents for the `o` key -- only the footer-echo half is asserted here.
 
 import urwid
 
+from bot_tui import app as app_module
 from bot_tui import bot_history_state
+from bot_tui import bot_incidents_state
+from bot_tui import bots_pane
 from bot_tui import bots_state
 from bot_tui.app import BotTuiApp
 
@@ -35,6 +38,9 @@ from bot_tui.app import BotTuiApp
 def _reset() -> None:
     bots_state._LATEST_STATUSES = {}
     bots_state._LATEST_RECEIVED_AT = {}
+    bot_incidents_state._LATEST_INCIDENTS = {}
+    bot_incidents_state._LATEST_RECEIVED_AT = {}
+    bot_incidents_state._TRACKED_BOT_ID = None
 
 
 def _status(bot_id: str, **overrides: object) -> dict:
@@ -195,22 +201,22 @@ def test_build_bot_detail_body_shows_history_unavailable_before_any_fetch() -> N
     assert body is not None
 
 
-def test_build_bot_detail_body_has_three_stacked_bordered_regions() -> None:
-    # AC1: snapshot, trades blotter, PnL sparkline -- stacked top-to-bottom.
+def test_build_bot_detail_body_has_four_stacked_bordered_regions() -> None:
+    # AC1: snapshot, trades blotter, PnL sparkline, performance metrics -- stacked
+    # top-to-bottom.
     _reset()
     bots_state._handle_status_message(_status("bot-01"))
     app = BotTuiApp()
     app._open_bot_detail("bot-01")
     body = app._build_bot_detail_body()
-    assert isinstance(body, urwid.Filler)
-    pile = body.original_widget
-    assert isinstance(pile, urwid.Pile)
-    boxes = [widget for widget, _options in pile.contents]
-    assert len(boxes) == 3
-    snapshot_box, blotter_box, sparkline_box = boxes
+    assert isinstance(body, urwid.ListBox)
+    boxes = list(body.body)
+    assert len(boxes) == 4
+    snapshot_box, blotter_box, sparkline_box, metrics_box = boxes
     assert isinstance(snapshot_box, urwid.LineBox)
     assert isinstance(blotter_box, urwid.LineBox)
     assert isinstance(sparkline_box, urwid.LineBox)
+    assert isinstance(metrics_box, urwid.LineBox)
     assert snapshot_box.title_widget.text.strip() == "bot-01  snapshot"
     assert blotter_box.title_widget.text.strip() == "trades"
     assert sparkline_box.title_widget.text.strip() == "pnl (day)"
@@ -243,4 +249,103 @@ def test_o_key_sets_footer_to_bot_dashboard_url() -> None:
     app = BotTuiApp()
     app._open_bot_detail("bot-07")
     app._handle_bot_detail_key("o")
-    assert app._footer_hint.text == "dashboard: http://127.0.0.1:8765/bot/bot-07"
+    assert (
+        app._footer_hint.text == "dashboard (copied to clipboard): http://127.0.0.1:8765/bot/bot-07"
+    )
+
+
+def test_v_key_opens_strategy_view_with_breadcrumb(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(app_module, "_STRATEGY_SOURCE_PATH", tmp_path / "strategy.py")
+    _reset()
+    bots_state._handle_status_message(_status("bot-01"))
+    app = BotTuiApp()
+    app._open_bot_detail("bot-01")
+    app._handle_bot_detail_key("v")
+    assert app._view == "strategy"
+    assert app._breadcrumb.text == "Bots > bot-01 > strategy"
+
+
+def test_build_strategy_body_renders_file_lines_scrollable(monkeypatch, tmp_path) -> None:
+    source = tmp_path / "strategy.py"
+    source.write_text("class DummyStrategy:\n    pass\n")
+    monkeypatch.setattr(app_module, "_STRATEGY_SOURCE_PATH", source)
+    _reset()
+    bots_state._handle_status_message(_status("bot-01"))
+    app = BotTuiApp()
+    app._open_bot_detail("bot-01")
+    app._handle_bot_detail_key("v")
+    body = app._build_strategy_body()
+    assert isinstance(body, urwid.ListBox)
+
+
+def test_build_strategy_body_handles_missing_file(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(app_module, "_STRATEGY_SOURCE_PATH", tmp_path / "missing.py")
+    _reset()
+    body = BotTuiApp()._build_strategy_body()
+    assert isinstance(body, urwid.Filler)
+
+
+def test_esc_from_strategy_view_returns_to_bot_detail_without_clearing_it(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(app_module, "_STRATEGY_SOURCE_PATH", tmp_path / "strategy.py")
+    _reset()
+    bots_state._handle_status_message(_status("bot-01"))
+    app = BotTuiApp()
+    app._open_bot_detail("bot-01")
+    app._handle_bot_detail_key("v")
+    app._handle_global_key("esc")
+    assert app._view == "bot_detail"
+    assert app._bot_detail_bot_id == "bot-01"
+
+
+def test_i_key_opens_incidents_view_with_breadcrumb() -> None:
+    _reset()
+    bots_state._handle_status_message(_status("bot-01"))
+    app = BotTuiApp()
+    app._open_bot_detail("bot-01")
+    app._handle_bot_detail_key("i")
+    assert app._view == "incidents"
+    assert app._breadcrumb.text == "Bots > bot-01 > incidents"
+
+
+def test_build_incidents_body_renders_fetched_incidents() -> None:
+    _reset()
+    bots_state._handle_status_message(_status("bot-01"))
+    app = BotTuiApp()
+    app._open_bot_detail("bot-01")
+    bot_incidents_state._handle_incidents_payload(
+        "bot-01", [{"type": "process_start", "started_at": 100.0, "ended_at": 100.0}]
+    )
+    app._handle_bot_detail_key("i")
+    body = app._build_incidents_body()
+    assert isinstance(body, urwid.ListBox)
+
+
+def test_build_incidents_body_before_any_fetch_shows_unavailable() -> None:
+    _reset()
+    bots_state._handle_status_message(_status("bot-01"))
+    app = BotTuiApp()
+    app._open_bot_detail("bot-01")
+    body = app._build_incidents_body()
+    assert body.body[0].text == bots_pane.INCIDENTS_UNAVAILABLE_TEXT
+
+
+def test_esc_from_incidents_view_returns_to_bot_detail_without_clearing_it() -> None:
+    _reset()
+    bots_state._handle_status_message(_status("bot-01"))
+    app = BotTuiApp()
+    app._open_bot_detail("bot-01")
+    app._handle_bot_detail_key("i")
+    app._handle_global_key("esc")
+    assert app._view == "bot_detail"
+    assert app._bot_detail_bot_id == "bot-01"
+
+
+def test_esc_from_bot_detail_also_stops_tracking_incidents() -> None:
+    _reset()
+    bots_state._handle_status_message(_status("bot-01"))
+    app = BotTuiApp()
+    app._open_bot_detail("bot-01")
+    app._handle_bot_detail_key("esc")
+    assert bot_incidents_state._TRACKED_BOT_ID is None

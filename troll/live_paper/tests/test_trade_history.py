@@ -219,6 +219,58 @@ def test_compute_history_all_range_pnl_series_matches_sum_of_trades(tmp_path) ->
     engine.dispose()
 
 
+def test_compute_history_includes_metrics_computed_from_the_same_fills(tmp_path) -> None:
+    db_path = str(tmp_path / "fills.db")
+    engine, _strategy = _run_strategy_with_history(db_path)
+
+    history = trade_history.compute_history(
+        bot_id="bot-01",
+        range_name="all",
+        now_ns=200 * _NS_PER_SECOND,
+        db_path=db_path,
+        starting_balance=10_000.0,
+    )
+
+    closing_pnls = [t["realized_pnl"] for t in history["trades"] if t["realized_pnl"] is not None]
+    expected_win_rate = sum(1 for p in closing_pnls if p > 0) / len(closing_pnls)
+    metrics = history["metrics"]
+    assert metrics["win_rate"] == expected_win_rate
+    assert metrics["expectancy"] == sum(closing_pnls) / len(closing_pnls)
+    # Every round trip in this fixture is a win (see _run_strategy_with_history's own
+    # sibling assertion) inside one UTC day bucket, so the (single-point) equity curve
+    # never dips below its own starting value -- drawdown is exactly zero. This is also
+    # the signal that the return-based stats were actually computed (not skipped, as
+    # the no-starting-balance test below asserts None instead).
+    assert metrics["max_drawdown"] == 0.0
+
+    engine.reset()
+    engine.dispose()
+
+
+def test_compute_history_skips_return_based_metrics_without_a_starting_balance(
+    tmp_path,
+) -> None:
+    db_path = str(tmp_path / "fills.db")
+    engine, _strategy = _run_strategy_with_history(db_path)
+
+    history = trade_history.compute_history(
+        bot_id="bot-01",
+        range_name="all",
+        now_ns=200 * _NS_PER_SECOND,
+        db_path=db_path,
+        starting_balance=None,
+    )
+
+    metrics = history["metrics"]
+    assert metrics["sharpe_ratio"] is None
+    assert metrics["max_drawdown"] is None
+    # Trade-level stats need no starting balance -- still populated.
+    assert metrics["win_rate"] is not None
+
+    engine.reset()
+    engine.dispose()
+
+
 def test_compute_history_day_window_excludes_trades_outside_24h_but_all_does_not(
     tmp_path,
 ) -> None:

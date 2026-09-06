@@ -17,17 +17,24 @@ bot_tui's own snapshots:raw reader (Story 4.3, AC1; architecture AD-9).
 
 Separate connection from ranking_state.py's rankings:live listener -- deliberately not
 multiplexed onto it even though dashboard.py itself subscribes to both channels on one
-connection (dashboard.py:1281-1284). ranking_state.py is already-shipped, already-
-reviewed Story 4.1/4.2 code; adding a second subscribed channel and dispatch branch to
-it is a larger, riskier change than one new, fully independent sibling module.
+connection. ranking_state.py is already-shipped, already-reviewed Story 4.1/4.2 code;
+adding a second subscribed channel and dispatch branch to it is a larger, riskier
+change than one new, fully independent sibling module.
 
 snapshots:raw carries every currently-published instrument's batch every tick -- there
 is no per-instrument channel to selectively join. This module receives the full batch
 for the whole app session and discards every row except the one currently open in
-Coin-detail (a deliberate bandwidth/CPU trade-off, not an oversight -- a dynamic
-per-visit subscribe/unsubscribe protocol would add real complexity, subscribe-
-confirmation timing and reconnect bookkeeping, to save discarding a few hundred bytes
-of JSON a client already receives for free on its own dedicated connection).
+Coin-detail (a deliberate bandwidth/CPU trade-off, not an oversight).
+
+This module's only remaining job is the raw order-book ladder (bid/ask price/size
+arrays) -- there is no scalar-message equivalent for a full depth array, so this is the
+one place Coin-detail still needs the raw tick stream. Every *derived* indicator
+(microprice, OFI, OBI, spread, cvd, ...) used to be computed here too, independently of
+both ranking_engine's and dashboard's own copies -- a real SSOT-02 violation
+(troll/CLAUDE.md): three separate processes independently running the same rolling
+indicators against the same feed. That computation is deleted; Coin-detail now reads
+those values straight off the matching ranking_state._LATEST_RANKING rank entry
+instead (see coin_detail.rank_row_for) -- already-received, no new subscription.
 """
 
 import asyncio
@@ -37,11 +44,6 @@ import os
 import time
 
 import redis.asyncio as aioredis
-from ml_signals.indicators import Microprice
-from ml_signals.indicators import MultiLevelOBI
-from ml_signals.indicators import MultiLevelOFI
-
-from bot_tui import coin_detail
 
 
 logger = logging.getLogger(__name__)
@@ -55,49 +57,21 @@ _CURRENT_INSTRUMENT_ID: str | None = None
 _LATEST_SNAPSHOT: dict | None = None
 _LATEST_SNAPSHOT_RECEIVED_AT: float = 0.0
 
-_MICROPRICE: Microprice | None = None
-_OFI: MultiLevelOFI | None = None
-_OBI: MultiLevelOBI | None = None
-
-# Same threshold/mechanism as dashboard.py's _ingest_batch gap detection: a >3s gap
-# between two fed ts_event values means the collector reconnected and rebuilt the book
-# in between, so the next update_raw must not diff against pre-gap prices.
-_OFI_GAP_NS: int = 3_000_000_000
-_LAST_FED_TS_EVENT: int = 0
-
 
 def open_coin(instrument_id: str) -> None:
-    """
-    Construct FRESH indicator instances for this coin, called once per Enter keypress.
-
-    Discards any previous coin's instances -- even for the same instrument_id reopened
-    later in the same session. MultiLevelOFI diffs against its own previous tick; if
-    Coin-detail wasn't open in between, there is no legitimate previous tick to diff
-    against, and carrying over an old instance would silently compute a delta across
-    an arbitrary real-time gap as if it were one 1-second tick.
-    """
+    """Start tracking this coin's raw ladder, called once per Enter keypress."""
     global _CURRENT_INSTRUMENT_ID, _LATEST_SNAPSHOT, _LATEST_SNAPSHOT_RECEIVED_AT
-    global _MICROPRICE, _OFI, _OBI, _LAST_FED_TS_EVENT
     _CURRENT_INSTRUMENT_ID = instrument_id
     _LATEST_SNAPSHOT = None
     _LATEST_SNAPSHOT_RECEIVED_AT = 0.0
-    _MICROPRICE = Microprice()
-    _OFI = MultiLevelOFI(levels=10, window=300)
-    _OBI = MultiLevelOBI(levels=10)
-    _LAST_FED_TS_EVENT = 0
 
 
 def close_coin() -> None:
     """Drop the open coin's state, called once per esc-from-Coin-detail."""
     global _CURRENT_INSTRUMENT_ID, _LATEST_SNAPSHOT, _LATEST_SNAPSHOT_RECEIVED_AT
-    global _MICROPRICE, _OFI, _OBI, _LAST_FED_TS_EVENT
     _CURRENT_INSTRUMENT_ID = None
     _LATEST_SNAPSHOT = None
     _LATEST_SNAPSHOT_RECEIVED_AT = 0.0
-    _MICROPRICE = None
-    _OFI = None
-    _OBI = None
-    _LAST_FED_TS_EVENT = 0
 
 
 def _handle_snapshot_batch(batch: object) -> None:
@@ -107,28 +81,17 @@ def _handle_snapshot_batch(batch: object) -> None:
     other row (typically ~19 of ~20 in a full watchlist batch) is discarded. A row
     missing instrument_id or shaped unexpectedly is skipped, not fatal.
     """
-    global _LATEST_SNAPSHOT, _LATEST_SNAPSHOT_RECEIVED_AT, _LAST_FED_TS_EVENT
+    global _LATEST_SNAPSHOT, _LATEST_SNAPSHOT_RECEIVED_AT
     if not isinstance(batch, list):
         logger.warning("snapshots:raw message not list-shaped, ignoring: %r", batch)
         return
     if _CURRENT_INSTRUMENT_ID is None:
         return
-    # open_coin() always constructs all three together, close_coin() always clears
-    # all three together -- _CURRENT_INSTRUMENT_ID being set guarantees these are too
-    # (same invariant-narrowing precedent as app.py's _open_dashboard_chart assert).
-    assert _MICROPRICE is not None
-    assert _OFI is not None
-    assert _OBI is not None
     for row in batch:
         if not isinstance(row, dict) or row.get("instrument_id") != _CURRENT_INSTRUMENT_ID:
             continue
-        ts_event = row["ts_event"]
-        if _LAST_FED_TS_EVENT > 0 and (ts_event - _LAST_FED_TS_EVENT) > _OFI_GAP_NS:
-            _OFI.clear_prev_state()
-        coin_detail.update_indicators(_MICROPRICE, _OFI, _OBI, row)
         _LATEST_SNAPSHOT = row
         _LATEST_SNAPSHOT_RECEIVED_AT = time.time()
-        _LAST_FED_TS_EVENT = ts_event
         return
 
 
