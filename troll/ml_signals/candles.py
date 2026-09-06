@@ -35,28 +35,30 @@ class Candle:
     high: float
     low: float
     close: float
+    volume: float = 0.0
 
 
-def build_candles(rows: list[tuple[int, float]], period_seconds: int) -> list[Candle]:
+def build_candles(rows: list[tuple[int, float, float]], period_seconds: int) -> list[Candle]:
     """
-    Bucket (ts_event, price) trade rows into `period_seconds`-wide OHLC candles.
+    Bucket (ts_event, price, size) trade rows into `period_seconds`-wide OHLC candles.
 
     The last candle covers "now" and is necessarily partial — callers re-fetch
     trades from the catalog and recompute on every request, so it fills in
     live as new trades land. No special-cased "live candle" code needed.
     """
     period_ns = period_seconds * 1_000_000_000
-    buckets: dict[int, list[float]] = {}
-    for ts_event, price in sorted(rows, key=lambda row: row[0]):
-        buckets.setdefault(ts_event // period_ns, []).append(price)
+    buckets: dict[int, list[tuple[float, float]]] = {}
+    for ts_event, price, size in sorted(rows, key=lambda row: row[0]):
+        buckets.setdefault(ts_event // period_ns, []).append((price, size))
 
     return [
         Candle(
             ts_open=bucket_key * period_ns,
-            open=prices[0],
-            high=max(prices),
-            low=min(prices),
-            close=prices[-1],
+            open=prices_sizes[0][0],
+            high=max(p for p, _ in prices_sizes),
+            low=min(p for p, _ in prices_sizes),
+            close=prices_sizes[-1][0],
+            volume=sum(s for _, s in prices_sizes),
         )
-        for bucket_key, prices in sorted(buckets.items())
+        for bucket_key, prices_sizes in sorted(buckets.items())
     ]

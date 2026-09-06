@@ -20,12 +20,12 @@ from ml_signals.candles import build_candles
 def test_buckets_two_periods_with_correct_ohlc() -> None:
     one_second = 1_000_000_000
     rows = [
-        (0, 100.0),
-        (10 * one_second, 105.0),
-        (20 * one_second, 95.0),
-        (30 * one_second, 102.0),  # last in bucket 0 -> close=102
-        (61 * one_second, 200.0),  # bucket 1 starts at 60s
-        (90 * one_second, 190.0),
+        (0, 100.0, 1.0),
+        (10 * one_second, 105.0, 2.0),
+        (20 * one_second, 95.0, 3.0),
+        (30 * one_second, 102.0, 4.0),  # last in bucket 0 -> close=102
+        (61 * one_second, 200.0, 5.0),  # bucket 1 starts at 60s
+        (90 * one_second, 190.0, 6.0),
     ]
 
     candles = build_candles(rows, period_seconds=60)
@@ -34,8 +34,10 @@ def test_buckets_two_periods_with_correct_ohlc() -> None:
     first, second = candles
     assert first.ts_open == 0
     assert (first.open, first.high, first.low, first.close) == (100.0, 105.0, 95.0, 102.0)
+    assert first.volume == 10.0
     assert second.ts_open == 60 * one_second
     assert (second.open, second.high, second.low, second.close) == (200.0, 200.0, 190.0, 190.0)
+    assert second.volume == 11.0
 
 
 def test_empty_input_produces_no_candles() -> None:

@@ -603,17 +603,29 @@ class Collector:
     async def _unsubscribe(self, iid: str) -> None:
         await self._client.unsubscribe_trades(iid)
         await self._client.unsubscribe_orderbook(iid)
+        self._clear_book_state(iid)
         logger.info(f"Unsubscribed {iid}")
+
+    def _clear_book_state(self, iid: str) -> None:
+        """
+        Drop all per-instrument order-book tracking state.
+
+        Required on both unsubscribe and resync -- otherwise a later resubscribe reads a
+        stale `_crossed_since_ns` entry (set hours/days earlier) and can fire a false
+        steady_state_crossed_book CRITICAL plus an unwarranted destructive resync on a
+        book that was never actually stuck (DATA-02/DATA-03).
+        """
+        self._live_books.pop(iid, None)
+        self._crossed_since_ns.pop(iid, None)
+        self._crossed_prices.pop(iid, None)
+        self._level_msg_id.pop(iid, None)
 
     async def _resync_book(self, iid: str) -> None:
         """Force a fresh order-book snapshot for a desynced instrument via resubscribe."""
         logger.warning(f"Resyncing desynced order book for {iid}")
         await self._client.unsubscribe_orderbook(iid)
         await self._client.subscribe_orderbook(iid)
-        self._live_books.pop(iid, None)
-        self._crossed_since_ns.pop(iid, None)
-        self._crossed_prices.pop(iid, None)
-        self._level_msg_id.pop(iid, None)
+        self._clear_book_state(iid)
 
     async def _apply_config(self, new_config: CollectorConfig) -> None:
         """
@@ -888,15 +900,29 @@ class Collector:
             )
         )
         level_msg_id.pop(stale_key, None)
-        logger.info(
-            "Crossed book for %s actively uncrossed: dropped stale %s @ %.6f "
-            "(msg_id %d, surviving side msg_id %d)",
-            iid,
-            stale_side.name,
-            stale_price.as_double(),
-            stale_seq,
-            other_seq,
+        side_now_empty = (
+            book.best_bid_price() is None if stale_side == OrderSide.BUY
+            else book.best_ask_price() is None
         )
+        if side_now_empty:
+            # DATA-02: a one-sided book after uncrossing is a real data-loss event, not
+            # routine self-healing -- must not be logged identically to the benign case,
+            # or this failure class stays invisible.
+            logger.warning(
+                "Crossed book for %s uncrossed by dropping the LAST remaining %s level "
+                "@ %.6f (msg_id %d, surviving side msg_id %d) -- book is now one-sided",
+                iid, stale_side.name, stale_price.as_double(), stale_seq, other_seq,
+            )
+        else:
+            logger.info(
+                "Crossed book for %s actively uncrossed: dropped stale %s @ %.6f "
+                "(msg_id %d, surviving side msg_id %d)",
+                iid,
+                stale_side.name,
+                stale_price.as_double(),
+                stale_seq,
+                other_seq,
+            )
         return True
 
     async def _handle_crossed_book(self, iid: str, book: OrderBook, now_ns: int) -> bool:

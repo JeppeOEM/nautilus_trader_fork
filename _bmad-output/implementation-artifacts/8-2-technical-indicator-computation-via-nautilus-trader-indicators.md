@@ -4,12 +4,13 @@ baseline_commit: 1809690d2d
 
 # Story 8.2: Technical indicator computation via `nautilus_trader.indicators`
 
-Status: ready-for-dev
+Status: review
 
-<!-- Depends on nothing per epics.md — backend-only, additive. Story 8.1 (dashboard.py chart
-     consolidation) is still status: review / uncommitted in the working tree at the time
-     this story was created, but 8.2 does not touch the Lines/Candles/Ticks rendering path
-     8.1 changed, only adds new endpoints and a new module, so there is no ordering conflict. -->
+<!-- Depends on nothing per epics.md — backend-only, additive. Story 8.1's dashboard.py changes
+     landed in commit e216c414c8 ("gg") shortly after this story was drafted (status still
+     shows review in sprint-status.yaml at the time this story was implemented). 8.2 does not
+     touch the Lines/Candles/Ticks rendering path 8.1 changed, only adds new endpoints and a
+     new module, so there was no conflict. -->
 
 ## Story
 
@@ -27,26 +28,29 @@ so that the chart offers the full built-in indicator toolkit with zero reimpleme
 
 ## Tasks / Subtasks
 
-- [ ] Task 0 — Add volume to the candle-building path (blocks AC #1/#3 for volume-fed indicators)
-  - [ ] Confirmed gap (see Dev Notes "Volume gap"): `ml_signals/candles.py`'s `Candle` dataclass and `build_candles()` carry no volume field, and neither does `dashboard._live_candles_json`/`_historical_candles_json`'s output dict (`{t,o,h,l,c}` only). `OnBalanceVolume`, `VolumeWeightedAveragePrice`, `KlingerVolumeOscillator`, `Pressure` need a `v` field per candle.
-  - [ ] Extend `Candle`/`build_candles()` to accept `(ts_event, price, size)` rows and emit a summed `volume` field per bucket.
-  - [ ] Extend `_historical_candles_json` to pass `t.size.as_double()` alongside price (trade size is already read the same way in `_historical_ticks_json`) and include `v` in each candle dict.
-  - [ ] Extend `_live_candles_json` to sum `s["buy_volume"] + s["sell_volume"]` per bucket from `_second_rolling` snapshots (same fields `_price_series_rows` already reads) and include `v`.
-  - [ ] Do this as a minimal, additive field append — do not touch Candles-mode rendering/pagination behavior (Story 8.1 territory), only the data shape.
-- [ ] Task 1 — Build `INDICATOR_CATALOG` (AC: #1)
-  - [ ] New file `ml_signals/chart_indicators.py`. Define `IndicatorSpec` (a small dataclass: `cls`, `params: dict[str, ParamSpec]`, `feed: tuple[str, ...]`, `outputs: tuple[str, ...]`, `panel: Literal["overlay", "oscillator"]`).
-  - [ ] Populate `INDICATOR_CATALOG` for the confirmed set in Dev Notes' "Confirmed indicator inventory" table only — do not include the six excluded classes (see Dev Notes "Exclusions"), and flag (comment, don't silently include) `FuzzyCandlesticks` and `Swings` as excluded too (non-float outputs — see Dev Notes).
-- [ ] Task 2 — `replay_indicator` (AC: #2)
-  - [ ] Instantiate `spec.cls(**params)`, feed `getattr`-based lookup of each candle's `feed` fields per candle, in order, via `update_raw(*values)`.
-  - [ ] Collect `getattr(indicator, attr)` for each `spec.outputs` attr after each `update_raw` call; use `None` while `not indicator.initialized`.
-  - [ ] Keep under ~30 lines (READ-01) — split the per-candle step into a small helper if needed.
-- [ ] Task 3 — Endpoints (AC: #3, #4)
-  - [ ] `coin_indicators_handler` mirroring `coin_candles_handler`'s live/historical dispatch on `start`/`end` presence; parse `spec=Name:param=val,param2=val2|Name2:...` into `(name, params)` pairs; 400 on unknown name via `web.Response(status=400, ...)`, not an unhandled exception.
-  - [ ] `indicators_catalog_handler` — static JSON dump of `INDICATOR_CATALOG` metadata (name, params+defaults, panel). No candle fetch involved.
-  - [ ] Register both in `setup_routes`: `GET /data/coin/{id}/indicators`, `GET /data/indicators/catalog` (same block as the existing `/data/coin/{id}/candles` etc. registrations, dashboard.py:1480 area).
-- [ ] Task 4 — Tests (AC: #5)
-  - [ ] `ml_signals/tests/test_chart_indicators.py`: hand-computable `SimpleMovingAverage` case, `BollingerBands` upper/middle/lower, `Stochastics` value_k/value_d, a warm-up/`None`-padding test, and the `INDICATOR_CATALOG` smoke-test loop (instantiate every entry with its default params, assert no exception).
-  - [ ] `cd troll && python -m pytest ml_signals/tests/test_chart_indicators.py ml_signals/tests/test_dashboard_chart.py -q` passes.
+- [x] Task 0 — Add volume to the candle-building path (blocks AC #1/#3 for volume-fed indicators)
+  - [x] Confirmed gap (see Dev Notes "Volume gap"): `ml_signals/candles.py`'s `Candle` dataclass and `build_candles()` carry no volume field, and neither does `dashboard._live_candles_json`/`_historical_candles_json`'s output dict (`{t,o,h,l,c}` only). `OnBalanceVolume`, `VolumeWeightedAveragePrice`, `KlingerVolumeOscillator`, `Pressure` need a `v` field per candle.
+  - [x] Extended `Candle`/`build_candles()` to accept `(ts_event, price, size)` rows and emit a summed `volume` field per bucket (`volume: float = 0.0` default on `Candle` so `test_footprint.py`'s direct `Candle(...)` constructions, unrelated to this story, stay unchanged).
+  - [x] Extended `_historical_candles_json` to pass `t.size.as_double()` alongside price (trade size is already read the same way in `_historical_ticks_json`) and include `v` in each candle dict.
+  - [x] Extended `_live_candles_json` to sum `s["buy_volume"] + s["sell_volume"]` per bucket from `_second_rolling` snapshots (same fields `_price_series_rows` already reads) and include `v`.
+  - [x] Additive field append only — did not touch Candles-mode rendering/pagination behavior (Story 8.1 territory).
+  - [x] Updated `ml_signals/tests/test_candles.py` for the new 3-tuple row shape + volume assertions (existing test, required by the signature change). `ml_signals/tests/test_dashboard_chart.py` (33 passed) and `test_footprint.py` unaffected.
+- [x] Task 1 — Build `INDICATOR_CATALOG` (AC: #1)
+  - [x] New file `ml_signals/chart_indicators.py`. `IndicatorSpec` dataclass: `cls`, `params: dict[str, Any]` (JSON-safe defaults, enums stored as `.name` strings), `feed: tuple[str, ...]`, `outputs: tuple[str, ...]`, `panel: Literal["overlay", "oscillator"]`, `enum_params: dict[str, type]` (which param names need string→enum conversion before construction).
+  - [x] Populated `INDICATOR_CATALOG` with 34 entries (confirmed set from Dev Notes' inventory table) — excluded the 6 non-candle-drivable classes plus `FuzzyCandlesticks`/`Swings` (non-float outputs), all with an explanatory module docstring, not silently omitted.
+- [x] Task 2 — `replay_indicator` (AC: #2)
+  - [x] `spec.cls(**_resolve_enum_params(spec, params))`, feeds `_feed_values(spec, candle)` per candle via `update_raw(*values)`; VWAP's `"timestamp"` feed name converts the candle's `t` (ms) to a UTC `datetime` (its `update_raw` needs one).
+  - [x] Collects `getattr(indicator, attr)` per `spec.outputs` attr after each `update_raw`; `None` while `not indicator.initialized`.
+  - [x] Verified directly (not assumed): all 34 catalog entries construct + replay without error over 60 synthetic candles, each output list length-matches the candle count; `SimpleMovingAverage(period=3)` over `[1..10]` produces `[None, None, 2.0, 3.0, ..., 9.0]` — exact hand-computed match.
+- [x] Task 3 — Endpoints (AC: #3, #4)
+  - [x] `coin_indicators_handler` mirrors `coin_candles_handler`'s live/historical dispatch on `start`/`end` presence, reusing `_historical_candles_json`/`_live_candles_json` verbatim (SSOT-03); `_parse_indicator_spec` parses `Name:param=val,param2=val2|Name2:...` into `(name, params)` pairs — **entries are pipe (`|`) separated, not comma**, a deliberate deviation from epics.md's illustrative example (`spec=A:period=20,B:period=14`), because comma must stay reserved for an entry's own multi-param list (e.g. `Stochastics:period_k=14,period_d=3`). `_indicators_json` returns a `(body, status)` tuple, 400 on unknown indicator name (`{"error": "Unknown indicator: ..."}`), verified directly, not an unhandled exception.
+  - [x] `indicators_catalog_handler` — static JSON dump of `_chart_indicators.catalog_json()` (name → params+defaults, panel). No candle fetch involved.
+  - [x] Registered both in `setup_routes`: `GET /data/coin/{id}/indicators`, `GET /data/indicators/catalog`.
+  - [x] Verified directly: multi-entry spec (`SimpleMovingAverage:period=3|BollingerBands:period=5,k=2`) returns both stable ids with correctly-keyed output sub-dicts (`{"value":[...]}` for SMA, `{"upper":[...],"middle":[...],"lower":[...]}` for BollingerBands), each point `{t, value}` aligned to the candle list.
+- [x] Task 4 — Tests (AC: #5)
+  - [x] `ml_signals/tests/test_chart_indicators.py` (new, 6 tests): hand-computable `SimpleMovingAverage` case, `BollingerBands` upper/middle/lower, `Stochastics` value_k/value_d, a warm-up/`None`-padding test asserting exact parity against a directly-driven real `nautilus_trader.indicators.SimpleMovingAverage` instance's own `initialized` transition (not a hand-computed guess), the `INDICATOR_CATALOG` smoke-test loop (all 34 entries, default params, asserts output-key sets match `spec.outputs` and every output list length-matches the candle count), and an unknown-name `ValueError` test.
+  - [x] `ml_signals/tests/test_dashboard_chart.py` gained 7 tests for the dashboard-side glue (`_parse_indicator_spec`, `_coerce_indicator_params`, `_indicator_id`, `_indicators_json`) — pipe/comma parsing, type coercion (incl. bool-before-int ordering), unknown-param dropping, stable-id sorting, multi-entry response shape, and the 400 path.
+  - [x] `cd troll && python -m pytest ml_signals/tests/test_chart_indicators.py ml_signals/tests/test_dashboard_chart.py ml_signals/tests/test_candles.py ml_signals/tests/test_footprint.py -q` — 53 passed.
 
 ## Dev Notes
 
@@ -138,8 +142,31 @@ That leaves **38 confirmed catalog entries**. Constructor signatures below are c
 
 ### Agent Model Used
 
+Claude Sonnet 5 (claude-sonnet-5)
+
 ### Debug Log References
+
+- `inspect.signature()` on the compiled Cython `__init__` of every `nautilus_trader.indicators` class returns `(*args, **kwargs)` — useless for discovering real param names. Each class's own docstring (Cython embeds the real signature there, e.g. `SimpleMovingAverage(int period, PriceType price_type=PriceType.LAST)`) was the reliable source, confirmed by keyword-instantiating a sample and reading `dir(cls)` diffed against the base `Indicator` class for output attributes.
+- Confirmed by direct introspection (not assumed from upstream docs) that 6 of the 45 public names in `nautilus_trader.indicators` are not usable by an `update_raw`-replay design: `CandleBodySize`/`CandleDirection`/`CandleSize`/`CandleWickSize` are `IntEnum` value classes, not `Indicator` subclasses; `FuzzyCandle` is `FuzzyCandlesticks`'s output value type, not an indicator; `SpreadAnalyzer` is quote-tick-driven (`handle_quote_tick`), has no `update_raw`. Two further classes were excluded despite having `update_raw`: `FuzzyCandlesticks` (output is a `FuzzyCandle`/`.vector`, not floats) and `Swings` (needs a `datetime` arg, non-float outputs). Final catalog: 34 entries.
+- `ml_signals/candles.py`'s `Candle`/`build_candles()` had no volume field — confirmed by reading the file directly, not assumed from epics.md's example (which assumed candles already carried `v`). Closed via Task 0: `build_candles()` now takes `(ts_event, price, size)` rows and sums `size` per bucket; `Candle.volume` defaults to `0.0` so `test_footprint.py`'s unrelated direct `Candle(...)` constructions needed no changes.
+- `PriceType`/`MovingAverageType` constructor params are real `enum.Enum` subclasses (confirmed via `issubclass(..., enum.Enum)`) — `INDICATOR_CATALOG` stores their defaults as JSON-safe `.name` strings and `IndicatorSpec.enum_params` records which params need `EnumType[name_string]` conversion before construction (`_resolve_enum_params` in `chart_indicators.py`, `_coerce_indicator_params` in `dashboard.py` for the query-string path). Verified `enum_type[value]` needed `enum_params: dict[str, type[Enum]]` (not bare `type`) for mypy to accept the subscript.
+- epics.md's AC #3 example query string (`spec=SimpleMovingAverage:period=20,RelativeStrengthIndex:period=14`) uses comma as both the entry separator and the implied param separator — ambiguous for any indicator with more than one param (e.g. `Stochastics:period_k=14,period_d=3`). Resolved by using `|` to separate spec entries and reserving `,` for a single entry's own params; documented as a deliberate deviation in Task 3 and the endpoint's own docstring.
+- `ruff format` on the full `dashboard.py`/`test_dashboard_chart.py` files reformatted ~250 lines of pre-existing, unrelated code (quote style, line-wrapping) beyond anything this story touched. Reverted both files via `git checkout` and reapplied only this story's edits by hand, then ran `ruff check --fix`/manual fixes scoped to the new lines only (verified via `ruff check` error line numbers falling outside the new code ranges) — final diffs are 91 and 76 lines respectively, exactly the story's own additions.
+- Full `ml_signals` suite: 153 passed, 1 pre-existing failure (`test_ofi_strategy.py::test_ofi_strategy_generates_long_entry_on_bid_pressure`) — identical to the one Story 8.1's Debug Log documents as pre-existing `BacktestEngine`-construction fragility (open Epic 2 action item in `sprint-status.yaml`), unrelated to this story's changes.
 
 ### Completion Notes List
 
+- Closed the volume gap in the candle-building path first (Task 0): `ml_signals/candles.py`'s `Candle`/`build_candles()` gained a `volume` field/param, and both `dashboard._historical_candles_json`/`_live_candles_json` now emit a `v` field per candle, sourced the same way `_historical_ticks_json`/`_price_series_rows` already source trade size and buy/sell volume — required for `OnBalanceVolume`/`VolumeWeightedAveragePrice`/`KlingerVolumeOscillator`/`Pressure` to compute real values instead of a placeholder.
+- New `ml_signals/chart_indicators.py`: `INDICATOR_CATALOG` (34 confirmed real, OHLCV-drivable, float-output indicator classes out of `nautilus_trader.indicators`'s 45 public names — 6 structurally excluded, 2 more excluded for non-float output, all with an explanatory module docstring) and `replay_indicator()` (instantiate → per-candle `update_raw` → per-output-attribute value list, `None`-padded exactly to each indicator's own `initialized` transition). Verified directly: `SimpleMovingAverage(period=3)` over `[1..10]` reproduces the exact hand-computed SMA series including warm-up `None`s; all 34 catalog entries construct and replay without error over 60 synthetic candles.
+- New endpoints in `dashboard.py`: `GET /data/coin/{id}/indicators` (reuses the existing live/historical candle-building path verbatim, SSOT-03; parses a pipe/comma spec string; 400 on unknown indicator name) and `GET /data/indicators/catalog` (serializes `INDICATOR_CATALOG` metadata for Story 8.4's picker to consume — never a hardcoded name list).
+- Tests: `ml_signals/tests/test_chart_indicators.py` (new, 6 tests — hand-computed SMA, BollingerBands 3-output, Stochastics dual-line, warm-up parity against a directly-driven real indicator instance, the 34-entry catalog smoke test, unknown-name error), `ml_signals/tests/test_dashboard_chart.py` (+7 tests for the endpoint glue), `ml_signals/tests/test_candles.py` (updated for the new volume field/row shape). All new/changed tests pass; `ruff check`/`ruff format` (scoped to this story's own lines) and `mypy` clean on every new/modified file; full `ml_signals` suite green apart from the one documented pre-existing failure.
+- **Not verified against a real browser/Story 8.4 picker** — this story is backend-only per its own scope (Story 8.4 builds the UI consumer). Endpoint behavior was verified via direct Python calls to the handler-level helper functions and via the automated test suite, not a live HTTP request against a running `aiohttp` server.
+
 ### File List
+
+- New: `troll/ml_signals/chart_indicators.py`
+- New: `troll/ml_signals/tests/test_chart_indicators.py`
+- Modified: `troll/ml_signals/candles.py`
+- Modified: `troll/ml_signals/dashboard.py`
+- Modified: `troll/ml_signals/tests/test_candles.py`
+- Modified: `troll/ml_signals/tests/test_dashboard_chart.py`

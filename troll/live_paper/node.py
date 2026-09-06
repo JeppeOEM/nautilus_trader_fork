@@ -121,7 +121,14 @@ def build_node(config: PaperConfig | RealMoneyConfig) -> TradingNode:
         trader_id=TraderId("LIVE-PAPER-001"),
         logging=LoggingConfig(log_level=config.log_level, use_pyo3=True),
         cache=CacheConfig(
-            database=DatabaseConfig(type="redis", host=redis_url.hostname, port=redis_url.port),
+            database=DatabaseConfig(
+                type="redis",
+                host=redis_url.hostname,
+                port=redis_url.port,
+                username=redis_url.username,
+                password=redis_url.password,
+                ssl=redis_url.scheme == "rediss",
+            ),
         ),
         data_clients=data_clients,
         exec_clients=exec_clients,

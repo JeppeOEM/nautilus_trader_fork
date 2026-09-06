@@ -166,6 +166,35 @@ async def test_resync_book_resubscribes_and_drops_local_state(tmp_path: Path) ->
     assert iid not in collector._crossed_since_ns
 
 
+@pytest.mark.asyncio
+async def test_unsubscribe_drops_crossed_book_tracking_state(tmp_path: Path) -> None:
+    """
+    A stale `_crossed_since_ns` entry left behind by `_unsubscribe` would make the first
+    harmless cross after a later resubscribe read as hours/days old
+    (`setdefault` returns the old value), firing a false steady_state_crossed_book
+    CRITICAL and an unwarranted destructive resync on data that was never actually
+    stuck. `_unsubscribe` must clear the same per-instrument book state `_resync_book`
+    already does.
+    """
+    collector = Collector(_make_config(tmp_path / "catalog"))
+    fake_client = _FakeClient()
+    collector._client = fake_client  # type: ignore[assignment]
+
+    iid = "BTC-USD-PERP.DYDX"
+    collector._live_books[iid] = OrderBook(InstrumentId.from_str(iid), BookType.L2_MBP)
+    collector._crossed_since_ns[iid] = 123
+    collector._crossed_prices[iid] = (100.0, 101.0)
+    collector._level_msg_id[iid] = {(OrderSide.BUY, 100.0): 1}
+
+    await collector._unsubscribe(iid)
+
+    assert fake_client.calls == [f"unsubscribe_trades:{iid}", f"unsubscribe:{iid}"]
+    assert iid not in collector._live_books
+    assert iid not in collector._crossed_since_ns
+    assert iid not in collector._crossed_prices
+    assert iid not in collector._level_msg_id
+
+
 _IID = "BTC-USD-PERP.DYDX"
 
 
@@ -424,12 +453,47 @@ async def test_crossed_book_actively_uncrossed_when_both_levels_tagged(
     """
     Both crossed levels tagged (via _apply_deltas, so _level_msg_id is populated) ->
     _handle_crossed_book drops the older-tagged (bid) side itself, resolves within the
-    same tick, and never reaches the WARNING/CRITICAL/_resync_book path.
+    same tick, and never reaches the WARNING/CRITICAL/_resync_book path. The bid side
+    keeps a second, untouched level (99.0) so dropping the stale 101.0 level does not
+    empty that side -- this is the ordinary, benign case, logged at INFO. See
+    test_crossed_book_uncrossing_the_last_level_logs_a_warning below for the case where
+    the dropped level was the side's only one.
     """
     collector = Collector(_make_config(tmp_path / "catalog"))
     fake_client = _FakeClient()
     collector._client = fake_client  # type: ignore[assignment]
     # bid @101 tagged with the OLDER sequence -> bid is stale and must be dropped.
+    collector._apply_deltas(_IID, _side_delta(OrderSide.BUY, sequence=1, price=101.0))
+    collector._apply_deltas(_IID, _side_delta(OrderSide.BUY, sequence=1, price=99.0))
+    collector._apply_deltas(_IID, _side_delta(OrderSide.SELL, sequence=2, price=100.0))
+    book = collector._live_books[_IID]
+
+    with caplog.at_level(logging.INFO):
+        still_crossed = await collector._handle_crossed_book(_IID, book, time.time_ns())
+
+    assert still_crossed is False
+    assert book.best_bid_price().as_double() == 99.0  # surviving, untouched bid level
+    assert book.best_ask_price().as_double() == 100.0
+    assert fake_client.calls == []  # no resync
+    assert [r for r in caplog.records if r.name == "dydx_collector.critical"] == []
+    assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+    uncrossed_logs = [r for r in caplog.records if "actively uncrossed" in r.getMessage()]
+    assert len(uncrossed_logs) == 1
+    assert _IID in uncrossed_logs[0].getMessage()
+    assert "BUY" in uncrossed_logs[0].getMessage()
+
+
+@pytest.mark.asyncio
+async def test_crossed_book_uncrossing_the_last_level_logs_a_warning(
+    tmp_path: Path, caplog
+) -> None:
+    """
+    DATA-02: dropping the *only* remaining level on one side (leaving that side fully
+    empty) is a real one-sided-book data-loss event, not routine self-healing -- it must
+    be distinguishable from the benign case above, not logged identically at INFO.
+    """
+    collector = Collector(_make_config(tmp_path / "catalog"))
+    collector._client = _FakeClient()  # type: ignore[assignment]
     collector._apply_deltas(_IID, _side_delta(OrderSide.BUY, sequence=1, price=101.0))
     collector._apply_deltas(_IID, _side_delta(OrderSide.SELL, sequence=2, price=100.0))
     book = collector._live_books[_IID]
@@ -438,14 +502,12 @@ async def test_crossed_book_actively_uncrossed_when_both_levels_tagged(
         still_crossed = await collector._handle_crossed_book(_IID, book, time.time_ns())
 
     assert still_crossed is False
-    assert book.best_bid_price() is None
-    assert book.best_ask_price().as_double() == 100.0
-    assert fake_client.calls == []  # no resync
-    assert [r for r in caplog.records if r.name == "dydx_collector.critical"] == []
-    uncrossed_logs = [r for r in caplog.records if "actively uncrossed" in r.getMessage()]
-    assert len(uncrossed_logs) == 1
-    assert _IID in uncrossed_logs[0].getMessage()
-    assert "BUY" in uncrossed_logs[0].getMessage()
+    assert book.best_bid_price() is None  # bid side is now fully empty
+    assert [r for r in caplog.records if "actively uncrossed" in r.getMessage()] == []
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "LAST remaining" in warnings[0].getMessage()
+    assert "BUY" in warnings[0].getMessage()
 
 
 @pytest.mark.asyncio

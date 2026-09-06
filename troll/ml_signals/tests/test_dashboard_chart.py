@@ -32,6 +32,20 @@ import tempfile
 from collections import deque
 
 import pytest
+from dydx_collector.second_snapshot import DydxSecondSnapshot
+
+import ml_signals.dashboard
+from ml_signals.chart_indicators import INDICATOR_CATALOG
+from ml_signals.dashboard import _coerce_indicator_params
+from ml_signals.dashboard import _coin_chart_json
+from ml_signals.dashboard import _historical_candles_json
+from ml_signals.dashboard import _historical_lines_json
+from ml_signals.dashboard import _historical_ticks_json
+from ml_signals.dashboard import _indicator_id
+from ml_signals.dashboard import _indicators_json
+from ml_signals.dashboard import _live_candles_json
+from ml_signals.dashboard import _live_lines_json
+from ml_signals.dashboard import _parse_indicator_spec
 from nautilus_trader.model.data import TradeTick
 from nautilus_trader.model.enums import AggressorSide
 from nautilus_trader.model.identifiers import InstrumentId
@@ -40,17 +54,6 @@ from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
-from dydx_collector.second_snapshot import DydxSecondSnapshot
-
-import ml_signals.dashboard
-from ml_signals.dashboard import (
-    _coin_chart_json,
-    _historical_candles_json,
-    _historical_lines_json,
-    _historical_ticks_json,
-    _live_candles_json,
-    _live_lines_json,
-)
 
 _IID = "BTC-USD-PERP.DYDX"
 _TS_NS = 1_700_000_000_000_000_000  # arbitrary fixed nanosecond timestamp
@@ -606,3 +609,54 @@ def test_live_lines_json_matches_coin_chart_json_price_series() -> None:
     assert [r["mid"] for r in rows] == chart["mid"]
     assert [r["micro"] for r in rows] == chart["micro"]
     assert [r["price"] for r in rows] == chart["price"]
+
+
+# ---------------------------------------------------------------------------
+# Indicator endpoint glue (_parse_indicator_spec / _coerce_indicator_params /
+# _indicator_id / _indicators_json) -- Story 8.2
+# ---------------------------------------------------------------------------
+
+def test_parse_indicator_spec_splits_entries_on_pipe_and_params_on_comma() -> None:
+    specs = _parse_indicator_spec("SimpleMovingAverage:period=20|Stochastics:period_k=14,period_d=3")
+    assert specs == [
+        ("SimpleMovingAverage", {"period": "20"}),
+        ("Stochastics", {"period_k": "14", "period_d": "3"}),
+    ]
+
+
+def test_parse_indicator_spec_handles_entry_with_no_params() -> None:
+    assert _parse_indicator_spec("VolumeWeightedAveragePrice") == [("VolumeWeightedAveragePrice", {})]
+
+
+def test_coerce_indicator_params_casts_to_default_types() -> None:
+    spec = INDICATOR_CATALOG["KeltnerChannel"]
+    coerced = _coerce_indicator_params(spec, {"period": "20", "k_multiplier": "1.5", "use_previous": "false"})
+    assert coerced == {"period": 20, "k_multiplier": 1.5, "use_previous": False}
+
+
+def test_coerce_indicator_params_drops_unknown_keys() -> None:
+    spec = INDICATOR_CATALOG["SimpleMovingAverage"]
+    assert _coerce_indicator_params(spec, {"not_a_real_param": "1"}) == {}
+
+
+def test_indicator_id_sorts_params_for_a_stable_key() -> None:
+    assert _indicator_id("BollingerBands", {"k": 2.0, "period": 5}) == "BollingerBands_k=2.0,period=5"
+    assert _indicator_id("VolumeWeightedAveragePrice", {}) == "VolumeWeightedAveragePrice"
+
+
+def test_indicators_json_returns_points_per_output_attribute() -> None:
+    candles = [{"t": i * 60_000, "o": c, "h": c, "l": c, "c": c, "v": 1.0}
+               for i, c in enumerate([float(x) for x in range(1, 11)])]
+    body, status = _indicators_json(candles, "SimpleMovingAverage:period=3|BollingerBands:period=5,k=2")
+    assert status == 200
+    payload = json.loads(body)
+    assert set(payload.keys()) == {"SimpleMovingAverage_period=3", "BollingerBands_k=2.0,period=5"}
+    sma_points = payload["SimpleMovingAverage_period=3"]["value"]
+    assert [p["t"] for p in sma_points] == [c["t"] for c in candles]
+    assert set(payload["BollingerBands_k=2.0,period=5"].keys()) == {"upper", "middle", "lower"}
+
+
+def test_indicators_json_returns_400_for_unknown_indicator() -> None:
+    body, status = _indicators_json([], "NotARealIndicator:period=3")
+    assert status == 400
+    assert "Unknown indicator" in json.loads(body)["error"]

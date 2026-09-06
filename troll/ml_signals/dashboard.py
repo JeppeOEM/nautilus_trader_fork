@@ -55,6 +55,7 @@ from plotly.subplots import make_subplots
 from ranking_engine import metrics_store
 
 from ml_signals import chart_data as _chart_data
+from ml_signals import chart_indicators as _chart_indicators
 from ml_signals import ranking_columns as _ranking_columns
 from ml_signals.catalog_stats import list_instruments
 from ml_signals.indicators import microprice as calc_microprice
@@ -917,6 +918,7 @@ def _live_candles_json(iid: str, bar_seconds: int) -> str:
     if not snaps:
         return json.dumps({"candles": []})
     buckets: dict[int, list[float]] = {}
+    volumes: dict[int, float] = defaultdict(float)
     for s in snaps:
         if not s["bid_prices"] or not s["ask_prices"]:
             continue
@@ -926,6 +928,7 @@ def _live_candles_json(iid: str, bar_seconds: int) -> str:
         mid = (bp + ap) / 2
         bucket = (s["ts_event"] // 1_000_000_000 // bar_seconds) * bar_seconds
         buckets.setdefault(bucket, []).append(mid)
+        volumes[bucket] += s["buy_volume"] + s["sell_volume"]
     # The oldest bucket is necessarily partial: snapshots older than it have already
     # aged out of the rolling deque (maxlen), so its member count keeps shrinking every
     # second as more of them evict, which changes its open/high/low live. That reads as
@@ -934,7 +937,7 @@ def _live_candles_json(iid: str, bar_seconds: int) -> str:
     if len(buckets) > 1:
         del buckets[min(buckets)]
     candles = [
-        {"t": t * 1000, "o": mids[0], "h": max(mids), "l": min(mids), "c": mids[-1]}
+        {"t": t * 1000, "o": mids[0], "h": max(mids), "l": min(mids), "c": mids[-1], "v": volumes[t]}
         for t, mids in sorted(buckets.items())
     ]
     return json.dumps({"candles": candles})
@@ -948,12 +951,12 @@ def _historical_candles_json(iid: str, start_ms: int, end_ms: int, bar_seconds: 
     start_ns = start_ms * 1_000_000
     end_ns = end_ms * 1_000_000
     trades = catalog.trade_ticks(instrument_ids=[iid], start=start_ns, end=end_ns)
-    raw = [(t.ts_event, t.price.as_double()) for t in trades]
+    raw = [(t.ts_event, t.price.as_double(), t.size.as_double()) for t in trades]
     if not raw:
         return json.dumps({"candles": []})
     candle_data = _build(raw, period_seconds=bar_seconds)
     candles = [
-        {"t": c.ts_open // 1_000_000, "o": c.open, "h": c.high, "l": c.low, "c": c.close}
+        {"t": c.ts_open // 1_000_000, "o": c.open, "h": c.high, "l": c.low, "c": c.close, "v": c.volume}
         for c in candle_data
     ]
     return json.dumps({"candles": candles})
@@ -1311,6 +1314,91 @@ async def coin_ticks_handler(request: web.Request) -> web.Response:
     return web.Response(text=data, content_type="application/json")
 
 
+def _parse_indicator_spec(raw: str) -> list[tuple[str, dict[str, str]]]:
+    """
+    Parse `Name:param=val,param2=val2|Name2:param=val` into [(name, {param: val}), ...].
+
+    Entries are pipe-separated, not comma-separated -- a single indicator can have more
+    than one param (e.g. Stochastics' period_k/period_d), so comma must stay reserved for
+    separating an entry's own params.
+    """
+    specs = []
+    for entry in raw.split("|"):
+        entry = entry.strip()
+        if not entry:
+            continue
+        name, _, param_str = entry.partition(":")
+        params = dict(pair.split("=", 1) for pair in param_str.split(",") if pair)
+        specs.append((name, params))
+    return specs
+
+
+def _coerce_indicator_params(
+    spec: _chart_indicators.IndicatorSpec, raw: dict[str, str],
+) -> dict[str, object]:
+    """
+    Cast query-string param values to match each param's default type (bool checked
+    before int since bool is an int subclass in Python).
+    """
+    coerced: dict[str, object] = {}
+    for key, val in raw.items():
+        default = spec.params.get(key)
+        if key not in spec.params:
+            continue
+        if isinstance(default, bool):
+            coerced[key] = val.lower() in ("1", "true", "yes")
+        elif isinstance(default, int):
+            coerced[key] = int(val)
+        elif isinstance(default, float):
+            coerced[key] = float(val)
+        else:
+            coerced[key] = val
+    return coerced
+
+
+def _indicator_id(name: str, params: dict[str, object]) -> str:
+    if not params:
+        return name
+    return name + "_" + ",".join(f"{k}={v}" for k, v in sorted(params.items()))
+
+
+def _indicators_json(candles: list[dict], spec_str: str) -> tuple[str, int]:
+    """Compute {t, value} point series for every requested indicator spec entry."""
+    result: dict[str, dict[str, list[dict]]] = {}
+    for name, raw_params in _parse_indicator_spec(spec_str):
+        if name not in _chart_indicators.INDICATOR_CATALOG:
+            return json.dumps({"error": f"Unknown indicator: {name}"}), 400
+        params = _coerce_indicator_params(_chart_indicators.INDICATOR_CATALOG[name], raw_params)
+        outputs = _chart_indicators.replay_indicator(candles, name, params)
+        result[_indicator_id(name, params)] = {
+            attr: [{"t": c["t"], "value": v} for c, v in zip(candles, values, strict=True)]
+            for attr, values in outputs.items()
+        }
+    return json.dumps(result), 200
+
+
+async def coin_indicators_handler(request: web.Request) -> web.Response:
+    symbol = request.match_info["id"]
+    qs = dict(request.rel_url.query)
+    spec_str = qs.get("spec", "")
+    if not spec_str:
+        return web.Response(text=json.dumps({}), content_type="application/json")
+    bar_seconds = max(1, int(qs.get("bar", "60")))
+    start_ms = _parse_query_ms(qs, "start")
+    end_ms = _parse_query_ms(qs, "end")
+    if start_ms is not None and end_ms is not None:
+        candles_json = await asyncio.to_thread(_historical_candles_json, symbol, start_ms, end_ms, bar_seconds)
+    else:
+        candles_json = _live_candles_json(symbol, bar_seconds)
+    candles = json.loads(candles_json)["candles"]
+    body, status = _indicators_json(candles, spec_str)
+    return web.Response(text=body, content_type="application/json", status=status)
+
+
+async def indicators_catalog_handler(request: web.Request) -> web.Response:
+    return web.Response(text=json.dumps(_chart_indicators.catalog_json()), content_type="application/json")
+
+
 async def live_coin_json_handler(request: web.Request) -> web.Response:
     """
     Raw indicator values for /coin/{id} live panel — polled every 1s.
@@ -1480,6 +1568,8 @@ def make_app(redis_url: str, catalog_path: str) -> web.Application:
     app.router.add_get("/data/coin/{id}/candles", coin_candles_handler)
     app.router.add_get("/data/coin/{id}/ticks", coin_ticks_handler)
     app.router.add_get("/data/coin/{id}/lines", coin_lines_handler)
+    app.router.add_get("/data/coin/{id}/indicators", coin_indicators_handler)
+    app.router.add_get("/data/indicators/catalog", indicators_catalog_handler)
     app.router.add_get("/data/live/{id}", live_coin_json_handler)
     app.router.add_get("/chart/{id}", chart_handler)
     app.router.add_get("/history/{id}", history_handler)

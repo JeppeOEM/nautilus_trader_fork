@@ -41,7 +41,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-07-01
-last_updated: 2026-09-06 (8-2 in-progress)
+last_updated: 2026-09-06 (8-2 review)
 project: nautilus_trader_fork
 project_key: NOKEY
 tracking_system: file-system
@@ -105,7 +105,7 @@ development_status:
   # directly via create-story as the epic progresses.
   epic-8: in-progress
   8-1-consolidate-the-interactive-chart-widget-onto-chart-id-only: review
-  8-2-technical-indicator-computation-via-nautilus-trader-indicators: in-progress
+  8-2-technical-indicator-computation-via-nautilus-trader-indicators: review
   8-4-indicator-picker-on-the-chart-page-settings-toolbar: backlog
   8-5-combined-candlestick-and-bid-ask-overlay-mode: backlog
 

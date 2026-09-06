@@ -12,11 +12,13 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
+import pytest
 from nautilus_trader.adapters.dydx.config import DydxExecClientConfig
 from nautilus_trader.adapters.sandbox.config import SandboxExecutionClientConfig
 from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
 from nautilus_trader.live.node import TradingNode
 
+import live_paper.node
 from live_paper.config import PaperConfig
 from live_paper.config import RealMoneyConfig
 from live_paper.node import build_node
@@ -72,5 +74,25 @@ def test_build_node_configures_redis_backed_cache() -> None:
         assert cache_config.database.type == "redis"
         assert cache_config.database.host == "127.0.0.1"
         assert cache_config.database.port == 6379
+    finally:
+        node.dispose()
+
+
+def test_build_node_passes_redis_credentials_and_ssl_from_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A hardened deployment's REDIS_URL carries auth/TLS; DatabaseConfig(host, port) alone
+    # (the pre-fix behavior) silently dropped them, so the Cache's own Redis connection
+    # would fail auth even though bot_status.py's separate aioredis.from_url(REDIS_URL)
+    # connection -- which does use the full URL -- kept working, masking the problem.
+    monkeypatch.setattr(live_paper.node, "_REDIS_URL", "rediss://user:secret@myhost:6380")
+    node = build_node(_paper_config())
+    try:
+        db = node._config.cache.database
+        assert db.host == "myhost"
+        assert db.port == 6380
+        assert db.username == "user"
+        assert db.password == "secret"
+        assert db.ssl is True
     finally:
         node.dispose()
