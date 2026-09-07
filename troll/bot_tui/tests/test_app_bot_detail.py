@@ -125,9 +125,9 @@ def test_bot_detail_footer_hint_on_entry_and_restored_on_esc() -> None:
     assert "start/stop" in app._footer_hint.text
     assert "esc back" in app._footer_hint.text
     assert "j/k" not in app._footer_hint.text
-    # Story 4.7: t (range)/o (dashboard) are now real Bot-detail keys, unlike Story
+    # Story 4.7: h/l (range)/o (dashboard) are now real Bot-detail keys, unlike Story
     # 4.5 which had neither yet.
-    assert "t range" in app._footer_hint.text
+    assert "h/l range" in app._footer_hint.text
     assert "o dashboard" in app._footer_hint.text
     app._handle_bot_detail_key("esc")
     assert app._footer_hint.text == "s start/stop  : command  esc back  :q quit"
@@ -222,24 +222,44 @@ def test_build_bot_detail_body_has_four_stacked_bordered_regions() -> None:
     assert sparkline_box.title_widget.text.strip() == "pnl (day)"
 
 
-def test_t_key_cycles_range_and_echoes_footer() -> None:
+def test_right_key_steps_range_forward_and_echoes_footer() -> None:
     _reset()
     bots_state._handle_status_message(_status("bot-01"))
     app = BotTuiApp()
     app._open_bot_detail("bot-01")
     assert app._bot_history_range == "day"
-    app._handle_bot_detail_key("t")
+    app._handle_bot_detail_key("right")
     assert app._bot_history_range == "week"
     assert app._footer_hint.text == "range: week"
 
 
-def test_t_key_full_cycle_returns_to_day() -> None:
+def test_l_key_steps_range_forward_same_as_right() -> None:
+    _reset()
+    bots_state._handle_status_message(_status("bot-01"))
+    app = BotTuiApp()
+    app._open_bot_detail("bot-01")
+    app._handle_bot_detail_key("l")
+    assert app._bot_history_range == "week"
+
+
+def test_left_and_h_key_step_range_backward() -> None:
+    _reset()
+    bots_state._handle_status_message(_status("bot-01"))
+    app = BotTuiApp()
+    app._open_bot_detail("bot-01")
+    app._handle_bot_detail_key("left")
+    assert app._bot_history_range == "all"
+    app._handle_bot_detail_key("h")
+    assert app._bot_history_range == "month"
+
+
+def test_right_key_full_cycle_returns_to_day() -> None:
     _reset()
     bots_state._handle_status_message(_status("bot-01"))
     app = BotTuiApp()
     app._open_bot_detail("bot-01")
     for _ in range(4):
-        app._handle_bot_detail_key("t")
+        app._handle_bot_detail_key("right")
     assert app._bot_history_range == "day"
 
 

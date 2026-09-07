@@ -49,6 +49,18 @@ CREATE TABLE IF NOT EXISTS fills (
 CREATE INDEX IF NOT EXISTS idx_bot_ts ON fills(bot_id, ts);
 """
 
+# Added when a single closing order started fragmenting into multiple reducing fills
+# (trade_history._fill_realized_pnl): `realized_pnl` became a per-fill proportional
+# split (so it keeps summing correctly across a round trip's several reducing fills),
+# which makes it unusable for counting "closed trades" -- COUNT(realized_pnl IS NOT
+# NULL) would now count fills, not round trips. `position_realized_pnl` is non-NULL on
+# exactly one row per round trip (the fill that actually closed the position) and holds
+# that position's true total realized PnL -- win_rate_stats() uses this column, never
+# realized_pnl. ALTER TABLE (not just CREATE TABLE IF NOT EXISTS) because an existing
+# fills.db predates this column; the "duplicate column" error on an already-migrated db
+# is the expected steady state, not a real failure.
+_MIGRATIONS = ("ALTER TABLE fills ADD COLUMN position_realized_pnl REAL",)
+
 
 def _conn(db_path: str) -> sqlite3.Connection:
     if db_path not in _connections:
@@ -58,6 +70,11 @@ def _conn(db_path: str) -> sqlite3.Connection:
                 db = sqlite3.connect(db_path, check_same_thread=False)
                 db.execute("PRAGMA journal_mode=WAL")
                 db.executescript(_SCHEMA)
+                for migration in _MIGRATIONS:
+                    try:
+                        db.execute(migration)
+                    except sqlite3.OperationalError:
+                        pass  # column already present from a prior run
                 db.commit()
                 _connections[db_path] = db
     return _connections[db_path]
@@ -71,12 +88,14 @@ def write_fill(
     qty: float,
     realized_pnl: float | None,
     db_path: str,
+    position_realized_pnl: float | None = None,
 ) -> None:
     with _lock:
         db = _conn(db_path)
         db.execute(
-            "INSERT INTO fills(ts, bot_id, side, price, qty, realized_pnl) VALUES (?, ?, ?, ?, ?, ?)",
-            (ts, bot_id, side, price, qty, realized_pnl),
+            "INSERT INTO fills(ts, bot_id, side, price, qty, realized_pnl, position_realized_pnl) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (ts, bot_id, side, price, qty, realized_pnl, position_realized_pnl),
         )
         db.commit()
 
@@ -104,9 +123,12 @@ def recent_trades(bot_id: str, db_path: str, cutoff_ns: int | None, limit: int) 
 
 def realized_pnls(bot_id: str, db_path: str, cutoff_ns: int | None) -> list[float]:
     """
-    Closing fills' realized_pnl (dollars) at/after cutoff_ns (all time if None), in
-    chronological order -- feeds ml_signals.performance_metrics.trade_stats()/
-    all_metrics().
+    Every reducing fill's realized_pnl (dollars, proportional split -- see
+    trade_history._fill_realized_pnl) at/after cutoff_ns (all time if None), in
+    chronological order. NOT one-per-round-trip: a position closed across several
+    reducing fills contributes several values here, summing to that round trip's true
+    total. Used where per-fill time-accuracy matters (pnl_by_day); trade-*count*-
+    sensitive stats must use position_realized_pnls() instead.
     """
     db = _conn(db_path)
     rows = db.execute(
@@ -120,17 +142,40 @@ def realized_pnls(bot_id: str, db_path: str, cutoff_ns: int | None) -> list[floa
     return [pnl for (pnl,) in rows]
 
 
+def position_realized_pnls(bot_id: str, db_path: str, cutoff_ns: int | None) -> list[float]:
+    """
+    One realized_pnl value per completed round trip (open->close), at/after cutoff_ns
+    (all time if None), in chronological order -- feeds
+    ml_signals.performance_metrics.trade_stats()/all_metrics(), which are inherently
+    per-completed-trade statistics (win_rate, expectancy, avg/max win/loss) and would
+    be diluted by counting a multi-fill close as several trades.
+    """
+    db = _conn(db_path)
+    rows = db.execute(
+        """
+        SELECT position_realized_pnl FROM fills
+        WHERE bot_id = ? AND position_realized_pnl IS NOT NULL AND (? IS NULL OR ts >= ?)
+        ORDER BY ts ASC
+        """,
+        (bot_id, cutoff_ns, cutoff_ns),
+    ).fetchall()
+    return [pnl for (pnl,) in rows]
+
+
 def win_rate_stats(bot_id: str, db_path: str) -> tuple[int, int]:
     """
-    (closed_trades, wins) for a bot, all-time -- closing fills only (realized_pnl
-    IS NOT NULL); a win is a closing fill with realized_pnl > 0.
+    (closed_trades, wins) for a bot, all-time -- one row per completed round trip
+    (position_realized_pnl IS NOT NULL, set on exactly the fill that closed a
+    position -- never realized_pnl, which is now a per-fill proportional split and
+    would count a multi-fill close as several trades). A win is a round trip with
+    position_realized_pnl > 0.
     """
     db = _conn(db_path)
     closed_trades, wins = db.execute(
         """
-        SELECT COUNT(*), SUM(CASE WHEN realized_pnl > 0 THEN 1 ELSE 0 END)
+        SELECT COUNT(*), SUM(CASE WHEN position_realized_pnl > 0 THEN 1 ELSE 0 END)
         FROM fills
-        WHERE bot_id = ? AND realized_pnl IS NOT NULL
+        WHERE bot_id = ? AND position_realized_pnl IS NOT NULL
         """,
         (bot_id,),
     ).fetchone()

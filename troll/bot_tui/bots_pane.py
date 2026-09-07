@@ -167,6 +167,12 @@ def next_range(current: str) -> str:
     return _RANGE_CYCLE[(idx + 1) % len(_RANGE_CYCLE)]
 
 
+def previous_range(current: str) -> str:
+    """All -> month -> week -> day -> all... (reverse of next_range)."""
+    idx = _RANGE_CYCLE.index(current)
+    return _RANGE_CYCLE[(idx - 1) % len(_RANGE_CYCLE)]
+
+
 def format_trade_line(trade: dict) -> str:
     """
     One blotter row: timestamp (from trade["ts"], UNIX nanoseconds per Story 4.6's wire

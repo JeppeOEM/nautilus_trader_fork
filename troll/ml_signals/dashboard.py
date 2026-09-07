@@ -1363,17 +1363,31 @@ def _indicator_id(name: str, params: dict[str, object]) -> str:
 
 
 def _indicators_json(candles: list[dict], spec_str: str) -> tuple[str, int]:
-    """Compute {t, value} point series for every requested indicator spec entry."""
+    """Compute {t, value} point series for every requested indicator spec entry.
+
+    spec_str is untrusted (a raw query-string value): a malformed entry (missing "=",
+    a non-numeric value for a numeric param, an out-of-range param a specific
+    indicator's own replay rejects) must degrade to a 400 with a message, the same
+    contract the "Unknown indicator" case below already has -- not an uncaught 500 out
+    of this handler. This is a system boundary (troll/CLAUDE.md: "only validate at
+    system boundaries"), so the catch is intentionally broad -- there is no fixed set
+    of exception types every current and future indicator's replay_indicator() might
+    raise on bad input.
+    """
     result: dict[str, dict[str, list[dict]]] = {}
-    for name, raw_params in _parse_indicator_spec(spec_str):
-        if name not in _chart_indicators.INDICATOR_CATALOG:
-            return json.dumps({"error": f"Unknown indicator: {name}"}), 400
-        params = _coerce_indicator_params(_chart_indicators.INDICATOR_CATALOG[name], raw_params)
-        outputs = _chart_indicators.replay_indicator(candles, name, params)
-        result[_indicator_id(name, params)] = {
-            attr: [{"t": c["t"], "value": v} for c, v in zip(candles, values, strict=True)]
-            for attr, values in outputs.items()
-        }
+    try:
+        for name, raw_params in _parse_indicator_spec(spec_str):
+            if name not in _chart_indicators.INDICATOR_CATALOG:
+                return json.dumps({"error": f"Unknown indicator: {name}"}), 400
+            params = _coerce_indicator_params(_chart_indicators.INDICATOR_CATALOG[name], raw_params)
+            outputs = _chart_indicators.replay_indicator(candles, name, params)
+            result[_indicator_id(name, params)] = {
+                attr: [{"t": c["t"], "value": v} for c, v in zip(candles, values, strict=True)]
+                for attr, values in outputs.items()
+            }
+    except Exception as exc:
+        logger.info("Malformed indicator spec %r rejected: %s", spec_str, exc)
+        return json.dumps({"error": f"Invalid indicator spec: {exc}"}), 400
     return json.dumps(result), 200
 
 

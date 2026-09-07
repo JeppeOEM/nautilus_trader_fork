@@ -31,9 +31,11 @@ from decimal import Decimal
 import live_paper.bot_status as bot_status_module
 from live_paper import fills_store
 from live_paper import trade_history
+from live_paper.bot_status import _DATA_STALE_NS
 from live_paper.bot_status import _close_orphaned_incident
 from live_paper.bot_status import _heartbeat_loop
 from live_paper.bot_status import _incident_transition
+from live_paper.bot_status import _is_feed_stale
 from live_paper.bot_status import _parse_control_message
 from live_paper.bot_status import _record_process_start
 from live_paper.bot_status import _trim_incidents
@@ -266,9 +268,13 @@ def test_build_status_closed_trades_survives_a_netting_reopen(tmp_path) -> None:
     assert strategy.cache.positions_closed(strategy_id=strategy.id) == []
 
     fills_store.write_fill("bot-01", 1, "BUY", 100.0, 1.0, None, db_path)
-    fills_store.write_fill("bot-01", 2, "SELL", 105.0, 1.0, 5.0, db_path)  # win
+    fills_store.write_fill(
+        "bot-01", 2, "SELL", 105.0, 1.0, 5.0, db_path, position_realized_pnl=5.0
+    )  # win
     fills_store.write_fill("bot-01", 3, "BUY", 105.0, 1.0, None, db_path)
-    fills_store.write_fill("bot-01", 4, "SELL", 103.0, 1.0, -2.0, db_path)  # loss
+    fills_store.write_fill(
+        "bot-01", 4, "SELL", 103.0, 1.0, -2.0, db_path, position_realized_pnl=-2.0
+    )  # loss
 
     status = build_status(
         strategy, bot_id="bot-01", mode="paper", started_at=0.0, now=1.0, db_path=db_path
@@ -325,6 +331,33 @@ def test_incident_transition_is_a_no_op_while_healthy() -> None:
     incidents, changed = _incident_transition(now=200.0, is_stale=False, incidents=closed)
     assert changed is False
     assert incidents == closed
+
+
+def test_is_feed_stale_fires_from_process_start_when_no_data_ever_arrived() -> None:
+    # Regression: a WS/API connection that never succeeds at all used to never mark
+    # stale, since last_data_ns==0 forever looked identical to "healthy, no tick yet".
+    started_at = 100.0
+    now_ns = int(started_at * 1e9) + _DATA_STALE_NS + 1
+    assert _is_feed_stale(last_data_ns=0, started_at=started_at, now_ns=now_ns) is True
+
+
+def test_is_feed_stale_is_not_stale_right_after_process_start_with_no_data_yet() -> None:
+    started_at = 100.0
+    now_ns = int(started_at * 1e9) + 1_000_000_000  # 1s in, well under the threshold
+    assert _is_feed_stale(last_data_ns=0, started_at=started_at, now_ns=now_ns) is False
+
+
+def test_is_feed_stale_uses_last_data_ns_once_data_has_arrived() -> None:
+    last_data_ns = 1_000_000_000_000
+    now_ns = last_data_ns + _DATA_STALE_NS + 1
+    # started_at far in the past -- must not be what triggers staleness here.
+    assert _is_feed_stale(last_data_ns=last_data_ns, started_at=0.0, now_ns=now_ns) is True
+    assert (
+        _is_feed_stale(
+            last_data_ns=last_data_ns, started_at=0.0, now_ns=last_data_ns + 1_000_000_000
+        )
+        is False
+    )
 
 
 def test_close_orphaned_incident_closes_a_dangling_open_span() -> None:
@@ -390,7 +423,7 @@ def test_heartbeat_loop_skips_a_failing_build_status_tick_without_crashing(monke
         task = asyncio.create_task(
             _heartbeat_loop(
                 client,
-                strategy=types.SimpleNamespace(last_data_ns=0),
+                strategy=types.SimpleNamespace(last_data_ns=0, is_running=True),
                 bot_id="bot-01",
                 mode="paper",
                 started_at=0.0,
@@ -408,3 +441,39 @@ def test_heartbeat_loop_skips_a_failing_build_status_tick_without_crashing(monke
     assert calls["n"] >= 2  # the failing tick did not stop later ticks from running
     assert len(client.published) >= 1  # at least one tick after the failure published
     assert all(json.loads(msg)["tick"] > 1 for msg in client.published)
+
+
+def test_heartbeat_loop_does_not_flag_a_deliberately_stopped_bot_as_data_stale(
+    monkeypatch,
+) -> None:
+    """
+    Regression: a bot the operator deliberately stopped (strategy.is_running=False)
+    legitimately stops receiving fresh data -- last_data_ns=0 from process start plus
+    started_at=0.0 would otherwise trip _is_feed_stale on the very first tick,
+    misreporting an intentional stop as a WS/feed-health incident.
+    """
+    monkeypatch.setattr(bot_status_module, "_STATUS_HEARTBEAT_SECONDS", 0.0)
+    monkeypatch.setattr(bot_status_module, "build_status", lambda *a, **kw: {})
+    client = _FakePublishClient()
+    incidents: list[dict] = []
+
+    async def _run_briefly() -> None:
+        task = asyncio.create_task(
+            _heartbeat_loop(
+                client,
+                strategy=types.SimpleNamespace(last_data_ns=0, is_running=False),
+                bot_id="bot-01",
+                mode="paper",
+                started_at=0.0,
+                db_path="unused",
+                incidents=incidents,
+            )
+        )
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    asyncio.run(_run_briefly())
+
+    assert incidents == []

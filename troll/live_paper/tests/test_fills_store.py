@@ -122,3 +122,40 @@ def test_realized_pnls_respects_cutoff_and_bot_id(tmp_path) -> None:
     fills_store.write_fill("bot-02", _DAY0 + _NS_PER_DAY, "SELL", 105.0, 1.0, 99.0, db_path)
 
     assert fills_store.realized_pnls("bot-01", db_path, cutoff_ns=_DAY0 + 1) == [7.0]
+
+
+def test_position_realized_pnls_ignores_per_fill_realized_pnl(tmp_path) -> None:
+    # A round trip closed across two reducing fills: both get a per-fill realized_pnl
+    # (proportional split), but only the second (the one that actually closed the
+    # position) gets position_realized_pnl -- position_realized_pnls() must return
+    # exactly one value for this round trip, not two.
+    db_path = _db_path(tmp_path)
+    fills_store.write_fill("bot-01", _DAY0, "BUY", 100.0, 2.0, None, db_path)
+    fills_store.write_fill(
+        "bot-01", _DAY0 + 10, "SELL", 105.0, 1.0, 2.5, db_path, position_realized_pnl=None
+    )
+    fills_store.write_fill(
+        "bot-01", _DAY0 + 20, "SELL", 106.0, 1.0, 3.5, db_path, position_realized_pnl=6.0
+    )
+
+    assert fills_store.realized_pnls("bot-01", db_path, cutoff_ns=None) == [2.5, 3.5]
+    assert fills_store.position_realized_pnls("bot-01", db_path, cutoff_ns=None) == [6.0]
+
+
+def test_win_rate_stats_counts_round_trips_not_fills(tmp_path) -> None:
+    db_path = _db_path(tmp_path)
+    fills_store.write_fill("bot-01", _DAY0, "BUY", 100.0, 2.0, None, db_path)
+    fills_store.write_fill(
+        "bot-01", _DAY0 + 10, "SELL", 105.0, 1.0, 2.5, db_path, position_realized_pnl=None
+    )
+    fills_store.write_fill(
+        "bot-01", _DAY0 + 20, "SELL", 106.0, 1.0, 3.5, db_path, position_realized_pnl=6.0
+    )
+    fills_store.write_fill("bot-01", _DAY0 + 30, "BUY", 106.0, 1.0, None, db_path)
+    fills_store.write_fill(
+        "bot-01", _DAY0 + 40, "SELL", 100.0, 1.0, -6.0, db_path, position_realized_pnl=-6.0
+    )
+
+    closed_trades, wins = fills_store.win_rate_stats("bot-01", db_path)
+    assert closed_trades == 2
+    assert wins == 1

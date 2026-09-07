@@ -366,6 +366,76 @@ async def _publish_snapshot_batch(redis_client: aioredis.Redis, snapshots: list)
         logger.warning("Redis publish failed: %s", e)
 
 
+def _resolve_stale_level(
+    book: OrderBook, bid: Price, ask: Price, bid_seq: int, ask_seq: int,
+) -> tuple[OrderSide, Price, int, int]:
+    """
+    Which side of a crossed book is stale, per dYdX's own tie-break rule (DATA-04):
+    the level with the strictly older (smaller) message-id, or on a tie, the side
+    with the smaller resting size (dYdX's own documented tie-break).
+
+    Returns (stale_side, stale_price, stale_seq, other_seq) -- extracted from
+    Collector._uncross_step to keep that method under this project's ~30-line
+    guideline (READ-01).
+    """
+    if bid_seq == ask_seq:
+        bid_stale = book.best_bid_size().as_double() <= book.best_ask_size().as_double()
+    else:
+        bid_stale = bid_seq < ask_seq
+    if bid_stale:
+        return OrderSide.BUY, bid, bid_seq, ask_seq
+    return OrderSide.SELL, ask, ask_seq, bid_seq
+
+
+def _apply_stale_delete(book: OrderBook, stale_side: OrderSide, stale_price: Price, sequence: int) -> None:
+    """
+    Synthetic BookAction.DELETE for the stale level (DATA-04) -- applied identically
+    to how a real dYdX-sent deletion is applied, never a full book wipe.
+    """
+    delete_order = BookOrder(
+        side=stale_side, price=stale_price, size=Quantity(0.0, stale_price.precision), order_id=0,
+    )
+    now_ns = time.time_ns()
+    book.apply_delta(
+        OrderBookDelta(
+            instrument_id=book.instrument_id,
+            action=BookAction.DELETE,
+            order=delete_order,
+            flags=0,
+            sequence=sequence,
+            ts_event=now_ns,
+            ts_init=now_ns,
+        )
+    )
+
+
+def _log_uncross_result(
+    iid: str,
+    stale_side: OrderSide,
+    stale_price: Price,
+    stale_seq: int,
+    other_seq: int,
+    side_now_empty: bool,
+) -> None:
+    """
+    DATA-02: a one-sided book after uncrossing is a real data-loss event, not routine
+    self-healing -- must not be logged identically to the benign case, or this failure
+    class stays invisible.
+    """
+    if side_now_empty:
+        logger.warning(
+            "Crossed book for %s uncrossed by dropping the LAST remaining %s level "
+            "@ %.6f (msg_id %d, surviving side msg_id %d) -- book is now one-sided",
+            iid, stale_side.name, stale_price.as_double(), stale_seq, other_seq,
+        )
+    else:
+        logger.info(
+            "Crossed book for %s actively uncrossed: dropped stale %s @ %.6f "
+            "(msg_id %d, surviving side msg_id %d)",
+            iid, stale_side.name, stale_price.as_double(), stale_seq, other_seq,
+        )
+
+
 class Collector:
     def __init__(self, config: CollectorConfig) -> None:
         self._config = config
@@ -861,118 +931,79 @@ class Collector:
         if bid is None or ask is None or bid.as_double() < ask.as_double():
             return False
         level_msg_id = self._level_msg_id.get(iid, {})
-        bid_key = (OrderSide.BUY, bid.as_double())
-        ask_key = (OrderSide.SELL, ask.as_double())
-        bid_seq = level_msg_id.get(bid_key)
-        ask_seq = level_msg_id.get(ask_key)
+        bid_seq = level_msg_id.get((OrderSide.BUY, bid.as_double()))
+        ask_seq = level_msg_id.get((OrderSide.SELL, ask.as_double()))
         if bid_seq is None or ask_seq is None:
             return False
 
-        if bid_seq == ask_seq:
-            bid_stale = book.best_bid_size().as_double() <= book.best_ask_size().as_double()
-        else:
-            bid_stale = bid_seq < ask_seq
-        if bid_stale:
-            stale_side, stale_price, stale_key, stale_seq, other_seq = (
-                OrderSide.BUY, bid, bid_key, bid_seq, ask_seq,
-            )
-        else:
-            stale_side, stale_price, stale_key, stale_seq, other_seq = (
-                OrderSide.SELL, ask, ask_key, ask_seq, bid_seq,
-            )
+        stale_side, stale_price, stale_seq, other_seq = _resolve_stale_level(
+            book, bid, ask, bid_seq, ask_seq
+        )
+        _apply_stale_delete(book, stale_side, stale_price, max(bid_seq, ask_seq))
+        level_msg_id.pop((stale_side, stale_price.as_double()), None)
 
-        delete_order = BookOrder(
-            side=stale_side,
-            price=stale_price,
-            size=Quantity(0.0, stale_price.precision),
-            order_id=0,
-        )
-        now_ns = time.time_ns()
-        book.apply_delta(
-            OrderBookDelta(
-                instrument_id=book.instrument_id,
-                action=BookAction.DELETE,
-                order=delete_order,
-                flags=0,
-                sequence=max(bid_seq, ask_seq),
-                ts_event=now_ns,
-                ts_init=now_ns,
-            )
-        )
-        level_msg_id.pop(stale_key, None)
         side_now_empty = (
             book.best_bid_price() is None if stale_side == OrderSide.BUY
             else book.best_ask_price() is None
         )
-        if side_now_empty:
-            # DATA-02: a one-sided book after uncrossing is a real data-loss event, not
-            # routine self-healing -- must not be logged identically to the benign case,
-            # or this failure class stays invisible.
-            logger.warning(
-                "Crossed book for %s uncrossed by dropping the LAST remaining %s level "
-                "@ %.6f (msg_id %d, surviving side msg_id %d) -- book is now one-sided",
-                iid, stale_side.name, stale_price.as_double(), stale_seq, other_seq,
-            )
-        else:
-            logger.info(
-                "Crossed book for %s actively uncrossed: dropped stale %s @ %.6f "
-                "(msg_id %d, surviving side msg_id %d)",
-                iid,
-                stale_side.name,
-                stale_price.as_double(),
-                stale_seq,
-                other_seq,
-            )
+        _log_uncross_result(iid, stale_side, stale_price, stale_seq, other_seq, side_now_empty)
         return True
 
-    async def _handle_crossed_book(self, iid: str, book: OrderBook, now_ns: int) -> bool:
+    def _handle_uncrossed_book(self, iid: str, book: OrderBook, now_ns: int) -> None:
         """
-        Detect/escalate/resolve a crossed book for one instrument. Returns True if
-        currently crossed (caller should skip this tick's snapshot for it).
+        Book isn't (or is no longer) crossed -- clear tracking state and, if this
+        instrument had an open crossed-book episode, log its resolution.
 
-        Extracted from _second_loop to keep that loop's own cyclomatic complexity down --
-        this is a self-contained state machine (crossed / resolved / stuck-past-grace),
-        not something _second_loop's per-tick iteration needs to inline.
+        Proves this was a real book update (the price actually moved), not a no-op
+        or a silently-forced resync -- distinguishes a genuine, harmless sub-second
+        touch (self-heals via normal delta activity, matches _CROSSED_RESYNC_NS's
+        documented tolerance) from a stuck desync that only recovers via
+        _resync_book's forced resubscribe (logged separately, as a CRITICAL).
         """
-        if book.best_bid_price().as_double() < book.best_ask_price().as_double():
-            crossed_since = self._crossed_since_ns.pop(iid, None)
-            crossed_prices = self._crossed_prices.pop(iid, None)
-            if crossed_since is not None and crossed_prices is not None:
-                # Proves this was a real book update (the price actually moved), not a
-                # no-op or a silently-forced resync -- distinguishes a genuine, harmless
-                # sub-second touch (self-heals via normal delta activity, matches
-                # _CROSSED_RESYNC_NS's documented tolerance) from a stuck desync that
-                # only recovers via _resync_book's forced resubscribe (logged separately,
-                # below, as a CRITICAL).
-                logger.info(
-                    "Crossed book for %s resolved after %.2fs "
-                    "(was bid=%.6f/ask=%.6f, now bid=%.6f/ask=%.6f)",
-                    iid,
-                    (now_ns - crossed_since) / 1e9,
-                    crossed_prices[0],
-                    crossed_prices[1],
-                    book.best_bid_price().as_double(),
-                    book.best_ask_price().as_double(),
-                )
-            return False
+        crossed_since = self._crossed_since_ns.pop(iid, None)
+        crossed_prices = self._crossed_prices.pop(iid, None)
+        if crossed_since is None or crossed_prices is None:
+            return
+        logger.info(
+            "Crossed book for %s resolved after %.2fs "
+            "(was bid=%.6f/ask=%.6f, now bid=%.6f/ask=%.6f)",
+            iid,
+            (now_ns - crossed_since) / 1e9,
+            crossed_prices[0],
+            crossed_prices[1],
+            book.best_bid_price().as_double(),
+            book.best_ask_price().as_double(),
+        )
 
-        # DATA-04: try dYdX's own non-destructive fix first -- drop only the stale
-        # level(s), never the whole book -- before falling back to the existing
-        # WARNING/timer/CRITICAL/_resync_book machinery below. The cap bounds a
-        # pathological/many-levels-deep cross; a genuine crossed-book episode is
-        # normally one or two levels.
+    def _try_active_uncross(self, iid: str, book: OrderBook) -> bool:
+        """
+        DATA-04: try dYdX's own non-destructive fix first -- drop only the stale
+        level(s), never the whole book -- before falling back to the existing
+        WARNING/timer/CRITICAL/_resync_book machinery. The cap bounds a
+        pathological/many-levels-deep cross; a genuine crossed-book episode is
+        normally one or two levels. Returns True once the book is no longer crossed.
+        """
         for _ in range(_UNCROSS_MAX_STEPS):
             if not self._uncross_step(iid, book):
-                break
+                return False
             new_bid, new_ask = book.best_bid_price(), book.best_ask_price()
             if new_bid is None or new_ask is None or new_bid.as_double() < new_ask.as_double():
                 self._crossed_since_ns.pop(iid, None)
                 self._crossed_prices.pop(iid, None)
-                return False
+                return True
+        return False
 
-        # Diagnostic: _last_book_update_ns refreshes on a delta for EITHER side, so it
-        # can't tell "bid deltas stopped arriving" apart from "both sides keep updating
-        # and are genuinely crossed". These per-side timestamps can.
+    async def _escalate_persistent_crossed_book(self, iid: str, book: OrderBook, now_ns: int) -> None:
+        """
+        Logs a WARNING for a crossed book active uncrossing couldn't resolve, and
+        escalates to CRITICAL + a forced resync once it's persisted past
+        _CROSSED_RESYNC_NS (DATA-02/DATA-03: resync is a last resort, not a first
+        response).
+
+        Diagnostic: _last_book_update_ns refreshes on a delta for EITHER side, so it
+        can't tell "bid deltas stopped arriving" apart from "both sides keep updating
+        and are genuinely crossed". These per-side timestamps can.
+        """
         bid_stale_s = (now_ns - self._last_bid_delta_ns.get(iid, 0)) / 1e9
         ask_stale_s = (now_ns - self._last_ask_delta_ns.get(iid, 0)) / 1e9
         logger.warning(
@@ -988,30 +1019,50 @@ class Collector:
         self._crossed_prices.setdefault(
             iid, (book.best_bid_price().as_double(), book.best_ask_price().as_double())
         )
-        if now_ns - crossed_since > _CROSSED_RESYNC_NS:
-            # Persisted past the grace window this system already uses as its tolerance
-            # for a genuine sub-second touch (see _CROSSED_RESYNC_NS's definition) --
-            # confirmed local desync (a lost delta our reconstruction never recovers from
-            # on its own), not bad data from dYdX. Not gated to "once ever": _resync_book
-            # (below) resets crossed_since on every call, so for a book that keeps failing
-            # to recover this naturally repeats roughly every _CROSSED_RESYNC_NS, not
-            # every _second_loop tick -- an unresolved CRITICAL incident should keep
-            # alerting, not go silent after a single log line.
-            critical_logger.critical(
-                json.dumps(
-                    {
-                        "instrument_id": iid,
-                        "reason": "steady_state_crossed_book",
-                        "best_bid": book.best_bid_price().as_double(),
-                        "best_ask": book.best_ask_price().as_double(),
-                        "crossed_duration_ns": now_ns - crossed_since,
-                        "bid_delta_stale_s": bid_stale_s,
-                        "ask_delta_stale_s": ask_stale_s,
-                        "ts_event_ns": now_ns,
-                    }
-                )
+        if now_ns - crossed_since <= _CROSSED_RESYNC_NS:
+            return
+        # Persisted past the grace window this system already uses as its tolerance
+        # for a genuine sub-second touch (see _CROSSED_RESYNC_NS's definition) --
+        # confirmed local desync (a lost delta our reconstruction never recovers from
+        # on its own), not bad data from dYdX. Not gated to "once ever": _resync_book
+        # (below) resets crossed_since on every call, so for a book that keeps failing
+        # to recover this naturally repeats roughly every _CROSSED_RESYNC_NS, not
+        # every _second_loop tick -- an unresolved CRITICAL incident should keep
+        # alerting, not go silent after a single log line.
+        critical_logger.critical(
+            json.dumps(
+                {
+                    "instrument_id": iid,
+                    "reason": "steady_state_crossed_book",
+                    "best_bid": book.best_bid_price().as_double(),
+                    "best_ask": book.best_ask_price().as_double(),
+                    "crossed_duration_ns": now_ns - crossed_since,
+                    "bid_delta_stale_s": bid_stale_s,
+                    "ask_delta_stale_s": ask_stale_s,
+                    "ts_event_ns": now_ns,
+                }
             )
-            await self._resync_book(iid)
+        )
+        await self._resync_book(iid)
+
+    async def _handle_crossed_book(self, iid: str, book: OrderBook, now_ns: int) -> bool:
+        """
+        Detect/escalate/resolve a crossed book for one instrument. Returns True if
+        currently crossed (caller should skip this tick's snapshot for it).
+
+        Extracted from _second_loop to keep that loop's own cyclomatic complexity down --
+        this is a self-contained state machine (crossed / resolved / stuck-past-grace),
+        not something _second_loop's per-tick iteration needs to inline. Split further
+        into _handle_uncrossed_book / _try_active_uncross /
+        _escalate_persistent_crossed_book to keep each stage under this project's
+        ~30-line guideline (READ-01).
+        """
+        if book.best_bid_price().as_double() < book.best_ask_price().as_double():
+            self._handle_uncrossed_book(iid, book, now_ns)
+            return False
+        if self._try_active_uncross(iid, book):
+            return False
+        await self._escalate_persistent_crossed_book(iid, book, now_ns)
         return True
 
     async def _second_loop(self) -> None:
@@ -1170,9 +1221,10 @@ class Collector:
             asyncio.create_task(self._prune_loop()),
             asyncio.create_task(self._second_loop()),
             asyncio.create_task(self._watchdog_loop()),
-            # ponytail: temporary crossed-book root-cause debug (Story 5.1), remove once
-            # resolved. Rust's file logger only flushes its BufWriter to disk on an
-            # explicit Sync event -- without this, [WS_RAW] lines sit in memory forever.
+            # Raw-WS debug feed (Story 5.1) for the incident-report subsystem below --
+            # a permanent feature, not scoped to any one investigation. Rust's file
+            # logger only flushes its BufWriter to disk on an explicit Sync event --
+            # without this, [WS_RAW] lines sit in memory forever.
             asyncio.create_task(_ws_raw_debug_flush_loop()),
         ]
         stop_task = asyncio.create_task(self._stop.wait())
@@ -1201,7 +1253,8 @@ class Collector:
         self._stop.set()
 
 
-# ponytail: temporary crossed-book root-cause debug (Story 5.1), remove once resolved.
+# Raw-WS debug feed (Story 5.1) for the incident-report subsystem below -- a
+# permanent feature, not scoped to any one investigation.
 async def _ws_raw_debug_flush_loop() -> None:
     while True:
         await asyncio.sleep(2.0)
@@ -1442,13 +1495,13 @@ async def main() -> None:
         trader_id=nautilus_pyo3.TraderId("COLLECTOR-001"),
         instance_id=nautilus_pyo3.UUID4(),
         level_stdout=nautilus_pyo3.LogLevel.WARNING,
-        # ponytail: temporary crossed-book root-cause debug (Story 5.1). DEBUG+ goes to a
-        # file, not stdout -- component_levels/log_components_only can only make Logger's
-        # filtering MORE restrictive than the global stdout/fileout level, never less
-        # (see Logger::enabled() in crates/common/src/logging/logger.rs), so there is no
-        # way to raise just handler.rs's [WS_RAW] debug! line above stdout=WARNING without
-        # a separate, permissive file sink. Remove alongside handler.rs's [WS_RAW] line
-        # once the investigation concludes.
+        # Permanent raw-WS debug feed (Story 5.1), not scoped to any one investigation --
+        # feeds the incident-report subsystem below. DEBUG+ goes to a file, not stdout --
+        # component_levels/log_components_only can only make Logger's filtering MORE
+        # restrictive than the global stdout/fileout level, never less (see
+        # Logger::enabled() in crates/common/src/logging/logger.rs), so there is no way
+        # to raise just handler.rs's [WS_RAW] debug! line above stdout=WARNING without a
+        # separate, permissive file sink.
         level_file=nautilus_pyo3.LogLevel.DEBUG,
         directory=str(_WS_RAW_LOG_DIR),
         file_name="ws_raw_debug",

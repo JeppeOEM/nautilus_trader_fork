@@ -50,6 +50,7 @@ from ml_signals import performance_metrics
 from live_paper import fills_store
 from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.events import OrderFilled
+from nautilus_trader.model.identifiers import PositionId
 from nautilus_trader.trading.strategy import Strategy
 
 
@@ -75,48 +76,116 @@ def _fill_side(fill: OrderFilled) -> str:
     return "BUY" if fill.order_side == OrderSide.BUY else "SELL"
 
 
-def _closing_realized_pnl(strategy: Strategy, fill: OrderFilled) -> float | None:
+# Running total of realized PnL already attributed to a still-open position's earlier
+# reducing fills, keyed by PositionId -- reconciled onto (and popped by) the fill that
+# actually closes the position, see _fill_realized_pnl's own docstring. Self-cleans: an
+# entry exists only between a position's first reducing fill and its close, so this
+# never grows past the number of currently-open, partially-reduced positions.
+_pending_realized_pnl: dict[PositionId, float] = {}
+
+
+def _fill_pnl(strategy: Strategy, fill: OrderFilled) -> tuple[float | None, float | None]:
     """
-    Only the fill that closes a position carries realized PnL -- documented
-    simplification, not a general partial-close replay: DummyStrategy (this codebase's
-    only live_paper strategy) never partially scales out of a position
-    (strategy.py's _maybe_trade has no add-to-position branch), so a closed position's
-    realized_pnl belongs entirely to its one closing fill.
-    # ponytail: assumes one closing fill per position (true for DummyStrategy today);
-    # if a future strategy partially scales out across multiple reducing fills, this
-    # attributes all realized PnL to whichever fill happens to close the position
-    # instead of splitting it proportionally via Position.calculate_pnl() per reducing
-    # fill -- revisit only if that strategy shape is actually built.
+    (realized_pnl, position_realized_pnl) attributed to this one fill.
+
+    realized_pnl is proportional to this fill's own contribution to closing the
+    position, not dumped entirely onto whichever fill happens to close it. A single
+    closing *order* can still fill across several partial venue-side fills (normal
+    dYdX behavior, independent of whether the strategy itself ever adds to a
+    position) -- each reducing fill needs its own share, or the trade blotter shows
+    one tiny-qty row carrying an entire close's PnL next to other rows that look like
+    unrelated null-PnL fills. Every reducing fill before the last is given a
+    pre-commission estimate via Position.calculate_pnl(avg_px_open, this fill's own
+    price, this fill's own qty); the position's actual Position.realized_pnl
+    (commission-net, known only once fully closed) is reconciled onto the fill that
+    closes the position, as (total - sum of the earlier fills' estimates) -- so this
+    column still sums to exactly Position.realized_pnl for the round trip as a whole.
+
+    position_realized_pnl is the round trip's true total, set ONLY on the fill that
+    closes the position (None on every other fill) -- fills_store.win_rate_stats()/
+    ml_signals.performance_metrics feed on this instead of realized_pnl, since those
+    are inherently per-completed-trade stats and a multi-fill close must still count
+    as exactly one trade, not several.
+
+    Both are (None, None) for a fill that only opens or adds to a position
+    (order_side == position.entry), matching this codebase's "None means not
+    applicable" convention (see coin_detail.py's format_indicator).
     """
     if fill.position_id is None:
-        return None
+        return None, None
     position = strategy.cache.position(fill.position_id)
-    if position is None or not position.is_closed or position.realized_pnl is None:
-        return None
-    return position.realized_pnl.as_double()
+    if position is None or fill.order_side == position.entry:
+        return None, None
+    if not position.is_closed:
+        estimate = position.calculate_pnl(
+            position.avg_px_open, fill.last_px.as_double(), fill.last_qty
+        ).as_double()
+        _pending_realized_pnl[position.id] = (
+            _pending_realized_pnl.get(position.id, 0.0) + estimate
+        )
+        return estimate, None
+    if position.realized_pnl is None:
+        return None, None
+    total = position.realized_pnl.as_double()
+    pending = _pending_realized_pnl.pop(position.id, 0.0)
+    return total - pending, total
+
+
+def _write_fill(fill: dict) -> None:
+    """
+    The actual (blocking) sqlite3 write -- called either straight off the event loop
+    thread (see _on_order_event) or, in BacktestEngine (no running loop, purely
+    synchronous), directly inline where blocking has no live-responsiveness cost.
+    Never raises: catches its own failure so a fire-and-forget executor call never
+    leaves an unretrieved exception on its Future, and a direct/synchronous call never
+    propagates into the strategy's own event handling either way.
+    """
+    try:
+        fills_store.write_fill(**fill)
+    except Exception:
+        # No app-level retry: sqlite3.connect's default 5s busy_timeout already retries
+        # transient lock contention internally (e.g. two bot containers sharing
+        # fills.db), and a retry here wouldn't help the remaining failure modes (disk
+        # full, bad volume-mount permissions). This fill is now permanently missing from
+        # closed_trades/win_rate/history everywhere fills_store is read, with nothing
+        # else in the system to surface that -- ERROR (not WARNING) + every field of the
+        # lost fill is what makes the loss discoverable and manually recoverable from
+        # Dozzle, instead of a silent, permanent undercount.
+        logger.error("Fill permanently lost, not persisted to fills_store: %s", fill, exc_info=True)
 
 
 def _on_order_event(event: object, strategy: Strategy, bot_id: str, db_path: str) -> None:
     if not isinstance(event, OrderFilled):
         return
     # This handler runs synchronously on the strategy's own message bus dispatch (not
-    # inside run()'s try/except loop) -- an unhandled exception here propagates straight
-    # into live order-fill handling and takes the whole TradingNode down with it, same
-    # failure shape AC4 already guards against on the timer/Redis-publish side. A fill,
-    # once observed, must never be able to crash the node just because the store can't
-    # be written to right now (e.g. a bad volume-mount permission) -- log and move on.
+    # inside run()'s try/except loop) -- live_paper's whole TradingNode runs on one
+    # single-threaded event loop (this codebase's documented architecture), so a
+    # blocking sqlite3 commit right here would freeze the entire bot -- unable to
+    # process new market data or react to a price move -- for however long the disk
+    # write takes, not just the sub-millisecond common case. Offloading the write to a
+    # thread (loop.run_in_executor) keeps this handler itself non-blocking in live
+    # mode. BacktestEngine has no running event loop at all (purely synchronous
+    # replay, per this codebase's own architecture docs) -- there, offloading would add
+    # complexity for no benefit, so this falls back to writing inline.
+    realized_pnl, position_realized_pnl = _fill_pnl(strategy, event)
+    fill = {
+        "bot_id": bot_id,
+        "ts": event.ts_event,
+        "side": _fill_side(event),
+        "price": event.last_px.as_double(),
+        "qty": event.last_qty.as_double(),
+        "realized_pnl": realized_pnl,
+        "db_path": db_path,
+        "position_realized_pnl": position_realized_pnl,
+    }
     try:
-        fills_store.write_fill(
-            bot_id=bot_id,
-            ts=event.ts_event,
-            side=_fill_side(event),
-            price=event.last_px.as_double(),
-            qty=event.last_qty.as_double(),
-            realized_pnl=_closing_realized_pnl(strategy, event),
-            db_path=db_path,
-        )
-    except Exception as exc:
-        logger.warning("Failed to record fill to fills_store, fill not persisted: %s", exc)
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is None:
+        _write_fill(fill)
+    else:
+        loop.run_in_executor(None, _write_fill, fill)
 
 
 def subscribe(strategy: Strategy, bot_id: str, db_path: str) -> None:
@@ -158,7 +227,11 @@ def compute_history(
         "trades": fills_store.recent_trades(bot_id, db_path, cutoff_ns, _MAX_TRADES),
         "pnl_series": fills_store.pnl_by_day(bot_id, db_path, cutoff_ns),
         "metrics": performance_metrics.all_metrics(
-            realized_pnls=fills_store.realized_pnls(bot_id, db_path, cutoff_ns),
+            # One value per completed round trip, not per reducing fill -- see
+            # position_realized_pnls()'s own docstring; trade_stats()'s win_rate/
+            # expectancy/avg-max win-loss would otherwise count a multi-fill close as
+            # several trades.
+            realized_pnls=fills_store.position_realized_pnls(bot_id, db_path, cutoff_ns),
             pnl_by_day=fills_store.pnl_by_day(bot_id, db_path, cutoff_ns=None),
             starting_balance=starting_balance,
             cutoff_ns=cutoff_ns,

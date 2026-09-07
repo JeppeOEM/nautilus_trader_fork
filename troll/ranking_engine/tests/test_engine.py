@@ -450,3 +450,33 @@ def test_persist_snapshots_writes_rank_and_volume_from_current_ranks() -> None:
     row = metrics_store.nearest(iid, now_ns, db_path)
     assert row["rank"] == 1
     assert row["volume24h"] == 50_000_000.0
+
+
+def test_legacy_book_metrics_for_reads_the_live_ofi5_microprice_spread() -> None:
+    """
+    SSOT-02 regression: metrics_store's historical ofi/microprice/spread columns must
+    come from the exact same live tracker state rankings:live's ofi_5/microprice/spread
+    fields come from (via _fast_metrics_for), never an independent recomputation that
+    could diverge from it.
+    """
+    _reset_state()
+    iid = "BTC-USD-PERP.DYDX"
+    engine._ingest_snapshot_batch(
+        [_snap(iid, 100.0, 101.0, ts_event=0), _snap(iid, 100.0, 101.0, ts_event=1_000_000_000)]
+    )
+
+    legacy = engine._legacy_book_metrics_for(iid)
+    fast = engine._fast_metrics_for(iid)
+
+    assert legacy == {"ofi": fast["ofi_5"], "microprice": fast["microprice"], "spread": fast["spread"]}
+    assert legacy["microprice"] is not None
+    assert legacy["spread"] == 1.0
+
+
+def test_legacy_book_metrics_for_unknown_instrument_is_all_none() -> None:
+    _reset_state()
+    assert engine._legacy_book_metrics_for("NEVER-SEEN-USD-PERP.DYDX") == {
+        "ofi": None,
+        "microprice": None,
+        "spread": None,
+    }

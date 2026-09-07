@@ -27,6 +27,9 @@ from coin_detail_state.py's own snapshots:raw subscription.
 
 import base64
 
+from ml_signals.indicators import mid_price
+
+
 # Verbatim UX copy (EXPERIENCE.md State Patterns: "Thin order book") -- keep exact,
 # same discipline as coins_pane.py's COLD_OPEN_TEXT/NO_MATCHES_TEXT.
 NO_BIDS_TEXT = "no bids"
@@ -108,7 +111,10 @@ def order_book_lines(
     screen-centered label, so mid_line is built from the same size_w/price_w as the
     levels rather than independently centered. Mid is read from the same book snapshot
     the levels themselves come from (not ranking_engine's own mid), so it can never
-    disagree with the best bid/ask shown directly above/below it.
+    disagree with the best bid/ask shown directly above/below it -- computed via
+    ml_signals.indicators.mid_price on that same local snapshot, not a reimplemented
+    formula (SSOT-01: mid price is a pure, single-snapshot derivation and must have
+    exactly one implementation).
 
     size_w/price_w are a ratchet_width() of this render's actual values against
     min_size_w/min_price_w -- see that function's docstring. The caller (app.py) is
@@ -131,9 +137,8 @@ def order_book_lines(
     bid_rows = _rows(bid_prices, bid_sizes, n_bid) if bid_prices else [NO_BIDS_TEXT]
     ask_rows = _rows(ask_prices, ask_sizes, n_ask) if ask_prices else [NO_ASKS_TEXT]
 
-    mid_str = (
-        f"{(bid_prices[0] + ask_prices[0]) / 2:.2f}" if bid_prices and ask_prices else "—"
-    )
+    mid = mid_price({"bid_prices": bid_prices, "ask_prices": ask_prices})
+    mid_str = f"{mid:.2f}" if mid is not None else "—"
     mid_line = f"{'':>{size_w}}  {mid_str:>{price_w}}"
 
     return list(reversed(ask_rows)), mid_line, bid_rows, size_w, price_w

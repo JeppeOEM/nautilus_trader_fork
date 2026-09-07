@@ -660,3 +660,22 @@ def test_indicators_json_returns_400_for_unknown_indicator() -> None:
     body, status = _indicators_json([], "NotARealIndicator:period=3")
     assert status == 400
     assert "Unknown indicator" in json.loads(body)["error"]
+
+
+def test_indicators_json_returns_400_instead_of_raising_for_malformed_spec() -> None:
+    # Regression: a param entry missing "=" used to raise ValueError out of
+    # _parse_indicator_spec's dict() construction, uncaught -- an aiohttp 500, not a
+    # clean 4xx, for what is just bad/untrusted query-string input.
+    candles = [{"t": 0, "o": 1.0, "h": 1.0, "l": 1.0, "c": 1.0, "v": 1.0}]
+    body, status = _indicators_json(candles, "SimpleMovingAverage:period")
+    assert status == 400
+    assert "error" in json.loads(body)
+
+
+def test_indicators_json_returns_400_for_non_numeric_param_value() -> None:
+    # A non-numeric value for an int/float param used to raise ValueError out of
+    # _coerce_indicator_params' int()/float() coercion, uncaught.
+    candles = [{"t": 0, "o": 1.0, "h": 1.0, "l": 1.0, "c": 1.0, "v": 1.0}]
+    body, status = _indicators_json(candles, "SimpleMovingAverage:period=not_a_number")
+    assert status == 400
+    assert "error" in json.loads(body)

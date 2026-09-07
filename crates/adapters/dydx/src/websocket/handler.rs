@@ -212,6 +212,14 @@ impl FeedHandler {
                     return vec![DydxWsOutputMessage::Reconnected];
                 }
 
+                // Permanent raw-WS debug feed for troll/dydx_collector's incident-report
+                // subsystem (collector.py's _scan_ws_raw_window/_write_incident_report) --
+                // not scoped to any one investigation. debug!, not trace! -- the
+                // workspace's `log` crate feature `release_max_level_debug` (root
+                // Cargo.toml) strips trace! calls entirely from release builds at compile
+                // time; debug! is the highest level that survives release compilation.
+                log::debug!("[WS_RAW] {txt}");
+
                 // Hot path: zero-copy parse for feed messages (orderbook/trades/candles)
                 match serde_json::from_str::<DydxWsFeedMessage>(&txt) {
                     Ok(feed_msg) => {

@@ -161,6 +161,13 @@ def test_next_range_cycles_day_week_month_all_day() -> None:
     assert bots_pane.next_range("all") == "day"
 
 
+def test_previous_range_cycles_the_reverse_of_next_range() -> None:
+    assert bots_pane.previous_range("day") == "all"
+    assert bots_pane.previous_range("all") == "month"
+    assert bots_pane.previous_range("month") == "week"
+    assert bots_pane.previous_range("week") == "day"
+
+
 def _history_entry(**overrides: object) -> dict:
     base = {
         "bot_id": "bot-01",

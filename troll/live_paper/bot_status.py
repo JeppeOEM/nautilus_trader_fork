@@ -131,6 +131,19 @@ def _trim_incidents(incidents: list[dict]) -> list[dict]:
     return incidents[-_MAX_INCIDENTS:]
 
 
+def _is_feed_stale(last_data_ns: int, started_at: float, now_ns: int) -> bool:
+    """
+    True once _DATA_STALE_NS has passed with no data -- measured from the last quote
+    if one has ever arrived, otherwise from process start. Falling back to started_at
+    (rather than never firing while last_data_ns stays 0) is what lets a startup
+    connection failure -- the WS/API is down for the bot's entire life -- still open a
+    data_stale incident; last_data_ns==0 is otherwise indistinguishable from "healthy,
+    just no quote yet" and would suppress staleness detection forever.
+    """
+    reference_ns = last_data_ns if last_data_ns != 0 else int(started_at * 1e9)
+    return (now_ns - reference_ns) > _DATA_STALE_NS
+
+
 def build_status(
     strategy: Strategy,
     bot_id: str,
@@ -225,9 +238,13 @@ async def _heartbeat_loop(
         # function is re-scheduled fresh each reconnect (see run()'s docstring), but
         # incidents itself must survive that so a reconnect doesn't look like a data
         # gap ever happened.
-        last_data_ns = strategy.last_data_ns
         now_ns = time.time_ns()
-        is_stale = last_data_ns != 0 and (now_ns - last_data_ns) > _DATA_STALE_NS
+        # A deliberately-stopped bot (operator "s" + confirm) legitimately stops
+        # receiving fresh data -- without this guard, "stopped on purpose" and "feed
+        # actually died" both silently look identical (a growing last_data_ns gap),
+        # opening a misleading data_stale incident for a stop nobody would call a feed
+        # outage. Staleness is only a meaningful question while the bot is running.
+        is_stale = strategy.is_running and _is_feed_stale(strategy.last_data_ns, started_at, now_ns)
         new_incidents, changed = _incident_transition(time.time(), is_stale, incidents)
         if changed:
             incidents[:] = _trim_incidents(new_incidents)

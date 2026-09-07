@@ -22,6 +22,7 @@ matching column in metrics_store.COLS to extend what gets tracked.
 
 import logging
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 
 from nautilus_trader.model.identifiers import InstrumentId
@@ -93,10 +94,25 @@ def compute_snapshot(
     catalog: ParquetDataCatalog,
     instrument_id: str,
     now_ns: int,
+    book_metrics_fn: Callable[[str], dict] | None = None,
 ) -> dict:
+    """
+    book_metrics_fn, when given, replaces the default from-Parquet _book_metrics() for
+    the ofi/microprice/spread fields -- ranking_engine (this function's only real
+    caller) passes its own live-indicator-state read here (troll/CLAUDE.md SSOT-02):
+    that process must never run two independent stateful OFI/microprice trackers for
+    the same instrument, which a fresh from-scratch Parquet replay every call would be
+    relative to the live trackers it already maintains continuously from the Redis
+    snapshot stream. None (the default) keeps the original from-Parquet behavior for
+    any other/future caller with no live state of its own to read.
+    """
     price_start_ns = now_ns - int(PRICE_LOOKBACK_HOURS * 3_600 * 1_000_000_000)
     stats = price_stats(catalog, instrument_id, start_ns=price_start_ns)
-    book = _book_metrics(catalog, instrument_id, now_ns)
+    book = (
+        book_metrics_fn(instrument_id)
+        if book_metrics_fn is not None
+        else _book_metrics(catalog, instrument_id, now_ns)
+    )
     return {
         "ts": now_ns,
         "instrument_id": instrument_id,
@@ -134,19 +150,26 @@ def compute_book_metrics_all(catalog_path: str, max_workers: int = 32) -> list[d
     return snapshots
 
 
-def compute_all(catalog_path: str, max_workers: int = 32) -> list[dict]:
+def compute_all(
+    catalog_path: str,
+    max_workers: int = 32,
+    book_metrics_fn: Callable[[str], dict] | None = None,
+) -> list[dict]:
     """Full snapshot (book metrics + price stats) for every instrument.
 
     Slower than compute_book_metrics_all due to the 25h price lookback.
     Run this on a longer interval for bookkeeping; use compute_book_metrics_all
     for the live-update loop.
+
+    book_metrics_fn is forwarded to compute_snapshot() -- see that function's own
+    docstring (SSOT-02).
     """
     now_ns = time.time_ns()
     instruments = list_instruments(catalog_path)
 
     def _one(iid: str) -> dict | None:
         try:
-            return compute_snapshot(ParquetDataCatalog(catalog_path), iid, now_ns)
+            return compute_snapshot(ParquetDataCatalog(catalog_path), iid, now_ns, book_metrics_fn)
         except Exception:
             logger.warning("Snapshot failed for %s", iid, exc_info=True)
             return None

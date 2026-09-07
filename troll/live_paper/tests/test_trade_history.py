@@ -43,13 +43,16 @@ from nautilus_trader.model.data import OrderBookDelta
 from nautilus_trader.model.enums import AccountType
 from nautilus_trader.model.enums import BookAction
 from nautilus_trader.model.enums import BookType
+from nautilus_trader.model.data import QuoteTick
 from nautilus_trader.model.enums import OmsType
 from nautilus_trader.model.enums import OrderSide
+from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.objects import Money
 from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
 from nautilus_trader.test_kit.providers import TestInstrumentProvider
 from nautilus_trader.test_kit.stubs.data import TestDataStubs
+from nautilus_trader.trading.strategy import Strategy
 
 
 _INSTRUMENT = TestInstrumentProvider.btcusdt_binance()
@@ -308,7 +311,9 @@ def test_on_order_event_ignores_non_fill_order_events(tmp_path) -> None:
     engine.dispose()
 
 
-def test_on_order_event_swallows_a_store_write_failure_instead_of_crashing(tmp_path) -> None:
+def test_on_order_event_swallows_a_store_write_failure_instead_of_crashing(
+    tmp_path, caplog
+) -> None:
     """
     Regression for a live incident (2026-09-02): the on-fill handler had no
     try/except, so a fills.db write failure (there: a bind-mounted data dir Docker
@@ -316,6 +321,10 @@ def test_on_order_event_swallows_a_store_write_failure_instead_of_crashing(tmp_p
     synchronous message-bus handler and crashed the whole TradingNode on the first
     real fill. `db_path` here is a directory, not a file -- sqlite3.connect() on it
     reproduces the exact "unable to open database file" error seen live.
+
+    Also covers a second review finding: a lost fill must be escalated (ERROR, with
+    the full fill payload logged) rather than silently dropped at WARNING with no
+    way to recover it -- see trade_history._on_order_event's own comment.
     """
     db_path = str(tmp_path / "fills.db")
     engine, strategy = _run_strategy_with_history(db_path)
@@ -326,9 +335,99 @@ def test_on_order_event_swallows_a_store_write_failure_instead_of_crashing(tmp_p
     fill = closed_orders[0].events[-1]
 
     unwritable_db_path = str(tmp_path)  # a directory, not a file
-    trade_history._on_order_event(
-        fill, strategy=strategy, bot_id="bot-01", db_path=unwritable_db_path
-    )  # must not raise
+    with caplog.at_level("ERROR"):
+        trade_history._on_order_event(
+            fill, strategy=strategy, bot_id="bot-01", db_path=unwritable_db_path
+        )  # must not raise
+
+    assert len(caplog.records) == 1
+    assert caplog.records[0].levelname == "ERROR"
+    assert "permanently lost" in caplog.records[0].message
+    assert "bot-01" in caplog.records[0].message
+
+    engine.reset()
+    engine.dispose()
+
+
+class _MultiFillCloseStrategy(Strategy):
+    """
+    Test-only strategy (not DummyStrategy): submits one opening BUY, then two separate
+    reducing SELL orders that together close the position. Models a single closing
+    intent venue-side-fragmented into multiple fills without needing to reproduce
+    dYdX's own partial-fill matching inside BacktestEngine -- from
+    trade_history._fill_pnl's point of view, two reducing OrderFilled events for one
+    round trip is the same shape either way.
+    """
+
+    def __init__(self, instrument_id: InstrumentId, open_qty: Decimal, reduce_qty: Decimal) -> None:
+        super().__init__()
+        self._instrument_id = instrument_id
+        self._open_qty = open_qty
+        self._reduce_qty = reduce_qty
+        self._tick_count = 0
+
+    def on_start(self) -> None:
+        self.subscribe_quote_ticks(self._instrument_id)
+
+    def on_quote_tick(self, tick: QuoteTick) -> None:
+        self._tick_count += 1
+        if self._tick_count == 1:
+            self._submit(OrderSide.BUY, self._open_qty)
+        elif self._tick_count == 5:
+            self._submit(OrderSide.SELL, self._reduce_qty)
+        elif self._tick_count == 10:
+            self._submit(OrderSide.SELL, self._reduce_qty)
+
+    def _submit(self, side: OrderSide, qty: Decimal) -> None:
+        instrument = self.cache.instrument(self._instrument_id)
+        order = self.order_factory.market(
+            instrument_id=self._instrument_id,
+            order_side=side,
+            quantity=instrument.make_qty(qty),
+        )
+        self.submit_order(order)
+
+
+def test_fill_pnl_splits_a_multi_fill_close_proportionally_and_sums_to_the_total(
+    tmp_path,
+) -> None:
+    """
+    Regression for a review finding: a single closing intent that fills across two
+    separate reducing fills (dYdX can fragment one order this way) must give each
+    reducing fill its own realized_pnl share, not dump the whole round trip's PnL onto
+    only the fill that happens to close the position -- and position_realized_pnl must
+    land on exactly the closing fill, holding the round trip's true total.
+    """
+    db_path = str(tmp_path / "fills.db")
+    engine = _engine()
+    engine.add_data(_quotes_and_deltas(n_seconds=20, levels_per_side=2))
+    strategy = _MultiFillCloseStrategy(_IID, open_qty=Decimal("0.002"), reduce_qty=Decimal("0.001"))
+    engine.add_strategy(strategy)
+    trade_history.subscribe(strategy, bot_id="bot-01", db_path=db_path)
+    engine.run()
+
+    trades = fills_store.recent_trades("bot-01", db_path, cutoff_ns=None, limit=500)
+    assert len(trades) == 3  # 1 opening fill + 2 reducing fills
+
+    opening, first_reduce, closing_reduce = trades
+    assert opening["realized_pnl"] is None
+
+    position = strategy.cache.positions_closed(strategy_id=strategy.id)[0]
+    total_realized_pnl = position.realized_pnl.as_double()
+
+    # Both reducing fills carry their own non-null share, and they sum to the true total.
+    assert first_reduce["realized_pnl"] is not None
+    assert closing_reduce["realized_pnl"] is not None
+    assert first_reduce["realized_pnl"] != closing_reduce["realized_pnl"]
+    assert first_reduce["realized_pnl"] + closing_reduce["realized_pnl"] == total_realized_pnl
+
+    # position_realized_pnl (the round-trip total, for win_rate_stats()) lands on
+    # exactly the closing fill -- never the earlier partial reduce.
+    assert fills_store.position_realized_pnls("bot-01", db_path, cutoff_ns=None) == [
+        total_realized_pnl
+    ]
+    closed_trades, _wins = fills_store.win_rate_stats("bot-01", db_path)
+    assert closed_trades == 1  # one round trip, not two "trades" for its two fills
 
     engine.reset()
     engine.dispose()

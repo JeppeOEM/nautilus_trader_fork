@@ -19,8 +19,9 @@ pane, the `:` command bar, the `/` inline filter, the `m` Ranking-Mode toggle, a
 pane-level stale badge, a full-screen Coin-detail view (live indicators + collapsible
 order-book ladder + `o` dashboard deep-link), a Bots pane (live per-bot PnL/status
 rows, per-row stale badges, `s` start/stop with a footer-echo confirmation), a
-full-screen Bot-detail view (live-snapshot header, `t`-cycled trades blotter + PnL
-sparkline sourced from Story 4.6's bots:history:* keys, `o` dashboard deep-link), a
+full-screen Bot-detail view (live-snapshot header, left/right- (or h/l-) stepped trades
+blotter + PnL sparkline sourced from Story 4.6's bots:history:* keys, `o` dashboard
+deep-link), a
 Collector pane (Story 6.1: every currently-collected dYdX instrument -- always pinned,
 there is no "collected but not pinned" state -- with liquid status, `p` to unpin (stop
 + add to config.exclude) and `x` to stop (don't exclude), both behind the same
@@ -96,11 +97,12 @@ _COIN_DETAIL_FOOTER_HINT_TEXT = "d expand book  o dashboard  esc back  :q quit"
 # _handle_global_key), `s` is Bots-pane-only.
 _BOTS_FOOTER_HINT_TEXT = "s start/stop  : command  esc back  :q quit"
 
-# Bot-detail's own footer (Story 4.5 added s/esc; Story 4.7 adds t/o for the new
-# blotter/PnL-sparkline regions). No j/k (scroll) hint -- the blotter's own ListBox
-# scrolling is "free" the same way the Coins-pane's j/k movement already is.
+# Bot-detail's own footer (Story 4.5 added s/esc; Story 4.7 adds left/right (h/l) for
+# the new blotter/PnL-sparkline regions' history range). No j/k (scroll) hint -- the
+# blotter's own ListBox scrolling is "free" the same way the Coins-pane's j/k movement
+# already is.
 _BOT_DETAIL_FOOTER_HINT_TEXT = (
-    "s start/stop  t range  o dashboard  v strategy  i incidents  esc back  :q quit"
+    "s start/stop  h/l range  o dashboard  v strategy  i incidents  esc back  :q quit"
 )
 
 # Help view's own footer -- nothing to do here but leave (:h/:help got you in).
@@ -162,7 +164,7 @@ BOTS PANE
 
 BOT DETAIL
   s          start/stop this bot (stop asks for confirmation)
-  t          cycle PnL/trades history range
+  h/l, left/right  step PnL/trades history range back/forward
   o          open dashboard bot page in browser
   v          view this bot's strategy source (read-only, scrollable)
   i          view this bot's incidents log: restarts, WS/data-stale spans
@@ -1362,11 +1364,17 @@ class BotTuiApp:
         sys.stdout.flush()
         self._footer_hint.set_text(f"dashboard (copied to clipboard): {url}")
 
-    def _cycle_bot_history_range(self) -> None:
+    def _bot_history_range_back(self) -> None:
+        self._set_bot_history_range(bots_pane.previous_range(self._bot_history_range))
+
+    def _bot_history_range_forward(self) -> None:
+        self._set_bot_history_range(bots_pane.next_range(self._bot_history_range))
+
+    def _set_bot_history_range(self, range_name: str) -> None:
         # Footer-echoes the new range and redraws immediately (Story 4.7, AC2) --
         # doesn't wait for the redraw loop's own next tick, same "keystroke handled
         # synchronously" idiom _on_filter_change already uses.
-        self._bot_history_range = bots_pane.next_range(self._bot_history_range)
+        self._bot_history_range = range_name
         self._footer_hint.set_text(f"range: {self._bot_history_range}")
         self._body.original_widget = self._build_body()
 
@@ -1516,8 +1524,10 @@ class BotTuiApp:
         # complexity threshold as more per-view keys accumulate.
         if key == "s":
             self._toggle_bot()
-        elif key == "t":
-            self._cycle_bot_history_range()
+        elif key in ("left", "h"):
+            self._bot_history_range_back()
+        elif key in ("right", "l"):
+            self._bot_history_range_forward()
         elif key == "o":
             self._open_dashboard_bot()
         elif key == "v":

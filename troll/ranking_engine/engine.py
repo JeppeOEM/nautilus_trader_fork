@@ -337,6 +337,26 @@ def _fast_metrics_for(iid: str) -> dict:
     }
 
 
+def _legacy_book_metrics_for(iid: str) -> dict:
+    """
+    metrics_store's historical ofi/microprice/spread columns (persisted every
+    DB_WRITE_INTERVAL_SECONDS by _slow_loop_task, plotted by dashboard.py's per-coin
+    history chart), sourced from the exact same live indicator state _fast_metrics_for
+    reads for rankings:live -- troll/CLAUDE.md SSOT-02: this process must never run
+    two independent stateful OFI/microprice trackers for the same instrument.
+    Replaces the old metrics_computer._book_metrics, a from-scratch Parquet replay (a
+    fresh OrderFlowImbalance/Microprice instance re-fed the last 60s of deltas on every
+    call) that duplicated, and slowly diverged from, this exact signal.
+
+    "ofi" maps to the live raw (unscored) ofi_5 -- the closest already-computed signal
+    to the old OrderFlowImbalance(window=5) top-of-book value; deliberately not the
+    z-scored ofi_10_z used for cross-sectional ranking, to avoid a scale discontinuity
+    in this historical chart.
+    """
+    fast = _fast_metrics_for(iid)
+    return {"ofi": fast["ofi_5"], "microprice": fast["microprice"], "spread": fast["spread"]}
+
+
 def _handle_control_message(message: dict) -> None:
     """Apply a ranking:control mode-switch request. Unrecognized modes are logged and
     ignored (AD-2's fail-closed spirit applied to a control message, not market data).
@@ -436,10 +456,21 @@ async def _slow_loop_task(catalog_path: str) -> None:
     directly on the main thread rather than inside asyncio.to_thread, avoiding a
     cross-thread read/mutate race against _redis_listener. Only the genuinely blocking
     I/O (metrics_store.write) is pushed to a worker thread.
+
+    Same reasoning applies to _legacy_book_metrics_for: it reads the live OFI/OBI
+    tracker dicts _ingest_snapshot_batch also mutates on this same main thread, so
+    every instrument's book-metrics dict is computed here, up front, and handed into
+    compute_all() as a plain (now-frozen) dict lookup -- never read live from inside
+    the ThreadPoolExecutor compute_all() runs in via asyncio.to_thread.
     """
     while True:
         try:
-            snapshots = await asyncio.to_thread(metrics_computer.compute_all, catalog_path)
+            book_metrics_by_iid = {iid: _legacy_book_metrics_for(iid) for iid in _LAST_SEEN}
+            snapshots = await asyncio.to_thread(
+                metrics_computer.compute_all,
+                catalog_path,
+                book_metrics_fn=lambda iid: book_metrics_by_iid.get(iid, {}),
+            )
             if snapshots:
                 _SLOW_METRICS.update({s["instrument_id"]: s for s in snapshots})
                 persisted = _merge_rank_into_snapshots(snapshots, _ranks_by_iid(), _VOLUME_24H)

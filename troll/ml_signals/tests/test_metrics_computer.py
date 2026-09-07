@@ -70,6 +70,35 @@ def test_book_metrics_resets_ofi_across_stale_gap(monkeypatch) -> None:
     assert result["microprice"] is not None  # microprice has no windowed history to corrupt
 
 
+def test_compute_snapshot_uses_book_metrics_fn_override_instead_of_book_metrics(
+    monkeypatch,
+) -> None:
+    """
+    SSOT-02: ranking_engine passes its own live-indicator-state read here instead of
+    letting compute_snapshot fall back to the from-Parquet _book_metrics -- verify the
+    override actually short-circuits _book_metrics rather than being ignored.
+    """
+
+    def _boom(*_args: object, **_kwargs: object) -> dict:
+        raise AssertionError("_book_metrics must not be called when book_metrics_fn is given")
+
+    monkeypatch.setattr(metrics_computer, "_book_metrics", _boom)
+    monkeypatch.setattr(
+        metrics_computer, "price_stats", lambda catalog, iid, start_ns: {"price": 1.0}
+    )
+
+    result = metrics_computer.compute_snapshot(
+        catalog=_FakeCatalog(),
+        instrument_id="BTC-USD-PERP.DYDX",
+        now_ns=10_000_000_000,
+        book_metrics_fn=lambda iid: {"ofi": 0.5, "microprice": 100.5, "spread": 1.0},
+    )
+
+    assert result["ofi"] == 0.5
+    assert result["microprice"] == 100.5
+    assert result["spread"] == 1.0
+
+
 if __name__ == "__main__":
     import pytest
 
