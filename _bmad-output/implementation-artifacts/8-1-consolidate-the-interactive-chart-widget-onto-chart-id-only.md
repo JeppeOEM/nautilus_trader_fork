@@ -4,7 +4,7 @@ baseline_commit: 55cf91b7685c9860aa8deccfa729a97351ea6df4
 
 # Story 8.1: Consolidate the interactive chart widget onto `/chart/{id}` only
 
-Status: review
+Status: done
 
 <!-- No epics.md entry existed for Epic 8 when stories 5.1/6.1/7.1 were created, but it does
      now (added 2026-09-06, then this story rewritten 2026-09-06 after the user pointed out
@@ -111,3 +111,18 @@ Claude Sonnet 5 (claude-sonnet-5)
 - Modified: `troll/ml_signals/dashboard.py`
 - Modified: `troll/ml_signals/tests/test_dashboard_chart.py`
 - Modified: `troll/ml_signals/tests/test_dashboard_chart_pan_js.py`
+
+## Senior Developer Review (AI)
+
+**Outcome:** Approve
+**Date:** 2026-09-07
+
+A whole-branch `/code-review` run (2026-09-06) covering this story's diff surfaced no
+correctness findings scoped to `_renderLineChart`/`_live_lines_json`/`_historical_lines_json`/
+click-to-diff — its 10 confirmed findings all landed in `live_paper/`, `dydx_collector/`,
+`ml_signals/metrics_computer.py`, and one `crates/` FORK-01 violation (see commit
+`e91174cab5`), none in this story's own files. Re-verified this session:
+`ml_signals/tests/test_dashboard_chart.py` + `test_dashboard_chart_pan_js.py` (53 passed) and
+the full `ml_signals` suite (156/157 passed, the 1 failure is the pre-existing
+`test_ofi_strategy.py` `BacktestEngine`-construction flakiness this story's own Debug Log
+already documents as unrelated). No action items.

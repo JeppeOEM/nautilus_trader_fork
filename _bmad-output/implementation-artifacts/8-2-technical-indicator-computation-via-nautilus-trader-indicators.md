@@ -4,7 +4,7 @@ baseline_commit: 1809690d2d
 
 # Story 8.2: Technical indicator computation via `nautilus_trader.indicators`
 
-Status: review
+Status: done
 
 <!-- Depends on nothing per epics.md — backend-only, additive. Story 8.1's dashboard.py changes
      landed in commit e216c414c8 ("gg") shortly after this story was drafted (status still
@@ -170,3 +170,21 @@ Claude Sonnet 5 (claude-sonnet-5)
 - Modified: `troll/ml_signals/dashboard.py`
 - Modified: `troll/ml_signals/tests/test_candles.py`
 - Modified: `troll/ml_signals/tests/test_dashboard_chart.py`
+
+## Senior Developer Review (AI)
+
+**Outcome:** Approve
+**Date:** 2026-09-07
+
+A whole-branch `/code-review` run (2026-09-06) flagged one finding in this story's own scope:
+`_indicators_json`/`coin_indicators_handler` let a malformed `spec=` query param (missing `=`,
+non-numeric param value, an out-of-range param a specific indicator's replay rejects) raise an
+uncaught exception → 500, instead of the 400 contract the "unknown indicator name" path already
+had. Fixed in commit `e91174cab5`: `_indicators_json` now wraps the per-spec-entry loop in a
+broad `except Exception` (deliberately broad — a system boundary per troll/CLAUDE.md, no fixed
+set of exception types across current/future indicators) and returns
+`{"error": f"Invalid indicator spec: {exc}"}, 400`, logged at INFO. Re-verified this session:
+`ml_signals/tests/test_chart_indicators.py` + `test_dashboard_chart.py` + `test_candles.py` +
+`test_footprint.py` (53 passed) and the full `ml_signals` suite (156/157 passed, 1 pre-existing
+unrelated `BacktestEngine`-construction failure, documented in this story's own Debug Log). No
+further action items.
