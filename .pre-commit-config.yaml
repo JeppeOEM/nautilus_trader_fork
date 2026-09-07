@@ -159,6 +159,14 @@ repos:
           )$
         pass_filenames: false
 
+      - id: check-docker-port-binding
+        name: check docker port binding
+        description: Blocks docker-compose ports published to 0.0.0.0 instead of localhost
+        entry: bash .pre-commit-hooks/check_docker_port_binding.sh
+        language: system
+        files: "docker-compose.*\\.ya?ml$|^compose.*\\.ya?ml$"
+        pass_filenames: false
+
       - id: check-copyright-year
         name: check copyright year
         description: Ensures copyright headers have current year

@@ -22,6 +22,12 @@ See `troll/live_paper/node.py`'s module docstring for the full rationale.
 
 ---
 
+## Network Security
+
+- **SEC-01** — **Every Docker port is localhost-only. No exceptions, ever.** `ports:` entries must be `"127.0.0.1:HOST:CONTAINER"` — never a bare `"HOST:CONTAINER"`/`"PORT"` (that publishes to `0.0.0.0`). If a service needs no host access at all, use `expose:` instead of `ports:`, or nothing. Remote access is via SSH tunnel (`ssh -L`) only, never a publicly reachable port — including reverse proxies. **Why:** Docker inserts its own `iptables` `ACCEPT` rules ahead of ufw's chain, so a bare port mapping is reachable from the public internet even with `ufw deny <port>`/`ufw default deny incoming` active — ufw never sees the connection, since Docker never routes it through ufw's INPUT chain. Enforced unconditionally by the `check-docker-port-binding` pre-commit hook (`.pre-commit-hooks/check_docker_port_binding.sh`) — no escape-comment override. `troll/docker-compose.yml`'s services already follow this: `redis`/`dozzle` bind `127.0.0.1:PORT:PORT`; `collector`/`dashboard`/`ranking_engine`/`bot_tui`/`live-paper` use `network_mode: host` with the app itself binding `127.0.0.1` (e.g. `dashboard.py`'s `web.run_app(..., host="127.0.0.1", ...)`) instead of a `ports:` mapping.
+
+---
+
 ## Data Integrity
 
 - **DATA-01** — **Correct data is the #1 priority. Never display stale or fabricated values as live market data.** If data is genuinely unavailable (e.g., during WS reconnect recovery when the Rust client re-subscribes instruments at 2/sec), the gap must be flagged visually rather than papered over with a flatline. **Implementation:** `collector._second_loop` uses `_STALE_BOOK_NS = 5s` to skip snapshot emission when no `OrderBookDeltas` have arrived for an instrument; `dashboard._coin_chart_json` inserts `None` at timestamp gaps > `_CHART_GAP_THRESHOLD_MS = 2.5s` so Plotly renders an honest break instead of a misleading horizontal line. When adding new data sources or display paths, apply the same principle: skip or flag, never silently perpetuate stale state.
