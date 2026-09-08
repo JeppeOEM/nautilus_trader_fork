@@ -170,11 +170,13 @@ td:first-child, th:first-child { text-align: left; }
 # _historical_lines_json, Story 8.1) -- a different data source than Candles/Ticks
 # (order-book bid/ask/mid/micro/price snapshots, not trade-tick OHLC/prints).
 # Story 8.4 (indicator picker, Candles-mode only) additionally needs the embedder to
-# declare #ind-picker/#ind-picker-list/#ind-picker-note/#ind-panel divs and call
-# _fetchIndicatorCatalog() once in its init script; _activeIndicators/_indicatorCatalog/
-# _lastCandles/_syncingXRange are declared inside this module, same pattern as _diffA/
-# _diffB above. Backed by Story 8.2's /data/indicators/catalog and
-# /data/coin/{id}/indicators verbatim (SSOT-03) -- no new Python endpoint.
+# declare #ind-picker/#ind-picker-list/#ind-picker-note/#ind-table/#ind-panel divs and
+# call _fetchIndicatorCatalog() once in its init script; _activeIndicators/
+# _indicatorCatalog/_indSeq/_lastCandles/_syncingXRange are declared inside this module,
+# same pattern as _diffA/_diffB above. Backed by Story 8.2's /data/indicators/catalog and
+# /data/coin/{id}/indicators verbatim (SSOT-03) -- no new Python endpoint. Each add-list
+# click creates a fresh {id,name,params} instance so the same indicator can appear more
+# than once with different settings; #ind-table renders one editable row per instance.
 _LIVE_CHART_JS = """
 function _fmtDTL(d){var p=function(n){return n<10?'0'+n:String(n);};return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+'T'+p(d.getHours())+':'+p(d.getMinutes());}
 function setCoinMode(m){
@@ -363,12 +365,16 @@ function _wireChartRelayout(){
     liveEl.on('plotly_relayout',_onChartRelayout);
   }
 }
-// -- Indicator picker (Story 8.4): catalog-driven multi-select, overlay traces added
-// directly to live-chart's candlestick trace array, a dedicated oscillator panel synced
-// to live-chart's x-axis. Reuses Story 8.2's /data/indicators/catalog and
-// /data/coin/{id}/indicators verbatim (SSOT-03) -- no new Python endpoint this story.
-var _activeIndicators=[];  // [{name,params}]
+// -- Indicator picker (Story 8.4, extended for multi-instance): catalog-driven add-list,
+// each added instance gets its own id so the same indicator can be added more than once
+// with different settings; per-instance settings render as an editable table below the
+// chart. Overlay traces are added directly to live-chart's candlestick trace array, a
+// dedicated oscillator panel synced to live-chart's x-axis. Reuses Story 8.2's
+// /data/indicators/catalog and /data/coin/{id}/indicators verbatim (SSOT-03) -- no new
+// Python endpoint for this.
+var _activeIndicators=[];  // [{id,name,params}]
 var _indicatorCatalog=null;  // {name: {params:{...defaults}, panel:'overlay'|'oscillator'}}
+var _indSeq=0;
 var _lastCandles=null;  // candles most recently rendered on live-chart (candles mode only)
 var _syncingXRange=false;
 function _fetchIndicatorCatalog(){
@@ -385,14 +391,17 @@ function _toggleIndicatorPicker(){
 function _escAttr(s){
   return String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
 }
-function _paramInputHTML(name,key,val){
-  var id='ip_'+name+'_'+key;
+function _paramInputHTML(id,key,val){
+  var elId='ip_'+id+'_'+key;
   if(typeof val==='boolean')
-    return '<label style="margin-right:8px"><input type="checkbox" id="'+id+'" '+(val?'checked':'')
-      +' onchange="_updateIndicatorParam(\\''+name+'\\',\\''+key+'\\',this.checked)"> '+key+'</label>';
-  return '<label style="margin-right:8px">'+key+' <input type="'+(typeof val==='number'?'number':'text')+'" id="'+id+'" value="'+_escAttr(val)
-    +'" style="width:56px" onchange="_updateIndicatorParam(\\''+name+'\\',\\''+key+'\\',this.value)"></label>';
+    return '<label style="margin-right:8px"><input type="checkbox" id="'+elId+'" '+(val?'checked':'')
+      +' onchange="_updateIndicatorParam('+id+',\\''+key+'\\',this.checked)"> '+key+'</label>';
+  return '<label style="margin-right:8px">'+key+' <input type="'+(typeof val==='number'?'number':'text')+'" id="'+elId+'" value="'+_escAttr(val)
+    +'" style="width:56px" onchange="_updateIndicatorParam('+id+',\\''+key+'\\',this.value)"></label>';
 }
+// Add-only list -- unlike a checkbox toggle, clicking an entry always adds a fresh
+// instance so the same indicator can be added more than once (each gets its own id and
+// default params, edited afterwards in the settings table).
 function _renderIndicatorPicker(){
   var box=document.getElementById('ind-picker-list');
   if(!box||!_indicatorCatalog)return;
@@ -401,32 +410,44 @@ function _renderIndicatorPicker(){
   var names=Object.keys(_indicatorCatalog).sort().filter(function(n){return !q||n.toLowerCase().indexOf(q)!==-1;});
   box.innerHTML=names.map(function(name){
     var spec=_indicatorCatalog[name];
-    var active=_activeIndicators.filter(function(a){return a.name===name;})[0];
-    var row='<div style="padding:2px 0"><label><input type="checkbox" '+(active?'checked':'')
-      +' onchange="_toggleIndicator(\\''+name+'\\',this.checked)"> <b>'+name+'</b> <span style="color:#8b949e">('+spec.panel+')</span></label>';
-    if(active){
-      row+='<div style="padding-left:20px;margin-top:2px">'
-        +Object.keys(spec.params).map(function(k){return _paramInputHTML(name,k,active.params[k]);}).join('')
-        +'</div>';
-    }
-    return row+'</div>';
+    return '<div style="padding:2px 0"><a href="#" onclick="_addIndicator(\\''+name+'\\');return false" style="color:#58a6ff;text-decoration:none">+ <b>'+name+'</b></a> <span style="color:#8b949e">('+spec.panel+')</span></div>';
   }).join('');
 }
-function _toggleIndicator(name,checked){
-  if(checked){
-    var spec=_indicatorCatalog[name],params={};
-    for(var k in spec.params)params[k]=spec.params[k];
-    _activeIndicators.push({name:name,params:params});
-  }else{
-    _activeIndicators=_activeIndicators.filter(function(a){return a.name!==name;});
-  }
-  _renderIndicatorPicker();
+function _addIndicator(name){
+  var spec=_indicatorCatalog&&_indicatorCatalog[name];
+  if(!spec)return;
+  var params={};
+  for(var k in spec.params)params[k]=spec.params[k];
+  _activeIndicators.push({id:++_indSeq,name:name,params:params});
+  _renderIndicatorTable();
   _refreshActiveIndicators();
 }
-function _updateIndicatorParam(name,key,rawVal){
-  var entry=_activeIndicators.filter(function(a){return a.name===name;})[0];
+function _removeIndicator(id){
+  _activeIndicators=_activeIndicators.filter(function(a){return a.id!==id;});
+  _renderIndicatorTable();
+  _refreshActiveIndicators();
+}
+function _indicatorLabel(a){
+  var vals=Object.keys(a.params).map(function(k){return a.params[k];});
+  return vals.length?a.name+'('+vals.join(',')+')':a.name;
+}
+function _renderIndicatorTable(){
+  var box=document.getElementById('ind-table');
+  if(!box)return;
+  if(!_activeIndicators.length){box.innerHTML='';return;}
+  var rows=_activeIndicators.map(function(a){
+    var spec=_indicatorCatalog[a.name];
+    var params=Object.keys(spec.params).map(function(k){return _paramInputHTML(a.id,k,a.params[k]);}).join(' ');
+    return '<tr><td style="padding:3px 6px;border-bottom:1px solid #21262d;white-space:nowrap"><b>'+a.name+'</b> <span style="color:#8b949e">('+spec.panel+')</span></td>'
+      +'<td style="padding:3px 6px;border-bottom:1px solid #21262d">'+params+'</td>'
+      +'<td style="padding:3px 6px;border-bottom:1px solid #21262d"><button onclick="_removeIndicator('+a.id+')" style="background:#21262d;color:#f85149;border:1px solid #444;cursor:pointer;padding:1px 6px">✕</button></td></tr>';
+  }).join('');
+  box.innerHTML='<table style="width:100%;border-collapse:collapse;font-size:12px">'+rows+'</table>';
+}
+function _updateIndicatorParam(id,key,rawVal){
+  var entry=_activeIndicators.filter(function(a){return a.id===id;})[0];
   if(!entry)return;
-  var defaultVal=_indicatorCatalog[name].params[key];
+  var defaultVal=_indicatorCatalog[entry.name].params[key];
   entry.params[key]=typeof defaultVal==='boolean'?!!rawVal:typeof defaultVal==='number'?Number(rawVal):rawVal;
   _refreshActiveIndicators();
 }
@@ -436,6 +457,11 @@ function _updateIndicatorPickerEnabled(){
   var enabled=_coinMode==='candles';
   var inputs=box.getElementsByTagName('input');
   for(var i=0;i<inputs.length;i++)inputs[i].disabled=!enabled;
+  var tbl=document.getElementById('ind-table');
+  if(tbl){
+    var tInputs=tbl.getElementsByTagName('input');
+    for(var j=0;j<tInputs.length;j++)tInputs[j].disabled=!enabled;
+  }
   if(note)note.style.display=enabled?'none':'block';
   if(!enabled)_clearIndicatorPanel();
 }
@@ -464,13 +490,33 @@ function _fetchIndicatorSeriesForCurrentWindow(){
     });
   });
 }
-// Response keys are the backend's own _indicator_id(name, coerced_params) -- rather than
-// re-deriving that exact string client-side (bool/float stringification could drift from
-// Python's str()), match by name prefix instead: no two catalog entries share a
-// name-is-a-prefix-of-another relationship.
+// Response keys are the backend's own _indicator_id(name, coerced_params). Two instances
+// of the same indicator (different settings) can be active at once, so a bare name-prefix
+// match is ambiguous -- instead parse each candidate key's own param string and compare
+// typed values against this instance's params (Number()/lower-cased-string, not a
+// straight string equals) so Python's str() formatting of a coerced value (e.g. "20.0"
+// for a float) never has to match JS's own stringification byte-for-byte.
+function _paramsMatch(paramStr,params){
+  var keys=Object.keys(params);
+  if(!paramStr)return keys.length===0;
+  var pairs=paramStr.split(',');
+  if(pairs.length!==keys.length)return false;
+  return pairs.every(function(pair){
+    var eq=pair.indexOf('='),k=pair.slice(0,eq),v=pair.slice(eq+1);
+    if(!(k in params))return false;
+    var want=params[k];
+    if(typeof want==='number')return Number(v)===want;
+    if(typeof want==='boolean')return v.toLowerCase()===String(want);
+    return v===String(want);
+  });
+}
 function _seriesForIndicator(data,a){
+  var keys=Object.keys(a.params);
+  if(!keys.length)return data[a.name]||null;
   var prefix=a.name+'_';
-  for(var key in data)if(key===a.name||key.indexOf(prefix)===0)return data[key];
+  for(var key in data){
+    if(key.indexOf(prefix)===0&&_paramsMatch(key.slice(prefix.length),a.params))return data[key];
+  }
   return null;
 }
 function _clearIndicatorPanel(){
@@ -516,7 +562,7 @@ function _renderCandleTraces(indicatorData){
       Object.keys(series).forEach(function(attr){
         traces.push({type:'scattergl',mode:'lines',x:x,
           y:series[attr].map(function(p){return p.value;}),
-          name:a.name+(Object.keys(series).length>1?'.'+attr:''),line:{width:1}});
+          name:_indicatorLabel(a)+(Object.keys(series).length>1?'.'+attr:''),line:{width:1}});
       });
     });
   }
@@ -553,7 +599,7 @@ function _renderOscillatorPanel(data){
     Object.keys(series).forEach(function(attr){
       traces.push({type:'scattergl',mode:'lines',x:x,yaxis:axisKey,
         y:series[attr].map(function(p){return p.value;}),
-        name:a.name+'.'+attr,line:{width:1}});
+        name:_indicatorLabel(a)+'.'+attr,line:{width:1}});
     });
   });
   var panel=document.getElementById('ind-panel');
@@ -1109,6 +1155,7 @@ def _render_chart_page(symbol: str, start_ms: int, end_ms: int) -> str:
         "</div>"
         "<div id='status' style='color:#8b949e;font-size:11px;margin:4px 0'></div>"
         "<div id='live-chart' style='height:300px;margin-bottom:8px'></div>"
+        "<div id='ind-table' style='margin-bottom:8px'></div>"
         "<div id='diff-box' style='min-height:22px;padding:5px 2px;border-top:1px solid #21262d;font-size:12px;font-family:monospace'></div>"
         "<div id='ind-panel' style='height:0px;overflow:hidden;margin-bottom:8px'></div>"
     )
@@ -1623,7 +1670,11 @@ async def coin_indicators_handler(request: web.Request) -> web.Response:
     else:
         candles_json = _live_candles_json(symbol, bar_seconds)
     candles = json.loads(candles_json)["candles"]
-    body, status = _indicators_json(candles, spec_str)
+    # replay_indicator() is CPU-bound and runs once per active indicator instance --
+    # off the event loop, or a request with several indicators active stalls every other
+    # concurrent request this single-process aiohttp server is serving (other tabs' 1s
+    # poll loops included), not just this one.
+    body, status = await asyncio.to_thread(_indicators_json, candles, spec_str)
     return web.Response(text=body, content_type="application/json", status=status)
 
 

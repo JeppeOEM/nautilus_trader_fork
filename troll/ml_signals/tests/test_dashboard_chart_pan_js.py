@@ -160,6 +160,17 @@ var obvSeries=_seriesForIndicator(data,{name:"OnBalanceVolume",params:{}});
 assert.deepStrictEqual(obvSeries,{value:[4,5,6]},"bare-name match must find the OBV series");
 var missing=_seriesForIndicator(data,{name:"RelativeStrengthIndex",params:{}});
 assert.strictEqual(missing,null,"an indicator with no matching response key must return null, not throw");
+
+// -- _seriesForIndicator: two instances of the same indicator with different settings must
+// each resolve to their own series, not both collapse onto whichever key comes first.
+var multiData={
+  "SimpleMovingAverage_period=10":{value:[1,2,3]},
+  "SimpleMovingAverage_period=20":{value:[9,9,9]}
+};
+var fast=_seriesForIndicator(multiData,{name:"SimpleMovingAverage",params:{period:10}});
+var slow=_seriesForIndicator(multiData,{name:"SimpleMovingAverage",params:{period:20}});
+assert.deepStrictEqual(fast,{value:[1,2,3]},"period=10 instance must not cross-match period=20's series");
+assert.deepStrictEqual(slow,{value:[9,9,9]},"period=20 instance must not cross-match period=10's series");
 console.error("ASSERTIONS_OK");
 """
 
