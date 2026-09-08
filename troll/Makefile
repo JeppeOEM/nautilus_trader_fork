@@ -3,7 +3,7 @@ TROLL_DIR  := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 COMPOSE    := docker compose -f $(TROLL_DIR)docker-compose.yml
 BASE_IMAGE := nautilus-trader-base:1.229.0
 
-.PHONY: build-base up redeploy up-live-paper build-insecure test test-live-paper down logs logs-dash web enable-boot enable-firewall harden-ssh remote-tui remote-web remote-web-stop
+.PHONY: build-base up redeploy up-live-paper build-insecure test test-live-paper down logs logs-dash web enable-boot enable-firewall harden-ssh remote-tui remote-web remote-web-stop remote-db remote-db-stop
 
 REMOTE_HOST := nifelheim
 REMOTE_DIR  := ~/nautilus_trader_fork/troll
@@ -134,6 +134,19 @@ remote-web:
 ## Kill the SSH tunnel opened by `make remote-web`
 remote-web-stop:
 	pkill -f "ssh -f -N -L 8765:localhost:8765 $(REMOTE_HOST)" || true
+
+## Tunnel the remote Redis instance (port 6379, SEC-01: localhost-only, no public
+## port) to localhost so a DB GUI (RedisInsight, TablePlus, Another Redis Desktop
+## Manager, etc.) on your machine can connect to localhost:6379 as if it were local.
+## Same -f -N -L pattern as `make remote-web` -- backgrounds only once the tunnel is
+## up. Stop it with `make remote-db-stop`.
+remote-db:
+	ssh -f -N -L 6379:localhost:6379 $(REMOTE_HOST)
+	@echo "Redis reachable at localhost:6379"
+
+## Kill the SSH tunnel opened by `make remote-db`
+remote-db-stop:
+	pkill -f "ssh -f -N -L 6379:localhost:6379 $(REMOTE_HOST)" || true
 
 ## One-time VPS setup: enable the Docker daemon on boot so `restart: always`
 ## containers actually come back after a host reboot (Docker's own auto-start
