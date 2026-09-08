@@ -34,7 +34,7 @@ from nautilus_trader.indicators import MovingAverageType
 from nautilus_trader.model.enums import PriceType
 
 
-Panel = Literal["overlay", "oscillator"]
+Panel = Literal["overlay", "oscillator", "histogram"]
 
 
 @dataclass

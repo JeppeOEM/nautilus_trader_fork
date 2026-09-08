@@ -11,7 +11,7 @@ inputDocuments:
 
 ## Overview
 
-This document provides the complete epic and story breakdown for nautilus_trader_fork (the `troll/` dYdX Signal Research & Trading Platform), decomposing the requirements from the PRD and Architecture spine into implementable stories. Epics 1–3 (below) cover the original PRD/architecture scope (FR1–FR15) and were fully implemented as of 2026-07-17. This document was reopened on 2026-07-24 to extend coverage for the PRD's volatility Ranking Mode (FR-16) and new Bot Monitoring TUI feature (FR-17–FR-25), backed by a finalized UX design contract (`DESIGN.md`/`EXPERIENCE.md`) — the project's first UX-driven surface. Reopened again on 2026-09-06 to add Epic 8 (FR28–FR30): TradingView-style multi-chart navigation and selectable technical indicators on the web dashboard's coin chart. Numbered Epic 8 (not 5) because epics 5–7 were filed directly as standalone stories bypassing epics.md ceremony (see `sprint-status.yaml`) — Epic 8 continues that same global epic-number sequence to avoid collision with their story-file paths (`5-1-*`, `6-1-*`, `7-1-*`). No PRD/Architecture update precedes this addition (same precedent as FR27); PM should fold FR28–FR30 into the PRD proper once shipped. (FR31, a combined candlestick + bid/ask overlay, was drafted alongside these but the story implementing it — 8.5 — was dropped before dev started; FR31 removed with it.)
+This document provides the complete epic and story breakdown for nautilus_trader_fork (the `troll/` dYdX Signal Research & Trading Platform), decomposing the requirements from the PRD and Architecture spine into implementable stories. Epics 1–3 (below) cover the original PRD/architecture scope (FR1–FR15) and were fully implemented as of 2026-07-17. This document was reopened on 2026-07-24 to extend coverage for the PRD's volatility Ranking Mode (FR-16) and new Bot Monitoring TUI feature (FR-17–FR-25), backed by a finalized UX design contract (`DESIGN.md`/`EXPERIENCE.md`) — the project's first UX-driven surface. Reopened again on 2026-09-06 to add Epic 8 (FR28–FR30): TradingView-style multi-chart navigation and selectable technical indicators on the web dashboard's coin chart. Numbered Epic 8 (not 5) because epics 5–7 were filed directly as standalone stories bypassing epics.md ceremony (see `sprint-status.yaml`) — Epic 8 continues that same global epic-number sequence to avoid collision with their story-file paths (`5-1-*`, `6-1-*`, `7-1-*`). No PRD/Architecture update precedes this addition (same precedent as FR27); PM should fold FR28–FR30 into the PRD proper once shipped. (FR31, a combined candlestick + bid/ask overlay, was drafted alongside these but the story implementing it — 8.5 — was dropped before dev started; FR31 removed with it — its number is reused below.) Reopened again on 2026-09-08 to add Epic 10 (FR31–FR33): a second, non-Nautilus indicator category on the chart page's picker (Story 8.4), migrating three of the chart page's fixed microstructure-panel rows (OFI, Cancel Pressure, CVD) into it, plus persisted per-instrument indicator configuration. Numbered 10 (not 9) for the same reason Epic 8 skipped 5–7: Epic 9 is itself a standalone bypass-epic bug-fix story (`9-1-fix-oscillator-panel-shared-y-axis-scaling`, see `sprint-status.yaml`), not a real epics.md entry — Epic 10 continues the sequence past its file-path prefix (`9-1-*`).
 
 ## Requirements Inventory
 
@@ -130,6 +130,9 @@ UX-DR1–UX-DR9: Epic 4 - all Bot Monitoring TUI UX design requirements
 FR28: Epic 8 - Per-chart settings/navigation panes
 FR29: Epic 8 - TradingView-style pan/zoom parity across all coin-detail charts
 FR30: Epic 8 - Selectable technical indicators from nautilus_trader.indicators
+FR31: Epic 10 - Custom (non-Nautilus) indicator category on the chart page's indicator picker
+FR32: Epic 10 - CVD, Cancel Pressure, and OFI available as picker-addable custom indicators, replacing their fixed microstructure-panel rows
+FR33: Epic 10 - Persisted per-instrument chart indicator configuration, committable to source control
 
 ## Epic List
 
@@ -152,6 +155,10 @@ Builder SSHes into the box, opens a keyboard-only urwid terminal UI, and at a gl
 ### Epic 8: TradingView-Style Multi-Chart Navigation & Indicator Overlays
 Builder opens a coin's chart on the web dashboard and it behaves like a professional charting site: every chart (not just the price chart) pans on drag and zooms on scroll and stays x-axis-linked to the candlestick chart, each chart carries its own settings toolbar instead of one shared bar, the candlestick chart can show any indicator from `nautilus_trader.indicators`' own built-in library (no third-party TA dependency), and Candles mode can overlay live bid/ask lines on top of the OHLC candlesticks. Extends Story 7.1 (drag-to-pan/scroll-zoom, Lines/Candles/Ticks modes) rather than replacing it — stays on Plotly, no new charting library. Numbered 8 (not 5) to avoid colliding with the standalone bypass-epics 5–7 already tracked in `sprint-status.yaml`.
 **FRs covered:** FR28, FR29, FR30
+
+### Epic 10: Custom Chart Indicators & Persisted Configuration
+Builder adds dYdX-specific microstructure signals — CVD, Cancel Pressure, OFI — to the chart page's indicator picker (Story 8.4) as a second, clearly-separated category alongside `nautilus_trader.indicators`' native library, since none of the three is derivable from OHLCV candles alone or exists anywhere in `nautilus_trader` itself. Each one already has a working implementation on the chart page's fixed 7-row microstructure panel (`ml_signals/chart_data.py`) or in `ml_signals/book_features.py` — this epic re-exposes that existing math through the picker (never reimplementing it) and retires the corresponding fixed row once its picker equivalent lands, so the same signal is never shown in two places at once. Closes with persisting a coin's active indicator selection to a source-control-committable file, so a chart's configuration survives a page reload/redeploy instead of resetting to empty every time. Numbered 10 (not 9) because Epic 9 is itself a standalone bypass-epic bug-fix story, not a real epics.md entry (see `sprint-status.yaml`) — Epic 10 continues the sequence past its file-path prefix.
+**FRs covered:** FR31, FR32, FR33
 
 ## Epic 1: Trustworthy Coin Ranking & Watchlist
 
@@ -829,4 +836,152 @@ So that I can inspect a coin with the same indicator toolkit a professional char
 **Given** `cd troll && python -m pytest ml_signals/tests/test_dashboard_chart.py -q`
 **When** it runs after this story
 **Then** it passes, with a new test asserting the indicator-fetch JS helper builds the correct `spec=` query string for a given active-indicator selection (JS verified via the same `node --check` + stubbed-harness method used in Story 7.1, since no browser is available in this environment — flag for manual in-browser confirmation before considering this story fully verified, same caveat 7.1 documented)
+
+## Epic 10: Custom Chart Indicators & Persisted Configuration
+
+Story 8.2's `chart_indicators.py` is explicitly scoped as "dispatch/metadata over `nautilus_trader.indicators` — no indicator math of its own" (`ml_signals/chart_indicators.py:16`) — every one of its ~30 catalog entries is fed purely from OHLCV candle fields (`o`/`h`/`l`/`c`/`v`). CVD, Cancel Pressure, and OFI cannot live there: none is a `nautilus_trader.indicators` class, and none is computable from OHLCV alone — all three need order-book-level or trade-level data (buy/sell volume split, book deltas) that a plain candle doesn't carry. All three already exist and already work, today, as fixed rows in `/chart/{id}`'s static 7-row `make_subplots` microstructure figure (`_render_chart_page`, `dashboard.py:1067-1076`: row 1 "OFI", row 5 "Cancel pressure", row 6 "5-min cumulative delta"), computed by `ml_signals/chart_data.py`'s per-event replay of raw catalog data (`OrderBookDelta`/`TradeTick`) driving `ml_signals/indicators.py`'s `OrderFlowImbalance` and `ml_signals/book_features.py`'s `CancellationTracker`. This epic does not reimplement any of the three — it re-exposes each one's existing computation through a new, second indicator catalog (alongside Story 8.2's native one), then retires the corresponding fixed row so the same signal is never shown in two places on the same page at once. Closes with persisting a coin's active indicator selection to a plain, source-control-committable file (mirroring `dydx_collector/config.py`'s `tomllib`/`tomli_w` load/save pattern, `tomli_w` already a pinned dependency per `troll-requirements.txt:9`), so a chart's configuration survives a page reload or a container redeploy instead of resetting to empty every time.
+
+**One open question this epic's stories flag but do not silently resolve on their own:** CVD already has *two* independent existing implementations — `ranking_engine/engine.py:330`'s snapshot-based `cvd` (published to `rankings:live`, the ranking table/bot_tui's SSOT-02-owned value) and `chart_data.py:68-86`'s trade-tick-based `cum_delta` (chart-page-only, a 300-second rolling sum, not a true running-cumulative total). Story 10.2 does not silently pick one — it reuses `ml_signals/indicators.py`'s `trade_aggregates()`/`volume_delta()` SSOT-01 stateless helpers as the shared math primitive so a *third* independent implementation is not created, and calls out the ranking-table/chart-page distinction explicitly in its own AC. (Cancel Pressure's fixed row is also removed once its picker equivalent lands, same one-signal-one-place principle — confirmed by the user 2026-09-08, no longer an open question.)
+
+### Story 10.1: Custom-indicator catalog, category-tagged picker, and a histogram panel type
+
+Foundational — Stories 10.2/10.3/10.4 each register one indicator into the catalog this story creates; none of them can start before this one lands. Depends on Story 8.2 (the native catalog/endpoint contract this story runs alongside) and Story 8.4 (the picker UI this story extends).
+
+As a user of the chart page's indicator picker,
+I want native `nautilus_trader` indicators and dYdX-specific custom indicators presented as two clearly labeled groups, with a histogram rendering option for indicators that aren't a line,
+So that I can tell at a glance which indicators come from the standard library versus this project's own signal work, and so a signal like Cancel Pressure (which isn't naturally a line) renders in a way that actually reads as its own metric.
+
+**Acceptance Criteria:**
+
+**Given** a new `ml_signals/custom_indicators.py` module (mirrors `chart_indicators.py`'s shape — `IndicatorSpec`-equivalent dataclass, a catalog dict, `catalog_json()`, a replay function — but is explicitly for indicators that are not `nautilus_trader.indicators` classes and are not fed from OHLCV candle fields alone)
+**When** this story is implemented
+**Then** it defines its own spec dataclass (e.g. `CustomIndicatorSpec`) carrying: a name, JSON-safe default params, a panel classification, and a replay callable whose signature accepts whatever raw window data it needs (candles plus one or more of: the window's `DydxSecondSnapshot` rows, `TradeTick` rows, or `OrderBookDelta` rows — not just the candle list `chart_indicators.replay_indicator` receives) and returns `dict[str, list[float | None]]` aligned 1:1 with the candle list, exactly matching Story 8.2's existing output contract so nothing downstream of the response needs to know which catalog an indicator came from
+
+**Given** the `Panel` type currently defined as `Literal["overlay", "oscillator"]` (`chart_indicators.py:37`)
+**When** this story is implemented
+**Then** a third value, `"histogram"`, is added (in whichever module now owns the shared `Panel` type — extracting it to a small shared location both catalogs import, rather than each catalog defining its own copy) — an indicator classified `"histogram"` renders as Plotly `type:'bar'` traces instead of `type:'scattergl'` lines, sharing the oscillator panel's existing per-instance-axis-scaling machinery from Story 9.1 (`_oscillatorOverlayAxis`, `dashboard.py:583-585`) rather than a fourth new panel — a histogram trace still needs its own scale when it coexists with line-based oscillators, for the exact reason Story 9.1 gave every oscillator instance its own axis
+
+**Given** `GET /data/indicators/catalog` (`indicators_catalog_handler`, `dashboard.py:1681-1682`) currently returns only `chart_indicators.catalog_json()`'s output
+**When** this story is implemented
+**Then** the endpoint merges both catalogs into one JSON object, and every entry (native and custom alike) gains a `category` field (`"native"` or `"custom"`) alongside its existing `params`/`panel` fields — this is the single source Story 10.1's picker UI reads to group entries, so the JS never hardcodes which names are custom vs native
+
+**Given** `_indicators_json`/`coin_indicators_handler` (`dashboard.py:1630-1656`, `1659-1678`), which today only ever calls `chart_indicators.replay_indicator`
+**When** a requested spec entry's name is registered in the custom catalog instead of the native one
+**Then** the handler dispatches it to the custom module's replay function instead, fetching whatever extra raw window data that indicator's spec declares it needs (second-snapshots/trade-ticks/book-deltas) via the same catalog-query patterns already used elsewhere in this file (`dashboard.py:1338-1348` for `DydxSecondSnapshot`, `dashboard.py:1218`/`chart_data.py:64` for `TradeTick`, `chart_data.py:62` for `OrderBookDelta`) — a name present in neither catalog still returns the existing 400 (`dashboard.py`'s "Unknown indicator" path, unchanged)
+
+**Given** `_renderIndicatorPicker`'s add-list (`dashboard.py:405-414`), currently one flat alphabetical list
+**When** this story is implemented
+**Then** the list renders as two labeled groups, "Nautilus Indicators" and "Custom Indicators", populated by filtering the merged catalog response on its new `category` field — the existing search box (`#ind-picker-search`) filters across both groups, not just one
+
+**Given** `cd troll && python -m pytest ml_signals/tests/test_dashboard_chart.py ml_signals/tests/test_chart_indicators.py -q`
+**When** it runs after this story
+**Then** it passes, plus a new `ml_signals/tests/test_custom_indicators.py` (TEST-01: this module does financial-calculation dispatch) asserting the merged catalog response carries the correct `category` tag for at least one native and one placeholder custom entry, and a JS-harness test (same Node-stub pattern as Story 8.4/9.1's tests in `test_dashboard_chart_pan_js.py`) confirming a `"histogram"`-classified indicator's trace has `type:'bar'`, not `'scattergl'`
+
+### Story 10.2: CVD as a custom indicator, retiring the fixed "5-min cumulative delta" row
+
+Depends on Story 10.1 (the custom catalog this registers into).
+
+As a user of the chart page,
+I want Cumulative Volume Delta available from the indicator picker instead of a permanently-shown row,
+So that I only see CVD when I actually want it, alongside whatever else I've picked, at whatever timeframe I'm viewing.
+
+**Acceptance Criteria:**
+
+**Given** `ml_signals/chart_data.py:40,68-86`'s existing `cum_delta` computation (a 300-second rolling sum of signed trade size from replayed `TradeTick`s) and `ml_signals/indicators.py`'s SSOT-01 stateless helpers `trade_aggregates()`/`volume_delta()` (`indicators.py:454-467`)
+**When** Story 10.1's custom catalog registers a `"CumulativeVolumeDelta"` entry
+**Then** its replay function computes a true per-candle running-cumulative series — bucket the window's buy/sell volume split into the candle time grid (same bucketing pattern `ml_signals/candles.py:47-50` already uses to build OHLCV candles from raw ticks, applied here to the signed-volume split instead), then accumulate that bucketed per-candle delta into a running total starting from 0 at the window's first candle — reusing `trade_aggregates()`/`volume_delta()` for the per-bucket buy/sell split rather than hand-rolling a third independent aggressor-side-sign implementation alongside `chart_data.py`'s and `ranking_engine/engine.py:330`'s existing two
+
+**Given** the source data for the bucketed split
+**When** implementing the replay function
+**Then** it reuses `DydxSecondSnapshot.buy_volume`/`sell_volume` (already read for the window via the catalog-query pattern at `dashboard.py:1338-1348`, or the in-process `_second_rolling` buffer for the live window, `dashboard.py:105`) rather than re-replaying raw `TradeTick`s from scratch — this is a deliberate divergence from `chart_data.py`'s existing tick-based `cum_delta`, and the story's dev notes must say so explicitly rather than silently changing CVD's data source without comment
+
+**Given** `_render_chart_page`'s 7-row figure and `chart_data.py`'s row-6 "5-min cumulative delta" computation
+**When** this story is implemented
+**Then** the fixed row and its `cum_delta` computation are removed entirely (not left dead/unreferenced) and the remaining rows renumber to fill 1-6, so CVD is shown exactly once on the page — via the picker, never both
+
+**Given** `cd troll && python -m pytest ml_signals/tests/test_dashboard_chart.py ml_signals/tests/test_custom_indicators.py -q`
+**When** it runs after this story
+**Then** it passes, with a new test asserting the CVD replay function's per-candle running total against a hand-constructed small snapshot window (TEST-01: financial calculation), and `test_dashboard_chart.py`'s existing row-count-dependent assertions (if any exist for the 7-row figure) are updated for 6 rows
+
+### Story 10.3: Cancel Pressure as a custom (histogram) indicator, retiring the fixed row
+
+Depends on Story 10.1 (the custom catalog and the new `"histogram"` panel type this needs).
+
+As a user of the chart page,
+I want Cancel Pressure available from the indicator picker as a histogram instead of a permanently-shown line row,
+So that I can add it only when relevant and read it the way a pressure/imbalance metric actually reads — as bars around zero, not a line.
+
+**Acceptance Criteria:**
+
+**Given** `ml_signals/book_features.py:195-263`'s existing `CancelRate`/`CancellationTracker` (a stateful rolling-window tracker of ADD/DELETE events at the best price level, `bid_pressure`/`ask_pressure` each in [-1, +1]) and `chart_data.py:34,100,113-117,150-152`'s existing per-event replay driving it for the fixed row-5 chart
+**When** Story 10.1's custom catalog registers a `"CancelPressure"` entry classified `"histogram"`
+**Then** its replay function reuses `CancellationTracker` unchanged (no new cancellation math, per DESIGN-02 — this story only relocates where the tracker's output is sampled and rendered), replaying the window's `OrderBookDelta`s the same way `chart_data.py` already does, and samples `bid_pressure`/`ask_pressure` once per candle-time bucket (last-value-in-bucket, matching how a live indicator reads "current state as of this bar close" rather than an average-over-bucket, unless dev investigation finds average-in-bucket reads better for this specific signal — flag whichever choice is made in Completion Notes since either is defensible and the story does not mandate one over the other)
+
+**Given** Story 10.1's new `"histogram"` panel type
+**When** `CancelPressure` is active
+**Then** its `bid_pressure`/`ask_pressure` output attributes render as Plotly bar traces in the oscillator panel (positive/negative bars around a zero baseline), each on its own overlaid axis per Story 10.1's shared axis-scaling reuse — not as a fixed always-visible row
+
+**Given** `_render_chart_page`'s figure (now 6 rows after Story 10.2) and `chart_data.py`'s row-5 "Cancel pressure" computation
+**When** this story is implemented
+**Then** the fixed row and its dedicated `CancellationTracker` replay call in `chart_data.py` are removed and the remaining rows renumber to fill 1-5 — confirmed by the user 2026-09-08: Cancel Pressure is picker-only, not shown in both places
+
+**Given** `ml_signals/ofi_strategy.py:48,69-70,100,131,223,241,274-277`'s existing use of `CancellationTracker`/`max_cancel_pressure` as a backtest entry filter
+**When** this story is implemented
+**Then** that usage is confirmed unaffected — `ofi_strategy.py` instantiates its own `CancellationTracker` independently of the chart page's replay, and this story does not touch it
+
+**Given** `cd troll && python -m pytest ml_signals/tests/test_dashboard_chart.py ml_signals/tests/test_custom_indicators.py ml_signals/tests/test_book_features.py ml_signals/tests/test_ofi_strategy.py -q`
+**When** it runs after this story
+**Then** it passes unchanged for the `book_features`/`ofi_strategy` suites (confirming `CancellationTracker` itself is untouched) plus a new bucketed-sampling test in `test_custom_indicators.py`, and a JS-harness test confirming the histogram panel renders bar traces for this specific indicator
+
+### Story 10.4: OFI as a custom indicator, retiring the fixed row
+
+Depends on Story 10.1 (the custom catalog this registers into).
+
+As a user of the chart page,
+I want Order Flow Imbalance available from the indicator picker instead of a permanently-shown row,
+So that I only see it when I actually want it, consistent with how CVD and Cancel Pressure now work.
+
+**Acceptance Criteria:**
+
+**Given** `ml_signals/chart_data.py:98,130`'s existing top-of-book `OrderFlowImbalance` (`ml_signals/indicators.py:157-231`, fed via `update_raw(bid_price, bid_size, ask_price, ask_size)` on every replayed `OrderBookDelta`) driving the fixed row-1 chart — and confirmed distinct from `ranking_engine`'s `MultiLevelOFI`-based, full-depth, continuously-published `ofi_10`/`ofi_10_z` (`ranking_engine/engine.py:293,300,318-321`), a legitimately separate metric for a separate purpose (live ranking table vs. this per-window historical chart view)
+**When** Story 10.1's custom catalog registers an `"OrderFlowImbalance"` entry
+**Then** its replay function reuses the exact same `OrderFlowImbalance` class `chart_data.py` already drives (no new/third OFI variant), bucketing its per-event output into the candle time grid — dev must first re-confirm against `chart_data.py:98,130`'s exact accumulation semantics (whether `.value` is a running total across the whole replay or resets per sample) before choosing sum-per-bucket vs. last-value-per-bucket, rather than assuming one
+
+**Given** `_render_chart_page`'s figure (now 5 rows after Stories 10.2/10.3) and `chart_data.py`'s row-1 "OFI" computation
+**When** this story is implemented
+**Then** the fixed row and its dedicated `OrderFlowImbalance` replay call in `chart_data.py` are removed and the remaining rows renumber to fill 1-4 (Book imbalance L1 agg, Mid-layer imbalance, Depth, Spread) — this epic does not touch these four remaining rows; they stay fixed, out of scope
+
+**Given** `cd troll && python -m pytest ml_signals/tests/test_dashboard_chart.py ml_signals/tests/test_custom_indicators.py -q`
+**When** it runs after this story
+**Then** it passes, with a new bucketed-OFI test in `test_custom_indicators.py` asserting the chosen accumulation semantics against a hand-constructed small book-delta sequence
+
+### Story 10.5: Persisted per-instrument chart indicator configuration
+
+Depends on Stories 10.1-10.4 (needs the final `_activeIndicators` shape, spanning both catalogs, to persist). Format is TOML by default, matching `dydx_collector/config.py`'s established `tomllib`/`tomli_w` pattern (`tomli_w` already pinned, `troll-requirements.txt:9`) — but the concrete requirement is only that a coin's active indicator selection survives a reload/redeploy via a plain, source-control-committable file; if implementation finds a different plain-file format fits better, that substitution is acceptable as long as it's still a committed file, not browser-only state.
+
+As a user of the chart page,
+I want the indicators I've added to a coin's chart to still be there next time I open it — and to be able to check that configuration into git,
+So that a chart's setup isn't lost on every page reload or container redeploy, and a useful indicator combination can be shared/reviewed like any other config change.
+
+**Acceptance Criteria:**
+
+**Given** a new `ml_signals/chart_indicator_config.py` module (mirrors `dydx_collector/config.py`'s `load_config()`/`save_config()` shape, `config.py:64-99,111-134`: `tomllib.load()` to read, `tomli_w.dump()` to write, full-rewrite-not-patch, same accepted tradeoff `config.py:114-118` already documents for hand-added comments)
+**When** this story is implemented
+**Then** it defines a schema keyed by `instrument_id`, each entry a list of `{name, params, category}` objects (one per active indicator instance — `id` is not persisted, since it is only ever a client-side sequence counter for the multi-instance UI, regenerated fresh on load), and reads/writes a new file, `troll/ml_signals/chart_indicators.toml`, confirmed not excluded by any `.gitignore` (root `.gitignore`'s `troll/` entries only exclude generated data directories — `catalog/`, `metrics/`, `bot_tui_logs/`, `live_paper/data/` — never config files, matching `dydx_collector/config.toml`'s own already-committed precedent)
+
+**Given** `_render_chart_page`'s `init_script` (`dashboard.py`, declares `_activeIndicators=[]` as an empty array on every page load today)
+**When** this story is implemented
+**Then** a new `GET /data/coin/{id}/indicator-config` endpoint returns that instrument's persisted entries (or an empty list if none saved yet), and the page's init script fetches it and populates `_activeIndicators` from the response before the first render — a coin with no saved config still opens exactly as it does today (empty picker, no regression)
+
+**Given** the indicator picker's toolbar
+**When** this story is implemented
+**Then** it gains a "Save" control that POSTs the current `_activeIndicators` array (both native and custom entries) to a new `POST /data/coin/{id}/indicator-config` endpoint, which calls `save_config()` for that instrument — saving is explicit/user-triggered, not automatic on every add/remove, so an in-progress exploratory selection is never persisted by accident
+
+**Given** `docker-compose.yml`'s `dashboard` service currently mounts `./dydx_collector/catalog:/app/catalog:ro` and `./dydx_collector/metrics:/app/metrics_dir:ro` — both read-only
+**When** this story adds a file the running dashboard container must be able to write
+**Then** `docker-compose.yml` gains a new bind mount for `ml_signals/chart_indicators.toml` (or its containing directory) into the `dashboard` service, read-write — mirroring the collector's own single `rw` config mount (`docker-compose.yml`'s `collector` service, `./config.toml:/app/dydx_collector/config.toml:rw`, the only other `rw` config mount in the file) — without this, "Save" would succeed inside the container's writable layer and vanish on the next `make redeploy`
+
+**Given** `cd troll && python -m pytest ml_signals/tests/test_dashboard_chart.py -q` plus a new `ml_signals/tests/test_chart_indicator_config.py`
+**When** it runs after this story
+**Then** it passes, asserting `load_config()`/`save_config()` round-trip a multi-instrument, mixed-category selection correctly (TEST-01: integration path touching a persisted config file) and that `GET`/`POST /data/coin/{id}/indicator-config` behave correctly against a temp config file (same temp-file test pattern `dydx_collector/tests` already uses for `config.py`)
 

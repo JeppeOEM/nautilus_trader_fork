@@ -41,7 +41,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-07-01
-last_updated: 2026-09-08 (9-1 chart-page oscillator-scaling bug fix reviewed and done)
+last_updated: 2026-09-08 (Story 10.1 custom-indicator framework reviewed and done; 10.2-10.5 still backlog)
 project: nautilus_trader_fork
 project_key: NOKEY
 tracking_system: file-system
@@ -117,6 +117,18 @@ development_status:
   # indicators render as a flat line because they share one unscaled Plotly y-axis.
   epic-9: done
   9-1-fix-oscillator-panel-shared-y-axis-scaling: done
+
+  # epic-10 has a real epics.md entry (2026-09-08, FR31-33: a second, non-Nautilus
+  # indicator category on the chart page's picker) -- no sprint-planning run yet,
+  # stories to be created directly via create-story as the epic progresses, same
+  # pattern Epic 8 used. Numbered 10 (not 9) because epic-9 above is itself a
+  # standalone bypass-epic bug-fix story, not a real epics.md entry.
+  epic-10: in-progress
+  10-1-custom-indicator-catalog-category-tagged-picker-and-histogram-panel-type: done
+  10-2-cvd-as-a-custom-indicator-retiring-the-fixed-row: backlog
+  10-3-cancel-pressure-as-a-custom-histogram-indicator-retiring-the-fixed-row: backlog
+  10-4-ofi-as-a-custom-indicator-retiring-the-fixed-row: backlog
+  10-5-persisted-per-instrument-chart-indicator-configuration: backlog
 
 action_items:
   - epic: 1

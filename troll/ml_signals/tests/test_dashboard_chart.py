@@ -36,6 +36,7 @@ from dydx_collector.second_snapshot import DydxSecondSnapshot
 
 import ml_signals.dashboard
 from ml_signals.chart_indicators import INDICATOR_CATALOG
+from ml_signals.custom_indicators import ReplayWindow
 from ml_signals.dashboard import _coerce_indicator_params
 from ml_signals.dashboard import _coin_chart_json
 from ml_signals.dashboard import _historical_candles_json
@@ -43,6 +44,8 @@ from ml_signals.dashboard import _historical_lines_json
 from ml_signals.dashboard import _historical_ticks_json
 from ml_signals.dashboard import _indicator_id
 from ml_signals.dashboard import _indicators_json
+from ml_signals.dashboard import _indicator_replay_window
+from ml_signals.dashboard import _merged_indicator_catalog
 from ml_signals.dashboard import _live_candles_json
 from ml_signals.dashboard import _live_lines_json
 from ml_signals.dashboard import _parse_indicator_spec
@@ -639,15 +642,74 @@ def test_coerce_indicator_params_drops_unknown_keys() -> None:
     assert _coerce_indicator_params(spec, {"not_a_real_param": "1"}) == {}
 
 
+def test_merged_indicator_catalog_tags_native_entries() -> None:
+    merged = _merged_indicator_catalog()
+    assert merged["SimpleMovingAverage"]["category"] == "native"
+    assert merged["SimpleMovingAverage"]["panel"] == "overlay"
+
+
+def test_merged_indicator_catalog_tags_custom_entries(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ml_signals import custom_indicators as _ci
+
+    monkeypatch.setitem(
+        _ci.CUSTOM_INDICATOR_CATALOG,
+        "PlaceholderCustom",
+        _ci.CustomIndicatorSpec(params={}, panel="histogram", replay=lambda c, p, w: {}),
+    )
+    merged = _merged_indicator_catalog()
+    assert merged["PlaceholderCustom"] == {"params": {}, "panel": "histogram", "category": "custom"}
+    assert merged["SimpleMovingAverage"]["category"] == "native"  # native entries unaffected
+
+
+def test_merged_indicator_catalog_raises_on_name_collision(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ml_signals import custom_indicators as _ci
+
+    # A name registered in both catalogs would otherwise silently resolve differently
+    # depending which code path you ask (the merged catalog lists it last-write-wins;
+    # _indicators_json's dispatch checks native first) -- must fail loud, not diverge.
+    monkeypatch.setitem(
+        _ci.CUSTOM_INDICATOR_CATALOG,
+        "SimpleMovingAverage",
+        _ci.CustomIndicatorSpec(params={}, panel="oscillator", replay=lambda c, p, w: {}),
+    )
+    with pytest.raises(ValueError, match="registered in both catalogs"):
+        _merged_indicator_catalog()
+
+
+def test_indicator_replay_window_both_bounds_set_is_historical() -> None:
+    window = _indicator_replay_window("BTC-USD-PERP.DYDX", 60, 1000, 2000)
+    assert (window.start_ms, window.end_ms) == (1000, 2000)
+
+
+def test_indicator_replay_window_only_one_bound_falls_back_to_live() -> None:
+    # A query string with only "start" (or only "end") parseable must not leave the
+    # window half-set -- coin_indicators_handler takes the live candle path in this
+    # case, and the window's bounds must agree (both None), not silently carry the one
+    # real value through.
+    assert _indicator_replay_window("BTC-USD-PERP.DYDX", 60, 1000, None).start_ms is None
+    assert _indicator_replay_window("BTC-USD-PERP.DYDX", 60, None, 2000).end_ms is None
+
+
+def test_indicator_replay_window_neither_bound_set_is_live() -> None:
+    window = _indicator_replay_window("BTC-USD-PERP.DYDX", 60, None, None)
+    assert (window.start_ms, window.end_ms) == (None, None)
+
+
 def test_indicator_id_sorts_params_for_a_stable_key() -> None:
     assert _indicator_id("BollingerBands", {"k": 2.0, "period": 5}) == "BollingerBands_k=2.0,period=5"
     assert _indicator_id("VolumeWeightedAveragePrice", {}) == "VolumeWeightedAveragePrice"
 
 
+def _window() -> ReplayWindow:
+    return ReplayWindow(instrument_id="BTC-USD-PERP.DYDX", bar_seconds=60, start_ms=None, end_ms=None)
+
+
 def test_indicators_json_returns_points_per_output_attribute() -> None:
     candles = [{"t": i * 60_000, "o": c, "h": c, "l": c, "c": c, "v": 1.0}
                for i, c in enumerate([float(x) for x in range(1, 11)])]
-    body, status = _indicators_json(candles, "SimpleMovingAverage:period=3|BollingerBands:period=5,k=2")
+    body, status = _indicators_json(
+        candles, "SimpleMovingAverage:period=3|BollingerBands:period=5,k=2", _window(),
+    )
     assert status == 200
     payload = json.loads(body)
     assert set(payload.keys()) == {"SimpleMovingAverage_period=3", "BollingerBands_k=2.0,period=5"}
@@ -656,8 +718,27 @@ def test_indicators_json_returns_points_per_output_attribute() -> None:
     assert set(payload["BollingerBands_k=2.0,period=5"].keys()) == {"upper", "middle", "lower"}
 
 
+def test_indicators_json_dispatches_to_custom_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
+    from ml_signals import custom_indicators as _ci
+
+    monkeypatch.setitem(
+        _ci.CUSTOM_INDICATOR_CATALOG,
+        "PlaceholderCustom",
+        _ci.CustomIndicatorSpec(
+            params={}, panel="histogram",
+            replay=lambda candles, params, window: {"value": [c["c"] for c in candles]},
+        ),
+    )
+    candles = [{"t": 0, "c": 1.0}, {"t": 60_000, "c": 2.0}]
+    body, status = _indicators_json(candles, "PlaceholderCustom", _window())
+    assert status == 200
+    assert json.loads(body)["PlaceholderCustom"]["value"] == [
+        {"t": 0, "value": 1.0}, {"t": 60_000, "value": 2.0},
+    ]
+
+
 def test_indicators_json_returns_400_for_unknown_indicator() -> None:
-    body, status = _indicators_json([], "NotARealIndicator:period=3")
+    body, status = _indicators_json([], "NotARealIndicator:period=3", _window())
     assert status == 400
     assert "Unknown indicator" in json.loads(body)["error"]
 
@@ -667,7 +748,7 @@ def test_indicators_json_returns_400_instead_of_raising_for_malformed_spec() -> 
     # _parse_indicator_spec's dict() construction, uncaught -- an aiohttp 500, not a
     # clean 4xx, for what is just bad/untrusted query-string input.
     candles = [{"t": 0, "o": 1.0, "h": 1.0, "l": 1.0, "c": 1.0, "v": 1.0}]
-    body, status = _indicators_json(candles, "SimpleMovingAverage:period")
+    body, status = _indicators_json(candles, "SimpleMovingAverage:period", _window())
     assert status == 400
     assert "error" in json.loads(body)
 
@@ -676,6 +757,6 @@ def test_indicators_json_returns_400_for_non_numeric_param_value() -> None:
     # A non-numeric value for an int/float param used to raise ValueError out of
     # _coerce_indicator_params' int()/float() coercion, uncaught.
     candles = [{"t": 0, "o": 1.0, "h": 1.0, "l": 1.0, "c": 1.0, "v": 1.0}]
-    body, status = _indicators_json(candles, "SimpleMovingAverage:period=not_a_number")
+    body, status = _indicators_json(candles, "SimpleMovingAverage:period=not_a_number", _window())
     assert status == 400
     assert "error" in json.loads(body)

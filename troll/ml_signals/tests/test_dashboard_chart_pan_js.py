@@ -267,4 +267,121 @@ def test_oscillator_panel_gives_each_active_indicator_its_own_axis() -> None:
         ["node", "-e", harness], capture_output=True, text=True, timeout=30, check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+# -- Story 10.1: category-grouped picker + histogram panel rendering ------------------------
+
+_PICKER_GROUPING_HARNESS_TEMPLATE = r"""
+"use strict";
+const assert = require("assert");
+
+var _els={};
+function _dummyEl(id){
+  if(!_els[id])_els[id]={innerHTML:"",style:{},value:"",on:function(){},removeAllListeners:function(){},getElementsByTagName:function(){return [];}};
+  return _els[id];
+}
+global.document = { getElementById: function(id){ return _dummyEl(id); } };
+global.Plotly = { react: function(){}, relayout: function(){}, purge: function(){} };
+global.fetch = function(){ return Promise.resolve({ ok:true, json: function(){ return Promise.resolve({}); } }); };
+
+var _coinIid="test-coin";var _coinMode="candles";var _coinBarSeconds=60;
+var _coinHistStart=null,_coinHistEnd=null;
+var _coinPanning=false,_chartState=null,_relayoutTimer=null,timer=null;
+var _MAX_CHUNK_MS=30*24*3600*1000;
+function setStatus(s){}
+
+__DASHBOARD_JS__
+
+// One native, one custom entry -- the merged catalog's own "category" field (tagged by
+// dashboard.py's _merged_indicator_catalog, not by either catalog module itself) is all
+// the picker needs to group correctly.
+_indicatorCatalog={
+  SimpleMovingAverage:{params:{period:20},panel:"overlay",category:"native"},
+  PlaceholderCustom:{params:{},panel:"histogram",category:"custom"}
+};
+_renderIndicatorPicker();
+var html=_els["ind-picker-list"].innerHTML;
+assert.ok(html.indexOf("Nautilus Indicators")>=0, "native group header must render");
+assert.ok(html.indexOf("Custom Indicators")>=0, "custom group header must render");
+assert.ok(html.indexOf("Nautilus Indicators")<html.indexOf("SimpleMovingAverage"), "native header must precede native entries");
+assert.ok(html.indexOf("SimpleMovingAverage")<html.indexOf("Custom Indicators"), "native group must render before custom group");
+assert.ok(html.indexOf("Custom Indicators")<html.indexOf("PlaceholderCustom"), "custom header must precede custom entries");
+
+// Empty custom group must still render its header (AC: the picker's shape doesn't
+// visibly change the moment the first custom indicator is added later).
+_indicatorCatalog={SimpleMovingAverage:{params:{period:20},panel:"overlay",category:"native"}};
+_renderIndicatorPicker();
+var html2=_els["ind-picker-list"].innerHTML;
+assert.ok(html2.indexOf("Custom Indicators")>=0, "custom group header must render even when the group is empty");
+console.error("ASSERTIONS_OK");
+"""
+
+
+def test_indicator_picker_groups_by_category() -> None:
+    if shutil.which("node") is None:
+        pytest.skip("node not installed")
+    js = _extract_inline_script()
+    harness = _PICKER_GROUPING_HARNESS_TEMPLATE.replace("__DASHBOARD_JS__", js)
+    result = subprocess.run(
+        ["node", "-e", harness], capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "ASSERTIONS_OK" in result.stderr
+
+
+_HISTOGRAM_PANEL_HARNESS_TEMPLATE = r"""
+"use strict";
+const assert = require("assert");
+
+function _dummyEl(){ return { innerHTML:"", style:{}, value:"", on:function(){}, removeAllListeners:function(){}, getElementsByTagName:function(){ return []; } }; }
+global.document = { getElementById: function(){ return _dummyEl(); } };
+var _captured=null;
+global.Plotly = { react: function(id,traces,layout){ _captured={traces:traces,layout:layout}; }, relayout: function(){}, purge: function(){} };
+global.fetch = function(){ return Promise.resolve({ ok:true, json: function(){ return Promise.resolve({}); } }); };
+
+var _coinIid="test-coin";var _coinMode="candles";var _coinBarSeconds=60;
+var _coinHistStart=null,_coinHistEnd=null;
+var _coinPanning=false,_chartState=null,_relayoutTimer=null,timer=null;
+var _MAX_CHUNK_MS=30*24*3600*1000;
+function setStatus(s){}
+
+__DASHBOARD_JS__
+
+// A "histogram"-classified indicator must render as a Plotly bar trace, sharing the
+// oscillator panel's per-instance axis-scaling machinery (Story 9.1) rather than a
+// fourth new panel -- alongside an ordinary oscillator (line) indicator in the same call.
+_indicatorCatalog={
+  IndLine:{params:{period:14},panel:"oscillator",category:"native"},
+  IndBar:{params:{},panel:"histogram",category:"custom"}
+};
+_activeIndicators=[
+  {id:1,name:"IndLine",params:{period:14}},
+  {id:2,name:"IndBar",params:{}}
+];
+_lastCandles=[{t:1000},{t:2000},{t:3000}];
+var data={
+  "IndLine_period=14":{value:[{t:1000,value:1},{t:2000,value:2},{t:3000,value:3}]},
+  "IndBar":{value:[{t:1000,value:0.1},{t:2000,value:-0.2},{t:3000,value:0.05}]}
+};
+_renderOscillatorPanel(data);
+assert.strictEqual(_captured.layout.barmode, "overlay", "shared panel must overlay bar traces, not Plotly's default group-offset");
+assert.strictEqual(_captured.traces[0].type, "scattergl", "an ordinary oscillator indicator still renders as a line");
+assert.strictEqual(_captured.traces[0].mode, "lines", "a line trace must still set mode");
+assert.strictEqual(_captured.traces[1].type, "bar", "a histogram-classified indicator must render as a bar trace");
+assert.ok(!("mode" in _captured.traces[1]), "a bar trace must not carry a leftover mode key, not even set to undefined");
+assert.ok(!("line" in _captured.traces[1]), "a bar trace must not carry a leftover line-style key meant for scattergl traces");
+assert.strictEqual(_captured.traces[1].yaxis, "y2", "the histogram trace still gets its own overlaid axis like any other instance");
+console.error("ASSERTIONS_OK");
+"""
+
+
+def test_histogram_indicator_renders_as_bar_trace_in_oscillator_panel() -> None:
+    if shutil.which("node") is None:
+        pytest.skip("node not installed")
+    js = _extract_inline_script()
+    harness = _HISTOGRAM_PANEL_HARNESS_TEMPLATE.replace("__DASHBOARD_JS__", js)
+    result = subprocess.run(
+        ["node", "-e", harness], capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
     assert "ASSERTIONS_OK" in result.stderr

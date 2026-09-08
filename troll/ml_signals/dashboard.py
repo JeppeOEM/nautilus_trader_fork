@@ -56,6 +56,7 @@ from ranking_engine import metrics_store
 
 from ml_signals import chart_data as _chart_data
 from ml_signals import chart_indicators as _chart_indicators
+from ml_signals import custom_indicators as _custom_indicators
 from ml_signals import ranking_columns as _ranking_columns
 from ml_signals.catalog_stats import list_instruments
 from ml_signals.indicators import microprice as calc_microprice
@@ -402,16 +403,28 @@ function _paramInputHTML(id,key,val){
 // Add-only list -- unlike a checkbox toggle, clicking an entry always adds a fresh
 // instance so the same indicator can be added more than once (each gets its own id and
 // default params, edited afterwards in the settings table).
+// One row per indicator, grouped under a "Nautilus Indicators"/"Custom Indicators"
+// header by the merged catalog's own `category` tag (dashboard.py's
+// _merged_indicator_catalog -- neither catalog module knows about the other,
+// DESIGN-02). Both headers always render, even when a group is currently empty, so
+// the picker's shape doesn't visibly change the moment the first custom indicator
+// (Story 10.2+) is added.
+function _indicatorGroupHTML(label,names){
+  var rows=names.map(function(name){
+    var spec=_indicatorCatalog[name];
+    return '<div style="padding:2px 0"><a href="#" onclick="_addIndicator(\\''+name+'\\');return false" style="color:#58a6ff;text-decoration:none">+ <b>'+name+'</b></a> <span style="color:#8b949e">('+spec.panel+')</span></div>';
+  }).join('');
+  return '<div style="font-weight:bold;color:#8b949e;margin-top:6px;font-size:11px">'+label+'</div>'+rows;
+}
 function _renderIndicatorPicker(){
   var box=document.getElementById('ind-picker-list');
   if(!box||!_indicatorCatalog)return;
   var search=document.getElementById('ind-picker-search');
   var q=search?search.value.trim().toLowerCase():'';
   var names=Object.keys(_indicatorCatalog).sort().filter(function(n){return !q||n.toLowerCase().indexOf(q)!==-1;});
-  box.innerHTML=names.map(function(name){
-    var spec=_indicatorCatalog[name];
-    return '<div style="padding:2px 0"><a href="#" onclick="_addIndicator(\\''+name+'\\');return false" style="color:#58a6ff;text-decoration:none">+ <b>'+name+'</b></a> <span style="color:#8b949e">('+spec.panel+')</span></div>';
-  }).join('');
+  var groups={native:[],custom:[]};
+  names.forEach(function(n){groups[_indicatorCatalog[n].category==='custom'?'custom':'native'].push(n);});
+  box.innerHTML=_indicatorGroupHTML('Nautilus Indicators',groups.native)+_indicatorGroupHTML('Custom Indicators',groups.custom);
 }
 function _addIndicator(name){
   var spec=_indicatorCatalog&&_indicatorCatalog[name];
@@ -585,21 +598,29 @@ function _oscillatorOverlayAxis(){
 }
 function _renderOscillatorPanel(data){
   var x=_lastCandles.map(function(c){return new Date(c.t);}),traces=[],axisN=0;
-  var layout={height:180,template:'plotly_dark',dragmode:'pan',
+  // barmode:'overlay' is required, not cosmetic -- Plotly's default ('group') offsets
+  // each bar trace sideways at every x tick to sit them side by side, which misplaces a
+  // histogram indicator's bars away from their true timestamp on this shared date axis
+  // the moment a second bar trace (a second histogram instance, or one with >1 output
+  // attribute) is active.
+  var layout={height:180,template:'plotly_dark',dragmode:'pan',barmode:'overlay',
     xaxis:{type:'date',rangeslider:{visible:false}},
     margin:{t:10,b:20,l:60,r:10},legend:{orientation:'h'}};
   _activeIndicators.forEach(function(a){
     var spec=_indicatorCatalog&&_indicatorCatalog[a.name];
-    if(!spec||spec.panel!=='oscillator')return;
+    if(!spec||(spec.panel!=='oscillator'&&spec.panel!=='histogram'))return;
     var series=_seriesForIndicator(data,a);
     if(!series)return;
     axisN++;
     var axisKey=axisN===1?'y':'y'+axisN;
     if(axisN>1)layout['yaxis'+axisN]=_oscillatorOverlayAxis();
+    var isHistogram=spec.panel==='histogram';
     Object.keys(series).forEach(function(attr){
-      traces.push({type:'scattergl',mode:'lines',x:x,yaxis:axisKey,
+      var trace={type:isHistogram?'bar':'scattergl',x:x,yaxis:axisKey,
         y:series[attr].map(function(p){return p.value;}),
-        name:_indicatorLabel(a)+'.'+attr,line:{width:1}});
+        name:_indicatorLabel(a)+'.'+attr};
+      if(isHistogram)trace.marker={opacity:0.7};else{trace.mode='lines';trace.line={width:1};}
+      traces.push(trace);
     });
   });
   var panel=document.getElementById('ind-panel');
@@ -1599,7 +1620,7 @@ def _parse_indicator_spec(raw: str) -> list[tuple[str, dict[str, str]]]:
 
 
 def _coerce_indicator_params(
-    spec: _chart_indicators.IndicatorSpec, raw: dict[str, str],
+    spec: _chart_indicators.IndicatorSpec | _custom_indicators.CustomIndicatorSpec, raw: dict[str, str],
 ) -> dict[str, object]:
     """
     Cast query-string param values to match each param's default type (bool checked
@@ -1627,7 +1648,7 @@ def _indicator_id(name: str, params: dict[str, object]) -> str:
     return name + "_" + ",".join(f"{k}={v}" for k, v in sorted(params.items()))
 
 
-def _indicators_json(candles: list[dict], spec_str: str) -> tuple[str, int]:
+def _indicators_json(candles: list[dict], spec_str: str, window: _custom_indicators.ReplayWindow) -> tuple[str, int]:
     """Compute {t, value} point series for every requested indicator spec entry.
 
     spec_str is untrusted (a raw query-string value): a malformed entry (missing "=",
@@ -1638,14 +1659,25 @@ def _indicators_json(candles: list[dict], spec_str: str) -> tuple[str, int]:
     system boundaries"), so the catch is intentionally broad -- there is no fixed set
     of exception types every current and future indicator's replay_indicator() might
     raise on bad input.
+
+    A name is looked up in the native catalog first, then the custom one -- `window` is
+    only ever passed to a custom replay (chart_indicators.replay_indicator's signature and
+    call site stay exactly as Story 8.2 shipped them, since every native indicator is a
+    pure function of the candle list alone).
     """
     result: dict[str, dict[str, list[dict]]] = {}
     try:
         for name, raw_params in _parse_indicator_spec(spec_str):
-            if name not in _chart_indicators.INDICATOR_CATALOG:
+            if name in _chart_indicators.INDICATOR_CATALOG:
+                spec = _chart_indicators.INDICATOR_CATALOG[name]
+                params = _coerce_indicator_params(spec, raw_params)
+                outputs = _chart_indicators.replay_indicator(candles, name, params)
+            elif name in _custom_indicators.CUSTOM_INDICATOR_CATALOG:
+                spec = _custom_indicators.CUSTOM_INDICATOR_CATALOG[name]
+                params = _coerce_indicator_params(spec, raw_params)
+                outputs = _custom_indicators.replay_indicator(candles, name, params, window)
+            else:
                 return json.dumps({"error": f"Unknown indicator: {name}"}), 400
-            params = _coerce_indicator_params(_chart_indicators.INDICATOR_CATALOG[name], raw_params)
-            outputs = _chart_indicators.replay_indicator(candles, name, params)
             result[_indicator_id(name, params)] = {
                 attr: [{"t": c["t"], "value": v} for c, v in zip(candles, values, strict=True)]
                 for attr, values in outputs.items()
@@ -1654,6 +1686,25 @@ def _indicators_json(candles: list[dict], spec_str: str) -> tuple[str, int]:
         logger.info("Malformed indicator spec %r rejected: %s", spec_str, exc)
         return json.dumps({"error": f"Invalid indicator spec: {exc}"}), 400
     return json.dumps(result), 200
+
+
+def _indicator_replay_window(
+    symbol: str, bar_seconds: int, start_ms: int | None, end_ms: int | None,
+) -> _custom_indicators.ReplayWindow:
+    """Build the ReplayWindow for an indicator request, keeping start_ms/end_ms in lockstep
+    with which candle path (live vs. historical) actually ran.
+
+    A query string with only one of start/end parseable falls through to the live candle
+    path (the `and` below) -- ReplayWindow's bounds must fall through with it (both None),
+    or a future custom replay's own live-vs-historical check (`window.start_ms is None`)
+    would see a half-set window and misread live candles as a bounded historical one.
+    """
+    is_historical = start_ms is not None and end_ms is not None
+    return _custom_indicators.ReplayWindow(
+        instrument_id=symbol, bar_seconds=bar_seconds,
+        start_ms=start_ms if is_historical else None,
+        end_ms=end_ms if is_historical else None,
+    )
 
 
 async def coin_indicators_handler(request: web.Request) -> web.Response:
@@ -1665,7 +1716,8 @@ async def coin_indicators_handler(request: web.Request) -> web.Response:
     bar_seconds = max(1, int(qs.get("bar", "60")))
     start_ms = _parse_query_ms(qs, "start")
     end_ms = _parse_query_ms(qs, "end")
-    if start_ms is not None and end_ms is not None:
+    window = _indicator_replay_window(symbol, bar_seconds, start_ms, end_ms)
+    if window.start_ms is not None and window.end_ms is not None:
         candles_json = await asyncio.to_thread(_historical_candles_json, symbol, start_ms, end_ms, bar_seconds)
     else:
         candles_json = _live_candles_json(symbol, bar_seconds)
@@ -1674,12 +1726,33 @@ async def coin_indicators_handler(request: web.Request) -> web.Response:
     # off the event loop, or a request with several indicators active stalls every other
     # concurrent request this single-process aiohttp server is serving (other tabs' 1s
     # poll loops included), not just this one.
-    body, status = await asyncio.to_thread(_indicators_json, candles, spec_str)
+    body, status = await asyncio.to_thread(_indicators_json, candles, spec_str, window)
     return web.Response(text=body, content_type="application/json", status=status)
 
 
+def _merged_indicator_catalog() -> dict[str, dict]:
+    """Native + custom catalogs, each entry tagged with which one it came from.
+
+    Tagging happens here, not inside either catalog module -- chart_indicators.py and
+    custom_indicators.py stay unaware of each other (DESIGN-02); only this call site
+    knows both exist. A name registered in both catalogs is a real bug (whichever one
+    the picker lists would silently disagree with the native-first dispatch order in
+    _indicators_json) -- raise immediately rather than let the two catalogs silently
+    diverge (DATA-02: no mysteries).
+    """
+    collisions = set(_chart_indicators.INDICATOR_CATALOG) & set(_custom_indicators.CUSTOM_INDICATOR_CATALOG)
+    if collisions:
+        raise ValueError(f"Indicator name(s) registered in both catalogs: {sorted(collisions)}")
+    merged: dict[str, dict] = {}
+    for name, entry in _chart_indicators.catalog_json().items():
+        merged[name] = {**entry, "category": "native"}
+    for name, entry in _custom_indicators.catalog_json().items():
+        merged[name] = {**entry, "category": "custom"}
+    return merged
+
+
 async def indicators_catalog_handler(request: web.Request) -> web.Response:
-    return web.Response(text=json.dumps(_chart_indicators.catalog_json()), content_type="application/json")
+    return web.Response(text=json.dumps(_merged_indicator_catalog()), content_type="application/json")
 
 
 async def live_coin_json_handler(request: web.Request) -> web.Response:
