@@ -181,3 +181,79 @@ def test_indicator_spec_string_matches_python_parser() -> None:
         ("BollingerBands", {"period": "20", "k": "2.5"}),
         ("OnBalanceVolume", {}),
     ]
+
+
+# -- Story 9.1: oscillator panel per-indicator axis scaling ---------------------------------
+
+_OSCILLATOR_AXIS_HARNESS_TEMPLATE = r"""
+"use strict";
+const assert = require("assert");
+
+function _dummyEl(){ return { innerHTML:"", style:{}, value:"", on:function(){}, removeAllListeners:function(){}, getElementsByTagName:function(){ return []; } }; }
+global.document = { getElementById: function(){ return _dummyEl(); } };
+var _captured=null;
+global.Plotly = { react: function(id,traces,layout){ _captured={traces:traces,layout:layout}; }, relayout: function(){}, purge: function(){} };
+global.fetch = function(){ return Promise.resolve({ ok:true, json: function(){ return Promise.resolve({}); } }); };
+
+var _coinIid="test-coin";var _coinMode="candles";var _coinBarSeconds=60;
+var _coinHistStart=null,_coinHistEnd=null;
+var _coinPanning=false,_chartState=null,_relayoutTimer=null,timer=null;
+var _MAX_CHUNK_MS=30*24*3600*1000;
+function setStatus(s){}
+
+__DASHBOARD_JS__
+
+_indicatorCatalog={
+  IndA:{params:{period:14},panel:"oscillator"},
+  IndB:{params:{period:20},panel:"oscillator"},
+  IndC:{params:{period:30},panel:"oscillator"}
+};
+
+// -- Single active oscillator indicator: must keep Plotly's default visible axis (the
+// common case, and the one that never had the scaling bug -- one trace, nothing to
+// squash against). No yaxis2 key should exist at all.
+_activeIndicators=[{id:1,name:"IndA",params:{period:14}}];
+_lastCandles=[{t:1000},{t:2000},{t:3000}];
+_renderOscillatorPanel({"IndA_period=14":{value:[{t:1000,value:0.1},{t:2000,value:0.2},{t:3000,value:0.3}]}});
+assert.strictEqual(_captured.traces[0].yaxis, "y", "the sole indicator stays on the default axis");
+assert.strictEqual(_captured.layout.yaxis, undefined, "default axis must be left at Plotly's normal visible default, not hidden");
+assert.strictEqual(_captured.layout.yaxis2, undefined, "no secondary axis when only one indicator is active");
+
+// -- Three active oscillator indicators with wildly different native ranges (mirrors the
+// real LinearRegression-vs-RelativeStrengthIndex disparity found this session) -- each
+// beyond the first must land on its own overlaid, hidden axis, and real (unscaled) values
+// must survive into the trace so Plotly's hover tooltip still shows the true value.
+_activeIndicators=[
+  {id:1,name:"IndA",params:{period:14}},
+  {id:2,name:"IndB",params:{period:20}},
+  {id:3,name:"IndC",params:{period:30}}
+];
+var data={
+  "IndA_period=14":{value:[{t:1000,value:0.1},{t:2000,value:0.2},{t:3000,value:0.3}]},
+  "IndB_period=20":{value:[{t:1000,value:60000},{t:2000,value:60010},{t:3000,value:60020}]},
+  "IndC_period=30":{value:[{t:1000,value:-5},{t:2000,value:-6},{t:3000,value:-7}]}
+};
+_renderOscillatorPanel(data);
+assert.ok(_captured, "Plotly.react must be called when active oscillator indicators have data");
+assert.strictEqual(_captured.traces.length, 3, "one trace per active oscillator indicator");
+assert.strictEqual(_captured.traces[0].yaxis, "y", "first indicator stays on the default axis");
+assert.strictEqual(_captured.traces[1].yaxis, "y2", "second indicator must get its own overlaid axis");
+assert.strictEqual(_captured.traces[2].yaxis, "y3", "third indicator must get its own overlaid axis, not reuse y2");
+assert.strictEqual(_captured.layout.yaxis, undefined, "default axis stays at Plotly's normal visible default");
+assert.deepStrictEqual(_captured.layout.yaxis2, {visible:false,overlaying:"y"}, "axis 2 must overlay axis 1, hidden");
+assert.deepStrictEqual(_captured.layout.yaxis3, {visible:false,overlaying:"y"}, "axis 3 must overlay axis 1, hidden");
+assert.deepStrictEqual(_captured.traces[1].y, [60000,60010,60020], "trace values must stay real/unscaled so hover shows the true value, not a normalized one");
+console.error("ASSERTIONS_OK");
+"""
+
+
+def test_oscillator_panel_gives_each_active_indicator_its_own_axis() -> None:
+    if shutil.which("node") is None:
+        pytest.skip("node not installed")
+    js = _extract_inline_script()
+    harness = _OSCILLATOR_AXIS_HARNESS_TEMPLATE.replace("__DASHBOARD_JS__", js)
+    result = subprocess.run(
+        ["node", "-e", harness], capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "ASSERTIONS_OK" in result.stderr

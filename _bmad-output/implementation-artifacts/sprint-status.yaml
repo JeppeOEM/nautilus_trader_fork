@@ -41,7 +41,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-07-01
-last_updated: 2026-09-08 (8-5 dropped from epic before dev started, 8-4 code-reviewed and done)
+last_updated: 2026-09-08 (9-1 chart-page oscillator-scaling bug fix reviewed and done)
 project: nautilus_trader_fork
 project_key: NOKEY
 tracking_system: file-system
@@ -110,6 +110,13 @@ development_status:
   # 8.5 (combined candlestick + bid/ask overlay) dropped from the epic at the user's
   # request 2026-09-08, before any dev work started -- story file deleted, epics.md's
   # Story 8.5 section and FR31 removed.
+
+  # epic-9 has no epics.md entry -- standalone bug-fix story created directly via
+  # create-story at the user's request (same precedent as epics 5/6/7), reported against
+  # Epic 8's shipped indicator picker: on /chart/{id}, almost all oscillator-panel
+  # indicators render as a flat line because they share one unscaled Plotly y-axis.
+  epic-9: done
+  9-1-fix-oscillator-panel-shared-y-axis-scaling: done
 
 action_items:
   - epic: 1

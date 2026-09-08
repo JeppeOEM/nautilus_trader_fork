@@ -525,15 +525,33 @@ function _renderCandleTraces(indicatorData){
     margin:{t:10,b:30,l:60,r:10},legend:{orientation:'h'}},{scrollZoom:true});
   _wireChartRelayout();
 }
+// Each active oscillator indicator instance beyond the first gets its own overlaid,
+// hidden y-axis so it autoscales independently -- a price-scale indicator (e.g.
+// LinearRegression) and a 0-1-scale one (e.g. RelativeStrengthIndex) sharing one
+// auto-ranging axis otherwise flattens the smaller-range one to an invisible line near
+// zero. The first instance keeps Plotly's default visible axis (readable ticks for the
+// common single-indicator case); axes 2+ are overlaid/hidden -- Plotly addresses its
+// first y-axis as plain 'y'/'yaxis', never 'y1'/'yaxis1', so axis 1 never goes through
+// this helper. Real y-values are untouched (no normalization), so hover tooltips still
+// show each indicator's true value.
+function _oscillatorOverlayAxis(){
+  return {visible:false,overlaying:'y'};
+}
 function _renderOscillatorPanel(data){
-  var x=_lastCandles.map(function(c){return new Date(c.t);}),traces=[];
+  var x=_lastCandles.map(function(c){return new Date(c.t);}),traces=[],axisN=0;
+  var layout={height:180,template:'plotly_dark',dragmode:'pan',
+    xaxis:{type:'date',rangeslider:{visible:false}},
+    margin:{t:10,b:20,l:60,r:10},legend:{orientation:'h'}};
   _activeIndicators.forEach(function(a){
     var spec=_indicatorCatalog&&_indicatorCatalog[a.name];
     if(!spec||spec.panel!=='oscillator')return;
     var series=_seriesForIndicator(data,a);
     if(!series)return;
+    axisN++;
+    var axisKey=axisN===1?'y':'y'+axisN;
+    if(axisN>1)layout['yaxis'+axisN]=_oscillatorOverlayAxis();
     Object.keys(series).forEach(function(attr){
-      traces.push({type:'scattergl',mode:'lines',x:x,
+      traces.push({type:'scattergl',mode:'lines',x:x,yaxis:axisKey,
         y:series[attr].map(function(p){return p.value;}),
         name:a.name+'.'+attr,line:{width:1}});
     });
@@ -542,9 +560,7 @@ function _renderOscillatorPanel(data){
   if(!panel)return;
   if(!traces.length){_clearIndicatorPanel();return;}
   panel.style.height='180px';
-  Plotly.react('ind-panel',traces,{height:180,template:'plotly_dark',dragmode:'pan',
-    xaxis:{type:'date',rangeslider:{visible:false}},
-    margin:{t:10,b:20,l:60,r:10},legend:{orientation:'h'}},{scrollZoom:true});
+  Plotly.react('ind-panel',traces,layout,{scrollZoom:true});
   var el=document.getElementById('ind-panel');
   if(el){
     el.removeAllListeners&&el.removeAllListeners('plotly_relayout');
