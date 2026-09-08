@@ -52,11 +52,14 @@ RUN uv sync --no-install-package nautilus_trader
 # step gets a full Cargo cache hit and does no Rust compilation itself.
 # CARGO_BUILD_JOBS caps parallelism — release codegen-units=1 uses 2-4 GB/job;
 # 12 default jobs would exceed Docker's ~13 GB limit with a SIGKILL/OOM.
+# Overridable via --build-arg for low-RAM hosts (see `make build-base-vps`) —
+# default of 4 is unchanged for everyone who doesn't pass the arg.
 COPY Cargo.toml ./
 COPY Cargo.lock ./
 COPY crates ./crates
 COPY patches ./patches
-ENV CARGO_BUILD_JOBS=4
+ARG CARGO_BUILD_JOBS=4
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
 RUN cargo build --lib \
   -p nautilus-backtest \
   -p nautilus-common \

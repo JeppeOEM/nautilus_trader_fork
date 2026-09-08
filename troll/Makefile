@@ -3,7 +3,7 @@ TROLL_DIR  := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 COMPOSE    := docker compose -f $(TROLL_DIR)docker-compose.yml
 BASE_IMAGE := nautilus-trader-base:1.229.0
 
-.PHONY: build-base up redeploy up-live-paper build-insecure test test-live-paper down logs logs-dash web enable-boot enable-firewall harden-ssh remote-tui remote-web remote-web-stop remote-db remote-db-stop
+.PHONY: build-base build-base-vps up redeploy up-live-paper build-insecure test test-live-paper down logs logs-dash web enable-boot enable-firewall harden-ssh remote-tui remote-web remote-web-stop remote-db remote-db-stop
 
 REMOTE_HOST := nifelheim
 REMOTE_DIR  := ~/nautilus_trader_fork/troll
@@ -17,6 +17,27 @@ build-base:
 		CA_SECRET="--secret id=ca-cert,src=$(HOME)/.docker/corporate-ca.pem"; \
 	fi; \
 	docker build $$CA_SECRET --network=host \
+		-f $(REPO_ROOT)/.docker/nautilus_trader.dockerfile \
+		--target application \
+		-t $(BASE_IMAGE) \
+		$(REPO_ROOT)
+
+## Build the base image on a low-RAM VPS. Runs the Rust compile as a single job
+## (CARGO_BUILD_JOBS=1) instead of build-base's default 4-wide, capping peak
+## memory at ~2-4GB instead of ~8-16GB -- see .docker/nautilus_trader.dockerfile's
+## CARGO_BUILD_JOBS comment. Much slower than build-base (serial, not parallel) --
+## budget well over an hour on a small VPS, not ~15 min. --progress=plain forces
+## linear, always-flushed log lines instead of BuildKit's default redrawing TTY
+## UI, which can look like nothing is happening over a slow/non-interactive SSH
+## session -- use this if `make build-base` printed nothing before failing.
+build-base-vps:
+	@CA_SECRET=""; \
+	if [ -f "$(HOME)/.docker/corporate-ca.pem" ]; then \
+		CA_SECRET="--secret id=ca-cert,src=$(HOME)/.docker/corporate-ca.pem"; \
+	fi; \
+	DOCKER_BUILDKIT=1 docker build $$CA_SECRET --network=host \
+		--progress=plain \
+		--build-arg CARGO_BUILD_JOBS=1 \
 		-f $(REPO_ROOT)/.docker/nautilus_trader.dockerfile \
 		--target application \
 		-t $(BASE_IMAGE) \
