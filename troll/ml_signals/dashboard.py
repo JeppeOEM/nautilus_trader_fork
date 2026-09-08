@@ -169,6 +169,12 @@ td:first-child, th:first-child { text-align: left; }
 # embedder). Lines mode is backed by /data/coin/{id}/lines (_live_lines_json/
 # _historical_lines_json, Story 8.1) -- a different data source than Candles/Ticks
 # (order-book bid/ask/mid/micro/price snapshots, not trade-tick OHLC/prints).
+# Story 8.4 (indicator picker, Candles-mode only) additionally needs the embedder to
+# declare #ind-picker/#ind-picker-list/#ind-picker-note/#ind-panel divs and call
+# _fetchIndicatorCatalog() once in its init script; _activeIndicators/_indicatorCatalog/
+# _lastCandles/_syncingXRange are declared inside this module, same pattern as _diffA/
+# _diffB above. Backed by Story 8.2's /data/indicators/catalog and
+# /data/coin/{id}/indicators verbatim (SSOT-03) -- no new Python endpoint.
 _LIVE_CHART_JS = """
 function _fmtDTL(d){var p=function(n){return n<10?'0'+n:String(n);};return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+'T'+p(d.getHours())+':'+p(d.getMinutes());}
 function setCoinMode(m){
@@ -181,6 +187,7 @@ function _updateModeButtons(){
   if(bl)bl.style.borderColor=_coinMode==='lines'?'#58a6ff':'#444';
   if(bc)bc.style.borderColor=_coinMode==='candles'?'#58a6ff':'#444';
   if(bt)bt.style.borderColor=_coinMode==='ticks'?'#58a6ff':'#444';
+  _updateIndicatorPickerEnabled();
 }
 function onBarChange(){
   var sel=document.getElementById('bar-sel');
@@ -309,6 +316,7 @@ function _relayoutXRange(ev){
 function _onChartRelayout(ev){
   var rng=_relayoutXRange(ev);
   if(!rng)return;  // not a real pan/zoom (e.g. legend click, resize/autosize)
+  _syncChartXRange('live-chart',rng);
   if(!_coinPanning){
     // First drag/zoom: freeze live polling exactly like clicking "Load" does, so the
     // 1s poll loop stops overwriting the candle/tick trace out from under the user. A
@@ -355,10 +363,137 @@ function _wireChartRelayout(){
     liveEl.on('plotly_relayout',_onChartRelayout);
   }
 }
-function _renderCandleChart(candles){
-  if(!candles||!candles.length)return;
+// -- Indicator picker (Story 8.4): catalog-driven multi-select, overlay traces added
+// directly to live-chart's candlestick trace array, a dedicated oscillator panel synced
+// to live-chart's x-axis. Reuses Story 8.2's /data/indicators/catalog and
+// /data/coin/{id}/indicators verbatim (SSOT-03) -- no new Python endpoint this story.
+var _activeIndicators=[];  // [{name,params}]
+var _indicatorCatalog=null;  // {name: {params:{...defaults}, panel:'overlay'|'oscillator'}}
+var _lastCandles=null;  // candles most recently rendered on live-chart (candles mode only)
+var _syncingXRange=false;
+function _fetchIndicatorCatalog(){
+  fetch('/data/indicators/catalog').then(function(r){return r.json();}).then(function(d){
+    _indicatorCatalog=d;
+    _renderIndicatorPicker();
+    _updateIndicatorPickerEnabled();
+  }).catch(function(err){setStatus('Indicator catalog error: '+err);});
+}
+function _toggleIndicatorPicker(){
+  var box=document.getElementById('ind-picker');
+  if(box)box.style.display=box.style.display==='none'?'block':'none';
+}
+function _escAttr(s){
+  return String(s).replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;');
+}
+function _paramInputHTML(name,key,val){
+  var id='ip_'+name+'_'+key;
+  if(typeof val==='boolean')
+    return '<label style="margin-right:8px"><input type="checkbox" id="'+id+'" '+(val?'checked':'')
+      +' onchange="_updateIndicatorParam(\\''+name+'\\',\\''+key+'\\',this.checked)"> '+key+'</label>';
+  return '<label style="margin-right:8px">'+key+' <input type="'+(typeof val==='number'?'number':'text')+'" id="'+id+'" value="'+_escAttr(val)
+    +'" style="width:56px" onchange="_updateIndicatorParam(\\''+name+'\\',\\''+key+'\\',this.value)"></label>';
+}
+function _renderIndicatorPicker(){
+  var box=document.getElementById('ind-picker-list');
+  if(!box||!_indicatorCatalog)return;
+  var search=document.getElementById('ind-picker-search');
+  var q=search?search.value.trim().toLowerCase():'';
+  var names=Object.keys(_indicatorCatalog).sort().filter(function(n){return !q||n.toLowerCase().indexOf(q)!==-1;});
+  box.innerHTML=names.map(function(name){
+    var spec=_indicatorCatalog[name];
+    var active=_activeIndicators.filter(function(a){return a.name===name;})[0];
+    var row='<div style="padding:2px 0"><label><input type="checkbox" '+(active?'checked':'')
+      +' onchange="_toggleIndicator(\\''+name+'\\',this.checked)"> <b>'+name+'</b> <span style="color:#8b949e">('+spec.panel+')</span></label>';
+    if(active){
+      row+='<div style="padding-left:20px;margin-top:2px">'
+        +Object.keys(spec.params).map(function(k){return _paramInputHTML(name,k,active.params[k]);}).join('')
+        +'</div>';
+    }
+    return row+'</div>';
+  }).join('');
+}
+function _toggleIndicator(name,checked){
+  if(checked){
+    var spec=_indicatorCatalog[name],params={};
+    for(var k in spec.params)params[k]=spec.params[k];
+    _activeIndicators.push({name:name,params:params});
+  }else{
+    _activeIndicators=_activeIndicators.filter(function(a){return a.name!==name;});
+  }
+  _renderIndicatorPicker();
+  _refreshActiveIndicators();
+}
+function _updateIndicatorParam(name,key,rawVal){
+  var entry=_activeIndicators.filter(function(a){return a.name===name;})[0];
+  if(!entry)return;
+  var defaultVal=_indicatorCatalog[name].params[key];
+  entry.params[key]=typeof defaultVal==='boolean'?!!rawVal:typeof defaultVal==='number'?Number(rawVal):rawVal;
+  _refreshActiveIndicators();
+}
+function _updateIndicatorPickerEnabled(){
+  var box=document.getElementById('ind-picker'),note=document.getElementById('ind-picker-note');
+  if(!box)return;
+  var enabled=_coinMode==='candles';
+  var inputs=box.getElementsByTagName('input');
+  for(var i=0;i<inputs.length;i++)inputs[i].disabled=!enabled;
+  if(note)note.style.display=enabled?'none':'block';
+  if(!enabled)_clearIndicatorPanel();
+}
+function _buildIndicatorSpecString(){
+  return _activeIndicators.map(function(a){
+    var keys=Object.keys(a.params);
+    return keys.length?a.name+':'+keys.map(function(k){return k+'='+a.params[k];}).join(','):a.name;
+  }).join('|');
+}
+// Always fetches via the historical (explicit start/end) indicator endpoint, derived from
+// _lastCandles' own actual window -- /chart/{id} has no live 1s poll (unlike /coin/{id}'s
+// pollCoin: this page's init_script fetches its window once and only refetches on an
+// explicit Load/pan/mode/bar change), so there's no separate "live" indicator case here.
+function _fetchIndicatorSeriesForCurrentWindow(){
+  var specStr=_buildIndicatorSpecString();
+  if(!specStr||!_lastCandles||!_lastCandles.length)return Promise.resolve({});
+  var startMs=_lastCandles[0].t,endMs=_lastCandles[_lastCandles.length-1].t+_coinBarSeconds*1000;
+  var url='/data/coin/'+encodeURIComponent(_coinIid)+'/indicators?bar='+_coinBarSeconds
+    +'&start='+encodeURIComponent(_fmtDTL(new Date(startMs)))
+    +'&end='+encodeURIComponent(_fmtDTL(new Date(endMs)))
+    +'&spec='+encodeURIComponent(specStr);
+  return fetch(url).then(function(r){
+    return r.json().then(function(body){
+      if(!r.ok)throw new Error((body&&body.error)||('HTTP '+r.status));
+      return body;
+    });
+  });
+}
+// Response keys are the backend's own _indicator_id(name, coerced_params) -- rather than
+// re-deriving that exact string client-side (bool/float stringification could drift from
+// Python's str()), match by name prefix instead: no two catalog entries share a
+// name-is-a-prefix-of-another relationship.
+function _seriesForIndicator(data,a){
+  var prefix=a.name+'_';
+  for(var key in data)if(key===a.name||key.indexOf(prefix)===0)return data[key];
+  return null;
+}
+function _clearIndicatorPanel(){
+  var panel=document.getElementById('ind-panel');
+  if(panel){Plotly.purge(panel);panel.style.height='0px';}
+}
+var _indicatorFetchGen=0;
+function _refreshActiveIndicators(){
+  if(_lastCandles)_renderCandleTraces();  // paint base immediately; overlays follow async below
+  if(_coinMode!=='candles'||!_activeIndicators.length||!_lastCandles||!_lastCandles.length){
+    _clearIndicatorPanel();
+    return;
+  }
+  var gen=++_indicatorFetchGen,candlesAtRequest=_lastCandles;
+  _fetchIndicatorSeriesForCurrentWindow().then(function(data){
+    if(gen!==_indicatorFetchGen||_coinMode!=='candles'||_lastCandles!==candlesAtRequest)return;  // superseded
+    _renderCandleTraces(data);
+    _renderOscillatorPanel(data);
+  }).catch(function(err){setStatus('Indicator error: '+err);});
+}
+function _candleBaseTraces(candles){
   var x=candles.map(function(c){return new Date(c.t);});
-  Plotly.react('live-chart',[{
+  return [{
     type:'candlestick',x:x,
     open:candles.map(function(c){return c.o;}),
     high:candles.map(function(c){return c.h;}),
@@ -367,10 +502,69 @@ function _renderCandleChart(candles){
     name:'price',
     increasing:{line:{color:'#26a69a'}},
     decreasing:{line:{color:'#ef5350'}},
-  }],{height:300,template:'plotly_dark',dragmode:'pan',
+  }];
+}
+function _renderCandleTraces(indicatorData){
+  var traces=_candleBaseTraces(_lastCandles);
+  if(indicatorData){
+    var x=_lastCandles.map(function(c){return new Date(c.t);});
+    _activeIndicators.forEach(function(a){
+      var spec=_indicatorCatalog&&_indicatorCatalog[a.name];
+      if(!spec||spec.panel!=='overlay')return;
+      var series=_seriesForIndicator(indicatorData,a);
+      if(!series)return;
+      Object.keys(series).forEach(function(attr){
+        traces.push({type:'scattergl',mode:'lines',x:x,
+          y:series[attr].map(function(p){return p.value;}),
+          name:a.name+(Object.keys(series).length>1?'.'+attr:''),line:{width:1}});
+      });
+    });
+  }
+  Plotly.react('live-chart',traces,{height:300,template:'plotly_dark',dragmode:'pan',
     xaxis:{type:'date',rangeslider:{visible:false}},
-    margin:{t:10,b:30,l:60,r:10}},{scrollZoom:true});
+    margin:{t:10,b:30,l:60,r:10},legend:{orientation:'h'}},{scrollZoom:true});
   _wireChartRelayout();
+}
+function _renderOscillatorPanel(data){
+  var x=_lastCandles.map(function(c){return new Date(c.t);}),traces=[];
+  _activeIndicators.forEach(function(a){
+    var spec=_indicatorCatalog&&_indicatorCatalog[a.name];
+    if(!spec||spec.panel!=='oscillator')return;
+    var series=_seriesForIndicator(data,a);
+    if(!series)return;
+    Object.keys(series).forEach(function(attr){
+      traces.push({type:'scattergl',mode:'lines',x:x,
+        y:series[attr].map(function(p){return p.value;}),
+        name:a.name+'.'+attr,line:{width:1}});
+    });
+  });
+  var panel=document.getElementById('ind-panel');
+  if(!panel)return;
+  if(!traces.length){_clearIndicatorPanel();return;}
+  panel.style.height='180px';
+  Plotly.react('ind-panel',traces,{height:180,template:'plotly_dark',dragmode:'pan',
+    xaxis:{type:'date',rangeslider:{visible:false}},
+    margin:{t:10,b:20,l:60,r:10},legend:{orientation:'h'}},{scrollZoom:true});
+  var el=document.getElementById('ind-panel');
+  if(el){
+    el.removeAllListeners&&el.removeAllListeners('plotly_relayout');
+    el.on('plotly_relayout',function(ev){var rng=_relayoutXRange(ev);if(rng)_syncChartXRange('ind-panel',rng);});
+  }
+}
+// Guarded against reentrancy: a programmatic Plotly.relayout on the target panel would
+// otherwise re-fire that panel's own plotly_relayout listener and ping-pong forever.
+function _syncChartXRange(sourceId,rng){
+  if(_syncingXRange||!rng)return;
+  var targetId=sourceId==='live-chart'?'ind-panel':'live-chart';
+  var targetEl=document.getElementById(targetId);
+  if(!targetEl||!targetEl.data||!targetEl.data.length)return;
+  _syncingXRange=true;
+  try{Plotly.relayout(targetId,{'xaxis.range':rng});}finally{_syncingXRange=false;}
+}
+function _renderCandleChart(candles){
+  if(!candles||!candles.length)return;
+  _lastCandles=candles;
+  _refreshActiveIndicators();
 }
 // Click-to-diff (bid/ask/mid/micro/price A/B comparison) -- Lines-mode-only, moved here
 // from /coin/{id}'s old bespoke renderCoin implementation (Story 8.1) so it works
@@ -889,10 +1083,18 @@ def _render_chart_page(symbol: str, start_ms: int, end_ms: int) -> str:
         "<option value='30'>30s</option><option value='60' selected>1m</option><option value='300'>5m</option>"
         "<option value='900'>15m</option><option value='3600'>1h</option>"
         "<option value='14400'>4h</option><option value='86400'>1d</option><option value='604800'>1w</option></select>"
+        '<button id="btn-indicators" onclick="_toggleIndicatorPicker()" style="background:#21262d;color:#c9d1d9;border:1px solid #444;padding:3px 10px;cursor:pointer">Indicators</button>'
+        "</div>"
+        "<div id='ind-picker' style='display:none;padding:6px 4px;margin-bottom:6px;border:1px solid #21262d;font-size:12px;max-height:220px;overflow-y:auto'>"
+        "<div id='ind-picker-note' style='display:none;color:#f0883e;margin-bottom:4px'>Indicators require Candles mode</div>"
+        "<input id='ind-picker-search' type='text' placeholder='Search indicators…' oninput='_renderIndicatorPicker()' "
+        "style=\"width:100%;box-sizing:border-box;margin-bottom:4px;background:#0d1117;color:#c9d1d9;border:1px solid #444;padding:3px 6px\">"
+        "<div id='ind-picker-list'></div>"
         "</div>"
         "<div id='status' style='color:#8b949e;font-size:11px;margin:4px 0'></div>"
         "<div id='live-chart' style='height:300px;margin-bottom:8px'></div>"
         "<div id='diff-box' style='min-height:22px;padding:5px 2px;border-top:1px solid #21262d;font-size:12px;font-family:monospace'></div>"
+        "<div id='ind-panel' style='height:0px;overflow:hidden;margin-bottom:8px'></div>"
     )
     init_script = (
         "<script>"
@@ -901,7 +1103,7 @@ def _render_chart_page(symbol: str, start_ms: int, end_ms: int) -> str:
         "var _coinPanning=false,_chartState=null,_relayoutTimer=null,timer=null;"
         "var _MAX_CHUNK_MS=30*24*3600*1000;"
         "function setStatus(s){var el=document.getElementById('status');if(el)el.innerHTML=s;}"
-        "_updateModeButtons();_fetchHistCoin(_coinIid,_coinHistStart,_coinHistEnd);"
+        "_updateModeButtons();_fetchHistCoin(_coinIid,_coinHistStart,_coinHistEnd);_fetchIndicatorCatalog();"
         "</script>"
     )
     body = (

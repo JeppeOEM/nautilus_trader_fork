@@ -49,8 +49,8 @@ global.document = { getElementById: function(){ return _dummyEl(); } };
 global.window = {};
 global.history = { pushState: function(){} };
 global.location = { pathname: "/", search: "" };
-global.Plotly = { react: function(){}, newPlot: function(){} };
-global.fetch = function(){ return Promise.resolve({ json: function(){ return Promise.resolve({rows:[], candles:[], ticks:[]}); } }); };
+global.Plotly = { react: function(){}, newPlot: function(){}, purge: function(){} };
+global.fetch = function(){ return Promise.resolve({ ok:true, json: function(){ return Promise.resolve({rows:[], candles:[], ticks:[]}); } }); };
 
 // Globals _LIVE_CHART_JS expects its embedding page to declare (matches _render_chart_page's
 // init_script, dashboard.py) -- previously these lived in _INDEX_HTML's own script, removed
@@ -117,3 +117,67 @@ def test_chart_pan_state_machine() -> None:
         ["node", "-e", harness], capture_output=True, text=True, timeout=30, check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+# -- Story 8.4: indicator picker's spec-string builder + response-series lookup -------------
+
+_INDICATOR_HARNESS_TEMPLATE = r"""
+"use strict";
+const assert = require("assert");
+
+function _dummyEl(){ return { innerHTML:"", style:{}, value:"", on:function(){}, removeAllListeners:function(){}, getElementsByTagName:function(){ return []; } }; }
+global.document = { getElementById: function(){ return _dummyEl(); } };
+global.Plotly = { react: function(){}, relayout: function(){}, purge: function(){} };
+global.fetch = function(){ return Promise.resolve({ ok:true, json: function(){ return Promise.resolve({}); } }); };
+
+var _coinIid="test-coin";var _coinMode="candles";var _coinBarSeconds=60;
+var _coinHistStart=null,_coinHistEnd=null;
+var _coinPanning=false,_chartState=null,_relayoutTimer=null,timer=null;
+var _MAX_CHUNK_MS=30*24*3600*1000;
+function setStatus(s){}
+
+__DASHBOARD_JS__
+
+// -- _buildIndicatorSpecString: pipe-separated entries, comma-separated params, matching
+// dashboard.py's _parse_indicator_spec contract exactly (verified against the real Python
+// parser by the test itself, not just against a hand-written expected string here).
+_activeIndicators=[
+  {name:"SimpleMovingAverage",params:{period:10}},
+  {name:"BollingerBands",params:{period:20,k:2.5}},
+  {name:"OnBalanceVolume",params:{}}
+];
+console.log(_buildIndicatorSpecString());
+
+// -- _seriesForIndicator: matches the backend's own _indicator_id key by name/name_ prefix,
+// never cross-matches a different active indicator, returns null (not a throw) when absent.
+var data={
+  "SimpleMovingAverage_period=10":{value:[1,2,3]},
+  "OnBalanceVolume":{value:[4,5,6]}
+};
+var smaSeries=_seriesForIndicator(data,{name:"SimpleMovingAverage",params:{period:10}});
+assert.deepStrictEqual(smaSeries,{value:[1,2,3]},"prefix match must find the SMA series");
+var obvSeries=_seriesForIndicator(data,{name:"OnBalanceVolume",params:{}});
+assert.deepStrictEqual(obvSeries,{value:[4,5,6]},"bare-name match must find the OBV series");
+var missing=_seriesForIndicator(data,{name:"RelativeStrengthIndex",params:{}});
+assert.strictEqual(missing,null,"an indicator with no matching response key must return null, not throw");
+console.error("ASSERTIONS_OK");
+"""
+
+
+def test_indicator_spec_string_matches_python_parser() -> None:
+    if shutil.which("node") is None:
+        pytest.skip("node not installed")
+    js = _extract_inline_script()
+    harness = _INDICATOR_HARNESS_TEMPLATE.replace("__DASHBOARD_JS__", js)
+    result = subprocess.run(
+        ["node", "-e", harness], capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "ASSERTIONS_OK" in result.stderr
+
+    spec_str = result.stdout.strip()
+    assert dashboard._parse_indicator_spec(spec_str) == [
+        ("SimpleMovingAverage", {"period": "10"}),
+        ("BollingerBands", {"period": "20", "k": "2.5"}),
+        ("OnBalanceVolume", {}),
+    ]

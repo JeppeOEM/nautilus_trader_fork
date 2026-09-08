@@ -41,7 +41,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-07-01
-last_updated: 2026-09-07 (8-1/8-2 done)
+last_updated: 2026-09-08 (8-5 dropped from epic before dev started, 8-4 code-reviewed and done)
 project: nautilus_trader_fork
 project_key: NOKEY
 tracking_system: file-system
@@ -103,11 +103,13 @@ development_status:
   # epic-8 has a real epics.md entry (2026-09-06, FR28-31: TradingView-style chart
   # navigation + indicator overlays) -- no sprint-planning run yet, stories created
   # directly via create-story as the epic progresses.
-  epic-8: in-progress
+  epic-8: done # 8.5 dropped from epic 2026-09-08; all remaining stories (8.1/8.2/8.4) done
   8-1-consolidate-the-interactive-chart-widget-onto-chart-id-only: done
   8-2-technical-indicator-computation-via-nautilus-trader-indicators: done
-  8-4-indicator-picker-on-the-chart-page-settings-toolbar: backlog
-  8-5-combined-candlestick-and-bid-ask-overlay-mode: backlog
+  8-4-indicator-picker-on-the-chart-page-settings-toolbar: done
+  # 8.5 (combined candlestick + bid/ask overlay) dropped from the epic at the user's
+  # request 2026-09-08, before any dev work started -- story file deleted, epics.md's
+  # Story 8.5 section and FR31 removed.
 
 action_items:
   - epic: 1

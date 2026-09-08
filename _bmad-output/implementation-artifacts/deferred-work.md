@@ -1,3 +1,8 @@
+## Deferred from: code review of 8-4-indicator-picker-on-the-chart-page-settings-toolbar (2026-09-08)
+
+- **Batch-level error reporting loses per-indicator granularity.** `_indicators_json` (dashboard.py:1388, from Story 8.2) fails the entire multi-indicator request on the first bad entry, returning one generic `{"error": ...}` message with no indication of which indicator/param in the pipe-separated spec was at fault. Pre-existing from Story 8.2, not introduced by Story 8.4 — Story 8.4's own fix (checking `r.ok` client-side) will at least surface that *something* failed, but not which indicator.
+- **`_seriesForIndicator`'s prefix-match invariant is documented, not enforced.** The comment above it (dashboard.py:457-460) asserts "no two catalog entries share a name-is-a-prefix-of-another relationship" — true today (verified against all 34 `INDICATOR_CATALOG` keys during Story 8.4's review), but nothing guards it if a future indicator addition violates it; a runtime assertion or catalog-level test would catch a silent cross-match regression early. `troll/ml_signals/chart_indicators.py`, `troll/ml_signals/dashboard.py`.
+
 ## Deferred from: code review of spec-normalize-rankings-table-units.md (2026-07-17)
 
 - source_spec: `_bmad-output/implementation-artifacts/spec-normalize-rankings-table-units.md`

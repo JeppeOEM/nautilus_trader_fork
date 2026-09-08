@@ -11,7 +11,7 @@ inputDocuments:
 
 ## Overview
 
-This document provides the complete epic and story breakdown for nautilus_trader_fork (the `troll/` dYdX Signal Research & Trading Platform), decomposing the requirements from the PRD and Architecture spine into implementable stories. Epics 1–3 (below) cover the original PRD/architecture scope (FR1–FR15) and were fully implemented as of 2026-07-17. This document was reopened on 2026-07-24 to extend coverage for the PRD's volatility Ranking Mode (FR-16) and new Bot Monitoring TUI feature (FR-17–FR-25), backed by a finalized UX design contract (`DESIGN.md`/`EXPERIENCE.md`) — the project's first UX-driven surface. Reopened again on 2026-09-06 to add Epic 8 (FR28–FR31): TradingView-style multi-chart navigation and selectable technical indicators on the web dashboard's coin chart. Numbered Epic 8 (not 5) because epics 5–7 were filed directly as standalone stories bypassing epics.md ceremony (see `sprint-status.yaml`) — Epic 8 continues that same global epic-number sequence to avoid collision with their story-file paths (`5-1-*`, `6-1-*`, `7-1-*`). No PRD/Architecture update precedes this addition (same precedent as FR27); PM should fold FR28–FR31 into the PRD proper once shipped.
+This document provides the complete epic and story breakdown for nautilus_trader_fork (the `troll/` dYdX Signal Research & Trading Platform), decomposing the requirements from the PRD and Architecture spine into implementable stories. Epics 1–3 (below) cover the original PRD/architecture scope (FR1–FR15) and were fully implemented as of 2026-07-17. This document was reopened on 2026-07-24 to extend coverage for the PRD's volatility Ranking Mode (FR-16) and new Bot Monitoring TUI feature (FR-17–FR-25), backed by a finalized UX design contract (`DESIGN.md`/`EXPERIENCE.md`) — the project's first UX-driven surface. Reopened again on 2026-09-06 to add Epic 8 (FR28–FR30): TradingView-style multi-chart navigation and selectable technical indicators on the web dashboard's coin chart. Numbered Epic 8 (not 5) because epics 5–7 were filed directly as standalone stories bypassing epics.md ceremony (see `sprint-status.yaml`) — Epic 8 continues that same global epic-number sequence to avoid collision with their story-file paths (`5-1-*`, `6-1-*`, `7-1-*`). No PRD/Architecture update precedes this addition (same precedent as FR27); PM should fold FR28–FR30 into the PRD proper once shipped. (FR31, a combined candlestick + bid/ask overlay, was drafted alongside these but the story implementing it — 8.5 — was dropped before dev started; FR31 removed with it.)
 
 ## Requirements Inventory
 
@@ -50,8 +50,6 @@ FR29 `[NEW — 2026-09-06, not yet in PRD, PM should fold in]`: TradingView-styl
 
 FR30 `[NEW — 2026-09-06, not yet in PRD, PM should fold in]`: Selectable technical indicators from `nautilus_trader`'s own built-in indicator library — the user can choose from every concrete indicator class in `nautilus_trader.indicators` (confirmed ~45 as of this repo's pinned version: `SimpleMovingAverage`, `ExponentialMovingAverage`, `WeightedMovingAverage`, `HullMovingAverage`, `AdaptiveMovingAverage`, `DoubleExponentialMovingAverage`, `VariableIndexDynamicAverage`, `WilderMovingAverage`, `BollingerBands`, `KeltnerChannel`, `DonchianChannel`, `RelativeStrengthIndex`, `MovingAverageConvergenceDivergence`, `Stochastics`, `CommodityChannelIndex`, `AverageTrueRange`, `VolatilityRatio`, `AroonOscillator`, `DirectionalMovement`, `RateOfChange`, `ChandeMomentumOscillator`, `OnBalanceVolume`, `VolumeWeightedAveragePrice`, and the rest of that module's indicators) and add it to the candlestick chart. **No third-party TA library** — `pandas_ta`/`pandas_ta_classic` are explicitly rejected; every indicator is the exact same `nautilus_trader.indicators.Indicator` class already usable by research/backtest/live contexts (FR10), fed via its own `update_raw`/`handle_bar`, never reimplemented. Indicators whose natural output overlays price (moving averages, Bollinger/Keltner/Donchian bands, VWAP) render as additional traces directly on the candlestick chart; indicators whose output is a bounded oscillator on a different scale (RSI, Stochastics, MACD, CCI, AROON, etc.) render in the oscillator panel from FR29, which follows the candlestick chart's x-axis like every other spawned panel.
 
-FR31 `[NEW — 2026-09-06, not yet in PRD, PM should fold in]`: Combined candlestick + order-book overlay — in Candles display mode, a per-chart setting overlays live best-bid/best-ask lines on top of the OHLC candlesticks in the same chart, sourced from data already returned alongside candles (no new backend data pipeline).
-
 ### NonFunctional Requirements
 
 _The PRD has no explicit NFR section; the following are derived from the Vision, Success Metrics, and Architecture spine invariants that constrain how the FRs above must be implemented._
@@ -84,7 +82,7 @@ NFR5: Precision correctness — price/quantity precision changes only via `Decim
 - **Charting library decision stands (Story 7.1, reconfirmed 2026-09-06): stay on Plotly, do not introduce TradingView's Lightweight Charts or any other charting library.** Epic 8 extends Story 7.1's hand-rolled pan/zoom/pagination machinery rather than replacing it.
 - **No new dependency for FR30 (revised 2026-09-06) — explicitly rejected `pandas_ta`/`pandas_ta_classic`.** `nautilus_trader.indicators` already ships ~45 concrete TA indicator classes (moving averages, bands, oscillators, volume indicators); FR30 uses those directly. Nothing to add to `troll/troll-requirements.txt`.
 - **Indicator placement (FR30) follows FR10 precedent:** the indicator *classes* already live in the one shared place (`nautilus_trader.indicators`) usable by research/backtest/live — this epic adds only a chart-specific registry/dispatch layer (which class + params + which OHLCV fields feed its `update_raw` + which output attribute(s) to read + overlay-vs-oscillator classification) in `ml_signals/`, never a reimplementation of any indicator's math.
-- **FR30/FR31 data is not net-new collection** — technical indicators are computed from candle OHLC data `_historical_candles_json`/`build_candles()` already produce; the bid/ask overlay (FR31) uses the same per-snapshot bid/ask arrays the existing Lines-mode trace already plots (`chart.bid`/`chart.ask`, dashboard.py:643-644). No collector or catalog schema change.
+- **FR30 data is not net-new collection** — technical indicators are computed from candle OHLC data `_historical_candles_json`/`build_candles()` already produce. No collector or catalog schema change.
 
 ### UX Design Requirements
 
@@ -132,7 +130,6 @@ UX-DR1–UX-DR9: Epic 4 - all Bot Monitoring TUI UX design requirements
 FR28: Epic 8 - Per-chart settings/navigation panes
 FR29: Epic 8 - TradingView-style pan/zoom parity across all coin-detail charts
 FR30: Epic 8 - Selectable technical indicators from nautilus_trader.indicators
-FR31: Epic 8 - Combined candlestick + order-book overlay
 
 ## Epic List
 
@@ -154,7 +151,7 @@ Builder SSHes into the box, opens a keyboard-only urwid terminal UI, and at a gl
 
 ### Epic 8: TradingView-Style Multi-Chart Navigation & Indicator Overlays
 Builder opens a coin's chart on the web dashboard and it behaves like a professional charting site: every chart (not just the price chart) pans on drag and zooms on scroll and stays x-axis-linked to the candlestick chart, each chart carries its own settings toolbar instead of one shared bar, the candlestick chart can show any indicator from `nautilus_trader.indicators`' own built-in library (no third-party TA dependency), and Candles mode can overlay live bid/ask lines on top of the OHLC candlesticks. Extends Story 7.1 (drag-to-pan/scroll-zoom, Lines/Candles/Ticks modes) rather than replacing it — stays on Plotly, no new charting library. Numbered 8 (not 5) to avoid colliding with the standalone bypass-epics 5–7 already tracked in `sprint-status.yaml`.
-**FRs covered:** FR28, FR29, FR30, FR31
+**FRs covered:** FR28, FR29, FR30
 
 ## Epic 1: Trustworthy Coin Ranking & Watchlist
 
@@ -731,7 +728,7 @@ So that I can diagnose a bad day without leaving the terminal, using the same nu
 
 ## Epic 8: TradingView-Style Multi-Chart Navigation & Indicator Overlays
 
-Builder opens a coin's chart on the web dashboard and it behaves like a professional charting site. Since this epic was first drafted, the drag-to-pan candlestick widget (Story 7.1) was refactored into a shared JS module (`_LIVE_CHART_JS`, dashboard.py) embedded on **both** `/coin/{id}` and `/chart/{id}` — but the two pages have diverged: `/coin/{id}`'s "Lines" mode is a separate, bespoke implementation (bid/ask/mid/microprice/price multi-line, plus click-to-diff A/B markers) that never joined the shared pan-to-load-more/pagination machinery, while `/chart/{id}`'s "Lines" mode (via the shared widget) is a single close-price line derived from candle data, with full pagination but none of the richer bid/ask view. Story 8.1 (revised 2026-09-06, replacing an earlier per-chart-toolbar draft that's now largely moot — both pages already have their own toolbars) consolidates the interactive chart widget onto `/chart/{id}` only, bringing its Lines mode to full parity first. Remaining stories (8.2-8.5) build the indicator functionality on top of that consolidated widget. Stays on Plotly — no new charting library (Story 7.1 Dev Notes, reconfirmed here).
+Builder opens a coin's chart on the web dashboard and it behaves like a professional charting site. Since this epic was first drafted, the drag-to-pan candlestick widget (Story 7.1) was refactored into a shared JS module (`_LIVE_CHART_JS`, dashboard.py) embedded on **both** `/coin/{id}` and `/chart/{id}` — but the two pages have diverged: `/coin/{id}`'s "Lines" mode is a separate, bespoke implementation (bid/ask/mid/microprice/price multi-line, plus click-to-diff A/B markers) that never joined the shared pan-to-load-more/pagination machinery, while `/chart/{id}`'s "Lines" mode (via the shared widget) is a single close-price line derived from candle data, with full pagination but none of the richer bid/ask view. Story 8.1 (revised 2026-09-06, replacing an earlier per-chart-toolbar draft that's now largely moot — both pages already have their own toolbars) consolidates the interactive chart widget onto `/chart/{id}` only, bringing its Lines mode to full parity first. Remaining stories (8.2, 8.4) build the indicator functionality on top of that consolidated widget. Stays on Plotly — no new charting library (Story 7.1 Dev Notes, reconfirmed here).
 
 ### Story 8.1: Consolidate the interactive chart widget onto `/chart/{id}` only
 
@@ -832,34 +829,4 @@ So that I can inspect a coin with the same indicator toolkit a professional char
 **Given** `cd troll && python -m pytest ml_signals/tests/test_dashboard_chart.py -q`
 **When** it runs after this story
 **Then** it passes, with a new test asserting the indicator-fetch JS helper builds the correct `spec=` query string for a given active-indicator selection (JS verified via the same `node --check` + stubbed-harness method used in Story 7.1, since no browser is available in this environment — flag for manual in-browser confirmation before considering this story fully verified, same caveat 7.1 documented)
-
-### Story 8.5: Combined candlestick + bid/ask overlay mode
-
-Depends on Story 8.1 (consolidated widget/toolbar on `/chart/{id}`). Independent of Stories 8.2-8.4 — no indicator dependency.
-
-As a user of the chart page,
-I want to see the live best-bid/best-ask lines drawn on top of the candlesticks in Candles mode,
-So that I can see the current spread and candle structure together without switching to Lines mode and losing the OHLC view.
-
-**Acceptance Criteria:**
-
-**Given** `/chart/{id}`'s toolbar in Candles mode
-**When** this story is implemented
-**Then** it gains a "Bid/Ask overlay" toggle, off by default, that persists only for the current session (not remembered across page loads — matches this codebase's existing no-persisted-UI-prefs convention)
-
-**Given** the toggle is on and the chart is in Candles mode
-**When** `_renderCandleChart` runs
-**Then** it adds two additional line traces (`bid`, `ask`) alongside the existing candlestick trace, sourced from the same per-window bid/ask data Story 8.1's new lines endpoints (`_live_lines_json`/`_historical_lines_json`) already produce — fetched alongside the candle window rather than duplicating a second bid/ask query path (FR31)
-
-**Given** the toggle is on
-**When** the user pans/zooms and older candles load via `_loadOlderChunk` (Story 7.1)
-**Then** the bid/ask overlay traces extend in lockstep with the candlestick trace — no gap or truncation in the overlay relative to the candles it's drawn over
-
-**Given** the toggle is off (default)
-**When** Candles mode renders
-**Then** behavior is pixel-for-pixel identical to today's Candles mode (Story 7.1) — this story adds a rendering option, it does not change the default rendering
-
-**Given** the toggle
-**When** the user switches to Lines or Ticks mode
-**Then** the toggle has no effect (it's Candles-mode-specific) and its own UI control is hidden/disabled while in those modes, rather than shown-but-inert
 
