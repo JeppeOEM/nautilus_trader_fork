@@ -23,10 +23,7 @@ Performance note: replaying a large delta range (full day) takes seconds.
 The chart page defaults to 4 hours. Let the user expand via the time pickers.
 """
 
-from collections import deque
-
 from nautilus_trader.model.book import OrderBook
-from nautilus_trader.model.enums import AggressorSide
 from nautilus_trader.model.enums import BookType
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
@@ -35,9 +32,6 @@ from ml_signals.book_features import CancellationTracker
 from ml_signals.book_features import compute_features
 from ml_signals.indicators import Microprice
 from ml_signals.indicators import OrderFlowImbalance
-
-
-_CUM_DELTA_SECONDS = 300  # 5 min
 
 
 def compute_chart_series(
@@ -60,37 +54,12 @@ def compute_chart_series(
     iid = InstrumentId.from_str(instrument_id)
 
     deltas = catalog.order_book_deltas(instrument_ids=[instrument_id], start=start_ns, end=end_ns)
-    sorted_trades = sorted(
-        catalog.trade_ticks(instrument_ids=[instrument_id], start=start_ns, end=end_ns),
-        key=lambda t: t.ts_event,
-    )
-
-    # 5-min rolling cumulative delta from trade ticks
-    cum_delta_series: list[dict] = []
-    window_ns = _CUM_DELTA_SECONDS * 1_000_000_000
-    cum_buf: deque[tuple[int, float]] = deque()
-    running_total = 0.0
-    for tick in sorted_trades:
-        signed = tick.size.as_double()
-        if tick.aggressor_side == AggressorSide.SELLER:
-            signed = -signed
-        cum_buf.append((tick.ts_event, signed))
-        running_total += signed
-        cutoff = tick.ts_event - window_ns
-        while cum_buf and cum_buf[0][0] < cutoff:
-            _, removed = cum_buf.popleft()
-            running_total -= removed
-        cum_delta_series.append({
-            "time": tick.ts_event / 1e9,
-            "value": running_total,
-        })
 
     if not deltas:
         return {
             "ofi": [], "microprice": [], "spread": [],
             "imbalance": [], "mid_imbalance": [], "bid_depth": [], "ask_depth": [],
             "bid_cancel": [], "ask_cancel": [],
-            "cum_delta": cum_delta_series,
         }
 
     # Replay deltas — compute features at every event
@@ -151,5 +120,4 @@ def compute_chart_series(
         series["bid_cancel"].append({"time": t, "value": cr.bid_pressure})
         series["ask_cancel"].append({"time": t, "value": cr.ask_pressure})
 
-    series["cum_delta"] = cum_delta_series
     return series

@@ -1069,9 +1069,10 @@ def _render_chart_page(symbol: str, start_ms: int, end_ms: int) -> str:
     Price pane is the interactive Candles/Lines/Ticks drag-to-pan widget (_LIVE_CHART_JS)
     -- the sole home for this widget since Story 8.1 consolidated it here from /coin/{id}
     -- fed by /data/coin/{id}/candles|ticks|lines. The remaining OFI/imbalance/depth/
-    cancel/cum-delta/spread panes stay server-rendered Plotly subplots from
+    cancel/spread panes stay server-rendered Plotly subplots from
     _chart_data.compute_chart_series for the same [start_ms, end_ms) window picked by
-    the date-range form below.
+    the date-range form below. CVD moved to the indicator picker as a custom indicator
+    (Story 10.2) -- OFI/cancel pressure are slated to follow (Stories 10.3/10.4).
     """
     data = _chart_data.compute_chart_series(
         CATALOG_PATH, symbol,
@@ -1086,13 +1087,12 @@ def _render_chart_page(symbol: str, start_ms: int, end_ms: int) -> str:
         return [p["value"] for p in series]
 
     fig = make_subplots(
-        rows=7, cols=1, shared_xaxes=True,
-        row_heights=[0.14, 0.14, 0.14, 0.15, 0.15, 0.14, 0.14],
+        rows=6, cols=1, shared_xaxes=True,
+        row_heights=[0.16, 0.16, 0.16, 0.17, 0.17, 0.18],
         vertical_spacing=0.02,
         subplot_titles=[
             "OFI", "Book imbalance L1 agg (4-level)", "Mid-layer imbalance (L2-3)",
-            "Depth (4-level)", "Cancel pressure",
-            "5-min cumulative delta", "Spread",
+            "Depth (4-level)", "Cancel pressure", "Spread",
         ],
     )
 
@@ -1126,13 +1126,8 @@ def _render_chart_page(symbol: str, start_ms: int, end_ms: int) -> str:
     _add("bid_cancel", 5, "bid cancel", "#26a69a")
     _add("ask_cancel", 5, "ask cancel", "#ef5350")
 
-    # Row 6: 5-min cumulative delta
-    _add("cum_delta", 6, "cum delta", "#64b5f6")
-    if data.get("cum_delta"):
-        fig.add_hline(y=0, line_color="#555", line_width=1, row=6, col=1)
-
-    # Row 7: spread
-    _add("spread", 7, "spread", "#78909c")
+    # Row 6: spread
+    _add("spread", 6, "spread", "#78909c")
 
     n = len(data.get("ofi", []))
     fig.update_layout(
