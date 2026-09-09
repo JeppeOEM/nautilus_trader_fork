@@ -16,8 +16,8 @@
 Per-event book feature computation for the chart page.
 
 Replays OrderBookDelta from the catalog for a time range, computing OFI,
-book imbalance, depth, and cancel pressure at every single event. The result
-is a dict of named series ready for Lightweight Charts.
+book imbalance, and depth at every single event. The result is a dict of
+named series ready for Lightweight Charts.
 
 Performance note: replaying a large delta range (full day) takes seconds.
 The chart page defaults to 4 hours. Let the user expand via the time pickers.
@@ -28,7 +28,6 @@ from nautilus_trader.model.enums import BookType
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
-from ml_signals.book_features import CancellationTracker
 from ml_signals.book_features import compute_features
 from ml_signals.indicators import Microprice
 from ml_signals.indicators import OrderFlowImbalance
@@ -59,31 +58,20 @@ def compute_chart_series(
         return {
             "ofi": [], "microprice": [], "spread": [],
             "imbalance": [], "mid_imbalance": [], "bid_depth": [], "ask_depth": [],
-            "bid_cancel": [], "ask_cancel": [],
         }
 
     # Replay deltas — compute features at every event
     book  = OrderBook(iid, BookType.L2_MBP)
     ofi   = OrderFlowImbalance(window=ofi_window)
     micro = Microprice()
-    cancel = CancellationTracker(window=ofi_window * 5)
 
     series: dict[str, list[dict]] = {
         "ofi": [], "microprice": [], "spread": [],
         "imbalance": [], "mid_imbalance": [], "bid_depth": [], "ask_depth": [],
-        "bid_cancel": [], "ask_cancel": [],
     }
 
     for delta in sorted(deltas, key=lambda d: d.ts_init):
         t = delta.ts_event / 1e9
-
-        best_bid = book.best_bid_price()
-        best_ask = book.best_ask_price()
-        cancel.update(
-            delta,
-            best_bid.as_double() if best_bid else None,
-            best_ask.as_double() if best_ask else None,
-        )
         book.apply_delta(delta)
 
         bid_price = book.best_bid_price()
@@ -98,7 +86,7 @@ def compute_chart_series(
 
         ofi.update_raw(bid_p, bid_s, ask_p, ask_s)
         micro.update_raw(bid_p, bid_s, ask_p, ask_s)
-        features = compute_features(book, cancel)
+        features = compute_features(book)
 
         if ofi.initialized:
             series["ofi"].append({"time": t, "value": ofi.value})
@@ -115,9 +103,5 @@ def compute_chart_series(
             if features.depth.levels >= 3:
                 mid = (features.imbalance.per_level[1] + features.imbalance.per_level[2]) / 2
                 series["mid_imbalance"].append({"time": t, "value": mid})
-
-        cr = cancel.rate()
-        series["bid_cancel"].append({"time": t, "value": cr.bid_pressure})
-        series["ask_cancel"].append({"time": t, "value": cr.ask_pressure})
 
     return series

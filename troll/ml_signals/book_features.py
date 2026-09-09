@@ -272,12 +272,15 @@ class BookFeatures:
     depth:      DepthProfile
     imbalance:  BookImbalance
     liquidity:  LiquidityDistance
-    cancel:     CancelRate
+    # None when the caller has no cancellation tracker to report (Story 10.3 -- callers that
+    # only need depth/imbalance/liquidity no longer have to maintain a tracker just to satisfy
+    # this field).
+    cancel:     CancelRate | None
 
 
 def compute_features(
     book: OrderBook,
-    cancel_tracker: CancellationTracker,
+    cancel_tracker: CancellationTracker | None = None,
     levels: int = 10,
     liquidity_pct: float = 0.8,
 ) -> BookFeatures | None:
@@ -288,5 +291,5 @@ def compute_features(
         depth=profile,
         imbalance=book_imbalance(profile),
         liquidity=liquidity_distance(profile, liquidity_pct),
-        cancel=cancel_tracker.rate(),
+        cancel=cancel_tracker.rate() if cancel_tracker is not None else None,
     )

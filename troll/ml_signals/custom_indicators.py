@@ -35,6 +35,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from nautilus_trader.model.data import OrderBookDelta
+
+from ml_signals.book_features import CancellationTracker
 from ml_signals.chart_indicators import Panel
 from ml_signals.indicators import trade_aggregates
 
@@ -170,4 +173,101 @@ def _cvd_replay(
 
 CUSTOM_INDICATOR_CATALOG["CumulativeVolumeDelta"] = CustomIndicatorSpec(
     params={}, panel="oscillator", replay=_cvd_replay,
+)
+
+
+def _order_book_deltas(window: ReplayWindow) -> list[OrderBookDelta]:
+    """Fetch this window's OrderBookDelta rows from the catalog, sorted by ts_init --
+    same catalog-query pattern chart_data.py's own replay loop already uses."""
+    from nautilus_trader.persistence.catalog import ParquetDataCatalog
+
+    catalog = ParquetDataCatalog(_CATALOG_PATH)
+    deltas = catalog.order_book_deltas(
+        instrument_ids=[window.instrument_id],
+        start=window.start_ms * 1_000_000, end=window.end_ms * 1_000_000,
+    )
+    return sorted(deltas, key=lambda d: d.ts_init)
+
+
+# Cap on how many consecutive empty buckets forward-fill will carry a value across before
+# giving up and reporting None again -- forward-filling a *quiet* market is correct (the
+# level genuinely hasn't changed), but forward-filling forever across a real ingestion outage
+# would render a stale reading as confidently current, which is exactly what DATA-01 forbids.
+# ponytail: a flat bucket-count cap, not a time-aware one -- revisit if a real outage shorter
+# than this many buckets still reads as a false "live" value in practice.
+_MAX_FORWARD_FILL_BUCKETS = 10
+
+
+def _cancel_pressure_replay(
+    candles: list[dict], params: dict[str, Any], window: ReplayWindow,
+) -> dict[str, list[float | None]]:
+    """Per-candle bid/ask cancel pressure, forward-filled: within a candle's bucket, the
+    tracker's state as of the LAST delta processed becomes that candle's value; a bucket with
+    no delta events carries forward the last known value, up to `_MAX_FORWARD_FILL_BUCKETS`
+    (DATA-01 -- a real ingestion gap must eventually read as unknown again, not confidently
+    stale forever). Unlike CVD's running-cumulative sum (a flow, correctly reset per bucket),
+    cancel pressure is a *level* -- the book's current cancellation-pressure state -- so
+    persisting the last real observation across a quiet bucket is the metric's own correct
+    behavior, not fabrication. Candles before the first delta is processed are None (real
+    warm-up, same as any other indicator).
+
+    A BookAction.CLEAR (troll/CLAUDE.md DATA-03: typically a forced resync, a destructive
+    worst-case recovery) resets the tracker's rolling window to empty -- its immediate
+    post-clear rate() is a meaningless (0.0, 0.0), not a real neutral reading, so that bucket
+    is recorded as an explicit reset rather than a sample: forward-fill breaks there instead
+    of treating it as genuine data or silently continuing the pre-clear value.
+
+    Reuses book_features.CancellationTracker unchanged -- no new cancellation math (DESIGN-02).
+    Historical only, same reasoning as CVD (Story 10.2): the old fixed row was never live.
+    """
+    if window.start_ms is None or window.end_ms is None:
+        none_col: list[float | None] = [None] * len(candles)
+        return {"bid_pressure": none_col, "ask_pressure": list(none_col)}
+    from nautilus_trader.model.book import OrderBook
+    from nautilus_trader.model.enums import BookAction
+    from nautilus_trader.model.enums import BookType
+    from nautilus_trader.model.identifiers import InstrumentId
+
+    book = OrderBook(InstrumentId.from_str(window.instrument_id), BookType.L2_MBP)
+    tracker = CancellationTracker(window=params["window"])
+    bar_ns = window.bar_seconds * 1_000_000_000
+    # None value = explicit reset (a CLEAR happened in this bucket); absent key = no event at
+    # all in this bucket (an ordinary gap, still eligible for bounded forward-fill).
+    bucket_samples: dict[int, tuple[float, float] | None] = {}
+    for delta in _order_book_deltas(window):
+        best_bid = book.best_bid_price()
+        best_ask = book.best_ask_price()
+        best_bid_p = best_bid.as_double() if best_bid else None
+        best_ask_p = best_ask.as_double() if best_ask else None
+        tracker.update(delta, best_bid_p, best_ask_p)
+        book.apply_delta(delta)
+        bucket = (delta.ts_event // bar_ns) * bar_ns
+        if delta.action == BookAction.CLEAR:
+            bucket_samples[bucket] = None
+            continue
+        rate = tracker.rate()
+        bucket_samples[bucket] = (rate.bid_pressure, rate.ask_pressure)
+
+    bid_out: list[float | None] = []
+    ask_out: list[float | None] = []
+    last_bid: float | None = None
+    last_ask: float | None = None
+    gap_buckets = 0
+    for candle in candles:
+        key = candle["t"] * 1_000_000
+        if key in bucket_samples:
+            sample = bucket_samples[key]
+            last_bid, last_ask = sample if sample is not None else (None, None)
+            gap_buckets = 0
+        else:
+            gap_buckets += 1
+            if gap_buckets > _MAX_FORWARD_FILL_BUCKETS:
+                last_bid = last_ask = None
+        bid_out.append(last_bid)
+        ask_out.append(last_ask)
+    return {"bid_pressure": bid_out, "ask_pressure": ask_out}
+
+
+CUSTOM_INDICATOR_CATALOG["CancelPressure"] = CustomIndicatorSpec(
+    params={"window": 200}, panel="histogram", replay=_cancel_pressure_replay,
 )

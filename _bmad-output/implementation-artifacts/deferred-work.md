@@ -1,3 +1,7 @@
+## Deferred from: code review of 10-3-cancel-pressure-as-a-custom-histogram-indicator-retiring-the-fixed-row (2026-09-09)
+
+- **`bar_ns = window.bar_seconds * 1_000_000_000` then `// bar_ns` is unguarded against `bar_seconds == 0`.** Pre-existing pattern shared verbatim with `_cvd_replay` (Story 10.2), not introduced fresh by this story; no real call path currently passes `bar_seconds=0`. `troll/ml_signals/custom_indicators.py`.
+
 ## Deferred from: code review of 10-2-cvd-as-a-custom-indicator-retiring-the-fixed-row (2026-09-08)
 
 - **`_indicators_json`'s broad exception-to-400 handling now has a real trigger, not just a hypothetical one.** Story 10.1's review flagged this same item speculatively ("no real custom indicator exists yet to trigger this") — CVD is now that real custom indicator: `_second_snapshots`'s `catalog.query()` call can raise (missing partition/schema, IO error) and would be caught by `_indicators_json`'s broad `except Exception`, reported to the client as a generic "Invalid indicator spec" 400 and logged only at `logger.info`, indistinguishable from a user typo. This is a systemic `_indicators_json` concern (affects every current and future custom indicator identically, not CVD-specifically) — worth a proper fix (e.g. a narrower except scope, or re-raising fetch errors distinctly from parse/coercion errors) once Stories 10.3/10.4 add their own catalog-fetching replay functions and the pattern is confirmed to recur, rather than a one-off patch inside CVD alone. `troll/ml_signals/dashboard.py:_indicators_json`.
