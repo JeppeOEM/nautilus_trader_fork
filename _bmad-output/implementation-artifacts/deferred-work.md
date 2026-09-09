@@ -1,3 +1,8 @@
+## Deferred from: code review of 10-4-ofi-as-a-custom-indicator-retiring-the-fixed-row (2026-09-09)
+
+- **`fig.update_layout(height=1250, ...)` was never rebalanced despite the fixed-row panel count shrinking every Epic 10 story (7→6→5→4).** Each remaining panel gets proportionally more vertical room every time a row is retired, and no story has yet revisited the total page height. A deliberate redesign of the page's total height is a product decision out of proportion to any single indicator-retirement story. `troll/ml_signals/dashboard.py:_render_chart_page`.
+- **`bar_ns = window.bar_seconds * 1_000_000_000` then `// bar_ns` in `_ofi_replay` is unguarded against `bar_seconds == 0`.** Same pre-existing pattern already deferred for `_cancel_pressure_replay`/`_cvd_replay` in Story 10.3's review; no real call path currently passes `bar_seconds=0`. `troll/ml_signals/custom_indicators.py`.
+
 ## Deferred from: code review of 10-3-cancel-pressure-as-a-custom-histogram-indicator-retiring-the-fixed-row (2026-09-09)
 
 - **`bar_ns = window.bar_seconds * 1_000_000_000` then `// bar_ns` is unguarded against `bar_seconds == 0`.** Pre-existing pattern shared verbatim with `_cvd_replay` (Story 10.2), not introduced fresh by this story; no real call path currently passes `bar_seconds=0`. `troll/ml_signals/custom_indicators.py`.

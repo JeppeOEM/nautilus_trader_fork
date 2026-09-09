@@ -41,7 +41,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-07-01
-last_updated: 2026-09-09 (Story 10.3 Cancel Pressure custom indicator reviewed and done; 10.4-10.5 remain)
+last_updated: 2026-09-09 (Story 10.4 OFI custom indicator reviewed and done; 10.5 remains)
 project: nautilus_trader_fork
 project_key: NOKEY
 tracking_system: file-system
@@ -127,7 +127,7 @@ development_status:
   10-1-custom-indicator-catalog-category-tagged-picker-and-histogram-panel-type: done
   10-2-cvd-as-a-custom-indicator-retiring-the-fixed-row: done
   10-3-cancel-pressure-as-a-custom-histogram-indicator-retiring-the-fixed-row: done
-  10-4-ofi-as-a-custom-indicator-retiring-the-fixed-row: ready-for-dev
+  10-4-ofi-as-a-custom-indicator-retiring-the-fixed-row: done
   10-5-persisted-per-instrument-chart-indicator-configuration: backlog
 
 action_items:

@@ -15,9 +15,9 @@
 """
 Per-event book feature computation for the chart page.
 
-Replays OrderBookDelta from the catalog for a time range, computing OFI,
-book imbalance, and depth at every single event. The result is a dict of
-named series ready for Lightweight Charts.
+Replays OrderBookDelta from the catalog for a time range, computing book
+imbalance and depth at every single event. The result is a dict of named
+series ready for Lightweight Charts.
 
 Performance note: replaying a large delta range (full day) takes seconds.
 The chart page defaults to 4 hours. Let the user expand via the time pickers.
@@ -30,7 +30,6 @@ from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
 from ml_signals.book_features import compute_features
 from ml_signals.indicators import Microprice
-from ml_signals.indicators import OrderFlowImbalance
 
 
 def compute_chart_series(
@@ -38,7 +37,6 @@ def compute_chart_series(
     instrument_id: str,
     start_ns: int,
     end_ns: int,
-    ofi_window: int = 20,
 ) -> dict[str, list[dict]]:
     """
     Replay book deltas for the time window and return per-event series.
@@ -56,17 +54,16 @@ def compute_chart_series(
 
     if not deltas:
         return {
-            "ofi": [], "microprice": [], "spread": [],
+            "microprice": [], "spread": [],
             "imbalance": [], "mid_imbalance": [], "bid_depth": [], "ask_depth": [],
         }
 
     # Replay deltas — compute features at every event
     book  = OrderBook(iid, BookType.L2_MBP)
-    ofi   = OrderFlowImbalance(window=ofi_window)
     micro = Microprice()
 
     series: dict[str, list[dict]] = {
-        "ofi": [], "microprice": [], "spread": [],
+        "microprice": [], "spread": [],
         "imbalance": [], "mid_imbalance": [], "bid_depth": [], "ask_depth": [],
     }
 
@@ -84,12 +81,9 @@ def compute_chart_series(
         ask_p = ask_price.as_double()
         ask_s = book.best_ask_size().as_double()
 
-        ofi.update_raw(bid_p, bid_s, ask_p, ask_s)
         micro.update_raw(bid_p, bid_s, ask_p, ask_s)
         features = compute_features(book)
 
-        if ofi.initialized:
-            series["ofi"].append({"time": t, "value": ofi.value})
         if micro.initialized:
             series["microprice"].append({"time": t, "value": micro.value})
 

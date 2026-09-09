@@ -271,3 +271,77 @@ def _cancel_pressure_replay(
 CUSTOM_INDICATOR_CATALOG["CancelPressure"] = CustomIndicatorSpec(
     params={"window": 200}, panel="histogram", replay=_cancel_pressure_replay,
 )
+
+
+def _ofi_bucket_samples(window: ReplayWindow, ofi_window: int) -> dict[int, float]:
+    """Replay `_order_book_deltas(window)` and return last-value-in-bucket `OrderFlowImbalance`
+    samples, keyed by bucket start (ns). Drives the indicator exactly as chart_data.py's
+    retired fixed row did -- `book.apply_delta(delta)` FIRST, then read post-delta top-of-book,
+    skipping the delta if either side is `None`, THEN `ofi.update_raw(...)` (DESIGN-02:
+    unchanged reuse). This call order is the opposite of Cancel Pressure's
+    `CancellationTracker.update`, which needs PRE-delta best prices -- do not conflate the two.
+    """
+    from nautilus_trader.model.book import OrderBook
+    from nautilus_trader.model.enums import BookType
+    from nautilus_trader.model.identifiers import InstrumentId
+
+    from ml_signals.indicators import OrderFlowImbalance
+
+    book = OrderBook(InstrumentId.from_str(window.instrument_id), BookType.L2_MBP)
+    ofi = OrderFlowImbalance(window=ofi_window)
+    bar_ns = window.bar_seconds * 1_000_000_000
+    bucket_samples: dict[int, float] = {}
+    for delta in _order_book_deltas(window):
+        book.apply_delta(delta)
+        bid_price = book.best_bid_price()
+        ask_price = book.best_ask_price()
+        if bid_price is None or ask_price is None:
+            continue
+        ofi.update_raw(
+            bid_price.as_double(), book.best_bid_size().as_double(),
+            ask_price.as_double(), book.best_ask_size().as_double(),
+        )
+        if not ofi.initialized:
+            continue
+        bucket = (delta.ts_event // bar_ns) * bar_ns
+        bucket_samples[bucket] = ofi.value
+    return bucket_samples
+
+
+def _ofi_replay(
+    candles: list[dict], params: dict[str, Any], window: ReplayWindow,
+) -> dict[str, list[float | None]]:
+    """Per-candle top-of-book Order Flow Imbalance, last-value-in-bucket and forward-filled
+    (bounded by `_MAX_FORWARD_FILL_BUCKETS`, same DATA-01 reasoning as Cancel Pressure, Story
+    10.3): `OrderFlowImbalance.value` is a continuously-recomputed trailing rolling-window sum,
+    not a per-bucket flow, so persisting the last sampled value across a quiet bucket reflects
+    real state, not fabrication. `None` before `ofi.initialized` first becomes True (real
+    warm-up) and before the first delta is processed at all.
+
+    Reuses `_order_book_deltas` (Story 10.3) -- OFI is the second, not third, book-delta
+    consumer this module now shares that helper with (DESIGN-01: no further extraction needed).
+    Historical only, same reasoning as CVD/Cancel Pressure: the old fixed row was never live.
+    """
+    if window.start_ms is None or window.end_ms is None:
+        return {"value": [None] * len(candles)}
+    bucket_samples = _ofi_bucket_samples(window, params["window"])
+
+    out: list[float | None] = []
+    last_value: float | None = None
+    gap_buckets = 0
+    for candle in candles:
+        key = candle["t"] * 1_000_000
+        if key in bucket_samples:
+            last_value = bucket_samples[key]
+            gap_buckets = 0
+        else:
+            gap_buckets += 1
+            if gap_buckets > _MAX_FORWARD_FILL_BUCKETS:
+                last_value = None
+        out.append(last_value)
+    return {"value": out}
+
+
+CUSTOM_INDICATOR_CATALOG["OrderFlowImbalance"] = CustomIndicatorSpec(
+    params={"window": 20}, panel="oscillator", replay=_ofi_replay,
+)

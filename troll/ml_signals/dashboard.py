@@ -1068,11 +1068,12 @@ def _render_chart_page(symbol: str, start_ms: int, end_ms: int) -> str:
 
     Price pane is the interactive Candles/Lines/Ticks drag-to-pan widget (_LIVE_CHART_JS)
     -- the sole home for this widget since Story 8.1 consolidated it here from /coin/{id}
-    -- fed by /data/coin/{id}/candles|ticks|lines. The remaining OFI/imbalance/depth/spread
-    panes stay server-rendered Plotly subplots from _chart_data.compute_chart_series for the
-    same [start_ms, end_ms) window picked by the date-range form below. CVD (Story 10.2) and
-    Cancel Pressure (Story 10.3) moved to the indicator picker as custom indicators -- OFI
-    is slated to follow (Story 10.4).
+    -- fed by /data/coin/{id}/candles|ticks|lines. The remaining imbalance/depth/spread panes
+    stay server-rendered Plotly subplots from _chart_data.compute_chart_series for the same
+    [start_ms, end_ms) window picked by the date-range form below. CVD (Story 10.2), Cancel
+    Pressure (Story 10.3), and OFI (Story 10.4) all moved to the indicator picker as custom
+    indicators -- this is the last fixed-row retirement in Epic 10; the remaining four rows
+    (imbalance, mid-imbalance, depth, spread) stay fixed, out of scope for the epic.
     """
     data = _chart_data.compute_chart_series(
         CATALOG_PATH, symbol,
@@ -1087,11 +1088,11 @@ def _render_chart_page(symbol: str, start_ms: int, end_ms: int) -> str:
         return [p["value"] for p in series]
 
     fig = make_subplots(
-        rows=5, cols=1, shared_xaxes=True,
-        row_heights=[0.19, 0.19, 0.19, 0.20, 0.23],
+        rows=4, cols=1, shared_xaxes=True,
+        row_heights=[0.24, 0.24, 0.25, 0.27],
         vertical_spacing=0.02,
         subplot_titles=[
-            "OFI", "Book imbalance L1 agg (4-level)", "Mid-layer imbalance (L2-3)",
+            "Book imbalance L1 agg (4-level)", "Mid-layer imbalance (L2-3)",
             "Depth (4-level)", "Spread",
         ],
     )
@@ -1103,29 +1104,26 @@ def _render_chart_page(symbol: str, start_ms: int, end_ms: int) -> str:
                 mode="lines", name=name, line_color=color, line_width=1,
             ), row=row, col=1)
 
-    # Row 1: OFI
-    _add("ofi", 1, "OFI", "#f0883e")
-    if data.get("ofi"):
-        fig.add_hline(y=0, line_color="#555", line_width=1, row=1, col=1)
-
-    # Row 2: 4-level aggregate imbalance
-    _add("imbalance", 2, "imbalance", "#ab71ff")
+    # Row 1: 4-level aggregate imbalance
+    _add("imbalance", 1, "imbalance", "#ab71ff")
     if data.get("imbalance"):
+        fig.add_hline(y=0.5, line_color="#555", line_width=1, row=1, col=1)
+
+    # Row 2: mid-layer imbalance (levels 2-3)
+    _add("mid_imbalance", 2, "mid imbalance", "#c792ea")
+    if data.get("mid_imbalance"):
         fig.add_hline(y=0.5, line_color="#555", line_width=1, row=2, col=1)
 
-    # Row 3: mid-layer imbalance (levels 2-3)
-    _add("mid_imbalance", 3, "mid imbalance", "#c792ea")
-    if data.get("mid_imbalance"):
-        fig.add_hline(y=0.5, line_color="#555", line_width=1, row=3, col=1)
+    # Row 3: depth
+    _add("bid_depth", 3, "bid depth", "#26a69a")
+    _add("ask_depth", 3, "ask depth", "#ef5350")
 
-    # Row 4: depth
-    _add("bid_depth", 4, "bid depth", "#26a69a")
-    _add("ask_depth", 4, "ask depth", "#ef5350")
+    # Row 4: spread
+    _add("spread", 4, "spread", "#78909c")
 
-    # Row 5: spread
-    _add("spread", 5, "spread", "#78909c")
-
-    n = len(data.get("ofi", []))
+    # "spread" is populated for every non-skipped delta (unlike the retired "ofi" series,
+    # which only appended once warmed up), so this count is now exact, not an undercount.
+    n = len(data.get("spread", []))
     fig.update_layout(
         height=1250, template="plotly_dark",
         title=f"{symbol} — {n:,} delta events",

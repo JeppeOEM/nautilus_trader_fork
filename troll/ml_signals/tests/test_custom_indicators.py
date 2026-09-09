@@ -309,3 +309,79 @@ def test_cancel_pressure_forward_fill_reverts_to_none_past_the_bucket_cap(
         # ...but one bucket further, the gap has outlasted the cap -- back to None.
         assert result["bid_pressure"][gap_buckets + 1] is None
         assert result["ask_pressure"][gap_buckets + 1] is None
+
+
+# -- Story 10.4: OrderFlowImbalance ---------------------------------------------------------
+
+
+def test_ofi_samples_last_value_in_bucket_and_forward_fills_gaps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bar_ns = 3_000_000_000
+    base_ns = (_TS_NS // bar_ns) * bar_ns
+    deltas = [
+        # Bucket 0: ADD bid (ask side still empty -- skipped, no top-of-book yet), then
+        # ADD ask seeds ofi's prev state (not initialized yet), then an UPDATE to the bid
+        # size is the first initialized sample.
+        # bid_term = 8-5=3 (price unchanged), ask_term = 5-5=0 (price/size unchanged) -> 3.0
+        _book_delta(BookAction.ADD, OrderSide.BUY, 100.0, 5.0, base_ns),
+        _book_delta(BookAction.ADD, OrderSide.SELL, 101.0, 5.0, base_ns + 100_000_000),
+        _book_delta(BookAction.UPDATE, OrderSide.BUY, 100.0, 8.0, base_ns + 200_000_000),
+        # Bucket 1: no deltas -- a real gap, must forward-fill bucket 0's 3.0.
+        # Bucket 2: ask size shrinks -- bid_term=8-8=0, ask_term=2-5=-3 -> contribution +3,
+        # running sum (window=20, unbounded here) = 3.0 (bucket 0) + 3.0 = 6.0.
+        _book_delta(BookAction.UPDATE, OrderSide.SELL, 101.0, 2.0, base_ns + 2 * bar_ns + 100_000_000),
+    ]
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_deltas(tmp, deltas)
+        monkeypatch.setattr(ci, "_CATALOG_PATH", tmp)
+        candles = [
+            {"t": (base_ns - bar_ns) // 1_000_000},  # before any delta -- warm-up, None
+            {"t": base_ns // 1_000_000},
+            {"t": (base_ns + bar_ns) // 1_000_000},  # the gap bucket
+            {"t": (base_ns + 2 * bar_ns) // 1_000_000},
+        ]
+        start_ms = (base_ns - bar_ns) // 1_000_000
+        window = ReplayWindow(
+            instrument_id=_IID, bar_seconds=3, start_ms=start_ms, end_ms=start_ms + 4 * 3000,
+        )
+        result = ci.replay_indicator(candles, "OrderFlowImbalance", {}, window)
+        assert result["value"] == pytest.approx([None, 3.0, 3.0, 6.0])
+
+
+def test_ofi_forward_fill_reverts_to_none_past_the_bucket_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bar_ns = 3_000_000_000
+    base_ns = (_TS_NS // bar_ns) * bar_ns
+    deltas = [
+        _book_delta(BookAction.ADD, OrderSide.BUY, 100.0, 5.0, base_ns),
+        _book_delta(BookAction.ADD, OrderSide.SELL, 101.0, 5.0, base_ns + 100_000_000),
+        _book_delta(BookAction.UPDATE, OrderSide.BUY, 100.0, 8.0, base_ns + 200_000_000),
+    ]
+    gap_buckets = ci._MAX_FORWARD_FILL_BUCKETS
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_deltas(tmp, deltas)
+        monkeypatch.setattr(ci, "_CATALOG_PATH", tmp)
+        candles = [{"t": (base_ns + i * bar_ns) // 1_000_000} for i in range(gap_buckets + 2)]
+        start_ms = base_ns // 1_000_000
+        window = ReplayWindow(
+            instrument_id=_IID, bar_seconds=3,
+            start_ms=start_ms, end_ms=start_ms + (gap_buckets + 2) * 3000,
+        )
+        result = ci.replay_indicator(candles, "OrderFlowImbalance", {}, window)
+        assert result["value"][0] == 3.0
+        assert result["value"][gap_buckets] == 3.0
+        assert result["value"][gap_buckets + 1] is None
+
+
+def test_ofi_returns_none_for_every_candle_in_live_mode() -> None:
+    live_window = ReplayWindow(instrument_id=_IID, bar_seconds=60, start_ms=None, end_ms=None)
+    result = ci.replay_indicator([{"t": 0}, {"t": 60_000}], "OrderFlowImbalance", {}, live_window)
+    assert result == {"value": [None, None]}
+
+
+def test_ofi_registered_in_production_catalog_with_correct_shape() -> None:
+    assert ci.catalog_json()["OrderFlowImbalance"] == {
+        "params": {"window": 20}, "panel": "oscillator",
+    }

@@ -699,18 +699,17 @@ def test_indicator_replay_window_neither_bound_set_is_live() -> None:
 def test_render_chart_page_figure_row_counts_stay_in_lockstep(monkeypatch: pytest.MonkeyPatch) -> None:
     """Plotly's make_subplots raises if rows/row_heights/subplot_titles lengths disagree --
     nothing else in this suite exercises _render_chart_page's figure construction at all, so a
-    future row add/remove (like this story's own CVD-row removal) could silently break page
-    load with no test catching it until someone opens the page by hand."""
+    future row add/remove (each Epic 10 custom-indicator story has retired one fixed row) could
+    silently break page load with no test catching it until someone opens the page by hand."""
     monkeypatch.setattr(
         ml_signals.dashboard._chart_data, "compute_chart_series",
         lambda *a, **k: {
-            "ofi": [], "microprice": [], "spread": [],
+            "microprice": [], "spread": [],
             "imbalance": [], "mid_imbalance": [], "bid_depth": [], "ask_depth": [],
-            "bid_cancel": [], "ask_cancel": [],
         },
     )
     html_out = _render_chart_page("BTC-USD-PERP.DYDX", 0, 1000)
-    assert "OFI" in html_out
+    assert "Book imbalance" in html_out
 
 
 def test_indicator_id_sorts_params_for_a_stable_key() -> None:
