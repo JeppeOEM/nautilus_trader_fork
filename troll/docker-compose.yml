@@ -60,8 +60,13 @@ services:
       CATALOG_PATH: "/app/catalog"
       DASHBOARD_PORT: "8765"
       METRICS_DB_PATH: "/app/metrics_dir/metrics.db"
+      CHART_INDICATOR_CONFIG_PATH: "/app/ml_signals/chart_indicators.toml"
     user: "1000:1000"
     volumes:
+      # rw (not ro): the chart page's Save button (Story 10.5) writes this file back
+      # after the user saves a coin's indicator selection -- mirrors the collector
+      # service's own single `rw` config mount above.
+      - ./ml_signals/chart_indicators.toml:/app/ml_signals/chart_indicators.toml:rw
       - ./dydx_collector/catalog:/app/catalog:ro
       # ranking_engine is now the sole writer of metrics.db (Story 1.8, Task 7) --
       # dashboard only ever reads it (metrics_store.latest/nearest/history), so this

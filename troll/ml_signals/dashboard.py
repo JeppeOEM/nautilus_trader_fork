@@ -42,6 +42,7 @@ import logging
 import math
 import os
 import time
+import tomllib
 from collections import defaultdict
 from collections import deque
 from contextlib import asynccontextmanager
@@ -55,6 +56,7 @@ from plotly.subplots import make_subplots
 from ranking_engine import metrics_store
 
 from ml_signals import chart_data as _chart_data
+from ml_signals import chart_indicator_config as _chart_indicator_config
 from ml_signals import chart_indicators as _chart_indicators
 from ml_signals import custom_indicators as _custom_indicators
 from ml_signals import ranking_columns as _ranking_columns
@@ -65,6 +67,14 @@ from ml_signals.indicators import microprice as calc_microprice
 logger = logging.getLogger(__name__)
 
 CATALOG_PATH: str = os.environ.get("CATALOG_PATH", "troll/dydx_collector/catalog")
+
+# Persisted per-instrument /chart/{id} indicator selections (Story 10.5) -- a coin's
+# Save button writes here, the page's init script reads it back on load. Mounted `rw`
+# in docker-compose.yml's dashboard service, mirroring the collector's own single `rw`
+# config mount.
+CHART_INDICATOR_CONFIG_PATH: str = os.environ.get(
+    "CHART_INDICATOR_CONFIG_PATH", "troll/ml_signals/chart_indicators.toml",
+)
 
 # Path to the shared SQLite metrics store -- ranking_engine is the sole writer (Task
 # 7); dashboard only ever reads it (metrics_store.latest/nearest/history). Mounted from
@@ -383,7 +393,46 @@ function _fetchIndicatorCatalog(){
     _indicatorCatalog=d;
     _renderIndicatorPicker();
     _updateIndicatorPickerEnabled();
+    _loadSavedIndicatorConfig();
   }).catch(function(err){setStatus('Indicator catalog error: '+err);});
+}
+// Populates _activeIndicators from this instrument's persisted selection (Story 10.5).
+// Chained after _fetchIndicatorCatalog resolves, not fired in parallel with it --
+// _renderIndicatorTable below reads _indicatorCatalog[a.name], so the catalog must
+// already be loaded. A coin with no saved config (empty response) renders exactly as
+// it always has: no _renderIndicatorTable/_refreshActiveIndicators call, empty picker.
+function _loadSavedIndicatorConfig(){
+  fetch('/data/coin/'+encodeURIComponent(_coinIid)+'/indicator-config').then(function(r){return r.json();}).then(function(saved){
+    if(!saved||!saved.length)return;
+    // Skip any entry whose name no longer exists in the catalog (renamed/removed
+    // since this coin's config was saved) -- pushing it would later crash
+    // _renderIndicatorTable's _indicatorCatalog[a.name] lookup and break the whole
+    // indicator table, not just silently drop the one stale entry.
+    saved.forEach(function(e){
+      if(!_indicatorCatalog[e.name])return;
+      _activeIndicators.push({id:++_indSeq,name:e.name,params:e.params});
+    });
+    if(_activeIndicators.length){_renderIndicatorTable();_refreshActiveIndicators();}
+  }).catch(function(err){setStatus('Saved indicator config error: '+err);});
+}
+// Explicit, user-triggered only (AC #3) -- never fired automatically from
+// _addIndicator/_removeIndicator/_updateIndicatorParam, so an in-progress exploratory
+// selection is never persisted by accident. category isn't stored on _activeIndicators
+// entries (only id/name/params are) -- looked up from _indicatorCatalog at send time.
+// Entries whose name is somehow no longer in the catalog are dropped rather than
+// crashing the .map() (same stale-name defense as _loadSavedIndicatorConfig above).
+function _saveIndicatorConfig(){
+  var payload=_activeIndicators.map(function(a){
+    var spec=_indicatorCatalog[a.name];
+    return spec?{name:a.name,params:a.params,category:spec.category}:null;
+  }).filter(function(p){return p!==null;});
+  fetch('/data/coin/'+encodeURIComponent(_coinIid)+'/indicator-config',{
+    method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload),
+  }).then(function(r){
+    return r.json().then(function(d){return {ok:r.ok,d:d};});
+  }).then(function(res){
+    setStatus(res.ok?'Indicator config saved.':'Save failed: '+(res.d.error||'unknown error'));
+  }).catch(function(err){setStatus('Save failed: '+err);});
 }
 function _toggleIndicatorPicker(){
   var box=document.getElementById('ind-picker');
@@ -1156,6 +1205,7 @@ def _render_chart_page(symbol: str, start_ms: int, end_ms: int) -> str:
         "<option value='900'>15m</option><option value='3600'>1h</option>"
         "<option value='14400'>4h</option><option value='86400'>1d</option><option value='604800'>1w</option></select>"
         '<button id="btn-indicators" onclick="_toggleIndicatorPicker()" style="background:#21262d;color:#c9d1d9;border:1px solid #444;padding:3px 10px;cursor:pointer">Indicators</button>'
+        '<button id="btn-save-indicators" onclick="_saveIndicatorConfig()" style="background:#21262d;color:#c9d1d9;border:1px solid #444;padding:3px 10px;cursor:pointer">Save</button>'
         "</div>"
         "<div id='ind-picker' style='display:none;padding:6px 4px;margin-bottom:6px;border:1px solid #21262d;font-size:12px;max-height:220px;overflow-y:auto'>"
         "<div id='ind-picker-note' style='display:none;color:#f0883e;margin-bottom:4px'>Indicators require Candles mode</div>"
@@ -1744,6 +1794,46 @@ async def indicators_catalog_handler(request: web.Request) -> web.Response:
     return web.Response(text=json.dumps(_merged_indicator_catalog()), content_type="application/json")
 
 
+async def coin_indicator_config_handler(request: web.Request) -> web.Response:
+    """Return this instrument's persisted /chart/{id} indicator selection (Story 10.5)."""
+    symbol = request.match_info["id"]
+    try:
+        config = _chart_indicator_config.load_config(Path(CHART_INDICATOR_CONFIG_PATH))
+    except (tomllib.TOMLDecodeError, KeyError, TypeError) as exc:
+        # Fail loud (DATA-02), not a silent empty list -- the file is meant to be
+        # human-editable (AC #1), so a corrupt hand-edit is a real, diagnosable state.
+        return web.Response(
+            text=json.dumps({"error": f"chart_indicators.toml is corrupt: {exc}"}),
+            content_type="application/json", status=500,
+        )
+    entries = config.get(symbol, [])
+    body = [{"name": e.name, "params": e.params, "category": e.category} for e in entries]
+    return web.Response(text=json.dumps(body), content_type="application/json")
+
+
+async def save_coin_indicator_config_handler(request: web.Request) -> web.Response:
+    """Persist this instrument's current indicator selection (Story 10.5, explicit Save)."""
+    symbol = request.match_info["id"]
+    path = Path(CHART_INDICATOR_CONFIG_PATH)
+    try:
+        payload = await request.json()
+        entries = [
+            _chart_indicator_config.IndicatorEntry(
+                name=e["name"], params=e.get("params", {}), category=e["category"],
+            )
+            for e in payload
+        ]
+        config = _chart_indicator_config.load_config(path)
+        config[symbol] = entries
+        _chart_indicator_config.save_config(config, path)
+    except (json.JSONDecodeError, KeyError, TypeError, tomllib.TOMLDecodeError) as exc:
+        return web.Response(
+            text=json.dumps({"error": f"invalid indicator config payload: {exc}"}),
+            content_type="application/json", status=400,
+        )
+    return web.Response(text=json.dumps({"ok": True}), content_type="application/json")
+
+
 async def live_coin_json_handler(request: web.Request) -> web.Response:
     """
     Raw indicator values for /coin/{id} live panel — polled every 1s.
@@ -1915,6 +2005,8 @@ def make_app(redis_url: str, catalog_path: str) -> web.Application:
     app.router.add_get("/data/coin/{id}/lines", coin_lines_handler)
     app.router.add_get("/data/coin/{id}/indicators", coin_indicators_handler)
     app.router.add_get("/data/indicators/catalog", indicators_catalog_handler)
+    app.router.add_get("/data/coin/{id}/indicator-config", coin_indicator_config_handler)
+    app.router.add_post("/data/coin/{id}/indicator-config", save_coin_indicator_config_handler)
     app.router.add_get("/data/live/{id}", live_coin_json_handler)
     app.router.add_get("/chart/{id}", chart_handler)
     app.router.add_get("/history/{id}", history_handler)

@@ -1,3 +1,7 @@
+## Deferred from: code review of 10-5-persisted-per-instrument-chart-indicator-configuration (2026-09-09)
+
+- **`chart_indicator_config.save_config` writes directly with no temp-file+rename and no file lock.** A crash mid-write or two near-simultaneous saves could corrupt/lose an update. Confirmed identical, pre-existing pattern in `dydx_collector/config.py`'s own `save_config` (this story's AC #1 explicitly directs mirroring that shape) — not a regression this story introduces. Acceptable risk for a personal single-user localhost tool with no comparable hardening anywhere else in this codebase's config-writing code; revisit only if it becomes a real complaint (same standard `dydx_collector/config.py`'s own docstring already sets). `troll/ml_signals/chart_indicator_config.py`.
+
 ## Deferred from: code review of 10-4-ofi-as-a-custom-indicator-retiring-the-fixed-row (2026-09-09)
 
 - **`fig.update_layout(height=1250, ...)` was never rebalanced despite the fixed-row panel count shrinking every Epic 10 story (7→6→5→4).** Each remaining panel gets proportionally more vertical room every time a row is retired, and no story has yet revisited the total page height. A deliberate redesign of the page's total height is a product decision out of proportion to any single indicator-retirement story. `troll/ml_signals/dashboard.py:_render_chart_page`.

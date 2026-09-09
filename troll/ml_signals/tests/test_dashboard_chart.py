@@ -30,8 +30,11 @@ Why these bugs occur
 import json
 import tempfile
 from collections import deque
+from pathlib import Path
 
 import pytest
+from aiohttp.test_utils import TestClient
+from aiohttp.test_utils import TestServer
 from dydx_collector.second_snapshot import DydxSecondSnapshot
 
 import ml_signals.dashboard
@@ -777,3 +780,103 @@ def test_indicators_json_returns_400_for_non_numeric_param_value() -> None:
     body, status = _indicators_json(candles, "SimpleMovingAverage:period=not_a_number", _window())
     assert status == 400
     assert "error" in json.loads(body)
+
+
+# -- Story 10.5: persisted per-instrument indicator config (GET/POST) -------------------------
+
+
+async def _config_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> TestClient:
+    monkeypatch.setattr(
+        ml_signals.dashboard, "CHART_INDICATOR_CONFIG_PATH", str(tmp_path / "chart_indicators.toml"),
+    )
+    app = ml_signals.dashboard.make_app("redis://127.0.0.1:6379", str(tmp_path / "catalog"))
+    return TestClient(TestServer(app))
+
+
+@pytest.mark.asyncio
+async def test_indicator_config_get_on_fresh_file_returns_empty_list(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    async with await _config_client(monkeypatch, tmp_path) as client:
+        resp = await client.get("/data/coin/BTC-USD-PERP.DYDX/indicator-config")
+        assert resp.status == 200
+        assert await resp.json() == []
+
+
+@pytest.mark.asyncio
+async def test_indicator_config_post_then_get_round_trips(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    payload = [
+        {"name": "CumulativeVolumeDelta", "params": {}, "category": "custom"},
+        {"name": "RelativeStrengthIndex", "params": {"period": 14}, "category": "native"},
+    ]
+    async with await _config_client(monkeypatch, tmp_path) as client:
+        post_resp = await client.post("/data/coin/BTC-USD-PERP.DYDX/indicator-config", json=payload)
+        assert post_resp.status == 200
+
+        get_resp = await client.get("/data/coin/BTC-USD-PERP.DYDX/indicator-config")
+        assert await get_resp.json() == payload
+
+        # A different instrument's config is untouched -- keyed by instrument_id.
+        other_resp = await client.get("/data/coin/ETH-USD-PERP.DYDX/indicator-config")
+        assert await other_resp.json() == []
+
+
+@pytest.mark.asyncio
+async def test_indicator_config_post_ignores_client_side_id_field(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    # A client-sent "id" (the picker UI's own sequence counter) must not be required
+    # or persisted -- confirmed here by sending one and asserting it never comes back.
+    payload = [{"id": 7, "name": "OFI", "params": {}, "category": "custom"}]
+    async with await _config_client(monkeypatch, tmp_path) as client:
+        post_resp = await client.post("/data/coin/BTC-USD-PERP.DYDX/indicator-config", json=payload)
+        assert post_resp.status == 200
+
+        get_resp = await client.get("/data/coin/BTC-USD-PERP.DYDX/indicator-config")
+        saved = await get_resp.json()
+        assert saved == [{"name": "OFI", "params": {}, "category": "custom"}]
+        assert "id" not in saved[0]
+
+
+@pytest.mark.asyncio
+async def test_indicator_config_post_malformed_payload_returns_400(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    async with await _config_client(monkeypatch, tmp_path) as client:
+        resp = await client.post(
+            "/data/coin/BTC-USD-PERP.DYDX/indicator-config", json=[{"name": "OFI"}],  # missing category
+        )
+        assert resp.status == 400
+        assert "error" in await resp.json()
+
+
+@pytest.mark.asyncio
+async def test_indicator_config_post_toml_unrepresentable_param_returns_400_not_500(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    # A JSON null decodes to Python None, which tomli_w cannot serialize -- must be a
+    # structured 400 from save_coin_indicator_config_handler's widened try/except, not
+    # an unhandled 500 (Review Finding: try/except previously only wrapped JSON parsing).
+    payload = [{"name": "OFI", "params": {"threshold": None}, "category": "custom"}]
+    async with await _config_client(monkeypatch, tmp_path) as client:
+        resp = await client.post("/data/coin/BTC-USD-PERP.DYDX/indicator-config", json=payload)
+        assert resp.status == 400
+        assert "error" in await resp.json()
+
+
+@pytest.mark.asyncio
+async def test_indicator_config_get_on_corrupt_file_returns_500_not_crash(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    # A hand-edited/corrupt chart_indicators.toml (AC #1 makes this file human-editable)
+    # must surface as a diagnosable 500, not an unhandled exception (Review Finding).
+    path = tmp_path / "chart_indicators.toml"
+    path.write_text("this is not valid toml [[[")
+    monkeypatch.setattr(ml_signals.dashboard, "CHART_INDICATOR_CONFIG_PATH", str(path))
+    app = ml_signals.dashboard.make_app("redis://127.0.0.1:6379", str(tmp_path / "catalog"))
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.get("/data/coin/BTC-USD-PERP.DYDX/indicator-config")
+        assert resp.status == 500
+        assert "error" in await resp.json()
