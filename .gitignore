@@ -175,9 +175,13 @@ bench_data/
 /examples/backtest/notebooks/catalog/
 /examples/notebooks/catalog/
 /troll/dydx_collector/catalog/
+!/troll/dydx_collector/catalog/.gitkeep
 /troll/dydx_collector/metrics/
+!/troll/dydx_collector/metrics/.gitkeep
 /troll/bot_tui_logs/
+!/troll/bot_tui_logs/.gitkeep
 /troll/live_paper/data/
+!/troll/live_paper/data/.gitkeep
 nautilus_trader/**/.gitignore
 nautilus_trader/test_kit/mocks/.nautilus/
 nautilus_trader.egg-info
