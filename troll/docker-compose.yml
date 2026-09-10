@@ -58,7 +58,7 @@ services:
       PYTHONUNBUFFERED: "1"
       REDIS_URL: "redis://127.0.0.1:6379"
       CATALOG_PATH: "/app/catalog"
-      DASHBOARD_PORT: "8765"
+      DASHBOARD_PORT: "${WEB_PORT:-8765}"
       METRICS_DB_PATH: "/app/metrics_dir/metrics.db"
       CHART_INDICATOR_CONFIG_PATH: "/app/ml_signals/chart_indicators.toml"
     user: "1000:1000"
@@ -139,10 +139,11 @@ services:
       # not the host's own TERM -- an unusual host terminal (e.g. "xterm-ghostty") has
       # no matching terminfo entry inside the container at all.
       TERM: "xterm-256color"
-      # Story 4.3's `o` deep-link target -- 127.0.0.1:8765 is reachable here exactly
+      # Story 4.3's `o` deep-link target -- 127.0.0.1:<port> is reachable here exactly
       # as it is from the host, since both `dashboard` and `bot_tui` run
-      # network_mode: host with no separate port mapping.
-      DASHBOARD_BASE_URL: "http://127.0.0.1:8765"
+      # network_mode: host with no separate port mapping. Tracks WEB_PORT (see
+      # dashboard's DASHBOARD_PORT above) so a custom port doesn't break the deep link.
+      DASHBOARD_BASE_URL: "http://127.0.0.1:${WEB_PORT:-8765}"
     user: "1000:1000"
     volumes:
       # bot_tui.log is written here instead of stderr/stdout to avoid corrupting the

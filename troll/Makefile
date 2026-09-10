@@ -3,10 +3,11 @@ TROLL_DIR  := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 COMPOSE    := docker compose -f $(TROLL_DIR)docker-compose.yml
 BASE_IMAGE := nautilus-trader-base:1.229.0
 
-.PHONY: build-base build-base-vps up redeploy up-live-paper build-insecure test test-live-paper down logs logs-dash web enable-boot enable-firewall harden-ssh remote-tui remote-web remote-web-stop remote-db remote-db-stop
+.PHONY: build-base build-base-vps up redeploy up-live-paper build-insecure test test-live-paper down logs logs-dash web enable-boot enable-firewall harden-ssh
 
-REMOTE_HOST := nifelheim
-REMOTE_DIR  := ~/nautilus_trader_fork/troll
+# Personal, gitignored overrides (see .env-example for the documented default).
+-include $(TROLL_DIR).env
+WEB_PORT ?= 8765
 
 ## Build the base nautilus image (~15 min, only needed once or after core changes)
 ## On networks with TLS inspection (e.g. Zscaler), export your root CA to
@@ -50,7 +51,7 @@ build-base-vps:
 ## the collector's live WS connection/book state is never disturbed.
 up:
 	$(COMPOSE) up -d --build
-	@echo "Dashboard: http://localhost:8765"
+	@echo "Dashboard: http://localhost:$(WEB_PORT)"
 
 ## Rebuild and restart everything that doesn't collect market data (dashboard,
 ## ranking_engine, live-paper, bot_tui's image) -- never touches the collector
@@ -64,7 +65,7 @@ redeploy:
 	$(COMPOSE) up -d --build dashboard ranking_engine
 	$(COMPOSE) --profile live-paper up -d --build live-paper
 	$(COMPOSE) --profile tui build bot_tui
-	@echo "Dashboard: http://localhost:8765"
+	@echo "Dashboard: http://localhost:$(WEB_PORT)"
 
 ## Start the paper-trading node (Epic 3, live_paper module). Not part of plain `make up`
 ## -- gated behind the `live-paper` compose profile so it's never started by accident.
@@ -138,37 +139,6 @@ logs-dash:
 web:
 	xdg-open http://localhost:8080
 
-## Launch bot_tui on nifelheim over SSH (needs a real TTY, hence -t). Uses the
-## `nifelheim` alias from ~/.ssh/config (host/port/user/key already set there).
-remote-tui:
-	ssh -t $(REMOTE_HOST) "cd $(REMOTE_DIR) && make tui"
-
-## Tunnel the remote ml_signals dashboard (port 8765) to localhost and open it.
-## The VPS firewall (make enable-firewall) only allows inbound on 22 + tailscale,
-## so port 8765 isn't reachable directly -- an SSH tunnel is the way in.
-## `-f` backgrounds ssh only after the tunnel is up, so the xdg-open below always
-## races a live tunnel, not a not-yet-connected one. Stop it with `make remote-web-stop`.
-remote-web:
-	ssh -f -N -L 8765:localhost:8765 $(REMOTE_HOST)
-	xdg-open http://localhost:8765
-
-## Kill the SSH tunnel opened by `make remote-web`
-remote-web-stop:
-	pkill -f "ssh -f -N -L 8765:localhost:8765 $(REMOTE_HOST)" || true
-
-## Tunnel the remote Redis instance (port 6379, SEC-01: localhost-only, no public
-## port) to localhost so a DB GUI (RedisInsight, TablePlus, Another Redis Desktop
-## Manager, etc.) on your machine can connect to localhost:6379 as if it were local.
-## Same -f -N -L pattern as `make remote-web` -- backgrounds only once the tunnel is
-## up. Stop it with `make remote-db-stop`.
-remote-db:
-	ssh -f -N -L 6379:localhost:6379 $(REMOTE_HOST)
-	@echo "Redis reachable at localhost:6379"
-
-## Kill the SSH tunnel opened by `make remote-db`
-remote-db-stop:
-	pkill -f "ssh -f -N -L 6379:localhost:6379 $(REMOTE_HOST)" || true
-
 ## One-time VPS setup: enable the Docker daemon on boot so `restart: always`
 ## containers actually come back after a host reboot (Docker's own auto-start
 ## does nothing if the daemon itself isn't enabled).
@@ -221,7 +191,8 @@ prune-dry:
 		--catalog $(REPO_ROOT)/troll/dydx_collector/catalog \
 		--types order_book_deltas --days 14 --dry-run
 
-## Run the ml_signals dashboard (OFI, Microprice, footprint charts) on port 8765
+## Run the ml_signals dashboard (OFI, Microprice, footprint charts) directly on the host
+## (not Docker), on WEB_PORT (default 8765, override via .env -- see .env-example).
 dashboard:
-	fuser -k 8765/tcp || true
-	cd $(REPO_ROOT) && PYTHONPATH=$(REPO_ROOT)/troll python -m ml_signals.dashboard --open
+	fuser -k $(WEB_PORT)/tcp || true
+	cd $(REPO_ROOT) && PYTHONPATH=$(REPO_ROOT)/troll DASHBOARD_PORT=$(WEB_PORT) python -m ml_signals.dashboard --open
