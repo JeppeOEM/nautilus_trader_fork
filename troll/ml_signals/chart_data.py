@@ -13,23 +13,28 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-Per-event book feature computation for the chart page.
+Per-snapshot book feature computation for the chart page.
 
-Replays OrderBookDelta from the catalog for a time range, computing book
-imbalance and depth at every single event. The result is a dict of named
-series ready for Lightweight Charts.
+Reads DydxSecondSnapshot records from the catalog for a time range, computing
+book imbalance and depth at every 1-second snapshot. The result is a dict of
+named series ready for Plotly (see dashboard._render_chart_page).
 
-Performance note: replaying a large delta range (full day) takes seconds.
-The chart page defaults to 4 hours. Let the user expand via the time pickers.
+Snapshot-based, not raw-delta-based (troll/CLAUDE.md's "Signal Architecture:
+1s-Based, Not Event-Driven" / SIGNAL-01): OrderBookDeltas are only persisted
+per-instrument when dydx_collector's store_order_book_deltas is opted in
+(default off), so replaying raw deltas here would silently return empty
+series for every instrument in the live catalog.
 """
 
-from nautilus_trader.model.book import OrderBook
-from nautilus_trader.model.enums import BookType
-from nautilus_trader.model.identifiers import InstrumentId
+from dydx_collector.second_snapshot import DydxSecondSnapshot
+
+from ml_signals.book_features import DepthProfile
+from ml_signals.book_features import book_imbalance
+from ml_signals.indicators import microprice as calc_microprice
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
-from ml_signals.book_features import compute_features
-from ml_signals.indicators import Microprice
+
+_LEVELS = 10
 
 
 def compute_chart_series(
@@ -39,7 +44,7 @@ def compute_chart_series(
     end_ns: int,
 ) -> dict[str, list[dict]]:
     """
-    Replay book deltas for the time window and return per-event series.
+    Read 1s book snapshots for the time window and return per-snapshot series.
 
     Returns a dict keyed by series name, each value a list of
     {"time": <unix_seconds_float>, "value": <float>} dicts. The price pane
@@ -48,54 +53,61 @@ def compute_chart_series(
     this series.
     """
     catalog = ParquetDataCatalog(catalog_path)
-    iid = InstrumentId.from_str(instrument_id)
-
-    deltas = catalog.order_book_deltas(instrument_ids=[instrument_id], start=start_ns, end=end_ns)
-
-    if not deltas:
-        return {
-            "microprice": [], "spread": [],
-            "imbalance": [], "mid_imbalance": [], "bid_depth": [], "ask_depth": [],
-        }
-
-    # Replay deltas — compute features at every event
-    book  = OrderBook(iid, BookType.L2_MBP)
-    micro = Microprice()
+    results = catalog.query(
+        data_cls=DydxSecondSnapshot,
+        identifiers=[instrument_id],
+        start=start_ns,
+        end=end_ns,
+    )
+    # query() wraps custom Data subclasses in CustomData -- unwrap via .data (same
+    # pattern as dashboard._historical_lines_json).
+    snapshots = [r.data if hasattr(r, "data") else r for r in results]
 
     series: dict[str, list[dict]] = {
-        "microprice": [], "spread": [],
-        "imbalance": [], "mid_imbalance": [], "bid_depth": [], "ask_depth": [],
+        "microprice": [],
+        "spread": [],
+        "imbalance": [],
+        "mid_imbalance": [],
+        "bid_depth": [],
+        "ask_depth": [],
     }
 
-    for delta in sorted(deltas, key=lambda d: d.ts_init):
-        t = delta.ts_event / 1e9
-        book.apply_delta(delta)
-
-        bid_price = book.best_bid_price()
-        ask_price = book.best_ask_price()
-        if bid_price is None or ask_price is None:
+    for s in sorted(snapshots, key=lambda s: s.ts_event):
+        if not s.bid_prices or not s.ask_prices:
             continue
+        bid_p, ask_p = s.bid_prices[0], s.ask_prices[0]
+        if bid_p >= ask_p:  # crossed/touched snapshot — skip (DATA-04)
+            continue
+        t = s.ts_event / 1e9
 
-        bid_p = bid_price.as_double()
-        bid_s = book.best_bid_size().as_double()
-        ask_p = ask_price.as_double()
-        ask_s = book.best_ask_size().as_double()
-
-        micro.update_raw(bid_p, bid_s, ask_p, ask_s)
-        features = compute_features(book)
-
-        if micro.initialized:
-            series["microprice"].append({"time": t, "value": micro.value})
+        micro_value = calc_microprice(
+            {
+                "bid_prices": s.bid_prices,
+                "bid_sizes": s.bid_sizes,
+                "ask_prices": s.ask_prices,
+                "ask_sizes": s.ask_sizes,
+            }
+        )
+        if micro_value is not None:
+            series["microprice"].append({"time": t, "value": micro_value})
 
         series["spread"].append({"time": t, "value": ask_p - bid_p})
 
-        if features is not None:
-            series["imbalance"].append({"time": t, "value": features.imbalance.aggregate})
-            series["bid_depth"].append({"time": t, "value": features.depth.total_bid_depth()})
-            series["ask_depth"].append({"time": t, "value": features.depth.total_ask_depth()})
-            # mid-layer: average of levels 2-3
-            if features.depth.levels >= 3:
-                mid = (features.imbalance.per_level[1] + features.imbalance.per_level[2]) / 2
-                series["mid_imbalance"].append({"time": t, "value": mid})
+        profile = DepthProfile(
+            bid_prices=s.bid_prices[:_LEVELS],
+            bid_sizes=s.bid_sizes[:_LEVELS],
+            ask_prices=s.ask_prices[:_LEVELS],
+            ask_sizes=s.ask_sizes[:_LEVELS],
+        )
+        imbalance = book_imbalance(profile)
+        series["imbalance"].append({"time": t, "value": imbalance.aggregate})
+        series["bid_depth"].append({"time": t, "value": profile.total_bid_depth()})
+        series["ask_depth"].append({"time": t, "value": profile.total_ask_depth()})
+        # mid-layer: average of levels 2-3. per_level is zip(bid_sizes, ask_sizes) --
+        # its length is min(bid, ask) level count, which can differ from profile.levels
+        # (bid count alone) on a thin/illiquid side, so guard on per_level itself.
+        if len(imbalance.per_level) >= 3:
+            mid = (imbalance.per_level[1] + imbalance.per_level[2]) / 2
+            series["mid_imbalance"].append({"time": t, "value": mid})
 
     return series
