@@ -15,14 +15,22 @@
 """
 1-second L2 book snapshot — raw data only, no derived signals.
 
-Stores the top 20 price levels on each side plus per-side trade volume.
-All signals (OFI, OBI, microprice, spread) are computed from this data
-via indicator classes in ml_signals/indicators.py — never stored here.
+Stores the top 20 price levels on each side plus per-side trade volume and
+per-second trade OHLC. All signals (OFI, OBI, microprice, spread) are computed
+from this data via indicator classes in ml_signals/indicators.py — never
+stored here.
 
   spread      = ask_prices[0] - bid_prices[0]
   microprice  = Microprice().update_raw(bid_prices[0], bid_sizes[0], ask_prices[0], ask_sizes[0])
   ofi_N       = MultiLevelOFI(levels=N) replayed over consecutive snapshots
   obi_N       = MultiLevelOBI(levels=N).update_raw(bid_sizes, ask_sizes)
+
+`open_price`/`high_price`/`low_price`/`close_price` are the OHLC of actual
+executed trade prices within this second (None if no trade occurred) —
+this is the collector's *only* record of traded price; raw `TradeTick`s are
+no longer persisted to the catalog (see collector.py's `_process_data`).
+Candles at any resolution >= 1s are built by aggregating these fields
+(ml_signals/candles.py), not by replaying individual trades.
 """
 
 import pyarrow as pa
@@ -34,6 +42,10 @@ from nautilus_trader.serialization.arrow.serializer import make_dict_serializer
 from nautilus_trader.serialization.arrow.serializer import register_arrow
 
 BOOK_DEPTH = 20
+
+
+def _optional_float(value: object) -> float | None:
+    return None if value is None else float(value)
 
 
 class DydxSecondSnapshot(Data):
@@ -58,6 +70,10 @@ class DydxSecondSnapshot(Data):
         sell_count: int,
         ts_event: int,
         ts_init: int,
+        open_price: float | None = None,
+        high_price: float | None = None,
+        low_price: float | None = None,
+        close_price: float | None = None,
     ) -> None:
         self.instrument_id = instrument_id
         self.bid_prices = bid_prices
@@ -68,6 +84,10 @@ class DydxSecondSnapshot(Data):
         self.sell_volume = sell_volume
         self.buy_count = buy_count
         self.sell_count = sell_count
+        self.open_price = open_price
+        self.high_price = high_price
+        self.low_price = low_price
+        self.close_price = close_price
         self._ts_event = ts_event
         self._ts_init = ts_init
 
@@ -92,6 +112,10 @@ class DydxSecondSnapshot(Data):
                 "sell_volume": pa.float64(),
                 "buy_count": pa.uint32(),
                 "sell_count": pa.uint32(),
+                "open_price": pa.float64(),
+                "high_price": pa.float64(),
+                "low_price": pa.float64(),
+                "close_price": pa.float64(),
                 "ts_event": pa.uint64(),
                 "ts_init": pa.uint64(),
             },
@@ -110,6 +134,10 @@ class DydxSecondSnapshot(Data):
             "sell_volume": obj.sell_volume,
             "buy_count": obj.buy_count,
             "sell_count": obj.sell_count,
+            "open_price": obj.open_price,
+            "high_price": obj.high_price,
+            "low_price": obj.low_price,
+            "close_price": obj.close_price,
             "ts_event": obj.ts_event,
             "ts_init": obj.ts_init,
         }
@@ -126,6 +154,10 @@ class DydxSecondSnapshot(Data):
             sell_volume=float(values.get("sell_volume") or 0.0),
             buy_count=int(values.get("buy_count") or 0),
             sell_count=int(values.get("sell_count") or 0),
+            open_price=_optional_float(values.get("open_price")),
+            high_price=_optional_float(values.get("high_price")),
+            low_price=_optional_float(values.get("low_price")),
+            close_price=_optional_float(values.get("close_price")),
             ts_event=int(values["ts_event"]),
             ts_init=int(values["ts_init"]),
         )

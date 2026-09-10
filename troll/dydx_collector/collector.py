@@ -478,6 +478,15 @@ class Collector:
         self._second_sell_volume: dict[str, float] = defaultdict(float)
         self._second_buy_count: dict[str, int] = defaultdict(int)
         self._second_sell_count: dict[str, int] = defaultdict(int)
+        # Running trade-price OHLC for the current second, built from TradeTicks as
+        # they arrive (see _process_data) -- this is the collector's only record of
+        # traded price now that raw TradeTicks are no longer persisted. Absence of a
+        # key (checked via .pop(iid, None) in _second_loop) means no trade occurred
+        # this second, distinct from a trade occurring at price 0.
+        self._second_open_price: dict[str, float] = {}
+        self._second_high_price: dict[str, float] = {}
+        self._second_low_price: dict[str, float] = {}
+        self._second_close_price: dict[str, float] = {}
 
         # Real-time order books — updated immediately on every OrderBookDeltas callback,
         # independent of the 60s flush cycle. _second_loop reads from here, not _bar_builder._books.
@@ -569,13 +578,28 @@ class Collector:
                 await asyncio.sleep(0)
 
     def _process_data(self, data: Any) -> None:
-        self._buffer[_buffer_key(data)].append(data)
+        # TradeTick is deliberately excluded from the catalog buffer -- raw trades are
+        # no longer persisted (see DydxSecondSnapshot's open/high/low/close_price
+        # fields below, and troll/docs/DATA_DICTIONARY.md's Retention section). Every
+        # other type still goes through the normal buffer/flush path.
+        if not isinstance(data, TradeTick):
+            self._buffer[_buffer_key(data)].append(data)
         if isinstance(data, OrderBookDeltas):
             iid = str(data.instrument_id)
             self._apply_deltas(iid, data)
             self._last_book_update_ns[iid] = time.time_ns()
         elif isinstance(data, TradeTick):
             iid = str(data.instrument_id)
+            price = data.price.as_double()
+            if iid not in self._second_open_price:
+                self._second_open_price[iid] = price
+                self._second_high_price[iid] = price
+                self._second_low_price[iid] = price
+            elif price > self._second_high_price[iid]:
+                self._second_high_price[iid] = price
+            elif price < self._second_low_price[iid]:
+                self._second_low_price[iid] = price
+            self._second_close_price[iid] = price
             if data.aggressor_side == AggressorSide.BUYER:
                 self._second_buy_volume[iid] += data.size.as_double()
                 self._second_buy_count[iid] += 1
@@ -1114,6 +1138,12 @@ class Collector:
                 sell_volume = self._second_sell_volume.pop(iid, 0.0)
                 buy_count = self._second_buy_count.pop(iid, 0)
                 sell_count = self._second_sell_count.pop(iid, 0)
+                # Absent from these dicts means no trade occurred this second --
+                # .pop(iid, None) yields None, not a fabricated price.
+                open_price = self._second_open_price.pop(iid, None)
+                high_price = self._second_high_price.pop(iid, None)
+                low_price = self._second_low_price.pop(iid, None)
+                close_price = self._second_close_price.pop(iid, None)
 
                 snapshot = DydxSecondSnapshot(
                     instrument_id=InstrumentId.from_str(iid),
@@ -1125,6 +1155,10 @@ class Collector:
                     sell_volume=sell_volume,
                     buy_count=buy_count,
                     sell_count=sell_count,
+                    open_price=open_price,
+                    high_price=high_price,
+                    low_price=low_price,
+                    close_price=close_price,
                     ts_event=now_ns,
                     ts_init=now_ns,
                 )

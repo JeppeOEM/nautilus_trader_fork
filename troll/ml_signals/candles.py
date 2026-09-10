@@ -62,3 +62,35 @@ def build_candles(rows: list[tuple[int, float, float]], period_seconds: int) -> 
         )
         for bucket_key, prices_sizes in sorted(buckets.items())
     ]
+
+
+def aggregate_ohlc(
+    rows: list[tuple[int, float, float, float, float, float]],
+    period_seconds: int,
+) -> list[Candle]:
+    """
+    Re-bucket already-built 1-second OHLC rows into wider `period_seconds` candles.
+
+    Rows are (ts_event, open, high, low, close, volume) — one per second, e.g. from
+    DydxSecondSnapshot's open/high/low/close_price fields (raw TradeTicks are no
+    longer persisted, see troll/docs/DATA_DICTIONARY.md's Retention section). Unlike
+    `build_candles`, which derives OHLC from a flat list of trade prices, this
+    combines pre-built OHLC correctly: open of the first second in the bucket, high/
+    low across all of them, close of the last, volume summed.
+    """
+    period_ns = period_seconds * 1_000_000_000
+    buckets: dict[int, list[tuple[int, float, float, float, float, float]]] = {}
+    for row in sorted(rows, key=lambda r: r[0]):
+        buckets.setdefault(row[0] // period_ns, []).append(row)
+
+    return [
+        Candle(
+            ts_open=bucket_key * period_ns,
+            open=members[0][1],
+            high=max(r[2] for r in members),
+            low=min(r[3] for r in members),
+            close=members[-1][4],
+            volume=sum(r[5] for r in members),
+        )
+        for bucket_key, members in sorted(buckets.items())
+    ]

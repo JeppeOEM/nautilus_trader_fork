@@ -14,6 +14,7 @@
 # -------------------------------------------------------------------------------------------------
 """Self-check: candle bucketing produces correct OHLC per time bucket."""
 
+from ml_signals.candles import aggregate_ohlc
 from ml_signals.candles import build_candles
 
 
@@ -44,7 +45,35 @@ def test_empty_input_produces_no_candles() -> None:
     assert build_candles([], period_seconds=60) == []
 
 
+def test_aggregate_ohlc_combines_per_second_bars_correctly() -> None:
+    """High/low across the bucket's seconds, open of the first, close of the last --
+    not the flat-price-list logic build_candles uses, since each row is already an
+    OHLC bar, not a single trade price."""
+    one_second = 1_000_000_000
+    rows = [
+        (0, 100.0, 103.0, 99.0, 101.0, 1.0),
+        (10 * one_second, 101.0, 108.0, 100.0, 105.0, 2.0),
+        (61 * one_second, 200.0, 205.0, 198.0, 202.0, 3.0),  # bucket 1 starts at 60s
+    ]
+
+    candles = aggregate_ohlc(rows, period_seconds=60)
+
+    assert len(candles) == 2
+    first, second = candles
+    assert first.ts_open == 0
+    assert (first.open, first.high, first.low, first.close) == (100.0, 108.0, 99.0, 105.0)
+    assert first.volume == 3.0
+    assert second.ts_open == 60 * one_second
+    assert (second.open, second.high, second.low, second.close) == (200.0, 205.0, 198.0, 202.0)
+
+
+def test_aggregate_ohlc_empty_input_produces_no_candles() -> None:
+    assert aggregate_ohlc([], period_seconds=60) == []
+
+
 if __name__ == "__main__":
     test_buckets_two_periods_with_correct_ohlc()
     test_empty_input_produces_no_candles()
+    test_aggregate_ohlc_combines_per_second_bars_correctly()
+    test_aggregate_ohlc_empty_input_produces_no_candles()
     print("ok")

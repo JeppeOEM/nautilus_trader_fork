@@ -21,6 +21,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from dydx_collector.second_snapshot import DydxSecondSnapshot
 from nautilus_trader.model.data import IndexPriceUpdate
 from nautilus_trader.model.data import MarkPriceUpdate
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
@@ -170,10 +171,23 @@ def price_series(
     instrument_id: str,
     start_ns: int | None = None,
 ) -> list[tuple[int, float]]:
-    """(ts_event, price) pairs in ascending order. Preference: trade_tick → mark price."""
-    trades = catalog.trade_ticks(instrument_ids=[instrument_id], start=start_ns)
+    """
+    (ts_event, price) pairs in ascending order. Preference: second-snapshot close → mark price.
+
+    Raw TradeTicks are no longer persisted (see troll/docs/DATA_DICTIONARY.md's
+    Retention section) — DydxSecondSnapshot.close_price is the collector's only
+    record of traded price now. Seconds with no trade have close_price=None and
+    are skipped, not treated as a zero-price tick.
+    """
+    results = catalog.query(DydxSecondSnapshot, identifiers=[instrument_id], start=start_ns)
+    # query() wraps custom Data subclasses in CustomData -- unwrap via .data (same
+    # pattern as chart_data.py's compute_chart_series).
+    snapshots = [r.data if hasattr(r, "data") else r for r in results]
+    trades = sorted(
+        (s.ts_event, s.close_price) for s in snapshots if s.close_price is not None
+    )
     if trades:
-        return sorted((t.ts_event, t.price.as_double()) for t in trades)
+        return trades
 
     # Fallback for instruments with no trades (illiquid/new): use mark price.
     # catalog.bars() is intentionally omitted — the collector never writes Bar objects.

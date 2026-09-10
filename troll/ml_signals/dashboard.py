@@ -24,7 +24,7 @@ Pages:
 - `/`               rankings table — all coins sortable by any metric (1s poll)
 - `/api/rankings`   JSON endpoint polled every 1s by the rankings page JS
 - `/coin/{id}`      live indicator panel (1s poll) -- no chart here, see `/chart/{id}`
-- `/chart/{id}`     interactive Candles/Lines/Ticks chart + per-event microstructure panes (Parquet-backed)
+- `/chart/{id}`     interactive Candles/Lines chart + per-event microstructure panes (Parquet-backed)
 - `/history/{id}`   31-day metric history charts for one coin
 - `/live`           in-process live signal monitor (see `record()` below)
 
@@ -131,11 +131,17 @@ _NAV = '<p><a href="/">Rankings</a> | <a href="/live">Live signals</a></p>'
 
 
 def _split_tiers(catalog_path: str) -> tuple[set[str], set[str]]:
-    """Return (subscribed_iids, illiquid_iids) by checking trade_tick directory presence."""
+    """
+    Return (subscribed_iids, illiquid_iids) by checking custom_dydx_second_snapshot
+    directory presence -- DydxSecondSnapshot is only written for pinned + liquid
+    instruments (collector.py's _second_loop), which is exactly "subscribed" here.
+    Previously checked trade_tick, before raw TradeTick storage was cut over to
+    DydxSecondSnapshot's OHLC fields (see troll/docs/DATA_DICTIONARY.md).
+    """
     import glob
     import os as _os
     subscribed: set[str] = set()
-    for path in glob.glob(_os.path.join(catalog_path, "data", "trade_tick", "*")):
+    for path in glob.glob(_os.path.join(catalog_path, "data", "custom_dydx_second_snapshot", "*")):
         subscribed.add(Path(path).name)
     all_iids = set(list_instruments(catalog_path))
     return subscribed, all_iids - subscribed
@@ -168,7 +174,7 @@ td:first-child, th:first-child { text-align: left; }
 </style>
 """
 
-# Candles/Lines/Ticks interactive chart widget -- lives only on _render_chart_page's
+# Candles/Lines interactive chart widget -- lives only on _render_chart_page's
 # /chart/{id} page (consolidated there by Story 8.1; previously also duplicated into
 # /coin/{id}, which now has no chart at all -- see /coin/{id}'s ind-groups/price-ticker/
 # sig-chart for what remains there). Keeps the drag-to-pan/scroll-to-zoom state machine
@@ -178,8 +184,13 @@ td:first-child, th:first-child { text-align: left; }
 # setStatus(s) function, a #live-chart div, and a #diff-box div (Lines-mode click-to-diff,
 # Story 8.1 -- _diffA/_diffB/_diffBoxHTML are declared inside this module, not by the
 # embedder). Lines mode is backed by /data/coin/{id}/lines (_live_lines_json/
-# _historical_lines_json, Story 8.1) -- a different data source than Candles/Ticks
-# (order-book bid/ask/mid/micro/price snapshots, not trade-tick OHLC/prints).
+# _historical_lines_json, Story 8.1) -- a different data source than Candles
+# (order-book bid/ask/mid/micro/price snapshots, not trade OHLC).
+#
+# Ticks mode (raw per-trade price/size/side scatter) was removed when raw TradeTick
+# storage was cut over to DydxSecondSnapshot's per-second OHLC fields -- individual
+# trade prints are no longer persisted at all, so there was nothing left to render.
+# See troll/docs/DATA_DICTIONARY.md's Retention section.
 # Story 8.4 (indicator picker, Candles-mode only) additionally needs the embedder to
 # declare #ind-picker/#ind-picker-list/#ind-picker-note/#ind-table/#ind-panel divs and
 # call _fetchIndicatorCatalog() once in its init script; _activeIndicators/
@@ -196,10 +207,9 @@ function setCoinMode(m){
   else if(_coinPanning)_refreshPanningWindow();
 }
 function _updateModeButtons(){
-  var bl=document.getElementById('btn-lines'),bc=document.getElementById('btn-candles'),bt=document.getElementById('btn-ticks');
+  var bl=document.getElementById('btn-lines'),bc=document.getElementById('btn-candles');
   if(bl)bl.style.borderColor=_coinMode==='lines'?'#58a6ff':'#444';
   if(bc)bc.style.borderColor=_coinMode==='candles'?'#58a6ff':'#444';
-  if(bt)bt.style.borderColor=_coinMode==='ticks'?'#58a6ff':'#444';
   _updateIndicatorPickerEnabled();
 }
 function onBarChange(){
@@ -240,26 +250,17 @@ function _fetchCandlesWindow(iid,startMs,endMs,barSeconds){
   return fetch('/data/coin/'+encodeURIComponent(iid)+'/candles?start='+encodeURIComponent(_fmtDTL(new Date(startMs)))+'&end='+encodeURIComponent(_fmtDTL(new Date(endMs)))+'&bar='+barSeconds)
     .then(function(r){return r.json();}).then(function(d){return {rows:d.candles,truncated:false};});
 }
-function _fetchTicksWindow(iid,startMs,endMs){
-  return fetch('/data/coin/'+encodeURIComponent(iid)+'/ticks?start='+encodeURIComponent(_fmtDTL(new Date(startMs)))+'&end='+encodeURIComponent(_fmtDTL(new Date(endMs))))
-    .then(function(r){return r.json();}).then(function(d){return {rows:d.ticks,truncated:!!d.truncated};});
-}
 function _fetchLinesWindow(iid,startMs,endMs){
   return fetch('/data/coin/'+encodeURIComponent(iid)+'/lines?start='+encodeURIComponent(_fmtDTL(new Date(startMs)))+'&end='+encodeURIComponent(_fmtDTL(new Date(endMs))))
     .then(function(r){return r.json();}).then(function(d){return {rows:d.rows,truncated:!!d.truncated};});
 }
 function _fetchModeWindow(mode,iid,startMs,endMs,barSeconds){
-  if(mode==='ticks')return _fetchTicksWindow(iid,startMs,endMs);
   if(mode==='lines')return _fetchLinesWindow(iid,startMs,endMs);
   return _fetchCandlesWindow(iid,startMs,endMs,barSeconds);
 }
 // Plain-array fetch for the "live" (unfrozen or just-unfroze) default window -- used by
 // renderCoin's poll loop and by a bar/mode change that happens mid-pan (_refreshPanningWindow).
 function _fetchLiveWindow(iid,mode,bar){
-  if(mode==='ticks'){
-    var nowMs=Date.now();
-    return _fetchTicksWindow(iid,nowMs-30*60*1000,nowMs).then(function(r){return r.rows;});
-  }
   if(mode==='lines'){
     return fetch('/data/coin/'+encodeURIComponent(iid)+'/lines')
       .then(function(r){return r.json();}).then(function(d){return d.rows;});
@@ -278,7 +279,7 @@ function _fetchHistCoin(iid,start,end){
     })
     .catch(function(err){setStatus('Error: '+err);});
 }
-// -- Shared pan-to-load-more state (candles + ticks) --------------------------------------
+// -- Shared pan-to-load-more state (candles + lines) ---------------------------------------
 function _setChartRows(iid,mode,barSeconds,rows){
   _chartState={iid:iid,mode:mode,barSeconds:barSeconds,rows:rows.slice(),
     cursorStart:rows.length?rows[0].t:null,exhaustedLeft:false,loading:false};
@@ -286,13 +287,12 @@ function _setChartRows(iid,mode,barSeconds,rows){
 }
 function _renderChartRows(){
   if(!_chartState)return;
-  if(_chartState.mode==='ticks')_renderTickChart(_chartState.rows);
-  else if(_chartState.mode==='lines')_renderLineChart(_chartState.rows);
+  if(_chartState.mode==='lines')_renderLineChart(_chartState.rows);
   else _renderCandleChart(_chartState.rows);
 }
 function _chunkSpanMs(state){
   var s=state||_chartState;
-  if(s.mode==='ticks'||s.mode==='lines')return 15*60*1000;
+  if(s.mode==='lines')return 15*60*1000;
   return Math.min(Math.max(s.barSeconds*1000*200,3600*1000),_MAX_CHUNK_MS);
 }
 function _loadOlderChunk(){
@@ -349,8 +349,7 @@ function _onChartRelayout(ev){
 // clicked "Load") candles session would otherwise concat trade-price rows onto a
 // mid-price series with a visible seam at the join. Reload the currently-shown window
 // from the trade-price source once, on the first pan, so the whole series is consistent
-// going forward. Ticks mode has no such mismatch -- live and historical ticks both come
-// from the same raw-trade endpoint.
+// going forward.
 function _reconcilePriceBasisOnFirstPan(){
   if(_coinMode!=='candles'||_coinHistStart||!_chartState||!_chartState.rows.length)return;
   var state=_chartState;
@@ -771,18 +770,6 @@ function _renderLineChart(rows){
   _wireChartRelayout();
   _wireChartClick();
 }
-function _renderTickChart(ticks){
-  if(!ticks||!ticks.length)return;
-  var x=ticks.map(function(t){return new Date(t.t);});
-  var colors=ticks.map(function(t){return t.side==='BUYER'?'#26a69a':t.side==='SELLER'?'#ef5350':'#8b949e';});
-  Plotly.react('live-chart',[{
-    type:'scattergl',mode:'markers',x:x,y:ticks.map(function(t){return t.price;}),
-    marker:{color:colors,size:4},name:'trades',
-  }],{height:300,template:'plotly_dark',dragmode:'pan',
-    xaxis:{type:'date',rangeslider:{visible:false}},
-    margin:{t:10,b:30,l:60,r:10}},{scrollZoom:true});
-  _wireChartRelayout();
-}
 """
 
 
@@ -1018,7 +1005,7 @@ function pollCoin(iid){
 }
 
 // /coin/{id}'s live indicator panel: ind-groups table, price-ticker, sig-chart (OFI10z/
-// OBI10). The Candles/Lines/Ticks chart widget moved to /chart/{id} only (Story 8.1) --
+// OBI10). The Candles/Lines chart widget moved to /chart/{id} only (Story 8.1) --
 // this function no longer touches chart mode, pagination, or click-to-diff state.
 function renderCoin(iid,ind,chart){
   var groupsHTML=IND_GROUPS.map(function(g){
@@ -1115,9 +1102,9 @@ def _render_chart_page(symbol: str, start_ms: int, end_ms: int) -> str:
     """
     Per-event microstructure chart page.
 
-    Price pane is the interactive Candles/Lines/Ticks drag-to-pan widget (_LIVE_CHART_JS)
+    Price pane is the interactive Candles/Lines drag-to-pan widget (_LIVE_CHART_JS)
     -- the sole home for this widget since Story 8.1 consolidated it here from /coin/{id}
-    -- fed by /data/coin/{id}/candles|ticks|lines. The remaining imbalance/depth/spread panes
+    -- fed by /data/coin/{id}/candles|lines. The remaining imbalance/depth/spread panes
     stay server-rendered Plotly subplots from _chart_data.compute_chart_series for the same
     [start_ms, end_ms) window picked by the date-range form below. CVD (Story 10.2), Cancel
     Pressure (Story 10.3), and OFI (Story 10.4) all moved to the indicator picker as custom
@@ -1198,7 +1185,6 @@ def _render_chart_page(symbol: str, start_ms: int, end_ms: int) -> str:
         '<div style="display:flex;gap:8px;align-items:center;padding:6px 0;flex-wrap:wrap">'
         "<button id=\"btn-lines\" onclick=\"setCoinMode('lines')\" style=\"background:#21262d;color:#c9d1d9;border:1px solid #444;padding:3px 10px;cursor:pointer\">Lines</button>"
         "<button id=\"btn-candles\" onclick=\"setCoinMode('candles')\" style=\"background:#21262d;color:#c9d1d9;border:1px solid #58a6ff;padding:3px 10px;cursor:pointer\">Candles</button>"
-        "<button id=\"btn-ticks\" onclick=\"setCoinMode('ticks')\" style=\"background:#21262d;color:#c9d1d9;border:1px solid #444;padding:3px 10px;cursor:pointer\">Ticks</button>"
         "<select id='bar-sel' onchange='onBarChange()' style=\"background:#21262d;color:#c9d1d9;border:1px solid #444;padding:3px\">"
         "<option value='5'>5s</option><option value='15'>15s</option>"
         "<option value='30'>30s</option><option value='60' selected>1m</option><option value='300'>5m</option>"
@@ -1269,56 +1255,36 @@ def _live_candles_json(iid: str, bar_seconds: int) -> str:
 
 
 def _historical_candles_json(iid: str, start_ms: int, end_ms: int, bar_seconds: int) -> str:
-    """Build OHLC candles from trade_ticks in the Parquet catalog."""
-    from ml_signals.candles import build_candles as _build
+    """
+    Build OHLC candles from DydxSecondSnapshot's per-second trade OHLC fields.
+
+    Raw TradeTicks are no longer persisted (see troll/docs/DATA_DICTIONARY.md's
+    Retention section) -- DydxSecondSnapshot.open/high/low/close_price is the only
+    remaining record of traded price. Seconds with no trade (close_price is None)
+    contribute nothing; aggregate_ohlc combines the rest correctly across buckets
+    (max of highs, min of lows), unlike a flat trade-price bucketing.
+    """
+    from dydx_collector.second_snapshot import DydxSecondSnapshot
+    from ml_signals.candles import aggregate_ohlc as _aggregate
     from nautilus_trader.persistence.catalog import ParquetDataCatalog
     catalog = ParquetDataCatalog(CATALOG_PATH)
     start_ns = start_ms * 1_000_000
     end_ns = end_ms * 1_000_000
-    trades = catalog.trade_ticks(instrument_ids=[iid], start=start_ns, end=end_ns)
-    raw = [(t.ts_event, t.price.as_double(), t.size.as_double()) for t in trades]
+    results = catalog.query(DydxSecondSnapshot, identifiers=[iid], start=start_ns, end=end_ns)
+    snapshots = [r.data if hasattr(r, "data") else r for r in results]
+    raw = [
+        (s.ts_event, s.open_price, s.high_price, s.low_price, s.close_price, s.buy_volume + s.sell_volume)
+        for s in snapshots
+        if s.close_price is not None
+    ]
     if not raw:
         return json.dumps({"candles": []})
-    candle_data = _build(raw, period_seconds=bar_seconds)
+    candle_data = _aggregate(raw, period_seconds=bar_seconds)
     candles = [
         {"t": c.ts_open // 1_000_000, "o": c.open, "h": c.high, "l": c.low, "c": c.close, "v": c.volume}
         for c in candle_data
     ]
     return json.dumps({"candles": candles})
-
-
-_MAX_TICK_WINDOW_NS = 6 * 3600 * 1_000_000_000  # 6h -- Ticks mode is a zoomed-in view only (AC #8)
-
-
-def _historical_ticks_json(iid: str, start_ms: int, end_ms: int, max_rows: int = 20_000) -> str:
-    """
-    Return individual trade prints from the catalog -- the raw data candles are built from.
-
-    Bounded two ways (MEM-01): the query window itself is clamped to _MAX_TICK_WINDOW_NS
-    *before* hitting the catalog (never materialize an unbounded read just to slice it
-    afterward), and max_rows caps the response as a second defensive backstop. Either
-    clamp sets "truncated" so the client's pagination cursor never advances past data it
-    didn't actually receive.
-    """
-    from nautilus_trader.persistence.catalog import ParquetDataCatalog
-    catalog = ParquetDataCatalog(CATALOG_PATH)
-    start_ns = start_ms * 1_000_000
-    end_ns = end_ms * 1_000_000
-    window_clamped = end_ns - start_ns > _MAX_TICK_WINDOW_NS
-    if window_clamped:
-        start_ns = end_ns - _MAX_TICK_WINDOW_NS
-    trades = catalog.trade_ticks(instrument_ids=[iid], start=start_ns, end=end_ns)
-    row_capped = len(trades) > max_rows
-    ticks = [
-        {
-            "t": t.ts_event // 1_000_000,
-            "price": t.price.as_double(),
-            "size": t.size.as_double(),
-            "side": t.aggressor_side.name,
-        }
-        for t in trades[:max_rows]
-    ]
-    return json.dumps({"ticks": ticks, "truncated": window_clamped or row_capped})
 
 
 def _price_series_rows(snaps: list[dict]) -> list[dict]:
@@ -1625,17 +1591,6 @@ async def coin_lines_handler(request: web.Request) -> web.Response:
         data = await asyncio.to_thread(_historical_lines_json, symbol, start_ms, end_ms)
     else:
         data = _live_lines_json(symbol)
-    return web.Response(text=data, content_type="application/json")
-
-
-async def coin_ticks_handler(request: web.Request) -> web.Response:
-    symbol = request.match_info["id"]
-    qs = dict(request.rel_url.query)
-    start_ms = _parse_query_ms(qs, "start")
-    end_ms = _parse_query_ms(qs, "end")
-    if start_ms is None or end_ms is None:
-        return web.Response(text=json.dumps({"ticks": [], "truncated": False}), content_type="application/json")
-    data = await asyncio.to_thread(_historical_ticks_json, symbol, start_ms, end_ms)
     return web.Response(text=data, content_type="application/json")
 
 
@@ -2001,7 +1956,6 @@ def make_app(redis_url: str, catalog_path: str) -> web.Application:
     app.router.add_get("/coin/{id}", coin_handler)
     app.router.add_get("/data/coin/{id}", coin_json_handler)
     app.router.add_get("/data/coin/{id}/candles", coin_candles_handler)
-    app.router.add_get("/data/coin/{id}/ticks", coin_ticks_handler)
     app.router.add_get("/data/coin/{id}/lines", coin_lines_handler)
     app.router.add_get("/data/coin/{id}/indicators", coin_indicators_handler)
     app.router.add_get("/data/indicators/catalog", indicators_catalog_handler)

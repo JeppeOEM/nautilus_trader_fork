@@ -15,18 +15,25 @@ Nautilus types decoded straight from the Rust adapter; two (`DydxSecondSnapshot`
 `DydxOpenInterest`) are custom `Data` subclasses this collector defines because the
 PyO3 bindings don't expose the fields another way.
 
-### 1.1 `TradeTick` (native Nautilus type)
+### 1.1 `TradeTick` (native Nautilus type) — **no longer persisted**
 
 - **Source:** `v4_trades` WS channel, decoded by the Rust adapter, delivered via
   `DydxClient._handle_message`'s PyCapsule path (`client.py:138-140`).
 - **Fields:** `instrument_id`, `price`, `size`, `aggressor_side` (`AggressorSide.BUYER`/
   `SELLER`), `trade_id`, `ts_event`, `ts_init`.
 - **Cadence:** event-driven, one per executed trade.
-- **Written:** buffered per `(type, instrument_id)` in `Collector._buffer`
-  (`collector.py:420`), flushed to the catalog every `flush_interval_seconds`
-  (default 60s, `collector.py:465-497`).
+- **No longer written to the catalog.** `Collector._process_data` explicitly excludes
+  `TradeTick` from the buffer/flush path — raw trades accumulated forever for every
+  pinned instrument with no retention cap (see §5's old Retention section history),
+  and every downstream consumer only ever needed OHLC, not individual prints. Each
+  `TradeTick` is still processed live to update a running per-second open/high/low/
+  close price, folded into `DydxSecondSnapshot` (§1.7) instead of stored raw. The
+  dashboard's "Ticks mode" (individual trade price/size/side scatter, `dashboard.py`)
+  was removed in the same change since it has no data source anymore.
 - **Subscription scope:** every pinned + liquid instrument (`_subscribe`,
   `collector.py:508-511`). Illiquid instruments are not subscribed to trades.
+- **Historical data:** `TradeTick` Parquet files written before this cutover remain in
+  the catalog and are still readable — this only stops *new* rows from being written.
 
 ### 1.2 `OrderBookDeltas` (native Nautilus type)
 
@@ -54,8 +61,8 @@ PyO3 bindings don't expose the fields another way.
 - **Note:** the collector's `run()` (`collector.py:771-819`) never calls
   `subscribe_bars` — no bar subscription is currently active. The capability exists in
   `client.py` but is unused; **no `Bar` data is currently written to the catalog by this
-  collector.** (`ml_signals/candles.py`'s `build_candles` instead derives minute
-  candles from raw `TradeTick`s on read — see §2.3.)
+  collector.** (`ml_signals/candles.py`'s `aggregate_ohlc` instead derives candles from
+  `DydxSecondSnapshot`'s per-second OHLC fields on read — see §2.3.)
 
 ### 1.4 `MarkPriceUpdate` (native Nautilus type)
 
@@ -89,12 +96,21 @@ The core microstructure record — a 1-second-sampled L2 book snapshot, **not** 
 deltas. Per `troll/CLAUDE.md`'s Signal Architecture rule: store raw inputs, compute
 signals on read (SIGNAL-01).
 
-- **Fields** (`second_snapshot.py:48-72`, schema at `:83-99`):
+- **Fields** (`second_snapshot.py`, schema at `DydxSecondSnapshot.schema()`):
   - `instrument_id`
   - `bid_prices`, `bid_sizes`, `ask_prices`, `ask_sizes` — up to `BOOK_DEPTH = 20`
     levels each (`second_snapshot.py:36`), index 0 = best bid/ask
   - `buy_volume`, `sell_volume` — summed trade size per side since the last tick
   - `buy_count`, `sell_count` — trade count per side since the last tick
+  - `open_price`, `high_price`, `low_price`, `close_price` — OHLC of actual executed
+    trade prices within this second, `None` if no trade occurred. This is the
+    collector's **only** record of traded price now that raw `TradeTick` is no longer
+    persisted (§1.1) — tracked live in `Collector._process_data` as each `TradeTick`
+    arrives, popped into the snapshot by `_second_loop`. `ml_signals/candles.py`'s
+    `aggregate_ohlc` combines these across multiple seconds for coarser candles;
+    `ml_signals/catalog_stats.py`'s `price_series` reads `close_price` as its primary
+    price source (falling back to `MarkPriceUpdate` only when no snapshot ever
+    recorded a trade for that instrument).
   - `ts_event`, `ts_init`
 - **Built by:** `Collector._second_loop` (`collector.py:652-718`), every
   `snapshot_interval_seconds` (config default 0.5s, `config.py:66-68`, `config.toml`
@@ -216,10 +232,19 @@ web dashboard's footprint chart only — no ranking/live-tick consumer.
 
 ### 2.5 Candles (`candles.py`)
 
-`build_candles` buckets raw `(ts_event, price)` `TradeTick` rows into OHLC candles at
-an arbitrary `period_seconds` (presets `1m` through `1h`, `candles.py:20-28`).
-Recomputed fresh on every request from trades, not stored — this is where minute-bar
-candles come from since the collector itself never subscribes to `Bar`s (§1.3).
+Two builder functions, both recomputed fresh on every request, not stored — this is
+where minute-bar candles come from since the collector itself never subscribes to
+`Bar`s (§1.3):
+
+- `build_candles` buckets a flat list of `(ts_event, price, size)` rows into OHLC
+  candles at an arbitrary `period_seconds`. Legacy path, kept for any caller still
+  working from individual trade prices.
+- `aggregate_ohlc` — the one actually used by `dashboard.py`'s
+  `_historical_candles_json` — re-buckets already-built 1-second OHLC rows (from
+  `DydxSecondSnapshot.open/high/low/close_price`, §1.7/§1.1) into wider candles,
+  combining them correctly (open of the first second in the bucket, high/low across
+  all of them, close of the last, volume summed) rather than rederiving OHLC from a
+  flat price list.
 
 ### 2.6 Book features (`book_features.py`)
 
@@ -395,7 +420,7 @@ trading decision.
 | `DydxSecondSnapshot.buy_volume`/`sell_volume`/`buy_count`/`sell_count` | `trade_aggregates()`, `volume_delta()` | `cvd`, `volume_delta`, `avg_trade_size`, `buy_count`, `sell_count` | |
 | `DydxSecondSnapshot` mid-price sequence | `VolatilityTracker` (3600s cross-sectional) | `volatility_score` | **this is the sort key when mode = `"volatility"`** |
 | `DydxSecondSnapshot` mid-price sequence (300-tick window) | `statistics.stdev` fast volatility | `volatility_fast` | separate from `volatility_score` and catalog `volatility` — 3 distinct volatility numbers by design |
-| `TradeTick` (Parquot, 25h lookback) | `price_stats()` → `pct_change_1h/24h`, catalog `volatility` | `pct_1h`, `pct_24h`, `volatility` | via `metrics_computer.compute_all`, refreshed every 60s |
+| `DydxSecondSnapshot.close_price` (25h lookback; `TradeTick` pre-cutover) | `price_stats()` → `pct_change_1h/24h`, catalog `volatility` | `pct_1h`, `pct_24h`, `volatility` | via `metrics_computer.compute_all`, refreshed every 60s |
 | dYdX indexer `volume24H` (independent poll) | — (used as-is) | `volume24h` | **this is the sort key when mode = `"volume"` (default)** |
 | `OrderBookDeltas` | `book_features.py`, `chart_data.py`, `footprint.py` | *not present* | chart-page-only; never reaches `ranking_engine` |
 | `MarkPriceUpdate` / `IndexPriceUpdate` | — | *not present* | stored, no downstream reader found |
@@ -411,3 +436,65 @@ alone, and does not itself move an instrument's rank. Three raw types collected 
 (`FundingRateUpdate`, `InstrumentStatus`, and the `open_interest` field of
 `DydxOpenInterest`) have no confirmed downstream consumer anywhere in `ml_signals/`
 or `ranking_engine/`.
+
+---
+
+## 5. Retention: how long is each type kept, and why the catalog keeps growing
+
+Two independent pruning mechanisms exist. Neither one bounds the data that actually
+accumulates day to day, which is why the catalog only ever grows.
+
+**1. `Collector._prune_loop` (`collector.py:1136-1158`), running inside the collector
+process itself.** Every `min(active retain_hours) * 900` seconds (≥ 900s floor,
+`_prune_interval_seconds`), it deletes catalog files — across *every* data type, not
+just one — for two groups of instrument only:
+
+- Any instrument in `config.toml` with `pinned = false` (a legacy state — nothing
+  creates one today; every instrument this collector actively adds is pinned by
+  definition).
+- Any market dYdX lists that *isn't* in `config.toml` at all, or was just dropped by a
+  `stop`/`unpin` control action (`_prune_candidates`, `collector.py:266-280`) — this is
+  why `crypto_perpetual`/`instrument_status`/etc. exist for ~140 markets on disk even
+  though only the 29 in `config.toml` are actually subscribed: the markets channel is
+  global, so mark/index price, funding rate, and instrument status/definitions get
+  written for every market dYdX lists, and only the ~29 configured ones are exempt from
+  this prune.
+
+The retention window for that non-pinned/unknown group is `non_config_retain_hours` in
+`config.toml` — **currently `4` hours**. It applies uniformly to every data type.
+
+**2. Per-instrument raw `OrderBookDeltas` retention** (`retain_hours` on an
+`InstrumentEntry`, only meaningful if that same entry also sets
+`store_order_book_deltas = true`) — enforced by the same loop via
+`_prune_delta_retention` (`collector.py:338-350`). **None of the 29 instruments in the
+current `config.toml` set `store_order_book_deltas = true`**, so no raw deltas are
+being written at all right now (`order_book_deltas/` is an empty directory) and this
+mechanism currently has nothing to do.
+
+**3. `prune_catalog.py` / `make prune`** — a separate, manual/cron-only script, not run
+by the collector itself. By default it only targets `order_book_deltas` at a flat
+**14-day** global cutoff, regardless of pinned status. Since nothing is stored there
+today (see above), running it currently frees nothing.
+
+### The actual retention per type, put plainly
+
+| Data type | For your 29 pinned instruments | For any other dYdX market |
+|---|---|---|
+| `TradeTick` | **No longer written at all** (§1.1) — historical files pre-cutover remain but stop growing | 4h (`non_config_retain_hours`), also no longer growing |
+| `OrderBookDeltas` | Not stored (no instrument opts in) | not stored |
+| `MarkPriceUpdate` / `IndexPriceUpdate` / `FundingRateUpdate` / `InstrumentStatus` | **Unlimited** | 4h |
+| `DydxSecondSnapshot` (now includes trade OHLC, §1.7) | **Unlimited** (pinned + liquid only, so this is always the pinned group) | not collected |
+| `DydxOpenInterest` | **Unlimited** | 4h |
+| Instrument definitions (`crypto_perpetual`) | **Unlimited** | 4h |
+| `Bar` / `custom_dydx_minute_bar` | **Dead legacy data.** Written by an earlier pre-pivot architecture (§1.3 — the collector no longer calls `subscribe_bars` at all); nothing writes new files here and nothing prunes the old ones. Safe to delete manually if disk space matters; not wired into anything live. | — |
+
+**Bottom line:** every instrument you've configured is `pinned = true`, and pinned
+instruments are permanently exempt from `_prune_loop`. So for all 29 configured coins,
+mark/index price, funding rate, open interest, instrument status, and the 1-second book
+snapshots (which now also carry trade OHLC) still accumulate forever with no built-in
+cap. Raw `TradeTick` was the one type that grew fastest for no real benefit — it's cut
+over to `DydxSecondSnapshot`'s `open`/`high`/`low`/`close_price` fields (§1.1/§1.7),
+which every downstream candle/price-series consumer (§2.5, §2.8) now reads instead.
+That removes roughly 2-6 MB/day/instrument of unbounded growth (dominated by the most
+liquid pairs) but does **not** address the other unlimited types above — those still
+need `non_config_retain_hours`-style bounding if you want them capped too.

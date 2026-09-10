@@ -14,12 +14,22 @@
 # -------------------------------------------------------------------------------------------------
 """Self-check: gap/outage detection finds obvious cases and ignores regular spacing; price_stats arithmetic."""
 
+import tempfile
 from unittest.mock import MagicMock
+
+from dydx_collector.second_snapshot import DydxSecondSnapshot
+from nautilus_trader.model.data import MarkPriceUpdate
+from nautilus_trader.model.identifiers import InstrumentId
+from nautilus_trader.model.objects import Price
+from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
 from ml_signals.catalog_stats import _overlapping_intervals
 from ml_signals.catalog_stats import find_gaps
 from ml_signals.catalog_stats import price_series
 from ml_signals.catalog_stats import price_stats
+
+
+_IID = "BTC-USD-PERP.DYDX"
 
 
 def test_finds_a_single_obvious_gap() -> None:
@@ -122,6 +132,62 @@ def test_price_stats_volatility_is_std_of_returns() -> None:
     assert abs(result["volatility"] - float(np.std(returns))) < 1e-9
 
 
+# ---- price_series (catalog integration) ----
+
+
+def _write_snapshot(catalog_path: str, close_price: float | None, ts: int) -> None:
+    ParquetDataCatalog(catalog_path).write_data([
+        DydxSecondSnapshot(
+            instrument_id=InstrumentId.from_str(_IID),
+            bid_prices=[close_price - 1] if close_price else [100.0],
+            bid_sizes=[1.0],
+            ask_prices=[close_price + 1] if close_price else [102.0],
+            ask_sizes=[1.0],
+            buy_volume=1.0 if close_price else 0.0,
+            sell_volume=0.0,
+            buy_count=1 if close_price else 0,
+            sell_count=0,
+            open_price=close_price,
+            high_price=close_price,
+            low_price=close_price,
+            close_price=close_price,
+            ts_event=ts,
+            ts_init=ts,
+        )
+    ])
+
+
+def test_price_series_uses_second_snapshot_close_price() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_snapshot(tmp, close_price=100.0, ts=1_000_000_000)
+        _write_snapshot(tmp, close_price=101.0, ts=2_000_000_000)
+        series = price_series(ParquetDataCatalog(tmp), _IID)
+        assert series == [(1_000_000_000, 100.0), (2_000_000_000, 101.0)]
+
+
+def test_price_series_skips_seconds_with_no_trade() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_snapshot(tmp, close_price=100.0, ts=1_000_000_000)
+        _write_snapshot(tmp, close_price=None, ts=2_000_000_000)  # no trade this second
+        series = price_series(ParquetDataCatalog(tmp), _IID)
+        assert series == [(1_000_000_000, 100.0)]
+
+
+def test_price_series_falls_back_to_mark_price_when_no_trades_exist() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        catalog = ParquetDataCatalog(tmp)
+        catalog.write_data([
+            MarkPriceUpdate(
+                instrument_id=InstrumentId.from_str(_IID),
+                value=Price(50.0, 1),
+                ts_event=1_000_000_000,
+                ts_init=1_000_000_000,
+            )
+        ])
+        series = price_series(catalog, _IID)
+        assert series == [(1_000_000_000, 50.0)]
+
+
 if __name__ == "__main__":
     test_finds_a_single_obvious_gap()
     test_no_gaps_in_regularly_spaced_series()
@@ -133,4 +199,7 @@ if __name__ == "__main__":
     test_price_stats_pct_24h_none_when_series_too_short()
     test_price_stats_pct_24h_correct()
     test_price_stats_volatility_is_std_of_returns()
+    test_price_series_uses_second_snapshot_close_price()
+    test_price_series_skips_seconds_with_no_trade()
+    test_price_series_falls_back_to_mark_price_when_no_trades_exist()
     print("ok")

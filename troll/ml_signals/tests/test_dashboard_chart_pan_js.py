@@ -13,7 +13,7 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-Exercises the candle/tick/lines pan-to-load-more JS state machine (Story 7.1, extended by
+Exercises the candle/lines pan-to-load-more JS state machine (Story 7.1, extended by
 Story 8.1) that lives inside dashboard.py's _LIVE_CHART_JS module -- the sole home for this
 widget since Story 8.1 consolidated it onto /chart/{id} (previously also duplicated inline
 in _INDEX_HTML for /coin/{id}, which has no chart at all anymore).
@@ -71,7 +71,7 @@ __DASHBOARD_JS__
   assert.ok(span1m >= 3600*1000, "1-minute bar chunk span must still have the 1h floor");
 
   // -- _onChartRelayout: _coinPanning sentinel fix ----------------------------------------
-  _coinPanning=false; _coinHistStart=null; _chartState=null; _coinMode="ticks";
+  _coinPanning=false; _coinHistStart=null; _chartState=null; _coinMode="lines";
   _onChartRelayout({"xaxis.range[0]":"2024-01-01","xaxis.range[1]":"2024-01-02"});
   assert.strictEqual(_coinPanning, true, "first genuine relayout must set _coinPanning");
   assert.strictEqual(_coinHistStart, null, "_coinHistStart must not be repurposed as a panning sentinel");
@@ -84,8 +84,8 @@ __DASHBOARD_JS__
   assert.strictEqual(_chartState.exhaustedLeft, true, "empty response must mark exhaustedLeft");
 
   // -- _loadOlderChunk: truncated response advances the cursor only to what was returned -
-  _chartState = {iid:"A", mode:"ticks", barSeconds:60, rows:[{t:100000,price:1,size:1,side:"BUYER"}], cursorStart:100000, exhaustedLeft:false, loading:false};
-  global.fetch = function(){ return Promise.resolve({ json: function(){ return Promise.resolve({ticks:[{t:90000,price:1,size:1,side:"BUYER"}], truncated:true}); } }); };
+  _chartState = {iid:"A", mode:"lines", barSeconds:60, rows:[{t:100000,bid:1,ask:1,mid:1,micro:1,price:1}], cursorStart:100000, exhaustedLeft:false, loading:false};
+  global.fetch = function(){ return Promise.resolve({ json: function(){ return Promise.resolve({rows:[{t:90000,bid:1,ask:1,mid:1,micro:1,price:1}], truncated:true}); } }); };
   await _loadOlderChunk();
   assert.strictEqual(_chartState.cursorStart, 90000, "a truncated response must not advance the cursor past data it didn't return");
   assert.strictEqual(_chartState.exhaustedLeft, false, "a truncated-but-nonempty response must not be treated as exhausted");

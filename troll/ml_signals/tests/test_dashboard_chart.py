@@ -44,7 +44,6 @@ from ml_signals.dashboard import _coerce_indicator_params
 from ml_signals.dashboard import _coin_chart_json
 from ml_signals.dashboard import _historical_candles_json
 from ml_signals.dashboard import _historical_lines_json
-from ml_signals.dashboard import _historical_ticks_json
 from ml_signals.dashboard import _indicator_id
 from ml_signals.dashboard import _indicators_json
 from ml_signals.dashboard import _indicator_replay_window
@@ -53,12 +52,7 @@ from ml_signals.dashboard import _render_chart_page
 from ml_signals.dashboard import _live_candles_json
 from ml_signals.dashboard import _live_lines_json
 from ml_signals.dashboard import _parse_indicator_spec
-from nautilus_trader.model.data import TradeTick
-from nautilus_trader.model.enums import AggressorSide
 from nautilus_trader.model.identifiers import InstrumentId
-from nautilus_trader.model.identifiers import TradeId
-from nautilus_trader.model.objects import Price
-from nautilus_trader.model.objects import Quantity
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
 
@@ -450,39 +444,41 @@ def test_live_candles_keeps_only_bucket_when_alone() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Catalog-backed candles/ticks (_historical_candles_json / _historical_ticks_json)
+# Catalog-backed candles (_historical_candles_json)
 # ---------------------------------------------------------------------------
 
-def _write_trades_to_catalog(tmp_path: str, n: int = 10) -> tuple[int, int]:
-    """Write n TradeTicks 60s apart, prices 100,101,...,100+n-1, into a temp catalog.
-
-    Mirrors the temp-catalog-with-real-TradeTicks pattern from
-    ml_signals/tests/test_timeframe_backtest.py's _catalog_with_trades. Returns
-    (first_ts_ns, last_ts_ns) for the caller to build a bounding [start_ms, end_ms].
-    """
+def _write_snapshot_trades_to_catalog(tmp_path: str, n: int = 10) -> tuple[int, int]:
+    """Write n DydxSecondSnapshots 60s apart, each with a single trade at open=high=
+    low=close=100+i, into a temp catalog. Returns (first_ts_ns, last_ts_ns) for the
+    caller to build a bounding [start_ms, end_ms]. Raw TradeTicks are no longer
+    persisted (see troll/docs/DATA_DICTIONARY.md's Retention section) -- OHLC candles
+    are built from these snapshot fields instead."""
     base_ns = _TS_NS
     step_ns = 60 * 1_000_000_000
-    trades = [
-        TradeTick(
-            instrument_id=InstrumentId.from_str(_IID), price=Price(100.0 + i, 1), size=Quantity(1.0 + i, 1),
-            aggressor_side=AggressorSide.BUYER if i % 2 == 0 else AggressorSide.SELLER,
-            trade_id=TradeId(str(i)), ts_event=base_ns + i * step_ns, ts_init=base_ns + i * step_ns,
+    snapshots = [
+        DydxSecondSnapshot(
+            instrument_id=InstrumentId.from_str(_IID),
+            bid_prices=[100.0 + i], bid_sizes=[1.0],
+            ask_prices=[102.0 + i], ask_sizes=[1.0],
+            buy_volume=1.0 + i, sell_volume=0.0, buy_count=1, sell_count=0,
+            open_price=100.0 + i, high_price=100.0 + i, low_price=100.0 + i, close_price=100.0 + i,
+            ts_event=base_ns + i * step_ns, ts_init=base_ns + i * step_ns,
         )
         for i in range(n)
     ]
     catalog = ParquetDataCatalog(tmp_path)
-    catalog.write_data(trades)
-    return trades[0].ts_event, trades[-1].ts_event
+    catalog.write_data(snapshots)
+    return snapshots[0].ts_event, snapshots[-1].ts_event
 
 
-def test_historical_candles_json_builds_from_catalog_trades(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Round-trips real TradeTicks through the catalog into OHLC candles."""
+def test_historical_candles_json_builds_from_catalog_snapshots(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Round-trips DydxSecondSnapshot OHLC fields through the catalog into OHLC candles."""
     with tempfile.TemporaryDirectory() as tmp:
-        first_ns, last_ns = _write_trades_to_catalog(tmp, n=10)
+        first_ns, last_ns = _write_snapshot_trades_to_catalog(tmp, n=10)
         monkeypatch.setattr(ml_signals.dashboard, "CATALOG_PATH", tmp)
         start_ms = first_ns // 1_000_000 - 1
         end_ms = last_ns // 1_000_000 + 1
-        # bar_seconds wide enough that all 10 trades (9 minutes apart) land in one candle
+        # bar_seconds wide enough that all 10 seconds' trades (9 minutes apart) land in one candle
         candles = json.loads(_historical_candles_json(_IID, start_ms, end_ms, 3600))["candles"]
         assert len(candles) == 1
         assert candles[0]["o"] == 100.0
@@ -491,71 +487,21 @@ def test_historical_candles_json_builds_from_catalog_trades(monkeypatch: pytest.
         assert candles[0]["c"] == 109.0
 
 
-def test_historical_ticks_json_returns_raw_trades(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Returns individual trade prints, not aggregated candles."""
+def test_historical_candles_json_skips_seconds_with_no_trade(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Snapshots with close_price=None (no trade that second) contribute no candle."""
     with tempfile.TemporaryDirectory() as tmp:
-        first_ns, last_ns = _write_trades_to_catalog(tmp, n=5)
+        snapshot = DydxSecondSnapshot(
+            instrument_id=InstrumentId.from_str(_IID),
+            bid_prices=[100.0], bid_sizes=[1.0], ask_prices=[102.0], ask_sizes=[1.0],
+            buy_volume=0.0, sell_volume=0.0, buy_count=0, sell_count=0,
+            ts_event=_TS_NS, ts_init=_TS_NS,
+        )
+        ParquetDataCatalog(tmp).write_data([snapshot])
         monkeypatch.setattr(ml_signals.dashboard, "CATALOG_PATH", tmp)
-        start_ms = first_ns // 1_000_000 - 1
-        end_ms = last_ns // 1_000_000 + 1
-        ticks = json.loads(_historical_ticks_json(_IID, start_ms, end_ms))["ticks"]
-        assert len(ticks) == 5
-        assert [t["price"] for t in ticks] == [100.0, 101.0, 102.0, 103.0, 104.0]
-        assert ticks[0]["side"] == "BUYER"
-        assert ticks[1]["side"] == "SELLER"
-
-
-def test_historical_ticks_json_respects_row_cap(monkeypatch: pytest.MonkeyPatch) -> None:
-    """max_rows caps the response even when more trades exist in the requested window."""
-    with tempfile.TemporaryDirectory() as tmp:
-        first_ns, last_ns = _write_trades_to_catalog(tmp, n=10)
-        monkeypatch.setattr(ml_signals.dashboard, "CATALOG_PATH", tmp)
-        start_ms = first_ns // 1_000_000 - 1
-        end_ms = last_ns // 1_000_000 + 1
-        body = json.loads(_historical_ticks_json(_IID, start_ms, end_ms, max_rows=3))
-        assert len(body["ticks"]) == 3
-        assert body["truncated"] is True
-
-
-def test_historical_ticks_json_not_truncated_under_cap(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No truncation flagged when the window/row count are both within bounds."""
-    with tempfile.TemporaryDirectory() as tmp:
-        first_ns, last_ns = _write_trades_to_catalog(tmp, n=5)
-        monkeypatch.setattr(ml_signals.dashboard, "CATALOG_PATH", tmp)
-        start_ms = first_ns // 1_000_000 - 1
-        end_ms = last_ns // 1_000_000 + 1
-        body = json.loads(_historical_ticks_json(_IID, start_ms, end_ms))
-        assert len(body["ticks"]) == 5
-        assert body["truncated"] is False
-
-
-def test_historical_ticks_json_clamps_wide_window(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A request window wider than _MAX_TICK_WINDOW_NS is clamped before hitting the
-    catalog (MEM-01) -- trades older than the clamped start are excluded and the
-    response is flagged truncated so the client's pagination cursor doesn't skip them."""
-    with tempfile.TemporaryDirectory() as tmp:
-        # 5 trades 2.5h apart (0,2.5,5,7.5,10h) -- a 10h span, wider than the 6h clamp,
-        # with the clamp boundary (4h before the last trade) landing well clear of any
-        # trade timestamp so this isn't sensitive to ms-rounding at the edges.
-        base_ns = _TS_NS
-        step_ns = int(2.5 * 3600 * 1_000_000_000)
-        trades = [
-            TradeTick(
-                instrument_id=InstrumentId.from_str(_IID), price=Price(100.0 + i, 1),
-                size=Quantity(1.0, 1), aggressor_side=AggressorSide.BUYER,
-                trade_id=TradeId(str(i)), ts_event=base_ns + i * step_ns,
-                ts_init=base_ns + i * step_ns,
-            )
-            for i in range(5)
-        ]
-        ParquetDataCatalog(tmp).write_data(trades)
-        monkeypatch.setattr(ml_signals.dashboard, "CATALOG_PATH", tmp)
-        start_ms = trades[0].ts_event // 1_000_000 - 1
-        end_ms = trades[-1].ts_event // 1_000_000 + 1
-        body = json.loads(_historical_ticks_json(_IID, start_ms, end_ms))
-        assert body["truncated"] is True
-        # Clamped to the last 6h of the requested window: only the 6h/9h/12h trades survive.
-        assert len(body["ticks"]) == 3
+        candles = json.loads(
+            _historical_candles_json(_IID, _TS_NS // 1_000_000 - 1, _TS_NS // 1_000_000 + 1, 60)
+        )["candles"]
+        assert candles == []
 
 
 # ---------------------------------------------------------------------------
