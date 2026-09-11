@@ -12,77 +12,16 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
-"""
-Unit tests for _book_metrics()'s stale/crossed-book gap handling.
-
-top_of_book_series is monkeypatched to a fixed row sequence so the gap-reset
-decision in _book_metrics can be tested in isolation from catalog I/O.
-"""
+"""Unit tests for compute_snapshot()'s price-stats/book-metrics merge."""
 
 from ml_signals import metrics_computer
 
 
 class _FakeCatalog:
-    """
-    order_book_deltas() only needs to return something truthy -- the real
-    rows come from the monkeypatched top_of_book_series below.
-    """
-
-    def order_book_deltas(self, instrument_ids: list[str], start: int) -> list[str]:
-        return ["not-empty"]
+    """order_book_deltas() is never called -- book_metrics_fn is always given."""
 
 
-def test_book_metrics_no_gap_accumulates_ofi(monkeypatch) -> None:
-    rows = [
-        (0, 100.0, 1.0, 101.0, 1.0),
-        (1_000_000_000, 100.5, 1.0, 101.5, 1.0),
-        (2_000_000_000, 101.0, 1.0, 102.0, 1.0),
-    ]
-    monkeypatch.setattr(metrics_computer, "top_of_book_series", lambda deltas, iid: iter(rows))
-
-    result = metrics_computer._book_metrics(
-        _FakeCatalog(), "BTC-USD-PERP.DYDX", now_ns=10_000_000_000
-    )
-
-    assert result["ofi"] is not None, "3 consecutive 1s-spaced updates must initialize OFI"
-
-
-def test_book_metrics_resets_ofi_across_stale_gap(monkeypatch) -> None:
-    """
-    A >3s gap between top-of-book updates means the collector's crossed/stale
-    guard (see collector.py's resync watchdog) skipped snapshots for a while --
-    _book_metrics must not compute an OFI delta spanning that gap.
-    """
-    rows = [
-        (0, 100.0, 1.0, 101.0, 1.0),
-        (1_000_000_000, 100.5, 1.0, 101.5, 1.0),  # 2nd update -- OFI initializes here
-        (5_000_000_000, 200.0, 1.0, 201.0, 1.0),  # >3s gap -- must reset first
-    ]
-    monkeypatch.setattr(metrics_computer, "top_of_book_series", lambda deltas, iid: iter(rows))
-
-    result = metrics_computer._book_metrics(
-        _FakeCatalog(), "BTC-USD-PERP.DYDX", now_ns=10_000_000_000
-    )
-
-    # After the reset, the post-gap row is only the first observation again --
-    # OFI needs a second update to initialize, which never comes here.
-    assert result["ofi"] is None, "OFI must reset (un-initialize) across a stale/crossed-book gap"
-    assert result["microprice"] is not None  # microprice has no windowed history to corrupt
-
-
-def test_compute_snapshot_uses_book_metrics_fn_override_instead_of_book_metrics(
-    monkeypatch,
-) -> None:
-    """
-    SSOT-02: ranking_engine passes its own live-indicator-state read here instead of
-    letting compute_snapshot fall back to the from-Parquet _book_metrics -- verify the
-    override actually short-circuits _book_metrics rather than being ignored.
-    """
-
-    def _boom(*_args: object, **_kwargs: object) -> dict:
-        raise AssertionError("_book_metrics must not be called when book_metrics_fn is given")
-
-    monkeypatch.setattr(metrics_computer, "_book_metrics", _boom)
+def test_compute_snapshot_merges_price_stats_and_book_metrics_fn(monkeypatch) -> None:
     monkeypatch.setattr(
         metrics_computer, "price_stats", lambda catalog, iid, start_ns: {"price": 1.0}
     )
@@ -94,6 +33,7 @@ def test_compute_snapshot_uses_book_metrics_fn_override_instead_of_book_metrics(
         book_metrics_fn=lambda iid: {"ofi": 0.5, "microprice": 100.5, "spread": 1.0},
     )
 
+    assert result["price"] == 1.0
     assert result["ofi"] == 0.5
     assert result["microprice"] == 100.5
     assert result["spread"] == 1.0

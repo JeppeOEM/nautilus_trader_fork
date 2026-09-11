@@ -15,8 +15,6 @@
 """
 Tests for Story 6.1's instrument control: config.toml's [[instruments]] list is the sole
 subscribe source, and start/unpin/stop/pin_top_liquid are the only ways it changes.
-Every instrument in `instruments` is pinned by definition -- there is no more
-"collected but not pinned" middle state (see collector.py's module docstring).
 """
 
 import asyncio
@@ -98,7 +96,7 @@ def _use_tmp_config_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Pat
 
 
 @pytest.mark.asyncio
-async def test_start_appends_pinned_and_subscribes(
+async def test_start_appends_and_subscribes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config_path = _use_tmp_config_path(tmp_path, monkeypatch)
@@ -108,8 +106,7 @@ async def test_start_appends_pinned_and_subscribes(
 
     ids = {e.id for e in collector._config.instruments}
     assert ids == {"SOL-USD-PERP.DYDX"}
-    assert collector._config.instruments[0].pinned is True
-    assert load_config(config_path).instruments[0].pinned is True
+    assert load_config(config_path).instruments[0].id == "SOL-USD-PERP.DYDX"
     assert "subscribe_trades:SOL-USD-PERP.DYDX" in collector._client.calls
     assert "subscribe_orderbook:SOL-USD-PERP.DYDX" in collector._client.calls
 
@@ -135,7 +132,7 @@ async def test_unpin_removes_entry_and_excludes_id(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config_path = _use_tmp_config_path(tmp_path, monkeypatch)
-    collector = _collector(tmp_path, (InstrumentEntry(id="BTC-USD-PERP.DYDX", pinned=True),))
+    collector = _collector(tmp_path, (InstrumentEntry(id="BTC-USD-PERP.DYDX"),))
 
     await collector._handle_control_message("unpin", "BTC-USD-PERP.DYDX")
 
@@ -151,7 +148,7 @@ async def test_unpin_publishes_removed_tombstone(
 ) -> None:
     """bot_tui must drop the row immediately, not wait out its staleness timeout."""
     _use_tmp_config_path(tmp_path, monkeypatch)
-    collector = _collector(tmp_path, (InstrumentEntry(id="BTC-USD-PERP.DYDX", pinned=True),))
+    collector = _collector(tmp_path, (InstrumentEntry(id="BTC-USD-PERP.DYDX"),))
     collector._redis = _FakeRedis()  # type: ignore[assignment]
 
     await collector._handle_control_message("unpin", "BTC-USD-PERP.DYDX")
@@ -216,15 +213,13 @@ async def test_start_at_exactly_one_below_cap_succeeds(
 
 
 @pytest.mark.asyncio
-async def test_stop_removes_pinned_entry_and_unsubscribes(
+async def test_stop_removes_entry_and_unsubscribes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """
-    Stop removes an entry regardless of its pinned flag (AC #4) -- and, unlike unpin,
-    does not add it to `exclude` (that's the whole distinction between the two).
-    """
+    """Stop removes an entry (AC #4) -- and, unlike unpin, does not add it to `exclude`
+    (that's the whole distinction between the two)."""
     _use_tmp_config_path(tmp_path, monkeypatch)
-    collector = _collector(tmp_path, (InstrumentEntry(id="BTC-USD-PERP.DYDX", pinned=True),))
+    collector = _collector(tmp_path, (InstrumentEntry(id="BTC-USD-PERP.DYDX"),))
 
     await collector._handle_control_message("stop", "BTC-USD-PERP.DYDX")
 
@@ -263,7 +258,7 @@ def _markets_json(volumes: dict[str, float]) -> dict:
 
 
 @pytest.mark.asyncio
-async def test_pin_top_liquid_fills_empty_slots_pinned(
+async def test_pin_top_liquid_fills_empty_slots(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _use_tmp_config_path(tmp_path, monkeypatch)
@@ -273,7 +268,7 @@ async def test_pin_top_liquid_fills_empty_slots_pinned(
         lambda _network: _markets_json({"AAA": 500_000.0, "BBB": 400_000.0, "LOW": 50.0}),
     )
 
-    existing = InstrumentEntry(id="PIN-USD-PERP.DYDX", pinned=True)
+    existing = InstrumentEntry(id="PIN-USD-PERP.DYDX")
     collector = _collector(tmp_path, (existing,))
 
     await collector._handle_control_message("pin_top_liquid", None)
@@ -283,8 +278,6 @@ async def test_pin_top_liquid_fills_empty_slots_pinned(
     assert "AAA-PERP.DYDX" in ids
     assert "BBB-PERP.DYDX" in ids
     assert "LOW-PERP.DYDX" not in ids  # below volume threshold
-    new_entries = [e for e in collector._config.instruments if e.id != "PIN-USD-PERP.DYDX"]
-    assert all(e.pinned for e in new_entries)
     existing_entry = next(e for e in collector._config.instruments if e.id == "PIN-USD-PERP.DYDX")
     assert existing_entry is existing  # byte-identical -- never rebuilt
 
@@ -325,7 +318,7 @@ async def test_pin_top_liquid_never_removes_or_exceeds_cap(
         collector_module, "_fetch_markets_json", lambda _network: _markets_json(volumes)
     )
 
-    existing = tuple(InstrumentEntry(id=f"PIN{i}-PERP.DYDX", pinned=True) for i in range(5))
+    existing = tuple(InstrumentEntry(id=f"PIN{i}-PERP.DYDX") for i in range(5))
     collector = _collector(tmp_path, existing)
 
     await collector._handle_control_message("pin_top_liquid", None)
@@ -346,7 +339,7 @@ async def test_pin_top_liquid_excludes_already_collected_ids(
         "_fetch_markets_json",
         lambda _network: _markets_json({"AAA": 500_000.0}),
     )
-    collector = _collector(tmp_path, (InstrumentEntry(id="AAA-PERP.DYDX", pinned=True),))
+    collector = _collector(tmp_path, (InstrumentEntry(id="AAA-PERP.DYDX"),))
 
     await collector._handle_control_message("pin_top_liquid", None)
 
@@ -366,7 +359,7 @@ async def test_pin_top_liquid_at_cap_is_noop(
         lambda network: fetch_calls.append(network) or _markets_json({}),
     )
     at_cap = tuple(
-        InstrumentEntry(id=f"COIN{i}-PERP.DYDX", pinned=True) for i in range(_MAX_COLLECTED_INSTRUMENTS)
+        InstrumentEntry(id=f"COIN{i}-PERP.DYDX") for i in range(_MAX_COLLECTED_INSTRUMENTS)
     )
     collector = _collector(tmp_path, at_cap)
 
@@ -381,24 +374,13 @@ def test_prune_candidates_includes_dropped_instrument() -> None:
     unpin) must still be a prune candidate as long as it's a known market -- catalog
     data for abandoned instruments must not be orphaned.
     """
-    instruments = (InstrumentEntry(id="PINNED-PERP.DYDX", pinned=True),)
-    known_markets = {"PINNED-PERP.DYDX", "STOPPED-PERP.DYDX"}
+    instruments = (InstrumentEntry(id="COLLECTED-PERP.DYDX"),)
+    known_markets = {"COLLECTED-PERP.DYDX", "STOPPED-PERP.DYDX"}
 
     candidates = _prune_candidates(instruments, known_markets)
 
     assert "STOPPED-PERP.DYDX" in candidates
-    assert "PINNED-PERP.DYDX" not in candidates
-
-
-def test_prune_candidates_includes_non_pinned_collected() -> None:
-    instruments = (
-        InstrumentEntry(id="PINNED-PERP.DYDX", pinned=True),
-        InstrumentEntry(id="NON-PINNED-PERP.DYDX", pinned=False),
-    )
-
-    candidates = _prune_candidates(instruments, known_markets=set())
-
-    assert candidates == {"NON-PINNED-PERP.DYDX"}
+    assert "COLLECTED-PERP.DYDX" not in candidates
 
 
 @pytest.mark.asyncio

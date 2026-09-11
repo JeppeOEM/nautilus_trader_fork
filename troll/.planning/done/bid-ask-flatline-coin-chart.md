@@ -1,5 +1,5 @@
 ---
-status: verifying
+status: done
 trigger: "the bid and ask can sometimes flatline showing incorrect price that is just frozen when i can clearly see on the live homepage that the bid or ask is moving and not flatlining"
 created: 2026-06-30
 updated: 2026-06-30

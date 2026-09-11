@@ -108,6 +108,7 @@ def test_ofi_strategy_generates_long_entry_on_bid_pressure() -> None:
 
     config = OFIStrategyConfig(
         instrument_id=_IID,
+        warmup_seconds=0,   # synthetic data spans ~6s; default 1800s warmup would block every entry
         ofi_window=2,
         ma_period=2,
         buy_threshold=0.5,
@@ -133,6 +134,7 @@ def test_ofi_strategy_no_trade_below_ma_threshold() -> None:
 
     config = OFIStrategyConfig(
         instrument_id=_IID,
+        warmup_seconds=0,   # isolate the threshold filter -- don't let warmup mask it
         ofi_window=2,
         ma_period=2,
         buy_threshold=999_999.0,   # impossibly high → no entry
@@ -157,6 +159,7 @@ def test_ofi_strategy_depth_filter_blocks_entry() -> None:
 
     config = OFIStrategyConfig(
         instrument_id=_IID,
+        warmup_seconds=0,   # isolate the depth filter -- don't let warmup mask it
         ofi_window=2,
         ma_period=2,
         buy_threshold=0.5,

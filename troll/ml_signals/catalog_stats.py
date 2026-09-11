@@ -48,6 +48,24 @@ def list_instruments(catalog_path: str) -> list[str]:
     return sorted(ids)
 
 
+def query_second_snapshots(
+    catalog_path: str, instrument_id: str, start_ns: int, end_ns: int,
+) -> list[DydxSecondSnapshot]:
+    """DydxSecondSnapshot rows for `instrument_id` in [start_ns, end_ns], CustomData-unwrapped.
+
+    Shared by dashboard.py's _historical_lines_json and custom_indicators.py's
+    _second_snapshots -- both projected different fields off this same query, so only
+    the catalog-query + CustomData-unwrap boilerplate lives here.
+    """
+    catalog = ParquetDataCatalog(catalog_path)
+    results = catalog.query(
+        data_cls=DydxSecondSnapshot, identifiers=[instrument_id], start=start_ns, end=end_ns,
+    )
+    # query() wraps custom Data subclasses in CustomData -- unwrap via .data to reach the
+    # actual DydxSecondSnapshot (confirmed via direct introspection this session).
+    return [r.data if hasattr(r, "data") else r for r in results]
+
+
 def _load(catalog: ParquetDataCatalog, data_type: str, instrument_id: str) -> list:
     if data_type == "trade_tick":
         return catalog.trade_ticks(instrument_ids=[instrument_id])

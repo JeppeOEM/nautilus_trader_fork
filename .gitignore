@@ -87,6 +87,7 @@ env/
 !**/fuzz/grind.sh
 !.docker/entrypoint.sh
 !.pre-commit-hooks/*.sh
+!troll/scripts/*.sh
 !scripts/cargo-tool-version.sh
 !scripts/check-cargo-cooldown.sh
 !scripts/check-no-build-packages.sh

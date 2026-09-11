@@ -272,22 +272,17 @@ into ranking.
 
 ### 2.8 `metrics_computer.py` — periodic snapshot metrics
 
-Bridges §1's Parquet catalog and the SQLite `metrics_store` (§3.4). Two entry points:
+Bridges §1's Parquet catalog and the SQLite `metrics_store` (§3.4). One entry point:
 
-- `compute_book_metrics_all` — fast path, reads only the last `OFI_LOOKBACK_SECONDS`
-  (60s) of `OrderBookDeltas` per instrument and computes `ofi` (top-of-book
-  `OrderFlowImbalance`, window 5), `microprice`, and `spread` (`_book_metrics`,
-  `metrics_computer.py:58-89`). **Note:** as of the current `ranking_engine.py`
-  wiring, only `compute_all` (not `compute_book_metrics_all`) is actually invoked
-  (`engine.py:419`) — this fast-path function currently has no caller found in
-  `ranking_engine`/`dashboard`.
-- `compute_all` — the slow, complete path: adds `price_stats` (`catalog_stats.py:190-224`)
-  — latest price, `pct_change_1h`/`pct_change_24h`, and `volatility` (stdev of
-  consecutive-return percentages over a 25-hour trailing window read straight from
-  the Parquet trade/price history) — on top of the same book metrics. This is what
-  `ranking_engine._slow_loop_task` calls every `DB_WRITE_INTERVAL_SECONDS` (60s,
-  `engine.py:401-426`) to populate the `pct_1h`/`pct_24h`/`volatility` fields in the
-  live ranking (§3).
+- `compute_all` — adds `price_stats` (`catalog_stats.py:190-224`) — latest price,
+  `pct_change_1h`/`pct_change_24h`, and `volatility` (stdev of consecutive-return
+  percentages over a 25-hour trailing window read straight from the Parquet
+  trade/price history) — to the `ofi`/`microprice`/`spread` fields its required
+  `book_metrics_fn` argument supplies (`ranking_engine._legacy_book_metrics_for`,
+  reading the same live indicator state `rankings:live` uses — SSOT-02, no
+  from-Parquet OFI replay). This is what `ranking_engine._slow_loop_task` calls every
+  `DB_WRITE_INTERVAL_SECONDS` (60s, `engine.py:401-426`) to populate the
+  `pct_1h`/`pct_24h`/`volatility` fields in the live ranking (§3).
 
 ### 2.9 `rank_history.py` / `watchlist.py`
 

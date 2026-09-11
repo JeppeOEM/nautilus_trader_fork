@@ -100,6 +100,15 @@ load that OOM-crashed an earlier `Strategy`-based recorder.
 **Publishes:** `snapshots:raw` (Redis pub/sub, one message per instrument per second).
 **Writes:** Parquet catalog at `dydx_collector/catalog/`.
 
+**Known benign WARN log lines** (from `nautilus_network::websocket::client`, seen via
+`troll-logs`/Dozzle):
+- `Connection closed by peer (no close frame), terminating` — dYdX's socket hung up
+  without a WS close handshake (server restart, LB cycling the connection, network
+  blip). The read loop breaks and the client's normal reconnect/resubscribe logic
+  takes over automatically — expected, not a bug, as long as reconnect follows.
+- `Received close frame, terminating: code=..., reason='...'` — same situation but a
+  *graceful* close (peer sent a proper WS close frame first).
+
 ---
 
 ## 2. `ml_signals/` — shared signals, dashboard, backtesting

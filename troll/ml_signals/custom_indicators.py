@@ -103,21 +103,13 @@ def catalog_json() -> dict[str, Any]:
 
 
 def _second_snapshots(window: ReplayWindow) -> list[dict]:
-    """Fetch this window's DydxSecondSnapshot rows from the catalog, as plain dicts.
+    """Fetch this window's DydxSecondSnapshot rows from the catalog, as plain dicts."""
+    from ml_signals.catalog_stats import query_second_snapshots
 
-    Mirrors dashboard.py's _historical_lines_json exactly (same catalog-query +
-    CustomData-unwrap pattern) -- duplicated here rather than imported, since importing
-    from dashboard.py would be circular (dashboard.py imports this module).
-    """
-    from dydx_collector.second_snapshot import DydxSecondSnapshot
-    from nautilus_trader.persistence.catalog import ParquetDataCatalog
-
-    catalog = ParquetDataCatalog(_CATALOG_PATH)
-    results = catalog.query(
-        data_cls=DydxSecondSnapshot, identifiers=[window.instrument_id],
-        start=window.start_ms * 1_000_000, end=window.end_ms * 1_000_000,
+    snapshots = query_second_snapshots(
+        _CATALOG_PATH, window.instrument_id,
+        window.start_ms * 1_000_000, window.end_ms * 1_000_000,
     )
-    snapshots = [r.data if hasattr(r, "data") else r for r in results]
     # buy_count/sell_count are required by trade_aggregates()'s reduction below even though
     # _cvd_replay only consumes the volume totals it returns -- not dead data, just an unused
     # part of a shared function's output.

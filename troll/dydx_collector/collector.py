@@ -267,23 +267,17 @@ def _prune_candidates(instruments: tuple[InstrumentEntry, ...], known_markets: s
     """
     Ids whose catalog data is subject to non_config_retain_hours pruning (Story 6.1).
 
-    Two groups, matching the pre-6.1 `(self._liquid | self._illiquid) - self._pinned`
-    behavior exactly: currently-collected non-pinned instruments (a legacy state --
-    nothing creates one anymore, since every instrument is pinned by definition; this
-    stays a no-op group rather than a group that can never exist, for any config.toml
-    hand-edited before this change), UNION every known market not currently collected
-    at all (covers an instrument dropped by `stop` or `unpin` -- its leftover catalog
-    data must still age out).
+    Every known market not currently collected (dropped by `stop` or `unpin`, or never
+    added) -- its leftover catalog data must still age out.
     """
     collected_ids = {e.id for e in instruments}
-    non_pinned_collected = {e.id for e in instruments if not e.pinned}
-    return non_pinned_collected | (known_markets - collected_ids)
+    return known_markets - collected_ids
 
 
-def _prune_all_instruments(catalog_path: str, non_pinned: set[str], retain_hours: float) -> int:
+def _prune_all_instruments(catalog_path: str, ids: set[str], retain_hours: float) -> int:
     """Blocking filesystem walk over every candidate -- always call via asyncio.to_thread."""
     freed = 0
-    for iid in non_pinned:
+    for iid in ids:
         freed += prune_instrument(catalog_path, iid, retain_hours)
     return freed
 
@@ -476,7 +470,7 @@ class Collector:
             e.id for e in config.instruments if e.store_order_book_deltas
         }
         # Per-coin raw-delta retention, in hours; None means unlimited (never pruned).
-        # Independent of the pinned/non-pinned tier split used for non_config_retain_hours below.
+        # Independent of the collected/uncollected split used for non_config_retain_hours below.
         self._delta_retain_hours: dict[str, float | None] = {
             e.id: e.retain_hours for e in config.instruments if e.store_order_book_deltas
         }
@@ -823,7 +817,6 @@ class Collector:
         for entry in self._config.instruments:
             payload = {
                 "id": entry.id,
-                "pinned": entry.pinned,
                 "liquid": entry.id in self._last_liquid_by_volume,
                 "last_trade_ts": self._last_book_update_ns.get(entry.id, 0),
             }
@@ -857,7 +850,7 @@ class Collector:
                     "Cannot start %s: at %s-instrument cap", iid, _MAX_COLLECTED_INSTRUMENTS
                 )
                 return
-            new_instruments = (*self._config.instruments, InstrumentEntry(id=iid, pinned=True))
+            new_instruments = (*self._config.instruments, InstrumentEntry(id=iid))
             new_config = dataclasses.replace(
                 self._config, instruments=new_instruments, exclude=self._config.exclude - {iid}
             )
@@ -929,7 +922,7 @@ class Collector:
             max_liquid=free_slots,
         )
         new_instruments = self._config.instruments + tuple(
-            InstrumentEntry(id=iid, pinned=True) for iid in sorted(top)
+            InstrumentEntry(id=iid) for iid in sorted(top)
         )
         new_config = dataclasses.replace(self._config, instruments=new_instruments)
         await self._apply_and_persist(new_config)
@@ -1203,7 +1196,7 @@ class Collector:
             await _publish_snapshot_batch(self._redis, batch)
 
     async def _prune_loop(self) -> None:
-        """Prune non-pinned instruments' catalog data, and any per-coin raw-delta retention."""
+        """Prune uncollected instruments' catalog data, and any per-coin raw-delta retention."""
         while not self._stop.is_set():
             # Recomputed each iteration so a hot-reloaded retain_hours takes effect promptly.
             interval = _prune_interval_seconds(
@@ -1211,7 +1204,7 @@ class Collector:
             )
             await asyncio.sleep(interval)
             catalog_path = str(Path(self._config.catalog_path).resolve())
-            non_pinned = _prune_candidates(self._config.instruments, self._known_markets)
+            dropped_ids = _prune_candidates(self._config.instruments, self._known_markets)
 
             # Both calls do real synchronous filesystem walks (up to 267 instruments'
             # worth) -- to_thread keeps them off the event loop, which _ingest_loop and
@@ -1219,11 +1212,11 @@ class Collector:
             # promptly. A same-thread version of this loop once blocked the loop for
             # 20s+ and stalled every instrument's book simultaneously (2026-09-11 OOM).
             freed = await asyncio.to_thread(
-                _prune_all_instruments, catalog_path, non_pinned, self._config.non_config_retain_hours
+                _prune_all_instruments, catalog_path, dropped_ids, self._config.non_config_retain_hours
             )
             if freed:
                 logger.info(
-                    f"Pruned {freed / 1024 / 1024:.1f} MB from {len(non_pinned)} non-pinned instruments"
+                    f"Pruned {freed / 1024 / 1024:.1f} MB from {len(dropped_ids)} uncollected instruments"
                 )
 
             delta_freed = await asyncio.to_thread(

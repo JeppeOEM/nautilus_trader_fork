@@ -38,7 +38,6 @@ def _reset() -> None:
 def _status(iid: str, **overrides: object) -> dict:
     base = {
         "id": iid,
-        "pinned": False,
         "liquid": True,
         "last_trade_ts": 1_000_000_000,
     }
@@ -62,10 +61,10 @@ def test_populated_collector_pane_has_one_row_per_instrument() -> None:
     assert len(app._collector_body.body) == 2
 
 
-def test_rows_pinned_first_then_by_id_and_selectable() -> None:
+def test_rows_sorted_by_id_and_selectable() -> None:
     _reset()
     collector_state._handle_status_message(_status("ETH-USD-PERP.DYDX"))
-    collector_state._handle_status_message(_status("BTC-USD-PERP.DYDX", pinned=True))
+    collector_state._handle_status_message(_status("BTC-USD-PERP.DYDX"))
     app = BotTuiApp()
     app._refresh_collector_body()
     body = app._collector_body

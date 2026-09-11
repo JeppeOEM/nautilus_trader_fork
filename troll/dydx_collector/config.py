@@ -25,18 +25,14 @@ from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
 
 @dataclass(frozen=True)
 class InstrumentEntry:
+    # Every id in `instruments` is collected -- there is no "listed but not collected"
+    # state. Removed from `config.toml`'s [[instruments]] entirely (via "stop"/"unpin")
+    # to stop collecting it.
     id: str
-    # Always True for any entry added going forward (collector.py's "start" and
-    # "pin_top_liquid" control actions) -- every currently-collected instrument is
-    # pinned by definition, there is no more "collected but not pinned" state. Kept as
-    # a field (rather than removed) only so a config.toml saved before this change still
-    # loads; see _prune_candidates' non_pinned_collected group for the one place that
-    # legacy False still matters.
-    pinned: bool = False
     store_order_book_deltas: bool = False
     # Retention for this instrument's raw order-book-delta data, in hours.
     # None means unlimited (never pruned) -- distinct from the global
-    # non_config_retain_hours, which only applies to non-pinned instruments.
+    # non_config_retain_hours, which only applies to instruments no longer collected.
     retain_hours: float | None = None
 
 
@@ -68,7 +64,6 @@ def load_config(path: Path) -> CollectorConfig:
     instruments = tuple(
         InstrumentEntry(
             id=entry["id"],
-            pinned=entry.get("pinned", False),
             store_order_book_deltas=entry.get("store_order_book_deltas", False),
             retain_hours=entry.get("retain_hours"),
         )
@@ -100,7 +95,7 @@ def load_config(path: Path) -> CollectorConfig:
 
 
 def _instrument_to_raw(entry: InstrumentEntry) -> dict:
-    raw: dict = {"id": entry.id, "pinned": entry.pinned}
+    raw: dict = {"id": entry.id}
     if entry.store_order_book_deltas:
         raw["store_order_book_deltas"] = entry.store_order_book_deltas
     if entry.retain_hours is not None:

@@ -26,26 +26,18 @@ COLD_OPEN_TEXT = "waiting for collector:status…"
 
 
 def collector_rows(statuses: dict[str, dict]) -> list[dict]:
-    """
-    Latest known status dict per instrument, sorted by id.
-
-    Every currently-collected instrument is pinned by definition (there is no more
-    "collected but not pinned" state -- see collector.py's module docstring), so
-    row["pinned"] is always True here; a stale row from a config.toml saved before
-    that change could still say False, sorting harmlessly to the same place.
-    """
-    return sorted(statuses.values(), key=lambda row: (not row.get("pinned", False), row["id"]))
+    """Latest known status dict per instrument, sorted by id."""
+    return sorted(statuses.values(), key=lambda row: row["id"])
 
 
 def format_collector_line(row: dict, stale: bool) -> str:
     """
-    One full plain-text row: id, pinned marker, liquid/illiquid label.
+    One full plain-text row: id, liquid/illiquid label.
     Used directly by tests and as the source of truth app.py's urwid.Text must match.
     """
     stale_marker = "~ " if stale else "  "
-    pinned_text = "pinned" if row.get("pinned", False) else "      "
     liquid_text = "liquid" if row.get("liquid", False) else "illiquid"
-    return f"{stale_marker}{row['id']:<22} {pinned_text}  {liquid_text:<8}"
+    return f"{stale_marker}{row['id']:<22} {liquid_text:<8}"
 
 
 def format_unpinned_line(unpinned_ids: list[str]) -> str:

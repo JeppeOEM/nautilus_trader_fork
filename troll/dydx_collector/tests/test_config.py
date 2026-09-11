@@ -95,19 +95,7 @@ def test_negative_snapshot_interval_is_rejected(tmp_path: Path) -> None:
         load_config(path)
 
 
-def test_instrument_pinned_defaults_to_false(tmp_path: Path) -> None:
-    path = _write_toml(
-        tmp_path,
-        """
-        [[instruments]]
-        id = "BTC-USD-PERP.DYDX"
-        """,
-    )
-    config = load_config(path)
-    assert config.instruments[0].pinned is False
-
-
-def test_save_config_round_trips_pinned_and_all_other_fields(tmp_path: Path) -> None:
+def test_save_config_round_trips_all_fields(tmp_path: Path) -> None:
     path = _write_toml(
         tmp_path,
         """
@@ -124,13 +112,11 @@ def test_save_config_round_trips_pinned_and_all_other_fields(tmp_path: Path) -> 
 
         [[instruments]]
         id = "BTC-USD-PERP.DYDX"
-        pinned = true
         store_order_book_deltas = true
         retain_hours = 24.0
 
         [[instruments]]
         id = "ETH-USD-PERP.DYDX"
-        pinned = false
         """,
     )
     original = load_config(path)

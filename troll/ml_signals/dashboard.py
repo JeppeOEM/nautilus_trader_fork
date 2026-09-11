@@ -55,12 +55,12 @@ from aiohttp import web
 from plotly.subplots import make_subplots
 from ranking_engine import metrics_store
 
+from ml_signals import catalog_stats as _catalog_stats
 from ml_signals import chart_data as _chart_data
 from ml_signals import chart_indicator_config as _chart_indicator_config
 from ml_signals import chart_indicators as _chart_indicators
 from ml_signals import custom_indicators as _custom_indicators
 from ml_signals import ranking_columns as _ranking_columns
-from ml_signals.catalog_stats import list_instruments
 from ml_signals.indicators import microprice as calc_microprice
 
 
@@ -128,36 +128,6 @@ _second_rolling: dict[str, deque] = defaultdict(lambda: deque(maxlen=3600))
 _ind_rolling: dict[str, deque] = defaultdict(lambda: deque(maxlen=3600))
 
 _NAV = '<p><a href="/">Rankings</a> | <a href="/live">Live signals</a></p>'
-
-
-def _split_tiers(catalog_path: str) -> tuple[set[str], set[str]]:
-    """
-    Return (subscribed_iids, illiquid_iids) by checking custom_dydx_second_snapshot
-    directory presence -- DydxSecondSnapshot is only written for pinned + liquid
-    instruments (collector.py's _second_loop), which is exactly "subscribed" here.
-    Previously checked trade_tick, before raw TradeTick storage was cut over to
-    DydxSecondSnapshot's OHLC fields (see troll/docs/DATA_DICTIONARY.md).
-    """
-    import glob
-    import os as _os
-    subscribed: set[str] = set()
-    for path in glob.glob(_os.path.join(catalog_path, "data", "custom_dydx_second_snapshot", "*")):
-        subscribed.add(Path(path).name)
-    all_iids = set(list_instruments(catalog_path))
-    return subscribed, all_iids - subscribed
-
-
-_TIER_CACHE: tuple[set[str], set[str]] | None = None
-_TIER_CACHE_TS: float = 0.0
-_TIER_TTL: float = 1800.0  # re-scan every 30 min
-
-
-def _get_tiers() -> tuple[set[str], set[str]]:
-    global _TIER_CACHE, _TIER_CACHE_TS
-    if _TIER_CACHE is None or time.time() - _TIER_CACHE_TS > _TIER_TTL:
-        _TIER_CACHE = _split_tiers(CATALOG_PATH)
-        _TIER_CACHE_TS = time.time()
-    return _TIER_CACHE
 
 
 _CSS = """
@@ -1398,15 +1368,9 @@ def _live_lines_json(iid: str) -> str:
 
 def _historical_lines_json(iid: str, start_ms: int, end_ms: int) -> str:
     """Build bid/ask/mid/micro/price rows from DydxSecondSnapshot records in the catalog."""
-    from dydx_collector.second_snapshot import DydxSecondSnapshot
-    from nautilus_trader.persistence.catalog import ParquetDataCatalog
-    catalog = ParquetDataCatalog(CATALOG_PATH)
-    start_ns = start_ms * 1_000_000
-    end_ns = end_ms * 1_000_000
-    results = catalog.query(data_cls=DydxSecondSnapshot, identifiers=[iid], start=start_ns, end=end_ns)
-    # query() wraps custom Data subclasses in CustomData -- unwrap via .data to reach the
-    # actual DydxSecondSnapshot (confirmed via direct introspection this session).
-    snapshots = [r.data if hasattr(r, "data") else r for r in results]
+    snapshots = _catalog_stats.query_second_snapshots(
+        CATALOG_PATH, iid, start_ms * 1_000_000, end_ms * 1_000_000,
+    )
     snaps = [
         {
             "bid_prices": s.bid_prices, "bid_sizes": s.bid_sizes,
