@@ -54,7 +54,7 @@ RANKING_COLS: list[tuple[str, str, object, object]] = [
     ("pct_24h",        "24h %",  lambda v: f"{v:+.2f}%", lambda v: POSITIVE_COLOR if v > 0 else NEGATIVE_COLOR),
     ("volatility",     "Vol",    lambda v: f"{v:.6f}",   None),
     ("volatility_score", "Vol Score", lambda v: f"{v:.6f}" if v is not None else "—", None),
-    ("volume24h",      "Vol24h", lambda v: f"{v / 1e6:.1f}M", None),
+    ("volume24h",      "Vol24h", lambda v: f"{v / 1e6:.3f}M", None),
 ]
 
 # History-only column (Story 1.4): plotted on /history/{id} from metrics_store rows, but
