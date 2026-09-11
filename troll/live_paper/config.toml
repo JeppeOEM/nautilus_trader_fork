@@ -1,13 +1,381 @@
-# Paper-mode config -- safe to commit. Loaded by live_paper.config.load_paper_config(),
-# which hard-errors if this file ever contains a `mode` key (see config.py's docstring for
-# why real-money execution is a separate file/loader, never a field toggle here).
+# Stress-test config -- 40 bots across 30 instruments, for VPS load-testing
+# AD-11's one-node-many-bots shape (troll/CLAUDE.md, ARCHITECTURE-SPINE.md AD-11).
+#
+# Deliberately at the collector's own established safety margin: 30 distinct
+# instruments = 30 v4_orderbook subscriptions on this ONE connection, right at
+# _MAX_COLLECTED_INSTRUMENTS's cap (dydx_collector/collector.py) -- a real test of
+# the subscription budget, not just bot count. 10 of the 30 coins get a second bot
+# with different thresholds (same instrument_id, different bot_id) -- this is the
+# exact scenario AD-11's bot_status.py fix (strategy_id-scoped Cache queries,
+# instead of the account-wide Portfolio facade) exists for: two bots sharing an
+# instrument must never blend PnL/exposure.
+#
+# trade_size is NOT calibrated per-instrument (0.001 BTC and 0.001 DOGE are wildly
+# different position sizes) -- fine for a connectivity/subscription/isolation
+# stress test, not meant to be a realistic PnL run. starting_balances is the ONE
+# shared simulated pool every bot below draws from (AD-11) -- sized up from the
+# 2-bot default to give 40 bots headroom.
 network = "mainnet"
-starting_balances = ["10_000 USDC"]
+starting_balances = ["100_000 USDC"]
 account_type = "MARGIN"
 log_level = "INFO"
-instrument_id = "BTC-USD-PERP.DYDX"
+
+[[bots]]
 bot_id = "bot-01"
+instrument_id = "BTC-USD-PERP.DYDX"
+trade_size = "0.0012"
+trend_buy_threshold = 0.56
+trend_sell_threshold = 0.39
+ofi_confirm_threshold = -0.4
+starting_balance = "10_000 USDC"
+
+[[bots]]
+bot_id = "bot-02"
+instrument_id = "ETH-USD-PERP.DYDX"
+trade_size = "0.0014"
+trend_buy_threshold = 0.57
+trend_sell_threshold = 0.4
+ofi_confirm_threshold = -0.3
+starting_balance = "10_000 USDC"
+
+[[bots]]
+bot_id = "bot-03"
+instrument_id = "SOL-USD-PERP.DYDX"
+trade_size = "0.0016"
+trend_buy_threshold = 0.58
+trend_sell_threshold = 0.41
+ofi_confirm_threshold = -0.2
+starting_balance = "10_000 USDC"
+
+[[bots]]
+bot_id = "bot-04"
+instrument_id = "AVAX-USD-PERP.DYDX"
+trade_size = "0.0018"
+trend_buy_threshold = 0.59
+trend_sell_threshold = 0.42
+ofi_confirm_threshold = -0.1
+starting_balance = "10_000 USDC"
+
+[[bots]]
+bot_id = "bot-05"
+instrument_id = "DOGE-USD-PERP.DYDX"
 trade_size = "0.001"
 trend_buy_threshold = 0.6
-trend_sell_threshold = 0.4
+trend_sell_threshold = 0.43
 ofi_confirm_threshold = 0.0
+starting_balance = "10_000 USDC"
+
+[[bots]]
+bot_id = "bot-06"
+instrument_id = "ADA-USD-PERP.DYDX"
+trade_size = "0.0012"
+trend_buy_threshold = 0.61
+trend_sell_threshold = 0.44
+ofi_confirm_threshold = 0.1
+starting_balance = "10_000 USDC"
+
+[[bots]]
+bot_id = "bot-07"
+instrument_id = "DOT-USD-PERP.DYDX"
+trade_size = "0.0014"
+trend_buy_threshold = 0.62
+trend_sell_threshold = 0.35
+ofi_confirm_threshold = 0.2
+starting_balance = "10_000 USDC"
+
+[[bots]]
+bot_id = "bot-08"
+instrument_id = "ATOM-USD-PERP.DYDX"
+trade_size = "0.0016"
+trend_buy_threshold = 0.63
+trend_sell_threshold = 0.36
+ofi_confirm_threshold = 0.3
+starting_balance = "10_000 USDC"
+
+[[bots]]
+bot_id = "bot-09"
+instrument_id = "NEAR-USD-PERP.DYDX"
+trade_size = "0.0018"
+trend_buy_threshold = 0.64
+trend_sell_threshold = 0.37
+ofi_confirm_threshold = 0.4
+starting_balance = "10_000 USDC"
+
+[[bots]]
+bot_id = "bot-10"
+instrument_id = "LINK-USD-PERP.DYDX"
+trade_size = "0.001"
+trend_buy_threshold = 0.55
+trend_sell_threshold = 0.38
+ofi_confirm_threshold = -0.5
+starting_balance = "10_000 USDC"
+
+[[bots]]
+bot_id = "bot-11"
+instrument_id = "LTC-USD-PERP.DYDX"
+trade_size = "0.0012"
+trend_buy_threshold = 0.56
+trend_sell_threshold = 0.39
+ofi_confirm_threshold = -0.4
+starting_balance = "10_000 USDC"
+
+[[bots]]
+bot_id = "bot-12"
+instrument_id = "BCH-USD-PERP.DYDX"
+trade_size = "0.0014"
+trend_buy_threshold = 0.57
+trend_sell_threshold = 0.4
+ofi_confirm_threshold = -0.3
+starting_balance = "10_000 USDC"
+
+[[bots]]
+bot_id = "bot-13"
+instrument_id = "ETC-USD-PERP.DYDX"
+trade_size = "0.0016"
+trend_buy_threshold = 0.58
+trend_sell_threshold = 0.41
+ofi_confirm_threshold = -0.2
+starting_balance = "10_000 USDC"
+
+[[bots]]
+bot_id = "bot-14"
+instrument_id = "XRP-USD-PERP.DYDX"
+trade_size = "0.0018"
+trend_buy_threshold = 0.59
+trend_sell_threshold = 0.42
+ofi_confirm_threshold = -0.1
+starting_balance = "10_000 USDC"
+
+[[bots]]
+bot_id = "bot-15"
+instrument_id = "FIL-USD-PERP.DYDX"
+trade_size = "0.001"
+trend_buy_threshold = 0.6
+trend_sell_threshold = 0.43
+ofi_confirm_threshold = 0.0
+starting_balance = "10_000 USDC"
+
+[[bots]]
+bot_id = "bot-16"
+instrument_id = "INJ-USD-PERP.DYDX"
+trade_size = "0.0012"
+trend_buy_threshold = 0.61
+trend_sell_threshold = 0.44
+ofi_confirm_threshold = 0.1
+starting_balance = "10_000 USDC"
+
+[[bots]]
+bot_id = "bot-17"
+instrument_id = "SUI-USD-PERP.DYDX"
+trade_size = "0.0014"
+trend_buy_threshold = 0.62
+trend_sell_threshold = 0.35
+ofi_confirm_threshold = 0.2
+starting_balance = "10_000 USDC"
+
+[[bots]]
+bot_id = "bot-18"
+instrument_id = "WLD-USD-PERP.DYDX"
+trade_size = "0.0016"
+trend_buy_threshold = 0.63
+trend_sell_threshold = 0.36
+ofi_confirm_threshold = 0.3
+starting_balance = "10_000 USDC"
+
+[[bots]]
+bot_id = "bot-19"
+instrument_id = "BONK-USD-PERP.DYDX"
+trade_size = "0.0018"
+trend_buy_threshold = 0.64
+trend_sell_threshold = 0.37
+ofi_confirm_threshold = 0.4
+starting_balance = "10_000 USDC"
+
+[[bots]]
+bot_id = "bot-20"
+instrument_id = "UNI-USD-PERP.DYDX"
+trade_size = "0.001"
+trend_buy_threshold = 0.55
+trend_sell_threshold = 0.38
+ofi_confirm_threshold = -0.5
+starting_balance = "10_000 USDC"
+
+[[bots]]
+bot_id = "bot-21"
+instrument_id = "ONDO-USD-PERP.DYDX"
+trade_size = "0.0012"
+trend_buy_threshold = 0.56
+trend_sell_threshold = 0.39
+ofi_confirm_threshold = -0.4
+starting_balance = "10_000 USDC"
+
+[[bots]]
+bot_id = "bot-22"
+instrument_id = "JTO-USD-PERP.DYDX"
+trade_size = "0.0014"
+trend_buy_threshold = 0.57
+trend_sell_threshold = 0.4
+ofi_confirm_threshold = -0.3
+starting_balance = "10_000 USDC"
+
+[[bots]]
+bot_id = "bot-23"
+instrument_id = "JUP-USD-PERP.DYDX"
+trade_size = "0.0016"
+trend_buy_threshold = 0.58
+trend_sell_threshold = 0.41
+ofi_confirm_threshold = -0.2
+starting_balance = "10_000 USDC"
+
+[[bots]]
+bot_id = "bot-24"
+instrument_id = "LDO-USD-PERP.DYDX"
+trade_size = "0.0018"
+trend_buy_threshold = 0.59
+trend_sell_threshold = 0.42
+ofi_confirm_threshold = -0.1
+starting_balance = "10_000 USDC"
+
+[[bots]]
+bot_id = "bot-25"
+instrument_id = "ICP-USD-PERP.DYDX"
+trade_size = "0.001"
+trend_buy_threshold = 0.6
+trend_sell_threshold = 0.43
+ofi_confirm_threshold = 0.0
+starting_balance = "10_000 USDC"
+
+[[bots]]
+bot_id = "bot-26"
+instrument_id = "TAO-USD-PERP.DYDX"
+trade_size = "0.0012"
+trend_buy_threshold = 0.61
+trend_sell_threshold = 0.44
+ofi_confirm_threshold = 0.1
+starting_balance = "10_000 USDC"
+
+[[bots]]
+bot_id = "bot-27"
+instrument_id = "RENDER-USD-PERP.DYDX"
+trade_size = "0.0014"
+trend_buy_threshold = 0.62
+trend_sell_threshold = 0.35
+ofi_confirm_threshold = 0.2
+starting_balance = "10_000 USDC"
+
+[[bots]]
+bot_id = "bot-28"
+instrument_id = "HYPE-USD-PERP.DYDX"
+trade_size = "0.0016"
+trend_buy_threshold = 0.63
+trend_sell_threshold = 0.36
+ofi_confirm_threshold = 0.3
+starting_balance = "10_000 USDC"
+
+[[bots]]
+bot_id = "bot-29"
+instrument_id = "SHIB-USD-PERP.DYDX"
+trade_size = "0.0018"
+trend_buy_threshold = 0.64
+trend_sell_threshold = 0.37
+ofi_confirm_threshold = 0.4
+starting_balance = "10_000 USDC"
+
+[[bots]]
+bot_id = "bot-30"
+instrument_id = "DYDX-USD-PERP.DYDX"
+trade_size = "0.001"
+trend_buy_threshold = 0.55
+trend_sell_threshold = 0.38
+ofi_confirm_threshold = -0.5
+starting_balance = "10_000 USDC"
+
+[[bots]]
+bot_id = "bot-31"
+instrument_id = "BTC-USD-PERP.DYDX"
+trade_size = "0.0012"
+trend_buy_threshold = 0.56
+trend_sell_threshold = 0.39
+ofi_confirm_threshold = -0.4
+starting_balance = "10_000 USDC"
+
+[[bots]]
+bot_id = "bot-32"
+instrument_id = "ETH-USD-PERP.DYDX"
+trade_size = "0.0014"
+trend_buy_threshold = 0.57
+trend_sell_threshold = 0.4
+ofi_confirm_threshold = -0.3
+starting_balance = "10_000 USDC"
+
+[[bots]]
+bot_id = "bot-33"
+instrument_id = "SOL-USD-PERP.DYDX"
+trade_size = "0.0016"
+trend_buy_threshold = 0.58
+trend_sell_threshold = 0.41
+ofi_confirm_threshold = -0.2
+starting_balance = "10_000 USDC"
+
+[[bots]]
+bot_id = "bot-34"
+instrument_id = "AVAX-USD-PERP.DYDX"
+trade_size = "0.0018"
+trend_buy_threshold = 0.59
+trend_sell_threshold = 0.42
+ofi_confirm_threshold = -0.1
+starting_balance = "10_000 USDC"
+
+[[bots]]
+bot_id = "bot-35"
+instrument_id = "DOGE-USD-PERP.DYDX"
+trade_size = "0.001"
+trend_buy_threshold = 0.6
+trend_sell_threshold = 0.43
+ofi_confirm_threshold = 0.0
+starting_balance = "10_000 USDC"
+
+[[bots]]
+bot_id = "bot-36"
+instrument_id = "ADA-USD-PERP.DYDX"
+trade_size = "0.0012"
+trend_buy_threshold = 0.61
+trend_sell_threshold = 0.44
+ofi_confirm_threshold = 0.1
+starting_balance = "10_000 USDC"
+
+[[bots]]
+bot_id = "bot-37"
+instrument_id = "DOT-USD-PERP.DYDX"
+trade_size = "0.0014"
+trend_buy_threshold = 0.62
+trend_sell_threshold = 0.35
+ofi_confirm_threshold = 0.2
+starting_balance = "10_000 USDC"
+
+[[bots]]
+bot_id = "bot-38"
+instrument_id = "ATOM-USD-PERP.DYDX"
+trade_size = "0.0016"
+trend_buy_threshold = 0.63
+trend_sell_threshold = 0.36
+ofi_confirm_threshold = 0.3
+starting_balance = "10_000 USDC"
+
+[[bots]]
+bot_id = "bot-39"
+instrument_id = "NEAR-USD-PERP.DYDX"
+trade_size = "0.0018"
+trend_buy_threshold = 0.64
+trend_sell_threshold = 0.37
+ofi_confirm_threshold = 0.4
+starting_balance = "10_000 USDC"
+
+[[bots]]
+bot_id = "bot-40"
+instrument_id = "LINK-USD-PERP.DYDX"
+trade_size = "0.001"
+trend_buy_threshold = 0.55
+trend_sell_threshold = 0.38
+ofi_confirm_threshold = -0.5
+starting_balance = "10_000 USDC"
