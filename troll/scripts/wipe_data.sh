@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Permanently deletes every persisted data store the troll/ stack has written:
 # the Parquet market-data catalog (all coins), ranking_engine's metrics.db
-# (history charts), collector incident reports, and live_paper's fills.db
-# (bot trade/position history). Leaves config.toml and .gitkeep files alone.
+# (history charts), collector incident reports, live_paper's fills.db
+# (bot trade/position history), and bot_tui's own debug log. Leaves
+# config.toml and .gitkeep files alone.
 #
 # Stops the docker compose stack first so nothing is deleted out from under a
 # container holding it open, then deletes, then leaves the stack down --
@@ -16,6 +17,7 @@ TARGETS=(
     dydx_collector/metrics
     dydx_collector/incident_reports
     live_paper/data
+    bot_tui_logs
 )
 
 echo "This will PERMANENTLY delete all data in:"
