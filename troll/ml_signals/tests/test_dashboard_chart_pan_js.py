@@ -72,7 +72,7 @@ __DASHBOARD_JS__
 
   // -- _onChartRelayout: _coinPanning sentinel fix ----------------------------------------
   _coinPanning=false; _coinHistStart=null; _chartState=null; _coinMode="lines";
-  _onChartRelayout({"xaxis.range[0]":"2024-01-01","xaxis.range[1]":"2024-01-02"});
+  _onChartRelayout("live-chart", {"xaxis.range[0]":"2024-01-01","xaxis.range[1]":"2024-01-02"});
   assert.strictEqual(_coinPanning, true, "first genuine relayout must set _coinPanning");
   assert.strictEqual(_coinHistStart, null, "_coinHistStart must not be repurposed as a panning sentinel");
   clearInterval(timer);

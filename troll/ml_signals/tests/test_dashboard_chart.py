@@ -657,7 +657,7 @@ def test_render_chart_page_figure_row_counts_stay_in_lockstep(monkeypatch: pytes
             "imbalance": [], "mid_imbalance": [], "bid_depth": [], "ask_depth": [],
         },
     )
-    html_out = _render_chart_page("BTC-USD-PERP.DYDX", 0, 1000)
+    html_out = _render_chart_page("BTC-USD-PERP.DYDX", 0, 1000, explicit_range=True)
     assert "Book imbalance" in html_out
 
 

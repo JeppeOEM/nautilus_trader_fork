@@ -204,7 +204,7 @@ function _fmtDTL(d){var p=function(n){return n<10?'0'+n:String(n);};return d.get
 function setCoinMode(m){
   _coinMode=m;_chartState=null;_updateModeButtons();
   if(_coinHistStart)_fetchHistCoin(_coinIid,_coinHistStart,_coinHistEnd);
-  else if(_coinPanning)_refreshPanningWindow();
+  else _refreshPanningWindow();  // live (unfrozen) or panned -- both just need a fresh window
 }
 function _updateModeButtons(){
   var bl=document.getElementById('btn-lines'),bc=document.getElementById('btn-candles');
@@ -217,7 +217,7 @@ function onBarChange(){
   if(sel)_coinBarSeconds=parseInt(sel.value);
   _chartState=null;
   if(_coinHistStart)_fetchHistCoin(_coinIid,_coinHistStart,_coinHistEnd);
-  else if(_coinPanning)_refreshPanningWindow();
+  else _refreshPanningWindow();
 }
 // Bar/mode change while frozen from a drag (no explicit Load range): load a fresh,
 // coherent default window instead of leaving the stale pan-extended trace on screen.
@@ -240,8 +240,8 @@ function resetCoinLive(){
   var b=document.getElementById('btn-live');
   if(b){b.style.color='#3fb950';b.style.borderColor='#3fb950';}
   clearInterval(timer);
-  pollCoin(_coinIid);
-  timer=setInterval(function(){if(!_coinHistStart&&!_coinPanning)pollCoin(_coinIid);},1000);
+  _refreshPanningWindow();  // fetches the live window and renders it into live-chart
+  timer=setInterval(function(){if(!_coinHistStart&&!_coinPanning)_refreshPanningWindow();},1000);
 }
 // Resolve to {rows,truncated} -- truncated means the server clamped the query window
 // and/or the row cap, so the caller must not advance its paging cursor past what it
@@ -322,14 +322,18 @@ function _loadOlderChunk(){
 }
 function _relayoutXRange(ev){
   if(!ev)return null;
-  if(ev['xaxis.range[0]']!=null&&ev['xaxis.range[1]']!=null)return[ev['xaxis.range[0]'],ev['xaxis.range[1]']];
-  if(ev['xaxis.range'])return ev['xaxis.range'];
+  // xaxis / xaxis2 / xaxis3 / ... -- the micro-panel subplot (4 rows) reports whichever
+  // row's axis was dragged directly, not always plain 'xaxis'.
+  var k0=Object.keys(ev).find(function(k){return /^xaxis\\d*\\.range\\[0\\]$/.test(k);});
+  if(k0){var k1=k0.replace('[0]','[1]');if(ev[k1]!=null)return[ev[k0],ev[k1]];}
+  var kw=Object.keys(ev).find(function(k){return /^xaxis\\d*\\.range$/.test(k);});
+  if(kw)return ev[kw];
   return null;
 }
-function _onChartRelayout(ev){
+function _onChartRelayout(sourceId,ev){
   var rng=_relayoutXRange(ev);
   if(!rng)return;  // not a real pan/zoom (e.g. legend click, resize/autosize)
-  _syncChartXRange('live-chart',rng);
+  _syncChartXRange(sourceId,rng);
   if(!_coinPanning){
     // First drag/zoom: freeze live polling exactly like clicking "Load" does, so the
     // 1s poll loop stops overwriting the candle/tick trace out from under the user. A
@@ -372,8 +376,15 @@ function _wireChartRelayout(){
   var liveEl=document.getElementById('live-chart');
   if(liveEl){
     liveEl.removeAllListeners&&liveEl.removeAllListeners('plotly_relayout');
-    liveEl.on('plotly_relayout',_onChartRelayout);
+    liveEl.on('plotly_relayout',function(ev){_onChartRelayout('live-chart',ev);});
   }
+}
+// Server-rendered imbalance/mid-imbalance/depth/spread subplot (Story 8.1's
+// _render_chart_page) -- wired once on page load since it's static HTML, not a
+// JS-managed Plotly.react target like live-chart/ind-panel.
+function _wireMicroPanelRelayout(){
+  var el=document.getElementById('micro-panel');
+  if(el)el.on('plotly_relayout',function(ev){_onChartRelayout('micro-panel',ev);});
 }
 // -- Indicator picker (Story 8.4, extended for multi-instance): catalog-driven add-list,
 // each added instance gets its own id so the same indicator can be added more than once
@@ -679,18 +690,33 @@ function _renderOscillatorPanel(data){
   var el=document.getElementById('ind-panel');
   if(el){
     el.removeAllListeners&&el.removeAllListeners('plotly_relayout');
-    el.on('plotly_relayout',function(ev){var rng=_relayoutXRange(ev);if(rng)_syncChartXRange('ind-panel',rng);});
+    el.on('plotly_relayout',function(ev){_onChartRelayout('ind-panel',ev);});
   }
 }
-// Guarded against reentrancy: a programmatic Plotly.relayout on the target panel would
+// Every chart on the page that should pan/zoom together. micro-panel (the 4-row
+// imbalance/depth/spread subplot) has its own 4 x-axes internally, so a synced
+// range is applied to all of them, not just the unindexed 'xaxis'.
+var _SYNCED_CHART_IDS=['live-chart','ind-panel','micro-panel'];
+var _MICRO_PANEL_XAXES=['xaxis','xaxis2','xaxis3','xaxis4'];
+// Guarded against reentrancy: a programmatic Plotly.relayout on a target panel would
 // otherwise re-fire that panel's own plotly_relayout listener and ping-pong forever.
 function _syncChartXRange(sourceId,rng){
   if(_syncingXRange||!rng)return;
-  var targetId=sourceId==='live-chart'?'ind-panel':'live-chart';
-  var targetEl=document.getElementById(targetId);
-  if(!targetEl||!targetEl.data||!targetEl.data.length)return;
   _syncingXRange=true;
-  try{Plotly.relayout(targetId,{'xaxis.range':rng});}finally{_syncingXRange=false;}
+  try{
+    _SYNCED_CHART_IDS.forEach(function(targetId){
+      if(targetId===sourceId)return;
+      var targetEl=document.getElementById(targetId);
+      if(!targetEl||!targetEl.data||!targetEl.data.length)return;
+      if(targetId==='micro-panel'){
+        var update={};
+        _MICRO_PANEL_XAXES.forEach(function(ax){update[ax+'.range']=rng;});
+        Plotly.relayout(targetId,update);
+      }else{
+        Plotly.relayout(targetId,{'xaxis.range':rng});
+      }
+    });
+  }finally{_syncingXRange=false;}
 }
 function _renderCandleChart(candles){
   if(!candles||!candles.length)return;
@@ -1098,7 +1124,7 @@ def _render_history_page(symbol: str) -> str:
     return _page(f"{symbol} history", body, refresh_seconds=30)
 
 
-def _render_chart_page(symbol: str, start_ms: int, end_ms: int) -> str:
+def _render_chart_page(symbol: str, start_ms: int, end_ms: int, explicit_range: bool) -> str:
     """
     Per-event microstructure chart page.
 
@@ -1110,6 +1136,12 @@ def _render_chart_page(symbol: str, start_ms: int, end_ms: int) -> str:
     Pressure (Story 10.3), and OFI (Story 10.4) all moved to the indicator picker as custom
     indicators -- this is the last fixed-row retirement in Epic 10; the remaining four rows
     (imbalance, mid-imbalance, depth, spread) stay fixed, out of scope for the epic.
+
+    `explicit_range` is False for a bare "/chart/{id}" visit (no start/end query params) --
+    that case defaults to live (resetCoinLive(), 1s poll of the in-progress candle) rather
+    than the static default-4h window, so the forming candle keeps updating with the current
+    price instead of freezing at whatever it was when the page loaded. Submitting the date
+    form (or a URL with an explicit start/end) opts into the static historical view.
     """
     data = _chart_data.compute_chart_series(
         CATALOG_PATH, symbol,
@@ -1183,6 +1215,7 @@ def _render_chart_page(symbol: str, start_ms: int, end_ms: int) -> str:
     )
     widget = (
         '<div style="display:flex;gap:8px;align-items:center;padding:6px 0;flex-wrap:wrap">'
+        "<button id=\"btn-live\" onclick=\"resetCoinLive()\" style=\"background:#21262d;color:#3fb950;border:1px solid #3fb950;padding:3px 10px;cursor:pointer\">Live</button>"
         "<button id=\"btn-lines\" onclick=\"setCoinMode('lines')\" style=\"background:#21262d;color:#c9d1d9;border:1px solid #444;padding:3px 10px;cursor:pointer\">Lines</button>"
         "<button id=\"btn-candles\" onclick=\"setCoinMode('candles')\" style=\"background:#21262d;color:#c9d1d9;border:1px solid #58a6ff;padding:3px 10px;cursor:pointer\">Candles</button>"
         "<select id='bar-sel' onchange='onBarChange()' style=\"background:#21262d;color:#c9d1d9;border:1px solid #444;padding:3px\">"
@@ -1208,16 +1241,18 @@ def _render_chart_page(symbol: str, start_ms: int, end_ms: int) -> str:
     init_script = (
         "<script>"
         f"var _coinIid={json.dumps(symbol)};var _coinMode='candles';var _coinBarSeconds=60;"
-        f"var _coinHistStart={json.dumps(start_val)};var _coinHistEnd={json.dumps(end_val)};"
+        f"var _coinHistStart={json.dumps(start_val) if explicit_range else 'null'};"
+        f"var _coinHistEnd={json.dumps(end_val) if explicit_range else 'null'};"
         "var _coinPanning=false,_chartState=null,_relayoutTimer=null,timer=null;"
         "var _MAX_CHUNK_MS=30*24*3600*1000;"
         "function setStatus(s){var el=document.getElementById('status');if(el)el.innerHTML=s;}"
-        "_updateModeButtons();_fetchHistCoin(_coinIid,_coinHistStart,_coinHistEnd);_fetchIndicatorCatalog();"
-        "</script>"
+        "_updateModeButtons();_wireMicroPanelRelayout();_fetchIndicatorCatalog();"
+        + ("_fetchHistCoin(_coinIid,_coinHistStart,_coinHistEnd);" if explicit_range else "resetCoinLive();")
+        + "</script>"
     )
     body = (
         form + widget
-        + fig.to_html(full_html=False, include_plotlyjs="cdn")
+        + fig.to_html(full_html=False, include_plotlyjs="cdn", div_id="micro-panel")
         + f"<script>{_LIVE_CHART_JS}</script>" + init_script
     )
     return _page(f"{sym} chart", body, refresh_seconds=86400)  # no auto-refresh; user controls via form
@@ -1830,7 +1865,8 @@ async def chart_handler(request: web.Request) -> web.Response:
 
     start_ms = _parse_dt("start", now_ms - 4 * 3600 * 1000)
     end_ms = _parse_dt("end", now_ms)
-    html_str = await asyncio.to_thread(_render_chart_page, symbol, start_ms, end_ms)
+    explicit_range = bool(qs.get("start") or qs.get("end"))
+    html_str = await asyncio.to_thread(_render_chart_page, symbol, start_ms, end_ms, explicit_range)
     return web.Response(text=html_str, content_type="text/html")
 
 
