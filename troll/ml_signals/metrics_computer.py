@@ -154,6 +154,7 @@ def compute_all(
     catalog_path: str,
     max_workers: int = 32,
     book_metrics_fn: Callable[[str], dict] | None = None,
+    instrument_ids: list[str] | None = None,
 ) -> list[dict]:
     """Full snapshot (book metrics + price stats) for every instrument.
 
@@ -163,9 +164,18 @@ def compute_all(
 
     book_metrics_fn is forwarded to compute_snapshot() -- see that function's own
     docstring (SSOT-02).
+
+    instrument_ids, when given, replaces the default list_instruments(catalog_path)
+    scan. list_instruments() globs every instrument folder the catalog has *ever*
+    held data for (currently ~300 on the live deployment, most long unpinned) --
+    scanning all of them with a 25h-lookback catalog read, 32-way concurrent, was
+    what OOM-crashed ranking_engine repeatedly (see troll/CLAUDE.md DATA-02 incident,
+    2026-09-11). ranking_engine passes its own live-seen instrument set here instead;
+    other callers (e.g. catalog_stats.overview_table's dashboard-wide summary) keep
+    the full historical scan by leaving this None.
     """
     now_ns = time.time_ns()
-    instruments = list_instruments(catalog_path)
+    instruments = instrument_ids if instrument_ids is not None else list_instruments(catalog_path)
 
     def _one(iid: str) -> dict | None:
         try:

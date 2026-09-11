@@ -280,6 +280,14 @@ def _prune_candidates(instruments: tuple[InstrumentEntry, ...], known_markets: s
     return non_pinned_collected | (known_markets - collected_ids)
 
 
+def _prune_all_instruments(catalog_path: str, non_pinned: set[str], retain_hours: float) -> int:
+    """Blocking filesystem walk over every candidate -- always call via asyncio.to_thread."""
+    freed = 0
+    for iid in non_pinned:
+        freed += prune_instrument(catalog_path, iid, retain_hours)
+    return freed
+
+
 def _watchdog_transition(
     now_ns: int,
     is_stale: bool,
@@ -1204,15 +1212,23 @@ class Collector:
             await asyncio.sleep(interval)
             catalog_path = str(Path(self._config.catalog_path).resolve())
             non_pinned = _prune_candidates(self._config.instruments, self._known_markets)
-            freed = 0
-            for iid in non_pinned:
-                freed += prune_instrument(catalog_path, iid, self._config.non_config_retain_hours)
+
+            # Both calls do real synchronous filesystem walks (up to 267 instruments'
+            # worth) -- to_thread keeps them off the event loop, which _ingest_loop and
+            # _second_loop's crossed-book/staleness detection also depend on running
+            # promptly. A same-thread version of this loop once blocked the loop for
+            # 20s+ and stalled every instrument's book simultaneously (2026-09-11 OOM).
+            freed = await asyncio.to_thread(
+                _prune_all_instruments, catalog_path, non_pinned, self._config.non_config_retain_hours
+            )
             if freed:
                 logger.info(
                     f"Pruned {freed / 1024 / 1024:.1f} MB from {len(non_pinned)} non-pinned instruments"
                 )
 
-            delta_freed = _prune_delta_retention(catalog_path, self._delta_retain_hours)
+            delta_freed = await asyncio.to_thread(
+                _prune_delta_retention, catalog_path, self._delta_retain_hours
+            )
             if delta_freed:
                 logger.info(
                     f"Pruned {delta_freed / 1024 / 1024:.1f} MB of raw order-book deltas (per-coin retention)"

@@ -462,6 +462,13 @@ async def _slow_loop_task(catalog_path: str) -> None:
     every instrument's book-metrics dict is computed here, up front, and handed into
     compute_all() as a plain (now-frozen) dict lookup -- never read live from inside
     the ThreadPoolExecutor compute_all() runs in via asyncio.to_thread.
+
+    instrument_ids=list(book_metrics_by_iid) scopes compute_all() to only the coins
+    this process has actually seen live data for (~29, the pinned set), instead of
+    its default of every instrument folder the catalog has ever held (drifted to
+    ~300 on the live deployment). That default -- 25h-lookback catalog reads, 32-way
+    concurrent, over 300 instruments -- was OOM-killing this container repeatedly
+    (troll/CLAUDE.md DATA-02 incident, 2026-09-11).
     """
     while True:
         try:
@@ -470,6 +477,7 @@ async def _slow_loop_task(catalog_path: str) -> None:
                 metrics_computer.compute_all,
                 catalog_path,
                 book_metrics_fn=lambda iid: book_metrics_by_iid.get(iid, {}),
+                instrument_ids=list(book_metrics_by_iid),
             )
             if snapshots:
                 _SLOW_METRICS.update({s["instrument_id"]: s for s in snapshots})
