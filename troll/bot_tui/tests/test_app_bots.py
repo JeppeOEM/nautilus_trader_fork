@@ -54,11 +54,21 @@ def _status(bot_id: str, **overrides: object) -> dict:
     return base
 
 
+def _bots_app_with_one_row(bot_id: str = "bot-01", **overrides: object) -> BotTuiApp:
+    _reset()
+    bots_state._handle_status_message(_status(bot_id, **overrides))
+    app = BotTuiApp()
+    app._switch_view("bots", [])
+    app._refresh_bots_body()
+    app._body.original_widget = app._bots_body
+    return app
+
+
 def test_cold_open_before_any_bots_status_message() -> None:
     _reset()
     app = BotTuiApp()
-    body = app._build_bots_body()
-    assert COLD_OPEN_TEXT in body.original_widget.text
+    app._refresh_bots_body()
+    assert COLD_OPEN_TEXT in app._bots_body.original_widget.text
 
 
 def test_populated_bots_pane_has_one_row_per_bot() -> None:
@@ -66,8 +76,8 @@ def test_populated_bots_pane_has_one_row_per_bot() -> None:
     bots_state._handle_status_message(_status("bot-01"))
     bots_state._handle_status_message(_status("bot-02"))
     app = BotTuiApp()
-    body = app._build_bots_body()
-    assert len(body.body) == 2
+    app._refresh_bots_body()
+    assert len(app._bots_body.body) == 2
 
 
 def test_rows_sorted_by_bot_id_and_selectable() -> None:
@@ -75,10 +85,39 @@ def test_rows_sorted_by_bot_id_and_selectable() -> None:
     bots_state._handle_status_message(_status("bot-02"))
     bots_state._handle_status_message(_status("bot-01"))
     app = BotTuiApp()
-    body = app._build_bots_body()
+    app._refresh_bots_body()
+    body = app._bots_body
     assert isinstance(body.body[0].original_widget, _SelectableBotRow)
     assert body.body[0].original_widget.bot_id == "bot-01"
     assert body.body[1].original_widget.bot_id == "bot-02"
+
+
+def test_refresh_bots_body_preserves_scroll_position_across_repeated_ticks() -> None:
+    """
+    Regression: the redraw loop calls _refresh_bots_body() every
+    _REDRAW_POLL_SECONDS while this view is active. Before this fix, the body was
+    rebuilt as a brand-new ListBox on every single tick, silently resetting scroll/
+    focus to the top within half a second of any user scroll -- reported in
+    production as "the bots page jumps up" (the same class of bug already found and
+    fixed once for the Collector pane, Story 6.1 -- see troll/CLAUDE.md TUI-01).
+    """
+    _reset()
+    bots_state._handle_status_message(_status("bot-01"))
+    bots_state._handle_status_message(_status("bot-02"))
+    bots_state._handle_status_message(_status("bot-03"))
+    app = BotTuiApp()
+    app._switch_view("bots", [])
+    app._refresh_bots_body()
+    app._body.original_widget = app._bots_body
+    body_before = app._bots_body
+    app._bots_body.focus_position = 2  # scroll to the last row
+
+    # Simulate several more redraw ticks with unchanged status data.
+    app._refresh_bots_body()
+    app._refresh_bots_body()
+
+    assert app._bots_body is body_before
+    assert app._highlighted_bot_id() == "bot-03"
 
 
 def test_highlighted_bot_id_reads_listbox_focus() -> None:
@@ -87,6 +126,8 @@ def test_highlighted_bot_id_reads_listbox_focus() -> None:
     bots_state._handle_status_message(_status("bot-02"))
     app = BotTuiApp()
     app._switch_view("bots", [])
+    app._refresh_bots_body()
+    app._body.original_widget = app._bots_body
     assert app._highlighted_bot_id() == "bot-01"
     body = app._body.original_widget
     body.focus_position = 1
@@ -106,7 +147,8 @@ def test_stale_row_has_marker_fresh_row_does_not() -> None:
     bots_state._LATEST_RECEIVED_AT["bot-stale"] = 0.0
     bots_state._LATEST_STATUSES["bot-stale"] = _status("bot-stale")
     app = BotTuiApp()
-    body = app._build_bots_body()
+    app._refresh_bots_body()
+    body = app._bots_body
     rows = {widget.original_widget.bot_id: widget.original_widget.text for widget in body.body}
     assert rows["bot-stale"].startswith("~")
     assert not rows["bot-fresh"].startswith("~")
@@ -116,8 +158,8 @@ def test_stopped_bot_row_shows_off() -> None:
     _reset()
     bots_state._handle_status_message(_status("bot-01", running=False))
     app = BotTuiApp()
-    body = app._build_bots_body()
-    assert "off" in body.body[0].original_widget.text
+    app._refresh_bots_body()
+    assert "off" in app._bots_body.body[0].original_widget.text
 
 
 def test_bots_pane_footer_hint_switches_on_entry() -> None:
@@ -141,10 +183,7 @@ def test_s_on_running_bot_opens_stop_confirm_without_publishing() -> None:
     # yet (monkeypatched here specifically to avoid _toggle_bot's real asyncio-
     # scheduled publish path -- an established testing-boundary in this file/module,
     # see the module docstring).
-    _reset()
-    bots_state._handle_status_message(_status("bot-01", running=True))
-    app = BotTuiApp()
-    app._switch_view("bots", [])
+    app = _bots_app_with_one_row(running=True)
     published: list[tuple[str, str]] = []
     app._publish_bot_action = lambda bot_id, action: published.append((bot_id, action))  # type: ignore[method-assign]
 
@@ -156,10 +195,7 @@ def test_s_on_running_bot_opens_stop_confirm_without_publishing() -> None:
 
 
 def test_s_on_stopped_bot_starts_immediately_without_confirm() -> None:
-    _reset()
-    bots_state._handle_status_message(_status("bot-01", running=False))
-    app = BotTuiApp()
-    app._switch_view("bots", [])
+    app = _bots_app_with_one_row(running=False)
     published: list[tuple[str, str]] = []
     app._publish_bot_action = lambda bot_id, action: published.append((bot_id, action))  # type: ignore[method-assign]
 
@@ -170,10 +206,7 @@ def test_s_on_stopped_bot_starts_immediately_without_confirm() -> None:
 
 
 def test_typing_stop_and_enter_confirms_and_publishes() -> None:
-    _reset()
-    bots_state._handle_status_message(_status("bot-01", running=True))
-    app = BotTuiApp()
-    app._switch_view("bots", [])
+    app = _bots_app_with_one_row(running=True)
     published: list[tuple[str, str]] = []
     app._publish_bot_action = lambda bot_id, action: published.append((bot_id, action))  # type: ignore[method-assign]
     app._toggle_bot()
@@ -186,10 +219,7 @@ def test_typing_stop_and_enter_confirms_and_publishes() -> None:
 
 
 def test_wrong_text_keeps_confirm_open_without_publishing() -> None:
-    _reset()
-    bots_state._handle_status_message(_status("bot-01", running=True))
-    app = BotTuiApp()
-    app._switch_view("bots", [])
+    app = _bots_app_with_one_row(running=True)
     published: list[tuple[str, str]] = []
     app._publish_bot_action = lambda bot_id, action: published.append((bot_id, action))  # type: ignore[method-assign]
     app._toggle_bot()
@@ -203,10 +233,7 @@ def test_wrong_text_keeps_confirm_open_without_publishing() -> None:
 
 
 def test_esc_cancels_stop_confirm_without_publishing() -> None:
-    _reset()
-    bots_state._handle_status_message(_status("bot-01", running=True))
-    app = BotTuiApp()
-    app._switch_view("bots", [])
+    app = _bots_app_with_one_row(running=True)
     published: list[tuple[str, str]] = []
     app._publish_bot_action = lambda bot_id, action: published.append((bot_id, action))  # type: ignore[method-assign]
     app._toggle_bot()
@@ -221,10 +248,7 @@ def test_esc_cancels_stop_confirm_without_publishing() -> None:
 def test_stop_confirm_intercepts_keys_via_unhandled_input() -> None:
     # End-to-end through the real dispatch path, not just direct method calls --
     # confirms _unhandled_input actually routes to the guard while it's active.
-    _reset()
-    bots_state._handle_status_message(_status("bot-01", running=True))
-    app = BotTuiApp()
-    app._switch_view("bots", [])
+    app = _bots_app_with_one_row(running=True)
     published: list[tuple[str, str]] = []
     app._publish_bot_action = lambda bot_id, action: published.append((bot_id, action))  # type: ignore[method-assign]
 

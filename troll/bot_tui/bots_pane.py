@@ -42,6 +42,34 @@ from datetime import datetime
 
 COLD_OPEN_TEXT = "waiting for bots:status…"
 
+# Widths for the Bots-pane row's own genuinely-unbounded-length fields (bot_id is
+# operator-chosen in config.toml; symbol grows with the instrument ticker, e.g.
+# "RENDER-USD-PERP.DYDX" is 20 chars vs "BTC-USD-PERP.DYDX"'s 17) -- see fit()'s own
+# docstring for why plain f-string `:<N` padding alone isn't sufficient here.
+BOT_ID_WIDTH = 12
+SYMBOL_WIDTH = 20
+
+
+def fit(text: str, width: int) -> str:
+    """
+    Left-justify to exactly `width` characters, truncating (with a trailing "…")
+    rather than overflowing when longer.
+
+    Plain f-string `:<N` formatting only pads a short string -- it never clips a
+    long one. bot_id and symbol are the two fields here with no fixed vocabulary
+    (mode/running/position_side are all short, closed sets), so an operator-chosen
+    bot_id or a longer-than-usual ticker (e.g. "RENDER-USD-PERP.DYDX" overflowing an
+    18-char `:<18` field by 2) pushes every column after it out of alignment for
+    that row only -- rows for shorter instruments still line up, so the whole table
+    looks broken/inconsistently spaced rather than obviously wrong. This guarantees
+    every row is exactly `width` characters for this field, always.
+    """
+    if len(text) <= width:
+        return f"{text:<{width}}"
+    if width <= 1:
+        return text[:width]
+    return text[: width - 1] + "…"
+
 # Distinct from COLD_OPEN_TEXT (that's "no bots:status message has ever arrived for
 # any bot"): these two describe bots:history:{bot_id}:{range}'s own three-state shape
 # for whichever single bot/range Bot-detail currently has open (Story 4.7, AC1/AC4).
@@ -124,7 +152,8 @@ def format_bot_line(row: dict, stale: bool, now: float) -> str:
     win_rate_text = format_win_rate(row["win_rate"])
     running_text = "run" if row["running"] else "off"
     return (
-        f"{stale_marker}{row['bot_id']:<12} {pnl_text}  {row['symbol']:<18} "
+        f"{stale_marker}{fit(row['bot_id'], BOT_ID_WIDTH)} {pnl_text}  "
+        f"{fit(row['symbol'], SYMBOL_WIDTH)} "
         f"{row['mode']:<5} {running_text} {row['position_side']:<5} "
         f"{format_exposure(row['net_exposure'])}  up {uptime_text}  wr {win_rate_text}"
     )

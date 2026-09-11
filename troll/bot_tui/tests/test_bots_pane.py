@@ -108,6 +108,39 @@ def test_format_bot_line_stopped_bot_shows_off() -> None:
     assert "off" in line
 
 
+def test_fit_pads_a_short_string_to_exact_width() -> None:
+    assert bots_pane.fit("bot-01", 12) == "bot-01      "
+    assert len(bots_pane.fit("bot-01", 12)) == 12
+
+
+def test_fit_truncates_with_ellipsis_when_over_width() -> None:
+    # Regression: plain f"{text:<N}" only pads, never truncates -- a longer-than-
+    # expected value (an operator-chosen bot_id, or a longer ticker like
+    # RENDER-USD-PERP.DYDX at 20 chars) silently overflowed its column and pushed
+    # every field after it out of alignment for that row only (troll/CLAUDE.md TUI-02).
+    fitted = bots_pane.fit("a-much-too-long-bot-id", 12)
+    assert len(fitted) == 12
+    assert fitted.endswith("…")
+
+
+def test_fit_exact_width_no_truncation_no_padding() -> None:
+    assert bots_pane.fit("AVAX-USD-PERP.DYDX", 18) == "AVAX-USD-PERP.DYDX"
+
+
+def test_format_bot_line_every_row_has_identical_length_regardless_of_symbol_length() -> None:
+    # The actual regression this fix targets: before it, a row for a longer-ticker
+    # instrument (e.g. RENDER-USD-PERP.DYDX, 20 chars, overflowing the old 18-char
+    # field by 2) was two characters longer than a BTC row, so every column after
+    # the symbol landed in a different terminal column depending on the row.
+    short_line = bots_pane.format_bot_line(
+        _status("bot-01", symbol="BTC-USD-PERP.DYDX"), stale=False, now=1_005.0
+    )
+    long_line = bots_pane.format_bot_line(
+        _status("bot-02", symbol="RENDER-USD-PERP.DYDX"), stale=False, now=1_005.0
+    )
+    assert len(short_line) == len(long_line)
+
+
 def test_format_win_rate_detail_none_is_not_available() -> None:
     assert bots_pane.format_win_rate_detail(None, closed_trades=0) == "n/a"
 

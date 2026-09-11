@@ -96,6 +96,13 @@ See `troll/live_paper/node.py`'s module docstring for the full rationale.
 
 ---
 
+## bot_tui / urwid Patterns
+
+- **TUI-01** — **A `urwid.ListBox` (or any `Filler`) that gets a brand-new `SimpleListWalker`/widget object on every redraw tick silently resets the user's scroll/focus position to the top.** `urwid.ListBox` and its `.focus_position` are properties of the walker *object* — swap in a fresh one and the old scroll state is simply gone, even though the visible rows look the same as before. This has been found and fixed twice independently in this codebase (Collector pane, Story 6.1; Bots pane, this incident) — both reported in production as "the page jumps [back] to the top" / "can't scroll." **The fix, in both cases:** never rebuild the `ListBox` itself on a routine per-tick refresh. Keep it as a persistent instance attribute (`self._foo_body`) plus a `self._foo_shape` sentinel (`None` / `"cold_open"` / `"rows"`); only swap the widget's *type* when the shape genuinely changes (empty ↔ populated); for a same-shape update, mutate the existing walker in place via slice-assignment (`listbox.body[:] = new_widgets`) — this is what actually preserves `.focus_position` across ticks. See `app.py`'s `_refresh_collector_body`/`_refresh_bots_body` for the reference implementation. **Any new scrollable pane in `bot_tui` must follow this pattern from the start** — a "no round-trip needs it yet" YAGNI deferral here specifically has already caused the same bug to ship twice; don't defer it a third time.
+- **TUI-02** — **A fixed-width text column must truncate, not just pad.** Python's `f"{text:<N}"` only left-pads a *short* string to width `N` — it does not clip a *longer* one, so any field whose length isn't from a small closed vocabulary (an operator-chosen `bot_id`, an instrument ticker whose length varies, e.g. `RENDER-USD-PERP.DYDX` at 20 chars vs `BTC-USD-PERP.DYDX` at 17) will overflow its intended column width on some rows and push every column after it out of alignment for that row only — other rows still line up, so the table looks randomly, inconsistently broken rather than obviously wrong in one place. Use a real fit-to-width helper that truncates-with-ellipsis when over length (see `bots_pane.fit()`) for any field without a small fixed set of possible values; plain `:<N`/`:>N` remains fine for genuinely bounded fields (short enums like `mode`/`running`/`position_side`).
+
+---
+
 ## Nautilus Usage Patterns
 
 - **NAUT-01** — **Known silent bug:** `Price(decimal, precision)` silently returns a wrong value for some inputs. Example: `Price(Decimal("61090.59855"), 16)` returns `61090.5985500000026624`. **Never use this constructor for re-stamping.** Always re-stamp via:

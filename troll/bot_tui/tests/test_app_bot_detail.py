@@ -68,6 +68,8 @@ def test_enter_on_highlighted_bots_row_opens_bot_detail() -> None:
     bots_state._handle_status_message(_status("bot-01"))
     app = BotTuiApp()
     app._switch_view("bots", [])
+    app._refresh_bots_body()
+    app._body.original_widget = app._bots_body
     app._handle_global_key("enter")
     assert app._view == "bot_detail"
     assert app._bot_detail_bot_id == "bot-01"
@@ -97,6 +99,8 @@ def test_active_bot_id_reads_highlighted_row_from_bots_pane() -> None:
     bots_state._handle_status_message(_status("bot-01"))
     app = BotTuiApp()
     app._switch_view("bots", [])
+    app._refresh_bots_body()
+    app._body.original_widget = app._bots_body
     assert app._active_bot_id() == "bot-01"
 
 

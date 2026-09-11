@@ -484,6 +484,18 @@ class BotTuiApp:
             urwid.Text(collector_pane.COLD_OPEN_TEXT), valign="top"
         )
 
+        # Bots pane's body, same persistent-object/scroll-preservation contract as
+        # Coins/Collector above (see _refresh_bots_body) -- previously rebuilt fresh
+        # every redraw tick (_build_bots_body), which reset scroll/focus to the top
+        # within _REDRAW_POLL_SECONDS of any user scroll. Confirmed in production as
+        # "the bots page jumps up" -- the same bug already found and fixed once for
+        # the Collector pane (Story 6.1); troll/CLAUDE.md now has a standing rule
+        # against reintroducing it a third time in a future pane.
+        self._bots_shape: str | None = None
+        self._bots_body: urwid.Widget = urwid.Filler(
+            urwid.Text(bots_pane.COLD_OPEN_TEXT), valign="top"
+        )
+
         self._breadcrumb = urwid.Text(_BREADCRUMB_LABELS[self._view])
         # Coins-only column-header row ("#  INSTRUMENT  VOLUME24H"/"VOLATILITY"),
         # stacked under the breadcrumb rather than folded into the Coins-pane body --
@@ -588,7 +600,11 @@ class BotTuiApp:
 
     def _build_body(self) -> urwid.Widget:
         if self._view == "bots":
-            return self._build_bots_body()
+            # Returned as-is, whatever it currently holds -- same "never rebuilt
+            # here" discipline as Coins/Collector below; only _refresh_bots_body()
+            # (called by the redraw loop while this view is active) ever changes
+            # what this holds.
+            return self._bots_body
 
         if self._view == "coin_detail":
             return self._build_coin_detail_body()
@@ -616,17 +632,29 @@ class BotTuiApp:
         # changes, not on a mere view switch) ever changes what this holds.
         return self._coins_body
 
-    def _build_bots_body(self) -> urwid.Widget:
-        # Unlike the Coins pane (Story 4.3, AC6), this is rebuilt fresh on every call --
-        # a deliberate, scoped-out YAGNI choice: this story has no drill-in/esc round
-        # trip to preserve scroll position across yet (Bot-detail's Enter/esc is Story
-        # 4.5), so a persistent-body refactor here would be speculative. Known
-        # consequence: scroll position resets on every bots:status heartbeat-driven
-        # rebuild (~5s) -- acceptable for now, revisit if/when Story 4.5 actually needs
-        # a round trip through this pane the way Story 4.3 needed one through Coins.
+    def _refresh_bots_body(self) -> None:
+        """
+        Rebuild/mutate self._bots_body to reflect current bots:status data.
+
+        Follows _refresh_collector_body's fix (itself following _refresh_coins_body):
+        only the two genuinely-different-shape transitions (cold-open <-> populated)
+        swap self._bots_body's type; a same-shape update mutates the existing
+        ListBox's SimpleListWalker in place via slice-assignment, which is what
+        actually preserves scroll/focus position. Each row's stale badge and uptime
+        text must keep advancing purely from the passage of time, so the redraw loop
+        still calls this every _REDRAW_POLL_SECONDS while this view is active --
+        without the in-place mutation, that would silently wipe a user's scroll
+        position within half a second on every single redraw tick, not just on a
+        real bots:status change. This was the exact previously-reported "the bots
+        page jumps up" bug -- see troll/CLAUDE.md for the standing rule this and
+        _refresh_collector_body's identical prior fix are both now recorded under.
+        """
         statuses = bots_state._LATEST_STATUSES
         if not statuses:
-            return urwid.Filler(urwid.Text(bots_pane.COLD_OPEN_TEXT), valign="top")
+            if self._bots_shape != "cold_open":
+                self._bots_body = urwid.Filler(urwid.Text(bots_pane.COLD_OPEN_TEXT), valign="top")
+                self._bots_shape = "cold_open"
+            return
 
         now = time.time()
         rows = bots_pane.bot_rows(statuses)
@@ -634,15 +662,20 @@ class BotTuiApp:
             self._build_bot_row_widget(row, bots_state.is_stale(row["bot_id"], now=now), now)
             for row in rows
         ]
-        return urwid.ListBox(urwid.SimpleListWalker(widgets))
+        if self._bots_shape != "rows":
+            self._bots_body = urwid.ListBox(urwid.SimpleListWalker(widgets))
+            self._bots_shape = "rows"
+        else:
+            listbox = self._bots_body
+            assert isinstance(listbox, urwid.ListBox)
+            listbox.body[:] = widgets  # type: ignore[index]
 
     def _refresh_collector_body(self) -> None:
         """
         Rebuild/mutate self._collector_body to reflect current collector:status data.
 
-        Unlike _build_bots_body (a deliberate, documented YAGNI gap that resets scroll
-        position on every rebuild), this follows _refresh_coins_body's fix instead: only
-        the three genuinely-different-shape transitions (cold-open <-> populated) swap
+        Follows _refresh_coins_body's fix (also now mirrored by _refresh_bots_body):
+        only the three genuinely-different-shape transitions (cold-open <-> populated) swap
         self._collector_body's type; a same-shape update mutates the existing ListBox's
         SimpleListWalker in place via slice-assignment, which is what actually preserves
         scroll/focus position. Collector rows update far less often than bots/coins rows
@@ -713,9 +746,10 @@ class BotTuiApp:
         running_text = "run" if row["running"] else "off"
         markup = [
             prefix,
-            f"{row['bot_id']:<12} ",
+            f"{bots_pane.fit(row['bot_id'], bots_pane.BOT_ID_WIDTH)} ",
             (pnl_color, bots_pane.format_pnl(pnl_value)),
-            f"  {row['symbol']:<18} {row['mode']:<5} {running_text:<3} {row['position_side']:<5} "
+            f"  {bots_pane.fit(row['symbol'], bots_pane.SYMBOL_WIDTH)} "
+            f"{row['mode']:<5} {running_text:<3} {row['position_side']:<5} "
             f"{bots_pane.format_exposure(row['net_exposure'])}  "
             f"up {bots_pane.format_uptime(row['started_at'], now)}  "
             f"wr {bots_pane.format_win_rate(row['win_rate'])}",
@@ -1639,12 +1673,13 @@ class BotTuiApp:
                     self._body.original_widget = self._build_body()
                     self._draw_screen()
                 elif self._view == "bots":
-                    # Rebuilt unconditionally every tick, same as Coin-detail -- each
-                    # row's own stale badge and uptime text must keep advancing purely
-                    # from the passage of time, and (per _build_bots_body's own Dev
-                    # Notes) this pane has no scroll-position-preservation contract to
-                    # protect yet, unlike the Coins pane.
-                    self._body.original_widget = self._build_bots_body()
+                    # Unlike the old _build_bots_body, this pane now preserves scroll
+                    # position the same way Collector does (see _refresh_bots_body) --
+                    # each row's stale badge/uptime text is still rebuilt every tick,
+                    # but mutates the existing ListBox in place rather than the redraw
+                    # loop assigning a fresh one.
+                    self._refresh_bots_body()
+                    self._body.original_widget = self._bots_body
                     self._draw_screen()
                 elif self._view == "bot_detail":
                     # Breadcrumb (and its stale badge) needs to keep advancing purely
@@ -1658,8 +1693,12 @@ class BotTuiApp:
                 elif self._view == "incidents":
                     # An open incident's "ongoing (Nm..)" duration must keep advancing
                     # purely from wall-clock time, same as Bot-detail's own uptime text
-                    # above -- rebuilt unconditionally every tick for that reason (same
-                    # scroll-position tradeoff _build_bots_body's docstring accepts).
+                    # above -- rebuilt unconditionally every tick for that reason.
+                    # NOTE: this still constructs a fresh ListBox every tick, same
+                    # class of bug _refresh_bots_body/_refresh_collector_body were
+                    # fixed for (troll/CLAUDE.md's standing rule) -- not fixed here
+                    # since it wasn't reported, but a future scroll-jump complaint on
+                    # this pane has the same known cause and fix shape.
                     self._body.original_widget = self._build_incidents_body()
                     self._draw_screen()
                 elif self._view == "collector":
