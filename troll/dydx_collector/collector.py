@@ -45,8 +45,8 @@ pin_top_liquid : fill any empty collector slots (up to the cap) with the current
                  protect against, since every entry is already pinned.
 
 `_MAX_WS_SUBSCRIPTIONS` (32) is dYdX's real per-connection WS hard subscription limit;
-`_MAX_COLLECTED_INSTRUMENTS` (29) is this collector's own, smaller operating cap
-(3-slot safety margin) enforced on `start`/`pin_top_liquid` -- never exceed it.
+`_MAX_COLLECTED_INSTRUMENTS` (30) is this collector's own, smaller operating cap
+(2-slot safety margin) enforced on `start`/`pin_top_liquid` -- never exceed it.
 """
 
 import asyncio
@@ -169,11 +169,11 @@ _STALE_BOOK_NS: int = 5_000_000_000  # 5 seconds
 # instrument (not just the overflow ones) rather than a one-off blip.
 _MAX_WS_SUBSCRIPTIONS: int = 32
 
-# This collector's own operating cap (Story 6.1) -- a deliberate 3-slot safety margin
+# This collector's own operating cap (Story 6.1) -- a deliberate 2-slot safety margin
 # below dYdX's real _MAX_WS_SUBSCRIPTIONS above, enforced on `start`/`pin_top_liquid`
 # control actions. Intentionally a separate constant from _MAX_WS_SUBSCRIPTIONS: one is
 # the venue's hard ceiling, the other is our own choice of how close to run to it.
-_MAX_COLLECTED_INSTRUMENTS: int = 29
+_MAX_COLLECTED_INSTRUMENTS: int = 30
 
 # Redis channels for live instrument control (Story 6.1) -- mirrors the bots:control/
 # bots:status pattern already used between bot_tui and live_paper (bot_status.py).
