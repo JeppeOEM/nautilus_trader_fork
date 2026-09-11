@@ -81,6 +81,10 @@ See `troll/live_paper/node.py`'s module docstring for the full rationale.
   - Never mock Nautilus internals — use real `Price`, `Quantity`, `OrderBook`, etc. objects, or skip the test entirely.
   - Use `pytest`; no class-based tests; minimal fixtures (helper functions with `_` prefix).
   - One assertion per logical claim. Return type `-> None` on all test functions.
+- **TEST-04** — **Warnings and deprecation notices are not noise — never dismiss them as cosmetic.** A deprecated API gets removed in some future dependency bump (pandas, nautilus_trader, etc.), silently breaking the code at the worst possible time — usually mid-upgrade, far from the original context. A warning is also often the only visible symptom of a real latent bug (a resource never cleaned up, a coroutine never awaited, a type coerced somewhere it shouldn't be). Treat every new warning surfaced by a test run the same as a failing test:
+  - Identify its exact source (don't guess "probably from a dependency") and either fix it at that source, or if it's genuinely upstream (a library's own internal deprecated call with no workaround), record it explicitly — file/line, the warning text, and why it can't be fixed here yet — rather than letting it scroll by unacknowledged.
+  - Never add a blanket `filterwarnings("ignore")` or similar suppression to make output quieter — that hides the next new warning too, not just the one you're currently looking at.
+  - This is what "long-running, easy to maintain" means in practice: the software should still build and run cleanly after routine dependency upgrades, years from now, not accumulate deprecated-API debt that turns every future upgrade into an archaeology project.
 
 ---
 

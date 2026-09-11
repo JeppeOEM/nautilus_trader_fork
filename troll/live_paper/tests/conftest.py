@@ -21,6 +21,21 @@ from nautilus_trader.backtest.engine import BacktestEngineConfig
 from nautilus_trader.config import LoggingConfig
 
 
+# Known upstream deprecation warnings (troll/CLAUDE.md TEST-04: tracked explicitly,
+# never blanket-suppressed) -- both are internal nautilus_trader calls, off-limits to
+# fix here per FORK-01 (never modify nautilus_trader/crates), and both fire on every
+# BacktestEngine.run() so they show up across test_bot_status.py/test_strategy.py/
+# test_trade_history.py:
+#   - nautilus_trader/backtest/engine.pyx:1601 (and :1418) -- `pd.Timestamp.utcnow()`,
+#     deprecated by pandas in favor of `Timestamp.now('UTC')`.
+#   - nautilus_trader/data/engine.pyx:2041 -- `state.start.floor(freq="d")`, pandas
+#     deprecated the lowercase 'd' frequency alias in favor of 'D'.
+# Revisit when this project's nautilus_trader pin (currently 1.229.0) bumps past
+# whatever version fixes these upstream -- confirmed via a forced `-W error` run
+# 2026-09-11 that both originate inside compiled nautilus_trader .pyx files, not in
+# any troll/ code.
+
+
 @pytest.fixture(autouse=True)
 def _fresh_event_loop():
     """
@@ -38,6 +53,19 @@ def _fresh_event_loop():
     asyncio.set_event_loop(loop)
     yield
     if not loop.is_closed():
+        # build_node() (live_paper/node.py) schedules one bot_status.run()/
+        # trade_history.run() task per configured bot via loop.create_task() --
+        # these tests never drive the loop, so those tasks never get their first
+        # `.send()`. Cancelling (rather than just closing the loop out from under
+        # them) lets each coroutine actually run once to receive CancelledError,
+        # which is what silences Python's "coroutine was never awaited"
+        # RuntimeWarning -- closing an un-run loop directly does not (troll/CLAUDE.md
+        # TEST-04: a warning gets fixed at its source, not filtered away).
+        pending = asyncio.all_tasks(loop=loop)
+        for task in pending:
+            task.cancel()
+        if pending:
+            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
         loop.close()
 
 
