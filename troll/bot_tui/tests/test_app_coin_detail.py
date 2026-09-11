@@ -193,6 +193,83 @@ def test_o_key_sets_footer_to_dashboard_url() -> None:
     )
 
 
+# --- BOT_TUI_OPEN_URL_PORT: hand off to a local open_listener.go instead of
+# webbrowser.open()/OSC52, when troll-tui's reverse SSH tunnel is up ---
+
+
+def test_open_via_local_listener_sends_url_and_returns_true(monkeypatch) -> None:
+    import socket
+
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    port = server.getsockname()[1]
+    monkeypatch.setenv("BOT_TUI_OPEN_URL_PORT", str(port))
+
+    result = BotTuiApp._open_via_local_listener("http://127.0.0.1:8765/chart/BTC-USD-PERP")
+
+    conn, _ = server.accept()
+    received = conn.recv(4096)
+    conn.close()
+    server.close()
+
+    assert result is True
+    assert received == b"http://127.0.0.1:8765/chart/BTC-USD-PERP"
+
+
+def test_open_via_local_listener_false_when_port_unset(monkeypatch) -> None:
+    monkeypatch.delenv("BOT_TUI_OPEN_URL_PORT", raising=False)
+    assert BotTuiApp._open_via_local_listener("http://127.0.0.1:8765/chart/BTC-USD-PERP") is False
+
+
+def test_open_via_local_listener_false_when_nothing_listening(monkeypatch) -> None:
+    monkeypatch.setenv("BOT_TUI_OPEN_URL_PORT", "1")  # privileged/unused port, connect refused
+    assert BotTuiApp._open_via_local_listener("http://127.0.0.1:8765/chart/BTC-USD-PERP") is False
+
+
+def test_space_key_uses_local_listener_when_port_set(monkeypatch) -> None:
+    import socket
+
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    port = server.getsockname()[1]
+    monkeypatch.setenv("BOT_TUI_OPEN_URL_PORT", str(port))
+
+    _reset()
+    ranking_state._handle_rankings_message(_ranking())
+    app = BotTuiApp()
+    app._handle_global_key(" ")
+
+    conn, _ = server.accept()
+    conn.close()
+    server.close()
+
+    assert app._footer_hint.text == "dashboard: http://127.0.0.1:8765/chart/BTC-USD-PERP"
+
+
+# --- space key: open dashboard chart directly from the Coins pane ---
+
+
+def test_space_on_highlighted_row_sets_footer_to_dashboard_url() -> None:
+    _reset()
+    ranking_state._handle_rankings_message(_ranking())
+    app = BotTuiApp()
+    app._handle_global_key(" ")
+    assert (
+        app._footer_hint.text
+        == "dashboard (copied to clipboard): http://127.0.0.1:8765/chart/BTC-USD-PERP"
+    )
+    assert app._view == "coins"  # stays on the Coins pane, unlike enter
+
+
+def test_space_on_empty_coins_list_is_a_no_op() -> None:
+    _reset()
+    app = BotTuiApp()
+    app._handle_global_key(" ")
+    assert app._view == "coins"
+
+
 # --- Task 6: esc preserves Coins-pane scroll position and active filter ---
 
 

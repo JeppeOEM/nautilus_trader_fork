@@ -55,6 +55,7 @@ dashboard's job via the `o` deep-link.
 import asyncio
 import logging
 import os
+import socket
 import sys
 import time
 import webbrowser
@@ -88,7 +89,7 @@ _BREADCRUMB_LABELS = {"coins": "Coins", "bots": "Bots", "collector": "Collector"
 # on the Coins pane -- advertised alongside the Story 4.1 keys. `j`/`k` row-focus
 # movement is still "free" via urwid.ListBox and still isn't advertised as a distinct
 # feature.
-_FOOTER_HINT_TEXT = "/ filter  m mode  : command  esc back  :q quit"
+_FOOTER_HINT_TEXT = "/ filter  m mode  space dashboard  : command  esc back  :q quit"
 
 # Coin-detail's own footer -- distinct keys, distinct hints (Story 4.3).
 _COIN_DETAIL_FOOTER_HINT_TEXT = "d expand book  o dashboard  esc back  :q quit"
@@ -1348,9 +1349,17 @@ class BotTuiApp:
         # in practice (same stub-gap-narrowing precedent as Story 4.1's own
         # test_app_body.py, applied here to this Optional instance attribute instead).
         assert self._coin_detail_instrument_id is not None
-        url = coin_detail.dashboard_chart_url(
-            self._dashboard_base_url, self._coin_detail_instrument_id
-        )
+        self._open_dashboard_chart_for(self._coin_detail_instrument_id)
+
+    def _open_dashboard_chart_for(self, instrument_id: str) -> None:
+        # Shared by the "o" key (Coin-detail) and the Coins-pane space key below --
+        # same open-attempt + OSC52-clipboard-copy fallback either way, just
+        # parameterized on which instrument_id to open rather than always reading
+        # self._coin_detail_instrument_id.
+        url = coin_detail.dashboard_chart_url(self._dashboard_base_url, instrument_id)
+        if self._open_via_local_listener(url):
+            self._footer_hint.set_text(f"dashboard: {url}")
+            return
         # webbrowser.open() is a harmless no-op inside this product's headless
         # Docker/SSH deployment (no DISPLAY reachable) but genuinely opens a real
         # browser when bot_tui is run on-host -- both are real deployment shapes, so
@@ -1363,6 +1372,30 @@ class BotTuiApp:
         sys.stdout.write(coin_detail.osc52_copy_sequence(url))
         sys.stdout.flush()
         self._footer_hint.set_text(f"dashboard (copied to clipboard): {url}")
+
+    @staticmethod
+    def _open_via_local_listener(url: str) -> bool:
+        """
+        Best-effort hand-off to troll/scripts/open_listener.go running on the
+        operator's own machine (see troll-tui's -R reverse SSH tunnel in
+        ~/.zshrc) -- lets a space/o press on a VPS-hosted bot_tui actually pop a
+        Firefox tab locally, which webbrowser.open() alone can't do with no
+        DISPLAY on the remote host.
+
+        BOT_TUI_OPEN_URL_PORT unset (a local, non-SSH bot_tui run, or troll-tui
+        without the listener running) short-circuits to False immediately --
+        same fast, silent fallthrough to the existing webbrowser.open()+OSC52
+        path as a refused/timed-out connection.
+        """
+        port = os.environ.get("BOT_TUI_OPEN_URL_PORT")
+        if not port:
+            return False
+        try:
+            with socket.create_connection(("127.0.0.1", int(port)), timeout=0.3) as sock:
+                sock.sendall(url.encode("utf-8"))
+        except OSError:
+            return False
+        return True
 
     def _bot_history_range_back(self) -> None:
         self._set_bot_history_range(bots_pane.previous_range(self._bot_history_range))
@@ -1493,6 +1526,10 @@ class BotTuiApp:
             instrument_id = self._highlighted_instrument_id()
             if instrument_id is not None:
                 self._open_coin_detail(instrument_id)
+        elif key == " " and self._view == "coins":
+            instrument_id = self._highlighted_instrument_id()
+            if instrument_id is not None:
+                self._open_dashboard_chart_for(instrument_id)
         elif self._view == "bots":
             self._handle_bots_pane_key(key)
         elif self._view == "collector":

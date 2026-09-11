@@ -144,6 +144,11 @@ services:
       # network_mode: host with no separate port mapping. Tracks WEB_PORT (see
       # dashboard's DASHBOARD_PORT above) so a custom port doesn't break the deep link.
       DASHBOARD_BASE_URL: "http://127.0.0.1:${WEB_PORT:-8765}"
+      # Set by troll-tui (~/.zshrc) to the port its -R reverse SSH tunnel binds
+      # on this host -- see app.py's _open_via_local_listener. Unset (e.g.
+      # bot_tui run on-host, not over troll-tui) means that hand-off is simply
+      # skipped in favor of webbrowser.open()/OSC52.
+      BOT_TUI_OPEN_URL_PORT: "${BOT_TUI_OPEN_URL_PORT:-}"
     user: "1000:1000"
     volumes:
       # bot_tui.log is written here instead of stderr/stdout to avoid corrupting the
