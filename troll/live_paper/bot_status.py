@@ -50,6 +50,7 @@ import time
 import redis.asyncio as aioredis
 
 from live_paper import fills_store
+from nautilus_trader.model.enums import PriceType
 from nautilus_trader.trading.strategy import Strategy
 
 
@@ -174,15 +175,44 @@ def build_status(
     """
     instrument_id = strategy.config.instrument_id
 
-    position_side = "flat"
-    if strategy.portfolio.is_net_long(instrument_id):
-        position_side = "long"
-    elif strategy.portfolio.is_net_short(instrument_id):
-        position_side = "short"
+    # strategy_id-scoped, never strategy.portfolio.*(instrument_id) -- AD-11:
+    # Portfolio's net_exposure/realized_pnl/unrealized_pnl are account+instrument
+    # scoped in the Rust core (cache.positions_open(strategy_id=None, ...)), i.e. they
+    # silently sum across every strategy in the node trading this instrument. Under
+    # the one-node-many-bots model that would blend two bots' numbers together the
+    # moment they share an instrument_id, so each figure is computed here directly
+    # from this strategy's own positions instead.
+    positions_open = strategy.cache.positions_open(
+        instrument_id=instrument_id,
+        strategy_id=strategy.id,
+    )
+    positions_closed = strategy.cache.positions_closed(
+        instrument_id=instrument_id,
+        strategy_id=strategy.id,
+    )
 
-    net_exposure_money = strategy.portfolio.net_exposure(instrument_id)
-    realized_pnl_money = strategy.portfolio.realized_pnl(instrument_id)
-    unrealized_pnl_money = strategy.portfolio.unrealized_pnl(instrument_id)
+    position_side = "flat"
+    net_exposure = 0.0
+    unrealized_pnl = 0.0
+    if positions_open:
+        # NETTING (this project's only OMS type): at most one open position per
+        # strategy+instrument.
+        position = positions_open[0]
+        position_side = "long" if position.is_long else "short" if position.is_short else "flat"
+        price = strategy.cache.price(instrument_id, PriceType.MID)
+        if price is not None:
+            # notional_value() (not signed_qty * price) -- matches Portfolio's own
+            # net_exposure calc (crates/portfolio/src/portfolio.rs), which scales by
+            # the instrument's multiplier; signed_qty alone would drop that factor.
+            sign = 1.0 if position.is_long else -1.0
+            net_exposure = sign * position.notional_value(price).as_double()
+            unrealized_pnl = position.unrealized_pnl(price).as_double()
+
+    realized_pnl = sum(
+        position.realized_pnl.as_double()
+        for position in (*positions_open, *positions_closed)
+        if position.realized_pnl is not None
+    )
 
     closed_trades, wins = fills_store.win_rate_stats(bot_id, db_path)
     win_rate = wins / closed_trades if closed_trades else None
@@ -194,11 +224,9 @@ def build_status(
         "mode": mode,
         "running": strategy.is_running,
         "position_side": position_side,
-        "net_exposure": net_exposure_money.as_double() if net_exposure_money is not None else 0.0,
-        "realized_pnl": realized_pnl_money.as_double() if realized_pnl_money is not None else 0.0,
-        "unrealized_pnl": (
-            unrealized_pnl_money.as_double() if unrealized_pnl_money is not None else 0.0
-        ),
+        "net_exposure": net_exposure,
+        "realized_pnl": realized_pnl,
+        "unrealized_pnl": unrealized_pnl,
         "win_rate": win_rate,
         "closed_trades": closed_trades,
         "started_at": started_at,

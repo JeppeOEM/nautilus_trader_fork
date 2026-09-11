@@ -7,7 +7,7 @@ paradigm: 'Gatekeeper (fail-closed single-writer ingestion)'
 scope: 'troll/dydx_collector + troll/ml_signals — the market-data write path (collector → ParquetDataCatalog + Redis live stream) and every reader that consumes it (dashboard, backtests, catalog stats, metrics computer), plus the derived-data layer built on top of it (ranking_engine, bot_tui, live_paper)'
 status: final
 created: '2026-07-01'
-updated: '2026-07-24'
+updated: '2026-09-11'
 binds: []
 sources: []
 companions: []
@@ -156,6 +156,20 @@ Namespace mapping: `dydx_collector/` = the gate for raw market data (ingest, val
   - **Staleness (history):** each `bots:history:*` blob's `updated_at` follows the identical staleness discipline as `bots:status` and `rankings:live` — a reader treats a stale `updated_at` beyond a configurable timeout as `unknown/stale`, never as still-current.
   - **Chosen over** a request/response pub/sub pattern for history queries (rejected: correlation IDs and reply routing add protocol complexity — timeouts, in-flight request state — this single-user personal tool doesn't need; the four fixed time-range buckets already cover every range the UX design's day/week/month/all preset toggle ever requests, so no arbitrary-range query capability is needed).
 
+### AD-11 — `live_paper`: one node, many bots (shared connection, shared balance pool, per-bot isolation via Cache filtering)
+
+- **Binds:** `live_paper/node.py` (builds one `TradingNode` hosting every paper bot), `live_paper/strategy.py` (one `DummyStrategy` instance per bot, explicit identity), `live_paper/bot_status.py` (per-bot live status, must read Cache scoped by `strategy_id`), `live_paper/trade_history.py` (already scoped this way), `live_paper/config.py` (multi-bot paper config shape), `docker-compose.yml`'s `live-paper` service (collapses to one container)
+- **Prevents:** N containers each opening an independent live dYdX WebSocket connection and an independent full instrument-provider REST load merely to run N paper bots (~450MB RAM and one redundant dYdX connection per bot — doesn't fit a 4GB VPS past 1–2 bots); a future implementer assuming multiple `SandboxExecutionClientConfig` accounts can coexist in one node (Nautilus's `ExecutionEngine` hard-errors registering two exec clients for the same venue); `bot_status.py` silently blending two bots' `net_exposure`/`realized_pnl`/`unrealized_pnl` together the moment they share an instrument; a bot's identity (and therefore its Cache/Redis history) silently shifting to another bot's data because of config-file reordering; real-money config inheriting the shared-pool multi-bot shape and diluting FR-15's single-subaccount isolation discipline
+- **Rule:**
+  - **One `TradingNode` per `live_paper` process, one `DydxDataClientConfig` (one live dYdX WS connection, one instrument-provider load), one `SandboxExecutionClientConfig` (one simulated account/balance pool) — no matter how many bots are configured.** This is the load-bearing trade-off this AD exists to pin: full tick-level fill fidelity (real `QuoteTick`/`OrderBookDeltas`/internally-aggregated `Bar`s feeding the Sandbox matching engine, exactly as today) was chosen over reusing `dydx_collector`'s already-open connection, because `dydx_collector`'s `snapshots:raw` feed is 1-second-sampled top-of-book (per AD-9's `DydxSecondSnapshot`) — coarser than what `DummyStrategy` consumes today — and this project's paper bots need tick fidelity, not RAM savings, per explicit user choice.
+  - **`[VERIFIED]` Per-bot simulated-balance isolation is structurally unavailable once bots share a node.** `nautilus_trader`'s `ExecutionEngine.register_client` raises if two exec clients claim the same venue (`nautilus_trader/execution/engine.pyx:455-462`) — one node can only ever run one `DYDX` exec client. Every bot in one `live_paper` process therefore draws from **one shared `starting_balances` pool**, not an isolated balance per bot. Accepted for paper-test bots at small `trade_size`s; never extended to real money (see below).
+  - **Per-bot PnL/exposure is still exact — computed by filtering the Cache, never by re-deriving or approximating.** `bot_status.py` MUST NOT call `strategy.portfolio.net_exposure()/realized_pnl()/unrealized_pnl()/is_net_long()/is_net_short()` with only an `instrument_id` — `[VERIFIED]` these are account+instrument scoped in the Rust core (`crates/portfolio/src/portfolio.rs:1088`'s `net_exposure` calls `cache.positions_open(venue=None, instrument_id, strategy_id=None, account_id, side=None)` — `crates/common/src/cache/mod.rs:4694`), i.e. they aggregate across every strategy in the node trading that instrument, and would silently blend two bots' numbers the moment they share an `instrument_id`. Instead, `bot_status.py` computes each figure itself from `cache.positions_open(strategy_id=strategy.id)` / `cache.positions_closed(strategy_id=strategy.id)` filtered to the bot's own `instrument_id`, summing notional/realized/unrealized across just those positions — the identical `strategy_id`-filtering primitive `trade_history.py` already uses for AD-10's history feature, applied to the live-status path too. This fix is unconditional (applied regardless of whether any two configured bots actually share an instrument), since a config-time coincidence is not a safe thing to depend on for correctness.
+  - **Each bot's `StrategyId` is pinned explicitly, never left to auto-assignment.** `DummyStrategyConfig(order_id_tag=bot_id, ...)` — never `Trader.add_strategy()`'s default auto-increment (`nautilus_trader/trading/trader.py:407-411`, which assigns `order_id_tag` by insertion-order position among currently-attached strategies). An auto-assigned tag makes a bot's identity — and therefore its Cache/Redis/`fills.db` history — depend on config list order; reordering or removing a bot between deploys would silently reassign another bot's history to a shifted `StrategyId`. Pinning `order_id_tag = bot_id` keeps identity stable across restarts and config edits, consistent with AD-10's existing `bot_id`-uniqueness discipline.
+  - **Multi-bot config shape is paper-only.** `config.toml` (paper) gains a `[[bots]]` array of tables — `network`/`starting_balances`/`account_type`/`log_level` stay shared top-level fields (the one pool above); each `[[bots]]` entry carries `bot_id`/`instrument_id`/`trade_size`/`trend_buy_threshold`/`trend_sell_threshold`/`ofi_confirm_threshold`. `RealMoneyConfig`'s file format is **explicitly not** changed to this shape — real-money execution stays one-bot-per-file/subaccount (FR-15/FR-23's existing structural isolation), never sharing a pool with other bots the way paper mode now does. `load_paper_config`'s existing hard-error-on-a-`mode`-key check is unaffected by this reshape.
+  - `node.py`'s `TraderId` represents the whole paper-fleet node, not a single bot (e.g. a fixed `LIVE-PAPER-001`) — it is bot-agnostic under this AD, since one node now hosts many bots by design; per-bot addressing lives entirely in `bot_id`/`StrategyId`, never in `TraderId`.
+  - **Deployment collapses to one `live-paper` container** running every configured paper bot — not one container per bot. `bot_status.run()`/`trade_history.run()` are called once per configured bot (both already take `(strategy, bot_id, ...)`, so this is a call-site change, not a signature change), all scheduled on the same node's event loop per AD-10's existing "outside the Strategy's own component lifecycle" reasoning.
+  - **Chosen over** (a) feeding strategies from `dydx_collector`'s `snapshots:raw` feed instead of `TradingNode`'s own `DydxDataClientConfig` — rejected for the fidelity loss above; (b) keeping bots on fully separate nodes/containers to preserve true balance isolation — rejected because it caps concurrent bots at roughly 1–2 on a 4GB VPS (~450MB + one dYdX connection per bot), which doesn't meet the goal of running several test bots at once.
+
 ## Consistency Conventions
 
 | Concern | Convention |
@@ -205,11 +219,17 @@ troll/
                             # active Ranking Mode state (subscribes ranking:control), publishes
                             # rankings:live (live path) + relocated SQLite metrics_store (historical path)
   live_paper/             # sole sanctioned TradingNode/Strategy user; control plane + durable history
-                            # (node.py, strategy.py, config.py); publishes bots:status (change + heartbeat),
-                            # subscribes bots:control ({bot_id, action} only — never a mode parameter);
+                            # (node.py, strategy.py, config.py); ONE TradingNode hosts EVERY paper bot
+                            # (one DydxDataClientConfig connection, one shared SandboxExecutionClientConfig
+                            # balance pool, per AD-11) — config.toml's [[bots]] array drives N DummyStrategy
+                            # instances (order_id_tag = bot_id, never auto-assigned), each with its own
+                            # bot_status.run()/trade_history.run() task on the same event loop;
+                            # publishes bots:status (change + heartbeat) per bot_id, subscribes bots:control
+                            # ({bot_id, action} only — never a mode parameter);
                             # TradingNodeConfig's CacheConfig(database=DatabaseConfig(type="redis", ...))
                             # persists orders/positions/fills; refreshes bots:history:{bot_id}:{day,week,month,all}
-                            # Redis keys from cache.orders_closed()/positions_closed() (GET-only for readers)
+                            # Redis keys from cache.orders_closed()/positions_closed() filtered by strategy_id
+                            # (GET-only for readers). RealMoneyConfig stays one-bot-per-file (AD-11).
   bot_tui/                # (new) urwid TUI app — pure reader/client
                             # reads snapshots:raw directly via ml_signals.indicators for per-coin live indicators;
                             # reads rankings:live for the coin-list pane, publishes ranking:control to switch mode;
@@ -225,6 +245,8 @@ Two-image Docker split: `nautilus-trader-base:1.229.0` (rare rebuild, core/deps 
 **New components' deployment shape (this update):** `ranking_engine` needs its own service — read access to `snapshots:raw` (Redis) and outbound internet for the `volume24h` poll, read-write access to its relocated `metrics_store` SQLite file, publish access to `rankings:live`/`ranking:control`. `bot_tui` is not a long-running background service like the others — it's an interactive urwid app meant to be launched directly over SSH (e.g. via `docker compose exec` into a running container, or run on the host against the same Redis instance), not a `restart: always` daemon. Exact `docker-compose.yml` service definitions for both are implementation-owned, not fixed here — flagged in Deferred rather than left silent.
 
 **`live-paper`'s Redis usage extended (2026-07-24 update):** previously Redis-only for `bots:status`/`bots:control` pub/sub; now also uses Redis as its Nautilus `Cache` backend (`CacheConfig(database=DatabaseConfig(type="redis", ...))`) and to hold the `bots:history:*` keys — no new service/container needed, same Redis instance, no compose changes beyond what already exists.
+
+**`live-paper` collapses to one container for every paper bot (2026-09-11 update, AD-11):** driven by a 4GB-RAM VPS deployment target — running N bots as N separate containers each opening its own dYdX connection doesn't fit. `docker-compose.yml`'s `live-paper` service is unchanged in shape (still one profile-gated, `restart: on-failure:5` service); `config.toml` now drives however many bots that one container runs via its `[[bots]]` array (AD-11). Real-money mode is unaffected — it stays a separate, single-bot config/process per FR-15's existing gate, never folded into the shared paper pool.
 
 ## Deferred
 

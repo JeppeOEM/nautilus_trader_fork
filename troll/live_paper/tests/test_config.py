@@ -16,12 +16,16 @@ from decimal import Decimal
 
 import pytest
 
+from live_paper.config import BotConfig
 from live_paper.config import PaperConfig
 from live_paper.config import RealMoneyConfig
 from live_paper.config import load_paper_config
 from live_paper.config import load_real_money_config
 from live_paper.config import resolve_config
 from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
+
+
+_ONE_BOT = '\n[[bots]]\nbot_id = "bot-01"\n'
 
 
 def _write(tmp_path, name: str, content: str):
@@ -31,21 +35,39 @@ def _write(tmp_path, name: str, content: str):
 
 
 def test_default_paper_config_loads_paper_mode(tmp_path) -> None:
-    path = _write(tmp_path, "config.toml", 'network = "mainnet"\n')
+    path = _write(tmp_path, "config.toml", f'network = "mainnet"\n{_ONE_BOT}')
     config = load_paper_config(path)
     assert isinstance(config, PaperConfig)
     assert config.network == DydxNetwork.MAINNET
 
 
-def test_resolve_config_with_no_real_money_path_returns_paper(tmp_path) -> None:
+def test_paper_config_requires_at_least_one_bot(tmp_path) -> None:
     path = _write(tmp_path, "config.toml", 'network = "mainnet"\n')
+    with pytest.raises(ValueError, match="at least one \\[\\[bots\\]\\] entry"):
+        load_paper_config(path)
+
+
+def test_paper_config_rejects_duplicate_bot_ids(tmp_path) -> None:
+    path = _write(
+        tmp_path,
+        "config.toml",
+        'network = "mainnet"\n'
+        '[[bots]]\nbot_id = "bot-01"\n'
+        '[[bots]]\nbot_id = "bot-01"\n',
+    )
+    with pytest.raises(ValueError, match="distinct bot_id"):
+        load_paper_config(path)
+
+
+def test_resolve_config_with_no_real_money_path_returns_paper(tmp_path) -> None:
+    path = _write(tmp_path, "config.toml", f'network = "mainnet"\n{_ONE_BOT}')
     config, is_real_money = resolve_config(path, real_money_path=None)
     assert is_real_money is False
     assert isinstance(config, PaperConfig)
 
 
 def test_paper_config_rejects_a_mode_field(tmp_path) -> None:
-    path = _write(tmp_path, "config.toml", 'network = "mainnet"\nmode = "real_money"\n')
+    path = _write(tmp_path, "config.toml", f'network = "mainnet"\nmode = "real_money"\n{_ONE_BOT}')
     with pytest.raises(ValueError, match="must not contain a 'mode' field"):
         load_paper_config(path)
 
@@ -74,7 +96,7 @@ def test_real_money_config_loads_when_mode_is_explicit(tmp_path) -> None:
 
 
 def test_resolve_config_with_real_money_path_returns_real_money(tmp_path) -> None:
-    paper_path = _write(tmp_path, "config.toml", 'network = "mainnet"\n')
+    paper_path = _write(tmp_path, "config.toml", f'network = "mainnet"\n{_ONE_BOT}')
     real_money_path = _write(
         tmp_path,
         "real_money.toml",
@@ -86,7 +108,7 @@ def test_resolve_config_with_real_money_path_returns_real_money(tmp_path) -> Non
 
 
 def test_resolve_config_with_empty_string_real_money_path_returns_paper(tmp_path) -> None:
-    path = _write(tmp_path, "config.toml", 'network = "mainnet"\n')
+    path = _write(tmp_path, "config.toml", f'network = "mainnet"\n{_ONE_BOT}')
     config, is_real_money = resolve_config(path, real_money_path="")
     assert is_real_money is False
     assert isinstance(config, PaperConfig)
@@ -96,47 +118,67 @@ def test_paper_config_rejects_a_bare_string_starting_balances(tmp_path) -> None:
     path = _write(
         tmp_path,
         "config.toml",
-        'network = "mainnet"\nstarting_balances = "10_000 USDC"\n',
+        f'network = "mainnet"\nstarting_balances = "10_000 USDC"\n{_ONE_BOT}',
     )
     with pytest.raises(ValueError, match="must be a TOML array"):
         load_paper_config(path)
 
 
-def test_default_paper_config_has_instrument_id_and_trade_size(tmp_path) -> None:
-    path = _write(tmp_path, "config.toml", 'network = "mainnet"\n')
+def test_default_bot_has_instrument_id_and_trade_size(tmp_path) -> None:
+    path = _write(tmp_path, "config.toml", f'network = "mainnet"\n{_ONE_BOT}')
     config = load_paper_config(path)
-    assert config.instrument_id == "BTC-USD-PERP.DYDX"
-    assert config.trade_size == Decimal("0.001")
+    assert config.bots[0].instrument_id == "BTC-USD-PERP.DYDX"
+    assert config.bots[0].trade_size == Decimal("0.001")
 
 
-def test_paper_config_reads_explicit_instrument_id_and_trade_size(tmp_path) -> None:
-    path = _write(
-        tmp_path,
-        "config.toml",
-        'network = "mainnet"\ninstrument_id = "ETH-USD-PERP.DYDX"\ntrade_size = "0.05"\n',
-    )
-    config = load_paper_config(path)
-    assert config.instrument_id == "ETH-USD-PERP.DYDX"
-    assert config.trade_size == Decimal("0.05")
-
-
-def test_paper_config_rejects_an_unquoted_trade_size(tmp_path) -> None:
-    path = _write(tmp_path, "config.toml", 'network = "mainnet"\ntrade_size = 0.05\n')
-    with pytest.raises(ValueError, match="trade_size must be a quoted TOML string"):
-        load_paper_config(path)
-
-
-def test_paper_config_reads_explicit_thresholds(tmp_path) -> None:
+def test_bot_reads_explicit_instrument_id_and_trade_size(tmp_path) -> None:
     path = _write(
         tmp_path,
         "config.toml",
         'network = "mainnet"\n'
+        '[[bots]]\nbot_id = "bot-01"\ninstrument_id = "ETH-USD-PERP.DYDX"\ntrade_size = "0.05"\n',
+    )
+    config = load_paper_config(path)
+    assert config.bots[0].instrument_id == "ETH-USD-PERP.DYDX"
+    assert config.bots[0].trade_size == Decimal("0.05")
+
+
+def test_bot_rejects_an_unquoted_trade_size(tmp_path) -> None:
+    path = _write(
+        tmp_path,
+        "config.toml",
+        'network = "mainnet"\n[[bots]]\nbot_id = "bot-01"\ntrade_size = 0.05\n',
+    )
+    with pytest.raises(ValueError, match="trade_size must be a quoted TOML string"):
+        load_paper_config(path)
+
+
+def test_bot_reads_explicit_thresholds(tmp_path) -> None:
+    path = _write(
+        tmp_path,
+        "config.toml",
+        'network = "mainnet"\n[[bots]]\nbot_id = "bot-01"\n'
         "trend_buy_threshold = 0.7\ntrend_sell_threshold = 0.3\nofi_confirm_threshold = 1.5\n",
     )
     config = load_paper_config(path)
-    assert config.trend_buy_threshold == 0.7
-    assert config.trend_sell_threshold == 0.3
-    assert config.ofi_confirm_threshold == 1.5
+    bot = config.bots[0]
+    assert bot.trend_buy_threshold == 0.7
+    assert bot.trend_sell_threshold == 0.3
+    assert bot.ofi_confirm_threshold == 1.5
+
+
+def test_multiple_bots_each_get_their_own_settings(tmp_path) -> None:
+    path = _write(
+        tmp_path,
+        "config.toml",
+        'network = "mainnet"\n'
+        '[[bots]]\nbot_id = "bot-01"\ntrend_buy_threshold = 0.6\n'
+        '[[bots]]\nbot_id = "bot-02"\ntrend_buy_threshold = 0.51\n',
+    )
+    config = load_paper_config(path)
+    assert [bot.bot_id for bot in config.bots] == ["bot-01", "bot-02"]
+    assert config.bots[0].trend_buy_threshold == 0.6
+    assert config.bots[1].trend_buy_threshold == 0.51
 
 
 def test_real_money_config_rejects_an_unquoted_trade_size(tmp_path) -> None:
@@ -149,16 +191,22 @@ def test_real_money_config_rejects_an_unquoted_trade_size(tmp_path) -> None:
         load_real_money_config(path)
 
 
-def test_default_paper_config_has_bot_id(tmp_path) -> None:
-    path = _write(tmp_path, "config.toml", 'network = "mainnet"\n')
-    config = load_paper_config(path)
-    assert config.bot_id == "bot-01"
+def test_bot_requires_a_bot_id(tmp_path) -> None:
+    path = _write(tmp_path, "config.toml", 'network = "mainnet"\n[[bots]]\ninstrument_id = "x"\n')
+    with pytest.raises(ValueError, match="must set bot_id"):
+        load_paper_config(path)
 
 
-def test_paper_config_reads_explicit_bot_id(tmp_path) -> None:
-    path = _write(tmp_path, "config.toml", 'network = "mainnet"\nbot_id = "bot-btc"\n')
+def test_bot_reads_explicit_bot_id(tmp_path) -> None:
+    path = _write(tmp_path, "config.toml", 'network = "mainnet"\n[[bots]]\nbot_id = "bot-btc"\n')
     config = load_paper_config(path)
-    assert config.bot_id == "bot-btc"
+    assert config.bots[0].bot_id == "bot-btc"
+
+
+def test_bot_default_starting_balance_anchor(tmp_path) -> None:
+    path = _write(tmp_path, "config.toml", f'network = "mainnet"\n{_ONE_BOT}')
+    config = load_paper_config(path)
+    assert config.bots[0].starting_balance == "10_000 USDC"
 
 
 def test_real_money_config_reads_explicit_bot_id(tmp_path) -> None:

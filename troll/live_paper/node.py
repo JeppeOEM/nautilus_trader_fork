@@ -100,6 +100,9 @@ def build_node(config: PaperConfig | RealMoneyConfig) -> TradingNode:
             ),
         }
         exec_factory = DydxLiveExecClientFactory
+        # Real money stays one-bot-per-file/subaccount (AD-11) -- RealMoneyConfig
+        # itself already carries one bot's instrument/sizing/thresholds/bot_id.
+        bots = (config,)
     else:
         exec_clients = {
             DYDX: SandboxExecutionClientConfig(
@@ -110,6 +113,9 @@ def build_node(config: PaperConfig | RealMoneyConfig) -> TradingNode:
             ),
         }
         exec_factory = SandboxLiveExecClientFactory
+        # AD-11: every configured paper bot shares this one node/connection/balance
+        # pool -- no per-bot exec client (Nautilus allows only one per venue per node).
+        bots = config.bots
 
     # Redis-backed Cache (Story 4.6, AD-10) -- orders/positions/fills persist beyond
     # this process's lifetime instead of defaulting to in-memory-only. Parsed from the
@@ -118,6 +124,9 @@ def build_node(config: PaperConfig | RealMoneyConfig) -> TradingNode:
     # Cache and the bots:status/bots:control channels onto different Redis instances.
     redis_url = urlparse(_REDIS_URL)
     node_config = TradingNodeConfig(
+        # One fixed id for the whole node (AD-11) -- every paper bot (or the one
+        # real-money bot) shares this single node/connection; per-bot addressing lives
+        # entirely in bot_id/StrategyId (order_id_tag below), never in trader_id.
         trader_id=TraderId("LIVE-PAPER-001"),
         logging=LoggingConfig(log_level=config.log_level, use_pyo3=True),
         cache=CacheConfig(
@@ -134,60 +143,73 @@ def build_node(config: PaperConfig | RealMoneyConfig) -> TradingNode:
         exec_clients=exec_clients,
     )
 
-    strategy = DummyStrategy(
-        config=DummyStrategyConfig(
-            instrument_id=InstrumentId.from_str(config.instrument_id),
-            trade_size=config.trade_size,
-            trend_buy_threshold=config.trend_buy_threshold,
-            trend_sell_threshold=config.trend_sell_threshold,
-            ofi_confirm_threshold=config.ofi_confirm_threshold,
-        ),
-    )
-
     node = TradingNode(config=node_config)
-    node.trader.add_strategy(strategy)
     node.add_data_client_factory(DYDX, DydxLiveDataClientFactory)
     node.add_exec_client_factory(DYDX, exec_factory)
+
+    strategies = []
+    for bot in bots:
+        strategy = DummyStrategy(
+            config=DummyStrategyConfig(
+                instrument_id=InstrumentId.from_str(bot.instrument_id),
+                trade_size=bot.trade_size,
+                trend_buy_threshold=bot.trend_buy_threshold,
+                trend_sell_threshold=bot.trend_sell_threshold,
+                ofi_confirm_threshold=bot.ofi_confirm_threshold,
+                # Pinned to bot_id, never left to Trader.add_strategy()'s
+                # insertion-order auto-increment default (AD-11) -- an auto-assigned
+                # tag would make a bot's Cache/Redis/fills.db identity depend on
+                # config list order, silently reassigning history on a reorder.
+                order_id_tag=bot.bot_id,
+            ),
+        )
+        node.trader.add_strategy(strategy)
+        strategies.append((strategy, bot))
+
     node.build()
 
-    # Scheduled on the node's own loop, outside the strategy's component lifecycle
+    # Scheduled on the node's own loop, outside each strategy's component lifecycle
     # (Story 4.4; see bot_status.run's own docstring for why -- a Strategy-internal
     # timer would stop firing once Stopped, and could never later hear a "start").
+    # One bot_status/trade_history task per configured bot (AD-11), all on this one
+    # node's loop -- both already take (strategy, bot_id, ...), so looping here is a
+    # call-site change, not a signature change.
     mode = "live" if isinstance(config, RealMoneyConfig) else "paper"
     loop = node.get_event_loop()
     assert loop is not None, "TradingNode's kernel loop must exist once constructed"
-    loop.create_task(
-        bot_status.run(
-            strategy,
-            bot_id=config.bot_id,
-            mode=mode,
-            redis_url=_REDIS_URL,
-            db_path=_FILLS_DB_PATH,
+    for strategy, bot in strategies:
+        loop.create_task(
+            bot_status.run(
+                strategy,
+                bot_id=bot.bot_id,
+                mode=mode,
+                redis_url=_REDIS_URL,
+                db_path=_FILLS_DB_PATH,
+            )
         )
-    )
-    # Anchors performance_metrics.equity_returns()'s equity curve (Sharpe/Sortino/etc.
-    # in bots:history's "metrics" field) -- only PaperConfig has a fixed config value
-    # for this; real-money mode's actual balance lives on-chain, not in a config file,
-    # so those return-based stats are skipped there (None) rather than computed
-    # against a fabricated number (see all_metrics()'s own docstring). Money.from_str
-    # reuses the same "10_000 USDC"-style parser SandboxExecutionClientConfig already
-    # trusts above, rather than a second hand-rolled one.
-    starting_balance = (
-        Money.from_str(config.starting_balances[0]).as_double()
-        if isinstance(config, PaperConfig) and config.starting_balances
-        else None
-    )
-
-    # Same event-loop-lifecycle reasoning as bot_status.run() above (Story 4.6).
-    loop.create_task(
-        trade_history.run(
-            strategy,
-            bot_id=config.bot_id,
-            redis_url=_REDIS_URL,
-            db_path=_FILLS_DB_PATH,
-            starting_balance=starting_balance,
+        # Anchors performance_metrics.equity_returns()'s equity curve (Sharpe/Sortino/
+        # etc. in bots:history's "metrics" field) -- this bot's own config value, a
+        # bookkeeping anchor only (AD-11: bots share one real balance pool, so this is
+        # not that bot's actual simulated balance). Real-money mode's actual balance
+        # lives on-chain, not in a config file, so those return-based stats are
+        # skipped there (None) rather than computed against a fabricated number (see
+        # all_metrics()'s own docstring). Money.from_str reuses the same
+        # "10_000 USDC"-style parser SandboxExecutionClientConfig already trusts
+        # above, rather than a second hand-rolled one.
+        starting_balance = (
+            Money.from_str(bot.starting_balance).as_double()
+            if isinstance(config, PaperConfig)
+            else None
         )
-    )
+        loop.create_task(
+            trade_history.run(
+                strategy,
+                bot_id=bot.bot_id,
+                redis_url=_REDIS_URL,
+                db_path=_FILLS_DB_PATH,
+                starting_balance=starting_balance,
+            )
+        )
 
     return node
 

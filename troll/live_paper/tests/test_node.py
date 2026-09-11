@@ -12,6 +12,8 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
+import asyncio
+
 import pytest
 from nautilus_trader.adapters.dydx.config import DydxExecClientConfig
 from nautilus_trader.adapters.sandbox.config import SandboxExecutionClientConfig
@@ -19,22 +21,47 @@ from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
 from nautilus_trader.live.node import TradingNode
 
 import live_paper.node
+from live_paper.config import BotConfig
 from live_paper.config import PaperConfig
 from live_paper.config import RealMoneyConfig
 from live_paper.node import build_node
 
 
-def _paper_config() -> PaperConfig:
+def _paper_config(*bots: BotConfig) -> PaperConfig:
     return PaperConfig(
         network=DydxNetwork.MAINNET,
         starting_balances=("10_000 USDC",),
         account_type="MARGIN",
         log_level="ERROR",
+        bots=bots or (BotConfig(bot_id="bot-01"),),
     )
 
 
-def test_paper_config_builds_node_with_sandbox_exec_client_and_zero_strategies() -> None:
-    node = build_node(_paper_config())
+def _dispose(node: TradingNode) -> None:
+    """
+    build_node() schedules one bot_status.run()/trade_history.run() task per
+    configured bot via loop.create_task() (live_paper/node.py) -- these synchronous
+    tests never drive the loop, so those tasks never get their first `.send()`.
+    node.dispose() (nautilus_trader/live/node.py) closes the loop itself, so
+    cancelling has to happen here, first -- doing it after dispose() is too late
+    (the closed loop can no longer run anything). Un-run + cancelled-without-ever-
+    stepping is exactly what triggers Python's "coroutine was never awaited"
+    RuntimeWarning on GC; running the cancellation once via gather() gives each
+    coroutine the one step it needs to receive CancelledError instead
+    (troll/CLAUDE.md TEST-04: fixed at the source, not filtered away).
+    """
+    loop = node.get_event_loop()
+    if loop is not None and not loop.is_closed():
+        pending = asyncio.all_tasks(loop=loop)
+        for task in pending:
+            task.cancel()
+        if pending:
+            loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+    node.dispose()
+
+
+def test_paper_config_builds_node_with_sandbox_exec_client_and_one_strategy_per_bot() -> None:
+    node = build_node(_paper_config(BotConfig(bot_id="bot-01"), BotConfig(bot_id="bot-02")))
     try:
         assert isinstance(node, TradingNode)
         # `_config` is TradingNode's own stored constructor argument (no public accessor
@@ -43,11 +70,23 @@ def test_paper_config_builds_node_with_sandbox_exec_client_and_zero_strategies()
         exec_client_config = node._config.exec_clients["DYDX"]
         assert isinstance(exec_client_config, SandboxExecutionClientConfig)
         assert not isinstance(exec_client_config, DydxExecClientConfig)
-        # Story 3.2: the DummyStrategy is now attached by default (Story 3.1 built with
-        # zero strategies since it predates the strategy's existence).
-        assert len(node.trader.strategy_states()) == 1
+        # AD-11: one TradingNode/exec client, but one Strategy per configured bot.
+        assert len(node.trader.strategy_states()) == 2
     finally:
-        node.dispose()
+        _dispose(node)
+
+
+def test_paper_config_pins_strategy_id_to_bot_id_not_insertion_order() -> None:
+    # AD-11: order_id_tag must come from bot_id, never Trader.add_strategy()'s
+    # insertion-order auto-increment default -- otherwise reordering [[bots]] entries
+    # between deploys would silently reassign a bot's Cache/Redis history.
+    node = build_node(_paper_config(BotConfig(bot_id="bot-02"), BotConfig(bot_id="bot-01")))
+    try:
+        strategy_ids = {str(strategy_id) for strategy_id in node.trader.strategy_states()}
+        assert any(sid.endswith("-bot-02") for sid in strategy_ids)
+        assert any(sid.endswith("-bot-01") for sid in strategy_ids)
+    finally:
+        _dispose(node)
 
 
 def test_real_money_config_builds_node_with_dydx_exec_client() -> None:
@@ -59,7 +98,7 @@ def test_real_money_config_builds_node_with_dydx_exec_client() -> None:
         exec_client_config = node._config.exec_clients["DYDX"]
         assert isinstance(exec_client_config, DydxExecClientConfig)
     finally:
-        node.dispose()
+        _dispose(node)
 
 
 def test_build_node_configures_redis_backed_cache() -> None:
@@ -75,7 +114,7 @@ def test_build_node_configures_redis_backed_cache() -> None:
         assert cache_config.database.host == "127.0.0.1"
         assert cache_config.database.port == 6379
     finally:
-        node.dispose()
+        _dispose(node)
 
 
 def test_build_node_passes_redis_credentials_and_ssl_from_url(
@@ -95,4 +134,4 @@ def test_build_node_passes_redis_credentials_and_ssl_from_url(
         assert db.password == "secret"
         assert db.ssl is True
     finally:
-        node.dispose()
+        _dispose(node)

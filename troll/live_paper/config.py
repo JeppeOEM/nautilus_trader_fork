@@ -15,6 +15,14 @@
 """
 Live/paper-trading configuration -- a structurally isolated paper vs real-money split.
 
+Architecture AD-11: one `live_paper` process runs ONE `TradingNode` (one dYdX
+connection, one shared simulated-balance pool) hosting every configured paper bot --
+`PaperConfig.bots` is a tuple of `BotConfig`, one per bot, each getting its own
+`Strategy` instance and its own `bots:status`/`bots:history:*` identity. This is
+paper-only: `RealMoneyConfig` deliberately stays single-bot (its own subaccount,
+never sharing a pool with other bots), so the multi-bot shape below is not mirrored
+there.
+
 PaperConfig and RealMoneyConfig are deliberately two separate dataclasses with two separate
 loaders, not one schema with an optional `mode` field. Story 3.1 AC4 requires real-money
 execution be unreachable by any default or accidental config state -- a single toggleable
@@ -43,22 +51,34 @@ from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
 
 
 @dataclass(frozen=True)
-class PaperConfig:
-    network: DydxNetwork
-    starting_balances: tuple[str, ...]
-    account_type: str
-    log_level: str
+class BotConfig:
+    """
+    One paper bot within a shared `PaperConfig` node (AD-11) -- its own `Strategy`
+    instance, own instrument/sizing/thresholds, own `bots:status`/`bots:history:*`
+    identity via `bot_id`. `starting_balance` is a bookkeeping anchor only (feeds
+    `performance_metrics.equity_returns()`'s Sharpe/Sortino calc for this bot's own
+    fill history) -- it is NOT this bot's real simulated balance, since every bot in
+    one node draws from `PaperConfig.starting_balances`' single shared pool (AD-11:
+    Nautilus's ExecutionEngine allows only one exec client per venue per node, so
+    per-bot balance isolation isn't available once bots share a node).
+    """
+
+    bot_id: str
     instrument_id: str = "BTC-USD-PERP.DYDX"
     trade_size: Decimal = Decimal("0.001")
     trend_buy_threshold: float = 0.6
     trend_sell_threshold: float = 0.4
     ofi_confirm_threshold: float = 0.0
-    # bots:status/bots:control identity (Story 4.4, architecture AD-10) -- must stay
-    # distinct between a bot's paper and live-mode configs, or its status/control/
-    # history would silently merge across paper and real-money trading (no automated
-    # check exists for this; see epic-4-context.md's own flagged operator-discipline
-    # note).
-    bot_id: str = "bot-01"
+    starting_balance: str = "10_000 USDC"
+
+
+@dataclass(frozen=True)
+class PaperConfig:
+    network: DydxNetwork
+    starting_balances: tuple[str, ...]
+    account_type: str
+    log_level: str
+    bots: tuple[BotConfig, ...]
 
 
 @dataclass(frozen=True)
@@ -75,15 +95,30 @@ class RealMoneyConfig:
     bot_id: str = "bot-01"
 
 
-def _parse_trade_size(raw: dict, path: Path) -> Decimal:
-    trade_size = raw.get("trade_size", "0.001")
+def _parse_trade_size(raw: dict, key: str, path: Path) -> Decimal:
+    trade_size = raw.get(key, "0.001")
     if not isinstance(trade_size, str):
         raise ValueError(
-            f'{path}: trade_size must be a quoted TOML string (e.g. "0.001"), got '
+            f'{path}: {key} must be a quoted TOML string (e.g. "0.001"), got '
             f"{trade_size!r} -- an unquoted TOML float would round-trip through float64 "
             "before becoming a Decimal, risking precision drift (AD-5)."
         )
     return Decimal(trade_size)
+
+
+def _parse_bot(raw_bot: dict, path: Path) -> BotConfig:
+    if "bot_id" not in raw_bot:
+        raise ValueError(f"{path}: every [[bots]] entry must set bot_id")
+
+    return BotConfig(
+        bot_id=raw_bot["bot_id"],
+        instrument_id=raw_bot.get("instrument_id", "BTC-USD-PERP.DYDX"),
+        trade_size=_parse_trade_size(raw_bot, "trade_size", path),
+        trend_buy_threshold=raw_bot.get("trend_buy_threshold", 0.6),
+        trend_sell_threshold=raw_bot.get("trend_sell_threshold", 0.4),
+        ofi_confirm_threshold=raw_bot.get("ofi_confirm_threshold", 0.0),
+        starting_balance=raw_bot.get("starting_balance", "10_000 USDC"),
+    )
 
 
 def load_paper_config(path: Path) -> PaperConfig:
@@ -106,17 +141,20 @@ def load_paper_config(path: Path) -> PaperConfig:
             "individual characters.",
         )
 
+    raw_bots = raw.get("bots")
+    if not raw_bots:
+        raise ValueError(f"{path}: must define at least one [[bots]] entry")
+    bots = tuple(_parse_bot(raw_bot, path) for raw_bot in raw_bots)
+    bot_ids = [bot.bot_id for bot in bots]
+    if len(bot_ids) != len(set(bot_ids)):
+        raise ValueError(f"{path}: [[bots]] entries must have distinct bot_id values, got {bot_ids}")
+
     return PaperConfig(
         network=DydxNetwork.from_str(raw.get("network", "mainnet").lower()),  # type: ignore[attr-defined]
         starting_balances=tuple(starting_balances),
         account_type=raw.get("account_type", "MARGIN"),
         log_level=raw.get("log_level", "INFO"),
-        instrument_id=raw.get("instrument_id", "BTC-USD-PERP.DYDX"),
-        trade_size=_parse_trade_size(raw, path),
-        trend_buy_threshold=raw.get("trend_buy_threshold", 0.6),
-        trend_sell_threshold=raw.get("trend_sell_threshold", 0.4),
-        ofi_confirm_threshold=raw.get("ofi_confirm_threshold", 0.0),
-        bot_id=raw.get("bot_id", "bot-01"),
+        bots=bots,
     )
 
 
@@ -137,7 +175,7 @@ def load_real_money_config(path: Path) -> RealMoneyConfig:
         subaccount=raw.get("subaccount", 0),
         log_level=raw.get("log_level", "INFO"),
         instrument_id=raw.get("instrument_id", "BTC-USD-PERP.DYDX"),
-        trade_size=_parse_trade_size(raw, path),
+        trade_size=_parse_trade_size(raw, "trade_size", path),
         trend_buy_threshold=raw.get("trend_buy_threshold", 0.6),
         trend_sell_threshold=raw.get("trend_sell_threshold", 0.4),
         ofi_confirm_threshold=raw.get("ofi_confirm_threshold", 0.0),
