@@ -539,6 +539,25 @@ class Collector:
         self._redis: aioredis.Redis | None = None
         self._stop = asyncio.Event()
 
+    def _discard_second_accumulators(self, iid: str) -> None:
+        """
+        Drop any trade volume/OHLC accumulated for `iid` this tick without emitting it.
+
+        Called whenever `_second_loop` skips a snapshot (no book, crossed, stale). Without
+        this, trades that landed during the skipped period stay in the accumulator until
+        the next *valid* tick pops it — silently stamping the whole skipped span's price
+        range onto a single second and producing a giant-range candle at recovery instead
+        of an honest gap.
+        """
+        self._second_buy_volume.pop(iid, None)
+        self._second_sell_volume.pop(iid, None)
+        self._second_buy_count.pop(iid, None)
+        self._second_sell_count.pop(iid, None)
+        self._second_open_price.pop(iid, None)
+        self._second_high_price.pop(iid, None)
+        self._second_low_price.pop(iid, None)
+        self._second_close_price.pop(iid, None)
+
     def _on_data(self, data: Any) -> None:
         # Called directly from the Rust WS client's callback thread/loop via
         # call_soon_threadsafe. Must stay this cheap: this scheduled callback and
@@ -1112,11 +1131,14 @@ class Collector:
             for iid in {e.id for e in self._config.instruments}:
                 book = self._live_books.get(iid)
                 if book is None:
+                    self._discard_second_accumulators(iid)
                     continue
                 if book.best_bid_price() is None or book.best_ask_price() is None:
+                    self._discard_second_accumulators(iid)
                     continue
                 # Skip crossed/touched book — can occur briefly during reconnect snapshot replay
                 if await self._handle_crossed_book(iid, book, now_ns):
+                    self._discard_second_accumulators(iid)
                     continue
 
                 # Staleness guard: skip if no OrderBookDeltas have arrived recently.
@@ -1130,6 +1152,11 @@ class Collector:
                         iid,
                         (now_ns - last_book_update_ns) / 1e9,
                     )
+                    # Discard, don't carry: trades that landed during the outage would
+                    # otherwise sit in the accumulator until the next *valid* tick pops
+                    # it, stamping the entire outage's price range onto one second and
+                    # producing a giant-range candle at recovery (see DATA-01/DATA-02).
+                    self._discard_second_accumulators(iid)
                     continue
 
                 bid_levels = book.bids()[:BOOK_DEPTH]

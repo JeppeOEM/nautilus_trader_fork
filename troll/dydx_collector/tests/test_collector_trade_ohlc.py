@@ -103,3 +103,30 @@ def test_buy_and_sell_volume_still_tracked_alongside_ohlc(tmp_path: Path) -> Non
     assert collector._second_sell_volume[iid] == 3.0
     assert collector._second_buy_count[iid] == 1
     assert collector._second_sell_count[iid] == 1
+
+
+def test_discard_second_accumulators_clears_ohlc_and_volume(tmp_path: Path) -> None:
+    """
+    A skipped snapshot (stale/crossed/missing book) must drop trades seen during it,
+    not carry them into the next valid tick.
+
+    Regression for the bug where trades landing during a book outage sat in the
+    accumulator until the next *valid* _second_loop tick popped it, stamping the
+    entire outage's price range onto a single second -- a giant-range candle at
+    recovery instead of an honest gap (see DATA-01/DATA-02 in troll/CLAUDE.md).
+    """
+    collector = Collector(_make_config(tmp_path / "catalog"))
+    iid = str(_IID)
+    collector._process_data(_trade(100.0, 2.0, AggressorSide.BUYER, "1"))
+    collector._process_data(_trade(9000.0, 3.0, AggressorSide.SELLER, "2"))
+
+    collector._discard_second_accumulators(iid)
+
+    assert iid not in collector._second_open_price
+    assert iid not in collector._second_high_price
+    assert iid not in collector._second_low_price
+    assert iid not in collector._second_close_price
+    assert iid not in collector._second_buy_volume
+    assert iid not in collector._second_sell_volume
+    assert iid not in collector._second_buy_count
+    assert iid not in collector._second_sell_count
