@@ -78,6 +78,21 @@ the cause.
    dashboard/bot_tui/ranking_engine off this box.
 4. (Chosen for now) Document and defer — no change made this session.
 
+## Addendum (Epic 13, Story 13.1)
+
+A follow-on session shipped `ranking_engine/engine.py`'s `_slow_loop_task` passing
+`max_workers=4` to `metrics_computer.compute_all()` (previously defaulting to 32) —
+bounding the number of concurrent `ParquetDataCatalog` reads on the 60s cycle. This is
+an explicit, small mitigation of `ranking_engine`'s own peak memory contribution, not a
+resolution of this writeup's root cause: the box's underlying CPU/RAM oversubscription
+(option 4 above, "reduce load"/"resize the VM", remains unaddressed). Real before/after
+`docker stats`/`free -h` evidence on nifelheim itself was not collected for this change —
+this development environment had no reachable access to that host (SSH returned
+`Permission denied`) — so whether this mitigation measurably reduces the OOM-restart rate
+in production is still an open, deferred verification, not a confirmed result. Story 13.2
+(same epic) is the actual fix: it removes the recurring Parquet re-scan from the hot path
+entirely rather than just narrowing its concurrency.
+
 ## Evidence trail
 
 - `docker logs dydx-collector --since '2026-09-12T12:00:00' --until '2026-09-12T13:35:00'`

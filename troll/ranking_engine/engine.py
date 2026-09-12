@@ -484,16 +484,42 @@ async def _slow_loop_task(catalog_path: str) -> None:
     ~300 on the live deployment). That default -- 25h-lookback catalog reads, 32-way
     concurrent, over 300 instruments -- was OOM-killing this container repeatedly
     (troll/CLAUDE.md DATA-02 incident, 2026-09-11).
+
+    max_workers=4 (Story 13.1, troll/.planning/debug/nifelheim-resource-exhaustion-2026-09-12.md)
+    bounds this call to a small fixed worker count instead of compute_all()'s 32-worker
+    default, trading a smaller peak of concurrent ParquetDataCatalog reads for a longer
+    per-cycle wall-clock time -- a mitigation, not a fix for nifelheim's underlying host
+    oversubscription (see that incident writeup). The duration log below exists so a
+    slowdown past DB_WRITE_INTERVAL_SECONDS is visible instead of silently eating into
+    the metrics-freshness cadence (troll/CLAUDE.md DATA-02's "close observability gaps
+    permanently" rule) -- Story 13.2 removes this Parquet re-scan from the hot path
+    entirely.
     """
     while True:
         try:
             book_metrics_by_iid = {iid: _legacy_book_metrics_for(iid) for iid in _LAST_SEEN}
+            cycle_start = time.monotonic()
             snapshots = await asyncio.to_thread(
                 metrics_computer.compute_all,
                 catalog_path,
                 book_metrics_fn=lambda iid: book_metrics_by_iid.get(iid, {}),
                 instrument_ids=list(book_metrics_by_iid),
+                max_workers=4,
             )
+            cycle_seconds = time.monotonic() - cycle_start
+            if cycle_seconds > DB_WRITE_INTERVAL_SECONDS:
+                logger.warning(
+                    "compute_all took %.1fs for %d instruments -- exceeded the %ds cycle interval",
+                    cycle_seconds,
+                    len(book_metrics_by_iid),
+                    DB_WRITE_INTERVAL_SECONDS,
+                )
+            else:
+                logger.debug(
+                    "compute_all took %.1fs for %d instruments",
+                    cycle_seconds,
+                    len(book_metrics_by_iid),
+                )
             if snapshots:
                 _SLOW_METRICS.update({s["instrument_id"]: s for s in snapshots})
                 persisted = _merge_rank_into_snapshots(snapshots, _ranks_by_iid(), _VOLUME_24H)
