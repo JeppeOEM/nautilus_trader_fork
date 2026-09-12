@@ -2,12 +2,13 @@
 title: 'Bound compute_all()''s catalog-read concurrency in ranking_engine'
 type: 'chore'
 created: '2026-09-12'
-status: 'in-review'
+status: 'done'
 review_loop_iteration: 0
 followup_review_recommended: false
 context: []
 warnings: []
 baseline_revision: '7f1496be31b163e9a47f8a570760ab544b56b38e'
+final_revision: 'ec94d2691d'
 ---
 
 <intent-contract>
@@ -71,3 +72,30 @@ baseline_revision: '7f1496be31b163e9a47f8a570760ab544b56b38e'
 
 **Manual checks (if no CLI):**
 - Manually inspect the diff to confirm only the `compute_all` call site changed -- no changes to `metrics_computer.py`, `instrument_ids` scoping, or `book_metrics_fn` wiring.
+
+## Auto Run Result
+
+**Summary:** `ranking_engine/engine.py`'s `_slow_loop_task` now passes `max_workers=4` explicitly to `metrics_computer.compute_all()`, bounding its 60s periodic catalog-read concurrency instead of relying on the function's 32-worker default. Review added duration observability and doc traceability; no behavior beyond concurrency changed.
+
+**Files changed:**
+- `troll/ranking_engine/engine.py` -- added `max_workers=4` to the `compute_all` call in `_slow_loop_task`; added a `time.monotonic()`-based cycle-duration measurement (`logger.warning` if it exceeds `DB_WRITE_INTERVAL_SECONDS`, `logger.debug` otherwise); expanded the docstring to explain the `max_workers=4` rationale.
+- `troll/.planning/debug/nifelheim-resource-exhaustion-2026-09-12.md` -- appended an addendum recording that this mitigation landed, that it does not resolve the writeup's host-oversubscription root cause, and that real nifelheim verification was not collected in this environment.
+- `_bmad-output/implementation-artifacts/deferred-work.md` -- logged one pre-existing gap surfaced by review (`_SLOW_METRICS` consumption has no staleness check).
+- `_bmad-output/implementation-artifacts/epic-13-context.md` -- new, compiled epic context (reusable for Story 13.2).
+- `_bmad-output/implementation-artifacts/spec-13-1-bound-compute-all-catalog-read-concurrency.md` -- this spec.
+
+**Review findings breakdown:** 3 patches applied (2 medium, 1 low -- duration observability, incident-doc traceability, magic-number justification), 1 deferred (medium -- pre-existing `_SLOW_METRICS` staleness gap, logged to `deferred-work.md`), 3 rejected (low -- re-litigations of epic-level scope decisions already made in `epics.md`'s Story 13.1 AC: mitigation-not-fix framing, TEST-02's no-new-test waiver, and the deliberately-unchanged `compute_all` default). No intent gaps, no bad-spec loopbacks.
+
+**Follow-up review recommendation:** `false` -- fixes were small, localized to one file plus one doc, low complexity (a docstring, a bounded logging conditional, a doc addendum), no API/behavior/security/data-model impact.
+
+**Verification performed:**
+- `python -m pytest ranking_engine/tests -q` -- 49 passed, both before and after the review-driven patches (run independently, not just via the implementation subagent's report).
+- `grep -n "max_workers=4" troll/ranking_engine/engine.py` -- exactly one match, at the `compute_all` call site.
+- `git diff` inspected directly to confirm scope: only `engine.py`'s call site, docstring, and duration logging changed; `metrics_computer.py` untouched.
+- Line-length check (`awk 'length > 100'`) run manually since `ruff`/`mypy` are not installed in this sandbox -- one violation found and fixed (a `logger.debug` call reformatted to wrap under 100 chars); re-checked clean.
+- `ruff`/`mypy` could not be run in this environment (not installed) -- deferred to the repo's normal CI/pre-commit hooks on push.
+
+**Residual risks:**
+- Real nifelheim (production) before/after `docker stats`/`free -h` evidence was **not collected** -- this development sandbox has no reachable SSH access to that host (`Permission denied (publickey,password)`). Whether this mitigation measurably reduces the OOM-restart rate in production is **an open, deferred verification**, not a confirmed result. This is explicitly recorded here and in the incident writeup addendum per troll/CLAUDE.md DATA-02 -- it must not be read as "OOM resolved."
+- `_SLOW_METRICS` consumption in `_current_ranks()` has no staleness check (pre-existing, deferred to `deferred-work.md`) -- narrowing concurrency makes this gap marginally more likely to matter in practice, though it is not introduced by this story.
+- The underlying root cause (nifelheim host CPU/RAM oversubscription, per the incident writeup) remains unaddressed by this story by design -- Story 13.2 is the intended fix.
