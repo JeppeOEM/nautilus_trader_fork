@@ -47,7 +47,10 @@ from collections import defaultdict
 from collections import deque
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
+from urllib.parse import quote
 
+import aiohttp
 import pandas as pd
 import plotly.graph_objects as go
 import redis.asyncio as aioredis
@@ -85,6 +88,16 @@ CHART_INDICATOR_CONFIG_PATH: str = os.environ.get(
 METRICS_DB_PATH: str = os.environ.get(
     "METRICS_DB_PATH", str(Path(CATALOG_PATH).parent / "metrics" / "metrics.db"),
 )
+
+# Opt-in remote-data mode (Story 12.2): when unset (the default -- e.g. the VPS-hosted
+# dashboard co-located with the collector), every read below stays local disk/SQLite via
+# asyncio.to_thread, byte-for-byte the pre-story behavior. When set to a running
+# `data_api` instance's base URL (e.g. via an SSH tunnel from a laptop), the 4 call
+# sites in this file fetch the same data over HTTP instead -- see _fetch_json below.
+# .rstrip("/") avoids a double slash in every f-string URL below for a hand-edited value
+# with a trailing slash (e.g. "http://127.0.0.1:9100/") -- a real footgun for a value
+# operators type into .env by hand, per review (code review pass, Story 12.2).
+DATA_API_URL: str = os.environ.get("DATA_API_URL", "").strip().rstrip("/")
 
 # Gap threshold for coin chart: if consecutive snapshots are further apart than this
 # (in milliseconds), insert a null data point to break the Plotly line. This converts
@@ -1072,9 +1085,48 @@ def _page(title: str, body: str, refresh_seconds: int = 60) -> str:
     )
 
 
-def _render_history_page(symbol: str) -> str:
-    rows = metrics_store.history(symbol, METRICS_DB_PATH, days=31)
+# --- DATA_API_URL remote-data mode (Story 12.2) -----------------------------------
+#
+# One shared aiohttp.ClientSession, lazily created on first use rather than at import
+# time -- aiohttp requires a running event loop to construct a session, which doesn't
+# exist yet at module load. Closed via make_app's on_cleanup hook (mirrors the
+# redis_subscriber_ctx pattern already used for the Redis background task's lifecycle).
+_http_session: aiohttp.ClientSession | None = None
 
+
+def _get_http_session() -> aiohttp.ClientSession:
+    global _http_session
+    if _http_session is None or _http_session.closed:
+        # Explicit total timeout (aiohttp's own default is 5 minutes) -- per DATA-01,
+        # a hung/half-open tunnel to data_api must fail fast and visibly, not leave an
+        # interactive page request hanging for minutes with no feedback (review finding,
+        # Story 12.2 code review pass).
+        _http_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
+    return _http_session
+
+
+async def _close_http_session(app: web.Application) -> None:
+    global _http_session
+    if _http_session is not None and not _http_session.closed:
+        await _http_session.close()
+    _http_session = None
+
+
+async def _fetch_json(session: aiohttp.ClientSession, url: str) -> Any:
+    """
+    Single shared HTTP-fetch helper for all 4 DATA_API_URL remote-mode call sites.
+
+    Never duplicated per call site (epic constraint) -- a data_api outage or bad
+    response surfaces here as a raised exception, propagated up to the calling
+    handler as a 5xx rather than silently returning stale/fabricated data (DATA-01).
+    """
+    async with session.get(url) as resp:
+        resp.raise_for_status()
+        return await resp.json()
+
+
+def _history_page_from_rows(symbol: str, rows: list[dict]) -> str:
+    """Render the /history/{id} page's HTML from already-fetched metrics_store rows."""
     if not rows:
         return _page(symbol, f"<h1>{html.escape(symbol)}</h1><p>No history yet.</p>")
 
@@ -1094,16 +1146,26 @@ def _render_history_page(symbol: str) -> str:
     return _page(f"{symbol} history", body, refresh_seconds=30)
 
 
-def _render_chart_page(symbol: str, start_ms: int, end_ms: int, explicit_range: bool) -> str:
+def _render_history_page(symbol: str) -> str:
+    """Local-mode /history/{id} page: fetch rows from the local SQLite store, then render."""
+    rows = metrics_store.history(symbol, METRICS_DB_PATH, days=31)
+    return _history_page_from_rows(symbol, rows)
+
+
+def _build_chart_page_html(
+    symbol: str, start_ms: int, end_ms: int, explicit_range: bool, data: dict[str, list[dict]],
+) -> str:
     """
-    Per-event microstructure chart page.
+    Render the /chart/{id} page's HTML from an already-computed chart-series `data` dict.
 
     Price pane is the interactive Candles/Lines drag-to-pan widget (_LIVE_CHART_JS)
     -- the sole home for this widget since Story 8.1 consolidated it here from /coin/{id}
     -- fed by /data/coin/{id}/candles|lines. The remaining imbalance/depth/spread panes
-    stay server-rendered Plotly subplots from _chart_data.compute_chart_series for the same
-    [start_ms, end_ms) window picked by the date-range form below. CVD (Story 10.2), Cancel
-    Pressure (Story 10.3), and OFI (Story 10.4) all moved to the indicator picker as custom
+    stay server-rendered Plotly subplots from `data` (local mode:
+    _chart_data.compute_chart_series; remote mode: data_api's equivalent route, Story
+    12.2 -- same shape either way, no reshaping needed) for the same [start_ms, end_ms)
+    window picked by the date-range form below. CVD (Story 10.2), Cancel Pressure
+    (Story 10.3), and OFI (Story 10.4) all moved to the indicator picker as custom
     indicators -- this is the last fixed-row retirement in Epic 10; the remaining four rows
     (imbalance, mid-imbalance, depth, spread) stay fixed, out of scope for the epic.
 
@@ -1113,11 +1175,6 @@ def _render_chart_page(symbol: str, start_ms: int, end_ms: int, explicit_range: 
     price instead of freezing at whatever it was when the page loaded. Submitting the date
     form (or a URL with an explicit start/end) opts into the static historical view.
     """
-    data = _chart_data.compute_chart_series(
-        CATALOG_PATH, symbol,
-        start_ns=start_ms * 1_000_000,
-        end_ns=end_ms * 1_000_000,
-    )
 
     def ts(series: list[dict]) -> list:
         return pd.to_datetime([p["time"] for p in series], unit="s", utc=True)
@@ -1226,6 +1283,16 @@ def _render_chart_page(symbol: str, start_ms: int, end_ms: int, explicit_range: 
         + f"<script>{_LIVE_CHART_JS}</script>" + init_script
     )
     return _page(f"{sym} chart", body, refresh_seconds=86400)  # no auto-refresh; user controls via form
+
+
+def _render_chart_page(symbol: str, start_ms: int, end_ms: int, explicit_range: bool) -> str:
+    """Local-mode /chart/{id} page: compute chart series from the local catalog, then render."""
+    data = _chart_data.compute_chart_series(
+        CATALOG_PATH, symbol,
+        start_ns=start_ms * 1_000_000,
+        end_ns=end_ms * 1_000_000,
+    )
+    return _build_chart_page_html(symbol, start_ms, end_ms, explicit_range, data)
 
 
 def _live_candles_json(iid: str, bar_seconds: int) -> str:
@@ -1366,8 +1433,21 @@ def _live_lines_json(iid: str) -> str:
     return json.dumps({"rows": rows, "truncated": False})
 
 
+def _lines_json_from_snapshot_dicts(snaps: list[dict]) -> str:
+    """
+    Build the /data/coin/{id}/lines response from a list of snapshot dicts.
+
+    Feeds directly off either local-mode's own dicts (below) or data_api's
+    /catalog/snapshots/{iid} response verbatim -- the latter's dicts are a superset
+    (4 extra OHLC keys) but _price_series_rows only reads the 7 keys both share, so no
+    reshaping is needed (Story 12.2).
+    """
+    rows = _price_series_rows(snaps)
+    return json.dumps({"rows": rows, "truncated": False})
+
+
 def _historical_lines_json(iid: str, start_ms: int, end_ms: int) -> str:
-    """Build bid/ask/mid/micro/price rows from DydxSecondSnapshot records in the catalog."""
+    """Local-mode /chart/{id} Lines data: read DydxSecondSnapshot records from the catalog."""
     snapshots = _catalog_stats.query_second_snapshots(
         CATALOG_PATH, iid, start_ms * 1_000_000, end_ms * 1_000_000,
     )
@@ -1380,8 +1460,7 @@ def _historical_lines_json(iid: str, start_ms: int, end_ms: int) -> str:
         }
         for s in snapshots
     ]
-    rows = _price_series_rows(snaps)
-    return json.dumps({"rows": rows, "truncated": False})
+    return _lines_json_from_snapshot_dicts(snaps)
 
 
 def _render_live_page() -> str:
@@ -1531,7 +1610,11 @@ async def rank_history_json_handler(request: web.Request) -> web.Response:
     else:
         ts_ns = time.time_ns()
 
-    row = await asyncio.to_thread(metrics_store.nearest, symbol, ts_ns, METRICS_DB_PATH)
+    if DATA_API_URL:
+        url = f"{DATA_API_URL}/metrics/nearest/{quote(symbol, safe='')}?ts_ns={ts_ns}"
+        row = await _fetch_json(_get_http_session(), url)
+    else:
+        row = await asyncio.to_thread(metrics_store.nearest, symbol, ts_ns, METRICS_DB_PATH)
     return web.Response(text=json.dumps(row or {}), content_type="application/json")
 
 
@@ -1587,7 +1670,18 @@ async def coin_lines_handler(request: web.Request) -> web.Response:
     start_ms = _parse_query_ms(qs, "start")
     end_ms = _parse_query_ms(qs, "end")
     if start_ms is not None and end_ms is not None:
-        data = await asyncio.to_thread(_historical_lines_json, symbol, start_ms, end_ms)
+        if DATA_API_URL:
+            url = (
+                f"{DATA_API_URL}/catalog/snapshots/{quote(symbol, safe='')}"
+                f"?start_ns={start_ms * 1_000_000}&end_ns={end_ms * 1_000_000}"
+            )
+            snaps = await _fetch_json(_get_http_session(), url)
+            # Pure in-memory list/dict work, unlike the local branch's real catalog I/O
+            # below -- no asyncio.to_thread needed, that would just be pointless
+            # thread-pool dispatch overhead for a fetch that already happened off-loop.
+            data = _lines_json_from_snapshot_dicts(snaps)
+        else:
+            data = await asyncio.to_thread(_historical_lines_json, symbol, start_ms, end_ms)
     else:
         data = _live_lines_json(symbol)
     return web.Response(text=data, content_type="application/json")
@@ -1830,13 +1924,29 @@ async def chart_handler(request: web.Request) -> web.Response:
     start_ms = _parse_dt("start", now_ms - 4 * 3600 * 1000)
     end_ms = _parse_dt("end", now_ms)
     explicit_range = bool(qs.get("start") or qs.get("end"))
-    html_str = await asyncio.to_thread(_render_chart_page, symbol, start_ms, end_ms, explicit_range)
+    if DATA_API_URL:
+        start_ns, end_ns = start_ms * 1_000_000, end_ms * 1_000_000
+        url = (
+            f"{DATA_API_URL}/catalog/chart-series/{quote(symbol, safe='')}"
+            f"?start_ns={start_ns}&end_ns={end_ns}"
+        )
+        data = await _fetch_json(_get_http_session(), url)
+        html_str = await asyncio.to_thread(
+            _build_chart_page_html, symbol, start_ms, end_ms, explicit_range, data,
+        )
+    else:
+        html_str = await asyncio.to_thread(_render_chart_page, symbol, start_ms, end_ms, explicit_range)
     return web.Response(text=html_str, content_type="text/html")
 
 
 async def history_handler(request: web.Request) -> web.Response:
     symbol = request.match_info["id"]
-    html_str = await asyncio.to_thread(_render_history_page, symbol)
+    if DATA_API_URL:
+        url = f"{DATA_API_URL}/metrics/history/{quote(symbol, safe='')}?days=31"
+        rows = await _fetch_json(_get_http_session(), url)
+        html_str = await asyncio.to_thread(_history_page_from_rows, symbol, rows)
+    else:
+        html_str = await asyncio.to_thread(_render_history_page, symbol)
     return web.Response(text=html_str, content_type="text/html")
 
 
@@ -1947,6 +2057,11 @@ def make_app(redis_url: str, catalog_path: str) -> web.Application:
     app["catalog_path"] = catalog_path
 
     app.cleanup_ctx.append(redis_subscriber_ctx)
+    # Closes the module-level shared aiohttp.ClientSession (DATA_API_URL remote mode,
+    # Story 12.2) on shutdown, if one was ever lazily created -- avoids an "Unclosed
+    # client session" warning when DATA_API_URL was used during this process's lifetime.
+    # A no-op when it never was, since _get_http_session is only ever called lazily.
+    app.on_cleanup.append(_close_http_session)
 
     app.router.add_get("/", rankings_handler)
     app.router.add_get("/api/rankings", rankings_json_handler)

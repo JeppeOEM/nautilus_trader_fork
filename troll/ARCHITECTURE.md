@@ -155,6 +155,12 @@ with Plotly, others are server-rendered HTML built directly from in-memory state
 separate frontend build (`troll/package-lock.json` is an empty placeholder lockfile,
 not a real JS app; there is no `npm install`/build step anywhere in this system).
 
+Optional remote-data mode (Story 12.2): when `DATA_API_URL` is set, the 4 routes that
+otherwise read the catalog/`metrics.db` off local disk (`/history/{id}`, `/chart/{id}`,
+`/api/rank_history/{id}`, `/data/coin/{id}/lines`) fetch the same data from a running
+`data_api` instance over HTTP instead — see "Running dashboard/bot_tui off the VPS"
+below. Unset (the VPS default), behavior is unchanged.
+
 **In-memory state, kept live by a background Redis subscriber task
 (`redis_subscriber_ctx`/`_redis_listener`):** `_LIVE_FAST` (per-instrument latest
 snapshot-derived values), `_LIVE_SLOW` (slower/rollup values), `_OFI_INDS` (per-coin OFI
@@ -304,14 +310,39 @@ without an SSH tunnel over Tailscale (see README's remote-access section).
 | `collector` | yes | `always` | Core data path, must self-heal |
 | `dashboard` | yes | `always` | Read-only web UI |
 | `ranking_engine` | yes | `always` | Sole ranking computer |
+| `data_api` | yes | `always` | Read-only FastAPI wrapper over the catalog/`metrics.db` (Story 12.1), `:9100` — lets `dashboard`/`bot_tui` run off-VPS via `DATA_API_URL` instead of a local catalog/metrics mount (Story 12.2) |
 | `dozzle` | yes | `always` | Log viewer, `:8080` |
 | `live-paper` | **no** — `profiles: ["live-paper"]`, `make up-live-paper` | `on-failure:5` | Explicit opt-in per Story 3.1; capped restarts so a bad config doesn't crash-loop against dYdX's API |
 | `bot_tui` | **no** — `profiles: ["tui"]`, `docker compose run` | n/a (one-shot) | Interactive tool, never a background daemon |
 
 Two-image split: `nautilus-trader-base` (rebuilt rarely, `make build-base`, ~15 min) →
 `collector.dockerfile` (thin layer, rebuilds in seconds) reused by collector, dashboard,
-ranking_engine, and bot_tui; `live_paper.dockerfile` is `live-paper`'s own thin layer on
-the same base.
+ranking_engine, `data_api`, and bot_tui; `live_paper.dockerfile` is `live-paper`'s own
+thin layer on the same base.
+
+### Running `dashboard`/`bot_tui` off the VPS (Story 12.2)
+
+Both normally run co-located with the collector. `bot_tui` only ever needs live Redis
+data (`REDIS_URL`, already supported); `dashboard` additionally reads the catalog/
+`metrics.db` straight off local disk for its 4 historical routes. Tunnel the two ports
+either needs — Redis (`6379`) and, for `dashboard`'s historical reads, `data_api`
+(`9100`) — over the same SSH-over-Tailscale mechanism README.md's "Remote access via
+Tailscale + SSH tunnel" section already sets up:
+
+```bash
+ssh -N -L 6379:127.0.0.1:6379 -L 9100:127.0.0.1:9100 you@<vps-tailscale-ip>
+```
+
+Then, on the laptop, point the local process at the tunnel instead of local disk:
+
+```bash
+REDIS_URL=redis://127.0.0.1:6379 DATA_API_URL=http://127.0.0.1:9100 make dashboard
+REDIS_URL=redis://127.0.0.1:6379 make tui   # bot_tui has no DATA_API_URL use -- Redis only
+```
+
+No catalog or `metrics.db` mount is needed locally for `dashboard` in this mode — every
+read that would otherwise hit local disk goes through the tunnel to `data_api` instead
+(see `ml_signals/dashboard.py`'s `DATA_API_URL` branch).
 
 ---
 
