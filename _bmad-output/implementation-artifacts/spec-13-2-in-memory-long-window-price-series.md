@@ -133,6 +133,6 @@ final_revision: '9a1de5d50e'
 
 **Residual risks:**
 - Real nifelheim (production) before/after `docker stats`/`free -h` evidence was **not collected** -- this development sandbox has no reachable SSH access to that host (same limitation as Story 13.1). Whether this change measurably reduces/eliminates the OOM-restart rate in production is an **open, deferred verification**, not a confirmed result, per troll/CLAUDE.md DATA-02.
-- The never-trading-instrument staleness regression (see Review Triage Log) is a real, confirmed gap, not a hypothetical one -- deferred rather than fixed, tracked in `deferred-work.md`.
+- ~~The never-trading-instrument staleness regression (see Review Triage Log) is a real, confirmed gap~~ -- **addendum (2026-09-12, post-finalization):** the mechanism is real, but on user review the trigger condition (a market with an actively-updating order book yet zero taker trades across a full 24-25h span) does not occur on real dYdX perpetual markets -- liquidations/funding arb/cross-exchange arb guarantee occasional taker fills on any market that is still genuinely trading; a market seeing truly zero trades for a day is functionally dead, a state this system has no obligation to serve fresh stats for. Downgraded from "real regression, deferred" to "theoretical-only, accepted, not scheduled" in `deferred-work.md`.
 - `ruff`/`mypy` could not be run in this environment (not installed); a manual line-length check was substituted. Deferred to CI/pre-commit on push, matching Story 13.1's precedent.
 
