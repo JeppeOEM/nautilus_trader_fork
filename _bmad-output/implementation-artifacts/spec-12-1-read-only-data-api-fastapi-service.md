@@ -2,8 +2,9 @@
 title: 'Story 12.1: Read-only data_api FastAPI service on the VPS'
 type: 'feature'
 created: '2026-09-12'
-status: 'in-review'
+status: 'done'
 baseline_revision: '7f1496be31b163e9a47f8a570760ab544b56b38e'
+final_revision: '01aa846ddc'
 review_loop_iteration: 0
 followup_review_recommended: false
 context: ['{project-root}/troll/CLAUDE.md', '{project-root}/CLAUDE.md']
@@ -93,3 +94,32 @@ Note: this pass's Blind Hunter + Edge Case Hunter review, deduplication, and cla
   - none
 
 One additional `defer` finding (low severity) was surfaced during this pass's own Verification (not by Blind Hunter/Edge Case Hunter, who review diffs rather than run tests): `make test` emits a new `StarletteDeprecationWarning` from `fastapi.testclient`/`httpx`, recorded in `deferred-work.md` per troll/CLAUDE.md TEST-04 rather than suppressed or silently accepted.
+
+## Auto Run Result
+
+**Summary:** Added `troll/data_api/app.py`, a new standalone read-only FastAPI service exposing 4 thin-wrapper routes (`/metrics/history/{symbol}`, `/metrics/nearest/{symbol}`, `/catalog/chart-series/{symbol}`, `/catalog/snapshots/{iid}`) around `dashboard.py`'s existing catalog/metrics query functions, verbatim, with zero reimplemented query/aggregation logic (NAUT-02). Layered onto the shared `collector.dockerfile` image; new `data_api` compose service bound to `127.0.0.1:9100` only (SEC-01). This run resumed a prior `bmad-dev-auto` session that had reached the review step (Blind Hunter + Edge Case Hunter already run, findings already written to `deferred-work.md`) but was killed by a session rate-limit error before it could record the triage summary in this spec file.
+
+**Files changed:**
+- `troll/data_api/app.py` -- new FastAPI app, `CATALOG_PATH`/`METRICS_DB_PATH` env vars, 4 sync route handlers
+- `troll/data_api/__init__.py`, `troll/data_api/tests/__init__.py` -- empty package markers
+- `troll/data_api/tests/test_data_api.py` -- `TestClient` integration tests, one per route plus the `nearest`-returns-null case, seeding real `ParquetDataCatalog`/SQLite objects (no mocks, TEST-03)
+- `troll/troll-requirements.txt` -- added `fastapi==0.141.1`, `uvicorn[standard]==0.52.4`, `httpx==0.28.1`
+- `troll/collector.dockerfile` -- added `COPY troll/data_api ./data_api`
+- `troll/docker-compose.yml` -- added `data_api` service (`network_mode: host`, uvicorn `--host 127.0.0.1 --port 9100`, `:ro` catalog/metrics mounts, no `ports:` key)
+- `troll/Makefile` -- appended `data_api/tests` to the `test:` target's pytest module list
+- `_bmad-output/implementation-artifacts/deferred-work.md` -- 7 defer entries logged (6 from the original review pass, 1 found during this session's own test-run verification)
+- `_bmad-output/implementation-artifacts/epic-12-context.md` -- compiled epic context (reused from the prior session; still valid)
+- This spec file -- reconstructed the missing `## Review Triage Log` entry and this `Auto Run Result` section
+
+**Review findings breakdown:** 0 patches applied, 7 deferred (1 high, 2 medium, 4 low), 0 rejected (none identified with confidence), 0 intent gaps, 0 bad-spec loopbacks. Highest-severity deferred item: `ranking_engine/metrics_store.py`'s `_conn()` requires write access even in WAL mode, which will make `/metrics/*` routes (and, pre-existingly, `dashboard.py`'s history/nearest calls) fail against the `:ro`-mounted metrics directory both this story's and the existing `dashboard` compose service use -- reproduced directly against the real built image; root cause lives outside this story's changed files and is tracked as a separate DATA-02 investigation, not folded into this story or Story 12.2.
+
+**Follow-up review recommendation:** `false` -- no patches or bad-spec changes were made in this pass; all findings were classified `defer` (pre-existing, out of this story's file scope) and logged for separate attention, so there is no new review-driven code change in this pass to independently re-review.
+
+**Verification performed:**
+- `docker compose build collector` -- image rebuilt cleanly with the new `COPY troll/data_api` layer (requirements layer was already cached from the prior session, confirming `fastapi`/`uvicorn`/`httpx` were already validated as installable)
+- `cd troll && make test` (inside Docker, via `docker compose run --rm --no-deps collector`) -- 619 passed, 5 skipped, 0 failures, including all of `data_api/tests`
+- `docker compose config` -- rendered `data_api` service block inspected directly: `network_mode: host`, uvicorn bound to `127.0.0.1:9100` explicitly, no `ports:` key -- SEC-01 confirmed
+- Manually reproduced the `httpx2` deprecation warning's exact origin (`starlette.testclient` module-level warning, starlette 1.6.0) and confirmed `httpx2` exists on PyPI (v2.12.0) before logging it as a defer item rather than dismissing it (TEST-04)
+- `git diff`/`git status` inspected directly before staging to confirm only this story's own files were committed, excluding a concurrent agent's simultaneous Epic 13 Story 13.2 changes (`ranking_engine/engine.py`, `ranking_engine/price_series.py`, `ranking_engine/tests/test_engine.py`, `ml_signals/catalog_stats.py`, `spec-13-2-*.md`)
+
+**Residual risks:** The `:ro`-mount/WAL SQLite issue above means `/metrics/history` and `/metrics/nearest` will likely fail with `sqlite3.OperationalError` when this service is actually deployed against the production compose mounts, despite passing all local tests (which use a writable `tmp_path` DB, not a `:ro` mount) -- this is a real, not merely theoretical, deployment-time gap that should be prioritized before relying on those two routes in production. The two `/catalog/*` routes accept unbounded `start_ns`/`end_ns` ranges (MEM-01 risk, inherited from the wrapped functions). No route has error handling for malformed/unknown inputs beyond FastAPI's own type coercion.
