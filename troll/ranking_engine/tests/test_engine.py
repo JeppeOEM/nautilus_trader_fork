@@ -18,6 +18,10 @@ import asyncio
 import tempfile
 import time
 
+from dydx_collector.second_snapshot import DydxSecondSnapshot
+from nautilus_trader.model.identifiers import InstrumentId
+from nautilus_trader.persistence.catalog import ParquetDataCatalog
+
 import ranking_engine.engine as engine
 import ranking_engine.metrics_store as metrics_store
 
@@ -34,6 +38,8 @@ def _reset_state() -> None:
     engine._LAST_FED.clear()
     engine._SECOND_ROLLING.clear()
     engine._SLOW_METRICS.clear()
+    engine._PRICE_SERIES = engine.PriceSeriesStore()
+    engine._BACKFILLED.clear()
 
 
 def test_parse_volume_24h_extracts_usd_volume_per_market() -> None:
@@ -76,6 +82,7 @@ def _snap(
     sell_volume: float = 0.0,
     buy_count: int = 0,
     sell_count: int = 0,
+    close_price: float | None = None,
 ) -> dict:
     return {
         "instrument_id": iid, "ts_event": ts_event,
@@ -83,6 +90,7 @@ def _snap(
         "bid_sizes": [bid_size], "ask_sizes": [ask_size],
         "buy_volume": buy_volume, "sell_volume": sell_volume,
         "buy_count": buy_count, "sell_count": sell_count,
+        "close_price": close_price,
     }
 
 
@@ -122,6 +130,56 @@ def test_ingest_snapshot_batch_one_malformed_snap_does_not_drop_the_rest() -> No
     engine._ingest_snapshot_batch(batch)  # must not raise
 
     assert good_iid in engine._LAST_SEEN
+
+
+def test_ingest_snapshot_batch_feeds_close_price_into_price_series() -> None:
+    """Two snaps with distinct close_price/ts_event must both land in _PRICE_SERIES,
+    with stats() reflecting the latest one (Story 13.2 wiring).
+    """
+    _reset_state()
+    iid = "BTC-USD-PERP.DYDX"
+    engine._ingest_snapshot_batch(
+        [_snap(iid, 99.0, 101.0, ts_event=1_000_000_000, close_price=100.0)],
+    )
+    engine._ingest_snapshot_batch(
+        [_snap(iid, 100.0, 102.0, ts_event=2_000_000_000, close_price=101.0)],
+    )
+
+    stats = engine._PRICE_SERIES.stats(iid, now_ns=3_000_000_000)
+
+    assert stats["price"] == 101.0
+
+
+def test_ingest_snapshot_batch_drops_nonfinite_or_nonpositive_close_price() -> None:
+    """A malformed close_price (NaN/inf/<=0) must not be recorded in _PRICE_SERIES --
+    it would otherwise silently poison every downstream pct_change/volatility read
+    with no error raised (DATA-02), unlike the mid<=0 guard for book state.
+    """
+    _reset_state()
+    iid = "BTC-USD-PERP.DYDX"
+    for bad_price in (float("nan"), float("inf"), -1.0, 0.0):
+        engine._ingest_snapshot_batch(
+            [_snap(iid, 99.0, 101.0, ts_event=1_000_000_000, close_price=bad_price)],
+        )
+
+    stats = engine._PRICE_SERIES.stats(iid, now_ns=2_000_000_000)
+    assert stats["price"] is None
+
+
+def test_ingest_snapshot_batch_none_close_price_records_no_price_but_still_updates_ofi() -> None:
+    """A snap with close_price=None (no trade that second) must not be recorded in
+    _PRICE_SERIES, even though the rest of the snap (OFI/OBI) is ingested normally.
+    """
+    _reset_state()
+    iid = "ETH-USD-PERP.DYDX"
+    engine._ingest_snapshot_batch(
+        [_snap(iid, 99.0, 101.0, ts_event=1_000_000_000, close_price=None)],
+    )
+
+    stats = engine._PRICE_SERIES.stats(iid, now_ns=2_000_000_000)
+
+    assert stats["price"] is None
+    assert engine._OFI_INDS.get(iid) is not None  # OFI tracker still fed
 
 
 def test_current_ranks_volume_mode_sorts_by_descending_volume24h() -> None:
@@ -482,3 +540,101 @@ def test_legacy_book_metrics_for_unknown_instrument_is_all_none() -> None:
         "microprice": None,
         "spread": None,
     }
+
+
+def _write_snapshot(catalog_path: str, iid: str, close_price: float, ts: int) -> None:
+    ParquetDataCatalog(catalog_path).write_data([
+        DydxSecondSnapshot(
+            instrument_id=InstrumentId.from_str(iid),
+            bid_prices=[close_price - 1],
+            bid_sizes=[1.0],
+            ask_prices=[close_price + 1],
+            ask_sizes=[1.0],
+            buy_volume=1.0,
+            sell_volume=0.0,
+            buy_count=1,
+            sell_count=0,
+            open_price=close_price,
+            high_price=close_price,
+            low_price=close_price,
+            close_price=close_price,
+            ts_event=ts,
+            ts_init=ts,
+        )
+    ])
+
+
+def test_slow_loop_once_backfills_instrument_exactly_once_across_two_cycles() -> None:
+    """Story 13.2: _slow_loop_once must backfill a newly-seen instrument's price
+    series from Parquet on its first cycle (landing it in _BACKFILLED and populating
+    _SLOW_METRICS), and run a second cycle cleanly with no error -- the instrument
+    stays backfilled rather than being re-backfilled (engine._BACKFILLED gates the
+    Parquet read in _backfill_new_instruments; this is the behavioral proxy for "no
+    repeat Parquet read", since TEST-03 forbids mocking Nautilus internals to prove it
+    more directly).
+    """
+    _reset_state()
+    iid = "BTC-USD-PERP.DYDX"
+    now_ns = time.time_ns()
+    _mark_fresh(iid, now_ns)
+    original_db_path = engine.METRICS_DB_PATH
+    with tempfile.TemporaryDirectory() as catalog_dir:
+        _write_snapshot(catalog_dir, iid, close_price=100.0, ts=now_ns - 1_000_000_000)
+        engine.METRICS_DB_PATH = tempfile.mktemp(suffix=".db")
+        try:
+            asyncio.run(engine._slow_loop_once(catalog_dir))
+            assert iid in engine._BACKFILLED
+            assert iid in engine._SLOW_METRICS
+
+            asyncio.run(engine._slow_loop_once(catalog_dir))  # second cycle, must not raise
+            assert iid in engine._BACKFILLED
+            assert iid in engine._SLOW_METRICS
+        finally:
+            engine.METRICS_DB_PATH = original_db_path
+
+
+def test_backfill_new_instruments_reads_parquet_exactly_once_across_two_cycles(
+    monkeypatch,
+) -> None:
+    """Direct counter-based proof (not just absence-of-error) that
+    _read_price_series_sync is invoked exactly once per instrument, ever -- monkey-
+    patching this module's own function is not "mocking Nautilus internals" (TEST-03
+    only bans that), so this can assert the call count directly instead of inferring
+    it from the previous test's "second cycle doesn't raise" proxy.
+    """
+    _reset_state()
+    iid = "BTC-USD-PERP.DYDX"
+    now_ns = time.time_ns()
+    _mark_fresh(iid, now_ns)
+    calls = []
+    original = engine._read_price_series_sync
+
+    def _counting_read(catalog_path: str, iid: str, start_ns: int) -> list[tuple[int, float]]:
+        calls.append(iid)
+        return original(catalog_path, iid, start_ns)
+
+    monkeypatch.setattr(engine, "_read_price_series_sync", _counting_read)
+    with tempfile.TemporaryDirectory() as catalog_dir:
+        _write_snapshot(catalog_dir, iid, close_price=100.0, ts=now_ns - 1_000_000_000)
+        asyncio.run(engine._backfill_new_instruments(catalog_dir, now_ns))
+        asyncio.run(engine._backfill_new_instruments(catalog_dir, now_ns))
+        asyncio.run(engine._backfill_new_instruments(catalog_dir, now_ns))
+    assert calls == [iid]
+
+
+def test_backfill_new_instruments_marks_backfilled_even_on_failure(monkeypatch) -> None:
+    """A backfill that raises (e.g. a corrupt catalog partition) must still land the
+    instrument in _BACKFILLED -- otherwise it is retried every cycle forever,
+    reintroducing the exact recurring-Parquet-read cost Story 13.2 removes.
+    """
+    _reset_state()
+    iid = "BTC-USD-PERP.DYDX"
+    now_ns = time.time_ns()
+    _mark_fresh(iid, now_ns)
+
+    def _raising_read(catalog_path: str, iid: str, start_ns: int) -> list[tuple[int, float]]:
+        raise RuntimeError("simulated corrupt catalog partition")
+
+    monkeypatch.setattr(engine, "_read_price_series_sync", _raising_read)
+    asyncio.run(engine._backfill_new_instruments("/nonexistent", now_ns))
+    assert iid in engine._BACKFILLED

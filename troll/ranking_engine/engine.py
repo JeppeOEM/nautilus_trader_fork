@@ -25,6 +25,7 @@ schema every reader depends on.
 import asyncio
 import json
 import logging
+import math
 import os
 import statistics
 import time
@@ -37,8 +38,9 @@ import redis.asyncio as aioredis
 
 from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
 from nautilus_trader.core.nautilus_pyo3 import get_dydx_http_url  # type: ignore[attr-defined]
+from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
-from ml_signals import metrics_computer
+from ml_signals import catalog_stats
 from ml_signals.indicators import MultiLevelOBI
 from ml_signals.indicators import MultiLevelOFI
 from ml_signals.indicators import microprice as calc_microprice
@@ -46,6 +48,7 @@ from ml_signals.indicators import mid_price as calc_mid_price
 from ml_signals.indicators import spread as calc_spread
 from ml_signals.indicators import trade_aggregates
 from ranking_engine import metrics_store
+from ranking_engine.price_series import PriceSeriesStore
 from ranking_engine.volatility import VolatilityTracker
 
 
@@ -142,6 +145,18 @@ _VOLUME_DELTA_WINDOW: int = 60
 # so dashboard/bot_tui get it via rankings:live instead of touching metrics_store
 # directly.
 _SLOW_METRICS: dict[str, dict] = {}
+
+# In-memory long-window (ts_event_ns, close_price) series (Story 13.2) -- replaces
+# the old recurring ml_signals.metrics_computer Parquet re-scan. Fed live on every
+# _ingest_snapshot_batch call; seeded once per instrument via a lazy Parquet backfill
+# in _slow_loop_task (see _BACKFILLED below).
+_PRICE_SERIES = PriceSeriesStore()
+
+# Instrument IDs that have already received their one-time Parquet backfill into
+# _PRICE_SERIES -- _slow_loop_task never re-reads Parquet for an instrument once its
+# id is in this set (troll/CLAUDE.md DATA-02: removes the recurring re-scan from the
+# hot path entirely, not just rate-limits it).
+_BACKFILLED: set[str] = set()
 
 # The single global Ranking Mode -- module-level mutable state, switched atomically by
 # a ranking:control message. Defaults to "volume", matching FR6's existing default.
@@ -251,6 +266,20 @@ def _ingest_snapshot_batch(batch: list[dict]) -> None:
         try:
             iid = snap["instrument_id"]
             _LAST_SEEN[iid] = time.time_ns()
+            close_price = snap.get("close_price")
+            # A malformed close_price (NaN/inf/<=0) would poison every downstream
+            # pct_change/volatility computation with no error raised -- fail closed
+            # (AD-2) and treat it as "no trade this second" instead, mirroring the
+            # mid<=0 guard a few lines below (DATA-02: never let a bad value silently
+            # corrupt stored price history).
+            if close_price is not None and (
+                not math.isfinite(close_price) or close_price <= 0
+            ):
+                logger.warning(
+                    "Non-finite/non-positive close_price dropped for %s: %r", iid, close_price,
+                )
+                close_price = None
+            _PRICE_SERIES.ingest(iid, snap["ts_event"], close_price)
             bid_prices, ask_prices = snap["bid_prices"], snap["ask_prices"]
             bid_sizes, ask_sizes = snap["bid_sizes"], snap["ask_sizes"]
             if not bid_prices or not ask_prices:  # thin/one-sided book -- legitimate, skip
@@ -359,7 +388,7 @@ def _legacy_book_metrics_for(iid: str) -> dict:
     history chart), sourced from the exact same live indicator state _fast_metrics_for
     reads for rankings:live -- troll/CLAUDE.md SSOT-02: this process must never run
     two independent stateful OFI/microprice trackers for the same instrument.
-    Replaces the old metrics_computer._book_metrics, a from-scratch Parquet replay (a
+    Replaces the old ml_signals.metrics_computer._book_metrics, a from-scratch Parquet replay (a
     fresh OrderFlowImbalance/Microprice instance re-fed the last 60s of deltas on every
     call) that duplicated, and slowly diverged from, this exact signal.
 
@@ -456,76 +485,120 @@ def _persist_snapshots(snapshots: list[dict], db_path: str) -> None:
     metrics_store.write(persisted, db_path)
 
 
+def _read_price_series_sync(catalog_path: str, iid: str, start_ns: int) -> list[tuple[int, float]]:
+    """Blocking Parquet read for one instrument's backfill -- runs via asyncio.to_thread.
+
+    Opens its own ParquetDataCatalog handle (cheap, no shared state) so this can run
+    off the main event-loop thread without touching anything _redis_listener mutates.
+    """
+    catalog = ParquetDataCatalog(catalog_path)
+    return catalog_stats.price_series(catalog, iid, start_ns=start_ns)
+
+
+async def _backfill_new_instruments(catalog_path: str, now_ns: int) -> None:
+    """One-time lazy Parquet backfill for every instrument seen live but not yet
+    backfilled into _PRICE_SERIES (Story 13.2).
+
+    The blocking Parquet read runs via asyncio.to_thread; the ring-buffer mutation
+    (_PRICE_SERIES.backfill) and _BACKFILLED bookkeeping happen back on the main
+    thread after the await returns -- mirrors this module's existing discipline of
+    keeping shared in-memory state mutation off worker threads. A plain sequential
+    loop is fine here (DESIGN-01/YAGNI): this only ever runs once per instrument for
+    the life of the process, so it is not the recurring-cost path being fixed.
+
+    _BACKFILLED gains `iid` even when the read raises (finally, not just on success):
+    a failing instrument (e.g. a corrupt catalog partition) must not be retried every
+    cycle forever -- that would reintroduce, per-instrument, the exact recurring
+    Parquet-read cost this story exists to remove. The instrument simply keeps
+    whatever live points it has accumulated (possibly none yet); the failure is still
+    loud (logger.exception), just not retried.
+    """
+    new_iids = [iid for iid in _LAST_SEEN if iid not in _BACKFILLED]
+    for iid in new_iids:
+        try:
+            start_ns = now_ns - _PRICE_SERIES.lookback_ns
+            series = await asyncio.to_thread(_read_price_series_sync, catalog_path, iid, start_ns)
+            _PRICE_SERIES.backfill(iid, series)
+        except Exception:
+            logger.exception("Price-series backfill failed for %s -- not retrying", iid)
+        finally:
+            _BACKFILLED.add(iid)
+
+
+async def _slow_loop_once(catalog_path: str) -> None:
+    """One cycle of _slow_loop_task's work -- split out so tests can drive exactly one
+    cycle at a time instead of the infinite while-True loop below.
+    """
+    now_ns = time.time_ns()
+    await _backfill_new_instruments(catalog_path, now_ns)
+
+    book_metrics_by_iid = {iid: _legacy_book_metrics_for(iid) for iid in _LAST_SEEN}
+    snapshots = []
+    for iid in _LAST_SEEN:
+        stats = _PRICE_SERIES.stats(iid, now_ns)
+        snapshots.append({
+            "ts": now_ns,
+            "instrument_id": iid,
+            "price": stats.get("price"),
+            "pct_1h": stats.get("pct_change_1h"),
+            "pct_24h": stats.get("pct_change_24h"),
+            "volatility": stats.get("volatility"),
+            **book_metrics_by_iid.get(iid, {}),
+        })
+    if snapshots:
+        _SLOW_METRICS.update({s["instrument_id"]: s for s in snapshots})
+        persisted = _merge_rank_into_snapshots(snapshots, _ranks_by_iid(), _VOLUME_24H)
+        await asyncio.to_thread(metrics_store.write, persisted, METRICS_DB_PATH)
+
+
 async def _slow_loop_task(catalog_path: str) -> None:
     """Full snapshot (price/pct/vol + book metrics) every DB_WRITE_INTERVAL_SECONDS.
 
-    Relocated from ml_signals.dashboard (Task 7) -- ranking_engine is now the sole
-    caller of ml_signals.metrics_computer.compute_all() and the sole writer of
-    metrics_store, closing the two-writer race Story 1.4's review already fixed once
-    against the old single-process dashboard.
+    Relocated from ml_signals.dashboard (Task 7) -- ranking_engine is the sole writer
+    of metrics_store, closing the two-writer race Story 1.4's review already fixed
+    once against the old single-process dashboard.
 
-    The rank/merge computation (_ranks_by_iid -> _merge_rank_into_snapshots) reads
-    _LAST_SEEN and VolatilityTracker's internal buffers -- the same state
-    _ingest_snapshot_batch mutates on the main event-loop thread from _redis_listener.
-    That computation is cheap (in-memory dict iteration, no I/O), so it runs here
-    directly on the main thread rather than inside asyncio.to_thread, avoiding a
-    cross-thread read/mutate race against _redis_listener. Only the genuinely blocking
-    I/O (metrics_store.write) is pushed to a worker thread.
+    Story 13.1 bounded the old ml_signals.metrics_computer batch-computation call (a
+    recurring 25h-lookback Parquet re-scan per instrument, the proximate cause of
+    nifelheim's OOM-restart loop, troll/CLAUDE.md DATA-02 incident 2026-09-11) to
+    max_workers=4 -- a mitigation, not a fix, since the re-scan itself still ran every
+    cycle. Story 13.2 replaces that call entirely: price/pct_1h/pct_24h/volatility now
+    come from _PRICE_SERIES, an in-memory ring-buffer store fed incrementally by
+    _ingest_snapshot_batch on every live snapshot, seeded exactly once per instrument
+    via _backfill_new_instruments' lazy Parquet read above. This removes the recurring
+    Parquet re-scan from the hot path structurally -- there is no longer a periodic
+    catalog read to bound or throttle. Whether this actually prevents the nifelheim
+    OOM in production is not independently verified from this sandbox (no reachable
+    nifelheim docker stats/free -h evidence, same as Story 13.1) -- record that
+    verification as deferred, not resolved.
 
-    Same reasoning applies to _legacy_book_metrics_for: it reads the live OFI/OBI
-    tracker dicts _ingest_snapshot_batch also mutates on this same main thread, so
-    every instrument's book-metrics dict is computed here, up front, and handed into
-    compute_all() as a plain (now-frozen) dict lookup -- never read live from inside
-    the ThreadPoolExecutor compute_all() runs in via asyncio.to_thread.
+    _legacy_book_metrics_for reads the live OFI/OBI tracker dicts _ingest_snapshot_batch
+    mutates on this same main thread, so it and _PRICE_SERIES.stats() are both read
+    directly here rather than inside asyncio.to_thread -- only the genuinely blocking
+    I/O (the Parquet backfill read, metrics_store.write) is pushed to a worker thread.
 
-    instrument_ids=list(book_metrics_by_iid) scopes compute_all() to only the coins
-    this process has actually seen live data for (~29, the pinned set), instead of
-    its default of every instrument folder the catalog has ever held (drifted to
-    ~300 on the live deployment). That default -- 25h-lookback catalog reads, 32-way
-    concurrent, over 300 instruments -- was OOM-killing this container repeatedly
-    (troll/CLAUDE.md DATA-02 incident, 2026-09-11).
-
-    max_workers=4 (Story 13.1, troll/.planning/debug/nifelheim-resource-exhaustion-2026-09-12.md)
-    bounds this call to a small fixed worker count instead of compute_all()'s 32-worker
-    default, trading a smaller peak of concurrent ParquetDataCatalog reads for a longer
-    per-cycle wall-clock time -- a mitigation, not a fix for nifelheim's underlying host
-    oversubscription (see that incident writeup). The duration log below exists so a
-    slowdown past DB_WRITE_INTERVAL_SECONDS is visible instead of silently eating into
-    the metrics-freshness cadence (troll/CLAUDE.md DATA-02's "close observability gaps
-    permanently" rule) -- Story 13.2 removes this Parquet re-scan from the hot path
-    entirely.
+    Cycle-duration canary (troll/CLAUDE.md DATA-02: "a staleness/health canary on your
+    own detection loop is required, not optional") carried over from the pre-13.2
+    loop: _backfill_new_instruments' sequential per-instrument Parquet reads are a new
+    potentially-slow phase (e.g. a cold start where every tracked instrument needs its
+    one-time backfill in the same cycle), so a cycle silently running long past
+    DB_WRITE_INTERVAL_SECONDS -- and quietly eating into metrics-freshness cadence --
+    must stay visible, not just possible.
     """
     while True:
+        cycle_start = time.monotonic()
         try:
-            book_metrics_by_iid = {iid: _legacy_book_metrics_for(iid) for iid in _LAST_SEEN}
-            cycle_start = time.monotonic()
-            snapshots = await asyncio.to_thread(
-                metrics_computer.compute_all,
-                catalog_path,
-                book_metrics_fn=lambda iid: book_metrics_by_iid.get(iid, {}),
-                instrument_ids=list(book_metrics_by_iid),
-                max_workers=4,
-            )
-            cycle_seconds = time.monotonic() - cycle_start
-            if cycle_seconds > DB_WRITE_INTERVAL_SECONDS:
-                logger.warning(
-                    "compute_all took %.1fs for %d instruments -- exceeded the %ds cycle interval",
-                    cycle_seconds,
-                    len(book_metrics_by_iid),
-                    DB_WRITE_INTERVAL_SECONDS,
-                )
-            else:
-                logger.debug(
-                    "compute_all took %.1fs for %d instruments",
-                    cycle_seconds,
-                    len(book_metrics_by_iid),
-                )
-            if snapshots:
-                _SLOW_METRICS.update({s["instrument_id"]: s for s in snapshots})
-                persisted = _merge_rank_into_snapshots(snapshots, _ranks_by_iid(), _VOLUME_24H)
-                await asyncio.to_thread(metrics_store.write, persisted, METRICS_DB_PATH)
+            await _slow_loop_once(catalog_path)
         except Exception:
             logger.exception("Slow metrics loop failed")
+        cycle_seconds = time.monotonic() - cycle_start
+        if cycle_seconds > DB_WRITE_INTERVAL_SECONDS:
+            logger.warning(
+                "Slow metrics loop cycle took %.1fs, exceeding the %ds write interval",
+                cycle_seconds, DB_WRITE_INTERVAL_SECONDS,
+            )
+        else:
+            logger.debug("Slow metrics loop cycle took %.1fs", cycle_seconds)
         await asyncio.sleep(DB_WRITE_INTERVAL_SECONDS)
 
 

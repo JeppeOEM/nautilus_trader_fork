@@ -219,18 +219,19 @@ def price_series(
     return []
 
 
-def price_stats(
-    catalog: ParquetDataCatalog,
-    instrument_id: str,
-    start_ns: int | None = None,
-) -> dict:
+def price_stats_from_series(series: list[tuple[int, float]]) -> dict:
     """
-    Latest price, pct change over the last 1h/24h, and return volatility (stdev).
+    Latest price, pct change over the last 1h/24h, and return volatility (stdev),
+    computed from an already-fetched (ts_event, price) series.
 
-    `pct_change_1h`/`pct_change_24h` are None when the catalog doesn't yet span
+    Extracted from price_stats() (Story 13.2) so ranking_engine's in-memory
+    PriceSeriesStore can call this exact same formula against its own ring-buffer
+    series, instead of a second, independently-written (and potentially drifting)
+    implementation -- one formula, two callers (SSOT-02, DATA-02).
+
+    `pct_change_1h`/`pct_change_24h` are None when the series doesn't yet span
     that long — no extrapolation from partial history.
     """
-    series = price_series(catalog, instrument_id, start_ns=start_ns)
     if not series:
         return {"price": None, "pct_change_1h": None, "pct_change_24h": None, "volatility": None}
 
@@ -254,6 +255,20 @@ def price_stats(
         "pct_change_24h": _pct_change(24),
         "volatility": volatility,
     }
+
+
+def price_stats(
+    catalog: ParquetDataCatalog,
+    instrument_id: str,
+    start_ns: int | None = None,
+) -> dict:
+    """
+    Latest price, pct change over the last 1h/24h, and return volatility (stdev).
+
+    Thin wrapper: fetches the series then delegates the math to
+    price_stats_from_series() -- see that function's docstring.
+    """
+    return price_stats_from_series(price_series(catalog, instrument_id, start_ns=start_ns))
 
 
 def overview_table(catalog_path: str) -> list[dict]:
