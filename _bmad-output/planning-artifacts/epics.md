@@ -11,7 +11,7 @@ inputDocuments:
 
 ## Overview
 
-This document provides the complete epic and story breakdown for nautilus_trader_fork (the `troll/` dYdX Signal Research & Trading Platform), decomposing the requirements from the PRD and Architecture spine into implementable stories. Epics 1–3 (below) cover the original PRD/architecture scope (FR1–FR15) and were fully implemented as of 2026-07-17. This document was reopened on 2026-07-24 to extend coverage for the PRD's volatility Ranking Mode (FR-16) and new Bot Monitoring TUI feature (FR-17–FR-25), backed by a finalized UX design contract (`DESIGN.md`/`EXPERIENCE.md`) — the project's first UX-driven surface. Reopened again on 2026-09-06 to add Epic 8 (FR28–FR30): TradingView-style multi-chart navigation and selectable technical indicators on the web dashboard's coin chart. Numbered Epic 8 (not 5) because epics 5–7 were filed directly as standalone stories bypassing epics.md ceremony (see `sprint-status.yaml`) — Epic 8 continues that same global epic-number sequence to avoid collision with their story-file paths (`5-1-*`, `6-1-*`, `7-1-*`). No PRD/Architecture update precedes this addition (same precedent as FR27); PM should fold FR28–FR30 into the PRD proper once shipped. (FR31, a combined candlestick + bid/ask overlay, was drafted alongside these but the story implementing it — 8.5 — was dropped before dev started; FR31 removed with it — its number is reused below.) Reopened again on 2026-09-08 to add Epic 10 (FR31–FR33): a second, non-Nautilus indicator category on the chart page's picker (Story 8.4), migrating three of the chart page's fixed microstructure-panel rows (OFI, Cancel Pressure, CVD) into it, plus persisted per-instrument indicator configuration. Numbered 10 (not 9) for the same reason Epic 8 skipped 5–7: Epic 9 is itself a standalone bypass-epic bug-fix story (`9-1-fix-oscillator-panel-shared-y-axis-scaling`, see `sprint-status.yaml`), not a real epics.md entry — Epic 10 continues the sequence past its file-path prefix (`9-1-*`).
+This document provides the complete epic and story breakdown for nautilus_trader_fork (the `troll/` dYdX Signal Research & Trading Platform), decomposing the requirements from the PRD and Architecture spine into implementable stories. Epics 1–3 (below) cover the original PRD/architecture scope (FR1–FR15) and were fully implemented as of 2026-07-17. This document was reopened on 2026-07-24 to extend coverage for the PRD's volatility Ranking Mode (FR-16) and new Bot Monitoring TUI feature (FR-17–FR-25), backed by a finalized UX design contract (`DESIGN.md`/`EXPERIENCE.md`) — the project's first UX-driven surface. Reopened again on 2026-09-06 to add Epic 8 (FR28–FR30): TradingView-style multi-chart navigation and selectable technical indicators on the web dashboard's coin chart. Numbered Epic 8 (not 5) because epics 5–7 were filed directly as standalone stories bypassing epics.md ceremony (see `sprint-status.yaml`) — Epic 8 continues that same global epic-number sequence to avoid collision with their story-file paths (`5-1-*`, `6-1-*`, `7-1-*`). No PRD/Architecture update precedes this addition (same precedent as FR27); PM should fold FR28–FR30 into the PRD proper once shipped. (FR31, a combined candlestick + bid/ask overlay, was drafted alongside these but the story implementing it — 8.5 — was dropped before dev started; FR31 removed with it — its number is reused below.) Reopened again on 2026-09-08 to add Epic 10 (FR31–FR33): a second, non-Nautilus indicator category on the chart page's picker (Story 8.4), migrating three of the chart page's fixed microstructure-panel rows (OFI, Cancel Pressure, CVD) into it, plus persisted per-instrument indicator configuration. Numbered 10 (not 9) for the same reason Epic 8 skipped 5–7: Epic 9 is itself a standalone bypass-epic bug-fix story (`9-1-fix-oscillator-panel-shared-y-axis-scaling`, see `sprint-status.yaml`), not a real epics.md entry — Epic 10 continues the sequence past its file-path prefix (`9-1-*`). Reopened again on 2026-09-12 to add Epic 12 (FR34–FR35: run dashboard/bot_tui on the user's own machine via a new read-only data API, offloading load from the oversubscribed nifelheim VPS) and Epic 13 (FR36–FR37: stop ranking_engine's recurring Parquet-read memory spike, the mechanism behind its OOM-restart loop). Numbered 12 (not 9) for the same reason Epic 10 was: Epic 11 is itself a standalone bypass-epic bug-fix story (`11-1-fix-empty-imbalance-depth-spread-chart-panes`, see `sprint-status.yaml`), not a real epics.md entry. No PRD/Architecture update precedes this addition (same precedent as FR27–FR33); PM should fold FR34–FR37 into the PRD proper once shipped. Created via direct technical investigation this session (root-caused against real code, real measurements, and an already-logged production incident) rather than the standard PRD-first elicitation flow, at the user's explicit request — same precedent as Epic 11.
 
 ## Requirements Inventory
 
@@ -134,6 +134,14 @@ FR31: Epic 10 - Custom (non-Nautilus) indicator category on the chart page's ind
 FR32: Epic 10 - CVD, Cancel Pressure, and OFI available as picker-addable custom indicators, replacing their fixed microstructure-panel rows
 FR33: Epic 10 - Persisted per-instrument chart indicator configuration, committable to source control
 
+FR34 `[NEW — 2026-09-12, not yet in PRD, PM should fold in]`: Local-machine dashboard + bot_tui — the web dashboard and the bot monitoring TUI can both run on the user's own machine instead of on nifelheim, reached over an SSH tunnel to nifelheim's Redis and a new read-only data API, with zero change to the VPS-hosted collector/ranking_engine/dashboard/bot_tui services' own behavior when `DATA_API_URL` is unset.
+
+FR35 `[NEW — 2026-09-12, not yet in PRD, PM should fold in]`: Remote catalog/metrics read API — a new, single, read-only FastAPI service exposes exactly the historical-chart and metrics-history reads `dashboard.py` currently does via direct local-disk access (SQLite `metrics_store`, Parquet catalog), reusing that existing code verbatim, bound to `127.0.0.1` only (no public port, per SEC-01).
+
+FR36 `[NEW — 2026-09-12, not yet in PRD, PM should fold in]`: ranking_engine's periodic price/pct/volatility computation no longer re-scans the Parquet catalog every cycle — it is served from an in-memory, long-window price series maintained incrementally from the same live `snapshots:raw` feed `ranking_engine` already consumes, seeded once at process startup via a single Parquet backfill read per instrument (not re-read every `DB_WRITE_INTERVAL_SECONDS`).
+
+FR37 `[NEW — 2026-09-12, not yet in PRD, PM should fold in]`: `ranking_engine`'s per-cycle catalog-read concurrency is bounded to a small, fixed worker count (not the prior unbounded-by-instrument-count default), as an independent, immediately-shippable mitigation to peak memory during the existing `compute_all()` cycle while FR36 is built.
+
 ## Epic List
 
 ### Epic 1: Trustworthy Coin Ranking & Watchlist
@@ -159,6 +167,14 @@ Builder opens a coin's chart on the web dashboard and it behaves like a professi
 ### Epic 10: Custom Chart Indicators & Persisted Configuration
 Builder adds dYdX-specific microstructure signals — CVD, Cancel Pressure, OFI — to the chart page's indicator picker (Story 8.4) as a second, clearly-separated category alongside `nautilus_trader.indicators`' native library, since none of the three is derivable from OHLCV candles alone or exists anywhere in `nautilus_trader` itself. Each one already has a working implementation on the chart page's fixed 7-row microstructure panel (`ml_signals/chart_data.py`) or in `ml_signals/book_features.py` — this epic re-exposes that existing math through the picker (never reimplementing it) and retires the corresponding fixed row once its picker equivalent lands, so the same signal is never shown in two places at once. Closes with persisting a coin's active indicator selection to a source-control-committable file, so a chart's configuration survives a page reload/redeploy instead of resetting to empty every time. Numbered 10 (not 9) because Epic 9 is itself a standalone bypass-epic bug-fix story, not a real epics.md entry (see `sprint-status.yaml`) — Epic 10 continues the sequence past its file-path prefix.
 **FRs covered:** FR31, FR32, FR33
+
+### Epic 12: Local Dashboard + bot_tui, VPS as Data API
+nifelheim (2 vCPU/3.7GB/0 swap) is resource-oversubscribed (`troll/.planning/debug/nifelheim-resource-exhaustion-2026-09-12.md`) — collector + dashboard + ranking_engine + bot_tui all running on one box leaves no headroom, contributing to both collector stale-book bursts and ranking_engine's OOM-restart loop. `bot_tui` already talks to nothing but Redis pub/sub (zero code change needed once Redis is SSH-tunneled); `dashboard.py` additionally needs a small new read-only data API for its 4 local-disk (SQLite/Parquet) reads. Moving both to the user's own machine removes two of the four services from nifelheim entirely.
+**FRs covered:** FR34, FR35
+
+### Epic 13: ranking_engine Memory/CPU Stabilization
+`ranking_engine` OOM-restarts roughly every 2 minutes on nifelheim (confirmed via `docker events`: real host OOM-kill, not an app-level exit). Root mechanism: `compute_all()` re-scans a full 25h Parquet window, 32-way concurrent, every 60s cycle — for the same `DydxSecondSnapshot` data already streaming live through Redis, just discarded after 5 minutes by `ranking_engine`'s own in-memory window. This epic bounds the immediate concurrency (fast, independent mitigation) and then removes the recurring re-scan entirely by keeping a long-window price series in memory, backfilled once at startup.
+**FRs covered:** FR36, FR37
 
 ## Epic 1: Trustworthy Coin Ranking & Watchlist
 
@@ -984,4 +1000,138 @@ So that a chart's setup isn't lost on every page reload or container redeploy, a
 **Given** `cd troll && python -m pytest ml_signals/tests/test_dashboard_chart.py -q` plus a new `ml_signals/tests/test_chart_indicator_config.py`
 **When** it runs after this story
 **Then** it passes, asserting `load_config()`/`save_config()` round-trip a multi-instrument, mixed-category selection correctly (TEST-01: integration path touching a persisted config file) and that `GET`/`POST /data/coin/{id}/indicator-config` behave correctly against a temp config file (same temp-file test pattern `dydx_collector/tests` already uses for `config.py`)
+
+## Epic 12: Local Dashboard + bot_tui, VPS as Data API
+
+Builder runs `dashboard.py` and `bot_tui` on their own machine instead of on nifelheim, reaching nifelheim's live data over one SSH tunnel (Redis, unchanged wire protocol) plus a new small read-only HTTP API for the handful of local-disk reads `dashboard.py` currently does directly. The VPS-hosted `collector`/`ranking_engine`/`dashboard`/`bot_tui` services keep working exactly as today — this epic adds a new opt-in path, it does not remove or change the existing one. Investigated this session: `bot_tui/*.py` touches nothing but Redis pub/sub (`bots:status`/`bots:control`, `snapshots:raw`, `rankings:live`, `ranking:control`, `collector:status`/`collector:control`, plus plain-key polling in `bot_history_state.py`/`bot_incidents_state.py`) — no direct file access anywhere, so it moves with zero code changes once Redis is tunneled. `dashboard.py` additionally does 4 direct local-disk reads: `ranking_engine/metrics_store.py`'s `history()`/`nearest()` (SQLite), `ml_signals/catalog_stats.py::query_second_snapshots()`, `ml_signals/chart_data.py::compute_chart_series()`, and one inline `ParquetDataCatalog(...).query(DydxSecondSnapshot, ...)` in `_historical_candles_json` (Parquet). Chosen shape (confirmed with user, do not revisit): exactly one new service, Python, FastAPI — ruled out a Go/Python split and a Redis→WebSocket bridge as unneeded (Redis is already a network service; the catalog reads must stay Python regardless, since `DydxSecondSnapshot`'s Arrow schema is only registered via `nautilus_trader.serialization.arrow` in Python, per NAUT-02).
+**FRs covered:** FR34, FR35
+
+### Story 12.1: Read-only `data_api` FastAPI service on the VPS
+
+New service, no changes to any existing service's behavior. Reuses `ranking_engine/metrics_store.py` and `ml_signals/catalog_stats.py`/`chart_data.py` verbatim — no reimplemented logic.
+
+As a user who wants to run the dashboard/bot_tui off nifelheim,
+I want a small, read-only HTTP API that serves the same catalog/metrics data `dashboard.py` reads from local disk today,
+So that a remote `dashboard.py` process can get identical data over the network instead of needing local disk access to nifelheim's catalog.
+
+**Acceptance Criteria:**
+
+**Given** a new `troll/data_api/app.py` (FastAPI), env vars `CATALOG_PATH`/`METRICS_DB_PATH` with the same defaults `ml_signals/dashboard.py:69,85-86` already uses
+**When** the service is running
+**Then** it exposes exactly 4 routes, each a thin wrapper (no reimplemented logic) around an existing function:
+- `GET /metrics/history/{symbol}?days=31` → `ranking_engine.metrics_store.history(symbol, METRICS_DB_PATH, days)`, JSON list of dicts
+- `GET /metrics/nearest/{symbol}?ts_ns=<int>` → `ranking_engine.metrics_store.nearest(symbol, ts_ns, METRICS_DB_PATH)`, JSON dict or `null`
+- `GET /catalog/chart-series/{symbol}?start_ns=&end_ns=` → `ml_signals.chart_data.compute_chart_series(CATALOG_PATH, symbol, start_ns, end_ns)`, returned verbatim
+- `GET /catalog/snapshots/{iid}?start_ns=&end_ns=` → `ml_signals.catalog_stats.query_second_snapshots(CATALOG_PATH, iid, start_ns, end_ns)`, serialized to a list of dicts covering the fields `_historical_lines_json` already extracts (`dashboard.py:1379-1387`: `bid_prices`, `bid_sizes`, `ask_prices`, `ask_sizes`, `buy_volume`, `sell_volume`, `ts_event`) plus `open_price`/`high_price`/`low_price`/`close_price` (needed by `_historical_candles_json`'s OHLC aggregation) — one route replacing both of today's separate catalog reads, since they query the same underlying `DydxSecondSnapshot` rows
+
+**Given** `troll/troll-requirements.txt`
+**When** this story lands
+**Then** `fastapi`, `uvicorn[standard]`, and `httpx` (required by FastAPI's `TestClient`) are added; `aiohttp` (already present) is left as-is, it will cover Story 12.2's client side
+
+**Given** `troll/collector.dockerfile` (the shared image `dashboard`/`ranking_engine` already build from) and `troll/docker-compose.yml`
+**When** this story lands
+**Then** the dockerfile gains `COPY troll/data_api ./data_api` alongside its existing module copies, and compose gains a new `data_api` service: same `build:` block (dockerfile `collector.dockerfile`), `command: uvicorn data_api.app:app --host 127.0.0.1 --port 9100`, `network_mode: host` (matching every other service), env `CATALOG_PATH`/`METRICS_DB_PATH` matching `dashboard`'s own, and read-only volume mounts `./dydx_collector/catalog:/app/catalog:ro` + `./dydx_collector/metrics:/app/metrics_dir:ro` (same AD-3 discipline as `dashboard`'s existing mounts) — **no `ports:` entry, `network_mode: host` binds the app itself to `127.0.0.1:9100` per SEC-01, nothing public, ever**
+
+**Given** `troll/data_api/tests/test_data_api.py` (new)
+**When** `pytest data_api/tests -q` runs
+**Then** it passes: FastAPI `TestClient` hitting all 4 routes against a temp SQLite file (written via `ranking_engine.metrics_store.write()`) and a temp `ParquetDataCatalog` seeded with real `DydxSecondSnapshot` rows, following the `_write_snapshot` pattern already established in `ml_signals/tests/test_catalog_stats.py:138-139` — never mock Nautilus internals (TEST-03), this is exactly the kind of catalog-touching integration path TEST-01 requires a test for
+
+**Given** `troll/Makefile`'s `test:` target
+**When** this story lands
+**Then** `data_api/tests` is added to the pytest module list it already runs, so `make test` covers the new service without a separate invocation
+
+### Story 12.2: `dashboard.py` remote-data mode + local-machine run docs
+
+Depends on Story 12.1 (needs `data_api`'s routes to exist). No behavior change to the VPS-hosted `dashboard` compose service — `DATA_API_URL` unset must be provably identical to today.
+
+As a user running `dashboard.py` on my own machine,
+I want it to fetch its catalog/metrics data over the tunnel instead of local disk when configured to,
+So that I get the exact same dashboard, running locally, without needing nifelheim's filesystem mounted.
+
+**Acceptance Criteria:**
+
+**Given** a new `DATA_API_URL` env var read in `ml_signals/dashboard.py` near its other env-var reads (`dashboard.py:69,85-86`)
+**When** it is unset
+**Then** every one of the 4 call sites below behaves byte-for-byte as it does today (local `ParquetDataCatalog`/`metrics_store` access) — this is the default for the VPS-hosted `dashboard` compose service, which gets no new env var and therefore no behavior change
+
+**Given** `DATA_API_URL` is set (e.g. to `http://127.0.0.1:9100`, reached via an SSH-tunneled port)
+**When** any of these run: `_render_history_page` (`dashboard.py:1073`), `rank_history_json_handler` (`:1534`), `_render_chart_page`'s `compute_chart_series` call (`:1274-1278`), `_historical_candles_json` (`:1274-1278`), `_historical_lines_json` (`:1371-1372`)
+**Then** each fetches from `data_api`'s matching route over `aiohttp.ClientSession` (already a dependency) instead of touching local disk, and returns data producing an identical rendered page/JSON response to today's local-disk path for the same underlying catalog/metrics state — share one small `_fetch_json(session, url)` helper across all 5 call sites rather than 5 separate HTTP-call implementations
+
+**Given** `troll/.env-example`
+**When** this story lands
+**Then** it documents `DATA_API_URL` (default empty = unchanged local/VPS behavior), mirroring the existing `WEB_PORT` doc comment's style
+
+**Given** a user wants to run both processes locally
+**When** they follow the new docs added to `troll/ARCHITECTURE.md`'s deployment-topology section
+**Then** the docs cover: the one SSH tunnel command covering both ports (`ssh -fN -L 6379:localhost:6379 -L 9100:localhost:9100 nifelheim`), and the two local run commands (`REDIS_URL=redis://127.0.0.1:6379 DATA_API_URL=http://127.0.0.1:9100 python -m ml_signals.dashboard --open` and `REDIS_URL=redis://127.0.0.1:6379 python -m bot_tui.app`) — `bot_tui` needs no code change (already Redis-only) and its reverse-tunnel URL hand-off (`_open_via_local_listener`/`BOT_TUI_OPEN_URL_PORT`, `app.py:1424-1426`) needs no change either, since it already no-ops when the env var is unset and falls through to `webbrowser.open()`, which works correctly once both processes are local — do not modify that code path
+
+**Given** `cd troll && python -m pytest ml_signals/tests/test_dashboard_chart.py ml_signals/tests/test_rank_history.py -q` plus any new/updated tests for the remote-mode branches
+**When** it runs after this story
+**Then** it passes — cover both the `DATA_API_URL` unset (unchanged) and set (HTTP fetch) branches of at least one of the 5 call sites (TEST-01: this is new branching logic, not trivial glue)
+
+## Epic 13: ranking_engine Memory/CPU Stabilization
+
+Builder stops seeing `ranking_engine` OOM-restart every ~2 minutes on nifelheim. Root cause investigated this session: `ranking_engine/engine.py:485`'s `_slow_loop_task` calls `metrics_computer.compute_all()` every `DB_WRITE_INTERVAL_SECONDS` (60s), which spins up `ThreadPoolExecutor(max_workers=32)` (`metrics_computer.py:71`) — per instrument, opens a fresh `ParquetDataCatalog` and re-reads a full 25h (`PRICE_LOOKBACK_HOURS`) window via `catalog_stats.price_series()`, which queries `DydxSecondSnapshot` (`catalog_stats.py:200`) — the same type already streaming live through Redis `snapshots:raw` and already ingested into `ranking_engine`'s own `_SECOND_ROLLING` (`engine.py:129,287`). The only reason the Parquet re-read is needed at all: `_SECOND_ROLLING` is `deque(maxlen=300)` — 5 minutes, nowhere near enough for `pct_1h`/`pct_24h`/volatility. A 2026-09-11 fix already scoped the instrument count down (~300→~29) but, per the incident writeup (`troll/.planning/debug/nifelheim-resource-exhaustion-2026-09-12.md`), "reduced per-cycle memory but didn't add real headroom." This epic ships an immediate concurrency cap (Story 13.1) and then removes the recurring re-scan entirely (Story 13.2).
+**FRs covered:** FR36, FR37
+
+### Story 13.1: Bound `compute_all()`'s catalog-read concurrency
+
+Independent of Story 13.2, ships first — a one-line-call-site change with immediate effect.
+
+As an operator of nifelheim,
+I want ranking_engine's periodic catalog scan to run at a small, fixed concurrency instead of one thread per instrument,
+So that its 60s cycle no longer spikes peak memory with ~29 simultaneous Parquet/pandas reads.
+
+**Acceptance Criteria:**
+
+**Given** `ranking_engine/engine.py:485`'s call to `metrics_computer.compute_all(catalog_path, book_metrics_fn=..., instrument_ids=list(book_metrics_by_iid))`
+**When** this story lands
+**Then** the call passes an explicit `max_workers` (a small fixed value, e.g. 4 — not derived from instrument count) instead of relying on `metrics_computer.compute_all`'s current `max_workers: int = 32` default; the default itself may stay 32 (call-site override is sufficient, no need to change the function signature's default) or be lowered too, dev's judgment, as long as `ranking_engine`'s own call is bounded
+
+**Given** the existing behavior of `compute_all()` otherwise
+**When** `max_workers` is lowered
+**Then** results are unchanged (same instruments, same 25h lookback, same returned dicts) — only the number of concurrent in-flight `ParquetDataCatalog` reads changes; total per-cycle wall-clock time may increase (more sequential batches) but must stay well under `DB_WRITE_INTERVAL_SECONDS` (60s) for the current ~29-instrument count
+
+**Given** `docker stats`/`free -h` evidence on nifelheim before/after (per troll/CLAUDE.md DATA-02 — real evidence, not "looks fine")
+**When** this story is verified
+**Then** `ranking_engine`'s peak RSS during a `_slow_loop_task` cycle is observably lower than before the change — this is a mitigation, not a full fix (the box may still be oversubscribed at rest per the incident writeup), so verification should report the actual before/after numbers rather than claim the OOM loop is fully resolved unless it demonstrably is
+
+**Given** no existing test exercises `max_workers` as a parameter
+**When** this story lands
+**Then** no new test is required (TEST-02: trivial call-site argument change, no new branching logic) — existing `ranking_engine/tests/test_engine.py` coverage of `_slow_loop_task`'s behavior must still pass unchanged
+
+### Story 13.2: In-memory long-window price series, replacing the recurring Parquet re-scan
+
+Depends on Story 13.1 landing first (keeps the mitigation in place while this larger change is built and reviewed). This is the real fix — Story 13.1 only shrinks the existing spike, this removes its cause.
+
+As an operator of nifelheim,
+I want ranking_engine's `price`/`pct_1h`/`pct_24h`/`volatility` fields computed from data it's already holding in memory,
+So that its 60s cycle stops re-reading ~25 hours of mostly-unchanged data from Parquet every single time.
+
+**Acceptance Criteria:**
+
+**Given** a new long-window, per-instrument price series held in `ranking_engine/engine.py` (numpy ring buffers of `(ts_event_ns, close_price)`, sized for `PRICE_LOOKBACK_HOURS` = 25h — explicitly NOT Python-boxed tuples/deques, to keep this cheap: ~90,000 points/instrument × ~29 instruments × 16 bytes/point ≈ 40MB steady-state, vs. today's spiky ~29-concurrent-pandas-DataFrame peak)
+**When** `ranking_engine` starts up (or restarts)
+**Then** it seeds this series with exactly ONE Parquet backfill read per instrument (reusing `catalog_stats.price_series()`/`query_second_snapshots()` as today, not reimplemented), preserving the existing restart-survives-with-full-history property (the collector's writes are independent of `ranking_engine`'s own uptime, so this backfill is always available even after an OOM restart)
+
+**Given** the live `snapshots:raw` feed `ranking_engine` already consumes into `_SECOND_ROLLING` (`engine.py:287`, `_ingest_snapshot_batch`)
+**When** each new `DydxSecondSnapshot` arrives
+**Then** its `(ts_event, close_price)` is also appended to the new long-window series (when `close_price is not None`, matching `price_series()`'s existing "seconds with no trade contribute nothing" semantics, `catalog_stats.py:196-197`) with O(1) eviction of entries older than 25h — this must not duplicate or diverge from `_SECOND_ROLLING`'s own short-window bookkeeping, it is an additional, independent structure fed by the same ingest path
+
+**Given** `_slow_loop_task`'s existing 60s cycle (`engine.py:459-503`)
+**When** this story lands
+**Then** `price`/`pct_1h`/`pct_24h`/`volatility` are computed as slices/reductions over the new in-memory series instead of via `metrics_computer.compute_all()`'s Parquet-backed `ThreadPoolExecutor` path — `compute_all()`/`price_stats()`/`price_series()` are no longer called from the periodic cycle for these fields (the backfill-at-startup call is the only remaining Parquet read in the hot path); `_legacy_book_metrics_for`'s OFI/OBI/etc. fields, already sourced from live trackers, are unaffected
+
+**Given** the exact `pct_1h`/`pct_24h`/`volatility` formulas today (`catalog_stats.py:241-249`'s `_pct_change`/returns-stdev) and their "not enough history yet → `None`" guard (`catalog_stats.py:230-231,243-244`)
+**When** the new in-memory computation replaces the Parquet-backed one
+**Then** values match — verify side by side (both paths computing from the same underlying data during development, per troll/CLAUDE.md DATA-02's standard of real evidence, not code-reading alone) before removing the old path; the same "not enough history yet" `None` behavior must hold when the in-memory series hasn't yet accumulated a full 1h/24h since last backfill
+
+**Given** `ranking_engine/tests/test_engine.py` and any new test file for the price-series structure
+**When** `pytest ranking_engine/tests -q` runs
+**Then** it passes, with new coverage for: the ring buffer's append/evict behavior, the startup-backfill-then-incremental-update sequence, and `pct_1h`/`pct_24h`/`volatility` computed from the in-memory series matching `catalog_stats.price_stats()`'s output for equivalent input data (TEST-01: this is a financial calculation and an integration path touching the catalog — real `DydxSecondSnapshot`/`ParquetDataCatalog` objects, never mocked, per TEST-03)
+
+**Given** `docker stats`/`free -h` on nifelheim, and `rankings:live`/`metrics.db` output, before/after this story (DATA-02 real evidence)
+**When** this story is verified
+**Then** `ranking_engine`'s peak RSS during a `_slow_loop_task` cycle drops further than Story 13.1 alone achieved, and the OOM-restart loop (`docker events`, `RestartCount`) is observably reduced or stopped — report actual numbers; if the box is still oversubscribed at rest even after this fix (per the incident writeup's own conclusion that this may be a capacity problem, not purely a logic bug), say so explicitly rather than claiming full resolution
 
