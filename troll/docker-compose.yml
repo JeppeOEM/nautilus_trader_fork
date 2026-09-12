@@ -113,6 +113,25 @@ services:
     restart: always
     logging: *default-logging
 
+  data_api:
+    container_name: dydx-data-api
+    build:
+      context: ..
+      dockerfile: troll/collector.dockerfile
+      network: host
+    command: uvicorn data_api.app:app --host 127.0.0.1 --port 9100
+    environment:
+      PYTHONUNBUFFERED: "1"
+      CATALOG_PATH: "/app/catalog"
+      METRICS_DB_PATH: "/app/metrics_dir/metrics.db"
+    user: "1000:1000"
+    volumes:
+      - ./dydx_collector/catalog:/app/catalog:ro
+      - ./dydx_collector/metrics:/app/metrics_dir:ro
+    network_mode: host
+    restart: always
+    logging: *default-logging
+
   bot_tui:
     container_name: dydx-bot-tui
     # Not part of `make up` / `docker compose up -d` at all -- bot_tui is an

@@ -15,3 +15,10 @@ urwid==4.0.6
 # not "test" -- pytest isn't otherwise present in the image `make test` runs against.
 pytest>=7.4.4,<8.0.0
 pytest-asyncio==0.23.8
+# data_api's read-only FastAPI service (Story 12.1).
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+# TestClient's transport -- a separate install path from the httpx already pinned in
+# the top-level pyproject.toml's dev dependency group, listed here too so data_api's
+# tests work inside this image without depending on that unrelated install.
+httpx==0.28.1

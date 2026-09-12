@@ -14,5 +14,6 @@ COPY troll/dydx_collector ./dydx_collector
 COPY troll/ml_signals ./ml_signals
 COPY troll/ranking_engine ./ranking_engine
 COPY troll/bot_tui ./bot_tui
+COPY troll/data_api ./data_api
 
 CMD ["python3", "-m", "dydx_collector.collector"]
