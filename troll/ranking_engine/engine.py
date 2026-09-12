@@ -45,7 +45,6 @@ from ml_signals.indicators import microprice as calc_microprice
 from ml_signals.indicators import mid_price as calc_mid_price
 from ml_signals.indicators import spread as calc_spread
 from ml_signals.indicators import trade_aggregates
-from ml_signals.indicators import volume_delta as calc_volume_delta
 from ranking_engine import metrics_store
 from ranking_engine.volatility import VolatilityTracker
 
@@ -128,6 +127,14 @@ _OFI_GAP_NS: int = 3_000_000_000
 # trade_aggregates() (cvd/avg_trade_size) and the fast live-tick volatility stdev
 # below. Relocated from dashboard.py's _second_rolling.
 _SECOND_ROLLING: dict[str, deque] = {}
+
+# volume_delta's own window, in snapshots -- deliberately shorter than CVD's full
+# 300s _SECOND_ROLLING window. A single-snapshot (1s) delta was the original design,
+# but almost never lands on a second with a trade, so it read as +0.00 on every
+# instrument, always (confirmed live: 0/29 nonzero rows on the deployed dashboard,
+# 2026-09-11). 60s is short enough to stay visibly distinct from CVD's smoother 300s
+# figure while aggregating enough ticks to actually surface a nonzero delta.
+_VOLUME_DELTA_WINDOW: int = 60
 
 # Latest catalog-derived slow-loop snapshot per instrument (price/pct_1h/pct_24h/
 # volatility) -- relocated from dashboard's _LIVE_SLOW; refreshed every
@@ -286,6 +293,9 @@ def _fast_metrics_for(iid: str) -> dict:
     """Re-shape one instrument's already-updated tracker state + rolling window into
     the live-tick fields of a rankings:live rank entry. Pure read of state
     _ingest_snapshot_batch already maintains -- computes nothing new itself.
+
+    "volume_delta" is buy-sell volume summed over the last _VOLUME_DELTA_WINDOW
+    snapshots, not a single tick -- see that constant's own comment for why.
     """
     snapshots = list(_SECOND_ROLLING.get(iid, ()))
     latest = snapshots[-1] if snapshots else None
@@ -301,6 +311,11 @@ def _fast_metrics_for(iid: str) -> dict:
         trade_aggregates(snapshots) if snapshots else (0.0, 0.0, 0, 0)
     )
     total_cnt = buy_cnt + sell_cnt
+
+    recent = snapshots[-_VOLUME_DELTA_WINDOW:]
+    recent_buy_vol, recent_sell_vol, _, _ = (
+        trade_aggregates(recent) if recent else (0.0, 0.0, 0, 0)
+    )
 
     mid = calc_mid_price(latest) if latest is not None else None
     microprice_value = calc_microprice(latest) if latest is not None else None
@@ -328,7 +343,7 @@ def _fast_metrics_for(iid: str) -> dict:
         ),
         "spread": calc_spread(latest) if latest is not None else None,
         "cvd": buy_vol - sell_vol,
-        "volume_delta": calc_volume_delta(latest) if latest is not None else None,
+        "volume_delta": (recent_buy_vol - recent_sell_vol) if snapshots else None,
         "buy_count": buy_cnt,
         "sell_count": sell_cnt,
         "avg_trade_size": (buy_vol + sell_vol) / total_cnt if total_cnt > 0 else None,

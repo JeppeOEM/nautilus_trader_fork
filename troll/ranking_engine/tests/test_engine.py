@@ -364,7 +364,9 @@ def test_current_ranks_includes_live_tick_fields_from_ingested_snapshots() -> No
     assert row["spread"] == 1.0  # last ingested snap: 102.0 - 101.0
     assert row["price"] == 101.5  # last ingested snap mid: (101.0 + 102.0) / 2
     assert row["cvd"] == 4.0  # (3+2) buy - (1+0) sell across both snapshots
-    assert row["volume_delta"] == 2.0  # last snap only: 2.0 - 0.0
+    # 60s-windowed, not last-snap-only (both snaps fall inside the window here):
+    # (3+2) buy - (1+0) sell across both snapshots, same as cvd.
+    assert row["volume_delta"] == 4.0
     assert row["buy_count"] == 3  # summed across both snapshots: 2 + 1
     assert row["sell_count"] == 1  # summed across both snapshots: 1 + 0
     assert row["avg_trade_size"] == 1.5  # (5.0 buy + 1.0 sell) / (3 buy_cnt + 1 sell_cnt)

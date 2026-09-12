@@ -251,7 +251,7 @@ _COIN_DETAIL_INDICATOR_GROUPS: list[tuple[str, list[tuple[str, str, int]]]] = [
         ("ofi(10)", "ofi_10", _MIN_INDICATOR_DECIMALS),
         ("ofi(10) z", "ofi_10_z", _MIN_INDICATOR_DECIMALS),
         ("cvd", "cvd", _MIN_INDICATOR_DECIMALS),
-        ("volume delta", "volume_delta", _MIN_INDICATOR_DECIMALS),
+        ("volume delta (60s)", "volume_delta", _MIN_INDICATOR_DECIMALS),
         ("buy count", "buy_count", 0),
         ("sell count", "sell_count", 0),
         ("avg trade size", "avg_trade_size", _MIN_INDICATOR_DECIMALS),
