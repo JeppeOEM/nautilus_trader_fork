@@ -20,26 +20,29 @@ against a real running dashboard app (aiohttp TestServer) and a real running dat
 app (a genuinely bound uvicorn server -- not FastAPI's TestClient/httpx ASGI transport,
 which aiohttp.ClientSession cannot reach; see the story's Design Notes):
 
-1. DATA_API_URL unset -> every one of the 4 call sites behaves exactly as before this
+1. DATA_API_URL unset -> every one of the 5 call sites behaves exactly as before this
    story: `_fetch_json` is never invoked (proven by making it raise if called).
 2. DATA_API_URL set to a running data_api instance -> each call site's output matches
    what local mode produces for the same seeded catalog/metrics data.
 
-Three of the four call sites (`/api/rank_history/{id}`, `/data/coin/{id}/lines`,
-`/data/coin/{id}/microfeatures`) return plain JSON, so local-vs-remote output is compared
-byte-for-byte via the same running dashboard app (toggling DATA_API_URL between two
-requests). The remaining one (`/history/{id}`) renders Plotly HTML, which embeds a fresh
-random div id on every call (`fig.to_html()` is not deterministic even for two calls with
-identical input -- verified empirically) -- for that one, the *data fed into the shared
-render helper* (`_history_page_from_rows`) is captured via a spy and compared instead,
-which is the actual claim Story 12.2 makes ("output matches local mode for the same
-seeded data"): rendering itself is already covered by test_dashboard_chart.py's existing
-tests.
+Four of the five call sites (`/api/rank_history/{id}`, `/data/coin/{id}/lines`,
+`/data/coin/{id}/candles`, `/data/coin/{id}/microfeatures`) return plain JSON, so
+local-vs-remote output is compared byte-for-byte via the same running dashboard app
+(toggling DATA_API_URL between two requests). The remaining one (`/history/{id}`) renders
+Plotly HTML, which embeds a fresh random div id on every call (`fig.to_html()` is not
+deterministic even for two calls with identical input -- verified empirically) -- for
+that one, the *data fed into the shared render helper* (`_history_page_from_rows`) is
+captured via a spy and compared instead, which is the actual claim Story 12.2 makes
+("output matches local mode for the same seeded data"): rendering itself is already
+covered by test_dashboard_chart.py's existing tests.
 
-`/chart/{id}` itself is no longer one of the 4 remote call sites (Story 14.2): the page
+`/chart/{id}` itself is no longer one of the remote call sites (Story 14.2): the page
 shell it returns no longer depends on any chart-series data, local or remote -- that data
-now comes from a client-side fetch of `/data/coin/{id}/microfeatures` after the page is
-already on screen, which is call site #4 above.
+now comes from client-side fetches of `/data/coin/{id}/candles` and
+`/data/coin/{id}/microfeatures` after the page is already on screen (call sites #3 and
+#4 above). `/data/coin/{id}/candles` was, until the candlestick-empty-in-remote-mode fix,
+the one call site that never got a DATA_API_URL branch at all -- see
+test_remote_candles_matches_local_response.
 
 A third claim, from the I/O matrix's "data_api unreachable" row, is also proven here
 (not just asserted in `_fetch_json`'s docstring, per code review pass): a genuinely
@@ -102,6 +105,13 @@ def _seeded_paths(tmp_path: Path) -> tuple[str, str]:
                 sell_volume=0.5,
                 buy_count=1,
                 sell_count=1,
+                # OHLC of actual trades in this second -- only used by the candles
+                # call site's aggregate_ohlc path (test_remote_candles_matches_local_response
+                # below); other tests reading this fixture don't touch these fields.
+                open_price=100.5 + i,
+                high_price=101.0 + i,
+                low_price=100.0 + i,
+                close_price=100.8 + i,
                 ts_event=1_000_000_000 + i * 1_000_000_000,
                 ts_init=1_000_000_000 + i * 1_000_000_000,
             )
@@ -190,7 +200,7 @@ async def test_data_api_url_unset_never_calls_fetch_json(
 ) -> None:
     """
     The hard byte-for-byte-identical constraint: with DATA_API_URL unset, none of the
-    4 call sites may take the remote branch at all.
+    5 call sites may take the remote branch at all.
     """
     catalog_path, db_path = _seeded_paths
     monkeypatch.setattr(dashboard_module, "CATALOG_PATH", catalog_path)
@@ -217,6 +227,11 @@ async def test_data_api_url_unset_never_calls_fetch_json(
         )
         assert resp.status == 200
         resp = await client.get(
+            f"/data/coin/{_IID}/candles",
+            params={"start": start_str, "end": end_str, "bar": "60"},
+        )
+        assert resp.status == 200
+        resp = await client.get(
             f"/data/coin/{_IID}/microfeatures",
             params={"start": start_str, "end": end_str},
         )
@@ -238,7 +253,7 @@ async def test_remote_mode_surfaces_data_api_outage_as_error_not_empty_result(
     monkeypatch.setattr(dashboard_module, "METRICS_DB_PATH", db_path)
 
     # A closed loopback socket's just-freed port -- connection refused immediately, no
-    # need to wait out _get_http_session's 10s request timeout.
+    # need to wait out _get_http_session's request timeout.
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     sock.bind(("127.0.0.1", 0))
     dead_port = sock.getsockname()[1]
@@ -381,4 +396,45 @@ async def test_remote_lines_matches_local_response(
         remote_body = json.loads(await resp.text())
 
     assert local_body["rows"], "seeded catalog snapshots must actually produce rows"
+    assert remote_body == local_body
+
+
+@pytest.mark.asyncio
+async def test_remote_candles_matches_local_response(
+    monkeypatch: pytest.MonkeyPatch,
+    _seeded_paths: tuple[str, str],
+    _data_api_url: str,
+) -> None:
+    """
+    coin_candles_handler was, until now, the one call site never wired to DATA_API_URL --
+    it always read CATALOG_PATH directly, so a desktop running the documented
+    troll-web/_troll_dashboard_ensure remote-tunnel setup (real DATA_API_URL, but a
+    stale/empty *local* catalog) got an always-empty candlestick pane on /chart/{id}'s
+    new default-load path (Story 14.1's _loadDefaultCandleWindow), even with plenty of
+    real data available through the tunnel. Same byte-for-byte comparison pattern as
+    lines above -- plain JSON, no Plotly involved.
+    """
+    catalog_path, _db_path = _seeded_paths
+    monkeypatch.setattr(dashboard_module, "CATALOG_PATH", catalog_path)
+    monkeypatch.setattr(dashboard_module, "DATA_API_URL", "")
+
+    start_str, end_str = _epoch_window_query(0, 3600)
+    app = dashboard_module.make_app("redis://127.0.0.1:6379", catalog_path)
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.get(
+            f"/data/coin/{_IID}/candles",
+            params={"start": start_str, "end": end_str, "bar": "60"},
+        )
+        assert resp.status == 200
+        local_body = json.loads(await resp.text())
+
+        monkeypatch.setattr(dashboard_module, "DATA_API_URL", _data_api_url)
+        resp = await client.get(
+            f"/data/coin/{_IID}/candles",
+            params={"start": start_str, "end": end_str, "bar": "60"},
+        )
+        assert resp.status == 200
+        remote_body = json.loads(await resp.text())
+
+    assert local_body["candles"], "seeded catalog snapshots' OHLC fields must produce candles"
     assert remote_body == local_body

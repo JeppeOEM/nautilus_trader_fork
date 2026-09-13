@@ -94,3 +94,35 @@ def aggregate_ohlc(
         )
         for bucket_key, members in sorted(buckets.items())
     ]
+
+
+def candle_dicts_from_snapshots(snapshots: list, period_seconds: int) -> list[dict]:
+    """
+    Aggregate DydxSecondSnapshot-like objects' per-second OHLC into JSON-ready candle dicts.
+
+    Accepts anything with .ts_event/.open_price/.high_price/.low_price/.close_price/
+    .buy_volume/.sell_volume attributes -- both dashboard.py's local-mode catalog.query()
+    results and data_api's query_second_snapshots() results satisfy this, so one function
+    serves both without a dict round-trip.
+
+    Shared so the aggregation runs exactly once, server-side (on whichever box actually
+    holds the catalog), and only the resulting handful of candle bars ever crosses the
+    network -- not the full per-snapshot order-book depth (bid/ask price/size arrays,
+    up to 20 levels each) that /catalog/snapshots returns for Lines mode. Routing candles
+    through that endpoint (an earlier fix, before this one) was itself the bug: a 4-hour
+    window's snapshots serialize to ~12MB of mostly-unused order-book depth, which over an
+    SSH tunnel took 30-60s to transfer -- consistently exceeding any sane client timeout.
+    The aggregated candles for the same window are a few KB.
+    """
+    raw = [
+        (s.ts_event, s.open_price, s.high_price, s.low_price, s.close_price, s.buy_volume + s.sell_volume)
+        for s in snapshots
+        if s.close_price is not None
+    ]
+    if not raw:
+        return []
+    candle_data = aggregate_ohlc(raw, period_seconds=period_seconds)
+    return [
+        {"t": c.ts_open // 1_000_000, "o": c.open, "h": c.high, "l": c.low, "c": c.close, "v": c.volume}
+        for c in candle_data
+    ]

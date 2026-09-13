@@ -44,14 +44,25 @@ _HARNESS_TEMPLATE = r"""
 "use strict";
 const assert = require("assert");
 
-function _dummyEl(){ return { innerHTML:"", style:{}, value:"", on:function(){}, removeAllListeners:function(){} }; }
-global.document = { getElementById: function(){ return _dummyEl(); } };
+var _els={};
+function _dummyEl(id){
+  if(!_els[id])_els[id]={innerHTML:"",style:{},value:"",on:function(){},removeAllListeners:function(){}};
+  return _els[id];
+}
+global.document = { getElementById: function(id){ return _dummyEl(id); } };
 global.window = {};
 global.history = { pushState: function(){} };
 global.location = { pathname: "/", search: "" };
 var _relayoutCalls = [];
-global.Plotly = { react: function(){}, newPlot: function(){}, purge: function(){},
-  relayout: function(id, upd){ _relayoutCalls.push({id: id, upd: upd}); } };
+// react/newPlot stamp .data on the target div, purge clears it -- mirrors real Plotly.js
+// closely enough for _syncChartXRange/_loadDefaultCandleWindow's "has this div actually
+// been plotted yet" guards (el.data) to behave the same as they do in a real browser.
+global.Plotly = {
+  react: function(id,traces){ _dummyEl(id).data=traces; },
+  newPlot: function(id,traces){ _dummyEl(id).data=traces; },
+  purge: function(id){ _dummyEl(id).data=null; },
+  relayout: function(id, upd){ _relayoutCalls.push({id: id, upd: upd}); }
+};
 global.fetch = function(){ return Promise.resolve({ ok:true, json: function(){ return Promise.resolve({rows:[], candles:[], ticks:[]}); } }); };
 
 // Globals _LIVE_CHART_JS expects its embedding page to declare (matches _build_chart_page_html's
@@ -81,13 +92,13 @@ __DASHBOARD_JS__
 
   // -- _loadOlderChunk: exhaustion on an empty response -----------------------------------
   _chartState = {iid:"A", mode:"candles", barSeconds:60, rows:[{t:1000,o:1,h:1,l:1,c:1}], cursorStart:1000, exhaustedLeft:false, loading:false};
-  global.fetch = function(){ return Promise.resolve({ json: function(){ return Promise.resolve({candles:[]}); } }); };
+  global.fetch = function(){ return Promise.resolve({ ok:true, json: function(){ return Promise.resolve({candles:[]}); } }); };
   await _loadOlderChunk();
   assert.strictEqual(_chartState.exhaustedLeft, true, "empty response must mark exhaustedLeft");
 
   // -- _loadOlderChunk: truncated response advances the cursor only to what was returned -
   _chartState = {iid:"A", mode:"lines", barSeconds:60, rows:[{t:100000,bid:1,ask:1,mid:1,micro:1,price:1}], cursorStart:100000, exhaustedLeft:false, loading:false};
-  global.fetch = function(){ return Promise.resolve({ json: function(){ return Promise.resolve({rows:[{t:90000,bid:1,ask:1,mid:1,micro:1,price:1}], truncated:true}); } }); };
+  global.fetch = function(){ return Promise.resolve({ ok:true, json: function(){ return Promise.resolve({rows:[{t:90000,bid:1,ask:1,mid:1,micro:1,price:1}], truncated:true}); } }); };
   await _loadOlderChunk();
   assert.strictEqual(_chartState.cursorStart, 90000, "a truncated response must not advance the cursor past data it didn't return");
   assert.strictEqual(_chartState.exhaustedLeft, false, "a truncated-but-nonempty response must not be treated as exhausted");
@@ -100,7 +111,7 @@ __DASHBOARD_JS__
   var pending = _loadOlderChunk();
   var newState = {iid:"B", mode:"candles", barSeconds:60, rows:[{t:5000,o:2,h:2,l:2,c:2}], cursorStart:5000, exhaustedLeft:false, loading:false};
   _chartState = newState;  // simulate a coin switch while the older-chunk fetch is in flight
-  resolveFetch({ json: function(){ return Promise.resolve({candles:[{t:500,o:9,h:9,l:9,c:9}]}); } });
+  resolveFetch({ ok:true, json: function(){ return Promise.resolve({candles:[{t:500,o:9,h:9,l:9,c:9}]}); } });
   await pending;
   assert.strictEqual(_chartState, newState, "stale in-flight fetch must not clobber a superseding chart state");
   assert.strictEqual(_chartState.rows.length, 1, "stale fetch result must not have been spliced into the new state");
@@ -140,6 +151,21 @@ __DASHBOARD_JS__
   var expectedVisStartMs = fixedNowMs - barMs * _CANDLE_VISIBLE_BARS;
   assert.ok(Math.abs(visRange[0].getTime() - expectedVisStartMs) < 1000, "visible range must start _CANDLE_VISIBLE_BARS bars back");
   assert.ok(Math.abs(visRange[1].getTime() - fixedNowMs) < 1000, "visible range must end at now");
+
+  // -- _loadDefaultCandleWindow: an EMPTY window (no candles in range) must not call
+  // Plotly.relayout at all -- _renderCandleChart never calls Plotly.react on 'live-chart'
+  // when there's no data, so the div has no internal Plotly state yet; relaying it out
+  // anyway throws inside plotly.js itself (real repro: "Cannot read properties of
+  // undefined (reading '_guiEditing')"), an uncaught promise rejection that silently kills
+  // the load -- the actual root cause of the reported "candlestick chart never appears".
+  _relayoutCalls.length = 0;
+  delete _els["live-chart"];  // simulate a div that has genuinely never been plotted
+  global.fetch = function(){ return Promise.resolve({ ok:true, json: function(){ return Promise.resolve({candles:[]}); } }); };
+  Date.now = function(){ return fixedNowMs; };
+  await _loadDefaultCandleWindow();
+  Date.now = realDateNow;
+  assert.strictEqual(_relayoutCalls.length, 0,
+    "must not call Plotly.relayout on a live-chart div that was never plotted (empty window)");
 
   console.log("OK");
 })().then(function(){ process.exit(0); }).catch(function(e){ console.error(e); process.exit(1); });
@@ -505,7 +531,7 @@ assert.strictEqual(_els["micro-panel-spinner"].style.display, "none", "spinner m
 // -- _loadMicroPanel: fetches the microfeatures endpoint and renders the result's "series".
 global.fetch = function(url){
   assert.ok(url.indexOf("/data/coin/test-coin/microfeatures") === 0, "must hit the microfeatures endpoint for the given iid");
-  return Promise.resolve({ json: function(){ return Promise.resolve({series:{spread:[{time:1,value:0.05}]},count:1}); } });
+  return Promise.resolve({ ok:true, json: function(){ return Promise.resolve({series:{spread:[{time:1,value:0.05}]},count:1}); } });
 };
 await _loadMicroPanel("test-coin", 0, 1000);
 assert.strictEqual(_captured.traces.length, 1, "_loadMicroPanel must render whatever series the endpoint returns");
@@ -514,6 +540,23 @@ assert.strictEqual(_captured.traces[0].name, "spread");
 // -- Every synced chart id from _SYNCED_CHART_IDS still includes micro-panel (Story 14.2
 // only changed how it's populated, not its participation in cross-panel pan/zoom sync).
 assert.ok(_SYNCED_CHART_IDS.indexOf("micro-panel") >= 0, "micro-panel must remain a synced chart id");
+
+// -- _loadMicroPanel: a non-OK HTTP response must surface the real status/body via
+// setStatus, not a cryptic "unexpected end of data" JSON.parse crash from r.json() on an
+// error page (the actual bug this guarded against) -- and must hide the spinner, not leave
+// it spinning forever over a panel that will never render (the "chart never appears" bug).
+var _statusMsgs=[];
+setStatus=function(s){_statusMsgs.push(s);};
+_els["micro-panel-spinner"].style.display = "";
+global.fetch = function(){
+  return Promise.resolve({ ok:false, status:500, text: function(){ return Promise.resolve("boom"); } });
+};
+await _loadMicroPanel("test-coin", 0, 1000);
+assert.ok(_statusMsgs.some(function(s){return s.indexOf("500") >= 0 && s.indexOf("boom") >= 0;}),
+  "non-OK response must report HTTP status + body, not a JSON parse error: " + JSON.stringify(_statusMsgs));
+assert.strictEqual(_els["micro-panel-spinner"].style.display, "none",
+  "spinner must be hidden on load failure too, not just on success");
+
 console.error("ASSERTIONS_OK");
 
 })().then(function(){ process.exit(0); }).catch(function(e){ console.error(e); process.exit(1); });
@@ -525,6 +568,69 @@ def test_micro_panel_renders_client_side_from_fetched_series_and_hides_spinner()
         pytest.skip("node not installed")
     js = _extract_inline_script()
     harness = _MICRO_PANEL_HARNESS_TEMPLATE.replace("__DASHBOARD_JS__", js)
+    result = subprocess.run(
+        ["node", "-e", harness],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "ASSERTIONS_OK" in result.stderr
+
+
+_CANDLE_LOAD_FAILURE_HARNESS_TEMPLATE = r"""
+"use strict";
+const assert = require("assert");
+
+var _els={};
+function _dummyEl(id){
+  if(!_els[id])_els[id]={innerHTML:"",style:{},value:"",on:function(){},removeAllListeners:function(){}};
+  return _els[id];
+}
+global.document = { getElementById: function(id){ return _dummyEl(id); } };
+global.window = {};
+global.history = { pushState: function(){} };
+global.location = { pathname: "/", search: "" };
+global.Plotly = { react: function(){}, relayout: function(){}, purge: function(){}, newPlot: function(){} };
+global.fetch = function(){
+  return Promise.resolve({ ok:false, status:500, text: function(){ return Promise.resolve("catalog unavailable"); } });
+};
+
+var _coinIid="test-coin";var _coinMode="candles";var _coinBarSeconds=60;
+var _coinHistStart=null,_coinHistEnd=null;
+var _coinPanning=false,_chartState=null,_relayoutTimer=null,timer=null;
+var _MAX_CHUNK_MS=30*24*3600*1000;
+var _statusMsgs=[];
+function setStatus(s){_statusMsgs.push(s);}
+
+__DASHBOARD_JS__
+
+// The HTML shell renders the spinner visible before any fetch resolves (see
+// _build_chart_page_html) -- simulate that starting state.
+_dummyEl("live-chart-spinner").style.display = "";
+
+(async function(){
+// -- _loadDefaultCandleWindow (the bare-page-visit path, _fetchHistCoin underneath): a
+// failed candle fetch must hide the live-chart spinner and report the real HTTP
+// status/body via setStatus -- not silently leave the spinner covering a permanently
+// blank chart while the only trace of the failure is a JSON.parse crash nobody sees
+// (the actual "candlestick chart never appears" bug this guards against).
+await _loadDefaultCandleWindow();
+assert.ok(_statusMsgs.some(function(s){return s.indexOf("500")>=0 && s.indexOf("catalog unavailable")>=0;}),
+  "must report real HTTP status/body, not a cryptic JSON parse error: "+JSON.stringify(_statusMsgs));
+assert.strictEqual(_els["live-chart-spinner"].style.display, "none",
+  "spinner must be hidden on load failure -- otherwise it masks the chart forever");
+console.error("ASSERTIONS_OK");
+})().then(function(){ process.exit(0); }).catch(function(e){ console.error(e); process.exit(1); });
+"""
+
+
+def test_candlestick_load_failure_hides_spinner_and_reports_real_error() -> None:
+    if shutil.which("node") is None:
+        pytest.skip("node not installed")
+    js = _extract_inline_script()
+    harness = _CANDLE_LOAD_FAILURE_HARNESS_TEMPLATE.replace("__DASHBOARD_JS__", js)
     result = subprocess.run(
         ["node", "-e", harness],
         capture_output=True,

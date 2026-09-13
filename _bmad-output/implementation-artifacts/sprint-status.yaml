@@ -1,5 +1,5 @@
 # generated: 2026-07-01
-# last_updated: 2026-07-24
+# last_updated: 2026-09-13
 # project: nautilus_trader_fork
 # project_key: NOKEY
 # tracking_system: file-system
@@ -155,9 +155,15 @@ development_status:
   # panel moved to a new client-fetched endpoint (/data/coin/{id}/microfeatures) with its
   # own loading spinner, fetched concurrently with (never blocking) the candlestick chart's
   # own fetch; cross-panel pan/zoom sync confirmed preserved.
-  epic-14: done
+  # Reopened 2026-09-13 for 14.3: 14.1's 120-bar default zoom was never actually durable --
+  # any active/saved indicator's async overlay repaint (_renderCandleTraces, no explicit
+  # xaxis.range) silently wipes it back to the full 240-bar buffered window. Root-caused and
+  # reproduced with a real node harness this session; 14.1/14.2 (and every prior chart-page
+  # story) never verified in a real browser, which is why this shipped unnoticed.
+  epic-14: in-progress
   14-1-chart-default-120-bar-window-with-scroll-back-preload: done
   14-2-async-chart-page-load-with-panel-spinners: done
+  14-3-preserve-120-bar-zoom-through-indicator-overlay-repaints: ready-for-dev
 
 action_items:
   - epic: 1

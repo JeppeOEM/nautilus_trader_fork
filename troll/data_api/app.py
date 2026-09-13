@@ -35,6 +35,7 @@ from fastapi import FastAPI
 from dydx_collector.second_snapshot import DydxSecondSnapshot
 from ml_signals import catalog_stats as _catalog_stats
 from ml_signals import chart_data as _chart_data
+from ml_signals.candles import candle_dicts_from_snapshots
 from ranking_engine import metrics_store
 
 
@@ -83,3 +84,20 @@ def _snapshot_to_dict(snapshot: DydxSecondSnapshot) -> dict:
 def catalog_snapshots(iid: str, start_ns: int, end_ns: int) -> list[dict]:
     snapshots = _catalog_stats.query_second_snapshots(CATALOG_PATH, iid, start_ns, end_ns)
     return [_snapshot_to_dict(s) for s in snapshots]
+
+
+@app.get("/catalog/candles/{iid}")
+def catalog_candles(
+    iid: str, start_ns: int, end_ns: int, bar_seconds: int = 60,
+) -> dict[str, list[dict]]:
+    """
+    Dedicated lean candles route -- not a client of /catalog/snapshots above.
+
+    That route returns full order-book depth (bid/ask price+size arrays, up to 20
+    levels each) needed for Lines mode; a candlestick pane only needs 4 scalar OHLC
+    fields per second. For a 4-hour window /catalog/snapshots serializes to ~12MB,
+    which took 30-60s over an SSH tunnel -- this route aggregates to candle bars here,
+    on the box that holds the catalog, so only a few KB crosses the network.
+    """
+    snapshots = _catalog_stats.query_second_snapshots(CATALOG_PATH, iid, start_ns, end_ns)
+    return {"candles": candle_dicts_from_snapshots(snapshots, bar_seconds)}

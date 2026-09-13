@@ -52,10 +52,17 @@ from urllib.parse import quote
 
 import aiohttp
 import pandas as pd
+import plotly
 import plotly.graph_objects as go
 import redis.asyncio as aioredis
 from aiohttp import web
 from ranking_engine import metrics_store
+
+# Served locally instead of the plotly CDN -- `plotly` is already an installed
+# dependency (used for go.Figure below) and ships this exact bundle as package data,
+# so no new dependency, no runtime fetch to an external host.
+_PLOTLY_JS_PATH = Path(plotly.__file__).parent / "package_data" / "plotly.min.js"
+_PLOTLY_JS_URL = "/static/plotly.min.js"
 
 from ml_signals import catalog_stats as _catalog_stats
 from ml_signals import chart_data as _chart_data
@@ -227,7 +234,7 @@ function onBarChange(){
 function _refreshPanningWindow(){
   _fetchLiveWindow(_coinIid,_coinMode,_coinBarSeconds)
     .then(function(rows){_setChartRows(_coinIid,_coinMode,_coinBarSeconds,rows);})
-    .catch(function(err){setStatus('Error: '+err);});
+    .catch(function(err){setStatus('Error: '+err);_hideSpinner('live-chart');});
 }
 function loadCoinDateRange(){
   var s=document.getElementById('coin-start'),e=document.getElementById('coin-end');
@@ -249,13 +256,17 @@ function resetCoinLive(){
 // Resolve to {rows,truncated} -- truncated means the server clamped the query window
 // and/or the row cap, so the caller must not advance its paging cursor past what it
 // actually got back (silently skipping data otherwise -- see _loadOlderChunk).
+function _checkFetchOk(r){
+  if(!r.ok)return r.text().then(function(t){throw new Error('HTTP '+r.status+': '+t.slice(0,200));});
+  return r.json();
+}
 function _fetchCandlesWindow(iid,startMs,endMs,barSeconds){
   return fetch('/data/coin/'+encodeURIComponent(iid)+'/candles?start='+encodeURIComponent(_fmtDTL(new Date(startMs)))+'&end='+encodeURIComponent(_fmtDTL(new Date(endMs)))+'&bar='+barSeconds)
-    .then(function(r){return r.json();}).then(function(d){return {rows:d.candles,truncated:false};});
+    .then(_checkFetchOk).then(function(d){return {rows:d.candles,truncated:false};});
 }
 function _fetchLinesWindow(iid,startMs,endMs){
   return fetch('/data/coin/'+encodeURIComponent(iid)+'/lines?start='+encodeURIComponent(_fmtDTL(new Date(startMs)))+'&end='+encodeURIComponent(_fmtDTL(new Date(endMs))))
-    .then(function(r){return r.json();}).then(function(d){return {rows:d.rows,truncated:!!d.truncated};});
+    .then(_checkFetchOk).then(function(d){return {rows:d.rows,truncated:!!d.truncated};});
 }
 function _fetchModeWindow(mode,iid,startMs,endMs,barSeconds){
   if(mode==='lines')return _fetchLinesWindow(iid,startMs,endMs);
@@ -266,10 +277,10 @@ function _fetchModeWindow(mode,iid,startMs,endMs,barSeconds){
 function _fetchLiveWindow(iid,mode,bar){
   if(mode==='lines'){
     return fetch('/data/coin/'+encodeURIComponent(iid)+'/lines')
-      .then(function(r){return r.json();}).then(function(d){return d.rows;});
+      .then(_checkFetchOk).then(function(d){return d.rows;});
   }
   return fetch('/data/coin/'+encodeURIComponent(iid)+'/candles?bar='+bar)
-    .then(function(r){return r.json();}).then(function(d){return d.candles;});
+    .then(_checkFetchOk).then(function(d){return d.candles;});
 }
 function _fetchHistCoin(iid,start,end){
   setStatus('Loading…');
@@ -280,7 +291,7 @@ function _fetchHistCoin(iid,start,end){
       _setChartRows(iid,_coinMode,bar,result.rows);
       setStatus('Loaded '+result.rows.length+' rows'+(result.truncated?' (truncated -- window too wide)':''));
     })
-    .catch(function(err){setStatus('Error: '+err);});
+    .catch(function(err){setStatus('Error: '+err);_hideSpinner('live-chart');});
 }
 // Bare-page-visit default (no Load, no Live): a fixed catalog-backed window sized in
 // bars, not wall-clock time -- see _CANDLE_VISIBLE_BARS/_CANDLE_BUFFER_BARS above. Reuses
@@ -295,6 +306,15 @@ function _loadDefaultCandleWindow(){
   var b=document.getElementById('btn-live');
   if(b){b.style.color='#8b949e';b.style.borderColor='#444';}
   return _fetchHistCoin(_coinIid,_coinHistStart,_coinHistEnd).then(function(){
+    // An empty window (no candles in range -- e.g. a fresh instrument, a gap, or a wider
+    // buffered range than the catalog actually has) means _renderCandleChart never called
+    // Plotly.react on 'live-chart' at all, so it has no internal Plotly state yet.
+    // Plotly.relayout on a never-plotted div throws (TypeError reading "_guiEditing" of
+    // undefined) -- an uncaught promise rejection that aborts silently, which is exactly
+    // what made the chart "never appear": no data AND no visible error. Guard the same way
+    // _syncChartXRange already does for its sync targets.
+    var liveEl=document.getElementById('live-chart');
+    if(!liveEl||!liveEl.data||!liveEl.data.length)return;
     var visStartMs=nowMs-bar*1000*_CANDLE_VISIBLE_BARS;
     Plotly.relayout('live-chart',{'xaxis.range':[new Date(visStartMs),new Date(nowMs)]});
   });
@@ -739,7 +759,7 @@ function _syncChartXRange(sourceId,rng){
   }finally{_syncingXRange=false;}
 }
 function _renderCandleChart(candles){
-  if(!candles||!candles.length)return;
+  if(!candles||!candles.length){_hideSpinner('live-chart');return;}
   _lastCandles=candles;
   _refreshActiveIndicators();
 }
@@ -797,7 +817,7 @@ function _wireChartClick(){
   }
 }
 function _renderLineChart(rows){
-  if(!rows||!rows.length)return;
+  if(!rows||!rows.length){_hideSpinner('live-chart');return;}
   var x=rows.map(function(r){return new Date(r.t);});
   Plotly.react('live-chart',[
     {type:'scattergl',mode:'lines',x:x,y:rows.map(function(r){return r.bid;}),
@@ -831,11 +851,11 @@ function _fetchMicroFeatures(iid,startMs,endMs){
   return fetch('/data/coin/'+encodeURIComponent(iid)+'/microfeatures'
     +'?start='+encodeURIComponent(_fmtDTL(new Date(startMs)))
     +'&end='+encodeURIComponent(_fmtDTL(new Date(endMs))))
-    .then(function(r){return r.json();});
+    .then(_checkFetchOk);
 }
 function _loadMicroPanel(iid,startMs,endMs){
   return _fetchMicroFeatures(iid,startMs,endMs).then(function(d){_renderMicroPanel(d.series||{});})
-    .catch(function(err){setStatus('Micro-panel error: '+err);});
+    .catch(function(err){setStatus('Micro-panel error: '+err);_hideSpinner('micro-panel');});
 }
 function _renderMicroPanel(series){
   var rowDomains=[[0.7744,1],[0.5288,0.7544],[0.2738,0.5088],[0,0.2538]];
@@ -904,7 +924,7 @@ td:first-child,th:first-child{text-align:left}
 <p><a onclick="showRankings();return false" href="/">Rankings</a> | <a href="/live">Live signals</a> | <a href="/docs">Docs</a></p>
 <div id="status">Loading…</div>
 <div id="app"></div>
-<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+<script src="/static/plotly.min.js"></script>
 <script>
 // "u lean" (microprice_lean) is deliberately absent here -- it lives on the coin-detail
 // page only (IND_GROUPS below), not the cross-instrument ranking table (ranking_columns.py
@@ -1204,8 +1224,16 @@ def _get_http_session() -> aiohttp.ClientSession:
         # Explicit total timeout (aiohttp's own default is 5 minutes) -- per DATA-01,
         # a hung/half-open tunnel to data_api must fail fast and visibly, not leave an
         # interactive page request hanging for minutes with no feedback (review finding,
-        # Story 12.2 code review pass).
-        _http_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10))
+        # Story 12.2 code review pass). Originally 10s, raised to 60s after Story 14.2
+        # moved /catalog/chart-series's caller (coin_microfeatures_handler) to a
+        # client-side background fetch: measured real-world latency for that endpoint's
+        # 4-hour default window is ~32s (a real Parquet scan over ~14,400 snapshots
+        # across ~240 files), which a 10s cap always killed -- 504 on every load, not a
+        # hung-tunnel failure at all. None of these 4 call sites are on the synchronous
+        # page-load path anymore, so a longer cap costs nothing; it still fails a
+        # genuinely hung tunnel visibly, just not before a legitimately slow-but-working
+        # query gets the chance to finish.
+        _http_session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=60))
     return _http_session
 
 
@@ -1236,7 +1264,7 @@ def _history_page_from_rows(symbol: str, rows: list[dict]) -> str:
 
     ts = [pd.Timestamp(r["ts"], unit="ns", tz="UTC") for r in rows]
     body = f"<h1>{html.escape(symbol)} — 31-day history</h1>"
-    plotlyjs = "cdn"
+    plotlyjs = _PLOTLY_JS_URL
 
     for field, label, *_ in [*RANKING_COLS, *_HISTORY_ONLY_COLS]:
         vals = [r.get(field) for r in rows]
@@ -1351,7 +1379,13 @@ def _build_chart_page_html(symbol: str, start_ms: int, end_ms: int, explicit_ran
         )
         + "</script>"
     )
-    body = form + widget + f"<script>{_LIVE_CHART_JS}</script>" + init_script
+    body = (
+        form
+        + widget
+        + f'<script src="{_PLOTLY_JS_URL}"></script>'
+        + f"<script>{_LIVE_CHART_JS}</script>"
+        + init_script
+    )
     return _page(
         f"{sym} chart", body, refresh_seconds=86400
     )  # no auto-refresh; user controls via form
@@ -1397,50 +1431,29 @@ def _live_candles_json(iid: str, bar_seconds: int) -> str:
 
 def _historical_candles_json(iid: str, start_ms: int, end_ms: int, bar_seconds: int) -> str:
     """
-    Build OHLC candles from DydxSecondSnapshot's per-second trade OHLC fields.
+    Local-mode /chart/{id} candle data: read DydxSecondSnapshot records from the catalog.
 
-    Raw TradeTicks are no longer persisted (see troll/docs/DATA_DICTIONARY.md's
-    Retention section) -- DydxSecondSnapshot.open/high/low/close_price is the only
-    remaining record of traded price. Seconds with no trade (close_price is None)
-    contribute nothing; aggregate_ohlc combines the rest correctly across buckets
-    (max of highs, min of lows), unlike a flat trade-price bucketing.
+    Aggregation itself lives in ml_signals.candles.candle_dicts_from_snapshots, shared
+    with data_api's /catalog/candles route (remote mode, see coin_candles_handler) --
+    NOT with /catalog/snapshots's snapshot-dict shape. Candles only need 4 scalar OHLC
+    fields per second; /catalog/snapshots carries the full order-book depth (up to
+    20 bid/ask levels each) needed for Lines mode, which serializes to ~12MB for a
+    4-hour window -- routing candles through it (an earlier fix, before this one) was
+    itself the bug: transferring that over the SSH tunnel took 30-60s, well past any
+    sane client timeout. The aggregation now runs once, on whichever box holds the
+    catalog, and only the resulting handful of candle bars ever crosses the network.
     """
     from dydx_collector.second_snapshot import DydxSecondSnapshot
 
-    from ml_signals.candles import aggregate_ohlc as _aggregate
+    from ml_signals.candles import candle_dicts_from_snapshots
     from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
     catalog = ParquetDataCatalog(CATALOG_PATH)
-    start_ns = start_ms * 1_000_000
-    end_ns = end_ms * 1_000_000
-    results = catalog.query(DydxSecondSnapshot, identifiers=[iid], start=start_ns, end=end_ns)
+    results = catalog.query(
+        DydxSecondSnapshot, identifiers=[iid], start=start_ms * 1_000_000, end=end_ms * 1_000_000
+    )
     snapshots = [r.data if hasattr(r, "data") else r for r in results]
-    raw = [
-        (
-            s.ts_event,
-            s.open_price,
-            s.high_price,
-            s.low_price,
-            s.close_price,
-            s.buy_volume + s.sell_volume,
-        )
-        for s in snapshots
-        if s.close_price is not None
-    ]
-    if not raw:
-        return json.dumps({"candles": []})
-    candle_data = _aggregate(raw, period_seconds=bar_seconds)
-    candles = [
-        {
-            "t": c.ts_open // 1_000_000,
-            "o": c.open,
-            "h": c.high,
-            "l": c.low,
-            "c": c.close,
-            "v": c.volume,
-        }
-        for c in candle_data
-    ]
+    candles = candle_dicts_from_snapshots(snapshots, bar_seconds)
     return json.dumps({"candles": candles})
 
 
@@ -1591,7 +1604,7 @@ def _render_live_page() -> str:
         )
     fig.update_layout(title="Live strategy signals", xaxis_title="ts_event (ns)")
 
-    body = "<h1>Live signals</h1>" + fig.to_html(full_html=False, include_plotlyjs="cdn")
+    body = "<h1>Live signals</h1>" + fig.to_html(full_html=False, include_plotlyjs=_PLOTLY_JS_URL)
     return _page("ml_signals live", body, refresh_seconds=1)
 
 
@@ -1787,9 +1800,21 @@ async def coin_candles_handler(request: web.Request) -> web.Response:
     start_ms = _parse_query_ms(qs, "start")
     end_ms = _parse_query_ms(qs, "end")
     if start_ms is not None and end_ms is not None:
-        data = await asyncio.to_thread(
-            _historical_candles_json, symbol, start_ms, end_ms, bar_seconds
-        )
+        if DATA_API_URL:
+            # Dedicated lean route, not /catalog/snapshots (that one carries the full
+            # order-book depth needed for Lines mode -- ~12MB for a 4-hour window vs. a
+            # few KB of aggregated candle bars; see _historical_candles_json's docstring).
+            url = (
+                f"{DATA_API_URL}/catalog/candles/{quote(symbol, safe='')}"
+                f"?start_ns={start_ms * 1_000_000}&end_ns={end_ms * 1_000_000}"
+                f"&bar_seconds={bar_seconds}"
+            )
+            data_dict = await _fetch_json(_get_http_session(), url)
+            data = json.dumps(data_dict)
+        else:
+            data = await asyncio.to_thread(
+                _historical_candles_json, symbol, start_ms, end_ms, bar_seconds
+            )
     else:
         data = _live_candles_json(symbol, bar_seconds)
     return web.Response(text=data, content_type="application/json")
@@ -2192,6 +2217,11 @@ async def docs_handler(request: web.Request) -> web.Response:
     return web.Response(text=_DOCS_HTML, content_type="text/html")
 
 
+async def plotly_js_handler(request: web.Request) -> web.FileResponse:
+    """Serve plotly.js from the installed `plotly` package -- no CDN dependency."""
+    return web.FileResponse(_PLOTLY_JS_PATH)
+
+
 # --- background tasks ---
 
 
@@ -2322,6 +2352,7 @@ def make_app(redis_url: str, catalog_path: str) -> web.Application:
     app.router.add_get("/history/{id}", history_handler)
     app.router.add_get("/live", live_handler)
     app.router.add_get("/docs", docs_handler)
+    app.router.add_get(_PLOTLY_JS_URL, plotly_js_handler)
 
     return app
 

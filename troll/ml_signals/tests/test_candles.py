@@ -14,8 +14,24 @@
 # -------------------------------------------------------------------------------------------------
 """Self-check: candle bucketing produces correct OHLC per time bucket."""
 
+from types import SimpleNamespace
+
 from ml_signals.candles import aggregate_ohlc
 from ml_signals.candles import build_candles
+from ml_signals.candles import candle_dicts_from_snapshots
+
+
+def _snap(ts_event: int, close_price: float | None, buy_volume: float = 1.0, sell_volume: float = 0.5) -> SimpleNamespace:
+    """A DydxSecondSnapshot-shaped stand-in (attribute access, same as the real class)."""
+    return SimpleNamespace(
+        ts_event=ts_event,
+        open_price=close_price,
+        high_price=close_price,
+        low_price=close_price,
+        close_price=close_price,
+        buy_volume=buy_volume,
+        sell_volume=sell_volume,
+    )
 
 
 def test_buckets_two_periods_with_correct_ohlc() -> None:
@@ -71,9 +87,40 @@ def test_aggregate_ohlc_empty_input_produces_no_candles() -> None:
     assert aggregate_ohlc([], period_seconds=60) == []
 
 
+def test_candle_dicts_from_snapshots_skips_no_trade_seconds_and_shapes_json() -> None:
+    """
+    Shared by dashboard.py's local-mode candle handler and data_api's /catalog/candles
+    route (the fix for candles reading an empty local catalog / a ~12MB /catalog/snapshots
+    payload in DATA_API_URL remote mode) -- one aggregation, JSON-ready dict output.
+    A second with no trade (close_price=None) must contribute nothing, same as
+    aggregate_ohlc's own contract.
+    """
+    one_second = 1_000_000_000
+    snapshots = [
+        _snap(0, close_price=100.0),
+        _snap(10 * one_second, close_price=None),  # no trade this second -- skipped
+        _snap(30 * one_second, close_price=102.0),
+    ]
+
+    candles = candle_dicts_from_snapshots(snapshots, period_seconds=60)
+
+    assert len(candles) == 1
+    c = candles[0]
+    assert c["t"] == 0
+    assert (c["o"], c["h"], c["l"], c["c"]) == (100.0, 102.0, 100.0, 102.0)
+    assert c["v"] == 3.0  # two contributing seconds' buy_volume(1.0)+sell_volume(0.5) each
+
+
+def test_candle_dicts_from_snapshots_all_none_close_produces_no_candles() -> None:
+    snapshots = [_snap(0, close_price=None), _snap(1_000_000_000, close_price=None)]
+    assert candle_dicts_from_snapshots(snapshots, period_seconds=60) == []
+
+
 if __name__ == "__main__":
     test_buckets_two_periods_with_correct_ohlc()
     test_empty_input_produces_no_candles()
     test_aggregate_ohlc_combines_per_second_bars_correctly()
     test_aggregate_ohlc_empty_input_produces_no_candles()
+    test_candle_dicts_from_snapshots_skips_no_trade_seconds_and_shapes_json()
+    test_candle_dicts_from_snapshots_all_none_close_produces_no_candles()
     print("ok")
