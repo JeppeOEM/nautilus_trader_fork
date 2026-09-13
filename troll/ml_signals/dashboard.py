@@ -55,7 +55,6 @@ import pandas as pd
 import plotly.graph_objects as go
 import redis.asyncio as aioredis
 from aiohttp import web
-from plotly.subplots import make_subplots
 from ranking_engine import metrics_store
 
 from ml_signals import catalog_stats as _catalog_stats
@@ -63,6 +62,7 @@ from ml_signals import chart_data as _chart_data
 from ml_signals import chart_indicator_config as _chart_indicator_config
 from ml_signals import chart_indicators as _chart_indicators
 from ml_signals import custom_indicators as _custom_indicators
+from ml_signals import docs_page as _docs_page
 from ml_signals import ranking_columns as _ranking_columns
 from ml_signals.indicators import microprice as calc_microprice
 
@@ -76,7 +76,8 @@ CATALOG_PATH: str = os.environ.get("CATALOG_PATH", "troll/dydx_collector/catalog
 # in docker-compose.yml's dashboard service, mirroring the collector's own single `rw`
 # config mount.
 CHART_INDICATOR_CONFIG_PATH: str = os.environ.get(
-    "CHART_INDICATOR_CONFIG_PATH", "troll/ml_signals/chart_indicators.toml",
+    "CHART_INDICATOR_CONFIG_PATH",
+    "troll/ml_signals/chart_indicators.toml",
 )
 
 # Path to the shared SQLite metrics store -- ranking_engine is the sole writer (Task
@@ -86,7 +87,8 @@ CHART_INDICATOR_CONFIG_PATH: str = os.environ.get(
 # a single-file bind mount can't expose on a path shared with ranking_engine's own
 # read-write mount of the same store.
 METRICS_DB_PATH: str = os.environ.get(
-    "METRICS_DB_PATH", str(Path(CATALOG_PATH).parent / "metrics" / "metrics.db"),
+    "METRICS_DB_PATH",
+    str(Path(CATALOG_PATH).parent / "metrics" / "metrics.db"),
 )
 
 # Opt-in remote-data mode (Story 12.2): when unset (the default -- e.g. the VPS-hosted
@@ -113,7 +115,7 @@ _HISTORY_ONLY_COLS = _ranking_columns._HISTORY_ONLY_COLS
 
 _SERIES: dict[str, deque[tuple[int, float]]] = defaultdict(lambda: deque(maxlen=2000))
 
-_INGEST_COUNT: int = 0       # total batches ingested; increments ~1/s; visible in API
+_INGEST_COUNT: int = 0  # total batches ingested; increments ~1/s; visible in API
 _LAST_INGEST_TS: float = 0.0  # wall-clock seconds of last successful ingest
 
 # rankings:live is now the sole source of every rankings-table/coin-panel metric (AD-9,
@@ -140,7 +142,9 @@ _second_rolling: dict[str, deque] = defaultdict(lambda: deque(maxlen=3600))
 # fields (_handle_rankings_message below), not computed locally.
 _ind_rolling: dict[str, deque] = defaultdict(lambda: deque(maxlen=3600))
 
-_NAV = '<p><a href="/">Rankings</a> | <a href="/live">Live signals</a></p>'
+_NAV = (
+    '<p><a href="/">Rankings</a> | <a href="/live">Live signals</a> | <a href="/docs">Docs</a></p>'
+)
 
 
 _CSS = """
@@ -154,6 +158,10 @@ th { background: #161b22; position: sticky; top: 0; }
 th a { color: #c9d1d9; }
 tr:hover td { background: #161b22; }
 td:first-child, th:first-child { text-align: left; }
+.chart-spinner { position: absolute; top: 16px; left: 50%; margin-left: -14px;
+  width: 28px; height: 28px; border: 3px solid #30363d; border-top-color: #58a6ff;
+  border-radius: 50%; animation: chart-spin 0.8s linear infinite; }
+@keyframes chart-spin { to { transform: rotate(360deg); } }
 </style>
 """
 
@@ -183,6 +191,18 @@ td:first-child, th:first-child { text-align: left; }
 # click creates a fresh {id,name,params} instance so the same indicator can appear more
 # than once with different settings; #ind-table renders one editable row per instance.
 _LIVE_CHART_JS = """
+// Candle paging is bar-count based, not time based, so the same feel holds at every
+// timeframe: default view = last _CANDLE_VISIBLE_BARS bars, with _CANDLE_BUFFER_BARS
+// more pre-fetched behind them so panning back doesn't hit a visible edge; refill
+// triggers once only _CANDLE_REFILL_MARGIN_BARS of that buffer are left unseen, so the
+// next chunk has time to land before the user pans into missing data.
+var _CANDLE_VISIBLE_BARS=120,_CANDLE_BUFFER_BARS=120,_CANDLE_REFILL_MARGIN_BARS=20;
+// Each data-bearing chart div (#live-chart, #micro-panel) is wrapped in a
+// position:relative div with a sibling #<id>-spinner (.chart-spinner, CSS-animated).
+// The spinner is visible in the page's initial static HTML (page load is no longer
+// blocked on any chart data -- chart_handler returns the HTML shell immediately) and
+// hidden the first time that panel actually renders real data, never before.
+function _hideSpinner(id){var el=document.getElementById(id+'-spinner');if(el)el.style.display='none';}
 function _fmtDTL(d){var p=function(n){return n<10?'0'+n:String(n);};return d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+'T'+p(d.getHours())+':'+p(d.getMinutes());}
 function setCoinMode(m){
   _coinMode=m;_chartState=null;_updateModeButtons();
@@ -255,12 +275,29 @@ function _fetchHistCoin(iid,start,end){
   setStatus('Loading…');
   var bar=_coinBarSeconds;
   var startMs=new Date(start).getTime(),endMs=new Date(end).getTime();
-  _fetchModeWindow(_coinMode,iid,startMs,endMs,bar)
+  return _fetchModeWindow(_coinMode,iid,startMs,endMs,bar)
     .then(function(result){
       _setChartRows(iid,_coinMode,bar,result.rows);
       setStatus('Loaded '+result.rows.length+' rows'+(result.truncated?' (truncated -- window too wide)':''));
     })
     .catch(function(err){setStatus('Error: '+err);});
+}
+// Bare-page-visit default (no Load, no Live): a fixed catalog-backed window sized in
+// bars, not wall-clock time -- see _CANDLE_VISIBLE_BARS/_CANDLE_BUFFER_BARS above. Reuses
+// _fetchHistCoin (same "frozen, catalog-backed" path as a real Load) so bar/mode changes
+// afterward behave exactly like a Load's would; only the initial x-axis range differs,
+// zoomed to the most recent _CANDLE_VISIBLE_BARS once the full buffered window has loaded.
+function _loadDefaultCandleWindow(){
+  var bar=_coinBarSeconds;
+  var nowMs=Date.now();
+  var startMs=nowMs-bar*1000*(_CANDLE_VISIBLE_BARS+_CANDLE_BUFFER_BARS);
+  _coinHistStart=_fmtDTL(new Date(startMs));_coinHistEnd=_fmtDTL(new Date(nowMs));
+  var b=document.getElementById('btn-live');
+  if(b){b.style.color='#8b949e';b.style.borderColor='#444';}
+  return _fetchHistCoin(_coinIid,_coinHistStart,_coinHistEnd).then(function(){
+    var visStartMs=nowMs-bar*1000*_CANDLE_VISIBLE_BARS;
+    Plotly.relayout('live-chart',{'xaxis.range':[new Date(visStartMs),new Date(nowMs)]});
+  });
 }
 // -- Shared pan-to-load-more state (candles + lines) ---------------------------------------
 function _setChartRows(iid,mode,barSeconds,rows){
@@ -276,7 +313,7 @@ function _renderChartRows(){
 function _chunkSpanMs(state){
   var s=state||_chartState;
   if(s.mode==='lines')return 15*60*1000;
-  return Math.min(Math.max(s.barSeconds*1000*200,3600*1000),_MAX_CHUNK_MS);
+  return Math.min(s.barSeconds*1000*_CANDLE_BUFFER_BARS,_MAX_CHUNK_MS);
 }
 function _loadOlderChunk(){
   if(!_chartState||_chartState.exhaustedLeft||_chartState.cursorStart==null||_chartState.loading)return;
@@ -352,7 +389,13 @@ function _maybeLoadOlder(rng){
   if(!_chartState||_chartState.exhaustedLeft||_chartState.cursorStart==null)return;
   var leftMs=new Date(rng[0]).getTime();
   if(isNaN(leftMs))return;
-  var margin=_chunkSpanMs(_chartState)*0.5;
+  // Candles: refill once only _CANDLE_REFILL_MARGIN_BARS of the buffered chunk are still
+  // ahead of the visible left edge -- bar-count based so the trigger point is the same
+  // "feel" at every timeframe. Lines has no bar concept, so it keeps the old proportional
+  // (half-chunk) margin.
+  var margin=_chartState.mode==='lines'
+    ?_chunkSpanMs(_chartState)*0.5
+    :_chartState.barSeconds*1000*_CANDLE_REFILL_MARGIN_BARS;
   if(leftMs<=_chartState.cursorStart+margin)_loadOlderChunk();
 }
 function _wireChartRelayout(){
@@ -361,13 +404,6 @@ function _wireChartRelayout(){
     liveEl.removeAllListeners&&liveEl.removeAllListeners('plotly_relayout');
     liveEl.on('plotly_relayout',function(ev){_onChartRelayout('live-chart',ev);});
   }
-}
-// Server-rendered imbalance/mid-imbalance/depth/spread subplot (Story 8.1's
-// _render_chart_page) -- wired once on page load since it's static HTML, not a
-// JS-managed Plotly.react target like live-chart/ind-panel.
-function _wireMicroPanelRelayout(){
-  var el=document.getElementById('micro-panel');
-  if(el)el.on('plotly_relayout',function(ev){_onChartRelayout('micro-panel',ev);});
 }
 // -- Indicator picker (Story 8.4, extended for multi-instance): catalog-driven add-list,
 // each added instance gets its own id so the same indicator can be added more than once
@@ -624,6 +660,7 @@ function _renderCandleTraces(indicatorData){
   Plotly.react('live-chart',traces,{height:300,template:'plotly_dark',dragmode:'pan',
     xaxis:{type:'date',rangeslider:{visible:false}},
     margin:{t:10,b:30,l:60,r:10},legend:{orientation:'h'}},{scrollZoom:true});
+  _hideSpinner('live-chart');
   _wireChartRelayout();
 }
 // Each active oscillator indicator instance beyond the first gets its own overlaid,
@@ -776,8 +813,72 @@ function _renderLineChart(rows){
   ],{height:300,template:'plotly_dark',dragmode:'pan',
     xaxis:{type:'date',rangeslider:{visible:false}},
     margin:{t:10,b:30,l:60,r:10},legend:{orientation:'h'}},{scrollZoom:true});
+  _hideSpinner('live-chart');
   _wireChartRelayout();
   _wireChartClick();
+}
+// -- Micro-panel (book imbalance / mid-imbalance / depth / spread, 4 rows) -----------------
+// Client-fetched (coin_microfeatures_handler) and rendered here instead of the old
+// server-side Plotly make_subplots figure baked into the page's initial HTML -- that
+// blocked the whole /chart/{id} response on a catalog read (_chart_data.compute_chart_series)
+// nobody else on the page needed. Now the page HTML returns immediately with an empty
+// #micro-panel + spinner, and this fetch/render happens after, in parallel with the
+// candlestick chart's own fetch -- neither blocks the other. Row layout (y-axis domains,
+// titles, colors, 0.5 hlines) mirrors the retired Python make_subplots(rows=4,
+// row_heights=[0.24,0.24,0.25,0.27], vertical_spacing=0.02) call exactly, just expressed as
+// a Plotly.js layout instead of Plotly.py's subplot helper.
+function _fetchMicroFeatures(iid,startMs,endMs){
+  return fetch('/data/coin/'+encodeURIComponent(iid)+'/microfeatures'
+    +'?start='+encodeURIComponent(_fmtDTL(new Date(startMs)))
+    +'&end='+encodeURIComponent(_fmtDTL(new Date(endMs))))
+    .then(function(r){return r.json();});
+}
+function _loadMicroPanel(iid,startMs,endMs){
+  return _fetchMicroFeatures(iid,startMs,endMs).then(function(d){_renderMicroPanel(d.series||{});})
+    .catch(function(err){setStatus('Micro-panel error: '+err);});
+}
+function _renderMicroPanel(series){
+  var rowDomains=[[0.7744,1],[0.5288,0.7544],[0.2738,0.5088],[0,0.2538]];
+  var rowTitles=['Book imbalance L1 agg (4-level)','Mid-layer imbalance (L2-3)','Depth (4-level)','Spread'];
+  var layout={height:1250,template:'plotly_dark',dragmode:'pan',showlegend:true,
+    legend:{orientation:'h',y:1.01},margin:{t:30,b:30,l:60,r:10},shapes:[],
+    annotations:rowTitles.map(function(t,i){
+      return {text:t,xref:'paper',yref:'paper',x:0,xanchor:'left',y:rowDomains[i][1],yanchor:'bottom',showarrow:false,font:{size:12}};
+    })};
+  var traces=[];
+  function axisSuffix(rowIdx){return rowIdx===0?'':String(rowIdx+1);}
+  function ensureRowAxes(rowIdx){
+    var s=axisSuffix(rowIdx);
+    if(!layout['xaxis'+s])layout['xaxis'+s]={type:'date',domain:[0,1],anchor:'y'+s};
+    layout['yaxis'+s]={domain:rowDomains[rowIdx],anchor:'x'+s};
+  }
+  function addRow(key,rowIdx,name,color){
+    var pts=series[key];
+    if(!pts||!pts.length)return;
+    ensureRowAxes(rowIdx);
+    var s=axisSuffix(rowIdx);
+    traces.push({type:'scattergl',mode:'lines',name:name,line:{color:color,width:1},
+      xaxis:'x'+s,yaxis:'y'+s,
+      x:pts.map(function(p){return new Date(p.time*1000);}),
+      y:pts.map(function(p){return p.value;})});
+  }
+  function addHline(rowIdx,y){
+    var s=axisSuffix(rowIdx);
+    layout.shapes.push({type:'line',xref:'paper',x0:0,x1:1,yref:'y'+s,y0:y,y1:y,line:{color:'#555',width:1}});
+  }
+  addRow('imbalance',0,'imbalance','#ab71ff');
+  if(series.imbalance&&series.imbalance.length)addHline(0,0.5);
+  addRow('mid_imbalance',1,'mid imbalance','#c792ea');
+  if(series.mid_imbalance&&series.mid_imbalance.length)addHline(1,0.5);
+  addRow('bid_depth',2,'bid depth','#26a69a');
+  addRow('ask_depth',2,'ask depth','#ef5350');
+  addRow('spread',3,'spread','#78909c');
+  var panel=document.getElementById('micro-panel');
+  if(!panel)return;
+  Plotly.react('micro-panel',traces,layout,{scrollZoom:true});
+  _hideSpinner('micro-panel');
+  panel.removeAllListeners&&panel.removeAllListeners('plotly_relayout');
+  panel.on('plotly_relayout',function(ev){_onChartRelayout('micro-panel',ev);});
 }
 """
 
@@ -800,16 +901,19 @@ td:first-child,th:first-child{text-align:left}
 </style>
 </head>
 <body>
-<p><a onclick="showRankings();return false" href="/">Rankings</a> | <a href="/live">Live signals</a></p>
+<p><a onclick="showRankings();return false" href="/">Rankings</a> | <a href="/live">Live signals</a> | <a href="/docs">Docs</a></p>
 <div id="status">Loading…</div>
 <div id="app"></div>
 <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
 <script>
+// "u lean" (microprice_lean) is deliberately absent here -- it lives on the coin-detail
+// page only (IND_GROUPS below), not the cross-instrument ranking table (ranking_columns.py
+// mirrors this: it's in _HISTORY_ONLY_COLS, not RANKING_COLS).
 var COLS=[
   ["ofi_10_z","OFI10z"],["obi_10","OBI10"],["obi_5","OBI5"],["obi_3","OBI3"],
-  ["cvd","CVD($)"],["spread","Spread(bps)"],["microprice_lean","u lean(bps)"],
+  ["cvd","CVD($)"],["spread","Spread(bps)"],
   ["volume_delta","Vol d($)"],
-  ["price","Price"],["pct_1h","1h %"],["pct_24h","24h %"],["volatility","Vol"],
+  ["price","Price"],["pct_1h","1h %"],["pct_24h","24h %"],["volatility","Vol(catalog)"],
   ["volume24h","Vol24h"]
 ];
 // Keys normalized client-side from raw token/price-unit deltas -- see usdFromTokens/
@@ -1152,87 +1256,45 @@ def _render_history_page(symbol: str) -> str:
     return _history_page_from_rows(symbol, rows)
 
 
-def _build_chart_page_html(
-    symbol: str, start_ms: int, end_ms: int, explicit_range: bool, data: dict[str, list[dict]],
-) -> str:
+def _build_chart_page_html(symbol: str, start_ms: int, end_ms: int, explicit_range: bool) -> str:
     """
-    Render the /chart/{id} page's HTML from an already-computed chart-series `data` dict.
+    Render the /chart/{id} page's HTML shell -- no chart data is fetched or computed here.
 
     Price pane is the interactive Candles/Lines drag-to-pan widget (_LIVE_CHART_JS)
     -- the sole home for this widget since Story 8.1 consolidated it here from /coin/{id}
-    -- fed by /data/coin/{id}/candles|lines. The remaining imbalance/depth/spread panes
-    stay server-rendered Plotly subplots from `data` (local mode:
-    _chart_data.compute_chart_series; remote mode: data_api's equivalent route, Story
-    12.2 -- same shape either way, no reshaping needed) for the same [start_ms, end_ms)
-    window picked by the date-range form below. CVD (Story 10.2), Cancel Pressure
-    (Story 10.3), and OFI (Story 10.4) all moved to the indicator picker as custom
+    -- fed by /data/coin/{id}/candles|lines. The remaining imbalance/mid-imbalance/depth/
+    spread panes (#micro-panel) used to be a Plotly subplot figure rendered server-side into
+    this very function's return value, computed from `_chart_data.compute_chart_series`
+    (local mode) or data_api's equivalent route (remote mode) -- which meant every
+    /chart/{id} request blocked on a full catalog read before the browser saw anything at
+    all, even though the candlestick chart above it needs none of that data. That data fetch
+    now happens client-side after this HTML shell is already on screen (coin_microfeatures_
+    handler -> _LIVE_CHART_JS's _loadMicroPanel/_renderMicroPanel), in parallel with the
+    candlestick chart's own fetch -- see the spinner divs below. CVD (Story 10.2), Cancel
+    Pressure (Story 10.3), and OFI (Story 10.4) all moved to the indicator picker as custom
     indicators -- this is the last fixed-row retirement in Epic 10; the remaining four rows
     (imbalance, mid-imbalance, depth, spread) stay fixed, out of scope for the epic.
 
     `explicit_range` is False for a bare "/chart/{id}" visit (no start/end query params) --
-    that case defaults to live (resetCoinLive(), 1s poll of the in-progress candle) rather
-    than the static default-4h window, so the forming candle keeps updating with the current
-    price instead of freezing at whatever it was when the page loaded. Submitting the date
-    form (or a URL with an explicit start/end) opts into the static historical view.
+    that case still defaults the candle widget to a catalog-backed historical window
+    (last _CANDLE_VISIBLE_BARS bars visible, _CANDLE_BUFFER_BARS more buffered behind for
+    seamless back-panning -- see _loadDefaultCandleWindow in _LIVE_CHART_JS), not the
+    empty live tick buffer (_second_rolling only fills from ticks arriving after this
+    dashboard process started, so it showed near-zero candles right after any restart --
+    the actual bug report this replaced). Live tailing (resetCoinLive(), 1s poll of the
+    in-progress candle) is now an explicit opt-in via the Live button, same as Load.
+    Submitting the date form (or a URL with an explicit start/end) still opts into a
+    fixed-range historical view for both the candle widget and the micro-panel below (same
+    [start_ms, end_ms) window passed to both).
     """
-
-    def ts(series: list[dict]) -> list:
-        return pd.to_datetime([p["time"] for p in series], unit="s", utc=True)
-
-    def vals(series: list[dict]) -> list:
-        return [p["value"] for p in series]
-
-    fig = make_subplots(
-        rows=4, cols=1, shared_xaxes=True,
-        row_heights=[0.24, 0.24, 0.25, 0.27],
-        vertical_spacing=0.02,
-        subplot_titles=[
-            "Book imbalance L1 agg (4-level)", "Mid-layer imbalance (L2-3)",
-            "Depth (4-level)", "Spread",
-        ],
-    )
-
-    def _add(series_key: str, row: int, name: str, color: str) -> None:
-        if data.get(series_key):
-            fig.add_trace(go.Scattergl(
-                x=ts(data[series_key]), y=vals(data[series_key]),
-                mode="lines", name=name, line_color=color, line_width=1,
-            ), row=row, col=1)
-
-    # Row 1: 4-level aggregate imbalance
-    _add("imbalance", 1, "imbalance", "#ab71ff")
-    if data.get("imbalance"):
-        fig.add_hline(y=0.5, line_color="#555", line_width=1, row=1, col=1)
-
-    # Row 2: mid-layer imbalance (levels 2-3)
-    _add("mid_imbalance", 2, "mid imbalance", "#c792ea")
-    if data.get("mid_imbalance"):
-        fig.add_hline(y=0.5, line_color="#555", line_width=1, row=2, col=1)
-
-    # Row 3: depth
-    _add("bid_depth", 3, "bid depth", "#26a69a")
-    _add("ask_depth", 3, "ask depth", "#ef5350")
-
-    # Row 4: spread
-    _add("spread", 4, "spread", "#78909c")
-
-    # "spread" is populated for every non-skipped delta (unlike the retired "ofi" series,
-    # which only appended once warmed up), so this count is now exact, not an undercount.
-    n = len(data.get("spread", []))
-    fig.update_layout(
-        height=1250, template="plotly_dark",
-        title=f"{symbol} — {n:,} delta events",
-        xaxis_rangeslider_visible=False,
-        showlegend=True,
-        legend={"orientation": "h", "y": 1.01},
-    )
     # Datetime pickers above the chart — submits as GET params, also seeds the
     # interactive price widget's initial historical window (below).
     sym = html.escape(symbol)
     import datetime as _dt
+
     fmt = "%Y-%m-%dT%H:%M"
     start_val = _dt.datetime.fromtimestamp(start_ms / 1000).strftime(fmt)
-    end_val   = _dt.datetime.fromtimestamp(end_ms   / 1000).strftime(fmt)
+    end_val = _dt.datetime.fromtimestamp(end_ms / 1000).strftime(fmt)
     form = (
         f"<form method='get' style='margin:8px 0'>"
         f"From <input type='datetime-local' id='coin-start' name='start' value='{start_val}'> &nbsp;"
@@ -1242,9 +1304,9 @@ def _build_chart_page_html(
     )
     widget = (
         '<div style="display:flex;gap:8px;align-items:center;padding:6px 0;flex-wrap:wrap">'
-        "<button id=\"btn-live\" onclick=\"resetCoinLive()\" style=\"background:#21262d;color:#3fb950;border:1px solid #3fb950;padding:3px 10px;cursor:pointer\">Live</button>"
-        "<button id=\"btn-lines\" onclick=\"setCoinMode('lines')\" style=\"background:#21262d;color:#c9d1d9;border:1px solid #444;padding:3px 10px;cursor:pointer\">Lines</button>"
-        "<button id=\"btn-candles\" onclick=\"setCoinMode('candles')\" style=\"background:#21262d;color:#c9d1d9;border:1px solid #58a6ff;padding:3px 10px;cursor:pointer\">Candles</button>"
+        '<button id="btn-live" onclick="resetCoinLive()" style="background:#21262d;color:#3fb950;border:1px solid #3fb950;padding:3px 10px;cursor:pointer">Live</button>'
+        '<button id="btn-lines" onclick="setCoinMode(\'lines\')" style="background:#21262d;color:#c9d1d9;border:1px solid #444;padding:3px 10px;cursor:pointer">Lines</button>'
+        '<button id="btn-candles" onclick="setCoinMode(\'candles\')" style="background:#21262d;color:#c9d1d9;border:1px solid #58a6ff;padding:3px 10px;cursor:pointer">Candles</button>'
         "<select id='bar-sel' onchange='onBarChange()' style=\"background:#21262d;color:#c9d1d9;border:1px solid #444;padding:3px\">"
         "<option value='5'>5s</option><option value='15'>15s</option>"
         "<option value='30'>30s</option><option value='60' selected>1m</option><option value='300'>5m</option>"
@@ -1256,14 +1318,21 @@ def _build_chart_page_html(
         "<div id='ind-picker' style='display:none;padding:6px 4px;margin-bottom:6px;border:1px solid #21262d;font-size:12px;max-height:220px;overflow-y:auto'>"
         "<div id='ind-picker-note' style='display:none;color:#f0883e;margin-bottom:4px'>Indicators require Candles mode</div>"
         "<input id='ind-picker-search' type='text' placeholder='Search indicators…' oninput='_renderIndicatorPicker()' "
-        "style=\"width:100%;box-sizing:border-box;margin-bottom:4px;background:#0d1117;color:#c9d1d9;border:1px solid #444;padding:3px 6px\">"
+        'style="width:100%;box-sizing:border-box;margin-bottom:4px;background:#0d1117;color:#c9d1d9;border:1px solid #444;padding:3px 6px">'
         "<div id='ind-picker-list'></div>"
         "</div>"
         "<div id='status' style='color:#8b949e;font-size:11px;margin:4px 0'></div>"
+        "<div style='position:relative'>"
         "<div id='live-chart' style='height:300px;margin-bottom:8px'></div>"
+        "<div id='live-chart-spinner' class='chart-spinner'></div>"
+        "</div>"
         "<div id='ind-table' style='margin-bottom:8px'></div>"
         "<div id='diff-box' style='min-height:22px;padding:5px 2px;border-top:1px solid #21262d;font-size:12px;font-family:monospace'></div>"
         "<div id='ind-panel' style='height:0px;overflow:hidden;margin-bottom:8px'></div>"
+        "<div style='position:relative'>"
+        "<div id='micro-panel' style='height:1250px'></div>"
+        "<div id='micro-panel-spinner' class='chart-spinner'></div>"
+        "</div>"
     )
     init_script = (
         "<script>"
@@ -1273,26 +1342,19 @@ def _build_chart_page_html(
         "var _coinPanning=false,_chartState=null,_relayoutTimer=null,timer=null;"
         "var _MAX_CHUNK_MS=30*24*3600*1000;"
         "function setStatus(s){var el=document.getElementById('status');if(el)el.innerHTML=s;}"
-        "_updateModeButtons();_wireMicroPanelRelayout();_fetchIndicatorCatalog();"
-        + ("_fetchHistCoin(_coinIid,_coinHistStart,_coinHistEnd);" if explicit_range else "resetCoinLive();")
+        "_updateModeButtons();_fetchIndicatorCatalog();"
+        f"_loadMicroPanel(_coinIid,{start_ms},{end_ms});"
+        + (
+            "_fetchHistCoin(_coinIid,_coinHistStart,_coinHistEnd);"
+            if explicit_range
+            else "_loadDefaultCandleWindow();"
+        )
         + "</script>"
     )
-    body = (
-        form + widget
-        + fig.to_html(full_html=False, include_plotlyjs="cdn", div_id="micro-panel")
-        + f"<script>{_LIVE_CHART_JS}</script>" + init_script
-    )
-    return _page(f"{sym} chart", body, refresh_seconds=86400)  # no auto-refresh; user controls via form
-
-
-def _render_chart_page(symbol: str, start_ms: int, end_ms: int, explicit_range: bool) -> str:
-    """Local-mode /chart/{id} page: compute chart series from the local catalog, then render."""
-    data = _chart_data.compute_chart_series(
-        CATALOG_PATH, symbol,
-        start_ns=start_ms * 1_000_000,
-        end_ns=end_ms * 1_000_000,
-    )
-    return _build_chart_page_html(symbol, start_ms, end_ms, explicit_range, data)
+    body = form + widget + f"<script>{_LIVE_CHART_JS}</script>" + init_script
+    return _page(
+        f"{sym} chart", body, refresh_seconds=86400
+    )  # no auto-refresh; user controls via form
 
 
 def _live_candles_json(iid: str, bar_seconds: int) -> str:
@@ -1320,7 +1382,14 @@ def _live_candles_json(iid: str, bar_seconds: int) -> str:
     if len(buckets) > 1:
         del buckets[min(buckets)]
     candles = [
-        {"t": t * 1000, "o": mids[0], "h": max(mids), "l": min(mids), "c": mids[-1], "v": volumes[t]}
+        {
+            "t": t * 1000,
+            "o": mids[0],
+            "h": max(mids),
+            "l": min(mids),
+            "c": mids[-1],
+            "v": volumes[t],
+        }
         for t, mids in sorted(buckets.items())
     ]
     return json.dumps({"candles": candles})
@@ -1337,15 +1406,24 @@ def _historical_candles_json(iid: str, start_ms: int, end_ms: int, bar_seconds: 
     (max of highs, min of lows), unlike a flat trade-price bucketing.
     """
     from dydx_collector.second_snapshot import DydxSecondSnapshot
+
     from ml_signals.candles import aggregate_ohlc as _aggregate
     from nautilus_trader.persistence.catalog import ParquetDataCatalog
+
     catalog = ParquetDataCatalog(CATALOG_PATH)
     start_ns = start_ms * 1_000_000
     end_ns = end_ms * 1_000_000
     results = catalog.query(DydxSecondSnapshot, identifiers=[iid], start=start_ns, end=end_ns)
     snapshots = [r.data if hasattr(r, "data") else r for r in results]
     raw = [
-        (s.ts_event, s.open_price, s.high_price, s.low_price, s.close_price, s.buy_volume + s.sell_volume)
+        (
+            s.ts_event,
+            s.open_price,
+            s.high_price,
+            s.low_price,
+            s.close_price,
+            s.buy_volume + s.sell_volume,
+        )
         for s in snapshots
         if s.close_price is not None
     ]
@@ -1353,7 +1431,14 @@ def _historical_candles_json(iid: str, start_ms: int, end_ms: int, bar_seconds: 
         return json.dumps({"candles": []})
     candle_data = _aggregate(raw, period_seconds=bar_seconds)
     candles = [
-        {"t": c.ts_open // 1_000_000, "o": c.open, "h": c.high, "l": c.low, "c": c.close, "v": c.volume}
+        {
+            "t": c.ts_open // 1_000_000,
+            "o": c.open,
+            "h": c.high,
+            "l": c.low,
+            "c": c.close,
+            "v": c.volume,
+        }
         for c in candle_data
     ]
     return json.dumps({"candles": candles})
@@ -1385,8 +1470,16 @@ def _price_series_rows(snaps: list[dict]) -> list[dict]:
         # misleading flatline at the last-known price.  Gaps arise when the collector's
         # staleness guard (_STALE_BOOK_NS) skips stale books during WS reconnect recovery.
         if prev_ts_ms is not None and (curr_ts_ms - prev_ts_ms) > _CHART_GAP_THRESHOLD_MS:
-            rows.append({"t": curr_ts_ms - 1, "bid": None, "ask": None, "mid": None,
-                         "micro": None, "price": None})
+            rows.append(
+                {
+                    "t": curr_ts_ms - 1,
+                    "bid": None,
+                    "ask": None,
+                    "mid": None,
+                    "micro": None,
+                    "price": None,
+                }
+            )
         prev_ts_ms = curr_ts_ms
         mid = (bp + ap) / 2
         micro_value = calc_microprice(s)
@@ -1396,8 +1489,9 @@ def _price_series_rows(snaps: list[dict]) -> list[dict]:
             price = mid + ((s["buy_volume"] - s["sell_volume"]) / tv) * (ap - bp) * 0.5
         else:
             price = mid
-        rows.append({"t": curr_ts_ms, "bid": bp, "ask": ap, "mid": mid,
-                     "micro": micro, "price": price})
+        rows.append(
+            {"t": curr_ts_ms, "bid": bp, "ask": ap, "mid": mid, "micro": micro, "price": price}
+        )
     return rows
 
 
@@ -1411,20 +1505,33 @@ def _coin_chart_json(iid: str) -> str:
     snaps = list(_second_rolling.get(iid, []))
     inds = list(_ind_rolling.get(iid, []))
     if not snaps:
-        return json.dumps({"ts": [], "mid": [], "bid": [], "ask": [], "micro": [], "price": [],
-                           "sig_ts": [], "ofi_10_z": [], "obi_10": []})
+        return json.dumps(
+            {
+                "ts": [],
+                "mid": [],
+                "bid": [],
+                "ask": [],
+                "micro": [],
+                "price": [],
+                "sig_ts": [],
+                "ofi_10_z": [],
+                "obi_10": [],
+            }
+        )
     rows = _price_series_rows(snaps)
-    return json.dumps({
-        "ts": [r["t"] for r in rows],
-        "mid": [r["mid"] for r in rows],
-        "bid": [r["bid"] for r in rows],
-        "ask": [r["ask"] for r in rows],
-        "micro": [r["micro"] for r in rows],
-        "price": [r["price"] for r in rows],
-        "sig_ts": [e["ts"] for e in inds],
-        "ofi_10_z": [e["ofi_10_z"] for e in inds],
-        "obi_10": [e["obi_10"] for e in inds],
-    })
+    return json.dumps(
+        {
+            "ts": [r["t"] for r in rows],
+            "mid": [r["mid"] for r in rows],
+            "bid": [r["bid"] for r in rows],
+            "ask": [r["ask"] for r in rows],
+            "micro": [r["micro"] for r in rows],
+            "price": [r["price"] for r in rows],
+            "sig_ts": [e["ts"] for e in inds],
+            "ofi_10_z": [e["ofi_10_z"] for e in inds],
+            "obi_10": [e["obi_10"] for e in inds],
+        }
+    )
 
 
 def _live_lines_json(iid: str) -> str:
@@ -1449,13 +1556,19 @@ def _lines_json_from_snapshot_dicts(snaps: list[dict]) -> str:
 def _historical_lines_json(iid: str, start_ms: int, end_ms: int) -> str:
     """Local-mode /chart/{id} Lines data: read DydxSecondSnapshot records from the catalog."""
     snapshots = _catalog_stats.query_second_snapshots(
-        CATALOG_PATH, iid, start_ms * 1_000_000, end_ms * 1_000_000,
+        CATALOG_PATH,
+        iid,
+        start_ms * 1_000_000,
+        end_ms * 1_000_000,
     )
     snaps = [
         {
-            "bid_prices": s.bid_prices, "bid_sizes": s.bid_sizes,
-            "ask_prices": s.ask_prices, "ask_sizes": s.ask_sizes,
-            "buy_volume": s.buy_volume, "sell_volume": s.sell_volume,
+            "bid_prices": s.bid_prices,
+            "bid_sizes": s.bid_sizes,
+            "ask_prices": s.ask_prices,
+            "ask_sizes": s.ask_sizes,
+            "buy_volume": s.buy_volume,
+            "sell_volume": s.sell_volume,
             "ts_event": s.ts_event,
         }
         for s in snapshots
@@ -1489,9 +1602,15 @@ def _cells_for_row(row: dict) -> dict[str, dict]:
     for key, _, fmt_fn, color_fn in RANKING_COLS:
         v = row.get(key)
         if v is None:
-            cells[key] = {"text": "!", "color": "#f85149", "raw": None} if err else {
-                "text": "—", "color": None, "raw": None,
-            }
+            cells[key] = (
+                {"text": "!", "color": "#f85149", "raw": None}
+                if err
+                else {
+                    "text": "—",
+                    "color": None,
+                    "raw": None,
+                }
+            )
         else:
             try:
                 cells[key] = {
@@ -1538,11 +1657,17 @@ def _rankings_json() -> str:
     stale_instrument_ids = (
         _LATEST_RANKING.get("stale_instrument_ids", []) if _LATEST_RANKING is not None else []
     )
-    return json.dumps({
-        "rows": result, "ingest_count": _INGEST_COUNT, "age_s": age_s, "stale": stale,
-        "ranking_stale": ranking_stale, "ranking_age_s": ranking_age_s,
-        "stale_instrument_ids": stale_instrument_ids,
-    })
+    return json.dumps(
+        {
+            "rows": result,
+            "ingest_count": _INGEST_COUNT,
+            "age_s": age_s,
+            "stale": stale,
+            "ranking_stale": ranking_stale,
+            "ranking_age_s": ranking_age_s,
+            "stale_instrument_ids": stale_instrument_ids,
+        }
+    )
 
 
 def _ingest_batch(batch: list[dict]) -> None:
@@ -1589,7 +1714,8 @@ async def watchlist_json_handler(request: web.Request) -> web.Response:
         iid for r in ranks if isinstance(r, dict) and (iid := r.get("instrument_id")) is not None
     ]
     return web.Response(
-        text=json.dumps({"instrument_ids": instrument_ids}), content_type="application/json",
+        text=json.dumps({"instrument_ids": instrument_ids}),
+        content_type="application/json",
     )
 
 
@@ -1622,11 +1748,13 @@ async def debug_handler(request: web.Request) -> web.Response:
     ranks = _LATEST_RANKING["ranks"] if _LATEST_RANKING is not None else []
     sample = ranks[0] if ranks else {}
     return web.Response(
-        text=json.dumps({
-            "ranked_count": len(ranks),
-            "second_rolling_count": len(_second_rolling),
-            "sample": sample,
-        }),
+        text=json.dumps(
+            {
+                "ranked_count": len(ranks),
+                "second_rolling_count": len(_second_rolling),
+                "sample": sample,
+            }
+        ),
         content_type="application/json",
     )
 
@@ -1644,6 +1772,7 @@ def _parse_query_ms(qs: dict[str, str], key: str) -> int | None:
     v = qs.get(key)
     if v:
         import datetime as _dt
+
         try:
             return int(_dt.datetime.fromisoformat(v).timestamp() * 1000)
         except ValueError:
@@ -1658,7 +1787,9 @@ async def coin_candles_handler(request: web.Request) -> web.Response:
     start_ms = _parse_query_ms(qs, "start")
     end_ms = _parse_query_ms(qs, "end")
     if start_ms is not None and end_ms is not None:
-        data = await asyncio.to_thread(_historical_candles_json, symbol, start_ms, end_ms, bar_seconds)
+        data = await asyncio.to_thread(
+            _historical_candles_json, symbol, start_ms, end_ms, bar_seconds
+        )
     else:
         data = _live_candles_json(symbol, bar_seconds)
     return web.Response(text=data, content_type="application/json")
@@ -1707,7 +1838,8 @@ def _parse_indicator_spec(raw: str) -> list[tuple[str, dict[str, str]]]:
 
 
 def _coerce_indicator_params(
-    spec: _chart_indicators.IndicatorSpec | _custom_indicators.CustomIndicatorSpec, raw: dict[str, str],
+    spec: _chart_indicators.IndicatorSpec | _custom_indicators.CustomIndicatorSpec,
+    raw: dict[str, str],
 ) -> dict[str, object]:
     """
     Cast query-string param values to match each param's default type (bool checked
@@ -1735,8 +1867,11 @@ def _indicator_id(name: str, params: dict[str, object]) -> str:
     return name + "_" + ",".join(f"{k}={v}" for k, v in sorted(params.items()))
 
 
-def _indicators_json(candles: list[dict], spec_str: str, window: _custom_indicators.ReplayWindow) -> tuple[str, int]:
-    """Compute {t, value} point series for every requested indicator spec entry.
+def _indicators_json(
+    candles: list[dict], spec_str: str, window: _custom_indicators.ReplayWindow
+) -> tuple[str, int]:
+    """
+    Compute {t, value} point series for every requested indicator spec entry.
 
     spec_str is untrusted (a raw query-string value): a malformed entry (missing "=",
     a non-numeric value for a numeric param, an out-of-range param a specific
@@ -1776,9 +1911,13 @@ def _indicators_json(candles: list[dict], spec_str: str, window: _custom_indicat
 
 
 def _indicator_replay_window(
-    symbol: str, bar_seconds: int, start_ms: int | None, end_ms: int | None,
+    symbol: str,
+    bar_seconds: int,
+    start_ms: int | None,
+    end_ms: int | None,
 ) -> _custom_indicators.ReplayWindow:
-    """Build the ReplayWindow for an indicator request, keeping start_ms/end_ms in lockstep
+    """
+    Build the ReplayWindow for an indicator request, keeping start_ms/end_ms in lockstep
     with which candle path (live vs. historical) actually ran.
 
     A query string with only one of start/end parseable falls through to the live candle
@@ -1788,7 +1927,8 @@ def _indicator_replay_window(
     """
     is_historical = start_ms is not None and end_ms is not None
     return _custom_indicators.ReplayWindow(
-        instrument_id=symbol, bar_seconds=bar_seconds,
+        instrument_id=symbol,
+        bar_seconds=bar_seconds,
         start_ms=start_ms if is_historical else None,
         end_ms=end_ms if is_historical else None,
     )
@@ -1805,7 +1945,9 @@ async def coin_indicators_handler(request: web.Request) -> web.Response:
     end_ms = _parse_query_ms(qs, "end")
     window = _indicator_replay_window(symbol, bar_seconds, start_ms, end_ms)
     if window.start_ms is not None and window.end_ms is not None:
-        candles_json = await asyncio.to_thread(_historical_candles_json, symbol, start_ms, end_ms, bar_seconds)
+        candles_json = await asyncio.to_thread(
+            _historical_candles_json, symbol, start_ms, end_ms, bar_seconds
+        )
     else:
         candles_json = _live_candles_json(symbol, bar_seconds)
     candles = json.loads(candles_json)["candles"]
@@ -1818,7 +1960,8 @@ async def coin_indicators_handler(request: web.Request) -> web.Response:
 
 
 def _merged_indicator_catalog() -> dict[str, dict]:
-    """Native + custom catalogs, each entry tagged with which one it came from.
+    """
+    Native + custom catalogs, each entry tagged with which one it came from.
 
     Tagging happens here, not inside either catalog module -- chart_indicators.py and
     custom_indicators.py stay unaware of each other (DESIGN-02); only this call site
@@ -1827,7 +1970,9 @@ def _merged_indicator_catalog() -> dict[str, dict]:
     _indicators_json) -- raise immediately rather than let the two catalogs silently
     diverge (DATA-02: no mysteries).
     """
-    collisions = set(_chart_indicators.INDICATOR_CATALOG) & set(_custom_indicators.CUSTOM_INDICATOR_CATALOG)
+    collisions = set(_chart_indicators.INDICATOR_CATALOG) & set(
+        _custom_indicators.CUSTOM_INDICATOR_CATALOG
+    )
     if collisions:
         raise ValueError(f"Indicator name(s) registered in both catalogs: {sorted(collisions)}")
     merged: dict[str, dict] = {}
@@ -1839,7 +1984,9 @@ def _merged_indicator_catalog() -> dict[str, dict]:
 
 
 async def indicators_catalog_handler(request: web.Request) -> web.Response:
-    return web.Response(text=json.dumps(_merged_indicator_catalog()), content_type="application/json")
+    return web.Response(
+        text=json.dumps(_merged_indicator_catalog()), content_type="application/json"
+    )
 
 
 async def coin_indicator_config_handler(request: web.Request) -> web.Response:
@@ -1852,7 +1999,8 @@ async def coin_indicator_config_handler(request: web.Request) -> web.Response:
         # human-editable (AC #1), so a corrupt hand-edit is a real, diagnosable state.
         return web.Response(
             text=json.dumps({"error": f"chart_indicators.toml is corrupt: {exc}"}),
-            content_type="application/json", status=500,
+            content_type="application/json",
+            status=500,
         )
     entries = config.get(symbol, [])
     body = [{"name": e.name, "params": e.params, "category": e.category} for e in entries]
@@ -1867,7 +2015,9 @@ async def save_coin_indicator_config_handler(request: web.Request) -> web.Respon
         payload = await request.json()
         entries = [
             _chart_indicator_config.IndicatorEntry(
-                name=e["name"], params=e.get("params", {}), category=e["category"],
+                name=e["name"],
+                params=e.get("params", {}),
+                category=e["category"],
             )
             for e in payload
         ]
@@ -1877,7 +2027,8 @@ async def save_coin_indicator_config_handler(request: web.Request) -> web.Respon
     except (json.JSONDecodeError, KeyError, TypeError, tomllib.TOMLDecodeError) as exc:
         return web.Response(
             text=json.dumps({"error": f"invalid indicator config payload: {exc}"}),
-            content_type="application/json", status=400,
+            content_type="application/json",
+            status=400,
         )
     return web.Response(text=json.dumps({"ok": True}), content_type="application/json")
 
@@ -1894,13 +2045,32 @@ async def live_coin_json_handler(request: web.Request) -> web.Response:
     symbol = request.match_info["id"]
     ranks = _LATEST_RANKING["ranks"] if _LATEST_RANKING is not None else []
     m = next(
-        (r for r in ranks if isinstance(r, dict) and r.get("instrument_id") == symbol), {},
+        (r for r in ranks if isinstance(r, dict) and r.get("instrument_id") == symbol),
+        {},
     )
     ind_keys = [
-        "ofi_10", "ofi_5", "ofi_3", "ofi_10_z", "obi_10", "obi_5", "obi_3",
-        "microprice", "microprice_lean", "spread", "cvd",
-        "volume_delta", "buy_count", "sell_count", "avg_trade_size", "price",
-        "volatility_fast", "volatility", "volatility_score", "pct_1h", "pct_24h", "volume24h",
+        "ofi_10",
+        "ofi_5",
+        "ofi_3",
+        "ofi_10_z",
+        "obi_10",
+        "obi_5",
+        "obi_3",
+        "microprice",
+        "microprice_lean",
+        "spread",
+        "cvd",
+        "volume_delta",
+        "buy_count",
+        "sell_count",
+        "avg_trade_size",
+        "price",
+        "volatility_fast",
+        "volatility",
+        "volatility_score",
+        "pct_1h",
+        "pct_24h",
+        "volume24h",
     ]
     result = {k: m.get(k) for k in ind_keys}
     return web.Response(text=json.dumps(result), content_type="application/json")
@@ -1910,6 +2080,7 @@ async def chart_handler(request: web.Request) -> web.Response:
     symbol = request.match_info["id"]
     qs = dict(request.rel_url.query)
     import datetime as _dt
+
     now_ms = int(time.time() * 1000)
 
     def _parse_dt(key: str, default_ms: int) -> int:
@@ -1924,19 +2095,74 @@ async def chart_handler(request: web.Request) -> web.Response:
     start_ms = _parse_dt("start", now_ms - 4 * 3600 * 1000)
     end_ms = _parse_dt("end", now_ms)
     explicit_range = bool(qs.get("start") or qs.get("end"))
+    # No chart-series fetch here (local or remote) -- the page shell no longer needs one.
+    # The micro-panel (imbalance/mid-imbalance/depth/spread) fetches its own data
+    # client-side after this HTML is already on screen; see coin_microfeatures_handler.
+    html_str = await asyncio.to_thread(
+        _build_chart_page_html, symbol, start_ms, end_ms, explicit_range
+    )
+    return web.Response(text=html_str, content_type="text/html")
+
+
+_CHART_MAX_POINTS = 2000
+
+
+def _decimate_series(series: list[dict], max_points: int = _CHART_MAX_POINTS) -> list[dict]:
+    """Stride-decimate a long series to at most max_points -- see _microfeatures_json."""
+    if len(series) <= max_points:
+        return series
+    step = len(series) // max_points
+    return series[::step]
+
+
+def _microfeatures_json(data: dict[str, list[dict]]) -> str:
+    """
+    Decimate and JSON-encode compute_chart_series' output for the micro-panel's client
+    fetch (coin_microfeatures_handler). Decimation moved here verbatim from the old
+    server-rendered _build_chart_page_html (pre-Story-14.2): a wide window can carry tens
+    of thousands of 1s-snapshot points per series, more than the browser needs to render a
+    readable line -- stride-decimate to a fixed point cap instead of shipping every point.
+    "count" is the true pre-decimation event count (from "spread", populated for every
+    non-skipped snapshot), matching the count the old server-rendered title used to show.
+    """
+    count = len(data.get("spread", []))
+    series = {key: _decimate_series(points) for key, points in data.items()}
+    return json.dumps({"series": series, "count": count})
+
+
+async def coin_microfeatures_handler(request: web.Request) -> web.Response:
+    """
+    JSON data source for the chart page's micro-panel (imbalance/mid-imbalance/depth/
+    spread, _renderMicroPanel in _LIVE_CHART_JS). Split out of chart_handler (Story 14.2)
+    so a slow catalog read no longer blocks /chart/{id}'s initial HTML response -- this
+    endpoint is fetched by the browser after the page shell is already showing.
+    """
+    symbol = request.match_info["id"]
+    qs = dict(request.rel_url.query)
+    start_ms = _parse_query_ms(qs, "start")
+    end_ms = _parse_query_ms(qs, "end")
+    if start_ms is None or end_ms is None:
+        return web.Response(
+            text=json.dumps({"error": "start and end are required"}),
+            content_type="application/json",
+            status=400,
+        )
     if DATA_API_URL:
-        start_ns, end_ns = start_ms * 1_000_000, end_ms * 1_000_000
         url = (
             f"{DATA_API_URL}/catalog/chart-series/{quote(symbol, safe='')}"
-            f"?start_ns={start_ns}&end_ns={end_ns}"
+            f"?start_ns={start_ms * 1_000_000}&end_ns={end_ms * 1_000_000}"
         )
         data = await _fetch_json(_get_http_session(), url)
-        html_str = await asyncio.to_thread(
-            _build_chart_page_html, symbol, start_ms, end_ms, explicit_range, data,
-        )
     else:
-        html_str = await asyncio.to_thread(_render_chart_page, symbol, start_ms, end_ms, explicit_range)
-    return web.Response(text=html_str, content_type="text/html")
+        data = await asyncio.to_thread(
+            _chart_data.compute_chart_series,
+            CATALOG_PATH,
+            symbol,
+            start_ms * 1_000_000,
+            end_ms * 1_000_000,
+        )
+    body = await asyncio.to_thread(_microfeatures_json, data)
+    return web.Response(text=body, content_type="application/json")
 
 
 async def history_handler(request: web.Request) -> web.Response:
@@ -1952,6 +2178,18 @@ async def history_handler(request: web.Request) -> web.Response:
 
 async def live_handler(request: web.Request) -> web.Response:
     return web.Response(text=_render_live_page(), content_type="text/html")
+
+
+_DOCS_HTML = _docs_page.HEAD + _NAV + _docs_page.BODY
+
+
+async def docs_handler(request: web.Request) -> web.Response:
+    """
+    Signal Atlas: static indicator reference + engineering knowledge base.
+
+    Entirely static (no Redis/catalog reads) -- see ml_signals/docs_page.py.
+    """
+    return web.Response(text=_DOCS_HTML, content_type="text/html")
 
 
 # --- background tasks ---
@@ -1999,12 +2237,14 @@ def _handle_rankings_message(message: dict) -> None:
         iid = rank_row.get("instrument_id")
         if iid is None:
             continue
-        _ind_rolling[iid].append({
-            "ts": ts_ms,
-            "ofi_10_z": rank_row.get("ofi_10_z"),
-            "obi_10": rank_row.get("obi_10"),
-            "lean": rank_row.get("microprice_lean"),
-        })
+        _ind_rolling[iid].append(
+            {
+                "ts": ts_ms,
+                "ofi_10_z": rank_row.get("ofi_10_z"),
+                "obi_10": rank_row.get("obi_10"),
+                "lean": rank_row.get("microprice_lean"),
+            }
+        )
 
 
 async def _redis_listener(redis_url: str) -> None:
@@ -2073,6 +2313,7 @@ def make_app(redis_url: str, catalog_path: str) -> web.Application:
     app.router.add_get("/data/coin/{id}/candles", coin_candles_handler)
     app.router.add_get("/data/coin/{id}/lines", coin_lines_handler)
     app.router.add_get("/data/coin/{id}/indicators", coin_indicators_handler)
+    app.router.add_get("/data/coin/{id}/microfeatures", coin_microfeatures_handler)
     app.router.add_get("/data/indicators/catalog", indicators_catalog_handler)
     app.router.add_get("/data/coin/{id}/indicator-config", coin_indicator_config_handler)
     app.router.add_post("/data/coin/{id}/indicator-config", save_coin_indicator_config_handler)
@@ -2080,6 +2321,7 @@ def make_app(redis_url: str, catalog_path: str) -> web.Application:
     app.router.add_get("/chart/{id}", chart_handler)
     app.router.add_get("/history/{id}", history_handler)
     app.router.add_get("/live", live_handler)
+    app.router.add_get("/docs", docs_handler)
 
     return app
 

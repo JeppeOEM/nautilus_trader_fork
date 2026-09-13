@@ -40,17 +40,18 @@ from dydx_collector.second_snapshot import DydxSecondSnapshot
 import ml_signals.dashboard
 from ml_signals.chart_indicators import INDICATOR_CATALOG
 from ml_signals.custom_indicators import ReplayWindow
+from ml_signals.dashboard import _build_chart_page_html
 from ml_signals.dashboard import _coerce_indicator_params
 from ml_signals.dashboard import _coin_chart_json
 from ml_signals.dashboard import _historical_candles_json
 from ml_signals.dashboard import _historical_lines_json
 from ml_signals.dashboard import _indicator_id
-from ml_signals.dashboard import _indicators_json
 from ml_signals.dashboard import _indicator_replay_window
-from ml_signals.dashboard import _merged_indicator_catalog
-from ml_signals.dashboard import _render_chart_page
+from ml_signals.dashboard import _indicators_json
 from ml_signals.dashboard import _live_candles_json
 from ml_signals.dashboard import _live_lines_json
+from ml_signals.dashboard import _merged_indicator_catalog
+from ml_signals.dashboard import _microfeatures_json
 from ml_signals.dashboard import _parse_indicator_spec
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
@@ -97,15 +98,27 @@ def _chart() -> dict:
 # Output keys
 # ---------------------------------------------------------------------------
 
+
 def test_chart_json_output_keys() -> None:
     _reset()
     result = json.loads(_coin_chart_json("UNKNOWN.DYDX"))
-    assert set(result) == {"ts", "bid", "ask", "mid", "micro", "price", "sig_ts", "ofi_10_z", "obi_10"}
+    assert set(result) == {
+        "ts",
+        "bid",
+        "ask",
+        "mid",
+        "micro",
+        "price",
+        "sig_ts",
+        "ofi_10_z",
+        "obi_10",
+    }
 
 
 # ---------------------------------------------------------------------------
 # Mid formula
 # ---------------------------------------------------------------------------
+
 
 def test_mid_is_arithmetic_mean_of_bid_and_ask() -> None:
     _reset()
@@ -124,6 +137,7 @@ def test_mid_with_asymmetric_spread() -> None:
 # ---------------------------------------------------------------------------
 # Microprice formula
 # ---------------------------------------------------------------------------
+
 
 def test_microprice_balanced_sizes_equals_mid() -> None:
     _reset()
@@ -182,30 +196,39 @@ def test_microprice_falls_back_to_mid_when_total_size_zero() -> None:
 # Effective price formula
 # ---------------------------------------------------------------------------
 
+
 def test_effective_price_all_buy_volume_equals_ask() -> None:
     _reset()
-    ml_signals.dashboard._second_rolling[_IID] = deque([_snap(100.0, 102.0, buy_vol=5.0, sell_vol=0.0)])
+    ml_signals.dashboard._second_rolling[_IID] = deque(
+        [_snap(100.0, 102.0, buy_vol=5.0, sell_vol=0.0)]
+    )
     result = _chart()
     assert result["price"] == [pytest.approx(102.0)]
 
 
 def test_effective_price_all_sell_volume_equals_bid() -> None:
     _reset()
-    ml_signals.dashboard._second_rolling[_IID] = deque([_snap(100.0, 102.0, buy_vol=0.0, sell_vol=5.0)])
+    ml_signals.dashboard._second_rolling[_IID] = deque(
+        [_snap(100.0, 102.0, buy_vol=0.0, sell_vol=5.0)]
+    )
     result = _chart()
     assert result["price"] == [pytest.approx(100.0)]
 
 
 def test_effective_price_balanced_volume_equals_mid() -> None:
     _reset()
-    ml_signals.dashboard._second_rolling[_IID] = deque([_snap(100.0, 102.0, buy_vol=5.0, sell_vol=5.0)])
+    ml_signals.dashboard._second_rolling[_IID] = deque(
+        [_snap(100.0, 102.0, buy_vol=5.0, sell_vol=5.0)]
+    )
     result = _chart()
     assert result["price"] == [pytest.approx(101.0)]
 
 
 def test_effective_price_zero_volume_falls_back_to_mid() -> None:
     _reset()
-    ml_signals.dashboard._second_rolling[_IID] = deque([_snap(100.0, 102.0, buy_vol=0.0, sell_vol=0.0)])
+    ml_signals.dashboard._second_rolling[_IID] = deque(
+        [_snap(100.0, 102.0, buy_vol=0.0, sell_vol=0.0)]
+    )
     result = _chart()
     assert result["price"] == [pytest.approx(101.0)]
 
@@ -221,9 +244,9 @@ def test_effective_price_always_bounded_within_bid_ask() -> None:
         (50000.0, 50000.5, 100.0, 1.0),
     ]
     for bid_p, ask_p, buy_vol, sell_vol in cases:
-        ml_signals.dashboard._second_rolling[_IID] = deque([
-            _snap(bid_p, ask_p, buy_vol=buy_vol, sell_vol=sell_vol)
-        ])
+        ml_signals.dashboard._second_rolling[_IID] = deque(
+            [_snap(bid_p, ask_p, buy_vol=buy_vol, sell_vol=sell_vol)]
+        )
         res = _chart()
         p = res["price"][0]
         assert bid_p - 1e-9 <= p <= ask_p + 1e-9, (
@@ -235,6 +258,7 @@ def test_effective_price_always_bounded_within_bid_ask() -> None:
 # ---------------------------------------------------------------------------
 # Crossed-book guard
 # ---------------------------------------------------------------------------
+
 
 def test_crossed_book_snap_is_skipped() -> None:
     # bid > ask — produced during reconnect snapshot replay; must not appear in output
@@ -256,11 +280,13 @@ def test_valid_snaps_before_and_after_crossed_snap() -> None:
     # A crossed entry in the middle must not corrupt surrounding valid entries
     _reset()
     ts1, ts2, ts3 = _TS_NS, _TS_NS + 1_000_000_000, _TS_NS + 2_000_000_000
-    ml_signals.dashboard._second_rolling[_IID] = deque([
-        _snap(100.0, 102.0, ts_ns=ts1),
-        _snap(103.0, 101.0, ts_ns=ts2),   # crossed — must be dropped
-        _snap(100.0, 102.0, ts_ns=ts3),
-    ])
+    ml_signals.dashboard._second_rolling[_IID] = deque(
+        [
+            _snap(100.0, 102.0, ts_ns=ts1),
+            _snap(103.0, 101.0, ts_ns=ts2),  # crossed — must be dropped
+            _snap(100.0, 102.0, ts_ns=ts3),
+        ]
+    )
     result = _chart()
     assert result["ts"] == [ts1 // 1_000_000, ts3 // 1_000_000]
     assert len(result["bid"]) == 2
@@ -270,6 +296,7 @@ def test_valid_snaps_before_and_after_crossed_snap() -> None:
 # ---------------------------------------------------------------------------
 # Empty / missing levels
 # ---------------------------------------------------------------------------
+
 
 def test_empty_bid_prices_snap_is_skipped() -> None:
     _reset()
@@ -295,6 +322,7 @@ def test_empty_ask_prices_snap_is_skipped() -> None:
 # Flat-line (stale feed) behaviour — documented, not a formula bug
 # ---------------------------------------------------------------------------
 
+
 def test_stale_feed_produces_identical_bid_ask_across_ticks() -> None:
     """
     When no new OrderBookDeltas arrive the collector's _live_books[iid] stays frozen.
@@ -308,10 +336,9 @@ def test_stale_feed_produces_identical_bid_ask_across_ticks() -> None:
     """
     _reset()
     frozen_bid, frozen_ask = 50000.0, 50001.0
-    ml_signals.dashboard._second_rolling[_IID] = deque([
-        _snap(frozen_bid, frozen_ask, ts_ns=_TS_NS + i * 1_000_000_000)
-        for i in range(5)
-    ])
+    ml_signals.dashboard._second_rolling[_IID] = deque(
+        [_snap(frozen_bid, frozen_ask, ts_ns=_TS_NS + i * 1_000_000_000) for i in range(5)]
+    )
     result = _chart()
     assert all(b == frozen_bid for b in result["bid"]), "all bids identical — stale feed"
     assert all(a == frozen_ask for a in result["ask"]), "all asks identical — stale feed"
@@ -321,6 +348,7 @@ def test_stale_feed_produces_identical_bid_ask_across_ticks() -> None:
 # ---------------------------------------------------------------------------
 # Timestamp conversion
 # ---------------------------------------------------------------------------
+
 
 def test_ts_event_converted_from_ns_to_ms() -> None:
     _reset()
@@ -334,15 +362,18 @@ def test_ts_event_converted_from_ns_to_ms() -> None:
 # Gap detection — null insertion for stale-book gaps (_CHART_GAP_THRESHOLD_MS)
 # ---------------------------------------------------------------------------
 
+
 def test_gap_below_threshold_does_not_insert_null() -> None:
     """Consecutive snapshots within 2.5s do NOT get a null break inserted."""
     _reset()
     ts1 = _TS_NS
     ts2 = ts1 + 2_000_000_000  # 2s gap — below 2.5s threshold
-    ml_signals.dashboard._second_rolling[_IID] = deque([
-        _snap(100.0, 102.0, ts_ns=ts1),
-        _snap(101.0, 103.0, ts_ns=ts2),
-    ])
+    ml_signals.dashboard._second_rolling[_IID] = deque(
+        [
+            _snap(100.0, 102.0, ts_ns=ts1),
+            _snap(101.0, 103.0, ts_ns=ts2),
+        ]
+    )
     result = _chart()
     assert result["ts"] == [ts1 // 1_000_000, ts2 // 1_000_000]
     assert len(result["bid"]) == 2
@@ -361,10 +392,12 @@ def test_gap_above_threshold_inserts_null_break() -> None:
     ts2 = ts1 + 5_000_000_000  # 5s gap — exceeds 2.5s threshold
     ts1_ms = ts1 // 1_000_000
     ts2_ms = ts2 // 1_000_000
-    ml_signals.dashboard._second_rolling[_IID] = deque([
-        _snap(100.0, 102.0, ts_ns=ts1),
-        _snap(101.0, 103.0, ts_ns=ts2),
-    ])
+    ml_signals.dashboard._second_rolling[_IID] = deque(
+        [
+            _snap(100.0, 102.0, ts_ns=ts1),
+            _snap(101.0, 103.0, ts_ns=ts2),
+        ]
+    )
     result = _chart()
     # Expected: [ts1_ms, ts2_ms-1 (null), ts2_ms (valid)]
     assert len(result["ts"]) == 3
@@ -386,18 +419,20 @@ def test_multiple_gaps_each_inserts_one_null() -> None:
     """Multiple gaps each get their own null break."""
     _reset()
     ts1 = _TS_NS
-    ts2 = ts1 + 6_000_000_000   # 6s gap
-    ts3 = ts2 + 8_000_000_000   # 8s gap
-    ml_signals.dashboard._second_rolling[_IID] = deque([
-        _snap(100.0, 102.0, ts_ns=ts1),
-        _snap(101.0, 103.0, ts_ns=ts2),
-        _snap(102.0, 104.0, ts_ns=ts3),
-    ])
+    ts2 = ts1 + 6_000_000_000  # 6s gap
+    ts3 = ts2 + 8_000_000_000  # 8s gap
+    ml_signals.dashboard._second_rolling[_IID] = deque(
+        [
+            _snap(100.0, 102.0, ts_ns=ts1),
+            _snap(101.0, 103.0, ts_ns=ts2),
+            _snap(102.0, 104.0, ts_ns=ts3),
+        ]
+    )
     result = _chart()
     # 3 valid points + 2 null breaks = 5 total entries
     assert len(result["ts"]) == 5
-    assert result["bid"][1] is None   # null after first gap
-    assert result["bid"][3] is None   # null after second gap
+    assert result["bid"][1] is None  # null after first gap
+    assert result["bid"][3] is None  # null after second gap
     assert result["bid"][0] == 100.0
     assert result["bid"][2] == 101.0
     assert result["bid"][4] == 102.0
@@ -406,9 +441,11 @@ def test_multiple_gaps_each_inserts_one_null() -> None:
 def test_first_snapshot_never_gets_null_prefix() -> None:
     """No null is inserted before the very first snapshot — gaps only tracked after first point."""
     _reset()
-    ml_signals.dashboard._second_rolling[_IID] = deque([
-        _snap(100.0, 102.0, ts_ns=_TS_NS),
-    ])
+    ml_signals.dashboard._second_rolling[_IID] = deque(
+        [
+            _snap(100.0, 102.0, ts_ns=_TS_NS),
+        ]
+    )
     result = _chart()
     assert len(result["ts"]) == 1
     assert result["bid"] == [100.0]
@@ -418,17 +455,21 @@ def test_first_snapshot_never_gets_null_prefix() -> None:
 # Live candles — leading-bucket churn
 # ---------------------------------------------------------------------------
 
+
 def test_live_candles_drops_partial_leading_bucket() -> None:
-    """The oldest bucket loses members every second as the deque evicts old snapshots
+    """
+    The oldest bucket loses members every second as the deque evicts old snapshots
     (maxlen), so its open/high/low would otherwise change on every poll even though
     it isn't the currently-forming candle. Only fully-aged buckets should be returned.
     """
     _reset()
     bar = 60
-    ml_signals.dashboard._second_rolling[_IID] = deque([
-        _snap(100.0, 102.0, ts_ns=_TS_NS),  # oldest bucket -- must be dropped
-        _snap(110.0, 112.0, ts_ns=_TS_NS + bar * 1_000_000_000),
-    ])
+    ml_signals.dashboard._second_rolling[_IID] = deque(
+        [
+            _snap(100.0, 102.0, ts_ns=_TS_NS),  # oldest bucket -- must be dropped
+            _snap(110.0, 112.0, ts_ns=_TS_NS + bar * 1_000_000_000),
+        ]
+    )
     candles = json.loads(_live_candles_json(_IID, bar))["candles"]
     assert len(candles) == 1
     assert candles[0]["o"] == 111.0
@@ -447,22 +488,34 @@ def test_live_candles_keeps_only_bucket_when_alone() -> None:
 # Catalog-backed candles (_historical_candles_json)
 # ---------------------------------------------------------------------------
 
+
 def _write_snapshot_trades_to_catalog(tmp_path: str, n: int = 10) -> tuple[int, int]:
-    """Write n DydxSecondSnapshots 60s apart, each with a single trade at open=high=
+    """
+    Write n DydxSecondSnapshots 60s apart, each with a single trade at open=high=
     low=close=100+i, into a temp catalog. Returns (first_ts_ns, last_ts_ns) for the
     caller to build a bounding [start_ms, end_ms]. Raw TradeTicks are no longer
     persisted (see troll/docs/DATA_DICTIONARY.md's Retention section) -- OHLC candles
-    are built from these snapshot fields instead."""
+    are built from these snapshot fields instead.
+    """
     base_ns = _TS_NS
     step_ns = 60 * 1_000_000_000
     snapshots = [
         DydxSecondSnapshot(
             instrument_id=InstrumentId.from_str(_IID),
-            bid_prices=[100.0 + i], bid_sizes=[1.0],
-            ask_prices=[102.0 + i], ask_sizes=[1.0],
-            buy_volume=1.0 + i, sell_volume=0.0, buy_count=1, sell_count=0,
-            open_price=100.0 + i, high_price=100.0 + i, low_price=100.0 + i, close_price=100.0 + i,
-            ts_event=base_ns + i * step_ns, ts_init=base_ns + i * step_ns,
+            bid_prices=[100.0 + i],
+            bid_sizes=[1.0],
+            ask_prices=[102.0 + i],
+            ask_sizes=[1.0],
+            buy_volume=1.0 + i,
+            sell_volume=0.0,
+            buy_count=1,
+            sell_count=0,
+            open_price=100.0 + i,
+            high_price=100.0 + i,
+            low_price=100.0 + i,
+            close_price=100.0 + i,
+            ts_event=base_ns + i * step_ns,
+            ts_init=base_ns + i * step_ns,
         )
         for i in range(n)
     ]
@@ -471,7 +524,9 @@ def _write_snapshot_trades_to_catalog(tmp_path: str, n: int = 10) -> tuple[int, 
     return snapshots[0].ts_event, snapshots[-1].ts_event
 
 
-def test_historical_candles_json_builds_from_catalog_snapshots(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_historical_candles_json_builds_from_catalog_snapshots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Round-trips DydxSecondSnapshot OHLC fields through the catalog into OHLC candles."""
     with tempfile.TemporaryDirectory() as tmp:
         first_ns, last_ns = _write_snapshot_trades_to_catalog(tmp, n=10)
@@ -487,14 +542,23 @@ def test_historical_candles_json_builds_from_catalog_snapshots(monkeypatch: pyte
         assert candles[0]["c"] == 109.0
 
 
-def test_historical_candles_json_skips_seconds_with_no_trade(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_historical_candles_json_skips_seconds_with_no_trade(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Snapshots with close_price=None (no trade that second) contribute no candle."""
     with tempfile.TemporaryDirectory() as tmp:
         snapshot = DydxSecondSnapshot(
             instrument_id=InstrumentId.from_str(_IID),
-            bid_prices=[100.0], bid_sizes=[1.0], ask_prices=[102.0], ask_sizes=[1.0],
-            buy_volume=0.0, sell_volume=0.0, buy_count=0, sell_count=0,
-            ts_event=_TS_NS, ts_init=_TS_NS,
+            bid_prices=[100.0],
+            bid_sizes=[1.0],
+            ask_prices=[102.0],
+            ask_sizes=[1.0],
+            buy_volume=0.0,
+            sell_volume=0.0,
+            buy_count=0,
+            sell_count=0,
+            ts_event=_TS_NS,
+            ts_init=_TS_NS,
         )
         ParquetDataCatalog(tmp).write_data([snapshot])
         monkeypatch.setattr(ml_signals.dashboard, "CATALOG_PATH", tmp)
@@ -509,19 +573,28 @@ def test_historical_candles_json_skips_seconds_with_no_trade(monkeypatch: pytest
 # proving the extracted price-series computation didn't change _coin_chart_json's output.
 # ---------------------------------------------------------------------------
 
+
 def _write_snapshots_to_catalog(tmp_path: str, n: int = 5) -> tuple[int, int]:
-    """Write n DydxSecondSnapshots 1s apart (realistic cadence -- wider spacing would
+    """
+    Write n DydxSecondSnapshots 1s apart (realistic cadence -- wider spacing would
     trip the gap-detection None-insertion in _price_series_rows), bid/ask prices
-    climbing by 1 each step, into a temp catalog. Mirrors _write_trades_to_catalog's pattern."""
+    climbing by 1 each step, into a temp catalog. Mirrors _write_trades_to_catalog's pattern.
+    """
     base_ns = _TS_NS
     step_ns = 1_000_000_000
     snapshots = [
         DydxSecondSnapshot(
             instrument_id=InstrumentId.from_str(_IID),
-            bid_prices=[100.0 + i], bid_sizes=[1.0],
-            ask_prices=[102.0 + i], ask_sizes=[1.0],
-            buy_volume=0.0, sell_volume=0.0, buy_count=0, sell_count=0,
-            ts_event=base_ns + i * step_ns, ts_init=base_ns + i * step_ns,
+            bid_prices=[100.0 + i],
+            bid_sizes=[1.0],
+            ask_prices=[102.0 + i],
+            ask_sizes=[1.0],
+            buy_volume=0.0,
+            sell_volume=0.0,
+            buy_count=0,
+            sell_count=0,
+            ts_event=base_ns + i * step_ns,
+            ts_init=base_ns + i * step_ns,
         )
         for i in range(n)
     ]
@@ -530,7 +603,9 @@ def _write_snapshots_to_catalog(tmp_path: str, n: int = 5) -> tuple[int, int]:
     return snapshots[0].ts_event, snapshots[-1].ts_event
 
 
-def test_historical_lines_json_builds_from_catalog_snapshots(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_historical_lines_json_builds_from_catalog_snapshots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Round-trips real DydxSecondSnapshots through the catalog into bid/ask/mid/micro/price rows."""
     with tempfile.TemporaryDirectory() as tmp:
         first_ns, last_ns = _write_snapshots_to_catalog(tmp, n=5)
@@ -546,14 +621,18 @@ def test_historical_lines_json_builds_from_catalog_snapshots(monkeypatch: pytest
 
 
 def test_live_lines_json_matches_coin_chart_json_price_series() -> None:
-    """The extracted price-series computation (Story 8.1) must produce identical
+    """
+    The extracted price-series computation (Story 8.1) must produce identical
     bid/ask/mid/micro/price values to _coin_chart_json's own fields for the same
-    buffer -- a pure extraction, not a behavior change."""
+    buffer -- a pure extraction, not a behavior change.
+    """
     _reset()
-    ml_signals.dashboard._second_rolling[_IID] = deque([
-        _snap(100.0, 102.0, ts_ns=_TS_NS),
-        _snap(101.0, 103.0, ts_ns=_TS_NS + 1_000_000_000),
-    ])
+    ml_signals.dashboard._second_rolling[_IID] = deque(
+        [
+            _snap(100.0, 102.0, ts_ns=_TS_NS),
+            _snap(101.0, 103.0, ts_ns=_TS_NS + 1_000_000_000),
+        ]
+    )
     chart = _chart()
     rows = json.loads(_live_lines_json(_IID))["rows"]
     assert [r["t"] for r in rows] == chart["ts"]
@@ -569,8 +648,11 @@ def test_live_lines_json_matches_coin_chart_json_price_series() -> None:
 # _indicator_id / _indicators_json) -- Story 8.2
 # ---------------------------------------------------------------------------
 
+
 def test_parse_indicator_spec_splits_entries_on_pipe_and_params_on_comma() -> None:
-    specs = _parse_indicator_spec("SimpleMovingAverage:period=20|Stochastics:period_k=14,period_d=3")
+    specs = _parse_indicator_spec(
+        "SimpleMovingAverage:period=20|Stochastics:period_k=14,period_d=3"
+    )
     assert specs == [
         ("SimpleMovingAverage", {"period": "20"}),
         ("Stochastics", {"period_k": "14", "period_d": "3"}),
@@ -578,12 +660,16 @@ def test_parse_indicator_spec_splits_entries_on_pipe_and_params_on_comma() -> No
 
 
 def test_parse_indicator_spec_handles_entry_with_no_params() -> None:
-    assert _parse_indicator_spec("VolumeWeightedAveragePrice") == [("VolumeWeightedAveragePrice", {})]
+    assert _parse_indicator_spec("VolumeWeightedAveragePrice") == [
+        ("VolumeWeightedAveragePrice", {})
+    ]
 
 
 def test_coerce_indicator_params_casts_to_default_types() -> None:
     spec = INDICATOR_CATALOG["KeltnerChannel"]
-    coerced = _coerce_indicator_params(spec, {"period": "20", "k_multiplier": "1.5", "use_previous": "false"})
+    coerced = _coerce_indicator_params(
+        spec, {"period": "20", "k_multiplier": "1.5", "use_previous": "false"}
+    )
     assert coerced == {"period": 20, "k_multiplier": 1.5, "use_previous": False}
 
 
@@ -645,36 +731,70 @@ def test_indicator_replay_window_neither_bound_set_is_live() -> None:
     assert (window.start_ms, window.end_ms) == (None, None)
 
 
-def test_render_chart_page_figure_row_counts_stay_in_lockstep(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Plotly's make_subplots raises if rows/row_heights/subplot_titles lengths disagree --
-    nothing else in this suite exercises _render_chart_page's figure construction at all, so a
-    future row add/remove (each Epic 10 custom-indicator story has retired one fixed row) could
-    silently break page load with no test catching it until someone opens the page by hand."""
-    monkeypatch.setattr(
-        ml_signals.dashboard._chart_data, "compute_chart_series",
-        lambda *a, **k: {
-            "microprice": [], "spread": [],
-            "imbalance": [], "mid_imbalance": [], "bid_depth": [], "ask_depth": [],
-        },
-    )
-    html_out = _render_chart_page("BTC-USD-PERP.DYDX", 0, 1000, explicit_range=True)
-    assert "Book imbalance" in html_out
+def test_build_chart_page_html_never_touches_compute_chart_series(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Story 14.2: the page shell must render without any chart-series data at all -- a slow
+    catalog read (compute_chart_series) must never block /chart/{id}'s HTML response. Proven
+    by making compute_chart_series raise if it's ever called from this code path (it used to
+    be called unconditionally by the pre-14.2 _render_chart_page this replaces).
+    """
+
+    def _boom(*a: object, **k: object) -> None:
+        raise AssertionError("_build_chart_page_html must not call compute_chart_series")
+
+    monkeypatch.setattr(ml_signals.dashboard._chart_data, "compute_chart_series", _boom)
+    html_out = _build_chart_page_html("BTC-USD-PERP.DYDX", 0, 1000, explicit_range=True)
+    assert "Book imbalance L1 agg" in html_out  # row title, now a JS string in _LIVE_CHART_JS
+    assert "micro-panel" in html_out
+    assert "_loadMicroPanel(_coinIid,0,1000)" in html_out
+
+
+def test_microfeatures_json_decimates_and_reports_true_pre_decimation_count() -> None:
+    """
+    Moved verbatim from the old server-side _build_chart_page_html (pre-Story-14.2) --
+    same stride-decimation, same "count" semantics (true pre-decimation event count from
+    "spread", not the decimated point count), now serving coin_microfeatures_handler
+    instead of an inline server-rendered Plotly figure.
+    """
+    long_series = [{"time": float(i), "value": float(i)} for i in range(5000)]
+    data = {"spread": long_series, "imbalance": [{"time": 1.0, "value": 0.5}]}
+    body = json.loads(_microfeatures_json(data))
+    assert body["count"] == 5000
+    assert len(body["series"]["spread"]) <= 2000
+    assert body["series"]["imbalance"] == [{"time": 1.0, "value": 0.5}]
+
+
+def test_microfeatures_json_under_cap_is_not_decimated() -> None:
+    small_series = [{"time": float(i), "value": float(i)} for i in range(10)]
+    body = json.loads(_microfeatures_json({"spread": small_series}))
+    assert body["series"]["spread"] == small_series
+    assert body["count"] == 10
 
 
 def test_indicator_id_sorts_params_for_a_stable_key() -> None:
-    assert _indicator_id("BollingerBands", {"k": 2.0, "period": 5}) == "BollingerBands_k=2.0,period=5"
+    assert (
+        _indicator_id("BollingerBands", {"k": 2.0, "period": 5}) == "BollingerBands_k=2.0,period=5"
+    )
     assert _indicator_id("VolumeWeightedAveragePrice", {}) == "VolumeWeightedAveragePrice"
 
 
 def _window() -> ReplayWindow:
-    return ReplayWindow(instrument_id="BTC-USD-PERP.DYDX", bar_seconds=60, start_ms=None, end_ms=None)
+    return ReplayWindow(
+        instrument_id="BTC-USD-PERP.DYDX", bar_seconds=60, start_ms=None, end_ms=None
+    )
 
 
 def test_indicators_json_returns_points_per_output_attribute() -> None:
-    candles = [{"t": i * 60_000, "o": c, "h": c, "l": c, "c": c, "v": 1.0}
-               for i, c in enumerate([float(x) for x in range(1, 11)])]
+    candles = [
+        {"t": i * 60_000, "o": c, "h": c, "l": c, "c": c, "v": 1.0}
+        for i, c in enumerate([float(x) for x in range(1, 11)])
+    ]
     body, status = _indicators_json(
-        candles, "SimpleMovingAverage:period=3|BollingerBands:period=5,k=2", _window(),
+        candles,
+        "SimpleMovingAverage:period=3|BollingerBands:period=5,k=2",
+        _window(),
     )
     assert status == 200
     payload = json.loads(body)
@@ -691,7 +811,8 @@ def test_indicators_json_dispatches_to_custom_catalog(monkeypatch: pytest.Monkey
         _ci.CUSTOM_INDICATOR_CATALOG,
         "PlaceholderCustom",
         _ci.CustomIndicatorSpec(
-            params={}, panel="histogram",
+            params={},
+            panel="histogram",
             replay=lambda candles, params, window: {"value": [c["c"] for c in candles]},
         ),
     )
@@ -699,7 +820,8 @@ def test_indicators_json_dispatches_to_custom_catalog(monkeypatch: pytest.Monkey
     body, status = _indicators_json(candles, "PlaceholderCustom", _window())
     assert status == 200
     assert json.loads(body)["PlaceholderCustom"]["value"] == [
-        {"t": 0, "value": 1.0}, {"t": 60_000, "value": 2.0},
+        {"t": 0, "value": 1.0},
+        {"t": 60_000, "value": 2.0},
     ]
 
 
@@ -733,7 +855,9 @@ def test_indicators_json_returns_400_for_non_numeric_param_value() -> None:
 
 async def _config_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> TestClient:
     monkeypatch.setattr(
-        ml_signals.dashboard, "CHART_INDICATOR_CONFIG_PATH", str(tmp_path / "chart_indicators.toml"),
+        ml_signals.dashboard,
+        "CHART_INDICATOR_CONFIG_PATH",
+        str(tmp_path / "chart_indicators.toml"),
     )
     app = ml_signals.dashboard.make_app("redis://127.0.0.1:6379", str(tmp_path / "catalog"))
     return TestClient(TestServer(app))
@@ -741,7 +865,8 @@ async def _config_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Tes
 
 @pytest.mark.asyncio
 async def test_indicator_config_get_on_fresh_file_returns_empty_list(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     async with await _config_client(monkeypatch, tmp_path) as client:
         resp = await client.get("/data/coin/BTC-USD-PERP.DYDX/indicator-config")
@@ -751,7 +876,8 @@ async def test_indicator_config_get_on_fresh_file_returns_empty_list(
 
 @pytest.mark.asyncio
 async def test_indicator_config_post_then_get_round_trips(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     payload = [
         {"name": "CumulativeVolumeDelta", "params": {}, "category": "custom"},
@@ -771,7 +897,8 @@ async def test_indicator_config_post_then_get_round_trips(
 
 @pytest.mark.asyncio
 async def test_indicator_config_post_ignores_client_side_id_field(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     # A client-sent "id" (the picker UI's own sequence counter) must not be required
     # or persisted -- confirmed here by sending one and asserting it never comes back.
@@ -788,11 +915,13 @@ async def test_indicator_config_post_ignores_client_side_id_field(
 
 @pytest.mark.asyncio
 async def test_indicator_config_post_malformed_payload_returns_400(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     async with await _config_client(monkeypatch, tmp_path) as client:
         resp = await client.post(
-            "/data/coin/BTC-USD-PERP.DYDX/indicator-config", json=[{"name": "OFI"}],  # missing category
+            "/data/coin/BTC-USD-PERP.DYDX/indicator-config",
+            json=[{"name": "OFI"}],  # missing category
         )
         assert resp.status == 400
         assert "error" in await resp.json()
@@ -800,7 +929,8 @@ async def test_indicator_config_post_malformed_payload_returns_400(
 
 @pytest.mark.asyncio
 async def test_indicator_config_post_toml_unrepresentable_param_returns_400_not_500(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     # A JSON null decodes to Python None, which tomli_w cannot serialize -- must be a
     # structured 400 from save_coin_indicator_config_handler's widened try/except, not
@@ -814,7 +944,8 @@ async def test_indicator_config_post_toml_unrepresentable_param_returns_400_not_
 
 @pytest.mark.asyncio
 async def test_indicator_config_get_on_corrupt_file_returns_500_not_crash(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     # A hand-edited/corrupt chart_indicators.toml (AC #1 makes this file human-editable)
     # must surface as a diagnosable 500, not an unhandled exception (Review Finding).

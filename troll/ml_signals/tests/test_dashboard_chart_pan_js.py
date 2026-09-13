@@ -20,7 +20,7 @@ in _INDEX_HTML for /coin/{id}, which has no chart at all anymore).
 
 No JS test framework exists in this repo (Python is the only tested layer per project
 convention) -- this extracts the real _LIVE_CHART_JS source, stubs document/Plotly/fetch
-with plain objects plus the globals a real embedding page (_render_chart_page) would
+with plain objects plus the globals a real embedding page (_build_chart_page_html) would
 declare, and runs a small Node harness (built-in `assert` only, no framework) against the
 actual functions to cover the branching/race logic a review found untested:
 request-generation guard (_loadOlderChunk vs. a superseding coin/mode/bar switch),
@@ -49,10 +49,12 @@ global.document = { getElementById: function(){ return _dummyEl(); } };
 global.window = {};
 global.history = { pushState: function(){} };
 global.location = { pathname: "/", search: "" };
-global.Plotly = { react: function(){}, newPlot: function(){}, purge: function(){} };
+var _relayoutCalls = [];
+global.Plotly = { react: function(){}, newPlot: function(){}, purge: function(){},
+  relayout: function(id, upd){ _relayoutCalls.push({id: id, upd: upd}); } };
 global.fetch = function(){ return Promise.resolve({ ok:true, json: function(){ return Promise.resolve({rows:[], candles:[], ticks:[]}); } }); };
 
-// Globals _LIVE_CHART_JS expects its embedding page to declare (matches _render_chart_page's
+// Globals _LIVE_CHART_JS expects its embedding page to declare (matches _build_chart_page_html's
 // init_script, dashboard.py) -- previously these lived in _INDEX_HTML's own script, removed
 // in Story 8.1 since /coin/{id} no longer embeds this widget.
 var _coinIid="test-coin";var _coinMode="candles";var _coinBarSeconds=60;
@@ -103,6 +105,42 @@ __DASHBOARD_JS__
   assert.strictEqual(_chartState, newState, "stale in-flight fetch must not clobber a superseding chart state");
   assert.strictEqual(_chartState.rows.length, 1, "stale fetch result must not have been spliced into the new state");
 
+  // -- _maybeLoadOlder: candles use a bar-count refill margin (_CANDLE_REFILL_MARGIN_BARS),
+  // not the lines' proportional half-chunk margin -- must not fire early, must fire once
+  // the pan reaches within that many bars of the buffered edge.
+  var fetchCalls = 0;
+  global.fetch = function(){ fetchCalls++; return new Promise(function(){}); };  // never resolves
+  var barMs = 60 * 1000, marginMs = barMs * _CANDLE_REFILL_MARGIN_BARS;
+  _chartState = {iid:"A", mode:"candles", barSeconds:60, rows:[{t:5000000,o:1,h:1,l:1,c:1}], cursorStart:5000000, exhaustedLeft:false, loading:false};
+  _maybeLoadOlder([new Date(5000000 + marginMs + 1000).toISOString(), new Date(6000000).toISOString()]);
+  assert.strictEqual(fetchCalls, 0, "must not refill while more than the bar-count margin remains");
+  _maybeLoadOlder([new Date(5000000 + marginMs - 1000).toISOString(), new Date(6000000).toISOString()]);
+  assert.strictEqual(fetchCalls, 1, "must refill once the pan reaches within the bar-count margin of the buffered edge");
+
+  // -- _loadDefaultCandleWindow: bare-visit default is a catalog-backed window sized in
+  // bars (_CANDLE_VISIBLE_BARS + _CANDLE_BUFFER_BARS back from now), zoomed to just the
+  // visible tail -- this replaces the old resetCoinLive() default that showed near-zero
+  // candles right after a dashboard restart (empty _second_rolling buffer).
+  var fixedNowMs = 1700000000000;
+  var realDateNow = Date.now;
+  Date.now = function(){ return fixedNowMs; };
+  _coinBarSeconds = 60; _coinMode = "candles"; _coinIid = "test-coin";
+  _coinHistStart = null; _coinHistEnd = null;
+  _relayoutCalls.length = 0;
+  global.fetch = function(){ return Promise.resolve({ ok:true, json: function(){ return Promise.resolve({candles:[{t:1,o:1,h:1,l:1,c:1}]}); } }); };
+  await _loadDefaultCandleWindow();
+  Date.now = realDateNow;
+  assert.ok(_coinHistStart, "default load must set a fixed historical window, not stay live/null");
+  var expectedStartMs = fixedNowMs - barMs * (_CANDLE_VISIBLE_BARS + _CANDLE_BUFFER_BARS);
+  assert.ok(Math.abs(new Date(_coinHistStart).getTime() - expectedStartMs) < 60000,
+    "default window must reach back _CANDLE_VISIBLE_BARS+_CANDLE_BUFFER_BARS bars, got start=" + _coinHistStart);
+  assert.strictEqual(_relayoutCalls.length, 1, "must zoom the chart to the visible tail after the default load resolves");
+  assert.strictEqual(_relayoutCalls[0].id, "live-chart");
+  var visRange = _relayoutCalls[0].upd["xaxis.range"];
+  var expectedVisStartMs = fixedNowMs - barMs * _CANDLE_VISIBLE_BARS;
+  assert.ok(Math.abs(visRange[0].getTime() - expectedVisStartMs) < 1000, "visible range must start _CANDLE_VISIBLE_BARS bars back");
+  assert.ok(Math.abs(visRange[1].getTime() - fixedNowMs) < 1000, "visible range must end at now");
+
   console.log("OK");
 })().then(function(){ process.exit(0); }).catch(function(e){ console.error(e); process.exit(1); });
 """
@@ -114,7 +152,11 @@ def test_chart_pan_state_machine() -> None:
     js = _extract_inline_script()
     harness = _HARNESS_TEMPLATE.replace("__DASHBOARD_JS__", js)
     result = subprocess.run(
-        ["node", "-e", harness], capture_output=True, text=True, timeout=30, check=False,
+        ["node", "-e", harness],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
 
@@ -181,7 +223,11 @@ def test_indicator_spec_string_matches_python_parser() -> None:
     js = _extract_inline_script()
     harness = _INDICATOR_HARNESS_TEMPLATE.replace("__DASHBOARD_JS__", js)
     result = subprocess.run(
-        ["node", "-e", harness], capture_output=True, text=True, timeout=30, check=False,
+        ["node", "-e", harness],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "ASSERTIONS_OK" in result.stderr
@@ -264,7 +310,11 @@ def test_oscillator_panel_gives_each_active_indicator_its_own_axis() -> None:
     js = _extract_inline_script()
     harness = _OSCILLATOR_AXIS_HARNESS_TEMPLATE.replace("__DASHBOARD_JS__", js)
     result = subprocess.run(
-        ["node", "-e", harness], capture_output=True, text=True, timeout=30, check=False,
+        ["node", "-e", harness],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
 
@@ -323,7 +373,11 @@ def test_indicator_picker_groups_by_category() -> None:
     js = _extract_inline_script()
     harness = _PICKER_GROUPING_HARNESS_TEMPLATE.replace("__DASHBOARD_JS__", js)
     result = subprocess.run(
-        ["node", "-e", harness], capture_output=True, text=True, timeout=30, check=False,
+        ["node", "-e", harness],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "ASSERTIONS_OK" in result.stderr
@@ -381,7 +435,102 @@ def test_histogram_indicator_renders_as_bar_trace_in_oscillator_panel() -> None:
     js = _extract_inline_script()
     harness = _HISTOGRAM_PANEL_HARNESS_TEMPLATE.replace("__DASHBOARD_JS__", js)
     result = subprocess.run(
-        ["node", "-e", harness], capture_output=True, text=True, timeout=30, check=False,
+        ["node", "-e", harness],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "ASSERTIONS_OK" in result.stderr
+
+
+# -- Story 14.2: client-fetched micro-panel + loading spinners ------------------------------
+
+_MICRO_PANEL_HARNESS_TEMPLATE = r"""
+"use strict";
+const assert = require("assert");
+
+var _els={};
+function _dummyEl(id){
+  if(!_els[id])_els[id]={innerHTML:"",style:{},value:"",on:function(){},removeAllListeners:function(){}};
+  return _els[id];
+}
+global.document = { getElementById: function(id){ return _dummyEl(id); } };
+var _captured=null;
+global.Plotly = { react: function(id,traces,layout){ _captured={id:id,traces:traces,layout:layout}; }, relayout: function(){}, purge: function(){} };
+global.fetch = function(){ return Promise.resolve({ ok:true, json: function(){ return Promise.resolve({}); } }); };
+
+var _coinIid="test-coin";var _coinMode="candles";var _coinBarSeconds=60;
+var _coinHistStart=null,_coinHistEnd=null;
+var _coinPanning=false,_chartState=null,_relayoutTimer=null,timer=null;
+var _MAX_CHUNK_MS=30*24*3600*1000;
+function setStatus(s){}
+
+__DASHBOARD_JS__
+
+(async function(){
+
+// -- _renderMicroPanel: row 1 (imbalance) present, row 2 (mid_imbalance) absent, row 3 has
+// both bid_depth and ask_depth sharing one axis, row 4 (spread) present.
+_renderMicroPanel({
+  imbalance:[{time:1,value:0.6}],
+  bid_depth:[{time:1,value:10}],
+  ask_depth:[{time:1,value:8}],
+  spread:[{time:1,value:0.02}],
+});
+assert.strictEqual(_captured.id, "micro-panel");
+assert.strictEqual(_captured.traces.length, 4, "imbalance + bid_depth + ask_depth + spread, mid_imbalance skipped (no data)");
+var byName={};
+_captured.traces.forEach(function(t){byName[t.name]=t;});
+assert.strictEqual(byName["imbalance"].xaxis, "x", "row 1 uses the bare (first) x-axis");
+assert.strictEqual(byName["imbalance"].yaxis, "y", "row 1 uses the bare (first) y-axis");
+assert.strictEqual(byName["bid depth"].xaxis, "x3", "row 3 (depth) uses the third x-axis");
+assert.strictEqual(byName["ask depth"].xaxis, "x3", "bid/ask depth share the same row-3 axis");
+assert.strictEqual(byName["spread"].xaxis, "x4", "row 4 uses the fourth x-axis");
+// Only imbalance (row 1) has data, so only its 0.5 hline shape should exist -- the absent
+// mid_imbalance row must not contribute a dangling hline against an empty row.
+assert.strictEqual(_captured.layout.shapes.length, 1, "hline only for rows that actually have data");
+assert.strictEqual(_captured.layout.shapes[0].yref, "y", "the one hline belongs to row 1");
+assert.deepStrictEqual(_captured.layout.yaxis4.domain, [0, 0.2538], "row 4's y-domain mirrors the retired make_subplots row_heights/vertical_spacing layout");
+assert.strictEqual(_els["micro-panel-spinner"].style.display, "none", "spinner must be hidden once real data has rendered");
+
+// -- _renderMicroPanel: a fully empty series must not crash and must still hide the spinner
+// (an instrument with no snapshots in the requested window is a normal, not exceptional, case).
+_els["micro-panel-spinner"].style.display = "";
+_renderMicroPanel({});
+assert.strictEqual(_captured.traces.length, 0, "no series data means no traces");
+assert.strictEqual(_els["micro-panel-spinner"].style.display, "none", "spinner must still hide even when the panel ends up empty");
+
+// -- _loadMicroPanel: fetches the microfeatures endpoint and renders the result's "series".
+global.fetch = function(url){
+  assert.ok(url.indexOf("/data/coin/test-coin/microfeatures") === 0, "must hit the microfeatures endpoint for the given iid");
+  return Promise.resolve({ json: function(){ return Promise.resolve({series:{spread:[{time:1,value:0.05}]},count:1}); } });
+};
+await _loadMicroPanel("test-coin", 0, 1000);
+assert.strictEqual(_captured.traces.length, 1, "_loadMicroPanel must render whatever series the endpoint returns");
+assert.strictEqual(_captured.traces[0].name, "spread");
+
+// -- Every synced chart id from _SYNCED_CHART_IDS still includes micro-panel (Story 14.2
+// only changed how it's populated, not its participation in cross-panel pan/zoom sync).
+assert.ok(_SYNCED_CHART_IDS.indexOf("micro-panel") >= 0, "micro-panel must remain a synced chart id");
+console.error("ASSERTIONS_OK");
+
+})().then(function(){ process.exit(0); }).catch(function(e){ console.error(e); process.exit(1); });
+"""
+
+
+def test_micro_panel_renders_client_side_from_fetched_series_and_hides_spinner() -> None:
+    if shutil.which("node") is None:
+        pytest.skip("node not installed")
+    js = _extract_inline_script()
+    harness = _MICRO_PANEL_HARNESS_TEMPLATE.replace("__DASHBOARD_JS__", js)
+    result = subprocess.run(
+        ["node", "-e", harness],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "ASSERTIONS_OK" in result.stderr

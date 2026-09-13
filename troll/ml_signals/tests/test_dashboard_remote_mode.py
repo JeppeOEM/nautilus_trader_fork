@@ -25,16 +25,21 @@ which aiohttp.ClientSession cannot reach; see the story's Design Notes):
 2. DATA_API_URL set to a running data_api instance -> each call site's output matches
    what local mode produces for the same seeded catalog/metrics data.
 
-Two of the four call sites (`/api/rank_history/{id}`, `/data/coin/{id}/lines`) return
-plain JSON, so local-vs-remote output is compared byte-for-byte via the same running
-dashboard app (toggling DATA_API_URL between two requests). The other two
-(`/history/{id}`, `/chart/{id}`) render Plotly HTML, which embeds a fresh random div id
-on every call (`fig.to_html()` is not deterministic even for two calls with identical
-input -- verified empirically) -- for those, the *data fed into the shared render
-helper* (`_history_page_from_rows`/`_build_chart_page_html`) is captured via a spy and
-compared instead, which is the actual claim Story 12.2 makes ("output matches local
-mode for the same seeded data"): rendering itself is already covered by
-test_dashboard_chart.py's existing tests.
+Three of the four call sites (`/api/rank_history/{id}`, `/data/coin/{id}/lines`,
+`/data/coin/{id}/microfeatures`) return plain JSON, so local-vs-remote output is compared
+byte-for-byte via the same running dashboard app (toggling DATA_API_URL between two
+requests). The remaining one (`/history/{id}`) renders Plotly HTML, which embeds a fresh
+random div id on every call (`fig.to_html()` is not deterministic even for two calls with
+identical input -- verified empirically) -- for that one, the *data fed into the shared
+render helper* (`_history_page_from_rows`) is captured via a spy and compared instead,
+which is the actual claim Story 12.2 makes ("output matches local mode for the same
+seeded data"): rendering itself is already covered by test_dashboard_chart.py's existing
+tests.
+
+`/chart/{id}` itself is no longer one of the 4 remote call sites (Story 14.2): the page
+shell it returns no longer depends on any chart-series data, local or remote -- that data
+now comes from a client-side fetch of `/data/coin/{id}/microfeatures` after the page is
+already on screen, which is call site #4 above.
 
 A third claim, from the I/O matrix's "data_api unreachable" row, is also proven here
 (not just asserted in `_fetch_json`'s docstring, per code review pass): a genuinely
@@ -50,17 +55,17 @@ import time
 from collections.abc import Iterator
 from pathlib import Path
 
+import data_api.app as data_api_app
 import pytest
+import ranking_engine.metrics_store as metrics_store
 import uvicorn
 from aiohttp.test_utils import TestClient
 from aiohttp.test_utils import TestServer
 from dydx_collector.second_snapshot import DydxSecondSnapshot
+
+import ml_signals.dashboard as dashboard_module
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
-
-import data_api.app as data_api_app
-import ml_signals.dashboard as dashboard_module
-import ranking_engine.metrics_store as metrics_store
 
 
 _IID = "BTC-USD-PERP.DYDX"
@@ -69,7 +74,7 @@ _IID = "BTC-USD-PERP.DYDX"
 def _epoch_window_query(start_s: float, end_s: float) -> tuple[str, str]:
     """
     Local-time ISO strings that _parse_dt/_parse_query_ms invert back to the given
-    epoch-second window in this same process -- mirrors _render_chart_page's own
+    epoch-second window in this same process -- mirrors _build_chart_page_html's own
     `datetime.fromtimestamp(...).strftime(fmt)` construction, so it round-trips
     correctly regardless of the sandbox's timezone (forward and backward conversion
     both happen in-process with the same tz).
@@ -85,17 +90,24 @@ def _epoch_window_query(start_s: float, end_s: float) -> tuple[str, str]:
 def _seeded_paths(tmp_path: Path) -> tuple[str, str]:
     """A temp ParquetDataCatalog with 2 DydxSecondSnapshots + a temp metrics.db with 2 rows."""
     catalog_path = str(tmp_path / "catalog")
-    ParquetDataCatalog(catalog_path).write_data([
-        DydxSecondSnapshot(
-            instrument_id=InstrumentId.from_str(_IID),
-            bid_prices=[100.0 + i], bid_sizes=[1.0],
-            ask_prices=[102.0 + i], ask_sizes=[1.0],
-            buy_volume=1.0, sell_volume=0.5, buy_count=1, sell_count=1,
-            ts_event=1_000_000_000 + i * 1_000_000_000,
-            ts_init=1_000_000_000 + i * 1_000_000_000,
-        )
-        for i in range(2)
-    ])
+    ParquetDataCatalog(catalog_path).write_data(
+        [
+            DydxSecondSnapshot(
+                instrument_id=InstrumentId.from_str(_IID),
+                bid_prices=[100.0 + i],
+                bid_sizes=[1.0],
+                ask_prices=[102.0 + i],
+                ask_sizes=[1.0],
+                buy_volume=1.0,
+                sell_volume=0.5,
+                buy_count=1,
+                sell_count=1,
+                ts_event=1_000_000_000 + i * 1_000_000_000,
+                ts_init=1_000_000_000 + i * 1_000_000_000,
+            )
+            for i in range(2)
+        ]
+    )
 
     db_path = str(tmp_path / "metrics" / "metrics.db")
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
@@ -103,24 +115,44 @@ def _seeded_paths(tmp_path: Path) -> tuple[str, str]:
     # catalog snapshot queries -- these must be recent, not epoch-relative, or history()
     # would trivially return [] and the equality assertion below would vacuously pass.
     now_ns = time.time_ns()
-    metrics_store.write([
-        {
-            "instrument_id": _IID, "ts": now_ns - 3_600_000_000_000, "rank": 1, "volume24h": 1.0,
-            "price": 101.0, "pct_1h": 1.0, "pct_24h": 2.0, "volatility": 0.1,
-            "ofi": 0.0, "microprice": 101.0, "spread": 2.0,
-        },
-        {
-            "instrument_id": _IID, "ts": now_ns - 1_800_000_000_000, "rank": 1, "volume24h": 1.0,
-            "price": 102.0, "pct_1h": 1.0, "pct_24h": 2.0, "volatility": 0.1,
-            "ofi": 0.0, "microprice": 102.0, "spread": 2.0,
-        },
-    ], db_path)
+    metrics_store.write(
+        [
+            {
+                "instrument_id": _IID,
+                "ts": now_ns - 3_600_000_000_000,
+                "rank": 1,
+                "volume24h": 1.0,
+                "price": 101.0,
+                "pct_1h": 1.0,
+                "pct_24h": 2.0,
+                "volatility": 0.1,
+                "ofi": 0.0,
+                "microprice": 101.0,
+                "spread": 2.0,
+            },
+            {
+                "instrument_id": _IID,
+                "ts": now_ns - 1_800_000_000_000,
+                "rank": 1,
+                "volume24h": 1.0,
+                "price": 102.0,
+                "pct_1h": 1.0,
+                "pct_24h": 2.0,
+                "volatility": 0.1,
+                "ofi": 0.0,
+                "microprice": 102.0,
+                "spread": 2.0,
+            },
+        ],
+        db_path,
+    )
     return catalog_path, db_path
 
 
 @pytest.fixture
 def _data_api_url(
-    _seeded_paths: tuple[str, str], monkeypatch: pytest.MonkeyPatch,
+    _seeded_paths: tuple[str, str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[str]:
     """Run data_api's real FastAPI app on a genuinely bound port, in a background thread."""
     catalog_path, db_path = _seeded_paths
@@ -153,10 +185,13 @@ def _data_api_url(
 
 @pytest.mark.asyncio
 async def test_data_api_url_unset_never_calls_fetch_json(
-    monkeypatch: pytest.MonkeyPatch, _seeded_paths: tuple[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    _seeded_paths: tuple[str, str],
 ) -> None:
-    """The hard byte-for-byte-identical constraint: with DATA_API_URL unset, none of the
-    4 call sites may take the remote branch at all."""
+    """
+    The hard byte-for-byte-identical constraint: with DATA_API_URL unset, none of the
+    4 call sites may take the remote branch at all.
+    """
     catalog_path, db_path = _seeded_paths
     monkeypatch.setattr(dashboard_module, "CATALOG_PATH", catalog_path)
     monkeypatch.setattr(dashboard_module, "METRICS_DB_PATH", db_path)
@@ -171,18 +206,27 @@ async def test_data_api_url_unset_never_calls_fetch_json(
     app = dashboard_module.make_app("redis://127.0.0.1:6379", catalog_path)
     async with TestClient(TestServer(app)) as client:
         assert (await client.get(f"/history/{_IID}")).status == 200
+        # /chart/{id}'s HTML shell never touches DATA_API_URL at all (Story 14.2) -- kept
+        # here only as a smoke check that the page still loads, not as remote-branch proof.
         resp = await client.get(f"/chart/{_IID}", params={"start": start_str, "end": end_str})
         assert resp.status == 200
         assert (await client.get(f"/api/rank_history/{_IID}")).status == 200
         resp = await client.get(
-            f"/data/coin/{_IID}/lines", params={"start": start_str, "end": end_str},
+            f"/data/coin/{_IID}/lines",
+            params={"start": start_str, "end": end_str},
+        )
+        assert resp.status == 200
+        resp = await client.get(
+            f"/data/coin/{_IID}/microfeatures",
+            params={"start": start_str, "end": end_str},
         )
         assert resp.status == 200
 
 
 @pytest.mark.asyncio
 async def test_remote_mode_surfaces_data_api_outage_as_error_not_empty_result(
-    monkeypatch: pytest.MonkeyPatch, _seeded_paths: tuple[str, str],
+    monkeypatch: pytest.MonkeyPatch,
+    _seeded_paths: tuple[str, str],
 ) -> None:
     """
     DATA-01: a genuinely unreachable `DATA_API_URL` must surface as an error response,
@@ -209,7 +253,9 @@ async def test_remote_mode_surfaces_data_api_outage_as_error_not_empty_result(
 
 @pytest.mark.asyncio
 async def test_remote_history_page_uses_data_api_rows_matching_local(
-    monkeypatch: pytest.MonkeyPatch, _seeded_paths: tuple[str, str], _data_api_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    _seeded_paths: tuple[str, str],
+    _data_api_url: str,
 ) -> None:
     catalog_path, db_path = _seeded_paths
     monkeypatch.setattr(dashboard_module, "CATALOG_PATH", catalog_path)
@@ -239,43 +285,50 @@ async def test_remote_history_page_uses_data_api_rows_matching_local(
 
 
 @pytest.mark.asyncio
-async def test_remote_chart_page_uses_data_api_data_matching_local(
-    monkeypatch: pytest.MonkeyPatch, _seeded_paths: tuple[str, str], _data_api_url: str,
+async def test_remote_microfeatures_matches_local_response(
+    monkeypatch: pytest.MonkeyPatch,
+    _seeded_paths: tuple[str, str],
+    _data_api_url: str,
 ) -> None:
+    """
+    Plain-JSON response (Story 14.2 moved the chart page's imbalance/mid-imbalance/depth/
+    spread data off the page-render path onto this endpoint) -- byte-for-byte comparison
+    is exact, no spy needed (unlike the old Plotly-HTML-rendering /chart/{id} path this
+    replaces, whose non-deterministic div ids required one).
+    """
     catalog_path, _db_path = _seeded_paths
     monkeypatch.setattr(dashboard_module, "CATALOG_PATH", catalog_path)
     monkeypatch.setattr(dashboard_module, "DATA_API_URL", "")
 
-    captured: list[dict] = []
-    original = dashboard_module._build_chart_page_html
-
-    def _spy(
-        symbol: str, start_ms: int, end_ms: int, explicit_range: bool, data: dict,
-    ) -> str:
-        captured.append(data)
-        return original(symbol, start_ms, end_ms, explicit_range, data)
-
-    monkeypatch.setattr(dashboard_module, "_build_chart_page_html", _spy)
-
     start_str, end_str = _epoch_window_query(0, 3600)
     app = dashboard_module.make_app("redis://127.0.0.1:6379", catalog_path)
     async with TestClient(TestServer(app)) as client:
-        resp = await client.get(f"/chart/{_IID}", params={"start": start_str, "end": end_str})
+        resp = await client.get(
+            f"/data/coin/{_IID}/microfeatures",
+            params={"start": start_str, "end": end_str},
+        )
         assert resp.status == 200
-        local_data = captured[-1]
+        local_body = json.loads(await resp.text())
 
         monkeypatch.setattr(dashboard_module, "DATA_API_URL", _data_api_url)
-        resp = await client.get(f"/chart/{_IID}", params={"start": start_str, "end": end_str})
+        resp = await client.get(
+            f"/data/coin/{_IID}/microfeatures",
+            params={"start": start_str, "end": end_str},
+        )
         assert resp.status == 200
-        remote_data = captured[-1]
+        remote_body = json.loads(await resp.text())
 
-    assert any(local_data.get(k) for k in local_data), "seeded snapshots must produce chart series"
-    assert remote_data == local_data
+    assert any(local_body["series"].get(k) for k in local_body["series"]), (
+        "seeded snapshots must produce chart series"
+    )
+    assert remote_body == local_body
 
 
 @pytest.mark.asyncio
 async def test_remote_rank_history_matches_local_response(
-    monkeypatch: pytest.MonkeyPatch, _seeded_paths: tuple[str, str], _data_api_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    _seeded_paths: tuple[str, str],
+    _data_api_url: str,
 ) -> None:
     """Plain-JSON response -- no Plotly involved, so byte-for-byte comparison is exact."""
     catalog_path, db_path = _seeded_paths
@@ -300,7 +353,9 @@ async def test_remote_rank_history_matches_local_response(
 
 @pytest.mark.asyncio
 async def test_remote_lines_matches_local_response(
-    monkeypatch: pytest.MonkeyPatch, _seeded_paths: tuple[str, str], _data_api_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    _seeded_paths: tuple[str, str],
+    _data_api_url: str,
 ) -> None:
     """Plain-JSON response -- no Plotly involved, so byte-for-byte comparison is exact."""
     catalog_path, _db_path = _seeded_paths
@@ -311,14 +366,16 @@ async def test_remote_lines_matches_local_response(
     app = dashboard_module.make_app("redis://127.0.0.1:6379", catalog_path)
     async with TestClient(TestServer(app)) as client:
         resp = await client.get(
-            f"/data/coin/{_IID}/lines", params={"start": start_str, "end": end_str},
+            f"/data/coin/{_IID}/lines",
+            params={"start": start_str, "end": end_str},
         )
         assert resp.status == 200
         local_body = json.loads(await resp.text())
 
         monkeypatch.setattr(dashboard_module, "DATA_API_URL", _data_api_url)
         resp = await client.get(
-            f"/data/coin/{_IID}/lines", params={"start": start_str, "end": end_str},
+            f"/data/coin/{_IID}/lines",
+            params={"start": start_str, "end": end_str},
         )
         assert resp.status == 200
         remote_body = json.loads(await resp.text())

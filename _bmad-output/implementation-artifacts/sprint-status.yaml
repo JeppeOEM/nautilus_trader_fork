@@ -41,7 +41,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-07-01
-last_updated: 2026-09-10 (Story 11.1 created, dev'd, self-reviewed and done — chart page's imbalance/mid-imbalance/depth/spread panes fixed)
+last_updated: 2026-09-13 (Epic 14 created, dev'd, self-reviewed and done — chart default 120-bar window/preload, async chart-page load with panel spinners)
 project: nautilus_trader_fork
 project_key: NOKEY
 tracking_system: file-system
@@ -139,6 +139,25 @@ development_status:
   # request: no elicitation).
   epic-11: done
   11-1-fix-empty-imbalance-depth-spread-chart-panes: done
+
+  # epic-14 has no epics.md entry -- standalone bypass-epic story pair created directly via
+  # create-story at the user's explicit request for full autonomy (plan -> correct epic ->
+  # create story -> dev -> review, no check-ins), same precedent as epics 5/6/7/9/11.
+  # Numbered 14 (not folded into an existing epic) because Epic 12/13 are real epics.md
+  # entries unrelated to the chart page, and epics 9/11 (the prior chart-page bypass
+  # stories) are already done. Both stories touch /chart/{id} (dashboard.py) only.
+  # 14.1: default candlestick view raised from 100 to 120 bars, with 120 (not 100) bars
+  # preloaded behind it and the existing pan-triggered refill mechanism confirmed to still
+  # hold at the new scale (the mechanism itself pre-existed this story, uncommitted, in the
+  # working tree -- see 14.1's story file for the full context).
+  # 14.2: /chart/{id}'s HTML response no longer blocks on any chart-series computation in
+  # either local or DATA_API_URL remote mode -- the imbalance/mid-imbalance/depth/spread
+  # panel moved to a new client-fetched endpoint (/data/coin/{id}/microfeatures) with its
+  # own loading spinner, fetched concurrently with (never blocking) the candlestick chart's
+  # own fetch; cross-panel pan/zoom sync confirmed preserved.
+  epic-14: done
+  14-1-chart-default-120-bar-window-with-scroll-back-preload: done
+  14-2-async-chart-page-load-with-panel-spinners: done
 
 action_items:
   - epic: 1
