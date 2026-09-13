@@ -1541,10 +1541,33 @@ class _IncidentHandler(logging.Handler):
             self.handleError(record)
 
 
+def _prune_stale_ws_raw_logs() -> None:
+    """
+    Delete ws_raw_debug_*.log files left behind by a previous process instance.
+
+    nautilus_trader's FileWriter tracks rotated backups in an in-memory queue
+    (crates/common/src/logging/writer.rs's `backup_files`) that is never seeded
+    from files already on disk -- it starts empty on every process start. Within
+    one run, cleanup_backups() correctly caps the directory at max_backup_count;
+    across a restart, whatever files existed from the prior run become permanently
+    untracked and are never pruned. Since this is core nautilus_trader code
+    (FORK-01: never modify nautilus_trader/crates), the fix lives here: clear the
+    directory before init_logging() starts a fresh writer, so restarts can't
+    accumulate. Confirmed the cause by reading writer.rs directly, not guessing --
+    found 43 orphaned files / 8GB on nifelheim spanning this collector's last day
+    of redeploys (DATA-02).
+    """
+    if not _WS_RAW_LOG_DIR.exists():
+        return
+    for path in _WS_RAW_LOG_DIR.glob("ws_raw_debug_*.log*"):
+        path.unlink(missing_ok=True)
+
+
 async def main() -> None:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
+    _prune_stale_ws_raw_logs()
     logging.getLogger().addHandler(_IncidentHandler())
     # Rust's `log` crate is a no-op until a logger is installed -- without this, any
     # `log::warn!`/`log::error!` inside the Rust WS client (including the exact path that
@@ -1575,24 +1598,24 @@ async def main() -> None:
         level_file=nautilus_pyo3.LogLevel.DEBUG,
         directory=str(_WS_RAW_LOG_DIR),
         file_name="ws_raw_debug",
-        # Bounded rolling buffer, not a growing archive: [WS_RAW] is ~1MB/s, so 250MB x 2
-        # backups is ~500MB nominal / ~12 minutes of retention -- a debugging aid,
-        # self-cleaning by design. It doesn't need to survive long: _IncidentHandler
-        # (below) snapshots the relevant window into a permanent incident report the
-        # moment something WARNING+ worthy happens, well within this retention window (a
-        # fixed 100MB x 3 attempt was measured too short at ~6 min for a human to notice
-        # and go check manually -- this one only needs to outlast
-        # _INCIDENT_LOOKAHEAD_DELAY_S, not a human).
+        # Bounded rolling buffer, not a growing archive: [WS_RAW] is ~1MB/s. _IncidentHandler
+        # (below) auto-snapshots the relevant _INCIDENT_LOOKBACK_NS (10s) + a
+        # _INCIDENT_LOOKAHEAD_DELAY_S (2s) window into a permanent incident report the
+        # moment something WARNING+ worthy happens -- this buffer only needs to outlast that
+        # ~12s window by a safety margin, not a human noticing and checking manually (that
+        # was the old, much larger 500MB-nominal design this replaces). 20MB x 1 backup is
+        # ~40MB nominal / ~40s -- over 3x the required window.
         #
-        # Rotation size, not backup count, is what was raised here (was 50MB x 10, same
-        # ~500MB nominal budget): nautilus_trader's file writer unconditionally
-        # `eprintln!`s "Rotated log file..." on every rotation regardless of configured
-        # log level (crates/common/src/logging/writer.rs's rotate_file(), not routed
-        # through the `log` crate at all) -- that fired every ~50s at the old size, purely
-        # docker-logs noise nothing in this codebase reads (_scan_ws_raw_window globs
-        # every rotated file, never depends on which one is "current"). Fewer, bigger
-        # files cut that print's frequency ~5x for the same nominal retention budget.
-        file_rotate=(250_000_000, 2),
+        # Smaller than the old 250MB x 2 (~750MB nominal, and the underlying trigger for a
+        # disk-full incident on nifelheim once restarts orphaned old rotations -- see
+        # _prune_stale_ws_raw_logs). Rotating every ~20s at 20MB does mean nautilus_trader's
+        # file writer's unconditional `eprintln!("Rotated log file...")` on every rotation
+        # (crates/common/src/logging/writer.rs's rotate_file(), not routed through the
+        # `log` crate, so log level can't silence it) fires more often -- purely docker-logs
+        # noise nothing in this codebase reads (_scan_ws_raw_window globs every rotated
+        # file, never depends on which one is "current"), traded deliberately for a much
+        # smaller worst-case disk footprint.
+        file_rotate=(20_000_000, 1),
     )
     config = load_config(CONFIG_PATH)
 

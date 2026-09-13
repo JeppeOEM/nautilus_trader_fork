@@ -22,6 +22,7 @@ build-base:
 		--target application \
 		-t $(BASE_IMAGE) \
 		$(REPO_ROOT)
+	@docker image prune -f
 
 ## Build the base image on a low-RAM VPS. Runs the Rust compile as a single job
 ## (CARGO_BUILD_JOBS=1) instead of build-base's default 4-wide, capping peak
@@ -43,6 +44,7 @@ build-base-vps:
 		--target application \
 		-t $(BASE_IMAGE) \
 		$(REPO_ROOT)
+	@docker image prune -f
 
 ## Start collecting data, rebuilding every default-profile service (collector included)
 ## first (seconds -- it's just the thin troll/ layer on top of the base image). Run
@@ -51,6 +53,7 @@ build-base-vps:
 ## the collector's live WS connection/book state is never disturbed.
 up:
 	$(COMPOSE) up -d --build
+	@docker image prune -f
 	@echo "Dashboard: http://localhost:$(WEB_PORT)"
 
 ## Rebuild and restart everything that doesn't collect market data (dashboard,
@@ -65,6 +68,7 @@ redeploy:
 	$(COMPOSE) up -d --build dashboard ranking_engine
 	$(COMPOSE) --profile live-paper up -d --build live-paper
 	$(COMPOSE) --profile tui build bot_tui
+	@docker image prune -f
 	@echo "Dashboard: http://localhost:$(WEB_PORT)"
 
 ## Start the paper-trading node (Epic 3, live_paper module). Not part of plain `make up`
@@ -73,6 +77,7 @@ redeploy:
 ## key) -- see troll/live_paper/config.py for how real-money mode is separately gated.
 up-live-paper:
 	$(COMPOSE) --profile live-paper up -d --build live-paper
+	@docker image prune -f
 
 ## Build the collector/dashboard/live-paper images bypassing pip's TLS verification, for
 ## networks with a TLS-intercepting proxy (e.g. Zscaler) where pip can't validate
