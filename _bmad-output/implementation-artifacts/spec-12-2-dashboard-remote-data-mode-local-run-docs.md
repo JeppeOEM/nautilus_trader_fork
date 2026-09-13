@@ -6,7 +6,7 @@ status: 'done'
 review_loop_iteration: 1
 followup_review_recommended: false
 context: ['{project-root}/troll/CLAUDE.md', '{project-root}/CLAUDE.md']
-warnings: []
+warnings: ['oversized']
 baseline_revision: 'd82a8c8ff1'
 final_revision: '6af9bbc385'
 ---
