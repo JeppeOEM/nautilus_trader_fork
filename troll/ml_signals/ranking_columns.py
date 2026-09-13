@@ -40,6 +40,14 @@ NEGATIVE_COLOR = "#c0392b"
 # bpsFromPriceUnits) using each row's own "price" field; a script hitting the JSON
 # endpoints directly must do the same multiplication/division itself to get comparable
 # USD/bps units.
+#
+# "Vol(catalog)" is deliberately disambiguated from the coin-detail page's other two
+# volatility figures -- "volatility_fast" (live-tick, ~300s) and "volatility_score"
+# (VolatilityTracker's cross-sectional rank, 3600s) -- rather than a bare "Vol", which
+# used to collide with those on the same row/page. "catalog" matches the label already
+# used for this same field on both the web coin-detail page (dashboard.py's IND_GROUPS)
+# and bot_tui's coin-detail groups (app.py's _DETAIL_GROUPS) -- same field, same name,
+# everywhere it appears.
 RANKING_COLS: list[tuple[str, str, object, object]] = [
     ("ofi_10_z",       "OFI10z", lambda v: f"{v:+.2f}",  lambda v: POSITIVE_COLOR if v > 0 else NEGATIVE_COLOR),
     ("obi_10",         "OBI10",  lambda v: f"{v:.3f}",   lambda v: POSITIVE_COLOR if v > 0.5 else NEGATIVE_COLOR),
@@ -47,21 +55,25 @@ RANKING_COLS: list[tuple[str, str, object, object]] = [
     ("obi_3",          "OBI3",   lambda v: f"{v:.3f}",   lambda v: POSITIVE_COLOR if v > 0.5 else NEGATIVE_COLOR),
     ("cvd",            "CVD",    lambda v: f"{v:+.2f}",  lambda v: POSITIVE_COLOR if v > 0 else NEGATIVE_COLOR),
     ("spread",         "Spread", lambda v: f"{v:.6f}",   None),
-    ("microprice_lean","u lean", lambda v: f"{v:+.6f}",  lambda v: POSITIVE_COLOR if v > 0 else NEGATIVE_COLOR),
     ("volume_delta",   "Vol d 60s", lambda v: f"{v:+.2f}", lambda v: POSITIVE_COLOR if v > 0 else NEGATIVE_COLOR),
     ("price",          "Price",  lambda v: f"{v:.4f}",   None),
     ("pct_1h",         "1h %",   lambda v: f"{v:+.2f}%", lambda v: POSITIVE_COLOR if v > 0 else NEGATIVE_COLOR),
     ("pct_24h",        "24h %",  lambda v: f"{v:+.2f}%", lambda v: POSITIVE_COLOR if v > 0 else NEGATIVE_COLOR),
-    ("volatility",     "Vol",    lambda v: f"{v:.6f}",   None),
+    ("volatility",     "Vol(catalog)", lambda v: f"{v:.6f}", None),
     ("volatility_score", "Vol Score", lambda v: f"{v:.6f}" if v is not None else "—", None),
     ("volume24h",      "Vol24h", lambda v: f"{v / 1e6:.3f}M", None),
 ]
 
-# History-only column (Story 1.4): plotted on /history/{id} from metrics_store rows, but
-# deliberately NOT in RANKING_COLS -- that list is also used to render the *live*
-# rankings table straight from rankings:live's rank entries, which never carry a "rank"
-# key (row order itself is the live rank). Dashboard-only: bot_tui's Coins pane already
-# shows rank as its own leading column, not sourced from this list.
+# History-only columns (store_key, header_label): plotted on /history/{id}'s per-coin
+# 31-day charts from metrics_store rows, but deliberately NOT in RANKING_COLS -- that
+# list is also used to render the cross-instrument *ranking* table (both the web
+# dashboard's table and bot_tui's Coins pane), so anything here is single-coin-page-only.
+# "rank" is here because live rankings:live rank entries never carry a "rank" key (row
+# order itself is the live rank); bot_tui's Coins pane already shows rank as its own
+# leading column, not sourced from this list. "microprice_lean" ("u lean") is here
+# because it belongs on the single-coin page only, not the cross-instrument ranking
+# table -- it's already shown on both the web and bot_tui coin-detail views.
 _HISTORY_ONLY_COLS: list[tuple[str, str]] = [
     ("rank", "Rank"),
+    ("microprice_lean", "u lean"),
 ]

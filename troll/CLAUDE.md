@@ -146,3 +146,50 @@ Every metric/indicator shown in both `ml_signals/dashboard.py` and `bot_tui` mus
 - **SSOT-03** — Before adding any new metric to either UI, check whether it already exists in the other first. If so, locate and consolidate its current implementation onto one shared source before displaying it in the new place — never duplicate to move faster.
 - **SSOT-04** — The coin ranking page is one feature with two renderers: `ml_signals/dashboard.py` (web) and `bot_tui` (TUI). Any functionality applied to it — new columns/metrics, sort/filter behavior, ranking logic changes — must land in both, backed by the same shared source (per SSOT-01/02). Treat a request to change "the ranking page" as covering both unless the user scopes it to one explicitly.
 - **SSOT-05** — Same rule for the single-coin detail view: the metrics/indicators shown must match between web and `bot_tui`, per-coin. The web dashboard additionally has a per-coin page with visual graphs (charts/plots) — that page is web-only and is not duplicated in the TUI; `bot_tui`'s coin detail should instead surface a link/reference to the web graph page rather than reimplementing charting in the terminal.
+
+---
+
+## Desktop ↔ VPS Connection
+
+`dashboard`/`bot_tui` normally run *on* the VPS (`nifelheim`) alongside `collector`,
+inside Docker (`make up`). Since Story 12.2 (`DATA_API_URL` remote-data mode, see
+`ARCHITECTURE.md`'s "Running dashboard/bot_tui off the VPS" section), the desktop can
+instead run them locally and reach `nifelheim` only for data, via shell functions in
+`~/.zshrc`:
+
+- **`_troll_tunnel_ensure`** — opens one background SSH tunnel to `$TROLL_VPS_HOST`
+  (`nifelheim`) forwarding two ports: `6379` (Redis — live snapshots/rankings pub/sub)
+  and `9100` (`data_api`, the read-only FastAPI wrapper over the Parquet catalog +
+  `metrics.db`). Idempotent — checks `fuser 6379/tcp` first, so repeated calls don't
+  stack tunnels.
+- **`_troll_dashboard_ensure`** — ensures the tunnel, then runs `make dashboard` locally
+  (in `$TROLL_DIR`) with `REDIS_URL`/`DATA_API_URL` pointed at the tunnel's local end
+  (`127.0.0.1:6379`/`127.0.0.1:9100`), backgrounded, logging to
+  `/tmp/troll-dashboard.log`. No local catalog/`metrics.db` mount needed — every
+  historical read goes over the tunnel to `data_api` instead.
+- **`troll-web`** — the entry point: ensures the dashboard is up (above), then opens it
+  in Firefox at `http://localhost:$TROLL_WEB_PORT` (`7766`, matching the VPS's own
+  `troll/.env` `WEB_PORT` there) — **this must match `WEB_PORT` in the desktop's own
+  `troll/.env`** (which the Makefile's `dashboard`/`web` targets actually bind to,
+  independently of whatever the VPS is running on); the two settings don't check each
+  other, and a mismatch makes `_troll_dashboard_ensure` poll the wrong port until it
+  times out, causing `troll-web` to fail silently instead of opening the browser. Since
+  desktop and VPS each have their own gitignored `.env`, nothing enforces this
+  agreement automatically — if you ever change one side's `WEB_PORT`, change the other
+  to match.
+- **`troll-tui`** — same dashboard/tunnel dependency, plus starts
+  `scripts/open_listener.go` locally (`$TROLL_OPEN_LISTENER_PORT`, `8901`) so that
+  pressing "open chart" inside `bot_tui` (which itself runs via `make tui`, rebuilding
+  only the thin `bot_tui` Docker layer) can pop a chart open in the desktop's browser —
+  `bot_tui` has no `DATA_API_URL` use of its own, it only needs live Redis.
+- **`troll-logs`** — a separate, independent tunnel (`-L 8080:localhost:8080` to
+  `nifelheim`) for Dozzle, the container log viewer; unrelated to the Redis/`data_api`
+  tunnel above. Opened with plain `xdg-open`, not Firefox directly.
+- **`troll-down`** — tears everything back down: kills the `open_listener` process,
+  frees `$TROLL_WEB_PORT`, and kills any `ssh.*nifelheim` tunnel (both the
+  Redis/`data_api` one and the Dozzle one).
+
+**Why this exists:** running the web UI/TUI on the desktop instead of the VPS gets a
+real browser and better interactivity without exposing any VPS port publicly — SEC-01
+still holds, since nothing new is bound to `0.0.0.0` on `nifelheim`; the connection is
+entirely outbound SSH from the desktop.

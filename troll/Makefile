@@ -3,11 +3,32 @@ TROLL_DIR  := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 COMPOSE    := docker compose -f $(TROLL_DIR)docker-compose.yml
 BASE_IMAGE := nautilus-trader-base:1.229.0
 
-.PHONY: build-base build-base-vps up redeploy up-live-paper build-insecure test test-live-paper down logs logs-dash web enable-boot enable-firewall harden-ssh
+.PHONY: build-base build-base-vps up redeploy redeploy-no-paper up-live-paper build-insecure test test-live-paper down logs logs-dash web enable-boot enable-firewall harden-ssh
 
 # Personal, gitignored overrides (see .env-example for the documented default).
 -include $(TROLL_DIR).env
+
+# LOCAL_DEV=true (set in troll/.env, or `LOCAL_DEV=true make up`) shifts every port
+# this stack publishes off its production defaults, onto ones that don't collide with
+# the SSH-tunnel-forwarded ports (6379/9100/8080) or dashboard port (8765) that
+# troll-web/troll-tui/troll-logs (~/.zshrc) use to reach the real VPS instance -- see
+# troll/CLAUDE.md's "Desktop <-> VPS Connection" section. Never set on the VPS itself,
+# so its .env needs no changes; `?=` still lets an explicit port in .env win over either
+# default. ponytail: 4 vars is simpler than a generic port-offset scheme -- add one if a
+# 5th port ever needs it.
+LOCAL_DEV ?= false
+ifeq ($(LOCAL_DEV),true)
+WEB_PORT ?= 18765
+REDIS_PORT ?= 16379
+DATA_API_PORT ?= 19100
+DOZZLE_PORT ?= 18080
+else
 WEB_PORT ?= 8765
+REDIS_PORT ?= 6379
+DATA_API_PORT ?= 9100
+DOZZLE_PORT ?= 8080
+endif
+export WEB_PORT REDIS_PORT DATA_API_PORT DOZZLE_PORT
 
 ## Build the base nautilus image (~15 min, only needed once or after core changes)
 ## On networks with TLS inspection (e.g. Zscaler), export your root CA to
@@ -67,6 +88,16 @@ up:
 redeploy:
 	$(COMPOSE) up -d --build dashboard ranking_engine
 	$(COMPOSE) --profile live-paper up -d --build live-paper
+	$(COMPOSE) --profile tui build bot_tui
+	@docker image prune -f
+	@echo "Dashboard: http://localhost:$(WEB_PORT)"
+
+## Same as `redeploy` but never touches live-paper -- for iterating on
+## dashboard/ranking_engine/data_api/bot_tui (e.g. the VPS-side half of
+## troll-redeploy in ~/.zshrc) without disturbing a running paper-trading bot's
+## position/order state. Includes data_api (redeploy itself omits it today).
+redeploy-no-paper:
+	$(COMPOSE) up -d --build dashboard ranking_engine data_api
 	$(COMPOSE) --profile tui build bot_tui
 	@docker image prune -f
 	@echo "Dashboard: http://localhost:$(WEB_PORT)"
@@ -142,7 +173,7 @@ logs-dash:
 
 ## Open Dozzle log viewer in browser
 web:
-	xdg-open http://localhost:8080
+	xdg-open http://localhost:$(DOZZLE_PORT)
 
 ## One-time VPS setup: enable the Docker daemon on boot so `restart: always`
 ## containers actually come back after a host reboot (Docker's own auto-start
