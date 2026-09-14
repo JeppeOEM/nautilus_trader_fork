@@ -27,12 +27,18 @@ Bound to 127.0.0.1 only (SEC-01) -- see docker-compose.yml's `data_api`
 service (`network_mode: host` + `uvicorn --host 127.0.0.1`), no `ports:` entry.
 """
 
+import asyncio
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import AsyncIterator
 
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
+from data_api import redis_bus
+from data_api.routes import rankings as rankings_routes
+from data_api.ws import live as live_ws
 from dydx_collector.second_snapshot import DydxSecondSnapshot
 from ml_signals import catalog_stats as _catalog_stats
 from ml_signals import chart_data as _chart_data
@@ -55,7 +61,28 @@ FRONTEND_DIST_PATH: str = os.environ.get("FRONTEND_DIST_PATH", "frontend_dist")
 # which would otherwise collide with this app's own /docs SPA route (Signal Atlas, FR45) --
 # confirmed via a real TestClient request during Story 15.1 (not assumed), see that story's
 # Dev Agent Record.
-app = FastAPI(docs_url=None, redoc_url=None)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """
+    Start the one shared `RankingsBus` subscriber (Story 15.2) for the app's whole
+    lifetime -- both `GET /api/rankings` and every `/ws/live` connection read/subscribe
+    against this same `redis_bus.bus` instance, never opening a per-request or
+    per-websocket Redis connection of their own.
+    """
+    task = asyncio.create_task(redis_bus.bus.run(redis_bus.REDIS_URL))
+    try:
+        yield
+    finally:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+app = FastAPI(docs_url=None, redoc_url=None, lifespan=lifespan)
 
 
 @app.get("/metrics/history/{symbol}")
@@ -121,6 +148,14 @@ def health() -> HealthResponse:
     """Pilot route for the OpenAPI->TypeScript codegen pipeline (Story 15.1 AC #3) --
     also a real liveness check going forward, not throwaway scaffolding."""
     return HealthResponse(status="ok")
+
+
+# Story 15.2: rankings REST + WS relay. Both must register above the /api/* catch-all
+# below -- a route registered after it would silently 404 (confirmed failure mode from
+# Story 15.1's own SPA-fallback investigation; the same "declared routes win over the
+# catch-all" rule applies here).
+app.include_router(rankings_routes.router)
+app.include_router(live_ws.router)
 
 
 @app.get("/api/{full_path:path}")

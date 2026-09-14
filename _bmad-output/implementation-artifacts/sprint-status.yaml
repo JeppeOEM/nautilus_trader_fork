@@ -182,7 +182,7 @@ development_status:
   # epic-14 (14.3 becomes moot once dashboard.py's chart page is deleted in Story 15.10).
   epic-15: in-progress
   15-1-facade-scaffold-spa-static-serving-and-docs-page: done
-  15-2-live-coin-rankings-page: backlog
+  15-2-live-coin-rankings-page: done
 
 action_items:
   - epic: 1

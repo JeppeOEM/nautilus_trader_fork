@@ -125,6 +125,7 @@ services:
     command: uvicorn data_api.app:app --host 127.0.0.1 --port ${DATA_API_PORT:-9100}
     environment:
       PYTHONUNBUFFERED: "1"
+      REDIS_URL: "redis://127.0.0.1:${REDIS_PORT:-6379}"
       CATALOG_PATH: "/app/catalog"
       METRICS_DB_PATH: "/app/metrics_dir/metrics.db"
     user: "1000:1000"

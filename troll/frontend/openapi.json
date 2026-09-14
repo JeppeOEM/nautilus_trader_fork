@@ -338,6 +338,25 @@
         }
       }
     },
+    "/api/rankings": {
+      "get": {
+        "summary": "Get Rankings",
+        "description": "503 before the bus has cached its first message -- an honest transient state, not a\nfabricated empty snapshot (I/O matrix). Referencing `redis_bus.bus` via the module\n(not importing the `bus` name directly) so tests can `monkeypatch.setattr(redis_bus,\n\"bus\", RankingsBus())` to exercise this route against an isolated cache.",
+        "operationId": "get_rankings_api_rankings_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RankingsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/{full_path}": {
       "get": {
         "summary": "Api Not Found",
@@ -404,6 +423,41 @@
           "status"
         ],
         "title": "HealthResponse"
+      },
+      "RankingsResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "updated_at": {
+            "type": "integer",
+            "title": "Updated At"
+          },
+          "mode": {
+            "type": "string",
+            "title": "Mode"
+          },
+          "stale_instrument_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Stale Instrument Ids"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "updated_at",
+          "mode",
+          "stale_instrument_ids"
+        ],
+        "title": "RankingsResponse"
       },
       "ValidationError": {
         "properties": {

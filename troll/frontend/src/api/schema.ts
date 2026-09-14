@@ -4,3 +4,10 @@
 export interface HealthResponse {
   status: string;
 }
+
+export interface RankingsResponse {
+  items: Record<string, unknown>[];
+  updated_at: number;
+  mode: string;
+  stale_instrument_ids: string[];
+}
