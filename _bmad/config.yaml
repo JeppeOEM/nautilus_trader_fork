@@ -1,0 +1,10 @@
+document_output_language: English
+output_folder: '{project-root}/_bmad-output'
+bauto:
+  name: BMAD Auto Skills
+  description: 'Automation-mode skills driven by the bmad-auto orchestrator: interactive
+    escalation resolution (bmad-auto-resolve) and deferred-work sweep triage (bmad-auto-sweep)
+    — the inner dev primitive (which self-reviews and commits) is the upstream bmad-dev-auto
+    skill'
+  version: 0.7.11
+  default_selected: false

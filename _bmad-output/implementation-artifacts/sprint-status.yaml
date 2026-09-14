@@ -41,7 +41,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-07-01
-last_updated: 2026-09-13 (Epic 14 created, dev'd, self-reviewed and done — chart default 120-bar window/preload, async chart-page load with panel spinners)
+last_updated: 2026-09-14 (Epic 15 created — dashboard React/TypeScript rewrite; Story 15.1 dev'd, code-reviewed (2 findings fixed), and done)
 project: nautilus_trader_fork
 project_key: NOKEY
 tracking_system: file-system
@@ -164,6 +164,14 @@ development_status:
   14-1-chart-default-120-bar-window-with-scroll-back-preload: done
   14-2-async-chart-page-load-with-panel-spinners: done
   14-3-preserve-120-bar-zoom-through-indicator-overlay-repaints: ready-for-dev
+
+  # epic-15 has a real epics.md entry (2026-09-14, FR38-46/NFR6-9: full React/TypeScript
+  # rewrite of dashboard.py into a Read-Only Facade + SPA, backed by a finalized PRD and
+  # architecture spine) -- no sprint-planning run yet, stories created directly via
+  # create-story as the epic progresses, same pattern Epics 8/10/12/13 used. Supersedes
+  # epic-14 (14.3 becomes moot once dashboard.py's chart page is deleted in Story 15.10).
+  epic-15: in-progress
+  15-1-facade-scaffold-spa-static-serving-and-docs-page: done
 
 action_items:
   - epic: 1

@@ -120,7 +120,7 @@ services:
     container_name: dydx-data-api
     build:
       context: ..
-      dockerfile: troll/collector.dockerfile
+      dockerfile: troll/data_api.dockerfile
       network: host
     command: uvicorn data_api.app:app --host 127.0.0.1 --port ${DATA_API_PORT:-9100}
     environment:

@@ -30,7 +30,8 @@ service (`network_mode: host` + `uvicorn --host 127.0.0.1`), no `ports:` entry.
 import os
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
 
 from dydx_collector.second_snapshot import DydxSecondSnapshot
 from ml_signals import catalog_stats as _catalog_stats
@@ -46,7 +47,15 @@ METRICS_DB_PATH: str = os.environ.get(
     "METRICS_DB_PATH", str(Path(CATALOG_PATH).parent / "metrics" / "metrics.db"),
 )
 
-app = FastAPI()
+# Where troll/data_api.dockerfile's Node build stage COPYs troll/frontend/dist -- keep this
+# default in sync with that Dockerfile's COPY destination (Story 15.1 AC #5).
+FRONTEND_DIST_PATH: str = os.environ.get("FRONTEND_DIST_PATH", "frontend_dist")
+
+# docs_url/redoc_url=None: FastAPI's own built-in Swagger UI defaults to serving at /docs,
+# which would otherwise collide with this app's own /docs SPA route (Signal Atlas, FR45) --
+# confirmed via a real TestClient request during Story 15.1 (not assumed), see that story's
+# Dev Agent Record.
+app = FastAPI(docs_url=None, redoc_url=None)
 
 
 @app.get("/metrics/history/{symbol}")
@@ -101,3 +110,42 @@ def catalog_candles(
     """
     snapshots = _catalog_stats.query_second_snapshots(CATALOG_PATH, iid, start_ns, end_ns)
     return {"candles": candle_dicts_from_snapshots(snapshots, bar_seconds)}
+
+
+class HealthResponse(BaseModel):
+    status: str
+
+
+@app.get("/api/health")
+def health() -> HealthResponse:
+    """Pilot route for the OpenAPI->TypeScript codegen pipeline (Story 15.1 AC #3) --
+    also a real liveness check going forward, not throwaway scaffolding."""
+    return HealthResponse(status="ok")
+
+
+@app.get("/api/{full_path:path}")
+def api_not_found(full_path: str) -> None:
+    """
+    Catches every unmatched `/api/*` GET request and returns a JSON 404, unconditionally.
+
+    Without this, `app.frontend()`'s `fallback="auto"` SPA-serving behavior silently
+    returns the built `index.html` (200 text/html) for an unmatched `/api/*` path whenever
+    the request carries an `Accept: text/html` header (a real browser's default for
+    top-level navigation) -- confirmed via a real TestClient request this story, not
+    assumed. This route is a normal FastAPI path operation, so it always takes priority
+    over `app.frontend()`'s low-priority fallback routes regardless of Accept header
+    (spine Consistency Conventions: "an unmatched /api/* path returns a JSON 404, never
+    SPA HTML"). GET-only for now (data_api is a Read-Only Facade, AD-F1/AD-F2) -- if a
+    future story adds a `PUT`/`POST` route under /api/*, it needs its own such catch-all
+    per method, registered ABOVE this block (Starlette matches routes in registration
+    order; a route registered after this catch-all for the SAME method would never be
+    reached, since this wildcard would already have matched first).
+    """
+    raise HTTPException(status_code=404, detail="Not Found")
+
+
+# Must stay the LAST route registered: every specific route above (existing 5 + /api/health,
+# plus any /api/* route a future story adds) must be registered above this line, and
+# app.frontend() itself must come after every normal path operation -- FastAPI only falls
+# through to it when nothing above matched (AD-F1a).
+app.frontend("/", directory=FRONTEND_DIST_PATH, check_dir=False)

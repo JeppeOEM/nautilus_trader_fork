@@ -1,0 +1,14 @@
+/* Minimal reset only -- the terminal/ANSI visual identity (16-color VGA palette, DOS
+   bitmap font, box-drawing motif) is Story 15.9's job, not this one's. */
+:root {
+  color-scheme: light dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+}

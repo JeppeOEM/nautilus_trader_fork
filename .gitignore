@@ -202,3 +202,7 @@ tests/test_data/**/backtest/**
 !/nautilus_core/adapters/src/databento/test_data/*
 repo-backup.bundle
 branch.bundle
+.bmad-loop/runs/
+.bmad-loop/cache/
+.bmad-loop/policy.toml
+_bmad/render/

@@ -5,13 +5,15 @@ inputDocuments:
   - _bmad-output/planning-artifacts/architecture/architecture-nautilus_trader_fork-2026-07-01/ARCHITECTURE-SPINE.md
   - _bmad-output/planning-artifacts/ux-designs/ux-nautilus_trader_fork-2026-07-24/DESIGN.md
   - _bmad-output/planning-artifacts/ux-designs/ux-nautilus_trader_fork-2026-07-24/EXPERIENCE.md
+  - _bmad-output/planning-artifacts/prds/prd-chart-frontend-rewrite-2026-09-13/prd.md
+  - _bmad-output/planning-artifacts/architecture/architecture-chart-frontend-rewrite-2026-09-13/ARCHITECTURE-SPINE.md
 ---
 
 # nautilus_trader_fork - Epic Breakdown
 
 ## Overview
 
-This document provides the complete epic and story breakdown for nautilus_trader_fork (the `troll/` dYdX Signal Research & Trading Platform), decomposing the requirements from the PRD and Architecture spine into implementable stories. Epics 1–3 (below) cover the original PRD/architecture scope (FR1–FR15) and were fully implemented as of 2026-07-17. This document was reopened on 2026-07-24 to extend coverage for the PRD's volatility Ranking Mode (FR-16) and new Bot Monitoring TUI feature (FR-17–FR-25), backed by a finalized UX design contract (`DESIGN.md`/`EXPERIENCE.md`) — the project's first UX-driven surface. Reopened again on 2026-09-06 to add Epic 8 (FR28–FR30): TradingView-style multi-chart navigation and selectable technical indicators on the web dashboard's coin chart. Numbered Epic 8 (not 5) because epics 5–7 were filed directly as standalone stories bypassing epics.md ceremony (see `sprint-status.yaml`) — Epic 8 continues that same global epic-number sequence to avoid collision with their story-file paths (`5-1-*`, `6-1-*`, `7-1-*`). No PRD/Architecture update precedes this addition (same precedent as FR27); PM should fold FR28–FR30 into the PRD proper once shipped. (FR31, a combined candlestick + bid/ask overlay, was drafted alongside these but the story implementing it — 8.5 — was dropped before dev started; FR31 removed with it — its number is reused below.) Reopened again on 2026-09-08 to add Epic 10 (FR31–FR33): a second, non-Nautilus indicator category on the chart page's picker (Story 8.4), migrating three of the chart page's fixed microstructure-panel rows (OFI, Cancel Pressure, CVD) into it, plus persisted per-instrument indicator configuration. Numbered 10 (not 9) for the same reason Epic 8 skipped 5–7: Epic 9 is itself a standalone bypass-epic bug-fix story (`9-1-fix-oscillator-panel-shared-y-axis-scaling`, see `sprint-status.yaml`), not a real epics.md entry — Epic 10 continues the sequence past its file-path prefix (`9-1-*`). Reopened again on 2026-09-12 to add Epic 12 (FR34–FR35: run dashboard/bot_tui on the user's own machine via a new read-only data API, offloading load from the oversubscribed nifelheim VPS) and Epic 13 (FR36–FR37: stop ranking_engine's recurring Parquet-read memory spike, the mechanism behind its OOM-restart loop). Numbered 12 (not 9) for the same reason Epic 10 was: Epic 11 is itself a standalone bypass-epic bug-fix story (`11-1-fix-empty-imbalance-depth-spread-chart-panes`, see `sprint-status.yaml`), not a real epics.md entry. No PRD/Architecture update precedes this addition (same precedent as FR27–FR33); PM should fold FR34–FR37 into the PRD proper once shipped. Created via direct technical investigation this session (root-caused against real code, real measurements, and an already-logged production incident) rather than the standard PRD-first elicitation flow, at the user's explicit request — same precedent as Epic 11.
+This document provides the complete epic and story breakdown for nautilus_trader_fork (the `troll/` dYdX Signal Research & Trading Platform), decomposing the requirements from the PRD and Architecture spine into implementable stories. Epics 1–3 (below) cover the original PRD/architecture scope (FR1–FR15) and were fully implemented as of 2026-07-17. This document was reopened on 2026-07-24 to extend coverage for the PRD's volatility Ranking Mode (FR-16) and new Bot Monitoring TUI feature (FR-17–FR-25), backed by a finalized UX design contract (`DESIGN.md`/`EXPERIENCE.md`) — the project's first UX-driven surface. Reopened again on 2026-09-06 to add Epic 8 (FR28–FR30): TradingView-style multi-chart navigation and selectable technical indicators on the web dashboard's coin chart. Numbered Epic 8 (not 5) because epics 5–7 were filed directly as standalone stories bypassing epics.md ceremony (see `sprint-status.yaml`) — Epic 8 continues that same global epic-number sequence to avoid collision with their story-file paths (`5-1-*`, `6-1-*`, `7-1-*`). No PRD/Architecture update precedes this addition (same precedent as FR27); PM should fold FR28–FR30 into the PRD proper once shipped. (FR31, a combined candlestick + bid/ask overlay, was drafted alongside these but the story implementing it — 8.5 — was dropped before dev started; FR31 removed with it — its number is reused below.) Reopened again on 2026-09-08 to add Epic 10 (FR31–FR33): a second, non-Nautilus indicator category on the chart page's picker (Story 8.4), migrating three of the chart page's fixed microstructure-panel rows (OFI, Cancel Pressure, CVD) into it, plus persisted per-instrument indicator configuration. Numbered 10 (not 9) for the same reason Epic 8 skipped 5–7: Epic 9 is itself a standalone bypass-epic bug-fix story (`9-1-fix-oscillator-panel-shared-y-axis-scaling`, see `sprint-status.yaml`), not a real epics.md entry — Epic 10 continues the sequence past its file-path prefix (`9-1-*`). Reopened again on 2026-09-12 to add Epic 12 (FR34–FR35: run dashboard/bot_tui on the user's own machine via a new read-only data API, offloading load from the oversubscribed nifelheim VPS) and Epic 13 (FR36–FR37: stop ranking_engine's recurring Parquet-read memory spike, the mechanism behind its OOM-restart loop). Numbered 12 (not 9) for the same reason Epic 10 was: Epic 11 is itself a standalone bypass-epic bug-fix story (`11-1-fix-empty-imbalance-depth-spread-chart-panes`, see `sprint-status.yaml`), not a real epics.md entry. No PRD/Architecture update precedes this addition (same precedent as FR27–FR33); PM should fold FR34–FR37 into the PRD proper once shipped. Created via direct technical investigation this session (root-caused against real code, real measurements, and an already-logged production incident) rather than the standard PRD-first elicitation flow, at the user's explicit request — same precedent as Epic 11. Reopened again on 2026-09-14 to add Epic 15 (FR38–FR46, NFR6–NFR9): a full rewrite of `troll/ml_signals/dashboard.py` into a React/TypeScript SPA served by an expanded `troll/data_api`, backed this time by a proper PRD (`prds/prd-chart-frontend-rewrite-2026-09-13/prd.md`) and architecture spine (`architecture/architecture-chart-frontend-rewrite-2026-09-13/ARCHITECTURE-SPINE.md`), both status `final`. This epic supersedes `epic-14` (a bypass-epic never entered into this document — 14.1/14.2 done, 14.3 becomes moot once the chart page is deleted under this epic's AD-F1 and should be marked superseded in `sprint-status.yaml`, not shipped). Reopened again on 2026-09-14 to add Epic 16 (FR47–FR50, NFR10): an incremental 1-minute rollup cache (`DydxMinuteRollup`), maintained by the collector as new `DydxSecondSnapshot` rows stream in, so wide-window (daily/weekly) candle requests stop rescanning the full raw 1-second archive. Backend/collector-pipeline scope, independent of Epic 15's dashboard rewrite — Epic 15's future `/api/candles` story will depend on this epic's output, but this isn't "replace dashboard.py with React." No PRD/Architecture update precedes this addition; created via direct technical investigation this session (real code read, real read-cost scaling estimated), same precedent as Epic 12/13.
 
 ## Requirements Inventory
 
@@ -50,6 +52,14 @@ FR29 `[NEW — 2026-09-06, not yet in PRD, PM should fold in]`: TradingView-styl
 
 FR30 `[NEW — 2026-09-06, not yet in PRD, PM should fold in]`: Selectable technical indicators from `nautilus_trader`'s own built-in indicator library — the user can choose from every concrete indicator class in `nautilus_trader.indicators` (confirmed ~45 as of this repo's pinned version: `SimpleMovingAverage`, `ExponentialMovingAverage`, `WeightedMovingAverage`, `HullMovingAverage`, `AdaptiveMovingAverage`, `DoubleExponentialMovingAverage`, `VariableIndexDynamicAverage`, `WilderMovingAverage`, `BollingerBands`, `KeltnerChannel`, `DonchianChannel`, `RelativeStrengthIndex`, `MovingAverageConvergenceDivergence`, `Stochastics`, `CommodityChannelIndex`, `AverageTrueRange`, `VolatilityRatio`, `AroonOscillator`, `DirectionalMovement`, `RateOfChange`, `ChandeMomentumOscillator`, `OnBalanceVolume`, `VolumeWeightedAveragePrice`, and the rest of that module's indicators) and add it to the candlestick chart. **No third-party TA library** — `pandas_ta`/`pandas_ta_classic` are explicitly rejected; every indicator is the exact same `nautilus_trader.indicators.Indicator` class already usable by research/backtest/live contexts (FR10), fed via its own `update_raw`/`handle_bar`, never reimplemented. Indicators whose natural output overlays price (moving averages, Bollinger/Keltner/Donchian bands, VWAP) render as additional traces directly on the candlestick chart; indicators whose output is a bounded oscillator on a different scale (RSI, Stochastics, MACD, CCI, AROON, etc.) render in the oscillator panel from FR29, which follows the candlestick chart's x-axis like every other spawned panel.
 
+FR47 `[NEW — 2026-09-14, not yet in PRD, PM should fold in]`: Incremental 1-minute rollup cache — the collector maintains a `DydxMinuteRollup` type (OHLCV + order-book-derived aggregates: OFI/OBI at levels 5/10, top-of-book at close) per instrument per closed minute, built incrementally from each second's `DydxSecondSnapshot` as it streams in, written through the existing catalog buffer/flush path (`flush_interval_seconds`). The raw 1-second archive is never modified, deleted, or superseded — the rollup is purely a derived, regenerable performance cache.
+
+FR48 `[NEW — 2026-09-14, not yet in PRD, PM should fold in]`: Threshold-based candle source dispatch — candle requests wider than 1h read from the minute rollup instead of rescanning raw 1-second data; requests at or below 1h continue reading raw 1-second data unchanged, exactly as today. Every candle response tags its source (`raw_1s`/`rollup_1m`) explicitly — never left for the caller to infer from which fields happen to be present. Missing rollup coverage for a requested range (e.g. pre-feature history, or a recently-restarted collector) falls back to the raw-1s aggregation path rather than returning an empty/wrong chart.
+
+FR49 `[NEW — 2026-09-14, not yet in PRD, PM should fold in]`: Correct-by-construction OFI continuity — the rollup builder never loses or double-counts an order-flow-imbalance contribution at a minute boundary (the underlying `MultiLevelOFI` indicator instance is never reconstructed on an ordinary minute rollover); continuity state is reset only on a genuine book-rebuild event (resync/resubscribe), via the indicator's existing `clear_prev_state()`.
+
+FR50 `[NEW — 2026-09-14, not yet in PRD, PM should fold in]`: Backfill capability — historical 1-second data already in the catalog (predating this feature, or after a rollup schema change) can be reprocessed into rollup rows via a standalone script, streaming raw 1s in time-bounded chunks per instrument, without touching or risking the raw 1-second archive.
+
 ### NonFunctional Requirements
 
 _The PRD has no explicit NFR section; the following are derived from the Vision, Success Metrics, and Architecture spine invariants that constrain how the FRs above must be implemented._
@@ -59,6 +69,16 @@ NFR2: Operational reliability — the Dummy Strategy must run continuously in pa
 NFR3: Memory-bounded access — no unbounded catalog reads (e.g. `catalog.trade_ticks()` with no time bounds); all data access is time-bounded or streamed via `BacktestDataConfig`; non-configured coins are rolling-window-in-memory only (architecture AD-6, Consistency Conventions).
 NFR4: Fork safety — `nautilus_trader/` and `crates/` are never modified; all `troll/` work is additive so upstream merges stay possible (architecture, all ADs; fork boundary convention).
 NFR5: Precision correctness — price/quantity precision changes only via `Decimal.scaleb()` + `Price.from_raw()`/`Quantity.from_raw()`; never `Price(decimal, precision)`/`Quantity(decimal, precision)`, never inferred from digit count, never round-tripped through `float` (architecture AD-5).
+
+NFR6 (PRD NFR-A, Performance): Initial chart-page load and scroll-back history fetches must feel immediate, not merely "eventually consistent" — qualitative by deliberate choice, no numeric SLO; structurally supported by cursor pagination (AD-F3), code-splitting, cache headers, and compression.
+
+NFR7 (PRD NFR-B, Responsive layout): Every page is usable on both desktop and phone/tablet viewports, not desktop-only.
+
+NFR8 (PRD NFR-C, Live-data honesty): No page ever renders a data gap as a flat/interpolated line, and no live value is shown as current once its heartbeat has gone stale — extends NFR1's existing data-integrity discipline into the from-scratch chart-rendering path this epic builds (spine AD-F6).
+
+NFR9 (PRD NFR-D, Feature parity): Every page and capability present in today's `dashboard.py` has a working equivalent in the new frontend before `dashboard.py` is deleted — this epic is a rewrite, not a reduction.
+
+NFR10 `[NEW — 2026-09-14]`: No data loss — the 1-second snapshot archive is never modified, deleted, or superseded by the minute-rollup feature; the rollup is fully regenerable from raw 1-second data at any time, so a bug or schema change in the rollup never risks the underlying market-data record.
 
 ### Additional Requirements
 
@@ -83,6 +103,21 @@ NFR5: Precision correctness — price/quantity precision changes only via `Decim
 - **No new dependency for FR30 (revised 2026-09-06) — explicitly rejected `pandas_ta`/`pandas_ta_classic`.** `nautilus_trader.indicators` already ships ~45 concrete TA indicator classes (moving averages, bands, oscillators, volume indicators); FR30 uses those directly. Nothing to add to `troll/troll-requirements.txt`.
 - **Indicator placement (FR30) follows FR10 precedent:** the indicator *classes* already live in the one shared place (`nautilus_trader.indicators`) usable by research/backtest/live — this epic adds only a chart-specific registry/dispatch layer (which class + params + which OHLCV fields feed its `update_raw` + which output attribute(s) to read + overlay-vs-oscillator classification) in `ml_signals/`, never a reimplementation of any indicator's math.
 - **FR30 data is not net-new collection** — technical indicators are computed from candle OHLC data `_historical_candles_json`/`build_candles()` already produce. No collector or catalog schema change.
+- **Read-Only Facade, single backend (AD-F1/AD-F1a).** `data_api` absorbs every in-scope route and the Redis-subscriber logic currently in `dashboard.py`; `dashboard.py`'s HTML-rendering functions (`_page`, `_build_chart_page_html`, `_render_live_page`, `_render_history_page`, `_history_page_from_rows`, etc.) are deleted, not retained. SPA static files served via FastAPI's native `app.frontend()` (ships `fastapi>=0.138.0`, already pinned `0.141.1`) — never a hand-rolled `StaticFiles` mount + catch-all route.
+- **Facade computes no new signal (AD-F2).** Every REST route calls an existing `ml_signals`/`ranking_engine`/`dydx_collector` pure function/query — the route body only shapes JSON. The one write path is config persistence (`PUT /api/coin/{iid}/indicators` and similar); `/ws/live` forwards Redis pub/sub messages verbatim plus the one derived `candles:{iid}:{bar_seconds}` channel (AD-F7).
+- **Cursor pagination binding on every chart-history route without exception (AD-F3)** — `/api/candles/{instrument_id}` AND `/api/snapshots/{instrument_id}` (Lines-mode history) AND any future scroll-back route. `before_ns` (cursor) + `limit` (bounded, server-enforced max) request; `{"items": [...], "has_more": bool}` response envelope is pinned, not per-route.
+- **One chart instance, native multi-pane sync, keyed pane registry (AD-F4).** A coin's chart page is exactly one `lightweight-charts` `createChart()` instance with N panes (`chart.addPane()`) — never multiple `createChart()` instances kept in sync by application code. Panes keyed by indicator id (reusing `_indicator_id(name, params)` from `dashboard.py`), held in a single `Map<indicatorId, IPaneApi>` owned by the one component that calls `createChart()`.
+- **Generated contract types, never hand-duplicated (AD-F5).** `data_api` route handlers declare Pydantic response models; frontend TypeScript request/response types are generated from the resulting OpenAPI schema at build time. Exception: `/ws/live` message shapes are hand-written (no OpenAPI coverage for WS) but must cite the exact Redis wire format or `ml_signals` function they mirror in a comment. Codegen tool choice is implementation-owned (Deferred).
+- **Live candle edge has one sanctioned path (AD-F7).** `data_api` computes the forming bar server-side via the existing `ml_signals.candles` aggregation function against incoming `snapshots:raw` ticks, publishes on derived `/ws/live` sub-channel `candles:{instrument_id}:{bar_seconds}`. Frontend never aggregates a candle itself from raw snapshot data.
+- **Stack pins (verified 2026-09-13):** React 19.3.0, Vite 8.3.0 + `@vitejs/plugin-react` 6.1.1, `@tanstack/react-query` 5.102.8, `lightweight-charts` 5.2.1, FastAPI 0.141.1 (already pinned), TypeScript strict mode. No Redux/Zustand — React Query owns all server state, component state is sufficient (YAGNI/DESIGN-01).
+- **Own dockerfile, no shared Node build stage.** `data_api` gets `troll/data_api.dockerfile` (not a Node stage bolted onto `troll/collector.dockerfile`, which stays untouched and keeps serving `collector`/`ranking_engine`/`bot_tui`) — layered on `nautilus-trader-base`, runs `vite build` against `troll/frontend/`, copies `dist/` into the final image; `node_modules`/build tooling never appear in the runtime layer.
+- **Deployment:** `docker-compose.yml`'s `dashboard` service is removed; `data_api` absorbs its role, still `network_mode: host`, still `127.0.0.1`-bound (SEC-01 unchanged). SSH-tunnel remote-dev flow simplifies from two tunneled surfaces to one.
+- **Module dependencies (AD-4 extended):** `data_api` → `ml_signals`, `ranking_engine`, `dydx_collector` (data types + pure functions only); `frontend` → `data_api` only, via HTTP/WS, never a direct Python import.
+- **Deferred to the stories pass (from the architecture spine):** exact 1:1 mapping of every in-scope `dashboard.py` JSON route into `data_api/routes/*.py` (the spine's route-file grouping is a seed, not a mandate); OpenAPI→TypeScript codegen tool choice; `epic-14`'s formal closure (14.1/14.2 done, 14.3 becomes moot once the chart page is deleted, mark superseded in `sprint-status.yaml`, don't ship it); `bot_tui` SSOT-04/05 cross-check — any new rankings-page column or per-coin metric this epic ships must also land in `bot_tui`, backed by the same shared source (bots/live_paper stay TUI-only, no reverse parity needed).
+- **Non-Goals restated for story-writing:** no bots/`live_paper` UI in this frontend (stays exclusively `bot_tui`'s domain — never reads `bots:status`/`bots:control`); no new analytical capability beyond parity; no auth/multi-user access; no native mobile app; no CRT/scanline effects.
+- **Reuse `ml_signals/indicators.py`'s existing `MultiLevelOFI`/`MultiLevelOBI`/`microprice`/`spread` for the rollup builder (SSOT-01) — never reimplement this math** (Epic 16). Levels 5/10 for OFI/OBI reuse `ranking_engine`'s own existing level convention rather than inventing a third.
+- **1-hour rollup tier is explicitly out of scope for Epic 16** — 1-minute rollup rows are all scalars (no per-level depth arrays), so even 120 weekly bars (~2.3 years) is only ~1.2M rows to scan, which stays fast on its own. Revisit only if real-world read latency on `nifelheim` (resource-constrained 2vCPU/3.7GB, see Epic 13's incident) proves insufficient — if ever needed, derive it from already-built 1m rollup rows, never re-touch raw 1s.
+- **Epic 16 is forward-compatible with, but does not implement, Epic 15's not-yet-built `/api/candles` route** — its output is a plain time-ordered list, trivially sliceable into AD-F3's `before_ns`/`limit` cursor contract by whichever future Epic 15 story implements that route; the rollup only ever contains closed minutes, so AD-F7's live/forming-bar path is unaffected and keeps using the existing raw-1s live-buffer aggregation.
 
 ### UX Design Requirements
 
@@ -133,6 +168,15 @@ FR30: Epic 8 - Selectable technical indicators from nautilus_trader.indicators
 FR31: Epic 10 - Custom (non-Nautilus) indicator category on the chart page's indicator picker
 FR32: Epic 10 - CVD, Cancel Pressure, and OFI available as picker-addable custom indicators, replacing their fixed microstructure-panel rows
 FR33: Epic 10 - Persisted per-instrument chart indicator configuration, committable to source control
+FR38: Epic 15 - Live coin-rankings table
+FR39: Epic 15 - Candlestick chart with synced indicator panes
+FR40: Epic 15 - Incremental, TradingView-style history loading
+FR41: Epic 15 - Live edge stays consistent with loaded history
+FR42: Epic 15 - Per-coin indicator configuration
+FR43: Epic 15 - Lines mode
+FR44: Epic 15 - 31-day metrics history view
+FR45: Epic 15 - Docs page
+FR46: Epic 15 - Terminal/ANSI visual identity
 
 FR34 `[NEW — 2026-09-12, not yet in PRD, PM should fold in]`: Local-machine dashboard + bot_tui — the web dashboard and the bot monitoring TUI can both run on the user's own machine instead of on nifelheim, reached over an SSH tunnel to nifelheim's Redis and a new read-only data API, with zero change to the VPS-hosted collector/ranking_engine/dashboard/bot_tui services' own behavior when `DATA_API_URL` is unset.
 
@@ -141,6 +185,29 @@ FR35 `[NEW — 2026-09-12, not yet in PRD, PM should fold in]`: Remote catalog/m
 FR36 `[NEW — 2026-09-12, not yet in PRD, PM should fold in]`: ranking_engine's periodic price/pct/volatility computation no longer re-scans the Parquet catalog every cycle — it is served from an in-memory, long-window price series maintained incrementally from the same live `snapshots:raw` feed `ranking_engine` already consumes, seeded once at process startup via a single Parquet backfill read per instrument (not re-read every `DB_WRITE_INTERVAL_SECONDS`).
 
 FR37 `[NEW — 2026-09-12, not yet in PRD, PM should fold in]`: `ranking_engine`'s per-cycle catalog-read concurrency is bounded to a small, fixed worker count (not the prior unbounded-by-instrument-count default), as an independent, immediately-shippable mitigation to peak memory during the existing `compute_all()` cycle while FR36 is built.
+
+FR38: Live coin-rankings table — every subscribed coin's live rank, price, and key metrics in one sortable table, row order matching `ranking_engine`'s published `rankings:live` order exactly (no independent client-side re-sort), stale coins visibly marked, click-through to a coin's chart page.
+
+FR39: Candlestick chart with synced indicator panes — a coin's candlestick chart with zero or more indicator panes (OFI, order-book imbalance, volume, microprice, spread) stacked beneath it, sharing one time axis via the charting library's native multi-pane sync (never custom event-relay code); adding/removing/reconfiguring an indicator never resets zoom/pan; touch parity (drag-to-pan, pinch-to-zoom) on phone/tablet; up to 5 panes each get a distinct, consistently-assigned color from the 16-color palette.
+
+FR40: Incremental, TradingView-style history loading — a chart's candlestick pane scrolls back through full history with older bars loading progressively (cursor-paginated `before_ns`/`limit`, never a full-history fetch); initial load matches today's 120-bar default; `has_more: false` stops further requests at the true start of history; indicator panes co-page their own snapshot data in the same interaction, never lagging the candlestick pane's loaded range.
+
+FR41: Live edge stays consistent with loaded history — the currently-forming candle bar updates live at the right edge, sourced exclusively from the one sanctioned server-aggregated channel (never assembled client-side from raw ticks); a bar-size change or navigation never leaves a stale live bar overlapping freshly-loaded history.
+
+FR42: Per-coin indicator configuration — add/remove/reconfigure indicators on a coin's chart, persisted per coin and restored on next visit, via the Facade's one sanctioned write path (`PUT /api/coin/{iid}/indicators`).
+
+FR43: Lines mode — switch a coin's chart page from candlestick to a direct comparison of raw bid/ask/mid/microprice/price series, carried forward from today's dashboard's Candles/Lines toggle; same cursor-paginated contract as candlestick history; switching modes preserves the currently-viewed time range.
+
+FR44: 31-day metrics history view — a coin's ranking-input metrics (volume, volatility, etc.) plotted over the trailing 31 days; a metric with no data for part of the window renders a visible gap, never an interpolated flat line.
+
+FR45: Docs page — the existing reference/help page content, rebuilt on the new stack at its current URL shape; every section on today's `/docs` page has a corresponding section on the new page (diffable content checklist, not a rewrite); renders in the terminal visual identity like every other page.
+
+FR46: Terminal/ANSI visual identity — every page (rankings, chart, history, docs) renders in a consistent old-school terminal aesthetic: monospace DOS/BIOS-style bitmap font throughout (no proportional-font fallback), ASCII-art-style decorative elements (box-drawing borders/dividers, terminal-style loading/empty states), and the classic 16-color VGA/ANSI palette as the *entire* color system (background, text, borders, semantic states, chart series colors) — no color outside that set anywhere in the frontend; no CRT/scanline effects.
+
+FR47: Epic 16 - Incremental 1-minute rollup cache
+FR48: Epic 16 - Threshold-based candle source dispatch (raw 1s vs. rollup, explicit source tag, fallback on missing coverage)
+FR49: Epic 16 - Correct-by-construction OFI continuity across minute boundaries
+FR50: Epic 16 - Backfill capability for pre-existing/historical 1-second data
 
 ## Epic List
 
@@ -175,6 +242,16 @@ nifelheim (2 vCPU/3.7GB/0 swap) is resource-oversubscribed (`troll/.planning/deb
 ### Epic 13: ranking_engine Memory/CPU Stabilization
 `ranking_engine` OOM-restarts roughly every 2 minutes on nifelheim (confirmed via `docker events`: real host OOM-kill, not an app-level exit). Root mechanism: `compute_all()` re-scans a full 25h Parquet window, 32-way concurrent, every 60s cycle — for the same `DydxSecondSnapshot` data already streaming live through Redis, just discarded after 5 minutes by `ranking_engine`'s own in-memory window. This epic bounds the immediate concurrency (fast, independent mitigation) and then removes the recurring re-scan entirely by keeping a long-window price series in memory, backfilled once at startup.
 **FRs covered:** FR36, FR37
+
+### Epic 15: Dashboard React/TypeScript Rewrite
+Builder gets the same dashboard capabilities they use every day — live coin rankings, a coin's candlestick chart with synced indicator panes and TradingView-style scroll-back history, 31-day metrics history, docs — rebuilt as a fast React SPA with a terminal/ANSI visual identity, served by a single Read-Only Facade backend (`data_api`) that replaces `troll/ml_signals/dashboard.py` entirely. Single epic (not split by page or by frontend/backend layer): every FR shares the same two core components (`data_api`, `frontend`) end-to-end, backed by a finalized architecture spine (`ARCHITECTURE-SPINE.md`, status final) that already fixes the technical shape — no risk boundary between pages justifies separate epics. Supersedes `epic-14` (bypass-epic, never entered into this document; 14.3 becomes moot and should be marked superseded, not shipped).
+**FRs covered:** FR38, FR39, FR40, FR41, FR42, FR43, FR44, FR45, FR46
+**NFRs covered:** NFR6, NFR7, NFR8, NFR9
+
+### Epic 16: Minute-Rollup Candle Cache
+Builder's chart page can show daily/weekly candles — with order-book-derived signal (OFI/OBI, top-of-book) baked in — without every request rescanning years of raw 1-second data. The collector incrementally builds a small `DydxMinuteRollup` cache as data streams in (O(1)/second, no periodic full rescan); wide-window candle requests read from it instead of raw 1s, with correct-by-construction OFI continuity across minute boundaries and a fallback to raw 1s when rollup coverage is missing. The raw 1-second archive stays fully intact and authoritative — the rollup is a regenerable performance cache, never a replacement. Backend/collector-pipeline scope, standalone: delivers complete value against the existing `dashboard.py`/`data_api` candle route today, and is a dependency for Epic 15's future `/api/candles` story once that lands. No PRD/Architecture update precedes this addition (same precedent as Epic 12/13) — created via direct technical investigation this session.
+**FRs covered:** FR47, FR48, FR49, FR50
+**NFRs covered:** NFR10
 
 ## Epic 1: Trustworthy Coin Ranking & Watchlist
 
@@ -1134,4 +1211,468 @@ So that its 60s cycle stops re-reading ~25 hours of mostly-unchanged data from P
 **Given** `docker stats`/`free -h` on nifelheim, and `rankings:live`/`metrics.db` output, before/after this story (DATA-02 real evidence)
 **When** this story is verified
 **Then** `ranking_engine`'s peak RSS during a `_slow_loop_task` cycle drops further than Story 13.1 alone achieved, and the OOM-restart loop (`docker events`, `RestartCount`) is observably reduced or stopped — report actual numbers; if the box is still oversubscribed at rest even after this fix (per the incident writeup's own conclusion that this may be a capacity problem, not purely a logic bug), say so explicitly rather than claiming full resolution
+
+## Epic 15: Dashboard React/TypeScript Rewrite
+
+Builder gets the same dashboard capabilities they use every day — live coin rankings, a coin's candlestick chart with synced indicator panes and TradingView-style scroll-back history, 31-day metrics history, docs — rebuilt as a fast React SPA with a terminal/ANSI visual identity, served by a single Read-Only Facade backend (`data_api`) that replaces `troll/ml_signals/dashboard.py` entirely. Backed by a finalized PRD (`prds/prd-chart-frontend-rewrite-2026-09-13/prd.md`) and architecture spine (`architecture/architecture-chart-frontend-rewrite-2026-09-13/ARCHITECTURE-SPINE.md`), both `status: final`. Stories are sequenced walking-skeleton-first: 15.1 proves the facade/SPA/codegen pipeline end-to-end via the simplest page (Docs), then each subsequent story builds one more vertical slice on top, ending with the cutover that retires `dashboard.py`. Supersedes `epic-14` (bypass-epic, never entered into this document; 14.1/14.2 done, 14.3 becomes moot and is marked superseded in Story 15.10, not shipped).
+**FRs covered:** FR38, FR39, FR40, FR41, FR42, FR43, FR44, FR45, FR46
+**NFRs covered:** NFR6, NFR7, NFR8, NFR9
+
+### Story 15.1: Facade scaffold, SPA static serving, and Docs page
+
+Foundational — every later story in this epic depends on this pipeline existing and working. Delivers a real page (Docs, FR45) as the walking-skeleton proof, not just infrastructure.
+
+As the dashboard operator,
+I want a working end-to-end pipeline (React SPA built and served by `data_api`, with generated API types) proven by the simplest existing page,
+So that every later story lands on a working foundation instead of untested plumbing.
+
+**Acceptance Criteria:**
+
+**Given** `troll/frontend/` does not yet exist
+**When** this story lands
+**Then** it is scaffolded via Vite + React + TypeScript (strict mode) at the architecture spine's pinned versions (React 19.3.0, Vite 8.3.0 + `@vitejs/plugin-react` 6.1.1), with route-based code-splitting configured (each page a separate lazy-loaded chunk) per the spine's Consistency Conventions
+
+**Given** `data_api/app.py`
+**When** this story lands
+**Then** it declares Pydantic response models for its first route and serves `troll/frontend/dist/` via FastAPI's native `app.frontend()` helper (AD-F1a) — never a hand-rolled `StaticFiles` mount + catch-all route — and an unmatched `/api/*` path returns a JSON 404, never SPA HTML (Consistency Conventions)
+
+**Given** `data_api`'s OpenAPI schema
+**When** the frontend build runs
+**Then** TypeScript request/response types are generated from that schema (AD-F5) into `frontend/src/api/`, never hand-written to match — codegen tool choice is an implementation detail (Deferred)
+
+**Given** `dashboard.py`'s existing `docs_handler` content
+**When** this story lands
+**Then** `/docs` (Docs page, FR45) is rebuilt as a React page reading that same content (a diffable content checklist, not a rewrite of the text) and served through the new pipeline end-to-end
+
+**Given** `troll/collector.dockerfile` currently builds `collector`/`dashboard`/`ranking_engine`/`data_api`/`bot_tui` from one shared file
+**When** this story lands
+**Then** `troll/data_api.dockerfile` exists as its own file (layered on `nautilus-trader-base`, an added Node build stage running `vite build` against `frontend/`, `dist/` copied into the final image, `node_modules` absent from the runtime layer) and `troll/collector.dockerfile` is unchanged
+
+**Given** `docker-compose.yml`
+**When** this story lands
+**Then** a `data_api` service exists (`network_mode: host`, binding `127.0.0.1` only per SEC-01) — the `dashboard` service is NOT yet removed in this story (removal is Story 15.10's cutover, once every page has a working equivalent per NFR9)
+
+**Given** no test currently exercises this pipeline
+**When** this story lands
+**Then** a smoke test (a Vitest render test for `DocsPage`, plus a pytest hitting the route backing `/docs` and asserting a 200) proves the scaffold works end-to-end (TEST-01: every later story depends on this integration path)
+
+### Story 15.2: Live coin-rankings page
+
+As the dashboard operator,
+I want to see every subscribed coin's live rank, price, and key metrics updating in real time without a manual refresh,
+So that I can decide what to look at next the moment a coin's ranking changes.
+
+**Acceptance Criteria:**
+
+**Given** `ranking_engine`'s existing `rankings:live` Redis publish (parent spine AD-9)
+**When** `GET /api/rankings` is called
+**Then** `data_api/routes/rankings.py` returns the current snapshot verbatim (AD-F2 passthrough, no recomputation) shaped as `{"items": [...], "updated_at": ...}`
+
+**Given** `data_api/ws/live.py`
+**When** a client subscribes to `/ws/live`
+**Then** `rankings:live` messages are relayed using their existing wire format verbatim (AD-F2), with no reshaping beyond channel subscription
+
+**Given** `frontend/src/pages/RankingsPage.tsx` and a `useLiveChannel` hook
+**When** a `rankings:live` message arrives
+**Then** the table's row order matches the message's order exactly — no independent client-side re-sort logic beyond what the active Ranking Mode already dictates (FR38)
+
+**Given** a coin whose `rankings:live` `updated_at` has exceeded its configured heartbeat timeout
+**When** the table renders
+**Then** that row is visibly marked stale (dimmed/badge), never silently frozen in its last position (AD-F6 staleness half)
+
+**Given** each row's React key
+**When** the table re-renders on every live tick
+**Then** it is keyed by `instrument_id` (stable), never by array index or a per-tick timestamp/UUID (Consistency Conventions: "Live-refreshing list identity")
+
+**Given** a rankings row
+**When** the operator clicks it
+**Then** the app navigates to that coin's chart page (realizes UJ-1)
+
+**Given** `bot_tui`'s existing coin-list pane (parent FR19)
+**When** this story ships
+**Then** confirm no new column/metric was introduced beyond what `dashboard.py`'s rankings view already showed — FR38 is parity, not new columns; if a future story adds one, SSOT-04/05 requires landing it in `bot_tui` too
+
+**Given** the rankings query/relay path
+**When** tests run
+**Then** existing `ranking_engine` test coverage of `rankings:live`'s shape is unaffected, plus a new integration test exercises `GET /api/rankings` and the `/ws/live` relay against a real (not mocked) Redis fixture matching the real wire format (TEST-03)
+
+### Story 15.3: Chart page foundation — candlestick + cursor-paginated history
+
+As the dashboard operator,
+I want a coin's candlestick chart to load its recent window immediately and fetch older bars progressively as I scroll back,
+So that I never wait on a multi-megabyte full-history fetch just to see a chart.
+
+**Acceptance Criteria:**
+
+**Given** `ml_signals.candles`' existing aggregation function (used today by `dashboard.py`'s `chart_handler`)
+**When** `GET /api/candles/{instrument_id}` is called with `before_ns` + `limit`
+**Then** `data_api/routes/candles.py` returns at most `limit` rows strictly older than `before_ns` as `{"items": [...], "has_more": bool}` (AD-F3) — the underlying business logic is relocated unchanged; the route's `before_ns`/`limit` wire contract replaces today's `start_ns`/`end_ns` shape (AD-F1's upgrade-during-relocation clause)
+
+**Given** `frontend/src/components/chart/`
+**When** a coin's chart page first loads
+**Then** it fetches only the most recent window (matching today's 120-bar default), not the full catalog range (FR40)
+
+**Given** `lightweight-charts`' `subscribeVisibleLogicalRangeChange`
+**When** the visible range approaches the earliest currently-loaded bar
+**Then** the next page is fetched via the same `before_ns`/`limit` contract — the operator never observes a request whose response exceeds one page's worth of bars (FR40)
+
+**Given** `has_more: false` in a response
+**When** the true start of a coin's history is reached
+**Then** no further requests are issued for that direction — never retrying or hanging (FR40)
+
+**Given** a genuine gap in the backend's queried range (collector-skipped emission, or a scroll-back page with a partial-range gap)
+**When** the API returns that range
+**Then** it includes an explicit gap marker (a `null`/whitespace-data point at the gap boundary, matching `lightweight-charts`' native whitespace-data support) rather than omitting the row, and the frontend renders it as a visible break — never interpolated or flat (AD-F6)
+
+**Given** `frontend/src/components/chart/`
+**When** this story lands
+**Then** exactly one `lightweight-charts` `createChart()` instance is created for the page — the single-instance invariant (AD-F4) is established here even though indicator panes arrive in Story 15.4, so no instance created here is later discarded/recreated
+
+**Given** the ~12MB-per-4-hour-window `/catalog/snapshots` timeout already fixed once this session for candles
+**When** this story's tests run
+**Then** a boundary test confirms a large `before_ns`/`limit` request never returns more than `limit` rows (MEM-01 extended to the API surface, per AD-F3's stated prevention)
+
+**Given** this is a financial/catalog-integration path
+**When** `pytest troll/data_api/tests` runs
+**Then** it covers `/api/candles` against real `Price`/candle objects and a real (not mocked) catalog fixture (TEST-01/03)
+
+### Story 15.4: Synced indicator panes
+
+As the dashboard operator,
+I want OFI, order-book imbalance, volume, microprice, and spread panes stacked beneath the candlestick chart and moving in lockstep with it,
+So that I can read a coin's technical structure without the panes drifting out of sync the way ad-hoc event wiring would risk.
+
+**Acceptance Criteria:**
+
+**Given** Story 15.3's one `createChart()` instance
+**When** an indicator pane is added
+**Then** it is added via `chart.addPane()` + `addSeries`/`addCustomSeries` on its own `IPaneApi` — never a second `createChart()` instance kept in sync by application code (AD-F4)
+
+**Given** `dashboard.py`'s existing `_indicator_id(name, params)` scheme
+**When** a pane is created
+**Then** it is keyed by that same indicator id (reused, not reinvented) in a single `Map<indicatorId, IPaneApi>` owned by the one component that calls `createChart()` — no child component creates or destroys a pane directly (AD-F4)
+
+**Given** any one pane
+**When** the operator pans or zooms it (mouse or touch)
+**Then** every other pane on the page moves in lockstep in the same interaction, via the charting library's native multi-pane time-scale sync — no custom event-relay code (FR39)
+
+**Given** an indicator is added, removed, or reconfigured
+**When** the chart re-renders
+**Then** the current zoom/pan position is never reset — the exact regression Story 14.3 exists to fix, and this epic's own trigger (FR39)
+
+**Given** Story 15.3's cursor-paginated scroll-back
+**When** the candlestick pane's scroll-back triggers the next `before_ns`/`limit` page
+**Then** each visible indicator pane co-pages its own underlying snapshot data for that same window in the same interaction — never blank, never lagging the candlestick pane's loaded range (FR40)
+
+**Given** a touch-driven phone/tablet viewport
+**When** the operator drags to pan or pinches to zoom any pane
+**Then** every consequence above holds identically to mouse/trackpad (FR39, NFR7)
+
+**Given** up to five indicator panes visible at once
+**When** they render
+**Then** each gets a distinct, consistently-assigned series color — exact palette values finalize in Story 15.9, but the assignment logic (indicator id → color slot) is built here so panes are never visually indistinguishable in the interim (FR39)
+
+**Given** `ml_signals.indicators`' existing OFI/OBI/microprice/spread functions
+**When** a pane's data is fetched
+**Then** the route calls those existing functions — never a reimplementation (AD-F2)
+
+**Given** this is a multi-file, non-trivial sync mechanism
+**When** tests run
+**Then** a Vitest test exercises the keyed pane registry (add/remove by indicator id) and an integration/E2E-style test confirms pan/zoom on one pane's time-scale actually propagates to a sibling pane (TEST-01)
+
+### Story 15.5: Live candle edge
+
+As the dashboard operator,
+I want the candlestick chart's currently-forming bar to update live without ever visibly diverging from the historical bars beside it,
+So that I can trust the right edge of the chart as much as its paginated history.
+
+**Acceptance Criteria:**
+
+**Given** `ml_signals.candles`' existing aggregation function (already used by Story 15.3's `/api/candles`)
+**When** a `snapshots:raw` tick arrives for a subscribed instrument
+**Then** `data_api/ws/live.py` computes the forming bar server-side by calling that same function — never a new/parallel aggregation implementation (AD-F7, AD-F2)
+
+**Given** that computed bar
+**When** it changes (on tick and on bar-close)
+**Then** it is published on a derived `/ws/live` sub-channel `candles:{instrument_id}:{bar_seconds}`, one bar per message (AD-F7)
+
+**Given** `frontend/src/hooks/useLiveChannel`
+**When** the chart page is open
+**Then** it subscribes to this channel for the live edge only — it never aggregates a candle itself from raw snapshot data (AD-F7)
+
+**Given** a bar-size change (e.g. 1m → 1h)
+**When** the operator switches it
+**Then** no stale live bar from the old bar-size is left overlapping the freshly-loaded historical bars for the new size (FR41)
+
+**Given** the operator navigates away from a coin's chart page and back
+**When** the page remounts
+**Then** the live edge resumes cleanly with no stale bar carried over from the previous mount (FR41)
+
+**Given** this is a live-data-consistency path
+**When** tests run
+**Then** a test verifies the server-computed forming bar matches `ml_signals.candles`' own aggregation for equivalent input ticks (TEST-01/03: real `Bar`/`Price` objects, no mocks)
+
+### Story 15.6: Per-coin indicator configuration
+
+As the dashboard operator,
+I want to add, remove, and reconfigure a coin's chart indicators and have that choice persist,
+So that I don't have to rebuild my preferred view of a coin every time I revisit it.
+
+**Acceptance Criteria:**
+
+**Given** `dashboard.py`'s existing `save_coin_indicator_config_handler`
+**When** `PUT /api/coin/{iid}/indicators` is called
+**Then** `data_api/routes/indicators.py` persists the config using that same relocated logic (AD-F1 verbatim relocation of business logic) — this is the Facade's one sanctioned write path beyond `/ws/live` relaying (AD-F2 exception)
+
+**Given** `GET /api/indicators/catalog`
+**When** the frontend requests it
+**Then** it returns the available indicator catalog (names/params/overlay-vs-oscillator classification) sourced from `ml_signals`' existing registry — never a second, hand-duplicated list in the frontend
+
+**Given** a coin's chart page
+**When** the operator adds, removes, or reconfigures an indicator via the UI
+**Then** the change is sent through `PUT /api/coin/{iid}/indicators` and the resulting pane set updates per Story 15.4's keyed registry
+
+**Given** a coin's persisted indicator config
+**When** the operator reloads that coin's chart page
+**Then** the same indicators and parameters last configured for that coin are restored exactly (FR42)
+
+**Given** this is a config-integration path (not pure financial calculation)
+**When** tests run
+**Then** an integration test covers the GET (catalog) + PUT (persist) + reload-restores-config round trip, using real config objects (TEST-01: integration path touching a persisted resource)
+
+### Story 15.7: Lines mode
+
+As the dashboard operator,
+I want to switch a coin's chart from candlesticks to a direct line comparison of bid/ask/mid/microprice/price,
+So that I can read raw price-series behavior the way I do today, without losing my place in time when I switch.
+
+**Acceptance Criteria:**
+
+**Given** `dashboard.py`'s existing Candles/Lines toggle
+**When** this story lands
+**Then** the frontend carries that same toggle forward on the chart page
+
+**Given** `GET /api/snapshots/{instrument_id}` with `before_ns` + `limit`
+**When** Lines mode requests history
+**Then** `data_api/routes/snapshots.py` returns it under the identical cursor-paginated contract as `/api/candles` (`{"items": [...], "has_more": bool}`) — spine AD-F3 explicitly binds this route to the same contract, not a separate unbounded fetch
+
+**Given** the operator is viewing a specific time range in Candles mode
+**When** they switch to Lines mode (or back)
+**Then** the currently-viewed time range is preserved, never reset to a default window (FR43)
+
+**Given** a gap in the underlying snapshot data
+**When** Lines mode renders it
+**Then** the same AD-F6 gap-marker discipline from Story 15.3 applies — never an interpolated flat line
+
+**Given** this route repeats the exact shape of Story 15.3's `/api/candles` route
+**When** tests run
+**Then** the same boundary/pagination test pattern is applied to `/api/snapshots` (TEST-01, mirrors Story 15.3's coverage)
+
+### Story 15.8: 31-day metrics history page
+
+As the dashboard operator,
+I want to see a coin's ranking-input metrics (volume, volatility) plotted over the trailing 31 days,
+So that I can decide whether a coin merits opt-in raw-delta capture.
+
+**Acceptance Criteria:**
+
+**Given** `dashboard.py`'s existing `_render_history_page`/`_history_page_from_rows` and `metrics_store`
+**When** `GET /api/metrics/history/{symbol}` is called
+**Then** `data_api/routes/metrics.py` returns the same underlying `metrics_store` query (relocated, not reimplemented) shaped as JSON for the new `HistoryPage`
+
+**Given** `frontend/src/pages/HistoryPage.tsx`
+**When** a coin's history page loads
+**Then** it renders each ranking-input metric (volume, volatility, etc.) as a small time-series chart covering the trailing 31 days
+
+**Given** a metric with no data for part of the 31-day window
+**When** the chart renders that range
+**Then** it shows a visible gap, never an interpolated flat line (FR44, restates AD-F6 for this page)
+
+**Given** `GET /api/metrics/nearest/{symbol}` (per the architecture's Structural Seed)
+**When** this story lands
+**Then** it is relocated alongside metrics/history for any nearest-value lookup the page needs
+
+**Given** this is a read-only reporting path with no complex branching
+**When** tests run
+**Then** a single integration test covers the route returning real `metrics_store` rows, including a deliberate gap case (TEST-01: touches the catalog-adjacent metrics store)
+
+### Story 15.9: Terminal/ANSI visual identity
+
+As the dashboard operator,
+I want every page to render in a consistent DOS-style terminal aesthetic using only the classic 16-color VGA/ANSI palette,
+So that the tool looks and feels like a serious terminal instrument for reading raw market data, not a generic web app.
+
+**Acceptance Criteria:**
+
+**Given** the 16-color VGA/ANSI palette (black, blue, green, cyan, red, magenta, brown/yellow, light gray, dark gray, light blue, light green, light cyan, light red, light magenta, yellow, white)
+**When** this story lands
+**Then** it is declared once as design tokens (e.g. CSS custom properties) and every page (rankings, chart, history, docs) sources all color — background, text, borders, semantic states, chart series — exclusively from those tokens; no color outside the set appears anywhere in the frontend (FR46)
+
+**Given** a DOS/BIOS-style bitmap terminal font (direction confirmed in the PRD; exact family an implementation choice per PRD §8 Open Question 1)
+**When** this story lands
+**Then** it is applied as the sole typeface for headings, body, tables, and chart labels across all four pages — no page falls back to a proportional/sans-serif face (FR46)
+
+**Given** box-drawing characters and terminal-style loading/empty states (blinking cursor, ASCII progress indicator)
+**When** this story lands
+**Then** they replace conventional web-app borders/dividers/spinners/skeleton screens as the pages' decorative motif (per PRD Aesthetic and Tone; exact placement/extent per PRD §8 Open Question 2, an implementation choice)
+
+**Given** semantic color use (stale-data indicator, up/down candle, active/inactive UI)
+**When** this story lands
+**Then** each is drawn from the same 16-color token set, not a separate arbitrary palette (FR46) — this finalizes the pane-color assignment stubbed in Story 15.4
+
+**Given** CRT/scanline effects are explicitly out of scope (PRD Aesthetic and Tone, Non-Goals)
+**When** this story lands
+**Then** no such rendering is added
+
+**Given** SM-3 (visual-identity conformance)
+**When** this story is verified
+**Then** a manual palette check confirms no color outside the 16-color set appears anywhere in the built frontend, and the DOS-style font renders with no visible proportional-font fallback
+
+### Story 15.10: Cutover — retire dashboard.py, close epic-14
+
+As the dashboard operator,
+I want `dashboard.py` fully retired once its React replacement has verified parity,
+So that I'm not maintaining two dashboards, and stale/superseded work doesn't linger in the backlog.
+
+**Acceptance Criteria:**
+
+**Given** every page/capability present in today's `dashboard.py` (rankings, chart w/ candles+lines+indicators+live edge, 31-day history, docs, terminal visual identity)
+**When** this story starts
+**Then** a feature-parity checklist (SM-1) is walked and confirmed against Stories 15.1–15.9's shipped React equivalents — any gap found blocks this story, it does not get silently skipped
+
+**Given** the checklist passes
+**When** this story lands
+**Then** `dashboard.py`'s HTML-rendering functions (`_page`, `_build_chart_page_html`, `_render_live_page`, `_render_history_page`, `_history_page_from_rows`, `docs_handler`, etc.) are deleted, not retained as dead code (AD-F1)
+
+**Given** `docker-compose.yml`'s `dashboard` service
+**When** this story lands
+**Then** it is removed; `data_api` fully absorbs its role (already added in Story 15.1), still `network_mode: host` / `127.0.0.1`-bound (SEC-01 unchanged)
+
+**Given** `epic-14` (bypass-epic, stories 14.1/14.2 done, 14.3 ready-for-dev)
+**When** this story lands
+**Then** 14.3 is marked superseded (not shipped) in `sprint-status.yaml`, since `dashboard.py`'s chart page — the surface 14.3 would have modified — no longer exists
+
+**Given** the SSH-tunnel remote-dev flow (`troll/CLAUDE.md` "Desktop ↔ VPS Connection")
+**When** this story lands
+**Then** that doc is updated to reflect one tunneled surface (`data_api`) instead of two (`dashboard` + `data_api`), per the architecture spine's stated simplification
+
+**Given** SM-2 (perceived speed) and NFR6
+**When** this story is verified
+**Then** chart-page interactivity and scroll-back are checked on the real SSH-tunneled access path (not just localhost), with results reported — not merely asserted as "fast"
+
+**Given** this is a deletion/cutover story with no new branching logic
+**When** it lands
+**Then** no new test is required beyond re-running the full existing `troll/` test suite to confirm nothing outside `dashboard.py`'s own tests depended on the deleted functions (TEST-02: trivial removal, but verify no accidental external import breaks)
+
+## Epic 16: Minute-Rollup Candle Cache
+
+Builder's chart page can show daily/weekly candles — with order-book-derived signal (OFI/OBI, top-of-book) baked in — without every request rescanning years of raw 1-second data. The collector incrementally builds a small `DydxMinuteRollup` cache as data streams in (O(1)/second, no periodic full rescan); wide-window candle requests read from it instead of raw 1s, with correct-by-construction OFI continuity across minute boundaries and a fallback to raw 1s when rollup coverage is missing. The raw 1-second archive stays fully intact and authoritative — the rollup is a regenerable performance cache, never a replacement. Backend/collector-pipeline scope, standalone: delivers complete value against the existing `dashboard.py`/`data_api` candle route today, and is a dependency for Epic 15's future `/api/candles` story once that lands.
+
+### Story 16.1: Incremental 1-minute rollup cache
+
+As the collector operator,
+I want a `DydxMinuteRollup` type built incrementally from each second's `DydxSecondSnapshot` as it streams in,
+So that a small, always-up-to-date cache of OHLCV + order-book-derived aggregates exists for every closed minute, without any periodic full-catalog rescan and without touching the raw 1-second archive.
+
+**Acceptance Criteria:**
+
+**Given** a new `DydxMinuteRollup` `Data` type defined in `troll/dydx_collector/minute_rollup.py` (same `schema()`/`to_dict`/`from_dict`/`register_arrow` pattern as `second_snapshot.py`)
+**When** the collector runs
+**Then** it carries `instrument_id`, `ts_event`/`ts_init`, `open/high/low/close` (`None` if no trades that minute), `buy_volume`/`sell_volume`/`buy_count`/`sell_count` (summed), `seconds_observed`, `close_bid_price`/`close_bid_size`/`close_ask_price`/`close_ask_size` (raw top-of-book at the minute's last observed second, not pre-computed microprice/spread), and `ofi_5`/`ofi_10`/`obi_5`/`obi_10`
+
+**Given** a `MinuteRollupBuilder.update(iid, snapshot)` fed one `DydxSecondSnapshot` per call
+**When** a snapshot from a new minute bucket arrives
+**Then** it returns the just-closed previous minute's completed `DydxMinuteRollup`; on every other call it returns `None`, and an in-progress (not-yet-closed) minute is never returned, including at collector shutdown
+
+**Given** `ofi_5`/`ofi_10` are computed via one long-lived `MultiLevelOFI(levels=n, window=1)` instance per `(iid, n)`, never reconstructed at a minute boundary
+**When** the first snapshot of a new minute arrives
+**Then** its OFI contribution is computed against the true previous second's book (the last second of the prior minute) — never lost, never compared against nothing — verified by a test that hand-computes the expected boundary-crossing contribution via a bare `MultiLevelOFI` and asserts the rollup includes it
+
+**Given** `MinuteRollupBuilder.discard_book_state(iid)`, called from `collector.py::_clear_book_state` (both existing call sites: `_unsubscribe` and `_resync_book`)
+**When** the book has just been rebuilt from scratch (resync/resubscribe)
+**Then** each of that instrument's OFI instances has its `clear_prev_state()` called, so the next `update_raw()` is treated as a first observation, not compared against pre-resync prices — verified by a test with an artificial large price jump across the `discard_book_state` call, asserting no phantom large OFI contribution results
+
+**Given** `obi_5`/`obi_10` via `MultiLevelOBI` (stateless per snapshot, no continuity concern)
+**When** a minute closes
+**Then** the emitted rollup's `obi_5`/`obi_10` are the mean of that minute's per-second `MultiLevelOBI` readings
+
+**Given** the collector's existing per-second loop (`collector.py:1194`, immediately after `self._on_data(snapshot)`)
+**When** `MinuteRollupBuilder.update()` returns a completed rollup
+**Then** it is routed through `self._on_data(rollup)` — the existing `_buffer_key`/`_process_data`/`_flush_once` buffer-and-flush path, on the existing `flush_interval_seconds` cadence — with no second flush mechanism added
+
+**Given** a fully-skipped minute (e.g. book down, `_discard_second_accumulators` firing every tick)
+**When** the book recovers in a later minute
+**Then** no rollup row is ever emitted for the skipped minute — matching `DydxSecondSnapshot`'s own no-row-for-skipped-second contract
+
+**Given** a minute with real book activity but zero trades
+**When** it closes
+**Then** `open`/`high`/`low`/`close` are all `None` while `obi_5`/`obi_10` are real floats and `seconds_observed` reflects actual coverage
+
+**Given** TEST-01 (financial/stateful calculation)
+**When** this story is verified
+**Then** `troll/dydx_collector/tests/test_minute_rollup.py` exists with real `DydxSecondSnapshot`/`MultiLevelOFI` objects (no mocking), pytest, `_`-prefixed helpers, covering: correct OHLCV/volume/counts for a single minute; the OFI-continuity-across-boundary case above; the resync/`discard_book_state` case above; fully-skipped-minute emits nothing; no-trade minute has `None` OHLC but real OBI; a partial in-progress minute is never emitted by `update()`
+
+### Story 16.2: Threshold-based candle source dispatch
+
+As a chart-page user,
+I want daily/weekly candle requests to read from the minute rollup instead of rescanning raw 1-second data,
+So that wide-window charts load fast and carry order-book-derived signal, while short-window charts keep behaving exactly as they do today.
+
+**Acceptance Criteria:**
+
+**Given** `ml_signals/candles.py`'s `TIMEFRAMES` extended with `"1d": 86400, "1w": 604800`, and `ROLLUP_THRESHOLD_SECONDS = TIMEFRAMES["1h"]`
+**When** a candle request's `bar_seconds` is `> 3600`
+**Then** `choose_candle_source(bar_seconds)` returns `"rollup_1m"`; at or below `3600` it returns `"raw_1s"` — a single shared decision point, never duplicated in `dashboard.py`/`data_api/app.py`
+
+**Given** `rollup_dicts_from_rows(rows, period_seconds)`, the rollup analogue of `candle_dicts_from_snapshots`
+**When** re-bucketing `DydxMinuteRollup` rows into a wider window
+**Then** OHLCV/counts are summed (no-trade members excluded from O/H/L/C derivation, still counted for volume), `seconds_observed` is summed, `ofi_5`/`ofi_10` are summed, `obi_5`/`obi_10` are `seconds_observed`-weighted means, and `close_bid_price`/`close_ask_price`/microprice/spread (derived via `indicators.py`'s existing `microprice()`/`spread()`) take the **last** member's value, never summed or averaged
+
+**Given** `candle_dicts_for_window(iid, start_ns, end_ns, bar_seconds, snapshot_rows_fn, rollup_rows_fn)`, the dependency-injected dispatch function
+**When** `choose_candle_source` selects `"rollup_1m"` and `rollup_rows_fn` returns at least one row
+**Then** the response is built via `rollup_dicts_from_rows` and every returned candle dict carries `"source": "rollup_1m"`
+
+**Given** the same dispatch, but `rollup_rows_fn` returns no rows for the requested range (pre-feature historical data, or a recently-restarted collector)
+**When** the request is served
+**Then** it falls back to `snapshot_rows_fn` + `candle_dicts_from_snapshots` (raw 1s), logs a warning naming the instrument and range, and every returned candle dict carries `"source": "raw_1s"` — never a silently empty or wrong chart
+
+**Given** `troll/ml_signals/catalog_stats.py`'s new `query_minute_rollups(catalog_path, iid, start_ns, end_ns)` (exact mirror of the existing `query_second_snapshots`)
+**When** `dashboard.py::_historical_candles_json` and `data_api/app.py::catalog_candles` are updated
+**Then** both call `candle_dicts_for_window` with closures around `query_second_snapshots`/`query_minute_rollups` instead of calling `candle_dicts_from_snapshots` directly — URL/params (`start_ns`/`end_ns`/`bar_seconds`) unchanged, no new route added
+
+**Given** TEST-01 (financial calculation) extending `troll/ml_signals/tests/test_candles.py`
+**When** this story is verified
+**Then** tests cover: re-bucketing OHLCV + summed `ofi_5`; close-book/microprice/spread fields take the last member's value, not summed; `obi_5`/`obi_10` seconds-observed-weighted mean with unequal weights; the threshold boundary in `choose_candle_source`; fallback-to-raw-1s when rollup is empty (result matches `candle_dicts_from_snapshots`' own output, tagged `source: "raw_1s"`); rollup used when present, tagged `source: "rollup_1m"`
+
+**Given** a manual verification pass
+**When** the chart page (local mode) requests `bar_seconds=86400` for a multi-week range spanning both pre-feature and post-feature history
+**Then** the `source` field flips correctly across the boundary and both segments render sane candles
+
+### Story 16.3: Backfill historical 1-second data into the rollup
+
+As the collector operator,
+I want a standalone script to reprocess existing catalog history into `DydxMinuteRollup` rows,
+So that daily/weekly charts get rollup-speed and rollup-enriched data for time ranges that predate this feature (or after a rollup schema change), without touching or risking the raw 1-second archive.
+
+**Acceptance Criteria:**
+
+**Given** a new `troll/dydx_collector/backfill_minute_rollup.py` CLI script (argparse), same operational category as the existing `prune_catalog.py` — manually run, not scheduled
+**When** invoked for one or more instrument ids (default: every id with existing `DydxSecondSnapshot` data)
+**Then** it streams raw 1-second data in day-sized, time-bounded chunks per instrument (never an unbounded load, per MEM-01)
+
+**Given** one long-lived `MinuteRollupBuilder` instance per instrument, reused across the entire requested date range (not recreated per chunk)
+**When** chunk boundaries are crossed
+**Then** OFI continuity carries across them exactly as it does for the live collector's minute boundaries — no dropped first-second-of-chunk contribution — reusing `MinuteRollupBuilder` unmodified (zero duplicated aggregation logic)
+
+**Given** emitted `DydxMinuteRollup` rows per chunk
+**When** the script writes them
+**Then** it uses the existing `catalog.write_data()` API (NAUT-02) — no hand-rolled Parquet schema
+
+**Given** the catalog is append-only (no upsert)
+**When** an operator re-runs the backfill over an already-backfilled range (e.g. after a schema change)
+**Then** the script's own `--help`/docstring documents that `data/dydx_minute_rollup/` must be cleared first — same wipe-and-rebuild pattern `wipe_data.sh` already establishes — rather than the script silently producing overlapping/duplicate files
+
+**Given** a cross-check requirement (this touches financial OHLCV data)
+**When** this story is verified
+**Then** the backfill is run against one day of existing historical 1-second data for one real instrument, and the resulting rollup's OHLCV is confirmed to match what `aggregate_ohlc` independently computes over the same raw 1-second window (open/high/low/close/volume equality, not just "didn't crash")
 
