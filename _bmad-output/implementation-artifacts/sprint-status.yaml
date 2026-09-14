@@ -163,7 +163,17 @@ development_status:
   epic-14: in-progress
   14-1-chart-default-120-bar-window-with-scroll-back-preload: done
   14-2-async-chart-page-load-with-panel-spinners: done
-  14-3-preserve-120-bar-zoom-through-indicator-overlay-repaints: ready-for-dev
+  # 14.3 parked 2026-09-14 at the user's request, ahead of schedule -- epics.md's Epic 15
+  # entry already documented 14.3 as superseded and slated to be formally marked so in
+  # Story 15.10, but epic-15 work is starting now rather than after 14.3 ships, so there's
+  # no point burning dev time on a dashboard.py fix that 15.10 deletes outright. Partial
+  # dev work (root-caused, one JS repaint-guard fix in progress) is preserved, not lost --
+  # stashed uncommitted on the `troll` branch: `git stash list` -> "14.3 partial dev work,
+  # parked: superseded by epic-15 (15.10 cutover)". Status set to `in-progress` (not
+  # `backlog`/`ready-for-dev`) specifically so ACTIONABLE_STATUSES excludes it and neither
+  # a plain `bmad-loop run` nor `sweep` auto-picks it back up; epic-14 itself stays
+  # in-progress (not closed) since 15.10 is still the intended formal close, per epics.md.
+  14-3-preserve-120-bar-zoom-through-indicator-overlay-repaints: in-progress
 
   # epic-15 has a real epics.md entry (2026-09-14, FR38-46/NFR6-9: full React/TypeScript
   # rewrite of dashboard.py into a Read-Only Facade + SPA, backed by a finalized PRD and
@@ -172,6 +182,7 @@ development_status:
   # epic-14 (14.3 becomes moot once dashboard.py's chart page is deleted in Story 15.10).
   epic-15: in-progress
   15-1-facade-scaffold-spa-static-serving-and-docs-page: done
+  15-2-live-coin-rankings-page: backlog
 
 action_items:
   - epic: 1
