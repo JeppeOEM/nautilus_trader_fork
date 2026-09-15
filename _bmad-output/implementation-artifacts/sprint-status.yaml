@@ -1,5 +1,5 @@
 # generated: 2026-07-01
-# last_updated: 2026-09-13
+# last_updated: 2026-09-15 (Stories 15.9-15.10 story files created via create-story, queued ready-for-dev; all of Epic 15's stories now have story files)
 # project: nautilus_trader_fork
 # project_key: NOKEY
 # tracking_system: file-system
@@ -41,7 +41,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-07-01
-last_updated: 2026-09-14 (Epic 15 created — dashboard React/TypeScript rewrite; Story 15.1 dev'd, code-reviewed (2 findings fixed), and done)
+last_updated: 2026-09-15 (Story 15.8 story file created via create-story, queued ready-for-dev; Story 15.7 story file created via create-story, queued ready-for-dev; Story 15.6 story file created via create-story, queued ready-for-dev; Story 15.5 story file created via create-story, queued ready-for-dev; Story 15.4 story file created via create-story, queued ready-for-dev; Story 15.1 dev'd, code-reviewed (2 findings fixed), and done)
 project: nautilus_trader_fork
 project_key: NOKEY
 tracking_system: file-system
@@ -183,6 +183,14 @@ development_status:
   epic-15: in-progress
   15-1-facade-scaffold-spa-static-serving-and-docs-page: done
   15-2-live-coin-rankings-page: done
+  15-3-chart-page-foundation-candlestick-and-cursor-paginated-history: ready-for-dev
+  15-4-synced-indicator-panes: ready-for-dev
+  15-5-live-candle-edge: ready-for-dev
+  15-6-per-coin-indicator-configuration: ready-for-dev
+  15-7-lines-mode: ready-for-dev
+  15-8-31-day-metrics-history-page: ready-for-dev
+  15-9-terminal-ansi-visual-identity: ready-for-dev
+  15-10-cutover-retire-dashboard-py-close-epic-14: ready-for-dev
 
 action_items:
   - epic: 1
