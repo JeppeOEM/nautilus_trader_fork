@@ -1,5 +1,6 @@
 import type {
   CandlestickData,
+  HistogramData,
   IChartApi,
   LogicalRange,
   Time,
@@ -19,6 +20,7 @@ const BAR_SECONDS = 60;
 const REFILL_MARGIN_BARS = 20;
 
 export type ChartDatum = CandlestickData<Time> | WhitespaceData<Time>;
+export type VolumeDatum = HistogramData<Time> | WhitespaceData<Time>;
 
 function toChartDatum(item: CandleItem): ChartDatum {
   const time = (item.t / 1000) as UTCTimestamp; // wire is ms, lightweight-charts wants seconds
@@ -30,8 +32,25 @@ function toChartDatum(item: CandleItem): ChartDatum {
   return { time, open: item.o, high: item.h, low: item.l, close: item.c };
 }
 
+// Story 15.4: the volume pane is derived client-side from this same already-fetched `v`
+// field -- no new query (DESIGN-01, this story's spec). `v` is only null on a gap-marker
+// item (real candles always carry a volume, possibly 0.0), same nullity contract as the
+// OHLC fields above.
+function toVolumeDatum(item: CandleItem): VolumeDatum {
+  const time = (item.t / 1000) as UTCTimestamp;
+  return item.v == null ? { time } : { time, value: item.v };
+}
+
+interface CandlesState {
+  candles: ChartDatum[];
+  volume: VolumeDatum[];
+}
+
+const EMPTY_STATE: CandlesState = { candles: [], volume: [] };
+
 export interface UseCandlesResult {
   candles: ChartDatum[];
+  volume: VolumeDatum[];
 }
 
 /**
@@ -44,7 +63,7 @@ export interface UseCandlesResult {
  * logic.
  */
 export function useCandles(instrumentId: string, chart: IChartApi | null): UseCandlesResult {
-  const [candles, setCandles] = useState<ChartDatum[]>([]);
+  const [state, setState] = useState<CandlesState>(EMPTY_STATE);
   const hasMoreOlderRef = useRef(true);
   const loadingRef = useRef(false);
   const earliestMsRef = useRef<number | null>(null);
@@ -61,9 +80,12 @@ export function useCandles(instrumentId: string, chart: IChartApi | null): UseCa
           }
           earliestMsRef.current = response.items[0].t;
           hasMoreOlderRef.current = response.has_more;
-          const mapped = response.items.map(toChartDatum);
-          setCandles((prev) => {
-            if (!prepend || prev.length === 0) return mapped;
+          const mappedCandles = response.items.map(toChartDatum);
+          const mappedVolume = response.items.map(toVolumeDatum);
+          setState((prev) => {
+            if (!prepend || prev.candles.length === 0) {
+              return { candles: mappedCandles, volume: mappedVolume };
+            }
             // A gap can straddle exactly the page boundary (the cursor point) -- each
             // page's own gap-marker insertion (AC #5) only sees gaps inside its own
             // queried range, so this seam needs its own check: if the newest incoming
@@ -73,13 +95,19 @@ export function useCandles(instrumentId: string, chart: IChartApi | null): UseCa
             // Every ChartDatum here is built by toChartDatum() above, so .time is
             // always a UTCTimestamp (never lightweight-charts' BusinessDay/string Time
             // variants).
-            const newestTime = mapped[mapped.length - 1].time as UTCTimestamp;
-            const boundaryTime = prev[0].time as UTCTimestamp;
+            const newestTime = mappedCandles[mappedCandles.length - 1].time as UTCTimestamp;
+            const boundaryTime = prev.candles[0].time as UTCTimestamp;
             if (newestTime + BAR_SECONDS < boundaryTime) {
-              const seamMarker: ChartDatum = { time: (newestTime + BAR_SECONDS) as UTCTimestamp };
-              return [...mapped, seamMarker, ...prev];
+              const seamTime = (newestTime + BAR_SECONDS) as UTCTimestamp;
+              return {
+                candles: [...mappedCandles, { time: seamTime }, ...prev.candles],
+                volume: [...mappedVolume, { time: seamTime }, ...prev.volume],
+              };
             }
-            return [...mapped, ...prev];
+            return {
+              candles: [...mappedCandles, ...prev.candles],
+              volume: [...mappedVolume, ...prev.volume],
+            };
           });
         })
         .catch((err: unknown) => {
@@ -112,5 +140,5 @@ export function useCandles(instrumentId: string, chart: IChartApi | null): UseCa
     return () => timeScale.unsubscribeVisibleLogicalRangeChange(handler);
   }, [chart, loadPage]);
 
-  return { candles };
+  return state;
 }

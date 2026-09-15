@@ -38,6 +38,7 @@ from pydantic import BaseModel
 
 from data_api import redis_bus
 from data_api.routes import candles as candles_routes
+from data_api.routes import indicator_series as indicator_series_routes
 from data_api.routes import rankings as rankings_routes
 from data_api.ws import live as live_ws
 from dydx_collector.second_snapshot import DydxSecondSnapshot
@@ -157,6 +158,7 @@ def health() -> HealthResponse:
 # win over the catch-all" rule applies here).
 app.include_router(rankings_routes.router)
 app.include_router(candles_routes.router)
+app.include_router(indicator_series_routes.router)
 app.include_router(live_ws.router)
 
 

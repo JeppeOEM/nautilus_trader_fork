@@ -19,6 +19,19 @@ export interface HealthResponse {
   status: string;
 }
 
+export interface IndicatorSeriesPoint {
+  t: number;
+  ofi?: number | null;
+  obi?: number | null;
+  microprice?: number | null;
+  spread?: number | null;
+}
+
+export interface IndicatorSeriesResponse {
+  items: IndicatorSeriesPoint[];
+  has_more: boolean;
+}
+
 export interface RankingsResponse {
   items: Record<string, unknown>[];
   updated_at: number;

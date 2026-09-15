@@ -1,8 +1,13 @@
 // Thin typed fetch helper over the generated OpenAPI schema (AD-F5) -- proves the codegen
 // pipeline's output is actually consumed, not just generated and ignored (Story 15.1 AC #3).
-import type { CandlesResponse, HealthResponse, RankingsResponse } from "./schema";
+import type {
+  CandlesResponse,
+  HealthResponse,
+  IndicatorSeriesResponse,
+  RankingsResponse,
+} from "./schema";
 
-export type { CandlesResponse, HealthResponse, RankingsResponse };
+export type { CandlesResponse, HealthResponse, IndicatorSeriesResponse, RankingsResponse };
 
 export async function fetchHealth(): Promise<HealthResponse> {
   const res = await fetch("/api/health");
@@ -35,4 +40,23 @@ export async function fetchCandles(
   const res = await fetch(`/api/candles/${encodeURIComponent(instrumentId)}?${params}`);
   if (!res.ok) throw new Error(`GET /api/candles/${instrumentId} failed: ${res.status}`);
   return (await res.json()) as CandlesResponse;
+}
+
+// Story 15.4: cursor-paginated OFI/OBI/microprice/spread history (AD-F3) -- mirrors
+// fetchCandles()'s exact shape, so `useIndicatorSeries` can co-page with `useCandles`
+// using the identical before_ns/limit/bar_seconds tuple.
+export async function fetchIndicatorSeries(
+  instrumentId: string,
+  beforeNs: number,
+  limit: number,
+  barSeconds: number,
+): Promise<IndicatorSeriesResponse> {
+  const params = new URLSearchParams({
+    before_ns: String(beforeNs),
+    limit: String(limit),
+    bar_seconds: String(barSeconds),
+  });
+  const res = await fetch(`/api/indicator-series/${encodeURIComponent(instrumentId)}?${params}`);
+  if (!res.ok) throw new Error(`GET /api/indicator-series/${instrumentId} failed: ${res.status}`);
+  return (await res.json()) as IndicatorSeriesResponse;
 }

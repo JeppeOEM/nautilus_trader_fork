@@ -425,6 +425,74 @@
         }
       }
     },
+    "/api/indicator-series/{instrument_id}": {
+      "get": {
+        "summary": "Get Indicator Series",
+        "operationId": "get_indicator_series_api_indicator_series__instrument_id__get",
+        "parameters": [
+          {
+            "name": "instrument_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Instrument Id"
+            }
+          },
+          {
+            "name": "before_ns",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Before Ns"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 120,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "bar_seconds",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 60,
+              "title": "Bar Seconds"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IndicatorSeriesResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/{full_path}": {
       "get": {
         "summary": "Api Not Found",
@@ -580,6 +648,84 @@
           "status"
         ],
         "title": "HealthResponse"
+      },
+      "IndicatorSeriesPoint": {
+        "properties": {
+          "t": {
+            "type": "integer",
+            "title": "T"
+          },
+          "ofi": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Ofi"
+          },
+          "obi": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Obi"
+          },
+          "microprice": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Microprice"
+          },
+          "spread": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Spread"
+          }
+        },
+        "type": "object",
+        "required": [
+          "t"
+        ],
+        "title": "IndicatorSeriesPoint"
+      },
+      "IndicatorSeriesResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/IndicatorSeriesPoint"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "has_more"
+        ],
+        "title": "IndicatorSeriesResponse"
       },
       "RankingsResponse": {
         "properties": {
