@@ -16,7 +16,9 @@ import type { CandleItem } from "../api/schema";
 // _CANDLE_REFILL_MARGIN_BARS=20) -- same initial window size and scroll-back trigger
 // margin, now served through the cursor-paginated /api/candles contract (AD-F3).
 const INITIAL_LIMIT = 120;
-const BAR_SECONDS = 60;
+// Exported so useLiveCandle.ts (Story 15.5) can subscribe to the same bar size instead
+// of duplicating the literal -- the two paths must never silently drift apart.
+export const BAR_SECONDS = 60;
 const REFILL_MARGIN_BARS = 20;
 
 export type ChartDatum = CandlestickData<Time> | WhitespaceData<Time>;

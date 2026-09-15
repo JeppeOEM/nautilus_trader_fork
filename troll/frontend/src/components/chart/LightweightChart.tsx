@@ -44,6 +44,13 @@ interface LightweightChartProps {
    * `chart.timeScale().setVisibleLogicalRange(...)` (AC #4 -- adding/removing/
    * reconfiguring a pane must never reset the chart's current zoom/pan). */
   panes?: IndicatorPaneSpec[];
+  /** Story 15.5: the currently-forming candle bar, from `useLiveCandle`. Applied via
+   * `series.update()` (not `setData()`) on the candlestick series only -- independent of
+   * the `data`/`setData()` effect above and Story 15.4's `panes` effect below; neither of
+   * those is touched by this prop. `null`/`undefined` means "no live bar yet" (e.g.
+   * before the live socket's first message, or synchronously reset on instrument/bar-size
+   * change) and is a no-op, not a clear of the last-drawn bar. */
+  liveBar?: ChartDatum | null;
 }
 
 type AnySeriesApi = ISeriesApi<"Line", Time> | ISeriesApi<"Histogram", Time>;
@@ -73,7 +80,7 @@ function setSeriesData(series: AnySeriesApi, data: IndicatorDatum[]): void {
  * one long-lived instance, since `lightweight-charts` has no supported "re-point this
  * chart at different data" API.
  */
-export default function LightweightChart({ data, onChartApi, panes = [] }: LightweightChartProps) {
+export default function LightweightChart({ data, onChartApi, panes = [], liveBar }: LightweightChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
@@ -132,6 +139,15 @@ export default function LightweightChart({ data, onChartApi, panes = [] }: Light
       });
     }
   }, [data]);
+
+  useEffect(() => {
+    // Story 15.5's live edge: independent of the mount effect, the data/setData() effect,
+    // and the panes effect below -- touches only seriesRef, via update() rather than a
+    // full setData() (AD-F7: the frontend never re-aggregates, it just paints the
+    // already-aggregated forming bar `useLiveCandle` handed it).
+    if (!liveBar) return;
+    seriesRef.current?.update(liveBar);
+  }, [liveBar]);
 
   useEffect(() => {
     const chart = chartRef.current;

@@ -4,8 +4,9 @@ import { useParams } from "react-router";
 
 import LightweightChart, { type IndicatorPaneSpec } from "../components/chart/LightweightChart";
 import { assignPaneColor } from "../components/chart/paneColors";
-import { useCandles } from "../hooks/useCandles";
+import { BAR_SECONDS, useCandles } from "../hooks/useCandles";
 import { useIndicatorSeries } from "../hooks/useIndicatorSeries";
+import { useLiveCandle } from "../hooks/useLiveCandle";
 
 // Story 15.4's five default panes (FR-39) -- fixed order for now (Story 15.6 makes this
 // user-configurable); this order is also the color-slot assignment order (AC #7).
@@ -15,6 +16,9 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
   const [chart, setChart] = useState<IChartApi | null>(null);
   const { candles, volume } = useCandles(instrumentId, chart);
   const indicatorSeries = useIndicatorSeries(instrumentId, chart);
+  // Story 15.5: the forming right-edge bar, over its own dedicated /ws/live socket
+  // (AD-F7) -- same BAR_SECONDS constant useCandles uses, so the two paths can't drift.
+  const liveBar = useLiveCandle(instrumentId, BAR_SECONDS);
 
   // Declarative pane set fed into LightweightChart's own registry (AD-F4) -- this
   // component never calls chart.addPane()/addSeries() itself. Volume is derived
@@ -59,7 +63,7 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
   return (
     <div>
       <h1>{instrumentId}</h1>
-      <LightweightChart data={candles} onChartApi={setChart} panes={panes} />
+      <LightweightChart data={candles} onChartApi={setChart} panes={panes} liveBar={liveBar} />
     </div>
   );
 }

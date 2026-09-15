@@ -36,7 +36,7 @@ from typing import AsyncIterator
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from data_api import redis_bus
+from data_api import live_candles, redis_bus
 from data_api.routes import candles as candles_routes
 from data_api.routes import indicator_series as indicator_series_routes
 from data_api.routes import rankings as rankings_routes
@@ -68,20 +68,24 @@ FRONTEND_DIST_PATH: str = os.environ.get("FRONTEND_DIST_PATH", "frontend_dist")
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """
-    Start the one shared `RankingsBus` subscriber (Story 15.2) for the app's whole
-    lifetime -- both `GET /api/rankings` and every `/ws/live` connection read/subscribe
-    against this same `redis_bus.bus` instance, never opening a per-request or
+    Start the two shared Redis subscribers for the app's whole lifetime: `RankingsBus`
+    (Story 15.2) and `LiveCandleBus` (Story 15.5). Every `GET /api/rankings` request and
+    every `/ws/live` connection read/subscribe against these same `redis_bus.bus` /
+    `live_candles.live_candle_bus` instances, never opening a per-request or
     per-websocket Redis connection of their own.
     """
-    task = asyncio.create_task(redis_bus.bus.run(redis_bus.REDIS_URL))
+    rankings_task = asyncio.create_task(redis_bus.bus.run(redis_bus.REDIS_URL))
+    live_candles_task = asyncio.create_task(live_candles.live_candle_bus.run(redis_bus.REDIS_URL))
     try:
         yield
     finally:
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+        rankings_task.cancel()
+        live_candles_task.cancel()
+        for task in (rankings_task, live_candles_task):
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
 
 app = FastAPI(docs_url=None, redoc_url=None, lifespan=lifespan)
