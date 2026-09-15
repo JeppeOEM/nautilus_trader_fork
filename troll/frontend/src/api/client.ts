@@ -1,8 +1,8 @@
 // Thin typed fetch helper over the generated OpenAPI schema (AD-F5) -- proves the codegen
 // pipeline's output is actually consumed, not just generated and ignored (Story 15.1 AC #3).
-import type { HealthResponse, RankingsResponse } from "./schema";
+import type { CandlesResponse, HealthResponse, RankingsResponse } from "./schema";
 
-export type { HealthResponse, RankingsResponse };
+export type { CandlesResponse, HealthResponse, RankingsResponse };
 
 export async function fetchHealth(): Promise<HealthResponse> {
   const res = await fetch("/api/health");
@@ -17,4 +17,22 @@ export async function fetchRankings(): Promise<RankingsResponse> {
   const res = await fetch("/api/rankings");
   if (!res.ok) throw new Error(`GET /api/rankings failed: ${res.status}`);
   return (await res.json()) as RankingsResponse;
+}
+
+// Story 15.3: cursor-paginated candle history (AD-F3) -- `useCandles` calls this once for
+// the initial window and once per scroll-back refill, never for a full-range load.
+export async function fetchCandles(
+  instrumentId: string,
+  beforeNs: number,
+  limit: number,
+  barSeconds: number,
+): Promise<CandlesResponse> {
+  const params = new URLSearchParams({
+    before_ns: String(beforeNs),
+    limit: String(limit),
+    bar_seconds: String(barSeconds),
+  });
+  const res = await fetch(`/api/candles/${encodeURIComponent(instrumentId)}?${params}`);
+  if (!res.ok) throw new Error(`GET /api/candles/${instrumentId} failed: ${res.status}`);
+  return (await res.json()) as CandlesResponse;
 }

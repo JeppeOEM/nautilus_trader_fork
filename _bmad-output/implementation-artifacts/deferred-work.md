@@ -1,3 +1,9 @@
+## Deferred from: code review of 15-3-chart-page-foundation-candlestick-and-cursor-paginated-history (2026-09-15)
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-15-3-chart-page-foundation-candlestick-and-cursor-paginated-history.md`
+  summary: `LightweightChart.tsx` sizes itself from `container.clientWidth` at mount and only re-syncs on `window`'s own `resize` event -- a layout-only resize that doesn't fire a window resize (a container inside a flex/grid parent reflowing, a hidden-tab/collapsed-panel becoming visible after mount with initial `clientWidth: 0`) leaves the chart at a stale or zero width until an unrelated window resize happens to fire.
+  evidence: `troll/frontend/src/components/chart/LightweightChart.tsx`'s mount effect calls `createChart(container, { width: container.clientWidth, ... })` and `window.addEventListener("resize", handleResize)` only -- no `ResizeObserver` on the container itself. Not reachable via this story's own `ChartPage.tsx` (the container always renders directly, not inside a hidden/collapsed panel), so it doesn't block this story; flagged as a general chart-sizing robustness gap worth fixing once, in this one shared component, before Story 15.4 (indicator panes) and later stories build more UI around it. Surfaced independently by both Blind Hunter and Edge Case Hunter review of this story's diff.
+
 ## Deferred from: code review of 15-2-live-coin-rankings-page (2026-09-14)
 
 - source_spec: `_bmad-output/implementation-artifacts/spec-15-2-live-coin-rankings-page.md`

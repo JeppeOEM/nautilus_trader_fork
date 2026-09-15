@@ -37,6 +37,7 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from data_api import redis_bus
+from data_api.routes import candles as candles_routes
 from data_api.routes import rankings as rankings_routes
 from data_api.ws import live as live_ws
 from dydx_collector.second_snapshot import DydxSecondSnapshot
@@ -150,11 +151,12 @@ def health() -> HealthResponse:
     return HealthResponse(status="ok")
 
 
-# Story 15.2: rankings REST + WS relay. Both must register above the /api/* catch-all
-# below -- a route registered after it would silently 404 (confirmed failure mode from
-# Story 15.1's own SPA-fallback investigation; the same "declared routes win over the
-# catch-all" rule applies here).
+# Story 15.2: rankings REST + WS relay. Story 15.3: candles REST. All must register above
+# the /api/* catch-all below -- a route registered after it would silently 404 (confirmed
+# failure mode from Story 15.1's own SPA-fallback investigation; the same "declared routes
+# win over the catch-all" rule applies here).
 app.include_router(rankings_routes.router)
+app.include_router(candles_routes.router)
 app.include_router(live_ws.router)
 
 

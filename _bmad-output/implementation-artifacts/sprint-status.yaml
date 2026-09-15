@@ -183,7 +183,7 @@ development_status:
   epic-15: in-progress
   15-1-facade-scaffold-spa-static-serving-and-docs-page: done
   15-2-live-coin-rankings-page: done
-  15-3-chart-page-foundation-candlestick-and-cursor-paginated-history: ready-for-dev
+  15-3-chart-page-foundation-candlestick-and-cursor-paginated-history: done
   15-4-synced-indicator-panes: ready-for-dev
   15-5-live-candle-edge: ready-for-dev
   15-6-per-coin-indicator-configuration: ready-for-dev

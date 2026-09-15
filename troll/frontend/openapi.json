@@ -357,6 +357,74 @@
         }
       }
     },
+    "/api/candles/{instrument_id}": {
+      "get": {
+        "summary": "Get Candles",
+        "operationId": "get_candles_api_candles__instrument_id__get",
+        "parameters": [
+          {
+            "name": "instrument_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Instrument Id"
+            }
+          },
+          {
+            "name": "before_ns",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Before Ns"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 120,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "bar_seconds",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 60,
+              "title": "Bar Seconds"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CandlesResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/{full_path}": {
       "get": {
         "summary": "Api Not Found",
@@ -398,6 +466,95 @@
   },
   "components": {
     "schemas": {
+      "CandleItem": {
+        "properties": {
+          "t": {
+            "type": "integer",
+            "title": "T"
+          },
+          "o": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "O"
+          },
+          "h": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "H"
+          },
+          "l": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "L"
+          },
+          "c": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "C"
+          },
+          "v": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "V"
+          }
+        },
+        "type": "object",
+        "required": [
+          "t"
+        ],
+        "title": "CandleItem"
+      },
+      "CandlesResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/CandleItem"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "has_more"
+        ],
+        "title": "CandlesResponse"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
