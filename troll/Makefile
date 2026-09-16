@@ -3,7 +3,7 @@ TROLL_DIR  := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 COMPOSE    := docker compose -f $(TROLL_DIR)docker-compose.yml
 BASE_IMAGE := nautilus-trader-base:1.229.0
 
-.PHONY: build-base build-base-vps up redeploy redeploy-no-paper up-live-paper build-insecure test test-live-paper down logs logs-dash web enable-boot enable-firewall harden-ssh
+.PHONY: build-base build-base-vps up redeploy redeploy-no-paper up-live-paper build-insecure test test-live-paper down logs logs-dash web enable-boot enable-firewall harden-ssh frontend-dev
 
 # Personal, gitignored overrides (see .env-example for the documented default).
 -include $(TROLL_DIR).env
@@ -232,3 +232,12 @@ prune-dry:
 dashboard:
 	fuser -k $(WEB_PORT)/tcp || true
 	cd $(REPO_ROOT) && PYTHONPATH=$(REPO_ROOT)/troll DASHBOARD_PORT=$(WEB_PORT) python -m ml_signals.dashboard --open
+
+## Local frontend dev: brings up data_api (network_mode: host, so it lands on
+## 127.0.0.1:$(DATA_API_PORT) -- exactly where frontend/vite.config.ts's dev-server
+## proxy expects it) plus the redis it reads from, then runs Vite in the
+## foreground. Ctrl-C only stops the frontend -- the backend containers keep
+## running (restart: always); `make down` stops those too.
+frontend-dev:
+	$(COMPOSE) up -d --build redis data_api
+	cd $(TROLL_DIR)frontend && npm run dev
