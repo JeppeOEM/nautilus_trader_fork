@@ -3,7 +3,7 @@ TROLL_DIR  := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 COMPOSE    := docker compose -f $(TROLL_DIR)docker-compose.yml
 BASE_IMAGE := nautilus-trader-base:1.229.0
 
-.PHONY: build-base build-base-vps up redeploy redeploy-no-paper up-live-paper build-insecure test test-live-paper down logs logs-dash web enable-boot enable-firewall harden-ssh frontend-dev
+.PHONY: build-base build-base-vps up redeploy redeploy-no-paper up-live-paper build-insecure test test-live-paper down logs logs-dash web enable-boot enable-firewall harden-ssh frontend-dev frontend-remote
 
 # Personal, gitignored overrides (see .env-example for the documented default).
 -include $(TROLL_DIR).env
@@ -233,11 +233,30 @@ dashboard:
 	fuser -k $(WEB_PORT)/tcp || true
 	cd $(REPO_ROOT) && PYTHONPATH=$(REPO_ROOT)/troll DASHBOARD_PORT=$(WEB_PORT) python -m ml_signals.dashboard --open
 
-## Local frontend dev: brings up data_api (network_mode: host, so it lands on
+## Local frontend dev, fully self-contained: brings up collector + ranking_engine +
+## data_api + redis, all locally (network_mode: host, so data_api lands on
 ## 127.0.0.1:$(DATA_API_PORT) -- exactly where frontend/vite.config.ts's dev-server
-## proxy expects it) plus the redis it reads from, then runs Vite in the
-## foreground. Ctrl-C only stops the frontend -- the backend containers keep
-## running (restart: always); `make down` stops those too.
+## proxy expects it), then runs Vite in the foreground. Opens a REAL dYdX WS
+## connection via collector and needs time to build up real ranking history from
+## scratch via ranking_engine -- heavier than `frontend-remote` below, but fully
+## self-contained (no VPS/tunnel dependency). Ctrl-C only stops the frontend -- the
+## backend containers keep running (restart: always); `make down` stops those too.
 frontend-dev:
-	$(COMPOSE) up -d --build redis data_api
+	$(COMPOSE) up -d --build redis data_api collector ranking_engine
 	cd $(TROLL_DIR)frontend && npm run dev
+
+## Local frontend dev against the VPS's real, already-running data instead --
+## collector/ranking_engine stay on the VPS, nothing heavy runs locally. Opens one SSH
+## tunnel to $(TROLL_VPS_HOST) forwarding its data_api port (9100 -- the VPS's own
+## default, NOT $(DATA_API_PORT), which is LOCAL_DEV's shifted port for the
+## locally-run containers `frontend-dev` starts above) to the same local port,
+## idempotent via fuser -- same pattern as ~/.zshrc's `_troll_tunnel_ensure`
+## (troll/CLAUDE.md's "Desktop <-> VPS Connection"), self-contained here since that
+## shell function lives outside this repo. Then runs Vite with DATA_API_PORT
+## overridden to the tunnel's local end. Only the data_api tunnel is needed --
+## data_api is the sole thing the frontend talks to; it owns its own redis
+## subscription on the VPS side.
+TROLL_VPS_HOST ?= nifelheim
+frontend-remote:
+	fuser 9100/tcp >/dev/null 2>&1 || ssh -f -N -L 9100:127.0.0.1:9100 $(TROLL_VPS_HOST)
+	cd $(TROLL_DIR)frontend && DATA_API_PORT=9100 npm run dev
