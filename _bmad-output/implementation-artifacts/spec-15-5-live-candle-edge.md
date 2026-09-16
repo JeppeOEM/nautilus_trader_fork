@@ -2,8 +2,9 @@
 title: 'Story 15.5: Live candle edge'
 type: 'feature'
 created: '2026-09-15'
-status: 'in-review'
+status: 'done'
 baseline_revision: 'b424c292c5ee2dc97c162be5a46f3c88fe0e7fc8'
+final_revision: '0a3e3c49c31d301e2f28b298dd214228845adada'
 review_loop_iteration: 0
 followup_review_recommended: true
 context: [
@@ -128,3 +129,29 @@ warnings: ['oversized']
 
 **Manual checks (if no CLI):**
 - `docker compose up -d data_api` then connect a WS client to `/ws/live`, send `{"subscribe": "candles:BTC-USD-PERP.DYDX:60"}`, confirm `candles:...` messages arrive on live ticks and stop after `{"unsubscribe": ...}`.
+
+## Auto Run Result
+
+Status: `done`
+
+**Summary:** Dev implementation (all 9 tasks, `troll/data_api/live_candles.py`'s `LiveCandleBus`, `ws/live.py`'s subscribe/unsubscribe multiplexer, `useLiveCandle.ts`, `LightweightChart.tsx`'s `liveBar` prop, `ChartPage.tsx` wiring, both new test files) had already landed at baseline `c50fbbaaa7` before this run started; this run performed the review pass, fixed everything auto-fixable, and finalized the story.
+
+**Files changed this pass:**
+- `troll/data_api/ws/live.py` -- reject `bar_seconds <= 0` in `_parse_candle_channel` (was a `ZeroDivisionError` DoS on the shared bus); moved the initial `rankings:live` `send_json` back inside `try`/`finally` (was leaking the rankings listener queue on an early disconnect -- a regression against pre-Story-15.5 behavior); added `rankings_forward_task` to the monitored `asyncio.wait()` set and a `_log_forward_error` done-callback on per-channel forward tasks; fixed `_handle_control_message`'s early-return so a malformed `subscribe` no longer masks a valid `unsubscribe` in the same message.
+- `troll/data_api/live_candles.py` -- removed the dead, unused `REDIS_URL` module constant (and now-unused `os` import); the app always starts the bus via `redis_bus.REDIS_URL`.
+- `troll/frontend/src/components/chart/LightweightChart.tsx` -- added a `lastLiveBarTimeRef` guard before `series.update(liveBar)` so a stale/out-of-order live bar can't throw and silently kill further live updates for that mount.
+
+**Review findings breakdown (2026-09-16 pass, see Review Triage Log above for full detail):**
+- 6 patches applied (2 high, 2 medium, 2 low) -- see triage log for the full list.
+- 6 deferred to `deferred-work.md`: out-of-order/duplicate snapshot handling, no subscription cap per connection/process, unbounded `asyncio.Queue` growth pattern (mirrors pre-existing `RankingsBus`), duplicate-subscription risk from non-canonical `bar_seconds` strings, `useLiveCandle.ts`'s missing numeric-field validation, and a pre-existing (not caused by this story) failing test in `ml_signals/tests/test_dashboard_chart.py`.
+- 5 rejected as noise (2 were transcription errors made while assembling the review-agent prompts, not real issues in the actual diff; verified false against the real files before rejecting).
+- No intent_gap, no bad_spec -- no loopback to step-03 was needed.
+
+**Verification performed:**
+- `cd troll && PYTHONPATH=. python -m pytest data_api/tests -q` (with `REDIS_URL=redis://127.0.0.1:16379` to match this host's running Redis container's mapped port) -- 57 passed, including `test_rankings_live_message_reflected_by_rest_and_ws_relay` (Story 15.2's real-Redis WS relay test, confirmed still passing unmodified per the spec's own constraint).
+- `cd troll && PYTHONPATH=. python -m pytest data_api/tests ml_signals/tests -q` -- 270 passed, 1 pre-existing unrelated failure (`test_microfeatures_json_decimates_and_reports_true_pre_decimation_count`, confirmed present with this story's changes fully reverted too; deferred).
+- `cd troll/frontend && npm run build` -- clean (tsc + vite).
+- `cd troll/frontend && npm run test` -- 30 Vitest tests + 4 codegen tests passed, including all 9 `useLiveCandle.test.ts` cases.
+- `cd troll/frontend && npm run lint` -- clean for all files touched by this story (2 pre-existing warnings in an unrelated file, `TrustedHtml.tsx`).
+
+**Residual risks:** the 6 deferred items above remain open (all low severity/likelihood for this single-operator internal tool); `followup_review_recommended: true` given the volume and concurrency-adjacent nature of this pass's patched findings (two were real production-affecting bugs: a DoS-by-subscription and a connection-leak regression).
