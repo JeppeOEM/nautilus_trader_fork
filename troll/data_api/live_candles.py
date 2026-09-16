@@ -30,7 +30,6 @@ lazily on the first `subscribe()` for that pair and torn down on the last matchi
 import asyncio
 import json
 import logging
-import os
 
 import redis.asyncio as aioredis
 
@@ -40,7 +39,6 @@ from ml_signals.candles import candle_dicts_from_snapshots
 
 logger = logging.getLogger(__name__)
 
-REDIS_URL: str = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
 SNAPSHOTS_CHANNEL = "snapshots:raw"
 
 _BufferKey = tuple[str, int]  # (instrument_id, bar_seconds)

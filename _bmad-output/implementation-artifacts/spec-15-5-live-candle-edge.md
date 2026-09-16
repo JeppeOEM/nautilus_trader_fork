@@ -5,7 +5,7 @@ created: '2026-09-15'
 status: 'in-review'
 baseline_revision: 'b424c292c5ee2dc97c162be5a46f3c88fe0e7fc8'
 review_loop_iteration: 0
-followup_review_recommended: false
+followup_review_recommended: true
 context: [
   '{project-root}/troll/CLAUDE.md',
   '{project-root}/_bmad-output/planning-artifacts/architecture/architecture-chart-frontend-rewrite-2026-09-13/ARCHITECTURE-SPINE.md',
@@ -94,6 +94,22 @@ warnings: ['oversized']
 ## Spec Change Log
 
 ## Review Triage Log
+
+### 2026-09-16 — Review pass
+- intent_gap: 0
+- bad_spec: 0
+- patch: 6 (high 2, medium 2, low 2)
+- defer: 6 (low 6)
+- reject: 5
+- addressed_findings:
+  - `[high]` `[patch]` `_parse_candle_channel` accepted `bar_seconds="0"`, and `LiveCandleBus._apply_to_buffer` then divided by `bar_seconds * 1e9 == 0` -> `ZeroDivisionError` inside `LiveCandleBus.run()`'s broad reconnect handler, tearing down the shared Redis subscription (disrupting every connected client's live-candle stream) repeatedly for as long as the bad subscription stayed registered. Fixed by rejecting `bar_seconds <= 0` in `_parse_candle_channel` (`ws/live.py`).
+  - `[high]` `[patch]` This story's refactor moved the initial `send_json(latest)` call in `ws_live()` to *before* the `try`/`finally` block (it was inside `try` pre-Story-15.5) -- a client disconnecting between `accept()` and that send now raised outside the `finally`, permanently leaking `rankings_queue` in `redis_bus.bus`'s listener set. Fixed by moving the send back inside `try` (`ws/live.py`).
+  - `[medium]` `[patch]` Per-channel and rankings `_forward()` tasks ran outside `ws_live()`'s monitored `asyncio.wait()` set, so an unexpected failure in one would silently stop that stream with only an "exception was never retrieved" asyncio warning. Fixed by adding `rankings_forward_task` to the monitored set and a `_log_forward_error` done-callback on each dynamically-created per-channel forward task (`ws/live.py`).
+  - `[medium]` `[patch]` `LightweightChart.tsx`'s new `liveBar` effect called `series.update()` with no guard against a stale/out-of-order bar time, which `lightweight-charts` rejects by throwing and would silently kill all further live updates for that mount. Fixed with a `lastLiveBarTimeRef` guard that drops a bar older than the last-applied one.
+  - `[low]` `[patch]` `_handle_control_message` returned unconditionally as soon as either key held a string, even when that key's channel failed to parse -- a message with a malformed `subscribe` alongside a valid `unsubscribe` silently dropped the unsubscribe. Fixed by `continue`-ing to the next key on a parse failure instead of returning (`ws/live.py`).
+  - `[low]` `[patch]` `live_candles.py` defined its own unused `REDIS_URL` module constant (the app actually starts `LiveCandleBus.run()` with `redis_bus.REDIS_URL`) -- dead code and a divergence risk. Removed, along with the now-unused `os` import.
+  - `defer`: 6 items appended to `deferred-work.md` -- out-of-order/duplicate snapshot handling in `LiveCandleBus`, no per-connection/process cap on distinct `(iid, bar_seconds)` subscriptions, unbounded `asyncio.Queue` growth pattern (mirrors pre-existing `RankingsBus`), duplicate-subscription risk from a non-canonical `bar_seconds` string, `useLiveCandle.ts`'s `isLiveCandleMessage` not validating bar field types, and a pre-existing (not caused by this story) failure in `ml_signals/tests/test_dashboard_chart.py::test_microfeatures_json_decimates_and_reports_true_pre_decimation_count` surfaced while running the full-regression verification command.
+  - `reject`: 5 -- two were transcription errors introduced while assembling the review-agent prompt (not present in the actual diff: a stray non-comment line, and a diff hunk mis-copied as a no-op change) and were verified false against the real files; one flagged the mid-bucket-subscribe forming-bar bias, which is the spec's own documented I/O-matrix behavior, not a bug; one flagged a `t`-units mismatch that verification against `candle_dicts_from_snapshots` (ms, confirmed by its `// 1_000_000` from nanoseconds) disproved; one flagged `_reader`'s docstring as inaccurate, which the low-severity `_handle_control_message` patch above already resolves in practice.
 
 ## Design Notes
 

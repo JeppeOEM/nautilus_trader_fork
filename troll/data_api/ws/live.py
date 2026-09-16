@@ -59,7 +59,10 @@ def _parse_candle_channel(channel: str) -> tuple[str, int] | None:
     iid, _, bar_seconds_str = rest.rpartition(":")
     if not iid or not bar_seconds_str.isdigit():
         return None
-    return iid, int(bar_seconds_str)
+    bar_seconds = int(bar_seconds_str)
+    if bar_seconds <= 0:
+        return None  # bar_seconds=0 would divide-by-zero in LiveCandleBus's bucket math
+    return iid, bar_seconds
 
 
 async def _forward(source: "asyncio.Queue[dict]", outbox: "asyncio.Queue[dict]") -> None:
@@ -67,6 +70,18 @@ async def _forward(source: "asyncio.Queue[dict]", outbox: "asyncio.Queue[dict]")
     forever, until cancelled -- runs as its own task per active subscription."""
     while True:
         outbox.put_nowait(await source.get())
+
+
+def _log_forward_error(task: "asyncio.Task[None]") -> None:
+    """A per-channel `_forward` task isn't in `ws_live`'s monitored `asyncio.wait()` set
+    (there can be any number of them, created/cancelled dynamically) -- without this, an
+    unexpected failure would silently stop that channel's stream and only surface as an
+    "exception was never retrieved" warning from asyncio's default handler."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.warning("/ws/live forward task failed: %s", exc)
 
 
 class _CandleSubscriptions:
@@ -82,6 +97,7 @@ class _CandleSubscriptions:
             return  # already subscribed for this connection -- idempotent
         queue = live_candles.live_candle_bus.subscribe(iid, bar_seconds)
         task = asyncio.create_task(_forward(queue, self._outbox))
+        task.add_done_callback(_log_forward_error)
         self._entries[channel] = (iid, bar_seconds, queue, task)
 
     def unsubscribe(self, channel: str) -> None:
@@ -103,9 +119,10 @@ def _handle_control_message(message: dict, subs: _CandleSubscriptions) -> None:
         if not isinstance(channel, str):
             continue
         parsed = _parse_candle_channel(channel)
-        if parsed is not None:
-            iid, bar_seconds = parsed
-            subs.subscribe(channel, iid, bar_seconds) if key == "subscribe" else subs.unsubscribe(channel)
+        if parsed is None:
+            continue  # this key didn't parse -- still check the other key, don't give up
+        iid, bar_seconds = parsed
+        subs.subscribe(channel, iid, bar_seconds) if key == "subscribe" else subs.unsubscribe(channel)
         return
 
 
@@ -141,17 +158,20 @@ async def ws_live(websocket: WebSocket) -> None:
     # instead arrives twice (via the initial send below and the queue) -- harmless for a
     # full-snapshot relay, unlike a silent drop. Unchanged from before Story 15.5.
     rankings_queue = redis_bus.bus.subscribe()
-    if redis_bus.bus.latest is not None:
-        await websocket.send_json(redis_bus.bus.latest)
-
     subs = _CandleSubscriptions(outbox)
     rankings_forward_task = asyncio.create_task(_forward(rankings_queue, outbox))
     sender_task = asyncio.create_task(_sender(websocket, outbox))
     reader_task = asyncio.create_task(_reader(websocket, subs))
 
     try:
+        # Inside the try/finally (unlike pre-Story-15.5 code, where this send sat before
+        # the try): a client that disconnects between accept() and this send must still
+        # hit `finally` below, or `rankings_queue` leaks in `redis_bus.bus`'s listener set
+        # forever.
+        if redis_bus.bus.latest is not None:
+            await websocket.send_json(redis_bus.bus.latest)
         done, _pending = await asyncio.wait(
-            {sender_task, reader_task}, return_when=asyncio.FIRST_COMPLETED,
+            {sender_task, reader_task, rankings_forward_task}, return_when=asyncio.FIRST_COMPLETED,
         )
         for task in done:
             exc = task.exception()

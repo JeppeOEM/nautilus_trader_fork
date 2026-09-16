@@ -86,6 +86,7 @@ export default function LightweightChart({ data, onChartApi, panes = [], liveBar
   const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const prevLengthRef = useRef(0);
   const panesRef = useRef<Map<string, PaneEntry>>(new Map());
+  const lastLiveBarTimeRef = useRef<number | null>(null);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -146,7 +147,15 @@ export default function LightweightChart({ data, onChartApi, panes = [], liveBar
     // full setData() (AD-F7: the frontend never re-aggregates, it just paints the
     // already-aggregated forming bar `useLiveCandle` handed it).
     if (!liveBar) return;
-    seriesRef.current?.update(liveBar);
+    const series = seriesRef.current;
+    if (!series) return;
+    // lightweight-charts requires non-decreasing update() times; a live bar racing in
+    // behind the last-applied one (e.g. a stray message right after an instrument/
+    // bar-size switch) would otherwise throw and silently kill all further live updates.
+    const time = liveBar.time as unknown as number;
+    if (lastLiveBarTimeRef.current !== null && time < lastLiveBarTimeRef.current) return;
+    lastLiveBarTimeRef.current = time;
+    series.update(liveBar);
   }, [liveBar]);
 
   useEffect(() => {
