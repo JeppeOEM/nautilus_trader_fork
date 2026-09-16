@@ -41,6 +41,7 @@ from data_api.routes import candles as candles_routes
 from data_api.routes import indicator_series as indicator_series_routes
 from data_api.routes import indicators as indicators_routes
 from data_api.routes import rankings as rankings_routes
+from data_api.routes import snapshots as snapshots_routes
 from data_api.ws import live as live_ws
 from dydx_collector.second_snapshot import DydxSecondSnapshot
 from ml_signals import catalog_stats as _catalog_stats
@@ -157,14 +158,16 @@ def health() -> HealthResponse:
     return HealthResponse(status="ok")
 
 
-# Story 15.2: rankings REST + WS relay. Story 15.3: candles REST. All must register above
-# the /api/* catch-all below -- a route registered after it would silently 404 (confirmed
-# failure mode from Story 15.1's own SPA-fallback investigation; the same "declared routes
-# win over the catch-all" rule applies here).
+# Story 15.2: rankings REST + WS relay. Story 15.3: candles REST. Story 15.7: snapshots
+# (Lines mode) REST. All must register above the /api/* catch-all below -- a route
+# registered after it would silently 404 (confirmed failure mode from Story 15.1's own
+# SPA-fallback investigation; the same "declared routes win over the catch-all" rule
+# applies here).
 app.include_router(rankings_routes.router)
 app.include_router(candles_routes.router)
 app.include_router(indicator_series_routes.router)
 app.include_router(indicators_routes.router)
+app.include_router(snapshots_routes.router)
 app.include_router(live_ws.router)
 
 

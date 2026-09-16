@@ -339,3 +339,9 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-15-6-per-coin-indicator-configuration.md`
   summary: A single bad/unknown entry in a batched `GET .../indicator-values` request still fails the entire request rather than just that entry -- re-confirmed still present and unaddressed as of this pass.
   evidence: Same as the already-logged entry from the second review pass (`indicators.py`'s `get_indicator_values`/`_values_by_time`); re-surfaced by Edge Case Hunter in this (third) pass.
+
+## Deferred from: code review of 15-7-lines-mode (2026-09-16)
+
+- source_spec: `_bmad-output/implementation-artifacts/15-7-lines-mode.md`
+  summary: When a queried page's rows are all crossed-book (filtered to empty) but real older history exists further back, `has_more` is reported `False`, silently truncating scroll-back pagination instead of probing further back.
+  evidence: `troll/data_api/routes/snapshots.py:get_snapshots`'s `if not kept: return SnapshotSeriesResponse(items=[], has_more=False)`. Pre-existing, identical behavior in the sibling route this story was instructed to mirror exactly: `troll/data_api/routes/candles.py:get_candles`'s own `if not kept: return CandlesResponse(items=[], has_more=False)` (Story 15.3). Not introduced by this story -- fixing it here alone would diverge from the reused design rather than fix the shared root cause. Surfaced by Edge Case Hunter review of this story's diff.

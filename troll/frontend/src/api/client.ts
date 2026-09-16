@@ -8,6 +8,7 @@ import type {
   IndicatorSeriesResponse,
   IndicatorValuesResponse,
   RankingsResponse,
+  SnapshotSeriesResponse,
 } from "./schema";
 
 export type {
@@ -18,6 +19,7 @@ export type {
   IndicatorSeriesResponse,
   IndicatorValuesResponse,
   RankingsResponse,
+  SnapshotSeriesResponse,
 };
 
 export async function fetchHealth(): Promise<HealthResponse> {
@@ -70,6 +72,21 @@ export async function fetchIndicatorSeries(
   const res = await fetch(`/api/indicator-series/${encodeURIComponent(instrumentId)}?${params}`);
   if (!res.ok) throw new Error(`GET /api/indicator-series/${instrumentId} failed: ${res.status}`);
   return (await res.json()) as IndicatorSeriesResponse;
+}
+
+// Story 15.7: cursor-paginated bid/ask/mid/micro/price history (AD-F3) for Lines mode --
+// no `bar_seconds` (snapshots are per-second rows, no bar/aggregation concept). `useSnapshotSeries`
+// calls this once for the initial window and once per scroll-back refill, mirroring
+// `fetchCandles()`'s exact shape.
+export async function fetchSnapshotSeries(
+  instrumentId: string,
+  beforeNs: number,
+  limit: number,
+): Promise<SnapshotSeriesResponse> {
+  const params = new URLSearchParams({ before_ns: String(beforeNs), limit: String(limit) });
+  const res = await fetch(`/api/snapshots/${encodeURIComponent(instrumentId)}?${params}`);
+  if (!res.ok) throw new Error(`GET /api/snapshots/${instrumentId} failed: ${res.status}`);
+  return (await res.json()) as SnapshotSeriesResponse;
 }
 
 // Story 15.6: the merged native+custom indicator catalog -- IndicatorPicker's list always

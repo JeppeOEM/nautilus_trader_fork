@@ -60,3 +60,17 @@ export interface RankingsResponse {
   mode: string;
   stale_instrument_ids: string[];
 }
+
+export interface SnapshotSeriesPoint {
+  t: number;
+  bid?: number | null;
+  ask?: number | null;
+  mid?: number | null;
+  micro?: number | null;
+  price?: number | null;
+}
+
+export interface SnapshotSeriesResponse {
+  items: SnapshotSeriesPoint[];
+  has_more: boolean;
+}

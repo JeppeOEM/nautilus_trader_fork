@@ -6,6 +6,7 @@ import type { IndicatorPaneSpec } from "./LightweightChart";
 const addSeriesMock = vi.fn();
 const applyOptionsMock = vi.fn();
 const removeMock = vi.fn();
+const removeSeriesMock = vi.fn();
 const setDataMock = vi.fn();
 const createChartMock = vi.fn();
 const addPaneMock = vi.fn();
@@ -71,12 +72,14 @@ beforeEach(() => {
     .mockImplementation((_definition: unknown, options?: { color?: string }) => makeSeriesMock(options?.color));
   applyOptionsMock.mockReset();
   removeMock.mockReset();
+  removeSeriesMock.mockReset();
   addPaneMock.mockReset().mockImplementation(() => makePaneMock());
   removePaneMock.mockReset();
   getVisibleLogicalRangeMock.mockReset().mockReturnValue({ from: 10, to: 50 });
   setVisibleLogicalRangeMock.mockReset();
   createChartMock.mockReset().mockImplementation(() => ({
     addSeries: addSeriesMock,
+    removeSeries: removeSeriesMock,
     applyOptions: applyOptionsMock,
     remove: removeMock,
     addPane: addPaneMock,
@@ -211,5 +214,65 @@ describe("LightweightChart", () => {
     rerender(<LightweightChart data={stableCandleData as never} onChartApi={() => {}} panes={specB} />);
     expect(addPaneMock).toHaveBeenCalledTimes(1);
     expect(setDataMock.mock.calls.length).toBe(callsAfterMount + 1);
+  });
+
+  describe("Candles/Lines mode swap (Story 15.7)", () => {
+    it("defaults to candles mode: adds exactly one CandlestickSeries, no line series", () => {
+      render(<LightweightChart data={[]} onChartApi={() => {}} />);
+
+      expect(addSeriesMock).toHaveBeenCalledTimes(1);
+      expect(addSeriesMock).toHaveBeenCalledWith("CandlestickSeries-sentinel");
+    });
+
+    it("switching to lines mode removes the candlestick series and adds 5 line series on the main pane", () => {
+      const { rerender } = render(<LightweightChart data={[]} onChartApi={() => {}} mode="candles" />);
+      expect(addSeriesMock).toHaveBeenCalledTimes(1); // the candlestick series
+
+      rerender(<LightweightChart data={[]} onChartApi={() => {}} mode="lines" />);
+
+      expect(removeSeriesMock).toHaveBeenCalledTimes(1); // the candlestick series removed
+      // 1 candlestick (mount) + 5 line series (bid/ask/mid/micro/price), every line series
+      // call explicitly targets pane 0 (the main pane), never a fresh chart.addPane().
+      expect(addSeriesMock).toHaveBeenCalledTimes(6);
+      expect(addPaneMock).not.toHaveBeenCalled();
+      for (let i = 1; i < 6; i++) {
+        expect(addSeriesMock).toHaveBeenNthCalledWith(i + 1, "LineSeries-sentinel", expect.objectContaining({}), 0);
+      }
+    });
+
+    it("switching from lines back to candles removes the 5 line series and re-adds one candlestick series", () => {
+      const { rerender } = render(<LightweightChart data={[]} onChartApi={() => {}} mode="lines" />);
+      expect(addSeriesMock).toHaveBeenCalledTimes(5); // 5 line series, no candlestick this time
+
+      rerender(<LightweightChart data={[]} onChartApi={() => {}} mode="candles" />);
+
+      expect(removeSeriesMock).toHaveBeenCalledTimes(5); // all 5 line series removed
+      expect(addSeriesMock).toHaveBeenCalledTimes(6); // 5 line series + 1 candlestick
+      expect(addSeriesMock).toHaveBeenNthCalledWith(6, "CandlestickSeries-sentinel");
+    });
+
+    it("never touches the chart's visible logical/time range across a Candles->Lines->Candles toggle (AC #3)", () => {
+      const { rerender } = render(<LightweightChart data={[]} onChartApi={() => {}} mode="candles" />);
+
+      rerender(<LightweightChart data={[]} onChartApi={() => {}} mode="lines" />);
+      rerender(<LightweightChart data={[]} onChartApi={() => {}} mode="candles" />);
+
+      // The mode-swap effect itself never calls getVisibleLogicalRange()/
+      // setVisibleLogicalRange() -- those are only ever read/written by the data-effects'
+      // own scroll-back shift-preservation, which never fires here since `data`/`linesData`
+      // stay empty across every rerender (no `addedAtFront` growth to compensate for).
+      expect(getVisibleLogicalRangeMock).not.toHaveBeenCalled();
+      expect(setVisibleLogicalRangeMock).not.toHaveBeenCalled();
+    });
+
+    it("does not recreate the candlestick series on a data-only re-render while mode stays candles", () => {
+      const { rerender } = render(<LightweightChart data={[]} onChartApi={() => {}} mode="candles" />);
+      expect(addSeriesMock).toHaveBeenCalledTimes(1);
+
+      rerender(<LightweightChart data={[{ time: 1700000000 as never }]} onChartApi={() => {}} mode="candles" />);
+
+      expect(addSeriesMock).toHaveBeenCalledTimes(1); // still just the one, no remove/re-add
+      expect(removeSeriesMock).not.toHaveBeenCalled();
+    });
   });
 });

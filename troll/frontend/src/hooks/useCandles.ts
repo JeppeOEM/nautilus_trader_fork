@@ -63,12 +63,26 @@ export interface UseCandlesResult {
  * false` (AC #4). Callers key their component by instrument id (`ChartPage.tsx`) so a
  * new instrument always gets a fresh hook instance rather than needing in-hook reset
  * logic.
+ *
+ * `enabled` (Story 15.7, default `true`): while `false` (Lines mode is active), this hook
+ * issues no requests at all -- neither the initial-page fetch nor a scroll-back refill --
+ * so Candles-mode data isn't fetched behind a pane the operator isn't looking at. Once
+ * loaded, `state` is simply left as-is (not cleared) so switching back to Candles mode
+ * shows the same data without a redundant refetch; the initial-page fetch itself only
+ * ever runs once per mount, whenever `enabled` first becomes `true` (a `hasLoadedInitialRef`
+ * guard, not a plain `[enabled]` dependency, so toggling modes back and forth can't
+ * re-trigger it and discard any scroll-back history already loaded).
  */
-export function useCandles(instrumentId: string, chart: IChartApi | null): UseCandlesResult {
+export function useCandles(
+  instrumentId: string,
+  chart: IChartApi | null,
+  enabled = true,
+): UseCandlesResult {
   const [state, setState] = useState<CandlesState>(EMPTY_STATE);
   const hasMoreOlderRef = useRef(true);
   const loadingRef = useRef(false);
   const earliestMsRef = useRef<number | null>(null);
+  const hasLoadedInitialRef = useRef(false);
 
   const loadPage = useCallback(
     (beforeNs: number, prepend: boolean): Promise<void> => {
@@ -127,20 +141,23 @@ export function useCandles(instrumentId: string, chart: IChartApi | null): UseCa
   );
 
   useEffect(() => {
+    if (!enabled || hasLoadedInitialRef.current) return;
+    hasLoadedInitialRef.current = true;
     void loadPage(Date.now() * 1_000_000, false);
-  }, [loadPage]);
+  }, [loadPage, enabled]);
 
   useEffect(() => {
     if (!chart) return;
     const timeScale = chart.timeScale();
     const handler = (range: LogicalRange | null) => {
+      if (!enabled) return;
       if (!range || range.from >= REFILL_MARGIN_BARS) return;
       if (!hasMoreOlderRef.current || loadingRef.current || earliestMsRef.current === null) return;
       void loadPage(earliestMsRef.current * 1_000_000, true);
     };
     timeScale.subscribeVisibleLogicalRangeChange(handler);
     return () => timeScale.unsubscribeVisibleLogicalRangeChange(handler);
-  }, [chart, loadPage]);
+  }, [chart, loadPage, enabled]);
 
   return state;
 }

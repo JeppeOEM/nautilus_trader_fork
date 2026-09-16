@@ -187,7 +187,7 @@ development_status:
   15-4-synced-indicator-panes: done
   15-5-live-candle-edge: done
   15-6-per-coin-indicator-configuration: done
-  15-7-lines-mode: ready-for-dev
+  15-7-lines-mode: done
   # 15.8 deferred 2026-09-16 at the user's request -- not needed now. Status set to
   # `in-progress` (not `backlog`/`ready-for-dev`), same convention as 14.3's park above,
   # specifically so ACTIONABLE_STATUSES excludes it and neither a plain `bmad-loop run`
