@@ -3,11 +3,22 @@
 import type {
   CandlesResponse,
   HealthResponse,
+  IndicatorCatalogEntry,
+  IndicatorConfigEntry,
   IndicatorSeriesResponse,
+  IndicatorValuesResponse,
   RankingsResponse,
 } from "./schema";
 
-export type { CandlesResponse, HealthResponse, IndicatorSeriesResponse, RankingsResponse };
+export type {
+  CandlesResponse,
+  HealthResponse,
+  IndicatorCatalogEntry,
+  IndicatorConfigEntry,
+  IndicatorSeriesResponse,
+  IndicatorValuesResponse,
+  RankingsResponse,
+};
 
 export async function fetchHealth(): Promise<HealthResponse> {
   const res = await fetch("/api/health");
@@ -59,4 +70,60 @@ export async function fetchIndicatorSeries(
   const res = await fetch(`/api/indicator-series/${encodeURIComponent(instrumentId)}?${params}`);
   if (!res.ok) throw new Error(`GET /api/indicator-series/${instrumentId} failed: ${res.status}`);
   return (await res.json()) as IndicatorSeriesResponse;
+}
+
+// Story 15.6: the merged native+custom indicator catalog -- IndicatorPicker's list always
+// comes from here, never a hand-duplicated frontend copy (spec's "Never" list).
+export async function fetchIndicatorCatalog(): Promise<Record<string, IndicatorCatalogEntry>> {
+  const res = await fetch("/api/indicators/catalog");
+  if (!res.ok) throw new Error(`GET /api/indicators/catalog failed: ${res.status}`);
+  return (await res.json()) as Record<string, IndicatorCatalogEntry>;
+}
+
+// Story 15.6: this coin's persisted picker selection -- `[]` when nothing has been saved
+// yet (not an error).
+export async function fetchCoinIndicatorConfig(instrumentId: string): Promise<IndicatorConfigEntry[]> {
+  const res = await fetch(`/api/coin/${encodeURIComponent(instrumentId)}/indicators`);
+  if (!res.ok) throw new Error(`GET /api/coin/${instrumentId}/indicators failed: ${res.status}`);
+  return (await res.json()) as IndicatorConfigEntry[];
+}
+
+// Story 15.6: persists the FULL updated list on any picker change (add/remove/param-apply)
+// -- never auto-save-per-keystroke, matching the relocated handler's explicit-Save contract.
+export async function saveCoinIndicatorConfig(
+  instrumentId: string,
+  entries: IndicatorConfigEntry[],
+): Promise<{ ok: boolean }> {
+  const res = await fetch(`/api/coin/${encodeURIComponent(instrumentId)}/indicators`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(entries),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(`PUT /api/coin/${instrumentId}/indicators failed: ${res.status} ${JSON.stringify(body)}`);
+  }
+  return (await res.json()) as { ok: boolean };
+}
+
+// Story 15.6: cursor-paginated indicator-values history (AD-F3) -- mirrors
+// fetchCandles()/fetchIndicatorSeries()'s before_ns/limit/bar_seconds contract, plus the
+// caller-supplied `entries` (name+params) list of which picker-configured indicators to
+// replay over the same bounded window.
+export async function fetchIndicatorValues(
+  instrumentId: string,
+  beforeNs: number,
+  limit: number,
+  barSeconds: number,
+  entries: { name: string; params: Record<string, unknown> }[],
+): Promise<IndicatorValuesResponse> {
+  const params = new URLSearchParams({
+    before_ns: String(beforeNs),
+    limit: String(limit),
+    bar_seconds: String(barSeconds),
+    entries: JSON.stringify(entries),
+  });
+  const res = await fetch(`/api/coin/${encodeURIComponent(instrumentId)}/indicator-values?${params}`);
+  if (!res.ok) throw new Error(`GET /api/coin/${instrumentId}/indicator-values failed: ${res.status}`);
+  return (await res.json()) as IndicatorValuesResponse;
 }

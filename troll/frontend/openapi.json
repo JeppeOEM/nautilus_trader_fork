@@ -493,6 +493,192 @@
         }
       }
     },
+    "/api/indicators/catalog": {
+      "get": {
+        "summary": "Get Indicators Catalog",
+        "operationId": "get_indicators_catalog_api_indicators_catalog_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "$ref": "#/components/schemas/IndicatorCatalogEntry"
+                  },
+                  "type": "object",
+                  "title": "Response Get Indicators Catalog Api Indicators Catalog Get"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/coin/{instrument_id}/indicators": {
+      "get": {
+        "summary": "Get Coin Indicator Config",
+        "description": "Return this instrument's persisted picker selection. No saved entry is a legitimate\n\"nothing saved yet\" state -- `[]`, not an error.",
+        "operationId": "get_coin_indicator_config_api_coin__instrument_id__indicators_get",
+        "parameters": [
+          {
+            "name": "instrument_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Instrument Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/IndicatorConfigEntry"
+                  },
+                  "title": "Response Get Coin Indicator Config Api Coin  Instrument Id  Indicators Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "summary": "Put Coin Indicator Config",
+        "description": "Persist this instrument's current indicator selection (explicit Save/change, never\nauto-save-per-keystroke -- matches today's handler's docstring).\n\nReads the raw JSON body itself (rather than a typed Pydantic body parameter) so a\nmalformed entry -- missing `name`/`category`, or invalid JSON outright -- degrades to a\nreal `400` with a message, never FastAPI's automatic `422`, matching the pre-existing\nhandler's contract exactly (DATA-02: never a silent/opaque failure for a client-input\nproblem).",
+        "operationId": "put_coin_indicator_config_api_coin__instrument_id__indicators_put",
+        "parameters": [
+          {
+            "name": "instrument_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Instrument Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "boolean"
+                  },
+                  "title": "Response Put Coin Indicator Config Api Coin  Instrument Id  Indicators Put"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/coin/{instrument_id}/indicator-values": {
+      "get": {
+        "summary": "Get Indicator Values",
+        "description": "Bounded candle window (mirrors `candles.py`'s window/limit/bar_seconds contract), then\nper-requested-name `replay_indicator` dispatch, results keyed by `_indicator_id(name,\nparams)` (AD-F2/AD-F3).\n\nRe-derives its own bounded window server-side rather than accepting client-supplied\ncandles in the request body (Design Notes: DESIGN-01) -- always a bounded *historical*\nreplay of `[start_ns, before_ns)`, mirroring `indicator_series.py`'s own purely-historical\nscroll-back model; the candlestick's live edge has its own sanctioned path (AD-F7) that\nthis route does not duplicate.\n\nA custom indicator whose instrument never opted into raw-delta capture returns `None` for\nevery point (pre-existing `custom_indicators.py` behavior, reused unchanged) -- not an\nerror (I/O matrix: \"Values route returns None per-point for an uncaptured custom\nindicator, not an error\").",
+        "operationId": "get_indicator_values_api_coin__instrument_id__indicator_values_get",
+        "parameters": [
+          {
+            "name": "instrument_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Instrument Id"
+            }
+          },
+          {
+            "name": "before_ns",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "title": "Before Ns"
+            }
+          },
+          {
+            "name": "entries",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Entries"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 120,
+              "title": "Limit"
+            }
+          },
+          {
+            "name": "bar_seconds",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "default": 60,
+              "title": "Bar Seconds"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IndicatorValuesResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/{full_path}": {
       "get": {
         "summary": "Api Not Found",
@@ -649,6 +835,54 @@
         ],
         "title": "HealthResponse"
       },
+      "IndicatorCatalogEntry": {
+        "properties": {
+          "params": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Params"
+          },
+          "panel": {
+            "type": "string",
+            "title": "Panel"
+          },
+          "category": {
+            "type": "string",
+            "title": "Category"
+          }
+        },
+        "type": "object",
+        "required": [
+          "params",
+          "panel",
+          "category"
+        ],
+        "title": "IndicatorCatalogEntry"
+      },
+      "IndicatorConfigEntry": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "params": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Params",
+            "default": {}
+          },
+          "category": {
+            "type": "string",
+            "title": "Category"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "category"
+        ],
+        "title": "IndicatorConfigEntry"
+      },
       "IndicatorSeriesPoint": {
         "properties": {
           "t": {
@@ -726,6 +960,55 @@
           "has_more"
         ],
         "title": "IndicatorSeriesResponse"
+      },
+      "IndicatorValuesItem": {
+        "properties": {
+          "t": {
+            "type": "integer",
+            "title": "T"
+          },
+          "values": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "type": "object",
+            "title": "Values",
+            "default": {}
+          }
+        },
+        "type": "object",
+        "required": [
+          "t"
+        ],
+        "title": "IndicatorValuesItem"
+      },
+      "IndicatorValuesResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "$ref": "#/components/schemas/IndicatorValuesItem"
+            },
+            "type": "array",
+            "title": "Items"
+          },
+          "has_more": {
+            "type": "boolean",
+            "title": "Has More"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items",
+          "has_more"
+        ],
+        "title": "IndicatorValuesResponse"
       },
       "RankingsResponse": {
         "properties": {

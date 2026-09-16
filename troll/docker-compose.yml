@@ -7,6 +7,14 @@ x-logging: &default-logging
     max-size: "20m"
     max-file: "20"
 
+# Shared by dashboard and data_api (Story 15.6) -- both are `rw` writers of the same host
+# file (dashboard's Story 10.5 Save button, data_api's picker PUT), so a future path/mount
+# change only needs to happen in one place instead of being manually kept in sync across
+# two service blocks.
+x-chart-indicator-config-path: &chart-indicator-config-path "/app/ml_signals/chart_indicators.toml"
+x-chart-indicator-config-mount: &chart-indicator-config-mount
+  ./ml_signals/chart_indicators.toml:/app/ml_signals/chart_indicators.toml:rw
+
 services:
   redis:
     container_name: dydx-redis
@@ -63,13 +71,13 @@ services:
       CATALOG_PATH: "/app/catalog"
       DASHBOARD_PORT: "${WEB_PORT:-8765}"
       METRICS_DB_PATH: "/app/metrics_dir/metrics.db"
-      CHART_INDICATOR_CONFIG_PATH: "/app/ml_signals/chart_indicators.toml"
+      CHART_INDICATOR_CONFIG_PATH: *chart-indicator-config-path
     user: "1000:1000"
     volumes:
       # rw (not ro): the chart page's Save button (Story 10.5) writes this file back
       # after the user saves a coin's indicator selection -- mirrors the collector
       # service's own single `rw` config mount above.
-      - ./ml_signals/chart_indicators.toml:/app/ml_signals/chart_indicators.toml:rw
+      - *chart-indicator-config-mount
       - ./dydx_collector/catalog:/app/catalog:ro
       # ranking_engine is now the sole writer of metrics.db (Story 1.8, Task 7) --
       # dashboard only ever reads it (metrics_store.latest/nearest/history), so this
@@ -128,10 +136,15 @@ services:
       REDIS_URL: "redis://127.0.0.1:${REDIS_PORT:-6379}"
       CATALOG_PATH: "/app/catalog"
       METRICS_DB_PATH: "/app/metrics_dir/metrics.db"
+      CHART_INDICATOR_CONFIG_PATH: *chart-indicator-config-path
     user: "1000:1000"
     volumes:
       - ./dydx_collector/catalog:/app/catalog:ro
       - ./dydx_collector/metrics:/app/metrics_dir:ro
+      # rw (not ro): the picker's PUT /api/coin/{iid}/indicators (Story 15.6) writes this
+      # file back on every add/remove/param-apply change -- mirrors dashboard's own `rw`
+      # mount above (the config-persistence handlers this route relocates verbatim).
+      - *chart-indicator-config-mount
     network_mode: host
     restart: always
     logging: *default-logging

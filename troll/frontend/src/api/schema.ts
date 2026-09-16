@@ -19,6 +19,18 @@ export interface HealthResponse {
   status: string;
 }
 
+export interface IndicatorCatalogEntry {
+  params: Record<string, unknown>;
+  panel: string;
+  category: string;
+}
+
+export interface IndicatorConfigEntry {
+  name: string;
+  params?: Record<string, unknown>;
+  category: string;
+}
+
 export interface IndicatorSeriesPoint {
   t: number;
   ofi?: number | null;
@@ -29,6 +41,16 @@ export interface IndicatorSeriesPoint {
 
 export interface IndicatorSeriesResponse {
   items: IndicatorSeriesPoint[];
+  has_more: boolean;
+}
+
+export interface IndicatorValuesItem {
+  t: number;
+  values?: Record<string, number | null>;
+}
+
+export interface IndicatorValuesResponse {
+  items: IndicatorValuesItem[];
   has_more: boolean;
 }
 

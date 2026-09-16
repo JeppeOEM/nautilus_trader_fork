@@ -159,9 +159,10 @@ instead run them locally and reach `nifelheim` only for data, via shell function
 
 - **`_troll_tunnel_ensure`** — opens one background SSH tunnel to `$TROLL_VPS_HOST`
   (`nifelheim`) forwarding two ports: `6379` (Redis — live snapshots/rankings pub/sub)
-  and `9100` (`data_api`, the read-only FastAPI wrapper over the Parquet catalog +
-  `metrics.db`). Idempotent — checks `fuser 6379/tcp` first, so repeated calls don't
-  stack tunnels.
+  and `9100` (`data_api`, the FastAPI wrapper over the Parquet catalog + `metrics.db` --
+  read-only except for the picker's own `chart_indicators.toml` config writes, Story
+  15.6). Idempotent — checks `fuser 6379/tcp` first, so repeated calls don't stack
+  tunnels.
 - **`_troll_dashboard_ensure`** — ensures the tunnel, then runs `make dashboard` locally
   (in `$TROLL_DIR`) with `REDIS_URL`/`DATA_API_URL` pointed at the tunnel's local end
   (`127.0.0.1:6379`/`127.0.0.1:9100`), backgrounded, logging to
