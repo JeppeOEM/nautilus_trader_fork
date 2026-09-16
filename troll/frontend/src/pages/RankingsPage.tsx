@@ -126,44 +126,46 @@ export default function RankingsPage() {
   // yet), show a loading state -- never an empty table (I/O matrix: "first load,
   // before any message cached").
   if (rows.length === 0 && updatedAtNs === undefined) {
-    return <p>Loading rankings…</p>;
+    return <p className="term-loading">Loading rankings…</p>;
   }
 
   return (
-    <table>
-      <thead>
-        <tr>
-          <th>Rank</th>
-          <th>Instrument</th>
-          {RANKING_COLS.map((col) => (
-            <th key={col.key}>{col.label}</th>
-          ))}
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((row, index) => {
-          const marketDataStale = staleInstrumentIds.has(row.instrument_id);
-          const rowStale = isMessageStale || marketDataStale;
-          return (
-            <tr
-              key={row.instrument_id}
-              onClick={() => navigate(`/chart/${row.instrument_id}`)}
-              data-stale={rowStale ? "true" : "false"}
-              style={{ opacity: rowStale ? 0.5 : 1, cursor: "pointer" }}
-            >
-              <td>{index + 1}</td>
-              <td>
-                {row.instrument_id}
-                {isMessageStale && <span title="rankings feed stale"> ⏱</span>}
-                {marketDataStale && <span title="market data stale"> ⚠</span>}
-              </td>
-              {RANKING_COLS.map((col) => (
-                <td key={col.key}>{formatCell(col, row[col.key])}</td>
-              ))}
-            </tr>
-          );
-        })}
-      </tbody>
-    </table>
+    <div className="term-box" data-label="Rankings">
+      <table className="rankings-table">
+        <thead>
+          <tr>
+            <th>Rank</th>
+            <th>Instrument</th>
+            {RANKING_COLS.map((col) => (
+              <th key={col.key}>{col.label}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row, index) => {
+            const marketDataStale = staleInstrumentIds.has(row.instrument_id);
+            const rowStale = isMessageStale || marketDataStale;
+            return (
+              <tr
+                key={row.instrument_id}
+                onClick={() => navigate(`/chart/${row.instrument_id}`)}
+                data-stale={rowStale ? "true" : "false"}
+                className="rankings-row"
+              >
+                <td>{index + 1}</td>
+                <td>
+                  {row.instrument_id}
+                  {isMessageStale && <span title="rankings feed stale"> ⏱</span>}
+                  {marketDataStale && <span title="market data stale"> ⚠</span>}
+                </td>
+                {RANKING_COLS.map((col) => (
+                  <td key={col.key}>{formatCell(col, row[col.key])}</td>
+                ))}
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
   );
 }

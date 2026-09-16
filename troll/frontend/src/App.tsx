@@ -13,7 +13,7 @@ const queryClient = new QueryClient();
 
 function TopNav() {
   return (
-    <nav>
+    <nav style={{ borderBottom: "1px solid var(--color-border)", padding: "0.6em 1em" }}>
       <Link to="/">Rankings</Link> · <Link to="/docs">Docs</Link>
     </nav>
   );
@@ -24,7 +24,7 @@ export default function App() {
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
         <TopNav />
-        <Suspense fallback={<p>Loading…</p>}>
+        <Suspense fallback={<p className="term-loading">Loading</p>}>
           <Routes>
             <Route path="/" element={<RankingsPage />} />
             <Route path="/chart/:iid" element={<ChartPage />} />

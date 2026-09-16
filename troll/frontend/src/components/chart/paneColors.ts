@@ -1,9 +1,35 @@
-// Deterministic placeholder pane-color-slot assignment (Story 15.4 AC #7). Exact hex
-// values are Story 15.9's job -- this is only enough to make up-to-5 simultaneous panes
-// visually distinguishable in the interim, written generically enough that Story 15.6
-// (user-added/removed panes) and 15.9 (final palette swap) can call the same function.
+// Story 15.9: final pane-color-slot assignment (Story 15.4 AC #7). Values come
+// from the 16-color VGA/ANSI token set declared in theme.css -- read at call time
+// via `cssVar` (not at module load) so it always reflects whatever the stylesheet
+// currently has applied, and works whether or not the stylesheet has loaded yet
+// (falls back to the same literal value baked into theme.css).
 
-const PLACEHOLDER_PALETTE = ["#2962ff", "#e91e63", "#ff9800", "#4caf50", "#9c27b0"];
+/** Reads a CSS custom property off :root, falling back to `fallback` when unset
+ * (e.g. under jsdom in tests, where no stylesheet is ever loaded). Shared with
+ * LightweightChart.tsx so there is exactly one place that knows how to resolve a
+ * design token into a literal color string a canvas API can use. */
+export function cssVar(name: string, fallback: string): string {
+  if (typeof document === "undefined") return fallback;
+  const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  return value || fallback;
+}
+
+// Eight bright/high-contrast VGA tones, chosen for legibility against the
+// terminal's black chart background -- deliberately skips black/dark-gray/the
+// non-"light" red/green/cyan/magenta/blue (too low-contrast on black to read as a
+// chart line). Order matters: it's also the color-slot order.
+function palette(): string[] {
+  return [
+    cssVar("--vga-light-cyan", "#55ffff"),
+    cssVar("--vga-light-green", "#55ff55"),
+    cssVar("--vga-light-red", "#ff5555"),
+    cssVar("--vga-yellow", "#ffff55"),
+    cssVar("--vga-light-magenta", "#ff55ff"),
+    cssVar("--vga-light-blue", "#5555ff"),
+    cssVar("--vga-brown", "#aa5500"),
+    cssVar("--vga-white", "#ffffff"),
+  ];
+}
 
 /**
  * Deterministic, first-available-slot color for `indicatorId` given the current set of
@@ -15,5 +41,6 @@ const PLACEHOLDER_PALETTE = ["#2962ff", "#e91e63", "#ff9800", "#4caf50", "#9c27b
 export function assignPaneColor(indicatorId: string, visibleIds: string[]): string {
   const index = visibleIds.indexOf(indicatorId);
   const slot = index === -1 ? visibleIds.length : index;
-  return PLACEHOLDER_PALETTE[slot % PLACEHOLDER_PALETTE.length];
+  const pal = palette();
+  return pal[slot % pal.length];
 }

@@ -1,38 +1,43 @@
 /* Ported from troll/ml_signals/docs_page.py's HEAD <style> block (Story 15.1 Task 4).
-   Scoped under .signal-atlas so it doesn't leak onto other pages -- the dark palette here
-   is this content's own pre-existing theme; Story 15.9 unifies everything under the
-   16-color VGA/ANSI palette and replaces this file's colors, not its layout. */
+   Scoped under .signal-atlas so it doesn't leak onto other pages. Story 15.9 replaced
+   this file's own separate GitHub-dark palette below with the app-wide 16-color
+   VGA/ANSI semantic tokens from theme.css -- every var here is now an alias onto one
+   of those tokens, never a literal hex/rgba (AC #1). The "*-bg" tint variables that
+   used to be translucent rgba() fills are now `transparent` (the 16-color set has no
+   alpha channel to spare) -- badges/pills become bordered outline badges instead of
+   filled chips; --accent-bg is the one exception, kept as a real solid highlight
+   (var(--color-active-bg), VGA blue) for nav/tab active states, DOS-menu-style. */
 
 .signal-atlas {
-  --bg: #0d1117;
-  --panel: #161b22;
-  --border: #21262d;
-  --border-strong: #30363d;
-  --ink: #c9d1d9;
-  --muted: #8b949e;
-  --accent: #58a6ff;
-  --accent-ink: #79c0ff;
-  --accent-bg: rgba(88, 166, 255, 0.14);
-  --pos: #3fb950;
-  --pos-bg: rgba(63, 185, 80, 0.14);
-  --neg: #f85149;
-  --neg-bg: rgba(248, 81, 73, 0.14);
-  --warn: #e3b341;
-  --warn-bg: rgba(227, 179, 65, 0.14);
-  --tag-live: #79c0ff;
-  --tag-live-bg: rgba(121, 192, 255, 0.14);
-  --tag-rolling: #58a6ff;
-  --tag-rolling-bg: rgba(88, 166, 255, 0.14);
-  --tag-slow: #d2a8ff;
-  --tag-slow-bg: rgba(210, 168, 255, 0.14);
-  --tag-static: #8b949e;
-  --tag-static-bg: rgba(139, 148, 158, 0.14);
-  --code-bg: #0d1117;
-  --code-ink: #c9d1d9;
+  --bg: var(--color-bg);
+  --panel: var(--color-bg);
+  --border: var(--color-border);
+  --border-strong: var(--color-border-strong);
+  --ink: var(--color-text);
+  --muted: var(--color-text-dim);
+  --accent: var(--color-link);
+  --accent-ink: var(--color-active);
+  --accent-bg: var(--color-active-bg);
+  --pos: var(--color-positive);
+  --pos-bg: transparent;
+  --neg: var(--color-negative);
+  --neg-bg: transparent;
+  --warn: var(--color-warn);
+  --warn-bg: transparent;
+  --tag-live: var(--color-tag-live);
+  --tag-live-bg: transparent;
+  --tag-rolling: var(--color-tag-rolling);
+  --tag-rolling-bg: transparent;
+  --tag-slow: var(--color-tag-slow);
+  --tag-slow-bg: transparent;
+  --tag-static: var(--color-tag-static);
+  --tag-static-bg: transparent;
+  --code-bg: var(--color-bg);
+  --code-ink: var(--color-text);
 
   background: var(--bg);
   color: var(--ink);
-  font-family: monospace;
+  font-family: var(--font-terminal);
   font-size: 13.5px;
   line-height: 1.55;
 }
@@ -67,15 +72,15 @@
 
 .signal-atlas .tabs { display: flex; gap: 6px; margin: 0 0 12px; }
 .signal-atlas .tabbtn {
-  flex: 1; text-align: center; padding: 7px 6px; border-radius: 5px; border: 1px solid var(--border);
+  flex: 1; text-align: center; padding: 7px 6px; border-radius: 0; border: 1px solid var(--border);
   background: var(--bg); color: var(--muted); font-size: 11px; letter-spacing: 0.03em;
-  cursor: pointer; text-transform: uppercase; font-family: monospace;
+  cursor: pointer; text-transform: uppercase;
 }
 .signal-atlas .tabbtn.active { background: var(--accent-bg); color: var(--accent-ink); border-color: var(--accent); }
 
 .signal-atlas .filter {
-  width: 100%; padding: 7px 9px; border-radius: 5px; border: 1px solid var(--border);
-  background: var(--bg); color: var(--ink); font-size: 12.5px; margin-bottom: 12px; font-family: monospace;
+  width: 100%; padding: 7px 9px; border-radius: 0; border: 1px solid var(--border);
+  background: var(--bg); color: var(--ink); font-size: 12.5px; margin-bottom: 12px;
 }
 .signal-atlas .filter:focus { outline: 1px solid var(--accent); outline-offset: 1px; }
 
@@ -85,7 +90,7 @@
   padding: 10px 6px 4px;
 }
 .signal-atlas .navitem {
-  display: flex; align-items: center; gap: 8px; padding: 5px 6px; border-radius: 4px;
+  display: flex; align-items: center; gap: 8px; padding: 5px 6px; border-radius: 0;
   cursor: pointer; color: var(--ink); font-size: 12.5px;
 }
 .signal-atlas .navitem:hover { background: var(--bg); }
@@ -102,7 +107,7 @@
 .signal-atlas .grid-group .gdesc { color: var(--muted); font-size: 12.5px; margin: 0 0 12px; max-width: 660px; }
 .signal-atlas .cards { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 10px; }
 .signal-atlas .card {
-  background: var(--panel); border: 1px solid var(--border); border-radius: 6px;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 0;
   padding: 13px 13px 11px; cursor: pointer; display: flex; flex-direction: column; gap: 7px;
 }
 .signal-atlas .card:hover { border-color: var(--border-strong); }
@@ -111,8 +116,8 @@
 
 .signal-atlas .pill {
   display: inline-flex; align-items: center; gap: 5px; font-size: 10px; font-weight: 600;
-  padding: 3px 7px; border-radius: 99px; letter-spacing: 0.03em; text-transform: uppercase;
-  width: fit-content;
+  padding: 3px 7px; border-radius: 0; letter-spacing: 0.03em; text-transform: uppercase;
+  width: fit-content; border: 1px solid currentColor; background: transparent;
 }
 .signal-atlas .pill.live { background: var(--tag-live-bg); color: var(--tag-live); }
 .signal-atlas .pill.rolling { background: var(--tag-rolling-bg); color: var(--tag-rolling); }
@@ -131,7 +136,7 @@
 
 .signal-atlas .infogrid {
   display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 1px;
-  background: var(--border); border: 1px solid var(--border); border-radius: 6px;
+  background: var(--border); border: 1px solid var(--border); border-radius: 0;
   overflow: hidden; margin: 18px 0 24px;
 }
 .signal-atlas .infocell { background: var(--panel); padding: 10px 13px; }
@@ -139,14 +144,39 @@
 .signal-atlas .infocell .v { font-size: 12.5px; color: var(--ink); }
 .signal-atlas .chiprow { display: flex; flex-wrap: wrap; gap: 6px; }
 .signal-atlas .chip {
-  font-size: 10.5px; padding: 3px 7px; border-radius: 4px; background: var(--bg);
+  font-size: 10.5px; padding: 3px 7px; border-radius: 0; background: var(--bg);
   border: 1px solid var(--border); color: var(--ink);
 }
 
 .signal-atlas .formula {
   background: var(--code-bg); color: var(--code-ink); border: 1px solid var(--border);
-  border-radius: 6px; padding: 13px 15px; font-size: 12.5px; overflow-x: auto;
+  border-radius: 0; padding: 13px 15px; font-size: 12.5px; overflow-x: auto;
   margin: 0 0 20px; white-space: pre;
+}
+
+/* Story 15.9 Task 3: box-drawing frame treatment on DocsPage's boxed sections --
+   same floating-legend technique as the app-wide .term-box utility (theme.css).
+   Scoped to .formula only: it has no pre-existing heading of its own, so the
+   floating "Formula" legend adds information rather than duplicating the
+   .refs/.infogrid blocks' own visible "Source"/grid headings right next to it.
+   .infogrid is separately excluded because it relies on `overflow: hidden` for
+   its own 1px cell-gap-line technique, which would clip a label positioned
+   above the border the same way this technique needs. */
+.signal-atlas .formula {
+  position: relative;
+  margin-top: 1.6em;
+}
+.signal-atlas .formula::before {
+  content: "\250C\2500 Formula ";
+  position: absolute;
+  top: -0.75em;
+  left: 0.6em;
+  padding: 0 0.3em;
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 0.85em;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
 }
 
 .signal-atlas .sec { margin-bottom: 24px; max-width: 760px; }
@@ -159,9 +189,9 @@
 .signal-atlas .sec th { color: var(--muted); font-weight: 600; text-transform: uppercase; font-size: 10px; letter-spacing: 0.04em; background: var(--panel); }
 .signal-atlas .sec .callout {
   border-left: 2px solid var(--accent); background: var(--accent-bg); color: var(--accent-ink);
-  padding: 9px 13px; border-radius: 0 5px 5px 0; font-size: 12.5px; margin: 0 0 15px;
+  padding: 9px 13px; border-radius: 0; font-size: 12.5px; margin: 0 0 15px;
 }
-.signal-atlas .sec code { background: var(--panel); padding: 1px 5px; border-radius: 3px; font-size: 12px; }
+.signal-atlas .sec code { background: var(--panel); padding: 1px 5px; border-radius: 0; font-size: 12px; }
 .signal-atlas .sec .pos { color: var(--pos); font-weight: 600; }
 .signal-atlas .sec .neg { color: var(--neg); font-weight: 600; }
 
@@ -170,7 +200,7 @@
 .signal-atlas .refline { display: block; font-size: 11.5px; color: var(--muted); margin-bottom: 3px; }
 .signal-atlas .related { margin-top: 16px; display: flex; flex-wrap: wrap; gap: 8px; }
 .signal-atlas .related a {
-  font-size: 11.5px; text-decoration: none; padding: 5px 9px; border-radius: 5px;
+  font-size: 11.5px; text-decoration: none; padding: 5px 9px; border-radius: 0;
   border: 1px solid var(--border); background: var(--panel); color: var(--ink); cursor: pointer;
 }
 .signal-atlas .related a:hover { border-color: var(--border-strong); color: var(--accent-ink); }

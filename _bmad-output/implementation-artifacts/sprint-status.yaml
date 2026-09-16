@@ -193,7 +193,7 @@ development_status:
   # specifically so ACTIONABLE_STATUSES excludes it and neither a plain `bmad-loop run`
   # nor `sweep` auto-picks it back up. No dev work has been done on it.
   15-8-31-day-metrics-history-page: in-progress
-  15-9-terminal-ansi-visual-identity: ready-for-dev
+  15-9-terminal-ansi-visual-identity: done
   15-10-cutover-retire-dashboard-py-close-epic-14: ready-for-dev
 
 action_items:

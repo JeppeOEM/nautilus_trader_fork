@@ -116,7 +116,7 @@ export default function IndicatorPicker({ instrumentId, onEntriesChange }: Indic
   return (
     <div>
       <h3>Indicators</h3>
-      {error && <p style={{ color: "red" }}>{error}</p>}
+      {error && <p style={{ color: "var(--color-danger)" }}>{error}</p>}
       <div>
         <select value={selectedName} onChange={(e) => setSelectedName(e.target.value)}>
           {Object.entries(catalog).map(([name, entry]) => (

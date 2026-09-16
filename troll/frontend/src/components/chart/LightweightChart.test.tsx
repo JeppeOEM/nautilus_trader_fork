@@ -60,6 +60,23 @@ vi.mock("lightweight-charts", () => ({
 
 const { default: LightweightChart } = await import("./LightweightChart");
 
+// Story 15.9: the candlestick series' fallback color literals (LightweightChart.tsx's
+// `cssVar(name, fallback)` calls) resolve deterministically under jsdom, since no
+// stylesheet is ever loaded here -- `cssVar` always returns `fallback`. Asserting this
+// exact object (not `expect.any(Object)`) is what actually catches a regression that
+// scrambles or drops the token-derived up/down colors, the entire point of the AC #4
+// chart-theming change.
+const EXPECTED_CANDLESTICK_OPTIONS = {
+  upColor: "#55ff55",
+  downColor: "#ff5555",
+  borderUpColor: "#55ff55",
+  borderDownColor: "#ff5555",
+  wickUpColor: "#55ff55",
+  wickDownColor: "#ff5555",
+  borderColor: "#555555",
+  wickColor: "#555555",
+};
+
 function makePaneSpec(id: string, overrides: Partial<IndicatorPaneSpec> = {}): IndicatorPaneSpec {
   return { id, kind: "Line", data: [], color: "#123456", ...overrides };
 }
@@ -103,7 +120,9 @@ describe("LightweightChart", () => {
 
     expect(createChartMock).toHaveBeenCalledTimes(1);
     expect(addSeriesMock).toHaveBeenCalledTimes(1);
-    expect(addSeriesMock).toHaveBeenCalledWith("CandlestickSeries-sentinel");
+    // Story 15.9: candle series now also carries up/down color options sourced from
+    // the terminal theme tokens -- assert the exact options object, not just its shape.
+    expect(addSeriesMock).toHaveBeenCalledWith("CandlestickSeries-sentinel", EXPECTED_CANDLESTICK_OPTIONS);
   });
 
   it("does not call createChart again on a data-only re-render", () => {
@@ -221,7 +240,7 @@ describe("LightweightChart", () => {
       render(<LightweightChart data={[]} onChartApi={() => {}} />);
 
       expect(addSeriesMock).toHaveBeenCalledTimes(1);
-      expect(addSeriesMock).toHaveBeenCalledWith("CandlestickSeries-sentinel");
+      expect(addSeriesMock).toHaveBeenCalledWith("CandlestickSeries-sentinel", EXPECTED_CANDLESTICK_OPTIONS);
     });
 
     it("switching to lines mode removes the candlestick series and adds 5 line series on the main pane", () => {
@@ -248,7 +267,7 @@ describe("LightweightChart", () => {
 
       expect(removeSeriesMock).toHaveBeenCalledTimes(5); // all 5 line series removed
       expect(addSeriesMock).toHaveBeenCalledTimes(6); // 5 line series + 1 candlestick
-      expect(addSeriesMock).toHaveBeenNthCalledWith(6, "CandlestickSeries-sentinel");
+      expect(addSeriesMock).toHaveBeenNthCalledWith(6, "CandlestickSeries-sentinel", EXPECTED_CANDLESTICK_OPTIONS);
     });
 
     it("never touches the chart's visible logical/time range across a Candles->Lines->Candles toggle (AC #3)", () => {

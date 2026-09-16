@@ -1,14 +1,109 @@
-/* Minimal reset only -- the terminal/ANSI visual identity (16-color VGA palette, DOS
-   bitmap font, box-drawing motif) is Story 15.9's job, not this one's. */
-:root {
-  color-scheme: light dark;
-}
+/* Story 15.9: base reset + the one fixed terminal/ANSI visual identity, sourced
+   entirely from theme.css's tokens. No `prefers-color-scheme` branch anywhere --
+   this is a single fixed look, not a light/dark toggle (Task 1 Dev Note). (The
+   `color-scheme: dark` declared in theme.css is a different, unrelated property --
+   it only tells the browser to render native UI chrome dark, it does not opt into
+   any light/dark switching.) */
+@import "./theme.css";
 
 * {
   box-sizing: border-box;
 }
 
+html,
 body {
   margin: 0;
   min-height: 100vh;
+  background: var(--color-bg);
+  color: var(--color-text);
 }
+
+body {
+  font-family: var(--font-terminal);
+}
+
+/* Form controls don't inherit font-family from the page by default in browsers'
+   UA stylesheets -- without this, every <input>/<select>/<button>/<textarea>
+   (DocsPage's filter box, IndicatorPicker's controls, ChartPage's mode buttons)
+   would silently fall back to the platform's proportional UI font, the exact
+   "no page falls back to a proportional face" failure AC #2 rules out. */
+input,
+select,
+button,
+textarea {
+  font-family: inherit;
+}
+
+/* Native form-control chrome defaults to OS colors (white background, black text,
+   a system-blue focus ring) which are not in the 16-color set -- `color-scheme:
+   dark` (theme.css) covers the <select> popup and scrollbars, but the control's
+   own box still needs explicit token colors (AC #1). `appearance: none` drops the
+   native rounded/gradient chrome so the box-drawing-square aesthetic holds here
+   too. Only one weight of the bitmap font exists, so buttons never request bold
+   (avoids browser-synthesized fake-bold on a pixel font, e.g. `.pill`'s 600 weight
+   in docs.css). */
+select,
+button,
+input,
+textarea {
+  appearance: none;
+  background: var(--color-bg);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+  border-radius: 0;
+  font-weight: normal;
+  padding: 0.2em 0.5em;
+}
+
+select:focus,
+button:focus,
+input:focus,
+textarea:focus {
+  outline: 1px solid var(--color-active);
+  outline-offset: -1px;
+}
+
+button:disabled {
+  color: var(--color-inactive);
+  border-color: var(--color-inactive);
+}
+
+a {
+  color: var(--color-link);
+}
+
+table {
+  border-collapse: collapse;
+}
+
+/* RankingsPage (Story 15.9 Task 4) -- semantic-token stale-row treatment,
+   replacing the old inline `opacity: rowStale ? 0.5 : 1`. */
+.rankings-table th,
+.rankings-table td {
+  padding: 0.3em 0.7em;
+  text-align: left;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.rankings-table th {
+  color: var(--color-text-dim);
+  text-transform: uppercase;
+  font-size: 0.85em;
+  letter-spacing: 0.03em;
+}
+
+.rankings-row {
+  cursor: pointer;
+}
+
+.rankings-row[data-stale="true"] {
+  color: var(--color-stale);
+}
+
+/* Declared after the stale rule so hover text color always wins even on a stale
+   row -- both selectors have equal specificity, so source order alone decides. */
+.rankings-row:hover {
+  background: var(--color-active-bg);
+  color: var(--color-text-strong);
+}
+

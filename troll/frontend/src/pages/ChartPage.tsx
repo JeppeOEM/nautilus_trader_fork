@@ -126,14 +126,16 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
           Lines
         </button>
       </div>
-      <LightweightChart
-        mode={mode}
-        data={candles}
-        linesData={snapshotLines}
-        onChartApi={setChart}
-        panes={panes}
-        liveBar={liveBar}
-      />
+      <div className="term-box" data-label={instrumentId}>
+        <LightweightChart
+          mode={mode}
+          data={candles}
+          linesData={snapshotLines}
+          onChartApi={setChart}
+          panes={panes}
+          liveBar={liveBar}
+        />
+      </div>
       <IndicatorPicker instrumentId={instrumentId} onEntriesChange={setPickerEntries} />
     </div>
   );

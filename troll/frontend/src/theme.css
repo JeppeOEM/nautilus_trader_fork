@@ -1,0 +1,142 @@
+/* Story 15.9: terminal/ANSI visual identity.
+
+   Two layers, per the story's Task 1:
+   1. The 16 raw VGA/ANSI text-mode colors, standard values, declared once.
+   2. A semantic mapping layer -- every page/component references ONLY these
+      semantic names, never a raw --vga-* token directly, so re-theming later
+      (unlikely, but cheap to keep possible) touches only this file.
+
+   This is one fixed visual identity, not a light/dark toggle -- deliberately no
+   `prefers-color-scheme` branch (Task 1 Dev Note). */
+
+:root {
+  /* Tells the browser to render native UI chrome (scrollbars, the popup list a
+     <select> opens, default focus rings) using its dark rendering, not light --
+     unrelated to `prefers-color-scheme`/a light-dark toggle (Task 1 Dev Note still
+     holds: this is one fixed identity). Without this, native chrome stays light by
+     default and clashes with the black page (AC #1: "no color outside the set
+     appears anywhere"). */
+  color-scheme: dark;
+
+  /* -- 16-color VGA/ANSI palette (standard text-mode RGB values) -- exactly these
+     16, no more, no fewer (AC #1). */
+  --vga-black: #000000;
+  --vga-blue: #0000aa;
+  --vga-green: #00aa00;
+  --vga-cyan: #00aaaa;
+  --vga-red: #aa0000;
+  --vga-magenta: #aa00aa;
+  --vga-brown: #aa5500;
+  --vga-light-gray: #aaaaaa;
+  --vga-dark-gray: #555555;
+  --vga-light-blue: #5555ff;
+  --vga-light-green: #55ff55;
+  --vga-light-cyan: #55ffff;
+  --vga-light-red: #ff5555;
+  --vga-light-magenta: #ff55ff;
+  --vga-yellow: #ffff55;
+  --vga-white: #ffffff;
+
+  /* -- Typeface: one bitmap terminal font for the whole app (Task 2). Fallback
+     stack is monospace-only, never proportional (AC #2). See
+     public/fonts/ATTRIBUTION.txt for the font's license. */
+  --font-terminal: "AcPlus IBM VGA 9x16", "Courier New", ui-monospace, monospace;
+
+  /* -- Semantic tokens -- every component/page references these, never a raw
+     --vga-* token (Task 1). */
+  --color-bg: var(--vga-black);
+  --color-text: var(--vga-light-gray);
+  --color-text-strong: var(--vga-white);
+  --color-text-dim: var(--vga-dark-gray);
+  --color-border: var(--vga-dark-gray);
+  --color-border-strong: var(--vga-light-gray);
+  --color-link: var(--vga-light-cyan);
+
+  /* Active/inactive UI state (AC #4) -- a solid highlight bar, not a translucent
+     tint (the 16-color set has no alpha channel to spare). */
+  --color-active: var(--vga-light-cyan);
+  --color-active-bg: var(--vga-blue);
+  --color-inactive: var(--vga-dark-gray);
+
+  /* Staleness + up/down semantic states (AC #4, finalizes Story 15.4's
+     placeholder pane palette together with paneColors.ts). */
+  --color-stale: var(--vga-yellow);
+  --color-warn: var(--vga-yellow);
+  --color-danger: var(--vga-light-red);
+  --color-positive: var(--vga-light-green);
+  --color-negative: var(--vga-light-red);
+  --color-up: var(--vga-light-green);
+  --color-down: var(--vga-light-red);
+
+  /* Docs page cadence tags (replaces its own separate GitHub-dark palette). */
+  --color-tag-live: var(--vga-light-cyan);
+  --color-tag-rolling: var(--vga-cyan);
+  --color-tag-slow: var(--vga-light-magenta);
+  --color-tag-static: var(--vga-dark-gray);
+}
+
+@font-face {
+  font-family: "AcPlus IBM VGA 9x16";
+  src: url("/fonts/AcPlus_IBM_VGA_9x16.ttf") format("truetype");
+  font-weight: normal;
+  font-style: normal;
+  font-display: block; /* never show a proportional-font flash (AC #2) */
+}
+
+/* -------------------------------------------------------------------------
+   ASCII-art motif: box-drawing frame, used on exactly 4 surfaces (Task 3):
+   RankingsPage's table, ChartPage's chart pane, HistoryPage's placeholder
+   tile, DocsPage's sections. One small utility, not a generic box-component
+   library (DESIGN-01). Corners render as real box-drawing glyphs via a
+   floating legend label -- the same technique as an HTML <fieldset>/<legend>,
+   so it never needs to compute a dash run to match a dynamic box width and
+   degrades cleanly at any viewport width (NFR-B). */
+.term-box {
+  position: relative;
+  border: 1px solid var(--color-border);
+  padding: 1.1em 1em 1em;
+  margin: 1.4em 0 1em;
+}
+
+.term-box[data-label]::before {
+  content: "\250C\2500 " attr(data-label) " ";
+  position: absolute;
+  top: -0.75em;
+  left: 0.6em;
+  padding: 0 0.3em;
+  background: var(--color-bg);
+  color: var(--color-text-dim);
+  font-family: var(--font-terminal);
+  font-size: 0.8em;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  max-width: calc(100% - 1.2em);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@media (max-width: 480px) {
+  .term-box {
+    padding: 1em 0.6em 0.8em;
+  }
+  .term-box[data-label]::before {
+    font-size: 0.7em;
+    left: 0.3em;
+  }
+}
+
+/* Terminal-style loading state: static text plus a CSS-only blinking cursor
+   (no web spinner/skeleton, Task 3). The cursor is a pseudo-element, never
+   real text, so it never changes what a query like getByText(/Loading/) sees. */
+.term-loading::after {
+  content: "_";
+  margin-left: 0.15em;
+  animation: term-blink 1s steps(1, end) infinite;
+}
+
+@keyframes term-blink {
+  50% {
+    opacity: 0;
+  }
+}

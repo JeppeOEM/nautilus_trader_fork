@@ -15,7 +15,7 @@ import { useEffect, useRef } from "react";
 import type { ChartDatum } from "../../hooks/useCandles";
 import type { IndicatorDatum } from "../../hooks/useIndicatorSeries";
 import type { SnapshotLinesData } from "../../hooks/useSnapshotSeries";
-import { assignPaneColor } from "./paneColors";
+import { assignPaneColor, cssVar } from "./paneColors";
 
 export type PaneSeriesKind = "Line" | "Histogram";
 
@@ -125,15 +125,58 @@ export default function LightweightChart({
     const container = containerRef.current;
     if (!container) return;
 
-    const chart = createChart(container, { width: container.clientWidth, height: 500 });
+    // Story 15.9: lightweight-charts' own defaults aren't VGA-derived -- every one of
+    // background/text/grid/crosshair is explicitly set from the semantic tokens so the
+    // chart itself doesn't stay the one non-conforming element on an otherwise-restyled
+    // page.
+    const chart = createChart(container, {
+      width: container.clientWidth,
+      height: 500,
+      layout: {
+        background: { color: cssVar("--color-bg", "#000000") },
+        textColor: cssVar("--color-text", "#aaaaaa"),
+        fontFamily: cssVar("--font-terminal", "monospace"),
+      },
+      grid: {
+        vertLines: { color: cssVar("--color-border", "#555555") },
+        horzLines: { color: cssVar("--color-border", "#555555") },
+      },
+      crosshair: {
+        vertLine: {
+          color: cssVar("--color-active", "#55ffff"),
+          labelBackgroundColor: cssVar("--color-active-bg", "#0000aa"),
+        },
+        horzLine: {
+          color: cssVar("--color-active", "#55ffff"),
+          labelBackgroundColor: cssVar("--color-active-bg", "#0000aa"),
+        },
+      },
+      // Both scales default to a non-token gray border line (library default
+      // '#2B2B43') -- override explicitly, same as grid/crosshair above.
+      rightPriceScale: { borderColor: cssVar("--color-border", "#555555") },
+      timeScale: { borderColor: cssVar("--color-border", "#555555") },
+    });
     chartRef.current = chart;
     onChartApi(chart);
+
+    // Canvas text (unlike DOM text) never re-flows on its own once a `@font-face`
+    // finishes loading -- if the webfont is still pending when `createChart()` reads
+    // `--font-terminal`'s computed value above, the price/time-scale labels are drawn
+    // with the fallback font and stay that way until something explicitly reapplies
+    // the option. `document.fonts.ready` resolves once, is a no-op if already
+    // resolved, and this effect only runs once per mount, so this can't loop.
+    let cancelled = false;
+    void document.fonts?.ready?.then(() => {
+      if (cancelled || chartRef.current !== chart) return;
+      chart.applyOptions({ layout: { fontFamily: cssVar("--font-terminal", "monospace") } });
+    });
 
     const handleResize = () => chart.applyOptions({ width: container.clientWidth });
     window.addEventListener("resize", handleResize);
     const panes = panesRef.current;
 
     return () => {
+      cancelled = true;
       window.removeEventListener("resize", handleResize);
       chartRef.current = null;
       seriesRef.current = null;
@@ -166,7 +209,25 @@ export default function LightweightChart({
         prevLinesLengthRef.current = 0;
       }
       if (!seriesRef.current) {
-        seriesRef.current = chart.addSeries(CandlestickSeries);
+        // Up/down candle colors explicitly from the semantic tokens (AC #4/#1) --
+        // lightweight-charts' own default green/red is not VGA-derived.
+        const up = cssVar("--color-up", "#55ff55");
+        const down = cssVar("--color-down", "#ff5555");
+        const dim = cssVar("--color-text-dim", "#555555");
+        seriesRef.current = chart.addSeries(CandlestickSeries, {
+          upColor: up,
+          downColor: down,
+          borderUpColor: up,
+          borderDownColor: down,
+          wickUpColor: up,
+          wickDownColor: down,
+          // The base borderColor/wickColor fields (as opposed to the Up/Down
+          // variants above) are vestigial fallbacks whose library defaults
+          // (`#378658`/`#737375`) are otherwise never overridden -- set
+          // explicitly so nothing non-token-derived can ever render.
+          borderColor: dim,
+          wickColor: dim,
+        });
         prevLengthRef.current = 0;
       }
     } else {
