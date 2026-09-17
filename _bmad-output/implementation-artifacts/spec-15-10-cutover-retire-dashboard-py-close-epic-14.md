@@ -2,7 +2,7 @@
 title: 'Cutover — retire dashboard.py, close epic-14'
 type: 'chore'
 created: '2026-09-16'
-status: 'blocked'
+status: 'ready-for-dev'
 review_loop_iteration: 0
 followup_review_recommended: false
 context: ['{project-root}/troll/CLAUDE.md']
