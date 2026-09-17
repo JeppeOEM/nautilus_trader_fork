@@ -208,11 +208,10 @@ development_status:
   15-5-live-candle-edge: done
   15-6-per-coin-indicator-configuration: done
   15-7-lines-mode: done
-  # 15.8 deferred 2026-09-16 at the user's request -- not needed now. Status set to
-  # `in-progress` (not `backlog`/`ready-for-dev`), same convention as 14.3's park above,
-  # specifically so ACTIONABLE_STATUSES excludes it and neither a plain `bmad-loop run`
-  # nor `sweep` auto-picks it back up. No dev work has been done on it.
-  15-8-31-day-metrics-history-page: in-progress
+  # 15.8 was deferred 2026-09-16, then unparked and implemented via Story 17.2
+  # (2026-09-17), which executed this story's scope verbatim -- see
+  # 17-2-unpark-and-complete-story-15-8-31-day-metrics-history for the actual work.
+  15-8-31-day-metrics-history-page: done
   15-9-terminal-ansi-visual-identity: done
   15-10-cutover-retire-dashboard-py-close-epic-14: ready-for-dev
 
