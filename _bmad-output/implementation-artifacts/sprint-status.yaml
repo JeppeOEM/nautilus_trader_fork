@@ -41,7 +41,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-07-01
-last_updated: 2026-09-16 (Story 15.8 deferred at the user's request, parked in-progress; Story 15.8 story file created via create-story, queued ready-for-dev; Story 15.7 story file created via create-story, queued ready-for-dev; Story 15.6 story file created via create-story, queued ready-for-dev; Story 15.5 story file created via create-story, queued ready-for-dev; Story 15.4 story file created via create-story, queued ready-for-dev; Story 15.1 dev'd, code-reviewed (2 findings fixed), and done)
+last_updated: 2026-09-17 (All 25 stories across epics 17-20 story-created via create-story in one pass, all queued ready-for-dev, epics 17/18/19/20 moved to in-progress; sprint planning run earlier the same session -- retroactively added epic-16's 3 stories, missing since 2026-09-14, still backlog, no story files yet)
 project: nautilus_trader_fork
 project_key: NOKEY
 tracking_system: file-system
@@ -195,6 +195,58 @@ development_status:
   15-8-31-day-metrics-history-page: in-progress
   15-9-terminal-ansi-visual-identity: done
   15-10-cutover-retire-dashboard-py-close-epic-14: ready-for-dev
+
+  # epic-16 has a real epics.md entry (2026-09-14, FR47-50/NFR10: incremental 1-minute
+  # rollup cache) but never got a sprint-planning run until now (2026-09-17) -- no story
+  # files exist yet, so all three stories default to backlog, retroactively added here
+  # rather than left missing from this file.
+  epic-16: backlog
+  16-1-incremental-1-minute-rollup-cache: backlog
+  16-2-threshold-based-candle-source-dispatch: backlog
+  16-3-backfill-historical-1-second-data-into-the-rollup: backlog
+  epic-16-retrospective: optional
+
+  # epics 17-20 added to epics.md 2026-09-17 (multi-exchange screener/chart revision,
+  # spec-multi-exchange-screener-chart.md) and sprint-planned the same session -- no story
+  # files exist yet, all default to backlog. Epic 20 (Alerts) is deliberately sequenced
+  # last per the user's explicit deferral; its backlog status here doesn't imply readiness
+  # to start before 17-19.
+  epic-17: in-progress
+  17-1-tab-shell-performance-technicals-tabs-on-the-rankings-page: ready-for-dev
+  17-2-unpark-and-complete-story-15-8-31-day-metrics-history: ready-for-dev
+  17-3-performance-tab-multi-window-pct-change: ready-for-dev
+  17-4-wire-the-rankings-performance-history-link: ready-for-dev
+  17-5-technicals-tab-user-managed-indicator-columns: ready-for-dev
+  17-6-filter-panel: ready-for-dev
+  epic-17-retrospective: optional
+
+  epic-18: in-progress
+  18-1-horizontal-line-drawing-tool: ready-for-dev
+  18-2-trendline-drawing-tool: ready-for-dev
+  18-3-measurement-tool: ready-for-dev
+  18-4-bar-replay: ready-for-dev
+  18-5-volume-profile-shared-engine-and-rendering-primitive: ready-for-dev
+  18-6-fixed-range-volume-profile-frvp: ready-for-dev
+  18-7-visible-range-volume-profile-vrvp: ready-for-dev
+  18-8-session-volume-profile-and-session-volume-profile-hd: ready-for-dev
+  18-9-periodic-volume-profile-pvp: ready-for-dev
+  18-10-placement-and-operation-parity-pass: ready-for-dev
+  epic-18-retrospective: optional
+
+  epic-19: in-progress
+  19-1-explicit-venue-field-in-the-data-model: ready-for-dev
+  19-2-consolidate-data-api-catalog-path-into-one-shared-setting: ready-for-dev
+  19-3-troll-bybit-collector: ready-for-dev
+  19-4-troll-hyperliquid-collector: ready-for-dev
+  19-5-rankings-screener-venue-column-and-filter: ready-for-dev
+  19-6-cex-dex-registry: ready-for-dev
+  epic-19-retrospective: optional
+
+  epic-20: in-progress
+  20-1-alert-creation-dialog: ready-for-dev
+  20-2-local-alert-evaluation-engine: ready-for-dev
+  20-3-alerts-list-view: ready-for-dev
+  epic-20-retrospective: optional
 
 action_items:
   - epic: 1

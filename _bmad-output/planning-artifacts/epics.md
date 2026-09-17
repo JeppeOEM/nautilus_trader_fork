@@ -15,6 +15,8 @@ inputDocuments:
 
 This document provides the complete epic and story breakdown for nautilus_trader_fork (the `troll/` dYdX Signal Research & Trading Platform), decomposing the requirements from the PRD and Architecture spine into implementable stories. Epics 1–3 (below) cover the original PRD/architecture scope (FR1–FR15) and were fully implemented as of 2026-07-17. This document was reopened on 2026-07-24 to extend coverage for the PRD's volatility Ranking Mode (FR-16) and new Bot Monitoring TUI feature (FR-17–FR-25), backed by a finalized UX design contract (`DESIGN.md`/`EXPERIENCE.md`) — the project's first UX-driven surface. Reopened again on 2026-09-06 to add Epic 8 (FR28–FR30): TradingView-style multi-chart navigation and selectable technical indicators on the web dashboard's coin chart. Numbered Epic 8 (not 5) because epics 5–7 were filed directly as standalone stories bypassing epics.md ceremony (see `sprint-status.yaml`) — Epic 8 continues that same global epic-number sequence to avoid collision with their story-file paths (`5-1-*`, `6-1-*`, `7-1-*`). No PRD/Architecture update precedes this addition (same precedent as FR27); PM should fold FR28–FR30 into the PRD proper once shipped. (FR31, a combined candlestick + bid/ask overlay, was drafted alongside these but the story implementing it — 8.5 — was dropped before dev started; FR31 removed with it — its number is reused below.) Reopened again on 2026-09-08 to add Epic 10 (FR31–FR33): a second, non-Nautilus indicator category on the chart page's picker (Story 8.4), migrating three of the chart page's fixed microstructure-panel rows (OFI, Cancel Pressure, CVD) into it, plus persisted per-instrument indicator configuration. Numbered 10 (not 9) for the same reason Epic 8 skipped 5–7: Epic 9 is itself a standalone bypass-epic bug-fix story (`9-1-fix-oscillator-panel-shared-y-axis-scaling`, see `sprint-status.yaml`), not a real epics.md entry — Epic 10 continues the sequence past its file-path prefix (`9-1-*`). Reopened again on 2026-09-12 to add Epic 12 (FR34–FR35: run dashboard/bot_tui on the user's own machine via a new read-only data API, offloading load from the oversubscribed nifelheim VPS) and Epic 13 (FR36–FR37: stop ranking_engine's recurring Parquet-read memory spike, the mechanism behind its OOM-restart loop). Numbered 12 (not 9) for the same reason Epic 10 was: Epic 11 is itself a standalone bypass-epic bug-fix story (`11-1-fix-empty-imbalance-depth-spread-chart-panes`, see `sprint-status.yaml`), not a real epics.md entry. No PRD/Architecture update precedes this addition (same precedent as FR27–FR33); PM should fold FR34–FR37 into the PRD proper once shipped. Created via direct technical investigation this session (root-caused against real code, real measurements, and an already-logged production incident) rather than the standard PRD-first elicitation flow, at the user's explicit request — same precedent as Epic 11. Reopened again on 2026-09-14 to add Epic 15 (FR38–FR46, NFR6–NFR9): a full rewrite of `troll/ml_signals/dashboard.py` into a React/TypeScript SPA served by an expanded `troll/data_api`, backed this time by a proper PRD (`prds/prd-chart-frontend-rewrite-2026-09-13/prd.md`) and architecture spine (`architecture/architecture-chart-frontend-rewrite-2026-09-13/ARCHITECTURE-SPINE.md`), both status `final`. This epic supersedes `epic-14` (a bypass-epic never entered into this document — 14.1/14.2 done, 14.3 becomes moot once the chart page is deleted under this epic's AD-F1 and should be marked superseded in `sprint-status.yaml`, not shipped). Reopened again on 2026-09-14 to add Epic 16 (FR47–FR50, NFR10): an incremental 1-minute rollup cache (`DydxMinuteRollup`), maintained by the collector as new `DydxSecondSnapshot` rows stream in, so wide-window (daily/weekly) candle requests stop rescanning the full raw 1-second archive. Backend/collector-pipeline scope, independent of Epic 15's dashboard rewrite — Epic 15's future `/api/candles` story will depend on this epic's output, but this isn't "replace dashboard.py with React." No PRD/Architecture update precedes this addition; created via direct technical investigation this session (real code read, real read-cost scaling estimated), same precedent as Epic 12/13.
 
+Reopened again on 2026-09-17 to add Epic 17 (FR51–FR56), Epic 18 (FR57–FR60), Epic 19 (FR61–FR66), and Epic 20 (FR67–FR69, deferred): the next phase of Epic 15's chart+screener rewrite. Epic 17 evolves `RankingsPage.tsx` (Story 15.2) into the full tabbed screener (Performance + Technicals tabs), unparking Story 15.8 (31-day metrics history, parked in-progress since 2026-09-16) as part of wiring Performance's multi-window % change and the Rankings→History link. Epic 18 builds the chart features Epic 15 never scoped — drawing tools, Bar Replay, the full Volume Profile family, and a placement/operation-parity pass. Epic 19 adds Bybit and Hyperliquid alongside dYdX, mirroring `dydx_collector`'s direct-asyncio-PyO3 architecture (never `TradingNode`/`DataEngine`, per FORK-02) rather than the `TradingNode`-based `scripts/bybit_recorder/` on the `gg` branch. Epic 20 (Alerts/webhook delivery) is deliberately sequenced last, after Epics 17–19 ship. No PRD/Architecture update precedes this addition — created from a jointly-revised build spec (`_bmad-output/planning-artifacts/spec-multi-exchange-screener-chart.md`, itself a revision of an external TradingView-clone brief against this codebase, confirmed file-by-file this session), same "direct technical investigation" precedent as Epics 12/13/16.
+
 ## Requirements Inventory
 
 ### Functional Requirements
@@ -79,6 +81,8 @@ NFR8 (PRD NFR-C, Live-data honesty): No page ever renders a data gap as a flat/i
 NFR9 (PRD NFR-D, Feature parity): Every page and capability present in today's `dashboard.py` has a working equivalent in the new frontend before `dashboard.py` is deleted — this epic is a rewrite, not a reduction.
 
 NFR10 `[NEW — 2026-09-14]`: No data loss — the 1-second snapshot archive is never modified, deleted, or superseded by the minute-rollup feature; the rollup is fully regenerable from raw 1-second data at any time, so a bug or schema change in the rollup never risks the underlying market-data record.
+
+NFR11 `[NEW — 2026-09-17]`: No new frontend grid/table-framework dependency — the screener's tab/filter/column-management work (Epic 17) stays on a hand-rendered table, matching `RankingsPage.tsx`'s existing approach; TanStack Table or any equivalent is explicitly rejected for this scope.
 
 ### Additional Requirements
 
@@ -209,6 +213,29 @@ FR48: Epic 16 - Threshold-based candle source dispatch (raw 1s vs. rollup, expli
 FR49: Epic 16 - Correct-by-construction OFI continuity across minute boundaries
 FR50: Epic 16 - Backfill capability for pre-existing/historical 1-second data
 
+FR51: Epic 17 - Rankings page gains Performance + Technicals tabs with a pinned Symbol/Name column
+FR52: Epic 17 - Story 15.8 (31-day metrics history) unparked and completed as this epic's shared historical-data dependency
+FR53: Epic 17 - Performance tab: multi-window % change columns sharing one historical query path with the History page
+FR54: Epic 17 - Rankings/Performance → `/history/:iid` link wired (currently orphaned)
+FR55: Epic 17 - Technicals tab: user-managed indicator columns (add/configure/remove/reorder) reusing the chart's existing 37-entry indicator catalog
+FR56: Epic 17 - Filter panel: AND-combined `<field> <operator> <value>` conditions, including any added Technicals column
+
+FR57: Epic 18 - Drawing tools: trendline, horizontal line, measurement tool
+FR58: Epic 18 - Bar Replay
+FR59: Epic 18 - Volume Profile family (FRVP, VRVP, SVP, SVP-HD, PVP) backed by the existing `/api/candles` route
+FR60: Epic 18 - Toolbar/legend/pane placement and operation-parity pass, including the top-toolbar symbol-slot reconciliation
+
+FR61: Epic 19 - Explicit `venue` field surfaced through the data model/schema/API
+FR62: Epic 19 - `data_api`'s duplicated `CATALOG_PATH` constants consolidated to one shared, multi-venue-capable setting
+FR63: Epic 19 - New `troll/bybit_collector/`, mirroring `dydx_collector`'s direct-asyncio-PyO3 architecture
+FR64: Epic 19 - New `troll/hyperliquid_collector/`, same architecture
+FR65: Epic 19 - Rankings/screener venue column + filter
+FR66: Epic 19 - Self-maintained CEX/DEX registry (`troll/common/venues.py`)
+
+FR67: Epic 20 - Alert creation dialog (condition builder, frequency, expiration, message template, webhook URL)
+FR68: Epic 20 - Local alert evaluation engine + webhook POST + in-app toast
+FR69: Epic 20 - Alerts list view
+
 ## Epic List
 
 ### Epic 1: Trustworthy Coin Ranking & Watchlist
@@ -252,6 +279,23 @@ Builder gets the same dashboard capabilities they use every day — live coin ra
 Builder's chart page can show daily/weekly candles — with order-book-derived signal (OFI/OBI, top-of-book) baked in — without every request rescanning years of raw 1-second data. The collector incrementally builds a small `DydxMinuteRollup` cache as data streams in (O(1)/second, no periodic full rescan); wide-window candle requests read from it instead of raw 1s, with correct-by-construction OFI continuity across minute boundaries and a fallback to raw 1s when rollup coverage is missing. The raw 1-second archive stays fully intact and authoritative — the rollup is a regenerable performance cache, never a replacement. Backend/collector-pipeline scope, standalone: delivers complete value against the existing `dashboard.py`/`data_api` candle route today, and is a dependency for Epic 15's future `/api/candles` story once that lands. No PRD/Architecture update precedes this addition (same precedent as Epic 12/13) — created via direct technical investigation this session.
 **FRs covered:** FR47, FR48, FR49, FR50
 **NFRs covered:** NFR10
+
+### Epic 17: Screener — Rankings Becomes a Tabbed Performance/Technicals Screener
+Builder's Rankings page (Story 15.2, one flat live table today) becomes the full screener: a pinned Symbol/Name column plus Performance and Technicals tabs. Performance's multi-window % change and the still-parked Story 15.8 (31-day metrics history) share one `metrics_store` query path instead of two independent calculations — this epic unparks and completes 15.8 as part of that work, and wires the currently-missing Rankings/Performance → `/history/:iid` link. Technicals reuses the chart's existing 37-entry indicator catalog (`chart_indicators.py`/`custom_indicators.py`) and `IndicatorPicker.tsx` as user-managed table columns — no new indicator math, no curated MVP subset (NFR11 also pins this epic to a hand-rendered table, no grid framework). Standalone: extends Epic 15's `RankingsPage.tsx`/`data_api` foundation, doesn't depend on Epic 18/19.
+**FRs covered:** FR51, FR52, FR53, FR54, FR55, FR56
+**NFRs covered:** NFR11
+
+### Epic 18: Chart — Drawing Tools, Bar Replay, Volume Profile, Placement Pass
+Builder gets the chart features Epic 15 never scoped: trendline/horizontal-line/measurement drawing tools, Bar Replay, and the full Volume Profile family (Fixed Range, Visible Range, Session, Session HD, Periodic) sharing one calculation engine and one rendering Primitive, backed by the existing `/api/candles` route (confirmed sufficient — no new backend endpoint, no raw-tick data needed). Closes with a placement/operation-parity pass reconciling the original brief's toolbar-driven navigation model against this app's actual table-first navigation (Rankings row → `/chart/:iid`, fixed bar size) — resolved as a read-only symbol label + back-to-Rankings link, not a free symbol/timeframe picker, no theme toggle. Standalone: extends the existing `LightweightChart.tsx`/`ChartPage.tsx` chart instance, doesn't depend on Epic 17/19.
+**FRs covered:** FR57, FR58, FR59, FR60
+
+### Epic 19: Multi-Exchange Support — Bybit and Hyperliquid
+Builder's catalog, `data_api`, and screener stop being dYdX-only. `venue` becomes an explicit field (not just an implicit `instrument_id` suffix) across the schema/API; `data_api`'s six independently-duplicated `CATALOG_PATH` constants consolidate to one shared, multi-collector-capable setting; two new sibling collectors (`troll/bybit_collector/`, `troll/hyperliquid_collector/`) mirror `dydx_collector`'s own direct-asyncio-PyO3 architecture — never `TradingNode`/`DataEngine` (FORK-02) — using the `BybitHttpClient`/`BybitWebSocketClient` and `HyperliquidHttpClient`/`HyperliquidWebSocketClient` PyO3 bindings already present in this fork. Closes with a Rankings venue column/filter and a small self-maintained CEX/DEX registry (dYdX and Hyperliquid are both on-chain perp DEXes; Bybit is a CEX — a real distinction once all three coexist). Standalone at the collector/data layer; the Rankings venue column is the one point of contact with Epic 17's screener work.
+**FRs covered:** FR61, FR62, FR63, FR64, FR65, FR66
+
+### Epic 20: Alerts — Webhook Delivery (deferred, built last)
+Builder can define a price/indicator condition and get a webhook POST (plus an in-app toast) when it fires — the same generic delivery model TradingView itself uses, since there's no native Telegram integration anywhere; wiring a webhook to an actual Telegram relay bot is the user's own infrastructure, out of scope here. Deliberately sequenced dead last, after Epics 17–19 are done — a backend-first addition with no dependency the earlier epics need. Standalone once started: condition builder + local evaluation engine + alerts list view, evaluated against the same live Redis feed `data_api`'s `ws/live.py`/`redis_bus.py` already run, not a second polling loop.
+**FRs covered:** FR67, FR68, FR69
 
 ## Epic 1: Trustworthy Coin Ranking & Watchlist
 
@@ -1675,4 +1719,480 @@ So that daily/weekly charts get rollup-speed and rollup-enriched data for time r
 **Given** a cross-check requirement (this touches financial OHLCV data)
 **When** this story is verified
 **Then** the backfill is run against one day of existing historical 1-second data for one real instrument, and the resulting rollup's OHLCV is confirmed to match what `aggregate_ohlc` independently computes over the same raw 1-second window (open/high/low/close/volume equality, not just "didn't crash")
+
+## Epic 17: Screener — Rankings Becomes a Tabbed Performance/Technicals Screener
+
+Builder's `RankingsPage.tsx` (Story 15.2, one flat live table today) becomes the full screener spec'd in `spec-multi-exchange-screener-chart.md` Part B: a pinned Symbol/Name column plus Performance and Technicals tabs, sharing one historical-data path with the still-parked Story 15.8 rather than building two.
+
+### Story 17.1: Tab shell — Performance + Technicals tabs on the Rankings page
+
+As the dashboard operator,
+I want the Rankings page to show a pinned Symbol/Name column plus switchable Performance/Technicals tabs,
+So that I can see either view without losing track of which coin's row I'm looking at.
+
+**Acceptance Criteria:**
+
+**Given** `RankingsPage.tsx`'s existing live table (Story 15.2, `useLiveChannel.ts`-driven)
+**When** the tab shell is added
+**Then** the Symbol/Name column stays pinned and visible regardless of which tab is active, and switching tabs swaps only the metric columns to its right
+
+**Given** the row set currently matched by the (not-yet-built, Story 17.6) filter panel
+**When** the user switches tabs
+**Then** the row set is unchanged — no refetch, no re-filter — only the displayed columns change
+
+**Given** no grid framework is introduced (NFR11)
+**When** the tab bar and column-set swap are implemented
+**Then** they are built directly against the existing hand-rendered table and React state, with no new dependency added to `troll/frontend/package.json`
+
+**Given** live updates via `useLiveChannel.ts`
+**When** a live update arrives while either tab is active
+**Then** the currently-displayed tab's columns update live exactly as today's single table does — no regression to live-update behavior
+
+### Story 17.2: Unpark and complete Story 15.8 — 31-day metrics history
+
+As the dashboard operator,
+I want the parked 31-day metrics history page finished,
+So that Performance's multi-window deltas (Story 17.3) have a real, shared historical-data source instead of a second implementation.
+
+**Acceptance Criteria:**
+
+**Given** Story 15.8's existing, fully-scoped story file (`_bmad-output/implementation-artifacts/15-8-31-day-metrics-history-page.md`), zero code written, parked `in-progress` at the user's request 2026-09-16
+**When** this story resumes it
+**Then** all of 15.8's original tasks are completed exactly as scoped: `GET /api/metrics/history/{symbol}` and `GET /api/metrics/nearest/{symbol}` in a new `troll/data_api/routes/metrics.py`, wrapping `ranking_engine/metrics_store.py`'s `history()`/`nearest()` unchanged
+
+**Given** `troll/frontend/src/pages/HistoryPage.tsx` (currently the Story 15.1-era placeholder)
+**When** this story replaces it
+**Then** it renders one independent `lightweight-charts` tile per ranking-input metric (price, pct_1h, pct_24h, volatility, ofi, microprice, spread, volume24h) over the trailing 31 days, feeding `None` as a whitespace gap point (never interpolated, per DATA-01/AD-F6) — same gap-honesty rule as every other chart in Epic 15
+
+**Given** `metrics_store`'s `PRIMARY KEY (ts, instrument_id)` keys every row by the full instrument_id already
+**When** this story is verified against multi-exchange readiness
+**Then** no `metrics_store` schema change is needed — confirmed already venue-safe
+
+**Given** TEST-01 (this touches a real store, not a mock)
+**When** this story is verified
+**Then** `data_api/tests/test_metrics.py` writes real rows via `metrics_store.write()` to a temp SQLite path, including at least one row with a `None` metric column and one fully-populated row, and asserts the route's JSON reflects both faithfully
+
+### Story 17.3: Performance tab — multi-window % change
+
+As the dashboard operator,
+I want the Performance tab to show a coin's % change across multiple lookback windows,
+So that I can assess momentum without leaving the screener.
+
+**Acceptance Criteria:**
+
+**Given** `ranking_engine/metrics_store.py` already stores `pct_1h`/`pct_24h` per row
+**When** the Performance tab's columns are built
+**Then** they are read from `metrics_store` via the same query path Story 17.2 wires up — never a second, independently-maintained delta calculation
+
+**Given** `metrics_store.write()`'s current `retain_days=31` default
+**When** windows beyond 31 days (e.g. 1M/YTD/1Y from the original brief) are considered
+**Then** this story explicitly decides and documents which windows are buildable today (bounded by 31-day retention) vs. which require a deliberate retention extension — not discovered as a surprise mid-implementation
+
+**Given** each Performance cell
+**When** it renders
+**Then** it is colored/signed by direction (positive/negative), matching the original spec's §B3 requirement, with no other interaction
+
+### Story 17.4: Wire the Rankings/Performance → History link
+
+As the dashboard operator,
+I want a way to reach a coin's 31-day history directly from its Rankings/Performance row,
+So that I don't have to type the `/history/:iid` URL by hand.
+
+**Acceptance Criteria:**
+
+**Given** `RankingsPage.tsx`'s row click today only calls `navigate(/chart/${row.instrument_id})`, and `/history/:iid` is registered in `App.tsx` but nothing links to it
+**When** this story adds the link
+**Then** a row-level affordance (e.g. a small history icon/button) on the Performance tab navigates to `/history/:iid`, without changing the existing row-click-to-chart behavior
+
+### Story 17.5: Technicals tab — user-managed indicator columns
+
+As the dashboard operator,
+I want to add, configure, remove, and reorder indicator columns on the Technicals tab,
+So that I can screen coins on any of the chart's existing indicators without leaving the table.
+
+**Acceptance Criteria:**
+
+**Given** the existing 37-entry indicator catalog (`troll/ml_signals/chart_indicators.py`'s `INDICATOR_CATALOG`, 34 entries; `custom_indicators.py`'s `CUSTOM_INDICATOR_CATALOG`, 3 entries) and `IndicatorPicker.tsx` (built for the chart, Story 15.6)
+**When** the Technicals tab's "Edit columns" control opens
+**Then** it reuses the exact same catalog and component — no second, curated indicator catalog, no calculation reimplementation
+
+**Given** a catalog entry is clicked
+**When** it is added
+**Then** it appears immediately as one or more new columns with default parameters — no confirm step — multi-value entries (MACD, Bollinger Bands, Keltner Channel, Donchian Channel, Ichimoku Cloud, Directional Movement, etc.) add as a group of adjacent columns under one shared header
+
+**Given** an added column's gear icon
+**When** its settings are changed
+**Then** that column recalculates for every row immediately
+
+**Given** an added column
+**When** the user clicks its × or drags its header
+**Then** it is removed or reordered respectively — a per-user view preference only, never touching underlying data
+
+**Given** NFR11 (no grid framework)
+**When** add/configure/remove/reorder is implemented
+**Then** it is built directly against React state and the existing hand-rendered table, matching Story 17.1's approach
+
+### Story 17.6: Filter panel
+
+As the dashboard operator,
+I want to filter the screener's row set by any base field or any added Technicals column,
+So that I can narrow to coins matching a specific condition (e.g. "RSI < 30").
+
+**Acceptance Criteria:**
+
+**Given** a `+` control opening a condition builder (`<field> <operator> <value>`)
+**When** a Technicals column has been added (Story 17.5)
+**Then** that column becomes available as a filterable field, matching TradingView's own "filters and columns share one metric set" behavior
+
+**Given** multiple filter conditions
+**When** more than one is active
+**Then** they combine with AND only — no OR/grouped logic for this story
+
+**Given** the currently-active tab (Performance or Technicals)
+**When** a filter is applied
+**Then** it narrows the row set regardless of which tab is displayed — filtering and column display stay independent, per Story 17.1
+
+## Epic 18: Chart — Drawing Tools, Bar Replay, Volume Profile, Placement Pass
+
+Builder gets the chart features `spec-multi-exchange-screener-chart.md` Part A specifies but Epic 15 never scoped: drawing tools (§A3), Bar Replay (§A5), the full Volume Profile family (§A7), and a placement/operation-parity pass (§A8) — all built against the existing `LightweightChart.tsx`/`ChartPage.tsx` chart instance, not a new chart setup.
+
+### Story 18.1: Horizontal line drawing tool
+
+As a chart user,
+I want to click once to place a draggable horizontal price line,
+So that I can mark a price level of interest.
+
+**Acceptance Criteria:**
+
+**Given** the left toolbar's horizontal-line tool is selected
+**When** the user clicks once on the chart
+**Then** `series.createPriceLine({ price, color, lineWidth, axisLabelVisible: true, title })` places a line at that price — native lightweight-charts support, no custom Primitive needed
+
+**Given** a placed horizontal line
+**When** the user drags it
+**Then** its `price` updates live to track the drag
+
+**Given** any active drawing tool
+**When** the user presses `Esc`
+**Then** the in-progress tool action cancels and the cursor returns to select/cursor mode
+
+### Story 18.2: Trendline drawing tool
+
+As a chart user,
+I want to click-drag a line between two points on the price/time plane,
+So that I can mark a trend.
+
+**Acceptance Criteria:**
+
+**Given** the left toolbar's line (trendline) tool is selected
+**When** the user click-drags between two points
+**Then** a custom Primitive holding two `{time, price}` anchors is created and rendered
+
+**Given** an existing trendline Primitive
+**When** the chart is panned, zoomed, or the crosshair moves
+**Then** the Primitive redraws correctly via `updateAllViews`, staying anchored to its original `{time, price}` points
+
+### Story 18.3: Measurement tool
+
+As a chart user,
+I want to click-drag a rectangle across two points and see price delta, bar count, and volume sum,
+So that I can quickly measure a move without manual calculation.
+
+**Acceptance Criteria:**
+
+**Given** the left toolbar's measurement tool is selected
+**When** the user click-drags a rectangle across the main pane
+**Then** a custom Primitive (no native lightweight-charts equivalent) overlays a label showing price delta (absolute + %) and the number of bars/time spanned
+
+**Given** the same click-drag selection spans the volume pane
+**When** the label renders
+**Then** it additionally shows summed volume across the selected bars
+
+### Story 18.4: Bar Replay
+
+As a chart user,
+I want to pick a start bar and replay the chart bar-by-bar,
+So that I can review how price action unfolded without seeing future bars.
+
+**Acceptance Criteria:**
+
+**Given** the top toolbar's Replay button
+**When** clicked
+**Then** the chart enters "pick a start bar" mode (crosshair + vertical guide line following the cursor)
+
+**Given** the user clicks a candle in picker mode
+**When** the start point is set
+**Then** a vertical marker line is drawn at that bar, and the dataset fed to `setData()` is sliced to that start index — reusing the existing historical/live-bar split from Story 15.5's live-candle-edge work, not a second split
+
+**Given** the replay control bar (Play/Pause, Step-back, Step-forward, speed selector, "Go to…", Exit)
+**When** Play is active
+**Then** one additional bar is revealed at a fixed interval scaled by the speed setting (base interval ÷ speed); Step-forward/back move exactly one bar and pause autoplay if running
+
+**Given** drawing tools (Stories 18.1–18.3) and indicators are active during replay
+**When** bars are revealed
+**Then** both keep working and recalculating live — not special-cased out
+
+**Given** Exit is clicked
+**When** replay ends
+**Then** the full dataset is restored and the control bar/vertical marker are removed
+
+### Story 18.5: Volume Profile — shared engine and rendering Primitive
+
+As a chart user,
+I want one consistent Volume Profile calculation and rendering behind every variant,
+So that Fixed Range, Visible Range, Session, Session HD, and Periodic profiles behave predictably and share bug fixes.
+
+**Acceptance Criteria:**
+
+**Given** `buildVolumeProfile(candles, rowCount, valueAreaPct)` (§A7.0: min/max price bucketing, up/down volume classification, POC = highest-volume bucket, Value Area accumulation from POC outward)
+**When** implemented
+**Then** it is one pure function consumed by all five variants, never duplicated per variant
+
+**Given** a single `VolumeProfilePrimitive` (§A7.1)
+**When** it renders a `VolumeProfile` object
+**Then** it draws a horizontal histogram (up/down-colored segments per row), highlights the POC row distinctly, and shades the Value Area band — parameterized by x-anchor/width per variant, never a separate rendering implementation per variant
+
+**Given** §A7.5's backend confirmation
+**When** this story is implemented
+**Then** it uses only `GET /api/candles/{instrument_id}` (`troll/data_api/routes/candles.py`) — no new backend route, no raw-snapshot/tick data — and verifies in practice that `_MAX_CANDLES_LIMIT`/`_MAX_QUERY_SPAN_SECONDS` don't cut off the range a typical Fixed Range selection needs (raising them if so)
+
+### Story 18.6: Fixed Range Volume Profile (FRVP)
+
+As a chart user,
+I want to click-drag between two timestamps and see a persistent volume profile for that exact range,
+So that I can analyze a specific historical move.
+
+**Acceptance Criteria:**
+
+**Given** the left toolbar (drawing-tool placement, per §A7.2 — not the Indicators dialog)
+**When** the user click-drags between two points
+**Then** `buildVolumeProfile` runs once over the candles between those two timestamps, on drag-release
+
+**Given** a placed FRVP
+**When** the user drags an edge to resize it
+**Then** it recomputes — otherwise it stays static (confirm-once model, distinct from VRVP's always-recompute model per §A7.4)
+
+### Story 18.7: Visible Range Volume Profile (VRVP)
+
+As a chart user,
+I want a volume profile that always reflects whatever's currently visible,
+So that I get an at-a-glance profile without manually selecting a range.
+
+**Acceptance Criteria:**
+
+**Given** the Indicators dialog (§A4.1), `overlay: true`
+**When** VRVP is added
+**Then** it renders on the main price pane using `buildVolumeProfile` over the currently-visible candle range
+
+**Given** `chart.timeScale().subscribeVisibleTimeRangeChange()`
+**When** the user pans or zooms
+**Then** the profile rebuilds against the new visible range — never sharing a "live" component with FRVP's confirm-once model (§A7.4)
+
+### Story 18.8: Session Volume Profile and Session Volume Profile HD
+
+As a chart user,
+I want a volume profile computed per calendar session (day), with a higher-resolution variant available,
+So that I can compare volume distribution session-over-session.
+
+**Acceptance Criteria:**
+
+**Given** candles grouped by calendar day using the base/finest timeframe data regardless of the chart's current timeframe
+**When** SVP is added (Indicators dialog, `overlay: true`)
+**Then** one profile per day is computed, recomputed once per session boundary, with only the current in-progress session's profile updating as new bars arrive
+
+**Given** SVP HD is a config preset of the *same* component as SVP (not a separate code path)
+**When** HD is selected
+**Then** it uses a higher default `rowCount` (100+ vs SVP's ~24) and a `respondsToZoom: true` flag that redraws (not recomputes) the Primitive on zoom level changes
+
+**Given** the settings panel (§A7.3: row size, value area %, up/down colors, POC/Value-Area visibility toggles, number of past sessions to render)
+**When** "show last N sessions" is set
+**Then** each rendered session keeps its own independent POC/VAH/VAL — never merged into one
+
+### Story 18.9: Periodic Volume Profile (PVP)
+
+As a chart user,
+I want a volume profile grouped by a recurring period I choose (weekly, 4-hourly, monthly),
+So that I can see volume distribution over a period longer or shorter than one session.
+
+**Acceptance Criteria:**
+
+**Given** the Indicators dialog, `overlay: true`, with a `period: 'daily' | 'weekly' | '4h' | 'monthly'` settings field
+**When** PVP is added
+**Then** candles are grouped by the chosen recurring period and a profile is computed per period, recomputed on each period boundary — same trigger pattern as Story 18.8's SVP, not a separate scheduling mechanism
+
+### Story 18.10: Placement and operation-parity pass
+
+As a chart user,
+I want every tool in the same relative slot/group TradingView uses, and every interaction to behave the same way,
+So that the chart feels familiar even with a fully custom visual style.
+
+**Acceptance Criteria:**
+
+**Given** §A8.1's top-toolbar clusters ([symbol+timeframe] [chart type] [indicators+fit+jump] [theme]) and the real app's table-first navigation (Rankings row → `/chart/:iid`, fixed `BAR_SECONDS`)
+**When** the top toolbar is built
+**Then** the symbol slot is a read-only label + back-to-Rankings link (not a free picker), a real timeframe selector is added only if multi-timeframe viewing is explicitly wanted, and no theme toggle is added (Story 15.9 already fixed the visual identity deliberately)
+
+**Given** §A8.1's left-toolbar clusters (cursor/crosshair, then the three drawing tools in order)
+**When** the left toolbar is built
+**Then** it matches that relative order and grouping
+
+**Given** §A8.2's full operation checklist (pan/zoom/fit/jump/crosshair-readout/pane-resize/indicator add-configure-toggle-remove/drawing-tool click-drag/Esc-cancel/replay entry-step-goto/alert creation)
+**When** this story is verified
+**Then** every listed interaction is checked against the real, live app — not a screenshot/visual comparison — before this epic is called done
+
+## Epic 19: Multi-Exchange Support — Bybit and Hyperliquid
+
+Builder's catalog, `data_api`, and screener stop being dYdX-only, per `spec-multi-exchange-screener-chart.md` Part D. New collectors mirror `dydx_collector`'s own direct-asyncio-PyO3 architecture — never `TradingNode`/`DataEngine` (FORK-02) — not the `TradingNode`-based `scripts/bybit_recorder/` on the `gg` branch.
+
+### Story 19.1: Explicit `venue` field in the data model
+
+As a frontend developer,
+I want `venue` surfaced as its own field rather than an implicit `instrument_id` suffix,
+So that the screener and chart can filter/group/label by exchange without string-parsing IDs.
+
+**Acceptance Criteria:**
+
+**Given** Nautilus's `InstrumentId` = `"{SYMBOL}.{VENUE}"` convention (`crates/model/src/identifiers/instrument_id.rs`, `rsplit_once('.')`)
+**When** this story adds an explicit `venue` field
+**Then** it appears in `troll/frontend/src/api/schema.ts` and every `data_api` response shape that already includes an `instrument_id` (`routes/candles.py`, `routes/snapshots.py`, `routes/indicators.py`, `routes/indicator_series.py`, `routes/rankings.py`)
+
+**Given** the existing dYdX-only data
+**When** this story ships
+**Then** every existing `.DYDX` instrument's `venue` field reads `"DYDX"` — no behavior change for existing data, purely additive
+
+### Story 19.2: Consolidate `data_api`'s `CATALOG_PATH` into one shared setting
+
+As a backend developer,
+I want one `CATALOG_PATH` source instead of six independently-duplicated defaults,
+So that adding a second collector's catalog doesn't require editing six files in lockstep.
+
+**Acceptance Criteria:**
+
+**Given** `CATALOG_PATH = os.environ.get("CATALOG_PATH", "troll/dydx_collector/catalog")` independently redeclared in `app.py`, `routes/candles.py`, `routes/snapshots.py`, `routes/indicators.py`, `routes/indicator_series.py` (each to avoid a circular import from `app.py`, per each file's own comment)
+**When** this story consolidates them
+**Then** all five (six including any other route module) resolve from one shared setting, without reintroducing the circular-import problem each file's comment originally avoided
+
+**Given** `catalog/data/<data_type>/<instrument_id>/` already partitions by the full `SYMBOL.VENUE` id
+**When** a second collector's output (Story 19.3) writes into the same catalog root
+**Then** its data is served by the existing routes with zero additional code — confirmed via a real Bybit or Hyperliquid instrument once Story 19.3/19.4 lands
+
+### Story 19.3: `troll/bybit_collector/`
+
+As the platform operator,
+I want a Bybit market-data collector with the same reliability properties as the dYdX collector,
+So that Bybit data lands in the same catalog without inheriting Nautilus's live-runtime OOM/wedge bug.
+
+**Acceptance Criteria:**
+
+**Given** `BybitHttpClient`/`BybitWebSocketClient` (`nautilus_trader/core/nautilus_pyo3.pyi`, backed by `crates/adapters/bybit/`)
+**When** `troll/bybit_collector/` is built
+**Then** it owns its own asyncio loop, buffer, and flush timer calling these PyO3 clients directly — never instantiating `TradingNode`/`DataEngine` (FORK-02), structured as a sibling of `troll/dydx_collector/`, not a shared base class with it
+
+**Given** dYdX's `_at_fixed_precision()` workaround exists because of a dYdX-specific wire-format quirk (mark/index price precision derived from trailing-zero count)
+**When** Bybit's own wire format is implemented
+**Then** its precision handling is derived from Bybit's actual wire format, not assumed to need the same workaround
+
+**Given** `ParquetDataCatalog.write_data()` (NAUT-02)
+**When** the collector writes data
+**Then** all writes go through this API — no hand-rolled Parquet schema — writing `SYMBOL.BYBIT`-suffixed instrument ids into the shared catalog root from Story 19.2
+
+**Given** TEST-01 (financial calculations)
+**When** this story is verified
+**Then** any precision re-stamping logic has tests using real `Price`/`Quantity` objects, never mocked
+
+### Story 19.4: `troll/hyperliquid_collector/`
+
+As the platform operator,
+I want a Hyperliquid market-data collector with the same architecture as the Bybit and dYdX collectors,
+So that Hyperliquid data lands in the same catalog consistently.
+
+**Acceptance Criteria:**
+
+**Given** `HyperliquidHttpClient`/`HyperliquidWebSocketClient` (`nautilus_trader/core/nautilus_pyo3.pyi`, backed by `crates/adapters/hyperliquid/`)
+**When** `troll/hyperliquid_collector/` is built
+**Then** it follows the exact same direct-asyncio-PyO3 pattern as Story 19.3's Bybit collector — a sibling, not a shared base class imposed before real duplication across all three collectors is visible
+
+**Given** Hyperliquid's own wire format
+**When** precision/re-stamping is implemented
+**Then** it is derived from Hyperliquid's actual wire format, not assumed identical to dYdX's or Bybit's
+
+**Given** common helpers across all three collectors become visible only once this story lands (e.g. open-interest-poll shape, second-snapshot schema)
+**When** this story is complete
+**Then** any genuine duplication found is noted for a future extraction — not extracted speculatively as part of this story (DESIGN-01)
+
+### Story 19.5: Rankings/screener venue column and filter
+
+As the dashboard operator,
+I want to see and filter by exchange in the screener,
+So that I can distinguish a coin's dYdX row from its Bybit or Hyperliquid row.
+
+**Acceptance Criteria:**
+
+**Given** Story 19.1's explicit `venue` field
+**When** the Rankings/screener table renders
+**Then** it shows a venue column, and the existing filter panel (Story 17.6) accepts venue as a filterable field
+
+### Story 19.6: CEX/DEX registry
+
+As the dashboard operator,
+I want to know whether a venue is a CEX or a DEX,
+So that I can filter or reason about counterparty/custody risk differences.
+
+**Acceptance Criteria:**
+
+**Given** Nautilus has no usable native flag for this (`Venue.is_dex()` only fires on a `Chain:DexType`-formatted string behind the `defi` feature; none of dYdX's/Bybit's/Hyperliquid's adapter constants use that format)
+**When** this story is built
+**Then** a small, self-maintained `troll/common/venues.py` registry (plain dict, not a class hierarchy) maps `{"DYDX": {"kind": "dex"}, "HYPERLIQUID": {"kind": "dex"}, "BYBIT": {"kind": "cex"}}`
+
+**Given** the registry
+**When** the screener is extended to use it
+**Then** it powers a CEX/DEX label or filter option, confirmed against all three real venues (dYdX and Hyperliquid both DEX, Bybit CEX)
+
+## Epic 20: Alerts — Webhook Delivery (deferred, built last)
+
+Builder can define a price/indicator condition and get a webhook POST plus an in-app toast when it fires. Deliberately sequenced after Epics 17–19 are done — this epic has no dependency the earlier epics need, and is a backend-first addition per the user's explicit deferral.
+
+### Story 20.1: Alert creation dialog
+
+As a chart user,
+I want to define an alert condition, frequency, expiration, message template, and webhook URL,
+So that I can be notified when a price or drawing-line condition is met.
+
+**Acceptance Criteria:**
+
+**Given** a clock/bell icon opening a "Create Alert" dialog
+**When** the user builds a condition
+**Then** MVP supports price crossing a static value, and price crossing a horizontal-line drawing (Story 18.1)
+
+**Given** the dialog's frequency, expiration, message template (`{{ticker}}`, `{{close}}`, `{{time}}`, `{{interval}}` placeholders), and Webhook URL fields
+**When** the user saves
+**Then** all fields are persisted with the alert, with no validation on the Webhook URL beyond "looks like a URL"
+
+### Story 20.2: Local alert evaluation engine
+
+As a chart user,
+I want my saved alerts evaluated automatically against live data,
+So that I don't have to watch the chart myself.
+
+**Acceptance Criteria:**
+
+**Given** `troll/data_api`'s existing live Redis-subscriber loop (`ws/live.py`, `redis_bus.py`)
+**When** the alert engine is built
+**Then** it evaluates active alert conditions as a consumer of that same live feed — not a second, independent polling loop
+
+**Given** a condition fires
+**When** it matches its configured frequency (once per bar close / once per bar / only once) and hasn't expired
+**Then** a `fetch(POST)` is sent to its Webhook URL with the templated JSON body, and an in-app toast/notification is shown
+
+### Story 20.3: Alerts list view
+
+As a chart user,
+I want to see all my alerts and their status,
+So that I can review or delete them.
+
+**Acceptance Criteria:**
+
+**Given** saved alerts (Story 20.1) and firing history (Story 20.2)
+**When** the Alerts list view is opened
+**Then** each alert shows its condition, status (active/triggered/expired), and a delete button — a simple list, not a full manager UI
 
