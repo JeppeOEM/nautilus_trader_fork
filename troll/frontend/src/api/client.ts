@@ -7,6 +7,7 @@ import type {
   IndicatorConfigEntry,
   IndicatorSeriesResponse,
   IndicatorValuesResponse,
+  MetricsHistoryResponse,
   RankingsResponse,
   SnapshotSeriesResponse,
 } from "./schema";
@@ -18,6 +19,7 @@ export type {
   IndicatorConfigEntry,
   IndicatorSeriesResponse,
   IndicatorValuesResponse,
+  MetricsHistoryResponse,
   RankingsResponse,
   SnapshotSeriesResponse,
 };
@@ -87,6 +89,17 @@ export async function fetchSnapshotSeries(
   const res = await fetch(`/api/snapshots/${encodeURIComponent(instrumentId)}?${params}`);
   if (!res.ok) throw new Error(`GET /api/snapshots/${instrumentId} failed: ${res.status}`);
   return (await res.json()) as SnapshotSeriesResponse;
+}
+
+// Story 17.2/15.8: the trailing 31-day metrics-store window for HistoryPage's small-
+// multiples charts -- no before_ns/limit cursor contract (AD-F3's documented exception,
+// see that story's Dev Notes): metrics_store.history() is already a small, fixed-size
+// window, fetched once per page load, not scroll-back.
+export async function fetchMetricsHistory(instrumentId: string, days = 31): Promise<MetricsHistoryResponse> {
+  const params = new URLSearchParams({ days: String(days) });
+  const res = await fetch(`/api/metrics/history/${encodeURIComponent(instrumentId)}?${params}`);
+  if (!res.ok) throw new Error(`GET /api/metrics/history/${instrumentId} failed: ${res.status}`);
+  return (await res.json()) as MetricsHistoryResponse;
 }
 
 // Story 15.6: the merged native+custom indicator catalog -- IndicatorPicker's list always

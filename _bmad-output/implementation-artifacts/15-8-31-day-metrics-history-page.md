@@ -1,6 +1,6 @@
 # Story 15.8: 31-day metrics history page
 
-Status: ready-for-dev
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
