@@ -41,7 +41,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-07-01
-last_updated: 2026-09-17 (All 25 stories across epics 17-20 story-created via create-story in one pass, all queued ready-for-dev, epics 17/18/19/20 moved to in-progress; sprint planning run earlier the same session -- retroactively added epic-16's 3 stories, missing since 2026-09-14, still backlog, no story files yet)
+last_updated: 2026-09-17 (All 25 stories across epics 17-20 story-created via create-story in one pass, all queued ready-for-dev, epics 17/18/19/20 moved to in-progress; sprint planning run earlier the same session -- retroactively added epic-16's 3 stories, missing since 2026-09-14, still backlog, no story files yet; re-run same day at the user's request to focus on Epic 15's remaining loose ends -- found and backfilled epics 12/13, entirely missing from this file since their specs shipped/finalized done on 2026-09-12, never tracked here)
 project: nautilus_trader_fork
 project_key: NOKEY
 tracking_system: file-system
@@ -139,6 +139,26 @@ development_status:
   # request: no elicitation).
   epic-11: done
   11-1-fix-empty-imbalance-depth-spread-chart-panes: done
+
+  # epic-12 has a real epics.md entry (2026-09-12, FR34-35: read-only data_api FastAPI
+  # service on the VPS + dashboard.py remote-data mode) -- both stories spec-driven
+  # (spec-12-1/spec-12-2), never entered into this file until this sprint-planning run
+  # (2026-09-17) found the gap. Both specs finalized `status: done`; shipped commits
+  # 01aa846ddc (12.1) and 6af9bbc385 (12.2).
+  epic-12: done
+  12-1-read-only-data-api-fastapi-service-on-the-vps: done
+  12-2-dashboard-py-remote-data-mode-local-machine-run-docs: done
+  epic-12-retrospective: optional
+
+  # epic-13 has a real epics.md entry (2026-09-12, FR36-37: stop ranking_engine's
+  # recurring Parquet-read memory spike behind its OOM-restart loop) -- both stories
+  # spec-driven (spec-13-1/spec-13-2), same gap as epic-12 above, found and backfilled
+  # this run. Both specs finalized `status: done`; shipped commits ec94d2691d (13.1) and
+  # 9a1de5d50e (13.2).
+  epic-13: done
+  13-1-bound-compute-all-s-catalog-read-concurrency: done
+  13-2-in-memory-long-window-price-series-replacing-the-recurring-parquet-re-scan: done
+  epic-13-retrospective: optional
 
   # epic-14 has no epics.md entry -- standalone bypass-epic story pair created directly via
   # create-story at the user's explicit request for full autonomy (plan -> correct epic ->
