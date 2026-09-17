@@ -35,6 +35,17 @@ export function useLiveChannel<T>(): LiveChannelState<T> {
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let cancelled = false;
 
+    // ponytail: defer the first connect by one tick so React StrictMode's dev-only
+    // double-invoke (mount -> cleanup -> mount) never opens a real socket for the
+    // throwaway first mount -- `cancelled` is already true by the time this runs, so
+    // it's skipped. Without this, the fake mount's socket gets proxied mid-handshake
+    // through Vite's /ws proxy and torn down before the write finishes, logging an
+    // EPIPE stack trace vite has no public API to suppress. No effect on the real
+    // (second) mount, which schedules and fires normally.
+    const startTimer = setTimeout(() => {
+      if (!cancelled) connect();
+    }, 0);
+
     function connect(): void {
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
       socket = new WebSocket(`${protocol}//${window.location.host}/ws/live`);
@@ -71,10 +82,9 @@ export function useLiveChannel<T>(): LiveChannelState<T> {
       };
     }
 
-    connect();
-
     return () => {
       cancelled = true;
+      clearTimeout(startTimer);
       if (reconnectTimer) clearTimeout(reconnectTimer);
       socket?.close();
     };
