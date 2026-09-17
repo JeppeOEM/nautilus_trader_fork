@@ -54,6 +54,23 @@ export interface IndicatorValuesResponse {
   has_more: boolean;
 }
 
+export interface MetricHistoryItem {
+  ts: number;
+  price?: number | null;
+  pct_1h?: number | null;
+  pct_24h?: number | null;
+  volatility?: number | null;
+  ofi?: number | null;
+  microprice?: number | null;
+  spread?: number | null;
+  rank?: number | null;
+  volume24h?: number | null;
+}
+
+export interface MetricsHistoryResponse {
+  items: MetricHistoryItem[];
+}
+
 export interface RankingsResponse {
   items: Record<string, unknown>[];
   updated_at: number;

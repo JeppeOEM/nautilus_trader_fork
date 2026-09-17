@@ -345,3 +345,12 @@
 - source_spec: `_bmad-output/implementation-artifacts/15-7-lines-mode.md`
   summary: When a queried page's rows are all crossed-book (filtered to empty) but real older history exists further back, `has_more` is reported `False`, silently truncating scroll-back pagination instead of probing further back.
   evidence: `troll/data_api/routes/snapshots.py:get_snapshots`'s `if not kept: return SnapshotSeriesResponse(items=[], has_more=False)`. Pre-existing, identical behavior in the sibling route this story was instructed to mirror exactly: `troll/data_api/routes/candles.py:get_candles`'s own `if not kept: return CandlesResponse(items=[], has_more=False)` (Story 15.3). Not introduced by this story -- fixing it here alone would diverge from the reused design rather than fix the shared root cause. Surfaced by Edge Case Hunter review of this story's diff.
+
+## Deferred from: code review of 17-2-unpark-and-complete-story-15-8-31-day-metrics-history (2026-09-17)
+
+- source_spec: `_bmad-output/implementation-artifacts/17-2-unpark-and-complete-story-15-8-31-day-metrics-history.md`
+  summary: `data_api/app.py`'s own `METRICS_DB_PATH` default comment ("mirrors dashboard.py:85-86 exactly") cites the wrong line numbers -- `dashboard.py`'s actual `METRICS_DB_PATH` assignment is at lines 96-98 -- and this story's new `data_api/routes/metrics.py` copied the same stale citation verbatim into its own comment.
+  evidence: Confirmed by grepping `ml_signals/dashboard.py` for `METRICS_DB_PATH`, which resolves to lines 96-98, not 85-86. The inaccurate citation predates this story (already wrong in `app.py` before this diff); this story's own file only inherited it. Surfaced by Blind Hunter review of this story's diff.
+- source_spec: `_bmad-output/implementation-artifacts/17-2-unpark-and-complete-story-15-8-31-day-metrics-history.md`
+  summary: `HistoryPage.tsx`'s `toMetricDatum` treats only `null`/`undefined` as a gap; a `NaN`/`Infinity` metric value (were one ever to reach the route from an upstream computation bug) would be passed to `lightweight-charts` as real plotted data rather than being treated as a gap.
+  evidence: `toMetricDatum(tsNs, value)`'s `value == null ? { time } : { time, value }` check has no `Number.isFinite` guard. No evidence this actually occurs -- `metrics_store` columns are written from `ranking_engine`'s own float computations, which are not known to ever emit `NaN`/`Infinity` -- so this is a defensive hardening gap, not an observed bug. Surfaced by Edge Case Hunter review of this story's diff.
