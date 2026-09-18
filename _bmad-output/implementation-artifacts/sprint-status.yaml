@@ -232,7 +232,7 @@ development_status:
   # last per the user's explicit deferral; its backlog status here doesn't imply readiness
   # to start before 17-19.
   epic-17: in-progress
-  17-1-tab-shell-performance-technicals-tabs-on-the-rankings-page: ready-for-dev
+  17-1-tab-shell-performance-technicals-tabs-on-the-rankings-page: review  # owed: visual browser check
   17-2-unpark-and-complete-story-15-8-31-day-metrics-history: done
   17-3-performance-tab-multi-window-pct-change: ready-for-dev
   17-4-wire-the-rankings-performance-history-link: ready-for-dev

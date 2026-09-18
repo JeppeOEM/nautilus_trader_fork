@@ -140,3 +140,39 @@
     opacity: 0;
   }
 }
+
+/* -------------------------------------------------------------------------
+   Tab bar (Story 17.1): the one tab visual pattern, shared by DocsPage's
+   sidebar tabs and RankingsPage's Performance/Technicals column-set tabs.
+   Moved here from docs.css, where it was scoped under .signal-atlas -- the
+   classes are unscoped so both pages use this single definition, never two
+   independently-defined copies. The docs-local alias vars were substituted
+   with the semantic tokens each alias was defined to resolve to (--bg ->
+   --color-bg, --border -> --color-border, --muted -> --color-text-dim,
+   --accent -> --color-link, --accent-ink -> --color-active, --accent-bg ->
+   --color-active-bg), so the docs page's computed styles are unchanged. */
+.tabs {
+  display: flex;
+  gap: 6px;
+  margin: 0 0 12px;
+}
+
+.tabbtn {
+  flex: 1;
+  text-align: center;
+  padding: 7px 6px;
+  border-radius: 0;
+  border: 1px solid var(--color-border);
+  background: var(--color-bg);
+  color: var(--color-text-dim);
+  font-size: 11px;
+  letter-spacing: 0.03em;
+  cursor: pointer;
+  text-transform: uppercase;
+}
+
+.tabbtn.active {
+  background: var(--color-active-bg);
+  color: var(--color-active);
+  border-color: var(--color-link);
+}

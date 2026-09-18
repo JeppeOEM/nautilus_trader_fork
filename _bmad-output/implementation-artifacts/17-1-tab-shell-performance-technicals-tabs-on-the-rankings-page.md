@@ -1,6 +1,11 @@
+---
+baseline_revision: 9b9af56112301082559f766768e7c35cb31bcb85
+status: review
+---
+
 # Story 17.1: Tab shell — Performance + Technicals tabs on the Rankings page
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -22,21 +27,21 @@ so that I can see either view without losing track of which coin's row I'm looki
 
 ## Tasks / Subtasks
 
-- [ ] Task 1 — Tab state and tab bar (AC: #1, #6)
-  - [ ] Add `const [activeTab, setActiveTab] = useState<"performance" | "technicals">("performance")` to `RankingsPage.tsx`, alongside the existing `now`/live-channel state — no new dependency, no router change (this is in-page state, not a new route).
-  - [ ] **Reuse the existing `.tabs`/`.tabbtn`/`.tabbtn.active` tab visual pattern already established by `troll/frontend/src/pages/docs/DocsPage.tsx` (`docs.css`), rather than inventing a second tab visual style.** That CSS is currently scoped under `.signal-atlas` (the docs page's own wrapper class) — either move the three rules to a shared stylesheet (e.g. `theme.css` or a small shared CSS file) so both pages reference the same unscoped `.tabs`/`.tabbtn` classes, or duplicate the three rules under a Rankings-specific wrapper selector; do not leave two independently-defined but visually-identical tab implementations. Markup mirrors `DocsPage.tsx`'s pattern: `<div className="tabs"><div className={\`tabbtn${activeTab === "performance" ? " active" : ""}\`} onClick={() => setActiveTab("performance")}>Performance</div>...</div>`.
+- [x] Task 1 — Tab state and tab bar (AC: #1, #6)
+  - [x] Add `const [activeTab, setActiveTab] = useState<"performance" | "technicals">("performance")` to `RankingsPage.tsx`, alongside the existing `now`/live-channel state — no new dependency, no router change (this is in-page state, not a new route).
+  - [x] **Reuse the existing `.tabs`/`.tabbtn`/`.tabbtn.active` tab visual pattern already established by `troll/frontend/src/pages/docs/DocsPage.tsx` (`docs.css`), rather than inventing a second tab visual style.** That CSS is currently scoped under `.signal-atlas` (the docs page's own wrapper class) — either move the three rules to a shared stylesheet (e.g. `theme.css` or a small shared CSS file) so both pages reference the same unscoped `.tabs`/`.tabbtn` classes, or duplicate the three rules under a Rankings-specific wrapper selector; do not leave two independently-defined but visually-identical tab implementations. Markup mirrors `DocsPage.tsx`'s pattern: `<div className="tabs"><div className={\`tabbtn${activeTab === "performance" ? " active" : ""}\`} onClick={() => setActiveTab("performance")}>Performance</div>...</div>`.
 
-- [ ] Task 2 — Column-set switch, pinned columns preserved (AC: #2, #3, #5)
-  - [ ] Keep the `<thead>`'s `Rank`/`Instrument` `<th>` and each row's `<td>{index + 1}</td>`/instrument-id `<td>` exactly as they are today — these render unconditionally regardless of `activeTab`.
-  - [ ] Wrap the existing `RANKING_COLS.map(...)` header-cell and body-cell rendering (today's only column set) in `activeTab === "performance"` — no changes to `RANKING_COLS`, `formatCell`, `fmtSigned`/`fmtFixed`/`fmtPercent`/`fmtMillions`, or any staleness/formatting logic.
-  - [ ] When `activeTab === "technicals"`, render a single empty-state row/message reading "no columns yet — click + to add one" (exact copy from the original build brief's §B7 step 3) spanning the table width — no `+`/add-column control yet, that arrives in Story 17.5.
+- [x] Task 2 — Column-set switch, pinned columns preserved (AC: #2, #3, #5)
+  - [x] Keep the `<thead>`'s `Rank`/`Instrument` `<th>` and each row's `<td>{index + 1}</td>`/instrument-id `<td>` exactly as they are today — these render unconditionally regardless of `activeTab`.
+  - [x] Wrap the existing `RANKING_COLS.map(...)` header-cell and body-cell rendering (today's only column set) in `activeTab === "performance"` — no changes to `RANKING_COLS`, `formatCell`, `fmtSigned`/`fmtFixed`/`fmtPercent`/`fmtMillions`, or any staleness/formatting logic.
+  - [x] When `activeTab === "technicals"`, render a single empty-state row/message reading "no columns yet — click + to add one" (exact copy from the original build brief's §B7 step 3) spanning the table width — no `+`/add-column control yet, that arrives in Story 17.5.
 
-- [ ] Task 3 — Confirm no refetch on tab switch (AC: #4)
-  - [ ] `activeTab` must be a plain `useState` that only affects the JSX branch rendered — it must not appear in the `useQuery` `queryKey: ["rankings"]` array or in any effect dependency array that would cause `fetchRankings`/`useLiveChannel` to re-run. Verify this explicitly (e.g. a test asserting `fetchRankings` mock call count is unchanged across a tab switch).
+- [x] Task 3 — Confirm no refetch on tab switch (AC: #4)
+  - [x] `activeTab` must be a plain `useState` that only affects the JSX branch rendered — it must not appear in the `useQuery` `queryKey: ["rankings"]` array or in any effect dependency array that would cause `fetchRankings`/`useLiveChannel` to re-run. Verify this explicitly (e.g. a test asserting `fetchRankings` mock call count is unchanged across a tab switch).
 
-- [ ] Task 4 — Tests (AC: #7)
-  - [ ] Extend `troll/frontend/src/pages/RankingsPage.test.tsx` (currently covers: loading state, stale-row marking x2, row-click navigation, row-order-verbatim) with: Performance tab active by default and its columns visible; clicking Technicals hides Performance's columns and shows the empty-state text; clicking back to Performance restores the columns; a live update arriving while Technicals is active does not throw and is reflected immediately if the user switches back to Performance (no stale/cached render).
-  - [ ] Run the existing frontend test/build/lint commands per prior stories' convention (Vitest + React Testing Library, already the project's pairing — no new test tooling).
+- [x] Task 4 — Tests (AC: #7)
+  - [x] Extend `troll/frontend/src/pages/RankingsPage.test.tsx` (currently covers: loading state, stale-row marking x2, row-click navigation, row-order-verbatim) with: Performance tab active by default and its columns visible; clicking Technicals hides Performance's columns and shows the empty-state text; clicking back to Performance restores the columns; a live update arriving while Technicals is active does not throw and is reflected immediately if the user switches back to Performance (no stale/cached render).
+  - [x] Run the existing frontend test/build/lint commands per prior stories' convention (Vitest + React Testing Library, already the project's pairing — no new test tooling).
 
 ## Dev Notes
 
@@ -70,4 +75,9 @@ so that I can see either view without losing track of which coin's row I'm looki
 
 ### Completion Notes List
 
+- Tab shell implemented in `RankingsPage.tsx` (plain `useState`, no refetch/subscription change); `.tabs`/`.tabbtn` moved once to `theme.css` (docs.css alias vars substituted with their resolved tokens). Vitest 59/59, `tsc -b` clean, oxlint clean.
+- Not verified: visual check in a real browser (tab styling on the rankings page, docs sidebar tabs unchanged).
+
 ### File List
+
+- troll/frontend/src/pages/RankingsPage.tsx, RankingsPage.test.tsx, troll/frontend/src/theme.css, index.css, pages/docs/docs.css
