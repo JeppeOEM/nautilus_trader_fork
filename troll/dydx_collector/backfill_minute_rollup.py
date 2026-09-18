@@ -97,7 +97,8 @@ def backfill_instrument(
             rollup = builder.update(iid, snap)
             if rollup is not None and rollup.ts_event <= end_ns:
                 rollups.append(rollup)
-        existing = {r.ts_event for r in query_minute_rollups(catalog_path, iid, a, min(b, end_ns))}
+        # a - 1 min: the previous chunk's last minute only closes on this chunk's first snapshot
+        existing = {r.ts_event for r in query_minute_rollups(catalog_path, iid, a - _MINUTE_NS, min(b, end_ns))}
         rollups = [r for r in rollups if r.ts_event not in existing]
         if rollups:
             catalog.write_data(rollups)
