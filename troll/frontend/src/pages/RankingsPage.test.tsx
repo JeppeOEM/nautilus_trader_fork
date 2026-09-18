@@ -365,6 +365,28 @@ describe("RankingsPage", () => {
       expect(screen.queryByText("NNN-USD-PERP.DYDX")).not.toBeInTheDocument();
     });
 
+    it("drops a Technicals filter when its column is removed, instead of emptying the table", async () => {
+      const rsi = { name: "RelativeStrengthIndex", params: {}, category: "native" };
+      vi.mocked(fetchTechnicalsColumns).mockResolvedValue([rsi]);
+      vi.mocked(fetchTechnicalsValues).mockResolvedValue({ "AAA-USD-PERP.DYDX": { "0.value": 25 } });
+      renderPage();
+      fireEvent.click(screen.getByRole("button", { name: "Add filter" }));
+      await waitFor(() => {
+        const options = Array.from(screen.getByLabelText<HTMLSelectElement>("Filter field").options).map((o) => o.text);
+        expect(options).toContain("RelativeStrengthIndex.value");
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Add filter" }));
+      addFilter("RelativeStrengthIndex.value", "<", "30");
+      expect(shownInstruments()).toEqual(["AAA-USD-PERP.DYDX"]);
+
+      fireEvent.click(screen.getByText("Technicals"));
+      vi.mocked(fetchTechnicalsColumns).mockResolvedValue([]);
+      fireEvent.click(await screen.findByRole("button", { name: "Remove RelativeStrengthIndex column" }));
+
+      await waitFor(() => expect(shownInstruments()).toHaveLength(3));
+      expect(screen.queryByRole("button", { name: /Remove filter/ })).not.toBeInTheDocument();
+    });
+
     it("filters on a Technicals output from the Performance tab", async () => {
       vi.mocked(fetchTechnicalsColumns).mockResolvedValue([
         { name: "RelativeStrengthIndex", params: {}, category: "native" },

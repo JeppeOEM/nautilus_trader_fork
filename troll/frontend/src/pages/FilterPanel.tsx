@@ -24,7 +24,8 @@ export default function FilterPanel({ fields, conditions, onChange, onOpen }: Fi
   const [op, setOp] = useState<FilterOperator>(">");
   const [value, setValue] = useState("");
 
-  const selectedField = field || fields[0]?.key || "";
+  // Fall back when the chosen field disappeared (e.g. its Technicals column was removed).
+  const selectedField = fields.some((f) => f.key === field) ? field : (fields[0]?.key ?? "");
   const parsed = Number(value);
   const canAdd = selectedField !== "" && value.trim() !== "" && Number.isFinite(parsed);
 

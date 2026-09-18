@@ -147,6 +147,19 @@ export default function RankingsPage() {
   // Sticky once the builder has been opened: Technicals outputs only become selectable fields
   // after their first values arrive.
   const [filterBuilderOpened, setFilterBuilderOpened] = useState(false);
+  // A filter on a Technicals output whose column was removed would exclude every row with no
+  // visible cause -- drop it with its column. (Entries are loaded before any such condition can
+  // exist: its field only becomes selectable once the entry's values have arrived.)
+  useEffect(() => {
+    setFilters((current) => {
+      const kept = current.filter((f) => {
+        if (!f.field.startsWith(TECHNICAL_FIELD_PREFIX)) return true;
+        const name = f.field.slice(TECHNICAL_FIELD_PREFIX.length).replace(/\.[^.]*$/, "");
+        return technicalsEntries.some((e) => e.name === name);
+      });
+      return kept.length === current.length ? current : kept;
+    });
+  }, [technicalsEntries]);
   const filtersUseTechnicals =
     filterBuilderOpened || filters.some((f) => f.field.startsWith(TECHNICAL_FIELD_PREFIX));
   const { data: technicalsValues, error: valuesError } = useQuery({
@@ -155,13 +168,13 @@ export default function RankingsPage() {
     enabled: technicalsEntries.length > 0 && (activeTab === "technicals" || filtersUseTechnicals),
     refetchInterval: TECHNICALS_POLL_MS,
     retry: false,
-    // Keep the previous columns' values on screen while a changed selection refetches, rather
-    // than collapsing every multi-output column to a placeholder.
-    placeholderData: (previous) => previous,
+    // No placeholderData: the response is keyed by entry *position*, so keeping the previous
+    // selection's values across a reorder/removal would read them under the wrong column.
   });
   const groups = buildGroups(technicalsEntries, technicalsValues);
   const filterFields: FilterField[] = [
-    ...RANKING_COLS.map((col) => ({ key: col.key, label: col.label })),
+    // Conditions compare the raw value; volume24h is displayed in millions but filtered in USD.
+    ...RANKING_COLS.map((col) => ({ key: col.key, label: col.key === "volume24h" ? `${col.label} (raw USD)` : col.label })),
     ...groups.flatMap((g) =>
       g.attrs.map((attr) => ({ key: `${TECHNICAL_FIELD_PREFIX}${g.entry.name}.${attr}`, label: `${g.entry.name}.${attr}` })),
     ),
@@ -215,9 +228,16 @@ export default function RankingsPage() {
   }
 
   // Rank is the row's position in the live message, so it stays the true rank when filtered.
+  // Technicals conditions can't be evaluated until their values are loaded -- skipped (not
+  // treated as "no match") so the table isn't blanked, with a visible note below.
+  const technicalsPending = technicalsValues === undefined;
+  const activeFilters = technicalsPending
+    ? filters.filter((f) => !f.field.startsWith(TECHNICAL_FIELD_PREFIX))
+    : filters;
+  const skippedFilters = filters.length - activeFilters.length;
   const visibleRows = applyFilters(
     rows.map((row, index) => ({ row, rank: index + 1 })),
-    filters,
+    activeFilters,
     ({ row }, field) => readField(row, field),
   );
 
@@ -229,6 +249,12 @@ export default function RankingsPage() {
         onChange={setFilters}
         onOpen={() => setFilterBuilderOpened(true)}
       />
+      {skippedFilters > 0 && (
+        <p className="rankings-empty">
+          {skippedFilters} Technicals filter(s) not applied yet — waiting for indicator values
+          {valuesError ? ` (${valuesError instanceof Error ? valuesError.message : String(valuesError)})` : ""}
+        </p>
+      )}
       <div className="tabs">
         <div
           className={`tabbtn${activeTab === "performance" ? " active" : ""}`}
