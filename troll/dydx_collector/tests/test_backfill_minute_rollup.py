@@ -59,3 +59,13 @@ def test_backfill_ohlcv_matches_aggregate_ohlc_across_chunk_boundary(tmp_path: P
         r = closed[c.ts_open]
         assert (r.open, r.high, r.low, r.close) == (c.open, c.high, c.low, c.close)
         assert r.buy_volume + r.sell_volume == c.volume
+
+
+def test_final_minute_of_requested_range_is_emitted(tmp_path: Path) -> None:
+    snaps = _seed(tmp_path)  # 200s of data; more data exists past the requested end
+    catalog = ParquetDataCatalog(str(tmp_path))
+    end = snaps[0].ts_event + 100 * _SEC  # mid-minute (3d + 10s)
+    backfill_instrument(catalog, str(tmp_path), IID, snaps[0].ts_event, end)
+    got = sorted(r.data.ts_event for r in catalog.query(DydxMinuteRollup, identifiers=[IID]))
+    assert got[-1] == end // (60 * _SEC) * (60 * _SEC)
+    assert all(t <= end for t in got)

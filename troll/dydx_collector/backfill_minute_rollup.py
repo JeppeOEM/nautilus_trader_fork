@@ -20,7 +20,8 @@ Usage:
         [--instrument BTC-USD-PERP.DYDX ...] [--start 2026-09-01] [--end 2026-09-18]
 
 Defaults: every instrument that has second-snapshot data, over that data's full range.
-Manually run, like prune_catalog.py; reads raw 1s in day-sized chunks (MEM-01) through one
+With no --end, the data's last minute has no successor snapshot and is skipped (it may still
+be live). Manually run, like prune_catalog.py; reads raw 1s in day-sized chunks (MEM-01) through one
 long-lived MinuteRollupBuilder per instrument, so OFI carries across chunk boundaries.
 
 The catalog is append-only: re-running over an already-backfilled range writes duplicate
@@ -46,6 +47,7 @@ from nautilus_trader.persistence.catalog import ParquetDataCatalog
 logger = logging.getLogger(__name__)
 
 _DAY_NS = 86_400 * 1_000_000_000
+_MINUTE_NS = 60_000_000_000
 _SNAPSHOT_DIR = "custom_dydx_second_snapshot"
 _FILENAME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2})-(\d{9})Z_(.+)-(\d{9})Z\.parquet$")
 
@@ -84,11 +86,14 @@ def backfill_instrument(
 ) -> int:
     builder = MinuteRollupBuilder()  # one per instrument, reused across every chunk
     written = 0
-    for a, b in day_chunks(start_ns, end_ns):
+    # Read one minute past `end_ns`: a minute only closes when the next one's first snapshot
+    # arrives, so without this lookahead the run's final minute would never get a rollup row.
+    read_end_ns = end_ns + _MINUTE_NS
+    for a, b in day_chunks(start_ns, read_end_ns):
         rollups: list[DydxMinuteRollup] = []
-        for snap in query_second_snapshots(catalog_path, iid, a, min(b, end_ns)):
+        for snap in query_second_snapshots(catalog_path, iid, a, min(b, read_end_ns)):
             rollup = builder.update(iid, snap)
-            if rollup is not None:
+            if rollup is not None and rollup.ts_event <= end_ns:
                 rollups.append(rollup)
         if rollups:
             catalog.write_data(rollups)
