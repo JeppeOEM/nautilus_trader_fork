@@ -42,11 +42,9 @@ def test_fetch_watchlist_parses_instrument_ids(monkeypatch) -> None:
     monkeypatch.setattr(
         urllib.request,
         "urlopen",
-        lambda request, timeout=None: _FakeResponse(
-            {"instrument_ids": ["BTC-USD-PERP.DYDX", "ETH-USD-PERP.DYDX"]},
-        ),
+        lambda request, timeout=None: _FakeResponse({"items": [{"instrument_id": i} for i in ["BTC-USD-PERP.DYDX", "ETH-USD-PERP.DYDX"]]}),
     )
-    result = watchlist.fetch_watchlist("http://127.0.0.1:8765")
+    result = watchlist.fetch_watchlist("http://127.0.0.1:9100")
     assert result == ["BTC-USD-PERP.DYDX", "ETH-USD-PERP.DYDX"]
 
 
@@ -54,7 +52,7 @@ def test_fetch_watchlist_empty_list(monkeypatch) -> None:
     monkeypatch.setattr(
         urllib.request,
         "urlopen",
-        lambda request, timeout=None: _FakeResponse({"instrument_ids": []}),
+        lambda request, timeout=None: _FakeResponse({"items": [{"instrument_id": i} for i in []]}),
     )
     assert watchlist.fetch_watchlist() == []
 
@@ -65,7 +63,7 @@ def test_watchlist_ids_are_backtest_data_config_compatible(monkeypatch) -> None:
     monkeypatch.setattr(
         urllib.request,
         "urlopen",
-        lambda request, timeout=None: _FakeResponse({"instrument_ids": ids}),
+        lambda request, timeout=None: _FakeResponse({"items": [{"instrument_id": i} for i in ids]}),
     )
 
     fetched = watchlist.fetch_watchlist()

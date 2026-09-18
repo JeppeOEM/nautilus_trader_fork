@@ -188,7 +188,7 @@ reachable from outside the box directly. The way in is an SSH tunnel, via the
 |---|---|
 | `make remote-db` | Tunnels Redis (6379) to `localhost:6379` so a GUI client (RedisInsight, TablePlus, Another Redis Desktop Manager, ...) on your machine can connect to it as if it were local. |
 | `make remote-db-stop` | Kills that tunnel. |
-| `make remote-web` | Tunnels the dashboard (8765) and opens it in your browser. |
+| `make remote-web` | Tunnels the dashboard (9100) and opens it in your browser. |
 | `make remote-web-stop` | Kills that tunnel. |
 | `make remote-tui` | SSHes in with a real TTY and runs `bot_tui` interactively — no port involved, it's a terminal app, not a network service. |
 

@@ -7,10 +7,8 @@ x-logging: &default-logging
     max-size: "20m"
     max-file: "20"
 
-# Shared by dashboard and data_api (Story 15.6) -- both are `rw` writers of the same host
-# file (dashboard's Story 10.5 Save button, data_api's picker PUT), so a future path/mount
-# change only needs to happen in one place instead of being manually kept in sync across
-# two service blocks.
+# data_api's picker PUT (Story 15.6) is the one `rw` writer of this host file; kept as an
+# anchor so the path/mount is defined in one place.
 x-chart-indicator-config-path: &chart-indicator-config-path "/app/ml_signals/chart_indicators.toml"
 x-chart-indicator-config-mount: &chart-indicator-config-mount
   ./ml_signals/chart_indicators.toml:/app/ml_signals/chart_indicators.toml:rw
@@ -58,43 +56,6 @@ services:
     restart: always
     logging: *default-logging
 
-  dashboard:
-    container_name: dydx-dashboard
-    build:
-      context: ..
-      dockerfile: troll/collector.dockerfile
-      network: host
-    command: python3 -m ml_signals.dashboard
-    environment:
-      PYTHONUNBUFFERED: "1"
-      REDIS_URL: "redis://127.0.0.1:${REDIS_PORT:-6379}"
-      CATALOG_PATH: "/app/catalog"
-      DASHBOARD_PORT: "${WEB_PORT:-8765}"
-      METRICS_DB_PATH: "/app/metrics_dir/metrics.db"
-      CHART_INDICATOR_CONFIG_PATH: *chart-indicator-config-path
-    user: "1000:1000"
-    volumes:
-      # rw (not ro): the chart page's Save button (Story 10.5) writes this file back
-      # after the user saves a coin's indicator selection -- mirrors the collector
-      # service's own single `rw` config mount above.
-      - *chart-indicator-config-mount
-      - ./dydx_collector/catalog:/app/catalog:ro
-      # ranking_engine is now the sole writer of metrics.db (Story 1.8, Task 7) --
-      # dashboard only ever reads it (metrics_store.latest/nearest/history), so this
-      # mount gains :ro, mirroring the same structural enforcement the catalog mount
-      # above already demonstrates for AD-3.
-      #
-      # Mounted as a *directory* (./dydx_collector/metrics/), not the single metrics.db
-      # file: SQLite WAL mode creates metrics.db-wal/metrics.db-shm sidecar files next
-      # to the main file, and a single-file bind mount can't expose those sidecars on a
-      # path shared with another container -- ranking_engine's writes could land in
-      # this container's own private overlay instead of becoming visible here. Mounting
-      # the containing directory lets every sidecar land on the same shared host path.
-      - ./dydx_collector/metrics:/app/metrics_dir:ro
-    network_mode: host
-    restart: always
-    logging: *default-logging
-
   ranking_engine:
     container_name: dydx-ranking-engine
     build:
@@ -114,10 +75,10 @@ services:
     volumes:
       # Catalog is read-only -- ranking_engine only reads it via
       # ml_signals.metrics_computer.compute_all(), same AD-3 "reader trusts the gate"
-      # discipline as dashboard's mount above. metrics/ is read-write -- this is now
-      # the sole writer (Task 7), matching the same reasoning that put :ro on
-      # dashboard's mount. Mounted as a directory, not the single metrics.db file --
-      # see dashboard's mount comment above for why (WAL/SHM sidecar visibility).
+      # discipline as data_api's mount. metrics/ is read-write -- this is now
+      # the sole writer (Task 7). Mounted as a directory, not the single metrics.db file:
+      # SQLite WAL mode creates -wal/-shm sidecars next to it, and a single-file bind
+      # mount can't expose those on a path shared with another container.
       - ./dydx_collector/catalog:/app/catalog:ro
       - ./dydx_collector/metrics:/app/metrics_dir
     network_mode: host
@@ -142,8 +103,8 @@ services:
       - ./dydx_collector/catalog:/app/catalog:ro
       - ./dydx_collector/metrics:/app/metrics_dir:ro
       # rw (not ro): the picker's PUT /api/coin/{iid}/indicators (Story 15.6) writes this
-      # file back on every add/remove/param-apply change -- mirrors dashboard's own `rw`
-      # mount above (the config-persistence handlers this route relocates verbatim).
+      # file back on every add/remove/param-apply change -- the one `rw` mount
+      # of this file.
       - *chart-indicator-config-mount
     network_mode: host
     restart: always
@@ -175,11 +136,9 @@ services:
       # not the host's own TERM -- an unusual host terminal (e.g. "xterm-ghostty") has
       # no matching terminfo entry inside the container at all.
       TERM: "xterm-256color"
-      # Story 4.3's `o` deep-link target -- 127.0.0.1:<port> is reachable here exactly
-      # as it is from the host, since both `dashboard` and `bot_tui` run
-      # network_mode: host with no separate port mapping. Tracks WEB_PORT (see
-      # dashboard's DASHBOARD_PORT above) so a custom port doesn't break the deep link.
-      DASHBOARD_BASE_URL: "http://127.0.0.1:${WEB_PORT:-8765}"
+      # Story 4.3's `o` deep-link target -- data_api serves the chart SPA, and 127.0.0.1:<port>
+      # is reachable here exactly as from the host (both run network_mode: host).
+      DASHBOARD_BASE_URL: "http://127.0.0.1:${DATA_API_PORT:-9100}"
       # Set by troll-tui (~/.zshrc) to the port its -R reverse SSH tunnel binds
       # on this host -- see app.py's _open_via_local_listener. Unset (e.g.
       # bot_tui run on-host, not over troll-tui) means that hand-off is simply
@@ -222,10 +181,10 @@ services:
       # Directory mount, not the single fills.db file (Story 4.6) -- SQLite WAL mode
       # creates fills.db-wal/fills.db-shm sidecar files next to the main file, which a
       # single-file bind mount can't expose (same gotcha already documented on
-      # ranking_engine/dashboard's metrics.db mounts above).
+      # ranking_engine/data_api's metrics.db mounts above).
       - ./live_paper/data:/app/live_paper/data
     network_mode: host
-    # on-failure (not `always`, unlike collector/dashboard) -- Story 3.2 attached a real
+    # on-failure (not `always`, unlike collector/data_api) -- Story 3.2 attached a real
     # Strategy that submits live paper orders, so a persistent bad-config or transient
     # startup failure must not crash-loop against dYdX's API as fast as Docker allows.
     # Flagged in deferred-work.md's Story 3.1 entry to revisit exactly here.

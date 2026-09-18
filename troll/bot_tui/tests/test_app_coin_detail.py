@@ -189,7 +189,7 @@ def test_o_key_sets_footer_to_dashboard_url() -> None:
     app._handle_coin_detail_key("o")
     assert (
         app._footer_hint.text
-        == "dashboard (copied to clipboard): http://127.0.0.1:8765/chart/BTC-USD-PERP"
+        == "dashboard (copied to clipboard): http://127.0.0.1:9100/chart/BTC-USD-PERP"
     )
 
 
@@ -206,7 +206,7 @@ def test_open_via_local_listener_sends_url_and_returns_true(monkeypatch) -> None
     port = server.getsockname()[1]
     monkeypatch.setenv("BOT_TUI_OPEN_URL_PORT", str(port))
 
-    result = BotTuiApp._open_via_local_listener("http://127.0.0.1:8765/chart/BTC-USD-PERP")
+    result = BotTuiApp._open_via_local_listener("http://127.0.0.1:9100/chart/BTC-USD-PERP")
 
     conn, _ = server.accept()
     received = conn.recv(4096)
@@ -214,17 +214,17 @@ def test_open_via_local_listener_sends_url_and_returns_true(monkeypatch) -> None
     server.close()
 
     assert result is True
-    assert received == b"http://127.0.0.1:8765/chart/BTC-USD-PERP"
+    assert received == b"http://127.0.0.1:9100/chart/BTC-USD-PERP"
 
 
 def test_open_via_local_listener_false_when_port_unset(monkeypatch) -> None:
     monkeypatch.delenv("BOT_TUI_OPEN_URL_PORT", raising=False)
-    assert BotTuiApp._open_via_local_listener("http://127.0.0.1:8765/chart/BTC-USD-PERP") is False
+    assert BotTuiApp._open_via_local_listener("http://127.0.0.1:9100/chart/BTC-USD-PERP") is False
 
 
 def test_open_via_local_listener_false_when_nothing_listening(monkeypatch) -> None:
     monkeypatch.setenv("BOT_TUI_OPEN_URL_PORT", "1")  # privileged/unused port, connect refused
-    assert BotTuiApp._open_via_local_listener("http://127.0.0.1:8765/chart/BTC-USD-PERP") is False
+    assert BotTuiApp._open_via_local_listener("http://127.0.0.1:9100/chart/BTC-USD-PERP") is False
 
 
 def test_space_key_uses_local_listener_when_port_set(monkeypatch) -> None:
@@ -245,7 +245,7 @@ def test_space_key_uses_local_listener_when_port_set(monkeypatch) -> None:
     conn.close()
     server.close()
 
-    assert app._footer_hint.text == "dashboard: http://127.0.0.1:8765/chart/BTC-USD-PERP"
+    assert app._footer_hint.text == "dashboard: http://127.0.0.1:9100/chart/BTC-USD-PERP"
 
 
 # --- space key: open dashboard chart directly from the Coins pane ---
@@ -258,7 +258,7 @@ def test_space_on_highlighted_row_sets_footer_to_dashboard_url() -> None:
     app._handle_global_key(" ")
     assert (
         app._footer_hint.text
-        == "dashboard (copied to clipboard): http://127.0.0.1:8765/chart/BTC-USD-PERP"
+        == "dashboard (copied to clipboard): http://127.0.0.1:9100/chart/BTC-USD-PERP"
     )
     assert app._view == "coins"  # stays on the Coins pane, unlike enter
 

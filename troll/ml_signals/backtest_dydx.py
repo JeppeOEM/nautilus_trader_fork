@@ -29,7 +29,7 @@ bar_interval is a plain Nautilus bar-spec string (e.g. "1-SECOND", "1-MINUTE",
 "5-MINUTE") -- a config value, no code change, per Story 2.3 AC2.
 
 Multi-coin (Story 2.4 AC1-4): symbols=None (the default) resolves the current coin-set via
-ml_signals.watchlist.fetch_watchlist() -- this requires a running dashboard process, so tests
+ml_signals.watchlist.fetch_watchlist() -- this requires a running data_api process, so tests
 must always pass an explicit symbols list instead (see test_watchlist_multi_coin_backtest.py). Each
 symbol gets its own fully independent BacktestRunConfig (own venue/portfolio/strategy instance)
 -- no cross-coin state, no aggregation logic, so per-coin results are trivially distinguishable.
@@ -152,7 +152,7 @@ def run(
             symbols = fetch_watchlist()
         except Exception as exc:
             raise RuntimeError(
-                "failed to fetch the live Watchlist -- is the ml_signals dashboard running "
+                "failed to fetch the live Watchlist -- is data_api running "
                 "(see watchlist.fetch_watchlist's docstring)? Pass an explicit symbols=[...] "
                 "list to bypass the live Watchlist entirely.",
             ) from exc

@@ -41,7 +41,6 @@ _ML_SIGNALS_DIR = Path(__file__).resolve().parent.parent
 
 # AD-8's exact named reader-module list, plus backtest_snapshot.py (see module docstring).
 _READER_MODULES = (
-    "dashboard.py",
     "catalog_stats.py",
     "chart_data.py",
     "metrics_computer.py",

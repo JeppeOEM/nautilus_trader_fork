@@ -24,7 +24,7 @@ See `troll/live_paper/node.py`'s module docstring for the full rationale.
 
 ## Network Security
 
-- **SEC-01** — **Every Docker port is localhost-only. No exceptions, ever.** `ports:` entries must be `"127.0.0.1:HOST:CONTAINER"` — never a bare `"HOST:CONTAINER"`/`"PORT"` (that publishes to `0.0.0.0`). If a service needs no host access at all, use `expose:` instead of `ports:`, or nothing. Remote access is via SSH tunnel (`ssh -L`) only, never a publicly reachable port — including reverse proxies. **Why:** Docker inserts its own `iptables` `ACCEPT` rules ahead of ufw's chain, so a bare port mapping is reachable from the public internet even with `ufw deny <port>`/`ufw default deny incoming` active — ufw never sees the connection, since Docker never routes it through ufw's INPUT chain. Enforced unconditionally by the `check-docker-port-binding` pre-commit hook (`.pre-commit-hooks/check_docker_port_binding.sh`) — no escape-comment override. `troll/docker-compose.yml`'s services already follow this: `redis`/`dozzle` bind `127.0.0.1:PORT:PORT`; `collector`/`dashboard`/`ranking_engine`/`bot_tui`/`live-paper` use `network_mode: host` with the app itself binding `127.0.0.1` (e.g. `dashboard.py`'s `web.run_app(..., host="127.0.0.1", ...)`) instead of a `ports:` mapping.
+- **SEC-01** — **Every Docker port is localhost-only. No exceptions, ever.** `ports:` entries must be `"127.0.0.1:HOST:CONTAINER"` — never a bare `"HOST:CONTAINER"`/`"PORT"` (that publishes to `0.0.0.0`). If a service needs no host access at all, use `expose:` instead of `ports:`, or nothing. Remote access is via SSH tunnel (`ssh -L`) only, never a publicly reachable port — including reverse proxies. **Why:** Docker inserts its own `iptables` `ACCEPT` rules ahead of ufw's chain, so a bare port mapping is reachable from the public internet even with `ufw deny <port>`/`ufw default deny incoming` active — ufw never sees the connection, since Docker never routes it through ufw's INPUT chain. Enforced unconditionally by the `check-docker-port-binding` pre-commit hook (`.pre-commit-hooks/check_docker_port_binding.sh`) — no escape-comment override. `troll/docker-compose.yml`'s services already follow this: `redis`/`dozzle` bind `127.0.0.1:PORT:PORT`; `collector`/`data_api`/`ranking_engine`/`bot_tui`/`live-paper` use `network_mode: host` with the app itself binding `127.0.0.1` (e.g. `data_api`'s `uvicorn --host 127.0.0.1`) instead of a `ports:` mapping.
 
 ---
 
@@ -141,56 +141,47 @@ HFT signals are computed from **1-second sampled snapshots** (`DydxSecondSnapsho
 
 ## Metrics Single Source of Truth (Web Dashboard ↔ bot_tui)
 
-Every metric/indicator shown in both `ml_signals/dashboard.py` and `bot_tui` must trace back to exactly one calculation — never two independent implementations of the same formula, and never two independently-running instances of the same stateful indicator class.
+Every metric/indicator shown in both the web UI (`frontend/` via `data_api`) and `bot_tui` must trace back to exactly one calculation — never two independent implementations of the same formula, and never two independently-running instances of the same stateful indicator class.
 
 - **SSOT-01** — Stateless, single-snapshot derivations (spread, mid price, CVD, volume_delta, avg_trade_size, microprice) live as plain functions/classes in `ml_signals/indicators.py`. Every UI computes them by calling that shared function on the snapshot it already holds — never a local inline reimplementation of the formula. Safe because the output is a pure function of the current snapshot: two processes calling the same function on the same input can never disagree.
 - **SSOT-02** — Stateful/rolling/windowed metrics (OFI/OBI and their z-scores, volatility, pct_1h/pct_24h, EMA trend, `book_features` depth/imbalance/cancellation/cum_delta) must be computed exactly once, by exactly one long-running process, and published (Redis pub/sub or a shared store) for every other reader to consume verbatim. Never let two processes independently subscribe to the same raw feed and run their own copy of a rolling-window indicator, even via the identical shared class — differing startup time, differing window contents, and floating-point accumulation order will silently diverge the two numbers over time. `ranking_engine` is the sole owner of this class of computation (architecture AD-9); `dashboard`/`bot_tui` are pure readers of its published output, never independent computers of it.
 - **SSOT-03** — Before adding any new metric to either UI, check whether it already exists in the other first. If so, locate and consolidate its current implementation onto one shared source before displaying it in the new place — never duplicate to move faster.
-- **SSOT-04** — The coin ranking page is one feature with two renderers: `ml_signals/dashboard.py` (web) and `bot_tui` (TUI). Any functionality applied to it — new columns/metrics, sort/filter behavior, ranking logic changes — must land in both, backed by the same shared source (per SSOT-01/02). Treat a request to change "the ranking page" as covering both unless the user scopes it to one explicitly.
+- **SSOT-04** — The coin ranking page is one feature with two renderers: the web UI (`frontend/` via `data_api`) and `bot_tui` (TUI). Any functionality applied to it — new columns/metrics, sort/filter behavior, ranking logic changes — must land in both, backed by the same shared source (per SSOT-01/02). Treat a request to change "the ranking page" as covering both unless the user scopes it to one explicitly.
 - **SSOT-05** — Same rule for the single-coin detail view: the metrics/indicators shown must match between web and `bot_tui`, per-coin. The web dashboard additionally has a per-coin page with visual graphs (charts/plots) — that page is web-only and is not duplicated in the TUI; `bot_tui`'s coin detail should instead surface a link/reference to the web graph page rather than reimplementing charting in the terminal.
 
 ---
 
 ## Desktop ↔ VPS Connection
 
-`dashboard`/`bot_tui` normally run *on* the VPS (`nifelheim`) alongside `collector`,
-inside Docker (`make up`). Since Story 12.2 (`DATA_API_URL` remote-data mode, see
-`ARCHITECTURE.md`'s "Running dashboard/bot_tui off the VPS" section), the desktop can
-instead run them locally and reach `nifelheim` only for data, via shell functions in
-`~/.zshrc`:
+The web UI (`data_api` serving the React SPA, Story 15.10 retired the old `dashboard`
+service) and `bot_tui` normally run *on* the VPS (`nifelheim`) alongside `collector`,
+inside Docker (`make up`). From the desktop there is exactly **one tunneled web surface,
+`data_api`** — it serves the UI and its API from the same port, so no local process is
+needed for the browser. Shell functions in `~/.zshrc` (outside this repo):
 
 - **`_troll_tunnel_ensure`** — opens one background SSH tunnel to `$TROLL_VPS_HOST`
-  (`nifelheim`) forwarding two ports: `6379` (Redis — live snapshots/rankings pub/sub)
-  and `9100` (`data_api`, the FastAPI wrapper over the Parquet catalog + `metrics.db` --
-  read-only except for the picker's own `chart_indicators.toml` config writes, Story
-  15.6). Idempotent — checks `fuser 6379/tcp` first, so repeated calls don't stack
-  tunnels.
-- **`_troll_dashboard_ensure`** — ensures the tunnel, then runs `make dashboard` locally
-  (in `$TROLL_DIR`) with `REDIS_URL`/`DATA_API_URL` pointed at the tunnel's local end
-  (`127.0.0.1:6379`/`127.0.0.1:9100`), backgrounded, logging to
-  `/tmp/troll-dashboard.log`. No local catalog/`metrics.db` mount needed — every
-  historical read goes over the tunnel to `data_api` instead.
-- **`troll-web`** — the entry point: ensures the dashboard is up (above), then opens it
-  in Firefox at `http://localhost:$TROLL_WEB_PORT` (`7766`, matching the VPS's own
-  `troll/.env` `WEB_PORT` there) — **this must match `WEB_PORT` in the desktop's own
-  `troll/.env`** (which the Makefile's `dashboard`/`web` targets actually bind to,
-  independently of whatever the VPS is running on); the two settings don't check each
-  other, and a mismatch makes `_troll_dashboard_ensure` poll the wrong port until it
-  times out, causing `troll-web` to fail silently instead of opening the browser. Since
-  desktop and VPS each have their own gitignored `.env`, nothing enforces this
-  agreement automatically — if you ever change one side's `WEB_PORT`, change the other
-  to match.
-- **`troll-tui`** — same dashboard/tunnel dependency, plus starts
-  `scripts/open_listener.go` locally (`$TROLL_OPEN_LISTENER_PORT`, `8901`) so that
-  pressing "open chart" inside `bot_tui` (which itself runs via `make tui`, rebuilding
-  only the thin `bot_tui` Docker layer) can pop a chart open in the desktop's browser —
-  `bot_tui` has no `DATA_API_URL` use of its own, it only needs live Redis.
+  (`nifelheim`) forwarding two ports: `6379` (Redis — live snapshots/rankings pub/sub,
+  needed by `bot_tui`) and `9100` (`data_api`: the React UI, REST/WebSocket API, the
+  Parquet catalog + `metrics.db` read-only, and the picker's own `chart_indicators.toml`
+  config writes, Story 15.6). Idempotent — checks `fuser 6379/tcp` first, so repeated
+  calls don't stack tunnels.
+- **`troll-web`** — ensures the tunnel, then opens Firefox at `http://localhost:9100`
+  (the tunneled `data_api`). There is no local dashboard process any more, so no
+  `WEB_PORT` to keep in sync between desktop and VPS `.env` files.
+- **`troll-tui`** — same tunnel dependency, plus starts `scripts/open_listener.go`
+  locally (`$TROLL_OPEN_LISTENER_PORT`, `8901`) so that pressing "open chart" inside
+  `bot_tui` (which itself runs via `make tui`, rebuilding only the thin `bot_tui` Docker
+  layer) can pop a chart open in the desktop's browser. `bot_tui` only needs live Redis;
+  its chart deep-link targets `DASHBOARD_BASE_URL` (defaults to `data_api`'s port).
 - **`troll-logs`** — a separate, independent tunnel (`-L 8080:localhost:8080` to
   `nifelheim`) for Dozzle, the container log viewer; unrelated to the Redis/`data_api`
   tunnel above. Opened with plain `xdg-open`, not Firefox directly.
-- **`troll-down`** — tears everything back down: kills the `open_listener` process,
-  frees `$TROLL_WEB_PORT`, and kills any `ssh.*nifelheim` tunnel (both the
-  Redis/`data_api` one and the Dozzle one).
+- **`troll-down`** — tears everything back down: kills the `open_listener` process and any
+  `ssh.*nifelheim` tunnel (both the Redis/`data_api` one and the Dozzle one).
+
+**Migration note (Story 15.10):** `_troll_dashboard_ensure`, `$TROLL_WEB_PORT` and
+`make dashboard` no longer exist in the repo — `~/.zshrc` must drop the first two and
+point `troll-web` at `http://localhost:9100`, or it will poll a port nothing listens on.
 
 **Why this exists:** running the web UI/TUI on the desktop instead of the VPS gets a
 real browser and better interactivity without exposing any VPS port publicly — SEC-01

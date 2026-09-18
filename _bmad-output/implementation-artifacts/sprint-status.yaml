@@ -22,6 +22,7 @@
 #   - in-progress: Developer actively working on implementation
 #   - review: Ready for code review (via Dev's code-review workflow)
 #   - done: Story completed
+#   - superseded: Story will never ship; its target surface was removed by another story
 #
 # Retrospective Status:
 #   - optional: Can be completed but not required
@@ -193,7 +194,7 @@ development_status:
   # `backlog`/`ready-for-dev`) specifically so ACTIONABLE_STATUSES excludes it and neither
   # a plain `bmad-loop run` nor `sweep` auto-picks it back up; epic-14 itself stays
   # in-progress (not closed) since 15.10 is still the intended formal close, per epics.md.
-  14-3-preserve-120-bar-zoom-through-indicator-overlay-repaints: in-progress
+  14-3-preserve-120-bar-zoom-through-indicator-overlay-repaints: superseded  # dashboard.py chart page deleted in 15.10, never shipped
 
   # epic-15 has a real epics.md entry (2026-09-14, FR38-46/NFR6-9: full React/TypeScript
   # rewrite of dashboard.py into a Read-Only Facade + SPA, backed by a finalized PRD and
@@ -213,7 +214,7 @@ development_status:
   # 17-2-unpark-and-complete-story-15-8-31-day-metrics-history for the actual work.
   15-8-31-day-metrics-history-page: done
   15-9-terminal-ansi-visual-identity: done
-  15-10-cutover-retire-dashboard-py-close-epic-14: ready-for-dev
+  15-10-cutover-retire-dashboard-py-close-epic-14: review  # code cut over; owed: browser parity walk + SSH-tunnel perf check (AC1, AC6)
 
   # epic-16 has a real epics.md entry (2026-09-14, FR47-50/NFR10: incremental 1-minute
   # rollup cache) but never got a sprint-planning run until now (2026-09-17) -- no story

@@ -15,7 +15,7 @@
 """
 Lean, dependency-light fetch helper for the live Watchlist (FR-7).
 
-Deliberately kept separate from dashboard.py: a backtest script or Jupyter notebook
+Deliberately dependency-light: a backtest script or Jupyter notebook
 that only wants the current coin-set should not have to import aiohttp, plotly,
 redis, or every indicator class just to call fetch_watchlist().
 """
@@ -24,15 +24,16 @@ import json
 import urllib.request
 
 
-def fetch_watchlist(dashboard_url: str = "http://127.0.0.1:8765") -> list[str]:
+def fetch_watchlist(data_api_url: str = "http://127.0.0.1:9100") -> list[str]:
     """
-    Fetch the current live Watchlist coin-set from a running dashboard.
+    Fetch the current live Watchlist coin-set from a running data_api.
 
-    Requires the ml_signals dashboard process to be up and reachable at dashboard_url --
-    the live Watchlist only exists in that process's memory (fed from Redis), there is
-    no other queryable store of "current live ranking" yet (see Story 1.4 for history).
+    Requires data_api to be up and reachable at data_api_url -- the live Watchlist only
+    exists as ranking_engine's published rankings, which data_api relays at /api/rankings
+    (503 until its first message arrives, which raises here rather than returning []).
     """
-    url = f"{dashboard_url.rstrip('/')}/api/watchlist"
-    request = urllib.request.Request(url)  # noqa: S310 (local dashboard, not a remote host)
+    url = f"{data_api_url.rstrip('/')}/api/rankings"
+    request = urllib.request.Request(url)  # noqa: S310 (local data_api, not a remote host)
     with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310
-        return json.load(response)["instrument_ids"]
+        items = json.load(response)["items"]
+    return [r["instrument_id"] for r in items if isinstance(r, dict) and "instrument_id" in r]

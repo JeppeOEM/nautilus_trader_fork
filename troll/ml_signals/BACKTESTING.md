@@ -22,7 +22,7 @@ Each file's `run()` returns results programmatically (from a notebook/script) an
 tuning knobs — e.g. `backtest_dydx.run(symbols=["BTC-USD-PERP.DYDX"], bar_interval="5-MINUTE")`.
 
 `backtest_dydx.py` defaults to backtesting every coin in the live Watchlist (needs
-`make dashboard` running); pass `symbols=[...]` to skip that dependency.
+`data_api` running); pass `symbols=[...]` to skip that dependency.
 
 ---
 

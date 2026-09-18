@@ -24,7 +24,6 @@ Run all `make` commands from `troll/`:
 | `make web` | Open Dozzle log viewer in browser |
 | `make prune` | Delete `order_book_deltas` older than 14 days |
 | `make prune-dry` | Preview what `prune` would delete |
-| `make dashboard` | Start the ml_signals dashboard on port 8765 |
 
 ---
 
@@ -76,7 +75,7 @@ make web       # open Dozzle log viewer (http://localhost:8080)
 
 The catalog appears at `troll/dydx_collector/catalog/` on the host, owned by your user (uid 1000).
 
-**OFI / data dashboard:** run `make dashboard` in a separate terminal to start the ml_signals dashboard on `http://localhost:8765`. Shows per-coin footprint charts, Microprice, Order Flow Imbalance, and data coverage/gap detection. Reads directly from the catalog — no collector restart needed.
+**Web dashboard:** `make up` starts `data_api`, which serves the React UI on `http://localhost:9100` — rankings, per-coin candlestick/indicator charts, 31-day metrics history, and docs. Reads directly from the catalog — no collector restart needed.
 
 ---
 
@@ -99,10 +98,10 @@ make harden-ssh            # key-only SSH auth -- confirm your key works first!
 **From your PC**, with Tailscale running locally too:
 
 ```bash
-ssh -N -L 8765:127.0.0.1:8765 -L 8080:127.0.0.1:8080 you@<vps-tailscale-ip>
+ssh -N -L 9100:127.0.0.1:9100 -L 8080:127.0.0.1:8080 you@<vps-tailscale-ip>
 ```
 
-Leave that running, then open `http://localhost:8765` (dashboard) or
+Leave that running, then open `http://localhost:9100` (dashboard) or
 `http://localhost:8080` (Dozzle logs) in your own browser. `-N` means the SSH session
 does nothing but hold the tunnel open — no shell needed.
 
@@ -156,7 +155,7 @@ python backtest_dydx.py
 
 Streams trade ticks from the catalog and aggregates bars internally at a configurable wall-clock interval. Adjust `bar_interval` (e.g. `"1-SECOND"`, `"1-MINUTE"`, `"5-MINUTE"`), `buy_threshold`, `sell_threshold` by passing args to `run()`.
 
-By default `run()` backtests every coin in the live Watchlist (requires `make dashboard` running -- if it's not reachable, `run()` raises a clear error rather than a raw connection traceback) and returns a `dict[str, BacktestResult]` keyed by symbol. Pass `symbols=["BTC-USD-PERP.DYDX", ...]` to backtest an explicit coin-set instead. A Watchlist coin with no matching catalog instrument yet is skipped (logged as a warning, not a crash) rather than aborting the whole run -- check the logs if the returned dict has fewer entries than expected.
+By default `run()` backtests every coin in the live Watchlist (requires `data_api` running -- if it's not reachable, `run()` raises a clear error rather than a raw connection traceback) and returns a `dict[str, BacktestResult]` keyed by symbol. Pass `symbols=["BTC-USD-PERP.DYDX", ...]` to backtest an explicit coin-set instead. A Watchlist coin with no matching catalog instrument yet is skipped (logged as a warning, not a crash) rather than aborting the whole run -- check the logs if the returned dict has fewer entries than expected.
 
 See [`ml_signals/BACKTESTING.md`](ml_signals/BACKTESTING.md) for the other backtest runners, how to build a new strategy, and which data feed to subscribe to.
 

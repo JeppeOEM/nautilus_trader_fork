@@ -151,11 +151,11 @@ def test_run_rejects_a_bare_str_symbols_argument() -> None:
 
 def test_run_wraps_a_fetch_watchlist_failure_in_a_clear_runtime_error(monkeypatch) -> None:
     def _raise() -> list[str]:
-        raise ValueError("dashboard unreachable")
+        raise ValueError("data_api unreachable")
 
     monkeypatch.setattr(backtest_dydx, "fetch_watchlist", _raise)
 
-    with pytest.raises(RuntimeError, match="dashboard") as exc_info:
+    with pytest.raises(RuntimeError, match="data_api") as exc_info:
         backtest_dydx.run(symbols=None)
     assert isinstance(exc_info.value.__cause__, ValueError)
 

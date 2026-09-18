@@ -56,7 +56,7 @@ dYdX WS/REST (Rust nautilus_pyo3 client)
         │  └─────────────────────────────┘
         │                            metrics.db (SQLite, ranking history)
         │
-        ├──► ml_signals.dashboard (web, :8765)   — reads snapshots:raw + rankings:live
+        ├──► data_api (web UI + REST, :9100)      — reads snapshots:raw + rankings:live
         │
         ├──► bot_tui (terminal, on-demand)        — reads snapshots:raw + rankings:live
         │                                            + bots:status; writes ranking:control
@@ -127,8 +127,7 @@ reimplements.
   helpers for the dashboard (spread, microprice, footprint charts, OHLC aggregation) —
   none of it is stored, all computed on read per `troll/CLAUDE.md`'s 1s-based signal
   architecture rule.
-- **`watchlist.py`** — `fetch_watchlist()` hits the dashboard's HTTP watchlist endpoint
-  to get the live, ranked coin set — this is how a backtest gets a dynamic instrument
+- **`watchlist.py`** — `fetch_watchlist()` reads `data_api`'s `/api/rankings` to get the live, ranked coin set — this is how a backtest gets a dynamic instrument
   universe instead of a hardcoded list.
 - **`backtest_dydx.py` / `backtest_ofi.py` / `backtest_snapshot.py`** — `BacktestNode` +
   `BacktestDataConfig` runs (no custom matching engine anywhere). `backtest_dydx.py`
@@ -137,57 +136,24 @@ reimplements.
   reference strategies, referenced via `ImportableStrategyConfig` by string path.
 - **`metrics_computer.py`** — pure computation used by `ranking_engine` to score coins;
   lives here (not in `ranking_engine`) so the same math is reachable from research code.
-- **`dashboard.py`** — the web UI (`:8765`), covered in its own section below.
 - **`rank_history.py` / `catalog_stats.py`** — supporting queries for the history view
   and catalog coverage/gap diagnostics.
 
 **Reads:** Parquet catalog, Redis (`snapshots:raw`, `rankings:live`), `metrics.db`.
 **Publishes:** `ranking:control` (mode-switch requests only).
-**Serves:** HTTP on `:8765` (dashboard + watchlist API).
+**Serves:** nothing itself -- the web UI is `data_api` + `frontend/` (next section).
 
 ---
 
-## 2a. `ml_signals/dashboard.py` — the web interface
+## 2a. Web UI — `data_api/` + `frontend/`
 
-Single `aiohttp` app, `:8765`, `make dashboard` or the `dashboard` compose service.
-Mixed rendering: some routes serve a client-side SPA shell that fetches JSON and draws
-with Plotly, others are server-rendered HTML built directly from in-memory state — no
-separate frontend build (`troll/package-lock.json` is an empty placeholder lockfile,
-not a real JS app; there is no `npm install`/build step anywhere in this system).
-
-Optional remote-data mode (Story 12.2): when `DATA_API_URL` is set, the 4 routes that
-otherwise read the catalog/`metrics.db` off local disk (`/history/{id}`, `/chart/{id}`,
-`/api/rank_history/{id}`, `/data/coin/{id}/lines`) fetch the same data from a running
-`data_api` instance over HTTP instead — see "Running dashboard/bot_tui off the VPS"
-below. Unset (the VPS default), behavior is unchanged.
-
-**In-memory state, kept live by a background Redis subscriber task
-(`redis_subscriber_ctx`/`_redis_listener`):** `_LIVE_FAST` (per-instrument latest
-snapshot-derived values), `_LIVE_SLOW` (slower/rollup values), `_OFI_INDS` (per-coin OFI
-indicator instances), `_LATEST_RANKING` (last `rankings:live` message).
-
-| Route | Kind | Purpose |
-|---|---|---|
-| `GET /` | HTML (SPA shell) | Main rankings table — defaults to volume-sort (Story 1.2), client-side sortable by any column, polls `/api/rankings` |
-| `GET /coin/{id}` | HTML (SPA shell) | Same SPA shell, client-side-routed to a coin's live view (Microprice/OFI/OBI/spread + footprint chart) |
-| `GET /live` | HTML (server-rendered) | `_render_live_page()` — all-coins live snapshot table, no client JS routing |
-| `GET /chart/{id}` | HTML (server-rendered) | `_render_chart_page()` — historical Plotly chart for one coin, `start`/`end` query params (ISO datetimes) |
-| `GET /history/{id}` | HTML (server-rendered) | `_render_history_page()` — this coin's ranking-history view (FR8), backed by `ranking_engine`'s `metrics.db` |
-| `GET /debug` | JSON | In-memory state counts + one sample entry — operator sanity check, not part of any UI flow |
-| `GET /api/rankings` | JSON | Full current rankings table, same shape `rankings:live` carries |
-| `GET /api/watchlist` | JSON | `{instrument_ids: [...]}` — FR7's live watchlist; thin proxy over the last `rankings:live` message (no separate Redis call), this is what `ml_signals.watchlist.fetch_watchlist()` calls |
-| `GET /api/rank_history/{id}?ts=<iso8601>` | JSON | Nearest historical rank/volume for a coin at a given timestamp (FR8) |
-| `GET /data/coin/{id}` | JSON | `_coin_chart_json()` — chart series with `None` gaps inserted at data breaks >2.5s (DATA-01: an honest break, never an interpolated flatline) |
-| `GET /data/coin/{id}/candles?bar=<seconds>&start=&end=` | JSON | OHLC candles aggregated from catalog trade data at a configurable bar size |
-| `GET /data/live/{id}` | JSON | Polled every 5s by `/coin/{id}`'s live panel — `ofi_10/5/3`, `obi_10/5/3`, `microprice`, `microprice_lean`, `spread`, `cvd`, `volume_delta`, `buy_count`, `sell_count`, `avg_trade_size`, `price` |
-
-**Writes on operator action:** switching Ranking Mode in the UI publishes to
-`ranking:control` (`ranking_engine` owns the actual mode state — the dashboard never
-computes ranking itself, same discipline `bot_tui`'s `m` key follows).
-
-**Reads:** Parquet catalog (chart/candle data), Redis (`snapshots:raw`, `rankings:live`
-subscriptions), `metrics.db` (read-only — `ranking_engine` is the sole writer).
-
+`ml_signals/dashboard.py` (the old aiohttp HTML app) was retired in Story 15.10. The web
+UI is now the React SPA in `troll/frontend/` (Rankings, Chart, 31-day History, Docs),
+served by the `data_api` FastAPI app on `:9100` (`127.0.0.1` only) alongside its REST +
+WebSocket API: `/api/rankings`, `/api/candles/{id}`, `/api/snapshots/{id}`,
+`/api/indicator-series/{id}`, `/api/coin/{id}/indicators`, `/api/metrics/history|nearest/{symbol}`,
+and `/ws/live`. `data_api` reads the catalog/`metrics.db` read-only. Dropped without a
+React equivalent: the `/debug` state dump and the server-rendered `/live` table.
 ---
 
 ## 3. `ranking_engine/` — the one place ranking gets computed
@@ -283,9 +249,9 @@ SSH-launched tool, not a background service.
 
 | Channel | Publisher(s) | Subscriber(s) | Payload |
 |---|---|---|---|
-| `snapshots:raw` | `dydx_collector` | `ranking_engine`, `dashboard`, `bot_tui` | One `DydxSecondSnapshot`-shaped message per instrument per second |
-| `rankings:live` | `ranking_engine` | `dashboard`, `bot_tui` | `{mode, updated_at, ranks: [{instrument_id, rank, volume24h, volatility_score}]}`, on change + heartbeat |
-| `ranking:control` | `dashboard`, `bot_tui` | `ranking_engine` | Mode-switch request (`"volume"` \| `"volatility"`), last-write-wins |
+| `snapshots:raw` | `dydx_collector` | `ranking_engine`, `data_api`, `bot_tui` | One `DydxSecondSnapshot`-shaped message per instrument per second |
+| `rankings:live` | `ranking_engine` | `data_api`, `bot_tui` | `{mode, updated_at, ranks: [{instrument_id, rank, volume24h, volatility_score}]}`, on change + heartbeat |
+| `ranking:control` | `data_api`, `bot_tui` | `ranking_engine` | Mode-switch request (`"volume"` \| `"volatility"`), last-write-wins |
 | `bots:status` | `live_paper` | `bot_tui` | Per-bot PnL/position/mode/heartbeat, on a timer |
 | `bots:control` | `bot_tui` | `live_paper` | `{bot_id, action: "start"|"stop"}` — never a mode field |
 
@@ -293,8 +259,8 @@ SSH-launched tool, not a background service.
 
 | Store | Writer | Readers | Contents |
 |---|---|---|---|
-| Parquet catalog (`dydx_collector/catalog/`) | `dydx_collector` | `ml_signals` (dashboard, backtests), Jupyter | Trades, order book deltas, bars, mark/index price, funding rate, instruments, `DydxOpenInterest` — Nautilus-native, zero-conversion |
-| `metrics.db` (SQLite) | `ranking_engine` | `dashboard` (read-only mount) | Historical ranking snapshots (Story 1.4/FR8) |
+| Parquet catalog (`dydx_collector/catalog/`) | `dydx_collector` | `ml_signals`, `data_api`, backtests, Jupyter | Trades, order book deltas, bars, mark/index price, funding rate, instruments, `DydxOpenInterest` — Nautilus-native, zero-conversion |
+| `metrics.db` (SQLite) | `ranking_engine` | `data_api` (read-only mount) | Historical ranking snapshots (Story 1.4/FR8) |
 | Nautilus `Cache` (in-memory, `live_paper`) | `live_paper` | nobody external yet | Orders/positions/fills for the running bot — **not yet Redis-backed**, lost on restart |
 
 ---
@@ -308,42 +274,30 @@ without an SSH tunnel over Tailscale (see README's remote-access section).
 |---|---|---|---|
 | `redis` | yes (`make up`) | `always` | Shared bus, no state to lose |
 | `collector` | yes | `always` | Core data path, must self-heal |
-| `dashboard` | yes | `always` | Read-only web UI |
 | `ranking_engine` | yes | `always` | Sole ranking computer |
-| `data_api` | yes | `always` | Read-only FastAPI wrapper over the catalog/`metrics.db` (Story 12.1), `:9100` — lets `dashboard`/`bot_tui` run off-VPS via `DATA_API_URL` instead of a local catalog/metrics mount (Story 12.2) |
+| `data_api` | yes | `always` | Web UI (React SPA) + read-only FastAPI over the catalog/`metrics.db`, `:9100` |
 | `dozzle` | yes | `always` | Log viewer, `:8080` |
 | `live-paper` | **no** — `profiles: ["live-paper"]`, `make up-live-paper` | `on-failure:5` | Explicit opt-in per Story 3.1; capped restarts so a bad config doesn't crash-loop against dYdX's API |
 | `bot_tui` | **no** — `profiles: ["tui"]`, `docker compose run` | n/a (one-shot) | Interactive tool, never a background daemon |
 
 Two-image split: `nautilus-trader-base` (rebuilt rarely, `make build-base`, ~15 min) →
-`collector.dockerfile` (thin layer, rebuilds in seconds) reused by collector, dashboard,
+`collector.dockerfile` (thin layer, rebuilds in seconds) reused by collector,
 ranking_engine, `data_api`, and bot_tui; `live_paper.dockerfile` is `live-paper`'s own
 thin layer on the same base.
 
-### Running `dashboard`/`bot_tui` off the VPS (Story 12.2)
+### Running the UI/`bot_tui` off the VPS
 
-Both normally run co-located with the collector. `bot_tui` only ever needs live Redis
-data (`REDIS_URL`, already supported); `dashboard` additionally reads the catalog/
-`metrics.db` straight off local disk for its 4 historical routes. Tunnel the two ports
-either needs — Redis (`6379`) and, for `dashboard`'s historical reads, `data_api`
-(`9100`) — over the same SSH-over-Tailscale mechanism README.md's "Remote access via
-Tailscale + SSH tunnel" section already sets up:
+The whole web UI is one tunneled surface: `data_api` (`9100`). `bot_tui` additionally
+needs live Redis (`6379`). Tunnel both over the SSH-over-Tailscale mechanism README.md's
+"Remote access via Tailscale + SSH tunnel" section sets up:
 
 ```bash
 ssh -N -L 6379:127.0.0.1:6379 -L 9100:127.0.0.1:9100 you@<vps-tailscale-ip>
 ```
 
-Then, on the laptop, point the local process at the tunnel instead of local disk:
-
-```bash
-REDIS_URL=redis://127.0.0.1:6379 DATA_API_URL=http://127.0.0.1:9100 make dashboard
-REDIS_URL=redis://127.0.0.1:6379 make tui   # bot_tui has no DATA_API_URL use -- Redis only
-```
-
-No catalog or `metrics.db` mount is needed locally for `dashboard` in this mode — every
-read that would otherwise hit local disk goes through the tunnel to `data_api` instead
-(see `ml_signals/dashboard.py`'s `DATA_API_URL` branch).
-
+Then open `http://localhost:9100` for the UI, and run
+`REDIS_URL=redis://127.0.0.1:6379 make tui` for the terminal UI. No local catalog or
+`metrics.db` is needed.
 ---
 
 ## What's genuinely not finished
