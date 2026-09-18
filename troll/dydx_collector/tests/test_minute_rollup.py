@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from dydx_collector.minute_rollup import _MINUTE_NS
 from dydx_collector.minute_rollup import MinuteRollupBuilder
 from dydx_collector.second_snapshot import DydxSecondSnapshot
@@ -7,7 +9,9 @@ from nautilus_trader.model.identifiers import InstrumentId
 IID = "BTC-USD-PERP.DYDX"
 
 
-def _snap(sec: int, bid: float = 100.0, bsz: float = 1.0, trade: float | None = None, buy: float = 0.0):
+def _snap(
+    sec: int, bid: float = 100.0, bsz: float = 1.0, trade: float | None = None, buy: float = 0.0
+) -> DydxSecondSnapshot:
     ts = sec * 1_000_000_000
     return DydxSecondSnapshot(
         instrument_id=InstrumentId.from_str(IID),
@@ -87,7 +91,7 @@ def test_dict_roundtrip() -> None:
     assert DydxMinuteRollup.to_dict(DydxMinuteRollup.from_dict(DydxMinuteRollup.to_dict(r))) == DydxMinuteRollup.to_dict(r)
 
 
-def test_catalog_write_read_roundtrip(tmp_path) -> None:
+def test_catalog_write_read_roundtrip(tmp_path: Path) -> None:
     from dydx_collector.minute_rollup import DydxMinuteRollup
     from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
@@ -96,3 +100,19 @@ def test_catalog_write_read_roundtrip(tmp_path) -> None:
     catalog.write_data([r])
     (out,) = catalog.custom_data(DydxMinuteRollup)
     assert DydxMinuteRollup.to_dict(out.data) == DydxMinuteRollup.to_dict(r)
+
+
+def test_gap_in_seconds_suppresses_phantom_ofi() -> None:
+    (r,) = _feed(MinuteRollupBuilder(), [_snap(0, bid=100.0), _snap(1, bid=100.0), _snap(30, bid=500.0), _snap(60)])
+    assert r.ofi_5 == 0.0
+
+
+def test_out_of_order_snapshot_is_ignored() -> None:
+    b = MinuteRollupBuilder()
+    assert _feed(b, [_snap(61), _snap(5)]) == []
+    assert _feed(b, [_snap(120)])[0].seconds_observed == 1
+
+
+def test_rollup_ts_init_is_not_before_minute_end() -> None:
+    (r,) = _feed(MinuteRollupBuilder(), [_snap(0), _snap(60)])
+    assert r.ts_init >= _MINUTE_NS

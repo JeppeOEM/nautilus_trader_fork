@@ -37,6 +37,9 @@ from nautilus_trader.serialization.arrow.serializer import register_arrow
 
 _MINUTE_NS = 60_000_000_000
 _LEVELS = (5, 10)
+# Snapshots arrive every 1s; a longer silence means the collector skipped seconds (stale/crossed
+# book), so the next book must not be diffed against the pre-gap one.
+_MAX_GAP_NS = 2_000_000_000
 _OPTIONAL_FLOATS = ("open", "high", "low", "close")
 _FLOATS = (
     "buy_volume",
@@ -175,10 +178,17 @@ class MinuteRollupBuilder:
         self._ofi: dict[tuple[str, int], MultiLevelOFI] = {}
         self._obi: dict[tuple[str, int], MultiLevelOBI] = {}
         self._primed: dict[str, bool] = {}
+        self._last_ts: dict[str, int] = {}
 
     def update(self, iid: str, s: DydxSecondSnapshot) -> DydxMinuteRollup | None:
         bucket = s.ts_event // _MINUTE_NS
         cur = self._minutes.get(iid)
+        last_ts = self._last_ts.get(iid)
+        if last_ts is not None and s.ts_event <= last_ts:
+            return None  # duplicate/out-of-order: would close the wrong minute
+        if last_ts is not None and s.ts_event - last_ts > _MAX_GAP_NS:
+            self.discard_book_state(iid)
+        self._last_ts[iid] = s.ts_event
         closed = None
         if cur is not None and bucket != cur.bucket:
             closed = self._close(iid, cur)
@@ -187,6 +197,15 @@ class MinuteRollupBuilder:
             cur = self._minutes[iid] = _Minute(bucket=bucket, last=s)
         self._accumulate(iid, cur, s)
         return closed
+
+    def drop(self, iid: str) -> None:
+        """Forget an unsubscribed instrument entirely (MEM-02); its open minute is not emitted."""
+        self._minutes.pop(iid, None)
+        self._primed.pop(iid, None)
+        self._last_ts.pop(iid, None)
+        for n in _LEVELS:
+            self._ofi.pop((iid, n), None)
+            self._obi.pop((iid, n), None)
 
     def discard_book_state(self, iid: str) -> None:
         """Book rebuilt from scratch: next OFI update is a first observation, not a delta."""
@@ -206,7 +225,7 @@ class MinuteRollupBuilder:
             obi.update_raw(s.bid_sizes, s.ask_sizes)
             m.obi[n] += obi.value
         self._primed[iid] = True
-        if s.open_price is not None:
+        if None not in (s.open_price, s.high_price, s.low_price, s.close_price):
             m.open = s.open_price if m.open is None else m.open
             m.high = s.high_price if m.high is None else max(m.high, s.high_price)
             m.low = s.low_price if m.low is None else min(m.low, s.low_price)
@@ -224,7 +243,8 @@ class MinuteRollupBuilder:
         return DydxMinuteRollup(
             instrument_id=InstrumentId.from_str(iid),
             ts_event=m.bucket * _MINUTE_NS,
-            ts_init=s.ts_init,
+            # Knowable only once the minute ends; an earlier ts_init would be look-ahead.
+            ts_init=max(s.ts_init, (m.bucket + 1) * _MINUTE_NS),
             open=m.open,
             high=m.high,
             low=m.low,

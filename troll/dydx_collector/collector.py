@@ -74,11 +74,11 @@ from dydx_collector.config import CollectorConfig
 from dydx_collector.config import InstrumentEntry
 from dydx_collector.config import load_config
 from dydx_collector.config import save_config
+from dydx_collector.minute_rollup import MinuteRollupBuilder
 from dydx_collector.open_interest import _fetch_markets_json
 from dydx_collector.open_interest import classify_liquidity
 from dydx_collector.open_interest import fetch_open_interest
 from dydx_collector.prune_catalog import prune_instrument
-from dydx_collector.minute_rollup import MinuteRollupBuilder
 from dydx_collector.second_snapshot import BOOK_DEPTH
 from dydx_collector.second_snapshot import DydxSecondSnapshot
 from nautilus_trader.core import nautilus_pyo3
@@ -721,6 +721,7 @@ class Collector:
         await self._client.unsubscribe_trades(iid)
         await self._client.unsubscribe_orderbook(iid)
         self._clear_book_state(iid)
+        self._minute_rollup.drop(iid)
         logger.info(f"Unsubscribed {iid}")
 
     def _clear_book_state(self, iid: str) -> None:
@@ -1195,7 +1196,12 @@ class Collector:
                 )
                 batch.append(snapshot)
                 self._on_data(snapshot)  # routes to buffer → Parquet flush
-                rollup = self._minute_rollup.update(iid, snapshot)
+                try:
+                    rollup = self._minute_rollup.update(iid, snapshot)
+                except Exception:
+                    # A rollup bug must not stop every other instrument's snapshots.
+                    logger.exception("Minute rollup failed for %s", iid)
+                    rollup = None
                 if rollup is not None:
                     self._on_data(rollup)
 
