@@ -231,7 +231,7 @@ export const INDICATORS: Indicator[] = [
     related: ["vol_fast", "vol_catalog", "volume24h"],
   },
   {
-    id: "pct_change", group: "market", name: "pct_1h / pct_24h", cadence: "slow", window: "60s refresh, read from the same 25h price series as Vol(catalog)",
+    id: "pct_change", group: "market", name: "pct_1h / pct_24h (+ pct_1w / pct_1m from metrics_store)", cadence: "slow", window: "60s refresh, read from the same 25h price series as Vol(catalog)",
     owner: "ml_signals.catalog_stats.price_stats_from_series()",
     shownIn: ["Ranking table (web + bot_tui)", "Coin detail"],
     tagline: "Percent change in mid price over the trailing 1h / 24h.",

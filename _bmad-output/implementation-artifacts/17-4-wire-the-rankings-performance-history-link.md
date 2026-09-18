@@ -1,6 +1,6 @@
 # Story 17.4: Wire the Rankings/Performance → History link
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 

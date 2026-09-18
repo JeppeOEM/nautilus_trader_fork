@@ -385,7 +385,7 @@ changes (`RankingsPublisher._ranks_key`: instrument_id, rank, `ofi_10_z`, `sprea
 
 Every `DB_WRITE_INTERVAL_SECONDS` (60s), `_slow_loop_task` merges the current rank +
 `volume24h` into that pass's snapshots and writes them to a SQLite table
-(`ranking_engine/metrics_store.py`), columns: `price`, `pct_1h`, `pct_24h`,
+(`ranking_engine/metrics_store.py`), columns: `price`, `pct_1h`, `pct_24h`, `pct_1w`, `pct_1m`,
 `volatility`, `ofi`, `microprice`, `spread`, `rank`, `volume24h` — a 31-day rolling
 history used by the dashboard's per-coin history page. Note this stored `ofi` column
 is the **top-of-book-only** `OrderFlowImbalance` from `metrics_computer.compute_all`
@@ -415,7 +415,7 @@ trading decision.
 | `DydxSecondSnapshot.buy_volume`/`sell_volume`/`buy_count`/`sell_count` | `trade_aggregates()`, `volume_delta()` | `cvd`, `volume_delta`, `avg_trade_size`, `buy_count`, `sell_count` | |
 | `DydxSecondSnapshot` mid-price sequence | `VolatilityTracker` (3600s cross-sectional) | `volatility_score` | **this is the sort key when mode = `"volatility"`** |
 | `DydxSecondSnapshot` mid-price sequence (300-tick window) | `statistics.stdev` fast volatility | `volatility_fast` | separate from `volatility_score` and catalog `volatility` — 3 distinct volatility numbers by design |
-| `DydxSecondSnapshot.close_price` (25h lookback; `TradeTick` pre-cutover) | `price_stats()` → `pct_change_1h/24h`, catalog `volatility` | `pct_1h`, `pct_24h`, `volatility` | via `metrics_computer.compute_all`, refreshed every 60s |
+| `DydxSecondSnapshot.close_price` (25h lookback; `TradeTick` pre-cutover) | `price_stats()` → `pct_change_1h/24h`, catalog `volatility` | `pct_1h`, `pct_24h`, `volatility` | via `metrics_computer.compute_all`, refreshed every 60s. `pct_1w`/`pct_1m` come from `metrics_store`'s persisted prices (`price_near_days_ago`), `None` until 7/30 days of history exist |
 | dYdX indexer `volume24H` (independent poll) | — (used as-is) | `volume24h` | **this is the sort key when mode = `"volume"` (default)** |
 | `OrderBookDeltas` | `book_features.py`, `chart_data.py`, `footprint.py` | *not present* | chart-page-only; never reaches `ranking_engine` |
 | `MarkPriceUpdate` / `IndexPriceUpdate` | — | *not present* | stored, no downstream reader found |

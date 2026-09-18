@@ -262,6 +262,8 @@ _COIN_DETAIL_INDICATOR_GROUPS: list[tuple[str, list[tuple[str, str, int]]]] = [
         ("volatility score", "volatility_score", _MIN_INDICATOR_DECIMALS),
         ("pct 1h", "pct_1h", _MIN_INDICATOR_DECIMALS),
         ("pct 24h", "pct_24h", _MIN_INDICATOR_DECIMALS),
+        ("pct 1w", "pct_1w", _MIN_INDICATOR_DECIMALS),
+        ("pct 1m", "pct_1m", _MIN_INDICATOR_DECIMALS),
         ("volume 24h", "volume24h", _MIN_INDICATOR_DECIMALS),
     ]),
 ]
