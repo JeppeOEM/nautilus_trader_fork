@@ -74,6 +74,7 @@ from dydx_collector.config import CollectorConfig
 from dydx_collector.config import InstrumentEntry
 from dydx_collector.config import load_config
 from dydx_collector.config import save_config
+from dydx_collector.minute_rollup import MinuteRollupBuilder
 from dydx_collector.open_interest import _fetch_markets_json
 from dydx_collector.open_interest import classify_liquidity
 from dydx_collector.open_interest import fetch_open_interest
@@ -524,6 +525,7 @@ class Collector:
         # (Roundtable's uncross-orderbook.ts) to resolve a crossed book without a full
         # resync. See DATA-04 in troll/CLAUDE.md and _uncross_step below.
         self._level_msg_id: dict[str, dict[tuple[OrderSide, float], int]] = {}
+        self._minute_rollup = MinuteRollupBuilder()
 
         # _on_data (the WS callback, scheduled via the Rust client's call_soon_threadsafe)
         # only enqueues -- _ingest_loop does the real per-message work (_process_data).
@@ -719,6 +721,7 @@ class Collector:
         await self._client.unsubscribe_trades(iid)
         await self._client.unsubscribe_orderbook(iid)
         self._clear_book_state(iid)
+        self._minute_rollup.drop(iid)
         logger.info(f"Unsubscribed {iid}")
 
     def _clear_book_state(self, iid: str) -> None:
@@ -734,6 +737,7 @@ class Collector:
         self._crossed_since_ns.pop(iid, None)
         self._crossed_prices.pop(iid, None)
         self._level_msg_id.pop(iid, None)
+        self._minute_rollup.discard_book_state(iid)
 
     async def _resync_book(self, iid: str) -> None:
         """Force a fresh order-book snapshot for a desynced instrument via resubscribe."""
@@ -1192,6 +1196,14 @@ class Collector:
                 )
                 batch.append(snapshot)
                 self._on_data(snapshot)  # routes to buffer → Parquet flush
+                try:
+                    rollup = self._minute_rollup.update(iid, snapshot)
+                except Exception:
+                    # A rollup bug must not stop every other instrument's snapshots.
+                    logger.exception("Minute rollup failed for %s", iid)
+                    rollup = None
+                if rollup is not None:
+                    self._on_data(rollup)
 
             await _publish_snapshot_batch(self._redis, batch)
 

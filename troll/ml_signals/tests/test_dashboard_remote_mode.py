@@ -437,4 +437,7 @@ async def test_remote_candles_matches_local_response(
         remote_body = json.loads(await resp.text())
 
     assert local_body["candles"], "seeded catalog snapshots' OHLC fields must produce candles"
+    # data_api tags each candle with `source` (Story 16.2); the local dashboard.py path (retired
+    # by 15.10) does not.
+    remote_body["candles"] = [{k: v for k, v in c.items() if k != "source"} for c in remote_body["candles"]]
     assert remote_body == local_body
