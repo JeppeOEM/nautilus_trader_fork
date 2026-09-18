@@ -1212,6 +1212,28 @@
             ],
             "title": "Pct 24H"
           },
+          "pct_1w": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pct 1W"
+          },
+          "pct_1m": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Pct 1M"
+          },
           "volatility": {
             "anyOf": [
               {

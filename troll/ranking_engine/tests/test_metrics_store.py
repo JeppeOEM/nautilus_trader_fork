@@ -197,3 +197,28 @@ if __name__ == "__main__":
     test_nearest_returns_none_for_unknown_instrument()
     test_migration_adds_new_columns_to_existing_table()
     print("ok")
+
+
+def test_price_near_days_ago_returns_price_at_or_before_target_per_instrument() -> None:
+    path = _path()
+    week = 7 * _DAY_NS
+    store.write([
+        _row(_NOW - week - 60 * 1_000_000_000, "BTC-USD-PERP.DYDX", price=90.0),
+        _row(_NOW - week - 10 * 1_000_000_000, "BTC-USD-PERP.DYDX", price=100.0),  # closest before
+        _row(_NOW - week + 60 * 1_000_000_000, "BTC-USD-PERP.DYDX", price=110.0),  # after target
+        _row(_NOW - week - 5 * 1_000_000_000, "ETH-USD-PERP.DYDX", price=7.0),
+    ], path)
+
+    assert store.price_near_days_ago(path, 7) == {"BTC-USD-PERP.DYDX": 100.0, "ETH-USD-PERP.DYDX": 7.0}
+
+
+def test_price_near_days_ago_omits_instruments_without_history_that_old() -> None:
+    path = _path()
+    store.write([
+        _row(_NOW - 10 * _DAY_NS, "OLD-USD-PERP.DYDX", price=5.0),
+        _row(_NOW - 2 * _DAY_NS, "NEW-USD-PERP.DYDX", price=9.0),  # only 2 days of history
+        _row(_NOW - 20 * _DAY_NS, "GAP-USD-PERP.DYDX", price=1.0),  # nothing near the 7d mark
+    ], path)
+
+    assert store.price_near_days_ago(path, 10) == {"OLD-USD-PERP.DYDX": 5.0}
+    assert store.price_near_days_ago(path, 7) == {}

@@ -22,6 +22,7 @@ from dydx_collector.second_snapshot import DydxSecondSnapshot
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
+import pytest
 import ranking_engine.engine as engine
 import ranking_engine.metrics_store as metrics_store
 
@@ -441,9 +442,13 @@ def test_current_ranks_falls_back_to_slow_metrics_price_pct_and_volatility() -> 
     _mark_fresh(iid, now_ns)
     engine._SLOW_METRICS[iid] = {
         "instrument_id": iid, "price": 99.0, "pct_1h": 0.01, "pct_24h": 0.05, "volatility": 0.002,
+        "pct_1w": 3.5, "pct_1m": None,
     }
 
     row = engine._current_ranks()[0]
+
+    assert row["pct_1w"] == 3.5
+    assert row["pct_1m"] is None  # not enough history yet -- never 0
 
     assert row["pct_1h"] == 0.01
     assert row["pct_24h"] == 0.05
@@ -638,3 +643,11 @@ def test_backfill_new_instruments_marks_backfilled_even_on_failure(monkeypatch) 
     monkeypatch.setattr(engine, "_read_price_series_sync", _raising_read)
     asyncio.run(engine._backfill_new_instruments("/nonexistent", now_ns))
     assert iid in engine._BACKFILLED
+
+
+def test_pct_change_from_is_signed_percent_and_none_without_history() -> None:
+    assert engine._pct_change_from(110.0, 100.0) == pytest.approx(10.0)
+    assert engine._pct_change_from(90.0, 100.0) == pytest.approx(-10.0)
+    assert engine._pct_change_from(110.0, None) is None
+    assert engine._pct_change_from(None, 100.0) is None
+    assert engine._pct_change_from(110.0, 0.0) is None

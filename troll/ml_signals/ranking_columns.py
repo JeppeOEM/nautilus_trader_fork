@@ -59,6 +59,8 @@ RANKING_COLS: list[tuple[str, str, object, object]] = [
     ("price",          "Price",  lambda v: f"{v:.4f}",   None),
     ("pct_1h",         "1h %",   lambda v: f"{v:+.2f}%", lambda v: POSITIVE_COLOR if v > 0 else NEGATIVE_COLOR),
     ("pct_24h",        "24h %",  lambda v: f"{v:+.2f}%", lambda v: POSITIVE_COLOR if v > 0 else NEGATIVE_COLOR),
+    ("pct_1w",         "1w %",   lambda v: f"{v:+.2f}%", lambda v: POSITIVE_COLOR if v > 0 else NEGATIVE_COLOR),
+    ("pct_1m",         "1m %",   lambda v: f"{v:+.2f}%", lambda v: POSITIVE_COLOR if v > 0 else NEGATIVE_COLOR),
     ("volatility",     "Vol(catalog)", lambda v: f"{v:.6f}", None),
     ("volatility_score", "Vol Score", lambda v: f"{v:.6f}" if v is not None else "—", None),
     ("volume24h",      "Vol24h", lambda v: f"{v / 1e6:.3f}M", None),

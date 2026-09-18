@@ -434,6 +434,8 @@ def _current_ranks() -> list[dict]:
             **_fast_metrics_for(iid),
             "pct_1h": slow.get("pct_1h"),
             "pct_24h": slow.get("pct_24h"),
+            "pct_1w": slow.get("pct_1w"),
+            "pct_1m": slow.get("pct_1m"),
             "volatility": slow.get("volatility"),
         }
         if row["price"] is None:  # no fresh snapshot yet -- fall back to the last
@@ -525,6 +527,13 @@ async def _backfill_new_instruments(catalog_path: str, now_ns: int) -> None:
             _BACKFILLED.add(iid)
 
 
+def _pct_change_from(current: float | None, base: float | None) -> float | None:
+    """Percent change from `base` to `current`; None if either is missing (no history yet)."""
+    if current is None or not base:
+        return None
+    return (current - base) / base * 100.0
+
+
 async def _slow_loop_once(catalog_path: str) -> None:
     """One cycle of _slow_loop_task's work -- split out so tests can drive exactly one
     cycle at a time instead of the infinite while-True loop below.
@@ -533,6 +542,10 @@ async def _slow_loop_once(catalog_path: str) -> None:
     await _backfill_new_instruments(catalog_path, now_ns)
 
     book_metrics_by_iid = {iid: _legacy_book_metrics_for(iid) for iid in _LAST_SEEN}
+    # 1w/1m need more history than the 25h in-memory price series holds, so they come from
+    # metrics_store's persisted prices -- one bulk query per window, not one per instrument.
+    price_1w = await asyncio.to_thread(metrics_store.price_near_days_ago, METRICS_DB_PATH, 7)
+    price_1m = await asyncio.to_thread(metrics_store.price_near_days_ago, METRICS_DB_PATH, 30)
     snapshots = []
     for iid in _LAST_SEEN:
         stats = _PRICE_SERIES.stats(iid, now_ns)
@@ -542,6 +555,8 @@ async def _slow_loop_once(catalog_path: str) -> None:
             "price": stats.get("price"),
             "pct_1h": stats.get("pct_change_1h"),
             "pct_24h": stats.get("pct_change_24h"),
+            "pct_1w": _pct_change_from(stats.get("price"), price_1w.get(iid)),
+            "pct_1m": _pct_change_from(stats.get("price"), price_1m.get(iid)),
             "volatility": stats.get("volatility"),
             **book_metrics_by_iid.get(iid, {}),
         })

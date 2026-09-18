@@ -30,7 +30,7 @@ _connections: dict[str, sqlite3.Connection] = {}
 
 # Metric columns stored per snapshot. Extend here to track new metrics.
 COLS = (
-    "price", "pct_1h", "pct_24h", "volatility", "ofi", "microprice", "spread", "rank", "volume24h",
+    "price", "pct_1h", "pct_24h", "pct_1w", "pct_1m", "volatility", "ofi", "microprice", "spread", "rank", "volume24h",
 )
 
 _SCHEMA = f"""
@@ -109,6 +109,25 @@ def history(instrument_id: str, db_path: str, days: int = 31) -> list[dict]:
     ).fetchall()
     keys = ("ts", *COLS)
     return [dict(zip(keys, r)) for r in rows]
+
+
+def price_near_days_ago(
+    db_path: str, days: float, tolerance_s: float = 3600.0,
+) -> dict[str, float]:
+    """Per instrument, the stored price at or just before `now - days`.
+
+    Only a row within `tolerance_s` before that target counts -- an instrument whose store
+    doesn't reach back that far (or has a gap there) is absent from the result, never
+    padded with a stale or zero price (DATA-01). One bulk query, not one per instrument.
+    """
+    target = time.time_ns() - int(days * 86_400 * 1_000_000_000)
+    floor = target - int(tolerance_s * 1_000_000_000)
+    rows = _conn(db_path).execute(
+        "SELECT instrument_id, price, MAX(ts) FROM snapshots "
+        "WHERE ts <= ? AND ts > ? AND price IS NOT NULL GROUP BY instrument_id",
+        (target, floor),
+    ).fetchall()
+    return {iid: price for iid, price, _ts in rows}
 
 
 def nearest(instrument_id: str, ts: int, db_path: str) -> dict | None:

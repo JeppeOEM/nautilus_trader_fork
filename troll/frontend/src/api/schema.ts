@@ -59,6 +59,8 @@ export interface MetricHistoryItem {
   price?: number | null;
   pct_1h?: number | null;
   pct_24h?: number | null;
+  pct_1w?: number | null;
+  pct_1m?: number | null;
   volatility?: number | null;
   ofi?: number | null;
   microprice?: number | null;

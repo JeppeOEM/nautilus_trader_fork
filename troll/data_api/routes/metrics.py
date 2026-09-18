@@ -64,6 +64,8 @@ class MetricHistoryItem(BaseModel):
     price: float | None = None
     pct_1h: float | None = None
     pct_24h: float | None = None
+    pct_1w: float | None = None
+    pct_1m: float | None = None
     volatility: float | None = None
     ofi: float | None = None
     microprice: float | None = None
