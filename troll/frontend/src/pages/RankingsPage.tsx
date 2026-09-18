@@ -106,6 +106,14 @@ export default function RankingsPage() {
     return () => clearInterval(interval);
   }, []);
 
+  // Which column set renders to the right of the pinned Rank/Instrument columns
+  // (Story 17.1). Deliberately plain useState, never in the useQuery key or any
+  // effect deps -- a tab switch may only change the JSX branch below, never
+  // refetch rankings or open a new live-channel subscription (AC #4). The tab
+  // bar itself reuses the shared .tabs/.tabbtn pattern from theme.css (the same
+  // classes DocsPage's sidebar tabs use) rather than a second tab visual style.
+  const [activeTab, setActiveTab] = useState<"performance" | "technicals">("performance");
+
   // Live WS ticks take over from the initial REST seed the moment the first one
   // arrives -- row order is message order verbatim, never re-sorted client-side
   // (epics AC3/troll/CLAUDE.md: "no client-side re-sort beyond the active Ranking
@@ -131,17 +139,40 @@ export default function RankingsPage() {
 
   return (
     <div className="term-box" data-label="Rankings">
+      <div className="tabs">
+        <div
+          className={`tabbtn${activeTab === "performance" ? " active" : ""}`}
+          onClick={() => setActiveTab("performance")}
+        >
+          Performance
+        </div>
+        <div
+          className={`tabbtn${activeTab === "technicals" ? " active" : ""}`}
+          onClick={() => setActiveTab("technicals")}
+        >
+          Technicals
+        </div>
+      </div>
       <table className="rankings-table">
         <thead>
           <tr>
             <th>Rank</th>
             <th>Instrument</th>
-            {RANKING_COLS.map((col) => (
-              <th key={col.key}>{col.label}</th>
-            ))}
+            {activeTab === "performance" &&
+              RANKING_COLS.map((col) => <th key={col.key}>{col.label}</th>)}
           </tr>
         </thead>
         <tbody>
+          {/* Technicals has no user-managed columns yet (Story 17.5 adds them) --
+              one dim empty-state row spanning the table's full width, which on
+              this tab is exactly the pinned Rank/Instrument pair. */}
+          {activeTab === "technicals" && (
+            <tr>
+              <td colSpan={2} className="rankings-empty">
+                no columns yet — click + to add one
+              </td>
+            </tr>
+          )}
           {rows.map((row, index) => {
             const marketDataStale = staleInstrumentIds.has(row.instrument_id);
             const rowStale = isMessageStale || marketDataStale;
@@ -158,9 +189,8 @@ export default function RankingsPage() {
                   {isMessageStale && <span title="rankings feed stale"> ⏱</span>}
                   {marketDataStale && <span title="market data stale"> ⚠</span>}
                 </td>
-                {RANKING_COLS.map((col) => (
-                  <td key={col.key}>{formatCell(col, row[col.key])}</td>
-                ))}
+                {activeTab === "performance" &&
+                  RANKING_COLS.map((col) => <td key={col.key}>{formatCell(col, row[col.key])}</td>)}
               </tr>
             );
           })}

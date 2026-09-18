@@ -70,13 +70,8 @@
 .signal-atlas .brand span { color: var(--muted); font-size: 11px; }
 .signal-atlas .tagline { color: var(--muted); font-size: 12px; margin: 0 2px 14px; line-height: 1.5; }
 
-.signal-atlas .tabs { display: flex; gap: 6px; margin: 0 0 12px; }
-.signal-atlas .tabbtn {
-  flex: 1; text-align: center; padding: 7px 6px; border-radius: 0; border: 1px solid var(--border);
-  background: var(--bg); color: var(--muted); font-size: 11px; letter-spacing: 0.03em;
-  cursor: pointer; text-transform: uppercase;
-}
-.signal-atlas .tabbtn.active { background: var(--accent-bg); color: var(--accent-ink); border-color: var(--accent); }
+/* .tabs/.tabbtn/.tabbtn.active are defined once, unscoped, in theme.css
+   (shared with RankingsPage's tab bar since Story 17.1) -- no local copy. */
 
 .signal-atlas .filter {
   width: 100%; padding: 7px 9px; border-radius: 0; border: 1px solid var(--border);

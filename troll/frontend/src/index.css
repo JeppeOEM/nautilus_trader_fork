@@ -107,3 +107,9 @@ table {
   color: var(--color-text-strong);
 }
 
+/* Story 17.1: the Technicals tab's empty state (no user columns exist yet) --
+   dim placeholder text spanning the table width, not a data cell. */
+.rankings-empty {
+  color: var(--color-text-dim);
+}
+
