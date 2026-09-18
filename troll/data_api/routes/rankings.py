@@ -21,6 +21,7 @@ entry) passes through byte-for-byte from the cached Redis payload.
 """
 
 import json
+import logging
 import os
 import time
 import tomllib
@@ -39,6 +40,7 @@ from ml_signals.candles import candle_dicts_from_snapshots
 
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 class RankingsResponse(BaseModel):
@@ -79,6 +81,13 @@ SCREENER_COLUMNS_CONFIG_PATH: str = os.environ.get(
 # Recent-window replay per coin: enough 1m bars for the slowest common indicator warm-up.
 _TECHNICALS_BARS = 120
 _TECHNICALS_BAR_SECONDS = 60
+# Catalog writes lag by a flush interval, so the newest candle is normally a minute or two old;
+# older than this the coin's data has genuinely stopped and its value must not read as live.
+_TECHNICALS_MAX_CANDLE_AGE_BARS = 5
+# Bulk values are identical for every viewer of the same entries/ranked set -- a short TTL cache
+# keeps a second tab or a slow poll from stacking another full per-coin catalog pass.
+_TECHNICALS_CACHE_TTL_S = 30.0
+_technicals_cache: dict[str, tuple[float, dict[str, dict[str, float | None]]]] = {}
 
 
 class TechnicalsColumn(_indicators.IndicatorConfigEntry):
@@ -91,7 +100,17 @@ def get_technicals_columns() -> list[TechnicalsColumn]:
         entries = screener_columns_config.load_config(Path(SCREENER_COLUMNS_CONFIG_PATH))
     except (tomllib.TOMLDecodeError, KeyError, TypeError) as exc:
         raise HTTPException(status_code=500, detail=f"screener_columns.toml is corrupt: {exc}") from exc
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"failed to read screener_columns.toml: {exc}") from exc
     return [TechnicalsColumn(name=e.name, params=e.params, category=e.category) for e in entries]
+
+
+def _require_known_indicators(names: list[str]) -> None:
+    """A saved name the catalogs don't know would make every later values poll fail."""
+    known = _indicators._merged_indicator_catalog()
+    unknown = [n for n in names if n not in known]
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"unknown indicator(s): {unknown}")
 
 
 @router.put("/api/rankings/technicals-columns")
@@ -107,6 +126,7 @@ async def put_technicals_columns(request: Request) -> dict[str, bool]:
         ]
     except (json.JSONDecodeError, KeyError, TypeError) as exc:
         raise HTTPException(status_code=400, detail=f"invalid columns payload: {exc}") from exc
+    _require_known_indicators([e.name for e in entries])
     try:
         screener_columns_config.save_config(entries, Path(SCREENER_COLUMNS_CONFIG_PATH))
     except OSError as exc:
@@ -128,11 +148,14 @@ def _latest_values(
 ) -> dict[str, float | None]:
     """Each requested indicator's latest value for one instrument, via the chart's own
     `replay_indicator` dispatch over a short recent 1m window (no indicator math here)."""
-    start_ns = _indicators._window_start_ns(now_ns, _TECHNICALS_BARS, _TECHNICALS_BAR_SECONDS)
+    # Exactly the window needed (not the chart route's 3x scroll-back margin): 120 bars of 1m
+    # is 2h of 1s snapshots per coin, not 6h.
+    start_ns = now_ns - (_TECHNICALS_BARS + 5) * _TECHNICALS_BAR_SECONDS * 1_000_000_000
     snapshots = _catalog_stats.query_second_snapshots(CATALOG_PATH, instrument_id, start_ns, now_ns)
     candles = candle_dicts_from_snapshots(snapshots, _TECHNICALS_BAR_SECONDS)[-_TECHNICALS_BARS:]
-    if not candles:
-        return {}
+    max_age_ms = _TECHNICALS_MAX_CANDLE_AGE_BARS * _TECHNICALS_BAR_SECONDS * 1000
+    if not candles or now_ns // 1_000_000 - candles[-1]["t"] > max_age_ms:
+        return {}  # no data / stopped: an honest gap, never a stale value shown as current (DATA-01)
     window = custom_indicators.ReplayWindow(
         instrument_id=instrument_id,
         bar_seconds=_TECHNICALS_BAR_SECONDS,
@@ -160,15 +183,25 @@ def get_technicals_values(entries: str) -> TechnicalsValuesResponse:
     a 60s poll ever loads the box.
     """
     parsed = _indicators._parse_entries(entries)
+    _require_known_indicators([e.name for e in parsed])
     latest = redis_bus.bus.latest
     if latest is None:
         raise HTTPException(status_code=503, detail="Rankings not yet available")
+    iids = [row["instrument_id"] for row in latest["ranks"]]
+    cache_key = json.dumps([entries, iids])
+    cached = _technicals_cache.get(cache_key)
+    if cached is not None and time.monotonic() - cached[0] < _TECHNICALS_CACHE_TTL_S:
+        return TechnicalsValuesResponse(values=cached[1])
     now_ns = time.time_ns()
     result: dict[str, dict[str, float | None]] = {}
-    for row in latest["ranks"]:
-        iid = row["instrument_id"]
+    for iid in iids:
         try:
             result[iid] = _latest_values(iid, parsed, now_ns)
-        except Exception as exc:  # noqa: BLE001 -- untrusted entries/params, per-coin catalog I/O
+        except ValueError as exc:  # bad indicator params -- the same for every coin, client input
             raise HTTPException(status_code=400, detail=f"invalid indicator entry: {exc}") from exc
+        except Exception:  # noqa: BLE001 -- one coin's catalog read must not blank every coin
+            logger.exception("technicals values failed for %s", iid)
+            result[iid] = {}
+    _technicals_cache.clear()  # one live key at a time; bounded (MEM-01)
+    _technicals_cache[cache_key] = (time.monotonic(), result)
     return TechnicalsValuesResponse(values=result)

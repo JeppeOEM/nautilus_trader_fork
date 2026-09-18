@@ -123,3 +123,23 @@ table {
   color: var(--color-link);
   cursor: pointer;
 }
+
+/* Story 17.6: Rankings filter panel -- chips + inline builder above the tab bar. */
+.filter-panel {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 12px;
+}
+
+.filter-panel .tabbtn {
+  flex: none;
+  padding: 7px 10px;
+}
+
+.filter-chip {
+  border: 1px solid var(--color-border);
+  padding: 2px 6px;
+  color: var(--color-text-dim);
+}

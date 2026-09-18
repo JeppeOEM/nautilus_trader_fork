@@ -290,5 +290,100 @@ describe("RankingsPage", () => {
 
       await waitFor(() => expect(saveTechnicalsColumns).toHaveBeenCalledWith([macd]));
     });
+
+    it("builds a rapid second header removal on the first one instead of undoing it", async () => {
+      configureTechnicals();
+
+      renderPage();
+      fireEvent.click(screen.getByText("Technicals"));
+      fireEvent.click(await screen.findByRole("button", { name: "Remove RelativeStrengthIndex column" }));
+      fireEvent.click(screen.getByRole("button", { name: "Remove MovingAverageConvergenceDivergence column" }));
+
+      await waitFor(() => expect(saveTechnicalsColumns).toHaveBeenLastCalledWith([]));
+    });
+  });
+
+  describe("filter panel", () => {
+    const ranks = [
+      { instrument_id: "AAA-USD-PERP.DYDX", price: 1, pct_24h: 5, obi_5: 0.7 },
+      { instrument_id: "BBB-USD-PERP.DYDX", price: 2, pct_24h: 5, obi_5: 0.2 },
+      { instrument_id: "CCC-USD-PERP.DYDX", price: 3, pct_24h: -1, obi_5: 0.9 },
+    ];
+
+    function addFilter(fieldLabel: string, op: string, value: string) {
+      fireEvent.click(screen.getByRole("button", { name: "Add filter" }));
+      fireEvent.change(screen.getByLabelText("Filter field"), {
+        target: { value: Array.from(screen.getByLabelText<HTMLSelectElement>("Filter field").options).find((o) => o.text === fieldLabel)!.value },
+      });
+      fireEvent.change(screen.getByLabelText("Filter operator"), { target: { value: op } });
+      fireEvent.change(screen.getByLabelText("Filter value"), { target: { value } });
+      fireEvent.click(screen.getByRole("button", { name: "Add" }));
+    }
+
+    function shownInstruments(): string[] {
+      return screen.queryAllByText(/-USD-PERP\.DYDX/).map((el) => (el.textContent ?? "").replace("⏲", ""));
+    }
+
+    beforeEach(() => {
+      useLiveChannelMock.mockReturnValue({ latest: liveMessage({ ranks }), connected: true });
+    });
+
+    it("narrows rows, combines conditions with AND, and restores rows when a condition is removed", () => {
+      renderPage();
+
+      addFilter("24h %", ">", "0");
+      expect(shownInstruments()).toEqual(["AAA-USD-PERP.DYDX", "BBB-USD-PERP.DYDX"]);
+
+      addFilter("OBI5", ">", "0.5"); // BBB matches only the first condition
+      expect(shownInstruments()).toEqual(["AAA-USD-PERP.DYDX"]);
+
+      fireEvent.click(screen.getByRole("button", { name: /Remove filter OBI5/ }));
+      expect(shownInstruments()).toEqual(["AAA-USD-PERP.DYDX", "BBB-USD-PERP.DYDX"]);
+    });
+
+    it("keeps each row's true rank and the filtered set across a tab switch", () => {
+      renderPage();
+
+      addFilter("24h %", "<", "0");
+      const row = screen.getByText("CCC-USD-PERP.DYDX").closest("tr")!;
+      expect(row.querySelector("td")?.textContent).toBe("3"); // rank in the full message, not 1
+
+      fireEvent.click(screen.getByText("Technicals"));
+      expect(screen.getByText("CCC-USD-PERP.DYDX")).toBeInTheDocument();
+      expect(screen.queryByText("AAA-USD-PERP.DYDX")).not.toBeInTheDocument();
+    });
+
+    it("excludes rows with no value for the filtered field instead of treating it as 0", () => {
+      useLiveChannelMock.mockReturnValue({
+        latest: liveMessage({ ranks: [...ranks, { instrument_id: "NNN-USD-PERP.DYDX", price: 4 }] }),
+        connected: true,
+      });
+      renderPage();
+
+      addFilter("24h %", "<", "100");
+
+      expect(screen.queryByText("NNN-USD-PERP.DYDX")).not.toBeInTheDocument();
+    });
+
+    it("filters on a Technicals output from the Performance tab", async () => {
+      vi.mocked(fetchTechnicalsColumns).mockResolvedValue([
+        { name: "RelativeStrengthIndex", params: {}, category: "native" },
+      ]);
+      vi.mocked(fetchTechnicalsValues).mockResolvedValue({
+        "AAA-USD-PERP.DYDX": { "0.value": 25 },
+        "BBB-USD-PERP.DYDX": { "0.value": 60 },
+        "CCC-USD-PERP.DYDX": { "0.value": 10 },
+      });
+      renderPage();
+      fireEvent.click(screen.getByRole("button", { name: "Add filter" }));
+      await waitFor(() => {
+        const options = Array.from(screen.getByLabelText<HTMLSelectElement>("Filter field").options).map((o) => o.text);
+        expect(options).toContain("RelativeStrengthIndex.value");
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Add filter" })); // close, then reuse helper
+      addFilter("RelativeStrengthIndex.value", "<", "30");
+
+      expect(shownInstruments()).toEqual(["AAA-USD-PERP.DYDX", "CCC-USD-PERP.DYDX"]);
+    });
   });
 });

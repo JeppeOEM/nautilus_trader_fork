@@ -43,5 +43,6 @@ def load_config(path: Path) -> list[IndicatorEntry]:
 
 def save_config(entries: list[IndicatorEntry], path: Path) -> None:
     raw = {"columns": [{"name": e.name, "params": e.params, "category": e.category} for e in entries]}
-    with path.open("wb") as f:
-        tomli_w.dump(raw, f)
+    # Serialize first: a bad value must fail before the file is truncated. (Not a temp-file
+    # rename -- the docker single-file bind mount can't be renamed over.)
+    path.write_bytes(tomli_w.dumps(raw).encode())

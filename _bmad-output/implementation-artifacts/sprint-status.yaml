@@ -237,7 +237,7 @@ development_status:
   17-3-performance-tab-multi-window-pct-change: review
   17-4-wire-the-rankings-performance-history-link: review  # owed: visual browser check
   17-5-technicals-tab-user-managed-indicator-columns: review  # owed: visual browser check
-  17-6-filter-panel: ready-for-dev
+  17-6-filter-panel: review  # owed: visual browser check
   epic-17-retrospective: optional
 
   epic-18: in-progress

@@ -6,6 +6,8 @@ import { fetchRankings, fetchTechnicalsColumns, fetchTechnicalsValues, saveTechn
 import type { IndicatorConfigEntry } from "../api/schema";
 import IndicatorPicker from "../components/chart/IndicatorPicker";
 import { useLiveChannel } from "../hooks/useLiveChannel";
+import FilterPanel, { type FilterField } from "./FilterPanel";
+import { applyFilters, type FilterCondition } from "./filters";
 import { buildGroups, reorder } from "./technicals";
 
 // Client-side heartbeat staleness threshold: mirrors bot_tui/ranking_state.py's
@@ -22,6 +24,10 @@ const RANKING_STALE_MS = 15_000;
 
 // One bulk indicator recompute for every ranked coin per poll -- slow by design (1m candles).
 const TECHNICALS_POLL_MS = 60_000;
+
+// Filter-field keys for Technicals outputs: `tech:{entry name}.{output attr}` -- name-based,
+// so a saved condition survives reordering/removing other columns.
+const TECHNICAL_FIELD_PREFIX = "tech:";
 
 // Hand-declared TS mirror of ml_signals/ranking_columns.py's RANKING_COLS
 // (troll/CLAUDE.md SSOT-03) -- same precedent as bot_tui's own urwid renderer
@@ -130,19 +136,59 @@ export default function RankingsPage() {
   const [reloadKey, setReloadKey] = useState(0);
   const [dragFrom, setDragFrom] = useState<number | null>(null);
   const technicalsActive = activeTab === "technicals" && technicalsEntries.length > 0;
-  const { data: technicalsValues } = useQuery({
+  // Filters (Story 17.6) narrow the row set on either tab; a Technicals-field filter therefore
+  // needs those columns' entries and values loaded even while Performance is showing.
+  const [filters, setFilters] = useState<FilterCondition[]>([]);
+  useEffect(() => {
+    fetchTechnicalsColumns()
+      .then(setTechnicalsEntries)
+      .catch((err: unknown) => console.error("RankingsPage: failed to load Technicals columns", err));
+  }, []);
+  // Sticky once the builder has been opened: Technicals outputs only become selectable fields
+  // after their first values arrive.
+  const [filterBuilderOpened, setFilterBuilderOpened] = useState(false);
+  const filtersUseTechnicals =
+    filterBuilderOpened || filters.some((f) => f.field.startsWith(TECHNICAL_FIELD_PREFIX));
+  const { data: technicalsValues, error: valuesError } = useQuery({
     queryKey: ["technicals-values", JSON.stringify(technicalsEntries)],
     queryFn: () => fetchTechnicalsValues(technicalsEntries),
-    enabled: technicalsActive,
+    enabled: technicalsEntries.length > 0 && (activeTab === "technicals" || filtersUseTechnicals),
     refetchInterval: TECHNICALS_POLL_MS,
     retry: false,
+    // Keep the previous columns' values on screen while a changed selection refetches, rather
+    // than collapsing every multi-output column to a placeholder.
+    placeholderData: (previous) => previous,
   });
   const groups = buildGroups(technicalsEntries, technicalsValues);
+  const filterFields: FilterField[] = [
+    ...RANKING_COLS.map((col) => ({ key: col.key, label: col.label })),
+    ...groups.flatMap((g) =>
+      g.attrs.map((attr) => ({ key: `${TECHNICAL_FIELD_PREFIX}${g.entry.name}.${attr}`, label: `${g.entry.name}.${attr}` })),
+    ),
+  ];
 
+  function readField(row: RankingRow, field: string): unknown {
+    if (!field.startsWith(TECHNICAL_FIELD_PREFIX)) return row[field];
+    const path = field.slice(TECHNICAL_FIELD_PREFIX.length);
+    const dot = path.lastIndexOf(".");
+    const entryIndex = technicalsEntries.findIndex((e) => e.name === path.slice(0, dot));
+    return entryIndex < 0 ? undefined : technicalsValues?.[row.instrument_id]?.[`${entryIndex}.${path.slice(dot + 1)}`];
+  }
+
+  const [technicalsError, setTechnicalsError] = useState<string | null>(null);
+
+  // Applied to local state immediately, so a rapid second header action builds on this one
+  // instead of the pre-PUT list (which would silently undo it); the picker is re-synced from
+  // disk afterwards, and on failure too, rolling the optimistic change back.
   function saveEntries(next: IndicatorConfigEntry[]): void {
+    setTechnicalsEntries(next);
+    setTechnicalsError(null);
     saveTechnicalsColumns(next)
-      .then(() => setReloadKey((k) => k + 1))
-      .catch((err: unknown) => console.error("RankingsPage: failed to save Technicals columns", err));
+      .catch((err: unknown) => {
+        console.error("RankingsPage: failed to save Technicals columns", err);
+        setTechnicalsError(err instanceof Error ? err.message : String(err));
+      })
+      .finally(() => setReloadKey((k) => k + 1));
   }
 
   // Live WS ticks take over from the initial REST seed the moment the first one
@@ -168,8 +214,21 @@ export default function RankingsPage() {
     return <p className="term-loading">Loading rankings…</p>;
   }
 
+  // Rank is the row's position in the live message, so it stays the true rank when filtered.
+  const visibleRows = applyFilters(
+    rows.map((row, index) => ({ row, rank: index + 1 })),
+    filters,
+    ({ row }, field) => readField(row, field),
+  );
+
   return (
     <div className="term-box" data-label="Rankings">
+      <FilterPanel
+        fields={filterFields}
+        conditions={filters}
+        onChange={setFilters}
+        onOpen={() => setFilterBuilderOpened(true)}
+      />
       <div className="tabs">
         <div
           className={`tabbtn${activeTab === "performance" ? " active" : ""}`}
@@ -198,6 +257,7 @@ export default function RankingsPage() {
                   colSpan={Math.max(1, group.attrs.length)}
                   draggable
                   onDragStart={() => setDragFrom(group.entryIndex)}
+                  onDragEnd={() => setDragFrom(null)}
                   onDragOver={(event) => event.preventDefault()}
                   onDrop={() => {
                     if (dragFrom !== null) saveEntries(reorder(technicalsEntries, dragFrom, group.entryIndex));
@@ -236,7 +296,7 @@ export default function RankingsPage() {
               </td>
             </tr>
           )}
-          {rows.map((row, index) => {
+          {visibleRows.map(({ row, rank }) => {
             const marketDataStale = staleInstrumentIds.has(row.instrument_id);
             const rowStale = isMessageStale || marketDataStale;
             return (
@@ -246,7 +306,7 @@ export default function RankingsPage() {
                 data-stale={rowStale ? "true" : "false"}
                 className="rankings-row"
               >
-                <td>{index + 1}</td>
+                <td>{rank}</td>
                 <td>
                   {row.instrument_id}
                   {isMessageStale && <span title="rankings feed stale"> ⏱</span>}
@@ -285,6 +345,11 @@ export default function RankingsPage() {
           })}
         </tbody>
       </table>
+      {activeTab === "technicals" && (technicalsError ?? valuesError) && (
+        <p style={{ color: "var(--color-danger)" }}>
+          {technicalsError ?? (valuesError instanceof Error ? valuesError.message : String(valuesError))}
+        </p>
+      )}
       {activeTab === "technicals" && (
         <IndicatorPicker
           fetchConfig={fetchTechnicalsColumns}

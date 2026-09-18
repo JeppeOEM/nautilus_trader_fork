@@ -1,6 +1,6 @@
 # Story 17.5: Technicals tab — user-managed indicator columns
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 

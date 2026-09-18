@@ -44,13 +44,14 @@ def _client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     catalog = str(tmp_path / "cat")
     monkeypatch.setattr(rankings_routes, "SCREENER_COLUMNS_CONFIG_PATH", str(tmp_path / "cols.toml"))
     monkeypatch.setattr(rankings_routes, "CATALOG_PATH", catalog)
+    rankings_routes._technicals_cache.clear()
     monkeypatch.setattr(indicators_routes, "CATALOG_PATH", catalog)
     return TestClient(app_module.app)
 
 
-def _seed_recent_minutes(tmp_path: Path, count: int = 45) -> None:
+def _seed_recent_minutes(tmp_path: Path, count: int = 45, ended_minutes_ago: int = 0) -> None:
     """One trade-carrying snapshot per minute ending just before now -> `count` 1m candles."""
-    end = time.time_ns() // _MINUTE_NS * _MINUTE_NS
+    end = time.time_ns() // _MINUTE_NS * _MINUTE_NS - ended_minutes_ago * _MINUTE_NS
     ParquetDataCatalog(str(tmp_path / "cat")).write_data([
         DydxSecondSnapshot(
             instrument_id=InstrumentId.from_str(_IID),
@@ -141,3 +142,73 @@ def test_values_reject_bad_entries_with_400(tmp_path: Path, monkeypatch: pytest.
     monkeypatch.setattr(redis_bus, "bus", bus)
     client = _client(tmp_path, monkeypatch)
     assert client.get("/api/rankings/technicals-values", params={"entries": "not json"}).status_code == 400
+
+
+def _ranked(monkeypatch: pytest.MonkeyPatch, *iids: str) -> None:
+    bus = RankingsBus()
+    bus.latest = {"mode": "volume", "updated_at": 1, "ranks": [{"instrument_id": i} for i in iids]}
+    monkeypatch.setattr(redis_bus, "bus", bus)
+
+
+def test_values_omit_a_coin_whose_newest_candle_is_stale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed_recent_minutes(tmp_path, ended_minutes_ago=30)  # data stopped half an hour ago
+    _ranked(monkeypatch, _IID)
+    client = _client(tmp_path, monkeypatch)
+    entries = json.dumps([{"name": "RelativeStrengthIndex", "params": {}}])
+
+    values = client.get("/api/rankings/technicals-values", params={"entries": entries}).json()["values"]
+
+    assert values[_IID] == {}  # honest gap, not the 30-minute-old value shown as live
+
+
+def test_put_rejects_an_unknown_indicator_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _client(tmp_path, monkeypatch)
+    response = client.put(
+        "/api/rankings/technicals-columns", json=[{"name": "NoSuchIndicator", "params": {}, "category": "native"}],
+    )
+    assert response.status_code == 400
+    assert client.get("/api/rankings/technicals-columns").json() == []
+
+
+def test_one_coins_catalog_failure_does_not_blank_the_others(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed_recent_minutes(tmp_path)
+    _ranked(monkeypatch, _IID, "BAD-USD-PERP.DYDX")
+    client = _client(tmp_path, monkeypatch)
+    real = rankings_routes._latest_values
+
+    def flaky(iid: str, entries: list, now_ns: int) -> dict:
+        if iid.startswith("BAD"):
+            raise OSError("corrupt partition")
+        return real(iid, entries, now_ns)
+
+    monkeypatch.setattr(rankings_routes, "_latest_values", flaky)
+    entries = json.dumps([{"name": "RelativeStrengthIndex", "params": {}}])
+
+    values = client.get("/api/rankings/technicals-values", params={"entries": entries}).json()["values"]
+
+    assert values["BAD-USD-PERP.DYDX"] == {}
+    assert values[_IID]  # the healthy coin still has its value
+
+
+def test_values_are_served_from_the_ttl_cache_on_a_repeat_poll(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed_recent_minutes(tmp_path)
+    _ranked(monkeypatch, _IID)
+    client = _client(tmp_path, monkeypatch)
+    calls: list[str] = []
+    real = rankings_routes._latest_values
+    monkeypatch.setattr(
+        rankings_routes, "_latest_values", lambda i, e, n: calls.append(i) or real(i, e, n),
+    )
+    entries = json.dumps([{"name": "RelativeStrengthIndex", "params": {}}])
+
+    first = client.get("/api/rankings/technicals-values", params={"entries": entries}).json()
+    second = client.get("/api/rankings/technicals-values", params={"entries": entries}).json()
+
+    assert first == second
+    assert calls == [_IID]  # second poll never touched the catalog
