@@ -21,6 +21,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from dydx_collector.minute_rollup import DydxMinuteRollup
 from dydx_collector.second_snapshot import DydxSecondSnapshot
 from nautilus_trader.model.data import IndexPriceUpdate
 from nautilus_trader.model.data import MarkPriceUpdate
@@ -63,6 +64,17 @@ def query_second_snapshots(
     )
     # query() wraps custom Data subclasses in CustomData -- unwrap via .data to reach the
     # actual DydxSecondSnapshot (confirmed via direct introspection this session).
+    return [r.data if hasattr(r, "data") else r for r in results]
+
+
+def query_minute_rollups(
+    catalog_path: str, instrument_id: str, start_ns: int, end_ns: int,
+) -> list[DydxMinuteRollup]:
+    """DydxMinuteRollup rows for `instrument_id` in [start_ns, end_ns], CustomData-unwrapped."""
+    catalog = ParquetDataCatalog(catalog_path)
+    results = catalog.query(
+        data_cls=DydxMinuteRollup, identifiers=[instrument_id], start=start_ns, end=end_ns,
+    )
     return [r.data if hasattr(r, "data") else r for r in results]
 
 

@@ -116,3 +116,9 @@ def test_out_of_order_snapshot_is_ignored() -> None:
 def test_rollup_ts_init_is_not_before_minute_end() -> None:
     (r,) = _feed(MinuteRollupBuilder(), [_snap(0), _snap(60)])
     assert r.ts_init >= _MINUTE_NS
+
+
+def test_large_backwards_clock_step_resets_instead_of_freezing() -> None:
+    b = MinuteRollupBuilder()
+    _feed(b, [_snap(1000), _snap(1001)])
+    assert _feed(b, [_snap(10), _snap(11), _snap(70)])[0].seconds_observed == 2

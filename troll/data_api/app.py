@@ -47,7 +47,7 @@ from data_api.ws import live as live_ws
 from dydx_collector.second_snapshot import DydxSecondSnapshot
 from ml_signals import catalog_stats as _catalog_stats
 from ml_signals import chart_data as _chart_data
-from ml_signals.candles import candle_dicts_from_snapshots
+from ml_signals.candles import candle_dicts_for_window
 from ranking_engine import metrics_store
 
 
@@ -144,8 +144,15 @@ def catalog_candles(
     which took 30-60s over an SSH tunnel -- this route aggregates to candle bars here,
     on the box that holds the catalog, so only a few KB crosses the network.
     """
-    snapshots = _catalog_stats.query_second_snapshots(CATALOG_PATH, iid, start_ns, end_ns)
-    return {"candles": candle_dicts_from_snapshots(snapshots, bar_seconds)}
+    candles = candle_dicts_for_window(
+        iid,
+        start_ns,
+        end_ns,
+        bar_seconds,
+        snapshot_rows_fn=lambda i, a, b: _catalog_stats.query_second_snapshots(CATALOG_PATH, i, a, b),
+        rollup_rows_fn=lambda i, a, b: _catalog_stats.query_minute_rollups(CATALOG_PATH, i, a, b),
+    )
+    return {"candles": candles}
 
 
 class HealthResponse(BaseModel):

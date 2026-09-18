@@ -21,6 +21,7 @@ requests need not rescan raw 1s data. Top-of-book fields are the *raw* values at
 minute's last observed second; microprice/spread are derived on read (SIGNAL-01).
 """
 
+import logging
 from dataclasses import dataclass
 from dataclasses import field
 
@@ -34,6 +35,8 @@ from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.serialization.arrow.serializer import make_dict_deserializer
 from nautilus_trader.serialization.arrow.serializer import make_dict_serializer
 from nautilus_trader.serialization.arrow.serializer import register_arrow
+
+logger = logging.getLogger(__name__)
 
 _MINUTE_NS = 60_000_000_000
 _LEVELS = (5, 10)
@@ -185,7 +188,14 @@ class MinuteRollupBuilder:
         cur = self._minutes.get(iid)
         last_ts = self._last_ts.get(iid)
         if last_ts is not None and s.ts_event <= last_ts:
-            return None  # duplicate/out-of-order: would close the wrong minute
+            if last_ts - s.ts_event <= _MINUTE_NS:
+                return None  # duplicate/out-of-order: would close the wrong minute
+            # Wall clock stepped back by > 1 min: ignoring would freeze the rollup until it
+            # catches up, silently. Start over for this instrument (open minute is lost).
+            logger.warning("Clock stepped back %.0fs for %s; resetting minute rollup state",
+                           (last_ts - s.ts_event) / 1e9, iid)
+            self.drop(iid)
+            last_ts = None
         if last_ts is not None and s.ts_event - last_ts > _MAX_GAP_NS:
             self.discard_book_state(iid)
         self._last_ts[iid] = s.ts_event

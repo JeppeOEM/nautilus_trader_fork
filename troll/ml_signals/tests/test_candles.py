@@ -18,7 +18,10 @@ from types import SimpleNamespace
 
 from ml_signals.candles import aggregate_ohlc
 from ml_signals.candles import build_candles
+from ml_signals.candles import candle_dicts_for_window
 from ml_signals.candles import candle_dicts_from_snapshots
+from ml_signals.candles import choose_candle_source
+from ml_signals.candles import rollup_dicts_from_rows
 
 
 def _snap(ts_event: int, close_price: float | None, buy_volume: float = 1.0, sell_volume: float = 0.5) -> SimpleNamespace:
@@ -124,3 +127,56 @@ if __name__ == "__main__":
     test_candle_dicts_from_snapshots_skips_no_trade_seconds_and_shapes_json()
     test_candle_dicts_from_snapshots_all_none_close_produces_no_candles()
     print("ok")
+
+
+def _rollup(ts_min: int, o: float | None, h: float | None, low: float | None, c: float | None, *,
+            secs: int = 60, ofi: float = 1.0, obi: float = 0.5, bid: float = 100.0) -> SimpleNamespace:
+    return SimpleNamespace(
+        ts_event=ts_min * 60_000_000_000, open=o, high=h, low=low, close=c,
+        buy_volume=1.0, sell_volume=0.5, seconds_observed=secs, ofi_5=ofi, ofi_10=ofi, obi_5=obi, obi_10=obi,
+        close_bid_price=bid, close_bid_size=1.0, close_ask_price=bid + 2.0, close_ask_size=3.0,
+    )
+
+
+def test_choose_candle_source_threshold_boundary() -> None:
+    assert choose_candle_source(3600) == "raw_1s"
+    assert choose_candle_source(3601) == "rollup_1m"
+
+
+def test_rollup_rebucket_ohlcv_and_summed_ofi() -> None:
+    rows = [_rollup(0, 10.0, 12.0, 9.0, 11.0), _rollup(1, 11.0, 15.0, 8.0, 14.0), _rollup(2, None, None, None, None)]
+    (c,) = rollup_dicts_from_rows(rows, 3600)
+    assert (c["o"], c["h"], c["l"], c["c"]) == (10.0, 15.0, 8.0, 14.0)
+    assert c["v"] == 4.5  # no-trade member still counts for volume
+    assert (c["ofi_5"], c["seconds_observed"]) == (3.0, 180)
+
+
+def test_rollup_close_book_takes_last_member() -> None:
+    rows = [_rollup(0, 1.0, 1.0, 1.0, 1.0, bid=100.0), _rollup(1, 1.0, 1.0, 1.0, 1.0, bid=200.0)]
+    (c,) = rollup_dicts_from_rows(rows, 3600)
+    assert (c["close_bid_price"], c["spread"]) == (200.0, 2.0)
+    assert c["microprice"] == (200.0 * 3.0 + 202.0 * 1.0) / 4.0
+
+
+def test_rollup_obi_is_seconds_weighted() -> None:
+    rows = [_rollup(0, 1.0, 1.0, 1.0, 1.0, secs=10, obi=0.2), _rollup(1, 1.0, 1.0, 1.0, 1.0, secs=30, obi=0.6)]
+    (c,) = rollup_dicts_from_rows(rows, 3600)
+    assert c["obi_5"] == (0.2 * 10 + 0.6 * 30) / 40
+
+
+def test_dispatch_falls_back_to_raw_when_rollup_empty() -> None:
+    snaps = [_snap(0, 10.0), _snap(1_000_000_000, 12.0)]
+    got = candle_dicts_for_window("X", 0, 1, 86400, lambda *_: snaps, lambda *_: [])
+    assert got == [{**d, "source": "raw_1s"} for d in candle_dicts_from_snapshots(snaps, 86400)]
+
+
+def test_dispatch_uses_rollup_when_present() -> None:
+    got = candle_dicts_for_window("X", 0, 1, 86400, lambda *_: [], lambda *_: [_rollup(0, 1.0, 2.0, 0.5, 1.5)])
+    assert [c["source"] for c in got] == ["rollup_1m"]
+
+
+def test_short_window_never_touches_rollup() -> None:
+    def boom(*_: object) -> list:
+        raise AssertionError("rollup queried")
+
+    assert candle_dicts_for_window("X", 0, 1, 60, lambda *_: [], boom) == []

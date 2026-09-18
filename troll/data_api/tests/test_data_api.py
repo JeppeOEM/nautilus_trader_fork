@@ -168,5 +168,6 @@ def test_catalog_candles_route(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
 
     assert response.status_code == 200
     snapshots = _catalog_stats.query_second_snapshots(catalog_path, _IID, 0, 3_000_000_000)
-    assert response.json() == {"candles": candle_dicts_from_snapshots(snapshots, 60)}
+    expected = [{**c, "source": "raw_1s"} for c in candle_dicts_from_snapshots(snapshots, 60)]
+    assert response.json() == {"candles": expected}
     assert response.json()["candles"], "seeded snapshots with real close_price must produce a candle"
