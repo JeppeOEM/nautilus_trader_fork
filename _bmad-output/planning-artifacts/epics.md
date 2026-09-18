@@ -276,7 +276,7 @@ Builder gets the same dashboard capabilities they use every day — live coin ra
 **NFRs covered:** NFR6, NFR7, NFR8, NFR9
 
 ### Epic 16: Minute-Rollup Candle Cache
-Builder's chart page can show daily/weekly candles — with order-book-derived signal (OFI/OBI, top-of-book) baked in — without every request rescanning years of raw 1-second data. The collector incrementally builds a small `DydxMinuteRollup` cache as data streams in (O(1)/second, no periodic full rescan); wide-window candle requests read from it instead of raw 1s, with correct-by-construction OFI continuity across minute boundaries and a fallback to raw 1s when rollup coverage is missing. The raw 1-second archive stays fully intact and authoritative — the rollup is a regenerable performance cache, never a replacement. Backend/collector-pipeline scope, standalone: delivers complete value against the existing `dashboard.py`/`data_api` candle route today, and is a dependency for Epic 15's future `/api/candles` story once that lands. No PRD/Architecture update precedes this addition (same precedent as Epic 12/13) — created via direct technical investigation this session.
+Builder's chart page can show daily/weekly candles — with order-book-derived signal (OFI/OBI, top-of-book) baked in — without every request rescanning years of raw 1-second data. The collector incrementally builds a small `DydxMinuteRollup` cache as data streams in (O(1)/second, no periodic full rescan); wide-window candle requests read from it instead of raw 1s, with correct-by-construction OFI continuity across minute boundaries and a fallback to raw 1s when rollup coverage is missing. The raw 1-second archive stays fully intact and authoritative — the rollup is a regenerable performance cache, never a replacement. Backend/collector-pipeline scope, standalone: delivers complete value against `data_api/app.py`'s existing `/api/candles` route (`catalog_candles`) today — `dashboard.py` itself is retired by Story 15.10, so `data_api` is the sole integration point. No PRD/Architecture update precedes this addition (same precedent as Epic 12/13) — created via direct technical investigation this session.
 **FRs covered:** FR47, FR48, FR49, FR50
 **NFRs covered:** NFR10
 
@@ -1610,7 +1610,7 @@ So that I'm not maintaining two dashboards, and stale/superseded work doesn't li
 
 ## Epic 16: Minute-Rollup Candle Cache
 
-Builder's chart page can show daily/weekly candles — with order-book-derived signal (OFI/OBI, top-of-book) baked in — without every request rescanning years of raw 1-second data. The collector incrementally builds a small `DydxMinuteRollup` cache as data streams in (O(1)/second, no periodic full rescan); wide-window candle requests read from it instead of raw 1s, with correct-by-construction OFI continuity across minute boundaries and a fallback to raw 1s when rollup coverage is missing. The raw 1-second archive stays fully intact and authoritative — the rollup is a regenerable performance cache, never a replacement. Backend/collector-pipeline scope, standalone: delivers complete value against the existing `dashboard.py`/`data_api` candle route today, and is a dependency for Epic 15's future `/api/candles` story once that lands.
+Builder's chart page can show daily/weekly candles — with order-book-derived signal (OFI/OBI, top-of-book) baked in — without every request rescanning years of raw 1-second data. The collector incrementally builds a small `DydxMinuteRollup` cache as data streams in (O(1)/second, no periodic full rescan); wide-window candle requests read from it instead of raw 1s, with correct-by-construction OFI continuity across minute boundaries and a fallback to raw 1s when rollup coverage is missing. The raw 1-second archive stays fully intact and authoritative — the rollup is a regenerable performance cache, never a replacement. Backend/collector-pipeline scope, standalone: delivers complete value against `data_api/app.py`'s existing `/api/candles` route (`catalog_candles`) today — `dashboard.py` itself is retired by Story 15.10, so `data_api` is the sole integration point.
 
 ### Story 16.1: Incremental 1-minute rollup cache
 
@@ -1666,7 +1666,7 @@ So that wide-window charts load fast and carry order-book-derived signal, while 
 
 **Given** `ml_signals/candles.py`'s `TIMEFRAMES` extended with `"1d": 86400, "1w": 604800`, and `ROLLUP_THRESHOLD_SECONDS = TIMEFRAMES["1h"]`
 **When** a candle request's `bar_seconds` is `> 3600`
-**Then** `choose_candle_source(bar_seconds)` returns `"rollup_1m"`; at or below `3600` it returns `"raw_1s"` — a single shared decision point, never duplicated in `dashboard.py`/`data_api/app.py`
+**Then** `choose_candle_source(bar_seconds)` returns `"rollup_1m"`; at or below `3600` it returns `"raw_1s"` — a single shared decision point, never duplicated elsewhere in `data_api/app.py`
 
 **Given** `rollup_dicts_from_rows(rows, period_seconds)`, the rollup analogue of `candle_dicts_from_snapshots`
 **When** re-bucketing `DydxMinuteRollup` rows into a wider window
@@ -1681,8 +1681,8 @@ So that wide-window charts load fast and carry order-book-derived signal, while 
 **Then** it falls back to `snapshot_rows_fn` + `candle_dicts_from_snapshots` (raw 1s), logs a warning naming the instrument and range, and every returned candle dict carries `"source": "raw_1s"` — never a silently empty or wrong chart
 
 **Given** `troll/ml_signals/catalog_stats.py`'s new `query_minute_rollups(catalog_path, iid, start_ns, end_ns)` (exact mirror of the existing `query_second_snapshots`)
-**When** `dashboard.py::_historical_candles_json` and `data_api/app.py::catalog_candles` are updated
-**Then** both call `candle_dicts_for_window` with closures around `query_second_snapshots`/`query_minute_rollups` instead of calling `candle_dicts_from_snapshots` directly — URL/params (`start_ns`/`end_ns`/`bar_seconds`) unchanged, no new route added
+**When** `data_api/app.py::catalog_candles` is updated (`dashboard.py` no longer exists post-15.10, so this is the only candle route left to update)
+**Then** it calls `candle_dicts_for_window` with closures around `query_second_snapshots`/`query_minute_rollups` instead of calling `candle_dicts_from_snapshots` directly — URL/params (`start_ns`/`end_ns`/`bar_seconds`) unchanged, no new route added
 
 **Given** TEST-01 (financial calculation) extending `troll/ml_signals/tests/test_candles.py`
 **When** this story is verified
