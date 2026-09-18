@@ -1,5 +1,5 @@
 # ponytail: own dockerfile (not troll/collector.dockerfile) so the Node build stage below
-# doesn't force collector/dashboard/ranking_engine/bot_tui to pay a Node build cost they
+# doesn't force collector/ranking_engine/bot_tui to pay a Node build cost they
 # don't need -- see the architecture spine's Deployment & Environments section.
 
 # Stage 1: build the frontend (Node build-stage only -- never a runtime dependency of the

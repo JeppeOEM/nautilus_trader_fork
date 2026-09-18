@@ -287,9 +287,9 @@ Bridges §1's Parquet catalog and the SQLite `metrics_store` (§3.4). One entry 
 ### 2.9 `rank_history.py` / `watchlist.py`
 
 Thin, dependency-light HTTP fetch helpers, not computations: `fetch_rank_history`
-and `fetch_watchlist` pull already-computed data from the running dashboard's HTTP
-API (`/api/rank_history`, `/api/watchlist`) for scripts/notebooks that don't want to
-import the dashboard's full dependency set (aiohttp, plotly, redis).
+and `fetch_watchlist` pull already-computed data from the running `data_api`'s HTTP
+API (`/api/metrics/nearest/{iid}`, `/api/rankings`) for scripts/notebooks that don't want to
+import the full dependency set (fastapi, redis).
 
 ### 2.10 `ranking_columns.py` — shared column definitions
 

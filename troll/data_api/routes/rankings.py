@@ -90,6 +90,11 @@ _TECHNICALS_CACHE_TTL_S = 30.0
 _technicals_cache: dict[str, tuple[float, dict[str, dict[str, float | None]]]] = {}
 
 
+class _CatalogReadError(Exception):
+    """A catalog read failed. Deliberately not a ValueError: pyarrow's ArrowInvalid is one, and
+    would otherwise be mistaken for bad client indicator params (a whole-request 400)."""
+
+
 class TechnicalsColumn(_indicators.IndicatorConfigEntry):
     """Same wire shape as a per-coin picker entry -- only its persistence scope differs."""
 
@@ -151,7 +156,10 @@ def _latest_values(
     # Exactly the window needed (not the chart route's 3x scroll-back margin): 120 bars of 1m
     # is 2h of 1s snapshots per coin, not 6h.
     start_ns = now_ns - (_TECHNICALS_BARS + 5) * _TECHNICALS_BAR_SECONDS * 1_000_000_000
-    snapshots = _catalog_stats.query_second_snapshots(CATALOG_PATH, instrument_id, start_ns, now_ns)
+    try:
+        snapshots = _catalog_stats.query_second_snapshots(CATALOG_PATH, instrument_id, start_ns, now_ns)
+    except Exception as exc:
+        raise _CatalogReadError(str(exc)) from exc
     candles = candle_dicts_from_snapshots(snapshots, _TECHNICALS_BAR_SECONDS)[-_TECHNICALS_BARS:]
     max_age_ms = _TECHNICALS_MAX_CANDLE_AGE_BARS * _TECHNICALS_BAR_SECONDS * 1000
     if not candles or now_ns // 1_000_000 - candles[-1]["t"] > max_age_ms:
@@ -179,8 +187,8 @@ def get_technicals_values(entries: str) -> TechnicalsValuesResponse:
 
     Computes nothing itself (AD-F2): it dispatches to the chart's own `replay_indicator`, so a
     column always equals what that coin's chart shows. ponytail: sequential per-coin catalog
-    reads, cached only by the client's poll interval -- add a server-side cache if 50 coins x
-    a 60s poll ever loads the box.
+    reads behind a 30s TTL cache (one live key) -- no single-flight, add one if concurrent
+    viewers ever load the box.
     """
     parsed = _indicators._parse_entries(entries)
     _require_known_indicators([e.name for e in parsed])
@@ -188,7 +196,8 @@ def get_technicals_values(entries: str) -> TechnicalsValuesResponse:
     if latest is None:
         raise HTTPException(status_code=503, detail="Rankings not yet available")
     iids = [row["instrument_id"] for row in latest["ranks"]]
-    cache_key = json.dumps([entries, iids])
+    # Order-independent: rank order shifts constantly and must not defeat the cache.
+    cache_key = json.dumps([entries, sorted(iids)])
     cached = _technicals_cache.get(cache_key)
     if cached is not None and time.monotonic() - cached[0] < _TECHNICALS_CACHE_TTL_S:
         return TechnicalsValuesResponse(values=cached[1])

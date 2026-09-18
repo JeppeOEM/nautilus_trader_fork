@@ -48,10 +48,10 @@ def test_ohlcv_counts_and_close_only_on_boundary() -> None:
 
 def test_ofi_includes_boundary_crossing_contribution() -> None:
     b = MinuteRollupBuilder()
-    snaps = [_snap(58, bsz=1.0), _snap(59, bsz=1.0), _snap(60, bsz=5.0), _snap(120)]
+    snaps = [_snap(0), _snap(58, bsz=1.0), _snap(59, bsz=1.0), _snap(60, bsz=5.0), _snap(120)]
     ref = MultiLevelOFI(levels=5, window=1)
     contribs = []
-    for s in snaps[:3]:
+    for s in snaps[1:4]:
         ref.update_raw(s.bid_prices, s.bid_sizes, s.ask_prices, s.ask_sizes)
         contribs.append(ref.value)
     expected = contribs[2]  # the second-60 delta (+4 bid size) lives in minute 1
@@ -121,4 +121,16 @@ def test_rollup_ts_init_is_not_before_minute_end() -> None:
 def test_large_backwards_clock_step_resets_instead_of_freezing() -> None:
     b = MinuteRollupBuilder()
     _feed(b, [_snap(1000), _snap(1001)])
-    assert _feed(b, [_snap(10), _snap(11), _snap(70)])[0].seconds_observed == 2
+    assert _feed(b, [_snap(0), _snap(1), _snap(70)])[0].seconds_observed == 2
+
+
+def test_first_minute_of_a_run_that_starts_mid_minute_is_not_emitted() -> None:
+    """A restart at :30 would otherwise write a knowingly understated 30s minute the backfill
+    (which skips existing rows) could never correct."""
+    rollups = _feed(MinuteRollupBuilder(), [_snap(30), _snap(31), _snap(60), _snap(61), _snap(120)])
+    assert [r.ts_event for r in rollups] == [_MINUTE_NS]
+
+
+def test_first_minute_starting_at_the_top_of_the_minute_is_emitted() -> None:
+    rollups = _feed(MinuteRollupBuilder(), [_snap(0), _snap(1), _snap(60)])
+    assert [r.ts_event for r in rollups] == [0]

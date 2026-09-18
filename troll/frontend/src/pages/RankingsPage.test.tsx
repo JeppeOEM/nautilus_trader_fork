@@ -151,6 +151,18 @@ describe("RankingsPage", () => {
     expect(navigateMock).toHaveBeenCalledWith("/history/BTC-USD-PERP.DYDX");
   });
 
+  it("opens the chart on Enter for a focused row, but not for Enter on its history button", () => {
+    useLiveChannelMock.mockReturnValue({ latest: liveMessage(), connected: true });
+
+    renderPage();
+    const row = screen.getByText("BTC-USD-PERP.DYDX").closest("tr")!;
+    fireEvent.keyDown(screen.getByRole("button", { name: /31-day history/ }), { key: "Enter" });
+    expect(navigateMock).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(row, { key: "Enter" });
+    expect(navigateMock).toHaveBeenCalledWith("/chart/BTC-USD-PERP.DYDX");
+  });
+
   it("renders row order verbatim (message order), keyed by instrument_id", () => {
     useLiveChannelMock.mockReturnValue({
       latest: liveMessage({

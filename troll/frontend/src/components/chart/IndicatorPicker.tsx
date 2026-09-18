@@ -13,6 +13,9 @@ interface IndicatorPickerProps {
   /** Re-runs the initial load when it changes (a different coin, or an outside edit such as
    * a column removed from a table header). */
   reloadKey: string | number;
+  /** Blocks edits while another writer's save is in flight (a Technicals header action), so this
+   * picker can't PUT a list built from its own now-stale copy and undo that change. */
+  disabled?: boolean;
   /** Called with the freshly-persisted list every time it changes (initial load, add,
    * remove, or param-apply) -- `ChartPage.tsx` feeds this straight into its own `panes`
    * `useMemo`. Never called with an intermediate/unsaved draft (no auto-save-per-keystroke,
@@ -39,6 +42,7 @@ export default function IndicatorPicker({
   fetchConfig,
   saveConfig,
   reloadKey,
+  disabled = false,
   onEntriesChange,
 }: IndicatorPickerProps) {
   const [catalog, setCatalog] = useState<Record<string, IndicatorCatalogEntry>>({});
@@ -137,7 +141,7 @@ export default function IndicatorPicker({
             </option>
           ))}
         </select>
-        <button type="button" onClick={handleAdd} disabled={!selectedName}>
+        <button type="button" onClick={handleAdd} disabled={!selectedName || disabled}>
           Add
         </button>
       </div>
@@ -146,6 +150,7 @@ export default function IndicatorPicker({
           <IndicatorEntryRow
             key={entry.name}
             entry={entry}
+            disabled={disabled}
             onRemove={() => handleRemove(entry.name)}
             onApplyParams={(params) => handleApplyParams(entry.name, params)}
           />
@@ -157,10 +162,12 @@ export default function IndicatorPicker({
 
 function IndicatorEntryRow({
   entry,
+  disabled,
   onRemove,
   onApplyParams,
 }: {
   entry: IndicatorConfigEntry;
+  disabled: boolean;
   onRemove: () => void;
   onApplyParams: (params: Record<string, unknown>) => void;
 }) {
@@ -184,11 +191,11 @@ function IndicatorEntryRow({
         </label>
       ))}
       {Object.keys(draft).length > 0 && (
-        <button type="button" onClick={() => onApplyParams(draft)}>
+        <button type="button" disabled={disabled} onClick={() => onApplyParams(draft)}>
           Apply
         </button>
       )}
-      <button type="button" onClick={onRemove}>
+      <button type="button" disabled={disabled} onClick={onRemove}>
         Remove
       </button>
     </li>

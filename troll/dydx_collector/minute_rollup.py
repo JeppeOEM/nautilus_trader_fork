@@ -163,6 +163,10 @@ class _Minute:
     buy_count: int = 0
     sell_count: int = 0
     seconds: int = 0
+    # This minute began mid-way through with no earlier data in this builder (process start or a
+    # reset): its row would silently understate the minute, so it is never emitted. Raw 1s still
+    # holds the whole minute, and the backfill (which has no such seam) writes the complete row.
+    partial_start: bool = False
     ofi: dict[int, float] = field(default_factory=lambda: dict.fromkeys(_LEVELS, 0.0))
     obi: dict[int, float] = field(default_factory=lambda: dict.fromkeys(_LEVELS, 0.0))
 
@@ -195,16 +199,21 @@ class MinuteRollupBuilder:
             logger.warning("Clock stepped back %.0fs for %s; resetting minute rollup state",
                            (last_ts - s.ts_event) / 1e9, iid)
             self.drop(iid)
+            cur = None
             last_ts = None
         if last_ts is not None and s.ts_event - last_ts > _MAX_GAP_NS:
             self.discard_book_state(iid)
         self._last_ts[iid] = s.ts_event
         closed = None
         if cur is not None and bucket != cur.bucket:
-            closed = self._close(iid, cur)
+            closed = None if cur.partial_start else self._close(iid, cur)
             cur = None
         if cur is None:
-            cur = self._minutes[iid] = _Minute(bucket=bucket, last=s)
+            first_seen = last_ts is None
+            offset_ns = s.ts_event - bucket * _MINUTE_NS
+            cur = self._minutes[iid] = _Minute(
+                bucket=bucket, last=s, partial_start=first_seen and offset_ns > _MAX_GAP_NS
+            )
         self._accumulate(iid, cur, s)
         return closed
 

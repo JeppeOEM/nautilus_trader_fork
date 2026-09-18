@@ -169,6 +169,7 @@
   letter-spacing: 0.03em;
   cursor: pointer;
   text-transform: uppercase;
+  font-family: inherit; /* a <button> (Rankings tabs) doesn't inherit it by default, unlike the docs page's <div> tabs */
 }
 
 .tabbtn.active {

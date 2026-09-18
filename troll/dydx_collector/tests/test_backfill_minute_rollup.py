@@ -55,7 +55,8 @@ def test_backfill_ohlcv_matches_aggregate_ohlc_across_chunk_boundary(tmp_path: P
         60,
     )
     closed = {r.ts_event: r for r in rollups}
-    for c in expected[:-1]:  # last minute is still open, never emitted
+    # First minute starts mid-minute (30s in) so is never emitted; last is still open.
+    for c in expected[1:-1]:
         r = closed[c.ts_open]
         assert (r.open, r.high, r.low, r.close) == (c.open, c.high, c.low, c.close)
         assert r.buy_volume + r.sell_volume == c.volume
@@ -79,3 +80,27 @@ def test_rerun_fills_gaps_without_duplicating(tmp_path: Path) -> None:
     total = backfill_instrument(catalog, str(tmp_path), IID, lo, hi)
     stamps = [r.data.ts_event for r in catalog.query(DydxMinuteRollup, identifiers=[IID])]
     assert len(stamps) == len(set(stamps)) == first + total
+
+
+def test_gaps_on_both_sides_of_a_live_written_minute_do_not_crash_the_backfill(tmp_path: Path) -> None:
+    """Catalog refuses a write spanning an existing file -- gap-fill must write disjoint runs."""
+    start = 4 * _DAY_NS  # minute-aligned
+    ParquetDataCatalog(str(tmp_path)).write_data(
+        [_snap(start + i * _SEC, 100.0 + i) for i in range(6 * 60 + 5)]
+    )
+    catalog = ParquetDataCatalog(str(tmp_path))
+    live = DydxMinuteRollup  # minutes 1 and 3 already written by the "live collector"
+    first_pass = backfill_instrument(catalog, str(tmp_path), IID, start, start + 6 * 60 * _SEC)
+    assert first_pass == 6
+    # Fresh catalog with only minutes 1 and 3 pre-written, then a full backfill.
+    other = tmp_path / "other"
+    ParquetDataCatalog(str(other)).write_data([_snap(start + i * _SEC, 100.0 + i) for i in range(6 * 60 + 5)])
+    seeded = [r for r in catalog.query(live, identifiers=[IID]) if r.data.ts_event in (start + 60 * _SEC, start + 180 * _SEC)]
+    for r in seeded:  # separate live flushes, so their file spans stay disjoint
+        ParquetDataCatalog(str(other)).write_data([r.data])
+
+    written = backfill_instrument(ParquetDataCatalog(str(other)), str(other), IID, start, start + 6 * 60 * _SEC)
+
+    stamps = sorted(r.data.ts_event for r in ParquetDataCatalog(str(other)).query(live, identifiers=[IID]))
+    assert written == 4  # minutes 0, 2, 4, 5
+    assert stamps == [start + m * 60 * _SEC for m in range(6)]

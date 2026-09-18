@@ -212,3 +212,43 @@ def test_values_are_served_from_the_ttl_cache_on_a_repeat_poll(
 
     assert first == second
     assert calls == [_IID]  # second poll never touched the catalog
+
+
+def test_a_valueerror_from_one_coins_catalog_read_does_not_become_a_whole_request_400(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """pyarrow's ArrowInvalid subclasses ValueError -- a corrupt partition is not bad client input."""
+    _seed_recent_minutes(tmp_path)
+    _ranked(monkeypatch, _IID, "BAD-USD-PERP.DYDX")
+    client = _client(tmp_path, monkeypatch)
+    real = rankings_routes._catalog_stats.query_second_snapshots
+
+    def read(path: str, iid: str, a: int, b: int) -> list:
+        if iid.startswith("BAD"):
+            raise ValueError("Arrow schema mismatch")
+        return real(path, iid, a, b)
+
+    monkeypatch.setattr(rankings_routes._catalog_stats, "query_second_snapshots", read)
+    entries = json.dumps([{"name": "RelativeStrengthIndex", "params": {}}])
+
+    response = client.get("/api/rankings/technicals-values", params={"entries": entries})
+
+    assert response.status_code == 200
+    assert response.json()["values"]["BAD-USD-PERP.DYDX"] == {}
+    assert response.json()["values"][_IID]
+
+
+def test_cache_key_ignores_rank_order(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_recent_minutes(tmp_path)
+    client = _client(tmp_path, monkeypatch)
+    calls: list[str] = []
+    real = rankings_routes._latest_values
+    monkeypatch.setattr(rankings_routes, "_latest_values", lambda i, e, n: calls.append(i) or real(i, e, n))
+    entries = json.dumps([{"name": "RelativeStrengthIndex", "params": {}}])
+
+    _ranked(monkeypatch, _IID, "ZZZ-USD-PERP.DYDX")
+    client.get("/api/rankings/technicals-values", params={"entries": entries})
+    _ranked(monkeypatch, "ZZZ-USD-PERP.DYDX", _IID)  # rank order swapped
+    client.get("/api/rankings/technicals-values", params={"entries": entries})
+
+    assert len(calls) == 2  # only the first request hit the catalog

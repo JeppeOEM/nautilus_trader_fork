@@ -138,7 +138,15 @@ export default function RankingsPage() {
   const technicalsActive = activeTab === "technicals" && technicalsEntries.length > 0;
   // Filters (Story 17.6) narrow the row set on either tab; a Technicals-field filter therefore
   // needs those columns' entries and values loaded even while Performance is showing.
-  const [filters, setFilters] = useState<FilterCondition[]>([]);
+  const [allFilters, setFilters] = useState<FilterCondition[]>([]);
+  // A filter on a Technicals output whose column was removed would exclude every row with no
+  // visible cause -- it is ignored (and its chip hidden) with its column, derived here rather
+  // than pruned from state so it comes back if the same column is re-added.
+  const filters = allFilters.filter((f) => {
+    if (!f.field.startsWith(TECHNICAL_FIELD_PREFIX)) return true;
+    const name = f.field.slice(TECHNICAL_FIELD_PREFIX.length).replace(/\.[^.]*$/, "");
+    return technicalsEntries.some((e) => e.name === name);
+  });
   useEffect(() => {
     fetchTechnicalsColumns()
       .then(setTechnicalsEntries)
@@ -147,19 +155,6 @@ export default function RankingsPage() {
   // Sticky once the builder has been opened: Technicals outputs only become selectable fields
   // after their first values arrive.
   const [filterBuilderOpened, setFilterBuilderOpened] = useState(false);
-  // A filter on a Technicals output whose column was removed would exclude every row with no
-  // visible cause -- drop it with its column. (Entries are loaded before any such condition can
-  // exist: its field only becomes selectable once the entry's values have arrived.)
-  useEffect(() => {
-    setFilters((current) => {
-      const kept = current.filter((f) => {
-        if (!f.field.startsWith(TECHNICAL_FIELD_PREFIX)) return true;
-        const name = f.field.slice(TECHNICAL_FIELD_PREFIX.length).replace(/\.[^.]*$/, "");
-        return technicalsEntries.some((e) => e.name === name);
-      });
-      return kept.length === current.length ? current : kept;
-    });
-  }, [technicalsEntries]);
   const filtersUseTechnicals =
     filterBuilderOpened || filters.some((f) => f.field.startsWith(TECHNICAL_FIELD_PREFIX));
   const { data: technicalsValues, error: valuesError } = useQuery({
@@ -189,6 +184,7 @@ export default function RankingsPage() {
   }
 
   const [technicalsError, setTechnicalsError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
 
   // Applied to local state immediately, so a rapid second header action builds on this one
   // instead of the pre-PUT list (which would silently undo it); the picker is re-synced from
@@ -196,12 +192,16 @@ export default function RankingsPage() {
   function saveEntries(next: IndicatorConfigEntry[]): void {
     setTechnicalsEntries(next);
     setTechnicalsError(null);
+    setSaving(true);
     saveTechnicalsColumns(next)
       .catch((err: unknown) => {
         console.error("RankingsPage: failed to save Technicals columns", err);
         setTechnicalsError(err instanceof Error ? err.message : String(err));
       })
-      .finally(() => setReloadKey((k) => k + 1));
+      .finally(() => {
+        setSaving(false);
+        setReloadKey((k) => k + 1);
+      });
   }
 
   // Live WS ticks take over from the initial REST seed the moment the first one
@@ -255,19 +255,19 @@ export default function RankingsPage() {
           {valuesError ? ` (${valuesError instanceof Error ? valuesError.message : String(valuesError)})` : ""}
         </p>
       )}
-      <div className="tabs">
-        <div
-          className={`tabbtn${activeTab === "performance" ? " active" : ""}`}
-          onClick={() => setActiveTab("performance")}
-        >
-          Performance
-        </div>
-        <div
-          className={`tabbtn${activeTab === "technicals" ? " active" : ""}`}
-          onClick={() => setActiveTab("technicals")}
-        >
-          Technicals
-        </div>
+      <div className="tabs" role="tablist">
+        {(["performance", "technicals"] as const).map((tab) => (
+          <button
+            key={tab}
+            type="button"
+            role="tab"
+            aria-selected={activeTab === tab}
+            className={`tabbtn${activeTab === tab ? " active" : ""}`}
+            onClick={() => setActiveTab(tab)}
+          >
+            {tab === "performance" ? "Performance" : "Technicals"}
+          </button>
+        ))}
       </div>
       <table className="rankings-table">
         <thead>
@@ -329,6 +329,13 @@ export default function RankingsPage() {
               <tr
                 key={row.instrument_id}
                 onClick={() => navigate(`/chart/${row.instrument_id}`)}
+                tabIndex={0}
+                onKeyDown={(event) => {
+                  // Only the row itself -- Enter on the nested history button must not also open the chart.
+                  if (event.key === "Enter" && event.target === event.currentTarget) {
+                    navigate(`/chart/${row.instrument_id}`);
+                  }
+                }}
                 data-stale={rowStale ? "true" : "false"}
                 className="rankings-row"
               >
@@ -381,6 +388,7 @@ export default function RankingsPage() {
           fetchConfig={fetchTechnicalsColumns}
           saveConfig={saveTechnicalsColumns}
           reloadKey={reloadKey}
+          disabled={saving}
           onEntriesChange={setTechnicalsEntries}
         />
       )}

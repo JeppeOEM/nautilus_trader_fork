@@ -26,7 +26,8 @@ long-lived MinuteRollupBuilder per instrument, so OFI carries across chunk bound
 
 Idempotent: minutes that already have a rollup row (live-written, or from an earlier
 backfill) are skipped, so re-running fills only the gaps -- e.g. the minute in progress at
-each collector restart -- and never duplicates. Raw 1s is still replayed for every minute,
+each collector restart -- and never duplicates (writes are split into disjoint runs, since the
+catalog refuses a write spanning an already-written minute). Raw 1s is still replayed for every minute,
 so OFI continuity is unchanged. After a rollup *schema or algorithm* change, existing rows
 are stale: clear `<catalog>/data/custom_dydx_minute_rollup/` first (see scripts/wipe_data.sh).
 """
@@ -83,6 +84,22 @@ def day_chunks(start_ns: int, end_ns: int) -> Iterator[tuple[int, int]]:
         day += 1
 
 
+def _runs_between_existing(rollups: list[DydxMinuteRollup], existing: set[int]) -> list[list[DydxMinuteRollup]]:
+    """Split gap-fill rollups into runs with no already-written minute between them.
+
+    The catalog refuses a write whose time span overlaps an existing file, so one batch
+    spanning a live-written minute would raise (and abort the whole backfill). Each run's
+    span is disjoint from every existing file.
+    """
+    runs: list[list[DydxMinuteRollup]] = []
+    for rollup in rollups:
+        if runs and not any(runs[-1][-1].ts_event < e < rollup.ts_event for e in existing):
+            runs[-1].append(rollup)
+        else:
+            runs.append([rollup])
+    return runs
+
+
 def backfill_instrument(
     catalog: ParquetDataCatalog, catalog_path: str, iid: str, start_ns: int, end_ns: int
 ) -> int:
@@ -100,9 +117,9 @@ def backfill_instrument(
         # a - 1 min: the previous chunk's last minute only closes on this chunk's first snapshot
         existing = {r.ts_event for r in query_minute_rollups(catalog_path, iid, a - _MINUTE_NS, min(b, end_ns))}
         rollups = [r for r in rollups if r.ts_event not in existing]
-        if rollups:
-            catalog.write_data(rollups)
-            written += len(rollups)
+        for run in _runs_between_existing(rollups, existing):
+            catalog.write_data(run)
+            written += len(run)
     return written
 
 
