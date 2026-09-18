@@ -93,3 +93,13 @@ export interface SnapshotSeriesResponse {
   items: SnapshotSeriesPoint[];
   has_more: boolean;
 }
+
+export interface TechnicalsColumn {
+  name: string;
+  params?: Record<string, unknown>;
+  category: string;
+}
+
+export interface TechnicalsValuesResponse {
+  values: Record<string, Record<string, number | null>>;
+}

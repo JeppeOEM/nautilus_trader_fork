@@ -1,11 +1,18 @@
 import { useEffect, useRef, useState } from "react";
 
-import { fetchCoinIndicatorConfig, fetchIndicatorCatalog, saveCoinIndicatorConfig } from "../../api/client";
+import { fetchIndicatorCatalog } from "../../api/client";
 import type { IndicatorCatalogEntry, IndicatorConfigEntry } from "../../api/schema";
 import { coerceParamValue } from "./paramCoercion";
 
 interface IndicatorPickerProps {
-  instrumentId: string;
+  /** Where the selection lives: the chart page wraps its per-coin GET/PUT here, the
+   * Technicals tab wraps the screener-wide ones (Story 17.5) -- the add/remove/param UI
+   * itself is shared, only persistence differs. */
+  fetchConfig: () => Promise<IndicatorConfigEntry[]>;
+  saveConfig: (entries: IndicatorConfigEntry[]) => Promise<unknown>;
+  /** Re-runs the initial load when it changes (a different coin, or an outside edit such as
+   * a column removed from a table header). */
+  reloadKey: string | number;
   /** Called with the freshly-persisted list every time it changes (initial load, add,
    * remove, or param-apply) -- `ChartPage.tsx` feeds this straight into its own `panes`
    * `useMemo`. Never called with an intermediate/unsaved draft (no auto-save-per-keystroke,
@@ -18,17 +25,22 @@ function defaultParamsFor(catalogEntry: IndicatorCatalogEntry): Record<string, u
 }
 
 /**
- * Add/remove/param-controls for a coin's picker-configured indicators (Story 15.6). The
+ * Add/remove/param-controls for a persisted indicator selection (Story 15.6; generalized over its persistence in Story 17.5). The
  * catalog list always comes from `GET /api/indicators/catalog` (spec's "Never": no
  * hand-duplicated frontend catalog); every change -- add, remove, or a param "Apply" --
- * fires exactly one `PUT /api/coin/{iid}/indicators` with the FULL updated list, never a
+ * fires exactly one `saveConfig` call with the FULL updated list, never a
  * separate ad hoc endpoint and never on every keystroke.
  *
  * Owns no chart/pane state itself -- `onEntriesChange` is this component's entire surface
  * toward `ChartPage.tsx`, which alone decides how entries become panes (AD-F4: no
  * component outside `LightweightChart.tsx` calls `chart.addPane()`/`removePane()`).
  */
-export default function IndicatorPicker({ instrumentId, onEntriesChange }: IndicatorPickerProps) {
+export default function IndicatorPicker({
+  fetchConfig,
+  saveConfig,
+  reloadKey,
+  onEntriesChange,
+}: IndicatorPickerProps) {
   const [catalog, setCatalog] = useState<Record<string, IndicatorCatalogEntry>>({});
   const [entries, setEntries] = useState<IndicatorConfigEntry[]>([]);
   const [selectedName, setSelectedName] = useState("");
@@ -38,7 +50,7 @@ export default function IndicatorPicker({ instrumentId, onEntriesChange }: Indic
   // response is a stale snapshot -- applying it would silently revert the visible picker
   // state (and every pane downstream) even though the newer state already landed on disk,
   // and any *subsequent* edit would then build on that stale list and permanently drop the
-  // earlier change on its own next PUT. Reset per instrumentId via the effect below.
+  // earlier change on its own next PUT. Reset per reloadKey via the effect below.
   const hasLocalChangeRef = useRef(false);
 
   useEffect(() => {
@@ -58,20 +70,20 @@ export default function IndicatorPicker({ instrumentId, onEntriesChange }: Indic
   useEffect(() => {
     let cancelled = false;
     hasLocalChangeRef.current = false;
-    fetchCoinIndicatorConfig(instrumentId)
+    fetchConfig()
       .then((result) => {
         if (cancelled || hasLocalChangeRef.current) return;
         setEntries(result);
         onEntriesChange(result);
       })
-      .catch((err: unknown) => console.error(`IndicatorPicker: failed to load config for ${instrumentId}`, err));
+      .catch((err: unknown) => console.error("IndicatorPicker: failed to load config", err));
     return () => {
       cancelled = true;
     };
-    // onEntriesChange is a state setter passed by the caller, stable across renders --
-    // only instrumentId should re-trigger this fetch.
+    // fetchConfig/onEntriesChange are stable caller-owned functions -- only reloadKey
+    // should re-trigger this fetch.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [instrumentId]);
+  }, [reloadKey]);
 
   function persist(next: IndicatorConfigEntry[]): void {
     // Applied optimistically (before the PUT resolves) so a rapid second Add/Remove/Apply
@@ -82,13 +94,13 @@ export default function IndicatorPicker({ instrumentId, onEntriesChange }: Indic
     const previous = entries;
     setEntries(next);
     setError(null);
-    saveCoinIndicatorConfig(instrumentId, next)
+    saveConfig(next)
       .then(() => {
         hasLocalChangeRef.current = true;
         onEntriesChange(next);
       })
       .catch((err: unknown) => {
-        console.error(`IndicatorPicker: failed to save config for ${instrumentId}`, err);
+        console.error("IndicatorPicker: failed to save config", err);
         setEntries(previous);
         setError(err instanceof Error ? err.message : String(err));
       });

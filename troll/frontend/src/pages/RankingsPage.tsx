@@ -2,8 +2,11 @@ import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router";
 
-import { fetchRankings } from "../api/client";
+import { fetchRankings, fetchTechnicalsColumns, fetchTechnicalsValues, saveTechnicalsColumns } from "../api/client";
+import type { IndicatorConfigEntry } from "../api/schema";
+import IndicatorPicker from "../components/chart/IndicatorPicker";
 import { useLiveChannel } from "../hooks/useLiveChannel";
+import { buildGroups, reorder } from "./technicals";
 
 // Client-side heartbeat staleness threshold: mirrors bot_tui/ranking_state.py's
 // _RANKING_STALE_SECONDS = 15.0 (3x ranking_engine's RANKING_HEARTBEAT_SECONDS=5)
@@ -16,6 +19,9 @@ import { useLiveChannel } from "../hooks/useLiveChannel";
 // market-data-staleness judgment, already computed into the message itself. Both are
 // real and both get their own visible marker (Design Notes: "do not conflate").
 const RANKING_STALE_MS = 15_000;
+
+// One bulk indicator recompute for every ranked coin per poll -- slow by design (1m candles).
+const TECHNICALS_POLL_MS = 60_000;
 
 // Hand-declared TS mirror of ml_signals/ranking_columns.py's RANKING_COLS
 // (troll/CLAUDE.md SSOT-03) -- same precedent as bot_tui's own urwid renderer
@@ -116,6 +122,29 @@ export default function RankingsPage() {
   // classes DocsPage's sidebar tabs use) rather than a second tab visual style.
   const [activeTab, setActiveTab] = useState<"performance" | "technicals">("performance");
 
+  // Technicals columns (Story 17.5): the screener-wide selection, owned/persisted by the shared
+  // IndicatorPicker; header actions below (remove/reorder) save directly and bump `reloadKey`
+  // so the picker re-reads the same persisted list. Values refresh on a slow poll -- one bulk
+  // request for every ranked coin, not per-tick.
+  const [technicalsEntries, setTechnicalsEntries] = useState<IndicatorConfigEntry[]>([]);
+  const [reloadKey, setReloadKey] = useState(0);
+  const [dragFrom, setDragFrom] = useState<number | null>(null);
+  const technicalsActive = activeTab === "technicals" && technicalsEntries.length > 0;
+  const { data: technicalsValues } = useQuery({
+    queryKey: ["technicals-values", JSON.stringify(technicalsEntries)],
+    queryFn: () => fetchTechnicalsValues(technicalsEntries),
+    enabled: technicalsActive,
+    refetchInterval: TECHNICALS_POLL_MS,
+    retry: false,
+  });
+  const groups = buildGroups(technicalsEntries, technicalsValues);
+
+  function saveEntries(next: IndicatorConfigEntry[]): void {
+    saveTechnicalsColumns(next)
+      .then(() => setReloadKey((k) => k + 1))
+      .catch((err: unknown) => console.error("RankingsPage: failed to save Technicals columns", err));
+  }
+
   // Live WS ticks take over from the initial REST seed the moment the first one
   // arrives -- row order is message order verbatim, never re-sorted client-side
   // (epics AC3/troll/CLAUDE.md: "no client-side re-sort beyond the active Ranking
@@ -158,20 +187,52 @@ export default function RankingsPage() {
       <table className="rankings-table">
         <thead>
           <tr>
-            <th>Rank</th>
-            <th>Instrument</th>
+            <th rowSpan={technicalsActive ? 2 : 1}>Rank</th>
+            <th rowSpan={technicalsActive ? 2 : 1}>Instrument</th>
             {activeTab === "performance" &&
               RANKING_COLS.map((col) => <th key={col.key}>{col.label}</th>)}
+            {technicalsActive &&
+              groups.map((group) => (
+                <th
+                  key={group.entryIndex}
+                  colSpan={Math.max(1, group.attrs.length)}
+                  draggable
+                  onDragStart={() => setDragFrom(group.entryIndex)}
+                  onDragOver={(event) => event.preventDefault()}
+                  onDrop={() => {
+                    if (dragFrom !== null) saveEntries(reorder(technicalsEntries, dragFrom, group.entryIndex));
+                    setDragFrom(null);
+                  }}
+                >
+                  {group.entry.name}
+                  <button
+                    type="button"
+                    className="rankings-history-link"
+                    aria-label={`Remove ${group.entry.name} column`}
+                    onClick={() => saveEntries(technicalsEntries.filter((_, i) => i !== group.entryIndex))}
+                  >
+                    ×
+                  </button>
+                </th>
+              ))}
           </tr>
+          {technicalsActive && (
+            <tr>
+              {groups.flatMap((group) =>
+                group.attrs.length > 0
+                  ? group.attrs.map((attr) => <th key={`${group.entryIndex}.${attr}`}>{attr}</th>)
+                  : [<th key={`${group.entryIndex}.pending`}>—</th>],
+              )}
+            </tr>
+          )}
         </thead>
         <tbody>
-          {/* Technicals has no user-managed columns yet (Story 17.5 adds them) --
-              one dim empty-state row spanning the table's full width, which on
-              this tab is exactly the pinned Rank/Instrument pair. */}
-          {activeTab === "technicals" && (
+          {/* No Technicals columns configured yet -- one dim empty-state row spanning the
+              pinned Rank/Instrument pair; add one via the picker below the table. */}
+          {activeTab === "technicals" && technicalsEntries.length === 0 && (
             <tr>
               <td colSpan={2} className="rankings-empty">
-                no columns yet — click + to add one
+                no columns yet — add one below
               </td>
             </tr>
           )}
@@ -208,11 +269,30 @@ export default function RankingsPage() {
                 </td>
                 {activeTab === "performance" &&
                   RANKING_COLS.map((col) => <td key={col.key}>{formatCell(col, row[col.key])}</td>)}
+                {technicalsActive &&
+                  groups.flatMap((group) =>
+                    (group.attrs.length > 0 ? group.attrs : [null]).map((attr) => {
+                      const value = attr === null ? null : technicalsValues?.[row.instrument_id]?.[`${group.entryIndex}.${attr}`];
+                      return (
+                        <td key={`${group.entryIndex}.${attr}`}>
+                          {value === null || value === undefined ? "—" : value.toFixed(4)}
+                        </td>
+                      );
+                    }),
+                  )}
               </tr>
             );
           })}
         </tbody>
       </table>
+      {activeTab === "technicals" && (
+        <IndicatorPicker
+          fetchConfig={fetchTechnicalsColumns}
+          saveConfig={saveTechnicalsColumns}
+          reloadKey={reloadKey}
+          onEntriesChange={setTechnicalsEntries}
+        />
+      )}
     </div>
   );
 }

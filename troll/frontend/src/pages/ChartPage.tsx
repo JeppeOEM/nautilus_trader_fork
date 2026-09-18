@@ -2,6 +2,7 @@ import type { IChartApi } from "lightweight-charts";
 import { useMemo, useState } from "react";
 import { useParams } from "react-router";
 
+import { fetchCoinIndicatorConfig, saveCoinIndicatorConfig } from "../api/client";
 import IndicatorPicker from "../components/chart/IndicatorPicker";
 import LightweightChart, { type ChartMode, type IndicatorPaneSpec } from "../components/chart/LightweightChart";
 import { assignPaneColor } from "../components/chart/paneColors";
@@ -136,7 +137,12 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
           liveBar={liveBar}
         />
       </div>
-      <IndicatorPicker instrumentId={instrumentId} onEntriesChange={setPickerEntries} />
+      <IndicatorPicker
+        fetchConfig={() => fetchCoinIndicatorConfig(instrumentId)}
+        saveConfig={(entries) => saveCoinIndicatorConfig(instrumentId, entries)}
+        reloadKey={instrumentId}
+        onEntriesChange={setPickerEntries}
+      />
     </div>
   );
 }

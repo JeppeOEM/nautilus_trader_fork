@@ -357,6 +357,89 @@
         }
       }
     },
+    "/api/rankings/technicals-columns": {
+      "get": {
+        "summary": "Get Technicals Columns",
+        "operationId": "get_technicals_columns_api_rankings_technicals_columns_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/TechnicalsColumn"
+                  },
+                  "type": "array",
+                  "title": "Response Get Technicals Columns Api Rankings Technicals Columns Get"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "summary": "Put Technicals Columns",
+        "description": "Persist the FULL screener-wide column list (add/remove/reorder/param change).",
+        "operationId": "put_technicals_columns_api_rankings_technicals_columns_put",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": {
+                    "type": "boolean"
+                  },
+                  "type": "object",
+                  "title": "Response Put Technicals Columns Api Rankings Technicals Columns Put"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/rankings/technicals-values": {
+      "get": {
+        "summary": "Get Technicals Values",
+        "description": "Latest value of every requested indicator for every currently-ranked instrument.\n\nComputes nothing itself (AD-F2): it dispatches to the chart's own `replay_indicator`, so a\ncolumn always equals what that coin's chart shows. ponytail: sequential per-coin catalog\nreads, cached only by the client's poll interval -- add a server-side cache if 50 coins x\na 60s poll ever loads the box.",
+        "operationId": "get_technicals_values_api_rankings_technicals_values_get",
+        "parameters": [
+          {
+            "name": "entries",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Entries"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TechnicalsValuesResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/candles/{instrument_id}": {
       "get": {
         "summary": "Get Candles",
@@ -1447,6 +1530,57 @@
           "has_more"
         ],
         "title": "SnapshotSeriesResponse"
+      },
+      "TechnicalsColumn": {
+        "properties": {
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "params": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Params",
+            "default": {}
+          },
+          "category": {
+            "type": "string",
+            "title": "Category"
+          }
+        },
+        "type": "object",
+        "required": [
+          "name",
+          "category"
+        ],
+        "title": "TechnicalsColumn",
+        "description": "Same wire shape as a per-coin picker entry -- only its persistence scope differs."
+      },
+      "TechnicalsValuesResponse": {
+        "properties": {
+          "values": {
+            "additionalProperties": {
+              "additionalProperties": {
+                "anyOf": [
+                  {
+                    "type": "number"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "type": "object"
+            },
+            "type": "object",
+            "title": "Values"
+          }
+        },
+        "type": "object",
+        "required": [
+          "values"
+        ],
+        "title": "TechnicalsValuesResponse"
       },
       "ValidationError": {
         "properties": {

@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { fetchRankings } from "../api/client";
+import { fetchRankings, fetchTechnicalsColumns, fetchTechnicalsValues, saveTechnicalsColumns } from "../api/client";
 import type { RankingsLiveMessage } from "./RankingsPage";
 
 // api/client's fetchRankings would otherwise hit a real network fetch under jsdom --
@@ -16,6 +16,13 @@ vi.mock("../api/client", () => ({
     mode: "volume",
     stale_instrument_ids: [],
   }),
+  // Technicals tab (Story 17.5): the shared IndicatorPicker and the values poll.
+  fetchIndicatorCatalog: vi.fn().mockResolvedValue({
+    RelativeStrengthIndex: { params: { period: 14 }, panel: "oscillator", category: "native" },
+  }),
+  fetchTechnicalsColumns: vi.fn().mockResolvedValue([]),
+  saveTechnicalsColumns: vi.fn().mockResolvedValue(undefined),
+  fetchTechnicalsValues: vi.fn().mockResolvedValue({}),
 }));
 
 const useLiveChannelMock = vi.fn();
@@ -32,7 +39,7 @@ vi.mock("react-router", async (importOriginal) => {
 // Imported after the mocks above so RankingsPage picks up the mocked hooks/client.
 const { default: RankingsPage } = await import("./RankingsPage");
 
-// Hand-declared list of the Performance tab's 13 column labels (the exact set
+// Hand-declared list of the Performance tab's column labels (the exact set
 // RankingsPage.tsx's RANKING_COLS renders), deliberately NOT imported from the
 // page module -- a dropped/renamed column must fail these tests rather than
 // tautologically pass against whatever the module currently declares.
@@ -47,6 +54,8 @@ const PERFORMANCE_COL_LABELS = [
   "Price",
   "1h %",
   "24h %",
+  "1w %",
+  "1m %",
   "Vol(catalog)",
   "Vol Score",
   "Vol24h",
@@ -180,7 +189,7 @@ describe("RankingsPage", () => {
     renderPage();
     fireEvent.click(screen.getByText("Technicals"));
 
-    expect(screen.getByText("no columns yet — click + to add one")).toBeInTheDocument();
+    expect(screen.getByText("no columns yet — add one below")).toBeInTheDocument();
     for (const label of PERFORMANCE_COL_LABELS) {
       expect(screen.queryByText(label)).not.toBeInTheDocument();
     }
@@ -197,7 +206,7 @@ describe("RankingsPage", () => {
     fireEvent.click(screen.getByText("Technicals"));
     fireEvent.click(screen.getByText("Performance"));
 
-    expect(screen.queryByText("no columns yet — click + to add one")).not.toBeInTheDocument();
+    expect(screen.queryByText("no columns yet — add one below")).not.toBeInTheDocument();
     for (const label of PERFORMANCE_COL_LABELS) {
       expect(screen.getByText(label)).toBeInTheDocument();
     }
@@ -217,7 +226,7 @@ describe("RankingsPage", () => {
       connected: true,
     });
     rerender(pageElement(queryClient));
-    expect(screen.getByText("no columns yet — click + to add one")).toBeInTheDocument();
+    expect(screen.getByText("no columns yet — add one below")).toBeInTheDocument();
 
     fireEvent.click(screen.getByText("Performance"));
 
@@ -238,5 +247,48 @@ describe("RankingsPage", () => {
     fireEvent.click(screen.getByText("Technicals"));
 
     expect(vi.mocked(fetchRankings).mock.calls.length).toBe(callsAfterLoad);
+  });
+
+  describe("Technicals columns", () => {
+    const rsi = { name: "RelativeStrengthIndex", params: {}, category: "native" };
+    const macd = { name: "MovingAverageConvergenceDivergence", params: {}, category: "native" };
+
+    function configureTechnicals() {
+      useLiveChannelMock.mockReturnValue({ latest: liveMessage(), connected: true });
+      vi.mocked(fetchTechnicalsColumns).mockResolvedValue([rsi, macd]);
+      vi.mocked(fetchTechnicalsValues).mockResolvedValue({
+        "BTC-USD-PERP.DYDX": { "0.value": 55.5, "1.value": 1.25, "1.signal": 0.5 },
+      });
+      vi.mocked(saveTechnicalsColumns).mockClear();
+    }
+
+    it("renders configured columns grouped under one header per entry, with each coin's values", async () => {
+      configureTechnicals();
+
+      renderPage();
+      fireEvent.click(screen.getByText("Technicals"));
+
+      // The picker below the table also lists each entry's name -- pick the table header.
+      // The header's span only widens once the first values reveal MACD's two outputs.
+      await waitFor(() => {
+        const header = screen
+          .getAllByText("MovingAverageConvergenceDivergence")
+          .find((el) => el.tagName === "TH");
+        expect(header).toHaveAttribute("colspan", "2");
+      });
+      expect(await screen.findByText("55.5000")).toBeInTheDocument();
+      expect(screen.getByText("signal")).toBeInTheDocument();
+      expect(screen.getByText("0.5000")).toBeInTheDocument();
+    });
+
+    it("removes a column from its header, persisting the list without it", async () => {
+      configureTechnicals();
+
+      renderPage();
+      fireEvent.click(screen.getByText("Technicals"));
+      fireEvent.click(await screen.findByRole("button", { name: "Remove RelativeStrengthIndex column" }));
+
+      await waitFor(() => expect(saveTechnicalsColumns).toHaveBeenCalledWith([macd]));
+    });
   });
 });

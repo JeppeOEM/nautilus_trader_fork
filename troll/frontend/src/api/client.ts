@@ -10,6 +10,7 @@ import type {
   MetricsHistoryResponse,
   RankingsResponse,
   SnapshotSeriesResponse,
+  TechnicalsValuesResponse,
 } from "./schema";
 
 export type {
@@ -156,4 +157,37 @@ export async function fetchIndicatorValues(
   const res = await fetch(`/api/coin/${encodeURIComponent(instrumentId)}/indicator-values?${params}`);
   if (!res.ok) throw new Error(`GET /api/coin/${instrumentId}/indicator-values failed: ${res.status}`);
   return (await res.json()) as IndicatorValuesResponse;
+}
+
+// Story 17.5: the Technicals tab's screener-wide column list -- one list for every row, a
+// different persistence scope from the per-coin picker config above.
+export async function fetchTechnicalsColumns(): Promise<IndicatorConfigEntry[]> {
+  const res = await fetch("/api/rankings/technicals-columns");
+  if (!res.ok) throw new Error(`GET /api/rankings/technicals-columns failed: ${res.status}`);
+  return (await res.json()) as IndicatorConfigEntry[];
+}
+
+export async function saveTechnicalsColumns(entries: IndicatorConfigEntry[]): Promise<void> {
+  const res = await fetch("/api/rankings/technicals-columns", {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(entries),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(`PUT /api/rankings/technicals-columns failed: ${res.status} ${JSON.stringify(body)}`);
+  }
+}
+
+// Latest value of every requested indicator for every ranked instrument, keyed
+// instrument_id -> "{entry_index}.{output_attr}" -> value.
+export async function fetchTechnicalsValues(
+  entries: IndicatorConfigEntry[],
+): Promise<TechnicalsValuesResponse["values"]> {
+  const params = new URLSearchParams({
+    entries: JSON.stringify(entries.map(({ name, params: p }) => ({ name, params: p ?? {} }))),
+  });
+  const res = await fetch(`/api/rankings/technicals-values?${params}`);
+  if (!res.ok) throw new Error(`GET /api/rankings/technicals-values failed: ${res.status}`);
+  return ((await res.json()) as TechnicalsValuesResponse).values;
 }
