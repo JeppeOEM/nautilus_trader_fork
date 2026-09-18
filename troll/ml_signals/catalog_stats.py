@@ -72,10 +72,14 @@ def query_minute_rollups(
 ) -> list[DydxMinuteRollup]:
     """DydxMinuteRollup rows for `instrument_id` in [start_ns, end_ns], CustomData-unwrapped."""
     catalog = ParquetDataCatalog(catalog_path)
+    # The catalog filters on ts_init, which for a rollup is the minute's *end* (ts_event is
+    # its start) -- widen the query by one minute and filter on ts_event ourselves.
     results = catalog.query(
-        data_cls=DydxMinuteRollup, identifiers=[instrument_id], start=start_ns, end=end_ns,
+        data_cls=DydxMinuteRollup, identifiers=[instrument_id],
+        start=start_ns, end=end_ns + 60_000_000_000,
     )
-    return [r.data if hasattr(r, "data") else r for r in results]
+    rows = [r.data if hasattr(r, "data") else r for r in results]
+    return [r for r in rows if start_ns <= r.ts_event <= end_ns]
 
 
 def _load(catalog: ParquetDataCatalog, data_type: str, instrument_id: str) -> list:

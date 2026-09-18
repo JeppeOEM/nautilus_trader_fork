@@ -221,8 +221,8 @@ development_status:
   # rather than left missing from this file.
   epic-16: backlog
   16-1-incremental-1-minute-rollup-cache: done
-  16-2-threshold-based-candle-source-dispatch: review
-  16-3-backfill-historical-1-second-data-into-the-rollup: review
+  16-2-threshold-based-candle-source-dispatch: done
+  16-3-backfill-historical-1-second-data-into-the-rollup: done
   epic-16-retrospective: optional
 
   # epics 17-20 added to epics.md 2026-09-17 (multi-exchange screener/chart revision,

@@ -14,6 +14,7 @@
 # -------------------------------------------------------------------------------------------------
 """Self-check: candle bucketing produces correct OHLC per time bucket."""
 
+from pathlib import Path
 from types import SimpleNamespace
 
 from ml_signals.candles import aggregate_ohlc
@@ -180,3 +181,45 @@ def test_short_window_never_touches_rollup() -> None:
         raise AssertionError("rollup queried")
 
     assert candle_dicts_for_window("X", 0, 1, 60, lambda *_: [], boom) == []
+
+
+def test_dispatch_serves_pre_rollup_history_from_raw_then_rollup() -> None:
+    day = 86_400 * 1_000_000_000
+    snaps = [_snap(0, 10.0), _snap(day // 2, 11.0)]
+    rollups = [_rollup(2 * 1440 + 5, 1.0, 2.0, 0.5, 1.5)]  # first rollup on day 2
+    got = candle_dicts_for_window(
+        "X", 0, 3 * day, 86400,
+        lambda _i, a, b: [s for s in snaps if a <= s.ts_event <= b], lambda *_: rollups,
+    )
+    assert [(c["t"], c["source"]) for c in got] == [(0, "raw_1s"), (2 * day // 1_000_000, "rollup_1m")]
+
+
+def test_query_minute_rollups_filters_on_ts_event_not_ts_init(tmp_path: Path) -> None:
+    from dydx_collector.minute_rollup import MinuteRollupBuilder
+    from ml_signals.catalog_stats import query_minute_rollups
+    from nautilus_trader.persistence.catalog import ParquetDataCatalog
+
+    minute = 60_000_000_000
+    rows = []
+    b = MinuteRollupBuilder()
+    for m in range(3):  # minutes 0, 1, 2 closed by a snapshot in minute 3
+        for r in (b.update(IID, _real_snap(m * minute)), b.update(IID, _real_snap(m * minute + 1_000_000_000))):
+            rows += [r] if r else []
+    if (r := b.update(IID, _real_snap(3 * minute))) is not None:
+        rows.append(r)
+    ParquetDataCatalog(str(tmp_path)).write_data(rows)
+    got = query_minute_rollups(str(tmp_path), IID, minute, 2 * minute)
+    assert [r.ts_event for r in got] == [minute, 2 * minute]
+
+
+IID = "BTC-USD-PERP.DYDX"
+
+
+def _real_snap(ts: int):  # noqa: ANN202
+    from dydx_collector.second_snapshot import DydxSecondSnapshot
+    from nautilus_trader.model.identifiers import InstrumentId
+
+    return DydxSecondSnapshot(
+        instrument_id=InstrumentId.from_str(IID), bid_prices=[1.0], bid_sizes=[1.0], ask_prices=[2.0],
+        ask_sizes=[1.0], buy_volume=0.0, sell_volume=0.0, buy_count=0, sell_count=0, ts_event=ts, ts_init=ts,
+    )

@@ -200,13 +200,31 @@ def candle_dicts_for_window(
     snapshot_rows_fn: Callable[[str, int, int], list],
     rollup_rows_fn: Callable[[str, int, int], list],
 ) -> list[dict]:
-    """Serve candles from the minute rollup for wide bars, else (or if the rollup has no
-    rows for the range) from raw 1s. Every dict is tagged with its `source`."""
-    if choose_candle_source(bar_seconds) == "rollup_1m":
-        rollups = rollup_rows_fn(iid, start_ns, end_ns)
-        if rollups:
-            candles = rollup_dicts_from_rows(rollups, bar_seconds)
-            return [{**c, "source": "rollup_1m"} for c in candles]
+    """
+    Serve wide bars from the minute rollup, narrow ones from raw 1s; every dict carries `source`.
+
+    If the rollup only covers the tail of the range (pre-feature history), the buckets before
+    the first rollup's are served from raw 1s, so the chart never silently truncates (DATA-01).
+    The first rollup's own bucket is rollup-only (never mixes sources), so it may be partial.
+    No rollup at all: all raw.
+    """
+    if choose_candle_source(bar_seconds) != "rollup_1m":
+        return _raw_candles(iid, start_ns, end_ns, bar_seconds, snapshot_rows_fn)
+    rollups = rollup_rows_fn(iid, start_ns, end_ns)
+    if not rollups:
         logger.warning("No minute rollup for %s in [%d, %d]; falling back to raw 1s", iid, start_ns, end_ns)
+        return _raw_candles(iid, start_ns, end_ns, bar_seconds, snapshot_rows_fn)
+    period_ns = bar_seconds * 1_000_000_000
+    first_bucket_start = min(r.ts_event for r in rollups) // period_ns * period_ns
+    leading: list[dict] = []
+    if start_ns < first_bucket_start:
+        logger.warning("Minute rollup for %s starts at %d; raw 1s before it", iid, first_bucket_start)
+        leading = _raw_candles(iid, start_ns, first_bucket_start - 1, bar_seconds, snapshot_rows_fn)
+    return leading + [{**c, "source": "rollup_1m"} for c in rollup_dicts_from_rows(rollups, bar_seconds)]
+
+
+def _raw_candles(
+    iid: str, start_ns: int, end_ns: int, bar_seconds: int, snapshot_rows_fn: Callable[[str, int, int], list]
+) -> list[dict]:
     raw = candle_dicts_from_snapshots(snapshot_rows_fn(iid, start_ns, end_ns), bar_seconds)
     return [{**c, "source": "raw_1s"} for c in raw]
