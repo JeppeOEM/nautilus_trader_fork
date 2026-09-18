@@ -190,6 +190,21 @@ export default function RankingsPage() {
                   {row.instrument_id}
                   {isMessageStale && <span title="rankings feed stale"> ⏱</span>}
                   {marketDataStale && <span title="market data stale"> ⚠</span>}
+                  {activeTab === "performance" && (
+                    // stopPropagation: the row's own onClick goes to /chart/:iid (Story 17.4).
+                    <button
+                      type="button"
+                      className="rankings-history-link"
+                      title="31-day history"
+                      aria-label={`31-day history for ${row.instrument_id}`}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        navigate(`/history/${row.instrument_id}`);
+                      }}
+                    >
+                      ⏲
+                    </button>
+                  )}
                 </td>
                 {activeTab === "performance" &&
                   RANKING_COLS.map((col) => <td key={col.key}>{formatCell(col, row[col.key])}</td>)}

@@ -132,6 +132,16 @@ describe("RankingsPage", () => {
     expect(navigateMock).toHaveBeenCalledWith("/chart/BTC-USD-PERP.DYDX");
   });
 
+  it("navigates to /history/:iid from the history button without also opening the chart", () => {
+    useLiveChannelMock.mockReturnValue({ latest: liveMessage(), connected: true });
+
+    renderPage();
+    fireEvent.click(screen.getByRole("button", { name: /31-day history for BTC-USD-PERP.DYDX/ }));
+
+    expect(navigateMock).toHaveBeenCalledTimes(1);
+    expect(navigateMock).toHaveBeenCalledWith("/history/BTC-USD-PERP.DYDX");
+  });
+
   it("renders row order verbatim (message order), keyed by instrument_id", () => {
     useLiveChannelMock.mockReturnValue({
       latest: liveMessage({

@@ -113,3 +113,13 @@ table {
   color: var(--color-text-dim);
 }
 
+
+/* Story 17.4: per-row link to /history/:iid -- a bare icon button, not a filled control. */
+.rankings-history-link {
+  margin-left: 0.5em;
+  padding: 0 0.3em;
+  background: none;
+  border: none;
+  color: var(--color-link);
+  cursor: pointer;
+}
