@@ -69,3 +69,13 @@ def test_final_minute_of_requested_range_is_emitted(tmp_path: Path) -> None:
     got = sorted(r.data.ts_event for r in catalog.query(DydxMinuteRollup, identifiers=[IID]))
     assert got[-1] == end // (60 * _SEC) * (60 * _SEC)
     assert all(t <= end for t in got)
+
+
+def test_rerun_fills_gaps_without_duplicating(tmp_path: Path) -> None:
+    snaps = _seed(tmp_path)
+    lo, hi = data_range_ns(str(tmp_path), IID)
+    catalog = ParquetDataCatalog(str(tmp_path))
+    first = backfill_instrument(catalog, str(tmp_path), IID, lo, lo + 100 * _SEC)
+    total = backfill_instrument(catalog, str(tmp_path), IID, lo, hi)
+    stamps = [r.data.ts_event for r in catalog.query(DydxMinuteRollup, identifiers=[IID])]
+    assert len(stamps) == len(set(stamps)) == first + total

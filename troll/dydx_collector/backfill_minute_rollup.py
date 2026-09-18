@@ -24,10 +24,11 @@ With no --end, the data's last minute has no successor snapshot and is skipped (
 be live). Manually run, like prune_catalog.py; reads raw 1s in day-sized chunks (MEM-01) through one
 long-lived MinuteRollupBuilder per instrument, so OFI carries across chunk boundaries.
 
-The catalog is append-only: re-running over an already-backfilled range writes duplicate
-rows. Clear `<catalog>/data/custom_dydx_minute_rollup/` first (same wipe-and-rebuild
-pattern as scripts/wipe_data.sh). Also do not run it over a range the live collector is
-already writing rollups for.
+Idempotent: minutes that already have a rollup row (live-written, or from an earlier
+backfill) are skipped, so re-running fills only the gaps -- e.g. the minute in progress at
+each collector restart -- and never duplicates. Raw 1s is still replayed for every minute,
+so OFI continuity is unchanged. After a rollup *schema or algorithm* change, existing rows
+are stale: clear `<catalog>/data/custom_dydx_minute_rollup/` first (see scripts/wipe_data.sh).
 """
 
 import argparse
@@ -40,6 +41,7 @@ from pathlib import Path
 
 from dydx_collector.minute_rollup import DydxMinuteRollup
 from dydx_collector.minute_rollup import MinuteRollupBuilder
+from ml_signals.catalog_stats import query_minute_rollups
 from ml_signals.catalog_stats import query_second_snapshots
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
@@ -95,6 +97,8 @@ def backfill_instrument(
             rollup = builder.update(iid, snap)
             if rollup is not None and rollup.ts_event <= end_ns:
                 rollups.append(rollup)
+        existing = {r.ts_event for r in query_minute_rollups(catalog_path, iid, a, min(b, end_ns))}
+        rollups = [r for r in rollups if r.ts_event not in existing]
         if rollups:
             catalog.write_data(rollups)
             written += len(rollups)

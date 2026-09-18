@@ -45,6 +45,8 @@ See `troll/live_paper/node.py`'s module docstring for the full rationale.
   - **Forced resync (DATA-03) is a fallback only** — for when a level can't be tagged (e.g. immediately after a resubscribe) or a book stays crossed for far longer than active uncrossing should ever take. It is not the first response to an ordinary crossed book.
   - See `_bmad-output/planning-artifacts/research/technical-dydx-v4-orderbook-crossing-resolution-research-2026-09-06.md` for full sourcing (dYdX docs + Indexer source + this repo's own wire captures).
 
+- **DATA-05** — **No data loss, where it can be prevented. Never accept a silent gap as "small" or "just a cache."** This covers derived data too (e.g. `DydxMinuteRollup`): a missing minute understates the wide candle built from it, so it counts. Any seam that can drop data (restart, shutdown, chunk/range boundary, lookahead-dependent close) must be closed by design or have a documented, tested way to fill it (e.g. an idempotent backfill that skips existing rows). A loss that genuinely can't be prevented must be named explicitly, with how to detect and repair it -- never left implicit. **Why:** the builder only closes a minute on the next minute's first snapshot, so the run-final minute and the minute in progress at each collector restart were silently absent until 16.3's backfill was made lookahead-aware and idempotent.
+
 ---
 
 ## Observability Rules
