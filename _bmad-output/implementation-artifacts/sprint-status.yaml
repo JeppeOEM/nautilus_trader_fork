@@ -220,7 +220,7 @@ development_status:
   # files exist yet, so all three stories default to backlog, retroactively added here
   # rather than left missing from this file.
   epic-16: backlog
-  16-1-incremental-1-minute-rollup-cache: backlog
+  16-1-incremental-1-minute-rollup-cache: review
   16-2-threshold-based-candle-source-dispatch: backlog
   16-3-backfill-historical-1-second-data-into-the-rollup: backlog
   epic-16-retrospective: optional
