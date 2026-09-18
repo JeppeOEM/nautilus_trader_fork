@@ -10,7 +10,7 @@ BASE_IMAGE := nautilus-trader-base:1.229.0
 
 # LOCAL_DEV=true (set in troll/.env, or `LOCAL_DEV=true make up`) shifts every port
 # this stack publishes off its production defaults, onto ones that don't collide with
-# the SSH-tunnel-forwarded ports (6379/9100/8080) or dashboard port (8765) that
+# the SSH-tunnel-forwarded ports (6379/9100/8080) that
 # troll-web/troll-tui/troll-logs (~/.zshrc) use to reach the real VPS instance -- see
 # troll/CLAUDE.md's "Desktop <-> VPS Connection" section. Never set on the VPS itself,
 # so its .env needs no changes; `?=` still lets an explicit port in .env win over either
@@ -18,17 +18,15 @@ BASE_IMAGE := nautilus-trader-base:1.229.0
 # 5th port ever needs it.
 LOCAL_DEV ?= false
 ifeq ($(LOCAL_DEV),true)
-WEB_PORT ?= 18765
 REDIS_PORT ?= 16379
 DATA_API_PORT ?= 19100
 DOZZLE_PORT ?= 18080
 else
-WEB_PORT ?= 8765
 REDIS_PORT ?= 6379
 DATA_API_PORT ?= 9100
 DOZZLE_PORT ?= 8080
 endif
-export WEB_PORT REDIS_PORT DATA_API_PORT DOZZLE_PORT
+export REDIS_PORT DATA_API_PORT DOZZLE_PORT
 
 ## Build the base nautilus image (~15 min, only needed once or after core changes)
 ## On networks with TLS inspection (e.g. Zscaler), export your root CA to
@@ -75,10 +73,9 @@ build-base-vps:
 up:
 	$(COMPOSE) up -d --build
 	@docker image prune -f
-	@echo "Dashboard: http://localhost:$(WEB_PORT)"
+	@echo "Dashboard: http://localhost:$(DATA_API_PORT)"
 
-## Rebuild and restart everything that doesn't collect market data (dashboard,
-## ranking_engine, live-paper, bot_tui's image) -- never touches the collector
+## Rebuild and restart everything that doesn't collect market data (ranking_engine, live-paper, bot_tui's image) -- never touches the collector
 ## container, so its WS connection/book state stays untouched. Use this for all
 ## non-collector iteration; reach for `make up` (or `docker compose up -d --build
 ## collector`) only when dydx_collector/ itself changed. live-paper is rebuilt+restarted
@@ -86,21 +83,21 @@ up:
 ## live-paper (re)started. bot_tui is `run`-only (never a daemon), so it's just rebuilt
 ## here for a fresh image; `make tui` also rebuilds it on every invocation regardless.
 redeploy:
-	$(COMPOSE) up -d --build dashboard ranking_engine
+	$(COMPOSE) up -d --build ranking_engine data_api
 	$(COMPOSE) --profile live-paper up -d --build live-paper
 	$(COMPOSE) --profile tui build bot_tui
 	@docker image prune -f
-	@echo "Dashboard: http://localhost:$(WEB_PORT)"
+	@echo "Dashboard: http://localhost:$(DATA_API_PORT)"
 
 ## Same as `redeploy` but never touches live-paper -- for iterating on
-## dashboard/ranking_engine/data_api/bot_tui (e.g. the VPS-side half of
+## ranking_engine/data_api/bot_tui (e.g. the VPS-side half of
 ## troll-redeploy in ~/.zshrc) without disturbing a running paper-trading bot's
-## position/order state. Includes data_api (redeploy itself omits it today).
+## position/order state.
 redeploy-no-paper:
-	$(COMPOSE) up -d --build dashboard ranking_engine data_api
+	$(COMPOSE) up -d --build ranking_engine data_api
 	$(COMPOSE) --profile tui build bot_tui
 	@docker image prune -f
-	@echo "Dashboard: http://localhost:$(WEB_PORT)"
+	@echo "Dashboard: http://localhost:$(DATA_API_PORT)"
 
 ## Start the paper-trading node (Epic 3, live_paper module). Not part of plain `make up`
 ## -- gated behind the `live-paper` compose profile so it's never started by accident.
@@ -110,7 +107,7 @@ up-live-paper:
 	$(COMPOSE) --profile live-paper up -d --build live-paper
 	@docker image prune -f
 
-## Build the collector/dashboard/live-paper images bypassing pip's TLS verification, for
+## Build the collector/data_api/live-paper images bypassing pip's TLS verification, for
 ## networks with a TLS-intercepting proxy (e.g. Zscaler) where pip can't validate
 ## PyPI's cert chain. No corporate CA is trusted into the image -- this just skips
 ## verification for pip's own install step. Run this (not plain `docker compose
@@ -122,7 +119,7 @@ up-live-paper:
 build-insecure:
 	$(COMPOSE) build \
 		--build-arg PIP_INSECURE_ARGS="--trusted-host pypi.org --trusted-host files.pythonhosted.org --trusted-host pypi.python.org" \
-		collector dashboard ranking_engine bot_tui live-paper
+		collector ranking_engine data_api bot_tui live-paper
 
 ## Run the troll test suite inside the collector image. Can't run against host
 ## Python -- nautilus_trader is only compiled/installed inside this image (see
@@ -167,9 +164,9 @@ down:
 logs:
 	$(COMPOSE) logs -f collector
 
-## Tail dashboard logs
+## Tail data_api (dashboard) logs
 logs-dash:
-	$(COMPOSE) logs -f dydx-dashboard
+	$(COMPOSE) logs -f dydx-data-api
 
 ## Open Dozzle log viewer in browser
 web:
@@ -226,12 +223,6 @@ prune-dry:
 	python $(REPO_ROOT)/troll/dydx_collector/prune_catalog.py \
 		--catalog $(REPO_ROOT)/troll/dydx_collector/catalog \
 		--types order_book_deltas --days 14 --dry-run
-
-## Run the ml_signals dashboard (OFI, Microprice, footprint charts) directly on the host
-## (not Docker), on WEB_PORT (default 8765, override via .env -- see .env-example).
-dashboard:
-	fuser -k $(WEB_PORT)/tcp || true
-	cd $(REPO_ROOT) && PYTHONPATH=$(REPO_ROOT)/troll DASHBOARD_PORT=$(WEB_PORT) python -m ml_signals.dashboard --open
 
 ## Local frontend dev, fully self-contained: brings up collector + ranking_engine +
 ## data_api + redis, all locally (network_mode: host, so data_api lands on

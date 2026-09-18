@@ -425,7 +425,7 @@ class BotTuiApp:
         self._ladder_size_w = 0
         self._ladder_price_w = 0
         self._indicator_value_w = 0
-        self._dashboard_base_url = os.environ.get("DASHBOARD_BASE_URL", "http://127.0.0.1:8765")
+        self._dashboard_base_url = os.environ.get("DASHBOARD_BASE_URL", "http://127.0.0.1:9100")
         # The ListBox itself persists across the redraw loop's every-tick rebuild
         # (only its SimpleListWalker's contents are replaced in place) so mid-scroll
         # position survives a data refresh -- same fix as Story 4.2's Coins-pane

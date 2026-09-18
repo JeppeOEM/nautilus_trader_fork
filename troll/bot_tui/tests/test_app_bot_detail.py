@@ -274,7 +274,7 @@ def test_o_key_sets_footer_to_bot_dashboard_url() -> None:
     app._open_bot_detail("bot-07")
     app._handle_bot_detail_key("o")
     assert (
-        app._footer_hint.text == "dashboard (copied to clipboard): http://127.0.0.1:8765/bot/bot-07"
+        app._footer_hint.text == "dashboard (copied to clipboard): http://127.0.0.1:9100/bot/bot-07"
     )
 
 

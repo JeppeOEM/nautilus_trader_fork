@@ -14,24 +14,17 @@
 # -------------------------------------------------------------------------------------------------
 """Unit tests for rank_history.fetch_rank_history (Story 1.4)."""
 
-import asyncio
 import json
-import tempfile
 import urllib.request
-from pathlib import Path
 from typing import Self
 
 import pytest
-from aiohttp.test_utils import TestClient
-from aiohttp.test_utils import TestServer
 
-import ml_signals.dashboard as dashboard_module
-import ranking_engine.metrics_store as metrics_store
 from ml_signals import rank_history
 
 
 class _FakeResponse:
-    def __init__(self, payload: dict) -> None:
+    def __init__(self, payload: object) -> None:
         self._body = json.dumps(payload).encode()
 
     def __enter__(self) -> Self:
@@ -44,95 +37,45 @@ class _FakeResponse:
         return self._body
 
 
-def test_fetch_rank_history_without_ts_omits_query_param(monkeypatch) -> None:
-    captured = {}
+def _capture_url(monkeypatch: pytest.MonkeyPatch, payload: object) -> dict:
+    captured: dict = {}
 
-    def _urlopen(request, timeout=None):
+    def _urlopen(request: urllib.request.Request, timeout: float | None = None) -> _FakeResponse:
         captured["url"] = request.full_url
-        return _FakeResponse({"ts": 1, "rank": 1, "volume24h": 100.0})
+        return _FakeResponse(payload)
 
     monkeypatch.setattr(urllib.request, "urlopen", _urlopen)
-
-    result = rank_history.fetch_rank_history("BTC-USD-PERP.DYDX")
-
-    assert result == {"ts": 1, "rank": 1, "volume24h": 100.0}
-    assert captured["url"] == "http://127.0.0.1:8765/api/rank_history/BTC-USD-PERP.DYDX"
+    return captured
 
 
-def test_fetch_rank_history_with_ts_adds_iso_query_param(monkeypatch) -> None:
-    captured = {}
-
-    def _urlopen(request, timeout=None):
-        captured["url"] = request.full_url
-        return _FakeResponse({"ts": 2, "rank": 3, "volume24h": 50.0})
-
-    monkeypatch.setattr(urllib.request, "urlopen", _urlopen)
+def test_fetch_rank_history_with_ts_passes_ts_ns(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = _capture_url(monkeypatch, {"ts": 2, "rank": 3, "volume24h": 50.0})
 
     result = rank_history.fetch_rank_history("BTC-USD-PERP.DYDX", ts_ns=1_700_000_000_000_000_000)
 
     assert result == {"ts": 2, "rank": 3, "volume24h": 50.0}
-    assert captured["url"].startswith("http://127.0.0.1:8765/api/rank_history/BTC-USD-PERP.DYDX?ts=")
-
-
-def test_fetch_rank_history_empty_response(monkeypatch) -> None:
-    monkeypatch.setattr(
-        urllib.request,
-        "urlopen",
-        lambda request, timeout=None: _FakeResponse({}),
+    assert captured["url"] == (
+        "http://127.0.0.1:9100/api/metrics/nearest/BTC-USD-PERP.DYDX?ts_ns=1700000000000000000"
     )
+
+
+def test_fetch_rank_history_without_ts_defaults_to_now(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = _capture_url(monkeypatch, {"ts": 1})
+    monkeypatch.setattr(rank_history.time, "time_ns", lambda: 42)
+
+    rank_history.fetch_rank_history("BTC-USD-PERP.DYDX")
+
+    assert captured["url"].endswith("/api/metrics/nearest/BTC-USD-PERP.DYDX?ts_ns=42")
+
+
+def test_fetch_rank_history_null_response_is_empty_dict(monkeypatch: pytest.MonkeyPatch) -> None:
+    _capture_url(monkeypatch, None)  # data_api returns JSON null when no row exists
     assert rank_history.fetch_rank_history("DEAD-USD-PERP.DYDX") == {}
 
 
-def test_fetch_rank_history_strips_trailing_slash_on_dashboard_url(monkeypatch) -> None:
-    captured = {}
+def test_fetch_rank_history_strips_trailing_slash_on_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = _capture_url(monkeypatch, {})
 
-    def _urlopen(request, timeout=None):
-        captured["url"] = request.full_url
-        return _FakeResponse({})
+    rank_history.fetch_rank_history("BTC-USD-PERP.DYDX", ts_ns=1, data_api_url="http://x:9100/")
 
-    monkeypatch.setattr(urllib.request, "urlopen", _urlopen)
-
-    rank_history.fetch_rank_history("BTC-USD-PERP.DYDX", dashboard_url="http://127.0.0.1:8765/")
-
-    assert captured["url"] == "http://127.0.0.1:8765/api/rank_history/BTC-USD-PERP.DYDX"
-
-
-@pytest.mark.asyncio
-async def test_fetch_rank_history_resolves_real_historical_timestamp_via_http(monkeypatch) -> None:
-    """End-to-end regression: fetch_rank_history's ts_ns query must round-trip through a real
-    aiohttp server/handler and return the requested historical row, not "now" data.
-
-    Exercises the actual query-string encoding/decoding that the mocked-urlopen tests above
-    cannot -- this is what catches an unescaped '+' in the ISO UTC offset (a raw '+' in a
-    query string is decoded as a space by aiohttp/yarl, breaking datetime.fromisoformat and
-    silently falling back to "nearest to now" instead of the requested timestamp).
-    """
-    tmp_dir = tempfile.mkdtemp()
-    monkeypatch.setattr(dashboard_module, "CATALOG_PATH", str(Path(tmp_dir) / "catalog"))
-    db_path = str(Path(tmp_dir) / "metrics.db")
-    # METRICS_DB_PATH is its own module constant (Story 1.8 review fix #4 -- the
-    # metrics store now lives in a dedicated directory, decoupled from CATALOG_PATH's
-    # parent), so redirecting it for this test needs its own monkeypatch too.
-    monkeypatch.setattr(dashboard_module, "METRICS_DB_PATH", db_path)
-    iid = "BTC-USD-PERP.DYDX"
-    old_ts = 1_700_000_000_000_000_000
-    new_ts = old_ts + 60_000_000_000
-    base_row = {
-        "price": None, "pct_1h": None, "pct_24h": None, "volatility": None,
-        "ofi": None, "microprice": None, "spread": None,
-    }
-    metrics_store.write([
-        {"instrument_id": iid, "ts": old_ts, "rank": 1, "volume24h": 1.0, **base_row},
-        {"instrument_id": iid, "ts": new_ts, "rank": 2, "volume24h": 2.0, **base_row},
-    ], db_path)
-
-    app = dashboard_module.make_app("redis://127.0.0.1:6379", str(Path(tmp_dir) / "catalog"))
-    async with TestClient(TestServer(app)) as client:
-        # fetch_rank_history uses blocking urllib -- run off-thread so the event loop
-        # this same TestServer needs to answer the request on isn't blocked by the caller.
-        result = await asyncio.to_thread(
-            rank_history.fetch_rank_history, iid, ts_ns=old_ts, dashboard_url=str(client.make_url("")),
-        )
-
-    assert result["ts"] == old_ts
-    assert result["rank"] == 1
+    assert captured["url"] == "http://x:9100/api/metrics/nearest/BTC-USD-PERP.DYDX?ts_ns=1"

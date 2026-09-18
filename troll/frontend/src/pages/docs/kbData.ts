@@ -47,8 +47,8 @@ make web           # open Dozzle log viewer (http://localhost:8080)</div></div>
 <div class="sec"><h2>Configure instruments</h2><p>Edit <code>troll/dydx_collector/config.toml</code> — hot-reloaded every <code>config_reload_seconds</code> (30s default), no restart needed:</p><div class="formula">[[instruments]]
 id = "BTC-USD-PERP.DYDX"
 bar_intervals = ["1-MINUTE"]</div></div>
-<div class="sec"><h2>Run the dashboard</h2><p><code>make dashboard</code> in a separate terminal — <code>http://localhost:8765</code>. Reads directly from the catalog + Redis, no collector restart needed.</p></div>
-<div class="sec"><h2>Remote access via Tailscale + SSH tunnel</h2><p>Dashboard, Redis, and Dozzle all bind <code>127.0.0.1</code> only — nothing is reachable from the public internet or even the tailnet directly.</p><div class="formula">ssh -N -L 8765:127.0.0.1:8765 -L 8080:127.0.0.1:8080 you@&lt;vps-tailscale-ip&gt;</div><p>Then open <code>http://localhost:8765</code> (dashboard) or <code>:8080</code> (Dozzle) locally. <code>-N</code> holds the tunnel open with no remote shell.</p>
+<div class="sec"><h2>Run the dashboard</h2><p><code>make up</code> starts <code>data_api</code>, which serves this UI at <code>http://localhost:9100</code>. Reads directly from the catalog + Redis, no collector restart needed.</p></div>
+<div class="sec"><h2>Remote access via Tailscale + SSH tunnel</h2><p>Dashboard, Redis, and Dozzle all bind <code>127.0.0.1</code> only — nothing is reachable from the public internet or even the tailnet directly.</p><div class="formula">ssh -N -L 9100:127.0.0.1:9100 -L 8080:127.0.0.1:8080 you@&lt;vps-tailscale-ip&gt;</div><p>Then open <code>http://localhost:9100</code> (dashboard) or <code>:8080</code> (Dozzle) locally. <code>-N</code> holds the tunnel open with no remote shell.</p>
 <p><b>Feed-health alerts:</b> set <code>WATCHDOG_NTFY_URL</code> (e.g. an ntfy.sh topic) on the <code>collector</code> service to get a push notification if every subscribed instrument's book goes stale for 30s+ (OBS-01). Without it, the same condition is only logged.</p></div>
 <div class="sec"><h2>Inspect the catalog directly</h2><div class="formula">from nautilus_trader.persistence.catalog import ParquetDataCatalog
 catalog = ParquetDataCatalog("troll/dydx_collector/catalog")
@@ -122,7 +122,7 @@ docker exec dydx-redis redis-cli PUBLISH bots:control '{"bot_id":"bot-01","actio
 <tr><td>Bars (aggregated from trades)</td><td><code>TradeTick</code> → internal <code>Bar</code></td><td><code>backtest_dydx.py</code></td></tr>
 <tr><td>Raw 1s book snapshots</td><td><code>DydxSecondSnapshot</code></td><td><code>backtest_snapshot.py</code></td></tr>
 <tr><td>Raw deltas + trades + bars</td><td><code>OrderBookDelta</code>, <code>TradeTick</code>, <code>Bar</code></td><td><code>backtest_ofi.py</code></td></tr>
-</table><p>Don't write a new backtest runner from scratch — copy the closest match and swap the <code>strategy_path</code>/<code>config_path</code>/<code>data=[...]</code> list. <code>backtest_dydx.py</code> defaults to backtesting every coin in the live Watchlist (needs <code>make dashboard</code> running); pass <code>symbols=[...]</code> to skip that dependency.</p></div>
+</table><p>Don't write a new backtest runner from scratch — copy the closest match and swap the <code>strategy_path</code>/<code>config_path</code>/<code>data=[...]</code> list. <code>backtest_dydx.py</code> defaults to backtesting every coin in the live Watchlist (needs <code>data_api</code> running); pass <code>symbols=[...]</code> to skip that dependency.</p></div>
 <div class="sec"><h2>Strategy conventions (every *_strategy.py follows these)</h2><ul>
 <li><code>frozen=True</code> on the config class.</li>
 <li><code>on_start</code>: look up <code>self.instrument</code> via <code>self.cache.instrument(...)</code>; <code>self.stop()</code> + log an error if missing, never assume it's there.</li>
