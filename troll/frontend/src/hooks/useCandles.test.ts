@@ -16,6 +16,7 @@ function page(items: Array<Partial<CandleItem> & { t: number }>, hasMore: boolea
   return {
     items: items.map((i) => ({ o: null, h: null, l: null, c: null, v: null, ...i })),
     has_more: hasMore,
+    venue: "dydx",
   };
 }
 

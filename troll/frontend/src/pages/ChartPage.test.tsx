@@ -86,7 +86,7 @@ vi.mock("react-router", async (importOriginal) => {
 // the latest props object ChartPage handed it -- every claim below is about what
 // ChartPage FEEDS the chart component, never about LightweightChart's internals.
 interface ChartStubProps {
-  panes?: { id: string; kind: string; placement?: string; group?: string; groupLabel?: string; outputLabel?: string }[];
+  panes?: { id: string; kind: string; data: { time: number }[]; placement?: string; group?: string; groupLabel?: string; outputLabel?: string }[];
   priceLines?: PriceLineSpec[];
   onPriceClick?: (price: number) => void;
   onPriceLineDrag?: (id: string, price: number) => void;
@@ -95,7 +95,6 @@ interface ChartStubProps {
   measureActive?: boolean;
   onMeasureEnd?: () => void;
   data?: { time: number }[];
-  panes?: { id: string; data: { time: number }[] }[];
   liveBar?: unknown;
   markerTime?: number | null;
   volumeProfiles?: { id: string; profile: { totalVolume: number; rows: unknown[] }; xAnchor: unknown; width: unknown; edges?: unknown; respondsToZoom?: boolean; widthFraction?: number }[];

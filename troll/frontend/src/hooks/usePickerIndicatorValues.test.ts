@@ -13,7 +13,7 @@ vi.mock("../api/client", () => ({
 const { usePickerIndicatorValues } = await import("./usePickerIndicatorValues");
 
 function page(items: Array<Partial<IndicatorValuesItem> & { t: number }>, hasMore: boolean): IndicatorValuesResponse {
-  return { items: items.map((i) => ({ values: {}, ...i })), has_more: hasMore };
+  return { items: items.map((i) => ({ values: {}, ...i })), has_more: hasMore, venue: "dydx" };
 }
 
 type RangeHandler = (range: LogicalRange | null) => void;

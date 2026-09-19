@@ -16,6 +16,7 @@ function page(items: Array<Partial<SnapshotSeriesPoint> & { t: number }>, hasMor
   return {
     items: items.map((i) => ({ bid: null, ask: null, mid: null, micro: null, price: null, ...i })),
     has_more: hasMore,
+    venue: "dydx",
   };
 }
 
