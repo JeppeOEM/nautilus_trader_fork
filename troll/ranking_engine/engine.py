@@ -40,6 +40,7 @@ from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
 from nautilus_trader.core.nautilus_pyo3 import get_dydx_http_url  # type: ignore[attr-defined]
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
+from common.venues import venue_kind
 from ml_signals import catalog_stats
 from ml_signals.indicators import MultiLevelOBI
 from ml_signals.indicators import MultiLevelOFI
@@ -430,7 +431,8 @@ def _current_ranks() -> list[dict]:
         slow = _SLOW_METRICS.get(iid, {})
         row = {
             "instrument_id": iid,
-            "venue": venue_of(iid),
+            "venue": (venue := venue_of(iid)),
+            "venue_kind": venue_kind(venue),
             "volume24h": volume24h,
             "volatility_score": volatility_score,
             **_fast_metrics_for(iid),

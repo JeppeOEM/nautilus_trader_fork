@@ -196,6 +196,7 @@ def test_current_ranks_volume_mode_sorts_by_descending_volume24h() -> None:
     assert [r["instrument_id"] for r in ranks] == ["BTC-USD-PERP.DYDX", "SHIB-USD-PERP.DYDX"]
     assert [r["rank"] for r in ranks] == [1, 2]
     assert {r["venue"] for r in ranks} == {"DYDX"}
+    assert {r["venue_kind"] for r in ranks} == {"dex"}
 
 
 def test_current_ranks_volatility_mode_sorts_by_descending_volatility_score() -> None:

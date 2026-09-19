@@ -259,7 +259,7 @@ development_status:
   19-3-troll-bybit-collector: done
   19-4-troll-hyperliquid-collector: done
   19-5-rankings-screener-venue-column-and-filter: done
-  19-6-cex-dex-registry: ready-for-dev
+  19-6-cex-dex-registry: done
   epic-19-retrospective: optional
 
   epic-20: in-progress

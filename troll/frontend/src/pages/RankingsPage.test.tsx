@@ -381,9 +381,9 @@ describe("RankingsPage", () => {
       useLiveChannelMock.mockReturnValue({
         latest: liveMessage({
           ranks: [
-            { instrument_id: "BTC-USD-PERP.DYDX", venue: "DYDX", price: 1 },
-            { instrument_id: "BTCUSDT-LINEAR.BYBIT", venue: "BYBIT", price: 2 },
-            { instrument_id: "BTC-USD-PERP.HYPERLIQUID", venue: "HYPERLIQUID", price: 3 },
+            { instrument_id: "BTC-USD-PERP.DYDX", venue: "DYDX", venue_kind: "dex", price: 1 },
+            { instrument_id: "BTCUSDT-LINEAR.BYBIT", venue: "BYBIT", venue_kind: "cex", price: 2 },
+            { instrument_id: "BTC-USD-PERP.HYPERLIQUID", venue: "HYPERLIQUID", venue_kind: "dex", price: 3 },
           ],
         }),
         connected: true,
@@ -399,6 +399,24 @@ describe("RankingsPage", () => {
       expect(screen.getByText("BTCUSDT-LINEAR.BYBIT")).toBeInTheDocument();
       expect(screen.queryByText("BTC-USD-PERP.DYDX")).not.toBeInTheDocument();
       expect(screen.queryByText("BTC-USD-PERP.HYPERLIQUID")).not.toBeInTheDocument();
+    });
+
+    it("filters by CEX/DEX kind", () => {
+      useLiveChannelMock.mockReturnValue({
+        latest: liveMessage({
+          ranks: [
+            { instrument_id: "BTC-USD-PERP.DYDX", venue: "DYDX", venue_kind: "dex", price: 1 },
+            { instrument_id: "BTCUSDT-LINEAR.BYBIT", venue: "BYBIT", venue_kind: "cex", price: 2 },
+          ],
+        }),
+        connected: true,
+      });
+      renderPage();
+
+      addFilter("Kind (cex/dex)", "=", "cex");
+
+      expect(screen.getByText("BTCUSDT-LINEAR.BYBIT")).toBeInTheDocument();
+      expect(screen.queryByText("BTC-USD-PERP.DYDX")).not.toBeInTheDocument();
     });
 
     it("drops a Technicals filter when its column is removed, instead of emptying the table", async () => {

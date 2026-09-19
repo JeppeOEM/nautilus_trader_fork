@@ -1,6 +1,6 @@
 # Story 19.6: CEX/DEX registry
 
-Status: ready-for-dev
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -18,12 +18,12 @@ so that I can filter or reason about counterparty/custody risk differences.
 
 ## Tasks / Subtasks
 
-- [ ] Task 1 — Registry (AC: #1, #2)
-  - [ ] Create `troll/common/venues.py` with the plain dict above. No dependency on `crates/model/src/defi` or any Nautilus `is_dex()` mechanism.
-- [ ] Task 2 — Surface in the screener (AC: #3)
-  - [ ] Expose `kind` alongside `venue` wherever `venue` is already surfaced (Story 19.1's response shapes, Story 19.5's Rankings column) — either a small badge/label next to the venue column, or a filterable field (`kind = dex`), reusing Story 17.6's filter mechanism.
-- [ ] Task 3 — Tests
-  - [ ] A test confirming the registry returns the correct kind for all three known venues, and a defined (not crashing) behavior for an unknown venue (e.g. `None`/`"unknown"`, not a `KeyError`).
+- [x] Task 1 — Registry (AC: #1, #2)
+  - [x] Create `troll/common/venues.py` with the plain dict above. No dependency on `crates/model/src/defi` or any Nautilus `is_dex()` mechanism.
+- [x] Task 2 — Surface in the screener (AC: #3)
+  - [x] Expose `kind` alongside `venue` wherever `venue` is already surfaced (Story 19.1's response shapes, Story 19.5's Rankings column) — either a small badge/label next to the venue column, or a filterable field (`kind = dex`), reusing Story 17.6's filter mechanism.
+- [x] Task 3 — Tests
+  - [x] A test confirming the registry returns the correct kind for all three known venues, and a defined (not crashing) behavior for an unknown venue (e.g. `None`/`"unknown"`, not a `KeyError`).
 
 ## Dev Notes
 
@@ -50,4 +50,12 @@ so that I can filter or reason about counterparty/custody risk differences.
 
 ### Completion Notes List
 
+- `troll/common/venues.py`: plain `VENUE_KINDS` dict + `venue_kind()` (unknown venue → `"unknown"`, never raises). No Nautilus `is_dex()`.
+- Surfaced on rankings only: `ranking_engine._current_ranks()` rows gain `venue_kind`; RankingsPage gets a Kind column and a `Kind (cex/dex)` text filter (reusing 19.5's text-filter support). Did not add `kind` to the candles/snapshots response shapes — nothing consumes it there (YAGNI); one line each if wanted.
+- `collector.dockerfile` now COPYs `troll/common` (ranking_engine imports it). Full troll suite in the image with a throwaway Redis: 701 passed (27 pre-existing Pandas4Warning/deprecation warnings from ml_signals, unrelated to this epic).
+
 ### File List
+
+- troll/common/{__init__,venues}.py, common/tests/{__init__,test_venues}.py (new)
+- troll/ranking_engine/engine.py, tests/test_engine.py; troll/frontend/src/pages/{RankingsPage.tsx,RankingsPage.test.tsx}
+- troll/collector.dockerfile, troll/Makefile
