@@ -3,6 +3,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import { Link, useParams } from "react-router";
 
 import { fetchCoinIndicatorConfig, fetchIndicatorCatalog, saveCoinIndicatorConfig } from "../api/client";
+import AlertDialog from "../components/chart/AlertDialog";
 import IndicatorPicker from "../components/chart/IndicatorPicker";
 import LightweightChart, {
   type ChartMode,
@@ -127,6 +128,7 @@ function ChartInner({ instrumentId, barSeconds, onTimeframeChange }: ChartInnerP
   );
   const [crosshairOn, setCrosshairOn] = useState(true);
   const [indicatorDialogOpen, setIndicatorDialogOpen] = useState(false);
+  const [alertDialogOpen, setAlertDialogOpen] = useState(false);
   const [catalog, setCatalog] = useState<Record<string, IndicatorCatalogEntry>>({});
   const { candles, volume, loadFailed } = useCandles(instrumentId, chart, mode === "candles", barSeconds);
   const snapshotLines = useSnapshotSeries(instrumentId, chart, mode === "lines");
@@ -306,6 +308,9 @@ function ChartInner({ instrumentId, barSeconds, onTimeframeChange }: ChartInnerP
           <button type="button" onClick={() => setIndicatorDialogOpen(true)}>
             Indicators
           </button>
+          <button type="button" onClick={() => setAlertDialogOpen(true)}>
+            Alert
+          </button>
           <button type="button" onClick={() => chart?.timeScale().fitContent()}>
             Fit
           </button>
@@ -373,6 +378,13 @@ function ChartInner({ instrumentId, barSeconds, onTimeframeChange }: ChartInnerP
           Indicator {id} failed: {message}
         </p>
       ))}
+      <AlertDialog
+        open={alertDialogOpen}
+        onClose={() => setAlertDialogOpen(false)}
+        instrumentId={instrumentId}
+        barSeconds={barSeconds}
+        priceLines={priceLines}
+      />
       <IndicatorPicker
         fetchConfig={() => fetchCoinIndicatorConfig(instrumentId)}
         saveConfig={(entries) => saveCoinIndicatorConfig(instrumentId, entries)}

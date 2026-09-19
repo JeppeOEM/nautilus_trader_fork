@@ -297,6 +297,7 @@ describe("ChartPage toolbars and timeframe (spec A8.1)", () => {
       "Candles",
       "Lines",
       "Indicators",
+      "Alert",
       "Fit",
       "Latest",
     ]);

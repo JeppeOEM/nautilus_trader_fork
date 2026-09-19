@@ -37,7 +37,8 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from data_api import live_candles, redis_bus
+from data_api import alerts, live_candles, redis_bus
+from data_api.routes import alerts as alerts_routes
 from data_api.routes import candles as candles_routes
 from data_api.routes import indicator_series as indicator_series_routes
 from data_api.routes import indicators as indicators_routes
@@ -93,6 +94,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(docs_url=None, redoc_url=None, lifespan=lifespan)
+
+live_candles.live_candle_bus.observers.append(alerts.engine.on_snapshot)
 
 
 @app.get("/metrics/history/{symbol}")
@@ -179,6 +182,7 @@ async def _malformed_instrument_id(_: Request, exc: MalformedInstrumentId) -> JS
     return JSONResponse(status_code=400, content={"detail": str(exc)})
 
 
+app.include_router(alerts_routes.router)
 app.include_router(rankings_routes.router)
 app.include_router(candles_routes.router)
 app.include_router(indicator_series_routes.router)

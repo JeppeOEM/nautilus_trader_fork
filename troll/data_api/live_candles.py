@@ -30,6 +30,7 @@ lazily on the first `subscribe()` for that pair and torn down on the last matchi
 import asyncio
 import json
 import logging
+from typing import Callable
 
 import redis.asyncio as aioredis
 
@@ -60,6 +61,9 @@ class LiveCandleBus:
     def __init__(self) -> None:
         self._buffers: dict[_BufferKey, list[DydxSecondSnapshot]] = {}
         self._listeners: dict[_BufferKey, set["asyncio.Queue[dict]"]] = {}
+        # Called with every decoded snapshot (e.g. the alert engine) so a second consumer
+        # never needs its own `snapshots:raw` subscription.
+        self.observers: list[Callable[[DydxSecondSnapshot], None]] = []
 
     def subscribe(self, instrument_id: str, bar_seconds: int) -> "asyncio.Queue[dict]":
         """Register a new per-listener queue for `(instrument_id, bar_seconds)`,
@@ -103,6 +107,11 @@ class LiveCandleBus:
         except Exception as exc:
             logger.warning("snapshots:raw entry failed to decode, skipping: %s", exc)
             return
+        for observer in self.observers:
+            try:
+                observer(snapshot)
+            except Exception:
+                logger.exception("snapshot observer failed, skipping")
         instrument_id = snapshot.instrument_id.value
         watched_bar_seconds = [bs for (iid, bs) in self._listeners if iid == instrument_id]
         for bar_seconds in watched_bar_seconds:

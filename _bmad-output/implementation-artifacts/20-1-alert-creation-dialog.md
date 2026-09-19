@@ -1,6 +1,6 @@
 # Story 20.1: Alert creation dialog
 
-Status: ready-for-dev
+Status: review
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -22,16 +22,16 @@ so that I can be notified when a price or drawing-line condition is met.
 
 ## Tasks / Subtasks
 
-- [ ] Task 1 — Dialog UI (AC: #2-6)
-  - [ ] A new dialog component with the condition builder, frequency/expiration/template/webhook-URL fields described above.
-  - [ ] Condition builder reads available price-crossing targets: a static value (user-entered) or any currently-placed `priceLines` entry (Story 18.1) on the active chart.
+- [x] Task 1 — Dialog UI (AC: #2-6)
+  - [x] A new dialog component with the condition builder, frequency/expiration/template/webhook-URL fields described above.
+  - [x] Condition builder reads available price-crossing targets: a static value (user-entered) or any currently-placed `priceLines` entry (Story 18.1) on the active chart.
 
-- [ ] Task 2 — Persistence (AC: #7)
-  - [ ] A new small backend resource for saved alerts (per-instrument or global — decide based on whether alerts should follow "one coin's chart" scope or a user-wide list; the original spec's Alerts list view (Story 20.3) suggests a user-wide list is the simpler, correct scope, matching this project's single-operator posture). Model it after the existing config-persistence pattern (`chart_indicator_config.py`'s TOML load/save shape) rather than inventing a new persistence mechanism.
-  - [ ] New `data_api` routes for create/list/delete (`GET/POST/DELETE /api/alerts` or similar) — the write path is a sanctioned AD-F2 exception (config persistence), same category as `PUT /api/coin/{iid}/indicators`.
+- [x] Task 2 — Persistence (AC: #7)
+  - [x] A new small backend resource for saved alerts (per-instrument or global — decide based on whether alerts should follow "one coin's chart" scope or a user-wide list; the original spec's Alerts list view (Story 20.3) suggests a user-wide list is the simpler, correct scope, matching this project's single-operator posture). Model it after the existing config-persistence pattern (`chart_indicator_config.py`'s TOML load/save shape) rather than inventing a new persistence mechanism.
+  - [x] New `data_api` routes for create/list/delete (`GET/POST/DELETE /api/alerts` or similar) — the write path is a sanctioned AD-F2 exception (config persistence), same category as `PUT /api/coin/{iid}/indicators`.
 
-- [ ] Task 3 — Tests
-  - [ ] A round-trip test for the alert-persistence store (create, list, delete) against a temp file, real objects, no mocking.
+- [x] Task 3 — Tests
+  - [x] A round-trip test for the alert-persistence store (create, list, delete) against a temp file, real objects, no mocking.
 
 ## Dev Notes
 
@@ -56,4 +56,20 @@ so that I can be notified when a price or drawing-line condition is met.
 
 ### Completion Notes List
 
+Implemented: `data_api/alerts.py` (TOML `AlertStore`, mirrors chart_indicator_config), `data_api/routes/alerts.py` (GET/POST/DELETE /api/alerts, pydantic validation: http(s) URL, finite level, bar_seconds 1..86400, frequency enum), `AlertDialog.tsx` + an "Alert" toolbar button on ChartPage. Horizontal-line conditions resolve to the line's price at creation (line state is client-side), so an alert always stores a static `level`. Global (user-wide) list scope. Compose mounts `data_api/alerts.toml` rw. Tests: `test_alerts.py` (store round-trip, routes, validation), `AlertDialog.test.tsx`.
+
 ### File List
+
+- troll/data_api/alerts.py
+- troll/data_api/alerts.toml
+- troll/data_api/routes/alerts.py
+- troll/data_api/app.py
+- troll/data_api/tests/test_alerts.py
+- troll/docker-compose.yml
+- troll/frontend/src/components/chart/AlertDialog.tsx
+- troll/frontend/src/components/chart/AlertDialog.test.tsx
+- troll/frontend/src/pages/ChartPage.tsx
+- troll/frontend/src/pages/ChartPage.test.tsx
+- troll/frontend/src/api/client.ts
+- troll/frontend/src/api/schema.ts
+- troll/frontend/openapi.json

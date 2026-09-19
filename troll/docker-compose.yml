@@ -136,10 +136,13 @@ services:
       METRICS_DB_PATH: "/app/metrics_dir/metrics.db"
       CHART_INDICATOR_CONFIG_PATH: *chart-indicator-config-path
       SCREENER_COLUMNS_CONFIG_PATH: "/app/ml_signals/screener_columns.toml"
+      ALERTS_PATH: "/app/data_api/alerts.toml"
     user: "1000:1000"
     volumes:
       - ./dydx_collector/catalog:/app/catalog:ro
       - ./dydx_collector/metrics:/app/metrics_dir:ro
+      # rw: saved alerts (Story 20.1) -- host file must exist (committed empty), same reason.
+      - ./data_api/alerts.toml:/app/data_api/alerts.toml:rw
       # rw: the Technicals tab's screener-wide column list (Story 17.5). The host file must
       # exist (committed empty) or Docker would create a directory at this path.
       - ./ml_signals/screener_columns.toml:/app/ml_signals/screener_columns.toml:rw
