@@ -22,23 +22,21 @@ Reuses `ml_signals.candles.candle_dicts_from_snapshots` and
 no new aggregation/query logic, only bounded-query construction, gap-marker insertion,
 and the `has_more` probe.
 
-Own module-level `CATALOG_PATH` constant, same pattern as `redis_bus.py`'s own
-`REDIS_URL` -- `routes/candles.py` cannot `from data_api.app import CATALOG_PATH`
-without a circular import, since `app.py` imports this module.
+`CATALOG_PATH` comes from `data_api.settings` (a leaf module -- routes can't import it from
+`app.py`, which imports them).
 """
 
-import os
 
 from fastapi import APIRouter
 from pydantic import BaseModel
 
 from data_api.routes import paging
+from data_api.settings import CATALOG_PATH
 from ml_signals import catalog_stats as _catalog_stats
 from ml_signals.candles import candle_dicts_for_window
 from ml_signals.candles import choose_candle_source
+from ml_signals.venue import venue_of
 
-
-CATALOG_PATH: str = os.environ.get("CATALOG_PATH", "troll/dydx_collector/catalog")
 
 # Server-enforced upper bound on `limit`, regardless of what the client requests (AC #7,
 # MEM-01 extended to the API surface) -- a module constant, not per-request configurable.
@@ -88,6 +86,7 @@ class CandleItem(BaseModel):
 class CandlesResponse(BaseModel):
     items: list[CandleItem]
     has_more: bool
+    venue: str
 
 
 def _window_start_ns(before_ns: int, limit: int, bar_seconds: int) -> int:
@@ -148,7 +147,9 @@ def get_candles(
     kept = paging.fetch_page(fetch, ranges, before_ns, span_ns)[-limit:]
 
     if not kept:
-        return CandlesResponse(items=[], has_more=False)
+        return CandlesResponse(items=[], has_more=False, venue=venue_of(instrument_id))
 
     has_more = paging.has_older_data(ranges, kept[0]["t"] * 1_000_000)
-    return CandlesResponse(items=_insert_gap_markers(kept, bar_seconds), has_more=has_more)
+    return CandlesResponse(
+        items=_insert_gap_markers(kept, bar_seconds), has_more=has_more, venue=venue_of(instrument_id),
+    )

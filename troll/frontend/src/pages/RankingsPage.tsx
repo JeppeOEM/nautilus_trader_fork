@@ -173,6 +173,8 @@ export default function RankingsPage() {
   const filterFields: FilterField[] = [
     // Conditions compare the raw value; volume24h is displayed in millions but filtered in USD.
     ...RANKING_COLS.map((col) => ({ key: col.key, label: col.key === "volume24h" ? `${col.label} (raw USD)` : col.label })),
+    { key: "venue", label: "Venue", text: true },
+    { key: "venue_kind", label: "Kind (cex/dex)", text: true },
     ...groups.flatMap((g) =>
       g.attrs.map((attr) => ({ key: `${TECHNICAL_FIELD_PREFIX}${g.entry.name}.${attr}`, label: `${g.entry.name}.${attr}` })),
     ),
@@ -278,6 +280,8 @@ export default function RankingsPage() {
           <tr>
             <th rowSpan={technicalsActive ? 2 : 1}>Rank</th>
             <th rowSpan={technicalsActive ? 2 : 1}>Instrument</th>
+            {activeTab === "performance" && <th>Venue</th>}
+            {activeTab === "performance" && <th>Kind</th>}
             {activeTab === "performance" &&
               RANKING_COLS.map((col) => <th key={col.key}>{col.label}</th>)}
             {technicalsActive &&
@@ -364,6 +368,8 @@ export default function RankingsPage() {
                     </button>
                   )}
                 </td>
+                {activeTab === "performance" && <td>{typeof row.venue === "string" ? row.venue : "—"}</td>}
+                {activeTab === "performance" && <td>{typeof row.venue_kind === "string" ? row.venue_kind : "—"}</td>}
                 {activeTab === "performance" &&
                   RANKING_COLS.map((col) => <td key={col.key}>{formatCell(col, row[col.key])}</td>)}
                 {technicalsActive &&

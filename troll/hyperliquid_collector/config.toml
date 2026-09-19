@@ -1,0 +1,8 @@
+# Hyperliquid collector (Story 19.4). Ids are the Nautilus Hyperliquid adapter's perp ids.
+environment = "mainnet"
+catalog_path = "/app/catalog"
+flush_interval_seconds = 60
+snapshot_interval_seconds = 0.5
+# l2Book pushes were observed ~5s apart, so the stale guard must be well above that.
+stale_book_seconds = 30.0
+instruments = ["BTC-USD-PERP.HYPERLIQUID", "ETH-USD-PERP.HYPERLIQUID"]

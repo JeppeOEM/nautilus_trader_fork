@@ -12,6 +12,14 @@ describe("compare", () => {
     expect(compare(5, "=", 5)).toBe(true);
   });
 
+  it("matches text values case-insensitively with = only", () => {
+    expect(compare("BYBIT", "=", "bybit")).toBe(true);
+    expect(compare("BYBIT", "=", "dydx")).toBe(false);
+    expect(compare("BYBIT", ">", "A")).toBe(false);
+    expect(compare(5, "=", "5")).toBe(false);
+    expect(compare(undefined, "=", "BYBIT")).toBe(false);
+  });
+
   it("never matches a missing or non-numeric value", () => {
     expect(compare(null, "<", 100)).toBe(false);
     expect(compare(undefined, ">", -100)).toBe(false);

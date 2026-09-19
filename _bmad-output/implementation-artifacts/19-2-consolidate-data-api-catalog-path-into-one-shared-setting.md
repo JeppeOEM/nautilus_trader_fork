@@ -1,6 +1,6 @@
 # Story 19.2: Consolidate `data_api`'s `CATALOG_PATH` into one shared setting
 
-Status: ready-for-dev
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -19,15 +19,15 @@ so that adding a second collector's catalog doesn't require editing multiple fil
 
 ## Tasks / Subtasks
 
-- [ ] Task 1 — Identify why the duplication exists before consolidating (AC: #2)
-  - [ ] Read each route file's own comment on this (`routes/candles.py`: "cannot `from data_api.app import CATALOG_PATH`"; `routes/indicators.py`/`routes/snapshots.py`/`routes/indicator_series.py`: same pattern) to confirm the exact import-cycle shape before choosing a fix — don't guess.
-  - [ ] Likely fix: extract `CATALOG_PATH` (and any other similarly-duplicated env-derived constant) into a small new module with no dependency on `app.py` or any `routes/*.py` (e.g. `troll/data_api/settings.py`), which both `app.py` and every route module import from — breaks the cycle by introducing a new leaf dependency rather than making the routes depend on `app.py`.
+- [x] Task 1 — Identify why the duplication exists before consolidating (AC: #2)
+  - [x] Read each route file's own comment on this (`routes/candles.py`: "cannot `from data_api.app import CATALOG_PATH`"; `routes/indicators.py`/`routes/snapshots.py`/`routes/indicator_series.py`: same pattern) to confirm the exact import-cycle shape before choosing a fix — don't guess.
+  - [x] Likely fix: extract `CATALOG_PATH` (and any other similarly-duplicated env-derived constant) into a small new module with no dependency on `app.py` or any `routes/*.py` (e.g. `troll/data_api/settings.py`), which both `app.py` and every route module import from — breaks the cycle by introducing a new leaf dependency rather than making the routes depend on `app.py`.
 
-- [ ] Task 2 — Apply the consolidation (AC: #1, #4)
-  - [ ] Replace each of the five (or more, if others exist) duplicated declarations with an import from the new settings module. Confirm the app still starts and every existing route still resolves the same default path.
+- [x] Task 2 — Apply the consolidation (AC: #1, #4)
+  - [x] Replace each of the five (or more, if others exist) duplicated declarations with an import from the new settings module. Confirm the app still starts and every existing route still resolves the same default path.
 
-- [ ] Task 3 — Tests
-  - [ ] A test (or a startup smoke check) confirming no circular import was reintroduced — the whole `data_api` package must still import cleanly.
+- [x] Task 3 — Tests
+  - [x] A test (or a startup smoke check) confirming no circular import was reintroduced — the whole `data_api` package must still import cleanly.
 
 ## Dev Notes
 
@@ -53,4 +53,10 @@ so that adding a second collector's catalog doesn't require editing multiple fil
 
 ### Completion Notes List
 
+- New leaf `data_api/settings.py` holds `CATALOG_PATH`; 7 declarations (app + candles/snapshots/rankings/metrics/indicator_series/indicators — two more than the story listed) now `from data_api.settings import CATALOG_PATH`, preserving per-module names so existing test monkeypatches work. Left `ml_signals/custom_indicators._CATALOG_PATH` and `ranking_engine/engine.CATALOG_PATH` alone (different packages/services, not data_api).
+- Cold-import subprocess test guards against reintroducing the cycle. data_api+ranking_engine: 158 pass; the Redis-dependent rankings relay test still fails only because no Redis is reachable here.
+
 ### File List
+
+- troll/data_api/settings.py (new), troll/data_api/tests/test_settings.py (new)
+- troll/data_api/app.py, routes/{candles,snapshots,rankings,metrics,indicator_series,indicators}.py

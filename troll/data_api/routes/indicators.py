@@ -33,8 +33,7 @@ The indicator-values route reuses `chart_indicators.replay_indicator` (native) /
 no new indicator math lives here, only bounded-window construction (mirroring `candles.py`'s
 `before_ns`/`limit`/`bar_seconds` contract) and dispatch/response shaping.
 
-Own module-level `CATALOG_PATH`/`CHART_INDICATOR_CONFIG_PATH` constants, same non-circular-import
-pattern `candles.py`/`indicator_series.py` established.
+`CATALOG_PATH` comes from `data_api.settings` (a leaf module, avoiding an `app.py` import cycle).
 """
 
 import json
@@ -49,14 +48,14 @@ from fastapi import Request
 from pydantic import BaseModel
 
 from data_api.routes import paging
+from data_api.settings import CATALOG_PATH
 from ml_signals import catalog_stats as _catalog_stats
 from ml_signals import chart_indicator_config
 from ml_signals import chart_indicators
 from ml_signals import custom_indicators
 from ml_signals.candles import candle_dicts_from_snapshots
+from ml_signals.venue import venue_of
 
-
-CATALOG_PATH: str = os.environ.get("CATALOG_PATH", "troll/dydx_collector/catalog")
 
 # Default mirrors dashboard.py:85-88 exactly (same env var name, same default path).
 CHART_INDICATOR_CONFIG_PATH: str = os.environ.get(
@@ -220,6 +219,7 @@ class IndicatorValuesResponse(BaseModel):
     # `_indicator_id(name, params)` -> message, for entries whose replay failed. The other
     # entries' values are still served; one bad/stale entry must not blank every pane.
     errors: dict[str, str] = {}
+    venue: str
 
 
 def _indicator_id(name: str, params: dict[str, Any]) -> str:
@@ -362,7 +362,7 @@ def get_indicator_values(
         raise HTTPException(status_code=500, detail=f"failed to read catalog: {exc}") from exc
 
     if not kept:
-        return IndicatorValuesResponse(items=[], has_more=False)
+        return IndicatorValuesResponse(items=[], has_more=False, venue=venue_of(instrument_id))
 
     start_ms = kept[0]["t"]
     end_ms = kept[-1]["t"] + bar_seconds * 1000
@@ -375,4 +375,5 @@ def get_indicator_values(
         items=_insert_gap_markers(items, bar_seconds),
         has_more=paging.has_older_data(ranges, items[0].t * 1_000_000),
         errors=errors,
+        venue=venue_of(instrument_id),
     )

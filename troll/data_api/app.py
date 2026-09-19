@@ -33,7 +33,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from data_api import live_candles, redis_bus
@@ -43,17 +44,17 @@ from data_api.routes import indicators as indicators_routes
 from data_api.routes import metrics as metrics_routes
 from data_api.routes import rankings as rankings_routes
 from data_api.routes import snapshots as snapshots_routes
+from data_api.settings import CATALOG_PATH
 from data_api.ws import live as live_ws
 from dydx_collector.second_snapshot import DydxSecondSnapshot
 from ml_signals import catalog_stats as _catalog_stats
 from ml_signals import chart_data as _chart_data
 from ml_signals.candles import candle_dicts_for_window
+from ml_signals.venue import MalformedInstrumentId
 from ranking_engine import metrics_store
 
 
-CATALOG_PATH: str = os.environ.get("CATALOG_PATH", "troll/dydx_collector/catalog")
-
-# <catalog parent>/metrics/metrics.db, same layout ranking_engine writes to.
+# Default mirrors dashboard.py:85-86 exactly.
 METRICS_DB_PATH: str = os.environ.get(
     "METRICS_DB_PATH", str(Path(CATALOG_PATH).parent / "metrics" / "metrics.db"),
 )
@@ -171,6 +172,13 @@ def health() -> HealthResponse:
 # above the /api/* catch-all below -- a route registered after it would silently 404
 # (confirmed failure mode from Story 15.1's own SPA-fallback investigation; the same
 # "declared routes win over the catch-all" rule applies here).
+
+
+@app.exception_handler(MalformedInstrumentId)
+async def _malformed_instrument_id(_: Request, exc: MalformedInstrumentId) -> JSONResponse:
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+
 app.include_router(rankings_routes.router)
 app.include_router(candles_routes.router)
 app.include_router(indicator_series_routes.router)

@@ -55,6 +55,44 @@ services:
     restart: always
     logging: *default-logging
 
+  bybit_collector:
+    container_name: bybit-collector
+    build:
+      context: ..
+      dockerfile: troll/collector.dockerfile
+      network: host
+    command: python3 -m bybit_collector.collector
+    environment:
+      PYTHONUNBUFFERED: "1"
+      BYBIT_COLLECTOR_CONFIG: "/app/bybit_config.toml"
+    user: "1000:1000"
+    volumes:
+      - ./bybit_collector/config.toml:/app/bybit_config.toml:ro
+      # Same catalog root as the dYdX collector (Story 19.2): data_api serves both.
+      - ./dydx_collector/catalog:/app/catalog
+    network_mode: host
+    restart: always
+    logging: *default-logging
+
+  hyperliquid_collector:
+    container_name: hyperliquid-collector
+    build:
+      context: ..
+      dockerfile: troll/collector.dockerfile
+      network: host
+    command: python3 -m hyperliquid_collector.collector
+    environment:
+      PYTHONUNBUFFERED: "1"
+      HYPERLIQUID_COLLECTOR_CONFIG: "/app/hyperliquid_config.toml"
+    user: "1000:1000"
+    volumes:
+      - ./hyperliquid_collector/config.toml:/app/hyperliquid_config.toml:ro
+      # Same catalog root as the dYdX collector (Story 19.2): data_api serves both.
+      - ./dydx_collector/catalog:/app/catalog
+    network_mode: host
+    restart: always
+    logging: *default-logging
+
   ranking_engine:
     container_name: dydx-ranking-engine
     build:

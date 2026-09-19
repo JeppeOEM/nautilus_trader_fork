@@ -265,3 +265,10 @@ def test_one_second_bars_return_one_candle_per_snapshot(tmp_path: Path, monkeypa
 
 def test_sub_minute_bars_look_back_at_least_an_hour() -> None:
     assert candles_routes._window_start_ns(0, 120, 1) == -3600 * 1_000_000_000
+
+
+def test_venue_field_and_malformed_id_400(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _client(tmp_path, monkeypatch)
+    ok = client.get(f"/api/candles/{_IID}?before_ns={_BASE_NS}&limit=3&bar_seconds=60")
+    assert ok.json()["venue"] == "DYDX"
+    assert client.get(f"/api/candles/BTC?before_ns={_BASE_NS}").status_code == 400

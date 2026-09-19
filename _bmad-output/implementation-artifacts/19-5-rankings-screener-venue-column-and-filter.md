@@ -1,6 +1,6 @@
 # Story 19.5: Rankings/screener venue column and filter
 
-Status: ready-for-dev
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -18,12 +18,12 @@ so that I can distinguish a coin's dYdX row from its Bybit or Hyperliquid row.
 
 ## Tasks / Subtasks
 
-- [ ] Task 1 — Venue column (AC: #1, #3)
-  - [ ] Add a `venue` column to `RankingsPage.tsx`'s rendering (Performance tab, per Story 17.1's design — this is a base field, not a Technicals indicator column), reading the `venue` field Story 19.1 adds to each row.
-- [ ] Task 2 — Filter integration (AC: #2)
-  - [ ] Confirm `venue` appears in Story 17.6's field dropdown automatically (it should, if that story's field list is derived generically from row keys) — add it explicitly if the field list is instead a hardcoded subset.
-- [ ] Task 3 — Tests
-  - [ ] A test with rows from multiple venues confirming the venue column renders correctly and a `venue = X` filter narrows to only that venue's rows.
+- [x] Task 1 — Venue column (AC: #1, #3)
+  - [x] Add a `venue` column to `RankingsPage.tsx`'s rendering (Performance tab, per Story 17.1's design — this is a base field, not a Technicals indicator column), reading the `venue` field Story 19.1 adds to each row.
+- [x] Task 2 — Filter integration (AC: #2)
+  - [x] Confirm `venue` appears in Story 17.6's field dropdown automatically (it should, if that story's field list is derived generically from row keys) — add it explicitly if the field list is instead a hardcoded subset.
+- [x] Task 3 — Tests
+  - [x] A test with rows from multiple venues confirming the venue column renders correctly and a `venue = X` filter narrows to only that venue's rows.
 
 ## Dev Notes
 
@@ -49,4 +49,12 @@ so that I can distinguish a coin's dYdX row from its Bybit or Hyperliquid row.
 
 ### Completion Notes List
 
+- Venue column added to the Performance tab (rendered separately from `RANKING_COLS`, which mirrors `ml_signals/ranking_columns.py` per SSOT-03 — venue is a base field, not a ranking metric).
+- The 17.6 filter mechanism was numeric-only (`value: number`), so `venue = BYBIT` needed a small extension rather than "one more field": `FilterField.text` + `FilterCondition.value: number | string`; a text field allows only `=` and matches case-insensitively. The Venue field sits after the numeric columns so the builder's default field is unchanged.
+- One row per venue-qualified `instrument_id` (test asserts three distinct rows for DYDX/BYBIT/HYPERLIQUID BTC ids). vitest 105 pass, tsc clean.
+- Caveats for the operator: (1) SSOT-04 says ranking-page changes land in bot_tui too — not done, the story scopes this to `RankingsPage.tsx`; (2) `ranking_engine` still only ranks dYdX snapshots, so Bybit/Hyperliquid rows won't appear on this page until it consumes those catalogs — this story only makes the UI ready.
+
 ### File List
+
+- troll/frontend/src/pages/{RankingsPage.tsx,FilterPanel.tsx,filters.ts}
+- troll/frontend/src/pages/{RankingsPage.test.tsx,filters.test.ts}

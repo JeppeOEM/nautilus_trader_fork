@@ -142,7 +142,7 @@ build-insecure:
 ## around it with -e USER; mirror that here.
 test:
 	$(COMPOSE) run --rm --no-deps -e HOME=/tmp -e USER=collector collector \
-		python3 -m pytest dydx_collector/tests ml_signals/tests ranking_engine/tests bot_tui/tests data_api/tests -q
+		python3 -m pytest dydx_collector/tests bybit_collector/tests hyperliquid_collector/tests common/tests ml_signals/tests ranking_engine/tests bot_tui/tests data_api/tests -q
 
 ## Launch the bot_tui terminal UI (Story 4.1) -- an interactive urwid app, not a
 ## daemon, so it's run via `docker compose run` (never `up -d`) and gated behind the

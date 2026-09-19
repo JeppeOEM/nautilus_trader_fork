@@ -36,25 +36,23 @@ Deliberately its own file, not folded into the structural seed's planned
 `routes/indicators.py` (Story 15.6's `/api/indicators/catalog` + config-persistence
 concern) -- see this story's spec for the full rationale.
 
-Own module-level `CATALOG_PATH` constant, same non-circular-import pattern
-`candles.py`/`redis_bus.py` established -- this module cannot `from data_api.app import
-CATALOG_PATH` without a circular import, since `app.py` imports this module.
+`CATALOG_PATH` comes from `data_api.settings` (a leaf module -- routes can't import it from
+`app.py`, which imports them).
 """
 
-import os
 
 from fastapi import APIRouter
 from pydantic import BaseModel
 
 from data_api.routes import paging
+from data_api.settings import CATALOG_PATH
 from ml_signals import catalog_stats as _catalog_stats
 from ml_signals.indicators import MultiLevelOBI
 from ml_signals.indicators import MultiLevelOFI
 from ml_signals.indicators import microprice as _microprice
 from ml_signals.indicators import spread as _spread
+from ml_signals.venue import venue_of
 
-
-CATALOG_PATH: str = os.environ.get("CATALOG_PATH", "troll/dydx_collector/catalog")
 
 # Same clamp/window/span constants as candles.py -- kept as this module's own copies
 # rather than importing candles.py's (MEM-01 extended to this route, independently of
@@ -78,6 +76,7 @@ class IndicatorSeriesPoint(BaseModel):
 class IndicatorSeriesResponse(BaseModel):
     items: list[IndicatorSeriesPoint]
     has_more: bool
+    venue: str
 
 
 def _window_start_ns(before_ns: int, limit: int, bar_seconds: int) -> int:
@@ -161,7 +160,9 @@ def get_indicator_series(
     kept = paging.fetch_page(fetch, ranges, before_ns, span_ns)[-limit:]
 
     if not kept:
-        return IndicatorSeriesResponse(items=[], has_more=False)
+        return IndicatorSeriesResponse(items=[], has_more=False, venue=venue_of(instrument_id))
 
     has_more = paging.has_older_data(ranges, kept[0].t * 1_000_000)
-    return IndicatorSeriesResponse(items=_insert_gap_markers(kept, bar_seconds), has_more=has_more)
+    return IndicatorSeriesResponse(
+        items=_insert_gap_markers(kept, bar_seconds), has_more=has_more, venue=venue_of(instrument_id),
+    )

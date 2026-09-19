@@ -5,6 +5,8 @@ import { FILTER_OPERATORS, type FilterCondition, type FilterOperator } from "./f
 export interface FilterField {
   key: string;
   label: string;
+  /** Free-text field (e.g. venue): the value stays a string and only `=` applies. */
+  text?: boolean;
 }
 
 interface FilterPanelProps {
@@ -26,12 +28,13 @@ export default function FilterPanel({ fields, conditions, onChange, onOpen }: Fi
 
   // Fall back when the chosen field disappeared (e.g. its Technicals column was removed).
   const selectedField = fields.some((f) => f.key === field) ? field : (fields[0]?.key ?? "");
-  const parsed = Number(value);
-  const canAdd = selectedField !== "" && value.trim() !== "" && Number.isFinite(parsed);
+  const isText = fields.find((f) => f.key === selectedField)?.text === true;
+  const parsed = isText ? value.trim() : Number(value);
+  const canAdd = selectedField !== "" && value.trim() !== "" && (isText || Number.isFinite(parsed));
 
   function add(): void {
     if (!canAdd) return;
-    onChange([...conditions, { field: selectedField, op, value: parsed }]);
+    onChange([...conditions, { field: selectedField, op: isText ? "=" : op, value: parsed }]);
     setValue("");
     setOpen(false);
   }
@@ -69,8 +72,8 @@ export default function FilterPanel({ fields, conditions, onChange, onOpen }: Fi
               </option>
             ))}
           </select>
-          <select aria-label="Filter operator" value={op} onChange={(e) => setOp(e.target.value as FilterOperator)}>
-            {FILTER_OPERATORS.map((o) => (
+          <select aria-label="Filter operator" value={isText ? "=" : op} onChange={(e) => setOp(e.target.value as FilterOperator)}>
+            {(isText ? (["="] as FilterOperator[]) : FILTER_OPERATORS).map((o) => (
               <option key={o} value={o}>
                 {o}
               </option>

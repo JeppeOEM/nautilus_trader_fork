@@ -39,12 +39,12 @@ from pathlib import Path
 
 from fastapi import APIRouter
 from pydantic import BaseModel
+
+from data_api.settings import CATALOG_PATH
 from ranking_engine import metrics_store
 
 
-CATALOG_PATH: str = os.environ.get("CATALOG_PATH", "troll/dydx_collector/catalog")
-
-# Default mirrors data_api/app.py's own METRICS_DB_PATH default exactly.
+# Default mirrors data_api/app.py's own METRICS_DB_PATH default exactly (dashboard.py:85-86).
 METRICS_DB_PATH: str = os.environ.get(
     "METRICS_DB_PATH",
     str(Path(CATALOG_PATH).parent / "metrics" / "metrics.db"),
