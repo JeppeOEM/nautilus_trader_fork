@@ -365,3 +365,8 @@
 
 - Measurement drag past the last bar freezes at the last valid point (no coordinate->time there); same root cause as 18.2's empty-margin item.
 - Measure mousedown on price/time axis strips starts a measurement; mouse events only (no touch); label unclamped at pane edges; O(n) `computeMeasurement` per mousemove; forming live bar not in the label counts.
+
+## Deferred from: code review of story-18.4 (2026-09-19)
+
+- Replay: no follow-scroll -- revealed bars may end up off-screen right after `setData`; verify in a real browser and add `scrollToPosition`/`scrollToRealTime` if so.
+- Replay polish: silent no-op when picking a gap; Play at newest bar does nothing visibly; Step back can pass the start marker; play interval restarts on any `candles` identity change; marker color resolved at construction.

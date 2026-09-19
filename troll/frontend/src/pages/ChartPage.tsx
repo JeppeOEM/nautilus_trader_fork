@@ -1,4 +1,4 @@
-import type { IChartApi } from "lightweight-charts";
+import type { IChartApi, Time } from "lightweight-charts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams } from "react-router";
 
@@ -15,6 +15,7 @@ import { assignPaneColor, cssVar } from "../components/chart/paneColors";
 import type { IndicatorConfigEntry } from "../api/schema";
 import { BAR_SECONDS, useCandles } from "../hooks/useCandles";
 import { useIndicatorSeries } from "../hooks/useIndicatorSeries";
+import { useReplay } from "../hooks/useReplay";
 import { useLiveCandle } from "../hooks/useLiveCandle";
 import { usePickerIndicatorValues } from "../hooks/usePickerIndicatorValues";
 import { useSnapshotSeries } from "../hooks/useSnapshotSeries";
@@ -46,6 +47,12 @@ const CHART_TOOLS: readonly ChartToolDef[] = [
   { id: "measure", label: "Measure", ariaLabel: "Measurement tool", candlesOnly: true },
 ];
 
+// Identity-preserving when no replay is active (`cutoff === null`), so an ordinary
+// re-render never hands the chart's pane registry a "changed" data reference.
+function trimAfter<T extends { time: Time }>(rows: T[], cutoff: number | null): T[] {
+  return cutoff === null ? rows : rows.filter((row) => (row.time as number) <= cutoff);
+}
+
 function ChartInner({ instrumentId }: { instrumentId: string }) {
   const [chart, setChart] = useState<IChartApi | null>(null);
   // Story 15.7: Candles/Lines toggle (AC #1) -- `dashboard.py`'s own #btn-candles/
@@ -65,9 +72,25 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
   const [pendingAnchor, setPendingAnchor] = useState<TrendlineAnchor | null>(null);
   const [drawings, setDrawings] = useState<DrawingSpec[]>([]);
   const nextDrawingIdRef = useRef(1);
-  const { candles, volume } = useCandles(instrumentId, chart, mode === "candles");
+  const { candles, volume: fullVolume } = useCandles(instrumentId, chart, mode === "candles");
+  // Story 18.4: replay only trims the NEWEST end of the loaded candles for display
+  // (`replay.displayed`); useCandles and its older-history refill are untouched.
+  const replay = useReplay(candles);
+  const { cancelPick: cancelReplayPick, pick: pickReplayBar, mode: replayMode, cutoffTime } = replay;
+  // Volume and every indicator pane are cut at the same replay time as the candles, or
+  // they would show the "future" the replay hides.
+  const volume = useMemo(() => trimAfter(fullVolume, cutoffTime), [fullVolume, cutoffTime]);
   const snapshotLines = useSnapshotSeries(instrumentId, chart, mode === "lines");
-  const indicatorSeries = useIndicatorSeries(instrumentId, chart);
+  const fullIndicatorSeries = useIndicatorSeries(instrumentId, chart);
+  const indicatorSeries = useMemo(
+    () => ({
+      ofi: trimAfter(fullIndicatorSeries.ofi, cutoffTime),
+      obi: trimAfter(fullIndicatorSeries.obi, cutoffTime),
+      microprice: trimAfter(fullIndicatorSeries.microprice, cutoffTime),
+      spread: trimAfter(fullIndicatorSeries.spread, cutoffTime),
+    }),
+    [fullIndicatorSeries, cutoffTime],
+  );
   // Story 15.5: the forming right-edge bar, over its own dedicated /ws/live socket
   // (AD-F7) -- same BAR_SECONDS constant useCandles uses, so the two paths can't drift.
   // Lines mode has no live-edge concept of its own (Task 3's Dev Note) -- LightweightChart
@@ -142,14 +165,14 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
       ...pickerSeriesKeys.map((key) => ({
         id: key,
         kind: "Line" as const,
-        data: pickerValues[key],
+        data: trimAfter(pickerValues[key], cutoffTime),
         // Combined with DEFAULT_PANE_IDS (not its own separate `pickerSeriesKeys`-only
         // domain) so a picker pane's color slot can never land on the same palette index
         // as one of the five fixed default panes.
         color: assignPaneColor(key, [...DEFAULT_PANE_IDS, ...pickerSeriesKeys]),
       })),
     ],
-    [indicatorSeries, volume, pickerSeriesKeys, pickerValues],
+    [indicatorSeries, volume, pickerSeriesKeys, pickerValues, cutoffTime],
   );
 
   useEffect(() => {
@@ -161,11 +184,12 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
       if (event.key === "Escape") {
         setActiveTool("cursor");
         setPendingAnchor(null);
+        cancelReplayPick();
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, []);
+  }, [cancelReplayPick]);
 
   // useCallback (not inline arrows) so LightweightChart's interaction effects don't
   // tear down and re-attach their subscriptions on every render of this page -- the
@@ -192,6 +216,12 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
       // Story 18.2 (AC #2/#5): first click stores the start anchor, the second completes
       // the line and disarms the tool. A second click on the exact same point would make
       // an invisible zero-length line, so it is ignored (the tool stays armed).
+      // Story 18.4 (AC #2): while picking a replay start, a click selects that bar and
+      // nothing else -- drawing tools are disarmed on entry, this guards the same click.
+      if (replayMode === "picking") {
+        pickReplayBar(point.time as number);
+        return;
+      }
       if (activeTool !== "trendline") return;
       if (!pendingAnchor) {
         setPendingAnchor(point);
@@ -206,7 +236,7 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
       setPendingAnchor(null);
       setActiveTool("cursor");
     },
-    [activeTool, pendingAnchor],
+    [activeTool, pendingAnchor, replayMode, pickReplayBar],
   );
 
   // Stable identity: LightweightChart's measure effect must not re-subscribe mid-drag.
@@ -215,6 +245,13 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
   const selectTool = (tool: ChartTool): void => {
     setActiveTool(tool);
     setPendingAnchor(null);
+    replay.cancelPick();
+  };
+
+  const startReplayPick = (): void => {
+    setActiveTool("cursor");
+    setPendingAnchor(null);
+    replay.startPicking();
   };
 
   const handlePriceLineDrag = useCallback(
@@ -254,11 +291,49 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
           onClick={() => {
             setMode("lines");
             selectTool("cursor");
+            replay.exit();
           }}
         >
           Lines
         </button>
+        {/* Story 18.4 (AC #1): candles-only, like the tools that need the candle array. */}
+        <button
+          id="btn-replay"
+          type="button"
+          disabled={mode === "lines" || replay.mode !== "off"}
+          onClick={startReplayPick}
+        >
+          Replay
+        </button>
       </div>
+      {replay.mode !== "off" && (
+        <div role="group" aria-label="Replay controls">
+          {replay.mode === "picking" ? (
+            <span>Click a candle to start the replay</span>
+          ) : (
+            <>
+              <button type="button" onClick={replay.togglePlay}>
+                {replay.isPlaying ? "Pause" : "Play"}
+              </button>
+              <button type="button" aria-label="Step back" onClick={() => replay.step(-1)}>
+                &lt;
+              </button>
+              <button type="button" aria-label="Step forward" onClick={() => replay.step(1)}>
+                &gt;
+              </button>
+              <button type="button" aria-label="Replay speed" onClick={replay.cycleSpeed}>
+                {replay.speed}x
+              </button>
+              <button type="button" onClick={startReplayPick}>
+                Go to...
+              </button>
+            </>
+          )}
+          <button type="button" onClick={replay.exit}>
+            Exit
+          </button>
+        </div>
+      )}
       <div className="chart-workspace">
         {/* Story 18.1 (AC #1): the left tool rail, generated from CHART_TOOLS --
             .tabbtn's shared visual pattern (theme.css) with the narrow-rail overrides
@@ -282,7 +357,7 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
         <div className="term-box" data-label={instrumentId}>
           <LightweightChart
             mode={mode}
-            data={candles}
+            data={replay.displayed}
             linesData={snapshotLines}
             onChartApi={setChart}
             panes={panes}
@@ -294,7 +369,9 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
             volume={volume}
             onMeasureEnd={handleMeasureEnd}
             onPriceLineDrag={handlePriceLineDrag}
-            liveBar={liveBar}
+            // Story 18.4: the real-time forming bar would reveal "future" price action.
+            liveBar={replay.mode === "active" ? null : liveBar}
+            markerTime={replay.markerTime}
           />
         </div>
       </div>

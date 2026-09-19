@@ -141,6 +141,8 @@ type ChartTestProps = {
   drawings?: DrawingSpec[];
   measureActive?: boolean;
   onMeasureEnd?: () => void;
+  data?: { time: Time; open: number; high: number; low: number; close: number }[];
+  markerTime?: Time | null;
   onPointClick?: (point: { time: Time; price: number }) => void;
 };
 
@@ -827,5 +829,38 @@ describe("measurement drag (Story 18.3)", () => {
     fireEvent.mouseDown(container.firstElementChild!, { clientX: 10, clientY: 100, button: 0 });
 
     expect(attachPrimitiveMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("replay support (Story 18.4)", () => {
+  const b = (n: number) => ({ time: n as Time, open: 1, high: 2, low: 1, close: 1 });
+
+  it("does not shift the visible range when bars are added or removed at the newest end", () => {
+    const { rerender } = render(chartElement({ data: [b(60), b(120), b(180)] }));
+
+    rerender(chartElement({ data: [b(60)] }));
+    rerender(chartElement({ data: [b(60), b(120)] }));
+
+    expect(setVisibleLogicalRangeMock).not.toHaveBeenCalled();
+  });
+
+  it("still compensates the visible range for older bars prepended at the front", () => {
+    const { rerender } = render(chartElement({ data: [b(60), b(120)] }));
+
+    rerender(chartElement({ data: [b(0), b(30), b(60), b(120)] }));
+
+    expect(setVisibleLogicalRangeMock).toHaveBeenCalledWith({ from: 12, to: 52 });
+  });
+
+  it("attaches, moves and detaches the start marker", () => {
+    const { rerender } = render(chartElement({ markerTime: 60 as Time }));
+    expect(attachPrimitiveMock).toHaveBeenCalledTimes(1);
+    const marker = attachPrimitiveMock.mock.calls[0][0];
+
+    rerender(chartElement({ markerTime: 120 as Time }));
+    expect(attachPrimitiveMock).toHaveBeenCalledTimes(1);
+
+    rerender(chartElement({ markerTime: null }));
+    expect(detachPrimitiveMock).toHaveBeenCalledWith(marker);
   });
 });

@@ -1,6 +1,10 @@
+---
+baseline_commit: 379ebd246f02f373cbdcfe4b535878ebf5c1c758
+---
+
 # Story 18.4: Bar Replay
 
-Status: ready-for-dev
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -22,27 +26,27 @@ so that I can review how price action unfolded without seeing future bars.
 
 ## Tasks / Subtasks
 
-- [ ] Task 1 — Replay state and start-bar picker (AC: #1, #2)
-  - [ ] Add replay state to `ChartPage.tsx`'s `ChartInner`: `replayState: "off" | "picking" | "active"`, `replayIndex: number | null` (an index into the currently-loaded `candles` array marking the last visible bar).
-  - [ ] While `"picking"`: a crosshair + vertical guide line follows the cursor (`chart.subscribeCrosshairMove`); a click on a candle sets `replayIndex` to that bar's array index and transitions to `"active"`.
+- [x] Task 1 — Replay state and start-bar picker (AC: #1, #2)
+  - [x] Add replay state to `ChartPage.tsx`'s `ChartInner`: `replayState: "off" | "picking" | "active"`, `replayIndex: number | null` (an index into the currently-loaded `candles` array marking the last visible bar).
+  - [x] While `"picking"`: a crosshair + vertical guide line follows the cursor (`chart.subscribeCrosshairMove`); a click on a candle sets `replayIndex` to that bar's array index and transitions to `"active"`.
 
-- [ ] Task 2 — Slice the visible dataset, never touch `useCandles`'s pagination (AC: #2, #7)
-  - [ ] **Critical design point, confirmed by reading `useCandles.ts`:** its scroll-back refill (`subscribeVisibleLogicalRangeChange`) only triggers on the array's *left* (oldest) edge (`range.from >= REFILL_MARGIN_BARS` — i.e. approaching the earliest loaded bar) and is completely independent of the array's right (newest) end. Replay only needs to trim the *right* end for display — `ChartPage.tsx` computes `const displayedCandles = replayState === "active" && replayIndex !== null ? candles.slice(0, replayIndex + 1) : candles` and passes `displayedCandles` (not raw `candles`) as `LightweightChart`'s `data` prop. `useCandles` itself, and its refill logic, are completely untouched — do not add any replay-awareness inside `useCandles.ts`.
-  - [ ] The vertical marker line at the replay start bar reuses Story 18.1's `priceLines`-style declarative pattern conceptually, but as a time-based marker rather than a price line — if `lightweight-charts` has no direct "vertical time marker" primitive, implement it as a small custom Primitive (same family as Stories 18.2/18.3) rather than repurposing `createPriceLine`.
+- [x] Task 2 — Slice the visible dataset, never touch `useCandles`'s pagination (AC: #2, #7)
+  - [x] **Critical design point, confirmed by reading `useCandles.ts`:** its scroll-back refill (`subscribeVisibleLogicalRangeChange`) only triggers on the array's *left* (oldest) edge (`range.from >= REFILL_MARGIN_BARS` — i.e. approaching the earliest loaded bar) and is completely independent of the array's right (newest) end. Replay only needs to trim the *right* end for display — `ChartPage.tsx` computes `const displayedCandles = replayState === "active" && replayIndex !== null ? candles.slice(0, replayIndex + 1) : candles` and passes `displayedCandles` (not raw `candles`) as `LightweightChart`'s `data` prop. `useCandles` itself, and its refill logic, are completely untouched — do not add any replay-awareness inside `useCandles.ts`.
+  - [x] The vertical marker line at the replay start bar reuses Story 18.1's `priceLines`-style declarative pattern conceptually, but as a time-based marker rather than a price line — if `lightweight-charts` has no direct "vertical time marker" primitive, implement it as a small custom Primitive (same family as Stories 18.2/18.3) rather than repurposing `createPriceLine`.
 
-- [ ] Task 3 — Replay control bar and playback (AC: #3, #4)
-  - [ ] Render Play/Pause, Step-back, Step-forward, a speed selector (cycling `[0.5, 1, 2, 5]`, not a continuous slider), "Go to…" (re-enters Task 1's picking mode without resetting `replayState` to `"off"` first — must preserve the fact a replay is in progress), and Exit.
-  - [ ] Play: a `setInterval` at `700ms / speed` incrementing `replayIndex` by 1 each tick, stopping (not wrapping) once `replayIndex` reaches `candles.length - 1`. Step-forward/back: `setReplayIndex(i => i + 1 / - 1)`, clamped to `[0, candles.length - 1]`, and must also clear/pause the Play interval if running.
+- [x] Task 3 — Replay control bar and playback (AC: #3, #4)
+  - [x] Render Play/Pause, Step-back, Step-forward, a speed selector (cycling `[0.5, 1, 2, 5]`, not a continuous slider), "Go to…" (re-enters Task 1's picking mode without resetting `replayState` to `"off"` first — must preserve the fact a replay is in progress), and Exit.
+  - [x] Play: a `setInterval` at `700ms / speed` incrementing `replayIndex` by 1 each tick, stopping (not wrapping) once `replayIndex` reaches `candles.length - 1`. Step-forward/back: `setReplayIndex(i => i + 1 / - 1)`, clamped to `[0, candles.length - 1]`, and must also clear/pause the Play interval if running.
 
-- [ ] Task 4 — Confirm drawing tools/indicators keep working during replay (AC: #5)
-  - [ ] No special-casing needed in `LightweightChart.tsx`, `panes`, `priceLines`, or `drawings` — they all already operate on whatever `data`/`panes` they're handed, independent of how `ChartPage.tsx` computed that slice. Verify this holds (a real manual/test check that indicator panes and drawings remain interactive and correctly positioned while `replayIndex` advances) rather than assuming it from the architecture alone.
+- [x] Task 4 — Confirm drawing tools/indicators keep working during replay (AC: #5)
+  - [x] No special-casing needed in `LightweightChart.tsx`, `panes`, `priceLines`, or `drawings` — they all already operate on whatever `data`/`panes` they're handed, independent of how `ChartPage.tsx` computed that slice. Verify this holds (a real manual/test check that indicator panes and drawings remain interactive and correctly positioned while `replayIndex` advances) rather than assuming it from the architecture alone.
 
-- [ ] Task 5 — Exit replay (AC: #6)
-  - [ ] Resets `replayState` to `"off"`, `replayIndex` to `null` — `displayedCandles` reverts to the full `candles` array, the control bar and vertical marker are removed.
+- [x] Task 5 — Exit replay (AC: #6)
+  - [x] Resets `replayState` to `"off"`, `replayIndex` to `null` — `displayedCandles` reverts to the full `candles` array, the control bar and vertical marker are removed.
 
-- [ ] Task 6 — Tests
-  - [ ] A test confirming `displayedCandles` correctly slices at `replayIndex` and that `useCandles`'s own refill trigger logic is unaffected by a mocked replay state (i.e. the refill effect's dependencies/behavior are untouched).
-  - [ ] A test for the speed-cycling and step-forward/back clamping behavior.
+- [x] Task 6 — Tests
+  - [x] A test confirming `displayedCandles` correctly slices at `replayIndex` and that `useCandles`'s own refill trigger logic is unaffected by a mocked replay state (i.e. the refill effect's dependencies/behavior are untouched).
+  - [x] A test for the speed-cycling and step-forward/back clamping behavior.
 
 ## Dev Notes
 
@@ -67,8 +71,36 @@ so that I can review how price action unfolded without seeing future bars.
 
 ### Agent Model Used
 
+claude-sonnet-5
+
 ### Debug Log References
 
 ### Completion Notes List
 
+- `hooks/useReplay.ts`: state machine (`off|picking|active`) downstream of `useCandles`; replay position is a bar **time**, not an index, because scroll-back refill prepends bars and shifts every index (AC #7). `displayed` trims only the newest end. `useCandles.ts` is untouched.
+- Play = `setInterval(700ms / speed)`, speeds cycle `[0.5,1,2,5]`; stops (never wraps) at newest loaded bar (derived `isPlaying`). Step skips gap entries, clamps, pauses autoplay. "Go to..." keeps the replay (Esc/cancel returns to it).
+- **Required fix outside the story text:** `LightweightChart`'s scroll-back shift detection used array-length growth, which would treat every revealed replay bar as an older-history prepend and shift the view. It now locates the previous first bar's new index instead; covered by tests (end add/remove no shift; prepend still compensates).
+- `VerticalMarkerPrimitive` (dashed full-height line) attached via new `markerTime` prop. `liveBar` suppressed while replay active. Replay is candles-only (button disabled / replay exited on Lines).
+- The cursor "vertical guide" while picking is the library's own crosshair vertical line (already on); no extra guide primitive built.
+- Task 4 (drawings/indicators during replay): no special-casing; verified by test that a trendline can be placed via the same click path after picking. No real-browser visual check.
+- vitest 145 pass, tsc + oxlint clean.
+
 ### File List
+
+- troll/frontend/src/hooks/useReplay.ts (new)
+- troll/frontend/src/hooks/useReplay.test.ts (new)
+- troll/frontend/src/components/chart/primitives/VerticalMarkerPrimitive.ts (new)
+- troll/frontend/src/components/chart/LightweightChart.tsx
+- troll/frontend/src/components/chart/LightweightChart.test.tsx
+- troll/frontend/src/pages/ChartPage.tsx
+- troll/frontend/src/pages/ChartPage.test.tsx
+
+### Review Findings
+
+- [x] [Review][Patch] Volume and indicator panes still showed bars after the replay position (lookahead leak) [ChartPage.tsx] — fixed: everything trimmed to the replay cutoff time (identity-preserving when replay is off) + test
+- [x] [Review][Patch] `displayed` fell back to the full array if the replay time was missing from the data [useReplay.ts] — fixed: filter by time, never a fallback + test
+- [x] [Review][Patch] Start marker vanished while re-picking via "Go to..." [useReplay.ts] — fixed, marker kept while replay in progress
+- [x] [Review][Defer] Revealed bars may land off-screen right of the viewport (no follow-scroll after `setData`); needs a real-browser check to see whether the library already follows [LightweightChart.tsx] — deferred
+- [x] [Review][Defer] Silent no-op when clicking a gap while picking; Play at the newest bar is a silent no-op; Step back may go before the start marker; play interval restarts when `candles` identity changes; marker color not theme-live — deferred, polish for 18.10
+
+Dismissed as noise/handled: 9 (liveBar reapply on exit — effect re-fires on the prop change; cursor style — library crosshair default; index/`findIndex` perf; etc.).

@@ -23,6 +23,7 @@ import {
   computeMeasurement,
   formatMeasurement,
 } from "./primitives/MeasurementPrimitive";
+import { VerticalMarkerPrimitive } from "./primitives/VerticalMarkerPrimitive";
 import { TrendlinePrimitive, type TrendlineAnchor } from "./primitives/TrendlinePrimitive";
 
 export type PaneSeriesKind = "Line" | "Histogram";
@@ -138,6 +139,9 @@ interface LightweightChartProps {
   measureActive?: boolean;
   volume?: VolumeDatum[];
   onMeasureEnd?: () => void;
+  /** Story 18.4: when set, a vertical marker line is drawn at this time (the replay start
+   * bar); `null`/omitted removes it. Attached to the main candlestick series. */
+  markerTime?: Time | null;
   /** Story 15.5: the currently-forming candle bar, from `useLiveCandle`. Applied via
    * `series.update()` (not `setData()`) on the candlestick series only -- independent of
    * the `data`/`setData()` effect above and Story 15.4's `panes` effect below; neither of
@@ -230,13 +234,14 @@ export default function LightweightChart({
   measureActive = false,
   volume = [],
   onMeasureEnd,
+  markerTime = null,
   liveBar,
 }: LightweightChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const lineSeriesRef = useRef<Record<LineSeriesId, MainLineSeriesApi> | null>(null);
-  const prevLengthRef = useRef(0);
+  const prevFirstTimeRef = useRef<Time | null>(null);
   const prevLinesLengthRef = useRef(0);
   const panesRef = useRef<Map<string, PaneEntry>>(new Map());
   // Story 18.1: price-line registry + drag bookkeeping. `lastCrosshairRef` holds the
@@ -249,6 +254,7 @@ export default function LightweightChart({
   const dragIdRef = useRef<string | null>(null);
   const suppressNextClickRef = useRef(false);
   const measureDataRef = useRef<{ data: ChartDatum[]; volume: VolumeDatum[] }>({ data, volume });
+  const markerRef = useRef<VerticalMarkerPrimitive | null>(null);
   const drawingRegistryRef = useRef<Map<string, TrendlinePrimitive>>(new Map());
   const lastLiveBarTimeRef = useRef<number | null>(null);
 
@@ -345,6 +351,7 @@ export default function LightweightChart({
     // on every mode flip -- drop the entries (no detach: the series goes away entirely)
     // and let the [drawings, mode] effect re-attach them to the new host.
     drawingRegistryRef.current.clear();
+    markerRef.current = null;
 
     if (mode === "candles") {
       if (lineSeriesRef.current) {
@@ -372,13 +379,13 @@ export default function LightweightChart({
           borderColor: dim,
           wickColor: dim,
         });
-        prevLengthRef.current = 0;
+        prevFirstTimeRef.current = null;
       }
     } else {
       if (seriesRef.current) {
         chart.removeSeries(seriesRef.current);
         seriesRef.current = null;
-        prevLengthRef.current = 0;
+        prevFirstTimeRef.current = null;
         // Story 18.1: the candlestick series' price lines die with the series here --
         // drop the registry entries without removePriceLine() calls (the series is
         // going away entirely), but NOT the `priceLines` prop, which stays the source
@@ -410,11 +417,16 @@ export default function LightweightChart({
     // time older history loads -- defeating the point of scroll-back pagination
     // (AC #3). Only applies once there was a previous, non-empty dataset (the initial
     // load has no prior view to preserve).
-    const addedAtFront = prevLengthRef.current > 0 ? data.length - prevLengthRef.current : 0;
+    //
+    // Detected by where the previous FIRST bar now sits, not by a length change: replay
+    // (Story 18.4) grows/shrinks the array at its newest end, which must never be
+    // mistaken for a prepend.
+    const prevFirst = prevFirstTimeRef.current;
+    const addedAtFront = prevFirst === null ? 0 : Math.max(0, data.findIndex((d) => d.time === prevFirst));
     const rangeBeforeUpdate = addedAtFront > 0 ? chart?.timeScale().getVisibleLogicalRange() : null;
 
     series.setData(data);
-    prevLengthRef.current = data.length;
+    prevFirstTimeRef.current = data.length > 0 ? data[0].time : null;
 
     if (rangeBeforeUpdate && chart) {
       chart.timeScale().setVisibleLogicalRange({
@@ -559,6 +571,23 @@ export default function LightweightChart({
   useEffect(() => {
     measureDataRef.current = { data, volume };
   }, [data, volume]);
+
+  useEffect(() => {
+    // Story 18.4 (AC #2/#6): add/move/remove the replay start marker.
+    const host = seriesRef.current;
+    if (!host || mode !== "candles") return;
+    if (markerTime === null) {
+      if (markerRef.current) host.detachPrimitive(markerRef.current);
+      markerRef.current = null;
+      return;
+    }
+    if (markerRef.current) {
+      markerRef.current.setTime(markerTime);
+      return;
+    }
+    markerRef.current = new VerticalMarkerPrimitive(markerTime, cssVar("--color-warn", "#ffff55"));
+    host.attachPrimitive(markerRef.current);
+  }, [markerTime, mode]);
 
   useEffect(() => {
     // Story 18.3 (AC #2/#3/#5): the transient click-drag measurement. Capture-phase
