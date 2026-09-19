@@ -14,10 +14,15 @@ import {
 } from "lightweight-charts";
 import { useEffect, useRef } from "react";
 
-import type { ChartDatum } from "../../hooks/useCandles";
+import type { ChartDatum, VolumeDatum } from "../../hooks/useCandles";
 import type { IndicatorDatum } from "../../hooks/useIndicatorSeries";
 import type { SnapshotLinesData } from "../../hooks/useSnapshotSeries";
 import { assignPaneColor, cssVar } from "./paneColors";
+import {
+  MeasurementPrimitive,
+  computeMeasurement,
+  formatMeasurement,
+} from "./primitives/MeasurementPrimitive";
 import { TrendlinePrimitive, type TrendlineAnchor } from "./primitives/TrendlinePrimitive";
 
 export type PaneSeriesKind = "Line" | "Histogram";
@@ -125,6 +130,14 @@ interface LightweightChartProps {
    * and grab-suppression as `onPriceClick`; a click with no resolvable time -- past the
    * last bar's coordinate space -- is not reported). Works in both modes. */
   onPointClick?: (point: TrendlineAnchor) => void;
+  /** Story 18.3: while true (candles mode only), a click-drag on the chart draws a
+   * transient measurement rectangle + label (a `MeasurementPrimitive` owned entirely by
+   * this component -- never in `drawings`) instead of panning; release removes it and
+   * reports `onMeasureEnd`. Turning the prop false mid-drag (Esc) cancels with no residue.
+   * The label is computed from `data` + `volume`, the arrays the chart already holds. */
+  measureActive?: boolean;
+  volume?: VolumeDatum[];
+  onMeasureEnd?: () => void;
   /** Story 15.5: the currently-forming candle bar, from `useLiveCandle`. Applied via
    * `series.update()` (not `setData()`) on the candlestick series only -- independent of
    * the `data`/`setData()` effect above and Story 15.4's `panes` effect below; neither of
@@ -214,6 +227,9 @@ export default function LightweightChart({
   onPriceClick,
   drawings = [],
   onPointClick,
+  measureActive = false,
+  volume = [],
+  onMeasureEnd,
   liveBar,
 }: LightweightChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -232,6 +248,7 @@ export default function LightweightChart({
   const lastCrosshairRef = useRef<MouseEventParams | null>(null);
   const dragIdRef = useRef<string | null>(null);
   const suppressNextClickRef = useRef(false);
+  const measureDataRef = useRef<{ data: ChartDatum[]; volume: VolumeDatum[] }>({ data, volume });
   const drawingRegistryRef = useRef<Map<string, TrendlinePrimitive>>(new Map());
   const lastLiveBarTimeRef = useRef<number | null>(null);
 
@@ -538,6 +555,75 @@ export default function LightweightChart({
       if (current.title !== (spec.title ?? "")) line.applyOptions({ title: spec.title ?? "" });
     }
   }, [priceLines, mode]);
+
+  useEffect(() => {
+    measureDataRef.current = { data, volume };
+  }, [data, volume]);
+
+  useEffect(() => {
+    // Story 18.3 (AC #2/#3/#5): the transient click-drag measurement. Capture-phase
+    // mousedown with stopPropagation() keeps the library from starting a pan (same
+    // technique as the price-line grab above); move/up are window-level so a drag can
+    // end outside the chart. Cleanup detaches the primitive, which is also the Esc path
+    // (the caller flips `measureActive` false).
+    const container = containerRef.current;
+    const chart = chartRef.current;
+    const host = seriesRef.current;
+    if (!container || !chart || !host || !measureActive || mode !== "candles") return;
+
+    const primitive = new MeasurementPrimitive(cssVar("--color-active", "#55ffff"));
+    let start: TrendlineAnchor | null = null;
+    let attached = false;
+
+    const pointFrom = (event: MouseEvent): TrendlineAnchor | null => {
+      const box = container.getBoundingClientRect();
+      const time = chart.timeScale().coordinateToTime(event.clientX - box.left);
+      const price = host.coordinateToPrice(event.clientY - box.top);
+      return time === null || price === null ? null : { time, price };
+    };
+
+    const handleMouseDown = (event: MouseEvent): void => {
+      // `start` still set = a release was lost (window blur); ignore rather than restart.
+      if (event.button !== 0 || start) return;
+      start = pointFrom(event);
+      // Only swallow the event once a measurement actually started, so a press with no
+      // resolvable point (past the data range) still pans as usual.
+      if (start) event.stopPropagation();
+    };
+
+    const handleMouseMove = (event: MouseEvent): void => {
+      if (!start) return;
+      const end = pointFrom(event);
+      if (!end) return;
+      const { data: candles, volume: volumes } = measureDataRef.current;
+      // Attached lazily on the first move: a click with no drag never shows anything,
+      // and (see mouseup) leaves the tool armed rather than consuming it.
+      if (!attached) {
+        host.attachPrimitive(primitive);
+        attached = true;
+      }
+      primitive.setSelection(start, end, formatMeasurement(computeMeasurement(start, end, candles, volumes)));
+    };
+
+    const handleMouseUp = (event: MouseEvent): void => {
+      if (!start || event.button !== 0) return;
+      start = null;
+      if (!attached) return;
+      host.detachPrimitive(primitive);
+      attached = false;
+      onMeasureEnd?.();
+    };
+
+    container.addEventListener("mousedown", handleMouseDown, true);
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", handleMouseUp);
+    return () => {
+      container.removeEventListener("mousedown", handleMouseDown, true);
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mouseup", handleMouseUp);
+      if (attached) host.detachPrimitive(primitive);
+    };
+  }, [measureActive, onMeasureEnd, mode]);
 
   useEffect(() => {
     // Story 18.2 (AC #4): the drawings prop's registry-diff effect -- same per-id

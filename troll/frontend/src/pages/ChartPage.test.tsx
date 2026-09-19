@@ -54,6 +54,8 @@ interface ChartStubProps {
   onPriceLineDrag?: (id: string, price: number) => void;
   drawings?: { id: string; kind: string; anchors: unknown[] }[];
   onPointClick?: (point: { time: number; price: number }) => void;
+  measureActive?: boolean;
+  onMeasureEnd?: () => void;
 }
 
 const lastChartProps: { current: ChartStubProps | null } = { current: null };
@@ -251,5 +253,36 @@ describe("ChartPage trendline tool (Story 18.2)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Lines" }));
 
     expect(screen.getByRole("button", { name: "Trendline tool" })).toBeEnabled();
+  });
+});
+
+describe("ChartPage measurement tool (Story 18.3)", () => {
+  it("arms the measurement tool and disarms it when the drag ends (AC #1/#5)", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Measurement tool" }));
+    expect(lastChartProps.current!.measureActive).toBe(true);
+
+    act(() => {
+      lastChartProps.current!.onMeasureEnd!();
+    });
+
+    expect(lastChartProps.current!.measureActive).toBe(false);
+    expect(screen.getByRole("button", { name: "Cursor tool" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("cancels an armed measurement on Escape", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Measurement tool" }));
+
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    expect(lastChartProps.current!.measureActive).toBe(false);
+  });
+
+  it("is disabled in Lines mode", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+
+    expect(screen.getByRole("button", { name: "Measurement tool" })).toBeDisabled();
   });
 });

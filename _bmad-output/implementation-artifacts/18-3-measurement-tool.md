@@ -1,6 +1,10 @@
+---
+baseline_commit: 8d44a003f1667389cfb964a862f79d5de3dc0eb2
+---
+
 # Story 18.3: Measurement tool
 
-Status: ready-for-dev
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -20,20 +24,20 @@ so that I can quickly measure a move without manual calculation.
 
 ## Tasks / Subtasks
 
-- [ ] Task 1 — Decide persistence model (AC: #5)
-  - [ ] **Decision for this story: the measurement is transient** — it disappears when the mouse button is released (matching a typical ruler-tool UX and the original spec's "overlay a small label" wording, which describes an in-progress readout rather than a saved annotation). This avoids adding a "remove a stale measurement" affordance nobody asked for. If persistent measurements are wanted later, that's a follow-up decision, not silently assumed here.
+- [x] Task 1 — Decide persistence model (AC: #5)
+  - [x] **Decision for this story: the measurement is transient** — it disappears when the mouse button is released (matching a typical ruler-tool UX and the original spec's "overlay a small label" wording, which describes an in-progress readout rather than a saved annotation). This avoids adding a "remove a stale measurement" affordance nobody asked for. If persistent measurements are wanted later, that's a follow-up decision, not silently assumed here.
 
-- [ ] Task 2 — Measurement Primitive (AC: #2, #3, #4)
-  - [ ] Implement a `MeasurementPrimitive` (or reuse `TrendlinePrimitive`'s rectangle-anchor logic where structurally similar) drawing a rectangle between two `{time, price}` points plus a text label; computed values: `priceDelta = end.price - start.price`, `priceDeltaPct = priceDelta / start.price`, bar count from the number of `data` entries between the two `time` values.
-  - [ ] Volume sum (AC #3): when the drag rectangle's vertical extent covers the volume pane too (or always, if the tool doesn't visually distinguish "over the volume pane" — a UX simplification worth flagging as acceptable per the original spec's "if over the volume pane" being a nice-to-have, not a hard gate), sum `volume` entries (`VolumeDatum[]` from `useCandles`) whose `time` falls within the selected range, skipping whitespace/gap entries.
+- [x] Task 2 — Measurement Primitive (AC: #2, #3, #4)
+  - [x] Implement a `MeasurementPrimitive` (or reuse `TrendlinePrimitive`'s rectangle-anchor logic where structurally similar) drawing a rectangle between two `{time, price}` points plus a text label; computed values: `priceDelta = end.price - start.price`, `priceDeltaPct = priceDelta / start.price`, bar count from the number of `data` entries between the two `time` values.
+  - [x] Volume sum (AC #3): when the drag rectangle's vertical extent covers the volume pane too (or always, if the tool doesn't visually distinguish "over the volume pane" — a UX simplification worth flagging as acceptable per the original spec's "if over the volume pane" being a nice-to-have, not a hard gate), sum `volume` entries (`VolumeDatum[]` from `useCandles`) whose `time` falls within the selected range, skipping whitespace/gap entries.
 
-- [ ] Task 3 — Click-drag interaction, transient render (AC: #1, #5)
-  - [ ] While active, mouse-down records the start point, mouse-move updates a live-rendered rectangle + label via the Primitive's own state (not React re-renders per pixel), mouse-up clears it (per Task 1's decision) and resets the active tool to cursor.
-  - [ ] `Escape` mid-drag cancels without leaving any residual rectangle.
+- [x] Task 3 — Click-drag interaction, transient render (AC: #1, #5)
+  - [x] While active, mouse-down records the start point, mouse-move updates a live-rendered rectangle + label via the Primitive's own state (not React re-renders per pixel), mouse-up clears it (per Task 1's decision) and resets the active tool to cursor.
+  - [x] `Escape` mid-drag cancels without leaving any residual rectangle.
 
-- [ ] Task 4 — Tests
-  - [ ] A test for the price-delta/percent/bar-count computation given known start/end anchors and a known candle array.
-  - [ ] A test for the volume-sum computation given a known `VolumeDatum[]` slice, including correct skipping of gap/whitespace entries.
+- [x] Task 4 — Tests
+  - [x] A test for the price-delta/percent/bar-count computation given known start/end anchors and a known candle array.
+  - [x] A test for the volume-sum computation given a known `VolumeDatum[]` slice, including correct skipping of gap/whitespace entries.
 
 ## Dev Notes
 
@@ -57,8 +61,33 @@ so that I can quickly measure a move without manual calculation.
 
 ### Agent Model Used
 
+claude-sonnet-5
+
 ### Debug Log References
 
 ### Completion Notes List
 
+- Transient (Task 1): `MeasurementPrimitive` is owned by `LightweightChart` (never in `drawings`); `measureActive` prop drives capture-phase mousedown (stops pan) + window move/up. Release detaches and calls `onMeasureEnd` (ChartPage -> cursor). Esc flips `measureActive` false; effect cleanup detaches.
+- `computeMeasurement`/`formatMeasurement` are pure: delta, % (null for zero start), bar count and volume sum skip whitespace entries. Volume is always shown (spec-permitted simplification).
+- Tool is candles-only (bar/volume arrays belong to Candles mode). Label reads `data` + `volume` via a ref, no new query.
+- vitest 125 pass, tsc + oxlint clean. No real-browser visual check.
+
 ### File List
+
+- troll/frontend/src/components/chart/primitives/MeasurementPrimitive.ts (new)
+- troll/frontend/src/components/chart/primitives/MeasurementPrimitive.test.ts (new)
+- troll/frontend/src/components/chart/LightweightChart.tsx
+- troll/frontend/src/components/chart/LightweightChart.test.tsx
+- troll/frontend/src/pages/ChartPage.tsx
+- troll/frontend/src/pages/ChartPage.test.tsx
+
+### Review Findings
+
+- [x] [Review][Patch] Sub-cent instruments printed every delta as "+0.00" (toFixed(2)) [MeasurementPrimitive.ts] — fixed, significant-digit formatting + test
+- [x] [Review][Patch] A click without a drag attached a never-rendered primitive and disarmed the tool [LightweightChart.tsx] — fixed, attach lazily on first move; click-only keeps tool armed + test
+- [x] [Review][Patch] mousedown swallowed the pan even when no start point resolved [LightweightChart.tsx] — fixed, stopPropagation only after a valid start
+- [x] [Review][Patch] A second mousedown after a lost release, and non-left mouseup, could restart/end the drag [LightweightChart.tsx] — fixed
+- [x] [Review][Defer] Drag past the last bar has no coordinate->time, so the measurement freezes at the last valid point [LightweightChart.tsx] — deferred, same root as 18.2's empty-margin item
+- [x] [Review][Defer] mousedown on the price/time axis strips starts a measurement; mouse-only (no touch/pointer events); label not clamped to pane edges; O(n) recompute per mousemove; forming live bar not in the label — deferred, polish for 18.10
+
+Dismissed as noise/handled: 8 (mode-flip stale host — tool disarms on any mode change; Esc wiring — covered by ChartPage test; BusinessDay time — repo uses UTC seconds; etc.).

@@ -25,7 +25,7 @@ const DEFAULT_PANE_IDS = ["MultiLevelOFI", "MultiLevelOBI", "microprice", "sprea
 
 // Story 18.1 (AC #1): the chart's drawing-tool state -- "cursor" is the inert default.
 // Stories 18.2/18.3 extend this union with their tools, never a second state variable.
-export type ChartTool = "cursor" | "hline" | "trendline";
+export type ChartTool = "cursor" | "hline" | "trendline" | "measure";
 
 interface ChartToolDef {
   id: ChartTool;
@@ -43,6 +43,7 @@ const CHART_TOOLS: readonly ChartToolDef[] = [
   { id: "cursor", label: "Cursor", ariaLabel: "Cursor tool", candlesOnly: false },
   { id: "hline", label: "HLine", ariaLabel: "Horizontal line tool", candlesOnly: true },
   { id: "trendline", label: "Trend", ariaLabel: "Trendline tool", candlesOnly: false },
+  { id: "measure", label: "Measure", ariaLabel: "Measurement tool", candlesOnly: true },
 ];
 
 function ChartInner({ instrumentId }: { instrumentId: string }) {
@@ -208,6 +209,9 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
     [activeTool, pendingAnchor],
   );
 
+  // Stable identity: LightweightChart's measure effect must not re-subscribe mid-drag.
+  const handleMeasureEnd = useCallback((): void => setActiveTool("cursor"), []);
+
   const selectTool = (tool: ChartTool): void => {
     setActiveTool(tool);
     setPendingAnchor(null);
@@ -286,6 +290,9 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
             onPriceClick={handlePriceClick}
             drawings={drawings}
             onPointClick={handlePointClick}
+            measureActive={activeTool === "measure"}
+            volume={volume}
+            onMeasureEnd={handleMeasureEnd}
             onPriceLineDrag={handlePriceLineDrag}
             liveBar={liveBar}
           />

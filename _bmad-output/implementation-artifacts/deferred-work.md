@@ -360,3 +360,8 @@
 - Trendline anchor with no bar in the active mode's data (click right of last bar; 1s Lines-mode anchor viewed in Candles mode) has no `timeToCoordinate`, so the line silently isn't drawn. Needs snapping or extrapolation.
 - Trendline color is resolved once via `cssVar` at creation; won't follow theme changes.
 - No rubber-band preview between first and second click (candidate for 18.10).
+
+## Deferred from: code review of story-18.3 (2026-09-19)
+
+- Measurement drag past the last bar freezes at the last valid point (no coordinate->time there); same root cause as 18.2's empty-margin item.
+- Measure mousedown on price/time axis strips starts a measurement; mouse events only (no touch); label unclamped at pane edges; O(n) `computeMeasurement` per mousemove; forming live bar not in the label counts.

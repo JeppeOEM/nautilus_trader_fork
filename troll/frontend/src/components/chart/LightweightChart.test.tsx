@@ -139,6 +139,8 @@ type ChartTestProps = {
   onPriceClick?: (price: number) => void;
   onPriceLineDrag?: (id: string, price: number) => void;
   drawings?: DrawingSpec[];
+  measureActive?: boolean;
+  onMeasureEnd?: () => void;
   onPointClick?: (point: { time: Time; price: number }) => void;
 };
 
@@ -773,5 +775,57 @@ describe("TrendlinePrimitive (Story 18.2)", () => {
     primitive.updateAllViews();
 
     expect(primitive.screenPoints()).toBeNull();
+  });
+});
+
+describe("measurement drag (Story 18.3)", () => {
+  beforeEach(() => {
+    coordinateToTimeMock.mockImplementation((x: number) => x);
+  });
+
+  it("attaches a transient primitive on drag and removes it on release, reporting the end", () => {
+    const onMeasureEnd = vi.fn();
+    const { container } = render(chartElement({ measureActive: true, onMeasureEnd }));
+    const target = container.firstElementChild!;
+
+    fireEvent.mouseDown(target, { clientX: 10, clientY: 100, button: 0 });
+    expect(attachPrimitiveMock).not.toHaveBeenCalled();
+    fireEvent.mouseMove(window, { clientX: 50, clientY: 150 });
+    expect(attachPrimitiveMock).toHaveBeenCalledTimes(1);
+    expect(detachPrimitiveMock).not.toHaveBeenCalled();
+    fireEvent.mouseUp(window);
+
+    expect(detachPrimitiveMock).toHaveBeenCalledTimes(1);
+    expect(detachPrimitiveMock.mock.calls[0][0]).toBe(attachPrimitiveMock.mock.calls[0][0]);
+    expect(onMeasureEnd).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancels mid-drag with no residue when measureActive goes false (Esc)", () => {
+    const { container, rerender } = render(chartElement({ measureActive: true }));
+    fireEvent.mouseDown(container.firstElementChild!, { clientX: 10, clientY: 100, button: 0 });
+    fireEvent.mouseMove(window, { clientX: 50, clientY: 150 });
+
+    rerender(chartElement({ measureActive: false }));
+
+    expect(detachPrimitiveMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the tool armed after a click without a drag", () => {
+    const onMeasureEnd = vi.fn();
+    const { container } = render(chartElement({ measureActive: true, onMeasureEnd }));
+
+    fireEvent.mouseDown(container.firstElementChild!, { clientX: 10, clientY: 100, button: 0 });
+    fireEvent.mouseUp(window);
+
+    expect(attachPrimitiveMock).not.toHaveBeenCalled();
+    expect(onMeasureEnd).not.toHaveBeenCalled();
+  });
+
+  it("does nothing while measureActive is false", () => {
+    const { container } = render(chartElement({}));
+
+    fireEvent.mouseDown(container.firstElementChild!, { clientX: 10, clientY: 100, button: 0 });
+
+    expect(attachPrimitiveMock).not.toHaveBeenCalled();
   });
 });
