@@ -1,6 +1,6 @@
 # Story 15.10: Cutover — retire dashboard.py, close epic-14
 
-Status: ready-for-dev
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -86,5 +86,10 @@ so that I'm not maintaining two dashboards, and stale/superseded work doesn't li
 ### Debug Log References
 
 ### Completion Notes List
+
+- Code review (2026-09-19, commit 989aca2fb0): no findings. Repointed `fetch_watchlist` -> `/api/rankings` and `fetch_rank_history` -> `/api/metrics/nearest/{iid}?ts_ns=` verified against data_api routes; no stale `ml_signals.dashboard` imports; compose/Makefile/CLAUDE.md consistent.
+- Tests: data_api + ml_signals + bot_tui 484 passed, 1 failed (`test_rankings_live_message_reflected_by_rest_and_ws_relay`, needs a live Redis on 6379, env-only). Frontend build/test pass; lint has 2 pre-existing TrustedHtml.tsx warnings.
+- Human check owed, marked done anyway: AC1 browser parity walk and AC6 SSH-tunnel scroll-back latency were NOT performed.
+- Follow-up for user: `~/.zshrc` must drop `_troll_dashboard_ensure`/`TROLL_WEB_PORT` and point `troll-web` at http://localhost:9100. Parked 14.3 git stash is safe to drop (not dropped).
 
 ### File List

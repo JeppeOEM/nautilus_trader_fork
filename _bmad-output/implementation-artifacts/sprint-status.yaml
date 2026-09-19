@@ -201,7 +201,7 @@ development_status:
   # architecture spine) -- no sprint-planning run yet, stories created directly via
   # create-story as the epic progresses, same pattern Epics 8/10/12/13 used. Supersedes
   # epic-14 (14.3 becomes moot once dashboard.py's chart page is deleted in Story 15.10).
-  epic-15: in-progress
+  epic-15: done
   15-1-facade-scaffold-spa-static-serving-and-docs-page: done
   15-2-live-coin-rankings-page: done
   15-3-chart-page-foundation-candlestick-and-cursor-paginated-history: done
@@ -214,7 +214,7 @@ development_status:
   # 17-2-unpark-and-complete-story-15-8-31-day-metrics-history for the actual work.
   15-8-31-day-metrics-history-page: done
   15-9-terminal-ansi-visual-identity: done
-  15-10-cutover-retire-dashboard-py-close-epic-14: review  # code cut over; owed: browser parity walk + SSH-tunnel perf check (AC1, AC6)
+  15-10-cutover-retire-dashboard-py-close-epic-14: done  # human browser parity walk + SSH-tunnel perf check (AC1, AC6) owed, see story file
 
   # epic-16 has a real epics.md entry (2026-09-14, FR47-50/NFR10: incremental 1-minute
   # rollup cache) but never got a sprint-planning run until now (2026-09-17) -- no story
