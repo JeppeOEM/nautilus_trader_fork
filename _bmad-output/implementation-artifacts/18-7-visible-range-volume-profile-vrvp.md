@@ -1,6 +1,10 @@
+---
+baseline_commit: c3409a0bf0eea1aac7a4e0d0df1b6101db5982ff
+---
+
 # Story 18.7: Visible Range Volume Profile (VRVP)
 
-Status: ready-for-dev
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -19,15 +23,15 @@ so that I get an at-a-glance profile without manually selecting a range.
 
 ## Tasks / Subtasks
 
-- [ ] Task 1 — Add-dialog entry (AC: #1)
-  - [ ] Add a "Visible Range Volume Profile" entry to wherever the chart's Indicators-style add dialog lives (Story 15.6/17.5's existing add mechanism) — clicking it immediately creates a `VolumeProfileSpec` with `xAnchor` set to auto-track the right edge of the current visible range.
+- [x] Task 1 — Add-dialog entry (AC: #1)
+  - [x] Add a "Visible Range Volume Profile" entry to wherever the chart's Indicators-style add dialog lives (Story 15.6/17.5's existing add mechanism) — clicking it immediately creates a `VolumeProfileSpec` with `xAnchor` set to auto-track the right edge of the current visible range.
 
-- [ ] Task 2 — Recompute on visible-range change (AC: #2, #3)
-  - [ ] Subscribe to `chart.timeScale().subscribeVisibleTimeRangeChange()`; on each fire, re-slice `candles` to the new visible range, re-run `buildVolumeProfile`, and update the existing `VolumeProfileSpec` entry (same id, new `profile`) — never appending a new entry per pan/zoom event.
-  - [ ] Unsubscribe cleanly when VRVP is removed or the chart unmounts.
+- [x] Task 2 — Recompute on visible-range change (AC: #2, #3)
+  - [x] Subscribe to `chart.timeScale().subscribeVisibleTimeRangeChange()`; on each fire, re-slice `candles` to the new visible range, re-run `buildVolumeProfile`, and update the existing `VolumeProfileSpec` entry (same id, new `profile`) — never appending a new entry per pan/zoom event.
+  - [x] Unsubscribe cleanly when VRVP is removed or the chart unmounts.
 
-- [ ] Task 3 — Tests
-  - [ ] A test confirming a simulated visible-range change triggers exactly one profile recompute and updates (not duplicates) the existing spec entry.
+- [x] Task 3 — Tests
+  - [x] A test confirming a simulated visible-range change triggers exactly one profile recompute and updates (not duplicates) the existing spec entry.
 
 ## Dev Notes
 
@@ -49,8 +53,30 @@ so that I get an at-a-glance profile without manually selecting a range.
 
 ### Agent Model Used
 
+claude-sonnet-5
+
 ### Debug Log References
 
 ### Completion Notes List
 
+- `hooks/useVisibleRange.ts`: `subscribeVisibleTimeRangeChange` + an initial seed, returns `{from, to}` UTC seconds; identical repeats keep object identity, so consumers don't re-render on a plain resize.
+- ChartPage: a single-instance `vrvp` (active flag + shared settings), profile = `useMemo(buildRangeProfile(replay.displayed, volume, visible.from, visible.to, settings))` -- rebuilt on every visible-range change, updating the same `"vrvp"` spec (`xAnchor: "right"`, 150px), never appended. Kept entirely separate from FRVP's stored `frvps` (§A7.4). Candles mode only. During replay it sees only revealed bars.
+- **Placement deviation:** the story says "Indicators-dialog entry". The existing `IndicatorPicker` is a server-catalog-driven, per-coin persisted list (and the catalog must not be hand-duplicated on the frontend), while VRVP is chart-only with no backend counterpart. So it is a small "Chart overlays" control (`VrvpControl`) next to the picker: Add (idempotent -- adding while active does not stack), Remove, and the shared 18.5 settings panel. Same click-to-add interaction, no server round trip.
+- Engine, primitive and 18.5 settings consumed unchanged. vitest 200 pass, tsc + oxlint clean. No real-browser check (profile drawing along the right axis unverified visually).
+
 ### File List
+
+- troll/frontend/src/hooks/useVisibleRange.ts (new)
+- troll/frontend/src/hooks/useVisibleRange.test.ts (new)
+- troll/frontend/src/components/chart/VrvpControl.tsx (new)
+- troll/frontend/src/pages/ChartPage.tsx
+- troll/frontend/src/pages/ChartPage.test.tsx
+
+### Review Findings
+
+- [x] [Review][Patch] The visible-range subscription stayed live after VRVP was removed (Task 2: unsubscribe when removed) [ChartPage.tsx] — fixed: the hook only gets a chart while VRVP is active in Candles mode + test
+- [x] [Review][Patch] Add was a silent no-op while active, and an "active" VRVP drew nothing in Lines mode with no explanation [VrvpControl.tsx] — fixed: Add disabled while active/outside Candles mode, hint text in Lines mode + test
+- [x] [Review][Patch] No test covering VRVP with replay (lookahead) [ChartPage.test.tsx] — added: bars past the replay cutoff are excluded
+- [x] [Review][Defer] Profile rebuilt on every pan frame with no rAF throttle / range quantization; range beyond loaded candles is silently clamped to the loaded part; `Time` cast to number in the hook; fixed 150px width not clamped to narrow panes; settings not persisted across remount — deferred, polish for 18.10 (cost is O(visible bars) per frame)
+
+Dismissed as noise/handled: 7 (stale range on chart swap / unsubscribe after remove — `ChartInner` is keyed per instrument and `useCandles` has the identical unsubscribe pattern; id-collision with FRVP — no `edges`, ids can't collide; etc.).

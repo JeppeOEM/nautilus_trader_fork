@@ -12,6 +12,7 @@ import LightweightChart, {
   type PriceLineSpec,
 } from "../components/chart/LightweightChart";
 import type { TrendlineAnchor } from "../components/chart/primitives/TrendlinePrimitive";
+import VrvpControl from "../components/chart/VrvpControl";
 import VolumeProfileSettingsPanel from "../components/chart/VolumeProfileSettings";
 import {
   DEFAULT_VOLUME_PROFILE_SETTINGS,
@@ -23,6 +24,7 @@ import type { IndicatorConfigEntry } from "../api/schema";
 import { BAR_SECONDS, useCandles } from "../hooks/useCandles";
 import { useIndicatorSeries } from "../hooks/useIndicatorSeries";
 import { useReplay } from "../hooks/useReplay";
+import { useVisibleRange } from "../hooks/useVisibleRange";
 import { useLiveCandle } from "../hooks/useLiveCandle";
 import { usePickerIndicatorValues } from "../hooks/usePickerIndicatorValues";
 import { useSnapshotSeries } from "../hooks/useSnapshotSeries";
@@ -60,6 +62,9 @@ const CHART_TOOLS: readonly ChartToolDef[] = [
 function trimAfter<T extends { time: Time }>(rows: T[], cutoff: number | null): T[] {
   return cutoff === null ? rows : rows.filter((row) => (row.time as number) <= cutoff);
 }
+
+// Story 18.7: the longest VRVP bar, growing leftward from the price axis.
+const VRVP_WIDTH_PX = 150;
 
 // Story 18.6: a placed fixed-range profile. The profile is computed once when the range
 // is confirmed (drag-release, edge-drag release, or a settings change) and stored -- never
@@ -100,6 +105,9 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
   const [frvpSettings, setFrvpSettings] = useState(DEFAULT_VOLUME_PROFILE_SETTINGS);
   const [edgeGhost, setEdgeGhost] = useState<EdgeGhost | null>(null);
   const nextFrvpIdRef = useRef(1);
+  // Story 18.7: the single visible-range profile ("always recompute", unlike FRVP above).
+  const [vrvpActive, setVrvpActive] = useState(false);
+  const [vrvpSettings, setVrvpSettings] = useState(DEFAULT_VOLUME_PROFILE_SETTINGS);
   const { candles, volume: fullVolume } = useCandles(instrumentId, chart, mode === "candles");
   // Story 18.4: replay only trims the NEWEST end of the loaded candles for display
   // (`replay.displayed`); useCandles and its older-history refill are untouched.
@@ -337,6 +345,39 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
     [frvps, edgeGhost, frvpSettings, cutoffTime, replay.displayed, volume],
   );
 
+  // Story 18.7 (AC #2/#3): rebuilt from whatever is visible on EVERY visible-range change
+  // (and when the candles/settings change) -- the mirror image of FRVP's confirm-once
+  // entries, kept as its own single-instance state, not folded into `frvps`. Candles mode
+  // only (Lines mode's time axis is snapshot seconds, not the candle bars profiled here).
+  // Subscribed only while the VRVP is on (Task 2: unsubscribe when removed).
+  const visibleRange = useVisibleRange(vrvpActive && mode === "candles" ? chart : null);
+  const vrvpProfile = useMemo(
+    () =>
+      vrvpActive && mode === "candles" && visibleRange
+        ? buildRangeProfile(replay.displayed, volume, visibleRange.from, visibleRange.to, vrvpSettings)
+        : null,
+    [vrvpActive, mode, visibleRange, replay.displayed, volume, vrvpSettings],
+  );
+  const allVolumeProfiles = useMemo<VolumeProfileSpec[]>(
+    () =>
+      vrvpProfile
+        ? [
+            ...volumeProfiles,
+            {
+              id: "vrvp",
+              profile: vrvpProfile,
+              xAnchor: "right",
+              width: VRVP_WIDTH_PX,
+              upColor: vrvpSettings.upColor,
+              downColor: vrvpSettings.downColor,
+              showPoc: vrvpSettings.showPoc,
+              showValueArea: vrvpSettings.showValueArea,
+            },
+          ]
+        : volumeProfiles,
+    [volumeProfiles, vrvpProfile, vrvpSettings],
+  );
+
   // Stable identity: LightweightChart's measure effect must not re-subscribe mid-drag.
   const handleMeasureEnd = useCallback((): void => setActiveTool("cursor"), []);
 
@@ -463,7 +504,7 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
             onPriceClick={handlePriceClick}
             drawings={drawings}
             onPointClick={handlePointClick}
-            volumeProfiles={volumeProfiles}
+            volumeProfiles={allVolumeProfiles}
             rangeSelectActive={activeTool === "frvp"}
             profileEdgesEditable={activeTool === "cursor" && replayMode !== "picking"}
             onRangeSelect={handleRangeSelect}
@@ -494,6 +535,14 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
           <VolumeProfileSettingsPanel value={frvpSettings} onChange={handleFrvpSettings} />
         </div>
       )}
+      <VrvpControl
+        active={vrvpActive}
+        candlesMode={mode === "candles"}
+        settings={vrvpSettings}
+        onAdd={() => setVrvpActive(true)}
+        onRemove={() => setVrvpActive(false)}
+        onSettingsChange={setVrvpSettings}
+      />
       <IndicatorPicker
         fetchConfig={() => fetchCoinIndicatorConfig(instrumentId)}
         saveConfig={(entries) => saveCoinIndicatorConfig(instrumentId, entries)}

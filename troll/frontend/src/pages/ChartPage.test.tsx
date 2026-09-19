@@ -67,6 +67,7 @@ interface ChartStubProps {
   volumeProfiles?: { id: string; profile: { totalVolume: number; rows: unknown[] }; xAnchor: unknown; width: unknown; edges?: unknown }[];
   rangeSelectActive?: boolean;
   profileEdgesEditable?: boolean;
+  onChartApi?: (chart: unknown) => void;
   onRangeSelect?: (start: { time: number; price: number }, end: { time: number; price: number }) => void;
   onProfileEdgeDrag?: (id: string, edge: "start" | "end", time: number) => void;
   onProfileEdgeCommit?: (id: string, edge: "start" | "end", time: number) => void;
@@ -523,5 +524,111 @@ describe("ChartPage fixed range volume profile (Story 18.6)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Lines" }));
 
     expect(screen.getByRole("button", { name: "Fixed range volume profile tool" })).toBeDisabled();
+  });
+});
+
+describe("ChartPage visible range volume profile (Story 18.7)", () => {
+  const bars = [1, 2, 3, 4, 5, 6].map((n) => ({ time: n, open: n, high: n + 1, low: n, close: n + 1 }));
+  type RangeHandler = (range: { from: number; to: number } | null) => void;
+  let handlers: RangeHandler[];
+  let visible: { from: number; to: number };
+
+  const attachChart = () =>
+    act(() => {
+      lastChartProps.current!.onChartApi!({
+        timeScale: () => ({
+          getVisibleRange: () => visible,
+          subscribeVisibleTimeRangeChange: (h: RangeHandler) => handlers.push(h),
+          unsubscribeVisibleTimeRangeChange: vi.fn(),
+        }),
+      });
+    });
+  const vrvp = () => lastChartProps.current!.volumeProfiles!.filter((p) => p.id === "vrvp");
+
+  beforeEach(() => {
+    handlers = [];
+    visible = { from: 2, to: 4 };
+    mocks.candles = bars;
+    mocks.volume = bars.map((b) => ({ time: b.time, value: 10 }));
+  });
+
+  it("adds a right-anchored profile of the visible bars, only after Add (AC #1/#2)", () => {
+    render(<ChartPage />);
+    attachChart();
+    expect(vrvp()).toHaveLength(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "Add visible range volume profile" }));
+
+    expect(vrvp()).toHaveLength(1);
+    expect(vrvp()[0].xAnchor).toBe("right");
+    expect(vrvp()[0].profile.totalVolume).toBeCloseTo(30);
+  });
+
+  it("recomputes once per visible-range change and updates the same entry, never adding one (AC #3)", () => {
+    render(<ChartPage />);
+    attachChart();
+    fireEvent.click(screen.getByRole("button", { name: "Add visible range volume profile" }));
+    const first = vrvp()[0].profile;
+
+    act(() => handlers.forEach((h) => h({ from: 2, to: 4 }))); // unchanged range
+    expect(vrvp()[0].profile).toBe(first);
+
+    act(() => handlers.forEach((h) => h({ from: 1, to: 6 })));
+    expect(vrvp()).toHaveLength(1);
+    expect(vrvp()[0].profile).not.toBe(first);
+    expect(vrvp()[0].profile.totalVolume).toBeCloseTo(60);
+  });
+
+  it("subscribes to the visible range only while active, and shows revealed bars only during a replay", () => {
+    render(<ChartPage />);
+    attachChart();
+    expect(handlers).toHaveLength(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "Add visible range volume profile" }));
+    expect(handlers).toHaveLength(1);
+    expect(vrvp()[0].profile.totalVolume).toBeCloseTo(30); // bars 2..4
+
+    fireEvent.click(screen.getByRole("button", { name: "Replay" }));
+    act(() => lastChartProps.current!.onPointClick!({ time: 3, price: 1 }));
+    expect(vrvp()[0].profile.totalVolume).toBeCloseTo(20); // bars 2..3, bar 4 hidden
+  });
+
+  it("disables Add while active or outside Candles mode", () => {
+    render(<ChartPage />);
+    attachChart();
+    const add = () => screen.getByRole("button", { name: "Add visible range volume profile" });
+    expect(add()).toBeEnabled();
+
+    fireEvent.click(add());
+    expect(add()).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    expect(screen.getByText("Shown in Candles mode only")).toBeInTheDocument();
+  });
+
+  it("is a single instance: adding again does not stack, Remove clears it (AC #4)", () => {
+    render(<ChartPage />);
+    attachChart();
+    const add = () => fireEvent.click(screen.getByRole("button", { name: "Add visible range volume profile" }));
+    add();
+    add();
+    expect(vrvp()).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove visible range volume profile" }));
+
+    expect(vrvp()).toHaveLength(0);
+  });
+
+  it("coexists with a placed FRVP and is hidden in Lines mode", () => {
+    render(<ChartPage />);
+    attachChart();
+    fireEvent.click(screen.getByRole("button", { name: "Add visible range volume profile" }));
+    fireEvent.click(screen.getByRole("button", { name: "Fixed range volume profile tool" }));
+    act(() => lastChartProps.current!.onRangeSelect!({ time: 1, price: 1 }, { time: 3, price: 2 }));
+    expect(lastChartProps.current!.volumeProfiles!.map((p) => p.id)).toEqual(["frvp-1", "vrvp"]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+
+    expect(vrvp()).toHaveLength(0);
   });
 });

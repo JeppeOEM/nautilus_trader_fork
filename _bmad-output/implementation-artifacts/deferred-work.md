@@ -383,3 +383,7 @@
 ## Deferred from: code review of story-18.6 (2026-09-19)
 
 - FRVP: dragging past the last bar has no coordinate->time so the endpoint is dropped/stale (same root as 18.2/18.3); edge ghost not cancelled if the edge effect is torn down mid-drag; no hover cursor on edges; shared settings panel only appears once a profile is placed; removal is a text button outside the chart rather than an in-chart x.
+
+## Deferred from: code review of story-18.7 (2026-09-19)
+
+- VRVP recomputes on every pan frame (no rAF throttle or range quantization); a visible range extending past the loaded candles is clamped to the loaded part without a cue; fixed 150px width is not clamped to narrow panes; VRVP settings are not persisted across remounts.
