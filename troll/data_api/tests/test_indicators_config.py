@@ -101,7 +101,7 @@ def test_put_then_get_reflects_exactly_what_was_put(
 ) -> None:
     client = _client(tmp_path, monkeypatch)
     payload = [
-        {"name": "RSI", "params": {"period": 21}, "category": "native"},
+        {"name": "RelativeStrengthIndex", "params": {"period": 21}, "category": "native"},
         {"name": "CumulativeVolumeDelta", "params": {}, "category": "custom"},
     ]
 
@@ -117,7 +117,7 @@ def test_put_then_get_reflects_exactly_what_was_put(
     # proves the write actually landed as real TOML, not just an in-process fake.
     config = load_config(Path(indicators_routes.CHART_INDICATOR_CONFIG_PATH))
     assert config[_IID] == [
-        IndicatorEntry(name="RSI", params={"period": 21}, category="native"),
+        IndicatorEntry(name="RelativeStrengthIndex", params={"period": 21}, category="native"),
         IndicatorEntry(name="CumulativeVolumeDelta", params={}, category="custom"),
     ]
 
@@ -135,13 +135,13 @@ def test_put_preserves_other_coins_existing_config(
 
     put_response = client.put(
         f"/api/coin/{_IID}/indicators",
-        json=[{"name": "SMA", "params": {}, "category": "native"}],
+        json=[{"name": "SimpleMovingAverage", "params": {}, "category": "native"}],
     )
     assert put_response.status_code == 200
 
     config = load_config(path)
     assert config[other_iid] == [IndicatorEntry(name="EMA", params={}, category="native")]
-    assert config[_IID] == [IndicatorEntry(name="SMA", params={}, category="native")]
+    assert config[_IID] == [IndicatorEntry(name="SimpleMovingAverage", params={}, category="native")]
 
 
 @pytest.mark.parametrize(
@@ -210,20 +210,33 @@ def test_indicator_values_reload_reproduces_same_series(
     assert any(v is not None for v in values)
 
 
-def test_indicator_values_unknown_indicator_returns_400(
+def test_indicator_values_unknown_indicator_is_a_per_entry_error_not_a_400(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     catalog_path = str(tmp_path / "cat")
     _write_snapshots(catalog_path, [(_BASE_NS, 100.0)])
     client = _client(tmp_path, monkeypatch, catalog_path=catalog_path)
-    spec = json.dumps([{"name": "NotARealIndicator", "params": {}}])
+    spec = json.dumps([
+        {"name": "NotARealIndicator", "params": {}},
+        {"name": "SimpleMovingAverage", "params": {"period": 2}},
+    ])
     response = client.get(
         f"/api/coin/{_IID}/indicator-values",
         params={
             "before_ns": _BASE_NS + 60_000_000_000, "limit": 5, "bar_seconds": 60, "entries": spec,
         },
     )
-    assert response.status_code == 400
+    body = response.json()
+    assert response.status_code == 200
+    assert "NotARealIndicator" in body["errors"]
+    assert any(k.startswith("SimpleMovingAverage") for k in body["items"][0]["values"])
+
+
+def test_put_rejects_unknown_indicator_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _client(tmp_path, monkeypatch)
+    payload = [{"name": "NotARealIndicator", "params": {}, "category": "native"}]
+
+    assert client.put(f"/api/coin/{_IID}/indicators", json=payload).status_code == 400
 
 
 def test_indicator_values_dispatches_custom_indicator_via_replay_window(

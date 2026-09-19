@@ -86,7 +86,7 @@ _TECHNICALS_BAR_SECONDS = 60
 _TECHNICALS_MAX_CANDLE_AGE_BARS = 5
 # Bulk values are identical for every viewer of the same entries/ranked set -- a short TTL cache
 # keeps a second tab or a slow poll from stacking another full per-coin catalog pass.
-_TECHNICALS_CACHE_TTL_S = 30.0
+_TECHNICALS_CACHE_TTL_S = 90.0
 _technicals_cache: dict[str, tuple[float, dict[str, dict[str, float | None]]]] = {}
 
 
@@ -177,7 +177,10 @@ def _latest_values(
         start_ms=candles[0]["t"],
         end_ms=candles[-1]["t"] + _TECHNICALS_BAR_SECONDS * 1000,
     )
-    latest = _indicators._values_by_time(candles, entries, window)[candles[-1]["t"]]
+    by_time, errors = _indicators._values_by_time(candles, entries, window)
+    if errors:  # unlike the chart, one bad column fails the request: a half-filled column reads as data
+        raise ValueError(next(iter(errors.values())))
+    latest = by_time[candles[-1]["t"]]
     keyed: dict[str, float | None] = {}
     for index, entry in enumerate(entries):
         prefix = _indicators._indicator_id(entry.name, entry.params) + "."
@@ -194,7 +197,7 @@ def get_technicals_values(entries: str) -> TechnicalsValuesResponse:
 
     Computes nothing itself (AD-F2): it dispatches to the chart's own `replay_indicator`, so a
     column always equals what that coin's chart shows. ponytail: sequential per-coin catalog
-    reads behind a 30s TTL cache (one live key) -- no single-flight, add one if concurrent
+    reads behind a 90s TTL cache (> the client's 60s poll, or it never hits) (one live key) -- no single-flight, add one if concurrent
     viewers ever load the box.
     """
     parsed = _indicators._parse_entries(entries)

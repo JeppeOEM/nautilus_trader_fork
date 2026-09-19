@@ -45,6 +45,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from dydx_collector.second_snapshot import DydxSecondSnapshot
+from data_api.routes import paging
 from ml_signals import catalog_stats as _catalog_stats
 from ml_signals.indicators import microprice as _microprice
 
@@ -175,33 +176,24 @@ def _take_last_n_real_rows(rows: list[dict], limit: int) -> list[dict]:
     return rows[start_index:]
 
 
-def _has_more(instrument_id: str, earliest_kept_ns: int, limit: int) -> bool:
-    """
-    One bounded probe query for the window immediately preceding the page's earliest kept
-    row -- same off-by-one-safe, one-more-bounded-probe-query design as `candles.py`'s
-    `_has_more` (its own docstring explains the `- 1` end bound; reused verbatim here, not
-    reinvented).
-    """
-    probe_end_ns = earliest_kept_ns - 1
-    probe_start_ns = _window_start_ns(probe_end_ns, limit)
-    probe = _catalog_stats.query_second_snapshots(CATALOG_PATH, instrument_id, probe_start_ns, probe_end_ns)
-    return len(probe) > 0
-
-
 @router.get("/api/snapshots/{instrument_id}")
 def get_snapshots(instrument_id: str, before_ns: int, limit: int = 900) -> SnapshotSeriesResponse:
     limit = max(1, min(limit, _MAX_SNAPSHOTS_LIMIT))
     before_ms = before_ns // 1_000_000
 
-    start_ns = _window_start_ns(before_ns, limit)
-    snapshots = _catalog_stats.query_second_snapshots(CATALOG_PATH, instrument_id, start_ns, before_ns)
-    snap_dicts = [_snapshot_to_row_dict(s) for s in sorted(snapshots, key=lambda s: s.ts_event)]
-    rows = [r for r in _price_series_rows(snap_dicts) if r["t"] < before_ms]
-    kept = _take_last_n_real_rows(rows, limit)
+    def fetch(start_ns: int, end_ns: int) -> list[dict]:
+        snapshots = _catalog_stats.query_second_snapshots(CATALOG_PATH, instrument_id, start_ns, end_ns)
+        snap_dicts = [_snapshot_to_row_dict(s) for s in sorted(snapshots, key=lambda s: s.ts_event)]
+        return _take_last_n_real_rows(
+            [r for r in _price_series_rows(snap_dicts) if r["t"] < before_ms], limit,
+        )
+
+    ranges = _catalog_stats.data_file_ranges(CATALOG_PATH, instrument_id)
+    span_ns = before_ns - _window_start_ns(before_ns, limit)
+    kept = paging.fetch_page(fetch, ranges, before_ns, span_ns)
 
     if not kept:
         return SnapshotSeriesResponse(items=[], has_more=False)
 
-    earliest_kept_ns = kept[0]["t"] * 1_000_000
-    has_more = _has_more(instrument_id, earliest_kept_ns, limit)
+    has_more = paging.has_older_data(ranges, kept[0]["t"] * 1_000_000)
     return SnapshotSeriesResponse(items=[SnapshotSeriesPoint(**row) for row in kept], has_more=has_more)

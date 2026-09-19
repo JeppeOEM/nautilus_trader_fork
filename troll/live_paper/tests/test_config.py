@@ -12,6 +12,7 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
+from pathlib import Path
 from decimal import Decimal
 
 import pytest
@@ -217,3 +218,15 @@ def test_real_money_config_reads_explicit_bot_id(tmp_path) -> None:
     )
     config = load_real_money_config(path)
     assert config.bot_id == "bot-btc-live"
+
+
+def test_unknown_keys_are_rejected_in_every_loader(tmp_path: Path) -> None:
+    paper = tmp_path / "paper.toml"
+    paper.write_text('[[bots]]\nbot_id = "a"\ntrade_sizee = "1"\n')
+    with pytest.raises(ValueError, match="trade_sizee"):
+        load_paper_config(paper)
+
+    real = tmp_path / "real.toml"
+    real.write_text('mode = "real_money"\nsubaccont = 1\n')
+    with pytest.raises(ValueError, match="subaccont"):
+        load_real_money_config(real)

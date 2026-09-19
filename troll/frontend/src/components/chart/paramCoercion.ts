@@ -1,3 +1,11 @@
+/** True when `raw` is a well-formed replacement for a `previous`-typed param -- what
+ * `coerceParamValue` would otherwise silently swallow by keeping the prior value. */
+export function isValidParamText(previous: unknown, raw: string): boolean {
+  if (typeof previous === "boolean") return ["true", "false"].includes(raw.trim().toLowerCase());
+  if (typeof previous === "number") return raw.trim() !== "" && !Number.isNaN(Number(raw));
+  return true;
+}
+
 /** Coerces a picker param-input's raw text back into the type of its `previous` value.
  * Extracted from `IndicatorPicker.tsx` (rather than exported from that component file)
  * so the file stays component-only-exports for fast refresh, same reasoning as

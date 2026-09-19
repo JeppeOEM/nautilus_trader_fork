@@ -370,3 +370,11 @@ Fixed: `metrics_store` reads now take `_lock` and the >100-char line is wrapped;
 Verified no longer applicable: `metrics_store` on a `:ro` mount works (reproduced with a real Docker `:ro` bind mount, 2026-09-19); every entry citing `ml_signals/dashboard.py` was retired with Story 15.10.
 
 Still open (design decisions or accepted risk, not fixed): unlocked/non-atomic `chart_indicators.toml`/`screener_columns.toml` writes; picker per-instance/panel/coercion UX gaps; whole-request 400 on one bad indicator entry; `bot_tui` AD-3 trust-the-gate items; `live_paper` unknown-TOML-key validation and signal cadence; technicals-values cache/single-flight and value validation; `has_more` on sparse ranges.
+
+## Resolved: deferred-work sweep, operator-triaged items (2026-09-19)
+
+Accepted and done: picker multi-instance (`multiInstance` prop, chart page only -- Technicals filters are keyed by indicator name); inline invalid-param feedback (`isValidParamText`); `indicator-values` returns per-entry `errors` (other entries still served; chart page shows a banner); `PUT .../indicators` 400s on unknown indicator names; `live_paper` loaders reject unknown TOML keys; technicals cache TTL 30s -> 90s; scroll-back routes (candles, snapshots, indicator-series, indicator-values) page across data gaps of any width via catalog file ranges (`catalog_stats.data_file_ranges`, `data_api/routes/paging.py`), and `has_more` is now "older data exists in the catalog" (no probe query).
+
+Already implemented before this sweep: overlay indicators on the price pane (`ChartPage.tsx` places by catalog `panel`).
+
+Discarded by operator: locking/atomic TOML writes; `bot_tui` malformed-message hardening; `DummyStrategy` signal cadence; technicals PUT value validation. `=` on float filter left as strict equality.

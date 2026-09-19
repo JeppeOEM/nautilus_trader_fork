@@ -52,6 +52,7 @@ export interface IndicatorValuesItem {
 export interface IndicatorValuesResponse {
   items: IndicatorValuesItem[];
   has_more: boolean;
+  errors?: Record<string, string>;
 }
 
 export interface MetricHistoryItem {

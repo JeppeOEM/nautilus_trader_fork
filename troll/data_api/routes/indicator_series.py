@@ -46,6 +46,7 @@ import os
 from fastapi import APIRouter
 from pydantic import BaseModel
 
+from data_api.routes import paging
 from ml_signals import catalog_stats as _catalog_stats
 from ml_signals.indicators import MultiLevelOBI
 from ml_signals.indicators import MultiLevelOFI
@@ -142,18 +143,6 @@ def _insert_gap_markers(
     return items
 
 
-def _has_more(instrument_id: str, earliest_kept_ns: int, limit: int, bar_seconds: int) -> bool:
-    """One bounded probe query for the window immediately preceding the page's earliest
-    kept point -- same off-by-one-safe approach as `candles.py`'s `_has_more` (its own
-    docstring explains the `- 1` end bound; unchanged here)."""
-    probe_end_ns = earliest_kept_ns - 1
-    probe_start_ns = _window_start_ns(probe_end_ns, limit, bar_seconds)
-    probe = _catalog_stats.query_second_snapshots(
-        CATALOG_PATH, instrument_id, probe_start_ns, probe_end_ns,
-    )
-    return len(probe) > 0
-
-
 @router.get("/api/indicator-series/{instrument_id}")
 def get_indicator_series(
     instrument_id: str, before_ns: int, limit: int = 120, bar_seconds: int = 60,
@@ -162,17 +151,17 @@ def get_indicator_series(
     bar_seconds = max(1, min(bar_seconds, _MAX_BAR_SECONDS))
     before_ms = before_ns // 1_000_000
 
-    start_ns = _window_start_ns(before_ns, limit, bar_seconds)
-    snapshots = _catalog_stats.query_second_snapshots(
-        CATALOG_PATH, instrument_id, start_ns, before_ns,
-    )
-    buckets = _replay_bucket_samples(snapshots, bar_seconds)
-    points = [p for _, p in sorted(buckets.items()) if p.t < before_ms]
-    kept = points[-limit:]
+    def fetch(start_ns: int, end_ns: int) -> list[IndicatorSeriesPoint]:
+        snapshots = _catalog_stats.query_second_snapshots(CATALOG_PATH, instrument_id, start_ns, end_ns)
+        buckets = _replay_bucket_samples(snapshots, bar_seconds)
+        return [p for _, p in sorted(buckets.items()) if p.t < before_ms]
+
+    ranges = _catalog_stats.data_file_ranges(CATALOG_PATH, instrument_id)
+    span_ns = before_ns - _window_start_ns(before_ns, limit, bar_seconds)
+    kept = paging.fetch_page(fetch, ranges, before_ns, span_ns)[-limit:]
 
     if not kept:
         return IndicatorSeriesResponse(items=[], has_more=False)
 
-    earliest_kept_ns = kept[0].t * 1_000_000
-    has_more = _has_more(instrument_id, earliest_kept_ns, limit, bar_seconds)
+    has_more = paging.has_older_data(ranges, kept[0].t * 1_000_000)
     return IndicatorSeriesResponse(items=_insert_gap_markers(kept, bar_seconds), has_more=has_more)

@@ -140,7 +140,8 @@ function ChartInner({ instrumentId, barSeconds, onTimeframeChange }: ChartInnerP
   // the GET (initial load)/PUT (every add/remove/param-apply) round trip and reports the
   // resulting list here; this component decides how it becomes panes (AD-F4).
   const [pickerEntries, setPickerEntries] = useState<IndicatorConfigEntry[]>([]);
-  const pickerValues = usePickerIndicatorValues(instrumentId, chart, pickerEntries, barSeconds);
+  const [indicatorErrors, setIndicatorErrors] = useState<Record<string, string>>({});
+  const pickerValues = usePickerIndicatorValues(instrumentId, chart, pickerEntries, barSeconds, setIndicatorErrors);
   // First-seen order, not a fresh alphabetical sort every render -- assignPaneColor's own
   // invariant ("an id's color never changes while it stays in the list") only holds if
   // this order list is itself stable. Re-sorting Object.keys(pickerValues) on every
@@ -367,6 +368,11 @@ function ChartInner({ instrumentId, barSeconds, onTimeframeChange }: ChartInnerP
           />
         </div>
       </div>
+      {Object.entries(indicatorErrors).map(([id, message]) => (
+        <p key={id} role="alert" className="chart-load-error">
+          Indicator {id} failed: {message}
+        </p>
+      ))}
       <IndicatorPicker
         fetchConfig={() => fetchCoinIndicatorConfig(instrumentId)}
         saveConfig={(entries) => saveCoinIndicatorConfig(instrumentId, entries)}
@@ -374,6 +380,7 @@ function ChartInner({ instrumentId, barSeconds, onTimeframeChange }: ChartInnerP
         onEntriesChange={setPickerEntries}
         dialogOpen={indicatorDialogOpen}
         onDialogClose={() => setIndicatorDialogOpen(false)}
+        multiInstance
       />
     </div>
   );

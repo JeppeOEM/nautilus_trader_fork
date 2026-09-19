@@ -16,6 +16,8 @@
 
 import glob
 import os
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 
 import numpy as np
@@ -65,6 +67,31 @@ def query_second_snapshots(
     # query() wraps custom Data subclasses in CustomData -- unwrap via .data to reach the
     # actual DydxSecondSnapshot (confirmed via direct introspection this session).
     return [r.data if hasattr(r, "data") else r for r in results]
+
+
+def _stamp_to_ns(stamp: str) -> int:
+    """`2026-06-30T17-17-34-103475440Z` (a catalog filename bound) -> epoch ns."""
+    date, _, clock = stamp.rstrip("Z").partition("T")
+    hour, minute, second, nanos = clock.split("-")
+    moment = datetime.strptime(f"{date} {hour}:{minute}:{second}", "%Y-%m-%d %H:%M:%S")
+    return int(moment.replace(tzinfo=timezone.utc).timestamp()) * 1_000_000_000 + int(nanos)
+
+
+def data_file_ranges(
+    catalog_path: str, instrument_id: str, include_rollups: bool = False,
+) -> list[tuple[int, int]]:
+    """Ascending (start_ns, end_ns) of every second-snapshot Parquet file (plus minute-rollup
+    files if `include_rollups`) for the instrument, read from the catalog's filenames -- a
+    directory listing, no Parquet I/O. Lets paging routes know where data actually exists
+    instead of guessing with fixed-size probe windows (a data gap wider than the window
+    otherwise reads as "no more history")."""
+    types = ["custom_dydx_second_snapshot"] + (["custom_dydx_minute_rollup"] if include_rollups else [])
+    ranges = []
+    for data_type in types:
+        for path in glob.glob(os.path.join(catalog_path, "data", data_type, instrument_id, "*.parquet")):
+            start, _, end = Path(path).stem.partition("_")
+            ranges.append((_stamp_to_ns(start), _stamp_to_ns(end)))
+    return sorted(ranges)
 
 
 def query_minute_rollups(

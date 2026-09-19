@@ -51,6 +51,7 @@ export function usePickerIndicatorValues(
   chart: IChartApi | null,
   entries: IndicatorConfigEntry[],
   barSeconds = DEFAULT_BAR_SECONDS,
+  onErrors?: (errors: Record<string, string>) => void,
 ): Record<string, PickerDatum[]> {
   const [seriesByKey, setSeriesByKey] = useState<Record<string, PickerDatum[]>>({});
   const hasMoreOlderRef = useRef(true);
@@ -83,6 +84,9 @@ export function usePickerIndicatorValues(
       loadingRef.current = true;
       return fetchIndicatorValues(instrumentId, beforeNs, INITIAL_LIMIT, barSeconds, requestEntries)
         .then((response) => {
+          // Per-indicator failures (bad/stale entry): the good ones still plotted, so surface
+          // which ones failed instead of leaving a silently missing pane.
+          onErrors?.(response.errors ?? {});
           if (response.items.length === 0) {
             hasMoreOlderRef.current = false;
             return;
@@ -115,6 +119,7 @@ export function usePickerIndicatorValues(
           }
         });
     },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [instrumentId, requestEntries, barSeconds],
   );
 

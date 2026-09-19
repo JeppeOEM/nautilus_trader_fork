@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { fetchIndicatorCatalog } from "../../api/client";
 import type { IndicatorCatalogEntry, IndicatorConfigEntry } from "../../api/schema";
-import { coerceParamValue } from "./paramCoercion";
+import { coerceParamValue, isValidParamText } from "./paramCoercion";
 
 interface IndicatorPickerProps {
   /** Where the selection lives: the chart page wraps its per-coin GET/PUT here, the
@@ -25,6 +25,20 @@ interface IndicatorPickerProps {
    * "Indicators" button. Omitted (Technicals tab) = no dialog, just the select+Add below. */
   dialogOpen?: boolean;
   onDialogClose?: () => void;
+  /** Allow the same indicator several times with different params (RSI(14) + RSI(21)). Off by
+   * default: the Technicals tab's filter fields are keyed by indicator name alone. */
+  multiInstance?: boolean;
+}
+
+function hasInstance(
+  entries: IndicatorConfigEntry[],
+  name: string,
+  params: Record<string, unknown>,
+  multiInstance: boolean,
+): boolean {
+  return entries.some(
+    (e) => e.name === name && (!multiInstance || JSON.stringify(e.params ?? {}) === JSON.stringify(params)),
+  );
 }
 
 function defaultParamsFor(catalogEntry: IndicatorCatalogEntry): Record<string, unknown> {
@@ -50,6 +64,7 @@ export default function IndicatorPicker({
   onEntriesChange,
   dialogOpen = false,
   onDialogClose,
+  multiInstance = false,
 }: IndicatorPickerProps) {
   const [catalog, setCatalog] = useState<Record<string, IndicatorCatalogEntry>>({});
   const [entries, setEntries] = useState<IndicatorConfigEntry[]>([]);
@@ -119,24 +134,27 @@ export default function IndicatorPicker({
   function addByName(name: string): void {
     const catalogEntry = catalog[name];
     if (!catalogEntry) return;
-    if (entries.some((e) => e.name === name)) return; // already added
-    const next: IndicatorConfigEntry[] = [
-      ...entries,
-      { name, params: defaultParamsFor(catalogEntry), category: catalogEntry.category },
-    ];
-    persist(next);
+    const params = defaultParamsFor(catalogEntry);
+    if (hasInstance(entries, name, params, multiInstance)) return; // already added
+    persist([...entries, { name, params, category: catalogEntry.category }]);
   }
 
   function handleAdd(): void {
     addByName(selectedName);
   }
 
-  function handleRemove(name: string): void {
-    persist(entries.filter((e) => e.name !== name));
+  function handleRemove(index: number): void {
+    persist(entries.filter((_, i) => i !== index));
   }
 
-  function handleApplyParams(name: string, params: Record<string, unknown>): void {
-    persist(entries.map((e) => (e.name === name ? { ...e, params } : e)));
+  function handleApplyParams(index: number, params: Record<string, unknown>): void {
+    const others = entries.filter((_, i) => i !== index);
+    if (hasInstance(others, entries[index].name, params, multiInstance)) {
+      // Two identical instances would share one series key and draw on top of each other.
+      setError(`${entries[index].name} with those params is already added`);
+      return;
+    }
+    persist(entries.map((e, i) => (i === index ? { ...e, params } : e)));
   }
 
   return (
@@ -146,7 +164,9 @@ export default function IndicatorPicker({
           open={dialogOpen}
           onClose={onDialogClose}
           catalog={catalog}
-          addedNames={entries.map((e) => e.name)}
+          addedNames={Object.keys(catalog).filter((n) =>
+            hasInstance(entries, n, defaultParamsFor(catalog[n]), multiInstance),
+          )}
           disabled={disabled}
           onAdd={addByName}
         />
@@ -166,13 +186,13 @@ export default function IndicatorPicker({
         </button>
       </div>
       <ul>
-        {entries.map((entry) => (
+        {entries.map((entry, index) => (
           <IndicatorEntryRow
-            key={entry.name}
+            key={`${entry.name}:${JSON.stringify(entry.params)}`}
             entry={entry}
             disabled={disabled}
-            onRemove={() => handleRemove(entry.name)}
-            onApplyParams={(params) => handleApplyParams(entry.name, params)}
+            onRemove={() => handleRemove(index)}
+            onApplyParams={(params) => handleApplyParams(index, params)}
           />
         ))}
       </ul>
@@ -196,22 +216,38 @@ function IndicatorEntryRow({
   // onApplyParams -> persist -> onEntriesChange), so `entry.params` never changes out
   // from under an already-mounted row for reasons other than this row's own edit, which
   // already agrees with `draft` (avoids an effect-driven setState re-render loop).
-  const [draft, setDraft] = useState<Record<string, unknown>>(() => entry.params ?? {});
+  const params = entry.params ?? {};
+  const [raw, setRaw] = useState<Record<string, string>>(() =>
+    Object.fromEntries(Object.entries(params).map(([k, v]) => [k, String(v)])),
+  );
+  // Invalid text is shown, not silently reverted -- coerceParamValue alone would keep the
+  // prior value and leave the field looking like it ignored the keystroke.
+  const invalidKeys = Object.keys(params).filter((k) => !isValidParamText(params[k], raw[k] ?? ""));
 
   return (
     <li>
       <span>{entry.name}</span>
-      {Object.entries(draft).map(([key, value]) => (
+      {Object.keys(params).map((key) => (
         <label key={key}>
           {key}:
           <input
-            value={String(value)}
-            onChange={(e) => setDraft((prev) => ({ ...prev, [key]: coerceParamValue(value, e.target.value) }))}
+            value={raw[key] ?? ""}
+            aria-invalid={invalidKeys.includes(key)}
+            onChange={(e) => setRaw((prev) => ({ ...prev, [key]: e.target.value }))}
           />
         </label>
       ))}
-      {Object.keys(draft).length > 0 && (
-        <button type="button" disabled={disabled} onClick={() => onApplyParams(draft)}>
+      {invalidKeys.length > 0 && <span role="alert">Invalid value for {invalidKeys.join(", ")}</span>}
+      {Object.keys(params).length > 0 && (
+        <button
+          type="button"
+          disabled={disabled || invalidKeys.length > 0}
+          onClick={() =>
+            onApplyParams(
+              Object.fromEntries(Object.keys(params).map((k) => [k, coerceParamValue(params[k], raw[k] ?? "")])),
+            )
+          }
+        >
           Apply
         </button>
       )}

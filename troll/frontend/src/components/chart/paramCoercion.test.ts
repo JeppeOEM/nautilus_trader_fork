@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { coerceParamValue } from "./paramCoercion";
+import { coerceParamValue, isValidParamText } from "./paramCoercion";
 
 describe("coerceParamValue", () => {
   it("keeps a numeric default when the field is cleared, instead of coercing to 0", () => {
@@ -31,5 +31,18 @@ describe("coerceParamValue", () => {
     const previous = { nested: true };
     expect(coerceParamValue(previous, "not-an-object")).toBe(previous);
     expect(coerceParamValue(null, "x")).toBe(null);
+  });
+});
+
+describe("isValidParamText", () => {
+  it("rejects empty or non-numeric text for a number param", () => {
+    expect(isValidParamText(14, "")).toBe(false);
+    expect(isValidParamText(14, "abc")).toBe(false);
+    expect(isValidParamText(14, "21")).toBe(true);
+  });
+
+  it("accepts only true/false for a boolean param", () => {
+    expect(isValidParamText(true, "1")).toBe(false);
+    expect(isValidParamText(true, "False")).toBe(true);
   });
 });

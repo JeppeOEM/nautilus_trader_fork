@@ -48,6 +48,7 @@ from fastapi import HTTPException
 from fastapi import Request
 from pydantic import BaseModel
 
+from data_api.routes import paging
 from ml_signals import catalog_stats as _catalog_stats
 from ml_signals import chart_indicator_config
 from ml_signals import chart_indicators
@@ -180,6 +181,9 @@ async def put_coin_indicator_config(instrument_id: str, request: Request) -> dic
         raise HTTPException(
             status_code=400, detail=f"invalid indicator config payload: {exc}"
         ) from exc
+    unknown = [e.name for e in entries if e.name not in _merged_indicator_catalog()]
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"unknown indicator(s): {unknown}")
     try:
         chart_indicator_config.save_config(config, path)
     except OSError as exc:
@@ -213,6 +217,9 @@ class IndicatorValuesItem(BaseModel):
 class IndicatorValuesResponse(BaseModel):
     items: list[IndicatorValuesItem]
     has_more: bool
+    # `_indicator_id(name, params)` -> message, for entries whose replay failed. The other
+    # entries' values are still served; one bad/stale entry must not blank every pane.
+    errors: dict[str, str] = {}
 
 
 def _indicator_id(name: str, params: dict[str, Any]) -> str:
@@ -273,19 +280,27 @@ def _values_by_time(
     candles: list[dict],
     entries: list[IndicatorValueRequestEntry],
     window: custom_indicators.ReplayWindow,
-) -> dict[int, dict[str, float | None]]:
+) -> tuple[dict[int, dict[str, float | None]], dict[str, str]]:
     """Replay every requested entry over the same bounded candle window and merge into one
     `t -> {series_key: value}` mapping -- every entry shares the identical candle list, so
-    their outputs are already aligned 1:1 by index."""
+    their outputs are already aligned 1:1 by index. An entry that fails is reported in the
+    second (`indicator_id -> message`) result and skipped, never failing the others."""
     by_time: dict[int, dict[str, float | None]] = {c["t"]: {} for c in candles}
+    errors: dict[str, str] = {}
     for entry in entries:
-        outputs = _replay_entry(candles, entry, window)
         indicator_id = _indicator_id(entry.name, entry.params)
+        try:
+            outputs = _replay_entry(candles, entry, window)
+        except Exception as exc:
+            # Broad by design (DATA-02): params are untrusted and every current and future
+            # indicator's replay may raise something different (e.g. period=0).
+            errors[indicator_id] = str(exc)
+            continue
         for attr, values in outputs.items():
             key = f"{indicator_id}.{attr}"
             for candle, value in zip(candles, values, strict=True):
                 by_time[candle["t"]][key] = value
-    return by_time
+    return by_time, errors
 
 
 def _insert_gap_markers(
@@ -301,18 +316,6 @@ def _insert_gap_markers(
             out.append(IndicatorValuesItem(t=items[i - 1].t + bar_ms))
         out.append(item)
     return out
-
-
-def _has_more(instrument_id: str, earliest_kept_ns: int, limit: int, bar_seconds: int) -> bool:
-    """One bounded probe query for the window immediately preceding the page's earliest kept
-    point -- same off-by-one-safe approach as `candles.py`'s `_has_more` (its own docstring
-    explains the `- 1` end bound; unchanged here)."""
-    probe_end_ns = earliest_kept_ns - 1
-    probe_start_ns = _window_start_ns(probe_end_ns, limit, bar_seconds)
-    probe = _catalog_stats.query_second_snapshots(
-        CATALOG_PATH, instrument_id, probe_start_ns, probe_end_ns,
-    )
-    return len(probe) > 0
 
 
 @router.get("/api/coin/{instrument_id}/indicator-values")
@@ -344,21 +347,19 @@ def get_indicator_values(
     before_ms = before_ns // 1_000_000
     parsed_entries = _parse_entries(entries)
 
+    def fetch(start_ns: int, end_ns: int) -> list[dict]:
+        snapshots = _catalog_stats.query_second_snapshots(CATALOG_PATH, instrument_id, start_ns, end_ns)
+        return [c for c in candle_dicts_from_snapshots(snapshots, bar_seconds) if c["t"] < before_ms]
+
     try:
-        start_ns = _window_start_ns(before_ns, limit, bar_seconds)
-        snapshots = _catalog_stats.query_second_snapshots(
-            CATALOG_PATH, instrument_id, start_ns, before_ns,
-        )
+        ranges = _catalog_stats.data_file_ranges(CATALOG_PATH, instrument_id)
+        span_ns = before_ns - _window_start_ns(before_ns, limit, bar_seconds)
+        kept = paging.fetch_page(fetch, ranges, before_ns, span_ns)[-limit:]
     except Exception as exc:
         # A catalog read failure (missing/corrupt catalog dir, I/O error) is a server-side
         # condition, not a client-input problem -- 500, never a silent/opaque failure
         # (DATA-02).
         raise HTTPException(status_code=500, detail=f"failed to read catalog: {exc}") from exc
-
-    candles = [
-        c for c in candle_dicts_from_snapshots(snapshots, bar_seconds) if c["t"] < before_ms
-    ]
-    kept = candles[-limit:]
 
     if not kept:
         return IndicatorValuesResponse(items=[], has_more=False)
@@ -368,22 +369,10 @@ def get_indicator_values(
     window = custom_indicators.ReplayWindow(
         instrument_id=instrument_id, bar_seconds=bar_seconds, start_ms=start_ms, end_ms=end_ms,
     )
-    try:
-        by_time = _values_by_time(kept, parsed_entries, window)
-    except Exception as exc:
-        # Broad by design (system boundary, DATA-02) -- entries is untrusted client input,
-        # and there is no fixed set of exception types every current and future indicator's
-        # replay_indicator() might raise on a bad param (e.g. period=0 dividing by zero).
-        # Same posture the retired dashboard.py._indicators_json documented for this exact
-        # dispatch call.
-        raise HTTPException(status_code=400, detail=f"invalid indicator entry: {exc}") from exc
-
+    by_time, errors = _values_by_time(kept, parsed_entries, window)
     items = [IndicatorValuesItem(t=t, values=values) for t, values in sorted(by_time.items())]
-    earliest_kept_ns = items[0].t * 1_000_000
-    try:
-        has_more = _has_more(instrument_id, earliest_kept_ns, limit, bar_seconds)
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"failed to read catalog: {exc}") from exc
     return IndicatorValuesResponse(
-        items=_insert_gap_markers(items, bar_seconds), has_more=has_more,
+        items=_insert_gap_markers(items, bar_seconds),
+        has_more=paging.has_older_data(ranges, items[0].t * 1_000_000),
+        errors=errors,
     )

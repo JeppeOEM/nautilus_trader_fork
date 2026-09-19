@@ -32,6 +32,7 @@ import os
 from fastapi import APIRouter
 from pydantic import BaseModel
 
+from data_api.routes import paging
 from ml_signals import catalog_stats as _catalog_stats
 from ml_signals.candles import candle_dicts_for_window
 from ml_signals.candles import choose_candle_source
@@ -118,33 +119,6 @@ def _insert_gap_markers(candles: list[dict], bar_seconds: int) -> list[CandleIte
     return items
 
 
-def _has_more(instrument_id: str, earliest_kept_ns: int, limit: int, bar_seconds: int) -> bool:
-    """
-    One bounded probe query for the window immediately preceding the page's earliest
-    kept candle -- `ParquetDataCatalog.query()` has no cheap "does earlier data exist"
-    primitive, so this is the sanctioned approach (Design Notes): `has_more = True` iff
-    the probe returns any snapshot at all.
-
-    `end` is `earliest_kept_ns - 1`, not `earliest_kept_ns` -- `ParquetDataCatalog.query()`'s
-    `end` bound is inclusive (`ts_init <= end`, verified in
-    `nautilus_trader/persistence/catalog/parquet.py`), so probing with an inclusive end
-    exactly at the earliest kept candle's own bucket-open time would re-find that
-    candle's own underlying snapshot every time, making this report `True`
-    unconditionally regardless of whether older data actually exists.
-    """
-    probe_end_ns = earliest_kept_ns - 1
-    probe_start_ns = _window_start_ns(probe_end_ns, limit, bar_seconds)
-    if choose_candle_source(bar_seconds) == "rollup_1m" and _catalog_stats.query_minute_rollups(
-        CATALOG_PATH, instrument_id, probe_start_ns, probe_end_ns,
-    ):
-        return True
-    # Pre-rollup history is raw-only; probe a bounded raw window so it still pages back.
-    raw_start_ns = max(probe_start_ns, probe_end_ns - _MAX_QUERY_SPAN_SECONDS * 1_000_000_000)
-    return len(_catalog_stats.query_second_snapshots(
-        CATALOG_PATH, instrument_id, raw_start_ns, probe_end_ns,
-    )) > 0
-
-
 @router.get("/api/candles/{instrument_id}")
 def get_candles(
     instrument_id: str, before_ns: int, limit: int = 120, bar_seconds: int = 60,
@@ -153,24 +127,28 @@ def get_candles(
     bar_seconds = max(1, min(bar_seconds, _MAX_BAR_SECONDS))
     before_ms = before_ns // 1_000_000
 
-    start_ns = _window_start_ns(before_ns, limit, bar_seconds)
-    candles = [
-        c
-        for c in candle_dicts_for_window(
-            instrument_id,
-            start_ns,
-            before_ns,
-            bar_seconds,
-            snapshot_rows_fn=lambda i, a, b: _catalog_stats.query_second_snapshots(CATALOG_PATH, i, a, b),
-            rollup_rows_fn=lambda i, a, b: _catalog_stats.query_minute_rollups(CATALOG_PATH, i, a, b),
-        )
-        if c["t"] < before_ms
-    ]
-    kept = candles[-limit:]
+    def fetch(start_ns: int, end_ns: int) -> list[dict]:
+        return [
+            c
+            for c in candle_dicts_for_window(
+                instrument_id,
+                start_ns,
+                end_ns,
+                bar_seconds,
+                snapshot_rows_fn=lambda i, a, b: _catalog_stats.query_second_snapshots(CATALOG_PATH, i, a, b),
+                rollup_rows_fn=lambda i, a, b: _catalog_stats.query_minute_rollups(CATALOG_PATH, i, a, b),
+            )
+            if c["t"] < before_ms
+        ]
+
+    ranges = _catalog_stats.data_file_ranges(
+        CATALOG_PATH, instrument_id, include_rollups=choose_candle_source(bar_seconds) == "rollup_1m",
+    )
+    span_ns = before_ns - _window_start_ns(before_ns, limit, bar_seconds)
+    kept = paging.fetch_page(fetch, ranges, before_ns, span_ns)[-limit:]
 
     if not kept:
         return CandlesResponse(items=[], has_more=False)
 
-    earliest_kept_ns = kept[0]["t"] * 1_000_000
-    has_more = _has_more(instrument_id, earliest_kept_ns, limit, bar_seconds)
+    has_more = paging.has_older_data(ranges, kept[0]["t"] * 1_000_000)
     return CandlesResponse(items=_insert_gap_markers(kept, bar_seconds), has_more=has_more)

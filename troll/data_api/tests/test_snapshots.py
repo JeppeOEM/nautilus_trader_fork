@@ -233,3 +233,23 @@ def test_limit_zero_or_negative_is_clamped_up_to_one_not_treated_as_unbounded(
         response = client.get(f"/api/snapshots/{_IID}?before_ns={_BASE_NS + 1_000_000_000}&limit={limit}")
         assert response.status_code == 200
         assert len(response.json()["items"]) == 1
+
+
+def test_paging_reaches_data_beyond_a_gap_wider_than_the_query_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    catalog_path = str(tmp_path / "catalog")
+    _write_snapshots(catalog_path, [
+        (_BASE_NS - 1_000_000_000, 100.0, 101.0),
+        (_BASE_NS - 3_600_000_000_000, 90.0, 91.0),  # 1h back; the query window is only seconds
+    ])
+    client = _client(catalog_path, monkeypatch)
+
+    first = client.get(f"/api/snapshots/{_IID}?before_ns={_BASE_NS}&limit=2").json()
+    second = client.get(
+        f"/api/snapshots/{_IID}?before_ns={first['items'][0]['t'] * 1_000_000}&limit=2"
+    ).json()
+
+    assert first["has_more"] is True
+    assert [i["t"] for i in second["items"]] == [(_BASE_NS - 3_600_000_000_000) // 1_000_000]
+    assert second["has_more"] is False

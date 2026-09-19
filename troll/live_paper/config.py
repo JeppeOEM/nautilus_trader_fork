@@ -44,6 +44,7 @@ closed, since load_paper_config rejects any `mode` key outright.
 
 import tomllib
 from dataclasses import dataclass
+from dataclasses import fields
 from decimal import Decimal
 from pathlib import Path
 
@@ -95,6 +96,14 @@ class RealMoneyConfig:
     bot_id: str = "bot-01"
 
 
+def _reject_unknown_keys(raw: dict, config_cls: type, path: Path, where: str = "") -> None:
+    """A typo'd key (`subaccont`) would otherwise silently fall back to its default -- for a
+    real-money config that could route trades through the wrong subaccount."""
+    unknown = sorted(set(raw) - {f.name for f in fields(config_cls)})
+    if unknown:
+        raise ValueError(f"{path}: unknown key(s) {unknown}{where}")
+
+
 def _parse_trade_size(raw: dict, key: str, path: Path) -> Decimal:
     trade_size = raw.get(key, "0.001")
     if not isinstance(trade_size, str):
@@ -109,6 +118,7 @@ def _parse_trade_size(raw: dict, key: str, path: Path) -> Decimal:
 def _parse_bot(raw_bot: dict, path: Path) -> BotConfig:
     if "bot_id" not in raw_bot:
         raise ValueError(f"{path}: every [[bots]] entry must set bot_id")
+    _reject_unknown_keys(raw_bot, BotConfig, path, " in [[bots]] entry")
 
     return BotConfig(
         bot_id=raw_bot["bot_id"],
@@ -132,6 +142,7 @@ def load_paper_config(path: Path) -> PaperConfig:
             "toggle inside the default config (see this module's docstring)."
         )
 
+    _reject_unknown_keys(raw, PaperConfig, path)
     starting_balances = raw.get("starting_balances", ["10_000 USDC"])
     if isinstance(starting_balances, str):
         raise ValueError(
@@ -169,6 +180,7 @@ def load_real_money_config(path: Path) -> RealMoneyConfig:
             f"(found {mode!r}) -- refusing to start rather than guessing operator intent.",
         )
 
+    _reject_unknown_keys(raw, RealMoneyConfig, path)
     return RealMoneyConfig(
         mode=mode,
         network=DydxNetwork.from_str(raw.get("network", "mainnet").lower()),  # type: ignore[attr-defined]
