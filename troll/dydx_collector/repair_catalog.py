@@ -70,9 +70,11 @@ def _cleared_copy(snap: DydxSecondSnapshot) -> DydxSecondSnapshot:
 
 
 def repair_instrument(catalog: ParquetDataCatalog, catalog_path: str, iid: str, flagged: list[DydxSecondSnapshot]) -> None:
-    for snap in flagged:
+    # Build every replacement first so a bad row fails before anything is deleted.
+    replacements = [(snap, _cleared_copy(snap)) for snap in flagged]
+    for snap, cleared in replacements:
         catalog.delete_data_range(DydxSecondSnapshot, iid, snap.ts_event, snap.ts_event)
-        catalog.write_data([_cleared_copy(snap)])
+        catalog.write_data([cleared])
         minute_start = snap.ts_event // _MINUTE_NS * _MINUTE_NS
         # A rollup's ts_init is its minute's end (see catalog_stats.query_minute_rollups);
         # start + 1 keeps the previous minute (ts_init == this start) out of the delete.

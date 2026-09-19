@@ -115,6 +115,7 @@ _QUARANTINE_DIRNAME = "_quarantine"
 # second's OHLC/volume after every (re)subscribe -- fake ~$850-range, ~21 BTC candles.
 # A live trade reaches us within ~1s, so anything older than this is history.
 _STALE_TRADE_NS = 10_000_000_000
+_IMPOSSIBLE_LOG_EVERY_NS = 60_000_000_000  # one ERROR per instrument per minute, not per second
 _SEEN_TRADE_IDS = 2000  # per instrument; > the 1000-trade subscribed reply
 
 # ponytail: ParquetDataCatalog.write_data() (pinned nautilus_trader 1.229.0) has no
@@ -499,6 +500,7 @@ class Collector:
         # Trades dropped as subscribe-time history, per instrument (see _STALE_TRADE_NS).
         # Logged by _report_stale_trades so drops are never silent (DATA-05).
         self._stale_trades_dropped: defaultdict[str, int] = defaultdict(int)
+        self._last_impossible_log_ns: dict[str, int] = {}
         self._duplicate_trades_dropped: defaultdict[str, int] = defaultdict(int)
         # Bounded recent trade ids per instrument: a reconnect's subscribed reply replays
         # trades already counted, and those are still "fresh" (< _STALE_TRADE_NS) if the
@@ -1244,7 +1246,8 @@ class Collector:
                     ts_event=now_ns,
                     ts_init=now_ns,
                 )
-                if ohlc_outside_book(snapshot):
+                if ohlc_outside_book(snapshot) and now_ns - self._last_impossible_log_ns.get(iid, 0) >= _IMPOSSIBLE_LOG_EVERY_NS:
+                    self._last_impossible_log_ns[iid] = now_ns
                     # Should be unreachable after the stale/duplicate trade filters; if it
                     # fires, an ingestion bug is writing impossible prices (DATA-02).
                     logger.error(
