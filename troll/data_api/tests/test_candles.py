@@ -228,3 +228,10 @@ def test_large_limit_and_bar_seconds_combination_does_not_blow_the_query_span(
     assert response.status_code == 200
     items = response.json()["items"]
     assert len(items) == 1  # only the within-cap snapshot's candle is queried at all
+
+
+def test_venue_field_and_malformed_id_400(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _client(tmp_path, monkeypatch)
+    ok = client.get(f"/api/candles/{_IID}?before_ns={_BASE_NS}&limit=3&bar_seconds=60")
+    assert ok.json()["venue"] == "DYDX"
+    assert client.get(f"/api/candles/BTC?before_ns={_BASE_NS}").status_code == 400

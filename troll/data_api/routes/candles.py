@@ -34,6 +34,7 @@ from pydantic import BaseModel
 
 from ml_signals import catalog_stats as _catalog_stats
 from ml_signals.candles import candle_dicts_from_snapshots
+from ml_signals.venue import venue_of
 
 
 CATALOG_PATH: str = os.environ.get("CATALOG_PATH", "troll/dydx_collector/catalog")
@@ -76,6 +77,7 @@ class CandleItem(BaseModel):
 class CandlesResponse(BaseModel):
     items: list[CandleItem]
     has_more: bool
+    venue: str
 
 
 def _window_start_ns(before_ns: int, limit: int, bar_seconds: int) -> int:
@@ -137,8 +139,10 @@ def get_candles(
     kept = candles[-limit:]
 
     if not kept:
-        return CandlesResponse(items=[], has_more=False)
+        return CandlesResponse(items=[], has_more=False, venue=venue_of(instrument_id))
 
     earliest_kept_ns = kept[0]["t"] * 1_000_000
     has_more = _has_more(instrument_id, earliest_kept_ns, limit, bar_seconds)
-    return CandlesResponse(items=_insert_gap_markers(kept, bar_seconds), has_more=has_more)
+    return CandlesResponse(
+        items=_insert_gap_markers(kept, bar_seconds), has_more=has_more, venue=venue_of(instrument_id),
+    )

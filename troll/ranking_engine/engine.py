@@ -47,6 +47,7 @@ from ml_signals.indicators import microprice as calc_microprice
 from ml_signals.indicators import mid_price as calc_mid_price
 from ml_signals.indicators import spread as calc_spread
 from ml_signals.indicators import trade_aggregates
+from ml_signals.venue import venue_of
 from ranking_engine import metrics_store
 from ranking_engine.price_series import PriceSeriesStore
 from ranking_engine.volatility import VolatilityTracker
@@ -429,6 +430,7 @@ def _current_ranks() -> list[dict]:
         slow = _SLOW_METRICS.get(iid, {})
         row = {
             "instrument_id": iid,
+            "venue": venue_of(iid),
             "volume24h": volume24h,
             "volatility_score": volatility_score,
             **_fast_metrics_for(iid),
@@ -622,7 +624,8 @@ def _build_rankings_message() -> dict:
     names, nesting, and per-rank shape are load-bearing; never rename for "clarity."
 
     stale_instrument_ids is an additive field (dashboard/bot_tui readers predating it
-    simply never look at it) -- never renamed either, once shipped.
+    simply never look at it) -- never renamed either, once shipped. Each rank entry's `venue`
+    (Story 19.1) is derived from its instrument_id's ".VENUE" suffix, not stored.
     """
     now_ns = time.time_ns()
     return {

@@ -53,6 +53,7 @@ from ml_signals import chart_indicator_config
 from ml_signals import chart_indicators
 from ml_signals import custom_indicators
 from ml_signals.candles import candle_dicts_from_snapshots
+from ml_signals.venue import venue_of
 
 
 CATALOG_PATH: str = os.environ.get("CATALOG_PATH", "troll/dydx_collector/catalog")
@@ -210,6 +211,7 @@ class IndicatorValuesItem(BaseModel):
 class IndicatorValuesResponse(BaseModel):
     items: list[IndicatorValuesItem]
     has_more: bool
+    venue: str
 
 
 def _indicator_id(name: str, params: dict[str, Any]) -> str:
@@ -358,7 +360,7 @@ def get_indicator_values(
     kept = candles[-limit:]
 
     if not kept:
-        return IndicatorValuesResponse(items=[], has_more=False)
+        return IndicatorValuesResponse(items=[], has_more=False, venue=venue_of(instrument_id))
 
     start_ms = kept[0]["t"]
     end_ms = kept[-1]["t"] + bar_seconds * 1000
@@ -382,5 +384,5 @@ def get_indicator_values(
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"failed to read catalog: {exc}") from exc
     return IndicatorValuesResponse(
-        items=_insert_gap_markers(items, bar_seconds), has_more=has_more,
+        items=_insert_gap_markers(items, bar_seconds), has_more=has_more, venue=venue_of(instrument_id),
     )

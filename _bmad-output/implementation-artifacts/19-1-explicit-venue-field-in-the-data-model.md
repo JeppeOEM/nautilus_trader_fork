@@ -1,6 +1,6 @@
 # Story 19.1: Explicit `venue` field in the data model
 
-Status: ready-for-dev
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -19,15 +19,15 @@ so that the screener and chart can filter/group/label by exchange without string
 
 ## Tasks / Subtasks
 
-- [ ] Task 1 — Backend: derive and add `venue` (AC: #1, #2, #4)
-  - [ ] Add a small shared helper (e.g. in a module already common to the route files, or a new tiny `troll/data_api/venue.py`): `venue_of(instrument_id: str) -> str` — a pure `rsplit`, no new dependency.
-  - [ ] Apply it in every response model listed in AC #1 and in `ranking_engine`'s `_current_ranks()`/`_build_rankings_message()` row-building (the same function Story 17.3 also touches — coordinate to avoid a merge conflict, but these are independent additive fields).
+- [x] Task 1 — Backend: derive and add `venue` (AC: #1, #2, #4)
+  - [x] Add a small shared helper (e.g. in a module already common to the route files, or a new tiny `troll/data_api/venue.py`): `venue_of(instrument_id: str) -> str` — a pure `rsplit`, no new dependency.
+  - [x] Apply it in every response model listed in AC #1 and in `ranking_engine`'s `_current_ranks()`/`_build_rankings_message()` row-building (the same function Story 17.3 also touches — coordinate to avoid a merge conflict, but these are independent additive fields).
 
-- [ ] Task 2 — Frontend: surface `venue` (AC: #1)
-  - [ ] Add `venue: string` to `IndicatorCatalogEntry`-adjacent response types in `schema.ts` wherever `instrument_id` already appears; regenerate via the existing OpenAPI codegen path (AD-F5) rather than hand-editing generated sections.
+- [x] Task 2 — Frontend: surface `venue` (AC: #1)
+  - [x] Add `venue: string` to `IndicatorCatalogEntry`-adjacent response types in `schema.ts` wherever `instrument_id` already appears; regenerate via the existing OpenAPI codegen path (AD-F5) rather than hand-editing generated sections.
 
-- [ ] Task 3 — Tests
-  - [ ] A test confirming `venue_of("BTC-USD-PERP.DYDX") == "DYDX"` and that a malformed/venue-less string (should never occur in practice, since every catalog instrument_id is Nautilus-constructed) fails loudly rather than silently returning something wrong.
+- [x] Task 3 — Tests
+  - [x] A test confirming `venue_of("BTC-USD-PERP.DYDX") == "DYDX"` and that a malformed/venue-less string (should never occur in practice, since every catalog instrument_id is Nautilus-constructed) fails loudly rather than silently returning something wrong.
 
 ## Dev Notes
 
@@ -54,4 +54,13 @@ so that the screener and chart can filter/group/label by exchange without string
 
 ### Completion Notes List
 
+- Story premise correction: candles/snapshots/indicator-series/indicator-values responses did NOT include `instrument_id` (it's a path param), so `venue: str` was added as a response-level field on those four models; rank entries (`rankings:live` + `/api/rankings` passthrough) get per-row `venue`.
+- `venue_of()` lives in new `ml_signals/venue.py` (shared by data_api + ranking_engine); raises `MalformedInstrumentId` (ValueError) on venue-less ids; data_api maps it to HTTP 400 via an app exception handler.
+- Tests run in the troll-data_api image against the worktree: 296 pass; `test_rankings.py::test_rankings_live_message_reflected_by_rest_and_ws_relay` needs a live Redis on 127.0.0.1:6379 (unavailable here — environmental).
+
 ### File List
+
+- troll/ml_signals/venue.py (new), troll/ml_signals/tests/test_venue.py (new)
+- troll/data_api/app.py, routes/{candles,snapshots,indicator_series,indicators}.py, tests/test_candles.py
+- troll/ranking_engine/engine.py, tests/test_engine.py
+- troll/frontend/openapi.json, troll/frontend/src/api/schema.ts

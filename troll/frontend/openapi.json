@@ -1046,12 +1046,17 @@
           "has_more": {
             "type": "boolean",
             "title": "Has More"
+          },
+          "venue": {
+            "type": "string",
+            "title": "Venue"
           }
         },
         "type": "object",
         "required": [
           "items",
-          "has_more"
+          "has_more",
+          "venue"
         ],
         "title": "CandlesResponse"
       },
@@ -1198,12 +1203,17 @@
           "has_more": {
             "type": "boolean",
             "title": "Has More"
+          },
+          "venue": {
+            "type": "string",
+            "title": "Venue"
           }
         },
         "type": "object",
         "required": [
           "items",
-          "has_more"
+          "has_more",
+          "venue"
         ],
         "title": "IndicatorSeriesResponse"
       },
@@ -1247,12 +1257,17 @@
           "has_more": {
             "type": "boolean",
             "title": "Has More"
+          },
+          "venue": {
+            "type": "string",
+            "title": "Venue"
           }
         },
         "type": "object",
         "required": [
           "items",
-          "has_more"
+          "has_more",
+          "venue"
         ],
         "title": "IndicatorValuesResponse"
       },
@@ -1522,12 +1537,17 @@
           "has_more": {
             "type": "boolean",
             "title": "Has More"
+          },
+          "venue": {
+            "type": "string",
+            "title": "Venue"
           }
         },
         "type": "object",
         "required": [
           "items",
-          "has_more"
+          "has_more",
+          "venue"
         ],
         "title": "SnapshotSeriesResponse"
       },

@@ -47,6 +47,7 @@ from pydantic import BaseModel
 from dydx_collector.second_snapshot import DydxSecondSnapshot
 from ml_signals import catalog_stats as _catalog_stats
 from ml_signals.indicators import microprice as _microprice
+from ml_signals.venue import venue_of
 
 
 CATALOG_PATH: str = os.environ.get("CATALOG_PATH", "troll/dydx_collector/catalog")
@@ -90,6 +91,7 @@ class SnapshotSeriesPoint(BaseModel):
 class SnapshotSeriesResponse(BaseModel):
     items: list[SnapshotSeriesPoint]
     has_more: bool
+    venue: str
 
 
 def _snapshot_to_row_dict(snapshot: DydxSecondSnapshot) -> dict:
@@ -200,8 +202,10 @@ def get_snapshots(instrument_id: str, before_ns: int, limit: int = 900) -> Snaps
     kept = _take_last_n_real_rows(rows, limit)
 
     if not kept:
-        return SnapshotSeriesResponse(items=[], has_more=False)
+        return SnapshotSeriesResponse(items=[], has_more=False, venue=venue_of(instrument_id))
 
     earliest_kept_ns = kept[0]["t"] * 1_000_000
     has_more = _has_more(instrument_id, earliest_kept_ns, limit)
-    return SnapshotSeriesResponse(items=[SnapshotSeriesPoint(**row) for row in kept], has_more=has_more)
+    return SnapshotSeriesResponse(
+        items=[SnapshotSeriesPoint(**row) for row in kept], has_more=has_more, venue=venue_of(instrument_id),
+    )

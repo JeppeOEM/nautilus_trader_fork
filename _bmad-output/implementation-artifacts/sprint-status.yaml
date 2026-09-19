@@ -254,7 +254,7 @@ development_status:
   epic-18-retrospective: optional
 
   epic-19: in-progress
-  19-1-explicit-venue-field-in-the-data-model: ready-for-dev
+  19-1-explicit-venue-field-in-the-data-model: done
   19-2-consolidate-data-api-catalog-path-into-one-shared-setting: ready-for-dev
   19-3-troll-bybit-collector: ready-for-dev
   19-4-troll-hyperliquid-collector: ready-for-dev

@@ -13,6 +13,7 @@ export interface CandleItem {
 export interface CandlesResponse {
   items: CandleItem[];
   has_more: boolean;
+  venue: string;
 }
 
 export interface HealthResponse {
@@ -42,6 +43,7 @@ export interface IndicatorSeriesPoint {
 export interface IndicatorSeriesResponse {
   items: IndicatorSeriesPoint[];
   has_more: boolean;
+  venue: string;
 }
 
 export interface IndicatorValuesItem {
@@ -52,6 +54,7 @@ export interface IndicatorValuesItem {
 export interface IndicatorValuesResponse {
   items: IndicatorValuesItem[];
   has_more: boolean;
+  venue: string;
 }
 
 export interface MetricHistoryItem {
@@ -92,6 +95,7 @@ export interface SnapshotSeriesPoint {
 export interface SnapshotSeriesResponse {
   items: SnapshotSeriesPoint[];
   has_more: boolean;
+  venue: string;
 }
 
 export interface TechnicalsColumn {
