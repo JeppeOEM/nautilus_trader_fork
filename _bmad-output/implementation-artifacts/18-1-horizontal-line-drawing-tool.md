@@ -5,7 +5,7 @@ status: review
 
 # Story 18.1: Horizontal line drawing tool
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 

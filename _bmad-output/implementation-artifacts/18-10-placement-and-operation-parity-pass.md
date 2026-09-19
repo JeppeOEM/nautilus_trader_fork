@@ -4,7 +4,7 @@ baseline_commit: 06219946425ea7faf184dc3df86b24d62c2b32ea
 
 # Story 18.10: Placement and operation-parity pass
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 

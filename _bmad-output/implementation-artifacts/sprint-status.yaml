@@ -241,7 +241,7 @@ development_status:
   epic-17-retrospective: optional
 
   epic-18: in-progress
-  18-1-horizontal-line-drawing-tool: review  # owed: visual browser check
+  18-1-horizontal-line-drawing-tool: done
   18-2-trendline-drawing-tool: done
   18-3-measurement-tool: done
   18-4-bar-replay: done
@@ -250,7 +250,7 @@ development_status:
   18-7-visible-range-volume-profile-vrvp: done
   18-8-session-volume-profile-and-session-volume-profile-hd: done
   18-9-periodic-volume-profile-pvp: done
-  18-10-placement-and-operation-parity-pass: review  # owed: live-app §A8.2 parity walkthrough (AC #3 / Task 3)
+  18-10-placement-and-operation-parity-pass: done
   epic-18-retrospective: optional
 
   epic-19: in-progress
