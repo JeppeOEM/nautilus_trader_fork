@@ -10,12 +10,12 @@ export type ReplayMode = "off" | "picking" | "active";
 
 const isBar = (c: ChartDatum): boolean => "open" in c;
 
-/** The nearest real (non-gap) bar time strictly after/before `time`, or null at the end. */
+/** The nearest real (non-gap) bar time strictly after/before `time`, or null at the end.
+ * By time, not index: `time` may be absent after a reload/trim and must still step on. */
 export function stepBarTime(candles: readonly ChartDatum[], time: number, dir: 1 | -1): number | null {
-  let i = candles.findIndex((c) => c.time === time) + dir;
-  if (i - dir < 0) return null;
-  for (; i >= 0 && i < candles.length; i += dir) if (isBar(candles[i])) return candles[i].time as number;
-  return null;
+  const bars = candles.filter((c) => isBar(c) && ((c.time as number) - time) * dir > 0);
+  if (bars.length === 0) return null;
+  return (dir === 1 ? bars[0] : bars[bars.length - 1]).time as number;
 }
 
 interface ReplayState {
@@ -55,7 +55,10 @@ export function useReplay(candles: ChartDatum[]) {
     const id = setInterval(() => {
       setState((s) => {
         const next = s.lastTime === null ? null : stepBarTime(candles, s.lastTime, 1);
-        return next === null ? s : { ...s, lastTime: next };
+        if (next === null) return s;
+        // Stop *in state* on the newest bar: `isPlaying` is masked by `atEnd`, so without
+        // this a later-arriving bar would silently restart playback.
+        return { ...s, lastTime: next, playing: s.playing && stepBarTime(candles, next, 1) !== null };
       });
     }, REPLAY_BASE_MS / speed);
     return () => clearInterval(id);

@@ -18,6 +18,8 @@ describe("stepBarTime (Story 18.4)", () => {
     expect(stepBarTime(CANDLES, 240, -1)).toBe(120);
     expect(stepBarTime(CANDLES, 300, 1)).toBeNull();
     expect(stepBarTime(CANDLES, 60, -1)).toBeNull();
+    // a time absent from the data still steps to the nearest bar, not "end"
+    expect(stepBarTime(CANDLES, 130, 1)).toBe(240);
   });
 });
 
