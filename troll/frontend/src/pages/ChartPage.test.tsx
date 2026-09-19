@@ -302,16 +302,15 @@ describe("ChartPage default layout and per-coin persistence", () => {
 const last = (xs: number[]): number | undefined => xs[xs.length - 1];
 
 describe("ChartPage toolbars and timeframe (spec A8.1)", () => {
-  it("offers 1s/1m/5m/15m/1H/4H/1D/1W, defaults to 1m, and feeds the chosen bar size to every data hook", () => {
+  it("offers 1m/5m/15m/1H/4H/1D/1W, defaults to 1m, and feeds the chosen bar size to every data hook", () => {
     render(page());
 
-    const labels = ["1s", "1m", "5m", "15m", "1H", "4H", "1D", "1W"];
+    const labels = ["1m", "5m", "15m", "1H", "4H", "1D", "1W"];
     for (const l of labels) expect(screen.getByRole("button", { name: `Timeframe ${l}` })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Timeframe 1m" })).toHaveAttribute("aria-pressed", "true");
     expect(last(hooks.candlesBar)).toBe(60);
 
-    fireEvent.click(screen.getByRole("button", { name: "Timeframe 1s" }));
-    expect(last(hooks.candlesBar)).toBe(1);
+    expect(screen.queryByRole("button", { name: "Timeframe 1s" })).toBeNull(); // 1s removed on purpose
 
     fireEvent.click(screen.getByRole("button", { name: "Timeframe 4H" }));
 
@@ -336,7 +335,7 @@ describe("ChartPage toolbars and timeframe (spec A8.1)", () => {
       .getAllByRole("button")
       .map((b) => b.getAttribute("aria-label") ?? b.textContent);
     expect(names).toEqual([
-      ...["1s", "1m", "5m", "15m", "1H", "4H", "1D", "1W"].map((l) => `Timeframe ${l}`),
+      ...["1m", "5m", "15m", "1H", "4H", "1D", "1W"].map((l) => `Timeframe ${l}`),
       "Candles",
       "Lines",
       "Indicators",

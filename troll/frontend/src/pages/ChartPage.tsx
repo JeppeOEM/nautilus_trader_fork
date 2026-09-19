@@ -48,10 +48,11 @@ import { useSnapshotSeries } from "../hooks/useSnapshotSeries";
 // Volume is its own pane right under the price pane (spec §A1), before indicator panes.
 const DEFAULT_PANE_IDS = ["volume"];
 
-// Spec §A8.1 slot 2: the top toolbar's timeframe selector (+1s, beyond the spec's list). Bars > 1h are served from the
-// minute rollup server-side (Story 16.2), so 4H/1D/1W stay cheap.
+// Spec §A8.1 slot 2: the top toolbar's timeframe selector. Bars > 1h are served from the
+// minute rollup server-side (Story 16.2), so 4H/1D/1W stay cheap. No 1s: a 1s bar exists
+// only for a second with a trade and dYdX delivers trades 1-3 s late, so it read as a
+// frozen, time-nonlinear chart (see spec-21-x-candlestick-chart-correctness.md's backlog).
 const TIMEFRAMES = [
-  { label: "1s", seconds: 1 }, // the collector stores per-second OHLC, so 1s bars are native
   { label: "1m", seconds: 60 },
   { label: "5m", seconds: 300 },
   { label: "15m", seconds: 900 },
@@ -219,7 +220,9 @@ function ChartInner({ instrumentId, barSeconds, onTimeframeChange }: ChartInnerP
   const [sessionCfg, setSessionCfg] = useState<SessionConfig | null>(null);
   const [sessionCache] = useState<SessionProfileCache>(() => new Map());
   const [vrvpSettings, setVrvpSettings] = useState(DEFAULT_VOLUME_PROFILE_SETTINGS);
-  const { candles, volume: fullVolume, loadFailed } = useCandles(instrumentId, chart, mode === "candles", barSeconds);
+  const { candles, volume: fullVolume, loadFailed, loadError, refreshNewest, appendBar } = useCandles(
+    instrumentId, chart, mode === "candles", barSeconds,
+  );
   // Story 18.4: replay only trims the NEWEST end of the loaded candles for display
   // (`replay.displayed`); useCandles and its older-history refill are untouched.
   const replay = useReplay(candles);
@@ -232,7 +235,11 @@ function ChartInner({ instrumentId, barSeconds, onTimeframeChange }: ChartInnerP
   // (AD-F7) -- same BAR_SECONDS constant useCandles uses, so the two paths can't drift.
   // Lines mode has no live-edge concept of its own (Task 3's Dev Note) -- LightweightChart
   // itself ignores `liveBar` while `mode === "lines"` (its own seriesRef is null there).
-  const liveBar = useLiveCandle(instrumentId, barSeconds);
+  // A bar the live socket closes is promoted into history state, so a later setData() (a
+  // scroll-back prepend, replay, a mode flip) can never wipe bars the chart already showed;
+  // bars closed while the socket was down exist only on the server, so a reconnect refetches
+  // the newest page and merges it in.
+  const liveBar = useLiveCandle(instrumentId, barSeconds, { onReconnect: refreshNewest, onBarClosed: appendBar });
 
   // Story 15.6: the picker's persisted selection for this coin -- IndicatorPicker owns
   // the GET (initial load)/PUT (every add/remove/param-apply) round trip and reports the
@@ -706,7 +713,7 @@ function ChartInner({ instrumentId, barSeconds, onTimeframeChange }: ChartInnerP
         <div className="term-box" data-label={instrumentId}>
           {loadFailed && (
             <div role="alert" className="chart-load-error">
-              Can't reach the data API -- history not loaded, retrying...
+              {loadError}
             </div>
           )}
           <LightweightChart

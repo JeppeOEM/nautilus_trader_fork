@@ -29,6 +29,17 @@ export type {
   SnapshotSeriesResponse,
 };
 
+/** A non-2xx response, with its status so callers can tell a proxy hiccup (502/503/504) from a
+ * deterministic server error (a 500 the data API raised on purpose, DATA-07) that no retry fixes. */
+export class HttpError extends Error {
+  status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.status = status;
+  }
+}
+
 export async function fetchHealth(): Promise<HealthResponse> {
   const res = await fetch("/api/health");
   if (!res.ok) throw new Error(`GET /api/health failed: ${res.status}`);
@@ -58,7 +69,7 @@ export async function fetchCandles(
     bar_seconds: String(barSeconds),
   });
   const res = await fetch(`/api/candles/${encodeURIComponent(instrumentId)}?${params}`);
-  if (!res.ok) throw new Error(`GET /api/candles/${instrumentId} failed: ${res.status}`);
+  if (!res.ok) throw new HttpError(res.status, `GET /api/candles/${instrumentId} failed: ${res.status}`);
   return (await res.json()) as CandlesResponse;
 }
 

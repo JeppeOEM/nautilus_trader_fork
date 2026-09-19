@@ -30,6 +30,7 @@ from fastapi import APIRouter
 from fastapi import HTTPException
 from pydantic import BaseModel
 
+from data_api import live_candles
 from data_api.routes import paging
 from data_api.settings import CATALOG_PATH
 from ml_signals import catalog_stats as _catalog_stats
@@ -74,6 +75,14 @@ _MAX_QUERY_SPAN_SECONDS = 7 * 86_400
 _MAX_ROLLUP_QUERY_SPAN_SECONDS = 30 * 86_400
 
 router = APIRouter()
+
+
+def _catalog_plus_recent(instrument_id: str, start_ns: int, end_ns: int) -> list:
+    """Catalog rows plus the live tail the collector has not flushed yet (see live_candles.RECENT_SECONDS)."""
+    rows = _catalog_stats.query_second_ohlc(CATALOG_PATH, instrument_id, start_ns, end_ns)
+    have = {r.ts_event for r in rows}
+    tail = live_candles.live_candle_bus.recent_rows(instrument_id, start_ns, end_ns)
+    return rows + [r for r in tail if r.ts_event not in have]
 
 
 class CandleItem(BaseModel):
@@ -148,7 +157,7 @@ def get_candles(
                 start_ns,
                 end_ns,
                 bar_seconds,
-                snapshot_rows_fn=lambda i, a, b: _catalog_stats.query_second_ohlc(CATALOG_PATH, i, a, b),
+                snapshot_rows_fn=_catalog_plus_recent,
                 rollup_rows_fn=lambda i, a, b: _catalog_stats.query_minute_rollups(CATALOG_PATH, i, a, b),
             )
             if c["t"] < before_ms and checked(c)

@@ -320,7 +320,10 @@ export default function LightweightChart({
   const latestRef = useRef({ volumeProfiles, onRangeSelect, onProfileEdgeDrag, onProfileEdgeCommit });
   const markerRef = useRef<VerticalMarkerPrimitive | null>(null);
   const drawingRegistryRef = useRef<Map<string, TrendlinePrimitive>>(new Map());
-  const lastLiveBarTimeRef = useRef<number | null>(null);
+  // Newest time painted on the candlestick series -- the last setData() point or the last
+  // live update(), whichever is later. lightweight-charts throws on an update() older than
+  // its last point, so the live effect checks against this and every setData() resets it.
+  const lastPaintedTimeRef = useRef<number | null>(null);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -355,7 +358,8 @@ export default function LightweightChart({
       // Both scales default to a non-token gray border line (library default
       // '#2B2B43') -- override explicitly, same as grid/crosshair above.
       rightPriceScale: { borderColor: cssVar("--color-border", "#555555") },
-      timeScale: { borderColor: cssVar("--color-border", "#555555") },
+      // Intraday bars are unreadable without clock labels -- the library default shows dates only.
+      timeScale: { borderColor: cssVar("--color-border", "#555555"), timeVisible: true },
     });
     chartRef.current = chart;
     onChartApi(chart);
@@ -497,6 +501,7 @@ export default function LightweightChart({
 
     series.setData(data);
     prevFirstTimeRef.current = data.length > 0 ? data[0].time : null;
+    lastPaintedTimeRef.current = data.length > 0 ? (data[data.length - 1].time as unknown as number) : null;
 
     if (rangeBeforeUpdate && chart) {
       chart.timeScale().setVisibleLogicalRange({
@@ -529,36 +534,6 @@ export default function LightweightChart({
       });
     }
   }, [linesData, mode]);
-
-  useEffect(() => {
-    // Story 15.5's live edge: independent of the mount effect, the data/setData() effects,
-    // and the panes effect below -- touches only seriesRef, via update() rather than a
-    // full setData() (AD-F7: the frontend never re-aggregates, it just paints the
-    // already-aggregated forming bar `useLiveCandle` handed it). A no-op in Lines mode
-    // (`seriesRef.current` is `null` there, see the `[mode]` effect above) -- Lines mode
-    // has no live-edge concept of its own (Task 3's Dev Note: this toggle only ever swaps
-    // the main pane's historical series).
-    if (!liveBar) return;
-    const series = seriesRef.current;
-    if (!series) return;
-    // lightweight-charts requires non-decreasing update() times; a live bar racing in
-    // behind the last-applied one (e.g. a stray message right after an instrument/
-    // bar-size switch) would otherwise throw and silently kill all further live updates.
-    const time = liveBar.time as unknown as number;
-    if (lastLiveBarTimeRef.current !== null && time < lastLiveBarTimeRef.current) return;
-    lastLiveBarTimeRef.current = time;
-    // The server seeds its forming bar with the whole bucket (LiveCandleBus.seed), so it is
-    // painted as-is -- no client-side merge with history (one aggregation path, AD-F7).
-    const { volume, ...candle } = liveBar;
-    series.update(candle);
-    // Volume pane follows the forming bar; its series only exists once the panes effect has
-    // added it, and is absent in Lines mode's registry-less state -- both are no-ops.
-    panesRef.current.get("volume")?.series.update({ time: liveBar.time, value: volume });
-    // `mode` is a dependency too: switching Lines -> Candles recreates seriesRef (the
-    // `[mode]` effect above) with no data yet, so this must re-fire to paint the already-
-    // held `liveBar` onto the fresh series -- otherwise the forming bar stays blank until
-    // the next websocket tick.
-  }, [liveBar, mode, panes]); // `panes`: repaint the forming volume when its pane is (re)created
 
   useEffect(() => {
     const chart = chartRef.current;
@@ -629,6 +604,35 @@ export default function LightweightChart({
     draw();
     return () => cancelAnimationFrame(frame);
   }, [panes]);
+
+  useEffect(() => {
+    // Story 15.5's live edge: paints the already-aggregated forming bar `useLiveCandle`
+    // handed it via update(), never a full setData() (AD-F7: the frontend never
+    // re-aggregates). A no-op in Lines mode (`seriesRef.current` is `null` there).
+    // Declared AFTER the panes effect on purpose: both fire in the commit that closes a
+    // bar (ChartPage promotes the closed bar into `data`/`volume`), and the volume pane's
+    // setData() must not run after -- and erase -- this update.
+    if (!liveBar) return;
+    const series = seriesRef.current;
+    if (!series) return;
+    // A held bar older than the series' newest point (this effect re-firing on a
+    // `panes`/`data` change, or a stray message after a bar-size switch) is skipped, not
+    // thrown on: lightweight-charts' "Cannot update oldest data" would escape the effect
+    // and kill every later live update.
+    const time = liveBar.time as unknown as number;
+    if (lastPaintedTimeRef.current !== null && time < lastPaintedTimeRef.current) return;
+    lastPaintedTimeRef.current = time;
+    // The server seeds its forming bar with the whole bucket (LiveCandleBus.seed), so it is
+    // painted as-is -- no client-side merge with history (one aggregation path, AD-F7).
+    const { volume, ...candle } = liveBar;
+    series.update(candle);
+    // Volume pane follows the forming bar; its series only exists once the panes effect has
+    // added it, and is absent in Lines mode's registry-less state -- both are no-ops.
+    panesRef.current.get("volume")?.series.update({ time: liveBar.time, value: volume });
+    // `mode`: Lines -> Candles recreates seriesRef with no data. `data`: every setData()
+    // replaces the series with history that lacks the forming bar. Both must repaint the
+    // held `liveBar` at once, not wait for the next websocket tick.
+  }, [liveBar, mode, panes, data]);
 
   useEffect(() => {
     // Story 18.1 (AC #2/#4): the priceLines prop's own registry-diff effect, the exact

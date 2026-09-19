@@ -32,6 +32,8 @@ import json
 import logging
 from typing import Callable
 import time
+from collections import defaultdict
+from collections import deque
 
 import redis.asyncio as aioredis
 
@@ -42,6 +44,8 @@ from dydx_collector.second_snapshot import DydxSecondSnapshot
 from ml_signals import error_ledger
 from ml_signals.candles import ROLLUP_THRESHOLD_SECONDS
 from ml_signals.candles import candle_dicts_from_snapshots
+from ml_signals.catalog_stats import SecondOHLC
+from ml_signals.catalog_stats import query_minute_rollups
 from ml_signals.catalog_stats import query_second_ohlc
 
 
@@ -50,6 +54,25 @@ logger = logging.getLogger(__name__)
 SNAPSHOTS_CHANNEL = "snapshots:raw"
 
 _BufferKey = tuple[str, int]  # (instrument_id, bar_seconds)
+
+# The collector flushes to the catalog every flush_interval_seconds (60s), so a history read
+# right after a refresh misses the newest unflushed seconds. Keeping the last few minutes of
+# traded seconds here (a handful of tiny rows per coin, time-bounded: MEM-02) lets the candles
+# route serve them until the catalog has them.
+RECENT_SECONDS = 600
+
+
+def _catalog_rows_for_seed(instrument_id: str, bar_seconds: int, start_ns: int, end_ns: int) -> list[SecondOHLC]:
+    """The current bucket's traded rows from whichever source the history route uses for this bar size."""
+    if bar_seconds <= ROLLUP_THRESHOLD_SECONDS:
+        return query_second_ohlc(settings.CATALOG_PATH, instrument_id, start_ns, end_ns)
+    # A minute rollup row duck-types a traded second here: its o/h/l/c/volume aggregate through
+    # `aggregate_ohlc` exactly as `_rollup_bucket_dict` does (open of first, high/low across, close of last).
+    return [
+        SecondOHLC(r.ts_event, r.open, r.high, r.low, r.close, r.buy_volume, r.sell_volume)
+        for r in query_minute_rollups(settings.CATALOG_PATH, instrument_id, start_ns, end_ns)
+        if r.open is not None
+    ]
 
 
 class LiveCandleBus:
@@ -70,6 +93,24 @@ class LiveCandleBus:
         # never needs its own `snapshots:raw` subscription.
         self.observers: list[Callable[[DydxSecondSnapshot], None]] = []
         self._seeded: set[_BufferKey] = set()
+        self._recent: defaultdict[str, deque[SecondOHLC]] = defaultdict(deque)
+
+    def recent_rows(self, instrument_id: str, start_ns: int, end_ns: int) -> list[SecondOHLC]:
+        """Traded seconds seen live in [start_ns, end_ns], oldest first (see RECENT_SECONDS)."""
+        return [r for r in self._recent.get(instrument_id, ()) if start_ns <= r.ts_event <= end_ns]
+
+    def _remember(self, snapshot: DydxSecondSnapshot) -> None:
+        if snapshot.close_price is None:
+            return
+        rows = self._recent[snapshot.instrument_id.value]
+        if rows and snapshot.ts_event <= rows[-1].ts_event:
+            return  # duplicate/out-of-order (Redis reconnect)
+        rows.append(SecondOHLC(
+            snapshot.ts_event, snapshot.open_price, snapshot.high_price, snapshot.low_price,
+            snapshot.close_price, snapshot.buy_volume, snapshot.sell_volume,
+        ))
+        while rows[0].ts_event < snapshot.ts_event - RECENT_SECONDS * 1_000_000_000:
+            rows.popleft()
 
     def subscribe(self, instrument_id: str, bar_seconds: int) -> "asyncio.Queue[dict]":
         """Register a new per-listener queue for `(instrument_id, bar_seconds)`,
@@ -101,24 +142,27 @@ class LiveCandleBus:
 
         Without it the forming bar only covers ticks seen since subscribe, so its open/high/low/
         volume miss the start of the bucket (D-18). Runs once per pair; the catalog read is one
-        bucket, off the event loop. Seconds between the catalog's last flush and the first live tick
-        are in neither source, so the bar can still understate a few seconds (D-18 residual). Buckets wider than the raw-1s threshold are not seeded
-        (ponytail: ranges that wide would need the minute rollup; live bar there stays partial).
+        bucket, off the event loop. Buckets wider than the raw-1s threshold read the minute rollup
+        (the same source the history route serves them from), and every size unions the unflushed
+        tail (`recent_rows`) so the seconds since the collector's last flush are covered too.
         """
         key = (instrument_id, bar_seconds)
-        if key in self._seeded or key not in self._listeners or bar_seconds > ROLLUP_THRESHOLD_SECONDS:
+        if key in self._seeded or key not in self._listeners:
             return
         self._seeded.add(key)
         bucket_ns = bar_seconds * 1_000_000_000
         now_ns = time.time_ns()
         start_ns = now_ns // bucket_ns * bucket_ns
         try:
-            rows = await asyncio.to_thread(query_second_ohlc, settings.CATALOG_PATH, instrument_id, start_ns, now_ns)
+            rows = await asyncio.to_thread(_catalog_rows_for_seed, instrument_id, bar_seconds, start_ns, now_ns)
         except Exception:
             self._seeded.discard(key)  # a failed read must not leave this pair permanently unseeded
             raise
         if key not in self._listeners:
             return  # everyone left while the read ran
+        have = {r.ts_event for r in rows}
+        rows += [r for r in self.recent_rows(instrument_id, start_ns, now_ns) if r.ts_event not in have]
+        rows.sort(key=lambda r: r.ts_event)
         buffer = self._buffers.setdefault(key, [])
         # Live ticks own their bucket: if one rolled over while the read ran, only rows of that
         # same bucket may be prepended, never the previous bucket's.
@@ -152,6 +196,7 @@ class LiveCandleBus:
                 observer(snapshot)
             except Exception:
                 error_ledger.record("live_candles.observer", "snapshot observer failed")
+        self._remember(snapshot)
         instrument_id = snapshot.instrument_id.value
         watched_bar_seconds = [bs for (iid, bs) in self._listeners if iid == instrument_id]
         for bar_seconds in watched_bar_seconds:

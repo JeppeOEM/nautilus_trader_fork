@@ -1,16 +1,18 @@
-import type { IChartApi, LogicalRange } from "lightweight-charts";
-import { renderHook, waitFor } from "@testing-library/react";
+import type { IChartApi, LogicalRange, UTCTimestamp } from "lightweight-charts";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { CandleItem, CandlesResponse } from "../api/schema";
 
 const fetchCandlesMock = vi.fn<(...args: unknown[]) => Promise<CandlesResponse>>();
 
-vi.mock("../api/client", () => ({
+vi.mock("../api/client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../api/client")>()),
   fetchCandles: (...args: unknown[]) => fetchCandlesMock(...args),
 }));
 
-const { useCandles } = await import("./useCandles");
+const { useCandles, mergeByTime } = await import("./useCandles");
+const { HttpError } = await import("../api/client");
 
 function page(items: Array<Partial<CandleItem> & { t: number }>, hasMore: boolean): CandlesResponse {
   return {
@@ -146,5 +148,60 @@ describe("useCandles", () => {
 
     await waitFor(() => expect(fetchCandlesMock).toHaveBeenCalledTimes(1));
     expect(result.current.candles).toEqual([]);
+  });
+});
+
+describe("useCandles live merge and retry rules", () => {
+  it("appendBar upserts a closed live bar and refreshNewest merges a page without duplicates", async () => {
+    fetchCandlesMock.mockResolvedValueOnce(page([{ t: 60_000, o: 1, h: 2, l: 1, c: 2, v: 1 }], false));
+    const { result } = renderHook(() => useCandles("BTC-USD-PERP.DYDX", null));
+    await waitFor(() => expect(result.current.candles).toHaveLength(1));
+
+    act(() => result.current.appendBar({ time: 120 as UTCTimestamp, open: 2, high: 3, low: 2, close: 3, volume: 5 }));
+    expect(result.current.candles.map((c) => c.time)).toEqual([60, 120]);
+    expect(result.current.volume[1]).toEqual({ time: 120, value: 5 });
+
+    // Socket was down for two bars: the newest page overlaps t=120 and adds 180/240.
+    fetchCandlesMock.mockResolvedValueOnce(
+      page(
+        [
+          { t: 120_000, o: 2, h: 3, l: 2, c: 3, v: 5 },
+          { t: 180_000, o: 3, h: 4, l: 3, c: 4, v: 1 },
+          { t: 240_000, o: 4, h: 5, l: 4, c: 5, v: 1 },
+        ],
+        true,
+      ),
+    );
+    await act(() => result.current.refreshNewest());
+    expect(result.current.candles.map((c) => c.time)).toEqual([60, 120, 180, 240]);
+  });
+
+  it("mergeByTime marks a hole before the refetched page with one whitespace seam", () => {
+    const bar = (time: number) => ({ time: time as UTCTimestamp, open: 1, high: 1, low: 1, close: 1 });
+    const merged = mergeByTime([bar(60)], [bar(300)], 60);
+    expect(merged.map((c) => c.time)).toEqual([60, 120, 300]);
+    expect(merged[1]).toEqual({ time: 120 });
+  });
+
+  it("does not retry a deterministic HTTP error, but reports it", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    fetchCandlesMock.mockRejectedValueOnce(new HttpError(500, "GET /api/candles failed: 500"));
+    const { result } = renderHook(() => useCandles("BTC-USD-PERP.DYDX", null));
+    await waitFor(() => expect(result.current.loadFailed).toBe(true));
+    expect(result.current.loadError).toMatch(/500/);
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    expect(fetchCandlesMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps asking, from a fresh cursor, when the initial page is empty", async () => {
+    fetchCandlesMock
+      .mockResolvedValueOnce(page([], false))
+      .mockResolvedValueOnce(page([{ t: 60_000, o: 1, h: 2, l: 1, c: 2, v: 1 }], false));
+    const { result } = renderHook(() => useCandles("BTC-USD-PERP.DYDX", null));
+    await waitFor(() => expect(result.current.loadFailed).toBe(true));
+    await waitFor(() => expect(result.current.candles).toHaveLength(1), { timeout: 3000 });
+    expect(result.current.loadFailed).toBe(false);
+    const [first, second] = fetchCandlesMock.mock.calls;
+    expect(second[1] as number).toBeGreaterThanOrEqual(first[1] as number);
   });
 });

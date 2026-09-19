@@ -1,5 +1,5 @@
 import type { CandlestickData, Time, UTCTimestamp } from "lightweight-charts";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 // Reconnect-with-backoff constants -- deliberately duplicated from useLiveChannel.ts
 // rather than imported: this hook is a sibling implementation with its own dedicated
@@ -39,6 +39,13 @@ function toChartDatum(bar: LiveCandleMessage["bar"]): LiveBar {
   return { time, open: bar.o, high: bar.h, low: bar.l, close: bar.c, volume: Number.isFinite(bar.v) ? bar.v : 0 };
 }
 
+export interface LiveCandleHandlers {
+  /** The socket re-opened after a drop: bars published meanwhile were missed and must be refetched. */
+  onReconnect?: () => void;
+  /** A newer bucket's bar arrived, so the previous forming bar is closed and final. */
+  onBarClosed?: (bar: LiveBar) => void;
+}
+
 /**
  * Opens its own dedicated `/ws/live` WebSocket (sibling to `useLiveChannel`, never
  * shared -- see spec-15-5's Design Notes) and tracks the currently-forming
@@ -52,10 +59,21 @@ function toChartDatum(bar: LiveCandleMessage["bar"]): LiveBar {
  * `instrumentId` case for free by unmounting this hook entirely; the explicit reset here
  * is what covers a `barSeconds` change on an otherwise-stable mount.
  */
-export function useLiveCandle(instrumentId: string, barSeconds: number): LiveBar | null {
+export function useLiveCandle(
+  instrumentId: string,
+  barSeconds: number,
+  handlers: LiveCandleHandlers = {},
+): LiveBar | null {
   const [liveBar, setLiveBar] = useState<LiveBar | null>(null);
+  // Latest-handlers ref: callers pass fresh closures every render, and re-running the socket
+  // effect for that would drop and reopen the connection.
+  const handlersRef = useRef(handlers);
+  useEffect(() => {
+    handlersRef.current = handlers;
+  });
 
   useEffect(() => {
+    let currentBar: LiveBar | null = null;
     // Synchronous reset is the point (AC #4/#5): this effect is synchronizing with an
     // external system (the WS socket for instrumentId/barSeconds), and the reset must
     // land before that system's own connect() below can possibly deliver a message --
@@ -75,8 +93,10 @@ export function useLiveCandle(instrumentId: string, barSeconds: number): LiveBar
       socket = new WebSocket(`${protocol}//${window.location.host}/ws/live`);
 
       socket.onopen = () => {
+        const reconnected = attempt > 0; // onclose counted at least one drop before this open
         attempt = 0;
         socket?.send(JSON.stringify({ subscribe: channel }));
+        if (reconnected) handlersRef.current.onReconnect?.();
       };
 
       socket.onmessage = (event: MessageEvent<string>) => {
@@ -92,7 +112,10 @@ export function useLiveCandle(instrumentId: string, barSeconds: number): LiveBar
           // message (rankings:live, another instrument/bar_seconds' candle channel, or
           // a stray old-channel message racing in during a resubscribe).
           if (isLiveCandleMessage(parsed) && parsed.channel === channel) {
-            setLiveBar(toChartDatum(parsed.bar));
+            const bar = toChartDatum(parsed.bar);
+            if (currentBar && bar.time > currentBar.time) handlersRef.current.onBarClosed?.(currentBar);
+            currentBar = bar;
+            setLiveBar(bar);
           }
         } catch {
           // Malformed frame -- ignore, keep previous state (mirrors useLiveChannel.ts).

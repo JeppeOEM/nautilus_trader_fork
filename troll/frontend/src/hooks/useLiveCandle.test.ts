@@ -187,3 +187,35 @@ describe("useLiveCandle", () => {
     expect(FakeWebSocket.instances).toHaveLength(1);
   });
 });
+
+describe("useLiveCandle handlers", () => {
+  it("reports the closed bar when a newer bucket's bar arrives, not on same-bucket updates", () => {
+    const onBarClosed = vi.fn();
+    renderHook(() => useLiveCandle("BTC-USD-PERP.DYDX", 60, { onBarClosed }));
+    act(() => latestSocket().open());
+    act(() => latestSocket().receive(candleMessage({ t: 60_000 })));
+    act(() => latestSocket().receive(candleMessage({ t: 60_000 })));
+    expect(onBarClosed).not.toHaveBeenCalled();
+
+    act(() => latestSocket().receive(candleMessage({ t: 120_000 })));
+
+    expect(onBarClosed).toHaveBeenCalledTimes(1);
+    expect(onBarClosed).toHaveBeenCalledWith(expect.objectContaining({ time: 60, close: 1.5, volume: 10 }));
+  });
+
+  it("calls onReconnect only on a re-open after a drop", () => {
+    vi.useFakeTimers();
+    const onReconnect = vi.fn();
+    renderHook(() => useLiveCandle("BTC-USD-PERP.DYDX", 60, { onReconnect }));
+    act(() => latestSocket().open());
+    expect(onReconnect).not.toHaveBeenCalled();
+
+    act(() => latestSocket().close());
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    act(() => latestSocket().open());
+
+    expect(onReconnect).toHaveBeenCalledTimes(1);
+  });
+});

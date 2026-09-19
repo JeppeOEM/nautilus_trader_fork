@@ -9,8 +9,9 @@ import type {
 } from "lightweight-charts";
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import { fetchCandles } from "../api/client";
+import { HttpError, fetchCandles } from "../api/client";
 import type { CandleItem } from "../api/schema";
+import type { LiveBar } from "./useLiveCandle";
 
 // Mirrors dashboard.py:206's old defaults (_CANDLE_VISIBLE_BARS=120,
 // _CANDLE_REFILL_MARGIN_BARS=20) -- same initial window size and scroll-back trigger
@@ -25,6 +26,10 @@ const REFILL_MARGIN_BARS = 20;
 // one transient failure left the chart permanently blank until a manual reload.
 const RETRY_BASE_MS = 1000;
 const RETRY_MAX_MS = 10_000;
+// Gateway statuses the SSH tunnel / Vite proxy return while data_api restarts -- retried. Any
+// other HTTP status is the data API's own deterministic answer (e.g. its DATA-07 500 for an
+// impossible candle, already in the error ledger): retrying the same request cannot fix it.
+const TRANSIENT_HTTP = new Set([502, 503, 504]);
 
 export type ChartDatum = CandlestickData<Time> | WhitespaceData<Time>;
 export type VolumeDatum = HistogramData<Time> | WhitespaceData<Time>;
@@ -66,6 +71,26 @@ function toVolumeDatum(item: CandleItem): VolumeDatum {
   return item.v == null || malformed ? { time } : { time, value: item.v };
 }
 
+/**
+ * Upsert `incoming` into `prev` by time (incoming wins on a clash), ascending. Serves both the
+ * newest-page refetch after a socket drop and the promotion of a closed live bar into history,
+ * so a later setData() can never wipe bars the chart already showed. A hole between prev's last
+ * bar and incoming's first (socket down longer than one page) gets one whitespace seam marker --
+ * the same honesty rule the prepend seam applies at the older edge (AD-F6).
+ */
+export function mergeByTime<T extends { time: Time }>(prev: T[], incoming: T[], barSeconds: number): T[] {
+  if (incoming.length === 0) return prev;
+  const byTime = new Map<number, T>();
+  for (const d of prev) byTime.set(d.time as number, d);
+  const prevLast = prev.length > 0 ? (prev[prev.length - 1].time as number) : null;
+  const seam = prevLast === null ? null : prevLast + barSeconds;
+  if (seam !== null && (incoming[0].time as number) > seam && !byTime.has(seam)) {
+    byTime.set(seam, { time: seam as UTCTimestamp } as unknown as T);
+  }
+  for (const d of incoming) byTime.set(d.time as number, d);
+  return [...byTime.values()].sort((a, b) => (a.time as number) - (b.time as number));
+}
+
 interface CandlesState {
   candles: ChartDatum[];
   volume: VolumeDatum[];
@@ -76,8 +101,15 @@ const EMPTY_STATE: CandlesState = { candles: [], volume: [] };
 export interface UseCandlesResult {
   candles: ChartDatum[];
   volume: VolumeDatum[];
-  /** True while the last page fetch failed and a retry is pending. */
+  /** True while history is not loaded (fetch failed, or no candles yet); see `loadError`. */
   loadFailed: boolean;
+  /** Operator-facing reason while `loadFailed`, else `null`. */
+  loadError: string | null;
+  /** Refetch the newest page and merge it in -- after a `/ws/live` reconnect, the bars that
+   * closed while the socket was down exist only on the server. */
+  refreshNewest: () => Promise<void>;
+  /** Promote a closed live bar into history state. */
+  appendBar: (bar: LiveBar) => void;
 }
 
 /**
@@ -109,22 +141,41 @@ export function useCandles(
   const loadingRef = useRef(false);
   const earliestMsRef = useRef<number | null>(null);
   const hasLoadedInitialRef = useRef(false);
-  const [loadFailed, setLoadFailed] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const attemptRef = useRef(0);
+  const refreshingRef = useRef(false);
+  const unmountedRef = useRef(false);
 
   const loadPage = useCallback(
     (beforeNs: number, prepend: boolean): Promise<void> => {
       if (loadingRef.current) return Promise.resolve();
       loadingRef.current = true;
+      const retry = (message: string): void => {
+        // A fetch settling after unmount must not arm a timer nobody will ever clear.
+        if (unmountedRef.current) return;
+        setLoadError(message);
+        attemptRef.current += 1;
+        const delay = Math.min(RETRY_BASE_MS * 2 ** (attemptRef.current - 1), RETRY_MAX_MS);
+        // The initial page retries from "now", never its frozen cursor: a coin whose first
+        // bar lands after the first attempt would otherwise never load.
+        const cursor = prepend ? beforeNs : Date.now() * 1_000_000;
+        retryTimerRef.current = setTimeout(() => void loadPage(cursor, prepend), delay);
+      };
       return fetchCandles(instrumentId, beforeNs, INITIAL_LIMIT, barSeconds)
         .then((response) => {
           attemptRef.current = 0;
-          setLoadFailed(false);
           if (response.items.length === 0) {
-            hasMoreOlderRef.current = false;
+            if (prepend) {
+              hasMoreOlderRef.current = false;
+              return;
+            }
+            // Nothing served yet (data_api just restarted, or a freshly listed coin): not a
+            // terminal state -- keep asking, and say so instead of showing an empty chart.
+            retry("No candles served yet for this instrument -- retrying...");
             return;
           }
+          setLoadError(null);
           earliestMsRef.current = response.items[0].t;
           hasMoreOlderRef.current = response.has_more;
           const mappedCandles = response.items.map(toChartDatum);
@@ -158,15 +209,14 @@ export function useCandles(
           });
         })
         .catch((err: unknown) => {
-          // Mirrors useLiveChannel's own malformed-frame handling: log and keep the
-          // previous state rather than crash the chart or leave an unhandled
-          // rejection -- a failed refill/initial fetch is not fatal, just a page that
-          // didn't load.
+          // Log and keep the previous state rather than crash the chart or leave an
+          // unhandled rejection (console.error also lands in the ErrorBar, DATA-07).
           console.error(`useCandles: failed to load candles for ${instrumentId}`, err);
-          setLoadFailed(true);
-          attemptRef.current += 1;
-          const delay = Math.min(RETRY_BASE_MS * 2 ** (attemptRef.current - 1), RETRY_MAX_MS);
-          retryTimerRef.current = setTimeout(() => void loadPage(beforeNs, prepend), delay);
+          if (err instanceof HttpError && !TRANSIENT_HTTP.has(err.status)) {
+            setLoadError(`Data API answered ${err.status} -- history not loaded (see error bar)`);
+            return; // deterministic: the same request would fail the same way
+          }
+          retry("Can't reach the data API -- history not loaded, retrying...");
         })
         .finally(() => {
           loadingRef.current = false;
@@ -175,8 +225,45 @@ export function useCandles(
     [instrumentId, barSeconds],
   );
 
+  const refreshNewest = useCallback((): Promise<void> => {
+    if (refreshingRef.current) return Promise.resolve();
+    refreshingRef.current = true;
+    return fetchCandles(instrumentId, Date.now() * 1_000_000, INITIAL_LIMIT, barSeconds)
+      .then((response) => {
+        if (response.items.length === 0) return;
+        if (earliestMsRef.current === null) {
+          // First data this mount has seen: scroll-back must be able to start from it.
+          earliestMsRef.current = response.items[0].t;
+          hasMoreOlderRef.current = response.has_more;
+        }
+        setState((prev) => ({
+          candles: mergeByTime(prev.candles, response.items.map(toChartDatum), barSeconds),
+          volume: mergeByTime(prev.volume, response.items.map(toVolumeDatum), barSeconds),
+        }));
+      })
+      .catch((err: unknown) => {
+        // The live socket is back up regardless; the next reconnect (or reload) retries.
+        console.error(`useCandles: failed to refresh newest candles for ${instrumentId}`, err);
+      })
+      .finally(() => {
+        refreshingRef.current = false;
+      });
+  }, [instrumentId, barSeconds]);
+
+  const appendBar = useCallback(
+    (bar: LiveBar): void => {
+      const { volume, ...candle } = bar;
+      setState((prev) => ({
+        candles: mergeByTime(prev.candles, [candle], barSeconds),
+        volume: mergeByTime(prev.volume, [{ time: bar.time, value: volume }], barSeconds),
+      }));
+    },
+    [barSeconds],
+  );
+
   useEffect(
     () => () => {
+      unmountedRef.current = true;
       if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
     },
     [],
@@ -201,5 +288,5 @@ export function useCandles(
     return () => timeScale.unsubscribeVisibleLogicalRangeChange(handler);
   }, [chart, loadPage, enabled]);
 
-  return { ...state, loadFailed };
+  return { ...state, loadFailed: loadError !== null, loadError, refreshNewest, appendBar };
 }

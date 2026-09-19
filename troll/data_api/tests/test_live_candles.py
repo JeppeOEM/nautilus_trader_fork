@@ -18,6 +18,7 @@ how `test_rankings.py` unit-tests `RankingsBus.handle_message` in isolation)."""
 
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -207,12 +208,48 @@ async def test_seed_fills_bucket_start_so_forming_bar_covers_whole_bucket(
 
 
 @pytest.mark.asyncio
-async def test_seed_runs_once_and_skips_wide_bars(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(settings, "CATALOG_PATH", str(tmp_path))
+async def test_seed_wide_bar_reads_minute_rollup_plus_unflushed_tail(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Above the rollup threshold the forming bar must start from the rollup's minutes for this
+    bucket (what the history route serves), extended by live seconds the catalog has not flushed."""
+    import data_api.live_candles as lc
+
+    bar_seconds = 14_400
+    bucket_ns = bar_seconds * 1_000_000_000
+    now_ns = time.time_ns()
+    start_ns = now_ns // bucket_ns * bucket_ns
+    minute_ns = 60_000_000_000
+
+    def rollups(_path: str, _iid: str, a: int, b: int) -> list[SimpleNamespace]:
+        assert (a, b) == (start_ns, pytest.approx(now_ns, abs=5_000_000_000))
+        mk = lambda ts, o, h, low, c: SimpleNamespace(  # noqa: E731
+            ts_event=ts, open=o, high=h, low=low, close=c, buy_volume=1.0, sell_volume=0.5,
+        )
+        return [mk(start_ns, 100.0, 105.0, 99.0, 104.0), mk(start_ns + minute_ns, None, None, None, None),
+                mk(start_ns + 2 * minute_ns, 104.0, 110.0, 103.0, 108.0)]
+
+    monkeypatch.setattr(lc, "query_minute_rollups", rollups)
     bus = LiveCandleBus()
-    bus.subscribe(_IID, 7200)
-    await bus.seed(_IID, 7200)
-    assert (_IID, 7200) not in bus._seeded
+    queue = bus.subscribe(_IID, bar_seconds)
+    # A live second the collector has not flushed yet, newer than every rollup minute.
+    bus.handle_batch([DydxSecondSnapshot.to_dict(_snapshot(now_ns - 1_000_000_000, 120.0))])
+    queue.get_nowait()
+    await bus.seed(_IID, bar_seconds)
+    bar = queue.get_nowait()["bar"]
+    assert (bar["o"], bar["h"], bar["l"], bar["c"]) == (100.0, 120.0, 99.0, 120.0)
+    assert bar["v"] == 1.5 + 1.5 + 1.5  # both traded rollup minutes + the live second (1.0 + 0.5 each)
+
+
+@pytest.mark.asyncio
+async def test_seed_includes_unflushed_recent_seconds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "CATALOG_PATH", str(tmp_path))  # empty catalog: nothing flushed yet
+    bucket_ns = _BAR_SECONDS * 1_000_000_000
+    start_ns = time.time_ns() // bucket_ns * bucket_ns
+    bus = LiveCandleBus()
+    # Seen live before this subscriber arrived (another pair was watching the coin).
+    bus.handle_batch([DydxSecondSnapshot.to_dict(_snapshot(start_ns, 100.0))])
+    queue = bus.subscribe(_IID, _BAR_SECONDS)
+    await bus.seed(_IID, _BAR_SECONDS)
+    assert queue.get_nowait()["bar"]["o"] == 100.0
 
 
 @pytest.mark.asyncio
@@ -247,3 +284,12 @@ async def test_seed_failure_allows_a_retry(monkeypatch: pytest.MonkeyPatch) -> N
     with pytest.raises(OSError):
         await bus.seed(_IID, _BAR_SECONDS)
     assert (_IID, _BAR_SECONDS) not in bus._seeded
+
+
+def test_recent_rows_keep_traded_seconds_and_expire_old_ones() -> None:
+    bus = LiveCandleBus()
+    base = 1_800_000_000_000_000_000
+    bus.handle_batch([DydxSecondSnapshot.to_dict(_snapshot(base, 10.0))])
+    bus.handle_batch([DydxSecondSnapshot.to_dict(_snapshot(base + 700 * 1_000_000_000, 11.0))])
+    rows = bus.recent_rows(_IID, 0, base * 2)
+    assert [r.close_price for r in rows] == [11.0]  # the 700s-old row aged out (RECENT_SECONDS)
