@@ -26,26 +26,19 @@ and the `has_more` probe.
 `app.py`, which imports them).
 """
 
-
-import logging
-
 from fastapi import APIRouter
+from fastapi import HTTPException
 from pydantic import BaseModel
 
 from data_api.routes import paging
 from data_api.settings import CATALOG_PATH
 from ml_signals import catalog_stats as _catalog_stats
+from ml_signals import error_ledger
 from ml_signals.candles import candle_dicts_for_window
 from ml_signals.candles import choose_candle_source
 from ml_signals.candles import is_valid_candle
 from ml_signals.venue import venue_of
 
-
-logger = logging.getLogger(__name__)
-
-# Candles dropped by `is_valid_candle` since process start -- non-zero means an upstream data
-# bug (DATA-02); each drop is also logged at ERROR.
-invalid_candles_dropped = 0
 
 # Server-enforced upper bound on `limit`, regardless of what the client requests (AC #7,
 # MEM-01 extended to the API surface) -- a module constant, not per-request configurable.
@@ -138,13 +131,14 @@ def get_candles(
     bar_seconds = max(1, min(bar_seconds, _MAX_BAR_SECONDS))
     before_ms = before_ns // 1_000_000
 
-    def is_valid(c: dict) -> bool:
-        global invalid_candles_dropped  # noqa: PLW0603
-        if is_valid_candle(c):
-            return True
-        invalid_candles_dropped += 1
-        logger.error("Dropped invalid candle for %s (bar_seconds=%d): %r", instrument_id, bar_seconds, c)
-        return False
+    def checked(c: dict) -> dict:
+        # An impossible candle means upstream code malfunctioned (DATA-07): never serve it,
+        # never drop it quietly -- fail the request so the chart shows an error, and count it.
+        if not is_valid_candle(c):
+            detail = f"impossible candle for {instrument_id} (bar_seconds={bar_seconds}): {c!r}"
+            error_ledger.record("candles.invalid_candle", detail)
+            raise HTTPException(status_code=500, detail=detail)
+        return c
 
     def fetch(start_ns: int, end_ns: int) -> list[dict]:
         return [
@@ -157,7 +151,7 @@ def get_candles(
                 snapshot_rows_fn=lambda i, a, b: _catalog_stats.query_second_ohlc(CATALOG_PATH, i, a, b),
                 rollup_rows_fn=lambda i, a, b: _catalog_stats.query_minute_rollups(CATALOG_PATH, i, a, b),
             )
-            if c["t"] < before_ms and is_valid(c)
+            if c["t"] < before_ms and checked(c)
         ]
 
     ranges = _catalog_stats.data_file_ranges(

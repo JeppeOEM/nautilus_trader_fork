@@ -36,6 +36,7 @@ from data_api.routes import indicators as _indicators
 from data_api.settings import CATALOG_PATH
 from ml_signals import catalog_stats as _catalog_stats
 from ml_signals import custom_indicators
+from ml_signals import error_ledger
 from ml_signals import screener_columns_config
 from ml_signals.candles import candle_dicts_from_snapshots
 
@@ -153,6 +154,9 @@ class TechnicalsValuesResponse(BaseModel):
     # Keyed by the request entry's position, not the chart's `indicator_id` scheme, so the
     # client never has to reproduce that server-side param-formatting to find its column.
     values: dict[str, dict[str, float | None]]
+    # instrument_id -> why its values are missing. A coin listed here has NO data because its
+    # computation failed -- distinct from a coin with `None` values (genuinely no data yet).
+    errors: dict[str, str] = {}
 
 
 def _latest_values(
@@ -213,14 +217,16 @@ def get_technicals_values(entries: str) -> TechnicalsValuesResponse:
         return TechnicalsValuesResponse(values=cached[1])
     now_ns = time.time_ns()
     result: dict[str, dict[str, float | None]] = {}
+    errors: dict[str, str] = {}
     for iid in iids:
         try:
             result[iid] = _latest_values(iid, parsed, now_ns)
         except ValueError as exc:  # bad indicator params -- the same for every coin, client input
             raise HTTPException(status_code=400, detail=f"invalid indicator entry: {exc}") from exc
-        except Exception:  # noqa: BLE001 -- one coin's catalog read must not blank every coin
-            logger.exception("technicals values failed for %s", iid)
-            result[iid] = {}
-    _technicals_cache.clear()  # one live key at a time; bounded (MEM-01)
-    _technicals_cache[cache_key] = (time.monotonic(), result)
-    return TechnicalsValuesResponse(values=result)
+        except Exception as exc:  # noqa: BLE001 -- one coin's failure is reported, not hidden
+            error_ledger.record("technicals.values", f"technicals values failed for {iid}", exc)
+            errors[iid] = repr(exc)
+    if not errors:  # never cache a failure: the next poll must retry it
+        _technicals_cache.clear()  # one live key at a time; bounded (MEM-01)
+        _technicals_cache[cache_key] = (time.monotonic(), result)
+    return TechnicalsValuesResponse(values=result, errors=errors)

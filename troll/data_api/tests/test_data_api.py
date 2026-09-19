@@ -171,3 +171,18 @@ def test_catalog_candles_route(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     expected = [{**c, "source": "raw_1s"} for c in candle_dicts_from_snapshots(snapshots, 60)]
     assert response.json() == {"candles": expected}
     assert response.json()["candles"], "seeded snapshots with real close_price must produce a candle"
+
+
+def test_errors_route_reports_the_ledger() -> None:
+    from fastapi.testclient import TestClient
+
+    import data_api.app as app_module
+    from ml_signals import error_ledger
+
+    error_ledger.reset()
+    client = TestClient(app_module.app)
+    assert client.get("/api/errors").json() == {"counts": {}, "last": {}}
+    error_ledger.record("test.site", "boom")
+    body = client.get("/api/errors").json()
+    assert body["counts"] == {"test.site": 1} and body["last"] == {"test.site": "boom"}
+    error_ledger.reset()

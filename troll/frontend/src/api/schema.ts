@@ -41,6 +41,11 @@ export interface CandlesResponse {
   venue: string;
 }
 
+export interface ErrorsResponse {
+  counts: Record<string, number>;
+  last: Record<string, string>;
+}
+
 export interface HealthResponse {
   status: string;
 }
@@ -132,4 +137,5 @@ export interface TechnicalsColumn {
 
 export interface TechnicalsValuesResponse {
   values: Record<string, Record<string, number | null>>;
+  errors?: Record<string, string>;
 }

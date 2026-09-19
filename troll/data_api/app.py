@@ -50,6 +50,7 @@ from data_api.ws import live as live_ws
 from dydx_collector.second_snapshot import DydxSecondSnapshot
 from ml_signals import catalog_stats as _catalog_stats
 from ml_signals import chart_data as _chart_data
+from ml_signals import error_ledger
 from ml_signals.candles import candle_dicts_for_window
 from ml_signals.venue import MalformedInstrumentId
 from ranking_engine import metrics_store
@@ -168,6 +169,19 @@ def health() -> HealthResponse:
     """Pilot route for the OpenAPI->TypeScript codegen pipeline (Story 15.1 AC #3) --
     also a real liveness check going forward, not throwaway scaffolding."""
     return HealthResponse(status="ok")
+
+
+class ErrorsResponse(BaseModel):
+    # site -> how many times this process recorded a failure there since it started (DATA-07).
+    counts: dict[str, int]
+    last: dict[str, str]
+
+
+@app.get("/api/errors")
+def errors() -> ErrorsResponse:
+    """Every failure this process carried on past (`ml_signals.error_ledger`). Empty means none
+    since start; the frontend's error bar polls this so a malfunction cannot go unseen."""
+    return ErrorsResponse(counts=error_ledger.counts(), last=error_ledger.last_details())
 
 
 # Story 15.2: rankings REST + WS relay. Story 15.3: candles REST. Story 15.7: snapshots

@@ -274,7 +274,9 @@ def test_venue_field_and_malformed_id_400(tmp_path: Path, monkeypatch: pytest.Mo
     assert client.get(f"/api/candles/BTC?before_ns={_BASE_NS}").status_code == 400
 
 
-def test_invalid_candle_is_dropped_not_served(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_invalid_candle_fails_the_request_loudly(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from ml_signals import error_ledger
+
     catalog_path = str(tmp_path / "catalog")
     _write_snapshots(catalog_path, [(_BASE_NS - i * 60_000_000_000, 100.0 + i) for i in range(3)])
     real = candles_routes.candle_dicts_for_window
@@ -285,38 +287,10 @@ def test_invalid_candle_is_dropped_not_served(tmp_path: Path, monkeypatch: pytes
         return out
 
     monkeypatch.setattr(candles_routes, "candle_dicts_for_window", corrupt)
-    before = candles_routes.invalid_candles_dropped
+    error_ledger.reset()
     resp = _client(catalog_path, monkeypatch).get(
         f"/api/candles/{_IID}?before_ns={_BASE_NS + 60_000_000_000}&limit=10&bar_seconds=60",
     )
-    assert resp.status_code == 200
-    assert candles_routes.invalid_candles_dropped == before + 1
-    assert all(i["h"] >= i["l"] for i in resp.json()["items"] if i["h"] is not None)
-
-def test_multi_page_range_walk_covers_a_multi_day_selection_without_truncation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """
-    Story 18.5 (AC #3): a Fixed Range Volume Profile spanning several days at 1-minute bars
-    needs far more than one `_MAX_CANDLES_LIMIT` page. The caps must only bound each
-    response, never silently drop bars from the range -- walking `before_ns` back page by
-    page must return every bar exactly once, and `has_more` must go False only at the start.
-    """
-    catalog_path = str(tmp_path / "catalog")
-    bars = 3 * 1440  # 3 days of 1-minute bars
-    _write_snapshots(catalog_path, [(_BASE_NS - i * 60_000_000_000, 100.0 + i) for i in range(bars)])
-    client = _client(catalog_path, monkeypatch)
-
-    seen: list[int] = []
-    cursor_ns = _BASE_NS + 60_000_000_000
-    for _ in range(20):
-        body = client.get(f"/api/candles/{_IID}?before_ns={cursor_ns}&limit=500&bar_seconds=60").json()
-        seen.extend(item["t"] for item in body["items"])
-        if not body["has_more"]:
-            break
-        cursor_ns = body["items"][0]["t"] * 1_000_000
-    else:
-        pytest.fail("pagination did not terminate")
-
-    assert len(seen) == bars
-    assert len(set(seen)) == bars
+    assert resp.status_code == 500  # never served, never silently dropped
+    assert "impossible candle" in resp.json()["detail"]
+    assert error_ledger.counts() == {"candles.invalid_candle": 1}

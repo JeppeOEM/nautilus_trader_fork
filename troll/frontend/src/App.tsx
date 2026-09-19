@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { lazy, Suspense } from "react";
 import { BrowserRouter, Link, Route, Routes } from "react-router";
 
+import ErrorBar from "./components/ErrorBar";
 import { useAlertToasts } from "./hooks/useAlertToasts";
 
 // Route-based code-splitting (spine Consistency Conventions): each page is its own lazy chunk,
@@ -40,6 +41,7 @@ export default function App() {
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
         <TopNav />
+        <ErrorBar />
         <AlertToasts />
         <Suspense fallback={<p className="term-loading">Loading</p>}>
           <Routes>

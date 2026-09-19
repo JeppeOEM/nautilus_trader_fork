@@ -42,6 +42,7 @@ from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
 from common.venues import venue_kind
 from ml_signals import catalog_stats
+from ml_signals import error_ledger
 from ml_signals.indicators import MultiLevelOBI
 from ml_signals.indicators import MultiLevelOFI
 from ml_signals.indicators import microprice as calc_microprice
@@ -202,8 +203,10 @@ def parse_volume_24h(markets_json: dict) -> dict[str, float]:
             continue
         try:
             vol = float(market.get("volume24H") or 0)
-        except (ValueError, TypeError):
-            vol = 0.0
+        except (ValueError, TypeError) as exc:
+            # No volume is not zero volume (DATA-01): leave the coin out, loudly.
+            error_ledger.record("ranking_engine.volume24h", f"{ticker}: unparseable volume24H {market.get('volume24H')!r}", exc)
+            continue
         result[f"{ticker}-PERP.DYDX"] = vol
     return result
 
@@ -319,7 +322,7 @@ def _ingest_snapshot_batch(batch: list[dict]) -> None:
             _LAST_FED[iid] = snap["ts_event"]
             _SECOND_ROLLING.setdefault(iid, deque(maxlen=300)).append(snap)
         except Exception:
-            logger.warning("Malformed snapshots:raw entry skipped: %r", snap, exc_info=True)
+            error_ledger.record("ranking_engine.snapshot_entry", f"malformed snapshots:raw entry SKIPPED: {snap!r}")
 
 
 def _fast_metrics_for(iid: str) -> dict:
@@ -530,7 +533,7 @@ async def _backfill_new_instruments(catalog_path: str, now_ns: int) -> None:
             series = await asyncio.to_thread(_read_price_series_sync, catalog_path, iid, start_ns)
             _PRICE_SERIES.backfill(iid, series)
         except Exception:
-            logger.exception("Price-series backfill failed for %s -- not retrying", iid)
+            error_ledger.record("ranking_engine.price_backfill", f"price-series backfill failed for {iid}, NOT retried")
         finally:
             _BACKFILLED.add(iid)
 

@@ -27,6 +27,7 @@ import pyarrow.parquet as pq
 
 from dydx_collector.minute_rollup import DydxMinuteRollup
 from dydx_collector.second_snapshot import DydxSecondSnapshot
+from ml_signals import error_ledger
 from nautilus_trader.model.data import IndexPriceUpdate
 from nautilus_trader.model.data import MarkPriceUpdate
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
@@ -239,7 +240,8 @@ def likely_outages(catalog: ParquetDataCatalog, instrument_id: str) -> list[tupl
     """
     try:
         mark_rows = _load(catalog, "mark_price_update", instrument_id)
-    except (NotImplementedError, RuntimeError):
+    except (NotImplementedError, RuntimeError) as exc:
+        error_ledger.record("catalog_stats.likely_outages", f"{instrument_id} mark_price_update unreadable", exc)
         return []
     book_rows = _load(catalog, "order_book_deltas", instrument_id)
     if not mark_rows or not book_rows:
@@ -256,14 +258,12 @@ def coverage(catalog: ParquetDataCatalog, instrument_id: str) -> dict[str, dict]
     for data_type in DATA_TYPES:
         try:
             rows = _load(catalog, data_type, instrument_id)
-        except (NotImplementedError, RuntimeError):
-            # ponytail: IndexPriceUpdate has no Arrow deserializer in this
-            # nautilus_trader version (NotImplementedError); some instruments'
-            # files also have conflicting embedded schema metadata across
-            # flush batches, e.g. observed for ETH mark_price_update
-            # ("price_precision" 6 vs 5") -> RuntimeError from the Arrow
-            # reader. Either way, this is a catalog/environmental issue, not
-            # something fixable here — skip the data type rather than crash.
+        except (NotImplementedError, RuntimeError) as exc:
+            # IndexPriceUpdate has no Arrow deserializer in this nautilus_trader version
+            # (NotImplementedError); conflicting embedded schema metadata across flush batches
+            # (e.g. ETH mark_price_update "price_precision" 6 vs 5) raises RuntimeError. Both
+            # leave this data type out of the result -- recorded, never silent (DATA-07).
+            error_ledger.record("catalog_stats.coverage", f"{instrument_id} {data_type} unreadable", exc)
             continue
         if not rows:
             continue
@@ -306,7 +306,8 @@ def price_series(
     # catalog.bars() is intentionally omitted — the collector never writes Bar objects.
     try:
         marks = catalog.query(MarkPriceUpdate, identifiers=[instrument_id], start=start_ns)
-    except (NotImplementedError, RuntimeError):
+    except (NotImplementedError, RuntimeError) as exc:
+        error_ledger.record("catalog_stats.mark_prices", f"{instrument_id} mark_price_update unreadable", exc)
         marks = []
     if marks:
         return sorted((m.ts_event, m.value.as_double()) for m in marks)

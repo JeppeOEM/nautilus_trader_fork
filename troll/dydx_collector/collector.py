@@ -83,6 +83,7 @@ from dydx_collector.open_interest import fetch_open_interest
 from dydx_collector.prune_catalog import prune_instrument
 from dydx_collector.second_snapshot import BOOK_DEPTH
 from dydx_collector.second_snapshot import DydxSecondSnapshot
+from ml_signals import error_ledger
 from nautilus_trader.core import nautilus_pyo3
 from nautilus_trader.model.book import OrderBook
 from nautilus_trader.model.data import BookOrder
@@ -160,7 +161,7 @@ def quarantine_corrupt_parquet(catalog_path: str) -> None:
             dest = quarantine_root / path.relative_to(root)
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(path), str(dest))
-            logger.warning(f"Quarantined corrupt parquet file: {path} -> {dest}")
+            error_ledger.record("collector.corrupt_parquet", f"corrupt parquet file quarantined: {path} -> {dest}")
 
 
 # Skip snapshot if book hasn't received OrderBookDeltas in this many nanoseconds.
@@ -592,7 +593,7 @@ class Collector:
         try:
             self._ingest_queue.put_nowait(data)
         except Exception:
-            logger.exception(f"Failed to enqueue {type(data).__name__}, dropping")
+            error_ledger.record("collector.enqueue", f"failed to enqueue {type(data).__name__}, DROPPED")
 
     async def _ingest_loop(self) -> None:
         """
@@ -616,7 +617,7 @@ class Collector:
             try:
                 self._process_data(data)
             except Exception:
-                logger.exception(f"Failed to process {type(data).__name__}, dropping")
+                error_ledger.record("collector.process", f"failed to process {type(data).__name__}, DROPPED")
             processed += 1
             if processed % _INGEST_YIELD_EVERY == 0:
                 await asyncio.sleep(0)
@@ -729,7 +730,7 @@ class Collector:
             try:
                 await asyncio.to_thread(self._catalog.write_data, items)
             except Exception:
-                logger.exception(f"Failed to write {key}, dropping {len(items)} items")
+                error_ledger.record("collector.flush_write", f"failed to write {key}, {len(items)} items LOST")
 
     async def _flush_loop(self) -> None:
         while not self._stop.is_set():
@@ -762,7 +763,7 @@ class Collector:
                 for item in await fetch_open_interest(self._config.network):
                     self._on_data(item)
             except Exception:
-                logger.exception("Failed to poll open interest")
+                error_ledger.record("collector.open_interest_poll", "failed to poll open interest")
 
     async def _subscribe(self, iid: str) -> None:
         await self._client.subscribe_trades(iid)
@@ -851,7 +852,7 @@ class Collector:
                 )
                 await self._publish_status()
             except Exception:
-                logger.exception("Status loop failed")
+                error_ledger.record("collector.status_loop", "status loop failed")
             await asyncio.sleep(self._config.liquidity_check_seconds)
 
     async def _publish_status(self) -> None:
@@ -1004,7 +1005,7 @@ class Collector:
                             payload = json.loads(message["data"])
                             await self._handle_control_message(payload.get("action"), payload.get("id"))
                         except Exception:
-                            logger.exception("collector:control message failed: %r", message)
+                            error_ledger.record("collector.control", f"collector:control message failed: {message!r}")
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -1260,7 +1261,7 @@ class Collector:
                     rollup = self._minute_rollup.update(iid, snapshot)
                 except Exception:
                     # A rollup bug must not stop every other instrument's snapshots.
-                    logger.exception("Minute rollup failed for %s", iid)
+                    error_ledger.record("collector.minute_rollup", f"minute rollup failed for {iid}")
                     rollup = None
                 if rollup is not None:
                     self._on_data(rollup)

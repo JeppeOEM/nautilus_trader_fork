@@ -39,6 +39,7 @@ from data_api import settings
 from data_api.redis_bus import QUEUE_MAX
 from data_api.redis_bus import put_drop_oldest
 from dydx_collector.second_snapshot import DydxSecondSnapshot
+from ml_signals import error_ledger
 from ml_signals.candles import ROLLUP_THRESHOLD_SECONDS
 from ml_signals.candles import candle_dicts_from_snapshots
 from ml_signals.catalog_stats import query_second_ohlc
@@ -132,25 +133,25 @@ class LiveCandleBus:
         `DydxSecondSnapshot.to_dict()` results, per `collector._publish_snapshot_batch`).
         A malformed payload is logged and skipped, never raised."""
         if not isinstance(payload, list):
-            logger.warning("Malformed snapshots:raw payload (not a list), skipping: %r", payload)
+            error_ledger.record("live_candles.payload", f"snapshots:raw payload is not a list, SKIPPED: {payload!r}")
             return
         for entry in payload:
             self._handle_snapshot_entry(entry)
 
     def _handle_snapshot_entry(self, entry: object) -> None:
         if not isinstance(entry, dict):
-            logger.warning("Malformed snapshots:raw entry (not a dict), skipping: %r", entry)
+            error_ledger.record("live_candles.entry", f"snapshots:raw entry is not a dict, SKIPPED: {entry!r}")
             return
         try:
             snapshot = DydxSecondSnapshot.from_dict(entry)
         except Exception as exc:
-            logger.warning("snapshots:raw entry failed to decode, skipping: %s", exc)
+            error_ledger.record("live_candles.decode", "snapshots:raw entry failed to decode, SKIPPED", exc)
             return
         for observer in self.observers:
             try:
                 observer(snapshot)
             except Exception:
-                logger.exception("snapshot observer failed, skipping")
+                error_ledger.record("live_candles.observer", "snapshot observer failed")
         instrument_id = snapshot.instrument_id.value
         watched_bar_seconds = [bs for (iid, bs) in self._listeners if iid == instrument_id]
         for bar_seconds in watched_bar_seconds:
@@ -206,7 +207,7 @@ class LiveCandleBus:
                         try:
                             payload = json.loads(message["data"])
                         except Exception as exc:
-                            logger.warning("snapshots:raw message parse error: %s", exc)
+                            error_ledger.record("live_candles.parse", "snapshots:raw message is not JSON, SKIPPED", exc)
                             continue
                         self.handle_batch(payload)
             except asyncio.CancelledError:

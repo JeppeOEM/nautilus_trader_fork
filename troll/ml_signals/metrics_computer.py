@@ -27,6 +27,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
+from ml_signals import error_ledger
 from ml_signals.catalog_stats import list_instruments
 from ml_signals.catalog_stats import price_stats
 
@@ -91,7 +92,7 @@ def compute_all(
         try:
             return compute_snapshot(ParquetDataCatalog(catalog_path), iid, now_ns, book_metrics_fn)
         except Exception:
-            logger.warning("Snapshot failed for %s", iid, exc_info=True)
+            error_ledger.record("metrics_computer.snapshot", f"snapshot failed for {iid}")
             return None
 
     with ThreadPoolExecutor(max_workers=max_workers) as ex:

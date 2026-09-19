@@ -338,6 +338,25 @@
         }
       }
     },
+    "/api/errors": {
+      "get": {
+        "summary": "Errors",
+        "description": "Every failure this process carried on past (`ml_signals.error_ledger`). Empty means none\nsince start; the frontend's error bar polls this so a malfunction cannot go unseen.",
+        "operationId": "errors_api_errors_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorsResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/alerts": {
       "get": {
         "summary": "List Alerts",
@@ -1300,6 +1319,30 @@
         ],
         "title": "CandlesResponse"
       },
+      "ErrorsResponse": {
+        "properties": {
+          "counts": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "Counts"
+          },
+          "last": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Last"
+          }
+        },
+        "type": "object",
+        "required": [
+          "counts",
+          "last"
+        ],
+        "title": "ErrorsResponse"
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -1842,6 +1885,14 @@
             },
             "type": "object",
             "title": "Values"
+          },
+          "errors": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object",
+            "title": "Errors",
+            "default": {}
           }
         },
         "type": "object",

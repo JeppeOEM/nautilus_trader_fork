@@ -188,10 +188,11 @@ def test_one_coins_catalog_failure_does_not_blank_the_others(
     monkeypatch.setattr(rankings_routes, "_latest_values", flaky)
     entries = json.dumps([{"name": "RelativeStrengthIndex", "params": {}}])
 
-    values = client.get("/api/rankings/technicals-values", params={"entries": entries}).json()["values"]
+    body = client.get("/api/rankings/technicals-values", params={"entries": entries}).json()
 
-    assert values["BAD-USD-PERP.DYDX"] == {}
-    assert values[_IID]  # the healthy coin still has its value
+    assert "BAD-USD-PERP.DYDX" not in body["values"]  # no fabricated empty row...
+    assert "corrupt partition" in body["errors"]["BAD-USD-PERP.DYDX"]  # ...the failure is reported
+    assert body["values"][_IID]  # the healthy coin still has its value
 
 
 def test_values_are_served_from_the_ttl_cache_on_a_repeat_poll(
@@ -234,7 +235,7 @@ def test_a_valueerror_from_one_coins_catalog_read_does_not_become_a_whole_reques
     response = client.get("/api/rankings/technicals-values", params={"entries": entries})
 
     assert response.status_code == 200
-    assert response.json()["values"]["BAD-USD-PERP.DYDX"] == {}
+    assert "BAD-USD-PERP.DYDX" in response.json()["errors"]  # reported, not shown as "no data"
     assert response.json()["values"][_IID]
 
 
