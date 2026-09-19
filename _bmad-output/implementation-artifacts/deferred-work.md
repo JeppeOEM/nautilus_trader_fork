@@ -354,3 +354,11 @@
 - source_spec: `_bmad-output/implementation-artifacts/17-2-unpark-and-complete-story-15-8-31-day-metrics-history.md`
   summary: `HistoryPage.tsx`'s `toMetricDatum` treats only `null`/`undefined` as a gap; a `NaN`/`Infinity` metric value (were one ever to reach the route from an upstream computation bug) would be passed to `lightweight-charts` as real plotted data rather than being treated as a gap.
   evidence: `toMetricDatum(tsNs, value)`'s `value == null ? { time } : { time, value }` check has no `Number.isFinite` guard. No evidence this actually occurs -- `metrics_store` columns are written from `ranking_engine`'s own float computations, which are not known to ever emit `NaN`/`Infinity` -- so this is a defensive hardening gap, not an observed bug. Surfaced by Edge Case Hunter review of this story's diff.
+
+## Deferred from: code review of epic 17 (2026-09-19)
+
+- screener_columns.toml is written non-atomically (docker single-file bind mount cannot be renamed over); a concurrent GET can see a truncated file.
+- PUT technicals-columns validates param type only, not values (e.g. period 0); the bad config makes GET technicals-values 400 until fixed in the picker.
+- technicals-values cache is single-key with no single-flight; 60s client poll > 30s TTL means little hit-rate.
+- `=` filter operator on float values is strict equality; tech filters hide all rows while values are loading/errored on the Performance tab.
+- 16.x minute_rollup partial_start does not cover gap-created partial minutes (outside epic 17).

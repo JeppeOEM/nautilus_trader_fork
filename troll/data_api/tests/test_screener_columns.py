@@ -252,3 +252,14 @@ def test_cache_key_ignores_rank_order(tmp_path: Path, monkeypatch: pytest.Monkey
     client.get("/api/rankings/technicals-values", params={"entries": entries})
 
     assert len(calls) == 2  # only the first request hit the catalog
+
+
+def test_put_rejects_non_object_params_and_too_many_columns(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _client(tmp_path, monkeypatch)
+    bad = client.put(
+        "/api/rankings/technicals-columns",
+        json=[{"name": "AverageTrueRange", "params": "x", "category": "native"}],
+    )
+    assert bad.status_code == 400
+    many = [{"name": "AverageTrueRange", "params": {}, "category": "native"}] * 51
+    assert client.put("/api/rankings/technicals-columns", json=many).status_code == 400

@@ -231,13 +231,13 @@ development_status:
   # files exist yet, all default to backlog. Epic 20 (Alerts) is deliberately sequenced
   # last per the user's explicit deferral; its backlog status here doesn't imply readiness
   # to start before 17-19.
-  epic-17: in-progress
-  17-1-tab-shell-performance-technicals-tabs-on-the-rankings-page: review  # owed: visual browser check
+  epic-17: done
+  17-1-tab-shell-performance-technicals-tabs-on-the-rankings-page: done
   17-2-unpark-and-complete-story-15-8-31-day-metrics-history: done
-  17-3-performance-tab-multi-window-pct-change: review
-  17-4-wire-the-rankings-performance-history-link: review  # owed: visual browser check
-  17-5-technicals-tab-user-managed-indicator-columns: review  # owed: visual browser check
-  17-6-filter-panel: review  # owed: visual browser check
+  17-3-performance-tab-multi-window-pct-change: done
+  17-4-wire-the-rankings-performance-history-link: done
+  17-5-technicals-tab-user-managed-indicator-columns: done
+  17-6-filter-panel: done
   epic-17-retrospective: optional
 
   epic-18: in-progress

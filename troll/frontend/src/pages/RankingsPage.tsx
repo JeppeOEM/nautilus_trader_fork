@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 
 import { fetchRankings, fetchTechnicalsColumns, fetchTechnicalsValues, saveTechnicalsColumns } from "../api/client";
@@ -134,6 +134,7 @@ export default function RankingsPage() {
   // request for every ranked coin, not per-tick.
   const [technicalsEntries, setTechnicalsEntries] = useState<IndicatorConfigEntry[]>([]);
   const [reloadKey, setReloadKey] = useState(0);
+  const savedLocally = useRef(false); // a header save beat the mount fetch: its result is stale
   const [dragFrom, setDragFrom] = useState<number | null>(null);
   const technicalsActive = activeTab === "technicals" && technicalsEntries.length > 0;
   // Filters (Story 17.6) narrow the row set on either tab; a Technicals-field filter therefore
@@ -149,7 +150,9 @@ export default function RankingsPage() {
   });
   useEffect(() => {
     fetchTechnicalsColumns()
-      .then(setTechnicalsEntries)
+      .then((loaded) => {
+        if (!savedLocally.current) setTechnicalsEntries(loaded);
+      })
       .catch((err: unknown) => console.error("RankingsPage: failed to load Technicals columns", err));
   }, []);
   // Sticky once the builder has been opened: Technicals outputs only become selectable fields
@@ -190,6 +193,7 @@ export default function RankingsPage() {
   // instead of the pre-PUT list (which would silently undo it); the picker is re-synced from
   // disk afterwards, and on failure too, rolling the optimistic change back.
   function saveEntries(next: IndicatorConfigEntry[]): void {
+    savedLocally.current = true;
     setTechnicalsEntries(next);
     setTechnicalsError(null);
     setSaving(true);
