@@ -1,8 +1,6 @@
 import type { CandlestickData, Time, UTCTimestamp } from "lightweight-charts";
 import { useEffect, useState } from "react";
 
-import type { ChartDatum } from "./useCandles";
-
 // Reconnect-with-backoff constants -- deliberately duplicated from useLiveChannel.ts
 // rather than imported: this hook is a sibling implementation with its own dedicated
 // socket, not a shared/rewritten version of useLiveChannel (see spec-15-5's Design
@@ -33,9 +31,12 @@ function isLiveCandleMessage(value: unknown): value is LiveCandleMessage {
   return ["t", "o", "h", "l", "c"].every((k) => Number.isFinite(bar[k]));
 }
 
-function toChartDatum(bar: LiveCandleMessage["bar"]): CandlestickData<Time> {
+/** The forming bar plus its bucket volume (`bar.v`), so the volume pane can follow it too. */
+export type LiveBar = CandlestickData<Time> & { volume: number };
+
+function toChartDatum(bar: LiveCandleMessage["bar"]): LiveBar {
   const time = (bar.t / 1000) as UTCTimestamp; // wire is ms, lightweight-charts wants seconds
-  return { time, open: bar.o, high: bar.h, low: bar.l, close: bar.c };
+  return { time, open: bar.o, high: bar.h, low: bar.l, close: bar.c, volume: Number.isFinite(bar.v) ? bar.v : 0 };
 }
 
 /**
@@ -51,8 +52,8 @@ function toChartDatum(bar: LiveCandleMessage["bar"]): CandlestickData<Time> {
  * `instrumentId` case for free by unmounting this hook entirely; the explicit reset here
  * is what covers a `barSeconds` change on an otherwise-stable mount.
  */
-export function useLiveCandle(instrumentId: string, barSeconds: number): ChartDatum | null {
-  const [liveBar, setLiveBar] = useState<ChartDatum | null>(null);
+export function useLiveCandle(instrumentId: string, barSeconds: number): LiveBar | null {
+  const [liveBar, setLiveBar] = useState<LiveBar | null>(null);
 
   useEffect(() => {
     // Synchronous reset is the point (AC #4/#5): this effect is synchronizing with an

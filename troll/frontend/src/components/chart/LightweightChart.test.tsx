@@ -6,6 +6,7 @@ import type { CreatePriceLineOptions } from "lightweight-charts";
 import type { ChartMode, IndicatorPaneSpec, PriceLineSpec } from "./LightweightChart";
 
 const addSeriesMock = vi.fn();
+const seriesUpdateMock = vi.fn();
 const applyOptionsMock = vi.fn();
 const removeMock = vi.fn();
 const removeSeriesMock = vi.fn();
@@ -61,6 +62,7 @@ function makeSeriesMock(initialColor: string | undefined) {
   });
   return {
     setData: setDataMock,
+    update: seriesUpdateMock,
     applyOptions,
     options: vi.fn(() => ({ color })),
     createPriceLine: createPriceLineMock,
@@ -141,6 +143,7 @@ function chartElement(props: ChartTestProps) {
 beforeEach(() => {
   nextPaneIndex = 1;
   setDataMock.mockReset();
+  seriesUpdateMock.mockReset();
   addSeriesMock
     .mockReset()
     .mockImplementation((_definition: unknown, options?: { color?: string }) => makeSeriesMock(options?.color));
@@ -188,6 +191,24 @@ afterEach(() => {
 });
 
 describe("LightweightChart", () => {
+  it("paints the live bar as-is on the candle series and its volume on the volume pane (no client merge)", () => {
+    const historyBar = { time: 60 as never, open: 5, high: 50, low: 1, close: 6 };
+    const element = (liveBar: Parameters<typeof LightweightChart>[0]["liveBar"]) => (
+      <LightweightChart
+        data={[historyBar]}
+        onChartApi={() => {}}
+        panes={[makePaneSpec("volume", { kind: "Histogram" })]}
+        liveBar={liveBar}
+      />
+    );
+    const { rerender } = render(element(null));
+    // A tick arriving after mount (the volume pane is registered by then).
+    rerender(element({ time: 60 as never, open: 7, high: 8, low: 6, close: 7.5, volume: 42 }));
+
+    expect(seriesUpdateMock).toHaveBeenCalledWith({ time: 60, open: 7, high: 8, low: 6, close: 7.5 });
+    expect(seriesUpdateMock).toHaveBeenCalledWith({ time: 60, value: 42 });
+  });
+
   it("calls createChart exactly once per mount", () => {
     render(<LightweightChart data={[]} onChartApi={() => {}} />);
 

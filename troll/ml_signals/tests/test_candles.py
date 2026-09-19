@@ -15,6 +15,8 @@
 """Self-check: candle bucketing produces correct OHLC per time bucket."""
 
 from pathlib import Path
+
+import pytest
 from types import SimpleNamespace
 
 from ml_signals.candles import aggregate_ohlc
@@ -223,3 +225,102 @@ def _real_snap(ts: int):  # noqa: ANN202
         instrument_id=InstrumentId.from_str(IID), bid_prices=[1.0], bid_sizes=[1.0], ask_prices=[2.0],
         ask_sizes=[1.0], buy_volume=0.0, sell_volume=0.0, buy_count=0, sell_count=0, ts_event=ts, ts_init=ts,
     )
+
+
+def test_is_valid_candle_rejects_inverted_negative_and_nonfinite() -> None:
+    from ml_signals.candles import is_valid_candle
+
+    ok = {"o": 10.0, "h": 12.0, "l": 9.0, "c": 11.0, "v": 0.0}
+    assert is_valid_candle(ok)
+    assert not is_valid_candle({**ok, "h": 10.5})  # close above high
+    assert not is_valid_candle({**ok, "l": 10.5})  # open below... low above open
+    assert not is_valid_candle({**ok, "v": -1.0})
+    assert not is_valid_candle({**ok, "c": float("nan")})
+    assert not is_valid_candle({**ok, "h": float("inf")})
+    assert not is_valid_candle({"o": 1.0})  # missing keys
+
+
+def test_rollup_bucket_flagged_partial_when_underobserved() -> None:
+    full = rollup_dicts_from_rows([_rollup(m, 1.0, 1.0, 1.0, 1.0) for m in range(60)], 7200)
+    assert full[0]["partial"] is True  # 60 min of a 120 min bucket
+    (c,) = rollup_dicts_from_rows([_rollup(m, 1.0, 1.0, 1.0, 1.0) for m in range(120)], 7200)
+    assert c["partial"] is False
+    (g,) = rollup_dicts_from_rows([_rollup(0, 1.0, 1.0, 1.0, 1.0, secs=30), _rollup(1, 1.0, 1.0, 1.0, 1.0)], 120)
+    assert g["partial"] is True  # 90 of 120 s observed
+
+
+def test_raw_and_rollup_sources_agree_on_fully_covered_buckets() -> None:
+    """Same trades through raw 1s and through the real rollup builder -> identical OHLCV."""
+    from dydx_collector.minute_rollup import MinuteRollupBuilder
+    from dydx_collector.second_snapshot import DydxSecondSnapshot
+    from nautilus_trader.model.identifiers import InstrumentId
+
+    sec, minute = 1_000_000_000, 60_000_000_000
+    snaps = []
+    for i in range(3 * 60 + 1):  # minutes 0..2 fully observed, one tick opens minute 3
+        px = 100.0 + (i * 7 % 13)
+        snaps.append(DydxSecondSnapshot(
+            instrument_id=InstrumentId.from_str(IID), bid_prices=[px - 1], bid_sizes=[1.0],
+            ask_prices=[px + 1], ask_sizes=[1.0], buy_volume=0.25 * (i % 4), sell_volume=0.5,
+            buy_count=1, sell_count=1, open_price=px, high_price=px + 0.5, low_price=px - 0.5,
+            close_price=px + 0.25, ts_event=i * sec, ts_init=i * sec,
+        ))
+    builder = MinuteRollupBuilder()
+    rollups = [r for s in snaps if (r := builder.update(IID, s)) is not None]
+    assert len(rollups) == 3
+    raw = candle_dicts_from_snapshots(snaps[: 3 * 60], 180)
+    via_rollup = rollup_dicts_from_rows(rollups, 180)
+    assert len(raw) == len(via_rollup) == 1
+    for k in ("t", "o", "h", "l", "c"):
+        assert raw[0][k] == via_rollup[0][k]
+    assert raw[0]["v"] == pytest.approx(via_rollup[0]["v"])
+    assert via_rollup[0]["partial"] is False
+
+
+def _write_ohlc_snapshots(catalog_path: str, base: int, n: int):  # noqa: ANN202
+    from dydx_collector.second_snapshot import DydxSecondSnapshot
+    from nautilus_trader.model.identifiers import InstrumentId
+    from nautilus_trader.persistence.catalog import ParquetDataCatalog
+
+    snaps = [
+        DydxSecondSnapshot(
+            instrument_id=InstrumentId.from_str(IID), bid_prices=[99.0], bid_sizes=[1.0], ask_prices=[101.0],
+            ask_sizes=[1.0], buy_volume=0.5 * i, sell_volume=0.25, buy_count=1, sell_count=1,
+            open_price=100.0 + i, high_price=101.0 + i, low_price=99.5 + i, close_price=100.5 + i,
+            ts_event=base + i * 1_000_000_000, ts_init=base + i * 1_000_000_000,
+        )
+        for i in range(n)
+    ]
+    ParquetDataCatalog(catalog_path).write_data(snaps)
+    return snaps
+
+
+def test_query_second_ohlc_matches_catalog_decoder(tmp_path: Path) -> None:
+    """The column-projection read must return exactly what the catalog decoder does (Story 21.5)."""
+    from ml_signals.catalog_stats import query_second_ohlc
+    from ml_signals.catalog_stats import query_second_snapshots
+
+    base = 1_800_000_000_000_000_000
+    _write_ohlc_snapshots(str(tmp_path), base, 120)
+    lo, hi = base + 10_000_000_000, base + 90_000_000_000
+    old = candle_dicts_from_snapshots(query_second_snapshots(str(tmp_path), IID, lo, hi), 60)
+    new = candle_dicts_from_snapshots(query_second_ohlc(str(tmp_path), IID, lo, hi), 60)
+    assert new == old and len(new) == 2
+    assert all(r.ts_event >= lo and r.ts_event <= hi for r in query_second_ohlc(str(tmp_path), IID, lo, hi))
+
+
+def test_query_second_ohlc_tolerates_files_without_ohlc_columns(tmp_path: Path) -> None:
+    """Pre-OHLC files (no open/high/low/close columns) read as None instead of crashing."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from ml_signals.catalog_stats import query_second_ohlc
+
+    d = tmp_path / "data" / "custom_dydx_second_snapshot" / IID
+    d.mkdir(parents=True)
+    ts = 1_800_000_000_000_000_000
+    name = "2027-01-15T08-00-00-000000000Z_2027-01-15T08-00-01-000000000Z.parquet"
+    pq.write_table(pa.table({"ts_event": pa.array([ts], pa.uint64()), "buy_volume": [1.0]}), d / name)
+    (row,) = query_second_ohlc(str(tmp_path), IID, ts - 1, ts + 1)
+    assert (row.open_price, row.close_price, row.buy_volume, row.sell_volume) == (None, None, 1.0, 0.0)
+    assert candle_dicts_from_snapshots([row], 60) == []

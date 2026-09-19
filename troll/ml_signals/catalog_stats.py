@@ -18,10 +18,12 @@ import glob
 import os
 from datetime import datetime
 from datetime import timezone
+from typing import NamedTuple
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 
 from dydx_collector.minute_rollup import DydxMinuteRollup
 from dydx_collector.second_snapshot import DydxSecondSnapshot
@@ -67,6 +69,56 @@ def query_second_snapshots(
     # query() wraps custom Data subclasses in CustomData -- unwrap via .data to reach the
     # actual DydxSecondSnapshot (confirmed via direct introspection this session).
     return [r.data if hasattr(r, "data") else r for r in results]
+
+
+class SecondOHLC(NamedTuple):
+    """The per-second fields candle aggregation needs (duck-types `DydxSecondSnapshot` there)."""
+
+    ts_event: int
+    open_price: float | None
+    high_price: float | None
+    low_price: float | None
+    close_price: float | None
+    buy_volume: float
+    sell_volume: float
+
+
+_OHLC_COLUMNS = ["ts_event", "open_price", "high_price", "low_price", "close_price", "buy_volume", "sell_volume"]
+# Catalog filenames span ts_init, rows are filtered on ts_event; ts_init trails ts_event by well
+# under this, so files this close to the window are read and the exact ts_event filter decides.
+_FILE_MARGIN_NS = 60_000_000_000
+
+
+def query_second_ohlc(catalog_path: str, instrument_id: str, start_ns: int, end_ns: int) -> list[SecondOHLC]:
+    """
+    Per-second OHLC + volume rows in [start_ns, end_ns] (ts_event), read straight from the
+    catalog's Parquet files with only the seven columns candles need.
+
+    `query_second_snapshots` deserialises every row's 20-level book into Python objects through
+    the catalog decoder -- ~95% of a candle request's time (Story 21.5 profile) for fields
+    candles never look at. Same files, same rows, same values; just a column projection.
+    """
+    pattern = os.path.join(catalog_path, "data", "custom_dydx_second_snapshot", instrument_id, "*.parquet")
+    rows: list[SecondOHLC] = []
+    for path in glob.glob(pattern):
+        start, _, end = Path(path).stem.partition("_")
+        if _stamp_to_ns(end) < start_ns - _FILE_MARGIN_NS or _stamp_to_ns(start) > end_ns + _FILE_MARGIN_NS:
+            continue
+        # Files from before the OHLC fields existed lack those columns: they read as None (the
+        # candle path skips a second with no close), never as a crash.
+        names = pq.read_schema(path).names
+        present = [c for c in _OHLC_COLUMNS if c in names]
+        table = pq.read_table(
+            path, columns=present, filters=[("ts_event", ">=", start_ns), ("ts_event", "<=", end_ns)],
+        )
+        cols = {c: table.column(c).to_pylist() for c in present}
+        n = table.num_rows
+        rows.extend(
+            SecondOHLC(*(cols[c][i] if c in cols else (0.0 if c.endswith("volume") else None) for c in _OHLC_COLUMNS))
+            for i in range(n)
+        )
+    rows.sort(key=lambda r: r.ts_event)
+    return rows
 
 
 def _stamp_to_ns(stamp: str) -> int:

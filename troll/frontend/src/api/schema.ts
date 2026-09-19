@@ -32,6 +32,7 @@ export interface CandleItem {
   l?: number | null;
   c?: number | null;
   v?: number | null;
+  partial?: boolean | null;
 }
 
 export interface CandlesResponse {

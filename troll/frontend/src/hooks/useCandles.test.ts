@@ -61,6 +61,28 @@ describe("useCandles", () => {
     expect(result.current.loadFailed).toBe(false);
   });
 
+  it("renders a malformed candle as a gap, never as a shape", async () => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    fetchCandlesMock.mockResolvedValue(
+      page(
+        [
+          { t: 60_000, o: 1, h: 2, l: 0.5, c: 1.5, v: 3 },
+          { t: 120_000, o: 1, h: 0.5, l: 2, c: 1.5, v: 3 }, // inverted: high below low
+          { t: 180_000, o: 1, h: 2, l: 0.5, c: 1.5, v: -1 }, // negative volume
+        ],
+        false,
+      ),
+    );
+    const { result } = renderHook(() => useCandles("BTC-USD-PERP.DYDX", null));
+    await waitFor(() => expect(result.current.candles).toHaveLength(3));
+    expect(result.current.candles[0]).toHaveProperty("open", 1);
+    expect(result.current.candles[1]).toEqual({ time: 120 });
+    expect(result.current.candles[2]).toEqual({ time: 180 });
+    expect(result.current.volume[1]).toEqual({ time: 120 });
+    expect(result.current.volume[2]).toEqual({ time: 180 });
+    errSpy.mockRestore();
+  });
+
   it("fetches the initial 120-bar/60s page on mount", async () => {
     fetchCandlesMock.mockResolvedValue(page([{ t: 60_000, o: 1, h: 2, l: 0.5, c: 1.5 }], true));
 

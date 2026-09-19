@@ -1255,6 +1255,17 @@
               }
             ],
             "title": "V"
+          },
+          "partial": {
+            "anyOf": [
+              {
+                "type": "boolean"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Partial"
           }
         },
         "type": "object",

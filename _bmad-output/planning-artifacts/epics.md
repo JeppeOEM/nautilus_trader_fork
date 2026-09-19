@@ -2196,3 +2196,12 @@ So that I can review or delete them.
 **When** the Alerts list view is opened
 **Then** each alert shows its condition, status (active/triggered/expired), and a delete button — a simple list, not a full manager UI
 
+
+
+## Epic 21: Chart Data Correctness and Speed
+
+Builder can trust every candle and volume bar on the chart end-to-end (collector → catalog → rollup → `data_api` → frontend) and the chart loads fast. Driven by the 2026-09-19 fake-spike/odd-candle incident and `troll/docs/DATA_INTEGRITY_AUDIT.md`.
+
+### Stories 21.1–21.5
+
+21.1 Ingest and rollup correctness · 21.2 Candle invariants and source equivalence · 21.3 Live candle seeding and volume · 21.4 Vite proxy connection resets · 21.5 Chart load speed. Each has a story file in `_bmad-output/implementation-artifacts/21-*.md`.

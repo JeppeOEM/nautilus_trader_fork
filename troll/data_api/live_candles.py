@@ -31,13 +31,17 @@ import asyncio
 import json
 import logging
 from typing import Callable
+import time
 
 import redis.asyncio as aioredis
 
+from data_api import settings
 from data_api.redis_bus import QUEUE_MAX
 from data_api.redis_bus import put_drop_oldest
 from dydx_collector.second_snapshot import DydxSecondSnapshot
+from ml_signals.candles import ROLLUP_THRESHOLD_SECONDS
 from ml_signals.candles import candle_dicts_from_snapshots
+from ml_signals.catalog_stats import query_second_ohlc
 
 
 logger = logging.getLogger(__name__)
@@ -64,6 +68,7 @@ class LiveCandleBus:
         # Called with every decoded snapshot (e.g. the alert engine) so a second consumer
         # never needs its own `snapshots:raw` subscription.
         self.observers: list[Callable[[DydxSecondSnapshot], None]] = []
+        self._seeded: set[_BufferKey] = set()
 
     def subscribe(self, instrument_id: str, bar_seconds: int) -> "asyncio.Queue[dict]":
         """Register a new per-listener queue for `(instrument_id, bar_seconds)`,
@@ -87,6 +92,40 @@ class LiveCandleBus:
         if not listeners:
             del self._listeners[key]
             self._buffers.pop(key, None)
+            self._seeded.discard(key)
+
+    async def seed(self, instrument_id: str, bar_seconds: int) -> None:
+        """
+        Fill the current bucket's buffer with the snapshots that pre-date this subscription.
+
+        Without it the forming bar only covers ticks seen since subscribe, so its open/high/low/
+        volume miss the start of the bucket (D-18). Runs once per pair; the catalog read is one
+        bucket, off the event loop. Seconds between the catalog's last flush and the first live tick
+        are in neither source, so the bar can still understate a few seconds (D-18 residual). Buckets wider than the raw-1s threshold are not seeded
+        (ponytail: ranges that wide would need the minute rollup; live bar there stays partial).
+        """
+        key = (instrument_id, bar_seconds)
+        if key in self._seeded or key not in self._listeners or bar_seconds > ROLLUP_THRESHOLD_SECONDS:
+            return
+        self._seeded.add(key)
+        bucket_ns = bar_seconds * 1_000_000_000
+        now_ns = time.time_ns()
+        start_ns = now_ns // bucket_ns * bucket_ns
+        try:
+            rows = await asyncio.to_thread(query_second_ohlc, settings.CATALOG_PATH, instrument_id, start_ns, now_ns)
+        except Exception:
+            self._seeded.discard(key)  # a failed read must not leave this pair permanently unseeded
+            raise
+        if key not in self._listeners:
+            return  # everyone left while the read ran
+        buffer = self._buffers.setdefault(key, [])
+        # Live ticks own their bucket: if one rolled over while the read ran, only rows of that
+        # same bucket may be prepended, never the previous bucket's.
+        target = (buffer[0].ts_event if buffer else start_ns) // bucket_ns
+        older = [r for r in rows if r.ts_event // bucket_ns == target and (not buffer or r.ts_event < buffer[0].ts_event)]
+        self._buffers[key] = older + buffer
+        if self._buffers[key]:
+            self._publish(key, instrument_id, bar_seconds, self._buffers[key])
 
     def handle_batch(self, payload: object) -> None:
         """Decode and apply one `snapshots:raw` batch (a JSON list of

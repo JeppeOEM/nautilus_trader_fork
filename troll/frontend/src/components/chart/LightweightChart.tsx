@@ -15,6 +15,7 @@ import {
 import { useEffect, useRef } from "react";
 
 import type { ChartDatum } from "../../hooks/useCandles";
+import type { LiveBar } from "../../hooks/useLiveCandle";
 import type { IndicatorDatum } from "../../hooks/useIndicatorSeries";
 import type { SnapshotLinesData } from "../../hooks/useSnapshotSeries";
 import { type LegendSeries, renderLegends } from "./legend";
@@ -119,7 +120,7 @@ interface LightweightChartProps {
    * those is touched by this prop. `null`/`undefined` means "no live bar yet" (e.g.
    * before the live socket's first message, or synchronously reset on instrument/bar-size
    * change) and is a no-op, not a clear of the last-drawn bar. */
-  liveBar?: ChartDatum | null;
+  liveBar?: LiveBar | null;
 }
 
 type AnySeriesApi = ISeriesApi<"Line", Time> | ISeriesApi<"Histogram", Time>;
@@ -223,8 +224,6 @@ export default function LightweightChart({
   const dragIdRef = useRef<string | null>(null);
   const suppressNextClickRef = useRef(false);
   const lastLiveBarTimeRef = useRef<number | null>(null);
-  const dataRef = useRef(data);
-  dataRef.current = data;
 
   useEffect(() => {
     const container = containerRef.current;
@@ -435,26 +434,18 @@ export default function LightweightChart({
     const time = liveBar.time as unknown as number;
     if (lastLiveBarTimeRef.current !== null && time < lastLiveBarTimeRef.current) return;
     lastLiveBarTimeRef.current = time;
-    // The server's forming bar only covers snapshots seen since it started watching, so
-    // its open/high/low can miss the start of the bucket: merge with the history candle
-    // for the same bucket (open from history, extremes across both, close from live).
-    const hist = dataRef.current.find((d) => (d.time as unknown as number) === time);
-    if (hist && "open" in liveBar && "open" in hist) {
-      series.update({
-        time: liveBar.time,
-        open: hist.open,
-        high: Math.max(hist.high, liveBar.high),
-        low: Math.min(hist.low, liveBar.low),
-        close: liveBar.close,
-      });
-    } else {
-      series.update(liveBar);
-    }
+    // The server seeds its forming bar with the whole bucket (LiveCandleBus.seed), so it is
+    // painted as-is -- no client-side merge with history (one aggregation path, AD-F7).
+    const { volume, ...candle } = liveBar;
+    series.update(candle);
+    // Volume pane follows the forming bar; its series only exists once the panes effect has
+    // added it, and is absent in Lines mode's registry-less state -- both are no-ops.
+    panesRef.current.get("volume")?.series.update({ time: liveBar.time, value: volume });
     // `mode` is a dependency too: switching Lines -> Candles recreates seriesRef (the
     // `[mode]` effect above) with no data yet, so this must re-fire to paint the already-
     // held `liveBar` onto the fresh series -- otherwise the forming bar stays blank until
     // the next websocket tick.
-  }, [liveBar, mode]);
+  }, [liveBar, mode, panes]); // `panes`: repaint the forming volume when its pane is (re)created
 
   useEffect(() => {
     const chart = chartRef.current;

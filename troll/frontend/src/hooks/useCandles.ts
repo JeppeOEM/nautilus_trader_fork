@@ -29,11 +29,26 @@ const RETRY_MAX_MS = 10_000;
 export type ChartDatum = CandlestickData<Time> | WhitespaceData<Time>;
 export type VolumeDatum = HistogramData<Time> | WhitespaceData<Time>;
 
+// Last line of defence behind the backend's `is_valid_candle`: a malformed candle is drawn as
+// a gap (and logged), never as a strangely-shaped bar. Exported for tests.
+export function isValidOhlc(o: number, h: number, l: number, c: number, v: number | null | undefined): boolean {
+  return (
+    [o, h, l, c].every(Number.isFinite) &&
+    l <= Math.min(o, c) &&
+    Math.max(o, c) <= h &&
+    (v == null || (Number.isFinite(v) && v >= 0))
+  );
+}
+
 function toChartDatum(item: CandleItem): ChartDatum {
   const time = (item.t / 1000) as UTCTimestamp; // wire is ms, lightweight-charts wants seconds
   if (item.o == null || item.h == null || item.l == null || item.c == null) {
     // Gap marker (AC #5/AD-F6): all four OHLC fields are null together, never a mix --
     // passed straight through as native whitespace data, never filtered or reshaped.
+    return { time };
+  }
+  if (!isValidOhlc(item.o, item.h, item.l, item.c, item.v)) {
+    console.error("useCandles: dropping malformed candle, rendering as a gap", item);
     return { time };
   }
   return { time, open: item.o, high: item.h, low: item.l, close: item.c };
@@ -45,7 +60,10 @@ function toChartDatum(item: CandleItem): ChartDatum {
 // OHLC fields above.
 function toVolumeDatum(item: CandleItem): VolumeDatum {
   const time = (item.t / 1000) as UTCTimestamp;
-  return item.v == null ? { time } : { time, value: item.v };
+  const malformed =
+    item.o != null && item.h != null && item.l != null && item.c != null &&
+    !isValidOhlc(item.o, item.h, item.l, item.c, item.v);
+  return item.v == null || malformed ? { time } : { time, value: item.v };
 }
 
 interface CandlesState {

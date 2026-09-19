@@ -262,11 +262,19 @@ development_status:
   19-6-cex-dex-registry: done
   epic-19-retrospective: optional
 
-  epic-20: in-progress
-  20-1-alert-creation-dialog: ready-for-dev
-  20-2-local-alert-evaluation-engine: ready-for-dev
-  20-3-alerts-list-view: ready-for-dev
+  epic-20: done
+  20-1-alert-creation-dialog: done
+  20-2-local-alert-evaluation-engine: done
+  20-3-alerts-list-view: done
   epic-20-retrospective: optional
+
+  epic-21: in-progress
+  21-1-ingest-and-rollup-correctness: done
+  21-2-candle-invariants-and-source-equivalence: done
+  21-3-live-candle-seeding-and-volume: done
+  21-4-vite-proxy-connection-resets: done
+  21-5-chart-load-speed: done
+  epic-21-retrospective: optional
 
 action_items:
   - epic: 1

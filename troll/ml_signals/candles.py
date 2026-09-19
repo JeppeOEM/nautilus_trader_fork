@@ -15,6 +15,7 @@
 """Bucket trade prices into OHLC candles at an arbitrary timeframe."""
 
 import logging
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -141,6 +142,21 @@ def candle_dicts_from_snapshots(snapshots: list, period_seconds: int) -> list[di
     ]
 
 
+def is_valid_candle(c: dict) -> bool:
+    """
+    Hard shape invariants for a served candle: all finite, l <= min(o,c) <= max(o,c) <= h, v >= 0.
+
+    A violator is a data bug (DATA-02), never something to clamp or repair -- callers drop it.
+    """
+    try:
+        o, h, low, cl, v = (float(c[k]) for k in ("o", "h", "l", "c", "v"))
+    except (KeyError, TypeError, ValueError):
+        return False
+    if not all(map(math.isfinite, (o, h, low, cl, v))):
+        return False
+    return v >= 0 and low <= min(o, cl) and max(o, cl) <= h
+
+
 def choose_candle_source(bar_seconds: int) -> str:
     return "rollup_1m" if bar_seconds > ROLLUP_THRESHOLD_SECONDS else "raw_1s"
 
@@ -150,12 +166,18 @@ def _weighted_mean(rows: list, attr: str) -> float:
     return sum(getattr(r, attr) * r.seconds_observed for r in rows) / total if total else 0.0
 
 
+# A bucket observed for less than this fraction of its span is flagged `partial` (D-15):
+# collector downtime/gaps leave its high/low/volume understated, which raw 1s cannot repair.
+PARTIAL_OBSERVED_FRACTION = 0.9
+
+
 def _rollup_bucket_dict(bucket_key: int, members: list, period_ns: int) -> dict | None:
     """One candle dict from a bucket's rollups; None if no member traded (matches raw path)."""
     traded = [r for r in members if r.open is not None]
     if not traded:
         return None
     last = members[-1]
+    seconds_observed = sum(r.seconds_observed for r in members)
     book = {
         "bid_prices": [last.close_bid_price],
         "bid_sizes": [last.close_bid_size],
@@ -169,7 +191,8 @@ def _rollup_bucket_dict(bucket_key: int, members: list, period_ns: int) -> dict 
         "l": min(r.low for r in traded),
         "c": traded[-1].close,
         "v": sum(r.buy_volume + r.sell_volume for r in members),
-        "seconds_observed": sum(r.seconds_observed for r in members),
+        "seconds_observed": seconds_observed,
+        "partial": seconds_observed < PARTIAL_OBSERVED_FRACTION * period_ns / 1_000_000_000,
         "ofi_5": sum(r.ofi_5 for r in members),
         "ofi_10": sum(r.ofi_10 for r in members),
         "obi_5": _weighted_mean(members, "obi_5"),

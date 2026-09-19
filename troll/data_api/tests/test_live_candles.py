@@ -16,6 +16,12 @@
 (the class's buffer/listener logic is exercised directly via `handle_batch`, mirroring
 how `test_rankings.py` unit-tests `RankingsBus.handle_message` in isolation)."""
 
+import time
+from pathlib import Path
+
+import pytest
+
+from data_api import settings
 from data_api.live_candles import LiveCandleBus
 from dydx_collector.second_snapshot import DydxSecondSnapshot
 from ml_signals.candles import candle_dicts_from_snapshots
@@ -171,3 +177,73 @@ def test_incremental_buffer_converges_to_batch_aggregation_final_bar() -> None:
     assert len(expected) == 1  # all 10 one-second snapshots land in the same 60s bucket
     assert last_message is not None
     assert last_message["bar"] == expected[-1]
+
+
+@pytest.mark.asyncio
+async def test_seed_fills_bucket_start_so_forming_bar_covers_whole_bucket(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nautilus_trader.persistence.catalog import ParquetDataCatalog
+
+    bucket_ns = _BAR_SECONDS * 1_000_000_000
+    now_ns = time.time_ns()
+    start_ns = now_ns // bucket_ns * bucket_ns
+    # Two snapshots already in the catalog for this bucket, before we "subscribe".
+    early = [_snapshot(start_ns, 100.0), _snapshot(start_ns + 1, 90.0)]
+    ParquetDataCatalog(str(tmp_path)).write_data(early)
+    monkeypatch.setattr(settings, "CATALOG_PATH", str(tmp_path))
+
+    bus = LiveCandleBus()
+    queue = bus.subscribe(_IID, _BAR_SECONDS)
+    await bus.seed(_IID, _BAR_SECONDS)
+    bar = queue.get_nowait()["bar"]
+    assert (bar["o"], bar["l"], bar["h"]) == (100.0, 90.0, 100.0)
+    assert bar["v"] == 3.0  # 2 snapshots x (1.0 + 0.5)
+
+    # A later live tick extends the seeded bucket instead of restarting it.
+    bus.handle_batch([DydxSecondSnapshot.to_dict(_snapshot(now_ns + 10, 110.0))])
+    bar = queue.get_nowait()["bar"]
+    assert (bar["o"], bar["l"], bar["h"], bar["c"], bar["v"]) == (100.0, 90.0, 110.0, 110.0, 4.5)
+
+
+@pytest.mark.asyncio
+async def test_seed_runs_once_and_skips_wide_bars(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "CATALOG_PATH", str(tmp_path))
+    bus = LiveCandleBus()
+    bus.subscribe(_IID, 7200)
+    await bus.seed(_IID, 7200)
+    assert (_IID, 7200) not in bus._seeded
+
+
+@pytest.mark.asyncio
+async def test_seed_never_prepends_previous_bucket_after_rollover(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from nautilus_trader.persistence.catalog import ParquetDataCatalog
+
+    bucket_ns = _BAR_SECONDS * 1_000_000_000
+    start_ns = time.time_ns() // bucket_ns * bucket_ns
+    ParquetDataCatalog(str(tmp_path)).write_data([_snapshot(start_ns, 100.0)])
+    monkeypatch.setattr(settings, "CATALOG_PATH", str(tmp_path))
+    bus = LiveCandleBus()
+    queue = bus.subscribe(_IID, _BAR_SECONDS)
+    # A tick from the NEXT bucket lands before the seed read finishes.
+    bus._buffers[(_IID, _BAR_SECONDS)] = [_snapshot(start_ns + bucket_ns, 500.0)]
+    await bus.seed(_IID, _BAR_SECONDS)
+    bar = queue.get_nowait()["bar"]
+    assert (bar["o"], bar["h"], bar["l"]) == (500.0, 500.0, 500.0)
+
+
+@pytest.mark.asyncio
+async def test_seed_failure_allows_a_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    import data_api.live_candles as lc
+
+    def boom(*_a, **_k):  # noqa: ANN002, ANN003, ANN202
+        raise OSError("catalog unreadable")
+
+    monkeypatch.setattr(lc, "query_second_ohlc", boom)
+    bus = LiveCandleBus()
+    bus.subscribe(_IID, _BAR_SECONDS)
+    with pytest.raises(OSError):
+        await bus.seed(_IID, _BAR_SECONDS)
+    assert (_IID, _BAR_SECONDS) not in bus._seeded

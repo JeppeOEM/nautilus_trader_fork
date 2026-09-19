@@ -272,3 +272,23 @@ def test_venue_field_and_malformed_id_400(tmp_path: Path, monkeypatch: pytest.Mo
     ok = client.get(f"/api/candles/{_IID}?before_ns={_BASE_NS}&limit=3&bar_seconds=60")
     assert ok.json()["venue"] == "DYDX"
     assert client.get(f"/api/candles/BTC?before_ns={_BASE_NS}").status_code == 400
+
+
+def test_invalid_candle_is_dropped_not_served(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    catalog_path = str(tmp_path / "catalog")
+    _write_snapshots(catalog_path, [(_BASE_NS - i * 60_000_000_000, 100.0 + i) for i in range(3)])
+    real = candles_routes.candle_dicts_for_window
+
+    def corrupt(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        out = real(*args, **kwargs)
+        out[0] = {**out[0], "h": out[0]["l"] - 1.0}  # high below low
+        return out
+
+    monkeypatch.setattr(candles_routes, "candle_dicts_for_window", corrupt)
+    before = candles_routes.invalid_candles_dropped
+    resp = _client(catalog_path, monkeypatch).get(
+        f"/api/candles/{_IID}?before_ns={_BASE_NS + 60_000_000_000}&limit=10&bar_seconds=60",
+    )
+    assert resp.status_code == 200
+    assert candles_routes.invalid_candles_dropped == before + 1
+    assert all(i["h"] >= i["l"] for i in resp.json()["items"] if i["h"] is not None)

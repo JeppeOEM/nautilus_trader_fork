@@ -87,7 +87,7 @@ describe("useLiveCandle", () => {
 
     act(() => latestSocket().receive(candleMessage()));
 
-    expect(result.current).toEqual({ time: 60, open: 1, high: 2, low: 0.5, close: 1.5 });
+    expect(result.current).toEqual({ time: 60, open: 1, high: 2, low: 0.5, close: 1.5, volume: 10 });
   });
 
   it("ignores a message for a channel it did not subscribe to", () => {
@@ -106,7 +106,7 @@ describe("useLiveCandle", () => {
 
     act(() => latestSocket().onmessage?.({ data: "not json" }));
 
-    expect(result.current).toEqual({ time: 60, open: 1, high: 2, low: 0.5, close: 1.5 });
+    expect(result.current).toEqual({ time: 60, open: 1, high: 2, low: 0.5, close: 1.5, volume: 10 });
   });
 
   it(

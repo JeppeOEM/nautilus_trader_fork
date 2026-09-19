@@ -59,7 +59,7 @@ Status: **FIXED** (code + test), **GUARDED** (canary/detection, cause outside ou
 | ID | Danger | Treatment | Status |
 |----|--------|-----------|--------|
 | D-14 | Restart loses the minute in progress; first minute of a mid-minute start is not emitted | Idempotent `backfill_minute_rollup` (DATA-05) | DOCUMENTED |
-| D-15 | Rollup `partial_start` does not cover gap-created partial minutes | Epic-17 review ledger. With restarts every ~20 min this is hit often, so wide candles can be understated at gaps | OPEN |
+| D-15 | Rollup `partial_start` does not cover gap-created partial minutes | Epic-17 review ledger. With restarts every ~20 min this is hit often, so wide candles can be understated at gaps | MITIGATED (Story 21.1/21.2): rollup-sourced candles carry `partial: true` when observed < 90% of their span (`ml_signals.candles.PARTIAL_OBSERVED_FRACTION`). Not a fix: the missing seconds stay missing; the flag is on the wire only, the frontend does not draw it differently (ANSI 16-colour palette) |
 | D-16 | A rollup inherits any bad raw row | `repair_catalog` regenerates affected minutes | FIXED once D-03 is run |
 | D-17 | Non-atomic `screener_columns.toml` write; technicals params unvalidated | Epic-17 ledger | OPEN (low; not market data) |
 
@@ -67,12 +67,19 @@ Status: **FIXED** (code + test), **GUARDED** (canary/detection, cause outside ou
 
 | ID | Danger | Treatment | Status |
 |----|--------|-----------|--------|
-| D-18 | Live forming bar overwrote the history bar with a partial open/high/low (bucket start unseen by `LiveCandleBus`) → jumping candles | Frontend merges live bar with the history bar for the same bucket (open from history, extremes across both, close from live) | FIXED (undeployed) |
+| D-18 | Live forming bar overwrote the history bar with a partial open/high/low/**volume** (bucket start unseen by `LiveCandleBus`) → jumping candles | Story 21.3: `LiveCandleBus.seed()` fills the current bucket from the catalog on subscribe (buckets ≤ 1 h; wider stay partial), the client-side merge is deleted, and live volume now drives the volume pane | FIXED in code + tests (undeployed) |
 | D-19 | Chart shows only trade-seconds; thin coins show sparse candles | By design (no fabricated values, DATA-01); gaps drawn as whitespace | DOCUMENTED |
 | D-20 | `has_more=False` on an empty page truncates scroll-back on sparse coins | An in-progress, uncommitted rewrite of `routes/candles.py` (file-range paging) is addressing this; not verified by me | OPEN pending that work |
-| D-21 | Chart load latency (7–9 s at 1m, >45 s at 15m on the VPS) | Contributors: host oversubscribed (D-06), a second full catalog scan per page for `has_more`, per-request `ParquetDataCatalog`. Paging rewrite in progress | OPEN — not measured on the VPS in this pass |
+| D-21 | Chart load latency (7–9 s at 1m, >45 s at 15m on the VPS) | **Local measurement (960 MB catalog, BTC, `scripts/bench_candles.py`): 1m 1.14 s → 0.40 s, 15m 1.78 s → 0.66 s, 1h 1.63 s → 0.64 s, 4h 5.9 s → 3.0 s.** Cause: 95% of a request was the catalog decoder deserialising 20-level books nobody reads; candles now read 7 columns straight from the Parquet files (`query_second_ohlc`). VPS not measured — OPEN until measured there. Remaining: 4h+ falls back to raw 1s before the first rollup; original contributors: | Contributors: host oversubscribed (D-06), a second full catalog scan per page for `has_more`, per-request `ParquetDataCatalog`. Paging rewrite in progress | OPEN — not measured on the VPS in this pass |
 | D-22 | Live-candle path: out-of-order/duplicate snapshots, unbounded queues, unbounded subscriptions, non-numeric bar guard | Epic-15.5 review ledger | OPEN (low) |
 | D-23 | `NaN`/`Infinity` metric reaches the History chart | Epic-17.2 ledger | OPEN (defensive; not observed) |
+
+### Found during Story 21.5 (new)
+
+| ID | Danger | Evidence / treatment | Status |
+|----|--------|----------------------|--------|
+| D-24 | `ParquetDataCatalog.query()` over a wide window (30 d, spanning files written before the OHLC columns existed) returned `open/high/low/close = None` for 266 of 115 190 BTC seconds that **do** hold OHLC in their Parquet files. The same rows queried in a 1 s / 60 s / 1 h window decode correctly. Wide candles therefore silently lost real trade seconds | Verified by reading the file directly and by narrow-window queries. Root cause inside the nautilus decode/schema-unification path not identified. Candle reads no longer use that path (`query_second_ohlc`, proven equal to the narrow-window decoder in `test_query_second_ohlc_matches_catalog_decoder`). **Other consumers of `query_second_snapshots` over wide windows (indicators, snapshots routes, `repair_catalog`) may still be affected** | OPEN for other consumers |
+| D-25 | Because D-24 hid some rows, the new candle read also shows some historical spike seconds (D-01) that the old path hid by accident. They are the same rows `repair_catalog` targets | Run `repair_catalog` (D-03) | OPEN until D-03 is run |
 
 ## 3. Conclusions
 
