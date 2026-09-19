@@ -228,3 +228,32 @@ def test_large_limit_and_bar_seconds_combination_does_not_blow_the_query_span(
     assert response.status_code == 200
     items = response.json()["items"]
     assert len(items) == 1  # only the within-cap snapshot's candle is queried at all
+
+
+def test_multi_page_range_walk_covers_a_multi_day_selection_without_truncation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Story 18.5 (AC #3): a Fixed Range Volume Profile spanning several days at 1-minute bars
+    needs far more than one `_MAX_CANDLES_LIMIT` page. The caps must only bound each
+    response, never silently drop bars from the range -- walking `before_ns` back page by
+    page must return every bar exactly once, and `has_more` must go False only at the start.
+    """
+    catalog_path = str(tmp_path / "catalog")
+    bars = 3 * 1440  # 3 days of 1-minute bars
+    _write_snapshots(catalog_path, [(_BASE_NS - i * 60_000_000_000, 100.0 + i) for i in range(bars)])
+    client = _client(catalog_path, monkeypatch)
+
+    seen: list[int] = []
+    cursor_ns = _BASE_NS + 60_000_000_000
+    for _ in range(20):
+        body = client.get(f"/api/candles/{_IID}?before_ns={cursor_ns}&limit=500&bar_seconds=60").json()
+        seen.extend(item["t"] for item in body["items"])
+        if not body["has_more"]:
+            break
+        cursor_ns = body["items"][0]["t"] * 1_000_000
+    else:
+        pytest.fail("pagination did not terminate")
+
+    assert len(seen) == bars
+    assert len(set(seen)) == bars

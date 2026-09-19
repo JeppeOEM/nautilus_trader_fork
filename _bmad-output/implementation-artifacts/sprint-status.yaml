@@ -245,7 +245,7 @@ development_status:
   18-2-trendline-drawing-tool: done
   18-3-measurement-tool: done
   18-4-bar-replay: done
-  18-5-volume-profile-shared-engine-and-rendering-primitive: ready-for-dev
+  18-5-volume-profile-shared-engine-and-rendering-primitive: done
   18-6-fixed-range-volume-profile-frvp: ready-for-dev
   18-7-visible-range-volume-profile-vrvp: ready-for-dev
   18-8-session-volume-profile-and-session-volume-profile-hd: ready-for-dev

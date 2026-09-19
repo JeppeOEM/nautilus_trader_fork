@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { CreatePriceLineOptions, Time } from "lightweight-charts";
 
-import type { ChartMode, DrawingSpec, IndicatorPaneSpec, PriceLineSpec } from "./LightweightChart";
+import type { ChartMode, DrawingSpec, IndicatorPaneSpec, PriceLineSpec, VolumeProfileSpec } from "./LightweightChart";
 import { TrendlinePrimitive } from "./primitives/TrendlinePrimitive";
 
 const addSeriesMock = vi.fn();
@@ -143,6 +143,7 @@ type ChartTestProps = {
   onMeasureEnd?: () => void;
   data?: { time: Time; open: number; high: number; low: number; close: number }[];
   markerTime?: Time | null;
+  volumeProfiles?: VolumeProfileSpec[];
   onPointClick?: (point: { time: Time; price: number }) => void;
 };
 
@@ -862,5 +863,33 @@ describe("replay support (Story 18.4)", () => {
 
     rerender(chartElement({ markerTime: null }));
     expect(detachPrimitiveMock).toHaveBeenCalledWith(marker);
+  });
+});
+
+describe("volumeProfiles registry (Story 18.5)", () => {
+  const profileSpec = (id: string, overrides: Partial<VolumeProfileSpec> = {}): VolumeProfileSpec => ({
+    id,
+    profile: { rows: [], poc: 0, vah: 0, val: 0, totalVolume: 0 },
+    xAnchor: "right",
+    width: 100,
+    upColor: "#0f0",
+    downColor: "#f00",
+    showPoc: true,
+    showValueArea: true,
+    ...overrides,
+  });
+
+  it("attaches once per id, updates in place, and detaches a removed id", () => {
+    const first = profileSpec("p1");
+    const { rerender } = render(chartElement({ volumeProfiles: [first, profileSpec("p2")] }));
+    expect(attachPrimitiveMock).toHaveBeenCalledTimes(2);
+    const primitive = attachPrimitiveMock.mock.calls[0][0];
+
+    rerender(chartElement({ volumeProfiles: [profileSpec("p1", { width: 50 }), profileSpec("p2")] }));
+    expect(attachPrimitiveMock).toHaveBeenCalledTimes(2);
+
+    rerender(chartElement({ volumeProfiles: [profileSpec("p2")] }));
+    expect(detachPrimitiveMock).toHaveBeenCalledTimes(1);
+    expect(detachPrimitiveMock).toHaveBeenCalledWith(primitive);
   });
 });

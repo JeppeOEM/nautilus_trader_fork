@@ -23,6 +23,7 @@ import {
   computeMeasurement,
   formatMeasurement,
 } from "./primitives/MeasurementPrimitive";
+import { VolumeProfilePrimitive, type VolumeProfileRenderSpec } from "./primitives/VolumeProfilePrimitive";
 import { VerticalMarkerPrimitive } from "./primitives/VerticalMarkerPrimitive";
 import { TrendlinePrimitive, type TrendlineAnchor } from "./primitives/TrendlinePrimitive";
 
@@ -66,6 +67,11 @@ export interface TrendlineSpec {
   color: string;
 }
 export type DrawingSpec = TrendlineSpec;
+
+// Story 18.5: a Volume Profile placed on the main pane; `id` is the caller's stable key.
+export interface VolumeProfileSpec extends VolumeProfileRenderSpec {
+  id: string;
+}
 
 interface LightweightChartProps {
   /** Story 15.7: which data source currently owns the main pane. Defaults to `"candles"`
@@ -142,6 +148,9 @@ interface LightweightChartProps {
   /** Story 18.4: when set, a vertical marker line is drawn at this time (the replay start
    * bar); `null`/omitted removes it. Attached to the main candlestick series. */
   markerTime?: Time | null;
+  /** Story 18.5: declarative Volume Profiles (one `VolumeProfilePrimitive` each), diffed by
+   * id like `drawings`. Nothing in the app places one yet -- Stories 18.6-18.9 do. */
+  volumeProfiles?: VolumeProfileSpec[];
   /** Story 15.5: the currently-forming candle bar, from `useLiveCandle`. Applied via
    * `series.update()` (not `setData()`) on the candlestick series only -- independent of
    * the `data`/`setData()` effect above and Story 15.4's `panes` effect below; neither of
@@ -235,6 +244,7 @@ export default function LightweightChart({
   volume = [],
   onMeasureEnd,
   markerTime = null,
+  volumeProfiles = [],
   liveBar,
 }: LightweightChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -254,6 +264,7 @@ export default function LightweightChart({
   const dragIdRef = useRef<string | null>(null);
   const suppressNextClickRef = useRef(false);
   const measureDataRef = useRef<{ data: ChartDatum[]; volume: VolumeDatum[] }>({ data, volume });
+  const profileRegistryRef = useRef<Map<string, VolumeProfilePrimitive>>(new Map());
   const markerRef = useRef<VerticalMarkerPrimitive | null>(null);
   const drawingRegistryRef = useRef<Map<string, TrendlinePrimitive>>(new Map());
   const lastLiveBarTimeRef = useRef<number | null>(null);
@@ -315,6 +326,7 @@ export default function LightweightChart({
     // `.current` inside a cleanup is what the react-hooks/exhaustive-deps lint flags.
     const priceLineRegistry = priceLineRegistryRef.current;
     const drawingRegistry = drawingRegistryRef.current;
+    const profileRegistry = profileRegistryRef.current;
 
     return () => {
       cancelled = true;
@@ -327,6 +339,7 @@ export default function LightweightChart({
       // registry must not outlive the series instances it holds lines on.
       priceLineRegistry.clear();
       drawingRegistry.clear();
+      profileRegistry.clear();
       onChartApi(null);
       chart.remove();
     };
@@ -351,6 +364,7 @@ export default function LightweightChart({
     // on every mode flip -- drop the entries (no detach: the series goes away entirely)
     // and let the [drawings, mode] effect re-attach them to the new host.
     drawingRegistryRef.current.clear();
+    profileRegistryRef.current.clear();
     markerRef.current = null;
 
     if (mode === "candles") {
@@ -571,6 +585,31 @@ export default function LightweightChart({
   useEffect(() => {
     measureDataRef.current = { data, volume };
   }, [data, volume]);
+
+  useEffect(() => {
+    // Story 18.5: volumeProfiles registry diff -- same discipline as `drawings`.
+    const host = seriesRef.current ?? lineSeriesRef.current?.price;
+    if (!host) return;
+    const registry = profileRegistryRef.current;
+    const specsById = new Map(volumeProfiles.map((spec) => [spec.id, spec] as const));
+
+    for (const [id, primitive] of [...registry]) {
+      if (!specsById.has(id)) {
+        host.detachPrimitive(primitive);
+        registry.delete(id);
+      }
+    }
+    for (const spec of volumeProfiles) {
+      const primitive = registry.get(spec.id);
+      if (primitive) {
+        primitive.update(spec);
+        continue;
+      }
+      const created = new VolumeProfilePrimitive(spec);
+      host.attachPrimitive(created);
+      registry.set(spec.id, created);
+    }
+  }, [volumeProfiles, mode]);
 
   useEffect(() => {
     // Story 18.4 (AC #2/#6): add/move/remove the replay start marker.

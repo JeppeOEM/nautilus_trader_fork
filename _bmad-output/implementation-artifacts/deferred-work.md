@@ -370,3 +370,12 @@
 
 - Replay: no follow-scroll -- revealed bars may end up off-screen right after `setData`; verify in a real browser and add `scrollToPosition`/`scrollToRealTime` if so.
 - Replay polish: silent no-op when picking a gap; Play at newest bar does nothing visibly; Step back can pass the start marker; play interval restarts on any `candles` identity change; marker color resolved at construction.
+
+## Deferred from: story 18.5 backend verification (2026-09-19)
+
+- `GET /api/candles` `has_more` probes only one query window back, so a collector outage longer than that window (limit*bar_seconds*3, capped at 7 days -- ~25h at 1-minute bars) makes pagination report exhaustion while older data exists. Affects how far back FRVP scroll-back can reach across outages. Pre-existing; not truncation of a requested range.
+
+## Deferred from: code review of story-18.5 (2026-09-19)
+
+- `VolumeProfilePrimitive.xAnchor` is a pixel x; range-pinned profiles (FRVP, Session) need a time-based anchor so pan/zoom doesn't strand them -- handle when 18.6 places the first fixed profile.
+- POC color hardcoded (`#ffff55`), Value Area band reuses `upColor`; rows with null y-spans can bridge a Value Area gap; row gaps not bitmap-pixel-snapped.
