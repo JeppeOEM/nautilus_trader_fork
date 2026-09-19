@@ -150,3 +150,64 @@ describe("buildSessionProfiles (Story 18.8)", () => {
     expect(entries[2].endTime).toBe(D3 + 60); // the volume-less bar at +180 is not part of the session
   });
 });
+
+describe("period grouping for PVP (Story 18.9)", () => {
+  const bar = (time: number, price: number): ChartDatum => ({
+    time: time as Time,
+    open: price,
+    high: price + 1,
+    low: price,
+    close: price + 1,
+  });
+  const vol = (time: number): VolumeDatum => ({ time: time as Time, value: 2 });
+  const build = (times: number[], period: "4h" | "daily" | "weekly" | "monthly", count = 10) =>
+    buildSessionProfiles(
+      times.map((t, i) => bar(t, 10 + i)),
+      times.map(vol),
+      period,
+      count,
+      settings,
+      new Map(),
+    );
+
+  it("groups weekly on Monday 00:00 UTC, including the Sunday/Monday edge", () => {
+    const times = [utc(2024, 1, 1), utc(2024, 1, 5, 12), utc(2024, 1, 7, 23, 59), utc(2024, 1, 8), utc(2024, 1, 14, 23, 59)];
+
+    const entries = build(times, "weekly");
+
+    expect(entries.map((e) => e.periodStart)).toEqual([utc(2024, 1, 1), utc(2024, 1, 8)]);
+    expect(entries.map((e) => e.profile.totalVolume)).toEqual([6, 4]);
+  });
+
+  it("groups 4-hourly on UTC 4h boundaries", () => {
+    const times = [utc(2024, 1, 3, 3, 59), utc(2024, 1, 3, 4), utc(2024, 1, 3, 7, 59), utc(2024, 1, 3, 8)];
+
+    const entries = build(times, "4h");
+
+    expect(entries.map((e) => e.periodStart)).toEqual([utc(2024, 1, 3, 0), utc(2024, 1, 3, 4), utc(2024, 1, 3, 8)]);
+    expect(entries.map((e) => e.profile.totalVolume)).toEqual([2, 4, 2]);
+  });
+
+  it("groups monthly across month lengths, a leap February and a year end", () => {
+    const times = [utc(2023, 12, 31, 23, 59), utc(2024, 1, 1), utc(2024, 2, 29, 23, 59), utc(2024, 3, 1)];
+
+    const entries = build(times, "monthly");
+
+    expect(entries.map((e) => e.periodStart)).toEqual([utc(2023, 12, 1), utc(2024, 1, 1), utc(2024, 2, 1), utc(2024, 3, 1)]);
+  });
+
+  it("daily is the same grouping SVP uses (the generalisation did not diverge)", () => {
+    const times = [utc(2024, 1, 1), utc(2024, 1, 1, 12), utc(2024, 1, 2), utc(2024, 1, 3, 23, 59)];
+
+    // Independent of periodStart(): plain floor-to-day arithmetic, which is SVP's definition.
+    const expected = [...new Set(times.map((t) => Math.floor(t / 86_400) * 86_400))];
+
+    expect(build(times, "daily").map((e) => e.periodStart)).toEqual(expected);
+  });
+
+  it("renders only the last N periods", () => {
+    const times = [utc(2024, 1, 1), utc(2024, 1, 8), utc(2024, 1, 15)];
+
+    expect(build(times, "weekly", 2).map((e) => e.periodStart)).toEqual([utc(2024, 1, 8), utc(2024, 1, 15)]);
+  });
+});

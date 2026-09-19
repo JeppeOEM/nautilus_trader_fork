@@ -146,7 +146,13 @@ export function buildSessionProfiles(
 export const SESSION_PRESETS = {
   svp: { label: "Session Volume Profile", period: "daily" as SessionPeriod, rowCount: 24, respondsToZoom: false },
   "svp-hd": { label: "Session Volume Profile HD", period: "daily" as SessionPeriod, rowCount: 120, respondsToZoom: true },
+  // Story 18.9: the same component with a user-chosen period (`period` here is only the
+  // default the dropdown starts on).
+  pvp: { label: "Periodic Volume Profile", period: "weekly" as SessionPeriod, rowCount: 24, respondsToZoom: false },
 } as const;
+
+/** The period dropdown's fixed set (Story 18.9 AC #1) -- nothing user-defined. */
+export const SESSION_PERIODS: readonly SessionPeriod[] = ["4h", "daily", "weekly", "monthly"];
 
 export type SessionPreset = keyof typeof SESSION_PRESETS;
 

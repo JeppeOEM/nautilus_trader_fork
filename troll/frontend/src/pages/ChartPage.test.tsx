@@ -21,6 +21,7 @@ const mocks = vi.hoisted(() => ({
   volume: [] as unknown[],
   liveBar: null as unknown,
   session: { candles: [] as unknown[], volume: [] as unknown[], completeFrom: null as number | null },
+  sessionArgs: { enabled: false, sinceSeconds: 0, barSeconds: 0 },
 }));
 
 vi.mock("../hooks/useCandles", () => ({
@@ -29,7 +30,10 @@ vi.mock("../hooks/useCandles", () => ({
 }));
 
 vi.mock("../hooks/useSessionCandles", () => ({
-  useSessionCandles: () => mocks.session,
+  useSessionCandles: (_iid: string, enabled: boolean, sinceSeconds: number, barSeconds: number) => {
+    mocks.sessionArgs = { enabled, sinceSeconds, barSeconds };
+    return mocks.session;
+  },
 }));
 
 vi.mock("../hooks/useSnapshotSeries", () => ({
@@ -695,6 +699,16 @@ describe("ChartPage session volume profiles (Story 18.8)", () => {
     expect((screen.getByLabelText("Sessions to render") as HTMLInputElement).value).toBe("2");
   });
 
+  it("says so when fewer sessions than requested can be drawn", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+    expect(screen.getByText(/Showing 3 of 5/)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Sessions to render"), { target: { value: "3" } });
+
+    expect(screen.queryByText(/Showing/)).toBeNull();
+  });
+
   it("limits the rendered sessions with the sessions setting (AC #4)", () => {
     render(<ChartPage />);
     fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
@@ -724,5 +738,75 @@ describe("ChartPage session volume profiles (Story 18.8)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
 
     expect(sessions().map((s) => s.id)).toEqual([`session-${D3}`]);
+  });
+});
+
+describe("ChartPage periodic volume profile (Story 18.9)", () => {
+  const MON1 = Date.UTC(2024, 0, 1) / 1000; // a Monday
+  const MON2 = MON1 + 7 * 86_400;
+  const times = [MON1, MON1 + 3 * 86_400, MON2, MON2 + 86_400];
+  const bar = (t: number, p: number) => ({ time: t, open: p, high: p + 1, low: p, close: p + 1 });
+  const periods = () => lastChartProps.current!.volumeProfiles!.filter((p) => p.id.startsWith("session-"));
+
+  beforeEach(() => {
+    const candles = times.map((t, i) => bar(t, 10 + i * 10));
+    mocks.candles = candles;
+    mocks.session = { candles, volume: times.map((t) => ({ time: t, value: 5 })), completeFrom: null };
+  });
+
+  it("adds a periodic profile (weekly by default) with one profile per period (AC #1/#2)", () => {
+    render(<ChartPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Add Periodic Volume Profile" }));
+
+    expect(periods().map((p) => p.id)).toEqual([`session-${MON1}`, `session-${MON2}`]);
+    expect(periods().map((p) => p.profile.totalVolume)).toEqual([10, 10]);
+    expect((screen.getByLabelText("Profile period") as HTMLSelectElement).value).toBe("weekly");
+  });
+
+  it("regroups when the period dropdown changes, offering only the fixed set", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Add Periodic Volume Profile" }));
+    const select = screen.getByLabelText("Profile period") as HTMLSelectElement;
+    expect([...select.options].map((o) => o.value)).toEqual(["4h", "daily", "weekly", "monthly"]);
+
+    fireEvent.change(select, { target: { value: "daily" } });
+
+    expect(periods()).toHaveLength(4); // four distinct UTC days
+  });
+
+  it("switching the period refetches at that period's bar size and a deeper wanted start", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Add Periodic Volume Profile" }));
+    const weekly = { ...mocks.sessionArgs };
+    expect(weekly).toMatchObject({ enabled: true, barSeconds: 300 });
+
+    fireEvent.change(screen.getByLabelText("Profile period"), { target: { value: "monthly" } });
+
+    expect(mocks.sessionArgs.barSeconds).toBe(900);
+    expect(mocks.sessionArgs.sinceSeconds).toBeLessThan(weekly.sinceSeconds); // 5 months back vs 5 weeks back
+  });
+
+  it("switching PVP -> SVP -> PVP restarts on the preset's default period", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Add Periodic Volume Profile" }));
+    fireEvent.change(screen.getByLabelText("Profile period"), { target: { value: "monthly" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+    expect(mocks.sessionArgs.barSeconds).toBe(60);
+    fireEvent.click(screen.getByRole("button", { name: "Add Periodic Volume Profile" }));
+
+    expect((screen.getByLabelText("Profile period") as HTMLSelectElement).value).toBe("weekly");
+  });
+
+  it("reuses the shared sessions-to-render setting (AC #3), and only PVP shows a period dropdown", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Add Periodic Volume Profile" }));
+    fireEvent.change(screen.getByLabelText("Sessions to render"), { target: { value: "1" } });
+    expect(periods()).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+    expect(screen.queryByLabelText("Profile period")).toBeNull();
+    expect(screen.getAllByLabelText("Sessions to render")).toHaveLength(1);
   });
 });

@@ -47,8 +47,31 @@ describe("useSessionCandles (Story 18.8)", () => {
     await flush();
     for (let i = 0; i < 45; i++) await flush();
 
-    expect(fetchCandlesMock.mock.calls.length).toBeLessThanOrEqual(40);
+    expect(fetchCandlesMock.mock.calls.length).toBeLessThanOrEqual(80);
     expect(result.current.completeFrom).toBe(5_000);
+  });
+
+  it("sizes the page budget to the wanted span, so 10 weekly periods at 5m bars are reachable", async () => {
+    const now = Date.parse("2024-01-03T12:00:00Z") / 1000;
+    fetchCandlesMock.mockResolvedValue({ items: [item(now)], has_more: true }); // never reaches `since`
+    renderHook(() => useSessionCandles("BTC", true, now - 10 * 7 * 86_400, 300));
+    for (let i = 0; i < 90; i++) await flush();
+
+    // ~20160 bars / 500 per page = 41 pages, +2 slack -- more than the old fixed 40.
+    expect(fetchCandlesMock.mock.calls.length).toBeGreaterThan(40);
+    expect(fetchCandlesMock.mock.calls.length).toBeLessThanOrEqual(80);
+  });
+
+  it("refreshes at most once a minute even for coarse bars", async () => {
+    const now = Date.parse("2024-01-03T12:00:00Z") / 1000;
+    fetchCandlesMock.mockResolvedValue({ items: [item(now)], has_more: false });
+    renderHook(() => useSessionCandles("BTC", true, now, 900));
+    await flush();
+    fetchCandlesMock.mockClear();
+
+    await act(async () => { vi.advanceTimersByTime(60_000); });
+
+    expect(fetchCandlesMock).toHaveBeenCalledTimes(1);
   });
 
   it("refreshes only the newest bars each interval, replacing the forming bar in place", async () => {

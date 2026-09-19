@@ -442,6 +442,11 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
     setSessionCfg({ preset, period, settings, sinceSeconds: sessionSince(period, settings.sessionCount) });
   };
 
+  const changeSessionPeriod = (period: SessionPeriod): void =>
+    setSessionCfg((cfg) =>
+      cfg ? { ...cfg, period, sinceSeconds: sessionSince(period, cfg.settings.sessionCount) } : cfg,
+    );
+
   const changeSessionSettings = (settings: SessionProfileSettings): void =>
     setSessionCfg((cfg) =>
       cfg ? { ...cfg, settings, sinceSeconds: sessionSince(cfg.period, settings.sessionCount) } : cfg,
@@ -641,10 +646,12 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
         onSettingsChange={setVrvpSettings}
       />
       <SessionProfileControl
-        active={sessionCfg ? { preset: sessionCfg.preset, settings: sessionCfg.settings } : null}
+        active={sessionCfg ? { preset: sessionCfg.preset, period: sessionCfg.period, settings: sessionCfg.settings } : null}
         candlesMode={mode === "candles"}
+        renderedCount={sessionSpecs.length}
         onAdd={addSessionProfile}
         onRemove={() => setSessionCfg(null)}
+        onPeriodChange={changeSessionPeriod}
         onSettingsChange={changeSessionSettings}
       />
       <IndicatorPicker

@@ -6,8 +6,15 @@ import type { CandleItem } from "../api/schema";
 import type { ChartDatum, VolumeDatum } from "./useCandles";
 
 const PAGE_LIMIT = 500;
-// Bounds one session fetch (MEM-01 on the client): 40 pages x 500 bars = 20k bars.
-const MAX_PAGES = 40;
+// Bounds one session fetch (MEM-01 on the client): 80 pages x 500 bars = 40k bars. The
+// actual page budget is sized to the wanted span (see `pageBudget`), never above this.
+const HARD_MAX_PAGES = 80;
+// How often the in-progress tail is refreshed, whatever the bar size: a 15-minute monthly
+// bar must not leave the live profile up to 15 minutes stale.
+const MAX_REFRESH_SECONDS = 60;
+
+const pageBudget = (sinceSeconds: number, barSeconds: number): number =>
+  Math.min(HARD_MAX_PAGES, Math.ceil((Date.now() / 1000 - sinceSeconds) / barSeconds / PAGE_LIMIT) + 2);
 // The refresh pulls just the newest few bars -- the in-progress session's tail.
 const REFRESH_LIMIT = 5;
 
@@ -72,7 +79,8 @@ export function useSessionCandles(
 
     const load = async (): Promise<void> => {
       let cursorNs = Date.now() * 1_000_000;
-      for (let page = 0; page < MAX_PAGES; page++) {
+      const pages = pageBudget(sinceSeconds, barSeconds);
+      for (let page = 0; page < pages; page++) {
         const response = await fetchCandles(instrumentId, cursorNs, PAGE_LIMIT, barSeconds);
         if (cancelled) return;
         const items = response.items.filter(isBar);
@@ -114,7 +122,7 @@ export function useSessionCandles(
       .finally(() => {
         loaded = true;
       });
-    const id = setInterval(() => void refresh().catch(report("refresh")), barSeconds * 1000);
+    const id = setInterval(() => void refresh().catch(report("refresh")), Math.min(barSeconds, MAX_REFRESH_SECONDS) * 1000);
     return () => {
       cancelled = true;
       clearInterval(id);
