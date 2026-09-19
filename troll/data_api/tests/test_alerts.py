@@ -15,7 +15,10 @@
 expiration state machine, template rendering, and engine fire path (real objects; the network
 POST is injected as a recording callable, not a mock of any library)."""
 
+import json
 import threading
+from http.server import BaseHTTPRequestHandler
+from http.server import HTTPServer
 from pathlib import Path
 
 import pytest
@@ -206,3 +209,47 @@ def _join_post_threads() -> None:
     for t in threading.enumerate():
         if t is not threading.current_thread() and t.daemon:
             t.join(timeout=2)
+
+
+def test_deliver_sends_telegram_message_to_bot_api(monkeypatch: pytest.MonkeyPatch) -> None:
+    received: list[tuple[str, dict]] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            length = int(self.headers["Content-Length"])
+            received.append((self.path, json.loads(self.rfile.read(length))))
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *args: object) -> None:
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    monkeypatch.setattr(alerts, "TELEGRAM_API_BASE", f"http://127.0.0.1:{server.server_port}")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:abc")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+    alerts.deliver(_alert(webhook_url=""), "BTC crossed 65000")
+    server.shutdown()
+    assert received == [("/bot123:abc/sendMessage", {"chat_id": "42", "text": "BTC crossed 65000"})]
+
+
+def test_telegram_failure_logs_alert_id_but_never_the_token(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setattr(alerts, "TELEGRAM_API_BASE", "http://127.0.0.1:1")
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "secret-token")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
+    alert = _alert(webhook_url="")
+    alerts.post_telegram(alert, "x")
+    assert f"alert {alert.id} telegram send failed" in caplog.text
+    assert "secret-token" not in caplog.text
+
+
+def test_route_requires_a_delivery_channel(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _client(tmp_path, monkeypatch)
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    assert client.post("/api/alerts", json={**_BODY, "webhook_url": ""}).status_code == 422
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
+    assert client.post("/api/alerts", json={**_BODY, "webhook_url": ""}).status_code == 201

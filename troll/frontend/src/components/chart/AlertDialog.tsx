@@ -3,8 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { createAlert } from "../../api/client";
 import type { PriceLineSpec } from "./LightweightChart";
 
-export const DEFAULT_TEMPLATE =
-  '{"ticker":"{{ticker}}","close":{{close}},"time":"{{time}}","interval":"{{interval}}"}';
+export const DEFAULT_TEMPLATE = "{{ticker}} price crossed {{close}} ({{time}})";
 
 const STATIC_SOURCE = "static";
 
@@ -125,7 +124,7 @@ export default function AlertDialog({ open, onClose, instrumentId, barSeconds, p
         />
       </label>
       <label>
-        Webhook URL
+        Webhook URL (optional -- alerts always go to Telegram when the server has it configured)
         <input
           aria-label="Webhook URL"
           type="url"

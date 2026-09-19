@@ -77,6 +77,8 @@ class AlertCreate(BaseModel):
     @field_validator("webhook_url")
     @classmethod
     def _looks_like_url(cls, v: str) -> str:
+        if not v:
+            return v  # Telegram-only alert; checked against the server config in create_alert
         parsed = urlparse(v)
         if parsed.scheme not in ("http", "https") or not parsed.netloc:
             raise ValueError("webhook_url must be an http(s) URL")
@@ -105,6 +107,11 @@ def list_alerts() -> list[AlertResponse]:
 
 @router.post("/api/alerts", status_code=201)
 def create_alert(body: AlertCreate) -> AlertResponse:
+    if not body.webhook_url and not alerts.telegram_configured():
+        raise HTTPException(
+            status_code=422,
+            detail="no delivery channel: set a webhook URL or configure TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID",
+        )
     alert = alerts.new_alert(**body.model_dump())
     alerts.store.add(alert)
     return _to_response(alert, time.time_ns())

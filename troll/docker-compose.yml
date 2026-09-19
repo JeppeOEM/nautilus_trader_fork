@@ -137,6 +137,8 @@ services:
       CHART_INDICATOR_CONFIG_PATH: *chart-indicator-config-path
       SCREENER_COLUMNS_CONFIG_PATH: "/app/ml_signals/screener_columns.toml"
       ALERTS_PATH: "/app/data_api/alerts.toml"
+      TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
+      TELEGRAM_CHAT_ID: "${TELEGRAM_CHAT_ID:-}"
     user: "1000:1000"
     volumes:
       - ./dydx_collector/catalog:/app/catalog:ro

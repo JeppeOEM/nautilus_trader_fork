@@ -14,9 +14,8 @@
 """
 Stories 20.1/20.2: saved alerts + the evaluation engine.
 
-Alerts are delivered as a plain webhook POST (plus a toast pushed over `/ws/live`) -- there is
-deliberately no Telegram/Discord/Slack/email integration; whatever the webhook URL points at is
-the user's own infrastructure.
+Alerts are delivered to Telegram (when `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` are set), to
+the alert's own webhook URL (optional), and as a toast pushed over `/ws/live`.
 
 Persistence mirrors `ml_signals/chart_indicator_config.py` (TOML, full rewrite). The engine is a
 server-side observer of `LiveCandleBus` (the one existing `snapshots:raw` subscriber), so alerts
@@ -55,6 +54,8 @@ ALERTS_PATH: str = os.environ.get("ALERTS_PATH", "troll/data_api/alerts.toml")
 
 FREQUENCIES = ("once_per_bar_close", "once_per_bar", "only_once")
 
+TELEGRAM_API_BASE: str = os.environ.get("TELEGRAM_API_BASE", "https://api.telegram.org")
+
 _NS_PER_S = 1_000_000_000
 _WEBHOOK_TIMEOUT_S = 5
 
@@ -70,7 +71,7 @@ class Alert:
     frequency: str
     bar_seconds: int
     template: str
-    webhook_url: str
+    webhook_url: str  # may be empty when Telegram is the delivery channel
     created_ns: int
     expires_at_ns: int | None = None
     triggered: bool = False  # only `only_once` alerts ever set this
@@ -216,9 +217,36 @@ def post_webhook(alert: Alert, body: str) -> None:
         logger.warning("alert %s webhook POST failed: %s", alert.id, exc)
 
 
+def telegram_configured() -> bool:
+    return bool(os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"))
+
+
+def post_telegram(alert: Alert, text: str) -> None:
+    """Bot API `sendMessage`. Failures are logged with the alert id only -- never the request
+    URL, which contains the bot token."""
+    request = urllib.request.Request(
+        f"{TELEGRAM_API_BASE}/bot{os.environ['TELEGRAM_BOT_TOKEN']}/sendMessage",
+        data=json.dumps({"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": text}).encode(),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=_WEBHOOK_TIMEOUT_S):  # noqa: S310
+            pass
+    except Exception as exc:
+        logger.warning("alert %s telegram send failed: %s", alert.id, type(exc).__name__)
+
+
+def deliver(alert: Alert, body: str) -> None:
+    if alert.webhook_url:
+        post_webhook(alert, body)
+    if telegram_configured():
+        post_telegram(alert, body)
+
+
 class AlertEngine:
     def __init__(
-        self, alert_store: AlertStore, post: Callable[[Alert, str], None] = post_webhook,
+        self, alert_store: AlertStore, post: Callable[[Alert, str], None] = deliver,
     ) -> None:
         self._store = alert_store
         self._post = post
