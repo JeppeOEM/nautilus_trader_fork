@@ -1,6 +1,6 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "opencode-go/glm-5.3",
+  "model": "opencode-go/glm-5.2",
   "small_model": "opencode-go/glm-5.3-flash",
   "permission": "allow"
 }
