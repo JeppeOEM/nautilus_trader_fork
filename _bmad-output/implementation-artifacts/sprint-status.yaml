@@ -181,7 +181,7 @@ development_status:
   # xaxis.range) silently wipes it back to the full 240-bar buffered window. Root-caused and
   # reproduced with a real node harness this session; 14.1/14.2 (and every prior chart-page
   # story) never verified in a real browser, which is why this shipped unnoticed.
-  epic-14: in-progress
+  epic-14: done  # all stories terminal (14.1, 14.2 done; 14.3 superseded by 15.10)
   14-1-chart-default-120-bar-window-with-scroll-back-preload: done
   14-2-async-chart-page-load-with-panel-spinners: done
   # 14.3 parked 2026-09-14 at the user's request, ahead of schedule -- epics.md's Epic 15
