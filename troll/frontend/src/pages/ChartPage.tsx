@@ -1,12 +1,13 @@
 import type { IChartApi, Time } from "lightweight-charts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useParams } from "react-router";
+import { Link, useParams } from "react-router";
 
 import { fetchCoinIndicatorConfig, saveCoinIndicatorConfig } from "../api/client";
 import IndicatorPicker from "../components/chart/IndicatorPicker";
 import LightweightChart, {
   type ChartMode,
   type DrawingSpec,
+  type ViewCommand,
   type VolumeProfileSpec,
   type IndicatorPaneSpec,
   type PriceLineSpec,
@@ -63,10 +64,16 @@ interface ChartToolDef {
 
 // The left tool rail's tools, as data -- Stories 18.2/18.3 append entries here and
 // the toolbar markup below never changes shape.
-const CHART_TOOLS: readonly ChartToolDef[] = [
+// Story 18.10 (spec §A8.1): two clusters, top to bottom -- [cursor, crosshair toggle]
+// then the drawing tools [line, horizontal line, measurement, + the FRVP profile tool].
+// The crosshair toggle is not an exclusive tool (it is a view option), so it is rendered
+// between the clusters rather than living in this list.
+const SELECT_TOOLS: readonly ChartToolDef[] = [
   { id: "cursor", label: "Cursor", ariaLabel: "Cursor tool", candlesOnly: false },
-  { id: "hline", label: "HLine", ariaLabel: "Horizontal line tool", candlesOnly: true },
+];
+const DRAWING_TOOLS: readonly ChartToolDef[] = [
   { id: "trendline", label: "Trend", ariaLabel: "Trendline tool", candlesOnly: false },
+  { id: "hline", label: "HLine", ariaLabel: "Horizontal line tool", candlesOnly: true },
   { id: "measure", label: "Measure", ariaLabel: "Measurement tool", candlesOnly: true },
   { id: "frvp", label: "FRVP", ariaLabel: "Fixed range volume profile tool", candlesOnly: true },
 ];
@@ -133,6 +140,12 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
   const [edgeGhost, setEdgeGhost] = useState<EdgeGhost | null>(null);
   const nextFrvpIdRef = useRef(1);
   // Story 18.7: the single visible-range profile ("always recompute", unlike FRVP above).
+  // Story 18.10: crosshair on/off (view option, not an exclusive tool) and the one-shot
+  // fit / jump-to-latest commands (`seq` makes a repeated identical click a new command).
+  const [crosshairVisible, setCrosshairVisible] = useState(true);
+  const [viewCommand, setViewCommand] = useState<ViewCommand | null>(null);
+  const requestView = (kind: ViewCommand["kind"]): void =>
+    setViewCommand((prev) => ({ kind, seq: (prev?.seq ?? 0) + 1 }));
   const [vrvpActive, setVrvpActive] = useState(false);
   // Story 18.8: the single session-profile slot (SVP / SVP HD presets). `sinceSeconds` is
   // fixed when the config is set (an event handler), so render stays pure.
@@ -501,47 +514,85 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
     [],
   );
 
+  const renderTool = (tool: ChartToolDef) => (
+    <button
+      key={tool.id}
+      type="button"
+      className={activeTool === tool.id ? "tabbtn active" : "tabbtn"}
+      aria-pressed={activeTool === tool.id}
+      aria-label={tool.ariaLabel}
+      data-tool={tool.id}
+      disabled={mode === "lines" && tool.candlesOnly}
+      onClick={() => selectTool(tool.id)}
+    >
+      {tool.label}
+    </button>
+  );
+
   return (
     <div>
-      <h1>{instrumentId}</h1>
-      <div>
-        {/* The mode buttons double as the candles-only-tool disarm point (Story
-            18.1): both buttons are disabled while their mode is already active, so
-            these handlers only ever run on a real mode CHANGE -- and any mode change
-            disarms the tool, in the handler itself rather than a state-syncing
-            effect (react/set-state-in-effect). */}
-        <button
-          id="btn-candles"
-          type="button"
-          disabled={mode === "candles"}
-          onClick={() => {
-            setMode("candles");
-            selectTool("cursor");
-          }}
-        >
-          Candles
-        </button>
-        <button
-          id="btn-lines"
-          type="button"
-          disabled={mode === "lines"}
-          onClick={() => {
-            setMode("lines");
-            selectTool("cursor");
-            replay.exit();
-          }}
-        >
-          Lines
-        </button>
-        {/* Story 18.4 (AC #1): candles-only, like the tools that need the candle array. */}
-        <button
-          id="btn-replay"
-          type="button"
-          disabled={mode === "lines" || replay.mode !== "off"}
-          onClick={startReplayPick}
-        >
-          Replay
-        </button>
+      {/* Story 18.10 (spec §A8.1), four clusters in order, dividers between:
+          [symbol + timeframe] [chart type] [indicators + fit + jump (+ replay)] [theme].
+          Reconciled to this app's table-first navigation: the symbol slot is a read-only
+          label + back-to-Rankings link and the timeframe a fixed read-only label (bar size
+          is the `BAR_SECONDS` constant, not a control); there is deliberately NO theme
+          toggle (Story 15.9 fixed the visual identity), so the fourth cluster is omitted. */}
+      <div className="chart-topbar" role="toolbar" aria-label="Chart controls">
+        <div className="chart-topbar-group" role="group" aria-label="Symbol">
+          <Link to="/" aria-label="Back to Rankings">
+            &lt; Rankings
+          </Link>
+          <h1>{instrumentId}</h1>
+          <span title="Timeframe (fixed)">{BAR_SECONDS / 60}m</span>
+        </div>
+        <div className="chart-topbar-group" role="group" aria-label="Chart type">
+          {/* The mode buttons double as the candles-only-tool disarm point (Story
+              18.1): both buttons are disabled while their mode is already active, so
+              these handlers only ever run on a real mode CHANGE -- and any mode change
+              disarms the tool, in the handler itself rather than a state-syncing
+              effect (react/set-state-in-effect). */}
+          <button
+            id="btn-candles"
+            type="button"
+            disabled={mode === "candles"}
+            onClick={() => {
+              setMode("candles");
+              selectTool("cursor");
+            }}
+          >
+            Candles
+          </button>
+          <button
+            id="btn-lines"
+            type="button"
+            disabled={mode === "lines"}
+            onClick={() => {
+              setMode("lines");
+              selectTool("cursor");
+              replay.exit();
+            }}
+          >
+            Lines
+          </button>
+        </div>
+        <div className="chart-topbar-group" role="group" aria-label="Indicators and view">
+          <a href="#indicators">Indicators</a>
+          <button type="button" onClick={() => requestView("fit")}>
+            Fit
+          </button>
+          <button type="button" onClick={() => requestView("latest")}>
+            Latest
+          </button>
+          {/* Story 18.4 (AC #1): candles-only, like the tools that need the candle array. */}
+          <button
+            id="btn-replay"
+            type="button"
+            disabled={mode === "lines" || replay.mode !== "off"}
+            onClick={startReplayPick}
+          >
+            Replay
+          </button>
+        </div>
       </div>
       {replay.mode !== "off" && (
         <div role="group" aria-label="Replay controls">
@@ -576,20 +627,18 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
             .tabbtn's shared visual pattern (theme.css) with the narrow-rail overrides
             in index.css, same scoped-override precedent as .filter-panel .tabbtn. */}
         <div className="chart-toolbar" role="toolbar" aria-label="Chart tools">
-          {CHART_TOOLS.map((tool) => (
-            <button
-              key={tool.id}
-              type="button"
-              className={activeTool === tool.id ? "tabbtn active" : "tabbtn"}
-              aria-pressed={activeTool === tool.id}
-              aria-label={tool.ariaLabel}
-              data-tool={tool.id}
-              disabled={mode === "lines" && tool.candlesOnly}
-              onClick={() => selectTool(tool.id)}
-            >
-              {tool.label}
-            </button>
-          ))}
+          {SELECT_TOOLS.map(renderTool)}
+          <button
+            type="button"
+            className={crosshairVisible ? "tabbtn active" : "tabbtn"}
+            aria-pressed={crosshairVisible}
+            aria-label="Crosshair"
+            onClick={() => setCrosshairVisible((on) => !on)}
+          >
+            Cross
+          </button>
+          <hr className="chart-toolbar-divider" />
+          {DRAWING_TOOLS.map(renderTool)}
         </div>
         <div className="term-box" data-label={instrumentId}>
           <LightweightChart
@@ -615,6 +664,8 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
             // Story 18.4: the real-time forming bar would reveal "future" price action.
             liveBar={replay.mode === "active" ? null : liveBar}
             markerTime={replay.markerTime}
+            crosshairVisible={crosshairVisible}
+            viewCommand={viewCommand}
           />
         </div>
       </div>
@@ -637,6 +688,9 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
           />
         </div>
       )}
+      {/* Anchor target of the top bar's "Indicators" entry point: the picker plus the chart-only
+          overlay controls. */}
+      <div id="indicators" tabIndex={-1}>
       <VrvpControl
         active={vrvpActive}
         candlesMode={mode === "candles"}
@@ -660,6 +714,7 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
         reloadKey={instrumentId}
         onEntriesChange={setPickerEntries}
       />
+      </div>
     </div>
   );
 }

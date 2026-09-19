@@ -32,6 +32,13 @@ export type PaneSeriesKind = "Line" | "Histogram";
 
 export type ChartMode = "candles" | "lines";
 
+// Story 18.10: a one-shot view command from the page's Fit / Latest buttons. `seq` makes a
+// repeated identical click a NEW command (the effect keys on the object).
+export interface ViewCommand {
+  kind: "fit" | "latest";
+  seq: number;
+}
+
 // Story 15.7's 5 main-pane line series, in a fixed order -- also the color-slot
 // assignment order (mirrors DEFAULT_PANE_IDS' role for indicator sub-panes).
 const LINE_SERIES_IDS = ["bid", "ask", "mid", "micro", "price"] as const;
@@ -149,6 +156,12 @@ interface LightweightChartProps {
   /** Story 18.4: when set, a vertical marker line is drawn at this time (the replay start
    * bar); `null`/omitted removes it. Attached to the main candlestick series. */
   markerTime?: Time | null;
+  /** Story 18.10: crosshair on/off (the left toolbar's toggle); default on. */
+  crosshairVisible?: boolean;
+  /** Story 18.10: applied once per new command object -- `fit` snaps the visible range to
+   * all loaded data, `latest` scrolls to the newest bar. The only place this component
+   * deliberately moves the view; the data/pane effects still never do. */
+  viewCommand?: ViewCommand | null;
   /** Story 18.5: declarative Volume Profiles (one `VolumeProfilePrimitive` each), diffed by
    * id like `drawings`. Nothing in the app places one yet -- Stories 18.6-18.9 do. */
   volumeProfiles?: VolumeProfileSpec[];
@@ -258,6 +271,8 @@ export default function LightweightChart({
   volume = [],
   onMeasureEnd,
   markerTime = null,
+  crosshairVisible = true,
+  viewCommand = null,
   volumeProfiles = [],
   rangeSelectActive = false,
   onRangeSelect,
@@ -632,6 +647,27 @@ export default function LightweightChart({
       registry.set(spec.id, created);
     }
   }, [volumeProfiles, mode]);
+
+  const crosshairShownRef = useRef(true);
+  useEffect(() => {
+    // Story 18.10: only a real change reaches the chart (the initial "on" is the library's
+    // own default, so mount adds no applyOptions call). The crosshair MODE stays untouched
+    // (the library default snaps to data, and hover/drag handling here depends on its
+    // events still flowing) -- "off" only hides the lines and their axis labels.
+    const chart = chartRef.current;
+    if (!chart || crosshairShownRef.current === crosshairVisible) return;
+    crosshairShownRef.current = crosshairVisible;
+    const line = { visible: crosshairVisible, labelVisible: crosshairVisible };
+    chart.applyOptions({ crosshair: { vertLine: line, horzLine: line } });
+  }, [crosshairVisible]);
+
+  useEffect(() => {
+    if (!viewCommand) return;
+    const timeScale = chartRef.current?.timeScale();
+    if (!timeScale) return;
+    if (viewCommand.kind === "fit") timeScale.fitContent();
+    else timeScale.scrollToRealTime();
+  }, [viewCommand]);
 
   useEffect(() => {
     // Story 18.4 (AC #2/#6): add/move/remove the replay start marker.

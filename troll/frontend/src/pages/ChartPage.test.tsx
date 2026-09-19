@@ -1,4 +1,6 @@
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render as rtlRender, screen } from "@testing-library/react";
+import type { ReactElement } from "react";
+import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { PriceLineSpec } from "../components/chart/LightweightChart";
@@ -81,6 +83,8 @@ interface ChartStubProps {
   rangeSelectActive?: boolean;
   profileEdgesEditable?: boolean;
   onChartApi?: (chart: unknown) => void;
+  crosshairVisible?: boolean;
+  viewCommand?: { kind: string; seq: number } | null;
   onRangeSelect?: (start: { time: number; price: number }, end: { time: number; price: number }) => void;
   onProfileEdgeDrag?: (id: string, edge: "start" | "end", time: number) => void;
   onProfileEdgeCommit?: (id: string, edge: "start" | "end", time: number) => void;
@@ -94,6 +98,10 @@ vi.mock("../components/chart/LightweightChart", () => ({
     return <div data-testid="chart-stub" />;
   },
 }));
+
+// The top bar's back-to-Rankings <Link> needs a router; `wrapper` (unlike wrapping the
+// element) survives `rerender`.
+const render = (ui: ReactElement) => rtlRender(ui, { wrapper: MemoryRouter });
 
 // Imported after the mocks above so ChartPage picks up the mocked client/hooks/chart.
 const { default: ChartPage } = await import("./ChartPage");
@@ -808,5 +816,132 @@ describe("ChartPage periodic volume profile (Story 18.9)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
     expect(screen.queryByLabelText("Profile period")).toBeNull();
     expect(screen.getAllByLabelText("Sessions to render")).toHaveLength(1);
+  });
+});
+
+describe("ChartPage toolbars (Story 18.10)", () => {
+  const names = (root: HTMLElement) =>
+    [...root.querySelectorAll("button, a, hr, h1")].map((el) =>
+      el.tagName === "HR" ? "|" : (el.getAttribute("aria-label") ?? el.textContent ?? ""),
+    );
+
+  it("orders the top bar as [symbol + timeframe] [chart type] [indicators + fit + jump + replay], with no theme toggle (AC #1)", () => {
+    render(<ChartPage />);
+    const bar = screen.getByRole("toolbar", { name: "Chart controls" });
+    const groups = [...bar.querySelectorAll(":scope > [role=group]")].map((g) => g.getAttribute("aria-label"));
+
+    expect(groups).toEqual(["Symbol", "Chart type", "Indicators and view"]);
+    expect(names(screen.getByRole("group", { name: "Symbol" }))).toEqual(["Back to Rankings", "BTC-USD-PERP.DYDX"]);
+    expect(screen.getByTitle("Timeframe (fixed)")).toHaveTextContent("1m");
+    expect(names(screen.getByRole("group", { name: "Chart type" }))).toEqual(["Candles", "Lines"]);
+    expect(names(screen.getByRole("group", { name: "Indicators and view" }))).toEqual([
+      "Indicators",
+      "Fit",
+      "Latest",
+      "Replay",
+    ]);
+    expect(screen.queryByText(/theme/i)).toBeNull();
+  });
+
+  it("has a symbol slot that is a read-only label plus a link back to Rankings, and no free picker", () => {
+    render(<ChartPage />);
+
+    expect(screen.getByRole("link", { name: "Back to Rankings" })).toHaveAttribute("href", "/");
+    expect(screen.getByRole("heading", { name: "BTC-USD-PERP.DYDX" })).toBeInTheDocument();
+    expect(screen.queryByRole("combobox", { name: /symbol|timeframe/i })).toBeNull();
+  });
+
+  it("points the Indicators entry at the indicators section", () => {
+    render(<ChartPage />);
+
+    expect(screen.getByRole("link", { name: "Indicators" })).toHaveAttribute("href", "#indicators");
+    expect(document.getElementById("indicators")).not.toBeNull();
+  });
+
+  it("orders the left toolbar [cursor, crosshair] | [line, horizontal line, measurement, ...] (AC #2)", () => {
+    render(<ChartPage />);
+
+    expect(names(screen.getByRole("toolbar", { name: "Chart tools" }))).toEqual([
+      "Cursor tool",
+      "Crosshair",
+      "|",
+      "Trendline tool",
+      "Horizontal line tool",
+      "Measurement tool",
+      "Fixed range volume profile tool",
+    ]);
+  });
+
+  it("toggles the crosshair independently of the active drawing tool", () => {
+    render(<ChartPage />);
+    const toggle = screen.getByRole("button", { name: "Crosshair" });
+    expect(toggle).toHaveAttribute("aria-pressed", "true");
+    expect(lastChartProps.current!.crosshairVisible).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "Trendline tool" }));
+    fireEvent.click(toggle);
+
+    expect(toggle).toHaveAttribute("aria-pressed", "false");
+    expect(lastChartProps.current!.crosshairVisible).toBe(false);
+    expect(screen.getByRole("button", { name: "Trendline tool" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("issues a new view command for every Fit / Latest click", () => {
+    render(<ChartPage />);
+    expect(lastChartProps.current!.viewCommand).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Fit" }));
+    expect(lastChartProps.current!.viewCommand).toEqual({ kind: "fit", seq: 1 });
+    fireEvent.click(screen.getByRole("button", { name: "Fit" }));
+    expect(lastChartProps.current!.viewCommand).toEqual({ kind: "fit", seq: 2 });
+    fireEvent.click(screen.getByRole("button", { name: "Latest" }));
+    expect(lastChartProps.current!.viewCommand).toEqual({ kind: "latest", seq: 3 });
+  });
+});
+
+describe("cross-story: drawing tools during replay (Story 18.4 AC #5, verified end-to-end at page level in 18.10)", () => {
+  const bars = [1, 2, 3, 4, 5].map((n) => ({ time: n, open: n, high: n + 1, low: n, close: n + 1 }));
+  const point = (time: number, price: number) =>
+    act(() => {
+      lastChartProps.current!.onPointClick!({ time, price });
+    });
+
+  beforeEach(() => {
+    mocks.candles = bars;
+    mocks.volume = bars.map((b) => ({ time: b.time, value: 10 }));
+  });
+
+  it("places a trendline and a horizontal line while a replay is active, and they survive stepping", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Replay" }));
+    point(3, 1);
+    expect(lastChartProps.current!.data).toHaveLength(3);
+
+    fireEvent.click(screen.getByRole("button", { name: "Trendline tool" }));
+    point(1, 1);
+    point(3, 2);
+    fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
+    act(() => lastChartProps.current!.onPriceClick!(1.5));
+    const drawings = lastChartProps.current!.drawings;
+    expect(drawings).toHaveLength(1);
+    expect(lastChartProps.current!.priceLines).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Step forward" }));
+    expect(lastChartProps.current!.data).toHaveLength(4);
+    expect(lastChartProps.current!.drawings).toBe(drawings);
+    expect(lastChartProps.current!.priceLines).toHaveLength(1);
+  });
+
+  it("Esc cancels an in-progress tool during replay without ending the replay", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Replay" }));
+    point(3, 1);
+    fireEvent.click(screen.getByRole("button", { name: "Trendline tool" }));
+    point(1, 1);
+
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    expect(screen.getByRole("group", { name: "Replay controls" })).toBeInTheDocument();
+    expect(lastChartProps.current!.drawings).toHaveLength(0);
   });
 });

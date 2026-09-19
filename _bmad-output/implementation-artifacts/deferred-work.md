@@ -395,3 +395,11 @@
 ## Deferred from: code review of story-18.9 (2026-09-19)
 
 - Session/periodic profiles: every period/count change re-pages from now (no debounce or abort of in-flight pages, no loading indicator); `sinceSeconds` is not re-anchored at a period rollover; the PVP period choice is not persisted; `SESSION_PRESETS.period` is a fixed period for SVP but only the dropdown default for PVP; dropdown shows raw values.
+
+## Deferred from: story 18.10 parity audit (2026-09-19)
+
+- **Live-app §A8.2 walkthrough owed for all of Epic 18** (18.1-18.10 are UI verified only in jsdom with a mocked lightweight-charts): pan/zoom, fit/latest, pane resize hit zone, every drawing tool's real mouse mechanics, replay, all volume-profile variants' actual drawing (right-axis anchoring, time-anchored session/FRVP widths, edge grab, respondsToZoom).
+- Crosshair readout status bar (O/H/L/C/time on hover) does not exist.
+- Indicator legend (gear / eye / x per indicator, top-left of its pane) does not exist; indicators are managed in the picker list (dropdown + Add, inline params + Apply, Remove), and there is no visibility toggle.
+- Trendline placement is two-click, not click-drag.
+- Alerts: Epic 20.

@@ -250,7 +250,7 @@ development_status:
   18-7-visible-range-volume-profile-vrvp: done
   18-8-session-volume-profile-and-session-volume-profile-hd: done
   18-9-periodic-volume-profile-pvp: done
-  18-10-placement-and-operation-parity-pass: ready-for-dev
+  18-10-placement-and-operation-parity-pass: review  # owed: live-app §A8.2 parity walkthrough (AC #3 / Task 3)
   epic-18-retrospective: optional
 
   epic-19: in-progress

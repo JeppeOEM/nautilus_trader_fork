@@ -33,6 +33,8 @@ const attachPrimitiveMock = vi.fn();
 const detachPrimitiveMock = vi.fn();
 const coordinateToTimeMock = vi.fn();
 const timeToCoordinateMock = vi.fn();
+const fitContentMock = vi.fn();
+const scrollToRealTimeMock = vi.fn();
 
 // One shared counter so each chart.addPane() call gets its own, stable, ever-increasing
 // index -- mirrors the real library's paneIndex() behaviour closely enough for the
@@ -145,6 +147,8 @@ type ChartTestProps = {
   data?: { time: Time; open: number; high: number; low: number; close: number }[];
   markerTime?: Time | null;
   volumeProfiles?: VolumeProfileSpec[];
+  crosshairVisible?: boolean;
+  viewCommand?: { kind: "fit" | "latest"; seq: number } | null;
   rangeSelectActive?: boolean;
   onRangeSelect?: (start: { time: Time; price: number }, end: { time: Time; price: number }) => void;
   profileEdgesEditable?: boolean;
@@ -179,6 +183,8 @@ beforeEach(() => {
   attachPrimitiveMock.mockReset();
   detachPrimitiveMock.mockReset();
   coordinateToTimeMock.mockReset().mockReturnValue(null);
+  fitContentMock.mockReset();
+  scrollToRealTimeMock.mockReset();
   timeToCoordinateMock.mockReset().mockImplementation((t: number) => t);
   // Identity defaults: a spec at price P sits at y=P, and a clicked/dragged y of Y
   // reads back as price Y -- individual tests override these when they need
@@ -201,6 +207,8 @@ beforeEach(() => {
       setVisibleLogicalRange: setVisibleLogicalRangeMock,
       coordinateToTime: coordinateToTimeMock,
       timeToCoordinate: timeToCoordinateMock,
+      fitContent: fitContentMock,
+      scrollToRealTime: scrollToRealTimeMock,
       subscribeVisibleLogicalRangeChange: vi.fn(),
       unsubscribeVisibleLogicalRangeChange: vi.fn(),
     }),
@@ -1044,5 +1052,41 @@ describe("FRVP range select and edge drag (Story 18.6)", () => {
 
       expect(first).toHaveBeenCalledWith("frvp-1", "start", 160);
     });
+  });
+});
+
+describe("view commands and crosshair toggle (Story 18.10)", () => {
+  it("runs fit and jump-to-latest once per new command, never on mount or an unrelated re-render", () => {
+    const { rerender } = render(chartElement({}));
+    expect(fitContentMock).not.toHaveBeenCalled();
+    expect(scrollToRealTimeMock).not.toHaveBeenCalled();
+
+    const fit = { kind: "fit" as const, seq: 1 };
+    rerender(chartElement({ viewCommand: fit }));
+    rerender(chartElement({ viewCommand: fit }));
+    expect(fitContentMock).toHaveBeenCalledTimes(1);
+
+    rerender(chartElement({ viewCommand: { kind: "fit", seq: 2 } })); // a repeated click is a new command
+    expect(fitContentMock).toHaveBeenCalledTimes(2);
+
+    rerender(chartElement({ viewCommand: { kind: "latest", seq: 3 } }));
+    expect(scrollToRealTimeMock).toHaveBeenCalledTimes(1);
+    expect(setVisibleLogicalRangeMock).not.toHaveBeenCalled();
+  });
+
+  it("hides/shows the crosshair lines only on a real change, leaving the crosshair mode alone", () => {
+    const { rerender } = render(chartElement({}));
+    const crosshairCalls = () => applyOptionsMock.mock.calls.filter((c) => c[0]?.crosshair).map((c) => c[0].crosshair);
+    expect(crosshairCalls()).toHaveLength(0);
+
+    rerender(chartElement({ crosshairVisible: false }));
+    expect(crosshairCalls()).toEqual([
+      { vertLine: { visible: false, labelVisible: false }, horzLine: { visible: false, labelVisible: false } },
+    ]);
+
+    rerender(chartElement({ crosshairVisible: true }));
+    expect(crosshairCalls()).toHaveLength(2);
+    expect(crosshairCalls()[1].vertLine.visible).toBe(true);
+    expect(crosshairCalls().every((c) => !("mode" in c))).toBe(true);
   });
 });
