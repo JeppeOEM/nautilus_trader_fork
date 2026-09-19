@@ -5,12 +5,16 @@ export const FILTER_OPERATORS: FilterOperator[] = [">", "<", ">=", "<=", "="];
 export interface FilterCondition {
   field: string;
   op: FilterOperator;
-  value: number;
+  /** A string value is a case-insensitive text match (only `=`), used for `venue`. */
+  value: number | string;
 }
 
 /** A missing/non-numeric value never satisfies a condition -- a row with no data for the
  * filtered field is excluded, not treated as 0. */
-export function compare(actual: unknown, op: FilterOperator, value: number): boolean {
+export function compare(actual: unknown, op: FilterOperator, value: number | string): boolean {
+  if (typeof value === "string") {
+    return op === "=" && typeof actual === "string" && actual.toLowerCase() === value.toLowerCase();
+  }
   if (typeof actual !== "number" || Number.isNaN(actual)) return false;
   switch (op) {
     case ">":

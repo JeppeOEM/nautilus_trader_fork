@@ -377,6 +377,30 @@ describe("RankingsPage", () => {
       expect(screen.queryByText("NNN-USD-PERP.DYDX")).not.toBeInTheDocument();
     });
 
+    it("shows a Venue column and filters multi-venue rows with `venue = X`, one row per instrument_id", () => {
+      useLiveChannelMock.mockReturnValue({
+        latest: liveMessage({
+          ranks: [
+            { instrument_id: "BTC-USD-PERP.DYDX", venue: "DYDX", price: 1 },
+            { instrument_id: "BTCUSDT-LINEAR.BYBIT", venue: "BYBIT", price: 2 },
+            { instrument_id: "BTC-USD-PERP.HYPERLIQUID", venue: "HYPERLIQUID", price: 3 },
+          ],
+        }),
+        connected: true,
+      });
+      renderPage();
+
+      expect(screen.getByRole("columnheader", { name: "Venue" })).toBeInTheDocument();
+      expect(screen.getByText("BYBIT")).toBeInTheDocument();
+      expect(screen.getAllByRole("row")).toHaveLength(4); // header + 3 distinct venue-qualified rows
+
+      addFilter("Venue", "=", "bybit");
+
+      expect(screen.getByText("BTCUSDT-LINEAR.BYBIT")).toBeInTheDocument();
+      expect(screen.queryByText("BTC-USD-PERP.DYDX")).not.toBeInTheDocument();
+      expect(screen.queryByText("BTC-USD-PERP.HYPERLIQUID")).not.toBeInTheDocument();
+    });
+
     it("drops a Technicals filter when its column is removed, instead of emptying the table", async () => {
       const rsi = { name: "RelativeStrengthIndex", params: {}, category: "native" };
       vi.mocked(fetchTechnicalsColumns).mockResolvedValue([rsi]);
