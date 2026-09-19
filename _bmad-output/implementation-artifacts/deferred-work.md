@@ -383,3 +383,52 @@ Discarded by operator: locking/atomic TOML writes; `bot_tui` malformed-message h
 - Alert horizontal-line conditions are resolved to a static price at creation; later line drags don't move the alert.
 - `AlertStore` in-place TOML rewrite: a crash mid-write corrupts the file (fails loudly on load).
 - Alert run state is in-memory: first tick after a data_api restart can't fire; once_per_bar may re-fire within the same bar.
+
+## Deferred from: code review of story-18.2 (2026-09-19)
+
+- Trendline anchor with no bar in the active mode's data (click right of last bar; 1s Lines-mode anchor viewed in Candles mode) has no `timeToCoordinate`, so the line silently isn't drawn. Needs snapping or extrapolation.
+- Trendline color is resolved once via `cssVar` at creation; won't follow theme changes.
+- No rubber-band preview between first and second click (candidate for 18.10).
+
+## Deferred from: code review of story-18.3 (2026-09-19)
+
+- Measurement drag past the last bar freezes at the last valid point (no coordinate->time there); same root cause as 18.2's empty-margin item.
+- Measure mousedown on price/time axis strips starts a measurement; mouse events only (no touch); label unclamped at pane edges; O(n) `computeMeasurement` per mousemove; forming live bar not in the label counts.
+
+## Deferred from: code review of story-18.4 (2026-09-19)
+
+- Replay: no follow-scroll -- revealed bars may end up off-screen right after `setData`; verify in a real browser and add `scrollToPosition`/`scrollToRealTime` if so.
+- Replay polish: silent no-op when picking a gap; Play at newest bar does nothing visibly; Step back can pass the start marker; play interval restarts on any `candles` identity change; marker color resolved at construction.
+
+## Deferred from: story 18.5 backend verification (2026-09-19)
+
+- `GET /api/candles` `has_more` probes only one query window back, so a collector outage longer than that window (limit*bar_seconds*3, capped at 7 days -- ~25h at 1-minute bars) makes pagination report exhaustion while older data exists. Affects how far back FRVP scroll-back can reach across outages. Pre-existing; not truncation of a requested range.
+
+## Deferred from: code review of story-18.5 (2026-09-19)
+
+- `VolumeProfilePrimitive.xAnchor` is a pixel x; range-pinned profiles (FRVP, Session) need a time-based anchor so pan/zoom doesn't strand them -- handle when 18.6 places the first fixed profile.
+- POC color hardcoded (`#ffff55`), Value Area band reuses `upColor`; rows with null y-spans can bridge a Value Area gap; row gaps not bitmap-pixel-snapped.
+
+## Deferred from: code review of story-18.6 (2026-09-19)
+
+- FRVP: dragging past the last bar has no coordinate->time so the endpoint is dropped/stale (same root as 18.2/18.3); edge ghost not cancelled if the edge effect is torn down mid-drag; no hover cursor on edges; shared settings panel only appears once a profile is placed; removal is a text button outside the chart rather than an in-chart x.
+
+## Deferred from: code review of story-18.7 (2026-09-19)
+
+- VRVP recomputes on every pan frame (no rAF throttle or range quantization); a visible range extending past the loaded candles is clamped to the loaded part without a cue; fixed 150px width is not clamped to narrow panes; VRVP settings are not persisted across remounts.
+
+## Deferred from: code review of story-18.8 (2026-09-19)
+
+- Session profiles: `respondsToZoom` is a draw-time gap tweak only; partly loaded sessions draw narrow (0.7 x loaded span; zero width for a single bar); `sinceSeconds` is fixed when the profile is added (no UTC-midnight re-anchor); every Sessions edit re-pages history from now; replay far in the past has no session history before the fetch window; an empty server page across a long outage stops paging early (see 18.5's `has_more` ceiling).
+
+## Deferred from: code review of story-18.9 (2026-09-19)
+
+- Session/periodic profiles: every period/count change re-pages from now (no debounce or abort of in-flight pages, no loading indicator); `sinceSeconds` is not re-anchored at a period rollover; the PVP period choice is not persisted; `SESSION_PRESETS.period` is a fixed period for SVP but only the dropdown default for PVP; dropdown shows raw values.
+
+## Deferred from: story 18.10 parity audit (2026-09-19)
+
+- **Live-app §A8.2 walkthrough owed for all of Epic 18** (18.1-18.10 are UI verified only in jsdom with a mocked lightweight-charts): pan/zoom, fit/latest, pane resize hit zone, every drawing tool's real mouse mechanics, replay, all volume-profile variants' actual drawing (right-axis anchoring, time-anchored session/FRVP widths, edge grab, respondsToZoom).
+- Crosshair readout status bar (O/H/L/C/time on hover) does not exist.
+- Indicator legend (gear / eye / x per indicator, top-left of its pane) does not exist; indicators are managed in the picker list (dropdown + Add, inline params + Apply, Remove), and there is no visibility toggle.
+- Trendline placement is two-click, not click-drag.
+- Alerts: Epic 20.

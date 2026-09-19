@@ -1,4 +1,5 @@
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render as rtlRender, screen, within } from "@testing-library/react";
+import type { ReactElement } from "react";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -25,12 +26,28 @@ const hooks = vi.hoisted(() => ({
   liveBar: [] as number[],
   pickerBar: [] as number[],
 }));
-const EMPTY_CANDLES = { candles: [], volume: [] };
+// Stable references (a fresh array per render would churn useReplay's memo) that the
+// replay tests swap in.
+const mocks = vi.hoisted(() => ({
+  candles: [] as unknown[],
+  volume: [] as unknown[],
+  liveBar: null as unknown,
+  session: { candles: [] as unknown[], volume: [] as unknown[], completeFrom: null as number | null },
+  sessionArgs: { enabled: false, sinceSeconds: 0, barSeconds: 0 },
+}));
+
 vi.mock("../hooks/useCandles", () => ({
   BAR_SECONDS: 60,
   useCandles: (_iid: string, _chart: unknown, _enabled: boolean, bar: number) => {
     hooks.candlesBar.push(bar);
-    return EMPTY_CANDLES;
+    return { candles: mocks.candles, volume: mocks.volume };
+  },
+}));
+
+vi.mock("../hooks/useSessionCandles", () => ({
+  useSessionCandles: (_iid: string, enabled: boolean, sinceSeconds: number, barSeconds: number) => {
+    mocks.sessionArgs = { enabled, sinceSeconds, barSeconds };
+    return mocks.session;
   },
 }));
 
@@ -41,7 +58,7 @@ vi.mock("../hooks/useSnapshotSeries", () => ({
 vi.mock("../hooks/useLiveCandle", () => ({
   useLiveCandle: (_iid: string, bar: number) => {
     hooks.liveBar.push(bar);
-    return null;
+    return mocks.liveBar;
   },
 }));
 
@@ -73,6 +90,23 @@ interface ChartStubProps {
   priceLines?: PriceLineSpec[];
   onPriceClick?: (price: number) => void;
   onPriceLineDrag?: (id: string, price: number) => void;
+  drawings?: { id: string; kind: string; anchors: unknown[] }[];
+  onPointClick?: (point: { time: number; price: number }) => void;
+  measureActive?: boolean;
+  onMeasureEnd?: () => void;
+  data?: { time: number }[];
+  panes?: { id: string; data: { time: number }[] }[];
+  liveBar?: unknown;
+  markerTime?: number | null;
+  volumeProfiles?: { id: string; profile: { totalVolume: number; rows: unknown[] }; xAnchor: unknown; width: unknown; edges?: unknown; respondsToZoom?: boolean; widthFraction?: number }[];
+  rangeSelectActive?: boolean;
+  profileEdgesEditable?: boolean;
+  onChartApi?: (chart: unknown) => void;
+  crosshairVisible?: boolean;
+  viewCommand?: { kind: string; seq: number } | null;
+  onRangeSelect?: (start: { time: number; price: number }, end: { time: number; price: number }) => void;
+  onProfileEdgeDrag?: (id: string, edge: "start" | "end", time: number) => void;
+  onProfileEdgeCommit?: (id: string, edge: "start" | "end", time: number) => void;
 }
 
 const lastChartProps: { current: ChartStubProps | null } = { current: null };
@@ -84,6 +118,12 @@ vi.mock("../components/chart/LightweightChart", () => ({
   },
 }));
 
+// The top bar's back-to-Rankings <Link> needs a router; `wrapper` (unlike wrapping the
+// element) survives `rerender`.
+// Some tests pass an element that already carries its own router (per-coin persistence,
+// toolbars); the rest render a bare <ChartPage /> and need the wrapper for its <Link>.
+const render = (ui: ReactElement) =>
+  ui.type === MemoryRouter ? rtlRender(ui) : rtlRender(ui, { wrapper: MemoryRouter });
 // Imported after the mocks above so ChartPage picks up the mocked client/hooks/chart.
 const { default: ChartPage } = await import("./ChartPage");
 const page = () => (
@@ -101,6 +141,10 @@ beforeEach(() => {
   hooks.liveBar = [];
   hooks.pickerBar = [];
   localStorage.clear();
+  mocks.candles = [];
+  mocks.volume = [];
+  mocks.liveBar = null;
+  mocks.session = { candles: [], volume: [], completeFrom: null };
 });
 
 afterEach(() => {
@@ -300,6 +344,7 @@ describe("ChartPage toolbars and timeframe (spec A8.1)", () => {
       "Alert",
       "Fit",
       "Latest",
+      "Replay",
     ]);
     expect(screen.getByRole("link", { name: /Rankings/ })).toHaveAttribute("href", "/");
     expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("BTC-USD-PERP.DYDX");
@@ -311,7 +356,14 @@ describe("ChartPage toolbars and timeframe (spec A8.1)", () => {
     const names = within(screen.getByRole("toolbar", { name: "Chart tools" }))
       .getAllByRole("button")
       .map((b) => b.getAttribute("aria-label"));
-    expect(names).toEqual(["Cursor tool", "Crosshair toggle", "Horizontal line tool"]);
+    expect(names).toEqual([
+      "Cursor tool",
+      "Crosshair toggle",
+      "Trendline tool",
+      "Horizontal line tool",
+      "Measurement tool",
+      "Fixed range volume profile tool",
+    ]);
   });
 });
 
@@ -353,5 +405,650 @@ describe("ChartPage indicators dialog (spec A4.1)", () => {
     ]);
     expect(within(dialog).getByRole("button", { name: /^SimpleMovingAverage/ })).toBeDisabled();
     expect(within(dialog).getByText("added")).toBeInTheDocument();
+  });
+});
+
+describe("ChartPage trendline tool (Story 18.2)", () => {
+  const arm = () => fireEvent.click(screen.getByRole("button", { name: "Trendline tool" }));
+  const click = (time: number, price: number) =>
+    act(() => {
+      lastChartProps.current!.onPointClick!({ time, price });
+    });
+
+  it("creates a trendline from two clicks, then disarms (AC #1/#2)", () => {
+    render(<ChartPage />);
+    arm();
+
+    click(100, 10);
+    expect(lastChartProps.current!.drawings).toEqual([]);
+    click(200, 20);
+
+    expect(lastChartProps.current!.drawings).toEqual([
+      {
+        id: "trendline-1",
+        kind: "trendline",
+        anchors: [
+          { time: 100, price: 10 },
+          { time: 200, price: 20 },
+        ],
+        color: "#55ffff",
+      },
+    ]);
+    expect(screen.getByRole("button", { name: "Cursor tool" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("ignores point clicks while the trendline tool is not armed", () => {
+    render(<ChartPage />);
+
+    click(100, 10);
+    click(200, 20);
+
+    expect(lastChartProps.current!.drawings).toEqual([]);
+  });
+
+  it("cancels an in-progress line on Escape without creating a drawing (AC #5)", () => {
+    render(<ChartPage />);
+    arm();
+    click(100, 10);
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    arm();
+    click(200, 20);
+    click(300, 30);
+
+    // The Esc'd first point is gone: the new line starts at 200, not 100.
+    expect(lastChartProps.current!.drawings).toHaveLength(1);
+    expect(lastChartProps.current!.drawings![0].anchors[0]).toEqual({ time: 200, price: 20 });
+  });
+
+  it("discards a pending first point when another tool is selected", () => {
+    render(<ChartPage />);
+    arm();
+    click(100, 10);
+
+    fireEvent.click(screen.getByRole("button", { name: "Cursor tool" }));
+    arm();
+    click(200, 20);
+    click(300, 30);
+
+    expect(lastChartProps.current!.drawings![0].anchors[0]).toEqual({ time: 200, price: 20 });
+  });
+
+  it("works in Lines mode too", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+
+    expect(screen.getByRole("button", { name: "Trendline tool" })).toBeEnabled();
+  });
+});
+
+describe("ChartPage measurement tool (Story 18.3)", () => {
+  it("arms the measurement tool and disarms it when the drag ends (AC #1/#5)", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Measurement tool" }));
+    expect(lastChartProps.current!.measureActive).toBe(true);
+
+    act(() => {
+      lastChartProps.current!.onMeasureEnd!();
+    });
+
+    expect(lastChartProps.current!.measureActive).toBe(false);
+    expect(screen.getByRole("button", { name: "Cursor tool" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("cancels an armed measurement on Escape", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Measurement tool" }));
+
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    expect(lastChartProps.current!.measureActive).toBe(false);
+  });
+
+  it("is disabled in Lines mode", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+
+    expect(screen.getByRole("button", { name: "Measurement tool" })).toBeDisabled();
+  });
+});
+
+describe("ChartPage bar replay (Story 18.4)", () => {
+  const bars = [60, 120, 180, 240, 300].map((time) => ({ time, open: 1, high: 2, low: 1, close: 1 }));
+  const pickBar = (time: number) =>
+    act(() => {
+      lastChartProps.current!.onPointClick!({ time, price: 1 });
+    });
+
+  beforeEach(() => {
+    mocks.candles = bars;
+    mocks.liveBar = { time: 360, open: 1, high: 1, low: 1, close: 1 };
+  });
+
+  it("picks a start bar, hides later bars, marks it and suppresses the live bar (AC #1/#2)", () => {
+    render(<ChartPage />);
+    expect(lastChartProps.current!.data).toHaveLength(5);
+    expect(lastChartProps.current!.liveBar).toBe(mocks.liveBar);
+
+    fireEvent.click(screen.getByRole("button", { name: "Replay" }));
+    expect(screen.getByText("Click a candle to start the replay")).toBeInTheDocument();
+    pickBar(120);
+
+    expect(lastChartProps.current!.data!.map((c) => c.time)).toEqual([60, 120]);
+    expect(lastChartProps.current!.markerTime).toBe(120);
+    expect(lastChartProps.current!.liveBar).toBeNull();
+    expect(screen.getByRole("group", { name: "Replay controls" })).toBeInTheDocument();
+  });
+
+  it("trims volume and indicator panes to the replay position too (no future leak)", () => {
+    mocks.volume = bars.map((b) => ({ time: b.time, value: 1 }));
+    render(<ChartPage />);
+    expect(lastChartProps.current!.panes!.find((p) => p.id === "volume")!.data).toHaveLength(5);
+
+    fireEvent.click(screen.getByRole("button", { name: "Replay" }));
+    pickBar(120);
+
+    expect(lastChartProps.current!.panes!.find((p) => p.id === "volume")!.data.map((d) => d.time)).toEqual([60, 120]);
+  });
+
+  it("steps forward and back through the control bar (AC #3/#4)", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Replay" }));
+    pickBar(120);
+
+    fireEvent.click(screen.getByRole("button", { name: "Step forward" }));
+    expect(lastChartProps.current!.data).toHaveLength(3);
+    fireEvent.click(screen.getByRole("button", { name: "Step back" }));
+    fireEvent.click(screen.getByRole("button", { name: "Step back" }));
+    expect(lastChartProps.current!.data).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "Step back" }));
+    expect(lastChartProps.current!.data).toHaveLength(1);
+  });
+
+  it("restores the full dataset and removes the controls and marker on Exit (AC #6)", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Replay" }));
+    pickBar(120);
+
+    fireEvent.click(screen.getByRole("button", { name: "Exit" }));
+
+    expect(lastChartProps.current!.data).toHaveLength(5);
+    expect(lastChartProps.current!.markerTime).toBeNull();
+    expect(lastChartProps.current!.liveBar).toBe(mocks.liveBar);
+    expect(screen.queryByRole("group", { name: "Replay controls" })).toBeNull();
+  });
+
+  it("Go to... re-picks without leaving replay; Esc while picking returns to the replay", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Replay" }));
+    pickBar(120);
+
+    fireEvent.click(screen.getByRole("button", { name: "Go to..." }));
+    expect(lastChartProps.current!.data).toHaveLength(5);
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(lastChartProps.current!.data).toHaveLength(2);
+
+    fireEvent.click(screen.getByRole("button", { name: "Go to..." }));
+    pickBar(240);
+    expect(lastChartProps.current!.data).toHaveLength(4);
+    expect(lastChartProps.current!.markerTime).toBe(240);
+  });
+
+  it("does not place a trendline point from the click that picks the start bar", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Replay" }));
+
+    pickBar(120);
+
+    fireEvent.click(screen.getByRole("button", { name: "Trendline tool" }));
+    pickBar(60);
+    pickBar(120);
+    expect(lastChartProps.current!.drawings).toHaveLength(1);
+  });
+
+  it("is disabled in Lines mode", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+
+    expect(screen.getByRole("button", { name: "Replay" })).toBeDisabled();
+  });
+});
+
+describe("ChartPage fixed range volume profile (Story 18.6)", () => {
+  const bars = [1, 2, 3, 4, 5].map((n) => ({ time: n, open: n, high: n + 1, low: n, close: n + 1 }));
+  const select = (a: number, b: number) =>
+    act(() => {
+      lastChartProps.current!.onRangeSelect!({ time: a, price: 1 }, { time: b, price: 2 });
+    });
+
+  beforeEach(() => {
+    mocks.candles = bars;
+    mocks.volume = bars.map((b) => ({ time: b.time, value: 10 }));
+  });
+
+  it("arms the FRVP tool, computes the profile for the dragged range once, then disarms (AC #1/#2)", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Fixed range volume profile tool" }));
+    expect(lastChartProps.current!.rangeSelectActive).toBe(true);
+
+    select(2, 4);
+
+    const [spec] = lastChartProps.current!.volumeProfiles!;
+    expect(spec.id).toBe("frvp-1");
+    expect(spec.profile.totalVolume).toBe(30);
+    expect(spec.xAnchor).toEqual({ time: 2 });
+    expect(spec.width).toEqual({ toTime: 4 });
+    expect(lastChartProps.current!.rangeSelectActive).toBe(false);
+  });
+
+  it("stays static: new candles/pan never recompute a placed profile (AC #3)", () => {
+    const { rerender } = render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Fixed range volume profile tool" }));
+    select(2, 4);
+    const placed = lastChartProps.current!.volumeProfiles![0].profile;
+
+    mocks.candles = [...bars, { time: 6, open: 6, high: 7, low: 6, close: 7 }];
+    mocks.volume = mocks.candles.map((b) => ({ time: (b as { time: number }).time, value: 99 }));
+    rerender(<ChartPage />);
+
+    expect(lastChartProps.current!.volumeProfiles![0].profile).toBe(placed);
+  });
+
+  it("moves a ghost edge without recomputing, then recomputes once on commit (AC #3)", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Fixed range volume profile tool" }));
+    select(2, 4);
+    const placed = lastChartProps.current!.volumeProfiles![0].profile;
+
+    act(() => lastChartProps.current!.onProfileEdgeDrag!("frvp-1", "end", 5));
+    expect(lastChartProps.current!.volumeProfiles![0].width).toEqual({ toTime: 5 });
+    expect(lastChartProps.current!.volumeProfiles![0].profile).toBe(placed);
+
+    act(() => lastChartProps.current!.onProfileEdgeCommit!("frvp-1", "end", 5));
+    expect(lastChartProps.current!.volumeProfiles).toHaveLength(1);
+    expect(lastChartProps.current!.volumeProfiles![0].profile.totalVolume).toBe(40);
+  });
+
+  it("supports several profiles, removable independently (AC #4)", () => {
+    render(<ChartPage />);
+    for (const [a, b] of [[1, 2], [3, 5]]) {
+      fireEvent.click(screen.getByRole("button", { name: "Fixed range volume profile tool" }));
+      select(a, b);
+    }
+    expect(lastChartProps.current!.volumeProfiles!.map((p) => p.id)).toEqual(["frvp-1", "frvp-2"]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove volume profile frvp-1" }));
+
+    expect(lastChartProps.current!.volumeProfiles!.map((p) => p.id)).toEqual(["frvp-2"]);
+  });
+
+  it("ignores a range with no candles in it and cancels the armed tool on Escape", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Fixed range volume profile tool" }));
+
+    select(50, 60);
+    expect(lastChartProps.current!.volumeProfiles).toEqual([]);
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(lastChartProps.current!.rangeSelectActive).toBe(false);
+  });
+
+  it("rebuilds placed profiles when the shared settings change (row count)", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Fixed range volume profile tool" }));
+    select(1, 5);
+    expect(lastChartProps.current!.volumeProfiles![0].profile.rows).toHaveLength(24);
+
+    fireEvent.change(screen.getByLabelText("Row count"), { target: { value: "6" } });
+
+    expect(lastChartProps.current!.volumeProfiles![0].profile.rows).toHaveLength(6);
+  });
+
+  it("shows only revealed bars during a replay and the full stored profile after it ends", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Fixed range volume profile tool" }));
+    select(1, 5);
+    expect(lastChartProps.current!.volumeProfiles![0].profile.totalVolume).toBeCloseTo(50);
+
+    fireEvent.click(screen.getByRole("button", { name: "Replay" }));
+    act(() => lastChartProps.current!.onPointClick!({ time: 3, price: 1 }));
+    expect(lastChartProps.current!.volumeProfiles![0].profile.totalVolume).toBeCloseTo(30);
+
+    fireEvent.click(screen.getByRole("button", { name: "Exit" }));
+    expect(lastChartProps.current!.volumeProfiles![0].profile.totalVolume).toBeCloseTo(50);
+  });
+
+  it("only lets edges be grabbed while the cursor tool is active", () => {
+    render(<ChartPage />);
+    expect(lastChartProps.current!.profileEdgesEditable).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
+
+    expect(lastChartProps.current!.profileEdgesEditable).toBe(false);
+  });
+
+  it("is disabled in Lines mode", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+
+    expect(screen.getByRole("button", { name: "Fixed range volume profile tool" })).toBeDisabled();
+  });
+});
+
+describe("ChartPage visible range volume profile (Story 18.7)", () => {
+  const bars = [1, 2, 3, 4, 5, 6].map((n) => ({ time: n, open: n, high: n + 1, low: n, close: n + 1 }));
+  type RangeHandler = (range: { from: number; to: number } | null) => void;
+  let handlers: RangeHandler[];
+  let visible: { from: number; to: number };
+
+  const attachChart = () =>
+    act(() => {
+      lastChartProps.current!.onChartApi!({
+        applyOptions: vi.fn(),
+        timeScale: () => ({
+          getVisibleRange: () => visible,
+          subscribeVisibleTimeRangeChange: (h: RangeHandler) => handlers.push(h),
+          unsubscribeVisibleTimeRangeChange: vi.fn(),
+        }),
+      });
+    });
+  const vrvp = () => lastChartProps.current!.volumeProfiles!.filter((p) => p.id === "vrvp");
+
+  beforeEach(() => {
+    handlers = [];
+    visible = { from: 2, to: 4 };
+    mocks.candles = bars;
+    mocks.volume = bars.map((b) => ({ time: b.time, value: 10 }));
+  });
+
+  it("adds a right-anchored profile of the visible bars, only after Add (AC #1/#2)", () => {
+    render(<ChartPage />);
+    attachChart();
+    expect(vrvp()).toHaveLength(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "Add visible range volume profile" }));
+
+    expect(vrvp()).toHaveLength(1);
+    expect(vrvp()[0].xAnchor).toBe("right");
+    expect(vrvp()[0].profile.totalVolume).toBeCloseTo(30);
+  });
+
+  it("recomputes once per visible-range change and updates the same entry, never adding one (AC #3)", () => {
+    render(<ChartPage />);
+    attachChart();
+    fireEvent.click(screen.getByRole("button", { name: "Add visible range volume profile" }));
+    const first = vrvp()[0].profile;
+
+    act(() => handlers.forEach((h) => h({ from: 2, to: 4 }))); // unchanged range
+    expect(vrvp()[0].profile).toBe(first);
+
+    act(() => handlers.forEach((h) => h({ from: 1, to: 6 })));
+    expect(vrvp()).toHaveLength(1);
+    expect(vrvp()[0].profile).not.toBe(first);
+    expect(vrvp()[0].profile.totalVolume).toBeCloseTo(60);
+  });
+
+  it("subscribes to the visible range only while active, and shows revealed bars only during a replay", () => {
+    render(<ChartPage />);
+    attachChart();
+    expect(handlers).toHaveLength(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "Add visible range volume profile" }));
+    expect(handlers).toHaveLength(1);
+    expect(vrvp()[0].profile.totalVolume).toBeCloseTo(30); // bars 2..4
+
+    fireEvent.click(screen.getByRole("button", { name: "Replay" }));
+    act(() => lastChartProps.current!.onPointClick!({ time: 3, price: 1 }));
+    expect(vrvp()[0].profile.totalVolume).toBeCloseTo(20); // bars 2..3, bar 4 hidden
+  });
+
+  it("disables Add while active or outside Candles mode", () => {
+    render(<ChartPage />);
+    attachChart();
+    const add = () => screen.getByRole("button", { name: "Add visible range volume profile" });
+    expect(add()).toBeEnabled();
+
+    fireEvent.click(add());
+    expect(add()).toBeDisabled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    expect(screen.getByText("Shown in Candles mode only")).toBeInTheDocument();
+  });
+
+  it("is a single instance: adding again does not stack, Remove clears it (AC #4)", () => {
+    render(<ChartPage />);
+    attachChart();
+    const add = () => fireEvent.click(screen.getByRole("button", { name: "Add visible range volume profile" }));
+    add();
+    add();
+    expect(vrvp()).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove visible range volume profile" }));
+
+    expect(vrvp()).toHaveLength(0);
+  });
+
+  it("coexists with a placed FRVP and is hidden in Lines mode", () => {
+    render(<ChartPage />);
+    attachChart();
+    fireEvent.click(screen.getByRole("button", { name: "Add visible range volume profile" }));
+    fireEvent.click(screen.getByRole("button", { name: "Fixed range volume profile tool" }));
+    act(() => lastChartProps.current!.onRangeSelect!({ time: 1, price: 1 }, { time: 3, price: 2 }));
+    expect(lastChartProps.current!.volumeProfiles!.map((p) => p.id)).toEqual(["frvp-1", "vrvp"]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+
+    expect(vrvp()).toHaveLength(0);
+  });
+});
+
+describe("ChartPage session volume profiles (Story 18.8)", () => {
+  const D1 = Date.UTC(2024, 0, 1) / 1000;
+  const D2 = D1 + 86_400;
+  const D3 = D2 + 86_400;
+  const times = [D1, D1 + 60, D2, D2 + 60, D3, D3 + 60];
+  const bar = (t: number, p: number) => ({ time: t, open: p, high: p + 1, low: p, close: p + 1 });
+  const sessions = () =>
+    lastChartProps.current!.volumeProfiles!.filter((p) => p.id.startsWith("session-"));
+
+  beforeEach(() => {
+    const candles = times.map((t, i) => bar(t, 10 + i * 10));
+    mocks.candles = candles;
+    mocks.session = { candles, volume: times.map((t) => ({ time: t, value: 5 })), completeFrom: null };
+  });
+
+  it("adds one independent profile per UTC day, anchored to that session's bars (AC #1/#4)", () => {
+    render(<ChartPage />);
+    expect(sessions()).toHaveLength(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+
+    expect(sessions().map((s) => s.id)).toEqual([`session-${D1}`, `session-${D2}`, `session-${D3}`]);
+    expect(sessions()[1].xAnchor).toEqual({ time: D2 });
+    expect(sessions()[1].width).toEqual({ toTime: D2 + 60 });
+    expect(sessions()[1].profile.totalVolume).toBeCloseTo(10);
+    expect(sessions()[0].profile).not.toBe(sessions()[1].profile);
+  });
+
+  it("SVP HD is the same component with a higher row count and respondsToZoom (AC #3)", () => {
+    render(<ChartPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+    expect(sessions()[0].profile.rows).toHaveLength(24);
+    expect(sessions()[0].respondsToZoom).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile HD" }));
+    expect(sessions()).toHaveLength(3); // switched preset, not stacked
+    expect(sessions()[0].profile.rows).toHaveLength(120);
+    expect(sessions()[0].respondsToZoom).toBe(true);
+  });
+
+  it("keeps the session count and colors when switching presets", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+    fireEvent.change(screen.getByLabelText("Sessions to render"), { target: { value: "2" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile HD" }));
+
+    expect(sessions()).toHaveLength(2);
+    expect((screen.getByLabelText("Sessions to render") as HTMLInputElement).value).toBe("2");
+  });
+
+  it("says so when fewer sessions than requested can be drawn", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+    expect(screen.getByText(/Showing 3 of 5/)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("Sessions to render"), { target: { value: "3" } });
+
+    expect(screen.queryByText(/Showing/)).toBeNull();
+  });
+
+  it("limits the rendered sessions with the sessions setting (AC #4)", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+
+    fireEvent.change(screen.getByLabelText("Sessions to render"), { target: { value: "2" } });
+
+    expect(sessions().map((s) => s.id)).toEqual([`session-${D2}`, `session-${D3}`]);
+  });
+
+  it("can be removed, and is hidden in Lines mode", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    expect(sessions()).toHaveLength(0);
+    expect(screen.getByText("Shown in Candles mode only")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Candles" }));
+    expect(sessions()).toHaveLength(3);
+    fireEvent.click(screen.getByRole("button", { name: "Remove session volume profile" }));
+    expect(sessions()).toHaveLength(0);
+  });
+
+  it("draws a session over the part of it the chart has loaded, and skips one the chart holds none of", () => {
+    mocks.candles = [bar(D3, 50), bar(D3 + 60, 60)]; // chart only loaded the last day
+    render(<ChartPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+
+    expect(sessions().map((s) => s.id)).toEqual([`session-${D3}`]);
+  });
+});
+
+describe("ChartPage periodic volume profile (Story 18.9)", () => {
+  const MON1 = Date.UTC(2024, 0, 1) / 1000; // a Monday
+  const MON2 = MON1 + 7 * 86_400;
+  const times = [MON1, MON1 + 3 * 86_400, MON2, MON2 + 86_400];
+  const bar = (t: number, p: number) => ({ time: t, open: p, high: p + 1, low: p, close: p + 1 });
+  const periods = () => lastChartProps.current!.volumeProfiles!.filter((p) => p.id.startsWith("session-"));
+
+  beforeEach(() => {
+    const candles = times.map((t, i) => bar(t, 10 + i * 10));
+    mocks.candles = candles;
+    mocks.session = { candles, volume: times.map((t) => ({ time: t, value: 5 })), completeFrom: null };
+  });
+
+  it("adds a periodic profile (weekly by default) with one profile per period (AC #1/#2)", () => {
+    render(<ChartPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Add Periodic Volume Profile" }));
+
+    expect(periods().map((p) => p.id)).toEqual([`session-${MON1}`, `session-${MON2}`]);
+    expect(periods().map((p) => p.profile.totalVolume)).toEqual([10, 10]);
+    expect((screen.getByLabelText("Profile period") as HTMLSelectElement).value).toBe("weekly");
+  });
+
+  it("regroups when the period dropdown changes, offering only the fixed set", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Add Periodic Volume Profile" }));
+    const select = screen.getByLabelText("Profile period") as HTMLSelectElement;
+    expect([...select.options].map((o) => o.value)).toEqual(["4h", "daily", "weekly", "monthly"]);
+
+    fireEvent.change(select, { target: { value: "daily" } });
+
+    expect(periods()).toHaveLength(4); // four distinct UTC days
+  });
+
+  it("switching the period refetches at that period's bar size and a deeper wanted start", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Add Periodic Volume Profile" }));
+    const weekly = { ...mocks.sessionArgs };
+    expect(weekly).toMatchObject({ enabled: true, barSeconds: 300 });
+
+    fireEvent.change(screen.getByLabelText("Profile period"), { target: { value: "monthly" } });
+
+    expect(mocks.sessionArgs.barSeconds).toBe(900);
+    expect(mocks.sessionArgs.sinceSeconds).toBeLessThan(weekly.sinceSeconds); // 5 months back vs 5 weeks back
+  });
+
+  it("switching PVP -> SVP -> PVP restarts on the preset's default period", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Add Periodic Volume Profile" }));
+    fireEvent.change(screen.getByLabelText("Profile period"), { target: { value: "monthly" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+    expect(mocks.sessionArgs.barSeconds).toBe(60);
+    fireEvent.click(screen.getByRole("button", { name: "Add Periodic Volume Profile" }));
+
+    expect((screen.getByLabelText("Profile period") as HTMLSelectElement).value).toBe("weekly");
+  });
+
+  it("reuses the shared sessions-to-render setting (AC #3), and only PVP shows a period dropdown", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Add Periodic Volume Profile" }));
+    fireEvent.change(screen.getByLabelText("Sessions to render"), { target: { value: "1" } });
+    expect(periods()).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+    expect(screen.queryByLabelText("Profile period")).toBeNull();
+    expect(screen.getAllByLabelText("Sessions to render")).toHaveLength(1);
+  });
+});
+
+describe("cross-story: drawing tools during replay (Story 18.4 AC #5, verified end-to-end at page level in 18.10)", () => {
+  const bars = [1, 2, 3, 4, 5].map((n) => ({ time: n, open: n, high: n + 1, low: n, close: n + 1 }));
+  const point = (time: number, price: number) =>
+    act(() => {
+      lastChartProps.current!.onPointClick!({ time, price });
+    });
+
+  beforeEach(() => {
+    mocks.candles = bars;
+    mocks.volume = bars.map((b) => ({ time: b.time, value: 10 }));
+  });
+
+  it("places a trendline and a horizontal line while a replay is active, and they survive stepping", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Replay" }));
+    point(3, 1);
+    expect(lastChartProps.current!.data).toHaveLength(3);
+
+    fireEvent.click(screen.getByRole("button", { name: "Trendline tool" }));
+    point(1, 1);
+    point(3, 2);
+    fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
+    act(() => lastChartProps.current!.onPriceClick!(1.5));
+    const drawings = lastChartProps.current!.drawings;
+    expect(drawings).toHaveLength(1);
+    expect(lastChartProps.current!.priceLines).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "Step forward" }));
+    expect(lastChartProps.current!.data).toHaveLength(4);
+    expect(lastChartProps.current!.drawings).toBe(drawings);
+    expect(lastChartProps.current!.priceLines).toHaveLength(1);
+  });
+
+  it("Esc cancels an in-progress tool during replay without ending the replay", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Replay" }));
+    point(3, 1);
+    fireEvent.click(screen.getByRole("button", { name: "Trendline tool" }));
+    point(1, 1);
+
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    expect(screen.getByRole("group", { name: "Replay controls" })).toBeInTheDocument();
+    expect(lastChartProps.current!.drawings).toHaveLength(0);
   });
 });

@@ -14,16 +14,32 @@ import {
 } from "lightweight-charts";
 import { useEffect, useRef } from "react";
 
-import type { ChartDatum } from "../../hooks/useCandles";
+import type { ChartDatum, VolumeDatum } from "../../hooks/useCandles";
 import type { LiveBar } from "../../hooks/useLiveCandle";
 import type { IndicatorDatum } from "../../hooks/useIndicatorSeries";
 import type { SnapshotLinesData } from "../../hooks/useSnapshotSeries";
 import { type LegendSeries, renderLegends } from "./legend";
 import { assignPaneColor, cssVar } from "./paneColors";
+import {
+  MeasurementPrimitive,
+  computeMeasurement,
+  formatMeasurement,
+} from "./primitives/MeasurementPrimitive";
+import { attachRangeDrag } from "./rangeDrag";
+import { VolumeProfilePrimitive, type VolumeProfileRenderSpec } from "./primitives/VolumeProfilePrimitive";
+import { VerticalMarkerPrimitive } from "./primitives/VerticalMarkerPrimitive";
+import { TrendlinePrimitive, type TrendlineAnchor } from "./primitives/TrendlinePrimitive";
 
 export type PaneSeriesKind = "Line" | "Histogram";
 
 export type ChartMode = "candles" | "lines";
+
+// Story 18.10: a one-shot view command from the page's Fit / Latest buttons. `seq` makes a
+// repeated identical click a NEW command (the effect keys on the object).
+export interface ViewCommand {
+  kind: "fit" | "latest";
+  seq: number;
+}
 
 // Story 15.7's 5 main-pane line series, in a fixed order -- also the color-slot
 // assignment order (mirrors DEFAULT_PANE_IDS' role for indicator sub-panes).
@@ -59,6 +75,22 @@ export interface PriceLineSpec {
   price: number;
   color: string;
   title?: string;
+}
+
+// Story 18.2: a tool-drawn custom-primitive drawing. A tagged union so Story 18.3's
+// measurement joins as another `kind`; kept separate from PriceLineSpec because a
+// two-anchor primitive and a native single-value price line are different mechanisms.
+export interface TrendlineSpec {
+  id: string;
+  kind: "trendline";
+  anchors: [TrendlineAnchor, TrendlineAnchor];
+  color: string;
+}
+export type DrawingSpec = TrendlineSpec;
+
+// Story 18.5: a Volume Profile placed on the main pane; `id` is the caller's stable key.
+export interface VolumeProfileSpec extends VolumeProfileRenderSpec {
+  id: string;
 }
 
 interface LightweightChartProps {
@@ -114,6 +146,50 @@ interface LightweightChartProps {
    * "candles"`; never called for a param without a point or when the conversion
    * returns null. */
   onPriceClick?: (price: number) => void;
+  /** Story 18.2: declarative custom-primitive drawings, attached to the current main-pane
+   * series (the candlestick series, or the `price` line series in Lines mode) and diffed
+   * against an internal `Map<string, TrendlinePrimitive>` registry like `priceLines` --
+   * add via `attachPrimitive`, changed anchors/color via `update()`, removed ids via
+   * `detachPrimitive`. Never touches the visible range. A mode flip replaces the host
+   * series, so the registry is cleared there and every spec re-attached on the new one. */
+  drawings?: DrawingSpec[];
+  /** Story 18.2: reports a chart click as a `{time, price}` point (same click subscription
+   * and grab-suppression as `onPriceClick`; a click with no resolvable time -- past the
+   * last bar's coordinate space -- is not reported). Works in both modes. */
+  onPointClick?: (point: TrendlineAnchor) => void;
+  /** Story 18.3: while true (candles mode only), a click-drag on the chart draws a
+   * transient measurement rectangle + label (a `MeasurementPrimitive` owned entirely by
+   * this component -- never in `drawings`) instead of panning; release removes it and
+   * reports `onMeasureEnd`. Turning the prop false mid-drag (Esc) cancels with no residue.
+   * The label is computed from `data` + `volume`, the arrays the chart already holds. */
+  measureActive?: boolean;
+  volume?: VolumeDatum[];
+  onMeasureEnd?: () => void;
+  /** Story 18.4: when set, a vertical marker line is drawn at this time (the replay start
+   * bar); `null`/omitted removes it. Attached to the main candlestick series. */
+  markerTime?: Time | null;
+  /** Story 18.10: crosshair on/off (the left toolbar's toggle); default on. */
+  crosshairVisible?: boolean;
+  /** Story 18.10: applied once per new command object -- `fit` snaps the visible range to
+   * all loaded data, `latest` scrolls to the newest bar. The only place this component
+   * deliberately moves the view; the data/pane effects still never do. */
+  viewCommand?: ViewCommand | null;
+  /** Story 18.5: declarative Volume Profiles (one `VolumeProfilePrimitive` each), diffed by
+   * id like `drawings`. Nothing in the app places one yet -- Stories 18.6-18.9 do. */
+  volumeProfiles?: VolumeProfileSpec[];
+  /** Story 18.6: while true (candles mode only) a click-drag selects a time range instead
+   * of panning -- a live rectangle preview (no calculation), and on release exactly one
+   * `onRangeSelect(start, end)`; a click without a drag reports nothing. Esc/disarm cancels. */
+  rangeSelectActive?: boolean;
+  onRangeSelect?: (start: TrendlineAnchor, end: TrendlineAnchor) => void;
+  /** Story 18.6: edge resize for profiles whose spec carries `edges`. Grabbing an edge
+   * (within a few px of it, inside the profile's vertical extent) reports `onProfileEdgeDrag`
+   * on every move -- for a cheap ghost only -- and exactly one `onProfileEdgeCommit` on release. */
+  /** Edges are only grabbable while true (default): the caller turns it off while another
+   * tool is armed so an edge press never steals that tool's click. */
+  profileEdgesEditable?: boolean;
+  onProfileEdgeDrag?: (id: string, edge: "start" | "end", time: Time) => void;
+  onProfileEdgeCommit?: (id: string, edge: "start" | "end", time: Time) => void;
   /** Story 15.5: the currently-forming candle bar, from `useLiveCandle`. Applied via
    * `series.update()` (not `setData()`) on the candlestick series only -- independent of
    * the `data`/`setData()` effect above and Story 15.4's `panes` effect below; neither of
@@ -204,13 +280,27 @@ export default function LightweightChart({
   priceLines = [],
   onPriceLineDrag,
   onPriceClick,
+  drawings = [],
+  onPointClick,
+  measureActive = false,
+  volume = [],
+  onMeasureEnd,
+  markerTime = null,
+  crosshairVisible = true,
+  viewCommand = null,
+  volumeProfiles = [],
+  rangeSelectActive = false,
+  onRangeSelect,
+  profileEdgesEditable = true,
+  onProfileEdgeDrag,
+  onProfileEdgeCommit,
   liveBar,
 }: LightweightChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
   const lineSeriesRef = useRef<Record<LineSeriesId, MainLineSeriesApi> | null>(null);
-  const prevLengthRef = useRef(0);
+  const prevFirstTimeRef = useRef<Time | null>(null);
   const prevLinesLengthRef = useRef(0);
   const panesRef = useRef<Map<string, PaneEntry>>(new Map());
   const legendItemsRef = useRef<LegendSeries[]>([]);
@@ -223,6 +313,13 @@ export default function LightweightChart({
   const lastCrosshairRef = useRef<MouseEventParams | null>(null);
   const dragIdRef = useRef<string | null>(null);
   const suppressNextClickRef = useRef(false);
+  const measureDataRef = useRef<{ data: ChartDatum[]; volume: VolumeDatum[] }>({ data, volume });
+  const profileRegistryRef = useRef<Map<string, VolumeProfilePrimitive>>(new Map());
+  // Latest-callback/latest-specs refs: the drag effects below must not re-subscribe (and
+  // lose an in-flight drag) whenever the caller re-renders with fresh closures or specs.
+  const latestRef = useRef({ volumeProfiles, onRangeSelect, onProfileEdgeDrag, onProfileEdgeCommit });
+  const markerRef = useRef<VerticalMarkerPrimitive | null>(null);
+  const drawingRegistryRef = useRef<Map<string, TrendlinePrimitive>>(new Map());
   const lastLiveBarTimeRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -284,6 +381,8 @@ export default function LightweightChart({
     // Captured to a local for the cleanup below, same as `panes` -- reading
     // `.current` inside a cleanup is what the react-hooks/exhaustive-deps lint flags.
     const priceLineRegistry = priceLineRegistryRef.current;
+    const drawingRegistry = drawingRegistryRef.current;
+    const profileRegistry = profileRegistryRef.current;
 
     return () => {
       cancelled = true;
@@ -295,6 +394,8 @@ export default function LightweightChart({
       // Story 18.1: the price lines die with the chart here, same as the panes -- the
       // registry must not outlive the series instances it holds lines on.
       priceLineRegistry.clear();
+      drawingRegistry.clear();
+      profileRegistry.clear();
       onChartApi(null);
       chart.remove();
     };
@@ -314,6 +415,13 @@ export default function LightweightChart({
     // these series -- only an actual mode change does.
     const chart = chartRef.current;
     if (!chart) return;
+
+    // Story 18.2: drawings are attached to the main-pane host series, which is replaced
+    // on every mode flip -- drop the entries (no detach: the series goes away entirely)
+    // and let the [drawings, mode] effect re-attach them to the new host.
+    drawingRegistryRef.current.clear();
+    profileRegistryRef.current.clear();
+    markerRef.current = null;
 
     if (mode === "candles") {
       if (lineSeriesRef.current) {
@@ -341,13 +449,13 @@ export default function LightweightChart({
           borderColor: dim,
           wickColor: dim,
         });
-        prevLengthRef.current = 0;
+        prevFirstTimeRef.current = null;
       }
     } else {
       if (seriesRef.current) {
         chart.removeSeries(seriesRef.current);
         seriesRef.current = null;
-        prevLengthRef.current = 0;
+        prevFirstTimeRef.current = null;
         // Story 18.1: the candlestick series' price lines die with the series here --
         // drop the registry entries without removePriceLine() calls (the series is
         // going away entirely), but NOT the `priceLines` prop, which stays the source
@@ -379,11 +487,16 @@ export default function LightweightChart({
     // time older history loads -- defeating the point of scroll-back pagination
     // (AC #3). Only applies once there was a previous, non-empty dataset (the initial
     // load has no prior view to preserve).
-    const addedAtFront = prevLengthRef.current > 0 ? data.length - prevLengthRef.current : 0;
+    //
+    // Detected by where the previous FIRST bar now sits, not by a length change: replay
+    // (Story 18.4) grows/shrinks the array at its newest end, which must never be
+    // mistaken for a prepend.
+    const prevFirst = prevFirstTimeRef.current;
+    const addedAtFront = prevFirst === null ? 0 : Math.max(0, data.findIndex((d) => d.time === prevFirst));
     const rangeBeforeUpdate = addedAtFront > 0 ? chart?.timeScale().getVisibleLogicalRange() : null;
 
     series.setData(data);
-    prevLengthRef.current = data.length;
+    prevFirstTimeRef.current = data.length > 0 ? data[0].time : null;
 
     if (rangeBeforeUpdate && chart) {
       chart.timeScale().setVisibleLogicalRange({
@@ -564,6 +677,248 @@ export default function LightweightChart({
   }, [priceLines, mode]);
 
   useEffect(() => {
+    measureDataRef.current = { data, volume };
+  }, [data, volume]);
+
+  useEffect(() => {
+    // Story 18.5: volumeProfiles registry diff -- same discipline as `drawings`.
+    const host = seriesRef.current ?? lineSeriesRef.current?.price;
+    if (!host) return;
+    const registry = profileRegistryRef.current;
+    const specsById = new Map(volumeProfiles.map((spec) => [spec.id, spec] as const));
+
+    for (const [id, primitive] of [...registry]) {
+      if (!specsById.has(id)) {
+        host.detachPrimitive(primitive);
+        registry.delete(id);
+      }
+    }
+    for (const spec of volumeProfiles) {
+      const primitive = registry.get(spec.id);
+      if (primitive) {
+        primitive.update(spec);
+        continue;
+      }
+      const created = new VolumeProfilePrimitive(spec);
+      host.attachPrimitive(created);
+      registry.set(spec.id, created);
+    }
+  }, [volumeProfiles, mode]);
+
+  const crosshairShownRef = useRef(true);
+  useEffect(() => {
+    // Story 18.10: only a real change reaches the chart (the initial "on" is the library's
+    // own default, so mount adds no applyOptions call). The crosshair MODE stays untouched
+    // (the library default snaps to data, and hover/drag handling here depends on its
+    // events still flowing) -- "off" only hides the lines and their axis labels.
+    const chart = chartRef.current;
+    if (!chart || crosshairShownRef.current === crosshairVisible) return;
+    crosshairShownRef.current = crosshairVisible;
+    const line = { visible: crosshairVisible, labelVisible: crosshairVisible };
+    chart.applyOptions({ crosshair: { vertLine: line, horzLine: line } });
+  }, [crosshairVisible]);
+
+  useEffect(() => {
+    if (!viewCommand) return;
+    const timeScale = chartRef.current?.timeScale();
+    if (!timeScale) return;
+    if (viewCommand.kind === "fit") timeScale.fitContent();
+    else timeScale.scrollToRealTime();
+  }, [viewCommand]);
+
+  useEffect(() => {
+    // Story 18.4 (AC #2/#6): add/move/remove the replay start marker.
+    const host = seriesRef.current;
+    if (!host || mode !== "candles") return;
+    if (markerTime === null) {
+      if (markerRef.current) host.detachPrimitive(markerRef.current);
+      markerRef.current = null;
+      return;
+    }
+    if (markerRef.current) {
+      markerRef.current.setTime(markerTime);
+      return;
+    }
+    markerRef.current = new VerticalMarkerPrimitive(markerTime, cssVar("--color-warn", "#ffff55"));
+    host.attachPrimitive(markerRef.current);
+  }, [markerTime, mode]);
+
+  useEffect(() => {
+    latestRef.current = { volumeProfiles, onRangeSelect, onProfileEdgeDrag, onProfileEdgeCommit };
+  });
+
+  useEffect(() => {
+    // Story 18.6 (AC #2): range selection for the fixed-range volume profile -- a live
+    // rectangle preview (the measurement primitive with no label; NO profile calculation
+    // while dragging), then exactly one onRangeSelect on release.
+    const container = containerRef.current;
+    const chart = chartRef.current;
+    const host = seriesRef.current;
+    if (!container || !chart || !host || !rangeSelectActive || mode !== "candles") return;
+
+    const preview = new MeasurementPrimitive(cssVar("--color-active", "#55ffff"));
+    let attached = false;
+    const stopDrag = attachRangeDrag(container, chart, host, {
+      onMove: (start, end) => {
+        if (!attached) {
+          host.attachPrimitive(preview);
+          attached = true;
+        }
+        preview.setSelection(start, end, []);
+      },
+      onRelease: (last) => {
+        if (!last || !attached) return;
+        host.detachPrimitive(preview);
+        attached = false;
+        latestRef.current.onRangeSelect?.(last.start, last.end);
+      },
+    });
+    return () => {
+      stopDrag();
+      if (attached) host.detachPrimitive(preview);
+    };
+  }, [rangeSelectActive, mode]);
+
+  useEffect(() => {
+    // Story 18.6 (AC #3): edge grab-and-drag for placed profiles. Off while a range tool
+    // is armed (their capture-phase drags own the mouse then).
+    const container = containerRef.current;
+    const chart = chartRef.current;
+    const host = seriesRef.current;
+    if (!container || !chart || !host || !profileEdgesEditable || rangeSelectActive || measureActive || mode !== "candles") return;
+
+    const EDGE_TOLERANCE_PX = 6;
+    let grabbed: { id: string; edge: "start" | "end" } | null = null;
+    let lastTime: Time | null = null;
+
+    const timeAt = (event: MouseEvent): Time | null =>
+      chart.timeScale().coordinateToTime(event.clientX - container.getBoundingClientRect().left);
+
+    const findEdge = (event: MouseEvent): { id: string; edge: "start" | "end" } | null => {
+      const box = container.getBoundingClientRect();
+      const x = event.clientX - box.left;
+      const y = event.clientY - box.top;
+      for (const spec of latestRef.current.volumeProfiles) {
+        if (!spec.edges || spec.profile.rows.length === 0) continue;
+        const top = host.priceToCoordinate(spec.profile.rows[spec.profile.rows.length - 1].priceHigh);
+        const bottom = host.priceToCoordinate(spec.profile.rows[0].priceLow);
+        if (top === null || bottom === null) continue;
+        if (y < Math.min(top, bottom) - EDGE_TOLERANCE_PX || y > Math.max(top, bottom) + EDGE_TOLERANCE_PX) continue;
+        // The nearer edge wins, so a narrow range (edges within one tolerance of each other)
+        // keeps both grabbable.
+        let best: { id: string; edge: "start" | "end" } | null = null;
+        let bestDistance = EDGE_TOLERANCE_PX;
+        for (const edge of ["start", "end"] as const) {
+          const edgeX = chart.timeScale().timeToCoordinate(spec.edges[edge === "start" ? "startTime" : "endTime"]);
+          if (edgeX === null || Math.abs(x - edgeX) > bestDistance) continue;
+          bestDistance = Math.abs(x - edgeX);
+          best = { id: spec.id, edge };
+        }
+        if (best) return best;
+      }
+      return null;
+    };
+
+    const handleMouseDown = (event: MouseEvent): void => {
+      if (event.button !== 0 || grabbed) return;
+      grabbed = findEdge(event);
+      if (grabbed) event.stopPropagation();
+    };
+    const handleMouseMove = (event: MouseEvent): void => {
+      if (!grabbed) return;
+      // No button held = the release happened outside the window (blur): finish the drag
+      // instead of leaving it stuck to the cursor.
+      if (event.buttons === 0) {
+        handleMouseUp(event, true);
+        return;
+      }
+      const time = timeAt(event);
+      if (time === null) return;
+      lastTime = time;
+      latestRef.current.onProfileEdgeDrag?.(grabbed.id, grabbed.edge, time);
+    };
+    const handleMouseUp = (event: MouseEvent, lost = false): void => {
+      if (!grabbed || (!lost && event.button !== 0)) return;
+      const done = grabbed;
+      const time = lastTime;
+      grabbed = null;
+      lastTime = null;
+      if (time !== null) latestRef.current.onProfileEdgeCommit?.(done.id, done.edge, time);
+    };
+
+    container.addEventListener("mousedown", handleMouseDown, true);
+    window.addEventListener("mousemove", handleMouseMove);
+    window.addEventListener("mouseup", handleMouseUp);
+    return () => {
+      container.removeEventListener("mousedown", handleMouseDown, true);
+      window.removeEventListener("mousemove", handleMouseMove);
+      window.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, [profileEdgesEditable, rangeSelectActive, measureActive, mode]);
+
+  useEffect(() => {
+    // Story 18.3 (AC #2/#3/#5): the transient click-drag measurement, on the shared
+    // range-drag plumbing. The primitive is attached lazily on the first move (a click
+    // with no drag shows nothing and leaves the tool armed) and detached on release or,
+    // on Esc/disarm, by the cleanup below.
+    const container = containerRef.current;
+    const chart = chartRef.current;
+    const host = seriesRef.current;
+    if (!container || !chart || !host || !measureActive || mode !== "candles") return;
+
+    const primitive = new MeasurementPrimitive(cssVar("--color-active", "#55ffff"));
+    let attached = false;
+
+    const stopDrag = attachRangeDrag(container, chart, host, {
+      onMove: (start, end) => {
+        const { data: candles, volume: volumes } = measureDataRef.current;
+        if (!attached) {
+          host.attachPrimitive(primitive);
+          attached = true;
+        }
+        primitive.setSelection(start, end, formatMeasurement(computeMeasurement(start, end, candles, volumes)));
+      },
+      onRelease: (last) => {
+        if (!last || !attached) return;
+        host.detachPrimitive(primitive);
+        attached = false;
+        onMeasureEnd?.();
+      },
+    });
+    return () => {
+      stopDrag();
+      if (attached) host.detachPrimitive(primitive);
+    };
+  }, [measureActive, onMeasureEnd, mode]);
+
+  useEffect(() => {
+    // Story 18.2 (AC #4): the drawings prop's registry-diff effect -- same per-id
+    // add/update/remove discipline as priceLines, never a visible-range call.
+    const host = seriesRef.current ?? lineSeriesRef.current?.price;
+    if (!host) return;
+    const registry = drawingRegistryRef.current;
+    const specsById = new Map(drawings.map((spec) => [spec.id, spec] as const));
+
+    for (const [id, primitive] of [...registry]) {
+      if (!specsById.has(id)) {
+        host.detachPrimitive(primitive);
+        registry.delete(id);
+      }
+    }
+
+    for (const spec of drawings) {
+      const primitive = registry.get(spec.id);
+      if (primitive) {
+        primitive.update(spec.anchors, spec.color);
+        continue;
+      }
+      const created = new TrendlinePrimitive(spec.anchors, spec.color);
+      host.attachPrimitive(created);
+      registry.set(spec.id, created);
+    }
+  }, [drawings, mode]);
+
+  useEffect(() => {
     // Story 18.1 (AC #3): the one crosshairMove subscription serves both halves of the
     // drag -- remembering the latest hover (what the mousedown grab below hit-tests
     // against) and, while a drag is active, converting its own `param.point.y` to a
@@ -644,11 +999,12 @@ export default function LightweightChart({
   }, [priceLines, onPriceLineDrag, mode]);
 
   useEffect(() => {
-    // Story 18.1 (AC #2): click-to-place reporting. Only subscribed while the caller
-    // provided the callback AND mode is candles -- in any other configuration the
-    // chart's own click behavior is left completely untouched.
+    // Story 18.1/18.2: click reporting. `onPriceClick` is candles-only; `onPointClick`
+    // works in both modes. Subscribed only while at least one applicable callback is
+    // provided -- otherwise the chart's own click behavior is left completely untouched.
     const chart = chartRef.current;
-    if (!chart || !onPriceClick || mode !== "candles") return;
+    const wantsPrice = onPriceClick && mode === "candles";
+    if (!chart || (!wantsPrice && !onPointClick)) return;
 
     const handleClick = (param: MouseEventParams): void => {
       if (suppressNextClickRef.current) {
@@ -656,14 +1012,20 @@ export default function LightweightChart({
         return;
       }
       if (!param.point) return;
-      const price = seriesRef.current?.coordinateToPrice(param.point.y);
+      // Lines mode's host is the `price` line series (see the drawings effect).
+      const host = seriesRef.current ?? lineSeriesRef.current?.price;
+      const price = host?.coordinateToPrice(param.point.y);
       if (price === null || price === undefined) return;
-      onPriceClick(price);
+      if (wantsPrice) onPriceClick(price);
+      // Story 18.2: `param.time` is only set over an existing bar; fall back to the
+      // time scale's own x->time conversion for the empty area right of the last bar.
+      const time = param.time ?? chart.timeScale().coordinateToTime(param.point.x);
+      if (time !== null && time !== undefined) onPointClick?.({ time, price });
     };
 
     chart.subscribeClick(handleClick);
     return () => chart.unsubscribeClick(handleClick);
-  }, [onPriceClick, mode]);
+  }, [onPriceClick, onPointClick, mode]);
 
   return <div ref={containerRef} />;
 }

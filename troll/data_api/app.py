@@ -153,7 +153,7 @@ def catalog_candles(
         start_ns,
         end_ns,
         bar_seconds,
-        snapshot_rows_fn=lambda i, a, b: _catalog_stats.query_second_snapshots(CATALOG_PATH, i, a, b),
+        snapshot_rows_fn=lambda i, a, b: _catalog_stats.query_second_ohlc(CATALOG_PATH, i, a, b),
         rollup_rows_fn=lambda i, a, b: _catalog_stats.query_minute_rollups(CATALOG_PATH, i, a, b),
     )
     return {"candles": candles}

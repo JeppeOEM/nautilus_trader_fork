@@ -304,3 +304,42 @@ table {
   color: var(--vga-black);
   background: var(--vga-light-red);
 }
+
+/* Story 18.10 (spec §A8.1): the top bar's clusters, separated by a rule (ANSI-style divider). */
+.chart-topbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.chart-topbar-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.chart-topbar-group + .chart-topbar-group {
+  border-left: 1px solid var(--color-border);
+  padding-left: 12px;
+}
+
+/* A group that wraps onto its own row would keep a dangling divider otherwise -- the rule is
+   only drawn while the bar fits on one line (wide viewports). */
+@media (max-width: 720px) {
+  .chart-topbar-group + .chart-topbar-group {
+    border-left: 0;
+    padding-left: 0;
+  }
+}
+
+.chart-topbar h1 {
+  margin: 0;
+}
+
+.chart-toolbar-divider {
+  width: 100%;
+  margin: 0;
+  border: 0;
+  border-top: 1px solid var(--color-border);
+}

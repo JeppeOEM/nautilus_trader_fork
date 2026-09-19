@@ -1,6 +1,10 @@
+---
+baseline_commit: 9b8243c1bb0bda226965f458491c4c9c237c9334
+---
+
 # Story 18.2: Trendline drawing tool
 
-Status: ready-for-dev
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -20,20 +24,20 @@ so that I can mark a trend.
 
 ## Tasks / Subtasks
 
-- [ ] Task 1 — Trendline Primitive (AC: #2, #3)
-  - [ ] Implement a `TrendlinePrimitive` class satisfying `lightweight-charts` v5's `ISeriesPrimitive` interface: holds two `{time, price}` anchors, implements `updateAllViews`/`paneViews` to draw a line between the anchors' current screen coordinates (via `series.priceToCoordinate`/`timeScale.timeToCoordinate`) on every redraw trigger.
-  - [ ] Attach via `series.attachPrimitive(primitive)` on the relevant main-pane series (Candles or Lines mode — unlike Story 18.1's price-line restriction, a trendline's anchors are `{time, price}` pairs independent of which main-pane series is currently displayed, so this tool works in both modes).
+- [x] Task 1 — Trendline Primitive (AC: #2, #3)
+  - [x] Implement a `TrendlinePrimitive` class satisfying `lightweight-charts` v5's `ISeriesPrimitive` interface: holds two `{time, price}` anchors, implements `updateAllViews`/`paneViews` to draw a line between the anchors' current screen coordinates (via `series.priceToCoordinate`/`timeScale.timeToCoordinate`) on every redraw trigger.
+  - [x] Attach via `series.attachPrimitive(primitive)` on the relevant main-pane series (Candles or Lines mode — unlike Story 18.1's price-line restriction, a trendline's anchors are `{time, price}` pairs independent of which main-pane series is currently displayed, so this tool works in both modes).
 
-- [ ] Task 2 — Declarative `drawings` prop on `LightweightChart.tsx` (AC: #4)
-  - [ ] Add `drawings?: DrawingSpec[]` (a tagged union covering trendline now, measurement in Story 18.3: `{ id: string; kind: "trendline"; anchors: [{time, price}, {time, price}] }`), diffed via an internal `Map<string, ISeriesPrimitive>` registry, same add/update/remove-by-id pattern as `panes`/`priceLines`.
+- [x] Task 2 — Declarative `drawings` prop on `LightweightChart.tsx` (AC: #4)
+  - [x] Add `drawings?: DrawingSpec[]` (a tagged union covering trendline now, measurement in Story 18.3: `{ id: string; kind: "trendline"; anchors: [{time, price}, {time, price}] }`), diffed via an internal `Map<string, ISeriesPrimitive>` registry, same add/update/remove-by-id pattern as `panes`/`priceLines`.
 
-- [ ] Task 3 — Two-click drag interaction (AC: #1, #2, #5)
-  - [ ] While the trendline tool is active: first click records the start `{time, price}` (via `coordinateToPrice`/the chart's time-scale coordinate conversion); a second click (or drag-release, depending on final interaction choice — click-drag per the original spec) records the end point and appends a new `DrawingSpec` to `ChartPage.tsx`'s `drawings` array, then resets the active tool to cursor.
-  - [ ] `Escape` during the in-progress first-point-placed state cancels it without creating a `DrawingSpec`.
+- [x] Task 3 — Two-click drag interaction (AC: #1, #2, #5)
+  - [x] While the trendline tool is active: first click records the start `{time, price}` (via `coordinateToPrice`/the chart's time-scale coordinate conversion); a second click (or drag-release, depending on final interaction choice — click-drag per the original spec) records the end point and appends a new `DrawingSpec` to `ChartPage.tsx`'s `drawings` array, then resets the active tool to cursor.
+  - [x] `Escape` during the in-progress first-point-placed state cancels it without creating a `DrawingSpec`.
 
-- [ ] Task 4 — Tests
-  - [ ] A test confirming `TrendlinePrimitive`'s coordinate recomputation on a simulated pan/zoom (its `updateAllViews` is called and produces different screen coordinates for the same stored anchors).
-  - [ ] A test for the `drawings` prop's diffing (add/remove by id).
+- [x] Task 4 — Tests
+  - [x] A test confirming `TrendlinePrimitive`'s coordinate recomputation on a simulated pan/zoom (its `updateAllViews` is called and produces different screen coordinates for the same stored anchors).
+  - [x] A test for the `drawings` prop's diffing (add/remove by id).
 
 ## Dev Notes
 
@@ -57,8 +61,33 @@ so that I can mark a trend.
 
 ### Agent Model Used
 
+claude-sonnet-5
+
 ### Debug Log References
 
 ### Completion Notes List
 
+- `TrendlinePrimitive` (v5 `ISeriesPrimitive`): stores `{time, price}` anchors, recomputes screen points in `updateAllViews` via `timeToCoordinate`/`priceToCoordinate`; skips drawing when an anchor has no coordinate.
+- `drawings?: DrawingSpec[]` on `LightweightChart` diffed by id (attach/update/detach). Host is the candlestick series, or the `price` line series in Lines mode; registry is cleared on mode flip and re-attached.
+- New `onPointClick({time, price})` shares the existing click subscription/suppression; time falls back to `coordinateToTime` past the last bar.
+- ChartPage: `"trendline"` tool (both modes), two-click flow with `pendingAnchor`; Esc/tool change/mode change discards it. Interaction is click-click (no drag preview), per the story's Task 3 wording.
+- vitest 113 pass, tsc + oxlint clean. Visual browser check not done (jsdom mock boundary, same as 18.1).
+
 ### File List
+
+- troll/frontend/src/components/chart/primitives/TrendlinePrimitive.ts (new)
+- troll/frontend/src/components/chart/LightweightChart.tsx
+- troll/frontend/src/components/chart/LightweightChart.test.tsx
+- troll/frontend/src/pages/ChartPage.tsx
+- troll/frontend/src/pages/ChartPage.test.tsx
+
+### Review Findings
+
+- [x] [Review][Patch] No test for the update-in-place leg of the drawings diff [LightweightChart.test.tsx] — fixed
+- [x] [Review][Patch] No test that switching tool discards a pending first point [ChartPage.test.tsx] — fixed
+- [x] [Review][Patch] Stale comment on click effect ("click behavior untouched") [LightweightChart.tsx] — fixed
+- [x] [Review][Defer] Anchor on a time with no bar in the current mode's data (empty area right of last bar, or a 1s Lines-mode anchor viewed in Candles mode) has no coordinate, so the line is not drawn [TrendlinePrimitive.ts] — deferred, needs snapping/extrapolation design
+- [x] [Review][Defer] Drawing color resolved once at creation, does not follow theme changes [ChartPage.tsx] — deferred, minor
+- [x] [Review][Defer] No rubber-band preview after the first click [ChartPage.tsx] — deferred, story permits two-click; candidate for 18.10 parity pass
+
+Dismissed as noise/handled: 12 (effect ordering, stale-closure, instrument/timeframe change, renderer snapshot, etc.).
