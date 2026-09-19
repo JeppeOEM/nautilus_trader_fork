@@ -362,3 +362,11 @@
 - technicals-values cache is single-key with no single-flight; 60s client poll > 30s TTL means little hit-rate.
 - `=` filter operator on float values is strict equality; tech filters hide all rows while values are loading/errored on the Performance tab.
 - 16.x minute_rollup partial_start does not cover gap-created partial minutes (outside epic 17).
+
+## Resolved: deferred-work sweep (2026-09-19)
+
+Fixed: `metrics_store` reads now take `_lock` and the >100-char line is wrapped; `data_api` queues bounded with drop-oldest (`RankingsBus`, `LiveCandleBus`, `/ws/live` outbox), per-connection subscription cap (32), canonical `candles:{iid}:{bar_seconds}` key, out-of-order live snapshots skipped; `indicators.py` catches `AttributeError`/`UnicodeDecodeError`; `LightweightChart` uses `ResizeObserver`; `useLiveCandle` guard checks numeric `t/o/h/l/c`; `HistoryPage` treats `NaN`/`Infinity` as a gap; `_current_ranks` drops `_SLOW_METRICS` older than 3 cycles (DATA-01); `PriceSeriesStore.backfill` warns on live/Parquet mismatch (DATA-02); `classify_liquidity(min_volume_usd=)` renamed; unused collector `metrics.db` mount removed; stale `dashboard.py:85-86` citations dropped.
+
+Verified no longer applicable: `metrics_store` on a `:ro` mount works (reproduced with a real Docker `:ro` bind mount, 2026-09-19); every entry citing `ml_signals/dashboard.py` was retired with Story 15.10.
+
+Still open (design decisions or accepted risk, not fixed): unlocked/non-atomic `chart_indicators.toml`/`screener_columns.toml` writes; picker per-instance/panel/coercion UX gaps; whole-request 400 on one bad indicator entry; `bot_tui` AD-3 trust-the-gate items; `live_paper` unknown-TOML-key validation and signal cadence; technicals-values cache/single-flight and value validation; `has_more` on sparse ranges.

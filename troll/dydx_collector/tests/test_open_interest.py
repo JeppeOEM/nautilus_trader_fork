@@ -78,7 +78,7 @@ def test_classify_liquidity_splits_by_volume24h_threshold() -> None:
         SHIB={"ticker": "SHIB-USD", "volume24H": "500"},
         ETH={"ticker": "ETH-USD", "volume24H": "100000"},  # exactly at threshold
     )
-    liquid, illiquid = classify_liquidity(markets, min_oi_usd=100_000.0)
+    liquid, illiquid = classify_liquidity(markets, min_volume_usd=100_000.0)
     assert "BTC-USD-PERP.DYDX" in liquid
     assert "ETH-USD-PERP.DYDX" in liquid
     assert "SHIB-USD-PERP.DYDX" in illiquid
@@ -88,20 +88,20 @@ def test_classify_liquidity_low_token_count_high_volume_is_liquid() -> None:
     # Regression for the production incident AD-7 exists to prevent: BTC at 458
     # tokens of raw openInterest looks illiquid, but its USD volume24H is huge.
     markets = _markets_by_volume(BTC={"ticker": "BTC-USD", "openInterest": "458", "volume24H": "50000000"})
-    liquid, _illiquid = classify_liquidity(markets, min_oi_usd=100_000.0)
+    liquid, _illiquid = classify_liquidity(markets, min_volume_usd=100_000.0)
     assert "BTC-USD-PERP.DYDX" in liquid
 
 
 def test_classify_liquidity_missing_volume_is_illiquid() -> None:
     markets = _markets_by_volume(X={"ticker": "X-USD"})  # no volume24H field
-    liquid, illiquid = classify_liquidity(markets, min_oi_usd=1.0)
+    liquid, illiquid = classify_liquidity(markets, min_volume_usd=1.0)
     assert "X-USD-PERP.DYDX" in illiquid
 
 
 def test_classify_liquidity_excluded_coin_is_always_illiquid() -> None:
     markets = _markets_by_volume(BTC={"ticker": "BTC-USD", "volume24H": "50000000"})
     liquid, illiquid = classify_liquidity(
-        markets, min_oi_usd=1.0, exclude=frozenset({"BTC-USD-PERP.DYDX"})
+        markets, min_volume_usd=1.0, exclude=frozenset({"BTC-USD-PERP.DYDX"})
     )
     assert "BTC-USD-PERP.DYDX" in illiquid
     assert "BTC-USD-PERP.DYDX" not in liquid
@@ -116,21 +116,21 @@ def test_classify_liquidity_max_liquid_keeps_highest_volume() -> None:
         ETH={"ticker": "ETH-USD", "volume24H": "300000"},
         SOL={"ticker": "SOL-USD", "volume24H": "200000"},
     )
-    liquid, illiquid = classify_liquidity(markets, min_oi_usd=100_000.0, max_liquid=2)
+    liquid, illiquid = classify_liquidity(markets, min_volume_usd=100_000.0, max_liquid=2)
     assert liquid == {"BTC-USD-PERP.DYDX", "ETH-USD-PERP.DYDX"}
     assert illiquid == {"SOL-USD-PERP.DYDX"}
 
 
 def test_classify_liquidity_max_liquid_zero_demotes_everything() -> None:
     markets = _markets_by_volume(BTC={"ticker": "BTC-USD", "volume24H": "500000"})
-    liquid, illiquid = classify_liquidity(markets, min_oi_usd=100_000.0, max_liquid=0)
+    liquid, illiquid = classify_liquidity(markets, min_volume_usd=100_000.0, max_liquid=0)
     assert liquid == set()
     assert illiquid == {"BTC-USD-PERP.DYDX"}
 
 
 def test_classify_liquidity_max_liquid_above_count_is_noop() -> None:
     markets = _markets_by_volume(BTC={"ticker": "BTC-USD", "volume24H": "500000"})
-    liquid, illiquid = classify_liquidity(markets, min_oi_usd=100_000.0, max_liquid=32)
+    liquid, illiquid = classify_liquidity(markets, min_volume_usd=100_000.0, max_liquid=32)
     assert liquid == {"BTC-USD-PERP.DYDX"}
     assert illiquid == set()
 

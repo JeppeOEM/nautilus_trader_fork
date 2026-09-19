@@ -40,6 +40,16 @@ logger = logging.getLogger(__name__)
 REDIS_URL: str = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
 RANKINGS_CHANNEL = "rankings:live"
 
+# Every relayed message is a complete snapshot/bar, so a stalled consumer only needs the
+# newest ones -- bounding the queues keeps it from growing memory without limit.
+QUEUE_MAX = 1000
+
+
+def put_drop_oldest(queue: "asyncio.Queue[dict]", item: dict) -> None:
+    if queue.full():
+        queue.get_nowait()
+    queue.put_nowait(item)
+
 
 class RankingsBus:
     """Caches the latest `rankings:live` message and fans it out to WS listeners.
@@ -55,7 +65,7 @@ class RankingsBus:
 
     def subscribe(self) -> "asyncio.Queue[dict]":
         """Register a new per-listener queue (one per `/ws/live` connection)."""
-        queue: asyncio.Queue = asyncio.Queue()
+        queue: asyncio.Queue = asyncio.Queue(QUEUE_MAX)
         self._listeners.add(queue)
         return queue
 
@@ -85,7 +95,7 @@ class RankingsBus:
             return
         self.latest = message
         for queue in self._listeners:
-            queue.put_nowait(message)
+            put_drop_oldest(queue, message)
 
     async def run(self, redis_url: str) -> None:
         """

@@ -442,7 +442,7 @@ def test_current_ranks_falls_back_to_slow_metrics_price_pct_and_volatility() -> 
     _mark_fresh(iid, now_ns)
     engine._SLOW_METRICS[iid] = {
         "instrument_id": iid, "price": 99.0, "pct_1h": 0.01, "pct_24h": 0.05, "volatility": 0.002,
-        "pct_1w": 3.5, "pct_1m": None,
+        "pct_1w": 3.5, "pct_1m": None, "ts": now_ns,
     }
 
     row = engine._current_ranks()[0]
@@ -454,6 +454,21 @@ def test_current_ranks_falls_back_to_slow_metrics_price_pct_and_volatility() -> 
     assert row["pct_24h"] == 0.05
     assert row["volatility"] == 0.002
     assert row["price"] == 99.0  # no live snapshot ingested -- falls back to slow cache
+
+
+def test_current_ranks_drops_stale_slow_metrics() -> None:
+    _reset_state()
+    iid = "BTC-USD-PERP.DYDX"
+    now_ns = time.time_ns()
+    _mark_fresh(iid, now_ns)
+    engine._SLOW_METRICS[iid] = {
+        "instrument_id": iid, "price": 99.0, "pct_1h": 0.01, "ts": now_ns - 10 * 60 * 1_000_000_000,
+    }
+
+    row = engine._current_ranks()[0]
+
+    assert row["pct_1h"] is None
+    assert row["price"] is None
 
 
 def test_merge_rank_into_snapshots_attaches_rank_and_volume() -> None:

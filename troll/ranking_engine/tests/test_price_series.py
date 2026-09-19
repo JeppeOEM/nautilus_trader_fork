@@ -188,3 +188,11 @@ def test_backfilled_in_memory_stats_match_catalog_backed_price_stats() -> None:
         new_path = store.stats(_IID, now_ns=t2)
 
     assert old_path == new_path
+
+
+def test_backfill_warns_when_parquet_disagrees_with_live_at_same_ts(caplog) -> None:  # type: ignore[no-untyped-def]
+    store = PriceSeriesStore()
+    store.ingest("X", 2_000_000_000, 10.0)
+    store.backfill("X", [(1_000_000_000, 5.0), (2_000_000_000, 11.0)])
+
+    assert "mismatches" in caplog.text

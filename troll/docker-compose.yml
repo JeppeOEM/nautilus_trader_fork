@@ -47,7 +47,6 @@ services:
       # container mounts it, bot_tui coordinates via Redis only, never the filesystem.
       - ./config.toml:/app/dydx_collector/config.toml:rw
       - ./dydx_collector/catalog:/app/catalog
-      - ./dydx_collector/metrics.db:/app/metrics.db
       # Story 5.1: permanent incident reports (crossed book, stale book, resync, etc.),
       # auto-snapshotted from the [WS_RAW] rolling debug buffer -- see collector.py's
       # _IncidentHandler. Must survive container restarts, unlike /tmp/nautilus_logs.

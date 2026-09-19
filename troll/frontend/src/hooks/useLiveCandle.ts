@@ -26,7 +26,11 @@ interface LiveCandleMessage {
 function isLiveCandleMessage(value: unknown): value is LiveCandleMessage {
   if (typeof value !== "object" || value === null) return false;
   const message = value as Record<string, unknown>;
-  return typeof message.channel === "string" && typeof message.bar === "object" && message.bar !== null;
+  if (typeof message.channel !== "string" || typeof message.bar !== "object" || message.bar === null) {
+    return false;
+  }
+  const bar = message.bar as Record<string, unknown>;
+  return ["t", "o", "h", "l", "c"].every((k) => Number.isFinite(bar[k]));
 }
 
 function toChartDatum(bar: LiveCandleMessage["bar"]): CandlestickData<Time> {

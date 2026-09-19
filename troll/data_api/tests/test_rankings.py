@@ -209,3 +209,14 @@ def test_rankings_live_message_reflected_by_rest_and_ws_relay() -> None:
             received = websocket.receive_json()
             assert received == message
             assert "ranks" in received  # ws/live never renames ranks -> items
+
+
+def test_put_drop_oldest_keeps_newest_when_full() -> None:
+    import asyncio
+
+    from data_api.redis_bus import put_drop_oldest
+
+    queue: asyncio.Queue[dict] = asyncio.Queue(2)
+    for i in range(3):
+        put_drop_oldest(queue, {"i": i})
+    assert [queue.get_nowait()["i"], queue.get_nowait()["i"]] == [1, 2]

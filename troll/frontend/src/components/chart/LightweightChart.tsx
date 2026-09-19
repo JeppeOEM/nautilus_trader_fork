@@ -275,7 +275,10 @@ export default function LightweightChart({
     });
 
     const handleResize = () => chart.applyOptions({ width: container.clientWidth });
-    window.addEventListener("resize", handleResize);
+    // ResizeObserver, not window "resize": catches layout-only reflows and a container that
+    // was hidden (clientWidth 0) at mount. Fires once on observe, so it also does the first sync.
+    const resizeObserver = new ResizeObserver(handleResize);
+    resizeObserver.observe(container);
     const panes = panesRef.current;
     // Captured to a local for the cleanup below, same as `panes` -- reading
     // `.current` inside a cleanup is what the react-hooks/exhaustive-deps lint flags.
@@ -283,7 +286,7 @@ export default function LightweightChart({
 
     return () => {
       cancelled = true;
-      window.removeEventListener("resize", handleResize);
+      resizeObserver.disconnect();
       chartRef.current = null;
       seriesRef.current = null;
       lineSeriesRef.current = null;

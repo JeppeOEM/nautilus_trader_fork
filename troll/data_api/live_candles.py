@@ -33,6 +33,8 @@ import logging
 
 import redis.asyncio as aioredis
 
+from data_api.redis_bus import QUEUE_MAX
+from data_api.redis_bus import put_drop_oldest
 from dydx_collector.second_snapshot import DydxSecondSnapshot
 from ml_signals.candles import candle_dicts_from_snapshots
 
@@ -64,7 +66,7 @@ class LiveCandleBus:
         creating that pair's buffer on first subscribe (one per `/ws/live` connection's
         live-candle subscription)."""
         key = (instrument_id, bar_seconds)
-        queue: "asyncio.Queue[dict]" = asyncio.Queue()
+        queue: "asyncio.Queue[dict]" = asyncio.Queue(QUEUE_MAX)
         self._listeners.setdefault(key, set()).add(queue)
         self._buffers.setdefault(key, [])
         return queue
@@ -111,6 +113,8 @@ class LiveCandleBus:
         then recompute and publish its forming bar."""
         key = (instrument_id, bar_seconds)
         buffer = self._buffers.setdefault(key, [])
+        if buffer and snapshot.ts_event <= buffer[-1].ts_event:
+            return  # out-of-order/duplicate (e.g. around a Redis reconnect) -- never fold in
         bucket_ns = bar_seconds * 1_000_000_000
         if buffer and buffer[-1].ts_event // bucket_ns != snapshot.ts_event // bucket_ns:
             buffer = [snapshot]  # bucket boundary crossed -- previous bar's last publish stands
@@ -131,7 +135,7 @@ class LiveCandleBus:
             return
         message = {"channel": f"candles:{instrument_id}:{bar_seconds}", "bar": candles[-1]}
         for queue in self._listeners.get(key, ()):
-            queue.put_nowait(message)
+            put_drop_oldest(queue, message)
 
     async def run(self, redis_url: str) -> None:
         """

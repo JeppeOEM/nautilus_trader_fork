@@ -53,7 +53,7 @@ from ranking_engine import metrics_store
 
 CATALOG_PATH: str = os.environ.get("CATALOG_PATH", "troll/dydx_collector/catalog")
 
-# Default mirrors dashboard.py:85-86 exactly.
+# <catalog parent>/metrics/metrics.db, same layout ranking_engine writes to.
 METRICS_DB_PATH: str = os.environ.get(
     "METRICS_DB_PATH", str(Path(CATALOG_PATH).parent / "metrics" / "metrics.db"),
 )

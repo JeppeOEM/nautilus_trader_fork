@@ -137,7 +137,7 @@ def get_coin_indicator_config(instrument_id: str) -> list[IndicatorConfigEntry]:
     "nothing saved yet" state -- `[]`, not an error."""
     try:
         config = chart_indicator_config.load_config(Path(CHART_INDICATOR_CONFIG_PATH))
-    except (tomllib.TOMLDecodeError, KeyError, TypeError) as exc:
+    except (tomllib.TOMLDecodeError, UnicodeDecodeError, KeyError, TypeError) as exc:
         # Fail loud (DATA-02), not a silent empty list -- the file is meant to be
         # human-editable, so a corrupt hand-edit is a real, diagnosable state.
         raise HTTPException(
@@ -173,7 +173,10 @@ async def put_coin_indicator_config(instrument_id: str, request: Request) -> dic
         ]
         config = chart_indicator_config.load_config(path)
         config[instrument_id] = entries
-    except (json.JSONDecodeError, KeyError, TypeError, tomllib.TOMLDecodeError) as exc:
+    except (
+        json.JSONDecodeError, KeyError, TypeError, AttributeError, tomllib.TOMLDecodeError,
+        UnicodeDecodeError,
+    ) as exc:
         raise HTTPException(
             status_code=400, detail=f"invalid indicator config payload: {exc}"
         ) from exc

@@ -36,7 +36,7 @@ function toMetricDatum(tsNs: number, value: number | null | undefined): MetricDa
   // A `None` value (a real gap, DATA-01/AD-F6) is passed straight through as native
   // whitespace data -- never `0`, never an omitted row (which a line series would
   // otherwise interpolate across), same discipline as useSnapshotSeries.ts's toDatum().
-  return value == null ? { time } : { time, value };
+  return value == null || !Number.isFinite(value) ? { time } : { time, value };
 }
 
 function HistoryInner({ instrumentId }: { instrumentId: string }) {

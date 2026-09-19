@@ -108,7 +108,7 @@ register_arrow(
 
 def classify_liquidity(
     markets_json: dict,
-    min_oi_usd: float,
+    min_volume_usd: float,
     exclude: frozenset[str] | None = None,
     max_liquid: int | None = None,
 ) -> tuple[set[str], set[str]]:
@@ -146,7 +146,7 @@ def classify_liquidity(
             vol = float(market.get("volume24H") or 0)
         except (ValueError, TypeError):
             vol = 0.0
-        if vol >= min_oi_usd:
+        if vol >= min_volume_usd:
             volumes[iid] = vol
         else:
             illiquid.add(iid)

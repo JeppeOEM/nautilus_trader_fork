@@ -73,7 +73,10 @@ def write(rows: list[dict], db_path: str, retain_days: int = 31) -> None:
     """Upsert snapshots and prune rows older than retain_days."""
     cutoff = time.time_ns() - retain_days * 86_400 * 1_000_000_000
     placeholders = ", ".join("?" * (2 + len(COLS)))
-    sql = f"INSERT OR REPLACE INTO snapshots(ts, instrument_id, {', '.join(COLS)}) VALUES({placeholders})"
+    sql = (
+        f"INSERT OR REPLACE INTO snapshots(ts, instrument_id, {', '.join(COLS)}) "
+        f"VALUES({placeholders})"
+    )
     with _lock:
         db = _conn(db_path)
         db.execute("DELETE FROM snapshots WHERE ts < ?", (cutoff,))
@@ -86,15 +89,15 @@ def write(rows: list[dict], db_path: str, retain_days: int = 31) -> None:
 
 def latest(db_path: str) -> list[dict]:
     """Most recent snapshot per instrument, for the rankings table."""
-    db = _conn(db_path)
-    rows = db.execute(f"""
-        SELECT instrument_id, {", ".join(COLS)}
-        FROM snapshots
-        WHERE (instrument_id, ts) IN (
-            SELECT instrument_id, MAX(ts) FROM snapshots GROUP BY instrument_id
-        )
-        ORDER BY instrument_id
-    """).fetchall()
+    with _lock:
+        rows = _conn(db_path).execute(f"""
+            SELECT instrument_id, {", ".join(COLS)}
+            FROM snapshots
+            WHERE (instrument_id, ts) IN (
+                SELECT instrument_id, MAX(ts) FROM snapshots GROUP BY instrument_id
+            )
+            ORDER BY instrument_id
+        """).fetchall()
     keys = ("instrument_id", *COLS)
     return [dict(zip(keys, r)) for r in rows]
 
@@ -102,11 +105,12 @@ def latest(db_path: str) -> list[dict]:
 def history(instrument_id: str, db_path: str, days: int = 31) -> list[dict]:
     """All snapshots for one instrument over the last `days` days, ordered by ts."""
     cutoff = time.time_ns() - days * 86_400 * 1_000_000_000
-    db = _conn(db_path)
-    rows = db.execute(
-        f"SELECT ts, {', '.join(COLS)} FROM snapshots WHERE instrument_id=? AND ts>=? ORDER BY ts",
-        (instrument_id, cutoff),
-    ).fetchall()
+    with _lock:
+        rows = _conn(db_path).execute(
+            f"SELECT ts, {', '.join(COLS)} FROM snapshots "
+            "WHERE instrument_id=? AND ts>=? ORDER BY ts",
+            (instrument_id, cutoff),
+        ).fetchall()
     keys = ("ts", *COLS)
     return [dict(zip(keys, r)) for r in rows]
 
@@ -122,22 +126,23 @@ def price_near_days_ago(
     """
     target = time.time_ns() - int(days * 86_400 * 1_000_000_000)
     floor = target - int(tolerance_s * 1_000_000_000)
-    rows = _conn(db_path).execute(
-        "SELECT instrument_id, price, MAX(ts) FROM snapshots "
-        "WHERE ts <= ? AND ts > ? AND price IS NOT NULL GROUP BY instrument_id",
-        (target, floor),
-    ).fetchall()
+    with _lock:
+        rows = _conn(db_path).execute(
+            "SELECT instrument_id, price, MAX(ts) FROM snapshots "
+            "WHERE ts <= ? AND ts > ? AND price IS NOT NULL GROUP BY instrument_id",
+            (target, floor),
+        ).fetchall()
     return {iid: price for iid, price, _ts in rows}
 
 
 def nearest(instrument_id: str, ts: int, db_path: str) -> dict | None:
     """Snapshot for instrument_id with ts closest to the given ts (ns). None if never stored."""
-    db = _conn(db_path)
-    row = db.execute(
-        f"SELECT ts, {', '.join(COLS)} FROM snapshots WHERE instrument_id=? "
-        "ORDER BY ABS(ts - ?) LIMIT 1",
-        (instrument_id, ts),
-    ).fetchone()
+    with _lock:
+        row = _conn(db_path).execute(
+            f"SELECT ts, {', '.join(COLS)} FROM snapshots WHERE instrument_id=? "
+            "ORDER BY ABS(ts - ?) LIMIT 1",
+            (instrument_id, ts),
+        ).fetchone()
     if row is None:
         return None
     keys = ("ts", *COLS)

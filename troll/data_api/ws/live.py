@@ -48,6 +48,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+_MAX_SUBSCRIPTIONS = 32
+
 
 def _parse_candle_channel(channel: str) -> tuple[str, int] | None:
     """Parse `"candles:{iid}:{bar_seconds}"`. Returns `None` for anything else (e.g. a
@@ -69,7 +71,7 @@ async def _forward(source: "asyncio.Queue[dict]", outbox: "asyncio.Queue[dict]")
     """Relay every message from one source queue into the shared per-connection outbox,
     forever, until cancelled -- runs as its own task per active subscription."""
     while True:
-        outbox.put_nowait(await source.get())
+        redis_bus.put_drop_oldest(outbox, await source.get())
 
 
 def _log_forward_error(task: "asyncio.Task[None]") -> None:
@@ -93,8 +95,8 @@ class _CandleSubscriptions:
         self._entries: dict[str, tuple[str, int, "asyncio.Queue[dict]", "asyncio.Task[None]"]] = {}
 
     def subscribe(self, channel: str, iid: str, bar_seconds: int) -> None:
-        if channel in self._entries:
-            return  # already subscribed for this connection -- idempotent
+        if channel in self._entries or len(self._entries) >= _MAX_SUBSCRIPTIONS:
+            return  # idempotent; the cap stops a buggy client growing per-channel state forever
         queue = live_candles.live_candle_bus.subscribe(iid, bar_seconds)
         task = asyncio.create_task(_forward(queue, self._outbox))
         task.add_done_callback(_log_forward_error)
@@ -122,6 +124,7 @@ def _handle_control_message(message: dict, subs: _CandleSubscriptions) -> None:
         if parsed is None:
             continue  # this key didn't parse -- still check the other key, don't give up
         iid, bar_seconds = parsed
+        channel = f"candles:{iid}:{bar_seconds}"
         subs.subscribe(channel, iid, bar_seconds) if key == "subscribe" else subs.unsubscribe(channel)
         return
 
@@ -150,7 +153,7 @@ async def _reader(websocket: WebSocket, subs: _CandleSubscriptions) -> None:
 @router.websocket("/ws/live")
 async def ws_live(websocket: WebSocket) -> None:
     await websocket.accept()
-    outbox: "asyncio.Queue[dict]" = asyncio.Queue()
+    outbox: "asyncio.Queue[dict]" = asyncio.Queue(redis_bus.QUEUE_MAX)
 
     # Subscribe before reading/sending `latest`: a message published between reading
     # `.latest` and registering the listener queue would otherwise be missed entirely

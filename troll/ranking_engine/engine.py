@@ -145,6 +145,8 @@ _VOLUME_DELTA_WINDOW: int = 60
 # so dashboard/bot_tui get it via rankings:live instead of touching metrics_store
 # directly.
 _SLOW_METRICS: dict[str, dict] = {}
+# 3 missed slow-loop cycles: past this the cached pct/volatility/price are no longer current.
+_SLOW_METRICS_MAX_AGE_NS = 3 * 60 * 1_000_000_000
 
 # In-memory long-window (ts_event_ns, close_price) series (Story 13.2) -- replaces
 # the old recurring ml_signals.metrics_computer Parquet re-scan. Fed live on every
@@ -427,6 +429,8 @@ def _current_ranks() -> list[dict]:
         volume24h = _VOLUME_24H.get(iid, 0.0)
         volatility_score = _VOLATILITY.score(iid)
         slow = _SLOW_METRICS.get(iid, {})
+        if now_ns - slow.get("ts", 0) > _SLOW_METRICS_MAX_AGE_NS:
+            slow = {}  # a stalled slow loop must read as a gap (None), not as live (DATA-01)
         row = {
             "instrument_id": iid,
             "volume24h": volume24h,

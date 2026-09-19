@@ -153,6 +153,15 @@ class PriceSeriesStore:
         live_ts, live_px = existing.ascending()
         earliest_live_ts = int(live_ts[0])
         historical = [(ts, price) for ts, price in series if ts < earliest_live_ts]
+        live_by_ts = dict(zip(live_ts.tolist(), live_px.tolist(), strict=True))
+        # Overlap is assumed redundant (live wins); a disagreement would be a data-integrity
+        # problem that must not be resolved silently (DATA-02).
+        mismatched = [ts for ts, price in series if live_by_ts.get(ts, price) != price]
+        if mismatched:
+            logger.warning(
+                "%s: %d live/Parquet price mismatches at same ts (first ts=%d); keeping live",
+                instrument_id, len(mismatched), mismatched[0],
+            )
 
         merged = _RingBuffer(self._capacity)
         for ts, price in historical:
