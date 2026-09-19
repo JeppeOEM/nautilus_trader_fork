@@ -1,6 +1,6 @@
 # Story 19.4: `troll/hyperliquid_collector/`
 
-Status: ready-for-dev
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -19,15 +19,15 @@ so that Hyperliquid data lands in the same catalog consistently.
 
 ## Tasks / Subtasks
 
-- [ ] Task 1 — Investigate Hyperliquid's actual wire behavior (AC: #2)
-  - [ ] Read `crates/adapters/hyperliquid/src/` (http/websocket/common modules) to independently confirm: book-crossing behavior, price-precision stability, whether open interest is forwarded through the PyO3 bindings, and Hyperliquid's own documented WS subscription limits — do not assume any answer from Stories 19.3's Bybit investigation or dYdX's own known quirks transfers over; Hyperliquid is architecturally distinct from both.
-- [ ] Task 2 — `HyperliquidClient` wrapper (AC: #1)
-  - [ ] New `troll/hyperliquid_collector/client.py`, mirroring `DydxClient`'s/`BybitClient`'s shape (own HTTP+WS PyO3 client pair, subscribe methods, `_handle_message` dispatch) — precision/re-stamping logic only if Task 1 justifies it, in whatever form Hyperliquid's actual wire format needs.
-- [ ] Task 3 — `Collector` class (AC: #1, #3, #4)
-  - [ ] New `troll/hyperliquid_collector/collector.py`: asyncio loop, ingest-queue pattern, flush loop via `ParquetDataCatalog.write_data()`, a periodic snapshot sampler if Hyperliquid's book model supports the same shape — crossed-book/resync handling and an open-interest poll workaround only if Task 1's investigation shows they're needed, and built against Hyperliquid's actual failure modes.
-- [ ] Task 4 — Tests
-  - [ ] TEST-01: any precision-handling logic uses real `Price`/`Quantity` objects.
-  - [ ] An integration test confirming a real (or realistically-simulated) Hyperliquid snapshot round-trips through the catalog with a `.HYPERLIQUID`-suffixed instrument id.
+- [x] Task 1 — Investigate Hyperliquid's actual wire behavior (AC: #2)
+  - [x] Read `crates/adapters/hyperliquid/src/` (http/websocket/common modules) to independently confirm: book-crossing behavior, price-precision stability, whether open interest is forwarded through the PyO3 bindings, and Hyperliquid's own documented WS subscription limits — do not assume any answer from Stories 19.3's Bybit investigation or dYdX's own known quirks transfers over; Hyperliquid is architecturally distinct from both.
+- [x] Task 2 — `HyperliquidClient` wrapper (AC: #1)
+  - [x] New `troll/hyperliquid_collector/client.py`, mirroring `DydxClient`'s/`BybitClient`'s shape (own HTTP+WS PyO3 client pair, subscribe methods, `_handle_message` dispatch) — precision/re-stamping logic only if Task 1 justifies it, in whatever form Hyperliquid's actual wire format needs.
+- [x] Task 3 — `Collector` class (AC: #1, #3, #4)
+  - [x] New `troll/hyperliquid_collector/collector.py`: asyncio loop, ingest-queue pattern, flush loop via `ParquetDataCatalog.write_data()`, a periodic snapshot sampler if Hyperliquid's book model supports the same shape — crossed-book/resync handling and an open-interest poll workaround only if Task 1's investigation shows they're needed, and built against Hyperliquid's actual failure modes.
+- [x] Task 4 — Tests
+  - [x] TEST-01: any precision-handling logic uses real `Price`/`Quantity` objects.
+  - [x] An integration test confirming a real (or realistically-simulated) Hyperliquid snapshot round-trips through the catalog with a `.HYPERLIQUID`-suffixed instrument id.
 
 ## Dev Notes
 
@@ -55,4 +55,12 @@ so that Hyperliquid data lands in the same catalog consistently.
 
 ### Completion Notes List
 
+- Task 1 findings (crates/adapters/hyperliquid + live probe), independent of dYdX/Bybit: (a) every `l2Book` payload is a full snapshot (Clear + levels), so the local book cannot drift → crossed sample is skipped, next message replaces the book, no resync/uncross machinery; (b) mark/index/book prices parsed at `instrument.price_precision()` → no re-stamping; (c) open interest IS forwarded over WS (`subscribe_open_interest` → pyo3 CustomData) → no REST poll, own `HyperliquidOpenInterest` Data type registered for Arrow; (d) no per-second subscribe limit needed for a handful of instruments.
+- Empirical finding: l2Book pushes arrived only ~every 5s in the live probe, so the stale-book guard is config (`stale_book_seconds`, default 30) and the 1s sampler repeats the last authoritative book between pushes. Worth revisiting if `subscribe_book` can be given finer cadence.
+- Same shape as bybit_collector but written as its own sibling (no shared code beyond `DydxSecondSnapshot`'s venue-neutral schema, which lets data_api serve `.HYPERLIQUID` ids untouched). Ids are `SYMBOL-USD-PERP.HYPERLIQUID`.
+- Live 25s run against mainnet: 45 BTC snapshots (20 levels) readable via data_api's reader, plus mark/funding/OI rows in the catalog. 6 new tests pass (12 with Bybit's). Compose service, Dockerfile COPY, Makefile updated (compose not brought up).
+
 ### File List
+
+- troll/hyperliquid_collector/{__init__,client,collector,config,open_interest}.py, config.toml, tests/{__init__,test_collector}.py (new)
+- troll/collector.dockerfile, troll/docker-compose.yml, troll/Makefile
