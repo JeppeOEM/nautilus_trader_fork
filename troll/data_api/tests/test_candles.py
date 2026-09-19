@@ -228,3 +228,26 @@ def test_large_limit_and_bar_seconds_combination_does_not_blow_the_query_span(
     assert response.status_code == 200
     items = response.json()["items"]
     assert len(items) == 1  # only the within-cap snapshot's candle is queried at all
+
+
+def test_weekly_bar_seconds_is_not_clamped_down_to_a_day(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The timeframe selector offers 1W; a 1D-only clamp silently returned daily bars."""
+    catalog_path = str(tmp_path / "catalog")
+    day_ns = 86_400_000_000_000
+    week_ns = 7 * day_ns
+    week_start = _BASE_NS // week_ns * week_ns
+    # one snapshot on each of 3 consecutive days of the same week -> exactly one weekly bar
+    _write_snapshots(catalog_path, [(week_start + i * day_ns, 100.0 + i) for i in range(3)])
+    client = _client(catalog_path, monkeypatch)
+
+    resp = client.get(f"/api/candles/{_IID}?before_ns={week_start + week_ns}&limit=10&bar_seconds=604800")
+
+    bars = [i for i in resp.json()["items"] if i["o"] is not None]
+    assert [(b["t"], b["o"], b["c"]) for b in bars] == [(week_start // 1_000_000, 100.0, 102.0)]
+
+
+def test_wide_bar_window_is_wider_than_the_raw_cap_but_still_bounded() -> None:
+    hour = 3600
+    assert candles_routes._window_start_ns(0, 120, hour) == -7 * 86_400 * 1_000_000_000
+    day_window_s = -candles_routes._window_start_ns(0, 120, 86_400) // 1_000_000_000
+    assert 7 * 86_400 < day_window_s <= candles_routes._MAX_ROLLUP_QUERY_SPAN_SECONDS

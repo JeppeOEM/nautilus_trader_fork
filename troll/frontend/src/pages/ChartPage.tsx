@@ -1,8 +1,8 @@
-import type { IChartApi } from "lightweight-charts";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useParams } from "react-router";
+import { CrosshairMode, type IChartApi } from "lightweight-charts";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Link, useParams } from "react-router";
 
-import { fetchCoinIndicatorConfig, saveCoinIndicatorConfig } from "../api/client";
+import { fetchCoinIndicatorConfig, fetchIndicatorCatalog, saveCoinIndicatorConfig } from "../api/client";
 import IndicatorPicker from "../components/chart/IndicatorPicker";
 import LightweightChart, {
   type ChartMode,
@@ -10,16 +10,65 @@ import LightweightChart, {
   type PriceLineSpec,
 } from "../components/chart/LightweightChart";
 import { assignPaneColor, cssVar } from "../components/chart/paneColors";
-import type { IndicatorConfigEntry } from "../api/schema";
+import type { IndicatorCatalogEntry, IndicatorConfigEntry } from "../api/schema";
 import { BAR_SECONDS, useCandles } from "../hooks/useCandles";
-import { useIndicatorSeries } from "../hooks/useIndicatorSeries";
 import { useLiveCandle } from "../hooks/useLiveCandle";
 import { usePickerIndicatorValues } from "../hooks/usePickerIndicatorValues";
 import { useSnapshotSeries } from "../hooks/useSnapshotSeries";
 
-// Story 15.4's five default panes (FR-39) -- fixed, untouched by Story 15.6's picker;
-// this order is also the color-slot assignment order (AC #7) for exactly these five.
-const DEFAULT_PANE_IDS = ["MultiLevelOFI", "MultiLevelOBI", "microprice", "spread", "volume"];
+// The default chart is candles + a volume overlay only; every other indicator is added
+// from the picker (persisted per coin server-side) and placed by its catalog `panel`.
+// Volume is its own pane right under the price pane (spec §A1), before indicator panes.
+const DEFAULT_PANE_IDS = ["volume"];
+
+// Spec §A8.1 slot 2: the top toolbar's timeframe selector. Bars > 1h are served from the
+// minute rollup server-side (Story 16.2), so 4H/1D/1W stay cheap.
+const TIMEFRAMES = [
+  { label: "1m", seconds: 60 },
+  { label: "5m", seconds: 300 },
+  { label: "15m", seconds: 900 },
+  { label: "1H", seconds: 3600 },
+  { label: "4H", seconds: 14400 },
+  { label: "1D", seconds: 86400 },
+  { label: "1W", seconds: 604800 },
+] as const;
+
+function timeframeStorageKey(instrumentId: string): string {
+  return `chart-timeframe:${instrumentId}`;
+}
+
+function loadTimeframe(instrumentId: string): number {
+  try {
+    const saved = Number(localStorage.getItem(timeframeStorageKey(instrumentId)));
+    return TIMEFRAMES.some((t) => t.seconds === saved) ? saved : BAR_SECONDS;
+  } catch {
+    return BAR_SECONDS;
+  }
+}
+
+function hlineStorageKey(instrumentId: string): string {
+  return `chart-hlines:${instrumentId}`;
+}
+
+// Drawn lines persist per coin in this browser (localStorage may throw/be blocked --
+// then the chart just starts empty). ponytail: browser-local, move server-side beside
+// the indicator config if lines must follow the user across browsers.
+function loadPriceLines(instrumentId: string): PriceLineSpec[] {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(hlineStorageKey(instrumentId)) ?? "[]");
+    return Array.isArray(parsed) ? (parsed as PriceLineSpec[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+// `key` is "{indicator_id}.{output_attr}" and indicator_id starts with the catalog name.
+function panelForKey(key: string, catalog: Record<string, IndicatorCatalogEntry>): string {
+  const name = Object.keys(catalog)
+    .filter((n) => key === n || key.startsWith(`${n}_`) || key.startsWith(`${n}.`))
+    .sort((x, y) => y.length - x.length)[0];
+  return name ? catalog[name].panel : "oscillator";
+}
 
 // Story 18.1 (AC #1): the chart's drawing-tool state -- "cursor" is the inert default.
 // Stories 18.2/18.3 extend this union with their tools, never a second state variable.
@@ -42,7 +91,13 @@ const CHART_TOOLS: readonly ChartToolDef[] = [
   { id: "hline", label: "HLine", ariaLabel: "Horizontal line tool", candlesOnly: true },
 ];
 
-function ChartInner({ instrumentId }: { instrumentId: string }) {
+interface ChartInnerProps {
+  instrumentId: string;
+  barSeconds: number;
+  onTimeframeChange: (seconds: number) => void;
+}
+
+function ChartInner({ instrumentId, barSeconds, onTimeframeChange }: ChartInnerProps) {
   const [chart, setChart] = useState<IChartApi | null>(null);
   // Story 15.7: Candles/Lines toggle (AC #1) -- `dashboard.py`'s own #btn-candles/
   // #btn-lines pair, carried forward. Only one of useCandles/useSnapshotSeries is ever
@@ -54,22 +109,26 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
   // -- that component stays a pure function of its props (AD-F4), this page owns the
   // data. Deterministic counter ids (no uuid) keep specs stable and diffable.
   const [activeTool, setActiveTool] = useState<ChartTool>("cursor");
-  const [priceLines, setPriceLines] = useState<PriceLineSpec[]>([]);
-  const nextPriceLineIdRef = useRef(1);
-  const { candles, volume } = useCandles(instrumentId, chart, mode === "candles");
+  const [priceLines, setPriceLines] = useState<PriceLineSpec[]>(() => loadPriceLines(instrumentId));
+  const nextPriceLineIdRef = useRef(
+    priceLines.reduce((max, l) => Math.max(max, Number(l.id.replace("hline-", "")) || 0), 0) + 1,
+  );
+  const [crosshairOn, setCrosshairOn] = useState(true);
+  const indicatorsRef = useRef<HTMLDivElement>(null);
+  const [catalog, setCatalog] = useState<Record<string, IndicatorCatalogEntry>>({});
+  const { candles, volume } = useCandles(instrumentId, chart, mode === "candles", barSeconds);
   const snapshotLines = useSnapshotSeries(instrumentId, chart, mode === "lines");
-  const indicatorSeries = useIndicatorSeries(instrumentId, chart);
   // Story 15.5: the forming right-edge bar, over its own dedicated /ws/live socket
   // (AD-F7) -- same BAR_SECONDS constant useCandles uses, so the two paths can't drift.
   // Lines mode has no live-edge concept of its own (Task 3's Dev Note) -- LightweightChart
   // itself ignores `liveBar` while `mode === "lines"` (its own seriesRef is null there).
-  const liveBar = useLiveCandle(instrumentId, BAR_SECONDS);
+  const liveBar = useLiveCandle(instrumentId, barSeconds);
 
   // Story 15.6: the picker's persisted selection for this coin -- IndicatorPicker owns
   // the GET (initial load)/PUT (every add/remove/param-apply) round trip and reports the
   // resulting list here; this component decides how it becomes panes (AD-F4).
   const [pickerEntries, setPickerEntries] = useState<IndicatorConfigEntry[]>([]);
-  const pickerValues = usePickerIndicatorValues(instrumentId, chart, pickerEntries);
+  const pickerValues = usePickerIndicatorValues(instrumentId, chart, pickerEntries, barSeconds);
   // First-seen order, not a fresh alphabetical sort every render -- assignPaneColor's own
   // invariant ("an id's color never changes while it stays in the list") only holds if
   // this order list is itself stable. Re-sorting Object.keys(pickerValues) on every
@@ -92,56 +151,49 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
   }
 
   // Declarative pane set fed into LightweightChart's own registry (AD-F4) -- this
-  // component never calls chart.addPane()/addSeries() itself. Volume is derived
-  // straight from useCandles' own already-fetched `v` field, no new query (Task 1's
-  // Dev Note); OFI/OBI/microprice/spread come from the co-paged useIndicatorSeries hook;
-  // Story 15.6's picker entries come from usePickerIndicatorValues, one pane per
-  // `{indicator_id}.{output_attr}` key -- untouched five fixed panes stay first so their
-  // own color slots never shift when a picker pane is added/removed.
+  // component never calls chart.addPane()/addSeries() itself. Default is just the volume
+  // overlay (derived from useCandles' own `v` field); picker entries follow, one series per
+  // `{indicator_id}.{output_attr}` key, placed by the catalog's `panel`.
   const panes = useMemo<IndicatorPaneSpec[]>(
     () => [
-      {
-        id: "MultiLevelOFI",
-        kind: "Line",
-        data: indicatorSeries.ofi,
-        color: assignPaneColor("MultiLevelOFI", DEFAULT_PANE_IDS),
-      },
-      {
-        id: "MultiLevelOBI",
-        kind: "Line",
-        data: indicatorSeries.obi,
-        color: assignPaneColor("MultiLevelOBI", DEFAULT_PANE_IDS),
-      },
-      {
-        id: "microprice",
-        kind: "Line",
-        data: indicatorSeries.microprice,
-        color: assignPaneColor("microprice", DEFAULT_PANE_IDS),
-      },
-      {
-        id: "spread",
-        kind: "Line",
-        data: indicatorSeries.spread,
-        color: assignPaneColor("spread", DEFAULT_PANE_IDS),
-      },
       {
         id: "volume",
         kind: "Histogram",
         data: volume,
         color: assignPaneColor("volume", DEFAULT_PANE_IDS),
       },
-      ...pickerSeriesKeys.map((key) => ({
-        id: key,
-        kind: "Line" as const,
-        data: pickerValues[key],
-        // Combined with DEFAULT_PANE_IDS (not its own separate `pickerSeriesKeys`-only
-        // domain) so a picker pane's color slot can never land on the same palette index
-        // as one of the five fixed default panes.
-        color: assignPaneColor(key, [...DEFAULT_PANE_IDS, ...pickerSeriesKeys]),
-      })),
+      ...pickerSeriesKeys.map((key) => {
+        const panel = panelForKey(key, catalog);
+        return {
+          id: key,
+          kind: panel === "histogram" ? ("Histogram" as const) : ("Line" as const),
+          data: pickerValues[key],
+          // Combined with DEFAULT_PANE_IDS so a picker series never lands on volume's slot.
+          color: assignPaneColor(key, [...DEFAULT_PANE_IDS, ...pickerSeriesKeys]),
+          placement: panel === "overlay" ? ("overlay" as const) : ("pane" as const),
+        };
+      }),
     ],
-    [indicatorSeries, volume, pickerSeriesKeys, pickerValues],
+    [volume, pickerSeriesKeys, pickerValues, catalog],
   );
+
+  useEffect(() => {
+    chart?.applyOptions({ crosshair: { mode: crosshairOn ? CrosshairMode.Normal : CrosshairMode.Hidden } });
+  }, [chart, crosshairOn]);
+
+  useEffect(() => {
+    fetchIndicatorCatalog()
+      .then(setCatalog)
+      .catch((err: unknown) => console.error("ChartPage: failed to load indicator catalog", err));
+  }, []);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(hlineStorageKey(instrumentId), JSON.stringify(priceLines));
+    } catch {
+      // storage blocked: lines just won't survive a reload
+    }
+  }, [instrumentId, priceLines]);
 
   useEffect(() => {
     // Story 18.1 (AC #5): Esc cancels the active tool from anywhere on the page, not
@@ -187,13 +239,28 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
 
   return (
     <div>
-      <h1>{instrumentId}</h1>
-      <div>
-        {/* The mode buttons double as the candles-only-tool disarm point (Story
-            18.1): both buttons are disabled while their mode is already active, so
-            these handlers only ever run on a real mode CHANGE -- and any mode change
-            disarms the tool, in the handler itself rather than a state-syncing
-            effect (react/set-state-in-effect). */}
+      {/* Spec §A8.1 top toolbar, clusters left to right: [symbol + timeframe] [chart type]
+          [indicators + fit + jump]. No theme toggle: the visual identity is fixed (15.9).
+          The symbol slot is a read-only label + back link -- coins are picked on Rankings. */}
+      <div className="chart-topbar" role="toolbar" aria-label="Chart controls">
+        <div className="chart-cluster">
+          <Link to="/">&larr; Rankings</Link>
+          <h1>{instrumentId}</h1>
+          {TIMEFRAMES.map((tf) => (
+            <button
+              key={tf.label}
+              type="button"
+              className={barSeconds === tf.seconds ? "tabbtn active" : "tabbtn"}
+              aria-pressed={barSeconds === tf.seconds}
+              aria-label={`Timeframe ${tf.label}`}
+              disabled={mode === "lines"}
+              onClick={() => onTimeframeChange(tf.seconds)}
+            >
+              {tf.label}
+            </button>
+          ))}
+        </div>
+        <div className="chart-cluster">
         <button
           id="btn-candles"
           type="button"
@@ -216,6 +283,18 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
         >
           Lines
         </button>
+        </div>
+        <div className="chart-cluster">
+          <button type="button" onClick={() => indicatorsRef.current?.scrollIntoView({ block: "center" })}>
+            Indicators
+          </button>
+          <button type="button" onClick={() => chart?.timeScale().fitContent()}>
+            Fit
+          </button>
+          <button type="button" onClick={() => chart?.timeScale().scrollToRealTime()}>
+            Latest
+          </button>
+        </div>
       </div>
       <div className="chart-workspace">
         {/* Story 18.1 (AC #1): the left tool rail, generated from CHART_TOOLS --
@@ -223,8 +302,22 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
             in index.css, same scoped-override precedent as .filter-panel .tabbtn. */}
         <div className="chart-toolbar" role="toolbar" aria-label="Chart tools">
           {CHART_TOOLS.map((tool) => (
+            <Fragment key={tool.id}>
+              {tool.id === "hline" && (
+                <>
+                  <button
+                    type="button"
+                    className={crosshairOn ? "tabbtn active" : "tabbtn"}
+                    aria-pressed={crosshairOn}
+                    aria-label="Crosshair toggle"
+                    onClick={() => setCrosshairOn((on) => !on)}
+                  >
+                    Cross
+                  </button>
+                  <hr className="chart-toolbar-sep" />
+                </>
+              )}
             <button
-              key={tool.id}
               type="button"
               className={activeTool === tool.id ? "tabbtn active" : "tabbtn"}
               aria-pressed={activeTool === tool.id}
@@ -235,6 +328,7 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
             >
               {tool.label}
             </button>
+            </Fragment>
           ))}
         </div>
         <div className="term-box" data-label={instrumentId}>
@@ -251,12 +345,14 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
           />
         </div>
       </div>
+      <div ref={indicatorsRef}>
       <IndicatorPicker
         fetchConfig={() => fetchCoinIndicatorConfig(instrumentId)}
         saveConfig={(entries) => saveCoinIndicatorConfig(instrumentId, entries)}
         reloadKey={instrumentId}
         onEntriesChange={setPickerEntries}
       />
+      </div>
     </div>
   );
 }
@@ -264,9 +360,33 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
 export default function ChartPage() {
   const { iid } = useParams<{ iid: string }>();
   if (!iid) return <p>No instrument specified.</p>;
+  return <ChartForCoin key={iid} instrumentId={iid} />;
+}
 
-  // Keyed by instrument id: a fresh LightweightChart + useCandles/useIndicatorSeries set
-  // per coin, rather than trying to re-point one long-lived chart instance (see
+function ChartForCoin({ instrumentId }: { instrumentId: string }) {
+  const [barSeconds, setBarSeconds] = useState(() => loadTimeframe(instrumentId));
+
+  const changeTimeframe = useCallback(
+    (seconds: number): void => {
+      setBarSeconds(seconds);
+      try {
+        localStorage.setItem(timeframeStorageKey(instrumentId), String(seconds));
+      } catch {
+        // storage blocked: the choice just won't survive a reload
+      }
+    },
+    [instrumentId],
+  );
+
+  // Keyed by instrument AND bar size: a fresh LightweightChart + useCandles set per
+  // (coin, timeframe), rather than trying to re-point one long-lived chart instance (see
   // LightweightChart's own docstring -- lightweight-charts has no supported API for that).
-  return <ChartInner key={iid} instrumentId={iid} />;
+  return (
+    <ChartInner
+      key={`${instrumentId}:${barSeconds}`}
+      instrumentId={instrumentId}
+      barSeconds={barSeconds}
+      onTimeframeChange={changeTimeframe}
+    />
+  );
 }

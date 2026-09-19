@@ -37,6 +37,9 @@ export interface IndicatorPaneSpec {
   kind: PaneSeriesKind;
   data: IndicatorDatum[];
   color: string;
+  /** "pane" (default) = its own pane under the price chart; "overlay" = drawn inside the
+   * price pane (TradingView-style: MAs/bands sharing the price scale). */
+  placement?: "pane" | "overlay";
 }
 
 // Story 18.1: a tool-drawn horizontal price line (AC #2). `id` is the caller's stable
@@ -114,7 +117,8 @@ interface LightweightChartProps {
 type AnySeriesApi = ISeriesApi<"Line", Time> | ISeriesApi<"Histogram", Time>;
 
 interface PaneEntry {
-  pane: IPaneApi<Time>;
+  /** null for an overlay: it lives in the price pane (0), so there is no pane to remove. */
+  pane: IPaneApi<Time> | null;
   series: AnySeriesApi;
   /** The last `spec.data` reference applied to `series`, so an unrelated pane's data
    * refresh doesn't force every other still-visible pane to re-run `setData()` too --
@@ -432,7 +436,8 @@ export default function LightweightChart({
     // `chart.removePane()` (AC #4).
     for (const [id, entry] of [...registry]) {
       if (!specsById.has(id)) {
-        chart.removePane(entry.pane.paneIndex());
+        if (entry.pane) chart.removePane(entry.pane.paneIndex());
+        else chart.removeSeries(entry.series);
         registry.delete(id);
       }
     }
@@ -442,9 +447,14 @@ export default function LightweightChart({
     for (const spec of panes) {
       let entry = registry.get(spec.id);
       if (!entry) {
-        const pane = chart.addPane();
+        const overlay = spec.placement === "overlay";
+        const pane = overlay ? null : chart.addPane();
         const definition = spec.kind === "Line" ? LineSeries : HistogramSeries;
-        const series = chart.addSeries(definition, { color: spec.color }, pane.paneIndex()) as AnySeriesApi;
+        const series = chart.addSeries(
+          definition,
+          { color: spec.color },
+          pane ? pane.paneIndex() : 0,
+        ) as AnySeriesApi;
         entry = { pane, series, lastData: spec.data };
         registry.set(spec.id, entry);
         setSeriesData(entry.series, spec.data);

@@ -240,6 +240,18 @@ describe("LightweightChart", () => {
     expect(addSeriesMock).toHaveBeenNthCalledWith(2, "LineSeries-sentinel", { color: "#2962ff" }, 1);
   });
 
+  it("draws an overlay inside the price pane (index 0) with no new pane, and removes just its series", () => {
+    const overlay = [makePaneSpec("SimpleMovingAverage", { placement: "overlay", color: "#2962ff" })];
+    const { rerender } = render(<LightweightChart data={[]} onChartApi={() => {}} panes={overlay} />);
+
+    expect(addPaneMock).not.toHaveBeenCalled();
+    expect(addSeriesMock).toHaveBeenNthCalledWith(2, "LineSeries-sentinel", { color: "#2962ff" }, 0);
+
+    rerender(<LightweightChart data={[]} onChartApi={() => {}} panes={[]} />);
+    expect(removeSeriesMock).toHaveBeenCalledTimes(1);
+    expect(removePaneMock).not.toHaveBeenCalled();
+  });
+
   it("removes a pane by id when it drops out of the panes prop, and re-adding the same id afterward works cleanly", () => {
     const onePane = [makePaneSpec("MultiLevelOFI")];
     const { rerender } = render(<LightweightChart data={[]} onChartApi={() => {}} panes={onePane} />);

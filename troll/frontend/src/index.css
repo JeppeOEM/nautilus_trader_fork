@@ -154,6 +154,14 @@ table {
   gap: 8px;
 }
 
+.chart-workspace > .term-box {
+  /* A flex child sizes to its content by default; the chart has none until it
+     mounts, so without this the box collapses to a ~30px sliver. min-width:0 lets it
+     shrink below the chart's own intrinsic width on narrow screens. */
+  flex: 1;
+  min-width: 0;
+}
+
 .chart-toolbar {
   display: flex;
   flex-direction: column;
@@ -166,4 +174,45 @@ table {
 .chart-toolbar .tabbtn {
   flex: none;
   padding: 7px 10px;
+}
+
+/* Spec §A8.1 top toolbar: three clusters (symbol+timeframe | chart type | indicators+fit+
+   jump) separated by a visible divider. */
+.chart-topbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0;
+  margin: 0 0 12px;
+}
+
+.chart-cluster {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px;
+  border-left: 1px solid var(--color-border);
+}
+
+.chart-cluster:first-child {
+  padding-left: 0;
+  border-left: 0;
+}
+
+.chart-cluster h1 {
+  margin: 0 6px;
+  font-size: 1.1em;
+}
+
+.chart-cluster .tabbtn {
+  flex: none;
+  padding: 7px 8px;
+}
+
+/* Spec §A8.1 left toolbar: cursor/crosshair, divider, then the drawing tools. */
+.chart-toolbar-sep {
+  width: 100%;
+  margin: 2px 0;
+  border: 0;
+  border-top: 1px solid var(--color-border);
 }

@@ -77,6 +77,7 @@ export function useCandles(
   instrumentId: string,
   chart: IChartApi | null,
   enabled = true,
+  barSeconds = BAR_SECONDS,
 ): UseCandlesResult {
   const [state, setState] = useState<CandlesState>(EMPTY_STATE);
   const hasMoreOlderRef = useRef(true);
@@ -88,7 +89,7 @@ export function useCandles(
     (beforeNs: number, prepend: boolean): Promise<void> => {
       if (loadingRef.current) return Promise.resolve();
       loadingRef.current = true;
-      return fetchCandles(instrumentId, beforeNs, INITIAL_LIMIT, BAR_SECONDS)
+      return fetchCandles(instrumentId, beforeNs, INITIAL_LIMIT, barSeconds)
         .then((response) => {
           if (response.items.length === 0) {
             hasMoreOlderRef.current = false;
@@ -113,8 +114,8 @@ export function useCandles(
             // variants).
             const newestTime = mappedCandles[mappedCandles.length - 1].time as UTCTimestamp;
             const boundaryTime = prev.candles[0].time as UTCTimestamp;
-            if (newestTime + BAR_SECONDS < boundaryTime) {
-              const seamTime = (newestTime + BAR_SECONDS) as UTCTimestamp;
+            if (newestTime + barSeconds < boundaryTime) {
+              const seamTime = (newestTime + barSeconds) as UTCTimestamp;
               return {
                 candles: [...mappedCandles, { time: seamTime }, ...prev.candles],
                 volume: [...mappedVolume, { time: seamTime }, ...prev.volume],
@@ -137,7 +138,7 @@ export function useCandles(
           loadingRef.current = false;
         });
     },
-    [instrumentId],
+    [instrumentId, barSeconds],
   );
 
   useEffect(() => {

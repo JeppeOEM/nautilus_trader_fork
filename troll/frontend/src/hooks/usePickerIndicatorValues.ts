@@ -8,7 +8,7 @@ import type { IndicatorConfigEntry, IndicatorValuesItem } from "../api/schema";
 // depends on every chart-history hook sharing the identical before_ns/limit/bar_seconds
 // tuple, not just a similarly-shaped one.
 const INITIAL_LIMIT = 120;
-const BAR_SECONDS = 60;
+const DEFAULT_BAR_SECONDS = 60;
 const REFILL_MARGIN_BARS = 20;
 
 export type PickerDatum = LineData<Time> | WhitespaceData<Time>;
@@ -50,6 +50,7 @@ export function usePickerIndicatorValues(
   instrumentId: string,
   chart: IChartApi | null,
   entries: IndicatorConfigEntry[],
+  barSeconds = DEFAULT_BAR_SECONDS,
 ): Record<string, PickerDatum[]> {
   const [seriesByKey, setSeriesByKey] = useState<Record<string, PickerDatum[]>>({});
   const hasMoreOlderRef = useRef(true);
@@ -80,7 +81,7 @@ export function usePickerIndicatorValues(
       if (requestEntries.length === 0) return Promise.resolve();
       if (loadingRef.current) return Promise.resolve();
       loadingRef.current = true;
-      return fetchIndicatorValues(instrumentId, beforeNs, INITIAL_LIMIT, BAR_SECONDS, requestEntries)
+      return fetchIndicatorValues(instrumentId, beforeNs, INITIAL_LIMIT, barSeconds, requestEntries)
         .then((response) => {
           if (response.items.length === 0) {
             hasMoreOlderRef.current = false;
@@ -92,7 +93,7 @@ export function usePickerIndicatorValues(
             // Same page-boundary seam-gap check as useCandles'/useIndicatorSeries' own
             // loadPage -- a real collection gap can straddle exactly the page cursor,
             // which each page's own gap-marker insertion can't see on its own.
-            const barMs = BAR_SECONDS * 1000;
+            const barMs = barSeconds * 1000;
             const newestMs = response.items[response.items.length - 1].t;
             const boundaryMs = itemsRef.current[0].t;
             const seam: IndicatorValuesItem[] =
@@ -114,7 +115,7 @@ export function usePickerIndicatorValues(
           }
         });
     },
-    [instrumentId, requestEntries],
+    [instrumentId, requestEntries, barSeconds],
   );
 
   const resetAndLoad = useCallback(() => {

@@ -9,7 +9,7 @@
     "lint": "oxlint",
     "preview": "vite preview",
     "test": "vitest run && npm run test:codegen",
-    "test:codegen": "node --test scripts/gen-api-types.test.mjs",
+    "test:codegen": "node --test scripts/gen-api-types.test.mjs scripts/chart-layout.test.mjs",
     "codegen": "node scripts/gen-api-types.mjs openapi.json src/api/schema.ts"
   },
   "dependencies": {

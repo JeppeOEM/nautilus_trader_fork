@@ -33,7 +33,8 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from ml_signals import catalog_stats as _catalog_stats
-from ml_signals.candles import candle_dicts_from_snapshots
+from ml_signals.candles import candle_dicts_for_window
+from ml_signals.candles import choose_candle_source
 
 
 CATALOG_PATH: str = os.environ.get("CATALOG_PATH", "troll/dydx_collector/catalog")
@@ -46,7 +47,7 @@ _MAX_CANDLES_LIMIT = 500
 # (AC #7's "no error, silently clamped"), not a 422: a non-positive value would zero or
 # invert every window/bucket computation below, and an unbounded one would let a client
 # blow up the query span this route otherwise keeps deliberately bounded (AD-F3/MEM-01).
-_MAX_BAR_SECONDS = 86_400
+_MAX_BAR_SECONDS = 604_800  # 1w -- the timeframe selector's widest bar
 
 # How many multiples of `limit * bar_seconds` to look back for the main query window.
 # Real second-snapshot coverage has gaps (thin trading, collector downtime), so a 1x
@@ -60,6 +61,11 @@ _QUERY_WINDOW_MULTIPLIER = 3
 # _QUERY_WINDOW_MULTIPLIER` alone would allow a single request to pull ~4 years of raw
 # 1-second snapshots, defeating the bounded-read guarantee this route exists to provide.
 _MAX_QUERY_SPAN_SECONDS = 7 * 86_400
+
+# Wide bars (> ROLLUP_THRESHOLD_SECONDS) read the minute rollup (1/60th the rows), so the
+# same MEM-01 bound can span longer -- but it also bounds the raw-1s fallback the dispatch
+# uses before the rollup's first row, so it stays a fixed cap, not open-ended.
+_MAX_ROLLUP_QUERY_SPAN_SECONDS = 30 * 86_400
 
 router = APIRouter()
 
@@ -79,7 +85,12 @@ class CandlesResponse(BaseModel):
 
 
 def _window_start_ns(before_ns: int, limit: int, bar_seconds: int) -> int:
-    span_seconds = min(limit * bar_seconds * _QUERY_WINDOW_MULTIPLIER, _MAX_QUERY_SPAN_SECONDS)
+    cap = (
+        _MAX_ROLLUP_QUERY_SPAN_SECONDS
+        if choose_candle_source(bar_seconds) == "rollup_1m"
+        else _MAX_QUERY_SPAN_SECONDS
+    )
+    span_seconds = min(limit * bar_seconds * _QUERY_WINDOW_MULTIPLIER, cap)
     return before_ns - span_seconds * 1_000_000_000
 
 
@@ -115,10 +126,15 @@ def _has_more(instrument_id: str, earliest_kept_ns: int, limit: int, bar_seconds
     """
     probe_end_ns = earliest_kept_ns - 1
     probe_start_ns = _window_start_ns(probe_end_ns, limit, bar_seconds)
-    probe = _catalog_stats.query_second_snapshots(
+    if choose_candle_source(bar_seconds) == "rollup_1m" and _catalog_stats.query_minute_rollups(
         CATALOG_PATH, instrument_id, probe_start_ns, probe_end_ns,
-    )
-    return len(probe) > 0
+    ):
+        return True
+    # Pre-rollup history is raw-only; probe a bounded raw window so it still pages back.
+    raw_start_ns = max(probe_start_ns, probe_end_ns - _MAX_QUERY_SPAN_SECONDS * 1_000_000_000)
+    return len(_catalog_stats.query_second_snapshots(
+        CATALOG_PATH, instrument_id, raw_start_ns, probe_end_ns,
+    )) > 0
 
 
 @router.get("/api/candles/{instrument_id}")
@@ -130,10 +146,18 @@ def get_candles(
     before_ms = before_ns // 1_000_000
 
     start_ns = _window_start_ns(before_ns, limit, bar_seconds)
-    snapshots = _catalog_stats.query_second_snapshots(
-        CATALOG_PATH, instrument_id, start_ns, before_ns,
-    )
-    candles = [c for c in candle_dicts_from_snapshots(snapshots, bar_seconds) if c["t"] < before_ms]
+    candles = [
+        c
+        for c in candle_dicts_for_window(
+            instrument_id,
+            start_ns,
+            before_ns,
+            bar_seconds,
+            snapshot_rows_fn=lambda i, a, b: _catalog_stats.query_second_snapshots(CATALOG_PATH, i, a, b),
+            rollup_rows_fn=lambda i, a, b: _catalog_stats.query_minute_rollups(CATALOG_PATH, i, a, b),
+        )
+        if c["t"] < before_ms
+    ]
     kept = candles[-limit:]
 
     if not kept:
