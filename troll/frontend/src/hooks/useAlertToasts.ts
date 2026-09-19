@@ -34,6 +34,7 @@ export function useAlertToasts(): AlertToast[] {
     const dismissTimers: ReturnType<typeof setTimeout>[] = [];
     let cancelled = false;
     let attempt = 0;
+    let toastSeq = 0;
 
     function connect(): void {
       const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
@@ -44,8 +45,8 @@ export function useAlertToasts(): AlertToast[] {
       socket.onmessage = (event: MessageEvent<string>) => {
         const toast = parseToast(event.data);
         if (cancelled || !toast) return;
-        // Same alert can fire again (once-per-bar): key by arrival, not alert id.
-        const key = `${toast.id}:${Date.now()}`;
+        // Same alert can fire again (once-per-bar): key by arrival order, not alert id (a Date.now() key could collide within one ms).
+        const key = `${toast.id}:${toastSeq++}`;
         setToasts((current) => [...current, { ...toast, id: key }]);
         dismissTimers.push(
           setTimeout(() => setToasts((current) => current.filter((t) => t.id !== key)), TOAST_MS),

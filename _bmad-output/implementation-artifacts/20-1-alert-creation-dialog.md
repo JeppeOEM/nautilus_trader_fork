@@ -1,6 +1,6 @@
 # Story 20.1: Alert creation dialog
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -73,3 +73,10 @@ Implemented: `data_api/alerts.py` (TOML `AlertStore`, mirrors chart_indicator_co
 - troll/frontend/src/api/client.ts
 - troll/frontend/src/api/schema.ts
 - troll/frontend/openapi.json
+
+### Review Findings
+
+Code review 2026-09-19 (adversarial + edge-case + acceptance layers, run inline over `git diff 14a459ccd6..HEAD`). 0 decision-needed, 3 patch (all applied), 3 defer, rest dismissed.
+
+- [x] [Review][Defer] A horizontal-line condition is resolved to a static price at creation; dragging the line afterwards does not move the alert — deferred, by design (line state is client-side chart state; spec AC allows it)
+- [x] [Review][Defer] `AlertStore` rewrites its TOML in place (bind-mounted single file can't be os.replace'd); a crash mid-write leaves a corrupt file that fails loudly on next load — deferred, same accepted trade-off as chart_indicator_config

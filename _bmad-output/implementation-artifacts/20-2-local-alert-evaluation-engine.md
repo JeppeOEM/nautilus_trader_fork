@@ -1,6 +1,6 @@
 # Story 20.2: Local alert evaluation engine
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -72,3 +72,12 @@ Decision: evaluation is server-side (webhook fires with no tab open). `AlertEngi
 - troll/data_api/tests/test_alerts.py
 - troll/frontend/src/hooks/useAlertToasts.ts
 - troll/frontend/src/App.tsx
+
+### Review Findings
+
+Code review 2026-09-19 (adversarial + edge-case + acceptance layers, run inline over `git diff 14a459ccd6..HEAD`). 0 decision-needed, 3 patch (all applied), 3 defer, rest dismissed.
+
+- [x] [Review][Patch] `record_fire` save failure would have swallowed the fire (webhook never posted) — now logged, alert still fires [data_api/alerts.py]
+- [x] [Review][Patch] `once_per_bar_close` reported the next bar's first tick as `{{close}}` — `evaluate()` now returns the closed bar's close [data_api/alerts.py]
+- [x] [Review][Patch] Toast key used `Date.now()`, could collide within 1ms — now a per-hook counter [frontend/src/hooks/useAlertToasts.ts]
+- [x] [Review][Defer] Run state (last price, fired bar) is in-memory: after a data_api restart the first tick can't fire and a once_per_bar alert may re-fire within the same bar — deferred, documented ceiling

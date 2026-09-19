@@ -44,7 +44,10 @@ def _alert(frequency: str = "only_once", **kw) -> alerts.Alert:
 def _run(alert: alerts.Alert, ticks: list[tuple[int, float]]) -> list[int]:
     """Feed (seconds-after-T0, price) ticks through evaluate(); return indexes that fired."""
     state = alerts.RunState()
-    return [i for i, (s, p) in enumerate(ticks) if alerts.evaluate(alert, state, p, _T0 + s * _S)]
+    return [
+        i for i, (s, p) in enumerate(ticks)
+        if alerts.evaluate(alert, state, p, _T0 + s * _S) is not None
+    ]
 
 
 def test_store_round_trip_keeps_optional_fields(tmp_path: Path) -> None:
@@ -95,6 +98,26 @@ def test_once_per_bar_close_decides_on_the_bar_close_not_intrabar_wicks() -> Non
     # on the first tick of bar 3 (the bar's close is only known once the bucket rolls over).
     ticks = [(0, 99), (30, 99), (60, 101), (90, 99), (120, 101), (150, 101), (180, 101)]
     assert _run(_alert("once_per_bar_close"), ticks) == [6]
+
+
+def test_once_per_bar_close_reports_the_closed_bars_close_price() -> None:
+    alert, state = _alert("once_per_bar_close"), alerts.RunState()
+    ticks = [(0, 99), (60, 99), (90, 101), (119, 102), (120, 50)]  # bar 1 closes at 102
+    reported = [alerts.evaluate(alert, state, p, _T0 + s * _S) for s, p in ticks]
+    assert reported == [None, None, None, None, 102]
+
+
+def test_failed_persist_still_fires_the_alert(tmp_path: Path) -> None:
+    posted: list[str] = []
+    store = alerts.AlertStore(tmp_path / "a.toml")
+    store.add(_alert("only_once", bar_seconds=1))
+    engine = alerts.AlertEngine(store, post=lambda a, body: posted.append(body))
+    (tmp_path / "a.toml").unlink()
+    (tmp_path / "a.toml").mkdir()  # makes every later save raise IsADirectoryError
+    engine.on_snapshot(_snapshot(_T0, 99))
+    engine.on_snapshot(_snapshot(_T0 + _S, 101))
+    _join_post_threads()
+    assert len(posted) == 1
 
 
 def test_expired_alert_never_fires_and_reports_expired() -> None:

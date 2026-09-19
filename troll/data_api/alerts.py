@@ -129,7 +129,12 @@ class AlertStore:
         with self._lock:
             alert.last_fired_ns = ts_ns
             alert.triggered = alert.frequency == "only_once"
-            self._save()
+            try:
+                self._save()
+            except OSError:
+                # The in-memory state still stops an only_once repeat this run; a failed save
+                # must never swallow the fire itself.
+                logger.exception("alert %s fired but could not be persisted", alert.id)
 
 
 store = AlertStore(Path(ALERTS_PATH))
@@ -154,29 +159,31 @@ def _crossed(prev: float | None, cur: float, level: float) -> bool:
     return prev is not None and (prev < level <= cur or prev > level >= cur)
 
 
-def evaluate(alert: Alert, state: RunState, price: float, ts_ns: int) -> bool:
-    """One tick of the frequency/expiration state machine. Returns True when `alert` fires."""
+def evaluate(alert: Alert, state: RunState, price: float, ts_ns: int) -> float | None:
+    """One tick of the frequency/expiration state machine. Returns the price to report when
+    `alert` fires (for once_per_bar_close that is the closed bar's close, not this tick), else None."""
     if status_of(alert, ts_ns) != "active":
-        return False
+        return None
     bucket = ts_ns // (alert.bar_seconds * _NS_PER_S)
     if alert.frequency == "once_per_bar_close":
         # Only bar closes are compared: a bar's close is the last price seen before the
         # bucket rolls over, so the crossing is decided once, on the first tick of the next bar.
-        fired = False
+        closed_bar_close = None
         if state.bucket is not None and bucket != state.bucket:
-            fired = _crossed(state.prev_close, state.last_price, alert.level)
+            if _crossed(state.prev_close, state.last_price, alert.level):
+                closed_bar_close = state.last_price
             state.prev_close = state.last_price
         state.bucket, state.last_price = bucket, price
-        return fired
+        return closed_bar_close
     crossed = _crossed(state.last_price, price, alert.level)
     state.last_price = price
     if not crossed:
-        return False
+        return None
     if alert.frequency == "once_per_bar":
         if state.fired_bucket == bucket:
-            return False
+            return None
         state.fired_bucket = bucket
-    return True
+    return price
 
 
 def render(template: str, ticker: str, close: float, ts_ns: int, bar_seconds: int) -> str:
@@ -240,8 +247,9 @@ class AlertEngine:
             if alert.instrument_id != instrument_id:
                 continue
             state = self._state.setdefault(alert.id, RunState())
-            if evaluate(alert, state, price, snapshot.ts_event):
-                self._fire(alert, price, snapshot.ts_event)
+            fire_price = evaluate(alert, state, price, snapshot.ts_event)
+            if fire_price is not None:
+                self._fire(alert, fire_price, snapshot.ts_event)
 
     def _fire(self, alert: Alert, price: float, ts_ns: int) -> None:
         message = render(alert.template, alert.instrument_id, price, ts_ns, alert.bar_seconds)

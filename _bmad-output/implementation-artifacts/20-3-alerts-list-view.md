@@ -1,6 +1,6 @@
 # Story 20.3: Alerts list view
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -54,3 +54,9 @@ so that I can review or delete them.
 - troll/frontend/src/pages/AlertsPage.tsx
 - troll/frontend/src/pages/AlertsPage.test.tsx
 - troll/frontend/src/App.tsx
+
+### Review Findings
+
+Code review 2026-09-19 (adversarial + edge-case + acceptance layers, run inline over `git diff 14a459ccd6..HEAD`). 0 decision-needed, 3 patch (all applied), 3 defer, rest dismissed.
+
+Clean — no findings.
