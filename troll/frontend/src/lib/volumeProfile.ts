@@ -51,6 +51,28 @@ export function joinCandlesWithVolume(
   return joined;
 }
 
+/**
+ * The profile of the candles whose time lies in [startTime, endTime] (either order) -- the
+ * one call every range-based variant makes: slice, pair with volume, build. Settings carry
+ * the value area as a percent, the engine takes a fraction.
+ */
+export function buildRangeProfile(
+  candles: readonly ChartDatum[],
+  volume: readonly VolumeDatum[],
+  startTime: number,
+  endTime: number,
+  settings: Pick<VolumeProfileSettings, "rowCount" | "valueAreaPercent">,
+): VolumeProfile {
+  const from = Math.min(startTime, endTime);
+  const to = Math.max(startTime, endTime);
+  const inRange = <T extends { time: unknown }>(d: T): boolean => (d.time as number) >= from && (d.time as number) <= to;
+  return buildVolumeProfile(
+    joinCandlesWithVolume(candles.filter(inRange), volume.filter(inRange)),
+    settings.rowCount,
+    settings.valueAreaPercent / 100,
+  );
+}
+
 function extendValueArea(totals: readonly number[], poc: number, target: number): [number, number] {
   let lo = poc;
   let hi = poc;

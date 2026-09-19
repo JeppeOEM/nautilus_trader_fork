@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import { buildVolumeProfile } from "../../../lib/volumeProfile";
-import { layoutProfile, type VolumeProfileRenderSpec } from "./VolumeProfilePrimitive";
+import type { Time } from "lightweight-charts";
+import { vi } from "vitest";
+
+import { VolumeProfilePrimitive, layoutProfile, type ResolvedProfileSpec, type VolumeProfileRenderSpec } from "./VolumeProfilePrimitive";
 
 // Range 0..4 in 4 size-1 rows, each candle inside one row: totals 2, 8, 4, 1 -- row 1 is
 // the POC (all up), row 2 is all down.
@@ -15,7 +18,7 @@ const profile = buildVolumeProfile(
   4,
 );
 const ys = [0, 1, 2, 3].map((i) => ({ y1: (3 - i) * 10, y2: (4 - i) * 10 }));
-const spec = (over: Partial<VolumeProfileRenderSpec> = {}): VolumeProfileRenderSpec => ({
+const spec = (over: Partial<ResolvedProfileSpec> = {}): ResolvedProfileSpec => ({
   profile,
   xAnchor: 5,
   width: 100,
@@ -65,5 +68,47 @@ describe("layoutProfile (Story 18.5)", () => {
     // POC row 1 (8) of total 15; 70% = 10.5 -> +row 2 (4) = 12 -> rows 1..2 -> y 10..30 in these ys
     expect(band!.y).toBe(ys[2].y1);
     expect(band!.y + band!.h).toBe(ys[1].y2);
+  });
+});
+
+describe("VolumeProfilePrimitive time anchors (Story 18.6)", () => {
+  const timeSpec: VolumeProfileRenderSpec = {
+    ...spec(),
+    xAnchor: { time: 100 as Time },
+    width: { toTime: 300 as Time },
+    edges: { startTime: 100 as Time, endTime: 300 as Time },
+  };
+
+  const attach = (primitive: VolumeProfilePrimitive, offset: () => number) =>
+    primitive.attached({
+      chart: { timeScale: () => ({ timeToCoordinate: (t: number) => t / 2 + offset() }) },
+      series: { priceToCoordinate: (p: number) => p * 10 },
+      requestUpdate: vi.fn(),
+    } as never);
+
+  it("re-resolves the anchor and range width from times on every redraw (follows pan/zoom)", () => {
+    let offset = 0;
+    const primitive = new VolumeProfilePrimitive(timeSpec);
+    attach(primitive, () => offset);
+
+    primitive.updateAllViews();
+    expect(primitive.resolvedAnchor()).toEqual({ xAnchor: 50, width: 100 });
+
+    offset = 20; // panned: same times, new pixels; width (range span) unchanged
+    primitive.updateAllViews();
+    expect(primitive.resolvedAnchor()).toEqual({ xAnchor: 70, width: 100 });
+  });
+
+  it("has nothing drawable while a time has no coordinate", () => {
+    const primitive = new VolumeProfilePrimitive(timeSpec);
+    primitive.attached({
+      chart: { timeScale: () => ({ timeToCoordinate: (t: number) => (t === 300 ? null : t) }) },
+      series: { priceToCoordinate: (p: number) => p },
+      requestUpdate: vi.fn(),
+    } as never);
+
+    primitive.updateAllViews();
+
+    expect(primitive.resolvedAnchor()).toBeNull();
   });
 });

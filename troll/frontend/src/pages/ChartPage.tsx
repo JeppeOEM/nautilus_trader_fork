@@ -7,10 +7,17 @@ import IndicatorPicker from "../components/chart/IndicatorPicker";
 import LightweightChart, {
   type ChartMode,
   type DrawingSpec,
+  type VolumeProfileSpec,
   type IndicatorPaneSpec,
   type PriceLineSpec,
 } from "../components/chart/LightweightChart";
 import type { TrendlineAnchor } from "../components/chart/primitives/TrendlinePrimitive";
+import VolumeProfileSettingsPanel from "../components/chart/VolumeProfileSettings";
+import {
+  DEFAULT_VOLUME_PROFILE_SETTINGS,
+  buildRangeProfile,
+  type VolumeProfile,
+} from "../lib/volumeProfile";
 import { assignPaneColor, cssVar } from "../components/chart/paneColors";
 import type { IndicatorConfigEntry } from "../api/schema";
 import { BAR_SECONDS, useCandles } from "../hooks/useCandles";
@@ -26,7 +33,7 @@ const DEFAULT_PANE_IDS = ["MultiLevelOFI", "MultiLevelOBI", "microprice", "sprea
 
 // Story 18.1 (AC #1): the chart's drawing-tool state -- "cursor" is the inert default.
 // Stories 18.2/18.3 extend this union with their tools, never a second state variable.
-export type ChartTool = "cursor" | "hline" | "trendline" | "measure";
+export type ChartTool = "cursor" | "hline" | "trendline" | "measure" | "frvp";
 
 interface ChartToolDef {
   id: ChartTool;
@@ -45,12 +52,29 @@ const CHART_TOOLS: readonly ChartToolDef[] = [
   { id: "hline", label: "HLine", ariaLabel: "Horizontal line tool", candlesOnly: true },
   { id: "trendline", label: "Trend", ariaLabel: "Trendline tool", candlesOnly: false },
   { id: "measure", label: "Measure", ariaLabel: "Measurement tool", candlesOnly: true },
+  { id: "frvp", label: "FRVP", ariaLabel: "Fixed range volume profile tool", candlesOnly: true },
 ];
 
 // Identity-preserving when no replay is active (`cutoff === null`), so an ordinary
 // re-render never hands the chart's pane registry a "changed" data reference.
 function trimAfter<T extends { time: Time }>(rows: T[], cutoff: number | null): T[] {
   return cutoff === null ? rows : rows.filter((row) => (row.time as number) <= cutoff);
+}
+
+// Story 18.6: a placed fixed-range profile. The profile is computed once when the range
+// is confirmed (drag-release, edge-drag release, or a settings change) and stored -- never
+// recomputed by pan/zoom/new data.
+interface FrvpEntry {
+  id: string;
+  startTime: number;
+  endTime: number;
+  profile: VolumeProfile;
+}
+
+interface EdgeGhost {
+  id: string;
+  edge: "start" | "end";
+  time: number;
 }
 
 function ChartInner({ instrumentId }: { instrumentId: string }) {
@@ -72,6 +96,10 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
   const [pendingAnchor, setPendingAnchor] = useState<TrendlineAnchor | null>(null);
   const [drawings, setDrawings] = useState<DrawingSpec[]>([]);
   const nextDrawingIdRef = useRef(1);
+  const [frvps, setFrvps] = useState<FrvpEntry[]>([]);
+  const [frvpSettings, setFrvpSettings] = useState(DEFAULT_VOLUME_PROFILE_SETTINGS);
+  const [edgeGhost, setEdgeGhost] = useState<EdgeGhost | null>(null);
+  const nextFrvpIdRef = useRef(1);
   const { candles, volume: fullVolume } = useCandles(instrumentId, chart, mode === "candles");
   // Story 18.4: replay only trims the NEWEST end of the loaded candles for display
   // (`replay.displayed`); useCandles and its older-history refill are untouched.
@@ -239,6 +267,76 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
     [activeTool, pendingAnchor, replayMode, pickReplayBar],
   );
 
+  // Story 18.6 (AC #2): one calculation per confirmed range, over the FULL loaded data so the
+  // stored profile is right once a replay ends; while a replay is active the display
+  // rebuilds from the revealed bars only (see `volumeProfiles`), never showing the future.
+  const handleRangeSelect = (start: TrendlineAnchor, end: TrendlineAnchor): void => {
+    const startTime = Math.min(start.time as number, end.time as number);
+    const endTime = Math.max(start.time as number, end.time as number);
+    const profile = buildRangeProfile(candles, fullVolume, startTime, endTime, frvpSettings);
+    if (profile.rows.length === 0) return;
+    const id = `frvp-${nextFrvpIdRef.current++}`;
+    setFrvps((all) => [...all, { id, startTime, endTime, profile }]);
+    setActiveTool("cursor");
+  };
+
+  // The ghost only moves the edge visually while dragging; the profile itself is rebuilt
+  // once, on release (AC #3, Task 4).
+  const handleEdgeDrag = useCallback((id: string, edge: "start" | "end", time: Time): void => {
+    setEdgeGhost({ id, edge, time: time as number });
+  }, []);
+
+  const handleEdgeCommit = (id: string, edge: "start" | "end", time: Time): void => {
+    setEdgeGhost(null);
+    setFrvps((all) =>
+      all.map((f) => {
+        if (f.id !== id) return f;
+        const a = edge === "start" ? (time as number) : f.startTime;
+        const b = edge === "end" ? (time as number) : f.endTime;
+        const startTime = Math.min(a, b);
+        const endTime = Math.max(a, b);
+        const profile = buildRangeProfile(candles, fullVolume, startTime, endTime, frvpSettings);
+        return profile.rows.length === 0 ? f : { ...f, startTime, endTime, profile };
+      }),
+    );
+  };
+
+  const handleFrvpSettings = (next: typeof frvpSettings): void => {
+    setFrvpSettings(next);
+    // A settings change is an explicit user action, so it rebuilds the placed profiles from
+    // their stored ranges (row count / value area change the calculation itself).
+    setFrvps((all) =>
+      all.map((f) => ({ ...f, profile: buildRangeProfile(candles, fullVolume, f.startTime, f.endTime, next) })),
+    );
+  };
+
+  const volumeProfiles = useMemo<VolumeProfileSpec[]>(
+    () =>
+      frvps.map((f) => {
+        const ghost = edgeGhost?.id === f.id ? edgeGhost : null;
+        const a = ghost?.edge === "start" ? ghost.time : f.startTime;
+        const b = ghost?.edge === "end" ? ghost.time : f.endTime;
+        const startTime = Math.min(a, b) as Time;
+        const endTime = Math.max(a, b) as Time;
+        return {
+          id: f.id,
+          // Replay hides the future: rebuild from the revealed bars while it is active.
+          profile:
+            cutoffTime === null
+              ? f.profile
+              : buildRangeProfile(replay.displayed, volume, f.startTime, f.endTime, frvpSettings),
+          xAnchor: { time: startTime },
+          width: { toTime: endTime },
+          upColor: frvpSettings.upColor,
+          downColor: frvpSettings.downColor,
+          showPoc: frvpSettings.showPoc,
+          showValueArea: frvpSettings.showValueArea,
+          edges: { startTime, endTime },
+        };
+      }),
+    [frvps, edgeGhost, frvpSettings, cutoffTime, replay.displayed, volume],
+  );
+
   // Stable identity: LightweightChart's measure effect must not re-subscribe mid-drag.
   const handleMeasureEnd = useCallback((): void => setActiveTool("cursor"), []);
 
@@ -365,6 +463,12 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
             onPriceClick={handlePriceClick}
             drawings={drawings}
             onPointClick={handlePointClick}
+            volumeProfiles={volumeProfiles}
+            rangeSelectActive={activeTool === "frvp"}
+            profileEdgesEditable={activeTool === "cursor" && replayMode !== "picking"}
+            onRangeSelect={handleRangeSelect}
+            onProfileEdgeDrag={handleEdgeDrag}
+            onProfileEdgeCommit={handleEdgeCommit}
             measureActive={activeTool === "measure"}
             volume={volume}
             onMeasureEnd={handleMeasureEnd}
@@ -375,6 +479,21 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
           />
         </div>
       </div>
+      {frvps.length > 0 && (
+        <div role="group" aria-label="Volume profiles">
+          {frvps.map((f) => (
+            <button
+              key={f.id}
+              type="button"
+              aria-label={`Remove volume profile ${f.id}`}
+              onClick={() => setFrvps((all) => all.filter((x) => x.id !== f.id))}
+            >
+              {f.id} x
+            </button>
+          ))}
+          <VolumeProfileSettingsPanel value={frvpSettings} onChange={handleFrvpSettings} />
+        </div>
+      )}
       <IndicatorPicker
         fetchConfig={() => fetchCoinIndicatorConfig(instrumentId)}
         saveConfig={(entries) => saveCoinIndicatorConfig(instrumentId, entries)}

@@ -2,7 +2,7 @@ import type { Time } from "lightweight-charts";
 import { describe, expect, it } from "vitest";
 
 import type { ChartDatum, VolumeDatum } from "../hooks/useCandles";
-import { buildVolumeProfile, joinCandlesWithVolume, type ProfileCandle } from "./volumeProfile";
+import { buildRangeProfile, buildVolumeProfile, joinCandlesWithVolume, type ProfileCandle } from "./volumeProfile";
 
 const c = (open: number, high: number, low: number, close: number, volume: number): ProfileCandle => ({
   open,
@@ -136,5 +136,29 @@ describe("joinCandlesWithVolume", () => {
     const volume: VolumeDatum[] = [{ time: t(1), value: 10 }, { time: t(2) }, { time: t(3), value: 30 }, { time: t(4) }];
 
     expect(joinCandlesWithVolume(candles, volume).map((x) => x.volume)).toEqual([10, 30]);
+  });
+});
+
+describe("buildRangeProfile (Story 18.6)", () => {
+  const t = (n: number): Time => n as Time;
+  const candles: ChartDatum[] = [1, 2, 3, 4].map((n) => ({ time: t(n), open: n, high: n + 1, low: n, close: n + 1 }));
+  const volume: VolumeDatum[] = [1, 2, 3, 4].map((n) => ({ time: t(n), value: 10 * n }));
+  const settings = { rowCount: 4, valueAreaPercent: 70 };
+
+  it("profiles only the candles inside the range, inclusive, in either order", () => {
+    const forward = buildRangeProfile(candles, volume, 2, 3, settings);
+
+    expect(forward.totalVolume).toBeCloseTo(50);
+    expect(buildRangeProfile(candles, volume, 3, 2, settings)).toEqual(forward);
+  });
+
+  it("converts the settings percent to the engine's fraction", () => {
+    expect(buildRangeProfile(candles, volume, 1, 4, settings)).toEqual(
+      buildVolumeProfile(joinCandlesWithVolume(candles, volume), 4, 0.7),
+    );
+  });
+
+  it("is empty when the range holds no candles", () => {
+    expect(buildRangeProfile(candles, volume, 10, 20, settings).rows).toEqual([]);
   });
 });

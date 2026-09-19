@@ -64,6 +64,12 @@ interface ChartStubProps {
   panes?: { id: string; data: { time: number }[] }[];
   liveBar?: unknown;
   markerTime?: number | null;
+  volumeProfiles?: { id: string; profile: { totalVolume: number; rows: unknown[] }; xAnchor: unknown; width: unknown; edges?: unknown }[];
+  rangeSelectActive?: boolean;
+  profileEdgesEditable?: boolean;
+  onRangeSelect?: (start: { time: number; price: number }, end: { time: number; price: number }) => void;
+  onProfileEdgeDrag?: (id: string, edge: "start" | "end", time: number) => void;
+  onProfileEdgeCommit?: (id: string, edge: "start" | "end", time: number) => void;
 }
 
 const lastChartProps: { current: ChartStubProps | null } = { current: null };
@@ -396,5 +402,126 @@ describe("ChartPage bar replay (Story 18.4)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Lines" }));
 
     expect(screen.getByRole("button", { name: "Replay" })).toBeDisabled();
+  });
+});
+
+describe("ChartPage fixed range volume profile (Story 18.6)", () => {
+  const bars = [1, 2, 3, 4, 5].map((n) => ({ time: n, open: n, high: n + 1, low: n, close: n + 1 }));
+  const select = (a: number, b: number) =>
+    act(() => {
+      lastChartProps.current!.onRangeSelect!({ time: a, price: 1 }, { time: b, price: 2 });
+    });
+
+  beforeEach(() => {
+    mocks.candles = bars;
+    mocks.volume = bars.map((b) => ({ time: b.time, value: 10 }));
+  });
+
+  it("arms the FRVP tool, computes the profile for the dragged range once, then disarms (AC #1/#2)", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Fixed range volume profile tool" }));
+    expect(lastChartProps.current!.rangeSelectActive).toBe(true);
+
+    select(2, 4);
+
+    const [spec] = lastChartProps.current!.volumeProfiles!;
+    expect(spec.id).toBe("frvp-1");
+    expect(spec.profile.totalVolume).toBe(30);
+    expect(spec.xAnchor).toEqual({ time: 2 });
+    expect(spec.width).toEqual({ toTime: 4 });
+    expect(lastChartProps.current!.rangeSelectActive).toBe(false);
+  });
+
+  it("stays static: new candles/pan never recompute a placed profile (AC #3)", () => {
+    const { rerender } = render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Fixed range volume profile tool" }));
+    select(2, 4);
+    const placed = lastChartProps.current!.volumeProfiles![0].profile;
+
+    mocks.candles = [...bars, { time: 6, open: 6, high: 7, low: 6, close: 7 }];
+    mocks.volume = mocks.candles.map((b) => ({ time: (b as { time: number }).time, value: 99 }));
+    rerender(<ChartPage />);
+
+    expect(lastChartProps.current!.volumeProfiles![0].profile).toBe(placed);
+  });
+
+  it("moves a ghost edge without recomputing, then recomputes once on commit (AC #3)", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Fixed range volume profile tool" }));
+    select(2, 4);
+    const placed = lastChartProps.current!.volumeProfiles![0].profile;
+
+    act(() => lastChartProps.current!.onProfileEdgeDrag!("frvp-1", "end", 5));
+    expect(lastChartProps.current!.volumeProfiles![0].width).toEqual({ toTime: 5 });
+    expect(lastChartProps.current!.volumeProfiles![0].profile).toBe(placed);
+
+    act(() => lastChartProps.current!.onProfileEdgeCommit!("frvp-1", "end", 5));
+    expect(lastChartProps.current!.volumeProfiles).toHaveLength(1);
+    expect(lastChartProps.current!.volumeProfiles![0].profile.totalVolume).toBe(40);
+  });
+
+  it("supports several profiles, removable independently (AC #4)", () => {
+    render(<ChartPage />);
+    for (const [a, b] of [[1, 2], [3, 5]]) {
+      fireEvent.click(screen.getByRole("button", { name: "Fixed range volume profile tool" }));
+      select(a, b);
+    }
+    expect(lastChartProps.current!.volumeProfiles!.map((p) => p.id)).toEqual(["frvp-1", "frvp-2"]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove volume profile frvp-1" }));
+
+    expect(lastChartProps.current!.volumeProfiles!.map((p) => p.id)).toEqual(["frvp-2"]);
+  });
+
+  it("ignores a range with no candles in it and cancels the armed tool on Escape", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Fixed range volume profile tool" }));
+
+    select(50, 60);
+    expect(lastChartProps.current!.volumeProfiles).toEqual([]);
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(lastChartProps.current!.rangeSelectActive).toBe(false);
+  });
+
+  it("rebuilds placed profiles when the shared settings change (row count)", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Fixed range volume profile tool" }));
+    select(1, 5);
+    expect(lastChartProps.current!.volumeProfiles![0].profile.rows).toHaveLength(24);
+
+    fireEvent.change(screen.getByLabelText("Row count"), { target: { value: "6" } });
+
+    expect(lastChartProps.current!.volumeProfiles![0].profile.rows).toHaveLength(6);
+  });
+
+  it("shows only revealed bars during a replay and the full stored profile after it ends", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Fixed range volume profile tool" }));
+    select(1, 5);
+    expect(lastChartProps.current!.volumeProfiles![0].profile.totalVolume).toBeCloseTo(50);
+
+    fireEvent.click(screen.getByRole("button", { name: "Replay" }));
+    act(() => lastChartProps.current!.onPointClick!({ time: 3, price: 1 }));
+    expect(lastChartProps.current!.volumeProfiles![0].profile.totalVolume).toBeCloseTo(30);
+
+    fireEvent.click(screen.getByRole("button", { name: "Exit" }));
+    expect(lastChartProps.current!.volumeProfiles![0].profile.totalVolume).toBeCloseTo(50);
+  });
+
+  it("only lets edges be grabbed while the cursor tool is active", () => {
+    render(<ChartPage />);
+    expect(lastChartProps.current!.profileEdgesEditable).toBe(true);
+
+    fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
+
+    expect(lastChartProps.current!.profileEdgesEditable).toBe(false);
+  });
+
+  it("is disabled in Lines mode", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+
+    expect(screen.getByRole("button", { name: "Fixed range volume profile tool" })).toBeDisabled();
   });
 });

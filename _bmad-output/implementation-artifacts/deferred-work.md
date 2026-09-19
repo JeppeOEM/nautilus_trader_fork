@@ -379,3 +379,7 @@
 
 - `VolumeProfilePrimitive.xAnchor` is a pixel x; range-pinned profiles (FRVP, Session) need a time-based anchor so pan/zoom doesn't strand them -- handle when 18.6 places the first fixed profile.
 - POC color hardcoded (`#ffff55`), Value Area band reuses `upColor`; rows with null y-spans can bridge a Value Area gap; row gaps not bitmap-pixel-snapped.
+
+## Deferred from: code review of story-18.6 (2026-09-19)
+
+- FRVP: dragging past the last bar has no coordinate->time so the endpoint is dropped/stale (same root as 18.2/18.3); edge ghost not cancelled if the edge effect is torn down mid-drag; no hover cursor on edges; shared settings panel only appears once a profile is placed; removal is a text button outside the chart rather than an in-chart x.

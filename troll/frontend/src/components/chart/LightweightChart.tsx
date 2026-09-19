@@ -23,6 +23,7 @@ import {
   computeMeasurement,
   formatMeasurement,
 } from "./primitives/MeasurementPrimitive";
+import { attachRangeDrag } from "./rangeDrag";
 import { VolumeProfilePrimitive, type VolumeProfileRenderSpec } from "./primitives/VolumeProfilePrimitive";
 import { VerticalMarkerPrimitive } from "./primitives/VerticalMarkerPrimitive";
 import { TrendlinePrimitive, type TrendlineAnchor } from "./primitives/TrendlinePrimitive";
@@ -151,6 +152,19 @@ interface LightweightChartProps {
   /** Story 18.5: declarative Volume Profiles (one `VolumeProfilePrimitive` each), diffed by
    * id like `drawings`. Nothing in the app places one yet -- Stories 18.6-18.9 do. */
   volumeProfiles?: VolumeProfileSpec[];
+  /** Story 18.6: while true (candles mode only) a click-drag selects a time range instead
+   * of panning -- a live rectangle preview (no calculation), and on release exactly one
+   * `onRangeSelect(start, end)`; a click without a drag reports nothing. Esc/disarm cancels. */
+  rangeSelectActive?: boolean;
+  onRangeSelect?: (start: TrendlineAnchor, end: TrendlineAnchor) => void;
+  /** Story 18.6: edge resize for profiles whose spec carries `edges`. Grabbing an edge
+   * (within a few px of it, inside the profile's vertical extent) reports `onProfileEdgeDrag`
+   * on every move -- for a cheap ghost only -- and exactly one `onProfileEdgeCommit` on release. */
+  /** Edges are only grabbable while true (default): the caller turns it off while another
+   * tool is armed so an edge press never steals that tool's click. */
+  profileEdgesEditable?: boolean;
+  onProfileEdgeDrag?: (id: string, edge: "start" | "end", time: Time) => void;
+  onProfileEdgeCommit?: (id: string, edge: "start" | "end", time: Time) => void;
   /** Story 15.5: the currently-forming candle bar, from `useLiveCandle`. Applied via
    * `series.update()` (not `setData()`) on the candlestick series only -- independent of
    * the `data`/`setData()` effect above and Story 15.4's `panes` effect below; neither of
@@ -245,6 +259,11 @@ export default function LightweightChart({
   onMeasureEnd,
   markerTime = null,
   volumeProfiles = [],
+  rangeSelectActive = false,
+  onRangeSelect,
+  profileEdgesEditable = true,
+  onProfileEdgeDrag,
+  onProfileEdgeCommit,
   liveBar,
 }: LightweightChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -265,6 +284,9 @@ export default function LightweightChart({
   const suppressNextClickRef = useRef(false);
   const measureDataRef = useRef<{ data: ChartDatum[]; volume: VolumeDatum[] }>({ data, volume });
   const profileRegistryRef = useRef<Map<string, VolumeProfilePrimitive>>(new Map());
+  // Latest-callback/latest-specs refs: the drag effects below must not re-subscribe (and
+  // lose an in-flight drag) whenever the caller re-renders with fresh closures or specs.
+  const latestRef = useRef({ volumeProfiles, onRangeSelect, onProfileEdgeDrag, onProfileEdgeCommit });
   const markerRef = useRef<VerticalMarkerPrimitive | null>(null);
   const drawingRegistryRef = useRef<Map<string, TrendlinePrimitive>>(new Map());
   const lastLiveBarTimeRef = useRef<number | null>(null);
@@ -629,57 +651,106 @@ export default function LightweightChart({
   }, [markerTime, mode]);
 
   useEffect(() => {
-    // Story 18.3 (AC #2/#3/#5): the transient click-drag measurement. Capture-phase
-    // mousedown with stopPropagation() keeps the library from starting a pan (same
-    // technique as the price-line grab above); move/up are window-level so a drag can
-    // end outside the chart. Cleanup detaches the primitive, which is also the Esc path
-    // (the caller flips `measureActive` false).
+    latestRef.current = { volumeProfiles, onRangeSelect, onProfileEdgeDrag, onProfileEdgeCommit };
+  });
+
+  useEffect(() => {
+    // Story 18.6 (AC #2): range selection for the fixed-range volume profile -- a live
+    // rectangle preview (the measurement primitive with no label; NO profile calculation
+    // while dragging), then exactly one onRangeSelect on release.
     const container = containerRef.current;
     const chart = chartRef.current;
     const host = seriesRef.current;
-    if (!container || !chart || !host || !measureActive || mode !== "candles") return;
+    if (!container || !chart || !host || !rangeSelectActive || mode !== "candles") return;
 
-    const primitive = new MeasurementPrimitive(cssVar("--color-active", "#55ffff"));
-    let start: TrendlineAnchor | null = null;
+    const preview = new MeasurementPrimitive(cssVar("--color-active", "#55ffff"));
     let attached = false;
+    const stopDrag = attachRangeDrag(container, chart, host, {
+      onMove: (start, end) => {
+        if (!attached) {
+          host.attachPrimitive(preview);
+          attached = true;
+        }
+        preview.setSelection(start, end, []);
+      },
+      onRelease: (last) => {
+        if (!last || !attached) return;
+        host.detachPrimitive(preview);
+        attached = false;
+        latestRef.current.onRangeSelect?.(last.start, last.end);
+      },
+    });
+    return () => {
+      stopDrag();
+      if (attached) host.detachPrimitive(preview);
+    };
+  }, [rangeSelectActive, mode]);
 
-    const pointFrom = (event: MouseEvent): TrendlineAnchor | null => {
+  useEffect(() => {
+    // Story 18.6 (AC #3): edge grab-and-drag for placed profiles. Off while a range tool
+    // is armed (their capture-phase drags own the mouse then).
+    const container = containerRef.current;
+    const chart = chartRef.current;
+    const host = seriesRef.current;
+    if (!container || !chart || !host || !profileEdgesEditable || rangeSelectActive || measureActive || mode !== "candles") return;
+
+    const EDGE_TOLERANCE_PX = 6;
+    let grabbed: { id: string; edge: "start" | "end" } | null = null;
+    let lastTime: Time | null = null;
+
+    const timeAt = (event: MouseEvent): Time | null =>
+      chart.timeScale().coordinateToTime(event.clientX - container.getBoundingClientRect().left);
+
+    const findEdge = (event: MouseEvent): { id: string; edge: "start" | "end" } | null => {
       const box = container.getBoundingClientRect();
-      const time = chart.timeScale().coordinateToTime(event.clientX - box.left);
-      const price = host.coordinateToPrice(event.clientY - box.top);
-      return time === null || price === null ? null : { time, price };
+      const x = event.clientX - box.left;
+      const y = event.clientY - box.top;
+      for (const spec of latestRef.current.volumeProfiles) {
+        if (!spec.edges || spec.profile.rows.length === 0) continue;
+        const top = host.priceToCoordinate(spec.profile.rows[spec.profile.rows.length - 1].priceHigh);
+        const bottom = host.priceToCoordinate(spec.profile.rows[0].priceLow);
+        if (top === null || bottom === null) continue;
+        if (y < Math.min(top, bottom) - EDGE_TOLERANCE_PX || y > Math.max(top, bottom) + EDGE_TOLERANCE_PX) continue;
+        // The nearer edge wins, so a narrow range (edges within one tolerance of each other)
+        // keeps both grabbable.
+        let best: { id: string; edge: "start" | "end" } | null = null;
+        let bestDistance = EDGE_TOLERANCE_PX;
+        for (const edge of ["start", "end"] as const) {
+          const edgeX = chart.timeScale().timeToCoordinate(spec.edges[edge === "start" ? "startTime" : "endTime"]);
+          if (edgeX === null || Math.abs(x - edgeX) > bestDistance) continue;
+          bestDistance = Math.abs(x - edgeX);
+          best = { id: spec.id, edge };
+        }
+        if (best) return best;
+      }
+      return null;
     };
 
     const handleMouseDown = (event: MouseEvent): void => {
-      // `start` still set = a release was lost (window blur); ignore rather than restart.
-      if (event.button !== 0 || start) return;
-      start = pointFrom(event);
-      // Only swallow the event once a measurement actually started, so a press with no
-      // resolvable point (past the data range) still pans as usual.
-      if (start) event.stopPropagation();
+      if (event.button !== 0 || grabbed) return;
+      grabbed = findEdge(event);
+      if (grabbed) event.stopPropagation();
     };
-
     const handleMouseMove = (event: MouseEvent): void => {
-      if (!start) return;
-      const end = pointFrom(event);
-      if (!end) return;
-      const { data: candles, volume: volumes } = measureDataRef.current;
-      // Attached lazily on the first move: a click with no drag never shows anything,
-      // and (see mouseup) leaves the tool armed rather than consuming it.
-      if (!attached) {
-        host.attachPrimitive(primitive);
-        attached = true;
+      if (!grabbed) return;
+      // No button held = the release happened outside the window (blur): finish the drag
+      // instead of leaving it stuck to the cursor.
+      if (event.buttons === 0) {
+        handleMouseUp(event, true);
+        return;
       }
-      primitive.setSelection(start, end, formatMeasurement(computeMeasurement(start, end, candles, volumes)));
+      const time = timeAt(event);
+      if (time === null) return;
+      lastTime = time;
+      latestRef.current.onProfileEdgeDrag?.(grabbed.id, grabbed.edge, time);
     };
-
-    const handleMouseUp = (event: MouseEvent): void => {
-      if (!start || event.button !== 0) return;
-      start = null;
-      if (!attached) return;
-      host.detachPrimitive(primitive);
-      attached = false;
-      onMeasureEnd?.();
+    const handleMouseUp = (event: MouseEvent, lost = false): void => {
+      if (!grabbed || (!lost && event.button !== 0)) return;
+      const done = grabbed;
+      const time = lastTime;
+      grabbed = null;
+      lastTime = null;
+      if (time !== null) latestRef.current.onProfileEdgeCommit?.(done.id, done.edge, time);
     };
 
     container.addEventListener("mousedown", handleMouseDown, true);
@@ -689,6 +760,40 @@ export default function LightweightChart({
       container.removeEventListener("mousedown", handleMouseDown, true);
       window.removeEventListener("mousemove", handleMouseMove);
       window.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, [profileEdgesEditable, rangeSelectActive, measureActive, mode]);
+
+  useEffect(() => {
+    // Story 18.3 (AC #2/#3/#5): the transient click-drag measurement, on the shared
+    // range-drag plumbing. The primitive is attached lazily on the first move (a click
+    // with no drag shows nothing and leaves the tool armed) and detached on release or,
+    // on Esc/disarm, by the cleanup below.
+    const container = containerRef.current;
+    const chart = chartRef.current;
+    const host = seriesRef.current;
+    if (!container || !chart || !host || !measureActive || mode !== "candles") return;
+
+    const primitive = new MeasurementPrimitive(cssVar("--color-active", "#55ffff"));
+    let attached = false;
+
+    const stopDrag = attachRangeDrag(container, chart, host, {
+      onMove: (start, end) => {
+        const { data: candles, volume: volumes } = measureDataRef.current;
+        if (!attached) {
+          host.attachPrimitive(primitive);
+          attached = true;
+        }
+        primitive.setSelection(start, end, formatMeasurement(computeMeasurement(start, end, candles, volumes)));
+      },
+      onRelease: (last) => {
+        if (!last || !attached) return;
+        host.detachPrimitive(primitive);
+        attached = false;
+        onMeasureEnd?.();
+      },
+    });
+    return () => {
+      stopDrag();
       if (attached) host.detachPrimitive(primitive);
     };
   }, [measureActive, onMeasureEnd, mode]);

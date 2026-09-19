@@ -32,6 +32,7 @@ const coordinateToPriceMock = vi.fn();
 const attachPrimitiveMock = vi.fn();
 const detachPrimitiveMock = vi.fn();
 const coordinateToTimeMock = vi.fn();
+const timeToCoordinateMock = vi.fn();
 
 // One shared counter so each chart.addPane() call gets its own, stable, ever-increasing
 // index -- mirrors the real library's paneIndex() behaviour closely enough for the
@@ -144,6 +145,11 @@ type ChartTestProps = {
   data?: { time: Time; open: number; high: number; low: number; close: number }[];
   markerTime?: Time | null;
   volumeProfiles?: VolumeProfileSpec[];
+  rangeSelectActive?: boolean;
+  onRangeSelect?: (start: { time: Time; price: number }, end: { time: Time; price: number }) => void;
+  profileEdgesEditable?: boolean;
+  onProfileEdgeDrag?: (id: string, edge: "start" | "end", time: Time) => void;
+  onProfileEdgeCommit?: (id: string, edge: "start" | "end", time: Time) => void;
   onPointClick?: (point: { time: Time; price: number }) => void;
 };
 
@@ -173,6 +179,7 @@ beforeEach(() => {
   attachPrimitiveMock.mockReset();
   detachPrimitiveMock.mockReset();
   coordinateToTimeMock.mockReset().mockReturnValue(null);
+  timeToCoordinateMock.mockReset().mockImplementation((t: number) => t);
   // Identity defaults: a spec at price P sits at y=P, and a clicked/dragged y of Y
   // reads back as price Y -- individual tests override these when they need
   // controlled conversions.
@@ -193,6 +200,7 @@ beforeEach(() => {
       getVisibleLogicalRange: getVisibleLogicalRangeMock,
       setVisibleLogicalRange: setVisibleLogicalRangeMock,
       coordinateToTime: coordinateToTimeMock,
+      timeToCoordinate: timeToCoordinateMock,
       subscribeVisibleLogicalRangeChange: vi.fn(),
       unsubscribeVisibleLogicalRangeChange: vi.fn(),
     }),
@@ -793,7 +801,7 @@ describe("measurement drag (Story 18.3)", () => {
 
     fireEvent.mouseDown(target, { clientX: 10, clientY: 100, button: 0 });
     expect(attachPrimitiveMock).not.toHaveBeenCalled();
-    fireEvent.mouseMove(window, { clientX: 50, clientY: 150 });
+    fireEvent.mouseMove(window, { buttons: 1, clientX: 50, clientY: 150 });
     expect(attachPrimitiveMock).toHaveBeenCalledTimes(1);
     expect(detachPrimitiveMock).not.toHaveBeenCalled();
     fireEvent.mouseUp(window);
@@ -806,7 +814,7 @@ describe("measurement drag (Story 18.3)", () => {
   it("cancels mid-drag with no residue when measureActive goes false (Esc)", () => {
     const { container, rerender } = render(chartElement({ measureActive: true }));
     fireEvent.mouseDown(container.firstElementChild!, { clientX: 10, clientY: 100, button: 0 });
-    fireEvent.mouseMove(window, { clientX: 50, clientY: 150 });
+    fireEvent.mouseMove(window, { buttons: 1, clientX: 50, clientY: 150 });
 
     rerender(chartElement({ measureActive: false }));
 
@@ -891,5 +899,150 @@ describe("volumeProfiles registry (Story 18.5)", () => {
     rerender(chartElement({ volumeProfiles: [profileSpec("p2")] }));
     expect(detachPrimitiveMock).toHaveBeenCalledTimes(1);
     expect(detachPrimitiveMock).toHaveBeenCalledWith(primitive);
+  });
+});
+
+describe("FRVP range select and edge drag (Story 18.6)", () => {
+  beforeEach(() => {
+    coordinateToTimeMock.mockImplementation((x: number) => x);
+  });
+
+  it("previews a drag without calculating, then reports exactly one range on release (AC #2)", () => {
+    const onRangeSelect = vi.fn();
+    const { container } = render(chartElement({ rangeSelectActive: true, onRangeSelect }));
+    const target = container.firstElementChild!;
+
+    fireEvent.mouseDown(target, { clientX: 10, clientY: 100, button: 0 });
+    fireEvent.mouseMove(window, { buttons: 1, clientX: 20, clientY: 110 });
+    fireEvent.mouseMove(window, { buttons: 1, clientX: 60, clientY: 130 });
+    expect(onRangeSelect).not.toHaveBeenCalled();
+    expect(attachPrimitiveMock).toHaveBeenCalledTimes(1);
+    fireEvent.mouseUp(window);
+
+    expect(onRangeSelect).toHaveBeenCalledTimes(1);
+    expect(onRangeSelect).toHaveBeenCalledWith({ time: 10, price: 100 }, { time: 60, price: 130 });
+    expect(detachPrimitiveMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports nothing for a click without a drag, and cancels cleanly on disarm", () => {
+    const onRangeSelect = vi.fn();
+    const { container, rerender } = render(chartElement({ rangeSelectActive: true, onRangeSelect }));
+    const target = container.firstElementChild!;
+
+    fireEvent.mouseDown(target, { clientX: 10, clientY: 100, button: 0 });
+    fireEvent.mouseUp(window);
+    expect(onRangeSelect).not.toHaveBeenCalled();
+
+    fireEvent.mouseDown(target, { clientX: 10, clientY: 100, button: 0 });
+    fireEvent.mouseMove(window, { buttons: 1, clientX: 60, clientY: 130 });
+    rerender(chartElement({ rangeSelectActive: false, onRangeSelect }));
+    expect(detachPrimitiveMock).toHaveBeenCalledTimes(1);
+    expect(onRangeSelect).not.toHaveBeenCalled();
+  });
+
+  it("finishes a drag whose mouseup was lost (move with no button held)", () => {
+    const onRangeSelect = vi.fn();
+    const { container } = render(chartElement({ rangeSelectActive: true, onRangeSelect }));
+
+    fireEvent.mouseDown(container.firstElementChild!, { clientX: 10, clientY: 100, button: 0 });
+    fireEvent.mouseMove(window, { buttons: 1, clientX: 60, clientY: 130 });
+    fireEvent.mouseMove(window, { buttons: 0, clientX: 90, clientY: 130 });
+
+    expect(onRangeSelect).toHaveBeenCalledTimes(1);
+    expect(onRangeSelect).toHaveBeenCalledWith({ time: 10, price: 100 }, { time: 60, price: 130 });
+  });
+
+  describe("edge drag", () => {
+    const spec: VolumeProfileSpec = {
+      id: "frvp-1",
+      profile: {
+        rows: [
+          { priceLow: 10, priceHigh: 15, upVolume: 1, downVolume: 1 },
+          { priceLow: 15, priceHigh: 20, upVolume: 1, downVolume: 1 },
+        ],
+        poc: 12,
+        vah: 20,
+        val: 10,
+        totalVolume: 4,
+      },
+      xAnchor: { time: 100 as Time },
+      width: { toTime: 300 as Time },
+      upColor: "#0f0",
+      downColor: "#f00",
+      showPoc: true,
+      showValueArea: true,
+      edges: { startTime: 100 as Time, endTime: 300 as Time },
+    };
+
+    it("reports a ghost on every move but exactly one commit on release (AC #3)", () => {
+      const onProfileEdgeDrag = vi.fn();
+      const onProfileEdgeCommit = vi.fn();
+      const { container } = render(chartElement({ volumeProfiles: [spec], onProfileEdgeDrag, onProfileEdgeCommit }));
+
+      fireEvent.mouseDown(container.firstElementChild!, { clientX: 102, clientY: 15, button: 0 });
+      fireEvent.mouseMove(window, { buttons: 1, clientX: 130, clientY: 15 });
+      fireEvent.mouseMove(window, { buttons: 1, clientX: 150, clientY: 15 });
+      expect(onProfileEdgeCommit).not.toHaveBeenCalled();
+      fireEvent.mouseUp(window);
+
+      expect(onProfileEdgeDrag.mock.calls).toEqual([
+        ["frvp-1", "start", 130],
+        ["frvp-1", "start", 150],
+      ]);
+      expect(onProfileEdgeCommit).toHaveBeenCalledTimes(1);
+      expect(onProfileEdgeCommit).toHaveBeenCalledWith("frvp-1", "start", 150);
+    });
+
+    it("grabs the end edge, and ignores presses away from an edge or outside the profile's height", () => {
+      const onProfileEdgeDrag = vi.fn();
+      const onProfileEdgeCommit = vi.fn();
+      const { container } = render(chartElement({ volumeProfiles: [spec], onProfileEdgeDrag, onProfileEdgeCommit }));
+      const target = container.firstElementChild!;
+
+      fireEvent.mouseDown(target, { clientX: 200, clientY: 15, button: 0 }); // between edges
+      fireEvent.mouseMove(window, { buttons: 1, clientX: 210, clientY: 15 });
+      fireEvent.mouseUp(window);
+      fireEvent.mouseDown(target, { clientX: 100, clientY: 500, button: 0 }); // far below
+      fireEvent.mouseMove(window, { buttons: 1, clientX: 110, clientY: 500 });
+      fireEvent.mouseUp(window);
+      expect(onProfileEdgeDrag).not.toHaveBeenCalled();
+
+      fireEvent.mouseDown(target, { clientX: 298, clientY: 12, button: 0 });
+      fireEvent.mouseMove(window, { buttons: 1, clientX: 340, clientY: 12 });
+      fireEvent.mouseUp(window);
+      expect(onProfileEdgeCommit).toHaveBeenCalledWith("frvp-1", "end", 340);
+    });
+
+    it("grabs the nearer edge of a very narrow range, and ignores edges when not editable", () => {
+      const narrow: VolumeProfileSpec = { ...spec, edges: { startTime: 100 as Time, endTime: 104 as Time } };
+      const onProfileEdgeCommit = vi.fn();
+      const { container, rerender } = render(chartElement({ volumeProfiles: [narrow], onProfileEdgeCommit }));
+      const target = container.firstElementChild!;
+
+      fireEvent.mouseDown(target, { clientX: 103, clientY: 15, button: 0 }); // nearer the end edge
+      fireEvent.mouseMove(window, { buttons: 1, clientX: 150, clientY: 15 });
+      fireEvent.mouseUp(window);
+      expect(onProfileEdgeCommit).toHaveBeenCalledWith("frvp-1", "end", 150);
+
+      onProfileEdgeCommit.mockClear();
+      rerender(chartElement({ volumeProfiles: [narrow], onProfileEdgeCommit, profileEdgesEditable: false }));
+      fireEvent.mouseDown(target, { clientX: 103, clientY: 15, button: 0 });
+      fireEvent.mouseMove(window, { buttons: 1, clientX: 150, clientY: 15 });
+      fireEvent.mouseUp(window);
+      expect(onProfileEdgeCommit).not.toHaveBeenCalled();
+    });
+
+    it("does not lose an in-flight drag when the parent re-renders with fresh callbacks", () => {
+      const first = vi.fn();
+      const { container, rerender } = render(chartElement({ volumeProfiles: [spec], onProfileEdgeCommit: vi.fn() }));
+      fireEvent.mouseDown(container.firstElementChild!, { clientX: 102, clientY: 15, button: 0 });
+      fireEvent.mouseMove(window, { buttons: 1, clientX: 150, clientY: 15 });
+
+      rerender(chartElement({ volumeProfiles: [{ ...spec }], onProfileEdgeCommit: first }));
+      fireEvent.mouseMove(window, { buttons: 1, clientX: 160, clientY: 15 });
+      fireEvent.mouseUp(window);
+
+      expect(first).toHaveBeenCalledWith("frvp-1", "start", 160);
+    });
   });
 });
