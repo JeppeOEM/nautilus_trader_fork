@@ -54,7 +54,7 @@ _BANNED_SUBSTRINGS = ("TradingNode", "DataEngine", "import Strategy")
 
 def test_ad8_reader_modules_never_import_tradingnode_strategy_or_dataengine() -> None:
     for name in _READER_MODULES:
-        path = _ML_SIGNALS_DIR / name
+        path = _ML_SIGNALS_DIR / ("strategies" if name.startswith("backtest_") else "") / name
         assert path.is_file(), f"expected AD-8 reader module not found: {path}"
         text = path.read_text()
         for banned in _BANNED_SUBSTRINGS:

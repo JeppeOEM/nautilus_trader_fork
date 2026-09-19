@@ -11,17 +11,17 @@ shared data types only).
 ## Run an existing backtest
 
 ```bash
-cd troll/ml_signals
-python backtest_dydx.py       # LogisticTrendStrategy on internally-aggregated Bars
-python backtest_snapshot.py   # SnapshotStrategy on raw 1s DydxSecondSnapshot
-python backtest_ofi.py        # OFIStrategy on OrderBookDelta + TradeTick + 1-min Bars
+# from the repo root (default catalog path is troll/dydx_collector/catalog)
+PYTHONPATH=troll python -m ml_signals.strategies.backtest_dydx       # LogisticTrendStrategy on internally-aggregated Bars
+PYTHONPATH=troll python -m ml_signals.strategies.backtest_snapshot   # SnapshotStrategy on raw 1s DydxSecondSnapshot
+PYTHONPATH=troll python -m ml_signals.strategies.backtest_ofi        # OFIStrategy on OrderBookDelta + TradeTick + 1-min Bars
 ```
 
 Each file's `run()` returns results programmatically (from a notebook/script) and its
 `__main__` block prints a report when run directly. See each file's docstring for
 tuning knobs — e.g. `backtest_dydx.run(symbols=["BTC-USD-PERP.DYDX"], bar_interval="5-MINUTE")`.
 
-`backtest_dydx.py` defaults to backtesting every coin in the live Watchlist (needs
+`strategies/backtest_dydx.py` defaults to backtesting every coin in the live Watchlist (needs
 `data_api` running); pass `symbols=[...]` to skip that dependency.
 
 ---
@@ -30,9 +30,9 @@ tuning knobs — e.g. `backtest_dydx.run(symbols=["BTC-USD-PERP.DYDX"], bar_inte
 
 | Data granularity | Feed | Copy |
 |---|---|---|
-| Bars (aggregated from trades) | `TradeTick` → internal `Bar` | `backtest_dydx.py` |
-| Raw 1s book snapshots | `DydxSecondSnapshot` | `backtest_snapshot.py` |
-| Raw order book deltas + trades + bars | `OrderBookDelta`, `TradeTick`, `Bar` | `backtest_ofi.py` |
+| Bars (aggregated from trades) | `TradeTick` → internal `Bar` | `strategies/backtest_dydx.py` |
+| Raw 1s book snapshots | `DydxSecondSnapshot` | `strategies/backtest_snapshot.py` |
+| Raw order book deltas + trades + bars | `OrderBookDelta`, `TradeTick`, `Bar` | `strategies/backtest_ofi.py` |
 
 Don't write a new backtest runner from scratch — copy the closest match above and swap
 the `strategy_path`/`config_path`/`data=[...]` list.
@@ -89,8 +89,8 @@ class MyStrategy(Strategy):
         self.submit_order(order)
 ```
 
-**Conventions used by every strategy here** (`example_strategy.py`, `ofi_strategy.py`,
-`snapshot_strategy.py`):
+**Conventions used by every strategy here** (`strategies/example_strategy.py`, `strategies/ofi_strategy.py`,
+`strategies/snapshot_strategy.py`):
 - `frozen=True` on the config class.
 - `on_start`: look up `self.instrument` via `self.cache.instrument(...)`, `self.stop()` and
   log an error if missing — never assume it's there.
@@ -109,10 +109,10 @@ class MyStrategy(Strategy):
   `tick.aggressor_side` in `on_trade_tick`.
 - Need book-level microstructure (OFI, depth, imbalance) → `subscribe_order_book_deltas`,
   maintain your own `OrderBook(instrument_id, BookType.L2_MBP)` and `apply_delta` in
-  `on_order_book_deltas` (see `ofi_strategy.py`).
+  `on_order_book_deltas` (see `strategies/ofi_strategy.py`).
 - Need the pre-computed 1s snapshot (top-20 levels + per-second buy/sell volume) instead of
   raw deltas → `subscribe_data(DataType(DydxSecondSnapshot), instrument_id=...)`, handle in
-  `on_data` (see `snapshot_strategy.py`). Cheaper than rebuilding an `OrderBook` if you don't
+  `on_data` (see `strategies/snapshot_strategy.py`). Cheaper than rebuilding an `OrderBook` if you don't
   need tick-by-tick delta resolution.
 
 **Reuse existing signal math** — don't reimplement OFI/OBI/microprice/spread. They're in
@@ -135,11 +135,11 @@ Copy the closest existing `backtest_*.py`, then in `_build_run_config`/`run()`:
    - Custom types (anything not a Nautilus built-in, e.g. `DydxSecondSnapshot`) need an
      explicit `client_id=str(venue)` and, if the strategy also needs `cache.instrument()` to
      resolve, a parallel `TradeTick` config purely for instrument auto-registration
-     (see `backtest_snapshot.py`'s comment on this).
+     (see `strategies/backtest_snapshot.py`'s comment on this).
    - For a `Bar` feed, match `bar_spec` to what's actually in the catalog — only
      `1-MINUTE` bars are currently collected (`troll/dydx_collector/config.toml`'s
      `bar_intervals`); anything else needs internal aggregation from `TradeTick`
-     (`backtest_dydx.py`'s pattern) instead of an `EXTERNAL` bar query.
+     (`strategies/backtest_dydx.py`'s pattern) instead of an `EXTERNAL` bar query.
 4. Trust `BacktestResult.stats_pnls`/`stats_returns` for whether trades happened —
    `total_orders`/`total_positions` were found unreliable (sometimes 0 despite real fills)
    in this pinned nautilus_trader version.

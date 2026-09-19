@@ -129,10 +129,10 @@ reimplements.
   architecture rule.
 - **`watchlist.py`** — `fetch_watchlist()` reads `data_api`'s `/api/rankings` to get the live, ranked coin set — this is how a backtest gets a dynamic instrument
   universe instead of a hardcoded list.
-- **`backtest_dydx.py` / `backtest_ofi.py` / `backtest_snapshot.py`** — `BacktestNode` +
-  `BacktestDataConfig` runs (no custom matching engine anywhere). `backtest_dydx.py`
+- **`strategies/backtest_dydx.py` / `strategies/backtest_ofi.py` / `strategies/backtest_snapshot.py`** — `BacktestNode` +
+  `BacktestDataConfig` runs (no custom matching engine anywhere). `strategies/backtest_dydx.py`
   defaults to backtesting every coin in the live Watchlist, keyed results per symbol.
-- **`example_strategy.py` / `ofi_strategy.py` / `snapshot_strategy.py`** — backtest-only
+- **`strategies/example_strategy.py` / `strategies/ofi_strategy.py` / `strategies/snapshot_strategy.py`** — backtest-only
   reference strategies, referenced via `ImportableStrategyConfig` by string path.
 - **`metrics_computer.py`** — pure computation used by `ranking_engine` to score coins;
   lives here (not in `ranking_engine`) so the same math is reachable from research code.

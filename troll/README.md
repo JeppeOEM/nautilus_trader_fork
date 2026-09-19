@@ -149,8 +149,8 @@ catalog.order_book_deltas(instrument_ids=["BTC-USD-PERP.DYDX"])
 ## Run a backtest
 
 ```bash
-cd troll/ml_signals
-python backtest_dydx.py
+# from the repo root (default catalog path is troll/dydx_collector/catalog)
+PYTHONPATH=troll python -m ml_signals.strategies.backtest_dydx
 ```
 
 Streams trade ticks from the catalog and aggregates bars internally at a configurable wall-clock interval. Adjust `bar_interval` (e.g. `"1-SECOND"`, `"1-MINUTE"`, `"5-MINUTE"`), `buy_threshold`, `sell_threshold` by passing args to `run()`.

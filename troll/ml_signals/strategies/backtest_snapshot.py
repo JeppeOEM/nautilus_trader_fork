@@ -49,6 +49,8 @@ def run(
     catalog_path: str = "troll/dydx_collector/catalog",
     buy_threshold: float = 5.0,
     sell_threshold: float = -5.0,
+    start: str | None = None,
+    end: str | None = None,
 ) -> list[BacktestResult]:
     catalog = ParquetDataCatalog(catalog_path)
     instrument = catalog.instruments(instrument_ids=[symbol])[0]
@@ -59,8 +61,8 @@ def run(
             logging=LoggingConfig(log_level="ERROR"),
             strategies=[
                 ImportableStrategyConfig(
-                    strategy_path="ml_signals.snapshot_strategy:SnapshotStrategy",
-                    config_path="ml_signals.snapshot_strategy:SnapshotStrategyConfig",
+                    strategy_path="ml_signals.strategies.snapshot_strategy:SnapshotStrategy",
+                    config_path="ml_signals.strategies.snapshot_strategy:SnapshotStrategyConfig",
                     config={
                         "instrument_id": str(instrument.id),
                         "trade_size": Decimal("0.01"),
@@ -91,6 +93,8 @@ def run(
                 catalog_path=catalog_path,
                 data_cls=TradeTick,
                 instrument_id=instrument.id,
+                start_time=start,
+                end_time=end,
             ),
             BacktestDataConfig(
                 catalog_path=catalog_path,
@@ -101,6 +105,8 @@ def run(
                 # not setup for loading into BacktestEngine" -- the data itself carries
                 # instrument_id, so this is a bookkeeping label only, not a real live data client.
                 client_id=str(venue),
+                start_time=start,
+                end_time=end,
             ),
         ],
     )

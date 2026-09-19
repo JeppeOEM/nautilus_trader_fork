@@ -44,8 +44,8 @@ from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
 from nautilus_trader.test_kit.providers import TestInstrumentProvider
 
-from ml_signals.ofi_strategy import OFIStrategy
-from ml_signals.ofi_strategy import OFIStrategyConfig
+from ml_signals.strategies.ofi_strategy import OFIStrategy
+from ml_signals.strategies.ofi_strategy import OFIStrategyConfig
 
 
 _INSTRUMENT = TestInstrumentProvider.btcusdt_binance()

@@ -78,8 +78,8 @@ from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
 
 from dydx_collector.second_snapshot import DydxSecondSnapshot
-from ml_signals.snapshot_strategy import SnapshotStrategy
-from ml_signals.snapshot_strategy import SnapshotStrategyConfig
+from ml_signals.strategies.snapshot_strategy import SnapshotStrategy
+from ml_signals.strategies.snapshot_strategy import SnapshotStrategyConfig
 
 
 _IID = InstrumentId(Symbol("BTC-USD-PERP"), Venue("DYDX"))

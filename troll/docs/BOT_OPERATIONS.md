@@ -136,9 +136,9 @@ ImportableStrategyConfig(
 **Run it:**
 ```bash
 cd troll
-python3 -c "from ml_signals.backtest_dydx import run; print(run(symbols=['BTC-USD-PERP']))"
+python3 -c "from ml_signals.strategies.backtest_dydx import run; print(run(symbols=['BTC-USD-PERP']))"
 ```
-or directly: `python3 -m ml_signals.backtest_dydx` (runs against the full live Watchlist
+or directly: `python3 -m ml_signals.strategies.backtest_dydx` (runs against the full live Watchlist
 by default — pass `symbols=[...]` explicitly for a quick single-coin check). `run()`
 also takes `catalog_path`, `bar_interval` (a plain bar-spec string, e.g. `"5-MINUTE"` —
 no code change needed), and per-strategy threshold kwargs; returns a

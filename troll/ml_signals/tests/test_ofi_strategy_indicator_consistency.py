@@ -67,8 +67,8 @@ from nautilus_trader.test_kit.providers import TestInstrumentProvider
 
 from ml_signals.book_features import top_of_book_series
 from ml_signals.indicators import OrderFlowImbalance
-from ml_signals.ofi_strategy import OFIStrategy
-from ml_signals.ofi_strategy import OFIStrategyConfig
+from ml_signals.strategies.ofi_strategy import OFIStrategy
+from ml_signals.strategies.ofi_strategy import OFIStrategyConfig
 
 
 _INSTRUMENT = TestInstrumentProvider.btcusdt_binance()

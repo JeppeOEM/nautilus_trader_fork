@@ -97,8 +97,8 @@ def _build_run_config(
             logging=LoggingConfig(log_level="ERROR"),
             strategies=[
                 ImportableStrategyConfig(
-                    strategy_path="ml_signals.example_strategy:LogisticTrendStrategy",
-                    config_path="ml_signals.example_strategy:LogisticTrendConfig",
+                    strategy_path="ml_signals.strategies.example_strategy:LogisticTrendStrategy",
+                    config_path="ml_signals.strategies.example_strategy:LogisticTrendConfig",
                     config={
                         "instrument_id": str(instrument.id),
                         "bar_type": f"{instrument.id}-{bar_interval}-LAST-INTERNAL",
