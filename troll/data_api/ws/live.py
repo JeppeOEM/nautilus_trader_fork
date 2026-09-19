@@ -41,7 +41,7 @@ import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from data_api import live_candles, redis_bus
+from data_api import alerts, live_candles, redis_bus
 
 
 logger = logging.getLogger(__name__)
@@ -161,7 +161,9 @@ async def ws_live(websocket: WebSocket) -> None:
     # instead arrives twice (via the initial send below and the queue) -- harmless for a
     # full-snapshot relay, unlike a silent drop. Unchanged from before Story 15.5.
     rankings_queue = redis_bus.bus.subscribe()
+    alerts_queue = alerts.engine.subscribe()
     subs = _CandleSubscriptions(outbox)
+    alerts_forward_task = asyncio.create_task(_forward(alerts_queue, outbox))
     rankings_forward_task = asyncio.create_task(_forward(rankings_queue, outbox))
     sender_task = asyncio.create_task(_sender(websocket, outbox))
     reader_task = asyncio.create_task(_reader(websocket, subs))
@@ -174,7 +176,7 @@ async def ws_live(websocket: WebSocket) -> None:
         if redis_bus.bus.latest is not None:
             await websocket.send_json(redis_bus.bus.latest)
         done, _pending = await asyncio.wait(
-            {sender_task, reader_task, rankings_forward_task}, return_when=asyncio.FIRST_COMPLETED,
+            {sender_task, reader_task, rankings_forward_task, alerts_forward_task}, return_when=asyncio.FIRST_COMPLETED,
         )
         for task in done:
             exc = task.exception()
@@ -193,5 +195,7 @@ async def ws_live(websocket: WebSocket) -> None:
         sender_task.cancel()
         reader_task.cancel()
         rankings_forward_task.cancel()
+        alerts_forward_task.cancel()
+        alerts.engine.unsubscribe(alerts_queue)
         subs.teardown_all()
         redis_bus.bus.unsubscribe(rankings_queue)

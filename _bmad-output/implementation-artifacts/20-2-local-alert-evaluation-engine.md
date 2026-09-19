@@ -1,6 +1,6 @@
 # Story 20.2: Local alert evaluation engine
 
-Status: ready-for-dev
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -20,20 +20,20 @@ so that I don't have to watch the chart myself.
 
 ## Tasks / Subtasks
 
-- [ ] Task 1 — Engine wiring (AC: #2)
-  - [ ] Decide (and document the decision, not leave it implicit) whether evaluation runs server-side in `data_api` (subscribing to the same Redis channels `ws/live.py` already relays) or client-side in the browser (subscribing to `/ws/live` like any other consumer). Server-side is more consistent with "the webhook fires even if no browser tab is open," which is almost certainly the more useful behavior for an alert — recommended default unless there's a reason to prefer client-side.
-  - [ ] Whichever side, reuse the existing live-data subscription surface — do not add a second Redis subscription or a new polling loop against the catalog.
+- [x] Task 1 — Engine wiring (AC: #2)
+  - [x] Decide (and document the decision, not leave it implicit) whether evaluation runs server-side in `data_api` (subscribing to the same Redis channels `ws/live.py` already relays) or client-side in the browser (subscribing to `/ws/live` like any other consumer). Server-side is more consistent with "the webhook fires even if no browser tab is open," which is almost certainly the more useful behavior for an alert — recommended default unless there's a reason to prefer client-side.
+  - [x] Whichever side, reuse the existing live-data subscription surface — do not add a second Redis subscription or a new polling loop against the catalog.
 
-- [ ] Task 2 — Condition evaluation + frequency/expiration state (AC: #3)
-  - [ ] On each relevant incoming tick/bar-close, evaluate every active alert's condition (Story 20.1's stored conditions); track last-fired state per alert to enforce frequency; check expiration before evaluating at all.
+- [x] Task 2 — Condition evaluation + frequency/expiration state (AC: #3)
+  - [x] On each relevant incoming tick/bar-close, evaluate every active alert's condition (Story 20.1's stored conditions); track last-fired state per alert to enforce frequency; check expiration before evaluating at all.
 
-- [ ] Task 3 — Fire: webhook POST + template substitution + toast (AC: #4, #5)
-  - [ ] Template substitution is a plain string-replace over the four documented placeholders — no templating library needed for four fixed tokens (DESIGN-01).
-  - [ ] POST failures are logged with the alert id and reason; no retry loop (a webhook endpoint that's down stays down until the next natural fire opportunity, per the alert's own frequency — not a reason to build retry/backoff machinery for a personal single-user tool).
+- [x] Task 3 — Fire: webhook POST + template substitution + toast (AC: #4, #5)
+  - [x] Template substitution is a plain string-replace over the four documented placeholders — no templating library needed for four fixed tokens (DESIGN-01).
+  - [x] POST failures are logged with the alert id and reason; no retry loop (a webhook endpoint that's down stays down until the next natural fire opportunity, per the alert's own frequency — not a reason to build retry/backoff machinery for a personal single-user tool).
 
-- [ ] Task 4 — Tests
-  - [ ] A test for the frequency/expiration state machine (once-per-bar-close vs once-per-bar vs only-once, and an expired alert never firing) using a pure function/class, independent of the actual network POST (mirrors `_watchdog_transition`'s pattern in `dydx_collector/collector.py` — a pure state-machine step, unit-testable without mocking network calls).
-  - [ ] A test for template substitution given known placeholder values.
+- [x] Task 4 — Tests
+  - [x] A test for the frequency/expiration state machine (once-per-bar-close vs once-per-bar vs only-once, and an expired alert never firing) using a pure function/class, independent of the actual network POST (mirrors `_watchdog_transition`'s pattern in `dydx_collector/collector.py` — a pure state-machine step, unit-testable without mocking network calls).
+  - [x] A test for template substitution given known placeholder values.
 
 ## Dev Notes
 
@@ -61,4 +61,23 @@ so that I don't have to watch the chart myself.
 
 ### Completion Notes List
 
+Decision: evaluation is server-side (webhook fires with no tab open). `AlertEngine.on_snapshot` is registered as an observer on the existing `LiveCandleBus` (`observers` list added in live_candles.py) -- no second Redis subscription. Pure `evaluate()` state machine (cross up/down, once_per_bar_close decided on bucket rollover, once_per_bar, only_once, expiry) and `render()`; webhook POST via stdlib urllib in a daemon thread, failure logged with alert id, no retry. Toast pushed over `/ws/live` (`{"channel":"alerts",...}`) and shown by `useAlertToasts` + `AlertToasts` in App. Known ceiling: run state is in-memory, so the first tick after a restart can't fire.
+
 ### File List
+
+- troll/data_api/alerts.py
+- troll/data_api/live_candles.py
+- troll/data_api/ws/live.py
+- troll/data_api/app.py
+- troll/data_api/tests/test_alerts.py
+- troll/frontend/src/hooks/useAlertToasts.ts
+- troll/frontend/src/App.tsx
+
+### Review Findings
+
+Code review 2026-09-19 (adversarial + edge-case + acceptance layers, run inline over `git diff 14a459ccd6..HEAD`). 0 decision-needed, 3 patch (all applied), 3 defer, rest dismissed.
+
+- [x] [Review][Patch] `record_fire` save failure would have swallowed the fire (webhook never posted) — now logged, alert still fires [data_api/alerts.py]
+- [x] [Review][Patch] `once_per_bar_close` reported the next bar's first tick as `{{close}}` — `evaluate()` now returns the closed bar's close [data_api/alerts.py]
+- [x] [Review][Patch] Toast key used `Date.now()`, could collide within 1ms — now a per-hook counter [frontend/src/hooks/useAlertToasts.ts]
+- [x] [Review][Defer] Run state (last price, fired bar) is in-memory: after a data_api restart the first tick can't fire and a once_per_bar alert may re-fire within the same bar — deferred, documented ceiling

@@ -378,3 +378,8 @@ Accepted and done: picker multi-instance (`multiInstance` prop, chart page only 
 Already implemented before this sweep: overlay indicators on the price pane (`ChartPage.tsx` places by catalog `panel`).
 
 Discarded by operator: locking/atomic TOML writes; `bot_tui` malformed-message hardening; `DummyStrategy` signal cadence; technicals PUT value validation. `=` on float filter left as strict equality.
+
+## Deferred from: code review of epic-20 (2026-09-19)
+- Alert horizontal-line conditions are resolved to a static price at creation; later line drags don't move the alert.
+- `AlertStore` in-place TOML rewrite: a crash mid-write corrupts the file (fails loudly on load).
+- Alert run state is in-memory: first tick after a data_api restart can't fire; once_per_bar may re-fire within the same bar.

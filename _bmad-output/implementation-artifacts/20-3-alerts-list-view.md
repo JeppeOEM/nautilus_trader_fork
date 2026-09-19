@@ -1,6 +1,6 @@
 # Story 20.3: Alerts list view
 
-Status: ready-for-dev
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -18,11 +18,11 @@ so that I can review or delete them.
 
 ## Tasks / Subtasks
 
-- [ ] Task 1 — List view (AC: #2, #3)
-  - [ ] A new page or panel rendering `GET /api/alerts`'s results as a plain list — condition summary (human-readable, e.g. "BTC-USD-PERP.DYDX price crosses 65000"), status derived from Story 20.2's fired/expired state, delete button calling the existing delete route.
+- [x] Task 1 — List view (AC: #2, #3)
+  - [x] A new page or panel rendering `GET /api/alerts`'s results as a plain list — condition summary (human-readable, e.g. "BTC-USD-PERP.DYDX price crosses 65000"), status derived from Story 20.2's fired/expired state, delete button calling the existing delete route.
 
-- [ ] Task 2 — Tests
-  - [ ] A test rendering a known set of alerts (active, triggered, expired) and confirming each renders its correct status and that delete removes it from the list.
+- [x] Task 2 — Tests
+  - [x] A test rendering a known set of alerts (active, triggered, expired) and confirming each renders its correct status and that delete removes it from the list.
 
 ## Dev Notes
 
@@ -47,4 +47,16 @@ so that I can review or delete them.
 
 ### Completion Notes List
 
+`AlertsPage.tsx` at `/alerts` (nav link added) over GET/DELETE /api/alerts; status is derived server-side (active/triggered/expired) in the Story 20.1 response, no new persistence. Test: `AlertsPage.test.tsx`.
+
 ### File List
+
+- troll/frontend/src/pages/AlertsPage.tsx
+- troll/frontend/src/pages/AlertsPage.test.tsx
+- troll/frontend/src/App.tsx
+
+### Review Findings
+
+Code review 2026-09-19 (adversarial + edge-case + acceptance layers, run inline over `git diff 14a459ccd6..HEAD`). 0 decision-needed, 3 patch (all applied), 3 defer, rest dismissed.
+
+Clean — no findings.

@@ -338,6 +338,96 @@
         }
       }
     },
+    "/api/alerts": {
+      "get": {
+        "summary": "List Alerts",
+        "operationId": "list_alerts_api_alerts_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "items": {
+                    "$ref": "#/components/schemas/AlertResponse"
+                  },
+                  "type": "array",
+                  "title": "Response List Alerts Api Alerts Get"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "summary": "Create Alert",
+        "operationId": "create_alert_api_alerts_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AlertCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/alerts/{alert_id}": {
+      "delete": {
+        "summary": "Delete Alert",
+        "operationId": "delete_alert_api_alerts__alert_id__delete",
+        "parameters": [
+          {
+            "name": "alert_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Alert Id"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/rankings": {
       "get": {
         "summary": "Get Rankings",
@@ -966,6 +1056,145 @@
   },
   "components": {
     "schemas": {
+      "AlertCreate": {
+        "properties": {
+          "instrument_id": {
+            "type": "string",
+            "title": "Instrument Id"
+          },
+          "level": {
+            "type": "number",
+            "title": "Level"
+          },
+          "frequency": {
+            "type": "string",
+            "enum": [
+              "once_per_bar_close",
+              "once_per_bar",
+              "only_once"
+            ],
+            "title": "Frequency"
+          },
+          "bar_seconds": {
+            "type": "integer",
+            "title": "Bar Seconds"
+          },
+          "expires_at_ns": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At Ns"
+          },
+          "template": {
+            "type": "string",
+            "title": "Template"
+          },
+          "webhook_url": {
+            "type": "string",
+            "title": "Webhook Url"
+          }
+        },
+        "type": "object",
+        "required": [
+          "instrument_id",
+          "level",
+          "frequency",
+          "bar_seconds",
+          "template",
+          "webhook_url"
+        ],
+        "title": "AlertCreate"
+      },
+      "AlertResponse": {
+        "properties": {
+          "instrument_id": {
+            "type": "string",
+            "title": "Instrument Id"
+          },
+          "level": {
+            "type": "number",
+            "title": "Level"
+          },
+          "frequency": {
+            "type": "string",
+            "enum": [
+              "once_per_bar_close",
+              "once_per_bar",
+              "only_once"
+            ],
+            "title": "Frequency"
+          },
+          "bar_seconds": {
+            "type": "integer",
+            "title": "Bar Seconds"
+          },
+          "expires_at_ns": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Expires At Ns"
+          },
+          "template": {
+            "type": "string",
+            "title": "Template"
+          },
+          "webhook_url": {
+            "type": "string",
+            "title": "Webhook Url"
+          },
+          "id": {
+            "type": "string",
+            "title": "Id"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "triggered",
+              "expired"
+            ],
+            "title": "Status"
+          },
+          "created_ns": {
+            "type": "integer",
+            "title": "Created Ns"
+          },
+          "last_fired_ns": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Fired Ns"
+          }
+        },
+        "type": "object",
+        "required": [
+          "instrument_id",
+          "level",
+          "frequency",
+          "bar_seconds",
+          "template",
+          "webhook_url",
+          "id",
+          "status",
+          "created_ns"
+        ],
+        "title": "AlertResponse"
+      },
       "CandleItem": {
         "properties": {
           "t": {

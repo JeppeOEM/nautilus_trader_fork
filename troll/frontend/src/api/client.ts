@@ -1,6 +1,8 @@
 // Thin typed fetch helper over the generated OpenAPI schema (AD-F5) -- proves the codegen
 // pipeline's output is actually consumed, not just generated and ignored (Story 15.1 AC #3).
 import type {
+  AlertCreate,
+  AlertResponse,
   CandlesResponse,
   HealthResponse,
   IndicatorCatalogEntry,
@@ -14,6 +16,8 @@ import type {
 } from "./schema";
 
 export type {
+  AlertCreate,
+  AlertResponse,
   CandlesResponse,
   HealthResponse,
   IndicatorCatalogEntry,
@@ -190,4 +194,26 @@ export async function fetchTechnicalsValues(
   const res = await fetch(`/api/rankings/technicals-values?${params}`);
   if (!res.ok) throw new Error(`GET /api/rankings/technicals-values failed: ${res.status}`);
   return ((await res.json()) as TechnicalsValuesResponse).values;
+}
+
+// Stories 20.1/20.3: saved alerts (webhook delivery). `status` is derived server-side.
+export async function fetchAlerts(): Promise<AlertResponse[]> {
+  const res = await fetch("/api/alerts");
+  if (!res.ok) throw new Error(`GET /api/alerts failed: ${res.status}`);
+  return (await res.json()) as AlertResponse[];
+}
+
+export async function createAlert(body: AlertCreate): Promise<AlertResponse> {
+  const res = await fetch("/api/alerts", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw new Error(`POST /api/alerts failed: ${res.status}`);
+  return (await res.json()) as AlertResponse;
+}
+
+export async function deleteAlert(id: string): Promise<void> {
+  const res = await fetch(`/api/alerts/${encodeURIComponent(id)}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(`DELETE /api/alerts/${id} failed: ${res.status}`);
 }
