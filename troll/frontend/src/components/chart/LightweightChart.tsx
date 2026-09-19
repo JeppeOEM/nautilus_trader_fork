@@ -5,8 +5,10 @@ import {
   createChart,
   type IChartApi,
   type IPaneApi,
+  type IPriceLine,
   type ISeriesApi,
   type LineData,
+  type MouseEventParams,
   type Time,
   type WhitespaceData,
 } from "lightweight-charts";
@@ -37,6 +39,16 @@ export interface IndicatorPaneSpec {
   color: string;
 }
 
+// Story 18.1: a tool-drawn horizontal price line (AC #2). `id` is the caller's stable
+// key (ChartPage uses deterministic "hline-N" counter ids), diffed exactly like
+// `IndicatorPaneSpec.id` -- the line's whole lifecycle rides on it.
+export interface PriceLineSpec {
+  id: string;
+  price: number;
+  color: string;
+  title?: string;
+}
+
 interface LightweightChartProps {
   /** Story 15.7: which data source currently owns the main pane. Defaults to `"candles"`
    * (every pre-15.7 caller/test omits this prop). Switching `mode` removes the previous
@@ -65,6 +77,31 @@ interface LightweightChartProps {
    * `chart.timeScale().setVisibleLogicalRange(...)` (AC #4 -- adding/removing/
    * reconfiguring a pane must never reset the chart's current zoom/pan). */
   panes?: IndicatorPaneSpec[];
+  /** Story 18.1 (AC #2/#4): declarative horizontal price lines on the main
+   * candlestick series, diffed against an internal `Map<string, IPriceLine>`
+   * registry exactly like `panes` above -- new ids `series.createPriceLine()`,
+   * changed price/color/title `applyOptions()` of only the differing fields,
+   * removed ids `series.removePriceLine()`; never touches
+   * `timeScale().setVisibleLogicalRange()`/`fitContent()` (same AC discipline as
+   * `panes`). Candles-mode-only (Lines mode has no single "the" main series to own
+   * a price line -- spec Task 2's MVP scope decision): a no-op in Lines mode, and
+   * the candles->lines branch of the `[mode]` effect already cleared the registry
+   * when it removed the series the lines lived on -- a lines->candles return
+   * re-creates every spec on the fresh series. */
+  priceLines?: PriceLineSpec[];
+  /** Story 18.1 (AC #3): reports a live drag of an existing line, in the library's
+   * own crosshair coordinate space (see the drag effects below). This component
+   * never mutates the caller's `priceLines` state itself -- it only reports; the
+   * caller updates the spec and the registry diff above moves the line. */
+  onPriceLineDrag?: (id: string, price: number) => void;
+  /** Story 18.1 (AC #2/#4): reports a chart click as a price, converted via the
+   * main series' `coordinateToPrice(param.point.y)`. The conversion must live here:
+   * it is a series method, and the series instances are solely owned by this
+   * component (AD-F4) -- the caller decides what a click means (ChartPage places a
+   * line only while its hline tool is armed). Only subscribed while `mode ===
+   * "candles"`; never called for a param without a point or when the conversion
+   * returns null. */
+  onPriceClick?: (price: number) => void;
   /** Story 15.5: the currently-forming candle bar, from `useLiveCandle`. Applied via
    * `series.update()` (not `setData()`) on the candlestick series only -- independent of
    * the `data`/`setData()` effect above and Story 15.4's `panes` effect below; neither of
@@ -95,6 +132,45 @@ function setSeriesData(series: AnySeriesApi, data: IndicatorDatum[]): void {
 
 type MainLineSeriesApi = ISeriesApi<"Line", Time>;
 
+// Story 18.1: one fixed width for every tool-drawn price line -- no per-line width in
+// PriceLineSpec until a drawing tool actually needs one (YAGNI).
+const PRICE_LINE_WIDTH = 1;
+
+// Drag grab tolerance in pixels, close enough to the library's own price-line hit
+// radius that a hover the library reports as "custom-price-line" is also the line this
+// hit-test finds.
+const PRICE_LINE_GRAB_TOLERANCE_PX = 5;
+
+/**
+ * Story 18.1 (AC #3): the price-line id a mousedown just grabbed, or `null`. Only a
+ * crosshair param the library itself reported as hovering a custom price line owned by
+ * the main series qualifies, and the nearest registry line within the grab tolerance
+ * wins -- `hoveredInfo` carries no line identity, so this y-coordinate hit-test against
+ * the specs is what recovers it.
+ */
+function findGrabbedPriceLineId(
+  specs: PriceLineSpec[],
+  series: ISeriesApi<"Candlestick">,
+  param: MouseEventParams,
+): string | null {
+  const point = param.point;
+  if (!point) return null;
+  const info = param.hoveredInfo;
+  if (info?.objectKind !== "custom-price-line" || info.series !== series) return null;
+  let grabbedId: string | null = null;
+  let bestDistance = PRICE_LINE_GRAB_TOLERANCE_PX;
+  for (const spec of specs) {
+    const lineY = series.priceToCoordinate(spec.price);
+    if (lineY === null) continue;
+    const distance = Math.abs(point.y - lineY);
+    if (distance <= bestDistance) {
+      bestDistance = distance;
+      grabbedId = spec.id;
+    }
+  }
+  return grabbedId;
+}
+
 /**
  * Owns the one `lightweight-charts` `createChart()` call for a coin's chart page
  * (AD-F4) -- the main pane (candlestick series in Candles mode, or 5 line series in Lines
@@ -110,6 +186,9 @@ export default function LightweightChart({
   linesData,
   onChartApi,
   panes = [],
+  priceLines = [],
+  onPriceLineDrag,
+  onPriceClick,
   liveBar,
 }: LightweightChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -119,6 +198,15 @@ export default function LightweightChart({
   const prevLengthRef = useRef(0);
   const prevLinesLengthRef = useRef(0);
   const panesRef = useRef<Map<string, PaneEntry>>(new Map());
+  // Story 18.1: price-line registry + drag bookkeeping. `lastCrosshairRef` holds the
+  // library's latest crosshair param (cleared when the mouse leaves the chart, so
+  // stale data can never start a drag); `dragIdRef` the id being dragged; the click
+  // suppression flag lives from a line-grab mousedown until the chart click that
+  // would otherwise have followed it (see the mousedown effect below).
+  const priceLineRegistryRef = useRef<Map<string, IPriceLine>>(new Map());
+  const lastCrosshairRef = useRef<MouseEventParams | null>(null);
+  const dragIdRef = useRef<string | null>(null);
+  const suppressNextClickRef = useRef(false);
   const lastLiveBarTimeRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -174,6 +262,9 @@ export default function LightweightChart({
     const handleResize = () => chart.applyOptions({ width: container.clientWidth });
     window.addEventListener("resize", handleResize);
     const panes = panesRef.current;
+    // Captured to a local for the cleanup below, same as `panes` -- reading
+    // `.current` inside a cleanup is what the react-hooks/exhaustive-deps lint flags.
+    const priceLineRegistry = priceLineRegistryRef.current;
 
     return () => {
       cancelled = true;
@@ -182,6 +273,9 @@ export default function LightweightChart({
       seriesRef.current = null;
       lineSeriesRef.current = null;
       panes.clear();
+      // Story 18.1: the price lines die with the chart here, same as the panes -- the
+      // registry must not outlive the series instances it holds lines on.
+      priceLineRegistry.clear();
       onChartApi(null);
       chart.remove();
     };
@@ -235,6 +329,12 @@ export default function LightweightChart({
         chart.removeSeries(seriesRef.current);
         seriesRef.current = null;
         prevLengthRef.current = 0;
+        // Story 18.1: the candlestick series' price lines die with the series here --
+        // drop the registry entries without removePriceLine() calls (the series is
+        // going away entirely), but NOT the `priceLines` prop, which stays the source
+        // of truth: the [priceLines, mode] diff effect below sees an empty registry on
+        // a lines->candles return and re-creates every spec on the fresh series.
+        priceLineRegistryRef.current.clear();
       }
       if (!lineSeriesRef.current) {
         const lineIds = [...LINE_SERIES_IDS];
@@ -359,6 +459,142 @@ export default function LightweightChart({
       }
     }
   }, [panes]);
+
+  useEffect(() => {
+    // Story 18.1 (AC #2/#4): the priceLines prop's own registry-diff effect, the exact
+    // discipline of the panes effect above -- per-id add/update/remove, never a
+    // timeScale/visible-range call anywhere. Candles-mode-only per the prop's doc; the
+    // [mode] effect above has already cleared the registry (with the series) before
+    // this runs on a candles->lines flip, so the early return leaves nothing stale.
+    if (mode !== "candles") return;
+    const series = seriesRef.current;
+    if (!series) return;
+    const registry = priceLineRegistryRef.current;
+    const specsById = new Map(priceLines.map((spec) => [spec.id, spec] as const));
+
+    for (const [id, line] of [...registry]) {
+      if (!specsById.has(id)) {
+        series.removePriceLine(line);
+        registry.delete(id);
+      }
+    }
+
+    for (const spec of priceLines) {
+      const line = registry.get(spec.id);
+      if (!line) {
+        registry.set(
+          spec.id,
+          series.createPriceLine({
+            id: spec.id,
+            price: spec.price,
+            color: spec.color,
+            lineWidth: PRICE_LINE_WIDTH,
+            axisLabelVisible: true,
+            title: spec.title,
+          }),
+        );
+        continue;
+      }
+      // Read current options first, apply only the fields that differ -- mirrors the
+      // panes effect's color check, so an unrelated re-render is a pure no-op. Title
+      // normalizes to "" because the library defaults an unspecified create title to
+      // an empty string, not undefined.
+      const current = line.options();
+      if (current.price !== spec.price) line.applyOptions({ price: spec.price });
+      if (current.color !== spec.color) line.applyOptions({ color: spec.color });
+      if (current.title !== (spec.title ?? "")) line.applyOptions({ title: spec.title ?? "" });
+    }
+  }, [priceLines, mode]);
+
+  useEffect(() => {
+    // Story 18.1 (AC #3): the one crosshairMove subscription serves both halves of the
+    // drag -- remembering the latest hover (what the mousedown grab below hit-tests
+    // against) and, while a drag is active, converting its own `param.point.y` to a
+    // price. Staying inside the library's `param.point` coordinate space (rather than
+    // native mousemove + getBoundingClientRect) keeps the grab hit-test and the drag
+    // conversion in the same space, pane offsets included. `paneIndex === 0` guards
+    // against y-converting from an indicator sub-pane.
+    const chart = chartRef.current;
+    if (!chart || !onPriceLineDrag || mode !== "candles") return;
+    // A drag can never carry over from a previous subscription lifetime (e.g. a
+    // candles->lines->candles flip while the button was somehow still held) -- a fresh
+    // subscription starts dragless.
+    dragIdRef.current = null;
+
+    const handleCrosshairMove = (param: MouseEventParams): void => {
+      lastCrosshairRef.current = param.point ? param : null;
+      const draggedId = dragIdRef.current;
+      if (draggedId === null) return;
+      if (!param.point || param.paneIndex !== 0) return;
+      const price = seriesRef.current?.coordinateToPrice(param.point.y);
+      if (price === null || price === undefined) return;
+      onPriceLineDrag(draggedId, price);
+    };
+
+    chart.subscribeCrosshairMove(handleCrosshairMove);
+    return () => {
+      chart.unsubscribeCrosshairMove(handleCrosshairMove);
+      // The subscription that would have refreshed it is gone -- a stale param from
+      // this lifetime must never be able to start a drag in the next one.
+      lastCrosshairRef.current = null;
+    };
+  }, [onPriceLineDrag, mode]);
+
+  useEffect(() => {
+    // Story 18.1 (AC #3): the drag's start/end. Capture phase so a line grab runs
+    // BEFORE lightweight-charts' own internal mousedown handlers (attached to inner
+    // elements) -- stopPropagation() then prevents any chart pan from starting. The
+    // window-level mouseup (not container-level: the drag can end with the cursor
+    // outside the chart) is what always ends it.
+    const container = containerRef.current;
+    if (!container || !onPriceLineDrag || mode !== "candles") return;
+
+    const handleMouseDown = (event: MouseEvent): void => {
+      const series = seriesRef.current;
+      const param = lastCrosshairRef.current;
+      const grabbedId = series && param ? findGrabbedPriceLineId(priceLines, series, param) : null;
+      dragIdRef.current = grabbedId;
+      // A grab whose release happens outside the chart never fires a chart click, so
+      // the suppression flag would otherwise swallow the NEXT real click -- every
+      // non-grab mousedown clears it, keeping it true only from grab to click.
+      suppressNextClickRef.current = grabbedId !== null;
+      if (grabbedId === null) return;
+      event.stopPropagation();
+    };
+
+    const handleMouseUp = (): void => {
+      dragIdRef.current = null;
+    };
+
+    container.addEventListener("mousedown", handleMouseDown, true);
+    window.addEventListener("mouseup", handleMouseUp);
+    return () => {
+      container.removeEventListener("mousedown", handleMouseDown, true);
+      window.removeEventListener("mouseup", handleMouseUp);
+    };
+  }, [priceLines, onPriceLineDrag, mode]);
+
+  useEffect(() => {
+    // Story 18.1 (AC #2): click-to-place reporting. Only subscribed while the caller
+    // provided the callback AND mode is candles -- in any other configuration the
+    // chart's own click behavior is left completely untouched.
+    const chart = chartRef.current;
+    if (!chart || !onPriceClick || mode !== "candles") return;
+
+    const handleClick = (param: MouseEventParams): void => {
+      if (suppressNextClickRef.current) {
+        suppressNextClickRef.current = false;
+        return;
+      }
+      if (!param.point) return;
+      const price = seriesRef.current?.coordinateToPrice(param.point.y);
+      if (price === null || price === undefined) return;
+      onPriceClick(price);
+    };
+
+    chart.subscribeClick(handleClick);
+    return () => chart.unsubscribeClick(handleClick);
+  }, [onPriceClick, mode]);
 
   return <div ref={containerRef} />;
 }

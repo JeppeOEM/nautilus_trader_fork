@@ -241,7 +241,7 @@ development_status:
   epic-17-retrospective: optional
 
   epic-18: in-progress
-  18-1-horizontal-line-drawing-tool: ready-for-dev
+  18-1-horizontal-line-drawing-tool: review  # owed: visual browser check
   18-2-trendline-drawing-tool: ready-for-dev
   18-3-measurement-tool: ready-for-dev
   18-4-bar-replay: ready-for-dev

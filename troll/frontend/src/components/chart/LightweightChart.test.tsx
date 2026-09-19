@@ -1,7 +1,9 @@
-import { cleanup, render } from "@testing-library/react";
+import { cleanup, fireEvent, render } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { IndicatorPaneSpec } from "./LightweightChart";
+import type { CreatePriceLineOptions } from "lightweight-charts";
+
+import type { ChartMode, IndicatorPaneSpec, PriceLineSpec } from "./LightweightChart";
 
 const addSeriesMock = vi.fn();
 const applyOptionsMock = vi.fn();
@@ -13,6 +15,18 @@ const addPaneMock = vi.fn();
 const removePaneMock = vi.fn();
 const getVisibleLogicalRangeMock = vi.fn();
 const setVisibleLogicalRangeMock = vi.fn();
+// Story 18.1: the chart's click/crosshair subscriptions and the main series'
+// price-line API surface -- module-level shared mocks (same convention as setDataMock
+// above) so tests can trigger/inspect them regardless of which series instance the
+// component attached them to.
+const subscribeClickMock = vi.fn();
+const unsubscribeClickMock = vi.fn();
+const subscribeCrosshairMoveMock = vi.fn();
+const unsubscribeCrosshairMoveMock = vi.fn();
+const createPriceLineMock = vi.fn();
+const removePriceLineMock = vi.fn();
+const priceToCoordinateMock = vi.fn();
+const coordinateToPriceMock = vi.fn();
 
 // One shared counter so each chart.addPane() call gets its own, stable, ever-increasing
 // index -- mirrors the real library's paneIndex() behaviour closely enough for the
@@ -44,7 +58,28 @@ function makeSeriesMock(initialColor: string | undefined) {
   const applyOptions = vi.fn((opts: { color?: string }) => {
     if (opts.color !== undefined) color = opts.color;
   });
-  return { setData: setDataMock, applyOptions, options: vi.fn(() => ({ color })) };
+  return {
+    setData: setDataMock,
+    applyOptions,
+    options: vi.fn(() => ({ color })),
+    createPriceLine: createPriceLineMock,
+    removePriceLine: removePriceLineMock,
+    priceToCoordinate: priceToCoordinateMock,
+    coordinateToPrice: coordinateToPriceMock,
+  };
+}
+
+// A real IPriceLine's `.options()`/`.applyOptions()` round-trip, same rationale as
+// makeSeriesMock above: the component's read-current-options-before-reapplying check
+// needs something real to read. An unspecified create title defaults to "", mirroring
+// the real library's PriceLineOptions default -- without that, a title-less spec
+// would look "changed" on every diff.
+function makePriceLineMock(options: CreatePriceLineOptions) {
+  const applied = { ...options, title: options.title ?? "" };
+  const applyOptions = vi.fn((opts: Partial<CreatePriceLineOptions>) => {
+    Object.assign(applied, opts);
+  });
+  return { applyOptions, options: vi.fn(() => ({ ...applied })) };
 }
 
 // Shallow mock of the whole module -- jsdom has no real <canvas> 2D context, so a real
@@ -81,6 +116,27 @@ function makePaneSpec(id: string, overrides: Partial<IndicatorPaneSpec> = {}): I
   return { id, kind: "Line", data: [], color: "#123456", ...overrides };
 }
 
+// Default price 100 lines up with the identity priceToCoordinate/coordinateToPrice
+// mocks above (a spec at price 100 sits at y=100), so drag tests need no coordinate
+// overrides.
+function makePriceLineSpec(id: string, overrides: Partial<PriceLineSpec> = {}): PriceLineSpec {
+  return { id, price: 100, color: "#123456", ...overrides };
+}
+
+// The Story 18.1 tests' shared inert base props -- one element factory (same pattern
+// as RankingsPage.test's pageElement) keeps each test's JSX down to the props it
+// actually varies.
+type ChartTestProps = {
+  priceLines?: PriceLineSpec[];
+  mode?: ChartMode;
+  onPriceClick?: (price: number) => void;
+  onPriceLineDrag?: (id: string, price: number) => void;
+};
+
+function chartElement(props: ChartTestProps) {
+  return <LightweightChart data={[]} onChartApi={() => {}} {...props} />;
+}
+
 beforeEach(() => {
   nextPaneIndex = 1;
   setDataMock.mockReset();
@@ -94,6 +150,17 @@ beforeEach(() => {
   removePaneMock.mockReset();
   getVisibleLogicalRangeMock.mockReset().mockReturnValue({ from: 10, to: 50 });
   setVisibleLogicalRangeMock.mockReset();
+  subscribeClickMock.mockReset();
+  unsubscribeClickMock.mockReset();
+  subscribeCrosshairMoveMock.mockReset();
+  unsubscribeCrosshairMoveMock.mockReset();
+  createPriceLineMock.mockReset().mockImplementation((options: CreatePriceLineOptions) => makePriceLineMock(options));
+  removePriceLineMock.mockReset();
+  // Identity defaults: a spec at price P sits at y=P, and a clicked/dragged y of Y
+  // reads back as price Y -- individual tests override these when they need
+  // controlled conversions.
+  priceToCoordinateMock.mockReset().mockImplementation((price: number) => price);
+  coordinateToPriceMock.mockReset().mockImplementation((coordinate: number) => coordinate);
   createChartMock.mockReset().mockImplementation(() => ({
     addSeries: addSeriesMock,
     removeSeries: removeSeriesMock,
@@ -101,6 +168,10 @@ beforeEach(() => {
     remove: removeMock,
     addPane: addPaneMock,
     removePane: removePaneMock,
+    subscribeClick: subscribeClickMock,
+    unsubscribeClick: unsubscribeClickMock,
+    subscribeCrosshairMove: subscribeCrosshairMoveMock,
+    unsubscribeCrosshairMove: unsubscribeCrosshairMoveMock,
     timeScale: () => ({
       getVisibleLogicalRange: getVisibleLogicalRangeMock,
       setVisibleLogicalRange: setVisibleLogicalRangeMock,
@@ -292,6 +363,272 @@ describe("LightweightChart", () => {
 
       expect(addSeriesMock).toHaveBeenCalledTimes(1); // still just the one, no remove/re-add
       expect(removeSeriesMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("priceLines registry (Story 18.1)", () => {
+    it("creates a price line on the main series for a new id (AC #2)", () => {
+      render(chartElement({ priceLines: [makePriceLineSpec("hline-1", { price: 61000.5 })] }));
+
+      expect(createPriceLineMock).toHaveBeenCalledTimes(1);
+      expect(createPriceLineMock).toHaveBeenCalledWith({
+        id: "hline-1",
+        price: 61000.5,
+        color: "#123456",
+        lineWidth: 1,
+        axisLabelVisible: true,
+        title: undefined,
+      });
+    });
+
+    it("passes a spec's title through on create", () => {
+      const spec = makePriceLineSpec("hline-1", { title: "TP" });
+      render(chartElement({ priceLines: [spec] }));
+
+      expect(createPriceLineMock).toHaveBeenCalledWith({
+        id: "hline-1",
+        price: 100,
+        color: "#123456",
+        lineWidth: 1,
+        axisLabelVisible: true,
+        title: "TP",
+      });
+    });
+
+    it("applies only the changed price on an existing id, never a second createPriceLine", () => {
+      const specA = makePriceLineSpec("hline-1", { price: 61000.5 });
+      const { rerender } = render(chartElement({ priceLines: [specA] }));
+      const line = createPriceLineMock.mock.results[0].value;
+
+      rerender(chartElement({ priceLines: [{ ...specA, price: 62000 }] }));
+
+      expect(createPriceLineMock).toHaveBeenCalledTimes(1);
+      // Exactly one applyOptions carrying only the price -- the unchanged color and
+      // the title normalization (unspecified === the library's "" default) must not
+      // spuriously re-apply.
+      expect(line.applyOptions).toHaveBeenCalledTimes(1);
+      expect(line.applyOptions).toHaveBeenCalledWith({ price: 62000 });
+    });
+
+    it("applies only the changed color on an existing id", () => {
+      const specA = makePriceLineSpec("hline-1");
+      const { rerender } = render(chartElement({ priceLines: [specA] }));
+      const line = createPriceLineMock.mock.results[0].value;
+
+      rerender(chartElement({ priceLines: [{ ...specA, color: "#654321" }] }));
+
+      expect(line.applyOptions).toHaveBeenCalledTimes(1);
+      expect(line.applyOptions).toHaveBeenCalledWith({ color: "#654321" });
+    });
+
+    it("removes a dropped id via removePriceLine with the exact created instance, and re-adds cleanly", () => {
+      const spec = makePriceLineSpec("hline-1");
+      const { rerender } = render(chartElement({ priceLines: [spec] }));
+      const line = createPriceLineMock.mock.results[0].value;
+
+      rerender(chartElement({ priceLines: [] }));
+
+      expect(removePriceLineMock).toHaveBeenCalledTimes(1);
+      expect(removePriceLineMock).toHaveBeenCalledWith(line);
+
+      // Re-adding the same id after removal creates exactly one fresh line, never a
+      // silently-stale registry entry -- mirrors the panes registry's own test.
+      rerender(chartElement({ priceLines: [spec] }));
+      expect(createPriceLineMock).toHaveBeenCalledTimes(2);
+    });
+
+    it("re-creates every price line on the fresh series across a Candles->Lines->Candles toggle", () => {
+      const spec = makePriceLineSpec("hline-1");
+      const { rerender } = render(chartElement({ mode: "candles", priceLines: [spec] }));
+      expect(createPriceLineMock).toHaveBeenCalledTimes(1);
+
+      rerender(chartElement({ mode: "lines", priceLines: [spec] }));
+      // Lines mode is a no-op for price lines, and the candles->lines series removal
+      // kills them with the series -- no removePriceLine() on a series that is gone.
+      expect(createPriceLineMock).toHaveBeenCalledTimes(1);
+      expect(removePriceLineMock).not.toHaveBeenCalled();
+
+      rerender(chartElement({ mode: "candles", priceLines: [spec] }));
+      // The registry was cleared with the old series, so the same id counts as new on
+      // the fresh candlestick series.
+      expect(createPriceLineMock).toHaveBeenCalledTimes(2);
+      expect(createPriceLineMock).toHaveBeenLastCalledWith(
+        expect.objectContaining({ id: "hline-1", price: 100 }),
+      );
+    });
+
+    it("never touches the chart's visible range while price lines are added, updated, or removed (AC #4)", () => {
+      const spec = makePriceLineSpec("hline-1");
+      const { rerender } = render(chartElement({ priceLines: [spec] }));
+      rerender(chartElement({ priceLines: [{ ...spec, price: 200 }] }));
+      rerender(chartElement({ priceLines: [] }));
+
+      expect(setVisibleLogicalRangeMock).not.toHaveBeenCalled();
+      expect(getVisibleLogicalRangeMock).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("price-line click/drag reporting (Story 18.1)", () => {
+    it("reports a clicked y-coordinate as a price through onPriceClick (AC #2)", () => {
+      const onPriceClick = vi.fn();
+      coordinateToPriceMock.mockReturnValue(61000.5);
+      render(chartElement({ onPriceClick }));
+
+      const clickHandler = subscribeClickMock.mock.calls[0][0];
+      clickHandler({ point: { x: 5, y: 100 } });
+
+      // The conversion runs through the main series' coordinateToPrice with the
+      // click's own y (AC #4: the series lives inside LightweightChart, so the
+      // click->price conversion must too).
+      expect(coordinateToPriceMock).toHaveBeenCalledWith(100);
+      expect(onPriceClick).toHaveBeenCalledTimes(1);
+      expect(onPriceClick).toHaveBeenCalledWith(61000.5);
+    });
+
+    it("does not subscribe to chart clicks when no onPriceClick callback is provided", () => {
+      render(chartElement({}));
+
+      expect(subscribeClickMock).not.toHaveBeenCalled();
+    });
+
+    it("does not fire onPriceClick for a click with no point", () => {
+      const onPriceClick = vi.fn();
+      render(chartElement({ onPriceClick }));
+
+      subscribeClickMock.mock.calls[0][0]({});
+
+      expect(onPriceClick).not.toHaveBeenCalled();
+    });
+
+    it("does not fire onPriceClick when the coordinate-to-price conversion returns null", () => {
+      const onPriceClick = vi.fn();
+      coordinateToPriceMock.mockReturnValue(null);
+      render(chartElement({ onPriceClick }));
+
+      subscribeClickMock.mock.calls[0][0]({ point: { x: 5, y: 100 } });
+
+      expect(onPriceClick).not.toHaveBeenCalled();
+    });
+
+    it("does not subscribe to chart clicks in lines mode", () => {
+      render(chartElement({ mode: "lines", onPriceClick: () => {} }));
+
+      expect(subscribeClickMock).not.toHaveBeenCalled();
+    });
+
+    it("unsubscribes the click handler when the mode flips to lines", () => {
+      const { rerender } = render(chartElement({ mode: "candles", onPriceClick: () => {} }));
+      const clickHandler = subscribeClickMock.mock.calls[0][0];
+
+      rerender(chartElement({ mode: "lines", onPriceClick: () => {} }));
+
+      expect(unsubscribeClickMock).toHaveBeenCalledWith(clickHandler);
+    });
+
+    it("unsubscribes its crosshair handler on unmount", () => {
+      const { unmount } = render(chartElement({ onPriceLineDrag: () => {} }));
+      const crosshairHandler = subscribeCrosshairMoveMock.mock.calls[0][0];
+
+      unmount();
+
+      expect(unsubscribeCrosshairMoveMock).toHaveBeenCalledWith(crosshairHandler);
+    });
+
+    it("starts a drag from a mousedown over a hovered line, reporting prices until mouseup (AC #3)", () => {
+      const onPriceLineDrag = vi.fn();
+      const { container } = render(
+        chartElement({ priceLines: [makePriceLineSpec("hline-1")], onPriceLineDrag }),
+      );
+      const crosshairHandler = subscribeCrosshairMoveMock.mock.calls[0][0];
+      const candleSeries = addSeriesMock.mock.results[0].value;
+
+      // A hover the library reports as "over this series' custom price line", at y=100
+      // -- exactly where the identity priceToCoordinate puts a price-100 spec.
+      crosshairHandler({
+        point: { x: 10, y: 100 },
+        paneIndex: 0,
+        hoveredInfo: { objectKind: "custom-price-line", series: candleSeries },
+      });
+      fireEvent.mouseDown(container.firstElementChild!);
+      crosshairHandler({ point: { x: 12, y: 150 }, paneIndex: 0 });
+
+      expect(onPriceLineDrag).toHaveBeenCalledTimes(1);
+      expect(onPriceLineDrag).toHaveBeenCalledWith("hline-1", 150);
+
+      // The drag ends with the window-level mouseup (the release can happen outside
+      // the chart): further crosshair moves report nothing.
+      fireEvent.mouseUp(window);
+      crosshairHandler({ point: { x: 14, y: 200 }, paneIndex: 0 });
+
+      expect(onPriceLineDrag).toHaveBeenCalledTimes(1);
+    });
+
+    it("never starts a drag when the mousedown is not over one of the series' price lines", () => {
+      const onPriceLineDrag = vi.fn();
+      const { container } = render(
+        chartElement({ priceLines: [makePriceLineSpec("hline-1")], onPriceLineDrag }),
+      );
+      const crosshairHandler = subscribeCrosshairMoveMock.mock.calls[0][0];
+      const candleSeries = addSeriesMock.mock.results[0].value;
+
+      // Hovering the series itself (not a custom price line) must not arm a grab.
+      crosshairHandler({
+        point: { x: 10, y: 100 },
+        paneIndex: 0,
+        hoveredInfo: { objectKind: "series", series: candleSeries },
+      });
+      fireEvent.mouseDown(container.firstElementChild!);
+      crosshairHandler({ point: { x: 12, y: 150 }, paneIndex: 0 });
+
+      expect(onPriceLineDrag).not.toHaveBeenCalled();
+    });
+
+    it("never starts a drag from a mousedown with no preceding crosshair point", () => {
+      const onPriceLineDrag = vi.fn();
+      const { container } = render(
+        chartElement({ priceLines: [makePriceLineSpec("hline-1")], onPriceLineDrag }),
+      );
+      const crosshairHandler = subscribeCrosshairMoveMock.mock.calls[0][0];
+
+      // Mouse left the chart: the param carries no point, clearing the remembered
+      // hover -- a following mousedown has nothing to hit-test against.
+      crosshairHandler({});
+      fireEvent.mouseDown(container.firstElementChild!);
+      crosshairHandler({ point: { x: 12, y: 150 }, paneIndex: 0 });
+
+      expect(onPriceLineDrag).not.toHaveBeenCalled();
+    });
+
+    it("suppresses the chart click that immediately follows a line-grab mousedown, one-shot", () => {
+      const onPriceClick = vi.fn();
+      const { container } = render(
+        chartElement({
+          priceLines: [makePriceLineSpec("hline-1")],
+          onPriceLineDrag: () => {},
+          onPriceClick,
+        }),
+      );
+      const crosshairHandler = subscribeCrosshairMoveMock.mock.calls[0][0];
+      const clickHandler = subscribeClickMock.mock.calls[0][0];
+      const candleSeries = addSeriesMock.mock.results[0].value;
+
+      crosshairHandler({
+        point: { x: 10, y: 100 },
+        paneIndex: 0,
+        hoveredInfo: { objectKind: "custom-price-line", series: candleSeries },
+      });
+      fireEvent.mouseDown(container.firstElementChild!); // grabs the line
+      fireEvent.mouseUp(window);
+      // lightweight-charts still fires a click for a press that never moved -- it
+      // must NOT place a new line under the cursor.
+      clickHandler({ point: { x: 10, y: 100 } });
+
+      expect(onPriceClick).not.toHaveBeenCalled();
+
+      // The suppression is one-shot: the next click reports normally again.
+      clickHandler({ point: { x: 10, y: 100 } });
+
+      expect(onPriceClick).toHaveBeenCalledTimes(1);
     });
   });
 });

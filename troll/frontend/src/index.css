@@ -143,3 +143,27 @@ table {
   padding: 2px 6px;
   color: var(--color-text-dim);
 }
+
+/* Story 18.1: the chart page's left tool rail -- the .tabs/.tabbtn shared pattern
+   (theme.css) with only the overrides a narrow vertical rail needs (no flex:1
+   stretch, compact padding), same scoped-override precedent as .filter-panel
+   .tabbtn above. */
+.chart-workspace {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
+.chart-toolbar {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  /* Matches .term-box's own top margin (theme.css) so the rail lines up with the
+     chart box's top edge. */
+  margin: 1.4em 0 0;
+}
+
+.chart-toolbar .tabbtn {
+  flex: none;
+  padding: 7px 10px;
+}
