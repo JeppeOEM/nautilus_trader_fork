@@ -3,7 +3,7 @@ TROLL_DIR  := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 COMPOSE    := docker compose -f $(TROLL_DIR)docker-compose.yml
 BASE_IMAGE := nautilus-trader-base:1.229.0
 
-.PHONY: build-base build-base-vps up redeploy redeploy-no-paper up-live-paper build-insecure test test-live-paper down logs logs-dash web enable-boot enable-firewall harden-ssh frontend-dev frontend-remote
+.PHONY: build-base build-base-vps up redeploy redeploy-all redeploy-no-paper up-live-paper build-insecure test test-live-paper down logs logs-dash web enable-boot enable-firewall harden-ssh frontend-dev frontend-remote
 
 # Personal, gitignored overrides (see .env-example for the documented default).
 -include $(TROLL_DIR).env
@@ -84,6 +84,16 @@ up:
 ## here for a fresh image; `make tui` also rebuilds it on every invocation regardless.
 redeploy:
 	$(COMPOSE) up -d --build ranking_engine data_api
+	$(COMPOSE) --profile live-paper up -d --build live-paper
+	$(COMPOSE) --profile tui build bot_tui
+	@docker image prune -f
+	@echo "Dashboard: http://localhost:$(DATA_API_PORT)"
+
+## Rebuild and restart EVERYTHING, collector included -- `redeploy` plus the collector. Use when
+## dydx_collector/ changed (e.g. a new rollup writer). Briefly drops the collector's WS
+## connection and loses its in-memory book/minute state; prefer `redeploy` otherwise.
+redeploy-all:
+	$(COMPOSE) up -d --build collector ranking_engine data_api
 	$(COMPOSE) --profile live-paper up -d --build live-paper
 	$(COMPOSE) --profile tui build bot_tui
 	@docker image prune -f
@@ -248,6 +258,15 @@ frontend-dev:
 ## data_api is the sole thing the frontend talks to; it owns its own redis
 ## subscription on the VPS side.
 TROLL_VPS_HOST ?= nifelheim
+## A listener on 9100 is NOT proof the tunnel works -- a stale `ssh -f` keeps the local
+## port open after its connection dies, and every /api call then fails while Vite still
+## looks fine (blank chart). So health-check THROUGH the tunnel, and recycle it if it
+## doesn't answer. ExitOnForwardFailure/ServerAlive* make a dead tunnel exit on its own.
 frontend-remote:
-	fuser 9100/tcp >/dev/null 2>&1 || ssh -f -N -L 9100:127.0.0.1:9100 $(TROLL_VPS_HOST)
+	curl -sf -m 5 http://127.0.0.1:9100/api/health >/dev/null 2>&1 || { \
+		pkill -f "^ssh .*-L 9100:127.0.0.1:9100" || true; sleep 1; \
+		ssh -f -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
+			-L 9100:127.0.0.1:9100 $(TROLL_VPS_HOST); }
+	curl -sf -m 10 http://127.0.0.1:9100/api/health >/dev/null || { \
+		echo "data_api unreachable via tunnel on 9100 (VPS data_api down/restarting?)"; exit 1; }
 	cd $(TROLL_DIR)frontend && DATA_API_PORT=9100 npm run dev

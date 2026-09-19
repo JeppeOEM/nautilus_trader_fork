@@ -251,3 +251,17 @@ def test_wide_bar_window_is_wider_than_the_raw_cap_but_still_bounded() -> None:
     assert candles_routes._window_start_ns(0, 120, hour) == -7 * 86_400 * 1_000_000_000
     day_window_s = -candles_routes._window_start_ns(0, 120, 86_400) // 1_000_000_000
     assert 7 * 86_400 < day_window_s <= candles_routes._MAX_ROLLUP_QUERY_SPAN_SECONDS
+
+
+def test_one_second_bars_return_one_candle_per_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    catalog_path = str(tmp_path / "catalog")
+    _write_snapshots(catalog_path, [(_BASE_NS + i * 1_000_000_000, 100.0 + i) for i in range(5)])
+    client = _client(catalog_path, monkeypatch)
+
+    resp = client.get(f"/api/candles/{_IID}?before_ns={_BASE_NS + 10_000_000_000}&limit=10&bar_seconds=1")
+
+    assert [i["c"] for i in resp.json()["items"]] == [100.0, 101.0, 102.0, 103.0, 104.0]
+
+
+def test_sub_minute_bars_look_back_at_least_an_hour() -> None:
+    assert candles_routes._window_start_ns(0, 120, 1) == -3600 * 1_000_000_000

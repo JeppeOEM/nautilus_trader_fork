@@ -56,6 +56,11 @@ _MAX_BAR_SECONDS = 604_800  # 1w -- the timeframe selector's widest bar
 # of a bounded window, never open-ended).
 _QUERY_WINDOW_MULTIPLIER = 3
 
+# Floor on the main query window for sub-minute bars. A bar only exists for a second that traded, so at 1s/5s the
+# `limit * bar_seconds * 3` window (6 min at 1s) can hold 0-1 candles on a quiet coin -- the
+# chart then has nothing to scroll and never refills. An hour of raw 1s is only ~3.6k rows.
+_MIN_QUERY_WINDOW_SECONDS = 3600
+
 # Hard cap on any single query's total time span (MEM-01), independent of the
 # limit/bar_seconds product that produced it -- `_MAX_CANDLES_LIMIT * _MAX_BAR_SECONDS *
 # _QUERY_WINDOW_MULTIPLIER` alone would allow a single request to pull ~4 years of raw
@@ -90,7 +95,10 @@ def _window_start_ns(before_ns: int, limit: int, bar_seconds: int) -> int:
         if choose_candle_source(bar_seconds) == "rollup_1m"
         else _MAX_QUERY_SPAN_SECONDS
     )
-    span_seconds = min(limit * bar_seconds * _QUERY_WINDOW_MULTIPLIER, cap)
+    span_seconds = limit * bar_seconds * _QUERY_WINDOW_MULTIPLIER
+    if bar_seconds < 60:
+        span_seconds = max(span_seconds, _MIN_QUERY_WINDOW_SECONDS)
+    span_seconds = min(span_seconds, cap)
     return before_ns - span_seconds * 1_000_000_000
 
 
