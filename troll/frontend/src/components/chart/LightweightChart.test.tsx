@@ -1,9 +1,10 @@
 import { cleanup, fireEvent, render } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { CreatePriceLineOptions } from "lightweight-charts";
+import type { CreatePriceLineOptions, Time } from "lightweight-charts";
 
-import type { ChartMode, IndicatorPaneSpec, PriceLineSpec } from "./LightweightChart";
+import type { ChartMode, DrawingSpec, IndicatorPaneSpec, PriceLineSpec } from "./LightweightChart";
+import { TrendlinePrimitive } from "./primitives/TrendlinePrimitive";
 
 const addSeriesMock = vi.fn();
 const applyOptionsMock = vi.fn();
@@ -27,6 +28,10 @@ const createPriceLineMock = vi.fn();
 const removePriceLineMock = vi.fn();
 const priceToCoordinateMock = vi.fn();
 const coordinateToPriceMock = vi.fn();
+// Story 18.2: the host series' primitive API and the time scale's x<->time conversions.
+const attachPrimitiveMock = vi.fn();
+const detachPrimitiveMock = vi.fn();
+const coordinateToTimeMock = vi.fn();
 
 // One shared counter so each chart.addPane() call gets its own, stable, ever-increasing
 // index -- mirrors the real library's paneIndex() behaviour closely enough for the
@@ -66,6 +71,8 @@ function makeSeriesMock(initialColor: string | undefined) {
     removePriceLine: removePriceLineMock,
     priceToCoordinate: priceToCoordinateMock,
     coordinateToPrice: coordinateToPriceMock,
+    attachPrimitive: attachPrimitiveMock,
+    detachPrimitive: detachPrimitiveMock,
   };
 }
 
@@ -131,6 +138,8 @@ type ChartTestProps = {
   mode?: ChartMode;
   onPriceClick?: (price: number) => void;
   onPriceLineDrag?: (id: string, price: number) => void;
+  drawings?: DrawingSpec[];
+  onPointClick?: (point: { time: Time; price: number }) => void;
 };
 
 function chartElement(props: ChartTestProps) {
@@ -156,6 +165,9 @@ beforeEach(() => {
   unsubscribeCrosshairMoveMock.mockReset();
   createPriceLineMock.mockReset().mockImplementation((options: CreatePriceLineOptions) => makePriceLineMock(options));
   removePriceLineMock.mockReset();
+  attachPrimitiveMock.mockReset();
+  detachPrimitiveMock.mockReset();
+  coordinateToTimeMock.mockReset().mockReturnValue(null);
   // Identity defaults: a spec at price P sits at y=P, and a clicked/dragged y of Y
   // reads back as price Y -- individual tests override these when they need
   // controlled conversions.
@@ -175,6 +187,7 @@ beforeEach(() => {
     timeScale: () => ({
       getVisibleLogicalRange: getVisibleLogicalRangeMock,
       setVisibleLogicalRange: setVisibleLogicalRangeMock,
+      coordinateToTime: coordinateToTimeMock,
       subscribeVisibleLogicalRangeChange: vi.fn(),
       unsubscribeVisibleLogicalRangeChange: vi.fn(),
     }),
@@ -630,5 +643,135 @@ describe("LightweightChart", () => {
 
       expect(onPriceClick).toHaveBeenCalledTimes(1);
     });
+  });
+});
+
+function makeTrendlineSpec(id: string, overrides: Partial<DrawingSpec> = {}): DrawingSpec {
+  return {
+    id,
+    kind: "trendline",
+    anchors: [
+      { time: 100 as Time, price: 10 },
+      { time: 200 as Time, price: 20 },
+    ],
+    color: "#123456",
+    ...overrides,
+  };
+}
+
+describe("drawings registry (Story 18.2)", () => {
+  it("attaches one primitive per new id, and only once across re-renders (AC #4)", () => {
+    const drawings = [makeTrendlineSpec("trendline-1")];
+    const { rerender } = render(chartElement({ drawings }));
+    rerender(chartElement({ drawings }));
+
+    expect(attachPrimitiveMock).toHaveBeenCalledTimes(1);
+    expect(attachPrimitiveMock.mock.calls[0][0]).toBeInstanceOf(TrendlinePrimitive);
+  });
+
+  it("detaches the primitive of a removed id and leaves the others", () => {
+    const { rerender } = render(
+      chartElement({ drawings: [makeTrendlineSpec("trendline-1"), makeTrendlineSpec("trendline-2")] }),
+    );
+    const first = attachPrimitiveMock.mock.calls[0][0];
+
+    rerender(chartElement({ drawings: [makeTrendlineSpec("trendline-2")] }));
+
+    expect(detachPrimitiveMock).toHaveBeenCalledTimes(1);
+    expect(detachPrimitiveMock).toHaveBeenCalledWith(first);
+  });
+
+  it("updates an existing primitive in place when its anchors change, without re-attaching", () => {
+    const { rerender } = render(chartElement({ drawings: [makeTrendlineSpec("trendline-1")] }));
+    const primitive = attachPrimitiveMock.mock.calls[0][0] as TrendlinePrimitive;
+    const updateSpy = vi.spyOn(primitive, "update");
+    const moved: DrawingSpec = makeTrendlineSpec("trendline-1", {
+      anchors: [
+        { time: 100 as Time, price: 11 },
+        { time: 200 as Time, price: 21 },
+      ],
+    });
+
+    rerender(chartElement({ drawings: [moved] }));
+
+    expect(updateSpy).toHaveBeenCalledWith(moved.anchors, "#123456");
+    expect(attachPrimitiveMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("re-attaches every drawing on the new host series after a mode flip", () => {
+    const drawings = [makeTrendlineSpec("trendline-1")];
+    const { rerender } = render(chartElement({ drawings }));
+    rerender(chartElement({ drawings, mode: "lines" }));
+
+    expect(attachPrimitiveMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports a click as a {time, price} point, falling back to coordinateToTime (AC #2)", () => {
+    const onPointClick = vi.fn();
+    coordinateToPriceMock.mockReturnValue(61000.5);
+    render(chartElement({ onPointClick }));
+    const clickHandler = subscribeClickMock.mock.calls[0][0];
+
+    clickHandler({ point: { x: 5, y: 100 }, time: 1234 });
+    coordinateToTimeMock.mockReturnValue(5678);
+    clickHandler({ point: { x: 9, y: 100 } });
+    coordinateToTimeMock.mockReturnValue(null);
+    clickHandler({ point: { x: 9, y: 100 } });
+
+    expect(onPointClick.mock.calls).toEqual([
+      [{ time: 1234, price: 61000.5 }],
+      [{ time: 5678, price: 61000.5 }],
+    ]);
+  });
+});
+
+describe("TrendlinePrimitive (Story 18.2)", () => {
+  it("recomputes screen coordinates from the same anchors after a pan/zoom (AC #3)", () => {
+    let offset = 0;
+    const primitive = new TrendlinePrimitive(
+      [
+        { time: 100 as Time, price: 10 },
+        { time: 200 as Time, price: 20 },
+      ],
+      "#fff",
+    );
+    const requestUpdate = vi.fn();
+    primitive.attached({
+      chart: { timeScale: () => ({ timeToCoordinate: (t: number) => t + offset }) },
+      series: { priceToCoordinate: (p: number) => p * 2 },
+      requestUpdate,
+    } as never);
+
+    primitive.updateAllViews();
+    expect(primitive.screenPoints()).toEqual([
+      { x: 100, y: 20 },
+      { x: 200, y: 40 },
+    ]);
+
+    offset = -50; // the view scrolled; anchors are untouched
+    primitive.updateAllViews();
+    expect(primitive.screenPoints()).toEqual([
+      { x: 50, y: 20 },
+      { x: 150, y: 40 },
+    ]);
+  });
+
+  it("has no drawable points while an anchor is outside the coordinate space", () => {
+    const primitive = new TrendlinePrimitive(
+      [
+        { time: 100 as Time, price: 10 },
+        { time: 200 as Time, price: 20 },
+      ],
+      "#fff",
+    );
+    primitive.attached({
+      chart: { timeScale: () => ({ timeToCoordinate: (t: number) => (t === 100 ? null : t) }) },
+      series: { priceToCoordinate: (p: number) => p },
+      requestUpdate: vi.fn(),
+    } as never);
+
+    primitive.updateAllViews();
+
+    expect(primitive.screenPoints()).toBeNull();
   });
 });

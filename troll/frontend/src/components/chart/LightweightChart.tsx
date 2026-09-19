@@ -18,6 +18,7 @@ import type { ChartDatum } from "../../hooks/useCandles";
 import type { IndicatorDatum } from "../../hooks/useIndicatorSeries";
 import type { SnapshotLinesData } from "../../hooks/useSnapshotSeries";
 import { assignPaneColor, cssVar } from "./paneColors";
+import { TrendlinePrimitive, type TrendlineAnchor } from "./primitives/TrendlinePrimitive";
 
 export type PaneSeriesKind = "Line" | "Histogram";
 
@@ -48,6 +49,17 @@ export interface PriceLineSpec {
   color: string;
   title?: string;
 }
+
+// Story 18.2: a tool-drawn custom-primitive drawing. A tagged union so Story 18.3's
+// measurement joins as another `kind`; kept separate from PriceLineSpec because a
+// two-anchor primitive and a native single-value price line are different mechanisms.
+export interface TrendlineSpec {
+  id: string;
+  kind: "trendline";
+  anchors: [TrendlineAnchor, TrendlineAnchor];
+  color: string;
+}
+export type DrawingSpec = TrendlineSpec;
 
 interface LightweightChartProps {
   /** Story 15.7: which data source currently owns the main pane. Defaults to `"candles"`
@@ -102,6 +114,17 @@ interface LightweightChartProps {
    * "candles"`; never called for a param without a point or when the conversion
    * returns null. */
   onPriceClick?: (price: number) => void;
+  /** Story 18.2: declarative custom-primitive drawings, attached to the current main-pane
+   * series (the candlestick series, or the `price` line series in Lines mode) and diffed
+   * against an internal `Map<string, TrendlinePrimitive>` registry like `priceLines` --
+   * add via `attachPrimitive`, changed anchors/color via `update()`, removed ids via
+   * `detachPrimitive`. Never touches the visible range. A mode flip replaces the host
+   * series, so the registry is cleared there and every spec re-attached on the new one. */
+  drawings?: DrawingSpec[];
+  /** Story 18.2: reports a chart click as a `{time, price}` point (same click subscription
+   * and grab-suppression as `onPriceClick`; a click with no resolvable time -- past the
+   * last bar's coordinate space -- is not reported). Works in both modes. */
+  onPointClick?: (point: TrendlineAnchor) => void;
   /** Story 15.5: the currently-forming candle bar, from `useLiveCandle`. Applied via
    * `series.update()` (not `setData()`) on the candlestick series only -- independent of
    * the `data`/`setData()` effect above and Story 15.4's `panes` effect below; neither of
@@ -189,6 +212,8 @@ export default function LightweightChart({
   priceLines = [],
   onPriceLineDrag,
   onPriceClick,
+  drawings = [],
+  onPointClick,
   liveBar,
 }: LightweightChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -207,6 +232,7 @@ export default function LightweightChart({
   const lastCrosshairRef = useRef<MouseEventParams | null>(null);
   const dragIdRef = useRef<string | null>(null);
   const suppressNextClickRef = useRef(false);
+  const drawingRegistryRef = useRef<Map<string, TrendlinePrimitive>>(new Map());
   const lastLiveBarTimeRef = useRef<number | null>(null);
 
   useEffect(() => {
@@ -265,6 +291,7 @@ export default function LightweightChart({
     // Captured to a local for the cleanup below, same as `panes` -- reading
     // `.current` inside a cleanup is what the react-hooks/exhaustive-deps lint flags.
     const priceLineRegistry = priceLineRegistryRef.current;
+    const drawingRegistry = drawingRegistryRef.current;
 
     return () => {
       cancelled = true;
@@ -276,6 +303,7 @@ export default function LightweightChart({
       // Story 18.1: the price lines die with the chart here, same as the panes -- the
       // registry must not outlive the series instances it holds lines on.
       priceLineRegistry.clear();
+      drawingRegistry.clear();
       onChartApi(null);
       chart.remove();
     };
@@ -295,6 +323,11 @@ export default function LightweightChart({
     // these series -- only an actual mode change does.
     const chart = chartRef.current;
     if (!chart) return;
+
+    // Story 18.2: drawings are attached to the main-pane host series, which is replaced
+    // on every mode flip -- drop the entries (no detach: the series goes away entirely)
+    // and let the [drawings, mode] effect re-attach them to the new host.
+    drawingRegistryRef.current.clear();
 
     if (mode === "candles") {
       if (lineSeriesRef.current) {
@@ -507,6 +540,33 @@ export default function LightweightChart({
   }, [priceLines, mode]);
 
   useEffect(() => {
+    // Story 18.2 (AC #4): the drawings prop's registry-diff effect -- same per-id
+    // add/update/remove discipline as priceLines, never a visible-range call.
+    const host = seriesRef.current ?? lineSeriesRef.current?.price;
+    if (!host) return;
+    const registry = drawingRegistryRef.current;
+    const specsById = new Map(drawings.map((spec) => [spec.id, spec] as const));
+
+    for (const [id, primitive] of [...registry]) {
+      if (!specsById.has(id)) {
+        host.detachPrimitive(primitive);
+        registry.delete(id);
+      }
+    }
+
+    for (const spec of drawings) {
+      const primitive = registry.get(spec.id);
+      if (primitive) {
+        primitive.update(spec.anchors, spec.color);
+        continue;
+      }
+      const created = new TrendlinePrimitive(spec.anchors, spec.color);
+      host.attachPrimitive(created);
+      registry.set(spec.id, created);
+    }
+  }, [drawings, mode]);
+
+  useEffect(() => {
     // Story 18.1 (AC #3): the one crosshairMove subscription serves both halves of the
     // drag -- remembering the latest hover (what the mousedown grab below hit-tests
     // against) and, while a drag is active, converting its own `param.point.y` to a
@@ -575,11 +635,12 @@ export default function LightweightChart({
   }, [priceLines, onPriceLineDrag, mode]);
 
   useEffect(() => {
-    // Story 18.1 (AC #2): click-to-place reporting. Only subscribed while the caller
-    // provided the callback AND mode is candles -- in any other configuration the
-    // chart's own click behavior is left completely untouched.
+    // Story 18.1/18.2: click reporting. `onPriceClick` is candles-only; `onPointClick`
+    // works in both modes. Subscribed only while at least one applicable callback is
+    // provided -- otherwise the chart's own click behavior is left completely untouched.
     const chart = chartRef.current;
-    if (!chart || !onPriceClick || mode !== "candles") return;
+    const wantsPrice = onPriceClick && mode === "candles";
+    if (!chart || (!wantsPrice && !onPointClick)) return;
 
     const handleClick = (param: MouseEventParams): void => {
       if (suppressNextClickRef.current) {
@@ -587,14 +648,20 @@ export default function LightweightChart({
         return;
       }
       if (!param.point) return;
-      const price = seriesRef.current?.coordinateToPrice(param.point.y);
+      // Lines mode's host is the `price` line series (see the drawings effect).
+      const host = seriesRef.current ?? lineSeriesRef.current?.price;
+      const price = host?.coordinateToPrice(param.point.y);
       if (price === null || price === undefined) return;
-      onPriceClick(price);
+      if (wantsPrice) onPriceClick(price);
+      // Story 18.2: `param.time` is only set over an existing bar; fall back to the
+      // time scale's own x->time conversion for the empty area right of the last bar.
+      const time = param.time ?? chart.timeScale().coordinateToTime(param.point.x);
+      if (time !== null && time !== undefined) onPointClick?.({ time, price });
     };
 
     chart.subscribeClick(handleClick);
     return () => chart.unsubscribeClick(handleClick);
-  }, [onPriceClick, mode]);
+  }, [onPriceClick, onPointClick, mode]);
 
   return <div ref={containerRef} />;
 }

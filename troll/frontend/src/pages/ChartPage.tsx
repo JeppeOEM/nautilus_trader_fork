@@ -6,9 +6,11 @@ import { fetchCoinIndicatorConfig, saveCoinIndicatorConfig } from "../api/client
 import IndicatorPicker from "../components/chart/IndicatorPicker";
 import LightweightChart, {
   type ChartMode,
+  type DrawingSpec,
   type IndicatorPaneSpec,
   type PriceLineSpec,
 } from "../components/chart/LightweightChart";
+import type { TrendlineAnchor } from "../components/chart/primitives/TrendlinePrimitive";
 import { assignPaneColor, cssVar } from "../components/chart/paneColors";
 import type { IndicatorConfigEntry } from "../api/schema";
 import { BAR_SECONDS, useCandles } from "../hooks/useCandles";
@@ -23,7 +25,7 @@ const DEFAULT_PANE_IDS = ["MultiLevelOFI", "MultiLevelOBI", "microprice", "sprea
 
 // Story 18.1 (AC #1): the chart's drawing-tool state -- "cursor" is the inert default.
 // Stories 18.2/18.3 extend this union with their tools, never a second state variable.
-export type ChartTool = "cursor" | "hline";
+export type ChartTool = "cursor" | "hline" | "trendline";
 
 interface ChartToolDef {
   id: ChartTool;
@@ -40,6 +42,7 @@ interface ChartToolDef {
 const CHART_TOOLS: readonly ChartToolDef[] = [
   { id: "cursor", label: "Cursor", ariaLabel: "Cursor tool", candlesOnly: false },
   { id: "hline", label: "HLine", ariaLabel: "Horizontal line tool", candlesOnly: true },
+  { id: "trendline", label: "Trend", ariaLabel: "Trendline tool", candlesOnly: false },
 ];
 
 function ChartInner({ instrumentId }: { instrumentId: string }) {
@@ -56,6 +59,11 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
   const [activeTool, setActiveTool] = useState<ChartTool>("cursor");
   const [priceLines, setPriceLines] = useState<PriceLineSpec[]>([]);
   const nextPriceLineIdRef = useRef(1);
+  // Story 18.2: the trendline's first click, held until the second click completes it
+  // (or Esc / a tool change discards it); `drawings` is the placed set.
+  const [pendingAnchor, setPendingAnchor] = useState<TrendlineAnchor | null>(null);
+  const [drawings, setDrawings] = useState<DrawingSpec[]>([]);
+  const nextDrawingIdRef = useRef(1);
   const { candles, volume } = useCandles(instrumentId, chart, mode === "candles");
   const snapshotLines = useSnapshotSeries(instrumentId, chart, mode === "lines");
   const indicatorSeries = useIndicatorSeries(instrumentId, chart);
@@ -149,7 +157,10 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
     // the stranded state this prevents. Runs regardless of the current tool: Esc in
     // cursor mode is a harmless no-op.
     const handleKeyDown = (event: KeyboardEvent): void => {
-      if (event.key === "Escape") setActiveTool("cursor");
+      if (event.key === "Escape") {
+        setActiveTool("cursor");
+        setPendingAnchor(null);
+      }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
@@ -174,6 +185,33 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
     },
     [activeTool],
   );
+
+  const handlePointClick = useCallback(
+    (point: TrendlineAnchor): void => {
+      // Story 18.2 (AC #2/#5): first click stores the start anchor, the second completes
+      // the line and disarms the tool. A second click on the exact same point would make
+      // an invisible zero-length line, so it is ignored (the tool stays armed).
+      if (activeTool !== "trendline") return;
+      if (!pendingAnchor) {
+        setPendingAnchor(point);
+        return;
+      }
+      if (pendingAnchor.time === point.time && pendingAnchor.price === point.price) return;
+      const id = `trendline-${nextDrawingIdRef.current++}`;
+      setDrawings((all) => [
+        ...all,
+        { id, kind: "trendline", anchors: [pendingAnchor, point], color: cssVar("--color-active", "#55ffff") },
+      ]);
+      setPendingAnchor(null);
+      setActiveTool("cursor");
+    },
+    [activeTool, pendingAnchor],
+  );
+
+  const selectTool = (tool: ChartTool): void => {
+    setActiveTool(tool);
+    setPendingAnchor(null);
+  };
 
   const handlePriceLineDrag = useCallback(
     (id: string, price: number): void => {
@@ -200,7 +238,7 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
           disabled={mode === "candles"}
           onClick={() => {
             setMode("candles");
-            setActiveTool("cursor");
+            selectTool("cursor");
           }}
         >
           Candles
@@ -211,7 +249,7 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
           disabled={mode === "lines"}
           onClick={() => {
             setMode("lines");
-            setActiveTool("cursor");
+            selectTool("cursor");
           }}
         >
           Lines
@@ -231,7 +269,7 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
               aria-label={tool.ariaLabel}
               data-tool={tool.id}
               disabled={mode === "lines" && tool.candlesOnly}
-              onClick={() => setActiveTool(tool.id)}
+              onClick={() => selectTool(tool.id)}
             >
               {tool.label}
             </button>
@@ -246,6 +284,8 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
             panes={panes}
             priceLines={priceLines}
             onPriceClick={handlePriceClick}
+            drawings={drawings}
+            onPointClick={handlePointClick}
             onPriceLineDrag={handlePriceLineDrag}
             liveBar={liveBar}
           />

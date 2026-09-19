@@ -52,6 +52,8 @@ interface ChartStubProps {
   priceLines?: PriceLineSpec[];
   onPriceClick?: (price: number) => void;
   onPriceLineDrag?: (id: string, price: number) => void;
+  drawings?: { id: string; kind: string; anchors: unknown[] }[];
+  onPointClick?: (point: { time: number; price: number }) => void;
 }
 
 const lastChartProps: { current: ChartStubProps | null } = { current: null };
@@ -175,5 +177,79 @@ describe("ChartPage drawing tools (Story 18.1)", () => {
       { id: "hline-1", price: 61000.5, color: "#55ffff" },
       { id: "hline-2", price: 63000, color: "#55ffff" },
     ]);
+  });
+});
+
+describe("ChartPage trendline tool (Story 18.2)", () => {
+  const arm = () => fireEvent.click(screen.getByRole("button", { name: "Trendline tool" }));
+  const click = (time: number, price: number) =>
+    act(() => {
+      lastChartProps.current!.onPointClick!({ time, price });
+    });
+
+  it("creates a trendline from two clicks, then disarms (AC #1/#2)", () => {
+    render(<ChartPage />);
+    arm();
+
+    click(100, 10);
+    expect(lastChartProps.current!.drawings).toEqual([]);
+    click(200, 20);
+
+    expect(lastChartProps.current!.drawings).toEqual([
+      {
+        id: "trendline-1",
+        kind: "trendline",
+        anchors: [
+          { time: 100, price: 10 },
+          { time: 200, price: 20 },
+        ],
+        color: "#55ffff",
+      },
+    ]);
+    expect(screen.getByRole("button", { name: "Cursor tool" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("ignores point clicks while the trendline tool is not armed", () => {
+    render(<ChartPage />);
+
+    click(100, 10);
+    click(200, 20);
+
+    expect(lastChartProps.current!.drawings).toEqual([]);
+  });
+
+  it("cancels an in-progress line on Escape without creating a drawing (AC #5)", () => {
+    render(<ChartPage />);
+    arm();
+    click(100, 10);
+
+    fireEvent.keyDown(window, { key: "Escape" });
+    arm();
+    click(200, 20);
+    click(300, 30);
+
+    // The Esc'd first point is gone: the new line starts at 200, not 100.
+    expect(lastChartProps.current!.drawings).toHaveLength(1);
+    expect(lastChartProps.current!.drawings![0].anchors[0]).toEqual({ time: 200, price: 20 });
+  });
+
+  it("discards a pending first point when another tool is selected", () => {
+    render(<ChartPage />);
+    arm();
+    click(100, 10);
+
+    fireEvent.click(screen.getByRole("button", { name: "Cursor tool" }));
+    arm();
+    click(200, 20);
+    click(300, 30);
+
+    expect(lastChartProps.current!.drawings![0].anchors[0]).toEqual({ time: 200, price: 20 });
+  });
+
+  it("works in Lines mode too", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+
+    expect(screen.getByRole("button", { name: "Trendline tool" })).toBeEnabled();
   });
 });

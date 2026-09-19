@@ -354,3 +354,9 @@
 - source_spec: `_bmad-output/implementation-artifacts/17-2-unpark-and-complete-story-15-8-31-day-metrics-history.md`
   summary: `HistoryPage.tsx`'s `toMetricDatum` treats only `null`/`undefined` as a gap; a `NaN`/`Infinity` metric value (were one ever to reach the route from an upstream computation bug) would be passed to `lightweight-charts` as real plotted data rather than being treated as a gap.
   evidence: `toMetricDatum(tsNs, value)`'s `value == null ? { time } : { time, value }` check has no `Number.isFinite` guard. No evidence this actually occurs -- `metrics_store` columns are written from `ranking_engine`'s own float computations, which are not known to ever emit `NaN`/`Infinity` -- so this is a defensive hardening gap, not an observed bug. Surfaced by Edge Case Hunter review of this story's diff.
+
+## Deferred from: code review of story-18.2 (2026-09-19)
+
+- Trendline anchor with no bar in the active mode's data (click right of last bar; 1s Lines-mode anchor viewed in Candles mode) has no `timeToCoordinate`, so the line silently isn't drawn. Needs snapping or extrapolation.
+- Trendline color is resolved once via `cssVar` at creation; won't follow theme changes.
+- No rubber-band preview between first and second click (candidate for 18.10).
