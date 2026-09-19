@@ -216,3 +216,91 @@ table {
   border: 0;
   border-top: 1px solid var(--color-border);
 }
+
+/* Spec §A4.1 indicator search dialog (native <dialog>, so Esc/backdrop/focus trap are free). */
+.indicator-dialog {
+  width: min(480px, 92vw);
+  max-height: 70vh;
+  padding: 12px;
+  background: var(--color-bg);
+  color: var(--color-text);
+  border: 1px solid var(--color-link);
+}
+
+.indicator-dialog::backdrop {
+  background: rgba(0, 0, 0, 0.7);
+}
+
+.indicator-dialog[open] {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.indicator-dialog-head {
+  display: flex;
+  gap: 6px;
+}
+
+.indicator-dialog-head input {
+  flex: 1;
+}
+
+.indicator-dialog-cats {
+  display: flex;
+  gap: 6px;
+}
+
+.indicator-dialog-cats .tabbtn {
+  flex: none;
+  padding: 7px 10px;
+}
+
+.indicator-dialog-results {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+}
+
+.indicator-dialog-results button {
+  display: flex;
+  justify-content: space-between;
+  width: 100%;
+  text-align: left;
+}
+
+.indicator-dialog-tag,
+.indicator-dialog-empty {
+  color: var(--color-text-dim);
+}
+
+/* Spec §A4.1 chart legend: top-left of each pane, values in their line colors. Click-through
+   so it never blocks the crosshair or a drag. */
+.chart-legend {
+  position: absolute;
+  top: 4px;
+  left: 8px;
+  z-index: 5;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12px;
+  text-shadow: 0 0 3px var(--color-bg), 0 0 3px var(--color-bg);
+  pointer-events: none;
+}
+
+.chart-legend-row {
+  display: flex;
+  gap: 8px;
+}
+
+.chart-legend-title {
+  color: var(--color-text);
+}
+
+.chart-load-error {
+  padding: 4px 8px;
+  color: var(--vga-black);
+  background: var(--vga-light-red);
+}

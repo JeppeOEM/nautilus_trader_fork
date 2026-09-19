@@ -48,6 +48,19 @@ afterEach(() => {
 });
 
 describe("useCandles", () => {
+  it("retries a failed initial fetch instead of staying blank forever", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    fetchCandlesMock
+      .mockRejectedValueOnce(new Error("GET /api/candles failed: 502"))
+      .mockResolvedValueOnce(page([{ t: 60_000, o: 1, h: 2, l: 1, c: 2, v: 1 }], false));
+
+    const { result } = renderHook(() => useCandles("BTC-USD-PERP.DYDX", null));
+
+    await waitFor(() => expect(result.current.loadFailed).toBe(true));
+    await waitFor(() => expect(result.current.candles).toHaveLength(1), { timeout: 3000 });
+    expect(result.current.loadFailed).toBe(false);
+  });
+
   it("fetches the initial 120-bar/60s page on mount", async () => {
     fetchCandlesMock.mockResolvedValue(page([{ t: 60_000, o: 1, h: 2, l: 0.5, c: 1.5 }], true));
 

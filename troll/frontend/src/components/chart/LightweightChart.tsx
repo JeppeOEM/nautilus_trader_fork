@@ -17,6 +17,7 @@ import { useEffect, useRef } from "react";
 import type { ChartDatum } from "../../hooks/useCandles";
 import type { IndicatorDatum } from "../../hooks/useIndicatorSeries";
 import type { SnapshotLinesData } from "../../hooks/useSnapshotSeries";
+import { type LegendSeries, renderLegends } from "./legend";
 import { assignPaneColor, cssVar } from "./paneColors";
 
 export type PaneSeriesKind = "Line" | "Histogram";
@@ -40,6 +41,13 @@ export interface IndicatorPaneSpec {
   /** "pane" (default) = its own pane under the price chart; "overlay" = drawn inside the
    * price pane (TradingView-style: MAs/bands sharing the price scale). */
   placement?: "pane" | "overlay";
+  /** Outputs of one indicator (e.g. MACD's line/signal/histogram) share one pane and one
+   * legend row; defaults to `id`, i.e. a lone series. */
+  group?: string;
+  /** Legend title for the group, e.g. "RelativeStrengthIndex (14)". */
+  groupLabel?: string;
+  /** Legend tooltip for this series' value, e.g. "value" / "signal". */
+  outputLabel?: string;
 }
 
 // Story 18.1: a tool-drawn horizontal price line (AC #2). `id` is the caller's stable
@@ -119,6 +127,8 @@ type AnySeriesApi = ISeriesApi<"Line", Time> | ISeriesApi<"Histogram", Time>;
 interface PaneEntry {
   /** null for an overlay: it lives in the price pane (0), so there is no pane to remove. */
   pane: IPaneApi<Time> | null;
+  group: string;
+  spec: IndicatorPaneSpec;
   series: AnySeriesApi;
   /** The last `spec.data` reference applied to `series`, so an unrelated pane's data
    * refresh doesn't force every other still-visible pane to re-run `setData()` too --
@@ -202,6 +212,7 @@ export default function LightweightChart({
   const prevLengthRef = useRef(0);
   const prevLinesLengthRef = useRef(0);
   const panesRef = useRef<Map<string, PaneEntry>>(new Map());
+  const legendItemsRef = useRef<LegendSeries[]>([]);
   // Story 18.1: price-line registry + drag bookkeeping. `lastCrosshairRef` holds the
   // library's latest crosshair param (cleared when the mouse leaves the chart, so
   // stale data can never start a drag); `dragIdRef` the id being dragged; the click
@@ -433,13 +444,13 @@ export default function LightweightChart({
     const specsById = new Map(panes.map((spec) => [spec.id, spec] as const));
 
     // Remove ids no longer present first -- never touches timeScale/visible range, just
-    // `chart.removePane()` (AC #4).
+    // `chart.removePane()` (AC #4). A shared pane goes only with its group's last series.
     for (const [id, entry] of [...registry]) {
-      if (!specsById.has(id)) {
-        if (entry.pane) chart.removePane(entry.pane.paneIndex());
-        else chart.removeSeries(entry.series);
-        registry.delete(id);
-      }
+      if (specsById.has(id)) continue;
+      registry.delete(id);
+      const groupStillUsed = [...registry.values()].some((e) => e.pane === entry.pane);
+      if (entry.pane && !groupStillUsed) chart.removePane(entry.pane.paneIndex());
+      else chart.removeSeries(entry.series);
     }
 
     // Add new ids / update data+color for ids that stayed -- again, no visible-range
@@ -447,19 +458,24 @@ export default function LightweightChart({
     for (const spec of panes) {
       let entry = registry.get(spec.id);
       if (!entry) {
+        const group = spec.group ?? spec.id;
         const overlay = spec.placement === "overlay";
-        const pane = overlay ? null : chart.addPane();
+        // The group's existing pane (a sibling output already added), else a new one.
+        const pane = overlay
+          ? null
+          : ([...registry.values()].find((e) => e.group === group && e.pane)?.pane ?? chart.addPane());
         const definition = spec.kind === "Line" ? LineSeries : HistogramSeries;
         const series = chart.addSeries(
           definition,
           { color: spec.color },
           pane ? pane.paneIndex() : 0,
         ) as AnySeriesApi;
-        entry = { pane, series, lastData: spec.data };
+        entry = { pane, group, spec, series, lastData: spec.data };
         registry.set(spec.id, entry);
         setSeriesData(entry.series, spec.data);
         continue;
       }
+      entry.spec = spec;
       if (entry.series.options().color !== spec.color) {
         entry.series.applyOptions({ color: spec.color });
       }
@@ -468,6 +484,27 @@ export default function LightweightChart({
         entry.lastData = spec.data;
       }
     }
+
+    // Legend rows follow the registry's order (= add order = stacking order).
+    legendItemsRef.current = [...registry.values()].map((e): LegendSeries => ({
+      group: e.group,
+      groupLabel: e.spec.groupLabel ?? e.spec.id,
+      outputLabel: e.spec.outputLabel ?? e.spec.id,
+      color: e.spec.color,
+      series: e.series,
+      data: e.spec.data,
+      pane: e.pane,
+    }));
+    // A new pane's element only exists after the library's next paint: retry per frame
+    // (bounded) until every pane has one.
+    let frame = 0;
+    let tries = 30;
+    const draw = (): void => {
+      if (renderLegends(chart, legendItemsRef.current, null) || tries-- <= 0) return;
+      frame = requestAnimationFrame(draw);
+    };
+    draw();
+    return () => cancelAnimationFrame(frame);
   }, [panes]);
 
   useEffect(() => {
@@ -549,6 +586,18 @@ export default function LightweightChart({
       lastCrosshairRef.current = null;
     };
   }, [onPriceLineDrag, mode]);
+
+  useEffect(() => {
+    // Legend values follow the crosshair; off-chart (time undefined) they fall back to the
+    // latest value. Its own subscription, declared after the drag one above.
+    const chart = chartRef.current;
+    if (!chart) return;
+    const handle = (param: MouseEventParams): void => {
+      renderLegends(chart, legendItemsRef.current, param);
+    };
+    chart.subscribeCrosshairMove(handle);
+    return () => chart.unsubscribeCrosshairMove(handle);
+  }, [mode]);
 
   useEffect(() => {
     // Story 18.1 (AC #3): the drag's start/end. Capture phase so a line grab runs

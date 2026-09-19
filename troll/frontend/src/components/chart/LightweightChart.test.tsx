@@ -42,6 +42,7 @@ function makePaneMock() {
   const paneApplyOptionsMock = vi.fn();
   return {
     paneIndex: () => paneIndex,
+    getHTMLElement: () => document.createElement("div"),
     addSeries: vi.fn(() => ({ setData: paneSeriesSetDataMock, applyOptions: paneApplyOptionsMock })),
     getSeries: vi.fn(() => []),
     setStretchFactor: vi.fn(),
@@ -168,6 +169,7 @@ beforeEach(() => {
     remove: removeMock,
     addPane: addPaneMock,
     removePane: removePaneMock,
+    panes: () => [{ paneIndex: () => 0, getHTMLElement: () => document.createElement("div") }],
     subscribeClick: subscribeClickMock,
     unsubscribeClick: unsubscribeClickMock,
     subscribeCrosshairMove: subscribeCrosshairMoveMock,
@@ -250,6 +252,24 @@ describe("LightweightChart", () => {
     rerender(<LightweightChart data={[]} onChartApi={() => {}} panes={[]} />);
     expect(removeSeriesMock).toHaveBeenCalledTimes(1);
     expect(removePaneMock).not.toHaveBeenCalled();
+  });
+
+  it("puts outputs of one group in a single pane, and removes that pane only with its last output", () => {
+    const both = [
+      makePaneSpec("MACD.macd", { group: "MACD" }),
+      makePaneSpec("MACD.signal", { group: "MACD" }),
+    ];
+    const { rerender } = render(<LightweightChart data={[]} onChartApi={() => {}} panes={both} />);
+
+    expect(addPaneMock).toHaveBeenCalledTimes(1);
+    expect(addSeriesMock.mock.calls.slice(1).map((c) => c[2])).toEqual([1, 1]); // same pane index
+
+    rerender(<LightweightChart data={[]} onChartApi={() => {}} panes={[both[0]]} />);
+    expect(removePaneMock).not.toHaveBeenCalled();
+    expect(removeSeriesMock).toHaveBeenCalledTimes(1);
+
+    rerender(<LightweightChart data={[]} onChartApi={() => {}} panes={[]} />);
+    expect(removePaneMock).toHaveBeenCalledTimes(1);
   });
 
   it("removes a pane by id when it drops out of the panes prop, and re-adding the same id afterward works cleanly", () => {

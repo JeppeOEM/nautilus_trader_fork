@@ -20,6 +20,11 @@ const INITIAL_LIMIT = 120;
 // of duplicating the literal -- the two paths must never silently drift apart.
 export const BAR_SECONDS = 60;
 const REFILL_MARGIN_BARS = 20;
+// A failed page fetch (backend restarting, SSH tunnel hiccup, proxy 502) is retried
+// forever with capped backoff -- the initial page runs once per mount, so without a retry
+// one transient failure left the chart permanently blank until a manual reload.
+const RETRY_BASE_MS = 1000;
+const RETRY_MAX_MS = 10_000;
 
 export type ChartDatum = CandlestickData<Time> | WhitespaceData<Time>;
 export type VolumeDatum = HistogramData<Time> | WhitespaceData<Time>;
@@ -53,6 +58,8 @@ const EMPTY_STATE: CandlesState = { candles: [], volume: [] };
 export interface UseCandlesResult {
   candles: ChartDatum[];
   volume: VolumeDatum[];
+  /** True while the last page fetch failed and a retry is pending. */
+  loadFailed: boolean;
 }
 
 /**
@@ -84,6 +91,9 @@ export function useCandles(
   const loadingRef = useRef(false);
   const earliestMsRef = useRef<number | null>(null);
   const hasLoadedInitialRef = useRef(false);
+  const [loadFailed, setLoadFailed] = useState(false);
+  const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const attemptRef = useRef(0);
 
   const loadPage = useCallback(
     (beforeNs: number, prepend: boolean): Promise<void> => {
@@ -91,6 +101,8 @@ export function useCandles(
       loadingRef.current = true;
       return fetchCandles(instrumentId, beforeNs, INITIAL_LIMIT, barSeconds)
         .then((response) => {
+          attemptRef.current = 0;
+          setLoadFailed(false);
           if (response.items.length === 0) {
             hasMoreOlderRef.current = false;
             return;
@@ -133,12 +145,23 @@ export function useCandles(
           // rejection -- a failed refill/initial fetch is not fatal, just a page that
           // didn't load.
           console.error(`useCandles: failed to load candles for ${instrumentId}`, err);
+          setLoadFailed(true);
+          attemptRef.current += 1;
+          const delay = Math.min(RETRY_BASE_MS * 2 ** (attemptRef.current - 1), RETRY_MAX_MS);
+          retryTimerRef.current = setTimeout(() => void loadPage(beforeNs, prepend), delay);
         })
         .finally(() => {
           loadingRef.current = false;
         });
     },
     [instrumentId, barSeconds],
+  );
+
+  useEffect(
+    () => () => {
+      if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
+    },
+    [],
   );
 
   useEffect(() => {
@@ -160,5 +183,5 @@ export function useCandles(
     return () => timeScale.unsubscribeVisibleLogicalRangeChange(handler);
   }, [chart, loadPage, enabled]);
 
-  return state;
+  return { ...state, loadFailed };
 }

@@ -21,6 +21,10 @@ interface IndicatorPickerProps {
    * `useMemo`. Never called with an intermediate/unsaved draft (no auto-save-per-keystroke,
    * spec's "Never" list) -- only after a successful `PUT`, or the initial `GET`. */
   onEntriesChange: (entries: IndicatorConfigEntry[]) => void;
+  /** Spec §A4.1's TradingView-style search dialog: opened by the chart toolbar's
+   * "Indicators" button. Omitted (Technicals tab) = no dialog, just the select+Add below. */
+  dialogOpen?: boolean;
+  onDialogClose?: () => void;
 }
 
 function defaultParamsFor(catalogEntry: IndicatorCatalogEntry): Record<string, unknown> {
@@ -44,6 +48,8 @@ export default function IndicatorPicker({
   reloadKey,
   disabled = false,
   onEntriesChange,
+  dialogOpen = false,
+  onDialogClose,
 }: IndicatorPickerProps) {
   const [catalog, setCatalog] = useState<Record<string, IndicatorCatalogEntry>>({});
   const [entries, setEntries] = useState<IndicatorConfigEntry[]>([]);
@@ -110,15 +116,19 @@ export default function IndicatorPicker({
       });
   }
 
-  function handleAdd(): void {
-    const catalogEntry = catalog[selectedName];
+  function addByName(name: string): void {
+    const catalogEntry = catalog[name];
     if (!catalogEntry) return;
-    if (entries.some((e) => e.name === selectedName)) return; // already added
+    if (entries.some((e) => e.name === name)) return; // already added
     const next: IndicatorConfigEntry[] = [
       ...entries,
-      { name: selectedName, params: defaultParamsFor(catalogEntry), category: catalogEntry.category },
+      { name, params: defaultParamsFor(catalogEntry), category: catalogEntry.category },
     ];
     persist(next);
+  }
+
+  function handleAdd(): void {
+    addByName(selectedName);
   }
 
   function handleRemove(name: string): void {
@@ -131,6 +141,16 @@ export default function IndicatorPicker({
 
   return (
     <div>
+      {onDialogClose && (
+        <IndicatorDialog
+          open={dialogOpen}
+          onClose={onDialogClose}
+          catalog={catalog}
+          addedNames={entries.map((e) => e.name)}
+          disabled={disabled}
+          onAdd={addByName}
+        />
+      )}
       <h3>Indicators</h3>
       {error && <p style={{ color: "var(--color-danger)" }}>{error}</p>}
       <div>
@@ -199,5 +219,96 @@ function IndicatorEntryRow({
         Remove
       </button>
     </li>
+  );
+}
+
+type DialogCategory = "all" | "overlay" | "oscillator";
+
+// Spec §A4.1's flat category list is just Overlays + Oscillators; the catalog's
+// "histogram" panel is a kind of oscillator here.
+function dialogCategoryOf(entry: IndicatorCatalogEntry): DialogCategory {
+  return entry.panel === "overlay" ? "overlay" : "oscillator";
+}
+
+function IndicatorDialog({
+  open,
+  onClose,
+  catalog,
+  addedNames,
+  disabled,
+  onAdd,
+}: {
+  open: boolean;
+  onClose: () => void;
+  catalog: Record<string, IndicatorCatalogEntry>;
+  addedNames: string[];
+  disabled: boolean;
+  onAdd: (name: string) => void;
+}) {
+  const ref = useRef<HTMLDialogElement>(null);
+  const [query, setQuery] = useState("");
+  const [category, setCategory] = useState<DialogCategory>("all");
+
+  useEffect(() => {
+    const dialog = ref.current;
+    if (!dialog) return;
+    if (open && !dialog.open) {
+      // showModal gives Esc-to-close, a backdrop and focus trapping natively; jsdom lacks it.
+      if (typeof dialog.showModal === "function") dialog.showModal();
+      else dialog.setAttribute("open", "");
+    } else if (!open && dialog.open) {
+      if (typeof dialog.close === "function") dialog.close();
+      else dialog.removeAttribute("open");
+    }
+  }, [open]);
+
+  const needle = query.trim().toLowerCase();
+  const results = Object.entries(catalog).filter(
+    ([name, entry]) =>
+      name.toLowerCase().includes(needle) && (category === "all" || dialogCategoryOf(entry) === category),
+  );
+
+  return (
+    <dialog ref={ref} className="indicator-dialog" aria-label="Indicators" onClose={onClose}>
+      <div className="indicator-dialog-head">
+        <input
+          type="search"
+          placeholder="Search indicators"
+          aria-label="Search indicators"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+        />
+        <button type="button" aria-label="Close indicators" onClick={onClose}>
+          &times;
+        </button>
+      </div>
+      <div className="indicator-dialog-cats" role="group" aria-label="Category">
+        {(["all", "overlay", "oscillator"] as const).map((c) => (
+          <button
+            key={c}
+            type="button"
+            className={category === c ? "tabbtn active" : "tabbtn"}
+            aria-pressed={category === c}
+            onClick={() => setCategory(c)}
+          >
+            {c === "all" ? "All" : c === "overlay" ? "Overlays" : "Oscillators"}
+          </button>
+        ))}
+      </div>
+      <ul className="indicator-dialog-results">
+        {results.map(([name, entry]) => {
+          const added = addedNames.includes(name);
+          return (
+            <li key={name}>
+              <button type="button" disabled={added || disabled} onClick={() => onAdd(name)}>
+                <span>{name}</span>
+                <span className="indicator-dialog-tag">{added ? "added" : dialogCategoryOf(entry)}</span>
+              </button>
+            </li>
+          );
+        })}
+        {results.length === 0 && <li className="indicator-dialog-empty">No matches</li>}
+      </ul>
+    </dialog>
   );
 }

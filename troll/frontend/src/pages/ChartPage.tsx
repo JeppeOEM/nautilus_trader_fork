@@ -21,9 +21,10 @@ import { useSnapshotSeries } from "../hooks/useSnapshotSeries";
 // Volume is its own pane right under the price pane (spec §A1), before indicator panes.
 const DEFAULT_PANE_IDS = ["volume"];
 
-// Spec §A8.1 slot 2: the top toolbar's timeframe selector. Bars > 1h are served from the
+// Spec §A8.1 slot 2: the top toolbar's timeframe selector (+1s, beyond the spec's list). Bars > 1h are served from the
 // minute rollup server-side (Story 16.2), so 4H/1D/1W stay cheap.
 const TIMEFRAMES = [
+  { label: "1s", seconds: 1 }, // the collector stores per-second OHLC, so 1s bars are native
   { label: "1m", seconds: 60 },
   { label: "5m", seconds: 300 },
   { label: "15m", seconds: 900 },
@@ -63,11 +64,22 @@ function loadPriceLines(instrumentId: string): PriceLineSpec[] {
 }
 
 // `key` is "{indicator_id}.{output_attr}" and indicator_id starts with the catalog name.
-function panelForKey(key: string, catalog: Record<string, IndicatorCatalogEntry>): string {
-  const name = Object.keys(catalog)
+// Longest name wins so a name that prefixes another can't claim its keys.
+function catalogNameForKey(key: string, catalog: Record<string, IndicatorCatalogEntry>): string | undefined {
+  return Object.keys(catalog)
     .filter((n) => key === n || key.startsWith(`${n}_`) || key.startsWith(`${n}.`))
     .sort((x, y) => y.length - x.length)[0];
+}
+
+function panelForKey(key: string, catalog: Record<string, IndicatorCatalogEntry>): string {
+  const name = catalogNameForKey(key, catalog);
   return name ? catalog[name].panel : "oscillator";
+}
+
+// Legend title, TradingView-style: name plus its params, e.g. "RelativeStrengthIndex (14)".
+function legendTitle(name: string, entries: IndicatorConfigEntry[]): string {
+  const params = Object.values(entries.find((e) => e.name === name)?.params ?? {});
+  return params.length ? `${name} (${params.join(", ")})` : name;
 }
 
 // Story 18.1 (AC #1): the chart's drawing-tool state -- "cursor" is the inert default.
@@ -114,9 +126,9 @@ function ChartInner({ instrumentId, barSeconds, onTimeframeChange }: ChartInnerP
     priceLines.reduce((max, l) => Math.max(max, Number(l.id.replace("hline-", "")) || 0), 0) + 1,
   );
   const [crosshairOn, setCrosshairOn] = useState(true);
-  const indicatorsRef = useRef<HTMLDivElement>(null);
+  const [indicatorDialogOpen, setIndicatorDialogOpen] = useState(false);
   const [catalog, setCatalog] = useState<Record<string, IndicatorCatalogEntry>>({});
-  const { candles, volume } = useCandles(instrumentId, chart, mode === "candles", barSeconds);
+  const { candles, volume, loadFailed } = useCandles(instrumentId, chart, mode === "candles", barSeconds);
   const snapshotLines = useSnapshotSeries(instrumentId, chart, mode === "lines");
   // Story 15.5: the forming right-edge bar, over its own dedicated /ws/live socket
   // (AD-F7) -- same BAR_SECONDS constant useCandles uses, so the two paths can't drift.
@@ -161,11 +173,16 @@ function ChartInner({ instrumentId, barSeconds, onTimeframeChange }: ChartInnerP
         kind: "Histogram",
         data: volume,
         color: assignPaneColor("volume", DEFAULT_PANE_IDS),
+        groupLabel: "Volume",
       },
       ...pickerSeriesKeys.map((key) => {
         const panel = panelForKey(key, catalog);
+        const name = catalogNameForKey(key, catalog) ?? key;
         return {
           id: key,
+          group: name,
+          groupLabel: legendTitle(name, pickerEntries),
+          outputLabel: key.slice(key.lastIndexOf(".") + 1),
           kind: panel === "histogram" ? ("Histogram" as const) : ("Line" as const),
           data: pickerValues[key],
           // Combined with DEFAULT_PANE_IDS so a picker series never lands on volume's slot.
@@ -174,7 +191,7 @@ function ChartInner({ instrumentId, barSeconds, onTimeframeChange }: ChartInnerP
         };
       }),
     ],
-    [volume, pickerSeriesKeys, pickerValues, catalog],
+    [volume, pickerSeriesKeys, pickerValues, catalog, pickerEntries],
   );
 
   useEffect(() => {
@@ -285,7 +302,7 @@ function ChartInner({ instrumentId, barSeconds, onTimeframeChange }: ChartInnerP
         </button>
         </div>
         <div className="chart-cluster">
-          <button type="button" onClick={() => indicatorsRef.current?.scrollIntoView({ block: "center" })}>
+          <button type="button" onClick={() => setIndicatorDialogOpen(true)}>
             Indicators
           </button>
           <button type="button" onClick={() => chart?.timeScale().fitContent()}>
@@ -332,6 +349,11 @@ function ChartInner({ instrumentId, barSeconds, onTimeframeChange }: ChartInnerP
           ))}
         </div>
         <div className="term-box" data-label={instrumentId}>
+          {loadFailed && (
+            <div role="alert" className="chart-load-error">
+              Can't reach the data API -- history not loaded, retrying...
+            </div>
+          )}
           <LightweightChart
             mode={mode}
             data={candles}
@@ -345,14 +367,14 @@ function ChartInner({ instrumentId, barSeconds, onTimeframeChange }: ChartInnerP
           />
         </div>
       </div>
-      <div ref={indicatorsRef}>
       <IndicatorPicker
         fetchConfig={() => fetchCoinIndicatorConfig(instrumentId)}
         saveConfig={(entries) => saveCoinIndicatorConfig(instrumentId, entries)}
         reloadKey={instrumentId}
         onEntriesChange={setPickerEntries}
+        dialogOpen={indicatorDialogOpen}
+        onDialogClose={() => setIndicatorDialogOpen(false)}
       />
-      </div>
     </div>
   );
 }

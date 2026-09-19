@@ -8,9 +8,10 @@ import type { PriceLineSpec } from "../components/chart/LightweightChart";
 // real fetches under jsdom, and the data hooks' fetch/websocket machinery plus
 // LightweightChart's chart internals are each covered by their own test files --
 // here they are all shallow-mocked so the only real code under test is ChartPage.tsx.
+const saveConfigMock = vi.hoisted(() => vi.fn().mockResolvedValue({ ok: true }));
 vi.mock("../api/client", () => ({
   fetchCoinIndicatorConfig: vi.fn().mockResolvedValue([]),
-  saveCoinIndicatorConfig: vi.fn().mockResolvedValue({ ok: true }),
+  saveCoinIndicatorConfig: saveConfigMock,
   // IndicatorPicker (rendered by ChartPage) fetches the catalog on mount.
   fetchIndicatorCatalog: vi.fn().mockResolvedValue({
     SimpleMovingAverage: { params: {}, panel: "overlay", category: "native" },
@@ -68,7 +69,7 @@ vi.mock("react-router", async (importOriginal) => {
 // the latest props object ChartPage handed it -- every claim below is about what
 // ChartPage FEEDS the chart component, never about LightweightChart's internals.
 interface ChartStubProps {
-  panes?: { id: string; kind: string; placement?: string }[];
+  panes?: { id: string; kind: string; placement?: string; group?: string; groupLabel?: string; outputLabel?: string }[];
   priceLines?: PriceLineSpec[];
   onPriceClick?: (price: number) => void;
   onPriceLineDrag?: (id: string, price: number) => void;
@@ -95,6 +96,7 @@ beforeEach(() => {
   lastChartProps.current = null;
   picker.values = {};
   picker.calls = 0;
+  saveConfigMock.mockClear();
   hooks.candlesBar = [];
   hooks.liveBar = [];
   hooks.pickerBar = [];
@@ -228,6 +230,13 @@ describe("ChartPage default layout and per-coin persistence", () => {
     expect(byId["SimpleMovingAverage_period=20.value"]).toMatchObject({ kind: "Line", placement: "overlay" });
     expect(byId["RelativeStrengthIndex_period=14.value"]).toMatchObject({ kind: "Line", placement: "pane" });
     expect(byId["CancelPressure_window=200.value"]).toMatchObject({ kind: "Histogram", placement: "pane" });
+    // legend info: grouped by indicator, titled with its name, tooltip = output attr
+    expect(byId["RelativeStrengthIndex_period=14.value"]).toMatchObject({
+      group: "RelativeStrengthIndex",
+      groupLabel: "RelativeStrengthIndex",
+      outputLabel: "value",
+    });
+    expect(lastChartProps.current?.panes?.find((p) => p.id === "volume")).toMatchObject({ groupLabel: "Volume" });
   });
 
   it("persists placed horizontal lines per coin across a remount", () => {
@@ -250,13 +259,16 @@ describe("ChartPage default layout and per-coin persistence", () => {
 const last = (xs: number[]): number | undefined => xs[xs.length - 1];
 
 describe("ChartPage toolbars and timeframe (spec A8.1)", () => {
-  it("offers 1m/5m/15m/1H/4H/1D/1W, defaults to 1m, and feeds the chosen bar size to every data hook", () => {
+  it("offers 1s/1m/5m/15m/1H/4H/1D/1W, defaults to 1m, and feeds the chosen bar size to every data hook", () => {
     render(page());
 
-    const labels = ["1m", "5m", "15m", "1H", "4H", "1D", "1W"];
+    const labels = ["1s", "1m", "5m", "15m", "1H", "4H", "1D", "1W"];
     for (const l of labels) expect(screen.getByRole("button", { name: `Timeframe ${l}` })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Timeframe 1m" })).toHaveAttribute("aria-pressed", "true");
     expect(last(hooks.candlesBar)).toBe(60);
+
+    fireEvent.click(screen.getByRole("button", { name: "Timeframe 1s" }));
+    expect(last(hooks.candlesBar)).toBe(1);
 
     fireEvent.click(screen.getByRole("button", { name: "Timeframe 4H" }));
 
@@ -281,7 +293,7 @@ describe("ChartPage toolbars and timeframe (spec A8.1)", () => {
       .getAllByRole("button")
       .map((b) => b.getAttribute("aria-label") ?? b.textContent);
     expect(names).toEqual([
-      ...["1m", "5m", "15m", "1H", "4H", "1D", "1W"].map((l) => `Timeframe ${l}`),
+      ...["1s", "1m", "5m", "15m", "1H", "4H", "1D", "1W"].map((l) => `Timeframe ${l}`),
       "Candles",
       "Lines",
       "Indicators",
@@ -299,5 +311,46 @@ describe("ChartPage toolbars and timeframe (spec A8.1)", () => {
       .getAllByRole("button")
       .map((b) => b.getAttribute("aria-label"));
     expect(names).toEqual(["Cursor tool", "Crosshair toggle", "Horizontal line tool"]);
+  });
+});
+
+describe("ChartPage indicators dialog (spec A4.1)", () => {
+  async function openDialog(): Promise<HTMLElement> {
+    render(page());
+    await act(async () => {}); // catalog load
+    fireEvent.click(within(screen.getByRole("toolbar", { name: "Chart controls" })).getByRole("button", { name: "Indicators" }));
+    return screen.getByRole("dialog", { name: "Indicators" });
+  }
+
+  it("opens a searchable dialog from the Indicators button", async () => {
+    const dialog = await openDialog();
+
+    expect(within(dialog).getAllByRole("listitem")).toHaveLength(3);
+    fireEvent.change(within(dialog).getByLabelText("Search indicators"), { target: { value: "rela" } });
+    expect(within(dialog).getAllByRole("listitem")).toHaveLength(1);
+    expect(within(dialog).getByText("RelativeStrengthIndex")).toBeInTheDocument();
+  });
+
+  it("filters by the Overlays / Oscillators categories (histogram counts as oscillator)", async () => {
+    const dialog = await openDialog();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Overlays" }));
+    expect(within(dialog).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["SimpleMovingAverageoverlay"]);
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Oscillators" }));
+    expect(within(dialog).getAllByRole("listitem")).toHaveLength(2);
+  });
+
+  it("adds a result immediately with default params -- no confirm step -- and marks it added", async () => {
+    const dialog = await openDialog();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: /^SimpleMovingAverage/ }));
+    await act(async () => {});
+
+    expect(saveConfigMock).toHaveBeenCalledWith("BTC-USD-PERP.DYDX", [
+      { name: "SimpleMovingAverage", params: {}, category: "native" },
+    ]);
+    expect(within(dialog).getByRole("button", { name: /^SimpleMovingAverage/ })).toBeDisabled();
+    expect(within(dialog).getByText("added")).toBeInTheDocument();
   });
 });
