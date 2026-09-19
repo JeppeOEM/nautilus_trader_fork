@@ -1,6 +1,6 @@
 # Story 19.3: `troll/bybit_collector/`
 
-Status: ready-for-dev
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -25,16 +25,16 @@ so that Bybit data lands in the same catalog without inheriting Nautilus's live-
 
 ## Tasks / Subtasks
 
-- [ ] Task 1 — Investigate Bybit's actual wire behavior before writing any collector code (AC: #3)
-  - [ ] Read `crates/adapters/bybit/src/` (http/websocket modules) to confirm: does Bybit's own book data ever legitimately cross? Does its price feed have the same precision-instability dYdX's does? Does `open_interest` come through the PyO3 bindings already? Does Bybit publish its own documented WS subscription limit? Answer each before Task 2.
-- [ ] Task 2 — `BybitClient` wrapper (AC: #1, #4)
-  - [ ] New `troll/bybit_collector/client.py`, mirroring `DydxClient`'s shape (own HTTP+WS PyO3 client pair, `subscribe_trades`/`subscribe_orderbook`, `_handle_message` dispatch) — only include a precision re-stamping helper if Task 1 confirms Bybit needs one, and only in the form Task 1's investigation justifies.
-- [ ] Task 3 — `Collector` class (AC: #1, #2, #4, #5)
-  - [ ] New `troll/bybit_collector/collector.py`: own asyncio loop, `_ingest_loop` queue pattern, `_flush_loop`/`ParquetDataCatalog.write_data()`, a periodic snapshot sampler analogous to `_second_loop` if Bybit's book model supports it — include crossed-book/resync handling only if Task 1's investigation actually finds Bybit needs it, built to match what Bybit's real failure modes are, not a copy of dYdX's.
-  - [ ] `config.py`/`open_interest.py`-equivalents only if Task 1 shows Bybit needs an out-of-band open-interest poll — otherwise skip building this module at all.
-- [ ] Task 4 — Tests
-  - [ ] TEST-01: any precision-handling logic gets real `Price`/`Quantity`-object tests, never mocked (`troll/CLAUDE.md` TEST-03).
-  - [ ] An integration test confirming a real (or realistically-simulated) Bybit snapshot round-trips through `ParquetDataCatalog.write_data()` and is readable back with a `BTCUSDT.BYBIT`-style instrument id.
+- [x] Task 1 — Investigate Bybit's actual wire behavior before writing any collector code (AC: #3)
+  - [x] Read `crates/adapters/bybit/src/` (http/websocket modules) to confirm: does Bybit's own book data ever legitimately cross? Does its price feed have the same precision-instability dYdX's does? Does `open_interest` come through the PyO3 bindings already? Does Bybit publish its own documented WS subscription limit? Answer each before Task 2.
+- [x] Task 2 — `BybitClient` wrapper (AC: #1, #4)
+  - [x] New `troll/bybit_collector/client.py`, mirroring `DydxClient`'s shape (own HTTP+WS PyO3 client pair, `subscribe_trades`/`subscribe_orderbook`, `_handle_message` dispatch) — only include a precision re-stamping helper if Task 1 confirms Bybit needs one, and only in the form Task 1's investigation justifies.
+- [x] Task 3 — `Collector` class (AC: #1, #2, #4, #5)
+  - [x] New `troll/bybit_collector/collector.py`: own asyncio loop, `_ingest_loop` queue pattern, `_flush_loop`/`ParquetDataCatalog.write_data()`, a periodic snapshot sampler analogous to `_second_loop` if Bybit's book model supports it — include crossed-book/resync handling only if Task 1's investigation actually finds Bybit needs it, built to match what Bybit's real failure modes are, not a copy of dYdX's.
+  - [x] `config.py`/`open_interest.py`-equivalents only if Task 1 shows Bybit needs an out-of-band open-interest poll — otherwise skip building this module at all.
+- [x] Task 4 — Tests
+  - [x] TEST-01: any precision-handling logic gets real `Price`/`Quantity`-object tests, never mocked (`troll/CLAUDE.md` TEST-03).
+  - [x] An integration test confirming a real (or realistically-simulated) Bybit snapshot round-trips through `ParquetDataCatalog.write_data()` and is readable back with a `BTCUSDT.BYBIT`-style instrument id.
 
 ## Dev Notes
 
@@ -64,4 +64,13 @@ so that Bybit data lands in the same catalog without inheriting Nautilus's live-
 
 ### Completion Notes List
 
+- Task 1 findings (from crates/adapters/bybit): (a) precision — mark/index parsed at `instrument.price_precision()`, a per-instrument constant, so no `_at_fixed_precision` equivalent; (b) open interest — dropped on the linear-ticker WS path (only option-greeks parse reads it) → stdlib REST poll of `/v5/market/tickers?category=linear` (one call, all symbols), `BybitOpenInterest` type; (c) sub limits — one WS request per topic, no documented per-second public subscribe limit → no cap/throttle, `32` not reused; (d) crossed book — Bybit has a central book so a cross is corruption: skip the sample, and after 10s resubscribe the orderbook for a fresh snapshot (no active-uncross machinery).
+- Snapshots reuse `DydxSecondSnapshot` (venue-neutral schema) so data_api reads Bybit ids with zero per-route code — the integration test reads back through `ml_signals.catalog_stats.query_second_snapshots`. Only this schema class is imported from dydx_collector; no base class (AC6).
+- Left out vs dYdX (not in ACs): pruning, Redis status/control, watchdog, incident reports, minute rollup, config live-reload. Ids are the adapter's `SYMBOL-LINEAR.BYBIT` (not `BTCUSDT.BYBIT`).
+- Verified live against mainnet: 879 linear instruments fetched, 20s run wrote 30 BTCUSDT snapshots (20 levels) readable via data_api's reader.
+- Added compose service `bybit_collector` + Dockerfile COPY + Makefile test path (compose not brought up here). 6 new tests pass.
+
 ### File List
+
+- troll/bybit_collector/{__init__,client,collector,config,open_interest}.py, config.toml, tests/{__init__,test_collector}.py (new)
+- troll/collector.dockerfile, troll/docker-compose.yml, troll/Makefile
