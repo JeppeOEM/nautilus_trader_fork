@@ -544,8 +544,15 @@ async def _slow_loop_once(catalog_path: str) -> None:
     book_metrics_by_iid = {iid: _legacy_book_metrics_for(iid) for iid in _LAST_SEEN}
     # 1w/1m need more history than the 25h in-memory price series holds, so they come from
     # metrics_store's persisted prices -- one bulk query per window, not one per instrument.
-    price_1w = await asyncio.to_thread(metrics_store.price_near_days_ago, METRICS_DB_PATH, 7)
-    price_1m = await asyncio.to_thread(metrics_store.price_near_days_ago, METRICS_DB_PATH, 30)
+    # Optional enrichment: a store read failure leaves pct_1w/pct_1m None (logged), it must not
+    # stall the 1h/24h/volatility/book metrics published in the same cycle.
+    price_1w: dict[str, float] = {}
+    price_1m: dict[str, float] = {}
+    try:
+        price_1w = await asyncio.to_thread(metrics_store.price_near_days_ago, METRICS_DB_PATH, 7)
+        price_1m = await asyncio.to_thread(metrics_store.price_near_days_ago, METRICS_DB_PATH, 30)
+    except Exception:  # noqa: BLE001
+        logger.exception("1w/1m price lookup failed; pct_1w/pct_1m unavailable this cycle")
     snapshots = []
     for iid in _LAST_SEEN:
         stats = _PRICE_SERIES.stats(iid, now_ns)

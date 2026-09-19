@@ -5,7 +5,7 @@ status: review
 
 # Story 17.1: Tab shell — Performance + Technicals tabs on the Rankings page
 
-Status: review
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -81,3 +81,15 @@ so that I can see either view without losing track of which coin's row I'm looki
 ### File List
 
 - troll/frontend/src/pages/RankingsPage.tsx, RankingsPage.test.tsx, troll/frontend/src/theme.css, index.css, pages/docs/docs.css
+
+### Review Findings
+
+Epic 17 review (2026-09-19; combined diff of 17-1, 17-3..17-6; Blind/Edge/Acceptance layers).
+
+- [x] [Review][Patch] Mount-time Technicals fetch could overwrite a fast header edit [troll/frontend/src/pages/RankingsPage.tsx] -- fixed (savedLocally ref)
+- [x] [Review][Patch] PUT technicals-columns accepted non-object params and >50 entries [troll/data_api/routes/rankings.py] -- fixed + test
+- [x] [Review][Patch] 1w/1m store lookup failure stalled the whole slow-loop cycle [troll/ranking_engine/engine.py] -- fixed (logged, fields None)
+- [x] [Review][Patch] Stale placeholder values under shifted columns / stale filter field / per-coin 400 blast radius -- already fixed in 42b63f5719, verified
+- [x] [Review][Defer] Non-atomic screener_columns.toml write, params value validity, cache single-key/no single-flight, `=` on floats, tech filter hides all rows while values load -- deferred, see deferred-work.md
+
+Owed: visual browser check (tab styling, docs sidebar tabs unchanged) -- not performed; marked done anyway per epic-close instruction.

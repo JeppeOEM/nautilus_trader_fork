@@ -131,6 +131,13 @@ async def put_technicals_columns(request: Request) -> dict[str, bool]:
         ]
     except (json.JSONDecodeError, KeyError, TypeError) as exc:
         raise HTTPException(status_code=400, detail=f"invalid columns payload: {exc}") from exc
+    if not all(isinstance(e.params, dict) for e in entries):
+        raise HTTPException(status_code=400, detail="invalid columns payload: params must be an object")
+    if len(entries) > _indicators._MAX_INDICATOR_VALUES_ENTRIES:
+        raise HTTPException(
+            status_code=400,
+            detail=f"too many columns: {len(entries)} > {_indicators._MAX_INDICATOR_VALUES_ENTRIES}",
+        )
     _require_known_indicators([e.name for e in entries])
     try:
         screener_columns_config.save_config(entries, Path(SCREENER_COLUMNS_CONFIG_PATH))
