@@ -29,6 +29,12 @@ export interface VolumeProfileRenderSpec {
   downColor: string;
   showPoc: boolean;
   showValueArea: boolean;
+  /** Scales a `{toTime}` width (e.g. 0.7 = the longest bar spans 70% of the range). */
+  widthFraction?: number;
+  /** Story 18.8 (SVP HD): at draw time, drop the inter-row gap once rows get too short to
+   * afford one, so a dense profile stays legible while zooming out. A redraw-only
+   * adaptation -- the profile is never recomputed for it. */
+  respondsToZoom?: boolean;
   /** Draws grab-able range edges (thin vertical lines) at these times. */
   edges?: { startTime: Time; endTime: Time };
 }
@@ -105,6 +111,9 @@ export function layoutProfile(
   return { rows, band };
 }
 
+// Rows shorter than this (px) lose their 1px gap when `respondsToZoom` is set.
+const ZOOM_GAP_MIN_ROW_PX = 3;
+
 const POC_COLOR = "#ffff55";
 const VA_ALPHA = 0.12;
 
@@ -168,7 +177,12 @@ export class VolumeProfilePrimitive implements ISeriesPrimitive<Time> {
     // An unresolvable time (no coordinate) means nothing drawable, never a guessed position.
     const rangeWidth =
       toX === null || anchorX === "right" || anchorX === null ? null : Math.abs(toX - anchorX);
-    const widthPx = typeof width === "object" ? rangeWidth : width;
+    let widthPx: number | null;
+    if (typeof width === "object") {
+      widthPx = rangeWidth === null ? null : rangeWidth * (this.spec.widthFraction ?? 1);
+    } else {
+      widthPx = width;
+    }
     this.resolved = anchorX === null || widthPx === null ? null : { xAnchor: anchorX, width: widthPx };
 
     const start = edges ? timeScale.timeToCoordinate(edges.startTime) : null;
@@ -203,7 +217,8 @@ export class VolumeProfilePrimitive implements ISeriesPrimitive<Time> {
           }
           for (const r of rows) {
             // 1px gap between rows keeps neighbouring bars legible.
-            const h = Math.max(1, r.h - 1) * vr;
+            const gap = spec.respondsToZoom && r.h < ZOOM_GAP_MIN_ROW_PX ? 0 : 1;
+            const h = Math.max(1, r.h - gap) * vr;
             context.fillStyle = spec.upColor;
             context.fillRect(r.upX * hr, r.y * vr, r.upW * hr, h);
             context.fillStyle = spec.downColor;

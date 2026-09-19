@@ -50,15 +50,23 @@ function NumberField({
   );
 }
 
-interface Props {
-  value: VolumeProfileSettings;
-  onChange: (next: VolumeProfileSettings) => void;
+// Story 18.8 (AC #4): SVP/PVP add "how many past sessions to render"; a value that carries
+// `sessionCount` gets that extra field, every other variant's settings are unchanged.
+type PanelSettings = VolumeProfileSettings & { sessionCount?: number };
+
+interface Props<T extends PanelSettings> {
+  value: T;
+  onChange: (next: T) => void;
+  /** Accessible name of the group: several panels can be on screen at once. */
+  title?: string;
+  /** Upper bound of the sessions field (only used when `value.sessionCount` is set). */
+  maxSessions?: number;
 }
 
-export default function VolumeProfileSettingsPanel({ value, onChange }: Props) {
-  const set = (patch: Partial<VolumeProfileSettings>): void => onChange({ ...value, ...patch });
+export default function VolumeProfileSettingsPanel<T extends PanelSettings>({ value, onChange, title = "Volume profile settings", maxSessions = 10 }: Props<T>) {
+  const set = (patch: Partial<PanelSettings>): void => onChange({ ...value, ...patch });
   return (
-    <fieldset aria-label="Volume profile settings">
+    <fieldset aria-label={title}>
       <NumberField
         label="Rows"
         ariaLabel="Row count"
@@ -75,6 +83,16 @@ export default function VolumeProfileSettingsPanel({ value, onChange }: Props) {
         max={100}
         onCommit={(valueAreaPercent) => set({ valueAreaPercent })}
       />
+      {value.sessionCount !== undefined && (
+        <NumberField
+          label="Sessions"
+          ariaLabel="Sessions to render"
+          value={value.sessionCount}
+          min={1}
+          max={maxSessions}
+          onCommit={(sessionCount) => set({ sessionCount })}
+        />
+      )}
       <label>
         Up
         <input type="color" aria-label="Up volume color" value={value.upColor} onChange={(e) => set({ upColor: e.target.value })} />

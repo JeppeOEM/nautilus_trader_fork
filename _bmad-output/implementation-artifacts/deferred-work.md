@@ -387,3 +387,7 @@
 ## Deferred from: code review of story-18.7 (2026-09-19)
 
 - VRVP recomputes on every pan frame (no rAF throttle or range quantization); a visible range extending past the loaded candles is clamped to the loaded part without a cue; fixed 150px width is not clamped to narrow panes; VRVP settings are not persisted across remounts.
+
+## Deferred from: code review of story-18.8 (2026-09-19)
+
+- Session profiles: `respondsToZoom` is a draw-time gap tweak only; partly loaded sessions draw narrow (0.7 x loaded span; zero width for a single bar); `sinceSeconds` is fixed when the profile is added (no UTC-midnight re-anchor); every Sessions edit re-pages history from now; replay far in the past has no session history before the fetch window; an empty server page across a long outage stops paging early (see 18.5's `has_more` ceiling).

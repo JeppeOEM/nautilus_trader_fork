@@ -16,11 +16,20 @@ vi.mock("../api/client", () => ({
 
 // Stable references (a fresh array per render would churn useReplay's memo) that the
 // replay tests swap in.
-const mocks = vi.hoisted(() => ({ candles: [] as unknown[], volume: [] as unknown[], liveBar: null as unknown }));
+const mocks = vi.hoisted(() => ({
+  candles: [] as unknown[],
+  volume: [] as unknown[],
+  liveBar: null as unknown,
+  session: { candles: [] as unknown[], volume: [] as unknown[], completeFrom: null as number | null },
+}));
 
 vi.mock("../hooks/useCandles", () => ({
   BAR_SECONDS: 60,
   useCandles: () => ({ candles: mocks.candles, volume: mocks.volume }),
+}));
+
+vi.mock("../hooks/useSessionCandles", () => ({
+  useSessionCandles: () => mocks.session,
 }));
 
 vi.mock("../hooks/useSnapshotSeries", () => ({
@@ -64,7 +73,7 @@ interface ChartStubProps {
   panes?: { id: string; data: { time: number }[] }[];
   liveBar?: unknown;
   markerTime?: number | null;
-  volumeProfiles?: { id: string; profile: { totalVolume: number; rows: unknown[] }; xAnchor: unknown; width: unknown; edges?: unknown }[];
+  volumeProfiles?: { id: string; profile: { totalVolume: number; rows: unknown[] }; xAnchor: unknown; width: unknown; edges?: unknown; respondsToZoom?: boolean; widthFraction?: number }[];
   rangeSelectActive?: boolean;
   profileEdgesEditable?: boolean;
   onChartApi?: (chart: unknown) => void;
@@ -90,6 +99,7 @@ beforeEach(() => {
   mocks.candles = [];
   mocks.volume = [];
   mocks.liveBar = null;
+  mocks.session = { candles: [], volume: [], completeFrom: null };
 });
 
 afterEach(() => {
@@ -630,5 +640,89 @@ describe("ChartPage visible range volume profile (Story 18.7)", () => {
     fireEvent.click(screen.getByRole("button", { name: "Lines" }));
 
     expect(vrvp()).toHaveLength(0);
+  });
+});
+
+describe("ChartPage session volume profiles (Story 18.8)", () => {
+  const D1 = Date.UTC(2024, 0, 1) / 1000;
+  const D2 = D1 + 86_400;
+  const D3 = D2 + 86_400;
+  const times = [D1, D1 + 60, D2, D2 + 60, D3, D3 + 60];
+  const bar = (t: number, p: number) => ({ time: t, open: p, high: p + 1, low: p, close: p + 1 });
+  const sessions = () =>
+    lastChartProps.current!.volumeProfiles!.filter((p) => p.id.startsWith("session-"));
+
+  beforeEach(() => {
+    const candles = times.map((t, i) => bar(t, 10 + i * 10));
+    mocks.candles = candles;
+    mocks.session = { candles, volume: times.map((t) => ({ time: t, value: 5 })), completeFrom: null };
+  });
+
+  it("adds one independent profile per UTC day, anchored to that session's bars (AC #1/#4)", () => {
+    render(<ChartPage />);
+    expect(sessions()).toHaveLength(0);
+
+    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+
+    expect(sessions().map((s) => s.id)).toEqual([`session-${D1}`, `session-${D2}`, `session-${D3}`]);
+    expect(sessions()[1].xAnchor).toEqual({ time: D2 });
+    expect(sessions()[1].width).toEqual({ toTime: D2 + 60 });
+    expect(sessions()[1].profile.totalVolume).toBeCloseTo(10);
+    expect(sessions()[0].profile).not.toBe(sessions()[1].profile);
+  });
+
+  it("SVP HD is the same component with a higher row count and respondsToZoom (AC #3)", () => {
+    render(<ChartPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+    expect(sessions()[0].profile.rows).toHaveLength(24);
+    expect(sessions()[0].respondsToZoom).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile HD" }));
+    expect(sessions()).toHaveLength(3); // switched preset, not stacked
+    expect(sessions()[0].profile.rows).toHaveLength(120);
+    expect(sessions()[0].respondsToZoom).toBe(true);
+  });
+
+  it("keeps the session count and colors when switching presets", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+    fireEvent.change(screen.getByLabelText("Sessions to render"), { target: { value: "2" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile HD" }));
+
+    expect(sessions()).toHaveLength(2);
+    expect((screen.getByLabelText("Sessions to render") as HTMLInputElement).value).toBe("2");
+  });
+
+  it("limits the rendered sessions with the sessions setting (AC #4)", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+
+    fireEvent.change(screen.getByLabelText("Sessions to render"), { target: { value: "2" } });
+
+    expect(sessions().map((s) => s.id)).toEqual([`session-${D2}`, `session-${D3}`]);
+  });
+
+  it("can be removed, and is hidden in Lines mode", () => {
+    render(<ChartPage />);
+    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    expect(sessions()).toHaveLength(0);
+    expect(screen.getByText("Shown in Candles mode only")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Candles" }));
+    expect(sessions()).toHaveLength(3);
+    fireEvent.click(screen.getByRole("button", { name: "Remove session volume profile" }));
+    expect(sessions()).toHaveLength(0);
+  });
+
+  it("draws a session over the part of it the chart has loaded, and skips one the chart holds none of", () => {
+    mocks.candles = [bar(D3, 50), bar(D3 + 60, 60)]; // chart only loaded the last day
+    render(<ChartPage />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Add Session Volume Profile" }));
+
+    expect(sessions().map((s) => s.id)).toEqual([`session-${D3}`]);
   });
 });

@@ -12,6 +12,7 @@ import LightweightChart, {
   type PriceLineSpec,
 } from "../components/chart/LightweightChart";
 import type { TrendlineAnchor } from "../components/chart/primitives/TrendlinePrimitive";
+import SessionProfileControl from "../components/chart/SessionProfileControl";
 import VrvpControl from "../components/chart/VrvpControl";
 import VolumeProfileSettingsPanel from "../components/chart/VolumeProfileSettings";
 import {
@@ -19,11 +20,24 @@ import {
   buildRangeProfile,
   type VolumeProfile,
 } from "../lib/volumeProfile";
+import {
+  DEFAULT_SESSION_COUNT,
+  SESSION_PRESETS,
+  buildSessionProfiles,
+  drawableSpan,
+  periodStartBack,
+  sessionBarSeconds,
+  type SessionPeriod,
+  type SessionPreset,
+  type SessionProfileCache,
+  type SessionProfileSettings,
+} from "../lib/sessionProfile";
 import { assignPaneColor, cssVar } from "../components/chart/paneColors";
 import type { IndicatorConfigEntry } from "../api/schema";
 import { BAR_SECONDS, useCandles } from "../hooks/useCandles";
 import { useIndicatorSeries } from "../hooks/useIndicatorSeries";
 import { useReplay } from "../hooks/useReplay";
+import { useSessionCandles } from "../hooks/useSessionCandles";
 import { useVisibleRange } from "../hooks/useVisibleRange";
 import { useLiveCandle } from "../hooks/useLiveCandle";
 import { usePickerIndicatorValues } from "../hooks/usePickerIndicatorValues";
@@ -62,6 +76,19 @@ const CHART_TOOLS: readonly ChartToolDef[] = [
 function trimAfter<T extends { time: Time }>(rows: T[], cutoff: number | null): T[] {
   return cutoff === null ? rows : rows.filter((row) => (row.time as number) <= cutoff);
 }
+
+interface SessionConfig {
+  preset: SessionPreset;
+  period: SessionPeriod;
+  settings: SessionProfileSettings;
+  sinceSeconds: number;
+}
+
+const sessionSince = (period: SessionPeriod, count: number): number =>
+  periodStartBack(Math.floor(Date.now() / 1000), period, count - 1);
+
+// Story 18.8: each session's longest bar spans this fraction of the session's width.
+const SESSION_WIDTH_FRACTION = 0.7;
 
 // Story 18.7: the longest VRVP bar, growing leftward from the price axis.
 const VRVP_WIDTH_PX = 150;
@@ -107,6 +134,10 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
   const nextFrvpIdRef = useRef(1);
   // Story 18.7: the single visible-range profile ("always recompute", unlike FRVP above).
   const [vrvpActive, setVrvpActive] = useState(false);
+  // Story 18.8: the single session-profile slot (SVP / SVP HD presets). `sinceSeconds` is
+  // fixed when the config is set (an event handler), so render stays pure.
+  const [sessionCfg, setSessionCfg] = useState<SessionConfig | null>(null);
+  const [sessionCache] = useState<SessionProfileCache>(() => new Map());
   const [vrvpSettings, setVrvpSettings] = useState(DEFAULT_VOLUME_PROFILE_SETTINGS);
   const { candles, volume: fullVolume } = useCandles(instrumentId, chart, mode === "candles");
   // Story 18.4: replay only trims the NEWEST end of the loaded candles for display
@@ -358,6 +389,64 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
         : null,
     [vrvpActive, mode, visibleRange, replay.displayed, volume, vrvpSettings],
   );
+
+  // Story 18.8: one independent profile per session, from its own finest-timeframe fetch;
+  // only the newest session is rebuilt as bars arrive (buildSessionProfiles' cache).
+  const sessionActive = sessionCfg !== null && mode === "candles";
+  const sessionData = useSessionCandles(
+    instrumentId,
+    sessionActive,
+    sessionCfg?.sinceSeconds ?? 0,
+    sessionCfg ? sessionBarSeconds(sessionCfg.period) : 60,
+  );
+  const sessionSpecs = useMemo<VolumeProfileSpec[]>(() => {
+    if (!sessionCfg || !sessionActive) return [];
+    const entries = buildSessionProfiles(
+      trimAfter(sessionData.candles, cutoffTime),
+      trimAfter(sessionData.volume, cutoffTime),
+      sessionCfg.period,
+      sessionCfg.settings.sessionCount,
+      sessionCfg.settings,
+      sessionCache,
+      sessionData.completeFrom,
+    );
+    const preset = SESSION_PRESETS[sessionCfg.preset];
+    return entries.flatMap((entry) => {
+      const span = drawableSpan(replay.displayed, entry.startTime, entry.endTime);
+      if (!span) return [];
+      return [
+        {
+          id: `session-${entry.periodStart}`,
+          profile: entry.profile,
+          xAnchor: { time: span.startTime as Time },
+          width: { toTime: span.endTime as Time },
+          widthFraction: SESSION_WIDTH_FRACTION,
+          respondsToZoom: preset.respondsToZoom,
+          upColor: sessionCfg.settings.upColor,
+          downColor: sessionCfg.settings.downColor,
+          showPoc: sessionCfg.settings.showPoc,
+          showValueArea: sessionCfg.settings.showValueArea,
+        },
+      ];
+    });
+  }, [sessionCfg, sessionActive, sessionData, cutoffTime, sessionCache, replay.displayed]);
+
+  const addSessionProfile = (preset: SessionPreset): void => {
+    const { period, rowCount } = SESSION_PRESETS[preset];
+    // Switching presets keeps the user's colors/toggles/session count; only the row count
+    // takes the new preset's default.
+    const settings: SessionProfileSettings = {
+      ...(sessionCfg?.settings ?? { ...DEFAULT_VOLUME_PROFILE_SETTINGS, sessionCount: DEFAULT_SESSION_COUNT }),
+      rowCount,
+    };
+    setSessionCfg({ preset, period, settings, sinceSeconds: sessionSince(period, settings.sessionCount) });
+  };
+
+  const changeSessionSettings = (settings: SessionProfileSettings): void =>
+    setSessionCfg((cfg) =>
+      cfg ? { ...cfg, settings, sinceSeconds: sessionSince(cfg.period, settings.sessionCount) } : cfg,
+    );
+
   const allVolumeProfiles = useMemo<VolumeProfileSpec[]>(
     () =>
       vrvpProfile
@@ -376,6 +465,10 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
           ]
         : volumeProfiles,
     [volumeProfiles, vrvpProfile, vrvpSettings],
+  );
+  const chartVolumeProfiles = useMemo(
+    () => (sessionSpecs.length > 0 ? [...allVolumeProfiles, ...sessionSpecs] : allVolumeProfiles),
+    [allVolumeProfiles, sessionSpecs],
   );
 
   // Stable identity: LightweightChart's measure effect must not re-subscribe mid-drag.
@@ -504,7 +597,7 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
             onPriceClick={handlePriceClick}
             drawings={drawings}
             onPointClick={handlePointClick}
-            volumeProfiles={allVolumeProfiles}
+            volumeProfiles={chartVolumeProfiles}
             rangeSelectActive={activeTool === "frvp"}
             profileEdgesEditable={activeTool === "cursor" && replayMode !== "picking"}
             onRangeSelect={handleRangeSelect}
@@ -532,7 +625,11 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
               {f.id} x
             </button>
           ))}
-          <VolumeProfileSettingsPanel value={frvpSettings} onChange={handleFrvpSettings} />
+          <VolumeProfileSettingsPanel
+            title="Fixed range volume profile settings"
+            value={frvpSettings}
+            onChange={handleFrvpSettings}
+          />
         </div>
       )}
       <VrvpControl
@@ -542,6 +639,13 @@ function ChartInner({ instrumentId }: { instrumentId: string }) {
         onAdd={() => setVrvpActive(true)}
         onRemove={() => setVrvpActive(false)}
         onSettingsChange={setVrvpSettings}
+      />
+      <SessionProfileControl
+        active={sessionCfg ? { preset: sessionCfg.preset, settings: sessionCfg.settings } : null}
+        candlesMode={mode === "candles"}
+        onAdd={addSessionProfile}
+        onRemove={() => setSessionCfg(null)}
+        onSettingsChange={changeSessionSettings}
       />
       <IndicatorPicker
         fetchConfig={() => fetchCoinIndicatorConfig(instrumentId)}

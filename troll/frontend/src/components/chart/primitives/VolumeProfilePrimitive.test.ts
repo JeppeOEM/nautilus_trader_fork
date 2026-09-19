@@ -112,3 +112,65 @@ describe("VolumeProfilePrimitive time anchors (Story 18.6)", () => {
     expect(primitive.resolvedAnchor()).toBeNull();
   });
 });
+
+describe("VolumeProfilePrimitive session options (Story 18.8)", () => {
+  const timeSpec = (over: Partial<VolumeProfileRenderSpec> = {}): VolumeProfileRenderSpec => ({
+    ...spec(),
+    xAnchor: { time: 100 as Time },
+    width: { toTime: 300 as Time },
+    ...over,
+  });
+  const attach = (primitive: VolumeProfilePrimitive, rowHeightPx: number) =>
+    primitive.attached({
+      chart: { timeScale: () => ({ timeToCoordinate: (t: number) => t / 2 }) },
+      // Row i spans rowHeightPx pixels: price p -> p * rowHeightPx (rows are size 1 apart).
+      series: { priceToCoordinate: (p: number) => p * rowHeightPx },
+      requestUpdate: vi.fn(),
+    } as never);
+
+  const drawnRowHeights = (primitive: VolumeProfilePrimitive): number[] => {
+    const heights: number[] = [];
+    const context = {
+      globalAlpha: 1,
+      fillRect: (_x: number, _y: number, _w: number, h: number) => heights.push(h),
+      strokeRect: () => {},
+      fillStyle: "",
+      strokeStyle: "",
+      lineWidth: 0,
+      setLineDash: () => {},
+      beginPath: () => {},
+      moveTo: () => {},
+      lineTo: () => {},
+      stroke: () => {},
+    };
+    primitive.updateAllViews();
+    primitive.paneViews()[0].renderer()!.draw({
+      useBitmapCoordinateSpace: (cb: (scope: unknown) => void) =>
+        cb({ context, bitmapSize: { width: 400, height: 300 }, horizontalPixelRatio: 1, verticalPixelRatio: 1 }),
+    } as never);
+    return heights;
+  };
+
+  it("scales a time-range width by widthFraction", () => {
+    const primitive = new VolumeProfilePrimitive(timeSpec({ widthFraction: 0.5 }));
+    attach(primitive, 10);
+
+    primitive.updateAllViews();
+
+    expect(primitive.resolvedAnchor()).toEqual({ xAnchor: 50, width: 50 }); // range 100px * 0.5
+  });
+
+  it("respondsToZoom drops the inter-row gap only once rows get too short, and never otherwise", () => {
+    const tall = new VolumeProfilePrimitive(timeSpec({ respondsToZoom: true, showValueArea: false }));
+    attach(tall, 10);
+    expect(Math.min(...drawnRowHeights(tall))).toBe(9); // 10px rows keep their 1px gap
+
+    const shortZoom = new VolumeProfilePrimitive(timeSpec({ respondsToZoom: true, showValueArea: false }));
+    attach(shortZoom, 2);
+    expect(Math.min(...drawnRowHeights(shortZoom))).toBe(2); // 2px rows: gap dropped
+
+    const shortFixed = new VolumeProfilePrimitive(timeSpec({ respondsToZoom: false, showValueArea: false }));
+    attach(shortFixed, 2);
+    expect(Math.min(...drawnRowHeights(shortFixed))).toBe(1); // gap kept, row squeezed to 1px
+  });
+});

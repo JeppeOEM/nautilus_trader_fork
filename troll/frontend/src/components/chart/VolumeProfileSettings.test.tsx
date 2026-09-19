@@ -44,6 +44,23 @@ describe("VolumeProfileSettingsPanel (Story 18.5)", () => {
     expect(input.value).toBe("");
   });
 
+  it("shows a clamped sessions field only for settings that carry sessionCount (AC #4)", () => {
+    const onChange = vi.fn();
+    const { rerender } = render(<VolumeProfileSettingsPanel value={DEFAULT_VOLUME_PROFILE_SETTINGS} onChange={onChange} />);
+    expect(screen.queryByLabelText("Sessions to render")).toBeNull();
+
+    rerender(
+      <VolumeProfileSettingsPanel
+        value={{ ...DEFAULT_VOLUME_PROFILE_SETTINGS, sessionCount: 5 }}
+        onChange={onChange}
+        maxSessions={10}
+      />,
+    );
+    fireEvent.change(screen.getByLabelText("Sessions to render"), { target: { value: "99" } });
+
+    expect(onChange.mock.calls[0][0].sessionCount).toBe(10);
+  });
+
   it("reports colors and the POC / value-area toggles, leaving other fields intact", () => {
     const onChange = setup();
 

@@ -35,7 +35,7 @@ export default function VrvpControl({ active, candlesMode, settings, onAdd, onRe
           <button type="button" aria-label="Remove visible range volume profile" onClick={onRemove}>
             Remove
           </button>
-          <VolumeProfileSettingsPanel value={settings} onChange={onSettingsChange} />
+          <VolumeProfileSettingsPanel title="Visible range volume profile settings" value={settings} onChange={onSettingsChange} />
         </div>
       )}
     </div>
