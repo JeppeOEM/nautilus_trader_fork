@@ -33,6 +33,7 @@ from pydantic import BaseModel
 
 from data_api import redis_bus
 from data_api.routes import indicators as _indicators
+from data_api.settings import CATALOG_PATH
 from ml_signals import catalog_stats as _catalog_stats
 from ml_signals import custom_indicators
 from ml_signals import screener_columns_config
@@ -73,7 +74,6 @@ def get_rankings() -> RankingsResponse:
 # Story 17.5: Technicals tab -- screener-wide column selection + bulk per-instrument values
 # ---------------------------------------------------------------------------------------------
 
-CATALOG_PATH: str = os.environ.get("CATALOG_PATH", "troll/dydx_collector/catalog")
 SCREENER_COLUMNS_CONFIG_PATH: str = os.environ.get(
     "SCREENER_COLUMNS_CONFIG_PATH", "troll/ml_signals/screener_columns.toml"
 )

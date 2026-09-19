@@ -44,6 +44,7 @@ from data_api.routes import indicators as indicators_routes
 from data_api.routes import metrics as metrics_routes
 from data_api.routes import rankings as rankings_routes
 from data_api.routes import snapshots as snapshots_routes
+from data_api.settings import CATALOG_PATH
 from data_api.ws import live as live_ws
 from dydx_collector.second_snapshot import DydxSecondSnapshot
 from ml_signals import catalog_stats as _catalog_stats
@@ -52,8 +53,6 @@ from ml_signals.candles import candle_dicts_for_window
 from ml_signals.venue import MalformedInstrumentId
 from ranking_engine import metrics_store
 
-
-CATALOG_PATH: str = os.environ.get("CATALOG_PATH", "troll/dydx_collector/catalog")
 
 # Default mirrors dashboard.py:85-86 exactly.
 METRICS_DB_PATH: str = os.environ.get(

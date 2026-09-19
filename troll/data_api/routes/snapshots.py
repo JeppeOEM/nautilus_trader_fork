@@ -24,10 +24,8 @@ Reuses `ml_signals.catalog_stats.query_second_snapshots` unchanged (AD-F2) and
 aggregation/query logic, only bounded-query construction, the ported `_price_series_rows`
 math (SSOT-03, see below), and the `has_more` probe.
 
-Own module-level `CATALOG_PATH` constant, same non-circular-import pattern
-`candles.py`/`indicator_series.py` established -- this module cannot
-`from data_api.app import CATALOG_PATH` without a circular import, since `app.py` imports
-this module.
+`CATALOG_PATH` comes from `data_api.settings` (a leaf module -- routes can't import it from
+`app.py`, which imports them).
 
 `_price_series_rows` below is a verbatim relocation of `ml_signals.dashboard._price_series_
 rows` (AD-F1) -- `dashboard.py` is scheduled for deletion in Story 15.10, so importing from
@@ -39,18 +37,16 @@ two copies stay byte-identical via a test-only oracle import of `ml_signals.dash
 original (never a runtime import).
 """
 
-import os
 
 from fastapi import APIRouter
 from pydantic import BaseModel
 
 from dydx_collector.second_snapshot import DydxSecondSnapshot
+from data_api.settings import CATALOG_PATH
 from ml_signals import catalog_stats as _catalog_stats
 from ml_signals.indicators import microprice as _microprice
 from ml_signals.venue import venue_of
 
-
-CATALOG_PATH: str = os.environ.get("CATALOG_PATH", "troll/dydx_collector/catalog")
 
 # Server-enforced upper bound on `limit` (MEM-01/AD-F3) -- sized in rows-per-second terms,
 # much larger than a candle limit (`_MAX_CANDLES_LIMIT = 500` bars) since there is no
