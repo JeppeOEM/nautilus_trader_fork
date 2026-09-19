@@ -18,6 +18,7 @@ replaced raw TradeTick persistence -- see troll/docs/DATA_DICTIONARY.md's
 Retention section for why.
 """
 
+import time
 from pathlib import Path
 
 from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
@@ -33,7 +34,7 @@ from dydx_collector.config import CollectorConfig
 
 
 _IID = InstrumentId.from_str("BTC-USD-PERP.DYDX")
-_TS = 1_000_000_000
+_TS = time.time_ns()
 
 
 def _make_config(catalog_path: Path) -> CollectorConfig:
@@ -130,3 +131,26 @@ def test_discard_second_accumulators_clears_ohlc_and_volume(tmp_path: Path) -> N
     assert iid not in collector._second_sell_volume
     assert iid not in collector._second_buy_count
     assert iid not in collector._second_sell_count
+
+
+def test_historical_trades_from_subscribe_reply_are_dropped(tmp_path: Path) -> None:
+    """dYdX's subscribed reply replays old trades; they must not enter the live second."""
+    collector = Collector(_make_config(tmp_path / "catalog"))
+    iid = str(_IID)
+    old = time.time_ns() - 3600 * 1_000_000_000
+    collector._process_data(_trade(100.0, 5.0, AggressorSide.BUYER, "old", ts=old))
+
+    assert iid not in collector._second_open_price
+    assert collector._second_buy_volume[iid] == 0.0
+    assert collector._stale_trades_dropped[iid] == 1
+
+
+def test_replayed_trade_id_is_not_counted_twice(tmp_path: Path) -> None:
+    """A reconnect replays trades still inside the age window; the trade id catches them."""
+    collector = Collector(_make_config(tmp_path / "catalog"))
+    iid = str(_IID)
+    collector._process_data(_trade(100.0, 2.0, AggressorSide.BUYER, "same"))
+    collector._process_data(_trade(100.0, 2.0, AggressorSide.BUYER, "same"))
+
+    assert collector._second_buy_volume[iid] == 2.0
+    assert collector._duplicate_trades_dropped[iid] == 1

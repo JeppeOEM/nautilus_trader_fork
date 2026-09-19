@@ -223,6 +223,8 @@ export default function LightweightChart({
   const dragIdRef = useRef<string | null>(null);
   const suppressNextClickRef = useRef(false);
   const lastLiveBarTimeRef = useRef<number | null>(null);
+  const dataRef = useRef(data);
+  dataRef.current = data;
 
   useEffect(() => {
     const container = containerRef.current;
@@ -433,7 +435,21 @@ export default function LightweightChart({
     const time = liveBar.time as unknown as number;
     if (lastLiveBarTimeRef.current !== null && time < lastLiveBarTimeRef.current) return;
     lastLiveBarTimeRef.current = time;
-    series.update(liveBar);
+    // The server's forming bar only covers snapshots seen since it started watching, so
+    // its open/high/low can miss the start of the bucket: merge with the history candle
+    // for the same bucket (open from history, extremes across both, close from live).
+    const hist = dataRef.current.find((d) => (d.time as unknown as number) === time);
+    if (hist && "open" in liveBar && "open" in hist) {
+      series.update({
+        time: liveBar.time,
+        open: hist.open,
+        high: Math.max(hist.high, liveBar.high),
+        low: Math.min(hist.low, liveBar.low),
+        close: liveBar.close,
+      });
+    } else {
+      series.update(liveBar);
+    }
     // `mode` is a dependency too: switching Lines -> Candles recreates seriesRef (the
     // `[mode]` effect above) with no data yet, so this must re-fire to paint the already-
     // held `liveBar` onto the fresh series -- otherwise the forming bar stays blank until

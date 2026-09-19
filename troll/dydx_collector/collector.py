@@ -61,6 +61,7 @@ import threading
 import time
 import urllib.request
 from collections import defaultdict
+from collections import deque
 from datetime import UTC
 from datetime import datetime
 from pathlib import Path
@@ -74,6 +75,7 @@ from dydx_collector.config import CollectorConfig
 from dydx_collector.config import InstrumentEntry
 from dydx_collector.config import load_config
 from dydx_collector.config import save_config
+from dydx_collector.integrity import ohlc_outside_book
 from dydx_collector.minute_rollup import MinuteRollupBuilder
 from dydx_collector.open_interest import _fetch_markets_json
 from dydx_collector.open_interest import classify_liquidity
@@ -106,6 +108,14 @@ critical_logger = logging.getLogger("dydx_collector.critical")
 CONFIG_PATH = Path(__file__).parent / "config.toml"
 
 _QUARANTINE_DIRNAME = "_quarantine"
+
+# dYdX's `v4_trades` subscribed reply carries up to 1000 *historical* trades (verified
+# against the live indexer: oldest ~17h old, ~26 BTC total on BTC-USD), which the Rust
+# adapter emits as ordinary TradeTicks. Counting them as live put ~1000 trades into one
+# second's OHLC/volume after every (re)subscribe -- fake ~$850-range, ~21 BTC candles.
+# A live trade reaches us within ~1s, so anything older than this is history.
+_STALE_TRADE_NS = 10_000_000_000
+_SEEN_TRADE_IDS = 2000  # per instrument; > the 1000-trade subscribed reply
 
 # ponytail: ParquetDataCatalog.write_data() (pinned nautilus_trader 1.229.0) has no
 # compression passthrough -- it calls pq.write_table() with pyarrow's "snappy" default,
@@ -486,6 +496,15 @@ class Collector:
         # traded price now that raw TradeTicks are no longer persisted. Absence of a
         # key (checked via .pop(iid, None) in _second_loop) means no trade occurred
         # this second, distinct from a trade occurring at price 0.
+        # Trades dropped as subscribe-time history, per instrument (see _STALE_TRADE_NS).
+        # Logged by _report_stale_trades so drops are never silent (DATA-05).
+        self._stale_trades_dropped: defaultdict[str, int] = defaultdict(int)
+        self._duplicate_trades_dropped: defaultdict[str, int] = defaultdict(int)
+        # Bounded recent trade ids per instrument: a reconnect's subscribed reply replays
+        # trades already counted, and those are still "fresh" (< _STALE_TRADE_NS) if the
+        # outage was short -- age alone can't catch them.
+        self._seen_trade_ids: defaultdict[str, deque[str]] = defaultdict(lambda: deque(maxlen=_SEEN_TRADE_IDS))
+        self._seen_trade_id_set: defaultdict[str, set[str]] = defaultdict(set)
         self._second_open_price: dict[str, float] = {}
         self._second_high_price: dict[str, float] = {}
         self._second_low_price: dict[str, float] = {}
@@ -605,7 +624,13 @@ class Collector:
         # no longer persisted (see DydxSecondSnapshot's open/high/low/close_price
         # fields below, and troll/docs/DATA_DICTIONARY.md's Retention section). Every
         # other type still goes through the normal buffer/flush path.
-        if not isinstance(data, TradeTick):
+        # Deltas of instruments not in `_delta_store` are only ever used to maintain the
+        # live book; _flush_once would discard them anyway, so never hold them for the
+        # whole flush interval (a 60s buffer of every book message for every coin).
+        keep_for_catalog = not isinstance(data, TradeTick) and not (
+            isinstance(data, OrderBookDeltas) and str(data.instrument_id) not in self._delta_store
+        )
+        if keep_for_catalog:
             self._buffer[_buffer_key(data)].append(data)
         if isinstance(data, OrderBookDeltas):
             iid = str(data.instrument_id)
@@ -613,6 +638,12 @@ class Collector:
             self._last_book_update_ns[iid] = time.time_ns()
         elif isinstance(data, TradeTick):
             iid = str(data.instrument_id)
+            if time.time_ns() - data.ts_event > _STALE_TRADE_NS:
+                self._stale_trades_dropped[iid] += 1
+                return
+            if self._is_duplicate_trade(iid, str(data.trade_id)):
+                self._duplicate_trades_dropped[iid] += 1
+                return
             price = data.price.as_double()
             if iid not in self._second_open_price:
                 self._second_open_price[iid] = price
@@ -702,6 +733,25 @@ class Collector:
         while not self._stop.is_set():
             await asyncio.sleep(self._config.flush_interval_seconds)
             await self._flush_once()
+            self._report_stale_trades()
+
+    def _is_duplicate_trade(self, iid: str, trade_id: str) -> bool:
+        seen, order = self._seen_trade_id_set[iid], self._seen_trade_ids[iid]
+        if trade_id in seen:
+            return True
+        if len(order) == order.maxlen:
+            seen.discard(order[0])
+        order.append(trade_id)
+        seen.add(trade_id)
+        return False
+
+    def _report_stale_trades(self) -> None:
+        if self._stale_trades_dropped:
+            logger.info(f"Dropped subscribe-time trade history: {dict(self._stale_trades_dropped)}")
+            self._stale_trades_dropped.clear()
+        if self._duplicate_trades_dropped:
+            logger.warning(f"Dropped duplicate trades (replayed after reconnect?): {dict(self._duplicate_trades_dropped)}")
+            self._duplicate_trades_dropped.clear()
 
     async def _open_interest_loop(self) -> None:
         while not self._stop.is_set():
@@ -1194,6 +1244,13 @@ class Collector:
                     ts_event=now_ns,
                     ts_init=now_ns,
                 )
+                if ohlc_outside_book(snapshot):
+                    # Should be unreachable after the stale/duplicate trade filters; if it
+                    # fires, an ingestion bug is writing impossible prices (DATA-02).
+                    logger.error(
+                        f"IMPOSSIBLE trade OHLC for {iid}: high={high_price} low={low_price} "
+                        f"outside book [{min(snapshot.bid_prices)}, {max(snapshot.ask_prices)}]"
+                    )
                 batch.append(snapshot)
                 self._on_data(snapshot)  # routes to buffer → Parquet flush
                 try:
