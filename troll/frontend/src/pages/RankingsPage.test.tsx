@@ -303,6 +303,23 @@ describe("RankingsPage", () => {
       await waitFor(() => expect(saveTechnicalsColumns).toHaveBeenCalledWith([macd]));
     });
 
+    it("shows each column's timeframe (1H when unset) and saves a change made in the header", async () => {
+      configureTechnicals();
+      vi.mocked(fetchTechnicalsColumns).mockResolvedValue([rsi, { ...macd, bar_seconds: 86400 }]);
+
+      renderPage();
+      fireEvent.click(screen.getByText("Technicals"));
+      const rsiTimeframe = await screen.findByLabelText<HTMLSelectElement>("RelativeStrengthIndex timeframe");
+      expect(rsiTimeframe.value).toBe("3600");
+      expect(screen.getByLabelText<HTMLSelectElement>("MovingAverageConvergenceDivergence timeframe").value).toBe("86400");
+
+      fireEvent.change(rsiTimeframe, { target: { value: "14400" } });
+
+      await waitFor(() =>
+        expect(saveTechnicalsColumns).toHaveBeenCalledWith([{ ...rsi, bar_seconds: 14400 }, { ...macd, bar_seconds: 86400 }]),
+      );
+    });
+
     it("builds a rapid second header removal on the first one instead of undoing it", async () => {
       configureTechnicals();
 

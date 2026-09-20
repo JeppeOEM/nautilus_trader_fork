@@ -277,6 +277,18 @@ development_status:
   21-6-no-hidden-errors: done
   epic-21-retrospective: optional
 
+  epic-22: in-progress
+  22-1-troll-collector-core-extracted-from-the-bybit-and-hyperliquid-collectors: ready-for-dev
+  22-2-dydx-collector-onto-the-core: ready-for-dev
+  22-3-shared-data-types-and-a-single-openinterest: ready-for-dev
+  22-4-bybit-spot-collection-and-explicit-perp-spot-everywhere: ready-for-dev
+  22-5-order-book-validation-per-venue: ready-for-dev
+  22-6-live-paper-multi-venue-paper-trading-sandbox: ready-for-dev
+  22-7-exchange-demo-testnet-and-real-money-for-bybit-and-hyperliquid: ready-for-dev
+  22-8-spine-rules-and-docs-updated-for-the-multi-venue-core: ready-for-dev
+  22-9-historical-bar-backfill-for-bybit-and-hyperliquid: ready-for-dev
+  epic-22-retrospective: optional
+
 action_items:
   - epic: 1
     action: "Add a lifecycle-cleanup checklist item: any subscribe/unsubscribe/resubscribe/shutdown transition must explicitly state what tracking state gets reset or removed (4 bugs across 3 stories in Epic 1 were this exact shape)."

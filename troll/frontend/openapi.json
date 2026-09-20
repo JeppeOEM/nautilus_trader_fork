@@ -1857,6 +1857,11 @@
           "category": {
             "type": "string",
             "title": "Category"
+          },
+          "bar_seconds": {
+            "type": "integer",
+            "title": "Bar Seconds",
+            "default": 3600
           }
         },
         "type": "object",
@@ -1865,7 +1870,7 @@
           "category"
         ],
         "title": "TechnicalsColumn",
-        "description": "Same wire shape as a per-coin picker entry -- only its persistence scope differs."
+        "description": "A per-coin picker entry plus the bar size it is computed on."
       },
       "TechnicalsValuesResponse": {
         "properties": {

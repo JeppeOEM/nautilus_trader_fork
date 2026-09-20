@@ -1,0 +1,41 @@
+# Default Technicals columns; rewritten by the UI on any change (see screener_columns_config.py).
+
+[[columns]]
+name = "RelativeStrengthIndex"
+category = "native"
+bar_seconds = 3600
+
+[columns.params]
+period = 14
+
+[[columns]]
+name = "MovingAverageConvergenceDivergence"
+category = "native"
+bar_seconds = 3600
+
+[columns.params]
+fast_period = 12
+slow_period = 26
+ma_type = "EXPONENTIAL"
+price_type = "LAST"
+
+[[columns]]
+name = "BollingerBands"
+category = "native"
+bar_seconds = 14400
+
+[columns.params]
+period = 20
+k = 2.0
+ma_type = "SIMPLE"
+
+[[columns]]
+name = "AverageTrueRange"
+category = "native"
+bar_seconds = 86400
+
+[columns.params]
+period = 14
+ma_type = "SIMPLE"
+use_previous = true
+value_floor = 0.0

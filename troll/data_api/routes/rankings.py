@@ -39,6 +39,7 @@ from ml_signals import custom_indicators
 from ml_signals import error_ledger
 from ml_signals import screener_columns_config
 from ml_signals.candles import candle_dicts_from_snapshots
+from ml_signals.candles import rollup_dicts_from_rows
 
 
 router = APIRouter()
@@ -79,15 +80,23 @@ SCREENER_COLUMNS_CONFIG_PATH: str = os.environ.get(
     "SCREENER_COLUMNS_CONFIG_PATH", "troll/ml_signals/screener_columns.toml"
 )
 
-# Recent-window replay per coin: enough 1m bars for the slowest common indicator warm-up.
+# Recent-window replay per coin: enough bars for the slowest common indicator warm-up. 4H and
+# wider get fewer bars: 60 daily bars already means ~86k minute rollups per coin.
 _TECHNICALS_BARS = 120
-_TECHNICALS_BAR_SECONDS = 60
+_TECHNICALS_WIDE_BARS = 60
+# The column timeframes the UI offers; anything else is a 400, not a silent fallback.
+_TECHNICALS_BAR_SIZES = (60, 300, 900, 3600, 14400, 86400)
 # Catalog writes lag by a flush interval, so the newest candle is normally a minute or two old;
 # older than this the coin's data has genuinely stopped and its value must not read as live.
 _TECHNICALS_MAX_CANDLE_AGE_BARS = 5
 # Bulk values are identical for every viewer of the same entries/ranked set -- a short TTL cache
 # keeps a second tab or a slow poll from stacking another full per-coin catalog pass.
 _TECHNICALS_CACHE_TTL_S = 90.0
+# 4H+ candles barely move between polls, so they are cached per (coin, bar size) far longer than
+# the 90s value cache -- otherwise a mixed column set re-reads days of rollups every poll.
+# ponytail: one entry per ranked coin x wide bar size, unbounded by anything but the ranked set.
+_TECHNICALS_WIDE_CACHE_TTL_S = 600.0
+_wide_candles_cache: dict[tuple[str, int], tuple[float, list[dict]]] = {}
 _technicals_cache: dict[str, tuple[float, dict[str, dict[str, float | None]]]] = {}
 
 
@@ -97,7 +106,13 @@ class _CatalogReadError(Exception):
 
 
 class TechnicalsColumn(_indicators.IndicatorConfigEntry):
-    """Same wire shape as a per-coin picker entry -- only its persistence scope differs."""
+    """A per-coin picker entry plus the bar size it is computed on."""
+
+    bar_seconds: int = screener_columns_config.DEFAULT_BAR_SECONDS
+
+
+class TechnicalsRequestEntry(_indicators.IndicatorValueRequestEntry):
+    bar_seconds: int = screener_columns_config.DEFAULT_BAR_SECONDS
 
 
 @router.get("/api/rankings/technicals-columns")
@@ -108,7 +123,7 @@ def get_technicals_columns() -> list[TechnicalsColumn]:
         raise HTTPException(status_code=500, detail=f"screener_columns.toml is corrupt: {exc}") from exc
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"failed to read screener_columns.toml: {exc}") from exc
-    return [TechnicalsColumn(name=e.name, params=e.params, category=e.category) for e in entries]
+    return [TechnicalsColumn(**vars(e)) for e in entries]
 
 
 def _require_known_indicators(names: list[str]) -> None:
@@ -125,8 +140,11 @@ async def put_technicals_columns(request: Request) -> dict[str, bool]:
     try:
         payload = await request.json()
         entries = [
-            screener_columns_config.IndicatorEntry(
-                name=e["name"], params=e.get("params", {}), category=e["category"]
+            screener_columns_config.ColumnEntry(
+                name=e["name"],
+                params=e.get("params", {}),
+                category=e["category"],
+                bar_seconds=e.get("bar_seconds", screener_columns_config.DEFAULT_BAR_SECONDS),
             )
             for e in payload
         ]
@@ -139,6 +157,8 @@ async def put_technicals_columns(request: Request) -> dict[str, bool]:
             status_code=400,
             detail=f"too many columns: {len(entries)} > {_indicators._MAX_INDICATOR_VALUES_ENTRIES}",
         )
+    if any(e.bar_seconds not in _TECHNICALS_BAR_SIZES for e in entries):
+        raise HTTPException(status_code=400, detail=f"bar_seconds must be one of {_TECHNICALS_BAR_SIZES}")
     _require_known_indicators([e.name for e in entries])
     try:
         screener_columns_config.save_config(entries, Path(SCREENER_COLUMNS_CONFIG_PATH))
@@ -159,38 +179,58 @@ class TechnicalsValuesResponse(BaseModel):
     errors: dict[str, str] = {}
 
 
-def _latest_values(
-    instrument_id: str, entries: list[_indicators.IndicatorValueRequestEntry], now_ns: int
-) -> dict[str, float | None]:
-    """Each requested indicator's latest value for one instrument, via the chart's own
-    `replay_indicator` dispatch over a short recent 1m window (no indicator math here)."""
-    # Exactly the window needed (not the chart route's 3x scroll-back margin): 120 bars of 1m
-    # is 2h of 1s snapshots per coin, not 6h.
-    start_ns = now_ns - (_TECHNICALS_BARS + 5) * _TECHNICALS_BAR_SECONDS * 1_000_000_000
+def _recent_candles(instrument_id: str, bar_seconds: int, now_ns: int) -> list[dict]:
+    key = (instrument_id, bar_seconds)
+    hit = _wide_candles_cache.get(key)
+    if bar_seconds >= 14400 and hit is not None and time.monotonic() - hit[0] < _TECHNICALS_WIDE_CACHE_TTL_S:
+        return hit[1]
+    candles = _read_candles(instrument_id, bar_seconds, now_ns)
+    if bar_seconds >= 14400:
+        _wide_candles_cache[key] = (time.monotonic(), candles)
+    return candles
+
+
+def _read_candles(instrument_id: str, bar_seconds: int, now_ns: int) -> list[dict]:
+    bars = _TECHNICALS_BARS if bar_seconds <= 3600 else _TECHNICALS_WIDE_BARS
+    start_ns = now_ns - (bars + 5) * bar_seconds * 1_000_000_000
     try:
-        snapshots = _catalog_stats.query_second_snapshots(CATALOG_PATH, instrument_id, start_ns, now_ns)
+        if bar_seconds == 60:  # raw 1s is only affordable at 1m: 1H x 120 would be 5 days of it
+            snapshots = _catalog_stats.query_second_snapshots(CATALOG_PATH, instrument_id, start_ns, now_ns)
+            return candle_dicts_from_snapshots(snapshots, bar_seconds)[-bars:]
+        rows = _catalog_stats.query_minute_rollups(CATALOG_PATH, instrument_id, start_ns, now_ns)
+        return rollup_dicts_from_rows(rows, bar_seconds)[-bars:]
     except Exception as exc:
         raise _CatalogReadError(str(exc)) from exc
-    candles = candle_dicts_from_snapshots(snapshots, _TECHNICALS_BAR_SECONDS)[-_TECHNICALS_BARS:]
-    max_age_ms = _TECHNICALS_MAX_CANDLE_AGE_BARS * _TECHNICALS_BAR_SECONDS * 1000
-    if not candles or now_ns // 1_000_000 - candles[-1]["t"] > max_age_ms:
-        return {}  # no data / stopped: an honest gap, never a stale value shown as current (DATA-01)
-    window = custom_indicators.ReplayWindow(
-        instrument_id=instrument_id,
-        bar_seconds=_TECHNICALS_BAR_SECONDS,
-        start_ms=candles[0]["t"],
-        end_ms=candles[-1]["t"] + _TECHNICALS_BAR_SECONDS * 1000,
-    )
-    by_time, errors = _indicators._values_by_time(candles, entries, window)
-    if errors:  # unlike the chart, one bad column fails the request: a half-filled column reads as data
-        raise ValueError(next(iter(errors.values())))
-    latest = by_time[candles[-1]["t"]]
+
+
+def _latest_values(
+    instrument_id: str, entries: list[TechnicalsRequestEntry], now_ns: int
+) -> dict[str, float | None]:
+    """Each requested indicator's latest value for one instrument, via the chart's own
+    `replay_indicator` dispatch, each entry over its own column's timeframe (no indicator math
+    here). Candles are built once per distinct bar size."""
     keyed: dict[str, float | None] = {}
-    for index, entry in enumerate(entries):
-        prefix = _indicators._indicator_id(entry.name, entry.params) + "."
-        keyed.update(
-            {f"{index}.{k.removeprefix(prefix)}": v for k, v in latest.items() if k.startswith(prefix)}
+    for bar_seconds in sorted({e.bar_seconds for e in entries}):
+        candles = _recent_candles(instrument_id, bar_seconds, now_ns)
+        max_age_ms = _TECHNICALS_MAX_CANDLE_AGE_BARS * bar_seconds * 1000
+        if not candles or now_ns // 1_000_000 - candles[-1]["t"] > max_age_ms:
+            continue  # no data / stopped: an honest gap, never a stale value shown as current (DATA-01)
+        window = custom_indicators.ReplayWindow(
+            instrument_id=instrument_id,
+            bar_seconds=bar_seconds,
+            start_ms=candles[0]["t"],
+            end_ms=candles[-1]["t"] + bar_seconds * 1000,
         )
+        group = [(i, e) for i, e in enumerate(entries) if e.bar_seconds == bar_seconds]
+        by_time, errors = _indicators._values_by_time(candles, [e for _, e in group], window)
+        if errors:  # unlike the chart, one bad column fails the request: a half-filled column reads as data
+            raise ValueError(next(iter(errors.values())))
+        latest = by_time[candles[-1]["t"]]
+        for index, entry in group:
+            prefix = _indicators._indicator_id(entry.name, entry.params) + "."
+            keyed.update(
+                {f"{index}.{k.removeprefix(prefix)}": v for k, v in latest.items() if k.startswith(prefix)}
+            )
     return keyed
 
 
@@ -204,7 +244,9 @@ def get_technicals_values(entries: str) -> TechnicalsValuesResponse:
     reads behind a 90s TTL cache (> the client's 60s poll, or it never hits) (one live key) -- no single-flight, add one if concurrent
     viewers ever load the box.
     """
-    parsed = _indicators._parse_entries(entries)
+    parsed = _indicators._parse_entries(entries, TechnicalsRequestEntry)
+    if any(e.bar_seconds not in _TECHNICALS_BAR_SIZES for e in parsed):
+        raise HTTPException(status_code=400, detail=f"bar_seconds must be one of {_TECHNICALS_BAR_SIZES}")
     _require_known_indicators([e.name for e in parsed])
     latest = redis_bus.bus.latest
     if latest is None:

@@ -133,6 +133,7 @@ export interface TechnicalsColumn {
   name: string;
   params?: Record<string, unknown>;
   category: string;
+  bar_seconds?: number;
 }
 
 export interface TechnicalsValuesResponse {

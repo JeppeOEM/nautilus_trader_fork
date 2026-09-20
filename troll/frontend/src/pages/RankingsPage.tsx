@@ -3,12 +3,12 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 
 import { fetchRankings, fetchTechnicalsColumns, fetchTechnicalsValues, saveTechnicalsColumns } from "../api/client";
-import type { IndicatorConfigEntry } from "../api/schema";
+import type { TechnicalsColumn } from "../api/schema";
 import IndicatorPicker from "../components/chart/IndicatorPicker";
 import { useLiveChannel } from "../hooks/useLiveChannel";
 import FilterPanel, { type FilterField } from "./FilterPanel";
 import { applyFilters, type FilterCondition } from "./filters";
-import { buildGroups, reorder } from "./technicals";
+import { buildGroups, COLUMN_TIMEFRAMES, columnBarSeconds, reorder } from "./technicals";
 
 // Client-side heartbeat staleness threshold: mirrors bot_tui/ranking_state.py's
 // _RANKING_STALE_SECONDS = 15.0 (3x ranking_engine's RANKING_HEARTBEAT_SECONDS=5)
@@ -22,7 +22,7 @@ import { buildGroups, reorder } from "./technicals";
 // real and both get their own visible marker (Design Notes: "do not conflate").
 const RANKING_STALE_MS = 15_000;
 
-// One bulk indicator recompute for every ranked coin per poll -- slow by design (1m candles).
+// One bulk indicator recompute for every ranked coin per poll -- slow by design.
 const TECHNICALS_POLL_MS = 60_000;
 
 // Filter-field keys for Technicals outputs: `tech:{entry name}.{output attr}` -- name-based,
@@ -132,7 +132,7 @@ export default function RankingsPage() {
   // IndicatorPicker; header actions below (remove/reorder) save directly and bump `reloadKey`
   // so the picker re-reads the same persisted list. Values refresh on a slow poll -- one bulk
   // request for every ranked coin, not per-tick.
-  const [technicalsEntries, setTechnicalsEntries] = useState<IndicatorConfigEntry[]>([]);
+  const [technicalsEntries, setTechnicalsEntries] = useState<TechnicalsColumn[]>([]);
   const [reloadKey, setReloadKey] = useState(0);
   const savedLocally = useRef(false); // a header save beat the mount fetch: its result is stale
   const [dragFrom, setDragFrom] = useState<number | null>(null);
@@ -194,7 +194,7 @@ export default function RankingsPage() {
   // Applied to local state immediately, so a rapid second header action builds on this one
   // instead of the pre-PUT list (which would silently undo it); the picker is re-synced from
   // disk afterwards, and on failure too, rolling the optimistic change back.
-  function saveEntries(next: IndicatorConfigEntry[]): void {
+  function saveEntries(next: TechnicalsColumn[]): void {
     savedLocally.current = true;
     setTechnicalsEntries(next);
     setTechnicalsError(null);
@@ -299,6 +299,25 @@ export default function RankingsPage() {
                   }}
                 >
                   {group.entry.name}
+                  {/* The bar size this column is computed on -- always visible, editable in place. */}
+                  <select
+                    aria-label={`${group.entry.name} timeframe`}
+                    value={columnBarSeconds(group.entry)}
+                    disabled={saving}
+                    onChange={(event) =>
+                      saveEntries(
+                        technicalsEntries.map((e, i) =>
+                          i === group.entryIndex ? { ...e, bar_seconds: Number(event.target.value) } : e,
+                        ),
+                      )
+                    }
+                  >
+                    {COLUMN_TIMEFRAMES.map((tf) => (
+                      <option key={tf.seconds} value={tf.seconds}>
+                        {tf.label}
+                      </option>
+                    ))}
+                  </select>
                   <button
                     type="button"
                     className="rankings-history-link"
@@ -388,6 +407,11 @@ export default function RankingsPage() {
           })}
         </tbody>
       </table>
+      {activeTab === "technicals" && technicalsEntries.length > 0 && (
+        <p className="rankings-empty">
+          Each column shows the latest value on its own timeframe (selector in the header).
+        </p>
+      )}
       {activeTab === "technicals" && (technicalsError ?? valuesError) && (
         <p style={{ color: "var(--color-danger)" }}>
           {technicalsError ?? (valuesError instanceof Error ? valuesError.message : String(valuesError))}

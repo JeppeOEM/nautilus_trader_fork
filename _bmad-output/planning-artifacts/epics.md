@@ -2205,3 +2205,183 @@ Builder can trust every candle and volume bar on the chart end-to-end (collector
 ### Stories 21.1–21.5
 
 21.1 Ingest and rollup correctness · 21.2 Candle invariants and source equivalence · 21.3 Live candle seeding and volume · 21.4 Vite proxy connection resets · 21.5 Chart load speed. Each has a story file in `_bmad-output/implementation-artifacts/21-*.md`.
+
+## Epic 22: Multi-Exchange Trading, Paper Trading and Collection on One Collector Core
+
+Builder trades, paper-trades and collects backtest data on dYdX, Bybit (linear perps + spot) and Hyperliquid perps through **one shared collector core** (`troll/collector_core/`) and a venue-parameterised `live_paper`, so a fourth exchange is a thin `client.py` + config + entrypoint. Research and architecture: `_bmad-output/planning-artifacts/research/technical-multi-exchange-collector-core-and-orderbook-research-2026-09-20.md` (approved 2026-09-20). Decisions: all three collectors on the core (dYdX included); 1.0 s snapshot cadence everywhere; Bybit linear + spot with perp/spot explicit in API and UI; Sandbox paper trading primary, Bybit Demo / Hyperliquid Testnet via the explicit exec-config path only. Closes story 19.3/19.4's "extract common helpers once duplication across all three is visible".
+
+### Story 22.1: `troll/collector_core/` extracted from the Bybit and Hyperliquid collectors
+
+As the platform operator,
+I want the ~200 identical lines of `bybit_collector/collector.py` and `hyperliquid_collector/collector.py` to live once in `troll/collector_core/collector.py`,
+So that every venue gets the same ingest/flush/sample/write path and the same integrity guards.
+
+**Acceptance Criteria:**
+
+**Given** the two sibling collectors (story 19.3/19.4)
+**When** `collector_core.Collector(config, client, extra_loops=())` and `run_forever(build)` exist
+**Then** `bybit_collector/collector.py` and `hyperliquid_collector/collector.py` each shrink to a client + config + entrypoint of roughly 15–25 lines, with the Bybit open-interest REST poll passed as an `extra_loops` entry, and the duck-typed client contract (`fetch_instruments`, `connect`, `disconnect`, `subscribe`, `unsubscribe`, optional `subscribe_global`, optional `resync_orderbook`) is documented in the core docstring
+
+**Given** dYdX already has trade stale-age filtering + bounded `trade_id` dedup (DATA-06), minute rollup (DATA-05), `snapshots:raw` publish, the `_second_loop` lag canary and the OBS-01 watchdog
+**When** the core is built
+**Then** all of these run for Bybit and Hyperliquid too, with thresholds in `CoreConfig` defaulting to dYdX's current values
+
+**Given** the user's decision to unify cadence
+**When** the core's `_second_loop` runs
+**Then** every venue samples at `snapshot_interval_seconds = 1.0` (the Bybit/Hyperliquid configs lose their `0.5`)
+
+**Given** the crossed-book differences documented in the research (Bybit = local corruption, Hyperliquid = impossible by construction)
+**When** the core sees `best_bid >= best_ask`
+**Then** it skips the sample, records `error_ledger.record("collector.crossed_book", ...)`, and resyncs only if the client exposes `resync_orderbook` and the book has stayed crossed longer than `crossed_resync_seconds` (DATA-03: a fallback, never the fix)
+
+**Given** TEST-01/TEST-03
+**When** verified
+**Then** the sibling tests move to `collector_core/tests/` with real `OrderBook`/`TradeTick`/`ParquetDataCatalog` objects, and both collectors are live-verified on the VPS writing `DydxSecondSnapshot` rows at 1 s spacing
+
+### Story 22.2: dYdX collector onto the core
+
+As the platform operator,
+I want `dydx_collector/collector.py` to be `class DydxCollector(collector_core.Collector)`,
+So that the production dYdX feed shares the single write gate (AD-1) instead of a 1.7k-line copy of it.
+
+**Acceptance Criteria:**
+
+**Given** dYdX's venue-specific book logic (per-level message-id tagging in `_apply_deltas`, uncross + escalation in `_handle_crossed_book`, DATA-04)
+**When** migrated
+**Then** it lives in `dydx_collector/uncross.py` and is wired by overriding exactly those two core methods; the core's `_second_loop` gate is otherwise unchanged from today's `collector.py:1188-1269`
+
+**Given** dYdX's control plane (config reload, status/control Redis loops, liquidity tiering, prune, watchdog notifications, incident reports, `[WS_RAW]` flush, `_MAX_WS_SUBSCRIPTIONS = 32`)
+**When** migrated
+**Then** these stay in `dydx_collector/` as `extra_loops` and `DydxConfig(CoreConfig)` fields, unchanged in behaviour
+
+**Given** the 18 existing test modules in `dydx_collector/tests/`
+**When** the migration lands
+**Then** all pass with only import/attribute-path updates (no behavioural rewrites), `make test` is green, and the dYdX collector is live-verified on the VPS with the bot_tui collector pane still working
+
+### Story 22.3: Shared data types and a single `OpenInterest`
+
+As a backend developer,
+I want the venue-neutral Data types to live in `collector_core/` and the three identical open-interest classes to become one,
+So that a new venue imports shared types instead of reaching into `dydx_collector`.
+
+**Acceptance Criteria:**
+
+**Given** `DydxSecondSnapshot`, `DydxMinuteRollup` and `integrity.ohlc_outside_book` are venue-neutral but live in `dydx_collector/`
+**When** moved to `collector_core/`
+**Then** class names are unchanged (catalog directories `custom_dydx_second_snapshot/` etc. stay valid) and every importer (`data_api/routes/*`, `ml_signals`, `ranking_engine`, collectors, tests) is updated
+
+**Given** `DydxOpenInterest`, `BybitOpenInterest`, `HyperliquidOpenInterest` share the same four fields
+**When** replaced by `collector_core.open_interest.OpenInterest` (with a `from_pyo3` staticmethod for Hyperliquid)
+**Then** an idempotent migration script renames existing `custom_{dydx,bybit,hyperliquid}_open_interest/` catalog directories to `custom_open_interest/` and rewrites the Arrow `type` metadata, readers of `custom_data(...)` are updated, and re-running the script is a no-op
+
+### Story 22.4: Bybit spot collection and explicit perp/spot everywhere
+
+As the dashboard operator,
+I want Bybit spot pairs collected alongside linear perps and every API response and screen to say whether an instrument is perp or spot,
+So that a `BTCUSDT-SPOT.BYBIT` row is never mistaken for `BTCUSDT-LINEAR.BYBIT`.
+
+**Acceptance Criteria:**
+
+**Given** Bybit runs one public WebSocket per product type and its spot ticker has no bid/ask, funding or open interest (docs `websocket/public/ticker`)
+**When** `BybitClient` gains a SPOT connection
+**Then** `subscribe(iid)` routes by suffix (`nautilus_pyo3.bybit_product_type_from_symbol`), spot subscribes `publicTrade` + `orderbook.50` only, `fetch_instruments` returns LINEAR + SPOT, and the OI poll / ticker subscribe remain linear-only by construction
+
+**Given** Nautilus's id suffixes (`-PERP`, `-LINEAR`, `-INVERSE` ⇒ perp; `-SPOT` ⇒ spot)
+**When** `common/venues.py` gains `market_kind(instrument_id) -> "perp" | "spot" | "unknown"`
+**Then** it is a pure function unit-tested against every real id shape for all three venues
+
+**Given** story 19.1's `venue` field
+**When** `market` is added
+**Then** it appears next to `venue` in every `data_api` response that carries `venue` (candles, snapshots, indicators, indicator_series, rankings), in `ranking_engine`'s rank entries, in `frontend/src/api/schema.ts`, as a screener column + filter (same pattern as story 19.5), and as a badge in the chart header
+
+### Story 22.5: Order book validation per venue
+
+As the platform operator,
+I want each venue's book to be checked against an independent source of truth and its known failure modes to have loud canaries,
+So that DATA-02's "no mysteries in ingestion" holds for Bybit and Hyperliquid, not just dYdX.
+
+**Acceptance Criteria:**
+
+**Given** Bybit's `u` update id (documented as a sequence; `u=1` = service-restart snapshot) is stamped as `BookOrder.order_id` by the Rust client, which performs no gap check
+**When** a non-snapshot delta arrives with `u` ≤ the previous `u` for that instrument, or with a gap > 1
+**Then** a `collector.book_sequence` ledger entry + counter is recorded (WARNING for a gap until a live capture proves `u` is contiguous in practice, then ERROR) and the book is resynced; dYdX and Hyperliquid opt out with the reason documented in their `client.py`
+
+**Given** REST snapshots exist for both venues (pyo3 `BybitHttpClient.request_orderbook_snapshot`; Hyperliquid `POST /info l2Book` via stdlib `urllib`, weight 2)
+**When** a periodic cross-check `extra_loop` runs
+**Then** the top-20 levels of the live book are diffed against the REST book taken at the same instant, mismatches beyond a tolerance land in `error_ledger` and `troll/docs/DATA_INTEGRITY_AUDIT.md`, and one hour of Bybit and Hyperliquid runs reports zero mismatches
+
+**Given** DATA-06 requires every new channel to be checked for subscribe-time replay
+**When** the first messages after `publicTrade` (Bybit) and `trades` (Hyperliquid) subscription are captured with the `[WS_RAW]` debug feed
+**Then** the replay finding per venue is registered in `DATA_INTEGRITY_AUDIT.md` with evidence, and the core's dedup/age filter is confirmed to cover it
+
+**Given** Hyperliquid pushes `l2Book` "on each block that is at least 0.5 s since last push" but the collector observed ~5 s spacing
+**When** a raw capture resolves the discrepancy
+**Then** a feed-level liveness timestamp distinguishes "quiet feed, book unchanged" from "dead feed / post-reconnect stale", per-venue `stale_book_seconds` is set from the evidence, and the finding is registered
+
+### Story 22.6: `live_paper` multi-venue paper trading (Sandbox)
+
+As a strategy developer,
+I want one `live_paper` process to run paper bots on dYdX, Bybit and Hyperliquid instruments at once,
+So that the same `DummyStrategy` is validated on every venue against live mainnet data.
+
+**Acceptance Criteria:**
+
+**Given** `live_paper/node.py` is hard-wired to `DydxDataClientConfig`/`DydxLiveDataClientFactory`
+**When** `live_paper/venues.py` maps `DYDX`/`BYBIT`/`HYPERLIQUID` to (data config class, data factory, exec config class, exec factory, allowed environments, paper quote currency) as a plain dict
+**Then** `build_node` creates one data client and one `SandboxExecutionClientConfig` per venue present in `PaperConfig.bots` (venue from `venue_of(bot.instrument_id)`), still one `TradingNode` per process
+
+**Given** AD-11 currently reads "one `DydxDataClientConfig`, one `SandboxExecutionClientConfig` no matter how many bots"
+**When** this story ships
+**Then** the spine is amended to "one data client and one exec client per venue in use" and `PaperConfig` carries per-venue `starting_balances` and `environment`
+
+**Given** Bybit spot and linear share the `BYBIT` venue
+**When** a spot bot and a linear bot run in the same node
+**Then** a spot fill and a linear fill are both observed in Sandbox (the open item on Sandbox account type for mixed `CurrencyPair`/perp instruments is resolved with evidence), and `bots:status` shows every bot
+
+### Story 22.7: Exchange demo/testnet and real money for Bybit and Hyperliquid
+
+As the platform operator,
+I want the explicit exec-config path to reach Bybit Demo, Hyperliquid Testnet and (separately) real mainnet execution on both venues,
+So that real order signing and reports are validated on the exchange's own paper environment before any real funds are used.
+
+**Acceptance Criteria:**
+
+**Given** story 3.1's two-signal safety design (separate file, separate loader, explicit `mode`)
+**When** the loader accepts `mode = "exchange_demo"`
+**Then** it requires a non-mainnet `environment` (Bybit `demo`/`testnet`, Hyperliquid `testnet`, dYdX `testnet`), `mode = "real_money"` requires `environment = "mainnet"`, and a mismatch fails closed with a clear error
+
+**Given** Bybit Demo uses `api-demo.bybit.com` + `wss://stream-demo.bybit.com` for private streams only, has no WS Trade API, and takes funds via `POST /v5/account/demo-apply-money` (docs `v5/demo`)
+**When** a Bybit demo run starts
+**Then** it uses `BybitEnvironment.DEMO`, credentials come only from the env vars Nautilus's factory reads, and one order is placed and cancelled with its reports visible in `bots:status`
+
+**Given** Hyperliquid Testnet needs a mainnet deposit from the same address before `claimDrip` grants 1,000 mock USDC
+**When** a Hyperliquid testnet run starts
+**Then** it uses `HyperliquidEnvironment.TESTNET` with `HYPERLIQUID_TESTNET_PK`, and `DEPLOY_CHECKLIST.md` documents the faucet prerequisite and the thin-liquidity caveat
+
+### Story 22.8: Spine, rules and docs updated for the multi-venue core
+
+As a future contributor,
+I want the architecture spine and `troll/CLAUDE.md` to describe the core, not three siblings,
+So that the next venue is added the documented way.
+
+**Acceptance Criteria:**
+
+**Given** ARCHITECTURE-SPINE AD-1 ("structural enforcement once a second writer exists"), AD-4 (shared types list, stale `DydxMinuteBar` name) and AD-11
+**When** this story ships
+**Then** each is amended to name `collector_core` as the single write gate, the moved shared types, and per-venue clients; the "one producer per channel" convention reads "one producer per (channel, venue)"
+
+**Given** `troll/CLAUDE.md`'s header scopes the rules to `dydx_collector/` and `ml_signals/`
+**When** updated
+**Then** the scope covers `collector_core/` and every venue collector, and the "how to add a venue" recipe (client + config + entrypoint + one `common/venues.py` line) is written down once
+
+### Story 22.9 (optional): Historical bar backfill for Bybit and Hyperliquid
+
+As a strategy developer,
+I want 1-minute `Bar` history backfilled into the catalog from Bybit klines (pyo3 `request_bars`) and Hyperliquid `candleSnapshot` (last 5000 candles),
+So that backtests on these venues can run over more history than the collector has been alive for.
+
+**Acceptance Criteria:**
+
+**Given** NAUT-02/NAUT-03
+**When** the backfill runs
+**Then** bars are written via `ParquetDataCatalog.write_data()`, re-runs are idempotent (skip existing ranges), and a `BacktestDataConfig` over the backfilled range loads them without conversion

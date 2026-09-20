@@ -45,6 +45,7 @@ def _client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setattr(rankings_routes, "SCREENER_COLUMNS_CONFIG_PATH", str(tmp_path / "cols.toml"))
     monkeypatch.setattr(rankings_routes, "CATALOG_PATH", catalog)
     rankings_routes._technicals_cache.clear()
+    rankings_routes._wide_candles_cache.clear()
     monkeypatch.setattr(indicators_routes, "CATALOG_PATH", catalog)
     return TestClient(app_module.app)
 
@@ -72,8 +73,8 @@ def test_columns_default_to_empty_and_roundtrip_in_order(
     assert client.get("/api/rankings/technicals-columns").json() == []
 
     cols = [
-        {"name": "RelativeStrengthIndex", "params": {"period": 7}, "category": "native"},
-        {"name": "MovingAverageConvergenceDivergence", "params": {}, "category": "native"},
+        {"name": "RelativeStrengthIndex", "params": {"period": 7}, "category": "native", "bar_seconds": 60},
+        {"name": "MovingAverageConvergenceDivergence", "params": {}, "category": "native", "bar_seconds": 3600},
     ]
     assert client.put("/api/rankings/technicals-columns", json=cols).json() == {"ok": True}
     assert client.get("/api/rankings/technicals-columns").json() == cols
@@ -102,7 +103,7 @@ def test_columns_are_independent_of_per_coin_indicator_config(
 def test_values_503_before_first_rankings_message(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(redis_bus, "bus", RankingsBus())
     client = _client(tmp_path, monkeypatch)
-    entries = json.dumps([{"name": "RelativeStrengthIndex", "params": {}}])
+    entries = json.dumps([{"name": "RelativeStrengthIndex", "params": {}, "bar_seconds": 60}])
     assert client.get("/api/rankings/technicals-values", params={"entries": entries}).status_code == 503
 
 
@@ -115,8 +116,8 @@ def test_values_match_the_chart_route_for_single_and_multi_value_entries(
     monkeypatch.setattr(redis_bus, "bus", bus)
     client = _client(tmp_path, monkeypatch)
     entries = json.dumps([
-        {"name": "RelativeStrengthIndex", "params": {"period": 14}},
-        {"name": "MovingAverageConvergenceDivergence", "params": {}},
+        {"name": "RelativeStrengthIndex", "params": {"period": 14}, "bar_seconds": 60},
+        {"name": "MovingAverageConvergenceDivergence", "params": {}, "bar_seconds": 60},
     ])
 
     got = client.get("/api/rankings/technicals-values", params={"entries": entries}).json()["values"]
@@ -156,7 +157,7 @@ def test_values_omit_a_coin_whose_newest_candle_is_stale(
     _seed_recent_minutes(tmp_path, ended_minutes_ago=30)  # data stopped half an hour ago
     _ranked(monkeypatch, _IID)
     client = _client(tmp_path, monkeypatch)
-    entries = json.dumps([{"name": "RelativeStrengthIndex", "params": {}}])
+    entries = json.dumps([{"name": "RelativeStrengthIndex", "params": {}, "bar_seconds": 60}])
 
     values = client.get("/api/rankings/technicals-values", params={"entries": entries}).json()["values"]
 
@@ -186,7 +187,7 @@ def test_one_coins_catalog_failure_does_not_blank_the_others(
         return real(iid, entries, now_ns)
 
     monkeypatch.setattr(rankings_routes, "_latest_values", flaky)
-    entries = json.dumps([{"name": "RelativeStrengthIndex", "params": {}}])
+    entries = json.dumps([{"name": "RelativeStrengthIndex", "params": {}, "bar_seconds": 60}])
 
     body = client.get("/api/rankings/technicals-values", params={"entries": entries}).json()
 
@@ -206,7 +207,7 @@ def test_values_are_served_from_the_ttl_cache_on_a_repeat_poll(
     monkeypatch.setattr(
         rankings_routes, "_latest_values", lambda i, e, n: calls.append(i) or real(i, e, n),
     )
-    entries = json.dumps([{"name": "RelativeStrengthIndex", "params": {}}])
+    entries = json.dumps([{"name": "RelativeStrengthIndex", "params": {}, "bar_seconds": 60}])
 
     first = client.get("/api/rankings/technicals-values", params={"entries": entries}).json()
     second = client.get("/api/rankings/technicals-values", params={"entries": entries}).json()
@@ -230,7 +231,7 @@ def test_a_valueerror_from_one_coins_catalog_read_does_not_become_a_whole_reques
         return real(path, iid, a, b)
 
     monkeypatch.setattr(rankings_routes._catalog_stats, "query_second_snapshots", read)
-    entries = json.dumps([{"name": "RelativeStrengthIndex", "params": {}}])
+    entries = json.dumps([{"name": "RelativeStrengthIndex", "params": {}, "bar_seconds": 60}])
 
     response = client.get("/api/rankings/technicals-values", params={"entries": entries})
 
@@ -245,7 +246,7 @@ def test_cache_key_ignores_rank_order(tmp_path: Path, monkeypatch: pytest.Monkey
     calls: list[str] = []
     real = rankings_routes._latest_values
     monkeypatch.setattr(rankings_routes, "_latest_values", lambda i, e, n: calls.append(i) or real(i, e, n))
-    entries = json.dumps([{"name": "RelativeStrengthIndex", "params": {}}])
+    entries = json.dumps([{"name": "RelativeStrengthIndex", "params": {}, "bar_seconds": 60}])
 
     _ranked(monkeypatch, _IID, "ZZZ-USD-PERP.DYDX")
     client.get("/api/rankings/technicals-values", params={"entries": entries})
@@ -264,3 +265,38 @@ def test_put_rejects_non_object_params_and_too_many_columns(tmp_path: Path, monk
     assert bad.status_code == 400
     many = [{"name": "AverageTrueRange", "params": {}, "category": "native"}] * 51
     assert client.put("/api/rankings/technicals-columns", json=many).status_code == 400
+
+
+def test_columns_default_to_hourly_and_reject_unknown_bar_sizes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _client(tmp_path, monkeypatch)
+    bare = [{"name": "RelativeStrengthIndex", "params": {}, "category": "native"}]
+    assert client.put("/api/rankings/technicals-columns", json=bare).status_code == 200
+    assert client.get("/api/rankings/technicals-columns").json()[0]["bar_seconds"] == 3600
+    bad = [{**bare[0], "bar_seconds": 7}]
+    assert client.put("/api/rankings/technicals-columns", json=bad).status_code == 400
+
+
+def test_each_column_is_computed_on_its_own_timeframe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _seed_recent_minutes(tmp_path)
+    bus = RankingsBus()
+    bus.latest = {"mode": "volume", "updated_at": 1, "ranks": [{"instrument_id": _IID}]}
+    monkeypatch.setattr(redis_bus, "bus", bus)
+    client = _client(tmp_path, monkeypatch)
+    seen: list[int] = []
+    monkeypatch.setattr(
+        rankings_routes, "_recent_candles",
+        lambda iid, bar_seconds, now_ns: seen.append(bar_seconds) or [],
+    )
+    entries = json.dumps([
+        {"name": "RelativeStrengthIndex", "params": {}, "bar_seconds": 60},
+        {"name": "RelativeStrengthIndex", "params": {"period": 7}, "bar_seconds": 86400},
+        {"name": "AverageTrueRange", "params": {}, "bar_seconds": 60},
+    ])
+    assert client.get("/api/rankings/technicals-values", params={"entries": entries}).status_code == 200
+    assert seen == [60, 86400]  # one candle build per distinct bar size, not per entry
+    bad = json.dumps([{"name": "RelativeStrengthIndex", "params": {}, "bar_seconds": 7}])
+    assert client.get("/api/rankings/technicals-values", params={"entries": bad}).status_code == 400

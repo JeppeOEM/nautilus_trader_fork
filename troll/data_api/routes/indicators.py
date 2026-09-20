@@ -236,14 +236,16 @@ def _window_start_ns(before_ns: int, limit: int, bar_seconds: int) -> int:
     return before_ns - span_seconds * 1_000_000_000
 
 
-def _parse_entries(entries: str) -> list[IndicatorValueRequestEntry]:
+def _parse_entries(
+    entries: str, model: type[IndicatorValueRequestEntry] = IndicatorValueRequestEntry
+) -> list[IndicatorValueRequestEntry]:
     """Parse the `entries` query param (a JSON-encoded array of `{"name", "params"}` objects)
     into validated request entries. Raises `HTTPException(400)` for any malformed input --
     invalid JSON, a non-array body, or an entry missing `name` -- never a `500` for a
     client-input problem (DATA-02, same posture as the PUT config route above)."""
     try:
         raw = json.loads(entries)
-        parsed = [IndicatorValueRequestEntry(**e) for e in raw]
+        parsed = [model(**e) for e in raw]
     except (json.JSONDecodeError, TypeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=f"invalid entries payload: {exc}") from exc
     if len(parsed) > _MAX_INDICATOR_VALUES_ENTRIES:

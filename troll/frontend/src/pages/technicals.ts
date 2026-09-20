@@ -1,11 +1,22 @@
-import type { IndicatorConfigEntry } from "../api/schema";
+import type { TechnicalsColumn } from "../api/schema";
+import { TIMEFRAMES } from "../timeframes";
 
 /** Instrument -> "{entry_index}.{output_attr}" -> value, as `GET /api/rankings/technicals-values` returns. */
 export type TechnicalsValues = Record<string, Record<string, number | null>>;
 
+/** Mirrors the backend default for a column saved without a timeframe. */
+export const DEFAULT_BAR_SECONDS = 3600;
+
+/** What the column selector offers: the chart's timeframes minus 1W, which the backend rejects. */
+export const COLUMN_TIMEFRAMES = TIMEFRAMES.filter((tf) => tf.seconds <= 86400);
+
+export function columnBarSeconds(entry: TechnicalsColumn): number {
+  return entry.bar_seconds ?? DEFAULT_BAR_SECONDS;
+}
+
 export interface TechnicalsGroup {
   entryIndex: number;
-  entry: IndicatorConfigEntry;
+  entry: TechnicalsColumn;
   /** Output names present in the response (one for RSI, several for MACD/Bollinger...).
    * Empty until the first values arrive -- rendered as one placeholder column. */
   attrs: string[];
@@ -14,7 +25,7 @@ export interface TechnicalsGroup {
 /** One group per configured entry; a multi-output entry's outputs become adjacent columns
  * under one shared header. Grouping comes from the response's keys, since the catalog does
  * not declare an entry's outputs. */
-export function buildGroups(entries: IndicatorConfigEntry[], values: TechnicalsValues | undefined): TechnicalsGroup[] {
+export function buildGroups(entries: TechnicalsColumn[], values: TechnicalsValues | undefined): TechnicalsGroup[] {
   return entries.map((entry, entryIndex) => {
     const prefix = `${entryIndex}.`;
     const attrs: string[] = [];

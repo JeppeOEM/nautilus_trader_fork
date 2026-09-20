@@ -65,7 +65,9 @@ Frontend:
 
 - Collector second loop: `sleep(1.0)` + body drifts ~30 ms/tick → one wall second skipped every
   ~33 s; `ts_event` unaligned; trades attributed to the receive second (`collector.py` `_second_loop`).
-  Visible only at 1s.
+  **Also visible at 1m** (2026-09-19 deep dive, `docs/DATA_INTEGRITY_AUDIT.md` D-31/D-32): a trade
+  1–3 s before a minute boundary lands in the next minute (BTC 20:00 candle where the indexer has
+  0 trades), and trades during a WS outage are lost because the replay cannot be placed.
 - `config.py` default `snapshot_interval_seconds=0.5` vs `config.toml` 1.0 (affects rollup `seconds_observed`).
 - 1s: time-linear axis (whitespace per missing bucket) + per-bucket empty heartbeat on the live channel.
 - `partial` rollup bars are drawn like complete ones; browser-vs-server clock for the history cursor;
