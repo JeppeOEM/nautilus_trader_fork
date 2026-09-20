@@ -29,9 +29,6 @@ from live_paper.node import build_node
 
 def _paper_config(*bots: BotConfig) -> PaperConfig:
     return PaperConfig(
-        network=DydxNetwork.MAINNET,
-        starting_balances=("10_000 USDC",),
-        account_type="MARGIN",
         log_level="ERROR",
         bots=bots or (BotConfig(bot_id="bot-01"),),
     )
@@ -133,5 +130,34 @@ def test_build_node_passes_redis_credentials_and_ssl_from_url(
         assert db.username == "user"
         assert db.password == "secret"
         assert db.ssl is True
+    finally:
+        _dispose(node)
+
+
+def test_paper_config_builds_one_data_and_one_sandbox_client_per_venue_in_use() -> None:
+    node = build_node(
+        _paper_config(
+            BotConfig(bot_id="dydx", instrument_id="BTC-USD-PERP.DYDX"),
+            BotConfig(bot_id="bybit-lin", instrument_id="BTCUSDT-LINEAR.BYBIT"),
+            BotConfig(bot_id="bybit-spot", instrument_id="BTCUSDT-SPOT.BYBIT"),
+            BotConfig(bot_id="hl", instrument_id="BTC-USD-PERP.HYPERLIQUID"),
+        )
+    )
+    try:
+        venues = {"DYDX", "BYBIT", "HYPERLIQUID"}
+        assert set(node._config.data_clients) == venues
+        assert set(node._config.exec_clients) == venues
+        assert all(isinstance(c, SandboxExecutionClientConfig) for c in node._config.exec_clients.values())
+        assert node._config.exec_clients["BYBIT"].starting_balances == ["10_000 USDT"]
+        assert node._config.exec_clients["HYPERLIQUID"].starting_balances == ["10_000 USDC"]
+        assert len(node.trader.strategy_states()) == 4
+    finally:
+        _dispose(node)
+
+
+def test_only_venues_with_a_bot_get_clients() -> None:
+    node = build_node(_paper_config(BotConfig(bot_id="b", instrument_id="BTCUSDT-SPOT.BYBIT")))
+    try:
+        assert set(node._config.data_clients) == {"BYBIT"}
     finally:
         _dispose(node)

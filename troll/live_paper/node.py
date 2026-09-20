@@ -20,9 +20,9 @@ AD-8 amendment. dydx_collector/ml_signals never instantiate TradingNode (troll/C
 FORK-02); that rule's own header scopes it to those two modules only, and does not bind
 this new, structurally separate module.
 
-Paper mode (the only reachable default -- see config.py) wires live DydxDataClientConfig
-market data into a SandboxExecutionClientConfig/SandboxLiveExecClientFactory simulated
-exchange: no wallet address or private key anywhere in this path, so real funds are
+Paper mode (the only reachable default -- see config.py) wires each venue's live public
+market data client (dYdX/Bybit/Hyperliquid, see venues.py) into a
+SandboxExecutionClientConfig/SandboxLiveExecClientFactory simulated exchange, one per venue: no wallet address or private key anywhere in this path, so real funds are
 structurally unreachable, not merely gated by a disabled flag. Real money uses
 DydxExecClientConfig/DydxLiveExecClientFactory instead, which does sign and submit real
 on-chain transactions -- only reachable via the separate, explicit path in config.py.
@@ -46,11 +46,14 @@ from urllib.parse import urlparse
 
 from live_paper import bot_status
 from live_paper import trade_history
+from live_paper.config import BotConfig
 from live_paper.config import PaperConfig
 from live_paper.config import RealMoneyConfig
 from live_paper.config import resolve_config
 from live_paper.strategy import DummyStrategy
 from live_paper.strategy import DummyStrategyConfig
+from live_paper.venues import VENUES
+from ml_signals.venue import venue_of
 from nautilus_trader.adapters.dydx.config import DydxDataClientConfig
 from nautilus_trader.adapters.dydx.config import DydxExecClientConfig
 from nautilus_trader.adapters.dydx.constants import DYDX
@@ -81,17 +84,42 @@ _REDIS_URL = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
 _FILLS_DB_PATH = os.environ.get("FILLS_DB_PATH", str(_MODULE_DIR / "data" / "fills.db"))
 
 
+def _paper_venue_clients(
+    config: PaperConfig, bots: tuple[BotConfig, ...], instrument_provider: InstrumentProviderConfig
+) -> tuple[dict, dict, dict]:
+    """One data client + one Sandbox exec client per venue in use (AD-11: Nautilus allows only
+    one exec client per venue, so bots on the same venue share that venue's balance pool)."""
+    data_clients, exec_clients, data_factories = {}, {}, {}
+    for venue in sorted({venue_of(bot.instrument_id) for bot in bots}):
+        spec = VENUES[venue]
+        venue_config = config.venue_config(venue)
+        data_clients[venue] = spec.make_data_config(
+            environment=spec.parse_environment(venue_config.environment),
+            instrument_provider=instrument_provider,
+        )
+        data_factories[venue] = spec.data_factory
+        exec_clients[venue] = SandboxExecutionClientConfig(
+            venue=venue,
+            starting_balances=list(venue_config.starting_balances),
+            account_type=venue_config.account_type,
+            instrument_provider=instrument_provider,
+        )
+    return data_clients, exec_clients, data_factories
+
+
 def build_node(config: PaperConfig | RealMoneyConfig) -> TradingNode:
     instrument_provider = InstrumentProviderConfig(load_all=True)
 
-    data_clients = {
-        DYDX: DydxDataClientConfig(
-            environment=config.network,
-            instrument_provider=instrument_provider,
-        ),
-    }
-
     if isinstance(config, RealMoneyConfig):
+        # Real money stays dYdX-only, one-bot-per-file/subaccount (AD-11) --
+        # RealMoneyConfig itself already carries one bot's instrument/sizing/thresholds/bot_id.
+        data_clients = {
+            DYDX: DydxDataClientConfig(
+                environment=config.network,
+                instrument_provider=instrument_provider,
+            ),
+        }
+        data_factories = {DYDX: DydxLiveDataClientFactory}
         exec_clients = {
             DYDX: DydxExecClientConfig(
                 environment=config.network,
@@ -100,22 +128,13 @@ def build_node(config: PaperConfig | RealMoneyConfig) -> TradingNode:
             ),
         }
         exec_factory = DydxLiveExecClientFactory
-        # Real money stays one-bot-per-file/subaccount (AD-11) -- RealMoneyConfig
-        # itself already carries one bot's instrument/sizing/thresholds/bot_id.
         bots = (config,)
     else:
-        exec_clients = {
-            DYDX: SandboxExecutionClientConfig(
-                venue=DYDX,
-                starting_balances=list(config.starting_balances),
-                account_type=config.account_type,
-                instrument_provider=instrument_provider,
-            ),
-        }
-        exec_factory = SandboxLiveExecClientFactory
-        # AD-11: every configured paper bot shares this one node/connection/balance
-        # pool -- no per-bot exec client (Nautilus allows only one per venue per node).
         bots = config.bots
+        data_clients, exec_clients, data_factories = _paper_venue_clients(
+            config, bots, instrument_provider
+        )
+        exec_factory = SandboxLiveExecClientFactory
 
     # Redis-backed Cache (Story 4.6, AD-10) -- orders/positions/fills persist beyond
     # this process's lifetime instead of defaulting to in-memory-only. Parsed from the
@@ -144,8 +163,9 @@ def build_node(config: PaperConfig | RealMoneyConfig) -> TradingNode:
     )
 
     node = TradingNode(config=node_config)
-    node.add_data_client_factory(DYDX, DydxLiveDataClientFactory)
-    node.add_exec_client_factory(DYDX, exec_factory)
+    for venue, data_factory in data_factories.items():
+        node.add_data_client_factory(venue, data_factory)
+        node.add_exec_client_factory(venue, exec_factory)
 
     strategies = []
     for bot in bots:

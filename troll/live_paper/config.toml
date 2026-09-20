@@ -13,12 +13,25 @@
 # trade_size is NOT calibrated per-instrument (0.001 BTC and 0.001 DOGE are wildly
 # different position sizes) -- fine for a connectivity/subscription/isolation
 # stress test, not meant to be a realistic PnL run. starting_balances is the ONE
-# shared simulated pool every bot below draws from (AD-11) -- sized up from the
-# 2-bot default to give 40 bots headroom.
-network = "mainnet"
+# shared simulated pool every dYdX bot below draws from (AD-11) -- sized up from the
+# 2-bot default to give 40 bots headroom. Each venue in use gets its own pool.
+log_level = "INFO"
+
+[venues.DYDX]
+environment = "mainnet"
 starting_balances = ["100_000 USDC"]
 account_type = "MARGIN"
-log_level = "INFO"
+
+# Other venues: add a bot with e.g. instrument_id = "BTCUSDT-LINEAR.BYBIT" or
+# "BTC-USD-PERP.HYPERLIQUID" and (optionally) uncomment its table. Absent tables use
+# environment "mainnet", MARGIN, and 10_000 of the venue's quote currency.
+# A Bybit spot and a Bybit linear bot may share the node -- see README.md.
+# [venues.BYBIT]
+# environment = "mainnet"        # mainnet | demo | testnet
+# starting_balances = ["10_000 USDT"]
+# [venues.HYPERLIQUID]
+# environment = "mainnet"        # mainnet | testnet
+# starting_balances = ["10_000 USDC"]
 
 [[bots]]
 bot_id = "bot-01"

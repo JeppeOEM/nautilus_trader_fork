@@ -49,10 +49,17 @@ means **no trade history gets recorded at all**, so don't skip this step).
 Edit `troll/live_paper/config.toml`:
 
 ```toml
-network = "mainnet"                 # or "testnet" -- only changes the market data feed
+log_level = "INFO"
+
+# One table per venue you trade on (DYDX | BYBIT | HYPERLIQUID); absent = defaults
+# (mainnet, MARGIN, 10_000 of the venue's quote currency: USDC / USDT / USDC).
+# `environment` only changes the market data feed -- paper execution is always simulated.
+[venues.DYDX]
+environment = "mainnet"             # mainnet | testnet   (BYBIT also allows demo)
 starting_balances = ["10_000 USDC"]
 account_type = "MARGIN"
-log_level = "INFO"
+
+[[bots]]
 instrument_id = "BTC-USD-PERP.DYDX"
 bot_id = "bot-01"
 trade_size = "0.001"
@@ -60,6 +67,16 @@ trend_buy_threshold = 0.6
 trend_sell_threshold = 0.4
 ofi_confirm_threshold = 0.0
 ```
+
+**Multi-venue:** a bot's venue is the suffix of its `instrument_id` (`BTCUSDT-LINEAR.BYBIT`,
+`BTCUSDT-SPOT.BYBIT`, `BTC-USD-PERP.HYPERLIQUID`, ...). One `TradingNode` runs one data client
+and one Sandbox exec client per venue in use; bots on the same venue share that venue's
+balance pool. An unsupported venue or unknown `[venues.*]` key fails at load.
+
+**Bybit spot + linear in one node works.** Sandbox is one `MARGIN` account per venue, and a
+`MARGIN` account fills both a spot `CurrencyPair` and a linear perpetual (proved in
+`tests/test_sandbox_mixed_account.py` on the same `SimulatedExchange` the Sandbox client
+wraps) -- so no config restriction is needed.
 
 This file must never contain a `mode` key — `load_paper_config()` hard-errors if it
 finds one (that's the point: real-money execution is a separate file/loader, never a

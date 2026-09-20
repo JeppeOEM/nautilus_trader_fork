@@ -283,7 +283,7 @@ development_status:
   22-3-shared-data-types-and-a-single-openinterest: awaiting-operator
   22-4-bybit-spot-collection-and-explicit-perp-spot-everywhere: awaiting-operator
   22-5-order-book-validation-per-venue: awaiting-operator
-  22-6-live-paper-multi-venue-paper-trading-sandbox: ready-for-dev
+  22-6-live-paper-multi-venue-paper-trading-sandbox: done
   22-7-exchange-demo-testnet-and-real-money-for-bybit-and-hyperliquid: ready-for-dev
   22-8-spine-rules-and-docs-updated-for-the-multi-venue-core: ready-for-dev
   22-9-historical-bar-backfill-for-bybit-and-hyperliquid: ready-for-dev

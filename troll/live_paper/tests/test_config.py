@@ -36,14 +36,14 @@ def _write(tmp_path, name: str, content: str):
 
 
 def test_default_paper_config_loads_paper_mode(tmp_path) -> None:
-    path = _write(tmp_path, "config.toml", f'network = "mainnet"\n{_ONE_BOT}')
+    path = _write(tmp_path, "config.toml", f'log_level = "INFO"\n{_ONE_BOT}')
     config = load_paper_config(path)
     assert isinstance(config, PaperConfig)
-    assert config.network == DydxNetwork.MAINNET
+    assert config.venue_config("DYDX").environment == "mainnet"
 
 
 def test_paper_config_requires_at_least_one_bot(tmp_path) -> None:
-    path = _write(tmp_path, "config.toml", 'network = "mainnet"\n')
+    path = _write(tmp_path, "config.toml", 'log_level = "INFO"\n')
     with pytest.raises(ValueError, match="at least one \\[\\[bots\\]\\] entry"):
         load_paper_config(path)
 
@@ -52,7 +52,7 @@ def test_paper_config_rejects_duplicate_bot_ids(tmp_path) -> None:
     path = _write(
         tmp_path,
         "config.toml",
-        'network = "mainnet"\n'
+        'log_level = "INFO"\n'
         '[[bots]]\nbot_id = "bot-01"\n'
         '[[bots]]\nbot_id = "bot-01"\n',
     )
@@ -61,7 +61,7 @@ def test_paper_config_rejects_duplicate_bot_ids(tmp_path) -> None:
 
 
 def test_resolve_config_with_no_real_money_path_returns_paper(tmp_path) -> None:
-    path = _write(tmp_path, "config.toml", f'network = "mainnet"\n{_ONE_BOT}')
+    path = _write(tmp_path, "config.toml", f'log_level = "INFO"\n{_ONE_BOT}')
     config, is_real_money = resolve_config(path, real_money_path=None)
     assert is_real_money is False
     assert isinstance(config, PaperConfig)
@@ -97,7 +97,7 @@ def test_real_money_config_loads_when_mode_is_explicit(tmp_path) -> None:
 
 
 def test_resolve_config_with_real_money_path_returns_real_money(tmp_path) -> None:
-    paper_path = _write(tmp_path, "config.toml", f'network = "mainnet"\n{_ONE_BOT}')
+    paper_path = _write(tmp_path, "config.toml", f'log_level = "INFO"\n{_ONE_BOT}')
     real_money_path = _write(
         tmp_path,
         "real_money.toml",
@@ -109,7 +109,7 @@ def test_resolve_config_with_real_money_path_returns_real_money(tmp_path) -> Non
 
 
 def test_resolve_config_with_empty_string_real_money_path_returns_paper(tmp_path) -> None:
-    path = _write(tmp_path, "config.toml", f'network = "mainnet"\n{_ONE_BOT}')
+    path = _write(tmp_path, "config.toml", f'log_level = "INFO"\n{_ONE_BOT}')
     config, is_real_money = resolve_config(path, real_money_path="")
     assert is_real_money is False
     assert isinstance(config, PaperConfig)
@@ -119,14 +119,14 @@ def test_paper_config_rejects_a_bare_string_starting_balances(tmp_path) -> None:
     path = _write(
         tmp_path,
         "config.toml",
-        f'network = "mainnet"\nstarting_balances = "10_000 USDC"\n{_ONE_BOT}',
+        f'log_level = "INFO"\n[venues.DYDX]\nstarting_balances = "10_000 USDC"\n{_ONE_BOT}',
     )
     with pytest.raises(ValueError, match="must be a TOML array"):
         load_paper_config(path)
 
 
 def test_default_bot_has_instrument_id_and_trade_size(tmp_path) -> None:
-    path = _write(tmp_path, "config.toml", f'network = "mainnet"\n{_ONE_BOT}')
+    path = _write(tmp_path, "config.toml", f'log_level = "INFO"\n{_ONE_BOT}')
     config = load_paper_config(path)
     assert config.bots[0].instrument_id == "BTC-USD-PERP.DYDX"
     assert config.bots[0].trade_size == Decimal("0.001")
@@ -136,7 +136,7 @@ def test_bot_reads_explicit_instrument_id_and_trade_size(tmp_path) -> None:
     path = _write(
         tmp_path,
         "config.toml",
-        'network = "mainnet"\n'
+        'log_level = "INFO"\n'
         '[[bots]]\nbot_id = "bot-01"\ninstrument_id = "ETH-USD-PERP.DYDX"\ntrade_size = "0.05"\n',
     )
     config = load_paper_config(path)
@@ -148,7 +148,7 @@ def test_bot_rejects_an_unquoted_trade_size(tmp_path) -> None:
     path = _write(
         tmp_path,
         "config.toml",
-        'network = "mainnet"\n[[bots]]\nbot_id = "bot-01"\ntrade_size = 0.05\n',
+        'log_level = "INFO"\n[[bots]]\nbot_id = "bot-01"\ntrade_size = 0.05\n',
     )
     with pytest.raises(ValueError, match="trade_size must be a quoted TOML string"):
         load_paper_config(path)
@@ -158,7 +158,7 @@ def test_bot_reads_explicit_thresholds(tmp_path) -> None:
     path = _write(
         tmp_path,
         "config.toml",
-        'network = "mainnet"\n[[bots]]\nbot_id = "bot-01"\n'
+        'log_level = "INFO"\n[[bots]]\nbot_id = "bot-01"\n'
         "trend_buy_threshold = 0.7\ntrend_sell_threshold = 0.3\nofi_confirm_threshold = 1.5\n",
     )
     config = load_paper_config(path)
@@ -172,7 +172,7 @@ def test_multiple_bots_each_get_their_own_settings(tmp_path) -> None:
     path = _write(
         tmp_path,
         "config.toml",
-        'network = "mainnet"\n'
+        'log_level = "INFO"\n'
         '[[bots]]\nbot_id = "bot-01"\ntrend_buy_threshold = 0.6\n'
         '[[bots]]\nbot_id = "bot-02"\ntrend_buy_threshold = 0.51\n',
     )
@@ -193,19 +193,19 @@ def test_real_money_config_rejects_an_unquoted_trade_size(tmp_path) -> None:
 
 
 def test_bot_requires_a_bot_id(tmp_path) -> None:
-    path = _write(tmp_path, "config.toml", 'network = "mainnet"\n[[bots]]\ninstrument_id = "x"\n')
+    path = _write(tmp_path, "config.toml", 'log_level = "INFO"\n[[bots]]\ninstrument_id = "x"\n')
     with pytest.raises(ValueError, match="must set bot_id"):
         load_paper_config(path)
 
 
 def test_bot_reads_explicit_bot_id(tmp_path) -> None:
-    path = _write(tmp_path, "config.toml", 'network = "mainnet"\n[[bots]]\nbot_id = "bot-btc"\n')
+    path = _write(tmp_path, "config.toml", 'log_level = "INFO"\n[[bots]]\nbot_id = "bot-btc"\n')
     config = load_paper_config(path)
     assert config.bots[0].bot_id == "bot-btc"
 
 
 def test_bot_default_starting_balance_anchor(tmp_path) -> None:
-    path = _write(tmp_path, "config.toml", f'network = "mainnet"\n{_ONE_BOT}')
+    path = _write(tmp_path, "config.toml", f'log_level = "INFO"\n{_ONE_BOT}')
     config = load_paper_config(path)
     assert config.bots[0].starting_balance == "10_000 USDC"
 
@@ -230,3 +230,65 @@ def test_unknown_keys_are_rejected_in_every_loader(tmp_path: Path) -> None:
     real.write_text('mode = "real_money"\nsubaccont = 1\n')
     with pytest.raises(ValueError, match="subaccont"):
         load_real_money_config(real)
+
+
+def test_default_starting_balance_uses_the_bots_venue_quote_currency(tmp_path) -> None:
+    path = _write(
+        tmp_path,
+        "config.toml",
+        '[[bots]]\nbot_id = "a"\ninstrument_id = "BTCUSDT-LINEAR.BYBIT"\n'
+        '[[bots]]\nbot_id = "b"\ninstrument_id = "BTC-USD-PERP.HYPERLIQUID"\n',
+    )
+    config = load_paper_config(path)
+    assert [b.starting_balance for b in config.bots] == ["10_000 USDT", "10_000 USDC"]
+    assert config.venue_config("BYBIT").starting_balances == ("10_000 USDT",)
+    assert config.venue_config("HYPERLIQUID").starting_balances == ("10_000 USDC",)
+
+
+def test_venue_table_is_parsed_per_venue(tmp_path) -> None:
+    path = _write(
+        tmp_path,
+        "config.toml",
+        '[venues.BYBIT]\nenvironment = "DEMO"\nstarting_balances = ["5_000 USDT"]\n' + _ONE_BOT,
+    )
+    venue = load_paper_config(path).venue_config("BYBIT")
+    assert (venue.environment, venue.starting_balances) == ("demo", ("5_000 USDT",))
+
+
+def test_venue_environment_must_be_allowed_for_that_venue(tmp_path) -> None:
+    path = _write(tmp_path, "config.toml", '[venues.BYBIT]\nenvironment = "prod"\n' + _ONE_BOT)
+    with pytest.raises(ValueError, match="environment 'prod'"):
+        load_paper_config(path)
+
+
+def test_demo_environment_is_bybit_only(tmp_path) -> None:
+    path = _write(tmp_path, "config.toml", '[venues.DYDX]\nenvironment = "demo"\n' + _ONE_BOT)
+    with pytest.raises(ValueError, match="environment 'demo'"):
+        load_paper_config(path)
+
+
+def test_unknown_venue_table_and_unknown_venue_key_are_rejected(tmp_path) -> None:
+    unknown_venue = _write(tmp_path, "a.toml", "[venues.KRAKEN]\n" + _ONE_BOT)
+    with pytest.raises(ValueError, match="unsupported venue 'KRAKEN'"):
+        load_paper_config(unknown_venue)
+    unknown_key = _write(tmp_path, "b.toml", "[venues.DYDX]\nnetwork = 'x'\n" + _ONE_BOT)
+    with pytest.raises(ValueError, match="unknown key"):
+        load_paper_config(unknown_key)
+
+
+@pytest.mark.parametrize(
+    "body",
+    ["environment = 1", "starting_balances = []", "starting_balances = [1]", "account_type = 'FOO'"],
+)
+def test_malformed_venue_values_are_rejected_at_load(tmp_path, body) -> None:
+    path = _write(tmp_path, "c.toml", f"[venues.DYDX]\n{body}\n" + _ONE_BOT)
+    with pytest.raises(ValueError, match=r"\[venues.DYDX\]"):
+        load_paper_config(path)
+
+
+def test_bot_on_an_unsupported_venue_fails_at_load_naming_the_venue(tmp_path) -> None:
+    path = _write(
+        tmp_path, "config.toml", '[[bots]]\nbot_id = "a"\ninstrument_id = "BTC-USD.KRAKEN"\n'
+    )
+    with pytest.raises(ValueError, match="unsupported venue 'KRAKEN'"):
+        load_paper_config(path)
