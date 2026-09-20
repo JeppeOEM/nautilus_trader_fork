@@ -376,7 +376,14 @@ export default function LightweightChart({
       chart.applyOptions({ layout: { fontFamily: cssVar("--font-terminal", "monospace") } });
     });
 
-    const handleResize = () => chart.applyOptions({ width: container.clientWidth });
+    // Deferred to a frame: applying the width inside the observer callback re-lays-out the
+    // observed container in the same frame, which is what raises "ResizeObserver loop completed
+    // with undelivered notifications". Coalesces bursts to one apply per frame too.
+    let resizeFrame = 0;
+    const handleResize = () => {
+      cancelAnimationFrame(resizeFrame);
+      resizeFrame = requestAnimationFrame(() => chart.applyOptions({ width: container.clientWidth }));
+    };
     // ResizeObserver, not window "resize": catches layout-only reflows and a container that
     // was hidden (clientWidth 0) at mount. Fires once on observe, so it also does the first sync.
     const resizeObserver = new ResizeObserver(handleResize);
@@ -391,6 +398,7 @@ export default function LightweightChart({
     return () => {
       cancelled = true;
       resizeObserver.disconnect();
+      cancelAnimationFrame(resizeFrame);
       chartRef.current = null;
       seriesRef.current = null;
       lineSeriesRef.current = null;
