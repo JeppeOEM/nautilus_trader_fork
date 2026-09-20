@@ -26,17 +26,20 @@ and the `has_more` probe.
 `app.py`, which imports them).
 """
 
+from pathlib import Path
+
 from fastapi import APIRouter
 from fastapi import HTTPException
 from pydantic import BaseModel
 
 from data_api import live_candles
 from data_api.routes import paging
+from data_api.settings import CANDLES_DB_DIR
 from data_api.settings import CATALOG_PATH
+from ml_signals import candle_store
 from ml_signals import catalog_stats as _catalog_stats
 from ml_signals import error_ledger
 from ml_signals.candles import candle_dicts_for_window
-from ml_signals.candles import choose_candle_source
 from ml_signals.candles import is_valid_candle
 from ml_signals.venue import venue_of
 
@@ -69,11 +72,6 @@ _MIN_QUERY_WINDOW_SECONDS = 3600
 # 1-second snapshots, defeating the bounded-read guarantee this route exists to provide.
 _MAX_QUERY_SPAN_SECONDS = 7 * 86_400
 
-# Wide bars (> ROLLUP_THRESHOLD_SECONDS) read the minute rollup (1/60th the rows), so the
-# same MEM-01 bound can span longer -- but it also bounds the raw-1s fallback the dispatch
-# uses before the rollup's first row, so it stays a fixed cap, not open-ended.
-_MAX_ROLLUP_QUERY_SPAN_SECONDS = 30 * 86_400
-
 router = APIRouter()
 
 
@@ -104,15 +102,10 @@ class CandlesResponse(BaseModel):
 
 
 def _window_start_ns(before_ns: int, limit: int, bar_seconds: int) -> int:
-    cap = (
-        _MAX_ROLLUP_QUERY_SPAN_SECONDS
-        if choose_candle_source(bar_seconds) == "rollup_1m"
-        else _MAX_QUERY_SPAN_SECONDS
-    )
     span_seconds = limit * bar_seconds * _QUERY_WINDOW_MULTIPLIER
     if bar_seconds < 60:
         span_seconds = max(span_seconds, _MIN_QUERY_WINDOW_SECONDS)
-    span_seconds = min(span_seconds, cap)
+    span_seconds = min(span_seconds, _MAX_QUERY_SPAN_SECONDS)
     return before_ns - span_seconds * 1_000_000_000
 
 
@@ -132,22 +125,20 @@ def _insert_gap_markers(candles: list[dict], bar_seconds: int) -> list[CandleIte
     return items
 
 
-@router.get("/api/candles/{instrument_id}")
-def get_candles(
-    instrument_id: str, before_ns: int, limit: int = 120, bar_seconds: int = 60,
-) -> CandlesResponse:
-    limit = max(1, min(limit, _MAX_CANDLES_LIMIT))
-    bar_seconds = max(1, min(bar_seconds, _MAX_BAR_SECONDS))
-    before_ms = before_ns // 1_000_000
+def _checked(instrument_id: str, bar_seconds: int, c: dict) -> dict:
+    # An impossible candle means upstream code malfunctioned (DATA-07): never serve it,
+    # never drop it quietly -- fail the request so the chart shows an error, and count it.
+    if not is_valid_candle(c):
+        detail = f"impossible candle for {instrument_id} (bar_seconds={bar_seconds}): {c!r}"
+        error_ledger.record("candles.invalid_candle", detail)
+        raise HTTPException(status_code=500, detail=detail)
+    return c
 
-    def checked(c: dict) -> dict:
-        # An impossible candle means upstream code malfunctioned (DATA-07): never serve it,
-        # never drop it quietly -- fail the request so the chart shows an error, and count it.
-        if not is_valid_candle(c):
-            detail = f"impossible candle for {instrument_id} (bar_seconds={bar_seconds}): {c!r}"
-            error_ledger.record("candles.invalid_candle", detail)
-            raise HTTPException(status_code=500, detail=detail)
-        return c
+
+def _parquet_page(instrument_id: str, before_ns: int, limit: int, bar_seconds: int) -> tuple[list[dict], bool]:
+    """One page straight from the Parquet archive (slow: reads a window of tiny files). Serves
+    history the candle store does not hold (older than its first day, or pruned)."""
+    before_ms = before_ns // 1_000_000
 
     def fetch(start_ns: int, end_ns: int) -> list[dict]:
         return [
@@ -158,21 +149,66 @@ def get_candles(
                 end_ns,
                 bar_seconds,
                 snapshot_rows_fn=_catalog_plus_recent,
-                rollup_rows_fn=lambda i, a, b: _catalog_stats.query_minute_rollups(CATALOG_PATH, i, a, b),
             )
-            if c["t"] < before_ms and checked(c)
+            if c["t"] < before_ms and _checked(instrument_id, bar_seconds, c)
         ]
 
-    ranges = _catalog_stats.data_file_ranges(
-        CATALOG_PATH, instrument_id, include_rollups=choose_candle_source(bar_seconds) == "rollup_1m",
-    )
+    ranges = _catalog_stats.data_file_ranges(CATALOG_PATH, instrument_id)
     span_ns = before_ns - _window_start_ns(before_ns, limit, bar_seconds)
     kept = paging.fetch_page(fetch, ranges, before_ns, span_ns)[-limit:]
+    return kept, bool(kept) and paging.has_older_data(ranges, kept[0]["t"] * 1_000_000)
 
+
+def _store_path(instrument_id: str) -> str:
+    return str(Path(CANDLES_DB_DIR) / f"candles_{venue_of(instrument_id).lower()}.db")
+
+
+def _store_page(
+    instrument_id: str, before_ns: int, limit: int, bar_seconds: int
+) -> tuple[list[dict], bool, int | None]:
+    """One page from the SQLite candle store (an indexed read, no Parquet I/O): `(candles,
+    store_has_more, start of the store's coverage in ms)`. Empty when the store is missing or has
+    nothing for this coin."""
+    if bar_seconds not in candle_store.BAR_SECONDS:
+        return [], False, None
+    with candle_store.connect_ro(_store_path(instrument_id)) as db:
+        if db is None:
+            return [], False, None
+        kept = candle_store.window(db, instrument_id, bar_seconds, before_ns // 1_000_000, limit)
+        if not kept:
+            return [], False, candle_store.oldest_t(db, instrument_id, bar_seconds, traded_only=False)
+        oldest = candle_store.oldest_t(db, instrument_id, bar_seconds)
+        coverage = candle_store.oldest_t(db, instrument_id, bar_seconds, traded_only=False)
+        return [_checked(instrument_id, bar_seconds, c) for c in kept], oldest is not None and oldest < kept[0]["t"], coverage
+
+
+def candle_page(instrument_id: str, before_ns: int, limit: int, bar_seconds: int) -> tuple[list[dict], bool]:
+    """The one candle source for the chart, its indicator panes and anything else that must agree
+    with them: `(candles oldest-first, has_more)` for the `limit` bars before `before_ns`. Reads the
+    SQLite candle store, and only what it does not cover (history older than its first bucket, or
+    pruned) from Parquet -- never when the store already reaches the archive's first file."""
+    kept, store_has_more, coverage_ms = _store_page(instrument_id, before_ns, limit, bar_seconds)
+    if store_has_more:
+        return kept, True
+    ranges = _catalog_stats.data_file_ranges(CATALOG_PATH, instrument_id)  # a directory listing
+    if coverage_ms is not None and not paging.has_older_data(ranges, coverage_ms * 1_000_000):
+        return kept, False
+    if len(kept) >= limit:
+        return kept, True  # older archive history exists beyond this full page
+    older_before_ns = kept[0]["t"] * 1_000_000 if kept else before_ns
+    older, has_more = _parquet_page(instrument_id, older_before_ns, limit - len(kept), bar_seconds)
+    return older + kept, has_more
+
+
+@router.get("/api/candles/{instrument_id}")
+def get_candles(
+    instrument_id: str, before_ns: int, limit: int = 120, bar_seconds: int = 60,
+) -> CandlesResponse:
+    limit = max(1, min(limit, _MAX_CANDLES_LIMIT))
+    bar_seconds = max(1, min(bar_seconds, _MAX_BAR_SECONDS))
+    kept, has_more = candle_page(instrument_id, before_ns, limit, bar_seconds)
     if not kept:
         return CandlesResponse(items=[], has_more=False, venue=venue_of(instrument_id))
-
-    has_more = paging.has_older_data(ranges, kept[0]["t"] * 1_000_000)
     return CandlesResponse(
         items=_insert_gap_markers(kept, bar_seconds), has_more=has_more, venue=venue_of(instrument_id),
     )

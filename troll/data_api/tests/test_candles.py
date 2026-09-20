@@ -21,6 +21,9 @@ from fastapi.testclient import TestClient
 
 import data_api.app as app_module
 import data_api.routes.candles as candles_routes
+from ml_signals import candle_store
+from ml_signals.tests.test_candle_store import _DAY0_MS
+from ml_signals.tests.test_candle_store import _second
 from dydx_collector.second_snapshot import DydxSecondSnapshot
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
@@ -37,6 +40,8 @@ assert _BASE_NS % 60_000_000_000 == 0
 
 def _client(catalog_path: str, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setattr(candles_routes, "CATALOG_PATH", catalog_path)
+    # No candle store unless a test builds one: these tests exercise the Parquet path.
+    monkeypatch.setattr(candles_routes, "CANDLES_DB_DIR", f"{catalog_path}-no-candle-store-dir")
     return TestClient(app_module.app)
 
 
@@ -246,11 +251,10 @@ def test_weekly_bar_seconds_is_not_clamped_down_to_a_day(tmp_path: Path, monkeyp
     assert [(b["t"], b["o"], b["c"]) for b in bars] == [(week_start // 1_000_000, 100.0, 102.0)]
 
 
-def test_wide_bar_window_is_wider_than_the_raw_cap_but_still_bounded() -> None:
-    hour = 3600
-    assert candles_routes._window_start_ns(0, 120, hour) == -7 * 86_400 * 1_000_000_000
-    day_window_s = -candles_routes._window_start_ns(0, 120, 86_400) // 1_000_000_000
-    assert 7 * 86_400 < day_window_s <= candles_routes._MAX_ROLLUP_QUERY_SPAN_SECONDS
+def test_archive_fallback_window_is_capped_for_every_bar_size() -> None:
+    week_ns = 7 * 86_400 * 1_000_000_000
+    assert candles_routes._window_start_ns(0, 120, 3600) == -week_ns
+    assert candles_routes._window_start_ns(0, 120, 86_400) == -week_ns  # no wider tier without rollups
 
 
 def test_one_second_bars_return_one_candle_per_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -294,3 +298,42 @@ def test_invalid_candle_fails_the_request_loudly(tmp_path: Path, monkeypatch: py
     assert resp.status_code == 500  # never served, never silently dropped
     assert "impossible candle" in resp.json()["detail"]
     assert error_ledger.counts() == {"candles.invalid_candle": 1}
+
+
+def _store_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, minutes: range) -> TestClient:
+    catalog_path = str(tmp_path / "catalog")
+    client = _client(catalog_path, monkeypatch)
+    db_path = str(tmp_path / "candles" / "candles_dydx.db")
+    monkeypatch.setattr(candles_routes, "CANDLES_DB_DIR", str(tmp_path / "candles"))
+    db = candle_store.connect_rw(db_path)
+    candle_store.apply_seconds(db, _IID, [_second(m * 60, 100.0 + m) for m in minutes])  # one trade per minute
+    return client
+
+
+def test_a_page_inside_the_candle_store_needs_no_parquet_at_all(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _store_client(tmp_path, monkeypatch, range(0, 30))  # no Parquet catalog exists
+    before_ns = (_DAY0_MS + 60 * 60_000) * 1_000_000
+
+    body = client.get(f"/api/candles/{_IID}", params={"before_ns": before_ns, "limit": 10}).json()
+
+    assert [i["t"] for i in body["items"]] == [_DAY0_MS + m * 60_000 for m in range(20, 30)]
+    assert body["items"][-1]["c"] == 129.1  # minute 29: price 129 + the fixture's close offset
+    assert body["has_more"] is True  # minutes 0-19 are older, still in the store
+
+
+def test_history_older_than_the_store_comes_from_parquet_and_joins_seamlessly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _store_client(tmp_path, monkeypatch, range(0, 30))
+    day0_ns = _DAY0_MS * 1_000_000
+    # 20 older one-minute candles that only the Parquet archive has (the store starts at minute 0).
+    _write_snapshots(str(tmp_path / "catalog"), [(day0_ns - i * 60_000_000_000, 50.0 + i) for i in range(1, 21)])
+    before_ns = day0_ns + 60 * 60_000_000_000
+
+    body = client.get(f"/api/candles/{_IID}", params={"before_ns": before_ns, "limit": 50}).json()
+
+    ts = [i["t"] for i in body["items"]]
+    assert ts == [_DAY0_MS + m * 60_000 for m in range(-20, 30)]  # 20 archive + 30 store, no gap, no overlap
+    assert body["has_more"] is False

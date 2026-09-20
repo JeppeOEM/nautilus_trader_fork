@@ -20,7 +20,7 @@ buffer and flush timer over a duck-typed venue client, writing to the shared
 Extracted from the (identical) Bybit and Hyperliquid collectors, plus dYdX's venue-neutral
 integrity guards: stale-trade age filter + bounded trade_id dedup (DATA-06), stale-book
 skip with accumulator discard (DATA-01), crossed-book skip + ledger with resync as a
-fallback only (DATA-03), `ohlc_outside_book` canary, minute rollup, `snapshots:raw` Redis
+fallback only (DATA-03), `ohlc_outside_book` canary, candle-store feed, `snapshots:raw` Redis
 publish, the `_second_loop` lag canary and the OBS-01 watchdog.
 
 Client contract (duck-typed -- this docstring is the contract, there is no base class):
@@ -63,10 +63,11 @@ from typing import Any
 import pyarrow.parquet as pq
 import redis.asyncio as aioredis
 from dydx_collector.integrity import ohlc_outside_book
-from dydx_collector.minute_rollup import MinuteRollupBuilder
 from dydx_collector.second_snapshot import BOOK_DEPTH
 from dydx_collector.second_snapshot import DydxSecondSnapshot
+from ml_signals import candle_store
 from ml_signals import error_ledger
+from ml_signals.catalog_stats import query_second_ohlc
 
 from collector_core.config import CoreConfig
 from nautilus_trader.core import nautilus_pyo3
@@ -219,6 +220,17 @@ def _notify(message: str, title: str = "collector") -> None:
         logger.exception("Watchdog notification failed")
 
 
+# Parquet is flushed this many seconds past each interval boundary (:02 for the default 60 s), so a
+# minute that just closed is in the archive -- and, right after it, in the candle store -- ~2 s later.
+_FLUSH_PHASE_S = 2.0
+_CATCH_UP_MAX_NS = 86_400 * 1_000_000_000
+
+
+def _seconds_until_next_flush(now: float, interval: float) -> float:
+    """Return seconds from `now` (epoch) to the next wall-clock flush; always in (0, interval]."""
+    return interval - (now - _FLUSH_PHASE_S) % interval
+
+
 async def _publish_snapshot_batch(redis_client: aioredis.Redis, snapshots: list) -> None:
     """
     Publish a batch of DydxSecondSnapshot objects to Redis channel snapshots:raw.
@@ -254,6 +266,11 @@ class Collector:
         catalog_path = Path(config.catalog_path).resolve()
         catalog_path.mkdir(parents=True, exist_ok=True)
         self._catalog = ParquetDataCatalog(str(catalog_path))
+        # Derived candle store for the UI (the catalog stays the archive): this collector is its
+        # single writer, one file per venue (compose sets CANDLES_DB_PATH). Rebuildable via build_candles.
+        self._candle_db = candle_store.connect_rw(
+            os.environ.get("CANDLES_DB_PATH", str(catalog_path.parent / "candles" / "candles.db"))
+        )
 
         self._buffer: dict[tuple[type, str], list[Any]] = defaultdict(list)
         # Unbounded: a real overflow would mean the process can't keep up with the
@@ -299,7 +316,6 @@ class Collector:
         self._seen_trade_id_set: defaultdict[str, set[str]] = defaultdict(set)
         self._last_impossible_log_ns: dict[str, int] = {}
 
-        self._minute_rollup = MinuteRollupBuilder()
         self._last_second_loop_tick_ns: int | None = None
 
         self._watchdog_started_ns: int = time.time_ns()
@@ -320,7 +336,6 @@ class Collector:
         """
         self._live_books.pop(iid, None)
         self._crossed_since_ns.pop(iid, None)
-        self._minute_rollup.discard_book_state(iid)
 
     def _apply_deltas(self, iid: str, deltas: OrderBookDeltas) -> None:
         if not deltas.deltas:
@@ -509,6 +524,7 @@ class Collector:
     # -- flush -------------------------------------------------------------------------------
 
     async def _flush_once(self) -> None:
+        flushed_seconds: dict[str, list[DydxSecondSnapshot]] = {}
         for key, items in list(self._buffer.items()):
             if not items:
                 continue
@@ -520,19 +536,76 @@ class Collector:
                 error_ledger.record(
                     "collector.flush_write", f"failed to write {key}, {len(items)} items LOST", e
                 )
+                continue
+            if key[0] is DydxSecondSnapshot:
+                flushed_seconds[key[1]] = items
+        self._apply_to_candle_store(flushed_seconds)
+
+    def _apply_to_candle_store(self, flushed: dict[str, list[DydxSecondSnapshot]]) -> None:
+        """
+        Fold what just reached Parquet into the candle store, in one transaction.
+
+        Only flushed seconds are applied, so the store is never ahead of the archive. A failure must
+        not stop ingestion: it is loud (DATA-07), and the next start's catch-up or `build_candles`
+        repairs it.
+        """
+        try:
+            candle_store.apply_batch(self._candle_db, flushed)
+        except Exception as e:
+            error_ledger.record(
+                "collector.candle_store",
+                f"candle store write failed for {len(flushed)} instruments",
+                e,
+            )
+
+    def _catch_up_candle_store(self) -> None:
+        """
+        Apply, at startup, the seconds the archive holds beyond each instrument's watermark.
+
+        A crash between a Parquet flush and its store write (or a failed store write) leaves the
+        store behind the archive, and nothing else would ever fill that hole. A gap wider than a day
+        is left to `build_candles` (it would read too much here) and logged.
+        """
+        catalog_path = str(Path(self._config.catalog_path).resolve())
+        now_ns = time.time_ns()
+        for iid, mark in candle_store.watermarks(self._candle_db).items():
+            if now_ns - mark > _CATCH_UP_MAX_NS:
+                logger.warning(
+                    f"Candle store for {iid} is more than a day behind: run build_candles"
+                )
+                continue
+            try:
+                candle_store.apply_seconds(
+                    self._candle_db, iid, query_second_ohlc(catalog_path, iid, mark + 1, now_ns)
+                )
+            except Exception as e:
+                error_ledger.record(
+                    "collector.candle_store_catch_up", f"candle store catch-up failed for {iid}", e
+                )
 
     async def _flush_loop(self) -> None:
         while not self._stop.is_set():
-            await asyncio.sleep(self._config.flush_interval_seconds)
+            await asyncio.sleep(
+                _seconds_until_next_flush(time.time(), self._config.flush_interval_seconds)
+            )
             await self._flush_once()
             self._report_stale_trades()
+
+    async def _candle_prune_loop(self) -> None:
+        """Hourly: drop 1m/5m bars past their retention (`candle_store.RETAIN_DAYS`); wide bars are kept."""
+        while not self._stop.is_set():
+            try:
+                candle_store.prune(self._candle_db)
+            except Exception as e:
+                error_ledger.record("collector.candle_store_prune", "candle store prune failed", e)
+            await asyncio.sleep(3600)
 
     # -- sample ------------------------------------------------------------------------------
 
     async def _sample_tick(self, now_ns: int) -> list[DydxSecondSnapshot]:
         """
         Run the single write gate (AD-1): validate each book, then build one snapshot that
-        feeds the catalog buffer, the minute rollup and (via the caller) Redis -- same object, same
+        feeds the catalog buffer and (via the caller) Redis -- same object, same
         iteration. A rejected instrument is skipped, its trades discarded, the reason logged.
         """
         stale_ns = self._config.stale_book_seconds * 1e9
@@ -589,14 +662,6 @@ class Collector:
                     f"low={snapshot.low_price} outside book "
                     f"[{min(snapshot.bid_prices)}, {max(snapshot.ask_prices)}]"
                 )
-            try:
-                rollup = self._minute_rollup.update(iid, snapshot)
-            except Exception as e:
-                # A rollup bug must not stop every other instrument's snapshots.
-                error_ledger.record("collector.minute_rollup", f"minute rollup failed for {iid}", e)
-                rollup = None
-            if rollup is not None:
-                self._buffer[(type(rollup), iid)].append(rollup)
             self._buffer[(DydxSecondSnapshot, iid)].append(snapshot)
             batch.append(snapshot)
         return batch
@@ -681,6 +746,7 @@ class Collector:
             logger.warning(
                 "Configured instruments not found on the venue, skipping: %s", sorted(unknown)
             )
+        self._catch_up_candle_store()
         for iid in sorted(configured & set(by_id)):
             await self._client.subscribe(iid)
             logger.info(f"Subscribed {iid}")
@@ -688,6 +754,7 @@ class Collector:
         loops: tuple[Callable[[], Awaitable[None]], ...] = (
             self._ingest_loop,
             self._flush_loop,
+            self._candle_prune_loop,
             self._second_loop,
             self._watchdog_loop,
             *self._extra_loops,

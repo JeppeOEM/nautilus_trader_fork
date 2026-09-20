@@ -17,8 +17,8 @@ so that backtests on these venues can run over more history than the collector h
 ## Tasks / Subtasks
 
 - [ ] Task 1 — `collector_core/backfill_bars.py` CLI (AC: #1)
-  - [ ] Args, mirroring `dydx_collector/backfill_minute_rollup.py`: `--catalog` (required), `--instrument` (repeatable, full Nautilus id), `--start`/`--end` (`YYYY-MM-DD` UTC), `--bar-spec` (default `1-MINUTE-LAST`), `--apply` (default report-only: prints the windows it *would* fetch and which are already covered).
-  - [ ] Venue dispatch by `venue_of(instrument_id)`: `BYBIT` → pyo3 `BybitHttpClient().request_bars(product_type=bybit_product_type_from_symbol(symbol), bar_type=BarType.from_str(f"{iid}-{spec}-EXTERNAL"), start=..., end=..., limit=1000, timestamp_on_close=True)` (`nautilus_pyo3.pyi:7345`); `HYPERLIQUID` → `HyperliquidHttpClient(environment=MAINNET).request_bars(bar_type, start, end, limit)` (`nautilus_pyo3.pyi:9430`, backed by `candleSnapshot`, ≤ 5000 most recent candles — the script must report when the requested start is older than what the venue returns, never silently return less). Any other venue → error (dYdX has its own rollup path).
+  - [ ] Args, mirroring `dydx_collector/build_candles.py`: `--catalog` (required), `--instrument` (repeatable, full Nautilus id), `--start`/`--end` (`YYYY-MM-DD` UTC), `--bar-spec` (default `1-MINUTE-LAST`), `--apply` (default report-only: prints the windows it *would* fetch and which are already covered).
+  - [ ] Venue dispatch by `venue_of(instrument_id)`: `BYBIT` → pyo3 `BybitHttpClient().request_bars(product_type=bybit_product_type_from_symbol(symbol), bar_type=BarType.from_str(f"{iid}-{spec}-EXTERNAL"), start=..., end=..., limit=1000, timestamp_on_close=True)` (`nautilus_pyo3.pyi:7345`); `HYPERLIQUID` → `HyperliquidHttpClient(environment=MAINNET).request_bars(bar_type, start, end, limit)` (`nautilus_pyo3.pyi:9430`, backed by `candleSnapshot`, ≤ 5000 most recent candles — the script must report when the requested start is older than what the venue returns, never silently return less). Any other venue → error (dYdX candles come from its own 1s archive).
   - [ ] Pagination: fixed windows of `limit` bars (1000 × 1 min = 16 h 40 m for Bybit) walked from `start` to `end`; a pure `_windows(start_ns, end_ns, bar_ns, limit) -> list[tuple[int, int]]` helper. Pace requests to stay far under Bybit's 600 req / 5 s and Hyperliquid's 1200 weight/min (a `asyncio.sleep(0.2)` between calls is plenty; document it).
   - [ ] Conversion: pyo3 bars → Cython `Bar` via `Bar.from_pyo3_list` (verify the helper name in `nautilus_trader/model/data.pyx`; it exists for the other data types the collectors already convert) → `catalog.write_data(bars)`. Instruments must already be in the catalog (the collectors write them on every start); assert and tell the operator to run the collector once otherwise.
   - [ ] Idempotency: before fetching a window, check the catalog's existing bar files for that `BarType` (`catalog.get_intervals`/the `data_file_ranges` pattern `normalize_snapshot_schema.py`'s docstring refers to — use the catalog's own interval API, don't parse file names by hand) and skip windows fully covered; partially covered windows are fetched and the overlap deduped by `ts_event` before writing, so the resulting files never hold duplicate timestamps (a duplicate bar would double volume in any aggregation — DATA-05/DATA-06 spirit).
@@ -32,7 +32,7 @@ so that backtests on these venues can run over more history than the collector h
 
 ### Why this is optional and small
 
-Research §B6: `.BYBIT`/`.HYPERLIQUID` ids already load through `BacktestDataConfig` on `DydxSecondSnapshot`/`DydxMinuteRollup`; this story only extends the *depth* of history for those venues using the venues' own klines. It does not touch the collectors, the rollup builder or `ml_signals`. Ponytail: one CLI module, two pyo3 calls, one pure window helper.
+Research §B6: `.BYBIT`/`.HYPERLIQUID` ids already load through `BacktestDataConfig` on `DydxSecondSnapshot`; this story only extends the *depth* of history for those venues using the venues' own klines. It does not touch the collectors, the candle store or `ml_signals`. Ponytail: one CLI module, two pyo3 calls, one pure window helper.
 
 ### `EXTERNAL` bars are the venue's candles, not ours
 
@@ -53,7 +53,7 @@ pyo3 bars carry `Price`/`Quantity` at the instrument's precision already; conver
 - [Source: _bmad-output/planning-artifacts/epics.md#Story 22.9] — AC.
 - [Source: research 2026-09-20 §B6] — scope and venue limits (Bybit years of 1m klines; Hyperliquid last 5000 candles).
 - [Source: nautilus_trader/core/nautilus_pyo3.pyi:7345 (`BybitHttpClient.request_bars`), :9352-9445 (`HyperliquidHttpClient`, `request_bars`)].
-- [Source: troll/dydx_collector/backfill_minute_rollup.py:103-140] — CLI/idempotent-backfill precedent; [Source: troll/dydx_collector/normalize_snapshot_schema.py docstring] — file-range/report-first conventions.
+- [Source: troll/dydx_collector/build_candles.py] — CLI/idempotent-backfill precedent; [Source: troll/dydx_collector/normalize_snapshot_schema.py docstring] — file-range/report-first conventions.
 - [Source: troll/ml_signals/backtest_dydx.py:48-57; troll/ml_signals/tests/test_snapshot_backtest_node.py] — `BacktestDataConfig`/`BacktestNode` usage to prove loadability.
 - [Source: troll/CLAUDE.md NAUT-02, NAUT-03, NAUT-01/AD-5, MEM-01, DATA-05, TEST-01] — rules applied.
 

@@ -76,14 +76,15 @@ from dydx_collector.config import InstrumentEntry
 from dydx_collector.config import load_config
 from dydx_collector.config import save_config
 from dydx_collector.integrity import ohlc_outside_book
-from dydx_collector.minute_rollup import MinuteRollupBuilder
 from dydx_collector.open_interest import _fetch_markets_json
 from dydx_collector.open_interest import classify_liquidity
 from dydx_collector.open_interest import fetch_open_interest
 from dydx_collector.prune_catalog import prune_instrument
 from dydx_collector.second_snapshot import BOOK_DEPTH
 from dydx_collector.second_snapshot import DydxSecondSnapshot
+from ml_signals import candle_store
 from ml_signals import error_ledger
+from ml_signals.catalog_stats import query_second_ohlc
 from nautilus_trader.core import nautilus_pyo3
 from nautilus_trader.model.book import OrderBook
 from nautilus_trader.model.data import BookOrder
@@ -451,6 +452,17 @@ def _log_uncross_result(
         )
 
 
+# Parquet is flushed this many seconds past each interval boundary (:02 for the default 60 s), so a
+# minute that just closed is in the archive -- and, right after it, in the candle store -- ~2 s later.
+_FLUSH_PHASE_S = 2.0
+_CATCH_UP_MAX_NS = 86_400 * 1_000_000_000
+
+
+def _seconds_until_next_flush(now: float, interval: float) -> float:
+    """Return seconds from `now` (epoch) to the next wall-clock flush; always in (0, interval]."""
+    return interval - (now - _FLUSH_PHASE_S) % interval
+
+
 class Collector:
     def __init__(self, config: CollectorConfig) -> None:
         self._config = config
@@ -458,6 +470,11 @@ class Collector:
         catalog_path = Path(config.catalog_path).resolve()
         catalog_path.mkdir(parents=True, exist_ok=True)
         self._catalog = ParquetDataCatalog(str(catalog_path))
+        # Derived candle store for the UI (the catalog stays the archive): the collector is its
+        # single writer, fed by each flush of second snapshots. Rebuildable via build_candles.
+        self._candle_db = candle_store.connect_rw(
+            os.environ.get("CANDLES_DB_PATH", str(catalog_path.parent / "candles" / "candles_dydx.db"))
+        )
 
         self._client = DydxClient(on_data=self._on_data, network=config.network)
         self._buffer: dict[tuple[type, str], list[Any]] = defaultdict(list)
@@ -547,7 +564,6 @@ class Collector:
         # (Roundtable's uncross-orderbook.ts) to resolve a crossed book without a full
         # resync. See DATA-04 in troll/CLAUDE.md and _uncross_step below.
         self._level_msg_id: dict[str, dict[tuple[OrderSide, float], int]] = {}
-        self._minute_rollup = MinuteRollupBuilder()
 
         # _on_data (the WS callback, scheduled via the Rust client's call_soon_threadsafe)
         # only enqueues -- _ingest_loop does the real per-message work (_process_data).
@@ -718,6 +734,7 @@ class Collector:
         the already-extracted, thread-local `items` list crosses to the executor thread,
         so `self._buffer` is still only ever mutated from the event loop thread.
         """
+        flushed_seconds: dict[str, list[DydxSecondSnapshot]] = {}
         for key, items in list(self._buffer.items()):
             if not items:
                 continue
@@ -731,10 +748,27 @@ class Collector:
                 await asyncio.to_thread(self._catalog.write_data, items)
             except Exception:
                 error_ledger.record("collector.flush_write", f"failed to write {key}, {len(items)} items LOST")
+                continue
+            if dtype is DydxSecondSnapshot:
+                flushed_seconds[iid] = items
+        self._apply_to_candle_store(flushed_seconds)
+
+    def _apply_to_candle_store(self, flushed: dict[str, list[DydxSecondSnapshot]]) -> None:
+        """
+        Fold what just reached Parquet into the candle store, in one transaction.
+
+        Only flushed seconds are applied, so the store is never ahead of the archive. A failure must
+        not stop ingestion: it is loud (DATA-07), and the next start's catch-up or `build_candles`
+        repairs it.
+        """
+        try:
+            candle_store.apply_batch(self._candle_db, flushed)
+        except Exception:
+            error_ledger.record("collector.candle_store", f"candle store write failed for {len(flushed)} instruments")
 
     async def _flush_loop(self) -> None:
         while not self._stop.is_set():
-            await asyncio.sleep(self._config.flush_interval_seconds)
+            await asyncio.sleep(_seconds_until_next_flush(time.time(), self._config.flush_interval_seconds))
             await self._flush_once()
             self._report_stale_trades()
 
@@ -774,7 +808,6 @@ class Collector:
         await self._client.unsubscribe_trades(iid)
         await self._client.unsubscribe_orderbook(iid)
         self._clear_book_state(iid)
-        self._minute_rollup.drop(iid)
         logger.info(f"Unsubscribed {iid}")
 
     def _clear_book_state(self, iid: str) -> None:
@@ -790,7 +823,6 @@ class Collector:
         self._crossed_since_ns.pop(iid, None)
         self._crossed_prices.pop(iid, None)
         self._level_msg_id.pop(iid, None)
-        self._minute_rollup.discard_book_state(iid)
 
     async def _resync_book(self, iid: str) -> None:
         """Force a fresh order-book snapshot for a desynced instrument via resubscribe."""
@@ -1257,16 +1289,27 @@ class Collector:
                     )
                 batch.append(snapshot)
                 self._on_data(snapshot)  # routes to buffer → Parquet flush
-                try:
-                    rollup = self._minute_rollup.update(iid, snapshot)
-                except Exception:
-                    # A rollup bug must not stop every other instrument's snapshots.
-                    error_ledger.record("collector.minute_rollup", f"minute rollup failed for {iid}")
-                    rollup = None
-                if rollup is not None:
-                    self._on_data(rollup)
 
             await _publish_snapshot_batch(self._redis, batch)
+
+    def _catch_up_candle_store(self) -> None:
+        """
+        Apply, at startup, the seconds the archive holds beyond each instrument's watermark.
+
+        A crash between a Parquet flush and its store write (or a failed store write) leaves the
+        store behind the archive, and nothing else would ever fill that hole. A gap wider than a day
+        is left to `build_candles` (it would read too much here) and logged.
+        """
+        catalog_path = str(Path(self._config.catalog_path).resolve())
+        now_ns = time.time_ns()
+        for iid, mark in candle_store.watermarks(self._candle_db).items():
+            if now_ns - mark > _CATCH_UP_MAX_NS:
+                logger.warning(f"Candle store for {iid} is more than a day behind: run build_candles")
+                continue
+            try:
+                candle_store.apply_seconds(self._candle_db, iid, query_second_ohlc(catalog_path, iid, mark + 1, now_ns))
+            except Exception:
+                error_ledger.record("collector.candle_store_catch_up", f"candle store catch-up failed for {iid}")
 
     async def _prune_loop(self) -> None:
         """Prune uncollected instruments' catalog data, and any per-coin raw-delta retention."""
@@ -1299,6 +1342,13 @@ class Collector:
                 logger.info(
                     f"Pruned {delta_freed / 1024 / 1024:.1f} MB of raw order-book deltas (per-coin retention)"
                 )
+
+            # Inline, not to_thread: the store's connection is the event loop's (one writer thread);
+            # this is a couple of indexed range deletes.
+            try:
+                candle_store.prune(self._candle_db)
+            except Exception:
+                error_ledger.record("collector.candle_store_prune", "candle store prune failed")
 
     async def _watchdog_loop(self) -> None:
         """
@@ -1349,6 +1399,7 @@ class Collector:
         if unknown:
             logger.warning("Configured instruments not found on dYdX, skipping: %s", sorted(unknown))
 
+        self._catch_up_candle_store()
         for iid in sorted(to_subscribe):
             await self._subscribe(iid)
 

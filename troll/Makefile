@@ -3,7 +3,7 @@ TROLL_DIR  := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 COMPOSE    := docker compose -f $(TROLL_DIR)docker-compose.yml
 BASE_IMAGE := nautilus-trader-base:1.229.0
 
-.PHONY: build-base build-base-vps up redeploy redeploy-all redeploy-no-paper up-live-paper build-insecure test test-live-paper down logs logs-dash web enable-boot enable-firewall harden-ssh frontend-dev frontend-remote
+.PHONY: consolidate build-candles build-base build-base-vps up redeploy redeploy-all redeploy-no-paper up-live-paper build-insecure test test-live-paper down logs logs-dash web enable-boot enable-firewall harden-ssh frontend-dev frontend-remote
 
 # Personal, gitignored overrides (see .env-example for the documented default).
 -include $(TROLL_DIR).env
@@ -90,8 +90,8 @@ redeploy:
 	@echo "Dashboard: http://localhost:$(DATA_API_PORT)"
 
 ## Rebuild and restart EVERYTHING, collector included -- `redeploy` plus the collector. Use when
-## dydx_collector/ changed (e.g. a new rollup writer). Briefly drops the collector's WS
-## connection and loses its in-memory book/minute state; prefer `redeploy` otherwise.
+## dydx_collector/ changed (e.g. the candle-store feed). Briefly drops the collector's WS
+## connection and loses its in-memory book state; prefer `redeploy` otherwise.
 redeploy-all:
 	$(COMPOSE) up -d --build collector ranking_engine data_api
 	$(COMPOSE) --profile live-paper up -d --build live-paper
@@ -143,6 +143,21 @@ build-insecure:
 test:
 	$(COMPOSE) run --rm --no-deps -e HOME=/tmp -e USER=collector collector \
 		python3 -m pytest collector_core/tests dydx_collector/tests bybit_collector/tests hyperliquid_collector/tests common/tests ml_signals/tests ranking_engine/tests bot_tui/tests data_api/tests -q
+
+## Merge yesterday's (and any older closed day's) minute-sized Parquet files into one file per
+## (data type, coin) -- audit D-36: without this the catalog grows ~1,440 files per coin per type
+## per day. Safe while the collector runs (today's files are never touched); run nightly from cron:
+##   7 3 * * * cd /path/to/troll && make consolidate >> consolidate.log 2>&1
+consolidate:
+	$(COMPOSE) run --rm --no-deps -e HOME=/tmp collector \
+		python3 -m dydx_collector.consolidate_catalog --catalog /app/catalog --apply
+
+## Rebuild the SQLite candle store from the raw 1s archive (first deploy, or after a
+## "candle store write failed" / repair_catalog run). Skips today unless the collector is stopped
+## and --include-open-day is added.
+build-candles:
+	$(COMPOSE) run --rm --no-deps -e HOME=/tmp collector \
+		python3 -m dydx_collector.build_candles --catalog /app/catalog --db /app/candles_dir/candles_dydx.db
 
 ## Launch the bot_tui terminal UI (Story 4.1) -- an interactive urwid app, not a
 ## daemon, so it's run via `docker compose run` (never `up -d`) and gated behind the

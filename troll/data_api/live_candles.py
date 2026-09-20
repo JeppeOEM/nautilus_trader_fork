@@ -42,10 +42,8 @@ from data_api.redis_bus import QUEUE_MAX
 from data_api.redis_bus import put_drop_oldest
 from dydx_collector.second_snapshot import DydxSecondSnapshot
 from ml_signals import error_ledger
-from ml_signals.candles import ROLLUP_THRESHOLD_SECONDS
 from ml_signals.candles import candle_dicts_from_snapshots
 from ml_signals.catalog_stats import SecondOHLC
-from ml_signals.catalog_stats import query_minute_rollups
 from ml_signals.catalog_stats import query_second_ohlc
 
 
@@ -63,16 +61,12 @@ RECENT_SECONDS = 600
 
 
 def _catalog_rows_for_seed(instrument_id: str, bar_seconds: int, start_ns: int, end_ns: int) -> list[SecondOHLC]:
-    """The current bucket's traded rows from whichever source the history route uses for this bar size."""
-    if bar_seconds <= ROLLUP_THRESHOLD_SECONDS:
-        return query_second_ohlc(settings.CATALOG_PATH, instrument_id, start_ns, end_ns)
-    # A minute rollup row duck-types a traded second here: its o/h/l/c/volume aggregate through
-    # `aggregate_ohlc` exactly as `_rollup_bucket_dict` does (open of first, high/low across, close of last).
-    return [
-        SecondOHLC(r.ts_event, r.open, r.high, r.low, r.close, r.buy_volume, r.sell_volume)
-        for r in query_minute_rollups(settings.CATALOG_PATH, instrument_id, start_ns, end_ns)
-        if r.open is not None
-    ]
+    """
+    Read the current bucket's traded rows straight from the raw 1s archive.
+
+    A wide bucket (4H, 1D) is up to ~1,440 small files, read once per subscription off the event loop.
+    """
+    return query_second_ohlc(settings.CATALOG_PATH, instrument_id, start_ns, end_ns)
 
 
 class LiveCandleBus:
@@ -142,9 +136,8 @@ class LiveCandleBus:
 
         Without it the forming bar only covers ticks seen since subscribe, so its open/high/low/
         volume miss the start of the bucket (D-18). Runs once per pair; the catalog read is one
-        bucket, off the event loop. Buckets wider than the raw-1s threshold read the minute rollup
-        (the same source the history route serves them from), and every size unions the unflushed
-        tail (`recent_rows`) so the seconds since the collector's last flush are covered too.
+        bucket, off the event loop, and unions the unflushed tail (`recent_rows`) so the seconds
+        since the collector's last flush are covered too.
         """
         key = (instrument_id, bar_seconds)
         if key in self._seeded or key not in self._listeners:

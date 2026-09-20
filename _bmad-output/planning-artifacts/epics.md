@@ -2222,7 +2222,7 @@ So that every venue gets the same ingest/flush/sample/write path and the same in
 **When** `collector_core.Collector(config, client, extra_loops=())` and `run_forever(build)` exist
 **Then** `bybit_collector/collector.py` and `hyperliquid_collector/collector.py` each shrink to a client + config + entrypoint of roughly 15–25 lines, with the Bybit open-interest REST poll passed as an `extra_loops` entry, and the duck-typed client contract (`fetch_instruments`, `connect`, `disconnect`, `subscribe`, `unsubscribe`, optional `subscribe_global`, optional `resync_orderbook`) is documented in the core docstring
 
-**Given** dYdX already has trade stale-age filtering + bounded `trade_id` dedup (DATA-06), minute rollup (DATA-05), `snapshots:raw` publish, the `_second_loop` lag canary and the OBS-01 watchdog
+**Given** dYdX already has trade stale-age filtering + bounded `trade_id` dedup (DATA-06), the SQLite candle-store feed (DATA-05: `ml_signals/candle_store.py`, fed from each Parquet flush, one `candles.db` per venue), `snapshots:raw` publish, the `_second_loop` lag canary and the OBS-01 watchdog
 **When** the core is built
 **Then** all of these run for Bybit and Hyperliquid too, with thresholds in `CoreConfig` defaulting to dYdX's current values
 
@@ -2258,6 +2258,10 @@ So that the production dYdX feed shares the single write gate (AD-1) instead of 
 **When** the migration lands
 **Then** all pass with only import/attribute-path updates (no behavioural rewrites), `make test` is green, and the dYdX collector is live-verified on the VPS with the bot_tui collector pane still working
 
+**Given** the candle store (`ml_signals/candle_store.py`), fed today from `dydx_collector/collector.py`'s flush path
+**When** the core (22.1) owns that path
+**Then** dYdX's `_flush_once` -> `_apply_to_candle_store`, the :02 wall-clock flush, the startup catch-up and the prune call are deleted from `dydx_collector/` with no behavioural change, and `candles_dydx.db` keeps being written
+
 ### Story 22.3: Shared data types and a single `OpenInterest`
 
 As a backend developer,
@@ -2266,7 +2270,7 @@ So that a new venue imports shared types instead of reaching into `dydx_collecto
 
 **Acceptance Criteria:**
 
-**Given** `DydxSecondSnapshot`, `DydxMinuteRollup` and `integrity.ohlc_outside_book` are venue-neutral but live in `dydx_collector/`
+**Given** `DydxSecondSnapshot`, `integrity.ohlc_outside_book` and the venue-neutral operator scripts `build_candles`, `consolidate_catalog` and `repair_catalog` live in `dydx_collector/`
 **When** moved to `collector_core/`
 **Then** class names are unchanged (catalog directories `custom_dydx_second_snapshot/` etc. stay valid) and every importer (`data_api/routes/*`, `ml_signals`, `ranking_engine`, collectors, tests) is updated
 
@@ -2385,3 +2389,68 @@ So that backtests on these venues can run over more history than the collector h
 **Given** NAUT-02/NAUT-03
 **When** the backfill runs
 **Then** bars are written via `ParquetDataCatalog.write_data()`, re-runs are idempotent (skip existing ranges), and a `BacktestDataConfig` over the backfilled range loads them without conversion
+
+### Story 22.10: Rankings show every collected coin across venues, with an exchange filter
+
+As the dashboard operator,
+I want the rankings page to list every coin any collector is currently collecting — dYdX, Bybit (linear + spot) and Hyperliquid — by default, and to narrow it by exchange with one click,
+So that a multi-venue watchlist is the normal view and a single venue is a filter, not the other way round.
+
+**Acceptance Criteria:**
+
+**Given** all three collectors publish to `snapshots:raw` (story 22.1)
+**When** `ranking_engine` builds `rankings:live`
+**Then** it contains one row per fresh instrument from every venue; a missing coin means "not collected / stale", never "hidden by venue"
+
+**Given** `ranking_engine`'s 24h volume comes only from dYdX's indexer today, so Bybit/Hyperliquid rows would rank at 0
+**When** the volume poll also reads Bybit `/v5/market/tickers` (`turnover24h`, linear + spot) and Hyperliquid `metaAndAssetCtxs` (`dayNtlVlm`)
+**Then** every venue's rows carry USD `volume24h` (OBS-03), and a row whose venue volume is unavailable is excluded from volume mode loudly (`error_ledger`, DATA-01), never ranked at 0
+
+**Given** story 19.5's typed `venue = X` filter condition
+**When** the rankings page shows a venue chip row (all venues present, all selected by default, per-viewer selection in `localStorage`)
+**Then** deselecting a chip hides that venue's rows, chips compose with `FilterPanel` conditions and sort, and a newly appearing venue is shown by default
+
+**Given** SSOT-04 (web and bot_tui are two renderers of one ranking page)
+**When** the bot_tui coins pane renders Hyperliquid's 24-char ids
+**Then** the instrument column fits without misaligning later columns (TUI-02) and the existing substring filter (`.BYBIT`, `.DYDX`, `.HYPERLIQUID`) is documented as the venue filter
+
+### Story 22.11: Nightly catalog consolidation for every venue
+
+As the platform operator,
+I want each closed UTC day's minute-sized Parquet files merged into one file per (data type, instrument) for every venue,
+So that the archive's file count grows by hundreds a day, not hundreds of thousands (audit D-36: inodes, backup and read cost all scale with files).
+
+**Acceptance Criteria:**
+
+**Given** `dydx_collector/consolidate_catalog.py` (moved to `collector_core/` in 22.3): plain pyarrow, one schema per day or refused (D-24), row count verified before the sources are deleted, interrupted runs self-healing, today never touched
+**When** it runs nightly (`make consolidate`, cron) against the shared catalog
+**Then** every closed day of every `data/<type>/<instrument>/` leaf -- `.DYDX`, `.BYBIT` and `.HYPERLIQUID` ids alike -- holds one file (plus at most one midnight-crossing file), the collectors keep writing today's files untouched, and `data_file_ranges`/`query_second_ohlc`/`build_candles` read the merged files unchanged (tested)
+
+**Given** the VPS
+**When** the first full run and one nightly run are timed
+**Then** wall time, peak RSS and files before/after are recorded in `docs/DATA_INTEGRITY_AUDIT.md` D-36 as measured, and the run stays under the collector's memory headroom (MEM-01)
+
+**Given** the Parquet backup that D-33 still lacks
+**When** consolidation has run
+**Then** a nightly `rclone`/`restic` copy of closed-day files to object storage is one command in the Makefile (its target and credentials are the operator's), documented next to `make consolidate`
+
+### Story 22.12: Venue-timed 1s sampling for Bybit and Hyperliquid (dYdX stays arrival-timed)
+
+As a strategy developer,
+I want Bybit and Hyperliquid snapshots and candles stamped with the venue's own event time,
+So that a bar holds the trades the venue did in that second, not the trades that happened to arrive in it, and bars align across venues.
+
+**Acceptance Criteria:**
+
+**Given** Bybit stamps trades from `trade.T` and the book from `orderbook.ts`, and Hyperliquid stamps trades from `trade.time` and the book from `book.time` (both halves venue-timed; dYdX's book carries no venue time, so it is excluded)
+**When** the core gains `CoreConfig.time_source: "venue" | "arrival"` (Bybit/Hyperliquid `venue`, dYdX `arrival`)
+**Then** under `venue`, second `S` is built from messages whose `ts_event` falls in `[S, S+1)` -- the book as of the last venue-timed delta at or before `S`, trades in `[S, S+1)` -- and is closed at `S + hold_back_seconds`; `snapshot.ts_event = S` exactly; `seconds_observed` in the candle store stays one per second
+
+**Given** transport delay
+**When** `hold_back_seconds` is set per venue
+**Then** it comes from a measured capture of `ts_init - ts_event` over several hours per venue (recorded in the audit), a trade arriving after its second closed is counted in `error_ledger` (`collector.late_trade`) and never dropped or misattributed, and `ranking_engine`'s staleness thresholds allow the hold-back
+
+**Given** the venues' own 1m klines (Bybit `/v5/market/kline`, Hyperliquid `candleSnapshot`)
+**When** one day of store bars is compared per venue
+**Then** volume matches bar for bar and OHLC within the venues' tick size; dYdX is documented as arrival-timed with up to ~3 s boundary misattribution (audit D-31..D-34) until its own story
+

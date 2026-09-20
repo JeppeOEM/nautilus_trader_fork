@@ -26,20 +26,19 @@ as live trades (collector._STALE_TRADE_NS).
 --apply, per flagged second: replace the snapshot with a copy whose trade fields are
 cleared (OHLC None, volumes/counts 0 -- the real trades in that second cannot be told
 apart from the replayed ones, so "no trade recorded" is the honest value, DATA-01), delete
-the minute rollup(s) built from it, then re-run the idempotent rollup backfill over the
-affected days so those minutes are regenerated from the corrected raw 1s. The book fields
+and (with --candles-db) rebuild the candle-store days it touched from the corrected raw 1s.
+Without --candles-db the store still holds the spike: run `build_candles` for those days. The book fields
 are untouched. Manually run, like prune_catalog.py; reads raw 1s in day chunks (MEM-01).
 """
 
 import argparse
 import logging
 
-from dydx_collector.backfill_minute_rollup import all_instruments
-from dydx_collector.backfill_minute_rollup import backfill_instrument
-from dydx_collector.backfill_minute_rollup import data_range_ns
-from dydx_collector.backfill_minute_rollup import day_chunks
+from dydx_collector.build_candles import all_instruments
+from dydx_collector.build_candles import data_range_ns
+from dydx_collector.build_candles import day_chunks
+from dydx_collector.build_candles import rebuild_instrument
 from dydx_collector.integrity import ohlc_outside_book
-from dydx_collector.minute_rollup import DydxMinuteRollup
 from dydx_collector.second_snapshot import DydxSecondSnapshot
 from ml_signals.catalog_stats import query_second_snapshots
 from nautilus_trader.model.identifiers import InstrumentId
@@ -47,8 +46,6 @@ from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
 
 logger = logging.getLogger(__name__)
-
-_MINUTE_NS = 60_000_000_000
 
 
 def find_impossible_snapshots(catalog_path: str, iid: str, start_ns: int, end_ns: int) -> list[DydxSecondSnapshot]:
@@ -69,18 +66,18 @@ def _cleared_copy(snap: DydxSecondSnapshot) -> DydxSecondSnapshot:
     return DydxSecondSnapshot.from_dict(values)
 
 
-def repair_instrument(catalog: ParquetDataCatalog, catalog_path: str, iid: str, flagged: list[DydxSecondSnapshot]) -> None:
+def repair_instrument(
+    catalog: ParquetDataCatalog, catalog_path: str, iid: str, flagged: list[DydxSecondSnapshot],
+    candles_db_path: str | None = None,
+) -> None:
     # Build every replacement first so a bad row fails before anything is deleted.
     replacements = [(snap, _cleared_copy(snap)) for snap in flagged]
     for snap, cleared in replacements:
         catalog.delete_data_range(DydxSecondSnapshot, iid, snap.ts_event, snap.ts_event)
         catalog.write_data([cleared])
-        minute_start = snap.ts_event // _MINUTE_NS * _MINUTE_NS
-        # A rollup's ts_init is its minute's end (see catalog_stats.query_minute_rollups);
-        # start + 1 keeps the previous minute (ts_init == this start) out of the delete.
-        catalog.delete_data_range(DydxMinuteRollup, iid, minute_start + 1, minute_start + _MINUTE_NS)
-    first, last = min(s.ts_event for s in flagged), max(s.ts_event for s in flagged)
-    backfill_instrument(catalog, catalog_path, iid, first, last + _MINUTE_NS)
+    if candles_db_path is not None:
+        first, last = min(s.ts_event for s in flagged), max(s.ts_event for s in flagged)
+        rebuild_instrument(candles_db_path, catalog_path, iid, first, last)
 
 
 def main() -> None:
@@ -88,6 +85,7 @@ def main() -> None:
     parser.add_argument("--catalog", required=True)
     parser.add_argument("--instrument", action="append", help="repeatable; default: all")
     parser.add_argument("--apply", action="store_true", help="rewrite the catalog (default: report only)")
+    parser.add_argument("--candles-db", help="candles.db to rebuild the repaired days in (closed days only)")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -104,7 +102,7 @@ def main() -> None:
             logger.info("  ts=%d high=%s low=%s vol=%.4f", snap.ts_event, snap.high_price, snap.low_price,
                         snap.buy_volume + snap.sell_volume)
         if args.apply:
-            repair_instrument(catalog, args.catalog, iid, flagged)
+            repair_instrument(catalog, args.catalog, iid, flagged, args.candles_db)
             logger.info("  repaired")
 
 

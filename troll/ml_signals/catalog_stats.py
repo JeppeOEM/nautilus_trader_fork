@@ -25,7 +25,6 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
-from dydx_collector.minute_rollup import DydxMinuteRollup
 from dydx_collector.second_snapshot import DydxSecondSnapshot
 from ml_signals import error_ledger
 from nautilus_trader.model.data import IndexPriceUpdate
@@ -122,6 +121,40 @@ def query_second_ohlc(catalog_path: str, instrument_id: str, start_ns: int, end_
     return rows
 
 
+def second_ohlc_arrays(paths: list[str]) -> dict[str, np.ndarray]:
+    """
+    Read OHLC + volume columns of the given snapshot files as arrays.
+
+    Keys `ts_ms`, `o`, `h`, `l`, `c`, `v` (NaN = no trade that second); each file opened once. The
+    rebuild's read path: no per-row Python objects, no per-call directory scan.
+    """
+    tables = []
+    for path in paths:
+        pf = pq.ParquetFile(path)
+        present = [c for c in _OHLC_COLUMNS if c in pf.schema_arrow.names]
+        tables.append(pf.read(columns=present))
+    out = {k: np.empty(0, dtype=np.float64) for k in ("o", "h", "l", "c", "v")}
+    out["ts_ms"] = np.empty(0, dtype=np.int64)
+    if not tables:
+        return out
+    n = sum(t.num_rows for t in tables)
+    ts = np.concatenate([t.column("ts_event").to_numpy() for t in tables]).astype(np.int64)
+    out["ts_ms"] = ts // 1_000_000
+
+    def col(name: str, default: float) -> np.ndarray:
+        parts = [
+            t.column(name).to_numpy(zero_copy_only=False).astype(np.float64)
+            if name in t.column_names else np.full(t.num_rows, default)
+            for t in tables
+        ]
+        return np.concatenate(parts) if parts else np.empty(0)
+
+    out["o"], out["h"], out["l"], out["c"] = (col(k, np.nan) for k in ("open_price", "high_price", "low_price", "close_price"))
+    out["v"] = col("buy_volume", 0.0) + col("sell_volume", 0.0)
+    assert len(out["ts_ms"]) == n
+    return out
+
+
 def _stamp_to_ns(stamp: str) -> int:
     """`2026-06-30T17-17-34-103475440Z` (a catalog filename bound) -> epoch ns."""
     date, _, clock = stamp.rstrip("Z").partition("T")
@@ -130,36 +163,19 @@ def _stamp_to_ns(stamp: str) -> int:
     return int(moment.replace(tzinfo=timezone.utc).timestamp()) * 1_000_000_000 + int(nanos)
 
 
-def data_file_ranges(
-    catalog_path: str, instrument_id: str, include_rollups: bool = False,
-) -> list[tuple[int, int]]:
-    """Ascending (start_ns, end_ns) of every second-snapshot Parquet file (plus minute-rollup
-    files if `include_rollups`) for the instrument, read from the catalog's filenames -- a
-    directory listing, no Parquet I/O. Lets paging routes know where data actually exists
-    instead of guessing with fixed-size probe windows (a data gap wider than the window
-    otherwise reads as "no more history")."""
-    types = ["custom_dydx_second_snapshot"] + (["custom_dydx_minute_rollup"] if include_rollups else [])
+def data_file_ranges(catalog_path: str, instrument_id: str) -> list[tuple[int, int]]:
+    """
+    Return ascending (start_ns, end_ns) of every second-snapshot Parquet file for the instrument.
+
+    Read from the catalog's filenames -- a directory listing, no Parquet I/O. Lets paging routes know
+    where data actually exists instead of guessing with fixed-size probe windows (a data gap wider
+    than the window otherwise reads as "no more history").
+    """
     ranges = []
-    for data_type in types:
-        for path in glob.glob(os.path.join(catalog_path, "data", data_type, instrument_id, "*.parquet")):
-            start, _, end = Path(path).stem.partition("_")
-            ranges.append((_stamp_to_ns(start), _stamp_to_ns(end)))
+    for path in glob.glob(os.path.join(catalog_path, "data", "custom_dydx_second_snapshot", instrument_id, "*.parquet")):
+        start, _, end = Path(path).stem.partition("_")
+        ranges.append((_stamp_to_ns(start), _stamp_to_ns(end)))
     return sorted(ranges)
-
-
-def query_minute_rollups(
-    catalog_path: str, instrument_id: str, start_ns: int, end_ns: int,
-) -> list[DydxMinuteRollup]:
-    """DydxMinuteRollup rows for `instrument_id` in [start_ns, end_ns], CustomData-unwrapped."""
-    catalog = ParquetDataCatalog(catalog_path)
-    # The catalog filters on ts_init, which for a rollup is the minute's *end* (ts_event is
-    # its start) -- widen the query by one minute and filter on ts_event ourselves.
-    results = catalog.query(
-        data_cls=DydxMinuteRollup, identifiers=[instrument_id],
-        start=start_ns, end=end_ns + 60_000_000_000,
-    )
-    rows = [r.data if hasattr(r, "data") else r for r in results]
-    return [r for r in rows if start_ns <= r.ts_event <= end_ns]
 
 
 def _load(catalog: ParquetDataCatalog, data_type: str, instrument_id: str) -> list:

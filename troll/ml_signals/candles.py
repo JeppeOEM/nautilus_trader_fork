@@ -19,9 +19,6 @@ import math
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from ml_signals.indicators import microprice
-from ml_signals.indicators import spread
-
 
 logger = logging.getLogger(__name__)
 
@@ -37,9 +34,6 @@ TIMEFRAMES = {
     "1d": 86400,
     "1w": 604800,
 }
-
-# Wider than this, the raw 1s archive is too big to rescan per request; read the minute rollup.
-ROLLUP_THRESHOLD_SECONDS = TIMEFRAMES["1h"]
 
 
 @dataclass
@@ -157,62 +151,9 @@ def is_valid_candle(c: dict) -> bool:
     return v >= 0 and low <= min(o, cl) and max(o, cl) <= h
 
 
-def choose_candle_source(bar_seconds: int) -> str:
-    return "rollup_1m" if bar_seconds > ROLLUP_THRESHOLD_SECONDS else "raw_1s"
-
-
-def _weighted_mean(rows: list, attr: str) -> float:
-    total = sum(r.seconds_observed for r in rows)
-    return sum(getattr(r, attr) * r.seconds_observed for r in rows) / total if total else 0.0
-
-
 # A bucket observed for less than this fraction of its span is flagged `partial` (D-15):
-# collector downtime/gaps leave its high/low/volume understated, which raw 1s cannot repair.
+# collector downtime/gaps leave its high/low/volume understated, which no later read can repair.
 PARTIAL_OBSERVED_FRACTION = 0.9
-
-
-def _rollup_bucket_dict(bucket_key: int, members: list, period_ns: int) -> dict | None:
-    """One candle dict from a bucket's rollups; None if no member traded (matches raw path)."""
-    traded = [r for r in members if r.open is not None]
-    if not traded:
-        return None
-    last = members[-1]
-    seconds_observed = sum(r.seconds_observed for r in members)
-    book = {
-        "bid_prices": [last.close_bid_price],
-        "bid_sizes": [last.close_bid_size],
-        "ask_prices": [last.close_ask_price],
-        "ask_sizes": [last.close_ask_size],
-    }
-    return {
-        "t": bucket_key * period_ns // 1_000_000,
-        "o": traded[0].open,
-        "h": max(r.high for r in traded),
-        "l": min(r.low for r in traded),
-        "c": traded[-1].close,
-        "v": sum(r.buy_volume + r.sell_volume for r in members),
-        "seconds_observed": seconds_observed,
-        "partial": seconds_observed < PARTIAL_OBSERVED_FRACTION * period_ns / 1_000_000_000,
-        "ofi_5": sum(r.ofi_5 for r in members),
-        "ofi_10": sum(r.ofi_10 for r in members),
-        "obi_5": _weighted_mean(members, "obi_5"),
-        "obi_10": _weighted_mean(members, "obi_10"),
-        "close_bid_price": last.close_bid_price,
-        "close_ask_price": last.close_ask_price,
-        "microprice": microprice(book),
-        "spread": spread(book),
-    }
-
-
-def rollup_dicts_from_rows(rows: list, period_seconds: int) -> list[dict]:
-    """Re-bucket DydxMinuteRollup-like rows into JSON-ready candle dicts (rollup analogue of
-    `candle_dicts_from_snapshots`). Flows are summed; top-of-book takes the last member."""
-    period_ns = period_seconds * 1_000_000_000
-    buckets: dict[int, list] = {}
-    for r in sorted(rows, key=lambda r: r.ts_event):
-        buckets.setdefault(r.ts_event // period_ns, []).append(r)
-    dicts = (_rollup_bucket_dict(k, m, period_ns) for k, m in sorted(buckets.items()))
-    return [d for d in dicts if d is not None]
 
 
 def candle_dicts_for_window(
@@ -221,29 +162,11 @@ def candle_dicts_for_window(
     end_ns: int,
     bar_seconds: int,
     snapshot_rows_fn: Callable[[str, int, int], list],
-    rollup_rows_fn: Callable[[str, int, int], list],
 ) -> list[dict]:
-    """
-    Serve wide bars from the minute rollup, narrow ones from raw 1s; every dict carries `source`.
-
-    If the rollup only covers the tail of the range (pre-feature history), the buckets before
-    the first rollup's are served from raw 1s, so the chart never silently truncates (DATA-01).
-    The first rollup's own bucket is rollup-only (never mixes sources), so it may be partial.
-    No rollup at all: all raw.
-    """
-    if choose_candle_source(bar_seconds) != "rollup_1m":
-        return _raw_candles(iid, start_ns, end_ns, bar_seconds, snapshot_rows_fn)
-    rollups = rollup_rows_fn(iid, start_ns, end_ns)
-    if not rollups:
-        logger.warning("No minute rollup for %s in [%d, %d]; falling back to raw 1s", iid, start_ns, end_ns)
-        return _raw_candles(iid, start_ns, end_ns, bar_seconds, snapshot_rows_fn)
-    period_ns = bar_seconds * 1_000_000_000
-    first_bucket_start = min(r.ts_event for r in rollups) // period_ns * period_ns
-    leading: list[dict] = []
-    if start_ns < first_bucket_start:
-        logger.warning("Minute rollup for %s starts at %d; raw 1s before it", iid, first_bucket_start)
-        leading = _raw_candles(iid, start_ns, first_bucket_start - 1, bar_seconds, snapshot_rows_fn)
-    return leading + [{**c, "source": "rollup_1m"} for c in rollup_dicts_from_rows(rollups, bar_seconds)]
+    """Candles for [start_ns, end_ns] aggregated from the raw 1s rows -- the slow, archive-side
+    path. Charts read the SQLite candle store (`ml_signals.candle_store`); this serves only history
+    the store does not hold. Every dict carries `source`."""
+    return _raw_candles(iid, start_ns, end_ns, bar_seconds, snapshot_rows_fn)
 
 
 def _raw_candles(

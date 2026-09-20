@@ -179,6 +179,8 @@ bench_data/
 !/troll/dydx_collector/catalog/.gitkeep
 /troll/dydx_collector/metrics/
 !/troll/dydx_collector/metrics/.gitkeep
+/troll/dydx_collector/candles/
+!/troll/dydx_collector/candles/.gitkeep
 /troll/bot_tui_logs/
 !/troll/bot_tui_logs/.gitkeep
 /troll/live_paper/data/

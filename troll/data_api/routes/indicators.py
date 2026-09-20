@@ -47,13 +47,10 @@ from fastapi import HTTPException
 from fastapi import Request
 from pydantic import BaseModel
 
-from data_api.routes import paging
-from data_api.settings import CATALOG_PATH
-from ml_signals import catalog_stats as _catalog_stats
+from data_api.routes import candles as _candles
 from ml_signals import chart_indicator_config
 from ml_signals import chart_indicators
 from ml_signals import custom_indicators
-from ml_signals.candles import candle_dicts_from_snapshots
 from ml_signals.venue import venue_of
 
 
@@ -63,13 +60,10 @@ CHART_INDICATOR_CONFIG_PATH: str = os.environ.get(
     "troll/ml_signals/chart_indicators.toml",
 )
 
-# Same clamp/window/span constants as candles.py/indicator_series.py -- kept as this module's
-# own copies rather than importing either route module's (MEM-01 extended to this route,
-# independently of whatever those modules' own values happen to be).
+# Own clamps (MEM-01 extended to this route, independently of candles.py's values). The candles
+# themselves come from `candles.candle_page`, so this route can never disagree with the chart.
 _MAX_INDICATOR_VALUES_LIMIT = 500
 _MAX_BAR_SECONDS = 86_400
-_QUERY_WINDOW_MULTIPLIER = 3
-_MAX_QUERY_SPAN_SECONDS = 7 * 86_400
 
 # Unlike limit/bar_seconds, `entries` has no natural client-side bound -- the picker only
 # ever sends its own configured list, but the query param is untrusted input like any
@@ -231,11 +225,6 @@ def _indicator_id(name: str, params: dict[str, Any]) -> str:
     return name + "_" + ",".join(f"{k}={v}" for k, v in sorted(params.items()))
 
 
-def _window_start_ns(before_ns: int, limit: int, bar_seconds: int) -> int:
-    span_seconds = min(limit * bar_seconds * _QUERY_WINDOW_MULTIPLIER, _MAX_QUERY_SPAN_SECONDS)
-    return before_ns - span_seconds * 1_000_000_000
-
-
 def _parse_entries(
     entries: str, model: type[IndicatorValueRequestEntry] = IndicatorValueRequestEntry
 ) -> list[IndicatorValueRequestEntry]:
@@ -346,17 +335,12 @@ def get_indicator_values(
     """
     limit = max(1, min(limit, _MAX_INDICATOR_VALUES_LIMIT))
     bar_seconds = max(1, min(bar_seconds, _MAX_BAR_SECONDS))
-    before_ms = before_ns // 1_000_000
     parsed_entries = _parse_entries(entries)
 
-    def fetch(start_ns: int, end_ns: int) -> list[dict]:
-        snapshots = _catalog_stats.query_second_snapshots(CATALOG_PATH, instrument_id, start_ns, end_ns)
-        return [c for c in candle_dicts_from_snapshots(snapshots, bar_seconds) if c["t"] < before_ms]
-
     try:
-        ranges = _catalog_stats.data_file_ranges(CATALOG_PATH, instrument_id)
-        span_ns = before_ns - _window_start_ns(before_ns, limit, bar_seconds)
-        kept = paging.fetch_page(fetch, ranges, before_ns, span_ns)[-limit:]
+        kept, has_more = _candles.candle_page(instrument_id, before_ns, limit, bar_seconds)
+    except HTTPException:
+        raise
     except Exception as exc:
         # A catalog read failure (missing/corrupt catalog dir, I/O error) is a server-side
         # condition, not a client-input problem -- 500, never a silent/opaque failure
@@ -375,7 +359,7 @@ def get_indicator_values(
     items = [IndicatorValuesItem(t=t, values=values) for t, values in sorted(by_time.items())]
     return IndicatorValuesResponse(
         items=_insert_gap_markers(items, bar_seconds),
-        has_more=paging.has_older_data(ranges, items[0].t * 1_000_000),
+        has_more=has_more,
         errors=errors,
         venue=venue_of(instrument_id),
     )

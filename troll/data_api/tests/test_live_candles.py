@@ -208,35 +208,35 @@ async def test_seed_fills_bucket_start_so_forming_bar_covers_whole_bucket(
 
 
 @pytest.mark.asyncio
-async def test_seed_wide_bar_reads_minute_rollup_plus_unflushed_tail(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Above the rollup threshold the forming bar must start from the rollup's minutes for this
-    bucket (what the history route serves), extended by live seconds the catalog has not flushed."""
+async def test_seed_wide_bar_reads_raw_seconds_plus_unflushed_tail(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A wide forming bar must start from the archive's raw seconds for this bucket (what the store
+    is built from), extended by live seconds the catalog has not flushed yet."""
     import data_api.live_candles as lc
+    from ml_signals.catalog_stats import SecondOHLC
 
     bar_seconds = 14_400
     bucket_ns = bar_seconds * 1_000_000_000
     now_ns = time.time_ns()
     start_ns = now_ns // bucket_ns * bucket_ns
-    minute_ns = 60_000_000_000
 
-    def rollups(_path: str, _iid: str, a: int, b: int) -> list[SimpleNamespace]:
+    def seconds(_path: str, _iid: str, a: int, b: int) -> list[SecondOHLC]:
         assert (a, b) == (start_ns, pytest.approx(now_ns, abs=5_000_000_000))
-        mk = lambda ts, o, h, low, c: SimpleNamespace(  # noqa: E731
-            ts_event=ts, open=o, high=h, low=low, close=c, buy_volume=1.0, sell_volume=0.5,
-        )
-        return [mk(start_ns, 100.0, 105.0, 99.0, 104.0), mk(start_ns + minute_ns, None, None, None, None),
-                mk(start_ns + 2 * minute_ns, 104.0, 110.0, 103.0, 108.0)]
+        return [
+            SecondOHLC(start_ns, 100.0, 105.0, 99.0, 104.0, 1.0, 0.5),
+            SecondOHLC(start_ns + 1_000_000_000, None, None, None, None, 0.0, 0.0),
+            SecondOHLC(start_ns + 2_000_000_000, 104.0, 110.0, 103.0, 108.0, 1.0, 0.5),
+        ]
 
-    monkeypatch.setattr(lc, "query_minute_rollups", rollups)
+    monkeypatch.setattr(lc, "query_second_ohlc", seconds)
     bus = LiveCandleBus()
     queue = bus.subscribe(_IID, bar_seconds)
-    # A live second the collector has not flushed yet, newer than every rollup minute.
+    # A live second the collector has not flushed yet, newer than every archived second.
     bus.handle_batch([DydxSecondSnapshot.to_dict(_snapshot(now_ns - 1_000_000_000, 120.0))])
     queue.get_nowait()
     await bus.seed(_IID, bar_seconds)
     bar = queue.get_nowait()["bar"]
     assert (bar["o"], bar["h"], bar["l"], bar["c"]) == (100.0, 120.0, 99.0, 120.0)
-    assert bar["v"] == 1.5 + 1.5 + 1.5  # both traded rollup minutes + the live second (1.0 + 0.5 each)
+    assert bar["v"] == 1.5 + 1.5 + 1.5  # both traded archived seconds + the live second (1.0 + 0.5 each)
 
 
 @pytest.mark.asyncio

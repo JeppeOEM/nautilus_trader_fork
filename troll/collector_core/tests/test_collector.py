@@ -18,12 +18,13 @@ client is a tiny in-test duck type -- it is *our* contract, not a Nautilus inter
 """
 
 import asyncio
+import os
 import time
 from pathlib import Path
 
 import pytest
-from dydx_collector.minute_rollup import DydxMinuteRollup
 from dydx_collector.second_snapshot import DydxSecondSnapshot
+from ml_signals import candle_store
 from ml_signals import error_ledger
 from ml_signals.catalog_stats import query_second_snapshots
 
@@ -75,6 +76,9 @@ class _SnapshotClient:
 def _collector(
     tmp_path: Path, iid: str = _BYBIT, client: object | None = None, seen_trade_ids: int = 2000
 ) -> Collector:
+    os.environ["CANDLES_DB_PATH"] = str(
+        tmp_path / "candles.db"
+    )  # the default dir is tmp_path's shared parent
     cfg = CoreConfig(
         environment="mainnet",
         catalog_path=str(tmp_path),
@@ -313,7 +317,7 @@ def test_ohlc_outside_book_canary_fires_once_per_minute(
     assert len([r for r in caplog.records if "IMPOSSIBLE" in r.message]) == 2
 
 
-def test_minute_rollup_row_buffered_at_minute_boundary(tmp_path: Path) -> None:
+def test_flush_feeds_the_candle_store_with_exactly_the_flushed_seconds(tmp_path: Path) -> None:
     c = _collector(tmp_path)
     c._process_data(_deltas([(100.0, 1.0)], [(100.5, 1.0)]))
     for sec in (0, 1, 2, 60):
@@ -322,8 +326,18 @@ def test_minute_rollup_row_buffered_at_minute_boundary(tmp_path: Path) -> None:
         c._process_data(_trade(100.0 + sec, 1.0, AggressorSide.BUYER, sec))
         (snap,) = _tick(c, now)
         assert snap.ts_event == now
-    (rollup,) = c._buffer[(DydxMinuteRollup, _BYBIT)]
-    assert (rollup.ts_event, rollup.open, rollup.close, rollup.buy_count) == (0, 100.0, 102.0, 3)
+    assert (
+        candle_store.window(c._candle_db, _BYBIT, 60, 1 << 62, 5) == []
+    )  # nothing until the flush
+
+    asyncio.run(c._flush_once())
+
+    bars = candle_store.window(c._candle_db, _BYBIT, 60, 1 << 62, 5)
+    assert [(b["t"], b["o"], b["c"], b["seconds_observed"]) for b in bars] == [
+        (0, 100.0, 102.0, 3),
+        (60_000, 160.0, 160.0, 1),
+    ]
+    assert candle_store.window(c._candle_db, _BYBIT, 3600, 1 << 62, 5)[0]["seconds_observed"] == 4
 
 
 @pytest.mark.asyncio
