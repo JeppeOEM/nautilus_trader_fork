@@ -40,8 +40,8 @@ from nautilus_trader.model.objects import Quantity
 
 from dydx_collector.collector import _prune_delta_retention
 from dydx_collector.collector import _prune_interval_seconds
-from dydx_collector.second_snapshot import BOOK_DEPTH
-from dydx_collector.second_snapshot import DydxSecondSnapshot
+from collector_core.second_snapshot import BOOK_DEPTH
+from collector_core.second_snapshot import DydxSecondSnapshot
 
 _IID = InstrumentId.from_str("BTC-USD-PERP.DYDX")
 _TS = 1_000_000_000

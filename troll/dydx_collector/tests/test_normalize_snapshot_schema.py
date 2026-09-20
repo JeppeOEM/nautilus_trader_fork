@@ -8,7 +8,7 @@ import pytest
 
 from dydx_collector.normalize_snapshot_schema import files_needing_migration
 from dydx_collector.normalize_snapshot_schema import migrate_file
-from dydx_collector.second_snapshot import DydxSecondSnapshot
+from collector_core.second_snapshot import DydxSecondSnapshot
 from ml_signals.catalog_stats import query_second_snapshots
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog

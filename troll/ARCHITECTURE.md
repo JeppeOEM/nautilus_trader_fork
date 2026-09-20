@@ -34,7 +34,7 @@ downstream of the collector ever touches `nautilus_trader`'s live `TradingNode`/
 
 Module boundary rule enforced throughout (architecture AD-4): every module downstream
 of the collector depends only on shared data types (`DydxSecondSnapshot`,
-`DydxOpenInterest`, `ml_signals.indicators` classes) and Redis/HTTP contracts — never
+`OpenInterest`, `ml_signals.indicators` classes) and Redis/HTTP contracts — never
 another module's internal state. `dydx_collector` never imports from anything
 downstream of it.
 
@@ -90,7 +90,7 @@ load that OOM-crashed an earlier `Strategy`-based recorder.
   each tick's own trailing-zero count, which corrupts catalog writes if left alone).
 - **`second_snapshot.py`** — defines `DydxSecondSnapshot(Data)`, the one custom Arrow-
   registered type this whole system is built around.
-- **`open_interest.py`** — `DydxOpenInterest(Data)` + `classify_liquidity()`; open
+- **`open_interest.py`** — `classify_liquidity()` + the dYdX REST poll (the `OpenInterest(Data)` type lives in `collector_core/open_interest.py`); open
   interest is the one field the Rust bindings drop, so it's polled separately via
   stdlib `urllib` against dYdX's indexer REST endpoint every 5 min.
 - **`prune_catalog.py`** — deletes `order_book_deltas` older than N days (`make prune`).
@@ -259,7 +259,7 @@ SSH-launched tool, not a background service.
 
 | Store | Writer | Readers | Contents |
 |---|---|---|---|
-| Parquet catalog (`dydx_collector/catalog/`) | `dydx_collector` | `ml_signals`, `data_api`, backtests, Jupyter | Trades, order book deltas, bars, mark/index price, funding rate, instruments, `DydxOpenInterest` — Nautilus-native, zero-conversion |
+| Parquet catalog (`dydx_collector/catalog/`) | `dydx_collector` | `ml_signals`, `data_api`, backtests, Jupyter | Trades, order book deltas, bars, mark/index price, funding rate, instruments, `OpenInterest` — Nautilus-native, zero-conversion |
 | `metrics.db` (SQLite) | `ranking_engine` | `data_api` (read-only mount) | Historical ranking snapshots (Story 1.4/FR8) |
 | Nautilus `Cache` (in-memory, `live_paper`) | `live_paper` | nobody external yet | Orders/positions/fills for the running bot — **not yet Redis-backed**, lost on restart |
 

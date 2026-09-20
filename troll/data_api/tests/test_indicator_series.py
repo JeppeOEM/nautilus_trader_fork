@@ -22,7 +22,7 @@ from fastapi.testclient import TestClient
 
 import data_api.app as app_module
 import data_api.routes.indicator_series as indicator_series_routes
-from dydx_collector.second_snapshot import DydxSecondSnapshot
+from collector_core.second_snapshot import DydxSecondSnapshot
 from ml_signals.indicators import MultiLevelOBI
 from ml_signals.indicators import MultiLevelOFI
 from ml_signals.indicators import microprice as _microprice

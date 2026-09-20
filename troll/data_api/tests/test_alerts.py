@@ -26,7 +26,7 @@ from fastapi.testclient import TestClient
 
 import data_api.app as app_module
 from data_api import alerts
-from dydx_collector.second_snapshot import DydxSecondSnapshot
+from collector_core.second_snapshot import DydxSecondSnapshot
 from nautilus_trader.model.identifiers import InstrumentId
 
 

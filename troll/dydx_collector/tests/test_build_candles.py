@@ -22,9 +22,9 @@ from pathlib import Path
 from ml_signals import candle_store
 from ml_signals.candles import candle_dicts_from_snapshots
 
-from dydx_collector.build_candles import all_instruments
-from dydx_collector.build_candles import rebuild_instrument
-from dydx_collector.second_snapshot import DydxSecondSnapshot
+from collector_core.build_candles import all_instruments
+from collector_core.build_candles import rebuild_instrument
+from collector_core.second_snapshot import DydxSecondSnapshot
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 

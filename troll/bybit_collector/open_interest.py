@@ -24,78 +24,14 @@ import time
 import urllib.request
 from decimal import Decimal
 
-import pyarrow as pa
-
-from nautilus_trader.core.data import Data
+from collector_core.open_interest import OpenInterest
 from nautilus_trader.model.identifiers import InstrumentId
-from nautilus_trader.serialization.arrow.serializer import make_dict_deserializer
-from nautilus_trader.serialization.arrow.serializer import make_dict_serializer
-from nautilus_trader.serialization.arrow.serializer import register_arrow
 
 
 _URLS = {
     "mainnet": "https://api.bybit.com",
     "testnet": "https://api-testnet.bybit.com",
 }
-
-
-class BybitOpenInterest(Data):
-    """Open interest (base-coin contracts) for one Bybit linear perpetual."""
-
-    def __init__(self, instrument_id: InstrumentId, open_interest: Decimal, ts_event: int, ts_init: int) -> None:
-        self.instrument_id = instrument_id
-        self.open_interest = open_interest
-        self._ts_event = ts_event
-        self._ts_init = ts_init
-
-    @property
-    def ts_event(self) -> int:
-        return self._ts_event
-
-    @property
-    def ts_init(self) -> int:
-        return self._ts_init
-
-    @classmethod
-    def schema(cls) -> pa.Schema:
-        return pa.schema(
-            {
-                "instrument_id": pa.dictionary(pa.int8(), pa.string()),
-                "open_interest": pa.string(),
-                "ts_event": pa.uint64(),
-                "ts_init": pa.uint64(),
-            },
-            metadata={"type": "BybitOpenInterest"},
-        )
-
-    @staticmethod
-    def to_dict(obj: "BybitOpenInterest") -> dict[str, object]:
-        return {
-            "instrument_id": obj.instrument_id.value,
-            "open_interest": str(obj.open_interest),
-            "ts_event": obj.ts_event,
-            "ts_init": obj.ts_init,
-        }
-
-    @classmethod
-    def from_dict(cls, values: dict[str, object]) -> "BybitOpenInterest":
-        return cls(
-            instrument_id=InstrumentId.from_str(str(values["instrument_id"])),
-            open_interest=Decimal(str(values["open_interest"])),
-            ts_event=int(values["ts_event"]),  # type: ignore[call-overload]
-            ts_init=int(values["ts_init"]),  # type: ignore[call-overload]
-        )
-
-    def __repr__(self) -> str:
-        return f"BybitOpenInterest({self.instrument_id}, {self.open_interest})"
-
-
-register_arrow(
-    data_cls=BybitOpenInterest,
-    schema=BybitOpenInterest.schema(),
-    encoder=make_dict_serializer(schema=BybitOpenInterest.schema()),
-    decoder=make_dict_deserializer(BybitOpenInterest),
-)
 
 
 def _fetch_tickers_json(environment: str) -> dict:
@@ -107,15 +43,15 @@ def _fetch_tickers_json(environment: str) -> dict:
         return json.load(response)
 
 
-async def fetch_open_interest(environment: str) -> list[BybitOpenInterest]:
+async def fetch_open_interest(environment: str) -> list[OpenInterest]:
     tickers_json = await asyncio.to_thread(_fetch_tickers_json, environment)
     return parse_open_interest(tickers_json, ts=time.time_ns())
 
 
-def parse_open_interest(tickers_json: dict, ts: int) -> list[BybitOpenInterest]:
+def parse_open_interest(tickers_json: dict, ts: int) -> list[OpenInterest]:
     # The Nautilus Bybit adapter's linear ids are "{symbol}-LINEAR.BYBIT".
     return [
-        BybitOpenInterest(
+        OpenInterest(
             instrument_id=InstrumentId.from_str(f"{row['symbol']}-LINEAR.BYBIT"),
             open_interest=Decimal(row["openInterest"]),
             ts_event=ts,

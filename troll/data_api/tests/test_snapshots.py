@@ -21,7 +21,7 @@ from fastapi.testclient import TestClient
 
 import data_api.app as app_module
 import data_api.routes.snapshots as snapshots_routes
-from dydx_collector.second_snapshot import DydxSecondSnapshot
+from collector_core.second_snapshot import DydxSecondSnapshot
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 

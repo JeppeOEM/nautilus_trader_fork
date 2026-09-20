@@ -18,7 +18,7 @@ import asyncio
 import json
 from unittest.mock import AsyncMock
 
-from dydx_collector.second_snapshot import DydxSecondSnapshot
+from collector_core.second_snapshot import DydxSecondSnapshot
 
 from collector_core.collector import _publish_snapshot_batch
 from nautilus_trader.model.identifiers import InstrumentId

@@ -27,7 +27,7 @@ on the computed series.
 import tempfile
 
 import pytest
-from dydx_collector.second_snapshot import DydxSecondSnapshot
+from collector_core.second_snapshot import DydxSecondSnapshot
 
 from ml_signals.chart_data import compute_chart_series
 from nautilus_trader.model.identifiers import InstrumentId

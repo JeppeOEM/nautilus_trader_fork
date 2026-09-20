@@ -33,7 +33,7 @@ import asyncio
 import logging
 from collections.abc import Callable
 
-from hyperliquid_collector.open_interest import HyperliquidOpenInterest
+from collector_core.open_interest import OpenInterest
 from nautilus_trader.core import nautilus_pyo3
 from nautilus_trader.model.data import FundingRateUpdate
 from nautilus_trader.model.data import capsule_to_data
@@ -97,6 +97,6 @@ class HyperliquidClient:
             message.data,
             nautilus_pyo3.HyperliquidOpenInterest,  # type: ignore[attr-defined]
         ):
-            self._on_data(HyperliquidOpenInterest.from_pyo3(message.data))
+            self._on_data(OpenInterest.from_pyo3(message.data))
         else:
             logger.debug(f"Ignoring message of type {type(message).__name__}")

@@ -23,7 +23,7 @@ import time
 from pathlib import Path
 
 import pytest
-from dydx_collector.second_snapshot import DydxSecondSnapshot
+from collector_core.second_snapshot import DydxSecondSnapshot
 from ml_signals import candle_store
 from ml_signals import error_ledger
 from ml_signals.catalog_stats import query_second_snapshots

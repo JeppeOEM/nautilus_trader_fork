@@ -26,7 +26,7 @@ per-instrument when dydx_collector's store_order_book_deltas is opted in
 series for every instrument in the live catalog.
 """
 
-from dydx_collector.second_snapshot import DydxSecondSnapshot
+from collector_core.second_snapshot import DydxSecondSnapshot
 
 from ml_signals.book_features import DepthProfile
 from ml_signals.book_features import book_imbalance

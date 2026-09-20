@@ -40,7 +40,7 @@ import redis.asyncio as aioredis
 from data_api import settings
 from data_api.redis_bus import QUEUE_MAX
 from data_api.redis_bus import put_drop_oldest
-from dydx_collector.second_snapshot import DydxSecondSnapshot
+from collector_core.second_snapshot import DydxSecondSnapshot
 from ml_signals import error_ledger
 from ml_signals.candles import candle_dicts_from_snapshots
 from ml_signals.catalog_stats import SecondOHLC

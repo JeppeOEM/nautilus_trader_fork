@@ -25,7 +25,7 @@ import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
 
-from dydx_collector.second_snapshot import DydxSecondSnapshot
+from collector_core.second_snapshot import DydxSecondSnapshot
 from ml_signals import error_ledger
 from nautilus_trader.model.data import IndexPriceUpdate
 from nautilus_trader.model.data import MarkPriceUpdate

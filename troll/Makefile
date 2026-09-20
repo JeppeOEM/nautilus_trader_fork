@@ -150,14 +150,14 @@ test:
 ##   7 3 * * * cd /path/to/troll && make consolidate >> consolidate.log 2>&1
 consolidate:
 	$(COMPOSE) run --rm --no-deps -e HOME=/tmp collector \
-		python3 -m dydx_collector.consolidate_catalog --catalog /app/catalog --apply
+		python3 -m collector_core.consolidate_catalog --catalog /app/catalog --apply
 
 ## Rebuild the SQLite candle store from the raw 1s archive (first deploy, or after a
 ## "candle store write failed" / repair_catalog run). Skips today unless the collector is stopped
 ## and --include-open-day is added.
 build-candles:
 	$(COMPOSE) run --rm --no-deps -e HOME=/tmp collector \
-		python3 -m dydx_collector.build_candles --catalog /app/catalog --db /app/candles_dir/candles_dydx.db
+		python3 -m collector_core.build_candles --catalog /app/catalog --db /app/candles_dir/candles_dydx.db
 
 ## Launch the bot_tui terminal UI (Story 4.1) -- an interactive urwid app, not a
 ## daemon, so it's run via `docker compose run` (never `up -d`) and gated behind the

@@ -20,8 +20,8 @@ from pathlib import Path
 import pytest
 
 from bybit_collector.config import load_config
-from bybit_collector.open_interest import BybitOpenInterest
 from bybit_collector.open_interest import parse_open_interest
+from collector_core.open_interest import OpenInterest
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
@@ -31,8 +31,8 @@ _IID = "BTCUSDT-LINEAR.BYBIT"
 
 def test_open_interest_round_trips_through_catalog(tmp_path: Path) -> None:
     catalog = ParquetDataCatalog(str(tmp_path))
-    catalog.write_data([BybitOpenInterest(InstrumentId.from_str(_IID), Decimal("123.456"), 1, 1)])
-    (oi,) = catalog.query(BybitOpenInterest, identifiers=[_IID])
+    catalog.write_data([OpenInterest(InstrumentId.from_str(_IID), Decimal("123.456"), 1, 1)])
+    (oi,) = catalog.query(OpenInterest, identifiers=[_IID])
     assert oi.data.open_interest == Decimal("123.456")
 
 

@@ -24,7 +24,7 @@ import data_api.routes.candles as candles_routes
 from ml_signals import candle_store
 from ml_signals.tests.test_candle_store import _DAY0_MS
 from ml_signals.tests.test_candle_store import _second
-from dydx_collector.second_snapshot import DydxSecondSnapshot
+from collector_core.second_snapshot import DydxSecondSnapshot
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 

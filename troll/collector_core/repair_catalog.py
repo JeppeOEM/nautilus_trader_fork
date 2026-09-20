@@ -16,8 +16,8 @@
 Find and repair second snapshots whose trade OHLC is impossible given their own book.
 
 Usage:
-    python -m dydx_collector.repair_catalog --catalog /app/catalog [--instrument X ...]      # report only
-    python -m dydx_collector.repair_catalog --catalog /app/catalog --apply                   # rewrite
+    python -m collector_core.repair_catalog --catalog /app/catalog [--instrument X ...]      # report only
+    python -m collector_core.repair_catalog --catalog /app/catalog --apply                   # rewrite
 
 Detection is `integrity.ohlc_outside_book` -- see there for why it is sound. It finds the
 rows written by the pre-fix collector, which counted dYdX's subscribed-reply trade history
@@ -34,12 +34,12 @@ are untouched. Manually run, like prune_catalog.py; reads raw 1s in day chunks (
 import argparse
 import logging
 
-from dydx_collector.build_candles import all_instruments
-from dydx_collector.build_candles import data_range_ns
-from dydx_collector.build_candles import day_chunks
-from dydx_collector.build_candles import rebuild_instrument
-from dydx_collector.integrity import ohlc_outside_book
-from dydx_collector.second_snapshot import DydxSecondSnapshot
+from collector_core.build_candles import all_instruments
+from collector_core.build_candles import data_range_ns
+from collector_core.build_candles import day_chunks
+from collector_core.build_candles import rebuild_instrument
+from collector_core.integrity import ohlc_outside_book
+from collector_core.second_snapshot import DydxSecondSnapshot
 from ml_signals.catalog_stats import query_second_snapshots
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog

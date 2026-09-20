@@ -140,7 +140,7 @@ def test_candle_dicts_for_window_serves_raw_seconds_with_a_source_tag() -> None:
 
 
 def _real_snap(ts: int):  # noqa: ANN202
-    from dydx_collector.second_snapshot import DydxSecondSnapshot
+    from collector_core.second_snapshot import DydxSecondSnapshot
     from nautilus_trader.model.identifiers import InstrumentId
 
     return DydxSecondSnapshot(
@@ -163,7 +163,7 @@ def test_is_valid_candle_rejects_inverted_negative_and_nonfinite() -> None:
 
 
 def _write_ohlc_snapshots(catalog_path: str, base: int, n: int):  # noqa: ANN202
-    from dydx_collector.second_snapshot import DydxSecondSnapshot
+    from collector_core.second_snapshot import DydxSecondSnapshot
     from nautilus_trader.model.identifiers import InstrumentId
     from nautilus_trader.persistence.catalog import ParquetDataCatalog
 

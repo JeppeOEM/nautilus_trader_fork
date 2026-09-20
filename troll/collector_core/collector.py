@@ -62,9 +62,9 @@ from typing import Any
 
 import pyarrow.parquet as pq
 import redis.asyncio as aioredis
-from dydx_collector.integrity import ohlc_outside_book
-from dydx_collector.second_snapshot import BOOK_DEPTH
-from dydx_collector.second_snapshot import DydxSecondSnapshot
+from collector_core.integrity import ohlc_outside_book
+from collector_core.second_snapshot import BOOK_DEPTH
+from collector_core.second_snapshot import DydxSecondSnapshot
 from ml_signals import candle_store
 from ml_signals import error_ledger
 from ml_signals.catalog_stats import query_second_ohlc
