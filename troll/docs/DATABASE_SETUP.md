@@ -35,12 +35,15 @@ are used — no hashes, sorted sets, streams, or lists.
 Think of Redis here purely as **a live wire between processes**, not a database you'd
 ever back up or migrate.
 
+<!-- [amended 2026-09-20: Epic 22 story 22.8] `dashboard` was retired by Story 15.10; every
+     reader named below is `data_api` (FastAPI + React SPA), reading the same Redis keys. -->
+
 ### 1.1 Pub/Sub channels
 
 | Channel | Publisher | Subscribers | Payload |
 |---|---|---|---|
-| `snapshots:raw` | `dydx_collector/collector.py` — every ~1s tick | `ranking_engine`, `dashboard`, `bot_tui` | JSON list of `DydxSecondSnapshot` dicts (book top-20 + trade volume/count), one per collected instrument |
-| `rankings:live` | `ranking_engine/engine.py` (**sole publisher**, AD-9) | `dashboard`, `bot_tui` | JSON: `{mode, updated_at, ranks: [...], stale_instrument_ids: [...]}` — every rank row carries volume/volatility/OFI/OBI/microprice/spread/CVD/price/pct-change fields |
+| `snapshots:raw` | `collector_core/collector.py`'s `_second_loop` — every ~1s tick, in **all three** collector containers (dYdX, Bybit, Hyperliquid) | `ranking_engine`, `data_api`, `bot_tui` | JSON list of `DydxSecondSnapshot` dicts (book top-20 + trade volume/count), one per collected instrument. Each publisher sends only its own venue's instruments, so entries stay disjoint by `instrument_id` — this is the architecture spine's "one producer per (channel, venue)" convention |
+| `rankings:live` | `ranking_engine/engine.py` (**sole publisher**, AD-9) | `data_api`, `bot_tui` | JSON: `{mode, updated_at, ranks: [...], stale_instrument_ids: [...]}` — every rank row carries volume/volatility/OFI/OBI/microprice/spread/CVD/price/pct-change fields |
 | `ranking:control` | `bot_tui` (mode toggle) | `ranking_engine` | `{"mode": "volume"\|"volatility"}` |
 | `collector:control` | `bot_tui` | `dydx_collector/collector.py` | `{"action": "start"\|"unpin"\|"stop"\|"pin_top_liquid", "id": "<instrument_id>"|null}` |
 | `collector:status` | `dydx_collector/collector.py` | `bot_tui` | Per-instrument `{id, pinned, liquid, last_trade_ts}`, or removal/unpin summaries |
@@ -57,11 +60,15 @@ ever back up or migrate.
 ### 1.3 Who owns what
 
 - **`ranking_engine`** is the sole computer of every rolling-window ranking indicator
-  (OFI/OBI z-scores, volatility). `dashboard`/`bot_tui` only ever parse
+  (OFI/OBI z-scores, volatility). `data_api`/`bot_tui` only ever parse
   `rankings:live` — neither runs its own copy of these indicators (`troll/CLAUDE.md`
   SSOT-02).
-- **`dydx_collector`** is the sole writer of `snapshots:raw`/`collector:status`, and
-  the sole actor on `collector:control`.
+- **The three collectors** (`dydx_collector`, `bybit_collector`, `hyperliquid_collector`,
+  all publishing through the shared `collector_core`) are the only writers of
+  `snapshots:raw` — one producer per venue, each publishing only its own instruments.
+  `collector:status`/`collector:control` stay **dYdX-only**: `dydx_collector` is their
+  sole writer and the sole actor on `collector:control` (the other two collectors have
+  no control plane).
 - **`live_paper`** is the sole writer of `bots:status`/`bots:incidents:*`/
   `bots:history:*`, and the sole actor on `bots:control`.
 - **`bot_tui`** never writes status data — it only publishes control messages and
@@ -92,12 +99,12 @@ single-file mount can't expose.
 ### 2.1 `metrics.db` — owned by `ranking_engine/metrics_store.py`
 
 - **Path:** `./dydx_collector/metrics/metrics.db` on the host (`METRICS_DB_PATH` env,
-  mounted `/app/metrics_dir/metrics.db` in the `ranking_engine`/`dashboard` containers).
+  mounted `/app/metrics_dir/metrics.db` in the `ranking_engine`/`data_api` containers).
 - **Table:** `snapshots(ts, instrument_id, price, pct_1h, pct_24h, volatility, ofi,
   microprice, spread, rank, volume24h)`, primary key `(ts, instrument_id)`.
 - **Purpose:** 31-day rolling per-instrument history, upserted every 60s, pruned to
-  `retain_days=31` on every write. Powers the dashboard's per-coin history chart.
-- **Writer:** `ranking_engine` exclusively. **Reader:** `dashboard` only (mounted
+  `retain_days=31` on every write. Powers the web UI's per-coin history chart.
+- **Writer:** `ranking_engine` exclusively. **Reader:** `data_api` only (mounted
   `:ro`).
 - Note: the `ofi` column here is top-of-book-only `OrderFlowImbalance` — a *different*
   metric from the multi-level `ofi_10_z`/`ofi_3/5/10` fields that live only in
@@ -117,17 +124,22 @@ single-file mount can't expose.
 - **Writer:** `live_paper/trade_history.py`. **Readers:** `live_paper/bot_status.py`
   (win-rate stats) and `trade_history.py` itself, to build the `bots:history:*` Redis
   blobs above. Nothing outside `live_paper/` reads this file directly — `bot_tui`/
-  `dashboard` only ever see it via Redis.
+  `data_api` only ever sees it via Redis.
 
 ---
 
 ## 3. Parquet catalog
 
-`ParquetDataCatalog`, mounted at `./dydx_collector/catalog` (read-write for
-`collector`, read-only for `dashboard`/`ranking_engine`). This is the append-only
-archive of every raw market data type the collector ingests — trades, order-book
-deltas, bars, mark/index price, funding rate, second-snapshots, open interest,
-instrument definitions — written exclusively via `ParquetDataCatalog.write_data()`
+`ParquetDataCatalog`, mounted at `./dydx_collector/catalog` (read-write for all three
+collector services — `collector`, `bybit_collector`, `hyperliquid_collector` — read-only
+for `data_api`/`ranking_engine`). This is the append-only
+archive of what the three collectors actually write: second-snapshots
+(`DydxSecondSnapshot`, which folds that second's trades in rather than storing them
+raw — audit D-45), mark/index price, funding rate, open interest and instrument
+definitions, plus `order_book_deltas` for the dYdX instruments that opt in via
+`store_order_book_deltas` (off by default, dYdX-only). There is no `trade_tick/`
+directory and minute bars were retired 2026-09-20 (audit D-35). Written exclusively
+via `ParquetDataCatalog.write_data()`
 (`troll/CLAUDE.md` NAUT-02: no hand-rolled schemas). Its full schema, per type, is
 already documented in [Data Dictionary](DATA_DICTIONARY.md) §1 — this doc won't
 repeat it.

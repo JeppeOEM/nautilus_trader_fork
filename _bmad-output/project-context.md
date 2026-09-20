@@ -17,16 +17,16 @@ _This file contains critical rules and patterns that AI agents must follow when 
 ## Technology Stack & Versions
 
 - Python 3.12–3.14, `nautilus_trader` 1.229.0 used strictly as a **library** (never `TradingNode`/`Strategy`/`DataEngine` runtime) in `troll/`
-- Dashboard stack: aiohttp (SSE server) + plotly (charts) + redis (pub/sub for live 1s data)
-- Deployment: two-image Docker split — `nautilus-trader-base` (rebuilt rarely, core/deps only) + thin `collector.dockerfile` layered on top (bakes in `troll/dydx_collector/`, rebuilds in seconds)
+- Reader stack: `data_api` is FastAPI + uvicorn serving a built React SPA (`troll/data_api.dockerfile`'s frontend-build stage), plus redis (pub/sub for live 1s data). The old aiohttp+plotly `ml_signals/dashboard.py` was retired by Story 15.10.
+- Deployment: one durable base image + three thin layers (not a two-image split) — `nautilus-trader-base` (rebuilt rarely, core/deps only) carries `troll/collector.dockerfile` (bakes in `collector_core/`, the three venue collectors `dydx_collector/`/`bybit_collector/`/`hyperliquid_collector/`, `common/`, `ml_signals/`, `ranking_engine/`, `bot_tui/`, `data_api/`), `troll/data_api.dockerfile` (own package set + a Node frontend-build stage) and `troll/live_paper.dockerfile`; all three rebuild in seconds
 - **Rebuild-order constraint**: rebuild the base image before the thin image whenever `nautilus_trader` core/deps change, or the thin image silently layers onto a stale base
-- **Version-pin discipline**: `nautilus_trader` is pinned at 1.229.0 deliberately; bumping requires re-validating the PyO3 dYdX client bindings (precision bugs are version-sensitive — see Language-Specific Rules below)
+- **Version-pin discipline**: `nautilus_trader` is pinned at 1.229.0 deliberately; bumping requires re-validating the PyO3 client bindings for all three venue adapters — dYdX, Bybit and Hyperliquid (precision bugs are version-sensitive and were a dYdX incident, but the pin now gates three adapters — see Language-Specific Rules below)
 
 ## Critical Implementation Rules
 
 ### Language-Specific Rules
 
-- **Precision re-stamping**: Never use `Price(decimal, precision)` / `Quantity(decimal, precision)` to change a value's precision — silently corrupts values via internal float64 round-trip for some inputs (e.g. `Price(Decimal("61090.59855"), 16)` → `61090.5985500000026624`). Always use `Decimal.scaleb(new_precision)` + `Price.from_raw()` / `Quantity.from_raw()`. Reference implementation: `troll/dydx_collector/client.py:45` `_at_fixed_precision()`.
+- **Precision re-stamping**: Never use `Price(decimal, precision)` / `Quantity(decimal, precision)` to change a value's precision — silently corrupts values via internal float64 round-trip for some inputs (e.g. `Price(Decimal("61090.59855"), 16)` → `61090.5985500000026624`). Always use `Decimal.scaleb(new_precision)` + `Price.from_raw()` / `Quantity.from_raw()`. Reference implementation: `troll/dydx_collector/client.py:50` `_at_fixed_precision()` (dYdX-only: Bybit and Hyperliquid parse mark/index at the instrument's own constant precision, so neither has an equivalent).
 - **Never derive precision from digit count** — don't use `Decimal.normalize()` on an incoming market value to infer its precision; dYdX's mark/index feed has inconsistent trailing-zero stripping per tick, which caused `ParquetDataCatalog` to reject mixed-precision files in production.
 - **Never round-trip a market data value through `float`** before it's inside a `Price`/`Quantity` — exact `Decimal`/raw-integer arithmetic only.
 - Type hints required on **all** function signatures in `troll/` — `mypy` runs with `disallow_incomplete_defs = true`. Use `X | None`, not `Optional[X]`.
@@ -34,10 +34,10 @@ _This file contains critical rules and patterns that AI agents must follow when 
 
 ### Framework-Specific Rules
 
-- **Never instantiate `TradingNode` or `DataEngine` in `troll/` code.** Live `DataEngine` has a documented unbounded-queue-growth + shutdown-wedge bug under sustained high-message-load that OOM-crashed an earlier `Strategy`/`TradingNode`-based recorder (see `gg` branch history). The collector (`dydx_collector/collector.py`) owns its own asyncio loop, buffer, and flush timer instead, calling the Rust `DydxHttpClient`/`DydxWebSocketClient` directly.
+- **Never instantiate `TradingNode` or `DataEngine` in `troll/` code.** Live `DataEngine` has a documented unbounded-queue-growth + shutdown-wedge bug under sustained high-message-load that OOM-crashed an earlier `Strategy`/`TradingNode`-based recorder (see `gg` branch history). The collector core (`collector_core/collector.py`'s `Collector`, subclassed per venue by `dydx_collector`/`bybit_collector`/`hyperliquid_collector`) owns its own asyncio loop, buffer, and flush timer instead, driving one duck-typed venue client that calls that venue's Rust pyo3 HTTP/WS clients directly.
 - **All data writes go through `ParquetDataCatalog.write_data()`** — no hand-rolled Parquet schemas. Working around the catalog API breaks catalog reads.
-- **Backtests use `BacktestNode` + `BacktestDataConfig`** (see `ml_signals/backtest_dydx.py:48`), not a custom simulation loop — this streams the catalog in time-bounded chunks rather than loading it fully into memory.
-- **Reference strategies via `ImportableStrategyConfig` by string path** (`ml_signals/backtest_dydx.py:57`), not by direct class import — enables parameter sweeps/time-range filtering with no code changes.
+- **Backtests use `BacktestNode` + `BacktestDataConfig`** (see `ml_signals/strategies/backtest_dydx.py:67-72`), not a custom simulation loop — this streams the catalog in time-bounded chunks rather than loading it fully into memory.
+- **Reference strategies via `ImportableStrategyConfig` by string path** (`ml_signals/strategies/backtest_dydx.py:99`), not by direct class import — enables parameter sweeps/time-range filtering with no code changes.
 - **1s-snapshot signal architecture**: HFT signals (OFI, OBI, microprice, spread) are computed on read from `DydxSecondSnapshot` (top-20 book levels + per-side trade volume), never stored pre-computed. If a value is exactly derivable from stored level data (e.g. `microprice`, `spread`), it must not be persisted — see `ml_signals/indicators.py`.
 
 ### Testing Rules
@@ -47,7 +47,7 @@ _This file contains critical rules and patterns that AI agents must follow when 
 - **One assertion per logical claim.** All test functions return `-> None`.
 - Tests are **required** for: financial calculations (OFI, imbalance, microprice, precision conversion) and integration paths touching Nautilus types or the catalog.
 - Tests are **not required** for trivial glue (config parsing, logging setup, simple routing) — skip if the function has no branching logic and no arithmetic.
-- Test file naming: `test_*.py`, one file per module under test (`dydx_collector/tests/`, `ml_signals/tests/`).
+- Test file naming: `test_*.py`, one file per module under test — one `tests/` directory per package (`collector_core/tests/`, `dydx_collector/tests/`, `bybit_collector/tests/`, `hyperliquid_collector/tests/`, `common/tests/`, `ml_signals/tests/`, `ranking_engine/tests/`, `bot_tui/tests/`, `data_api/tests/`), all listed in the `Makefile`'s `test` target. `live_paper/tests/` is the one deliberate exclusion — it runs under `make test-live-paper` against the `live-paper` image, not the collector one.
 
 ### Code Quality & Style Rules
 
@@ -68,8 +68,8 @@ _This file contains critical rules and patterns that AI agents must follow when 
 
 ### Critical Don't-Miss Rules
 
-- **Crossed/touched book snapshots must be dropped, not displayed.** During WS reconnect, dYdX sends a CLEAR delta then replays the book level-by-level — sampling mid-replay can produce `best_bid >= best_ask`. Both `collector._second_loop` and `dashboard._coin_chart_json` must skip (not clamp or average) any snapshot where `bp >= ap`. Fixed 2026-06-30; regression tests in `test_collector_snapshot.py` / `test_dashboard_chart.py`.
-- **A frozen/flat price line is not a bug to "fix" by interpolating** — if no `OrderBookDeltas` arrive, the book is genuinely stale and flatness is the correct signal. Never paper over a gap with a fabricated flatline; flag it visually instead (`_STALE_BOOK_NS = 5s` skip in collector, `_CHART_GAP_THRESHOLD_MS = 2.5s` → `None` gap in dashboard chart JSON).
+- **Crossed/touched book snapshots must be dropped, not displayed.** During WS reconnect, dYdX sends a CLEAR delta then replays the book level-by-level — sampling mid-replay can produce `best_bid >= best_ask`. The collector's per-second gate (`collector_core.collector.Collector._sample_tick`, called by `_second_loop`) must skip — not clamp or average — any snapshot where `bp >= ap`. Fixed 2026-06-30; regression tests in `dydx_collector/tests/test_collector_snapshot.py`. The reader-side skip that used to live in `dashboard._coin_chart_json` **was** ported: it is `data_api/routes/snapshots.py:132` (`if bp >= ap: continue`), relocated verbatim with `_price_series_rows` by Story 15.10. Under AD-3 a reader should never need it, so it is a tracked deviation (spine Deferred: "Reader-side crossed-book skip survived the `dashboard` → `data_api` move"), not a removed one — do not cite it as evidence the reader re-validates nothing.
+- **A frozen/flat price line is not a bug to "fix" by interpolating** — if no `OrderBookDeltas` arrive, the book is genuinely stale and flatness is the correct signal. Never paper over a gap with a fabricated flatline; flag it visually instead (the collector's 5s stale-book skip, now the config field `CoreConfig.stale_book_seconds` in `collector_core/config.py` — it was the module constant `_STALE_BOOK_NS` before Epic 22; `data_api/routes/snapshots.py:75`'s `_SNAPSHOT_GAP_THRESHOLD_MS = 2500 ms` → `None` gap in the chart series, ported from `dashboard`'s `_CHART_GAP_THRESHOLD_MS` by Story 15.10).
 - **Zero book updates across BTC/ETH/SOL-class instruments for >30s is a pipeline failure, not "quiet market"** — these trade 24/7. Diagnose (check `buy_count`/`sell_count`/raw bid-ask deltas across consecutive snapshots), don't accept it.
 - **A changing OFI z-score does NOT prove the feed is alive** — it's a rolling 3600-point mean/std that drifts as history ages off even with zero current input. Frozen price + moving z-score = suspect a dead book, not healthy data.
 - **Liquidity classification must use `volume24H` (USD) or `openInterest × oraclePrice`, never raw `openInterest`** — dYdX's indexer reports OI in base-token units, so e.g. BTC at 458 tokens looks "illiquid" against a naive USD threshold.
