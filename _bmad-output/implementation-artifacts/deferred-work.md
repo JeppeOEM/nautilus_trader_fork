@@ -432,3 +432,12 @@ Discarded by operator: locking/atomic TOML writes; `bot_tui` malformed-message h
 - Indicator legend (gear / eye / x per indicator, top-left of its pane) does not exist; indicators are managed in the picker list (dropdown + Add, inline params + Apply, Remove), and there is no visibility toggle.
 - Trendline placement is two-click, not click-drag.
 - Alerts: Epic 20.
+
+## Deferred from: code review of story 22.1 (2026-09-20)
+
+- source_spec: `_bmad-output/implementation-artifacts/22-1-troll-collector-core-extracted-from-the-bybit-and-hyperliquid-collectors.md`
+  summary: `_publish_snapshot_batch`'s Redis publish failure is a bare `logger.warning` and swallowed, so a permanently down Redis is invisible in `/api/errors` (DATA-07) — now from three collector processes, not one.
+  evidence: Pre-existing dYdX design ("missing one tick is acceptable") copied verbatim into `collector_core` as the story specified; the WARNING fires once per second per venue with no ledger count. Decide once for all collectors (ledger with rate limiting, or a `collector:status` heartbeat) when 22.2 moves dYdX onto the core.
+- source_spec: `_bmad-output/implementation-artifacts/22-1-troll-collector-core-extracted-from-the-bybit-and-hyperliquid-collectors.md`
+  summary: The stale-trade age filter compares venue `ts_event` to the host wall clock, so a host clock more than `stale_trade_seconds` fast drops every live trade on every venue, and `_report_stale_trades` reports it at INFO under the reassuring label "subscribe-time trade history".
+  evidence: Inherited from `dydx_collector` (D-01's filter), now venue-wide. A persistent non-zero count after the subscribe window is indistinguishable from Hyperliquid's real subscribe replay (D-36: 21/19 trades). Fix candidate: escalate to `error_ledger` when drops continue past the first flush after subscribe, or compare against the venue's own message time.

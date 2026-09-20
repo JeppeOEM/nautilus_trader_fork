@@ -106,6 +106,17 @@ React chart's own props to prove the frontend holds what the API served.
 | D-34 | Volume histogram "missing bars" / 1m bars "that are only a line" | Not loss. dYdX volume is tiny now (indexer 24h: ETH 2654 trades = 1.8/min, BTC 1.1/min, SOL 0.5/min; 135 of 200 BTC minutes had 0 trades), so a 1m bucket with one trade is a genuine o=h=l=c bar (ETH dojis: ours 25 vs indexer 24 over the same minutes). lightweight-charts draws a bar shorter than 1 px as a 1 px tick on the baseline (`PaneRendererHistogram`), so 0.002 ETH next to a 120 ETH bar is invisible. CDP read of the chart's props: volume bars == real candles (148/148 VPS, 240/240 local); last candle == API's last. | None needed for correctness. If wanted: log-scale the volume pane, or a per-bar min height (custom primitive) | DOCUMENTED |
 | D-05 | (update) BONK book still unparseable | VPS 24 h: 4433 `Failed to parse orderbook deltas for BONK-USD … exceeds QUANTITY_RAW_MAX`; local 3 h: 2315. BONK `/api/candles` on the VPS: empty. | Unchanged: exclude BONK (and any coin whose level sizes exceed ~3.4e13 units) | OPEN |
 
+### Story 22.1 — collector core (Bybit/Hyperliquid)
+
+`troll/collector_core/` now owns the ingest/flush/sample/write path for the Bybit and
+Hyperliquid collectors, so dYdX's venue-neutral guards run for every venue (dYdX itself
+moves onto the core in Story 22.2).
+
+| ID | Danger | Mechanism / evidence | Treatment | Status |
+|----|--------|----------------------|-----------|--------|
+| D-35 | Bybit/Hyperliquid had none of dYdX's ingestion guards (19.3/19.4 left them out) | Each sibling had its own ~200-line copy of the loop with no stale-trade filter, no dedup, no OHLC canary, and a bare `logger.exception(...); continue` at every drop site (DATA-07) | `collector_core.Collector`: D-01 stale-age filter (`stale_trade_seconds`, 10 s) + D-02 bounded `trade_id` dedup (2000) with drops reported each flush; D-04 `ohlc_outside_book` ERROR canary; D-09 stale-book skip with accumulator discard; crossed book = skip + `error_ledger` `collector.crossed_book` once per episode, forced resync only after `crossed_resync_seconds` and only for a client with `resync_orderbook` (Bybit; Hyperliquid's full-snapshot book never resyncs); D-10 `_second_loop` lag canary; OBS-01 watchdog; every drop site is an `error_ledger` entry. Both venues now sample at 1 s | GUARDED |
+| D-36 | Subscribe-time replay on the Bybit/Hyperliquid trade channels is unverified against the raw feed | First live run on the core (2026-09-20, 100 s, mainnet): Hyperliquid's `trades` subscribe reply **does** replay history — the age filter dropped 21 (BTC) / 19 (ETH) trades at subscribe (`Dropped subscribe-time trade history`), none afterwards; Bybit's `publicTrade` dropped nothing in the same run. Neither has been compared with the raw WS payload yet, so the replay size/age bounds (and whether the 10 s filter always covers Hyperliquid's) are unproven | Verify per venue against the raw feed (Story 22.5), then record the bounds here | OPEN — Story 22.5 |
+
 ## 3. Conclusions
 
 1. The spike candles were an **ingestion bug of ours**, not market data: the venue sends

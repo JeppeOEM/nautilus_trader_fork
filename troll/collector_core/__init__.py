@@ -12,18 +12,4 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
-"""Hyperliquid collector config: the venue-neutral `CoreConfig`, nothing extra (see config.toml)."""
-
-from pathlib import Path
-
-from collector_core.config import CoreConfig
-from collector_core.config import core_config_from_dict
-from collector_core.config import load_toml
-
-
-def load_config(path: Path) -> CoreConfig:
-    raw = load_toml(path)
-    # l2Book pushes arrive ~5s apart (Story 19.4): the core's 5s stale guard would skip most
-    # samples, so this venue's default is 30s. config.toml may still override it.
-    raw.setdefault("stale_book_seconds", 30.0)
-    return core_config_from_dict(raw, ("mainnet", "testnet"))
+"""Venue-neutral collector core (Story 22.1): one ingest/flush/sample/write path for every venue."""

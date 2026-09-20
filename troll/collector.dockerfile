@@ -10,6 +10,7 @@ COPY troll/troll-requirements.txt ./troll-requirements.txt
 # cert verification against PyPI -- see `make build-insecure`.
 ARG PIP_INSECURE_ARGS=
 RUN pip install --no-cache-dir $PIP_INSECURE_ARGS -r troll-requirements.txt
+COPY troll/collector_core ./collector_core
 COPY troll/dydx_collector ./dydx_collector
 COPY troll/bybit_collector ./bybit_collector
 COPY troll/hyperliquid_collector ./hyperliquid_collector

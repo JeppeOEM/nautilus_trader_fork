@@ -2,7 +2,7 @@
 environment = "mainnet"
 catalog_path = "/app/catalog"
 flush_interval_seconds = 60
-snapshot_interval_seconds = 0.5
+snapshot_interval_seconds = 1.0
 # l2Book pushes were observed ~5s apart, so the stale guard must be well above that.
 stale_book_seconds = 30.0
 instruments = ["BTC-USD-PERP.HYPERLIQUID", "ETH-USD-PERP.HYPERLIQUID"]

@@ -65,6 +65,9 @@ services:
     environment:
       PYTHONUNBUFFERED: "1"
       BYBIT_COLLECTOR_CONFIG: "/app/bybit_config.toml"
+      REDIS_URL: "redis://127.0.0.1:${REDIS_PORT:-6379}"
+      # OBS-01 push alert (ntfy.sh-compatible); unset means log-only. See the dYdX service.
+      # WATCHDOG_NTFY_URL: "https://ntfy.sh/your-private-topic-here"
     user: "1000:1000"
     volumes:
       - ./bybit_collector/config.toml:/app/bybit_config.toml:ro
@@ -84,6 +87,8 @@ services:
     environment:
       PYTHONUNBUFFERED: "1"
       HYPERLIQUID_COLLECTOR_CONFIG: "/app/hyperliquid_config.toml"
+      REDIS_URL: "redis://127.0.0.1:${REDIS_PORT:-6379}"
+      # WATCHDOG_NTFY_URL: "https://ntfy.sh/your-private-topic-here"
     user: "1000:1000"
     volumes:
       - ./hyperliquid_collector/config.toml:/app/hyperliquid_config.toml:ro
