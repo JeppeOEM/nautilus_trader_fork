@@ -38,7 +38,10 @@ from nautilus_trader.core.nautilus_pyo3 import BybitProductType
 from nautilus_trader.model.data import FundingRateUpdate
 from nautilus_trader.model.data import IndexPriceUpdate
 from nautilus_trader.model.data import MarkPriceUpdate
+from nautilus_trader.model.data import OrderBookDeltas
 from nautilus_trader.model.data import capsule_to_data
+from nautilus_trader.model.enums import BookType
+from nautilus_trader.model.book import OrderBook
 
 
 logger = logging.getLogger(__name__)
@@ -135,6 +138,24 @@ class BybitClient:
         ws, _ = self._ws_for(instrument_id)
         await ws.unsubscribe_orderbook(iid, ORDERBOOK_DEPTH)
         await ws.subscribe_orderbook(iid, ORDERBOOK_DEPTH)
+
+    async def fetch_book_levels(self, instrument_id: str) -> tuple[list, list]:
+        """
+        REST book snapshot as best-first (price, size) floats (cross-check, story 22.5).
+
+        REST `u` aligns with the 1000-level stream only, so only price levels are compared.
+        """
+        _, product_type = self._ws_for(instrument_id)
+        pyo3_deltas = await self._http.request_orderbook_snapshot(
+            product_type, nautilus_pyo3.InstrumentId.from_str(instrument_id), ORDERBOOK_DEPTH
+        )
+        deltas = OrderBookDeltas.from_pyo3(pyo3_deltas)
+        book = OrderBook(deltas.instrument_id, BookType.L2_MBP)
+        book.apply_deltas(deltas)
+        return (
+            [(lv.price.as_double(), lv.size()) for lv in book.bids()],
+            [(lv.price.as_double(), lv.size()) for lv in book.asks()],
+        )
 
     def _handle_message(self, message: object) -> None:
         # Orderbook/trade/quote arrive as PyCapsules; ticker-derived mark/index/funding

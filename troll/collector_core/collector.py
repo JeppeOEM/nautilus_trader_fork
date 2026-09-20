@@ -33,6 +33,9 @@ Client contract (duck-typed -- this docstring is the contract, there is no base 
     subscribe(iid: str) -> None          trades + book (+ whatever else the venue offers)
     unsubscribe(iid: str) -> None        one WS unsubscribe per topic subscribed
     subscribe_global() -> None           OPTIONAL: venue-wide channels (e.g. dYdX markets)
+    fetch_book_levels(iid: str)          OPTIONAL: a REST book snapshot as (bids, asks), each a
+        -> tuple[list, list]             best-first list of (price, size) floats; enables the
+                                         periodic cross-check against the live book (22.5).
     resync_orderbook(iid: str) -> None   OPTIONAL: force a fresh book snapshot. Only a
                                          venue whose local book can drift (delta stream)
                                          should expose it; a full-snapshot venue must not.
@@ -69,6 +72,8 @@ from ml_signals import candle_store
 from ml_signals import error_ledger
 from ml_signals.catalog_stats import query_second_ohlc
 
+from collector_core.book_check import persistent
+from collector_core.book_check import top_levels_mismatch
 from collector_core.config import CoreConfig
 from nautilus_trader.core import nautilus_pyo3
 from nautilus_trader.model.book import OrderBook
@@ -245,6 +250,9 @@ async def _publish_snapshot_batch(redis_client: aioredis.Redis, snapshots: list)
         logger.warning("Redis publish failed: %s", e)
 
 
+_CROSSCHECK_CONFIRM_SECONDS = 2.0  # gap before re-comparing a mismatch (story 22.5)
+
+
 class Collector:
     """
     One venue's collector: `config` thresholds, a duck-typed `client` (contract in the
@@ -289,6 +297,7 @@ class Collector:
         # reconnect only resubscribes what it still holds).
         self._resync_pending: set[str] = set()
         self._last_no_book_log_ns: dict[str, int] = {}
+        self._book_crosscheck_mismatches: defaultdict[str, int] = defaultdict(int)
 
         # Per-second trade accumulators. Absence of a key means no trade this second,
         # distinct from a trade at price 0 -- so `.pop(iid, None)` yields None, never a
@@ -607,6 +616,7 @@ class Collector:
         iteration. A rejected instrument is skipped, its trades discarded, the reason logged.
         """
         stale_ns = self._config.stale_book_seconds * 1e9
+        feed_stale_ns = (self._config.feed_stale_seconds or self._config.stale_book_seconds) * 1e9
         batch: list[DydxSecondSnapshot] = []
         for iid in self._instrument_ids():
             book = self._live_books.get(iid)
@@ -620,13 +630,9 @@ class Collector:
             if await self._handle_crossed_book(iid, book, now_ns):
                 self._discard_second_accumulators(iid)
                 continue
-            last_book_update_ns = self._last_book_update_ns.get(iid, 0)
-            if now_ns - last_book_update_ns > stale_ns:
-                logger.warning(
-                    "Stale book for %s (no OrderBookDeltas for %.1fs) — skipping snapshot",
-                    iid,
-                    (now_ns - last_book_update_ns) / 1e9,
-                )
+            reason = self._stale_reason(iid, now_ns, feed_stale_ns, stale_ns)
+            if reason:
+                logger.warning("Stale book for %s (%s) — skipping snapshot", iid, reason)
                 self._discard_second_accumulators(iid)
                 continue
 
@@ -664,6 +670,22 @@ class Collector:
             batch.append(snapshot)
         return batch
 
+    def _stale_reason(self, iid: str, now_ns: int, feed_stale_ns: float, stale_ns: float) -> str:
+        """
+        Why this book must not be sampled ('' = fresh), naming the gap (DATA-01).
+
+        Feed-level silence (no WS message for any instrument: dead socket, or a reconnect that
+        has not yet delivered a fresh snapshot) is told apart from one quiet instrument on a
+        live feed, whose book is simply unchanged.
+        """
+        feed_age_ns = now_ns - self._last_feed_message_ns
+        if feed_age_ns > feed_stale_ns:
+            return f"feed dead: no WS message of any kind for {feed_age_ns / 1e9:.1f}s"
+        book_age_ns = now_ns - self._last_book_update_ns.get(iid, 0)
+        if book_age_ns > stale_ns:
+            return f"instrument silent: no OrderBookDeltas for {book_age_ns / 1e9:.1f}s, feed alive"
+        return ""
+
     async def _handle_missing_book(self, iid: str, now_ns: int) -> None:
         if iid in self._resync_pending:
             await self._resync(iid)
@@ -694,6 +716,78 @@ class Collector:
             batch = await self._sample_tick(now_ns)
             if self._redis is not None:
                 await _publish_snapshot_batch(self._redis, batch)
+
+    def _live_top(self, iid: str) -> tuple[list, list] | None:
+        book = self._live_books.get(iid)
+        if book is None:
+            return None
+        return (
+            [(lv.price.as_double(), lv.size()) for lv in book.bids()[:BOOK_DEPTH]],
+            [(lv.price.as_double(), lv.size()) for lv in book.asks()[:BOOK_DEPTH]],
+        )
+
+    async def _crosscheck_round(self, iid: str) -> list[str] | None:
+        """
+        One live-vs-REST comparison; None when there is no live book to judge.
+
+        The live book is captured before and after the REST call and only a mismatch present
+        against *both* counts. That filters skew between two samples of a moving book, but not
+        REST latency on a book that churns faster than the request takes -- `_crosscheck_one`
+        adds the persistence confirmation for that.
+        """
+        before = self._live_top(iid)
+        rest_bids, rest_asks = await self._client.fetch_book_levels(iid)
+        after = self._live_top(iid)
+        if before is None or after is None:
+            return None
+
+        def mismatches(live: tuple[list, list]) -> list[str]:
+            return [
+                *(f"bids {m}" for m in top_levels_mismatch(live[0], rest_bids, depth=BOOK_DEPTH)),
+                *(f"asks {m}" for m in top_levels_mismatch(live[1], rest_asks, depth=BOOK_DEPTH)),
+            ]
+
+        return persistent(mismatches(before), mismatches(after))
+
+    async def _crosscheck_one(self, iid: str) -> None:
+        """
+        Diff the live top-20 with a REST snapshot (DATA-02's independent source of truth).
+
+        A level is ledgered only when the *same* level is still wrong on a second round
+        `_CROSSCHECK_CONFIRM_SECONDS` later: a book that missed a delta stays wrong until that
+        level is next touched, while sampling/latency skew on a churning level does not repeat
+        (first live run, 2026-09-20: BTC's top levels differed on ~every single round).
+        """
+        first = await self._crosscheck_round(iid)
+        if first is None:
+            logger.debug("Book cross-check skipped for %s: no live book", iid)
+            return
+        confirmed: list[str] = []
+        if first:
+            await asyncio.sleep(_CROSSCHECK_CONFIRM_SECONDS)
+            confirmed = persistent(first, await self._crosscheck_round(iid) or [])
+        if confirmed:
+            self._book_crosscheck_mismatches[iid] += 1
+            error_ledger.record(
+                "collector.book_crosscheck",
+                f"{iid} live book != REST snapshot on two rounds "
+                f"(mismatch #{self._book_crosscheck_mismatches[iid]}): " + "; ".join(confirmed[:5]),
+            )
+        else:
+            logger.debug(
+                "Book cross-check %s clean (depth %d, %d unconfirmed)", iid, BOOK_DEPTH, len(first)
+            )
+
+    async def _crosscheck_loop(self) -> None:
+        while not self._stop.is_set():
+            await asyncio.sleep(self._config.book_crosscheck_seconds)
+            for iid in self._instrument_ids():
+                try:
+                    await self._crosscheck_one(iid)
+                except Exception as e:
+                    error_ledger.record(
+                        "collector.book_crosscheck", f"cross-check failed for {iid}", e
+                    )
 
     async def _watchdog_loop(self) -> None:
         """OBS-01: page someone when every instrument's book has gone stale."""
@@ -757,6 +851,12 @@ class Collector:
             self._candle_prune_loop,
             self._second_loop,
             self._watchdog_loop,
+            *(
+                (self._crosscheck_loop,)
+                if self._config.book_crosscheck_seconds > 0
+                and hasattr(self._client, "fetch_book_levels")
+                else ()
+            ),
             *self._extra_loops,
         )
         # ensure_future (not create_task): extra_loops are typed as Awaitable, not Coroutine.

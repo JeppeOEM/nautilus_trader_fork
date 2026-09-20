@@ -17,8 +17,8 @@ Hyperliquid market-data collector: `collector_core.Collector` over `HyperliquidC
 
 Every l2Book message is a full snapshot (Clear + levels), so the local book can't drift and
 `HyperliquidClient` deliberately has no `resync_orderbook`: a crossed sample is skipped and
-ledgered, the next message replaces the book. Pushes were observed ~5s apart, hence the
-30s `stale_book_seconds` in config.toml. Open interest arrives over the WS -- no extra loop.
+ledgered, the next message replaces the book. Pushes arrive ~5.4s apart (raw capture, story 22.5), hence the
+12s `stale_book_seconds` in config.toml. Open interest arrives over the WS -- no extra loop.
 """
 
 import asyncio

@@ -23,7 +23,7 @@ from collector_core.config import load_toml
 
 def load_config(path: Path) -> CoreConfig:
     raw = load_toml(path)
-    # l2Book pushes arrive ~5s apart (Story 19.4): the core's 5s stale guard would skip most
-    # samples, so this venue's default is 30s. config.toml may still override it.
-    raw.setdefault("stale_book_seconds", 30.0)
+    # l2Book pushes every ~5.4 s (max 6 s in the 22.5 raw capture, see config.toml): the core's
+    # 5 s stale guard would skip most samples, so this venue defaults to 2x the cadence.
+    raw.setdefault("stale_book_seconds", 12.0)
     return core_config_from_dict(raw, ("mainnet", "testnet"))
