@@ -35,7 +35,7 @@ export function useLiveChannel<T>(): LiveChannelState<T> {
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let cancelled = false;
 
-    // ponytail: defer the first connect by one tick so React StrictMode's dev-only
+    // Defer the first connect by one tick so React StrictMode's dev-only
     // double-invoke (mount -> cleanup -> mount) never opens a real socket for the
     // throwaway first mount -- `cancelled` is already true by the time this runs, so
     // it's skipped. Without this, the fake mount's socket gets proxied mid-handshake

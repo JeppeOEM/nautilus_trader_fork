@@ -14,7 +14,7 @@ BASE_IMAGE := nautilus-trader-base:1.229.0
 # troll-web/troll-tui/troll-logs (~/.zshrc) use to reach the real VPS instance -- see
 # troll/CLAUDE.md's "Desktop <-> VPS Connection" section. Never set on the VPS itself,
 # so its .env needs no changes; `?=` still lets an explicit port in .env win over either
-# default. ponytail: 4 vars is simpler than a generic port-offset scheme -- add one if a
+# default. Four explicit vars rather than a generic port-offset scheme -- add one if a
 # 5th port ever needs it.
 LOCAL_DEV ?= false
 ifeq ($(LOCAL_DEV),true)

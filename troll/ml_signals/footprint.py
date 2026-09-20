@@ -28,7 +28,7 @@ level shrinking looks identical whether it was canceled or filled by a trade
 are tracked separately (not just net) so a churning level (e.g. +100/-40)
 doesn't look identical to a quiet one (+60/0) when both net to +60.
 
-ponytail: bands are sized relative to each candle's own high-low range, so
+Known limit: bands are sized relative to each candle's own high-low range, so
 adjacent candles' bands don't line up at the same absolute price (a textbook
 footprint chart usually fixes one global price step instead, so rows align
 across the whole chart). Switch `bands_per_candle` for a shared `price_step`

@@ -210,7 +210,7 @@ def find_gaps(
     was quiet as it is a dropped connection. See `likely_outages()` for a
     cross-type signal that's actually indicative of a real outage.
 
-    ponytail: adaptive heuristic (median inter-arrival time * `min_multiple`,
+    Known limit: adaptive heuristic (median inter-arrival time * `min_multiple`,
     floored at `floor_seconds`), not a statistical changepoint model. Pass an
     explicit `threshold_seconds` for data with a known fixed cadence instead
     of relying on the heuristic.
@@ -387,7 +387,7 @@ def overview_table(catalog_path: str) -> list[dict]:
     """One row per known instrument with price/volatility/pct-change stats."""
     catalog = ParquetDataCatalog(catalog_path)
     rows = []
-    # ponytail: recomputed from scratch on every call, ~300 catalog lookups for
+    # Known limit: recomputed from scratch on every call, ~300 catalog lookups for
     # instruments with no price data at all. Fine for a personal dashboard;
     # add a TTL cache if the overview page becomes measurably slow.
     for instrument_id in list_instruments(catalog_path):

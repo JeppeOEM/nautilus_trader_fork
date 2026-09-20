@@ -1,5 +1,5 @@
 x-logging: &default-logging
-  # ponytail: json-file driver rotates by size/file-count, not calendar days -- 20x20MB
+  # Known limit: json-file driver rotates by size/file-count, not calendar days -- 20x20MB
   # is a size-based proxy for "~1 month" at typical log volume, not an exact day cutoff.
   # Revisit if log volume changes enough to drift that estimate.
   driver: json-file
@@ -39,7 +39,7 @@ services:
       # Push alert (ntfy.sh-compatible) when every subscribed instrument's book goes
       # stale for 30s+ -- see OBS-01 in CLAUDE.md. Unset means log-only (no push).
       # WATCHDOG_NTFY_URL: "https://ntfy.sh/your-private-topic-here"
-    # ponytail: hardcoded to host uid/gid (single-user box), so ./catalog
+    # Known limit: hardcoded to host uid/gid (single-user box), so ./catalog
     # writes land owned by you, not root. Switch to ${UID}:${GID} if shared.
     user: "1000:1000"
     volumes:

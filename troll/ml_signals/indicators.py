@@ -78,7 +78,7 @@ class OnlineLogisticTrend(Indicator):
         if self._last_close is not None:
             ret = (close - self._last_close) / self._last_close
 
-            # ponytail: single online SGD step per bar, no batch retraining or
+            # Known limit: a single online SGD step per bar, no batch retraining or
             # persistence across restarts. Swap for sklearn.linear_model.SGDClassifier
             # + periodic refit if this drifts on long-running deployments.
             if self._pending_features is not None:

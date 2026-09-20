@@ -298,7 +298,7 @@ export const INDICATORS: Indicator[] = [
     formula: "z = weights · features + bias\nP(up) = 1 / (1 + e⁻ᶻ)\neach new bar: one SGD step trains on the PREVIOUS prediction now that the true outcome is known, then predicts the next probability",
     notes: [
       "<code>self.value</code> is that probability, 0.5 until <code>initialized</code> (i.e. until <code>lookback</code> returns have accumulated).",
-      "Deliberately minimal: a single online SGD step per bar, no batch retraining, no persistence across restarts. Documented in-code as a ponytail shortcut with a named upgrade path (<code>sklearn.linear_model.SGDClassifier</code> + periodic refit) if it drifts on a long-running deployment.",
+      "Deliberately minimal: a single online SGD step per bar, no batch retraining, no persistence across restarts. Documented in-code as a known limit with a named upgrade path (<code>sklearn.linear_model.SGDClassifier</code> + periodic refit) if it drifts on a long-running deployment.",
       "Never published to <code>rankings:live</code> — this is a strategy-internal signal, not a UI metric.",
     ],
     refs: ["ml_signals/indicators.py:41–113"],

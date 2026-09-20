@@ -248,7 +248,7 @@ def get_technicals_values(entries: str) -> TechnicalsValuesResponse:
     Latest value of every requested indicator for every currently-ranked instrument.
 
     Computes nothing itself (AD-F2): it dispatches to the chart's own `replay_indicator`, so a
-    column always equals what that coin's chart shows. ponytail: sequential per-coin catalog
+    column always equals what that coin's chart shows. Known limit: sequential per-coin catalog
     reads behind a 90s TTL cache (> the client's 60s poll, or it never hits) (one live key) -- no single-flight, add one if concurrent
     viewers ever load the box.
     """

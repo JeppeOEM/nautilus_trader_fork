@@ -10,7 +10,8 @@ A standalone Python asyncio service that connects directly to dYdX's Rust/PyO3-b
 
 ### Constraints
 
-- **Language**: Python — pivoted from an earlier Go rebuild (still present, untouched, on the `go` branch) at the user's request; "ponytail" (lazy/minimal) style, no GSD ceremony for this rebuild
+- **Language**: Python — pivoted from an earlier Go rebuild (still present, untouched, on the `go` branch) at the user's request
+- **Engineering standard**: This is a professional HFT trading platform and is built the right way — no corner-cutting. Correctness, tests, operational robustness and documented limits take priority over the shortest diff. A deliberate simplification is documented in-code as a `Known limit:` comment naming the ceiling and the upgrade path, never left implicit.
 - **Architecture**: No `TradingNode`/`Strategy`/`DataEngine` — a plain asyncio script (`troll/dydx_collector/collector.py`) owning its own loop, buffer, and flush timer. `nautilus_trader` is used purely as a library (domain types + `ParquetDataCatalog.write_data()`), never as a live runtime.
 - **Repo location**: Lives inside `nautilus_trader_fork`, in `troll/dydx_collector/`, on the `pony` branch — co-located with this repo's git history rather than a separate repo
 - **Catalog compatibility**: Output Parquet matches Nautilus's `ParquetDataCatalog` schema/partitioning exactly, since it's written via the catalog's own `write_data()` API, not a hand-rolled schema — loads directly into backtests with zero conversion step

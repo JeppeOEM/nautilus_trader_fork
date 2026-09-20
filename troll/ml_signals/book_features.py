@@ -254,7 +254,7 @@ class CancellationTracker:
             total   = added + deleted
             if total == 0:
                 return 0.0
-            # ponytail: (deleted - added) / total so positive = net cancellation pressure
+            # (deleted - added) / total, so positive = net cancellation pressure
             return (deleted - added) / total
 
         return CancelRate(

@@ -106,7 +106,7 @@ _WATCHDOG_REMINDER_NS: int = 600_000_000_000  # re-notify at most every 10 min w
 # not running for that gap -- surface it rather than let it look like a quiet market.
 _SECOND_LOOP_LAG_WARN_NS: int = 2_000_000_000
 
-# ponytail: ParquetDataCatalog.write_data() (pinned nautilus_trader 1.229.0) has no
+# Workaround: ParquetDataCatalog.write_data() (pinned nautilus_trader 1.229.0) has no
 # compression passthrough -- it calls pq.write_table() with pyarrow's "snappy" default,
 # and nautilus_trader/persistence/catalog/parquet.py can't be modified (fork rule). Patch
 # pyarrow's default here instead. `pq` is a shared module object (Python caches modules in
@@ -136,7 +136,7 @@ def quarantine_corrupt_parquet(catalog_path: str, instrument_ids: Iterable[str])
     scanning a sibling's directories would quarantine a file that is merely mid-write. Only
     this process writes its own ids' directories, and it is not writing yet when this runs
     (the shared instrument-definition tables are left alone for the same reason).
-    ponytail: full scan of this venue's files on every start; if that grows into the
+    Known limit: full scan of this venue's files on every start; if that grows into the
     hundreds of thousands of files, switch to only checking files newer than the last clean
     shutdown.
     """
@@ -280,7 +280,7 @@ class Collector:
 
         self._buffer: dict[tuple[type, str], list[Any]] = defaultdict(list)
         # Unbounded: a real overflow would mean the process can't keep up with the
-        # exchange at all -- ponytail: revisit with a maxsize + drop policy only if observed.
+        # exchange at all -- revisit with a maxsize + drop policy only if observed.
         self._ingest_queue: asyncio.Queue[Any] = asyncio.Queue()
         self._redis: aioredis.Redis | None = None
         self._stop = asyncio.Event()

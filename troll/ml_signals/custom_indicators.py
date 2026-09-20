@@ -185,7 +185,7 @@ def _order_book_deltas(window: ReplayWindow) -> list[OrderBookDelta]:
 # giving up and reporting None again -- forward-filling a *quiet* market is correct (the
 # level genuinely hasn't changed), but forward-filling forever across a real ingestion outage
 # would render a stale reading as confidently current, which is exactly what DATA-01 forbids.
-# ponytail: a flat bucket-count cap, not a time-aware one -- revisit if a real outage shorter
+# Known limit: a flat bucket-count cap, not a time-aware one -- revisit if a real outage shorter
 # than this many buckets still reads as a false "live" value in practice.
 _MAX_FORWARD_FILL_BUCKETS = 10
 

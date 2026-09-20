@@ -1,4 +1,4 @@
-# ponytail: own dockerfile (not troll/collector.dockerfile) so the Node build stage below
+# Own dockerfile (not troll/collector.dockerfile) so the Node build stage below
 # doesn't force collector/ranking_engine/bot_tui to pay a Node build cost they
 # don't need -- see the architecture spine's Deployment & Environments section.
 

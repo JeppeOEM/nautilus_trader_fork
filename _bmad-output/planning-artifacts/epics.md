@@ -2210,6 +2210,8 @@ Builder can trust every candle and volume bar on the chart end-to-end (collector
 
 Builder trades, paper-trades and collects backtest data on dYdX, Bybit (linear perps + spot) and Hyperliquid perps through **one shared collector core** (`troll/collector_core/`) and a venue-parameterised `live_paper`, so a fourth exchange is a thin `client.py` + config + entrypoint. Research and architecture: `_bmad-output/planning-artifacts/research/technical-multi-exchange-collector-core-and-orderbook-research-2026-09-20.md` (approved 2026-09-20). Decisions: all three collectors on the core (dYdX included); 1.0 s snapshot cadence everywhere; Bybit linear + spot with perp/spot explicit in API and UI; Sandbox paper trading primary, Bybit Demo / Hyperliquid Testnet via the explicit exec-config path only. Closes story 19.3/19.4's "extract common helpers once duplication across all three is visible".
 
+**Candle-accuracy decision (2026-09-20, operator review of the candle-store change):** the goal is 1 s aggregates and candles that match the exchange's own numbers exactly, and live trading on the same fold. Findings that reshaped the stories below: (a) the 1 s snapshot is the *only* record of trades -- raw `TradeTick`s are folded live and discarded, deltas are an unused per-instrument opt-in -- so anything the fold gets wrong or misses is unrecoverable; (b) the fold sums `size.as_double()`, so volume is a float sum, not exact; (c) nothing backfills trades missed across a reconnect; (d) exchange time (`ts_event`) exists on trades for all three venues and on the book for Bybit/Hyperliquid only; (e) a live hold-back cannot make a bar correct, only later -- correctness comes from rebuilding closed days from raw trades on exchange time and reconciling them against the venues' klines. The professional shape is therefore: archive raw trades with both clocks, one exact fold shared by live, rebuild and strategy, nightly rebuild + reconciliation, gap closure at the source. **Execution order: 22.13 -> 22.14 -> 22.12** (22.12 now depends on 22.13). Raw trades are retained only until their day is verified ("keep until proven, then release"), not indefinitely.
+
 ### Story 22.1: `troll/collector_core/` extracted from the Bybit and Hyperliquid collectors
 
 As the platform operator,
@@ -2222,7 +2224,7 @@ So that every venue gets the same ingest/flush/sample/write path and the same in
 **When** `collector_core.Collector(config, client, extra_loops=())` and `run_forever(build)` exist
 **Then** `bybit_collector/collector.py` and `hyperliquid_collector/collector.py` each shrink to a client + config + entrypoint of roughly 15–25 lines, with the Bybit open-interest REST poll passed as an `extra_loops` entry, and the duck-typed client contract (`fetch_instruments`, `connect`, `disconnect`, `subscribe`, `unsubscribe`, optional `subscribe_global`, optional `resync_orderbook`) is documented in the core docstring
 
-**Given** dYdX already has trade stale-age filtering + bounded `trade_id` dedup (DATA-06), the SQLite candle-store feed (DATA-05: `ml_signals/candle_store.py`, fed from each Parquet flush, one `candles.db` per venue), `snapshots:raw` publish, the `_second_loop` lag canary and the OBS-01 watchdog
+**Given** dYdX already has trade stale-age filtering + bounded `trade_id` dedup (DATA-06), the SQLite candle-store feed (DATA-05: `ml_signals/candle_store.py`, fed from each Parquet flush, one `candles_<venue>.db` per venue), `snapshots:raw` publish, the `_second_loop` lag canary and the OBS-01 watchdog
 **When** the core is built
 **Then** all of these run for Bybit and Hyperliquid too, with thresholds in `CoreConfig` defaulting to dYdX's current values
 
@@ -2382,13 +2384,17 @@ So that the next venue is added the documented way.
 
 As a strategy developer,
 I want 1-minute `Bar` history backfilled into the catalog from Bybit klines (pyo3 `request_bars`) and Hyperliquid `candleSnapshot` (last 5000 candles),
-So that backtests on these venues can run over more history than the collector has been alive for.
+So that backtests on these venues can run over more history than the collector has been alive for, and 22.13's reconciliation has a stored reference to diff against.
 
 **Acceptance Criteria:**
 
 **Given** NAUT-02/NAUT-03
 **When** the backfill runs
-**Then** bars are written via `ParquetDataCatalog.write_data()`, re-runs are idempotent (skip existing ranges), and a `BacktestDataConfig` over the backfilled range loads them without conversion
+**Then** bars are written via `ParquetDataCatalog.write_data()` as `-EXTERNAL` bar types, re-runs are idempotent (skip existing ranges), and a `BacktestDataConfig` over the backfilled range loads them without conversion
+
+**Given** the candle store is built only from our own 1 s snapshots (D-35)
+**When** venue bars are backfilled
+**Then** they land in Parquet only and never in `candles_<venue>.db` or on the chart; the data dictionary says so, and `compare_klines` (22.13) may read them instead of calling the venue
 
 ### Story 22.10: Rankings show every collected coin across venues, with an exchange filter
 
@@ -2422,7 +2428,7 @@ So that the archive's file count grows by hundreds a day, not hundreds of thousa
 
 **Acceptance Criteria:**
 
-**Given** `dydx_collector/consolidate_catalog.py` (moved to `collector_core/` in 22.3): plain pyarrow, one schema per day or refused (D-24), row count verified before the sources are deleted, interrupted runs self-healing, today never touched
+**Given** `collector_core/consolidate_catalog.py` (moved there in 22.3): plain pyarrow, one schema per day or refused (D-24), row count verified before the sources are deleted, interrupted runs self-healing, today never touched
 **When** it runs nightly (`make consolidate`, cron) against the shared catalog
 **Then** every closed day of every `data/<type>/<instrument>/` leaf -- `.DYDX`, `.BYBIT` and `.HYPERLIQUID` ids alike -- holds one file (plus at most one midnight-crossing file), the collectors keep writing today's files untouched, and `data_file_ranges`/`query_second_ohlc`/`build_candles` read the merged files unchanged (tested)
 
@@ -2434,23 +2440,78 @@ So that the archive's file count grows by hundreds a day, not hundreds of thousa
 **When** consolidation has run
 **Then** a nightly `rclone`/`restic` copy of closed-day files to object storage is one command in the Makefile (its target and credentials are the operator's), documented next to `make consolidate`
 
-### Story 22.12: Venue-timed 1s sampling for Bybit and Hyperliquid (dYdX stays arrival-timed)
+### Story 22.12: Exchange-time bucketing for trades on every venue and the book on Bybit/Hyperliquid (depends on 22.13)
 
 As a strategy developer,
-I want Bybit and Hyperliquid snapshots and candles stamped with the venue's own event time,
-So that a bar holds the trades the venue did in that second, not the trades that happened to arrive in it, and bars align across venues.
+I want every rebuilt second and bar to hold the trades the exchange executed in that second, and the Bybit/Hyperliquid book as the exchange stamped it,
+So that bars match the venues' klines bar for bar and align across venues, while the live loop stays instant.
 
 **Acceptance Criteria:**
 
-**Given** Bybit stamps trades from `trade.T` and the book from `orderbook.ts`, and Hyperliquid stamps trades from `trade.time` and the book from `book.time` (both halves venue-timed; dYdX's book carries no venue time, so it is excluded)
-**When** the core gains `CoreConfig.time_source: "venue" | "arrival"` (Bybit/Hyperliquid `venue`, dYdX `arrival`)
-**Then** under `venue`, second `S` is built from messages whose `ts_event` falls in `[S, S+1)` -- the book as of the last venue-timed delta at or before `S`, trades in `[S, S+1)` -- and is closed at `S + hold_back_seconds`; `snapshot.ts_event = S` exactly; `seconds_observed` in the candle store stays one per second
+**Given** trades carry venue `ts_event` on all three venues, and the book carries it on Bybit (`orderbook.ts`) and Hyperliquid (`book.time`) but not dYdX (`OrderBookDelta.ts_event = ts_init`)
+**When** 22.13's nightly rebuild recomputes a closed day's second-level trade fields
+**Then** it buckets trades by `ts_event` into half-open `[S, S+1)` on every venue (dYdX included, which closes D-31 and D-44 for trades), and the snapshot's `ts_event` semantics per venue are written in the data dictionary: trades exchange-timed everywhere; book exchange-timed on Bybit/Hyperliquid, arrival-timed on dYdX
 
-**Given** transport delay
-**When** `hold_back_seconds` is set per venue
-**Then** it comes from a measured capture of `ts_init - ts_event` over several hours per venue (recorded in the audit), a trade arriving after its second closed is counted in `error_ledger` (`collector.late_trade`) and never dropped or misattributed, and `ranking_engine`'s staleness thresholds allow the hold-back
+**Given** the live loop is arrival-timed and provisional by design (22.13)
+**When** this story ships
+**Then** the live `_second_loop` is unchanged and needs no hold-back for correctness; `hold_back_seconds` exists only as an optional `CoreConfig` knob that delays the live close so fewer seconds differ between live and rebuild, default `0.0`, and is set per venue from a measured `ts_init - ts_event` distribution (`measure_lag.py`, p50/p99/p99.9/max over >= 3 h, recorded in the audit); ranking staleness and the watchdog compare on arrival so a hold-back never flags a healthy feed stale
 
-**Given** the venues' own 1m klines (Bybit `/v5/market/kline`, Hyperliquid `candleSnapshot`)
-**When** one day of store bars is compared per venue
-**Then** volume matches bar for bar and OHLC within the venues' tick size; dYdX is documented as arrival-timed with up to ~3 s boundary misattribution (audit D-31..D-34) until its own story
+**Given** 22.13's `compare_klines`
+**When** one full UTC day per venue is rebuilt exchange-timed
+**Then** 1 m volume equals the venue's kline volume exactly (integer units) and OHLC equals the kline's on every bar that our trade archive covers completely; every remaining mismatch is root-caused (missing trades -> 22.14, never tolerance), and the pass rate is recorded per venue in `DATA_INTEGRITY_AUDIT.md`
 
+### Story 22.13: Raw trade archive, exact fold, nightly rebuild and kline reconciliation
+
+As the platform operator,
+I want every venue's raw trades archived with both clocks, one exact fold shared by the live loop and the rebuild, and every closed day rebuilt from trades and reconciled against the venue's klines,
+So that a bar is either proven equal to the exchange's or loudly flagged, and nothing the live fold gets wrong is unrecoverable.
+
+**Acceptance Criteria:**
+
+**Given** the core folds each `TradeTick` into the second accumulators and discards it
+**When** the core also appends the `TradeTick` to the flush buffer after the stale-age filter and `trade_id` dedup
+**Then** `data/trade_tick/<instrument>/` is written every flush via `ParquetDataCatalog.write_data()` for all three venues, with the venue's `ts_event` and our `ts_init` intact, loadable through `BacktestDataConfig(data_cls=TradeTick)` unchanged; measured footprint recorded (expected ~1 MB/venue/day on dYdX from today's counts: ETH ~2.9k, BTC ~1.4k, median coin ~150 trades/day)
+
+**Given** the live fold sums `size.as_double()` (float accumulation, D-46)
+**When** `collector_core/fold.py` holds one pure `fold_trades(trades, second_ns) -> SecondTradeFields` used by the live loop and the rebuild
+**Then** it accumulates `Quantity.raw` integers and compares `Price.raw` integers, converting to the snapshot's `float64` columns exactly once at the end; equivalence-tested against the previous fold on real `TradeTick`s; `DydxSecondSnapshot`'s Arrow schema is unchanged (D-24)
+
+**Given** a closed UTC day `D` and its trade archive
+**When** `collector_core/rebuild_seconds.py --catalog ... --day D [--instrument ...] [--apply]` runs (nightly, before `consolidate_catalog`)
+**Then** every snapshot of `D` has its trade fields (`open/high/low/close_price`, `buy_volume`, `sell_volume`, counts) recomputed from the archived trades with `fold_trades`, the files are rewritten temp-then-rename like `repair_catalog`, the book columns and `ts_event`/`ts_init` are untouched, `build_candles` then refolds `D` into `candles_<venue>.db`, and the run is idempotent and reports the number of seconds whose values changed (that number is the live/rebuild disagreement metric, published to the audit)
+
+**Given** the venues' own 1 m klines (Bybit `request_bars`, Hyperliquid `candleSnapshot`, dYdX indexer `/v4/candles/perpetualMarkets/{ticker}?resolution=1MIN`)
+**When** `collector_core/compare_klines.py --venue ... --day D` runs after the rebuild
+**Then** for every instrument it compares the store's 1 m bars bar for bar (volume in integer units, OHLC in raw price units), writes a `verified_days(instrument_id, day, status, checked_at, mismatches)` row into `candles_<venue>.db`, records every mismatch in `error_ledger` (`reconcile.kline_mismatch`) with instrument, minute and delta, and the per-venue pass rate goes into `DATA_INTEGRITY_AUDIT.md` as a running number; a mismatch is root-caused (DATA-02), never absorbed by a tolerance
+
+**Given** the decision to keep raw trades only to correct aggregates
+**When** `prune_catalog` gains a `trade_tick` policy
+**Then** a day's trades are pruned only when the day is older than `trade_retention_days` (default 7) **and** its `verified_days` row is `pass`; failed or unverified days are kept and listed in the prune report; the policy and its upgrade path (extend the window if tick-level features are ever wanted) are a `Known limit:` in the data dictionary
+
+**Given** the nightly job
+**When** `make nightly` runs (cron on the VPS)
+**Then** it runs rebuild -> consolidate -> build-candles -> compare -> prune for yesterday in that order, each step refusing to continue after a failure, with one summary line per venue in the collector log and every failure in `error_ledger`
+
+### Story 22.14: Trade gap closure: REST backfill after reconnect and dual-feed arbitration
+
+As the platform operator,
+I want trades missed while a WebSocket was down to be recovered from the venue, and the remaining gap closed with a second independent feed,
+So that the trade archive is complete on every venue that allows it, and the venue that does not is documented as such.
+
+**Acceptance Criteria:**
+
+**Given** the Rust clients reconnect and resubscribe silently, and the core only sees the resulting replay through `trade_id` dedup
+**When** the core detects a reconnect (client-exposed hook or a feed-silence gap longer than `stale_book_seconds` followed by messages) for an instrument
+**Then** it requests the venue's trade history covering `[last_trade_ts - margin, now]` -- dYdX indexer `GET /v4/trades/perpetualMarket/{ticker}` (paged by `createdBeforeOrAt`), Bybit `GET /v5/market/recent-trade?limit=1000` (most recent 1000 only; a longer gap on a busy pair is reported as unrecoverable) -- via stdlib `urllib` in an `extra_loop`, dedups by `trade_id`, appends the missing trades to the archive with their venue `ts_event` and `ts_init = now`, counts them in `collector:status` and `error_ledger` (`collector.trade_backfill`), and leaves the live second accumulators alone (the nightly rebuild absorbs them)
+
+**Given** Hyperliquid's public API has no documented trade-history endpoint
+**When** the story is implemented
+**Then** the venue capability table in the data dictionary states per venue what a reconnect gap costs (dYdX: recoverable; Bybit: last 1000 trades; Hyperliquid: unrecoverable from one connection), verified against the live API on the day, with the `Known limit:` and the upgrade path being the dual feed below
+
+**Given** professional A/B feed arbitration
+**When** `CoreConfig.trade_feeds: int = 1` is set to `2` for a venue
+**Then** the client opens a second independent WebSocket subscribed to trades only, both feeds flow through the same `_on_data`, the existing `trade_id` dedup takes the union (first copy wins, second counted as `duplicate` not `dropped`), a per-feed liveness timestamp feeds the OBS-01 watchdog, and a 24 h run on Hyperliquid and Bybit records in the audit how many trades only one feed delivered
+
+**Given** 22.13's reconciliation
+**When** 22.14 has run for a week
+**Then** the kline pass rate per venue is re-recorded and any remaining mismatch has a named cause

@@ -68,7 +68,7 @@ function hlineStorageKey(instrumentId: string): string {
 }
 
 // Drawn lines persist per coin in this browser (localStorage may throw/be blocked --
-// then the chart just starts empty). ponytail: browser-local, move server-side beside
+// then the chart just starts empty). Known limit: browser-local; move server-side beside
 // the indicator config if lines must follow the user across browsers.
 function loadPriceLines(instrumentId: string): PriceLineSpec[] {
   try {
