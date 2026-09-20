@@ -30,10 +30,10 @@ def _write_toml(tmp_path: Path, body: str) -> Path:
     return path
 
 
-def test_snapshot_interval_defaults_to_half_second(tmp_path: Path) -> None:
+def test_snapshot_interval_defaults_to_one_second(tmp_path: Path) -> None:
     path = _write_toml(tmp_path, "")
     config = load_config(path)
-    assert config.snapshot_interval_seconds == 0.5
+    assert config.snapshot_interval_seconds == 1.0
 
 
 def test_snapshot_interval_override_is_honored(tmp_path: Path) -> None:

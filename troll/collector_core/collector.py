@@ -108,8 +108,6 @@ _SECOND_LOOP_LAG_WARN_NS: int = 2_000_000_000
 # sys.modules), so this reaches nautilus's `import pyarrow.parquet as pq` call site too.
 # Ceiling: if a future nautilus_trader version passes `compression=` explicitly, this patch
 # is silently ignored -- revisit on version bump.
-# Until story 22.2 deletes dydx_collector's copy, both modules wrap pq.write_table; the
-# double wrap is harmless (setdefault is idempotent).
 _orig_write_table = pq.write_table
 
 
@@ -747,9 +745,11 @@ class Collector:
                 "Configured instruments not found on the venue, skipping: %s", sorted(unknown)
             )
         self._catch_up_candle_store()
-        for iid in sorted(configured & set(by_id)):
+        subscribed = sorted(configured & set(by_id))
+        for iid in subscribed:
             await self._client.subscribe(iid)
             logger.info(f"Subscribed {iid}")
+        logger.info(f"Started: {len(subscribed)} subscribed")
 
         loops: tuple[Callable[[], Awaitable[None]], ...] = (
             self._ingest_loop,
