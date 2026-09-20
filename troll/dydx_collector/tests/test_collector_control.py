@@ -28,9 +28,9 @@ import pytest
 import dydx_collector.collector as collector_module
 from dydx_collector.collector import _MAX_COLLECTED_INSTRUMENTS
 from dydx_collector.collector import _STATUS_CHANNEL
-from dydx_collector.collector import Collector
+from dydx_collector.collector import DydxCollector
 from dydx_collector.collector import _prune_candidates
-from dydx_collector.config import CollectorConfig
+from dydx_collector.config import DydxConfig
 from dydx_collector.config import InstrumentEntry
 from dydx_collector.config import load_config
 from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
@@ -38,8 +38,8 @@ from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
 
 def _make_config(
     catalog_path: Path, instruments: tuple[InstrumentEntry, ...] = ()
-) -> CollectorConfig:
-    return CollectorConfig(
+) -> DydxConfig:
+    return DydxConfig(
         network=DydxNetwork.TESTNET,
         catalog_path=str(catalog_path),
         flush_interval_seconds=60,
@@ -73,8 +73,8 @@ class _FakeClient:
         self.calls.append(f"unsubscribe_orderbook:{iid}")
 
 
-def _collector(tmp_path: Path, instruments: tuple[InstrumentEntry, ...] = ()) -> Collector:
-    collector = Collector(_make_config(tmp_path / "catalog", instruments))
+def _collector(tmp_path: Path, instruments: tuple[InstrumentEntry, ...] = ()) -> DydxCollector:
+    collector = DydxCollector(_make_config(tmp_path / "catalog", instruments))
     collector._client = _FakeClient()  # type: ignore[assignment]
     return collector
 
@@ -395,7 +395,7 @@ async def test_publish_status_broadcasts_hand_edited_exclude_entries(
     """
     config = _make_config(tmp_path / "catalog")
     config = dataclasses.replace(config, exclude=frozenset({"HANDEDITED-PERP.DYDX"}))
-    collector = Collector(config)
+    collector = DydxCollector(config)
     collector._redis = _FakeRedis()  # type: ignore[assignment]
 
     await collector._publish_status()
@@ -424,7 +424,7 @@ async def test_status_loop_publishes_immediately_without_waiting_for_first_sleep
     # still sleeping before its first publish -- proves the publish isn't just "fast",
     # it happens strictly before this sleep could ever complete.
     config = dataclasses.replace(config, liquidity_check_seconds=999_999)
-    collector = Collector(config)
+    collector = DydxCollector(config)
     collector._redis = _FakeRedis()  # type: ignore[assignment]
 
     loop_task = asyncio.create_task(collector._status_loop())

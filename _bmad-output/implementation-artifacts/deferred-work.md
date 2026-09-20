@@ -441,3 +441,10 @@ Discarded by operator: locking/atomic TOML writes; `bot_tui` malformed-message h
 - source_spec: `_bmad-output/implementation-artifacts/22-1-troll-collector-core-extracted-from-the-bybit-and-hyperliquid-collectors.md`
   summary: The stale-trade age filter compares venue `ts_event` to the host wall clock, so a host clock more than `stale_trade_seconds` fast drops every live trade on every venue, and `_report_stale_trades` reports it at INFO under the reassuring label "subscribe-time trade history".
   evidence: Inherited from `dydx_collector` (D-01's filter), now venue-wide. A persistent non-zero count after the subscribe window is indistinguishable from Hyperliquid's real subscribe replay (D-36: 21/19 trades). Fix candidate: escalate to `error_ledger` when drops continue past the first flush after subscribe, or compare against the venue's own message time.
+
+- source_spec: `_bmad-output/implementation-artifacts/22-2-dydx-collector-onto-the-core.md`
+  summary: `DydxCollector._resync_book` calls `_clear_book_state` after the awaited resubscribe, so a snapshot ingested during the awaits can be wiped; it also bypasses the core's `_resync` retry (`_resync_pending`) on failure.
+  evidence: ported verbatim from the pre-22.2 `Collector._resync_book`; the core's `_resync` clears first and retries, so dYdX could simply use it.
+- source_spec: `_bmad-output/implementation-artifacts/22-2-dydx-collector-onto-the-core.md`
+  summary: dYdX `_apply_deltas` has no snapshot-first guard (core's does), so incremental deltas after a resync can build a shallow book.
+  evidence: pre-existing dYdX behaviour, deliberately preserved for the oracle tests; revisit once dYdX's resubscribe is confirmed to always emit Clear + snapshot.

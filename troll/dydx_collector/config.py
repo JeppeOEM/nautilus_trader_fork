@@ -20,6 +20,7 @@ from pathlib import Path
 
 import tomli_w
 
+from collector_core.config import CoreConfig
 from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
 
 
@@ -36,28 +37,38 @@ class InstrumentEntry:
     retain_hours: float | None = None
 
 
-@dataclass(frozen=True)
-class CollectorConfig:
+@dataclass(frozen=True, kw_only=True)
+class DydxConfig(CoreConfig):
+    """
+    The core's thresholds plus dYdX's control-plane keys.
+
+    Keyword-only, so `network` can be required. `environment` is always derived from
+    `network` so `CoreConfig` stays satisfied. `instruments` narrows the
+    core's `tuple[str, ...]` to entries; `DydxCollector._instrument_ids()` keeps the
+    core agnostic of that.
+    """
+
+    environment: str = ""
     network: DydxNetwork
-    catalog_path: str
-    flush_interval_seconds: int
-    config_reload_seconds: int
-    open_interest_poll_seconds: int
-    snapshot_interval_seconds: float
-    non_config_retain_hours: float
-    liquidity_min_oi_usd: float
-    liquidity_check_seconds: int
-    instruments: tuple[InstrumentEntry, ...]
+    instruments: tuple[InstrumentEntry, ...] = ()  # type: ignore[assignment]
+    config_reload_seconds: int = 30
+    open_interest_poll_seconds: int = 300
+    non_config_retain_hours: float = 4.0
+    liquidity_min_oi_usd: float = 20_000.0
+    liquidity_check_seconds: int = 1800
     # Permanent denylist: classify_liquidity always treats these as illiquid regardless
     # of volume, so nothing (including pin_top_liquid) ever picks them. Also doubles as
     # where a collector:control "unpin" action lands an id -- unpinning a coin is
     # exactly "add it to exclude", so it also stays out of any future liquidity ranking,
     # not just out of the collected set. bot_tui shows this whole list, whatever its
     # origin (hand-edited or via unpin), as its "unpinned" section.
-    exclude: frozenset[str]
+    exclude: frozenset[str] = frozenset()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "environment", str(self.network))
 
 
-def load_config(path: Path) -> CollectorConfig:
+def load_config(path: Path) -> DydxConfig:
     with path.open("rb") as f:
         raw = tomllib.load(f)
 
@@ -73,11 +84,11 @@ def load_config(path: Path) -> CollectorConfig:
         if entry.retain_hours is not None and entry.retain_hours < 0:
             raise ValueError(f"retain_hours must be >= 0 for instrument {entry.id!r}, got {entry.retain_hours}")
 
-    snapshot_interval_seconds = float(raw.get("snapshot_interval_seconds", 0.5))
+    snapshot_interval_seconds = float(raw.get("snapshot_interval_seconds", 1.0))
     if snapshot_interval_seconds <= 0:
         raise ValueError(f"snapshot_interval_seconds must be > 0, got {snapshot_interval_seconds}")
 
-    return CollectorConfig(
+    return DydxConfig(
         network=DydxNetwork.from_str(  # type: ignore[attr-defined]
             raw.get("network", "mainnet").lower(),
         ),
@@ -103,7 +114,7 @@ def _instrument_to_raw(entry: InstrumentEntry) -> dict:
     return raw
 
 
-def save_config(config: CollectorConfig, path: Path) -> None:
+def save_config(config: DydxConfig, path: Path) -> None:
     """
     Persist `config` back to `path` as TOML.
 

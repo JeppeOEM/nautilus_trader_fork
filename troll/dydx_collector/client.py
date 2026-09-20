@@ -120,6 +120,23 @@ class DydxClient:
     async def unsubscribe_orderbook(self, instrument_id: str) -> None:
         await self._ws.unsubscribe_orderbook(nautilus_pyo3.InstrumentId.from_str(instrument_id))
 
+    # collector_core client contract: one call per lifecycle step; the per-channel
+    # methods above stay for the control plane and tests.
+    async def subscribe(self, iid: str) -> None:
+        await self.subscribe_trades(iid)
+        await self.subscribe_orderbook(iid)
+
+    async def unsubscribe(self, iid: str) -> None:
+        await self.unsubscribe_trades(iid)
+        await self.unsubscribe_orderbook(iid)
+
+    async def subscribe_global(self) -> None:
+        await self.subscribe_markets()
+
+    async def resync_orderbook(self, iid: str) -> None:
+        await self.unsubscribe_orderbook(iid)
+        await self.subscribe_orderbook(iid)
+
     async def subscribe_bars(self, bar_type: str) -> None:
         await self._ws.subscribe_bars(nautilus_pyo3.BarType.from_str(bar_type))
 

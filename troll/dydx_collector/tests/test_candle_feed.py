@@ -23,9 +23,8 @@ from pathlib import Path
 import pytest
 from ml_signals import candle_store
 
-from dydx_collector.collector import Collector
-from dydx_collector.collector import _buffer_key
-from dydx_collector.collector import _seconds_until_next_flush
+from dydx_collector.collector import DydxCollector
+from collector_core.collector import _seconds_until_next_flush
 from dydx_collector.second_snapshot import DydxSecondSnapshot
 from dydx_collector.tests.test_collector_trade_ohlc import _make_config
 from nautilus_trader.model.identifiers import InstrumentId
@@ -57,9 +56,9 @@ def _snap(i: int) -> DydxSecondSnapshot:
     )
 
 
-def _collector(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Collector:
+def _collector(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> DydxCollector:
     monkeypatch.setenv("CANDLES_DB_PATH", str(tmp_path / "candles.db"))
-    return Collector(_make_config(tmp_path / "catalog"))
+    return DydxCollector(_make_config(tmp_path / "catalog"))
 
 
 def test_flush_happens_two_seconds_past_each_interval() -> None:
@@ -76,7 +75,7 @@ def test_flush_writes_parquet_then_applies_exactly_that_to_the_store(
 ) -> None:
     collector = _collector(tmp_path, monkeypatch)
     snaps = [_snap(i) for i in range(30)]
-    collector._buffer[_buffer_key(snaps[0])] = snaps
+    collector._buffer[(DydxSecondSnapshot, str(snaps[0].instrument_id))] = snaps
 
     asyncio.run(collector._flush_once())
 
@@ -90,7 +89,7 @@ def test_a_failed_parquet_write_never_reaches_the_store(
 ) -> None:
     collector = _collector(tmp_path, monkeypatch)
     snaps = [_snap(i) for i in range(30)]
-    collector._buffer[_buffer_key(snaps[0])] = snaps
+    collector._buffer[(DydxSecondSnapshot, str(snaps[0].instrument_id))] = snaps
 
     def boom(_items: list) -> None:
         raise OSError("disk full")

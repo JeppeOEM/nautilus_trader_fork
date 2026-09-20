@@ -26,8 +26,8 @@ import tempfile
 from pathlib import Path
 
 from dydx_collector.client import DydxClient
-from dydx_collector.collector import Collector
-from dydx_collector.config import CollectorConfig
+from dydx_collector.collector import DydxCollector
+from dydx_collector.config import DydxConfig
 from dydx_collector.config import InstrumentEntry
 from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
 
@@ -54,7 +54,7 @@ async def main() -> None:
     print(f"running {RUN_SECONDS} s (flush every {FLUSH_INTERVAL} s) …\n")
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        config = CollectorConfig(
+        config = DydxConfig(
             network=network,
             catalog_path=tmpdir,
             flush_interval_seconds=FLUSH_INTERVAL,
@@ -62,7 +62,7 @@ async def main() -> None:
             open_interest_poll_seconds=9999,
             instruments=(InstrumentEntry(id=instrument_id, bar_intervals=()),),
         )
-        collector = Collector(config)
+        collector = DydxCollector(config)
 
         async def _stopper() -> None:
             await asyncio.sleep(RUN_SECONDS)
