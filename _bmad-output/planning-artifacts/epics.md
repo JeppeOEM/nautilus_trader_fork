@@ -2385,3 +2385,27 @@ So that backtests on these venues can run over more history than the collector h
 **Given** NAUT-02/NAUT-03
 **When** the backfill runs
 **Then** bars are written via `ParquetDataCatalog.write_data()`, re-runs are idempotent (skip existing ranges), and a `BacktestDataConfig` over the backfilled range loads them without conversion
+
+### Story 22.10: Rankings show every collected coin across venues, with an exchange filter
+
+As the dashboard operator,
+I want the rankings page to list every coin any collector is currently collecting — dYdX, Bybit (linear + spot) and Hyperliquid — by default, and to narrow it by exchange with one click,
+So that a multi-venue watchlist is the normal view and a single venue is a filter, not the other way round.
+
+**Acceptance Criteria:**
+
+**Given** all three collectors publish to `snapshots:raw` (story 22.1)
+**When** `ranking_engine` builds `rankings:live`
+**Then** it contains one row per fresh instrument from every venue; a missing coin means "not collected / stale", never "hidden by venue"
+
+**Given** `ranking_engine`'s 24h volume comes only from dYdX's indexer today, so Bybit/Hyperliquid rows would rank at 0
+**When** the volume poll also reads Bybit `/v5/market/tickers` (`turnover24h`, linear + spot) and Hyperliquid `metaAndAssetCtxs` (`dayNtlVlm`)
+**Then** every venue's rows carry USD `volume24h` (OBS-03), and a row whose venue volume is unavailable is excluded from volume mode loudly (`error_ledger`, DATA-01), never ranked at 0
+
+**Given** story 19.5's typed `venue = X` filter condition
+**When** the rankings page shows a venue chip row (all venues present, all selected by default, per-viewer selection in `localStorage`)
+**Then** deselecting a chip hides that venue's rows, chips compose with `FilterPanel` conditions and sort, and a newly appearing venue is shown by default
+
+**Given** SSOT-04 (web and bot_tui are two renderers of one ranking page)
+**When** the bot_tui coins pane renders Hyperliquid's 24-char ids
+**Then** the instrument column fits without misaligning later columns (TUI-02) and the existing substring filter (`.BYBIT`, `.DYDX`, `.HYPERLIQUID`) is documented as the venue filter
