@@ -15,15 +15,20 @@
 import asyncio
 
 import pytest
+from nautilus_trader.adapters.bybit.config import BybitExecClientConfig
 from nautilus_trader.adapters.dydx.config import DydxExecClientConfig
+from nautilus_trader.adapters.hyperliquid.config import HyperliquidExecClientConfig
 from nautilus_trader.adapters.sandbox.config import SandboxExecutionClientConfig
+from nautilus_trader.core.nautilus_pyo3 import BybitEnvironment
+from nautilus_trader.core.nautilus_pyo3 import BybitProductType
 from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
+from nautilus_trader.core.nautilus_pyo3 import HyperliquidEnvironment
 from nautilus_trader.live.node import TradingNode
 
 import live_paper.node
 from live_paper.config import BotConfig
+from live_paper.config import ExecConfig
 from live_paper.config import PaperConfig
-from live_paper.config import RealMoneyConfig
 from live_paper.node import build_node
 
 
@@ -86,14 +91,77 @@ def test_paper_config_pins_strategy_id_to_bot_id_not_insertion_order() -> None:
         _dispose(node)
 
 
+def _exec_config(**overrides: str | int) -> ExecConfig:
+    kwargs: dict = {
+        "mode": "real_money",
+        "environment": "mainnet",
+        "subaccount": 0,
+        "log_level": "ERROR",
+    }
+    return ExecConfig(**{**kwargs, **overrides})
+
+
 def test_real_money_config_builds_node_with_dydx_exec_client() -> None:
-    config = RealMoneyConfig(
-        mode="real_money", network=DydxNetwork.MAINNET, subaccount=0, log_level="ERROR"
-    )
-    node = build_node(config)
+    node = build_node(_exec_config(subaccount=3))
     try:
         exec_client_config = node._config.exec_clients["DYDX"]
         assert isinstance(exec_client_config, DydxExecClientConfig)
+        assert exec_client_config.environment == DydxNetwork.MAINNET
+        assert exec_client_config.subaccount == 3
+    finally:
+        _dispose(node)
+
+
+@pytest.mark.parametrize(
+    ("instrument_id", "product_type"),
+    [
+        ("BTCUSDT-LINEAR.BYBIT", BybitProductType.LINEAR),
+        ("BTCUSDT-SPOT.BYBIT", BybitProductType.SPOT),
+    ],
+)
+def test_exchange_demo_builds_a_bybit_demo_exec_client(instrument_id, product_type) -> None:
+    node = build_node(
+        _exec_config(mode="exchange_demo", environment="demo", instrument_id=instrument_id)
+    )
+    try:
+        exec_client_config = node._config.exec_clients["BYBIT"]
+        assert isinstance(exec_client_config, BybitExecClientConfig)
+        assert exec_client_config.environment == BybitEnvironment.DEMO
+        assert exec_client_config.product_types == (product_type,)
+        # Credentials must reach the client from the environment only (the Rust client
+        # picks BYBIT_DEMO_API_KEY/SECRET off `environment`), never from the config file.
+        assert exec_client_config.api_key is None
+        assert exec_client_config.api_secret is None
+        # Bybit Demo has no WS Trade API -- orders must go over HTTP.
+        assert exec_client_config.use_ws_execution_fast is False
+    finally:
+        _dispose(node)
+
+
+def test_exchange_demo_builds_a_hyperliquid_testnet_exec_client() -> None:
+    node = build_node(
+        _exec_config(
+            mode="exchange_demo",
+            environment="testnet",
+            instrument_id="BTC-USD-PERP.HYPERLIQUID",
+        )
+    )
+    try:
+        exec_client_config = node._config.exec_clients["HYPERLIQUID"]
+        assert isinstance(exec_client_config, HyperliquidExecClientConfig)
+        assert exec_client_config.environment == HyperliquidEnvironment.TESTNET
+        assert exec_client_config.private_key is None
+    finally:
+        _dispose(node)
+
+
+def test_explicit_path_builds_only_that_bots_venue_clients() -> None:
+    node = build_node(
+        _exec_config(mode="exchange_demo", environment="demo", instrument_id="BTCUSDT-LINEAR.BYBIT")
+    )
+    try:
+        assert set(node._config.data_clients) == {"BYBIT"}
+        assert set(node._config.exec_clients) == {"BYBIT"}
     finally:
         _dispose(node)
 

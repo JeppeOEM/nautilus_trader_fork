@@ -13,31 +13,44 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-The venues `live_paper` can paper-trade on -- a plain table, not a class hierarchy.
+The venues `live_paper` can trade on -- a plain table, not a class hierarchy.
 
 One `VenueSpec` per Nautilus venue string: how to build that venue's public data client
-and what its Sandbox quote currency / environments are. Paper execution is always
-`SandboxExecutionClientConfig` (built in node.py), so no exec-side entries are needed
-here until story 22.7 adds real-money for Bybit/Hyperliquid.
+and its non-Sandbox exec client, plus its Sandbox quote currency / allowed environments.
+Paper execution is always `SandboxExecutionClientConfig` (built in node.py) and ignores
+the exec-side columns; the explicit `real_money`/`exchange_demo` path (config.py) drives
+itself entirely off them, so adding a venue there is one more row here rather than
+another `if venue == ...` branch in node.py.
 """
 
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
+from typing import TYPE_CHECKING
 
 from nautilus_trader.adapters.bybit.config import BybitDataClientConfig
+from nautilus_trader.adapters.bybit.config import BybitExecClientConfig
 from nautilus_trader.adapters.bybit.constants import BYBIT
 from nautilus_trader.adapters.bybit.factories import BybitLiveDataClientFactory
+from nautilus_trader.adapters.bybit.factories import BybitLiveExecClientFactory
 from nautilus_trader.adapters.dydx.config import DydxDataClientConfig
+from nautilus_trader.adapters.dydx.config import DydxExecClientConfig
 from nautilus_trader.adapters.dydx.constants import DYDX
 from nautilus_trader.adapters.dydx.factories import DydxLiveDataClientFactory
+from nautilus_trader.adapters.dydx.factories import DydxLiveExecClientFactory
 from nautilus_trader.adapters.hyperliquid.config import HyperliquidDataClientConfig
+from nautilus_trader.adapters.hyperliquid.config import HyperliquidExecClientConfig
 from nautilus_trader.adapters.hyperliquid.constants import HYPERLIQUID
 from nautilus_trader.adapters.hyperliquid.factories import HyperliquidLiveDataClientFactory
+from nautilus_trader.adapters.hyperliquid.factories import HyperliquidLiveExecClientFactory
 from nautilus_trader.core.nautilus_pyo3 import BybitEnvironment
 from nautilus_trader.core.nautilus_pyo3 import BybitProductType
 from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
 from nautilus_trader.core.nautilus_pyo3 import HyperliquidEnvironment
+
+
+if TYPE_CHECKING:  # config.py imports this module, so the annotation can't be a real import
+    from live_paper.config import ExecConfig
 
 
 @dataclass(frozen=True)
@@ -47,11 +60,31 @@ class VenueSpec:
     allowed_environments: tuple[str, ...]
     environment_cls: type
     paper_quote_currency: str
+    exec_config_cls: type
+    exec_factory: type
+    exec_kwargs: "Callable[[ExecConfig], dict]" = lambda config: {}
 
     def parse_environment(self, name: str) -> object:
         # PyO3 enums have no string constructor that agrees across venues; the
         # upper-cased member name does (config spells them lower-case).
         return getattr(self.environment_cls, name.upper())
+
+
+def _bybit_exec_kwargs(config: "ExecConfig") -> dict:
+    """
+    Bybit's exec client is scoped to product types, and the instrument id's own suffix is
+    that product type (`BTCUSDT-LINEAR.BYBIT` -> LINEAR) -- the same suffix
+    `common.venues.market_kind()` reads. So the bot's one instrument decides it.
+    """
+    symbol = config.instrument_id.rpartition(".")[0]
+    suffix = symbol.rpartition("-")[2].upper()
+    product_type = getattr(BybitProductType, suffix, None) if "-" in symbol else None
+    if product_type is None:
+        raise ValueError(
+            f"Bybit instrument id {config.instrument_id!r} must carry its product type as the "
+            "symbol suffix (LINEAR, INVERSE, SPOT or OPTION), e.g. BTCUSDT-LINEAR.BYBIT"
+        )
+    return {"product_types": (product_type,)}
 
 
 VENUES: dict[str, VenueSpec] = {
@@ -61,6 +94,9 @@ VENUES: dict[str, VenueSpec] = {
         allowed_environments=("mainnet", "testnet"),
         environment_cls=DydxNetwork,
         paper_quote_currency="USDC",
+        exec_config_cls=DydxExecClientConfig,
+        exec_factory=DydxLiveExecClientFactory,
+        exec_kwargs=lambda config: {"subaccount": config.subaccount},
     ),
     BYBIT: VenueSpec(
         # Both product types: spot bots and linear bots share the one BYBIT data client.
@@ -72,6 +108,9 @@ VENUES: dict[str, VenueSpec] = {
         allowed_environments=("mainnet", "demo", "testnet"),
         environment_cls=BybitEnvironment,
         paper_quote_currency="USDT",
+        exec_config_cls=BybitExecClientConfig,
+        exec_factory=BybitLiveExecClientFactory,
+        exec_kwargs=_bybit_exec_kwargs,
     ),
     HYPERLIQUID: VenueSpec(
         make_data_config=HyperliquidDataClientConfig,
@@ -79,5 +118,7 @@ VENUES: dict[str, VenueSpec] = {
         allowed_environments=("mainnet", "testnet"),
         environment_cls=HyperliquidEnvironment,
         paper_quote_currency="USDC",
+        exec_config_cls=HyperliquidExecClientConfig,
+        exec_factory=HyperliquidLiveExecClientFactory,
     ),
 }

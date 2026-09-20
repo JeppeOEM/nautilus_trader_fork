@@ -79,8 +79,33 @@ balance pool. An unsupported venue or unknown `[venues.*]` key fails at load.
 wraps) -- so no config restriction is needed.
 
 This file must never contain a `mode` key — `load_paper_config()` hard-errors if it
-finds one (that's the point: real-money execution is a separate file/loader, never a
+finds one (that's the point: non-Sandbox execution is a separate file/loader, never a
 field toggle here — see `config.py`'s docstring).
+
+### The two non-Sandbox modes
+
+Everything above is paper. There is one other config shape, in its own file, only read
+when `LIVE_PAPER_REAL_MONEY_CONFIG` points at it, and it carries a `mode` key with
+exactly two accepted values:
+
+| `mode` | `environment` | What it is |
+|---|---|---|
+| `exchange_demo` | `demo` (Bybit) or `testnet` (dYdX, Hyperliquid) | The venue's own play-money account. Real signing, real order flow, no real funds. |
+| `real_money` | `mainnet` | A real account with real funds. |
+
+Both build the venue's real exec client, which is why they share the one env-var gate.
+The venue comes from `instrument_id`'s suffix, exactly as in paper mode, and for Bybit
+the symbol suffix also picks the product type (`BTCUSDT-LINEAR.BYBIT` → LINEAR).
+
+**Promotion rule:** a demo file cannot become a mainnet file by editing one key.
+`mode` and `environment` are cross-checked and must agree, so going live means editing
+*both* — in a file that has to be named explicitly in `LIVE_PAPER_REAL_MONEY_CONFIG`
+before anything reads it at all. Credentials are never config fields: each venue's Rust
+client reads the env-var pair its environment selects (`BYBIT_DEMO_API_KEY`,
+`HYPERLIQUID_TESTNET_PK`, ...). A missing key yields an *unauthenticated* client rather
+than a startup error, so see
+[`DEPLOY_CHECKLIST.md`](./DEPLOY_CHECKLIST.md)'s per-venue env-var table and its
+Bybit-Demo / Hyperliquid-testnet pre-flight steps before a first run.
 
 **To see a trade fire quickly** for testing purposes, loosen the thresholds so the
 strategy doesn't wait for a strong signal, e.g. `trend_buy_threshold = 0.51`,
@@ -170,7 +195,7 @@ is.
 | `i` | Bot-detail | view this bot's incidents log: restarts + WS/data-stale spans (`esc` back) |
 | `Esc` | any sub-view | go back one level |
 
-The Bots pane shows `bot_id`, mode (`paper`/`live`), running state, position side,
+The Bots pane shows `bot_id`, mode (`paper`/`demo`/`live`), running state, position side,
 `net_exposure`, PnL, and a stale badge if `bots:status` hasn't heartbeated recently.
 Bot-detail additionally shows the trades blotter and PnL-over-time sparkline sourced
 from `bots:history:{bot_id}:{range}` (Story 4.6/4.7) — empty until the bot has at least

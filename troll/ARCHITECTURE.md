@@ -214,12 +214,12 @@ a library only.
   against in backtest), and `OnlineLogisticTrend` from `Bar` via INTERNAL aggregation.
   Has an `orders_inflight()` guard to avoid duplicate submissions while a fill is
   pending — flagged as still needing a concurrency test, see below.
-- **`config.py`** — `PaperConfig` vs `RealMoneyConfig`: two structurally separate
+- **`config.py`** — `PaperConfig` vs `ExecConfig`: two structurally separate
   dataclasses/loaders, not one schema with a mode flag, specifically so a stray `mode`
   key in the default config can never silently promote to real money. Real-money mode
   requires setting `LIVE_PAPER_REAL_MONEY_CONFIG` to a distinct file path that
   `load_paper_config()` doesn't even know how to parse.
-- **`node.py`** — builds and runs the `TradingNode`; branches on `RealMoneyConfig` vs
+- **`node.py`** — builds and runs the `TradingNode`; branches on `ExecConfig` vs
   `PaperConfig` to pick paper vs live execution clients.
 - **`bot_status.py`** — publishes `bots:status` (PnL, position, mode, heartbeat) on a
   timer; subscribes to `bots:control` for `{bot_id, action: "start"|"stop"}` commands.
@@ -334,5 +334,5 @@ Cross-referenced against `_bmad-output/implementation-artifacts/sprint-status.ya
 - **EXTERNAL vs INTERNAL bar aggregation choice unverified live** — INTERNAL was
   picked defensively, never confirmed better against a real dYdX connection (open
   action item, epic-3 retro).
-- **Real-money path (`RealMoneyConfig`) exists and is gated but untested** — never
+- **Real-money path (`ExecConfig`, `mode = "real_money"`) exists and is gated but untested** — never
   exercised even once.
