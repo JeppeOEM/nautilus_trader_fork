@@ -1,0 +1,11 @@
+{
+  "actions": [
+    "Run the Bybit and Hyperliquid collectors for at least one hour each and confirm the `collector.book_crosscheck` count stays at zero (AC #2's one-hour bar; only minutes of local evidence exist so far).",
+    "Deploy on the VPS with `make redeploy` and confirm Dozzle is clean for 10 minutes, with no `collector.book_sequence` entries on Bybit and no stale-book warnings naming \"feed dead\" on Hyperliquid.",
+    "Run `ruff --fix` and `mypy` over `troll/`; neither is installed on the dev host."
+  ],
+  "parked_at": "2026-09-20",
+  "run_id": "20260920-152042-25f1",
+  "spec_file": "_bmad-output/implementation-artifacts/22-5-order-book-validation-per-venue.md",
+  "story_key": "22-5-order-book-validation-per-venue"
+}

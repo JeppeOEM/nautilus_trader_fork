@@ -25,6 +25,11 @@ Verified against crates/adapters/hyperliquid (Story 19.4 Task 1) -- independentl
     poll workaround, unlike dYdX/Bybit.
   * every `l2Book` payload is a full snapshot (parse_ws_order_book_deltas emits Clear + all
     levels), so the local book can't drift from missed deltas -> no resync machinery.
+  * NO `OrderBookDelta.sequence`/`order_id` gap check (opt-out of story 22.5's Bybit `u`
+    canary): websocket/parse.rs `parse_ws_order_book_deltas` (lines 103-163) stamps
+    `sequence=0` and `order_id=0` on every delta and emits Clear + all levels per message,
+    so there is no venue sequence to check and nothing to desync. Book correctness is
+    covered instead by the REST cross-check (`fetch_book_levels`).
   * subscriptions are one WS request per topic; Hyperliquid documents a per-IP subscription
     cap (1000) far above one connection's needs, so no throttle here.
 """
@@ -34,6 +39,7 @@ import logging
 from collections.abc import Callable
 
 from collector_core.open_interest import OpenInterest
+from hyperliquid_collector.book_snapshot import fetch_l2_book
 from nautilus_trader.core import nautilus_pyo3
 from nautilus_trader.model.data import FundingRateUpdate
 from nautilus_trader.model.data import capsule_to_data
@@ -55,10 +61,20 @@ class HyperliquidClient:
         env = nautilus_pyo3.HyperliquidEnvironment.from_str(environment)  # type: ignore[attr-defined]
         self._http = nautilus_pyo3.HyperliquidHttpClient(environment=env)  # type: ignore[attr-defined]
         self._ws = nautilus_pyo3.HyperliquidWebSocketClient(environment=env)  # type: ignore[attr-defined]
+        self._environment = environment
+        self._coins: dict[str, str] = {}  # instrument id -> wire coin (the instrument's raw_symbol)
 
     async def fetch_instruments(self) -> list:
         """Raw pyo3-native perp instruments; convert with `instruments_from_pyo3` for the catalog."""
-        return await self._http.load_instrument_definitions(include_spot=False, include_perps=True)
+        instruments = await self._http.load_instrument_definitions(
+            include_spot=False, include_perps=True
+        )
+        self._coins = {str(i.id): i.raw_symbol.value for i in instruments}
+        return instruments
+
+    async def fetch_book_levels(self, instrument_id: str) -> tuple[list, list]:
+        """REST l2Book as best-first (price, size) floats (cross-check, story 22.5)."""
+        return await fetch_l2_book(self._environment, self._coins[instrument_id])
 
     async def connect(self, loop: asyncio.AbstractEventLoop, instruments: list) -> None:
         await self._ws.connect(loop, instruments, self._handle_message)

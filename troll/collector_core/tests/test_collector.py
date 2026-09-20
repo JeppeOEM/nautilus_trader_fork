@@ -312,6 +312,7 @@ def test_ohlc_outside_book_canary_fires_once_per_minute(
             c._process_data(_deltas([(100.0, 1.0)], [(100.5, 1.0)]))
             c._process_data(_trade(150.0, 0.5, AggressorSide.BUYER, offset))  # impossible price
             c._last_book_update_ns[_BYBIT] = now + offset
+            c._last_feed_message_ns = now + offset
             (snap,) = _tick(c, now + offset)
             assert snap.high_price == 150.0  # canary, not a filter (DATA-07)
     assert len([r for r in caplog.records if "IMPOSSIBLE" in r.message]) == 2

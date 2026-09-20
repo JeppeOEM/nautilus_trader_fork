@@ -12,27 +12,20 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
-"""Hyperliquid-specific pieces only: config (core tests live in collector_core)."""
+"""Hyperliquid REST l2Book parse (payload shape from crates/adapters/hyperliquid/test_data/http_l2_book_btc.json)."""
 
-from pathlib import Path
-
-import pytest
-
-from hyperliquid_collector.config import load_config
+from hyperliquid_collector.book_snapshot import parse_l2_book
 
 
-
-def test_config_defaults_and_validation(tmp_path: Path) -> None:
-    path = tmp_path / "c.toml"
-    path.write_text('instruments = ["BTC-USD-PERP.HYPERLIQUID"]\n')
-    cfg = load_config(path)  # venue default: 12s stale guard (l2Book pushes ~5.4s apart)
-    assert (cfg.environment, cfg.snapshot_interval_seconds, cfg.stale_book_seconds) == (
-        "mainnet",
-        1.0,
-        12.0,
-    )
-    path.write_text("stale_book_seconds = 20.0\n")
-    assert load_config(path).stale_book_seconds == 20.0
-    path.write_text('environment = "prod"\n')
-    with pytest.raises(ValueError, match="environment"):
-        load_config(path)
+def test_parse_l2_book_best_first_bids_then_asks() -> None:
+    payload = {
+        "coin": "BTC",
+        "levels": [
+            [{"px": "110427.0", "sz": "4.11882"}, {"px": "110426.0", "sz": "0.31694"}],
+            [{"px": "110428.0", "sz": "3.72573"}, {"px": "110430.0", "sz": "0.03586"}],
+        ],
+        "time": 1761786491067,
+    }
+    bids, asks = parse_l2_book(payload)
+    assert bids == [(110427.0, 4.11882), (110426.0, 0.31694)]
+    assert asks == [(110428.0, 3.72573), (110430.0, 0.03586)]

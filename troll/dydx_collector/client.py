@@ -21,6 +21,11 @@ load (see memory project_dydx_collector_python_pivot). This client drives the
 same Rust connection/reconnect/throttle/decode logic directly with our own
 asyncio loop and callback, so the collector never touches the buggy layer.
 
+No per-market sequence check (opt-out of story 22.5's Bybit `u` canary): dYdX's book deltas
+carry a connection-global `message_id`, not a per-market sequence, so a "gap" for one market
+is normal (other markets' messages) and a "regress" is not detectable per instrument. Book
+integrity here rests on the crossed-book signal (DATA-04 per-level uncrossing) instead.
+
 """
 
 import asyncio

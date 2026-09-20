@@ -3,6 +3,11 @@ environment = "mainnet"
 catalog_path = "/app/catalog"
 flush_interval_seconds = 60
 snapshot_interval_seconds = 1.0
-# l2Book pushes were observed ~5s apart, so the stale guard must be well above that.
-stale_book_seconds = 30.0
+# Raw capture 2026-09-20 (scripts/capture_hl_ws.py, 630 s, BTC + PURR): l2Book pushes every
+# 5.38 s median (min 4.26 s, max 5.96 s over 118 frames each) and every push changed the book.
+# The docs' "0.5 s" is only a lower bound. Silence beyond 2x the cadence = dead feed / stale.
+stale_book_seconds = 12.0
+# feed_stale_seconds is left unset: it falls back to stale_book_seconds, and with every
+# instrument pushed on the same ~5.4 s cadence, feed silence and instrument silence are
+# the same 12 s bound here. The two are still reported separately (which one tripped).
 instruments = ["BTC-USD-PERP.HYPERLIQUID", "ETH-USD-PERP.HYPERLIQUID"]

@@ -37,6 +37,13 @@ class CoreConfig:
     crossed_resync_seconds: float = 10.0  # crossed longer than this -> resync (DATA-03 fallback)
     stale_trade_seconds: float = 10.0  # older trades are subscribe-time history (DATA-06)
     seen_trade_ids: int = 2000  # bounded per-instrument trade_id dedup window (DATA-06)
+    # Feed-level liveness: no WS message at all for this long = dead feed / stale after a
+    # reconnect. None = same as `stale_book_seconds`. A per-instrument silence is judged
+    # separately by `stale_book_seconds` (story 22.5).
+    feed_stale_seconds: float | None = None
+    # REST book cross-check cadence per instrument (story 22.5); 0 disables. Only runs for a
+    # client exposing `fetch_book_levels`.
+    book_crosscheck_seconds: float = 300.0
     instruments: tuple[str, ...] = ()
 
 
@@ -72,11 +79,19 @@ def core_config_from_dict(
         crossed_resync_seconds=float(raw.get("crossed_resync_seconds", 10.0)),
         stale_trade_seconds=float(raw.get("stale_trade_seconds", 10.0)),
         seen_trade_ids=int(raw.get("seen_trade_ids", 2000)),
+        feed_stale_seconds=(
+            float(raw["feed_stale_seconds"]) if "feed_stale_seconds" in raw else None
+        ),
+        book_crosscheck_seconds=float(raw.get("book_crosscheck_seconds", 300.0)),
         instruments=tuple(dict.fromkeys(raw.get("instruments", []))),  # deduped, order kept
     )
     for name in _POSITIVE_KEYS:
         if getattr(config, name) <= 0:
             raise ValueError(f"{name} must be > 0, got {getattr(config, name)}")
+    if config.feed_stale_seconds is not None and config.feed_stale_seconds <= 0:
+        raise ValueError(f"feed_stale_seconds must be > 0, got {config.feed_stale_seconds}")
+    if config.book_crosscheck_seconds < 0:
+        raise ValueError(f"book_crosscheck_seconds must be >= 0, got {config.book_crosscheck_seconds}")
     return config
 
 
