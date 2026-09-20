@@ -282,3 +282,12 @@ def test_thin_book_snapshot_yields_null_microprice_and_spread(
     assert len(items) == 1
     assert items[0]["microprice"] is None
     assert items[0]["spread"] is None
+
+
+@pytest.mark.parametrize(("iid", "market"), [("BTCUSDT-SPOT.BYBIT", "spot"), ("BTCUSDT-LINEAR.BYBIT", "perp")])
+def test_market_field_next_to_venue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, iid: str, market: str,
+) -> None:
+    client = _client(str(tmp_path / "cat"), monkeypatch)
+    body = client.get(_url(_BASE_NS, limit=3, bar_seconds=60).replace(_IID, iid)).json()
+    assert (body["venue"], body["market"]) == ("BYBIT", market)

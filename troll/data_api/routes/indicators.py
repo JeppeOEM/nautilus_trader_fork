@@ -47,6 +47,7 @@ from fastapi import HTTPException
 from fastapi import Request
 from pydantic import BaseModel
 
+from common.venues import market_kind
 from data_api.routes import candles as _candles
 from ml_signals import chart_indicator_config
 from ml_signals import chart_indicators
@@ -214,6 +215,7 @@ class IndicatorValuesResponse(BaseModel):
     # entries' values are still served; one bad/stale entry must not blank every pane.
     errors: dict[str, str] = {}
     venue: str
+    market: str
 
 
 def _indicator_id(name: str, params: dict[str, Any]) -> str:
@@ -348,7 +350,7 @@ def get_indicator_values(
         raise HTTPException(status_code=500, detail=f"failed to read catalog: {exc}") from exc
 
     if not kept:
-        return IndicatorValuesResponse(items=[], has_more=False, venue=venue_of(instrument_id))
+        return IndicatorValuesResponse(items=[], has_more=False, venue=venue_of(instrument_id), market=market_kind(instrument_id))
 
     start_ms = kept[0]["t"]
     end_ms = kept[-1]["t"] + bar_seconds * 1000
@@ -361,5 +363,5 @@ def get_indicator_values(
         items=_insert_gap_markers(items, bar_seconds),
         has_more=has_more,
         errors=errors,
-        venue=venue_of(instrument_id),
+        venue=venue_of(instrument_id), market=market_kind(instrument_id),
     )

@@ -32,6 +32,7 @@ from fastapi import APIRouter
 from fastapi import HTTPException
 from pydantic import BaseModel
 
+from common.venues import market_kind
 from data_api import live_candles
 from data_api.routes import paging
 from data_api.settings import CANDLES_DB_DIR
@@ -99,6 +100,7 @@ class CandlesResponse(BaseModel):
     items: list[CandleItem]
     has_more: bool
     venue: str
+    market: str
 
 
 def _window_start_ns(before_ns: int, limit: int, bar_seconds: int) -> int:
@@ -208,7 +210,7 @@ def get_candles(
     bar_seconds = max(1, min(bar_seconds, _MAX_BAR_SECONDS))
     kept, has_more = candle_page(instrument_id, before_ns, limit, bar_seconds)
     if not kept:
-        return CandlesResponse(items=[], has_more=False, venue=venue_of(instrument_id))
+        return CandlesResponse(items=[], has_more=False, venue=venue_of(instrument_id), market=market_kind(instrument_id))
     return CandlesResponse(
-        items=_insert_gap_markers(kept, bar_seconds), has_more=has_more, venue=venue_of(instrument_id),
+        items=_insert_gap_markers(kept, bar_seconds), has_more=has_more, venue=venue_of(instrument_id), market=market_kind(instrument_id),
     )

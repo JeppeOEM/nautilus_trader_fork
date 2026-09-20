@@ -197,6 +197,19 @@ def test_current_ranks_volume_mode_sorts_by_descending_volume24h() -> None:
     assert [r["rank"] for r in ranks] == [1, 2]
     assert {r["venue"] for r in ranks} == {"DYDX"}
     assert {r["venue_kind"] for r in ranks} == {"dex"}
+    assert {r["market"] for r in ranks} == {"perp"}
+
+
+def test_current_ranks_market_distinguishes_spot_from_linear() -> None:
+    _reset_state()
+    now_ns = time.time_ns()
+    for iid in ("BTCUSDT-SPOT.BYBIT", "BTCUSDT-LINEAR.BYBIT"):
+        _mark_fresh(iid, now_ns)
+    ranks = engine._current_ranks()
+    assert {r["instrument_id"]: r["market"] for r in ranks} == {
+        "BTCUSDT-SPOT.BYBIT": "spot",
+        "BTCUSDT-LINEAR.BYBIT": "perp",
+    }
 
 
 def test_current_ranks_volatility_mode_sorts_by_descending_volatility_score() -> None:

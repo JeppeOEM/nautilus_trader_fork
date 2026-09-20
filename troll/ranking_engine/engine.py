@@ -40,6 +40,7 @@ from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
 from nautilus_trader.core.nautilus_pyo3 import get_dydx_http_url  # type: ignore[attr-defined]
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
+from common.venues import market_kind
 from common.venues import venue_kind
 from ml_signals import catalog_stats
 from ml_signals import error_ledger
@@ -440,6 +441,7 @@ def _current_ranks() -> list[dict]:
             "instrument_id": iid,
             "venue": (venue := venue_of(iid)),
             "venue_kind": venue_kind(venue),
+            "market": market_kind(iid),
             "volume24h": volume24h,
             "volatility_score": volatility_score,
             **_fast_metrics_for(iid),

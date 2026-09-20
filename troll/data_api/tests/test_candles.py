@@ -337,3 +337,13 @@ def test_history_older_than_the_store_comes_from_parquet_and_joins_seamlessly(
     ts = [i["t"] for i in body["items"]]
     assert ts == [_DAY0_MS + m * 60_000 for m in range(-20, 30)]  # 20 archive + 30 store, no gap, no overlap
     assert body["has_more"] is False
+
+
+@pytest.mark.parametrize(("iid", "market"), [("BTCUSDT-SPOT.BYBIT", "spot"), ("BTCUSDT-LINEAR.BYBIT", "perp")])
+def test_market_field_next_to_venue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, iid: str, market: str,
+) -> None:
+    body = _client(str(tmp_path / "cat"), monkeypatch).get(
+        f"/api/candles/{iid}?before_ns={_BASE_NS}&limit=3&bar_seconds=60",
+    ).json()
+    assert (body["venue"], body["market"]) == ("BYBIT", market)

@@ -39,6 +39,7 @@ export interface CandlesResponse {
   items: CandleItem[];
   has_more: boolean;
   venue: string;
+  market: string;
 }
 
 export interface ErrorsResponse {
@@ -74,6 +75,7 @@ export interface IndicatorSeriesResponse {
   items: IndicatorSeriesPoint[];
   has_more: boolean;
   venue: string;
+  market: string;
 }
 
 export interface IndicatorValuesItem {
@@ -86,6 +88,7 @@ export interface IndicatorValuesResponse {
   has_more: boolean;
   errors?: Record<string, string>;
   venue: string;
+  market: string;
 }
 
 export interface MetricHistoryItem {
@@ -127,6 +130,7 @@ export interface SnapshotSeriesResponse {
   items: SnapshotSeriesPoint[];
   has_more: boolean;
   venue: string;
+  market: string;
 }
 
 export interface TechnicalsColumn {

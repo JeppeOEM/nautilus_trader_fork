@@ -208,7 +208,7 @@ function ChartInner({ instrumentId, barSeconds, onTimeframeChange }: ChartInnerP
   const [sessionCfg, setSessionCfg] = useState<SessionConfig | null>(null);
   const [sessionCache] = useState<SessionProfileCache>(() => new Map());
   const [vrvpSettings, setVrvpSettings] = useState(DEFAULT_VOLUME_PROFILE_SETTINGS);
-  const { candles, volume: fullVolume, loadFailed, loadError, refreshNewest, appendBar } = useCandles(
+  const { candles, volume: fullVolume, venueMarket, loadFailed, loadError, refreshNewest, appendBar } = useCandles(
     instrumentId, chart, mode === "candles", barSeconds,
   );
   // Story 18.4: replay only trims the NEWEST end of the loaded candles for display
@@ -589,6 +589,11 @@ function ChartInner({ instrumentId, barSeconds, onTimeframeChange }: ChartInnerP
         <div className="chart-cluster">
           <Link to="/">&larr; Rankings</Link>
           <h1>{instrumentId}</h1>
+          {venueMarket && (
+            <span className="venue-badge" aria-label="Venue and market">
+              {venueMarket.venue} · {venueMarket.market}
+            </span>
+          )}
           {TIMEFRAMES.map((tf) => (
             <button
               key={tf.label}

@@ -130,6 +130,10 @@ signals on read (SIGNAL-01).
 
 ### 1.8 `OpenInterest` (custom `Data` type, `collector_core/open_interest.py`)
 
+- **Spot has none, by design** (Story 22.4): Bybit `-SPOT.BYBIT` instruments produce only book+trade
+  snapshots -- Bybit's spot ticker has no bid/ask, funding or open interest, and mark/index price are
+  perp concepts -- so no `custom_open_interest`/mark/funding entries for a spot id is correct, not a gap.
+
 - **One type for all venues** (Story 22.3): written by all three collectors -- dYdX and Bybit
   via REST poll, Hyperliquid via WebSocket (`OpenInterest.from_pyo3`). Catalog directory
   `data/custom_open_interest/`. Replaces `DydxOpenInterest`/`BybitOpenInterest`/

@@ -418,6 +418,27 @@ describe("RankingsPage", () => {
       expect(screen.queryByText("BTC-USD-PERP.HYPERLIQUID")).not.toBeInTheDocument();
     });
 
+    it("keeps spot and linear rows of one symbol distinct and filters with `market = spot`", () => {
+      useLiveChannelMock.mockReturnValue({
+        latest: liveMessage({
+          ranks: [
+            { instrument_id: "BTCUSDT-SPOT.BYBIT", venue: "BYBIT", venue_kind: "cex", market: "spot", price: 1 },
+            { instrument_id: "BTCUSDT-LINEAR.BYBIT", venue: "BYBIT", venue_kind: "cex", market: "perp", price: 2 },
+          ],
+        }),
+        connected: true,
+      });
+      renderPage();
+
+      expect(screen.getAllByRole("row")).toHaveLength(3);
+      expect(screen.getByRole("columnheader", { name: "Market" })).toBeInTheDocument();
+
+      addFilter("Market (perp/spot)", "=", "spot");
+
+      expect(screen.getByText("BTCUSDT-SPOT.BYBIT")).toBeInTheDocument();
+      expect(screen.queryByText("BTCUSDT-LINEAR.BYBIT")).not.toBeInTheDocument();
+    });
+
     it("filters by CEX/DEX kind", () => {
       useLiveChannelMock.mockReturnValue({
         latest: liveMessage({

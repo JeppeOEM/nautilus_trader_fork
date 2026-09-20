@@ -42,6 +42,7 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from collector_core.second_snapshot import DydxSecondSnapshot
+from common.venues import market_kind
 from data_api.routes import paging
 from data_api.settings import CATALOG_PATH
 from ml_signals import catalog_stats as _catalog_stats
@@ -89,6 +90,7 @@ class SnapshotSeriesResponse(BaseModel):
     items: list[SnapshotSeriesPoint]
     has_more: bool
     venue: str
+    market: str
 
 
 def _snapshot_to_row_dict(snapshot: DydxSecondSnapshot) -> dict:
@@ -191,9 +193,9 @@ def get_snapshots(instrument_id: str, before_ns: int, limit: int = 900) -> Snaps
     kept = paging.fetch_page(fetch, ranges, before_ns, span_ns)
 
     if not kept:
-        return SnapshotSeriesResponse(items=[], has_more=False, venue=venue_of(instrument_id))
+        return SnapshotSeriesResponse(items=[], has_more=False, venue=venue_of(instrument_id), market=market_kind(instrument_id))
 
     has_more = paging.has_older_data(ranges, kept[0]["t"] * 1_000_000)
     return SnapshotSeriesResponse(
-        items=[SnapshotSeriesPoint(**row) for row in kept], has_more=has_more, venue=venue_of(instrument_id),
+        items=[SnapshotSeriesPoint(**row) for row in kept], has_more=has_more, venue=venue_of(instrument_id), market=market_kind(instrument_id),
     )

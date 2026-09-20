@@ -4,4 +4,5 @@ catalog_path = "/app/catalog"
 flush_interval_seconds = 60
 open_interest_poll_seconds = 300
 snapshot_interval_seconds = 1.0
-instruments = ["BTCUSDT-LINEAR.BYBIT", "ETHUSDT-LINEAR.BYBIT"]
+instruments = ["BTCUSDT-LINEAR.BYBIT", "ETHUSDT-LINEAR.BYBIT",
+               "BTCUSDT-SPOT.BYBIT", "ETHUSDT-SPOT.BYBIT"]

@@ -44,6 +44,7 @@ concern) -- see this story's spec for the full rationale.
 from fastapi import APIRouter
 from pydantic import BaseModel
 
+from common.venues import market_kind
 from data_api.routes import paging
 from data_api.settings import CATALOG_PATH
 from ml_signals import catalog_stats as _catalog_stats
@@ -77,6 +78,7 @@ class IndicatorSeriesResponse(BaseModel):
     items: list[IndicatorSeriesPoint]
     has_more: bool
     venue: str
+    market: str
 
 
 def _window_start_ns(before_ns: int, limit: int, bar_seconds: int) -> int:
@@ -160,9 +162,9 @@ def get_indicator_series(
     kept = paging.fetch_page(fetch, ranges, before_ns, span_ns)[-limit:]
 
     if not kept:
-        return IndicatorSeriesResponse(items=[], has_more=False, venue=venue_of(instrument_id))
+        return IndicatorSeriesResponse(items=[], has_more=False, venue=venue_of(instrument_id), market=market_kind(instrument_id))
 
     has_more = paging.has_older_data(ranges, kept[0].t * 1_000_000)
     return IndicatorSeriesResponse(
-        items=_insert_gap_markers(kept, bar_seconds), has_more=has_more, venue=venue_of(instrument_id),
+        items=_insert_gap_markers(kept, bar_seconds), has_more=has_more, venue=venue_of(instrument_id), market=market_kind(instrument_id),
     )
