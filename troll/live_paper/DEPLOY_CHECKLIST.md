@@ -2,7 +2,7 @@
 
 Grounded in the current code: `node.py` (paper mode always uses
 `SandboxExecutionClientConfig` — no real funds reachable regardless of
-`network`), `strategy.py` (`DummyStrategy`, Story 3.2), `bot_status.py`
+`[venues.*]`), `strategy.py` (`DummyStrategy`, Story 3.2), `bot_status.py`
 (`bots:status`/`bots:control`), `config.py`, `docker-compose.yml` /
 `live_paper.dockerfile`.
 
@@ -18,7 +18,7 @@ Baseline before starting: `make test-live-paper` passes (34/34 as of writing).
 - [ ] Sanity-check `trade_size` against current instrument price ×
       min-notional — not accidentally huge or below the venue's min order
       size.
-- [ ] `starting_balances` / `account_type` give enough margin that a single
+- [ ] Each `[venues.*]` table's `starting_balances` / `account_type` give enough margin that a single
       order won't get rejected by the sandbox exec client.
 - [ ] `mkdir -p live_paper/data` **before** the first `docker compose up`/`run` for
       `live-paper`, owned by the host user. If Docker creates this bind-mount target
@@ -42,16 +42,18 @@ Baseline before starting: `make test-live-paper` passes (34/34 as of writing).
 - [ ] `make test-live-paper` inside the actual image, not just host pytest —
       catches missing deps in `troll-requirements.txt`.
 
+- [ ] Multi-venue: each bot's `instrument_id` venue suffix is DYDX, BYBIT or HYPERLIQUID; Bybit spot and linear bots may share the node (one MARGIN account fills both -- see README).
+
 ## Dry run — testnet first
 
 `SandboxExecutionClientConfig` makes paper mode 100% simulated money on
-*either* network — `network` only controls which market data the data
+*either* network — `[venues.*] environment` only controls which market data the data
 client pulls from. Testnet proves the plumbing works without real BTC price
 action driving the strategy yet. No prior testnet usage exists anywhere in
 this codebase, so treat this as unverified territory.
 
 - [ ] Make a scratch copy, e.g. `config.testnet.toml`, with
-      `network = "testnet"` (everything else the same).
+      `[venues.DYDX] environment = "testnet"` (everything else the same).
 - [ ] Run it standalone, bypassing compose's single hardcoded mount:
       ```
       docker compose --profile live-paper run --rm \
@@ -70,7 +72,7 @@ this codebase, so treat this as unverified territory.
       fields update, no errors.
 - [ ] Exercise `bots:control` start/stop against this run too (see below).
 - [ ] Tear down, delete the scratch config, move to the real `config.toml`
-      (`network = "mainnet"`) for the checks below.
+      (`[venues.DYDX] environment = "mainnet"`) for the checks below.
 
 ## First run — mainnet paper (watch it live via dozzle + Redis)
 

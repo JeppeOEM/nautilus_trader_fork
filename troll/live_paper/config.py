@@ -15,8 +15,8 @@
 """
 Live/paper-trading configuration -- a structurally isolated paper vs real-money split.
 
-Architecture AD-11: one `live_paper` process runs ONE `TradingNode` (one dYdX
-connection, one shared simulated-balance pool) hosting every configured paper bot --
+Architecture AD-11: one `live_paper` process runs ONE `TradingNode` (one data client
+and one shared simulated-balance pool per venue in use) hosting every configured paper bot --
 `PaperConfig.bots` is a tuple of `BotConfig`, one per bot, each getting its own
 `Strategy` instance and its own `bots:status`/`bots:history:*` identity. This is
 paper-only: `RealMoneyConfig` deliberately stays single-bot (its own subaccount,
@@ -44,10 +44,14 @@ closed, since load_paper_config rejects any `mode` key outright.
 
 import tomllib
 from dataclasses import dataclass
+from dataclasses import field
 from dataclasses import fields
 from decimal import Decimal
 from pathlib import Path
 
+from live_paper.venues import VENUES
+from live_paper.venues import VenueSpec
+from ml_signals.venue import venue_of
 from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
 
 
@@ -59,9 +63,10 @@ class BotConfig:
     identity via `bot_id`. `starting_balance` is a bookkeeping anchor only (feeds
     `performance_metrics.equity_returns()`'s Sharpe/Sortino calc for this bot's own
     fill history) -- it is NOT this bot's real simulated balance, since every bot in
-    one node draws from `PaperConfig.starting_balances`' single shared pool (AD-11:
-    Nautilus's ExecutionEngine allows only one exec client per venue per node, so
-    per-bot balance isolation isn't available once bots share a node).
+    one venue draw from that venue's single shared pool (AD-11: Nautilus's
+    ExecutionEngine allows only one exec client per venue per node, so per-bot balance
+    isolation isn't available once bots share a venue). Left empty it defaults to
+    10_000 of the bot's venue's paper quote currency.
     """
 
     bot_id: str
@@ -70,16 +75,32 @@ class BotConfig:
     trend_buy_threshold: float = 0.6
     trend_sell_threshold: float = 0.4
     ofi_confirm_threshold: float = 0.0
-    starting_balance: str = "10_000 USDC"
+    starting_balance: str = ""
+
+    def __post_init__(self) -> None:
+        spec = _venue_spec(venue_of(self.instrument_id))
+        if not self.starting_balance:
+            object.__setattr__(
+                self, "starting_balance", f"10_000 {spec.paper_quote_currency}"
+            )
+
+
+@dataclass(frozen=True)
+class VenuePaperConfig:
+    environment: str
+    starting_balances: tuple[str, ...]
+    account_type: str
 
 
 @dataclass(frozen=True)
 class PaperConfig:
-    network: DydxNetwork
-    starting_balances: tuple[str, ...]
-    account_type: str
     log_level: str
     bots: tuple[BotConfig, ...]
+    venues: dict[str, VenuePaperConfig] = field(default_factory=dict)
+
+    def venue_config(self, venue: str) -> VenuePaperConfig:
+        """A venue used by a bot but absent from `[venues]` gets the defaults."""
+        return self.venues.get(venue) or _parse_venue(venue, {}, Path("<defaults>"))
 
 
 @dataclass(frozen=True)
@@ -94,6 +115,12 @@ class RealMoneyConfig:
     trend_sell_threshold: float = 0.4
     ofi_confirm_threshold: float = 0.0
     bot_id: str = "bot-01"
+
+
+def _venue_spec(venue: str) -> VenueSpec:
+    if venue not in VENUES:
+        raise ValueError(f"unsupported venue {venue!r} -- supported: {sorted(VENUES)}")
+    return VENUES[venue]
 
 
 def _reject_unknown_keys(raw: dict, config_cls: type, path: Path, where: str = "") -> None:
@@ -115,6 +142,44 @@ def _parse_trade_size(raw: dict, key: str, path: Path) -> Decimal:
     return Decimal(trade_size)
 
 
+def _parse_venue(venue: str, raw: dict, path: Path) -> VenuePaperConfig:
+    spec = _venue_spec(venue)
+    _reject_unknown_keys(raw, VenuePaperConfig, path, f" in [venues.{venue}]")
+    environment = raw.get("environment", "mainnet")
+    if not isinstance(environment, str):
+        raise ValueError(f"{path}: [venues.{venue}] environment must be a string")
+    environment = environment.lower()
+    if environment not in spec.allowed_environments:
+        raise ValueError(
+            f"{path}: [venues.{venue}] environment {environment!r} not in "
+            f"{list(spec.allowed_environments)}"
+        )
+    starting_balances = raw.get("starting_balances", [f"10_000 {spec.paper_quote_currency}"])
+    if isinstance(starting_balances, str):
+        raise ValueError(
+            f"{path}: [venues.{venue}] starting_balances must be a TOML array (e.g. "
+            f'["10_000 {spec.paper_quote_currency}"]), got a bare string '
+            f"{starting_balances!r} -- a missing pair of brackets here would otherwise "
+            "silently split it into individual characters.",
+        )
+    if (
+        not isinstance(starting_balances, list)
+        or not starting_balances
+        or not all(isinstance(b, str) for b in starting_balances)
+    ):
+        raise ValueError(
+            f"{path}: [venues.{venue}] starting_balances must be a non-empty array of strings"
+        )
+    account_type = raw.get("account_type", "MARGIN")
+    if account_type not in ("MARGIN", "CASH"):
+        raise ValueError(f"{path}: [venues.{venue}] account_type must be MARGIN or CASH")
+    return VenuePaperConfig(
+        environment=environment,
+        starting_balances=tuple(starting_balances),
+        account_type=account_type,
+    )
+
+
 def _parse_bot(raw_bot: dict, path: Path) -> BotConfig:
     if "bot_id" not in raw_bot:
         raise ValueError(f"{path}: every [[bots]] entry must set bot_id")
@@ -127,7 +192,7 @@ def _parse_bot(raw_bot: dict, path: Path) -> BotConfig:
         trend_buy_threshold=raw_bot.get("trend_buy_threshold", 0.6),
         trend_sell_threshold=raw_bot.get("trend_sell_threshold", 0.4),
         ofi_confirm_threshold=raw_bot.get("ofi_confirm_threshold", 0.0),
-        starting_balance=raw_bot.get("starting_balance", "10_000 USDC"),
+        starting_balance=raw_bot.get("starting_balance", ""),
     )
 
 
@@ -143,14 +208,10 @@ def load_paper_config(path: Path) -> PaperConfig:
         )
 
     _reject_unknown_keys(raw, PaperConfig, path)
-    starting_balances = raw.get("starting_balances", ["10_000 USDC"])
-    if isinstance(starting_balances, str):
-        raise ValueError(
-            f"{path}: starting_balances must be a TOML array (e.g. "
-            f'["10_000 USDC"]), got a bare string {starting_balances!r} -- '
-            "a missing pair of brackets here would otherwise silently split it into "
-            "individual characters.",
-        )
+    raw_venues = raw.get("venues", {})
+    if not isinstance(raw_venues, dict) or not all(isinstance(v, dict) for v in raw_venues.values()):
+        raise ValueError(f"{path}: [venues] must be a table of [venues.<VENUE>] tables")
+    venues = {name: _parse_venue(name, v, path) for name, v in raw_venues.items()}
 
     raw_bots = raw.get("bots")
     if not raw_bots:
@@ -160,13 +221,7 @@ def load_paper_config(path: Path) -> PaperConfig:
     if len(bot_ids) != len(set(bot_ids)):
         raise ValueError(f"{path}: [[bots]] entries must have distinct bot_id values, got {bot_ids}")
 
-    return PaperConfig(
-        network=DydxNetwork.from_str(raw.get("network", "mainnet").lower()),  # type: ignore[attr-defined]
-        starting_balances=tuple(starting_balances),
-        account_type=raw.get("account_type", "MARGIN"),
-        log_level=raw.get("log_level", "INFO"),
-        bots=bots,
-    )
+    return PaperConfig(log_level=raw.get("log_level", "INFO"), bots=bots, venues=venues)
 
 
 def load_real_money_config(path: Path) -> RealMoneyConfig:
