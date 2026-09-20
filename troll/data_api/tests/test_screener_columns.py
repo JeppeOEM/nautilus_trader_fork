@@ -47,8 +47,8 @@ def _client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setattr(rankings_routes, "CATALOG_PATH", catalog)
     rankings_routes._technicals_cache.clear()
     monkeypatch.setattr(candles_routes, "CATALOG_PATH", catalog)  # indicator-values reads candles via this route
-    monkeypatch.setattr(candles_routes, "CANDLES_DB_PATH", f"{catalog}-no-candle-store.db")
-    monkeypatch.setattr(rankings_routes, "CANDLES_DB_PATH", f"{catalog}-no-candle-store.db")
+    monkeypatch.setattr(candles_routes, "CANDLES_DB_DIR", f"{catalog}-no-candle-store-dir")
+    monkeypatch.setattr(rankings_routes, "CANDLES_DB_DIR", f"{catalog}-no-candle-store-dir")
     return TestClient(app_module.app)
 
 
@@ -312,8 +312,8 @@ def test_values_come_from_the_candle_store_without_touching_parquet(
 
     _ranked(monkeypatch, _IID)
     client = _client(tmp_path, monkeypatch)  # no Parquet catalog exists at all
-    db_path = str(tmp_path / "candles.db")
-    monkeypatch.setattr(rankings_routes, "CANDLES_DB_PATH", db_path)
+    db_path = str(tmp_path / "candles" / "candles_dydx.db")
+    monkeypatch.setattr(rankings_routes, "CANDLES_DB_DIR", str(tmp_path / "candles"))
     db = candle_store.connect_rw(db_path)
     now_minute = int(time.time()) // 60 * 60 * 1000
     rows = []

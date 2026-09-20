@@ -26,21 +26,23 @@ import os
 import time
 import tomllib
 from pathlib import Path
-from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel
-
-from data_api import redis_bus
-from data_api.routes import indicators as _indicators
-from data_api.settings import CANDLES_DB_PATH
-from data_api.settings import CATALOG_PATH
+from fastapi import APIRouter
+from fastapi import HTTPException
+from fastapi import Request
 from ml_signals import candle_store
 from ml_signals import catalog_stats as _catalog_stats
 from ml_signals import custom_indicators
 from ml_signals import error_ledger
 from ml_signals import screener_columns_config
 from ml_signals.candles import candle_dicts_from_snapshots
+from ml_signals.venue import venue_of
+from pydantic import BaseModel
+
+from data_api import redis_bus
+from data_api.routes import indicators as _indicators
+from data_api.settings import CANDLES_DB_DIR
+from data_api.settings import CATALOG_PATH
 
 
 router = APIRouter()
@@ -182,7 +184,8 @@ def _recent_candles(instrument_id: str, bar_seconds: int, now_ns: int) -> list[d
     """Newest candles for one bar size: the SQLite candle store when it holds the coin (no Parquet
     I/O), else the slow archive read."""
     try:
-        with candle_store.connect_ro(CANDLES_DB_PATH) as db:
+        store = Path(CANDLES_DB_DIR) / f"candles_{venue_of(instrument_id).lower()}.db"
+        with candle_store.connect_ro(str(store)) as db:
             if db is not None:
                 stored = candle_store.window(db, instrument_id, bar_seconds, 1 << 62, _TECHNICALS_STORE_BARS)
                 if stored:

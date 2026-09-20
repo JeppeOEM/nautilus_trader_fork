@@ -278,7 +278,7 @@ development_status:
   epic-21-retrospective: optional
 
   epic-22: in-progress
-  22-1-troll-collector-core-extracted-from-the-bybit-and-hyperliquid-collectors: ready-for-dev
+  22-1-troll-collector-core-extracted-from-the-bybit-and-hyperliquid-collectors: awaiting-operator
   22-2-dydx-collector-onto-the-core: ready-for-dev
   22-3-shared-data-types-and-a-single-openinterest: ready-for-dev
   22-4-bybit-spot-collection-and-explicit-perp-spot-everywhere: ready-for-dev

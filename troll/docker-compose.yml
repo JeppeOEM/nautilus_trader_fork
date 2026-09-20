@@ -35,7 +35,7 @@ services:
     environment:
       PYTHONUNBUFFERED: "1"
       REDIS_URL: "redis://127.0.0.1:${REDIS_PORT:-6379}"
-      CANDLES_DB_PATH: "/app/candles_dir/candles.db"
+      CANDLES_DB_PATH: "/app/candles_dir/candles_dydx.db"
       # Push alert (ntfy.sh-compatible) when every subscribed instrument's book goes
       # stale for 30s+ -- see OBS-01 in CLAUDE.md. Unset means log-only (no push).
       # WATCHDOG_NTFY_URL: "https://ntfy.sh/your-private-topic-here"
@@ -70,11 +70,16 @@ services:
     environment:
       PYTHONUNBUFFERED: "1"
       BYBIT_COLLECTOR_CONFIG: "/app/bybit_config.toml"
+      REDIS_URL: "redis://127.0.0.1:${REDIS_PORT:-6379}"
+      CANDLES_DB_PATH: "/app/candles_dir/candles_bybit.db"
+      # OBS-01 push alert (ntfy.sh-compatible); unset means log-only. See the dYdX service.
+      # WATCHDOG_NTFY_URL: "https://ntfy.sh/your-private-topic-here"
     user: "1000:1000"
     volumes:
       - ./bybit_collector/config.toml:/app/bybit_config.toml:ro
       # Same catalog root as the dYdX collector (Story 19.2): data_api serves both.
       - ./dydx_collector/catalog:/app/catalog
+      - ./dydx_collector/candles:/app/candles_dir
     network_mode: host
     restart: always
     logging: *default-logging
@@ -89,11 +94,15 @@ services:
     environment:
       PYTHONUNBUFFERED: "1"
       HYPERLIQUID_COLLECTOR_CONFIG: "/app/hyperliquid_config.toml"
+      REDIS_URL: "redis://127.0.0.1:${REDIS_PORT:-6379}"
+      CANDLES_DB_PATH: "/app/candles_dir/candles_hyperliquid.db"
+      # WATCHDOG_NTFY_URL: "https://ntfy.sh/your-private-topic-here"
     user: "1000:1000"
     volumes:
       - ./hyperliquid_collector/config.toml:/app/hyperliquid_config.toml:ro
       # Same catalog root as the dYdX collector (Story 19.2): data_api serves both.
       - ./dydx_collector/catalog:/app/catalog
+      - ./dydx_collector/candles:/app/candles_dir
     network_mode: host
     restart: always
     logging: *default-logging
@@ -139,7 +148,7 @@ services:
       REDIS_URL: "redis://127.0.0.1:${REDIS_PORT:-6379}"
       CATALOG_PATH: "/app/catalog"
       METRICS_DB_PATH: "/app/metrics_dir/metrics.db"
-      CANDLES_DB_PATH: "/app/candles_dir/candles.db"
+      CANDLES_DB_DIR: "/app/candles_dir"
       CHART_INDICATOR_CONFIG_PATH: *chart-indicator-config-path
       SCREENER_COLUMNS_CONFIG_PATH: "/app/ml_signals/screener_columns.toml"
       ALERTS_PATH: "/app/data_api/alerts.toml"

@@ -91,6 +91,12 @@ class BybitClient:
         await self._ws.subscribe_orderbook(iid, ORDERBOOK_DEPTH)
         await self._ws.subscribe_ticker(iid)  # mark/index price + funding rate
 
+    async def unsubscribe(self, instrument_id: str) -> None:
+        iid = nautilus_pyo3.InstrumentId.from_str(instrument_id)
+        await self._ws.unsubscribe_trades(iid)
+        await self._ws.unsubscribe_orderbook(iid, ORDERBOOK_DEPTH)
+        await self._ws.unsubscribe_ticker(iid)
+
     async def resync_orderbook(self, instrument_id: str) -> None:
         """Unsubscribe + resubscribe the book: Bybit answers with a fresh snapshot (Clear + levels)."""
         iid = nautilus_pyo3.InstrumentId.from_str(instrument_id)

@@ -50,7 +50,7 @@ def _client(
     )
     catalog = catalog_path or str(tmp_path / "cat")
     monkeypatch.setattr(candles_routes, "CATALOG_PATH", catalog)  # indicator-values reads candles via this route
-    monkeypatch.setattr(candles_routes, "CANDLES_DB_PATH", f"{catalog}-no-candle-store.db")
+    monkeypatch.setattr(candles_routes, "CANDLES_DB_DIR", f"{catalog}-no-candle-store-dir")
     return TestClient(app_module.app)
 
 

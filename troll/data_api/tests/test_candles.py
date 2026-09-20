@@ -41,7 +41,7 @@ assert _BASE_NS % 60_000_000_000 == 0
 def _client(catalog_path: str, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setattr(candles_routes, "CATALOG_PATH", catalog_path)
     # No candle store unless a test builds one: these tests exercise the Parquet path.
-    monkeypatch.setattr(candles_routes, "CANDLES_DB_PATH", f"{catalog_path}-no-candle-store.db")
+    monkeypatch.setattr(candles_routes, "CANDLES_DB_DIR", f"{catalog_path}-no-candle-store-dir")
     return TestClient(app_module.app)
 
 
@@ -303,8 +303,8 @@ def test_invalid_candle_fails_the_request_loudly(tmp_path: Path, monkeypatch: py
 def _store_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, minutes: range) -> TestClient:
     catalog_path = str(tmp_path / "catalog")
     client = _client(catalog_path, monkeypatch)
-    db_path = str(tmp_path / "candles.db")
-    monkeypatch.setattr(candles_routes, "CANDLES_DB_PATH", db_path)
+    db_path = str(tmp_path / "candles" / "candles_dydx.db")
+    monkeypatch.setattr(candles_routes, "CANDLES_DB_DIR", str(tmp_path / "candles"))
     db = candle_store.connect_rw(db_path)
     candle_store.apply_seconds(db, _IID, [_second(m * 60, 100.0 + m) for m in minutes])  # one trade per minute
     return client

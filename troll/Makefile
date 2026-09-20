@@ -142,7 +142,7 @@ build-insecure:
 ## around it with -e USER; mirror that here.
 test:
 	$(COMPOSE) run --rm --no-deps -e HOME=/tmp -e USER=collector collector \
-		python3 -m pytest dydx_collector/tests bybit_collector/tests hyperliquid_collector/tests common/tests ml_signals/tests ranking_engine/tests bot_tui/tests data_api/tests -q
+		python3 -m pytest collector_core/tests dydx_collector/tests bybit_collector/tests hyperliquid_collector/tests common/tests ml_signals/tests ranking_engine/tests bot_tui/tests data_api/tests -q
 
 ## Merge yesterday's (and any older closed day's) minute-sized Parquet files into one file per
 ## (data type, coin) -- audit D-36: without this the catalog grows ~1,440 files per coin per type
@@ -157,7 +157,7 @@ consolidate:
 ## and --include-open-day is added.
 build-candles:
 	$(COMPOSE) run --rm --no-deps -e HOME=/tmp collector \
-		python3 -m dydx_collector.build_candles --catalog /app/catalog --db /app/candles_dir/candles.db
+		python3 -m dydx_collector.build_candles --catalog /app/catalog --db /app/candles_dir/candles_dydx.db
 
 ## Launch the bot_tui terminal UI (Story 4.1) -- an interactive urwid app, not a
 ## daemon, so it's run via `docker compose run` (never `up -d`) and gated behind the

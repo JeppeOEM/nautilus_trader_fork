@@ -473,7 +473,7 @@ class Collector:
         # Derived candle store for the UI (the catalog stays the archive): the collector is its
         # single writer, fed by each flush of second snapshots. Rebuildable via build_candles.
         self._candle_db = candle_store.connect_rw(
-            os.environ.get("CANDLES_DB_PATH", str(catalog_path.parent / "candles" / "candles.db"))
+            os.environ.get("CANDLES_DB_PATH", str(catalog_path.parent / "candles" / "candles_dydx.db"))
         )
 
         self._client = DydxClient(on_data=self._on_data, network=config.network)

@@ -26,13 +26,15 @@ and the `has_more` probe.
 `app.py`, which imports them).
 """
 
+from pathlib import Path
+
 from fastapi import APIRouter
 from fastapi import HTTPException
 from pydantic import BaseModel
 
 from data_api import live_candles
 from data_api.routes import paging
-from data_api.settings import CANDLES_DB_PATH
+from data_api.settings import CANDLES_DB_DIR
 from data_api.settings import CATALOG_PATH
 from ml_signals import candle_store
 from ml_signals import catalog_stats as _catalog_stats
@@ -157,6 +159,10 @@ def _parquet_page(instrument_id: str, before_ns: int, limit: int, bar_seconds: i
     return kept, bool(kept) and paging.has_older_data(ranges, kept[0]["t"] * 1_000_000)
 
 
+def _store_path(instrument_id: str) -> str:
+    return str(Path(CANDLES_DB_DIR) / f"candles_{venue_of(instrument_id).lower()}.db")
+
+
 def _store_page(
     instrument_id: str, before_ns: int, limit: int, bar_seconds: int
 ) -> tuple[list[dict], bool, int | None]:
@@ -165,7 +171,7 @@ def _store_page(
     nothing for this coin."""
     if bar_seconds not in candle_store.BAR_SECONDS:
         return [], False, None
-    with candle_store.connect_ro(CANDLES_DB_PATH) as db:
+    with candle_store.connect_ro(_store_path(instrument_id)) as db:
         if db is None:
             return [], False, None
         kept = candle_store.window(db, instrument_id, bar_seconds, before_ns // 1_000_000, limit)

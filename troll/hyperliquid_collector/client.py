@@ -77,6 +77,15 @@ class HyperliquidClient:
         await self._ws.subscribe_funding_rates(iid)
         await self._ws.subscribe_open_interest(iid)
 
+    async def unsubscribe(self, instrument_id: str) -> None:
+        iid = nautilus_pyo3.InstrumentId.from_str(instrument_id)
+        await self._ws.unsubscribe_trades(iid)
+        await self._ws.unsubscribe_book(iid)
+        await self._ws.unsubscribe_mark_prices(iid)
+        await self._ws.unsubscribe_index_prices(iid)
+        await self._ws.unsubscribe_funding_rates(iid)
+        await self._ws.unsubscribe_open_interest(iid)  # type: ignore[attr-defined]
+
     def _handle_message(self, message: object) -> None:
         # Trades/book/mark/index arrive as PyCapsules; funding as a pyo3 object; open
         # interest as a pyo3 CustomData wrapper (mirrors nautilus_trader/adapters/hyperliquid/data.py).
