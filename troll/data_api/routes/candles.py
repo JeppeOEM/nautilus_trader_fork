@@ -38,7 +38,6 @@ from ml_signals import candle_store
 from ml_signals import catalog_stats as _catalog_stats
 from ml_signals import error_ledger
 from ml_signals.candles import candle_dicts_for_window
-from ml_signals.candles import choose_candle_source
 from ml_signals.candles import is_valid_candle
 from ml_signals.venue import venue_of
 
@@ -71,11 +70,6 @@ _MIN_QUERY_WINDOW_SECONDS = 3600
 # 1-second snapshots, defeating the bounded-read guarantee this route exists to provide.
 _MAX_QUERY_SPAN_SECONDS = 7 * 86_400
 
-# Wide bars (> ROLLUP_THRESHOLD_SECONDS) read the minute rollup (1/60th the rows), so the
-# same MEM-01 bound can span longer -- but it also bounds the raw-1s fallback the dispatch
-# uses before the rollup's first row, so it stays a fixed cap, not open-ended.
-_MAX_ROLLUP_QUERY_SPAN_SECONDS = 30 * 86_400
-
 router = APIRouter()
 
 
@@ -106,15 +100,10 @@ class CandlesResponse(BaseModel):
 
 
 def _window_start_ns(before_ns: int, limit: int, bar_seconds: int) -> int:
-    cap = (
-        _MAX_ROLLUP_QUERY_SPAN_SECONDS
-        if choose_candle_source(bar_seconds) == "rollup_1m"
-        else _MAX_QUERY_SPAN_SECONDS
-    )
     span_seconds = limit * bar_seconds * _QUERY_WINDOW_MULTIPLIER
     if bar_seconds < 60:
         span_seconds = max(span_seconds, _MIN_QUERY_WINDOW_SECONDS)
-    span_seconds = min(span_seconds, cap)
+    span_seconds = min(span_seconds, _MAX_QUERY_SPAN_SECONDS)
     return before_ns - span_seconds * 1_000_000_000
 
 
@@ -158,14 +147,11 @@ def _parquet_page(instrument_id: str, before_ns: int, limit: int, bar_seconds: i
                 end_ns,
                 bar_seconds,
                 snapshot_rows_fn=_catalog_plus_recent,
-                rollup_rows_fn=lambda i, a, b: _catalog_stats.query_minute_rollups(CATALOG_PATH, i, a, b),
             )
             if c["t"] < before_ms and _checked(instrument_id, bar_seconds, c)
         ]
 
-    ranges = _catalog_stats.data_file_ranges(
-        CATALOG_PATH, instrument_id, include_rollups=choose_candle_source(bar_seconds) == "rollup_1m",
-    )
+    ranges = _catalog_stats.data_file_ranges(CATALOG_PATH, instrument_id)
     span_ns = before_ns - _window_start_ns(before_ns, limit, bar_seconds)
     kept = paging.fetch_page(fetch, ranges, before_ns, span_ns)[-limit:]
     return kept, bool(kept) and paging.has_older_data(ranges, kept[0]["t"] * 1_000_000)

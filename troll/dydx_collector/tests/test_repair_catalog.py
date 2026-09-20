@@ -1,10 +1,10 @@
 from pathlib import Path
 
-from dydx_collector.minute_rollup import MinuteRollupBuilder
+from dydx_collector.build_candles import rebuild_instrument
 from dydx_collector.repair_catalog import find_impossible_snapshots
 from dydx_collector.repair_catalog import repair_instrument
 from dydx_collector.second_snapshot import DydxSecondSnapshot
-from ml_signals.catalog_stats import query_minute_rollups
+from ml_signals import candle_store
 from ml_signals.catalog_stats import query_second_snapshots
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
@@ -26,24 +26,25 @@ def _snap(second: int, high: float | None = None, low: float | None = None) -> D
     )
 
 
-def test_spike_snapshot_is_cleared_and_its_rollup_regenerated(tmp_path: Path) -> None:
-    catalog = ParquetDataCatalog(str(tmp_path))
-    # 3 minutes of 1s data; the spike sits in the middle minute, so its rollup closes.
+def test_spike_snapshot_is_cleared_and_its_candle_rebuilt(tmp_path: Path) -> None:
+    catalog = ParquetDataCatalog(str(tmp_path / "cat"))
+    catalog_path = str(tmp_path / "cat")
+    # 3 minutes of 1s data; the spike sits in the middle minute, which is otherwise untraded.
     snaps = [_snap(s) for s in range(180)]
     snaps[70] = _snap(70, high=150.0, low=50.0)
     catalog.write_data(snaps)
-    builder = MinuteRollupBuilder()
-    rollups = [r for s in snaps if (r := builder.update(_IID, s)) is not None]
-    catalog.write_data(rollups)
+    db_path = str(tmp_path / "candles.db")
+    rebuild_instrument(db_path, catalog_path, _IID, _T0, _T0 + 200 * _SEC)
+    db = candle_store.connect_rw(db_path)
+    assert [c["h"] for c in candle_store.window(db, _IID, 60, 1 << 62, 10)] == [150.0]  # the spike is in the store
 
-    flagged = find_impossible_snapshots(str(tmp_path), _IID, _T0, _T0 + 200 * _SEC)
+    flagged = find_impossible_snapshots(catalog_path, _IID, _T0, _T0 + 200 * _SEC)
     assert [f.ts_event for f in flagged] == [_T0 + 70 * _SEC]
 
-    repair_instrument(catalog, str(tmp_path), _IID, flagged)
+    repair_instrument(catalog, catalog_path, _IID, flagged, db_path)
 
-    assert find_impossible_snapshots(str(tmp_path), _IID, _T0, _T0 + 200 * _SEC) == []
-    rows = query_second_snapshots(str(tmp_path), _IID, _T0, _T0 + 200 * _SEC)
+    assert find_impossible_snapshots(catalog_path, _IID, _T0, _T0 + 200 * _SEC) == []
+    rows = query_second_snapshots(catalog_path, _IID, _T0, _T0 + 200 * _SEC)
     assert len(rows) == 180
     assert all(r.high_price is None for r in rows)
-    rebuilt = {r.ts_event: r for r in query_minute_rollups(str(tmp_path), _IID, _T0, _T0 + 200 * _SEC)}
-    assert rebuilt[_T0 + 60 * _SEC].high is None
+    assert candle_store.window(db, _IID, 60, 1 << 62, 10) == []  # no trade left in that minute

@@ -1,5 +1,5 @@
-// Spec §A8.1 slot 2: the top toolbar's timeframe selector. Bars > 1h are served from the
-// minute rollup server-side (Story 16.2), so 4H/1D/1W stay cheap. No 1s: a 1s bar exists
+// Spec §A8.1 slot 2: the top toolbar's timeframe selector. Every bar size is served from the
+// server's SQLite candle store, so 4H/1D/1W are as cheap as 1m. No 1s: a 1s bar exists
 // only for a second with a trade and dYdX delivers trades 1-3 s late, so it read as a
 // frozen, time-nonlinear chart (see spec-21-x-candlestick-chart-correctness.md's backlog).
 export const TIMEFRAMES = [

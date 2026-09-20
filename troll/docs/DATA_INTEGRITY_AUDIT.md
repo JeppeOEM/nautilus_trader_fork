@@ -58,9 +58,9 @@ Status: **FIXED** (code + test), **GUARDED** (canary/detection, cause outside ou
 
 | ID | Danger | Treatment | Status |
 |----|--------|-----------|--------|
-| D-14 | Restart loses the minute in progress; first minute of a mid-minute start is not emitted | Idempotent `backfill_minute_rollup` (DATA-05) | DOCUMENTED |
+| D-14 | Restart loses the minute in progress; first minute of a mid-minute start is not emitted | Idempotent `backfill_minute_rollup` (DATA-05) | SUPERSEDED (D-35): rollups retired; the store has no minute-close seam |
 | D-15 | Rollup `partial_start` does not cover gap-created partial minutes | Epic-17 review ledger. With restarts every ~20 min this is hit often, so wide candles can be understated at gaps | MITIGATED (Story 21.1/21.2): rollup-sourced candles carry `partial: true` when observed < 90% of their span (`ml_signals.candles.PARTIAL_OBSERVED_FRACTION`). Not a fix: the missing seconds stay missing; the flag is on the wire only, the frontend does not draw it differently (ANSI 16-colour palette) |
-| D-16 | A rollup inherits any bad raw row | `repair_catalog` regenerates affected minutes | FIXED once D-03 is run |
+| D-16 | A rollup inherits any bad raw row | `repair_catalog` regenerates affected minutes | SUPERSEDED (D-35): `repair_catalog --candles-db` rebuilds the affected days in the store |
 | D-17 | Non-atomic `screener_columns.toml` write; technicals params unvalidated | Epic-17 ledger | OPEN (low; not market data) |
 
 ### Read path / presentation
@@ -106,6 +106,14 @@ React chart's own props to prove the frontend holds what the API served.
 | D-34 | Volume histogram "missing bars" / 1m bars "that are only a line" | Not loss. dYdX volume is tiny now (indexer 24h: ETH 2654 trades = 1.8/min, BTC 1.1/min, SOL 0.5/min; 135 of 200 BTC minutes had 0 trades), so a 1m bucket with one trade is a genuine o=h=l=c bar (ETH dojis: ours 25 vs indexer 24 over the same minutes). lightweight-charts draws a bar shorter than 1 px as a 1 px tick on the baseline (`PaneRendererHistogram`), so 0.002 ETH next to a 120 ETH bar is invisible. CDP read of the chart's props: volume bars == real candles (148/148 VPS, 240/240 local); last candle == API's last. | None needed for correctness. If wanted: log-scale the volume pane, or a per-bar min height (custom primitive) | DOCUMENTED |
 | D-05 | (update) BONK book still unparseable | VPS 24 h: 4433 `Failed to parse orderbook deltas for BONK-USD … exceeds QUANTITY_RAW_MAX`; local 3 h: 2315. BONK `/api/candles` on the VPS: empty. | Unchanged: exclude BONK (and any coin whose level sizes exceed ~3.4e13 units) | OPEN |
 
+### Found 2026-09-20 — candle store (Parquet was the read path)
+
+| ID | Danger | Treatment | Status |
+|----|--------|-----------|--------|
+| D-35 | **Minute rollups retired.** Every candle read re-opened thousands of tiny Parquet files (~0.5 ms/file regardless of rows; one file per coin per flush), and the rollup did not help: same file count, 60x fewer rows. | Finished 1m..1D bars now live in SQLite (`candles.db`, `ml_signals/candle_store.py`), fed from raw 1s by the collector at :02/:32 past each minute and rebuilt with `python -m dydx_collector.build_candles`. `minute_rollup.py`, `backfill_minute_rollup.py`, the rollup read paths and `/catalog/candles` are deleted. **Existing rollup files are now unused: delete `<catalog>/data/custom_dydx_minute_rollup/` by hand when convenient (nothing reads it; the code never runs this).** | FIXED (undeployed) |
+| D-36 | **Parquet file count grows without bound**: one file per coin per data type per 60 s flush, about coins x types x 1,440 per day (locally 155k files in ~19 days; a VPS running 24/7 would reach inode limits in weeks, and backup/rsync/rclone/listing cost scales with file count). | `python -m dydx_collector.consolidate_catalog --catalog … --apply` (`make consolidate`, nightly cron): merges each closed UTC day into one file per (type, instrument) with plain pyarrow -- Nautilus's `consolidate_data_by_period` is NotImplemented for `MarkPriceUpdate`/`IndexPriceUpdate`/`FundingRateUpdate` and deletes sources before any check -- one schema per day or refused (D-24), row count verified before sources are deleted, interrupted runs self-heal, today untouched. **Local copy trial (BTC, 5 types, 97 closed days): 7.7 s, 9,007 -> 351 files, 61 -> 21 MB; `query_second_ohlc` rows on closed days identical before/after (168,771 = 168,771, every field; today's files untouched).** VPS: NOT measured (Story 22.11). Existing history must be consolidated once; then nightly. | FIX WRITTEN; OPEN until scheduled on the VPS |
+| D-37 | The store is fed every 30 s and can be ahead of the archive by up to that after a crash; the forming bar is up to 30 s stale (the live WebSocket bar covers it). | Documented in DATA-05; `build_candles` for the affected day drops seconds the archive lacks | DOCUMENTED |
+
 ## 3. Conclusions
 
 1. The spike candles were an **ingestion bug of ours**, not market data: the venue sends
@@ -128,5 +136,7 @@ React chart's own props to prove the frontend holds what the API served.
 3. Unsubscribe BONK via `collector:control` (D-05).
 4. `python -m dydx_collector.repair_catalog --catalog /app/catalog` — read the report;
    then `--apply` (D-03). Back up `catalog/` first: it rewrites parquet files.
-5. Watch logs for `Dropped subscribe-time trade history`, `Dropped duplicate trades`, and
+5. After the first deploy of the candle store: `make build-candles` (populates `candles.db` from the raw 1s archive; until then charts and technicals fall back to the slow Parquet path). Re-run after `repair_catalog --apply` for the repaired days, or run `repair_catalog` with `--candles-db`.
+6. Schedule `make consolidate` nightly (D-36) and run it once by hand for existing history; then delete `<catalog>/data/custom_dydx_minute_rollup/` (D-35, unused).
+7. Watch logs for `Dropped subscribe-time trade history`, `Dropped duplicate trades`, and
    `IMPOSSIBLE trade OHLC` (must stay absent).

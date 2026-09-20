@@ -29,9 +29,12 @@ not; a bucket row exists for every bucket a snapshot touched. Reads only return 
 import contextlib
 import sqlite3
 import time
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+
+import numpy as np
 
 from ml_signals.candles import PARTIAL_OBSERVED_FRACTION
 
@@ -72,18 +75,22 @@ ON CONFLICT(instrument_id, bar_seconds, t) DO UPDATE SET
 
 
 def connect_rw(path: str) -> sqlite3.Connection:
-    """The writer's connection (collector, rebuild CLI): creates the file and schema."""
+    """Open the writer's connection (collector, rebuild CLI), creating the file and schema."""
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(path, check_same_thread=False)
+    db = sqlite3.connect(
+        path, check_same_thread=False, timeout=60.0
+    )  # rebuild workers share the file
     db.execute("PRAGMA journal_mode=WAL")
-    db.execute("PRAGMA synchronous=NORMAL")  # WAL + NORMAL: no fsync per commit; a crash loses at most the last commits, rebuildable
+    db.execute(
+        "PRAGMA synchronous=NORMAL"
+    )  # WAL + NORMAL: no fsync per commit; a crash loses at most the last commits, rebuildable
     db.executescript(_SCHEMA)
     return db
 
 
 @contextlib.contextmanager
 def connect_ro(path: str) -> Iterator[sqlite3.Connection | None]:
-    """A reader's connection; None when the store does not exist yet (callers fall back)."""
+    """Open a read-only connection; yields None when the store does not exist yet (callers fall back)."""
     if not Path(path).exists():
         yield None
         return
@@ -95,24 +102,77 @@ def connect_ro(path: str) -> Iterator[sqlite3.Connection | None]:
 
 
 def _fold(rows: Iterable[Any]) -> dict[tuple[int, int], list]:
-    """(bar_seconds, bucket_start_ms) -> [o, h, l, c, volume, seconds_observed], for rows sorted by
-    ts_event that carry ts_event (ns), open/high/low/close_price (None = no trade that second) and
-    buy_volume/sell_volume: a `DydxSecondSnapshot` or a `SecondOHLC`."""
+    """
+    (bar_seconds, bucket_start_ms) -> [o, h, l, c, volume, seconds_observed], for rows that carry
+    ts_event (ns), open/high/low/close_price (None = no trade that second) and buy_volume/
+    sell_volume: a `DydxSecondSnapshot` or a `SecondOHLC`. Any order.
+    """
+    rows = list(rows)
+    if not rows:
+        return {}
+    nan = float("nan")
+    return fold_arrays(
+        np.fromiter((r.ts_event // 1_000_000 for r in rows), dtype=np.int64, count=len(rows)),
+        np.fromiter(
+            (nan if r.open_price is None else r.open_price for r in rows),
+            dtype=np.float64,
+            count=len(rows),
+        ),
+        np.fromiter(
+            (nan if r.high_price is None else r.high_price for r in rows),
+            dtype=np.float64,
+            count=len(rows),
+        ),
+        np.fromiter(
+            (nan if r.low_price is None else r.low_price for r in rows),
+            dtype=np.float64,
+            count=len(rows),
+        ),
+        np.fromiter(
+            (nan if r.close_price is None else r.close_price for r in rows),
+            dtype=np.float64,
+            count=len(rows),
+        ),
+        np.fromiter(
+            (r.buy_volume + r.sell_volume for r in rows), dtype=np.float64, count=len(rows)
+        ),
+    )
+
+
+def fold_arrays(
+    ts_ms: np.ndarray,
+    o: np.ndarray,
+    h: np.ndarray,
+    low: np.ndarray,
+    c: np.ndarray,
+    v: np.ndarray,
+) -> dict[tuple[int, int], list]:
+    """
+    Vectorised `_fold` over column arrays (NaN = no trade that second). One aggregation for the
+    live feed and the rebuild alike.
+    """
+    order = np.argsort(ts_ms, kind="stable")
+    ts_ms, o, h, low, c, v = (a[order] for a in (ts_ms, o, h, low, c, v))
+    traded = ~np.isnan(c)
     acc: dict[tuple[int, int], list] = {}
-    for r in rows:
-        ms = r.ts_event // 1_000_000
-        traded = r.close_price is not None
-        for bar in BAR_SECONDS:
-            a = acc.setdefault((bar, ms // (bar * 1000) * (bar * 1000)), [None, None, None, None, 0.0, 0])
-            a[5] += 1
-            if not traded:
-                continue
-            if a[0] is None:
-                a[0] = r.open_price
-            a[1] = r.high_price if a[1] is None else max(a[1], r.high_price)
-            a[2] = r.low_price if a[2] is None else min(a[2], r.low_price)
-            a[3] = r.close_price
-            a[4] += r.buy_volume + r.sell_volume
+    for bar in BAR_SECONDS:
+        bar_ms = bar * 1000
+        bucket = ts_ms // bar_ms * bar_ms
+        keys, counts = np.unique(bucket, return_counts=True)
+        for k, n in zip(keys.tolist(), counts.tolist(), strict=True):
+            acc[(bar, k)] = [None, None, None, None, 0.0, n]
+        if not traded.any():
+            continue
+        tb, to, th, tl, tc, tv = (a[traded] for a in (bucket, o, h, low, c, v))
+        t_starts = np.unique(tb, return_index=True)[1]
+        t_ends = np.append(t_starts[1:], len(tb)) - 1
+        for a_, z in zip(t_starts.tolist(), t_ends.tolist(), strict=True):
+            entry = acc[(bar, int(tb[a_]))]
+            entry[0] = float(to[a_])
+            entry[1] = float(th[a_ : z + 1].max())
+            entry[2] = float(tl[a_ : z + 1].min())
+            entry[3] = float(tc[z])
+            entry[4] = float(tv[a_ : z + 1].sum())
     return acc
 
 
@@ -121,37 +181,65 @@ def _write(db: sqlite3.Connection, iid: str, acc: dict[tuple[int, int], list]) -
         db.execute(_UPSERT, (iid, bar, t, o, h, low, c, v, secs))
 
 
-def apply_seconds(db: sqlite3.Connection, iid: str, rows: Iterable[Any]) -> int:
-    """Fold seconds into every bar size, each second exactly once: rows at or before the
-    instrument's watermark were already applied (a replayed flush) and are skipped. A hole filled
-    into the archive later is left to `rebuild`. Returns the number of seconds applied."""
-    with db:
-        row = db.execute("SELECT through_ns FROM built_through WHERE instrument_id = ?", (iid,)).fetchone()
-        mark = row[0] if row is not None else -1
-        fresh = sorted((r for r in rows if r.ts_event > mark), key=lambda r: r.ts_event)
-        if not fresh:
-            return 0
-        _write(db, iid, _fold(fresh))
-        db.execute("INSERT OR REPLACE INTO built_through VALUES(?, ?)", (iid, fresh[-1].ts_event))
+def _apply_locked(db: sqlite3.Connection, iid: str, rows: Iterable[Any]) -> int:
+    """`apply_seconds`' body; the caller owns the transaction."""
+    row = db.execute(
+        "SELECT through_ns FROM built_through WHERE instrument_id = ?", (iid,)
+    ).fetchone()
+    mark = row[0] if row is not None else -1
+    fresh = sorted((r for r in rows if r.ts_event > mark), key=lambda r: r.ts_event)
+    if not fresh:
+        return 0
+    _write(db, iid, _fold(fresh))
+    db.execute("INSERT OR REPLACE INTO built_through VALUES(?, ?)", (iid, fresh[-1].ts_event))
     return len(fresh)
 
 
+def apply_seconds(db: sqlite3.Connection, iid: str, rows: Iterable[Any]) -> int:
+    """
+    Fold seconds into every bar size, each second exactly once: rows at or before the
+    instrument's watermark were already applied (a replayed batch) and are skipped. A hole filled
+    into the archive later is left to `rebuild`. Returns the number of seconds applied.
+    """
+    with db:
+        return _apply_locked(db, iid, rows)
+
+
+def apply_batch(db: sqlite3.Connection, batches: dict[str, list[Any]]) -> int:
+    """
+    `apply_seconds` for many instruments in ONE transaction (one commit instead of one per coin:
+    the live feed's shape). Returns the total number of seconds applied.
+    """
+    with db:
+        return sum(_apply_locked(db, iid, rows) for iid, rows in batches.items())
+
+
 def rebuild(
-    db: sqlite3.Connection, iid: str, rows: Iterable[Any], start_ms: int, end_ms: int,
+    db: sqlite3.Connection,
+    iid: str,
+    rows: Iterable[Any],
+    start_ms: int,
+    end_ms: int,
     allow_open_day: bool = False,
 ) -> int:
-    """Recompute every bucket in whole UTC days covering [start_ms, end_ms) from `rows` (all of that
+    """
+    Recompute every bucket in whole UTC days covering [start_ms, end_ms) from `rows` (all of that
     instrument's seconds in those days, any order). Idempotent. Whole days, so no bucket is
     half-rebuilt. Today is excluded unless `allow_open_day` (only safe with the collector stopped):
     seconds the collector applied but the archive has not flushed yet would be deleted and lost.
-    Returns the number of seconds applied."""
+    Returns the number of seconds applied.
+    """
     lo = start_ms // _DAY_MS * _DAY_MS
     hi = -(-end_ms // _DAY_MS) * _DAY_MS
     if not allow_open_day:
         hi = min(hi, int(time.time() * 1000) // _DAY_MS * _DAY_MS)
-    seconds = sorted((r for r in rows if lo <= r.ts_event // 1_000_000 < hi), key=lambda r: r.ts_event)
+    seconds = sorted(
+        (r for r in rows if lo <= r.ts_event // 1_000_000 < hi), key=lambda r: r.ts_event
+    )
     with db:
-        db.execute("DELETE FROM candles WHERE instrument_id = ? AND t >= ? AND t < ?", (iid, lo, hi))
+        db.execute(
+            "DELETE FROM candles WHERE instrument_id = ? AND t >= ? AND t < ?", (iid, lo, hi)
+        )
         _write(db, iid, _fold(seconds))
         if seconds:
             db.execute(
@@ -162,10 +250,47 @@ def rebuild(
     return len(seconds)
 
 
+def rebuild_from_arrays(
+    db: sqlite3.Connection,
+    iid: str,
+    cols: dict[str, np.ndarray],
+    start_ms: int,
+    end_ms: int,
+    allow_open_day: bool = False,
+) -> int:
+    """
+    `rebuild` over column arrays (`ts_ms`, `o`, `h`, `l`, `c`, `v`; NaN = no trade), as the
+    rebuild CLI reads them straight out of Parquet without per-row Python objects.
+    """
+    lo = start_ms // _DAY_MS * _DAY_MS
+    hi = -(-end_ms // _DAY_MS) * _DAY_MS
+    if not allow_open_day:
+        hi = min(hi, int(time.time() * 1000) // _DAY_MS * _DAY_MS)
+    keep = (cols["ts_ms"] >= lo) & (cols["ts_ms"] < hi)
+    ts_ms = cols["ts_ms"][keep]
+    with db:
+        db.execute(
+            "DELETE FROM candles WHERE instrument_id = ? AND t >= ? AND t < ?", (iid, lo, hi)
+        )
+        if len(ts_ms):
+            _write(db, iid, fold_arrays(ts_ms, *(cols[k][keep] for k in ("o", "h", "l", "c", "v"))))
+            db.execute(
+                "INSERT INTO built_through VALUES(?, ?) ON CONFLICT(instrument_id) DO UPDATE "
+                "SET through_ns = max(through_ns, excluded.through_ns)",
+                (iid, int(ts_ms.max()) * 1_000_000),
+            )
+    return len(ts_ms)
+
+
 def _candle(row: tuple) -> dict:
     t, o, h, low, c, v, seconds_observed, bar = row
     return {
-        "t": t, "o": o, "h": h, "l": low, "c": c, "v": v,
+        "t": t,
+        "o": o,
+        "h": h,
+        "l": low,
+        "c": c,
+        "v": v,
         "seconds_observed": seconds_observed,
         "partial": seconds_observed < PARTIAL_OBSERVED_FRACTION * bar,
         "source": "candle_store",
@@ -175,30 +300,45 @@ def _candle(row: tuple) -> dict:
 _COLUMNS = "t, o, h, l, c, v, seconds_observed, bar_seconds"
 
 
-def window(db: sqlite3.Connection, iid: str, bar_seconds: int, before_ms: int, limit: int) -> list[dict]:
+def window(
+    db: sqlite3.Connection, iid: str, bar_seconds: int, before_ms: int, limit: int
+) -> list[dict]:
     """Up to `limit` traded candles with t < before_ms, oldest first."""
     rows = db.execute(
-        f"SELECT {_COLUMNS} FROM candles WHERE instrument_id = ? AND bar_seconds = ? "
+        f"SELECT {_COLUMNS} FROM candles WHERE instrument_id = ? AND bar_seconds = ? "  # noqa: S608 -- constant column list, values are bound
         "AND o IS NOT NULL AND t < ? ORDER BY t DESC LIMIT ?",
         (iid, bar_seconds, before_ms, limit),
     ).fetchall()
     return [_candle(r) for r in reversed(rows)]
 
 
-def oldest_t(db: sqlite3.Connection, iid: str, bar_seconds: int, traded_only: bool = True) -> int | None:
-    """Start of the oldest bucket (ms). `traded_only=False` includes buckets with no trade: the
-    earliest one is where the store's coverage of the archive begins."""
+def watermarks(db: sqlite3.Connection) -> dict[str, int]:
+    """instrument_id -> ts_event (ns) of the last second applied."""
+    return dict(db.execute("SELECT instrument_id, through_ns FROM built_through").fetchall())
+
+
+def oldest_t(
+    db: sqlite3.Connection, iid: str, bar_seconds: int, traded_only: bool = True
+) -> int | None:
+    """
+    Start of the oldest bucket (ms). `traded_only=False` includes buckets with no trade: the
+    earliest one is where the store's coverage of the archive begins.
+    """
     row = db.execute(
-        "SELECT MIN(t) FROM candles WHERE instrument_id = ? AND bar_seconds = ?"
+        "SELECT MIN(t) FROM candles WHERE instrument_id = ? AND bar_seconds = ?"  # noqa: S608 -- constant clause, values are bound
         + (" AND o IS NOT NULL" if traded_only else ""),
         (iid, bar_seconds),
     ).fetchone()
     return row[0]
 
 
-def latest(db: sqlite3.Connection, iids: list[str], bar_seconds: int, n: int) -> dict[str, list[dict]]:
-    """The newest `n` traded candles per instrument (oldest first); one query per coin, each an
-    index range scan -- no file I/O."""
+def latest(
+    db: sqlite3.Connection, iids: list[str], bar_seconds: int, n: int
+) -> dict[str, list[dict]]:
+    """
+    Return the newest `n` traded candles per instrument (oldest first); one query per coin, each an
+    index range scan -- no file I/O.
+    """
     return {iid: window(db, iid, bar_seconds, 1 << 62, n) for iid in iids}
 
 
@@ -206,4 +346,7 @@ def prune(db: sqlite3.Connection, now_ms: int | None = None) -> None:
     now_ms = now_ms if now_ms is not None else int(time.time() * 1000)
     with db:
         for bar, days in RETAIN_DAYS.items():
-            db.execute("DELETE FROM candles WHERE bar_seconds = ? AND t < ?", (bar, now_ms - days * _DAY_MS))
+            db.execute(
+                "DELETE FROM candles WHERE bar_seconds = ? AND t < ?",
+                (bar, now_ms - days * _DAY_MS),
+            )

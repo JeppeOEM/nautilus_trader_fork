@@ -251,11 +251,10 @@ def test_weekly_bar_seconds_is_not_clamped_down_to_a_day(tmp_path: Path, monkeyp
     assert [(b["t"], b["o"], b["c"]) for b in bars] == [(week_start // 1_000_000, 100.0, 102.0)]
 
 
-def test_wide_bar_window_is_wider_than_the_raw_cap_but_still_bounded() -> None:
-    hour = 3600
-    assert candles_routes._window_start_ns(0, 120, hour) == -7 * 86_400 * 1_000_000_000
-    day_window_s = -candles_routes._window_start_ns(0, 120, 86_400) // 1_000_000_000
-    assert 7 * 86_400 < day_window_s <= candles_routes._MAX_ROLLUP_QUERY_SPAN_SECONDS
+def test_archive_fallback_window_is_capped_for_every_bar_size() -> None:
+    week_ns = 7 * 86_400 * 1_000_000_000
+    assert candles_routes._window_start_ns(0, 120, 3600) == -week_ns
+    assert candles_routes._window_start_ns(0, 120, 86_400) == -week_ns  # no wider tier without rollups
 
 
 def test_one_second_bars_return_one_candle_per_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

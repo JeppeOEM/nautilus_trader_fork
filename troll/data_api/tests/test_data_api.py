@@ -23,7 +23,6 @@ import data_api.app as app_module
 from dydx_collector.second_snapshot import DydxSecondSnapshot
 from ml_signals import catalog_stats as _catalog_stats
 from ml_signals import chart_data as _chart_data
-from ml_signals.candles import candle_dicts_from_snapshots
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 from ranking_engine import metrics_store
@@ -151,26 +150,6 @@ def test_catalog_snapshots_route(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         for s in _catalog_stats.query_second_snapshots(catalog_path, _IID, 0, 2_000_000_000)
     ]
     assert response.json() == expected
-
-
-def test_catalog_candles_route(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """
-    Dedicated lean route, not a client of /catalog/snapshots -- see catalog_candles'
-    docstring: that route carries full order-book depth (~12MB for a 4-hour window),
-    candles only need 4 scalar OHLC fields, aggregated here, server-side.
-    """
-    catalog_path = str(tmp_path / "catalog")
-    _write_snapshot(catalog_path, ts=1_000_000_000, bid_price=100.0, ask_price=101.0, close_price=100.5)
-    _write_snapshot(catalog_path, ts=2_000_000_000, bid_price=100.5, ask_price=101.5, close_price=101.0)
-    client = _client(catalog_path, str(tmp_path / "metrics.db"), monkeypatch)
-
-    response = client.get(f"/catalog/candles/{_IID}?start_ns=0&end_ns=3000000000&bar_seconds=60")
-
-    assert response.status_code == 200
-    snapshots = _catalog_stats.query_second_snapshots(catalog_path, _IID, 0, 3_000_000_000)
-    expected = [{**c, "source": "raw_1s"} for c in candle_dicts_from_snapshots(snapshots, 60)]
-    assert response.json() == {"candles": expected}
-    assert response.json()["candles"], "seeded snapshots with real close_price must produce a candle"
 
 
 def test_errors_route_reports_the_ledger() -> None:

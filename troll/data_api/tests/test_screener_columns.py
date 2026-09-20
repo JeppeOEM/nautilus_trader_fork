@@ -225,14 +225,14 @@ def test_a_valueerror_from_one_coins_catalog_read_does_not_become_a_whole_reques
     _seed_recent_minutes(tmp_path)
     _ranked(monkeypatch, _IID, "BAD-USD-PERP.DYDX")
     client = _client(tmp_path, monkeypatch)
-    real = rankings_routes._catalog_stats.query_second_snapshots
+    real = rankings_routes._catalog_stats.query_second_ohlc
 
     def read(path: str, iid: str, a: int, b: int) -> list:
         if iid.startswith("BAD"):
             raise ValueError("Arrow schema mismatch")
         return real(path, iid, a, b)
 
-    monkeypatch.setattr(rankings_routes._catalog_stats, "query_second_snapshots", read)
+    monkeypatch.setattr(rankings_routes._catalog_stats, "query_second_ohlc", read)
     entries = json.dumps([{"name": "RelativeStrengthIndex", "params": {}, "bar_seconds": 60}])
 
     response = client.get("/api/rankings/technicals-values", params={"entries": entries})

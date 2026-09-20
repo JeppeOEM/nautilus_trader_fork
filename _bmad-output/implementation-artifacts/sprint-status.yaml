@@ -288,6 +288,8 @@ development_status:
   22-8-spine-rules-and-docs-updated-for-the-multi-venue-core: ready-for-dev
   22-9-historical-bar-backfill-for-bybit-and-hyperliquid: ready-for-dev
   22-10-rankings-show-every-collected-coin-across-venues-with-an-exchange-filter: ready-for-dev
+  22-11-nightly-catalog-consolidation-for-every-venue: backlog
+  22-12-venue-timed-1s-sampling-for-bybit-and-hyperliquid: backlog
   epic-22-retrospective: optional
 
 action_items:

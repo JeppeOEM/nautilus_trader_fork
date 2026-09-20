@@ -12,16 +12,16 @@ so that a new venue imports shared types instead of reaching into `dydx_collecto
 
 ## Acceptance Criteria
 
-1. **Shared types move, names don't.** `DydxSecondSnapshot` (+ `BOOK_DEPTH`), `DydxMinuteRollup`/`MinuteRollupBuilder` and `integrity.ohlc_outside_book` move to `collector_core/{second_snapshot,minute_rollup,integrity}.py` with class names unchanged, so the catalog directories `custom_dydx_second_snapshot/`, `custom_dydx_minute_rollup/` stay valid, and every importer (`data_api/routes/*`, `ml_signals`, `ranking_engine`, the three collectors, tests) is updated.
+1. **Shared types move, names don't.** `DydxSecondSnapshot` (+ `BOOK_DEPTH`) and `integrity.ohlc_outside_book` move to `collector_core/{second_snapshot,integrity}.py`, and the venue-neutral operator scripts `build_candles`, `consolidate_catalog`, `repair_catalog` move to `collector_core/` with class names unchanged, so the catalog directories `custom_dydx_second_snapshot/` stays valid, and every importer (`data_api/routes/*`, `ml_signals`, `ranking_engine`, the three collectors, tests) is updated.
 2. **One `OpenInterest`.** `DydxOpenInterest`, `BybitOpenInterest`, `HyperliquidOpenInterest` are replaced by `collector_core.open_interest.OpenInterest` (same four fields: `instrument_id`, `open_interest: Decimal`, `ts_event`, `ts_init`; a `from_pyo3` staticmethod for Hyperliquid), registered for Arrow once.
 3. **Idempotent catalog migration.** A script renames existing `data/custom_{dydx,bybit,hyperliquid}_open_interest/` directories into `data/custom_open_interest/` and rewrites each file's Arrow `type` metadata to `OpenInterest`; readers of the old types are updated; re-running the script is a no-op.
 
 ## Tasks / Subtasks
 
 - [ ] Task 1 — move the three modules (AC: #1)
-  - [ ] `git mv troll/dydx_collector/second_snapshot.py troll/collector_core/second_snapshot.py` (same for `minute_rollup.py`, `integrity.py`). Contents unchanged except `minute_rollup.py`'s own import of `DydxSecondSnapshot`. The Arrow `register_arrow(...)` calls at module bottom stay — the class name in `metadata={"type": ...}` is what the catalog keys on, not the module path.
-  - [ ] Update every importer. Current list (`grep -rl 'dydx_collector\.\(second_snapshot\|minute_rollup\|integrity\)' troll --include='*.py'`, 45 files at story creation): `bybit_collector/{collector,open_interest}.py` + tests, `hyperliquid_collector/collector.py` + tests, `dydx_collector/{collector,backfill_minute_rollup,normalize_snapshot_schema,repair_catalog}.py` + 8 test modules, `data_api/{app,live_candles}.py`, `data_api/routes/snapshots.py`, 9 `data_api/tests/*`, `ml_signals/{catalog_stats,chart_data}.py`, `ml_signals/strategies/{backtest_snapshot,ofi_strategy,snapshot_backtest,snapshot_strategy}.py`, 6 `ml_signals/tests/*`, `ranking_engine/engine.py` + 2 tests. No compatibility shims in `dydx_collector/` (DESIGN-03) — one sweep, `grep` returns nothing afterwards.
-  - [ ] `dydx_collector/{backfill_minute_rollup,normalize_snapshot_schema,repair_catalog}.py` stay where they are (operator scripts, `python -m dydx_collector.<name>` is documented in `DATA_INTEGRITY_AUDIT.md`'s runbook) — only their imports change.
+  - [ ] `git mv troll/dydx_collector/second_snapshot.py troll/collector_core/second_snapshot.py` (same for `integrity.py`, `build_candles.py`, `consolidate_catalog.py`, `repair_catalog.py`). Contents unchanged. The Arrow `register_arrow(...)` calls at module bottom stay — the class name in `metadata={"type": ...}` is what the catalog keys on, not the module path.
+  - [ ] Update every importer. Current list (`grep -rl 'dydx_collector\.\(second_snapshot\|integrity\)' troll --include='*.py'`, 45 files at story creation): `bybit_collector/{collector,open_interest}.py` + tests, `hyperliquid_collector/collector.py` + tests, `dydx_collector/{collector,normalize_snapshot_schema,repair_catalog}.py` + 8 test modules, `data_api/{app,live_candles}.py`, `data_api/routes/snapshots.py`, 9 `data_api/tests/*`, `ml_signals/{catalog_stats,chart_data}.py`, `ml_signals/strategies/{backtest_snapshot,ofi_strategy,snapshot_backtest,snapshot_strategy}.py`, 6 `ml_signals/tests/*`, `ranking_engine/engine.py` + 2 tests. No compatibility shims in `dydx_collector/` (DESIGN-03) — one sweep, `grep` returns nothing afterwards.
+  - [ ] `dydx_collector/normalize_snapshot_schema.py` stays where it is (operator scripts, `python -m dydx_collector.<name>` is documented in `DATA_INTEGRITY_AUDIT.md`'s runbook) — only their imports change.
 - [ ] Task 2 — `collector_core/open_interest.py` (AC: #2)
   - [ ] `class OpenInterest(Data)`: copy `dydx_collector/open_interest.py:45-107` (`DydxOpenInterest`) verbatim, rename, schema `metadata={"type": "OpenInterest"}`, `__repr__` updated, one `register_arrow(...)`. Add `@staticmethod from_pyo3(obj) -> OpenInterest` from `hyperliquid_collector/open_interest.py` (`HyperliquidOpenInterest.from_pyo3` — read its exact field mapping; the pyo3 object is `nautilus_pyo3.HyperliquidOpenInterest` delivered inside `CustomData`, `hyperliquid_collector/client.py:87-91`).
   - [ ] `bybit_collector/open_interest.py`: keep `_fetch_tickers_json`, `fetch_open_interest`, `parse_open_interest`; they return `OpenInterest`. `dydx_collector/open_interest.py`: keep `classify_liquidity`, `_fetch_markets_json`, `fetch_open_interest`, `parse_open_interest`; delete the class. `hyperliquid_collector/open_interest.py`: delete the file; `client.py` imports `OpenInterest` from the core.
@@ -41,11 +41,11 @@ so that a new venue imports shared types instead of reaching into `dydx_collecto
 
 ### Why the names stay (and why the dirs would otherwise orphan data)
 
-`ParquetDataCatalog` maps a custom `Data` class to `data/custom_<snake_case_class_name>/`. Renaming `DydxSecondSnapshot` → `SecondSnapshot` would silently start a second directory and every reader would lose history until a migration — exactly what this story does deliberately, once, for open interest only, where the three-way duplication is the actual problem. The snapshot/rollup classes keep their `Dydx` prefix for that reason (research §A "Key conclusions"; DATA-05: no silent gaps).
+`ParquetDataCatalog` maps a custom `Data` class to `data/custom_<snake_case_class_name>/`. Renaming `DydxSecondSnapshot` → `SecondSnapshot` would silently start a second directory and every reader would lose history until a migration — exactly what this story does deliberately, once, for open interest only, where the three-way duplication is the actual problem. The snapshot class keeps its `Dydx` prefix for that reason (research §A "Key conclusions"; DATA-05: no silent gaps).
 
 ### Module-boundary rule (AD-4)
 
-The moved modules are "shared data types and pure utilities": `DydxSecondSnapshot`, `DydxMinuteRollup`, `MinuteRollupBuilder` (stateful but pure over its inputs), `ohlc_outside_book`. Nothing else from `collector_core.collector` (buffers, gate, client state) may be imported across namespaces — `ml_signals`/`data_api`/`ranking_engine` import from `collector_core.{second_snapshot,minute_rollup,integrity,open_interest}` only. Keep `collector_core/__init__.py` empty; import from the module paths.
+The moved modules are "shared data types and pure utilities": `DydxSecondSnapshot`, `ohlc_outside_book`. Nothing else from `collector_core.collector` (buffers, gate, client state) may be imported across namespaces — `ml_signals`/`data_api`/`ranking_engine` import from `collector_core.{second_snapshot,integrity,open_interest}` only. Keep `collector_core/__init__.py` empty; import from the module paths.
 
 ### Open interest has no downstream reader today
 
@@ -57,10 +57,10 @@ Land after 22.2 so there is exactly one importer of each moved module inside the
 
 ### Project Structure Notes
 
-- New: `troll/collector_core/{second_snapshot,minute_rollup,integrity,open_interest,migrate_open_interest}.py`, `troll/collector_core/tests/{test_open_interest,test_migrate_open_interest}.py`.
-- Deleted: `troll/dydx_collector/{second_snapshot,minute_rollup,integrity}.py` (moved), `troll/hyperliquid_collector/open_interest.py`, the three `*OpenInterest` classes.
+- New: `troll/collector_core/{second_snapshot,integrity,open_interest,migrate_open_interest,build_candles,consolidate_catalog,repair_catalog}.py`, `troll/collector_core/tests/{test_open_interest,test_migrate_open_interest}.py`.
+- Deleted: `troll/dydx_collector/{second_snapshot,integrity,build_candles,consolidate_catalog,repair_catalog}.py` (moved), `troll/hyperliquid_collector/open_interest.py`, the three `*OpenInterest` classes.
 - Modified: ~45 importers (Task 1 list), `troll/docs/DATA_DICTIONARY.md`, `troll/docs/DATA_INTEGRITY_AUDIT.md`.
-- Unchanged: `troll/collector.dockerfile` (core dir already copied), compose, catalog dirs for snapshots/rollups.
+- Unchanged: `troll/collector.dockerfile` (core dir already copied), compose, catalog dir for snapshots.
 
 ### References
 

@@ -22,7 +22,7 @@ sibling, not a shared base). Deliberately left out vs dYdX:
   * crossed-book "is normal" machinery (DATA-04): dYdX has no central book, Bybit does -- a
     crossed Bybit book is local corruption. Handling is: skip that sample, and if it stays
     crossed for _CROSSED_RESYNC_NS, resubscribe the book for a fresh snapshot.
-  * pruning, control/status/Redis, watchdog, incident reports, minute rollup -- not needed
+  * pruning, control/status/Redis, watchdog, incident reports, candle-store feed -- not needed
     to archive data; add when the Bybit deployment needs them.
 
 Snapshots reuse `DydxSecondSnapshot` (a venue-neutral schema despite its name) so data_api's
