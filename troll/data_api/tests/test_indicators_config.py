@@ -25,6 +25,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import data_api.app as app_module
+import data_api.routes.candles as candles_routes
 import data_api.routes.indicators as indicators_routes
 from dydx_collector.second_snapshot import DydxSecondSnapshot
 from ml_signals.chart_indicator_config import IndicatorEntry
@@ -47,7 +48,9 @@ def _client(
     monkeypatch.setattr(
         indicators_routes, "CHART_INDICATOR_CONFIG_PATH", str(tmp_path / "chart_indicators.toml"),
     )
-    monkeypatch.setattr(indicators_routes, "CATALOG_PATH", catalog_path or str(tmp_path / "cat"))
+    catalog = catalog_path or str(tmp_path / "cat")
+    monkeypatch.setattr(candles_routes, "CATALOG_PATH", catalog)  # indicator-values reads candles via this route
+    monkeypatch.setattr(candles_routes, "CANDLES_DB_PATH", f"{catalog}-no-candle-store.db")
     return TestClient(app_module.app)
 
 

@@ -83,6 +83,7 @@ from dydx_collector.open_interest import fetch_open_interest
 from dydx_collector.prune_catalog import prune_instrument
 from dydx_collector.second_snapshot import BOOK_DEPTH
 from dydx_collector.second_snapshot import DydxSecondSnapshot
+from ml_signals import candle_store
 from ml_signals import error_ledger
 from nautilus_trader.core import nautilus_pyo3
 from nautilus_trader.model.book import OrderBook
@@ -458,6 +459,11 @@ class Collector:
         catalog_path = Path(config.catalog_path).resolve()
         catalog_path.mkdir(parents=True, exist_ok=True)
         self._catalog = ParquetDataCatalog(str(catalog_path))
+        # Derived candle store for the UI (the catalog stays the archive): the collector is its
+        # single writer, fed by each flush of second snapshots. Rebuildable via build_candles.
+        self._candle_db = candle_store.connect_rw(
+            os.environ.get("CANDLES_DB_PATH", str(catalog_path.parent / "candles" / "candles.db"))
+        )
 
         self._client = DydxClient(on_data=self._on_data, network=config.network)
         self._buffer: dict[tuple[type, str], list[Any]] = defaultdict(list)
@@ -731,6 +737,9 @@ class Collector:
                 await asyncio.to_thread(self._catalog.write_data, items)
             except Exception:
                 error_ledger.record("collector.flush_write", f"failed to write {key}, {len(items)} items LOST")
+                continue
+            if dtype is DydxSecondSnapshot:
+                self._apply_to_candle_store(iid, items)  # only what reached the archive
 
     async def _flush_loop(self) -> None:
         while not self._stop.is_set():
@@ -1268,6 +1277,14 @@ class Collector:
 
             await _publish_snapshot_batch(self._redis, batch)
 
+    def _apply_to_candle_store(self, iid: str, snapshots: list[DydxSecondSnapshot]) -> None:
+        """One failed store write must not stop ingestion; it is loud (DATA-07) and repaired by
+        `build_candles`, since the Parquet snapshots it mirrors were still written."""
+        try:
+            candle_store.apply_seconds(self._candle_db, iid, snapshots)
+        except Exception:
+            error_ledger.record("collector.candle_store", f"candle store write failed for {iid}")
+
     async def _prune_loop(self) -> None:
         """Prune uncollected instruments' catalog data, and any per-coin raw-delta retention."""
         while not self._stop.is_set():
@@ -1299,6 +1316,13 @@ class Collector:
                 logger.info(
                     f"Pruned {delta_freed / 1024 / 1024:.1f} MB of raw order-book deltas (per-coin retention)"
                 )
+
+            # Inline, not to_thread: the store's connection is the event loop's (one writer thread);
+            # this is a couple of indexed range deletes.
+            try:
+                candle_store.prune(self._candle_db)
+            except Exception:
+                error_ledger.record("collector.candle_store_prune", "candle store prune failed")
 
     async def _watchdog_loop(self) -> None:
         """

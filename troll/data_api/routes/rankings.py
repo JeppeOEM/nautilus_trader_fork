@@ -33,7 +33,9 @@ from pydantic import BaseModel
 
 from data_api import redis_bus
 from data_api.routes import indicators as _indicators
+from data_api.settings import CANDLES_DB_PATH
 from data_api.settings import CATALOG_PATH
+from ml_signals import candle_store
 from ml_signals import catalog_stats as _catalog_stats
 from ml_signals import custom_indicators
 from ml_signals import error_ledger
@@ -80,8 +82,10 @@ SCREENER_COLUMNS_CONFIG_PATH: str = os.environ.get(
     "SCREENER_COLUMNS_CONFIG_PATH", "troll/ml_signals/screener_columns.toml"
 )
 
-# Recent-window replay per coin: enough bars for the slowest common indicator warm-up. 4H and
-# wider get fewer bars: 60 daily bars already means ~86k minute rollups per coin.
+# Recent-window replay per coin: enough bars for the slowest common indicator warm-up. The candle
+# store serves any bar size cheaply (an indexed read), so 250 covers SMA(200); the Parquet fallback
+# is far costlier per bar, so it keeps a smaller window (60 for 4H+: ~86k minute rollups per coin at 1D).
+_TECHNICALS_STORE_BARS = 250
 _TECHNICALS_BARS = 120
 _TECHNICALS_WIDE_BARS = 60
 # The column timeframes the UI offers; anything else is a 400, not a silent fallback.
@@ -92,11 +96,6 @@ _TECHNICALS_MAX_CANDLE_AGE_BARS = 5
 # Bulk values are identical for every viewer of the same entries/ranked set -- a short TTL cache
 # keeps a second tab or a slow poll from stacking another full per-coin catalog pass.
 _TECHNICALS_CACHE_TTL_S = 90.0
-# 4H+ candles barely move between polls, so they are cached per (coin, bar size) far longer than
-# the 90s value cache -- otherwise a mixed column set re-reads days of rollups every poll.
-# ponytail: one entry per ranked coin x wide bar size, unbounded by anything but the ranked set.
-_TECHNICALS_WIDE_CACHE_TTL_S = 600.0
-_wide_candles_cache: dict[tuple[str, int], tuple[float, list[dict]]] = {}
 _technicals_cache: dict[str, tuple[float, dict[str, dict[str, float | None]]]] = {}
 
 
@@ -180,14 +179,17 @@ class TechnicalsValuesResponse(BaseModel):
 
 
 def _recent_candles(instrument_id: str, bar_seconds: int, now_ns: int) -> list[dict]:
-    key = (instrument_id, bar_seconds)
-    hit = _wide_candles_cache.get(key)
-    if bar_seconds >= 14400 and hit is not None and time.monotonic() - hit[0] < _TECHNICALS_WIDE_CACHE_TTL_S:
-        return hit[1]
-    candles = _read_candles(instrument_id, bar_seconds, now_ns)
-    if bar_seconds >= 14400:
-        _wide_candles_cache[key] = (time.monotonic(), candles)
-    return candles
+    """Newest candles for one bar size: the SQLite candle store when it holds the coin (no Parquet
+    I/O), else the slow archive read."""
+    try:
+        with candle_store.connect_ro(CANDLES_DB_PATH) as db:
+            if db is not None:
+                stored = candle_store.window(db, instrument_id, bar_seconds, 1 << 62, _TECHNICALS_STORE_BARS)
+                if stored:
+                    return stored
+    except Exception as exc:
+        raise _CatalogReadError(str(exc)) from exc
+    return _read_candles(instrument_id, bar_seconds, now_ns)
 
 
 def _read_candles(instrument_id: str, bar_seconds: int, now_ns: int) -> list[dict]:

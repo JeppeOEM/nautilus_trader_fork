@@ -27,6 +27,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import data_api.app as app_module
+import data_api.routes.candles as candles_routes
 import data_api.routes.indicators as indicators_routes
 import data_api.routes.rankings as rankings_routes
 from data_api import redis_bus
@@ -45,8 +46,9 @@ def _client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
     monkeypatch.setattr(rankings_routes, "SCREENER_COLUMNS_CONFIG_PATH", str(tmp_path / "cols.toml"))
     monkeypatch.setattr(rankings_routes, "CATALOG_PATH", catalog)
     rankings_routes._technicals_cache.clear()
-    rankings_routes._wide_candles_cache.clear()
-    monkeypatch.setattr(indicators_routes, "CATALOG_PATH", catalog)
+    monkeypatch.setattr(candles_routes, "CATALOG_PATH", catalog)  # indicator-values reads candles via this route
+    monkeypatch.setattr(candles_routes, "CANDLES_DB_PATH", f"{catalog}-no-candle-store.db")
+    monkeypatch.setattr(rankings_routes, "CANDLES_DB_PATH", f"{catalog}-no-candle-store.db")
     return TestClient(app_module.app)
 
 
@@ -300,3 +302,29 @@ def test_each_column_is_computed_on_its_own_timeframe(
     assert seen == [60, 86400]  # one candle build per distinct bar size, not per entry
     bad = json.dumps([{"name": "RelativeStrengthIndex", "params": {}, "bar_seconds": 7}])
     assert client.get("/api/rankings/technicals-values", params={"entries": bad}).status_code == 400
+
+
+def test_values_come_from_the_candle_store_without_touching_parquet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from ml_signals import candle_store
+    from ml_signals.tests.test_candle_store import _second
+
+    _ranked(monkeypatch, _IID)
+    client = _client(tmp_path, monkeypatch)  # no Parquet catalog exists at all
+    db_path = str(tmp_path / "candles.db")
+    monkeypatch.setattr(rankings_routes, "CANDLES_DB_PATH", db_path)
+    db = candle_store.connect_rw(db_path)
+    now_minute = int(time.time()) // 60 * 60 * 1000
+    rows = []
+    for i in range(45):  # 45 traded minutes ending now (the helper stamps a fixed day, so restamp)
+        row = _second(0, 100.0 + (i * 7) % 13)
+        row.ts_event = (now_minute - (45 - i) * 60_000) * 1_000_000
+        rows.append(row)
+    candle_store.apply_seconds(db, _IID, rows)
+    entries = json.dumps([{"name": "RelativeStrengthIndex", "params": {}, "bar_seconds": 60}])
+
+    got = client.get("/api/rankings/technicals-values", params={"entries": entries}).json()
+
+    assert got["errors"] == {}
+    assert got["values"][_IID]["0.value"] is not None
