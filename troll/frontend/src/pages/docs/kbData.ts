@@ -82,7 +82,7 @@ docker exec dydx-redis redis-cli PUBLISH bots:control '{"bot_id":"bot-01","actio
 <tr><td><code>MarkPriceUpdate</code> / <code>IndexPriceUpdate</code></td><td>markets WS</td><td>event-driven</td><td class="neg">stored, no reader found</td></tr>
 <tr><td><code>FundingRateUpdate</code></td><td>markets WS</td><td>event-driven</td><td class="neg">stored, no reader found</td></tr>
 <tr><td><code>DydxSecondSnapshot</code></td><td>built in-process from book + trades</td><td>every <code>snapshot_interval_seconds</code> (0.5s default)</td><td>the core record — feeds every live indicator on this site</td></tr>
-<tr><td><code>DydxOpenInterest</code></td><td>REST poll (stdlib urllib)</td><td>every 300s</td><td class="neg">stored field itself unused; the <em>parallel</em> volume24H liquidity classification from the same poll <b>is</b> used</td></tr>
+<tr><td><code>OpenInterest</code></td><td>REST poll (stdlib urllib)</td><td>every 300s</td><td class="neg">stored field itself unused; the <em>parallel</em> volume24H liquidity classification from the same poll <b>is</b> used</td></tr>
 <tr><td><code>InstrumentStatus</code></td><td>markets WS</td><td>event-driven</td><td class="neg">stored, no reader found</td></tr>
 </table><p><code>DydxSecondSnapshot</code> fields: <code>bid_prices/sizes</code>, <code>ask_prices/sizes</code> (top 20 levels), <code>buy_volume/sell_volume</code>, <code>buy_count/sell_count</code>, <code>open/high/low/close_price</code> (this is the collector's only surviving record of traded price now that raw <code>TradeTick</code> is no longer persisted). Every computed indicator on this site's Indicators tab traces back to this one record.</p></div>
 <div class="sec"><h2>Guards before a snapshot is ever emitted</h2><p><code>_second_loop</code> skips crossed books (forces a resubscribe after 3s of a persistent cross — see the <a data-nav="kb:pm-crossed-book">crossed-book postmortem</a>) and skips stale books with no deltas for 5s — both DATA-01 “flag the gap, never fabricate” implementations.</p></div>
@@ -91,7 +91,7 @@ docker exec dydx-redis redis-cli PUBLISH bots:control '{"bot_id":"bot-01","actio
 <tr><td><code>OrderBookDeltas</code></td><td>not stored (nothing opts in)</td><td>not stored</td></tr>
 <tr><td>Mark/Index/Funding/Status</td><td class="neg">unlimited</td><td>4h</td></tr>
 <tr><td><code>DydxSecondSnapshot</code></td><td class="neg">unlimited</td><td>not collected</td></tr>
-<tr><td><code>DydxOpenInterest</code></td><td class="neg">unlimited</td><td>4h</td></tr>
+<tr><td><code>OpenInterest</code></td><td class="neg">unlimited</td><td>4h</td></tr>
 </table><p>Every configured instrument is <code>pinned=true</code>, and pinned instruments are permanently exempt from the prune loop — so mark/index price, funding, open interest, instrument status, and 1s book snapshots for every configured coin accumulate forever with no built-in cap today.</p></div>`,
     refs: ["troll/docs/DATA_DICTIONARY.md"],
   },

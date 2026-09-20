@@ -41,7 +41,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from dydx_collector.second_snapshot import DydxSecondSnapshot
+from collector_core.second_snapshot import DydxSecondSnapshot
 
 
 logger = logging.getLogger(__name__)

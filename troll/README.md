@@ -172,4 +172,4 @@ See [`ml_signals/BACKTESTING.md`](ml_signals/BACKTESTING.md) for the other backt
 | Index price | `IndexPriceUpdate` | WebSocket markets channel |
 | Funding rate | `FundingRateUpdate` | WebSocket markets channel |
 | Instruments | `CryptoPerpetual` | REST on startup |
-| Open interest | `DydxOpenInterest` | REST poll every 5 min |
+| Open interest | `OpenInterest` | REST poll every 5 min |

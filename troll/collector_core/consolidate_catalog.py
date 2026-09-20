@@ -16,7 +16,7 @@
 Merge each closed UTC day's many small Parquet files into one file per (data type, instrument).
 
 Usage (nightly, e.g. from cron via `make consolidate`):
-    python -m dydx_collector.consolidate_catalog --catalog /app/catalog --apply [--days 3] [--data-type custom_dydx_second_snapshot ...]
+    python -m collector_core.consolidate_catalog --catalog /app/catalog --apply [--days 3] [--data-type custom_dydx_second_snapshot ...]
 
 The collector flushes once a minute, so every coin grows ~1,440 files per data type per day;
 reads, backups and inode counts all scale with that file count, not with the data (audit D-36).

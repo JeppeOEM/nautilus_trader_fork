@@ -32,7 +32,7 @@ import data_api.routes.indicators as indicators_routes
 import data_api.routes.rankings as rankings_routes
 from data_api import redis_bus
 from data_api.redis_bus import RankingsBus
-from dydx_collector.second_snapshot import DydxSecondSnapshot
+from collector_core.second_snapshot import DydxSecondSnapshot
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 

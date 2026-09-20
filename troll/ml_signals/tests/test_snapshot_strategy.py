@@ -77,7 +77,7 @@ from nautilus_trader.model.objects import Money
 from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
 
-from dydx_collector.second_snapshot import DydxSecondSnapshot
+from collector_core.second_snapshot import DydxSecondSnapshot
 from ml_signals.strategies.snapshot_strategy import SnapshotStrategy
 from ml_signals.strategies.snapshot_strategy import SnapshotStrategyConfig
 

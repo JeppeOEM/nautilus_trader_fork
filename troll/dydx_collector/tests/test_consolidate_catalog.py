@@ -25,9 +25,9 @@ from ml_signals import error_ledger
 from ml_signals.catalog_stats import data_file_ranges
 from ml_signals.catalog_stats import query_second_ohlc
 
-from dydx_collector.consolidate_catalog import consolidate_directory
-from dydx_collector.consolidate_catalog import leaf_dirs
-from dydx_collector.second_snapshot import DydxSecondSnapshot
+from collector_core.consolidate_catalog import consolidate_directory
+from collector_core.consolidate_catalog import leaf_dirs
+from collector_core.second_snapshot import DydxSecondSnapshot
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
@@ -141,7 +141,7 @@ def test_an_interrupted_run_is_finished_without_duplicating_rows(tmp_path: Path)
     catalog = ParquetDataCatalog(str(tmp_path))
     written = _seed(catalog, _DAY0, 10)
     (directory,) = leaf_dirs(str(tmp_path))
-    from dydx_collector.consolidate_catalog import _merge
+    from collector_core.consolidate_catalog import _merge
 
     sources = sorted(directory.glob("*.parquet"))
     tmp = _merge(directory, sources)

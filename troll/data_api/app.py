@@ -47,7 +47,7 @@ from data_api.routes import rankings as rankings_routes
 from data_api.routes import snapshots as snapshots_routes
 from data_api.settings import CATALOG_PATH
 from data_api.ws import live as live_ws
-from dydx_collector.second_snapshot import DydxSecondSnapshot
+from collector_core.second_snapshot import DydxSecondSnapshot
 from ml_signals import catalog_stats as _catalog_stats
 from ml_signals import chart_data as _chart_data
 from ml_signals import error_ledger

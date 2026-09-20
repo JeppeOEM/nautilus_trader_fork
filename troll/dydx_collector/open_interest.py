@@ -30,81 +30,11 @@ import time
 import urllib.request
 from decimal import Decimal
 
-import pyarrow as pa
-
+from collector_core.open_interest import OpenInterest
 from ml_signals import error_ledger
-from nautilus_trader.core.data import Data
 from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
 from nautilus_trader.core.nautilus_pyo3 import get_dydx_http_url  # type: ignore[attr-defined]
 from nautilus_trader.model.identifiers import InstrumentId
-from nautilus_trader.serialization.arrow.serializer import make_dict_deserializer
-from nautilus_trader.serialization.arrow.serializer import make_dict_serializer
-from nautilus_trader.serialization.arrow.serializer import register_arrow
-
-
-class DydxOpenInterest(Data):
-    """Open interest snapshot for a single dYdX perpetual market."""
-
-    def __init__(
-        self,
-        instrument_id: InstrumentId,
-        open_interest: Decimal,
-        ts_event: int,
-        ts_init: int,
-    ) -> None:
-        self.instrument_id = instrument_id
-        self.open_interest = open_interest
-        self._ts_event = ts_event
-        self._ts_init = ts_init
-
-    @property
-    def ts_event(self) -> int:
-        return self._ts_event
-
-    @property
-    def ts_init(self) -> int:
-        return self._ts_init
-
-    @classmethod
-    def schema(cls) -> pa.Schema:
-        return pa.schema(
-            {
-                "instrument_id": pa.dictionary(pa.int8(), pa.string()),
-                "open_interest": pa.string(),
-                "ts_event": pa.uint64(),
-                "ts_init": pa.uint64(),
-            },
-            metadata={"type": "DydxOpenInterest"},
-        )
-
-    @staticmethod
-    def to_dict(obj: "DydxOpenInterest") -> dict[str, object]:
-        return {
-            "instrument_id": obj.instrument_id.value,
-            "open_interest": str(obj.open_interest),
-            "ts_event": obj.ts_event,
-            "ts_init": obj.ts_init,
-        }
-
-    @classmethod
-    def from_dict(cls, values: dict[str, object]) -> "DydxOpenInterest":
-        return cls(
-            instrument_id=InstrumentId.from_str(str(values["instrument_id"])),
-            open_interest=Decimal(str(values["open_interest"])),
-            ts_event=int(values["ts_event"]),  # type: ignore[call-overload]
-            ts_init=int(values["ts_init"]),  # type: ignore[call-overload]
-        )
-
-    def __repr__(self) -> str:
-        return f"DydxOpenInterest(instrument_id={self.instrument_id}, open_interest={self.open_interest})"
-
-
-register_arrow(
-    data_cls=DydxOpenInterest,
-    schema=DydxOpenInterest.schema(),
-    encoder=make_dict_serializer(schema=DydxOpenInterest.schema()),
-    decoder=make_dict_deserializer(DydxOpenInterest),
-)
 
 
 def classify_liquidity(
@@ -175,13 +105,13 @@ def _fetch_markets_json(network: DydxNetwork) -> dict:
         return json.load(response)
 
 
-async def fetch_open_interest(network: DydxNetwork) -> list[DydxOpenInterest]:
+async def fetch_open_interest(network: DydxNetwork) -> list[OpenInterest]:
     """Poll dYdX's REST indexer for current open interest across all markets."""
     markets_json = await asyncio.to_thread(_fetch_markets_json, network)
     return parse_open_interest(markets_json, ts=time.time_ns())
 
 
-def parse_open_interest(markets_json: dict, ts: int) -> list[DydxOpenInterest]:
+def parse_open_interest(markets_json: dict, ts: int) -> list[OpenInterest]:
     items = []
     for market in markets_json.get("markets", {}).values():
         ticker = market.get("ticker")
@@ -189,7 +119,7 @@ def parse_open_interest(markets_json: dict, ts: int) -> list[DydxOpenInterest]:
         if ticker is None or open_interest is None:
             continue
         items.append(
-            DydxOpenInterest(
+            OpenInterest(
                 instrument_id=InstrumentId.from_str(f"{ticker}-PERP.DYDX"),
                 open_interest=Decimal(open_interest),
                 ts_event=ts,

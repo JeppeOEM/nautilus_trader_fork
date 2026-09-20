@@ -27,7 +27,7 @@ entries (CumulativeVolumeDelta and later additions) live in the same module-leve
 import tempfile
 
 import pytest
-from dydx_collector.second_snapshot import DydxSecondSnapshot
+from collector_core.second_snapshot import DydxSecondSnapshot
 from nautilus_trader.model.data import BookOrder
 from nautilus_trader.model.data import OrderBookDelta
 from nautilus_trader.model.data import OrderBookDeltas

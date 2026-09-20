@@ -12,7 +12,7 @@ The collector (`collector.py`) owns one WS connection per dYdX network and write
 everything through `ParquetDataCatalog.write_data()` — no hand-rolled schemas
 (`troll/CLAUDE.md` NAUT-02). Nine distinct types land in the catalog. Six are native
 Nautilus types decoded straight from the Rust adapter; two (`DydxSecondSnapshot`,
-`DydxOpenInterest`) are custom `Data` subclasses this collector defines because the
+`OpenInterest`) are custom `Data` subclasses this collector defines because the
 PyO3 bindings don't expose the fields another way.
 
 ### 1.1 `TradeTick` (native Nautilus type) — **no longer persisted**
@@ -128,7 +128,15 @@ signals on read (SIGNAL-01).
   this Redis stream is what `ranking_engine` actually consumes live (§3); the Parquet
   copy is for backtest/historical replay.
 
-### 1.8 `DydxOpenInterest` (custom `Data` type, `open_interest.py`)
+### 1.8 `OpenInterest` (custom `Data` type, `collector_core/open_interest.py`)
+
+- **One type for all venues** (Story 22.3): written by all three collectors -- dYdX and Bybit
+  via REST poll, Hyperliquid via WebSocket (`OpenInterest.from_pyo3`). Catalog directory
+  `data/custom_open_interest/`. Replaces `DydxOpenInterest`/`BybitOpenInterest`/
+  `HyperliquidOpenInterest` (history in `custom_{dydx,bybit,hyperliquid}_open_interest/` moves
+  with `python -m collector_core.migrate_open_interest`, audit D-40). The dYdX-specific
+  notes below describe `dydx_collector/open_interest.py`, which keeps the poll and
+  `classify_liquidity`.
 
 - **Why custom/separate:** open interest is parsed Rust-side but never forwarded to
   Python on either the REST or WS markets-channel path (`open_interest.py:16-24`
@@ -144,7 +152,7 @@ signals on read (SIGNAL-01).
   `openInterest` (base-token units) — `troll/CLAUDE.md` OBS-03 explicitly calls out
   the token-vs-USD confusion as a past production bug. This classification decides
   which instruments get trade/book subscriptions (pinned/liquid/illiquid tiers,
-  `collector.py:21-40`), independent of storing `DydxOpenInterest` itself.
+  `collector.py:21-40`), independent of storing `OpenInterest` itself.
 - **Downstream use of the stored `open_interest` field:** **none found** in
   `ml_signals/`/`ranking_engine/` — only the *volume*-based liquidity classification
   (a separate, parallel computation in the same module) is used live. The OI Parquet
@@ -421,7 +429,7 @@ trading decision.
 | `MarkPriceUpdate` / `IndexPriceUpdate` | — | *not present* | stored, no downstream reader found |
 | `FundingRateUpdate` | — | *not present* | stored, no downstream reader found |
 | `InstrumentStatus` | — | *not present* | stored, no downstream reader found |
-| `DydxOpenInterest` (stored) | — | *not present* | stored, no downstream reader found — only the *parallel* `volume24H`-based liquidity classification (not this field) affects anything live |
+| `OpenInterest` (stored) | — | *not present* | stored, no downstream reader found — only the *parallel* `volume24H`-based liquidity classification (not this field) affects anything live |
 
 **Bottom line:** the live ranking table's actual sort key is either raw 24h USD
 volume or a 1-hour cross-sectional volatility stdev — both computed from data outside
@@ -429,7 +437,7 @@ or adjacent to the book-level signal machinery. Every OFI/OBI/CVD/microprice col
 visible on the ranking table is informational, derived from `DydxSecondSnapshot`
 alone, and does not itself move an instrument's rank. Three raw types collected today
 (`FundingRateUpdate`, `InstrumentStatus`, and the `open_interest` field of
-`DydxOpenInterest`) have no confirmed downstream consumer anywhere in `ml_signals/`
+`OpenInterest`) have no confirmed downstream consumer anywhere in `ml_signals/`
 or `ranking_engine/`.
 
 ---
@@ -479,7 +487,7 @@ today (see above), running it currently frees nothing.
 | `OrderBookDeltas` | Not stored (no instrument opts in) | not stored |
 | `MarkPriceUpdate` / `IndexPriceUpdate` / `FundingRateUpdate` / `InstrumentStatus` | **Unlimited** | 4h |
 | `DydxSecondSnapshot` (now includes trade OHLC, §1.7) | **Unlimited** (pinned + liquid only, so this is always the pinned group) | not collected |
-| `DydxOpenInterest` | **Unlimited** | 4h |
+| `OpenInterest` | **Unlimited** | 4h |
 | Instrument definitions (`crypto_perpetual`) | **Unlimited** | 4h |
 | `Bar` / `custom_dydx_minute_bar` | **Dead legacy data.** Written by an earlier pre-pivot architecture (§1.3 — the collector no longer calls `subscribe_bars` at all); nothing writes new files here and nothing prunes the old ones. Safe to delete manually if disk space matters; not wired into anything live. | — |
 

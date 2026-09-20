@@ -27,7 +27,7 @@ from fastapi.testclient import TestClient
 import data_api.app as app_module
 import data_api.routes.candles as candles_routes
 import data_api.routes.indicators as indicators_routes
-from dydx_collector.second_snapshot import DydxSecondSnapshot
+from collector_core.second_snapshot import DydxSecondSnapshot
 from ml_signals.chart_indicator_config import IndicatorEntry
 from ml_signals.chart_indicator_config import load_config
 from ml_signals.chart_indicator_config import save_config

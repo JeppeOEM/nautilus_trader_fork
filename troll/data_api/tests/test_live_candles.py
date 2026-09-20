@@ -24,7 +24,7 @@ import pytest
 
 from data_api import settings
 from data_api.live_candles import LiveCandleBus
-from dydx_collector.second_snapshot import DydxSecondSnapshot
+from collector_core.second_snapshot import DydxSecondSnapshot
 from ml_signals.candles import candle_dicts_from_snapshots
 from nautilus_trader.model.identifiers import InstrumentId
 

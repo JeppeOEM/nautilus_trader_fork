@@ -52,7 +52,7 @@ from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
-from dydx_collector.second_snapshot import DydxSecondSnapshot
+from collector_core.second_snapshot import DydxSecondSnapshot
 from ml_signals import backtest_snapshot
 
 _IID = InstrumentId(Symbol("BTC-USD-PERP"), Venue("DYDX"))

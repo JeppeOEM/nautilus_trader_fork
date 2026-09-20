@@ -16,7 +16,7 @@ r"""
 Rebuild the SQLite candle store from the Parquet 1s snapshots (the archive is the source of truth).
 
 Usage:
-    python -m dydx_collector.build_candles --catalog /app/catalog --db /app/candles_dir/candles.db \\
+    python -m collector_core.build_candles --catalog /app/catalog --db /app/candles_dir/candles.db \\
         [--instrument BTC-USD-PERP.DYDX ...] [--start 2026-09-01] [--end 2026-09-18] [--include-open-day]
 
 Use it for first population and to repair after a "candle store write failed" error. Idempotent: each

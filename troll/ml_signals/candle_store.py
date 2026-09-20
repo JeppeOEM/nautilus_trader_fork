@@ -17,7 +17,7 @@ SQLite store of finished candles (1m..1D): the read model for charts, indicator-
 Technicals tab, so none of them re-read thousands of tiny Parquet files per request.
 
 The Parquet catalog's raw 1s snapshots stay the archive and source of truth; this store is derived
-and can be deleted and rebuilt (`dydx_collector.build_candles`). One writer: the collector folds every
+and can be deleted and rebuilt (`collector_core.build_candles`). One writer: the collector folds every
 flushed snapshot in (`apply_seconds`); everything else opens the file read-only. The live writer and
 the rebuild share one aggregation (`_fold`), so they cannot disagree.
 

@@ -13,8 +13,11 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-Hyperliquid open interest. Unlike dYdX/Bybit the Rust adapter forwards it over the WebSocket
-(`subscribe_open_interest`), so this module is only the catalog-serializable Data type.
+Open interest for one perpetual, shared by the dYdX, Bybit and Hyperliquid collectors.
+
+dYdX and Bybit poll a REST endpoint (the Rust adapters drop the field); Hyperliquid streams it
+over the WebSocket (`from_pyo3`). Instrument ids are venue-suffixed, so one catalog directory
+(`custom_open_interest/`) holds all three venues without collisions.
 """
 
 from decimal import Decimal
@@ -28,10 +31,16 @@ from nautilus_trader.serialization.arrow.serializer import make_dict_serializer
 from nautilus_trader.serialization.arrow.serializer import register_arrow
 
 
-class HyperliquidOpenInterest(Data):
-    """Open interest for one Hyperliquid perpetual (streamed; no REST poll needed)."""
+class OpenInterest(Data):
+    """Open interest snapshot for a single perpetual market (dYdX, Bybit or Hyperliquid)."""
 
-    def __init__(self, instrument_id: InstrumentId, open_interest: Decimal, ts_event: int, ts_init: int) -> None:
+    def __init__(
+        self,
+        instrument_id: InstrumentId,
+        open_interest: Decimal,
+        ts_event: int,
+        ts_init: int,
+    ) -> None:
         self.instrument_id = instrument_id
         self.open_interest = open_interest
         self._ts_event = ts_event
@@ -54,11 +63,11 @@ class HyperliquidOpenInterest(Data):
                 "ts_event": pa.uint64(),
                 "ts_init": pa.uint64(),
             },
-            metadata={"type": "HyperliquidOpenInterest"},
+            metadata={"type": "OpenInterest"},
         )
 
     @staticmethod
-    def to_dict(obj: "HyperliquidOpenInterest") -> dict[str, object]:
+    def to_dict(obj: "OpenInterest") -> dict[str, object]:
         return {
             "instrument_id": obj.instrument_id.value,
             "open_interest": str(obj.open_interest),
@@ -67,7 +76,7 @@ class HyperliquidOpenInterest(Data):
         }
 
     @classmethod
-    def from_dict(cls, values: dict[str, object]) -> "HyperliquidOpenInterest":
+    def from_dict(cls, values: dict[str, object]) -> "OpenInterest":
         return cls(
             instrument_id=InstrumentId.from_str(str(values["instrument_id"])),
             open_interest=Decimal(str(values["open_interest"])),
@@ -76,8 +85,9 @@ class HyperliquidOpenInterest(Data):
         )
 
     @staticmethod
-    def from_pyo3(pyo3_open_interest: object) -> "HyperliquidOpenInterest":
-        return HyperliquidOpenInterest(
+    def from_pyo3(pyo3_open_interest: object) -> "OpenInterest":
+        # Hyperliquid streams open interest over the WS; the Rust object arrives inside CustomData.
+        return OpenInterest(
             instrument_id=InstrumentId.from_str(str(pyo3_open_interest.instrument_id)),  # type: ignore[attr-defined]
             open_interest=Decimal(str(pyo3_open_interest.open_interest)),  # type: ignore[attr-defined]
             ts_event=pyo3_open_interest.ts_event,  # type: ignore[attr-defined]
@@ -85,12 +95,12 @@ class HyperliquidOpenInterest(Data):
         )
 
     def __repr__(self) -> str:
-        return f"HyperliquidOpenInterest({self.instrument_id}, {self.open_interest})"
+        return f"OpenInterest(instrument_id={self.instrument_id}, open_interest={self.open_interest})"
 
 
 register_arrow(
-    data_cls=HyperliquidOpenInterest,
-    schema=HyperliquidOpenInterest.schema(),
-    encoder=make_dict_serializer(schema=HyperliquidOpenInterest.schema()),
-    decoder=make_dict_deserializer(HyperliquidOpenInterest),
+    data_cls=OpenInterest,
+    schema=OpenInterest.schema(),
+    encoder=make_dict_serializer(schema=OpenInterest.schema()),
+    decoder=make_dict_deserializer(OpenInterest),
 )

@@ -12,40 +12,14 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
-"""Hyperliquid-specific pieces only: open interest + config (core tests live in collector_core)."""
+"""Hyperliquid-specific pieces only: config (core tests live in collector_core)."""
 
-from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
 from hyperliquid_collector.config import load_config
-from hyperliquid_collector.open_interest import HyperliquidOpenInterest
-from nautilus_trader.model.identifiers import InstrumentId
-from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
-
-_IID = "BTC-USD-PERP.HYPERLIQUID"
-
-
-def test_open_interest_round_trips_through_catalog(tmp_path: Path) -> None:
-    catalog = ParquetDataCatalog(str(tmp_path))
-    catalog.write_data(
-        [HyperliquidOpenInterest(InstrumentId.from_str(_IID), Decimal("123.456"), 1, 1)]
-    )
-    (oi,) = catalog.query(HyperliquidOpenInterest, identifiers=[_IID])
-    assert oi.data.open_interest == Decimal("123.456")
-
-
-def test_open_interest_from_pyo3_shape() -> None:
-    class Pyo3OI:
-        instrument_id = _IID
-        open_interest = "1234.5"
-        ts_event = ts_init = 7
-
-    oi = HyperliquidOpenInterest.from_pyo3(Pyo3OI())
-    assert str(oi.instrument_id) == _IID
-    assert oi.open_interest == Decimal("1234.5")
 
 
 def test_config_defaults_and_validation(tmp_path: Path) -> None:

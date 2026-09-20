@@ -41,7 +41,7 @@ original (never a runtime import).
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from dydx_collector.second_snapshot import DydxSecondSnapshot
+from collector_core.second_snapshot import DydxSecondSnapshot
 from data_api.routes import paging
 from data_api.settings import CATALOG_PATH
 from ml_signals import catalog_stats as _catalog_stats

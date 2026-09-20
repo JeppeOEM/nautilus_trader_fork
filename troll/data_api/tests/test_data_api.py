@@ -20,7 +20,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import data_api.app as app_module
-from dydx_collector.second_snapshot import DydxSecondSnapshot
+from collector_core.second_snapshot import DydxSecondSnapshot
 from ml_signals import catalog_stats as _catalog_stats
 from ml_signals import chart_data as _chart_data
 from nautilus_trader.model.identifiers import InstrumentId
