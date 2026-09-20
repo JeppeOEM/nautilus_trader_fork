@@ -1,6 +1,17 @@
+---
+status: awaiting-operator
+operator_actions:
+  - Run Bybit collector locally for ~60 s and confirm BTCUSDT-SPOT.BYBIT and BTCUSDT-LINEAR.BYBIT 1s snapshot rows exist and spot has no mark/index/funding/OI rows.
+  - Confirm GET /api/candles?instrument_id=BTCUSDT-SPOT.BYBIT returns venue=BYBIT, market=spot, and the screener and chart badge show and filter both.
+  - Deploy on the VPS with make up and confirm Dozzle is clean for 10 minutes with both WS connections.
+followup_review_recommended: false
+final_revision: a4e6df6b8561fd93fdbc940f53109c0e238b8f3e
+baseline_revision: 03030081018bc96aa53885dea57d666c4fd47912
+---
+
 # Story 22.4: Bybit spot collection and explicit perp/spot everywhere
 
-Status: ready-for-dev
+Status: awaiting-operator
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -18,24 +29,24 @@ so that a `BTCUSDT-SPOT.BYBIT` row is never mistaken for `BTCUSDT-LINEAR.BYBIT`.
 
 ## Tasks / Subtasks
 
-- [ ] Task 1 — `common/venues.py`: `market_kind` (AC: #2)
-  - [ ] Pure function, no I/O: strip the `.VENUE` suffix (reuse `ml_signals.venue.venue_of`'s `rpartition(".")` rule or duplicate the two lines — do not import `ml_signals` into `common`), then match the symbol's last `-` segment: `PERP`/`LINEAR`/`INVERSE` → `"perp"`, `SPOT` → `"spot"`, anything else → `"unknown"`. Never raises.
-  - [ ] `common/tests/test_venues.py`: `BTC-USD-PERP.DYDX`, `BTCUSDT-LINEAR.BYBIT`, `BTCUSDT-SPOT.BYBIT`, `BTCUSD-INVERSE.BYBIT`, `BTC-USD-PERP.HYPERLIQUID`, `HYPE-USDC-SPOT.HYPERLIQUID`, HIP-3 `km:US500-USD-PERP.HYPERLIQUID`, an option-style id → `unknown`, a malformed id (no dot) → `unknown`.
-- [ ] Task 2 — `bybit_collector/client.py`: second public WS (AC: #1)
-  - [ ] `self._ws_linear` (today's `_ws`) and `self._ws_spot = BybitWebSocketClient.new_public(product_type=BybitProductType.SPOT, environment=..., heartbeat=20)`; a small `_ws_for(iid)` helper: `bybit_product_type_from_symbol(iid.split(".")[0])` → LINEAR/SPOT → the matching client (raise on any other product type: this collector never subscribes inverse/option).
-  - [ ] `fetch_instruments()` → `request_instruments(LINEAR) + request_instruments(SPOT)` (spot are `CurrencyPair`; `instruments_from_pyo3` handles both — verify by writing them to the catalog in the test).
-  - [ ] `connect()` caches each instrument into the WS whose product type it belongs to, then connects both; `disconnect()` closes both; `subscribe(iid)`: trades + `orderbook.50` on the routed WS, `subscribe_ticker` **only** when LINEAR; `unsubscribe(iid)` and `resync_orderbook(iid)` route the same way. Docstring: why spot has no ticker/mark/funding/OI (docs cite), so nobody "fixes" it later.
-  - [ ] `bybit_collector/open_interest.py` stays `category=linear`; its `-LINEAR.BYBIT` id construction already excludes spot; the collector's `wanted` filter (`bybit_collector/collector.py` OI loop) keeps that true by construction. Add one assertion-style test that a spot id never appears in `parse_open_interest` output.
-  - [ ] `bybit_collector/config.toml`: add `"BTCUSDT-SPOT.BYBIT"`, `"ETHUSDT-SPOT.BYBIT"`.
-- [ ] Task 3 — `market` in the backend (AC: #3)
-  - [ ] Pydantic response models: add `market: str` beside `venue` in `CandlesResponse` (`data_api/routes/candles.py:173,177`), `SnapshotSeriesResponse` (`snapshots.py:194,198`), `IndicatorValuesResponse` (`indicators.py:367,380`), `IndicatorSeriesResponse` (`indicator_series.py:163,167`); the value is `market_kind(instrument_id)`. Rankings rows come from `ranking_engine/engine.py:441` — add `"market": market_kind(iid)` next to `"venue"`/`"venue_kind"`; `data_api/routes/rankings.py`'s `RankingsResponse` passes rows through, confirm the field survives its model.
-  - [ ] Regenerate the OpenAPI schema (`frontend/openapi.json`) the way the repo does today, then `cd frontend && npm run codegen` → `schema.ts` (auto-generated header; never hand-edit).
-  - [ ] Tests: extend the existing `data_api/tests/{test_candles,test_snapshots,test_indicator_series,test_indicators_config}.py` assertions that check `venue` to also check `market` for a `-SPOT.BYBIT` and a `-LINEAR.BYBIT` id; `ranking_engine/tests/test_engine.py`: rank entry has `market`.
-- [ ] Task 4 — `market` in the frontend (AC: #3)
-  - [ ] Screener: mirror 19.5 exactly — `RankingsPage.tsx:176-177` filter fields (`{ key: "market", label: "Market (perp/spot)", text: true }`), the Performance-tab cell at `:390-391`, `filters.ts` needs nothing new (text `=` filter already exists). Tests in `RankingsPage.test.tsx`/`filters.test.ts`: a spot and a linear row for the same symbol are distinct rows and `market = spot` filters to one.
-  - [ ] Chart header badge in `ChartPage.tsx`: ChartPage shows **no** venue today (grep is empty) — add one compact badge `BYBIT · spot` / `DYDX · perp` from the candles response's `venue`/`market`, styled with the terminal/ANSI identity from story 15.9 (reuse an existing badge/tag class if one exists; no new dependency).
-  - [ ] SSOT-04 says ranking-page changes land in `bot_tui` too; 19.5 deferred the venue column there. Add `venue` and `market` as two `fit()`'d columns (TUI-02) to the bot_tui rankings table **if** the row fits at 80 columns; otherwise register the gap in this story's Completion Notes — do not squeeze or truncate other columns for it.
-  - [ ] `vitest` + `tsc -b` clean (the Docker build runs `tsc -b`; a type error breaks the image, see commit `cb128d5d95`).
+- [x] Task 1 — `common/venues.py`: `market_kind` (AC: #2)
+  - [x] Pure function, no I/O: strip the `.VENUE` suffix (reuse `ml_signals.venue.venue_of`'s `rpartition(".")` rule or duplicate the two lines — do not import `ml_signals` into `common`), then match the symbol's last `-` segment: `PERP`/`LINEAR`/`INVERSE` → `"perp"`, `SPOT` → `"spot"`, anything else → `"unknown"`. Never raises.
+  - [x] `common/tests/test_venues.py`: `BTC-USD-PERP.DYDX`, `BTCUSDT-LINEAR.BYBIT`, `BTCUSDT-SPOT.BYBIT`, `BTCUSD-INVERSE.BYBIT`, `BTC-USD-PERP.HYPERLIQUID`, `HYPE-USDC-SPOT.HYPERLIQUID`, HIP-3 `km:US500-USD-PERP.HYPERLIQUID`, an option-style id → `unknown`, a malformed id (no dot) → `unknown`.
+- [x] Task 2 — `bybit_collector/client.py`: second public WS (AC: #1)
+  - [x] `self._ws_linear` (today's `_ws`) and `self._ws_spot = BybitWebSocketClient.new_public(product_type=BybitProductType.SPOT, environment=..., heartbeat=20)`; a small `_ws_for(iid)` helper: `bybit_product_type_from_symbol(iid.split(".")[0])` → LINEAR/SPOT → the matching client (raise on any other product type: this collector never subscribes inverse/option).
+  - [x] `fetch_instruments()` → `request_instruments(LINEAR) + request_instruments(SPOT)` (spot are `CurrencyPair`; `instruments_from_pyo3` handles both — verify by writing them to the catalog in the test).
+  - [x] `connect()` caches each instrument into the WS whose product type it belongs to, then connects both; `disconnect()` closes both; `subscribe(iid)`: trades + `orderbook.50` on the routed WS, `subscribe_ticker` **only** when LINEAR; `unsubscribe(iid)` and `resync_orderbook(iid)` route the same way. Docstring: why spot has no ticker/mark/funding/OI (docs cite), so nobody "fixes" it later.
+  - [x] `bybit_collector/open_interest.py` stays `category=linear`; its `-LINEAR.BYBIT` id construction already excludes spot; the collector's `wanted` filter (`bybit_collector/collector.py` OI loop) keeps that true by construction. Add one assertion-style test that a spot id never appears in `parse_open_interest` output.
+  - [x] `bybit_collector/config.toml`: add `"BTCUSDT-SPOT.BYBIT"`, `"ETHUSDT-SPOT.BYBIT"`.
+- [x] Task 3 — `market` in the backend (AC: #3)
+  - [x] Pydantic response models: add `market: str` beside `venue` in `CandlesResponse` (`data_api/routes/candles.py:173,177`), `SnapshotSeriesResponse` (`snapshots.py:194,198`), `IndicatorValuesResponse` (`indicators.py:367,380`), `IndicatorSeriesResponse` (`indicator_series.py:163,167`); the value is `market_kind(instrument_id)`. Rankings rows come from `ranking_engine/engine.py:441` — add `"market": market_kind(iid)` next to `"venue"`/`"venue_kind"`; `data_api/routes/rankings.py`'s `RankingsResponse` passes rows through, confirm the field survives its model.
+  - [x] Regenerate the OpenAPI schema (`frontend/openapi.json`) the way the repo does today, then `cd frontend && npm run codegen` → `schema.ts` (auto-generated header; never hand-edit).
+  - [x] Tests: extend the existing `data_api/tests/{test_candles,test_snapshots,test_indicator_series,test_indicators_config}.py` assertions that check `venue` to also check `market` for a `-SPOT.BYBIT` and a `-LINEAR.BYBIT` id; `ranking_engine/tests/test_engine.py`: rank entry has `market`.
+- [x] Task 4 — `market` in the frontend (AC: #3)
+  - [x] Screener: mirror 19.5 exactly — `RankingsPage.tsx:176-177` filter fields (`{ key: "market", label: "Market (perp/spot)", text: true }`), the Performance-tab cell at `:390-391`, `filters.ts` needs nothing new (text `=` filter already exists). Tests in `RankingsPage.test.tsx`/`filters.test.ts`: a spot and a linear row for the same symbol are distinct rows and `market = spot` filters to one.
+  - [x] Chart header badge in `ChartPage.tsx`: ChartPage shows **no** venue today (grep is empty) — add one compact badge `BYBIT · spot` / `DYDX · perp` from the candles response's `venue`/`market`, styled with the terminal/ANSI identity from story 15.9 (reuse an existing badge/tag class if one exists; no new dependency).
+  - [x] SSOT-04 says ranking-page changes land in `bot_tui` too; 19.5 deferred the venue column there. Add `venue` and `market` as two `fit()`'d columns (TUI-02) to the bot_tui rankings table **if** the row fits at 80 columns; otherwise register the gap in this story's Completion Notes — do not squeeze or truncate other columns for it.
+  - [x] `vitest` + `tsc -b` clean (the Docker build runs `tsc -b`; a type error breaks the image, see commit `cb128d5d95`).
 - [ ] Task 5 — live verification
   - [ ] Local ~60 s Bybit run: `custom_dydx_second_snapshot/BTCUSDT-SPOT.BYBIT/` rows at 1 s **and** `BTCUSDT-LINEAR.BYBIT`; spot rows have trades + book, no mark/index/funding/OI rows for spot ids in the catalog; `snapshots:raw` carries both.
   - [ ] `GET /api/candles?instrument_id=BTCUSDT-SPOT.BYBIT&...` → `venue="BYBIT", market="spot"`; the screener shows and filters both; chart badge reads `BYBIT · spot`.
@@ -85,8 +96,48 @@ Spot *trading* (Sandbox account type for `CurrencyPair`) is story 22.6's open it
 
 ### Agent Model Used
 
+Claude Sonnet 5
+
 ### Debug Log References
 
 ### Completion Notes List
 
+- Tasks 1-4 done. Task 5 (live verification: local Bybit run, API/screener/badge check, VPS `make up`) NOT done -- needs network/VPS/docker; left unticked for the operator.
+- Tests: common, bybit_collector, data_api, ranking_engine = 222 pass, 1 fail (`data_api/tests/test_rankings.py::test_rankings_live_message_reflected_by_rest_and_ws_relay`, needs a live Redis on 127.0.0.1:6379; environmental). Frontend: `npm run codegen`, vitest (23 files, 290 tests) and `tsc -b` clean.
+- Spot instrument catalog-write from `fetch_instruments` (CurrencyPair via `instruments_from_pyo3`) is not unit-tested (needs network); covered by Task 5. Client routing tested offline (`test_client_routes_by_product_type`).
+- Chart badge is fed by `useCandles` now returning `venueMarket` from the candles response; new `.venue-badge` class in `index.css`.
+- bot_tui gap (registered per spec): the Coins-pane row is already 192 columns wide (27 + 11 x 15 RANKING_COLS), far beyond 80, so `venue`/`market` columns were NOT added to bot_tui (19.5's venue deferral stands). SSOT-04 follow-up.
+- `ruff` is not installed in this environment; imports ordered by hand, no formatter run.
+- `_VOLUME_24H` is dYdX-only (known, out of scope): Bybit rows rank with volume24h = 0.
+
 ### File List
+
+- troll/common/venues.py, troll/common/tests/test_venues.py
+- troll/bybit_collector/client.py, config.toml, tests/test_collector.py
+- troll/data_api/routes/{candles,snapshots,indicators,indicator_series}.py
+- troll/data_api/tests/{test_candles,test_snapshots,test_indicator_series,test_indicators_config}.py
+- troll/ranking_engine/engine.py, troll/ranking_engine/tests/test_engine.py
+- troll/frontend/openapi.json, troll/frontend/src/api/schema.ts (generated)
+- troll/frontend/src/hooks/useCandles.ts (+ useCandles/usePickerIndicatorValues/useSnapshotSeries tests: `market` in fixtures)
+- troll/frontend/src/pages/{RankingsPage,ChartPage}.tsx, RankingsPage.test.tsx, ChartPage.test.tsx, troll/frontend/src/index.css
+- troll/docs/DATA_DICTIONARY.md
+
+## Review Triage Log
+
+### 2026-09-20 — Review pass
+- intent_gap: 0
+- bad_spec: 0
+- patch: 0
+- defer: 0
+- reject: many (stale badge: hook remounts via `key` per instrument/timeframe; INVERSE/OPTION never fetched; `market: str` matches `venue: str` precedent; style nits; ranking volume already documented as out of scope)
+- addressed_findings:
+  - none
+
+## Auto Run Result
+
+Status: awaiting-operator
+
+- Implemented: `market_kind` (common/venues.py), Bybit SPOT WS + routing in `bybit_collector/client.py`, spot ids in config, `market` in candles/snapshots/indicators/indicator_series responses and ranking entries, regenerated openapi/schema.ts, screener Market column+filter, chart venue/market badge.
+- Deferred/gap: bot_tui venue/market columns (row already ~192 cols wide, see Completion Notes).
+- Verification: Python (common, bybit_collector, data_api, ranking_engine) 222 pass, 1 fail (needs live Redis, fails pre-change); vitest 290 pass; `tsc -b` clean.
+- Residual risk: spot instrument catalog write and live WS behaviour untested until Task 5.

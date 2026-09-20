@@ -103,6 +103,8 @@ export interface UseCandlesResult {
   volume: VolumeDatum[];
   /** True while history is not loaded (fetch failed, or no candles yet); see `loadError`. */
   loadFailed: boolean;
+  /** `{venue, market}` from the newest candles response (e.g. BYBIT/spot), `null` until loaded. */
+  venueMarket: { venue: string; market: string } | null;
   /** Operator-facing reason while `loadFailed`, else `null`. */
   loadError: string | null;
   /** Refetch the newest page and merge it in -- after a `/ws/live` reconnect, the bars that
@@ -137,6 +139,7 @@ export function useCandles(
   barSeconds = BAR_SECONDS,
 ): UseCandlesResult {
   const [state, setState] = useState<CandlesState>(EMPTY_STATE);
+  const [venueMarket, setVenueMarket] = useState<UseCandlesResult["venueMarket"]>(null);
   const hasMoreOlderRef = useRef(true);
   const loadingRef = useRef(false);
   const earliestMsRef = useRef<number | null>(null);
@@ -176,6 +179,7 @@ export function useCandles(
             return;
           }
           setLoadError(null);
+          setVenueMarket({ venue: response.venue, market: response.market });
           earliestMsRef.current = response.items[0].t;
           hasMoreOlderRef.current = response.has_more;
           const mappedCandles = response.items.map(toChartDatum);
@@ -288,5 +292,5 @@ export function useCandles(
     return () => timeScale.unsubscribeVisibleLogicalRangeChange(handler);
   }, [chart, loadPage, enabled]);
 
-  return { ...state, loadFailed: loadError !== null, loadError, refreshNewest, appendBar };
+  return { ...state, venueMarket, loadFailed: loadError !== null, loadError, refreshNewest, appendBar };
 }

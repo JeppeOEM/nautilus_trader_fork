@@ -308,3 +308,14 @@ def test_indicator_values_reports_has_more_when_older_data_exists(
     body = response.json()
     assert len(body["items"]) == 3
     assert body["has_more"] is True
+
+
+@pytest.mark.parametrize(("iid", "market"), [("BTCUSDT-SPOT.BYBIT", "spot"), ("BTCUSDT-LINEAR.BYBIT", "perp")])
+def test_indicator_values_market_field_next_to_venue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, iid: str, market: str,
+) -> None:
+    client = _client(tmp_path, monkeypatch)
+    spec = json.dumps([{"name": "RelativeStrengthIndex", "params": {"period": 2}}])
+    query = {"before_ns": _BASE_NS, "limit": 3, "bar_seconds": 60, "entries": spec}
+    body = client.get(f"/api/coin/{iid}/indicator-values", params=query).json()
+    assert (body["venue"], body["market"]) == ("BYBIT", market)

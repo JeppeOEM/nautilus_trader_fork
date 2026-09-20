@@ -67,3 +67,24 @@ def test_config_defaults_and_validation(tmp_path: Path) -> None:
     path.write_text("open_interest_poll_seconds = 0\n")
     with pytest.raises(ValueError, match="open_interest_poll_seconds"):
         load_config(path)
+
+
+def test_spot_id_never_in_open_interest() -> None:
+    payload = {"result": {"list": [{"symbol": "BTCUSDT", "openInterest": "1"}]}}
+    ids = {str(item.instrument_id) for item in parse_open_interest(payload, ts=1)}
+    assert ids == {"BTCUSDT-LINEAR.BYBIT"}
+    assert not any("-SPOT" in i for i in ids)
+
+
+def test_client_routes_by_product_type() -> None:
+    from nautilus_trader.core.nautilus_pyo3 import BybitProductType
+
+    from bybit_collector.client import BybitClient
+
+    client = BybitClient(on_data=lambda _: None)
+    ws, pt = client._ws_for("BTCUSDT-SPOT.BYBIT")
+    assert ws is client._ws_spot and pt == BybitProductType.SPOT
+    ws, pt = client._ws_for("BTCUSDT-LINEAR.BYBIT")
+    assert ws is client._ws_linear and pt == BybitProductType.LINEAR
+    with pytest.raises(ValueError, match="unsupported"):
+        client._ws_for("BTCUSD-INVERSE.BYBIT")

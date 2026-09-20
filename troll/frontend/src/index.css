@@ -210,6 +210,14 @@ table {
   font-size: 1.1em;
 }
 
+/* Story 22.4: `BYBIT · spot` badge next to the symbol -- ANSI-style bordered tag, no fill. */
+.venue-badge {
+  border: 1px solid var(--color-border);
+  color: var(--color-text-dim);
+  padding: 0 6px;
+  margin-right: 6px;
+}
+
 .chart-cluster .tabbtn {
   flex: none;
   padding: 7px 8px;

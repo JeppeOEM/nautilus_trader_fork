@@ -31,6 +31,7 @@ const hooks = vi.hoisted(() => ({
 const mocks = vi.hoisted(() => ({
   candles: [] as unknown[],
   volume: [] as unknown[],
+  venueMarket: null as { venue: string; market: string } | null,
   liveBar: null as unknown,
   session: { candles: [] as unknown[], volume: [] as unknown[], completeFrom: null as number | null },
   sessionArgs: { enabled: false, sinceSeconds: 0, barSeconds: 0 },
@@ -40,7 +41,7 @@ vi.mock("../hooks/useCandles", () => ({
   BAR_SECONDS: 60,
   useCandles: (_iid: string, _chart: unknown, _enabled: boolean, bar: number) => {
     hooks.candlesBar.push(bar);
-    return { candles: mocks.candles, volume: mocks.volume };
+    return { candles: mocks.candles, volume: mocks.volume, venueMarket: mocks.venueMarket };
   },
 }));
 
@@ -142,12 +143,25 @@ beforeEach(() => {
   localStorage.clear();
   mocks.candles = [];
   mocks.volume = [];
+  mocks.venueMarket = null;
   mocks.liveBar = null;
   mocks.session = { candles: [], volume: [], completeFrom: null };
 });
 
 afterEach(() => {
   cleanup();
+});
+
+describe("ChartPage venue badge (Story 22.4)", () => {
+  it("shows `VENUE · market` from the candles response, and nothing before it loads", () => {
+    const { unmount } = render(page());
+    expect(screen.queryByLabelText("Venue and market")).not.toBeInTheDocument();
+    unmount();
+
+    mocks.venueMarket = { venue: "BYBIT", market: "spot" };
+    render(page());
+    expect(screen.getByLabelText("Venue and market")).toHaveTextContent("BYBIT · spot");
+  });
 });
 
 describe("ChartPage drawing tools (Story 18.1)", () => {

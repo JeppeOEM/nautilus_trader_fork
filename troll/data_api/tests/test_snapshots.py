@@ -253,3 +253,13 @@ def test_paging_reaches_data_beyond_a_gap_wider_than_the_query_window(
     assert first["has_more"] is True
     assert [i["t"] for i in second["items"]] == [(_BASE_NS - 3_600_000_000_000) // 1_000_000]
     assert second["has_more"] is False
+
+
+@pytest.mark.parametrize(("iid", "market"), [("BTCUSDT-SPOT.BYBIT", "spot"), ("BTCUSDT-LINEAR.BYBIT", "perp")])
+def test_market_field_next_to_venue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, iid: str, market: str,
+) -> None:
+    body = _client(str(tmp_path / "cat"), monkeypatch).get(
+        f"/api/snapshots/{iid}?before_ns={_BASE_NS}&limit=3",
+    ).json()
+    assert (body["venue"], body["market"]) == ("BYBIT", market)

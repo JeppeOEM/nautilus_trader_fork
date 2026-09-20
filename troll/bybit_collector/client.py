@@ -13,7 +13,7 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-Thin wrapper around Bybit's Rust-backed HTTP/WebSocket clients (linear USDT perps).
+Thin wrapper around Bybit's Rust-backed HTTP/WebSocket clients (linear USDT perps + spot).
 
 Same reason as `dydx_collector.client`: bypass TradingNode/DataEngine (unbounded-queue /
 shutdown-wedge bug) and drive the Rust connect/reconnect/decode logic with our own asyncio
@@ -49,7 +49,12 @@ ORDERBOOK_DEPTH = 50
 
 class BybitClient:
     """
-    Owns one Bybit HTTP client and one public linear WebSocket connection.
+    Owns one Bybit HTTP client and one public WebSocket per product type (LINEAR, SPOT).
+
+    Bybit binds a public stream to one product type, so `subscribe` routes by the Nautilus
+    symbol suffix. Spot subscribes trades + orderbook only, deliberately: Bybit's spot ticker
+    carries no bid/ask, funding or open interest (docs: websocket/public/ticker) and mark/index
+    price are perp concepts, so spot has no mark/index/funding/OI rows by design, not omission.
 
     `on_data` must be O(1) (append to a queue): it runs on the event loop via
     call_soon_threadsafe.
@@ -65,43 +70,71 @@ class BybitClient:
             testnet=environment == BybitEnvironment.TESTNET,
             demo=environment == BybitEnvironment.DEMO,
         )
-        self._ws = nautilus_pyo3.BybitWebSocketClient.new_public(  # type: ignore[attr-defined]
-            product_type=BybitProductType.LINEAR,
+        self._ws_linear = self._new_ws(BybitProductType.LINEAR, environment)
+        self._ws_spot = self._new_ws(BybitProductType.SPOT, environment)
+
+    @staticmethod
+    def _new_ws(product_type: BybitProductType, environment: BybitEnvironment) -> object:
+        return nautilus_pyo3.BybitWebSocketClient.new_public(  # type: ignore[attr-defined]
+            product_type=product_type,
             environment=environment,
             heartbeat=20,
         )
 
+    def _product_type(self, instrument_id: str) -> BybitProductType:
+        return nautilus_pyo3.bybit_product_type_from_symbol(  # type: ignore[attr-defined]
+            instrument_id.split(".")[0],
+        )
+
+    def _ws_for(self, instrument_id: str) -> tuple[object, BybitProductType]:
+        product_type = self._product_type(instrument_id)
+        if product_type == BybitProductType.LINEAR:
+            return self._ws_linear, product_type
+        if product_type == BybitProductType.SPOT:
+            return self._ws_spot, product_type
+        raise ValueError(f"unsupported Bybit product type for {instrument_id}: {product_type}")
+
     async def fetch_instruments(self) -> list:
-        """Raw pyo3-native linear instruments; convert with `instruments_from_pyo3` for the catalog."""
-        return await self._http.request_instruments(BybitProductType.LINEAR)
+        """Raw pyo3-native LINEAR + SPOT instruments; convert with `instruments_from_pyo3`."""
+        linear = await self._http.request_instruments(BybitProductType.LINEAR)
+        spot = await self._http.request_instruments(BybitProductType.SPOT)
+        return [*linear, *spot]
 
     async def connect(self, loop: asyncio.AbstractEventLoop, instruments: list) -> None:
-        # The WS client resolves symbols through its own instrument cache.
+        # Each WS resolves symbols through its own instrument cache.
         for instrument in instruments:
-            self._ws.cache_instrument(instrument)
-        await self._ws.connect(loop_=loop, callback=self._handle_message)
+            ws, _ = self._ws_for(str(instrument.id))
+            ws.cache_instrument(instrument)
+        for ws in (self._ws_linear, self._ws_spot):
+            await ws.connect(loop_=loop, callback=self._handle_message)
 
     async def disconnect(self) -> None:
-        if not self._ws.is_closed():
-            await self._ws.close()
+        for ws in (self._ws_linear, self._ws_spot):
+            if not ws.is_closed():
+                await ws.close()
 
     async def subscribe(self, instrument_id: str) -> None:
         iid = nautilus_pyo3.InstrumentId.from_str(instrument_id)
-        await self._ws.subscribe_trades(iid)
-        await self._ws.subscribe_orderbook(iid, ORDERBOOK_DEPTH)
-        await self._ws.subscribe_ticker(iid)  # mark/index price + funding rate
+        ws, product_type = self._ws_for(instrument_id)
+        await ws.subscribe_trades(iid)
+        await ws.subscribe_orderbook(iid, ORDERBOOK_DEPTH)
+        if product_type == BybitProductType.LINEAR:
+            await ws.subscribe_ticker(iid)  # mark/index price + funding rate (perp only)
 
     async def unsubscribe(self, instrument_id: str) -> None:
         iid = nautilus_pyo3.InstrumentId.from_str(instrument_id)
-        await self._ws.unsubscribe_trades(iid)
-        await self._ws.unsubscribe_orderbook(iid, ORDERBOOK_DEPTH)
-        await self._ws.unsubscribe_ticker(iid)
+        ws, product_type = self._ws_for(instrument_id)
+        await ws.unsubscribe_trades(iid)
+        await ws.unsubscribe_orderbook(iid, ORDERBOOK_DEPTH)
+        if product_type == BybitProductType.LINEAR:
+            await ws.unsubscribe_ticker(iid)
 
     async def resync_orderbook(self, instrument_id: str) -> None:
         """Unsubscribe + resubscribe the book: Bybit answers with a fresh snapshot (Clear + levels)."""
         iid = nautilus_pyo3.InstrumentId.from_str(instrument_id)
-        await self._ws.unsubscribe_orderbook(iid, ORDERBOOK_DEPTH)
-        await self._ws.subscribe_orderbook(iid, ORDERBOOK_DEPTH)
+        ws, _ = self._ws_for(instrument_id)
+        await ws.unsubscribe_orderbook(iid, ORDERBOOK_DEPTH)
+        await ws.subscribe_orderbook(iid, ORDERBOOK_DEPTH)
 
     def _handle_message(self, message: object) -> None:
         # Orderbook/trade/quote arrive as PyCapsules; ticker-derived mark/index/funding

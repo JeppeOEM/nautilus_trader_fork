@@ -175,6 +175,7 @@ export default function RankingsPage() {
     ...RANKING_COLS.map((col) => ({ key: col.key, label: col.key === "volume24h" ? `${col.label} (raw USD)` : col.label })),
     { key: "venue", label: "Venue", text: true },
     { key: "venue_kind", label: "Kind (cex/dex)", text: true },
+    { key: "market", label: "Market (perp/spot)", text: true },
     ...groups.flatMap((g) =>
       g.attrs.map((attr) => ({ key: `${TECHNICAL_FIELD_PREFIX}${g.entry.name}.${attr}`, label: `${g.entry.name}.${attr}` })),
     ),
@@ -282,6 +283,7 @@ export default function RankingsPage() {
             <th rowSpan={technicalsActive ? 2 : 1}>Instrument</th>
             {activeTab === "performance" && <th>Venue</th>}
             {activeTab === "performance" && <th>Kind</th>}
+            {activeTab === "performance" && <th>Market</th>}
             {activeTab === "performance" &&
               RANKING_COLS.map((col) => <th key={col.key}>{col.label}</th>)}
             {technicalsActive &&
@@ -389,6 +391,7 @@ export default function RankingsPage() {
                 </td>
                 {activeTab === "performance" && <td>{typeof row.venue === "string" ? row.venue : "—"}</td>}
                 {activeTab === "performance" && <td>{typeof row.venue_kind === "string" ? row.venue_kind : "—"}</td>}
+                {activeTab === "performance" && <td>{typeof row.market === "string" ? row.market : "—"}</td>}
                 {activeTab === "performance" &&
                   RANKING_COLS.map((col) => <td key={col.key}>{formatCell(col, row[col.key])}</td>)}
                 {technicalsActive &&

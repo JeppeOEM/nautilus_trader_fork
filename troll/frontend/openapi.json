@@ -1233,13 +1233,18 @@
           "venue": {
             "type": "string",
             "title": "Venue"
+          },
+          "market": {
+            "type": "string",
+            "title": "Market"
           }
         },
         "type": "object",
         "required": [
           "items",
           "has_more",
-          "venue"
+          "venue",
+          "market"
         ],
         "title": "CandlesResponse"
       },
@@ -1414,13 +1419,18 @@
           "venue": {
             "type": "string",
             "title": "Venue"
+          },
+          "market": {
+            "type": "string",
+            "title": "Market"
           }
         },
         "type": "object",
         "required": [
           "items",
           "has_more",
-          "venue"
+          "venue",
+          "market"
         ],
         "title": "IndicatorSeriesResponse"
       },
@@ -1476,13 +1486,18 @@
           "venue": {
             "type": "string",
             "title": "Venue"
+          },
+          "market": {
+            "type": "string",
+            "title": "Market"
           }
         },
         "type": "object",
         "required": [
           "items",
           "has_more",
-          "venue"
+          "venue",
+          "market"
         ],
         "title": "IndicatorValuesResponse"
       },
@@ -1756,13 +1771,18 @@
           "venue": {
             "type": "string",
             "title": "Venue"
+          },
+          "market": {
+            "type": "string",
+            "title": "Market"
           }
         },
         "type": "object",
         "required": [
           "items",
           "has_more",
-          "venue"
+          "venue",
+          "market"
         ],
         "title": "SnapshotSeriesResponse"
       },
