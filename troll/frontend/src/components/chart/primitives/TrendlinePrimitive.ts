@@ -88,6 +88,17 @@ export class TrendlinePrimitive implements ISeriesPrimitive<Time> {
     return [this.view];
   }
 
+  /** Pixel distance from (x, y) to the drawn segment, or `null` when not drawable. */
+  distanceTo(x: number, y: number): number | null {
+    if (!this.points) return null;
+    const [a, b] = this.points;
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const len2 = dx * dx + dy * dy;
+    const t = len2 === 0 ? 0 : Math.max(0, Math.min(1, ((x - a.x) * dx + (y - a.y) * dy) / len2));
+    return Math.hypot(x - (a.x + t * dx), y - (a.y + t * dy));
+  }
+
   /** The current screen-space endpoints, or `null` when not drawable -- exposed for tests. */
   screenPoints(): [ScreenPoint, ScreenPoint] | null {
     return this.points;

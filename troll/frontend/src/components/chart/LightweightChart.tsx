@@ -6,13 +6,14 @@ import {
   type IChartApi,
   type IPaneApi,
   type IPriceLine,
+  LineStyle,
   type ISeriesApi,
   type LineData,
   type MouseEventParams,
   type Time,
   type WhitespaceData,
 } from "lightweight-charts";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { ChartDatum, VolumeDatum } from "../../hooks/useCandles";
 import type { LiveBar } from "../../hooks/useLiveCandle";
@@ -157,6 +158,13 @@ interface LightweightChartProps {
    * and grab-suppression as `onPriceClick`; a click with no resolvable time -- past the
    * last bar's coordinate space -- is not reported). Works in both modes. */
   onPointClick?: (point: TrendlineAnchor) => void;
+  /** Trendline first click, previewed as a line following the cursor until the second. */
+  pendingAnchor?: TrendlineAnchor | null;
+  /** True while no tool is armed: a click on a drawn line then opens its edit menu. */
+  drawEditable?: boolean;
+  /** Edit-menu actions; `id` is a `PriceLineSpec` or `DrawingSpec` id. */
+  onDrawingColor?: (id: string, color: string) => void;
+  onDrawingDelete?: (id: string) => void;
   /** Story 18.3: while true (candles mode only), a click-drag on the chart draws a
    * transient measurement rectangle + label (a `MeasurementPrimitive` owned entirely by
    * this component -- never in `drawings`) instead of panning; release removes it and
@@ -262,6 +270,26 @@ function findGrabbedPriceLineId(
   return grabbedId;
 }
 
+/** The id of the trendline or price line under a click, or `null`. */
+function findClickedDrawingId(
+  point: { x: number; y: number },
+  series: ISeriesApi<"Candlestick"> | null,
+  drawings: Map<string, TrendlinePrimitive>,
+  specs: PriceLineSpec[],
+): string | null {
+  let bestId: string | null = null;
+  let best = PRICE_LINE_GRAB_TOLERANCE_PX + 1;
+  for (const [id, primitive] of drawings) {
+    const d = primitive.distanceTo(point.x, point.y);
+    if (d !== null && d < best) [best, bestId] = [d, id];
+  }
+  for (const spec of series ? specs : []) {
+    const y = series?.priceToCoordinate(spec.price);
+    if (y != null && Math.abs(point.y - y) < best) [best, bestId] = [Math.abs(point.y - y), spec.id];
+  }
+  return bestId;
+}
+
 /**
  * Owns the one `lightweight-charts` `createChart()` call for a coin's chart page
  * (AD-F4) -- the main pane (candlestick series in Candles mode, or 5 line series in Lines
@@ -281,6 +309,10 @@ export default function LightweightChart({
   onPriceLineDrag,
   onPriceClick,
   drawings = [],
+  pendingAnchor = null,
+  drawEditable = false,
+  onDrawingColor,
+  onDrawingDelete,
   onPointClick,
   measureActive = false,
   volume = [],
@@ -313,6 +345,11 @@ export default function LightweightChart({
   const lastCrosshairRef = useRef<MouseEventParams | null>(null);
   const dragIdRef = useRef<string | null>(null);
   const suppressNextClickRef = useRef(false);
+  const dragMovedRef = useRef(false);
+  const previewRef = useRef<TrendlinePrimitive | null>(null);
+  const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null);
+  const editRef = useRef({ priceLines, drawEditable });
+  editRef.current = { priceLines, drawEditable };
   const measureDataRef = useRef<{ data: ChartDatum[]; volume: VolumeDatum[] }>({ data, volume });
   const profileRegistryRef = useRef<Map<string, VolumeProfilePrimitive>>(new Map());
   // Latest-callback/latest-specs refs: the drag effects below must not re-subscribe (and
@@ -671,6 +708,7 @@ export default function LightweightChart({
             price: spec.price,
             color: spec.color,
             lineWidth: PRICE_LINE_WIDTH,
+            lineStyle: LineStyle.Solid,
             axisLabelVisible: true,
             title: spec.title,
           }),
@@ -952,6 +990,7 @@ export default function LightweightChart({
       if (!param.point || param.paneIndex !== 0) return;
       const price = seriesRef.current?.coordinateToPrice(param.point.y);
       if (price === null || price === undefined) return;
+      dragMovedRef.current = true;
       onPriceLineDrag(draggedId, price);
     };
 
@@ -990,15 +1029,20 @@ export default function LightweightChart({
       const param = lastCrosshairRef.current;
       const grabbedId = series && param ? findGrabbedPriceLineId(priceLines, series, param) : null;
       dragIdRef.current = grabbedId;
+      dragMovedRef.current = false;
       // A grab whose release happens outside the chart never fires a chart click, so
       // the suppression flag would otherwise swallow the NEXT real click -- every
       // non-grab mousedown clears it, keeping it true only from grab to click.
-      suppressNextClickRef.current = grabbedId !== null;
+      suppressNextClickRef.current = false;
       if (grabbedId === null) return;
       event.stopPropagation();
     };
 
     const handleMouseUp = (): void => {
+      // With no tool armed, an unmoved grab is a plain click (opens the edit menu); a real
+      // drag, or any grab while a tool is armed, swallows the click that follows.
+      suppressNextClickRef.current =
+        dragIdRef.current !== null && (dragMovedRef.current || !editRef.current.drawEditable);
       dragIdRef.current = null;
     };
 
@@ -1016,7 +1060,7 @@ export default function LightweightChart({
     // provided -- otherwise the chart's own click behavior is left completely untouched.
     const chart = chartRef.current;
     const wantsPrice = onPriceClick && mode === "candles";
-    if (!chart || (!wantsPrice && !onPointClick)) return;
+    if (!chart || (!wantsPrice && !onPointClick && !drawEditable)) return;
 
     const handleClick = (param: MouseEventParams): void => {
       if (suppressNextClickRef.current) {
@@ -1024,6 +1068,11 @@ export default function LightweightChart({
         return;
       }
       if (!param.point) return;
+      if (editRef.current.drawEditable) {
+        const hitId = findClickedDrawingId(param.point, seriesRef.current, drawingRegistryRef.current, editRef.current.priceLines);
+        const ev = param.sourceEvent;
+        setMenu(hitId && ev ? { id: hitId, x: ev.clientX, y: ev.clientY } : null);
+      }
       // Lines mode's host is the `price` line series (see the drawings effect).
       const host = seriesRef.current ?? lineSeriesRef.current?.price;
       const price = host?.coordinateToPrice(param.point.y);
@@ -1037,7 +1086,62 @@ export default function LightweightChart({
 
     chart.subscribeClick(handleClick);
     return () => chart.unsubscribeClick(handleClick);
-  }, [onPriceClick, onPointClick, mode]);
+  }, [onPriceClick, onPointClick, drawEditable, mode]);
 
-  return <div ref={containerRef} />;
+  useEffect(() => {
+    // Trendline preview: the pending first anchor drawn to the cursor until the second click.
+    const chart = chartRef.current;
+    const host = seriesRef.current ?? lineSeriesRef.current?.price;
+    if (!chart || !host || !pendingAnchor) return;
+    const preview = new TrendlinePrimitive([pendingAnchor, pendingAnchor], cssVar("--color-active", "#55ffff"));
+    host.attachPrimitive(preview);
+    previewRef.current = preview;
+    const move = (param: MouseEventParams): void => {
+      const price = param.point ? host.coordinateToPrice(param.point.y) : null;
+      const time = param.point ? (param.time ?? chart.timeScale().coordinateToTime(param.point.x)) : null;
+      if (price !== null && time !== null) preview.update([pendingAnchor, { time, price }], cssVar("--color-active", "#55ffff"));
+    };
+    chart.subscribeCrosshairMove(move);
+    return () => {
+      chart.unsubscribeCrosshairMove(move);
+      host.detachPrimitive(preview);
+      previewRef.current = null;
+    };
+  }, [pendingAnchor, mode]);
+
+  const menuSpec = menu ? (priceLines.find((l) => l.id === menu.id) ?? drawings.find((d) => d.id === menu.id)) : undefined;
+  const menuColor = /^#[0-9a-f]{6}$/i.test(menuSpec?.color ?? "") ? menuSpec!.color : "#55ffff";
+  return (
+    <>
+      <div ref={containerRef} />
+      {menu && menuSpec && (
+        <div
+          role="menu"
+          aria-label="Drawing options"
+          style={{
+            position: "fixed", left: menu.x + 8, top: menu.y + 8, zIndex: 1000, display: "flex", gap: 8,
+            alignItems: "center", padding: 6, background: cssVar("--color-bg", "#000"),
+            border: `1px solid ${cssVar("--color-text-dim", "#555")}`,
+          }}
+        >
+          <input
+            type="color"
+            aria-label="Line color"
+            value={menuColor}
+            onChange={(e) => onDrawingColor?.(menu.id, e.target.value)}
+          />
+          <button
+            type="button"
+            className="tabbtn"
+            onClick={() => {
+              onDrawingDelete?.(menu.id);
+              setMenu(null);
+            }}
+          >
+            Delete
+          </button>
+        </div>
+      )}
+    </>
+  );
 }

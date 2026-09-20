@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { CreatePriceLineOptions, Time } from "lightweight-charts";
@@ -103,6 +103,7 @@ vi.mock("lightweight-charts", () => ({
   CandlestickSeries: "CandlestickSeries-sentinel",
   LineSeries: "LineSeries-sentinel",
   HistogramSeries: "HistogramSeries-sentinel",
+  LineStyle: { Solid: 0 },
   createChart: (...args: unknown[]) => createChartMock(...args),
 }));
 
@@ -145,6 +146,9 @@ type ChartTestProps = {
   onPriceClick?: (price: number) => void;
   onPriceLineDrag?: (id: string, price: number) => void;
   drawings?: DrawingSpec[];
+  drawEditable?: boolean;
+  onDrawingColor?: (id: string, color: string) => void;
+  onDrawingDelete?: (id: string) => void;
   measureActive?: boolean;
   onMeasureEnd?: () => void;
   data?: { time: Time; open: number; high: number; low: number; close: number }[];
@@ -463,6 +467,7 @@ describe("LightweightChart", () => {
         price: 61000.5,
         color: "#123456",
         lineWidth: 1,
+        lineStyle: 0,
         axisLabelVisible: true,
         title: undefined,
       });
@@ -477,6 +482,7 @@ describe("LightweightChart", () => {
         price: 100,
         color: "#123456",
         lineWidth: 1,
+        lineStyle: 0,
         axisLabelVisible: true,
         title: "TP",
       });
@@ -716,6 +722,26 @@ describe("LightweightChart", () => {
       clickHandler({ point: { x: 10, y: 100 } });
 
       expect(onPriceClick).toHaveBeenCalledTimes(1);
+    });
+
+    it("opens an edit menu on a hline click and reports color / delete", () => {
+      const onDrawingColor = vi.fn();
+      const onDrawingDelete = vi.fn();
+      render(
+        chartElement({
+          priceLines: [makePriceLineSpec("hline-1", { color: "#123456" })],
+          drawEditable: true,
+          onDrawingColor,
+          onDrawingDelete,
+        }),
+      );
+      const clickHandler = subscribeClickMock.mock.calls.at(-1)![0];
+      act(() => clickHandler({ point: { x: 10, y: 102 }, sourceEvent: { clientX: 5, clientY: 5 } }));
+
+      fireEvent.change(screen.getByLabelText("Line color"), { target: { value: "#ff0000" } });
+      expect(onDrawingColor).toHaveBeenCalledWith("hline-1", "#ff0000");
+      fireEvent.click(screen.getByText("Delete"));
+      expect(onDrawingDelete).toHaveBeenCalledWith("hline-1");
     });
   });
 });

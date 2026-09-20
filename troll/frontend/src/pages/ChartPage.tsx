@@ -555,6 +555,16 @@ function ChartInner({ instrumentId, barSeconds, onTimeframeChange }: ChartInnerP
     replay.startPicking();
   };
 
+  const handleDrawingColor = useCallback((id: string, color: string): void => {
+    if (id.startsWith("hline-")) setPriceLines((all) => all.map((l) => (l.id === id ? { ...l, color } : l)));
+    else setDrawings((all) => all.map((d) => (d.id === id ? { ...d, color } : d)));
+  }, []);
+
+  const handleDrawingDelete = useCallback((id: string): void => {
+    if (id.startsWith("hline-")) setPriceLines((all) => all.filter((l) => l.id !== id));
+    else setDrawings((all) => all.filter((d) => d.id !== id));
+  }, []);
+
   const handlePriceLineDrag = useCallback(
     (id: string, price: number): void => {
       // Story 18.1 (AC #3): LightweightChart only reports the drag (it never mutates
@@ -718,6 +728,10 @@ function ChartInner({ instrumentId, barSeconds, onTimeframeChange }: ChartInnerP
             priceLines={priceLines}
             onPriceClick={handlePriceClick}
             drawings={drawings}
+            pendingAnchor={pendingAnchor}
+            drawEditable={activeTool === "cursor" && replayMode !== "picking"}
+            onDrawingColor={handleDrawingColor}
+            onDrawingDelete={handleDrawingDelete}
             onPointClick={handlePointClick}
             volumeProfiles={chartVolumeProfiles}
             rangeSelectActive={activeTool === "frvp"}
