@@ -30,7 +30,7 @@ downstream of the collector ever touches `nautilus_trader`'s live `TradingNode`/
 | `collector_core/` | The venue-neutral collector engine (Story 22.1) — ingest → 1s sample → flush → Parquet + `snapshots:raw` + `candles_*.db`; also the operator-run catalog tools | Parquet catalog (read/write), Redis (publish), `candles_*.db` (write) |
 | `dydx_collector/`, `bybit_collector/`, `hyperliquid_collector/` | Venue subclasses of `collector_core.Collector`: WS/HTTP client, config, venue quirks | Their venue's WS/REST (via Rust `nautilus_pyo3` clients) |
 | `common/` | Venue identifiers shared by every module (`venues.py`) | nothing (pure constants) |
-| `ml_signals/` | Shared indicators, candle store, backtest strategies (`strategies/`) | Parquet catalog (read), Redis (`snapshots:raw`, `rankings:live` read; `ranking:control` publish), `metrics.db` + `candles_*.db` (read) |
+| `ml_signals/` | Shared indicators, candle store, backtest strategies (`strategies/`) | Parquet catalog (read), Redis (`snapshots:raw`, `rankings:live` read), `metrics.db` + `candles_*.db` (read) `[amended 2026-09-20: Epic 22 story 22.8, review pass — `ranking:control` publish removed: the sole producer is `bot_tui/ranking_state.py:128` since Story 15.10 retired `dashboard`]` |
 | `data_api/` + `frontend/` | Web UI (React SPA) + read-only REST/WS on `:9100` | Redis (read), Parquet catalog + `candles_*.db` + `metrics.db` (read-only) |
 | `ranking_engine/` | Sole computer of coin ranking (volume + volatility) | Redis (`snapshots:raw` read; `rankings:live` publish; `ranking:control` read), `metrics.db` (write), dYdX REST (24h volume poll) |
 | `live_paper/` | The actual trading bot — `TradingNode` + `Strategy` in paper (or gated real-money) mode | dYdX WS/HTTP (via `TradingNode`), Redis (`bots:status` publish, `bots:control` read) |
@@ -39,18 +39,32 @@ downstream of the collector ever touches `nautilus_trader`'s live `TradingNode`/
 Module boundary rule enforced throughout (architecture AD-4): every module downstream
 of the collector depends only on shared data types (`DydxSecondSnapshot`,
 `OpenInterest`, `ml_signals.indicators` classes) and Redis/HTTP contracts — never
-another module's internal state. The collectors never import from anything downstream
-of them.
+another module's internal state. The collectors are *supposed* not to import from
+anything downstream of them, and today they do: `collector_core/collector.py:71-73`,
+`collector_core/{build_candles,repair_catalog,consolidate_catalog}.py`,
+`dydx_collector/collector.py:79-80`, `dydx_collector/open_interest.py:34` and
+`bybit_collector/collector.py:33` all import `ml_signals` utilities (two of them the
+private `catalog_stats._stamp_to_ns`). It pre-dates Epic 22 and is tracked as an open
+boundary question in the spine's Deferred section, not as a resolved rule
+`[amended 2026-09-20: Epic 22 story 22.8, review pass — this sentence asserted the clean
+version of the very clause AD-4 was amended to retract in the same commit]`.
 
 ---
 
 ## Data flow
 
+<!-- [amended 2026-09-20: Epic 22 story 22.8, review pass] the diagram was still the
+     single-venue system, contradicting this file's own three-collector summary above. -->
 ```
-dYdX WS/REST (Rust nautilus_pyo3 client)
+dYdX WS/REST      Bybit WS/REST      Hyperliquid WS
+(Rust nautilus_pyo3 clients, one duck-typed client.py per venue)
+        │                 │                 │
+        └─────────────────┴─────────────────┘
         │
         ▼
-  dydx_collector  ──────────────► Parquet catalog (Nautilus-native, zero-conversion)
+  collector_core.Collector  ─────► Parquet catalog (Nautilus-native, zero-conversion)
+  (one write gate; DydxCollector /                one shared catalog root
+   BybitCollector / HyperliquidCollector)
         │                                 │
         │ publish "snapshots:raw"         │ read (time-bounded / BacktestDataConfig)
         ▼                                 ▼
@@ -277,7 +291,7 @@ SSH-launched tool, not a background service.
 
 | Store | Writer | Readers | Contents |
 |---|---|---|---|
-| Parquet catalog (`dydx_collector/catalog/`) | all three collectors | `ml_signals`, `data_api`, backtests, Jupyter | Trades, order book deltas, bars, mark/index price, funding rate, instruments, `OpenInterest` — Nautilus-native, zero-conversion |
+| Parquet catalog (`dydx_collector/catalog/`) | all three collectors | `ml_signals`, `data_api`, backtests, Jupyter | Second-snapshots (`DydxSecondSnapshot`, trades folded in rather than stored raw — audit D-45), mark/index price, funding rate, `OpenInterest`, instrument definitions, plus `order_book_deltas` for the dYdX instruments that opt in. No `trade_tick/`; minute bars retired 2026-09-20 (D-35). Nautilus-native, zero-conversion `[amended 2026-09-20: Epic 22 story 22.8, review pass]` |
 | `candles_{dydx,bybit,hyperliquid}.db` (SQLite, `dydx_collector/candles/`) | that venue's collector | `data_api`, `ml_signals` | Finished 1m..1D bars derived from raw 1s (D-35). Fully rebuildable: `python -m collector_core.build_candles` |
 | `metrics.db` (SQLite) | `ranking_engine` | `data_api` (read-only mount) | Historical ranking snapshots (Story 1.4/FR8) |
 | Nautilus `Cache` (in-memory, `live_paper`) | `live_paper` | nobody external yet | Orders/positions/fills for the running bot — **not yet Redis-backed**, lost on restart |

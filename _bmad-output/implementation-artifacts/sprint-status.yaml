@@ -285,7 +285,7 @@ development_status:
   22-5-order-book-validation-per-venue: awaiting-operator
   22-6-live-paper-multi-venue-paper-trading-sandbox: done
   22-7-exchange-demo-testnet-and-real-money-for-bybit-and-hyperliquid: awaiting-operator
-  22-8-spine-rules-and-docs-updated-for-the-multi-venue-core: ready-for-dev
+  22-8-spine-rules-and-docs-updated-for-the-multi-venue-core: done
   22-9-historical-bar-backfill-for-bybit-and-hyperliquid: ready-for-dev
   22-10-rankings-show-every-collected-coin-across-venues-with-an-exchange-filter: ready-for-dev
   22-11-nightly-catalog-consolidation-for-every-venue: ready-for-dev

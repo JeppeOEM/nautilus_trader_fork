@@ -59,6 +59,7 @@ so that Hyperliquid data lands in the same catalog consistently.
 - Empirical finding: l2Book pushes arrived only ~every 5s in the live probe, so the stale-book guard is config (`stale_book_seconds`, default 30) and the 1s sampler repeats the last authoritative book between pushes. Worth revisiting if `subscribe_book` can be given finer cadence.
 - Same shape as bybit_collector but written as its own sibling (no shared code beyond `DydxSecondSnapshot`'s venue-neutral schema, which lets data_api serve `.HYPERLIQUID` ids untouched). Ids are `SYMBOL-USD-PERP.HYPERLIQUID`.
 - Live 25s run against mainnet: 45 BTC snapshots (20 levels) readable via data_api's reader, plus mark/funding/OI rows in the catalog. 6 new tests pass (12 with Bybit's). Compose service, Dockerfile COPY, Makefile updated (compose not brought up).
+- Sibling-not-base deferral (AC #3) closed by Epic 22 (22.1: `collector_core`) — `HyperliquidCollector` now subclasses `collector_core.collector.Collector` overriding no core *hook* — only `__init__`, to supply its client (`hyperliquid_collector/collector.py:42`).
 
 ### File List
 

@@ -1,6 +1,8 @@
-# dYdX Market Data Collector
+# Multi-Venue Market Data Collector
 
-Continuously records dYdX market data (trades, order book deltas, bars, mark/index prices, funding rates, open interest) to a local `ParquetDataCatalog`. The catalog is Nautilus-native — load it directly into backtests with zero conversion.
+Continuously records dYdX, Bybit and Hyperliquid market data to one local `ParquetDataCatalog`: 1-second book/trade snapshots (`DydxSecondSnapshot` — top-20 levels plus that second's trade OHLC/volume/counts), mark/index prices, funding rates, open interest and instrument definitions. Individual `TradeTick`s are folded into the second's snapshot and **not** stored raw, and `order_book_deltas` are a per-instrument opt-in (`store_order_book_deltas`) that is off by default and exists **for dYdX only** — `bybit_collector`/`hyperliquid_collector` take a flat `instruments = ["..."]` list with no per-instrument options. See `docs/DATA_INTEGRITY_AUDIT.md` D-45. Coverage is not uniform across venues either: a Bybit **spot** id yields trades and book only — no mark/index price, no funding rate (`bybit_collector/client.py:124-125` subscribes the ticker for `LINEAR` alone) and no open interest (Bybit spot has none). The catalog is Nautilus-native — load it directly into backtests with zero conversion.
+
+All three collectors are the same class: `collector_core.collector.Collector` (the write gate and every invariant check), subclassed by a thin per-venue package (`dydx_collector/`, `bybit_collector/`, `hyperliquid_collector/`) that supplies the venue's client and at most a few hook overrides. `make up` starts one container per venue from one image.
 
 ---
 
@@ -41,7 +43,19 @@ make build-base
 
 ## Configure instruments
 
-Edit `troll/dydx_collector/config.toml`:
+Each venue has its own `config.toml`; `docker-compose.yml` mounts each one into its own container:
+
+| Venue | File on the host | Mounted as |
+|---|---|---|
+| dYdX | `troll/config.toml` | `/app/dydx_collector/config.toml` (`rw` — the control plane writes it back) |
+| Bybit | `troll/bybit_collector/config.toml` | `/app/bybit_config.toml` (`:ro`) |
+| Hyperliquid | `troll/hyperliquid_collector/config.toml` | `/app/hyperliquid_config.toml` (`:ro`) |
+
+The thresholds every venue shares are the fields of `collector_core/config.py`'s `CoreConfig` (`environment`, `catalog_path`, `flush_interval_seconds`, `snapshot_interval_seconds`, `stale_book_seconds`, `crossed_resync_seconds`, `stale_trade_seconds`, `seen_trade_ids`, `feed_stale_seconds`, `book_crosscheck_seconds`, `instruments`); a venue adds keys only where it needs them (Bybit's `open_interest_poll_seconds`, dYdX's control-plane keys). One name does not carry over: dYdX's TOML key for the network is `network`, not `environment` — `DydxConfig.__post_init__` derives `environment` from it, so an `environment = ...` line in `troll/config.toml` is read by nothing.
+
+**Two loaders, and only one of them is strict.** Bybit and Hyperliquid go through `core_config_from_dict`, which rejects an unknown key outright rather than letting a misspelt threshold fall back to a default. dYdX's `load_config` (`dydx_collector/config.py`) predates the core and still reads key-by-key: it ignores unknown keys silently, and it never reads `stale_book_seconds`, `crossed_resync_seconds`, `stale_trade_seconds`, `seen_trade_ids`, `feed_stale_seconds` or `book_crosscheck_seconds` at all — dYdX always runs `CoreConfig`'s defaults for those six. Setting one of them in `troll/config.toml` neither takes effect nor errors.
+
+dYdX (`troll/config.toml`) — hot-reloaded every `config_reload_seconds`, no restart needed:
 
 ```toml
 network = "mainnet"
@@ -49,17 +63,21 @@ catalog_path = "catalog"          # relative to the container's /app — maps to
 flush_interval_seconds = 60
 config_reload_seconds = 30        # hot-reload: edit this file while running to add/remove instruments
 open_interest_poll_seconds = 300
-
-[[instruments]]
-id = "BTC-USD-PERP.DYDX"
-bar_intervals = ["1-MINUTE"]
-
-[[instruments]]
-id = "ETH-USD-PERP.DYDX"
-bar_intervals = ["1-MINUTE"]
+instruments = [
+    { id = "BTC-USD-PERP.DYDX" },
+    { id = "ETH-USD-PERP.DYDX", store_order_book_deltas = true, retain_hours = 48 },
+]
 ```
 
-Add any dYdX perpetual in `<BASE>-USD-PERP.DYDX` format. The collector hot-reloads this file every `config_reload_seconds` — no restart needed.
+Bybit and Hyperliquid take a plain list of ids and are read once at startup (no hot-reload):
+
+```toml
+environment = "mainnet"
+catalog_path = "/app/catalog"
+instruments = ["BTCUSDT-LINEAR.BYBIT", "BTCUSDT-SPOT.BYBIT"]
+```
+
+Add any dYdX perpetual in `<BASE>-USD-PERP.DYDX` format, any Bybit linear/spot id in `<SYMBOL>-LINEAR.BYBIT`/`<SYMBOL>-SPOT.BYBIT` format, and any Hyperliquid perp in `<BASE>-USD-PERP.HYPERLIQUID` format.
 
 ---
 
@@ -73,7 +91,7 @@ make logs      # tail live collector output
 make web       # open Dozzle log viewer (http://localhost:8080)
 ```
 
-The catalog appears at `troll/dydx_collector/catalog/` on the host, owned by your user (uid 1000).
+The catalog appears at `troll/dydx_collector/catalog/` on the host, owned by your user (uid 1000). Under `docker-compose.yml` all three collectors mount that one root (and the `troll/dydx_collector/candles/` directory, with a separate `candles_<venue>.db` per collector via `CANDLES_DB_PATH`), so `data_api` and every backtest read every venue from a single catalog — the path keeps its historical `dydx_collector/` name. The sharing is the compose mounts, not the config: Bybit's and Hyperliquid's `catalog_path` is the container-absolute `/app/catalog`, so running either outside Docker needs that value changed.
 
 **Web dashboard:** `make up` starts `data_api`, which serves the React UI on `http://localhost:9100` — rankings, per-coin candlestick/indicator charts, 31-day metrics history, and docs. Reads directly from the catalog — no collector restart needed.
 

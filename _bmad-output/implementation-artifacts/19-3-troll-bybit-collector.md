@@ -69,6 +69,7 @@ so that Bybit data lands in the same catalog without inheriting Nautilus's live-
 - Left out vs dYdX (not in ACs): pruning, Redis status/control, watchdog, incident reports, minute rollup, config live-reload. Ids are the adapter's `SYMBOL-LINEAR.BYBIT` (not `BTCUSDT.BYBIT`).
 - Verified live against mainnet: 879 linear instruments fetched, 20s run wrote 30 BTCUSDT snapshots (20 levels) readable via data_api's reader.
 - Added compose service `bybit_collector` + Dockerfile COPY + Makefile test path (compose not brought up here). 6 new tests pass.
+- Sibling-not-base deferral (AC #6) closed by Epic 22 (22.1: `collector_core`) — `BybitCollector` now subclasses `collector_core.collector.Collector` and overrides only `_clear_book_state`/`_apply_deltas` (the `u` sequence canary).
 
 ### File List
 
