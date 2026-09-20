@@ -234,9 +234,36 @@ services:
       PYTHONUNBUFFERED: "1"
       REDIS_URL: "redis://127.0.0.1:${REDIS_PORT:-6379}"
       FILLS_DB_PATH: "/app/live_paper/data/fills.db"
-      # Set to an explicit, differently-named file path to enable real-money execution --
-      # never set by default here. See live_paper/config.py's module docstring.
+      # Set to an explicit, differently-named file path to enable the non-Sandbox exec
+      # path (mode = "real_money" or "exchange_demo") -- never set by default here.
+      # See live_paper/config.py's module docstring.
       # LIVE_PAPER_REAL_MONEY_CONFIG: "/app/live_paper/real_money.toml"
+      # Venue credentials for that path only. Each adapter's Rust client picks the pair
+      # matching the environment it was configured with, so they are passed straight
+      # through rather than read anywhere in Python. Value-less entries forward a var
+      # only when the host exports it; an unset one stays UNSET inside the container.
+      # That distinction matters: the Rust clients take any present value as a key
+      # (`std::env::var(..).ok()`), so an empty-string default would hand the paper
+      # path's public Hyperliquid data client `HYPERLIQUID_PK=""`, which it rejects at
+      # construction ("EVM private key must be 32 bytes"), and would make the Bybit
+      # instrument provider sign its fee-rate call with an empty secret.
+      BYBIT_API_KEY:
+      BYBIT_API_SECRET:
+      BYBIT_DEMO_API_KEY:
+      BYBIT_DEMO_API_SECRET:
+      BYBIT_TESTNET_API_KEY:
+      BYBIT_TESTNET_API_SECRET:
+      # HYPERLIQUID_ACCOUNT_ADDRESS is deliberately un-suffixed -- the Rust side reads
+      # the one name on both mainnet and testnet (crates/.../hyperliquid/src/account.rs).
+      HYPERLIQUID_PK:
+      HYPERLIQUID_VAULT:
+      HYPERLIQUID_TESTNET_PK:
+      HYPERLIQUID_TESTNET_VAULT:
+      HYPERLIQUID_ACCOUNT_ADDRESS:
+      DYDX_PRIVATE_KEY:
+      DYDX_WALLET_ADDRESS:
+      DYDX_TESTNET_PRIVATE_KEY:
+      DYDX_TESTNET_WALLET_ADDRESS:
     user: "1000:1000"
     volumes:
       - ./live_paper/config.toml:/app/live_paper/config.toml:ro

@@ -19,11 +19,19 @@ Architecture AD-11: one `live_paper` process runs ONE `TradingNode` (one data cl
 and one shared simulated-balance pool per venue in use) hosting every configured paper bot --
 `PaperConfig.bots` is a tuple of `BotConfig`, one per bot, each getting its own
 `Strategy` instance and its own `bots:status`/`bots:history:*` identity. This is
-paper-only: `RealMoneyConfig` deliberately stays single-bot (its own subaccount,
+paper-only: `ExecConfig` deliberately stays single-bot (its own account/subaccount,
 never sharing a pool with other bots), so the multi-bot shape below is not mirrored
 there.
 
-PaperConfig and RealMoneyConfig are deliberately two separate dataclasses with two separate
+`ExecConfig` covers BOTH non-Sandbox modes -- `real_money` (a mainnet account, real
+funds) and `exchange_demo` (the venue's own play-money account: Bybit Demo, Hyperliquid
+or dYdX testnet). They share one dataclass, one loader and one env-var gate because they
+share the risk that matters here: both build a real venue exec client that signs and
+submits orders with real credentials. `mode` and `environment` must agree, so promoting
+a demo file to real money takes editing two keys in a file that is itself only reachable
+via LIVE_PAPER_REAL_MONEY_CONFIG -- never one stray line.
+
+PaperConfig and ExecConfig are deliberately two separate dataclasses with two separate
 loaders, not one schema with an optional `mode` field. Story 3.1 AC4 requires real-money
 execution be unreachable by any default or accidental config state -- a single toggleable
 field would let a stray `mode = "real_money"` line copy-pasted into the default, committed
@@ -52,7 +60,16 @@ from pathlib import Path
 from live_paper.venues import VENUES
 from live_paper.venues import VenueSpec
 from ml_signals.venue import venue_of
-from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
+from nautilus_trader.adapters.dydx.constants import DYDX
+
+
+# Which environments each explicit mode accepts. `real_money` is mainnet-only by
+# definition; `exchange_demo` is every play-money environment the venues offer (Bybit
+# calls its one `demo`, dYdX and Hyperliquid call theirs `testnet`).
+_MODE_ENVIRONMENTS: dict[str, tuple[str, ...]] = {
+    "real_money": ("mainnet",),
+    "exchange_demo": ("demo", "testnet"),
+}
 
 
 @dataclass(frozen=True)
@@ -104,9 +121,16 @@ class PaperConfig:
 
 
 @dataclass(frozen=True)
-class RealMoneyConfig:
+class ExecConfig:
+    """
+    The one-bot, explicitly-pathed config behind LIVE_PAPER_REAL_MONEY_CONFIG: `mode` is
+    `real_money` (mainnet) or `exchange_demo` (the venue's demo/testnet account), and
+    `environment` must match it. Credentials are never fields here -- the venue's Rust
+    client reads the env-var pair its environment selects (see node.py).
+    """
+
     mode: str
-    network: DydxNetwork
+    environment: str
     subaccount: int
     log_level: str
     instrument_id: str = "BTC-USD-PERP.DYDX"
@@ -224,21 +248,46 @@ def load_paper_config(path: Path) -> PaperConfig:
     return PaperConfig(log_level=raw.get("log_level", "INFO"), bots=bots, venues=venues)
 
 
-def load_real_money_config(path: Path) -> RealMoneyConfig:
+def load_real_money_config(path: Path) -> ExecConfig:
+    """
+    Load the explicitly-pathed, non-Sandbox config -- `real_money` or `exchange_demo`
+    (see this module's docstring for why both live behind the one env var). Every check
+    below fails closed and names the offending value(s); none of them ever reads a
+    credential.
+    """
     with path.open("rb") as f:
         raw = tomllib.load(f)
 
     mode = raw.get("mode")
-    if mode != "real_money":
+    if mode not in _MODE_ENVIRONMENTS:
         raise ValueError(
-            f'{path}: real-money config must set mode = "real_money" explicitly '
-            f"(found {mode!r}) -- refusing to start rather than guessing operator intent.",
+            f'{path}: config must set mode = "real_money" or mode = "exchange_demo" '
+            f"explicitly (found {mode!r}) -- refusing to start rather than guessing "
+            "operator intent.",
         )
 
-    _reject_unknown_keys(raw, RealMoneyConfig, path)
-    return RealMoneyConfig(
+    environment = str(raw.get("environment", "mainnet")).lower()
+    if environment not in _MODE_ENVIRONMENTS[mode]:
+        raise ValueError(
+            f"{path}: mode {mode!r} requires environment in "
+            f"{list(_MODE_ENVIRONMENTS[mode])}, got {environment!r} -- the two must agree, "
+            "so no single edited key can promote a demo config to mainnet.",
+        )
+
+    venue = venue_of(raw.get("instrument_id", "BTC-USD-PERP.DYDX"))
+    spec = _venue_spec(venue)
+    if environment not in spec.allowed_environments:
+        raise ValueError(
+            f"{path}: environment {environment!r} not in {list(spec.allowed_environments)} "
+            f"for venue {venue}",
+        )
+    if "subaccount" in raw and venue != DYDX:
+        raise ValueError(f"{path}: subaccount is dYdX-only, not valid for venue {venue}")
+
+    _reject_unknown_keys(raw, ExecConfig, path)
+    config = ExecConfig(
         mode=mode,
-        network=DydxNetwork.from_str(raw.get("network", "mainnet").lower()),  # type: ignore[attr-defined]
+        environment=environment,
         subaccount=raw.get("subaccount", 0),
         log_level=raw.get("log_level", "INFO"),
         instrument_id=raw.get("instrument_id", "BTC-USD-PERP.DYDX"),
@@ -248,12 +297,19 @@ def load_real_money_config(path: Path) -> RealMoneyConfig:
         ofi_confirm_threshold=raw.get("ofi_confirm_threshold", 0.0),
         bot_id=raw.get("bot_id", "bot-01"),
     )
+    # Venue-specific derivations (Bybit's product type from the id suffix) fail closed
+    # here, with the file named, rather than inside build_node.
+    try:
+        spec.exec_kwargs(config)
+    except ValueError as exc:
+        raise ValueError(f"{path}: {exc}") from exc
+    return config
 
 
 def resolve_config(
     paper_path: Path,
     real_money_path: str | None,
-) -> tuple[PaperConfig | RealMoneyConfig, bool]:
+) -> tuple[PaperConfig | ExecConfig, bool]:
     """
     Resolve which config to load and construct it.
 

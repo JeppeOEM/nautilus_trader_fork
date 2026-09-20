@@ -19,7 +19,7 @@ import pytest
 
 from live_paper.config import BotConfig
 from live_paper.config import PaperConfig
-from live_paper.config import RealMoneyConfig
+from live_paper.config import ExecConfig
 from live_paper.config import load_paper_config
 from live_paper.config import load_real_money_config
 from live_paper.config import resolve_config
@@ -68,20 +68,17 @@ def test_resolve_config_with_no_real_money_path_returns_paper(tmp_path) -> None:
 
 
 def test_paper_config_rejects_a_mode_field(tmp_path) -> None:
-    path = _write(tmp_path, "config.toml", f'network = "mainnet"\nmode = "real_money"\n{_ONE_BOT}')
+    path = _write(
+        tmp_path, "config.toml", f'environment = "mainnet"\nmode = "real_money"\n{_ONE_BOT}'
+    )
     with pytest.raises(ValueError, match="must not contain a 'mode' field"):
         load_paper_config(path)
 
 
-def test_real_money_config_requires_explicit_mode_field(tmp_path) -> None:
-    path = _write(tmp_path, "real_money.toml", 'network = "mainnet"\n')
-    with pytest.raises(ValueError, match='mode = "real_money"'):
-        load_real_money_config(path)
-
-
-def test_real_money_config_rejects_wrong_mode_value(tmp_path) -> None:
-    path = _write(tmp_path, "real_money.toml", 'mode = "paper"\nnetwork = "mainnet"\n')
-    with pytest.raises(ValueError, match='mode = "real_money"'):
+@pytest.mark.parametrize("body", ['environment = "mainnet"\n', 'mode = "paper"\n'])
+def test_exec_config_requires_one_of_the_two_explicit_modes(tmp_path, body) -> None:
+    path = _write(tmp_path, "exec.toml", body)
+    with pytest.raises(ValueError, match='mode = "real_money" or mode = "exchange_demo"'):
         load_real_money_config(path)
 
 
@@ -89,11 +86,85 @@ def test_real_money_config_loads_when_mode_is_explicit(tmp_path) -> None:
     path = _write(
         tmp_path,
         "real_money.toml",
-        'mode = "real_money"\nnetwork = "mainnet"\nsubaccount = 0\n',
+        'mode = "real_money"\nenvironment = "mainnet"\nsubaccount = 2\n',
     )
     config = load_real_money_config(path)
-    assert isinstance(config, RealMoneyConfig)
-    assert config.mode == "real_money"
+    assert isinstance(config, ExecConfig)
+    assert (config.mode, config.environment, config.subaccount) == ("real_money", "mainnet", 2)
+
+
+@pytest.mark.parametrize(
+    ("environment", "instrument_id"),
+    [
+        ("demo", "BTCUSDT-LINEAR.BYBIT"),
+        ("demo", "BTCUSDT-SPOT.BYBIT"),
+        ("testnet", "BTC-USD-PERP.HYPERLIQUID"),
+        ("testnet", "BTC-USD-PERP.DYDX"),
+    ],
+)
+def test_exchange_demo_loads_for_each_venue_play_money_environment(
+    tmp_path, environment, instrument_id
+) -> None:
+    path = _write(
+        tmp_path,
+        "demo.toml",
+        f'mode = "exchange_demo"\nenvironment = "{environment}"\n'
+        f'instrument_id = "{instrument_id}"\n',
+    )
+    config = load_real_money_config(path)
+    assert (config.mode, config.environment) == ("exchange_demo", environment)
+
+
+@pytest.mark.parametrize(
+    ("mode", "environment"),
+    [("real_money", "testnet"), ("real_money", "demo"), ("exchange_demo", "mainnet")],
+)
+def test_mode_and_environment_must_agree(tmp_path, mode, environment) -> None:
+    # The whole point of two keys: promoting a demo file to real money must take editing
+    # both, so neither a stray `mode` nor a stray `environment` line can do it alone.
+    path = _write(
+        tmp_path,
+        "exec.toml",
+        f'mode = "{mode}"\nenvironment = "{environment}"\ninstrument_id = "BTCUSDT-LINEAR.BYBIT"\n',
+    )
+    with pytest.raises(ValueError, match=f"mode '{mode}'.*{environment}"):
+        load_real_money_config(path)
+
+
+@pytest.mark.parametrize("instrument_id", ["BTC-USD-PERP.DYDX", "BTC-USD-PERP.HYPERLIQUID"])
+def test_demo_environment_is_rejected_on_a_venue_that_has_none(tmp_path, instrument_id) -> None:
+    path = _write(
+        tmp_path,
+        "demo.toml",
+        f'mode = "exchange_demo"\nenvironment = "demo"\ninstrument_id = "{instrument_id}"\n',
+    )
+    with pytest.raises(ValueError, match="environment 'demo' not in"):
+        load_real_money_config(path)
+
+
+@pytest.mark.parametrize("instrument_id", ["BTCUSDT-LINEAR.BYBIT", "BTC-USD-PERP.HYPERLIQUID"])
+def test_subaccount_is_rejected_on_a_non_dydx_venue(tmp_path, instrument_id) -> None:
+    path = _write(
+        tmp_path,
+        "demo.toml",
+        'mode = "real_money"\nenvironment = "mainnet"\nsubaccount = 1\n'
+        f'instrument_id = "{instrument_id}"\n',
+    )
+    with pytest.raises(ValueError, match="subaccount is dYdX-only"):
+        load_real_money_config(path)
+
+
+@pytest.mark.parametrize("instrument_id", ["BTCUSDT.BYBIT", "BTCUSDT-FUTURE.BYBIT"])
+def test_bybit_exec_config_requires_a_product_type_suffix(tmp_path, instrument_id) -> None:
+    # The suffix selects the exec client's product_types; without one, build_node would
+    # only fail later with an AttributeError, so the loader rejects it with the file named.
+    path = _write(
+        tmp_path,
+        "demo.toml",
+        f'mode = "exchange_demo"\nenvironment = "demo"\ninstrument_id = "{instrument_id}"\n',
+    )
+    with pytest.raises(ValueError, match="must carry its product type as the symbol suffix"):
+        load_real_money_config(path)
 
 
 def test_resolve_config_with_real_money_path_returns_real_money(tmp_path) -> None:
@@ -101,11 +172,11 @@ def test_resolve_config_with_real_money_path_returns_real_money(tmp_path) -> Non
     real_money_path = _write(
         tmp_path,
         "real_money.toml",
-        'mode = "real_money"\nnetwork = "mainnet"\n',
+        'mode = "real_money"\nenvironment = "mainnet"\n',
     )
     config, is_real_money = resolve_config(paper_path, real_money_path=str(real_money_path))
     assert is_real_money is True
-    assert isinstance(config, RealMoneyConfig)
+    assert isinstance(config, ExecConfig)
 
 
 def test_resolve_config_with_empty_string_real_money_path_returns_paper(tmp_path) -> None:
@@ -186,7 +257,7 @@ def test_real_money_config_rejects_an_unquoted_trade_size(tmp_path) -> None:
     path = _write(
         tmp_path,
         "real_money.toml",
-        'mode = "real_money"\nnetwork = "mainnet"\ntrade_size = 0.05\n',
+        'mode = "real_money"\nenvironment = "mainnet"\ntrade_size = 0.05\n',
     )
     with pytest.raises(ValueError, match="trade_size must be a quoted TOML string"):
         load_real_money_config(path)
@@ -214,7 +285,7 @@ def test_real_money_config_reads_explicit_bot_id(tmp_path) -> None:
     path = _write(
         tmp_path,
         "real_money.toml",
-        'mode = "real_money"\nnetwork = "mainnet"\nbot_id = "bot-btc-live"\n',
+        'mode = "real_money"\nenvironment = "mainnet"\nbot_id = "bot-btc-live"\n',
     )
     config = load_real_money_config(path)
     assert config.bot_id == "bot-btc-live"

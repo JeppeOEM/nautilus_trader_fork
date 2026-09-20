@@ -12,7 +12,8 @@ Baseline before starting: `make test-live-paper` passes (34/34 as of writing).
 
 - [ ] `troll/live_paper/config.toml` has no `mode` key, and
       `LIVE_PAPER_REAL_MONEY_CONFIG` is **unset** on the host — this is the
-      only thing standing between paper and real money.
+      only thing standing between paper and a real venue exec client (either
+      `mode`: `real_money` or `exchange_demo`).
 - [ ] `bot_id` in config.toml doesn't collide with another running bot's id —
       status/control are keyed on it.
 - [ ] Sanity-check `trade_size` against current instrument price ×
@@ -44,7 +45,69 @@ Baseline before starting: `make test-live-paper` passes (34/34 as of writing).
 
 - [ ] Multi-venue: each bot's `instrument_id` venue suffix is DYDX, BYBIT or HYPERLIQUID; Bybit spot and linear bots may share the node (one MARGIN account fills both -- see README).
 
-## Dry run — testnet first
+## Credentials — which env var each mode reads
+
+The explicit path (`LIVE_PAPER_REAL_MONEY_CONFIG`) never reads a credential in Python:
+each adapter's Rust client picks the pair matching the `environment` it was built with,
+straight out of the process environment. `docker-compose.yml`'s `live-paper` service
+forwards each of these only when the host exports it (an unset var stays unset in the
+container -- never an empty string, which the Rust clients would take as a key), so
+exporting them on the host (or putting them in `troll/.env`) is all that is needed.
+
+| Venue | `environment` | Env vars read |
+|---|---|---|
+| BYBIT | `mainnet` | `BYBIT_API_KEY`, `BYBIT_API_SECRET` |
+| BYBIT | `demo` | `BYBIT_DEMO_API_KEY`, `BYBIT_DEMO_API_SECRET` |
+| BYBIT | `testnet` | `BYBIT_TESTNET_API_KEY`, `BYBIT_TESTNET_API_SECRET` |
+| HYPERLIQUID | `mainnet` | `HYPERLIQUID_PK`, `HYPERLIQUID_VAULT`, `HYPERLIQUID_ACCOUNT_ADDRESS` |
+| HYPERLIQUID | `testnet` | `HYPERLIQUID_TESTNET_PK`, `HYPERLIQUID_TESTNET_VAULT`, `HYPERLIQUID_ACCOUNT_ADDRESS` |
+| DYDX | `mainnet` | `DYDX_PRIVATE_KEY`, `DYDX_WALLET_ADDRESS` |
+| DYDX | `testnet` | `DYDX_TESTNET_PRIVATE_KEY`, `DYDX_TESTNET_WALLET_ADDRESS` |
+
+`HYPERLIQUID_ACCOUNT_ADDRESS` is deliberately **not** environment-suffixed — the same
+name is read on both networks.
+
+- [ ] **Pre-flight, every explicit run:** confirm the right pair is actually exported
+      (`docker compose --profile live-paper run --rm live-paper printenv BYBIT_DEMO_API_KEY`).
+      A missing key does **not** fail startup — the client comes up *unauthenticated* and
+      only the first order tells you, so check before, not after.
+
+## Bybit Demo (`mode = "exchange_demo"`, `environment = "demo"`)
+
+Bybit Demo is **not** Bybit Testnet: it is a demo *account* hanging off the production
+exchange (`api-demo.bybit.com`, `wss://stream-demo.bybit.com/v5/private`), so the public
+market data is real mainnet data and only the private/account side is play money. A
+testnet key will not authenticate against it and vice versa.
+
+- [ ] Create the demo API key from Bybit's **Demo Trading** page (the key created under
+      the normal API-management page is a mainnet key; the testnet site's key is a third,
+      separate one). Export it as `BYBIT_DEMO_API_KEY`/`BYBIT_DEMO_API_SECRET`.
+- [ ] Fund the demo account — `POST /v5/account/demo-apply-money` (or the "request funds"
+      button on the demo-trading page). A fresh demo account has a zero balance and every
+      order is rejected until it is funded.
+- [ ] Write the config to its own file, e.g. `live_paper/bybit_demo.toml`:
+      `mode = "exchange_demo"`, `environment = "demo"`,
+      `instrument_id = "BTCUSDT-LINEAR.BYBIT"` (the id suffix picks the product type).
+      Never commit it.
+- [ ] Run it with `LIVE_PAPER_REAL_MONEY_CONFIG` pointed at that file, mounted read-only.
+- [ ] Orders go over HTTP: Bybit Demo has no WS Trade API, so `use_ws_execution_fast`
+      stays `False` (the code leaves it at its default — do not turn it on here).
+- [ ] Confirm one order end to end: submit → fill/ack → `bots:status` shows
+      `mode: "demo"` with the position and PnL fields moving.
+
+## Hyperliquid Testnet (`mode = "exchange_demo"`, `environment = "testnet"`)
+
+- [ ] Export `HYPERLIQUID_TESTNET_PK` (and `HYPERLIQUID_TESTNET_VAULT` only if trading a
+      vault). `HYPERLIQUID_ACCOUNT_ADDRESS` is shared with mainnet — set it if the signing
+      key is an API wallet rather than the account itself.
+- [ ] Get testnet USDC from the faucet (`claimDrip`, 1,000 mock USDC). **It requires a
+      prior mainnet deposit from the same address** — a never-used address cannot claim,
+      so budget for that step rather than discovering it at the faucet.
+- [ ] Expect thin testnet books: the strategy's thresholds and `trade_size` may need
+      loosening to get a fill at all. That is a mechanics run, not a P&L run.
+- [ ] Confirm the same end-to-end order as above, with `mode: "demo"` in `bots:status`.
+
+## Dry run — dYdX testnet, paper (Sandbox) execution
 
 `SandboxExecutionClientConfig` makes paper mode 100% simulated money on
 *either* network — `[venues.*] environment` only controls which market data the data

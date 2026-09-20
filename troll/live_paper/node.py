@@ -23,9 +23,10 @@ this new, structurally separate module.
 Paper mode (the only reachable default -- see config.py) wires each venue's live public
 market data client (dYdX/Bybit/Hyperliquid, see venues.py) into a
 SandboxExecutionClientConfig/SandboxLiveExecClientFactory simulated exchange, one per venue: no wallet address or private key anywhere in this path, so real funds are
-structurally unreachable, not merely gated by a disabled flag. Real money uses
-DydxExecClientConfig/DydxLiveExecClientFactory instead, which does sign and submit real
-on-chain transactions -- only reachable via the separate, explicit path in config.py.
+structurally unreachable, not merely gated by a disabled flag. The explicit path
+(`ExecConfig`, mode `real_money` or `exchange_demo`) uses the venue's own exec client
+from venues.py instead, which really signs and submits orders -- only reachable via the
+separate, explicit file in config.py.
 
 The Dummy Strategy (Story 3.2, `live_paper.strategy.DummyStrategy`) is attached directly
 via `node.trader.add_strategy(...)`, mirroring `examples/sandbox/dydx_sandbox.py`'s exact
@@ -47,18 +48,13 @@ from urllib.parse import urlparse
 from live_paper import bot_status
 from live_paper import trade_history
 from live_paper.config import BotConfig
+from live_paper.config import ExecConfig
 from live_paper.config import PaperConfig
-from live_paper.config import RealMoneyConfig
 from live_paper.config import resolve_config
 from live_paper.strategy import DummyStrategy
 from live_paper.strategy import DummyStrategyConfig
 from live_paper.venues import VENUES
 from ml_signals.venue import venue_of
-from nautilus_trader.adapters.dydx.config import DydxDataClientConfig
-from nautilus_trader.adapters.dydx.config import DydxExecClientConfig
-from nautilus_trader.adapters.dydx.constants import DYDX
-from nautilus_trader.adapters.dydx.factories import DydxLiveDataClientFactory
-from nautilus_trader.adapters.dydx.factories import DydxLiveExecClientFactory
 from nautilus_trader.adapters.sandbox.config import SandboxExecutionClientConfig
 from nautilus_trader.adapters.sandbox.factory import SandboxLiveExecClientFactory
 from nautilus_trader.config import CacheConfig
@@ -82,6 +78,7 @@ _REDIS_URL = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
 # env-override convention. Directory (not the bare file) must be volume-mounted for
 # fills to survive a container restart -- see docker-compose.yml's live-paper service.
 _FILLS_DB_PATH = os.environ.get("FILLS_DB_PATH", str(_MODULE_DIR / "data" / "fills.db"))
+_EXEC_MODE_LABELS = {"real_money": "live", "exchange_demo": "demo"}
 
 
 def _paper_venue_clients(
@@ -107,27 +104,37 @@ def _paper_venue_clients(
     return data_clients, exec_clients, data_factories
 
 
-def build_node(config: PaperConfig | RealMoneyConfig) -> TradingNode:
+def build_node(config: PaperConfig | ExecConfig) -> TradingNode:
     instrument_provider = InstrumentProviderConfig(load_all=True)
 
-    if isinstance(config, RealMoneyConfig):
-        # Real money stays dYdX-only, one-bot-per-file/subaccount (AD-11) --
-        # RealMoneyConfig itself already carries one bot's instrument/sizing/thresholds/bot_id.
+    if isinstance(config, ExecConfig):
+        # The explicit path stays one-bot-per-file/account (AD-11) -- ExecConfig itself
+        # already carries that one bot's instrument/sizing/thresholds/bot_id. Which venue
+        # and which clients both come off the VENUES table, so real_money and
+        # exchange_demo differ only by the environment enum they resolve to.
+        venue = venue_of(config.instrument_id)
+        spec = VENUES[venue]
+        environment = spec.parse_environment(config.environment)
         data_clients = {
-            DYDX: DydxDataClientConfig(
-                environment=config.network,
+            venue: spec.make_data_config(
+                environment=environment,
                 instrument_provider=instrument_provider,
             ),
         }
-        data_factories = {DYDX: DydxLiveDataClientFactory}
+        data_factories = {venue: spec.data_factory}
+        # No credential is ever passed in: each venue's Rust client resolves the key pair
+        # its environment selects (BYBIT_DEMO_API_KEY/..., HYPERLIQUID_TESTNET_PK, ...)
+        # straight from the process environment, so no secret reaches a config file or a
+        # log line. A missing key yields an unauthenticated client, not an error -- see
+        # DEPLOY_CHECKLIST.md's pre-flight step.
         exec_clients = {
-            DYDX: DydxExecClientConfig(
-                environment=config.network,
-                subaccount=config.subaccount,
+            venue: spec.exec_config_cls(
+                environment=environment,
                 instrument_provider=instrument_provider,
+                **spec.exec_kwargs(config),
             ),
         }
-        exec_factory = DydxLiveExecClientFactory
+        exec_factory = spec.exec_factory
         bots = (config,)
     else:
         bots = config.bots
@@ -194,7 +201,8 @@ def build_node(config: PaperConfig | RealMoneyConfig) -> TradingNode:
     # One bot_status/trade_history task per configured bot (AD-11), all on this one
     # node's loop -- both already take (strategy, bot_id, ...), so looping here is a
     # call-site change, not a signature change.
-    mode = "live" if isinstance(config, RealMoneyConfig) else "paper"
+    # Kept short: bot_tui's bots pane renders this in a fixed 5-char column.
+    mode = "paper" if isinstance(config, PaperConfig) else _EXEC_MODE_LABELS[config.mode]
     loop = node.get_event_loop()
     assert loop is not None, "TradingNode's kernel loop must exist once constructed"
     for strategy, bot in strategies:
@@ -240,7 +248,10 @@ def main() -> None:
 
     if is_real_money:
         logger.warning(
-            "Starting in REAL-MONEY mode via %s=%s", _REAL_MONEY_ENV_VAR, real_money_path
+            "Starting in %s mode via %s=%s",
+            config.mode.upper(),  # type: ignore[union-attr]
+            _REAL_MONEY_ENV_VAR,
+            real_money_path,
         )
 
     node = build_node(config)

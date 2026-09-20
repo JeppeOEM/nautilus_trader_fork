@@ -170,7 +170,7 @@ docstring). To trade a different strategy live:
    ...
    strategy = MyStrategy(config=MyStrategyConfig(...))
    ```
-3. Add any new tunable fields to `PaperConfig`/`RealMoneyConfig` in `live_paper/config.py`
+3. Add any new tunable fields to `PaperConfig`/`ExecConfig` in `live_paper/config.py`
    (both loaders) and to `config.toml`, mirroring the existing `trend_buy_threshold`-style
    fields. Never add a `mode` key to the paper config — `load_paper_config()` hard-errors
    on it by design (the paper/real-money split is structural, not a flag).
@@ -181,7 +181,7 @@ docstring). To trade a different strategy live:
    ```
 
 Real-money execution is a completely separate, explicitly-gated config file/loader
-(`RealMoneyConfig`/`load_real_money_config`) — never reachable from the default
+(`ExecConfig`/`load_real_money_config`) — never reachable from the default
 `config.toml` path. See `live_paper/README.md` and `config.py`'s module docstring before
 touching that path.
 
