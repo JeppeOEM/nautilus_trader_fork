@@ -21,7 +21,7 @@ Usage:
 
 Detection is `integrity.ohlc_outside_book` -- see there for why it is sound. It finds the
 rows written by the pre-fix collector, which counted dYdX's subscribed-reply trade history
-as live trades (collector._STALE_TRADE_NS).
+as live trades (before the `stale_trade_seconds` filter in `collector_core/config.py`).
 
 --apply, per flagged second: replace the snapshot with a copy whose trade fields are
 cleared (OHLC None, volumes/counts 0 -- the real trades in that second cannot be told

@@ -1,7 +1,9 @@
 # Data Integrity Audit — wrong-data dangers, old and new
 
-Audit date: 2026-09-19. Scope: everything between dYdX and a pixel on the chart — collector
-ingestion, the Parquet catalog, minute rollups, `data_api`, the frontend. Governing rules:
+Audit date: 2026-09-19; revised 2026-09-20 (Epic 22 moved the collector paths to
+`collector_core/`; minute rollups retired, D-35). Scope: everything between the venues and
+a pixel on the chart — collector ingestion, the Parquet catalog, the candle store,
+`data_api`, the frontend. Governing rules:
 `troll/CLAUDE.md` DATA-01…DATA-06. Every entry states the mechanism, the evidence, the
 treatment, and what is left open. "Open" is never rounded up to "fixed" (DATA-02).
 
@@ -40,15 +42,15 @@ Status: **FIXED** (code + test), **GUARDED** (canary/detection, cause outside ou
 
 | ID | Danger | Mechanism / evidence | Treatment | Status |
 |----|--------|----------------------|-----------|--------|
-| D-01 | Subscribe-time trade history counted as live | Above. Proven vs raw WS | `_STALE_TRADE_NS` (10 s) filter in `_process_data`; drops counted and logged each flush | FIXED (undeployed until `make redeploy-all`) |
-| D-02 | Replayed trades within the age window double-counted (short reconnect) | Reconnect resubscribes → replay of trades already counted, still < 10 s old for a brief outage | Bounded per-instrument `trade_id` dedup (2000 ids); duplicates counted, logged at WARNING | FIXED (undeployed) |
-| D-03 | Old spike rows already in the catalog and rollups | Rows written by pre-fix collector | `python -m collector_core.repair_catalog` (report-only by default; `--apply` clears trade fields on flagged seconds, deletes their rollup minute, regenerates it via the idempotent backfill). **Not yet run on production** | OPEN until run |
+| D-01 | Subscribe-time trade history counted as live | Above. Proven vs raw WS | `config.stale_trade_seconds` (10 s) filter in `_process_data`; drops counted and logged each flush | FIXED — no flagged row written after 2026-09-19 16:05 UTC in 25 h of local collection (scan below, D-03). VPS deploy not re-verified since `make redeploy-all` |
+| D-02 | Replayed trades within the age window double-counted (short reconnect) | Reconnect resubscribes → replay of trades already counted, still < 10 s old for a brief outage | Bounded per-instrument `trade_id` dedup (`config.seen_trade_ids`, 2000); duplicates counted, logged at WARNING | FIXED (same scan evidence as D-01) |
+| D-03 | Old spike rows already in the catalog | Rows written by the pre-fix collector. **Report-only scan, 2026-09-20, local catalog: BTC 4, ETH 5, SOL 6 flagged seconds, newest 2026-09-19 16:05 UTC — none after the fix. The other 26 instruments are unscanned** | `python -m collector_core.repair_catalog --catalog …` (report-only by default; `--apply` clears the trade fields of each flagged second, and `--candles-db` rebuilds the candle-store days they touch). Back up `catalog/` first — it rewrites Parquet | OPEN on the local catalog. **Moot on the VPS**: that catalog was created 2026-09-19 17:53, after the fix (D-33) |
 | D-04 | Any future bug that writes impossible prices | Class of failure D-01 belonged to | `integrity.ohlc_outside_book`: a second's trade high/low must lie inside that second's own top-20 book range (±0.1%). Live: logged at ERROR in `_second_loop`. Offline: the same function drives D-03's scan | GUARDED |
 | D-05 | BONK-USD-PERP book unparseable | 505 `Failed to parse orderbook deltas for BONK-USD … Raw value … exceeds QUANTITY_RAW_MAX` in 30 min. Sizes overflow the Rust `Quantity` in this build. Every BONK book message is dropped, so BONK has no valid book: no snapshots (the second loop skips it), candles/rankings absent or stale, and constant log/IO churn (ws raw-debug log rotates every ~20 s). Cannot be fixed here: `crates/` is off limits (FORK-01) | Unsubscribe BONK / add it to `exclude` via `collector:control` (runtime config lives on the VPS, not the repo). Any other coin with huge size scaling will fail the same way | OPEN — needs the control action on the VPS |
 | D-06 | Collector OOM-killed every 15–40 min → unflushed 60 s buffer lost, gaps (BTC: 1459 of 3600 expected snapshots in an hour) | `docker events`, exit 137; host 3.8 GB with 2.9 GB used, no swap, no `mem_limit`; orphan `dydx-dashboard` container (585 MB) still running | Order-book deltas of instruments outside `_delta_store` are no longer buffered for the 60 s flush interval (they were buffered then discarded). Swap file + removing the orphan dashboard are host actions | PARTLY FIXED — effect of the buffer fix unmeasured; host actions pending |
 | D-07 | Unbounded `_ingest_queue` under sustained load (collector at ~108 % CPU) | Same shape as the documented `DataEngine` OOM | None yet. Needs a queue-depth metric first; do not add a drop policy blind (DATA-05) | OPEN |
 | D-08 | Crossed dYdX book | Architectural (DATA-04) | Per-level message-id uncrossing already in place; resync only as fallback | GUARDED (pre-existing) |
-| D-09 | Stale book stamped as live | DATA-01 | `_STALE_BOOK_NS`, accumulators discarded on a skipped second | GUARDED (pre-existing) |
+| D-09 | Stale book stamped as live | DATA-01 | `config.stale_book_seconds`, accumulators discarded on a skipped second | GUARDED (pre-existing) |
 | D-10 | Detection loop itself stalls silently | DATA-02 | `second_loop` wall-clock lag canary; four `second_loop_lag` incidents today (12:22, 12:26, 12:50, 13:27) are a symptom of D-06/D-07 | GUARDED; incidents are open evidence for D-06 |
 | D-11 | Open interest dropped by the Rust bindings | Known | Polled separately over REST | GUARDED (pre-existing) |
 | D-12 | Mark/index price precision labels vary per tick | Known incident | `_at_fixed_precision()` | FIXED (pre-existing) |
@@ -78,8 +80,8 @@ Status: **FIXED** (code + test), **GUARDED** (canary/detection, cause outside ou
 
 | ID | Danger | Evidence / treatment | Status |
 |----|--------|----------------------|--------|
-| D-24 | **Root cause found; migration written (Story 21.6).** `second_snapshot` Parquet files come in two schemas: 11 columns (no `open/high/low/close_price`) up to 2026-09-10, 15 columns from 2026-09-16. `ParquetDataCatalog.query()` builds `pds.dataset(file_list)` (nautilus `persistence/catalog/parquet.py:2064`), which takes its schema **from the first file** — the oldest. Any query whose file set includes an old-schema file therefore silently drops the OHLC columns of every new-schema file in it: all trade seconds come back with `None` OHLC. Reproduced with plain pyarrow (`[old,new]` → no `open_price` column; `[new,old]` → has it) and by window bisection on BTC: windows centred on 2026-09-16 lose 0 rows at ≤ 7 d and 284 at 14 d and 30 d (the 14 d window is the first to reach a pre-09-10 file). All 29 instruments have both schemas; no other data type has mixed schemas. | Candles + legacy `/catalog/candles` now use `query_second_ohlc` (per-file read, immune). Other consumers read only book/volume columns present in both schemas, or read day-sized chunks that never span the 09-10→09-16 boundary (`repair_catalog`, `backfill_minute_rollup`), so they are unaffected today — but any *future* reader of OHLC over a range crossing that boundary via the catalog will silently lose it. Durable fix: `python -m dydx_collector.normalize_snapshot_schema --catalog … [--backup-dir … --apply]` rewrites the old files with the four OHLC columns as nulls (backup required, atomic replace, idempotent, refuses unknown columns); tested by reproducing the bug on a mixed-schema fixture. Local catalog: 22,143 files need it (report-only run; NOT applied). | FIX WRITTEN; OPEN until run on the production catalog after a backup |
-| D-25 | Because D-24 hid some rows, the new candle read also shows some historical spike seconds (D-01) that the old path hid by accident. They are the same rows `repair_catalog` targets | Run `repair_catalog` (D-03) | OPEN until D-03 is run |
+| D-24 | **Root cause found; migration written (Story 21.6).** `second_snapshot` Parquet files come in two schemas: 11 columns (no `open/high/low/close_price`) up to 2026-09-10, 15 columns from 2026-09-16. `ParquetDataCatalog.query()` builds `pds.dataset(file_list)` (nautilus `persistence/catalog/parquet.py:2064`), which takes its schema **from the first file** — the oldest. Any query whose file set includes an old-schema file therefore silently drops the OHLC columns of every new-schema file in it: all trade seconds come back with `None` OHLC. Reproduced with plain pyarrow (`[old,new]` → no `open_price` column; `[new,old]` → has it) and by window bisection on BTC: windows centred on 2026-09-16 lose 0 rows at ≤ 7 d and 284 at 14 d and 30 d (the 14 d window is the first to reach a pre-09-10 file). All 29 instruments have both schemas; no other data type has mixed schemas. | Candles now use `query_second_ohlc` (per-file read, immune). Other consumers read only book/volume columns present in both schemas, or read day-sized chunks that never span the 09-10→09-16 boundary (`repair_catalog`), so they are unaffected today — but any *future* reader of OHLC over a range crossing that boundary via the catalog will silently lose it. Durable fix: `python -m dydx_collector.normalize_snapshot_schema --catalog … [--backup-dir … --apply]` rewrites the old files with the four OHLC columns as nulls (backup required, atomic replace, idempotent, refuses unknown columns); tested by reproducing the bug on a mixed-schema fixture. Local catalog: 22,143 files need it (report-only run; NOT applied). | FIX WRITTEN; OPEN until run on the production catalog after a backup |
+| D-25 | Because D-24 hid some rows, the new candle read also shows some historical spike seconds (D-01) that the old path hid by accident. They are the same rows `repair_catalog` targets | Run `repair_catalog` (D-03) | OPEN on the local catalog until D-03 is run; moot on the VPS (D-33) |
 
 ### Story 21.6 — no hidden errors (DATA-07)
 
@@ -145,9 +147,13 @@ moves onto the core in Story 22.2).
 1. `make redeploy-all` — ships D-01, D-02, D-04, D-06 (buffer), D-18.
 2. On the VPS: add swap, remove the orphan `dydx-dashboard` container (D-06).
 3. Unsubscribe BONK via `collector:control` (D-05).
-4. `python -m collector_core.repair_catalog --catalog /app/catalog` — read the report;
-   then `--apply` (D-03). Back up `catalog/` first: it rewrites parquet files.
-5. After the first deploy of the candle store: `make build-candles` (populates `candles.db` from the raw 1s archive; until then charts and technicals fall back to the slow Parquet path). Re-run after `repair_catalog --apply` for the repaired days, or run `repair_catalog` with `--candles-db`.
+4. `python -m collector_core.repair_catalog --catalog /app/catalog` — read the report, then
+   `--apply --candles-db <candles_*.db>` (D-03). Back up `catalog/` first: it rewrites
+   Parquet files. Expected to report nothing on the VPS (D-33); the local dev catalog
+   still has the rows as of 2026-09-20.
+5. After the first deploy of the candle store: `make build-candles` (populates
+   `candles_dydx.db` from the raw 1s archive; until then charts and technicals fall back
+   to the slow Parquet path).
 6. Schedule `make consolidate` nightly (D-36) and run it once by hand for existing history; then delete `<catalog>/data/custom_dydx_minute_rollup/` (D-35, unused).
 7. Stop the three collectors, then merge the per-venue open-interest history (D-40):
    `python -m collector_core.migrate_open_interest --catalog /app/catalog` (report), then

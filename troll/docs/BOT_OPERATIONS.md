@@ -4,7 +4,7 @@ Two separate strategy paths exist in `troll/`, and they are not interchangeable:
 
 | | Backtest / research | Live paper bot |
 |---|---|---|
-| Where | `ml_signals/*_strategy.py` + `ml_signals/backtest_dydx.py` | `live_paper/strategy.py` + `live_paper/node.py` |
+| Where | `ml_signals/strategies/*_strategy.py` + `ml_signals/strategies/backtest_dydx.py` | `live_paper/strategy.py` + `live_paper/node.py` |
 | Runtime | `BacktestNode` (deterministic replay of the collector's Parquet catalog) | `TradingNode` (real dYdX WS data, sandbox execution) — the one place `troll/CLAUDE.md`'s TradingNode ban is lifted (AD-8) |
 | Wiring | `ImportableStrategyConfig(strategy_path=..., config_path=...)` — string path, per-symbol config | One strategy class hardcoded via `node.trader.add_strategy(...)` in `node.py`, mirroring `examples/sandbox/dydx_sandbox.py` |
 | Start/stop | One-shot Python process call, exits when done | Long-running Docker container, controlled via Redis pub/sub or `bot_tui` |
@@ -82,7 +82,8 @@ This is the research path — a `Strategy` subclass run by `BacktestNode` agains
 collector's own Parquet catalog, referenced by string path so parameter sweeps and
 symbol/date changes never require touching the strategy file.
 
-**Minimal shape** (see `ml_signals/example_strategy.py` for the full working version):
+**Minimal shape** (see `ml_signals/strategies/example_strategy.py` for the full working
+version):
 
 ```python
 from decimal import Decimal
@@ -120,11 +121,11 @@ Reuse an existing indicator from `ml_signals/indicators.py` (SIGNAL-01: derive f
 stored snapshot fields, don't reinvent) rather than rolling your own math inline.
 
 **Wire it into a backtest run** by pointing `ImportableStrategyConfig` at the new class
-(`ml_signals/backtest_dydx.py:_build_run_config`, ~line 99):
+(`ml_signals/strategies/backtest_dydx.py:_build_run_config`, ~line 85):
 ```python
 ImportableStrategyConfig(
-    strategy_path="ml_signals.my_strategy:MyStrategy",
-    config_path="ml_signals.my_strategy:MyStrategyConfig",
+    strategy_path="ml_signals.strategies.my_strategy:MyStrategy",
+    config_path="ml_signals.strategies.my_strategy:MyStrategyConfig",
     config={
         "instrument_id": f"{symbol}.DYDX",
         "bar_type": f"{symbol}.DYDX-{bar_interval}-LAST-INTERNAL",

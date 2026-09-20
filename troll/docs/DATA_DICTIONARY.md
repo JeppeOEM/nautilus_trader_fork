@@ -6,9 +6,10 @@ against the `bmad` branch as of 2026-09-05.
 
 ---
 
-## 1. Raw data collected (`troll/dydx_collector/`)
+## 1. Raw data collected (`troll/collector_core/` + the venue collectors)
 
-The collector (`collector.py`) owns one WS connection per dYdX network and writes
+Each collector (`collector_core/collector.py` plus a venue subclass) owns one WS
+connection per venue network and writes
 everything through `ParquetDataCatalog.write_data()` — no hand-rolled schemas
 (`troll/CLAUDE.md` NAUT-02). Nine distinct types land in the catalog. Six are native
 Nautilus types decoded straight from the Rust adapter; two (`DydxSecondSnapshot`,
@@ -18,7 +19,7 @@ PyO3 bindings don't expose the fields another way.
 ### 1.1 `TradeTick` (native Nautilus type) — **no longer persisted**
 
 - **Source:** `v4_trades` WS channel, decoded by the Rust adapter, delivered via
-  `DydxClient._handle_message`'s PyCapsule path (`client.py:138-140`).
+  `DydxClient._handle_message`'s PyCapsule path (`client.py`).
 - **Fields:** `instrument_id`, `price`, `size`, `aggressor_side` (`AggressorSide.BUYER`/
   `SELLER`), `trade_id`, `ts_event`, `ts_init`.
 - **Cadence:** event-driven, one per executed trade.
@@ -31,7 +32,7 @@ PyO3 bindings don't expose the fields another way.
   dashboard's "Ticks mode" (individual trade price/size/side scatter, `dashboard.py`)
   was removed in the same change since it has no data source anymore.
 - **Subscription scope:** every pinned + liquid instrument (`_subscribe`,
-  `collector.py:508-511`). Illiquid instruments are not subscribed to trades.
+  `collector.py`). Illiquid instruments are not subscribed to trades.
 - **Historical data:** `TradeTick` Parquet files written before this cutover remain in
   the catalog and are still readable — this only stops *new* rows from being written.
 
@@ -43,22 +44,22 @@ PyO3 bindings don't expose the fields another way.
   `OrderBookDeltas`.
 - **Cadence:** event-driven, one message per book change.
 - **Written:** only for instruments with `store_order_book_deltas = true` in
-  `config.toml` (`collector.py:486-487`, gated by `self._delta_store`) — this is a
+  `config.toml` (`collector.py`, gated by `self._delta_store`) — this is a
   raw, high-volume type, opt-in per instrument. Independently of storage, every
   pinned/liquid instrument's deltas are always applied to an in-memory `OrderBook`
-  (`_apply_deltas`, `collector.py:434-463`) used to build `DydxSecondSnapshot` (§1.7).
+  (`_apply_deltas`, `collector.py`) used to build `DydxSecondSnapshot` (§1.7).
 - **Retention:** per-instrument `retain_hours` in `config.toml`, pruned by
-  `_prune_delta_retention` (`collector.py:276-288`); `None` = kept forever.
+  `_prune_delta_retention` (`collector.py`); `None` = kept forever.
 - **No sequence-gap detection:** dYdX's WS `sequence` field is connection-global, not
   per-market, so it can't be used to detect a dropped delta for one instrument — see
-  `_apply_deltas`'s docstring (`collector.py:434-451`) and `troll/.planning/debug/
+  `_apply_deltas`'s docstring (`collector.py`) and `troll/.planning/debug/
   crossed-book-root-cause.md` for the investigation this constraint drove.
 
 ### 1.3 `Bar` (native Nautilus type)
 
-- **Source:** subscribed via `DydxClient.subscribe_bars` (`client.py:123-124`), PyCapsule
+- **Source:** subscribed via `DydxClient.subscribe_bars` (`client.py`), PyCapsule
   path.
-- **Note:** the collector's `run()` (`collector.py:771-819`) never calls
+- **Note:** the collector's `run()` (`collector.py`) never calls
   `subscribe_bars` — no bar subscription is currently active. The capability exists in
   `client.py` but is unused; **no `Bar` data is currently written to the catalog by this
   collector.** (`ml_signals/candles.py`'s `aggregate_ohlc` instead derives candles from
@@ -67,9 +68,9 @@ PyO3 bindings don't expose the fields another way.
 ### 1.4 `MarkPriceUpdate` (native Nautilus type)
 
 - **Source:** `subscribe_markets()` markets-channel, global for all instruments
-  (`client.py:129-131`, `collector.py:781`), plain pyo3-object path (`client.py:142-151`).
+  (`client.py`, `collector.py`), plain pyo3-object path (`client.py`).
 - **Fields:** `instrument_id`, `value` (`Price`), `ts_event`, `ts_init`.
-- **Precision fix:** re-stamped through `_at_fixed_precision()` (`client.py:45-66`)
+- **Precision fix:** re-stamped through `_at_fixed_precision()` (`client.py`)
   before storage — dYdX's raw feed derives each tick's `Price.precision` from its own
   digit count, so consecutive ticks can carry different precision labels, which
   `ParquetDataCatalog` refuses to merge. See `troll/CLAUDE.md` NAUT-01.
@@ -78,19 +79,19 @@ PyO3 bindings don't expose the fields another way.
 
 ### 1.5 `IndexPriceUpdate` (native Nautilus type)
 
-- Same channel/path/precision-fix as mark price (`client.py:152-161`). Oracle index
+- Same channel/path/precision-fix as mark price (`client.py`). Oracle index
   price, distinct from the venue's own mark price.
 
 ### 1.6 `FundingRateUpdate` (native Nautilus type)
 
-- **Source:** markets channel, plain pyo3-object path (`client.py:162-163`), forwarded
+- **Source:** markets channel, plain pyo3-object path (`client.py`), forwarded
   via `FundingRateUpdate.from_pyo3` with no transformation.
 - **Fields:** `instrument_id`, funding rate value, `ts_event`, `ts_init`.
 - **Downstream use:** **none found.** Stored to the catalog but no file in
   `ml_signals/` or `ranking_engine/` reads `FundingRateUpdate` — dead data as of this
   writing.
 
-### 1.7 `DydxSecondSnapshot` (custom `Data` type, `second_snapshot.py`)
+### 1.7 `DydxSecondSnapshot` (custom `Data` type, `collector_core/second_snapshot.py`)
 
 The core microstructure record — a 1-second-sampled L2 book snapshot, **not** raw
 deltas. Per `troll/CLAUDE.md`'s Signal Architecture rule: store raw inputs, compute
@@ -99,7 +100,7 @@ signals on read (SIGNAL-01).
 - **Fields** (`second_snapshot.py`, schema at `DydxSecondSnapshot.schema()`):
   - `instrument_id`
   - `bid_prices`, `bid_sizes`, `ask_prices`, `ask_sizes` — up to `BOOK_DEPTH = 20`
-    levels each (`second_snapshot.py:36`), index 0 = best bid/ask
+    levels each (`second_snapshot.py`), index 0 = best bid/ask
   - `buy_volume`, `sell_volume` — summed trade size per side since the last tick
   - `buy_count`, `sell_count` — trade count per side since the last tick
   - `open_price`, `high_price`, `low_price`, `close_price` — OHLC of actual executed
@@ -112,19 +113,16 @@ signals on read (SIGNAL-01).
     price source (falling back to `MarkPriceUpdate` only when no snapshot ever
     recorded a trade for that instrument).
   - `ts_event`, `ts_init`
-- **Built by:** `Collector._second_loop` (`collector.py:652-718`), every
-  `snapshot_interval_seconds` (config default 0.5s, `config.py:66-68`, `config.toml`
-  not shown here but overrideable).
-- **Guards before emission:** skips crossed books (`_handle_crossed_book`,
-  `collector.py:577-650` — also drives a forced resubscribe/resync after 3s of a
-  persistent cross), and skips stale books with no `OrderBookDeltas` for
-  `_STALE_BOOK_NS = 5s` (`collector.py:142,682-693`) — both are `troll/CLAUDE.md`
-  DATA-01 "flag the gap, never fabricate" implementations.
-- **Scope:** pinned + liquid instruments only (`collector.py:672`). Illiquid
-  instruments get no snapshots.
+- **Built by:** `collector_core/collector.py`'s `Collector._second_loop`, every
+  `snapshot_interval_seconds` (config default 1.0s, overrideable in `config.toml`).
+- **Guards before emission:** skips crossed books (the venue's `_handle_crossed_book` —
+  on dYdX it also drives a forced resubscribe/resync after a persistent cross), and skips
+  stale books with no `OrderBookDeltas` for `config.stale_book_seconds` (5s) — both are
+  `troll/CLAUDE.md` DATA-01 "flag the gap, never fabricate" implementations.
+- **Scope:** pinned + liquid instruments only. Illiquid instruments get no snapshots.
 - **Dual delivery:** written to the catalog via the normal buffer/flush path
-  (`self._on_data(snapshot)`, `collector.py:716`) **and** published live to Redis
-  channel `snapshots:raw` (`_publish_snapshot_batch`, `collector.py:291-304`) —
+  (`self._on_data(snapshot)`, `collector.py`) **and** published live to Redis
+  channel `snapshots:raw` (`_publish_snapshot_batch`, `collector.py`) —
   this Redis stream is what `ranking_engine` actually consumes live (§3); the Parquet
   copy is for backtest/historical replay.
 
@@ -143,20 +141,20 @@ signals on read (SIGNAL-01).
   `classify_liquidity`.
 
 - **Why custom/separate:** open interest is parsed Rust-side but never forwarded to
-  Python on either the REST or WS markets-channel path (`open_interest.py:16-24`
+  Python on either the REST or WS markets-channel path (`open_interest.py`
   docstring, citing `crates/adapters/dydx/src/python/{http,websocket}.rs`) — the one
   field this collector has to re-fetch itself.
 - **Fields:** `instrument_id`, `open_interest` (`Decimal`, stored as a string in Arrow
   to avoid float round-tripping), `ts_event`, `ts_init`.
 - **Source:** plain stdlib `urllib` poll of dYdX's public indexer
-  `/v4/perpetualMarkets` REST endpoint (`_fetch_markets_json`, `open_interest.py:163-171`),
-  every `open_interest_poll_seconds` (config default 300s, `config.py:77`).
-- **Also drives liquidity tiering:** `classify_liquidity` (`open_interest.py:109-160`)
+  `/v4/perpetualMarkets` REST endpoint (`_fetch_markets_json`, `open_interest.py`),
+  every `open_interest_poll_seconds` (config default 300s, `config.py`).
+- **Also drives liquidity tiering:** `classify_liquidity` (`open_interest.py`)
   reads the *same* markets JSON response but keys off `volume24H` (USD), not
   `openInterest` (base-token units) — `troll/CLAUDE.md` OBS-03 explicitly calls out
   the token-vs-USD confusion as a past production bug. This classification decides
   which instruments get trade/book subscriptions (pinned/liquid/illiquid tiers,
-  `collector.py:21-40`), independent of storing `OpenInterest` itself.
+  `collector.py`), independent of storing `OpenInterest` itself.
 - **Downstream use of the stored `open_interest` field:** **none found** in
   `ml_signals/`/`ranking_engine/` — only the *volume*-based liquidity classification
   (a separate, parallel computation in the same module) is used live. The OI Parquet
@@ -166,15 +164,15 @@ signals on read (SIGNAL-01).
 
 ### 1.9 `InstrumentStatus` (native Nautilus type)
 
-- **Source:** markets channel, plain pyo3-object path (`client.py:164-165`).
+- **Source:** markets channel, plain pyo3-object path (`client.py`).
 - **Downstream use:** **none found** — stored, not read anywhere in `ml_signals/`/
   `ranking_engine/`.
 
 ### 1.10 Instrument definitions
 
-- **Source:** one-time REST fetch (`DydxClient.fetch_instruments`, `client.py:91-101`)
+- **Source:** one-time REST fetch (`DydxClient.fetch_instruments`, `client.py`)
   at collector startup, converted via `instruments_from_pyo3()` and written once
-  (`collector.py:774-777`). Not a recurring stream — defines the instrument
+  (`collector.py`). Not a recurring stream — defines the instrument
   universe/precision metadata the catalog needs to interpret every other type
   correctly.
 
@@ -188,7 +186,7 @@ single-snapshot formulas live as plain functions in `indicators.py`; stateful/ro
 indicators are classes, and for anything shown in a live UI, exactly one process
 (`ranking_engine`) is allowed to own the running instance (§3).
 
-### 2.1 Stateless, single-snapshot functions (`indicators.py:409-467`)
+### 2.1 Stateless, single-snapshot functions (`indicators.py`)
 
 All take one `DydxSecondSnapshot`-shaped dict (§1.7) and return a value with no memory
 of prior calls:
@@ -201,7 +199,7 @@ of prior calls:
 | `volume_delta(snapshot)` | `buy_volume - sell_volume` | `buy_volume`, `sell_volume` |
 | `trade_aggregates(snapshots)` | sums `buy_volume`/`sell_volume`/`buy_count`/`sell_count` across a list — feeds CVD and `avg_trade_size` downstream | all four trade fields |
 
-`Microprice` (`indicators.py:116-155`) is also available as a stateful `Indicator`
+`Microprice` (`indicators.py`) is also available as a stateful `Indicator`
 class fed one tick at a time (`update_raw`/`handle_quote_tick`) — used where a class
 with `.initialized` semantics is more convenient (e.g. `chart_data.py` replay, §2.7),
 but produces the identical formula.
@@ -213,10 +211,10 @@ price+size to the previous tick's; a price improvement counts the full new size,
 unchanged price counts the size *delta*, a worse price counts a full withdrawal on
 that side. `contribution = bid_term - ask_term`, summed over a rolling window.
 
-- **`OrderFlowImbalance`** (`indicators.py:157-232`) — top-of-book only (level 0),
+- **`OrderFlowImbalance`** (`indicators.py`) — top-of-book only (level 0),
   rolling sum over `window` updates (default 50). Fed from `QuoteTick` or raw
   bid/ask price+size. Used by `metrics_computer.py` (§2.6) and `chart_data.py` (§2.7).
-- **`MultiLevelOFI`** (`indicators.py:269-397`) — same formula applied independently
+- **`MultiLevelOFI`** (`indicators.py`) — same formula applied independently
   at each of the top `levels` price levels and summed, using the full
   `bid_prices`/`bid_sizes`/`ask_prices`/`ask_sizes` lists from `DydxSecondSnapshot`.
   Options: `usd_notional` (multiply each size term by its price level, for
@@ -228,7 +226,7 @@ that side. `contribution = bid_term - ask_term`, summed over a rolling window.
 
 ### 2.3 Order Book Imbalance (OBI)
 
-`MultiLevelOBI` (`indicators.py:234-267`): `sum(bid_sizes[:levels]) / (sum(bid_sizes[:levels]) + sum(ask_sizes[:levels]))`.
+`MultiLevelOBI` (`indicators.py`): `sum(bid_sizes[:levels]) / (sum(bid_sizes[:levels]) + sum(ask_sizes[:levels]))`.
 1.0 = all depth on the bid side, 0.5 = balanced, 0.0 = all ask. `ranking_engine` runs
 three instances per instrument at levels 3/5/10.
 
@@ -236,7 +234,7 @@ three instances per instrument at levels 3/5/10.
 
 `build_footprint` buckets **resting order-book size changes** (not executed trades —
 dYdX L2 deltas have no order IDs, so a shrinking level can't be told apart from a
-cancel vs. a fill; see the module's own caveat, `footprint.py:16-29`) into
+cancel vs. a fill; see the module's own caveat, `footprint.py`) into
 per-candle, per-price-band cells (`bands_per_candle`, default 4). Each cell tracks
 gross `bid_added`/`bid_removed`/`ask_added`/`ask_removed` size (not just net, so a
 churning level is visible). Input: `OrderBookDelta`s + `Candle`s (§2.5). Used by the
@@ -286,14 +284,14 @@ into ranking.
 
 Bridges §1's Parquet catalog and the SQLite `metrics_store` (§3.4). One entry point:
 
-- `compute_all` — adds `price_stats` (`catalog_stats.py:190-224`) — latest price,
+- `compute_all` — adds `price_stats` (`catalog_stats.py`) — latest price,
   `pct_change_1h`/`pct_change_24h`, and `volatility` (stdev of consecutive-return
   percentages over a 25-hour trailing window read straight from the Parquet
   trade/price history) — to the `ofi`/`microprice`/`spread` fields its required
   `book_metrics_fn` argument supplies (`ranking_engine._legacy_book_metrics_for`,
   reading the same live indicator state `rankings:live` uses — SSOT-02, no
   from-Parquet OFI replay). This is what `ranking_engine._slow_loop_task` calls every
-  `DB_WRITE_INTERVAL_SECONDS` (60s, `engine.py:401-426`) to populate the
+  `DB_WRITE_INTERVAL_SECONDS` (60s, `engine.py`) to populate the
   `pct_1h`/`pct_24h`/`volatility` fields in the live ranking (§3).
 
 ### 2.9 `rank_history.py` / `watchlist.py`
@@ -307,8 +305,9 @@ import the full dependency set (fastapi, redis).
 
 Untracked in git but **actively wired up**, not a work-in-progress stub: it defines
 `RANKING_COLS`, the ordered list of `(store_key, label, format_fn, color_fn)` tuples
-that both `ml_signals/dashboard.py` (web) and `bot_tui`'s Coins pane render as the
-ranking table (`troll/CLAUDE.md` SSOT-04). Every `store_key` in this list
+that `bot_tui`'s Coins pane renders as the ranking table (`troll/CLAUDE.md` SSOT-04).
+The web UI no longer uses it: `ml_signals/dashboard.py` was retired in Story 15.10 and
+`frontend/` defines its own columns. Every `store_key` in this list
 (`ofi_10_z`, `obi_10`, `obi_5`, `obi_3`, `cvd`, `spread`, `microprice_lean`,
 `volume_delta`, `price`, `pct_1h`, `pct_24h`, `volatility`, `volatility_score`,
 `volume24h`) is a field name coming straight off a `rankings:live` rank entry —
@@ -333,10 +332,10 @@ time / window contents / float accumulation order.
   published live by the collector (§1.7). This is the engine's only per-tick market
   data input; it never reads Parquet directly for live-tick fields.
 - **`volume24H`** — polled independently every 60s directly from dYdX's indexer
-  `/v4/perpetualMarkets` (`_fetch_volume_24h_json`, `engine.py:152-167`) —
+  `/v4/perpetualMarkets` (`_fetch_volume_24h_json`, `engine.py`) —
   deliberately *not* reused from `dydx_collector.open_interest._fetch_markets_json`
   even though it hits the same endpoint, because architecture rule AD-4 disallows
-  cross-module reuse of anything that does network I/O (`engine.py:155-159`).
+  cross-module reuse of anything that does network I/O (`engine.py`).
 - **Parquet catalog** (via `metrics_computer.compute_all`, §2.8) — read once per
   minute for `price`/`pct_1h`/`pct_24h`/`volatility`.
 - **`ranking:control`** — a Redis control channel that switches the active ranking
@@ -344,12 +343,12 @@ time / window contents / float accumulation order.
 
 ### 3.2 What's computed, per instrument, on every `snapshots:raw` batch
 
-`_ingest_snapshot_batch` (`engine.py:211-259`) feeds every incoming snapshot into
+`_ingest_snapshot_batch` (`engine.py`) feeds every incoming snapshot into
 long-lived per-instrument indicator instances:
 
 - **`VolatilityTracker`** (`volatility.py`) — a *fourth*, deliberately separate
   volatility computation from the other three in this codebase (the module's own
-  docstring calls this out explicitly, `volatility.py:16-24`): cross-sectional stdev
+  docstring calls this out explicitly, `volatility.py`): cross-sectional stdev
   of consecutive mid-price percentage returns over an age-based (not fixed-length)
   rolling window, default 3600s. Age-based eviction specifically because a
   fixed-length deque would silently shrink its effective time span if the snapshot
@@ -362,17 +361,17 @@ long-lived per-instrument indicator instances:
   feeds `trade_aggregates` (§2.1) for CVD/`avg_trade_size`, and a fast 300-tick
   `statistics.stdev` of mid-price returns (`volatility_fast`) — a *fifth*, separate
   volatility number, distinct from both `VolatilityTracker`'s and the catalog-derived
-  one, by explicit design (`engine.py:285-292`).
+  one, by explicit design (`engine.py`).
 - A reconnect-gap guard (`_OFI_GAP_NS = 3s`) clears OFI trackers' previous-tick state
   after a gap, so a stale pre-gap price never gets diffed against a fresh one.
 
 ### 3.3 The published `rankings:live` message
 
-`_current_ranks()` (`engine.py:329-361`) builds one row per instrument that has had a
+`_current_ranks()` (`engine.py`) builds one row per instrument that has had a
 snapshot within the last 30 seconds (`_WATCHLIST_STALE_NS`, reusing OBS-01's
 "pipeline failure, not quiet market" threshold verbatim). Each row combines:
 
-- Live-tick fields from §3.2's indicators (`_fast_metrics_for`, `engine.py:262-314`):
+- Live-tick fields from §3.2's indicators (`_fast_metrics_for`, `engine.py`):
   `ofi_10_z`, `ofi_3/5/10`, `obi_3/5/10`, `microprice`, `microprice_lean`
   (`microprice - mid`), `spread`, `cvd` (`buy_vol - sell_vol` from the rolling
   window), `volume_delta` (latest snapshot's `buy_volume - sell_volume`),
@@ -382,7 +381,7 @@ snapshot within the last 30 seconds (`_WATCHLIST_STALE_NS`, reusing OBS-01's
 - `volume24h` and `volatility_score` — always both present regardless of active mode.
 - **`rank`** — 1-indexed position after sorting all rows by the active mode's score
   descending: `volatility_score` if mode is `"volatility"`, else `volume24h`
-  (`engine.py:356-361`). This is the actual ranking: **default mode ranks
+  (`engine.py`). This is the actual ranking: **default mode ranks
   instruments purely by 24-hour USD volume**; switching mode re-sorts the identical
   row set by the cross-sectional volatility stdev instead. No other field in the row
   affects sort order — OFI/OBI/CVD/etc. are informational columns on the ranked row,
@@ -407,12 +406,12 @@ track genuinely different OFI computations.
 
 ### 3.5 What the ranking is used for
 
-`dashboard.py`'s `/api/rankings`/`/api/watchlist` endpoints and `bot_tui`'s Coins pane
-both render `rankings:live` directly, row order and column values unchanged
-(`dashboard.py:854-933`, confirmed no independent computation on the read side). No
-code path in `troll/live_paper/` (the actual trading-bot module) imports
-`ranking_engine` or reads `rankings:live`/`/api/watchlist` — bots are configured
-independently, not auto-selected from the live ranking. The ranking's current, only
+`data_api`'s `GET /api/rankings` (a verbatim passthrough, `data_api/routes/rankings.py`)
+and `bot_tui`'s Coins pane both render `rankings:live` directly, row order and column
+values unchanged — no independent computation on the read side. No code path in
+`troll/live_paper/` (the actual trading-bot module) imports `ranking_engine` or reads
+`rankings:live` — bots are configured independently, not auto-selected from the live
+ranking. The ranking's current, only
 confirmed consumer is the human-facing dashboard/TUI coin-picker UI, not an automated
 trading decision.
 
@@ -422,7 +421,7 @@ trading decision.
 
 | Raw field (§1) | Computed signal (§2) | In `rankings:live` (§3) | Notes |
 |---|---|---|---|
-| `DydxSecondSnapshot.bid/ask_prices[0]`, `bid/ask_sizes[0]` | `microprice()`, `spread()`, `mid_price()` | `microprice`, `microprice_lean`, `spread`, `price` | pure functions, `indicators.py:409-446` |
+| `DydxSecondSnapshot.bid/ask_prices[0]`, `bid/ask_sizes[0]` | `microprice()`, `spread()`, `mid_price()` | `microprice`, `microprice_lean`, `spread`, `price` | pure functions, `indicators.py` |
 | `DydxSecondSnapshot.bid/ask_prices[:N]`, `bid/ask_sizes[:N]` | `MultiLevelOFI`, `MultiLevelOBI` | `ofi_10_z`, `ofi_3/5/10`, `obi_3/5/10` | `ranking_engine` is the only live runner of these classes |
 | `DydxSecondSnapshot.buy_volume`/`sell_volume`/`buy_count`/`sell_count` | `trade_aggregates()`, `volume_delta()` | `cvd`, `volume_delta`, `avg_trade_size`, `buy_count`, `sell_count` | |
 | `DydxSecondSnapshot` mid-price sequence | `VolatilityTracker` (3600s cross-sectional) | `volatility_score` | **this is the sort key when mode = `"volatility"`** |
@@ -451,7 +450,7 @@ or `ranking_engine/`.
 Two independent pruning mechanisms exist. Neither one bounds the data that actually
 accumulates day to day, which is why the catalog only ever grows.
 
-**1. `Collector._prune_loop` (`collector.py:1136-1158`), running inside the collector
+**1. `Collector._prune_loop` (`collector.py`), running inside the collector
 process itself.** Every `min(active retain_hours) * 900` seconds (≥ 900s floor,
 `_prune_interval_seconds`), it deletes catalog files — across *every* data type, not
 just one — for two groups of instrument only:
@@ -460,7 +459,7 @@ just one — for two groups of instrument only:
   creates one today; every instrument this collector actively adds is pinned by
   definition).
 - Any market dYdX lists that *isn't* in `config.toml` at all, or was just dropped by a
-  `stop`/`unpin` control action (`_prune_candidates`, `collector.py:266-280`) — this is
+  `stop`/`unpin` control action (`_prune_candidates`, `collector.py`) — this is
   why `crypto_perpetual`/`instrument_status`/etc. exist for ~140 markets on disk even
   though only the 29 in `config.toml` are actually subscribed: the markets channel is
   global, so mark/index price, funding rate, and instrument status/definitions get
@@ -473,7 +472,7 @@ The retention window for that non-pinned/unknown group is `non_config_retain_hou
 **2. Per-instrument raw `OrderBookDeltas` retention** (`retain_hours` on an
 `InstrumentEntry`, only meaningful if that same entry also sets
 `store_order_book_deltas = true`) — enforced by the same loop via
-`_prune_delta_retention` (`collector.py:338-350`). **None of the 29 instruments in the
+`_prune_delta_retention` (`collector.py`). **None of the 29 instruments in the
 current `config.toml` set `store_order_book_deltas = true`**, so no raw deltas are
 being written at all right now (`order_book_deltas/` is an empty directory) and this
 mechanism currently has nothing to do.

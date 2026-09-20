@@ -20,7 +20,8 @@ visible depth: no higher than the deepest ask level and no lower than the deepes
 level (a sweep that consumes levels only lands prices *between* the pre-trade levels,
 which the stored top-20 depth still brackets). A high/low outside that range cannot come
 from that second's real trading -- it is the signature of replayed history (dYdX's
-`v4_trades` subscribed reply, see collector._STALE_TRADE_NS) or another ingestion bug.
+`v4_trades` subscribed reply, dropped by `config.stale_trade_seconds`) or another
+ingestion bug.
 Derived purely from stored fields, so it works identically as a live canary and as a
 scan over old catalog data (see repair_catalog.py).
 """

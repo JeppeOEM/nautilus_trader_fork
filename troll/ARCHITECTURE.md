@@ -9,9 +9,10 @@ coding rules see `CLAUDE.md`, for planning history see `_bmad-output/`.
 
 ## The one-paragraph version
 
-A collector pulls live dYdX market data straight off the Rust adapter and writes it to
-a Nautilus-native Parquet catalog, publishing a live 1-second snapshot feed to Redis as
-it goes. A ranking engine reads that feed, scores every coin by volume or volatility,
+Three collectors (dYdX, Bybit, Hyperliquid) share one venue-neutral engine
+(`collector_core`): each pulls live market data straight off the Rust adapters and writes
+it to a Nautilus-native Parquet catalog, publishing a live 1-second snapshot feed to
+Redis as it goes. A ranking engine reads that feed, scores every coin by volume or volatility,
 and publishes the result back to Redis. A web dashboard and a terminal UI both read the
 same two Redis feeds (never recomputing anything themselves) to show live charts and a
 watchlist. Indicators written once in `ml_signals` get reused unmodified in Jupyter
@@ -26,8 +27,11 @@ downstream of the collector ever touches `nautilus_trader`'s live `TradingNode`/
 
 | Module | Role | Talks to |
 |---|---|---|
-| `dydx_collector/` | Captures live dYdX data → Parquet catalog + `snapshots:raw` Redis feed | dYdX WS/REST (via Rust `nautilus_pyo3` client), Redis (publish), Parquet catalog (write) |
-| `ml_signals/` | Shared indicators + web dashboard + backtesting | Parquet catalog (read), Redis (`snapshots:raw`, `rankings:live` read; `ranking:control` publish), `metrics.db` (read) |
+| `collector_core/` | The venue-neutral collector engine (Story 22.1) — ingest → 1s sample → flush → Parquet + `snapshots:raw` + `candles_*.db`; also the operator-run catalog tools | Parquet catalog (read/write), Redis (publish), `candles_*.db` (write) |
+| `dydx_collector/`, `bybit_collector/`, `hyperliquid_collector/` | Venue subclasses of `collector_core.Collector`: WS/HTTP client, config, venue quirks | Their venue's WS/REST (via Rust `nautilus_pyo3` clients) |
+| `common/` | Venue identifiers shared by every module (`venues.py`) | nothing (pure constants) |
+| `ml_signals/` | Shared indicators, candle store, backtest strategies (`strategies/`) | Parquet catalog (read), Redis (`snapshots:raw`, `rankings:live` read; `ranking:control` publish), `metrics.db` + `candles_*.db` (read) |
+| `data_api/` + `frontend/` | Web UI (React SPA) + read-only REST/WS on `:9100` | Redis (read), Parquet catalog + `candles_*.db` + `metrics.db` (read-only) |
 | `ranking_engine/` | Sole computer of coin ranking (volume + volatility) | Redis (`snapshots:raw` read; `rankings:live` publish; `ranking:control` read), `metrics.db` (write), dYdX REST (24h volume poll) |
 | `live_paper/` | The actual trading bot — `TradingNode` + `Strategy` in paper (or gated real-money) mode | dYdX WS/HTTP (via `TradingNode`), Redis (`bots:status` publish, `bots:control` read) |
 | `bot_tui/` | Keyboard-only terminal UI, interactive/on-demand | Redis (`rankings:live`, `snapshots:raw`, `bots:status` read; `ranking:control`, `bots:control` publish), dashboard (HTTP deep-link only) |
@@ -35,8 +39,8 @@ downstream of the collector ever touches `nautilus_trader`'s live `TradingNode`/
 Module boundary rule enforced throughout (architecture AD-4): every module downstream
 of the collector depends only on shared data types (`DydxSecondSnapshot`,
 `OpenInterest`, `ml_signals.indicators` classes) and Redis/HTTP contracts — never
-another module's internal state. `dydx_collector` never imports from anything
-downstream of it.
+another module's internal state. The collectors never import from anything downstream
+of them.
 
 ---
 
@@ -73,32 +77,46 @@ Redis (live/current) — never both conflated, per NFR3's memory-bounded-access 
 
 ---
 
-## 1. `dydx_collector/` — the data source
+## 1. `collector_core/` + the venue collectors — the data source
 
-Standalone asyncio service. Bypasses `TradingNode`/`Strategy`/`DataEngine` entirely and
-talks directly to `nautilus_pyo3.DydxHttpClient`/`DydxWebSocketClient` — this is
-deliberate: `DataEngine` has a documented unbounded-queue-growth bug under sustained
-load that OOM-crashed an earlier `Strategy`-based recorder.
+Three standalone asyncio services (one per venue) over one shared engine. All bypass
+`TradingNode`/`Strategy`/`DataEngine` entirely and talk directly to the Rust
+`nautilus_pyo3` WS/HTTP clients — this is deliberate: `DataEngine` has a documented
+unbounded-queue-growth bug under sustained load that OOM-crashed an earlier
+`Strategy`-based recorder.
 
-- **`collector.py`** — owns the asyncio loop, buffer, and flush timer. Every 1s builds a
-  `DydxSecondSnapshot` per subscribed instrument (top-20 bid/ask levels + per-side trade
-  volume — nothing derivable is stored) and publishes it to Redis channel
+- **`collector_core/collector.py`** — owns the asyncio loop, buffer, and flush timer for
+  every venue. Every 1s builds a `DydxSecondSnapshot` per subscribed instrument (top-20
+  bid/ask levels + per-side trade volume — nothing derivable is stored; the name is
+  historical, the schema is venue-neutral) and publishes it to Redis channel
   `snapshots:raw`. Flushes trades/deltas/bars/mark-index-funding/instruments to the
-  Parquet catalog via `ParquetDataCatalog.write_data()` on `flush_interval_seconds`.
-- **`client.py`** — thin wrapper around the Rust WS/HTTP clients; `_at_fixed_precision()`
-  re-stamps mark/index prices to a single precision (dYdX's feed derives precision from
-  each tick's own trailing-zero count, which corrupts catalog writes if left alone).
-- **`second_snapshot.py`** — defines `DydxSecondSnapshot(Data)`, the one custom Arrow-
-  registered type this whole system is built around.
-- **`open_interest.py`** — `classify_liquidity()` + the dYdX REST poll (the `OpenInterest(Data)` type lives in `collector_core/open_interest.py`); open
+  Parquet catalog via `ParquetDataCatalog.write_data()` on `flush_interval_seconds`, and
+  feeds finished 1m..1D bars into that venue's `candles_*.db`.
+- **`collector_core/second_snapshot.py`** — defines `DydxSecondSnapshot(Data)`, the one
+  custom Arrow-registered type this whole system is built around.
+- **`collector_core/integrity.py`** — `ohlc_outside_book()`: a second's trade high/low
+  must lie inside that same second's own book. Live ERROR canary and offline detector
+  (DATA-06).
+- **Operator-run catalog tools** (`python -m collector_core.<tool>`, never automatic):
+  `build_candles` (rebuild a candle store from raw 1s), `consolidate_catalog`
+  (`make consolidate`, nightly), `repair_catalog` (clear impossible trade OHLC),
+  `migrate_open_interest` (one-shot layout migration).
+- **`{dydx,bybit,hyperliquid}_collector/`** — per-venue `Collector` subclass, `client.py`
+  (thin wrapper around that venue's Rust clients) and `config.py`. dYdX-only:
+  `client.py`'s `_at_fixed_precision()` re-stamps mark/index prices to a single precision
+  (dYdX's feed derives precision from each tick's own trailing-zero count, which corrupts
+  catalog writes if left alone), `uncross.py` resolves crossed books (DATA-04), and
+  `prune_catalog.py` deletes `order_book_deltas` older than N days (`make prune`).
+- **`dydx_collector/open_interest.py`** — `classify_liquidity()` + the dYdX REST poll (the
+  shared `OpenInterest(Data)` type lives in `collector_core/open_interest.py`); open
   interest is the one field the Rust bindings drop, so it's polled separately via
   stdlib `urllib` against dYdX's indexer REST endpoint every 5 min.
-- **`prune_catalog.py`** — deletes `order_book_deltas` older than N days (`make prune`).
 - **Hot-reload**: `config.toml`'s instrument list is re-read every `config_reload_seconds`
   — no restart needed to add/remove a coin.
 
 **Publishes:** `snapshots:raw` (Redis pub/sub, one message per instrument per second).
-**Writes:** Parquet catalog at `dydx_collector/catalog/`.
+**Writes:** the Parquet catalog at `dydx_collector/catalog/` (shared by all three venues,
+Story 19.2) and `dydx_collector/candles/candles_{dydx,bybit,hyperliquid}.db`.
 
 **Known benign WARN log lines** (from `nautilus_network::websocket::client`, seen via
 `troll-logs`/Dozzle):
@@ -249,17 +267,18 @@ SSH-launched tool, not a background service.
 
 | Channel | Publisher(s) | Subscriber(s) | Payload |
 |---|---|---|---|
-| `snapshots:raw` | `dydx_collector` | `ranking_engine`, `data_api`, `bot_tui` | One `DydxSecondSnapshot`-shaped message per instrument per second |
+| `snapshots:raw` | the three collectors | `ranking_engine`, `data_api`, `bot_tui` | One `DydxSecondSnapshot`-shaped message per instrument per second |
 | `rankings:live` | `ranking_engine` | `data_api`, `bot_tui` | `{mode, updated_at, ranks: [{instrument_id, rank, volume24h, volatility_score}]}`, on change + heartbeat |
 | `ranking:control` | `data_api`, `bot_tui` | `ranking_engine` | Mode-switch request (`"volume"` \| `"volatility"`), last-write-wins |
 | `bots:status` | `live_paper` | `bot_tui` | Per-bot PnL/position/mode/heartbeat, on a timer |
-| `bots:control` | `bot_tui` | `live_paper` | `{bot_id, action: "start"|"stop"}` — never a mode field |
+| `bots:control` | `bot_tui` | `live_paper` | `{bot_id, action: "start"` \| `"stop"}` — never a mode field |
 
 ## Storage reference
 
 | Store | Writer | Readers | Contents |
 |---|---|---|---|
-| Parquet catalog (`dydx_collector/catalog/`) | `dydx_collector` | `ml_signals`, `data_api`, backtests, Jupyter | Trades, order book deltas, bars, mark/index price, funding rate, instruments, `OpenInterest` — Nautilus-native, zero-conversion |
+| Parquet catalog (`dydx_collector/catalog/`) | all three collectors | `ml_signals`, `data_api`, backtests, Jupyter | Trades, order book deltas, bars, mark/index price, funding rate, instruments, `OpenInterest` — Nautilus-native, zero-conversion |
+| `candles_{dydx,bybit,hyperliquid}.db` (SQLite, `dydx_collector/candles/`) | that venue's collector | `data_api`, `ml_signals` | Finished 1m..1D bars derived from raw 1s (D-35). Fully rebuildable: `python -m collector_core.build_candles` |
 | `metrics.db` (SQLite) | `ranking_engine` | `data_api` (read-only mount) | Historical ranking snapshots (Story 1.4/FR8) |
 | Nautilus `Cache` (in-memory, `live_paper`) | `live_paper` | nobody external yet | Orders/positions/fills for the running bot — **not yet Redis-backed**, lost on restart |
 
@@ -273,7 +292,8 @@ without an SSH tunnel over Tailscale (see README's remote-access section).
 | Service | Started by default? | Restart policy | Why |
 |---|---|---|---|
 | `redis` | yes (`make up`) | `always` | Shared bus, no state to lose |
-| `collector` | yes | `always` | Core data path, must self-heal |
+| `collector` (dYdX) | yes | `always` | Core data path, must self-heal |
+| `bybit_collector`, `hyperliquid_collector` | yes | `always` | Same engine, same catalog, other venues (Epic 22) |
 | `ranking_engine` | yes | `always` | Sole ranking computer |
 | `data_api` | yes | `always` | Web UI (React SPA) + read-only FastAPI over the catalog/`metrics.db`, `:9100` |
 | `dozzle` | yes | `always` | Log viewer, `:8080` |
