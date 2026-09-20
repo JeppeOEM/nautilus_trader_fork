@@ -1,5 +1,5 @@
 # generated: 2026-07-01
-# last_updated: 2026-09-15 (Stories 15.9-15.10 story files created via create-story, queued ready-for-dev; all of Epic 15's stories now have story files)
+# last_updated: 2026-09-20 (Stories 22.11-22.12 story files created via create-story; 22.1 merged, awaiting-operator)
 # project: nautilus_trader_fork
 # project_key: NOKEY
 # tracking_system: file-system
@@ -288,8 +288,8 @@ development_status:
   22-8-spine-rules-and-docs-updated-for-the-multi-venue-core: ready-for-dev
   22-9-historical-bar-backfill-for-bybit-and-hyperliquid: ready-for-dev
   22-10-rankings-show-every-collected-coin-across-venues-with-an-exchange-filter: ready-for-dev
-  22-11-nightly-catalog-consolidation-for-every-venue: backlog
-  22-12-venue-timed-1s-sampling-for-bybit-and-hyperliquid: backlog
+  22-11-nightly-catalog-consolidation-for-every-venue: ready-for-dev
+  22-12-venue-timed-1s-sampling-for-bybit-and-hyperliquid: ready-for-dev
   epic-22-retrospective: optional
 
 action_items:
