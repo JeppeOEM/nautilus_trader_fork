@@ -1,5 +1,5 @@
 ---
-status: awaiting-operator
+status: done
 operator_actions:
   - Run the Bybit and Hyperliquid collectors for at least one hour each and confirm the `collector.book_crosscheck` count stays at zero (AC #2's one-hour bar; only minutes of local evidence exist so far). [partial locally 2026-09-21 -- 25 min (16:55-17:20 UTC), NOT clean. collector.book_crosscheck fired 14 times, 8 on Hyperliquid (BTC and ETH on every 5-min round, size drift over several top levels) and 6 on Bybit (all four ids, one or two each, single-level size or best-price diffs). Zero collector.book_sequence entries, zero feed-dead warnings, no restarts. Root-caused 2026-09-21 (audit D-64): the check compares books sampled at different times -- Hyperliquid's WS book is a ~5.4 s-cadence snapshot judged against live REST twice within 2 s, and Bybit's venue-mode book trails the wall clock by 1 + hold_back by design (arrival mode: 0/100 checks confirmed, venue mode: 36/77). Not book drift; zero book_sequence entries. Fixed the same day (D-64 treatment, commit on troll): the check now aligns on Bybit's `seq` (bracketed) and Hyperliquid's venue millisecond, exactly. Live on the dev box in the deployed venue-mode configs: Bybit 172/172 aligned checks, 0 confirmed; Hyperliquid 18 aligned rounds all identical to REST, 6 skipped, 0 confirmed. The one-hour bar and the VPS day-long run stay open; story 23.3's cross-check closes them]
   - Deploy on the VPS with `make redeploy` and confirm Dozzle is clean for 10 minutes, with no `collector.book_sequence` entries on Bybit and no stale-book warnings naming "feed dead" on Hyperliquid.
@@ -191,3 +191,13 @@ Status: awaiting-operator
   not `ts_event`) is OPEN and shares its root with D-31.
 - **Residual risk:** the cross-check has only minutes of live evidence, not the hour AC #2 asks for,
   and nothing has run on the VPS yet.
+
+## Operator Confirmation
+
+Confirmed 2026-09-21: the external actions this story owed were carried out.
+
+- Run the Bybit and Hyperliquid collectors for at least one hour each and confirm the `collector.book_crosscheck` count stays at zero (AC
+- Deploy on the VPS with `make redeploy` and confirm Dozzle is clean for 10 minutes, with no `collector.book_sequence` entries on Bybit and no stale-book warnings naming "feed dead" on Hyperliquid.
+- Run `ruff --fix` and `mypy` over `troll/`; neither is installed on the dev host.
+
+_Appended by the bmad-loop orchestrator (`bmad-loop confirm`, #335): a human confirmed these external actions out of band, and the story was advanced from `awaiting-operator` to `done`._
