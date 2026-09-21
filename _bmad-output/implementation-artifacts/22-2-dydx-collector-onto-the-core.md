@@ -1,5 +1,5 @@
 ---
-status: awaiting-operator
+status: done
 followup_review_recommended: false
 final_revision: a46d8e2305ba1c3bad98684817455857b25d37f4
 operator_actions:
@@ -156,3 +156,14 @@ Status: awaiting-operator
 - Verification: core+dYdX+Bybit+HL 159 passed (warnings as errors). Full list: 596 passed, 5 failed + 3 collection errors, all outside this change (ml_signals OFI, data_api needing Redis; 4 failures reproduced on base commit). ruff/mypy unavailable on host.
 - Residual risk: Task 6 live verification not done; watchdog alert prefix now `DydxClient:`.
 - followup_review_recommended: false
+
+## Operator Confirmation
+
+Confirmed 2026-09-21: the external actions this story owed were carried out.
+
+- Run collector locally ~60s on mainnet: verify 1s custom_dydx_second_snapshot rows, candles.db 1m bars, snapshots:raw .DYDX ids, a collector:status publish, and a collector:control stop/start round-trip. [done locally 2026-09-21: 1 s rows spaced ~1.007 s for 29 .DYDX ids, candles_dydx.db 1m bars for 29 ids, snapshots:raw carries .DYDX ids, 58 collector:status messages, stop/start of ALGO-USD-PERP.DYDX unsubscribed+resubscribed and restored config.toml byte-identical]
+- On the VPS run make redeploy (thin image) and confirm dydx-collector healthy >= 10 min in Dozzle, bot_tui Collector pane populates, pin_top_liquid works, incident reports land on a WARNING.
+- Check VPS troll/config.toml for an explicit snapshot_interval_seconds = 0.5 and set it to 1.0.
+- Confirm no double Rust-logging init (WS_RAW file sink intact). [done locally 2026-09-21: entrypoint uses init_rust_logging=False, no init/logging errors in container log, /tmp/nautilus_logs/ws_raw_debug_*.log receives [WS_RAW] lines (15,137 in one rotated file)]
+
+_Appended by the bmad-loop orchestrator (`bmad-loop confirm`, #335): a human confirmed these external actions out of band, and the story was advanced from `awaiting-operator` to `done`._

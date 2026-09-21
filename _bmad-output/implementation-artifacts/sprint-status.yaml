@@ -279,7 +279,7 @@ development_status:
 
   epic-22: in-progress
   22-1-troll-collector-core-extracted-from-the-bybit-and-hyperliquid-collectors: done
-  22-2-dydx-collector-onto-the-core: awaiting-operator
+  22-2-dydx-collector-onto-the-core: done
   22-3-shared-data-types-and-a-single-openinterest: awaiting-operator
   22-4-bybit-spot-collection-and-explicit-perp-spot-everywhere: awaiting-operator
   22-5-order-book-validation-per-venue: awaiting-operator
