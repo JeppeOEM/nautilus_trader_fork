@@ -1,8 +1,8 @@
 ---
 status: awaiting-operator
 operator_actions:
-  - Run Bybit collector locally for ~60 s and confirm BTCUSDT-SPOT.BYBIT and BTCUSDT-LINEAR.BYBIT 1s snapshot rows exist and spot has no mark/index/funding/OI rows.
-  - Confirm GET /api/candles?instrument_id=BTCUSDT-SPOT.BYBIT returns venue=BYBIT, market=spot, and the screener and chart badge show and filter both.
+  - "Run Bybit collector locally for ~60 s and confirm BTCUSDT-SPOT.BYBIT and BTCUSDT-LINEAR.BYBIT 1s snapshot rows exist and spot has no mark/index/funding/OI rows. [done locally 2026-09-21: both ids write 1 s rows with no gaps or duplicate ts_event; no -SPOT.BYBIT directory exists under mark_price_update, index_price_update, funding_rate_update or custom_open_interest]"
+  - "Confirm GET /api/candles?instrument_id=BTCUSDT-SPOT.BYBIT returns venue=BYBIT, market=spot, and the screener and chart badge show and filter both. [API half done locally 2026-09-21: GET /api/candles/BTCUSDT-SPOT.BYBIT (path parameter, not query) returns venue=BYBIT market=spot, -LINEAR returns market=perp, /api/rankings lists both; screener and chart badge UI NOT checked]"
   - Deploy on the VPS with make up and confirm Dozzle is clean for 10 minutes with both WS connections.
 followup_review_recommended: false
 final_revision: a4e6df6b8561fd93fdbc940f53109c0e238b8f3e
@@ -48,7 +48,7 @@ so that a `BTCUSDT-SPOT.BYBIT` row is never mistaken for `BTCUSDT-LINEAR.BYBIT`.
   - [x] SSOT-04 says ranking-page changes land in `bot_tui` too; 19.5 deferred the venue column there. Add `venue` and `market` as two `fit()`'d columns (TUI-02) to the bot_tui rankings table **if** the row fits at 80 columns; otherwise register the gap in this story's Completion Notes — do not squeeze or truncate other columns for it.
   - [x] `vitest` + `tsc -b` clean (the Docker build runs `tsc -b`; a type error breaks the image, see commit `cb128d5d95`).
 - [ ] Task 5 — live verification
-  - [ ] Local ~60 s Bybit run: `custom_dydx_second_snapshot/BTCUSDT-SPOT.BYBIT/` rows at 1 s **and** `BTCUSDT-LINEAR.BYBIT`; spot rows have trades + book, no mark/index/funding/OI rows for spot ids in the catalog; `snapshots:raw` carries both.
+  - [x] (done locally 2026-09-21, see operator_actions note) Local ~60 s Bybit run: `custom_dydx_second_snapshot/BTCUSDT-SPOT.BYBIT/` rows at 1 s **and** `BTCUSDT-LINEAR.BYBIT`; spot rows have trades + book, no mark/index/funding/OI rows for spot ids in the catalog; `snapshots:raw` carries both.
   - [ ] `GET /api/candles?instrument_id=BTCUSDT-SPOT.BYBIT&...` → `venue="BYBIT", market="spot"`; the screener shows and filters both; chart badge reads `BYBIT · spot`.
   - [ ] VPS `make up`; Dozzle clean for 10 min with both WS connections.
 

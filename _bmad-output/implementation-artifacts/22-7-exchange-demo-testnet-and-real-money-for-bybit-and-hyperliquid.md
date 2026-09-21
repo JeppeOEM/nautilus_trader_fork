@@ -4,7 +4,7 @@ operator_actions:
   - Bybit Demo live check (Task 5): export `BYBIT_DEMO_API_KEY`/`BYBIT_DEMO_API_SECRET` (a demo-trading key, not testnet; fund via `POST /v5/account/demo-apply-money`), run `live_paper` with `LIVE_PAPER_REAL_MONEY_CONFIG=<file with mode = "exchange_demo", environment = "demo", instrument_id = "BTCUSDT-LINEAR.BYBIT">`, force one signal (tiny `trade_size`, relaxed thresholds), confirm `OrderSubmitted -> OrderAccepted -> fill/cancel` in the node log and the order in `bots:status`/`bots:history`, cancel any resting order, and record the order id under Completion Notes.
   - Hyperliquid Testnet (Task 5): only if the faucet prerequisite is met (a mainnet deposit from the same address, then `claimDrip`); otherwise leave the sub-task unticked with the blocking step named. No demo/testnet key of either venue exists on the dev host, which is what blocked both checks here.
   - Deploy on the VPS with `make redeploy` and confirm the paper path still starts with none of the new credential env vars exported (they default to empty in docker-compose.yml).
-  - Run `ruff --fix` and `mypy` over `troll/live_paper`; neither is installed on the dev host (the story's files carry exactly the baseline's pre-existing findings, no new ones).
+  - Run `ruff --fix` and `mypy` over `troll/live_paper`; neither is installed on the dev host (the story's files carry exactly the baseline's pre-existing findings, no new ones). [done locally 2026-09-21 -- ruff committed as 154d9898ad; mypy over live_paper reports 1 finding before and after, identical (node.py unused type-ignore comment)]
 followup_review_recommended: false
 baseline_revision: 6ee57aadb27e28b0cd511552db7d9d13259631a0
 ---

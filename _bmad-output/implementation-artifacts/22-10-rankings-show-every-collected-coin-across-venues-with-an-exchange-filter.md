@@ -34,7 +34,7 @@ so that a multi-venue watchlist is the normal view and a single venue is a filte
   - [ ] Filter hint: wherever the coins pane exposes its filter input, the help/header text mentions `.BYBIT` / `.DYDX` / `.HYPERLIQUID` as venue filters (substring match already implemented at `:80-101`). No new keybinding unless one already exists for filters.
   - [ ] `bot_tui/tests`: `fit` on a 24-char HL id; substring filter `.bybit` returns only Bybit rows (case-insensitive, `:101`).
 - [ ] Task 4 — verification
-  - [ ] Local with all three collectors publishing: `redis-cli subscribe rankings:live` shows rows for every venue with non-zero USD volume; web page lists all by default, chips narrow; TUI coins pane aligned with HL ids present; `/api/errors` shows no `ranking_engine.volume24h` entries in steady state.
+  - [ ] (partial, local 2026-09-21: rankings:live carried 35 rows, DYDX 29, BYBIT perp 2 and spot 2, HYPERLIQUID 2, all non-zero USD volume except ZEN-USD-PERP.DYDX whose indexer volume24H is really 0 (trades24H 0); no ranking_engine.volume24h ledger line in the container log. Web chips and TUI pane NOT checked. Note: /api/errors shows only data_api's own ledger, so it cannot show ranking_engine counts) Local with all three collectors publishing: `redis-cli subscribe rankings:live` shows rows for every venue with non-zero USD volume; web page lists all by default, chips narrow; TUI coins pane aligned with HL ids present; `/api/errors` shows no `ranking_engine.volume24h` entries in steady state.
   - [ ] VPS: `ranking_engine` memory stays flat with ~3× the instrument count (epic 13 baseline; nifelheim is a 2 vCPU / 3.7 GB box — note the new poll count).
 
 ## Dev Notes

@@ -4,7 +4,7 @@ followup_review_recommended: false
 final_revision: dec416641caee676e2bc0af60e005fd034c84539
 operator_actions:
   - "On the VPS stop the three collectors, run `python -m collector_core.migrate_open_interest --catalog /app/catalog` (report), then again with `--apply --backup-dir <dir>`, then start the collectors (audit item D-40)."
-  - "Run ruff --fix (import ordering after the collector_core rename) and mypy; neither is installed on the dev host."
+  - "Run ruff --fix (import ordering after the collector_core rename) and mypy; neither is installed on the dev host. [done locally 2026-09-21: ruff --fix + ruff format over platform/ committed as 154d9898ad; mypy (pre-commit args) 95 findings before, 97 after, 0 new: the +2 are one pre-existing int|None defect in ml_signals/custom_indicators.py now reported per line after the line split]"
 baseline_revision: c52a0dab7fb005cba489ce491ad37f5ea4f0db70
 ---
 

@@ -1,7 +1,7 @@
 ---
 status: awaiting-operator
 operator_actions:
-  - Run the Bybit and Hyperliquid collectors for at least one hour each and confirm the `collector.book_crosscheck` count stays at zero (AC #2's one-hour bar; only minutes of local evidence exist so far).
+  - Run the Bybit and Hyperliquid collectors for at least one hour each and confirm the `collector.book_crosscheck` count stays at zero (AC #2's one-hour bar; only minutes of local evidence exist so far). [partial locally 2026-09-21 -- 25 min (16:55-17:20 UTC), NOT clean. collector.book_crosscheck fired 14 times, 8 on Hyperliquid (BTC and ETH on every 5-min round, size drift over several top levels) and 6 on Bybit (all four ids, one or two each, single-level size or best-price diffs). Zero collector.book_sequence entries, zero feed-dead warnings, no restarts. Not root-caused yet (DATA-02); the day-long check moves to a follow-up story]
   - Deploy on the VPS with `make redeploy` and confirm Dozzle is clean for 10 minutes, with no `collector.book_sequence` entries on Bybit and no stale-book warnings naming "feed dead" on Hyperliquid.
   - Run `ruff --fix` and `mypy` over `troll/`; neither is installed on the dev host.
 followup_review_recommended: false

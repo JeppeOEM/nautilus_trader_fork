@@ -3,10 +3,10 @@ status: awaiting-operator
 followup_review_recommended: false
 final_revision: a46d8e2305ba1c3bad98684817455857b25d37f4
 operator_actions:
-  - "Run collector locally ~60s on mainnet: verify 1s custom_dydx_second_snapshot rows, candles.db 1m bars, snapshots:raw .DYDX ids, a collector:status publish, and a collector:control stop/start round-trip."
+  - "Run collector locally ~60s on mainnet: verify 1s custom_dydx_second_snapshot rows, candles.db 1m bars, snapshots:raw .DYDX ids, a collector:status publish, and a collector:control stop/start round-trip. [done locally 2026-09-21: 1 s rows spaced ~1.007 s for 29 .DYDX ids, candles_dydx.db 1m bars for 29 ids, snapshots:raw carries .DYDX ids, 58 collector:status messages, stop/start of ALGO-USD-PERP.DYDX unsubscribed+resubscribed and restored config.toml byte-identical]"
   - "On the VPS run make redeploy (thin image) and confirm dydx-collector healthy >= 10 min in Dozzle, bot_tui Collector pane populates, pin_top_liquid works, incident reports land on a WARNING."
   - "Check VPS troll/config.toml for an explicit snapshot_interval_seconds = 0.5 and set it to 1.0."
-  - "Confirm no double Rust-logging init (WS_RAW file sink intact)."
+  - "Confirm no double Rust-logging init (WS_RAW file sink intact). [done locally 2026-09-21: entrypoint uses init_rust_logging=False, no init/logging errors in container log, /tmp/nautilus_logs/ws_raw_debug_*.log receives [WS_RAW] lines (15,137 in one rotated file)]"
 
 baseline_revision: b008ed3b3eee9649c647e8cce4612ab00ea7a050
 ---
@@ -56,9 +56,9 @@ so that the production dYdX feed shares the single write gate (AD-1) instead of 
   - [x] `tests/test_integration.py` is a script, not a pytest module — update its `Collector(...)` construction and leave it otherwise.
   - [x] Run `make test`; the full suite (dYdX 18 modules minus the two moved, core, Bybit, HL, common, ml_signals, ranking_engine, bot_tui, data_api) must be green. Any dYdX test that needs a behavioural change is a **regression in the core**, not a test to edit — fix the core.
 - [ ] Task 6 — live verification (AC: #3)
-  - [ ] Local ~60 s mainnet run: `custom_dydx_second_snapshot` rows at 1 s, `candles.db` holds that coin's 1m bars after the first flush, `snapshots:raw` still carries `.DYDX` ids, at least one `collector:status` publish on startup (run-then-sleep loop, `:834-839`), a `collector:control` `stop`/`start` round-trip via `redis-cli publish`.
+  - [x] (done locally 2026-09-21, see operator_actions note) Local ~60 s mainnet run: `custom_dydx_second_snapshot` rows at 1 s, `candles.db` holds that coin's 1m bars after the first flush, `snapshots:raw` still carries `.DYDX` ids, at least one `collector:status` publish on startup (run-then-sleep loop, `:834-839`), a `collector:control` `stop`/`start` round-trip via `redis-cli publish`.
   - [ ] VPS: `make redeploy` (thin image); Dozzle shows `dydx-collector` healthy ≥ 10 min, `bot_tui` Collector pane populates within seconds of restart, `pin_top_liquid` works, incident reports still land in `./dydx_collector/incident_reports` on a WARNING.
-  - [ ] Confirm no double Rust-logging init (`init_rust_logging=False` path) — a second `init_logging` call would either error or silently replace the WS_RAW file sink.
+  - [x] (done locally 2026-09-21, see operator_actions note) Confirm no double Rust-logging init (`init_rust_logging=False` path) — a second `init_logging` call would either error or silently replace the WS_RAW file sink.
 
 ## Dev Notes
 
