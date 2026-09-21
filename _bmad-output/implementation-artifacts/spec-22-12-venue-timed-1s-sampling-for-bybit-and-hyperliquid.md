@@ -2,7 +2,7 @@
 title: 'Story 22.12: Exchange-time bucketing for trades on every venue and the book on Bybit/Hyperliquid'
 type: 'feature'
 created: '2026-09-21'
-status: 'awaiting-operator'
+status: done
 baseline_revision: 'bc3221b85c1ec8a98f7c2a06d532e43b3fd01ca3'
 final_revision: '0d1c11d8e587039163e9328fb4670f9d5476aef0'
 review_loop_iteration: 0
@@ -249,3 +249,14 @@ Status: awaiting-operator
 - In venue mode the REST book cross-check compares a book up to 1 + hold_back s old (documented `Known limit:`).
 - With a late message, the live row's book can differ from the exchange's at the boundary until the next close; the nightly rebuild does not touch book columns.
 
+## Operator Confirmation
+
+Confirmed 2026-09-21: the external actions this story owed were carried out.
+
+- On nifelheim, deploy this branch and rebuild the two venue collectors (`docker compose up -d --build bybit_collector hyperliquid_collector`). Their config.toml files are bind-mounted from the repo, so `book_time_source = "venue"` and `hold_back_seconds` take effect with the deploy.
+- On the VPS, run `python3 -m collector_core.measure_lag --venue bybit --seconds 10800` and `--venue hyperliquid --seconds 10800` in the collector image (`--network host`). Record each venue's per-kind distributions in troll/docs/DATA_INTEGRITY_AUDIT.md D-63.
+- Set `hold_back_seconds` in troll/bybit_collector/config.toml and troll/hyperliquid_collector/config.toml to each venue's VPS TradeTick p99.9 rounded up to 0.5 s (or 0.0, with the reason written in the comment). Replace the provisional dev-box comment, then redeploy.
+- After one full UTC day per venue has been rebuilt by `make nightly VENUE=BYBIT` / `VENUE=HYPERLIQUID`, record each venue's compare_klines pass rate (instruments and minutes) in DATA_INTEGRITY_AUDIT.md D-63/D-51. Root-cause every remaining mismatch (a missing trade is a 22.14 gap; a book-related one is a new finding). Never add a tolerance.
+- For the first day after deploy, watch the `collector.late_trade`, `collector.pending_deltas` and `collector.book_sequence` counts in /api/errors for Bybit and Hyperliquid. A steady late-trade rate means the hold-back is too short; any pending_deltas or book_sequence entry is a DATA-02 finding to root-cause in D-63.
+
+_Appended by the bmad-loop orchestrator (`bmad-loop confirm`, #335): a human confirmed these external actions out of band, and the story was advanced from `awaiting-operator` to `done`._
