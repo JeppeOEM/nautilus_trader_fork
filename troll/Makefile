@@ -3,7 +3,7 @@ TROLL_DIR  := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 COMPOSE    := docker compose -f $(TROLL_DIR)docker-compose.yml
 BASE_IMAGE := nautilus-trader-base:1.229.0
 
-.PHONY: consolidate build-candles build-base build-base-vps up redeploy redeploy-all redeploy-no-paper up-live-paper build-insecure test test-live-paper down logs logs-dash web enable-boot enable-firewall harden-ssh frontend-dev frontend-remote
+.PHONY: consolidate backup-catalog build-candles build-base build-base-vps up redeploy redeploy-all redeploy-no-paper up-live-paper build-insecure test test-live-paper down logs logs-dash web enable-boot enable-firewall harden-ssh frontend-dev frontend-remote
 
 # Personal, gitignored overrides (see .env-example for the documented default).
 -include $(TROLL_DIR).env
@@ -145,12 +145,44 @@ test:
 		python3 -m pytest collector_core/tests dydx_collector/tests bybit_collector/tests hyperliquid_collector/tests common/tests ml_signals/tests ranking_engine/tests bot_tui/tests data_api/tests -q
 
 ## Merge yesterday's (and any older closed day's) minute-sized Parquet files into one file per
-## (data type, coin) -- audit D-36: without this the catalog grows ~1,440 files per coin per type
-## per day. Safe while the collector runs (today's files are never touched); run nightly from cron:
-##   7 3 * * * cd /path/to/troll && make consolidate >> consolidate.log 2>&1
+## (data type, instrument) for every venue -- audit D-36: without this the catalog grows ~1,440
+## files per instrument per type per day. Safe while the collectors run (today's files are never
+## touched). Ends with one summary line (days, files/MB before -> after, wall s, peak RSS) and
+## exits 1 when any day was refused. Extra flags via CONSOLIDATE_ARGS, e.g.
+## `make consolidate CONSOLIDATE_ARGS="--days 3"`. Nightly from cron, consolidate THEN backup
+## (`;`, not `&&`: a refused day must not skip the backup of everything else):
+## (host crontab in UTC: prefix `CRON_TZ=UTC` if the box is not):
+##   7 3 * * * cd /path/to/troll && { make consolidate >> consolidate.log 2>&1; make backup-catalog >> backup.log 2>&1; }
 consolidate:
 	$(COMPOSE) run --rm --no-deps -e HOME=/tmp collector \
-		python3 -m collector_core.consolidate_catalog --catalog /app/catalog --apply
+		python3 -m collector_core.consolidate_catalog --catalog /app/catalog --apply $(CONSOLIDATE_ARGS)
+
+## Copy the catalog's closed-day files to object storage (audit D-33: there is no other copy).
+## Runs rclone on the HOST (install it there; the remote -- R2, B2, ... -- is configured with
+## `rclone config` in the operator's ~/.config/rclone, never in this repo). RCLONE_REMOTE and
+## RCLONE_BUCKET come from troll/.env or the environment. Run AFTER `make consolidate`, or the
+## upload is millions of tiny objects. Today's (UTC) files, still being written, are excluded,
+## as are *.tmp leftovers. `sync` deletes/overwrites on the remote what the local catalog no
+## longer has (every nightly consolidation replaces minute files) -- `--backup-dir` moves those
+## objects under a dated catalog-replaced/ prefix instead of deleting them, so a wiped local
+## catalog can never erase the only backup. Prune catalog-replaced/ only by hand, after checking
+## that catalog/data on the remote is intact -- never with an automatic expiry rule, which would
+## silently delete the only copy after a local wipe. Values in .env are taken literally: no quotes,
+## and the remote is its bare name (a trailing ':' is tolerated).
+BACKUP_SRC   := $(TROLL_DIR)dydx_collector/catalog/data
+BACKUP_DEST   = $(patsubst %:,%,$(RCLONE_REMOTE)):$(RCLONE_BUCKET)
+BACKUP_TODAY  = $(shell date -u +%Y-%m-%d)
+BACKUP_STAMP  = $(shell date -u +%Y-%m-%dT%H-%M-%SZ)
+backup-catalog:
+	@test -n "$(RCLONE_REMOTE)" || { echo "backup-catalog: RCLONE_REMOTE is not set (troll/.env or env; see README 'Nightly maintenance')" >&2; exit 1; }
+	@test -n "$(RCLONE_BUCKET)" || { echo "backup-catalog: RCLONE_BUCKET is not set (troll/.env or env; see README 'Nightly maintenance')" >&2; exit 1; }
+	@command -v rclone >/dev/null 2>&1 || { echo "backup-catalog: rclone is not installed on this host (https://rclone.org/install/)" >&2; exit 1; }
+	@test -d "$(BACKUP_SRC)" || { echo "backup-catalog: $(BACKUP_SRC) does not exist -- refusing to sync an absent catalog" >&2; exit 1; }
+	@test -n "$$(find "$(BACKUP_SRC)" -name '*.parquet' ! -name '$(BACKUP_TODAY)T*' -print -quit)" || { echo "backup-catalog: $(BACKUP_SRC) holds no closed-day .parquet file -- refusing to sync an empty (or freshly wiped) catalog" >&2; exit 1; }
+	rclone sync "$(BACKUP_SRC)" "$(BACKUP_DEST)/catalog/data" \
+		--backup-dir "$(BACKUP_DEST)/catalog-replaced/$(BACKUP_STAMP)" \
+		--exclude "**/$(BACKUP_TODAY)T*" --exclude "*.tmp" \
+		--transfers 8 --fast-list
 
 ## Rebuild the SQLite candle store from the raw 1s archive (first deploy, or after a
 ## "candle store write failed" / repair_catalog run). Skips today unless the collector is stopped

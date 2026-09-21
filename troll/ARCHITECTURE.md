@@ -113,7 +113,8 @@ unbounded-queue-growth bug under sustained load that OOM-crashed an earlier
   (DATA-06).
 - **Operator-run catalog tools** (`python -m collector_core.<tool>`, never automatic):
   `build_candles` (rebuild a candle store from raw 1s), `consolidate_catalog`
-  (`make consolidate`, nightly), `repair_catalog` (clear impossible trade OHLC),
+  (`make consolidate`, nightly, every venue; `make backup-catalog` syncs the result off-box),
+  `repair_catalog` (clear impossible trade OHLC),
   `migrate_open_interest` (one-shot layout migration).
 - **`{dydx,bybit,hyperliquid}_collector/`** — per-venue `Collector` subclass, `client.py`
   (thin wrapper around that venue's Rust clients) and `config.py`. dYdX-only:

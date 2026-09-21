@@ -26,6 +26,8 @@ Run all `make` commands from `troll/`:
 | `make web` | Open Dozzle log viewer in browser |
 | `make prune` | Delete `order_book_deltas` older than 14 days |
 | `make prune-dry` | Preview what `prune` would delete |
+| `make consolidate` | Merge each closed UTC day into one Parquet file per (type, instrument) |
+| `make backup-catalog` | `rclone sync` closed-day catalog files to object storage |
 
 ---
 
@@ -187,6 +189,68 @@ archived range plans zero windows and issues zero REST calls.
   one -- so it cannot stop a mainnet/testnet mix under a single instrument id.
 - Hyperliquid only serves ~the last 5000 candles; older windows are reported as missing, never
   silently marked covered. See `docs/DATA_INTEGRITY_AUDIT.md` D-52/D-53.
+
+---
+
+## Nightly maintenance
+
+Every collector flushes once a minute, so the shared catalog gains ~1,440 Parquet files per
+(data type, instrument) per day -- for dYdX, Bybit and Hyperliquid alike. Inodes, directory
+listings, reads and backups all scale with the file count, not the bytes (audit D-36). Two make
+targets keep that in check; install them in the host crontab. The times are UTC -- add a
+`CRON_TZ=UTC` line above the entry if the box's clock is not UTC:
+
+```bash
+7 3 * * * cd /path/to/troll && { make consolidate >> consolidate.log 2>&1; make backup-catalog >> backup.log 2>&1; }
+```
+
+`;` rather than `&&` between the two on purpose: a refused day must not skip the backup of
+everything else. Run `make consolidate` once by hand first to fold the existing history.
+
+**`make consolidate`** (`collector_core.consolidate_catalog --apply` in the collector image) walks
+every `data/<type>/<instrument>/` leaf and merges each closed UTC day's files into one; today's
+files are never read or rewritten, and a batch that crosses midnight stays as it is. `bar` leaves
+are skipped: `backfill_bars` plans from their file intervals, so merging two runs across a missing
+range would seal that hole as covered (DATA-05); they are only a few files per window anyway.
+Only one run at a time (a lock file in the catalog root); a second one exits 1 without starting.
+An unreadable file refuses its own day only -- every other day and leaf still runs. A day whose
+files disagree on schema -- columns *or* Arrow metadata such as `price_precision` -- is refused,
+as is a merged file whose row count does not match its sources; nothing is deleted then. Extra
+flags pass through `CONSOLIDATE_ARGS` (`make consolidate CONSOLIDATE_ARGS="--days 3"`). Every run
+ends with one line:
+
+```text
+consolidate: <D> day(s) consolidated, <R> refused, <L> leaf/leaves failed; files <before> -> <after>; <MB before> -> <MB after> MB; <S> s wall; peak RSS <M> MB
+```
+
+Peak RSS is the job's own `ru_maxrss`, measured inside
+the container -- `/usr/bin/time -v make consolidate` would only measure the `docker compose` client.
+The exit code is 1 when any day was refused or leaf failed; the reason is logged above the summary line and in
+the `consolidate.*` error-ledger entries.
+
+**`make backup-catalog`** runs `rclone` **on the host** and syncs
+`dydx_collector/catalog/data` to `$RCLONE_REMOTE:$RCLONE_BUCKET/catalog/data`:
+
+- Consolidate first: without it the upload is millions of tiny objects (per-request cost and
+  hours of listing), with it a few hundred new files a night.
+- Today's (UTC) files and `*.tmp` leftovers are excluded -- only closed, finished files leave the box.
+- Objects the sync would overwrite or delete (the minute files a consolidation replaced) are moved
+  under `catalog-replaced/<UTC timestamp>/` in the same bucket (`--backup-dir`), never deleted, so a
+  wiped local catalog (D-33) cannot erase the only backup. Prune that prefix **only by hand**,
+  after checking the remote `catalog/data` is intact -- never with an automatic expiry rule: after
+  a local wipe that prefix holds the only copy of the history.
+- It refuses (exit non-zero, nothing uploaded) when `RCLONE_REMOTE` or `RCLONE_BUCKET` is unset,
+  `rclone` is not installed, or the local `catalog/data` is missing or holds no closed-day Parquet
+  file (a freshly wiped catalog holding only today's files must not be mirrored).
+
+Setup, once, on the host: install rclone, run `rclone config` to create the remote -- it lives in
+the operator's `~/.config/rclone/rclone.conf`, **never in this repo** -- and set `RCLONE_REMOTE`
+and `RCLONE_BUCKET` in `troll/.env` (gitignored; see `.env-example`) -- bare values, no quotes,
+the remote without its trailing `:`. Cheap targets: Cloudflare R2
+(no egress fees) or Backblaze B2; both have a free tier covering the first few GB, but prices and
+free allowances change -- check the current pricing pages before choosing.
+
+`candles_*.db` needs no backup: it is derived from the catalog, and `make build-candles` rebuilds it.
 
 ---
 
