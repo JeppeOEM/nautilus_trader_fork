@@ -15,10 +15,13 @@
 """Unit tests for ranking_engine.engine -- the ranking core (Story 1.8)."""
 
 import asyncio
+import io
+import json
 import tempfile
 import time
 
 from collector_core.second_snapshot import DydxSecondSnapshot
+from ml_signals import error_ledger
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
@@ -30,6 +33,7 @@ import ranking_engine.metrics_store as metrics_store
 def _reset_state() -> None:
     engine._LAST_SEEN.clear()
     engine._VOLUME_24H.clear()
+    engine._VENUE_VOLUMES.clear()
     lookback = engine.RANKING_VOLATILITY_LOOKBACK_SECONDS
     engine._VOLATILITY = engine.VolatilityTracker(lookback_seconds=lookback)
     engine._ACTIVE_MODE = "volume"
@@ -205,6 +209,7 @@ def test_current_ranks_market_distinguishes_spot_from_linear() -> None:
     now_ns = time.time_ns()
     for iid in ("BTCUSDT-SPOT.BYBIT", "BTCUSDT-LINEAR.BYBIT"):
         _mark_fresh(iid, now_ns)
+        engine._VOLUME_24H[iid] = 1.0  # volume mode ranks only rows with a known volume
     ranks = engine._current_ranks()
     assert {r["instrument_id"]: r["market"] for r in ranks} == {
         "BTCUSDT-SPOT.BYBIT": "spot",
@@ -249,6 +254,7 @@ def test_current_ranks_excludes_stale_instrument() -> None:
     now_ns = time.time_ns()
     _mark_fresh("BTC-USD-PERP.DYDX", now_ns)
     _mark_fresh("DEAD-USD-PERP.DYDX", now_ns - engine._WATCHLIST_STALE_NS - 1)
+    engine._VOLUME_24H.update({"BTC-USD-PERP.DYDX": 1.0, "DEAD-USD-PERP.DYDX": 1.0})
 
     ranks = engine._current_ranks()
 
@@ -285,6 +291,7 @@ def test_build_rankings_message_carries_stale_instrument_ids() -> None:
     now_ns = time.time_ns()
     _mark_fresh("BTC-USD-PERP.DYDX", now_ns)
     _mark_fresh("SOL-USD-PERP.DYDX", now_ns - engine._WATCHLIST_STALE_NS - 1)
+    engine._VOLUME_24H["BTC-USD-PERP.DYDX"] = 1.0
 
     message = engine._build_rankings_message()
 
@@ -429,6 +436,7 @@ def test_current_ranks_includes_live_tick_fields_from_ingested_snapshots() -> No
         [_snap(iid, 101.0, 102.0, ts_event=1_000_000_000, buy_volume=2.0, sell_volume=0.0, buy_count=1, sell_count=0)],
     )
     _mark_fresh(iid, now_ns)
+    engine._VOLUME_24H[iid] = 1.0
 
     row = engine._current_ranks()[0]
 
@@ -455,6 +463,7 @@ def test_current_ranks_falls_back_to_slow_metrics_price_pct_and_volatility() -> 
     iid = "BTC-USD-PERP.DYDX"
     now_ns = time.time_ns()
     _mark_fresh(iid, now_ns)
+    engine._VOLUME_24H[iid] = 1.0
     engine._SLOW_METRICS[iid] = {
         "instrument_id": iid, "price": 99.0, "pct_1h": 0.01, "pct_24h": 0.05, "volatility": 0.002,
         "pct_1w": 3.5, "pct_1m": None, "ts": now_ns,
@@ -476,6 +485,7 @@ def test_current_ranks_drops_stale_slow_metrics() -> None:
     iid = "BTC-USD-PERP.DYDX"
     now_ns = time.time_ns()
     _mark_fresh(iid, now_ns)
+    engine._VOLUME_24H[iid] = 1.0
     engine._SLOW_METRICS[iid] = {
         "instrument_id": iid, "price": 99.0, "pct_1h": 0.01, "ts": now_ns - 10 * 60 * 1_000_000_000,
     }
@@ -681,3 +691,418 @@ def test_pct_change_from_is_signed_percent_and_none_without_history() -> None:
     assert engine._pct_change_from(110.0, None) is None
     assert engine._pct_change_from(None, 100.0) is None
     assert engine._pct_change_from(110.0, 0.0) is None
+
+
+# --- Story 22.10: per-venue USD 24h volume -------------------------------------------------
+# Fixtures below follow the shape of real responses captured 2026-09-21 (Bybit v5
+# /market/tickers linear + spot, Hyperliquid /info metaAndAssetCtxs) -- same field names,
+# string-typed numbers, and `[meta, ctxs]` pairing as the live APIs; trimmed to a few rows,
+# and the numbers are illustrative, not the captured values.
+
+_BYBIT_LINEAR_TICKERS = {
+    "retCode": 0,
+    "retMsg": "OK",
+    "result": {
+        "category": "linear",
+        "list": [
+            {
+                "symbol": "BTCUSDT",
+                "lastPrice": "81850.10",
+                "openInterest": "52034.1",
+                "turnover24h": "3499130184.7322",
+                "volume24h": "42880.8150",
+                "fundingRate": "0.00005",
+            },
+            {
+                "symbol": "0GUSDT",
+                "lastPrice": "0.2266",
+                "openInterest": "9529956.3",
+                "turnover24h": "2114464.7013",
+                "volume24h": "9653419.2000",
+                "fundingRate": "0.00005",
+            },
+        ],
+    },
+}
+
+_BYBIT_SPOT_TICKERS = {
+    "retCode": 0,
+    "retMsg": "OK",
+    "result": {
+        "category": "spot",
+        "list": [
+            {
+                "symbol": "BTCUSDT",
+                "lastPrice": "81852.3",
+                "turnover24h": "366657848.7248449",
+                "volume24h": "4480.1",
+                "usdIndexPrice": "81860.1",
+            },
+            {
+                "symbol": "WLDUSDC",
+                "lastPrice": "0.4459",
+                "turnover24h": "224189.487161",
+                "volume24h": "515315.85",
+                "usdIndexPrice": "0.446893",
+            },
+            {
+                "symbol": "ETHBTC",
+                "lastPrice": "0.02651",
+                "turnover24h": "12.3456",
+                "volume24h": "465.7",
+                "usdIndexPrice": "2170.4",
+            },
+        ],
+    },
+}
+
+_HL_META_AND_CTXS = [
+    {
+        "universe": [
+            {"szDecimals": 5, "name": "BTC", "maxLeverage": 40, "marginTableId": 56},
+            {"szDecimals": 4, "name": "ETH", "maxLeverage": 25, "marginTableId": 55},
+        ],
+        "marginTables": [],
+        "collateralToken": 0,
+    },
+    [
+        {
+            "funding": "0.0000125",
+            "openInterest": "43265.9884999999",
+            "prevDayPx": "80534.0",
+            "dayNtlVlm": "1787695641.5723600388",
+            "markPx": "81858.0",
+            "dayBaseVlm": "22035.29",
+        },
+        {
+            "funding": "0.0000100",
+            "openInterest": "812345.1",
+            "prevDayPx": "2150.0",
+            "dayNtlVlm": "954321000.25",
+            "markPx": "2170.4",
+            "dayBaseVlm": "440000.1",
+        },
+    ],
+]
+
+
+def test_parse_bybit_volume_24h_linear_uses_turnover24h_usd() -> None:
+    error_ledger.reset()
+
+    result = engine.parse_bybit_volume_24h(_BYBIT_LINEAR_TICKERS, "linear")
+
+    assert result == {"BTCUSDT-LINEAR.BYBIT": 3499130184.7322, "0GUSDT-LINEAR.BYBIT": 2114464.7013}
+    assert error_ledger.counts() == {}
+
+
+def test_parse_bybit_volume_24h_spot_keeps_only_usd_stablecoin_quotes() -> None:
+    """
+    ETHBTC's turnover24h is in BTC, not USD (OBS-03): left out, and not a ledger
+    event at parse time -- only a *collected* one is (see the missing-volume ledger).
+    """
+    error_ledger.reset()
+
+    result = engine.parse_bybit_volume_24h(_BYBIT_SPOT_TICKERS, "spot")
+
+    assert result == {"BTCUSDT-SPOT.BYBIT": 366657848.7248449, "WLDUSDC-SPOT.BYBIT": 224189.487161}
+    assert error_ledger.counts() == {}
+
+
+def test_parse_bybit_volume_24h_linear_and_spot_ids_never_collide() -> None:
+    linear = engine.parse_bybit_volume_24h(_BYBIT_LINEAR_TICKERS, "linear")
+    spot = engine.parse_bybit_volume_24h(_BYBIT_SPOT_TICKERS, "spot")
+
+    assert not set(linear) & set(spot)
+
+
+@pytest.mark.parametrize("raw", ["", None, "abc", "-5", "nan", "inf", True])
+def test_parse_bybit_volume_24h_unparseable_value_is_skipped_and_ledgered(raw: object) -> None:
+    error_ledger.reset()
+    tickers = {
+        "retCode": 0,
+        "result": {
+            "list": [
+                {"symbol": "BTCUSDT", "turnover24h": raw},
+                {"symbol": "ETHUSDT", "turnover24h": "10.5"},
+            ]
+        }
+    }
+
+    result = engine.parse_bybit_volume_24h(tickers, "linear")
+
+    assert result == {"ETHUSDT-LINEAR.BYBIT": 10.5}  # never BTCUSDT at 0 (DATA-01)
+    assert error_ledger.counts() == {"ranking_engine.volume24h": 1}
+
+
+def test_parse_hyperliquid_volume_24h_pairs_universe_with_ctxs_by_index() -> None:
+    error_ledger.reset()
+
+    result = engine.parse_hyperliquid_volume_24h(_HL_META_AND_CTXS)
+
+    assert result == {
+        "BTC-USD-PERP.HYPERLIQUID": 1787695641.5723600388,
+        "ETH-USD-PERP.HYPERLIQUID": 954321000.25,
+    }
+    assert error_ledger.counts() == {}
+
+
+def test_parse_hyperliquid_volume_24h_null_value_is_skipped_and_ledgered() -> None:
+    error_ledger.reset()
+    payload = [_HL_META_AND_CTXS[0], [{"dayNtlVlm": None}, {"dayNtlVlm": "5.0"}]]
+
+    result = engine.parse_hyperliquid_volume_24h(payload)
+
+    assert result == {"ETH-USD-PERP.HYPERLIQUID": 5.0}
+    assert error_ledger.counts() == {"ranking_engine.volume24h": 1}
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"universe": []},
+        [],
+        [{"universe": [{"name": "BTC"}]}, []],
+        [{"universe": [{"name": "BTC"}]}, [{}], [{}]],
+        [["not", "a", "dict"], [{}]],
+    ],
+)
+def test_parse_hyperliquid_volume_24h_bad_shape_raises(payload: object) -> None:
+    with pytest.raises(ValueError, match="metaAndAssetCtxs"):
+        engine.parse_hyperliquid_volume_24h(payload)
+
+
+def test_volume_sources_rejects_unknown_environment() -> None:
+    with pytest.raises(ValueError, match="BYBIT_ENVIRONMENT"):
+        engine._volume_sources(engine.DYDX_NETWORK, "demo", "mainnet")
+    with pytest.raises(ValueError, match="HYPERLIQUID_ENVIRONMENT"):
+        engine._volume_sources(engine.DYDX_NETWORK, "mainnet", "devnet")
+
+
+def test_volume_sources_polls_every_venue_and_market() -> None:
+    sources = engine._volume_sources(engine.DYDX_NETWORK, "mainnet", "testnet")
+
+    assert set(sources) == {"dydx", "bybit-linear", "bybit-spot", "hyperliquid"}
+
+
+def _fetcher(volumes: dict[str, float]) -> engine.VolumeFetcher:
+    async def _fetch() -> dict[str, float]:
+        return dict(volumes)
+
+    return _fetch
+
+
+def _failing_fetcher() -> engine.VolumeFetcher:
+    async def _fetch() -> dict[str, float]:
+        raise OSError("simulated venue outage")
+
+    return _fetch
+
+
+def _three_venue_volumes() -> dict[str, dict[str, float]]:
+    return {
+        "dydx": {"BTC-USD-PERP.DYDX": 3_000_000.0},
+        "bybit-linear": engine.parse_bybit_volume_24h(_BYBIT_LINEAR_TICKERS, "linear"),
+        "bybit-spot": engine.parse_bybit_volume_24h(_BYBIT_SPOT_TICKERS, "spot"),
+        "hyperliquid": engine.parse_hyperliquid_volume_24h(_HL_META_AND_CTXS),
+    }
+
+
+def test_three_venue_volume_cycle_ranks_every_venue_by_its_own_usd_volume() -> None:
+    _reset_state()
+    error_ledger.reset()
+    now_ns = time.time_ns()
+    iids = [
+        "BTC-USD-PERP.DYDX",
+        "BTCUSDT-LINEAR.BYBIT",
+        "BTCUSDT-SPOT.BYBIT",
+        "BTC-USD-PERP.HYPERLIQUID",
+    ]
+    for iid in iids:
+        _mark_fresh(iid, now_ns)
+    sources = {name: _fetcher(vols) for name, vols in _three_venue_volumes().items()}
+
+    asyncio.run(engine._volume_cycle(sources))
+    ranks = engine._current_ranks()
+
+    assert [(r["instrument_id"], r["venue"], r["market"]) for r in ranks] == [
+        ("BTCUSDT-LINEAR.BYBIT", "BYBIT", "perp"),
+        ("BTC-USD-PERP.HYPERLIQUID", "HYPERLIQUID", "perp"),
+        ("BTCUSDT-SPOT.BYBIT", "BYBIT", "spot"),
+        ("BTC-USD-PERP.DYDX", "DYDX", "perp"),
+    ]
+    assert [r["rank"] for r in ranks] == [1, 2, 3, 4]
+    assert error_ledger.counts() == {}
+
+
+def test_current_ranks_missing_volume_left_out_of_volume_mode_kept_as_none_in_volatility() -> None:
+    _reset_state()
+    now_ns = time.time_ns()
+    _mark_fresh("BTC-USD-PERP.DYDX", now_ns)
+    _mark_fresh("BTC-USD-PERP.HYPERLIQUID", now_ns)
+    engine._VOLUME_24H["BTC-USD-PERP.DYDX"] = 3_000_000.0
+
+    engine._ACTIVE_MODE = "volume"
+    assert [r["instrument_id"] for r in engine._current_ranks()] == ["BTC-USD-PERP.DYDX"]
+
+    engine._ACTIVE_MODE = "volatility"
+    rows = {r["instrument_id"]: r for r in engine._current_ranks()}
+    assert set(rows) == {"BTC-USD-PERP.DYDX", "BTC-USD-PERP.HYPERLIQUID"}
+    assert rows["BTC-USD-PERP.HYPERLIQUID"]["volume24h"] is None  # never a fabricated 0
+
+
+def test_volume_cycle_one_venue_failing_keeps_its_last_good_values_and_updates_the_rest() -> None:
+    _reset_state()
+    error_ledger.reset()
+    asyncio.run(
+        engine._volume_cycle(
+            {
+                "dydx": _fetcher({"BTC-USD-PERP.DYDX": 1.0}),
+                "bybit-linear": _fetcher({"BTCUSDT-LINEAR.BYBIT": 2.0}),
+            }
+        )
+    )
+
+    asyncio.run(
+        engine._volume_cycle(
+            {
+                "dydx": _fetcher({"BTC-USD-PERP.DYDX": 10.0}),
+                "bybit-linear": _failing_fetcher(),
+            }
+        )
+    )
+
+    assert engine._VOLUME_24H == {"BTC-USD-PERP.DYDX": 10.0, "BTCUSDT-LINEAR.BYBIT": 2.0}
+    assert error_ledger.counts() == {"ranking_engine.volume24h": 1}
+    assert error_ledger.last_details()["ranking_engine.volume24h"].startswith("bybit-linear:")
+
+
+def test_volume_cycle_successful_poll_replaces_a_source_whole_so_delisted_coins_drop_out() -> None:
+    _reset_state()
+    asyncio.run(engine._volume_cycle({"hyperliquid": _fetcher({"A-USD-PERP.HYPERLIQUID": 1.0})}))
+
+    asyncio.run(engine._volume_cycle({"hyperliquid": _fetcher({"B-USD-PERP.HYPERLIQUID": 2.0})}))
+
+    assert engine._VOLUME_24H == {"B-USD-PERP.HYPERLIQUID": 2.0}
+
+
+def test_rebuild_volume_24h_expires_a_source_past_max_age_with_a_ledger_entry() -> None:
+    _reset_state()
+    error_ledger.reset()
+    now_ns = time.time_ns()
+    engine._VENUE_VOLUMES["dydx"] = (now_ns, {"BTC-USD-PERP.DYDX": 1.0})
+    engine._VENUE_VOLUMES["bybit-spot"] = (
+        now_ns - engine._VOLUME_MAX_AGE_NS - 1,
+        {"BTCUSDT-SPOT.BYBIT": 2.0},
+    )
+
+    engine._rebuild_volume_24h(now_ns)
+
+    assert engine._VOLUME_24H == {"BTC-USD-PERP.DYDX": 1.0}
+    assert error_ledger.counts() == {"ranking_engine.volume24h": 1}
+    assert error_ledger.last_details()["ranking_engine.volume24h"].startswith("bybit-spot:")
+
+
+def test_volume_max_age_is_three_poll_intervals_in_ns() -> None:
+    assert engine._VOLUME_MAX_AGE_NS == 3 * engine.VOLUME_POLL_SECONDS * 1_000_000_000
+    assert isinstance(engine._VOLUME_MAX_AGE_NS, int)
+
+
+def test_volume_cycle_ledgers_each_fresh_iid_without_volume_once_per_cycle() -> None:
+    _reset_state()
+    error_ledger.reset()
+    now_ns = time.time_ns()
+    _mark_fresh("BTC-USD-PERP.DYDX", now_ns)
+    _mark_fresh("ETHBTC-SPOT.BYBIT", now_ns)  # collected, but no USD volume exists for it
+    _mark_fresh("SOL-USD-PERP.HYPERLIQUID", now_ns)  # venue lists no such coin
+    _mark_fresh("DEAD-USD-PERP.DYDX", now_ns - engine._WATCHLIST_STALE_NS - 1)  # stale: not counted
+    sources = {
+        "dydx": _fetcher({"BTC-USD-PERP.DYDX": 1.0}),
+        "hyperliquid": _fetcher({"BTC-USD-PERP.HYPERLIQUID": 5.0}),
+    }
+
+    asyncio.run(engine._volume_cycle(sources))
+    assert error_ledger.counts() == {"ranking_engine.volume24h": 2}
+
+    asyncio.run(engine._volume_cycle(sources))
+    assert error_ledger.counts() == {"ranking_engine.volume24h": 4}
+
+
+@pytest.mark.parametrize(
+    "tickers",
+    [
+        {"retCode": 10006, "retMsg": "Too many visits!", "result": {}},
+        {"retCode": 0, "result": {}},
+        {},
+    ],
+)
+def test_parse_bybit_volume_24h_error_response_raises_instead_of_parsing_empty(
+    tickers: dict,
+) -> None:
+    with pytest.raises(ValueError, match="retCode"):
+        engine.parse_bybit_volume_24h(tickers, "linear")
+
+
+def test_volume_cycle_empty_poll_is_a_failure_that_keeps_the_last_good_values() -> None:
+    _reset_state()
+    error_ledger.reset()
+    asyncio.run(engine._volume_cycle({"bybit-linear": _fetcher({"BTCUSDT-LINEAR.BYBIT": 2.0})}))
+
+    asyncio.run(engine._volume_cycle({"bybit-linear": _fetcher({})}))
+
+    assert engine._VOLUME_24H == {"BTCUSDT-LINEAR.BYBIT": 2.0}
+    assert error_ledger.counts() == {"ranking_engine.volume24h": 1}
+
+
+def test_volume_cycle_a_hung_source_times_out_without_stalling_the_others(monkeypatch) -> None:
+    _reset_state()
+    error_ledger.reset()
+    monkeypatch.setattr(engine, "_VOLUME_FETCH_TIMEOUT_SECONDS", 0.05)
+
+    async def _hung() -> dict[str, float]:
+        await asyncio.sleep(10)
+        return {}
+
+    asyncio.run(
+        engine._volume_cycle({"dydx": _fetcher({"BTC-USD-PERP.DYDX": 1.0}), "hyperliquid": _hung})
+    )
+
+    assert engine._VOLUME_24H == {"BTC-USD-PERP.DYDX": 1.0}
+    assert error_ledger.last_details()["ranking_engine.volume24h"].startswith("hyperliquid:")
+
+
+def _json_response(payload: object) -> io.BytesIO:
+    """Stand-in for urlopen's response: a context manager json.load can read."""
+    return io.BytesIO(json.dumps(payload).encode())
+
+
+def test_hyperliquid_fetch_posts_meta_and_asset_ctxs_as_json(monkeypatch) -> None:
+    requests: list = []
+
+    def _urlopen(request, timeout: float) -> io.BytesIO:
+        requests.append(request)
+        return _json_response(_HL_META_AND_CTXS)
+
+    monkeypatch.setattr(engine.urllib.request, "urlopen", _urlopen)
+
+    payload = engine._fetch_hyperliquid_meta_and_ctxs_json("mainnet")
+
+    request = requests[0]
+    assert payload == _HL_META_AND_CTXS
+    assert request.full_url == "https://api.hyperliquid.xyz/info"
+    assert request.get_method() == "POST"
+    assert json.loads(request.data) == {"type": "metaAndAssetCtxs"}
+    assert request.get_header("Content-type") == "application/json"
+
+
+def test_bybit_fetch_requests_the_category_tickers(monkeypatch) -> None:
+    requests: list = []
+
+    def _urlopen(request, timeout: float) -> io.BytesIO:
+        requests.append(request)
+        return _json_response(_BYBIT_SPOT_TICKERS)
+
+    monkeypatch.setattr(engine.urllib.request, "urlopen", _urlopen)
+
+    engine._fetch_bybit_tickers_json("testnet", "spot")
+
+    assert requests[0].full_url == "https://api-testnet.bybit.com/v5/market/tickers?category=spot"

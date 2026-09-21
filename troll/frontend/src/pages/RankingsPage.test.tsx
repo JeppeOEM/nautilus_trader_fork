@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -89,6 +89,7 @@ function liveMessage(overrides: Partial<RankingsLiveMessage> = {}): RankingsLive
 beforeEach(() => {
   useLiveChannelMock.mockReset();
   navigateMock.mockReset();
+  localStorage.clear(); // venue chip selection (Story 22.10) must not leak between tests
 });
 
 // The project's shared Vitest setup (src/test/setup.ts) doesn't register RTL's
@@ -98,6 +99,7 @@ beforeEach(() => {
 // ambiguous unless each test's DOM is torn down first.
 afterEach(() => {
   cleanup();
+  localStorage.clear();
 });
 
 describe("RankingsPage", () => {
@@ -408,7 +410,7 @@ describe("RankingsPage", () => {
       renderPage();
 
       expect(screen.getByRole("columnheader", { name: "Venue" })).toBeInTheDocument();
-      expect(screen.getByText("BYBIT")).toBeInTheDocument();
+      expect(within(screen.getByRole("table")).getByText("BYBIT")).toBeInTheDocument();
       expect(screen.getAllByRole("row")).toHaveLength(4); // header + 3 distinct venue-qualified rows
 
       addFilter("Venue", "=", "bybit");
@@ -498,6 +500,150 @@ describe("RankingsPage", () => {
       addFilter("RelativeStrengthIndex.value", "<", "30");
 
       expect(shownInstruments()).toEqual(["AAA-USD-PERP.DYDX", "CCC-USD-PERP.DYDX"]);
+    });
+    describe("venue chips", () => {
+      const multiVenueRanks = [
+        { instrument_id: "BTCUSDT-LINEAR.BYBIT", venue: "BYBIT", price: 1 },
+        { instrument_id: "BTC-USD-PERP.DYDX", venue: "DYDX", price: 2 },
+        { instrument_id: "BTC-USD-PERP.HYPERLIQUID", venue: "HYPERLIQUID", price: 3 },
+        { instrument_id: "ETH-USD-PERP.DYDX", venue: "DYDX", price: 4 },
+      ];
+
+      function showLive(ranks: RankingsLiveMessage["ranks"]): void {
+        useLiveChannelMock.mockReturnValue({ latest: liveMessage({ ranks }), connected: true });
+      }
+
+      function chip(venue: string): HTMLElement {
+        return within(screen.getByRole("group", { name: "Venues" })).getByRole("button", { name: venue });
+      }
+
+      // [rank, instrument_id] per rendered body row -- rank is the first cell.
+      function shownRows(): [string, string][] {
+        return screen
+          .getAllByRole("row")
+          .slice(1)
+          .map((tr) => {
+            const cells = within(tr).getAllByRole("cell");
+            return [cells[0].textContent ?? "", (cells[1].textContent ?? "").replace("⏲", "")];
+          });
+      }
+
+      beforeEach(() => showLive(multiVenueRanks));
+
+      it("shows every venue's rows by default, with one selected chip per venue (sorted)", () => {
+        renderPage();
+
+        const chips = within(screen.getByRole("group", { name: "Venues" })).getAllByRole("button");
+        expect(chips.map((c) => c.textContent)).toEqual(["BYBIT", "DYDX", "HYPERLIQUID"]);
+        chips.forEach((c) => expect(c).toHaveAttribute("aria-pressed", "true"));
+        expect(shownRows().map(([, iid]) => iid)).toEqual(multiVenueRanks.map((r) => r.instrument_id));
+      });
+
+      it("deselecting BYBIT hides only Bybit rows and keeps the message rank", () => {
+        renderPage();
+
+        fireEvent.click(chip("BYBIT"));
+
+        expect(chip("BYBIT")).toHaveAttribute("aria-pressed", "false");
+        expect(shownRows()).toEqual([
+          ["2", "BTC-USD-PERP.DYDX"],
+          ["3", "BTC-USD-PERP.HYPERLIQUID"],
+          ["4", "ETH-USD-PERP.DYDX"],
+        ]);
+      });
+
+      it("shows a venue that appears after others were deselected", () => {
+        showLive(multiVenueRanks.filter((r) => r.venue !== "HYPERLIQUID"));
+        const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+        const { rerender } = render(pageElement(queryClient));
+        fireEvent.click(chip("BYBIT"));
+
+        showLive(multiVenueRanks);
+        rerender(pageElement(queryClient));
+
+        expect(chip("HYPERLIQUID")).toHaveAttribute("aria-pressed", "true");
+        expect(screen.getByText("BTC-USD-PERP.HYPERLIQUID")).toBeInTheDocument();
+        expect(screen.queryByText("BTCUSDT-LINEAR.BYBIT")).not.toBeInTheDocument();
+      });
+
+      it("keeps a deselected venue's chip while it has no rows, so the hide can be undone", () => {
+        localStorage.setItem("rankings-deselected-venues", JSON.stringify(["KRAKEN"]));
+        renderPage();
+
+        expect(chip("KRAKEN")).toHaveAttribute("aria-pressed", "false");
+        fireEvent.click(chip("KRAKEN"));
+
+        expect(JSON.parse(localStorage.getItem("rankings-deselected-venues") ?? "null")).toEqual([]);
+      });
+
+      it("composes with a `venue = DYDX` condition and the tab", () => {
+        renderPage();
+
+        addFilter("Venue", "=", "dydx");
+        expect(shownRows().map(([, iid]) => iid)).toEqual(["BTC-USD-PERP.DYDX", "ETH-USD-PERP.DYDX"]);
+
+        fireEvent.click(chip("DYDX")); // chips AND conditions: nothing left
+        expect(screen.queryAllByRole("cell")).toHaveLength(0);
+        // Emptied by the condition, not by the chips alone -- no "every venue" note.
+        expect(screen.queryByText(/every venue is deselected/)).not.toBeInTheDocument();
+
+        fireEvent.click(chip("DYDX"));
+        fireEvent.click(screen.getByText("Technicals"));
+        expect(screen.getByText("BTC-USD-PERP.DYDX")).toBeInTheDocument();
+        expect(screen.queryByText("BTCUSDT-LINEAR.BYBIT")).not.toBeInTheDocument();
+      });
+
+      it("notes it when the chips alone hide every row", () => {
+        renderPage();
+
+        ["BYBIT", "DYDX", "HYPERLIQUID"].forEach((venue) => fireEvent.click(chip(venue)));
+
+        expect(screen.queryAllByRole("cell")).toHaveLength(0);
+        expect(screen.getByText(/every venue is deselected/)).toHaveClass("rankings-empty");
+      });
+
+      it("persists the deselected venues to localStorage and restores them on reload", () => {
+        renderPage();
+        fireEvent.click(chip("DYDX"));
+        fireEvent.click(chip("BYBIT"));
+        expect(JSON.parse(localStorage.getItem("rankings-deselected-venues") ?? "null")).toEqual(["BYBIT", "DYDX"]);
+
+        cleanup();
+        renderPage();
+
+        expect(chip("BYBIT")).toHaveAttribute("aria-pressed", "false");
+        expect(chip("DYDX")).toHaveAttribute("aria-pressed", "false");
+        expect(shownRows().map(([, iid]) => iid)).toEqual(["BTC-USD-PERP.HYPERLIQUID"]);
+      });
+
+      it("ignores a malformed stored value and shows every venue", () => {
+        localStorage.setItem("rankings-deselected-venues", "{not json");
+
+        renderPage();
+
+        expect(shownRows()).toHaveLength(multiVenueRanks.length);
+      });
+
+      it("renders every venue and still toggles in memory when storage throws", () => {
+        const getItem = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+          throw new Error("storage blocked");
+        });
+        const setItem = vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+          throw new Error("storage blocked");
+        });
+        try {
+          renderPage();
+          expect(shownRows()).toHaveLength(multiVenueRanks.length);
+
+          fireEvent.click(chip("BYBIT"));
+
+          expect(screen.queryByText("BTCUSDT-LINEAR.BYBIT")).not.toBeInTheDocument();
+          expect(shownRows()).toHaveLength(multiVenueRanks.length - 1);
+        } finally {
+          getItem.mockRestore();
+          setItem.mockRestore();
+        }
+      });
     });
   });
 });

@@ -287,7 +287,7 @@ development_status:
   22-7-exchange-demo-testnet-and-real-money-for-bybit-and-hyperliquid: awaiting-operator
   22-8-spine-rules-and-docs-updated-for-the-multi-venue-core: done
   22-9-historical-bar-backfill-for-bybit-and-hyperliquid: done
-  22-10-rankings-show-every-collected-coin-across-venues-with-an-exchange-filter: ready-for-dev
+  22-10-rankings-show-every-collected-coin-across-venues-with-an-exchange-filter: awaiting-operator
   22-11-nightly-catalog-consolidation-for-every-venue: ready-for-dev
   22-13-raw-trade-archive-exact-fold-nightly-rebuild-and-kline-reconciliation: ready-for-dev
   22-14-trade-gap-closure-rest-backfill-after-reconnect-and-dual-feed-arbitration: ready-for-dev

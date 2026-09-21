@@ -119,6 +119,10 @@ services:
       REDIS_URL: "redis://127.0.0.1:${REDIS_PORT:-6379}"
       CATALOG_PATH: "/app/catalog"
       DYDX_NETWORK: "mainnet"
+      # Must match bybit_collector's / hyperliquid_collector's config.toml `environment`
+      # (ranking_engine polls each venue's USD 24h volume from that network).
+      BYBIT_ENVIRONMENT: "mainnet"
+      HYPERLIQUID_ENVIRONMENT: "mainnet"
       RANKING_VOLATILITY_LOOKBACK_SECONDS: "3600"
       RANKING_HEARTBEAT_SECONDS: "5"
       METRICS_DB_PATH: "/app/metrics_dir/metrics.db"

@@ -1,6 +1,6 @@
 # Story 22.10: Rankings show every collected coin across venues, with an exchange filter
 
-Status: ready-for-dev
+Status: awaiting-operator
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -76,8 +76,43 @@ The dYdX parser already leaves an unparseable coin out, loudly. Extend that rule
 
 ### Agent Model Used
 
+claude-opus-5 (bmad-dev-auto, run d4b2)
+
 ### Debug Log References
 
 ### Completion Notes List
 
+- Implemented against `spec-22-10-rankings-show-every-collected-coin-across-venues-with-an-exchange-filter.md` (the executable spec; see its Auto Run Result for the review triage).
+- **Volume:**
+  - `ranking_engine` polls four sources concurrently every 60 s: `dydx`, `bybit-linear`, `bybit-spot` and `hyperliquid`.
+  - Each source is replaced whole on success. A failure, timeout (45 s), Bybit `retCode != 0` or empty parse is ledgered and the source keeps its last good values, which expire after 180 s.
+  - `volume24h` is `None` when unknown. Volume mode leaves such a row out and ledgers `ranking_engine.volume24h` once per instrument per cycle. Volatility mode keeps the row.
+  - Bybit spot counts only USDT/USDC-quoted pairs (`Known limit:`, audit D-55).
+- **TUI column (Task 3 decision):** the story asked to keep the row inside 80 columns, which is impossible. The row was already about 192 chars (rank + instrument + 15 `RANKING_COLS` × 11). The instrument column was widened from 20 to 26 (`_INSTRUMENT_WIDTH`), which fits every Hyperliquid id (22–26 chars) and every Bybit id up to 26. Longer ids go through `fit_instrument_id`, which keeps the `-MARKET.VENUE` tail and elides the symbol with `…`, e.g. `1000000MOGUS…-LINEAR.BYBIT`, so perp vs spot and the venue always stay visible. Header and rows share one constant.
+- **Web:** a venue chip row stores only the *deselected* venues in `localStorage["rankings-deselected-venues"]`, so a new venue is shown by default. It composes with the FilterPanel and the tab, and ranks stay message ranks.
+- **Live smoke (2026-09-21, host network):**
+
+  | Source | Markets | BTC 24h USD volume |
+  |---|---|---|
+  | dydx | 296 | 4.0 M |
+  | bybit-linear | 883 | 3.52 B |
+  | bybit-spot | 480 | 367 M |
+  | hyperliquid | 234 | 1.80 B |
+
+  The ledger stayed empty.
+- **Not done here (operator):** the Task 4 live three-collector check and the VPS memory check. See the spec's `operator_actions`.
+
 ### File List
+
+- troll/ranking_engine/engine.py
+- troll/ranking_engine/tests/test_engine.py
+- troll/frontend/src/pages/RankingsPage.tsx
+- troll/frontend/src/pages/RankingsPage.test.tsx
+- troll/frontend/src/pages/docs/data.ts
+- troll/bot_tui/coins_pane.py
+- troll/bot_tui/app.py
+- troll/bot_tui/tests/test_coins_pane.py
+- troll/docker-compose.yml
+- troll/CLAUDE.md
+- troll/docs/DATA_DICTIONARY.md
+- troll/docs/DATA_INTEGRITY_AUDIT.md

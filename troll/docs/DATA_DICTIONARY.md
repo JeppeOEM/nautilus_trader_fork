@@ -376,11 +376,19 @@ time / window contents / float accumulation order.
 - **`snapshots:raw`** — the Redis pub/sub stream of `DydxSecondSnapshot` dicts
   published live by the collector (§1.7). This is the engine's only per-tick market
   data input; it never reads Parquet directly for live-tick fields.
-- **`volume24H`** — polled independently every 60s directly from dYdX's indexer
-  `/v4/perpetualMarkets` (`_fetch_volume_24h_json`, `engine.py`) —
-  deliberately *not* reused from `dydx_collector.open_interest._fetch_markets_json`
-  even though it hits the same endpoint, because architecture rule AD-4 disallows
-  cross-module reuse of anything that does network I/O (`engine.py`).
+- **USD 24 h volume, per venue** (Story 22.10) — polled independently every 60s,
+  all sources concurrently (`_volume_cycle`, `engine.py`): dYdX's indexer
+  `/v4/perpetualMarkets` `volume24H` (`_fetch_volume_24h_json`), Bybit's
+  `/v5/market/tickers?category=linear|spot` `turnover24h`
+  (`_fetch_bybit_tickers_json`; spot kept only for USDT/USDC quotes) and Hyperliquid's
+  `POST /info {"type":"metaAndAssetCtxs"}` `dayNtlVlm`
+  (`_fetch_hyperliquid_meta_and_ctxs_json`). `DYDX_NETWORK`, `BYBIT_ENVIRONMENT` and
+  `HYPERLIQUID_ENVIRONMENT` pick mainnet/testnet. Each source's last good result is
+  kept on a failed poll and expires after 3 missed polls; failures, expiries and fresh
+  instruments with no volume are counted at `ranking_engine.volume24h`. None of these
+  fetchers is reused from the collectors even where the endpoint is the same, because
+  architecture rule AD-4 disallows cross-module reuse of anything that does network
+  I/O (`engine.py`).
 - **Parquet catalog** (via `metrics_computer.compute_all`, §2.8) — read once per
   minute for `price`/`pct_1h`/`pct_24h`/`volatility`.
 - **`ranking:control`** — a Redis control channel that switches the active ranking
@@ -424,6 +432,11 @@ snapshot within the last 30 seconds (`_WATCHLIST_STALE_NS`, reusing OBS-01's
 - Slow fields folded in from the last `compute_all` pass (§2.8): `pct_1h`, `pct_24h`,
   `volatility`.
 - `volume24h` and `volatility_score` — always both present regardless of active mode.
+  `volume24h` is the venue's own USD 24 h volume (Story 22.10) and is `null` when that
+  venue has no current volume for the instrument; such a row is left out of volume mode
+  entirely (never ranked at 0) and appears only in volatility mode. Exception, older than
+  Story 22.10: dYdX's `parse_volume_24h` still reads a market whose `volume24H` field is
+  absent or null as 0 (an unparseable string is left out); tracked in deferred work.
 - **`rank`** — 1-indexed position after sorting all rows by the active mode's score
   descending: `volatility_score` if mode is `"volatility"`, else `volume24h`
   (`engine.py`). This is the actual ranking: **default mode ranks
@@ -472,7 +485,7 @@ trading decision.
 | `DydxSecondSnapshot` mid-price sequence | `VolatilityTracker` (3600s cross-sectional) | `volatility_score` | **this is the sort key when mode = `"volatility"`** |
 | `DydxSecondSnapshot` mid-price sequence (300-tick window) | `statistics.stdev` fast volatility | `volatility_fast` | separate from `volatility_score` and catalog `volatility` — 3 distinct volatility numbers by design |
 | `DydxSecondSnapshot.close_price` (25h lookback; `TradeTick` pre-cutover) | `price_stats()` → `pct_change_1h/24h`, catalog `volatility` | `pct_1h`, `pct_24h`, `volatility` | via `metrics_computer.compute_all`, refreshed every 60s. `pct_1w`/`pct_1m` come from `metrics_store`'s persisted prices (`price_near_days_ago`), `None` until 7/30 days of history exist |
-| dYdX indexer `volume24H` (independent poll) | — (used as-is) | `volume24h` | **this is the sort key when mode = `"volume"` (default)** |
+| dYdX indexer `volume24H`, Bybit v5 tickers `turnover24h` (linear; spot USDT/USDC-quoted only), Hyperliquid `metaAndAssetCtxs` `dayNtlVlm` (independent polls in `ranking_engine`) | — (used as-is, USD) | `volume24h` | **this is the sort key when mode = `"volume"` (default)**; an instrument with no volume is absent from that mode and counted at `ranking_engine.volume24h` |
 | `OrderBookDeltas` | `book_features.py`, `chart_data.py`, `footprint.py` | *not present* | chart-page-only; never reaches `ranking_engine` |
 | `MarkPriceUpdate` / `IndexPriceUpdate` | — | *not present* | stored, no downstream reader found |
 | `FundingRateUpdate` | — | *not present* | stored, no downstream reader found |
