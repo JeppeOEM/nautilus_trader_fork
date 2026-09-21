@@ -40,7 +40,11 @@ CONFIG_PATH = Path(
 
 class HyperliquidCollector(Collector):
     def __init__(self, config: CoreConfig) -> None:
-        client = HyperliquidClient(on_data=self._on_data, environment=config.environment)
+        client = HyperliquidClient(
+            on_data=self._on_data,
+            environment=config.environment,
+            trade_feeds=config.trade_feeds,
+        )
         super().__init__(config, client)
 
 

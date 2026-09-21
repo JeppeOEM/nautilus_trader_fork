@@ -13,10 +13,10 @@ context:
 warnings: [oversized]
 operator_actions:
   - "On nifelheim, deploy this branch and rebuild the two venue collectors (`docker compose up -d --build bybit_collector hyperliquid_collector`). Their config.toml files are bind-mounted from the repo, so `book_time_source = \"venue\"` and `hold_back_seconds` take effect with the deploy."
-  - "On the VPS, run `python3 -m collector_core.measure_lag --venue bybit --seconds 10800` and `--venue hyperliquid --seconds 10800` in the collector image (`--network host`). Record each venue's per-kind distributions in troll/docs/DATA_INTEGRITY_AUDIT.md D-60."
+  - "On the VPS, run `python3 -m collector_core.measure_lag --venue bybit --seconds 10800` and `--venue hyperliquid --seconds 10800` in the collector image (`--network host`). Record each venue's per-kind distributions in troll/docs/DATA_INTEGRITY_AUDIT.md D-63."
   - "Set `hold_back_seconds` in troll/bybit_collector/config.toml and troll/hyperliquid_collector/config.toml to each venue's VPS TradeTick p99.9 rounded up to 0.5 s (or 0.0, with the reason written in the comment). Replace the provisional dev-box comment, then redeploy."
-  - "After one full UTC day per venue has been rebuilt by `make nightly VENUE=BYBIT` / `VENUE=HYPERLIQUID`, record each venue's compare_klines pass rate (instruments and minutes) in DATA_INTEGRITY_AUDIT.md D-60/D-51. Root-cause every remaining mismatch (a missing trade is a 22.14 gap; a book-related one is a new finding). Never add a tolerance."
-  - "For the first day after deploy, watch the `collector.late_trade`, `collector.pending_deltas` and `collector.book_sequence` counts in /api/errors for Bybit and Hyperliquid. A steady late-trade rate means the hold-back is too short; any pending_deltas or book_sequence entry is a DATA-02 finding to root-cause in D-60."
+  - "After one full UTC day per venue has been rebuilt by `make nightly VENUE=BYBIT` / `VENUE=HYPERLIQUID`, record each venue's compare_klines pass rate (instruments and minutes) in DATA_INTEGRITY_AUDIT.md D-63/D-51. Root-cause every remaining mismatch (a missing trade is a 22.14 gap; a book-related one is a new finding). Never add a tolerance."
+  - "For the first day after deploy, watch the `collector.late_trade`, `collector.pending_deltas` and `collector.book_sequence` counts in /api/errors for Bybit and Hyperliquid. A steady late-trade rate means the hold-back is too short; any pending_deltas or book_sequence entry is a DATA-02 finding to root-cause in D-63."
 ---
 
 <intent-contract>
@@ -162,13 +162,13 @@ operator_actions:
 - reject: 10
 - addressed_findings:
   - `[medium]` `[patch]` `query_second_snapshots` (and `chart_data`'s own copy of it) bounded the window on `ts_init`, so venue rows (sampled 1 + hold_back s after their `ts_event`) shifted at window edges. Both now query with the end widened by `_FILE_MARGIN_NS` and filter exactly on `ts_event`; `chart_data` reuses the shared helper.
-  - `[medium]` `[patch]` The shipped Hyperliquid hold-back of 2.5 s had never run live. Re-ran for 150 s at 2.5 s: 145 consecutive rows per instrument, 0 late trades, empty ledger. Recorded in D-60.
+  - `[medium]` `[patch]` The shipped Hyperliquid hold-back of 2.5 s had never run live. Re-ran for 150 s at 2.5 s: 145 consecutive rows per instrument, 0 late trades, empty ledger. Recorded in D-63.
   - `[medium]` `[patch]` Trades received before the first venue close were ledgered as `collector.late_trade` at every start. They are now counted in `_pre_start_trades` and logged, not ledgered.
   - `[low]` `[patch]` A 60 s catch-up could push `ts_init - ts_event` past the readers' 60 s file margin. The cap is now 30 s, with the reason in a comment.
   - `[low]` `[patch]` A catch-up ledgered one crossed-book episode once per overdue second (same `now_ns`). Episode start is now detected by membership.
   - `[low]` `[patch]` A late message could move `_book_event_ns` backwards. It now takes the max.
   - `[low]` `[patch]` Held deltas discarded by `_clear_book_state` went uncounted. They are now counted with the resync-window drops.
-  - `[low]` `[patch]` Applying Bybit deltas in `ts_event` order could trip the `u` regress canary if `ts` ever runs backwards against `u`. Documented in D-60 with the live evidence (zero occurrences); a rising `collector.book_sequence` count is the canary.
+  - `[low]` `[patch]` Applying Bybit deltas in `ts_event` order could trip the `u` regress canary if `ts` ever runs backwards against `u`. Documented in D-63 with the live evidence (zero occurrences); a rising `collector.book_sequence` count is the canary.
   - `[low]` `[patch]` `hold_back_seconds` of nan/inf was accepted. It is now refused (finite check) and tested.
   - `[low]` `[patch]` `measure_lag` accepted non-positive durations and connected outside its try/finally. It now validates its arguments and releases the client on a failed connect.
   - `[low]` `[patch]` The Bybit TOML comment said "below" for the instruments listed above it. Fixed.
@@ -214,7 +214,7 @@ Status: awaiting-operator
   - a `(ts_event=S, ts_init=S+2 s)` bucket test in `data_api` `test_live_candles`.
 - Docs:
   - `troll/docs/DATA_DICTIONARY.md`: per-venue clock semantics;
-  - `troll/docs/DATA_INTEGRITY_AUDIT.md`: D-31/D-44/D-50 amended, new D-60 with lag data, live checks and the Bybit `ts`/`u` note;
+  - `troll/docs/DATA_INTEGRITY_AUDIT.md`: D-31/D-44/D-50 amended, new D-63 with lag data, live checks and the Bybit `ts`/`u` note;
   - `troll/CLAUDE.md` DATA-01.
 
 **Review:**
@@ -240,7 +240,7 @@ Status: awaiting-operator
   - Bybit at 0.5 s: 125 rows per instrument across 4 instruments, one per floor second, all mid-second, `ts_init > ts_event`, 0 late trades, empty ledger.
   - Hyperliquid at 1.0 s: 126 rows, 24/28 late trades.
   - Hyperliquid at 2.5 s: 145 rows, 0 late trades, empty ledger.
-- **Measured lag:** `measure_lag`, 600 s per venue, recorded in D-60.
+- **Measured lag:** `measure_lag`, 600 s per venue, recorded in D-63.
 
 **Residual risks:**
 - The hold-backs are provisional, taken from a dev box that has a ~100 ms apparent clock offset to Bybit.

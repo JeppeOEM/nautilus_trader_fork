@@ -33,6 +33,8 @@ from collector_core.collector import _due_seconds
 from collector_core.collector import _next_close_at
 from collector_core.config import CoreConfig
 from collector_core.config import core_config_from_dict
+from collector_core.feed import MAIN_FEED
+from collector_core.feed import Feed
 from collector_core.rebuild_seconds import rebuild_day
 from collector_core.second_snapshot import DydxSecondSnapshot
 from nautilus_trader.model.data import BookOrder
@@ -146,6 +148,34 @@ def test_trades_are_bucketed_by_exchange_second(tmp_path: Path) -> None:
     c._process_data(_trade(2, _SEC + 1.01, init_s=_SEC + 1.02, price=101.0))  # in S+1
     (row,) = _close(c, _SEC)
     assert (row.buy_count, row.close_price) == (1, 100.25)
+
+
+def test_dual_feed_copies_fold_once_into_their_exchange_second(tmp_path: Path) -> None:
+    # 22.12 x 22.14: the trades-only socket's copy of a trade the book socket already delivered
+    # is a duplicate_feed -- never a second fold into the venue-timed row.
+    c = _collector(tmp_path)
+    trades_feed = Feed("main-trades", MAIN_FEED.group, trades_only=True)
+    c._process_data(_book(100.0, 102.0, _SEC + 0.1))
+    c._process_data(_trade(1, _SEC + 0.5, init_s=_SEC + 0.6), MAIN_FEED)
+    c._process_data(_trade(1, _SEC + 0.5, init_s=_SEC + 0.7), trades_feed)
+    c._process_data(_trade(2, _SEC + 0.8, init_s=_SEC + 1.1), trades_feed)  # only this feed
+    assert dict(c._duplicate_feed_dropped) == {_IID: 1}
+    assert [t.trade_id.value for t in c._buffer[(TradeTick, _IID)]] == ["1", "2"]
+    (row,) = _close(c, _SEC)
+    assert row.buy_count == 2
+
+
+def test_a_live_copy_of_a_rest_backfilled_trade_folds_into_its_exchange_second(
+    tmp_path: Path,
+) -> None:
+    c = _collector(tmp_path)
+    c._process_data(_book(100.0, 102.0, _SEC + 0.1))
+    c._register_trade(_IID, "5", "rest")  # the backfill archived it first
+    c._process_data(_trade(5, _SEC + 0.99, init_s=_SEC + 1.05))  # in S, arrived in S+1
+    assert c._buffer[(TradeTick, _IID)] == []  # never archived twice
+    (row,) = _close(c, _SEC)
+    assert (row.buy_count, row.close_price) == (1, 100.25)
+    assert c._second_trades == {}  # not in the arrival-second list
 
 
 def test_a_late_trade_is_archived_counted_excluded_live_and_rebuilt_into_its_second(

@@ -53,6 +53,41 @@ PyO3 bindings don't expose the fields another way.
 - **History:** files written before the earlier retention cutover (when trades stopped being stored)
   are still readable; story 22.13 reversed that cutover.
 
+#### Reconnect gap closure (story 22.14)
+
+The Rust WS clients reconnect and resubscribe silently, so the core detects a reconnect per
+connection ("feed") on evidence -- an `is_active()` flip (Bybit, Hyperliquid), a book feed
+silent past `feed_stale_seconds or stale_book_seconds`, or the same feed replaying a trade id
+after the startup grace -- and, 3 s later, fetches each affected instrument's trades of
+`[last archived ts_event - 5 s, now]` over stdlib REST (`collector_core/trade_backfill.py`).
+Unseen ids are archived with the venue's `ts_event` and `ts_init` = the time they were archived
+(so `ts_init - ts_event` shows the recovery lag); they are **never** folded into the live second
+-- the nightly rebuild places them. One `collector.trade_backfill` ledger entry per backfill
+names the feed, the detections, and the counts: backfilled, already archived, refused (older
+than the 300 s `ARRIVAL_MARGIN_NS`, which the rebuild and prune depend on), unrecoverable
+seconds, no baseline, errors. dYdX's `collector:status` carries the per-instrument cumulative
+`trade_backfill`; Bybit and Hyperliquid report it in the per-flush log line.
+
+What a reconnect gap costs, per venue (endpoints and depths verified live 2026-09-21):
+
+| Venue | Trade-history endpoint | Depth | What a reconnect gap costs |
+|---|---|---|---|
+| dYdX | `GET {indexer}/v4/trades/perpetualMarket/{ticker}?limit=1000&createdBeforeOrAt=<iso>` (paged backwards, newest first) | Full history, paged; capped by us at the 5-minute arrival margin and 20 pages | Nothing up to ~5 minutes: recovered exactly. Beyond that the older part is refused and reported `unrecoverable` |
+| Bybit linear | `GET /v5/market/recent-trade?category=linear&symbol=&limit=1000` (no paging) | Last **1000** trades (28-64 s of BTCUSDT in two samples, 2026-09-21) | Recovered while the outage is shorter than the last 1000 trades; beyond, `unrecoverable` seconds |
+| Bybit spot | same, `category=spot` | Last **60** trades, even with `limit=1000` (1.3-7 s of BTCUSDT) | Only very short outages on a busy pair; the rest `unrecoverable` (D-60) |
+| Hyperliquid | `POST /info {"type": "recentTrades", "coin"}` (exists; `startTime` ignored) | Last **10** trades only | Effectively unrecoverable from one connection (D-48) |
+
+Known limit: Bybit's and Hyperliquid's REST depth cannot cover a real outage on a busy
+instrument. Upgrade path, built and off by default: `trade_feeds = 2` in the venue's
+`config.toml` opens a second, independent trades-only WebSocket per feed group; both deliver
+into the same bounded `trade_id` dedup, which keeps the first copy and counts the other as
+`duplicate_feed` (distinct from `duplicate`, a same-feed replay). A per-flush INFO line "Trade
+feed arbitration (cumulative)" gives each feed's first copies, its only-this-feed count and the
+pairwise overlap; a feed whose last trade falls more than 30 s behind its sibling's raises an
+OBS-01 one-sided-outage notification. Other limits: a crash/restart gap is not backfilled
+(`_last_trade_ts` is in memory; D-61), and seconds the stale-book gate skipped during an outage
+have no snapshot row, so their backfilled trades are rebuild orphans.
+
 ### 1.2 `OrderBookDeltas` (native Nautilus type)
 
 - **Source:** `v4_orderbook` WS channel, PyCapsule path, same as trades.

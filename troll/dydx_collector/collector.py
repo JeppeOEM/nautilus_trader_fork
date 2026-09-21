@@ -358,7 +358,11 @@ class DydxCollector(Collector):
             await asyncio.sleep(self._config.open_interest_poll_seconds)
             try:
                 for item in await fetch_open_interest(self._config.network):
-                    self._on_data(item)
+                    # Straight to the buffer, not _on_data: REST-polled data must not count as
+                    # WS feed liveness (`_last_feed_message_ns`, story 22.5) nor feed a
+                    # reconnect's silence detection (story 22.14). Every market is kept, as
+                    # before: the markets poll is venue-wide.
+                    self._buffer[(type(item), str(item.instrument_id))].append(item)
             except Exception:
                 error_ledger.record("collector.open_interest_poll", "failed to poll open interest")
 
@@ -450,6 +454,8 @@ class DydxCollector(Collector):
                 "id": entry.id,
                 "liquid": entry.id in self._last_liquid_by_volume,
                 "last_trade_ts": self._last_book_update_ns.get(entry.id, 0),
+                # Trades recovered over REST after reconnects since start (story 22.14).
+                "trade_backfill": self._trade_backfill_counts.get(entry.id, 0),
             }
             await self._redis.publish(_STATUS_CHANNEL, json.dumps(payload))
         await self._redis.publish(

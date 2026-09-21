@@ -16,6 +16,11 @@ instruments = ["BTC-USD-PERP.HYPERLIQUID", "ETH-USD-PERP.HYPERLIQUID"]
 # (`python -m collector_core.measure_lag --venue hyperliquid`) rounded up to 0.5 s. Local dev-box
 # run 2026-09-21, 600 s, BTC + ETH: TradeTick n=9,596 p50 382.6 ms, p99 823.2 ms, p99.9 2307.6 ms,
 # max 2403.2 ms (l2Book p99.9 2307.6 ms). PROVISIONAL: the >= 3 h run on the VPS that hosts this
-# collector is owed (audit D-60); set the value from that run.
+# collector is owed (audit D-63); set the value from that run.
 book_time_source = "venue"
 hold_back_seconds = 2.5
+# Trade connections per feed group (story 22.14): 1 = trades on the book socket only; 2 = also an
+# independent trades-only socket, unioned through the trade_id dedup, so a one-sided outage loses
+# no trade (the REST backfill after a reconnect is shallow here: see docs/DATA_DICTIONARY.md).
+# The operator flips this to 2 for the 22.14 measurement (docs/DEPLOY_CHECKLIST.md).
+trade_feeds = 1

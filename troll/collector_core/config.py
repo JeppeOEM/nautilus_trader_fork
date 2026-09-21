@@ -55,6 +55,11 @@ class CoreConfig:
     # Set from `collector_core.measure_lag`, never to make reconciliation pass (the nightly
     # rebuild is the correctness device, D-50).
     hold_back_seconds: float = 0.0
+    # WebSocket connections carrying trades per feed group (story 22.14): 1 = the primary socket
+    # only; 2 = plus an independent trades-only socket, unioned through the trade_id dedup (first
+    # copy archived, the other counted `duplicate_feed`) so a one-sided outage loses nothing.
+    # Only the Bybit and Hyperliquid clients open a second socket; dYdX's loader keeps 1.
+    trade_feeds: int = 1
     instruments: tuple[str, ...] = ()
 
 
@@ -67,6 +72,13 @@ _POSITIVE_KEYS = (
     "stale_trade_seconds",
     "seen_trade_ids",
 )
+
+
+def _trade_feeds(value: Any) -> int:
+    # Strict: `int()` would turn a TOML `2.5` into 2 and `true` into 1, both then passing.
+    if type(value) is not int:
+        raise ValueError(f"trade_feeds must be the integer 1 or 2, got {value!r}")
+    return value
 
 
 def core_config_from_dict(
@@ -96,6 +108,7 @@ def core_config_from_dict(
         book_crosscheck_seconds=float(raw.get("book_crosscheck_seconds", 300.0)),
         book_time_source=raw.get("book_time_source", "arrival"),
         hold_back_seconds=float(raw.get("hold_back_seconds", 0.0)),
+        trade_feeds=_trade_feeds(raw.get("trade_feeds", 1)),
         instruments=tuple(dict.fromkeys(raw.get("instruments", []))),  # deduped, order kept
     )
     for name in _POSITIVE_KEYS:
@@ -108,6 +121,8 @@ def core_config_from_dict(
             f"book_crosscheck_seconds must be >= 0, got {config.book_crosscheck_seconds}"
         )
     _check_time_source(config)
+    if config.trade_feeds not in (1, 2):
+        raise ValueError(f"trade_feeds must be 1 or 2, got {config.trade_feeds}")
     return config
 
 

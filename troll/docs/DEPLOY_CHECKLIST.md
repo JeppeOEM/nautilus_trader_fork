@@ -56,7 +56,31 @@ None of these can be taken off the VPS; each is **NOT measured** until recorded.
 | RSS headroom: peak child RSS vs the collectors' memory on the 3.7 GB box | `free -m` during the run, next to the summary line | D-06 |
 | The first day that verifies `pass` for a venue | `verified_days` in `candles_<venue>.db` | closes D-31 / D-44 for trades |
 
-## 3. Things not to do
+## 3. Trade gap closure measurement (story 22.14)
+
+Record every number in `docs/DATA_INTEGRITY_AUDIT.md` D-47 (Bybit, dYdX), D-48 (Hyperliquid)
+and D-60 (Bybit spot depth).
+
+1. **Before**, with `trade_feeds = 1` (as shipped): after `make redeploy-all`, let one full UTC
+   day run and record the per-venue `compare_klines` pass rate (instruments and minutes) from
+   that night's `compare_klines <VENUE> <DAY>: ...` line, and the day's count of
+   `collector.trade_backfill` entries per venue (`GET /api/errors`, or `grep -c` in the
+   collector logs) with their `backfilled` / `unrecoverable` totals.
+2. **Flip:** set `trade_feeds = 2` in `bybit_collector/config.toml` **and**
+   `hyperliquid_collector/config.toml` (dYdX has no second feed), then
+   `make redeploy-all`. Check the first flush logs a `Trade feed arbitration (cumulative)` line
+   per venue.
+3. **After 24 h:** copy the last `Trade feed arbitration (cumulative)` line per venue (first
+   copies, only-this-feed per feed, both), the count of `collector.trade_backfill` entries and
+   their totals, any one-sided-outage notifications, and the next night's `compare_klines` pass
+   rate per venue into the audit, next to the "before" numbers.
+4. **After a week:** re-record the pass rates and name every remaining mismatch's cause
+   (DATA-02): a `reconcile.kline_mismatch` in a minute covered by a `collector.trade_backfill`
+   entry with `unrecoverable` seconds is the venue's depth (D-60/D-48); one in a minute the
+   stale-book gate skipped is a rebuild orphan (collector docstring `Known limit:`); anything
+   else is a new finding and gets its own audit row.
+
+## 4. Things not to do
 
 - Do not run `repair_catalog` on a day `rebuild_seconds` has rebuilt: its `ohlc_outside_book`
   detector compares exchange-timed trades with the mid-second book and would clear real trades.
