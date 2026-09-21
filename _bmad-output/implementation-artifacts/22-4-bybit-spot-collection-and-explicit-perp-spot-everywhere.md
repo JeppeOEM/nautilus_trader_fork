@@ -1,5 +1,5 @@
 ---
-status: awaiting-operator
+status: done
 operator_actions:
   - "Run Bybit collector locally for ~60 s and confirm BTCUSDT-SPOT.BYBIT and BTCUSDT-LINEAR.BYBIT 1s snapshot rows exist and spot has no mark/index/funding/OI rows. [done locally 2026-09-21: both ids write 1 s rows with no gaps or duplicate ts_event; no -SPOT.BYBIT directory exists under mark_price_update, index_price_update, funding_rate_update or custom_open_interest]"
   - "Confirm GET /api/candles?instrument_id=BTCUSDT-SPOT.BYBIT returns venue=BYBIT, market=spot, and the screener and chart badge show and filter both. [API half done locally 2026-09-21: GET /api/candles/BTCUSDT-SPOT.BYBIT (path parameter, not query) returns venue=BYBIT market=spot, -LINEAR returns market=perp, /api/rankings lists both; screener and chart badge UI NOT checked]"
@@ -141,3 +141,13 @@ Status: awaiting-operator
 - Deferred/gap: bot_tui venue/market columns (row already ~192 cols wide, see Completion Notes).
 - Verification: Python (common, bybit_collector, data_api, ranking_engine) 222 pass, 1 fail (needs live Redis, fails pre-change); vitest 290 pass; `tsc -b` clean.
 - Residual risk: spot instrument catalog write and live WS behaviour untested until Task 5.
+
+## Operator Confirmation
+
+Confirmed 2026-09-21: the external actions this story owed were carried out.
+
+- Run Bybit collector locally for ~60 s and confirm BTCUSDT-SPOT.BYBIT and BTCUSDT-LINEAR.BYBIT 1s snapshot rows exist and spot has no mark/index/funding/OI rows. [done locally 2026-09-21: both ids write 1 s rows with no gaps or duplicate ts_event; no -SPOT.BYBIT directory exists under mark_price_update, index_price_update, funding_rate_update or custom_open_interest]
+- Confirm GET /api/candles?instrument_id=BTCUSDT-SPOT.BYBIT returns venue=BYBIT, market=spot, and the screener and chart badge show and filter both. [API half done locally 2026-09-21: GET /api/candles/BTCUSDT-SPOT.BYBIT (path parameter, not query) returns venue=BYBIT market=spot, -LINEAR returns market=perp, /api/rankings lists both; screener and chart badge UI NOT checked]
+- Deploy on the VPS with make up and confirm Dozzle is clean for 10 minutes with both WS connections.
+
+_Appended by the bmad-loop orchestrator (`bmad-loop confirm`, #335): a human confirmed these external actions out of band, and the story was advanced from `awaiting-operator` to `done`._
