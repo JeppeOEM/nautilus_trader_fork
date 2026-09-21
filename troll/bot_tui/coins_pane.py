@@ -29,6 +29,8 @@ from ml_signals.ranking_columns import NEGATIVE_COLOR
 from ml_signals.ranking_columns import POSITIVE_COLOR
 from ml_signals.ranking_columns import RANKING_COLS
 
+from bot_tui.bots_pane import fit
+
 
 # Verbatim UX copy (EXPERIENCE.md State Patterns: Cold open) -- keep exact, per
 # UX-DR9's terse/no-marketing-copy discipline.
@@ -39,6 +41,42 @@ COLD_OPEN_TEXT = "waiting for rankings:live…"
 NO_MATCHES_TEXT = "no matches"
 
 _MISSING_CELL_TEXT = "—"
+
+# Instrument column width, shared by coin_header_text and format_coin_row so the two
+# can never drift apart (TUI-02). 26 fits every Hyperliquid id ("{1-5 letter coin}-USD-
+# PERP.HYPERLIQUID", 22-26 chars) and every Bybit id up to 26 chars; anything longer is
+# middle-elided by fit_instrument_id so the "-MARKET.VENUE" tail stays visible. Story 22.10
+# asked for the row to stay inside 80 columns -- it can't: "#", this column and 15
+# RANKING_COLS x 11 chars is already ~200 wide, so the column is sized for the ids, not
+# for a width budget the row never had.
+_INSTRUMENT_WIDTH = 26
+
+
+def fit_instrument_id(instrument_id: str, width: int) -> str:
+    """
+    Left-justify an instrument id to exactly `width` characters, keeping its market and
+    venue tail ("-LINEAR.BYBIT", "-SPOT.BYBIT", "-PERP.HYPERLIQUID") visible when it has
+    to be shortened.
+
+    bots_pane.fit() truncates at the end, which would cut exactly the part that tells rows
+    apart ("1000000MOGUSDT-LINEAR.BYBIT" -> "...-LINEAR.BY…"), and cutting inside the tail
+    would lose perp vs spot (Epic 22 UX: a spot row must never be mistaken for its linear
+    namesake). A too-long id instead keeps its leading symbol chars, an "…", then the full
+    tail. If the market tail leaves no room for a symbol char, only the ".VENUE" suffix is
+    kept; if even that does not fit (or there is no "."), it falls back to fit().
+    """
+    if len(instrument_id) <= width:
+        return fit(instrument_id, width)
+    symbol, dot, venue = instrument_id.rpartition(".")
+    if not dot:
+        return fit(instrument_id, width)
+    market_dash = symbol.rfind("-")
+    tails = [f"{symbol[market_dash:]}.{venue}"] if market_dash > 0 else []
+    for tail in [*tails, f".{venue}"]:
+        head_len = width - 1 - len(tail)
+        if head_len >= 1:
+            return f"{instrument_id[:head_len]}…{tail}"
+    return fit(instrument_id, width)
 
 
 def coin_rows(ranking: dict | None) -> list[dict]:
@@ -87,6 +125,10 @@ def filter_rows(rows: list[dict], filter_text: str) -> list[dict]:
     reason a builder would want case to matter here, and case-sensitivity would only
     add a pointless failure mode (typing "btc" and getting zero results).
 
+    The venue lives in the id (SIGNAL-01), so the same substring match is also the venue
+    filter: ".bybit", ".dydx" or ".hyperliquid" narrows to one venue's rows, and
+    "-spot."/"-linear." to one Bybit market (Story 22.10).
+
     A leading/trailing space is stripped before matching -- trivial to introduce while
     typing into the filter's Edit widget, and a builder typing " btc" almost certainly
     still means the substring "btc", not a literal leading space that happens to match
@@ -107,7 +149,7 @@ def coin_header_text() -> str:
     columns plus every RANKING_COLS label, same order as format_coin_row's cells below
     (and the same order the web dashboard's own `<th>` row renders in).
     """
-    header = f"{'#':>4}  {'INSTRUMENT':<20} "
+    header = f"{'#':>4}  {fit('INSTRUMENT', _INSTRUMENT_WIDTH)} "
     header += "".join(f"{label:>10} " for _key, label, _fmt, _color in RANKING_COLS)
     return header.rstrip()
 
@@ -125,7 +167,9 @@ def format_coin_row(row: dict) -> list:
     sign/threshold rule (e.g. OBI's ">0.5" boundary) a second time. Returns a list of
     plain strings and (attr, text) tuples, ready to hand straight to urwid.Text.
     """
-    segments: list = [f"{row['rank']:>4}  {row['instrument_id']:<20} "]
+    segments: list = [
+        f"{row['rank']:>4}  {fit_instrument_id(row['instrument_id'], _INSTRUMENT_WIDTH)} "
+    ]
     for key, _label, format_fn, color_fn in RANKING_COLS:
         value = row.get(key)
         if value is None:

@@ -31,6 +31,7 @@ from bot_tui.coins_pane import NO_MATCHES_TEXT
 from bot_tui.coins_pane import coin_header_text
 from bot_tui.coins_pane import coin_rows
 from bot_tui.coins_pane import filter_rows
+from bot_tui.coins_pane import fit_instrument_id
 from bot_tui.coins_pane import format_coin_row
 from bot_tui.coins_pane import stale_feed_banner_text
 
@@ -161,3 +162,72 @@ def test_ranking_columns_only_uses_the_two_shared_colors() -> None:
         if color_fn is not None:
             assert color_fn(1.0) in (POSITIVE_COLOR, NEGATIVE_COLOR)
             assert color_fn(-1.0) in (POSITIVE_COLOR, NEGATIVE_COLOR)
+
+
+# --- Story 22.10: multi-venue instrument ids -----------------------------------------------
+
+
+def test_fit_instrument_id_pads_a_24_char_hyperliquid_id_to_exact_width() -> None:
+    iid = "BTC-USD-PERP.HYPERLIQUID"
+    assert len(iid) == 24
+
+    fitted = fit_instrument_id(iid, 26)
+
+    assert fitted == iid + "  "
+
+
+def test_fit_instrument_id_fits_a_26_char_id_exactly_untruncated() -> None:
+    iid = "kPEPE-USD-PERP.HYPERLIQUID"
+
+    assert fit_instrument_id(iid, 26) == iid
+
+
+def test_fit_instrument_id_truncates_27_char_bybit_id_keeping_market_and_venue() -> None:
+    iid = "1000000MOGUSDT-LINEAR.BYBIT"
+    assert len(iid) == 27
+
+    fitted = fit_instrument_id(iid, 26)
+
+    assert fitted == "1000000MOGUS…-LINEAR.BYBIT"
+    assert len(fitted) == 26
+
+
+def test_fit_instrument_id_keeps_spot_and_linear_namesakes_distinct_when_truncated() -> None:
+    spot = fit_instrument_id("10000000000MOGUSDT-SPOT.BYBIT", 26)
+    linear = fit_instrument_id("10000000000MOGUSDT-LINEAR.BYBIT", 26)
+
+    assert spot == "10000000000MOG…-SPOT.BYBIT"
+    assert linear == "10000000000M…-LINEAR.BYBIT"
+
+
+def test_fit_instrument_id_keeps_only_the_venue_when_the_market_tail_cannot_fit() -> None:
+    assert fit_instrument_id("BTCUSDT-LINEAR.BYBIT", 12) == "BTCUS….BYBIT"
+
+
+def test_fit_instrument_id_falls_back_to_fit_when_the_suffix_cannot_fit() -> None:
+    assert fit_instrument_id("BTC-USD-PERP.HYPERLIQUID", 10) == "BTC-USD-P…"
+    assert fit_instrument_id("NO_VENUE_SUFFIX_AT_ALL", 10) == "NO_VENUE_…"
+
+
+def test_coin_header_and_row_instrument_cells_share_one_width() -> None:
+    """Every row's metric columns start where the header's do, whatever the id length (TUI-02)."""
+    prefix_len = len(f"{'#':>4}  ") + 26 + 1  # rank, gap, 26-wide instrument cell, separator
+    header = coin_header_text()
+    assert header[:prefix_len].rstrip().endswith("INSTRUMENT")
+    assert header[prefix_len:].startswith(f"{RANKING_COLS[0][1]:>10} ")
+    for iid in ("BTC-USD-PERP.DYDX", "BTC-USD-PERP.HYPERLIQUID", "1000000MOGUSDT-LINEAR.BYBIT"):
+        rank_and_instrument = format_coin_row(_row(iid, 7))[0]
+        assert len(rank_and_instrument) == prefix_len, iid
+
+
+def test_filter_rows_venue_suffix_narrows_to_bybit_rows() -> None:
+    rows = [
+        _row("BTC-USD-PERP.DYDX", 1),
+        _row("BTCUSDT-LINEAR.BYBIT", 2),
+        _row("BTC-USD-PERP.HYPERLIQUID", 3),
+        _row("BTCUSDT-SPOT.BYBIT", 4),
+    ]
+
+    result = filter_rows(rows, ".bybit")
+
+    assert [r["instrument_id"] for r in result] == ["BTCUSDT-LINEAR.BYBIT", "BTCUSDT-SPOT.BYBIT"]

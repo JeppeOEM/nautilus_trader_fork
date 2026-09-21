@@ -15,7 +15,8 @@
 """
 Ranking engine (Story 1.8 / architecture AD-9): sole computer/publisher of Coin Ranking.
 
-Owns the volume24h poll (relocated from ml_signals.dashboard), the cross-sectional
+Owns the per-venue USD volume24h polls (dYdX, Bybit linear + spot, Hyperliquid -- Story
+22.10; the dYdX one relocated from ml_signals.dashboard), the cross-sectional
 volatility tracker (ranking_engine.volatility), the single active Ranking Mode, and the
 snapshots:raw / rankings:live / ranking:control Redis wiring. dashboard/bot_tui are pure
 readers of rankings:live -- see AD-9's Consistency Conventions row for the exact wire
@@ -31,7 +32,9 @@ import statistics
 import time
 import urllib.request
 from collections import deque
+from collections.abc import Awaitable
 from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 
 import redis.asyncio as aioredis
@@ -77,6 +80,12 @@ METRICS_DB_PATH: str = os.environ.get(
 DYDX_NETWORK: DydxNetwork = DydxNetwork.from_str(  # type: ignore[attr-defined]
     os.environ.get("DYDX_NETWORK", "mainnet").lower(),
 )
+
+# BYBIT_ENVIRONMENT / HYPERLIQUID_ENVIRONMENT must match those collectors' configured
+# `environment`, for the same reason as DYDX_NETWORK above: testnet and mainnet list
+# different markets with identical-looking symbols. Validated in _volume_sources().
+BYBIT_ENVIRONMENT: str = os.environ.get("BYBIT_ENVIRONMENT", "mainnet").lower()
+HYPERLIQUID_ENVIRONMENT: str = os.environ.get("HYPERLIQUID_ENVIRONMENT", "mainnet").lower()
 
 # How often the volume-24h poll refreshes _VOLUME_24H.
 VOLUME_POLL_SECONDS: int = 60
@@ -168,13 +177,62 @@ _BACKFILLED: set[str] = set()
 # a ranking:control message. Defaults to "volume", matching FR6's existing default.
 _ACTIVE_MODE: str = "volume"
 
-# volume24H (USD) per instrument, polled independently from dYdX's public indexer --
-# not available anywhere else in this pipeline. Relocated verbatim from
-# ml_signals.dashboard (Story 1.2) -- see that module's Dev Notes for why this poll is
-# a deliberate, independent stdlib fetch rather than a reuse of
-# dydx_collector.open_interest._fetch_markets_json (AD-4: network I/O never qualifies
-# as a "pure utility" for cross-namespace reuse).
+# USD 24h volume per instrument, every venue merged (Story 22.10) -- the read side of the
+# volume ranking mode. Rebuilt in place (clear + update, no await in between) each poll
+# cycle by _rebuild_volume_24h from the per-source entries in _VENUE_VOLUMES that are
+# still younger than _VOLUME_MAX_AGE_NS. An instrument with no entry has no known USD
+# volume and is left out of volume mode loudly (DATA-01: no volume is not zero volume).
+# Each venue is polled independently from its own public REST API -- this data is not
+# available anywhere else in this pipeline. The dYdX poll was relocated verbatim from
+# ml_signals.dashboard (Story 1.2) -- see that module's Dev Notes for why these polls are
+# deliberate, independent stdlib fetches rather than reuses of the collectors' own REST
+# helpers (AD-4: network I/O never qualifies as a "pure utility" for cross-namespace reuse).
 _VOLUME_24H: dict[str, float] = {}
+
+# (fetched_at_ns, {instrument_id: usd_volume}) per volume source ("dydx", "bybit-linear",
+# "bybit-spot", "hyperliquid"). Replaced whole on every successful poll so a delisted
+# coin drops out; a failed poll keeps the previous entry (last good values) until it
+# ages past _VOLUME_MAX_AGE_NS.
+_VENUE_VOLUMES: dict[str, tuple[int, dict[str, float]]] = {}
+
+# About 3 missed polls (wall-clock, measured from when the last good poll completed; a cycle
+# lasts VOLUME_POLL_SECONDS plus its slowest fetch): past this a source's last good volumes
+# are no longer current, so its rows leave volume mode (loudly) rather than ranking on
+# stale figures.
+_VOLUME_MAX_AGE_NS: int = 3 * VOLUME_POLL_SECONDS * 1_000_000_000
+
+# Sent by the Bybit/Hyperliquid volume fetchers (the relocated dYdX fetcher keeps its own).
+_USER_AGENT: str = "nautilus-troll-ranking-engine/1.0"
+
+# Upper bound on one source's fetch. urlopen's timeout=30 bounds each socket operation, not
+# the whole response, so a slowly trickling body could otherwise hold the gathered cycle --
+# and with it every other venue's refresh -- open indefinitely. A timed-out fetch is a failed
+# poll (ledgered, last good values kept); its worker thread finishes on its own.
+_VOLUME_FETCH_TIMEOUT_SECONDS: float = 45.0
+
+_BYBIT_URLS: dict[str, str] = {
+    "mainnet": "https://api.bybit.com",
+    "testnet": "https://api-testnet.bybit.com",
+}
+
+_HYPERLIQUID_URLS: dict[str, str] = {
+    "mainnet": "https://api.hyperliquid.xyz/info",
+    "testnet": "https://api.hyperliquid-testnet.xyz/info",
+}
+
+# Bybit tickers `category` -> the Nautilus Bybit adapter's instrument id product suffix.
+_BYBIT_ID_SUFFIX: dict[str, str] = {"linear": "LINEAR", "spot": "SPOT"}
+
+# Known limit: Bybit spot `turnover24h` is denominated in the pair's quote asset, so only
+# USDT/USDC-quoted pairs are kept and the stablecoin is taken at USD par (a depeg skews
+# their volume by the depeg ratio). A non-USD-quoted spot pair (e.g. ETHBTC) has no USD
+# volume at all and is left out of volume mode; if one is ever collected, the per-iid
+# missing-volume ledger in _ledger_missing_volumes surfaces it. Upgrade path: convert
+# such a pair's volume to USD via a USD price of one of its assets (the spot tickers row
+# already carries `usdIndexPrice`, the base asset's USD index -- `volume24h` (base units)
+# x `usdIndexPrice` would do, once verified against Bybit's docs for every pair). Linear contracts are all
+# USDT- or USDC-settled, so their turnover is USD at the same stablecoin-par assumption.
+_BYBIT_SPOT_USD_QUOTES: tuple[str, ...] = ("USDT", "USDC")
 
 
 def _fetch_volume_24h_json(network: DydxNetwork) -> dict:
@@ -217,13 +275,246 @@ async def _fetch_volume_24h(network: DydxNetwork) -> dict[str, float]:
     return parse_volume_24h(markets_json)
 
 
-async def _volume_loop_task(network: DydxNetwork) -> None:
+def _parse_usd_volume(raw: object) -> float:
+    """
+    Parse a venue's USD volume string/number as a finite, non-negative float.
+
+    Raises ValueError/TypeError on anything else -- an empty string, None, NaN or a
+    negative value is unparseable, never a 0 (DATA-01).
+    """
+    if raw is None or raw == "" or isinstance(raw, bool):  # float(True) would be $1
+        raise ValueError(f"empty or non-numeric volume {raw!r}")
+    value = float(raw)  # type: ignore[arg-type]  # TypeError on a non-numeric type is the contract
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(f"volume {raw!r} is not a finite non-negative number")
+    return value
+
+
+def _fetch_bybit_tickers_json(environment: str, category: str) -> dict:
+    """
+    GET Bybit's public v5 market tickers for one category (linear or spot).
+
+    Independent of bybit_collector.open_interest._fetch_tickers_json for the same AD-4
+    reason as the dYdX fetcher above.
+    """
+    request = urllib.request.Request(  # noqa: S310 (fixed https URL)
+        f"{_BYBIT_URLS[environment]}/v5/market/tickers?category={category}",
+        headers={"User-Agent": _USER_AGENT},
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310
+        return json.load(response)
+
+
+def _is_bybit_usd_symbol(symbol: str, category: str) -> bool:
+    return category != "spot" or symbol.endswith(_BYBIT_SPOT_USD_QUOTES)
+
+
+def _bybit_ticker_rows(tickers_json: dict) -> list:
+    """
+    Return the `result.list` rows of a successful Bybit v5 response; ValueError otherwise.
+
+    Bybit answers errors (rate limit, maintenance) with HTTP 200, `retCode != 0` and an
+    empty `result` -- read naively that is a successful poll with no volumes, which would
+    replace the last good values and drop every Bybit row out of volume mode at once.
+    """
+    ret_code = tickers_json.get("retCode")
+    rows = (tickers_json.get("result") or {}).get("list")
+    if ret_code != 0 or not isinstance(rows, list):
+        raise ValueError(
+            f"Bybit tickers error retCode={ret_code!r} retMsg={tickers_json.get('retMsg')!r}"
+        )
+    return rows
+
+
+def parse_bybit_volume_24h(tickers_json: dict, product_type: str) -> dict[str, float]:
+    """
+    Parse turnover24h (USD) per instrument from a Bybit v5 tickers response.
+
+    `product_type` is the request's category ("linear" or "spot"); ids follow the
+    Nautilus Bybit adapter's "{symbol}-LINEAR.BYBIT" / "{symbol}-SPOT.BYBIT" format, so
+    linear and spot stay separate rows and are never summed.
+    """
+    suffix = _BYBIT_ID_SUFFIX[product_type]
+    rows = _bybit_ticker_rows(tickers_json)
+    result: dict[str, float] = {}
+    for row in rows:
+        symbol = row.get("symbol")
+        if not symbol or not _is_bybit_usd_symbol(symbol, product_type):
+            continue
+        iid = f"{symbol}-{suffix}.BYBIT"
+        try:
+            result[iid] = _parse_usd_volume(row.get("turnover24h"))
+        except (ValueError, TypeError) as exc:
+            error_ledger.record(
+                "ranking_engine.volume24h",
+                f"{iid}: unparseable turnover24h {row.get('turnover24h')!r}",
+                exc,
+            )
+    return result
+
+
+async def _fetch_bybit_volume_24h(environment: str, category: str) -> dict[str, float]:
+    tickers_json = await asyncio.to_thread(_fetch_bybit_tickers_json, environment, category)
+    return parse_bybit_volume_24h(tickers_json, category)
+
+
+def _fetch_hyperliquid_meta_and_ctxs_json(environment: str) -> object:
+    """POST Hyperliquid's public /info {"type": "metaAndAssetCtxs"} (perp universe + contexts)."""
+    request = urllib.request.Request(  # noqa: S310 (fixed https URL)
+        _HYPERLIQUID_URLS[environment],
+        data=json.dumps({"type": "metaAndAssetCtxs"}).encode(),
+        headers={
+            "User-Agent": _USER_AGENT,
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310
+        return json.load(response)
+
+
+def _hyperliquid_universe_and_ctxs(meta_and_ctxs: object) -> tuple[list, list]:
+    """Validate the `[meta, ctxs]` pair shape; ValueError on anything else."""
+    if not isinstance(meta_and_ctxs, list) or len(meta_and_ctxs) != 2:
+        raise ValueError(
+            f"metaAndAssetCtxs is not a [meta, ctxs] pair: {type(meta_and_ctxs).__name__}"
+        )
+    meta, ctxs = meta_and_ctxs
+    universe = meta.get("universe") if isinstance(meta, dict) else None
+    if not isinstance(universe, list) or not isinstance(ctxs, list) or len(universe) != len(ctxs):
+        raise ValueError("metaAndAssetCtxs universe/ctxs are not two equal-length lists")
+    return universe, ctxs
+
+
+def parse_hyperliquid_volume_24h(meta_and_ctxs: object) -> dict[str, float]:
+    """
+    Parse dayNtlVlm (USD notional) per instrument from a Hyperliquid metaAndAssetCtxs
+    response -- `meta.universe[i].name` pairs with `ctxs[i]` by index.
+
+    Known limit: a bare metaAndAssetCtxs request covers only the default perp dex, which is
+    all hyperliquid_collector collects today; a builder-deployed (HIP-3) perp would have no
+    volume here and be counted missing every cycle. Upgrade path: one extra request per dex
+    (`"dex": <name>`) keyed by that dex's own instrument ids, when such a perp is collected.
+
+    A malformed payload raises ValueError (the whole poll failed); one unparseable coin is
+    ledgered and skipped.
+    """
+    universe, ctxs = _hyperliquid_universe_and_ctxs(meta_and_ctxs)
+    result: dict[str, float] = {}
+    for asset, ctx in zip(universe, ctxs, strict=True):
+        name = asset.get("name") if isinstance(asset, dict) else None
+        if not name:
+            continue
+        iid = f"{name}-USD-PERP.HYPERLIQUID"
+        raw = ctx.get("dayNtlVlm") if isinstance(ctx, dict) else None
+        try:
+            result[iid] = _parse_usd_volume(raw)
+        except (ValueError, TypeError) as exc:
+            error_ledger.record(
+                "ranking_engine.volume24h", f"{iid}: unparseable dayNtlVlm {raw!r}", exc
+            )
+    return result
+
+
+async def _fetch_hyperliquid_volume_24h(environment: str) -> dict[str, float]:
+    meta_and_ctxs = await asyncio.to_thread(_fetch_hyperliquid_meta_and_ctxs_json, environment)
+    return parse_hyperliquid_volume_24h(meta_and_ctxs)
+
+
+VolumeFetcher = Callable[[], Awaitable[dict[str, float]]]
+
+
+def _volume_sources(
+    dydx_network: DydxNetwork,
+    bybit_environment: str,
+    hyperliquid_environment: str,
+) -> dict[str, VolumeFetcher]:
+    """
+    One fetcher per volume source. Fails fast on an unknown environment name rather
+    than ledgering the same KeyError every poll forever.
+    """
+    for name, env, urls in (
+        ("BYBIT_ENVIRONMENT", bybit_environment, _BYBIT_URLS),
+        ("HYPERLIQUID_ENVIRONMENT", hyperliquid_environment, _HYPERLIQUID_URLS),
+    ):
+        if env not in urls:
+            raise ValueError(f"{name}={env!r} is not one of {sorted(urls)}")
+    return {
+        "dydx": partial(_fetch_volume_24h, dydx_network),
+        "bybit-linear": partial(_fetch_bybit_volume_24h, bybit_environment, "linear"),
+        "bybit-spot": partial(_fetch_bybit_volume_24h, bybit_environment, "spot"),
+        "hyperliquid": partial(_fetch_hyperliquid_volume_24h, hyperliquid_environment),
+    }
+
+
+async def _poll_volume_source(source: str, fetch: VolumeFetcher) -> None:
+    """Replace `source`'s entry on success; on failure ledger and keep the last good one."""
+    try:
+        volumes = await asyncio.wait_for(fetch(), timeout=_VOLUME_FETCH_TIMEOUT_SECONDS)
+        if not volumes:
+            # Every venue lists hundreds of markets: an empty parse is a broken or error
+            # response, never "no volume anywhere" -- it must not wipe the last good values.
+            raise ValueError("poll returned no volumes at all")
+    except Exception as exc:
+        error_ledger.record(
+            "ranking_engine.volume24h",
+            f"{source}: volume poll failed, keeping its last good volumes",
+            exc,
+        )
+        return
+    _VENUE_VOLUMES[source] = (time.time_ns(), volumes)
+
+
+def _rebuild_volume_24h(now_ns: int) -> None:
+    """
+    Rebuild _VOLUME_24H from every source still younger than _VOLUME_MAX_AGE_NS.
+
+    An expired source is ledgered once per cycle and contributes nothing, so its rows
+    leave volume mode instead of ranking on stale figures. Clear + update run with no
+    await in between, so no reader ever sees a half-built dict.
+    """
+    merged: dict[str, float] = {}
+    for source, (fetched_at_ns, volumes) in _VENUE_VOLUMES.items():
+        age_ns = now_ns - fetched_at_ns
+        if age_ns > _VOLUME_MAX_AGE_NS:
+            error_ledger.record(
+                "ranking_engine.volume24h",
+                f"{source}: last good volume poll is {age_ns // 1_000_000_000}s old "
+                f"(max {_VOLUME_MAX_AGE_NS // 1_000_000_000}s), its rows are out of volume mode",
+            )
+            continue
+        merged.update(volumes)
+    _VOLUME_24H.clear()
+    _VOLUME_24H.update(merged)
+
+
+def _ledger_missing_volumes(now_ns: int) -> None:
+    """
+    One ledger count per fresh instrument with no USD volume -- exactly the rows
+    _current_ranks() leaves out of volume mode this cycle (DATA-01/DATA-07).
+    """
+    for iid in [iid for iid in _LAST_SEEN if _is_fresh(iid, now_ns) and iid not in _VOLUME_24H]:
+        error_ledger.record(
+            "ranking_engine.volume24h",
+            f"{iid}: no USD 24h volume from its venue, left out of volume mode",
+        )
+
+
+async def _volume_cycle(sources: dict[str, VolumeFetcher]) -> None:
+    """One poll cycle: every source concurrently, then rebuild, then the missing ledger."""
+    await asyncio.gather(*(_poll_volume_source(s, fetch) for s, fetch in sources.items()))
+    now_ns = time.time_ns()
+    _rebuild_volume_24h(now_ns)
+    _ledger_missing_volumes(now_ns)
+
+
+async def _volume_loop_task(sources: dict[str, VolumeFetcher]) -> None:
     """Refresh _VOLUME_24H every VOLUME_POLL_SECONDS -- drives the volume ranking mode."""
     while True:
         try:
-            _VOLUME_24H.update(await _fetch_volume_24h(network))
-        except Exception:
-            logger.exception("Volume-24h poll failed")
+            await _volume_cycle(sources)
+        except Exception as exc:
+            error_ledger.record("ranking_engine.volume24h", "volume poll cycle failed", exc)
         await asyncio.sleep(VOLUME_POLL_SECONDS)
 
 
@@ -426,13 +717,20 @@ def _current_ranks() -> list[dict]:
     score descending. Both volume24h and volatility_score are always computed and
     present in every entry regardless of active mode (AC1) -- only the sort key
     changes with _ACTIVE_MODE.
+
+    volume24h is None for an instrument whose venue has no current USD volume for it
+    (Story 22.10): volume mode leaves that row out (it cannot be ranked by a volume it
+    doesn't have, and a 0 would be fabricated -- DATA-01; _ledger_missing_volumes counts
+    it), volatility mode keeps it with volume24h None.
     """
     now_ns = time.time_ns()
     fresh_iids = [iid for iid in _LAST_SEEN if _is_fresh(iid, now_ns)]
 
     rows = []
     for iid in fresh_iids:
-        volume24h = _VOLUME_24H.get(iid, 0.0)
+        volume24h = _VOLUME_24H.get(iid)  # None = no USD volume known, never a fabricated 0
+        if volume24h is None and _ACTIVE_MODE == "volume":
+            continue  # left out of volume mode, ledgered by _ledger_missing_volumes (DATA-01)
         volatility_score = _VOLATILITY.score(iid)
         slow = _SLOW_METRICS.get(iid, {})
         if now_ns - slow.get("ts", 0) > _SLOW_METRICS_MAX_AGE_NS:
@@ -458,7 +756,7 @@ def _current_ranks() -> list[dict]:
     if _ACTIVE_MODE == "volatility":
         rows.sort(key=lambda r: r["volatility_score"] or 0.0, reverse=True)
     else:
-        rows.sort(key=lambda r: r["volume24h"], reverse=True)
+        rows.sort(key=lambda r: r["volume24h"], reverse=True)  # every row has a volume here
 
     return [{**r, "rank": i + 1} for i, r in enumerate(rows)]
 
@@ -772,7 +1070,9 @@ async def main() -> None:
         await asyncio.gather(
             _redis_listener(REDIS_URL),
             _heartbeat_loop(publish_client),
-            _volume_loop_task(DYDX_NETWORK),
+            _volume_loop_task(
+                _volume_sources(DYDX_NETWORK, BYBIT_ENVIRONMENT, HYPERLIQUID_ENVIRONMENT),
+            ),
             _slow_loop_task(CATALOG_PATH),
         )
 

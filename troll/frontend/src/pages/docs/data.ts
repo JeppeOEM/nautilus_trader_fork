@@ -242,12 +242,12 @@ export const INDICATORS: Indicator[] = [
   },
   {
     id: "volume24h", group: "market", name: "Volume24h (“Vol24h”)", cadence: "slow", window: "independent 60s poll",
-    owner: "ranking_engine — direct dYdX indexer poll, deliberately not reused from the collector's own liquidity poll (AD-4: no cross-module network-I/O reuse)",
+    owner: "ranking_engine — direct per-venue REST polls (dYdX, Bybit, Hyperliquid), deliberately not reused from the collectors' own polls (AD-4: no cross-module network-I/O reuse)",
     shownIn: ["Ranking table (web + bot_tui)", "Coin detail"],
     tagline: "24-hour USD volume straight from the venue. The sort key when Ranking Mode = “volume” — the default.",
-    formula: "polled every 60s from dYdX indexer's /v4/perpetualMarkets, field volume24H (already USD)",
-    notes: ["This is the actual default ranking order for the whole system: with Ranking Mode left on “volume,” every OFI/OBI/CVD/microprice column on the table is informational only — none of them move an instrument's position in the list."],
-    refs: ["ranking_engine/engine.py:152–167 (_fetch_volume_24h_json)"],
+    formula: "polled every 60s per venue, all already USD: dYdX indexer /v4/perpetualMarkets volume24H; Bybit /v5/market/tickers turnover24h (linear, and spot for USDT/USDC quotes only, stablecoin at par); Hyperliquid /info metaAndAssetCtxs dayNtlVlm",
+    notes: ["A coin whose venue has no current volume for it is left out of volume mode (never ranked at 0) and shows “—” in volatility mode; each one is counted in the error bar under ranking_engine.volume24h. Exception: a dYdX market whose volume24H field is absent or null still reads as 0 (older behaviour, tracked).", "This is the actual default ranking order for the whole system: with Ranking Mode left on “volume,” every OFI/OBI/CVD/microprice column on the table is informational only — none of them move an instrument's position in the list."],
+    refs: ["ranking_engine/engine.py (_volume_sources, _volume_cycle, parse_volume_24h / parse_bybit_volume_24h / parse_hyperliquid_volume_24h)"],
     related: ["vol_score"],
   },
   {

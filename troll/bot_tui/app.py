@@ -149,7 +149,8 @@ _HELP_TEXT = """GLOBAL
 
 COINS PANE
   j/k, up/down  move selection
-  /             filter by instrument id (enter confirms, esc clears)
+  /             filter by instrument id (enter confirms, esc clears);
+                .DYDX / .BYBIT / .HYPERLIQUID narrow to one venue
   m             toggle ranking mode (volume <-> volatility)
   enter         open coin detail
 
@@ -499,7 +500,7 @@ class BotTuiApp:
         )
 
         self._breadcrumb = urwid.Text(_BREADCRUMB_LABELS[self._view])
-        # Coins-only column-header row ("#  INSTRUMENT  VOLUME24H"/"VOLATILITY"),
+        # Coins-only column-header row ("#  INSTRUMENT  OFI10z ..." -- every RANKING_COLS label),
         # stacked under the breadcrumb rather than folded into the Coins-pane body --
         # keeps _build_body/_coins_body exactly what Story 4.3's AC6 comment already
         # documents (Filler <-> ListBox, mutated in place for scroll preservation),

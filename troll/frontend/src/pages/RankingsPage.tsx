@@ -25,6 +25,30 @@ const RANKING_STALE_MS = 15_000;
 // One bulk indicator recompute for every ranked coin per poll -- slow by design.
 const TECHNICALS_POLL_MS = 60_000;
 
+// Venue chips (Story 22.10): the *deselected* venues, per viewer, in this browser only.
+// Storing only what was switched off is what makes a venue that appears later (a new
+// collector) shown by default -- it can't be hidden by state saved before it existed.
+// A per-viewer convenience: blocked/throwing storage just means every venue is shown and
+// toggles live in memory for the session.
+const DESELECTED_VENUES_STORAGE_KEY = "rankings-deselected-venues";
+
+function loadDeselectedVenues(): Set<string> {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(DESELECTED_VENUES_STORAGE_KEY) ?? "[]");
+    return new Set(Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === "string") : []);
+  } catch {
+    return new Set();
+  }
+}
+
+function saveDeselectedVenues(venues: Set<string>): void {
+  try {
+    localStorage.setItem(DESELECTED_VENUES_STORAGE_KEY, JSON.stringify([...venues].sort()));
+  } catch {
+    // storage blocked: the selection just won't survive a reload
+  }
+}
+
 // Filter-field keys for Technicals outputs: `tech:{entry name}.{output attr}` -- name-based,
 // so a saved condition survives reordering/removing other columns.
 const TECHNICAL_FIELD_PREFIX = "tech:";
@@ -189,6 +213,16 @@ export default function RankingsPage() {
     return entryIndex < 0 ? undefined : technicalsValues?.[row.instrument_id]?.[`${entryIndex}.${path.slice(dot + 1)}`];
   }
 
+  const [deselectedVenues, setDeselectedVenues] = useState<Set<string>>(loadDeselectedVenues);
+
+  function toggleVenue(venue: string): void {
+    const next = new Set(deselectedVenues);
+    if (next.has(venue)) next.delete(venue);
+    else next.add(venue);
+    setDeselectedVenues(next);
+    saveDeselectedVenues(next);
+  }
+
   const [technicalsError, setTechnicalsError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -242,14 +276,42 @@ export default function RankingsPage() {
     ? filters.filter((f) => !f.field.startsWith(TECHNICAL_FIELD_PREFIX))
     : filters;
   const skippedFilters = filters.length - activeFilters.length;
+  // Chips narrow by venue first, then the FilterPanel conditions apply; rank is taken on the
+  // full message beforehand, so it stays the message rank either way.
+  // A deselected venue keeps its chip even while it has no rows, so a hide can always be undone.
+  const venues = [
+    ...new Set([...rows.flatMap((row) => (typeof row.venue === "string" ? [row.venue] : [])), ...deselectedVenues]),
+  ].sort();
+  const venueRows = rows
+    .map((row, index) => ({ row, rank: index + 1 }))
+    .filter(({ row }) => typeof row.venue !== "string" || !deselectedVenues.has(row.venue));
   const visibleRows = applyFilters(
-    rows.map((row, index) => ({ row, rank: index + 1 })),
+    venueRows,
     activeFilters,
     ({ row }, field) => readField(row, field),
   );
 
   return (
     <div className="term-box" data-label="Rankings">
+      <div className="filter-panel" role="group" aria-label="Venues">
+        {venues.map((venue) => {
+          const on = !deselectedVenues.has(venue);
+          return (
+            <button
+              key={venue}
+              type="button"
+              className={`tabbtn${on ? " active" : ""}`}
+              aria-pressed={on}
+              onClick={() => toggleVenue(venue)}
+            >
+              {venue}
+            </button>
+          );
+        })}
+      </div>
+      {rows.length > 0 && venueRows.length === 0 && (
+        <p className="rankings-empty">every venue is deselected — select one above to show its coins</p>
+      )}
       <FilterPanel
         fields={filterFields}
         conditions={filters}
