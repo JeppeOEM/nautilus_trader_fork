@@ -1,6 +1,4 @@
 ---
-
-> **Renamed 2026-09-21:** `troll/` is now `platform/` and every durable store moved under `platform/data/` (DDD spine AD-D13, `_bmad-output/planning-artifacts/architecture/architecture-ddd-platform-2026-09-21/`). Paths below are as written at the time; read `troll/` as `platform/`.
 stepsCompleted: [step-01-validate-prerequisites, step-02-design-epics, step-03-create-stories, step-04-final-validation]
 inputDocuments:
   - _bmad-output/planning-artifacts/prds/prd-nautilus_trader_fork-2026-07-01/prd.md
@@ -9,7 +7,11 @@ inputDocuments:
   - _bmad-output/planning-artifacts/ux-designs/ux-nautilus_trader_fork-2026-07-24/EXPERIENCE.md
   - _bmad-output/planning-artifacts/prds/prd-chart-frontend-rewrite-2026-09-13/prd.md
   - _bmad-output/planning-artifacts/architecture/architecture-chart-frontend-rewrite-2026-09-13/ARCHITECTURE-SPINE.md
+  - _bmad-output/planning-artifacts/architecture/architecture-ddd-platform-2026-09-21/ARCHITECTURE-SPINE.md
+  - _bmad-output/planning-artifacts/ddd-redesign-seed-2026-09-21.md
 ---
+
+> **Renamed 2026-09-21:** `troll/` is now `platform/` and every durable store moved under `platform/data/` (DDD spine AD-D13, `_bmad-output/planning-artifacts/architecture/architecture-ddd-platform-2026-09-21/`). Paths below are as written at the time; read `troll/` as `platform/`.
 
 # nautilus_trader_fork - Epic Breakdown
 
@@ -238,6 +240,25 @@ FR67: Epic 20 - Alert creation dialog (condition builder, frequency, expiration,
 FR68: Epic 20 - Local alert evaluation engine + webhook POST + in-app toast
 FR69: Epic 20 - Alerts list view
 
+### DDD Migration Requirements (2026-09-21, from the DDD spine AD-D1..AD-D18)
+
+Extracted for Epics 23+ from `architecture-ddd-platform-2026-09-21/ARCHITECTURE-SPINE.md`. Step 0 (rename `troll/` → `platform/`, stores under `platform/data/`) is done (`18c12eedf4`).
+
+- MR1: One bounded context moves per story, in AD-D12's order (observability → kernel → candles → views → alerting → research → archive → ranking → bots → collection_control → capture). Every story is deployable alone: Parquet schemas and catalog directory names, every Redis payload, the SQLite and TOML store schemas, compose service names, env vars and the `platform/data/` bind mounts are frozen for the whole migration.
+- MR2: Every move leaves a pure re-export shim at the old import path (`from <new> import <names>` + `DeprecationWarning` + `REMOVE_AFTER = "<story key>"`); a shim is deleted no later than two stories after it appears; `test_namespace.py` asserts `old.X is new.X` and exactly one Arrow registration per kernel class.
+- MR3: The first story ships the enforcement: `platform/tests/test_boundaries.py` (AD-D2 graph judged by target contexts via a legacy-module map, cross-row private-name ban), `platform/tests/test_images.py` (every compose/Makefile entrypoint's import closure ⊆ its dockerfile `COPY` set), the hot-path baseline (`tracemalloc` allocations + wall time per message, `platform/tests/fixtures/hotpath_baseline.json`), and closes the live `data_api`/`live_paper` image gaps.
+- MR4: Each move updates, in the same commit: `platform/CLAUDE.md` citations, `ARCHITECTURE.md`, `docs/DATA_DICTIONARY.md`, the three dockerfiles' `COPY` sets, compose `command:` lines and both Makefile test lists.
+- MR5: `kernel/` membership is exactly AD-D3: `DydxSecondSnapshot` + `SecondOHLC`, `OpenInterest`, `fold_trades`, `indicators`, `performance_metrics`, `venues` (the only `InstrumentId` parser, incl. `bybit_category`), `clocks` (`CatalogFileSpan`, single `MAX_TS_INIT_SKEW_NS`), `archive_markers` (`ArchiveGap`), `venue_http` (every venue REST request), `catalog_files` (read helpers), `parquet_compat` (one zstd patch). Kernel imports nothing from any context; a kernel change ships with every consumer's tests.
+- MR6: Candles precede views: exactly two folds (`fold_trades`, `fold_arrays`); `forming_bar` is a candles query service; `SecondSink.apply` receives the flushed batch; the candle prune loop becomes a candles process manager; `CandleStore` is the only rw opener of `candles_<venue>.db`; archive gets a `VerifiedDays` port.
+- MR7: `alerting` consumes the forming bar only as a `BarObserver` implementation wired in `data_api`'s composition root; `observability.notify` is the one outbound transport and `alerting.Deliverer` is implemented over it; `views` owns the two UI preference TOMLs and is the only place both UIs' values are computed.
+- MR8: Archive: `ArchiveDay` machine with `verified_days` as the only day-status store, `reconcile_day` only after a same-run `rebuild_day`, `provisional → rebuilt` skipping `ArchiveGap` spans, `RetentionPolicy` the only file deleter (incl. dropped-instrument and delta retention), `CatalogFiles` the only in-place rewriter, one writer process per catalog leaf (capture lock for the open day, maintenance lock for closed days, `repair_catalog` refuses while capture holds the lock).
+- MR9: Ranking: `RankingBoard` replaces the twelve mutable module globals; the pct/volatility math is ranking's alone; ports `VolumeSource` (per venue, over `kernel.venue_http`), `PriceHistory`, `RankingHistory`, `LivePublisher`; `views`/`research` never recompute.
+- MR10: Bots: `PaperFleet` and `ExecBot` as distinct aggregate types, `Bot.id == order_id_tag`, bounded `Incident` list, `FillLedger`, `NautilusHost` and strategy-scoped `CacheReader` ACLs; every AD-10/AD-11 wire contract unchanged.
+- MR11: Collection control: `CollectionPlan` (cap 30, `exclude ∩ collected = ∅`, USD-classified pins), plan-vs-applied set through `CaptureService.apply(plan_diff) → Applied(subscribed, unsubscribed, failed)`, one `config.toml` loader returning `(CoreConfig, CollectionPlan)`, no prune loop in control.
+- MR12: Capture last, gated by the hot-path test: `LiveBook`, `TradeIntake`, `FeedGroup`, pure `SecondSampler`, venue policies as pure synchronous values (`CrossedBookPolicy.step`, `LevelTagger`, `SequenceCanary`, `BookTimeSource`, `BackfillCapability`), `TradeBackfill` with per-venue `trade_history.py` adapters, `FlushBatch`, `CaptureService` as the only ledger caller with sites in one file, `VenueFeed` as a `Protocol`.
+- MR13: The reader-side crossed-book and empty-top skips in `data_api/routes/snapshots.py:129-133` are removed in the views move (gap markers kept); the silent empty-top-of-book skip in the sampler gains a rate-limited warning and ledger site in the capture move.
+- MR14: Every parent-spine Deferred item the DDD spine resolves is struck in the parent (with an amendment) by the story that lands it; the parent's `open_interest`/`volume24h` and `capture_hl_ws.py` items included.
+
 ## Epic List
 
 ### Epic 1: Trustworthy Coin Ranking & Watchlist
@@ -298,6 +319,26 @@ Builder's catalog, `data_api`, and screener stop being dYdX-only. `venue` become
 ### Epic 20: Alerts — Webhook Delivery (deferred, built last)
 Builder can define a price/indicator condition and get a webhook POST (plus an in-app toast) when it fires — the same generic delivery model TradingView itself uses, since there's no native Telegram integration anywhere; wiring a webhook to an actual Telegram relay bot is the user's own infrastructure, out of scope here. Deliberately sequenced dead last, after Epics 17–19 are done — a backend-first addition with no dependency the earlier epics need. Standalone once started: condition builder + local evaluation engine + alerts list view, evaluated against the same live Redis feed `data_api`'s `ws/live.py`/`redis_bus.py` already run, not a second polling loop.
 **FRs covered:** FR67, FR68, FR69
+
+### Epic 23: Migration guardrails, observability and the shared kernel
+Every service image is proven to ship its own imports, every process reports failures through one ledger and one notifier, boundary and hot-path regressions fail CI, and the shared types live in `kernel/` with nothing else. Closes the live `data_api`/`live_paper` image gaps.
+**MRs covered:** MR1, MR2, MR3, MR4, MR5, MR7 (notifier), MR14
+
+### Epic 24: Derived data and read models on one fold
+The chart's forming candle, the stored candle, the ranking sparkline and an alert's bar close come from one fold; both UIs read one set of view functions; the reader-side crossed-book re-validation is gone; research is a pure consumer.
+**MRs covered:** MR1, MR2, MR4, MR6, MR7, MR13 (views), MR14
+
+### Epic 25: Archive, ranking, bots and collection control as aggregates
+The nightly saga cannot zero rows over an archive gap or reconcile an unrebuilt day; the ranking engine has no module globals; the bots' paper/real split is a type; a venue's collected set is the applied plan, not the intent.
+**MRs covered:** MR1, MR2, MR4, MR8, MR9, MR10, MR11, MR14
+
+### Epic 26: The gate as an aggregate
+The write gate is one pure function over explicit aggregates, venue variance is a set of pure policy values, and no shim remains; a fourth venue is client + policies + config.
+**MRs covered:** MR1, MR2, MR4, MR12, MR13 (sampler), MR14
+
+### MR Coverage Map (Epics 23–26)
+
+MR1, MR2, MR4, MR14: every epic (per-story rules) · MR3, MR5: Epic 23 · MR6, MR7: Epic 24 (MR7's notifier lands in 23.1) · MR8–MR11: Epic 25 · MR12: Epic 26 · MR13: 24.2 (readers) and 26.1 (sampler). Order 23 → 24 → 25 → 26 (AD-D12).
 
 ## Epic 1: Trustworthy Coin Ranking & Watchlist
 
@@ -2517,3 +2558,323 @@ So that the trade archive is complete on every venue that allows it, and the ven
 **Given** 22.13's reconciliation
 **When** 22.14 has run for a week
 **Then** the kline pass rate per venue is re-recorded and any remaining mismatch has a named cause
+
+## Epic 23: Migration guardrails, observability and the shared kernel
+
+First epic of the DDD migration (`_bmad-output/planning-artifacts/architecture/architecture-ddd-platform-2026-09-21/ARCHITECTURE-SPINE.md`, AD-D1..AD-D18; requirements MR1–MR14 above). Step 0, the `troll/` → `platform/` rename with the stores under `platform/data/`, is done (`18c12eedf4`). Every story here and in Epics 24–26 obeys the per-story rules MR1 (deployable alone, published language frozen), MR2 (pure re-export shims with `REMOVE_AFTER`, gone within two stories), MR4 (docs, dockerfile `COPY` sets, compose `command:` lines and both Makefile test lists updated in the same commit) and MR14 (parent-spine Deferred items struck when resolved). Order inside the epic is fixed: 23.1 then 23.2.
+
+### Story 23.1: `observability/` context, one notifier, and the migration's enforcement tests
+
+As the platform operator,
+I want every process to report tolerated failures through one ledger and page me through one notifier, and the migration's boundary, image-closure and hot-path checks to run in `make test` from the first move,
+So that the two live image gaps are closed now and every later context move is caught by a test instead of a review.
+
+**Acceptance Criteria:**
+
+**Given** `ml_signals/error_ledger.py`, the module functions `_notify` and `_watchdog_transition` in `collector_core/collector.py`, the dYdX incident-report handler (`dydx_collector/collector.py`, `[WS_RAW]` flush + `_IncidentHandler`) and `data_api/alerts.py`'s `post_webhook`/`post_telegram`
+**When** the story ships
+**Then** `platform/observability/{error_ledger,notify,watchdog,incidents}.py` exist and import only the standard library (asserted by `test_boundaries.py`); `observability.notify(channel, title, body)` is the one outbound transport with ntfy, Telegram and generic-webhook adapters chosen by env (`WATCHDOG_NTFY_URL`, `TELEGRAM_*`, webhook URL), and both the capture watchdog and `data_api/alerts.py` deliver through it (an `Alert` names a channel, never a transport); `observability.watchdog` holds only the generic `(down_since, reminder)` transition over a boolean, the feed-silence verdict staying in the collector; the incident handler takes its instrument-id pattern from the dYdX entrypoint and holds no venue token; the old paths `ml_signals.error_ledger` and the moved functions are pure re-export shims with `DeprecationWarning` and `REMOVE_AFTER = "24-1-..."`, and every in-repo caller is updated in this story (a `DeprecationWarning` in the test run is a failure, TEST-04)
+
+**Given** the AD-D2 dependency graph and the AD-D1 context table
+**When** `platform/tests/test_boundaries.py` runs in `make test`
+**Then** it walks `ast` imports of every Python module under `platform/` (excluding `frontend/`, `node_modules/`, `data/`), maps every legacy module to its target context through a static `LEGACY_MODULE_TO_CONTEXT` table (an unmapped module is a failure), fails any import edge not in the AD-D2 graph between the two ends' target contexts, fails any import of a `_private` name across two contexts, treats `capture/venues/<v>/policies.py` as `domain/`, exempts only edges within one unmoved package, asserts `observability/` and `kernel/` import no context and `research/` imports no `data_api` symbol, and passes on the tree as of this story
+
+**Given** every `command:` in `docker-compose.yml` and every `-m` module in the `Makefile` and the nightly cron line
+**When** `platform/tests/test_images.py` runs in `make test`
+**Then** it computes each entrypoint's top-level-package import closure and asserts every package is in that service's dockerfile `COPY` set (a shim counts as its target), and the story adds the `COPY` lines the test demands today (`data_api.dockerfile` lacks `collector_core` and `common`; `live_paper.dockerfile` whatever its closure requires) so that the test passes and `make build` succeeds for all three thin images; the parent spine's Deferred entry "`data_api`'s image does not ship the packages its code imports" is struck with an amendment
+
+**Given** the recorded WS fixtures under `collector_core/tests/fixtures/` and the current `Collector._process_data`
+**When** the hot-path replay test `platform/tests/test_hotpath.py` runs
+**Then** it replays a fixed burst (all three venues, 30 instruments' worth of deltas and trades) through `_process_data`, measures `tracemalloc` allocations per message and `time.perf_counter_ns` wall time per message, writes the first run's numbers to `platform/tests/fixtures/hotpath_baseline.json` and records them in `docs/DATA_INTEGRITY_AUDIT.md`, and on every later run asserts allocations ≤ baseline and wall time ≤ 2× baseline; the test is deterministic across runs on the same host (three consecutive runs agree within the tolerance)
+
+**Given** MR4 and AD-D16's per-process Known limit
+**When** the story is merged
+**Then** `platform/CLAUDE.md` DATA-07 names `observability.error_ledger` and states the Known limit (the ledger is per process; `/api/errors` shows `data_api`'s own sites; upgrade path `errors:ledger`), `ARCHITECTURE.md`'s module map gains the `observability/` row, `docs/DATA_DICTIONARY.md` is unchanged in content but re-cited, the collector image `COPY`s `observability`, and both Makefile test lists (`test`, `test-live-paper`) include `tests`
+
+### Story 23.2: `kernel/` shared kernel
+
+As a strategy developer and collector maintainer,
+I want the one snapshot schema, the one fold, the one venue-id parser, the one skew constant, the one REST transport and the one Parquet compression patch to live in a package that imports nothing else,
+So that no two contexts can ever hold two copies of a shared type or a shared number.
+
+**Acceptance Criteria:**
+
+**Given** `collector_core/{second_snapshot,open_interest,fold,venue_http,archive_gaps}.py`, `common/venues.py`, `ml_signals/{venue,indicators,performance_metrics}.py`, `catalog_stats.SecondOHLC`/`_stamp_to_ns`/`data_file_ranges`/`second_ohlc_arrays`/`query_second_ohlc` and the zstd `pq.write_table` patch duplicated in `collector.py` and `backfill_bars.py`
+**When** the story ships
+**Then** `platform/kernel/` holds exactly `second_snapshot.py` (`DydxSecondSnapshot` + `SecondOHLC`), `open_interest.py`, `fold.py`, `indicators.py` (pure `Indicator` classes and stateless snapshot functions only), `performance_metrics.py`, `venues.py`, `clocks.py`, `archive_markers.py`, `venue_http.py`, `catalog_files.py`, `parquet_compat.py` and nothing else; `test_boundaries.py` asserts kernel imports no context and holds no module-level mutable state, no store and no config loader; `common/` and the moved `ml_signals`/`collector_core` modules become pure re-export shims (`REMOVE_AFTER = "24-2-..."`) and every in-repo caller is updated
+
+**Given** the catalog directory names derive from the class names (`nautilus_trader.persistence.funcs.class_to_filename`)
+**When** `DydxSecondSnapshot` and `OpenInterest` move
+**Then** their class names and Arrow schemas are byte-identical, `register_arrow` runs exactly once per class (`test_namespace.py` asserts one `_SCHEMAS` key per kernel class `__name__` and `old.X is new.X` for every shim name), a fixture test proves a `snapshots:raw` payload and a catalog row written before the move are read back unchanged after it, and `DydxSecondSnapshot.from_dict` is the only `snapshots:raw` parser left in `data_api/live_candles.py` (ranking and bot_tui parsers are chased in their own stories)
+
+**Given** three `InstrumentId` parsers today (`common.venues.market_kind`, `ml_signals.venue.venue_of`, `venue_http.bybit_category`)
+**When** `kernel/venues.py` lands
+**Then** it is the only module that parses an `InstrumentId` string, exposing `venue_of`, `venue_kind`, `market_kind`, `bybit_category` (defined over `market_kind`, raising `MalformedInstrumentId` for a non-Bybit id) and `MalformedInstrumentId`, with the existing tests of all three sources passing against it and a table test over every id shape the three venues produce (`-USD-PERP.DYDX`, `-LINEAR.BYBIT`, `-SPOT.BYBIT`, `-USD-PERP.HYPERLIQUID`)
+
+**Given** `ARRIVAL_MARGIN_NS` (300 s) and the five other skew-related constants (`_FILE_MARGIN_NS`, `_TS_INIT_MARGIN_NS`, `_MAX_CATCH_UP_SECONDS`, `hold_back_seconds + _VENUE_AHEAD_NS`, the backfill refusal)
+**When** `kernel/clocks.py` lands
+**Then** it holds `TwoClocks`, ns helpers, `CatalogFileSpan` (the former `_stamp_to_ns` stem parse plus `covers(ts_event)`) and the single `MAX_TS_INIT_SKEW_NS`; all six `collector_core` modules that imported `_stamp_to_ns` use `CatalogFileSpan`; every other constant is defined as an expression of, or asserted ≤, `MAX_TS_INIT_SKEW_NS` by a kernel test; `kernel/archive_markers.py` holds the `ArchiveGap` value object and the pure encode/decode of `_archive_gaps/<iid>.jsonl`, with `collector.py` and the archive tools reading and writing through it (writers unchanged: capture `write_failed`/`quarantined`, prune `pruned`)
+
+**Given** `venue_http` is used by `trade_backfill.py` and `compare_klines.py`, and `catalog_stats` read helpers by capture, archive, views and ranking
+**When** `kernel/venue_http.py` and `kernel/catalog_files.py` land
+**Then** every stdlib REST request in `collector_core/` is built through `kernel.venue_http` (a literal venue URL in a moved context is a boundary-test failure; `ranking_engine`'s duplicate maps stay until Story 25.2 and are listed in that story), `catalog_files.py` exposes `data_file_ranges`, `second_ohlc_arrays`, `query_second_ohlc`, `files_by_day` with no write path and no `ParquetDataCatalog` construction, `rebuild_seconds.py` no longer imports `build_candles._files_by_day`, and `parquet_compat.py` is the one place the zstd `write_table` patch is applied, imported by `collector.py` and `backfill_bars.py`
+
+**Given** MR4
+**When** the story is merged
+**Then** all three dockerfiles `COPY` `kernel`, `test_images.py` and `test_boundaries.py` pass, `platform/CLAUDE.md`'s "Adding a venue" step 5 points at `kernel/venues.py`, `ARCHITECTURE.md` and `docs/DATA_DICTIONARY.md` cite the kernel paths, and the parent spine's Deferred entry "Writer→reader imports contradict AD-4" is amended to record that `error_ledger` (23.1) and the shared types, clocks and read helpers (23.2) are resolved, with `candle_store` remaining for Story 24.1
+
+## Epic 24: Derived data and read models on one fold
+
+Second epic of the DDD migration (spine AD-D8, AD-D11, AD-D16; MR6, MR7, MR13). After Epic 23 the kernel and observability exist; this epic moves every *derived* reader: candles first (so the one seconds→bars fold exists before anything consumes it), then the read models both UIs share, then alerting as an observer of the forming bar, then research as a pure consumer. Order is fixed: 24.1 → 24.2 → 24.3 → 24.4. The per-story rules MR1, MR2, MR4 and MR14 apply to every story.
+
+### Story 24.1: `candles/` context behind capture's `SecondSink` port
+
+As a strategy developer and chart user,
+I want the candle store to be its own context that capture feeds through a port with the flushed batch, and the only seconds→bars fold in the platform,
+So that a bar is never ahead of the archive, is always rebuildable from seconds, and cannot disagree with the chart's forming candle.
+
+**Acceptance Criteria:**
+
+**Given** `ml_signals/candle_store.py`, `ml_signals/candles.py`, `collector_core/build_candles.py` and the collector's direct `candle_store` calls (`collector_core/collector.py` `_apply_to_candle_store`, `_catch_up_candle_store`, `_candle_prune_loop`)
+**When** the story ships
+**Then** `platform/candles/` holds `domain/` (`CandleSeries` with the per-instrument watermark and `seconds_observed`/`partial` semantics, `fold_arrays`), `application/` (`apply_seconds` implementing the `SecondSink` `Protocol`, `forming_bar(rows: Sequence[SecondOHLC], bar_seconds) -> Bar | None`, `rebuild_day`, `prune`, the queries `window`/`latest`/`oldest_t`/`watermarks`, and a `VerifiedDays` service exposing `mark_verified`/`verified_status`) and `infrastructure/` (`CandleStore`, the only code that opens `candles_<venue>.db` rw; schema and `verified_days` table byte-identical); `collector_core/ports.py` declares `SecondSink` (the legacy capture module) and the collector calls `self._second_sink.apply(iid, flushed_rows)` only with rows whose `write_data` succeeded (`collector.py:1063-1073` semantics kept, with a test); each venue entrypoint constructs the candles adapter and passes it in, and the candle prune loop runs as a candles process manager started through `extra_loops`; `test_boundaries.py` whitelists the venue entrypoints as composition roots for that wiring
+
+**Given** three seconds→bars folds today (`candle_store.fold_arrays`, `candles.aggregate_ohlc`/`candle_dicts_from_snapshots`, and the forming-bar arithmetic in `data_api/live_candles.py`)
+**When** the story ships
+**Then** exactly two folds exist in `platform/` (`kernel.fold.fold_trades` and `candles.domain.fold_arrays`), `ml_signals/candles.py`'s `aggregate_ohlc`, `candle_dicts_from_snapshots`, `build_candles` and `PARTIAL_OBSERVED_FRACTION` are retired (their callers in `data_api/live_candles.py`, `routes/rankings.py`, `routes/candles.py` call `candles.application.forming_bar`/`window`), and an equivalence test proves that `forming_bar` over a day of recorded seconds equals the stored closed bars for 1 m, 5 m and 1 h (the "source equivalence" of Story 21.2 restated over the single fold)
+
+**Given** `compare_klines.py` and `prune_catalog.py` open the candle store themselves (`connect_rw`, `connect_ro` + `verified_status`)
+**When** the story ships
+**Then** both receive a `VerifiedDays` adapter injected by `nightly.py` and their own CLIs, never a connection; `python -m collector_core.build_candles` becomes `python -m candles.rebuild` with the same arguments (the old module is a shim that forwards `main`), `make nightly` and the README are updated, and the idempotent-rebuild test still passes
+
+**Given** MR2 and MR4
+**When** the story is merged
+**Then** `ml_signals.candle_store`, `ml_signals.candles` and `collector_core.build_candles` are pure re-export shims with `REMOVE_AFTER = "24-3-..."`, every in-repo caller is updated, all three dockerfiles `COPY` `candles`, the Makefile test lists include `candles/tests`, `docs/DATA_DICTIONARY.md` §2.5/§5 and `ARCHITECTURE.md` cite the new paths, and the parent spine's Deferred entry "Writer→reader imports contradict AD-4" is struck as fully resolved
+
+### Story 24.2: `views/` read models for both UIs, and the reader-side re-validation removed
+
+As a trader reading the web UI and the TUI,
+I want every number both surfaces show to come from one function over one input, and the chart to render what the gate approved,
+So that the two UIs can never disagree and the reader never second-guesses the gate.
+
+**Acceptance Criteria:**
+
+**Given** `ml_signals/{ranking_columns,screener_columns_config,chart_indicators,chart_indicator_config,custom_indicators,book_features,footprint,chart_data}.py`, `data_api/{live_candles,redis_bus}.py`, the `catalog_stats` series reads (`query_second_snapshots`, `query_second_ohlc`, `second_ohlc_arrays`, `overview_table`) and the inline computations in `data_api/routes/*.py` and `bot_tui/*_state.py`
+**When** the story ships
+**Then** `platform/views/` holds `ranking_columns.py`, `coin_detail.py`, `chart_series.py`, `indicator_picker.py`, `live_candles.py` (declaring the `BarObserver` `Protocol` and keeping `LiveCandleBus`), `rankings_bus.py`, `preferences.py` (the one loader/saver for `chart_indicators.toml` and `screener_columns.toml`, full-rewrite TOML, key sets frozen) and the catalog series reads over `kernel.catalog_files`; an audit list in the story's Dev Notes names every computation found in `data_api/routes` and `bot_tui` state modules and each is moved into `views/` or shown to be pure formatting; `views` parses `snapshots:raw` only through `DydxSecondSnapshot.from_dict`, and `bot_tui`'s hand-indexed parsing is replaced by the same call
+
+**Given** `data_api/routes/snapshots.py:129-133` skips empty-top and `bp >= ap` rows (the AD-3 deviation) and `:137-138` inserts gap markers
+**When** the story ships
+**Then** the two skips are deleted, the gap-marker insertion (`_SNAPSHOT_GAP_THRESHOLD_MS`) moves into `views/chart_series.py` as a rendering rule with its existing test, a test proves a crossed row written by the gate is returned unchanged by `/api/snapshots`, and the parent spine's Deferred entry "Reader-side crossed-book skip survived the `dashboard` → `data_api` move" is struck with an amendment
+
+**Given** AD-D2's graph
+**When** `test_boundaries.py` runs after the move
+**Then** `views` imports only `kernel`, `observability` and the `candles`/`ranking` query services (`window`, `latest`, `forming_bar`, `verified_status`, `history`, `nearest`), `data_api` and `bot_tui` import `views`, `kernel`, `observability` and `alerting`'s application service only, and no `data_api` route or `bot_tui` module imports `ml_signals`, `collector_core`, `ranking_engine` or `common` directly
+
+**Given** MR2 and MR4
+**When** the story is merged
+**Then** the moved `ml_signals` and `data_api` modules are pure re-export shims with `REMOVE_AFTER = "24-4-..."`, the `data_api` and collector images `COPY` `views`, the Makefile test lists include `views/tests`, the frontend's docs page (`frontend/src/pages/docs/`) and `ARCHITECTURE.md` name `views/`, and SSOT-01..05 in `platform/CLAUDE.md` cite `views/` as the one place
+
+### Story 24.3: `alerting/` context as an observer of the forming bar
+
+As a trader who set a price alert,
+I want alerts evaluated on the same forming bar the chart shows and delivered through the one notifier,
+So that an alert never fires on a bar the chart never drew, and my Telegram or webhook settings work for every kind of page.
+
+**Acceptance Criteria:**
+
+**Given** `data_api/alerts.py` (`Alert`, `AlertStore`, `RunState`, `evaluate`, `render`, `post_webhook`, `post_telegram`, `AlertEngine`) and `data_api/routes/alerts.py`
+**When** the story ships
+**Then** `platform/alerting/` holds `domain/` (`Alert`, `FiringPolicy` for `once_per_bar_close | once_per_bar | only_once`, `RunState`, `evaluate`, `render`), `application/` (`AlertEngine` implementing `views.BarObserver`, subscribe/unsubscribe of SSE queues) and `infrastructure/` (`AlertStore` over `alerts.toml`, key set frozen; `Deliverer` implemented over `observability.notify`); `data_api/app.py`'s lifespan is the only place `AlertEngine` is attached to `LiveCandleBus` (composition-root wiring, no `alerting → views` import edge beyond the `BarObserver` type), `routes/alerts.py` is a thin adapter over `alerting.application`, and the frequency semantics tests from Story 20.2 pass unchanged
+
+**Given** an alert names a channel, never a transport
+**When** an alert fires
+**Then** `Deliverer.deliver(alert, body)` calls `observability.notify(channel, title, body)` and the transport (Telegram, webhook URL) is chosen by the notifier's env configuration; the SSE stream, the `/api/alerts` contract and the frontend dialog are byte-for-byte unchanged (existing route tests pass)
+
+**Given** MR2 and MR4
+**When** the story is merged
+**Then** `data_api.alerts` is a pure re-export shim with `REMOVE_AFTER = "25-1-..."`, the `data_api` image `COPY`s `alerting`, the Makefile test lists include `alerting/tests`, and `ARCHITECTURE.md` and the data dictionary cite `alerting/`
+
+### Story 24.4: `research/` as a pure consumer, with its broken tests repaired
+
+As a strategy researcher,
+I want the backtest strategies, runners and notebooks in one context that only reads the catalog, the ranking history and the watchlist API,
+So that research can never leak a computation back into the live path, and its test suite runs green again.
+
+**Acceptance Criteria:**
+
+**Given** `ml_signals/strategies/*`, `ml_signals/{run_backtest,watchlist}.py`, `ml_signals/BACKTESTING.md`, `ml_signals/backtest.ipynb`, `dydx_collector/notebooks/`
+**When** the story ships
+**Then** `platform/research/` holds `strategies/`, `run_backtest.py`, `watchlist.py` (HTTP to `/api/rankings` only; `test_boundaries.py` asserts no `data_api` import), `notebooks/` and `BACKTESTING.md`; backtests still reference strategies by `ImportableStrategyConfig` string path (the paths change to `research.strategies...` and the docs say so); every research catalog read goes through `kernel.catalog_files` or `BacktestDataConfig`; research computes no rolling metric of its own (pct/volatility come from `metrics.db` via the ranking query service)
+
+**Given** `ml_signals/tests/{test_snapshot_backtest_node,test_timeframe_backtest,test_watchlist_multi_coin_backtest}.py` fail at collection (`from ml_signals import backtest_dydx` while the module lives in `strategies/`) and `test_ofi_strategy*.py` fail on a stale `ma_period` keyword
+**When** the story ships
+**Then** all five modules are repaired against the real strategy API (never by deleting a test or loosening an assertion), run in `make test` under `research/tests`, and their pass is recorded in the story's Completion Notes together with the root cause of each break (TEST-04)
+
+**Given** MR2 and MR4
+**When** the story is merged
+**Then** the moved `ml_signals` modules are pure re-export shims with `REMOVE_AFTER = "25-2-..."` (the `ml_signals` package is retired for good in Story 25.2), the collector image `COPY`s `research`, the Makefile test lists include `research/tests`, and `platform/CLAUDE.md` NAUT-03 and the README's backtest section cite the new paths
+
+## Epic 25: Archive, ranking, bots and collection control as aggregates
+
+Third epic of the DDD migration (spine AD-D9, AD-D10, AD-D15, AD-D17, AD-D18; MR8–MR11). Four contexts with disjoint files, moved in the fixed order 25.1 → 25.2 → 25.3 → 25.4; each leaves the wire contracts of AD-9/AD-10/AD-11 and `collector:status`/`collector:control` unchanged. MR1, MR2, MR4 and MR14 apply to every story.
+
+### Story 25.1: `archive/` context: `ArchiveDay`, one deleter, one rewriter, one writer per leaf
+
+As the platform operator,
+I want the nightly maintenance to be one saga over an explicit day state machine, with one code path that deletes files and one that rewrites them,
+So that a rebuild can never zero rows over an archive gap, a reconcile can never pass on an unrebuilt day, and a repair can never collide with a running collector.
+
+**Acceptance Criteria:**
+
+**Given** `collector_core/{rebuild_seconds,consolidate_catalog,prune_catalog,repair_catalog,compare_klines,nightly,backfill_bars,migrate_open_interest,measure_lag}.py`, `dydx_collector/normalize_snapshot_schema.py`, the `catalog_stats` diagnostics (`data_file_ranges`, `find_gaps`, `likely_outages`, `coverage`) and `DydxCollector._prune_loop`
+**When** the story ships
+**Then** `platform/archive/` holds `domain/` (`ArchiveDay` with `DayStatus`, `RetentionPolicy`, `ReconciliationResult`, `ArchiveGap` handling over `kernel.archive_markers`), `application/` (`rebuild_day`, `consolidate_day`, `reconcile_day`, `prune`, `backfill_bars`, `diagnostics`, the `nightly` saga with `Step`/`StepResult`), `infrastructure/` (`catalog_files.py` — the `CatalogFiles` adapter, `klines_<venue>.py` over `kernel.venue_http`) and `tools/` (`measure_lag`, `migrate_open_interest`, `normalize_snapshot_schema`); every operator CLI keeps its arguments under `python -m archive.<tool>` with the old module paths forwarding; `make nightly`, `make consolidate`, `make prune`, `make backup-catalog` and the cron line in the README are updated
+
+**Given** four in-place `pq.write_table` rewrite sites and two `write_data()` callers in the tools
+**When** the story ships
+**Then** `CatalogFiles.rewrite(path, table)` (temp-then-rename, Arrow metadata preserved, zstd via `kernel.parquet_compat`) is the only in-place rewriter and the four sites call it; `backfill_bars` and `repair_catalog` remain the only offline `write_data()` callers and are listed in the data dictionary; a test proves a rewritten file's schema metadata and row order are unchanged
+
+**Given** AD-D9's state machine and AD-D18's leaf rule
+**When** the story ships
+**Then** `verified_days` (through the `VerifiedDays` port from 24.1) is the only persisted day status; `reconcile_day` refuses, ledgering `reconcile.not_rebuilt`, unless invoked by a saga run whose `rebuild_day` for the same (venue, day) succeeded (`StepResult` passed in-process; standalone `compare_klines` requires `--rebuilt-by <run id>`); `rebuild_day` leaves every row inside an `ArchiveGap` span untouched and reports the count; `RetentionPolicy` is the only code that deletes a catalog file and covers verified-and-aged `trade_tick/`, dropped-instrument retention (`non_config_retain_hours`, read from the venue plan file) and per-instrument `order_book_deltas` retention, so `DydxCollector._prune_loop` is deleted; the collector writes `<catalog>/.capture-<venue>.lock` for its whole run (the one capture edit in this story, with a test), `repair_catalog` refuses with `repair.capture_running` while that lock is held, and no archive tool writes a file whose `ts_init` span intersects the current UTC day (asserted in `CatalogFiles`)
+
+**Given** MR2 and MR4
+**When** the story is merged
+**Then** the moved modules are pure re-export shims with `REMOVE_AFTER = "25-3-..."`, the collector image `COPY`s `archive`, the Makefile test lists include `archive/tests`, `docs/DATA_DICTIONARY.md` §6 and `DATA_INTEGRITY_AUDIT.md` D-36/D-45..D-51 cite the new paths, and `platform/CLAUDE.md` DATA-05/DATA-06 name `archive.` tools
+
+### Story 25.2: `ranking/` context: `RankingBoard` replaces the module globals
+
+As a trader watching the rankings,
+I want the ranking engine to be one aggregate whose every input arrives through a named port,
+So that its behaviour is unit-testable, a second copy of a rolling metric can never appear, and a venue's volume source is one adapter.
+
+**Acceptance Criteria:**
+
+**Given** `ranking_engine/{engine,metrics_store,price_series,volatility}.py` with twelve mutable module globals (`engine.py:117-196`), `ml_signals/{metrics_computer,rank_history}.py` and the `catalog_stats` price math (`price_series`, `price_stats_from_series`, `price_stats`)
+**When** the story ships
+**Then** `platform/ranking/` holds `domain/` (`RankingBoard` owning `mode`, per-instrument `InstrumentMetrics`, `RankingsPublisher`; `RankingMode`, `VolumeReading`, `VolatilityScore`; `price_series.py`, `volatility.py`, `metrics.py` — the pct/volatility math, ranking's alone), `application/` (`ports.py` with `VolumeSource`, `PriceHistory`, `RankingHistory`, `LivePublisher`; `engine.py` with `ingest_snapshot_batch`, `switch_mode`, `volume_cycle`, `slow_loop`, `heartbeat`, constructed at `__main__`) and `infrastructure/` (`redis.py`, `metrics_store.py`, `catalog_prices.py` over `kernel.catalog_files`, `volume_<venue>.py` over `kernel.venue_http` — `engine.py`'s own URL maps, `_USER_AGENT` and timeouts retired); `test_boundaries.py` fails any module-level mutable runtime state in `ranking/`; the `ml_signals` package is deleted (its last shims expire here)
+
+**Given** AD-9 and Story 22.10's invariants
+**When** `RankingBoard` is tested
+**Then** invariant tests cover: both scores present on every row; a row without a fresh USD volume absent from volume mode and present in volatility mode with one `ranking_engine.volume24h` ledger entry per poll; stale instruments aged out; mode global and last-write-wins; publish on change and on heartbeat; and a replay test proves the `rankings:live` payload for a recorded `snapshots:raw` burst is byte-identical before and after the move
+
+**Given** SSOT-02
+**When** the story ships
+**Then** `views` and `research` read `pct_1h`/`pct_24h`/`volatility` only from `rankings:live`/`metrics.db` through the ranking query service (`history`, `nearest`), a grep-based test asserts no second implementation of `price_stats_from_series` exists, and `ranking` parses `snapshots:raw` only through `DydxSecondSnapshot.from_dict`
+
+**Given** MR2 and MR4
+**When** the story is merged
+**Then** `ranking_engine` is a pure re-export shim with `REMOVE_AFTER = "25-4-..."`, compose's `ranking_engine` service runs `python -m ranking`, the collector image `COPY`s `ranking`, the Makefile test lists include `ranking/tests`, `docs/DATA_DICTIONARY.md` §3 and `platform/CLAUDE.md` SSOT-02/"Adding a venue" step 7 cite the new paths, and the parent spine's Deferred entry "`open_interest` vs `volume24h` polling live in different namespaces" is struck as resolved by ownership
+
+### Story 25.3: `bots/` context: paper and non-paper as types, Nautilus behind an ACL
+
+As the bot operator,
+I want the trading runtime wrapped as one context whose aggregates make the paper/real split a type and whose only view of Nautilus is a strategy-scoped reader,
+So that a config key or a list reorder can never promote a bot to real money, and the TUI's status and history contracts stay exactly as they are.
+
+**Acceptance Criteria:**
+
+**Given** `live_paper/{config,node,strategy,bot_status,trade_history,fills_store,venues}.py`
+**When** the story ships
+**Then** `platform/bots/` holds `domain/` (`Bot` with `BotId == order_id_tag`, the bounded `Incident` list and heartbeat state; `FillLedger` with per-fill realized PnL and the day/week/month/all buckets of AD-10; `PaperFleet` and `ExecBot` as distinct aggregate types), `application/` (`supervise` — status heartbeat and `bots:control` handling; `history` — the refresh cycle), `infrastructure/` (`nautilus_host.py` building the one `TradingNode` per process with one data + Sandbox exec client per venue from the `VENUES` table; `cache_reader.py` filtering `cache.positions_open/closed(strategy_id=...)`; `fills_store.py`; `redis.py`; `config.py` with the two loaders, `load_paper_config` still rejecting a `mode` key and `ExecConfig.mode` still validated against `environment`) and `strategies/` (`DummyStrategy`, framework code); no module outside `bots/infrastructure/nautilus_host.py` imports `TradingNode` (asserted by `test_boundaries.py`)
+
+**Given** AD-10/AD-11's wire contracts
+**When** the story ships
+**Then** `bots:status`, `bots:control`, `bots:history:*` and `bots:incidents:*` payloads are byte-identical (replay tests against recorded messages), `bot_tui` needs no change, `docker-compose.yml`'s `live-paper` service runs `python -m bots` with the same env and mounts (`./data/live_paper:/app/live_paper/data` keeps the container path), and `live_paper.dockerfile` `COPY`s `bots`, `kernel`, `observability` (proven by `test_images.py`)
+
+**Given** MR2 and MR4
+**When** the story is merged
+**Then** `live_paper` is a pure re-export shim package with `REMOVE_AFTER = "26-1-..."`, the `test-live-paper` Makefile target runs `bots/tests` (the two host-dependent `test_node.py` tests stay deselected there with the reason recorded), `docs/BOT_OPERATIONS.md`, `live_paper/README.md` (moved to `bots/README.md`) and `platform/CLAUDE.md`'s `live_paper` exception clause cite `bots/`
+
+### Story 25.4: `collection_control/` context: the plan is the intent, the applied set is the fact
+
+As the collector operator,
+I want a venue's collected instruments to be one plan aggregate with a cap and USD-classified pins, applied by capture with an explicit report of what actually subscribed,
+So that the TUI never shows an instrument as collected that the feed never applied, and control can never reach the gate or delete catalog files.
+
+**Acceptance Criteria:**
+
+**Given** `DydxCollector`'s control plane (`dydx_collector/collector.py:369-625`: `_subscribe`/`_unsubscribe`, `_apply_config`, `_status_loop`, `_publish_status`, `_reload_config_loop`, `_apply_and_persist`, `_handle_control_message`, `_publish_removed`, `_pin_top_liquid`, `_control_loop`), `dydx_collector/config.py` and `classify_liquidity`
+**When** the story ships
+**Then** `platform/collection_control/` holds `domain/` (`CollectionPlan(venue)` with `instruments`, `exclude`, pins and `cap` = 30 for dYdX; invariants `exclude ∩ collected = ∅`, `|collected| ≤ cap`, pins admitted only by `classify_liquidity` on USD volume; `LiquidityTier`; commands `add`/`remove`/`pin`/`unpin`/`exclude`/`reload` returning a plan diff), `application/` (`ControlService` for `collector:control`, `StatusPublisher` for `collector:status`, the reload loop) and `infrastructure/` (`CollectionPlanStore` over `platform/data/dydx_config.toml`, full rewrite, comment loss as a `Known limit:`; redis); the dYdX entrypoint starts these as `extra_loops` and `DydxCollector` keeps only its book hooks
+
+**Given** AD-D17's applied-set rule
+**When** a plan diff is applied
+**Then** `Collector.apply(plan_diff)` (the legacy capture class, one new method) returns `Applied(subscribed, unsubscribed, failed)`; the sampler iterates `applied ∩ plan`; a `failed` instrument is `pending` on `collector:status`, ledgered `collector.subscribe_failed` once per attempt and retried by capture; a `LiveBook`/book state exists only for a subscribed instrument and is cleared on `unsubscribed`; an unsolicited message for a non-applied instrument is counted at `collector.unplanned_message`, not booked; tests cover a subscribe that fails on the wire and an unsubscribe that fails
+
+**Given** one `config.toml` with two schema owners today
+**When** the story ships
+**Then** `collector_core/config.py` is the one loader, returning `(CoreConfig, CollectionPlan)` for every venue (Bybit/Hyperliquid plans are static tuples applied once through the same `apply`), control validates through it before `CollectionPlanStore.save`, the key set is frozen, and `bot_tui`'s collector pane reads an unchanged `collector:status` payload (replay test)
+
+**Given** MR2 and MR4
+**When** the story is merged
+**Then** the moved `dydx_collector` modules are pure re-export shims with `REMOVE_AFTER = "26-2-..."`, the collector image `COPY`s `collection_control`, the Makefile test lists include `collection_control/tests`, and `platform/CLAUDE.md`'s "Adding a venue" steps 2–4 and `ARCHITECTURE.md` describe control as a separate context
+
+## Epic 26: The gate as an aggregate
+
+Last epic of the DDD migration (spine AD-D5, AD-D6, AD-D7, AD-D16; MR12, MR13). Capture moves last, in three stories: the domain shape first, in place, gated by the hot-path test (26.1); then the package and venue-package move with new entrypoints (26.2); then the closeout that removes the last shims and reconciles both spines with reality (26.3). MR1, MR2, MR4 and MR14 apply.
+
+### Story 26.1: `LiveBook`, `TradeIntake`, `FeedGroup` and a pure `SecondSampler`, in place
+
+As a collector maintainer,
+I want the write gate to be one pure function over explicit per-instrument and per-venue aggregates, with venue variance supplied as pure policy values,
+So that no venue can override the gate, every counter has a name, and the hot path is provably no slower than before.
+
+**Acceptance Criteria:**
+
+**Given** `collector_core/collector.py`'s per-instrument dicts (`_live_books`, `_last_book_update_ns`, `_crossed_since_ns`, `_resync_pending`, `_level_msg_id`, `_last_u`, pending deltas), trade dicts (`_second_trades`, `_seen_trade_ids`, the duplicate/stale/late/ahead counters, per-feed baselines), feed state (`_last_feed_message_ns`, feed states, backfill requests) and `_sample_tick`
+**When** the story ships
+**Then** `collector_core/domain/` holds `live_book.py` (`LiveBook` wrapping the Nautilus `OrderBook` by reference; `apply`, `clear`, `resync`, `snapshot_top(depth, now, policies) -> SampleVerdict`; pending `ts_event`-ordered deltas with the `hold_back + _VENUE_AHEAD_NS` overflow bound), `trade_intake.py` (`TradeIntake`: bounded id window, stale-history filter, per-feed first-copy arbitration with `duplicate` vs `duplicate_feed`, late/ahead counters, every counter reported at flush), `feed_group.py` (`FeedGroup`: `Feed` values, per-feed `FeedLiveness`, reconnect detection, one-sided outage comparison, `BackfillRequest` scheduling and abandonment), `sampler.py` (`SecondSampler.sample(...)` — pure, returns accepted snapshots, `SampleRejected`s and requested actions; closes second `S` at `S + 1 + hold_back_seconds` under `venue` time), `flush_batch.py` (`FlushBatch` with the `_TRADE_CARRY_NS` carry rule), `verdicts.py`, `events.py`; `Collector` becomes the application service that owns the loops, executes `ResyncRequested` through the client, and is the only ledger caller with every site listed in `collector_core/sites.py`; the empty-top-of-book rejection gains a rate-limited warning and the ledger site `collector.empty_top` (parent Deferred struck)
+
+**Given** the venue hook overrides (`_apply_deltas`, `_handle_crossed_book`, `_clear_book_state`, `_instrument_ids`) in the three venue collectors and `dydx_collector/uncross.py`
+**When** the story ships
+**Then** venue variance is supplied as policy values passed to the aggregates: `CrossedBookPolicy.step(book, tags, now_ns) -> Uncrossed | StillCrossed(since) | ResyncRequested` (dYdX: the uncross ladder, synchronous; Bybit/HL: core default), `LevelTagger`, `SequenceCanary`, `BookTimeSource`, `BackfillCapability`; every policy is pure and synchronous (no logging, ledgering or `await`; `test_boundaries.py` treats policy modules as `domain/`), the three venue `Collector` subclasses override no core method other than `__init__`, and the DATA-04/DATA-08 tests (uncross ladder, Bybit `u` canary incl. the zero-level message case, Hyperliquid full-snapshot) pass against the policies
+
+**Given** `test_hotpath.py`'s baseline from Story 23.1
+**When** the refactored ingest path runs the same replay
+**Then** allocations per message ≤ baseline and wall time per message ≤ 2× baseline; the numbers are recorded next to the baseline in `docs/DATA_INTEGRITY_AUDIT.md`; the story does not merge otherwise
+
+**Given** the client contract docstring (`collector_core/collector.py:32-50`)
+**When** the story ships
+**Then** `collector_core/ports.py` declares `VenueFeed`, `VenueTradeHistory`, `ArchiveWriter`, `LiveStream`, `Notifier` as `Protocol`s alongside `SecondSink`; `trade_backfill.py`'s fetch/parse half moves into per-venue `trade_history.py` modules implementing `VenueTradeHistory` (fixture tests unchanged) and its scheduling half stays in the application layer; the Parquet write, quarantine, instrument-definition write and capture lock live in an `ArchiveWriter` adapter and the Redis publish in a `LiveStream` adapter; all 22.13/22.14/22.12 tests pass unchanged
+
+### Story 26.2: `capture/` package and `capture/venues/<v>/` with new entrypoints
+
+As a maintainer adding a fourth venue,
+I want capture and its venue packages laid out as the spine's tree, with a venue being client + trade history + policies + config + entrypoint,
+So that "Adding a venue" is a recipe over named files, and no `Collector` subclass exists anywhere.
+
+**Acceptance Criteria:**
+
+**Given** `collector_core/` (post-26.1), `dydx_collector/`, `bybit_collector/`, `hyperliquid_collector/`
+**When** the story ships
+**Then** `platform/capture/{domain,application,infrastructure}/` and `capture/venues/{dydx,bybit,hyperliquid}/` with `client.py`, `trade_history.py`, `policies.py`, optional `open_interest.py`/`book_snapshot.py`, `config.py` and `__main__.py` exist as the Structural Seed lists; each `__main__.py` is the composition root that builds the client, policies, adapters (`ArchiveWriter`, `LiveStream`, candles `SecondSink`, `Notifier`), the collection-control loops for dYdX, and calls `run_forever`; compose `command:` lines become `python -m capture.venues.<venue>`; `docker-compose.yml`'s `collector` service is renamed `dydx_collector` for symmetry only if the operator checklist records the container-name change, otherwise left as is (decide in the story, record the decision)
+
+**Given** MR2 and MR4
+**When** the story is merged
+**Then** `collector_core`, `dydx_collector`, `bybit_collector`, `hyperliquid_collector` are pure re-export shim packages with `REMOVE_AFTER = "26-3-..."`, the collector image `COPY`s `capture`, the Makefile test lists include `capture/tests` and `capture/venues/*/tests`, `test_images.py` and `test_boundaries.py` pass with the full AD-D2 graph active (no unmoved package remains), `platform/CLAUDE.md`'s "Adding a venue" recipe is rewritten over the new files (steps 1–8, same evidence requirements, `capture/venues/<v>/trade_history.py` and `policies.py` added), `ARCHITECTURE.md`'s module map and diagram show the target tree, and `docs/DATA_DICTIONARY.md` §1 cites `capture/`
+
+**Given** the deployed collectors
+**When** the story is deployed
+**Then** `docs/DEPLOY_CHECKLIST.md` gains the redeploy order (all three collectors in one `make redeploy-all`, Dozzle check, `GET /api/errors` flat) as operator actions, and the story parks `awaiting-operator` with those actions
+
+### Story 26.3: Closeout: last shims gone, spines reconciled, guardrails permanent
+
+As the platform owner,
+I want the migration declared finished only when no shim remains, every `[TARGET]` in the DDD spine reads `[ADOPTED]` with a citation, and every parent Deferred item the migration resolved is struck,
+So that the architecture documents describe the code that runs.
+
+**Acceptance Criteria:**
+
+**Given** the shims created by Stories 23.1–26.2
+**When** the story ships
+**Then** no module carrying `REMOVE_AFTER` exists under `platform/`, `test_namespace.py`'s shim assertions are retired with it, and `git grep -n "ml_signals\|collector_core\|dydx_collector\|bybit_collector\|hyperliquid_collector\|ranking_engine\|live_paper\|common\.venues"` over `platform/` (excluding `docs/` history notes and `.planning/`) returns nothing
+
+**Given** the DDD spine's `[TARGET]` markers and `Today` columns and the parent spine's Deferred list
+**When** the story ships
+**Then** every `[TARGET]` is re-verified against the code and rewritten `[ADOPTED]` with `path:line` citations (or left `[TARGET]` with the reason and a Deferred entry), the `Today` columns are replaced by the target paths, the parent spine's resolved Deferred entries are struck with amendments, `troll/...` citations in both spines are re-pointed to `platform/...`, and the spine's Reviewer Gate (`lint_spine.py` + the version lens) is re-run clean
+
+**Given** the guardrails
+**When** the story ships
+**Then** `test_boundaries.py`'s legacy map is deleted (every module is in a context), `test_images.py` and `test_hotpath.py` stay in `make test`, the hot-path baseline is re-recorded from the final tree, `docs/DATA_INTEGRITY_AUDIT.md` carries the final numbers, and `_bmad-output/implementation-artifacts/sprint-status.yaml` marks Epics 23–26 `done`

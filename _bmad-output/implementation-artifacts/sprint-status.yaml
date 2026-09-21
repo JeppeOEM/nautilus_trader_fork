@@ -1,5 +1,5 @@
 # generated: 2026-07-01
-# last_updated: 2026-09-20 (Stories 22.11-22.12 story files created via create-story; 22.1 merged, awaiting-operator)
+# last_updated: 2026-09-21 (Epics 23-26: DDD migration, 13 story files created; 22.12 merged, awaiting-operator)
 # project: nautilus_trader_fork
 # project_key: NOKEY
 # tracking_system: file-system
@@ -293,6 +293,31 @@ development_status:
   22-14-trade-gap-closure-rest-backfill-after-reconnect-and-dual-feed-arbitration: awaiting-operator
   22-12-venue-timed-1s-sampling-for-bybit-and-hyperliquid: awaiting-operator
   epic-22-retrospective: optional
+
+  epic-23: in-progress
+  23-1-observability-context-and-migration-guardrails: ready-for-dev
+  23-2-kernel-shared-kernel: ready-for-dev
+  epic-23-retrospective: optional
+
+  epic-24: backlog
+  24-1-candles-context-behind-the-secondsink-port: ready-for-dev
+  24-2-views-read-models-and-reader-side-revalidation-removed: ready-for-dev
+  24-3-alerting-context-as-forming-bar-observer: ready-for-dev
+  24-4-research-pure-consumer-and-broken-tests-repaired: ready-for-dev
+  epic-24-retrospective: optional
+
+  epic-25: backlog
+  25-1-archive-context-archiveday-one-deleter-one-rewriter: ready-for-dev
+  25-2-ranking-context-rankingboard-replaces-module-globals: ready-for-dev
+  25-3-bots-context-paper-and-exec-types-nautilus-acl: ready-for-dev
+  25-4-collection-control-plan-intent-vs-applied-set: ready-for-dev
+  epic-25-retrospective: optional
+
+  epic-26: backlog
+  26-1-livebook-tradeintake-feedgroup-pure-secondsampler-in-place: ready-for-dev
+  26-2-capture-package-and-venue-packages-with-entrypoints: ready-for-dev
+  26-3-closeout-shims-gone-spines-reconciled: ready-for-dev
+  epic-26-retrospective: optional
 
 action_items:
   - epic: 1
