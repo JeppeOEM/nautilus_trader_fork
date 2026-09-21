@@ -42,7 +42,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-07-01
-last_updated: 2026-09-17 (All 25 stories across epics 17-20 story-created via create-story in one pass, all queued ready-for-dev, epics 17/18/19/20 moved to in-progress; sprint planning run earlier the same session -- retroactively added epic-16's 3 stories, missing since 2026-09-14, still backlog, no story files yet; re-run same day at the user's request to focus on Epic 15's remaining loose ends -- found and backfilled epics 12/13, entirely missing from this file since their specs shipped/finalized done on 2026-09-12, never tracked here)
+last_updated: 2026-09-21
 project: nautilus_trader_fork
 project_key: NOKEY
 tracking_system: file-system
@@ -278,7 +278,7 @@ development_status:
   epic-21-retrospective: optional
 
   epic-22: in-progress
-  22-1-troll-collector-core-extracted-from-the-bybit-and-hyperliquid-collectors: awaiting-operator
+  22-1-troll-collector-core-extracted-from-the-bybit-and-hyperliquid-collectors: done
   22-2-dydx-collector-onto-the-core: awaiting-operator
   22-3-shared-data-types-and-a-single-openinterest: awaiting-operator
   22-4-bybit-spot-collection-and-explicit-perp-spot-everywhere: awaiting-operator

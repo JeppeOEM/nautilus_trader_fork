@@ -1,6 +1,6 @@
 ---
 baseline_revision: a5f58ce1c7b802e06f2b5ad46ca7061761784e8c
-status: awaiting-operator
+status: done
 final_revision: 32eaf26419fcabab45434f50cad4a25a492c91dd
 review_loop_iteration: 0
 followup_review_recommended: true
@@ -203,3 +203,14 @@ Status: awaiting-operator
 **Residual risks:** the D-39 replay bounds are unverified against the raw feed (story 22.5); the two deferred items above; `DydxSecondSnapshot`/`ohlc_outside_book` are still imported from `dydx_collector` until story 22.3 moves them, and both `dydx_collector` and `collector_core` wrap `pq.write_table` until 22.2 (harmless, commented).
 
 This story's AC #5 includes a production deploy on the VPS that only the operator performs — hence `awaiting-operator`, not `blocked`, with the owed steps under `operator_actions`.
+
+## Operator Confirmation
+
+Confirmed 2026-09-21: the external actions this story owed were carried out.
+
+- On the VPS, once this branch is merged into `troll`: `cd troll && make up` to rebuild the thin collector image (it now bakes in `troll/collector_core/`) and restart `bybit-collector` and `hyperliquid-collector`.
+- Watch Dozzle for at least 10 minutes: both containers stay up, no `[collector.*]` error_ledger lines, at most one `Dropped subscribe-time trade history` line per (re)subscribe, and `DydxSecondSnapshot` rows for `BTCUSDT-LINEAR.BYBIT` and `BTC-USD-PERP.HYPERLIQUID` land 1 s apart (e.g. via `/api/candles` or a catalog query).
+- Confirm `dydx-ranking-engine` lists the `.BYBIT`/`.HYPERLIQUID` ids in `/api/rankings` and its memory stays flat (`docker stats dydx-ranking-engine`) over those 10 minutes.
+- Tick the VPS bullet under Task 6 in this story file and set its status to done.
+
+_Appended by the bmad-loop orchestrator (`bmad-loop confirm`, #335): a human confirmed these external actions out of band, and the story was advanced from `awaiting-operator` to `done`._
