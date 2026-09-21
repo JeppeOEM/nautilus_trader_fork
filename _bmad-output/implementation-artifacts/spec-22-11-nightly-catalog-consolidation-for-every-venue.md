@@ -2,7 +2,7 @@
 title: 'Story 22.11: Nightly catalog consolidation for every venue'
 type: 'feature'
 created: '2026-09-21'
-status: 'awaiting-operator'
+status: done
 baseline_revision: '4645f29059f9c28f5e9d001f95e1ffdd7cac3149'
 final_revision: 'a91584685ba9e7a8404aeb05d41931f51936d0c6'
 review_loop_iteration: 0
@@ -123,3 +123,15 @@ Status: awaiting-operator
 - The VPS runtime, RSS and file counts are unmeasured, and D-36 says so. The backup has never run against a real remote because rclone isn't installed here. Both are listed under `operator_actions`.
 - The first sync uploads the whole history. Nightly `sync` then moves each consolidated day's minute objects to `catalog-replaced/`, which must be pruned by hand.
 - rclone's default modtime comparison costs one HEAD request per object on S3-type remotes. `--fast-list` limits listing cost but not that.
+
+## Operator Confirmation
+
+Confirmed 2026-09-21: the external actions this story owed were carried out.
+
+- On nifelheim, deploy this branch (make redeploy-all) and run the first full consolidation by hand from troll/: `make consolidate`. Copy its final `consolidate: ...` summary line (days, files and MB before -> after, wall seconds, peak RSS) into troll/docs/DATA_INTEGRITY_AUDIT.md D-36 as **measured** (first full run), and confirm peak RSS stays well inside the box's free memory (MEM-01).
+- Install the nightly cron line from troll/README.md 'Nightly maintenance' in the VPS host crontab (add CRON_TZ=UTC if the box is not on UTC), then after the first nightly run copy that night's summary line from consolidate.log into D-36 as the measured nightly run.
+- Choose an object-storage provider (Cloudflare R2 or Backblaze B2), create a bucket, install rclone on the VPS host, run `rclone config` to create the remote (credentials stay in ~/.config/rclone), and set RCLONE_REMOTE and RCLONE_BUCKET (bare values) in troll/.env.
+- Run `make backup-catalog` once by hand after a consolidation, confirm with `rclone lsf $RCLONE_REMOTE:$RCLONE_BUCKET/catalog/data --max-depth 2` that the data type directories arrived, then update D-33 to say the backup is scheduled.
+- Answer the still-open D-33 question: was the 2026-09-19 17:53 VPS catalog reset deliberate?
+
+_Appended by the bmad-loop orchestrator (`bmad-loop confirm`, #335): a human confirmed these external actions out of band, and the story was advanced from `awaiting-operator` to `done`._

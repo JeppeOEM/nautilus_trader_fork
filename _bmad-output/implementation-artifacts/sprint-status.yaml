@@ -288,7 +288,7 @@ development_status:
   22-8-spine-rules-and-docs-updated-for-the-multi-venue-core: done
   22-9-historical-bar-backfill-for-bybit-and-hyperliquid: done
   22-10-rankings-show-every-collected-coin-across-venues-with-an-exchange-filter: done
-  22-11-nightly-catalog-consolidation-for-every-venue: awaiting-operator
+  22-11-nightly-catalog-consolidation-for-every-venue: done
   22-13-raw-trade-archive-exact-fold-nightly-rebuild-and-kline-reconciliation: awaiting-operator
   22-14-trade-gap-closure-rest-backfill-after-reconnect-and-dual-feed-arbitration: awaiting-operator
   22-12-venue-timed-1s-sampling-for-bybit-and-hyperliquid: awaiting-operator
