@@ -53,8 +53,60 @@ They belong to seconds that were already sampled, flushed and folded into the st
 
 ### Agent Model Used
 
+Claude Opus 5 (`claude-opus-5`), bmad-dev-auto (spec: `spec-22-14-trade-gap-closure-rest-backfill-after-reconnect-and-dual-feed-arbitration.md`).
+
 ### Debug Log References
+
+- Live wire check, 2026-09-21: the pyo3 WS clients were run against mainnet with `trade_feeds = 2`, then compared with the REST endpoints over the same interval.
+- Local 30 s network cut, 2026-09-21: real collectors wrote into a scratch catalog on a Docker network that was disconnected and reconnected.
 
 ### Completion Notes List
 
+- **Endpoint parameters, verified against the live API on 2026-09-21 (AC 2):**
+  - **dYdX:** `GET https://indexer.dydx.trade/v4/trades/perpetualMarket/{ticker}?limit=1000&createdBeforeOrAt=<iso>`.
+    - `limit=1000` works (the AC's 100 does too). The response is newest first, and `createdBeforeOrAt` is inclusive.
+    - The indexer returns 403 for urllib's default User-Agent.
+  - **Bybit:** `GET https://api.bybit.com/v5/market/recent-trade?category=linear|spot&symbol=...&limit=1000`.
+    - Linear returns 1000 trades: 28-64 s of BTCUSDT in the two samples.
+    - **Spot returns at most 60 trades**, even with `limit=1000` (audit D-60).
+  - **Hyperliquid:** `POST https://api.hyperliquid.xyz/info {"type":"recentTrades","coin":"BTC"}` exists.
+    - It returns **exactly the last 10 trades** and ignores `startTime` (audit D-48).
+- **WS trade ids equal REST trade ids on every venue:**
+  - Bybit: linear 999/999, spot 60/60.
+  - Hyperliquid: 19/19.
+  - dYdX: 3/3.
+  - Price, size and aggressor are equal on every one.
+  - The two feeds of `trade_feeds = 2` delivered identical id sets.
+- **Hyperliquid's live `ts_event` is up to 128 ns off the exact millisecond.** The adapter converts through `f64`. The Hyperliquid client now re-stamps it to the exact millisecond (audit D-62).
+- **Network-cut test:**
+  - dYdX: archive == REST for the outage window.
+  - Bybit ADAUSDT: 155/155.
+  - Bybit BTCUSDT linear and ETHUSDT spot: backfilled, with the rest reported `unrecoverable` (venue depth).
+  - Hyperliquid: `unrecoverable` (10-trade depth).
+  - The first run exposed a baseline bug, since fixed: the baseline was read when the backfill ran instead of at detection.
+- **AC 5 is owed on the VPS:** the 24 h and 1-week measurements are listed as the spec's `operator_actions`.
+
 ### File List
+
+- New:
+  - `troll/collector_core/feed.py`
+  - `troll/collector_core/trade_backfill.py`
+  - `troll/collector_core/venue_http.py`
+  - `troll/collector_core/tests/test_trade_backfill.py`
+  - `troll/collector_core/tests/fixtures/{dydx_trades_btc_usd,bybit_trades_btcusdt_linear,bybit_trades_btcusdt_spot,hyperliquid_recent_trades_btc}_20260921.json`
+  - `troll/bybit_collector/tests/test_client.py`
+  - `troll/hyperliquid_collector/tests/test_client.py`
+- Modified, code:
+  - `troll/collector_core/{collector,config,compare_klines,archive_gaps}.py`
+  - `troll/bybit_collector/{client,collector}.py`
+  - `troll/hyperliquid_collector/{client,collector}.py`
+  - `troll/dydx_collector/collector.py`
+- Modified, config:
+  - `troll/bybit_collector/config.toml`
+  - `troll/hyperliquid_collector/config.toml`
+- Modified, tests:
+  - `troll/collector_core/tests/{test_collector,test_config,test_watchdog}.py`
+  - `troll/dydx_collector/tests/test_collector_resilience.py`
+- Modified, docs:
+  - `troll/docs/{DATA_DICTIONARY,DATA_INTEGRITY_AUDIT,DEPLOY_CHECKLIST}.md`
+  - `troll/CLAUDE.md`

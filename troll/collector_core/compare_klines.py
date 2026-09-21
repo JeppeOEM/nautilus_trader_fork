@@ -91,7 +91,13 @@ from ml_signals import error_ledger
 from ml_signals.catalog_stats import _stamp_to_ns
 
 from collector_core.build_candles import _parse_date_ns
-from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
+from collector_core.venue_http import BYBIT_URLS
+from collector_core.venue_http import DYDX_NETWORKS
+from collector_core.venue_http import HYPERLIQUID_URLS
+from collector_core.venue_http import USER_AGENT
+from collector_core.venue_http import HttpJson
+from collector_core.venue_http import bybit_category
+from collector_core.venue_http import http_json
 from nautilus_trader.core.nautilus_pyo3 import get_dydx_http_url  # type: ignore[attr-defined]
 from nautilus_trader.model.data import Bar
 from nautilus_trader.model.instruments import Instrument
@@ -108,15 +114,8 @@ _MS_NS = 1_000_000
 # within this much of one. A representation guard, not a comparison tolerance -- two values a unit
 # apart can never compare equal.
 _FLOAT_RESIDUAL = Decimal("0.001")
-_BYBIT_URLS = {"mainnet": "https://api.bybit.com", "testnet": "https://api-testnet.bybit.com"}
-_HYPERLIQUID_URLS = {
-    "mainnet": "https://api.hyperliquid.xyz/info",
-    "testnet": "https://api.hyperliquid-testnet.xyz/info",
-}
-_DYDX_NETWORKS = {"mainnet": DydxNetwork.MAINNET, "testnet": DydxNetwork.TESTNET}
 _DYDX_PAGE = 1000
 _BYBIT_PAGE = 1000
-_USER_AGENT = "nautilus-troll-reconcile/1.0"  # dYdX's indexer rejects urllib's default (403)
 _SNAPSHOT_DIR = "custom_dydx_second_snapshot"
 
 
@@ -136,7 +135,6 @@ class Kline:
     v: int
 
 
-HttpJson = Callable[[urllib.request.Request], Any]
 KlineFetch = Callable[[Instrument, int], list[Kline]]
 
 
@@ -231,11 +229,6 @@ def parse_hyperliquid_candles(payload: list, price_p: int, size_p: int) -> list[
 # -- venue fetchers (paged; wire bounds verified live 2026-09-21 on 2026-09-20 data) --------------
 
 
-def http_json(request: urllib.request.Request) -> Any:
-    with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310 (fixed https URLs)
-        return json.load(response)
-
-
 def _iso(ms: int) -> str:
     return datetime.fromtimestamp(ms / 1000, tz=UTC).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
@@ -246,7 +239,7 @@ def _fetch_dydx(inst: Instrument, day_ms: int, environment: str, http: HttpJson)
 
     Verified: `fromISO` inclusive, `toISO` exclusive, newest first, `limit` at most 1000.
     """
-    base = get_dydx_http_url(_DYDX_NETWORKS[environment])
+    base = get_dydx_http_url(DYDX_NETWORKS[environment])
     ticker = urllib.parse.quote(inst.raw_symbol.value)
     out: list[Kline] = []
     to_ms = day_ms + _DAY_MS
@@ -255,7 +248,7 @@ def _fetch_dydx(inst: Instrument, day_ms: int, environment: str, http: HttpJson)
             f"{base}/v4/candles/perpetualMarkets/{ticker}?resolution=1MIN"
             f"&fromISO={_iso(day_ms)}&toISO={_iso(to_ms)}&limit={_DYDX_PAGE}"
         )
-        payload = http(urllib.request.Request(url, headers={"User-Agent": _USER_AGENT}))  # noqa: S310
+        payload = http(urllib.request.Request(url, headers={"User-Agent": USER_AGENT}))  # noqa: S310
         page = parse_dydx_candles(payload, inst.price_precision, inst.size_precision)
         out += page
         if len(page) < _DYDX_PAGE or min(k.t_ms for k in page) <= day_ms:
@@ -264,11 +257,10 @@ def _fetch_dydx(inst: Instrument, day_ms: int, environment: str, http: HttpJson)
 
 
 def _bybit_category(iid: str) -> str:
-    if iid.endswith("-LINEAR.BYBIT"):
-        return "linear"
-    if iid.endswith("-SPOT.BYBIT"):
-        return "spot"
-    raise KlineError(f"{iid}: no Bybit kline category for this id suffix")
+    try:
+        return bybit_category(iid)
+    except ValueError as e:
+        raise KlineError(f"{iid}: no Bybit kline category for this id suffix") from e
 
 
 def _fetch_bybit(inst: Instrument, day_ms: int, environment: str, http: HttpJson) -> list[Kline]:
@@ -283,11 +275,11 @@ def _fetch_bybit(inst: Instrument, day_ms: int, environment: str, http: HttpJson
     end_ms = day_ms + _DAY_MS - 1
     while True:
         url = (
-            f"{_BYBIT_URLS[environment]}/v5/market/kline?category={category}"
+            f"{BYBIT_URLS[environment]}/v5/market/kline?category={category}"
             f"&symbol={urllib.parse.quote(inst.raw_symbol.value)}&interval=1"
             f"&start={day_ms}&end={end_ms}&limit={_BYBIT_PAGE}"
         )
-        payload = http(urllib.request.Request(url, headers={"User-Agent": _USER_AGENT}))  # noqa: S310
+        payload = http(urllib.request.Request(url, headers={"User-Agent": USER_AGENT}))  # noqa: S310
         page = parse_bybit_klines(payload, inst.price_precision, inst.size_precision)
         out += page
         if len(page) < _BYBIT_PAGE or min(k.t_ms for k in page) <= day_ms:
@@ -318,9 +310,9 @@ def _fetch_hyperliquid(
             },
         }
         request = urllib.request.Request(  # noqa: S310
-            _HYPERLIQUID_URLS[environment],
+            HYPERLIQUID_URLS[environment],
             data=json.dumps(body).encode(),
-            headers={"Content-Type": "application/json", "User-Agent": _USER_AGENT},
+            headers={"Content-Type": "application/json", "User-Agent": USER_AGENT},
         )
         page = parse_hyperliquid_candles(http(request), inst.price_precision, inst.size_precision)
         if not page:

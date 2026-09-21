@@ -104,7 +104,7 @@ class BybitCollector(Collector):
             if config.environment == "testnet"
             else BybitEnvironment.MAINNET
         )
-        client = BybitClient(on_data=self._on_data, environment=env)
+        client = BybitClient(on_data=self._on_data, environment=env, trade_feeds=config.trade_feeds)
         super().__init__(config, client, extra_loops=(self._open_interest_loop,))
         self._last_u: dict[str, int] = {}
         self._book_sequence_errors: defaultdict[str, int] = defaultdict(int)

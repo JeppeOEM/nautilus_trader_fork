@@ -11,3 +11,8 @@ stale_book_seconds = 12.0
 # instrument pushed on the same ~5.4 s cadence, feed silence and instrument silence are
 # the same 12 s bound here. The two are still reported separately (which one tripped).
 instruments = ["BTC-USD-PERP.HYPERLIQUID", "ETH-USD-PERP.HYPERLIQUID"]
+# Trade connections per feed group (story 22.14): 1 = trades on the book socket only; 2 = also an
+# independent trades-only socket, unioned through the trade_id dedup, so a one-sided outage loses
+# no trade (the REST backfill after a reconnect is shallow here: see docs/DATA_DICTIONARY.md).
+# The operator flips this to 2 for the 22.14 measurement (docs/DEPLOY_CHECKLIST.md).
+trade_feeds = 1

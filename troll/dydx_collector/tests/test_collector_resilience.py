@@ -35,6 +35,8 @@ import pytest
 import dydx_collector.collector as collector_module
 from dydx_collector.collector import DydxCollector
 from collector_core.collector import quarantine_corrupt_parquet
+from collector_core.feed import MAIN_FEED
+from collector_core.feed import Feed
 from dydx_collector.config import DydxConfig
 from dydx_collector.config import InstrumentEntry
 from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
@@ -74,7 +76,7 @@ def test_on_data_enqueues_without_processing(tmp_path: Path) -> None:
     collector._on_data(sentinel)
 
     assert collector._ingest_queue.qsize() == 1
-    assert collector._ingest_queue.get_nowait() is sentinel
+    assert collector._ingest_queue.get_nowait() == (sentinel, MAIN_FEED)
 
 
 @pytest.mark.asyncio
@@ -84,7 +86,7 @@ async def test_ingest_loop_isolates_bad_message(tmp_path: Path, monkeypatch) -> 
     processed: list[object] = []
     good_message = object()
 
-    def _process(data: object) -> None:
+    def _process(data: object, feed: Feed = MAIN_FEED) -> None:
         if data is good_message:
             processed.append(data)
         else:

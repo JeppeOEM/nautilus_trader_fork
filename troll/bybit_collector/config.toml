@@ -6,3 +6,8 @@ open_interest_poll_seconds = 300
 snapshot_interval_seconds = 1.0
 instruments = ["BTCUSDT-LINEAR.BYBIT", "ETHUSDT-LINEAR.BYBIT",
                "BTCUSDT-SPOT.BYBIT", "ETHUSDT-SPOT.BYBIT"]
+# Trade connections per feed group (story 22.14): 1 = trades on the book socket only; 2 = also an
+# independent trades-only socket, unioned through the trade_id dedup, so a one-sided outage loses
+# no trade (the REST backfill after a reconnect is shallow here: see docs/DATA_DICTIONARY.md).
+# The operator flips this to 2 for the 22.14 measurement (docs/DEPLOY_CHECKLIST.md).
+trade_feeds = 1
