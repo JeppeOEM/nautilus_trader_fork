@@ -303,10 +303,10 @@ def price_series(
     """
     (ts_event, price) pairs in ascending order. Preference: second-snapshot close → mark price.
 
-    Raw TradeTicks are no longer persisted (see troll/docs/DATA_DICTIONARY.md's
-    Retention section) — DydxSecondSnapshot.close_price is the collector's only
-    record of traded price now. Seconds with no trade have close_price=None and
-    are skipped, not treated as a zero-price tick.
+    DydxSecondSnapshot.close_price is the per-second traded price every reader uses (raw
+    TradeTicks are archived again since story 22.13, but only for 7 days after their day is
+    verified -- troll/docs/DATA_DICTIONARY.md §1.1/§5). Seconds with no trade have
+    close_price=None and are skipped, not treated as a zero-price tick.
     """
     results = catalog.query(DydxSecondSnapshot, identifiers=[instrument_id], start=start_ns)
     # query() wraps custom Data subclasses in CustomData -- unwrap via .data (same

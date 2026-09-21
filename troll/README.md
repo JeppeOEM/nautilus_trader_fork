@@ -196,16 +196,28 @@ archived range plans zero windows and issues zero REST calls.
 
 Every collector flushes once a minute, so the shared catalog gains ~1,440 Parquet files per
 (data type, instrument) per day -- for dYdX, Bybit and Hyperliquid alike. Inodes, directory
-listings, reads and backups all scale with the file count, not the bytes (audit D-36). Two make
-targets keep that in check; install them in the host crontab. The times are UTC -- add a
-`CRON_TZ=UTC` line above the entry if the box's clock is not UTC:
+listings, reads and backups all scale with the file count, not the bytes (audit D-36). Since
+story 22.13 the nightly job is **`make nightly VENUE=<DYDX|BYBIT|HYPERLIQUID> [DAY=YYYY-MM-DD]`**
+(default: yesterday, UTC), once per venue, then a standalone `make consolidate` (every closed day,
+every type: it keeps reporting an old refused day the nightly's `--days 2` skips) and
+`make backup-catalog`. The cron line, re-running a missed day, and the first-run measurements
+still owed are in [`docs/DEPLOY_CHECKLIST.md`](docs/DEPLOY_CHECKLIST.md). Run `make consolidate`
+once by hand first to fold the existing history.
 
-```bash
-7 3 * * * cd /path/to/troll && { make consolidate >> consolidate.log 2>&1; make backup-catalog >> backup.log 2>&1; }
+**`make nightly`** (`collector_core.nightly` in the collector image) runs, each as its own
+process: `rebuild_seconds --apply` (the closed day's snapshot trade columns re-derived from the
+raw trade archive on exchange time) -> `consolidate_catalog --apply --venue --days 2` (below) ->
+`build_candles --day --workers 1` -> `compare_klines` (every traded minute against the venue's own
+1 m klines, exact; verdict in `verified_days`) -> `prune_catalog --apply` (raw trades released 7
+days after their day reconciled `pass`). A step's exit 2 is "findings" (per-instrument refusals,
+mismatches or uncomparable instruments, all ledgered): the chain continues; any other failure
+stops it. One summary line per venue:
+
+```text
+nightly <VENUE> <DAY>: rebuild_seconds ok <s>s, consolidate_catalog ok <s>s, build_candles ok <s>s, compare_klines ok|findings <s>s, prune_catalog ok <s>s; peak child RSS <M> MB; outcome ok|findings|FAILED
 ```
 
-`;` rather than `&&` between the two on purpose: a refused day must not skip the backup of
-everything else. Run `make consolidate` once by hand first to fold the existing history.
+Details of each step: `docs/DATA_DICTIONARY.md` §6.
 
 **`make consolidate`** (`collector_core.consolidate_catalog --apply` in the collector image) walks
 every `data/<type>/<instrument>/` leaf and merges each closed UTC day's files into one; today's

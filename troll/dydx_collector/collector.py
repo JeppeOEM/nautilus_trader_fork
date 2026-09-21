@@ -66,6 +66,7 @@ import redis.asyncio as aioredis
 
 from collector_core.collector import Collector
 from collector_core.collector import run_forever
+from collector_core.prune_catalog import prune_instrument
 from dydx_collector import uncross
 from dydx_collector.client import DydxClient
 from dydx_collector.config import DydxConfig
@@ -75,7 +76,6 @@ from dydx_collector.config import save_config
 from dydx_collector.open_interest import _fetch_markets_json
 from dydx_collector.open_interest import classify_liquidity
 from dydx_collector.open_interest import fetch_open_interest
-from dydx_collector.prune_catalog import prune_instrument
 from ml_signals import candle_store
 from ml_signals import error_ledger
 from nautilus_trader.core import nautilus_pyo3

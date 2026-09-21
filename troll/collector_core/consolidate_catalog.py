@@ -16,7 +16,7 @@
 Merge each closed UTC day's many small Parquet files into one file per (data type, instrument).
 
 Usage (nightly, e.g. from cron via `make consolidate`):
-    python -m collector_core.consolidate_catalog --catalog /app/catalog --apply [--days 3] [--data-type custom_dydx_second_snapshot ...]
+    python -m collector_core.consolidate_catalog --catalog /app/catalog --apply [--days 3] [--data-type custom_dydx_second_snapshot ...] [--venue BYBIT]
 
 Every collector (dYdX, Bybit, Hyperliquid) flushes once a minute into the one shared catalog, so
 every instrument grows ~1,440 files per data type per day; reads, backups and inode counts all scale
@@ -39,7 +39,9 @@ delete, so rows are never duplicated or lost. A crash inside the write leaves a
 `*.parquet.consolidate.tmp` (its own suffix: `migrate_open_interest`/`normalize_snapshot_schema`
 write `*.parquet.tmp` in the same leaves), which the next --apply run deletes before touching that
 leaf. One run at a time (an flock on the catalog root); one (type, instrument, day) in memory at a
-time (MEM-01). Report-only unless --apply.
+time (MEM-01). Report-only unless --apply. `--venue V` limits the run to leaves whose instrument
+directory ends in `.V` (the nightly job's per-venue form). The flock is `MAINTENANCE_LOCK_NAME`,
+also taken by `rebuild_seconds` and `prune_catalog`, so no two catalog-rewriting jobs overlap.
 
 `bar` leaves are never consolidated: `backfill_bars` writes one file per contiguous run of venue
 bars and plans its next fetch from the catalog's *file intervals*
@@ -53,11 +55,13 @@ detail is in the error ledger and the log above the summary.
 """
 
 import argparse
+import contextlib
 import fcntl
 import logging
 import os
 import resource
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -75,7 +79,7 @@ logger = logging.getLogger(__name__)
 _DAY_NS = 86_400 * 1_000_000_000
 _MB = 1024 * 1024
 _TMP_SUFFIX = ".consolidate.tmp"
-_LOCK_NAME = ".consolidate.lock"
+MAINTENANCE_LOCK_NAME = ".consolidate.lock"
 # Data types whose file intervals are a coverage record, not just a listing (see module docstring).
 _NEVER_CONSOLIDATED = frozenset({"bar"})
 
@@ -105,8 +109,28 @@ class RunStats:
         )
 
 
-def leaf_dirs(catalog_path: str, data_types: list[str] | None = None) -> list[Path]:
-    """Every data/<type>/<instrument> directory holding parquet files, `bar` leaves excepted."""
+@contextlib.contextmanager
+def maintenance_lock(catalog: Path) -> Iterator[bool]:
+    """
+    Hold the catalog-maintenance flock for the block; yields False (lock not taken) when another
+    maintenance run holds it -- the caller must then refuse to start.
+    """
+    with (catalog / MAINTENANCE_LOCK_NAME).open("a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        yield True
+
+
+def leaf_dirs(
+    catalog_path: str, data_types: list[str] | None = None, venue: str | None = None
+) -> list[Path]:
+    """
+    Every data/<type>/<instrument> directory holding parquet files, `bar` leaves excepted; with
+    `venue`, only instruments whose id ends in `.VENUE`.
+    """
     root = Path(catalog_path) / "data"
     if not root.exists():
         return []
@@ -117,7 +141,9 @@ def leaf_dirs(catalog_path: str, data_types: list[str] | None = None) -> list[Pa
         and t.name not in _NEVER_CONSOLIDATED
         and (not data_types or t.name in data_types)
         for d in t.iterdir()
-        if d.is_dir() and any(d.glob("*.parquet"))
+        if d.is_dir()
+        and (venue is None or d.name.endswith(f".{venue}"))
+        and any(d.glob("*.parquet"))
     )
 
 
@@ -312,6 +338,7 @@ def run(
     max_days: int | None,
     apply: bool,
     now_ns: int,
+    venue: str | None = None,
 ) -> RunStats:
     """
     Consolidate every leaf of the catalog, one at a time; return what was done. A failure is
@@ -320,7 +347,7 @@ def run(
     """
     started = time.monotonic()
     stats = RunStats()
-    for directory in leaf_dirs(catalog_path, data_types):
+    for directory in leaf_dirs(catalog_path, data_types, venue):
         _consolidate_leaf(directory, now_ns, max_days, apply, stats)
     stats.wall_seconds = time.monotonic() - started
     # ru_maxrss is KiB on Linux (the only platform this runs on: the collector image).
@@ -341,6 +368,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--data-type", action="append", help="repeatable directory name under data/; default: all"
     )
+    parser.add_argument("--venue", help="only instruments of this venue, e.g. BYBIT")
     args = parser.parse_args(argv)
     if args.days is not None and args.days < 1:
         parser.error("--days must be at least 1")
@@ -349,13 +377,13 @@ def main(argv: list[str] | None = None) -> int:
     if not catalog.is_dir():
         logger.error("consolidate: catalog %s does not exist (wrong mount?)", catalog)
         return 1
-    with (catalog / _LOCK_NAME).open("a") as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            logger.error("consolidate: another run holds %s; not starting", lock.name)
+    with maintenance_lock(catalog) as locked:
+        if not locked:
+            logger.error(
+                "consolidate: another run holds %s; not starting", catalog / MAINTENANCE_LOCK_NAME
+            )
             return 1
-        stats = run(args.catalog, args.data_type, args.days, args.apply, time.time_ns())
+        stats = run(args.catalog, args.data_type, args.days, args.apply, time.time_ns(), args.venue)
     logger.info("consolidate: %s", stats.summary(args.apply))
     if stats.days_refused or stats.leaves_failed:
         logger.error(

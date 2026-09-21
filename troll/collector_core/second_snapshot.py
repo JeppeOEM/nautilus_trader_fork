@@ -26,11 +26,14 @@ stored here.
   obi_N       = MultiLevelOBI(levels=N).update_raw(bid_sizes, ask_sizes)
 
 `open_price`/`high_price`/`low_price`/`close_price` are the OHLC of actual
-executed trade prices within this second (None if no trade occurred) —
-this is the collector's *only* record of traded price; raw `TradeTick`s are
-no longer persisted to the catalog (see collector.py's `_process_data`).
-Candles at any resolution >= 1s are built by aggregating these fields
-(ml_signals/candles.py), not by replaying individual trades.
+executed trade prices within this second (None if no trade occurred), and the
+volumes/counts the per-side totals -- all produced by the one exact fold,
+`collector_core.fold.fold_trades`. Live, a second holds the trades that *arrived*
+since the previous sample; the raw `TradeTick`s are archived too (`data/trade_tick/`,
+story 22.13) and `collector_core.rebuild_seconds` rewrites a closed day's trade
+columns from them on exchange time (`ts_event`), leaving book columns and timestamps
+untouched. Candles at any resolution >= 1s are built by aggregating these fields
+(`ml_signals/candle_store.py`), not by replaying individual trades.
 """
 
 import pyarrow as pa

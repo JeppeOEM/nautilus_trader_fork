@@ -114,14 +114,18 @@ unbounded-queue-growth bug under sustained load that OOM-crashed an earlier
 - **Operator-run catalog tools** (`python -m collector_core.<tool>`, never automatic):
   `build_candles` (rebuild a candle store from raw 1s), `consolidate_catalog`
   (`make consolidate`, nightly, every venue; `make backup-catalog` syncs the result off-box),
-  `repair_catalog` (clear impossible trade OHLC),
-  `migrate_open_interest` (one-shot layout migration).
+  `repair_catalog` (clear impossible trade OHLC; never on a day `rebuild_seconds` rebuilt),
+  `migrate_open_interest` (one-shot layout migration). Story 22.13: `fold` (the one exact
+  trades -> second fold, live and rebuild), `rebuild_seconds` (a closed day's trade columns from
+  the raw `trade_tick` archive, on `ts_event`), `compare_klines` (1 m bars vs the venue's klines,
+  exact, into `verified_days`), `prune_catalog` (age retention + verification-gated trade
+  retention; `make prune`) and `nightly` (`make nightly VENUE=...`: rebuild -> consolidate ->
+  build_candles -> compare -> prune).
 - **`{dydx,bybit,hyperliquid}_collector/`** — per-venue `Collector` subclass, `client.py`
   (thin wrapper around that venue's Rust clients) and `config.py`. dYdX-only:
   `client.py`'s `_at_fixed_precision()` re-stamps mark/index prices to a single precision
   (dYdX's feed derives precision from each tick's own trailing-zero count, which corrupts
-  catalog writes if left alone), `uncross.py` resolves crossed books (DATA-04), and
-  `prune_catalog.py` deletes `order_book_deltas` older than N days (`make prune`).
+  catalog writes if left alone) and `uncross.py` resolves crossed books (DATA-04).
 - **`dydx_collector/open_interest.py`** — `classify_liquidity()` + the dYdX REST poll (the
   shared `OpenInterest(Data)` type lives in `collector_core/open_interest.py`); open
   interest is the one field the Rust bindings drop, so it's polled separately via

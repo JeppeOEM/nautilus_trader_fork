@@ -41,7 +41,10 @@ from collector_core.second_snapshot import DydxSecondSnapshot
 from nautilus_trader.model.data import Bar
 from nautilus_trader.model.data import BarType
 from nautilus_trader.model.data import MarkPriceUpdate
+from nautilus_trader.model.data import TradeTick
+from nautilus_trader.model.enums import AggressorSide
 from nautilus_trader.model.identifiers import InstrumentId
+from nautilus_trader.model.identifiers import TradeId
 from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
@@ -549,3 +552,48 @@ def test_a_second_concurrent_run_refuses_to_start(tmp_path: Path) -> None:
 
 def test_a_missing_catalog_exits_1(tmp_path: Path) -> None:
     assert main(["--catalog", str(tmp_path / "nope"), "--apply"]) == 1
+
+
+# -- story 22.13: the raw trade archive and per-venue runs -----------------------------------------
+
+
+def _trade(n: int, ts: int, iid: str = IID) -> TradeTick:
+    return TradeTick(
+        InstrumentId.from_str(iid),
+        Price.from_str("100.5"),
+        Quantity.from_str(f"0.{n % 9 + 1:03d}"),
+        AggressorSide.BUYER if n % 2 else AggressorSide.SELLER,
+        TradeId(str(n)),
+        ts - 3_000_000,  # the venue's clock trails our receive clock
+        ts,
+    )
+
+
+def test_a_trade_tick_leaf_is_consolidated_with_both_clocks_intact(tmp_path: Path) -> None:
+    catalog = ParquetDataCatalog(str(tmp_path))
+    written = []
+    for minute in range(12):  # one file per flush, as the collector writes them
+        batch = [
+            _trade(minute * 10 + k, _DAY0 * _DAY_NS + (minute * 60 + k) * _SEC) for k in range(5)
+        ]
+        catalog.write_data(batch)
+        written += batch
+    (directory,) = leaf_dirs(str(tmp_path), ["trade_tick"])
+    assert directory.parent.name == "trade_tick"
+
+    assert consolidate_directory(directory, (_DAY0 + 1) * _DAY_NS + _SEC, None, apply=True) == 1
+
+    assert len(list(directory.glob("*.parquet"))) == 1
+    read = catalog.trade_ticks(instrument_ids=[IID])
+    key = [(t.trade_id, t.ts_event, t.ts_init, t.price, t.size, t.aggressor_side) for t in written]
+    assert [
+        (t.trade_id, t.ts_event, t.ts_init, t.price, t.size, t.aggressor_side) for t in read
+    ] == key
+
+
+def test_venue_limits_the_leaves(tmp_path: Path) -> None:
+    catalog = ParquetDataCatalog(str(tmp_path))
+    catalog.write_data([_trade(1, _DAY0 * _DAY_NS + _SEC)])
+    catalog.write_data([_trade(2, _DAY0 * _DAY_NS + _SEC, "BTCUSDT-LINEAR.BYBIT")])
+    assert [d.name for d in leaf_dirs(str(tmp_path), venue="BYBIT")] == ["BTCUSDT-LINEAR.BYBIT"]
+    assert [d.name for d in leaf_dirs(str(tmp_path), venue="DYDX")] == [IID]
