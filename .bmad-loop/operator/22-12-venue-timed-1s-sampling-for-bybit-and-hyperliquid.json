@@ -1,0 +1,13 @@
+{
+  "actions": [
+    "On nifelheim, deploy this branch and rebuild the two venue collectors (`docker compose up -d --build bybit_collector hyperliquid_collector`). Their config.toml files are bind-mounted from the repo, so `book_time_source = \"venue\"` and `hold_back_seconds` take effect with the deploy.",
+    "On the VPS, run `python3 -m collector_core.measure_lag --venue bybit --seconds 10800` and `--venue hyperliquid --seconds 10800` in the collector image (`--network host`). Record each venue's per-kind distributions in troll/docs/DATA_INTEGRITY_AUDIT.md D-60.",
+    "Set `hold_back_seconds` in troll/bybit_collector/config.toml and troll/hyperliquid_collector/config.toml to each venue's VPS TradeTick p99.9 rounded up to 0.5 s (or 0.0, with the reason written in the comment). Replace the provisional dev-box comment, then redeploy.",
+    "After one full UTC day per venue has been rebuilt by `make nightly VENUE=BYBIT` / `VENUE=HYPERLIQUID`, record each venue's compare_klines pass rate (instruments and minutes) in DATA_INTEGRITY_AUDIT.md D-60/D-51. Root-cause every remaining mismatch (a missing trade is a 22.14 gap; a book-related one is a new finding). Never add a tolerance.",
+    "For the first day after deploy, watch the `collector.late_trade`, `collector.pending_deltas` and `collector.book_sequence` counts in /api/errors for Bybit and Hyperliquid. A steady late-trade rate means the hold-back is too short; any pending_deltas or book_sequence entry is a DATA-02 finding to root-cause in D-60."
+  ],
+  "parked_at": "2026-09-21",
+  "run_id": "20260921-060624-d4b2",
+  "spec_file": "_bmad-output/implementation-artifacts/spec-22-12-venue-timed-1s-sampling-for-bybit-and-hyperliquid.md",
+  "story_key": "22-12-venue-timed-1s-sampling-for-bybit-and-hyperliquid"
+}

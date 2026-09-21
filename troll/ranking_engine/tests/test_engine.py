@@ -1106,3 +1106,18 @@ def test_bybit_fetch_requests_the_category_tickers(monkeypatch) -> None:
     engine._fetch_bybit_tickers_json("testnet", "spot")
 
     assert requests[0].full_url == "https://api-testnet.bybit.com/v5/market/tickers?category=spot"
+
+
+def test_freshness_is_stamped_on_receipt_not_on_the_snapshots_exchange_time() -> None:
+    """Story 22.12: a venue-timed row reaches Redis `1 + hold_back_seconds` after its
+    `ts_event`; freshness must not age it by that lag. Here `ts_event` is even older than the
+    whole stale bound, so only receipt-time stamping keeps the instrument fresh.
+    """
+    _reset_state()
+    iid = "BTC-USD-PERP.HYPERLIQUID"
+    now_ns = time.time_ns()
+    old_event_ns = now_ns - engine._WATCHLIST_STALE_NS - 5_000_000_000
+
+    engine._ingest_snapshot_batch([_snap(iid, 99.0, 101.0, ts_event=old_event_ns)])
+
+    assert engine._is_fresh(iid, time.time_ns())

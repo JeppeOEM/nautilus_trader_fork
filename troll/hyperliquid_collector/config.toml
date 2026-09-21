@@ -11,6 +11,14 @@ stale_book_seconds = 12.0
 # instrument pushed on the same ~5.4 s cadence, feed silence and instrument silence are
 # the same 12 s bound here. The two are still reported separately (which one tripped).
 instruments = ["BTC-USD-PERP.HYPERLIQUID", "ETH-USD-PERP.HYPERLIQUID"]
+# Story 22.12: a live row is exchange second S, closed at wall S + 1 + hold_back_seconds from the
+# book/trades stamped inside it (DATA_DICTIONARY.md §1.7). hold_back_seconds = trade p99.9 lag
+# (`python -m collector_core.measure_lag --venue hyperliquid`) rounded up to 0.5 s. Local dev-box
+# run 2026-09-21, 600 s, BTC + ETH: TradeTick n=9,596 p50 382.6 ms, p99 823.2 ms, p99.9 2307.6 ms,
+# max 2403.2 ms (l2Book p99.9 2307.6 ms). PROVISIONAL: the >= 3 h run on the VPS that hosts this
+# collector is owed (audit D-63); set the value from that run.
+book_time_source = "venue"
+hold_back_seconds = 2.5
 # Trade connections per feed group (story 22.14): 1 = trades on the book socket only; 2 = also an
 # independent trades-only socket, unioned through the trade_id dedup, so a one-sided outage loses
 # no trade (the REST backfill after a reconnect is shallow here: see docs/DATA_DICTIONARY.md).

@@ -291,7 +291,7 @@ development_status:
   22-11-nightly-catalog-consolidation-for-every-venue: awaiting-operator
   22-13-raw-trade-archive-exact-fold-nightly-rebuild-and-kline-reconciliation: awaiting-operator
   22-14-trade-gap-closure-rest-backfill-after-reconnect-and-dual-feed-arbitration: awaiting-operator
-  22-12-venue-timed-1s-sampling-for-bybit-and-hyperliquid: ready-for-dev
+  22-12-venue-timed-1s-sampling-for-bybit-and-hyperliquid: awaiting-operator
   epic-22-retrospective: optional
 
 action_items:

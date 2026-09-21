@@ -37,8 +37,14 @@ PyO3 bindings don't expose the fields another way.
   one, which would lose the next flush's whole batch. The shutdown flush writes everything.
 - **Live use:** each accepted trade is also kept for the current sample and folded once by
   `collector_core.fold.fold_trades` (exact: `Quantity.raw` sums, `Price.raw` comparisons)
-  into that second's `DydxSecondSnapshot` (§1.7). Live is provisional and arrival-timed;
+  into that second's `DydxSecondSnapshot` (§1.7). Live is provisional -- arrival-timed on
+  dYdX, exchange-timed on Bybit/Hyperliquid (story 22.12, §1.7) -- and
   `collector_core.rebuild_seconds` re-derives closed days from this archive (§6).
+- **Late trades (venue mode):** a trade processed after its exchange second closed is still
+  archived here, counted (`collector.late_trade` in the error ledger, once per instrument per
+  flush) and left out of every live row; the rebuild places it in its own second. A trade
+  stamped more than `hold_back_seconds + 5 s` after its arrival is handled the same way
+  (`collector.venue_clock_ahead`).
 - **Footprint:** expected ~1 MB/venue/day on dYdX (ETH ~2.9k, BTC ~1.4k trades/day);
   Bybit/Hyperliquid majors are far busier (the 200 s run archived ~7.2k BTCUSDT-LINEAR and
   ~1.4k Hyperliquid BTC trades). **Not measured** per venue-day yet (operator action, see
@@ -206,13 +212,36 @@ signals on read (SIGNAL-01).
     price source (falling back to `MarkPriceUpdate` only when no snapshot ever
     recorded a trade for that instrument).
   - `ts_event`, `ts_init`
+- **Clocks per venue** (`CoreConfig.book_time_source`, story 22.12):
+
+  | | dYdX (`"arrival"`) | Bybit, Hyperliquid (`"venue"`) |
+  |---|---|---|
+  | Book columns | the book as **received** by the sample (dYdX deltas carry no venue time, `OrderBookDelta.ts_event = ts_init`, audit D-49) | the book as **the exchange stamped it**: every delta with `ts_event < S+1`, applied in `ts_event` order |
+  | Trade columns, live | trades that **arrived** since the previous row | trades with `ts_event` in `[S, S+1)` that arrived before the row closed |
+  | Trade columns, after the nightly rebuild | exchange-timed: `[S, S+1)` by `ts_event` | same |
+  | `ts_event` | the sample time (mid-second) | `S + 0.5 s` |
+  | `ts_init` | the sample time (`== ts_event`) | when the row was sampled, `>= S + 1 + hold_back_seconds` |
+
+  Either way the row's floor second is its second (the rebuild, the candle store and the chart
+  gap logic rely on that), and `ts_init` is when the row could first be known -- backtests
+  replay on it. A Bybit/Hyperliquid row therefore reaches Redis and Parquet
+  `1 + hold_back_seconds` after its second began; freshness readers stamp arrival
+  (`ranking_engine._LAST_SEEN`), so that lag never reads as a stale feed. `hold_back_seconds`
+  is set per venue from `python -m collector_core.measure_lag` (the per-kind distribution of
+  `ts_init - ts_event`); it only makes fewer trades late, the rebuild is what makes a second
+  correct (audit D-50).
 - **Built by:** `collector_core/collector.py`'s `Collector._second_loop`, every
   `snapshot_interval_seconds` (config default 1.0s, overrideable in `config.toml`), on a
   drift-free wall-clock schedule at mid-interval (`_next_sample_at`): exactly one row per
-  floor second, which the rebuild's trade-to-row mapping relies on.
+  floor second, which the rebuild's trade-to-row mapping relies on. Venue mode
+  (`_venue_second_loop`) instead closes each exchange second at wall
+  `S + 1 + hold_back_seconds`; after a stall it closes every overdue second (at most 60) in
+  order, each from the book as of its own end.
 - **Guards before emission:** skips crossed books (the venue's `_handle_crossed_book` —
   on dYdX it also drives a forced resubscribe/resync after a persistent cross), and skips
-  stale books with no `OrderBookDeltas` for `config.stale_book_seconds` (5s) — both are
+  stale books with no `OrderBookDeltas` for `config.stale_book_seconds` (5s; in venue mode
+  measured from the last applied delta's `ts_event` to the end of the second, the feed-dead
+  test staying on arrival) — both are
   `troll/CLAUDE.md` DATA-01 "flag the gap, never fabricate" implementations.
 - **Scope:** pinned + liquid instruments only. Illiquid instruments get no snapshots.
 - **Dual delivery:** written to the catalog via the normal buffer/flush path
