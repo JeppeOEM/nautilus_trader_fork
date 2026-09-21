@@ -44,6 +44,11 @@ class CoreConfig:
     # REST book cross-check cadence per instrument (story 22.5); 0 disables. Only runs for a
     # client exposing `fetch_book_levels`.
     book_crosscheck_seconds: float = 300.0
+    # WebSocket connections carrying trades per feed group (story 22.14): 1 = the primary socket
+    # only; 2 = plus an independent trades-only socket, unioned through the trade_id dedup (first
+    # copy archived, the other counted `duplicate_feed`) so a one-sided outage loses nothing.
+    # Only the Bybit and Hyperliquid clients open a second socket; dYdX's loader keeps 1.
+    trade_feeds: int = 1
     instruments: tuple[str, ...] = ()
 
 
@@ -56,6 +61,13 @@ _POSITIVE_KEYS = (
     "stale_trade_seconds",
     "seen_trade_ids",
 )
+
+
+def _trade_feeds(value: Any) -> int:
+    # Strict: `int()` would turn a TOML `2.5` into 2 and `true` into 1, both then passing.
+    if type(value) is not int:
+        raise ValueError(f"trade_feeds must be the integer 1 or 2, got {value!r}")
+    return value
 
 
 def core_config_from_dict(
@@ -83,6 +95,7 @@ def core_config_from_dict(
             float(raw["feed_stale_seconds"]) if "feed_stale_seconds" in raw else None
         ),
         book_crosscheck_seconds=float(raw.get("book_crosscheck_seconds", 300.0)),
+        trade_feeds=_trade_feeds(raw.get("trade_feeds", 1)),
         instruments=tuple(dict.fromkeys(raw.get("instruments", []))),  # deduped, order kept
     )
     for name in _POSITIVE_KEYS:
@@ -91,7 +104,11 @@ def core_config_from_dict(
     if config.feed_stale_seconds is not None and config.feed_stale_seconds <= 0:
         raise ValueError(f"feed_stale_seconds must be > 0, got {config.feed_stale_seconds}")
     if config.book_crosscheck_seconds < 0:
-        raise ValueError(f"book_crosscheck_seconds must be >= 0, got {config.book_crosscheck_seconds}")
+        raise ValueError(
+            f"book_crosscheck_seconds must be >= 0, got {config.book_crosscheck_seconds}"
+        )
+    if config.trade_feeds not in (1, 2):
+        raise ValueError(f"trade_feeds must be 1 or 2, got {config.trade_feeds}")
     return config
 
 

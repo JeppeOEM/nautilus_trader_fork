@@ -15,6 +15,8 @@
 """Watchdog debounce state machine: alert once on stale, remind periodically, notify on recovery."""
 
 from collector_core.collector import _WATCHDOG_REMINDER_NS
+from collector_core.collector import AlertTexts
+from collector_core.collector import _alert_transition
 from collector_core.collector import _watchdog_transition
 
 
@@ -69,3 +71,23 @@ def test_recovery_clears_state_and_notifies() -> None:
     assert message is not None
     assert down_since_ns is None
     assert last_reminder_ns == 0
+
+
+def test_generic_transition_formats_the_callers_texts() -> None:
+    texts = AlertTexts(
+        down="down", still="still {down_for_s:.0f}s", recovered="back {down_for_s:.0f}s"
+    )
+    assert _alert_transition(_T0, True, None, 0, texts) == ("down", _T0, _T0)
+    now_ns = _T0 + _WATCHDOG_REMINDER_NS + 1_000_000_000
+    assert _alert_transition(now_ns, True, _T0, _T0, texts)[0] == "still 601s"
+    assert _alert_transition(now_ns, False, _T0, _T0, texts) == ("back 601s", None, 0)
+
+
+def test_book_watchdog_messages_are_unchanged_by_the_refactor() -> None:
+    down, _, _ = _watchdog_transition(_T0, True, None, 0, "BybitClient")
+    assert down == (
+        "BybitClient: all live instruments' order books have gone stale "
+        "(no OrderBookDeltas for 30s+) — feed may be down"
+    )
+    recovered, _, _ = _watchdog_transition(_T0 + 5_000_000_000, False, _T0, _T0, "BybitClient")
+    assert recovered == "BybitClient: recovered after 5s"

@@ -22,6 +22,7 @@ import math
 import os
 import random
 import time
+from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
@@ -30,18 +31,28 @@ from ml_signals import error_ledger
 from ml_signals.catalog_stats import _stamp_to_ns
 from ml_signals.catalog_stats import query_second_snapshots
 
+from collector_core import trade_backfill
 from collector_core.archive_gaps import ARRIVAL_MARGIN_NS
 from collector_core.archive_gaps import load_gaps
+from collector_core.collector import _BACKFILL_SETTLE_NS
 from collector_core.collector import _IMPOSSIBLE_LOG_EVERY_NS
+from collector_core.collector import _WATCHDOG_REMINDER_NS
+from collector_core.collector import _WATCHDOG_STARTUP_GRACE_NS
 from collector_core.collector import Collector
+from collector_core.collector import _BackfillReport
 from collector_core.collector import _next_sample_at
 from collector_core.collector import quarantine_corrupt_parquet
 from collector_core.config import CoreConfig
+from collector_core.feed import MAIN_FEED
+from collector_core.feed import Feed
 from collector_core.rebuild_seconds import rebuild_day
 from collector_core.second_snapshot import DydxSecondSnapshot
 from nautilus_trader.backtest.node import BacktestNode
 from nautilus_trader.config import BacktestDataConfig
+from nautilus_trader.model.currencies import BTC
+from nautilus_trader.model.currencies import USDT
 from nautilus_trader.model.data import BookOrder
+from nautilus_trader.model.data import MarkPriceUpdate
 from nautilus_trader.model.data import OrderBookDelta
 from nautilus_trader.model.data import OrderBookDeltas
 from nautilus_trader.model.data import TradeTick
@@ -49,7 +60,9 @@ from nautilus_trader.model.enums import AggressorSide
 from nautilus_trader.model.enums import BookAction
 from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.identifiers import InstrumentId
+from nautilus_trader.model.identifiers import Symbol
 from nautilus_trader.model.identifiers import TradeId
+from nautilus_trader.model.instruments import CryptoPerpetual
 from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
 from nautilus_trader.test_kit.providers import TestInstrumentProvider
@@ -105,9 +118,12 @@ def _adds(bids: list[tuple[float, float]], asks: list[tuple[float, float]]) -> O
 
 
 def _deltas(
-    bids: list[tuple[float, float]], asks: list[tuple[float, float]], iid: str = _BYBIT
+    bids: list[tuple[float, float]],
+    asks: list[tuple[float, float]],
+    iid: str = _BYBIT,
+    ts: int | None = None,
 ) -> OrderBookDeltas:
-    ts = time.time_ns()
+    ts = time.time_ns() if ts is None else ts
     inst = InstrumentId.from_str(iid)
     deltas = [OrderBookDelta.clear(inst, 0, ts, ts)]
     for side, levels in ((OrderSide.BUY, bids), (OrderSide.SELL, asks)):
@@ -618,3 +634,616 @@ def test_a_non_one_second_cadence_is_ledgered_once_at_start(tmp_path: Path) -> N
     error_ledger.reset()
     _day_collector(tmp_path, interval=0.5)
     assert error_ledger.counts() == {"collector.cadence": 1}
+
+
+# -- story 22.14: reconnect detection, REST backfill, dual-feed arbitration -------------------------
+
+_LINEAR = Feed("linear", "linear")
+_LINEAR_TRADES = Feed("linear-trades", "linear", trades_only=True)
+_SPOT_ID = "BTCUSDT-SPOT.BYBIT"
+
+
+class _FeedStateClient(_ResyncClient):
+    """A client with `feed_states()` (Bybit/Hyperliquid shape); the test flips the states."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.states: dict[Feed, bool] = {_LINEAR: True}
+
+    def feed_states(self) -> dict[Feed, bool]:
+        return dict(self.states)
+
+
+def _perp(iid: str) -> CryptoPerpetual:
+    return CryptoPerpetual(
+        instrument_id=InstrumentId.from_str(iid),
+        raw_symbol=Symbol("BTCUSDT"),
+        base_currency=BTC,
+        quote_currency=USDT,
+        settlement_currency=USDT,
+        is_inverse=False,
+        price_precision=1,
+        price_increment=Price.from_str("0.1"),
+        size_precision=3,
+        size_increment=Quantity.from_str("0.001"),
+        ts_event=0,
+        ts_init=0,
+    )
+
+
+def _two_instrument_collector(tmp_path: Path, client: object | None = None) -> Collector:
+    os.environ["CANDLES_DB_PATH"] = str(tmp_path / "candles.db")
+    cfg = CoreConfig(
+        environment="mainnet", catalog_path=str(tmp_path), instruments=(_BYBIT, _SPOT_ID)
+    )
+    c = Collector(cfg, client if client is not None else _FeedStateClient())
+    c._instruments = {iid: _perp(iid) for iid in (_BYBIT, _SPOT_ID)}
+    return c
+
+
+class _FakeFetch:
+    """Stands in for `trade_backfill.fetch_trades` (network) and records its calls."""
+
+    def __init__(self, results: Mapping[str, object]) -> None:
+        self.results = results
+        self.calls: list[tuple[str, int, int, str]] = []
+
+    def __call__(
+        self, inst: CryptoPerpetual, since: int, floor: int, env: str, ts_init: int
+    ) -> trade_backfill.Fetched:
+        self.calls.append((inst.id.value, since, floor, env))
+        result = self.results[inst.id.value]
+        if isinstance(result, BaseException):
+            raise result
+        assert isinstance(result, trade_backfill.Fetched)
+        return result
+
+
+def _fetched(
+    trades: list[TradeTick], reached: bool = True, oldest: int | None = None
+) -> trade_backfill.Fetched:
+    if oldest is None and trades:
+        oldest = trades[0].ts_event
+    return trade_backfill.Fetched(trades, reached, oldest)
+
+
+def _run_backfills(c: Collector, now_ns: int) -> None:
+    asyncio.run(c._run_due_backfills(now_ns))
+
+
+def _run_now(c: Collector, feed_name: str) -> None:
+    """Run one backfill for `feed_name` from its current baselines (a detection just now)."""
+    c._schedule_backfill(feed_name, 0, "test")
+    asyncio.run(c._run_backfill(feed_name, c._backfill_requests.pop(feed_name)))
+
+
+def _seed_trade(c: Collector, n: int, feed: Feed = _LINEAR, iid: str = _BYBIT) -> TradeTick:
+    """Feed a live trade on `feed`: the instrument gets its backfill baseline and feed membership."""
+    trade = _trade(100.0, 0.5, AggressorSide.BUYER, n, iid=iid)
+    c._process_data(trade, feed)
+    return trade
+
+
+def test_on_data_tags_the_queue_with_the_feed(tmp_path: Path) -> None:
+    c = _collector(tmp_path)
+    sentinel = object()
+    c._on_data(sentinel, _LINEAR)
+    c._on_data(sentinel)
+    assert c._ingest_queue.get_nowait() == (sentinel, _LINEAR)
+    assert c._ingest_queue.get_nowait() == (sentinel, MAIN_FEED)
+
+
+def test_flip_inactive_then_active_schedules_one_backfill_after_the_settle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    error_ledger.reset()
+    c = _two_instrument_collector(tmp_path)
+    live = _seed_trade(c, 1)
+    fetch = _FakeFetch({_BYBIT: _fetched([])})
+    monkeypatch.setattr(trade_backfill, "fetch_trades", fetch)
+    now = time.time_ns()
+    c._poll_feed_states(now)  # baseline only
+    assert c._backfill_requests == {}
+    c._client.states[_LINEAR] = False
+    c._poll_feed_states(now + 1)
+    c._client.states[_LINEAR] = True
+    c._poll_feed_states(now + 2)
+    assert c._backfill_requests["linear"].reasons == ["feed reconnected (inactive -> active)"]
+    _run_backfills(c, now + _BACKFILL_SETTLE_NS)  # not yet due
+    assert fetch.calls == []
+    _run_backfills(c, now + 2 + _BACKFILL_SETTLE_NS)
+    ((iid, since, floor, env),) = fetch.calls
+    assert (iid, since, env) == (_BYBIT, live.ts_event - 5 * _S, "mainnet")
+    assert now - ARRIVAL_MARGIN_NS <= floor <= time.time_ns() - ARRIVAL_MARGIN_NS
+    assert error_ledger.counts() == {"collector.trade_backfill": 1}
+    assert c._backfill_requests == {}
+
+
+def test_first_feed_state_observation_is_only_a_baseline(tmp_path: Path) -> None:
+    c = _two_instrument_collector(tmp_path)
+    c._client.states[_LINEAR] = True
+    c._poll_feed_states(time.time_ns())
+    c._poll_feed_states(time.time_ns())
+    assert c._backfill_requests == {}
+    assert _LINEAR in c._feeds
+
+
+def test_feed_states_failure_is_ledgered_at_most_once_a_minute(tmp_path: Path) -> None:
+    error_ledger.reset()
+
+    class _Broken(_ResyncClient):
+        def feed_states(self) -> dict[Feed, bool]:
+            raise RuntimeError("socket gone")
+
+    c = _two_instrument_collector(tmp_path, _Broken())
+    now = time.time_ns()
+    for offset in (0, _S // 10, 59 * _S, 61 * _S):
+        c._poll_feed_states(now + offset)
+    assert error_ledger.counts() == {"collector.feed_state": 2}
+
+
+def test_book_feed_silence_then_a_message_schedules_a_backfill(tmp_path: Path) -> None:
+    c = _collector(tmp_path)  # feed_stale_seconds unset: stale_book_seconds (5 s)
+    c._process_data(_deltas([(100.0, 1.0)], [(100.5, 1.0)]), _LINEAR)
+    c._feed_last_ns["linear"] = time.time_ns() - 7 * _S
+    c._process_data(_deltas([(100.0, 1.0)], [(100.5, 1.0)]), _LINEAR)
+    (reason,) = c._backfill_requests["linear"].reasons
+    assert reason.startswith("feed silent 7.0")
+
+
+def test_a_silent_trades_only_feed_schedules_nothing_and_never_feeds_the_book_gate(
+    tmp_path: Path,
+) -> None:
+    c = _collector(tmp_path)
+    c._feed_last_ns["linear-trades"] = time.time_ns() - 60 * _S
+    c._last_feed_message_ns = 123
+    _seed_trade(c, 1, _LINEAR_TRADES)
+    assert c._backfill_requests == {}
+    assert c._last_feed_message_ns == 123  # a live trades socket says nothing about the book
+    assert c._feed_last_ns["linear-trades"] > 123
+
+
+def test_replayed_trade_id_after_the_grace_is_a_duplicate_and_schedules_a_backfill(
+    tmp_path: Path,
+) -> None:
+    c = _collector(tmp_path)
+    c._watchdog_started_ns -= _WATCHDOG_STARTUP_GRACE_NS
+    trade = _seed_trade(c, 7)
+    c._process_data(trade, _LINEAR)
+    assert dict(c._duplicate_trades_dropped) == {_BYBIT: 1}
+    assert c._backfill_requests["linear"].reasons == ["replayed trade ids"]
+
+
+def test_a_replay_inside_the_startup_grace_schedules_nothing(tmp_path: Path) -> None:
+    c = _collector(tmp_path)
+    trade = _seed_trade(c, 7)
+    c._process_data(trade, _LINEAR)
+    assert dict(c._duplicate_trades_dropped) == {_BYBIT: 1}
+    assert c._backfill_requests == {}
+
+
+def test_detections_within_the_settle_coalesce_into_one_backfill_and_one_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    error_ledger.reset()
+    c = _two_instrument_collector(tmp_path)
+    _seed_trade(c, 1)
+    monkeypatch.setattr(trade_backfill, "fetch_trades", _FakeFetch({_BYBIT: _fetched([])}))
+    now = time.time_ns()
+    c._poll_feed_states(now)
+    c._client.states[_LINEAR] = False
+    c._poll_feed_states(now)
+    c._client.states[_LINEAR] = True
+    c._poll_feed_states(now)
+    c._schedule_backfill("linear", now + _S, "feed silent 7.0s")
+    assert c._backfill_requests["linear"].due_ns == now + _BACKFILL_SETTLE_NS  # first one's
+    _run_backfills(c, now + _BACKFILL_SETTLE_NS)
+    assert error_ledger.counts() == {"collector.trade_backfill": 1}
+    detail = error_ledger.last_details()["collector.trade_backfill"]
+    assert "feed reconnected (inactive -> active); feed silent 7.0s" in detail
+
+
+def _backfill(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, results: Mapping[str, object]
+) -> tuple[Collector, str]:
+    """Seed both instruments on `linear`, run one backfill with `results`; (collector, ledger)."""
+    error_ledger.reset()
+    c = _two_instrument_collector(tmp_path)
+    _seed_trade(c, 1)
+    _seed_trade(c, 2, iid=_SPOT_ID)
+    monkeypatch.setattr(trade_backfill, "fetch_trades", _FakeFetch(results))
+    _run_now(c, "linear")
+    return c, error_ledger.last_details()["collector.trade_backfill"]
+
+
+def _rest(n: int, ts_event: int, iid: str = _BYBIT) -> TradeTick:
+    return _clocked_trade(n, ts_event, 0, iid)
+
+
+def test_instrument_without_an_archived_trade_is_counted_no_baseline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    error_ledger.reset()
+    c = _two_instrument_collector(tmp_path)
+    _seed_trade(c, 1)
+    c._feed_instruments["linear"].add(_SPOT_ID)  # seen on the feed (book), never a trade
+    fetch = _FakeFetch({_BYBIT: _fetched([])})
+    monkeypatch.setattr(trade_backfill, "fetch_trades", fetch)
+    _run_now(c, "linear")
+    assert [call[0] for call in fetch.calls] == [_BYBIT]
+    assert "no baseline 1" in error_ledger.last_details()["collector.trade_backfill"]
+
+
+def test_a_rest_trade_already_archived_is_counted_not_buffered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = time.time_ns()
+    results = {_BYBIT: _fetched([_rest(1, now)]), _SPOT_ID: _fetched([])}
+    c, detail = _backfill(tmp_path, monkeypatch, results)
+    assert [t.trade_id.value for t in c._buffer[(TradeTick, _BYBIT)]] == ["1"]  # the live copy
+    assert "backfilled 0, already archived 1" in detail
+
+
+def test_a_new_rest_trade_is_archived_with_venue_ts_event_and_our_ts_init_but_never_folded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    before = time.time_ns()
+    missed = _rest(99, before - 2 * _S)
+    results = {_BYBIT: _fetched([missed]), _SPOT_ID: _fetched([])}
+    c, detail = _backfill(tmp_path, monkeypatch, results)
+    live, archived = c._buffer[(TradeTick, _BYBIT)]
+    assert (archived.trade_id, archived.ts_event, archived.price) == (
+        missed.trade_id,
+        missed.ts_event,
+        missed.price,
+    )
+    assert archived.ts_init >= before  # the time it was archived, not the venue's
+    assert [t.trade_id.value for t in c._second_trades[_BYBIT]] == [live.trade_id.value]
+    assert dict(c._trade_backfill_counts) == {_BYBIT: 1}
+    assert c._last_trade_ts[_BYBIT] == max(live.ts_event, missed.ts_event)
+    assert c._trade_feeds_seen[_BYBIT]["99"] == ["rest"]
+    assert "backfilled 1" in detail
+
+
+def test_an_unseen_rest_trade_older_than_the_arrival_margin_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old = _rest(99, time.time_ns() - ARRIVAL_MARGIN_NS - _S)
+    results = {_BYBIT: _fetched([old]), _SPOT_ID: _fetched([])}
+    c, detail = _backfill(tmp_path, monkeypatch, results)
+    assert len(c._buffer[(TradeTick, _BYBIT)]) == 1  # only the live seed
+    assert "refused 1 (older than the 300 s arrival margin)" in detail
+    assert "99" not in c._trade_feeds_seen[_BYBIT]
+
+
+def test_a_shallow_venue_reports_the_uncovered_seconds_as_unrecoverable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    error_ledger.reset()
+    c = _two_instrument_collector(tmp_path)
+    seed = _seed_trade(c, 1)
+    oldest = seed.ts_event + 12 * _S
+    fetch = _FakeFetch({_BYBIT: _fetched([_rest(5, oldest)], reached=False, oldest=oldest)})
+    monkeypatch.setattr(trade_backfill, "fetch_trades", fetch)
+    _run_now(c, "linear")
+    detail = error_ledger.last_details()["collector.trade_backfill"]
+    assert f"unrecoverable seconds {{'{_BYBIT}': 12.0}}" in detail
+
+
+def test_a_fetch_failure_is_listed_under_errors_and_the_others_continue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    missed = _rest(99, time.time_ns() - _S, _SPOT_ID)
+    results = {_BYBIT: OSError("connection reset"), _SPOT_ID: _fetched([missed])}
+    c, detail = _backfill(tmp_path, monkeypatch, results)
+    assert "OSError('connection reset')" in detail
+    assert dict(c._trade_backfill_counts) == {_SPOT_ID: 1}
+
+
+def test_an_inexact_venue_value_lists_the_instrument_under_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rejected = trade_backfill.Fetched([], True, None, ["{'px': '84765.05'}: not representable"])
+    c, detail = _backfill(tmp_path, monkeypatch, {_BYBIT: rejected, _SPOT_ID: _fetched([])})
+    assert f"errors {{'{_BYBIT}': \"1 inexact trade(s) skipped" in detail
+
+
+def test_a_backfill_request_covers_only_that_feeds_configured_instruments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    c = _two_instrument_collector(tmp_path)
+    _seed_trade(c, 1)
+    _seed_trade(c, 2, Feed("spot", "spot"), _SPOT_ID)
+    _seed_trade(c, 3, iid=_HL)  # on the feed, but not configured
+    fetch = _FakeFetch({_BYBIT: _fetched([])})
+    monkeypatch.setattr(trade_backfill, "fetch_trades", fetch)
+    _run_now(c, "linear")
+    assert [call[0] for call in fetch.calls] == [_BYBIT]
+
+
+def test_mark_price_does_not_teach_feed_instruments(tmp_path: Path) -> None:
+    c = _collector(tmp_path)
+    mark = MarkPriceUpdate(InstrumentId.from_str(_HL), Price.from_str("1.0"), 1, 1)
+    c._process_data(mark, _LINEAR)
+    c._process_data(_deltas([(100.0, 1.0)], [(100.5, 1.0)]), _LINEAR)
+    assert c._feed_instruments["linear"] == {_BYBIT}
+
+
+def test_dual_feed_archives_the_first_copy_and_counts_the_second_as_duplicate_feed(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    c = _collector(tmp_path)
+    trade = _seed_trade(c, 7, _LINEAR)
+    c._process_data(trade, _LINEAR_TRADES)
+    _seed_trade(c, 8, _LINEAR_TRADES)  # only the trades socket saw this one
+    assert [t.trade_id.value for t in c._buffer[(TradeTick, _BYBIT)]] == ["7", "8"]
+    assert dict(c._duplicate_feed_dropped) == {_BYBIT: 1}
+    assert dict(c._duplicate_trades_dropped) == {}
+    assert dict(c._feed_overlap) == {("linear", "linear-trades"): 1}
+    with caplog.at_level("INFO", logger="collector_core.collector"):
+        c._report_stale_trades()
+    lines = [r.message for r in caplog.records]
+    assert any("duplicate_feed" in m and _BYBIT in m for m in lines)
+    (arbitration,) = [m for m in lines if m.startswith("Trade feed arbitration (cumulative)")]
+    assert "linear: first 1, only-this-feed 0" in arbitration
+    assert "linear-trades: first 1, only-this-feed 1" in arbitration
+    assert "both {'linear+linear-trades': 1}" in arbitration
+    assert c._duplicate_feed_dropped == {}  # per-flush counter cleared, cumulative kept
+    assert c._feed_first == {"linear": 1, "linear-trades": 1}
+
+
+def test_a_rest_copy_first_then_the_live_copy_is_duplicate_feed(tmp_path: Path) -> None:
+    c = _collector(tmp_path)
+    trade = _trade(100.0, 0.5, AggressorSide.BUYER, 5)
+    c._register_trade(_BYBIT, "5", "rest")
+    c._process_data(trade, _LINEAR)
+    assert dict(c._duplicate_feed_dropped) == {_BYBIT: 1}
+    assert dict(c._feed_overlap) == {("rest", "linear"): 1}
+
+
+def test_the_dedup_map_stays_bounded_and_evicts_in_lockstep(tmp_path: Path) -> None:
+    c = _collector(tmp_path, seen_trade_ids=2)
+    for n in (1, 2, 3):
+        _seed_trade(c, n)
+    assert set(c._trade_feeds_seen[_BYBIT]) == {"2", "3"}
+    assert list(c._seen_trade_ids[_BYBIT]) == ["2", "3"]
+
+
+def _one_sided(c: Collector, now: int) -> list[str]:
+    return c._one_sided_messages(now, "BybitClient")
+
+
+def test_one_sided_outage_alerts_reminds_and_recovers(tmp_path: Path) -> None:
+    c = _collector(tmp_path)
+    now = time.time_ns()
+    c._feeds |= {_LINEAR, _LINEAR_TRADES, Feed("spot", "spot")}  # spot: a group of one
+    c._feed_last_trade_ns.update({"linear": now, "linear-trades": now - 31 * _S})
+    (down,) = _one_sided(c, now)
+    assert "one-sided outage" in down
+    assert "linear-trades is 30s+ behind linear in trade arrivals" in down
+    assert _one_sided(c, now + _S) == []
+    c._feed_last_trade_ns["linear"] = now + _WATCHDOG_REMINDER_NS + _S
+    (still,) = _one_sided(c, now + _WATCHDOG_REMINDER_NS + _S)
+    assert "still open" in still
+    c._feed_last_trade_ns["linear-trades"] = now + _WATCHDOG_REMINDER_NS + 2 * _S
+    (recovered,) = _one_sided(c, now + _WATCHDOG_REMINDER_NS + 2 * _S)
+    assert "recovered" in recovered
+    assert c._one_sided_state["linear"] == (None, 0)
+
+
+def test_a_feed_that_never_traded_counts_from_the_watchdog_start(tmp_path: Path) -> None:
+    c = _collector(tmp_path)
+    c._feeds |= {_LINEAR, _LINEAR_TRADES}
+    c._feed_last_trade_ns["linear"] = c._watchdog_started_ns + 40 * _S
+    (down,) = _one_sided(c, c._watchdog_started_ns + 40 * _S)
+    assert "linear-trades is 30s+ behind" in down
+
+
+def test_a_healthy_group_is_silent(tmp_path: Path) -> None:
+    c = _collector(tmp_path)
+    now = time.time_ns()
+    c._feeds |= {_LINEAR, _LINEAR_TRADES}
+    c._feed_last_trade_ns.update({"linear": now, "linear-trades": now - 29 * _S})
+    assert _one_sided(c, now) == []
+
+
+def test_restamped_backfill_keeps_the_flush_ts_init_order(tmp_path: Path) -> None:
+    # A backfilled trade must not land before what a flush already wrote (write_data refuses an
+    # overlapping ts_init interval): it is stamped when archived, after the live trades flushed.
+    c = _collector(tmp_path)
+    c._instruments = {_BYBIT: _perp(_BYBIT)}
+    old = time.time_ns() - 20 * _S
+    c._buffer[(TradeTick, _BYBIT)] = [_clocked_trade(0, old, old)]
+    c._last_trade_ts[_BYBIT] = old
+    asyncio.run(c._flush_once())
+    c._apply_backfill(_BYBIT, [_rest(1, old - _S)], _BackfillReport("linear", ["test"]))
+    asyncio.run(c._flush_once(final=True))
+    read = c._catalog.trade_ticks(instrument_ids=[_BYBIT])
+    assert [t.trade_id.value for t in read] == ["0", "1"]  # both files landed
+    assert read[1].ts_event < read[0].ts_event < read[1].ts_init
+
+
+def test_the_baseline_is_captured_at_detection_not_when_the_backfill_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Network-cut regression (2026-09-21): trades after the resume advanced `_last_trade_ts`
+    # before the settle elapsed, and the backfill fetched from after the outage.
+    c = _two_instrument_collector(tmp_path)
+    pre_gap = _seed_trade(c, 1)
+    fetch = _FakeFetch({_BYBIT: _fetched([])})
+    monkeypatch.setattr(trade_backfill, "fetch_trades", fetch)
+    now = time.time_ns()
+    c._feed_last_ns["linear"] = now - 60 * _S
+    c._process_data(_trade(100.0, 0.5, AggressorSide.BUYER, 2), _LINEAR)  # resumes after silence
+    _seed_trade(c, 3)
+    _run_backfills(c, time.time_ns() + _BACKFILL_SETTLE_NS)
+    ((_, since, _, _),) = fetch.calls
+    assert since == pre_gap.ts_event - 5 * _S
+
+
+def test_a_flip_uses_the_baseline_from_when_the_feed_went_inactive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    c = _two_instrument_collector(tmp_path)
+    pre_gap = _seed_trade(c, 1)
+    fetch = _FakeFetch({_BYBIT: _fetched([])})
+    monkeypatch.setattr(trade_backfill, "fetch_trades", fetch)
+    now = time.time_ns()
+    c._poll_feed_states(now)
+    c._client.states[_LINEAR] = False
+    c._poll_feed_states(now)
+    c._client.states[_LINEAR] = True
+    _seed_trade(c, 2)  # delivered after the reconnect, before the poll saw it active
+    c._poll_feed_states(now)
+    _run_backfills(c, now + _BACKFILL_SETTLE_NS)
+    ((_, since, _, _),) = fetch.calls
+    assert since == pre_gap.ts_event - 5 * _S
+
+
+def test_a_replay_lowers_the_baseline_to_the_replayed_trade(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    c = _two_instrument_collector(tmp_path)
+    c._watchdog_started_ns -= _WATCHDOG_STARTUP_GRACE_NS
+    old = _clocked_trade(1, time.time_ns() - 8 * _S, 0)
+    c._process_data(old, _LINEAR)
+    fetch = _FakeFetch({_BYBIT: _fetched([])})
+    monkeypatch.setattr(trade_backfill, "fetch_trades", fetch)
+    _seed_trade(c, 2)  # a gap trade the replay delivers before the one we already had
+    c._process_data(old, _LINEAR)
+    _run_backfills(c, time.time_ns() + _BACKFILL_SETTLE_NS)
+    ((_, since, _, _),) = fetch.calls
+    assert since == old.ts_event - 5 * _S
+
+
+# -- review pass (story 22.14) ---------------------------------------------------------------------
+
+
+def test_silence_is_judged_on_arrival_not_on_a_late_processing_time(tmp_path: Path) -> None:
+    # A queue backlog: the message arrived 1 s after the previous one but is processed a minute on.
+    c = _collector(tmp_path)
+    t0 = time.time_ns() - 60 * _S
+    c._process_data(_deltas([(100.0, 1.0)], [(100.5, 1.0)], ts=t0), _LINEAR)
+    c._process_data(_deltas([(100.0, 1.0)], [(100.5, 1.0)], ts=t0 + _S), _LINEAR)
+    assert c._backfill_requests == {}
+    assert c._feed_last_ns["linear"] == t0 + _S
+
+
+def test_a_replay_older_than_the_age_filter_is_still_replay_evidence(tmp_path: Path) -> None:
+    c = _collector(tmp_path)
+    c._watchdog_started_ns -= _WATCHDOG_STARTUP_GRACE_NS
+    now = time.time_ns()
+    c._process_data(_clocked_trade(7, now - 5 * _S, 0), _LINEAR)
+    c._process_data(_clocked_trade(7, now - 30 * _S, 0), _LINEAR)  # replayed, past 10 s
+    assert dict(c._duplicate_trades_dropped) == {_BYBIT: 1}
+    assert dict(c._stale_trades_dropped) == {}
+    assert c._backfill_requests["linear"].reasons == ["replayed trade ids"]
+
+
+def test_a_live_copy_after_its_rest_copy_is_folded_live_but_not_archived_again(
+    tmp_path: Path,
+) -> None:
+    c = _collector(tmp_path)
+    c._register_trade(_BYBIT, "5", "rest")
+    trade = _trade(100.0, 0.5, AggressorSide.BUYER, 5)
+    c._process_data(trade, _LINEAR)
+    assert [t.trade_id.value for t in c._second_trades[_BYBIT]] == ["5"]
+    assert c._buffer[(TradeTick, _BYBIT)] == []
+    assert c._trade_feeds_seen[_BYBIT]["5"] == ["rest", "linear"]
+
+
+def test_a_secondary_feed_replaying_an_id_is_one_overlap_and_one_replay(tmp_path: Path) -> None:
+    c = _collector(tmp_path)
+    trade = _seed_trade(c, 7, _LINEAR)
+    c._process_data(trade, _LINEAR_TRADES)
+    c._process_data(trade, _LINEAR_TRADES)
+    assert dict(c._feed_overlap) == {("linear", "linear-trades"): 1}
+    assert dict(c._duplicate_trades_dropped) == {_BYBIT: 1}
+
+
+def test_an_unexpected_error_for_one_instrument_is_reported_and_the_others_continue(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    missed = _rest(99, time.time_ns() - _S, _SPOT_ID)
+    results = {
+        _BYBIT: AttributeError("'list' object has no attribute 'get'"),
+        _SPOT_ID: _fetched([missed]),
+    }
+    c, detail = _backfill(tmp_path, monkeypatch, results)
+    assert "AttributeError" in detail
+    assert dict(c._trade_backfill_counts) == {_SPOT_ID: 1}
+
+
+def test_a_cancelled_backfill_still_writes_its_entry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    error_ledger.reset()
+    c = _two_instrument_collector(tmp_path)
+    _seed_trade(c, 1)
+    _seed_trade(c, 2, iid=_SPOT_ID)
+    monkeypatch.setattr(
+        trade_backfill, "fetch_trades", _FakeFetch({_BYBIT: asyncio.CancelledError()})
+    )
+    c._schedule_backfill("linear", 0, "test")
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(c._run_backfill("linear", c._backfill_requests.pop("linear")))
+    assert (
+        "interrupted after 0 instruments" in error_ledger.last_details()["collector.trade_backfill"]
+    )
+
+
+def test_the_unrecoverable_span_reaches_through_trades_refused_at_the_margin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # dYdX stopped at the 300 s floor: [oldest, floor) was fetched but refused, so nothing
+    # before the newest refused trade reached the archive.
+    error_ledger.reset()
+    c = _two_instrument_collector(tmp_path)
+    now = time.time_ns()
+    last = now - 400 * _S
+    refused = [_rest(1, now - 360 * _S), _rest(2, now - 320 * _S)]
+    fetched = _fetched([*refused, _rest(3, now - 100 * _S)], reached=False)
+    monkeypatch.setattr(trade_backfill, "fetch_trades", _FakeFetch({_BYBIT: fetched}))
+    report = _BackfillReport("main", ["test"])
+    asyncio.run(c._backfill_instrument(_BYBIT, last, report))
+    assert (report.refused, report.backfilled) == (2, 1)
+    assert report.unrecoverable == {_BYBIT: 80.0}
+
+
+def test_a_subscribed_instrument_without_a_definition_is_an_error_not_no_baseline(
+    tmp_path: Path,
+) -> None:
+    c = _two_instrument_collector(tmp_path)
+    c._instruments = {}
+    report = _BackfillReport("linear", ["test"])
+    asyncio.run(c._backfill_instrument(_BYBIT, time.time_ns(), report))
+    assert report.errors == {_BYBIT: "no instrument definition from the venue"}
+    assert report.no_baseline == 0
+
+
+def test_a_pending_backfill_at_shutdown_is_ledgered_as_abandoned(tmp_path: Path) -> None:
+    error_ledger.reset()
+    c = _two_instrument_collector(tmp_path)
+    _seed_trade(c, 1)
+    c._schedule_backfill("linear", time.time_ns(), "feed silent 7.0s")
+    c._ledger_abandoned_backfills()
+    detail = error_ledger.last_details()["collector.trade_backfill"]
+    assert "feed linear (feed silent 7.0s): abandoned at shutdown, 1 instruments" in detail
+    assert c._backfill_requests == {}
+
+
+def test_a_failed_connect_closes_what_did_connect_and_re_raises(tmp_path: Path) -> None:
+    class _HalfConnects(_ResyncClient):
+        closed = False
+
+        async def connect(self, loop: object, instruments: list) -> None:
+            raise OSError("second socket refused")
+
+        async def disconnect(self) -> None:
+            self.closed = True
+
+    client = _HalfConnects()
+    c = _collector(tmp_path, client=client)
+    with pytest.raises(OSError, match="second socket refused"):
+        asyncio.run(c._connect([]))
+    assert client.closed

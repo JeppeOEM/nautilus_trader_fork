@@ -42,8 +42,10 @@ from ml_signals import error_ledger
 
 GAPS_DIRNAME = "_archive_gaps"
 # How long after a trade's `ts_event` it can still reach the archive (`ts_init`): the live age
-# filter (`stale_trade_seconds`, 10 s) bounds it, so 5 minutes is ample. Shared by the rebuild's
-# `ts_init` query window, the quarantine marker and the prune gate's previous-day check.
+# filter (`stale_trade_seconds`, 10 s) bounds it for live trades, and the reconnect trade backfill
+# (story 22.14, `Collector._apply_backfill`) refuses -- and counts -- any unseen REST trade older
+# than this, so the bound holds for backfilled trades too. Shared by the rebuild's `ts_init` query
+# window, the quarantine marker and the prune gate's previous-day check.
 ARRIVAL_MARGIN_NS = 300 * 1_000_000_000
 
 

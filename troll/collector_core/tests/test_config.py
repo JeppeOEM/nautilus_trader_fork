@@ -73,3 +73,20 @@ def test_non_positive_threshold_rejected(key: str) -> None:
 def test_duplicate_instruments_collapsed() -> None:
     cfg = core_config_from_dict({"instruments": ["A.X", "B.X", "A.X"]}, ("mainnet",))
     assert cfg.instruments == ("A.X", "B.X")
+
+
+def test_trade_feeds_defaults_to_one_and_accepts_two() -> None:
+    assert core_config_from_dict({}, ("mainnet",)).trade_feeds == 1
+    assert core_config_from_dict({"trade_feeds": 2}, ("mainnet",)).trade_feeds == 2
+
+
+@pytest.mark.parametrize("value", [0, 3])
+def test_trade_feeds_outside_one_or_two_fails_closed(value: int) -> None:
+    with pytest.raises(ValueError, match="trade_feeds"):
+        core_config_from_dict({"trade_feeds": value}, ("mainnet",))
+
+
+@pytest.mark.parametrize("value", [2.5, True, "2"])
+def test_trade_feeds_must_be_an_integer(value: object) -> None:
+    with pytest.raises(ValueError, match="trade_feeds must be the integer"):
+        core_config_from_dict({"trade_feeds": value}, ("mainnet",))

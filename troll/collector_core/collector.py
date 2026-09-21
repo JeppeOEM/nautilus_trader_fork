@@ -34,7 +34,7 @@ Client contract (duck-typed -- this docstring is the contract, there is no base 
     fetch_instruments() -> list          raw pyo3 instruments; written to the catalog via
                                          `instruments_from_pyo3` and passed to connect()
     connect(loop, instruments) -> None   open the WS; deliver every decoded message to the
-                                         `on_data` callable the client was built with
+                                         `on_data(data, feed)` callable the client was built with
     disconnect() -> None
     subscribe(iid: str) -> None          trades + book (+ whatever else the venue offers)
     unsubscribe(iid: str) -> None        one WS unsubscribe per topic subscribed
@@ -45,9 +45,56 @@ Client contract (duck-typed -- this docstring is the contract, there is no base 
     resync_orderbook(iid: str) -> None   OPTIONAL: force a fresh book snapshot. Only a
                                          venue whose local book can drift (delta stream)
                                          should expose it; a full-snapshot venue must not.
+    feed_states() -> dict[Feed, bool]    OPTIONAL, *synchronous*: each WS connection's
+                                         `is_active()`; polled every 0.1 s for reconnects.
 
 The client must call `on_data` from the event loop (call_soon_threadsafe) and `on_data`
-itself is O(1): it only enqueues, `_ingest_loop` does the real work.
+itself is O(1): it only enqueues, `_ingest_loop` does the real work. `on_data(data, feed)` tags
+the message with the connection (`collector_core.feed.Feed`) it came on; a client with one
+connection may omit `feed` (`MAIN_FEED`).
+
+Trade gap closure (story 22.14). The Rust WS clients reconnect and resubscribe silently (none
+passes `Reconnected` to Python), so trades executed while a socket was down would be missing from
+the archive with nothing reporting it (D-47). A reconnect is detected per feed on evidence:
+
+- `feed_states()` shows the feed go inactive -> active (Bybit/Hyperliquid `is_active()`;
+  dYdX's `is_connected()` stays true through a reconnect, so dYdX has no `feed_states`);
+- a book-carrying feed is silent for longer than `feed_stale_seconds or stale_book_seconds`
+  and then delivers a message (the net for long outages, every venue);
+- the same feed re-delivers a `trade_id` it already delivered (a subscribe replay -- dYdX
+  replays recent trades on every trades subscribe), after the startup grace.
+
+Detections coalesce into one pending backfill per feed, run `_BACKFILL_SETTLE_NS` after the first
+one: for every instrument that feed delivered trades or book for, `trade_backfill.fetch_trades`
+reads the venue's trades of `[last archived ts_event - 5 s, now]` over stdlib REST and archives
+only unseen ids (`ts_init` = the time they were archived), never into the live second: the
+nightly rebuild places them. One `collector.trade_backfill` ledger entry per backfill states what
+was recovered, already archived, refused, unrecoverable (venue depth) and failed.
+
+Dual feed (`trade_feeds = 2`, Bybit and Hyperliquid): a second, trades-only connection per feed
+group. Both deliver into the same bounded `trade_id` dedup, which remembers the first copy's
+feed: a copy from the same feed is a replay (`duplicate`), from another feed (including the REST
+source `rest`) a `duplicate_feed`. Cumulative per-feed first copies and pairwise overlaps are
+logged each flush ("Trade feed arbitration"), and a feed whose last trade is more than 30 s
+behind a sibling's in its group raises an OBS-01 one-sided-outage notification.
+
+Known limit: a crash or restart gap is not backfilled, because `_last_trade_ts` lives in memory.
+Upgrade path: seed it from the newest archived trade per instrument at startup.
+Known limit: seconds the stale-book gate skipped during an outage have no snapshot row, so their
+backfilled trades are rebuild orphans and those minutes can still mismatch the venue's klines.
+Known limit: a backfill never archives a trade older than `ARRIVAL_MARGIN_NS` (the rebuild's and
+prune's `ts_init` window), so a dYdX outage longer than 5 minutes stays partly unrecovered and is
+reported as such. Upgrade path: a backfill-span marker the rebuild and prune read.
+Known limit: the one-sided alert compares trade arrival within a group only; a group where every
+feed is silent is the book watchdog's case.
+Known limit: a backfill fetches its instruments one after another (each floor taken when its own
+fetch starts), so on a long dYdX list the last instruments get a little less of the 5-minute
+window and one slow backfill delays the next feed's. Upgrade path: a small bounded fetch pool.
+
+Feed liveness (`_feed_last_ns`, `_feed_last_trade_ns`) runs on arrival time, the Rust client's
+`ts_init` at receipt, so an ingest backlog is not mistaken for a silent socket. A redundant
+trades-only socket that fails to connect or subscribe is ledgered (`collector.trade_feed`) and
+dropped, never allowed to take the primary data down (`collector_core.feed.optional_feed_step`).
 
 Snapshots are `DydxSecondSnapshot` (a venue-neutral schema despite its name -- moved in
 story 22.3) so data_api serves every venue's ids with zero per-route code.
@@ -55,6 +102,7 @@ story 22.3) so data_api serves every venue's ids with zero per-route code.
 
 import asyncio
 import bisect
+import http.client
 import json
 import logging
 import math
@@ -68,6 +116,9 @@ from collections import deque
 from collections.abc import Awaitable
 from collections.abc import Callable
 from collections.abc import Iterable
+from collections.abc import Mapping
+from dataclasses import dataclass
+from dataclasses import field
 from pathlib import Path
 from typing import Any
 
@@ -78,11 +129,15 @@ from ml_signals import error_ledger
 from ml_signals.catalog_stats import _stamp_to_ns
 from ml_signals.catalog_stats import query_second_ohlc
 
+from collector_core import trade_backfill
 from collector_core.archive_gaps import ARRIVAL_MARGIN_NS
 from collector_core.archive_gaps import record_gap
 from collector_core.book_check import persistent
 from collector_core.book_check import top_levels_mismatch
 from collector_core.config import CoreConfig
+from collector_core.feed import MAIN_FEED
+from collector_core.feed import REST_FEED_NAME
+from collector_core.feed import Feed
 from collector_core.fold import fold_trades
 from collector_core.integrity import ohlc_outside_book
 from collector_core.second_snapshot import BOOK_DEPTH
@@ -94,6 +149,7 @@ from nautilus_trader.model.data import QuoteTick
 from nautilus_trader.model.data import TradeTick
 from nautilus_trader.model.enums import BookType
 from nautilus_trader.model.identifiers import InstrumentId
+from nautilus_trader.model.instruments import Instrument
 from nautilus_trader.model.instruments import instruments_from_pyo3
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
@@ -111,6 +167,30 @@ _WATCHDOG_CHECK_SECONDS: float = 30.0
 _WATCHDOG_STALE_NS: int = 30_000_000_000
 _WATCHDOG_STARTUP_GRACE_NS: int = 60_000_000_000  # subscriptions need time to establish
 _WATCHDOG_REMINDER_NS: int = 600_000_000_000  # re-notify at most every 10 min while down
+# One-sided outage (story 22.14): a feed whose last trade is this far behind a sibling's in the
+# same group has lost its connection while the other kept delivering.
+_ONE_SIDED_NS: int = 30_000_000_000
+
+# Trade backfill (story 22.14). The settle lets a reconnect's resubscribes and replays land first,
+# so one reconnect gets one backfill; the lookback re-reads a little before the last archived
+# trade (ids already archived are counted, not written twice).
+_BACKFILL_SETTLE_NS: int = 3_000_000_000
+_BACKFILL_LOOKBACK_NS: int = 5_000_000_000
+_BACKFILL_POLL_SECONDS: float = 0.5
+# Faster than the Rust clients' 250 ms minimum reconnect delay, so an inactive spell is seen.
+_FEED_STATE_POLL_SECONDS: float = 0.1
+_FEED_STATE_ERROR_EVERY_NS: int = 60_000_000_000
+# Every failure one instrument's fetch can raise (urllib's URLError is an OSError): ledgered under
+# that instrument in the backfill's entry, the other instruments continue.
+_BACKFILL_FETCH_ERRORS = (
+    OSError,
+    ValueError,
+    KeyError,
+    TypeError,
+    http.client.HTTPException,
+    json.JSONDecodeError,
+    trade_backfill.BackfillError,
+)
 
 # A flush carries back a TradeTick batch's newest-`ts_init` group while it is younger than this:
 # every adapter stamps one `ts_init` per WS message, so a message's trades can straddle the flush,
@@ -204,6 +284,47 @@ def _is_readable_parquet(path: Path) -> bool:
     return True
 
 
+@dataclass(frozen=True)
+class AlertTexts:
+    """
+    An alert's three messages. `still` and `recovered` are `str.format` templates receiving
+    `down_for_s` (seconds since the alert opened).
+    """
+
+    down: str
+    still: str
+    recovered: str
+
+
+def _alert_transition(
+    now_ns: int,
+    is_down: bool,
+    down_since_ns: int | None,
+    last_reminder_ns: int,
+    texts: AlertTexts,
+) -> tuple[str | None, int | None, int]:
+    """
+    Pure state-machine step for an OBS-01 alert: (message_or_None, down_since_ns, last_reminder_ns).
+
+    Alert once on the transition to down, remind at most every `_WATCHDOG_REMINDER_NS` while it
+    stays down, and notify once on recovery. Kept separate from the asyncio loop and the notify
+    transport so the alerting/debounce logic is unit-testable without mocking network calls.
+    """
+    if is_down:
+        if down_since_ns is None:
+            return (texts.down, now_ns, now_ns)
+        if now_ns - last_reminder_ns > _WATCHDOG_REMINDER_NS:
+            down_for_s = (now_ns - down_since_ns) / 1e9
+            return (texts.still.format(down_for_s=down_for_s), down_since_ns, now_ns)
+        return (None, down_since_ns, last_reminder_ns)
+
+    if down_since_ns is not None:
+        down_for_s = (now_ns - down_since_ns) / 1e9
+        return (texts.recovered.format(down_for_s=down_for_s), None, 0)
+
+    return (None, None, last_reminder_ns)
+
+
 def _watchdog_transition(
     now_ns: int,
     is_stale: bool,
@@ -211,34 +332,32 @@ def _watchdog_transition(
     last_reminder_ns: int,
     name: str = "collector",
 ) -> tuple[str | None, int | None, int]:
-    """
-    Pure state-machine step for the feed watchdog: (message_or_None, down_since_ns, last_reminder_ns).
+    """Step the every-book-stale watchdog (see `_alert_transition`)."""
+    texts = AlertTexts(
+        down=(
+            f"{name}: all live instruments' order books have gone stale "
+            "(no OrderBookDeltas for 30s+) — feed may be down"
+        ),
+        still=f"{name}: still down, no book updates for {{down_for_s:.0f}}s",
+        recovered=f"{name}: recovered after {{down_for_s:.0f}}s",
+    )
+    return _alert_transition(now_ns, is_stale, down_since_ns, last_reminder_ns, texts)
 
-    Kept separate from the asyncio loop and the notify transport so the alerting/
-    debounce logic is unit-testable without mocking network calls.
-    """
-    if is_stale:
-        if down_since_ns is None:
-            return (
-                f"{name}: all live instruments' order books have gone stale "
-                "(no OrderBookDeltas for 30s+) — feed may be down",
-                now_ns,
-                now_ns,
-            )
-        if now_ns - last_reminder_ns > _WATCHDOG_REMINDER_NS:
-            down_for_s = (now_ns - down_since_ns) / 1e9
-            return (
-                f"{name}: still down, no book updates for {down_for_s:.0f}s",
-                down_since_ns,
-                now_ns,
-            )
-        return (None, down_since_ns, last_reminder_ns)
 
-    if down_since_ns is not None:
-        down_for_s = (now_ns - down_since_ns) / 1e9
-        return (f"{name}: recovered after {down_for_s:.0f}s", None, 0)
-
-    return (None, None, last_reminder_ns)
+def _one_sided_texts(name: str, group: str, behind: list[str], live: list[str]) -> AlertTexts:
+    return AlertTexts(
+        down=(
+            f"{name}: one-sided outage in feed group {group!r}: {', '.join(behind)} is 30s+ "
+            f"behind {', '.join(live)} in trade arrivals — that connection is down or stalled"
+        ),
+        still=(
+            f"{name}: one-sided outage in feed group {group!r} still open after "
+            f"{{down_for_s:.0f}}s: {', '.join(behind)} silent"
+        ),
+        recovered=(
+            f"{name}: one-sided outage in feed group {group!r} recovered after {{down_for_s:.0f}}s"
+        ),
+    )
 
 
 def _notify(message: str, title: str = "collector") -> None:
@@ -322,6 +441,63 @@ async def _publish_snapshot_batch(redis_client: aioredis.Redis, snapshots: list)
 _CROSSCHECK_CONFIRM_SECONDS = 2.0  # gap before re-comparing a mismatch (story 22.5)
 
 
+def _restamped(trade: TradeTick, ts_init: int) -> TradeTick:
+    return TradeTick(
+        trade.instrument_id,
+        trade.price,
+        trade.size,
+        trade.aggressor_side,
+        trade.trade_id,
+        trade.ts_event,
+        ts_init,
+    )
+
+
+@dataclass
+class _BackfillRequest:
+    """
+    One feed's pending backfill: every detection until it runs coalesces into it.
+
+    `since` is each instrument's pre-gap baseline (the newest archived trade `ts_event` before the
+    outage), captured at the earliest evidence and only ever lowered: by the time the backfill
+    runs, trades after the resume have advanced `_last_trade_ts`, and reading it then would skip
+    the whole outage (network-cut test, 2026-09-21: 368 of 382 ADAUSDT trades not fetched).
+    """
+
+    due_ns: int
+    reasons: list[str]
+    since: dict[str, int]
+
+    def lower(self, baselines: Mapping[str, int]) -> None:
+        for iid, ts in baselines.items():
+            self.since[iid] = min(self.since.get(iid, ts), ts)
+
+
+@dataclass
+class _BackfillReport:
+    """What one backfill did, for its single `collector.trade_backfill` ledger entry."""
+
+    feed: str
+    reasons: list[str]
+    instruments: int = 0
+    backfilled: int = 0
+    already: int = 0
+    refused: int = 0
+    no_baseline: int = 0
+    unrecoverable: dict[str, float] = field(default_factory=dict)
+    errors: dict[str, str] = field(default_factory=dict)
+
+    def message(self) -> str:
+        unrecoverable = {iid: round(s, 3) for iid, s in self.unrecoverable.items()}
+        return (
+            f"feed {self.feed} ({'; '.join(self.reasons)}): {self.instruments} instruments, "
+            f"backfilled {self.backfilled}, already archived {self.already}, refused "
+            f"{self.refused} (older than the {ARRIVAL_MARGIN_NS // 1_000_000_000} s arrival "
+            f"margin), unrecoverable seconds {unrecoverable}, no baseline {self.no_baseline}, "
+            f"errors {self.errors}"
+        )
+
+
 class Collector:
     """
     One venue's collector: `config` thresholds, a duck-typed `client` (contract in the
@@ -379,10 +555,14 @@ class Collector:
         self._stale_trades_dropped: defaultdict[str, int] = defaultdict(int)
         self._duplicate_trades_dropped: defaultdict[str, int] = defaultdict(int)
         self._deltas_before_snapshot_dropped: defaultdict[str, int] = defaultdict(int)
+        # Bounded per instrument (MEM-02): the id order evicts in lockstep with the map, which
+        # remembers the feeds that delivered each id, first one first (story 22.14's
+        # arbitration; a feed repeating an id is a replay, counted once per feed).
         self._seen_trade_ids: defaultdict[str, deque[str]] = defaultdict(
             lambda: deque(maxlen=config.seen_trade_ids)
         )
-        self._seen_trade_id_set: defaultdict[str, set[str]] = defaultdict(set)
+        self._trade_feeds_seen: defaultdict[str, dict[str, list[str]]] = defaultdict(dict)
+        self._duplicate_feed_dropped: defaultdict[str, int] = defaultdict(int)
         self._last_impossible_log_ns: dict[str, int] = {}
 
         self._last_second_loop_tick_ns: int | None = None
@@ -398,6 +578,25 @@ class Collector:
         self._watchdog_started_ns: int = time.time_ns()
         self._watchdog_down_since_ns: int | None = None
         self._watchdog_last_reminder_ns: int = 0
+
+        # -- story 22.14: per-feed liveness, reconnect detection, backfill, arbitration --------
+        # All keyed by feed name or instrument id: bounded by the connections and instruments.
+        self._instruments: dict[str, Instrument] = {}  # Cython instruments, kept by run()
+        self._feeds: set[Feed] = set()
+        self._feed_last_ns: dict[str, int] = {}
+        self._feed_last_trade_ns: dict[str, int] = {}
+        # Only TradeTick/OrderBookDeltas teach it: dYdX's markets channel carries every market.
+        self._feed_instruments: defaultdict[str, set[str]] = defaultdict(set)
+        self._feed_active: dict[Feed, bool] = {}
+        # A feed's baselines, captured when it was first seen inactive (the flip's pre-gap state).
+        self._inactive_baselines: dict[str, dict[str, int]] = {}
+        self._feed_state_error_ns: int = 0
+        self._last_trade_ts: dict[str, int] = {}  # max ts_event archived, live or backfilled
+        self._backfill_requests: dict[str, _BackfillRequest] = {}
+        self._trade_backfill_counts: defaultdict[str, int] = defaultdict(int)  # cumulative
+        self._feed_first: defaultdict[str, int] = defaultdict(int)  # cumulative first copies
+        self._feed_overlap: defaultdict[tuple[str, str], int] = defaultdict(int)
+        self._one_sided_state: dict[str, tuple[int | None, int]] = {}
 
     # -- hooks a venue subclass may override -------------------------------------------------
 
@@ -495,10 +694,10 @@ class Collector:
 
     # -- ingest ------------------------------------------------------------------------------
 
-    def _on_data(self, data: Any) -> None:
+    def _on_data(self, data: Any, feed: Feed = MAIN_FEED) -> None:
         # Runs on the event loop from the Rust callback: O(1) only, _ingest_loop does the work.
         try:
-            self._ingest_queue.put_nowait(data)
+            self._ingest_queue.put_nowait((data, feed))
         except Exception as e:
             error_ledger.record(
                 "collector.enqueue", f"failed to enqueue {type(data).__name__}, DROPPED", e
@@ -509,11 +708,11 @@ class Collector:
         processed = 0
         while not self._stop.is_set():
             try:
-                data = await asyncio.wait_for(self._ingest_queue.get(), timeout=1.0)
+                data, feed = await asyncio.wait_for(self._ingest_queue.get(), timeout=1.0)
             except TimeoutError:
                 continue
             try:
-                self._process_data(data)
+                self._process_data(data, feed)
             except Exception as e:
                 error_ledger.record(
                     "collector.process", f"failed to process {type(data).__name__}, DROPPED", e
@@ -522,37 +721,95 @@ class Collector:
             if processed % _INGEST_YIELD_EVERY == 0:
                 await asyncio.sleep(0)
 
-    def _process_data(self, data: Any) -> None:
+    def _process_data(self, data: Any, feed: Feed = MAIN_FEED) -> None:
         now_ns = time.time_ns()
-        self._last_feed_message_ns = now_ns
+        # Feed liveness runs on arrival (the Rust client's `ts_init` at receipt), not on when the
+        # ingest loop gets to the message: a queue backlog or loop stall is not a silent socket.
+        arrival_ns = getattr(data, "ts_init", 0) or now_ns
+        self._note_feed_message(feed, now_ns, arrival_ns)
         if isinstance(data, OrderBookDeltas):
-            self._apply_deltas(str(data.instrument_id), data)
-        elif isinstance(data, TradeTick):
             iid = str(data.instrument_id)
-            if now_ns - data.ts_event > self._config.stale_trade_seconds * 1e9:
-                self._stale_trades_dropped[iid] += 1
-                return
-            if self._is_duplicate_trade(iid, str(data.trade_id)):
-                self._duplicate_trades_dropped[iid] += 1
-                return
-            self._second_trades[iid].append(data)
-            # Archived as received (both clocks), so the nightly rebuild can re-derive the
-            # second from exchange time and correct what the live fold got wrong (D-45).
-            self._buffer[(TradeTick, iid)].append(data)
+            self._feed_instruments[feed.name].add(iid)
+            self._apply_deltas(iid, data)
+        elif isinstance(data, TradeTick):
+            self._accept_live_trade(data, feed, now_ns, arrival_ns)
         elif isinstance(data, QuoteTick):
             pass  # derivable from the snapshots; not persisted
         else:  # mark/index price, funding rate, open interest, ... -> catalog as-is
             self._buffer[(type(data), str(data.instrument_id))].append(data)
 
-    def _is_duplicate_trade(self, iid: str, trade_id: str) -> bool:
-        seen, order = self._seen_trade_id_set[iid], self._seen_trade_ids[iid]
-        if trade_id in seen:
-            return True
+    def _note_feed_message(self, feed: Feed, now_ns: int, arrival_ns: int) -> None:
+        """
+        Per-feed liveness, on arrival time. Only a book-carrying feed moves the feed-level
+        staleness gate (`_last_feed_message_ns`, processing time as before): a trades-only socket
+        being alive says nothing about the book. A book feed that was silent past the feed-stale
+        bound and speaks again has reconnected.
+        """
+        self._feeds.add(feed)
+        previous = self._feed_last_ns.get(feed.name)
+        self._feed_last_ns[feed.name] = max(previous or 0, arrival_ns)
+        if feed.trades_only:
+            return
+        self._last_feed_message_ns = now_ns
+        silent_ns = arrival_ns - previous if previous is not None else 0
+        if silent_ns > (self._config.feed_stale_seconds or self._config.stale_book_seconds) * 1e9:
+            self._schedule_backfill(feed.name, now_ns, f"feed silent {silent_ns / 1e9:.1f}s")
+
+    def _accept_live_trade(self, data: TradeTick, feed: Feed, now_ns: int, arrival_ns: int) -> None:
+        iid = str(data.instrument_id)
+        # Any trade message is liveness for the one-sided check, replayed or not.
+        self._feed_instruments[feed.name].add(iid)
+        self._feed_last_trade_ns[feed.name] = max(
+            self._feed_last_trade_ns.get(feed.name, 0), arrival_ns
+        )
+        trade_id = str(data.trade_id)
+        feeds = self._trade_feeds_seen[iid].get(trade_id)
+        if feeds is not None and feed.name in feeds:
+            # Checked before the age filter: a replay is mostly older than it (dYdX replays up
+            # to 1000 trades), and an id this feed already delivered is the evidence either way.
+            self._on_replayed_trade(iid, data, feed, now_ns)
+            return
+        if now_ns - data.ts_event > self._config.stale_trade_seconds * 1e9:
+            self._stale_trades_dropped[iid] += 1
+            return
+        if feeds is None:
+            self._register_trade(iid, trade_id, feed.name)
+            self._feed_first[feed.name] += 1
+            self._second_trades[iid].append(data)
+            # Archived as received (both clocks), so the nightly rebuild can re-derive the
+            # second from exchange time and correct what the live fold got wrong (D-45).
+            self._buffer[(TradeTick, iid)].append(data)
+            self._advance_last_trade(iid, data.ts_event)
+            return
+        feeds.append(feed.name)  # bounded by the number of feeds
+        self._duplicate_feed_dropped[iid] += 1
+        self._feed_overlap[(feeds[0], feed.name)] += 1
+        if feeds[0] == REST_FEED_NAME:
+            # The backfill archived it before this live copy was processed: fold the live copy
+            # (never archived twice), or the live second misses a trade the live feed delivered.
+            self._second_trades[iid].append(data)
+
+    def _on_replayed_trade(self, iid: str, data: TradeTick, feed: Feed, now_ns: int) -> None:
+        self._duplicate_trades_dropped[iid] += 1
+        if now_ns - self._watchdog_started_ns >= _WATCHDOG_STARTUP_GRACE_NS:
+            # The replay may deliver the gap's new trades before this one, advancing the
+            # baseline past the gap; a trade we already had predates it.
+            self._schedule_backfill(feed.name, now_ns, "replayed trade ids", {iid: data.ts_event})
+
+    def _first_copy_feed(self, iid: str, trade_id: str) -> str | None:
+        """Return the feed that delivered `trade_id` first, while it is inside the dedup window."""
+        feeds = self._trade_feeds_seen[iid].get(trade_id)
+        return feeds[0] if feeds else None
+
+    def _register_trade(self, iid: str, trade_id: str, feed_name: str) -> None:
+        seen, order = self._trade_feeds_seen[iid], self._seen_trade_ids[iid]
         if len(order) == order.maxlen:
-            seen.discard(order[0])
+            seen.pop(order[0], None)
         order.append(trade_id)
-        seen.add(trade_id)
-        return False
+        seen[trade_id] = [feed_name]
+
+    def _advance_last_trade(self, iid: str, ts_event: int) -> None:
+        self._last_trade_ts[iid] = max(self._last_trade_ts.get(iid, ts_event), ts_event)
 
     def _report_stale_trades(self) -> None:
         if self._stale_trades_dropped:
@@ -563,12 +820,38 @@ class Collector:
                 f"Dropped duplicate trades (replayed after reconnect?): {dict(self._duplicate_trades_dropped)}"
             )
             self._duplicate_trades_dropped.clear()
+        if self._duplicate_feed_dropped:
+            logger.warning(
+                "Dropped duplicate_feed trades (first copy archived from another feed): "
+                f"{dict(self._duplicate_feed_dropped)}"
+            )
+            self._duplicate_feed_dropped.clear()
         if self._deltas_before_snapshot_dropped:
             logger.warning(
                 "Dropped order-book deltas that arrived before a snapshot (subscribe/resync "
                 f"window): {dict(self._deltas_before_snapshot_dropped)}"
             )
             self._deltas_before_snapshot_dropped.clear()
+        self._report_trade_sources()
+
+    def _report_trade_sources(self) -> None:
+        """Cumulative REST-backfilled counts and, with more than one live feed, arbitration."""
+        if self._trade_backfill_counts:
+            logger.info(
+                f"Trades backfilled over REST (cumulative): {dict(self._trade_backfill_counts)}"
+            )
+        if len(self._feed_first) > 1:
+            logger.info(f"Trade feed arbitration (cumulative): {self._arbitration_summary()}")
+
+    def _arbitration_summary(self) -> str:
+        """Per feed: first copies, first copies no other feed delivered, and pairwise overlaps."""
+        parts = []
+        for feed_name in sorted(self._feed_first):
+            first = self._feed_first[feed_name]
+            shared = sum(n for (a, _), n in self._feed_overlap.items() if a == feed_name)
+            parts.append(f"{feed_name}: first {first}, only-this-feed {first - shared}")
+        both = {f"{a}+{b}": n for (a, b), n in sorted(self._feed_overlap.items())}
+        return f"{'; '.join(parts)}; both {both}"
 
     def _discard_second_accumulators(self, iid: str) -> None:
         """
@@ -907,30 +1190,229 @@ class Collector:
                         "collector.book_crosscheck", f"cross-check failed for {iid}", e
                     )
 
+    # -- trade gap closure (story 22.14) ------------------------------------------------------
+
+    def _baselines(self, feed_name: str) -> dict[str, int]:
+        """Return the feed's instruments' current `_last_trade_ts` (those with an archived trade)."""
+        return {
+            iid: self._last_trade_ts[iid]
+            for iid in self._feed_instruments.get(feed_name, set())
+            if iid in self._last_trade_ts
+        }
+
+    def _schedule_backfill(
+        self,
+        feed_name: str,
+        now_ns: int,
+        reason: str,
+        earlier: Mapping[str, int] | None = None,
+    ) -> None:
+        """
+        Coalesce a reconnect detection into the feed's one pending backfill (due time kept).
+
+        A new request snapshots the baselines now -- the silence signal fires before the resuming
+        message is processed, so nothing post-gap is in them yet. `earlier` lowers them further
+        with evidence captured before the resume (the flip's inactive-time snapshot, a replay).
+        """
+        request = self._backfill_requests.get(feed_name)
+        if request is None:
+            request = _BackfillRequest(
+                now_ns + _BACKFILL_SETTLE_NS, [reason], self._baselines(feed_name)
+            )
+            self._backfill_requests[feed_name] = request
+            logger.info(
+                f"Reconnect detected on feed {feed_name} ({reason}): trade backfill scheduled"
+            )
+        elif reason not in request.reasons:
+            request.reasons.append(reason)
+        request.lower(earlier or {})
+
+    def _poll_feed_states(self, now_ns: int) -> None:
+        """One `feed_states()` poll: an inactive -> active transition is a reconnect."""
+        try:
+            states = self._client.feed_states()
+        except Exception as e:
+            if now_ns - self._feed_state_error_ns >= _FEED_STATE_ERROR_EVERY_NS:
+                self._feed_state_error_ns = now_ns  # a broken poll must not ledger 10x a second
+                error_ledger.record("collector.feed_state", "feed_states() failed", e)
+            return
+        for feed, active in states.items():
+            self._feeds.add(feed)
+            previous = self._feed_active.get(feed)
+            self._feed_active[feed] = active
+            if not active:
+                # Nothing arrives while inactive: this is the pre-gap state the flip resumes from.
+                self._inactive_baselines.setdefault(feed.name, self._baselines(feed.name))
+            elif previous is False and active:
+                self._schedule_backfill(
+                    feed.name,
+                    now_ns,
+                    "feed reconnected (inactive -> active)",
+                    self._inactive_baselines.pop(feed.name, {}),
+                )
+
+    async def _feed_state_loop(self) -> None:
+        while not self._stop.is_set():
+            await asyncio.sleep(_FEED_STATE_POLL_SECONDS)
+            self._poll_feed_states(time.time_ns())
+
+    async def _trade_backfill_loop(self) -> None:
+        while not self._stop.is_set():
+            await asyncio.sleep(_BACKFILL_POLL_SECONDS)
+            try:
+                await self._run_due_backfills(time.time_ns())
+            except Exception as e:  # the loop must survive to serve the next reconnect
+                error_ledger.record("collector.trade_backfill", "trade backfill failed", e)
+
+    async def _run_due_backfills(self, now_ns: int) -> None:
+        """Run every request whose settle has passed, one at a time (sequential REST)."""
+        due = [name for name, r in self._backfill_requests.items() if r.due_ns <= now_ns]
+        for feed_name in due:
+            request = self._backfill_requests.pop(feed_name)
+            await self._run_backfill(feed_name, request)
+
+    async def _run_backfill(self, feed_name: str, request: _BackfillRequest) -> None:
+        """Backfill every instrument this feed carried, then ledger exactly one entry."""
+        report = _BackfillReport(feed_name, request.reasons)
+        wanted = set(self._instrument_ids())
+        instruments = sorted(self._feed_instruments.get(feed_name, set()) & wanted)
+        report.instruments = len(instruments)
+        done = 0
+        try:
+            for iid in instruments:
+                try:
+                    await self._backfill_instrument(iid, request.since.get(iid), report)
+                except Exception as e:  # one instrument's surprise must not cost the others
+                    report.errors[iid] = repr(e)
+                done += 1
+        finally:
+            # Always one entry, also when shutdown cancels the fetch mid-way: what was archived
+            # so far is buffered (the final flush writes it) and the rest is named, never silent.
+            if done < len(instruments):
+                report.reasons = [*report.reasons, f"interrupted after {done} instruments"]
+            error_ledger.record("collector.trade_backfill", report.message())
+
+    async def _backfill_instrument(
+        self, iid: str, last: int | None, report: _BackfillReport
+    ) -> None:
+        """`last`: the instrument's pre-gap baseline from the request (None: no archived trade)."""
+        if last is None:
+            report.no_baseline += 1  # the rebuild's coverage also starts at the first trade
+            return
+        instrument = self._instruments.get(iid)
+        if instrument is None:
+            report.errors[iid] = "no instrument definition from the venue"
+            return
+        fetch_ns = time.time_ns()
+        try:
+            fetched = await asyncio.to_thread(
+                trade_backfill.fetch_trades,
+                instrument,
+                last - _BACKFILL_LOOKBACK_NS,
+                fetch_ns - ARRIVAL_MARGIN_NS,
+                self._config.environment,
+                fetch_ns,
+            )
+        except _BACKFILL_FETCH_ERRORS as e:
+            report.errors[iid] = repr(e)
+            return
+        lost_until = self._apply_backfill(iid, fetched.trades, report) or last
+        if not fetched.reached_since:
+            # Nothing between `last` and the venue's oldest returned trade could be checked.
+            lost_until = max(lost_until, fetched.oldest_ns or fetch_ns)
+        if lost_until > last:
+            report.unrecoverable[iid] = (lost_until - last) / 1e9
+        if fetched.rejected:
+            report.errors[iid] = (
+                f"{len(fetched.rejected)} inexact trade(s) skipped: {fetched.rejected[0]}"
+            )
+
+    def _apply_backfill(
+        self, iid: str, trades: list[TradeTick], report: _BackfillReport
+    ) -> int | None:
+        """
+        Archive the unseen trades, oldest first -- never into the live second (the nightly
+        rebuild places them). `ts_init` is restamped to now: the flush needs every new trade's
+        `ts_init` at or after what it already wrote (`_TRADE_CARRY_NS`), and live trades may
+        have been flushed while the fetch ran. The arrival bound is checked on that stamp.
+        Returns the newest refused trade's `ts_event` (known lost up to there), or None.
+        """
+        now_ns = time.time_ns()
+        newest_refused: int | None = None
+        for trade in trades:
+            trade_id = str(trade.trade_id)
+            if self._first_copy_feed(iid, trade_id) is not None:
+                report.already += 1
+                continue
+            if now_ns - trade.ts_event > ARRIVAL_MARGIN_NS:
+                report.refused += 1  # invisible to the rebuild/prune window (archive invariant)
+                newest_refused = trade.ts_event  # oldest first: the last one is the newest
+                continue
+            self._register_trade(iid, trade_id, REST_FEED_NAME)
+            self._buffer[(TradeTick, iid)].append(_restamped(trade, now_ns))
+            self._advance_last_trade(iid, trade.ts_event)
+            self._trade_backfill_counts[iid] += 1
+            report.backfilled += 1
+        return newest_refused
+
+    def _one_sided_messages(self, now_ns: int, name: str) -> list[str]:
+        """
+        Per feed group with two or more feeds: a feed is behind when its last trade is more than
+        `_ONE_SIDED_NS` older than the group's newest (a feed that never delivered one counts
+        from the watchdog's start). Returns the alert transitions' messages.
+        """
+        groups: defaultdict[str, list[str]] = defaultdict(list)
+        for feed in self._feeds:
+            groups[feed.group].append(feed.name)
+        messages = []
+        for group, names in sorted(groups.items()):
+            if len(names) < 2:
+                continue
+            last = {n: self._feed_last_trade_ns.get(n, self._watchdog_started_ns) for n in names}
+            newest = max(last.values())
+            behind = sorted(n for n in names if newest - last[n] > _ONE_SIDED_NS)
+            live = sorted(set(names) - set(behind))
+            down_since, reminder = self._one_sided_state.get(group, (None, 0))
+            message, down_since, reminder = _alert_transition(
+                now_ns,
+                bool(behind),
+                down_since,
+                reminder,
+                _one_sided_texts(name, group, behind, live),
+            )
+            self._one_sided_state[group] = (down_since, reminder)
+            if message is not None:
+                messages.append(message)
+        return messages
+
+    def _book_watchdog_message(self, now_ns: int, name: str) -> str | None:
+        live = list(self._instrument_ids())
+        if not live:
+            return None
+        is_stale = all(
+            now_ns - self._last_book_update_ns.get(iid, 0) > _WATCHDOG_STALE_NS for iid in live
+        )
+        message, down_since_ns, reminder_ns = _watchdog_transition(
+            now_ns,
+            is_stale,
+            self._watchdog_down_since_ns,
+            self._watchdog_last_reminder_ns,
+            name,
+        )
+        self._watchdog_down_since_ns = down_since_ns
+        self._watchdog_last_reminder_ns = reminder_ns
+        return message
+
     async def _watchdog_loop(self) -> None:
-        """OBS-01: page someone when every instrument's book has gone stale."""
+        """OBS-01: page someone when every book has gone stale, or one feed of a group has."""
         name = type(self._client).__name__
         while not self._stop.is_set():
             await asyncio.sleep(_WATCHDOG_CHECK_SECONDS)
             now_ns = time.time_ns()
             if now_ns - self._watchdog_started_ns < _WATCHDOG_STARTUP_GRACE_NS:
                 continue
-            live = list(self._instrument_ids())
-            if not live:
-                continue
-            is_stale = all(
-                now_ns - self._last_book_update_ns.get(iid, 0) > _WATCHDOG_STALE_NS for iid in live
-            )
-            message, down_since_ns, reminder_ns = _watchdog_transition(
-                now_ns,
-                is_stale,
-                self._watchdog_down_since_ns,
-                self._watchdog_last_reminder_ns,
-                name,
-            )
-            self._watchdog_down_since_ns = down_since_ns
-            self._watchdog_last_reminder_ns = reminder_ns
-            if message is not None:
+            book = self._book_watchdog_message(now_ns, name)
+            for message in ([book] if book else []) + self._one_sided_messages(now_ns, name):
                 await asyncio.to_thread(_notify, message, name)
 
     # -- lifecycle ---------------------------------------------------------------------------
@@ -945,9 +1427,11 @@ class Collector:
 
         instruments = await self._client.fetch_instruments()
         by_id = {i.id.value: i for i in instruments}
-        self._catalog.write_data(instruments_from_pyo3(list(by_id.values())))
+        converted = instruments_from_pyo3(list(by_id.values()))
+        self._instruments = {str(i.id): i for i in converted}  # the trade backfill's precisions
+        self._catalog.write_data(converted)
 
-        await self._client.connect(asyncio.get_running_loop(), list(by_id.values()))
+        await self._connect(list(by_id.values()))
         if hasattr(self._client, "subscribe_global"):
             await self._client.subscribe_global()
         configured = set(self._instrument_ids())
@@ -969,6 +1453,8 @@ class Collector:
             self._candle_prune_loop,
             self._second_loop,
             self._watchdog_loop,
+            self._trade_backfill_loop,
+            *((self._feed_state_loop,) if hasattr(self._client, "feed_states") else ()),
             *(
                 (self._crosscheck_loop,)
                 if self._config.book_crosscheck_seconds > 0
@@ -990,13 +1476,41 @@ class Collector:
             stop_task.cancel()
             for task in tasks:
                 task.cancel()
-            try:
-                await self._client.disconnect()
-            except Exception as e:  # never skip the final flush over a closing WS
-                error_ledger.record("collector.disconnect", "disconnect failed", e)
+            # Let every loop unwind first: an interrupted backfill ledgers itself and leaves what
+            # it archived in the buffer, which the final flush below then writes.
+            await asyncio.gather(*tasks, return_exceptions=True)
+            self._ledger_abandoned_backfills()
+            await self._disconnect()
             await self._flush_once(final=True)
             self._report_stale_trades()
             await self._redis.aclose()
+
+    async def _connect(self, instruments: list) -> None:
+        """
+        Connect the client; on failure close what did connect (a client may own several
+        sockets), or the Rust clients keep reconnecting and feeding a collector that is gone.
+        """
+        try:
+            await self._client.connect(asyncio.get_running_loop(), instruments)
+        except BaseException:
+            await self._disconnect()
+            raise
+
+    async def _disconnect(self) -> None:
+        try:
+            await self._client.disconnect()
+        except Exception as e:  # never skip the final flush over a closing WS
+            error_ledger.record("collector.disconnect", "disconnect failed", e)
+
+    def _ledger_abandoned_backfills(self) -> None:
+        """Ledger every reconnect detected but not yet backfilled at shutdown (a named gap, DATA-05)."""
+        for feed_name, request in sorted(self._backfill_requests.items()):
+            error_ledger.record(
+                "collector.trade_backfill",
+                f"feed {feed_name} ({'; '.join(request.reasons)}): abandoned at shutdown, "
+                f"{len(request.since)} instruments not fetched",
+            )
+        self._backfill_requests.clear()
 
     def stop(self) -> None:
         self._stop.set()
