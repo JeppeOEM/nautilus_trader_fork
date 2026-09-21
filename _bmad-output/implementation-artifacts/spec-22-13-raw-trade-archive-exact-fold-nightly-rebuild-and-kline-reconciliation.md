@@ -2,7 +2,7 @@
 title: 'Story 22.13: Raw trade archive, exact fold, nightly rebuild and kline reconciliation'
 type: 'feature'
 created: '2026-09-21'
-status: 'awaiting-operator'
+status: done
 baseline_revision: '2266e6753d9c2f50a05202e3344602c4b2dd5c31'
 final_revision: '8f78dd6963fc8bf1b798feca96d67450d0cc40f4'
 review_loop_iteration: 0
@@ -187,3 +187,16 @@ A wire finding: Bybit's kline open is the previous close, measured 999/999. Our 
 - A realtime clock step backwards can still lose a trade flush; it is loud (`collector.flush_write`) and leaves an archive-gap marker.
 - A snapshot cadence other than 1 s is only canaried, not supported.
 - The live sampler's phase moved to mid-second, and 22.12 will revisit sampling.
+
+## Operator Confirmation
+
+Confirmed 2026-09-21: the external actions this story owed were carried out.
+
+- On nifelheim, deploy this branch with `make redeploy-all` plus `docker compose up -d --build bybit_collector hyperliquid_collector`, so all three collectors start archiving trades.
+- After the first full UTC day with the new collectors, measure the trade_tick footprint per venue (`du -sh troll/dydx_collector/catalog/data/trade_tick/*.<VENUE>` summed per venue for that day) and record it in troll/docs/DATA_INTEGRITY_AUDIT.md D-45.
+- Run `make nightly VENUE=DYDX`, `make nightly VENUE=BYBIT` and `make nightly VENUE=HYPERLIQUID` by hand for that first full day (DAY=YYYY-MM-DD). Copy each nightly summary line (per-step seconds, peak child RSS) and the before/after file counts into the audit (D-45/D-51 and troll/docs/DEPLOY_CHECKLIST.md), and confirm the peak RSS stays inside the box's free memory (MEM-01).
+- Record each venue's compare_klines pass rate (instruments and minutes) in DATA_INTEGRITY_AUDIT.md D-51, and root-cause every remaining mismatch there (reconnect gap -> 22.14, or a named finding). Never add a tolerance.
+- Install the nightly cron line from troll/docs/DEPLOY_CHECKLIST.md in the VPS host crontab (CRON_TZ=UTC if the box is not on UTC), replacing the Story 22.11 consolidate-only line.
+- Record a full day of Hyperliquid trade arrival lag (ts_init - ts_event) in audit D-59 to confirm the 10 s stale-trade filter is not dropping live trades.
+
+_Appended by the bmad-loop orchestrator (`bmad-loop confirm`, #335): a human confirmed these external actions out of band, and the story was advanced from `awaiting-operator` to `done`._
