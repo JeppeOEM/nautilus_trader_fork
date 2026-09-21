@@ -19,5 +19,6 @@ COPY platform/ml_signals ./ml_signals
 COPY platform/ranking_engine ./ranking_engine
 COPY platform/bot_tui ./bot_tui
 COPY platform/data_api ./data_api
+COPY platform/tests ./tests
 
 CMD ["python3", "-m", "dydx_collector.collector"]
