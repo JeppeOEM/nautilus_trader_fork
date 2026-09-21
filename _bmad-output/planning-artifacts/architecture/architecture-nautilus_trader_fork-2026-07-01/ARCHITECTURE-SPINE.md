@@ -15,6 +15,8 @@ companions: []
 
 # Architecture Spine — Collector Core & ml_signals — Data-Integrity Spine
 
+> `[amended 2026-09-21]` `troll/` was renamed `platform/` and the stores moved under `platform/data/` (companion DDD spine, AD-D13). Every `troll/...` citation below refers to the same file under `platform/`.
+
 ## Design Paradigm
 
 **Gatekeeper: fail-closed single-writer ingestion — applied twice, one layer apart.**

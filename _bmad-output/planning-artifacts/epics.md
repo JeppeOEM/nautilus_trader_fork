@@ -1,4 +1,6 @@
 ---
+
+> **Renamed 2026-09-21:** `troll/` is now `platform/` and every durable store moved under `platform/data/` (DDD spine AD-D13, `_bmad-output/planning-artifacts/architecture/architecture-ddd-platform-2026-09-21/`). Paths below are as written at the time; read `troll/` as `platform/`.
 stepsCompleted: [step-01-validate-prerequisites, step-02-design-epics, step-03-create-stories, step-04-final-validation]
 inputDocuments:
   - _bmad-output/planning-artifacts/prds/prd-nautilus_trader_fork-2026-07-01/prd.md

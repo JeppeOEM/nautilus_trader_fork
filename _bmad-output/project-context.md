@@ -16,9 +16,9 @@ _This file contains critical rules and patterns that AI agents must follow when 
 
 ## Technology Stack & Versions
 
-- Python 3.12–3.14, `nautilus_trader` 1.229.0 used strictly as a **library** (never `TradingNode`/`Strategy`/`DataEngine` runtime) in `troll/`
-- Reader stack: `data_api` is FastAPI + uvicorn serving a built React SPA (`troll/data_api.dockerfile`'s frontend-build stage), plus redis (pub/sub for live 1s data). The old aiohttp+plotly `ml_signals/dashboard.py` was retired by Story 15.10.
-- Deployment: one durable base image + three thin layers (not a two-image split) — `nautilus-trader-base` (rebuilt rarely, core/deps only) carries `troll/collector.dockerfile` (bakes in `collector_core/`, the three venue collectors `dydx_collector/`/`bybit_collector/`/`hyperliquid_collector/`, `common/`, `ml_signals/`, `ranking_engine/`, `bot_tui/`, `data_api/`), `troll/data_api.dockerfile` (own package set + a Node frontend-build stage) and `troll/live_paper.dockerfile`; all three rebuild in seconds
+- Python 3.12–3.14, `nautilus_trader` 1.229.0 used strictly as a **library** (never `TradingNode`/`Strategy`/`DataEngine` runtime) in `platform/`
+- Reader stack: `data_api` is FastAPI + uvicorn serving a built React SPA (`platform/data_api.dockerfile`'s frontend-build stage), plus redis (pub/sub for live 1s data). The old aiohttp+plotly `ml_signals/dashboard.py` was retired by Story 15.10.
+- Deployment: one durable base image + three thin layers (not a two-image split) — `nautilus-trader-base` (rebuilt rarely, core/deps only) carries `platform/collector.dockerfile` (bakes in `collector_core/`, the three venue collectors `dydx_collector/`/`bybit_collector/`/`hyperliquid_collector/`, `common/`, `ml_signals/`, `ranking_engine/`, `bot_tui/`, `data_api/`), `platform/data_api.dockerfile` (own package set + a Node frontend-build stage) and `platform/live_paper.dockerfile`; all three rebuild in seconds
 - **Rebuild-order constraint**: rebuild the base image before the thin image whenever `nautilus_trader` core/deps change, or the thin image silently layers onto a stale base
 - **Version-pin discipline**: `nautilus_trader` is pinned at 1.229.0 deliberately; bumping requires re-validating the PyO3 client bindings for all three venue adapters — dYdX, Bybit and Hyperliquid (precision bugs are version-sensitive and were a dYdX incident, but the pin now gates three adapters — see Language-Specific Rules below)
 
@@ -26,15 +26,15 @@ _This file contains critical rules and patterns that AI agents must follow when 
 
 ### Language-Specific Rules
 
-- **Precision re-stamping**: Never use `Price(decimal, precision)` / `Quantity(decimal, precision)` to change a value's precision — silently corrupts values via internal float64 round-trip for some inputs (e.g. `Price(Decimal("61090.59855"), 16)` → `61090.5985500000026624`). Always use `Decimal.scaleb(new_precision)` + `Price.from_raw()` / `Quantity.from_raw()`. Reference implementation: `troll/dydx_collector/client.py:50` `_at_fixed_precision()` (dYdX-only: Bybit and Hyperliquid parse mark/index at the instrument's own constant precision, so neither has an equivalent).
+- **Precision re-stamping**: Never use `Price(decimal, precision)` / `Quantity(decimal, precision)` to change a value's precision — silently corrupts values via internal float64 round-trip for some inputs (e.g. `Price(Decimal("61090.59855"), 16)` → `61090.5985500000026624`). Always use `Decimal.scaleb(new_precision)` + `Price.from_raw()` / `Quantity.from_raw()`. Reference implementation: `platform/dydx_collector/client.py:50` `_at_fixed_precision()` (dYdX-only: Bybit and Hyperliquid parse mark/index at the instrument's own constant precision, so neither has an equivalent).
 - **Never derive precision from digit count** — don't use `Decimal.normalize()` on an incoming market value to infer its precision; dYdX's mark/index feed has inconsistent trailing-zero stripping per tick, which caused `ParquetDataCatalog` to reject mixed-precision files in production.
 - **Never round-trip a market data value through `float`** before it's inside a `Price`/`Quantity` — exact `Decimal`/raw-integer arithmetic only.
-- Type hints required on **all** function signatures in `troll/` — `mypy` runs with `disallow_incomplete_defs = true`. Use `X | None`, not `Optional[X]`.
+- Type hints required on **all** function signatures in `platform/` — `mypy` runs with `disallow_incomplete_defs = true`. Use `X | None`, not `Optional[X]`.
 - Imports: absolute only (`from nautilus_trader.model.objects import Price`), one import per line (isort `force single line`), 2 blank lines after the import block.
 
 ### Framework-Specific Rules
 
-- **Never instantiate `TradingNode` or `DataEngine` in `troll/` code.** Live `DataEngine` has a documented unbounded-queue-growth + shutdown-wedge bug under sustained high-message-load that OOM-crashed an earlier `Strategy`/`TradingNode`-based recorder (see `gg` branch history). The collector core (`collector_core/collector.py`'s `Collector`, subclassed per venue by `dydx_collector`/`bybit_collector`/`hyperliquid_collector`) owns its own asyncio loop, buffer, and flush timer instead, driving one duck-typed venue client that calls that venue's Rust pyo3 HTTP/WS clients directly.
+- **Never instantiate `TradingNode` or `DataEngine` in `platform/` code.** Live `DataEngine` has a documented unbounded-queue-growth + shutdown-wedge bug under sustained high-message-load that OOM-crashed an earlier `Strategy`/`TradingNode`-based recorder (see `gg` branch history). The collector core (`collector_core/collector.py`'s `Collector`, subclassed per venue by `dydx_collector`/`bybit_collector`/`hyperliquid_collector`) owns its own asyncio loop, buffer, and flush timer instead, driving one duck-typed venue client that calls that venue's Rust pyo3 HTTP/WS clients directly.
 - **All data writes go through `ParquetDataCatalog.write_data()`** — no hand-rolled Parquet schemas. Working around the catalog API breaks catalog reads.
 - **Backtests use `BacktestNode` + `BacktestDataConfig`** (see `ml_signals/strategies/backtest_dydx.py:67-72`), not a custom simulation loop — this streams the catalog in time-bounded chunks rather than loading it fully into memory.
 - **Reference strategies via `ImportableStrategyConfig` by string path** (`ml_signals/strategies/backtest_dydx.py:99`), not by direct class import — enables parameter sweeps/time-range filtering with no code changes.
@@ -62,8 +62,8 @@ _This file contains critical rules and patterns that AI agents must follow when 
 ### Development Workflow Rules
 
 - **Commit style**: Conventional-commits-ish — `type(scope): description`, e.g. `fix(collector+dashboard): guard against crossed book`, `feat(dashboard): add live price ticker`, `chore: add BMad Method tooling`. Scope names match the touched area (`collector`, `dashboard`, `03-01` for BMad story IDs).
-- **Branch layout is meaningful, not disposable**: `develop` = main/PR target; `pony` = current `troll/dydx_collector` Python rebuild lineage; `go` = earlier Go rebuild attempt, left untouched; `gg` = prior `Strategy`/`TradingNode`-based recorder that hit the `DataEngine` OOM bug — historical reference, do not resume work there without reading why it was abandoned; `worktree-agent-*` = ephemeral BMad/agent worktrees.
-- **Fork boundary**: `nautilus_trader/` and `crates/` are never modified — all `troll/` work is additive so upstream merges stay possible.
+- **Branch layout is meaningful, not disposable**: `develop` = main/PR target; `pony` = current `platform/dydx_collector` Python rebuild lineage; `go` = earlier Go rebuild attempt, left untouched; `gg` = prior `Strategy`/`TradingNode`-based recorder that hit the `DataEngine` OOM bug — historical reference, do not resume work there without reading why it was abandoned; `worktree-agent-*` = ephemeral BMad/agent worktrees.
+- **Fork boundary**: `nautilus_trader/` and `crates/` are never modified — all `platform/` work is additive so upstream merges stay possible.
 - Docker rebuild order matters: `make build-base` (rare, on core/deps change) must run before `make up` (`--build`, fast) picks up thin-image code changes — a stale base silently ships old core behavior.
 
 ### Critical Don't-Miss Rules
@@ -80,7 +80,7 @@ _This file contains critical rules and patterns that AI agents must follow when 
 
 **For AI Agents:**
 
-- Read this file before implementing any code in `troll/`
+- Read this file before implementing any code in `platform/`
 - Follow ALL rules exactly as documented
 - When in doubt, prefer the more restrictive option
 - Update this file if new patterns emerge

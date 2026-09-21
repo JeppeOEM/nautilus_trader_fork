@@ -1,0 +1,15 @@
+Font: AcPlus IBM VGA 9x16
+Source: The Ultimate Oldschool PC Font Pack, https://int10h.org/oldschool-pc-fonts/
+Author: VileR
+License: Creative Commons Attribution-ShareAlike 4.0 International (CC BY-SA 4.0)
+License text: https://creativecommons.org/licenses/by-sa/4.0/
+
+Bundled unmodified for platform/frontend's Story 15.9 terminal/ANSI visual identity.
+License terms confirmed by reading the font file's own embedded OpenType `name`
+table (nameID 13/14), which states this license explicitly, and cross-checked
+against the font pack's own LICENSE.TXT.
+
+CC BY-SA 4.0 requires attribution (this file) and that any redistribution of the
+font itself (modified or not) remain under the same license -- it does not
+require the applications/pages that merely *use* the font via @font-face to be
+licensed under CC BY-SA.

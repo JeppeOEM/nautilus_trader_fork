@@ -36,7 +36,8 @@ Eleven contexts, one shared kernel. A tactical DDD pattern is admitted **only wh
 an invariant** (AD-D4); this is how the paradigm coexists with `CLAUDE.md` DESIGN-01. New
 decisions are numbered `AD-D1…` so they never collide with the parent's `AD-1..AD-11` or the
 frontend sibling's `AD-F…`. A rule marked `[ADOPTED]` is today's code restated; `[TARGET]`
-names today's deviation next to it.
+names today's deviation next to it. `troll/...` citations refer to the tree before
+step 0; the same files live under `platform/` after it (done 2026-09-21).
 
 ```mermaid
 flowchart LR

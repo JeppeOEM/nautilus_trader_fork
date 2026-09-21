@@ -207,9 +207,9 @@ tests/
 !docs/tutorials
 
 # dYdX collector collected data, never bake into the image
-troll/dydx_collector/catalog/
+platform/data/
 
-# Exclude Rust/Python source trees not needed by troll/dydx_collector image
+# Exclude Rust/Python source trees not needed by platform/dydx_collector image
 crates/
 nautilus_trader/
 .planning/

@@ -5,7 +5,7 @@
 # Why: Docker inserts its own iptables ACCEPT rules ahead of ufw's chain, so
 # a bare "8080:8080" (or short "8080") mapping is reachable from the public
 # internet even with ufw configured to deny it -- ufw never sees the
-# connection. See troll/CLAUDE.md's SEC-01.
+# connection. See platform/CLAUDE.md's SEC-01.
 #
 # Fix: bind explicitly, e.g. "127.0.0.1:8080:8080". A service that only
 # needs to be reached by other containers should use `expose:` instead of
