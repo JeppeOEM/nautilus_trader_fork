@@ -112,6 +112,92 @@ and D-60 (Bybit spot depth).
    stale-book gate skipped is a rebuild orphan (collector docstring `Known limit:`); anything
    else is a new finding and gets its own audit row.
 
+## 5. Epic 22 rollout on nifelheim (consolidated 2026-09-21)
+
+Every VPS-side operator action the eleven Epic 22 stories (22.1–22.5, 22.7, 22.10–22.14) still
+owed when they were closed on 2026-09-21, in the order to run them. What could be verified on
+the dev box that day was (see each story's `operator_actions` and audit D-64); nothing here
+was. Story paths in the old text said `troll/`; the tree is `platform/` now (section above).
+Record numbers where each line says, never in a story file.
+
+### 5.1 One-time steps before the collectors come back up
+
+1. `cd ~/nautilus_trader_fork && git pull` onto the merged `troll` branch; do the store move in
+   the "Rename `troll/` → `platform/`" section above if not done yet.
+2. `platform/config.toml` (dYdX): set `snapshot_interval_seconds = 1.0` if it still says `0.5`
+   (22.2).
+3. Bybit and Hyperliquid `config.toml` are bind-mounted from the repo, so
+   `book_time_source = "venue"` and `hold_back_seconds` take effect on the next start (22.12).
+   Leave `trade_feeds = 1` for now (step 5.4).
+4. Stop the three collectors (`docker compose stop collector bybit_collector
+   hyperliquid_collector`), then in the collector image run
+   `python -m collector_core.migrate_open_interest --catalog /app/catalog` (report), then again
+   with `--apply --backup-dir <dir>` (22.3, audit D-40).
+5. `cd platform && make redeploy-all` (rebuilds the thin images with `collector_core`,
+   `observability` when 23.1 lands, and starts every service; 22.1, 22.4, 22.5, 22.7, 22.10,
+   22.13). Confirm the paper path starts with none of the new credential env vars exported
+   (they default to empty in `docker-compose.yml`; 22.7).
+
+### 5.2 First 10 minutes (Dozzle, one pass covers 22.1, 22.2, 22.4, 22.5, 22.10)
+
+- All containers stay up; `dydx-collector` healthy; `bot_tui` Collector pane populates;
+  `pin_top_liquid` works; an incident report lands on a WARNING (22.2).
+- No `[collector.*]` error-ledger lines; at most one `Dropped subscribe-time trade history`
+  per (re)subscribe; no `collector.book_sequence` on Bybit; no stale-book warning naming
+  "feed dead" on Hyperliquid (22.1, 22.5).
+- `DydxSecondSnapshot` rows for `BTCUSDT-LINEAR.BYBIT`, `BTCUSDT-SPOT.BYBIT` and
+  `BTC-USD-PERP.HYPERLIQUID` land 1 s apart; spot has no mark/index/funding/OI rows
+  (`/api/candles/<id>` or a catalog query; 22.1, 22.4).
+- `GET /api/candles/BTCUSDT-SPOT.BYBIT` returns `venue=BYBIT, market=spot`; the screener and
+  chart badge show and filter both Bybit markets (22.4).
+- `redis-cli subscribe rankings:live` shows DYDX, BYBIT (-LINEAR and -SPOT) and HYPERLIQUID
+  rows, each with non-zero USD `volume24h`; `/api/rankings` lists the `.BYBIT`/`.HYPERLIQUID`
+  ids; the web rankings page has every venue chip selected by default, deselecting one hides
+  only that venue and survives a reload; `make tui` columns stay aligned and `/` + `.bybit`
+  narrows to Bybit rows (22.1, 22.10).
+- `GET /api/errors`: `ranking_engine.volume24h` is not growing (a growing count means a
+  collected instrument has no USD volume from its venue; 22.10).
+- `docker stats dydx-ranking-engine` flat over the 10 minutes, then about 3x the instrument
+  count over an hour (epic 13 baseline; the engine now polls volume 4x a minute; 22.10).
+- No double Rust-logging init: the `[WS_RAW]` file sink still writes (22.2).
+
+### 5.3 First day
+
+- `collector.book_crosscheck`: zero confirmed on Bybit and Hyperliquid over at least one hour
+  each, and `collector.book_crosscheck_unaligned` absent (22.5; the aligned check, audit D-64).
+- `collector.late_trade`, `collector.pending_deltas`, `collector.book_sequence` for Bybit and
+  Hyperliquid in `/api/errors`: a steady late-trade rate means `hold_back_seconds` is too
+  short; any `pending_deltas` or `book_sequence` entry is a DATA-02 finding for D-63 (22.12).
+- Lag measurement, once per venue, in the collector image with `--network host`:
+  `python3 -m collector_core.measure_lag --venue bybit --seconds 10800` and
+  `--venue hyperliquid --seconds 10800`; record the per-kind distributions in D-63, then set
+  each venue's `hold_back_seconds` to its TradeTick p99.9 rounded up to 0.5 s (or 0.0 with the
+  reason in the comment), replace the provisional dev-box comment, and redeploy (22.12).
+- After the first full UTC day: `du -sh platform/data/catalog/data/trade_tick/*.<VENUE>` summed
+  per venue into D-45 (22.13); `make nightly VENUE=DYDX|BYBIT|HYPERLIQUID DAY=YYYY-MM-DD` by
+  hand for that day, summary lines and before/after file counts into D-45/D-51 and section 2
+  above, peak RSS inside the box's free memory (MEM-01; 22.13); `make consolidate` once by
+  hand and its `consolidate: ...` line into D-36 as **measured** (22.11).
+- `compare_klines` pass rate per venue (instruments and minutes) into D-63/D-51 with every
+  mismatch root-caused: a missing trade is a 22.14 gap, a book-related one is a new finding.
+  Never add a tolerance (22.12, 22.13).
+- One full day of Hyperliquid trade arrival lag (`ts_init - ts_event`) into D-59 to confirm
+  the 10 s stale-trade filter drops no live trades (22.13).
+
+### 5.4 Cron, backup, and the trade-feed flip
+
+- Install the nightly cron line from section 1 (CRON_TZ=UTC if the box is not on UTC); it
+  replaces story 22.11's consolidate-only line. After the first nightly run, copy that night's
+  `consolidate: ...` line into D-36 as the measured nightly run (22.11, 22.13).
+- Object storage: choose Cloudflare R2 or Backblaze B2, create a bucket, `rclone config` on
+  the host (credentials stay in `~/.config/rclone`), set `RCLONE_REMOTE` and `RCLONE_BUCKET`
+  (bare values) in `platform/.env`, run `make backup-catalog` once after a consolidation,
+  confirm with `rclone lsf $RCLONE_REMOTE:$RCLONE_BUCKET/catalog/data --max-depth 2`, then
+  update D-33 to say the backup is scheduled. Also answer D-33's open question: was the
+  2026-09-19 17:53 VPS catalog reset deliberate? (22.11)
+- Trade gap closure: run section 3 above in full (before figure with `trade_feeds = 1`, flip
+  to 2, 24 h and one-week numbers into D-47/D-48; 22.14).
+
 ## 4. Things not to do
 
 - Do not run `repair_catalog` on a day `rebuild_seconds` has rebuilt: its `ohlc_outside_book`
