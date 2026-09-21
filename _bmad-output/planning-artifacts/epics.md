@@ -2561,7 +2561,7 @@ So that the trade archive is complete on every venue that allows it, and the ven
 
 ## Epic 23: Migration guardrails, observability and the shared kernel
 
-First epic of the DDD migration (`_bmad-output/planning-artifacts/architecture/architecture-ddd-platform-2026-09-21/ARCHITECTURE-SPINE.md`, AD-D1..AD-D18; requirements MR1–MR14 above). Step 0, the `troll/` → `platform/` rename with the stores under `platform/data/`, is done (`18c12eedf4`). Every story here and in Epics 24–26 obeys the per-story rules MR1 (deployable alone, published language frozen), MR2 (pure re-export shims with `REMOVE_AFTER`, gone within two stories), MR4 (docs, dockerfile `COPY` sets, compose `command:` lines and both Makefile test lists updated in the same commit) and MR14 (parent-spine Deferred items struck when resolved). Order inside the epic is fixed: 23.1 then 23.2.
+First epic of the DDD migration (`_bmad-output/planning-artifacts/architecture/architecture-ddd-platform-2026-09-21/ARCHITECTURE-SPINE.md`, AD-D1..AD-D18; requirements MR1–MR14 above). Step 0, the `troll/` → `platform/` rename with the stores under `platform/data/`, is done (`18c12eedf4`). Every story here and in Epics 24–26 obeys the per-story rules MR1 (deployable alone, published language frozen), MR2 (pure re-export shims with `REMOVE_AFTER`, gone within two stories), MR4 (docs, dockerfile `COPY` sets, compose `command:` lines and both Makefile test lists updated in the same commit) and MR14 (parent-spine Deferred items struck when resolved). Order inside the epic is fixed: 23.1, then 23.2, then 23.3 (added 2026-09-21 after the Epic 22 operator-action pass).
 
 ### Story 23.1: `observability/` context, one notifier, and the migration's enforcement tests
 
@@ -2622,6 +2622,46 @@ So that no two contexts can ever hold two copies of a shared type or a shared nu
 **Given** MR4
 **When** the story is merged
 **Then** all three dockerfiles `COPY` `kernel`, `test_images.py` and `test_boundaries.py` pass, `platform/CLAUDE.md`'s "Adding a venue" step 5 points at `kernel/venues.py`, `ARCHITECTURE.md` and `docs/DATA_DICTIONARY.md` cite the kernel paths, and the parent spine's Deferred entry "Writer→reader imports contradict AD-4" is amended to record that `error_ledger` (23.1) and the shared types, clocks and read helpers (23.2) are resolved, with `candle_store` remaining for Story 24.1
+
+### Story 23.3: Durable error ledger and the day-long data/error cross-check
+
+As the platform operator,
+I want every tolerated failure written to a file that survives restarts, rebuilds and Redis loss, and one command that cross-checks a day of archived data against those errors,
+So that "leave it running for a day and look at the logs" is real evidence, not a count that silently reset when a container was recreated.
+
+**Acceptance Criteria:**
+
+**Given** `observability.error_ledger.record(site, detail="", exc=None)` from 23.1
+**When** a process calls it
+**Then** besides the ERROR log line and the in-memory count (both unchanged), it appends one JSON line `{"ts_ns", "service", "pid", "site", "detail", "exc_type", "suppressed"}` to `<ERROR_LEDGER_DIR>/<service>.jsonl`, using the standard library only (the `test_boundaries.py` stdlib assertion for `observability/` still passes); `service` comes from `ERROR_LEDGER_SERVICE`; the write is flushed per line and never raises into the caller (a failed write is counted under the site `observability.ledger_write` in memory and logged, never swallowed, DATA-07); with `ERROR_LEDGER_DIR` unset the ledger behaves exactly as today and tests need no directory
+
+**Given** a process starts
+**When** its ledger is initialised
+**Then** it writes a `{"site": "process_start", ...}` line with the pid and image/code revision if available, so a reader can tell a zero-error window from a restarted one; the cross-check (AC5) reports every restart inside the window
+
+**Given** an error storm (a flapping feed, a reconnect loop)
+**When** one site records faster than the write cap
+**Then** at most `ERROR_LEDGER_MAX_LINES_PER_SITE_PER_MIN` (default 60) lines per site per minute are written, the next written line for that site carries the exact number of suppressed records in `suppressed`, so persisted totals stay exact; files rotate by size (`<service>.jsonl`, `.1` .. `.N`, default 20 MB × 10, mirroring the compose `x-logging` policy) and the bound is a documented `Known limit:` comment naming the ceiling and the upgrade path (object-storage shipping with the catalog backup, Story 22.11's rclone remote)
+
+**Given** every service that calls `record()` (`collector`, `bybit_collector`, `hyperliquid_collector`, `ranking_engine`, `data_api`, `live-paper`, `bot_tui`)
+**When** the story ships
+**Then** `docker-compose.yml` bind-mounts `./data/errors:/app/errors_dir` into each and sets `ERROR_LEDGER_DIR=/app/errors_dir` and a distinct `ERROR_LEDGER_SERVICE` equal to the compose service name (new env vars and one new mount are additive; every existing env var, mount and service name is unchanged, MR1); `.gitignore` covers `platform/data/errors/`; `platform/data/` stays the only place durable stores live (AD-D13)
+
+**Given** a UTC window (`--since`/`--until`, default the last 24 h) and optional `--venue`
+**When** `python3 -m collector_core.crosscheck_errors` runs (mapped to the `archive` context in `LEGACY_MODULE_TO_CONTEXT`; it moves with archive in 25.1)
+**Then** it reads the ledger files (rotated ones included) and, through `kernel.catalog_files` only (no `ParquetDataCatalog` construction, no unbounded loads, one day and one instrument at a time, MEM-01), the `custom_dydx_second_snapshot` rows of every collected instrument in the window, and prints: per service, restarts and per-site counts (suppressed included); per instrument, missing 1 s snapshot seconds grouped into gap intervals; and for every gap interval, the ledger entries of the owning collector within `MAX_TS_INIT_SKEW_NS` of it. A gap with no matching ledger entry and no restart is reported as `UNEXPLAINED` (a DATA-07 finding, never tolerated); the exit code is non-zero when any `UNEXPLAINED` gap or any site in a `--fail-on` list (default `collector.book_crosscheck`, `collector.book_sequence`, `collector.pending_deltas`) is non-zero
+
+**Given** `GET /api/errors`
+**When** `ERROR_LEDGER_DIR` is set for `data_api`
+**Then** the response keeps its current fields unchanged and adds a `services` object with, per service file, the per-site counts since that service's last `process_start` and since a `?since_ns=` bound; the frontend error bar keeps working unmodified (fixture test on the old response shape)
+
+**Given** the Epic 22 operator checks that need a clean day
+**When** the story is merged and deployed
+**Then** `platform/docs/DEPLOY_CHECKLIST.md` gains a "Day-long clean-run check" section with the exact `crosscheck_errors` invocation that closes each of: 22.5 #1 (`collector.book_crosscheck` zero on Bybit and Hyperliquid for a day), 22.1 #2 (no `[collector.*]` ledger lines, snapshots 1 s apart), 22.10 #4 (`ranking_engine.volume24h` not growing), 22.12 #5 (`collector.late_trade`, `collector.pending_deltas`, `collector.book_sequence` for Bybit and Hyperliquid); each of those story files gets a one-line pointer to it under its operator actions
+
+**Given** MR4
+**When** the story is merged
+**Then** `platform/CLAUDE.md` DATA-07 replaces the per-process Known limit with the durable-file behaviour and its new ceiling, `ARCHITECTURE.md` and `docs/DATA_DICTIONARY.md` document `platform/data/errors/*.jsonl` (fields, rotation, cap), the three dockerfiles and both Makefile test lists stay consistent (`test_images.py`, `test_boundaries.py` pass), and the spine's AD-D16 Known limit is amended with a `[amended 2026-09-21: Story 23.3]` note
 
 ## Epic 24: Derived data and read models on one fold
 
