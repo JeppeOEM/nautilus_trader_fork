@@ -62,8 +62,10 @@ _WEBHOOK_TIMEOUT_S = 5
 
 @dataclass
 class Alert:
-    """`level` is always a static price: a horizontal-line condition is resolved to the line's
-    price by the dialog at creation time (the line itself is client-side chart state)."""
+    """
+    `level` is always a static price: a horizontal-line condition is resolved to the line's
+    price by the dialog at creation time (the line itself is client-side chart state).
+    """
 
     id: str
     instrument_id: str
@@ -87,8 +89,10 @@ def status_of(alert: Alert, now_ns: int) -> str:
 
 
 class AlertStore:
-    """In-memory list mirrored to a TOML file on every change. A corrupt file raises on load
-    rather than starting empty -- the next save would otherwise silently destroy it."""
+    """
+    In-memory list mirrored to a TOML file on every change. A corrupt file raises on load
+    rather than starting empty -- the next save would otherwise silently destroy it.
+    """
 
     def __init__(self, path: Path) -> None:
         self._path = path
@@ -147,8 +151,10 @@ def new_alert(**fields: Any) -> Alert:
 
 @dataclass
 class RunState:
-    """Per-alert, in-memory only: a restart forgets the previous price, so the first tick after
-    a restart can never fire (a cross needs two observations)."""
+    """
+    Per-alert, in-memory only: a restart forgets the previous price, so the first tick after
+    a restart can never fire (a cross needs two observations).
+    """
 
     last_price: float | None = None
     prev_close: float | None = None  # once_per_bar_close: close of the bar before the last one
@@ -161,8 +167,10 @@ def _crossed(prev: float | None, cur: float, level: float) -> bool:
 
 
 def evaluate(alert: Alert, state: RunState, price: float, ts_ns: int) -> float | None:
-    """One tick of the frequency/expiration state machine. Returns the price to report when
-    `alert` fires (for once_per_bar_close that is the closed bar's close, not this tick), else None."""
+    """
+    One tick of the frequency/expiration state machine. Returns the price to report when
+    `alert` fires (for once_per_bar_close that is the closed bar's close, not this tick), else None.
+    """
     if status_of(alert, ts_ns) != "active":
         return None
     bucket = ts_ns // (alert.bar_seconds * _NS_PER_S)
@@ -197,8 +205,10 @@ def render(template: str, ticker: str, close: float, ts_ns: int, bar_seconds: in
 
 
 def post_webhook(alert: Alert, body: str) -> None:
-    """Failures are logged with the alert id and never retried -- the next fire opportunity
-    is the retry."""
+    """
+    Failures are logged with the alert id and never retried -- the next fire opportunity
+    is the retry.
+    """
     try:
         json.loads(body)
         content_type = "application/json"
@@ -222,8 +232,10 @@ def telegram_configured() -> bool:
 
 
 def post_telegram(alert: Alert, text: str) -> None:
-    """Bot API `sendMessage`. Failures are logged with the alert id only -- never the request
-    URL, which contains the bot token."""
+    """
+    Bot API `sendMessage`. Failures are logged with the alert id only -- never the request
+    URL, which contains the bot token.
+    """
     request = urllib.request.Request(
         f"{TELEGRAM_API_BASE}/bot{os.environ['TELEGRAM_BOT_TOKEN']}/sendMessage",
         data=json.dumps({"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": text}).encode(),
@@ -246,16 +258,18 @@ def deliver(alert: Alert, body: str) -> None:
 
 class AlertEngine:
     def __init__(
-        self, alert_store: AlertStore, post: Callable[[Alert, str], None] = deliver,
+        self,
+        alert_store: AlertStore,
+        post: Callable[[Alert, str], None] = deliver,
     ) -> None:
         self._store = alert_store
         self._post = post
         self._state: dict[str, RunState] = {}
-        self._listeners: set["asyncio.Queue[dict]"] = set()
+        self._listeners: set[asyncio.Queue[dict]] = set()
 
     def subscribe(self) -> "asyncio.Queue[dict]":
         """Toast feed for one `/ws/live` connection."""
-        queue: "asyncio.Queue[dict]" = asyncio.Queue(QUEUE_MAX)
+        queue: asyncio.Queue[dict] = asyncio.Queue(QUEUE_MAX)
         self._listeners.add(queue)
         return queue
 

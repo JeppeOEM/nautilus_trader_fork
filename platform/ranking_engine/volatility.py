@@ -34,7 +34,8 @@ from collections import deque
 
 
 class VolatilityTracker:
-    """Cross-sectional volatility: per-instrument stdev of consecutive-price percentage
+    """
+    Cross-sectional volatility: per-instrument stdev of consecutive-price percentage
     returns over the trailing `lookback_seconds` (default 3600s = 1h).
     """
 
@@ -51,7 +52,8 @@ class VolatilityTracker:
             buf.popleft()
 
     def score(self, instrument_id: str) -> float | None:
-        """Stdev of the buffer's consecutive-price returns, or None if fewer than 2
+        """
+        Stdev of the buffer's consecutive-price returns, or None if fewer than 2
         returns are available -- an instrument with insufficient history (newly
         subscribed, or mid-resync-gap) is a missing value, not an error.
         """

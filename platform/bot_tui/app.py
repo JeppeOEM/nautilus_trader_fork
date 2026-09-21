@@ -134,9 +134,7 @@ _MAX_COLLECTED_INSTRUMENTS = 29
 # live_paper/node.py's build_node(), which attaches DummyStrategy directly rather
 # than by string path; revisit as a per-bot lookup (bots:status already carries a
 # `strategy` class-name field) if a second strategy is ever added.
-_STRATEGY_SOURCE_PATH = Path(
-    os.environ.get("STRATEGY_SOURCE_PATH", "/app/live_paper/strategy.py")
-)
+_STRATEGY_SOURCE_PATH = Path(os.environ.get("STRATEGY_SOURCE_PATH", "/app/live_paper/strategy.py"))
 
 # Full control reference shown by `:h`/`:help` (see _COMMAND_ALIASES below) -- one
 # section per view, listing every key that view's own footer hint above only
@@ -237,36 +235,45 @@ _MIN_INDICATOR_DECIMALS = 8
 # they update on the same 60s-or-slower cadence as the volatility fields and would be
 # noise scattered elsewhere.
 _COIN_DETAIL_INDICATOR_GROUPS: list[tuple[str, list[tuple[str, str, int]]]] = [
-    ("live  (1s book state)", [
-        ("microprice", "microprice", _MIN_INDICATOR_DECIMALS),
-        ("microprice lean", "microprice_lean", _MIN_INDICATOR_DECIMALS),
-        ("spread", "spread", _MIN_INDICATOR_DECIMALS),
-        ("obi(3)", "obi_3", _MIN_INDICATOR_DECIMALS),
-        ("obi(5)", "obi_5", _MIN_INDICATOR_DECIMALS),
-        ("obi(10)", "obi_10", _MIN_INDICATOR_DECIMALS),
-        ("price", "price", _MIN_INDICATOR_DECIMALS),
-    ]),
-    ("order flow  (~5m rolling)", [
-        ("ofi(3)", "ofi_3", _MIN_INDICATOR_DECIMALS),
-        ("ofi(5)", "ofi_5", _MIN_INDICATOR_DECIMALS),
-        ("ofi(10)", "ofi_10", _MIN_INDICATOR_DECIMALS),
-        ("ofi(10) z", "ofi_10_z", _MIN_INDICATOR_DECIMALS),
-        ("cvd", "cvd", _MIN_INDICATOR_DECIMALS),
-        ("volume delta (60s)", "volume_delta", _MIN_INDICATOR_DECIMALS),
-        ("buy count", "buy_count", 0),
-        ("sell count", "sell_count", 0),
-        ("avg trade size", "avg_trade_size", _MIN_INDICATOR_DECIMALS),
-    ]),
-    ("volatility & market  (60s-1h)", [
-        ("volatility (fast)", "volatility_fast", _MIN_INDICATOR_DECIMALS),
-        ("volatility (catalog)", "volatility", _MIN_INDICATOR_DECIMALS),
-        ("volatility score", "volatility_score", _MIN_INDICATOR_DECIMALS),
-        ("pct 1h", "pct_1h", _MIN_INDICATOR_DECIMALS),
-        ("pct 24h", "pct_24h", _MIN_INDICATOR_DECIMALS),
-        ("pct 1w", "pct_1w", _MIN_INDICATOR_DECIMALS),
-        ("pct 1m", "pct_1m", _MIN_INDICATOR_DECIMALS),
-        ("volume 24h", "volume24h", _MIN_INDICATOR_DECIMALS),
-    ]),
+    (
+        "live  (1s book state)",
+        [
+            ("microprice", "microprice", _MIN_INDICATOR_DECIMALS),
+            ("microprice lean", "microprice_lean", _MIN_INDICATOR_DECIMALS),
+            ("spread", "spread", _MIN_INDICATOR_DECIMALS),
+            ("obi(3)", "obi_3", _MIN_INDICATOR_DECIMALS),
+            ("obi(5)", "obi_5", _MIN_INDICATOR_DECIMALS),
+            ("obi(10)", "obi_10", _MIN_INDICATOR_DECIMALS),
+            ("price", "price", _MIN_INDICATOR_DECIMALS),
+        ],
+    ),
+    (
+        "order flow  (~5m rolling)",
+        [
+            ("ofi(3)", "ofi_3", _MIN_INDICATOR_DECIMALS),
+            ("ofi(5)", "ofi_5", _MIN_INDICATOR_DECIMALS),
+            ("ofi(10)", "ofi_10", _MIN_INDICATOR_DECIMALS),
+            ("ofi(10) z", "ofi_10_z", _MIN_INDICATOR_DECIMALS),
+            ("cvd", "cvd", _MIN_INDICATOR_DECIMALS),
+            ("volume delta (60s)", "volume_delta", _MIN_INDICATOR_DECIMALS),
+            ("buy count", "buy_count", 0),
+            ("sell count", "sell_count", 0),
+            ("avg trade size", "avg_trade_size", _MIN_INDICATOR_DECIMALS),
+        ],
+    ),
+    (
+        "volatility & market  (60s-1h)",
+        [
+            ("volatility (fast)", "volatility_fast", _MIN_INDICATOR_DECIMALS),
+            ("volatility (catalog)", "volatility", _MIN_INDICATOR_DECIMALS),
+            ("volatility score", "volatility_score", _MIN_INDICATOR_DECIMALS),
+            ("pct 1h", "pct_1h", _MIN_INDICATOR_DECIMALS),
+            ("pct 24h", "pct_24h", _MIN_INDICATOR_DECIMALS),
+            ("pct 1w", "pct_1w", _MIN_INDICATOR_DECIMALS),
+            ("pct 1m", "pct_1m", _MIN_INDICATOR_DECIMALS),
+            ("volume 24h", "volume24h", _MIN_INDICATOR_DECIMALS),
+        ],
+    ),
 ]
 
 # Bot-detail's trades-blotter region (Story 4.7) -- a fixed visible height inside a
@@ -889,7 +896,9 @@ class BotTuiApp:
         # precedent _open_dashboard_chart's own assert already documents.
         assert self._coin_detail_instrument_id is not None
         snapshot = coin_detail_state._LATEST_SNAPSHOT
-        row = coin_detail.rank_row_for(ranking_state._LATEST_RANKING, self._coin_detail_instrument_id)
+        row = coin_detail.rank_row_for(
+            ranking_state._LATEST_RANKING, self._coin_detail_instrument_id
+        )
         row = row or {}
 
         # Right-justify values to the widest one ever seen this Coin-detail session,
@@ -1744,9 +1753,7 @@ class BotTuiApp:
             coin_detail_state._redis_listener(self._redis_url)
         )
         bots_listener_task = loop.create_task(bots_state._redis_listener(self._redis_url))
-        collector_listener_task = loop.create_task(
-            collector_state._redis_listener(self._redis_url)
-        )
+        collector_listener_task = loop.create_task(collector_state._redis_listener(self._redis_url))
         history_poll_task = loop.create_task(bot_history_state.poll_loop(self._redis_url))
         incidents_poll_task = loop.create_task(bot_incidents_state.poll_loop(self._redis_url))
         redraw_task = loop.create_task(self._redraw_loop())

@@ -52,7 +52,8 @@ def put_drop_oldest(queue: "asyncio.Queue[dict]", item: dict) -> None:
 
 
 class RankingsBus:
-    """Caches the latest `rankings:live` message and fans it out to WS listeners.
+    """
+    Caches the latest `rankings:live` message and fans it out to WS listeners.
 
     `.latest` is `None` until the first valid message arrives -- `GET /api/rankings`
     reads this directly to decide whether to 503 (I/O matrix: "cache empty is an
@@ -91,7 +92,9 @@ class RankingsBus:
             or not isinstance(message.get("ranks"), list)
             or not all(isinstance(row, dict) for row in message["ranks"])
         ):
-            logger.warning("Malformed rankings:live message, skipping (cache unchanged): %r", message)
+            logger.warning(
+                "Malformed rankings:live message, skipping (cache unchanged): %r", message
+            )
             return
         self.latest = message
         for queue in self._listeners:

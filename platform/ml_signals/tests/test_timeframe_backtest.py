@@ -37,6 +37,7 @@ import tempfile
 import time
 from decimal import Decimal
 
+from ml_signals import backtest_dydx
 from nautilus_trader.model.currencies import BTC
 from nautilus_trader.model.currencies import USDC
 from nautilus_trader.model.data import TradeTick
@@ -50,20 +51,32 @@ from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
-from ml_signals import backtest_dydx
 
 _IID = InstrumentId(Symbol("BTC-USD-PERP"), Venue("DYDX"))
 
 _INSTRUMENT = CryptoPerpetual(
-    instrument_id=_IID, raw_symbol=Symbol("BTC-USD-PERP"),
-    base_currency=BTC, quote_currency=USDC, settlement_currency=USDC, is_inverse=False,
-    price_precision=1, size_precision=3,
-    price_increment=Price(0.1, 1), size_increment=Quantity(0.001, 3),
-    max_quantity=None, min_quantity=None, max_notional=None, min_notional=None,
-    max_price=None, min_price=None,
-    margin_init=Decimal("0.1"), margin_maint=Decimal("0.05"),
-    maker_fee=Decimal("0.0002"), taker_fee=Decimal("0.0005"),
-    ts_event=0, ts_init=0,
+    instrument_id=_IID,
+    raw_symbol=Symbol("BTC-USD-PERP"),
+    base_currency=BTC,
+    quote_currency=USDC,
+    settlement_currency=USDC,
+    is_inverse=False,
+    price_precision=1,
+    size_precision=3,
+    price_increment=Price(0.1, 1),
+    size_increment=Quantity(0.001, 3),
+    max_quantity=None,
+    min_quantity=None,
+    max_notional=None,
+    min_notional=None,
+    max_price=None,
+    min_price=None,
+    margin_init=Decimal("0.1"),
+    margin_maint=Decimal("0.05"),
+    maker_fee=Decimal("0.0002"),
+    taker_fee=Decimal("0.0005"),
+    ts_event=0,
+    ts_init=0,
 )
 
 
@@ -71,9 +84,13 @@ def _catalog_with_trades(tmp_path: str, n: int = 200) -> None:
     now_ns = time.time_ns()
     trades = [
         TradeTick(
-            instrument_id=_IID, price=Price(100.0 + (i % 10) * 0.5, 1), size=Quantity(1.0, 3),
+            instrument_id=_IID,
+            price=Price(100.0 + (i % 10) * 0.5, 1),
+            size=Quantity(1.0, 3),
             aggressor_side=AggressorSide.BUYER if i % 2 == 0 else AggressorSide.SELLER,
-            trade_id=TradeId(str(i)), ts_event=now_ns - (n - i) * 1_000_000_000, ts_init=now_ns - (n - i) * 1_000_000_000,
+            trade_id=TradeId(str(i)),
+            ts_event=now_ns - (n - i) * 1_000_000_000,
+            ts_init=now_ns - (n - i) * 1_000_000_000,
         )
         for i in range(n)
     ]
@@ -87,10 +104,14 @@ def test_bar_interval_1_second_produces_working_bar_aggregation() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         _catalog_with_trades(tmp)
         results = backtest_dydx.run(
-            symbols=["BTC-USD-PERP.DYDX"], catalog_path=tmp, bar_interval="1-SECOND",
+            symbols=["BTC-USD-PERP.DYDX"],
+            catalog_path=tmp,
+            bar_interval="1-SECOND",
         )
         result = results["BTC-USD-PERP.DYDX"]
-        assert result.iterations > 0, "expected trade ticks to be processed for bar_interval=1-SECOND"
+        assert result.iterations > 0, (
+            "expected trade ticks to be processed for bar_interval=1-SECOND"
+        )
 
 
 if __name__ == "__main__":

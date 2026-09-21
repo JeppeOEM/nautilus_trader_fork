@@ -37,7 +37,8 @@ NO_ASKS_TEXT = "no asks"
 
 
 def rank_row_for(ranking: dict | None, instrument_id: str) -> dict | None:
-    """The rankings:live rank entry matching instrument_id, or None if no rankings:live
+    """
+    The rankings:live rank entry matching instrument_id, or None if no rankings:live
     message has arrived yet or this instrument isn't (yet) in it -- e.g. a coin just
     opened before its first live tick has propagated through ranking_engine.
     """

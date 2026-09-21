@@ -33,15 +33,16 @@ slots per instrument covers the full lookback window regardless of arrival rate.
 import logging
 
 import numpy as np
-
 from ml_signals import catalog_stats
 from ml_signals.metrics_computer import PRICE_LOOKBACK_HOURS
+
 
 logger = logging.getLogger(__name__)
 
 
 class _RingBuffer:
-    """Fixed-capacity circular buffer of (ts_event_ns, price) pairs.
+    """
+    Fixed-capacity circular buffer of (ts_event_ns, price) pairs.
 
     Private to this module -- PriceSeriesStore is the public surface. Backed by
     parallel numpy int64/float64 arrays (not a deque of tuples) to keep the ~29
@@ -76,7 +77,8 @@ class _RingBuffer:
         self._last_ts = ts_event_ns
 
     def ascending(self, cutoff_ns: int = 0) -> tuple[np.ndarray, np.ndarray]:
-        """(ts, price) numpy arrays in ascending ts order, filtered to ts >= cutoff_ns.
+        """
+        (ts, price) numpy arrays in ascending ts order, filtered to ts >= cutoff_ns.
 
         Never wrapped (count < capacity): the buffer is already in append order from
         index 0. Wrapped (count == capacity): the oldest entry sits at the current
@@ -94,7 +96,8 @@ class _RingBuffer:
 
 
 class PriceSeriesStore:
-    """Per-instrument long-window (ts_event_ns, close_price) series, in memory.
+    """
+    Per-instrument long-window (ts_event_ns, close_price) series, in memory.
 
     `backfill()` seeds an instrument's history exactly once (idempotency for
     "exactly once" is enforced by the caller, engine.py's `_BACKFILLED` set -- this
@@ -110,7 +113,8 @@ class PriceSeriesStore:
         self._buffers: dict[str, _RingBuffer] = {}
 
     def ingest(self, instrument_id: str, ts_event_ns: int, close_price: float | None) -> None:
-        """No-op when close_price is None -- matches price_series()'s existing
+        """
+        No-op when close_price is None -- matches price_series()'s existing
         "seconds with no trade contribute nothing" rule.
 
         A point older than or equal to the buffer's last-appended ts is dropped and
@@ -125,13 +129,16 @@ class PriceSeriesStore:
         if buf.last_ts is not None and ts_event_ns <= buf.last_ts:
             logger.warning(
                 "Out-of-order price point dropped for %s: ts_event_ns=%d <= last_ts=%d",
-                instrument_id, ts_event_ns, buf.last_ts,
+                instrument_id,
+                ts_event_ns,
+                buf.last_ts,
             )
             return
         buf.append(ts_event_ns, close_price)
 
     def backfill(self, instrument_id: str, series: list[tuple[int, float]]) -> None:
-        """Seed an instrument's buffer from a Parquet-read historical series.
+        """
+        Seed an instrument's buffer from a Parquet-read historical series.
 
         Handles the backfill/live-ingest race (Design Notes): live points may
         already be in the buffer (appended via ingest() while this series' Parquet
@@ -160,7 +167,9 @@ class PriceSeriesStore:
         if mismatched:
             logger.warning(
                 "%s: %d live/Parquet price mismatches at same ts (first ts=%d); keeping live",
-                instrument_id, len(mismatched), mismatched[0],
+                instrument_id,
+                len(mismatched),
+                mismatched[0],
             )
 
         merged = _RingBuffer(self._capacity)
@@ -171,7 +180,8 @@ class PriceSeriesStore:
         self._buffers[instrument_id] = merged
 
     def stats(self, instrument_id: str, now_ns: int) -> dict:
-        """price/pct_change_1h/pct_change_24h/volatility over the retained window,
+        """
+        price/pct_change_1h/pct_change_24h/volatility over the retained window,
         via the shared price_stats_from_series() formula (SSOT-02, DATA-02).
         """
         buf = self._buffers.get(instrument_id)

@@ -40,21 +40,23 @@ archive existed; this tool is for pre-archive rows only.
 import argparse
 import logging
 
+from ml_signals.catalog_stats import query_second_snapshots
+
 from collector_core.build_candles import all_instruments
 from collector_core.build_candles import data_range_ns
 from collector_core.build_candles import day_chunks
 from collector_core.build_candles import rebuild_instrument
 from collector_core.integrity import ohlc_outside_book
 from collector_core.second_snapshot import DydxSecondSnapshot
-from ml_signals.catalog_stats import query_second_snapshots
-from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
 
 logger = logging.getLogger(__name__)
 
 
-def find_impossible_snapshots(catalog_path: str, iid: str, start_ns: int, end_ns: int) -> list[DydxSecondSnapshot]:
+def find_impossible_snapshots(
+    catalog_path: str, iid: str, start_ns: int, end_ns: int
+) -> list[DydxSecondSnapshot]:
     return [
         snap
         for a, b in day_chunks(start_ns, end_ns)
@@ -66,14 +68,23 @@ def find_impossible_snapshots(catalog_path: str, iid: str, start_ns: int, end_ns
 def _cleared_copy(snap: DydxSecondSnapshot) -> DydxSecondSnapshot:
     values = DydxSecondSnapshot.to_dict(snap)
     values.update(
-        buy_volume=0.0, sell_volume=0.0, buy_count=0, sell_count=0,
-        open_price=None, high_price=None, low_price=None, close_price=None,
+        buy_volume=0.0,
+        sell_volume=0.0,
+        buy_count=0,
+        sell_count=0,
+        open_price=None,
+        high_price=None,
+        low_price=None,
+        close_price=None,
     )
     return DydxSecondSnapshot.from_dict(values)
 
 
 def repair_instrument(
-    catalog: ParquetDataCatalog, catalog_path: str, iid: str, flagged: list[DydxSecondSnapshot],
+    catalog: ParquetDataCatalog,
+    catalog_path: str,
+    iid: str,
+    flagged: list[DydxSecondSnapshot],
     candles_db_path: str | None = None,
 ) -> None:
     # Build every replacement first so a bad row fails before anything is deleted.
@@ -87,11 +98,17 @@ def repair_instrument(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--catalog", required=True)
     parser.add_argument("--instrument", action="append", help="repeatable; default: all")
-    parser.add_argument("--apply", action="store_true", help="rewrite the catalog (default: report only)")
-    parser.add_argument("--candles-db", help="candles.db to rebuild the repaired days in (closed days only)")
+    parser.add_argument(
+        "--apply", action="store_true", help="rewrite the catalog (default: report only)"
+    )
+    parser.add_argument(
+        "--candles-db", help="candles.db to rebuild the repaired days in (closed days only)"
+    )
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -105,8 +122,13 @@ def main() -> None:
             continue
         logger.info("%s: %d impossible snapshot(s)", iid, len(flagged))
         for snap in flagged:
-            logger.info("  ts=%d high=%s low=%s vol=%.4f", snap.ts_event, snap.high_price, snap.low_price,
-                        snap.buy_volume + snap.sell_volume)
+            logger.info(
+                "  ts=%d high=%s low=%s vol=%.4f",
+                snap.ts_event,
+                snap.high_price,
+                snap.low_price,
+                snap.buy_volume + snap.sell_volume,
+            )
         if args.apply:
             repair_instrument(catalog, args.catalog, iid, flagged, args.candles_db)
             logger.info("  repaired")

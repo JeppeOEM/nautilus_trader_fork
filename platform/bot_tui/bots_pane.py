@@ -70,6 +70,7 @@ def fit(text: str, width: int) -> str:
         return text[:width]
     return text[: width - 1] + "…"
 
+
 # Distinct from COLD_OPEN_TEXT (that's "no bots:status message has ever arrived for
 # any bot"): these two describe bots:history:{bot_id}:{range}'s own three-state shape
 # for whichever single bot/range Bot-detail currently has open (Story 4.7, AC1/AC4).

@@ -18,15 +18,15 @@ import tempfile
 from unittest.mock import MagicMock
 
 from collector_core.second_snapshot import DydxSecondSnapshot
-from nautilus_trader.model.data import MarkPriceUpdate
-from nautilus_trader.model.identifiers import InstrumentId
-from nautilus_trader.model.objects import Price
-from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
 from ml_signals.catalog_stats import _overlapping_intervals
 from ml_signals.catalog_stats import find_gaps
 from ml_signals.catalog_stats import price_series
 from ml_signals.catalog_stats import price_stats
+from nautilus_trader.model.data import MarkPriceUpdate
+from nautilus_trader.model.identifiers import InstrumentId
+from nautilus_trader.model.objects import Price
+from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
 
 _IID = "BTC-USD-PERP.DYDX"
@@ -69,30 +69,37 @@ def test_overlapping_intervals_empty_when_no_shared_window() -> None:
 # ---- price_stats ----
 
 # Timestamps: 1 h = 3_600_000_000_000 ns, 24 h = 86_400_000_000_000 ns
-_1H_NS  = 3_600 * 1_000_000_000
+_1H_NS = 3_600 * 1_000_000_000
 _24H_NS = 86_400 * 1_000_000_000
 
 
 def _patched_price_stats(series: list[tuple[int, float]]) -> dict:
     """Run price_stats with a fixed series, bypassing the catalog."""
-    with MagicMock() as mock_catalog:
-        with __import__("unittest.mock", fromlist=["patch"]).patch(
+    with (
+        MagicMock() as mock_catalog,
+        __import__("unittest.mock", fromlist=["patch"]).patch(
             "ml_signals.catalog_stats.price_series", return_value=series
-        ):
-            return price_stats(mock_catalog, "ANY")
+        ),
+    ):
+        return price_stats(mock_catalog, "ANY")
 
 
 def test_price_stats_empty_returns_all_none() -> None:
     result = _patched_price_stats([])
-    assert result == {"price": None, "pct_change_1h": None, "pct_change_24h": None, "volatility": None}
+    assert result == {
+        "price": None,
+        "pct_change_1h": None,
+        "pct_change_24h": None,
+        "volatility": None,
+    }
 
 
 def test_price_stats_single_point_returns_price_only() -> None:
     result = _patched_price_stats([(1_000_000_000, 42.0)])
     assert result["price"] == 42.0
-    assert result["pct_change_1h"] is None     # only one point, no history span
+    assert result["pct_change_1h"] is None  # only one point, no history span
     assert result["pct_change_24h"] is None
-    assert result["volatility"] is None        # need 2+ returns
+    assert result["volatility"] is None  # need 2+ returns
 
 
 def test_price_stats_pct_1h_correct() -> None:
@@ -127,6 +134,7 @@ def test_price_stats_volatility_is_std_of_returns() -> None:
     series = [(base - 2 * _1H_NS, 100.0), (base - _1H_NS, 110.0), (base, 121.0)]
     result = _patched_price_stats(series)
     import numpy as np
+
     returns = [0.1, 121.0 / 110.0 - 1.0]
     assert result["volatility"] is not None
     assert abs(result["volatility"] - float(np.std(returns))) < 1e-9
@@ -136,25 +144,27 @@ def test_price_stats_volatility_is_std_of_returns() -> None:
 
 
 def _write_snapshot(catalog_path: str, close_price: float | None, ts: int) -> None:
-    ParquetDataCatalog(catalog_path).write_data([
-        DydxSecondSnapshot(
-            instrument_id=InstrumentId.from_str(_IID),
-            bid_prices=[close_price - 1] if close_price else [100.0],
-            bid_sizes=[1.0],
-            ask_prices=[close_price + 1] if close_price else [102.0],
-            ask_sizes=[1.0],
-            buy_volume=1.0 if close_price else 0.0,
-            sell_volume=0.0,
-            buy_count=1 if close_price else 0,
-            sell_count=0,
-            open_price=close_price,
-            high_price=close_price,
-            low_price=close_price,
-            close_price=close_price,
-            ts_event=ts,
-            ts_init=ts,
-        )
-    ])
+    ParquetDataCatalog(catalog_path).write_data(
+        [
+            DydxSecondSnapshot(
+                instrument_id=InstrumentId.from_str(_IID),
+                bid_prices=[close_price - 1] if close_price else [100.0],
+                bid_sizes=[1.0],
+                ask_prices=[close_price + 1] if close_price else [102.0],
+                ask_sizes=[1.0],
+                buy_volume=1.0 if close_price else 0.0,
+                sell_volume=0.0,
+                buy_count=1 if close_price else 0,
+                sell_count=0,
+                open_price=close_price,
+                high_price=close_price,
+                low_price=close_price,
+                close_price=close_price,
+                ts_event=ts,
+                ts_init=ts,
+            )
+        ]
+    )
 
 
 def test_price_series_uses_second_snapshot_close_price() -> None:
@@ -176,14 +186,16 @@ def test_price_series_skips_seconds_with_no_trade() -> None:
 def test_price_series_falls_back_to_mark_price_when_no_trades_exist() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         catalog = ParquetDataCatalog(tmp)
-        catalog.write_data([
-            MarkPriceUpdate(
-                instrument_id=InstrumentId.from_str(_IID),
-                value=Price(50.0, 1),
-                ts_event=1_000_000_000,
-                ts_init=1_000_000_000,
-            )
-        ])
+        catalog.write_data(
+            [
+                MarkPriceUpdate(
+                    instrument_id=InstrumentId.from_str(_IID),
+                    value=Price(50.0, 1),
+                    ts_event=1_000_000_000,
+                    ts_init=1_000_000_000,
+                )
+            ]
+        )
         series = price_series(catalog, _IID)
         assert series == [(1_000_000_000, 50.0)]
 

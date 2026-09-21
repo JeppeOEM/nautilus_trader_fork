@@ -63,7 +63,9 @@ def test_one_side_empty_is_a_mismatch() -> None:
 
 
 def test_config_keys_validated() -> None:
-    cfg = core_config_from_dict({"feed_stale_seconds": 12, "book_crosscheck_seconds": 0}, ("mainnet",))
+    cfg = core_config_from_dict(
+        {"feed_stale_seconds": 12, "book_crosscheck_seconds": 0}, ("mainnet",)
+    )
     assert (cfg.feed_stale_seconds, cfg.book_crosscheck_seconds) == (12.0, 0.0)
     with pytest.raises(ValueError, match="feed_stale_seconds"):
         core_config_from_dict({"feed_stale_seconds": 0}, ("mainnet",))

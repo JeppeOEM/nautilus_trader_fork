@@ -48,7 +48,9 @@ def top_levels_mismatch(
     """
     live, rest = live[:depth], rest[:depth]
     if not live or not rest:
-        return [] if not live and not rest else [f"one side empty: live={len(live)} rest={len(rest)}"]
+        return (
+            [] if not live and not rest else [f"one side empty: live={len(live)} rest={len(rest)}"]
+        )
     out: list[str] = []
     if _key(live[0][0]) != _key(rest[0][0]):
         out.append(f"best price: live={live[0][0]} rest={rest[0][0]}")
@@ -56,10 +58,14 @@ def top_levels_mismatch(
     judged = live[: min(len(live), len(rest))]
     missing = [p for p, _ in judged if _key(p) not in rest_sizes]
     if len(missing) > price_tolerance_levels:
-        out.extend(f"absent from REST {price}: live level not in REST top {depth}" for price in missing)
+        out.extend(
+            f"absent from REST {price}: live level not in REST top {depth}" for price in missing
+        )
     for price, size in judged:
         rest_size = rest_sizes.get(_key(price))
-        if rest_size is not None and abs(size - rest_size) > size_rel_tolerance * max(size, rest_size):
+        if rest_size is not None and abs(size - rest_size) > size_rel_tolerance * max(
+            size, rest_size
+        ):
             out.append(f"size at {price}: live={size} rest={rest_size}")
     return out
 

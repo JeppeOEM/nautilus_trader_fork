@@ -3,7 +3,7 @@ import logging
 from ml_signals import error_ledger
 
 
-def test_record_logs_error_with_traceback_and_counts(caplog) -> None:  # noqa: ANN001
+def test_record_logs_error_with_traceback_and_counts(caplog) -> None:
     error_ledger.reset()
     try:
         raise ValueError("bad row")

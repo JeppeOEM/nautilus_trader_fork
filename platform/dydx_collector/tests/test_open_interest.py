@@ -28,7 +28,9 @@ def _markets(**markets: dict) -> dict:
 
 
 def test_parses_single_market() -> None:
-    result = parse_open_interest(_markets(BTC={"ticker": "BTC-USD", "openInterest": "1234.56"}), ts=_TS)
+    result = parse_open_interest(
+        _markets(BTC={"ticker": "BTC-USD", "openInterest": "1234.56"}), ts=_TS
+    )
     assert len(result) == 1
     assert result[0].instrument_id.value == "BTC-USD-PERP.DYDX"
     assert result[0].open_interest == Decimal("1234.56")
@@ -60,7 +62,9 @@ def test_skips_market_missing_open_interest() -> None:
 
 def test_open_interest_preserved_as_decimal() -> None:
     # Decimal("999999999.123456789") must not be mangled by float conversion
-    result = parse_open_interest(_markets(X={"ticker": "ETH-USD", "openInterest": "999999999.123456789"}), ts=_TS)
+    result = parse_open_interest(
+        _markets(X={"ticker": "ETH-USD", "openInterest": "999999999.123456789"}), ts=_TS
+    )
     assert result[0].open_interest == Decimal("999999999.123456789")
 
 
@@ -87,7 +91,9 @@ def test_classify_liquidity_splits_by_volume24h_threshold() -> None:
 def test_classify_liquidity_low_token_count_high_volume_is_liquid() -> None:
     # Regression for the production incident AD-7 exists to prevent: BTC at 458
     # tokens of raw openInterest looks illiquid, but its USD volume24H is huge.
-    markets = _markets_by_volume(BTC={"ticker": "BTC-USD", "openInterest": "458", "volume24H": "50000000"})
+    markets = _markets_by_volume(
+        BTC={"ticker": "BTC-USD", "openInterest": "458", "volume24H": "50000000"}
+    )
     liquid, _illiquid = classify_liquidity(markets, min_volume_usd=100_000.0)
     assert "BTC-USD-PERP.DYDX" in liquid
 

@@ -16,16 +16,16 @@
 
 import glob
 import os
+from datetime import UTC
 from datetime import datetime
-from datetime import timezone
-from typing import NamedTuple
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 import pandas as pd
 import pyarrow.parquet as pq
-
 from collector_core.second_snapshot import DydxSecondSnapshot
+
 from ml_signals import error_ledger
 from nautilus_trader.model.data import IndexPriceUpdate
 from nautilus_trader.model.data import MarkPriceUpdate
@@ -54,9 +54,13 @@ def list_instruments(catalog_path: str) -> list[str]:
 
 
 def query_second_snapshots(
-    catalog_path: str, instrument_id: str, start_ns: int, end_ns: int,
+    catalog_path: str,
+    instrument_id: str,
+    start_ns: int,
+    end_ns: int,
 ) -> list[DydxSecondSnapshot]:
-    """DydxSecondSnapshot rows for `instrument_id` in [start_ns, end_ns], CustomData-unwrapped.
+    """
+    DydxSecondSnapshot rows for `instrument_id` in [start_ns, end_ns], CustomData-unwrapped.
 
     Shared by dashboard.py's _historical_lines_json and custom_indicators.py's
     _second_snapshots -- both projected different fields off this same query, so only
@@ -90,13 +94,23 @@ class SecondOHLC(NamedTuple):
     sell_volume: float
 
 
-_OHLC_COLUMNS = ["ts_event", "open_price", "high_price", "low_price", "close_price", "buy_volume", "sell_volume"]
+_OHLC_COLUMNS = [
+    "ts_event",
+    "open_price",
+    "high_price",
+    "low_price",
+    "close_price",
+    "buy_volume",
+    "sell_volume",
+]
 # Catalog filenames span ts_init, rows are filtered on ts_event; ts_init trails ts_event by well
 # under this, so files this close to the window are read and the exact ts_event filter decides.
 _FILE_MARGIN_NS = 60_000_000_000
 
 
-def query_second_ohlc(catalog_path: str, instrument_id: str, start_ns: int, end_ns: int) -> list[SecondOHLC]:
+def query_second_ohlc(
+    catalog_path: str, instrument_id: str, start_ns: int, end_ns: int
+) -> list[SecondOHLC]:
     """
     Per-second OHLC + volume rows in [start_ns, end_ns] (ts_event), read straight from the
     catalog's Parquet files with only the seven columns candles need.
@@ -105,23 +119,35 @@ def query_second_ohlc(catalog_path: str, instrument_id: str, start_ns: int, end_
     the catalog decoder -- ~95% of a candle request's time (Story 21.5 profile) for fields
     candles never look at. Same files, same rows, same values; just a column projection.
     """
-    pattern = os.path.join(catalog_path, "data", "custom_dydx_second_snapshot", instrument_id, "*.parquet")
+    pattern = os.path.join(
+        catalog_path, "data", "custom_dydx_second_snapshot", instrument_id, "*.parquet"
+    )
     rows: list[SecondOHLC] = []
     for path in glob.glob(pattern):
         start, _, end = Path(path).stem.partition("_")
-        if _stamp_to_ns(end) < start_ns - _FILE_MARGIN_NS or _stamp_to_ns(start) > end_ns + _FILE_MARGIN_NS:
+        if (
+            _stamp_to_ns(end) < start_ns - _FILE_MARGIN_NS
+            or _stamp_to_ns(start) > end_ns + _FILE_MARGIN_NS
+        ):
             continue
         # Files from before the OHLC fields existed lack those columns: they read as None (the
         # candle path skips a second with no close), never as a crash.
         names = pq.read_schema(path).names
         present = [c for c in _OHLC_COLUMNS if c in names]
         table = pq.read_table(
-            path, columns=present, filters=[("ts_event", ">=", start_ns), ("ts_event", "<=", end_ns)],
+            path,
+            columns=present,
+            filters=[("ts_event", ">=", start_ns), ("ts_event", "<=", end_ns)],
         )
         cols = {c: table.column(c).to_pylist() for c in present}
         n = table.num_rows
         rows.extend(
-            SecondOHLC(*(cols[c][i] if c in cols else (0.0 if c.endswith("volume") else None) for c in _OHLC_COLUMNS))
+            SecondOHLC(
+                *(
+                    cols[c][i] if c in cols else (0.0 if c.endswith("volume") else None)
+                    for c in _OHLC_COLUMNS
+                )
+            )
             for i in range(n)
         )
     rows.sort(key=lambda r: r.ts_event)
@@ -151,12 +177,15 @@ def second_ohlc_arrays(paths: list[str]) -> dict[str, np.ndarray]:
     def col(name: str, default: float) -> np.ndarray:
         parts = [
             t.column(name).to_numpy(zero_copy_only=False).astype(np.float64)
-            if name in t.column_names else np.full(t.num_rows, default)
+            if name in t.column_names
+            else np.full(t.num_rows, default)
             for t in tables
         ]
         return np.concatenate(parts) if parts else np.empty(0)
 
-    out["o"], out["h"], out["l"], out["c"] = (col(k, np.nan) for k in ("open_price", "high_price", "low_price", "close_price"))
+    out["o"], out["h"], out["l"], out["c"] = (
+        col(k, np.nan) for k in ("open_price", "high_price", "low_price", "close_price")
+    )
     out["v"] = col("buy_volume", 0.0) + col("sell_volume", 0.0)
     assert len(out["ts_ms"]) == n
     return out
@@ -167,7 +196,7 @@ def _stamp_to_ns(stamp: str) -> int:
     date, _, clock = stamp.rstrip("Z").partition("T")
     hour, minute, second, nanos = clock.split("-")
     moment = datetime.strptime(f"{date} {hour}:{minute}:{second}", "%Y-%m-%d %H:%M:%S")
-    return int(moment.replace(tzinfo=timezone.utc).timestamp()) * 1_000_000_000 + int(nanos)
+    return int(moment.replace(tzinfo=UTC).timestamp()) * 1_000_000_000 + int(nanos)
 
 
 def data_file_ranges(catalog_path: str, instrument_id: str) -> list[tuple[int, int]]:
@@ -179,7 +208,11 @@ def data_file_ranges(catalog_path: str, instrument_id: str) -> list[tuple[int, i
     than the window otherwise reads as "no more history").
     """
     ranges = []
-    for path in glob.glob(os.path.join(catalog_path, "data", "custom_dydx_second_snapshot", instrument_id, "*.parquet")):
+    for path in glob.glob(
+        os.path.join(
+            catalog_path, "data", "custom_dydx_second_snapshot", instrument_id, "*.parquet"
+        )
+    ):
         start, _, end = Path(path).stem.partition("_")
         ranges.append((_stamp_to_ns(start), _stamp_to_ns(end)))
     return sorted(ranges)
@@ -264,7 +297,9 @@ def likely_outages(catalog: ParquetDataCatalog, instrument_id: str) -> list[tupl
     try:
         mark_rows = _load(catalog, "mark_price_update", instrument_id)
     except (NotImplementedError, RuntimeError) as exc:
-        error_ledger.record("catalog_stats.likely_outages", f"{instrument_id} mark_price_update unreadable", exc)
+        error_ledger.record(
+            "catalog_stats.likely_outages", f"{instrument_id} mark_price_update unreadable", exc
+        )
         return []
     book_rows = _load(catalog, "order_book_deltas", instrument_id)
     if not mark_rows or not book_rows:
@@ -286,7 +321,9 @@ def coverage(catalog: ParquetDataCatalog, instrument_id: str) -> dict[str, dict]
             # (NotImplementedError); conflicting embedded schema metadata across flush batches
             # (e.g. ETH mark_price_update "price_precision" 6 vs 5) raises RuntimeError. Both
             # leave this data type out of the result -- recorded, never silent (DATA-07).
-            error_ledger.record("catalog_stats.coverage", f"{instrument_id} {data_type} unreadable", exc)
+            error_ledger.record(
+                "catalog_stats.coverage", f"{instrument_id} {data_type} unreadable", exc
+            )
             continue
         if not rows:
             continue
@@ -319,9 +356,7 @@ def price_series(
     # query() wraps custom Data subclasses in CustomData -- unwrap via .data (same
     # pattern as chart_data.py's compute_chart_series).
     snapshots = [r.data if hasattr(r, "data") else r for r in results]
-    trades = sorted(
-        (s.ts_event, s.close_price) for s in snapshots if s.close_price is not None
-    )
+    trades = sorted((s.ts_event, s.close_price) for s in snapshots if s.close_price is not None)
     if trades:
         return trades
 
@@ -330,7 +365,9 @@ def price_series(
     try:
         marks = catalog.query(MarkPriceUpdate, identifiers=[instrument_id], start=start_ns)
     except (NotImplementedError, RuntimeError) as exc:
-        error_ledger.record("catalog_stats.mark_prices", f"{instrument_id} mark_price_update unreadable", exc)
+        error_ledger.record(
+            "catalog_stats.mark_prices", f"{instrument_id} mark_price_update unreadable", exc
+        )
         marks = []
     if marks:
         return sorted((m.ts_event, m.value.as_double()) for m in marks)

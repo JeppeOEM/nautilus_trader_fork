@@ -63,6 +63,7 @@ import logging
 import re
 from decimal import Decimal
 
+from ml_signals.watchlist import fetch_watchlist
 from nautilus_trader.backtest.engine import BacktestEngineConfig
 from nautilus_trader.backtest.node import BacktestDataConfig
 from nautilus_trader.backtest.node import BacktestNode
@@ -77,7 +78,6 @@ from nautilus_trader.model.enums import OmsType
 from nautilus_trader.model.instruments import Instrument
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
-from ml_signals.watchlist import fetch_watchlist
 
 logger = logging.getLogger(__name__)
 
@@ -172,7 +172,12 @@ def run(
             continue
         try:
             config = _build_run_config(
-                symbol, instrument, catalog_path, bar_interval, buy_threshold, sell_threshold,
+                symbol,
+                instrument,
+                catalog_path,
+                bar_interval,
+                buy_threshold,
+                sell_threshold,
             )
         except Exception:
             logger.exception(f"Skipping {symbol}: failed to build its BacktestRunConfig")

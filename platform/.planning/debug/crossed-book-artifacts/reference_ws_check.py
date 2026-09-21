@@ -82,7 +82,10 @@ async def ws_reader() -> None:
         async with session.ws_connect(WS_URL, heartbeat=30) as ws:
             for ticker in INSTRUMENTS:
                 await ws.send_json({"type": "subscribe", "channel": "v4_orderbook", "id": ticker})
-            print(f"[{time.strftime('%H:%M:%S')}] reference client subscribed: {INSTRUMENTS}", flush=True)
+            print(
+                f"[{time.strftime('%H:%M:%S')}] reference client subscribed: {INSTRUMENTS}",
+                flush=True,
+            )
 
             async for msg in ws:
                 if msg.type != aiohttp.WSMsgType.TEXT:
@@ -129,7 +132,8 @@ def dump_episode(iid: str, our_bid: str, our_ask: str) -> None:
 
     frozen_prices = {Decimal(our_bid), Decimal(our_ask)}
     touching = [
-        (t, d) for t, d in raw_history[ticker]
+        (t, d)
+        for t, d in raw_history[ticker]
         if any(
             Decimal(p) in frozen_prices
             for side in ("bids", "asks")
@@ -143,9 +147,7 @@ def dump_episode(iid: str, our_bid: str, our_ask: str) -> None:
             {
                 "collector_claim": {"iid": iid, "bid": our_bid, "ask": our_ask},
                 "reference_book": {"bid": str(ref_bid), "ask": str(ref_ask)},
-                "messages_touching_frozen_prices": [
-                    {"ts_ns": t, "data": d} for t, d in touching
-                ],
+                "messages_touching_frozen_prices": [{"ts_ns": t, "data": d} for t, d in touching],
             },
             f,
             indent=2,

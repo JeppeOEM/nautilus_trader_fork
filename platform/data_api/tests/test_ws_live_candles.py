@@ -12,22 +12,26 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
-"""Story 15.5: `ws/live.py`'s new subscribe/unsubscribe multiplexing pieces --
+"""
+Story 15.5: `ws/live.py`'s new subscribe/unsubscribe multiplexing pieces --
 `_parse_candle_channel` and `_CandleSubscriptions` -- tested directly against real
 `asyncio.Queue`/`LiveCandleBus` objects, no real WebSocket/Redis needed (the real-Redis
 `/ws/live` relay path itself is already covered end-to-end for `rankings:live` by
 test_rankings.py's `test_rankings_live_message_reflected_by_rest_and_ws_relay`, which
 this story's rewrite must keep passing unmodified -- proving the multiplexer's rankings
-forwarder is unaffected by the new candle-subscription machinery added here)."""
+forwarder is unaffected by the new candle-subscription machinery added here).
+"""
 
 import asyncio
 
 import pytest
+from collector_core.second_snapshot import DydxSecondSnapshot
 
 from data_api import live_candles
 from data_api.live_candles import LiveCandleBus
-from data_api.ws.live import _CandleSubscriptions, _handle_control_message, _parse_candle_channel
-from collector_core.second_snapshot import DydxSecondSnapshot
+from data_api.ws.live import _CandleSubscriptions
+from data_api.ws.live import _handle_control_message
+from data_api.ws.live import _parse_candle_channel
 from nautilus_trader.model.identifiers import InstrumentId
 
 
@@ -51,10 +55,12 @@ def test_parse_candle_channel(channel: str, expected: tuple[str, int] | None) ->
 
 @pytest.fixture
 def isolated_bus(monkeypatch: pytest.MonkeyPatch) -> LiveCandleBus:
-    """A fresh `LiveCandleBus`, isolated from the module-level `live_candle_bus` the
+    """
+    A fresh `LiveCandleBus`, isolated from the module-level `live_candle_bus` the
     running app uses -- `_CandleSubscriptions` (ws/live.py) calls through
     `live_candles.live_candle_bus` dynamically, so patching the module attribute is
-    enough to redirect it without editing ws/live.py's own code."""
+    enough to redirect it without editing ws/live.py's own code.
+    """
     bus = LiveCandleBus()
     monkeypatch.setattr(live_candles, "live_candle_bus", bus)
     return bus
@@ -64,7 +70,7 @@ def isolated_bus(monkeypatch: pytest.MonkeyPatch) -> LiveCandleBus:
 async def test_subscribe_registers_with_live_candle_bus_and_forwards_into_outbox(
     isolated_bus: LiveCandleBus,
 ) -> None:
-    outbox: "asyncio.Queue[dict]" = asyncio.Queue()
+    outbox: asyncio.Queue[dict] = asyncio.Queue()
     subs = _CandleSubscriptions(outbox)
 
     subs.subscribe("candles:BTC-USD-PERP.DYDX:60", _IID, 60)
@@ -80,7 +86,7 @@ async def test_subscribe_registers_with_live_candle_bus_and_forwards_into_outbox
 
 @pytest.mark.asyncio
 async def test_unsubscribe_tears_down_live_candle_bus_state(isolated_bus: LiveCandleBus) -> None:
-    outbox: "asyncio.Queue[dict]" = asyncio.Queue()
+    outbox: asyncio.Queue[dict] = asyncio.Queue()
     subs = _CandleSubscriptions(outbox)
     channel = "candles:BTC-USD-PERP.DYDX:60"
     subs.subscribe(channel, _IID, 60)
@@ -95,7 +101,7 @@ async def test_unsubscribe_tears_down_live_candle_bus_state(isolated_bus: LiveCa
 
 @pytest.mark.asyncio
 async def test_teardown_all_unsubscribes_every_active_channel(isolated_bus: LiveCandleBus) -> None:
-    outbox: "asyncio.Queue[dict]" = asyncio.Queue()
+    outbox: asyncio.Queue[dict] = asyncio.Queue()
     subs = _CandleSubscriptions(outbox)
     subs.subscribe("candles:BTC-USD-PERP.DYDX:60", _IID, 60)
     subs.subscribe("candles:BTC-USD-PERP.DYDX:300", _IID, 300)
@@ -109,8 +115,10 @@ async def test_teardown_all_unsubscribes_every_active_channel(isolated_bus: Live
 
 
 @pytest.mark.asyncio
-async def test_handle_control_message_subscribe_and_unsubscribe_dispatch(isolated_bus: LiveCandleBus) -> None:
-    outbox: "asyncio.Queue[dict]" = asyncio.Queue()
+async def test_handle_control_message_subscribe_and_unsubscribe_dispatch(
+    isolated_bus: LiveCandleBus,
+) -> None:
+    outbox: asyncio.Queue[dict] = asyncio.Queue()
     subs = _CandleSubscriptions(outbox)
     channel = "candles:BTC-USD-PERP.DYDX:60"
 
@@ -124,8 +132,10 @@ async def test_handle_control_message_subscribe_and_unsubscribe_dispatch(isolate
 
 
 @pytest.mark.asyncio
-async def test_handle_control_message_ignores_malformed_or_unparseable(isolated_bus: LiveCandleBus) -> None:
-    outbox: "asyncio.Queue[dict]" = asyncio.Queue()
+async def test_handle_control_message_ignores_malformed_or_unparseable(
+    isolated_bus: LiveCandleBus,
+) -> None:
+    outbox: asyncio.Queue[dict] = asyncio.Queue()
     subs = _CandleSubscriptions(outbox)
 
     _handle_control_message({"subscribe": 123}, subs)  # not a string

@@ -28,6 +28,10 @@ import tempfile
 
 import pytest
 from collector_core.second_snapshot import DydxSecondSnapshot
+
+from ml_signals import custom_indicators as ci
+from ml_signals.custom_indicators import CustomIndicatorSpec
+from ml_signals.custom_indicators import ReplayWindow
 from nautilus_trader.model.data import BookOrder
 from nautilus_trader.model.data import OrderBookDelta
 from nautilus_trader.model.data import OrderBookDeltas
@@ -38,19 +42,20 @@ from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
-from ml_signals import custom_indicators as ci
-from ml_signals.custom_indicators import CustomIndicatorSpec
-from ml_signals.custom_indicators import ReplayWindow
 
 _IID = "BTC-USD-PERP.DYDX"
 _TS_NS = 1_700_000_000_000_000_000
 
 
 def _window() -> ReplayWindow:
-    return ReplayWindow(instrument_id="BTC-USD-PERP.DYDX", bar_seconds=60, start_ms=None, end_ms=None)
+    return ReplayWindow(
+        instrument_id="BTC-USD-PERP.DYDX", bar_seconds=60, start_ms=None, end_ms=None
+    )
 
 
-def _echo_replay(candles: list[dict], params: dict, window: ReplayWindow) -> dict[str, list[float | None]]:
+def _echo_replay(
+    candles: list[dict], params: dict, window: ReplayWindow
+) -> dict[str, list[float | None]]:
     """A placeholder replay: one output ("value") per candle, scaled by params["scale"]."""
     return {"value": [c["c"] * params["scale"] for c in candles]}
 
@@ -84,23 +89,38 @@ def test_replay_indicator_raises_for_unknown_name() -> None:
 def test_catalog_json_returns_params_and_panel_per_entry() -> None:
     # Subset check, not exact-dict equality -- the catalog also carries real entries
     # (CumulativeVolumeDelta, Story 10.2+) alongside whatever a test adds via monkeypatch.
-    assert ci.catalog_json()["PlaceholderCustom"] == {"params": {"scale": 1.0}, "panel": "histogram"}
-    assert "category" not in ci.catalog_json()["PlaceholderCustom"]  # tagged only at the merge point
+    assert ci.catalog_json()["PlaceholderCustom"] == {
+        "params": {"scale": 1.0},
+        "panel": "histogram",
+    }
+    assert (
+        "category" not in ci.catalog_json()["PlaceholderCustom"]
+    )  # tagged only at the merge point
 
 
 # -- Story 10.2: CumulativeVolumeDelta -------------------------------------------------------
 
+
 def _write_snapshots(
-    tmp_path: str, buy_sell_pairs: list[tuple[float, float]], base_ns: int = _TS_NS,
+    tmp_path: str,
+    buy_sell_pairs: list[tuple[float, float]],
+    base_ns: int = _TS_NS,
 ) -> tuple[int, int]:
     """Write one DydxSecondSnapshot per (buy_volume, sell_volume) pair, 1s apart."""
     step_ns = 1_000_000_000
     snapshots = [
         DydxSecondSnapshot(
             instrument_id=InstrumentId.from_str(_IID),
-            bid_prices=[100.0], bid_sizes=[1.0], ask_prices=[101.0], ask_sizes=[1.0],
-            buy_volume=buy_vol, sell_volume=sell_vol, buy_count=1, sell_count=1,
-            ts_event=base_ns + i * step_ns, ts_init=base_ns + i * step_ns,
+            bid_prices=[100.0],
+            bid_sizes=[1.0],
+            ask_prices=[101.0],
+            ask_sizes=[1.0],
+            buy_volume=buy_vol,
+            sell_volume=sell_vol,
+            buy_count=1,
+            sell_count=1,
+            ts_event=base_ns + i * step_ns,
+            ts_init=base_ns + i * step_ns,
         )
         for i, (buy_vol, sell_vol) in enumerate(buy_sell_pairs)
     ]
@@ -114,12 +134,19 @@ def test_cvd_accumulates_buy_minus_sell_volume_per_candle(monkeypatch: pytest.Mo
         bar_ns = 3_000_000_000
         aligned_base_ns = (_TS_NS // bar_ns) * bar_ns  # deliberately bucket-aligned base
         first_ns, _ = _write_snapshots(
-            tmp, [(5.0, 2.0), (1.0, 1.0), (0.0, 3.0), (4.0, 0.0), (2.0, 2.0), (1.0, 0.0)], base_ns=aligned_base_ns,
+            tmp,
+            [(5.0, 2.0), (1.0, 1.0), (0.0, 3.0), (4.0, 0.0), (2.0, 2.0), (1.0, 0.0)],
+            base_ns=aligned_base_ns,
         )
         monkeypatch.setattr(ci, "_CATALOG_PATH", tmp)
-        candles = [{"t": aligned_base_ns // 1_000_000}, {"t": (aligned_base_ns + bar_ns) // 1_000_000}]
+        candles = [
+            {"t": aligned_base_ns // 1_000_000},
+            {"t": (aligned_base_ns + bar_ns) // 1_000_000},
+        ]
         start_ms = first_ns // 1_000_000
-        window = ReplayWindow(instrument_id=_IID, bar_seconds=3, start_ms=start_ms, end_ms=start_ms + 6000)
+        window = ReplayWindow(
+            instrument_id=_IID, bar_seconds=3, start_ms=start_ms, end_ms=start_ms + 6000
+        )
         result = ci.replay_indicator(candles, "CumulativeVolumeDelta", {}, window)
         # bucket 1: (5-2)+(1-1)+(0-3) = 0; bucket 2 adds (4-0)+(2-2)+(1-0) = +5 -> running 5
         assert result["value"] == [0.0, 5.0]
@@ -127,23 +154,36 @@ def test_cvd_accumulates_buy_minus_sell_volume_per_candle(monkeypatch: pytest.Mo
 
 def test_cvd_returns_none_for_every_candle_in_live_mode() -> None:
     live_window = ReplayWindow(instrument_id=_IID, bar_seconds=60, start_ms=None, end_ms=None)
-    result = ci.replay_indicator([{"t": 0}, {"t": 60_000}], "CumulativeVolumeDelta", {}, live_window)
+    result = ci.replay_indicator(
+        [{"t": 0}, {"t": 60_000}], "CumulativeVolumeDelta", {}, live_window
+    )
     assert result == {"value": [None, None]}
 
 
-def test_cvd_flags_a_snapshot_gap_as_none_instead_of_a_flat_carry_forward(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A candle bucket with zero DydxSecondSnapshot rows means the collector's snapshot data
+def test_cvd_flags_a_snapshot_gap_as_none_instead_of_a_flat_carry_forward(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A candle bucket with zero DydxSecondSnapshot rows means the collector's snapshot data
     didn't arrive for that second, not that trading was flat -- DATA-01 requires flagging
-    this as unknown, not silently carrying the running total forward as if nothing happened."""
+    this as unknown, not silently carrying the running total forward as if nothing happened.
+    """
     with tempfile.TemporaryDirectory() as tmp:
         bar_ns = 3_000_000_000
         aligned_base_ns = (_TS_NS // bar_ns) * bar_ns
         # Only the first bucket's 3 seconds have snapshots -- the second bucket is a real gap.
-        first_ns, _ = _write_snapshots(tmp, [(5.0, 2.0), (1.0, 1.0), (0.0, 3.0)], base_ns=aligned_base_ns)
+        first_ns, _ = _write_snapshots(
+            tmp, [(5.0, 2.0), (1.0, 1.0), (0.0, 3.0)], base_ns=aligned_base_ns
+        )
         monkeypatch.setattr(ci, "_CATALOG_PATH", tmp)
-        candles = [{"t": aligned_base_ns // 1_000_000}, {"t": (aligned_base_ns + bar_ns) // 1_000_000}]
+        candles = [
+            {"t": aligned_base_ns // 1_000_000},
+            {"t": (aligned_base_ns + bar_ns) // 1_000_000},
+        ]
         start_ms = first_ns // 1_000_000
-        window = ReplayWindow(instrument_id=_IID, bar_seconds=3, start_ms=start_ms, end_ms=start_ms + 6000)
+        window = ReplayWindow(
+            instrument_id=_IID, bar_seconds=3, start_ms=start_ms, end_ms=start_ms + 6000
+        )
         result = ci.replay_indicator(candles, "CumulativeVolumeDelta", {}, window)
         assert result["value"] == [0.0, None]
 
@@ -162,7 +202,9 @@ def test_cvd_resumes_running_total_after_a_gap(monkeypatch: pytest.MonkeyPatch) 
             {"t": (aligned_base_ns + 2 * bar_ns) // 1_000_000},
         ]
         start_ms = bucket1 // 1_000_000
-        window = ReplayWindow(instrument_id=_IID, bar_seconds=3, start_ms=start_ms, end_ms=start_ms + 9000)
+        window = ReplayWindow(
+            instrument_id=_IID, bar_seconds=3, start_ms=start_ms, end_ms=start_ms + 9000
+        )
         result = ci.replay_indicator(candles, "CumulativeVolumeDelta", {}, window)
         assert result["value"] == [3.0, None, 6.0]  # 3.0 carries through the gap, then +3.0
 
@@ -176,21 +218,36 @@ def test_cvd_registered_in_production_catalog_with_correct_shape() -> None:
 
 # -- Story 10.3: CancelPressure ---------------------------------------------------------------
 
+
 def _book_delta(
-    action: BookAction, side: OrderSide, price: float, size: float, ts: int,
+    action: BookAction,
+    side: OrderSide,
+    price: float,
+    size: float,
+    ts: int,
 ) -> OrderBookDelta:
     order = BookOrder(side=side, price=Price(price, 1), size=Quantity(size, 1), order_id=0)
     return OrderBookDelta(
-        instrument_id=InstrumentId.from_str(_IID), action=action, order=order,
-        flags=0, sequence=0, ts_event=ts, ts_init=ts,
+        instrument_id=InstrumentId.from_str(_IID),
+        action=action,
+        order=order,
+        flags=0,
+        sequence=0,
+        ts_event=ts,
+        ts_init=ts,
     )
 
 
 def _clear_delta(ts: int) -> OrderBookDelta:
     order = BookOrder(side=OrderSide.BUY, price=Price(0, 1), size=Quantity(0, 1), order_id=0)
     return OrderBookDelta(
-        instrument_id=InstrumentId.from_str(_IID), action=BookAction.CLEAR, order=order,
-        flags=0, sequence=0, ts_event=ts, ts_init=ts,
+        instrument_id=InstrumentId.from_str(_IID),
+        action=BookAction.CLEAR,
+        order=order,
+        flags=0,
+        sequence=0,
+        ts_event=ts,
+        ts_init=ts,
     )
 
 
@@ -225,7 +282,10 @@ def test_cancel_pressure_samples_last_value_in_bucket_and_forward_fills_gaps(
         ]
         start_ms = (base_ns - bar_ns) // 1_000_000
         window = ReplayWindow(
-            instrument_id=_IID, bar_seconds=3, start_ms=start_ms, end_ms=start_ms + 4 * 3000,
+            instrument_id=_IID,
+            bar_seconds=3,
+            start_ms=start_ms,
+            end_ms=start_ms + 4 * 3000,
         )
         result = ci.replay_indicator(candles, "CancelPressure", {}, window)
         # Tracker window=200 accumulates events across the whole replay (not per-bucket): by
@@ -262,7 +322,9 @@ def test_cancel_pressure_clear_bucket_is_none_and_forward_fill_resumes_after_it(
         _clear_delta(base_ns + bar_ns),
         # Bucket 2: book/tracker rebuilt from scratch after the CLEAR -> a fresh sample.
         _book_delta(BookAction.ADD, OrderSide.BUY, 99.0, 2.0, base_ns + 2 * bar_ns),
-        _book_delta(BookAction.DELETE, OrderSide.BUY, 99.0, 2.0, base_ns + 2 * bar_ns + 100_000_000),
+        _book_delta(
+            BookAction.DELETE, OrderSide.BUY, 99.0, 2.0, base_ns + 2 * bar_ns + 100_000_000
+        ),
     ]
     with tempfile.TemporaryDirectory() as tmp:
         _write_deltas(tmp, deltas)
@@ -274,7 +336,10 @@ def test_cancel_pressure_clear_bucket_is_none_and_forward_fill_resumes_after_it(
         ]
         start_ms = base_ns // 1_000_000
         window = ReplayWindow(
-            instrument_id=_IID, bar_seconds=3, start_ms=start_ms, end_ms=start_ms + 3 * 3000,
+            instrument_id=_IID,
+            bar_seconds=3,
+            start_ms=start_ms,
+            end_ms=start_ms + 3 * 3000,
         )
         result = ci.replay_indicator(candles, "CancelPressure", {}, window)
         assert result["bid_pressure"] == [1.0, None, 1.0]
@@ -299,8 +364,10 @@ def test_cancel_pressure_forward_fill_reverts_to_none_past_the_bucket_cap(
         candles = [{"t": (base_ns + i * bar_ns) // 1_000_000} for i in range(gap_buckets + 2)]
         start_ms = base_ns // 1_000_000
         window = ReplayWindow(
-            instrument_id=_IID, bar_seconds=3,
-            start_ms=start_ms, end_ms=start_ms + (gap_buckets + 2) * 3000,
+            instrument_id=_IID,
+            bar_seconds=3,
+            start_ms=start_ms,
+            end_ms=start_ms + (gap_buckets + 2) * 3000,
         )
         result = ci.replay_indicator(candles, "CancelPressure", {}, window)
         assert result["bid_pressure"][0] == 1.0
@@ -330,7 +397,9 @@ def test_ofi_samples_last_value_in_bucket_and_forward_fills_gaps(
         # Bucket 1: no deltas -- a real gap, must forward-fill bucket 0's 3.0.
         # Bucket 2: ask size shrinks -- bid_term=8-8=0, ask_term=2-5=-3 -> contribution +3,
         # running sum (window=20, unbounded here) = 3.0 (bucket 0) + 3.0 = 6.0.
-        _book_delta(BookAction.UPDATE, OrderSide.SELL, 101.0, 2.0, base_ns + 2 * bar_ns + 100_000_000),
+        _book_delta(
+            BookAction.UPDATE, OrderSide.SELL, 101.0, 2.0, base_ns + 2 * bar_ns + 100_000_000
+        ),
     ]
     with tempfile.TemporaryDirectory() as tmp:
         _write_deltas(tmp, deltas)
@@ -343,7 +412,10 @@ def test_ofi_samples_last_value_in_bucket_and_forward_fills_gaps(
         ]
         start_ms = (base_ns - bar_ns) // 1_000_000
         window = ReplayWindow(
-            instrument_id=_IID, bar_seconds=3, start_ms=start_ms, end_ms=start_ms + 4 * 3000,
+            instrument_id=_IID,
+            bar_seconds=3,
+            start_ms=start_ms,
+            end_ms=start_ms + 4 * 3000,
         )
         result = ci.replay_indicator(candles, "OrderFlowImbalance", {}, window)
         assert result["value"] == pytest.approx([None, 3.0, 3.0, 6.0])
@@ -366,8 +438,10 @@ def test_ofi_forward_fill_reverts_to_none_past_the_bucket_cap(
         candles = [{"t": (base_ns + i * bar_ns) // 1_000_000} for i in range(gap_buckets + 2)]
         start_ms = base_ns // 1_000_000
         window = ReplayWindow(
-            instrument_id=_IID, bar_seconds=3,
-            start_ms=start_ms, end_ms=start_ms + (gap_buckets + 2) * 3000,
+            instrument_id=_IID,
+            bar_seconds=3,
+            start_ms=start_ms,
+            end_ms=start_ms + (gap_buckets + 2) * 3000,
         )
         result = ci.replay_indicator(candles, "OrderFlowImbalance", {}, window)
         assert result["value"][0] == 3.0
@@ -383,5 +457,6 @@ def test_ofi_returns_none_for_every_candle_in_live_mode() -> None:
 
 def test_ofi_registered_in_production_catalog_with_correct_shape() -> None:
     assert ci.catalog_json()["OrderFlowImbalance"] == {
-        "params": {"window": 20}, "panel": "oscillator",
+        "params": {"window": 20},
+        "panel": "oscillator",
     }

@@ -19,8 +19,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import tomli_w
-
 from collector_core.config import CoreConfig
+
 from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
 
 
@@ -82,7 +82,9 @@ def load_config(path: Path) -> DydxConfig:
     )
     for entry in instruments:
         if entry.retain_hours is not None and entry.retain_hours < 0:
-            raise ValueError(f"retain_hours must be >= 0 for instrument {entry.id!r}, got {entry.retain_hours}")
+            raise ValueError(
+                f"retain_hours must be >= 0 for instrument {entry.id!r}, got {entry.retain_hours}"
+            )
 
     snapshot_interval_seconds = float(raw.get("snapshot_interval_seconds", 1.0))
     if snapshot_interval_seconds <= 0:
@@ -138,5 +140,3 @@ def save_config(config: DydxConfig, path: Path) -> None:
     }
     with path.open("wb") as f:
         tomli_w.dump(raw, f)
-
-

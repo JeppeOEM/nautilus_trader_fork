@@ -35,11 +35,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from nautilus_trader.model.data import OrderBookDelta
-
 from ml_signals.book_features import CancellationTracker
 from ml_signals.chart_indicators import Panel
 from ml_signals.indicators import trade_aggregates
+from nautilus_trader.model.data import OrderBookDelta
 
 
 # Duplicated from dashboard.py's own module-level constant (same env var, same default) --
@@ -54,7 +53,8 @@ _CATALOG_PATH = os.environ.get("CATALOG_PATH", "platform/data/catalog")
 
 @dataclass(frozen=True)
 class ReplayWindow:
-    """The window context a custom indicator's `replay` needs beyond the candle list itself.
+    """
+    The window context a custom indicator's `replay` needs beyond the candle list itself.
 
     `start_ms`/`end_ms` are `None` for the live (not-yet-closed) window -- mirrors
     `coin_indicators_handler`'s existing live/historical branch in dashboard.py, which already
@@ -84,7 +84,10 @@ CUSTOM_INDICATOR_CATALOG: dict[str, CustomIndicatorSpec] = {}
 
 
 def replay_indicator(
-    candles: list[dict], name: str, params: dict[str, Any], window: ReplayWindow,
+    candles: list[dict],
+    name: str,
+    params: dict[str, Any],
+    window: ReplayWindow,
 ) -> dict[str, list[float | None]]:
     """Look up `name` in `CUSTOM_INDICATOR_CATALOG` and run its `replay` function."""
     if name not in CUSTOM_INDICATOR_CATALOG:
@@ -107,25 +110,33 @@ def _second_snapshots(window: ReplayWindow) -> list[dict]:
     from ml_signals.catalog_stats import query_second_snapshots
 
     snapshots = query_second_snapshots(
-        _CATALOG_PATH, window.instrument_id,
-        window.start_ms * 1_000_000, window.end_ms * 1_000_000,
+        _CATALOG_PATH,
+        window.instrument_id,
+        window.start_ms * 1_000_000,
+        window.end_ms * 1_000_000,
     )
     # buy_count/sell_count are required by trade_aggregates()'s reduction below even though
     # _cvd_replay only consumes the volume totals it returns -- not dead data, just an unused
     # part of a shared function's output.
     return [
         {
-            "buy_volume": s.buy_volume, "sell_volume": s.sell_volume,
-            "buy_count": s.buy_count, "sell_count": s.sell_count, "ts_event": s.ts_event,
+            "buy_volume": s.buy_volume,
+            "sell_volume": s.sell_volume,
+            "buy_count": s.buy_count,
+            "sell_count": s.sell_count,
+            "ts_event": s.ts_event,
         }
         for s in snapshots
     ]
 
 
 def _cvd_replay(
-    candles: list[dict], params: dict[str, Any], window: ReplayWindow,
+    candles: list[dict],
+    params: dict[str, Any],
+    window: ReplayWindow,
 ) -> dict[str, list[float | None]]:
-    """Per-candle running-cumulative buy_volume - sell_volume for the currently-requested
+    """
+    Per-candle running-cumulative buy_volume - sell_volume for the currently-requested
     window -- an unbounded, request-anchored total (resets to 0 at whichever candle happens
     to be first in the current view), not the 5-minute rolling/decaying oscillator the old
     chart_data.py row computed. This is a deliberate scope choice for the picker version (see
@@ -164,19 +175,24 @@ def _cvd_replay(
 
 
 CUSTOM_INDICATOR_CATALOG["CumulativeVolumeDelta"] = CustomIndicatorSpec(
-    params={}, panel="oscillator", replay=_cvd_replay,
+    params={},
+    panel="oscillator",
+    replay=_cvd_replay,
 )
 
 
 def _order_book_deltas(window: ReplayWindow) -> list[OrderBookDelta]:
-    """Fetch this window's OrderBookDelta rows from the catalog, sorted by ts_init --
-    same catalog-query pattern chart_data.py's own replay loop already uses."""
+    """
+    Fetch this window's OrderBookDelta rows from the catalog, sorted by ts_init --
+    same catalog-query pattern chart_data.py's own replay loop already uses.
+    """
     from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
     catalog = ParquetDataCatalog(_CATALOG_PATH)
     deltas = catalog.order_book_deltas(
         instrument_ids=[window.instrument_id],
-        start=window.start_ms * 1_000_000, end=window.end_ms * 1_000_000,
+        start=window.start_ms * 1_000_000,
+        end=window.end_ms * 1_000_000,
     )
     return sorted(deltas, key=lambda d: d.ts_init)
 
@@ -191,9 +207,12 @@ _MAX_FORWARD_FILL_BUCKETS = 10
 
 
 def _cancel_pressure_replay(
-    candles: list[dict], params: dict[str, Any], window: ReplayWindow,
+    candles: list[dict],
+    params: dict[str, Any],
+    window: ReplayWindow,
 ) -> dict[str, list[float | None]]:
-    """Per-candle bid/ask cancel pressure, forward-filled: within a candle's bucket, the
+    """
+    Per-candle bid/ask cancel pressure, forward-filled: within a candle's bucket, the
     tracker's state as of the LAST delta processed becomes that candle's value; a bucket with
     no delta events carries forward the last known value, up to `_MAX_FORWARD_FILL_BUCKETS`
     (DATA-01 -- a real ingestion gap must eventually read as unknown again, not confidently
@@ -261,23 +280,25 @@ def _cancel_pressure_replay(
 
 
 CUSTOM_INDICATOR_CATALOG["CancelPressure"] = CustomIndicatorSpec(
-    params={"window": 200}, panel="histogram", replay=_cancel_pressure_replay,
+    params={"window": 200},
+    panel="histogram",
+    replay=_cancel_pressure_replay,
 )
 
 
 def _ofi_bucket_samples(window: ReplayWindow, ofi_window: int) -> dict[int, float]:
-    """Replay `_order_book_deltas(window)` and return last-value-in-bucket `OrderFlowImbalance`
+    """
+    Replay `_order_book_deltas(window)` and return last-value-in-bucket `OrderFlowImbalance`
     samples, keyed by bucket start (ns). Drives the indicator exactly as chart_data.py's
     retired fixed row did -- `book.apply_delta(delta)` FIRST, then read post-delta top-of-book,
     skipping the delta if either side is `None`, THEN `ofi.update_raw(...)` (DESIGN-02:
     unchanged reuse). This call order is the opposite of Cancel Pressure's
     `CancellationTracker.update`, which needs PRE-delta best prices -- do not conflate the two.
     """
+    from ml_signals.indicators import OrderFlowImbalance
     from nautilus_trader.model.book import OrderBook
     from nautilus_trader.model.enums import BookType
     from nautilus_trader.model.identifiers import InstrumentId
-
-    from ml_signals.indicators import OrderFlowImbalance
 
     book = OrderBook(InstrumentId.from_str(window.instrument_id), BookType.L2_MBP)
     ofi = OrderFlowImbalance(window=ofi_window)
@@ -290,8 +311,10 @@ def _ofi_bucket_samples(window: ReplayWindow, ofi_window: int) -> dict[int, floa
         if bid_price is None or ask_price is None:
             continue
         ofi.update_raw(
-            bid_price.as_double(), book.best_bid_size().as_double(),
-            ask_price.as_double(), book.best_ask_size().as_double(),
+            bid_price.as_double(),
+            book.best_bid_size().as_double(),
+            ask_price.as_double(),
+            book.best_ask_size().as_double(),
         )
         if not ofi.initialized:
             continue
@@ -301,9 +324,12 @@ def _ofi_bucket_samples(window: ReplayWindow, ofi_window: int) -> dict[int, floa
 
 
 def _ofi_replay(
-    candles: list[dict], params: dict[str, Any], window: ReplayWindow,
+    candles: list[dict],
+    params: dict[str, Any],
+    window: ReplayWindow,
 ) -> dict[str, list[float | None]]:
-    """Per-candle top-of-book Order Flow Imbalance, last-value-in-bucket and forward-filled
+    """
+    Per-candle top-of-book Order Flow Imbalance, last-value-in-bucket and forward-filled
     (bounded by `_MAX_FORWARD_FILL_BUCKETS`, same DATA-01 reasoning as Cancel Pressure, Story
     10.3): `OrderFlowImbalance.value` is a continuously-recomputed trailing rolling-window sum,
     not a per-bucket flow, so persisting the last sampled value across a quiet bucket reflects
@@ -335,5 +361,7 @@ def _ofi_replay(
 
 
 CUSTOM_INDICATOR_CATALOG["OrderFlowImbalance"] = CustomIndicatorSpec(
-    params={"window": 20}, panel="oscillator", replay=_ofi_replay,
+    params={"window": 20},
+    panel="oscillator",
+    replay=_ofi_replay,
 )

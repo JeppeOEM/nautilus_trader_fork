@@ -44,6 +44,7 @@ from nautilus_trader.serialization.arrow.serializer import make_dict_deserialize
 from nautilus_trader.serialization.arrow.serializer import make_dict_serializer
 from nautilus_trader.serialization.arrow.serializer import register_arrow
 
+
 BOOK_DEPTH = 20
 
 

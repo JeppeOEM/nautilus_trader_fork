@@ -55,6 +55,10 @@ that same deferred-work.md entry.
 
 from decimal import Decimal
 
+from collector_core.second_snapshot import DydxSecondSnapshot
+
+from ml_signals.strategies.snapshot_strategy import SnapshotStrategy
+from ml_signals.strategies.snapshot_strategy import SnapshotStrategyConfig
 from nautilus_trader.backtest.engine import BacktestEngine
 from nautilus_trader.backtest.engine import BacktestEngineConfig
 from nautilus_trader.config import LoggingConfig
@@ -77,23 +81,32 @@ from nautilus_trader.model.objects import Money
 from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
 
-from collector_core.second_snapshot import DydxSecondSnapshot
-from ml_signals.strategies.snapshot_strategy import SnapshotStrategy
-from ml_signals.strategies.snapshot_strategy import SnapshotStrategyConfig
-
 
 _IID = InstrumentId(Symbol("BTC-USD-PERP"), Venue("DYDX"))
 
 _INSTRUMENT = CryptoPerpetual(
-    instrument_id=_IID, raw_symbol=Symbol("BTC-USD-PERP"),
-    base_currency=BTC, quote_currency=USDC, settlement_currency=USDC, is_inverse=False,
-    price_precision=1, size_precision=3,
-    price_increment=Price(0.1, 1), size_increment=Quantity(0.001, 3),
-    max_quantity=None, min_quantity=None, max_notional=None, min_notional=None,
-    max_price=None, min_price=None,
-    margin_init=Decimal("0.1"), margin_maint=Decimal("0.05"),
-    maker_fee=Decimal("0.0002"), taker_fee=Decimal("0.0005"),
-    ts_event=0, ts_init=0,
+    instrument_id=_IID,
+    raw_symbol=Symbol("BTC-USD-PERP"),
+    base_currency=BTC,
+    quote_currency=USDC,
+    settlement_currency=USDC,
+    is_inverse=False,
+    price_precision=1,
+    size_precision=3,
+    price_increment=Price(0.1, 1),
+    size_increment=Quantity(0.001, 3),
+    max_quantity=None,
+    min_quantity=None,
+    max_notional=None,
+    min_notional=None,
+    max_price=None,
+    min_price=None,
+    margin_init=Decimal("0.1"),
+    margin_maint=Decimal("0.05"),
+    maker_fee=Decimal("0.0002"),
+    taker_fee=Decimal("0.0005"),
+    ts_event=0,
+    ts_init=0,
 )
 
 
@@ -104,15 +117,24 @@ def _snapshot(ts: int, bid_size: float) -> DydxSecondSnapshot:
         bid_sizes=[bid_size - j * 0.1 for j in range(10)],
         ask_prices=[100.1 + j * 0.1 for j in range(10)],
         ask_sizes=[5.0 - j * 0.1 for j in range(10)],
-        buy_volume=1.0, sell_volume=1.0, buy_count=1, sell_count=1,
-        ts_event=ts, ts_init=ts,
+        buy_volume=1.0,
+        sell_volume=1.0,
+        buy_count=1,
+        sell_count=1,
+        ts_event=ts,
+        ts_init=ts,
     )
 
 
 def _trade(ts: int, seq: int) -> TradeTick:
     return TradeTick(
-        instrument_id=_IID, price=Price(100.1, 1), size=Quantity(1.0, 3),
-        aggressor_side=AggressorSide.BUYER, trade_id=TradeId(str(seq)), ts_event=ts, ts_init=ts,
+        instrument_id=_IID,
+        price=Price(100.1, 1),
+        size=Quantity(1.0, 3),
+        aggressor_side=AggressorSide.BUYER,
+        trade_id=TradeId(str(seq)),
+        ts_event=ts,
+        ts_init=ts,
     )
 
 
@@ -131,12 +153,14 @@ def _engine() -> BacktestEngine:
 
 
 def _growing_bid_imbalance_data(n: int = 100) -> tuple[list, list]:
-    """n snapshots (1/s) with steadily growing bid size (constant ask) -- strong positive OFI --
+    """
+    N snapshots (1/s) with steadily growing bid size (constant ask) -- strong positive OFI --
     plus a matching TradeTick per snapshot so the exchange has a market to fill against.
 
     Each trade's ts_event is offset +0.5s from its paired snapshot, so BacktestEngine's
     timestamp-ordered merge always processes the snapshot (and any resulting order) before the
-    trade that would fill it -- this ordering is relied on, not incidental."""
+    trade that would fill it -- this ordering is relied on, not incidental.
+    """
     ts = 1_000_000_000
     step = 1_000_000_000
     snapshots = []

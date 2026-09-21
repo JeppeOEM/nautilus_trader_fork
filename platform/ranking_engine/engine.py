@@ -38,11 +38,6 @@ from functools import partial
 from pathlib import Path
 
 import redis.asyncio as aioredis
-
-from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
-from nautilus_trader.core.nautilus_pyo3 import get_dydx_http_url  # type: ignore[attr-defined]
-from nautilus_trader.persistence.catalog import ParquetDataCatalog
-
 from common.venues import market_kind
 from common.venues import venue_kind
 from ml_signals import catalog_stats
@@ -54,6 +49,10 @@ from ml_signals.indicators import mid_price as calc_mid_price
 from ml_signals.indicators import spread as calc_spread
 from ml_signals.indicators import trade_aggregates
 from ml_signals.venue import venue_of
+
+from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
+from nautilus_trader.core.nautilus_pyo3 import get_dydx_http_url  # type: ignore[attr-defined]
+from nautilus_trader.persistence.catalog import ParquetDataCatalog
 from ranking_engine import metrics_store
 from ranking_engine.price_series import PriceSeriesStore
 from ranking_engine.volatility import VolatilityTracker
@@ -70,7 +69,8 @@ CATALOG_PATH: str = os.environ.get("CATALOG_PATH", "platform/data/catalog")
 # the main file, which a single-file bind mount can't expose on a path shared with
 # dashboard's own read-only mount of the same store.
 METRICS_DB_PATH: str = os.environ.get(
-    "METRICS_DB_PATH", str(Path(CATALOG_PATH).parent / "metrics" / "metrics.db"),
+    "METRICS_DB_PATH",
+    str(Path(CATALOG_PATH).parent / "metrics" / "metrics.db"),
 )
 
 # DYDX_NETWORK must match the collector's configured network (collector.toml's
@@ -236,7 +236,8 @@ _BYBIT_SPOT_USD_QUOTES: tuple[str, ...] = ("USDT", "USDC")
 
 
 def _fetch_volume_24h_json(network: DydxNetwork) -> dict:
-    """GET dYdX's public indexer perpetualMarkets endpoint.
+    """
+    GET dYdX's public indexer perpetualMarkets endpoint.
 
     Deliberately independent of dydx_collector.open_interest._fetch_markets_json,
     which hits the same endpoint for the same reason: that function performs network
@@ -264,7 +265,11 @@ def parse_volume_24h(markets_json: dict) -> dict[str, float]:
             vol = float(market.get("volume24H") or 0)
         except (ValueError, TypeError) as exc:
             # No volume is not zero volume (DATA-01): leave the coin out, loudly.
-            error_ledger.record("ranking_engine.volume24h", f"{ticker}: unparseable volume24H {market.get('volume24H')!r}", exc)
+            error_ledger.record(
+                "ranking_engine.volume24h",
+                f"{ticker}: unparseable volume24H {market.get('volume24H')!r}",
+                exc,
+            )
             continue
         result[f"{ticker}-PERP.DYDX"] = vol
     return result
@@ -519,7 +524,8 @@ async def _volume_loop_task(sources: dict[str, VolumeFetcher]) -> None:
 
 
 def _is_fresh(iid: str, now_ns: int) -> bool:
-    """Check whether iid has a _LAST_SEEN entry within _WATCHLIST_STALE_NS.
+    """
+    Check whether iid has a _LAST_SEEN entry within _WATCHLIST_STALE_NS.
 
     _WATCHLIST_STALE_NS (30s) is the OBS-01-derived threshold: zero book updates on a
     liquid instrument for more than 30s is a pipeline failure, not a quiet market (see
@@ -553,7 +559,8 @@ def _recently_stale_iids(now_ns: int) -> list[str]:
 
 
 def _ingest_snapshot_batch(batch: list[dict]) -> None:
-    """Update freshness state and feed every live indicator tracker from a
+    """
+    Update freshness state and feed every live indicator tracker from a
     snapshots:raw batch -- volatility, OFI (z-scored + raw 3/5/10), OBI (3/5/10),
     microprice, and the 300s rolling window (cvd/avg_trade_size/fast volatility).
 
@@ -571,11 +578,11 @@ def _ingest_snapshot_batch(batch: list[dict]) -> None:
             # (AD-2) and treat it as "no trade this second" instead, mirroring the
             # mid<=0 guard a few lines below (DATA-02: never let a bad value silently
             # corrupt stored price history).
-            if close_price is not None and (
-                not math.isfinite(close_price) or close_price <= 0
-            ):
+            if close_price is not None and (not math.isfinite(close_price) or close_price <= 0):
                 logger.warning(
-                    "Non-finite/non-positive close_price dropped for %s: %r", iid, close_price,
+                    "Non-finite/non-positive close_price dropped for %s: %r",
+                    iid,
+                    close_price,
                 )
                 close_price = None
             _PRICE_SERIES.ingest(iid, snap["ts_event"], close_price)
@@ -592,14 +599,16 @@ def _ingest_snapshot_batch(batch: list[dict]) -> None:
             gapped = last_fed is not None and (snap["ts_event"] - last_fed) > _OFI_GAP_NS
 
             ofi_z = _OFI_INDS.setdefault(
-                iid, MultiLevelOFI(levels=10, window=50, zscore_window=3600),
+                iid,
+                MultiLevelOFI(levels=10, window=50, zscore_window=3600),
             )
             if gapped:
                 ofi_z.clear_prev_state()
             ofi_z.update_raw(bid_prices, bid_sizes, ask_prices, ask_sizes)
 
             raw_ofis = _OFI_RAW_INDS.setdefault(
-                iid, {n: MultiLevelOFI(levels=n, window=300) for n in (3, 5, 10)},
+                iid,
+                {n: MultiLevelOFI(levels=n, window=300) for n in (3, 5, 10)},
             )
             for raw_ofi in raw_ofis.values():
                 if gapped:
@@ -614,11 +623,14 @@ def _ingest_snapshot_batch(batch: list[dict]) -> None:
             _LAST_FED[iid] = snap["ts_event"]
             _SECOND_ROLLING.setdefault(iid, deque(maxlen=300)).append(snap)
         except Exception:
-            error_ledger.record("ranking_engine.snapshot_entry", f"malformed snapshots:raw entry SKIPPED: {snap!r}")
+            error_ledger.record(
+                "ranking_engine.snapshot_entry", f"malformed snapshots:raw entry SKIPPED: {snap!r}"
+            )
 
 
 def _fast_metrics_for(iid: str) -> dict:
-    """Re-shape one instrument's already-updated tracker state + rolling window into
+    """
+    Re-shape one instrument's already-updated tracker state + rolling window into
     the live-tick fields of a rankings:live rank entry. Pure read of state
     _ingest_snapshot_batch already maintains -- computes nothing new itself.
 
@@ -641,9 +653,7 @@ def _fast_metrics_for(iid: str) -> dict:
     total_cnt = buy_cnt + sell_cnt
 
     recent = snapshots[-_VOLUME_DELTA_WINDOW:]
-    recent_buy_vol, recent_sell_vol, _, _ = (
-        trade_aggregates(recent) if recent else (0.0, 0.0, 0, 0)
-    )
+    recent_buy_vol, recent_sell_vol, _, _ = trade_aggregates(recent) if recent else (0.0, 0.0, 0, 0)
 
     mid = calc_mid_price(latest) if latest is not None else None
     microprice_value = calc_microprice(latest) if latest is not None else None
@@ -701,7 +711,8 @@ def _legacy_book_metrics_for(iid: str) -> dict:
 
 
 def _handle_control_message(message: dict) -> None:
-    """Apply a ranking:control mode-switch request. Unrecognized modes are logged and
+    """
+    Apply a ranking:control mode-switch request. Unrecognized modes are logged and
     ignored (AD-2's fail-closed spirit applied to a control message, not market data).
     """
     global _ACTIVE_MODE
@@ -713,7 +724,8 @@ def _handle_control_message(message: dict) -> None:
 
 
 def _current_ranks() -> list[dict]:
-    """Ordered ranks for every currently-fresh instrument, sorted by the active mode's
+    """
+    Ordered ranks for every currently-fresh instrument, sorted by the active mode's
     score descending. Both volume24h and volatility_score are always computed and
     present in every entry regardless of active mode (AC1) -- only the sort key
     changes with _ACTIVE_MODE.
@@ -762,7 +774,8 @@ def _current_ranks() -> list[dict]:
 
 
 def _ranks_by_iid() -> dict[str, int]:
-    """{instrument_id: 1-indexed rank} for every currently-fresh instrument.
+    """
+    {instrument_id: 1-indexed rank} for every currently-fresh instrument.
 
     _current_ranks() returns Task 5's richer list[dict] shape (each entry also carries
     volume24h/volatility_score for rankings:live) -- this reconciles that against
@@ -772,9 +785,12 @@ def _ranks_by_iid() -> dict[str, int]:
 
 
 def _merge_rank_into_snapshots(
-    snapshots: list[dict], ranks: dict[str, int], volumes: dict[str, float],
+    snapshots: list[dict],
+    ranks: dict[str, int],
+    volumes: dict[str, float],
 ) -> list[dict]:
-    """Attach the current live rank/volume24h to each snapshot before persisting to
+    """
+    Attach the current live rank/volume24h to each snapshot before persisting to
     metrics_store. Relocated verbatim from ml_signals.dashboard (Story 1.4) -- see that
     story's Dev Notes for why this is deliberately a persistence-only copy, never
     merged into any live in-memory cache.
@@ -786,7 +802,8 @@ def _merge_rank_into_snapshots(
 
 
 def _persist_snapshots(snapshots: list[dict], db_path: str) -> None:
-    """Merge the current rank/volume24h into snapshots and write them to metrics_store.
+    """
+    Merge the current rank/volume24h into snapshots and write them to metrics_store.
 
     A synchronous convenience wrapper for direct/test use. _slow_loop_task does *not*
     call this as a single unit -- it computes the merge on the main thread and pushes
@@ -799,7 +816,8 @@ def _persist_snapshots(snapshots: list[dict], db_path: str) -> None:
 
 
 def _read_price_series_sync(catalog_path: str, iid: str, start_ns: int) -> list[tuple[int, float]]:
-    """Blocking Parquet read for one instrument's backfill -- runs via asyncio.to_thread.
+    """
+    Blocking Parquet read for one instrument's backfill -- runs via asyncio.to_thread.
 
     Opens its own ParquetDataCatalog handle (cheap, no shared state) so this can run
     off the main event-loop thread without touching anything _redis_listener mutates.
@@ -809,7 +827,8 @@ def _read_price_series_sync(catalog_path: str, iid: str, start_ns: int) -> list[
 
 
 async def _backfill_new_instruments(catalog_path: str, now_ns: int) -> None:
-    """One-time lazy Parquet backfill for every instrument seen live but not yet
+    """
+    One-time lazy Parquet backfill for every instrument seen live but not yet
     backfilled into _PRICE_SERIES (Story 13.2).
 
     The blocking Parquet read runs via asyncio.to_thread; the ring-buffer mutation
@@ -833,7 +852,10 @@ async def _backfill_new_instruments(catalog_path: str, now_ns: int) -> None:
             series = await asyncio.to_thread(_read_price_series_sync, catalog_path, iid, start_ns)
             _PRICE_SERIES.backfill(iid, series)
         except Exception:
-            error_ledger.record("ranking_engine.price_backfill", f"price-series backfill failed for {iid}, NOT retried")
+            error_ledger.record(
+                "ranking_engine.price_backfill",
+                f"price-series backfill failed for {iid}, NOT retried",
+            )
         finally:
             _BACKFILLED.add(iid)
 
@@ -846,7 +868,8 @@ def _pct_change_from(current: float | None, base: float | None) -> float | None:
 
 
 async def _slow_loop_once(catalog_path: str) -> None:
-    """One cycle of _slow_loop_task's work -- split out so tests can drive exactly one
+    """
+    One cycle of _slow_loop_task's work -- split out so tests can drive exactly one
     cycle at a time instead of the infinite while-True loop below.
     """
     now_ns = time.time_ns()
@@ -862,22 +885,24 @@ async def _slow_loop_once(catalog_path: str) -> None:
     try:
         price_1w = await asyncio.to_thread(metrics_store.price_near_days_ago, METRICS_DB_PATH, 7)
         price_1m = await asyncio.to_thread(metrics_store.price_near_days_ago, METRICS_DB_PATH, 30)
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.exception("1w/1m price lookup failed; pct_1w/pct_1m unavailable this cycle")
     snapshots = []
     for iid in _LAST_SEEN:
         stats = _PRICE_SERIES.stats(iid, now_ns)
-        snapshots.append({
-            "ts": now_ns,
-            "instrument_id": iid,
-            "price": stats.get("price"),
-            "pct_1h": stats.get("pct_change_1h"),
-            "pct_24h": stats.get("pct_change_24h"),
-            "pct_1w": _pct_change_from(stats.get("price"), price_1w.get(iid)),
-            "pct_1m": _pct_change_from(stats.get("price"), price_1m.get(iid)),
-            "volatility": stats.get("volatility"),
-            **book_metrics_by_iid.get(iid, {}),
-        })
+        snapshots.append(
+            {
+                "ts": now_ns,
+                "instrument_id": iid,
+                "price": stats.get("price"),
+                "pct_1h": stats.get("pct_change_1h"),
+                "pct_24h": stats.get("pct_change_24h"),
+                "pct_1w": _pct_change_from(stats.get("price"), price_1w.get(iid)),
+                "pct_1m": _pct_change_from(stats.get("price"), price_1m.get(iid)),
+                "volatility": stats.get("volatility"),
+                **book_metrics_by_iid.get(iid, {}),
+            }
+        )
     if snapshots:
         _SLOW_METRICS.update({s["instrument_id"]: s for s in snapshots})
         persisted = _merge_rank_into_snapshots(snapshots, _ranks_by_iid(), _VOLUME_24H)
@@ -885,7 +910,8 @@ async def _slow_loop_once(catalog_path: str) -> None:
 
 
 async def _slow_loop_task(catalog_path: str) -> None:
-    """Full snapshot (price/pct/vol + book metrics) every DB_WRITE_INTERVAL_SECONDS.
+    """
+    Full snapshot (price/pct/vol + book metrics) every DB_WRITE_INTERVAL_SECONDS.
 
     Relocated from ml_signals.dashboard (Task 7) -- ranking_engine is the sole writer
     of metrics_store, closing the two-writer race Story 1.4's review already fixed
@@ -928,7 +954,8 @@ async def _slow_loop_task(catalog_path: str) -> None:
         if cycle_seconds > DB_WRITE_INTERVAL_SECONDS:
             logger.warning(
                 "Slow metrics loop cycle took %.1fs, exceeding the %ds write interval",
-                cycle_seconds, DB_WRITE_INTERVAL_SECONDS,
+                cycle_seconds,
+                DB_WRITE_INTERVAL_SECONDS,
             )
         else:
             logger.debug("Slow metrics loop cycle took %.1fs", cycle_seconds)
@@ -936,7 +963,8 @@ async def _slow_loop_task(catalog_path: str) -> None:
 
 
 def _build_rankings_message() -> dict:
-    """The exact rankings:live wire schema -- AD-9/Consistency Conventions table field
+    """
+    The exact rankings:live wire schema -- AD-9/Consistency Conventions table field
     names, nesting, and per-rank shape are load-bearing; never rename for "clarity."
 
     stale_instrument_ids is an additive field (dashboard/bot_tui readers predating it
@@ -953,7 +981,8 @@ def _build_rankings_message() -> dict:
 
 
 class RankingsPublisher:
-    """Decides when to publish rankings:live, per AD-9's change+heartbeat discipline.
+    """
+    Decides when to publish rankings:live, per AD-9's change+heartbeat discipline.
 
     Chosen discipline (Task 6): the heartbeat timer resets on *every* publish, whether
     triggered by a rank/mode change or by the heartbeat itself -- so a burst of
@@ -1023,7 +1052,8 @@ async def _maybe_publish(redis_client: aioredis.Redis) -> None:
 
 
 async def _heartbeat_loop(redis_client: aioredis.Redis) -> None:
-    """Independent of the ingest-triggered publish -- guarantees a heartbeat fires even
+    """
+    Independent of the ingest-triggered publish -- guarantees a heartbeat fires even
     during a quiet market with zero snapshots:raw/ranking:control traffic.
     """
     while True:
@@ -1035,7 +1065,8 @@ async def _heartbeat_loop(redis_client: aioredis.Redis) -> None:
 
 
 async def _redis_listener(redis_url: str) -> None:
-    """Subscribe to snapshots:raw and ranking:control on one connection, branching on
+    """
+    Subscribe to snapshots:raw and ranking:control on one connection, branching on
     message["channel"] -- mirrors ml_signals.dashboard._redis_listener's reconnect
     discipline (outer while True reconnects on any non-cancellation exception).
     """

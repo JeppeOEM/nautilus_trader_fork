@@ -23,6 +23,9 @@ cross. Deliberately minimal: this story is about backtest infrastructure, not si
 
 from decimal import Decimal
 
+from collector_core.second_snapshot import DydxSecondSnapshot
+
+from ml_signals.indicators import MultiLevelOFI
 from nautilus_trader.config import StrategyConfig
 from nautilus_trader.core.data import Data
 from nautilus_trader.model.data import DataType
@@ -31,9 +34,6 @@ from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.instruments import Instrument
 from nautilus_trader.model.orders import MarketOrder
 from nautilus_trader.trading.strategy import Strategy
-
-from collector_core.second_snapshot import DydxSecondSnapshot
-from ml_signals.indicators import MultiLevelOFI
 
 
 class SnapshotStrategyConfig(StrategyConfig, frozen=True):

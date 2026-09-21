@@ -49,6 +49,10 @@ the currently-used Docker-based test invocation, not a root-cause fix.
 
 from decimal import Decimal
 
+from ml_signals.book_features import top_of_book_series
+from ml_signals.indicators import OrderFlowImbalance
+from ml_signals.strategies.ofi_strategy import OFIStrategy
+from ml_signals.strategies.ofi_strategy import OFIStrategyConfig
 from nautilus_trader.backtest.engine import BacktestEngine
 from nautilus_trader.backtest.engine import BacktestEngineConfig
 from nautilus_trader.config import LoggingConfig
@@ -65,11 +69,6 @@ from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
 from nautilus_trader.test_kit.providers import TestInstrumentProvider
 
-from ml_signals.book_features import top_of_book_series
-from ml_signals.indicators import OrderFlowImbalance
-from ml_signals.strategies.ofi_strategy import OFIStrategy
-from ml_signals.strategies.ofi_strategy import OFIStrategyConfig
-
 
 _INSTRUMENT = TestInstrumentProvider.btcusdt_binance()
 _IID = _INSTRUMENT.id
@@ -78,9 +77,19 @@ _SP = _INSTRUMENT.size_precision
 _USDT = _INSTRUMENT.quote_currency
 
 
-def _delta(action: BookAction, side: OrderSide, price: float, size: float, ts: int, seq: int) -> OrderBookDelta:
+def _delta(
+    action: BookAction, side: OrderSide, price: float, size: float, ts: int, seq: int
+) -> OrderBookDelta:
     order = BookOrder(side=side, price=Price(price, _PP), size=Quantity(size, _SP), order_id=0)
-    return OrderBookDelta(instrument_id=_IID, action=action, order=order, flags=0, sequence=seq, ts_event=ts, ts_init=ts)
+    return OrderBookDelta(
+        instrument_id=_IID,
+        action=action,
+        order=order,
+        flags=0,
+        sequence=seq,
+        ts_event=ts,
+        ts_init=ts,
+    )
 
 
 def _single_delta_batches() -> list[OrderBookDeltas]:
@@ -94,17 +103,34 @@ def _single_delta_batches() -> list[OrderBookDeltas]:
     ts = 1_000_000_000
     step = 1_000_000_000
     steps = [
-        (BookAction.ADD, OrderSide.BUY, 100.0, 10.0),      # bid only -- no top-of-book state yet
-        (BookAction.ADD, OrderSide.SELL, 101.0, 8.0),       # 1st top-of-book state (seeds prev state)
-        (BookAction.UPDATE, OrderSide.BUY, 100.0, 12.0),    # same-price size change (bid_price == prev)
-        (BookAction.UPDATE, OrderSide.SELL, 101.0, 6.0),    # same-price size change (ask_price == prev)
-        (BookAction.ADD, OrderSide.BUY, 100.5, 5.0),        # better bid price -- bid_price > prev branch
-        (BookAction.ADD, OrderSide.SELL, 100.8, 4.0),       # better ask price -- ask_price < prev branch
-        (BookAction.UPDATE, OrderSide.BUY, 100.5, 15.0),    # same-price size change at the new best bid
+        (BookAction.ADD, OrderSide.BUY, 100.0, 10.0),  # bid only -- no top-of-book state yet
+        (BookAction.ADD, OrderSide.SELL, 101.0, 8.0),  # 1st top-of-book state (seeds prev state)
+        (
+            BookAction.UPDATE,
+            OrderSide.BUY,
+            100.0,
+            12.0,
+        ),  # same-price size change (bid_price == prev)
+        (
+            BookAction.UPDATE,
+            OrderSide.SELL,
+            101.0,
+            6.0,
+        ),  # same-price size change (ask_price == prev)
+        (BookAction.ADD, OrderSide.BUY, 100.5, 5.0),  # better bid price -- bid_price > prev branch
+        (BookAction.ADD, OrderSide.SELL, 100.8, 4.0),  # better ask price -- ask_price < prev branch
+        (
+            BookAction.UPDATE,
+            OrderSide.BUY,
+            100.5,
+            15.0,
+        ),  # same-price size change at the new best bid
     ]
     batches = []
     for i, (action, side, price, size) in enumerate(steps):
-        batches.append(OrderBookDeltas(instrument_id=_IID, deltas=[_delta(action, side, price, size, ts, i)]))
+        batches.append(
+            OrderBookDeltas(instrument_id=_IID, deltas=[_delta(action, side, price, size, ts, i)])
+        )
         ts += step
     return batches
 
@@ -141,7 +167,7 @@ def _run_backtest_strategy(batches: list[OrderBookDeltas]) -> list[tuple[float |
         # (ofi_strategy.py's every-ofi_window-th-event sampling), which this test never reaches
         # since it only reads the strategy's own _ofi indicator directly, not its MA output.
         ma_period=1,
-        buy_threshold=1e9,   # unreachable -- this test only cares about the OFI value, not fills
+        buy_threshold=1e9,  # unreachable -- this test only cares about the OFI value, not fills
         sell_threshold=-1e9,
         trade_size=Decimal("0.001"),
         min_depth_levels=1,
@@ -173,7 +199,9 @@ def test_ofi_final_state_identical_across_direct_replay_and_backtest_strategy() 
 
     assert direct_results, "expected at least one top-of-book update from the direct-replay path"
     direct_final = direct_results[-1]
-    assert direct_final[1] is True, f"expected OFI to be initialized after {len(direct_results)} top-of-book updates"
+    assert direct_final[1] is True, (
+        f"expected OFI to be initialized after {len(direct_results)} top-of-book updates"
+    )
     assert backtest_result[0] == direct_final, (
         f"direct-replay final state {direct_final} != backtest-strategy final state {backtest_result[0]}"
     )

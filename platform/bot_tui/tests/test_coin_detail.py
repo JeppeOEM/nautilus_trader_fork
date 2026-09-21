@@ -23,9 +23,9 @@ Pure functions only, no urwid import.
 from bot_tui.coin_detail import NO_ASKS_TEXT
 from bot_tui.coin_detail import NO_BIDS_TEXT
 from bot_tui.coin_detail import dashboard_chart_url
+from bot_tui.coin_detail import format_indicator
 from bot_tui.coin_detail import order_book_lines
 from bot_tui.coin_detail import osc52_copy_sequence
-from bot_tui.coin_detail import format_indicator
 from bot_tui.coin_detail import rank_row_for
 from bot_tui.coin_detail import ratchet_width
 
@@ -35,10 +35,12 @@ def _ranking(ranks: list[dict]) -> dict:
 
 
 def test_rank_row_for_finds_matching_instrument() -> None:
-    ranking = _ranking([
-        {"instrument_id": "ETH-USD-PERP", "spread": 0.1},
-        {"instrument_id": "BTC-USD-PERP", "spread": 0.5},
-    ])
+    ranking = _ranking(
+        [
+            {"instrument_id": "ETH-USD-PERP", "spread": 0.1},
+            {"instrument_id": "BTC-USD-PERP", "spread": 0.5},
+        ]
+    )
     assert rank_row_for(ranking, "BTC-USD-PERP") == {"instrument_id": "BTC-USD-PERP", "spread": 0.5}
 
 
@@ -68,7 +70,9 @@ def test_format_indicator_custom_decimals() -> None:
     assert format_indicator(68421.3719, decimals=2) == "68421.37"
 
 
-def _book(n_bid: int = 4, n_ask: int = 4) -> tuple[list[float], list[float], list[float], list[float]]:
+def _book(
+    n_bid: int = 4, n_ask: int = 4
+) -> tuple[list[float], list[float], list[float], list[float]]:
     bid_prices = [float(100 - i) for i in range(n_bid)]
     bid_sizes = [1.0] * n_bid
     ask_prices = [float(101 + i) for i in range(n_ask)]

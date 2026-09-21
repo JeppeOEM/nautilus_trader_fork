@@ -30,6 +30,8 @@ fed for Microprice/OrderFlowImbalance, without needing a separate TradeTick stre
 
 from decimal import Decimal
 
+from live_paper.strategy import DummyStrategy
+from live_paper.strategy import DummyStrategyConfig
 from nautilus_trader.backtest.engine import BacktestEngine
 from nautilus_trader.backtest.engine import BacktestEngineConfig
 from nautilus_trader.config import LoggingConfig
@@ -45,9 +47,6 @@ from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
 from nautilus_trader.test_kit.providers import TestInstrumentProvider
 from nautilus_trader.test_kit.stubs.data import TestDataStubs
-
-from live_paper.strategy import DummyStrategy
-from live_paper.strategy import DummyStrategyConfig
 
 
 _INSTRUMENT = TestInstrumentProvider.btcusdt_binance()

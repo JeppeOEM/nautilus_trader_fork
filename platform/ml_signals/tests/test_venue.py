@@ -1,6 +1,7 @@
 import pytest
 
-from ml_signals.venue import MalformedInstrumentId, venue_of
+from ml_signals.venue import MalformedInstrumentId
+from ml_signals.venue import venue_of
 
 
 def test_venue_of() -> None:

@@ -12,21 +12,23 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
-"""Story 15.4: `GET /api/indicator-series/{instrument_id}` -- real ParquetDataCatalog, real
-DydxSecondSnapshot, mirrors test_candles.py's fixture pattern."""
+"""
+Story 15.4: `GET /api/indicator-series/{instrument_id}` -- real ParquetDataCatalog, real
+DydxSecondSnapshot, mirrors test_candles.py's fixture pattern.
+"""
 
 from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
-
-import data_api.app as app_module
-import data_api.routes.indicator_series as indicator_series_routes
 from collector_core.second_snapshot import DydxSecondSnapshot
+from fastapi.testclient import TestClient
 from ml_signals.indicators import MultiLevelOBI
 from ml_signals.indicators import MultiLevelOFI
 from ml_signals.indicators import microprice as _microprice
 from ml_signals.indicators import spread as _spread
+
+import data_api.app as app_module
+import data_api.routes.indicator_series as indicator_series_routes
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
@@ -75,9 +77,11 @@ def _snapshot(
 
 
 def _write_book_snapshots(catalog_path: str, entries: list[tuple[int, float]]) -> None:
-    """`entries` is a list of (ts_ns, bid_price) -- each becomes a one-second snapshot
+    """
+    `entries` is a list of (ts_ns, bid_price) -- each becomes a one-second snapshot
     with a simple synthetic two-level book, one second apart, so OFI/OBI have real
-    consecutive-tick deltas to replay."""
+    consecutive-tick deltas to replay.
+    """
     entries = sorted(entries, key=lambda e: e[0])
     snapshots = [
         _snapshot(
@@ -93,12 +97,15 @@ def _write_book_snapshots(catalog_path: str, entries: list[tuple[int, float]]) -
 
 
 def test_values_match_calling_indicators_directly_on_the_same_input_in_the_same_order(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The load-bearing test for AC #8: replays the exact same snapshots, in the exact
+    """
+    The load-bearing test for AC #8: replays the exact same snapshots, in the exact
     same chronological order, through freshly-constructed `MultiLevelOFI`/`MultiLevelOBI`
     instances and the stateless `microprice`/`spread` functions -- if the route ever
-    reimplements the math instead of calling these functions, this diverges."""
+    reimplements the math instead of calling these functions, this diverges.
+    """
     catalog_path = str(tmp_path / "catalog")
     entries = [(_BASE_NS - i * 1_000_000_000, 100.0 + i) for i in range(10)]
     _write_book_snapshots(catalog_path, entries)
@@ -120,7 +127,10 @@ def test_values_match_calling_indicators_directly_on_the_same_input_in_the_same_
             ask_sizes=[8.0, 4.0 + i],
         )
         ofi.update_raw(
-            snapshot.bid_prices, snapshot.bid_sizes, snapshot.ask_prices, snapshot.ask_sizes,
+            snapshot.bid_prices,
+            snapshot.bid_sizes,
+            snapshot.ask_prices,
+            snapshot.ask_sizes,
         )
         obi.update_raw(snapshot.bid_sizes, snapshot.ask_sizes)
         snapshot_dict = {
@@ -140,7 +150,8 @@ def test_values_match_calling_indicators_directly_on_the_same_input_in_the_same_
 
 
 def test_first_bucket_of_a_page_has_null_ofi_but_populated_obi_microprice_spread(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     catalog_path = str(tmp_path / "catalog")
     entries = [(_BASE_NS - i * 1_000_000_000, 100.0 + i) for i in range(3)]
@@ -157,7 +168,8 @@ def test_first_bucket_of_a_page_has_null_ofi_but_populated_obi_microprice_spread
 
 
 def test_pagination_two_sequential_pages_are_strictly_older_and_disjoint(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     catalog_path = str(tmp_path / "catalog")
     entries = [(_BASE_NS - i * 60_000_000_000, 100.0 + i) for i in range(5)]
@@ -179,7 +191,8 @@ def test_pagination_two_sequential_pages_are_strictly_older_and_disjoint(
 
 
 def test_has_more_false_at_true_history_start(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     catalog_path = str(tmp_path / "catalog")
     entries = [(_BASE_NS - i * 60_000_000_000, 100.0) for i in range(3)]
@@ -194,7 +207,8 @@ def test_has_more_false_at_true_history_start(
 
 
 def test_short_page_with_has_more_true_is_legal(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     catalog_path = str(tmp_path / "catalog")
     before_ns = _BASE_NS
@@ -206,7 +220,8 @@ def test_short_page_with_has_more_true_is_legal(
     # itself), so it's probe-visible-only by construction, not an arbitrary offset.
     in_probe_window_only_ns = before_ns - 390_000_000_000
     _write_book_snapshots(
-        catalog_path, [(in_main_window_ns, 100.0), (in_probe_window_only_ns, 90.0)],
+        catalog_path,
+        [(in_main_window_ns, 100.0), (in_probe_window_only_ns, 90.0)],
     )
     client = _client(catalog_path, monkeypatch)
 
@@ -218,7 +233,8 @@ def test_short_page_with_has_more_true_is_legal(
 
 
 def test_gap_marker_inserted_between_points_separated_by_more_than_one_bar(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     catalog_path = str(tmp_path / "catalog")
     earlier_ns = _BASE_NS - 300_000_000_000
@@ -243,7 +259,8 @@ def test_gap_marker_inserted_between_points_separated_by_more_than_one_bar(
 
 
 def test_limit_far_above_max_never_returns_more_than_max_indicator_series_limit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     catalog_path = str(tmp_path / "catalog")
     max_limit = indicator_series_routes._MAX_INDICATOR_SERIES_LIMIT
@@ -257,7 +274,8 @@ def test_limit_far_above_max_never_returns_more_than_max_indicator_series_limit(
 
 
 def test_thin_book_snapshot_yields_null_microprice_and_spread(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     catalog_path = str(tmp_path / "catalog")
     snapshot = DydxSecondSnapshot(
@@ -284,9 +302,14 @@ def test_thin_book_snapshot_yields_null_microprice_and_spread(
     assert items[0]["spread"] is None
 
 
-@pytest.mark.parametrize(("iid", "market"), [("BTCUSDT-SPOT.BYBIT", "spot"), ("BTCUSDT-LINEAR.BYBIT", "perp")])
+@pytest.mark.parametrize(
+    ("iid", "market"), [("BTCUSDT-SPOT.BYBIT", "spot"), ("BTCUSDT-LINEAR.BYBIT", "perp")]
+)
 def test_market_field_next_to_venue(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, iid: str, market: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    iid: str,
+    market: str,
 ) -> None:
     client = _client(str(tmp_path / "cat"), monkeypatch)
     body = client.get(_url(_BASE_NS, limit=3, bar_seconds=60).replace(_IID, iid)).json()

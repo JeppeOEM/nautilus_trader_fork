@@ -31,6 +31,7 @@ from dydx_collector.config import DydxConfig
 from dydx_collector.config import InstrumentEntry
 from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
 
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",

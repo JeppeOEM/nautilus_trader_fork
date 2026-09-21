@@ -40,10 +40,10 @@ from nautilus_trader.backtest.engine import BacktestEngineConfig
 from nautilus_trader.config import LoggingConfig
 from nautilus_trader.model.data import BookOrder
 from nautilus_trader.model.data import OrderBookDelta
+from nautilus_trader.model.data import QuoteTick
 from nautilus_trader.model.enums import AccountType
 from nautilus_trader.model.enums import BookAction
 from nautilus_trader.model.enums import BookType
-from nautilus_trader.model.data import QuoteTick
 from nautilus_trader.model.enums import OmsType
 from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.identifiers import InstrumentId
@@ -373,9 +373,7 @@ class _MultiFillCloseStrategy(Strategy):
         self._tick_count += 1
         if self._tick_count == 1:
             self._submit(OrderSide.BUY, self._open_qty)
-        elif self._tick_count == 5:
-            self._submit(OrderSide.SELL, self._reduce_qty)
-        elif self._tick_count == 10:
+        elif self._tick_count == 5 or self._tick_count == 10:
             self._submit(OrderSide.SELL, self._reduce_qty)
 
     def _submit(self, side: OrderSide, qty: Decimal) -> None:

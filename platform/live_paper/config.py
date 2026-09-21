@@ -57,9 +57,10 @@ from dataclasses import fields
 from decimal import Decimal
 from pathlib import Path
 
+from ml_signals.venue import venue_of
+
 from live_paper.venues import VENUES
 from live_paper.venues import VenueSpec
-from ml_signals.venue import venue_of
 from nautilus_trader.adapters.dydx.constants import DYDX
 
 
@@ -97,9 +98,7 @@ class BotConfig:
     def __post_init__(self) -> None:
         spec = _venue_spec(venue_of(self.instrument_id))
         if not self.starting_balance:
-            object.__setattr__(
-                self, "starting_balance", f"10_000 {spec.paper_quote_currency}"
-            )
+            object.__setattr__(self, "starting_balance", f"10_000 {spec.paper_quote_currency}")
 
 
 @dataclass(frozen=True)
@@ -148,8 +147,10 @@ def _venue_spec(venue: str) -> VenueSpec:
 
 
 def _reject_unknown_keys(raw: dict, config_cls: type, path: Path, where: str = "") -> None:
-    """A typo'd key (`subaccont`) would otherwise silently fall back to its default -- for a
-    real-money config that could route trades through the wrong subaccount."""
+    """
+    A typo'd key (`subaccont`) would otherwise silently fall back to its default -- for a
+    real-money config that could route trades through the wrong subaccount.
+    """
     unknown = sorted(set(raw) - {f.name for f in fields(config_cls)})
     if unknown:
         raise ValueError(f"{path}: unknown key(s) {unknown}{where}")
@@ -233,7 +234,9 @@ def load_paper_config(path: Path) -> PaperConfig:
 
     _reject_unknown_keys(raw, PaperConfig, path)
     raw_venues = raw.get("venues", {})
-    if not isinstance(raw_venues, dict) or not all(isinstance(v, dict) for v in raw_venues.values()):
+    if not isinstance(raw_venues, dict) or not all(
+        isinstance(v, dict) for v in raw_venues.values()
+    ):
         raise ValueError(f"{path}: [venues] must be a table of [venues.<VENUE>] tables")
     venues = {name: _parse_venue(name, v, path) for name, v in raw_venues.items()}
 
@@ -243,7 +246,9 @@ def load_paper_config(path: Path) -> PaperConfig:
     bots = tuple(_parse_bot(raw_bot, path) for raw_bot in raw_bots)
     bot_ids = [bot.bot_id for bot in bots]
     if len(bot_ids) != len(set(bot_ids)):
-        raise ValueError(f"{path}: [[bots]] entries must have distinct bot_id values, got {bot_ids}")
+        raise ValueError(
+            f"{path}: [[bots]] entries must have distinct bot_id values, got {bot_ids}"
+        )
 
     return PaperConfig(log_level=raw.get("log_level", "INFO"), bots=bots, venues=venues)
 

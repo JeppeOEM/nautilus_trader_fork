@@ -21,9 +21,9 @@ Backtest OFIStrategy on locally collected dYdX 1s snapshots. See snapshot_backte
 from decimal import Decimal
 from pathlib import Path
 
+from ml_signals.strategies.snapshot_backtest import run as run_snapshot_backtest
 from nautilus_trader.backtest.results import BacktestResult
 
-from ml_signals.strategies.snapshot_backtest import run as run_snapshot_backtest
 
 _CATALOG = str(Path(__file__).resolve().parents[2] / "dydx_collector" / "catalog")
 _S = "ml_signals.strategies.ofi_strategy:"

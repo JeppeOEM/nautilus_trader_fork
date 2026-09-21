@@ -10,6 +10,8 @@ them to the engine alongside the snapshots. Fills happen at the snapshot's best 
 import tempfile
 from typing import Any
 
+from collector_core.second_snapshot import DydxSecondSnapshot
+
 from nautilus_trader.backtest.engine import BacktestEngineConfig
 from nautilus_trader.backtest.node import BacktestDataConfig
 from nautilus_trader.backtest.node import BacktestNode
@@ -23,8 +25,6 @@ from nautilus_trader.model.enums import AccountType
 from nautilus_trader.model.enums import OmsType
 from nautilus_trader.model.instruments import Instrument
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
-
-from collector_core.second_snapshot import DydxSecondSnapshot
 
 
 def _quotes(instrument: Instrument, snapshots: list[DydxSecondSnapshot]) -> list[QuoteTick]:

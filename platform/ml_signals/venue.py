@@ -1,5 +1,7 @@
-"""`venue` is derived from Nautilus's own `"{SYMBOL}.{VENUE}"` InstrumentId convention
-(Story 19.1) -- never stored as a separate column."""
+"""
+`venue` is derived from Nautilus's own `"{SYMBOL}.{VENUE}"` InstrumentId convention
+(Story 19.1) -- never stored as a separate column.
+"""
 
 
 class MalformedInstrumentId(ValueError):

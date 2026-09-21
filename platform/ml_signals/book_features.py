@@ -31,7 +31,7 @@ What IS available and implemented here:
 
 from collections import deque
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from nautilus_trader.model.book import OrderBook
 from nautilus_trader.model.data import OrderBookDelta
@@ -44,6 +44,7 @@ from nautilus_trader.model.identifiers import InstrumentId
 # ---------------------------------------------------------------------------
 # Existing helper — unchanged
 # ---------------------------------------------------------------------------
+
 
 def top_of_book_series(
     deltas: list[OrderBookDelta],
@@ -79,13 +80,15 @@ def top_of_book_series(
 # Depth snapshot
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class DepthProfile:
     """Sizes and prices at the top N levels on both sides."""
-    bid_prices: list[float]   # index 0 = best bid
-    bid_sizes:  list[float]
-    ask_prices: list[float]   # index 0 = best ask
-    ask_sizes:  list[float]
+
+    bid_prices: list[float]  # index 0 = best bid
+    bid_sizes: list[float]
+    ask_prices: list[float]  # index 0 = best ask
+    ask_sizes: list[float]
 
     @property
     def levels(self) -> int:
@@ -110,9 +113,9 @@ def depth_profile(book: OrderBook, levels: int = 10) -> DepthProfile | None:
         return None
 
     bid_prices = [lv.price.as_double() for lv in bids[:levels]]
-    bid_sizes  = [lv.size()            for lv in bids[:levels]]
+    bid_sizes = [lv.size() for lv in bids[:levels]]
     ask_prices = [lv.price.as_double() for lv in asks[:levels]]
-    ask_sizes  = [lv.size()            for lv in asks[:levels]]
+    ask_sizes = [lv.size() for lv in asks[:levels]]
 
     return DepthProfile(bid_prices, bid_sizes, ask_prices, ask_sizes)
 
@@ -121,6 +124,7 @@ def depth_profile(book: OrderBook, levels: int = 10) -> DepthProfile | None:
 # Book imbalance
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class BookImbalance:
     """
@@ -128,8 +132,9 @@ class BookImbalance:
 
     Value of 1.0 = all depth on the bid side. 0.5 = balanced. 0.0 = all ask.
     """
-    per_level: list[float]   # one entry per level; index 0 = best
-    aggregate: float         # imbalance across all levels combined
+
+    per_level: list[float]  # one entry per level; index 0 = best
+    aggregate: float  # imbalance across all levels combined
 
 
 def book_imbalance(profile: DepthProfile) -> BookImbalance:
@@ -140,8 +145,8 @@ def book_imbalance(profile: DepthProfile) -> BookImbalance:
 
     total_bid = sum(profile.bid_sizes)
     total_ask = sum(profile.ask_sizes)
-    total     = total_bid + total_ask
-    agg       = total_bid / total if total > 0 else 0.5
+    total = total_bid + total_ask
+    agg = total_bid / total if total > 0 else 0.5
 
     return BookImbalance(per_level=per, aggregate=agg)
 
@@ -149,6 +154,7 @@ def book_imbalance(profile: DepthProfile) -> BookImbalance:
 # ---------------------------------------------------------------------------
 # Volume-weighted price distance to liquidity
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class LiquidityDistance:
@@ -162,7 +168,8 @@ class LiquidityDistance:
     A small distance means support/resistance is close and dense.
     A large distance means there's a vacuum — price can move fast and far.
     """
-    bid_distance: float   # price distance to capture pct_threshold of bid depth
+
+    bid_distance: float  # price distance to capture pct_threshold of bid depth
     ask_distance: float
 
 
@@ -192,6 +199,7 @@ def liquidity_distance(
 # Cancellation rate tracker
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class CancelRate:
     """
@@ -203,7 +211,8 @@ class CancelRate:
     cancel_pressure = (deleted_size - added_size) / (deleted_size + added_size)
     Range: -1 (all additions) to +1 (all cancellations).
     """
-    bid_pressure: float   # positive = bids being cancelled
+
+    bid_pressure: float  # positive = bids being cancelled
     ask_pressure: float
 
 
@@ -237,8 +246,8 @@ class CancellationTracker:
             return
 
         delta_price = delta.order.price.as_double()
-        delta_size  = delta.order.size.as_double()
-        action_str  = "add" if delta.action == BookAction.ADD else "delete"
+        delta_size = delta.order.size.as_double()
+        action_str = "add" if delta.action == BookAction.ADD else "delete"
 
         if delta.order.side == OrderSide.BUY and best_bid_price is not None:
             if delta_price == best_bid_price:
@@ -249,9 +258,9 @@ class CancellationTracker:
 
     def rate(self) -> CancelRate:
         def _pressure(side: str) -> float:
-            added   = sum(sz for s, a, sz in self._events if s == side and a == "add")
+            added = sum(sz for s, a, sz in self._events if s == side and a == "add")
             deleted = sum(sz for s, a, sz in self._events if s == side and a == "delete")
-            total   = added + deleted
+            total = added + deleted
             if total == 0:
                 return 0.0
             # (deleted - added) / total, so positive = net cancellation pressure
@@ -267,15 +276,16 @@ class CancellationTracker:
 # Convenience: compute all features in one call
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class BookFeatures:
-    depth:      DepthProfile
-    imbalance:  BookImbalance
-    liquidity:  LiquidityDistance
+    depth: DepthProfile
+    imbalance: BookImbalance
+    liquidity: LiquidityDistance
     # None when the caller has no cancellation tracker to report (Story 10.3 -- callers that
     # only need depth/imbalance/liquidity no longer have to maintain a tracker just to satisfy
     # this field).
-    cancel:     CancelRate | None
+    cancel: CancelRate | None
 
 
 def compute_features(

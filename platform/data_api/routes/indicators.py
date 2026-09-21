@@ -42,17 +42,17 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+from common.venues import market_kind
 from fastapi import APIRouter
 from fastapi import HTTPException
 from fastapi import Request
-from pydantic import BaseModel
-
-from common.venues import market_kind
-from data_api.routes import candles as _candles
 from ml_signals import chart_indicator_config
 from ml_signals import chart_indicators
 from ml_signals import custom_indicators
 from ml_signals.venue import venue_of
+from pydantic import BaseModel
+
+from data_api.routes import candles as _candles
 
 
 # Default mirrors dashboard.py:85-88 exactly (same env var name, same default path).
@@ -128,8 +128,10 @@ class IndicatorConfigEntry(BaseModel):
 
 @router.get("/api/coin/{instrument_id}/indicators")
 def get_coin_indicator_config(instrument_id: str) -> list[IndicatorConfigEntry]:
-    """Return this instrument's persisted picker selection. No saved entry is a legitimate
-    "nothing saved yet" state -- `[]`, not an error."""
+    """
+    Return this instrument's persisted picker selection. No saved entry is a legitimate
+    "nothing saved yet" state -- `[]`, not an error.
+    """
     try:
         config = chart_indicator_config.load_config(Path(CHART_INDICATOR_CONFIG_PATH))
     except (tomllib.TOMLDecodeError, UnicodeDecodeError, KeyError, TypeError) as exc:
@@ -146,7 +148,8 @@ def get_coin_indicator_config(instrument_id: str) -> list[IndicatorConfigEntry]:
 
 @router.put("/api/coin/{instrument_id}/indicators")
 async def put_coin_indicator_config(instrument_id: str, request: Request) -> dict[str, bool]:
-    """Persist this instrument's current indicator selection (explicit Save/change, never
+    """
+    Persist this instrument's current indicator selection (explicit Save/change, never
     auto-save-per-keystroke -- matches today's handler's docstring).
 
     Reads the raw JSON body itself (rather than a typed Pydantic body parameter) so a
@@ -169,7 +172,11 @@ async def put_coin_indicator_config(instrument_id: str, request: Request) -> dic
         config = chart_indicator_config.load_config(path)
         config[instrument_id] = entries
     except (
-        json.JSONDecodeError, KeyError, TypeError, AttributeError, tomllib.TOMLDecodeError,
+        json.JSONDecodeError,
+        KeyError,
+        TypeError,
+        AttributeError,
+        tomllib.TOMLDecodeError,
         UnicodeDecodeError,
     ) as exc:
         raise HTTPException(
@@ -219,9 +226,11 @@ class IndicatorValuesResponse(BaseModel):
 
 
 def _indicator_id(name: str, params: dict[str, Any]) -> str:
-    """Mirrors `dashboard.py`'s own `_indicator_id(name, params)` scheme exactly (same
+    """
+    Mirrors `dashboard.py`'s own `_indicator_id(name, params)` scheme exactly (same
     format, re-declared here rather than imported -- see module docstring) -- this is the
-    registry key `LightweightChart.tsx`'s pane `Map` already expects (AD-F4)."""
+    registry key `LightweightChart.tsx`'s pane `Map` already expects (AD-F4).
+    """
     if not params:
         return name
     return name + "_" + ",".join(f"{k}={v}" for k, v in sorted(params.items()))
@@ -230,10 +239,12 @@ def _indicator_id(name: str, params: dict[str, Any]) -> str:
 def _parse_entries(
     entries: str, model: type[IndicatorValueRequestEntry] = IndicatorValueRequestEntry
 ) -> list[IndicatorValueRequestEntry]:
-    """Parse the `entries` query param (a JSON-encoded array of `{"name", "params"}` objects)
+    """
+    Parse the `entries` query param (a JSON-encoded array of `{"name", "params"}` objects)
     into validated request entries. Raises `HTTPException(400)` for any malformed input --
     invalid JSON, a non-array body, or an entry missing `name` -- never a `500` for a
-    client-input problem (DATA-02, same posture as the PUT config route above)."""
+    client-input problem (DATA-02, same posture as the PUT config route above).
+    """
     try:
         raw = json.loads(entries)
         parsed = [model(**e) for e in raw]
@@ -250,14 +261,16 @@ def _parse_entries(
 def _replay_entry(
     candles: list[dict], entry: IndicatorValueRequestEntry, window: custom_indicators.ReplayWindow
 ) -> dict[str, list[float | None]]:
-    """Dispatch one requested indicator: native catalog first, then custom (via
+    """
+    Dispatch one requested indicator: native catalog first, then custom (via
     `ReplayWindow`) -- same lookup order `dashboard.py`'s retired `_indicators_json` used, so
     a name registered in exactly one catalog behaves identically here.
 
     Checks for a name registered in both catalogs before dispatching, same guard
     `_merged_indicator_catalog` applies for the picker's own listing -- without it, this
     route could silently serve the native catalog's replay for a colliding name while the
-    catalog route fails loud for the exact same name (DATA-02: no mysteries)."""
+    catalog route fails loud for the exact same name (DATA-02: no mysteries).
+    """
     in_native = entry.name in chart_indicators.INDICATOR_CATALOG
     in_custom = entry.name in custom_indicators.CUSTOM_INDICATOR_CATALOG
     if in_native and in_custom:
@@ -274,10 +287,12 @@ def _values_by_time(
     entries: list[IndicatorValueRequestEntry],
     window: custom_indicators.ReplayWindow,
 ) -> tuple[dict[int, dict[str, float | None]], dict[str, str]]:
-    """Replay every requested entry over the same bounded candle window and merge into one
+    """
+    Replay every requested entry over the same bounded candle window and merge into one
     `t -> {series_key: value}` mapping -- every entry shares the identical candle list, so
     their outputs are already aligned 1:1 by index. An entry that fails is reported in the
-    second (`indicator_id -> message`) result and skipped, never failing the others."""
+    second (`indicator_id -> message`) result and skipped, never failing the others.
+    """
     by_time: dict[int, dict[str, float | None]] = {c["t"]: {} for c in candles}
     errors: dict[str, str] = {}
     for entry in entries:
@@ -299,9 +314,11 @@ def _values_by_time(
 def _insert_gap_markers(
     items: list[IndicatorValuesItem], bar_seconds: int
 ) -> list[IndicatorValuesItem]:
-    """Same bar-boundary-spacing gap-marker rule as `candles.py`/`indicator_series.py`'s own
+    """
+    Same bar-boundary-spacing gap-marker rule as `candles.py`/`indicator_series.py`'s own
     `_insert_gap_markers` (AD-F6) -- an empty-`values` row inserted wherever two consecutive
-    kept points are more than one `bar_seconds` interval apart."""
+    kept points are more than one `bar_seconds` interval apart.
+    """
     bar_ms = bar_seconds * 1000
     out: list[IndicatorValuesItem] = []
     for i, item in enumerate(items):
@@ -350,12 +367,20 @@ def get_indicator_values(
         raise HTTPException(status_code=500, detail=f"failed to read catalog: {exc}") from exc
 
     if not kept:
-        return IndicatorValuesResponse(items=[], has_more=False, venue=venue_of(instrument_id), market=market_kind(instrument_id))
+        return IndicatorValuesResponse(
+            items=[],
+            has_more=False,
+            venue=venue_of(instrument_id),
+            market=market_kind(instrument_id),
+        )
 
     start_ms = kept[0]["t"]
     end_ms = kept[-1]["t"] + bar_seconds * 1000
     window = custom_indicators.ReplayWindow(
-        instrument_id=instrument_id, bar_seconds=bar_seconds, start_ms=start_ms, end_ms=end_ms,
+        instrument_id=instrument_id,
+        bar_seconds=bar_seconds,
+        start_ms=start_ms,
+        end_ms=end_ms,
     )
     by_time, errors = _values_by_time(kept, parsed_entries, window)
     items = [IndicatorValuesItem(t=t, values=values) for t, values in sorted(by_time.items())]
@@ -363,5 +388,6 @@ def get_indicator_values(
         items=_insert_gap_markers(items, bar_seconds),
         has_more=has_more,
         errors=errors,
-        venue=venue_of(instrument_id), market=market_kind(instrument_id),
+        venue=venue_of(instrument_id),
+        market=market_kind(instrument_id),
     )

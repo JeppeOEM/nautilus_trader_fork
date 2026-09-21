@@ -42,7 +42,9 @@ def test_fetch_watchlist_parses_instrument_ids(monkeypatch) -> None:
     monkeypatch.setattr(
         urllib.request,
         "urlopen",
-        lambda request, timeout=None: _FakeResponse({"items": [{"instrument_id": i} for i in ["BTC-USD-PERP.DYDX", "ETH-USD-PERP.DYDX"]]}),
+        lambda request, timeout=None: _FakeResponse(
+            {"items": [{"instrument_id": i} for i in ["BTC-USD-PERP.DYDX", "ETH-USD-PERP.DYDX"]]}
+        ),
     )
     result = watchlist.fetch_watchlist("http://127.0.0.1:9100")
     assert result == ["BTC-USD-PERP.DYDX", "ETH-USD-PERP.DYDX"]

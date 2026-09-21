@@ -15,8 +15,6 @@
 """Self-check: candle bucketing produces correct OHLC per time bucket."""
 
 from pathlib import Path
-
-import pytest
 from types import SimpleNamespace
 
 from ml_signals.candles import aggregate_ohlc
@@ -25,7 +23,9 @@ from ml_signals.candles import candle_dicts_for_window
 from ml_signals.candles import candle_dicts_from_snapshots
 
 
-def _snap(ts_event: int, close_price: float | None, buy_volume: float = 1.0, sell_volume: float = 0.5) -> SimpleNamespace:
+def _snap(
+    ts_event: int, close_price: float | None, buy_volume: float = 1.0, sell_volume: float = 0.5
+) -> SimpleNamespace:
     """A DydxSecondSnapshot-shaped stand-in (attribute access, same as the real class)."""
     return SimpleNamespace(
         ts_event=ts_event,
@@ -66,9 +66,11 @@ def test_empty_input_produces_no_candles() -> None:
 
 
 def test_aggregate_ohlc_combines_per_second_bars_correctly() -> None:
-    """High/low across the bucket's seconds, open of the first, close of the last --
+    """
+    High/low across the bucket's seconds, open of the first, close of the last --
     not the flat-price-list logic build_candles uses, since each row is already an
-    OHLC bar, not a single trade price."""
+    OHLC bar, not a single trade price.
+    """
     one_second = 1_000_000_000
     rows = [
         (0, 100.0, 103.0, 99.0, 101.0, 1.0),
@@ -139,13 +141,23 @@ def test_candle_dicts_for_window_serves_raw_seconds_with_a_source_tag() -> None:
     assert (c["o"], c["c"], c["source"]) == (100.0, 101.0, "raw_1s")
 
 
-def _real_snap(ts: int):  # noqa: ANN202
+def _real_snap(ts: int):
     from collector_core.second_snapshot import DydxSecondSnapshot
+
     from nautilus_trader.model.identifiers import InstrumentId
 
     return DydxSecondSnapshot(
-        instrument_id=InstrumentId.from_str(IID), bid_prices=[1.0], bid_sizes=[1.0], ask_prices=[2.0],
-        ask_sizes=[1.0], buy_volume=0.0, sell_volume=0.0, buy_count=0, sell_count=0, ts_event=ts, ts_init=ts,
+        instrument_id=InstrumentId.from_str(IID),
+        bid_prices=[1.0],
+        bid_sizes=[1.0],
+        ask_prices=[2.0],
+        ask_sizes=[1.0],
+        buy_volume=0.0,
+        sell_volume=0.0,
+        buy_count=0,
+        sell_count=0,
+        ts_event=ts,
+        ts_init=ts,
     )
 
 
@@ -162,17 +174,29 @@ def test_is_valid_candle_rejects_inverted_negative_and_nonfinite() -> None:
     assert not is_valid_candle({"o": 1.0})  # missing keys
 
 
-def _write_ohlc_snapshots(catalog_path: str, base: int, n: int):  # noqa: ANN202
+def _write_ohlc_snapshots(catalog_path: str, base: int, n: int):
     from collector_core.second_snapshot import DydxSecondSnapshot
+
     from nautilus_trader.model.identifiers import InstrumentId
     from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
     snaps = [
         DydxSecondSnapshot(
-            instrument_id=InstrumentId.from_str(IID), bid_prices=[99.0], bid_sizes=[1.0], ask_prices=[101.0],
-            ask_sizes=[1.0], buy_volume=0.5 * i, sell_volume=0.25, buy_count=1, sell_count=1,
-            open_price=100.0 + i, high_price=101.0 + i, low_price=99.5 + i, close_price=100.5 + i,
-            ts_event=base + i * 1_000_000_000, ts_init=base + i * 1_000_000_000,
+            instrument_id=InstrumentId.from_str(IID),
+            bid_prices=[99.0],
+            bid_sizes=[1.0],
+            ask_prices=[101.0],
+            ask_sizes=[1.0],
+            buy_volume=0.5 * i,
+            sell_volume=0.25,
+            buy_count=1,
+            sell_count=1,
+            open_price=100.0 + i,
+            high_price=101.0 + i,
+            low_price=99.5 + i,
+            close_price=100.5 + i,
+            ts_event=base + i * 1_000_000_000,
+            ts_init=base + i * 1_000_000_000,
         )
         for i in range(n)
     ]
@@ -191,7 +215,9 @@ def test_query_second_ohlc_matches_catalog_decoder(tmp_path: Path) -> None:
     old = candle_dicts_from_snapshots(query_second_snapshots(str(tmp_path), IID, lo, hi), 60)
     new = candle_dicts_from_snapshots(query_second_ohlc(str(tmp_path), IID, lo, hi), 60)
     assert new == old and len(new) == 2
-    assert all(r.ts_event >= lo and r.ts_event <= hi for r in query_second_ohlc(str(tmp_path), IID, lo, hi))
+    assert all(
+        r.ts_event >= lo and r.ts_event <= hi for r in query_second_ohlc(str(tmp_path), IID, lo, hi)
+    )
 
 
 def test_query_second_ohlc_tolerates_files_without_ohlc_columns(tmp_path: Path) -> None:
@@ -205,7 +231,14 @@ def test_query_second_ohlc_tolerates_files_without_ohlc_columns(tmp_path: Path) 
     d.mkdir(parents=True)
     ts = 1_800_000_000_000_000_000
     name = "2027-01-15T08-00-00-000000000Z_2027-01-15T08-00-01-000000000Z.parquet"
-    pq.write_table(pa.table({"ts_event": pa.array([ts], pa.uint64()), "buy_volume": [1.0]}), d / name)
+    pq.write_table(
+        pa.table({"ts_event": pa.array([ts], pa.uint64()), "buy_volume": [1.0]}), d / name
+    )
     (row,) = query_second_ohlc(str(tmp_path), IID, ts - 1, ts + 1)
-    assert (row.open_price, row.close_price, row.buy_volume, row.sell_volume) == (None, None, 1.0, 0.0)
+    assert (row.open_price, row.close_price, row.buy_volume, row.sell_volume) == (
+        None,
+        None,
+        1.0,
+        0.0,
+    )
     assert candle_dicts_from_snapshots([row], 60) == []

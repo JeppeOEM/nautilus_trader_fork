@@ -39,6 +39,9 @@ import tempfile
 import time
 from decimal import Decimal
 
+from collector_core.second_snapshot import DydxSecondSnapshot
+
+from ml_signals import backtest_snapshot
 from nautilus_trader.model.currencies import BTC
 from nautilus_trader.model.currencies import USDC
 from nautilus_trader.model.data import TradeTick
@@ -52,21 +55,32 @@ from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
-from collector_core.second_snapshot import DydxSecondSnapshot
-from ml_signals import backtest_snapshot
 
 _IID = InstrumentId(Symbol("BTC-USD-PERP"), Venue("DYDX"))
 
 _INSTRUMENT = CryptoPerpetual(
-    instrument_id=_IID, raw_symbol=Symbol("BTC-USD-PERP"),
-    base_currency=BTC, quote_currency=USDC, settlement_currency=USDC, is_inverse=False,
-    price_precision=1, size_precision=3,
-    price_increment=Price(0.1, 1), size_increment=Quantity(0.001, 3),
-    max_quantity=None, min_quantity=None, max_notional=None, min_notional=None,
-    max_price=None, min_price=None,
-    margin_init=Decimal("0.1"), margin_maint=Decimal("0.05"),
-    maker_fee=Decimal("0.0002"), taker_fee=Decimal("0.0005"),
-    ts_event=0, ts_init=0,
+    instrument_id=_IID,
+    raw_symbol=Symbol("BTC-USD-PERP"),
+    base_currency=BTC,
+    quote_currency=USDC,
+    settlement_currency=USDC,
+    is_inverse=False,
+    price_precision=1,
+    size_precision=3,
+    price_increment=Price(0.1, 1),
+    size_increment=Quantity(0.001, 3),
+    max_quantity=None,
+    min_quantity=None,
+    max_notional=None,
+    min_notional=None,
+    max_price=None,
+    min_price=None,
+    margin_init=Decimal("0.1"),
+    margin_maint=Decimal("0.05"),
+    maker_fee=Decimal("0.0002"),
+    taker_fee=Decimal("0.0005"),
+    ts_event=0,
+    ts_init=0,
 )
 
 
@@ -77,20 +91,33 @@ def test_backtest_snapshot_streams_dydx_second_snapshot_via_backtest_node() -> N
     trades = []
     for i in range(100):
         ts_snap = now_ns - (100 - i) * 1_000_000_000
-        snapshots.append(DydxSecondSnapshot(
-            instrument_id=_IID,
-            bid_prices=[100.0 - j * 0.1 for j in range(10)],
-            bid_sizes=[5.0 + i * 0.5 - j * 0.1 for j in range(10)],
-            ask_prices=[100.1 + j * 0.1 for j in range(10)],
-            ask_sizes=[5.0 - j * 0.1 for j in range(10)],
-            buy_volume=1.0, sell_volume=1.0, buy_count=1, sell_count=1,
-            ts_event=ts_snap, ts_init=ts_snap,
-        ))
+        snapshots.append(
+            DydxSecondSnapshot(
+                instrument_id=_IID,
+                bid_prices=[100.0 - j * 0.1 for j in range(10)],
+                bid_sizes=[5.0 + i * 0.5 - j * 0.1 for j in range(10)],
+                ask_prices=[100.1 + j * 0.1 for j in range(10)],
+                ask_sizes=[5.0 - j * 0.1 for j in range(10)],
+                buy_volume=1.0,
+                sell_volume=1.0,
+                buy_count=1,
+                sell_count=1,
+                ts_event=ts_snap,
+                ts_init=ts_snap,
+            )
+        )
         ts_trade = ts_snap + 500_000_000
-        trades.append(TradeTick(
-            instrument_id=_IID, price=Price(100.1, 1), size=Quantity(1.0, 3),
-            aggressor_side=AggressorSide.BUYER, trade_id=TradeId(str(i)), ts_event=ts_trade, ts_init=ts_trade,
-        ))
+        trades.append(
+            TradeTick(
+                instrument_id=_IID,
+                price=Price(100.1, 1),
+                size=Quantity(1.0, 3),
+                aggressor_side=AggressorSide.BUYER,
+                trade_id=TradeId(str(i)),
+                ts_event=ts_trade,
+                ts_init=ts_trade,
+            )
+        )
 
     with tempfile.TemporaryDirectory() as tmp:
         catalog = ParquetDataCatalog(tmp)
@@ -99,11 +126,18 @@ def test_backtest_snapshot_streams_dydx_second_snapshot_via_backtest_node() -> N
         catalog.write_data(trades)
 
         result = backtest_snapshot.run(
-            symbol="BTC-USD-PERP.DYDX", catalog_path=tmp, buy_threshold=1.0, sell_threshold=-1.0,
+            symbol="BTC-USD-PERP.DYDX",
+            catalog_path=tmp,
+            buy_threshold=1.0,
+            sell_threshold=-1.0,
         )[0]
 
-        assert result.iterations > 0, "expected DydxSecondSnapshot + TradeTick events to be processed"
-        assert result.stats_pnls, "expected real trading activity from the engineered bid-side imbalance"
+        assert result.iterations > 0, (
+            "expected DydxSecondSnapshot + TradeTick events to be processed"
+        )
+        assert result.stats_pnls, (
+            "expected real trading activity from the engineered bid-side imbalance"
+        )
 
 
 if __name__ == "__main__":

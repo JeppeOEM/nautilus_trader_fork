@@ -12,20 +12,21 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
-"""Story 15.5: `LiveCandleBus` -- real `DydxSecondSnapshot` objects, no real Redis
+"""
+Story 15.5: `LiveCandleBus` -- real `DydxSecondSnapshot` objects, no real Redis
 (the class's buffer/listener logic is exercised directly via `handle_batch`, mirroring
-how `test_rankings.py` unit-tests `RankingsBus.handle_message` in isolation)."""
+how `test_rankings.py` unit-tests `RankingsBus.handle_message` in isolation).
+"""
 
 import time
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
+from collector_core.second_snapshot import DydxSecondSnapshot
+from ml_signals.candles import candle_dicts_from_snapshots
 
 from data_api import settings
 from data_api.live_candles import LiveCandleBus
-from collector_core.second_snapshot import DydxSecondSnapshot
-from ml_signals.candles import candle_dicts_from_snapshots
 from nautilus_trader.model.identifiers import InstrumentId
 
 
@@ -161,10 +162,12 @@ def test_malformed_batch_payload_is_skipped_without_raising() -> None:
 
 
 def test_incremental_buffer_converges_to_batch_aggregation_final_bar() -> None:
-    """The load-bearing correctness AC: an incremental per-tick buffer run through
+    """
+    The load-bearing correctness AC: an incremental per-tick buffer run through
     `LiveCandleBus` must produce, on its final publish, exactly the bar that
     `candle_dicts_from_snapshots` produces when called once on the whole same-bucket
-    snapshot set."""
+    snapshot set.
+    """
     bus = LiveCandleBus()
     queue = bus.subscribe(_IID, _BAR_SECONDS)
     snapshots = [_snapshot(_BASE_NS + i * 1_000_000_000, 100.0 + i) for i in range(10)]
@@ -182,7 +185,8 @@ def test_incremental_buffer_converges_to_batch_aggregation_final_bar() -> None:
 
 @pytest.mark.asyncio
 async def test_seed_fills_bucket_start_so_forming_bar_covers_whole_bucket(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
@@ -208,11 +212,16 @@ async def test_seed_fills_bucket_start_so_forming_bar_covers_whole_bucket(
 
 
 @pytest.mark.asyncio
-async def test_seed_wide_bar_reads_raw_seconds_plus_unflushed_tail(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A wide forming bar must start from the archive's raw seconds for this bucket (what the store
-    is built from), extended by live seconds the catalog has not flushed yet."""
-    import data_api.live_candles as lc
+async def test_seed_wide_bar_reads_raw_seconds_plus_unflushed_tail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A wide forming bar must start from the archive's raw seconds for this bucket (what the store
+    is built from), extended by live seconds the catalog has not flushed yet.
+    """
     from ml_signals.catalog_stats import SecondOHLC
+
+    import data_api.live_candles as lc
 
     bar_seconds = 14_400
     bucket_ns = bar_seconds * 1_000_000_000
@@ -236,12 +245,18 @@ async def test_seed_wide_bar_reads_raw_seconds_plus_unflushed_tail(monkeypatch: 
     await bus.seed(_IID, bar_seconds)
     bar = queue.get_nowait()["bar"]
     assert (bar["o"], bar["h"], bar["l"], bar["c"]) == (100.0, 120.0, 99.0, 120.0)
-    assert bar["v"] == 1.5 + 1.5 + 1.5  # both traded archived seconds + the live second (1.0 + 0.5 each)
+    assert (
+        bar["v"] == 1.5 + 1.5 + 1.5
+    )  # both traded archived seconds + the live second (1.0 + 0.5 each)
 
 
 @pytest.mark.asyncio
-async def test_seed_includes_unflushed_recent_seconds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(settings, "CATALOG_PATH", str(tmp_path))  # empty catalog: nothing flushed yet
+async def test_seed_includes_unflushed_recent_seconds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        settings, "CATALOG_PATH", str(tmp_path)
+    )  # empty catalog: nothing flushed yet
     bucket_ns = _BAR_SECONDS * 1_000_000_000
     start_ns = time.time_ns() // bucket_ns * bucket_ns
     bus = LiveCandleBus()
@@ -254,7 +269,8 @@ async def test_seed_includes_unflushed_recent_seconds(tmp_path: Path, monkeypatc
 
 @pytest.mark.asyncio
 async def test_seed_never_prepends_previous_bucket_after_rollover(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
@@ -275,7 +291,7 @@ async def test_seed_never_prepends_previous_bucket_after_rollover(
 async def test_seed_failure_allows_a_retry(monkeypatch: pytest.MonkeyPatch) -> None:
     import data_api.live_candles as lc
 
-    def boom(*_a, **_k):  # noqa: ANN002, ANN003, ANN202
+    def boom(*_a, **_k):
         raise OSError("catalog unreadable")
 
     monkeypatch.setattr(lc, "query_second_ohlc", boom)
@@ -296,8 +312,10 @@ def test_recent_rows_keep_traded_seconds_and_expire_old_ones() -> None:
 
 
 def test_a_venue_timed_row_published_late_lands_in_its_exchange_time_bucket() -> None:
-    """Story 22.12: a Bybit/Hyperliquid row for the bucket's last second is sampled (ts_init)
-    after the boundary; the bar it belongs to is decided by ts_event alone."""
+    """
+    Story 22.12: a Bybit/Hyperliquid row for the bucket's last second is sampled (ts_init)
+    after the boundary; the bar it belongs to is decided by ts_event alone.
+    """
     bus = LiveCandleBus()
     queue = bus.subscribe(_IID, _BAR_SECONDS)
     last_second = _snapshot(_BASE_NS + 59_500_000_000, 100.0)

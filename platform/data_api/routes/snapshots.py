@@ -37,17 +37,16 @@ two copies stay byte-identical via a test-only oracle import of `ml_signals.dash
 original (never a runtime import).
 """
 
-
-from fastapi import APIRouter
-from pydantic import BaseModel
-
 from collector_core.second_snapshot import DydxSecondSnapshot
 from common.venues import market_kind
-from data_api.routes import paging
-from data_api.settings import CATALOG_PATH
+from fastapi import APIRouter
 from ml_signals import catalog_stats as _catalog_stats
 from ml_signals.indicators import microprice as _microprice
 from ml_signals.venue import venue_of
+from pydantic import BaseModel
+
+from data_api.routes import paging
+from data_api.settings import CATALOG_PATH
 
 
 # Server-enforced upper bound on `limit` (MEM-01/AD-F3) -- sized in rows-per-second terms,
@@ -136,7 +135,16 @@ def _price_series_rows(snaps: list[dict]) -> list[dict]:
         # threshold, insert a null data point so the chart renders an explicit break
         # instead of a misleading flat line across the gap (AC #4, AD-F6, DATA-01).
         if prev_ts_ms is not None and (curr_ts_ms - prev_ts_ms) > _SNAPSHOT_GAP_THRESHOLD_MS:
-            rows.append({"t": curr_ts_ms - 1, "bid": None, "ask": None, "mid": None, "micro": None, "price": None})
+            rows.append(
+                {
+                    "t": curr_ts_ms - 1,
+                    "bid": None,
+                    "ask": None,
+                    "mid": None,
+                    "micro": None,
+                    "price": None,
+                }
+            )
         prev_ts_ms = curr_ts_ms
         mid = (bp + ap) / 2
         micro_value = _microprice(s)
@@ -146,7 +154,9 @@ def _price_series_rows(snaps: list[dict]) -> list[dict]:
             price = mid + ((s["buy_volume"] - s["sell_volume"]) / tv) * (ap - bp) * 0.5
         else:
             price = mid
-        rows.append({"t": curr_ts_ms, "bid": bp, "ask": ap, "mid": mid, "micro": micro, "price": price})
+        rows.append(
+            {"t": curr_ts_ms, "bid": bp, "ask": ap, "mid": mid, "micro": micro, "price": price}
+        )
     return rows
 
 
@@ -182,10 +192,13 @@ def get_snapshots(instrument_id: str, before_ns: int, limit: int = 900) -> Snaps
     before_ms = before_ns // 1_000_000
 
     def fetch(start_ns: int, end_ns: int) -> list[dict]:
-        snapshots = _catalog_stats.query_second_snapshots(CATALOG_PATH, instrument_id, start_ns, end_ns)
+        snapshots = _catalog_stats.query_second_snapshots(
+            CATALOG_PATH, instrument_id, start_ns, end_ns
+        )
         snap_dicts = [_snapshot_to_row_dict(s) for s in sorted(snapshots, key=lambda s: s.ts_event)]
         return _take_last_n_real_rows(
-            [r for r in _price_series_rows(snap_dicts) if r["t"] < before_ms], limit,
+            [r for r in _price_series_rows(snap_dicts) if r["t"] < before_ms],
+            limit,
         )
 
     ranges = _catalog_stats.data_file_ranges(CATALOG_PATH, instrument_id)
@@ -193,9 +206,17 @@ def get_snapshots(instrument_id: str, before_ns: int, limit: int = 900) -> Snaps
     kept = paging.fetch_page(fetch, ranges, before_ns, span_ns)
 
     if not kept:
-        return SnapshotSeriesResponse(items=[], has_more=False, venue=venue_of(instrument_id), market=market_kind(instrument_id))
+        return SnapshotSeriesResponse(
+            items=[],
+            has_more=False,
+            venue=venue_of(instrument_id),
+            market=market_kind(instrument_id),
+        )
 
     has_more = paging.has_older_data(ranges, kept[0]["t"] * 1_000_000)
     return SnapshotSeriesResponse(
-        items=[SnapshotSeriesPoint(**row) for row in kept], has_more=has_more, venue=venue_of(instrument_id), market=market_kind(instrument_id),
+        items=[SnapshotSeriesPoint(**row) for row in kept],
+        has_more=has_more,
+        venue=venue_of(instrument_id),
+        market=market_kind(instrument_id),
     )

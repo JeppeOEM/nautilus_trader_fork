@@ -60,13 +60,13 @@ import time
 from datetime import UTC
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
 import redis.asyncio as aioredis
-
 from collector_core.collector import Collector
 from collector_core.collector import run_forever
 from collector_core.prune_catalog import prune_instrument
+from ml_signals import error_ledger
+
 from dydx_collector import uncross
 from dydx_collector.client import DydxClient
 from dydx_collector.config import DydxConfig
@@ -76,8 +76,6 @@ from dydx_collector.config import save_config
 from dydx_collector.open_interest import _fetch_markets_json
 from dydx_collector.open_interest import classify_liquidity
 from dydx_collector.open_interest import fetch_open_interest
-from ml_signals import candle_store
-from ml_signals import error_ledger
 from nautilus_trader.core import nautilus_pyo3
 from nautilus_trader.model.book import OrderBook
 from nautilus_trader.model.data import OrderBookDeltas
@@ -157,7 +155,9 @@ def _prune_interval_seconds(
     return max(min(active_retain_hours) * 900, 900)
 
 
-def _prune_candidates(instruments: tuple[InstrumentEntry, ...], known_markets: set[str]) -> set[str]:
+def _prune_candidates(
+    instruments: tuple[InstrumentEntry, ...], known_markets: set[str]
+) -> set[str]:
     """
     Ids whose catalog data is subject to non_config_retain_hours pruning (Story 6.1).
 
@@ -351,7 +351,6 @@ class DydxCollector(Collector):
         self._clear_book_state(iid)
 
     # -- control plane (extra_loops) ---------------------------------------------------------
-
 
     async def _open_interest_loop(self) -> None:
         while not self._stop.is_set():
@@ -583,9 +582,14 @@ class DydxCollector(Collector):
                             continue
                         try:
                             payload = json.loads(message["data"])
-                            await self._handle_control_message(payload.get("action"), payload.get("id"))
+                            await self._handle_control_message(
+                                payload.get("action"), payload.get("id")
+                            )
                         except Exception:
-                            error_ledger.record("collector.control", f"collector:control message failed: {message!r}")
+                            error_ledger.record(
+                                "collector.control",
+                                f"collector:control message failed: {message!r}",
+                            )
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
@@ -609,7 +613,10 @@ class DydxCollector(Collector):
             # promptly. A same-thread version of this loop once blocked the loop for
             # 20s+ and stalled every instrument's book simultaneously (2026-09-11 OOM).
             freed = await asyncio.to_thread(
-                _prune_all_instruments, catalog_path, dropped_ids, self._config.non_config_retain_hours
+                _prune_all_instruments,
+                catalog_path,
+                dropped_ids,
+                self._config.non_config_retain_hours,
             )
             if freed:
                 logger.info(
@@ -623,8 +630,6 @@ class DydxCollector(Collector):
                 logger.info(
                     f"Pruned {delta_freed / 1024 / 1024:.1f} MB of raw order-book deltas (per-coin retention)"
                 )
-
-
 
 
 # Raw-WS debug feed (Story 5.1) for the incident-report subsystem below -- a
@@ -845,7 +850,6 @@ class _IncidentHandler(logging.Handler):
             self.handleError(record)
 
 
-
 def _prune_stale_ws_raw_logs() -> None:
     """
     Delete ws_raw_debug_*.log files left behind by a previous process instance.
@@ -866,7 +870,6 @@ def _prune_stale_ws_raw_logs() -> None:
         return
     for path in _WS_RAW_LOG_DIR.glob("ws_raw_debug_*.log*"):
         path.unlink(missing_ok=True)
-
 
 
 async def main() -> None:

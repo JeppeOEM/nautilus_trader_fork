@@ -33,11 +33,21 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
 
-from fastapi import FastAPI, HTTPException, Request
+from collector_core.second_snapshot import DydxSecondSnapshot
+from fastapi import FastAPI
+from fastapi import HTTPException
+from fastapi import Request
 from fastapi.responses import JSONResponse
+from ml_signals import catalog_stats as _catalog_stats
+from ml_signals import chart_data as _chart_data
+from ml_signals import error_ledger
+from ml_signals.venue import MalformedInstrumentId
 from pydantic import BaseModel
+from ranking_engine import metrics_store
 
-from data_api import alerts, live_candles, redis_bus
+from data_api import alerts
+from data_api import live_candles
+from data_api import redis_bus
 from data_api.routes import alerts as alerts_routes
 from data_api.routes import candles as candles_routes
 from data_api.routes import indicator_series as indicator_series_routes
@@ -47,17 +57,12 @@ from data_api.routes import rankings as rankings_routes
 from data_api.routes import snapshots as snapshots_routes
 from data_api.settings import CATALOG_PATH
 from data_api.ws import live as live_ws
-from collector_core.second_snapshot import DydxSecondSnapshot
-from ml_signals import catalog_stats as _catalog_stats
-from ml_signals import chart_data as _chart_data
-from ml_signals import error_ledger
-from ml_signals.venue import MalformedInstrumentId
-from ranking_engine import metrics_store
 
 
 # Default mirrors dashboard.py:85-86 exactly.
 METRICS_DB_PATH: str = os.environ.get(
-    "METRICS_DB_PATH", str(Path(CATALOG_PATH).parent / "metrics" / "metrics.db"),
+    "METRICS_DB_PATH",
+    str(Path(CATALOG_PATH).parent / "metrics" / "metrics.db"),
 )
 
 # Where platform/data_api.dockerfile's Node build stage COPYs platform/frontend/dist -- keep this
@@ -141,8 +146,10 @@ class HealthResponse(BaseModel):
 
 @app.get("/api/health")
 def health() -> HealthResponse:
-    """Pilot route for the OpenAPI->TypeScript codegen pipeline (Story 15.1 AC #3) --
-    also a real liveness check going forward, not throwaway scaffolding."""
+    """
+    Pilot route for the OpenAPI->TypeScript codegen pipeline (Story 15.1 AC #3) --
+    also a real liveness check going forward, not throwaway scaffolding.
+    """
     return HealthResponse(status="ok")
 
 
@@ -154,8 +161,10 @@ class ErrorsResponse(BaseModel):
 
 @app.get("/api/errors")
 def errors() -> ErrorsResponse:
-    """Every failure this process carried on past (`ml_signals.error_ledger`). Empty means none
-    since start; the frontend's error bar polls this so a malfunction cannot go unseen."""
+    """
+    Every failure this process carried on past (`ml_signals.error_ledger`). Empty means none
+    since start; the frontend's error bar polls this so a malfunction cannot go unseen.
+    """
     return ErrorsResponse(counts=error_ledger.counts(), last=error_ledger.last_details())
 
 

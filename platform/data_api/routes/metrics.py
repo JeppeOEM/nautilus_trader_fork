@@ -39,9 +39,9 @@ from pathlib import Path
 
 from fastapi import APIRouter
 from pydantic import BaseModel
+from ranking_engine import metrics_store
 
 from data_api.settings import CATALOG_PATH
-from ranking_engine import metrics_store
 
 
 # Default mirrors data_api/app.py's own METRICS_DB_PATH default exactly (dashboard.py:85-86).

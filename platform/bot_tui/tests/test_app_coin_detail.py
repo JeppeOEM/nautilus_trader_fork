@@ -26,8 +26,8 @@ import urwid
 
 from bot_tui import coin_detail_state
 from bot_tui import ranking_state
-from bot_tui.app import BotTuiApp
 from bot_tui.app import _LADDER_COLLAPSED_LEVELS
+from bot_tui.app import BotTuiApp
 
 
 def _reset() -> None:

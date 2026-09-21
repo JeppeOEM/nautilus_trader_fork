@@ -12,18 +12,16 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
-from pathlib import Path
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
-from live_paper.config import BotConfig
-from live_paper.config import PaperConfig
 from live_paper.config import ExecConfig
+from live_paper.config import PaperConfig
 from live_paper.config import load_paper_config
 from live_paper.config import load_real_money_config
 from live_paper.config import resolve_config
-from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
 
 
 _ONE_BOT = '\n[[bots]]\nbot_id = "bot-01"\n'
@@ -52,9 +50,7 @@ def test_paper_config_rejects_duplicate_bot_ids(tmp_path) -> None:
     path = _write(
         tmp_path,
         "config.toml",
-        'log_level = "INFO"\n'
-        '[[bots]]\nbot_id = "bot-01"\n'
-        '[[bots]]\nbot_id = "bot-01"\n',
+        'log_level = "INFO"\n[[bots]]\nbot_id = "bot-01"\n[[bots]]\nbot_id = "bot-01"\n',
     )
     with pytest.raises(ValueError, match="distinct bot_id"):
         load_paper_config(path)
@@ -349,7 +345,12 @@ def test_unknown_venue_table_and_unknown_venue_key_are_rejected(tmp_path) -> Non
 
 @pytest.mark.parametrize(
     "body",
-    ["environment = 1", "starting_balances = []", "starting_balances = [1]", "account_type = 'FOO'"],
+    [
+        "environment = 1",
+        "starting_balances = []",
+        "starting_balances = [1]",
+        "account_type = 'FOO'",
+    ],
 )
 def test_malformed_venue_values_are_rejected_at_load(tmp_path, body) -> None:
     path = _write(tmp_path, "c.toml", f"[venues.DYDX]\n{body}\n" + _ONE_BOT)

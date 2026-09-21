@@ -28,7 +28,9 @@ _IIDS = ("BTC-USD-PERP.DYDX", "BTCUSDT-LINEAR.BYBIT", "BTC-USD-PERP.HYPERLIQUID"
 
 def test_round_trips_every_venue_through_one_catalog_dir(tmp_path: Path) -> None:
     catalog = ParquetDataCatalog(str(tmp_path))
-    catalog.write_data([OpenInterest(InstrumentId.from_str(i), Decimal("123.456"), 1, 1) for i in _IIDS])
+    catalog.write_data(
+        [OpenInterest(InstrumentId.from_str(i), Decimal("123.456"), 1, 1) for i in _IIDS]
+    )
     assert (tmp_path / "data" / "custom_open_interest").is_dir()
     for iid in _IIDS:
         (oi,) = catalog.query(OpenInterest, identifiers=[iid])
@@ -37,6 +39,13 @@ def test_round_trips_every_venue_through_one_catalog_dir(tmp_path: Path) -> None
 
 def test_from_pyo3_maps_real_hyperliquid_object() -> None:
     iid = "BTC-USD-PERP.HYPERLIQUID"
-    raw = nautilus_pyo3.HyperliquidOpenInterest(nautilus_pyo3.InstrumentId.from_str(iid), "1234.5", 7, 7)
+    raw = nautilus_pyo3.HyperliquidOpenInterest(
+        nautilus_pyo3.InstrumentId.from_str(iid), "1234.5", 7, 7
+    )
     oi = OpenInterest.from_pyo3(raw)
-    assert (str(oi.instrument_id), oi.open_interest, oi.ts_event, oi.ts_init) == (iid, Decimal("1234.5"), 7, 7)
+    assert (str(oi.instrument_id), oi.open_interest, oi.ts_event, oi.ts_init) == (
+        iid,
+        Decimal("1234.5"),
+        7,
+        7,
+    )

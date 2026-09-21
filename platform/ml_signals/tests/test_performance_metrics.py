@@ -104,6 +104,8 @@ def test_all_metrics_merges_trade_and_return_stats() -> None:
     pnl_by_day = [
         {"period_start": i * _NS_PER_DAY, "pnl": v} for i, v in enumerate([10.0, -5.0, 20.0])
     ]
-    stats = performance_metrics.all_metrics([10.0, -5.0, 20.0], pnl_by_day, starting_balance=1_000.0)
+    stats = performance_metrics.all_metrics(
+        [10.0, -5.0, 20.0], pnl_by_day, starting_balance=1_000.0
+    )
     assert stats["win_rate"] == 2 / 3
     assert stats["max_drawdown"] is not None

@@ -15,6 +15,12 @@
 import asyncio
 
 import pytest
+
+import live_paper.node
+from live_paper.config import BotConfig
+from live_paper.config import ExecConfig
+from live_paper.config import PaperConfig
+from live_paper.node import build_node
 from nautilus_trader.adapters.bybit.config import BybitExecClientConfig
 from nautilus_trader.adapters.dydx.config import DydxExecClientConfig
 from nautilus_trader.adapters.hyperliquid.config import HyperliquidExecClientConfig
@@ -24,12 +30,6 @@ from nautilus_trader.core.nautilus_pyo3 import BybitProductType
 from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
 from nautilus_trader.core.nautilus_pyo3 import HyperliquidEnvironment
 from nautilus_trader.live.node import TradingNode
-
-import live_paper.node
-from live_paper.config import BotConfig
-from live_paper.config import ExecConfig
-from live_paper.config import PaperConfig
-from live_paper.node import build_node
 
 
 def _paper_config(*bots: BotConfig) -> PaperConfig:
@@ -215,7 +215,9 @@ def test_paper_config_builds_one_data_and_one_sandbox_client_per_venue_in_use() 
         venues = {"DYDX", "BYBIT", "HYPERLIQUID"}
         assert set(node._config.data_clients) == venues
         assert set(node._config.exec_clients) == venues
-        assert all(isinstance(c, SandboxExecutionClientConfig) for c in node._config.exec_clients.values())
+        assert all(
+            isinstance(c, SandboxExecutionClientConfig) for c in node._config.exec_clients.values()
+        )
         assert node._config.exec_clients["BYBIT"].starting_balances == ["10_000 USDT"]
         assert node._config.exec_clients["HYPERLIQUID"].starting_balances == ["10_000 USDC"]
         assert len(node.trader.strategy_states()) == 4

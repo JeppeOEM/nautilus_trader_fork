@@ -49,7 +49,9 @@ logger = logging.getLogger(__name__)
 
 _DATA = Path("data")
 _TARGET_DIR = _DATA / "custom_open_interest"
-_SOURCE_DIRS = tuple(_DATA / f"custom_{venue}_open_interest" for venue in ("dydx", "bybit", "hyperliquid"))
+_SOURCE_DIRS = tuple(
+    _DATA / f"custom_{venue}_open_interest" for venue in ("dydx", "bybit", "hyperliquid")
+)
 _TYPE = b"OpenInterest"
 
 
@@ -97,7 +99,9 @@ def migrate_file(catalog_path: str, source: Path, target: Path, backup_dir: str)
     tmp = target.with_suffix(".parquet.tmp")
     pq.write_table(new, tmp, compression="zstd")
     if pq.read_table(tmp).num_rows != table.num_rows:
-        raise RuntimeError(f"{source}: rewritten file has a different row count; source left in place")
+        raise RuntimeError(
+            f"{source}: rewritten file has a different row count; source left in place"
+        )
     os.replace(tmp, target)
     source.unlink()
 
@@ -115,7 +119,9 @@ def _remove_empty_dirs(catalog_path: str) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--catalog", required=True)
     parser.add_argument("--backup-dir", help="required with --apply")
     parser.add_argument("--apply", action="store_true", help="move files (default: report only)")

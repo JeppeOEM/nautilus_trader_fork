@@ -49,11 +49,13 @@ def test_save_then_load_round_trips_multi_instrument_mixed_category_selection(
 def test_save_config_is_a_full_rewrite_not_a_patch(tmp_path: Path) -> None:
     path = tmp_path / "chart_indicators.toml"
     save_config(
-        {"BTC-USD-PERP.DYDX": [IndicatorEntry(name="OFI", params={}, category="custom")]}, path,
+        {"BTC-USD-PERP.DYDX": [IndicatorEntry(name="OFI", params={}, category="custom")]},
+        path,
     )
 
     save_config(
-        {"ETH-USD-PERP.DYDX": [IndicatorEntry(name="OFI", params={}, category="custom")]}, path,
+        {"ETH-USD-PERP.DYDX": [IndicatorEntry(name="OFI", params={}, category="custom")]},
+        path,
     )
 
     round_tripped = load_config(path)

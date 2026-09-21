@@ -17,11 +17,11 @@
 from pathlib import Path
 
 import pytest
+from collector_core.second_snapshot import DydxSecondSnapshot
 from fastapi.testclient import TestClient
 
 import data_api.app as app_module
 import data_api.routes.snapshots as snapshots_routes
-from collector_core.second_snapshot import DydxSecondSnapshot
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
@@ -45,33 +45,38 @@ def _write_snapshots(
     buy_volume: float = 1.0,
     sell_volume: float = 0.5,
 ) -> None:
-    """`entries` is a list of (ts_ns, bid_price, ask_price) -- each becomes a one-second
-    snapshot, written in one `write_data()` call for speed."""
+    """
+    `entries` is a list of (ts_ns, bid_price, ask_price) -- each becomes a one-second
+    snapshot, written in one `write_data()` call for speed.
+    """
     entries = sorted(entries, key=lambda e: e[0])
-    ParquetDataCatalog(catalog_path).write_data([
-        DydxSecondSnapshot(
-            instrument_id=InstrumentId.from_str(_IID),
-            bid_prices=[bid],
-            bid_sizes=[1.0],
-            ask_prices=[ask],
-            ask_sizes=[1.0],
-            buy_volume=buy_volume,
-            sell_volume=sell_volume,
-            buy_count=1,
-            sell_count=1,
-            open_price=bid,
-            high_price=ask,
-            low_price=bid,
-            close_price=bid,
-            ts_event=ts,
-            ts_init=ts,
-        )
-        for ts, bid, ask in entries
-    ])
+    ParquetDataCatalog(catalog_path).write_data(
+        [
+            DydxSecondSnapshot(
+                instrument_id=InstrumentId.from_str(_IID),
+                bid_prices=[bid],
+                bid_sizes=[1.0],
+                ask_prices=[ask],
+                ask_sizes=[1.0],
+                buy_volume=buy_volume,
+                sell_volume=sell_volume,
+                buy_count=1,
+                sell_count=1,
+                open_price=bid,
+                high_price=ask,
+                low_price=bid,
+                close_price=bid,
+                ts_event=ts,
+                ts_init=ts,
+            )
+            for ts, bid, ask in entries
+        ]
+    )
 
 
 def test_pagination_two_sequential_pages_are_strictly_older_and_disjoint(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     catalog_path = str(tmp_path / "catalog")
     # 5 one-second-apart snapshots -> 5 rows.
@@ -94,7 +99,9 @@ def test_pagination_two_sequential_pages_are_strictly_older_and_disjoint(
     assert {i["t"] for i in second_items}.isdisjoint({i["t"] for i in first_items})
 
 
-def test_has_more_false_at_true_history_start(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_has_more_false_at_true_history_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     catalog_path = str(tmp_path / "catalog")
     entries = [(_BASE_NS - i * 1_000_000_000, 100.0, 101.0) for i in range(3)]
     _write_snapshots(catalog_path, entries)
@@ -108,7 +115,9 @@ def test_has_more_false_at_true_history_start(tmp_path: Path, monkeypatch: pytes
     assert body["has_more"] is False
 
 
-def test_short_page_with_has_more_true_is_legal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_short_page_with_has_more_true_is_legal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """
     A page shorter than `limit` must not be misread as history exhaustion (AD-F3) --
     constructed so the probe query genuinely extends coverage into a second snapshot that
@@ -126,7 +135,9 @@ def test_short_page_with_has_more_true_is_legal(tmp_path: Path, monkeypatch: pyt
     # `before_ns` lands inside that range while sitting outside the main window
     # ([before_ns-4s, before_ns]).
     in_probe_window_only_ns = before_ns - 4_500_000_000
-    _write_snapshots(catalog_path, [(in_main_window_ns, 100.0, 101.0), (in_probe_window_only_ns, 90.0, 91.0)])
+    _write_snapshots(
+        catalog_path, [(in_main_window_ns, 100.0, 101.0), (in_probe_window_only_ns, 90.0, 91.0)]
+    )
     client = _client(catalog_path, monkeypatch)
 
     response = client.get(f"/api/snapshots/{_IID}?before_ns={before_ns}&limit=2")
@@ -138,7 +149,8 @@ def test_short_page_with_has_more_true_is_legal(tmp_path: Path, monkeypatch: pyt
 
 
 def test_gap_marker_inserted_between_rows_separated_by_more_than_threshold(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     catalog_path = str(tmp_path / "catalog")
     # limit=10 -> main query window span = 10 * _QUERY_WINDOW_MULTIPLIER(2) = 20s -- both
@@ -165,31 +177,36 @@ def test_gap_marker_inserted_between_rows_separated_by_more_than_threshold(
 
 
 def test_crossed_book_row_is_skipped_and_not_counted_toward_limit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A crossed/touched snapshot (`bid_prices[0] >= ask_prices[0]`, stale reconnect data,
+    """
+    A crossed/touched snapshot (`bid_prices[0] >= ask_prices[0]`, stale reconnect data,
     DATA-04) is silently dropped -- it must not consume any of the requested `limit` budget,
-    same discipline as `_price_series_rows`' original (`ml_signals/dashboard.py`)."""
+    same discipline as `_price_series_rows`' original (`ml_signals/dashboard.py`).
+    """
     catalog_path = str(tmp_path / "catalog")
     crossed_ns = _BASE_NS - 3_000_000_000
     healthy_ns = _BASE_NS - 2_000_000_000
     _write_snapshots(catalog_path, [(healthy_ns, 100.0, 101.0)])
     # Write the crossed row directly (helper always writes bid < ask).
-    ParquetDataCatalog(catalog_path).write_data([
-        DydxSecondSnapshot(
-            instrument_id=InstrumentId.from_str(_IID),
-            bid_prices=[105.0],
-            bid_sizes=[1.0],
-            ask_prices=[100.0],  # crossed: bid >= ask
-            ask_sizes=[1.0],
-            buy_volume=1.0,
-            sell_volume=0.5,
-            buy_count=1,
-            sell_count=1,
-            ts_event=crossed_ns,
-            ts_init=crossed_ns,
-        ),
-    ])
+    ParquetDataCatalog(catalog_path).write_data(
+        [
+            DydxSecondSnapshot(
+                instrument_id=InstrumentId.from_str(_IID),
+                bid_prices=[105.0],
+                bid_sizes=[1.0],
+                ask_prices=[100.0],  # crossed: bid >= ask
+                ask_sizes=[1.0],
+                buy_volume=1.0,
+                sell_volume=0.5,
+                buy_count=1,
+                sell_count=1,
+                ts_event=crossed_ns,
+                ts_init=crossed_ns,
+            ),
+        ]
+    )
     client = _client(catalog_path, monkeypatch)
 
     response = client.get(f"/api/snapshots/{_IID}?before_ns={_BASE_NS}&limit=10")
@@ -201,7 +218,8 @@ def test_crossed_book_row_is_skipped_and_not_counted_toward_limit(
 
 
 def test_limit_far_above_max_never_returns_more_than_max_snapshots_limit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     catalog_path = str(tmp_path / "catalog")
     max_limit = snapshots_routes._MAX_SNAPSHOTS_LIMIT
@@ -213,36 +231,47 @@ def test_limit_far_above_max_never_returns_more_than_max_snapshots_limit(
     _write_snapshots(catalog_path, entries)
     client = _client(catalog_path, monkeypatch)
 
-    response = client.get(f"/api/snapshots/{_IID}?before_ns={_BASE_NS + 1_000_000_000}&limit=100000000")
+    response = client.get(
+        f"/api/snapshots/{_IID}?before_ns={_BASE_NS + 1_000_000_000}&limit=100000000"
+    )
 
     assert response.status_code == 200
     assert len(response.json()["items"]) == max_limit
 
 
 def test_limit_zero_or_negative_is_clamped_up_to_one_not_treated_as_unbounded(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Python's `list[-0:]` equals `list[0:]` (the whole list) -- `limit=0` must not fall
-    through to that footgun and return more than one row."""
+    """
+    Python's `list[-0:]` equals `list[0:]` (the whole list) -- `limit=0` must not fall
+    through to that footgun and return more than one row.
+    """
     catalog_path = str(tmp_path / "catalog")
     entries = [(_BASE_NS - i * 1_000_000_000, 100.0, 101.0) for i in range(5)]
     _write_snapshots(catalog_path, entries)
     client = _client(catalog_path, monkeypatch)
 
     for limit in (0, -5):
-        response = client.get(f"/api/snapshots/{_IID}?before_ns={_BASE_NS + 1_000_000_000}&limit={limit}")
+        response = client.get(
+            f"/api/snapshots/{_IID}?before_ns={_BASE_NS + 1_000_000_000}&limit={limit}"
+        )
         assert response.status_code == 200
         assert len(response.json()["items"]) == 1
 
 
 def test_paging_reaches_data_beyond_a_gap_wider_than_the_query_window(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     catalog_path = str(tmp_path / "catalog")
-    _write_snapshots(catalog_path, [
-        (_BASE_NS - 1_000_000_000, 100.0, 101.0),
-        (_BASE_NS - 3_600_000_000_000, 90.0, 91.0),  # 1h back; the query window is only seconds
-    ])
+    _write_snapshots(
+        catalog_path,
+        [
+            (_BASE_NS - 1_000_000_000, 100.0, 101.0),
+            (_BASE_NS - 3_600_000_000_000, 90.0, 91.0),  # 1h back; the query window is only seconds
+        ],
+    )
     client = _client(catalog_path, monkeypatch)
 
     first = client.get(f"/api/snapshots/{_IID}?before_ns={_BASE_NS}&limit=2").json()
@@ -255,11 +284,20 @@ def test_paging_reaches_data_beyond_a_gap_wider_than_the_query_window(
     assert second["has_more"] is False
 
 
-@pytest.mark.parametrize(("iid", "market"), [("BTCUSDT-SPOT.BYBIT", "spot"), ("BTCUSDT-LINEAR.BYBIT", "perp")])
+@pytest.mark.parametrize(
+    ("iid", "market"), [("BTCUSDT-SPOT.BYBIT", "spot"), ("BTCUSDT-LINEAR.BYBIT", "perp")]
+)
 def test_market_field_next_to_venue(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, iid: str, market: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    iid: str,
+    market: str,
 ) -> None:
-    body = _client(str(tmp_path / "cat"), monkeypatch).get(
-        f"/api/snapshots/{iid}?before_ns={_BASE_NS}&limit=3",
-    ).json()
+    body = (
+        _client(str(tmp_path / "cat"), monkeypatch)
+        .get(
+            f"/api/snapshots/{iid}?before_ns={_BASE_NS}&limit=3",
+        )
+        .json()
+    )
     assert (body["venue"], body["market"]) == ("BYBIT", market)

@@ -31,10 +31,17 @@ def _path() -> str:
 
 def _row(ts: int, instrument_id: str = "BTC-USD-PERP.DYDX", **kwargs) -> dict:
     base = {
-        "ts": ts, "instrument_id": instrument_id,
-        "price": None, "pct_1h": None, "pct_24h": None, "volatility": None,
-        "ofi": None, "microprice": None, "spread": None,
-        "rank": None, "volume24h": None,
+        "ts": ts,
+        "instrument_id": instrument_id,
+        "price": None,
+        "pct_1h": None,
+        "pct_24h": None,
+        "volatility": None,
+        "ofi": None,
+        "microprice": None,
+        "spread": None,
+        "rank": None,
+        "volume24h": None,
     }
     return {**base, **kwargs}
 
@@ -50,7 +57,21 @@ def test_write_and_latest_roundtrip() -> None:
 
 def test_all_metric_columns_persisted() -> None:
     path = _path()
-    store.write([_row(_NOW, price=1.0, pct_1h=2.0, pct_24h=3.0, volatility=4.0, ofi=5.0, microprice=6.0, spread=7.0)], path)
+    store.write(
+        [
+            _row(
+                _NOW,
+                price=1.0,
+                pct_1h=2.0,
+                pct_24h=3.0,
+                volatility=4.0,
+                ofi=5.0,
+                microprice=6.0,
+                spread=7.0,
+            )
+        ],
+        path,
+    )
     rows = store.latest(path)
     r = rows[0]
     assert r["price"] == 1.0
@@ -68,10 +89,13 @@ def test_latest_returns_most_recent_per_instrument() -> None:
 
 def test_latest_multiple_instruments() -> None:
     path = _path()
-    store.write([
-        _row(_NOW, "BTC-USD-PERP.DYDX", price=10.0),
-        _row(_NOW, "ETH-USD-PERP.DYDX", price=20.0),
-    ], path)
+    store.write(
+        [
+            _row(_NOW, "BTC-USD-PERP.DYDX", price=10.0),
+            _row(_NOW, "ETH-USD-PERP.DYDX", price=20.0),
+        ],
+        path,
+    )
     by_iid = {r["instrument_id"]: r for r in store.latest(path)}
     assert by_iid["BTC-USD-PERP.DYDX"]["price"] == 10.0
     assert by_iid["ETH-USD-PERP.DYDX"]["price"] == 20.0
@@ -79,7 +103,7 @@ def test_latest_multiple_instruments() -> None:
 
 def test_history_filters_by_days() -> None:
     path = _path()
-    old = _NOW - 40 * _DAY_NS   # 40 days ago — outside the 31-day window
+    old = _NOW - 40 * _DAY_NS  # 40 days ago — outside the 31-day window
     store.write([_row(old, price=0.0), _row(_NOW, price=99.0)], path)
     rows = store.history("BTC-USD-PERP.DYDX", path, days=31)
     assert len(rows) == 1
@@ -114,7 +138,7 @@ def test_write_prunes_rows_older_than_retain_days() -> None:
 def test_upsert_replaces_same_ts_and_instrument() -> None:
     path = _path()
     store.write([_row(_NOW, price=1.0)], path)
-    store.write([_row(_NOW, price=2.0)], path)   # same primary key → replace
+    store.write([_row(_NOW, price=2.0)], path)  # same primary key → replace
     rows = store.latest(path)
     assert len(rows) == 1
     assert rows[0]["price"] == 2.0
@@ -136,10 +160,13 @@ def test_rank_and_volume24h_persisted() -> None:
 
 def test_nearest_returns_closest_row() -> None:
     path = _path()
-    store.write([
-        _row(_NOW - 3_000_000_000, rank=2),
-        _row(_NOW - 1_000_000_000, rank=1),
-    ], path)
+    store.write(
+        [
+            _row(_NOW - 3_000_000_000, rank=2),
+            _row(_NOW - 1_000_000_000, rank=1),
+        ],
+        path,
+    )
     row = store.nearest("BTC-USD-PERP.DYDX", _NOW - 2_500_000_000, path)
     assert row["rank"] == 2
     row = store.nearest("BTC-USD-PERP.DYDX", _NOW, path)
@@ -202,23 +229,36 @@ if __name__ == "__main__":
 def test_price_near_days_ago_returns_price_at_or_before_target_per_instrument() -> None:
     path = _path()
     week = 7 * _DAY_NS
-    store.write([
-        _row(_NOW - week - 60 * 1_000_000_000, "BTC-USD-PERP.DYDX", price=90.0),
-        _row(_NOW - week - 10 * 1_000_000_000, "BTC-USD-PERP.DYDX", price=100.0),  # closest before
-        _row(_NOW - week + 60 * 1_000_000_000, "BTC-USD-PERP.DYDX", price=110.0),  # after target
-        _row(_NOW - week - 5 * 1_000_000_000, "ETH-USD-PERP.DYDX", price=7.0),
-    ], path)
+    store.write(
+        [
+            _row(_NOW - week - 60 * 1_000_000_000, "BTC-USD-PERP.DYDX", price=90.0),
+            _row(
+                _NOW - week - 10 * 1_000_000_000, "BTC-USD-PERP.DYDX", price=100.0
+            ),  # closest before
+            _row(
+                _NOW - week + 60 * 1_000_000_000, "BTC-USD-PERP.DYDX", price=110.0
+            ),  # after target
+            _row(_NOW - week - 5 * 1_000_000_000, "ETH-USD-PERP.DYDX", price=7.0),
+        ],
+        path,
+    )
 
-    assert store.price_near_days_ago(path, 7) == {"BTC-USD-PERP.DYDX": 100.0, "ETH-USD-PERP.DYDX": 7.0}
+    assert store.price_near_days_ago(path, 7) == {
+        "BTC-USD-PERP.DYDX": 100.0,
+        "ETH-USD-PERP.DYDX": 7.0,
+    }
 
 
 def test_price_near_days_ago_omits_instruments_without_history_that_old() -> None:
     path = _path()
-    store.write([
-        _row(_NOW - 10 * _DAY_NS, "OLD-USD-PERP.DYDX", price=5.0),
-        _row(_NOW - 2 * _DAY_NS, "NEW-USD-PERP.DYDX", price=9.0),  # only 2 days of history
-        _row(_NOW - 20 * _DAY_NS, "GAP-USD-PERP.DYDX", price=1.0),  # nothing near the 7d mark
-    ], path)
+    store.write(
+        [
+            _row(_NOW - 10 * _DAY_NS, "OLD-USD-PERP.DYDX", price=5.0),
+            _row(_NOW - 2 * _DAY_NS, "NEW-USD-PERP.DYDX", price=9.0),  # only 2 days of history
+            _row(_NOW - 20 * _DAY_NS, "GAP-USD-PERP.DYDX", price=1.0),  # nothing near the 7d mark
+        ],
+        path,
+    )
 
     assert store.price_near_days_ago(path, 10) == {"OLD-USD-PERP.DYDX": 5.0}
     assert store.price_near_days_ago(path, 7) == {}

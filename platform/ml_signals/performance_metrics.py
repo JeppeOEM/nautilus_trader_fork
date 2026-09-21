@@ -61,7 +61,13 @@ from nautilus_trader.analysis import WinRate
 _ANNUALIZATION_PERIOD = 365
 
 _TRADE_STAT_NAMES = ("win_rate", "expectancy", "avg_win", "avg_loss", "max_win", "max_loss")
-_RETURN_STAT_NAMES = ("sharpe_ratio", "sortino_ratio", "calmar_ratio", "max_drawdown", "profit_factor")
+_RETURN_STAT_NAMES = (
+    "sharpe_ratio",
+    "sortino_ratio",
+    "calmar_ratio",
+    "max_drawdown",
+    "profit_factor",
+)
 
 
 def _clean(value: float | None) -> float | None:
@@ -131,15 +137,21 @@ def return_stats(
     equity anchoring always reflects true account history (see that function's own
     docstring).
     """
-    windowed = returns if cutoff_ns is None else {ts: r for ts, r in returns.items() if ts >= cutoff_ns}
+    windowed = (
+        returns if cutoff_ns is None else {ts: r for ts, r in returns.items() if ts >= cutoff_ns}
+    )
     if not windowed:
         return dict.fromkeys(_RETURN_STAT_NAMES)
     return {
-        "sharpe_ratio": _clean(SharpeRatio(period=_ANNUALIZATION_PERIOD).calculate_from_returns(windowed)),
+        "sharpe_ratio": _clean(
+            SharpeRatio(period=_ANNUALIZATION_PERIOD).calculate_from_returns(windowed)
+        ),
         "sortino_ratio": _clean(
             SortinoRatio(period=_ANNUALIZATION_PERIOD).calculate_from_returns(windowed)
         ),
-        "calmar_ratio": _clean(CalmarRatio(period=_ANNUALIZATION_PERIOD).calculate_from_returns(windowed)),
+        "calmar_ratio": _clean(
+            CalmarRatio(period=_ANNUALIZATION_PERIOD).calculate_from_returns(windowed)
+        ),
         "max_drawdown": _clean(MaxDrawdown().calculate_from_returns(windowed)),
         "profit_factor": _clean(ProfitFactor().calculate_from_returns(windowed)),
     }

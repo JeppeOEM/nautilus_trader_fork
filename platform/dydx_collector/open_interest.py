@@ -32,6 +32,7 @@ from decimal import Decimal
 
 from collector_core.open_interest import OpenInterest
 from ml_signals import error_ledger
+
 from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
 from nautilus_trader.core.nautilus_pyo3 import get_dydx_http_url  # type: ignore[attr-defined]
 from nautilus_trader.model.identifiers import InstrumentId
@@ -78,7 +79,11 @@ def classify_liquidity(
         except (ValueError, TypeError) as exc:
             # No volume is not zero volume (DATA-01): an unparseable value must not silently
             # reclassify a coin as illiquid. Leave it unclassified, loudly.
-            error_ledger.record("open_interest.volume24h", f"{iid}: unparseable volume24H {market.get('volume24H')!r}", exc)
+            error_ledger.record(
+                "open_interest.volume24h",
+                f"{iid}: unparseable volume24H {market.get('volume24H')!r}",
+                exc,
+            )
             continue
         if vol >= min_volume_usd:
             volumes[iid] = vol

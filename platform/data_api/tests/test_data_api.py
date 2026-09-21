@@ -17,15 +17,15 @@
 from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
-
-import data_api.app as app_module
 from collector_core.second_snapshot import DydxSecondSnapshot
+from fastapi.testclient import TestClient
 from ml_signals import catalog_stats as _catalog_stats
 from ml_signals import chart_data as _chart_data
+from ranking_engine import metrics_store
+
+import data_api.app as app_module
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
-from ranking_engine import metrics_store
 
 
 _IID = "BTC-USD-PERP.DYDX"
@@ -44,25 +44,27 @@ def _write_snapshot(
     ask_price: float = 101.0,
     close_price: float | None = 100.5,
 ) -> None:
-    ParquetDataCatalog(catalog_path).write_data([
-        DydxSecondSnapshot(
-            instrument_id=InstrumentId.from_str(_IID),
-            bid_prices=[bid_price],
-            bid_sizes=[1.0],
-            ask_prices=[ask_price],
-            ask_sizes=[1.0],
-            buy_volume=1.0,
-            sell_volume=0.5,
-            buy_count=1,
-            sell_count=1,
-            open_price=close_price,
-            high_price=close_price,
-            low_price=close_price,
-            close_price=close_price,
-            ts_event=ts,
-            ts_init=ts,
-        )
-    ])
+    ParquetDataCatalog(catalog_path).write_data(
+        [
+            DydxSecondSnapshot(
+                instrument_id=InstrumentId.from_str(_IID),
+                bid_prices=[bid_price],
+                bid_sizes=[1.0],
+                ask_prices=[ask_price],
+                ask_sizes=[1.0],
+                buy_volume=1.0,
+                sell_volume=0.5,
+                buy_count=1,
+                sell_count=1,
+                open_price=close_price,
+                high_price=close_price,
+                low_price=close_price,
+                close_price=close_price,
+                ts_event=ts,
+                ts_init=ts,
+            )
+        ]
+    )
 
 
 def _metrics_row(ts: int, price: float = 100.0) -> dict:
@@ -83,7 +85,9 @@ def _metrics_row(ts: int, price: float = 100.0) -> dict:
 
 def test_metrics_history_route(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     db_path = str(tmp_path / "metrics.db")
-    metrics_store.write([_metrics_row(1_000_000_000), _metrics_row(2_000_000_000, price=101.0)], db_path)
+    metrics_store.write(
+        [_metrics_row(1_000_000_000), _metrics_row(2_000_000_000, price=101.0)], db_path
+    )
     client = _client(str(tmp_path / "catalog"), db_path, monkeypatch)
 
     response = client.get(f"/metrics/history/{_IID}?days=31")
@@ -127,7 +131,9 @@ def test_catalog_chart_series_route(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 
 def test_catalog_snapshots_route(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     catalog_path = str(tmp_path / "catalog")
-    _write_snapshot(catalog_path, ts=1_000_000_000, bid_price=100.0, ask_price=101.0, close_price=100.5)
+    _write_snapshot(
+        catalog_path, ts=1_000_000_000, bid_price=100.0, ask_price=101.0, close_price=100.5
+    )
     client = _client(catalog_path, str(tmp_path / "metrics.db"), monkeypatch)
 
     response = client.get(f"/catalog/snapshots/{_IID}?start_ns=0&end_ns=2000000000")
@@ -154,9 +160,9 @@ def test_catalog_snapshots_route(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 
 def test_errors_route_reports_the_ledger() -> None:
     from fastapi.testclient import TestClient
+    from ml_signals import error_ledger
 
     import data_api.app as app_module
-    from ml_signals import error_ledger
 
     error_ledger.reset()
     client = TestClient(app_module.app)

@@ -53,7 +53,11 @@ _UNCROSS_MAX_STEPS: int = 5
 
 
 def _resolve_stale_level(
-    book: OrderBook, bid: Price, ask: Price, bid_seq: int, ask_seq: int,
+    book: OrderBook,
+    bid: Price,
+    ask: Price,
+    bid_seq: int,
+    ask_seq: int,
 ) -> tuple[OrderSide, Price, int, int]:
     """
     Which side of a crossed book is stale, per dYdX's own tie-break rule (DATA-04):
@@ -73,13 +77,18 @@ def _resolve_stale_level(
     return OrderSide.SELL, ask, ask_seq, bid_seq
 
 
-def _apply_stale_delete(book: OrderBook, stale_side: OrderSide, stale_price: Price, sequence: int) -> None:
+def _apply_stale_delete(
+    book: OrderBook, stale_side: OrderSide, stale_price: Price, sequence: int
+) -> None:
     """
     Synthetic BookAction.DELETE for the stale level (DATA-04) -- applied identically
     to how a real dYdX-sent deletion is applied, never a full book wipe.
     """
     delete_order = BookOrder(
-        side=stale_side, price=stale_price, size=Quantity(0.0, stale_price.precision), order_id=0,
+        side=stale_side,
+        price=stale_price,
+        size=Quantity(0.0, stale_price.precision),
+        order_id=0,
     )
     now_ns = time.time_ns()
     book.apply_delta(
@@ -112,13 +121,21 @@ def _log_uncross_result(
         logger.warning(
             "Crossed book for %s uncrossed by dropping the LAST remaining %s level "
             "@ %.6f (msg_id %d, surviving side msg_id %d) -- book is now one-sided",
-            iid, stale_side.name, stale_price.as_double(), stale_seq, other_seq,
+            iid,
+            stale_side.name,
+            stale_price.as_double(),
+            stale_seq,
+            other_seq,
         )
     else:
         logger.info(
             "Crossed book for %s actively uncrossed: dropped stale %s @ %.6f "
             "(msg_id %d, surviving side msg_id %d)",
-            iid, stale_side.name, stale_price.as_double(), stale_seq, other_seq,
+            iid,
+            stale_side.name,
+            stale_price.as_double(),
+            stale_seq,
+            other_seq,
         )
 
 
@@ -153,7 +170,8 @@ def uncross_step(iid: str, book: OrderBook, level_msg_id: LevelMsgIds) -> bool:
     level_msg_id.pop((stale_side, stale_price.as_double()), None)
 
     side_now_empty = (
-        book.best_bid_price() is None if stale_side == OrderSide.BUY
+        book.best_bid_price() is None
+        if stale_side == OrderSide.BUY
         else book.best_ask_price() is None
     )
     _log_uncross_result(iid, stale_side, stale_price, stale_seq, other_seq, side_now_empty)
@@ -182,8 +200,7 @@ def handle_uncrossed_book(
     if crossed_since is None or prices is None:
         return
     logger.info(
-        "Crossed book for %s resolved after %.2fs "
-        "(was bid=%.6f/ask=%.6f, now bid=%.6f/ask=%.6f)",
+        "Crossed book for %s resolved after %.2fs (was bid=%.6f/ask=%.6f, now bid=%.6f/ask=%.6f)",
         iid,
         (now_ns - crossed_since) / 1e9,
         prices[0],

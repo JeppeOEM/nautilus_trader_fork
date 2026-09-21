@@ -30,21 +30,21 @@ lazily on the first `subscribe()` for that pair and torn down on the last matchi
 import asyncio
 import json
 import logging
-from typing import Callable
 import time
 from collections import defaultdict
 from collections import deque
+from typing import Callable
 
 import redis.asyncio as aioredis
-
-from data_api import settings
-from data_api.redis_bus import QUEUE_MAX
-from data_api.redis_bus import put_drop_oldest
 from collector_core.second_snapshot import DydxSecondSnapshot
 from ml_signals import error_ledger
 from ml_signals.candles import candle_dicts_from_snapshots
 from ml_signals.catalog_stats import SecondOHLC
 from ml_signals.catalog_stats import query_second_ohlc
+
+from data_api import settings
+from data_api.redis_bus import QUEUE_MAX
+from data_api.redis_bus import put_drop_oldest
 
 
 logger = logging.getLogger(__name__)
@@ -60,7 +60,9 @@ _BufferKey = tuple[str, int]  # (instrument_id, bar_seconds)
 RECENT_SECONDS = 600
 
 
-def _catalog_rows_for_seed(instrument_id: str, bar_seconds: int, start_ns: int, end_ns: int) -> list[SecondOHLC]:
+def _catalog_rows_for_seed(
+    instrument_id: str, bar_seconds: int, start_ns: int, end_ns: int
+) -> list[SecondOHLC]:
     """
     Read the current bucket's traded rows straight from the raw 1s archive.
 
@@ -70,7 +72,8 @@ def _catalog_rows_for_seed(instrument_id: str, bar_seconds: int, start_ns: int, 
 
 
 class LiveCandleBus:
-    """Maintains one current-bucket snapshot buffer per actively-subscribed
+    """
+    Maintains one current-bucket snapshot buffer per actively-subscribed
     `(instrument_id, bar_seconds)` pair, and fans out that pair's recomputed forming bar
     to every listener queue on each matching `snapshots:raw` tick.
 
@@ -82,7 +85,7 @@ class LiveCandleBus:
 
     def __init__(self) -> None:
         self._buffers: dict[_BufferKey, list[DydxSecondSnapshot]] = {}
-        self._listeners: dict[_BufferKey, set["asyncio.Queue[dict]"]] = {}
+        self._listeners: dict[_BufferKey, set[asyncio.Queue[dict]]] = {}
         # Called with every decoded snapshot (e.g. the alert engine) so a second consumer
         # never needs its own `snapshots:raw` subscription.
         self.observers: list[Callable[[DydxSecondSnapshot], None]] = []
@@ -99,27 +102,40 @@ class LiveCandleBus:
         rows = self._recent[snapshot.instrument_id.value]
         if rows and snapshot.ts_event <= rows[-1].ts_event:
             return  # duplicate/out-of-order (Redis reconnect)
-        rows.append(SecondOHLC(
-            snapshot.ts_event, snapshot.open_price, snapshot.high_price, snapshot.low_price,
-            snapshot.close_price, snapshot.buy_volume, snapshot.sell_volume,
-        ))
+        rows.append(
+            SecondOHLC(
+                snapshot.ts_event,
+                snapshot.open_price,
+                snapshot.high_price,
+                snapshot.low_price,
+                snapshot.close_price,
+                snapshot.buy_volume,
+                snapshot.sell_volume,
+            )
+        )
         while rows[0].ts_event < snapshot.ts_event - RECENT_SECONDS * 1_000_000_000:
             rows.popleft()
 
     def subscribe(self, instrument_id: str, bar_seconds: int) -> "asyncio.Queue[dict]":
-        """Register a new per-listener queue for `(instrument_id, bar_seconds)`,
+        """
+        Register a new per-listener queue for `(instrument_id, bar_seconds)`,
         creating that pair's buffer on first subscribe (one per `/ws/live` connection's
-        live-candle subscription)."""
+        live-candle subscription).
+        """
         key = (instrument_id, bar_seconds)
-        queue: "asyncio.Queue[dict]" = asyncio.Queue(QUEUE_MAX)
+        queue: asyncio.Queue[dict] = asyncio.Queue(QUEUE_MAX)
         self._listeners.setdefault(key, set()).add(queue)
         self._buffers.setdefault(key, [])
         return queue
 
-    def unsubscribe(self, instrument_id: str, bar_seconds: int, queue: "asyncio.Queue[dict]") -> None:
-        """Deregister one listener queue -- called on `unsubscribe`/disconnect. Tears
+    def unsubscribe(
+        self, instrument_id: str, bar_seconds: int, queue: "asyncio.Queue[dict]"
+    ) -> None:
+        """
+        Deregister one listener queue -- called on `unsubscribe`/disconnect. Tears
         down the pair's buffer and listener set entirely once the last listener leaves,
-        so an unwatched pair never keeps accumulating snapshots (MEM-02)."""
+        so an unwatched pair never keeps accumulating snapshots (MEM-02).
+        """
         key = (instrument_id, bar_seconds)
         listeners = self._listeners.get(key)
         if listeners is None:
@@ -147,42 +163,58 @@ class LiveCandleBus:
         now_ns = time.time_ns()
         start_ns = now_ns // bucket_ns * bucket_ns
         try:
-            rows = await asyncio.to_thread(_catalog_rows_for_seed, instrument_id, bar_seconds, start_ns, now_ns)
+            rows = await asyncio.to_thread(
+                _catalog_rows_for_seed, instrument_id, bar_seconds, start_ns, now_ns
+            )
         except Exception:
             self._seeded.discard(key)  # a failed read must not leave this pair permanently unseeded
             raise
         if key not in self._listeners:
             return  # everyone left while the read ran
         have = {r.ts_event for r in rows}
-        rows += [r for r in self.recent_rows(instrument_id, start_ns, now_ns) if r.ts_event not in have]
+        rows += [
+            r for r in self.recent_rows(instrument_id, start_ns, now_ns) if r.ts_event not in have
+        ]
         rows.sort(key=lambda r: r.ts_event)
         buffer = self._buffers.setdefault(key, [])
         # Live ticks own their bucket: if one rolled over while the read ran, only rows of that
         # same bucket may be prepended, never the previous bucket's.
         target = (buffer[0].ts_event if buffer else start_ns) // bucket_ns
-        older = [r for r in rows if r.ts_event // bucket_ns == target and (not buffer or r.ts_event < buffer[0].ts_event)]
+        older = [
+            r
+            for r in rows
+            if r.ts_event // bucket_ns == target and (not buffer or r.ts_event < buffer[0].ts_event)
+        ]
         self._buffers[key] = older + buffer
         if self._buffers[key]:
             self._publish(key, instrument_id, bar_seconds, self._buffers[key])
 
     def handle_batch(self, payload: object) -> None:
-        """Decode and apply one `snapshots:raw` batch (a JSON list of
+        """
+        Decode and apply one `snapshots:raw` batch (a JSON list of
         `DydxSecondSnapshot.to_dict()` results, per `collector._publish_snapshot_batch`).
-        A malformed payload is logged and skipped, never raised."""
+        A malformed payload is logged and skipped, never raised.
+        """
         if not isinstance(payload, list):
-            error_ledger.record("live_candles.payload", f"snapshots:raw payload is not a list, SKIPPED: {payload!r}")
+            error_ledger.record(
+                "live_candles.payload", f"snapshots:raw payload is not a list, SKIPPED: {payload!r}"
+            )
             return
         for entry in payload:
             self._handle_snapshot_entry(entry)
 
     def _handle_snapshot_entry(self, entry: object) -> None:
         if not isinstance(entry, dict):
-            error_ledger.record("live_candles.entry", f"snapshots:raw entry is not a dict, SKIPPED: {entry!r}")
+            error_ledger.record(
+                "live_candles.entry", f"snapshots:raw entry is not a dict, SKIPPED: {entry!r}"
+            )
             return
         try:
             snapshot = DydxSecondSnapshot.from_dict(entry)
         except Exception as exc:
-            error_ledger.record("live_candles.decode", "snapshots:raw entry failed to decode, SKIPPED", exc)
+            error_ledger.record(
+                "live_candles.decode", "snapshots:raw entry failed to decode, SKIPPED", exc
+            )
             return
         for observer in self.observers:
             try:
@@ -195,9 +227,13 @@ class LiveCandleBus:
         for bar_seconds in watched_bar_seconds:
             self._apply_to_buffer(instrument_id, bar_seconds, snapshot)
 
-    def _apply_to_buffer(self, instrument_id: str, bar_seconds: int, snapshot: DydxSecondSnapshot) -> None:
-        """Append to (or reset) `(instrument_id, bar_seconds)`'s current-bucket buffer,
-        then recompute and publish its forming bar."""
+    def _apply_to_buffer(
+        self, instrument_id: str, bar_seconds: int, snapshot: DydxSecondSnapshot
+    ) -> None:
+        """
+        Append to (or reset) `(instrument_id, bar_seconds)`'s current-bucket buffer,
+        then recompute and publish its forming bar.
+        """
         key = (instrument_id, bar_seconds)
         buffer = self._buffers.setdefault(key, [])
         if buffer and snapshot.ts_event <= buffer[-1].ts_event:
@@ -211,7 +247,11 @@ class LiveCandleBus:
         self._publish(key, instrument_id, bar_seconds, buffer)
 
     def _publish(
-        self, key: _BufferKey, instrument_id: str, bar_seconds: int, buffer: list[DydxSecondSnapshot],
+        self,
+        key: _BufferKey,
+        instrument_id: str,
+        bar_seconds: int,
+        buffer: list[DydxSecondSnapshot],
     ) -> None:
         # The one and only aggregation call (AD-F7/AD-F2) -- `buffer` holds only the
         # current bucket's snapshots, so its one (last) resulting candle is the forming
@@ -245,7 +285,11 @@ class LiveCandleBus:
                         try:
                             payload = json.loads(message["data"])
                         except Exception as exc:
-                            error_ledger.record("live_candles.parse", "snapshots:raw message is not JSON, SKIPPED", exc)
+                            error_ledger.record(
+                                "live_candles.parse",
+                                "snapshots:raw message is not JSON, SKIPPED",
+                                exc,
+                            )
                             continue
                         self.handle_batch(payload)
             except asyncio.CancelledError:

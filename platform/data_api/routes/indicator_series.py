@@ -40,19 +40,18 @@ concern) -- see this story's spec for the full rationale.
 `app.py`, which imports them).
 """
 
-
-from fastapi import APIRouter
-from pydantic import BaseModel
-
 from common.venues import market_kind
-from data_api.routes import paging
-from data_api.settings import CATALOG_PATH
+from fastapi import APIRouter
 from ml_signals import catalog_stats as _catalog_stats
 from ml_signals.indicators import MultiLevelOBI
 from ml_signals.indicators import MultiLevelOFI
 from ml_signals.indicators import microprice as _microprice
 from ml_signals.indicators import spread as _spread
 from ml_signals.venue import venue_of
+from pydantic import BaseModel
+
+from data_api.routes import paging
+from data_api.settings import CATALOG_PATH
 
 
 # Same clamp/window/span constants as candles.py -- kept as this module's own copies
@@ -108,7 +107,10 @@ def _replay_bucket_samples(snapshots: list, bar_seconds: int) -> dict[int, Indic
 
     for snapshot in sorted(snapshots, key=lambda s: s.ts_event):
         ofi.update_raw(
-            snapshot.bid_prices, snapshot.bid_sizes, snapshot.ask_prices, snapshot.ask_sizes,
+            snapshot.bid_prices,
+            snapshot.bid_sizes,
+            snapshot.ask_prices,
+            snapshot.ask_sizes,
         )
         obi.update_raw(snapshot.bid_sizes, snapshot.ask_sizes)
         snapshot_dict = {
@@ -130,11 +132,14 @@ def _replay_bucket_samples(snapshots: list, bar_seconds: int) -> dict[int, Indic
 
 
 def _insert_gap_markers(
-    points: list[IndicatorSeriesPoint], bar_seconds: int,
+    points: list[IndicatorSeriesPoint],
+    bar_seconds: int,
 ) -> list[IndicatorSeriesPoint]:
-    """Same bar-boundary-spacing gap-marker rule as `candles.py`'s `_insert_gap_markers`
+    """
+    Same bar-boundary-spacing gap-marker rule as `candles.py`'s `_insert_gap_markers`
     (AC #5, AD-F6) -- consistency matters here specifically because this pane shares a
-    time axis with the candlestick pane."""
+    time axis with the candlestick pane.
+    """
     bar_ms = bar_seconds * 1000
     items: list[IndicatorSeriesPoint] = []
     for i, p in enumerate(points):
@@ -146,14 +151,19 @@ def _insert_gap_markers(
 
 @router.get("/api/indicator-series/{instrument_id}")
 def get_indicator_series(
-    instrument_id: str, before_ns: int, limit: int = 120, bar_seconds: int = 60,
+    instrument_id: str,
+    before_ns: int,
+    limit: int = 120,
+    bar_seconds: int = 60,
 ) -> IndicatorSeriesResponse:
     limit = max(1, min(limit, _MAX_INDICATOR_SERIES_LIMIT))
     bar_seconds = max(1, min(bar_seconds, _MAX_BAR_SECONDS))
     before_ms = before_ns // 1_000_000
 
     def fetch(start_ns: int, end_ns: int) -> list[IndicatorSeriesPoint]:
-        snapshots = _catalog_stats.query_second_snapshots(CATALOG_PATH, instrument_id, start_ns, end_ns)
+        snapshots = _catalog_stats.query_second_snapshots(
+            CATALOG_PATH, instrument_id, start_ns, end_ns
+        )
         buckets = _replay_bucket_samples(snapshots, bar_seconds)
         return [p for _, p in sorted(buckets.items()) if p.t < before_ms]
 
@@ -162,9 +172,17 @@ def get_indicator_series(
     kept = paging.fetch_page(fetch, ranges, before_ns, span_ns)[-limit:]
 
     if not kept:
-        return IndicatorSeriesResponse(items=[], has_more=False, venue=venue_of(instrument_id), market=market_kind(instrument_id))
+        return IndicatorSeriesResponse(
+            items=[],
+            has_more=False,
+            venue=venue_of(instrument_id),
+            market=market_kind(instrument_id),
+        )
 
     has_more = paging.has_older_data(ranges, kept[0].t * 1_000_000)
     return IndicatorSeriesResponse(
-        items=_insert_gap_markers(kept, bar_seconds), has_more=has_more, venue=venue_of(instrument_id), market=market_kind(instrument_id),
+        items=_insert_gap_markers(kept, bar_seconds),
+        has_more=has_more,
+        venue=venue_of(instrument_id),
+        market=market_kind(instrument_id),
     )

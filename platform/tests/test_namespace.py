@@ -12,6 +12,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+
 PLATFORM_DIR = Path(__file__).resolve().parents[1]
 REPO_ROOT = PLATFORM_DIR.parent
 

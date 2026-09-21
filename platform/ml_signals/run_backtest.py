@@ -1,15 +1,18 @@
-"""OFIStrategy backtest on 1s snapshots. Run from ml_signals/:
+"""
+OFIStrategy backtest on 1s snapshots. Run from ml_signals/:
 
-    python run_backtest.py --start 2026-09-05 --end 2026-09-06 [--symbol ETH-USD-PERP.DYDX] [--threshold 2.0]
+python run_backtest.py --start 2026-09-05 --end 2026-09-06 [--symbol ETH-USD-PERP.DYDX] [--threshold 2.0]
 """
 
 import argparse
 import sys
 from pathlib import Path
 
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # "ml_signals.…" string paths
 
-from ml_signals.strategies.backtest_ofi import run  # noqa: E402
+from ml_signals.strategies.backtest_ofi import run
+
 
 p = argparse.ArgumentParser()
 p.add_argument("--symbol", default="BTC-USD-PERP.DYDX")

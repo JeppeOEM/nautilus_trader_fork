@@ -28,21 +28,21 @@ and the `has_more` probe.
 
 from pathlib import Path
 
+from common.venues import market_kind
 from fastapi import APIRouter
 from fastapi import HTTPException
-from pydantic import BaseModel
-
-from common.venues import market_kind
-from data_api import live_candles
-from data_api.routes import paging
-from data_api.settings import CANDLES_DB_DIR
-from data_api.settings import CATALOG_PATH
 from ml_signals import candle_store
 from ml_signals import catalog_stats as _catalog_stats
 from ml_signals import error_ledger
 from ml_signals.candles import candle_dicts_for_window
 from ml_signals.candles import is_valid_candle
 from ml_signals.venue import venue_of
+from pydantic import BaseModel
+
+from data_api import live_candles
+from data_api.routes import paging
+from data_api.settings import CANDLES_DB_DIR
+from data_api.settings import CATALOG_PATH
 
 
 # Server-enforced upper bound on `limit`, regardless of what the client requests (AC #7,
@@ -88,7 +88,7 @@ class CandleItem(BaseModel):
     t: int
     o: float | None = None
     h: float | None = None
-    l: float | None = None  # noqa: E741 -- matches the wire field name (candle low)
+    l: float | None = None
     c: float | None = None
     v: float | None = None
     # Rollup-sourced bucket observed for < 90% of its span (collector gaps, D-15): its
@@ -137,9 +137,13 @@ def _checked(instrument_id: str, bar_seconds: int, c: dict) -> dict:
     return c
 
 
-def _parquet_page(instrument_id: str, before_ns: int, limit: int, bar_seconds: int) -> tuple[list[dict], bool]:
-    """One page straight from the Parquet archive (slow: reads a window of tiny files). Serves
-    history the candle store does not hold (older than its first day, or pruned)."""
+def _parquet_page(
+    instrument_id: str, before_ns: int, limit: int, bar_seconds: int
+) -> tuple[list[dict], bool]:
+    """
+    One page straight from the Parquet archive (slow: reads a window of tiny files). Serves
+    history the candle store does not hold (older than its first day, or pruned).
+    """
     before_ms = before_ns // 1_000_000
 
     def fetch(start_ns: int, end_ns: int) -> list[dict]:
@@ -168,9 +172,11 @@ def _store_path(instrument_id: str) -> str:
 def _store_page(
     instrument_id: str, before_ns: int, limit: int, bar_seconds: int
 ) -> tuple[list[dict], bool, int | None]:
-    """One page from the SQLite candle store (an indexed read, no Parquet I/O): `(candles,
+    """
+    One page from the SQLite candle store (an indexed read, no Parquet I/O): `(candles,
     store_has_more, start of the store's coverage in ms)`. Empty when the store is missing or has
-    nothing for this coin."""
+    nothing for this coin.
+    """
     if bar_seconds not in candle_store.BAR_SECONDS:
         return [], False, None
     with candle_store.connect_ro(_store_path(instrument_id)) as db:
@@ -178,17 +184,29 @@ def _store_page(
             return [], False, None
         kept = candle_store.window(db, instrument_id, bar_seconds, before_ns // 1_000_000, limit)
         if not kept:
-            return [], False, candle_store.oldest_t(db, instrument_id, bar_seconds, traded_only=False)
+            return (
+                [],
+                False,
+                candle_store.oldest_t(db, instrument_id, bar_seconds, traded_only=False),
+            )
         oldest = candle_store.oldest_t(db, instrument_id, bar_seconds)
         coverage = candle_store.oldest_t(db, instrument_id, bar_seconds, traded_only=False)
-        return [_checked(instrument_id, bar_seconds, c) for c in kept], oldest is not None and oldest < kept[0]["t"], coverage
+        return (
+            [_checked(instrument_id, bar_seconds, c) for c in kept],
+            oldest is not None and oldest < kept[0]["t"],
+            coverage,
+        )
 
 
-def candle_page(instrument_id: str, before_ns: int, limit: int, bar_seconds: int) -> tuple[list[dict], bool]:
-    """The one candle source for the chart, its indicator panes and anything else that must agree
+def candle_page(
+    instrument_id: str, before_ns: int, limit: int, bar_seconds: int
+) -> tuple[list[dict], bool]:
+    """
+    The one candle source for the chart, its indicator panes and anything else that must agree
     with them: `(candles oldest-first, has_more)` for the `limit` bars before `before_ns`. Reads the
     SQLite candle store, and only what it does not cover (history older than its first bucket, or
-    pruned) from Parquet -- never when the store already reaches the archive's first file."""
+    pruned) from Parquet -- never when the store already reaches the archive's first file.
+    """
     kept, store_has_more, coverage_ms = _store_page(instrument_id, before_ns, limit, bar_seconds)
     if store_has_more:
         return kept, True
@@ -204,13 +222,24 @@ def candle_page(instrument_id: str, before_ns: int, limit: int, bar_seconds: int
 
 @router.get("/api/candles/{instrument_id}")
 def get_candles(
-    instrument_id: str, before_ns: int, limit: int = 120, bar_seconds: int = 60,
+    instrument_id: str,
+    before_ns: int,
+    limit: int = 120,
+    bar_seconds: int = 60,
 ) -> CandlesResponse:
     limit = max(1, min(limit, _MAX_CANDLES_LIMIT))
     bar_seconds = max(1, min(bar_seconds, _MAX_BAR_SECONDS))
     kept, has_more = candle_page(instrument_id, before_ns, limit, bar_seconds)
     if not kept:
-        return CandlesResponse(items=[], has_more=False, venue=venue_of(instrument_id), market=market_kind(instrument_id))
+        return CandlesResponse(
+            items=[],
+            has_more=False,
+            venue=venue_of(instrument_id),
+            market=market_kind(instrument_id),
+        )
     return CandlesResponse(
-        items=_insert_gap_markers(kept, bar_seconds), has_more=has_more, venue=venue_of(instrument_id), market=market_kind(instrument_id),
+        items=_insert_gap_markers(kept, bar_seconds),
+        has_more=has_more,
+        venue=venue_of(instrument_id),
+        market=market_kind(instrument_id),
     )

@@ -29,13 +29,16 @@ import tomli_w
 
 from ml_signals.chart_indicator_config import IndicatorEntry
 
+
 DEFAULT_BAR_SECONDS = 3600
 
 
 @dataclass(frozen=True)
 class ColumnEntry(IndicatorEntry):
-    """A column is an indicator plus the bar size it is computed on -- a field of its own, not a
-    param: params feed the indicator constructor and its series id."""
+    """
+    A column is an indicator plus the bar size it is computed on -- a field of its own, not a
+    param: params feed the indicator constructor and its series id.
+    """
 
     bar_seconds: int = DEFAULT_BAR_SECONDS
 
@@ -60,7 +63,12 @@ def load_config(path: Path) -> list[ColumnEntry]:
 def save_config(entries: list[ColumnEntry], path: Path) -> None:
     raw = {
         "columns": [
-            {"name": e.name, "params": e.params, "category": e.category, "bar_seconds": e.bar_seconds}
+            {
+                "name": e.name,
+                "params": e.params,
+                "category": e.category,
+                "bar_seconds": e.bar_seconds,
+            }
             for e in entries
         ]
     }

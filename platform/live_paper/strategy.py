@@ -63,6 +63,11 @@ deliberately simple, not a same-tick double-sized reversal order.
 from decimal import Decimal
 
 import pandas as pd
+from ml_signals.indicators import Microprice
+from ml_signals.indicators import MultiLevelOBI
+from ml_signals.indicators import MultiLevelOFI
+from ml_signals.indicators import OnlineLogisticTrend
+from ml_signals.indicators import OrderFlowImbalance
 
 from nautilus_trader.common.events import TimeEvent
 from nautilus_trader.config import StrategyConfig
@@ -76,12 +81,6 @@ from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.instruments import Instrument
 from nautilus_trader.model.orders import MarketOrder
 from nautilus_trader.trading.strategy import Strategy
-
-from ml_signals.indicators import Microprice
-from ml_signals.indicators import MultiLevelOBI
-from ml_signals.indicators import MultiLevelOFI
-from ml_signals.indicators import OnlineLogisticTrend
-from ml_signals.indicators import OrderFlowImbalance
 
 
 _BOOK_SNAPSHOT_TIMER = "dummy_strategy_book_snapshot"

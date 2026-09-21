@@ -120,9 +120,7 @@ def _fill_pnl(strategy: Strategy, fill: OrderFilled) -> tuple[float | None, floa
         estimate = position.calculate_pnl(
             position.avg_px_open, fill.last_px.as_double(), fill.last_qty
         ).as_double()
-        _pending_realized_pnl[position.id] = (
-            _pending_realized_pnl.get(position.id, 0.0) + estimate
-        )
+        _pending_realized_pnl[position.id] = _pending_realized_pnl.get(position.id, 0.0) + estimate
         return estimate, None
     if position.realized_pnl is None:
         return None, None

@@ -102,8 +102,10 @@ _technicals_cache: dict[str, tuple[float, dict[str, dict[str, float | None]]]] =
 
 
 class _CatalogReadError(Exception):
-    """A catalog read failed. Deliberately not a ValueError: pyarrow's ArrowInvalid is one, and
-    would otherwise be mistaken for bad client indicator params (a whole-request 400)."""
+    """
+    A catalog read failed. Deliberately not a ValueError: pyarrow's ArrowInvalid is one, and
+    would otherwise be mistaken for bad client indicator params (a whole-request 400).
+    """
 
 
 class TechnicalsColumn(_indicators.IndicatorConfigEntry):
@@ -121,9 +123,13 @@ def get_technicals_columns() -> list[TechnicalsColumn]:
     try:
         entries = screener_columns_config.load_config(Path(SCREENER_COLUMNS_CONFIG_PATH))
     except (tomllib.TOMLDecodeError, KeyError, TypeError) as exc:
-        raise HTTPException(status_code=500, detail=f"screener_columns.toml is corrupt: {exc}") from exc
+        raise HTTPException(
+            status_code=500, detail=f"screener_columns.toml is corrupt: {exc}"
+        ) from exc
     except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"failed to read screener_columns.toml: {exc}") from exc
+        raise HTTPException(
+            status_code=500, detail=f"failed to read screener_columns.toml: {exc}"
+        ) from exc
     return [TechnicalsColumn(**vars(e)) for e in entries]
 
 
@@ -152,14 +158,18 @@ async def put_technicals_columns(request: Request) -> dict[str, bool]:
     except (json.JSONDecodeError, KeyError, TypeError) as exc:
         raise HTTPException(status_code=400, detail=f"invalid columns payload: {exc}") from exc
     if not all(isinstance(e.params, dict) for e in entries):
-        raise HTTPException(status_code=400, detail="invalid columns payload: params must be an object")
+        raise HTTPException(
+            status_code=400, detail="invalid columns payload: params must be an object"
+        )
     if len(entries) > _indicators._MAX_INDICATOR_VALUES_ENTRIES:
         raise HTTPException(
             status_code=400,
             detail=f"too many columns: {len(entries)} > {_indicators._MAX_INDICATOR_VALUES_ENTRIES}",
         )
     if any(e.bar_seconds not in _TECHNICALS_BAR_SIZES for e in entries):
-        raise HTTPException(status_code=400, detail=f"bar_seconds must be one of {_TECHNICALS_BAR_SIZES}")
+        raise HTTPException(
+            status_code=400, detail=f"bar_seconds must be one of {_TECHNICALS_BAR_SIZES}"
+        )
     _require_known_indicators([e.name for e in entries])
     try:
         screener_columns_config.save_config(entries, Path(SCREENER_COLUMNS_CONFIG_PATH))
@@ -181,13 +191,17 @@ class TechnicalsValuesResponse(BaseModel):
 
 
 def _recent_candles(instrument_id: str, bar_seconds: int, now_ns: int) -> list[dict]:
-    """Newest candles for one bar size: the SQLite candle store when it holds the coin (no Parquet
-    I/O), else the slow archive read."""
+    """
+    Newest candles for one bar size: the SQLite candle store when it holds the coin (no Parquet
+    I/O), else the slow archive read.
+    """
     try:
         store = Path(CANDLES_DB_DIR) / f"candles_{venue_of(instrument_id).lower()}.db"
         with candle_store.connect_ro(str(store)) as db:
             if db is not None:
-                stored = candle_store.window(db, instrument_id, bar_seconds, 1 << 62, _TECHNICALS_STORE_BARS)
+                stored = candle_store.window(
+                    db, instrument_id, bar_seconds, 1 << 62, _TECHNICALS_STORE_BARS
+                )
                 if stored:
                     return stored
     except Exception as exc:
@@ -205,7 +219,9 @@ def _read_candles(instrument_id: str, bar_seconds: int, now_ns: int) -> list[dic
     bars = _TECHNICALS_BARS if bar_seconds <= 3600 else _TECHNICALS_WIDE_BARS
     span_ns = min((bars + 5) * bar_seconds, _FALLBACK_MAX_SPAN_S) * 1_000_000_000
     try:
-        rows = _catalog_stats.query_second_ohlc(CATALOG_PATH, instrument_id, now_ns - span_ns, now_ns)
+        rows = _catalog_stats.query_second_ohlc(
+            CATALOG_PATH, instrument_id, now_ns - span_ns, now_ns
+        )
         return candle_dicts_from_snapshots(rows, bar_seconds)[-bars:]
     except Exception as exc:
         raise _CatalogReadError(str(exc)) from exc
@@ -214,9 +230,11 @@ def _read_candles(instrument_id: str, bar_seconds: int, now_ns: int) -> list[dic
 def _latest_values(
     instrument_id: str, entries: list[TechnicalsRequestEntry], now_ns: int
 ) -> dict[str, float | None]:
-    """Each requested indicator's latest value for one instrument, via the chart's own
+    """
+    Each requested indicator's latest value for one instrument, via the chart's own
     `replay_indicator` dispatch, each entry over its own column's timeframe (no indicator math
-    here). Candles are built once per distinct bar size."""
+    here). Candles are built once per distinct bar size.
+    """
     keyed: dict[str, float | None] = {}
     for bar_seconds in sorted({e.bar_seconds for e in entries}):
         candles = _recent_candles(instrument_id, bar_seconds, now_ns)
@@ -231,13 +249,19 @@ def _latest_values(
         )
         group = [(i, e) for i, e in enumerate(entries) if e.bar_seconds == bar_seconds]
         by_time, errors = _indicators._values_by_time(candles, [e for _, e in group], window)
-        if errors:  # unlike the chart, one bad column fails the request: a half-filled column reads as data
+        if (
+            errors
+        ):  # unlike the chart, one bad column fails the request: a half-filled column reads as data
             raise ValueError(next(iter(errors.values())))
         latest = by_time[candles[-1]["t"]]
         for index, entry in group:
             prefix = _indicators._indicator_id(entry.name, entry.params) + "."
             keyed.update(
-                {f"{index}.{k.removeprefix(prefix)}": v for k, v in latest.items() if k.startswith(prefix)}
+                {
+                    f"{index}.{k.removeprefix(prefix)}": v
+                    for k, v in latest.items()
+                    if k.startswith(prefix)
+                }
             )
     return keyed
 
@@ -254,7 +278,9 @@ def get_technicals_values(entries: str) -> TechnicalsValuesResponse:
     """
     parsed = _indicators._parse_entries(entries, TechnicalsRequestEntry)
     if any(e.bar_seconds not in _TECHNICALS_BAR_SIZES for e in parsed):
-        raise HTTPException(status_code=400, detail=f"bar_seconds must be one of {_TECHNICALS_BAR_SIZES}")
+        raise HTTPException(
+            status_code=400, detail=f"bar_seconds must be one of {_TECHNICALS_BAR_SIZES}"
+        )
     _require_known_indicators([e.name for e in parsed])
     latest = redis_bus.bus.latest
     if latest is None:
@@ -273,7 +299,7 @@ def get_technicals_values(entries: str) -> TechnicalsValuesResponse:
             result[iid] = _latest_values(iid, parsed, now_ns)
         except ValueError as exc:  # bad indicator params -- the same for every coin, client input
             raise HTTPException(status_code=400, detail=f"invalid indicator entry: {exc}") from exc
-        except Exception as exc:  # noqa: BLE001 -- one coin's failure is reported, not hidden
+        except Exception as exc:
             error_ledger.record("technicals.values", f"technicals values failed for {iid}", exc)
             errors[iid] = repr(exc)
     if not errors:  # never cache a failure: the next poll must retry it

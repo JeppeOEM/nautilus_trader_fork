@@ -101,7 +101,7 @@ def test_multilevel_ofi_respects_window() -> None:
     ofi.update_raw([100.0], [5.0], [101.0], [5.0])  # seed
     ofi.update_raw([101.0], [5.0], [101.0], [5.0])  # contrib: bid up → 5, ask same → 0 → +5
     ofi.update_raw([101.0], [5.0], [101.0], [5.0])  # contrib: 0
-    ofi.update_raw([99.0], [5.0], [101.0], [5.0])   # contrib: bid down → -5, ask same → 0 → -5
+    ofi.update_raw([99.0], [5.0], [101.0], [5.0])  # contrib: bid down → -5, ask same → 0 → -5
     # window=2: last two contribs are 0 and -5 → sum = -5
     assert ofi.value == -5.0
 
@@ -141,13 +141,15 @@ def test_multilevel_ofi_zscore_direction_matches_signal() -> None:
         ofi.update_raw([101.0], [5.0], [101.0], [5.0])  # bid up   → contribution +5
         ofi.update_raw([100.0], [5.0], [101.0], [5.0])  # bid down → contribution -5
     # zscore_history is now full: [+5,-5,+5,-5,+5,-5,+5,-5,+5,-5], mean=0, std=5
-    ofi.update_raw([101.0], [5.0], [101.0], [5.0])   # bid up → raw=+5 → z=(5-0)/5=+1.0
+    ofi.update_raw([101.0], [5.0], [101.0], [5.0])  # bid up → raw=+5 → z=(5-0)/5=+1.0
     assert abs(ofi.value - 1.0) < 0.01
-    ofi.update_raw([100.0], [5.0], [101.0], [5.0])   # bid down → raw=-5 → z≈-1.0
+    ofi.update_raw([100.0], [5.0], [101.0], [5.0])  # bid down → raw=-5 → z≈-1.0
     assert ofi.value < 0.0
 
 
-def _snap(bid_prices=None, ask_prices=None, buy_volume=0.0, sell_volume=0.0, buy_count=0, sell_count=0) -> dict:
+def _snap(
+    bid_prices=None, ask_prices=None, buy_volume=0.0, sell_volume=0.0, buy_count=0, sell_count=0
+) -> dict:
     return {
         "bid_prices": bid_prices if bid_prices is not None else [100.0],
         "ask_prices": ask_prices if ask_prices is not None else [101.0],

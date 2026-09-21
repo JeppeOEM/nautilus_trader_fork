@@ -23,6 +23,7 @@ import sqlite3
 import threading
 import time
 
+
 # RLock: write() holds _lock while calling _conn(), which also takes _lock internally
 # on first-open -- must be reentrant for the same thread to avoid deadlocking itself.
 _lock = threading.RLock()
@@ -30,7 +31,17 @@ _connections: dict[str, sqlite3.Connection] = {}
 
 # Metric columns stored per snapshot. Extend here to track new metrics.
 COLS = (
-    "price", "pct_1h", "pct_24h", "pct_1w", "pct_1m", "volatility", "ofi", "microprice", "spread", "rank", "volume24h",
+    "price",
+    "pct_1h",
+    "pct_24h",
+    "pct_1w",
+    "pct_1m",
+    "volatility",
+    "ofi",
+    "microprice",
+    "spread",
+    "rank",
+    "volume24h",
 )
 
 _SCHEMA = f"""
@@ -45,7 +56,8 @@ CREATE INDEX IF NOT EXISTS idx_iid_ts ON snapshots(instrument_id, ts);
 
 
 def _migrate(db: sqlite3.Connection) -> None:
-    """Add any COLS missing from an already-existing table (CREATE TABLE IF NOT EXISTS is a no-op
+    """
+    Add any COLS missing from an already-existing table (CREATE TABLE IF NOT EXISTS is a no-op
     against a pre-existing db, so extending COLS alone would otherwise break on deployed data).
     """
     existing = {row[1] for row in db.execute("PRAGMA table_info(snapshots)")}
@@ -80,24 +92,27 @@ def write(rows: list[dict], db_path: str, retain_days: int = 31) -> None:
     with _lock:
         db = _conn(db_path)
         db.execute("DELETE FROM snapshots WHERE ts < ?", (cutoff,))
-        db.executemany(sql, [
-            (r["ts"], r["instrument_id"], *[r.get(c) for c in COLS])
-            for r in rows
-        ])
+        db.executemany(
+            sql, [(r["ts"], r["instrument_id"], *[r.get(c) for c in COLS]) for r in rows]
+        )
         db.commit()
 
 
 def latest(db_path: str) -> list[dict]:
     """Most recent snapshot per instrument, for the rankings table."""
     with _lock:
-        rows = _conn(db_path).execute(f"""
+        rows = (
+            _conn(db_path)
+            .execute(f"""
             SELECT instrument_id, {", ".join(COLS)}
             FROM snapshots
             WHERE (instrument_id, ts) IN (
                 SELECT instrument_id, MAX(ts) FROM snapshots GROUP BY instrument_id
             )
             ORDER BY instrument_id
-        """).fetchall()
+        """)
+            .fetchall()
+        )
     keys = ("instrument_id", *COLS)
     return [dict(zip(keys, r)) for r in rows]
 
@@ -106,19 +121,26 @@ def history(instrument_id: str, db_path: str, days: int = 31) -> list[dict]:
     """All snapshots for one instrument over the last `days` days, ordered by ts."""
     cutoff = time.time_ns() - days * 86_400 * 1_000_000_000
     with _lock:
-        rows = _conn(db_path).execute(
-            f"SELECT ts, {', '.join(COLS)} FROM snapshots "
-            "WHERE instrument_id=? AND ts>=? ORDER BY ts",
-            (instrument_id, cutoff),
-        ).fetchall()
+        rows = (
+            _conn(db_path)
+            .execute(
+                f"SELECT ts, {', '.join(COLS)} FROM snapshots "
+                "WHERE instrument_id=? AND ts>=? ORDER BY ts",
+                (instrument_id, cutoff),
+            )
+            .fetchall()
+        )
     keys = ("ts", *COLS)
     return [dict(zip(keys, r)) for r in rows]
 
 
 def price_near_days_ago(
-    db_path: str, days: float, tolerance_s: float = 3600.0,
+    db_path: str,
+    days: float,
+    tolerance_s: float = 3600.0,
 ) -> dict[str, float]:
-    """Per instrument, the stored price at or just before `now - days`.
+    """
+    Per instrument, the stored price at or just before `now - days`.
 
     Only a row within `tolerance_s` before that target counts -- an instrument whose store
     doesn't reach back that far (or has a gap there) is absent from the result, never
@@ -127,22 +149,30 @@ def price_near_days_ago(
     target = time.time_ns() - int(days * 86_400 * 1_000_000_000)
     floor = target - int(tolerance_s * 1_000_000_000)
     with _lock:
-        rows = _conn(db_path).execute(
-            "SELECT instrument_id, price, MAX(ts) FROM snapshots "
-            "WHERE ts <= ? AND ts > ? AND price IS NOT NULL GROUP BY instrument_id",
-            (target, floor),
-        ).fetchall()
+        rows = (
+            _conn(db_path)
+            .execute(
+                "SELECT instrument_id, price, MAX(ts) FROM snapshots "
+                "WHERE ts <= ? AND ts > ? AND price IS NOT NULL GROUP BY instrument_id",
+                (target, floor),
+            )
+            .fetchall()
+        )
     return {iid: price for iid, price, _ts in rows}
 
 
 def nearest(instrument_id: str, ts: int, db_path: str) -> dict | None:
     """Snapshot for instrument_id with ts closest to the given ts (ns). None if never stored."""
     with _lock:
-        row = _conn(db_path).execute(
-            f"SELECT ts, {', '.join(COLS)} FROM snapshots WHERE instrument_id=? "
-            "ORDER BY ABS(ts - ?) LIMIT 1",
-            (instrument_id, ts),
-        ).fetchone()
+        row = (
+            _conn(db_path)
+            .execute(
+                f"SELECT ts, {', '.join(COLS)} FROM snapshots WHERE instrument_id=? "
+                "ORDER BY ABS(ts - ?) LIMIT 1",
+                (instrument_id, ts),
+            )
+            .fetchone()
+        )
     if row is None:
         return None
     keys = ("ts", *COLS)

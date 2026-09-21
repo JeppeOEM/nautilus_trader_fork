@@ -45,6 +45,8 @@ import os
 from pathlib import Path
 from urllib.parse import urlparse
 
+from ml_signals.venue import venue_of
+
 from live_paper import bot_status
 from live_paper import trade_history
 from live_paper.config import BotConfig
@@ -54,7 +56,6 @@ from live_paper.config import resolve_config
 from live_paper.strategy import DummyStrategy
 from live_paper.strategy import DummyStrategyConfig
 from live_paper.venues import VENUES
-from ml_signals.venue import venue_of
 from nautilus_trader.adapters.sandbox.config import SandboxExecutionClientConfig
 from nautilus_trader.adapters.sandbox.factory import SandboxLiveExecClientFactory
 from nautilus_trader.config import CacheConfig
@@ -84,8 +85,10 @@ _EXEC_MODE_LABELS = {"real_money": "live", "exchange_demo": "demo"}
 def _paper_venue_clients(
     config: PaperConfig, bots: tuple[BotConfig, ...], instrument_provider: InstrumentProviderConfig
 ) -> tuple[dict, dict, dict]:
-    """One data client + one Sandbox exec client per venue in use (AD-11: Nautilus allows only
-    one exec client per venue, so bots on the same venue share that venue's balance pool)."""
+    """
+    One data client + one Sandbox exec client per venue in use (AD-11: Nautilus allows only
+    one exec client per venue, so bots on the same venue share that venue's balance pool).
+    """
     data_clients, exec_clients, data_factories = {}, {}, {}
     for venue in sorted({venue_of(bot.instrument_id) for bot in bots}):
         spec = VENUES[venue]

@@ -11,9 +11,11 @@
 #  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
-"""Stories 20.1/20.2: alert store round-trip, `/api/alerts` routes, the pure frequency/
+"""
+Stories 20.1/20.2: alert store round-trip, `/api/alerts` routes, the pure frequency/
 expiration state machine, template rendering, and engine fire path (real objects; the network
-POST is injected as a recording callable, not a mock of any library)."""
+POST is injected as a recording callable, not a mock of any library).
+"""
 
 import json
 import threading
@@ -22,11 +24,11 @@ from http.server import HTTPServer
 from pathlib import Path
 
 import pytest
+from collector_core.second_snapshot import DydxSecondSnapshot
 from fastapi.testclient import TestClient
 
 import data_api.app as app_module
 from data_api import alerts
-from collector_core.second_snapshot import DydxSecondSnapshot
 from nautilus_trader.model.identifiers import InstrumentId
 
 
@@ -37,8 +39,12 @@ _T0 = 1_800_000_000 * _S  # multiple of 60s
 
 def _alert(frequency: str = "only_once", **kw) -> alerts.Alert:
     fields = dict(
-        instrument_id=_IID, level=100.0, frequency=frequency, bar_seconds=60,
-        template="{{ticker}} {{close}}", webhook_url="http://localhost:1/hook",
+        instrument_id=_IID,
+        level=100.0,
+        frequency=frequency,
+        bar_seconds=60,
+        template="{{ticker}} {{close}}",
+        webhook_url="http://localhost:1/hook",
     )
     fields.update(kw)
     return alerts.new_alert(**fields)
@@ -48,7 +54,8 @@ def _run(alert: alerts.Alert, ticks: list[tuple[int, float]]) -> list[int]:
     """Feed (seconds-after-T0, price) ticks through evaluate(); return indexes that fired."""
     state = alerts.RunState()
     return [
-        i for i, (s, p) in enumerate(ticks)
+        i
+        for i, (s, p) in enumerate(ticks)
         if alerts.evaluate(alert, state, p, _T0 + s * _S) is not None
     ]
 
@@ -131,7 +138,9 @@ def test_expired_alert_never_fires_and_reports_expired() -> None:
 
 
 def test_render_substitutes_all_four_placeholders() -> None:
-    out = alerts.render("{{ticker}}|{{close}}|{{time}}|{{interval}}|{{ticker}}", _IID, 65000.5, _T0, 60)
+    out = alerts.render(
+        "{{ticker}}|{{close}}|{{time}}|{{interval}}|{{ticker}}", _IID, 65000.5, _T0, 60
+    )
     assert out == f"{_IID}|65000.5|2027-01-15T08:00:00+00:00|60|{_IID}"
 
 
@@ -166,8 +175,12 @@ def _client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
 
 
 _BODY = {
-    "instrument_id": _IID, "level": 65000, "frequency": "once_per_bar",
-    "bar_seconds": 60, "template": "{{ticker}}", "webhook_url": "https://example.com/h",
+    "instrument_id": _IID,
+    "level": 65000,
+    "frequency": "once_per_bar",
+    "bar_seconds": 60,
+    "template": "{{ticker}}",
+    "webhook_url": "https://example.com/h",
 }
 
 
@@ -186,12 +199,19 @@ def test_routes_create_list_delete(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 @pytest.mark.parametrize(
     "patch",
     [
-        {"webhook_url": "ftp://x/y"}, {"webhook_url": "not a url"}, {"frequency": "always"},
-        {"bar_seconds": 0}, {"level": "nan"}, {"instrument_id": " "}, {"template": "x" * 1001},
+        {"webhook_url": "ftp://x/y"},
+        {"webhook_url": "not a url"},
+        {"frequency": "always"},
+        {"bar_seconds": 0},
+        {"level": "nan"},
+        {"instrument_id": " "},
+        {"template": "x" * 1001},
     ],
 )
 def test_routes_reject_invalid_alerts(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, patch: dict,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    patch: dict,
 ) -> None:
     client = _client(tmp_path, monkeypatch)
     assert client.post("/api/alerts", json={**_BODY, **patch}).status_code == 422
@@ -199,9 +219,18 @@ def test_routes_reject_invalid_alerts(
 
 def _snapshot(ts_ns: int, close: float | None) -> DydxSecondSnapshot:
     return DydxSecondSnapshot(
-        instrument_id=InstrumentId.from_str(_IID), bid_prices=[1.0], bid_sizes=[1.0],
-        ask_prices=[2.0], ask_sizes=[1.0], buy_volume=0.0, sell_volume=0.0, buy_count=0, sell_count=0,
-        ts_event=ts_ns, ts_init=ts_ns, close_price=None if close is None else float(close),
+        instrument_id=InstrumentId.from_str(_IID),
+        bid_prices=[1.0],
+        bid_sizes=[1.0],
+        ask_prices=[2.0],
+        ask_sizes=[1.0],
+        buy_volume=0.0,
+        sell_volume=0.0,
+        buy_count=0,
+        sell_count=0,
+        ts_event=ts_ns,
+        ts_init=ts_ns,
+        close_price=None if close is None else float(close),
     )
 
 
@@ -235,7 +264,8 @@ def test_deliver_sends_telegram_message_to_bot_api(monkeypatch: pytest.MonkeyPat
 
 
 def test_telegram_failure_logs_alert_id_but_never_the_token(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     monkeypatch.setattr(alerts, "TELEGRAM_API_BASE", "http://127.0.0.1:1")
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "secret-token")

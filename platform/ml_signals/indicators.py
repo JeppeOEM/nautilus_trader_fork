@@ -253,8 +253,8 @@ class MultiLevelOBI(Indicator):
         self.value = 0.5
 
     def update_raw(self, bid_sizes: list[float], ask_sizes: list[float]) -> None:
-        bid = sum(bid_sizes[:self.levels])
-        ask = sum(ask_sizes[:self.levels])
+        bid = sum(bid_sizes[: self.levels])
+        ask = sum(ask_sizes[: self.levels])
         total = bid + ask
         if total == 0.0:
             return
@@ -329,13 +329,19 @@ class MultiLevelOFI(Indicator):
         ask_sizes: list[float],
     ) -> None:
         if self._prev_bid_prices is None:
-            self._prev_bid_prices = bid_prices[:self.levels]
-            self._prev_bid_sizes = bid_sizes[:self.levels]
-            self._prev_ask_prices = ask_prices[:self.levels]
-            self._prev_ask_sizes = ask_sizes[:self.levels]
+            self._prev_bid_prices = bid_prices[: self.levels]
+            self._prev_bid_sizes = bid_sizes[: self.levels]
+            self._prev_ask_prices = ask_prices[: self.levels]
+            self._prev_ask_sizes = ask_sizes[: self.levels]
             return
 
-        n = min(self.levels, len(bid_prices), len(ask_prices), len(self._prev_bid_prices), len(self._prev_ask_prices))
+        n = min(
+            self.levels,
+            len(bid_prices),
+            len(ask_prices),
+            len(self._prev_bid_prices),
+            len(self._prev_ask_prices),
+        )
         contribution = 0.0
         for i in range(n):
             bp, bs = bid_prices[i], bid_sizes[i]
@@ -369,13 +375,14 @@ class MultiLevelOFI(Indicator):
         self._set_has_inputs(True)
         self._set_initialized(True)
 
-        self._prev_bid_prices = bid_prices[:self.levels]
-        self._prev_bid_sizes = bid_sizes[:self.levels]
-        self._prev_ask_prices = ask_prices[:self.levels]
-        self._prev_ask_sizes = ask_sizes[:self.levels]
+        self._prev_bid_prices = bid_prices[: self.levels]
+        self._prev_bid_sizes = bid_sizes[: self.levels]
+        self._prev_ask_prices = ask_prices[: self.levels]
+        self._prev_ask_sizes = ask_sizes[: self.levels]
 
     def clear_prev_state(self) -> None:
-        """Clear stale previous-tick state without losing contribution/z-score history.
+        """
+        Clear stale previous-tick state without losing contribution/z-score history.
 
         Call this when the book has been rebuilt after a reconnect so the next
         update_raw is treated as the first observation rather than computing a
@@ -407,7 +414,8 @@ class MultiLevelOFI(Indicator):
 
 
 def microprice(snapshot: dict) -> float | None:
-    """(bid_price * ask_size + ask_price * bid_size) / (bid_size + ask_size); None if
+    """
+    (bid_price * ask_size + ask_price * bid_size) / (bid_size + ask_size); None if
     either side is empty or total top-of-book size is zero.
 
     Pure/stateless companion to the `Microprice` indicator class above -- use this for

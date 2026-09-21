@@ -47,6 +47,8 @@ import time
 from decimal import Decimal
 
 import pytest
+
+from ml_signals import backtest_dydx
 from nautilus_trader.model.currencies import BTC
 from nautilus_trader.model.currencies import ETH
 from nautilus_trader.model.currencies import USDC
@@ -61,7 +63,6 @@ from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
-from ml_signals import backtest_dydx
 
 _BTC_IID = InstrumentId(Symbol("BTC-USD-PERP"), Venue("DYDX"))
 _ETH_IID = InstrumentId(Symbol("ETH-USD-PERP"), Venue("DYDX"))
@@ -69,31 +70,49 @@ _ETH_IID = InstrumentId(Symbol("ETH-USD-PERP"), Venue("DYDX"))
 
 def _instrument(iid: InstrumentId, base) -> CryptoPerpetual:
     return CryptoPerpetual(
-        instrument_id=iid, raw_symbol=iid.symbol,
-        base_currency=base, quote_currency=USDC, settlement_currency=USDC, is_inverse=False,
-        price_precision=1, size_precision=3,
-        price_increment=Price(0.1, 1), size_increment=Quantity(0.001, 3),
-        max_quantity=None, min_quantity=None, max_notional=None, min_notional=None,
-        max_price=None, min_price=None,
-        margin_init=Decimal("0.1"), margin_maint=Decimal("0.05"),
-        maker_fee=Decimal("0.0002"), taker_fee=Decimal("0.0005"),
-        ts_event=0, ts_init=0,
+        instrument_id=iid,
+        raw_symbol=iid.symbol,
+        base_currency=base,
+        quote_currency=USDC,
+        settlement_currency=USDC,
+        is_inverse=False,
+        price_precision=1,
+        size_precision=3,
+        price_increment=Price(0.1, 1),
+        size_increment=Quantity(0.001, 3),
+        max_quantity=None,
+        min_quantity=None,
+        max_notional=None,
+        min_notional=None,
+        max_price=None,
+        min_price=None,
+        margin_init=Decimal("0.1"),
+        margin_maint=Decimal("0.05"),
+        maker_fee=Decimal("0.0002"),
+        taker_fee=Decimal("0.0005"),
+        ts_event=0,
+        ts_init=0,
     )
 
 
 def _trades(iid: InstrumentId, n: int, now_ns: int) -> list[TradeTick]:
     return [
         TradeTick(
-            instrument_id=iid, price=Price(100.0 + (i % 10) * 0.5, 1), size=Quantity(1.0, 3),
+            instrument_id=iid,
+            price=Price(100.0 + (i % 10) * 0.5, 1),
+            size=Quantity(1.0, 3),
             aggressor_side=AggressorSide.BUYER if i % 2 == 0 else AggressorSide.SELLER,
-            trade_id=TradeId(str(i)), ts_event=now_ns - (n - i) * 1_000_000_000, ts_init=now_ns - (n - i) * 1_000_000_000,
+            trade_id=TradeId(str(i)),
+            ts_event=now_ns - (n - i) * 1_000_000_000,
+            ts_init=now_ns - (n - i) * 1_000_000_000,
         )
         for i in range(n)
     ]
 
 
 def test_multi_coin_backtest_skips_missing_instruments_and_dedupes_duplicates_while_keeping_per_coin_results_distinguishable(
-    monkeypatch, caplog,
+    monkeypatch,
+    caplog,
 ) -> None:
     now_ns = time.time_ns()
     with tempfile.TemporaryDirectory() as tmp:
@@ -107,7 +126,10 @@ def test_multi_coin_backtest_skips_missing_instruments_and_dedupes_duplicates_wh
             backtest_dydx,
             "fetch_watchlist",
             lambda: [
-                "BTC-USD-PERP.DYDX", "BTC-USD-PERP.DYDX", "ETH-USD-PERP.DYDX", "SOL-USD-PERP.DYDX",
+                "BTC-USD-PERP.DYDX",
+                "BTC-USD-PERP.DYDX",
+                "ETH-USD-PERP.DYDX",
+                "SOL-USD-PERP.DYDX",
             ],
         )
 
@@ -121,12 +143,15 @@ def test_multi_coin_backtest_skips_missing_instruments_and_dedupes_duplicates_wh
 
 
 def test_run_returns_empty_dict_when_no_symbol_matches_the_catalog_and_re_resolves_the_watchlist_fresh_each_call(
-    monkeypatch, caplog,
+    monkeypatch,
+    caplog,
 ) -> None:
-    """AC3: re-running with a changed Watchlist changes the effective coin-set with no code
+    """
+    AC3: re-running with a changed Watchlist changes the effective coin-set with no code
     change -- proven here via two sequential calls with different mocked fetch_watchlist results,
     both against a catalog matching neither, so run() returns {} before ever touching
-    BacktestNode (no construction in this test)."""
+    BacktestNode (no construction in this test).
+    """
     with tempfile.TemporaryDirectory() as tmp:
         catalog = ParquetDataCatalog(tmp)
         catalog.write_data([_instrument(_BTC_IID, BTC)])  # present, but never requested below
@@ -161,12 +186,14 @@ def test_run_wraps_a_fetch_watchlist_failure_in_a_clear_runtime_error(monkeypatc
 
 
 def test_run_correctly_attributes_results_when_backtestnode_drops_one_config(monkeypatch) -> None:
-    """The entire reason run() matches results back to symbols via config.id/run_config_id rather
+    """
+    The entire reason run() matches results back to symbols via config.id/run_config_id rather
     than list position: BacktestNode.run() silently drops a config's result if raise_exception is
     False (the default) and that config's engine build/run fails internally, so the returned list
     can be shorter than the configs list. Simulated here via a fake BacktestNode -- no real
     BacktestEngine/BacktestNode construction, so this doesn't affect the file's crash-mitigation
-    budget."""
+    budget.
+    """
 
     class _FakeResult:
         def __init__(self, run_config_id: str) -> None:
@@ -185,7 +212,9 @@ def test_run_correctly_attributes_results_when_backtestnode_drops_one_config(mon
 
     monkeypatch.setattr(backtest_dydx, "BacktestNode", _FakeNode)
     monkeypatch.setattr(
-        backtest_dydx, "fetch_watchlist", lambda: ["BTC-USD-PERP.DYDX", "ETH-USD-PERP.DYDX"],
+        backtest_dydx,
+        "fetch_watchlist",
+        lambda: ["BTC-USD-PERP.DYDX", "ETH-USD-PERP.DYDX"],
     )
 
     with tempfile.TemporaryDirectory() as tmp:

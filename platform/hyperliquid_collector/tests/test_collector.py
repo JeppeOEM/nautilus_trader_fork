@@ -21,7 +21,6 @@ import pytest
 from hyperliquid_collector.config import load_config
 
 
-
 def test_config_defaults_and_validation(tmp_path: Path) -> None:
     path = tmp_path / "c.toml"
     path.write_text('instruments = ["BTC-USD-PERP.HYPERLIQUID"]\n')

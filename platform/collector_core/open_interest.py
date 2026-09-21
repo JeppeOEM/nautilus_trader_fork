@@ -95,7 +95,9 @@ class OpenInterest(Data):
         )
 
     def __repr__(self) -> str:
-        return f"OpenInterest(instrument_id={self.instrument_id}, open_interest={self.open_interest})"
+        return (
+            f"OpenInterest(instrument_id={self.instrument_id}, open_interest={self.open_interest})"
+        )
 
 
 register_arrow(

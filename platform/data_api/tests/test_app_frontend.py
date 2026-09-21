@@ -57,8 +57,10 @@ def test_unmatched_api_path_returns_json_404_not_spa_html() -> None:
 
 
 def test_no_fastapi_builtin_docs_route_collides_with_the_spa_docs_page() -> None:
-    """docs_url/redoc_url=None -- FastAPI's own Swagger UI must not shadow this app's
-    own /docs SPA route (Signal Atlas, FR45)."""
+    """
+    docs_url/redoc_url=None -- FastAPI's own Swagger UI must not shadow this app's
+    own /docs SPA route (Signal Atlas, FR45).
+    """
     paths = {route.path for route in app_module.app.routes if hasattr(route, "path")}
 
     assert "/docs" not in paths

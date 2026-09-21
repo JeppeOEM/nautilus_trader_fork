@@ -21,11 +21,11 @@ import asyncio
 from pathlib import Path
 
 import pytest
+from collector_core.collector import _seconds_until_next_flush
+from collector_core.second_snapshot import DydxSecondSnapshot
 from ml_signals import candle_store
 
 from dydx_collector.collector import DydxCollector
-from collector_core.collector import _seconds_until_next_flush
-from collector_core.second_snapshot import DydxSecondSnapshot
 from dydx_collector.tests.test_collector_trade_ohlc import _make_config
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog

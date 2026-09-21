@@ -47,4 +47,6 @@ def ohlc_outside_book(snapshot: _Snapshot, tolerance: float = TOLERANCE) -> bool
         return False  # no book to judge against -- not evidence either way
     deepest_ask = max(snapshot.ask_prices)
     deepest_bid = min(snapshot.bid_prices)
-    return snapshot.high_price > deepest_ask * (1 + tolerance) or snapshot.low_price < deepest_bid * (1 - tolerance)
+    return snapshot.high_price > deepest_ask * (
+        1 + tolerance
+    ) or snapshot.low_price < deepest_bid * (1 - tolerance)

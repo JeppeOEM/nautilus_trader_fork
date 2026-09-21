@@ -25,11 +25,10 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 
-from nautilus_trader.persistence.catalog import ParquetDataCatalog
-
 from ml_signals import error_ledger
 from ml_signals.catalog_stats import list_instruments
 from ml_signals.catalog_stats import price_stats
+from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
 
 logger = logging.getLogger(__name__)
@@ -73,7 +72,8 @@ def compute_all(
     max_workers: int = 32,
     instrument_ids: list[str] | None = None,
 ) -> list[dict]:
-    """Full snapshot (book metrics + price stats) for every instrument.
+    """
+    Full snapshot (book metrics + price stats) for every instrument.
 
     book_metrics_fn is forwarded to compute_snapshot() -- see that function's own
     docstring (SSOT-02).

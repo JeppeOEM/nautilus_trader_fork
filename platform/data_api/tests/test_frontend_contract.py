@@ -1,4 +1,5 @@
-"""Every `/api/...` URL the React client fetches must be a real data_api route.
+"""
+Every `/api/...` URL the React client fetches must be a real data_api route.
 
 Regression: `/api/rankings/technicals-columns` 404'd/405'd in the browser because the
 frontend called routes the running backend didn't serve. A stale image can't be caught here,
@@ -10,8 +11,11 @@ from pathlib import Path
 
 import data_api.app as app_module
 
+
 _CLIENT = Path(__file__).resolve().parents[2] / "frontend" / "src" / "api" / "client.ts"
-_CALL = re.compile(r"""fetch\(\s*[`"'](/api/[^`"'?]*)[`"']?(?:[^)]*?method:\s*"(\w+)")?""", re.S)
+_CALL = re.compile(
+    r"""fetch\(\s*[`"'](/api/[^`"'?]*)[`"']?(?:[^)]*?method:\s*"(\w+)")?""", re.DOTALL
+)
 
 
 def _routes() -> list[tuple[re.Pattern[str], set[str]]]:

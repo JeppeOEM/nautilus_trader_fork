@@ -123,7 +123,14 @@ def candle_dicts_from_snapshots(snapshots: list, period_seconds: int) -> list[di
     The aggregated candles for the same window are a few KB.
     """
     raw = [
-        (s.ts_event, s.open_price, s.high_price, s.low_price, s.close_price, s.buy_volume + s.sell_volume)
+        (
+            s.ts_event,
+            s.open_price,
+            s.high_price,
+            s.low_price,
+            s.close_price,
+            s.buy_volume + s.sell_volume,
+        )
         for s in snapshots
         if s.close_price is not None
     ]
@@ -131,7 +138,14 @@ def candle_dicts_from_snapshots(snapshots: list, period_seconds: int) -> list[di
         return []
     candle_data = aggregate_ohlc(raw, period_seconds=period_seconds)
     return [
-        {"t": c.ts_open // 1_000_000, "o": c.open, "h": c.high, "l": c.low, "c": c.close, "v": c.volume}
+        {
+            "t": c.ts_open // 1_000_000,
+            "o": c.open,
+            "h": c.high,
+            "l": c.low,
+            "c": c.close,
+            "v": c.volume,
+        }
         for c in candle_data
     ]
 
@@ -163,14 +177,20 @@ def candle_dicts_for_window(
     bar_seconds: int,
     snapshot_rows_fn: Callable[[str, int, int], list],
 ) -> list[dict]:
-    """Candles for [start_ns, end_ns] aggregated from the raw 1s rows -- the slow, archive-side
+    """
+    Candles for [start_ns, end_ns] aggregated from the raw 1s rows -- the slow, archive-side
     path. Charts read the SQLite candle store (`ml_signals.candle_store`); this serves only history
-    the store does not hold. Every dict carries `source`."""
+    the store does not hold. Every dict carries `source`.
+    """
     return _raw_candles(iid, start_ns, end_ns, bar_seconds, snapshot_rows_fn)
 
 
 def _raw_candles(
-    iid: str, start_ns: int, end_ns: int, bar_seconds: int, snapshot_rows_fn: Callable[[str, int, int], list]
+    iid: str,
+    start_ns: int,
+    end_ns: int,
+    bar_seconds: int,
+    snapshot_rows_fn: Callable[[str, int, int], list],
 ) -> list[dict]:
     raw = candle_dicts_from_snapshots(snapshot_rows_fn(iid, start_ns, end_ns), bar_seconds)
     return [{**c, "source": "raw_1s"} for c in raw]

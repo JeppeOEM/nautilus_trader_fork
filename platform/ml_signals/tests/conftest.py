@@ -13,6 +13,7 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 import pytest
+
 from nautilus_trader.backtest.engine import BacktestEngine
 from nautilus_trader.backtest.engine import BacktestEngineConfig
 from nautilus_trader.config import LoggingConfig
@@ -20,7 +21,8 @@ from nautilus_trader.config import LoggingConfig
 
 @pytest.fixture(scope="session", autouse=True)
 def _keep_nautilus_log_guard_alive():
-    """Root-causes the "Fatal Python error: Aborted at kernel.py:231" native abort (see
+    """
+    Root-causes the "Fatal Python error: Aborted at kernel.py:231" native abort (see
     deferred-work.md, Stories 2.2/2.3).
 
     Nautilus's Rust logging subsystem (crates/common/src/logging/logger.rs) resets its

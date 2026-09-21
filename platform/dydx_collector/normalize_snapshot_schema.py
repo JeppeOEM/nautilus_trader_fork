@@ -40,7 +40,6 @@ from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
-
 from collector_core.second_snapshot import DydxSecondSnapshot
 
 
@@ -52,15 +51,26 @@ _SNAPSHOT_DIR = Path("data") / "custom_dydx_second_snapshot"
 
 def files_needing_migration(catalog_path: str, instruments: list[str] | None = None) -> list[Path]:
     root = Path(catalog_path) / _SNAPSHOT_DIR
-    dirs = [root / i for i in instruments] if instruments else sorted(p for p in root.glob("*") if p.is_dir())
-    return [f for d in dirs for f in sorted(d.glob("*.parquet")) if set(_TARGET.names) - set(pq.read_schema(f).names)]
+    dirs = (
+        [root / i for i in instruments]
+        if instruments
+        else sorted(p for p in root.glob("*") if p.is_dir())
+    )
+    return [
+        f
+        for d in dirs
+        for f in sorted(d.glob("*.parquet"))
+        if set(_TARGET.names) - set(pq.read_schema(f).names)
+    ]
 
 
 def _normalized(path: Path) -> pa.Table:
     table = pq.read_table(path)
     unexpected = set(table.schema.names) - set(_TARGET.names)
     if unexpected:
-        raise ValueError(f"{path}: columns not in the current schema, refusing to guess: {sorted(unexpected)}")
+        raise ValueError(
+            f"{path}: columns not in the current schema, refusing to guess: {sorted(unexpected)}"
+        )
     columns = [
         table.column(f.name) if f.name in table.schema.names else pa.nulls(table.num_rows, f.type)
         for f in _TARGET
@@ -76,12 +86,16 @@ def migrate_file(catalog_path: str, path: Path, backup_dir: str) -> None:
     tmp = path.with_suffix(".parquet.tmp")
     pq.write_table(new, tmp)
     if pq.read_table(tmp).num_rows != new.num_rows:
-        raise RuntimeError(f"{path}: rewritten file has a different row count; original left in place")
+        raise RuntimeError(
+            f"{path}: rewritten file has a different row count; original left in place"
+        )
     os.replace(tmp, path)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
     parser.add_argument("--catalog", required=True)
     parser.add_argument("--instrument", action="append", help="repeatable; default: all")
     parser.add_argument("--backup-dir", help="required with --apply")

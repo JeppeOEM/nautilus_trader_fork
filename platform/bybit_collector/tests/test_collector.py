@@ -18,10 +18,10 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from collector_core.open_interest import OpenInterest
 
 from bybit_collector.config import load_config
 from bybit_collector.open_interest import parse_open_interest
-from collector_core.open_interest import OpenInterest
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
@@ -77,9 +77,8 @@ def test_spot_id_never_in_open_interest() -> None:
 
 
 def test_client_routes_by_product_type() -> None:
-    from nautilus_trader.core.nautilus_pyo3 import BybitProductType
-
     from bybit_collector.client import BybitClient
+    from nautilus_trader.core.nautilus_pyo3 import BybitProductType
 
     client = BybitClient(on_data=lambda _: None)
     ws, pt = client._ws_for("BTCUSDT-SPOT.BYBIT")

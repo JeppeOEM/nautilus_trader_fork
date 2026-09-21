@@ -1,6 +1,7 @@
 import subprocess
 import sys
 
+
 _CHECK = """
 import data_api.app as app, data_api.settings as s
 from data_api.routes import candles, snapshots, indicators, indicator_series, rankings, metrics

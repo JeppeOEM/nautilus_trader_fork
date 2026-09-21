@@ -28,6 +28,11 @@ path so we can unit-test it without running the full asyncio collector.
 
 from pathlib import Path
 
+from collector_core.second_snapshot import BOOK_DEPTH
+from collector_core.second_snapshot import DydxSecondSnapshot
+
+from dydx_collector.collector import _prune_delta_retention
+from dydx_collector.collector import _prune_interval_seconds
 from nautilus_trader.model.book import OrderBook
 from nautilus_trader.model.data import BookOrder
 from nautilus_trader.model.data import OrderBookDelta
@@ -38,10 +43,6 @@ from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
 
-from dydx_collector.collector import _prune_delta_retention
-from dydx_collector.collector import _prune_interval_seconds
-from collector_core.second_snapshot import BOOK_DEPTH
-from collector_core.second_snapshot import DydxSecondSnapshot
 
 _IID = InstrumentId.from_str("BTC-USD-PERP.DYDX")
 _TS = 1_000_000_000
@@ -71,7 +72,9 @@ def _delta(
     )
 
 
-def _book(*bid_levels: tuple[float, float], ask_levels: list[tuple[float, float]] | None = None) -> OrderBook:
+def _book(
+    *bid_levels: tuple[float, float], ask_levels: list[tuple[float, float]] | None = None
+) -> OrderBook:
     """Build an L2_MBP OrderBook from bid/ask (price, size) tuples."""
     asks = ask_levels or [(bid_levels[0][0] + 1.0, bid_levels[0][1])]
     book = OrderBook(_IID, BookType.L2_MBP)
@@ -109,6 +112,7 @@ def _snapshot_from_book(book: OrderBook, ts: int = _TS) -> DydxSecondSnapshot | 
 # OrderBook level ordering
 # ---------------------------------------------------------------------------
 
+
 def test_bids_returned_descending_best_first() -> None:
     book = _book((100.0, 5.0), (99.0, 3.0), (98.0, 2.0))
     bid_prices = [lv.price.as_double() for lv in book.bids()]
@@ -134,6 +138,7 @@ def test_best_ask_price_is_lowest_ask() -> None:
 # ---------------------------------------------------------------------------
 # Normal snapshot: bid < ask
 # ---------------------------------------------------------------------------
+
 
 def test_snapshot_bid_below_ask_after_normal_deltas() -> None:
     book = _book((50000.0, 1.0), ask_levels=[(50001.0, 1.0)])
@@ -181,6 +186,7 @@ def test_snapshot_is_none_when_book_empty() -> None:
 # Crossed-book guard
 # ---------------------------------------------------------------------------
 
+
 def test_crossed_book_guard_returns_none() -> None:
     """
     Simulate reconnect mid-replay: ask side was cleared and bid is now above where
@@ -216,6 +222,7 @@ def test_normal_book_after_fix_emits_snapshot() -> None:
 # Stale feed (flat line) — documented behaviour
 # ---------------------------------------------------------------------------
 
+
 def test_stale_book_emits_identical_snapshots_each_second() -> None:
     """
     If no new OrderBookDeltas arrive, _live_books[iid] stays unchanged and
@@ -243,6 +250,7 @@ def test_stale_book_emits_identical_snapshots_each_second() -> None:
 # ---------------------------------------------------------------------------
 # Per-coin raw-delta retention (_prune_delta_retention, _prune_interval_seconds)
 # ---------------------------------------------------------------------------
+
 
 def test_prune_delta_retention_skips_unlimited_instrument(tmp_path: Path) -> None:
     deltas_dir = tmp_path / "data" / "order_book_deltas" / "BTC-USD-PERP.DYDX"

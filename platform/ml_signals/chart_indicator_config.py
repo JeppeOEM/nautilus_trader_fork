@@ -39,7 +39,8 @@ class IndicatorEntry:
 
 
 def load_config(path: Path) -> dict[str, list[IndicatorEntry]]:
-    """Load persisted per-instrument indicator selections.
+    """
+    Load persisted per-instrument indicator selections.
 
     A missing file (nothing saved yet) returns an empty dict, not an error -- same
     "nothing saved yet" treatment the rest of this codebase gives an absent data

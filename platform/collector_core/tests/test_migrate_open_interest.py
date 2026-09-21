@@ -36,14 +36,21 @@ _LEGACY = {
 def _legacy_catalog(root: Path) -> None:
     """Write via OpenInterest, then make it look like production: old dir name, old type metadata."""
     catalog = ParquetDataCatalog(str(root))
-    catalog.write_data([OpenInterest(InstrumentId.from_str(i), Decimal("5.5"), 1, 1) for i in _LEGACY])
+    catalog.write_data(
+        [OpenInterest(InstrumentId.from_str(i), Decimal("5.5"), 1, 1) for i in _LEGACY]
+    )
     data = root / "data"
     for iid, (old_dir, old_type) in _LEGACY.items():
         (data / old_dir).mkdir()
         (data / "custom_open_interest" / iid).rename(data / old_dir / iid)
         for f in (data / old_dir / iid).glob("*.parquet"):
             table = pq.read_table(f)
-            pq.write_table(table.replace_schema_metadata({**table.schema.metadata, b"type": old_type.encode()}), f)
+            pq.write_table(
+                table.replace_schema_metadata(
+                    {**table.schema.metadata, b"type": old_type.encode()}
+                ),
+                f,
+            )
     (data / "custom_open_interest").rmdir()
 
 
@@ -97,7 +104,9 @@ def test_resumes_after_crash_between_replace_and_unlink(tmp_path: Path) -> None:
     target = tmp_path / "data" / "custom_open_interest" / src.parent.name / src.name
     target.parent.mkdir(parents=True)
     table = pq.read_table(src)
-    pq.write_table(table.replace_schema_metadata({**table.schema.metadata, b"type": b"OpenInterest"}), target)
+    pq.write_table(
+        table.replace_schema_metadata({**table.schema.metadata, b"type": b"OpenInterest"}), target
+    )
     args = ["--catalog", str(tmp_path), "--backup-dir", str(tmp_path / "bak"), "--apply"]
     assert migrate_open_interest.main(args) == 0
     assert not src.exists()

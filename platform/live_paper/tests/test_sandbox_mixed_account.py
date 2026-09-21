@@ -47,7 +47,9 @@ class _BuyOnce(Strategy):
         if self.cache.orders_total_count(strategy_id=self.id):
             return
         self.submit_order(
-            self.order_factory.market(self._instrument.id, OrderSide.BUY, self._instrument.make_qty(0.01))
+            self.order_factory.market(
+                self._instrument.id, OrderSide.BUY, self._instrument.make_qty(0.01)
+            )
         )
 
 

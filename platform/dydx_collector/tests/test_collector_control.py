@@ -36,9 +36,7 @@ from dydx_collector.config import load_config
 from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
 
 
-def _make_config(
-    catalog_path: Path, instruments: tuple[InstrumentEntry, ...] = ()
-) -> DydxConfig:
+def _make_config(catalog_path: Path, instruments: tuple[InstrumentEntry, ...] = ()) -> DydxConfig:
     return DydxConfig(
         network=DydxNetwork.TESTNET,
         catalog_path=str(catalog_path),
@@ -216,8 +214,10 @@ async def test_start_at_exactly_one_below_cap_succeeds(
 async def test_stop_removes_entry_and_unsubscribes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Stop removes an entry (AC #4) -- and, unlike unpin, does not add it to `exclude`
-    (that's the whole distinction between the two)."""
+    """
+    Stop removes an entry (AC #4) -- and, unlike unpin, does not add it to `exclude`
+    (that's the whole distinction between the two).
+    """
     _use_tmp_config_path(tmp_path, monkeypatch)
     collector = _collector(tmp_path, (InstrumentEntry(id="BTC-USD-PERP.DYDX"),))
 
@@ -251,9 +251,7 @@ async def test_unknown_action_is_ignored(tmp_path: Path, monkeypatch: pytest.Mon
 
 def _markets_json(volumes: dict[str, float]) -> dict:
     return {
-        "markets": {
-            ticker: {"ticker": ticker, "volume24H": vol} for ticker, vol in volumes.items()
-        }
+        "markets": {ticker: {"ticker": ticker, "volume24H": vol} for ticker, vol in volumes.items()}
     }
 
 
@@ -298,9 +296,7 @@ async def test_pin_top_liquid_never_re_adds_an_unpinned_id(
         lambda _network: _markets_json({"AAA": 500_000.0}),
     )
     collector = _collector(tmp_path)
-    collector._config = dataclasses.replace(
-        collector._config, exclude=frozenset({"AAA-PERP.DYDX"})
-    )
+    collector._config = dataclasses.replace(collector._config, exclude=frozenset({"AAA-PERP.DYDX"}))
 
     await collector._handle_control_message("pin_top_liquid", None)
 

@@ -23,7 +23,8 @@ _SEC = 1_000_000_000  # 1 second in ns
 
 
 def test_score_known_price_series_matches_hand_computed_stdev() -> None:
-    """Expected value is a literal computed independently of VolatilityTracker.score's
+    """
+    Expected value is a literal computed independently of VolatilityTracker.score's
     own statistics.stdev() call -- the old version of this test re-derived "expected"
     via the exact same formula/stdev call as the implementation, so it could not have
     caught a formula regression (e.g. population vs. sample stdev, or a sign error).
@@ -69,7 +70,8 @@ def test_update_evicts_entries_older_than_lookback() -> None:
 
 
 def test_lookback_seconds_changes_computed_score_for_same_input() -> None:
-    """AC2: reconfiguring lookback_seconds must change the score, with no code change.
+    """
+    AC2: reconfiguring lookback_seconds must change the score, with no code change.
 
     short's 12s window evicts ts=0 by the time ts=15s arrives (age 15 > 12), leaving 3
     points/2 returns; long's 3600s window keeps all 4 points/3 returns -- different

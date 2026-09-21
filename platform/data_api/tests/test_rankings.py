@@ -74,8 +74,10 @@ def test_handle_message_skips_dict_missing_list_shaped_ranks() -> None:
 
 
 def test_handle_message_skips_message_missing_mode_or_updated_at() -> None:
-    """Guards `GET /api/rankings`'s plain-index reads (`latest["mode"]`, etc.) from ever
-    seeing a cached message that would raise a KeyError -> 500 instead of an honest 503."""
+    """
+    Guards `GET /api/rankings`'s plain-index reads (`latest["mode"]`, etc.) from ever
+    seeing a cached message that would raise a KeyError -> 500 instead of an honest 503.
+    """
     bus = RankingsBus()
 
     bus.handle_message({"updated_at": 1, "ranks": []})
@@ -128,7 +130,9 @@ def test_unsubscribe_stops_further_fan_out() -> None:
 # module-level singleton, so this never races the real-Redis integration test below) ---
 
 
-def test_get_rankings_returns_503_before_any_cached_message(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_get_rankings_returns_503_before_any_cached_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(redis_bus, "bus", RankingsBus())
     client = TestClient(app_module.app)
 
@@ -161,7 +165,10 @@ def test_get_rankings_renames_ranks_to_items_and_passes_everything_else_through(
 
 
 def _publish_until_observed(
-    channel: str, payload: str, observed: Callable[[], bool], timeout: float = 10.0,
+    channel: str,
+    payload: str,
+    observed: Callable[[], bool],
+    timeout: float = 10.0,
 ) -> bool:
     """
     Retry-publish loop: Redis pub/sub only delivers to already-subscribed clients, and
@@ -192,7 +199,9 @@ def test_rankings_live_message_reflected_by_rest_and_ws_relay() -> None:
 
     with TestClient(app_module.app) as client:
         delivered = _publish_until_observed(
-            redis_bus.RANKINGS_CHANNEL, payload, lambda: redis_bus.bus.latest == message,
+            redis_bus.RANKINGS_CHANNEL,
+            payload,
+            lambda: redis_bus.bus.latest == message,
         )
         assert delivered, "rankings:live message was never observed by the running RankingsBus"
 

@@ -31,6 +31,7 @@ from pydantic import field_validator
 
 from data_api import alerts
 
+
 router = APIRouter()
 
 _MAX_BAR_SECONDS = 86_400

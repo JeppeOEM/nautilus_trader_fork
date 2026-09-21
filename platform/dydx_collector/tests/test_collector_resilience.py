@@ -31,12 +31,12 @@ from types import SimpleNamespace
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-
-import dydx_collector.collector as collector_module
-from dydx_collector.collector import DydxCollector
 from collector_core.collector import quarantine_corrupt_parquet
 from collector_core.feed import MAIN_FEED
 from collector_core.feed import Feed
+
+import dydx_collector.collector as collector_module
+from dydx_collector.collector import DydxCollector
 from dydx_collector.config import DydxConfig
 from dydx_collector.config import InstrumentEntry
 from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
@@ -246,9 +246,11 @@ def _side_delta(
     size: float = 1.0,
     action: BookAction = BookAction.ADD,
 ) -> OrderBookDeltas:
-    """Like `_delta`, but for either side and with a configurable size/action -- needed
+    """
+    Like `_delta`, but for either side and with a configurable size/action -- needed
     to exercise Story 5.2's per-level message-id tagging, which `_delta`'s hardcoded
-    BUY-only/size=1.0 shape can't."""
+    BUY-only/size=1.0 shape can't.
+    """
     order = BookOrder(side=side, price=Price(price, 1), size=Quantity(size, 1), order_id=0)
     delta = OrderBookDelta(
         instrument_id=InstrumentId.from_str(_IID),
@@ -360,7 +362,9 @@ async def test_crossed_book_resolution_is_logged_with_before_after_prices(
     as CRITICAL).
     """
     collector = DydxCollector(_make_config(tmp_path / "catalog", snapshot_interval_seconds=0.01))
-    collector._config = dataclasses.replace(collector._config, instruments=(InstrumentEntry(id=_IID),))
+    collector._config = dataclasses.replace(
+        collector._config, instruments=(InstrumentEntry(id=_IID),)
+    )
     collector._client = _FakeClient()  # type: ignore[assignment]
     # Book has already resolved to uncrossed by the time this tick runs.
     collector._live_books[_IID] = _uncrossed_book()
@@ -389,7 +393,9 @@ async def test_crossed_book_resolution_is_logged_with_before_after_prices(
 async def test_crossed_book_within_grace_window_does_not_escalate(tmp_path: Path, caplog) -> None:
     """A crossed book just detected (within _CROSSED_RESYNC_NS) is a silent skip, unchanged."""
     collector = DydxCollector(_make_config(tmp_path / "catalog", snapshot_interval_seconds=0.01))
-    collector._config = dataclasses.replace(collector._config, instruments=(InstrumentEntry(id=_IID),))
+    collector._config = dataclasses.replace(
+        collector._config, instruments=(InstrumentEntry(id=_IID),)
+    )
     collector._client = _FakeClient()  # type: ignore[assignment]
     collector._live_books[_IID] = _crossed_book()
     collector._last_book_update_ns[_IID] = time.time_ns()
@@ -417,12 +423,16 @@ async def test_crossed_book_past_grace_window_escalates_critical(tmp_path: Path,
     snapshot_interval_seconds tick rate.
     """
     collector = DydxCollector(_make_config(tmp_path / "catalog", snapshot_interval_seconds=0.01))
-    collector._config = dataclasses.replace(collector._config, instruments=(InstrumentEntry(id=_IID),))
+    collector._config = dataclasses.replace(
+        collector._config, instruments=(InstrumentEntry(id=_IID),)
+    )
     fake_client = _FakeClient()
     collector._client = fake_client  # type: ignore[assignment]
     collector._live_books[_IID] = _crossed_book()
     collector._last_book_update_ns[_IID] = time.time_ns()
-    collector._crossed_since_ns[_IID] = time.time_ns() - int(collector._config.crossed_resync_seconds * 1e9) - 1
+    collector._crossed_since_ns[_IID] = (
+        time.time_ns() - int(collector._config.crossed_resync_seconds * 1e9) - 1
+    )
 
     with caplog.at_level(logging.CRITICAL, logger="dydx_collector.critical"):
         loop_task = asyncio.create_task(collector._second_loop())
@@ -514,8 +524,10 @@ async def test_crossed_book_uncrossing_the_last_level_logs_a_warning(
 
 @pytest.mark.asyncio
 async def test_crossed_book_tie_break_uses_smaller_size(tmp_path: Path) -> None:
-    """Equal message-ids on both crossed levels -> the smaller-size side is stale (dYdX's
-    own documented tie-break), not an arbitrary/undefined choice."""
+    """
+    Equal message-ids on both crossed levels -> the smaller-size side is stale (dYdX's
+    own documented tie-break), not an arbitrary/undefined choice.
+    """
     collector = DydxCollector(_make_config(tmp_path / "catalog"))
     collector._client = _FakeClient()  # type: ignore[assignment]
     collector._apply_deltas(_IID, _side_delta(OrderSide.BUY, sequence=5, price=101.0, size=0.5))

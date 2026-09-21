@@ -28,6 +28,8 @@ one until that's root-caused.
 
 from decimal import Decimal
 
+from ml_signals.strategies.ofi_strategy import OFIStrategy
+from ml_signals.strategies.ofi_strategy import OFIStrategyConfig
 from nautilus_trader.backtest.engine import BacktestEngine
 from nautilus_trader.backtest.engine import BacktestEngineConfig
 from nautilus_trader.config import LoggingConfig
@@ -44,20 +46,27 @@ from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
 from nautilus_trader.test_kit.providers import TestInstrumentProvider
 
-from ml_signals.strategies.ofi_strategy import OFIStrategy
-from ml_signals.strategies.ofi_strategy import OFIStrategyConfig
-
 
 _INSTRUMENT = TestInstrumentProvider.btcusdt_binance()
-_IID  = _INSTRUMENT.id
-_PP   = _INSTRUMENT.price_precision
-_SP   = _INSTRUMENT.size_precision
+_IID = _INSTRUMENT.id
+_PP = _INSTRUMENT.price_precision
+_SP = _INSTRUMENT.size_precision
 _USDT = _INSTRUMENT.quote_currency
 
 
-def _delta(action: BookAction, side: OrderSide, price: float, size: float, ts: int, seq: int) -> OrderBookDelta:
+def _delta(
+    action: BookAction, side: OrderSide, price: float, size: float, ts: int, seq: int
+) -> OrderBookDelta:
     order = BookOrder(side=side, price=Price(price, _PP), size=Quantity(size, _SP), order_id=0)
-    return OrderBookDelta(instrument_id=_IID, action=action, order=order, flags=0, sequence=seq, ts_event=ts, ts_init=ts)
+    return OrderBookDelta(
+        instrument_id=_IID,
+        action=action,
+        order=order,
+        flags=0,
+        sequence=seq,
+        ts_event=ts,
+        ts_init=ts,
+    )
 
 
 def _batch(deltas: list[OrderBookDelta]) -> OrderBookDeltas:
@@ -86,18 +95,24 @@ def _buy_pressure_data(n_update_batches: int = 5) -> list[OrderBookDeltas]:
     ts = 1_000_000_000
     step = 1_000_000_000
 
-    snapshot = _batch([
-        _delta(BookAction.ADD, OrderSide.BUY,  100.0, 10.0, ts, 0),
-        _delta(BookAction.ADD, OrderSide.BUY,   99.0,  5.0, ts, 1),
-        _delta(BookAction.ADD, OrderSide.SELL, 101.0, 10.0, ts, 2),
-        _delta(BookAction.ADD, OrderSide.SELL, 102.0,  5.0, ts, 3),
-    ])
+    snapshot = _batch(
+        [
+            _delta(BookAction.ADD, OrderSide.BUY, 100.0, 10.0, ts, 0),
+            _delta(BookAction.ADD, OrderSide.BUY, 99.0, 5.0, ts, 1),
+            _delta(BookAction.ADD, OrderSide.SELL, 101.0, 10.0, ts, 2),
+            _delta(BookAction.ADD, OrderSide.SELL, 102.0, 5.0, ts, 3),
+        ]
+    )
     batches = [snapshot]
     for i in range(1, n_update_batches + 1):
         ts += step
-        batches.append(_batch([
-            _delta(BookAction.UPDATE, OrderSide.BUY, 100.0, 10.0 + i * 5.0, ts, i * 10),
-        ]))
+        batches.append(
+            _batch(
+                [
+                    _delta(BookAction.UPDATE, OrderSide.BUY, 100.0, 10.0 + i * 5.0, ts, i * 10),
+                ]
+            )
+        )
     return batches
 
 
@@ -108,13 +123,13 @@ def test_ofi_strategy_generates_long_entry_on_bid_pressure() -> None:
 
     config = OFIStrategyConfig(
         instrument_id=_IID,
-        warmup_seconds=0,   # synthetic data spans ~6s; default 1800s warmup would block every entry
+        warmup_seconds=0,  # synthetic data spans ~6s; default 1800s warmup would block every entry
         ofi_window=2,
         ma_period=2,
         buy_threshold=0.5,
         sell_threshold=-0.5,
         trade_size=Decimal("0.001"),
-        min_depth_levels=2,   # 2 bid + 2 ask levels are added in snapshot
+        min_depth_levels=2,  # 2 bid + 2 ask levels are added in snapshot
     )
     engine.add_strategy(OFIStrategy(config))
     engine.run()
@@ -134,10 +149,10 @@ def test_ofi_strategy_no_trade_below_ma_threshold() -> None:
 
     config = OFIStrategyConfig(
         instrument_id=_IID,
-        warmup_seconds=0,   # isolate the threshold filter -- don't let warmup mask it
+        warmup_seconds=0,  # isolate the threshold filter -- don't let warmup mask it
         ofi_window=2,
         ma_period=2,
-        buy_threshold=999_999.0,   # impossibly high → no entry
+        buy_threshold=999_999.0,  # impossibly high → no entry
         sell_threshold=-999_999.0,
         trade_size=Decimal("0.001"),
         min_depth_levels=2,
@@ -159,13 +174,13 @@ def test_ofi_strategy_depth_filter_blocks_entry() -> None:
 
     config = OFIStrategyConfig(
         instrument_id=_IID,
-        warmup_seconds=0,   # isolate the depth filter -- don't let warmup mask it
+        warmup_seconds=0,  # isolate the depth filter -- don't let warmup mask it
         ofi_window=2,
         ma_period=2,
         buy_threshold=0.5,
         sell_threshold=-0.5,
         trade_size=Decimal("0.001"),
-        min_depth_levels=10,   # only 2 levels exist → always filtered
+        min_depth_levels=10,  # only 2 levels exist → always filtered
     )
     engine.add_strategy(OFIStrategy(config))
     engine.run()

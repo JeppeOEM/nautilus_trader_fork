@@ -39,9 +39,13 @@ import asyncio
 import json
 import logging
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter
+from fastapi import WebSocket
+from fastapi import WebSocketDisconnect
 
-from data_api import alerts, live_candles, redis_bus
+from data_api import alerts
+from data_api import live_candles
+from data_api import redis_bus
 
 
 logger = logging.getLogger(__name__)
@@ -52,9 +56,11 @@ _MAX_SUBSCRIPTIONS = 32
 
 
 def _parse_candle_channel(channel: str) -> tuple[str, int] | None:
-    """Parse `"candles:{iid}:{bar_seconds}"`. Returns `None` for anything else (e.g. a
+    """
+    Parse `"candles:{iid}:{bar_seconds}"`. Returns `None` for anything else (e.g. a
     future non-candle channel, or a malformed string) -- the caller then simply ignores
-    the control message rather than erroring the connection."""
+    the control message rather than erroring the connection.
+    """
     prefix, _, rest = channel.partition(":")
     if prefix != "candles" or not rest:
         return None
@@ -68,17 +74,21 @@ def _parse_candle_channel(channel: str) -> tuple[str, int] | None:
 
 
 async def _forward(source: "asyncio.Queue[dict]", outbox: "asyncio.Queue[dict]") -> None:
-    """Relay every message from one source queue into the shared per-connection outbox,
-    forever, until cancelled -- runs as its own task per active subscription."""
+    """
+    Relay every message from one source queue into the shared per-connection outbox,
+    forever, until cancelled -- runs as its own task per active subscription.
+    """
     while True:
         redis_bus.put_drop_oldest(outbox, await source.get())
 
 
 def _log_forward_error(task: "asyncio.Task[None]") -> None:
-    """A per-channel `_forward` task isn't in `ws_live`'s monitored `asyncio.wait()` set
+    """
+    A per-channel `_forward` task isn't in `ws_live`'s monitored `asyncio.wait()` set
     (there can be any number of them, created/cancelled dynamically) -- without this, an
     unexpected failure would silently stop that channel's stream and only surface as an
-    "exception was never retrieved" warning from asyncio's default handler."""
+    "exception was never retrieved" warning from asyncio's default handler.
+    """
     if task.cancelled():
         return
     exc = task.exception()
@@ -87,12 +97,14 @@ def _log_forward_error(task: "asyncio.Task[None]") -> None:
 
 
 class _CandleSubscriptions:
-    """Per-connection bookkeeping for this connection's active live-candle
-    subscriptions: one forwarder task + `LiveCandleBus` queue per subscribed channel."""
+    """
+    Per-connection bookkeeping for this connection's active live-candle
+    subscriptions: one forwarder task + `LiveCandleBus` queue per subscribed channel.
+    """
 
     def __init__(self, outbox: "asyncio.Queue[dict]") -> None:
         self._outbox = outbox
-        self._entries: dict[str, tuple[str, int, "asyncio.Queue[dict]", "asyncio.Task[None]"]] = {}
+        self._entries: dict[str, tuple[str, int, asyncio.Queue[dict], asyncio.Task[None]]] = {}
 
     def subscribe(self, channel: str, iid: str, bar_seconds: int) -> None:
         if channel in self._entries or len(self._entries) >= _MAX_SUBSCRIPTIONS:
@@ -127,7 +139,9 @@ def _handle_control_message(message: dict, subs: _CandleSubscriptions) -> None:
             continue  # this key didn't parse -- still check the other key, don't give up
         iid, bar_seconds = parsed
         channel = f"candles:{iid}:{bar_seconds}"
-        subs.subscribe(channel, iid, bar_seconds) if key == "subscribe" else subs.unsubscribe(channel)
+        subs.subscribe(channel, iid, bar_seconds) if key == "subscribe" else subs.unsubscribe(
+            channel
+        )
         return
 
 
@@ -138,9 +152,11 @@ async def _sender(websocket: WebSocket, outbox: "asyncio.Queue[dict]") -> None:
 
 
 async def _reader(websocket: WebSocket, subs: _CandleSubscriptions) -> None:
-    """Reads inbound control frames forever. A malformed (non-JSON or non-dict) frame is
+    """
+    Reads inbound control frames forever. A malformed (non-JSON or non-dict) frame is
     logged and skipped, never fatal -- only `WebSocketDisconnect` (raised by
-    `receive_text()` once the client closes) ends this loop."""
+    `receive_text()` once the client closes) ends this loop.
+    """
     while True:
         text = await websocket.receive_text()
         try:
@@ -155,7 +171,7 @@ async def _reader(websocket: WebSocket, subs: _CandleSubscriptions) -> None:
 @router.websocket("/ws/live")
 async def ws_live(websocket: WebSocket) -> None:
     await websocket.accept()
-    outbox: "asyncio.Queue[dict]" = asyncio.Queue(redis_bus.QUEUE_MAX)
+    outbox: asyncio.Queue[dict] = asyncio.Queue(redis_bus.QUEUE_MAX)
 
     # Subscribe before reading/sending `latest`: a message published between reading
     # `.latest` and registering the listener queue would otherwise be missed entirely
@@ -178,7 +194,8 @@ async def ws_live(websocket: WebSocket) -> None:
         if redis_bus.bus.latest is not None:
             await websocket.send_json(redis_bus.bus.latest)
         done, _pending = await asyncio.wait(
-            {sender_task, reader_task, rankings_forward_task, alerts_forward_task}, return_when=asyncio.FIRST_COMPLETED,
+            {sender_task, reader_task, rankings_forward_task, alerts_forward_task},
+            return_when=asyncio.FIRST_COMPLETED,
         )
         for task in done:
             exc = task.exception()

@@ -25,6 +25,7 @@ import urllib.request
 from decimal import Decimal
 
 from collector_core.open_interest import OpenInterest
+
 from nautilus_trader.model.identifiers import InstrumentId
 
 

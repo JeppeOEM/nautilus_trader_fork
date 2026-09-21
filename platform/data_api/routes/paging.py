@@ -1,9 +1,12 @@
-"""Shared cursor-paging helpers for the scroll-back routes (candles, snapshots, indicator
+"""
+Shared cursor-paging helpers for the scroll-back routes (candles, snapshots, indicator
 series/values): find a page across data gaps and answer "is there anything older?" from the
-catalog's own file ranges (`catalog_stats.data_file_ranges`), not fixed-size probe windows."""
+catalog's own file ranges (`catalog_stats.data_file_ranges`), not fixed-size probe windows.
+"""
 
 from collections.abc import Callable
 from typing import TypeVar
+
 
 T = TypeVar("T")
 
@@ -18,9 +21,11 @@ def fetch_page(
     before_ns: int,
     span_ns: int,
 ) -> list[T]:
-    """First non-empty `fetch(start_ns, end_ns)` walking back from `before_ns` in `span_ns`
+    """
+    First non-empty `fetch(start_ns, end_ns)` walking back from `before_ns` in `span_ns`
     windows, jumping over gaps straight to the last data before each empty window. `[]` only
-    when nothing older exists at all."""
+    when nothing older exists at all.
+    """
     end_ns = before_ns
     while True:
         start_ns = end_ns - span_ns
