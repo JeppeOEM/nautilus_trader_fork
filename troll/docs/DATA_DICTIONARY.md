@@ -16,25 +16,36 @@ Nautilus types decoded straight from the Rust adapter; two (`DydxSecondSnapshot`
 `OpenInterest`) are custom `Data` subclasses this collector defines because the
 PyO3 bindings don't expose the fields another way.
 
-### 1.1 `TradeTick` (native Nautilus type) — **no longer persisted**
+### 1.1 `TradeTick` (native Nautilus type) — raw trade archive (story 22.13)
 
-- **Source:** `v4_trades` WS channel, decoded by the Rust adapter, delivered via
-  `DydxClient._handle_message`'s PyCapsule path (`client.py`).
+- **Source:** every venue's trade channel, decoded by the Rust adapter and delivered to
+  `Collector._on_data` (dYdX `v4_trades`, Bybit `publicTrade`, Hyperliquid `trades`).
 - **Fields:** `instrument_id`, `price`, `size`, `aggressor_side` (`AggressorSide.BUYER`/
   `SELLER`), `trade_id`, `ts_event`, `ts_init`.
-- **Cadence:** event-driven, one per executed trade.
-- **No longer written to the catalog.** `Collector._process_data` explicitly excludes
-  `TradeTick` from the buffer/flush path — raw trades accumulated forever for every
-  pinned instrument with no retention cap (see §5's old Retention section history),
-  and every downstream consumer only ever needed OHLC, not individual prints. Each
-  `TradeTick` is still processed live to update a running per-second open/high/low/
-  close price, folded into `DydxSecondSnapshot` (§1.7) instead of stored raw. The
-  dashboard's "Ticks mode" (individual trade price/size/side scatter, `dashboard.py`)
-  was removed in the same change since it has no data source anymore.
-- **Subscription scope:** every pinned + liquid instrument (`_subscribe`,
-  `collector.py`). Illiquid instruments are not subscribed to trades.
-- **Historical data:** `TradeTick` Parquet files written before this cutover remain in
-  the catalog and are still readable — this only stops *new* rows from being written.
+- **Two clocks, stored untouched:** `ts_event` is the venue's trade time, `ts_init` the
+  Rust client's receive time (one per WS message, so a message's trades share it).
+  Aggregates bucket on `ts_event` (the nightly rebuild); backtests replay on `ts_init`.
+  Measured on a 200 s mainnet run (2026-09-21): arrival lag `ts_init - ts_event` median
+  ~110 ms on Bybit, ~390 ms on Hyperliquid (max 8.7 s), ~1.5 s on dYdX (max 1.8 s).
+- **Written to** `data/trade_tick/<instrument>/` through `ParquetDataCatalog.write_data()`
+  by the normal flush, for every trade that passes the DATA-06 guards (stale-age filter,
+  `trade_id` dedup) -- the same trades the live second folds. Loads with no conversion
+  through `BacktestDataConfig(data_cls=TradeTick, instrument_ids=[...])` (NAUT-03).
+- **Flush tie guard:** each flush sorts a batch by `ts_init` and keeps back the group
+  sharing its newest `ts_init` while it is under 5 s old (the rest of that WS message may
+  still be queued): `write_data` refuses a file whose `ts_init` interval touches an existing
+  one, which would lose the next flush's whole batch. The shutdown flush writes everything.
+- **Live use:** each accepted trade is also kept for the current sample and folded once by
+  `collector_core.fold.fold_trades` (exact: `Quantity.raw` sums, `Price.raw` comparisons)
+  into that second's `DydxSecondSnapshot` (§1.7). Live is provisional and arrival-timed;
+  `collector_core.rebuild_seconds` re-derives closed days from this archive (§6).
+- **Footprint:** expected ~1 MB/venue/day on dYdX (ETH ~2.9k, BTC ~1.4k trades/day);
+  Bybit/Hyperliquid majors are far busier (the 200 s run archived ~7.2k BTCUSDT-LINEAR and
+  ~1.4k Hyperliquid BTC trades). **Not measured** per venue-day yet (operator action, see
+  `DEPLOY_CHECKLIST.md`).
+- **Retention:** see §5 -- released only after the day reconciles `pass`.
+- **History:** files written before the earlier retention cutover (when trades stopped being stored)
+  are still readable; story 22.13 reversed that cutover.
 
 ### 1.2 `OrderBookDeltas` (native Nautilus type)
 
@@ -149,17 +160,21 @@ signals on read (SIGNAL-01).
   - `buy_volume`, `sell_volume` — summed trade size per side since the last tick
   - `buy_count`, `sell_count` — trade count per side since the last tick
   - `open_price`, `high_price`, `low_price`, `close_price` — OHLC of actual executed
-    trade prices within this second, `None` if no trade occurred. This is the
-    collector's **only** record of traded price now that raw `TradeTick` is no longer
-    persisted (§1.1) — tracked live in `Collector._process_data` as each `TradeTick`
-    arrives, popped into the snapshot by `_second_loop`. `ml_signals/candles.py`'s
+    trade prices within this second, `None` if no trade occurred. Live, each accepted
+    `TradeTick` is kept in `Collector._second_trades` and folded once per sample by
+    `collector_core.fold.fold_trades` (the same exact fold the nightly rebuild uses; the
+    float columns hold one conversion of an exact total). A closed day's rows are
+    re-derived from the raw archive (§1.1) on exchange time by `rebuild_seconds` (§6);
+    book columns and timestamps are never touched. `ml_signals/candles.py`'s
     `aggregate_ohlc` combines these across multiple seconds for coarser candles;
     `ml_signals/catalog_stats.py`'s `price_series` reads `close_price` as its primary
     price source (falling back to `MarkPriceUpdate` only when no snapshot ever
     recorded a trade for that instrument).
   - `ts_event`, `ts_init`
 - **Built by:** `collector_core/collector.py`'s `Collector._second_loop`, every
-  `snapshot_interval_seconds` (config default 1.0s, overrideable in `config.toml`).
+  `snapshot_interval_seconds` (config default 1.0s, overrideable in `config.toml`), on a
+  drift-free wall-clock schedule at mid-interval (`_next_sample_at`): exactly one row per
+  floor second, which the rebuild's trade-to-row mapping relies on.
 - **Guards before emission:** skips crossed books (the venue's `_handle_crossed_book` —
   on dYdX it also drives a forced resubscribe/resync after a persistent cross), and skips
   stale books with no `OrderBookDeltas` for `config.stale_book_seconds` (5s) — both are
@@ -535,16 +550,38 @@ current `config.toml` set `store_order_book_deltas = true`**, so no raw deltas a
 being written at all right now (`order_book_deltas/` is an empty directory) and this
 mechanism currently has nothing to do.
 
-**3. `prune_catalog.py` / `make prune`** — a separate, manual/cron-only script, not run
-by the collector itself. By default it only targets `order_book_deltas` at a flat
-**14-day** global cutoff, regardless of pinned status. Since nothing is stored there
-today (see above), running it currently frees nothing.
+**3. `collector_core/prune_catalog.py` / `make prune`** — a separate, manual/cron-only
+script, not run by the collector itself (moved from `dydx_collector/` by story 22.13; report
+only unless `--apply`). `make prune` targets `order_book_deltas` at a flat **14-day**
+global cutoff, regardless of pinned status. Since nothing is stored there today (see
+above), running it currently frees nothing. `trade_tick` is refused in `--types`, and
+mechanism 1 above skips it too: trades have their own policy (4).
+
+**4. Trade retention, gated on reconciliation** (`prune_catalog --candles-dir ...
+--trade-retention-days 7`, run by `make nightly`): a `data/trade_tick/<iid>/` file is
+deleted only when every UTC day its name spans is older than 7 days **and** that
+instrument-day's `verified_days` row (`candles_<venue>.db`, written by `compare_klines`)
+is `pass`. Otherwise it is kept and listed with its reason (`unverified` / `failed`).
+
+**Known limit:** raw trades exist to correct and prove the aggregates (the rebuild and the
+kline reconciliation), not as a tick-level research archive, so the window is 7 days after
+a day is proven. Upgrade path: raise `--trade-retention-days` (or drop the trade policy from
+`make nightly`) if tick-level features are ever wanted in backtests.
+
+**Known limit:** a trade day that is `unverified` or `failed` is kept **indefinitely** -- the prune
+never releases it -- so the archive keeps growing by every such day until 22.14 closes the
+reconnect gaps behind most failures. The operator path for each listed day (the prune report
+names them every night): find and fix the cause, then re-run `make nightly VENUE=<v> DAY=<day>`
+so it verifies `pass` and is released; or, after deciding the day's raw trades are not needed
+(the rebuilt snapshots and candles stay), delete its `trade_tick` files by hand and record why in
+`docs/DATA_INTEGRITY_AUDIT.md`. Upgrade path: an explicit "accepted" verdict in `verified_days`,
+set by the operator, that the prune honours.
 
 ### The actual retention per type, put plainly
 
 | Data type | For your 29 pinned instruments | For any other dYdX market |
 |---|---|---|
-| `TradeTick` | **No longer written at all** (§1.1) — historical files pre-cutover remain but stop growing | 4h (`non_config_retain_hours`), also no longer growing |
+| `TradeTick` | Archived (§1.1); deleted 7 days after its day reconciles `pass` (mechanism 4); an unverified or failed day is kept | not collected (trades are subscribed for collected instruments only) |
 | `OrderBookDeltas` | Not stored (no instrument opts in) | not stored |
 | `MarkPriceUpdate` / `IndexPriceUpdate` / `FundingRateUpdate` / `InstrumentStatus` | **Unlimited** | 4h |
 | `DydxSecondSnapshot` (now includes trade OHLC, §1.7) | **Unlimited** (pinned + liquid only, so this is always the pinned group) | not collected |
@@ -556,9 +593,36 @@ today (see above), running it currently frees nothing.
 instruments are permanently exempt from `_prune_loop`. So for all 29 configured coins,
 mark/index price, funding rate, open interest, instrument status, and the 1-second book
 snapshots (which now also carry trade OHLC) still accumulate forever with no built-in
-cap. Raw `TradeTick` was the one type that grew fastest for no real benefit — it's cut
-over to `DydxSecondSnapshot`'s `open`/`high`/`low`/`close_price` fields (§1.1/§1.7),
-which every downstream candle/price-series consumer (§2.5, §2.8) now reads instead.
-That removes roughly 2-6 MB/day/instrument of unbounded growth (dominated by the most
-liquid pairs) but does **not** address the other unlimited types above — those still
-need `non_config_retain_hours`-style bounding if you want them capped too.
+cap. Raw `TradeTick` is archived again since story 22.13 (§1.1), but bounded: a proven day
+is released after 7 days (mechanism 4). The other unlimited types above still need
+`non_config_retain_hours`-style bounding if you want them capped too.
+
+---
+
+## 6. Nightly maintenance: rebuild, reconcile, release (story 22.13)
+
+`make nightly VENUE=<DYDX|BYBIT|HYPERLIQUID> [DAY=YYYY-MM-DD]` (default: yesterday, UTC)
+runs `collector_core.nightly`, each step its own process, stopping at the first failure:
+
+1. `rebuild_seconds --apply` -- rewrites the day's snapshot trade columns from the raw
+   archive on `ts_event` (late trades move to their exchange second; the arrival row is
+   cleared). Rows before the instrument's first archived trade keep live values
+   (`not covered`), and so do rows inside an archive-gap marker (`<catalog>/_archive_gaps/<iid>.jsonl`:
+   a trade write that failed while its snapshots landed, a quarantined or a pruned trade file) --
+   the archive is known to miss trades their live values hold. Trades with no covered row are
+   counted (`orphan trades`). An instrument-day with two rows in one second or mixed schemas is
+   refused and left untouched (exit 2, the chain continues).
+2. `consolidate_catalog --apply --venue --days 2` -- one file per recent closed day and data type.
+3. `build_candles --day --venue --workers 1` -- refolds the day into `candles_<venue>.db`.
+4. `compare_klines` -- every traded minute against the venue's own 1 m klines, exact
+   integer units (no tolerance), parsed from the venue's decimal strings. Bybit's klines are
+   seeded with the previous close, so our Bybit bars are put in that definition first
+   (wire-verified; see the tool's docstring). Each mismatch is a
+   `reconcile.kline_mismatch`; the verdict goes to `verified_days`. A per-instrument error (no
+   definition, fetch error, no venue history for the day, unrepresentable value) is a
+   `reconcile.error` with no verdict. Exit 2 = findings of either kind (the chain continues),
+   1 = run-level failure (stops). `--kline-source catalog` never writes `verified_days`.
+5. `prune_catalog --apply` -- the trade retention policy above.
+
+One summary line per venue (per-step outcome and seconds, peak child RSS). The cron line
+and the first-run measurements still owed are in `docs/DEPLOY_CHECKLIST.md`.

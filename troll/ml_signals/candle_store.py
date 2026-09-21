@@ -44,6 +44,14 @@ CREATE TABLE IF NOT EXISTS built_through (
     instrument_id TEXT PRIMARY KEY,
     through_ns    INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS verified_days (
+    instrument_id TEXT    NOT NULL,
+    day           TEXT    NOT NULL,
+    status        TEXT    NOT NULL,
+    checked_at    INTEGER NOT NULL,
+    mismatches    INTEGER NOT NULL,
+    PRIMARY KEY (instrument_id, day)
+) WITHOUT ROWID;
 """
 
 # NULL-safe merge: a bucket with no trade carries NULL o/h/l/c and must not erase or poison them.
@@ -92,6 +100,8 @@ def _fold(rows: Iterable[Any]) -> dict[tuple[int, int], list]:
     (bar_seconds, bucket_start_ms) -> [o, h, l, c, volume, seconds_observed], for rows that carry
     ts_event (ns), open/high/low/close_price (None = no trade that second) and buy_volume/
     sell_volume: a `DydxSecondSnapshot` or a `SecondOHLC`. Any order.
+
+    This folds seconds into bars; trades into seconds is `collector_core.fold.fold_trades`.
     """
     rows = list(rows)
     if not rows:
@@ -326,6 +336,39 @@ def latest(
     index range scan -- no file I/O.
     """
     return {iid: window(db, iid, bar_seconds, 1 << 62, n) for iid in iids}
+
+
+def mark_verified(
+    db: sqlite3.Connection, iid: str, day: str, status: str, mismatches: int, checked_at_ms: int
+) -> None:
+    """
+    Record (upsert) one instrument-day's kline reconciliation verdict (`compare_klines`):
+    `status` is "pass" or "fail". The finality marker `prune_catalog` gates trade retention on.
+    """
+    with db:
+        db.execute(
+            "INSERT INTO verified_days(instrument_id, day, status, checked_at, mismatches) "
+            "VALUES(?, ?, ?, ?, ?) ON CONFLICT(instrument_id, day) DO UPDATE SET "
+            "status = excluded.status, checked_at = excluded.checked_at, "
+            "mismatches = excluded.mismatches",
+            (iid, day, status, checked_at_ms, mismatches),
+        )
+
+
+def verified_status(db: sqlite3.Connection, iid: str, day: str) -> str | None:
+    """
+    Return that instrument-day's last verdict ("pass"/"fail"), or None when never verified -- also for a
+    store opened read-only that predates the table (no reconciliation ever ran against it).
+    """
+    has_table = db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'verified_days'"
+    ).fetchone()
+    if has_table is None:
+        return None
+    row = db.execute(
+        "SELECT status FROM verified_days WHERE instrument_id = ? AND day = ?", (iid, day)
+    ).fetchone()
+    return None if row is None else str(row[0])
 
 
 def prune(db: sqlite3.Connection, now_ms: int | None = None) -> None:

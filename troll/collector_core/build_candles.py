@@ -17,12 +17,15 @@ Rebuild the SQLite candle store from the Parquet 1s snapshots (the archive is th
 
 Usage:
     python -m collector_core.build_candles --catalog /app/catalog --db /app/candles_dir/candles.db \\
-        [--instrument BTC-USD-PERP.DYDX ...] [--start 2026-09-01] [--end 2026-09-18] [--include-open-day]
+        [--instrument BTC-USD-PERP.DYDX ...] [--venue DYDX] [--start 2026-09-01] [--end 2026-09-18] \\
+        [--day 2026-09-20] [--include-open-day]
 
 Use it for first population and to repair after a "candle store write failed" error. Idempotent: each
 UTC day is deleted and recomputed whole. Today is skipped unless --include-open-day, which is only safe
 with the collector stopped (it would otherwise lose seconds the collector applied but the catalog has
 not flushed yet). Reads only the OHLC + volume columns (`query_second_ohlc`), one day at a time (MEM-01).
+`--day D` is `--start D --end D` (the nightly job's form, after `rebuild_seconds` rewrote D's trade
+columns); `--venue V` keeps only instrument ids ending in `.V`.
 """
 
 import argparse
@@ -45,6 +48,11 @@ logger = logging.getLogger(__name__)
 
 _DAY_NS = 86_400 * 1_000_000_000
 _SNAPSHOT_DIR = "custom_dydx_second_snapshot"
+
+
+def venue_instruments(ids: list[str], venue: str | None) -> list[str]:
+    """Keep the ids of one venue (Nautilus id suffix `.VENUE`); all of them when `venue` is None."""
+    return ids if venue is None else [i for i in ids if i.endswith(f".{venue}")]
 
 
 def all_instruments(catalog_path: str) -> list[str]:
@@ -123,8 +131,10 @@ def main() -> None:
     parser.add_argument(
         "--instrument", action="append", help="repeatable; default: all with snapshots"
     )
+    parser.add_argument("--venue", help="only ids of this venue, e.g. DYDX")
     parser.add_argument("--start", help="YYYY-MM-DD (UTC); default: first snapshot")
     parser.add_argument("--end", help="YYYY-MM-DD (UTC, inclusive); default: last snapshot")
+    parser.add_argument("--day", help="YYYY-MM-DD (UTC): shorthand for --start D --end D")
     parser.add_argument(
         "--include-open-day",
         action="store_true",
@@ -134,11 +144,15 @@ def main() -> None:
         "--workers", type=int, default=os.cpu_count() or 1, help="coins rebuilt in parallel"
     )
     args = parser.parse_args()
+    if args.day and (args.start or args.end):
+        parser.error("--day cannot be combined with --start/--end")
+    if args.day:
+        args.start = args.end = args.day
     logging.basicConfig(level=logging.INFO)
 
     candle_store.connect_rw(args.db).close()  # create the schema once, before workers race for it
     jobs = []
-    for iid in args.instrument or all_instruments(args.catalog):
+    for iid in venue_instruments(args.instrument or all_instruments(args.catalog), args.venue):
         span = data_range_ns(args.catalog, iid)
         if span is None:
             logger.warning("%s: no second snapshots, skipping", iid)

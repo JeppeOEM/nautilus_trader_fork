@@ -29,6 +29,12 @@ apart from the replayed ones, so "no trade recorded" is the honest value, DATA-0
 and (with --candles-db) rebuild the candle-store days it touched from the corrected raw 1s.
 Without --candles-db the store still holds the spike: run `build_candles` for those days. The book fields
 are untouched. Manually run, like prune_catalog.py; reads raw 1s in day chunks (MEM-01).
+
+Never run it on a day `rebuild_seconds` has rebuilt (story 22.13): a rebuilt second holds the
+trades whose *exchange* time falls in it, while its book is still sampled at mid-second on
+arrival time, so a fast market can put a real trade outside that book range -- this tool would
+then clear real trades. The rebuild itself is the repair for rows written after the trade
+archive existed; this tool is for pre-archive rows only.
 """
 
 import argparse

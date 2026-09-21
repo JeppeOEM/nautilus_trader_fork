@@ -13,14 +13,19 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-Tests for the collector's per-second trade OHLC tracking (_process_data), which
-replaced raw TradeTick persistence -- see troll/docs/DATA_DICTIONARY.md's
-Retention section for why.
+Tests for the collector's per-second trade tracking on dYdX: accepted trades are kept for the
+live second (`_second_trades`, folded once per sample by `collector_core.fold.fold_trades`) and
+archived raw (`_buffer[(TradeTick, iid)]`, story 22.13 -- the reverse of the earlier retention
+cutover that discarded them).
 """
 
 import time
 from pathlib import Path
 
+from collector_core.fold import fold_trades
+
+from dydx_collector.collector import DydxCollector
+from dydx_collector.config import DydxConfig
 from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
 from nautilus_trader.model.data import TradeTick
 from nautilus_trader.model.enums import AggressorSide
@@ -28,9 +33,6 @@ from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.identifiers import TradeId
 from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
-
-from dydx_collector.collector import DydxCollector
-from dydx_collector.config import DydxConfig
 
 
 _IID = InstrumentId.from_str("BTC-USD-PERP.DYDX")
@@ -53,7 +55,9 @@ def _make_config(catalog_path: Path) -> DydxConfig:
     )
 
 
-def _trade(price: float, size: float, side: AggressorSide, trade_id: str, ts: int = _TS) -> TradeTick:
+def _trade(
+    price: float, size: float, side: AggressorSide, trade_id: str, ts: int = _TS
+) -> TradeTick:
     return TradeTick(
         instrument_id=_IID,
         price=Price(price, 1),
@@ -65,45 +69,55 @@ def _trade(price: float, size: float, side: AggressorSide, trade_id: str, ts: in
     )
 
 
-def test_trade_tick_is_not_buffered_for_catalog_write(tmp_path: Path) -> None:
-    """Raw TradeTicks must never reach the catalog write buffer (Retention cutover)."""
+def _second(collector: DydxCollector) -> dict:
+    return fold_trades(collector._second_trades.get(str(_IID), [])).snapshot_values()._asdict()
+
+
+def test_trade_tick_is_buffered_for_catalog_write(tmp_path: Path) -> None:
+    """Raw TradeTicks reach the catalog write buffer, both clocks untouched (story 22.13)."""
     collector = DydxCollector(_make_config(tmp_path / "catalog"))
-    collector._process_data(_trade(100.0, 1.0, AggressorSide.BUYER, "1"))
-    assert not any(TradeTick in key for key in collector._buffer)
+    trade = _trade(100.0, 1.0, AggressorSide.BUYER, "1", ts=_TS - 5)
+    collector._process_data(trade)
+    (buffered,) = collector._buffer[(TradeTick, str(_IID))]
+    assert (buffered.ts_event, buffered.ts_init) == (trade.ts_event, trade.ts_init)
 
 
 def test_open_high_low_close_track_a_single_second_of_trades(tmp_path: Path) -> None:
     """open=first trade, close=last trade, high/low across all trades this second."""
     collector = DydxCollector(_make_config(tmp_path / "catalog"))
-    iid = str(_IID)
     for price in (100.0, 105.0, 98.0, 102.0):
         collector._process_data(_trade(price, 1.0, AggressorSide.BUYER, str(price)))
 
-    assert collector._second_open_price[iid] == 100.0
-    assert collector._second_high_price[iid] == 105.0
-    assert collector._second_low_price[iid] == 98.0
-    assert collector._second_close_price[iid] == 102.0
+    second = _second(collector)
+    assert second["open_price"] == 100.0
+    assert second["high_price"] == 105.0
+    assert second["low_price"] == 98.0
+    assert second["close_price"] == 102.0
 
 
 def test_no_trade_leaves_ohlc_trackers_empty(tmp_path: Path) -> None:
-    """An instrument with zero trades this second has no entry -- distinguishes
-    "no trade occurred" from a fabricated price."""
+    """
+    An instrument with zero trades this second folds to None OHLC.
+
+    Distinguishes "no trade occurred" from a fabricated price.
+    """
     collector = DydxCollector(_make_config(tmp_path / "catalog"))
-    assert str(_IID) not in collector._second_open_price
-    assert str(_IID) not in collector._second_close_price
+    assert str(_IID) not in collector._second_trades
+    assert _second(collector)["open_price"] is None
+    assert _second(collector)["close_price"] is None
 
 
 def test_buy_and_sell_volume_still_tracked_alongside_ohlc(tmp_path: Path) -> None:
-    """OHLC tracking is additive -- existing buy/sell volume/count aggregation unaffected."""
+    """OHLC tracking is additive -- buy/sell volume/count aggregation unaffected."""
     collector = DydxCollector(_make_config(tmp_path / "catalog"))
-    iid = str(_IID)
     collector._process_data(_trade(100.0, 2.0, AggressorSide.BUYER, "1"))
     collector._process_data(_trade(101.0, 3.0, AggressorSide.SELLER, "2"))
 
-    assert collector._second_buy_volume[iid] == 2.0
-    assert collector._second_sell_volume[iid] == 3.0
-    assert collector._second_buy_count[iid] == 1
-    assert collector._second_sell_count[iid] == 1
+    second = _second(collector)
+    assert second["buy_volume"] == 2.0
+    assert second["sell_volume"] == 3.0
+    assert second["buy_count"] == 1
+    assert second["sell_count"] == 1
 
 
 def test_discard_second_accumulators_clears_ohlc_and_volume(tmp_path: Path) -> None:
@@ -115,6 +129,7 @@ def test_discard_second_accumulators_clears_ohlc_and_volume(tmp_path: Path) -> N
     accumulator until the next *valid* _second_loop tick popped it, stamping the
     entire outage's price range onto a single second -- a giant-range candle at
     recovery instead of an honest gap (see DATA-01/DATA-02 in troll/CLAUDE.md).
+    The raw trades stay archived (the nightly rebuild reports them as orphans).
     """
     collector = DydxCollector(_make_config(tmp_path / "catalog"))
     iid = str(_IID)
@@ -123,26 +138,23 @@ def test_discard_second_accumulators_clears_ohlc_and_volume(tmp_path: Path) -> N
 
     collector._discard_second_accumulators(iid)
 
-    assert iid not in collector._second_open_price
-    assert iid not in collector._second_high_price
-    assert iid not in collector._second_low_price
-    assert iid not in collector._second_close_price
-    assert iid not in collector._second_buy_volume
-    assert iid not in collector._second_sell_volume
-    assert iid not in collector._second_buy_count
-    assert iid not in collector._second_sell_count
+    assert iid not in collector._second_trades
+    assert _second(collector)["high_price"] is None
+    assert _second(collector)["buy_volume"] == 0.0
+    assert len(collector._buffer[(TradeTick, iid)]) == 2
 
 
 def test_historical_trades_from_subscribe_reply_are_dropped(tmp_path: Path) -> None:
-    """dYdX's subscribed reply replays old trades; they must not enter the live second."""
+    """Drop the old trades dYdX's subscribed reply replays: they must not enter the live second."""
     collector = DydxCollector(_make_config(tmp_path / "catalog"))
     iid = str(_IID)
     old = time.time_ns() - 3600 * 1_000_000_000
     collector._process_data(_trade(100.0, 5.0, AggressorSide.BUYER, "old", ts=old))
 
-    assert iid not in collector._second_open_price
-    assert collector._second_buy_volume[iid] == 0.0
+    assert iid not in collector._second_trades
+    assert _second(collector)["buy_volume"] == 0.0
     assert collector._stale_trades_dropped[iid] == 1
+    assert (TradeTick, iid) not in collector._buffer  # not archived either
 
 
 def test_replayed_trade_id_is_not_counted_twice(tmp_path: Path) -> None:
@@ -152,5 +164,6 @@ def test_replayed_trade_id_is_not_counted_twice(tmp_path: Path) -> None:
     collector._process_data(_trade(100.0, 2.0, AggressorSide.BUYER, "same"))
     collector._process_data(_trade(100.0, 2.0, AggressorSide.BUYER, "same"))
 
-    assert collector._second_buy_volume[iid] == 2.0
+    assert _second(collector)["buy_volume"] == 2.0
     assert collector._duplicate_trades_dropped[iid] == 1
+    assert len(collector._buffer[(TradeTick, iid)]) == 1

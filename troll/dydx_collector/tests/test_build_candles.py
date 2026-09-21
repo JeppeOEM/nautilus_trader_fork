@@ -19,12 +19,13 @@
 
 from pathlib import Path
 
+from collector_core.build_candles import all_instruments
+from collector_core.build_candles import rebuild_instrument
+from collector_core.build_candles import venue_instruments
+from collector_core.second_snapshot import DydxSecondSnapshot
 from ml_signals import candle_store
 from ml_signals.candles import candle_dicts_from_snapshots
 
-from collector_core.build_candles import all_instruments
-from collector_core.build_candles import rebuild_instrument
-from collector_core.second_snapshot import DydxSecondSnapshot
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
@@ -86,3 +87,10 @@ def test_rebuild_from_catalog_matches_raw_aggregation_and_is_idempotent(tmp_path
                 )
                 for c in got
             ]
+
+
+def test_venue_instruments_filters_on_the_id_suffix() -> None:
+    ids = ["BTC-USD-PERP.DYDX", "BTCUSDT-LINEAR.BYBIT", "BTC-USD-PERP.HYPERLIQUID"]
+    assert venue_instruments(ids, "BYBIT") == ["BTCUSDT-LINEAR.BYBIT"]
+    assert venue_instruments(ids, "DYDX") == ["BTC-USD-PERP.DYDX"]
+    assert venue_instruments(ids, None) == ids

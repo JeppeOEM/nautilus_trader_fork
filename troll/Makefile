@@ -3,7 +3,7 @@ TROLL_DIR  := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 COMPOSE    := docker compose -f $(TROLL_DIR)docker-compose.yml
 BASE_IMAGE := nautilus-trader-base:1.229.0
 
-.PHONY: consolidate backup-catalog build-candles build-base build-base-vps up redeploy redeploy-all redeploy-no-paper up-live-paper build-insecure test test-live-paper down logs logs-dash web enable-boot enable-firewall harden-ssh frontend-dev frontend-remote
+.PHONY: nightly consolidate backup-catalog build-candles prune prune-dry build-base build-base-vps up redeploy redeploy-all redeploy-no-paper up-live-paper build-insecure test test-live-paper down logs logs-dash web enable-boot enable-firewall harden-ssh frontend-dev frontend-remote
 
 # Personal, gitignored overrides (see .env-example for the documented default).
 -include $(TROLL_DIR).env
@@ -149,13 +149,25 @@ test:
 ## files per instrument per type per day. Safe while the collectors run (today's files are never
 ## touched). Ends with one summary line (days, files/MB before -> after, wall s, peak RSS) and
 ## exits 1 when any day was refused. Extra flags via CONSOLIDATE_ARGS, e.g.
-## `make consolidate CONSOLIDATE_ARGS="--days 3"`. Nightly from cron, consolidate THEN backup
-## (`;`, not `&&`: a refused day must not skip the backup of everything else):
-## (host crontab in UTC: prefix `CRON_TZ=UTC` if the box is not):
-##   7 3 * * * cd /path/to/troll && { make consolidate >> consolidate.log 2>&1; make backup-catalog >> backup.log 2>&1; }
+## `make consolidate CONSOLIDATE_ARGS="--days 3"`. Nightly, `make nightly` (below) runs this per
+## venue as one of its steps; the cron line (nightly per venue, THEN backup) is in
+## docs/DEPLOY_CHECKLIST.md.
 consolidate:
 	$(COMPOSE) run --rm --no-deps -e HOME=/tmp collector \
 		python3 -m collector_core.consolidate_catalog --catalog /app/catalog --apply $(CONSOLIDATE_ARGS)
+
+## One venue's nightly maintenance for one closed UTC day (story 22.13), each step its own process:
+## rebuild_seconds --apply -> consolidate_catalog --apply --days 2 -> build_candles --day
+## --workers 1 -> compare_klines -> prune_catalog --apply (trade retention 7 days, gated on
+## verified_days). A step's "findings" exit 2 continues; any other failure stops the chain; one
+## summary line. Keep a standalone `make consolidate` in the cron line too. VENUE is required
+## (DYDX|BYBIT|HYPERLIQUID); DAY defaults to yesterday (UTC). Cron line: docs/DEPLOY_CHECKLIST.md.
+DAY ?= $(shell date -u -d yesterday +%Y-%m-%d)
+nightly:
+	@test -n "$(VENUE)" || { echo "nightly: VENUE is required, e.g. make nightly VENUE=BYBIT [DAY=YYYY-MM-DD]" >&2; exit 1; }
+	$(COMPOSE) run --rm --no-deps -e HOME=/tmp collector \
+		python3 -m collector_core.nightly --catalog /app/catalog --candles-dir /app/candles_dir \
+		--venue $(VENUE) --day $(DAY)
 
 ## Copy the catalog's closed-day files to object storage (audit D-33: there is no other copy).
 ## Runs rclone on the HOST (install it there; the remote -- R2, B2, ... -- is configured with
@@ -269,17 +281,18 @@ harden-ssh:
 		/etc/ssh/sshd_config
 	sudo systemctl reload ssh
 
-## Prune order_book_deltas older than 14 days (run daily to bound storage)
+## Prune order_book_deltas older than 14 days (run daily to bound storage). Trades are pruned
+## by `make nightly` only (verification-gated, see collector_core/prune_catalog.py).
 prune:
-	python $(REPO_ROOT)/troll/dydx_collector/prune_catalog.py \
-		--catalog $(REPO_ROOT)/troll/dydx_collector/catalog \
-		--types order_book_deltas --days 14
+	$(COMPOSE) run --rm --no-deps -e HOME=/tmp collector \
+		python3 -m collector_core.prune_catalog --catalog /app/catalog \
+		--types order_book_deltas --days 14 --apply
 
-## Preview what prune would delete without removing anything
+## Preview what prune would delete without removing anything (the tool's default: report only)
 prune-dry:
-	python $(REPO_ROOT)/troll/dydx_collector/prune_catalog.py \
-		--catalog $(REPO_ROOT)/troll/dydx_collector/catalog \
-		--types order_book_deltas --days 14 --dry-run
+	$(COMPOSE) run --rm --no-deps -e HOME=/tmp collector \
+		python3 -m collector_core.prune_catalog --catalog /app/catalog \
+		--types order_book_deltas --days 14
 
 ## Local frontend dev, fully self-contained: brings up collector + ranking_engine +
 ## data_api + redis, all locally (network_mode: host, so data_api lands on

@@ -23,6 +23,12 @@ skip with accumulator discard (DATA-01), crossed-book skip + ledger with resync 
 fallback only (DATA-03), `ohlc_outside_book` canary, candle-store feed, `snapshots:raw` Redis
 publish, the `_second_loop` lag canary and the OBS-01 watchdog.
 
+Trades (story 22.13): every accepted `TradeTick` is both kept for the live second (folded once
+per sample by `collector_core.fold.fold_trades`) and archived raw to `data/trade_tick/<iid>/`
+with both clocks untouched (`ts_event` = venue, `ts_init` = arrival). The live snapshot is
+provisional and arrival-timed; `collector_core.rebuild_seconds` re-derives closed days from the
+archive on exchange time.
+
 Client contract (duck-typed -- this docstring is the contract, there is no base class):
 
     fetch_instruments() -> list          raw pyo3 instruments; written to the catalog via
@@ -48,8 +54,10 @@ story 22.3) so data_api serves every venue's ids with zero per-route code.
 """
 
 import asyncio
+import bisect
 import json
 import logging
+import math
 import os
 import shutil
 import signal
@@ -65,22 +73,25 @@ from typing import Any
 
 import pyarrow.parquet as pq
 import redis.asyncio as aioredis
-from collector_core.integrity import ohlc_outside_book
-from collector_core.second_snapshot import BOOK_DEPTH
-from collector_core.second_snapshot import DydxSecondSnapshot
 from ml_signals import candle_store
 from ml_signals import error_ledger
+from ml_signals.catalog_stats import _stamp_to_ns
 from ml_signals.catalog_stats import query_second_ohlc
 
+from collector_core.archive_gaps import ARRIVAL_MARGIN_NS
+from collector_core.archive_gaps import record_gap
 from collector_core.book_check import persistent
 from collector_core.book_check import top_levels_mismatch
 from collector_core.config import CoreConfig
+from collector_core.fold import fold_trades
+from collector_core.integrity import ohlc_outside_book
+from collector_core.second_snapshot import BOOK_DEPTH
+from collector_core.second_snapshot import DydxSecondSnapshot
 from nautilus_trader.core import nautilus_pyo3
 from nautilus_trader.model.book import OrderBook
 from nautilus_trader.model.data import OrderBookDeltas
 from nautilus_trader.model.data import QuoteTick
 from nautilus_trader.model.data import TradeTick
-from nautilus_trader.model.enums import AggressorSide
 from nautilus_trader.model.enums import BookType
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.instruments import instruments_from_pyo3
@@ -100,6 +111,12 @@ _WATCHDOG_CHECK_SECONDS: float = 30.0
 _WATCHDOG_STALE_NS: int = 30_000_000_000
 _WATCHDOG_STARTUP_GRACE_NS: int = 60_000_000_000  # subscriptions need time to establish
 _WATCHDOG_REMINDER_NS: int = 600_000_000_000  # re-notify at most every 10 min while down
+
+# A flush carries back a TradeTick batch's newest-`ts_init` group while it is younger than this:
+# every adapter stamps one `ts_init` per WS message, so a message's trades can straddle the flush,
+# and `write_data` refuses a file whose `[first, last]` `ts_init` interval touches an existing one
+# -- the next flush would lose its whole batch on the tie (audit, flush tie guard).
+_TRADE_CARRY_NS: int = 5_000_000_000
 
 # _second_loop staleness canary: if its wakeup arrives this much later than the configured
 # interval, the event loop was busy and the crossed-book detection/resync guard was silently
@@ -157,6 +174,26 @@ def quarantine_corrupt_parquet(catalog_path: str, instrument_ids: Iterable[str])
             error_ledger.record(
                 "collector.corrupt_parquet", f"corrupt parquet file quarantined: {path} -> {dest}"
             )
+            if path.parent.parent.name == "trade_tick":
+                _mark_quarantined_trades(str(root), iid, path)
+
+
+def _mark_quarantined_trades(catalog_path: str, iid: str, path: Path) -> None:
+    """
+    Record the quarantined trade file's span as an archive gap, so the nightly rebuild keeps the
+    live values of the rows those trades were folded into. The name spans the batch's `ts_init`;
+    a row folding them is sampled after arrival, so `to` is widened by the arrival margin. An
+    unparseable name marks nothing and is ledgered: that file was never written by the collector.
+    """
+    try:
+        first, _, last = path.stem.partition("_")
+        from_ns, to_ns = _stamp_to_ns(first), _stamp_to_ns(last) + ARRIVAL_MARGIN_NS
+    except ValueError as e:
+        error_ledger.record(
+            "collector.corrupt_parquet", f"no span in {path.name}; no gap marked", e
+        )
+        return
+    record_gap(catalog_path, iid, from_ns, to_ns, "quarantined", 0)
 
 
 def _is_readable_parquet(path: Path) -> bool:
@@ -234,6 +271,38 @@ def _seconds_until_next_flush(now: float, interval: float) -> float:
     return interval - (now - _FLUSH_PHASE_S) % interval
 
 
+def _next_sample_at(now: float, interval: float, last_tick: float | None) -> float:
+    """
+    Next sample time (epoch seconds): the first `k * interval + interval / 2` strictly after
+    `now`, and never in the interval bucket (`floor(t / interval)`) `last_tick` already sampled.
+
+    A plain `sleep(interval)` after the work drifts by the work's duration every tick and skips a
+    whole floor second every few hundred seconds, orphaning that second's trades. The mid-interval
+    phase leaves half an interval of margin both ways, so an early wake-up still lands in its own
+    bucket and a late one is followed by the next free bucket, never a second tick in the same one.
+    """
+    k = math.floor((now - interval / 2) / interval) + 1
+    if last_tick is not None:
+        k = max(k, math.floor(last_tick / interval) + 1)
+    return k * interval + interval / 2
+
+
+def _split_open_ts_init_group(
+    items: list[Any], now_ns: int, queue_pending: bool
+) -> tuple[list[Any], list[Any]]:
+    """
+    Split a `ts_init`-sorted batch into (write now, carry to the next flush): the group sharing
+    the newest `ts_init` is carried while it is younger than `_TRADE_CARRY_NS`, or while the
+    ingest queue still holds messages (under lag, the rest of that WS message can sit there for
+    longer than any age bound).
+    """
+    newest = items[-1].ts_init
+    if now_ns - newest >= _TRADE_CARRY_NS and not queue_pending:
+        return items, []
+    cut = bisect.bisect_left([d.ts_init for d in items], newest)
+    return items[:cut], items[cut:]
+
+
 async def _publish_snapshot_batch(redis_client: aioredis.Redis, snapshots: list) -> None:
     """
     Publish a batch of DydxSecondSnapshot objects to Redis channel snapshots:raw.
@@ -299,17 +368,10 @@ class Collector:
         self._last_no_book_log_ns: dict[str, int] = {}
         self._book_crosscheck_mismatches: defaultdict[str, int] = defaultdict(int)
 
-        # Per-second trade accumulators. Absence of a key means no trade this second,
-        # distinct from a trade at price 0 -- so `.pop(iid, None)` yields None, never a
-        # fabricated price.
-        self._second_buy_volume: dict[str, float] = defaultdict(float)
-        self._second_sell_volume: dict[str, float] = defaultdict(float)
-        self._second_buy_count: dict[str, int] = defaultdict(int)
-        self._second_sell_count: dict[str, int] = defaultdict(int)
-        self._second_open_price: dict[str, float] = {}
-        self._second_high_price: dict[str, float] = {}
-        self._second_low_price: dict[str, float] = {}
-        self._second_close_price: dict[str, float] = {}
+        # This sample interval's accepted trades per instrument, folded once by `_sample_tick`
+        # (`fold_trades`: exact integer sums). An empty/absent list means no trade this second,
+        # distinct from a trade at price 0 -- the fold yields None OHLC, never a fabricated price.
+        self._second_trades: defaultdict[str, list[TradeTick]] = defaultdict(list)
 
         # DATA-06 guards: subscribe-time history dropped by age; reconnect replays (still
         # "fresh" after a short outage) dropped by bounded trade_id dedup. Both counted and
@@ -324,6 +386,14 @@ class Collector:
         self._last_impossible_log_ns: dict[str, int] = {}
 
         self._last_second_loop_tick_ns: int | None = None
+        if config.snapshot_interval_seconds != 1.0:
+            # Not refused (config validation is unchanged), but loud: the nightly rebuild maps
+            # trades to rows by floor second, which assumes one row per second.
+            error_ledger.record(
+                "collector.cadence",
+                f"snapshot_interval_seconds={config.snapshot_interval_seconds}, not 1.0: "
+                "rebuild_seconds' floor-second mapping assumes 1 s rows",
+            )
 
         self._watchdog_started_ns: int = time.time_ns()
         self._watchdog_down_since_ns: int | None = None
@@ -465,22 +535,10 @@ class Collector:
             if self._is_duplicate_trade(iid, str(data.trade_id)):
                 self._duplicate_trades_dropped[iid] += 1
                 return
-            price = data.price.as_double()
-            if iid not in self._second_open_price:
-                self._second_open_price[iid] = price
-                self._second_high_price[iid] = price
-                self._second_low_price[iid] = price
-            elif price > self._second_high_price[iid]:
-                self._second_high_price[iid] = price
-            elif price < self._second_low_price[iid]:
-                self._second_low_price[iid] = price
-            self._second_close_price[iid] = price
-            if data.aggressor_side == AggressorSide.BUYER:
-                self._second_buy_volume[iid] += data.size.as_double()
-                self._second_buy_count[iid] += 1
-            else:
-                self._second_sell_volume[iid] += data.size.as_double()
-                self._second_sell_count[iid] += 1
+            self._second_trades[iid].append(data)
+            # Archived as received (both clocks), so the nightly rebuild can re-derive the
+            # second from exchange time and correct what the live fold got wrong (D-45).
+            self._buffer[(TradeTick, iid)].append(data)
         elif isinstance(data, QuoteTick):
             pass  # derivable from the snapshots; not persisted
         else:  # mark/index price, funding rate, open interest, ... -> catalog as-is
@@ -514,28 +572,28 @@ class Collector:
 
     def _discard_second_accumulators(self, iid: str) -> None:
         """
-        Drop this tick's trades for `iid` without emitting them. Called on every skipped
-        sample (no book, crossed, stale): otherwise an outage's trades sit in the
-        accumulator until the next *valid* tick pops them, stamping the whole span's price
-        range onto one second -- a giant-range candle at recovery instead of an honest gap.
+        Drop this tick's trades for `iid` from the live second without emitting them. Called on
+        every skipped sample (no book, crossed, stale): otherwise an outage's trades sit in the
+        list until the next *valid* tick folds them, stamping the whole span's price range onto
+        one second -- a giant-range candle at recovery instead of an honest gap. They stay in the
+        raw archive: the nightly rebuild counts them as orphan trades (no snapshot row).
         """
-        self._second_buy_volume.pop(iid, None)
-        self._second_sell_volume.pop(iid, None)
-        self._second_buy_count.pop(iid, None)
-        self._second_sell_count.pop(iid, None)
-        self._second_open_price.pop(iid, None)
-        self._second_high_price.pop(iid, None)
-        self._second_low_price.pop(iid, None)
-        self._second_close_price.pop(iid, None)
+        self._second_trades.pop(iid, None)
 
     # -- flush -------------------------------------------------------------------------------
 
-    async def _flush_once(self) -> None:
+    async def _flush_once(self, final: bool = False) -> None:
+        """
+        Write every buffered batch through `write_data`, each sorted by `ts_init` (stable).
+
+        Unless `final` (shutdown: everything must go), a `TradeTick` batch keeps back the trades
+        sharing its newest `ts_init` while that group is younger than `_TRADE_CARRY_NS`: the rest
+        of that WS message may still be in the ingest queue (see `_TRADE_CARRY_NS`).
+        """
         flushed_seconds: dict[str, list[DydxSecondSnapshot]] = {}
-        for key, items in list(self._buffer.items()):
-            if not items:
-                continue
-            self._buffer[key] = []
+        now_ns = time.time_ns()
+        batches = self._take_batches(now_ns, final)
+        for key, items in batches:
             try:
                 # Real disk I/O -- off the event loop so _second_loop isn't stalled.
                 await asyncio.to_thread(self._catalog.write_data, items)
@@ -543,10 +601,50 @@ class Collector:
                 error_ledger.record(
                     "collector.flush_write", f"failed to write {key}, {len(items)} items LOST", e
                 )
+                if key[0] is TradeTick:
+                    self._mark_lost_trades(key[1], items, now_ns)
                 continue
             if key[0] is DydxSecondSnapshot:
                 flushed_seconds[key[1]] = items
         self._apply_to_candle_store(flushed_seconds)
+
+    def _take_batches(self, now_ns: int, final: bool) -> list[tuple[tuple[type, str], list[Any]]]:
+        """
+        Swap every non-empty buffer out as a `ts_init`-sorted batch, leaving any carried items.
+
+        When a trade group is carried, that instrument's snapshot rows sampled after the group's
+        `ts_init` are carried with it: they are the only rows that can hold those trades, so a
+        crash before the next flush loses both together -- an honest gap -- instead of leaving
+        rows whose trades the archive never received (the rebuild would zero them).
+        """
+        carried_from: dict[str, int] = {}
+        batches: list[tuple[tuple[type, str], list[Any]]] = []
+        pending = not self._ingest_queue.empty()
+        # Trades first: their carry decides what the snapshot batches keep back.
+        keys = sorted(self._buffer, key=lambda k: k[0] is not TradeTick)
+        for key in keys:
+            items = sorted(self._buffer[key], key=lambda d: d.ts_init)
+            carry: list[Any] = []
+            if key[0] is TradeTick and items and not final:
+                items, carry = _split_open_ts_init_group(items, now_ns, pending)
+                if carry:
+                    carried_from[key[1]] = carry[0].ts_init
+            elif key[0] is DydxSecondSnapshot and key[1] in carried_from:
+                cut = bisect.bisect_right([d.ts_event for d in items], carried_from[key[1]])
+                items, carry = items[:cut], items[cut:]
+            self._buffer[key] = carry
+            if items:
+                batches.append((key, items))
+        return batches
+
+    def _mark_lost_trades(self, iid: str, lost: list[TradeTick], now_ns: int) -> None:
+        """
+        Record an archive gap for a trade batch that failed to write while this instrument's
+        snapshots (holding those trades) may have landed, so the nightly rebuild keeps those
+        rows' live values.
+        """
+        catalog_path = str(Path(self._config.catalog_path).resolve())
+        record_gap(catalog_path, iid, lost[0].ts_init, now_ns, "write_failed", len(lost))
 
     def _apply_to_candle_store(self, flushed: dict[str, list[DydxSecondSnapshot]]) -> None:
         """
@@ -618,7 +716,8 @@ class Collector:
         stale_ns = self._config.stale_book_seconds * 1e9
         feed_stale_ns = (self._config.feed_stale_seconds or self._config.stale_book_seconds) * 1e9
         batch: list[DydxSecondSnapshot] = []
-        for iid in self._instrument_ids():
+        sampled = list(self._instrument_ids())
+        for iid in sampled:
             book = self._live_books.get(iid)
             if book is None:
                 await self._handle_missing_book(iid, now_ns)
@@ -637,20 +736,21 @@ class Collector:
                 continue
 
             bids, asks = book.bids()[:BOOK_DEPTH], book.asks()[:BOOK_DEPTH]
+            trades = fold_trades(self._second_trades.pop(iid, [])).snapshot_values()
             snapshot = DydxSecondSnapshot(
                 instrument_id=InstrumentId.from_str(iid),
                 bid_prices=[lv.price.as_double() for lv in bids],
                 bid_sizes=[lv.size() for lv in bids],
                 ask_prices=[lv.price.as_double() for lv in asks],
                 ask_sizes=[lv.size() for lv in asks],
-                buy_volume=self._second_buy_volume.pop(iid, 0.0),
-                sell_volume=self._second_sell_volume.pop(iid, 0.0),
-                buy_count=self._second_buy_count.pop(iid, 0),
-                sell_count=self._second_sell_count.pop(iid, 0),
-                open_price=self._second_open_price.pop(iid, None),
-                high_price=self._second_high_price.pop(iid, None),
-                low_price=self._second_low_price.pop(iid, None),
-                close_price=self._second_close_price.pop(iid, None),
+                buy_volume=trades.buy_volume,
+                sell_volume=trades.sell_volume,
+                buy_count=trades.buy_count,
+                sell_count=trades.sell_count,
+                open_price=trades.open_price,
+                high_price=trades.high_price,
+                low_price=trades.low_price,
+                close_price=trades.close_price,
                 ts_event=now_ns,
                 ts_init=now_ns,
             )
@@ -668,7 +768,16 @@ class Collector:
                 )
             self._buffer[(DydxSecondSnapshot, iid)].append(snapshot)
             batch.append(snapshot)
+        self._drop_unsampled_trades(sampled)
         return batch
+
+    def _drop_unsampled_trades(self, sampled: list[str]) -> None:
+        """
+        MEM-02: a trade for an instrument this collector does not sample (unsubscribed, or not
+        configured) would otherwise sit in `_second_trades` forever. It is still archived.
+        """
+        for iid in set(self._second_trades) - set(sampled):
+            del self._second_trades[iid]
 
     def _stale_reason(self, iid: str, now_ns: int, feed_stale_ns: float, stale_ns: float) -> str:
         """
@@ -697,9 +806,18 @@ class Collector:
             logger.warning("No book for %s — skipping snapshot", iid)
 
     async def _second_loop(self) -> None:
+        """
+        Sample on a drift-free wall-clock schedule (`_next_sample_at`): one sample per interval
+        bucket, at mid-interval, so every floor second gets exactly one snapshot row -- the
+        nightly rebuild maps trades to rows by `ts_event // 1 s` (audit, sampling drift).
+        """
+        interval = self._config.snapshot_interval_seconds
+        last_tick_s: float | None = None
         while not self._stop.is_set():
-            await asyncio.sleep(self._config.snapshot_interval_seconds)
+            now = time.time()
+            await asyncio.sleep(_next_sample_at(now, interval, last_tick_s) - now)
             now_ns = time.time_ns()
+            last_tick_s = now_ns / 1e9
             if self._last_second_loop_tick_ns is not None:
                 expected_ns = int(self._config.snapshot_interval_seconds * 1e9)
                 lag_ns = now_ns - self._last_second_loop_tick_ns - expected_ns
@@ -876,7 +994,7 @@ class Collector:
                 await self._client.disconnect()
             except Exception as e:  # never skip the final flush over a closing WS
                 error_ledger.record("collector.disconnect", "disconnect failed", e)
-            await self._flush_once()
+            await self._flush_once(final=True)
             self._report_stale_trades()
             await self._redis.aclose()
 

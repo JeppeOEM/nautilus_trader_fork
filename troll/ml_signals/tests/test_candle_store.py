@@ -20,6 +20,7 @@ second present, traded or not. Plain rows with the snapshot fields, a real SQLit
 """
 
 import random
+import sqlite3
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -168,3 +169,21 @@ def test_read_only_reader_sees_writer_and_missing_store_is_none(tmp_path: Path) 
     candle_store.apply_seconds(writer, _IID, [_second(0, 100.0)])
     with candle_store.connect_ro(path) as db:
         assert len(candle_store.window(db, _IID, 60, 1 << 62, 5)) == 1
+
+
+def test_verified_days_upsert_and_read_back(tmp_path: Path) -> None:
+    db = candle_store.connect_rw(str(tmp_path / "candles.db"))
+    assert candle_store.verified_status(db, _IID, "2026-09-20") is None
+    candle_store.mark_verified(db, _IID, "2026-09-20", "fail", 3, 1_000)
+    candle_store.mark_verified(db, _IID, "2026-09-20", "pass", 0, 2_000)  # a rerun after a fix
+    assert candle_store.verified_status(db, _IID, "2026-09-20") == "pass"
+    assert candle_store.verified_status(db, _IID, "2026-09-19") is None
+    assert db.execute("SELECT checked_at, mismatches FROM verified_days").fetchall() == [(2_000, 0)]
+
+
+def test_verified_status_on_a_store_that_predates_the_table(tmp_path: Path) -> None:
+    path = tmp_path / "old.db"
+    sqlite3.connect(path).execute("CREATE TABLE candles (t INTEGER)").connection.commit()
+    with candle_store.connect_ro(str(path)) as ro:
+        assert ro is not None
+        assert candle_store.verified_status(ro, _IID, "2026-09-20") is None

@@ -1,0 +1,79 @@
+{
+    "candles": [
+        {
+            "startedAt": "2026-09-20T00:04:00.000Z",
+            "ticker": "BTC-USD",
+            "resolution": "1MIN",
+            "low": "81204",
+            "high": "81222",
+            "open": "81222",
+            "close": "81204",
+            "baseTokenVolume": "0.0004",
+            "usdVolume": "32.4834",
+            "trades": 2,
+            "startingOpenInterest": "205.7575",
+            "orderbookMidPriceOpen": "81240.5",
+            "orderbookMidPriceClose": "81202.5"
+        },
+        {
+            "startedAt": "2026-09-20T00:03:00.000Z",
+            "ticker": "BTC-USD",
+            "resolution": "1MIN",
+            "low": "81315",
+            "high": "81315",
+            "open": "81315",
+            "close": "81315",
+            "baseTokenVolume": "0",
+            "usdVolume": "0",
+            "trades": 0,
+            "startingOpenInterest": "205.7575",
+            "orderbookMidPriceOpen": "81241",
+            "orderbookMidPriceClose": "81240.5"
+        },
+        {
+            "startedAt": "2026-09-20T00:02:00.000Z",
+            "ticker": "BTC-USD",
+            "resolution": "1MIN",
+            "low": "81315",
+            "high": "81315",
+            "open": "81315",
+            "close": "81315",
+            "baseTokenVolume": "0",
+            "usdVolume": "0",
+            "trades": 0,
+            "startingOpenInterest": "205.7575",
+            "orderbookMidPriceOpen": "81222.75",
+            "orderbookMidPriceClose": "81241"
+        },
+        {
+            "startedAt": "2026-09-20T00:01:00.000Z",
+            "ticker": "BTC-USD",
+            "resolution": "1MIN",
+            "low": "81315",
+            "high": "81315",
+            "open": "81315",
+            "close": "81315",
+            "baseTokenVolume": "0",
+            "usdVolume": "0",
+            "trades": 0,
+            "startingOpenInterest": "205.7575",
+            "orderbookMidPriceOpen": "81228.25",
+            "orderbookMidPriceClose": "81222.75"
+        },
+        {
+            "startedAt": "2026-09-20T00:00:00.000Z",
+            "ticker": "BTC-USD",
+            "resolution": "1MIN",
+            "low": "81315",
+            "high": "81315",
+            "open": "81315",
+            "close": "81315",
+            "baseTokenVolume": "0",
+            "usdVolume": "0",
+            "trades": 0,
+            "startingOpenInterest": "205.7575",
+            "orderbookMidPriceOpen": "81254",
+            "orderbookMidPriceClose": "81228.25"
+        }
+    ]
+}
