@@ -51,9 +51,11 @@ Client contract (duck-typed -- this docstring is the contract, there is no base 
     subscribe(iid: str) -> None          trades + book (+ whatever else the venue offers)
     unsubscribe(iid: str) -> None        one WS unsubscribe per topic subscribed
     subscribe_global() -> None           OPTIONAL: venue-wide channels (e.g. dYdX markets)
-    fetch_book_levels(iid: str)          OPTIONAL: a REST book snapshot as (bids, asks), each a
-        -> tuple[list, list]             best-first list of (price, size) floats; enables the
-                                         periodic cross-check against the live book (22.5).
+    fetch_book_snapshot(iid: str)        OPTIONAL: the venue's REST book as a
+        -> BookSnapshot                  `collector_core.book_check.BookSnapshot` carrying the
+                                         key the live book aligns on (Bybit `sequence`,
+                                         Hyperliquid `ts_event_ns`); enables the periodic
+                                         aligned cross-check (22.5, audit D-64).
     resync_orderbook(iid: str) -> None   OPTIONAL: force a fresh book snapshot. Only a
                                          venue whose local book can drift (delta stream)
                                          should expose it; a full-snapshot venue must not.
@@ -144,6 +146,9 @@ from ml_signals.catalog_stats import query_second_ohlc
 from collector_core import trade_backfill
 from collector_core.archive_gaps import ARRIVAL_MARGIN_NS
 from collector_core.archive_gaps import record_gap
+from collector_core.book_check import EXACT_PRICE_TOLERANCE_LEVELS
+from collector_core.book_check import EXACT_SIZE_REL_TOLERANCE
+from collector_core.book_check import BookSnapshot
 from collector_core.book_check import persistent
 from collector_core.book_check import top_levels_mismatch
 from collector_core.config import CoreConfig
@@ -479,7 +484,12 @@ async def _publish_snapshot_batch(redis_client: aioredis.Redis, snapshots: list)
         logger.warning("Redis publish failed: %s", e)
 
 
-_CROSSCHECK_CONFIRM_SECONDS = 2.0  # gap before re-comparing a mismatch (story 22.5)
+_CROSSCHECK_CONFIRM_SECONDS = 2.0  # gap before re-comparing a sequence-aligned mismatch (22.5)
+# Consecutive rounds that could not be aligned before the ledger says so: an hour at the 300 s
+# default. Unaligned rounds are skipped, never judged against the wall clock (audit D-64).
+_CROSSCHECK_UNALIGNED_STREAK = 12
+# A live capture: (OrderBook.sequence, OrderBook.ts_last, (bids, asks) top-20) after one apply.
+_Capture = tuple[int, int, tuple[list, list]]
 
 
 def _restamped(trade: TradeTick, ts_init: int) -> TradeTick:
@@ -584,6 +594,13 @@ class Collector:
         self._resync_pending: set[str] = set()
         self._last_no_book_log_ns: dict[str, int] = {}
         self._book_crosscheck_mismatches: defaultdict[str, int] = defaultdict(int)
+        # Armed cross-checks only (audit D-64): captures of the live top-20 per applied message,
+        # the message-arrival count since arming, and the event both bump. Empty otherwise, so
+        # the hot path pays one dict lookup per book message.
+        self._crosscheck_captures: dict[str, list[_Capture]] = {}
+        self._crosscheck_arrivals: dict[str, int] = {}
+        self._crosscheck_events: dict[str, asyncio.Event] = {}
+        self._crosscheck_unaligned: defaultdict[str, int] = defaultdict(int)
 
         # This sample interval's accepted trades per instrument, folded once by `_sample_tick`
         # (`fold_trades`: exact integer sums). An empty/absent list means no trade this second,
@@ -694,6 +711,8 @@ class Collector:
         for delta in deltas.deltas:
             book.apply_delta(delta)
         self._last_book_update_ns[iid] = time.time_ns()
+        if iid in self._crosscheck_captures:
+            self._capture_book(iid)
 
     async def _handle_crossed_book(self, iid: str, book: OrderBook, now_ns: int) -> bool:
         """
@@ -797,6 +816,9 @@ class Collector:
         if isinstance(data, OrderBookDeltas):
             iid = str(data.instrument_id)
             self._feed_instruments[feed.name].add(iid)
+            if iid in self._crosscheck_arrivals:  # armed: REST is fetched right after a push
+                self._crosscheck_arrivals[iid] += 1
+                self._crosscheck_events[iid].set()
             if self._venue_time:
                 self._hold_deltas(iid, data, now_ns)
             else:
@@ -1414,61 +1436,183 @@ class Collector:
             [(lv.price.as_double(), lv.size()) for lv in book.asks()[:BOOK_DEPTH]],
         )
 
-    async def _crosscheck_round(self, iid: str) -> list[str] | None:
-        """
-        One live-vs-REST comparison; None when there is no live book to judge.
+    def _capture_book(self, iid: str) -> None:
+        """Record the live top-20 with its alignment keys while a cross-check is armed."""
+        captures = self._crosscheck_captures.get(iid)
+        book = self._live_books.get(iid)
+        top = self._live_top(iid)
+        if captures is not None and book is not None and top is not None:
+            captures.append((book.sequence, book.ts_last, top))
+            self._crosscheck_events[iid].set()
 
-        The live book is captured before and after the REST call and only a mismatch present
-        against *both* counts. That filters skew between two samples of a moving book, but not
-        REST latency on a book that churns faster than the request takes -- `_crosscheck_one`
-        adds the persistence confirmation for that.
+    async def _wait_book_event(self, iid: str, ready: Callable[[], bool], timeout_s: float) -> bool:
+        """Wait until `ready()` after an armed book event for `iid`; False when `timeout_s` passes."""
+        event = self._crosscheck_events[iid]
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout_s
+        while not ready():
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return False
+            event.clear()
+            try:
+                await asyncio.wait_for(event.wait(), remaining)
+            except TimeoutError:
+                return False
+        return True
 
-        Known limit (venue mode, story 22.12): the live book trails the wall clock by up to
-        `1 + hold_back_seconds` (deltas are held until their second closes), so a level that
-        changed inside that window and then held still across both rounds could mis-flag.
-        Upgrade path: compare REST against the book drained to the REST response's own time.
+    @staticmethod
+    def _mismatches(live: tuple[list, list], snap: BookSnapshot) -> list[str]:
+        def side(name: str, live_side: list, rest_side: list) -> list[str]:
+            found = top_levels_mismatch(
+                live_side,
+                rest_side,
+                depth=BOOK_DEPTH,
+                price_tolerance_levels=EXACT_PRICE_TOLERANCE_LEVELS,
+                size_rel_tolerance=EXACT_SIZE_REL_TOLERANCE,
+            )
+            return [f"{name} {m}" for m in found]
+
+        return [*side("bids", live[0], snap.bids), *side("asks", live[1], snap.asks)]
+
+    def _align_timeout_s(self) -> float:
+        # Venue mode applies a message up to 1 + hold_back after arrival; _VENUE_AHEAD_NS is the
+        # bound after which a held message is dropped, so a capture cannot take longer.
+        return 1.0 + self._config.hold_back_seconds + _VENUE_AHEAD_NS / 1e9
+
+    async def _align_sequence(
+        self, iid: str, captures: list[_Capture], snap: BookSnapshot
+    ) -> list[str] | None:
         """
-        before = self._live_top(iid)
-        rest_bids, rest_asks = await self._client.fetch_book_levels(iid)
-        after = self._live_top(iid)
-        if before is None or after is None:
+        Bybit: REST `seq` and every WS delta's `sequence` are the same counter. The REST state
+        lies between the last capture with `sequence <= seq` and the first with `sequence > seq`,
+        so a level is wrong only when it disagrees with *both* brackets. None = not bracketed
+        (REST answered from behind every capture, or the stream did not pass `seq` in time).
+        """
+        seq = snap.sequence
+        assert seq is not None
+        if not await self._wait_book_event(
+            iid, lambda: captures[-1][0] > seq, self._align_timeout_s()
+        ):
             return None
+        before = next((c for c in reversed(captures) if c[0] <= seq), None)
+        if before is None:
+            return None
+        after = next(c for c in captures if c[0] > seq)
+        return persistent(self._mismatches(before[2], snap), self._mismatches(after[2], snap))
 
-        def mismatches(live: tuple[list, list]) -> list[str]:
-            return [
-                *(f"bids {m}" for m in top_levels_mismatch(live[0], rest_bids, depth=BOOK_DEPTH)),
-                *(f"asks {m}" for m in top_levels_mismatch(live[1], rest_asks, depth=BOOK_DEPTH)),
-            ]
+    @staticmethod
+    def _venue_ms(ts_ns: int) -> int:
+        """
+        Round a Hyperliquid `ts_event` back to the venue's millisecond: the adapter converts
+        the integer-ms `time` through f64 (audit D-62), so the live stamp can sit up to 128 ns off
+        the exact multiple that REST's `time * 1e6` gives. Rounding, not flooring: the error is
+        two-sided and floor would cross the ms boundary on a negative one.
+        """
+        return (ts_ns + 500_000) // 1_000_000
 
-        return persistent(mismatches(before), mismatches(after))
+    async def _align_ts_event(
+        self, iid: str, captures: list[_Capture], snap: BookSnapshot
+    ) -> list[str] | None:
+        """
+        Hyperliquid: every push is a full snapshot stamped with the venue's `time`, and REST
+        fetched right after a push answers with the same `time` (18 of 21 measured, D-64) --
+        then the two are the same state and must be identical. None = REST answered from a
+        later block than any push, or no push with that `time` was applied in time.
+        """
+        assert snap.ts_event_ns is not None
+        ms = self._venue_ms(snap.ts_event_ns)
+        if not await self._wait_book_event(
+            iid, lambda: self._venue_ms(captures[-1][1]) >= ms, self._align_timeout_s()
+        ):
+            return None
+        match = next((c for c in captures if self._venue_ms(c[1]) == ms), None)
+        return None if match is None else self._mismatches(match[2], snap)
+
+    async def _crosscheck_round(self, iid: str) -> tuple[list[str], str] | None:
+        """
+        One aligned live-vs-REST comparison: (mismatches, alignment key), or None when the
+        round could not be aligned and was skipped (never judged against the wall clock).
+
+        Arms capture for `iid` (current state first, then every applied message), waits for the
+        next book message to arrive so REST is fetched from the same venue state as the push,
+        then aligns on the key the snapshot carries (audit D-64).
+        """
+        captures: list[_Capture] = []
+        self._crosscheck_captures[iid] = captures
+        self._crosscheck_arrivals[iid] = 0
+        self._crosscheck_events[iid] = asyncio.Event()
+        try:
+            self._capture_book(iid)
+            if not captures or not await self._wait_book_event(
+                iid, lambda: self._crosscheck_arrivals[iid] > 0, self._config.stale_book_seconds
+            ):
+                return None
+            snap: BookSnapshot = await self._client.fetch_book_snapshot(iid)
+            if snap.sequence is not None:
+                found = await self._align_sequence(iid, captures, snap)
+                return None if found is None else (found, "sequence")
+            if snap.ts_event_ns is not None:
+                found = await self._align_ts_event(iid, captures, snap)
+                return None if found is None else (found, "ts_event")
+            return None
+        finally:
+            self._crosscheck_captures.pop(iid, None)
+            self._crosscheck_arrivals.pop(iid, None)
+            self._crosscheck_events.pop(iid, None)
 
     async def _crosscheck_one(self, iid: str) -> None:
         """
-        Diff the live top-20 with a REST snapshot (DATA-02's independent source of truth).
-
-        A level is ledgered only when the *same* level is still wrong on a second round
-        `_CROSSCHECK_CONFIRM_SECONDS` later: a book that missed a delta stays wrong until that
-        level is next touched, while sampling/latency skew on a churning level does not repeat
-        (first live run, 2026-09-20: BTC's top levels differed on ~every single round).
+        Diff the live top-20 with a REST snapshot at the same venue state (DATA-02's independent
+        source of truth). A sequence-bracketed mismatch is ledgered only when the *same* level is
+        still wrong on a second aligned round `_CROSSCHECK_CONFIRM_SECONDS` later (a level that
+        changed twice between two WS frames does not repeat; a missed delta does). A time-aligned
+        mismatch is ledgered at once: same venue, same `time`, so any difference is a finding.
         """
-        first = await self._crosscheck_round(iid)
-        if first is None:
+        if iid not in self._live_books:
             logger.debug("Book cross-check skipped for %s: no live book", iid)
             return
-        confirmed: list[str] = []
-        if first:
+        first = await self._crosscheck_round(iid)
+        if first is None:
+            self._note_unaligned(iid)
+            return
+        self._crosscheck_unaligned[iid] = 0
+        mismatches, key = first
+        confirmed = mismatches
+        if mismatches and key == "sequence":
             await asyncio.sleep(_CROSSCHECK_CONFIRM_SECONDS)
-            confirmed = persistent(first, await self._crosscheck_round(iid) or [])
+            second = await self._crosscheck_round(iid)
+            if second is None:
+                logger.warning(
+                    "Book cross-check %s: mismatch unconfirmed, second round not aligned", iid
+                )
+                return
+            confirmed = persistent(mismatches, second[0])
         if confirmed:
             self._book_crosscheck_mismatches[iid] += 1
             error_ledger.record(
                 "collector.book_crosscheck",
-                f"{iid} live book != REST snapshot on two rounds "
+                f"{iid} live book != REST snapshot at the same {key} "
                 f"(mismatch #{self._book_crosscheck_mismatches[iid]}): " + "; ".join(confirmed[:5]),
             )
         else:
             logger.debug(
-                "Book cross-check %s clean (depth %d, %d unconfirmed)", iid, BOOK_DEPTH, len(first)
+                "Book cross-check %s clean (depth %d, %s-aligned, %d unconfirmed)",
+                iid,
+                BOOK_DEPTH,
+                key,
+                len(mismatches),
+            )
+
+    def _note_unaligned(self, iid: str) -> None:
+        self._crosscheck_unaligned[iid] += 1
+        n = self._crosscheck_unaligned[iid]
+        if n % _CROSSCHECK_UNALIGNED_STREAK == 0:
+            error_ledger.record(
+                "collector.book_crosscheck_unaligned",
+                f"{iid}: {n} consecutive cross-check rounds could not be aligned with the live "
+                f"book (REST behind or ahead of the stream, or no book message within the wait): "
+                f"the book has gone {n * self._config.book_crosscheck_seconds / 60:.0f} min unverified",
             )
 
     async def _crosscheck_loop(self) -> None:
@@ -1750,7 +1894,7 @@ class Collector:
             *(
                 (self._crosscheck_loop,)
                 if self._config.book_crosscheck_seconds > 0
-                and hasattr(self._client, "fetch_book_levels")
+                and hasattr(self._client, "fetch_book_snapshot")
                 else ()
             ),
             *self._extra_loops,

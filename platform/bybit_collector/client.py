@@ -39,19 +39,18 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
+from collector_core.book_check import BookSnapshot
 from collector_core.feed import Feed
 from collector_core.feed import optional_feed_step
 
+from bybit_collector.book_snapshot import fetch_orderbook
 from nautilus_trader.core import nautilus_pyo3
 from nautilus_trader.core.nautilus_pyo3 import BybitEnvironment
 from nautilus_trader.core.nautilus_pyo3 import BybitProductType
-from nautilus_trader.model.book import OrderBook
 from nautilus_trader.model.data import FundingRateUpdate
 from nautilus_trader.model.data import IndexPriceUpdate
 from nautilus_trader.model.data import MarkPriceUpdate
-from nautilus_trader.model.data import OrderBookDeltas
 from nautilus_trader.model.data import capsule_to_data
-from nautilus_trader.model.enums import BookType
 
 
 logger = logging.getLogger(__name__)
@@ -90,6 +89,7 @@ class BybitClient:
         trade_feeds: int = 1,
     ) -> None:
         self._on_data = on_data
+        self._rest_environment = "testnet" if environment == BybitEnvironment.TESTNET else "mainnet"
         self._http = nautilus_pyo3.BybitHttpClient(  # type: ignore[attr-defined]
             testnet=environment == BybitEnvironment.TESTNET,
             demo=environment == BybitEnvironment.DEMO,
@@ -216,23 +216,13 @@ class BybitClient:
         await ws.unsubscribe_orderbook(iid, ORDERBOOK_DEPTH)
         await ws.subscribe_orderbook(iid, ORDERBOOK_DEPTH)
 
-    async def fetch_book_levels(self, instrument_id: str) -> tuple[list, list]:
+    async def fetch_book_snapshot(self, instrument_id: str) -> BookSnapshot:
         """
-        REST book snapshot as best-first (price, size) floats (cross-check, story 22.5).
+        REST book with its `seq` for the aligned cross-check (story 22.5, audit D-64).
 
-        REST `u` aligns with the 1000-level stream only, so only price levels are compared.
+        Public market data is served by the mainnet host for the demo environment too.
         """
-        _, product_type = self._ws_for(instrument_id)
-        pyo3_deltas = await self._http.request_orderbook_snapshot(
-            product_type, nautilus_pyo3.InstrumentId.from_str(instrument_id), ORDERBOOK_DEPTH
-        )
-        deltas = OrderBookDeltas.from_pyo3(pyo3_deltas)
-        book = OrderBook(deltas.instrument_id, BookType.L2_MBP)
-        book.apply_deltas(deltas)
-        return (
-            [(lv.price.as_double(), lv.size()) for lv in book.bids()],
-            [(lv.price.as_double(), lv.size()) for lv in book.asks()],
-        )
+        return await fetch_orderbook(self._rest_environment, instrument_id, ORDERBOOK_DEPTH)
 
     def _handle_message(self, feed: Feed, message: object) -> None:
         # Orderbook/trade/quote arrive as PyCapsules; ticker-derived mark/index/funding

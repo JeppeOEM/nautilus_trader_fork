@@ -15,13 +15,46 @@
 """
 Pure diff of a live book side against a REST snapshot of the same side (Story 22.5, DATA-02).
 
-REST and WS are sampled microseconds apart on a moving book, so exact equality would cry wolf;
-the caller therefore compares against two live captures (before/after the REST call) and only
-counts a mismatch present in both. The tolerances below are deliberately small -- revisit them
-from the one-hour evidence in DATA_INTEGRITY_AUDIT.md, never loosen them to make a run pass.
+A REST snapshot and the live book are only comparable at the *same* venue state (audit D-64):
+Hyperliquid's `l2Book` pushes every ~5 s while REST is live, and a venue-timed book trails the
+wall clock by `1 + hold_back_seconds` by design, so two samples taken around the REST call
+disagree on a correct book. The collector therefore aligns the samples on the venue's own key
+(`BookSnapshot.sequence` for Bybit, `BookSnapshot.ts_event_ns` for Hyperliquid) and judges
+them *exactly*; the tolerances below exist for callers that cannot align and must never be
+loosened to make a run pass.
 """
 
+from dataclasses import dataclass
+
+
 Level = tuple[float, float]  # (price, size)
+
+# Aligned samples are the same venue state, so only float representation may differ: a size
+# parsed from a REST decimal string and one read back from a `Quantity` can differ in the last
+# ulp. No price slack: a level present in one aligned sample and not the other is a finding.
+EXACT_PRICE_TOLERANCE_LEVELS = 0
+EXACT_SIZE_REL_TOLERANCE = 1e-9
+
+
+@dataclass(frozen=True)
+class BookSnapshot:
+    """
+    A venue's REST book with the key the live book can be aligned on.
+
+    Invariant: at most one alignment key is set, and the caller compares only against a live
+    capture whose key matches (`sequence`: the live capture bracketing this sequence;
+    `ts_event_ns`: the live capture with exactly this `ts_event`). A snapshot with neither key
+    cannot be judged and is skipped, never compared against the wall clock.
+    """
+
+    bids: list[Level]  # best first
+    asks: list[Level]  # best first
+    sequence: int | None = None  # Bybit `seq`, the same counter the WS stamps on every delta
+    ts_event_ns: int | None = None  # Hyperliquid `time` (ms) as ns, the WS push's `ts_event`
+
+    def __post_init__(self) -> None:
+        if self.sequence is not None and self.ts_event_ns is not None:
+            raise ValueError("BookSnapshot: sequence and ts_event_ns are mutually exclusive")
 
 
 def _key(price: float) -> float:

@@ -14,13 +14,19 @@
 # -------------------------------------------------------------------------------------------------
 """
 Hyperliquid REST book snapshot (`POST /info {"type":"l2Book"}`, weight 2 of 1200/min) for the
-live-book cross-check (story 22.5). Stdlib only, same as `dydx_collector.open_interest`.
+aligned live-book cross-check (story 22.5, audit D-64). Stdlib only, same as
+`dydx_collector.open_interest`. The response's `time` (ms) is the alignment key: the WS
+`l2Book` push carries the same `time` as its `ts_event`, and REST fetched right after a push
+answers with that `time` whenever no later block changed the book.
 """
 
 import asyncio
 import json
 import urllib.request
 from decimal import Decimal
+
+from collector_core.book_check import BookSnapshot
+from collector_core.book_check import Level
 
 
 _URLS = {
@@ -39,14 +45,17 @@ def _post_l2_book(environment: str, coin: str) -> dict:
         return json.load(response)
 
 
-def parse_l2_book(payload: dict) -> tuple[list[tuple[float, float]], list[tuple[float, float]]]:
-    """`levels[0]` = bids, `levels[1]` = asks, each best-first `{px, sz}` decimal strings."""
+def _levels(raw: list[dict]) -> list[Level]:
+    return [(float(Decimal(lv["px"])), float(Decimal(lv["sz"]))) for lv in raw]
+
+
+def parse_l2_book(payload: dict) -> BookSnapshot:
+    """`levels[0]` = bids, `levels[1]` = asks (best-first `{px, sz}` strings); `time` in ms."""
     bids, asks = payload["levels"]
-    return (
-        [(float(Decimal(lv["px"])), float(Decimal(lv["sz"]))) for lv in bids],
-        [(float(Decimal(lv["px"])), float(Decimal(lv["sz"]))) for lv in asks],
+    return BookSnapshot(
+        bids=_levels(bids), asks=_levels(asks), ts_event_ns=int(payload["time"]) * 1_000_000
     )
 
 
-async def fetch_l2_book(environment: str, coin: str) -> tuple[list, list]:
+async def fetch_l2_book(environment: str, coin: str) -> BookSnapshot:
     return parse_l2_book(await asyncio.to_thread(_post_l2_book, environment, coin))

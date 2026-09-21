@@ -29,7 +29,7 @@ Verified against crates/adapters/hyperliquid (Story 19.4 Task 1) -- independentl
     canary): websocket/parse.rs `parse_ws_order_book_deltas` (lines 103-163) stamps
     `sequence=0` and `order_id=0` on every delta and emits Clear + all levels per message,
     so there is no venue sequence to check and nothing to desync. Book correctness is
-    covered instead by the REST cross-check (`fetch_book_levels`).
+    covered instead by the time-aligned REST cross-check (`fetch_book_snapshot`, D-64).
   * subscriptions are one WS request per topic; Hyperliquid documents a per-IP subscription
     cap (1000) far above one connection's needs, so no throttle here.
 
@@ -53,6 +53,7 @@ import logging
 from collections.abc import Callable
 from typing import Any
 
+from collector_core.book_check import BookSnapshot
 from collector_core.feed import MAIN_FEED
 from collector_core.feed import Feed
 from collector_core.feed import optional_feed_step
@@ -138,8 +139,8 @@ class HyperliquidClient:
         self._coins = {str(i.id): i.raw_symbol.value for i in instruments}
         return instruments
 
-    async def fetch_book_levels(self, instrument_id: str) -> tuple[list, list]:
-        """REST l2Book as best-first (price, size) floats (cross-check, story 22.5)."""
+    async def fetch_book_snapshot(self, instrument_id: str) -> BookSnapshot:
+        """REST l2Book with its `time` for the aligned cross-check (story 22.5, audit D-64)."""
         return await fetch_l2_book(self._environment, self._coins[instrument_id])
 
     async def connect(self, loop: asyncio.AbstractEventLoop, instruments: list) -> None:

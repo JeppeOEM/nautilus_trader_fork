@@ -26,6 +26,9 @@ def test_parse_l2_book_best_first_bids_then_asks() -> None:
         ],
         "time": 1761786491067,
     }
-    bids, asks = parse_l2_book(payload)
-    assert bids == [(110427.0, 4.11882), (110426.0, 0.31694)]
-    assert asks == [(110428.0, 3.72573), (110430.0, 0.03586)]
+    snap = parse_l2_book(payload)
+    assert snap.bids == [(110427.0, 4.11882), (110426.0, 0.31694)]
+    assert snap.asks == [(110428.0, 3.72573), (110430.0, 0.03586)]
+    # `time` (ms) is the alignment key: the WS push's `ts_event` (audit D-64).
+    assert snap.ts_event_ns == 1761786491067_000_000
+    assert snap.sequence is None
