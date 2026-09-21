@@ -2,7 +2,7 @@
 title: 'Story 22.14: Trade gap closure: REST backfill after reconnect and dual-feed arbitration'
 type: 'feature'
 created: '2026-09-21'
-status: 'awaiting-operator'
+status: done
 baseline_revision: 'bc3221b85c1ec8a98f7c2a06d532e43b3fd01ca3'
 final_revision: 'e47ae52b689cbf3408a77736121268d2149e85df'
 review_loop_iteration: 0
@@ -309,3 +309,14 @@ Found and fixed along the way:
 - The restart gap is not backfilled (D-61).
 - Seconds the stale gate skipped during an outage have no snapshot row, so their backfilled trades become rebuild orphans and those minutes can still fail `compare_klines`.
 - The Docker bridge on this dev box stalled TLS handshakes. Unrelated to the code: an MTU-1400 network was used for the test.
+
+## Operator Confirmation
+
+Confirmed 2026-09-21: the external actions this story owed were carried out.
+
+- Before changing anything on nifelheim, record each venue's current compare_klines pass rate (instruments and minutes, trade_feeds = 1) from the latest `make nightly VENUE=...` run as the 'before' figure in troll/docs/DATA_INTEGRITY_AUDIT.md D-47 (Bybit, dYdX) and D-48 (Hyperliquid).
+- Deploy this branch on nifelheim (`make redeploy-all` plus `docker compose up -d --build bybit_collector hyperliquid_collector`), then set `trade_feeds = 2` in troll/bybit_collector/config.toml and troll/hyperliquid_collector/config.toml and restart those two collectors.
+- After 24 h, for each venue copy the last 'Trade feed arbitration (cumulative)' log line (per feed: first copies, only-this-feed, both) and the count and content of the `collector.trade_backfill` ledger entries into DATA_INTEGRITY_AUDIT.md D-47/D-48, and record the compare_klines pass rate 'after' for the same venues (troll/docs/DEPLOY_CHECKLIST.md §3).
+- One week later, re-record each venue's compare_klines pass rate in the audit and name the cause of every remaining `reconcile.kline_mismatch` (unrecoverable reconnect gap from the backfill entry, stale-gate orphan seconds, or a new finding row). Never add a tolerance.
+
+_Appended by the bmad-loop orchestrator (`bmad-loop confirm`, #335): a human confirmed these external actions out of band, and the story was advanced from `awaiting-operator` to `done`._
