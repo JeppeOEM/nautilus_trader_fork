@@ -26,12 +26,10 @@ per-instrument when dydx_collector's store_order_book_deltas is opted in
 series for every instrument in the live catalog.
 """
 
-from collector_core.second_snapshot import DydxSecondSnapshot
-
 from ml_signals.book_features import DepthProfile
 from ml_signals.book_features import book_imbalance
+from ml_signals.catalog_stats import query_second_snapshots
 from ml_signals.indicators import microprice as calc_microprice
-from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
 
 _LEVELS = 10
@@ -52,16 +50,8 @@ def compute_chart_series(
     dashboard._render_chart_page) from /data/coin/{id}/candles|ticks, not from
     this series.
     """
-    catalog = ParquetDataCatalog(catalog_path)
-    results = catalog.query(
-        data_cls=DydxSecondSnapshot,
-        identifiers=[instrument_id],
-        start=start_ns,
-        end=end_ns,
-    )
-    # query() wraps custom Data subclasses in CustomData -- unwrap via .data (same
-    # pattern as dashboard._historical_lines_json).
-    snapshots = [r.data if hasattr(r, "data") else r for r in results]
+    # ts_event window (venue-timed rows are sampled after their ts_event, story 22.12).
+    snapshots = query_second_snapshots(catalog_path, instrument_id, start_ns, end_ns)
 
     series: dict[str, list[dict]] = {
         "microprice": [],

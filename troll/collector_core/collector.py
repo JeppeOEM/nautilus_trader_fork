@@ -29,6 +29,18 @@ with both clocks untouched (`ts_event` = venue, `ts_init` = arrival). The live s
 provisional and arrival-timed; `collector_core.rebuild_seconds` re-derives closed days from the
 archive on exchange time.
 
+Two clocks per mode (story 22.12, `CoreConfig.book_time_source`):
+  * "arrival" (dYdX -- its book deltas carry no venue timestamp, D-49): a row is sampled at
+    mid-second from the book as received and holds the trades that *arrived* since the last
+    row; `ts_event == ts_init` = the sample time.
+  * "venue" (Bybit, Hyperliquid): exchange second S is closed at wall S + 1 + hold_back_seconds.
+    Deltas are held in `ts_event` order and applied up to S+1 (`_drain_pending_deltas`), trades
+    are bucketed by `ts_event // 1 s`; a trade processed after its second closed is archived and
+    counted (`collector.late_trade`) but never folded live -- the nightly rebuild places it. The
+    row's `ts_event` is S + 0.5 s (same floor second and phase as an arrival row) and `ts_init`
+    is when it was actually sampled, so a backtest replaying on `ts_init` never sees a book
+    before it could have been known.
+
 Client contract (duck-typed -- this docstring is the contract, there is no base class):
 
     fetch_instruments() -> list          raw pyo3 instruments; written to the catalog via
@@ -117,6 +129,19 @@ _WATCHDOG_REMINDER_NS: int = 600_000_000_000  # re-notify at most every 10 min w
 # and `write_data` refuses a file whose `[first, last]` `ts_init` interval touches an existing one
 # -- the next flush would lose its whole batch on the tie (audit, flush tie guard).
 _TRADE_CARRY_NS: int = 5_000_000_000
+
+_S_NS = 1_000_000_000
+_HALF_S_NS = 500_000_000
+# Venue mode: a delta held (or a trade stamped) this much beyond the hold-back after its arrival
+# means the venue clock runs ahead of ours -- bounds the pending list and trade buckets (MEM-02).
+_VENUE_AHEAD_NS: int = 5_000_000_000
+# Venue mode: after a stall, at most this many overdue seconds are closed in one wake-up.
+# Known limit: a longer stall (host suspend) leaves the older seconds without a live row; their
+# trades are counted late and placed by the nightly rebuild. Upgrade path: close them from the
+# archive instead of from memory. Kept well under `catalog_stats._FILE_MARGIN_NS` (60 s): every
+# caught-up row gets the wake-up's `ts_init`, so its `ts_init` trails its `ts_event` by up to
+# this + 1 + hold_back seconds, and readers only widen file spans by that margin.
+_MAX_CATCH_UP_SECONDS = 30
 
 # _second_loop staleness canary: if its wakeup arrives this much later than the configured
 # interval, the event loop was busy and the crossed-book detection/resync guard was silently
@@ -303,6 +328,22 @@ def _split_open_ts_init_group(
     return items[:cut], items[cut:]
 
 
+def _due_seconds(now_ns: int, hold_back_ns: int, last_closed: int | None) -> range:
+    """
+    Exchange seconds whose close time (`S + 1 + hold_back`) has passed and that are not closed
+    yet, oldest first; the first call closes only the latest one.
+    """
+    latest = (now_ns - hold_back_ns) // _S_NS - 1
+    first = latest if last_closed is None else last_closed + 1
+    return range(max(first, latest - _MAX_CATCH_UP_SECONDS + 1), latest + 1)
+
+
+def _next_close_at(now: float, hold_back_s: float, last_closed: int | None) -> float:
+    """Wall time (epoch s) at which the next unclosed exchange second is due; may be <= `now`."""
+    second = math.floor(now - hold_back_s) if last_closed is None else last_closed + 1
+    return second + 1 + hold_back_s
+
+
 async def _publish_snapshot_batch(redis_client: aioredis.Redis, snapshots: list) -> None:
     """
     Publish a batch of DydxSecondSnapshot objects to Redis channel snapshots:raw.
@@ -373,6 +414,23 @@ class Collector:
         # distinct from a trade at price 0 -- the fold yields None OHLC, never a fabricated price.
         self._second_trades: defaultdict[str, list[TradeTick]] = defaultdict(list)
 
+        # Venue mode (story 22.12) only -- every structure below stays empty in arrival mode.
+        self._venue_time = config.book_time_source == "venue"
+        self._hold_back_ns = int(config.hold_back_seconds * 1e9)
+        # Held deltas per instrument, sorted by (ts_event, arrival seq); ts_init kept for the
+        # overflow bound. `_pending_seq` makes every key unique, so deltas are never compared.
+        self._pending_deltas: defaultdict[str, list[tuple[int, int, int, OrderBookDeltas]]] = (
+            defaultdict(list)
+        )
+        self._pending_seq = 0
+        self._book_event_ns: dict[str, int] = {}  # ts_event of the last applied delta
+        self._venue_trades: defaultdict[str, dict[int, list[TradeTick]]] = defaultdict(dict)
+        self._last_closed_second: int | None = None
+        self._late_trades: defaultdict[str, int] = defaultdict(int)
+        self._ahead_trades: defaultdict[str, int] = defaultdict(int)
+        self._late_deltas: defaultdict[str, int] = defaultdict(int)
+        self._pre_start_trades: defaultdict[str, int] = defaultdict(int)
+
         # DATA-06 guards: subscribe-time history dropped by age; reconnect replays (still
         # "fresh" after a short outage) dropped by bounded trade_id dedup. Both counted and
         # reported every flush by _report_stale_trades -- never silent (DATA-05).
@@ -413,6 +471,12 @@ class Collector:
         """
         self._live_books.pop(iid, None)
         self._crossed_since_ns.pop(iid, None)
+        # Venue mode: held messages belong to the dropped book; counted with the other deltas
+        # dropped in a subscribe/resync window, never silently.
+        held = self._pending_deltas.pop(iid, None)
+        if held:
+            self._deltas_before_snapshot_dropped[iid] += len(held)
+        self._book_event_ns.pop(iid, None)
 
     def _apply_deltas(self, iid: str, deltas: OrderBookDeltas) -> None:
         if not deltas.deltas:
@@ -455,8 +519,11 @@ class Collector:
                     ask,
                 )
             return False
+        # Membership, not `since == now_ns`: a venue-mode catch-up closes several seconds with
+        # one `now_ns`, which must not ledger one episode once per overdue second.
+        first_seen = iid not in self._crossed_since_ns
         since = self._crossed_since_ns.setdefault(iid, now_ns)
-        if since == now_ns:
+        if first_seen:
             error_ledger.record("collector.crossed_book", f"{iid} bid={bid} ask={ask}")
         logger.warning(
             "Crossed book for %s (bid=%s >= ask=%s) for %.1fs — skipping sample",
@@ -526,7 +593,10 @@ class Collector:
         now_ns = time.time_ns()
         self._last_feed_message_ns = now_ns
         if isinstance(data, OrderBookDeltas):
-            self._apply_deltas(str(data.instrument_id), data)
+            if self._venue_time:
+                self._hold_deltas(str(data.instrument_id), data, now_ns)
+            else:
+                self._apply_deltas(str(data.instrument_id), data)
         elif isinstance(data, TradeTick):
             iid = str(data.instrument_id)
             if now_ns - data.ts_event > self._config.stale_trade_seconds * 1e9:
@@ -535,7 +605,10 @@ class Collector:
             if self._is_duplicate_trade(iid, str(data.trade_id)):
                 self._duplicate_trades_dropped[iid] += 1
                 return
-            self._second_trades[iid].append(data)
+            if self._venue_time:
+                self._bucket_venue_trade(iid, data)
+            else:
+                self._second_trades[iid].append(data)
             # Archived as received (both clocks), so the nightly rebuild can re-derive the
             # second from exchange time and correct what the live fold got wrong (D-45).
             self._buffer[(TradeTick, iid)].append(data)
@@ -543,6 +616,74 @@ class Collector:
             pass  # derivable from the snapshots; not persisted
         else:  # mark/index price, funding rate, open interest, ... -> catalog as-is
             self._buffer[(type(data), str(data.instrument_id))].append(data)
+
+    def _hold_deltas(self, iid: str, deltas: OrderBookDeltas, now_ns: int) -> None:
+        """Venue mode: hold a message until its second closes, in `ts_event` order."""
+        # Arrival, not ts_event: the OBS-01 watchdog must never read a hold-back as a dead feed.
+        self._last_book_update_ns[iid] = now_ns
+        closed = self._last_closed_second
+        if closed is not None and deltas.ts_event < (closed + 1) * _S_NS:
+            # Its second already closed: applied at the next close (a book cannot be rewound).
+            self._late_deltas[iid] += 1
+        self._pending_seq += 1
+        bisect.insort(
+            self._pending_deltas[iid], (deltas.ts_event, self._pending_seq, deltas.ts_init, deltas)
+        )
+
+    def _bucket_venue_trade(self, iid: str, trade: TradeTick) -> None:
+        """
+        Venue mode: put an accepted trade into its exchange second, unless that second already
+        closed (late) or its stamp runs implausibly ahead of its arrival (venue clock ahead).
+        Either way it is archived by the caller and counted -- never dropped, never folded live.
+        """
+        second = trade.ts_event // _S_NS
+        if self._last_closed_second is not None and second <= self._last_closed_second:
+            self._late_trades[iid] += 1
+        elif trade.ts_event - trade.ts_init > self._hold_back_ns + _VENUE_AHEAD_NS:
+            self._ahead_trades[iid] += 1
+        else:
+            self._venue_trades[iid].setdefault(second, []).append(trade)
+
+    def _drain_pending_deltas(self, boundary_ns: int) -> None:
+        """
+        Apply every held delta with `ts_event < boundary_ns`, in `ts_event` order, through the
+        `_apply_deltas` hook (so a venue's own checks -- Bybit's `u` canary -- run on it). The due
+        items are taken out first: the hook may drop the book state, pending list included.
+        """
+        for iid in list(self._pending_deltas):
+            pending = self._pending_deltas[iid]
+            cut = bisect.bisect_left(pending, (boundary_ns,))
+            due = pending[:cut]
+            del pending[:cut]
+            for ts_event, _, _, deltas in due:
+                self._apply_deltas(iid, deltas)
+                if iid in self._live_books:
+                    # max: a late message applied after newer ones must not age the book.
+                    self._book_event_ns[iid] = max(self._book_event_ns.get(iid, 0), ts_event)
+            if not self._pending_deltas.get(iid):
+                self._pending_deltas.pop(iid, None)
+
+    def _check_pending_overflow(self, now_ns: int) -> None:
+        """
+        MEM-02 bound: a delta still held `hold_back + 5 s` after it arrived has a `ts_event` that
+        far ahead of our clock -- the book cannot be venue-timed. Drop it (ledgered) and resync
+        where the client can; a full-snapshot venue's next message rebuilds the book.
+        """
+        limit = self._hold_back_ns + _VENUE_AHEAD_NS
+        for iid, pending in list(self._pending_deltas.items()):
+            held_ns = now_ns - min(item[2] for item in pending)
+            if held_ns <= limit:
+                continue
+            can_resync = hasattr(self._client, "resync_orderbook")
+            error_ledger.record(
+                "collector.pending_deltas",
+                f"{iid}: {len(pending)} book messages held {held_ns / 1e9:.1f}s > "
+                f"hold_back_seconds + {_VENUE_AHEAD_NS / 1e9:.0f}s (venue clock ahead of "
+                "arrival?): book dropped" + (", resync queued" if can_resync else ""),
+            )
+            self._clear_book_state(iid)
+            if can_resync:
+                self._resync_pending.add(iid)
 
     def _is_duplicate_trade(self, iid: str, trade_id: str) -> bool:
         seen, order = self._seen_trade_id_set[iid], self._seen_trade_ids[iid]
@@ -569,16 +710,48 @@ class Collector:
                 f"window): {dict(self._deltas_before_snapshot_dropped)}"
             )
             self._deltas_before_snapshot_dropped.clear()
+        self._report_venue_counts()
 
-    def _discard_second_accumulators(self, iid: str) -> None:
+    def _report_venue_counts(self) -> None:
+        """Venue mode: one ledger entry per instrument per report cycle (every flush)."""
+        for site, counts, what in (
+            ("collector.late_trade", self._late_trades, "arrived after their second closed"),
+            ("collector.venue_clock_ahead", self._ahead_trades, "were stamped ahead of arrival"),
+        ):
+            for iid, n in counts.items():
+                error_ledger.record(
+                    site,
+                    f"{iid}: {n} trades {what} (hold_back_seconds="
+                    f"{self._config.hold_back_seconds}): archived, not in the live row; the "
+                    "nightly rebuild places them",
+                )
+            counts.clear()
+        if self._pre_start_trades:
+            logger.info(
+                "Trades received before the first venue second closed (archived, placed by the "
+                f"nightly rebuild): {dict(self._pre_start_trades)}"
+            )
+            self._pre_start_trades.clear()
+        if self._late_deltas:
+            logger.warning(
+                "Book messages applied after their second closed (venue mode, counted into "
+                f"the next second): {dict(self._late_deltas)}"
+            )
+            self._late_deltas.clear()
+
+    def _discard_second_accumulators(self, iid: str, second: int | None = None) -> None:
         """
         Drop this tick's trades for `iid` from the live second without emitting them. Called on
         every skipped sample (no book, crossed, stale): otherwise an outage's trades sit in the
         list until the next *valid* tick folds them, stamping the whole span's price range onto
         one second -- a giant-range candle at recovery instead of an honest gap. They stay in the
         raw archive: the nightly rebuild counts them as orphan trades (no snapshot row).
+        `second` (venue mode): the exchange second being closed.
         """
-        self._second_trades.pop(iid, None)
+        if second is None:
+            self._second_trades.pop(iid, None)
+        else:
+            self._venue_trades.get(iid, {}).pop(second, None)
 
     # -- flush -------------------------------------------------------------------------------
 
@@ -630,7 +803,8 @@ class Collector:
                 if carry:
                     carried_from[key[1]] = carry[0].ts_init
             elif key[0] is DydxSecondSnapshot and key[1] in carried_from:
-                cut = bisect.bisect_right([d.ts_event for d in items], carried_from[key[1]])
+                # By sample time: a venue row's ts_event is its exchange second, not when it was sampled.
+                cut = bisect.bisect_right([d.ts_init for d in items], carried_from[key[1]])
                 items, carry = items[:cut], items[cut:]
             self._buffer[key] = carry
             if items:
@@ -707,69 +881,116 @@ class Collector:
 
     # -- sample ------------------------------------------------------------------------------
 
-    async def _sample_tick(self, now_ns: int) -> list[DydxSecondSnapshot]:
+    async def _sample_tick(
+        self, now_ns: int, second: int | None = None
+    ) -> list[DydxSecondSnapshot]:
         """
         Run the single write gate (AD-1): validate each book, then build one snapshot that
         feeds the catalog buffer and (via the caller) Redis -- same object, same
         iteration. A rejected instrument is skipped, its trades discarded, the reason logged.
+
+        `second` (venue mode): the exchange second to close; the held deltas are applied up to
+        its end first, and its trade bucket is folded.
         """
-        stale_ns = self._config.stale_book_seconds * 1e9
-        feed_stale_ns = (self._config.feed_stale_seconds or self._config.stale_book_seconds) * 1e9
+        if second is not None:
+            self._drain_pending_deltas((second + 1) * _S_NS)
         batch: list[DydxSecondSnapshot] = []
         sampled = list(self._instrument_ids())
         for iid in sampled:
-            book = self._live_books.get(iid)
-            if book is None:
-                await self._handle_missing_book(iid, now_ns)
-                self._discard_second_accumulators(iid)
+            snapshot = await self._sample_instrument(iid, now_ns, second)
+            if snapshot is None:
+                self._discard_second_accumulators(iid, second)
                 continue
-            if book.best_bid_price() is None or book.best_ask_price() is None:
-                self._discard_second_accumulators(iid)
-                continue
-            if await self._handle_crossed_book(iid, book, now_ns):
-                self._discard_second_accumulators(iid)
-                continue
-            reason = self._stale_reason(iid, now_ns, feed_stale_ns, stale_ns)
-            if reason:
-                logger.warning("Stale book for %s (%s) — skipping snapshot", iid, reason)
-                self._discard_second_accumulators(iid)
-                continue
-
-            bids, asks = book.bids()[:BOOK_DEPTH], book.asks()[:BOOK_DEPTH]
-            trades = fold_trades(self._second_trades.pop(iid, [])).snapshot_values()
-            snapshot = DydxSecondSnapshot(
-                instrument_id=InstrumentId.from_str(iid),
-                bid_prices=[lv.price.as_double() for lv in bids],
-                bid_sizes=[lv.size() for lv in bids],
-                ask_prices=[lv.price.as_double() for lv in asks],
-                ask_sizes=[lv.size() for lv in asks],
-                buy_volume=trades.buy_volume,
-                sell_volume=trades.sell_volume,
-                buy_count=trades.buy_count,
-                sell_count=trades.sell_count,
-                open_price=trades.open_price,
-                high_price=trades.high_price,
-                low_price=trades.low_price,
-                close_price=trades.close_price,
-                ts_event=now_ns,
-                ts_init=now_ns,
-            )
-            if (
-                ohlc_outside_book(snapshot)
-                and now_ns - self._last_impossible_log_ns.get(iid, 0) >= _IMPOSSIBLE_LOG_EVERY_NS
-            ):
-                self._last_impossible_log_ns[iid] = now_ns
-                # Unreachable after the stale/duplicate trade filters; if it fires, an
-                # ingestion bug is writing impossible prices (DATA-02/DATA-06 canary).
-                logger.error(
-                    f"IMPOSSIBLE trade OHLC for {iid}: high={snapshot.high_price} "
-                    f"low={snapshot.low_price} outside book "
-                    f"[{min(snapshot.bid_prices)}, {max(snapshot.ask_prices)}]"
-                )
             self._buffer[(DydxSecondSnapshot, iid)].append(snapshot)
             batch.append(snapshot)
         self._drop_unsampled_trades(sampled)
+        if second is not None:
+            self._close_venue_second(second)
         return batch
+
+    async def _sample_instrument(
+        self, iid: str, now_ns: int, second: int | None
+    ) -> DydxSecondSnapshot | None:
+        """One instrument through the gate: its snapshot, or None when the sample is skipped."""
+        book = self._live_books.get(iid)
+        if book is None:
+            await self._handle_missing_book(iid, now_ns)
+            return None
+        if book.best_bid_price() is None or book.best_ask_price() is None:
+            return None
+        if await self._handle_crossed_book(iid, book, now_ns):
+            return None
+        reason = (
+            self._stale_reason(iid, now_ns, *self._stale_bounds())
+            if second is None
+            else self._venue_stale_reason(iid, second, now_ns, *self._stale_bounds())
+        )
+        if reason:
+            logger.warning("Stale book for %s (%s) — skipping snapshot", iid, reason)
+            return None
+        snapshot = self._build_snapshot(iid, book, now_ns, second)
+        self._check_impossible_ohlc(iid, snapshot, now_ns)
+        return snapshot
+
+    def _stale_bounds(self) -> tuple[float, float]:
+        """(feed_stale_ns, stale_ns)."""
+        feed_stale_s = self._config.feed_stale_seconds or self._config.stale_book_seconds
+        return feed_stale_s * 1e9, self._config.stale_book_seconds * 1e9
+
+    def _build_snapshot(
+        self, iid: str, book: OrderBook, now_ns: int, second: int | None
+    ) -> DydxSecondSnapshot:
+        if second is None:
+            trade_list, ts_event = self._second_trades.pop(iid, []), now_ns
+        else:
+            trade_list = self._venue_trades.get(iid, {}).pop(second, [])
+            ts_event = second * _S_NS + _HALF_S_NS
+        bids, asks = book.bids()[:BOOK_DEPTH], book.asks()[:BOOK_DEPTH]
+        trades = fold_trades(trade_list).snapshot_values()
+        return DydxSecondSnapshot(
+            instrument_id=InstrumentId.from_str(iid),
+            bid_prices=[lv.price.as_double() for lv in bids],
+            bid_sizes=[lv.size() for lv in bids],
+            ask_prices=[lv.price.as_double() for lv in asks],
+            ask_sizes=[lv.size() for lv in asks],
+            buy_volume=trades.buy_volume,
+            sell_volume=trades.sell_volume,
+            buy_count=trades.buy_count,
+            sell_count=trades.sell_count,
+            open_price=trades.open_price,
+            high_price=trades.high_price,
+            low_price=trades.low_price,
+            close_price=trades.close_price,
+            ts_event=ts_event,
+            ts_init=now_ns,
+        )
+
+    def _check_impossible_ohlc(self, iid: str, snapshot: DydxSecondSnapshot, now_ns: int) -> None:
+        if (
+            ohlc_outside_book(snapshot)
+            and now_ns - self._last_impossible_log_ns.get(iid, 0) >= _IMPOSSIBLE_LOG_EVERY_NS
+        ):
+            self._last_impossible_log_ns[iid] = now_ns
+            # Unreachable after the stale/duplicate trade filters; if it fires, an
+            # ingestion bug is writing impossible prices (DATA-02/DATA-06 canary).
+            logger.error(
+                f"IMPOSSIBLE trade OHLC for {iid}: high={snapshot.high_price} "
+                f"low={snapshot.low_price} outside book "
+                f"[{min(snapshot.bid_prices)}, {max(snapshot.ask_prices)}]"
+            )
+
+    def _close_venue_second(self, second: int) -> None:
+        """
+        Mark `second` closed. A bucket older than it never reached a live row and is left to the
+        rebuild (its trades are archived): counted late after a stall, but on the very first close
+        it only holds trades that arrived before the loop started closing -- not transport
+        lateness, so they are logged (`_pre_start_trades`) rather than ledgered.
+        """
+        counts = self._pre_start_trades if self._last_closed_second is None else self._late_trades
+        self._last_closed_second = second
+        for iid, buckets in self._venue_trades.items():
+            for old in [s for s in buckets if s <= second]:
+                counts[iid] += len(buckets.pop(old))
 
     def _drop_unsampled_trades(self, sampled: list[str]) -> None:
         """
@@ -778,6 +999,8 @@ class Collector:
         """
         for iid in set(self._second_trades) - set(sampled):
             del self._second_trades[iid]
+        for iid in set(self._venue_trades) - set(sampled):
+            del self._venue_trades[iid]
 
     def _stale_reason(self, iid: str, now_ns: int, feed_stale_ns: float, stale_ns: float) -> str:
         """
@@ -787,12 +1010,36 @@ class Collector:
         has not yet delivered a fresh snapshot) is told apart from one quiet instrument on a
         live feed, whose book is simply unchanged.
         """
-        feed_age_ns = now_ns - self._last_feed_message_ns
-        if feed_age_ns > feed_stale_ns:
-            return f"feed dead: no WS message of any kind for {feed_age_ns / 1e9:.1f}s"
+        feed_dead = self._feed_dead_reason(now_ns, feed_stale_ns)
+        if feed_dead:
+            return feed_dead
         book_age_ns = now_ns - self._last_book_update_ns.get(iid, 0)
         if book_age_ns > stale_ns:
             return f"instrument silent: no OrderBookDeltas for {book_age_ns / 1e9:.1f}s, feed alive"
+        return ""
+
+    def _feed_dead_reason(self, now_ns: int, feed_stale_ns: float) -> str:
+        feed_age_ns = now_ns - self._last_feed_message_ns
+        if feed_age_ns > feed_stale_ns:
+            return f"feed dead: no WS message of any kind for {feed_age_ns / 1e9:.1f}s"
+        return ""
+
+    def _venue_stale_reason(
+        self, iid: str, second: int, now_ns: int, feed_stale_ns: float, stale_ns: float
+    ) -> str:
+        """
+        Venue mode: feed liveness is judged on arrival (now), the book's age on exchange time --
+        from the last applied delta's `ts_event` to the end of the second being closed.
+        """
+        feed_dead = self._feed_dead_reason(now_ns, feed_stale_ns)
+        if feed_dead:
+            return feed_dead
+        book_age_ns = (second + 1) * _S_NS - self._book_event_ns.get(iid, 0)
+        if book_age_ns > stale_ns:
+            return (
+                f"instrument silent: no delta stamped in the {book_age_ns / 1e9:.1f}s before the "
+                f"end of second {second}, feed alive"
+            )
         return ""
 
     async def _handle_missing_book(self, iid: str, now_ns: int) -> None:
@@ -810,7 +1057,11 @@ class Collector:
         Sample on a drift-free wall-clock schedule (`_next_sample_at`): one sample per interval
         bucket, at mid-interval, so every floor second gets exactly one snapshot row -- the
         nightly rebuild maps trades to rows by `ts_event // 1 s` (audit, sampling drift).
+        Venue mode runs `_venue_second_loop` instead.
         """
+        if self._venue_time:
+            await self._venue_second_loop()
+            return
         interval = self._config.snapshot_interval_seconds
         last_tick_s: float | None = None
         while not self._stop.is_set():
@@ -818,22 +1069,51 @@ class Collector:
             await asyncio.sleep(_next_sample_at(now, interval, last_tick_s) - now)
             now_ns = time.time_ns()
             last_tick_s = now_ns / 1e9
-            if self._last_second_loop_tick_ns is not None:
-                expected_ns = int(self._config.snapshot_interval_seconds * 1e9)
-                lag_ns = now_ns - self._last_second_loop_tick_ns - expected_ns
-                if lag_ns > _SECOND_LOOP_LAG_WARN_NS:
-                    logger.warning(
-                        "_second_loop tick arrived %.1fs late (expected every %.1fs) -- "
-                        "event loop was busy; crossed-book detection/resync was not "
-                        "running during this gap",
-                        lag_ns / 1e9,
-                        self._config.snapshot_interval_seconds,
-                    )
-            self._last_second_loop_tick_ns = now_ns
-
+            self._warn_if_late(now_ns)
             batch = await self._sample_tick(now_ns)
             if self._redis is not None:
                 await _publish_snapshot_batch(self._redis, batch)
+
+    async def _venue_second_loop(self) -> None:
+        """
+        Close every exchange second at wall `S + 1 + hold_back_seconds`, in order. After a late
+        wake-up every overdue second is closed (each drained to its own end), so no floor second
+        loses its row to a busy event loop; the lag canary still reports the stall.
+        """
+        hold_back_s = self._config.hold_back_seconds
+        while not self._stop.is_set():
+            now = time.time()
+            await asyncio.sleep(
+                max(0.0, _next_close_at(now, hold_back_s, self._last_closed_second) - now)
+            )
+            now_ns = time.time_ns()
+            due = _due_seconds(now_ns, self._hold_back_ns, self._last_closed_second)
+            if not due:
+                continue  # woke a hair early
+            self._warn_if_late(now_ns)
+            for second in due:
+                batch = await self._sample_tick(now_ns, second)
+                if self._redis is not None:
+                    await _publish_snapshot_batch(self._redis, batch)
+            self._check_pending_overflow(now_ns)
+
+    def _warn_if_late(self, now_ns: int) -> None:
+        """
+        `_second_loop` staleness canary (DATA-02): a wake-up far behind schedule means the event
+        loop was busy and the crossed-book detection/resync guard was not running.
+        """
+        if self._last_second_loop_tick_ns is not None:
+            expected_ns = int(self._config.snapshot_interval_seconds * 1e9)
+            lag_ns = now_ns - self._last_second_loop_tick_ns - expected_ns
+            if lag_ns > _SECOND_LOOP_LAG_WARN_NS:
+                logger.warning(
+                    "_second_loop tick arrived %.1fs late (expected every %.1fs) -- "
+                    "event loop was busy; crossed-book detection/resync was not "
+                    "running during this gap",
+                    lag_ns / 1e9,
+                    self._config.snapshot_interval_seconds,
+                )
+        self._last_second_loop_tick_ns = now_ns
 
     def _live_top(self, iid: str) -> tuple[list, list] | None:
         book = self._live_books.get(iid)
@@ -852,6 +1132,11 @@ class Collector:
         against *both* counts. That filters skew between two samples of a moving book, but not
         REST latency on a book that churns faster than the request takes -- `_crosscheck_one`
         adds the persistence confirmation for that.
+
+        Known limit (venue mode, story 22.12): the live book trails the wall clock by up to
+        `1 + hold_back_seconds` (deltas are held until their second closes), so a level that
+        changed inside that window and then held still across both rounds could mis-flag.
+        Upgrade path: compare REST against the book drained to the REST response's own time.
         """
         before = self._live_top(iid)
         rest_bids, rest_asks = await self._client.fetch_book_levels(iid)

@@ -63,12 +63,19 @@ def query_second_snapshots(
     the catalog-query + CustomData-unwrap boilerplate lives here.
     """
     catalog = ParquetDataCatalog(catalog_path)
+    # `query` bounds on ts_init, the window is ts_event: a venue-timed row (story 22.12) is
+    # sampled up to 1 + hold_back s (a catch-up: more) after its ts_event, so the end is widened
+    # and the exact ts_event filter decides. ts_init >= ts_event, so the start needs no margin.
     results = catalog.query(
-        data_cls=DydxSecondSnapshot, identifiers=[instrument_id], start=start_ns, end=end_ns,
+        data_cls=DydxSecondSnapshot,
+        identifiers=[instrument_id],
+        start=start_ns,
+        end=end_ns + _FILE_MARGIN_NS,
     )
     # query() wraps custom Data subclasses in CustomData -- unwrap via .data to reach the
     # actual DydxSecondSnapshot (confirmed via direct introspection this session).
-    return [r.data if hasattr(r, "data") else r for r in results]
+    snapshots = [r.data if hasattr(r, "data") else r for r in results]
+    return [s for s in snapshots if start_ns <= s.ts_event <= end_ns]
 
 
 class SecondOHLC(NamedTuple):

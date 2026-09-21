@@ -293,3 +293,18 @@ def test_recent_rows_keep_traded_seconds_and_expire_old_ones() -> None:
     bus.handle_batch([DydxSecondSnapshot.to_dict(_snapshot(base + 700 * 1_000_000_000, 11.0))])
     rows = bus.recent_rows(_IID, 0, base * 2)
     assert [r.close_price for r in rows] == [11.0]  # the 700s-old row aged out (RECENT_SECONDS)
+
+
+def test_a_venue_timed_row_published_late_lands_in_its_exchange_time_bucket() -> None:
+    """Story 22.12: a Bybit/Hyperliquid row for the bucket's last second is sampled (ts_init)
+    after the boundary; the bar it belongs to is decided by ts_event alone."""
+    bus = LiveCandleBus()
+    queue = bus.subscribe(_IID, _BAR_SECONDS)
+    last_second = _snapshot(_BASE_NS + 59_500_000_000, 100.0)
+    late = DydxSecondSnapshot.from_dict(
+        {**DydxSecondSnapshot.to_dict(last_second), "ts_init": _BASE_NS + 61_500_000_000}
+    )
+
+    bus.handle_batch([DydxSecondSnapshot.to_dict(late)])
+
+    assert queue.get_nowait()["bar"]["t"] == _BASE_NS // 1_000_000

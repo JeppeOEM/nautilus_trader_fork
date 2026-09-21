@@ -6,3 +6,11 @@ open_interest_poll_seconds = 300
 snapshot_interval_seconds = 1.0
 instruments = ["BTCUSDT-LINEAR.BYBIT", "ETHUSDT-LINEAR.BYBIT",
                "BTCUSDT-SPOT.BYBIT", "ETHUSDT-SPOT.BYBIT"]
+# Story 22.12: a live row is exchange second S, closed at wall S + 1 + hold_back_seconds from the
+# deltas/trades stamped inside it (DATA_DICTIONARY.md §1.7). hold_back_seconds = trade p99.9 lag
+# (`python -m collector_core.measure_lag --venue bybit`) rounded up to 0.5 s. Local dev-box run
+# 2026-09-21, 600 s, the 4 instruments above: TradeTick n=82,614 p50 105.5 ms, p99 158.8 ms,
+# p99.9 208.3 ms, max 211.5 ms (book deltas p99.9 160.9 ms). PROVISIONAL: the >= 3 h run on the
+# VPS that hosts this collector is owed (audit D-60); set the value from that run.
+book_time_source = "venue"
+hold_back_seconds = 0.5
