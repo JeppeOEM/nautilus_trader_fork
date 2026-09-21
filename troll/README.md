@@ -162,6 +162,32 @@ catalog.trade_ticks(instrument_ids=["BTC-USD-PERP.DYDX"])
 catalog.order_book_deltas(instrument_ids=["BTC-USD-PERP.DYDX"])
 ```
 
+### Backfill historical venue bars (Bybit / Hyperliquid)
+
+```bash
+# from troll/ -- report-only: plans the windows, contacts nothing, writes nothing
+PYTHONPATH=. python -m collector_core.backfill_bars --catalog /app/catalog \
+    --instrument BTCUSDT-LINEAR.BYBIT --start 2026-09-01 --end 2026-09-18
+
+# same command + --apply actually fetches and writes
+PYTHONPATH=. python -m collector_core.backfill_bars --catalog /app/catalog \
+    --instrument BTCUSDT-LINEAR.BYBIT --instrument BTC-USDC-PERP.HYPERLIQUID \
+    --start 2026-09-01 --end 2026-09-18 --bar-spec 1-MINUTE-LAST --apply
+```
+
+Fetches the venues' own klines and writes them as `EXTERNAL` `Bar`s (close-stamped on both venues)
+through `ParquetDataCatalog.write_data()`. dYdX is not supported -- its bars come from its own 1 s
+archive. **Report-only unless `--apply`.** Re-runs are idempotent at the request level: an already
+archived range plans zero windows and issues zero REST calls.
+
+- `--bar-spec` (default `1-MINUTE-LAST`): `1/3/5/15/30-MINUTE`, `1/2/4/12-HOUR`, `1-DAY`, all
+  `-LAST`. Anything else exits non-zero before the first request.
+- `--environment` (default `mainnet`): picks which venue endpoint is queried (`mainnet`, `testnet`,
+  plus `demo` on Bybit). It does **not** verify the catalog's own environment -- nothing records
+  one -- so it cannot stop a mainnet/testnet mix under a single instrument id.
+- Hyperliquid only serves ~the last 5000 candles; older windows are reported as missing, never
+  silently marked covered. See `docs/DATA_INTEGRITY_AUDIT.md` D-52/D-53.
+
 ---
 
 ## Run a backtest

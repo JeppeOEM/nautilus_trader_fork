@@ -65,6 +65,51 @@ PyO3 bindings don't expose the fields another way.
   collector.** (`ml_signals/candles.py`'s `aggregate_ohlc` instead derives candles from
   `DydxSecondSnapshot`'s per-second OHLC fields on read — see §2.3.)
 
+#### Backfilled `Bar`s (Story 22.9)
+
+The one `Bar` path that *does* write to the catalog: `python -m collector_core.backfill_bars`, an
+offline operator CLI that fetches the venues' own historical klines over REST for **Bybit and
+Hyperliquid only** (dYdX bars are derived from its 1 s archive instead).
+
+- **Bar type:** `<instrument id>-<step>-<aggregation>-LAST-EXTERNAL`, e.g.
+  `BTCUSDT-LINEAR.BYBIT-1-MINUTE-LAST-EXTERNAL`. `EXTERNAL` is literal and load-bearing: these are
+  the **venue's own aggregation**, not our 1 s fold, and the two must never be conflated in a
+  backtest or a reconciliation.
+- **Timestamps:** `ts_event == ts_init ==` the bar's **close** time, on both venues. Bybit is
+  requested with `timestamp_on_close=True`; Hyperliquid's adapter stamps the candle's *open* time
+  (`crates/adapters/hyperliquid/src/data.rs:1267`) and the CLI shifts it by one interval, carrying
+  the decoded `Price`/`Quantity` across unchanged.
+- **Day attribution:** a close-stamped bar belongs to the day it **opened** in, so `--start D1
+  --end D2` covers closes `midnight(D1) + interval` through `midnight(D2) + 24 h`. The end is
+  additionally clamped to the last closed bar.
+- **Coverage:** Bybit serves multi-year kline history. Hyperliquid's `candleSnapshot` returns
+  roughly the last 5000 candles (~3.5 days at 1 minute); older history is permanently unavailable
+  and the CLI warns rather than pretending the range is archived (audit D-53).
+- **Supported `--bar-spec`:** `1/3/5/15/30-MINUTE`, `1/2/4/12-HOUR`, `1-DAY`, all `-LAST`, on both
+  venues. Deliberately narrower than either adapter's table: `WEEK`, `MONTH` and `3-DAY` are
+  excluded because the tool's window bounds are absolute epoch multiples and the epoch is a
+  Thursday, while both venues open weekly klines on Monday -- every bar fetched on such a grid
+  would be discarded as off-grid. `6-HOUR` (Bybit-only) and `8-HOUR` (Hyperliquid-only) are
+  excluded so one `--bar-spec` behaves identically across a mixed-venue run.
+- **Idempotent re-run:** the windows come from the catalog's own
+  `get_missing_intervals_for_request`, so re-running an archived range issues **no REST request at
+  all** -- not merely no writes. A window the venue serves with an interior hole is written as one
+  file per contiguous run, so the hole stays a visible, re-plannable gap.
+- **Precision:** **both** venues' kline OHLCV passes through an `f64` round-trip upstream -- Bybit
+  `value.parse::<f64>()` + `Price::new_checked`
+  (`crates/adapters/bybit/src/common/parse.rs:1187-1198`) and Hyperliquid `Price::new(f64, …)`
+  (`crates/adapters/hyperliquid/src/data.rs:1278`) differ only in range validation. **There is no
+  Bybit/Hyperliquid precision asymmetry**; neither venue's backfilled bars carry a string-exact
+  guarantee (audit D-52).
+- **`--environment`:** picks which venue endpoint is queried (`mainnet`/`testnet`, plus `demo` on
+  Bybit). It does **not** verify what the target catalog already holds -- nothing in the catalog
+  records a row's environment -- so it cannot prevent a mainnet/testnet mix under one instrument id.
+- **Report-only by default:** without `--apply` the CLI plans and logs only; it builds no venue
+  client, issues no request and writes nothing.
+- **Where they live:** Parquet only, under `data/bar/<bar type>/`. They are **never** written to
+  `candles_<venue>.db` and **never** reach the chart, both of which are built from
+  `DydxSecondSnapshot`.
+
 ### 1.4 `MarkPriceUpdate` (native Nautilus type)
 
 - **Source:** `subscribe_markets()` markets-channel, global for all instruments
