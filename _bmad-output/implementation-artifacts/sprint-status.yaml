@@ -277,7 +277,7 @@ development_status:
   21-6-no-hidden-errors: done
   epic-21-retrospective: optional
 
-  epic-22: in-progress
+  epic-22: done
   22-1-troll-collector-core-extracted-from-the-bybit-and-hyperliquid-collectors: done
   22-2-dydx-collector-onto-the-core: done
   22-3-shared-data-types-and-a-single-openinterest: done
