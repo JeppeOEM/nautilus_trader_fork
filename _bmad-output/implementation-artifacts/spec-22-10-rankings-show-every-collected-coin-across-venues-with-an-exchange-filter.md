@@ -2,7 +2,7 @@
 title: 'Story 22.10: Rankings show every collected coin across venues, with an exchange filter'
 type: feature
 created: '2026-09-21'
-status: awaiting-operator
+status: done
 baseline_revision: 94f5cd5fe63adc587aedecb91808bf929be38ede
 review_loop_iteration: 0
 final_revision: bb58127f4b05c3a944ed0b0a3f5504f3ac4b7016
@@ -186,3 +186,15 @@ Status: awaiting-operator
 **Manual checks (if no CLI):**
 - Live smoke from the host: call the three new fetch+parse functions against the real APIs. Expect non-empty dicts with non-zero USD volume for `BTC-USD-PERP.DYDX`, `BTCUSDT-LINEAR.BYBIT`, `BTCUSDT-SPOT.BYBIT` and `BTC-USD-PERP.HYPERLIQUID`.
 - Operator (VPS): run `redis-cli subscribe rankings:live` and check that `/api/errors` is quiet in steady state, then watch `ranking_engine` memory at about 3× the instrument count.
+
+## Operator Confirmation
+
+Confirmed 2026-09-21: the external actions this story owed were carried out.
+
+- Deploy to nifelheim with all three collectors running (make up), then run `redis-cli subscribe rankings:live` and confirm rows for DYDX, BYBIT (-LINEAR and -SPOT) and HYPERLIQUID, each with a non-zero USD volume24h.
+- Open the web rankings page through the data_api tunnel. Confirm that all venue chips are selected by default and that deselecting one hides only that venue's rows and survives a reload.
+- Run make tui with Hyperliquid and Bybit rows present. Confirm the coins-pane columns stay aligned and that `/` + `.bybit` narrows to Bybit rows.
+- After about 10 minutes of steady state, check GET /api/errors and confirm the ranking_engine.volume24h count is not growing (a growing count means a collected instrument has no USD volume from its venue).
+- On nifelheim, watch `docker stats ranking_engine` over about an hour and confirm memory stays flat at about 3x the instrument count (epic 13 baseline). The engine now makes 4 volume polls a minute instead of 1.
+
+_Appended by the bmad-loop orchestrator (`bmad-loop confirm`, #335): a human confirmed these external actions out of band, and the story was advanced from `awaiting-operator` to `done`._
