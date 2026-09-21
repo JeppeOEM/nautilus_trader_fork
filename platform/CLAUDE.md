@@ -66,7 +66,7 @@ See `platform/live_paper/node.py`'s module docstring for the full rationale.
 
 ## Design Principles
 
-- **DESIGN-01** — YAGNI. No abstractions, interfaces, factories, or config for values that don't change. No scaffolding for hypothetical future use. Build the simplest thing that solves the present problem.
+- **DESIGN-01** — **No abstraction without a named invariant.** A class, aggregate, port, interface, factory or config value is admitted only if its docstring names the specific invariant it protects and the commands that could violate it; anything that cannot state one stays a plain function or dataclass. No scaffolding for hypothetical future use. Ports are `typing.Protocol`, wired explicitly at composition roots; no DI container, no event-bus library. **Why:** this is how the DDD spine (`_bmad-output/planning-artifacts/architecture/architecture-ddd-platform-2026-09-21/`, AD-D4) keeps tactical patterns from becoming ceremony — `LiveBook` earns its place by naming "a delta applies at most once, only after a baseline"; a `RankChanged` event nothing consumes does not. Replaced the earlier YAGNI wording on 2026-09-21.
 - **DESIGN-02** — Decouple at natural seams: `collector` / `book_features` / strategy / backtest. Components depend on shared data types, not each other's internals. Never import a collector class from a strategy file.
 - **DESIGN-03** — Prefer deletion over addition when simplification is possible. Prefer boring over clever. A function you can read in 10 seconds is better than one that needs a comment.
 

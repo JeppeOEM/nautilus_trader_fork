@@ -33,7 +33,7 @@ services, asyncio process managers) → `infrastructure/` (adapters). `data_api/
 and `frontend/` are interface adapters, not contexts.
 
 Eleven contexts, one shared kernel. A tactical DDD pattern is admitted **only where it names
-an invariant** (AD-D4); this is how the paradigm coexists with `CLAUDE.md` DESIGN-01. New
+an invariant** (AD-D4); `CLAUDE.md` DESIGN-01 now states the same rule (amended 2026-09-21). New
 decisions are numbered `AD-D1…` so they never collide with the parent's `AD-1..AD-11` or the
 frontend sibling's `AD-F…`. A rule marked `[ADOPTED]` is today's code restated; `[TARGET]`
 names today's deviation next to it. `troll/...` citations refer to the tree before
@@ -211,7 +211,7 @@ root (`data_api/app.py`) does the wiring with a kernel type as the observer's in
 ### AD-D4 — A tactical pattern must name its invariant
 
 - **Binds:** every aggregate, value object, domain event, port, repository, application service in `platform/`
-- **Prevents:** DDD ceremony for its own sake (the DESIGN-01 conflict); abstractions with no divergence to prevent; a DI container or event-bus dependency
+- **Prevents:** DDD ceremony for its own sake (DESIGN-01, which now carries this rule); abstractions with no divergence to prevent; a DI container or event-bus dependency
 - **Rule:** Each aggregate declares, in its module docstring, the invariant(s) it protects and the commands that can violate them; each port names the adapter it decouples and why the domain must not know it. A class that cannot state one is a plain function or dataclass. Ports are `typing.Protocol`; wiring is explicit in composition roots; there is no DI container, no service locator, no event-bus library. Domain events are frozen dataclasses returned or passed to the caller inside a context; **across contexts the only event transports are the existing Redis published language and the kernel-defined file markers under the catalog root (AD-D18), each with exactly one writing context per reason.** `RankChanged`/`ModeSwitched` from the seed are deliberately not modelled: nothing inside `ranking` consumes them.
 
 ### AD-D5 — Hot path: no additional per-message allocation or latency
@@ -456,7 +456,7 @@ Epic 22, story by story, and the parent's open Deferred items.
 
 ## Deferred
 
-- **DESIGN-01 wording.** Either amend `platform/CLAUDE.md` DESIGN-01 to "no abstraction without a named invariant" (AD-D4's rule) or keep the text and accept the documented tension. User decision; revisit when the first context story is cut.
+- ~~**DESIGN-01 wording.**~~ Resolved 2026-09-21: `platform/CLAUDE.md` DESIGN-01 was rewritten to "no abstraction without a named invariant" (AD-D4's rule); the YAGNI wording is gone.
 - **Per-context Docker packaging.** The three thin images keep their current package sets; a per-context image split is not decided until the migration is complete and image size or rebuild time becomes a measured problem.
 - **Renaming `DydxSecondSnapshot`/`OpenInterest` catalog directories.** Requires a one-off catalog directory migration under backup (a legacy `custom_dydx_open_interest` directory still exists locally); recommended never. Revisit only if a second custom snapshot type appears.
 - **`ExchangeDemoBot`/`RealMoneyBot` as separate types** (AD-D15's upgrade path): revisit when the real-money path is first exercised.
