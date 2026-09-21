@@ -37,7 +37,7 @@ import tempfile
 import time
 from decimal import Decimal
 
-from ml_signals import backtest_dydx
+from ml_signals.strategies import backtest_dydx
 from nautilus_trader.model.currencies import BTC
 from nautilus_trader.model.currencies import USDC
 from nautilus_trader.model.data import TradeTick

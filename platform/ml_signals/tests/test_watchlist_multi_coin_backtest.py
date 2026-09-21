@@ -48,7 +48,7 @@ from decimal import Decimal
 
 import pytest
 
-from ml_signals import backtest_dydx
+from ml_signals.strategies import backtest_dydx
 from nautilus_trader.model.currencies import BTC
 from nautilus_trader.model.currencies import ETH
 from nautilus_trader.model.currencies import USDC
