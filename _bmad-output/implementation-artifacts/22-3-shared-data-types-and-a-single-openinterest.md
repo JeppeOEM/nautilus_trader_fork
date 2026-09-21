@@ -1,5 +1,5 @@
 ---
-status: awaiting-operator
+status: done
 followup_review_recommended: false
 final_revision: dec416641caee676e2bc0af60e005fd034c84539
 operator_actions:
@@ -130,3 +130,12 @@ Status: awaiting-operator
 - Verification: core+dYdX+Bybit+HL 164 passed (DeprecationWarning as error); wider run only the known pre-existing failures (ml_signals OFI x4, data_api rankings needs redis, 3 ml_signals backtest import errors). ruff/mypy unavailable on host.
 - Residual risk: import ordering may need `ruff --fix`; VPS migration owed.
 - followup_review_recommended: false
+
+## Operator Confirmation
+
+Confirmed 2026-09-21: the external actions this story owed were carried out.
+
+- On the VPS stop the three collectors, run `python -m collector_core.migrate_open_interest --catalog /app/catalog` (report), then again with `--apply --backup-dir <dir>`, then start the collectors (audit item D-40).
+- Run ruff --fix (import ordering after the collector_core rename) and mypy; neither is installed on the dev host. [done locally 2026-09-21: ruff --fix + ruff format over platform/ committed as 154d9898ad; mypy (pre-commit args) 95 findings before, 97 after, 0 new: the +2 are one pre-existing int|None defect in ml_signals/custom_indicators.py now reported per line after the line split]
+
+_Appended by the bmad-loop orchestrator (`bmad-loop confirm`, #335): a human confirmed these external actions out of band, and the story was advanced from `awaiting-operator` to `done`._
