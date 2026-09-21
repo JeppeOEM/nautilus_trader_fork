@@ -339,6 +339,19 @@ Then open `http://localhost:9100` for the UI, and run
 `metrics.db` is needed.
 ---
 
+## Target structure (DDD)
+
+The module map above is the *current* layout. The target layout is a Domain-Driven Design
+projection of the same Gatekeeper paradigm, fixed in the DDD spine
+`_bmad-output/planning-artifacts/architecture/architecture-ddd-platform-2026-09-21/ARCHITECTURE-SPINE.md`
+(seed and decision record: `_bmad-output/planning-artifacts/ddd-redesign-seed-2026-09-21.md`).
+It keeps the 2026-07-01 spine's AD-1..AD-11 unchanged and adds AD-D1..AD-D18: eleven bounded
+contexts (`capture`, `collection_control`, `archive`, `candles`, `ranking`, `bots`, `alerting`,
+`research`, `views`, `observability`) over one shared `kernel`, hexagonal layering inside each,
+a boundary test instead of review as the enforcement, and a strangler migration one context per
+story. Migration step 0 renames this directory `troll/` → `platform/` (after story 22.12 merges);
+until a context's story lands, this file's map stays authoritative for it.
+
 ## What's genuinely not finished
 
 Cross-referenced against `_bmad-output/implementation-artifacts/sprint-status.yaml`
