@@ -140,9 +140,27 @@ build-insecure:
 ## (which shells out to getpass.getuser() to name its basetemp dir) raises OSError --
 ## same class of bug as the bot_tui_logs one above. test-live-paper already works
 ## around it with -e USER; mirror that here.
+## The cross-cutting guards in tests/ (import boundaries, image closures, shims -- Story 23.1)
+## read the whole checkout, mounted read-only at /src: no image holds every package, and /app is
+## not named `platform`, so reading the image would silently check a subset.
+TEST_SOURCE_MOUNT := -v $(REPO_ROOT):/src:ro -e PLATFORM_SOURCE_DIR=/src/platform
 test:
-	$(COMPOSE) run --rm --no-deps -e HOME=/tmp -e USER=collector collector \
-		python3 -m pytest collector_core/tests dydx_collector/tests bybit_collector/tests hyperliquid_collector/tests common/tests ml_signals/tests ranking_engine/tests bot_tui/tests data_api/tests tests -q
+	$(COMPOSE) run --rm --no-deps -e HOME=/tmp -e USER=collector $(TEST_SOURCE_MOUNT) collector \
+		python3 -m pytest collector_core/tests dydx_collector/tests bybit_collector/tests hyperliquid_collector/tests common/tests ml_signals/tests ranking_engine/tests bot_tui/tests data_api/tests observability/tests tests -q
+
+## Record the capture hot path's cost baseline (tests/fixtures/hotpath_baseline.json, audit D-65,
+## spine AD-D5) into the checkout: the one place the source tree is mounted writable, because
+## `make test` mounts it read-only and a baseline recorded into the image's copy would vanish with
+## the container. Only in a change that deliberately re-baselines (a changed burst, a Python or
+## nautilus_trader bump, or a reviewed per-message cost increase stated on audit row D-65),
+## never to make `make test` pass; the test's allocation checks say why.
+## Measures the collector image, so build it from this checkout first (`make up` / `make build`).
+HOTPATH_BASELINE := $(PLATFORM_DIR)tests/fixtures/hotpath_baseline.json
+hotpath-baseline:
+	rm -f $(HOTPATH_BASELINE)
+	$(COMPOSE) run --rm --no-deps -e HOME=/tmp -e USER=collector -v $(REPO_ROOT):/src -e PLATFORM_SOURCE_DIR=/src/platform collector \
+		python3 -m pytest tests/test_hotpath.py -q
+	@test -f $(HOTPATH_BASELINE) && echo "recorded $(HOTPATH_BASELINE)" || { echo "hotpath-baseline: nothing was recorded" >&2; exit 1; }
 
 ## Merge yesterday's (and any older closed day's) minute-sized Parquet files into one file per
 ## (data type, instrument) for every venue -- audit D-36: without this the catalog grows ~1,440
@@ -221,9 +239,11 @@ tui:
 ## -e HOME=/tmp -e USER=collector works around the same pre-existing "OSError: No
 ## username set" pytest tmp_path issue documented in deferred-work.md for
 ## dydx_collector/tests (image runs as uid 1000 with no matching /etc/passwd entry).
+## tests/test_hotpath.py replays the collector's ingest path, which this image deliberately
+## does not ship; it runs in `make test`.
 test-live-paper:
-	$(COMPOSE) --profile live-paper run --rm --no-deps -e HOME=/tmp -e USER=collector live-paper \
-		python3 -m pytest live_paper/tests -q
+	$(COMPOSE) --profile live-paper run --rm --no-deps -e HOME=/tmp -e USER=collector $(TEST_SOURCE_MOUNT) live-paper \
+		python3 -m pytest live_paper/tests observability/tests tests --ignore=tests/test_hotpath.py -q
 
 ## Stop containers (catalog data is preserved)
 down:

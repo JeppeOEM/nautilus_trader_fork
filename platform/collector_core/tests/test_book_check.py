@@ -22,7 +22,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
-from ml_signals import error_ledger
+from observability import error_ledger
 
 from collector_core import collector as collector_mod
 from collector_core.book_check import BookSnapshot

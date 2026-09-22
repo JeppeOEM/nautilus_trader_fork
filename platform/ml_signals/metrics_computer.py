@@ -25,7 +25,8 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 
-from ml_signals import error_ledger
+from observability import error_ledger
+
 from ml_signals.catalog_stats import list_instruments
 from ml_signals.catalog_stats import price_stats
 from nautilus_trader.persistence.catalog import ParquetDataCatalog

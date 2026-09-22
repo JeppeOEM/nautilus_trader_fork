@@ -27,9 +27,9 @@ from pathlib import Path
 
 import pytest
 from ml_signals import candle_store
-from ml_signals import error_ledger
 from ml_signals.catalog_stats import _stamp_to_ns
 from ml_signals.catalog_stats import query_second_snapshots
+from observability import error_ledger
 
 from collector_core import trade_backfill
 from collector_core.archive_gaps import ARRIVAL_MARGIN_NS

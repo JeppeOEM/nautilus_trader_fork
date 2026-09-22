@@ -26,6 +26,7 @@ from pathlib import Path
 import pytest
 from collector_core.second_snapshot import DydxSecondSnapshot
 from fastapi.testclient import TestClient
+from observability import error_ledger
 
 import data_api.app as app_module
 from data_api import alerts
@@ -144,10 +145,26 @@ def test_render_substitutes_all_four_placeholders() -> None:
     assert out == f"{_IID}|65000.5|2027-01-15T08:00:00+00:00|60|{_IID}"
 
 
-def test_failed_webhook_is_logged_with_alert_id(caplog: pytest.LogCaptureFixture) -> None:
+def test_failed_webhook_is_ledgered_with_alert_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    error_ledger.reset()
     alert = _alert(webhook_url="http://127.0.0.1:1/hook")  # nothing listens on port 1
-    alerts.post_webhook(alert, "x")
-    assert f"alert {alert.id} webhook POST failed" in caplog.text
+    alerts.deliver(alert, "x")
+    assert error_ledger.counts() == {"observability.notify.webhook": 1}
+    assert f"alert {alert.id}" in error_ledger.last_details()["observability.notify.webhook"]
+    error_ledger.reset()
+
+
+def test_alert_names_channels_never_transports(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    assert alerts.channels(_alert(webhook_url="")) == ()
+    assert alerts.channels(_alert(webhook_url="https://h/x")) == ("webhook:https://h/x",)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
+    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
+    assert alerts.channels(_alert(webhook_url="https://h/x")) == (
+        "webhook:https://h/x",
+        "telegram",
+    )
 
 
 def test_toast_is_pushed_to_subscribers(tmp_path: Path) -> None:
@@ -255,25 +272,12 @@ def test_deliver_sends_telegram_message_to_bot_api(monkeypatch: pytest.MonkeyPat
 
     server = HTTPServer(("127.0.0.1", 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-    monkeypatch.setattr(alerts, "TELEGRAM_API_BASE", f"http://127.0.0.1:{server.server_port}")
+    monkeypatch.setenv("TELEGRAM_API_BASE", f"http://127.0.0.1:{server.server_port}")
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:abc")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
     alerts.deliver(_alert(webhook_url=""), "BTC crossed 65000")
     server.shutdown()
     assert received == [("/bot123:abc/sendMessage", {"chat_id": "42", "text": "BTC crossed 65000"})]
-
-
-def test_telegram_failure_logs_alert_id_but_never_the_token(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    monkeypatch.setattr(alerts, "TELEGRAM_API_BASE", "http://127.0.0.1:1")
-    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "secret-token")
-    monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
-    alert = _alert(webhook_url="")
-    alerts.post_telegram(alert, "x")
-    assert f"alert {alert.id} telegram send failed" in caplog.text
-    assert "secret-token" not in caplog.text
 
 
 def test_route_requires_a_delivery_channel(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

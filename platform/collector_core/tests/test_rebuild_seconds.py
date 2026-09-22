@@ -19,8 +19,8 @@ import time
 from pathlib import Path
 
 import pyarrow.parquet as pq
-from ml_signals import error_ledger
 from ml_signals.catalog_stats import query_second_snapshots
+from observability import error_ledger
 
 from collector_core.archive_gaps import record_gap
 from collector_core.build_candles import _parse_date_ns

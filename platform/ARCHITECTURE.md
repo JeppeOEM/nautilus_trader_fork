@@ -30,6 +30,7 @@ downstream of the collector ever touches `nautilus_trader`'s live `TradingNode`/
 | `collector_core/` | The venue-neutral collector engine (Story 22.1) — ingest → 1s sample → flush → Parquet + `snapshots:raw` + `candles_*.db`; also the operator-run catalog tools | Parquet catalog (read/write), Redis (publish), `candles_*.db` (write) |
 | `dydx_collector/`, `bybit_collector/`, `hyperliquid_collector/` | Venue subclasses of `collector_core.Collector`: WS/HTTP client, config, venue quirks | Their venue's WS/REST (via Rust `nautilus_pyo3` clients) |
 | `common/` | Venue identifiers shared by every module (`venues.py`) | nothing (pure constants) |
+| `observability/` | The generic observability context (Story 23.1, DDD spine AD-D16), standard library only and venue-free: `error_ledger` (every continue-past-failure site, DATA-07; per process), `notify` (the one outbound transport: channels `operator` = ntfy/`WATCHDOG_NTFY_URL`, `telegram` = `TELEGRAM_*`, `webhook:<url>`), `watchdog` (the generic `(down_since, reminder)` alert transition), `incidents` (the WARNING+ incident-report handler, parameterised by the venue entrypoint's `IncidentConfig`). Every context except `kernel` may import it (spine AD-D2); it imports none | ntfy / Telegram / webhook URLs (outbound HTTP POST), `data/incident_reports/` (write, dYdX collector only) |
 | `ml_signals/` | Shared indicators, candle store, backtest strategies (`strategies/`) | Parquet catalog (read), Redis (`snapshots:raw`, `rankings:live` read), `metrics.db` + `candles_*.db` (read) `[amended 2026-09-20: Epic 22 story 22.8, review pass — `ranking:control` publish removed: the sole producer is `bot_tui/ranking_state.py:128` since Story 15.10 retired `dashboard`]` |
 | `data_api/` + `frontend/` | Web UI (React SPA) + read-only REST/WS on `:9100` | Redis (read), Parquet catalog + `candles_*.db` + `metrics.db` (read-only) |
 | `ranking_engine/` | Sole computer of coin ranking (volume + volatility) | Redis (`snapshots:raw` read; `rankings:live` publish; `ranking:control` read), `metrics.db` (write), dYdX REST (24h volume poll) |
@@ -48,6 +49,10 @@ private `catalog_stats._stamp_to_ns`). It pre-dates Epic 22 and is tracked as an
 boundary question in the spine's Deferred section, not as a resolved rule
 `[amended 2026-09-20: Epic 22 story 22.8, review pass — this sentence asserted the clean
 version of the very clause AD-4 was amended to retract in the same commit]`.
+The error-ledger part of it is gone: the ledger moved to `observability/` (Story 23.1), which
+every context except `kernel` may import, and `ml_signals.error_ledger` is a deprecated re-export, deleted once Story
+24.1 is done. What remains (`candle_store`, `catalog_stats`) is listed edge by edge, with the story that
+retires each, in `platform/tests/test_boundaries.py`.
 
 ---
 
@@ -351,6 +356,15 @@ contexts (`capture`, `collection_control`, `archive`, `candles`, `ranking`, `bot
 a boundary test instead of review as the enforcement, and a strangler migration one context per
 story. Migration step 0 renames this directory `platform/` → `platform/` (after story 22.12 merges);
 until a context's story lands, this file's map stays authoritative for it.
+
+The migration is enforced by three guards in `platform/tests/`, run by `make test` against the
+read-only checkout mount (Story 23.1): `test_boundaries.py` maps every module to its target
+context and fails any import outside the AD-D2 graph or any `_private` import across contexts,
+except the legacy edges it lists with the story that retires each (expired from
+`sprint-status.yaml`); `test_images.py` fails when a dockerfile's `COPY` set misses a package an
+entrypoint imports; `test_hotpath.py` replays a 30-instrument burst through
+`Collector._process_data` against `tests/fixtures/hotpath_baseline.json` (AD-D5; the baseline is
+recorded into the checkout by `make hotpath-baseline` only, and a missing one fails `make test`).
 
 ## What's genuinely not finished
 

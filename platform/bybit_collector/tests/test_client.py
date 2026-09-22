@@ -25,7 +25,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from collector_core.feed import Feed
-from ml_signals import error_ledger
+from observability import error_ledger
 
 from bybit_collector.client import LINEAR_FEED
 from bybit_collector.client import LINEAR_TRADES_FEED

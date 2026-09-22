@@ -17,7 +17,7 @@
 import sys
 
 import pytest
-from ml_signals import error_ledger
+from observability import error_ledger
 
 from collector_core.nightly import main
 from collector_core.nightly import steps

@@ -317,7 +317,7 @@ def test_venue_field_and_malformed_id_400(tmp_path: Path, monkeypatch: pytest.Mo
 def test_invalid_candle_fails_the_request_loudly(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from ml_signals import error_ledger
+    from observability import error_ledger
 
     catalog_path = str(tmp_path / "catalog")
     _write_snapshots(catalog_path, [(_BASE_NS - i * 60_000_000_000, 100.0 + i) for i in range(3)])

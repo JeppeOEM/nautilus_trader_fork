@@ -37,7 +37,7 @@ import json
 import os
 from pathlib import Path
 
-from ml_signals import error_ledger
+from observability import error_ledger
 
 
 GAPS_DIRNAME = "_archive_gaps"

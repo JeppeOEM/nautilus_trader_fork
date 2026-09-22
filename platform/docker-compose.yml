@@ -53,8 +53,9 @@ services:
       # Rebuildable from the catalog: python -m collector_core.build_candles.
       - ./data/candles:/app/candles_dir
       # Story 5.1: permanent incident reports (crossed book, stale book, resync, etc.),
-      # auto-snapshotted from the [WS_RAW] rolling debug buffer -- see collector.py's
-      # _IncidentHandler. Must survive container restarts, unlike /tmp/nautilus_logs.
+      # auto-snapshotted from the [WS_RAW] rolling debug buffer -- see
+      # observability/incidents.py's IncidentHandler, configured by dydx_collector/collector.py's
+      # INCIDENTS. Must survive container restarts, unlike /tmp/nautilus_logs.
       - ./data/incident_reports:/app/incident_reports
     network_mode: host
     restart: always

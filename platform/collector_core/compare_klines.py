@@ -87,8 +87,8 @@ from pathlib import Path
 from typing import Any
 
 from ml_signals import candle_store
-from ml_signals import error_ledger
 from ml_signals.catalog_stats import _stamp_to_ns
+from observability import error_ledger
 
 from collector_core.build_candles import _parse_date_ns
 from collector_core.venue_http import BYBIT_URLS

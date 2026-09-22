@@ -18,7 +18,7 @@ import time
 from pathlib import Path
 
 import pytest
-from ml_signals import error_ledger
+from observability import error_ledger
 
 from bybit_collector.collector import BybitCollector
 from bybit_collector.collector import _message_u

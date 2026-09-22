@@ -37,10 +37,10 @@ from typing import Callable
 
 import redis.asyncio as aioredis
 from collector_core.second_snapshot import DydxSecondSnapshot
-from ml_signals import error_ledger
 from ml_signals.candles import candle_dicts_from_snapshots
 from ml_signals.catalog_stats import SecondOHLC
 from ml_signals.catalog_stats import query_second_ohlc
+from observability import error_ledger
 
 from data_api import settings
 from data_api.redis_bus import QUEUE_MAX

@@ -295,7 +295,7 @@ development_status:
   epic-22-retrospective: optional
 
   epic-23: in-progress
-  23-1-observability-context-and-migration-guardrails: ready-for-dev
+  23-1-observability-context-and-migration-guardrails: done
   23-2-kernel-shared-kernel: ready-for-dev
   23-3-durable-error-ledger-and-day-long-data-error-crosscheck: ready-for-dev
   epic-23-retrospective: optional

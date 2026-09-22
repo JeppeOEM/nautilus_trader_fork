@@ -30,7 +30,7 @@ from typing import Literal
 
 from collector_core.collector import Collector
 from collector_core.collector import run_forever
-from ml_signals import error_ledger
+from observability import error_ledger
 
 from bybit_collector.client import BybitClient
 from bybit_collector.config import BybitConfig

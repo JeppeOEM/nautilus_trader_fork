@@ -31,7 +31,7 @@ import urllib.request
 from decimal import Decimal
 
 from collector_core.open_interest import OpenInterest
-from ml_signals import error_ledger
+from observability import error_ledger
 
 from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
 from nautilus_trader.core.nautilus_pyo3 import get_dydx_http_url  # type: ignore[attr-defined]
