@@ -1,6 +1,6 @@
 # Story 23.2: `kernel/` shared kernel
 
-Status: ready-for-dev
+Status: done
 
 <!-- Note: Validation is optional. Run validate-create-story for quality check before dev-story. -->
 
@@ -40,23 +40,23 @@ So that no two contexts can ever hold two copies of a shared type or a shared nu
 
 ## Tasks / Subtasks
 
-- [ ] Task 1 — `platform/kernel/` package with exactly the AD-D3 members (AC: #1)
-  - [ ] Move `collector_core/second_snapshot.py` → `kernel/second_snapshot.py` and add `SecondOHLC` (from `ml_signals/catalog_stats.py:74`); `collector_core/open_interest.py` → `kernel/open_interest.py`; `collector_core/fold.py` → `kernel/fold.py`; pure `Indicator` classes + stateless functions of `ml_signals/indicators.py` → `kernel/indicators.py`; `ml_signals/performance_metrics.py` → `kernel/performance_metrics.py`. Nothing else enters; the boundary test asserts kernel imports no context and holds no module-level mutable state.
-  - [ ] Shims at every old path (`REMOVE_AFTER = "24-2-views-read-models-and-reader-side-revalidation-removed"`); chase every caller (`grep -rn "from collector_core.second_snapshot\|from collector_core.open_interest\|from collector_core.fold\|from common\|from ml_signals.venue\|from ml_signals.indicators\|from ml_signals.performance_metrics\|from ml_signals.catalog_stats import" platform`).
-- [ ] Task 2 — class-name and Arrow-registration proof (AC: #2)
-  - [ ] Extend `platform/tests/test_namespace.py`: `old.DydxSecondSnapshot is kernel.second_snapshot.DydxSecondSnapshot`; `nautilus_trader.serialization.arrow.serializer._SCHEMAS` holds exactly one key whose `__name__` is `DydxSecondSnapshot` and one `OpenInterest`.
-  - [ ] Fixture test: write one `DydxSecondSnapshot` and one `OpenInterest` to a tmp catalog with the pre-move code (record the parquet bytes/rows as a fixture before moving), read them back after the move; serialise a `snapshots:raw` batch and compare to the recorded JSON. Replace `data_api/live_candles.py:183`'s parsing with `DydxSecondSnapshot.from_dict` if it is not already.
-- [ ] Task 3 — `kernel/venues.py`, the only `InstrumentId` parser (AC: #3)
-  - [ ] Merge `common/venues.py` (`VENUE_KINDS`, `venue_kind`, `market_kind`) and `ml_signals/venue.py` (`venue_of`, `MalformedInstrumentId`); move `collector_core/venue_http.py:48` `bybit_category` here, defined over `market_kind` (`-LINEAR.BYBIT`/`-INVERSE.BYBIT` → `linear`/`inverse`, `-SPOT.BYBIT` → `spot`, anything else `MalformedInstrumentId`). Table test over every id shape. `common/` becomes a shim package.
-- [ ] Task 4 — `kernel/clocks.py` and `kernel/archive_markers.py` (AC: #4)
-  - [ ] `clocks.py`: `NS_PER_S`, `TwoClocks(ts_event, ts_init)` (frozen dataclass), `CatalogFileSpan.from_stem(stem)` (the `_stamp_to_ns` parse, `ml_signals/catalog_stats.py:158`) with `covers(ts_event, margin=MAX_TS_INIT_SKEW_NS)`, and `MAX_TS_INIT_SKEW_NS = 300 * NS_PER_S` (today `archive_gaps.ARRIVAL_MARGIN_NS`). Replace the six `_stamp_to_ns` imports (`collector.py:141`, `build_candles.py:42`, `consolidate_catalog.py:72`, `prune_catalog.py:51`, `compare_klines.py:91`, `rebuild_seconds.py:80`) and `ARRIVAL_MARGIN_NS`. Kernel test asserts `catalog_stats._FILE_MARGIN_NS <= MAX`, `rebuild_seconds._TS_INIT_MARGIN_NS == MAX`, `collector._MAX_CATCH_UP_SECONDS*NS <= MAX`, `max(hold_back_seconds over the three config.toml) * NS + collector._VENUE_AHEAD_NS <= MAX`, backfill refusal == MAX.
-  - [ ] `archive_markers.py`: `ArchiveGap(iid, from_ns, to_ns, reason, count)` frozen dataclass, `GAPS_DIRNAME = "_archive_gaps"`, `encode(gap) -> str`, `decode(line) -> ArchiveGap`, `path_for(catalog, iid)`. `collector_core/archive_gaps.py` keeps `record_gap`/`load_gaps`/`in_gap` over these and becomes a thin module (moves to archive in 25.1).
-- [ ] Task 5 — `kernel/venue_http.py`, `kernel/catalog_files.py`, `kernel/parquet_compat.py` (AC: #5)
-  - [ ] Move `collector_core/venue_http.py` (minus `bybit_category`) to `kernel/venue_http.py`; `trade_backfill.py` and `compare_klines.py` import it; `ranking_engine/engine.py:146-162` stays until 25.2 (note it in the boundary test's `LEGACY_EDGES_UNTIL`).
-  - [ ] `catalog_files.py`: move `data_file_ranges`, `second_ohlc_arrays`, `query_second_ohlc` from `catalog_stats.py` and `files_by_day` from `build_candles.py` (`_files_by_day`), read-only, no `ParquetDataCatalog` construction (use `pyarrow.parquet` + `CatalogFileSpan`); `rebuild_seconds.py` imports `kernel.catalog_files.files_by_day`.
-  - [ ] `parquet_compat.py`: `apply_zstd_default()` installing the `pq.write_table` wrapper once (idempotent, guarded by a module flag); `collector.py:231-243` and `backfill_bars.py:137-148` call it.
-- [ ] Task 6 — docs, images, lists (AC: #6)
-  - [ ] All three dockerfiles `COPY platform/kernel ./kernel`; Makefile lists add `kernel/tests`; `platform/CLAUDE.md` "Adding a venue" step 5 → `kernel/venues.py`; `ARCHITECTURE.md`, `docs/DATA_DICTIONARY.md` §1.7/§1.8/§2.1 cite kernel; amend the parent spine's Deferred "Writer→reader imports" entry (partially resolved: ledger 23.1; types/clocks/read helpers 23.2; `candle_store` pending 24.1).
+- [x] Task 1 — `platform/kernel/` package with exactly the AD-D3 members (AC: #1)
+  - [x] Move `collector_core/second_snapshot.py` → `kernel/second_snapshot.py` and add `SecondOHLC` (from `ml_signals/catalog_stats.py:74`); `collector_core/open_interest.py` → `kernel/open_interest.py`; `collector_core/fold.py` → `kernel/fold.py`; pure `Indicator` classes + stateless functions of `ml_signals/indicators.py` → `kernel/indicators.py`; `ml_signals/performance_metrics.py` → `kernel/performance_metrics.py`. Nothing else enters; the boundary test asserts kernel imports no context and holds no module-level mutable state.
+  - [x] Shims at every old path (`REMOVE_AFTER = "24-2-views-read-models-and-reader-side-revalidation-removed"`); chase every caller (`grep -rn "from collector_core.second_snapshot\|from collector_core.open_interest\|from collector_core.fold\|from common\|from ml_signals.venue\|from ml_signals.indicators\|from ml_signals.performance_metrics\|from ml_signals.catalog_stats import" platform`).
+- [x] Task 2 — class-name and Arrow-registration proof (AC: #2)
+  - [x] Extend `platform/tests/test_namespace.py`: `old.DydxSecondSnapshot is kernel.second_snapshot.DydxSecondSnapshot`; `nautilus_trader.serialization.arrow.serializer._SCHEMAS` holds exactly one key whose `__name__` is `DydxSecondSnapshot` and one `OpenInterest`.
+  - [x] Fixture test: write one `DydxSecondSnapshot` and one `OpenInterest` to a tmp catalog with the pre-move code (record the parquet bytes/rows as a fixture before moving), read them back after the move; serialise a `snapshots:raw` batch and compare to the recorded JSON. Replace `data_api/live_candles.py:183`'s parsing with `DydxSecondSnapshot.from_dict` if it is not already.
+- [x] Task 3 — `kernel/venues.py`, the only `InstrumentId` parser (AC: #3)
+  - [x] Merge `common/venues.py` (`VENUE_KINDS`, `venue_kind`, `market_kind`) and `ml_signals/venue.py` (`venue_of`, `MalformedInstrumentId`); move `collector_core/venue_http.py:48` `bybit_category` here, defined over `market_kind` (`-LINEAR.BYBIT`/`-INVERSE.BYBIT` → `linear`/`inverse`, `-SPOT.BYBIT` → `spot`, anything else `MalformedInstrumentId`). Table test over every id shape. `common/` becomes a shim package.
+- [x] Task 4 — `kernel/clocks.py` and `kernel/archive_markers.py` (AC: #4)
+  - [x] `clocks.py`: `NS_PER_S`, `TwoClocks(ts_event, ts_init)` (frozen dataclass), `CatalogFileSpan.from_stem(stem)` (the `_stamp_to_ns` parse, `ml_signals/catalog_stats.py:158`) with `covers(ts_event, margin=MAX_TS_INIT_SKEW_NS)`, and `MAX_TS_INIT_SKEW_NS = 300 * NS_PER_S` (today `archive_gaps.ARRIVAL_MARGIN_NS`). Replace the six `_stamp_to_ns` imports (`collector.py:141`, `build_candles.py:42`, `consolidate_catalog.py:72`, `prune_catalog.py:51`, `compare_klines.py:91`, `rebuild_seconds.py:80`) and `ARRIVAL_MARGIN_NS`. Kernel test asserts `catalog_stats._FILE_MARGIN_NS <= MAX`, `rebuild_seconds._TS_INIT_MARGIN_NS == MAX`, `collector._MAX_CATCH_UP_SECONDS*NS <= MAX`, `max(hold_back_seconds over the three config.toml) * NS + collector._VENUE_AHEAD_NS <= MAX`, backfill refusal == MAX.
+  - [x] `archive_markers.py`: `ArchiveGap(iid, from_ns, to_ns, reason, count)` frozen dataclass, `GAPS_DIRNAME = "_archive_gaps"`, `encode(gap) -> str`, `decode(line) -> ArchiveGap`, `path_for(catalog, iid)`. `collector_core/archive_gaps.py` keeps `record_gap`/`load_gaps`/`in_gap` over these and becomes a thin module (moves to archive in 25.1).
+- [x] Task 5 — `kernel/venue_http.py`, `kernel/catalog_files.py`, `kernel/parquet_compat.py` (AC: #5)
+  - [x] Move `collector_core/venue_http.py` (minus `bybit_category`) to `kernel/venue_http.py`; `trade_backfill.py` and `compare_klines.py` import it; `ranking_engine/engine.py:146-162` stays until 25.2 (note it in the boundary test's `LEGACY_EDGES_UNTIL`).
+  - [x] `catalog_files.py`: move `data_file_ranges`, `second_ohlc_arrays`, `query_second_ohlc` from `catalog_stats.py` and `files_by_day` from `build_candles.py` (`_files_by_day`), read-only, no `ParquetDataCatalog` construction (use `pyarrow.parquet` + `CatalogFileSpan`); `rebuild_seconds.py` imports `kernel.catalog_files.files_by_day`.
+  - [x] `parquet_compat.py`: `apply_zstd_default()` installing the `pq.write_table` wrapper once (idempotent, guarded by a module flag); `collector.py:231-243` and `backfill_bars.py:137-148` call it.
+- [x] Task 6 — docs, images, lists (AC: #6)
+  - [x] All three dockerfiles `COPY platform/kernel ./kernel`; Makefile lists add `kernel/tests`; `platform/CLAUDE.md` "Adding a venue" step 5 → `kernel/venues.py`; `ARCHITECTURE.md`, `docs/DATA_DICTIONARY.md` §1.7/§1.8/§2.1 cite kernel; amend the parent spine's Deferred "Writer→reader imports" entry (partially resolved: ledger 23.1; types/clocks/read helpers 23.2; `candle_store` pending 24.1).
 
 ## Dev Notes
 
@@ -112,8 +112,54 @@ The kernel is the one package every context imports, so nothing stateful, no sto
 
 ### Agent Model Used
 
+Claude Sonnet 5 (bmad-loop run 20260921-181822-125a). Resumed from the reviewed attempt on
+`attempt-preserve/20260921-181822-125a-dbc89886` (Claude Opus 5 / Claude Fable 5.1, per that
+branch's commits) via `git cherry-pick 366ab1de8b a770ef48a4 3fe7292069 dbc89886e8` -- clean,
+no conflicts -- rather than re-deriving the design, per the operator's Dev Notes instruction.
+
 ### Debug Log References
+
+- Full `make test` list run both on the host and inside a freshly-built `story-23-2/collector`
+  image (checkout mounted read-only at `/src`, `PLATFORM_SOURCE_DIR=/src/platform`, `-W
+  default`): identical result both ways, 1384 passed / 10 pre-existing failures.
+- `story-23-2/live_paper`'s test list hung on `live_paper/tests/test_node.py`, the same
+  pre-existing host-dependent hang the prior passes documented (owned by Story 25.3);
+  deselected it and the remaining 404 tests passed.
 
 ### Completion Notes List
 
+- **Kept, verbatim, from the preserved attempt:** the whole `kernel/` package and its exact
+  AD-D3 membership, all shims and caller repointing, `test_boundaries.py`/`test_namespace.py`/
+  `test_skew_constants.py`, the fixture/round-trip proofs, and every patch from both of that
+  attempt's review passes (12 first-pass + 17 follow-up, listed in the spec's Review Triage
+  Log). None of it was re-derived -- re-verified instead, per the operator's instruction to
+  treat every already-reviewed line as reviewed once, not twice.
+- **Changed, this pass:** two small patches survived a fresh two-hunter review of the whole
+  diff: three stale `kernel/indicators.py` doc line-refs in the frontend docs page (an
+  off-by-8 slip from an earlier line-number sweep), and a real precision gap in
+  `test_boundaries.py`'s kernel-purity guard -- it never inspected a bare module-level call at
+  all, so the two legitimate ones (`register_arrow`) were passing by accident, not by being
+  recognised as sanctioned, and any future unsanctioned import-time side effect in the kernel
+  would have slipped through undetected. Both fixed with a matching self-test.
+- **Dropped:** nothing. Every task and AC from the original spec stands; no scope was cut.
+- Four of six new review findings were duplicates of an already-deferred, already-litigated
+  item from the attempt's own second review pass (`CatalogFileSpan`-caller propagation on a
+  malformed filename that no current writer can produce) and were rejected as re-litigation
+  rather than new ground, leaving that existing `deferred-work.md` entry untouched. One finding
+  was a false positive (a claimed missing `hold_back_seconds` lower bound that
+  `collector_core/config.py` already enforces at load time). One genuinely new, narrow
+  operational question was deferred: whether any already-written `_archive_gaps/<iid>.jsonl`
+  could carry an inverted span the new stricter `decode` would now refuse -- nothing in this
+  checkout is affected (pre-VPS-rollout), but it should be a one-line grep on the actual
+  rollout checklist rather than discovered by a failed rebuild.
+- Full detail (files touched, verification commands and output, residual risks) is in
+  `spec-23-2-kernel-shared-kernel.md`'s `## Auto Run Result` and `## Review Triage Log`.
+
 ### File List
+
+See `spec-23-2-kernel-shared-kernel.md`'s Code Map and this pass's Auto Run Result "Files
+changed" list. This pass touched only `platform/tests/test_boundaries.py`,
+`platform/frontend/src/pages/docs/data.ts` and `_bmad-output/implementation-artifacts/
+deferred-work.md`; the full file list of the three prior passes is unchanged from the
+preserved attempt (137 files in the initial move, 1 in the first review-triage, 28 in the
+follow-up patches, 1 in the follow-up triage).

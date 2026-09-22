@@ -101,7 +101,7 @@ export const INDICATORS: Indicator[] = [
       "None when either side of the book is empty (thin/no book) — never fabricated as zero.",
       "Displayed in basis points client-side on both the ranking table and coin detail (<code>bpsFromPriceUnits</code>), same normalization as Microprice Lean.",
     ],
-    refs: ["kernel/indicators.py:436"],
+    refs: ["kernel/indicators.py:444"],
     related: ["microprice", "mid_price"],
   },
   {
@@ -113,7 +113,7 @@ export const INDICATORS: Indicator[] = [
     notes: [
       "This is <em>not</em> microprice — no size weighting. It's the baseline every normalized bps/USD figure on the tables (spread, lean, CVD, volume delta) is scaled against.",
     ],
-    refs: ["kernel/indicators.py:445"],
+    refs: ["kernel/indicators.py:453"],
     related: ["microprice", "spread"],
   },
   {
@@ -179,7 +179,7 @@ export const INDICATORS: Indicator[] = [
       '<span class="callout">Label note:</span> the ranking table\'s column header reads “Vol d 60s” — that “60s” describes the table\'s own poll/refresh interval, <em>not</em> the underlying window. The value itself is always exactly one snapshot tick (≈ 1 second), the fastest-updating field on the whole table. Don\'t confuse this with <a data-nav="i:cvd">CVD</a>, which genuinely does sum over 300 snapshots.',
       "Raw base-token units; normalized to USD client-side, same as CVD.",
     ],
-    refs: ["kernel/indicators.py:454"],
+    refs: ["kernel/indicators.py:462"],
     related: ["cvd"],
   },
   {

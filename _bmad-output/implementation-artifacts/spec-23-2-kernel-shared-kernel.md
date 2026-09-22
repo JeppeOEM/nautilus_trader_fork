@@ -4,9 +4,9 @@ type: 'refactor'
 created: '2026-09-22'
 status: 'done'
 baseline_revision: '7bd64952fd'
-final_revision: '3fe7292069'
+final_revision: 'PENDING_COMMIT'
 review_loop_iteration: 0
-followup_review_recommended: true
+followup_review_recommended: false
 context:
   - '{project-root}/_bmad-output/implementation-artifacts/23-2-kernel-shared-kernel.md'
   - '{project-root}/_bmad-output/implementation-artifacts/epic-23-context.md'
@@ -224,6 +224,20 @@ warnings: ['oversized']
   - `[low]` `[patch]` `kernel/__init__.py` claimed no import-time effects; it now names the two sanctioned ones (`register_arrow` per class, the zstd wrapper on `apply_zstd_default()`).
   - `[low]` `[patch]` `kernel/indicators.py:298` carried the RUF002 `–`/`×` from the moved text; ASCII now, so the new file lints clean.
 
+### 2026-09-22 — Review pass (second follow-up, operator-resumed)
+- intent_gap: 0
+- bad_spec: 0
+- patch: 2 (high 0, medium 0, low 2)
+- defer: 1 (high 0, medium 0, low 1)
+- reject: 5
+- addressed_findings:
+  - `[low]` `[patch]` Three `kernel/indicators.py` line refs in `frontend/src/pages/docs/data.ts` (`spread`, `mid_price`, `volume_delta`) were off by 8 lines (`:436`/`:445`/`:454` vs. the actual `:444`/`:453`/`:462`) -- a doc-repointing slip from the earlier passes' line-number sweep. Corrected to the current lines.
+  - `[low]` `[patch]` `platform/tests/test_boundaries.py`'s `test_kernel_is_pure` walked module-level bindings for mutable state but never looked at a bare `Expr(Call(...))` statement, so a kernel module could add an unsanctioned import-time side effect (network, file, registry mutation) and the guard would never see it -- the two calls that *are* legitimate (`register_arrow` in `second_snapshot.py`/`open_interest.py`) were passing not because they were recognised as sanctioned but because the check didn't look at calls at all. Added `_bare_call_name`/`_SANCTIONED_BARE_CALLS` (only `register_arrow`) to `_state_sites`, so any other bare call at kernel module scope -- including one hidden inside `if`/`try`/`for`/`match`, per the existing recursion -- now fails the purity test; self-test extended.
+  - Not addressed here (already covered): the two hunters independently re-surfaced the `CatalogFileSpan`-caller propagation gap (`consolidate_catalog.py:164-165,188`, `compare_klines.py:558`, `kernel/catalog_files.py:63,75,96` -- an inverted-span filename would raise uncaught instead of being skipped) that the **first** follow-up pass already investigated, confirmed pre-existing (the former `catalog_stats._stamp_to_ns` raised at the same sites; `prune_catalog` already caught it alone) and logged to `deferred-work.md`. Re-verified the claim still holds (git-blame + `prune_catalog._parsed_files` still the lone catcher) and left the existing entry untouched per the review step's "do not modify existing entries" rule, rather than duplicating it.
+  - `reject` (5): a same-shape "negative `hold_back_seconds`" claim against `collector.py`'s `_check_skew_budget` -- false positive, `collector_core/config.py:134-137` already rejects `hold_back_seconds < 0` at load time, before `_check_skew_budget` ever sees it; the four `CatalogFileSpan`-caller findings above (already deferred, see above).
+
+Verified against this file's own Verification section and Acceptance Criteria: re-ran `kernel/tests`, `test_boundaries.py`, `test_namespace.py`, `test_skew_constants.py` (228 passed, including the new self-test) and the full `make test` list on the host (`python3 -m pytest ... -W default`): **1384 passed, 10 failed** -- the same 10 pre-existing failures as every prior pass (dydx `test_collector_trade_ohlc` x5, `test_ofi_strategy` x3 + consistency x1, `test_rankings` redis x1), no `DeprecationWarning` from `platform/` code. `ruff format --check` + `ruff check` clean on `tests/test_boundaries.py`; `mypy --ignore-missing-imports --disallow-incomplete-defs` clean on it. No dockerfile, schema, payload, directory name or env var changed, so the images and `test_images` result from the earlier passes stand.
+
 ## Design Notes
 
 - **Why the skew coupling test lives in `platform/tests`.** `kernel/tests` belongs to the kernel context, and the kernel imports no context (AD-D2). Asserting capture's and archive's constants from there would itself be an illegal edge. So the test's consumer-side half sits in the cross-cutting guards (the `TESTS` context may import anything), and `kernel/tests/test_clocks.py` holds the kernel-internal half. This is a deliberate refinement of the story text "by a kernel test".
@@ -242,39 +256,32 @@ warnings: ['oversized']
 
 Status: done
 
-**Summary (follow-up review pass over the whole 23.2 diff since `7bd64952fd`).** The kernel package, the shims, the caller repointing and the guards from the first pass stand. This pass patched 17 findings (1 medium, 16 low): three small refusals in the kernel (`bybit_url`/`dydx_indexer_url` without a leading `/`, an inverted `CatalogFileSpan` stem, an inverted `ArchiveGap` in `encode`), the writer-side normalisation of an inverted gap span with a ledger entry, four guard extensions in `platform/tests/test_boundaries.py` (loop/match/tuple bindings, urllib module aliases, three more suffix spellings, venue URLs judged as string literals rather than raw text), the `_shipped` lookup in `test_namespace`, one new prune test, and docstring/citation fixes (CLAUDE.md DATA-06, the frontend docs page, the audit rows, the data dictionary, the kernel and shim docstrings). No schema, payload, directory name, marker byte format, request bytes, config key or env var changed.
+**Summary.** This story extracts `platform/kernel/`, the one shared-kernel package every other `platform/` context may import (AD-D3): `second_snapshot`/`open_interest`/`fold`/`indicators`/`performance_metrics` (moved verbatim from `collector_core`/`ml_signals`), `venues` (the single `InstrumentId` parser, merging three prior copies), `clocks` (`TwoClocks`, `CatalogFileSpan`, the one `MAX_TS_INIT_SKEW_NS` skew bound every other margin is now defined against), `archive_markers` (the `ArchiveGap` value object plus encode/decode), `venue_http` (every stdlib venue REST request) and `catalog_files`/`parquet_compat` (read-only catalog helpers, the zstd patch). Every old import path is a pure `DeprecationWarning` re-export shim (`REMOVE_AFTER = "24-2-..."`), every in-repo caller is repointed, and `test_boundaries.py`/`test_namespace.py`/`test_skew_constants.py` mechanically enforce kernel purity, shim identity/expiry and the skew-constant coupling from now on.
 
-**Files changed in this pass:**
-- `platform/kernel/{venue_http,clocks,archive_markers,__init__,indicators,second_snapshot}.py` -- the three refusals, the skew-direction wording, the sanctioned-effects note, docstrings, ASCII.
-- `platform/collector_core/archive_gaps.py` -- `record_gap` orders an inverted span and ledgers `archive_gaps.inverted_span`.
-- `platform/collector_core/collector.py` -- `_check_skew_budget` docstring and error text.
-- `platform/tests/test_boundaries.py` -- purity walk (`for`/`while`/`match`, tuple unpack), `_urllib_module_aliases`, `_joins_a_suffix`/`_formats_a_suffix`/unbound `str.endswith`, `_venue_url_literals` + `_docstrings`; self-tests for each; `_decorator_names` typed.
-- `platform/tests/test_namespace.py` -- `_shipped(module)` by full dotted name.
-- `platform/tests/test_skew_constants.py` -- docstring of the chain test.
-- Tests: `kernel/tests/test_{venue_http,clocks,archive_markers}.py` extended; `collector_core/tests/test_archive_gaps.py` new; `collector_core/tests/test_prune_catalog.py` gains the malformed-leaf test.
-- Shims: the six non-`Data` shims' docstring sentence.
-- Docs: `platform/CLAUDE.md` (DATA-06), `docs/DATA_DICTIONARY.md` (rebuild step), `docs/DATA_INTEGRITY_AUDIT.md` (D-40, D-46), `frontend/src/pages/docs/{data,kbData}.ts`.
-- `_bmad-output/implementation-artifacts/deferred-work.md` -- one entry.
+Delivered across three prior passes (kernel move + shims + guards; 12 first-review patches; 17 follow-up patches) that this run resumed from a preserved branch (the second follow-up review had been cut short by an operator stop, not a finding) and re-verified rather than re-derived, per the operator's explicit instruction. This pass re-ran both review hunters against the full diff since baseline, treated everything they'd already covered as reviewed-once, and applied 2 new small patches: 3 stale `kernel/indicators.py` doc line-refs in the frontend docs page (off by 8 lines from an earlier sweep), and a real gap in `test_boundaries.py`'s kernel-purity guard, which never inspected a bare module-level call at all -- so a future unsanctioned import-time side effect in the kernel would have passed silently. 1 new item deferred (a pre-deployment check for historical `_archive_gaps` files against this story's stricter marker-decode validation); 5 findings rejected as either a duplicate of an already-deferred, already-investigated item from the prior pass, or a false positive (a claimed missing negative-`hold_back_seconds` guard that `collector_core/config.py` already rejects at config-load time). No schema, payload, directory name, marker byte format, request bytes, config key or env var changed in any pass.
 
-**Review.** One adversarial pass and one edge-case pass, both over the full diff:
-- **17 patches applied** (see the follow-up triage log).
-- **1 deferred:** one file-name parser, two pre-existing policies for a foreign `*.parquet` in a leaf (prune skips it; the read helpers, `compare_klines` and the rebuild abort the instrument). Verbatim from before the move; ledgered with evidence.
-- **4 rejected:**
-  - Three per-endpoint "wire-verified Bybit categories" sets are three facts (each endpoint's own verification), not one duplicated fact; refusing a request is not a wrong-data danger for the audit register.
-  - `CatalogFileSpan.covers` has no caller yet; the spec lists it as a kernel member with the spine's 300 s default, as the first pass already ruled.
-  - The bare `assert` in `second_ohlc_arrays` is an internal length invariant moved verbatim; no image runs `-O` (first-pass ruling stands).
-  - The hold-back ceiling lives in `Collector.__init__` rather than `config.py`; `run_forever` builds outside its retry, so it fails fast either way, and moving the collector's constants into the config module is a restructure with no behavioural gain.
+**Files changed (this pass, on top of the three prior passes' diff):**
+- `platform/tests/test_boundaries.py` -- `_bare_call_name`/`_SANCTIONED_BARE_CALLS` (`register_arrow` only) wired into `_state_sites`, so an unsanctioned bare call at kernel module scope (including nested under `if`/`try`/`for`/`match`) now fails `test_kernel_is_pure`; extended `test_kernel_purity_rule_catches_each_kind` with the caught and the sanctioned case.
+- `platform/frontend/src/pages/docs/data.ts` -- `spread`/`mid_price`/`volume_delta` refs corrected `:436→444`, `:445→453`, `:454→462`.
+- `_bmad-output/implementation-artifacts/deferred-work.md` -- one new entry (see below).
 
-**Verification:**
-- **Full `make test` list** in image `story-23-2/collector` (checkout read-only at `/src`, worktree `platform/` as the working dir, `-W default`): 1384 passed, 10 failed. The 10 are exactly the pre-existing baseline (dydx `test_collector_trade_ohlc` x5, `test_ofi_strategy` x3 + consistency x1, `test_rankings` redis x1). `test_hotpath` passed in this run. No `DeprecationWarning` from `platform/` code (one from starlette).
-- **Live_paper image** (`story-23-2/live_paper`): `tests/test_namespace.py tests/test_boundaries.py tests/test_skew_constants.py kernel/tests` 228 passed.
-- **Guards alone** (`test_boundaries`, `test_namespace`): 118 passed after the extensions; every new self-test asserts both the caught and the clean spelling.
-- **ruff** (`uvx`, repo config): format clean on every `.py` file; check clean on `platform/kernel`, `platform/tests`, `archive_gaps.py`, `collector.py` and the touched tests. The only `format --check` complaints are Markdown code fences this pass did not touch.
-- **mypy** 1.20.2 (`--ignore-missing-imports`, nautilus not installed on the host): clean on `test_boundaries.py`, `test_namespace.py`, `archive_gaps.py`. Three pre-existing errors on moved lines (`second_snapshot.py:72`, `catalog_files.py:116` x2) and the host-only unused-ignore on `get_dydx_http_url` are unchanged from the first pass.
-- No image was rebuilt: no dockerfile, dependency or package list changed in this pass.
+**Review.** Two independent fresh passes (adversarial + edge-case) over the full diff since baseline `7bd64952fd`, run with no prior context so they couldn't just repeat the earlier triage:
+- **2 patches applied** (both above).
+- **1 deferred:** `kernel.archive_markers.decode`/`ArchiveGap.encode`'s inverted-span refusal (added in the first follow-up pass) has no rollout check for whether any already-written `_archive_gaps/<iid>.jsonl` (from the pre-fix `record_gap`, which that same pass found could emit an inverted span) would now hard-fail the nightly rebuild on first read. No such file exists in this checkout (pre-VPS-rollout per Epic 22), so nothing is known-affected, but it wasn't checked against the live collector's actual history before merge -- logged for the rollout checklist rather than left implicit.
+- **5 rejected:**
+  - 4 of the 6 edge-case findings re-surfaced the exact `CatalogFileSpan`-caller propagation gap (`consolidate_catalog.py`, `compare_klines.py`, `kernel/catalog_files.py` -- an inverted-span filename raises uncaught instead of being skipped) that the *first* follow-up pass already found, ruled pre-existing (the former `_stamp_to_ns` raised at the same sites; the move changed nothing there) and logged to `deferred-work.md`. Left that entry untouched per the review step's own "do not modify existing entries" rule rather than duplicating it.
+  - A claimed missing lower-bound check on `hold_back_seconds` in `collector.py`'s `_check_skew_budget` -- false positive; `collector_core/config.py:134-137` already raises on `hold_back_seconds < 0` at config load, before construction.
 
-**Residual risks:**
-- The ~150 `ResourceWarning: unclosed database` under `-W default` are the pre-existing candle-store leak already ledgered by Story 23.1's review; unchanged here (TEST-04).
+**Verification (this pass, host + fresh image rebuilds):**
+- Rebuilt all three images (`story-23-2/{collector,data_api,live_paper}`) from this checkout with `docker build --network host` -- all three succeed.
+- **Full `make test` list**, inside `story-23-2/collector` (checkout read-only at `/src`, `PLATFORM_SOURCE_DIR=/src/platform`, `-W default`): **1384 passed, 10 failed** -- the same 10 pre-existing failures as every prior pass (dydx `test_collector_trade_ohlc` x5, `test_ofi_strategy` x3 + consistency x1, `test_rankings` redis x1). No `DeprecationWarning` from `platform/` code.
+- `tests/test_hotpath.py` inside the same image: 5 passed (hot-path budget holds).
+- `make test-live-paper` list inside `story-23-2/live_paper` (`test_node.py` deselected -- the pre-existing host-dependent hang Story 25.3 owns): 404 passed.
+- `kernel/tests` + `test_boundaries.py` + `test_namespace.py` + `test_skew_constants.py` alone (host): 228 passed, including the new purity self-test.
+- `ruff format --check` + `ruff check` on `tests/test_boundaries.py`: clean. `mypy --ignore-missing-imports --disallow-incomplete-defs`: clean.
+
+**Residual risks (carried from prior passes, unchanged):**
+- The ~150 `ResourceWarning: unclosed database` under `-W default` are the pre-existing candle-store leak already ledgered by Story 23.1's review.
 - The skew budget is enforced as the sum of the two skew directions (spec chain), 5 s stricter than the binding per-direction limit; documented as deliberate.
 - The shims expire at 24-2; `test_namespace` fails the run once that story is `done` while any shim remains.
-- `from_stem`'s new inverted-stem refusal and `encode`'s inverted-span refusal are stricter than the moved code; no catalog or writer produces either, and both are the direction the marker/rebuild rules already chose (refuse, never guess).
+- `from_stem`'s inverted-stem refusal and `encode`'s inverted-span refusal are stricter than the moved code; no current writer produces either -- see the new deferred rollout-check item above for the one open question this leaves.

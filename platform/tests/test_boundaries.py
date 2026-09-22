@@ -650,6 +650,18 @@ _MUTABLE_LITERALS = (ast.Dict, ast.List, ast.Set, ast.DictComp, ast.ListComp, as
 
 
 _CACHE_DECORATORS = frozenset({"cache", "lru_cache", "cached_property"})
+# The kernel's own two sanctioned import-time effects are `register_arrow` (once per `Data`
+# class) and `apply_zstd_default()` -- but the latter is only ever *defined* here, never
+# *called* here (its callers are `collector.py`/`backfill_bars.py`), so at kernel module scope
+# the only bare call an import may legitimately run is `register_arrow`.
+_SANCTIONED_BARE_CALLS = frozenset({"register_arrow"})
+
+
+def _bare_call_name(node: ast.stmt) -> str | None:
+    if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
+        callee = node.value.func
+        return getattr(callee, "id", None) or getattr(callee, "attr", None)
+    return None
 
 
 def _is_mutable_value(value: ast.expr | None) -> bool:
@@ -685,6 +697,8 @@ def _state_sites(statements: list[ast.stmt]) -> list[str]:
         elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
             if _decorator_names(node) & _CACHE_DECORATORS:
                 found.append(f"line {node.lineno} (memoising cache)")
+        elif (name := _bare_call_name(node)) is not None and name not in _SANCTIONED_BARE_CALLS:
+            found.append(f"line {node.lineno} (unsanctioned import-time call: {name})")
         elif isinstance(node, ast.ClassDef):
             found += _state_sites(node.body)
         elif isinstance(node, ast.If | ast.Try | ast.With | ast.For | ast.AsyncFor | ast.While):
@@ -753,6 +767,11 @@ def test_kernel_purity_rule_catches_each_kind() -> None:
         "line 9",
         "line 10",
         "line 11",
+    ]
+    called = ast.parse("register_arrow(X)\nsome_side_effect()\nif True:\n    another_one()\n")
+    assert _mutable_module_state(called) == [
+        "line 2 (unsanctioned import-time call: some_side_effect)",
+        "line 4 (unsanctioned import-time call: another_one)",
     ]
 
 
