@@ -13,42 +13,40 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-Venue REST endpoints and the stdlib JSON transport shared by the kline reconciliation
-(`compare_klines`, story 22.13) and the trade backfill (`trade_backfill`, story 22.14).
+Deprecated re-export shim (Story 23.2): `collector_core.venue_http` moved to the shared kernel (kernel.venue_http, kernel.venues).
 
-Stdlib `urllib` only, as every other venue REST poll in the collectors: no extra dependency, and
-the pyo3 HTTP clients parse decimals through `f64` (audit D-52), which cannot prove raw-unit
-equality.
+Pure re-export, defines nothing: every name here *is* the kernel object (a copied class would
+register a second Arrow class or break `is` dispatch). Import from the kernel instead, e.g.
+`from kernel import venue_http`.
 """
 
-import json
-import urllib.request
-from collections.abc import Callable
-from typing import Any
+import warnings
 
-from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
-
-
-BYBIT_URLS = {"mainnet": "https://api.bybit.com", "testnet": "https://api-testnet.bybit.com"}
-HYPERLIQUID_URLS = {
-    "mainnet": "https://api.hyperliquid.xyz/info",
-    "testnet": "https://api.hyperliquid-testnet.xyz/info",
-}
-DYDX_NETWORKS = {"mainnet": DydxNetwork.MAINNET, "testnet": DydxNetwork.TESTNET}
-USER_AGENT = "nautilus-platform-reconcile/1.0"  # dYdX's indexer rejects urllib's default (403)
-
-HttpJson = Callable[[urllib.request.Request], Any]
+from kernel.venue_http import BYBIT_URLS
+from kernel.venue_http import DYDX_NETWORKS
+from kernel.venue_http import HYPERLIQUID_URLS
+from kernel.venue_http import USER_AGENT
+from kernel.venue_http import HttpJson
+from kernel.venue_http import http_json
+from kernel.venues import bybit_category
 
 
-def http_json(request: urllib.request.Request) -> Any:
-    with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310 (fixed https URLs)
-        return json.load(response)
+__all__ = [
+    "BYBIT_URLS",
+    "DYDX_NETWORKS",
+    "HYPERLIQUID_URLS",
+    "USER_AGENT",
+    "HttpJson",
+    "bybit_category",
+    "http_json",
+]
 
+REMOVE_AFTER = "24-2-views-read-models-and-reader-side-revalidation-removed"
 
-def bybit_category(iid: str) -> str:
-    """Bybit's REST `category` for a Nautilus Bybit id; `ValueError` for any other suffix."""
-    if iid.endswith("-LINEAR.BYBIT"):
-        return "linear"
-    if iid.endswith("-SPOT.BYBIT"):
-        return "spot"
-    raise ValueError(f"{iid}: no Bybit category for this id suffix")
+# Attributed to the importing module, not to importlib's frames.
+warnings.warn(
+    "collector_core.venue_http moved to kernel.venue_http, kernel.venues (Story 23.2); "
+    f"this shim is removed after {REMOVE_AFTER}",
+    DeprecationWarning,
+    skip_file_prefixes=("<frozen importlib",),
+)

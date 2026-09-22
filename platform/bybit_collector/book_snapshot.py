@@ -30,10 +30,11 @@ from decimal import Decimal
 
 from collector_core.book_check import BookSnapshot
 from collector_core.book_check import Level
-from collector_core.venue_http import BYBIT_URLS
-from collector_core.venue_http import HttpJson
-from collector_core.venue_http import bybit_category
-from collector_core.venue_http import http_json
+from kernel.venue_http import HttpJson
+from kernel.venue_http import bybit_url
+from kernel.venue_http import get_request
+from kernel.venue_http import http_json
+from kernel.venues import bybit_category
 
 
 def _levels(raw: list[list[str]]) -> list[Level]:
@@ -47,14 +48,19 @@ def parse_orderbook(result: dict) -> BookSnapshot:
     )
 
 
+# Known limit: the linear and spot orderbooks are the wire-verified ones (22.5); an
+# `-INVERSE.BYBIT` id is refused until its `seq` alignment is verified (then add it).
+_BOOK_CATEGORIES = frozenset({"linear", "spot"})
+
+
 def _request(environment: str, iid: str, depth: int) -> urllib.request.Request:
     symbol = iid.split("-", 1)[0]
-    query = urllib.parse.urlencode(
-        {"category": bybit_category(iid), "symbol": symbol, "limit": depth}
-    )
-    return urllib.request.Request(  # noqa: S310 (fixed https URL)
-        f"{BYBIT_URLS[environment]}/v5/market/orderbook?{query}",
-        headers={"User-Agent": "nautilus-bybit-collector/1.0"},
+    category = bybit_category(iid)
+    if category not in _BOOK_CATEGORIES:
+        raise ValueError(f"{iid}: the Bybit {category} orderbook check is not wire-verified")
+    query = urllib.parse.urlencode({"category": category, "symbol": symbol, "limit": depth})
+    return get_request(
+        bybit_url(environment, f"/v5/market/orderbook?{query}"), "nautilus-bybit-collector/1.0"
     )
 
 

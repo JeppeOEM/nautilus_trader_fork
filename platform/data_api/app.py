@@ -33,14 +33,14 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
 
-from collector_core.second_snapshot import DydxSecondSnapshot
 from fastapi import FastAPI
 from fastapi import HTTPException
 from fastapi import Request
 from fastapi.responses import JSONResponse
+from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.venues import MalformedInstrumentId
 from ml_signals import catalog_stats as _catalog_stats
 from ml_signals import chart_data as _chart_data
-from ml_signals.venue import MalformedInstrumentId
 from observability import error_ledger
 from pydantic import BaseModel
 from ranking_engine import metrics_store

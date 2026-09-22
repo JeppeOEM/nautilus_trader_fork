@@ -117,7 +117,7 @@ class MyStrategy(Strategy):
         ...  # your signal + self.submit_order(...) logic
 ```
 
-Reuse an existing indicator from `ml_signals/indicators.py` (SIGNAL-01: derive from
+Reuse an existing indicator from `kernel/indicators.py` (SIGNAL-01: derive from
 stored snapshot fields, don't reinvent) rather than rolling your own math inline.
 
 **Wire it into a backtest run** by pointing `ImportableStrategyConfig` at the new class

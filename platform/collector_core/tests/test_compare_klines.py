@@ -27,6 +27,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from kernel.fold import fold_trades
+from kernel.second_snapshot import DydxSecondSnapshot
 from ml_signals import candle_store
 from observability import error_ledger
 
@@ -36,6 +38,7 @@ from collector_core.compare_klines import Kline
 from collector_core.compare_klines import KlineError
 from collector_core.compare_klines import fetch_klines
 from collector_core.compare_klines import float_units
+from collector_core.compare_klines import instruments_on_day
 from collector_core.compare_klines import parse_bybit_klines
 from collector_core.compare_klines import parse_dydx_candles
 from collector_core.compare_klines import parse_hyperliquid_candles
@@ -43,8 +46,6 @@ from collector_core.compare_klines import reconcile_instrument
 from collector_core.compare_klines import run
 from collector_core.compare_klines import seed_with_previous_close
 from collector_core.compare_klines import units
-from collector_core.fold import fold_trades
-from collector_core.second_snapshot import DydxSecondSnapshot
 from nautilus_trader.model.currencies import BTC
 from nautilus_trader.model.currencies import USDT
 from nautilus_trader.model.data import TradeTick
@@ -414,3 +415,33 @@ def test_a_seed_consequence_is_named_in_the_second_mismatch(tmp_path: Path) -> N
     assert len(result.mismatches) == 2
     assert "seed" not in result.mismatches[0]
     assert result.mismatches[1].endswith("(seed from a mismatched minute)")
+
+
+def test_instruments_on_day_keeps_only_the_venues_ids_with_a_file_that_day(tmp_path: Path) -> None:
+    day_ms = 1_780_000_000_000 // 86_400_000 * 86_400_000
+    stamp = "2026-05-28T12-00-00-000000000Z"
+    assert day_ms == 1_779_926_400_000  # 2026-05-28 00:00 UTC, the stamp's day
+    for leaf in ("BTCUSDT-LINEAR.BYBIT", "ETHUSDT-SPOT.BYBIT", "BTC-USD-PERP.DYDX"):
+        directory = tmp_path / "data" / "trade_tick" / leaf
+        directory.mkdir(parents=True)
+        (directory / f"{stamp}_{stamp}.parquet").write_bytes(b"")
+    old = tmp_path / "data" / "custom_dydx_second_snapshot" / "XRPUSDT-LINEAR.BYBIT"
+    old.mkdir(parents=True)
+    (old / "2026-05-20T00-00-00-000000000Z_2026-05-20T01-00-00-000000000Z.parquet").write_bytes(b"")
+    (tmp_path / "data" / "trade_tick" / "stray.BYBIT").write_text("not a leaf")
+
+    assert instruments_on_day(str(tmp_path), "BYBIT", day_ms) == [
+        "BTCUSDT-LINEAR.BYBIT",
+        "ETHUSDT-SPOT.BYBIT",
+    ]
+    assert instruments_on_day(str(tmp_path), "DYDX", day_ms) == ["BTC-USD-PERP.DYDX"]
+    assert instruments_on_day(str(tmp_path / "empty"), "BYBIT", day_ms) == []
+
+
+def test_an_inverse_bybit_id_is_refused_before_any_request() -> None:
+    """Inverse klines count contracts, not the base asset our fold sums: refused, not compared."""
+    http = _Recorder()
+    inverse = _instrument("BTCUSD-INVERSE.BYBIT", "BTCUSD", 1, 0)
+    with pytest.raises(KlineError, match="not wire-verified"):
+        fetch_klines("BYBIT", inverse, 0, "mainnet", http)
+    assert http.requests == []

@@ -28,6 +28,8 @@ from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING
 
+from kernel.venues import market_suffix
+
 from nautilus_trader.adapters.bybit.config import BybitDataClientConfig
 from nautilus_trader.adapters.bybit.config import BybitExecClientConfig
 from nautilus_trader.adapters.bybit.constants import BYBIT
@@ -74,11 +76,10 @@ def _bybit_exec_kwargs(config: "ExecConfig") -> dict:
     """
     Bybit's exec client is scoped to product types, and the instrument id's own suffix is
     that product type (`BTCUSDT-LINEAR.BYBIT` -> LINEAR) -- the same suffix
-    `common.venues.market_kind()` reads. So the bot's one instrument decides it.
+    `kernel.venues.market_kind()` reads. So the bot's one instrument decides it.
     """
-    symbol = config.instrument_id.rpartition(".")[0]
-    suffix = symbol.rpartition("-")[2].upper()
-    product_type = getattr(BybitProductType, suffix, None) if "-" in symbol else None
+    suffix = market_suffix(config.instrument_id)
+    product_type = getattr(BybitProductType, suffix.upper(), None) if suffix else None
     if product_type is None:
         raise ValueError(
             f"Bybit instrument id {config.instrument_id!r} must carry its product type as the "

@@ -17,7 +17,7 @@
 import tempfile
 
 import pytest
-from collector_core.second_snapshot import DydxSecondSnapshot
+from kernel.second_snapshot import DydxSecondSnapshot
 from ml_signals import catalog_stats
 
 from nautilus_trader.model.identifiers import InstrumentId

@@ -25,16 +25,16 @@ runtime dependency).
 """
 
 import asyncio
-import json
 import time
-import urllib.request
 from decimal import Decimal
 
-from collector_core.open_interest import OpenInterest
+from kernel.open_interest import OpenInterest
+from kernel.venue_http import dydx_indexer_url
+from kernel.venue_http import get_request
+from kernel.venue_http import http_json
 from observability import error_ledger
 
 from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
-from nautilus_trader.core.nautilus_pyo3 import get_dydx_http_url  # type: ignore[attr-defined]
 from nautilus_trader.model.identifiers import InstrumentId
 
 
@@ -100,14 +100,9 @@ def classify_liquidity(
 
 
 def _fetch_markets_json(network: DydxNetwork) -> dict:
-    url = f"{get_dydx_http_url(network)}/v4/perpetualMarkets"
     # dYdX's indexer rejects urllib's default User-Agent (403); needs a real one.
-    request = urllib.request.Request(  # noqa: S310 (fixed https indexer URL)
-        url,
-        headers={"User-Agent": "nautilus-dydx-collector/1.0"},
-    )
-    with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310
-        return json.load(response)
+    url = dydx_indexer_url(network, "/v4/perpetualMarkets")
+    return http_json(get_request(url, "nautilus-dydx-collector/1.0"))
 
 
 async def fetch_open_interest(network: DydxNetwork) -> list[OpenInterest]:

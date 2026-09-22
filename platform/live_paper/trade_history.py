@@ -45,7 +45,7 @@ import logging
 import time
 
 import redis.asyncio as aioredis
-from ml_signals import performance_metrics
+from kernel import performance_metrics
 
 from live_paper import fills_store
 from nautilus_trader.model.enums import OrderSide
@@ -103,7 +103,7 @@ def _fill_pnl(strategy: Strategy, fill: OrderFilled) -> tuple[float | None, floa
 
     position_realized_pnl is the round trip's true total, set ONLY on the fill that
     closes the position (None on every other fill) -- fills_store.win_rate_stats()/
-    ml_signals.performance_metrics feed on this instead of realized_pnl, since those
+    kernel.performance_metrics feed on this instead of realized_pnl, since those
     are inherently per-completed-trade stats and a multi-fill close must still count
     as exactly one trade, not several.
 
@@ -205,7 +205,7 @@ def compute_history(
     Assemble one bots:history:{bot_id}:{range_name} wire-contract payload (AC2/AC3),
     now including a "metrics" dict (Sharpe/Sortino/Calmar/max drawdown/profit factor/
     win rate/expectancy/avg-max win-loss) computed via
-    ml_signals.performance_metrics.all_metrics -- the single shared implementation
+    kernel.performance_metrics.all_metrics -- the single shared implementation
     bot_tui and any future ML/backtest evaluation code both read (SSOT-02).
 
     starting_balance anchors the equity curve return-based stats (Sharpe etc.) are

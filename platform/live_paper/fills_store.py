@@ -146,7 +146,7 @@ def position_realized_pnls(bot_id: str, db_path: str, cutoff_ns: int | None) -> 
     """
     One realized_pnl value per completed round trip (open->close), at/after cutoff_ns
     (all time if None), in chronological order -- feeds
-    ml_signals.performance_metrics.trade_stats()/all_metrics(), which are inherently
+    kernel.performance_metrics.trade_stats()/all_metrics(), which are inherently
     per-completed-trade statistics (win_rate, expectancy, avg/max win/loss) and would
     be diluted by counting a multi-fill close as several trades.
     """

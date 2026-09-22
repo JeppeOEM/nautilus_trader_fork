@@ -25,7 +25,7 @@ forwarder is unaffected by the new candle-subscription machinery added here).
 import asyncio
 
 import pytest
-from collector_core.second_snapshot import DydxSecondSnapshot
+from kernel.second_snapshot import DydxSecondSnapshot
 
 from data_api import live_candles
 from data_api.live_candles import LiveCandleBus

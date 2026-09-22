@@ -1,5 +1,5 @@
 from collector_core.integrity import ohlc_outside_book
-from collector_core.second_snapshot import DydxSecondSnapshot
+from kernel.second_snapshot import DydxSecondSnapshot
 
 from nautilus_trader.model.identifiers import InstrumentId
 

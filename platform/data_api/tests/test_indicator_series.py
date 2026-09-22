@@ -20,12 +20,12 @@ DydxSecondSnapshot, mirrors test_candles.py's fixture pattern.
 from pathlib import Path
 
 import pytest
-from collector_core.second_snapshot import DydxSecondSnapshot
 from fastapi.testclient import TestClient
-from ml_signals.indicators import MultiLevelOBI
-from ml_signals.indicators import MultiLevelOFI
-from ml_signals.indicators import microprice as _microprice
-from ml_signals.indicators import spread as _spread
+from kernel.indicators import MultiLevelOBI
+from kernel.indicators import MultiLevelOFI
+from kernel.indicators import microprice as _microprice
+from kernel.indicators import spread as _spread
+from kernel.second_snapshot import DydxSecondSnapshot
 
 import data_api.app as app_module
 import data_api.routes.indicator_series as indicator_series_routes

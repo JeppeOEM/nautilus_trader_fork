@@ -42,14 +42,14 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
-from common.venues import market_kind
 from fastapi import APIRouter
 from fastapi import HTTPException
 from fastapi import Request
+from kernel.venues import market_kind
+from kernel.venues import venue_of
 from ml_signals import chart_indicator_config
 from ml_signals import chart_indicators
 from ml_signals import custom_indicators
-from ml_signals.venue import venue_of
 from pydantic import BaseModel
 
 from data_api.routes import candles as _candles

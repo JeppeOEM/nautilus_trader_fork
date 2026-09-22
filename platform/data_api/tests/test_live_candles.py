@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 
 import pytest
-from collector_core.second_snapshot import DydxSecondSnapshot
+from kernel.second_snapshot import DydxSecondSnapshot
 from ml_signals.candles import candle_dicts_from_snapshots
 
 from data_api import settings
@@ -219,7 +219,7 @@ async def test_seed_wide_bar_reads_raw_seconds_plus_unflushed_tail(
     A wide forming bar must start from the archive's raw seconds for this bucket (what the store
     is built from), extended by live seconds the catalog has not flushed yet.
     """
-    from ml_signals.catalog_stats import SecondOHLC
+    from kernel.second_snapshot import SecondOHLC
 
     import data_api.live_candles as lc
 

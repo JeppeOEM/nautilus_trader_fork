@@ -26,13 +26,14 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
+from kernel.clocks import MAX_TS_INIT_SKEW_NS
+from kernel.clocks import CatalogFileSpan
+from kernel.second_snapshot import DydxSecondSnapshot
 from ml_signals import candle_store
-from ml_signals.catalog_stats import _stamp_to_ns
 from ml_signals.catalog_stats import query_second_snapshots
 from observability import error_ledger
 
 from collector_core import trade_backfill
-from collector_core.archive_gaps import ARRIVAL_MARGIN_NS
 from collector_core.archive_gaps import load_gaps
 from collector_core.collector import _BACKFILL_SETTLE_NS
 from collector_core.collector import _IMPOSSIBLE_LOG_EVERY_NS
@@ -46,7 +47,6 @@ from collector_core.config import CoreConfig
 from collector_core.feed import MAIN_FEED
 from collector_core.feed import Feed
 from collector_core.rebuild_seconds import rebuild_day
-from collector_core.second_snapshot import DydxSecondSnapshot
 from nautilus_trader.backtest.node import BacktestNode
 from nautilus_trader.config import BacktestDataConfig
 from nautilus_trader.model.currencies import BTC
@@ -626,8 +626,9 @@ def test_quarantining_a_trade_file_marks_its_span_as_an_archive_gap(tmp_path: Pa
     name = "2026-09-10T00-01-00-000000000Z_2026-09-10T00-02-00-000000000Z"
     (leaf / f"{name}.parquet").write_bytes(b"torn write")
     quarantine_corrupt_parquet(str(tmp_path), [_BYBIT])
-    first, last = (_stamp_to_ns(x) for x in name.split("_"))
-    assert load_gaps(str(tmp_path), _BYBIT) == [(first, last + ARRIVAL_MARGIN_NS)]
+    span = CatalogFileSpan.from_stem(name)
+    expected = [(span.start_ns, span.end_ns + MAX_TS_INIT_SKEW_NS)]
+    assert load_gaps(str(tmp_path), _BYBIT) == expected
 
 
 def test_a_non_one_second_cadence_is_ledgered_once_at_start(tmp_path: Path) -> None:
@@ -754,7 +755,7 @@ def test_flip_inactive_then_active_schedules_one_backfill_after_the_settle(
     _run_backfills(c, now + 2 + _BACKFILL_SETTLE_NS)
     ((iid, since, floor, env),) = fetch.calls
     assert (iid, since, env) == (_BYBIT, live.ts_event - 5 * _S, "mainnet")
-    assert now - ARRIVAL_MARGIN_NS <= floor <= time.time_ns() - ARRIVAL_MARGIN_NS
+    assert now - MAX_TS_INIT_SKEW_NS <= floor <= time.time_ns() - MAX_TS_INIT_SKEW_NS
     assert error_ledger.counts() == {"collector.trade_backfill": 1}
     assert c._backfill_requests == {}
 
@@ -908,7 +909,7 @@ def test_a_new_rest_trade_is_archived_with_venue_ts_event_and_our_ts_init_but_ne
 def test_an_unseen_rest_trade_older_than_the_arrival_margin_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    old = _rest(99, time.time_ns() - ARRIVAL_MARGIN_NS - _S)
+    old = _rest(99, time.time_ns() - MAX_TS_INIT_SKEW_NS - _S)
     results = {_BYBIT: _fetched([old]), _SPOT_ID: _fetched([])}
     c, detail = _backfill(tmp_path, monkeypatch, results)
     assert len(c._buffer[(TradeTick, _BYBIT)]) == 1  # only the live seed

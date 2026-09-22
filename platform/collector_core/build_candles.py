@@ -29,7 +29,6 @@ columns); `--venue V` keeps only instrument ids ending in `.V`.
 """
 
 import argparse
-import glob
 import logging
 import os
 from collections.abc import Iterator
@@ -38,25 +37,26 @@ from datetime import UTC
 from datetime import datetime
 from pathlib import Path
 
+from kernel.catalog_files import SNAPSHOT_DIRNAME
+from kernel.catalog_files import data_file_ranges
+from kernel.catalog_files import files_by_day
+from kernel.catalog_files import second_ohlc_arrays
+from kernel.venues import has_venue
 from ml_signals import candle_store
-from ml_signals.catalog_stats import _stamp_to_ns
-from ml_signals.catalog_stats import data_file_ranges
-from ml_signals.catalog_stats import second_ohlc_arrays
 
 
 logger = logging.getLogger(__name__)
 
 _DAY_NS = 86_400 * 1_000_000_000
-_SNAPSHOT_DIR = "custom_dydx_second_snapshot"
 
 
 def venue_instruments(ids: list[str], venue: str | None) -> list[str]:
     """Keep the ids of one venue (Nautilus id suffix `.VENUE`); all of them when `venue` is None."""
-    return ids if venue is None else [i for i in ids if i.endswith(f".{venue}")]
+    return ids if venue is None else [i for i in ids if has_venue(i, venue)]
 
 
 def all_instruments(catalog_path: str) -> list[str]:
-    root = Path(catalog_path) / "data" / _SNAPSHOT_DIR
+    root = Path(catalog_path) / "data" / SNAPSHOT_DIRNAME
     return sorted(p.name for p in root.iterdir() if p.is_dir()) if root.exists() else []
 
 
@@ -74,22 +74,6 @@ def day_chunks(start_ns: int, end_ns: int) -> Iterator[tuple[int, int]]:
         day += 1
 
 
-def _files_by_day(catalog_path: str, iid: str, start_ns: int, end_ns: int) -> dict[int, list[str]]:
-    """
-    UTC day index -> that day's snapshot files, from one directory listing. A file whose span
-    crosses midnight is listed under both days; the rebuild filters rows by timestamp.
-    """
-    days: dict[int, list[str]] = {}
-    for path in glob.glob(os.path.join(catalog_path, "data", _SNAPSHOT_DIR, iid, "*.parquet")):
-        first, _, last = Path(path).stem.partition("_")
-        a, b = _stamp_to_ns(first), _stamp_to_ns(last)
-        if b < start_ns or a > end_ns:
-            continue
-        for day in range(a // _DAY_NS, b // _DAY_NS + 1):
-            days.setdefault(day, []).append(path)
-    return days
-
-
 def rebuild_instrument(
     db_path: str,
     catalog_path: str,
@@ -104,7 +88,7 @@ def rebuild_instrument(
     """
     db = candle_store.connect_rw(db_path)
     seconds = 0
-    for day, paths in sorted(_files_by_day(catalog_path, iid, start_ns, end_ns).items()):
+    for day, paths in sorted(files_by_day(catalog_path, iid, start_ns, end_ns).items()):
         cols = second_ohlc_arrays(paths)
         seconds += candle_store.rebuild_from_arrays(
             db,

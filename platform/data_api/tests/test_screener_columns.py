@@ -25,8 +25,8 @@ import time
 from pathlib import Path
 
 import pytest
-from collector_core.second_snapshot import DydxSecondSnapshot
 from fastapi.testclient import TestClient
+from kernel.second_snapshot import DydxSecondSnapshot
 
 import data_api.app as app_module
 import data_api.routes.candles as candles_routes
@@ -295,14 +295,14 @@ def test_a_valueerror_from_one_coins_catalog_read_does_not_become_a_whole_reques
     _seed_recent_minutes(tmp_path)
     _ranked(monkeypatch, _IID, "BAD-USD-PERP.DYDX")
     client = _client(tmp_path, monkeypatch)
-    real = rankings_routes._catalog_stats.query_second_ohlc
+    real = rankings_routes.catalog_files.query_second_ohlc
 
     def read(path: str, iid: str, a: int, b: int) -> list:
         if iid.startswith("BAD"):
             raise ValueError("Arrow schema mismatch")
         return real(path, iid, a, b)
 
-    monkeypatch.setattr(rankings_routes._catalog_stats, "query_second_ohlc", read)
+    monkeypatch.setattr(rankings_routes.catalog_files, "query_second_ohlc", read)
     entries = json.dumps([{"name": "RelativeStrengthIndex", "params": {}, "bar_seconds": 60}])
 
     response = client.get("/api/rankings/technicals-values", params={"entries": entries})

@@ -17,8 +17,8 @@
 from pathlib import Path
 
 import pytest
-from collector_core.second_snapshot import DydxSecondSnapshot
 from fastapi.testclient import TestClient
+from kernel.second_snapshot import DydxSecondSnapshot
 
 import data_api.app as app_module
 import data_api.routes.snapshots as snapshots_routes

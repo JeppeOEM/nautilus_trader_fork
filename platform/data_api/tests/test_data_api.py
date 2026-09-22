@@ -17,8 +17,8 @@
 from pathlib import Path
 
 import pytest
-from collector_core.second_snapshot import DydxSecondSnapshot
 from fastapi.testclient import TestClient
+from kernel.second_snapshot import DydxSecondSnapshot
 from ml_signals import catalog_stats as _catalog_stats
 from ml_signals import chart_data as _chart_data
 from ranking_engine import metrics_store

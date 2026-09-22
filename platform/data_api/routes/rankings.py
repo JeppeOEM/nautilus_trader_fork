@@ -30,12 +30,12 @@ from pathlib import Path
 from fastapi import APIRouter
 from fastapi import HTTPException
 from fastapi import Request
+from kernel import catalog_files
+from kernel.venues import venue_of
 from ml_signals import candle_store
-from ml_signals import catalog_stats as _catalog_stats
 from ml_signals import custom_indicators
 from ml_signals import screener_columns_config
 from ml_signals.candles import candle_dicts_from_snapshots
-from ml_signals.venue import venue_of
 from observability import error_ledger
 from pydantic import BaseModel
 
@@ -219,7 +219,7 @@ def _read_candles(instrument_id: str, bar_seconds: int, now_ns: int) -> list[dic
     bars = _TECHNICALS_BARS if bar_seconds <= 3600 else _TECHNICALS_WIDE_BARS
     span_ns = min((bars + 5) * bar_seconds, _FALLBACK_MAX_SPAN_S) * 1_000_000_000
     try:
-        rows = _catalog_stats.query_second_ohlc(
+        rows = catalog_files.query_second_ohlc(
             CATALOG_PATH, instrument_id, now_ns - span_ns, now_ns
         )
         return candle_dicts_from_snapshots(rows, bar_seconds)[-bars:]

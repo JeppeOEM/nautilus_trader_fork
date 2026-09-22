@@ -57,7 +57,7 @@ from dataclasses import fields
 from decimal import Decimal
 from pathlib import Path
 
-from ml_signals.venue import venue_of
+from kernel.venues import venue_of
 
 from live_paper.venues import VENUES
 from live_paper.venues import VenueSpec

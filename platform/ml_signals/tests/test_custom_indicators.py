@@ -27,7 +27,7 @@ entries (CumulativeVolumeDelta and later additions) live in the same module-leve
 import tempfile
 
 import pytest
-from collector_core.second_snapshot import DydxSecondSnapshot
+from kernel.second_snapshot import DydxSecondSnapshot
 
 from ml_signals import custom_indicators as ci
 from ml_signals.custom_indicators import CustomIndicatorSpec

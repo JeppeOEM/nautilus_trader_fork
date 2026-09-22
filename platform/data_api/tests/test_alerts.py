@@ -24,8 +24,8 @@ from http.server import HTTPServer
 from pathlib import Path
 
 import pytest
-from collector_core.second_snapshot import DydxSecondSnapshot
 from fastapi.testclient import TestClient
+from kernel.second_snapshot import DydxSecondSnapshot
 from observability import error_ledger
 
 import data_api.app as app_module

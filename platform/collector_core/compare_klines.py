@@ -66,15 +66,11 @@ failure (bad arguments, an open day, a missing catalog or candle store).
 """
 
 import argparse
-import glob
 import http.client
-import json
 import logging
-import os
 import sqlite3
 import time
 import urllib.parse
-import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 from dataclasses import field
@@ -86,19 +82,22 @@ from decimal import InvalidOperation
 from pathlib import Path
 from typing import Any
 
+from kernel.catalog_files import SNAPSHOT_DIRNAME
+from kernel.clocks import CatalogFileSpan
+from kernel.venue_http import DYDX_NETWORKS
+from kernel.venue_http import HttpJson
+from kernel.venue_http import bybit_url
+from kernel.venue_http import dydx_indexer_url
+from kernel.venue_http import get_request
+from kernel.venue_http import http_json
+from kernel.venue_http import hyperliquid_info_url
+from kernel.venue_http import post_json_request
+from kernel.venues import bybit_category
+from kernel.venues import has_venue
 from ml_signals import candle_store
-from ml_signals.catalog_stats import _stamp_to_ns
 from observability import error_ledger
 
 from collector_core.build_candles import _parse_date_ns
-from collector_core.venue_http import BYBIT_URLS
-from collector_core.venue_http import DYDX_NETWORKS
-from collector_core.venue_http import HYPERLIQUID_URLS
-from collector_core.venue_http import USER_AGENT
-from collector_core.venue_http import HttpJson
-from collector_core.venue_http import bybit_category
-from collector_core.venue_http import http_json
-from nautilus_trader.core.nautilus_pyo3 import get_dydx_http_url  # type: ignore[attr-defined]
 from nautilus_trader.model.data import Bar
 from nautilus_trader.model.instruments import Instrument
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
@@ -116,7 +115,6 @@ _MS_NS = 1_000_000
 _FLOAT_RESIDUAL = Decimal("0.001")
 _DYDX_PAGE = 1000
 _BYBIT_PAGE = 1000
-_SNAPSHOT_DIR = "custom_dydx_second_snapshot"
 
 
 class KlineError(Exception):
@@ -239,16 +237,17 @@ def _fetch_dydx(inst: Instrument, day_ms: int, environment: str, http: HttpJson)
 
     Verified: `fromISO` inclusive, `toISO` exclusive, newest first, `limit` at most 1000.
     """
-    base = get_dydx_http_url(DYDX_NETWORKS[environment])
+    network = DYDX_NETWORKS[environment]
     ticker = urllib.parse.quote(inst.raw_symbol.value)
     out: list[Kline] = []
     to_ms = day_ms + _DAY_MS
     while True:
-        url = (
-            f"{base}/v4/candles/perpetualMarkets/{ticker}?resolution=1MIN"
-            f"&fromISO={_iso(day_ms)}&toISO={_iso(to_ms)}&limit={_DYDX_PAGE}"
+        url = dydx_indexer_url(
+            network,
+            f"/v4/candles/perpetualMarkets/{ticker}?resolution=1MIN"
+            f"&fromISO={_iso(day_ms)}&toISO={_iso(to_ms)}&limit={_DYDX_PAGE}",
         )
-        payload = http(urllib.request.Request(url, headers={"User-Agent": USER_AGENT}))  # noqa: S310
+        payload = http(get_request(url))
         page = parse_dydx_candles(payload, inst.price_precision, inst.size_precision)
         out += page
         if len(page) < _DYDX_PAGE or min(k.t_ms for k in page) <= day_ms:
@@ -256,11 +255,19 @@ def _fetch_dydx(inst: Instrument, day_ms: int, environment: str, http: HttpJson)
         to_ms = min(k.t_ms for k in page)
 
 
+# Known limit: inverse klines report volume in contracts, not the base asset our fold sums; an
+# `-INVERSE.BYBIT` id is refused until its units are verified against the venue (then add it).
+_BYBIT_KLINE_CATEGORIES = frozenset({"linear", "spot"})
+
+
 def _bybit_category(iid: str) -> str:
     try:
-        return bybit_category(iid)
+        category = bybit_category(iid)
     except ValueError as e:
         raise KlineError(f"{iid}: no Bybit kline category for this id suffix") from e
+    if category not in _BYBIT_KLINE_CATEGORIES:
+        raise KlineError(f"{iid}: Bybit {category} klines are not wire-verified")
+    return category
 
 
 def _fetch_bybit(inst: Instrument, day_ms: int, environment: str, http: HttpJson) -> list[Kline]:
@@ -274,12 +281,13 @@ def _fetch_bybit(inst: Instrument, day_ms: int, environment: str, http: HttpJson
     out: list[Kline] = []
     end_ms = day_ms + _DAY_MS - 1
     while True:
-        url = (
-            f"{BYBIT_URLS[environment]}/v5/market/kline?category={category}"
+        url = bybit_url(
+            environment,
+            f"/v5/market/kline?category={category}"
             f"&symbol={urllib.parse.quote(inst.raw_symbol.value)}&interval=1"
-            f"&start={day_ms}&end={end_ms}&limit={_BYBIT_PAGE}"
+            f"&start={day_ms}&end={end_ms}&limit={_BYBIT_PAGE}",
         )
-        payload = http(urllib.request.Request(url, headers={"User-Agent": USER_AGENT}))  # noqa: S310
+        payload = http(get_request(url))
         page = parse_bybit_klines(payload, inst.price_precision, inst.size_precision)
         out += page
         if len(page) < _BYBIT_PAGE or min(k.t_ms for k in page) <= day_ms:
@@ -309,11 +317,7 @@ def _fetch_hyperliquid(
                 "endTime": end_ms,
             },
         }
-        request = urllib.request.Request(  # noqa: S310
-            HYPERLIQUID_URLS[environment],
-            data=json.dumps(body).encode(),
-            headers={"Content-Type": "application/json", "User-Agent": USER_AGENT},
-        )
+        request = post_json_request(hyperliquid_info_url(environment), body)
         page = parse_hyperliquid_candles(http(request), inst.price_precision, inst.size_precision)
         if not page:
             return out
@@ -404,7 +408,7 @@ def _close_before(db: Any, iid: str, day_ms: int, price_p: int) -> int | None:
 
 def _ours_in_venue_definition(db: Any, iid: str, day_ms: int, inst: Instrument) -> list[Kline]:
     ours = our_klines(db, iid, day_ms, inst.price_precision, inst.size_precision)
-    if not iid.endswith(".BYBIT"):
+    if not has_venue(iid, "BYBIT"):
         return ours
     return seed_with_previous_close(ours, _close_before(db, iid, day_ms, inst.price_precision))
 
@@ -478,7 +482,7 @@ def _check_venue_history(iid: str, ours: list[Kline], theirs: list[Kline]) -> No
         raise KlineError(
             f"venue has no history for this day/range: no traded kline, ours has {len(ours)}"
         )
-    if iid.endswith(".HYPERLIQUID") and ours and theirs and theirs[0].t_ms > ours[0].t_ms:
+    if has_venue(iid, "HYPERLIQUID") and ours and theirs and theirs[0].t_ms > ours[0].t_ms:
         raise KlineError(
             "venue has no history for this day/range: candleSnapshot starts at "
             f"{theirs[0].t_ms}, after our first traded minute {ours[0].t_ms} (retention, D-53)"
@@ -516,7 +520,7 @@ def reconcile_instrument(
                 raise KlineError(f"candle store {db_path} does not exist")
             ours = _ours_in_venue_definition(ro, iid, day_ms, inst)
         _check_venue_history(iid, ours, theirs)
-        result = compare(iid, ours, theirs, inst, seeded=iid.endswith(".BYBIT"))
+        result = compare(iid, ours, theirs, inst, seeded=has_venue(iid, "BYBIT"))
         for message in result.mismatches:
             error_ledger.record("reconcile.kline_mismatch", message)
         if record_verdict:
@@ -543,12 +547,16 @@ def instruments_on_day(catalog_path: str, venue: str, day_ms: int) -> list[str]:
     """Ids of `venue` with a snapshot or trade file overlapping the day (file names only)."""
     lo, hi = day_ms * _MS_NS, (day_ms + _DAY_MS) * _MS_NS - 1
     found: set[str] = set()
-    for data_type in (_SNAPSHOT_DIR, "trade_tick"):
-        pattern = os.path.join(catalog_path, "data", data_type, f"*.{venue}", "*.parquet")
-        for path in glob.glob(pattern):
-            first, _, last = Path(path).stem.partition("_")
-            if _stamp_to_ns(first) <= hi and _stamp_to_ns(last) >= lo:
-                found.add(Path(path).parent.name)
+    for data_type in (SNAPSHOT_DIRNAME, "trade_tick"):
+        root = Path(catalog_path) / "data" / data_type
+        leaves = (
+            [d for d in root.iterdir() if d.is_dir() and has_venue(d.name, venue)]
+            if root.is_dir()
+            else []
+        )
+        for leaf in leaves:
+            if any(CatalogFileSpan.from_path(p).overlaps(lo, hi) for p in leaf.glob("*.parquet")):
+                found.add(leaf.name)
     return sorted(found)
 
 
@@ -624,7 +632,7 @@ def main(argv: list[str] | None = None) -> int:
         error_ledger.record("reconcile.error", f"{args.day} is not a closed UTC day")
         return 1
     iids = args.instrument or instruments_on_day(args.catalog, args.venue, day_ms)
-    wrong = [i for i in iids if not i.endswith(f".{args.venue}")]
+    wrong = [i for i in iids if not has_venue(i, args.venue)]
     if wrong:
         parser.error(f"--instrument ids not of venue {args.venue}: {wrong}")
     catalog = ParquetDataCatalog(args.catalog)

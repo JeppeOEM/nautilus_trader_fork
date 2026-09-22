@@ -142,7 +142,7 @@ def test_candle_dicts_for_window_serves_raw_seconds_with_a_source_tag() -> None:
 
 
 def _real_snap(ts: int):
-    from collector_core.second_snapshot import DydxSecondSnapshot
+    from kernel.second_snapshot import DydxSecondSnapshot
 
     from nautilus_trader.model.identifiers import InstrumentId
 
@@ -175,7 +175,7 @@ def test_is_valid_candle_rejects_inverted_negative_and_nonfinite() -> None:
 
 
 def _write_ohlc_snapshots(catalog_path: str, base: int, n: int):
-    from collector_core.second_snapshot import DydxSecondSnapshot
+    from kernel.second_snapshot import DydxSecondSnapshot
 
     from nautilus_trader.model.identifiers import InstrumentId
     from nautilus_trader.persistence.catalog import ParquetDataCatalog
@@ -206,7 +206,8 @@ def _write_ohlc_snapshots(catalog_path: str, base: int, n: int):
 
 def test_query_second_ohlc_matches_catalog_decoder(tmp_path: Path) -> None:
     """The column-projection read must return exactly what the catalog decoder does (Story 21.5)."""
-    from ml_signals.catalog_stats import query_second_ohlc
+    from kernel.catalog_files import query_second_ohlc
+
     from ml_signals.catalog_stats import query_second_snapshots
 
     base = 1_800_000_000_000_000_000
@@ -224,8 +225,7 @@ def test_query_second_ohlc_tolerates_files_without_ohlc_columns(tmp_path: Path) 
     """Pre-OHLC files (no open/high/low/close columns) read as None instead of crashing."""
     import pyarrow as pa
     import pyarrow.parquet as pq
-
-    from ml_signals.catalog_stats import query_second_ohlc
+    from kernel.catalog_files import query_second_ohlc
 
     d = tmp_path / "data" / "custom_dydx_second_snapshot" / IID
     d.mkdir(parents=True)

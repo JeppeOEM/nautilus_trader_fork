@@ -27,7 +27,11 @@ so the graph holds from the first move, not only once a module has been relocate
 - `observability` imports only the standard library, and `kernel` no context;
 - `research` imports nothing from `data_api`, legacy or not;
 - a `domain/` module or a venue `policies.py` imports only the standard library, `kernel` and
-  `nautilus_trader.model`/`core`.
+  `nautilus_trader.model`/`core`;
+- `kernel/` holds exactly spine AD-D3's modules and stays pure: no in-repo import beyond itself,
+  no store, no config loader, no module-level mutable state (Story 23.2);
+- every venue REST URL and request lives in `kernel.venue_http`, and every venue dispatch on an
+  instrument id's suffix goes through `kernel.venues` (Story 23.2).
 
 Two exemptions only. An edge whose both ends sit in one *unmoved* legacy package (e.g. inside
 `collector_core`) is not judged: it becomes judged the moment one end moves out. `platform/tests`
@@ -38,6 +42,7 @@ more, so both tables can only shrink.
 """
 
 import ast
+import re
 import sys
 from pathlib import Path
 from typing import NamedTuple
@@ -50,7 +55,7 @@ from _source_tree import story_statuses
 from _source_tree import unknown_or_done
 
 
-THIS_STORY = "23-1-observability-context-and-migration-guardrails"
+THIS_STORY = "23-2-kernel-shared-kernel"
 
 KERNEL = "kernel"
 OBSERVABILITY = "observability"
@@ -113,9 +118,10 @@ GRAPH: frozenset[tuple[str, str]] = frozenset(
 # Longest dotted prefix wins. A test module belongs to the context of the code it tests, so it
 # moves with that code.
 LEGACY_MODULE_TO_CONTEXT: dict[str, str] = {
-    # --- collector_core: capture, except the kernel/archive/candles modules it still hosts
+    # --- collector_core: capture, except the kernel shims and archive/candles modules it still hosts
     "collector_core": CAPTURE,
-    "collector_core.archive_gaps": KERNEL,
+    # the marker file I/O over `kernel.archive_markers` (archive's, Story 25.1)
+    "collector_core.archive_gaps": ARCHIVE,
     "collector_core.backfill_bars": ARCHIVE,
     "collector_core.book_check": CAPTURE,
     "collector_core.build_candles": CANDLES,
@@ -140,11 +146,9 @@ LEGACY_MODULE_TO_CONTEXT: dict[str, str] = {
     "collector_core.tests.test_backfill_bars": ARCHIVE,
     "collector_core.tests.test_compare_klines": ARCHIVE,
     "collector_core.tests.test_consolidate_catalog": ARCHIVE,
-    "collector_core.tests.test_fold": KERNEL,
     "collector_core.tests.test_measure_lag": ARCHIVE,
     "collector_core.tests.test_migrate_open_interest": ARCHIVE,
     "collector_core.tests.test_nightly": ARCHIVE,
-    "collector_core.tests.test_open_interest": KERNEL,
     "collector_core.tests.test_prune_catalog": ARCHIVE,
     "collector_core.tests.test_rebuild_seconds": ARCHIVE,
     # --- venue collectors: capture; dYdX also hosts its control plane and one archive tool.
@@ -160,7 +164,7 @@ LEGACY_MODULE_TO_CONTEXT: dict[str, str] = {
     "dydx_collector.tests.test_config": COLLECTION_CONTROL,
     "dydx_collector.tests.test_normalize_snapshot_schema": ARCHIVE,
     "dydx_collector.tests.test_repair_catalog": ARCHIVE,
-    # --- common: the one venue-id parser (kernel)
+    # --- common: a shim package over the one venue-id parser (kernel.venues, Story 23.2)
     "common": KERNEL,
     # --- ml_signals: no package default, so a new module there must be placed deliberately
     "ml_signals.__init__": RESEARCH,  # the package itself; see `_context_of`
@@ -196,16 +200,13 @@ LEGACY_MODULE_TO_CONTEXT: dict[str, str] = {
     "ml_signals.tests.test_chart_indicators": VIEWS,
     "ml_signals.tests.test_custom_indicators": VIEWS,
     "ml_signals.tests.test_footprint": VIEWS,
-    "ml_signals.tests.test_indicators": KERNEL,
     "ml_signals.tests.test_metrics_computer": RANKING,
     "ml_signals.tests.test_ofi_strategy": RESEARCH,
     "ml_signals.tests.test_ofi_strategy_indicator_consistency": RESEARCH,
-    "ml_signals.tests.test_performance_metrics": KERNEL,
     "ml_signals.tests.test_rank_history": RANKING,
     "ml_signals.tests.test_snapshot_backtest_node": RESEARCH,
     "ml_signals.tests.test_snapshot_strategy": RESEARCH,
     "ml_signals.tests.test_timeframe_backtest": RESEARCH,
-    "ml_signals.tests.test_venue": KERNEL,
     "ml_signals.tests.test_watchlist": RESEARCH,
     "ml_signals.tests.test_watchlist_multi_coin_backtest": RESEARCH,
     # --- ranking_engine / live_paper: one context each
@@ -225,12 +226,9 @@ LEGACY_MODULE_TO_CONTEXT: dict[str, str] = {
 # Modules split across contexts: (module, top-level name) -> context. Every top-level function and
 # class of a split module is listed (asserted), so its move is fully planned.
 LEGACY_SYMBOL_TO_CONTEXT: dict[tuple[str, str], str] = {
-    # catalog_stats: AD-D1's three-way split, with AD-D3's kernel `catalog_files` read helpers.
-    ("ml_signals.catalog_stats", "SecondOHLC"): KERNEL,
-    ("ml_signals.catalog_stats", "_stamp_to_ns"): KERNEL,
-    ("ml_signals.catalog_stats", "data_file_ranges"): KERNEL,
-    ("ml_signals.catalog_stats", "second_ohlc_arrays"): KERNEL,
-    ("ml_signals.catalog_stats", "query_second_ohlc"): KERNEL,
+    # catalog_stats: AD-D1's three-way split (its kernel read helpers moved in Story 23.2; the
+    # module `__getattr__` only serves those moved names, with a DeprecationWarning).
+    ("ml_signals.catalog_stats", "__getattr__"): KERNEL,
     ("ml_signals.catalog_stats", "find_gaps"): ARCHIVE,
     ("ml_signals.catalog_stats", "_overlapping_intervals"): ARCHIVE,
     ("ml_signals.catalog_stats", "_load"): ARCHIVE,
@@ -252,9 +250,6 @@ LEGACY_SYMBOL_TO_CONTEXT: dict[tuple[str, str], str] = {
 # Cross-context edges the tree still has, (importer context, imported context) -> the story whose
 # `done` retires the edge. The sites named are the ones the retiring story removes.
 LEGACY_EDGES_UNTIL: dict[tuple[str, str], str] = {
-    # archive_gaps (the kernel marker format) ledgers its own read failures; the kernel holds no
-    # ledger call once `archive_markers` is pure encode/decode (AD-D3).
-    (KERNEL, OBSERVABILITY): "23-2-kernel-shared-kernel",
     # collector.py's direct candle_store calls (and the capture tests reading the store back);
     # capture reaches candles only through the SecondSink port.
     (CAPTURE, CANDLES): "24-1-candles-context-behind-the-secondsink-port",
@@ -280,19 +275,8 @@ LEGACY_EDGES_UNTIL: dict[tuple[str, str], str] = {
 }
 
 # Cross-context imports of a `_private` name: (importing module, "module._name") -> story.
-_STAMP = "ml_signals.catalog_stats._stamp_to_ns"
-_KERNEL_STORY = "23-2-kernel-shared-kernel"
 _VIEWS_STORY = "24-2-views-read-models-and-reader-side-revalidation-removed"
 LEGACY_PRIVATE_IMPORTS_UNTIL: dict[tuple[str, str], str] = {
-    # The catalog file-stem parse, public in kernel.clocks as `CatalogFileSpan` (23.2).
-    ("collector_core.build_candles", _STAMP): _KERNEL_STORY,
-    ("collector_core.collector", _STAMP): _KERNEL_STORY,
-    ("collector_core.compare_klines", _STAMP): _KERNEL_STORY,
-    ("collector_core.consolidate_catalog", _STAMP): _KERNEL_STORY,
-    ("collector_core.prune_catalog", _STAMP): _KERNEL_STORY,
-    ("collector_core.rebuild_seconds", _STAMP): _KERNEL_STORY,
-    ("collector_core.tests.test_collector", _STAMP): _KERNEL_STORY,
-    ("collector_core.tests.test_prune_catalog", _STAMP): _KERNEL_STORY,
     # data_api route tests seed a candle store with the candle tests' private row helpers; they
     # go when data_api stops touching the candle store directly (views move).
     ("data_api.tests.test_candles", "ml_signals.tests.test_candle_store._DAY0_MS"): _VIEWS_STORY,
@@ -619,3 +603,300 @@ def test_exemption_covers_only_one_unmoved_package_and_platform_tests() -> None:
     assert not _exempt(across)
     assert not _exempt(interface)
     assert _exempt(guard)
+
+
+# --- the shared kernel (spine AD-D3, Story 23.2) --------------------------------------------------
+
+KERNEL_MODULES = frozenset(
+    {
+        "__init__",
+        "archive_markers",
+        "catalog_files",
+        "clocks",
+        "fold",
+        "indicators",
+        "open_interest",
+        "parquet_compat",
+        "performance_metrics",
+        "second_snapshot",
+        "venue_http",
+        "venues",
+    }
+)
+
+
+def _kernel_sources() -> dict[str, Path]:
+    """Return the kernel's own (non-test) modules."""
+    return {
+        module: path
+        for module, path in _MODULES.items()
+        if module.split(".")[0] == KERNEL and ".tests" not in f".{module}"
+    }
+
+
+def test_kernel_holds_exactly_the_ad_d3_modules() -> None:
+    found = {path.stem for path in _kernel_sources().values()}
+    assert found == KERNEL_MODULES, "kernel membership is AD-D3's list, nothing more (no grab-bag)"
+    assert all(path.parent == PLATFORM_DIR / KERNEL for path in _kernel_sources().values())
+
+
+# A store or a config loader never enters the kernel (AD-D3): these imports are how one would.
+_KERNEL_FORBIDDEN_IMPORTS = ("sqlite3", "redis", "tomllib", "shelve", "dbm", "observability")
+# Calls whose result at module level is mutable runtime state.
+_MUTABLE_FACTORIES = frozenset(
+    {"dict", "list", "set", "defaultdict", "deque", "OrderedDict", "Counter", "bytearray"}
+)
+_MUTABLE_LITERALS = (ast.Dict, ast.List, ast.Set, ast.DictComp, ast.ListComp, ast.SetComp)
+
+
+_CACHE_DECORATORS = frozenset({"cache", "lru_cache", "cached_property"})
+
+
+def _is_mutable_value(value: ast.expr | None) -> bool:
+    callee = value.func if isinstance(value, ast.Call) else None
+    name = getattr(callee, "id", None) or getattr(callee, "attr", None)
+    return isinstance(value, _MUTABLE_LITERALS) or name in _MUTABLE_FACTORIES
+
+
+def _decorator_names(node: ast.AST) -> set[str]:
+    names = set()
+    for decorator in getattr(node, "decorator_list", []):
+        target = decorator.func if isinstance(decorator, ast.Call) else decorator
+        names.add(getattr(target, "id", None) or getattr(target, "attr", None))
+    return names
+
+
+def _state_sites(statements: list[ast.stmt]) -> list[str]:
+    """Return module- or class-level mutable bindings, including ones under `if`/`try`/`with`."""
+    found = []
+    for node in statements:
+        if isinstance(node, ast.AugAssign):
+            found.append(f"line {node.lineno} (augmented assignment)")
+        elif isinstance(node, ast.Assign | ast.AnnAssign) and _is_mutable_value(node.value):
+            found.append(f"line {node.lineno}")
+        elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            if _decorator_names(node) & _CACHE_DECORATORS:
+                found.append(f"line {node.lineno} (memoising cache)")
+        elif isinstance(node, ast.ClassDef):
+            found += _state_sites(node.body)
+        elif isinstance(node, ast.If | ast.Try | ast.With):
+            nested = [*node.body, *getattr(node, "orelse", []), *getattr(node, "finalbody", [])]
+            nested += [stmt for handler in getattr(node, "handlers", []) for stmt in handler.body]
+            found += _state_sites(nested)
+    return found
+
+
+def _mutable_module_state(tree: ast.Module) -> list[str]:
+    """Bindings to mutable state at module or class level (tables must be frozen)."""
+    return _state_sites(tree.body)
+
+
+def _kernel_impurities(module: str, path: Path) -> list[str]:
+    tree = ast.parse(path.read_text())
+    bad = [f"{module}: mutable module state at {site}" for site in _mutable_module_state(tree)]
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Global):
+            bad.append(f"{module}:{node.lineno}: `global` statement")
+        name = node.attr if isinstance(node, ast.Attribute) else getattr(node, "id", None)
+        if isinstance(node, ast.Attribute | ast.Name) and name in {"environ", "getenv"}:
+            bad.append(f"{module}:{node.lineno}: reads the environment (a config loader)")
+    for ref in imports_of(module, path, _KNOWN):
+        in_repo = _in_repo(ref.target)
+        if in_repo is not None and in_repo.split(".")[0] != KERNEL:
+            bad.append(f"{module}:{ref.line}: imports context module {ref.target}")
+        elif ref.target.split(".")[0] in _KERNEL_FORBIDDEN_IMPORTS:
+            bad.append(f"{module}:{ref.line}: imports {ref.target} (a store/loader/ledger)")
+    return bad
+
+
+def test_kernel_is_pure() -> None:
+    impure = sorted(
+        entry
+        for module, path in _kernel_sources().items()
+        for entry in _kernel_impurities(module, path)
+    )
+    assert impure == [], "the kernel holds no state, store, config or context import (AD-D3)"
+
+
+def test_kernel_purity_rule_catches_each_kind() -> None:
+    tree = ast.parse("import types\nA = {}\nB = list()\nC = types.MappingProxyType({})\nD = (1,)\n")
+    assert _mutable_module_state(tree) == ["line 2", "line 3"]
+    hidden = ast.parse(
+        "import functools\nif True:\n    E = {}\nN = 0\nN += 1\n"
+        "class K:\n    seen = []\n"
+        "@functools.lru_cache\ndef f(): pass\n"
+    )
+    assert _mutable_module_state(hidden) == [
+        "line 3",
+        "line 5 (augmented assignment)",
+        "line 7",
+        "line 9 (memoising cache)",
+    ]
+
+
+# Venue REST: every URL and request is built in `kernel.venue_http` (AD-D3). `ranking_engine`'s
+# own volume polls keep their duplicate maps until its move -- the sites that story removes.
+LEGACY_VENUE_HTTP_UNTIL: dict[str, str] = {
+    "ranking_engine.engine": "25-2-ranking-context-rankingboard-replaces-module-globals",
+}
+# HTTP clients that talk to no venue, so `kernel.venue_http` does not own them.
+NON_VENUE_HTTP_CLIENTS: dict[str, str] = {
+    "observability.notify": "ntfy / Telegram / webhook alert transport",
+    "ml_signals.rank_history": "the local data_api HTTP API",
+    "ml_signals.watchlist": "the local data_api HTTP API",
+}
+_VENUE_URL = re.compile(r"https?://[^\s\"']*(?:dydx|bybit|hyperliquid)", re.IGNORECASE)
+
+
+def _judged_sources() -> dict[str, Path]:
+    """Production modules outside the kernel (tests may hold URLs and ids as fixtures)."""
+    return {
+        module: path
+        for module, path in _MODULES.items()
+        if module.split(".")[0] != KERNEL
+        and ".tests" not in f".{module}"
+        and module.split(".")[0] != TESTS
+    }
+
+
+_URLLIB_REQUEST_NAMES = frozenset({"Request", "urlopen"})
+
+
+def _urllib_aliases(tree: ast.AST) -> set[str]:
+    """Local names bound to `urllib.request.Request`/`urlopen` by a `from` import (any alias)."""
+    return {
+        alias.asname or alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module == "urllib.request"
+        for alias in node.names
+        if alias.name in _URLLIB_REQUEST_NAMES
+    }
+
+
+def _urllib_calls(tree: ast.AST) -> list[int]:
+    """Lines calling `urllib.request.Request`/`urlopen` (however imported or aliased)."""
+    aliases = _urllib_aliases(tree)
+    lines = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Name) and func.id in aliases:
+            lines.append(node.lineno)
+        elif isinstance(func, ast.Attribute) and func.attr in _URLLIB_REQUEST_NAMES:
+            if func.attr == "urlopen" or "urllib" in ast.unparse(func):
+                lines.append(node.lineno)
+        elif isinstance(func, ast.Name) and func.id == "urlopen":
+            lines.append(node.lineno)
+    return lines
+
+
+def _dydx_url_builders(tree: ast.AST) -> list[int]:
+    """Lines importing nautilus's `get_dydx_http_url`: the dYdX indexer's base URL."""
+    return [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        and any(alias.name == "get_dydx_http_url" for alias in node.names)
+    ]
+
+
+def test_venue_http_rule_sees_aliases_and_the_dydx_url() -> None:
+    tree = ast.parse(
+        "from urllib.request import Request as R\nimport urllib.request\n"
+        "from nautilus_trader.core.nautilus_pyo3 import get_dydx_http_url\n"
+        "R('u')\nurllib.request.urlopen('u')\nRequest('not urllib')\n"
+    )
+    assert _urllib_calls(tree) == [4, 5]
+    assert _dydx_url_builders(tree) == [3]
+
+
+def _venue_http_offenders() -> dict[str, list[str]]:
+    offenders: dict[str, list[str]] = {}
+    for module, path in _judged_sources().items():
+        text = path.read_text()
+        sites = [
+            f"URL line {text.count(chr(10), 0, m.start()) + 1}" for m in _VENUE_URL.finditer(text)
+        ]
+        tree = ast.parse(text)
+        sites += [f"dYdX URL line {line}" for line in _dydx_url_builders(tree)]
+        if module not in NON_VENUE_HTTP_CLIENTS:
+            sites += [f"request line {line}" for line in _urllib_calls(tree)]
+        if sites:
+            offenders[module] = sites
+    return offenders
+
+
+_VENUE_HTTP_OFFENDERS = _venue_http_offenders()
+
+
+def test_every_venue_rest_request_is_built_in_the_kernel() -> None:
+    illegal = {m: s for m, s in _VENUE_HTTP_OFFENDERS.items() if m not in LEGACY_VENUE_HTTP_UNTIL}
+    assert illegal == {}, "build venue URLs and requests with kernel.venue_http (AD-D3)"
+
+
+def test_venue_http_exemptions_are_still_needed() -> None:
+    assert sorted(set(LEGACY_VENUE_HTTP_UNTIL) - set(_VENUE_HTTP_OFFENDERS)) == []
+    unused = sorted(
+        module
+        for module in NON_VENUE_HTTP_CLIENTS
+        if module not in _MODULES or not _urllib_calls(ast.parse(_MODULES[module].read_text()))
+    )
+    assert unused == [], "these clients no longer make HTTP requests: delete their entries"
+
+
+@pytest.mark.parametrize(("module", "story"), sorted(LEGACY_VENUE_HTTP_UNTIL.items()))
+def test_legacy_venue_http_expires_with_its_story(module: str, story: str) -> None:
+    reason = unknown_or_done(story, story_statuses())
+    assert reason is None, f"{reason}: move {module}'s venue requests onto kernel.venue_http"
+
+
+# An instrument-id suffix test: `.endswith(".BYBIT")`, `.endswith("-LINEAR")`, `.endswith(f".{v}")`.
+_ID_SUFFIX = re.compile(r"^[.-][A-Z]")
+
+
+def _suffix_dispatches(tree: ast.AST) -> list[int]:
+    lines = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or getattr(node.func, "attr", None) != "endswith":
+            continue
+        arg = node.args[0] if node.args else None
+        candidates = arg.elts if isinstance(arg, ast.Tuple) else [arg]  # endswith((".A", ".B"))
+        if any(_is_id_suffix(candidate) for candidate in candidates):
+            lines.append(node.lineno)
+    return lines
+
+
+def _is_id_suffix(arg: ast.expr | None) -> bool:
+    if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+        return bool(_ID_SUFFIX.match(arg.value))
+    head = arg.values[0] if isinstance(arg, ast.JoinedStr) and arg.values else None
+    return isinstance(head, ast.Constant) and head.value in {".", "-"}
+
+
+def test_suffix_rule_sees_literals_formats_and_tuples() -> None:
+    tree = ast.parse(
+        "i.endswith('.BYBIT')\ni.endswith(f'.{v}')\ni.endswith(('.A', '.B'))\n"
+        "p.endswith('.parquet')\n"
+    )
+    assert _suffix_dispatches(tree) == [1, 2, 3]
+
+
+def test_venue_dispatch_parses_ids_only_through_kernel_venues() -> None:
+    """
+    Known limit: this catches the suffix-test shape every former parser used (`endswith`), not an
+    arbitrary hand-rolled `rpartition`; reviewers keep `kernel.venues` the only parser otherwise.
+    """
+    offending = sorted(
+        f"{path.relative_to(PLATFORM_DIR)}:{line}"
+        for module, path in _judged_sources().items()
+        for line in _suffix_dispatches(ast.parse(path.read_text()))
+    )
+    assert offending == [], "use kernel.venues.venue_of / has_venue / market_kind (AD-D3)"
+
+
+def test_suffix_rule_catches_literal_and_formatted_suffixes() -> None:
+    tree = ast.parse(
+        'a.endswith(".BYBIT")\nb.endswith(f".{v}")\nc.endswith(".parquet")\nd.endswith("x")\n'
+    )
+    assert _suffix_dispatches(tree) == [1, 2]

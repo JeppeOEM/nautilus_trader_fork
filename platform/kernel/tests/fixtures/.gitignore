@@ -1,0 +1,2 @@
+# Pre-move catalog fixtures (Story 23.2) are evidence and must be committed; the repo root ignores *.parquet.
+!*.parquet

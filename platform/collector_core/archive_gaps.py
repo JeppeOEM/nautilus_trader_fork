@@ -13,8 +13,8 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-Persistent markers for spans where the raw trade archive is known to miss trades the live fold
-used (story 22.13).
+Reading and writing the archive-gap markers (story 22.13) -- the file I/O over the kernel's
+marker format (`kernel.archive_markers`); it moves to the `archive` context in Story 25.1.
 
 `rebuild_seconds` replaces a covered row's trade columns with the fold of the archived trades.
 Where the archive lost trades that the live second still holds, that would zero correct values.
@@ -26,47 +26,53 @@ The ways it can happen, each recorded here:
 - `pruned`: `prune_catalog` deleted a verified trade file, but an older unverified day's files
   remain, so `covered_from` still reaches back past it.
 
-A row whose `ts_event` falls in any marker span is `not covered` and keeps its live values. One
-JSON line per gap in `<catalog>/_archive_gaps/<iid>.jsonl`: `instrument_id`, `from_ns`, `to_ns`
-(inclusive), `reason`, `count`. Only one collector writes a given instrument's file (the same
-single-writer rule as its catalog leaves), and the maintenance tools write it under the
-maintenance lock. A marker that cannot be written is ledgered (`archive_gaps.write`).
+A row whose `ts_event` falls in any marker span is `not covered` and keeps its live values. Only
+one collector writes a given instrument's file (the same single-writer rule as its catalog
+leaves), and the maintenance tools write it under the maintenance lock. A marker that cannot be
+written is ledgered (`archive_gaps.write`).
 """
 
-import json
 import os
-from pathlib import Path
+import warnings
 
+from kernel import archive_markers
+from kernel import clocks
+from kernel.archive_markers import ArchiveGap
 from observability import error_ledger
 
 
-GAPS_DIRNAME = "_archive_gaps"
-# How long after a trade's `ts_event` it can still reach the archive (`ts_init`): the live age
-# filter (`stale_trade_seconds`, 10 s) bounds it for live trades, and the reconnect trade backfill
-# (story 22.14, `Collector._apply_backfill`) refuses -- and counts -- any unseen REST trade older
-# than this, so the bound holds for backfilled trades too. Shared by the rebuild's `ts_init` query
-# window, the quarantine marker and the prune gate's previous-day check.
-ARRIVAL_MARGIN_NS = 300 * 1_000_000_000
+# Story 23.2 moved the marker format and the skew bound to the kernel. The old names are served,
+# as the same objects, with a DeprecationWarning until the story below is done.
+MOVED_NAMES_REMOVE_AFTER = "24-2-views-read-models-and-reader-side-revalidation-removed"
+_MOVED_NAMES: dict[str, str] = {
+    "ARRIVAL_MARGIN_NS": "kernel.clocks.MAX_TS_INIT_SKEW_NS",
+    "GAPS_DIRNAME": "kernel.archive_markers.GAPS_DIRNAME",
+    "in_gap": "kernel.archive_markers.in_gap",
+}
+
+_TARGET_MODULES = {"kernel.clocks": clocks, "kernel.archive_markers": archive_markers}
 
 
-def _gaps_path(catalog_path: str, iid: str) -> Path:
-    return Path(catalog_path) / GAPS_DIRNAME / f"{iid}.jsonl"
+def __getattr__(name: str) -> object:
+    if name not in _MOVED_NAMES:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    target = _MOVED_NAMES[name]
+    warnings.warn(
+        f"collector_core.archive_gaps.{name} moved to {target} (Story 23.2); "
+        f"removed after {MOVED_NAMES_REMOVE_AFTER}",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    module, _, attr = target.rpartition(".")
+    return getattr(_TARGET_MODULES[module], attr)  # a KeyError is a table typo: loud
 
 
 def record_gap(
     catalog_path: str, iid: str, from_ns: int, to_ns: int, reason: str, count: int
 ) -> None:
     """Append one gap marker; a failure is ledgered, never raised (callers must carry on)."""
-    line = json.dumps(
-        {
-            "instrument_id": iid,
-            "from_ns": from_ns,
-            "to_ns": to_ns,
-            "reason": reason,
-            "count": count,
-        }
-    )
-    path = _gaps_path(catalog_path, iid)
+    line = archive_markers.encode(ArchiveGap(iid, from_ns, to_ns, reason, count))
+    path = archive_markers.path_for(catalog_path, iid)
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("a") as f:
@@ -82,7 +88,7 @@ def load_gaps(catalog_path: str, iid: str) -> list[tuple[int, int]]:
     Return the instrument's gap spans `(from_ns, to_ns)`, inclusive. A malformed line raises
     `ValueError`: the rebuild then refuses the instrument-day rather than guess.
     """
-    path = _gaps_path(catalog_path, iid)
+    path = archive_markers.path_for(catalog_path, iid)
     if not path.exists():
         return []
     spans = []
@@ -90,12 +96,7 @@ def load_gaps(catalog_path: str, iid: str) -> list[tuple[int, int]]:
         if not text.strip():
             continue
         try:
-            entry = json.loads(text)
-            spans.append((int(entry["from_ns"]), int(entry["to_ns"])))
-        except (json.JSONDecodeError, KeyError, TypeError) as e:
+            spans.append(archive_markers.decode(text).span)
+        except ValueError as e:
             raise ValueError(f"{path}:{number}: malformed archive-gap marker {text!r}") from e
     return spans
-
-
-def in_gap(ts_ns: int, gaps: list[tuple[int, int]]) -> bool:
-    return any(lo <= ts_ns <= hi for lo, hi in gaps)

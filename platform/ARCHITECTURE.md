@@ -29,7 +29,8 @@ downstream of the collector ever touches `nautilus_trader`'s live `TradingNode`/
 |---|---|---|
 | `collector_core/` | The venue-neutral collector engine (Story 22.1) — ingest → 1s sample → flush → Parquet + `snapshots:raw` + `candles_*.db`; also the operator-run catalog tools | Parquet catalog (read/write), Redis (publish), `candles_*.db` (write) |
 | `dydx_collector/`, `bybit_collector/`, `hyperliquid_collector/` | Venue subclasses of `collector_core.Collector`: WS/HTTP client, config, venue quirks | Their venue's WS/REST (via Rust `nautilus_pyo3` clients) |
-| `common/` | Venue identifiers shared by every module (`venues.py`) | nothing (pure constants) |
+| `kernel/` | The shared kernel (Story 23.2, DDD spine AD-D3): the one copy of every type, fold, parser, constant, transport and read helper more than one context uses — `second_snapshot` (`DydxSecondSnapshot`, `SecondOHLC`), `open_interest`, `fold` (`fold_trades`), `indicators` (pure `Indicator`s and snapshot functions), `performance_metrics`, `venues` (the only `InstrumentId` parser: `venue_of`, `has_venue`, `venue_kind`, `market_kind`, `market_suffix`, `bybit_category`), `clocks` (`TwoClocks`, `CatalogFileSpan`, the one skew bound `MAX_TS_INIT_SKEW_NS` = 300 s), `archive_markers` (the `_archive_gaps/<iid>.jsonl` format), `venue_http` (every venue REST URL and request), `catalog_files` (read-only snapshot-file helpers), `parquet_compat` (the one zstd `write_table` default). Imports no context, holds no state, store, config loader or ledger call; every context may import it | venue REST endpoints (outbound GET/POST, via callers), the Parquet catalog (read-only) |
+| `common/` | Deprecated shim package (Story 23.2): `common.venues` re-exports `kernel.venues` until Story 24.2 | nothing |
 | `observability/` | The generic observability context (Story 23.1, DDD spine AD-D16), standard library only and venue-free: `error_ledger` (every continue-past-failure site, DATA-07; per process), `notify` (the one outbound transport: channels `operator` = ntfy/`WATCHDOG_NTFY_URL`, `telegram` = `TELEGRAM_*`, `webhook:<url>`), `watchdog` (the generic `(down_since, reminder)` alert transition), `incidents` (the WARNING+ incident-report handler, parameterised by the venue entrypoint's `IncidentConfig`). Every context except `kernel` may import it (spine AD-D2); it imports none | ntfy / Telegram / webhook URLs (outbound HTTP POST), `data/incident_reports/` (write, dYdX collector only) |
 | `ml_signals/` | Shared indicators, candle store, backtest strategies (`strategies/`) | Parquet catalog (read), Redis (`snapshots:raw`, `rankings:live` read), `metrics.db` + `candles_*.db` (read) `[amended 2026-09-20: Epic 22 story 22.8, review pass — `ranking:control` publish removed: the sole producer is `bot_tui/ranking_state.py:128` since Story 15.10 retired `dashboard`]` |
 | `data_api/` + `frontend/` | Web UI (React SPA) + read-only REST/WS on `:9100` | Redis (read), Parquet catalog + `candles_*.db` + `metrics.db` (read-only) |
@@ -39,13 +40,14 @@ downstream of the collector ever touches `nautilus_trader`'s live `TradingNode`/
 
 Module boundary rule enforced throughout (architecture AD-4): every module downstream
 of the collector depends only on shared data types (`DydxSecondSnapshot`,
-`OpenInterest`, `ml_signals.indicators` classes) and Redis/HTTP contracts — never
+`OpenInterest`, `kernel.indicators` classes) and Redis/HTTP contracts — never
 another module's internal state. The collectors are *supposed* not to import from
-anything downstream of them, and today they do: `collector_core/collector.py:71-73`,
-`collector_core/{build_candles,repair_catalog,consolidate_catalog}.py`,
-`dydx_collector/collector.py:79-80`, `dydx_collector/open_interest.py:34` and
-`bybit_collector/collector.py:33` all import `ml_signals` utilities (two of them the
-private `catalog_stats._stamp_to_ns`). It pre-dates Epic 22 and is tracked as an open
+anything downstream of them, and today some still do: `collector_core/{collector,build_candles,
+prune_catalog,compare_klines}.py` import `ml_signals.candle_store` (retired by Story 24.1's
+`SecondSink` port) and `collector_core/repair_catalog.py` imports
+`catalog_stats.query_second_snapshots` (Story 25.1). The shared types, clocks, file-span parse
+and read helpers they used to take from `ml_signals` now come from `kernel/` (Story 23.2) and the
+ledger from `observability/` (Story 23.1). It pre-dates Epic 22 and is tracked as an open
 boundary question in the spine's Deferred section, not as a resolved rule
 `[amended 2026-09-20: Epic 22 story 22.8, review pass — this sentence asserted the clean
 version of the very clause AD-4 was amended to retract in the same commit]`.
@@ -53,6 +55,10 @@ The error-ledger part of it is gone: the ledger moved to `observability/` (Story
 every context except `kernel` may import, and `ml_signals.error_ledger` is a deprecated re-export, deleted once Story
 24.1 is done. What remains (`candle_store`, `catalog_stats`) is listed edge by edge, with the story that
 retires each, in `platform/tests/test_boundaries.py`.
+The shared types, the fold, the clocks (`_stamp_to_ns` is now `kernel.clocks.CatalogFileSpan`) and
+the catalog read helpers (`kernel.catalog_files`) moved to `kernel/` in Story 23.2, so the
+collectors reach none of them through `ml_signals` any more; `candle_store` (Story 24.1) and
+`catalog_stats.query_second_snapshots` (a views read) remain `[amended 2026-09-22: Story 23.2]`.
 
 ---
 
@@ -111,8 +117,9 @@ unbounded-queue-growth bug under sustained load that OOM-crashed an earlier
   `snapshots:raw`. Flushes trades/deltas/bars/mark-index-funding/instruments to the
   Parquet catalog via `ParquetDataCatalog.write_data()` on `flush_interval_seconds`, and
   feeds finished 1m..1D bars into that venue's `candles_*.db`.
-- **`collector_core/second_snapshot.py`** — defines `DydxSecondSnapshot(Data)`, the one
-  custom Arrow-registered type this whole system is built around.
+- **`kernel/second_snapshot.py`** — defines `DydxSecondSnapshot(Data)`, the one
+  custom Arrow-registered type this whole system is built around (Story 23.2 moved it from
+  `collector_core/`; the old path is a deprecated re-export).
 - **`collector_core/integrity.py`** — `ohlc_outside_book()`: a second's trade high/low
   must lie inside that same second's own book. Live ERROR canary and offline detector
   (DATA-06).
@@ -120,7 +127,7 @@ unbounded-queue-growth bug under sustained load that OOM-crashed an earlier
   `build_candles` (rebuild a candle store from raw 1s), `consolidate_catalog`
   (`make consolidate`, nightly, every venue; `make backup-catalog` syncs the result off-box),
   `repair_catalog` (clear impossible trade OHLC; never on a day `rebuild_seconds` rebuilt),
-  `migrate_open_interest` (one-shot layout migration). Story 22.13: `fold` (the one exact
+  `migrate_open_interest` (one-shot layout migration). Story 22.13: `kernel.fold` (the one exact
   trades -> second fold, live and rebuild), `rebuild_seconds` (a closed day's trade columns from
   the raw `trade_tick` archive, on `ts_event`), `compare_klines` (1 m bars vs the venue's klines,
   exact, into `verified_days`), `prune_catalog` (age retention + verification-gated trade
@@ -132,9 +139,9 @@ unbounded-queue-growth bug under sustained load that OOM-crashed an earlier
   (dYdX's feed derives precision from each tick's own trailing-zero count, which corrupts
   catalog writes if left alone) and `uncross.py` resolves crossed books (DATA-04).
 - **`dydx_collector/open_interest.py`** — `classify_liquidity()` + the dYdX REST poll (the
-  shared `OpenInterest(Data)` type lives in `collector_core/open_interest.py`); open
+  shared `OpenInterest(Data)` type lives in `kernel/open_interest.py`); open
   interest is the one field the Rust bindings drop, so it's polled separately via
-  stdlib `urllib` against dYdX's indexer REST endpoint every 5 min.
+  `kernel.venue_http` against dYdX's indexer REST endpoint every 5 min.
 - **Hot-reload**: `config.toml`'s instrument list is re-read every `config_reload_seconds`
   — no restart needed to add/remove a coin.
 
@@ -229,7 +236,7 @@ The one place in `platform/` where `TradingNode`/`Strategy` usage is sanctioned
 (architecture AD-8 amendment) — everywhere else in `platform/` treats `nautilus_trader` as
 a library only.
 
-- **`strategy.py`** — `DummyStrategy`: wires all five `ml_signals.indicators` into a
+- **`strategy.py`** — `DummyStrategy`: wires all five `kernel.indicators` into a
   live `TradingNode` run. Explicitly framed as an integration proof, not a tuned alpha
   strategy — it proves every signal stays alive end-to-end from research through
   backtest through live paper trading. Feeds `Microprice`/`OrderFlowImbalance` from
@@ -270,7 +277,7 @@ SSH-launched tool, not a background service.
   by reading `rankings:live` directly (no local recomputation); `m` toggles ranking mode
   by publishing to `ranking:control`.
 - **`coin_detail.py` / `coin_detail_state.py`** — drill-down view: live indicators via
-  the shared `ml_signals.indicators` code path, order book collapsed-by-default /
+  the shared `kernel.indicators` code path, order book collapsed-by-default /
   `d`-to-expand (up to 20 levels), reads `snapshots:raw` directly. `o` deep-links to the
   dashboard's chart for the same coin.
 - **`bots_pane.py` / `bots_state.py`** — live bot list from `bots:status`, per-row stale

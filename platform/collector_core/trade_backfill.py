@@ -49,9 +49,9 @@ Known limit: Bybit's depth is the last 1000 linear trades (28-64 s of BTCUSDT in
 connection (`trade_feeds = 2`), which closes a one-sided outage without REST at all.
 
 Known limit: dYdX is paged back no further than `floor_ns` (the caller's fetch time minus
-`ARRIVAL_MARGIN_NS`, 5 minutes) and never beyond `_DYDX_MAX_PAGES`: the nightly rebuild and the
-prune find trades by `ts_init` within that margin of `ts_event`, so an older backfilled trade would
-be invisible to them. A dYdX outage longer than 5 minutes stays partly unrecovered, and says so.
+`kernel.clocks.MAX_TS_INIT_SKEW_NS`, 5 minutes) and never beyond `_DYDX_MAX_PAGES`: the nightly
+rebuild and the prune find trades by `ts_init` within that margin of `ts_event`, so an older
+backfilled trade would be invisible to them. A dYdX outage longer than 5 minutes stays partly unrecovered, and says so.
 Upgrade path: a backfill-span marker (like `archive_gaps`) that the rebuild and prune read to
 widen their window.
 
@@ -60,9 +60,7 @@ with more than 1000 trades of one market makes a page with no progress; paging s
 rest is reported `unrecoverable`. Upgrade path: page on `createdBeforeOrAtHeight` below the block.
 """
 
-import json
 import urllib.parse
-import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass
 from dataclasses import field
@@ -73,14 +71,16 @@ from decimal import Decimal
 from decimal import InvalidOperation
 from typing import Any
 
-from collector_core.venue_http import BYBIT_URLS
-from collector_core.venue_http import DYDX_NETWORKS
-from collector_core.venue_http import HYPERLIQUID_URLS
-from collector_core.venue_http import USER_AGENT
-from collector_core.venue_http import HttpJson
-from collector_core.venue_http import bybit_category
-from collector_core.venue_http import http_json
-from nautilus_trader.core.nautilus_pyo3 import get_dydx_http_url  # type: ignore[attr-defined]
+from kernel.venue_http import DYDX_NETWORKS
+from kernel.venue_http import HttpJson
+from kernel.venue_http import bybit_url
+from kernel.venue_http import dydx_indexer_url
+from kernel.venue_http import get_request
+from kernel.venue_http import http_json
+from kernel.venue_http import hyperliquid_info_url
+from kernel.venue_http import post_json_request
+from kernel.venues import bybit_category
+
 from nautilus_trader.model.data import TradeTick
 from nautilus_trader.model.enums import AggressorSide
 from nautilus_trader.model.identifiers import TradeId
@@ -93,6 +93,8 @@ _DYDX_PAGE = 1000
 _DYDX_MAX_PAGES = 20
 _BYBIT_LIMIT = 1000
 # A response this long may have been cut by the venue's depth: its oldest trade bounds coverage.
+# Known limit: only the wire-verified categories (22.14); an `-INVERSE.BYBIT` id is refused, not
+# guessed, until its recent-trade depth is verified against the venue (then add it here).
 _BYBIT_FULL = {"linear": 1000, "spot": 60}
 _HYPERLIQUID_FULL = 10
 _MS_NS = 1_000_000
@@ -298,13 +300,14 @@ _HYPERLIQUID = _Venue(_hyperliquid_time, _hyperliquid_trade)
 
 
 def _get(url: str, http: HttpJson) -> Any:
-    return http(urllib.request.Request(url, headers={"User-Agent": USER_AGENT}))  # noqa: S310
+    return http(get_request(url))
 
 
 def _dydx_page_url(instrument: Instrument, environment: str, before: str | None) -> str:
-    base = get_dydx_http_url(DYDX_NETWORKS[environment])
     ticker = urllib.parse.quote(instrument.raw_symbol.value)
-    url = f"{base}/v4/trades/perpetualMarket/{ticker}?limit={_DYDX_PAGE}"
+    url = dydx_indexer_url(
+        DYDX_NETWORKS[environment], f"/v4/trades/perpetualMarket/{ticker}?limit={_DYDX_PAGE}"
+    )
     if before is not None:
         url += f"&createdBeforeOrAt={urllib.parse.quote(before)}"
     return url
@@ -344,9 +347,14 @@ def _fetch_bybit(
     instrument: Instrument, environment: str, http: HttpJson
 ) -> tuple[list[dict], bool]:
     category = bybit_category(instrument.id.value)
-    url = (
-        f"{BYBIT_URLS[environment]}/v5/market/recent-trade?category={category}"
-        f"&symbol={urllib.parse.quote(instrument.raw_symbol.value)}&limit={_BYBIT_LIMIT}"
+    if category not in _BYBIT_FULL:
+        raise BackfillError(
+            f"{instrument.id}: Bybit {category} trade backfill is not wire-verified"
+        )
+    url = bybit_url(
+        environment,
+        f"/v5/market/recent-trade?category={category}"
+        f"&symbol={urllib.parse.quote(instrument.raw_symbol.value)}&limit={_BYBIT_LIMIT}",
     )
     rows = _bybit_rows(_get(url, http))
     return rows, len(rows) < _BYBIT_FULL[category]
@@ -356,11 +364,7 @@ def _fetch_hyperliquid(
     instrument: Instrument, environment: str, http: HttpJson
 ) -> tuple[list[dict], bool]:
     body = {"type": "recentTrades", "coin": instrument.raw_symbol.value}
-    request = urllib.request.Request(  # noqa: S310 (fixed https URLs)
-        HYPERLIQUID_URLS[environment],
-        data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json", "User-Agent": USER_AGENT},
-    )
+    request = post_json_request(hyperliquid_info_url(environment), body)
     rows = _hyperliquid_rows(http(request))
     return rows, len(rows) < _HYPERLIQUID_FULL
 

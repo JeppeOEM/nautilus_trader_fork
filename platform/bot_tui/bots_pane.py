@@ -278,7 +278,7 @@ def metrics_lines(entry: dict | None) -> list[str]:
     """
     Bot-detail's performance-metrics region: Sharpe, Sortino, Calmar, max drawdown,
     profit factor, expectancy, avg win/loss -- sourced from bots:history's "metrics"
-    field, which ml_signals.performance_metrics.all_metrics() computes as the single
+    field, which kernel.performance_metrics.all_metrics() computes as the single
     shared implementation (SSOT-02) this function only formats, never recomputes.
 
     A missing "metrics" key (e.g. a stale cached payload from before this field

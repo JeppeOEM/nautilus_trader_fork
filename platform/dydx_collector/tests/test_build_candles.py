@@ -22,7 +22,7 @@ from pathlib import Path
 from collector_core.build_candles import all_instruments
 from collector_core.build_candles import rebuild_instrument
 from collector_core.build_candles import venue_instruments
-from collector_core.second_snapshot import DydxSecondSnapshot
+from kernel.second_snapshot import DydxSecondSnapshot
 from ml_signals import candle_store
 from ml_signals.candles import candle_dicts_from_snapshots
 

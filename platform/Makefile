@@ -146,7 +146,7 @@ build-insecure:
 TEST_SOURCE_MOUNT := -v $(REPO_ROOT):/src:ro -e PLATFORM_SOURCE_DIR=/src/platform
 test:
 	$(COMPOSE) run --rm --no-deps -e HOME=/tmp -e USER=collector $(TEST_SOURCE_MOUNT) collector \
-		python3 -m pytest collector_core/tests dydx_collector/tests bybit_collector/tests hyperliquid_collector/tests common/tests ml_signals/tests ranking_engine/tests bot_tui/tests data_api/tests observability/tests tests -q
+		python3 -m pytest collector_core/tests dydx_collector/tests bybit_collector/tests hyperliquid_collector/tests ml_signals/tests ranking_engine/tests bot_tui/tests data_api/tests observability/tests kernel/tests tests -q
 
 ## Record the capture hot path's cost baseline (tests/fixtures/hotpath_baseline.json, audit D-65,
 ## spine AD-D5) into the checkout: the one place the source tree is mounted writable, because
@@ -243,7 +243,7 @@ tui:
 ## does not ship; it runs in `make test`.
 test-live-paper:
 	$(COMPOSE) --profile live-paper run --rm --no-deps -e HOME=/tmp -e USER=collector $(TEST_SOURCE_MOUNT) live-paper \
-		python3 -m pytest live_paper/tests observability/tests tests --ignore=tests/test_hotpath.py -q
+		python3 -m pytest live_paper/tests observability/tests kernel/tests tests --ignore=tests/test_hotpath.py -q
 
 ## Stop containers (catalog data is preserved)
 down:

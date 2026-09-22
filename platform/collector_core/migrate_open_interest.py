@@ -16,7 +16,7 @@
 Merge the three per-venue open-interest catalog directories into one (Story 22.3, AC #3).
 
 `custom_{dydx,bybit,hyperliquid}_open_interest/` held `DydxOpenInterest` / `BybitOpenInterest` /
-`HyperliquidOpenInterest` rows; all three classes are now `collector_core.open_interest.OpenInterest`,
+`HyperliquidOpenInterest` rows; all three classes are now `kernel.open_interest.OpenInterest`,
 whose catalog directory is `custom_open_interest/`. Until this runs, history in the old directories
 is read by nothing (DATA-05: no silent gap).
 

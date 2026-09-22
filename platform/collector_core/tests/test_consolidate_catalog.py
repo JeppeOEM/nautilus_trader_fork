@@ -25,10 +25,11 @@ from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+from kernel.catalog_files import data_file_ranges
+from kernel.catalog_files import query_second_ohlc
+from kernel.second_snapshot import DydxSecondSnapshot
 from ml_signals import candle_store
 from ml_signals.candle_store import BAR_SECONDS
-from ml_signals.catalog_stats import data_file_ranges
-from ml_signals.catalog_stats import query_second_ohlc
 from observability import error_ledger
 
 from collector_core.build_candles import rebuild_instrument
@@ -37,7 +38,6 @@ from collector_core.consolidate_catalog import consolidate_directory
 from collector_core.consolidate_catalog import leaf_dirs
 from collector_core.consolidate_catalog import main
 from collector_core.consolidate_catalog import run
-from collector_core.second_snapshot import DydxSecondSnapshot
 from nautilus_trader.model.data import Bar
 from nautilus_trader.model.data import BarType
 from nautilus_trader.model.data import MarkPriceUpdate

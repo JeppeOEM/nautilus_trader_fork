@@ -116,7 +116,7 @@ class MyStrategy(Strategy):
   need tick-by-tick delta resolution.
 
 **Reuse existing signal math** — don't reimplement OFI/OBI/microprice/spread. They're in
-`ml_signals/indicators.py` (`OrderFlowImbalance`, `MultiLevelOFI`, `MultiLevelOBI`,
+`kernel/indicators.py` (`OrderFlowImbalance`, `MultiLevelOFI`, `MultiLevelOBI`,
 `Microprice`, `OnlineLogisticTrend`) and `ml_signals/book_features.py`
 (`compute_features`, `CancellationTracker`) per SIGNAL-01 in `platform/CLAUDE.md` — raw data is
 stored, signals are computed on read.

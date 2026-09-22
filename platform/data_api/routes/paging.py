@@ -1,7 +1,7 @@
 """
 Shared cursor-paging helpers for the scroll-back routes (candles, snapshots, indicator
 series/values): find a page across data gaps and answer "is there anything older?" from the
-catalog's own file ranges (`catalog_stats.data_file_ranges`), not fixed-size probe windows.
+catalog's own file ranges (`kernel.catalog_files.data_file_ranges`), not fixed-size probe windows.
 """
 
 from collections.abc import Callable

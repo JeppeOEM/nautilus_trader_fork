@@ -39,7 +39,7 @@ import tempfile
 import time
 from decimal import Decimal
 
-from collector_core.second_snapshot import DydxSecondSnapshot
+from kernel.second_snapshot import DydxSecondSnapshot
 
 from ml_signals.strategies import backtest_snapshot
 from nautilus_trader.model.currencies import BTC

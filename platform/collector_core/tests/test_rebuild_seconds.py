@@ -19,16 +19,16 @@ import time
 from pathlib import Path
 
 import pyarrow.parquet as pq
+from kernel.fold import fold_trades
+from kernel.second_snapshot import DydxSecondSnapshot
 from ml_signals.catalog_stats import query_second_snapshots
 from observability import error_ledger
 
 from collector_core.archive_gaps import record_gap
 from collector_core.build_candles import _parse_date_ns
-from collector_core.fold import fold_trades
 from collector_core.rebuild_seconds import covered_from
 from collector_core.rebuild_seconds import main
 from collector_core.rebuild_seconds import rebuild_day
-from collector_core.second_snapshot import DydxSecondSnapshot
 from nautilus_trader.model.data import TradeTick
 from nautilus_trader.model.enums import AggressorSide
 from nautilus_trader.model.identifiers import InstrumentId

@@ -19,7 +19,7 @@ scroll-back page through this one `before_ns`/`limit`/`bar_seconds` contract, mi
 `routes/candles.py`'s own contract exactly so both routes can be co-paged from the same
 scroll-back trigger.
 
-Reuses `ml_signals.indicators.MultiLevelOFI`/`MultiLevelOBI`/`microprice`/`spread`
+Reuses `kernel.indicators.MultiLevelOFI`/`MultiLevelOBI`/`microprice`/`spread`
 unchanged (AD-F2, SSOT-01) -- this module adds no new indicator math, only bounded-query
 construction, chronological replay/bucketing, gap-marker insertion, and the `has_more`
 probe.
@@ -40,14 +40,15 @@ concern) -- see this story's spec for the full rationale.
 `app.py`, which imports them).
 """
 
-from common.venues import market_kind
 from fastapi import APIRouter
+from kernel import catalog_files
+from kernel.indicators import MultiLevelOBI
+from kernel.indicators import MultiLevelOFI
+from kernel.indicators import microprice as _microprice
+from kernel.indicators import spread as _spread
+from kernel.venues import market_kind
+from kernel.venues import venue_of
 from ml_signals import catalog_stats as _catalog_stats
-from ml_signals.indicators import MultiLevelOBI
-from ml_signals.indicators import MultiLevelOFI
-from ml_signals.indicators import microprice as _microprice
-from ml_signals.indicators import spread as _spread
-from ml_signals.venue import venue_of
 from pydantic import BaseModel
 
 from data_api.routes import paging
@@ -167,7 +168,7 @@ def get_indicator_series(
         buckets = _replay_bucket_samples(snapshots, bar_seconds)
         return [p for _, p in sorted(buckets.items()) if p.t < before_ms]
 
-    ranges = _catalog_stats.data_file_ranges(CATALOG_PATH, instrument_id)
+    ranges = catalog_files.data_file_ranges(CATALOG_PATH, instrument_id)
     span_ns = before_ns - _window_start_ns(before_ns, limit, bar_seconds)
     kept = paging.fetch_page(fetch, ranges, before_ns, span_ns)[-limit:]
 

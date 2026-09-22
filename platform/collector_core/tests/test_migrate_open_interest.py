@@ -19,9 +19,9 @@ from pathlib import Path
 
 import pyarrow.parquet as pq
 import pytest
+from kernel.open_interest import OpenInterest
 
 from collector_core import migrate_open_interest
-from collector_core.open_interest import OpenInterest
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 

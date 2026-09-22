@@ -49,8 +49,9 @@ the currently-used Docker-based test invocation, not a root-cause fix.
 
 from decimal import Decimal
 
+from kernel.indicators import OrderFlowImbalance
+
 from ml_signals.book_features import top_of_book_series
-from ml_signals.indicators import OrderFlowImbalance
 from ml_signals.strategies.ofi_strategy import OFIStrategy
 from ml_signals.strategies.ofi_strategy import OFIStrategyConfig
 from nautilus_trader.backtest.engine import BacktestEngine

@@ -20,7 +20,7 @@ cursor-pagination shape on a new route (no `bar_seconds` -- snapshots are per-se
 there is no bar/aggregation concept here).
 
 Reuses `ml_signals.catalog_stats.query_second_snapshots` unchanged (AD-F2) and
-`ml_signals.indicators.microprice` unchanged (SSOT-01) -- this module adds no new
+`kernel.indicators.microprice` unchanged (SSOT-01) -- this module adds no new
 aggregation/query logic, only bounded-query construction, the ported `_price_series_rows`
 math (SSOT-03, see below), and the `has_more` probe.
 
@@ -37,12 +37,13 @@ two copies stay byte-identical via a test-only oracle import of `ml_signals.dash
 original (never a runtime import).
 """
 
-from collector_core.second_snapshot import DydxSecondSnapshot
-from common.venues import market_kind
 from fastapi import APIRouter
+from kernel import catalog_files
+from kernel.indicators import microprice as _microprice
+from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.venues import market_kind
+from kernel.venues import venue_of
 from ml_signals import catalog_stats as _catalog_stats
-from ml_signals.indicators import microprice as _microprice
-from ml_signals.venue import venue_of
 from pydantic import BaseModel
 
 from data_api.routes import paging
@@ -201,7 +202,7 @@ def get_snapshots(instrument_id: str, before_ns: int, limit: int = 900) -> Snaps
             limit,
         )
 
-    ranges = _catalog_stats.data_file_ranges(CATALOG_PATH, instrument_id)
+    ranges = catalog_files.data_file_ranges(CATALOG_PATH, instrument_id)
     span_ns = before_ns - _window_start_ns(before_ns, limit)
     kept = paging.fetch_page(fetch, ranges, before_ns, span_ns)
 

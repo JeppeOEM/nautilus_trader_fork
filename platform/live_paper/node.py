@@ -45,7 +45,7 @@ import os
 from pathlib import Path
 from urllib.parse import urlparse
 
-from ml_signals.venue import venue_of
+from kernel.venues import venue_of
 
 from live_paper import bot_status
 from live_paper import trade_history
