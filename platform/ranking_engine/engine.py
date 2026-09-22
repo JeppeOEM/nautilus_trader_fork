@@ -1110,4 +1110,5 @@ async def main() -> None:
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
+    error_ledger.start()  # durable error ledger (story 23.3); no-op without ERROR_LEDGER_DIR
     asyncio.run(main())

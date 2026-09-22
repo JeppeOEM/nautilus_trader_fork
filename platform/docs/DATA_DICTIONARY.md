@@ -305,6 +305,33 @@ signals on read (SIGNAL-01).
   universe/precision metadata the catalog needs to interpret every other type
   correctly.
 
+### 1.11 Error ledger (`platform/data/errors/<service>.jsonl`, story 23.3)
+
+Not market data — the durable half of `observability.error_ledger.record()` (DATA-07). Not
+Parquet: plain JSON lines, one file per service (`collector`, `bybit_collector`,
+`hyperliquid_collector`, `ranking_engine`, `data_api`, `live-paper`, `bot_tui`; the compose
+service name, via `ERROR_LEDGER_SERVICE`).
+
+- **Fields per line:** `ts_ns` (int, arrival time), `service` (str), `pid` (int), `site` (str,
+  e.g. `collector.book_sequence`), `detail` (str, truncated to 2000 chars in the file only),
+  `exc_type` (str or `None`), `suppressed` (int, records dropped by the write cap since the
+  previous line for this site — `lines + sum(suppressed)` is the true count). A `process_start`
+  line (written once per boot by `observability.error_ledger.start()`) additionally carries
+  `revision` (str or `None`, from `ERROR_LEDGER_REVISION`) — its own fields are otherwise empty
+  (`detail=""`, `exc_type=None`, `suppressed=0`).
+- **Rotation:** by size, `<service>.jsonl` → `.1` .. `.N` (`ERROR_LEDGER_MAX_BYTES` default
+  20 MB, `ERROR_LEDGER_BACKUP_COUNT` default 10 files — the same shape as the compose
+  `x-logging` policy).
+- **Write cap:** at most `ERROR_LEDGER_MAX_LINES_PER_SITE_PER_MIN` (default 60) lines per site
+  per UTC minute; every record past the cap is counted and folded into the next written line's
+  `suppressed` for that site — never silently dropped from the total.
+- **Downstream use:** `GET /api/errors`'s `services` block (per-service restart count and
+  per-site totals since the last `process_start` / since an optional `?since_ns=`);
+  `python3 -m collector_core.crosscheck_errors` (§6 of `docs/DEPLOY_CHECKLIST.md`), which
+  matches a gap in §1.7's second-snapshot rows against these files within the 300 s skew bound
+  `collector_core.archive_gaps.ARRIVAL_MARGIN_NS` (`kernel.clocks.MAX_TS_INIT_SKEW_NS` after
+  Story 23.2) before calling it `UNEXPLAINED`.
+
 ---
 
 ## 2. Computed signals / ML features (`platform/ml_signals/`)

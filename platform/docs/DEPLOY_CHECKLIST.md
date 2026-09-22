@@ -203,3 +203,51 @@ Record numbers where each line says, never in a story file.
 - Do not run `repair_catalog` on a day `rebuild_seconds` has rebuilt: its `ohlc_outside_book`
   detector compares exchange-timed trades with the mid-second book and would clear real trades.
 - Do not run `rebuild_seconds --include-open-day` while that venue's collector is running.
+
+## 6. Day-long clean-run check (story 23.3)
+
+Before the first `make redeploy-all` that ships this story: `mkdir -p platform/data/errors` on
+the VPS, owned by the container user (`chown 1000:1000 platform/data/errors` if created as
+another user) -- every service bind-mounts it `rw` as `/app/errors_dir` and writes its own
+`<service>.jsonl` there from its first line, so the directory must exist and be writable before
+the containers start, the same as `platform/data/catalog` and the other `platform/data/*` stores.
+
+`python3 -m collector_core.crosscheck_errors` reads every service's durable ledger under
+`platform/data/errors/` together with the archived catalog, in the collector image (the
+`errors_dir`/`catalog` mounts are already present):
+
+```bash
+docker compose run --rm --no-deps --network host collector python3 -m collector_core.crosscheck_errors \
+  --catalog /app/catalog --errors-dir /app/errors_dir \
+  --fail-on collector.book_crosscheck collector.book_sequence collector.pending_deltas \
+            collector.late_trade ranking_engine.volume24h
+```
+
+(No `--since`/`--until` needed for the usual "did the last 24 hours run clean" check -- that is
+the tool's default window; pass both as ISO-8601 UTC instants, e.g. `--since
+2026-09-21T00:00:00Z --until 2026-09-22T00:00:00Z`, to pin an exact day for the record instead.)
+Exit 0 closes, in one command, the day-long evidence these operator actions were each left
+waiting on:
+
+- **22.5 #1** — `collector.book_crosscheck` is 0 for Bybit and Hyperliquid over the whole window
+  (already in the tool's default `--fail-on` list).
+- **22.1 #2** — the "Instrument gaps" section prints `(none)` *and* the "Services" section lists
+  every expected collected instrument's owning service with rows in the window: no
+  `[collector.*]`-caused gap, snapshots 1 s apart for the whole window. `(none)` on its own is
+  not sufficient -- the tool only diffs gaps *between* two observed rows (see the module's own
+  `Known limits`), so an instrument with zero rows for the whole window (dead the entire time)
+  also prints no gap. Cross-check against the expected instrument list (`config.toml`/
+  `dydx_config.toml`) if the count looks low.
+- **22.10 #4** — `ranking_engine.volume24h`'s printed count is 0 (add it to `--fail-on`, as
+  above, to make a nonzero count fail the exit code instead of only being visible in the
+  printed report).
+- **22.12 #5** — `collector.late_trade`, `collector.pending_deltas` and `collector.book_sequence`
+  are printed per service for Bybit and Hyperliquid; `pending_deltas`/`book_sequence` are
+  already `--fail-on` defaults, while a steady nonzero `late_trade` rate does not fail the exit
+  code on its own (it means `hold_back_seconds` is too short, not a loss) and is root-caused by
+  hand in `DATA_INTEGRITY_AUDIT.md` (D-63).
+
+Add `--venue bybit`/`--venue hyperliquid`/`--venue dydx` to narrow which instruments' gaps are
+checked (and so which collector's ledger explains them) to one venue. It never narrows the
+"Services"/`--fail-on` check -- a site belonging to a different service, e.g.
+`ranking_engine.volume24h`, is still checked under `--venue bybit`.

@@ -1939,6 +1939,9 @@ async def run_forever(build: Callable[[], Collector], *, init_rust_logging: bool
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
+    # Durable error ledger (story 23.3): a no-op unless ERROR_LEDGER_DIR is set, and the one
+    # place this process writes its `process_start` marker.
+    error_ledger.start()
     # Rust's `log` crate is a no-op until a logger is installed: without this every
     # `log::warn!`/`error!` inside the Rust WS client (including a failed
     # call_soon_threadsafe, i.e. a message silently never reaching `_on_data`) is invisible.

@@ -46,6 +46,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from ml_signals.venue import venue_of
+from observability import error_ledger
 
 from live_paper import bot_status
 from live_paper import trade_history
@@ -246,6 +247,7 @@ def build_node(config: PaperConfig | ExecConfig) -> TradingNode:
 
 
 def main() -> None:
+    error_ledger.start()  # durable error ledger (story 23.3); no-op without ERROR_LEDGER_DIR
     real_money_path = os.environ.get(_REAL_MONEY_ENV_VAR)
     config, is_real_money = resolve_config(_DEFAULT_PAPER_CONFIG_PATH, real_money_path)
 

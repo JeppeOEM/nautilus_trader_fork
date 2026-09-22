@@ -19,6 +19,13 @@ CATALOG_PATH: str = os.environ.get("CATALOG_PATH", "platform/data/catalog")
 # file in this directory, the UI routes read them. A directory for the same WAL-sidecar reason as metrics.db.
 CANDLES_DB_DIR: str = os.environ.get("CANDLES_DB_DIR", str(Path(CATALOG_PATH).parent / "candles"))
 
+# Durable per-service error ledger (`observability.error_ledger`, story 23.3): every service that
+# calls `error_ledger.start()` writes its own `<service>.jsonl` here; `/api/errors` reads every
+# service's file back through this same shared directory (docker-compose.yml's `errors_dir` mount).
+ERROR_LEDGER_DIR: str = os.environ.get(
+    "ERROR_LEDGER_DIR", str(Path(CATALOG_PATH).parent / "errors")
+)
+
 
 def candles_db_path(venue: str) -> str:
     """One store file per venue (each venue's collector is its single writer)."""

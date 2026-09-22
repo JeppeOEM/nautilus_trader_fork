@@ -58,16 +58,16 @@ A zero count after a restart proves nothing, and a data gap with no ledger entry
 
 ## Tasks / Subtasks
 
-- [ ] Task 1 — durable writer in `observability/error_ledger.py` (AC: #1, #2, #3)
-  - [ ] File sink: open append, one `json.dumps` line per record, `flush()` per line; rotation by size; per-site per-minute cap with an exact `suppressed` carry; `process_start` line at init. Stdlib only. The sink is created at init from env; no module-level mutable state beyond what 23.1's ledger already sanctions (AD-D10), documented with its invariant (DESIGN-01).
-  - [ ] Tests (real files in `tmp_path`, no mocks of internals, TEST-01..04): line format, flush-before-return, rotation boundary, cap and exact suppressed carry across a minute boundary, write failure counted and logged, unset dir is a no-op.
-- [ ] Task 2 — compose wiring (AC: #4)
-  - [ ] `./data/errors:/app/errors_dir` + `ERROR_LEDGER_DIR` + `ERROR_LEDGER_SERVICE` on the seven services; `.gitignore`; `platform/docs/DEPLOY_CHECKLIST.md` notes the VPS needs `mkdir -p platform/data/errors` owned by the container user before `make redeploy-all`.
-- [ ] Task 3 — `collector_core/crosscheck_errors.py` (AC: #5)
-  - [ ] Ledger reader over rotated files; gap finder over `kernel.catalog_files` per day per instrument (bounded memory, streaming); gap ↔ ledger/restart matcher using `kernel.clocks.MAX_TS_INIT_SKEW_NS`; report + exit code. Add it to `LEGACY_MODULE_TO_CONTEXT` as `archive`.
-  - [ ] Tests on a tmp catalog written with real `DydxSecondSnapshot` rows via `ParquetDataCatalog.write_data()`: a clean day passes; a gap with a matching ledger entry is explained; a gap across a `process_start` is explained as a restart; a gap with neither is `UNEXPLAINED` and exits non-zero; a `--fail-on` site with a non-zero count exits non-zero.
-- [ ] Task 4 — `/api/errors` `services` block (AC: #6) with a fixture test of the unchanged old fields.
-- [ ] Task 5 — docs and operator pointers (AC: #7, #8).
+- [x] Task 1 — durable writer in `observability/error_ledger.py` (AC: #1, #2, #3)
+  - [x] File sink: open append, one `json.dumps` line per record, `flush()` per line; rotation by size; per-site per-minute cap with an exact `suppressed` carry; `process_start` line at init. Stdlib only. The sink is created at init from env; no module-level mutable state beyond what 23.1's ledger already sanctions (AD-D10), documented with its invariant (DESIGN-01).
+  - [x] Tests (real files in `tmp_path`, no mocks of internals, TEST-01..04): line format, flush-before-return, rotation boundary, cap and exact suppressed carry across a minute boundary, write failure counted and logged, unset dir is a no-op.
+- [x] Task 2 — compose wiring (AC: #4)
+  - [x] `./data/errors:/app/errors_dir` + `ERROR_LEDGER_DIR` + `ERROR_LEDGER_SERVICE` on the seven services; `.gitignore`; `platform/docs/DEPLOY_CHECKLIST.md` notes the VPS needs `mkdir -p platform/data/errors` owned by the container user before `make redeploy-all`.
+- [x] Task 3 — `collector_core/crosscheck_errors.py` (AC: #5)
+  - [x] Ledger reader over rotated files; gap finder over `kernel.catalog_files` per day per instrument (bounded memory, streaming); gap ↔ ledger/restart matcher using `kernel.clocks.MAX_TS_INIT_SKEW_NS`; report + exit code. Add it to `LEGACY_MODULE_TO_CONTEXT` as `archive`.
+  - [x] Tests on a tmp catalog written with real `DydxSecondSnapshot` rows via `ParquetDataCatalog.write_data()`: a clean day passes; a gap with a matching ledger entry is explained; a gap across a `process_start` is explained as a restart; a gap with neither is `UNEXPLAINED` and exits non-zero; a `--fail-on` site with a non-zero count exits non-zero.
+- [x] Task 4 — `/api/errors` `services` block (AC: #6) with a fixture test of the unchanged old fields.
+- [x] Task 5 — docs and operator pointers (AC: #7, #8).
 
 ## Dev Notes
 
@@ -102,8 +102,154 @@ An earlier, unreviewed attempt at this story exists as one commit, `51990335a8`,
 
 ### Agent Model Used
 
+claude-opus-5 (Claude Code, bmad-loop dev session, 2026-09-22)
+
 ### Debug Log References
+
+- Local `python3 -m pytest -o addopts="" --rootdir=.` from `platform/` (the environment has
+  `nautilus_trader` importable, so the collector-image fallback was not needed).
+- Full Makefile `test` module list: **10 failed, 1279 passed** -- exactly the 10 known
+  pre-existing failures (`dydx_collector/tests/test_collector_trade_ohlc.py` x5,
+  `ml_signals/tests/test_ofi_strategy*.py` x4, `data_api/tests/test_rankings.py` redis x1).
+- `tests/test_hotpath.py`: all allocation assertions pass. Its wall-time assertion
+  (`test_wall_time_per_message_is_within_twice_the_baseline`) passed on the first run and then
+  began failing as the dev box's load average climbed past ~9 on 8 cores (other concurrent
+  sessions). Reproduced identically on a pristine detached worktree at the story's baseline
+  `9a067eb991` with no changes applied, so the failure is host contention, not this story.
 
 ### Completion Notes List
 
+Ported from the preserved attempt `attempt-preserve/20260921-181822-125a-84a41aca` (its own
+range `e58b0a0676..84a41aca65`), never cherry-picked (that range contains `e58b0a0676`, a merge
+of Story 23.2's whole `kernel/` package, which must not land here).
+
+**Kept (verified line by line against the ACs, unchanged in substance):**
+
+- `observability/error_ledger.py`'s `_FileSink` design: append + `flush()` per line, size
+  rotation (`.1`..`.N`), per-site per-minute cap with an exact `suppressed` carry, the
+  write-failure path that returns the spent cap slot *and* the lost line to `pending`,
+  `start()`/`PROCESS_START_SITE`/`WRITE_FAILED_SITE`/`_env_int`, and the reader helpers
+  `ledger_files`/`services`/`iter_records`/`site_counts`/`service_summary`. Stdlib only;
+  `record()`'s signature, ERROR log line and in-memory counts are byte-for-byte the 23.1
+  contract; `ml_signals.error_ledger` is untouched as 23.1's shim.
+- The `_FileSink`/reader test cases, the `crosscheck_errors` module structure
+  (`ServiceReport`/`Gap`/`Report`, `build_report`, `_explain_gap`, `_exit_code`, `main`), the
+  `--venue`-never-narrows-`--fail-on` rule and its test, `/api/errors`'s `services` block and
+  `ServiceErrorSummary`, `data_api/settings.py`'s `ERROR_LEDGER_DIR`, the compose wiring
+  (7 services x `ERROR_LEDGER_DIR`/`ERROR_LEDGER_SERVICE` + `./data/errors:/app/errors_dir`),
+  `.gitignore`, `platform/data/errors/.gitkeep`, `test_boundaries.py`'s two `ARCHIVE` rows,
+  `DEPLOY_CHECKLIST.md` §6, `DATA_DICTIONARY.md` §1.11, the AD-D16 amendment and the four
+  Epic 22 operator-action pointer lines.
+
+**Changed:**
+
+- **`kernel.*` -> today's modules (the one dependency deviation, spec Design Notes).**
+  `kernel.catalog_files.query_second_ohlc` -> `ml_signals.catalog_stats.query_second_ohlc`;
+  `kernel.catalog_files.SNAPSHOT_DIRNAME` -> a module constant `SNAPSHOT_DIRNAME =
+  "custom_dydx_second_snapshot"`; `kernel.clocks.MAX_TS_INIT_SKEW_NS` ->
+  `collector_core.archive_gaps.ARRIVAL_MARGIN_NS` (the same 300 s bound), aliased locally as
+  `_MAX_TS_INIT_SKEW_NS`; `kernel.clocks.NS_PER_S`/`NS_PER_DAY` -> module constants;
+  `kernel.venues` -> `ml_signals.venue` + `common.venues`; `kernel.second_snapshot` ->
+  `collector_core.second_snapshot`. Every site carries a `# 23.2 moves this to kernel.<symbol>.`
+  comment and the repoint is filed in `deferred-work.md`. `platform/kernel/` is **not** created.
+  `tests/test_boundaries.py` needed no new `LEGACY_EDGES_UNTIL`/`LEGACY_PRIVATE_IMPORTS_UNTIL`
+  entry: every substituted symbol is already `KERNEL` in its split map, so ARCHIVE->KERNEL is a
+  legal edge (the test was run and confirms it).
+- `_FileSink.last_error` typed `BaseException | None` (the preserved `OSError | None` is wrong:
+  the `except` clause also catches `UnicodeError`, which is not an `OSError` -- a real mypy
+  error).
+- `_emit`/`_rotate` restructured so `_rotate` takes and returns the open file instead of
+  asserting on `self._file`. In the preserved version an `assert` there would have raised
+  `AssertionError` **through** `record()`'s `except (OSError, UnicodeError)` guard, breaking the
+  "never raises into the caller" invariant.
+- `site_counts()` takes an `Iterable` (every caller passes a list; the preserved `Iterator`
+  annotation forced a pointless `iter(...)` at each call site).
+- `ledger_files()` returns `[]` when the directory does not exist, and `iter_records()` narrows
+  its skip to `FileNotFoundError` (the documented rotate-out-from-under-us race) instead of any
+  `OSError`, so a permission error stays loud rather than being silently skipped (DATA-07).
+- `_print_report` split into `_print_services`/`_print_gaps`/`_fail_on_totals`, and `main()`
+  split with `_build_parser`/`_window`, to keep every function under the cognitive-complexity
+  and ~30-line limits and to stop `_exit_code` and `_print_report` duplicating the fail-on sum.
+- Lint fixes over the preserved text: `datetime.fromisoformat(text)` directly (Python 3.11+
+  parses `Z`; FURB162), `itertools.pairwise` (RUF007), import ordering, and a non-D401 docstring
+  on `_count_write_failure`.
+- `ARCHITECTURE.md`: only the `observability/` row edit and the new `data/errors/<service>.jsonl`
+  stores-table row were taken; the preserved attempt's `kernel/` table row was dropped.
+  `DATA_DICTIONARY.md` §1.11 cites `collector_core.archive_gaps.ARRIVAL_MARGIN_NS`
+  (`kernel.clocks.MAX_TS_INIT_SKEW_NS` after 23.2) instead of the kernel symbol.
+- `CLAUDE.md` DATA-07 rewritten against this tree's current text (the preserved diff was against
+  a 23.2 baseline and did not apply). The new Known limit additionally records that the in-memory
+  `counts()` the `<ErrorBar>` polls is still `data_api`'s own process, and keeps the Redis
+  `errors:ledger` channel as the upgrade path for *live* cross-process visibility.
+- `live_paper/node.py`: only the `error_ledger.start()` line (and its import) was taken; the
+  preserved attempt's `kernel.venues` import was not.
+
+**Added beyond the preserved attempt (test coverage the I/O matrix demanded):**
+
+- `test_malformed_env_int_falls_back_to_the_default` (`_env_int` was untested).
+- `test_write_failure_returns_the_spent_cap_slot_and_the_lost_line` (I/O matrix row 6's exactness
+  claim was asserted nowhere).
+- `test_errors_route_services_block_is_empty_without_a_ledger_dir` (the missing-dir row).
+- `crosscheck_errors`: `test_a_ledger_entry_outside_the_skew_bound_does_not_explain_a_gap`,
+  `test_suppressed_carries_are_folded_into_the_printed_counts`,
+  `test_main_rejects_an_inverted_or_unparseable_window`,
+  `test_venue_filter_selects_only_that_venues_instruments`,
+  `test_missing_catalog_or_errors_dir_is_an_empty_report`.
+- Three `deferred-work.md` entries (the kernel repoint, plus the two carried over from the
+  preserved attempt's review round).
+
+**Dropped:**
+
+- Everything under `platform/kernel/` (never created).
+- `platform/ARCHITECTURE.md`'s `kernel/` table row from the preserved diff.
+- `live_paper/node.py`'s `kernel.venues` import from the preserved diff.
+- The preserved attempt's own edits to the spec file's frontmatter, Review Triage Log and Auto
+  Run Result (commits `6511bb0578`/`84a41aca65`): this session does not own the spec's status or
+  its `<intent-contract>`.
+
+**Known limits added in code** (each names its ceiling and upgrade path):
+
+1. `error_ledger` module docstring: size rotation can age a day's lines out of the 20 MB x 10
+   window under a sustained storm -- raise the two env vars, or ship the files with story
+   22.11's rclone catalog backup.
+2. `error_ledger` module docstring: a site's pending `suppressed` carry only reaches disk on that
+   site's next write and nothing calls `close()` in production -- a periodic time-based flush.
+3. `service_summary`: every call re-reads the service's whole file set -- an mtime/offset cache
+   if the poll shows up in `data_api`'s CPU.
+4. `crosscheck_errors` module docstring: the gap-to-ledger match is time proximity only (the
+   frozen AC1 line schema carries no instrument id) -- carry a structured instrument id in
+   `detail` and match on it too.
+5. `crosscheck_errors` module docstring: only gaps *between* two observed rows are found, so a
+   wholly dead instrument shows none -- persist a per-instrument last-seen watermark across runs.
+   `DEPLOY_CHECKLIST.md` §6 states this explicitly next to the `(none)` check.
+
+**Operator steps that remain (outside the repo):** create `platform/data/errors` on the VPS owned
+by uid 1000 before the first `make redeploy-all`, redeploy, let it run a full day, then run the
+§6 invocation and confirm exit 0; and confirm the frontend error bar still renders against the
+live `services`-carrying `/api/errors`.
+
 ### File List
+
+- `platform/observability/error_ledger.py` -- durable `_FileSink`, `start()`, reader helpers.
+- `platform/observability/tests/test_error_ledger.py` -- sink + reader cases.
+- `platform/collector_core/crosscheck_errors.py` -- **new** CLI.
+- `platform/collector_core/tests/test_crosscheck_errors.py` -- **new** tests.
+- `platform/collector_core/collector.py` -- `error_ledger.start()` in `run_forever`.
+- `platform/ranking_engine/engine.py` -- `error_ledger.start()` in `__main__`.
+- `platform/bot_tui/app.py` -- `error_ledger.start()` in `main()`.
+- `platform/live_paper/node.py` -- `error_ledger.start()` in `main()`.
+- `platform/data_api/app.py` -- lifespan `start()`, `ServiceErrorSummary`, `/api/errors`
+  `services` block + `?since_ns=`.
+- `platform/data_api/settings.py` -- `ERROR_LEDGER_DIR`.
+- `platform/data_api/tests/test_data_api.py` -- old-shape fixture test + two `services` tests.
+- `platform/frontend/openapi.json`, `platform/frontend/src/api/schema.ts` -- regenerated.
+- `platform/docker-compose.yml` -- 7 services x env pair + `./data/errors` mount.
+- `.gitignore`, `platform/data/errors/.gitkeep` -- the new store.
+- `platform/tests/test_boundaries.py` -- the two `ARCHIVE` rows.
+- `platform/CLAUDE.md`, `platform/ARCHITECTURE.md`, `platform/docs/DATA_DICTIONARY.md`,
+  `platform/docs/DEPLOY_CHECKLIST.md` -- DATA-07, the observability/stores rows, §1.11, §6.
+- `_bmad-output/planning-artifacts/architecture/architecture-ddd-platform-2026-09-21/ARCHITECTURE-SPINE.md`
+  -- AD-D16 `[amended 2026-09-21: Story 23.3]`.
+- `_bmad-output/implementation-artifacts/22-1-*.md`, `22-5-*.md`, `spec-22-10-*.md`,
+  `spec-22-12-*.md` -- one operator-action pointer line each.
+- `_bmad-output/implementation-artifacts/deferred-work.md` -- three entries.

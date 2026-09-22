@@ -56,6 +56,7 @@ from data_api.routes import metrics as metrics_routes
 from data_api.routes import rankings as rankings_routes
 from data_api.routes import snapshots as snapshots_routes
 from data_api.settings import CATALOG_PATH
+from data_api.settings import ERROR_LEDGER_DIR
 from data_api.ws import live as live_ws
 
 
@@ -84,6 +85,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     `live_candles.live_candle_bus` instances, never opening a per-request or
     per-websocket Redis connection of their own.
     """
+    error_ledger.start()
     rankings_task = asyncio.create_task(redis_bus.bus.run(redis_bus.REDIS_URL))
     live_candles_task = asyncio.create_task(live_candles.live_candle_bus.run(redis_bus.REDIS_URL))
     try:
@@ -153,19 +155,39 @@ def health() -> HealthResponse:
     return HealthResponse(status="ok")
 
 
+class ServiceErrorSummary(BaseModel):
+    last_start_ns: int | None
+    since_start: dict[str, int]
+    since: dict[str, int] | None
+
+
 class ErrorsResponse(BaseModel):
     # site -> how many times this process recorded a failure there since it started (DATA-07).
     counts: dict[str, int]
     last: dict[str, str]
+    # service name -> its durable ledger's summary (story 23.3); empty when ERROR_LEDGER_DIR
+    # has no files yet (unset, or nothing has called observability.error_ledger.start()).
+    services: dict[str, ServiceErrorSummary]
 
 
 @app.get("/api/errors")
-def errors() -> ErrorsResponse:
+def errors(since_ns: int | None = None) -> ErrorsResponse:
     """
-    Every failure this process carried on past (`observability.error_ledger`). Empty means none
-    since start; the frontend's error bar polls this so a malfunction cannot go unseen.
+    Every failure this process carried on past (`observability.error_ledger`). `counts`/`last`
+    are this process's own in-memory tallies, unchanged since Story 23.1; `services` is every
+    other process's durable ledger (story 23.3), read back from `ERROR_LEDGER_DIR` -- so a
+    collector's failure is visible here too, not only in its own container's log. Empty means
+    none since start; the frontend's error bar polls this so a malfunction cannot go unseen.
     """
-    return ErrorsResponse(counts=error_ledger.counts(), last=error_ledger.last_details())
+    services = {
+        name: ServiceErrorSummary(
+            **error_ledger.service_summary(ERROR_LEDGER_DIR, name, since_ns=since_ns)
+        )
+        for name in error_ledger.services(ERROR_LEDGER_DIR)
+    }
+    return ErrorsResponse(
+        counts=error_ledger.counts(), last=error_ledger.last_details(), services=services
+    )
 
 
 # Story 15.2: rankings REST + WS relay. Story 15.3: candles REST. Story 15.7: snapshots

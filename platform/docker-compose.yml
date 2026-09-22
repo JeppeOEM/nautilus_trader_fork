@@ -39,6 +39,10 @@ services:
       # Push alert (ntfy.sh-compatible) when every subscribed instrument's book goes
       # stale for 30s+ -- see OBS-01 in CLAUDE.md. Unset means log-only (no push).
       # WATCHDOG_NTFY_URL: "https://ntfy.sh/your-private-topic-here"
+      # Durable error ledger (story 23.3): every observability.error_ledger.record() call also
+      # appends a JSON line to <ERROR_LEDGER_DIR>/<ERROR_LEDGER_SERVICE>.jsonl.
+      ERROR_LEDGER_DIR: "/app/errors_dir"
+      ERROR_LEDGER_SERVICE: "collector"
     # Known limit: hardcoded to host uid/gid (single-user box), so ./catalog
     # writes land owned by you, not root. Switch to ${UID}:${GID} if shared.
     user: "1000:1000"
@@ -57,6 +61,8 @@ services:
       # observability/incidents.py's IncidentHandler, configured by dydx_collector/collector.py's
       # INCIDENTS. Must survive container restarts, unlike /tmp/nautilus_logs.
       - ./data/incident_reports:/app/incident_reports
+      # Story 23.3: durable per-service error ledger, survives restarts/rebuilds/Redis loss.
+      - ./data/errors:/app/errors_dir
     network_mode: host
     restart: always
     logging: *default-logging
@@ -75,12 +81,15 @@ services:
       CANDLES_DB_PATH: "/app/candles_dir/candles_bybit.db"
       # OBS-01 push alert (ntfy.sh-compatible); unset means log-only. See the dYdX service.
       # WATCHDOG_NTFY_URL: "https://ntfy.sh/your-private-topic-here"
+      ERROR_LEDGER_DIR: "/app/errors_dir"
+      ERROR_LEDGER_SERVICE: "bybit_collector"
     user: "1000:1000"
     volumes:
       - ./bybit_collector/config.toml:/app/bybit_config.toml:ro
       # Same catalog root as the dYdX collector (Story 19.2): data_api serves both.
       - ./data/catalog:/app/catalog
       - ./data/candles:/app/candles_dir
+      - ./data/errors:/app/errors_dir
     network_mode: host
     restart: always
     logging: *default-logging
@@ -98,12 +107,15 @@ services:
       REDIS_URL: "redis://127.0.0.1:${REDIS_PORT:-6379}"
       CANDLES_DB_PATH: "/app/candles_dir/candles_hyperliquid.db"
       # WATCHDOG_NTFY_URL: "https://ntfy.sh/your-private-topic-here"
+      ERROR_LEDGER_DIR: "/app/errors_dir"
+      ERROR_LEDGER_SERVICE: "hyperliquid_collector"
     user: "1000:1000"
     volumes:
       - ./hyperliquid_collector/config.toml:/app/hyperliquid_config.toml:ro
       # Same catalog root as the dYdX collector (Story 19.2): data_api serves both.
       - ./data/catalog:/app/catalog
       - ./data/candles:/app/candles_dir
+      - ./data/errors:/app/errors_dir
     network_mode: host
     restart: always
     logging: *default-logging
@@ -127,6 +139,8 @@ services:
       RANKING_VOLATILITY_LOOKBACK_SECONDS: "3600"
       RANKING_HEARTBEAT_SECONDS: "5"
       METRICS_DB_PATH: "/app/metrics_dir/metrics.db"
+      ERROR_LEDGER_DIR: "/app/errors_dir"
+      ERROR_LEDGER_SERVICE: "ranking_engine"
     user: "1000:1000"
     volumes:
       # Catalog is read-only -- ranking_engine only reads it via
@@ -137,6 +151,7 @@ services:
       # mount can't expose those on a path shared with another container.
       - ./data/catalog:/app/catalog:ro
       - ./data/metrics:/app/metrics_dir
+      - ./data/errors:/app/errors_dir
     network_mode: host
     restart: always
     logging: *default-logging
@@ -159,11 +174,16 @@ services:
       ALERTS_PATH: "/app/data_api/alerts.toml"
       TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
       TELEGRAM_CHAT_ID: "${TELEGRAM_CHAT_ID:-}"
+      ERROR_LEDGER_DIR: "/app/errors_dir"
+      ERROR_LEDGER_SERVICE: "data_api"
     user: "1000:1000"
     volumes:
       - ./data/catalog:/app/catalog:ro
       - ./data/metrics:/app/metrics_dir:ro
       - ./data/candles:/app/candles_dir:ro
+      # rw (not ro): data_api both writes its own process_start/record() lines here and
+      # reads every service's files back for GET /api/errors' `services` block (story 23.3).
+      - ./data/errors:/app/errors_dir
       # rw: saved alerts (Story 20.1) -- host file must exist (committed empty), same reason.
       - ./data_api/alerts.toml:/app/data_api/alerts.toml:rw
       # rw: the Technicals tab's screener-wide column list (Story 17.5). The host file must
@@ -211,6 +231,8 @@ services:
       # bot_tui run on-host, not over troll-tui) means that hand-off is simply
       # skipped in favor of webbrowser.open()/OSC52.
       BOT_TUI_OPEN_URL_PORT: "${BOT_TUI_OPEN_URL_PORT:-}"
+      ERROR_LEDGER_DIR: "/app/errors_dir"
+      ERROR_LEDGER_SERVICE: "bot_tui"
     user: "1000:1000"
     volumes:
       # bot_tui.log is written here instead of stderr/stdout to avoid corrupting the
@@ -218,6 +240,7 @@ services:
       # discards the container's writable layer on exit, so without this bind mount the
       # log -- including any crash traceback -- would be lost the instant the run ends.
       - ./data/bot_tui_logs:/app/bot_tui_logs
+      - ./data/errors:/app/errors_dir
       # Read-only: bot_tui's own image (collector.dockerfile) never COPYs live_paper/
       # in, per AD-8's module isolation. This mount only lets the `v` key display the
       # strategy's source text -- no live_paper code is imported or run here.
@@ -269,6 +292,8 @@ services:
       DYDX_WALLET_ADDRESS:
       DYDX_TESTNET_PRIVATE_KEY:
       DYDX_TESTNET_WALLET_ADDRESS:
+      ERROR_LEDGER_DIR: "/app/errors_dir"
+      ERROR_LEDGER_SERVICE: "live-paper"
     user: "1000:1000"
     volumes:
       - ./live_paper/config.toml:/app/live_paper/config.toml:ro
@@ -277,6 +302,7 @@ services:
       # single-file bind mount can't expose (same gotcha already documented on
       # ranking_engine/data_api's metrics.db mounts above).
       - ./data/live_paper:/app/live_paper/data
+      - ./data/errors:/app/errors_dir
     network_mode: host
     # on-failure (not `always`, unlike collector/data_api) -- Story 3.2 attached a real
     # Strategy that submits live paper orders, so a persistent bad-config or transient
