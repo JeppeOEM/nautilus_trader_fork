@@ -112,6 +112,13 @@ The kernel is the one package every context imports, so nothing stateful, no sto
 
 ### Agent Model Used
 
+Claude Opus 5 (bmad-loop run 20260922-185011-96f9). Re-drove the story after the orchestrator
+deferred the prior attempt on the spec-baseline mismatch alone: recorded this worktree's starting
+commit (`2d7dd5ab6e`), cherry-picked the six preserved commits from
+`bmad-loop/20260921-181822-125a/23-2-kernel-shared-kernel` (clean, reproducing the recorded 143
+files / +4293/-1689 exactly), re-stamped the frontmatter, then verified and reviewed rather than
+re-derived. Earlier attempt, kept for provenance:
+
 Claude Sonnet 5 (bmad-loop run 20260921-181822-125a). Resumed from the reviewed attempt on
 `attempt-preserve/20260921-181822-125a-dbc89886` (Claude Opus 5 / Claude Fable 5.1, per that
 branch's commits) via `git cherry-pick 366ab1de8b a770ef48a4 3fe7292069 dbc89886e8` -- clean,
@@ -155,7 +162,34 @@ no conflicts -- rather than re-deriving the design, per the operator's Dev Notes
 - Full detail (files touched, verification commands and output, residual risks) is in
   `spec-23-2-kernel-shared-kernel.md`'s `## Auto Run Result` and `## Review Triage Log`.
 
+**Run 20260922-185011-96f9 (this attempt):**
+
+- **Kept:** everything above. The cherry-pick was clean and reproduced the preserved attempt's
+  diff exactly, so all three prior passes' work stands unmodified; none of the six commits was
+  amended or rewritten.
+- **Changed:** six files, in two commits. An implementation-verification pass found one real
+  defect the prior passes missed -- an unused `# type: ignore[index]` in
+  `kernel/tests/test_venue_http.py` that `warn_unused_ignores = true` turns into a pre-commit
+  mypy failure. A fourth independent two-hunter review then patched five more: the stale
+  `live_paper/DEPLOY_CHECKLIST.md` build steps (the one doc the earlier passes' sweep missed,
+  and it contradicts the dockerfile this story changed), a blind spot in
+  `test_skew_constants.py`'s config walk that let the whole skew-coupling chain pass vacuously
+  over a TOML array-of-tables, `kernel/__init__.py`'s "enforces all of it" overclaim about the
+  AST purity guard, the untested `_OHLC_COLUMNS = SecondOHLC._fields` coupling (a field rename
+  would null the whole catalog's candles silently), and `_stamp_ns` reading a fractional field
+  positionally without a length check.
+- **Dropped:** nothing. Every task and AC stands.
+- One new item deferred (the read helpers' list-then-open race, verified pre-existing and moved
+  verbatim); 19 findings rejected, most of them the earlier passes' own conclusions re-surfaced
+  by hunters who could not see the triage log.
+
 ### File List
+
+This attempt (run 96f9) additionally touched: `platform/kernel/tests/test_venue_http.py`,
+`platform/live_paper/DEPLOY_CHECKLIST.md`, `platform/tests/test_skew_constants.py`,
+`platform/kernel/__init__.py`, `platform/kernel/tests/test_catalog_files.py`,
+`platform/kernel/clocks.py`, `platform/kernel/tests/test_clocks.py` and
+`_bmad-output/implementation-artifacts/deferred-work.md`.
 
 See `spec-23-2-kernel-shared-kernel.md`'s Code Map and this pass's Auto Run Result "Files
 changed" list. This pass touched only `platform/tests/test_boundaries.py`,
