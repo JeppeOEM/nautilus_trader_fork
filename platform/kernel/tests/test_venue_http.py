@@ -59,6 +59,6 @@ def test_a_path_without_a_leading_slash_is_refused(path: str) -> None:
 
 def test_url_tables_are_read_only() -> None:
     with pytest.raises(TypeError):
-        venue_http.BYBIT_URLS["mainnet"] = "https://elsewhere"  # type: ignore[index]
+        venue_http.BYBIT_URLS["mainnet"] = "https://elsewhere"
     assert venue_http.BYBIT_URLS["testnet"] == "https://api-testnet.bybit.com"
     assert venue_http.HYPERLIQUID_URLS["mainnet"] == "https://api.hyperliquid.xyz/info"
