@@ -2,7 +2,7 @@
 title: 'Story 23.3: Durable error ledger and the day-long data/error cross-check'
 type: 'feature'
 created: '2026-09-22'
-status: 'in-progress'
+status: 'in-review'
 baseline_revision: '77730e2995beb1e08e296cfc8dcc123ba897edbe'
 review_loop_iteration: 0
 followup_review_recommended: false
@@ -79,15 +79,15 @@ warnings: ['oversized']
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] `platform/observability/error_ledger.py` -- add `_FileSink` (append + flush per line, size rotation, per-site per-minute cap with exact `suppressed` carry), `start()`, `PROCESS_START_SITE`/`WRITE_FAILED_SITE`, `_env_int`, and the reader helpers -- the durable half of DATA-07, stdlib only.
-- [ ] `platform/observability/tests/test_error_ledger.py` -- cover every I/O-matrix row of the sink and readers (line format, flush-before-return, idempotent `start()`, unset-dir no-op, cap + carry across a minute boundary, rotation bound and oldest-first read-back, write failure counted/logged twice, truncated line skipped, `service_summary` since-start and since-bound).
-- [ ] entrypoints (`collector_core/collector.py`, `ranking_engine/engine.py`, `data_api/app.py`, `live_paper/node.py`, `bot_tui/app.py`) -- one `error_ledger.start()` call each, so every service emits `process_start`.
-- [ ] `platform/docker-compose.yml`, `.gitignore`, `platform/data/errors/.gitkeep` -- add `./data/errors:/app/errors_dir` (rw) plus `ERROR_LEDGER_DIR`/`ERROR_LEDGER_SERVICE` (= compose service name) to the seven services; change nothing existing.
-- [ ] `platform/collector_core/crosscheck_errors.py` -- the CLI: ledger reader over rotated files, per-day/per-instrument gap finder, gap↔ledger/restart matcher within the 300 s skew bound, printed report and exit code; `--since/--until/--venue/--fail-on`.
-- [ ] `platform/collector_core/tests/test_crosscheck_errors.py` -- clean day, explained gap, restart-explained gap, `UNEXPLAINED` + non-zero exit, `--fail-on` exit, `--venue` never narrowing `--fail-on`, venue→service map covers `VENUE_KINDS`, and `main()` argv end-to-end.
-- [ ] `platform/data_api/{settings.py,app.py}` + `platform/data_api/tests/test_data_api.py` + `platform/frontend/{openapi.json,src/api/schema.ts}` -- the `services` block and its fixture test on the unchanged old shape.
-- [ ] `platform/tests/test_boundaries.py` -- map `collector_core.crosscheck_errors` and its test module to `ARCHIVE`; add any `LEGACY_EDGES_UNTIL`/`LEGACY_PRIVATE_IMPORTS_UNTIL` entry the new imports require, keyed on the story that retires it.
-- [ ] Docs + operator pointers -- `CLAUDE.md` DATA-07 (replace the per-process Known limit), `ARCHITECTURE.md` (observability row + the stores table), `docs/DATA_DICTIONARY.md` §1.11, `docs/DEPLOY_CHECKLIST.md` §6 "Day-long clean-run check" with the exact invocation and which Epic 22 action each line closes, one pointer line in each of stories 22.1/22.5/22.10/22.12, and `[amended 2026-09-21: Story 23.3]` on the spine's AD-D16.
+- [x] `platform/observability/error_ledger.py` -- add `_FileSink` (append + flush per line, size rotation, per-site per-minute cap with exact `suppressed` carry), `start()`, `PROCESS_START_SITE`/`WRITE_FAILED_SITE`, `_env_int`, and the reader helpers -- the durable half of DATA-07, stdlib only.
+- [x] `platform/observability/tests/test_error_ledger.py` -- cover every I/O-matrix row of the sink and readers (line format, flush-before-return, idempotent `start()`, unset-dir no-op, cap + carry across a minute boundary, rotation bound and oldest-first read-back, write failure counted/logged twice, truncated line skipped, `service_summary` since-start and since-bound).
+- [x] entrypoints (`collector_core/collector.py`, `ranking_engine/engine.py`, `data_api/app.py`, `live_paper/node.py`, `bot_tui/app.py`) -- one `error_ledger.start()` call each, so every service emits `process_start`.
+- [x] `platform/docker-compose.yml`, `.gitignore`, `platform/data/errors/.gitkeep` -- add `./data/errors:/app/errors_dir` (rw) plus `ERROR_LEDGER_DIR`/`ERROR_LEDGER_SERVICE` (= compose service name) to the seven services; change nothing existing.
+- [x] `platform/collector_core/crosscheck_errors.py` -- the CLI: ledger reader over rotated files, per-day/per-instrument gap finder, gap↔ledger/restart matcher within the 300 s skew bound, printed report and exit code; `--since/--until/--venue/--fail-on`.
+- [x] `platform/collector_core/tests/test_crosscheck_errors.py` -- clean day, explained gap, restart-explained gap, `UNEXPLAINED` + non-zero exit, `--fail-on` exit, `--venue` never narrowing `--fail-on`, venue→service map covers `VENUE_KINDS`, and `main()` argv end-to-end.
+- [x] `platform/data_api/{settings.py,app.py}` + `platform/data_api/tests/test_data_api.py` + `platform/frontend/{openapi.json,src/api/schema.ts}` -- the `services` block and its fixture test on the unchanged old shape.
+- [x] `platform/tests/test_boundaries.py` -- map `collector_core.crosscheck_errors` and its test module to `ARCHIVE`; add any `LEGACY_EDGES_UNTIL`/`LEGACY_PRIVATE_IMPORTS_UNTIL` entry the new imports require, keyed on the story that retires it.
+- [x] Docs + operator pointers -- `CLAUDE.md` DATA-07 (replace the per-process Known limit), `ARCHITECTURE.md` (observability row + the stores table), `docs/DATA_DICTIONARY.md` §1.11, `docs/DEPLOY_CHECKLIST.md` §6 "Day-long clean-run check" with the exact invocation and which Epic 22 action each line closes, one pointer line in each of stories 22.1/22.5/22.10/22.12, and `[amended 2026-09-21: Story 23.3]` on the spine's AD-D16.
 
 **Acceptance Criteria:**
 - Given the tree after this story, when the Makefile test-target module list runs in the collector image, then `observability/tests`, `collector_core/tests/test_crosscheck_errors.py`, `data_api/tests/test_data_api.py`, `tests/test_boundaries.py`, `tests/test_images.py`, `tests/test_namespace.py` and `tests/test_hotpath.py` pass with no new failure against the 10 pre-existing ones (dydx trade_ohlc ×5, ofi_strategy ×4, rankings redis ×1).
