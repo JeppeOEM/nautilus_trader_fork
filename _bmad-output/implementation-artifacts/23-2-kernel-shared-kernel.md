@@ -60,26 +60,29 @@ So that no two contexts can ever hold two copies of a shared type or a shared nu
 
 ## Dev Notes
 
-### Start from the prior attempt (operator decision, 2026-09-22)
+### Start from the prior attempt (operator decision, 2026-09-22, revised 18:55)
 
-A complete, reviewed attempt at this story exists as four commits on branch
-`attempt-preserve/20260921-181822-125a-dbc89886` (range `7bd64952fd..dbc89886e8`, 142 files,
-+4199/-1671): `366ab1de8b` (the `kernel/` package, shims, caller repointing, `test_boundaries.py`
-guards), `a770ef48a4` (first review triage), `3fe7292069` (17 follow-up review patches: 1 medium,
-16 low) and `dbc89886e8` (follow-up triage). The first review pass returned `status: done` with a
-follow-up review recommended; the follow-up patches were applied and the second follow-up review
-was aborted by an operator stop, not by a finding. The orchestrator then reset this story branch
-to `troll` HEAD. The operator wants that attempt used as the starting point, not rebuilt:
+A complete, twice-reviewed attempt at this story exists as six commits on branch
+`bmad-loop/20260921-181822-125a/23-2-kernel-shared-kernel` (tip `d7477299ac`, based on
+`77730e2995`, 143 files, +4293/-1689). Its spec ends at `status: done` with
+`followup_review_recommended: false`. The orchestrator rejected it only because the spec's
+`baseline_revision` (`7bd64952fd`, carried over from a cherry-pick) did not equal the baseline the
+orchestrator recorded for the worktree; the code was never faulted. Use it, do not rebuild it:
 
-1. First action in the worktree: `git cherry-pick 366ab1de8b a770ef48a4 3fe7292069 dbc89886e8`.
-   The only commit on `troll` since the attempt's base is `04062009f4` (Epic 27 planning
-   artifacts: `epics.md`, `sprint-status.yaml`, nine `27-*.md` story files), so conflicts, if
-   any, are confined to `_bmad-output/`; resolve them by keeping both sides.
-2. Treat every line as reviewed once but not twice. Re-verify against each AC, the migration
-   rules below and `spec-23-2-kernel-shared-kernel.md`'s Verification section (its Auto Run
-   Result records what the follow-up pass patched). Run the full `platform/` test suite and
-   `test_boundaries.py`. Fix what fails; do not re-derive the design.
-3. Record in Completion Notes what was kept, changed and dropped relative to the attempt.
+1. Before touching anything, record the worktree's starting commit: `BASE=$(git rev-parse HEAD)`.
+   This is the baseline the orchestrator recorded for this attempt.
+2. Cherry-pick, in this order: `692af555ea` (kernel/ package, shims, caller repointing,
+   `test_boundaries.py` guards), `692becfde1` (review triage), `638aca661e` (17 follow-up
+   patches), `49406f9a27` (follow-up triage), `df50abab0f` (second follow-up triage),
+   `d7477299ac` (final-revision stamp). They apply cleanly onto `77730e2995`; if `troll` has moved,
+   conflicts can only be in `_bmad-output/` and are resolved by keeping both sides.
+3. Then set the spec frontmatter of `spec-23-2-kernel-shared-kernel.md` to `baseline_revision:
+   '<BASE>'` (the cherry-picked value is stale and is exactly what deferred the previous attempt),
+   `status: 'in-progress'` and `review_loop_iteration: 0`, and commit that as its own commit. From
+   here follow the skill as normal: the diff since `<BASE>` is the whole story.
+4. Verify rather than redesign: run the full `platform/` suite and `test_boundaries.py`, check each
+   AC against the spec's Verification section, fix what fails, and stamp `final_revision` to the
+   last commit when finalising. Record in Completion Notes what was kept, changed and dropped.
 
 The kernel is the one package every context imports, so nothing stateful, no store and no config loader may enter (AD-D3). `DydxSecondSnapshot`'s class name is a persistence identifier: `nautilus_trader.persistence.funcs.class_to_filename` derives the catalog directory `custom_dydx_second_snapshot` from `__name__`. `register_arrow` keys by class object — a shim must re-export the class, never copy it. `MAX_TS_INIT_SKEW_NS` is the coupling constant between capture's carry/backfill rules and archive's rebuild/prune windows (adversary review C1/H1 in `reviews/review-adversary.md`); expressing every related constant against it is the point of `clocks.py`.
 
