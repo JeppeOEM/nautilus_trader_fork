@@ -2,8 +2,9 @@
 title: 'Story 23.2: kernel/ shared kernel'
 type: 'refactor'
 created: '2026-09-22'
-status: 'in-review'
+status: 'done'
 baseline_revision: '7bd64952fd'
+final_revision: '366ab1de8b'
 review_loop_iteration: 0
 followup_review_recommended: true
 context:
@@ -211,3 +212,64 @@ warnings: ['oversized']
 - `docker run --rm --network host -v "$REPO":/src:ro -v "$PWD":/work/platform -w /work/platform -e PLATFORM_SOURCE_DIR=/src/platform -e HOME=/tmp -e USER=collector -u 1000:1000 story-23-2/collector:latest python3 -m pytest -o addopts="" --rootdir=. <make test list> -q` -- expected: only the 10 pre-existing failures
 - `docker build -f platform/<x>.dockerfile --network host -t story-23-2/<x> .` for collector, data_api and live_paper -- expected: success (never `make up` from the worktree)
 - `uvx ruff check` + `uvx ruff format --check` on the changed files -- expected: clean on the changed lines
+
+## Auto Run Result
+
+Status: done
+
+**Summary.**
+- `platform/kernel/` now holds exactly the AD-D3 members: `second_snapshot` (`DydxSecondSnapshot` + `SecondOHLC`), `open_interest`, `fold`, `indicators`, `performance_metrics`, `venues`, `clocks`, `archive_markers`, `venue_http`, `catalog_files` and `parquet_compat`, plus its `tests/`.
+- The moved modules went across with `git mv`. Every old path is a pure re-export shim (`REMOVE_AFTER = 24-2-...`), or a `_MOVED_NAMES`/`_REPLACED_NAMES` entry in a module that stays. About 70 callers were repointed.
+- `kernel.venues` is now the only `InstrumentId` parser. The six `_stamp_to_ns` users use `CatalogFileSpan`, and every skew margin is tied to `MAX_TS_INIT_SKEW_NS`.
+- Every venue REST request outside `ranking_engine` (25.2) is built through `kernel.venue_http`, keeping its own User-Agent.
+- The zstd patch is applied once, by `apply_zstd_default()`.
+- No schema, directory name, payload, marker format, env var, compose service or config key changed. Fixtures recorded with the pre-move code prove it.
+
+**Files changed (grouped):**
+- `platform/kernel/**`: the new package, 13 test modules, and the pre-move fixtures. A fixtures `.gitignore` is needed because the repo ignores `*.parquet`.
+- Shims:
+  - whole-module: `collector_core/{second_snapshot,open_interest,fold,venue_http}.py`, `common/venues.py`, `ml_signals/{venue,indicators,performance_metrics}.py`;
+  - moved-name tables in `ml_signals/catalog_stats.py` and `collector_core/archive_gaps.py`, which is now thin file I/O over `kernel.archive_markers`.
+- Callers:
+  - `collector_core/*` (collector, build_candles, rebuild_seconds, consolidate/prune/repair_catalog, compare_klines, trade_backfill, backfill_bars, nightly, measure_lag);
+  - the three venue collectors;
+  - `ml_signals/*`, `data_api/*`, `ranking_engine/*`, `live_paper/*`, `bot_tui/*`;
+  - their tests.
+- Guards:
+  - `tests/test_boundaries.py`: the remap; membership, purity, venue HTTP and id-suffix rules; expired 23-2 entries removed.
+  - `tests/test_namespace.py`: one `_SCHEMAS` key per kernel class.
+  - The new `tests/test_skew_constants.py`.
+- Build: the three dockerfiles `COPY kernel` (`live_paper` no longer needs `ml_signals`). The `Makefile` lists gain `kernel/tests` and drop `common/tests`.
+- Docs:
+  - `platform/CLAUDE.md` ("Adding a venue" step 5 → `kernel/venues.py`, DATA-05), `ARCHITECTURE.md` (kernel row, the writer→reader paragraph), `docs/DATA_DICTIONARY.md`, `docs/BOT_OPERATIONS.md`, `ml_signals/BACKTESTING.md`, the root `CLAUDE.md`, and the dydx notebook.
+  - The parent spine's Deferred "Writer→reader imports" entry is amended as partially resolved (ledger 23.1; types/clocks/read helpers 23.2; `candle_store` pending 24.1).
+
+**Review.** One adversarial pass and one edge-case pass over the whole diff since `7bd64952fd`:
+- **12 patches applied** (2 medium, 10 low); see the triage log.
+- **0 deferred.**
+- **5 rejected:**
+  - `CatalogFileSpan.covers`' 300 s default is what the spine specifies.
+  - `COPY common` stays while its shim lives; removing `common/` breaks the build loudly, not silently.
+  - `decode` requiring all five keys: every writer since 22.13 wrote them, and refusal keeps live values, the safe direction.
+  - An `instrument_id` that does not match its file is hypothetical.
+  - The bare `assert` was moved verbatim, and no image runs `-O`.
+
+**Deviations from the story text, all recorded in the spec:**
+- The consumer half of the skew test lives in `platform/tests/test_skew_constants.py`, because a kernel test may not import other contexts (AD-D2).
+- `archive_gaps` maps to `archive` (25.1), no longer to kernel.
+- `bybit_category` maps `-INVERSE` to `inverse` as asked, but its three consumers refuse inverse until it is wire-verified.
+
+**Verification:**
+- **Full `make test` list** in image `story-23-2/collector` (built from the worktree, checkout read-only at `/src`, `-W default`): 1372 passed, 11 failed.
+  - Ten are the pre-existing baseline failures (dydx trade_ohlc ×5, ofi_strategy ×4, rankings redis ×1).
+  - The eleventh was `test_hotpath`'s wall-time bound under the loaded full run (load ~2.9). It passed 5/5 in each of three standalone runs right after, against the unchanged baseline; the allocation checks passed throughout.
+  - No `DeprecationWarning` comes from `platform/` code; the only ones are from starlette/fastapi.
+- **`test-live-paper` list** in `story-23-2/live_paper`: 397 passed, with `live_paper/tests/test_node.py` deselected (pre-existing hang, story 25.3).
+- **Image builds:** all three images built after the dockerfile change (subagent run). No dockerfile changed in the review pass.
+- **ruff** (`uvx`, repo config): format clean. Check is clean on every line this story wrote; the remaining RUF002 is in text moved verbatim into `kernel/indicators.py`.
+- **mypy** 1.20.2: no errors on the lines written. On the host, the `get_dydx_http_url` ignore shows as unused only because nautilus is not installed there; it matches `ranking_engine`'s identical import.
+
+**Residual risks:**
+- `test_hotpath`'s wall-time bound stays host-load-sensitive (the 23.1 residual). The allocation bounds are the deterministic guard.
+- The live_paper test run used the worktree mounted as the working dir, so it does not by itself prove that image's closure. That closure is proven by `test_images` and the subagent's in-image smoke imports.
+- The shims expire at 24-2. `test_namespace` fails the run once that story is `done` while any shim remains.
