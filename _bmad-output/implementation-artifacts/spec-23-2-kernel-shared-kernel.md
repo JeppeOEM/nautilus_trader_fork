@@ -2,9 +2,9 @@
 title: 'Story 23.2: kernel/ shared kernel'
 type: 'refactor'
 created: '2026-09-22'
-status: 'done'
-baseline_revision: '7bd64952fd'
-final_revision: 'df50abab0f'
+status: 'in-progress'
+baseline_revision: '2d7dd5ab6e'
+final_revision: ''
 review_loop_iteration: 0
 followup_review_recommended: false
 context:
