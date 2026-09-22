@@ -26,10 +26,10 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 from ml_signals import candle_store
-from ml_signals import error_ledger
 from ml_signals.candle_store import BAR_SECONDS
 from ml_signals.catalog_stats import data_file_ranges
 from ml_signals.catalog_stats import query_second_ohlc
+from observability import error_ledger
 
 from collector_core.build_candles import rebuild_instrument
 from collector_core.consolidate_catalog import _file_span

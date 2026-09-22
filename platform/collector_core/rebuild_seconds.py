@@ -76,8 +76,8 @@ from typing import Any
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
-from ml_signals import error_ledger
 from ml_signals.catalog_stats import _stamp_to_ns
+from observability import error_ledger
 
 from collector_core.archive_gaps import ARRIVAL_MARGIN_NS
 from collector_core.archive_gaps import in_gap

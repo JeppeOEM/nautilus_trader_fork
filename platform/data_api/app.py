@@ -40,8 +40,8 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 from ml_signals import catalog_stats as _catalog_stats
 from ml_signals import chart_data as _chart_data
-from ml_signals import error_ledger
 from ml_signals.venue import MalformedInstrumentId
+from observability import error_ledger
 from pydantic import BaseModel
 from ranking_engine import metrics_store
 
@@ -162,7 +162,7 @@ class ErrorsResponse(BaseModel):
 @app.get("/api/errors")
 def errors() -> ErrorsResponse:
     """
-    Every failure this process carried on past (`ml_signals.error_ledger`). Empty means none
+    Every failure this process carried on past (`observability.error_ledger`). Empty means none
     since start; the frontend's error bar polls this so a malfunction cannot go unseen.
     """
     return ErrorsResponse(counts=error_ledger.counts(), last=error_ledger.last_details())

@@ -41,7 +41,6 @@ import redis.asyncio as aioredis
 from common.venues import market_kind
 from common.venues import venue_kind
 from ml_signals import catalog_stats
-from ml_signals import error_ledger
 from ml_signals.indicators import MultiLevelOBI
 from ml_signals.indicators import MultiLevelOFI
 from ml_signals.indicators import microprice as calc_microprice
@@ -49,6 +48,7 @@ from ml_signals.indicators import mid_price as calc_mid_price
 from ml_signals.indicators import spread as calc_spread
 from ml_signals.indicators import trade_aggregates
 from ml_signals.venue import venue_of
+from observability import error_ledger
 
 from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
 from nautilus_trader.core.nautilus_pyo3 import get_dydx_http_url  # type: ignore[attr-defined]

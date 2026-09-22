@@ -160,7 +160,7 @@ def test_catalog_snapshots_route(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 
 def test_errors_route_reports_the_ledger() -> None:
     from fastapi.testclient import TestClient
-    from ml_signals import error_ledger
+    from observability import error_ledger
 
     import data_api.app as app_module
 

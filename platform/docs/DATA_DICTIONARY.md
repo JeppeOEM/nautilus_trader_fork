@@ -4,6 +4,11 @@ What the dYdX collector stores, what `ml_signals`/`ranking_engine` compute from 
 how a value traces from raw feed to the ranking table. All file:line references are
 against the `bmad` branch as of 2026-09-05.
 
+Every "error ledger" site named below (`collector.late_trade`, `collector.trade_backfill`,
+`collector.candle_store`, ...) is recorded through `observability.error_ledger.record`
+(Story 23.1; formerly `ml_signals.error_ledger`, now a deprecated re-export). The sites, their
+names and what they count are unchanged `[re-cited 2026-09-21: Story 23.1]`.
+
 ---
 
 ## 1. Raw data collected (`platform/collector_core/` + the venue collectors)

@@ -45,7 +45,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from ml_signals import error_ledger
+from observability import error_ledger
 
 from collector_core.compare_klines import VENUES
 

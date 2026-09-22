@@ -33,10 +33,10 @@ from fastapi import Request
 from ml_signals import candle_store
 from ml_signals import catalog_stats as _catalog_stats
 from ml_signals import custom_indicators
-from ml_signals import error_ledger
 from ml_signals import screener_columns_config
 from ml_signals.candles import candle_dicts_from_snapshots
 from ml_signals.venue import venue_of
+from observability import error_ledger
 from pydantic import BaseModel
 
 from data_api import redis_bus

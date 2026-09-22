@@ -22,7 +22,7 @@ import time
 
 import pytest
 from collector_core.second_snapshot import DydxSecondSnapshot
-from ml_signals import error_ledger
+from observability import error_ledger
 
 import ranking_engine.engine as engine
 import ranking_engine.metrics_store as metrics_store

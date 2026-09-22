@@ -51,21 +51,23 @@ pin_top_liquid : fill any empty collector slots (up to the cap) with the current
 
 import asyncio
 import dataclasses
+import functools
 import json
 import logging
 import os
 import re
-import threading
 import time
-from datetime import UTC
-from datetime import datetime
+import warnings
 from pathlib import Path
 
 import redis.asyncio as aioredis
 from collector_core.collector import Collector
 from collector_core.collector import run_forever
 from collector_core.prune_catalog import prune_instrument
-from ml_signals import error_ledger
+from observability import error_ledger
+from observability import incidents
+from observability.incidents import IncidentConfig
+from observability.incidents import IncidentRule
 
 from dydx_collector import uncross
 from dydx_collector.client import DydxClient
@@ -211,11 +213,11 @@ class DydxCollector(Collector):
                 self._status_loop,
                 self._control_loop,
                 self._prune_loop,
-                # Raw-WS debug feed (Story 5.1) for the incident-report subsystem below --
+                # Raw-WS debug feed (Story 5.1) for the incident reports (INCIDENTS below) --
                 # a permanent feature, not scoped to any one investigation. Rust's file
                 # logger only flushes its BufWriter to disk on an explicit Sync event --
                 # without this, [WS_RAW] lines sit in memory forever.
-                _ws_raw_debug_flush_loop,
+                functools.partial(incidents.raw_log_flush_loop, nautilus_pyo3.logging_sync_to_disk),
             ),
         )
         self._config: DydxConfig  # narrows the core's CoreConfig
@@ -632,244 +634,75 @@ class DydxCollector(Collector):
                 )
 
 
-# Raw-WS debug feed (Story 5.1) for the incident-report subsystem below -- a
-# permanent feature, not scoped to any one investigation.
-async def _ws_raw_debug_flush_loop() -> None:
-    while True:
-        await asyncio.sleep(2.0)
-        nautilus_pyo3.logging_sync_to_disk()
-
-
 # ---------------------------------------------------------------------------
-# Incident reporting (Story 5.1): any WARNING+ log line, from any logger in this
-# process, gets a permanent human-readable report snapshotting the relevant
-# [WS_RAW] rolling-buffer window -- turns "grep a 500MB debug file by hand" into
-# an automatic, standing capability. Generic by design: classification is a
-# best-effort heuristic over the already-formatted message text (no changes
-# needed at existing logger.warning()/critical() call sites), so any *new*
-# warning added later gets this for free too.
+# Incident reports (Story 5.1; the handler moved to `observability.incidents` in Story 23.1).
+# Everything dYdX-specific about them is this one config: the id shape, the report title, where
+# the Rust [WS_RAW] debug log lives and what one of its lines carries for an instrument.
 # ---------------------------------------------------------------------------
 
-_WS_RAW_LOG_DIR = Path("/tmp/nautilus_logs")  # noqa: S108 -- deliberate: ephemeral rolling
-# buffer inside a single-purpose container (docker-compose's `collector` service, PID 1),
-# not a shared multi-tenant host -- no symlink/race risk this rule guards against applies.
-_INCIDENT_DIR = Path("/app/incident_reports")
+INCIDENTS = IncidentConfig(
+    report_title="dYdX Collector Incident Report",
+    # `ticker` is what a [WS_RAW] line's "id" field carries for the instrument.
+    iid_pattern=re.compile(r"\b(?P<iid>(?P<ticker>[A-Z0-9]+-USD)-PERP\.DYDX)\b"),
+    evidence_needle='"id":"{ticker}"',
+    # Deliberately /tmp: an ephemeral rolling buffer inside a single-purpose container (the
+    # compose `collector` service), not a shared multi-tenant host -- no symlink/race risk.
+    raw_log_dir=Path("/tmp/nautilus_logs"),  # noqa: S108
+    raw_log_name="ws_raw_debug",
+    # Bind-mounted (compose `./data/incident_reports`): must survive container restarts.
+    report_dir=Path("/app/incident_reports"),
+    # Tried in order; texts are the collector's own warning lines.
+    rules=(
+        IncidentRule("Crossed book", "crossed_book"),
+        IncidentRule("Stale book", "stale_book"),
+        IncidentRule("_second_loop tick arrived", "second_loop_lag", with_instrument=False),
+        IncidentRule("Resyncing", "resync"),
+    ),
+)
 
-# Debounce window per (incident_type, instrument) -- a crossed book logs a fresh
-# WARNING on every _second_loop tick while it persists (up to ~3 before CRITICAL
-# escalation); without this, one ongoing incident would produce a report per tick.
-_INCIDENT_DEBOUNCE_NS: int = 10_000_000_000  # 10 seconds
-
-# How far back the raw-evidence window reaches from the triggering log line.
-_INCIDENT_LOOKBACK_NS: int = 10_000_000_000  # 10 seconds
-
-# Bounded like the other two log sinks (docker json-file: 400MB, ws_raw_debug: 500MB) --
-# unlike those, nothing was capping this directory before, so it grew forever.
-_INCIDENT_DIR_MAX_BYTES: int = 200_000_000  # 200MB, oldest files pruned past this
-# Extraction is deferred this long after the trigger so the window also captures
-# whatever resolves the incident (e.g. the delete that un-crosses a book), not
-# just the run-up to it.
-_INCIDENT_LOOKAHEAD_DELAY_S: float = 2.0
-
-_IID_RE = re.compile(r"\b([A-Z0-9]+-USD-PERP\.DYDX)\b")
-
-# _write_incident_report runs via asyncio.to_thread, and the default executor has
-# multiple worker threads -- two incidents close together (different type/instrument,
-# so neither is debounced) can each land on their own thread and call
-# _prune_incident_reports() at the same time. Without this, both glob() the directory
-# independently and can race to stat/unlink the same file: one thread deletes it after
-# the other has already listed it but before that thread's own stat() call, raising
-# FileNotFoundError (seen in production). Only _prune_incident_reports touches this
-# directory's files, so a plain lock around the whole function is sufficient --
-# nothing else can delete out from under it once serialized.
-_INCIDENT_PRUNE_LOCK = threading.Lock()
-
-
-def _classify_incident(message: str) -> tuple[str, str | None]:
-    """Best-effort (incident_type, instrument_id) from an already-formatted log message."""
-    try:
-        payload = json.loads(message)
-    except (json.JSONDecodeError, TypeError):
-        payload = None
-    if isinstance(payload, dict) and "reason" in payload:
-        # CRITICAL escalations already log structured JSON (see _second_loop) -- exact,
-        # no heuristics needed.
-        return str(payload["reason"]), payload.get("instrument_id")
-
-    iid_match = _IID_RE.search(message)
-    iid = iid_match.group(1) if iid_match else None
-    if "Crossed book" in message:
-        return "crossed_book", iid
-    if "Stale book" in message:
-        return "stale_book", iid
-    if "_second_loop tick arrived" in message:
-        return "second_loop_lag", None
-    if "Resyncing" in message:
-        return "resync", iid
-    return "unclassified", iid
+# Story 23.1 moved the incident subsystem to `observability.incidents`. The one old name with a
+# same-object, same-shape successor is served below with a DeprecationWarning. Every other name
+# raises, naming its successor: the handler now needs an `IncidentConfig`, and the constants are
+# fields of `INCIDENTS` -- serving a copy would make a stale monkeypatch silently do nothing.
+MOVED_NAMES_REMOVE_AFTER = "24-1-candles-context-behind-the-secondsink-port"
+_MOVED_NAMES: dict[str, str] = {
+    "_ns_to_iso": "observability.incidents.ns_to_iso",
+}
+_REPLACED_NAMES: dict[str, str] = {
+    "_IncidentHandler": "observability.incidents.IncidentHandler(config, loop)",
+    "_IID_RE": "dydx_collector.collector.INCIDENTS.iid_pattern",
+    "_WS_RAW_LOG_DIR": "dydx_collector.collector.INCIDENTS.raw_log_dir",
+    "_INCIDENT_DIR": "dydx_collector.collector.INCIDENTS.report_dir",
+    "_INCIDENT_DEBOUNCE_NS": "dydx_collector.collector.INCIDENTS.debounce_ns",
+    "_INCIDENT_LOOKBACK_NS": "dydx_collector.collector.INCIDENTS.lookback_ns",
+    "_INCIDENT_DIR_MAX_BYTES": "dydx_collector.collector.INCIDENTS.report_dir_max_bytes",
+    "_INCIDENT_LOOKAHEAD_DELAY_S": "dydx_collector.collector.INCIDENTS.lookahead_s",
+    "_ws_raw_debug_flush_loop": "observability.incidents.raw_log_flush_loop(sync)",
+    "_classify_incident": "observability.incidents.classify_incident(config, message)",
+    "_scan_ws_raw_window": "observability.incidents.scan_raw_window(config, ...)",
+    "_write_incident_report": "observability.incidents.IncidentReportWriter.write",
+    "_prune_incident_reports": "observability.incidents.IncidentReportWriter.prune",
+    "_INCIDENT_PRUNE_LOCK": "observability.incidents.IncidentReportWriter (owns the lock)",
+    "_report_incident": "observability.incidents.IncidentHandler.report",
+    "_prune_stale_ws_raw_logs": "observability.incidents.prune_stale_raw_logs(config)",
+}
 
 
-def _ns_to_iso(ns: int) -> str:
-    """
-    Nanosecond-precision UTC ISO string matching handler.rs's [WS_RAW] line prefix
-    format exactly (same width), so plain string comparison is chronologically correct.
-    """
-    dt = datetime.fromtimestamp(ns // 1_000_000_000, tz=UTC)
-    frac_ns = ns % 1_000_000_000
-    return f"{dt.strftime('%Y-%m-%dT%H:%M:%S')}.{frac_ns:09d}Z"
-
-
-def _scan_ws_raw_window(ticker: str, start_ns: int, end_ns: int) -> list[str]:
-    """
-    Blocking file I/O -- always call via asyncio.to_thread. Scans every rotated file
-    currently present (bounded by _INCIDENT_DEBOUNCE_NS keeping incidents infrequent, and
-    the rolling buffer itself bounded to ~500MB) rather than tracking per-file byte ranges
-    -- simplest thing that works, not a measured bottleneck.
-    """
-    start_ts = _ns_to_iso(start_ns)
-    end_ts = _ns_to_iso(end_ns)
-    needle = f'"id":"{ticker}"'
-    matches: list[str] = []
-    for path in sorted(_WS_RAW_LOG_DIR.glob("ws_raw_debug_*.log")):
-        try:
-            with path.open("r", errors="replace") as f:
-                for line in f:
-                    if needle not in line:
-                        continue
-                    ts = line.split(" ", 1)[0]
-                    if start_ts <= ts <= end_ts:
-                        matches.append(line)
-        except OSError:
-            continue
-    return matches
-
-
-def _write_incident_report(
-    incident_type: str,
-    iid: str | None,
-    level: str,
-    logger_name: str,
-    message: str,
-    trigger_ns: int,
-) -> str:
-    """Blocking -- always call via asyncio.to_thread."""
-    _INCIDENT_DIR.mkdir(parents=True, exist_ok=True)
-    start_ns = trigger_ns - _INCIDENT_LOOKBACK_NS
-    end_ns = trigger_ns + int(_INCIDENT_LOOKAHEAD_DELAY_S * 1e9)
-    ticker = iid.split("-PERP")[0] if iid else None
-    lines = _scan_ws_raw_window(ticker, start_ns, end_ns) if ticker else []
-
-    ts_str = _ns_to_iso(trigger_ns)
-    safe_iid = iid or "system"
-    path = _INCIDENT_DIR / f"{incident_type}_{safe_iid}_{trigger_ns // 1_000_000_000}.log"
-    with path.open("w") as f:
-        f.write("=== dYdX Collector Incident Report ===\n")
-        f.write(f"Time: {ts_str}\n")
-        f.write(f"Level: {level}\n")
-        f.write(f"Logger: {logger_name}\n")
-        f.write(f"Type: {incident_type}\n")
-        f.write(f"Instrument: {iid or '-'}\n")
-        f.write(f"Message: {message}\n\n")
-        if ticker:
-            f.write(f"--- Raw WS evidence ({ticker}, {len(lines)} messages) ---\n")
-            f.writelines(lines)
-        else:
-            f.write(
-                "--- No instrument identified in this message; no raw WS evidence attached ---\n"
-            )
-    _prune_incident_reports()
-    return str(path)
-
-
-def _prune_incident_reports() -> None:
-    """
-    Delete oldest incident reports until the directory is back under the size cap.
-
-    Runs on a worker thread (via asyncio.to_thread) -- see _INCIDENT_PRUNE_LOCK for why
-    this must be serialized against concurrent calls from other incident writes.
-    """
-    with _INCIDENT_PRUNE_LOCK:
-        files = sorted(_INCIDENT_DIR.glob("*.log"), key=lambda p: p.stat().st_mtime)
-        total = sum(f.stat().st_size for f in files)
-        for f in files:
-            if total <= _INCIDENT_DIR_MAX_BYTES:
-                break
-            total -= f.stat().st_size
-            f.unlink()
-
-
-async def _report_incident(
-    incident_type: str, iid: str | None, level: str, logger_name: str, message: str, trigger_ns: int
-) -> None:
-    await asyncio.sleep(_INCIDENT_LOOKAHEAD_DELAY_S)
-    report_path = await asyncio.to_thread(
-        _write_incident_report, incident_type, iid, level, logger_name, message, trigger_ns
-    )
-    logger.info("Incident report written [%s/%s]: %s", incident_type, iid or "-", report_path)
-
-
-class _IncidentHandler(logging.Handler):
-    """
-    Attached to the root logger at WARNING level -- catches every current and future
-    warning/error/critical in this process (both `logger`/__main__ and `critical_logger`
-    propagate to root by default), without needing changes at each call site.
-    """
-
-    def __init__(self, loop: asyncio.AbstractEventLoop | None = None) -> None:
-        super().__init__(level=logging.WARNING)
-        # Captured once, not looked up in emit(): _notify() (run via asyncio.to_thread
-        # from _watchdog_loop) calls logger.exception() on its own notification-failure
-        # path, which reaches this handler from a plain ThreadPoolExecutor worker thread
-        # -- one with no running event loop of its own. asyncio.get_running_loop() would
-        # raise there, silently dropping that incident report (swallowed below) and
-        # spamming stderr. Storing the loop up front and scheduling with
-        # run_coroutine_threadsafe (below) works correctly from either the loop's own
-        # thread or any other thread.
-        self._loop = loop or asyncio.get_running_loop()
-        self._last_report_ns: dict[tuple[str, str | None], int] = {}
-
-    def emit(self, record: logging.LogRecord) -> None:
-        try:
-            message = record.getMessage()
-            incident_type, iid = _classify_incident(message)
-            key = (incident_type, iid)
-            now_ns = time.time_ns()
-            if now_ns - self._last_report_ns.get(key, 0) < _INCIDENT_DEBOUNCE_NS:
-                return
-            self._last_report_ns[key] = now_ns
-            asyncio.run_coroutine_threadsafe(
-                _report_incident(
-                    incident_type, iid, record.levelname, record.name, message, now_ns
-                ),
-                self._loop,
-            )
-        except Exception:
-            # logging.Handler's own documented convention: emit() must never propagate --
-            # a broken incident report must not crash the collector or the logging system
-            # it's attached to. handleError() (not a bare pass) surfaces it to stderr.
-            self.handleError(record)
-
-
-def _prune_stale_ws_raw_logs() -> None:
-    """
-    Delete ws_raw_debug_*.log files left behind by a previous process instance.
-
-    nautilus_trader's FileWriter tracks rotated backups in an in-memory queue
-    (crates/common/src/logging/writer.rs's `backup_files`) that is never seeded
-    from files already on disk -- it starts empty on every process start. Within
-    one run, cleanup_backups() correctly caps the directory at max_backup_count;
-    across a restart, whatever files existed from the prior run become permanently
-    untracked and are never pruned. Since this is core nautilus_trader code
-    (FORK-01: never modify nautilus_trader/crates), the fix lives here: clear the
-    directory before init_logging() starts a fresh writer, so restarts can't
-    accumulate. Confirmed the cause by reading writer.rs directly, not guessing --
-    found 43 orphaned files / 8GB on nifelheim spanning this collector's last day
-    of redeploys (DATA-02).
-    """
-    if not _WS_RAW_LOG_DIR.exists():
-        return
-    for path in _WS_RAW_LOG_DIR.glob("ws_raw_debug_*.log*"):
-        path.unlink(missing_ok=True)
+def __getattr__(name: str) -> object:
+    if name in _MOVED_NAMES:
+        target = _MOVED_NAMES[name]
+        warnings.warn(
+            f"dydx_collector.collector.{name} moved to {target} (Story 23.1); "
+            f"removed after {MOVED_NAMES_REMOVE_AFTER}",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return getattr(incidents, target.rpartition(".")[2])
+    if name in _REPLACED_NAMES:
+        raise AttributeError(
+            f"dydx_collector.collector.{name} was replaced by {_REPLACED_NAMES[name]} (Story 23.1)"
+        )
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 async def main() -> None:
@@ -877,8 +710,8 @@ async def main() -> None:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
-    _prune_stale_ws_raw_logs()
-    logging.getLogger().addHandler(_IncidentHandler())
+    incidents.prune_stale_raw_logs(INCIDENTS)
+    logging.getLogger().addHandler(incidents.IncidentHandler(INCIDENTS))
     # Rust's `log` crate is a no-op until a logger is installed -- without this, any
     # `log::warn!`/`log::error!` inside the Rust WS client (including the exact path that
     # reports a failed `call_soon_threadsafe` scheduling, i.e. a delta silently never
@@ -906,11 +739,11 @@ async def main() -> None:
         # to raise just handler.rs's [WS_RAW] debug! line above stdout=WARNING without a
         # separate, permissive file sink.
         level_file=nautilus_pyo3.LogLevel.DEBUG,
-        directory=str(_WS_RAW_LOG_DIR),
-        file_name="ws_raw_debug",
-        # Bounded rolling buffer, not a growing archive: [WS_RAW] is ~1MB/s. _IncidentHandler
-        # (below) auto-snapshots the relevant _INCIDENT_LOOKBACK_NS (10s) + a
-        # _INCIDENT_LOOKAHEAD_DELAY_S (2s) window into a permanent incident report the
+        directory=str(INCIDENTS.raw_log_dir),
+        file_name=INCIDENTS.raw_log_name,
+        # Bounded rolling buffer, not a growing archive: [WS_RAW] is ~1MB/s. IncidentHandler
+        # (above) auto-snapshots the relevant INCIDENTS.lookback_ns (10s) + a
+        # INCIDENTS.lookahead_s (2s) window into a permanent incident report the
         # moment something WARNING+ worthy happens -- this buffer only needs to outlast that
         # ~12s window by a safety margin, not a human noticing and checking manually (that
         # was the old, much larger 500MB-nominal design this replaces). 20MB x 1 backup is
@@ -918,11 +751,11 @@ async def main() -> None:
         #
         # Smaller than the old 250MB x 2 (~750MB nominal, and the underlying trigger for a
         # disk-full incident on nifelheim once restarts orphaned old rotations -- see
-        # _prune_stale_ws_raw_logs). Rotating every ~20s at 20MB does mean nautilus_trader's
+        # prune_stale_raw_logs). Rotating every ~20s at 20MB does mean nautilus_trader's
         # file writer's unconditional `eprintln!("Rotated log file...")` on every rotation
         # (crates/common/src/logging/writer.rs's rotate_file(), not routed through the
         # `log` crate, so log level can't silence it) fires more often -- purely docker-logs
-        # noise nothing in this codebase reads (_scan_ws_raw_window globs every rotated
+        # noise nothing in this codebase reads (scan_raw_window globs every rotated
         # file, never depends on which one is "current"), traded deliberately for a much
         # smaller worst-case disk footprint.
         file_rotate=(20_000_000, 1),

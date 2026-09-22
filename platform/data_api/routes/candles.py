@@ -33,10 +33,10 @@ from fastapi import APIRouter
 from fastapi import HTTPException
 from ml_signals import candle_store
 from ml_signals import catalog_stats as _catalog_stats
-from ml_signals import error_ledger
 from ml_signals.candles import candle_dicts_for_window
 from ml_signals.candles import is_valid_candle
 from ml_signals.venue import venue_of
+from observability import error_ledger
 from pydantic import BaseModel
 
 from data_api import live_candles

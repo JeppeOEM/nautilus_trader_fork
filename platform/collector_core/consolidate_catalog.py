@@ -68,8 +68,8 @@ from pathlib import Path
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
-from ml_signals import error_ledger
 from ml_signals.catalog_stats import _stamp_to_ns
+from observability import error_ledger
 
 from nautilus_trader.persistence.catalog.parquet import _timestamps_to_filename
 

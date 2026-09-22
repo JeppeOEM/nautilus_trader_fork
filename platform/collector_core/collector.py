@@ -124,7 +124,7 @@ import os
 import shutil
 import signal
 import time
-import urllib.request
+import warnings
 from collections import defaultdict
 from collections import deque
 from collections.abc import Awaitable
@@ -139,9 +139,11 @@ from typing import Any
 import pyarrow.parquet as pq
 import redis.asyncio as aioredis
 from ml_signals import candle_store
-from ml_signals import error_ledger
 from ml_signals.catalog_stats import _stamp_to_ns
 from ml_signals.catalog_stats import query_second_ohlc
+from observability import error_ledger
+from observability import notify
+from observability import watchdog
 
 from collector_core import trade_backfill
 from collector_core.archive_gaps import ARRIVAL_MARGIN_NS
@@ -183,7 +185,7 @@ _IMPOSSIBLE_LOG_EVERY_NS = 60_000_000_000  # one ERROR per instrument per minute
 _WATCHDOG_CHECK_SECONDS: float = 30.0
 _WATCHDOG_STALE_NS: int = 30_000_000_000
 _WATCHDOG_STARTUP_GRACE_NS: int = 60_000_000_000  # subscriptions need time to establish
-_WATCHDOG_REMINDER_NS: int = 600_000_000_000  # re-notify at most every 10 min while down
+_WATCHDOG_REMINDER_NS: int = watchdog.DEFAULT_REMINDER_NS  # re-notify at most every 10 min
 # One-sided outage (story 22.14): a feed whose last trade is this far behind a sibling's in the
 # same group has lost its connection while the other kept delivering.
 _ONE_SIDED_NS: int = 30_000_000_000
@@ -314,47 +316,6 @@ def _is_readable_parquet(path: Path) -> bool:
     return True
 
 
-@dataclass(frozen=True)
-class AlertTexts:
-    """
-    An alert's three messages. `still` and `recovered` are `str.format` templates receiving
-    `down_for_s` (seconds since the alert opened).
-    """
-
-    down: str
-    still: str
-    recovered: str
-
-
-def _alert_transition(
-    now_ns: int,
-    is_down: bool,
-    down_since_ns: int | None,
-    last_reminder_ns: int,
-    texts: AlertTexts,
-) -> tuple[str | None, int | None, int]:
-    """
-    Pure state-machine step for an OBS-01 alert: (message_or_None, down_since_ns, last_reminder_ns).
-
-    Alert once on the transition to down, remind at most every `_WATCHDOG_REMINDER_NS` while it
-    stays down, and notify once on recovery. Kept separate from the asyncio loop and the notify
-    transport so the alerting/debounce logic is unit-testable without mocking network calls.
-    """
-    if is_down:
-        if down_since_ns is None:
-            return (texts.down, now_ns, now_ns)
-        if now_ns - last_reminder_ns > _WATCHDOG_REMINDER_NS:
-            down_for_s = (now_ns - down_since_ns) / 1e9
-            return (texts.still.format(down_for_s=down_for_s), down_since_ns, now_ns)
-        return (None, down_since_ns, last_reminder_ns)
-
-    if down_since_ns is not None:
-        down_for_s = (now_ns - down_since_ns) / 1e9
-        return (texts.recovered.format(down_for_s=down_for_s), None, 0)
-
-    return (None, None, last_reminder_ns)
-
-
 def _watchdog_transition(
     now_ns: int,
     is_stale: bool,
@@ -362,8 +323,8 @@ def _watchdog_transition(
     last_reminder_ns: int,
     name: str = "collector",
 ) -> tuple[str | None, int | None, int]:
-    """Step the every-book-stale watchdog (see `_alert_transition`)."""
-    texts = AlertTexts(
+    """Step the every-book-stale watchdog (the generic `observability.watchdog.transition`)."""
+    texts = watchdog.AlertTexts(
         down=(
             f"{name}: all live instruments' order books have gone stale "
             "(no OrderBookDeltas for 30s+) — feed may be down"
@@ -371,11 +332,15 @@ def _watchdog_transition(
         still=f"{name}: still down, no book updates for {{down_for_s:.0f}}s",
         recovered=f"{name}: recovered after {{down_for_s:.0f}}s",
     )
-    return _alert_transition(now_ns, is_stale, down_since_ns, last_reminder_ns, texts)
+    return watchdog.transition(
+        now_ns, is_stale, down_since_ns, last_reminder_ns, texts, _WATCHDOG_REMINDER_NS
+    )
 
 
-def _one_sided_texts(name: str, group: str, behind: list[str], live: list[str]) -> AlertTexts:
-    return AlertTexts(
+def _one_sided_texts(
+    name: str, group: str, behind: list[str], live: list[str]
+) -> watchdog.AlertTexts:
+    return watchdog.AlertTexts(
         down=(
             f"{name}: one-sided outage in feed group {group!r}: {', '.join(behind)} is 30s+ "
             f"behind {', '.join(live)} in trade arrivals — that connection is down or stalled"
@@ -390,23 +355,35 @@ def _one_sided_texts(name: str, group: str, behind: list[str], live: list[str]) 
     )
 
 
-def _notify(message: str, title: str = "collector") -> None:
-    """POST to a ntfy.sh-compatible topic URL. Log CRITICAL if WATCHDOG_NTFY_URL isn't set."""
-    url = os.environ.get("WATCHDOG_NTFY_URL")
-    if not url:
-        logger.critical(message)
-        return
-    request = urllib.request.Request(  # noqa: S310 (fixed, operator-configured URL)
-        url,
-        data=message.encode(),
-        headers={"Title": title},
-        method="POST",
+# Story 23.1 moved the generic alert transition and the notify transport to `observability`. Old
+# names whose successor is the same object with the same call shape are served with a
+# DeprecationWarning until the story below is done; a name whose successor changed shape raises,
+# naming it, because serving it would break a stale caller in a less obvious way.
+MOVED_NAMES_REMOVE_AFTER = "24-1-candles-context-behind-the-secondsink-port"
+_MOVED_NAMES: dict[str, str] = {
+    "AlertTexts": "observability.watchdog.AlertTexts",
+    "_alert_transition": "observability.watchdog.transition",
+}
+_REPLACED_NAMES: dict[str, str] = {
+    "_notify": "observability.notify.notify(notify.OPERATOR, title, body)",
+}
+
+
+def __getattr__(name: str) -> object:
+    if name in _REPLACED_NAMES:
+        raise AttributeError(
+            f"collector_core.collector.{name} was replaced by {_REPLACED_NAMES[name]} (Story 23.1)"
+        )
+    if name not in _MOVED_NAMES:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    target = _MOVED_NAMES[name]
+    warnings.warn(
+        f"collector_core.collector.{name} moved to {target} (Story 23.1); "
+        f"removed after {MOVED_NAMES_REMOVE_AFTER}",
+        DeprecationWarning,
+        stacklevel=2,
     )
-    try:
-        with urllib.request.urlopen(request, timeout=10):  # noqa: S310
-            pass
-    except Exception:  # a malformed URL raises ValueError; the watchdog loop must not die
-        logger.exception("Watchdog notification failed")
+    return getattr(watchdog, target.rpartition(".")[2])
 
 
 # Parquet is flushed this many seconds past each interval boundary (:02 for the default 60 s), so a
@@ -1809,12 +1786,13 @@ class Collector:
             behind = sorted(n for n in names if newest - last[n] > _ONE_SIDED_NS)
             live = sorted(set(names) - set(behind))
             down_since, reminder = self._one_sided_state.get(group, (None, 0))
-            message, down_since, reminder = _alert_transition(
+            message, down_since, reminder = watchdog.transition(
                 now_ns,
                 bool(behind),
                 down_since,
                 reminder,
                 _one_sided_texts(name, group, behind, live),
+                _WATCHDOG_REMINDER_NS,
             )
             self._one_sided_state[group] = (down_since, reminder)
             if message is not None:
@@ -1849,7 +1827,7 @@ class Collector:
                 continue
             book = self._book_watchdog_message(now_ns, name)
             for message in ([book] if book else []) + self._one_sided_messages(now_ns, name):
-                await asyncio.to_thread(_notify, message, name)
+                await asyncio.to_thread(notify.notify, notify.OPERATOR, name, message)
 
     # -- lifecycle ---------------------------------------------------------------------------
 

@@ -24,7 +24,7 @@ from typing import Any
 
 from collector_core.feed import MAIN_FEED
 from collector_core.feed import Feed
-from ml_signals import error_ledger
+from observability import error_ledger
 
 from hyperliquid_collector.client import TRADES_FEED
 from hyperliquid_collector.client import HyperliquidClient

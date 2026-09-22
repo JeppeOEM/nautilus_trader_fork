@@ -15,7 +15,8 @@
 Stories 20.1/20.2: saved alerts + the evaluation engine.
 
 Alerts are delivered to Telegram (when `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` are set), to
-the alert's own webhook URL (optional), and as a toast pushed over `/ws/live`.
+the alert's own webhook URL (optional), and as a toast pushed over `/ws/live`. The first two are
+channels of `observability.notify` (Story 23.1), which owns the transports and ledgers failures.
 
 Persistence mirrors `ml_signals/chart_indicator_config.py` (TOML, full rewrite). The engine is a
 server-side observer of `LiveCandleBus` (the one existing `snapshots:raw` subscriber), so alerts
@@ -26,13 +27,11 @@ Evaluation is split so the frequency/expiration rules are testable without any n
 """
 
 import asyncio
-import json
 import logging
 import os
 import threading
 import time
 import tomllib
-import urllib.request
 import uuid
 from dataclasses import asdict
 from dataclasses import dataclass
@@ -43,6 +42,7 @@ from typing import Any
 from typing import Callable
 
 import tomli_w
+from observability import notify
 
 from data_api.redis_bus import QUEUE_MAX
 from data_api.redis_bus import put_drop_oldest
@@ -54,10 +54,7 @@ ALERTS_PATH: str = os.environ.get("ALERTS_PATH", "platform/data_api/alerts.toml"
 
 FREQUENCIES = ("once_per_bar_close", "once_per_bar", "only_once")
 
-TELEGRAM_API_BASE: str = os.environ.get("TELEGRAM_API_BASE", "https://api.telegram.org")
-
 _NS_PER_S = 1_000_000_000
-_WEBHOOK_TIMEOUT_S = 5
 
 
 @dataclass
@@ -204,56 +201,30 @@ def render(template: str, ticker: str, close: float, ts_ns: int, bar_seconds: in
     return template
 
 
-def post_webhook(alert: Alert, body: str) -> None:
-    """
-    Failures are logged with the alert id and never retried -- the next fire opportunity
-    is the retry.
-    """
-    try:
-        json.loads(body)
-        content_type = "application/json"
-    except ValueError:
-        content_type = "text/plain"
-    request = urllib.request.Request(
-        alert.webhook_url,
-        data=body.encode(),
-        headers={"Content-Type": content_type},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=_WEBHOOK_TIMEOUT_S):  # noqa: S310 (scheme validated on create)
-            pass
-    except Exception as exc:
-        logger.warning("alert %s webhook POST failed: %s", alert.id, exc)
-
-
 def telegram_configured() -> bool:
-    return bool(os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"))
+    """Whether the Telegram channel can deliver (both `TELEGRAM_*` variables set)."""
+    return notify.telegram_configured()
 
 
-def post_telegram(alert: Alert, text: str) -> None:
+def channels(alert: Alert) -> tuple[str, ...]:
     """
-    Bot API `sendMessage`. Failures are logged with the alert id only -- never the request
-    URL, which contains the bot token.
+    Return the notification channels `alert` delivers on: its own webhook (when it has one) and
+    Telegram (when configured). An alert names channels only; `observability.notify` owns the
+    transports (spine AD-D16).
     """
-    request = urllib.request.Request(
-        f"{TELEGRAM_API_BASE}/bot{os.environ['TELEGRAM_BOT_TOKEN']}/sendMessage",
-        data=json.dumps({"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": text}).encode(),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=_WEBHOOK_TIMEOUT_S):  # noqa: S310
-            pass
-    except Exception as exc:
-        logger.warning("alert %s telegram send failed: %s", alert.id, type(exc).__name__)
+    named = [notify.webhook_channel(alert.webhook_url)] if alert.webhook_url else []
+    if telegram_configured():
+        named.append(notify.TELEGRAM)
+    return tuple(named)
 
 
 def deliver(alert: Alert, body: str) -> None:
-    if alert.webhook_url:
-        post_webhook(alert, body)
-    if telegram_configured():
-        post_telegram(alert, body)
+    """
+    Send `body` on every channel of `alert`. A failed send is ledgered by `notify` under the
+    alert's id and never retried -- the next fire opportunity is the retry.
+    """
+    for channel in channels(alert):
+        notify.notify(channel, f"alert {alert.id}", body)
 
 
 class AlertEngine:

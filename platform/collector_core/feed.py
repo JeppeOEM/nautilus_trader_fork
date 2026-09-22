@@ -26,7 +26,7 @@ from collections.abc import Awaitable
 from dataclasses import dataclass
 from typing import Any
 
-from ml_signals import error_ledger
+from observability import error_ledger
 
 
 @dataclass(frozen=True)

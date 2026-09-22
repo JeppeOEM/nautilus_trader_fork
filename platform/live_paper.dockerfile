@@ -16,5 +16,10 @@ RUN pip install --no-cache-dir $PIP_INSECURE_ARGS -r requirements.txt
 # module structurally separate from the collector's write path either way).
 COPY platform/ml_signals ./ml_signals
 COPY platform/live_paper ./live_paper
+# Story 23.1: the generic observability context (every context may import it; nothing here does
+# yet, but `make test-live-paper` runs its tests) and the cross-cutting guards in platform/tests,
+# which read the read-only source mount (PLATFORM_SOURCE_DIR), not this image.
+COPY platform/observability ./observability
+COPY platform/tests ./tests
 
 CMD ["python3", "-m", "live_paper.node"]

@@ -36,22 +36,22 @@ So that the two live image gaps are closed now and every later context move is c
 
 ## Tasks / Subtasks
 
-- [ ] Task 1 — `observability/` package (AC: #1)
-  - [ ] Create `platform/observability/{__init__,error_ledger,notify,watchdog,incidents}.py`; move `ml_signals/error_ledger.py` verbatim (API `record(site, detail="", exc=None)`, `counts()`, `last_details()`, `reset()`), the module functions `_notify` (`collector_core/collector.py:388`) and `_watchdog_transition` (`:353`), and the incident-report subsystem from `dydx_collector/collector.py:648-843` (`_classify_incident`, `_write_incident_report`, `_IncidentHandler`, `_prune_incident_reports`, `_prune_stale_ws_raw_logs`, `_ws_raw_debug_flush_loop`), parameterising the handler with `iid_pattern: re.Pattern` supplied by the dYdX entrypoint.
-  - [ ] `notify(channel, title, body)` with adapters `ntfy` (`WATCHDOG_NTFY_URL`), `telegram` (`TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`, moved from `data_api/alerts.py:224`), `webhook` (URL); stdlib `urllib` only; the capture watchdog and `data_api/alerts.py`'s `deliver()` call it. Keep the existing payload shapes (test against the current tests in `data_api/tests` and `collector_core/tests/test_watchdog.py`).
-  - [ ] Shims at `ml_signals/error_ledger.py` (`REMOVE_AFTER = "24-1-candles-context-behind-the-secondsink-port"`); update every caller (`grep -rn "error_ledger" platform --include=*.py`, ~31 sites).
-- [ ] Task 2 — `platform/tests/test_boundaries.py` (AC: #2)
-  - [ ] Walk `platform/**/*.py` (skip `frontend/`, `node_modules/`, `data/`, `.planning/`) with `ast`; collect `import`/`from ... import` top-level names; map each module path to a context via `LEGACY_MODULE_TO_CONTEXT` (a dict keyed by module path prefix: `collector_core/*` → capture, except `second_snapshot/open_interest/fold/venue_http/archive_gaps` → kernel, `build_candles` → candles, `rebuild_seconds/consolidate_catalog/prune_catalog/repair_catalog/compare_klines/nightly/backfill_bars/migrate_open_interest/measure_lag/archive_gaps` → archive; `dydx_collector/collector.py` lines are one module → capture (control-plane split happens in 25.4, list it as capture until then); `ml_signals/*` per the spine's AD-D1 table; `ranking_engine` → ranking; `live_paper` → bots; `data_api/alerts.py` → alerting; `data_api/{{live_candles,redis_bus}}.py` → views; `bot_tui` → interface; …). An unmapped module fails the test.
-  - [ ] Encode the AD-D2 graph as a set of `(src_ctx, dst_ctx)` edges (copy it from the spine, including the labelled query-service edges as plain edges for now); fail any other cross-context edge; fail any `from x import _private` across contexts; exempt edges whose both ends map to the same *unmoved* package; special-case: `capture/venues/*/policies.py` is domain; `kernel` and `observability` may import no context; `research` may not import `data_api`.
-  - [ ] Make it pass on the current tree: the map must be complete (list every module) and every current import must be a legal edge under target contexts — where it is not (e.g. `collector_core → ml_signals.candle_store` = capture → candles), add the edge to an explicit `LEGACY_EDGES_UNTIL = {{(edge): "<story key>"}}` table that the test honours until that story is `done` in `sprint-status.yaml`. This is the mechanism that lets the graph tighten one story at a time without loosening the test.
-- [ ] Task 3 — `platform/tests/test_images.py` (AC: #3)
-  - [ ] Parse `docker-compose.yml` `command:` lines and `build.dockerfile`, the Makefile's `python3 -m <module>` invocations and the README cron line; for each entrypoint compute the transitive top-level-package closure by `ast` (in-repo packages only); parse the dockerfile's `COPY platform/<pkg> ./<pkg>` lines; assert closure ⊆ COPY set (a shim module counts as its target package too).
-  - [ ] Fix the current gaps the test finds (`data_api.dockerfile:27-30` lacks `collector_core`, `common`; `live_paper.dockerfile:17-18` lacks whatever `live_paper` imports — verify), run `make build` for all three images (`--network host`, see memory note on local Docker MTU) and record the result in Completion Notes. Strike the parent spine's Deferred entry.
-- [ ] Task 4 — hot-path baseline `platform/tests/test_hotpath.py` (AC: #4)
-  - [ ] Build a replay from the recorded fixtures under `collector_core/tests/fixtures/` (WS frames/trades for the three venues); construct a `Collector` with a fake client and a temp catalog; push N messages through `_process_data` (bypassing the queue) while `tracemalloc` is tracing; measure allocations/message and `perf_counter_ns`/message over 3 repetitions, take the median.
-  - [ ] First run writes `platform/tests/fixtures/hotpath_baseline.json` (`{{"allocations_per_message": ..., "ns_per_message": ..., "messages": N, "host": ..., "recorded": ISO}}`); later runs assert `alloc <= baseline` and `ns <= 2*baseline`; document the numbers in `docs/DATA_INTEGRITY_AUDIT.md` (new row, "hot-path baseline").
-- [ ] Task 5 — docs and lists (AC: #5)
-  - [ ] `platform/CLAUDE.md` DATA-07 → `observability.error_ledger`, Known limit (per-process ledger, `/api/errors` shows `data_api` only, upgrade path `errors:ledger`); `ARCHITECTURE.md` module map row; `collector.dockerfile` + `data_api.dockerfile` + `live_paper.dockerfile` `COPY platform/observability ./observability`; Makefile `test` and `test-live-paper` lists include `tests` and `observability/tests`.
+- [x] Task 1 — `observability/` package (AC: #1)
+  - [x] Create `platform/observability/{__init__,error_ledger,notify,watchdog,incidents}.py`; move `ml_signals/error_ledger.py` verbatim (API `record(site, detail="", exc=None)`, `counts()`, `last_details()`, `reset()`), the module functions `_notify` (`collector_core/collector.py:388`) and `_watchdog_transition` (`:353`), and the incident-report subsystem from `dydx_collector/collector.py:648-843` (`_classify_incident`, `_write_incident_report`, `_IncidentHandler`, `_prune_incident_reports`, `_prune_stale_ws_raw_logs`, `_ws_raw_debug_flush_loop`), parameterising the handler with `iid_pattern: re.Pattern` supplied by the dYdX entrypoint.
+  - [x] `notify(channel, title, body)` with adapters `ntfy` (`WATCHDOG_NTFY_URL`), `telegram` (`TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`, moved from `data_api/alerts.py:224`), `webhook` (URL); stdlib `urllib` only; the capture watchdog and `data_api/alerts.py`'s `deliver()` call it. Keep the existing payload shapes (test against the current tests in `data_api/tests` and `collector_core/tests/test_watchdog.py`).
+  - [x] Shims at `ml_signals/error_ledger.py` (`REMOVE_AFTER = "24-1-candles-context-behind-the-secondsink-port"`); update every caller (`grep -rn "error_ledger" platform --include=*.py`, ~31 sites).
+- [x] Task 2 — `platform/tests/test_boundaries.py` (AC: #2)
+  - [x] Walk `platform/**/*.py` (skip `frontend/`, `node_modules/`, `data/`, `.planning/`) with `ast`; collect `import`/`from ... import` top-level names; map each module path to a context via `LEGACY_MODULE_TO_CONTEXT` (a dict keyed by module path prefix: `collector_core/*` → capture, except `second_snapshot/open_interest/fold/venue_http/archive_gaps` → kernel, `build_candles` → candles, `rebuild_seconds/consolidate_catalog/prune_catalog/repair_catalog/compare_klines/nightly/backfill_bars/migrate_open_interest/measure_lag/archive_gaps` → archive; `dydx_collector/collector.py` lines are one module → capture (control-plane split happens in 25.4, list it as capture until then); `ml_signals/*` per the spine's AD-D1 table; `ranking_engine` → ranking; `live_paper` → bots; `data_api/alerts.py` → alerting; `data_api/{{live_candles,redis_bus}}.py` → views; `bot_tui` → interface; …). An unmapped module fails the test.
+  - [x] Encode the AD-D2 graph as a set of `(src_ctx, dst_ctx)` edges (copy it from the spine, including the labelled query-service edges as plain edges for now); fail any other cross-context edge; fail any `from x import _private` across contexts; exempt edges whose both ends map to the same *unmoved* package; special-case: `capture/venues/*/policies.py` is domain; `kernel` and `observability` may import no context; `research` may not import `data_api`.
+  - [x] Make it pass on the current tree: the map must be complete (list every module) and every current import must be a legal edge under target contexts — where it is not (e.g. `collector_core → ml_signals.candle_store` = capture → candles), add the edge to an explicit `LEGACY_EDGES_UNTIL = {{(edge): "<story key>"}}` table that the test honours until that story is `done` in `sprint-status.yaml`. This is the mechanism that lets the graph tighten one story at a time without loosening the test.
+- [x] Task 3 — `platform/tests/test_images.py` (AC: #3)
+  - [x] Parse `docker-compose.yml` `command:` lines and `build.dockerfile`, the Makefile's `python3 -m <module>` invocations and the README cron line; for each entrypoint compute the transitive top-level-package closure by `ast` (in-repo packages only); parse the dockerfile's `COPY platform/<pkg> ./<pkg>` lines; assert closure ⊆ COPY set (a shim module counts as its target package too).
+  - [x] Fix the current gaps the test finds (`data_api.dockerfile:27-30` lacks `collector_core`, `common`; `live_paper.dockerfile:17-18` lacks whatever `live_paper` imports — verify), run `make build` for all three images (`--network host`, see memory note on local Docker MTU) and record the result in Completion Notes. Strike the parent spine's Deferred entry.
+- [x] Task 4 — hot-path baseline `platform/tests/test_hotpath.py` (AC: #4)
+  - [x] Build a replay from the recorded fixtures under `collector_core/tests/fixtures/` (WS frames/trades for the three venues); construct a `Collector` with a fake client and a temp catalog; push N messages through `_process_data` (bypassing the queue) while `tracemalloc` is tracing; measure allocations/message and `perf_counter_ns`/message over 3 repetitions, take the median.
+  - [x] First run writes `platform/tests/fixtures/hotpath_baseline.json` (`{{"allocations_per_message": ..., "ns_per_message": ..., "messages": N, "host": ..., "recorded": ISO}}`); later runs assert `alloc <= baseline` and `ns <= 2*baseline`; document the numbers in `docs/DATA_INTEGRITY_AUDIT.md` (new row, "hot-path baseline").
+- [x] Task 5 — docs and lists (AC: #5)
+  - [x] `platform/CLAUDE.md` DATA-07 → `observability.error_ledger`, Known limit (per-process ledger, `/api/errors` shows `data_api` only, upgrade path `errors:ledger`); `ARCHITECTURE.md` module map row; `collector.dockerfile` + `data_api.dockerfile` + `live_paper.dockerfile` `COPY platform/observability ./observability`; Makefile `test` and `test-live-paper` lists include `tests` and `observability/tests`.
 
 ## Dev Notes
 
@@ -83,8 +83,51 @@ First story of the migration: it creates the tests every later story is judged b
 
 ### Agent Model Used
 
+Claude Opus 5 (bmad-loop run 20260921-181822-125a; builds on the unreviewed WIP of run 694d)
+
 ### Debug Log References
+
+- Tests run in the collector image with the checkout mounted read-only at `/src`
+  (`PLATFORM_SOURCE_DIR=/src/platform`), exactly as `make test` does.
 
 ### Completion Notes List
 
+- `observability/` (stdlib only, venue-free) holds `error_ledger`, `notify` (`operator`,
+  `telegram`, `webhook:<url>`), `watchdog` (`AlertTexts`, `transition`) and `incidents`; the old
+  paths are pure re-export shims (`REMOVE_AFTER`/`MOVED_NAMES_REMOVE_AFTER` =
+  `24-1-candles-context-behind-the-secondsink-port`), every caller repointed.
+- `test_boundaries.py`: every module mapped (longest prefix; `ml_signals` has no package default,
+  so a new module there fails until placed), `catalog_stats`/`dydx_collector.open_interest` split
+  per symbol (AD-D3's `catalog_files` helpers placed in kernel). Legacy edges today: 9 context
+  pairs (retired by 23-2, 24-1, 24-2, 24-3, 25-1, 26-2) and 11 private imports (8 x
+  `_stamp_to_ns` -> 23-2, 3 x candle-store test helpers -> 24-2). Stale or expired entries fail.
+- `test_images.py` found `observability` missing from all three dockerfiles (fixed) and nothing
+  else: `data_api.dockerfile` already shipped `collector_core`/`common` (commit `8316dc728d`),
+  so the parent spine's Deferred entry was struck as resolved and now enforced.
+- Hot-path baseline (collector image, i7-11370H, pinned clock): 3,130 messages; 2.8818 retained
+  blocks, 173.0032 retained bytes, 173.0866 peak bytes, 2,237 ns per message. Three consecutive
+  runs: allocations identical, wall 2,605 / 2,645 / 2,631 ns. Recorded as audit D-65.
+- Review pass: call-shape-changed shim names (`_notify`, `_IncidentHandler`, the INCIDENTS
+  constants) now raise naming their successor; notify builds requests inside the guarded block
+  and ledgers every transport sanitized; failed incident reports are ledgered
+  (`observability.incidents.report`); the source walk prunes excluded dirs.
+- `make build` equivalent (`docker build --network host -t story-23-1/<x>`): collector,
+  data_api and live_paper images all build.
+- Full `make test` list: same 10 failures as HEAD (dydx trade_ohlc x5, ofi_strategy x4, rankings
+  redis x1), all pre-existing; from the image's `/app` two more environment-only failures
+  (`test_app_frontend`/`test_frontend_contract` need `frontend/`, absent from the collector
+  image). `make test-live-paper` list passes in the new live_paper image except
+  `live_paper/tests/test_node.py`, which hangs on the operator's existing image too
+  (pre-existing, host-dependent; see Story 25.3).
+
 ### File List
+
+- platform/observability/{__init__,error_ledger,notify,watchdog,incidents}.py, observability/tests/*
+- platform/tests/{_source_tree,test_boundaries,test_images,test_hotpath,test_namespace}.py,
+  platform/tests/fixtures/hotpath_baseline.json
+- platform/ml_signals/error_ledger.py (shim), platform/collector_core/collector.py,
+  platform/dydx_collector/collector.py, platform/data_api/alerts.py and the repointed callers
+- platform/{collector,data_api,live_paper}.dockerfile, platform/Makefile,
+  platform/docker-compose.yml (comment only), platform/live_paper/bot_status.py (docstring only)
+- platform/CLAUDE.md, platform/ARCHITECTURE.md, platform/docs/DATA_DICTIONARY.md,
+  platform/docs/DATA_INTEGRITY_AUDIT.md, parent spine Deferred entry

@@ -1,0 +1,18 @@
+{
+  "messages": 3130,
+  "retained_blocks_per_message": 1.7406,
+  "retained_bytes_per_message": 122.2658,
+  "peak_bytes_per_message": 143.4917,
+  "ns_per_message": 3024,
+  "host": {
+    "cpu": "11th Gen Intel(R) Core(TM) i7-11370H @ 3.30GHz | 8 cpus | x86_64",
+    "python": "3.13.13"
+  },
+  "recorded": "2026-09-21T19:26:25+00:00",
+  "burst": {
+    "instruments": 30,
+    "deltas_per_instrument": 50,
+    "book_levels": 20,
+    "repetitions": 3
+  }
+}

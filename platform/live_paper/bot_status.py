@@ -83,10 +83,10 @@ def _incident_transition(
 ) -> tuple[list[dict], bool]:
     """
     Pure state-machine step for the per-bot data-staleness incident log. Mirrors the
-    shape of dydx_collector.collector._watchdog_transition (not reused directly -- AD-4
-    only permits cross-module reuse of pure, I/O-free *utilities*, and this one
-    persists a different representation: a list of {started_at, ended_at} spans, not a
-    notify-string).
+    shape of observability.watchdog.transition, which every context may import, but is not
+    that function: it persists a different representation (a list of {started_at, ended_at}
+    spans written to Redis, not a notify-string), so the shared transition's contract does
+    not fit it.
 
     Appends a new open incident (ended_at=None) on a stale-start transition; closes the
     most recent open incident on recovery; otherwise returns incidents unchanged.
