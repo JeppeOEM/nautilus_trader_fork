@@ -71,6 +71,14 @@ A zero count after a restart proves nothing, and a data gap with no ledger entry
 
 ## Dev Notes
 
+### Start from the prior attempt (operator decision, 2026-09-22)
+
+An earlier, unreviewed attempt at this story exists as one commit, `51990335a8`, on branch `wip/23-3-main-checkout-20260921`. It adds about 1,100 lines across 11 files: `ml_signals/error_ledger.py` JSONL sink + tests, `collector_core/crosscheck_errors.py` + tests, `data_api/app.py` `/api/errors`, `ml_signals/catalog_stats.py`, `docker-compose.yml` mounts, `.gitignore` `platform/data/errors/`, and `error_ledger.start()` in `collector_core/collector.py` and `ranking_engine/engine.py`. The operator wants it used as the starting point, not rebuilt from scratch:
+
+1. First action in the worktree: `git cherry-pick 51990335a8`. Resolve any conflicts against what 23.1/23.2 landed.
+2. The attempt was written against the pre-23.1 layout. Port it onto this story's contract: the sink goes behind `observability/error_ledger.py`'s `record()`, stdlib-only (AD-D2), with `ml_signals.error_ledger` left as 23.1's shim; the cross-check reads the catalog through `kernel.catalog_files` (23.2). Move or rewrite anything that breaks `test_boundaries.py`, the shim contract or the same-commit rules below.
+3. Treat every line as unreviewed. Verify it against each AC and the migration rules; keep what is correct, fix or drop what is not. List what was kept, changed and dropped in Completion Notes.
+
 - Keep 23.1's API and shim contract exactly; this story only adds a sink behind `record()`. `ml_signals.error_ledger` is still a shim until 24.1.
 - Hot path: `record()` is on failure paths only, but a storm must not stall `_process_data`. The per-site cap bounds writes; 23.1's `test_hotpath.py` baseline must still pass (a storm fixture that calls `record()` in the burst is a good extra case).
 - Redis is not the persistence layer here on purpose: it has no volume and `appendonly no` in `docker-compose.yml`, and `observability/` is stdlib-only. Do not change Redis persistence in this story.
