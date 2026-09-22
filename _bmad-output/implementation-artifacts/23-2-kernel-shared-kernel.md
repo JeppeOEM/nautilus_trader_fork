@@ -60,6 +60,27 @@ So that no two contexts can ever hold two copies of a shared type or a shared nu
 
 ## Dev Notes
 
+### Start from the prior attempt (operator decision, 2026-09-22)
+
+A complete, reviewed attempt at this story exists as four commits on branch
+`attempt-preserve/20260921-181822-125a-dbc89886` (range `7bd64952fd..dbc89886e8`, 142 files,
++4199/-1671): `366ab1de8b` (the `kernel/` package, shims, caller repointing, `test_boundaries.py`
+guards), `a770ef48a4` (first review triage), `3fe7292069` (17 follow-up review patches: 1 medium,
+16 low) and `dbc89886e8` (follow-up triage). The first review pass returned `status: done` with a
+follow-up review recommended; the follow-up patches were applied and the second follow-up review
+was aborted by an operator stop, not by a finding. The orchestrator then reset this story branch
+to `troll` HEAD. The operator wants that attempt used as the starting point, not rebuilt:
+
+1. First action in the worktree: `git cherry-pick 366ab1de8b a770ef48a4 3fe7292069 dbc89886e8`.
+   The only commit on `troll` since the attempt's base is `04062009f4` (Epic 27 planning
+   artifacts: `epics.md`, `sprint-status.yaml`, nine `27-*.md` story files), so conflicts, if
+   any, are confined to `_bmad-output/`; resolve them by keeping both sides.
+2. Treat every line as reviewed once but not twice. Re-verify against each AC, the migration
+   rules below and `spec-23-2-kernel-shared-kernel.md`'s Verification section (its Auto Run
+   Result records what the follow-up pass patched). Run the full `platform/` test suite and
+   `test_boundaries.py`. Fix what fails; do not re-derive the design.
+3. Record in Completion Notes what was kept, changed and dropped relative to the attempt.
+
 The kernel is the one package every context imports, so nothing stateful, no store and no config loader may enter (AD-D3). `DydxSecondSnapshot`'s class name is a persistence identifier: `nautilus_trader.persistence.funcs.class_to_filename` derives the catalog directory `custom_dydx_second_snapshot` from `__name__`. `register_arrow` keys by class object — a shim must re-export the class, never copy it. `MAX_TS_INIT_SKEW_NS` is the coupling constant between capture's carry/backfill rules and archive's rebuild/prune windows (adversary review C1/H1 in `reviews/review-adversary.md`); expressing every related constant against it is the point of `clocks.py`.
 
 ### Migration rules that bind every story (spine AD-D12, MR1/MR2/MR4/MR14)
