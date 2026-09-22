@@ -655,12 +655,27 @@ _CACHE_DECORATORS = frozenset({"cache", "lru_cache", "cached_property"})
 # *called* here (its callers are `collector.py`/`backfill_bars.py`), so at kernel module scope
 # the only bare call an import may legitimately run is `register_arrow`.
 _SANCTIONED_BARE_CALLS = frozenset({"register_arrow"})
+# A call whose *result* is bound to a module-level name is an import-time effect too (`_C =
+# Session()`, `_D = open(...).read()`), so it is judged by the same rule. These three are the
+# kernel's frozen-table and name-derivation builders: pure, no I/O, no registry mutation.
+_SANCTIONED_VALUE_CALLS = frozenset({"MappingProxyType", "frozenset", "class_to_filename"})
+
+
+def _call_name(call: ast.expr) -> str | None:
+    callee = call.func if isinstance(call, ast.Call) else None
+    return getattr(callee, "id", None) or getattr(callee, "attr", None)
 
 
 def _bare_call_name(node: ast.stmt) -> str | None:
     if isinstance(node, ast.Expr) and isinstance(node.value, ast.Call):
-        callee = node.value.func
-        return getattr(callee, "id", None) or getattr(callee, "attr", None)
+        return _call_name(node.value)
+    return None
+
+
+def _bound_call_name(node: ast.stmt) -> str | None:
+    """Return the callee of `NAME = f(...)`: an import-time effect whose result is kept."""
+    if isinstance(node, ast.Assign | ast.AnnAssign) and isinstance(node.value, ast.Call):
+        return _call_name(node.value)
     return None
 
 
@@ -686,28 +701,71 @@ def _decorator_names(node: ast.AST) -> set[str]:
     return names
 
 
+_COMPOUND = (ast.If, ast.Try, ast.With, ast.AsyncWith, ast.For, ast.AsyncFor, ast.While)
+
+
+def _import_time_call(node: ast.stmt) -> str | None:
+    """Return the callee of an unsanctioned import-time call, bare or bound to a name."""
+    if (bare := _bare_call_name(node)) is not None:
+        return None if bare in _SANCTIONED_BARE_CALLS else bare
+    bound = _bound_call_name(node)
+    sanctioned = _SANCTIONED_VALUE_CALLS | _SANCTIONED_BARE_CALLS
+    return None if bound is None or bound in sanctioned else bound
+
+
+def _own_state_site(node: ast.stmt) -> str | None:
+    """Return this statement's own impurity label, ignoring anything nested inside it."""
+    if isinstance(node, ast.AugAssign):
+        return f"line {node.lineno} (augmented assignment)"
+    if isinstance(node, ast.Assign | ast.AnnAssign) and _is_mutable_value(node.value):
+        return f"line {node.lineno}"
+    if (callee := _import_time_call(node)) is not None:
+        return f"line {node.lineno} (unsanctioned import-time call: {callee})"
+    if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+        return (
+            f"line {node.lineno} (memoising cache)"
+            if _decorator_names(node) & _CACHE_DECORATORS
+            else None
+        )
+    return None
+
+
+def _nested_statements(node: ast.stmt) -> list[ast.stmt]:
+    """Return statements a class or compound statement still runs at import time."""
+    if isinstance(node, ast.ClassDef):
+        return list(node.body)
+    if isinstance(node, _COMPOUND):
+        nested = [*node.body, *getattr(node, "orelse", []), *getattr(node, "finalbody", [])]
+        return nested + [stmt for handler in getattr(node, "handlers", []) for stmt in handler.body]
+    if isinstance(node, ast.Match):
+        return [stmt for case in node.cases for stmt in case.body]
+    return []
+
+
 def _state_sites(statements: list[ast.stmt]) -> list[str]:
     """Return module- or class-level mutable bindings, including ones under `if`/`try`/`with`."""
     found = []
     for node in statements:
-        if isinstance(node, ast.AugAssign):
-            found.append(f"line {node.lineno} (augmented assignment)")
-        elif isinstance(node, ast.Assign | ast.AnnAssign) and _is_mutable_value(node.value):
-            found.append(f"line {node.lineno}")
-        elif isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
-            if _decorator_names(node) & _CACHE_DECORATORS:
-                found.append(f"line {node.lineno} (memoising cache)")
-        elif (name := _bare_call_name(node)) is not None and name not in _SANCTIONED_BARE_CALLS:
-            found.append(f"line {node.lineno} (unsanctioned import-time call: {name})")
-        elif isinstance(node, ast.ClassDef):
-            found += _state_sites(node.body)
-        elif isinstance(node, ast.If | ast.Try | ast.With | ast.For | ast.AsyncFor | ast.While):
-            nested = [*node.body, *getattr(node, "orelse", []), *getattr(node, "finalbody", [])]
-            nested += [stmt for handler in getattr(node, "handlers", []) for stmt in handler.body]
-            found += _state_sites(nested)
-        elif isinstance(node, ast.Match):
-            found += _state_sites([stmt for case in node.cases for stmt in case.body])
+        site = _own_state_site(node)
+        if site is not None:
+            found.append(site)
+        else:
+            found += _state_sites(_nested_statements(node))
     return found
+
+
+_ENV_NAMES = frozenset({"environ", "getenv"})
+
+
+def _env_aliases(tree: ast.AST) -> set[str]:
+    """Return local names bound to `os.environ`/`os.getenv` by a `from os import ... as ...`."""
+    return {
+        alias.asname or alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module == "os"
+        for alias in node.names
+        if alias.name in _ENV_NAMES
+    }
 
 
 def _mutable_module_state(tree: ast.Module) -> list[str]:
@@ -718,11 +776,12 @@ def _mutable_module_state(tree: ast.Module) -> list[str]:
 def _kernel_impurities(module: str, path: Path) -> list[str]:
     tree = ast.parse(path.read_text())
     bad = [f"{module}: mutable module state at {site}" for site in _mutable_module_state(tree)]
+    env_names = _ENV_NAMES | _env_aliases(tree)
     for node in ast.walk(tree):
         if isinstance(node, ast.Global):
             bad.append(f"{module}:{node.lineno}: `global` statement")
         name = node.attr if isinstance(node, ast.Attribute) else getattr(node, "id", None)
-        if isinstance(node, ast.Attribute | ast.Name) and name in {"environ", "getenv"}:
+        if isinstance(node, ast.Attribute | ast.Name) and name in env_names:
             bad.append(f"{module}:{node.lineno}: reads the environment (a config loader)")
     for ref in imports_of(module, path, _KNOWN):
         in_repo = _in_repo(ref.target)
@@ -773,6 +832,23 @@ def test_kernel_purity_rule_catches_each_kind() -> None:
         "line 2 (unsanctioned import-time call: some_side_effect)",
         "line 4 (unsanctioned import-time call: another_one)",
     ]
+    bound = ast.parse(
+        "T = MappingProxyType({})\nF = frozenset({1})\nN = class_to_filename(C)\n"
+        "S: Session = Session()\nD = open('f').read()\n"
+    )
+    assert _mutable_module_state(bound) == [
+        "line 4 (unsanctioned import-time call: Session)",
+        "line 5 (unsanctioned import-time call: read)",
+    ]
+
+
+def test_kernel_purity_rule_follows_an_environ_alias() -> None:
+    """`from os import environ as E` is the same config loader as `os.environ`."""
+    assert _env_aliases(ast.parse("from os import environ as E\nfrom os import getenv\n")) == {
+        "E",
+        "getenv",
+    }
+    assert _env_aliases(ast.parse("from typing import environ\n")) == set()
 
 
 # Venue REST: every URL and request is built in `kernel.venue_http` (AD-D3). `ranking_engine`'s
@@ -800,17 +876,32 @@ def _docstrings(tree: ast.AST) -> set[int]:
     return found
 
 
+def _string_expr_text(node: ast.AST) -> str | None:
+    """Return a string expression's literal text: a constant, an f-string, or a `+` chain."""
+    if isinstance(node, ast.Constant):
+        return node.value if isinstance(node.value, str) else None
+    if isinstance(node, ast.JoinedStr):
+        # A formatted part contributes nothing readable, but joining the literal parts keeps a
+        # URL split across one (`f"https://api.{env}.bybit.com"`) matchable.
+        parts = (v.value for v in node.values if isinstance(v, ast.Constant))
+        return "".join(part for part in parts if isinstance(part, str))
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left, right = _string_expr_text(node.left), _string_expr_text(node.right)
+        return None if left is None or right is None else left + right
+    return None
+
+
 def _venue_url_literals(tree: ast.AST) -> list[int]:
-    """Lines whose string literal (plain or f-string part) holds a venue URL; not comments/docs."""
+    """Lines whose string expression holds a venue URL, however split; not comments/docstrings."""
     docs = _docstrings(tree)
-    return [
-        node.lineno
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Constant)
-        and isinstance(node.value, str)
-        and id(node) not in docs
-        and _VENUE_URL.search(node.value)
-    ]
+    lines = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.expr) or id(node) in docs:
+            continue
+        text = _string_expr_text(node)
+        if text is not None and _VENUE_URL.search(text):
+            lines.add(node.lineno)
+    return sorted(lines)
 
 
 def test_venue_url_rule_reads_literals_not_comments_or_docstrings() -> None:
@@ -822,6 +913,17 @@ def test_venue_url_rule_reads_literals_not_comments_or_docstrings() -> None:
         "    return 'https://example.com/none'\n"
     )
     assert _venue_url_literals(tree) == [5, 6]
+
+
+def test_venue_url_rule_reads_a_url_split_across_parts() -> None:
+    """A URL assembled from an f-string hole or a `+` chain is still one venue URL."""
+    tree = ast.parse(
+        "env = 'api'\n"
+        "a = f'https://{env}.bybit.com/v5'\n"
+        "b = 'https://api.' + 'dydx.trade/v4'\n"
+        "c = 'https://example.' + 'com/none'\n"
+    )
+    assert _venue_url_literals(tree) == [2, 3]
 
 
 def _judged_sources() -> dict[str, Path]:

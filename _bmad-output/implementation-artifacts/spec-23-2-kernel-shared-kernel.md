@@ -6,7 +6,7 @@ status: 'done'
 baseline_revision: '2d7dd5ab6e'
 final_revision: 'b2a14facb7'
 review_loop_iteration: 0
-followup_review_recommended: false
+followup_review_recommended: true
 context:
   - '{project-root}/_bmad-output/implementation-artifacts/23-2-kernel-shared-kernel.md'
   - '{project-root}/_bmad-output/implementation-artifacts/epic-23-context.md'
@@ -254,6 +254,29 @@ Verified against this file's own Verification section and Acceptance Criteria: r
   - `[defer]` The catalog read helpers list files and then open them in a second step with no guard for a file removed in between, so a `data_api` request overlapping the nightly consolidate/prune 500s instead of skipping one file. Verified pre-existing and moved verbatim (`2d7dd5ab6e:platform/ml_signals/catalog_stats.py:157-166` has the same shape); logged to `deferred-work.md` for 25.1, where the skip-vs-ledger policy belongs.
   - `reject` (19): the two hunters re-surfaced, from no prior context, most of what the first three passes already settled — `bybit_category`'s `inverse` support and its three per-call-site refusals (the *fix* the first pass applied, and what AC3 asks for), `market_kind`'s deliberate dash-less-symbol contract (first-pass patch, with the test that pins it), the `CatalogFileSpan` caller-propagation gap and the stricter marker decode (both already in `deferred-work.md`, left untouched per this step's "do not modify existing entries"), and `record_gap`'s swap-and-ledger, whose docstring already names the backward-wall-clock-step root cause DATA-02 asks for. Also rejected: the shims being callerless (that is MR2's whole design — they are the out-of-tree contract until 24.2), `covers()` and `TwoClocks` being thin (both are spec-mandated members of AC4), `parquet_compat`'s idempotence docstring (its claim is scoped to `apply_zstd_default` calls, which is exactly what it delivers), `second_ohlc_arrays`' file-order precondition and the bare `assert` at its tail (both verbatim pre-existing, and the downstream `argsort` holds today), the day-boundary and symmetric-widening reads (the known, tracked D-31..D-34 attribution issue and a deliberately preserved margin), and four cosmetics (a bare `KeyError` from the URL maps, the three URL builders' argument shapes, a test that re-asserts `MalformedInstrumentId` is a `ValueError` on purpose, and docstring lines over 100 where `E501` is disabled project-wide).
 
+### 2026-09-22 — Review pass (fifth, follow-up)
+
+- intent_gap: 0
+- bad_spec: 0
+- patch: 10 (high 0, medium 1, low 9)
+- defer: 1 (high 0, medium 1, low 0)
+- reject: 18
+- addressed_findings:
+  - `[medium]` `[patch]` `kernel/venue_http.py`'s `get_request`/`post_json_request` moved each call site's `# noqa: S310 (fixed https URL)` onto a shared builder that takes an unvalidated `url: str`, so the property the suppression asserts stopped being checked anywhere: `_rooted` guards the path, nothing guarded the scheme or host. Both builders now go through `_venue_url`, which refuses a non-`https` URL; parametrised test (`http://`, `file://`, a bare path) and the module docstring states the invariant. No live caller was affected — all three URL builders draw from the frozen `https` maps — so this restores the audit annotation's truth rather than fixing a reachable bug.
+  - `[low]` `[patch]` `kernel/catalog_files.py`'s module docstring claimed every helper selects files "widened by `READ_SPAN_MARGIN_NS`". Only `query_second_ohlc` does; `files_by_day` (the rebuild's selector) and `data_file_ranges` take the span as written, exactly as their pre-kernel originals did (`2d7dd5ab6e:platform/collector_core/build_candles.py:77-90` has no margin). Consolidating four helpers under one documented constant is what made the blanket claim misleading. Docstring now states which helper widens and why the other two need not.
+  - `[low]` `[patch]` `ml_signals.catalog_stats.query_second_snapshots`'s comment justified its one-sided widening with "ts_init >= ts_event, so the start needs no margin" — which this story's own `kernel/clocks.py` contradicts in three places (a venue clock can run ahead of ours by hold-back + `_VENUE_AHEAD_NS`). Replaced with a `Known limit:` naming the ceiling (a venue-ahead row within one margin of `start_ns` is dropped, while `query_second_ohlc` keeps it) and the upgrade path; the margin itself is left alone because AC2 freezes it, and the behaviour change is deferred (below).
+  - `[low]` `[patch]` `kernel/parquet_compat.py`'s wrapper had no `functools.wraps`, so installing it renamed pyarrow's function process-wide (`pq.write_table.__name__` became `write_table_zstd`) — the patch reaches nautilus's own call site, where a traceback or a repr would then name ours. Added, with the marker still set after the decorator so idempotence is unchanged.
+  - `[low]` `[patch]` The kernel purity guard could not see an import-time call whose result is bound to a name — and the kernel already contains one (`SNAPSHOT_DIRNAME = class_to_filename(...)`), passing only because the check never looked. `_C = Session()` or `_D = open(...).read()` would have passed the same way. `_bound_call_name` + `_SANCTIONED_VALUE_CALLS` (`MappingProxyType`, `frozenset`, `class_to_filename`) now judge it by the same rule as a bare call, so a new import-time effect has to be argued for by name; self-test extended. `_state_sites` was split into `_own_state_site`/`_nested_statements` to stay under the cognitive-complexity limit.
+  - `[low]` `[patch]` The same guard's environment check matched the names `environ`/`getenv` syntactically, so `from os import environ as E` followed by `E["X"]` — a config loader, the thing the rule exists to keep out — was invisible. `_env_aliases` resolves the `from os import ... as ...` form; self-test.
+  - `[low]` `[patch]` The venue-URL guard matched whole string constants only, so a URL split across an f-string hole (`f"https://api.{env}.bybit.com"`) or a `+` chain passed. `_string_expr_text` now assembles the literal text of a constant, an f-string's literal parts and an `+` chain before matching; self-test with both shapes plus a non-venue control.
+  - `[low]` `[patch]` `CatalogFileSpan.covers()` defaults `margin_ns` to `MAX_TS_INIT_SKEW_NS` (300 s) while the one real file-selection path uses `READ_SPAN_MARGIN_NS` (60 s), and it has no production caller yet — a future one reaching for the obvious-looking method silently gets a five-times-wider window. Docstring now names the distinction and that the wider default only over-selects, never under-selects.
+  - `[low]` `[patch]` `docs/DATA_DICTIONARY.md` asserts the error-ledger sites "are unchanged", which this story falsified: `record_gap` gained `archive_gaps.inverted_span`, the only operator-visible signal that a collector's wall clock stepped back. Listed, with what it counts and why the marker is still trustworthy.
+  - `[low]` `[patch]` `platform/CLAUDE.md`'s "Adding a venue" step 5 was rewritten by this story and names `VENUE_KINDS`, `_PERP_SUFFIXES` and `kernel/venue_http.py`, but not the three wire-verification allow-lists that `bybit_category`'s new `inverse` support created (`_BOOK_CATEGORIES`, `_BYBIT_KLINE_CATEGORIES`, `_BYBIT_FULL`). A new market type must be added to all three, and missing one fails soft by refusing the id. Added as an explicit sub-step.
+  - `[defer]` The two snapshot readers' asymmetric file-span widening (see the third patch above): pre-existing and moved verbatim, but the fix changes a frozen read margin, so it is logged to `deferred-work.md` for 24.2 rather than taken here.
+  - `reject` (18): the hunters, working from no prior context, re-surfaced most of what the first four passes settled — the `CatalogFileSpan` caller-propagation gap at four sites and the stricter marker `decode`'s effect on pre-existing files (both already in `deferred-work.md`, left untouched per this step's rule), `INVERSE` being allow-listed per caller rather than refused in the kernel (the first pass's own fix), and `apply_zstd_default`'s idempotence docstring and missing uninstall (scoped correctly, and `monkeypatch` is the sanctioned undo). Also rejected: `kernel/venue_http.py` importing dYdX's PyO3 binding (AD-D3 puts every venue URL there by design), `_check_skew_budget` living on `Collector` rather than in `config.py` (a placement preference; `config.py:134-137` already rejects the values it can see), `bybit_category` reaching a verdict through both the lenient `market_kind` and the strict `market_suffix` (the deliberate split the first pass's patch pinned with a test), `_rooted` not rejecting `//host` or CRLF (`//x` stays on the venue host, and urllib refuses control characters itself), `compare_klines.instruments_on_day`'s `glob.glob` → `Path.glob` dot-file difference (latent: no writer emits one, and the raise path is the already-deferred entry), the User-Agent literals being duplicated inside `bybit_collector` (verbatim pre-existing) and untested per call site (the byte-equality evidence already covers them), AC4's verification grep also matching a kernel test's *function name* (the claim's substance — no live caller of the old names — holds), and eight lines over 100 characters where `E501` is disabled project-wide (the same class the fourth pass rejected).
+
+Verified: `ruff format --check` + `ruff check` clean on every changed file, `mypy --ignore-missing-imports --disallow-incomplete-defs` clean on `tests/test_boundaries.py` (the two errors it flags elsewhere, `kernel/catalog_files.py:118` and the deliberate `venue_http.py:38` `type: ignore`, are untouched pre-existing lines). `platform/tests` + `kernel/tests`: 272 passed with `-W default`. Full `make test` list on the host: **1398 passed, 5 failed** — the `ofi_strategy` trio, the OFI consistency test and the redis-backed `test_rankings`, all a subset of the 10 pre-existing failures every prior pass recorded (the five dYdX `test_collector_trade_ohlc` cases passed this run), and none in a module this pass touched. No `DeprecationWarning` from `platform/` code. No dockerfile, schema, payload, directory name, config key or env var changed, so the image results from the earlier passes stand.
+
 ## Design Notes
 
 - **Why the skew coupling test lives in `platform/tests`.** `kernel/tests` belongs to the kernel context, and the kernel imports no context (AD-D2). Asserting capture's and archive's constants from there would itself be an illegal edge. So the test's consumer-side half sits in the cross-cutting guards (the `TESTS` context may import anything), and `kernel/tests/test_clocks.py` holds the kernel-internal half. This is a deliberate refinement of the story text "by a kernel test".
@@ -268,35 +291,56 @@ Verified against this file's own Verification section and Acceptance Criteria: r
 - `docker build -f platform/<x>.dockerfile --network host -t story-23-2/<x> .` for collector, data_api and live_paper -- expected: success (never `make up` from the worktree)
 - `uvx ruff check` + `uvx ruff format --check` on the changed files -- expected: clean on the changed lines
 
+
 ## Auto Run Result
 
-Status: done
+Status: `done` (fifth review pass — review-only; no re-derivation, no spec amendment).
 
-**Summary.** This story extracts `platform/kernel/`, the one shared-kernel package every other `platform/` context may import (AD-D3): `second_snapshot`/`open_interest`/`fold`/`indicators`/`performance_metrics` (moved verbatim from `collector_core`/`ml_signals`), `venues` (the single `InstrumentId` parser, merging three prior copies), `clocks` (`TwoClocks`, `CatalogFileSpan`, and the one `MAX_TS_INIT_SKEW_NS` every other skew margin is now defined against or asserted under), `archive_markers` (the `ArchiveGap` value object plus its encode/decode), `venue_http` (every stdlib venue REST request) and `catalog_files`/`parquet_compat` (read-only catalog helpers, the one zstd `write_table` patch). Every old import path is a pure `DeprecationWarning` re-export shim (`REMOVE_AFTER = "24-2-..."`), every in-repo caller is repointed, and `test_boundaries.py`/`test_namespace.py`/`test_skew_constants.py` mechanically enforce kernel purity, shim identity and expiry, and the skew-constant coupling from here on. No schema, payload, catalog directory name, marker byte format, request bytes, config key, env var or compose service changed in any pass.
+**Change.** Story 23.2 creates `platform/kernel/`, moves the shared types, the one trade fold, the id
+parser, the skew constants, the venue REST transport, the catalog read helpers and the zstd patch
+into it, leaves deprecating re-export shims at the old paths, repoints every in-repo caller and
+extends the 23.1 boundary guards to keep the kernel pure. This pass reviewed that change again with
+two fresh hunters and applied 10 patches; the code the story delivers is otherwise unchanged.
 
-**How this attempt ran.** The orchestrator deferred the previous attempt on one ground only: its spec carried `baseline_revision: '7bd64952fd'`, inherited through a cherry-pick, which did not match the baseline recorded for that worktree. The code was never faulted — it had already been through three review passes (12 + 17 + 2 patches). Per the operator's instruction in the story's Dev Notes, this run recorded the worktree's starting commit (`2d7dd5ab6e`), cherry-picked the six preserved commits (clean, reproducing the recorded 143 files / +4293/-1689 exactly), re-stamped the frontmatter, and then **verified rather than re-derived**: a full implementation-verification pass against every task and AC, then a fourth independent review.
+**Files changed in this pass**
 
-**Files changed (this attempt, on top of the cherry-picked diff):**
-- `platform/kernel/tests/test_venue_http.py` — dropped an unused `# type: ignore[index]` that `warn_unused_ignores = true` makes a pre-commit mypy failure (the one new mypy finding the story introduced against baseline).
-- `platform/live_paper/DEPLOY_CHECKLIST.md` — build/static-check steps re-pointed from `ml_signals` to `kernel` + `observability`, matching the dockerfile this story changed.
-- `platform/tests/test_skew_constants.py` — the config walk reads TOML arrays-of-tables, plus a self-test; without it the skew-coupling chain could pass vacuously.
-- `platform/kernel/__init__.py` — the purity guard's ceiling stated as a `Known limit:` with upgrade path instead of "enforces all of it".
-- `platform/kernel/tests/test_catalog_files.py` — two tests binding `_OHLC_COLUMNS` (now `SecondOHLC._fields`) to the snapshot's Arrow schema and to the literals `second_ohlc_arrays` reads.
-- `platform/kernel/clocks.py`, `platform/kernel/tests/test_clocks.py` — `_stamp_ns` refuses a fractional field that is not nine digits (it was read positionally, so a shorter one parsed to a silently wrong instant); one test stem corrected from a `-0Z` shorthand to the real form.
+- `platform/kernel/venue_http.py` — `_venue_url()` refuses a non-`https` URL in both request builders,
+  restoring the property each `# noqa: S310` asserts; docstring states the invariant.
+- `platform/kernel/tests/test_venue_http.py` — parametrised test for the refusal.
+- `platform/kernel/catalog_files.py` — module docstring: only `query_second_ohlc` widens the file span.
+- `platform/kernel/clocks.py` — `covers()` docstring: its 300 s default is the writer bound, not the
+  readers' 60 s selection margin.
+- `platform/kernel/parquet_compat.py` — `functools.wraps` on the zstd wrapper, so the process-wide
+  patch keeps pyarrow's function identity.
+- `platform/kernel/__init__.py` — `Known limit:` restated: the AST purity rule now also judges an
+  import-time call bound to a name; what it still cannot see is closure state.
+- `platform/ml_signals/catalog_stats.py` — the one-sided widening's justification replaced with a
+  `Known limit:` naming the dropped-row ceiling and the upgrade path.
+- `platform/tests/test_boundaries.py` — three guard blind spots closed (an import-time call bound to a
+  name, a `from os import environ as E` alias, a venue URL split across an f-string hole or a `+`
+  chain), each with a self-test; `_state_sites` split into `_own_state_site`/`_nested_statements`.
+- `platform/docs/DATA_DICTIONARY.md` — the new `archive_gaps.inverted_span` ledger site.
+- `platform/CLAUDE.md` — "Adding a venue" step 5: the three wire-verification allow-lists a new Bybit
+  market category must be added to.
+- `_bmad-output/implementation-artifacts/deferred-work.md` — one new entry (the two readers' asymmetric
+  widening).
 
-**Review.** Two fresh hunters (adversarial + edge-case), no prior context, over the whole diff since `2d7dd5ab6e`: **5 patched** (1 medium, 4 low), **1 deferred**, **19 rejected**. The rejected set is largely the earlier passes' own findings re-surfaced by reviewers who could not see the triage log — the `bybit_category` inverse support and its three per-call-site refusals, `market_kind`'s deliberate dash-less contract, and two items already in `deferred-work.md` and left untouched per this step's rule. Full reasoning in the triage log above.
+**Findings breakdown.** 10 patches applied (1 medium, 9 low), 1 deferred (medium), 18 rejected — the
+rejections are almost entirely items the first four passes already settled and the hunters
+re-surfaced from no prior context.
 
-**Verification (this attempt):**
-- Full `make test` list on the host with `-W default`: **1387 passed**, with the same **10 pre-existing failures** as every prior pass (dydx `test_collector_trade_ohlc` ×5, `test_ofi_strategy` ×3 + consistency ×1, `test_rankings` redis ×1). An 11th, `tests/test_hotpath.py::test_wall_time_per_message_is_within_twice_the_baseline`, appears only when the whole suite runs in one process on this loaded host; it passes alone (5 passed) and passed in-image in the prior pass, so it is contention, not a regression.
-- `kernel/tests` + `test_boundaries` + `test_namespace` + `test_skew_constants` + `test_images`: **262 passed**.
-- **No `DeprecationWarning` from `platform/` code** under `-W default` (TEST-04).
-- All three images (`story-23-2/{collector,data_api,live_paper}`) build from this checkout; the full list re-run inside `story-23-2/collector` gave the identical 1384/10; `make test-live-paper` in `story-23-2/live_paper` gave 404 passed (`test_node.py` deselected — a host-dependent hang proven pre-existing against the baseline tree, owned by Story 25.3).
-- `ruff format --check` + `ruff check` (pinned 0.15.16) over the changed files: clean; **zero new findings** against baseline across the 117-file changed set, and `platform/kernel/` is entirely lint-clean. `mypy` 1.20.2 as pre-commit runs it: no error in any changed `platform/` file.
-- FORK-01: the diff touches only `platform/`, `_bmad-output/` and the root `CLAUDE.md` (citation updates). Nothing under `nautilus_trader/` or `crates/`.
+**Verification.** `ruff check` + `ruff format --check` clean on every changed file. `mypy
+--ignore-missing-imports --disallow-incomplete-defs` clean on `tests/test_boundaries.py`. `platform/tests`
++ `kernel/tests`: 272 passed under `-W default`. Full `make test` list on the host: 1398 passed, 5
+failed — a subset of the 10 pre-existing failures recorded by every prior pass, none in a module this
+pass touched. No `DeprecationWarning` from `platform/` code.
 
-**Residual risks:**
-- The ~157 `ResourceWarning: unclosed database` under `-W default` are the pre-existing candle-store leak already ledgered by Story 23.1's review, unrelated to this move.
-- The skew budget is enforced as the sum of both skew directions (the spec's chain), 5 s stricter than the binding per-direction limit; deliberate and documented.
-- The shims expire at 24.2: `test_namespace` fails the run once that story is `done` while any shim remains.
-- `from_stem`'s inverted-stem and nine-digit refusals and `encode`'s inverted-span refusal are stricter than the code they replaced. No current writer can produce any of them (`unix_nanos_to_iso8601` never trims; the catalog never writes an inverted span), but the pre-rollout check against the live collector's historical `_archive_gaps` files remains the open deferred item from the third pass.
-- Two deferred items carry forward to 25.1: the `CatalogFileSpan` caller-propagation policy and the list-then-open race in the read helpers.
+**Residual risks.**
+- `_venue_url` is a new runtime refusal on the path every venue REST request is built through. All
+  three URL builders draw from frozen `https` maps and the full suite passes, so no live caller is
+  affected; a future caller passing a non-`https` URL now fails loudly rather than silently.
+- The images were not rebuilt this pass. Nothing in the diff touches a dockerfile, a schema, a payload,
+  a directory name, a config key or an env var, so the earlier passes' `test_images` and build results
+  stand.
+- The VPS rollout (`live_paper/DEPLOY_CHECKLIST.md` §5) still has not run, so the deferred entries about
+  deployed `_archive_gaps` files and the read-during-nightly race remain unobserved rather than disproven.

@@ -105,7 +105,14 @@ def query_second_snapshots(
     catalog = ParquetDataCatalog(catalog_path)
     # `query` bounds on ts_init, the window is ts_event: a venue-timed row (story 22.12) is
     # sampled up to 1 + hold_back s (a catch-up: more) after its ts_event, so the end is widened
-    # and the exact ts_event filter decides. ts_init >= ts_event, so the start needs no margin.
+    # and the exact ts_event filter decides.
+    # Known limit: the start is not widened, so a row whose venue clock ran ahead of ours
+    # (`ts_init < ts_event`, the second direction `kernel.clocks.READ_SPAN_MARGIN_NS` documents)
+    # is dropped when its ts_event is within READ_SPAN_MARGIN_NS of `start_ns`. The ceiling is one
+    # margin's worth of rows at the window's lower edge; `kernel.catalog_files.query_second_ohlc`
+    # widens both sides and keeps them, so the two readers can disagree there. The upgrade path is
+    # `start=start_ns - READ_SPAN_MARGIN_NS` (the exact ts_event filter below already makes it
+    # safe); held back here because this story moves read margins without changing them.
     results = catalog.query(
         data_cls=DydxSecondSnapshot,
         identifiers=[instrument_id],

@@ -32,6 +32,7 @@ Known limit: if a future nautilus_trader version passes `compression=` explicitl
 is silently ignored -- revisit on a version bump (the upgrade path is that passthrough).
 """
 
+import functools
 from collections.abc import Callable
 from typing import Any
 
@@ -47,6 +48,9 @@ def apply_zstd_default() -> None:
     if getattr(original, _MARKER, False):
         return
 
+    # `wraps` keeps `pq.write_table.__name__`/`__doc__`: the patch is process-wide and reaches
+    # nautilus's own call site, so a traceback or a repr must still name pyarrow's function.
+    @functools.wraps(original)
     def write_table_zstd(*args: Any, **kwargs: Any) -> None:
         kwargs.setdefault("compression", "zstd")
         original(*args, **kwargs)

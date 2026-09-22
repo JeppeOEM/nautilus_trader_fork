@@ -21,7 +21,8 @@ the kline reconciliation (`compare_klines`, story 22.13).
 Invariant: one place holds every venue REST URL, so two contexts can never send the same
 request to two different hosts or with two different encodings; a literal venue URL outside
 the kernel fails `platform/tests/test_boundaries.py` (`ranking_engine`'s own maps retire in
-Story 25.2).
+Story 25.2). Every built request is `https` -- the builders take a `url: str` rather than a
+visible literal, so the scheme each `# noqa: S310` asserts is checked here instead.
 
 Stdlib `urllib` only: no extra dependency, and the pyo3 HTTP clients parse decimals through
 `f64` (audit D-52), which cannot prove raw-unit equality.
@@ -60,17 +61,24 @@ def http_json(request: urllib.request.Request) -> Any:
         return json.load(response)
 
 
+def _venue_url(url: str) -> str:
+    """Return the URL, refusing a non-`https` one -- what the builders' `# noqa: S310` claims."""
+    if not url.startswith("https://"):
+        raise ValueError(f"venue URL must be https: {url!r}")
+    return url
+
+
 def get_request(url: str, user_agent: str = USER_AGENT) -> urllib.request.Request:
     """Build a GET to a venue URL, carrying a real User-Agent."""
-    return urllib.request.Request(url, headers={"User-Agent": user_agent})  # noqa: S310
+    return urllib.request.Request(_venue_url(url), headers={"User-Agent": user_agent})  # noqa: S310
 
 
 def post_json_request(
     url: str, body: object, user_agent: str = USER_AGENT
 ) -> urllib.request.Request:
     """Build a POST of `body` as JSON (`json.dumps` defaults) to a venue URL."""
-    return urllib.request.Request(  # noqa: S310 (callers pass venue_http URLs)
-        url,
+    return urllib.request.Request(  # noqa: S310 (`_venue_url` refuses a non-https scheme)
+        _venue_url(url),
         data=json.dumps(body).encode(),
         headers={"Content-Type": "application/json", "User-Agent": user_agent},
     )

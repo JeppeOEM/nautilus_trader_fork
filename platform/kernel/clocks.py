@@ -121,6 +121,10 @@ class CatalogFileSpan:
         """
         Return whether the file can hold a row with this `ts_event`: its `ts_init` lies within
         `margin_ns` of the span on either side (a venue clock may also run ahead of ours).
+
+        The default is the writer bound, not the readers' one: file *selection* over a window uses
+        `overlaps(..., READ_SPAN_MARGIN_NS)`, five times narrower. Pass that explicitly to match a
+        reader; the wider default only ever opens more files than needed, never fewer.
         """
         return self.start_ns - margin_ns <= ts_event <= self.end_ns + margin_ns
 

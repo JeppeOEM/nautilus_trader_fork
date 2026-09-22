@@ -57,6 +57,15 @@ def test_a_path_without_a_leading_slash_is_refused(path: str) -> None:
         venue_http.dydx_indexer_url(DydxNetwork.MAINNET, path)
 
 
+@pytest.mark.parametrize("url", ["http://api.bybit.com/v5", "file:///etc/passwd", "/v5/market"])
+def test_a_non_https_url_is_refused(url: str) -> None:
+    """The builders take a `str`, so the scheme their `# noqa: S310` asserts is checked here."""
+    with pytest.raises(ValueError, match="must be https"):
+        venue_http.get_request(url)
+    with pytest.raises(ValueError, match="must be https"):
+        venue_http.post_json_request(url, {"type": "l2Book"})
+
+
 def test_url_tables_are_read_only() -> None:
     with pytest.raises(TypeError):
         venue_http.BYBIT_URLS["mainnet"] = "https://elsewhere"

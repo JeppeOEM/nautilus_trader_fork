@@ -20,9 +20,11 @@ Invariant: reading only. Nothing here writes, renames or deletes a catalog file,
 `ParquetDataCatalog` (the catalog object's decoder turns every row's 20-level book into Python
 objects; these helpers read the Parquet files directly with `pyarrow`). The directory names come
 from Nautilus's own `class_to_filename`, so they can never drift from what `write_data` writes.
-Files are selected by their name's `ts_init` span (`kernel.clocks.CatalogFileSpan`), widened by
-`READ_SPAN_MARGIN_NS`, and rows by their exact `ts_event` (MEM-01: callers read one instrument,
-and the rebuilds one day, at a time).
+Files are selected by their name's `ts_init` span (`kernel.clocks.CatalogFileSpan`) and rows by
+their exact `ts_event` (MEM-01: callers read one instrument, and the rebuilds one day, at a time).
+Only `query_second_ohlc` widens the span by `READ_SPAN_MARGIN_NS`; `files_by_day` and
+`data_file_ranges` take the span as written, as their pre-kernel originals did -- the rebuild
+re-reads a whole day, so a row whose `ts_init` lands in the neighbouring file is picked up there.
 """
 
 import glob

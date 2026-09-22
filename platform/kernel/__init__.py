@@ -28,11 +28,13 @@ no store, no config loader and no ledger call, so every context may import it wi
 anything else (`platform/tests/test_boundaries.py` enforces it).
 
 Known limit: that guard reads the source with `ast`, so it judges what a binding *looks* like. It
-catches a mutable literal, a call to one of the known mutable factories, and any unsanctioned bare
-call at module scope; it cannot see mutable state reached through a name it has no type for
-(`X = SomeMutableClass()`) or captured in a closure. Upgrade path: bind the check to runtime types
-(import each kernel module and walk its module dict for a non-hashable value) once the kernel holds
-a module-level object the AST rule cannot classify.
+catches a mutable literal, a call to one of the known mutable factories, and any import-time call
+at module scope outside its two sanction tables -- bare (`side_effect()`) or bound to a name
+(`X = SomeMutableClass()`), so a new one has to be argued for by name rather than slipping in. It
+still cannot see state captured in a closure, or reached through an attribute of a sanctioned
+result. Upgrade path: bind the check to runtime types (import each kernel module and walk its
+module dict for a non-hashable value) once the kernel holds a module-level object the AST rule
+cannot classify.
 
 Its only effects outside its own namespace are the two sanctioned ones: each `Data` class's single
 `register_arrow` at import (nautilus's Arrow registry, counted by

@@ -7,7 +7,11 @@ against the `bmad` branch as of 2026-09-05.
 Every "error ledger" site named below (`collector.late_trade`, `collector.trade_backfill`,
 `collector.candle_store`, ...) is recorded through `observability.error_ledger.record`
 (Story 23.1; formerly `ml_signals.error_ledger`, now a deprecated re-export). The sites, their
-names and what they count are unchanged `[re-cited 2026-09-21: Story 23.1]`.
+names and what they count are unchanged `[re-cited 2026-09-21: Story 23.1]`, with one addition:
+`archive_gaps.inverted_span` counts a gap marker whose `from_ns > to_ns` — a backward wall-clock
+step between a lost trade's arrival and the flush. The marker is written as the ordered span and
+still protects its rows, so the count is the only signal that the clock stepped back
+`[added 2026-09-22: Story 23.2]`.
 
 ---
 
