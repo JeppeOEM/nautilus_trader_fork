@@ -38,15 +38,25 @@ in the file only (the ERROR log line keeps it whole).
 
 Storm bound: at most `ERROR_LEDGER_MAX_LINES_PER_SITE_PER_MIN` (default 60) lines per site per
 UTC minute are written; records past the cap are counted and the next written line for that site
-carries the exact number in `suppressed`, so `lines + sum(suppressed)` is the true record count.
-Files rotate by size (`<service>.jsonl`, `.1` .. `.N`; `ERROR_LEDGER_MAX_BYTES` default 20 MB,
-`ERROR_LEDGER_BACKUP_COUNT` default 10, mirroring the compose `x-logging` policy).
+carries the exact number in `suppressed`, so `lines + sum(suppressed)` is the true record count
+over a whole file set. Files rotate by size (`<service>.jsonl`, `.1` .. `.N`;
+`ERROR_LEDGER_MAX_BYTES` default 20 MB, `ERROR_LEDGER_BACKUP_COUNT` default 10 *backups* kept
+alongside the live file, so the retained window is 11 files of 20 MB, mirroring the compose
+`x-logging` policy).
+
+Known limit: the suppressed carry is attributed to the timestamp of the line that *reports* it,
+not to when the suppressed records happened, so `lines + sum(suppressed)` is exact over a whole
+file set but only approximate over a bounded window -- a storm at 23:58:30 whose next written
+line for that site lands at 00:05 counts entirely in the following day. Ceiling: window-edge
+totals can be off by up to one cap-bucket's worth of records per site. Upgrade path: carry the
+suppressed bucket's own start timestamp on the line; blocked today because AC1 freezes the
+line's field set, so it needs a schema bump readers can version-detect.
 
 Known limit: rotation is size-based, so a sustained storm can age a day's lines out of the
-`20 MB x 10` window (at the 60/site/min cap that takes hundreds of sites erroring flat out for a
-whole day); the suppressed carry keeps totals exact inside the window but not across a dropped
-file. Upgrade path: raise the two env vars, or ship the files to object storage alongside the
-catalog backup (story 22.11's rclone remote).
+retained window (the live file plus 10 backups of 20 MB each; at the 60/site/min cap that takes
+hundreds of sites erroring flat out for a whole day); the suppressed carry keeps totals exact
+inside the window but not across a dropped file. Upgrade path: raise the two env vars, or ship
+the files to object storage alongside the catalog backup (story 22.11's rclone remote).
 
 Known limit: a site's pending suppressed count only reaches disk on that site's *next* write --
 `close()` (called by `reset()` in tests) does not flush it, and nothing calls `close()` in
@@ -82,12 +92,23 @@ logger = logging.getLogger(__name__)
 
 PROCESS_START_SITE = "process_start"
 WRITE_FAILED_SITE = "observability.ledger_write"
+READ_FAILED_SITE = "observability.ledger_read"
 
 _MAX_DETAIL_CHARS = 2000
 _DEFAULT_MAX_LINES_PER_SITE_PER_MIN = 60
 _DEFAULT_MAX_BYTES = 20 * 1024 * 1024
 _DEFAULT_BACKUP_COUNT = 10
 _MINUTE_NS = 60 * 1_000_000_000
+
+# Floors for the three env-tunable sink bounds. Each zero/negative value silently disables a
+# guarantee the ledger is supposed to give, so `_env_int` clamps rather than honouring it:
+# 0 lines/min caps every record forever (an empty durable ledger while `start()` still reports
+# a sink), 0 backups makes rotation unlink a full file (a whole window of errors gone), and a
+# tiny byte bound rotates on every line. The byte floor sits above the largest single line a
+# `_MAX_DETAIL_CHARS` detail can produce (2000 chars, up to ~8 KB as UTF-8, plus the envelope).
+_MIN_MAX_LINES_PER_SITE_PER_MIN = 1
+_MIN_MAX_BYTES = 64 * 1024
+_MIN_BACKUP_COUNT = 1
 
 _lock = threading.Lock()
 _counts: Counter[str] = Counter()
@@ -199,9 +220,12 @@ class _FileSink:
         if fh is None:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             fh = self._file = open(self.path, "a", encoding="utf-8")  # noqa: SIM115
-        # `open(..., "a")` positions at end of file, so `tell()` is the current size.
+        # `max_bytes` is a byte bound and `tell()` on a text file opened "a" is a byte offset,
+        # so the line has to be measured in bytes too -- `len(line)` is characters, and a
+        # non-ASCII `detail` (a venue symbol, an exception message) would overshoot the bound.
+        payload = (line + "\n").encode("utf-8")
         position = fh.tell()
-        if position > 0 and position + len(line) + 1 > self.max_bytes:
+        if position > 0 and position + len(payload) > self.max_bytes:
             fh = self._rotate(fh)
         fh.write(line + "\n")
         fh.flush()
@@ -225,22 +249,28 @@ class _FileSink:
 _sink: _FileSink | None = None
 
 
-def _env_int(name: str, default: int) -> int:
+def _env_int(name: str, default: int, minimum: int) -> int:
     """
-    Parse `name` as an int, falling back to `default` on a malformed value.
+    Parse `name` as an int, falling back to `default` on a malformed value and to `minimum` on a
+    value below it.
 
     A typo here must never crash `start()` -- every process calls it near the top of its
     entrypoint (DATA-07: a misconfigured env var is not license for the whole service to
-    fail to boot).
+    fail to boot). A well-formed but out-of-range value is equally not license to *silently*
+    disable the ledger, so it is clamped loudly instead of honoured (see the `_MIN_*` floors).
     """
     raw = os.environ.get(name)
     if not raw:
         return default
     try:
-        return int(raw)
+        value = int(raw)
     except ValueError:
         logger.warning("error ledger: %s=%r is not an int, using default %d", name, raw, default)
         return default
+    if value < minimum:
+        logger.warning("error ledger: %s=%d is below the floor, using %d", name, value, minimum)
+        return minimum
+    return value
 
 
 def start(service: str | None = None) -> bool:
@@ -265,9 +295,12 @@ def start(service: str | None = None) -> bool:
             max_lines_per_site_per_min=_env_int(
                 "ERROR_LEDGER_MAX_LINES_PER_SITE_PER_MIN",
                 _DEFAULT_MAX_LINES_PER_SITE_PER_MIN,
+                _MIN_MAX_LINES_PER_SITE_PER_MIN,
             ),
-            max_bytes=_env_int("ERROR_LEDGER_MAX_BYTES", _DEFAULT_MAX_BYTES),
-            backup_count=_env_int("ERROR_LEDGER_BACKUP_COUNT", _DEFAULT_BACKUP_COUNT),
+            max_bytes=_env_int("ERROR_LEDGER_MAX_BYTES", _DEFAULT_MAX_BYTES, _MIN_MAX_BYTES),
+            backup_count=_env_int(
+                "ERROR_LEDGER_BACKUP_COUNT", _DEFAULT_BACKUP_COUNT, _MIN_BACKUP_COUNT
+            ),
         )
         sink = _sink
     fields: dict[str, Any] = {"revision": os.environ.get("ERROR_LEDGER_REVISION") or None}
@@ -348,6 +381,25 @@ def services(directory: str | Path) -> list[str]:
     return sorted({p.name[: -len(".jsonl")] for p in root.glob("*.jsonl")})
 
 
+def _read_lines(path: Path) -> list[str] | None:
+    """
+    Every line of one ledger file, or None when it could not be read at all.
+
+    An unreadable file is itself a tolerated failure (DATA-07): it is counted at
+    `READ_FAILED_SITE` and logged with the cause, never swallowed and never raised into
+    `GET /api/errors` -- the one endpoint whose job is to report failures must not 500 because
+    a `*.jsonl` path turned out to be a directory, lost its permissions, or was rotated out
+    from under the listing above (the rotation race loses *this* call's view of those lines;
+    they are in a `.N` sibling only for the next call, which is exactly why it is counted).
+    """
+    try:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            return fh.read().splitlines()
+    except OSError as exc:
+        record(READ_FAILED_SITE, f"could not read {path}", exc)
+        return None
+
+
 def iter_records(
     directory: str | Path,
     service: str,
@@ -357,23 +409,35 @@ def iter_records(
 ) -> Iterator[dict[str, Any]]:
     """Every parseable line of the service in the window, oldest first (rotated files included)."""
     for path in ledger_files(directory, service):
-        try:
-            fh = open(path, encoding="utf-8", errors="replace")  # noqa: SIM115
-        except FileNotFoundError:
-            # The writer rotated this file out from under us between the listing above and
-            # this open -- its lines are still in a `.N` sibling `ledger_files` will pick up
-            # on the next call; skip rather than raise.
+        lines = _read_lines(path)
+        if lines is None:
             continue
-        with fh:
-            for raw in fh:
-                rec = _parse_line(raw)
-                if rec is None:
-                    continue
-                ts = rec["ts_ns"]
-                if (since_ns is not None and ts < since_ns) or (
-                    until_ns is not None and ts > until_ns
-                ):
-                    continue
+        for raw in lines:
+            rec = _parse_line(raw)
+            if rec is None:
+                continue
+            ts = rec["ts_ns"]
+            if (since_ns is not None and ts < since_ns) or (until_ns is not None and ts > until_ns):
+                continue
+            yield rec
+
+
+def _iter_records_newest_first(directory: str | Path, service: str) -> Iterator[dict[str, Any]]:
+    """
+    Every parseable line of the service, newest first, so a reader can stop early.
+
+    Lines are appended in timestamp order and `ledger_files` is oldest-first, so reversing both
+    levels yields descending `ts_ns` -- which is what lets `service_summary` stop at the last
+    `process_start` instead of reading the whole rotation window. One file is held in memory at
+    a time (bounded by `ERROR_LEDGER_MAX_BYTES`, 20 MB by default).
+    """
+    for path in reversed(ledger_files(directory, service)):
+        lines = _read_lines(path)
+        if lines is None:
+            continue
+        for raw in reversed(lines):
+            rec = _parse_line(raw)
+            if rec is not None:
                 yield rec
 
 
@@ -382,13 +446,25 @@ def _parse_line(raw: str) -> dict[str, Any] | None:
         rec = json.loads(raw)
     except ValueError:
         return None
-    if not isinstance(rec, dict) or not isinstance(rec.get("ts_ns"), int) or "site" not in rec:
+    if not isinstance(rec, dict) or not isinstance(rec.get("ts_ns"), int):
+        return None
+    # `site` must be a string, not merely present: every reader sorts, joins and groups on it,
+    # so a line whose `site` decodes to a number would raise out of a whole day's cross-check.
+    if not isinstance(rec.get("site"), str):
         return None
     return rec
 
 
 def site_counts(records: Iterable[dict[str, Any]]) -> dict[str, int]:
-    """Per-site totals with the suppressed carry folded in; `process_start` lines excluded."""
+    """
+    Per-site totals with the suppressed carry folded in; `process_start` lines excluded.
+
+    Known limit: a carry is attributed to the line that reports it, not to when the suppressed
+    records happened, so these totals are exact over a whole file set but approximate at a
+    bounded window's edge (up to one cap-bucket per site can land in the neighbouring window).
+    Upgrade path: carry the bucket's start timestamp on the line -- blocked today because AC1
+    freezes the line's field set.
+    """
     totals: Counter[str] = Counter()
     for rec in records:
         if rec["site"] == PROCESS_START_SITE:
@@ -404,22 +480,40 @@ def service_summary(
     `/api/errors`' per-service block: `last_start_ns`, per-site counts `since_start` (after the
     last `process_start` line) and `since` (from `since_ns`; None when no bound was given).
 
-    Suppressed carries are folded in. Known limit: every call re-reads the service's whole file
-    set, so the cost grows with the rotation window rather than with the poll interval; upgrade
-    path is an mtime/offset cache if this poll ever shows up in `data_api`'s CPU.
+    Suppressed carries are folded in. A `last_start_ns` of None means no `process_start` line
+    survives in the retained files, so `since_start` is **not anchored** to a restart -- it then
+    means "since retention", i.e. everything still on disk. Callers that need "since start" must
+    check `last_start_ns is not None` before reading `since_start` as such.
+
+    Files are read newest-first and the read stops as soon as the answer is settled -- the last
+    `process_start` has been seen and (when `since_ns` is given) a record older than it has been
+    passed -- so an `/api/errors` poll normally touches only the live file instead of the whole
+    rotation window. Known limit: a service whose live file holds no `process_start` and no
+    record older than `since_ns` still falls back to reading every rotated file; upgrade path is
+    an mtime/offset cache if this poll ever shows up in `data_api`'s CPU.
+
+    Known limit: the suppressed carry is attributed to the reporting line, so `since`'s totals
+    are approximate at the `since_ns` edge (see `site_counts`). Upgrade path is the same.
     """
     last_start: int | None = None
     since_start: Counter[str] = Counter()
     since: Counter[str] = Counter()
-    for rec in iter_records(directory, service):
+    start_found = False
+    since_done = since_ns is None
+    for rec in _iter_records_newest_first(directory, service):
+        if since_ns is not None and rec["ts_ns"] < since_ns:
+            since_done = True
         if rec["site"] == PROCESS_START_SITE:
-            last_start = rec["ts_ns"]
-            since_start.clear()
-            continue
-        n = 1 + int(rec.get("suppressed") or 0)
-        since_start[rec["site"]] += n
-        if since_ns is not None and rec["ts_ns"] >= since_ns:
-            since[rec["site"]] += n
+            if not start_found:
+                last_start, start_found = rec["ts_ns"], True
+        else:
+            n = 1 + int(rec.get("suppressed") or 0)
+            if not start_found:
+                since_start[rec["site"]] += n
+            if since_ns is not None and rec["ts_ns"] >= since_ns:
+                since[rec["site"]] += n
+        if start_found and since_done:
+            break
     return {
         "last_start_ns": last_start,
         "since_start": dict(since_start),

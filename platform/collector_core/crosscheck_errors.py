@@ -37,30 +37,56 @@ folded in (DATA-07).
 Per collected instrument (narrowed to one venue's instruments with `--venue`): every second-
 snapshot row in the window is read through `ml_signals.catalog_stats.query_second_ohlc` -- never
 a `ParquetDataCatalog` construction, one UTC day and one instrument at a time (MEM-01) -- and a
-gap between two consecutive rows wider than `_GAP_THRESHOLD_NS` is reported. Each gap is matched,
-within `_MAX_TS_INIT_SKEW_NS` of either edge, against the owning collector's ledger entries: a
-`process_start` in that window explains it as a restart, any other entry explains it by site, and
-no entry at all makes it `UNEXPLAINED` -- a DATA-07 finding, never tolerated.
+gap between two consecutive rows wider than `_GAP_THRESHOLD_NS` is reported, alongside an
+"Instruments" section giving every selected instrument's row count and first/last row timestamp
+(the dead-instrument check of `docs/DEPLOY_CHECKLIST.md` §6, which a gap list alone cannot
+answer). Each gap is matched against the owning collector's ledger entries lying within
+`_MAX_TS_INIT_SKEW_NS` of one of the gap's own *edges*: a `process_start` there explains it as a
+restart, any other entry explains it by site, and no entry at all makes it `UNEXPLAINED` -- a
+DATA-07 finding, never tolerated.
 
 Known limit: the gap-to-ledger match is time proximity only, not causally verified -- the
 ledger's frozen AC1 line schema carries no instrument id, so an unrelated site's entry (e.g. a
-`notify` failure) falling in the same ~10-minute window as a real, different-instrument data gap
+`notify` failure) falling within the skew bound of a real, different-instrument data gap's edge
 will "explain" it, and two distinct gaps on one instrument inside that window can cross-explain
-each other the same way. Upgrade path: carry the instrument id on every collector ledger site's
-`detail`, structured, and match on it as well as on time.
+each other the same way. A site that fires *continuously* (e.g. a steadily nonzero
+`collector.late_trade`) therefore explains every gap whose edge it brackets, so
+`explained: <site>` is not automatically benign -- read the named sites, never the word
+"explained". Only the gap's edges are matched, never its interior, so a long gap with nothing at
+either edge stays `UNEXPLAINED` however chatty the service was mid-gap. Upgrade path: carry the
+instrument id on every collector ledger site's `detail`, structured, and match on it as well as
+on time.
 
 Known limit: only gaps *between* two observed rows are detected; a dead instrument with no rows
 at all in the window, or a gap touching the window's own `--since`/`--until` edge, is not (there
-is no data on either side to diff against) -- `docs/DEPLOY_CHECKLIST.md` §6 therefore reads
-"(none)" alongside a nonzero row-count check for exactly this reason. Upgrade path: persist each
-run's last-seen timestamp per instrument and compare the next run's first row against it.
+is no data on either side to diff against) -- the "Instruments" section's row counts are what
+covers that case, and `docs/DEPLOY_CHECKLIST.md` §6 says to read both. An instrument *delisted*
+mid-window is the mirror image: `_catalog_instruments()` lists every partition directory ever
+written, so it shows rows before the delisting, none after, and its trailing absence can never
+be explained by a ledger entry -- expect a permanent `UNEXPLAINED`-looking tail for a delisted
+id. Upgrade path: persist each run's last-seen timestamp per instrument, compare the next run's
+first row against it, and read the venue's own instrument list to tell "delisted" from "dead".
+
+Known limit (expected on the first real run): three sampler skip paths in
+`collector_core/collector.py` -- empty top-of-book (~:1208), stale book (~:1218) and no book at
+all (~:1342) -- emit neither a snapshot row nor a ledger entry, so every such episode surfaces
+here as an `UNEXPLAINED` gap. That is AC5 working as designed: an unledgered skip *is* the
+DATA-07 finding. The resolution is to give those three paths their own ledger sites (the spine
+assigns that to the `SecondSampler` story), never to relax this check or to widen the matcher.
 
 Exit code: non-zero when any gap is `UNEXPLAINED`, or any `--fail-on` site has a non-zero count
-summed across the services printed; zero otherwise.
+summed across the services printed; zero otherwise. `process_start` is a usable `--fail-on`
+token and then makes each service's restart count fail the run -- a crash-loop must not certify
+a clean day just because every gap it caused prints `restart` (DATA-07: "a restart-tolerant
+pipeline does not make a crash-looping one acceptable"). `main()` also exits 1 when the errors
+directory holds no ledger file at all, or when the catalog yields no instrument: certifying a
+day as clean having read nothing is the worst possible outcome for this tool.
 """
 
 import argparse
 import sys
+from bisect import bisect_left
+from bisect import bisect_right
 from collections.abc import Iterator
 from dataclasses import dataclass
 from dataclasses import field
@@ -69,6 +95,7 @@ from datetime import datetime
 from datetime import timedelta
 from itertools import pairwise
 from pathlib import Path
+from typing import Any
 
 from ml_signals.catalog_stats import query_second_ohlc  # 23.2 moves this to kernel.catalog_files.
 from ml_signals.venue import MalformedInstrumentId  # 23.2 moves this to kernel.venues.
@@ -134,9 +161,39 @@ class Gap:
 
 
 @dataclass
+class InstrumentReport:
+    """One selected instrument's observed coverage: the dead-instrument check gaps cannot give."""
+
+    instrument_id: str
+    rows: int
+    first_ns: int | None
+    last_ns: int | None
+
+
+@dataclass
 class Report:
     services: list[ServiceReport] = field(default_factory=list)
+    instruments: list[InstrumentReport] = field(default_factory=list)
     gaps: list[Gap] = field(default_factory=list)
+
+
+@dataclass
+class _ServiceLedger:
+    """
+    One service's window of ledger records plus their timestamps, read exactly once.
+
+    Named invariant (DESIGN-01): `timestamps[i] == records[i]["ts_ns"]` and both are ascending,
+    which is what lets `_explain_gap` bisect instead of re-reading the rotated file set per gap.
+    """
+
+    records: list[dict[str, Any]] = field(default_factory=list)
+    timestamps: list[int] = field(default_factory=list)
+
+
+def _to_ns(moment: datetime) -> int:
+    """Convert an aware `datetime` to epoch ns exactly: no float seconds, no lost sub-second."""
+    whole = moment.astimezone(UTC).replace(microsecond=0)
+    return int(whole.timestamp()) * NS_PER_S + moment.microsecond * 1_000
 
 
 def _parse_ts(text: str) -> int:
@@ -144,7 +201,7 @@ def _parse_ts(text: str) -> int:
     moment = datetime.fromisoformat(text)  # Python 3.11+ parses the `Z` suffix itself
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=UTC)
-    return int(moment.astimezone(UTC).timestamp()) * NS_PER_S
+    return _to_ns(moment)
 
 
 def _day_starts(since_ns: int, until_ns: int) -> Iterator[int]:
@@ -204,32 +261,67 @@ def _owning_service(instrument_id: str) -> str | None:
         return None
 
 
-def _explain_gap(errors_dir: str, service: str | None, start_ns: int, end_ns: int) -> str:
-    if service is None:
-        return "UNEXPLAINED"
-    records = list(
-        error_ledger.iter_records(
-            errors_dir,
-            service,
-            since_ns=start_ns - _MAX_TS_INIT_SKEW_NS,
-            until_ns=end_ns + _MAX_TS_INIT_SKEW_NS,
-        )
-    )
-    if any(rec["site"] == error_ledger.PROCESS_START_SITE for rec in records):
+def _records_near(ledger: _ServiceLedger, lo_ns: int, hi_ns: int) -> list[dict[str, Any]]:
+    left = bisect_left(ledger.timestamps, lo_ns)
+    right = bisect_right(ledger.timestamps, hi_ns)
+    return ledger.records[left:right]
+
+
+def _explain_gap(ledger: _ServiceLedger, start_ns: int, end_ns: int) -> str:
+    """
+    Match only within the skew bound of one of the gap's own *edges*, never across its interior.
+
+    A service that logs steadily (`collector.late_trade` can be nonzero all day) would otherwise
+    explain a multi-hour gap with a single unrelated entry that happens to fall inside it, and
+    `UNEXPLAINED` would become unreachable in production. For a gap shorter than twice the skew
+    bound the two edge windows overlap, so short-gap behaviour is exactly as before.
+    """
+    near = _records_near(ledger, start_ns - _MAX_TS_INIT_SKEW_NS, start_ns + _MAX_TS_INIT_SKEW_NS)
+    near += _records_near(ledger, end_ns - _MAX_TS_INIT_SKEW_NS, end_ns + _MAX_TS_INIT_SKEW_NS)
+    if any(rec["site"] == error_ledger.PROCESS_START_SITE for rec in near):
         return "restart"
-    sites = sorted({rec["site"] for rec in records})
+    sites = sorted({rec["site"] for rec in near})
     if sites:
         return f"explained: {', '.join(sites)}"
     return "UNEXPLAINED"
 
 
-def _service_report(errors_dir: str, service: str, since_ns: int, until_ns: int) -> ServiceReport:
-    records = list(
-        error_ledger.iter_records(errors_dir, service, since_ns=since_ns, until_ns=until_ns)
+def _read_ledger(errors_dir: str, service: str, since_ns: int, until_ns: int) -> _ServiceLedger:
+    """
+    Read the service's records once, ascending, over the window widened by the skew bound.
+
+    Widened because `_explain_gap` matches a gap edge +/- the skew bound, and a gap edge can sit
+    at the window's own boundary; the report itself still only counts records inside
+    `[since_ns, until_ns]` (`_service_report`).
+    """
+    records = sorted(
+        error_ledger.iter_records(
+            errors_dir,
+            service,
+            since_ns=since_ns - _MAX_TS_INIT_SKEW_NS,
+            until_ns=until_ns + _MAX_TS_INIT_SKEW_NS,
+        ),
+        key=lambda rec: rec["ts_ns"],
     )
-    restarts = sum(1 for rec in records if rec["site"] == error_ledger.PROCESS_START_SITE)
+    return _ServiceLedger(records=records, timestamps=[rec["ts_ns"] for rec in records])
+
+
+def _service_report(
+    service: str, ledger: _ServiceLedger, since_ns: int, until_ns: int
+) -> ServiceReport:
+    in_window = _records_near(ledger, since_ns, until_ns)
+    restarts = sum(1 for rec in in_window if rec["site"] == error_ledger.PROCESS_START_SITE)
     return ServiceReport(
-        service=service, restarts=restarts, site_counts=error_ledger.site_counts(records)
+        service=service, restarts=restarts, site_counts=error_ledger.site_counts(in_window)
+    )
+
+
+def _instrument_report(instrument_id: str, seconds: list[int]) -> InstrumentReport:
+    return InstrumentReport(
+        instrument_id=instrument_id,
+        rows=len(seconds),
+        first_ns=seconds[0] if seconds else None,
+        last_ns=seconds[-1] if seconds else None,
     )
 
 
@@ -243,26 +335,47 @@ def build_report(
     other than the requested venue's own collector (e.g. `ranking_engine.volume24h` with
     `--venue bybit`) must still be checked, or `--venue` would silently exclude it from the
     exit code.
+
+    Each service's ledger is read exactly once here and handed to every gap that service owns --
+    a 24 h window over ~120 instruments would otherwise re-glob and re-parse the whole rotated
+    file set once per gap.
     """
     report = Report()
 
-    for service in error_ledger.services(errors_dir):
-        report.services.append(_service_report(errors_dir, service, since_ns, until_ns))
+    ledgers = {
+        service: _read_ledger(errors_dir, service, since_ns, until_ns)
+        for service in error_ledger.services(errors_dir)
+    }
+    for service, ledger in ledgers.items():
+        report.services.append(_service_report(service, ledger, since_ns, until_ns))
 
     for instrument_id in _instruments_for_venue(catalog_path, venue):
         seconds = _snapshot_seconds(catalog_path, instrument_id, since_ns, until_ns)
+        report.instruments.append(_instrument_report(instrument_id, seconds))
         owner = _owning_service(instrument_id)
+        ledger = ledgers.get(owner, _ServiceLedger()) if owner is not None else _ServiceLedger()
         for start_ns, end_ns in _find_gaps(seconds):
-            explanation = _explain_gap(errors_dir, owner, start_ns, end_ns)
-            report.gaps.append(Gap(instrument_id, start_ns, end_ns, explanation))
+            report.gaps.append(
+                Gap(instrument_id, start_ns, end_ns, _explain_gap(ledger, start_ns, end_ns))
+            )
 
     return report
 
 
 def _fail_on_totals(report: Report, fail_on: tuple[str, ...]) -> dict[str, int]:
-    """Each `--fail-on` site's count summed across every service in the report."""
+    """
+    Each `--fail-on` site's count summed across every service in the report.
+
+    `process_start` is not an ordinary site -- `error_ledger.site_counts()` excludes it, so it
+    is counted here from each service's `restarts` instead. Naming it in `--fail-on` is how the
+    operator makes a crash-loop fail the run: without it, 40 OOM-kills explain every gap they
+    caused as `restart` and the day still exits 0 (DATA-07).
+    """
     totals: dict[str, int] = dict.fromkeys(fail_on, 0)
+    restarts_fail = error_ledger.PROCESS_START_SITE in totals
     for svc in report.services:
+        if restarts_fail:
+            totals[error_ledger.PROCESS_START_SITE] += svc.restarts
         for site, count in svc.site_counts.items():
             if site in totals:
                 totals[site] += count
@@ -279,18 +392,36 @@ def _print_services(report: Report) -> None:
             print(f"    {site}: {count}")
 
 
+def _iso(ns: int | None) -> str:
+    if ns is None:
+        return "-"
+    return datetime.fromtimestamp(ns / NS_PER_S, tz=UTC).isoformat()
+
+
+def _print_instruments(report: Report) -> None:
+    """Row coverage per instrument -- the check §6 asks for that a gap list cannot answer."""
+    print("== Instruments ==")
+    if not report.instruments:
+        print("  (no second-snapshot partitions found)")
+    for inst in report.instruments:
+        print(
+            f"  {inst.instrument_id}: rows={inst.rows} "
+            f"first={_iso(inst.first_ns)} last={_iso(inst.last_ns)}"
+        )
+
+
 def _print_gaps(report: Report) -> None:
     print("== Instrument gaps ==")
     if not report.gaps:
         print("  (none)")
     for gap in report.gaps:
-        start = datetime.fromtimestamp(gap.start_ns / NS_PER_S, tz=UTC).isoformat()
-        end = datetime.fromtimestamp(gap.end_ns / NS_PER_S, tz=UTC).isoformat()
-        print(f"  {gap.instrument_id} [{start} .. {end}]: {gap.explanation}")
+        window = f"[{_iso(gap.start_ns)} .. {_iso(gap.end_ns)}]"
+        print(f"  {gap.instrument_id} {window}: {gap.explanation}")
 
 
 def _print_report(report: Report, fail_on: tuple[str, ...]) -> None:
     _print_services(report)
+    _print_instruments(report)
     _print_gaps(report)
     print("== Fail-on sites ==")
     for site, count in _fail_on_totals(report, fail_on).items():
@@ -318,7 +449,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 def _window(since: str | None, until: str | None) -> tuple[int, int]:
     """Resolve `--since`/`--until` to a half-open ns window; raises ValueError when invalid."""
-    until_ns = _parse_ts(until) if until else int(datetime.now(UTC).timestamp()) * NS_PER_S
+    until_ns = _parse_ts(until) if until else _to_ns(datetime.now(UTC))
     since_ns = (
         _parse_ts(since)
         if since
@@ -349,7 +480,35 @@ def main(argv: list[str] | None = None) -> int:
 
     report = build_report(args.catalog, args.errors_dir, since_ns, until_ns, args.venue)
     _print_report(report, tuple(args.fail_on))
+    if _nothing_was_checked(report, args.errors_dir, args.catalog):
+        return 1
     return _exit_code(report, tuple(args.fail_on))
+
+
+def _nothing_was_checked(report: Report, errors_dir: str, catalog_path: str) -> bool:
+    """
+    Report whether the run read no ledger and no instrument -- it must not certify the day.
+
+    `build_report` stays pure -- an empty report is a legitimate value there. But exiting 0 on
+    a missing `errors_dir` mount, an unset `ERROR_LEDGER_DIR`, or a `--catalog` pointing
+    somewhere with no second-snapshot partitions would report "clean" having checked nothing,
+    which is the one answer this tool must never give (DATA-07).
+    """
+    if not report.services:
+        print(
+            f"error: no ledger file under {errors_dir}; nothing was cross-checked "
+            "(is the errors_dir mount present and ERROR_LEDGER_DIR set on every service?)",
+            file=sys.stderr,
+        )
+        return True
+    if not report.instruments:
+        print(
+            f"error: no second-snapshot instrument under {catalog_path}; nothing was "
+            "cross-checked (wrong --catalog, or --venue matches no collected instrument?)",
+            file=sys.stderr,
+        )
+        return True
+    return False
 
 
 if __name__ == "__main__":

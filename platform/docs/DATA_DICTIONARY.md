@@ -315,22 +315,35 @@ service name, via `ERROR_LEDGER_SERVICE`).
 - **Fields per line:** `ts_ns` (int, arrival time), `service` (str), `pid` (int), `site` (str,
   e.g. `collector.book_sequence`), `detail` (str, truncated to 2000 chars in the file only),
   `exc_type` (str or `None`), `suppressed` (int, records dropped by the write cap since the
-  previous line for this site — `lines + sum(suppressed)` is the true count). A `process_start`
+  previous line for this site — `lines + sum(suppressed)` is the true count **over a whole file
+  set**; see the window-edge `Known limit` below). A `process_start`
   line (written once per boot by `observability.error_ledger.start()`) additionally carries
   `revision` (str or `None`, from `ERROR_LEDGER_REVISION`) — its own fields are otherwise empty
   (`detail=""`, `exc_type=None`, `suppressed=0`).
 - **Rotation:** by size, `<service>.jsonl` → `.1` .. `.N` (`ERROR_LEDGER_MAX_BYTES` default
-  20 MB, `ERROR_LEDGER_BACKUP_COUNT` default 10 files — the same shape as the compose
-  `x-logging` policy).
+  20 MB, `ERROR_LEDGER_BACKUP_COUNT` default 10 **backups kept alongside the live file**, so
+  the retained window is 11 files — the same shape as the compose `x-logging` policy).
 - **Write cap:** at most `ERROR_LEDGER_MAX_LINES_PER_SITE_PER_MIN` (default 60) lines per site
   per UTC minute; every record past the cap is counted and folded into the next written line's
   `suppressed` for that site — never silently dropped from the total.
+- **Known limit (window edges):** a `suppressed` carry is stamped with the timestamp of the line
+  that *reports* it, not with when the suppressed records happened, so `lines + Σsuppressed` is
+  exact over a whole file set but only approximate over a bounded window — a storm at 23:58:30
+  whose next line for that site lands at 00:05 counts entirely in the following day. Ceiling:
+  up to one cap-bucket per site can be attributed to the neighbouring window. Upgrade path:
+  carry the bucket's own start timestamp on the line, which needs a version-detectable schema
+  bump because the field set above is frozen by this story's AC1.
+- **Known limit (unanchored counts):** `service_summary`'s `last_start_ns` is `None` when no
+  `process_start` line survives in the retained files. `since_start` is then *not* anchored to
+  a restart — it means "since retention", i.e. everything still on disk. Check
+  `last_start_ns is not None` before reading it as "since start".
 - **Downstream use:** `GET /api/errors`'s `services` block (per-service restart count and
   per-site totals since the last `process_start` / since an optional `?since_ns=`);
   `python3 -m collector_core.crosscheck_errors` (§6 of `docs/DEPLOY_CHECKLIST.md`), which
   matches a gap in §1.7's second-snapshot rows against these files within the 300 s skew bound
   `collector_core.archive_gaps.ARRIVAL_MARGIN_NS` (`kernel.clocks.MAX_TS_INIT_SKEW_NS` after
-  Story 23.2) before calling it `UNEXPLAINED`.
+  Story 23.2) **of one of the gap's own edges** — never across its interior — before calling it
+  `UNEXPLAINED`.
 
 ---
 

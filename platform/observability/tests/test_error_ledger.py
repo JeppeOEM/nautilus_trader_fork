@@ -105,6 +105,41 @@ def test_malformed_env_int_falls_back_to_the_default(
     error_ledger.reset()
 
 
+def test_out_of_range_env_int_is_clamped_to_the_floor_not_honoured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """`...MAX_LINES_PER_SITE_PER_MIN=0` would cap every record forever -- an empty ledger."""
+    error_ledger.reset()
+    monkeypatch.setenv("ERROR_LEDGER_DIR", str(tmp_path))
+    monkeypatch.setenv("ERROR_LEDGER_SERVICE", "collector")
+    monkeypatch.setenv("ERROR_LEDGER_MAX_LINES_PER_SITE_PER_MIN", "0")
+    with caplog.at_level(logging.WARNING):
+        assert error_ledger.start() is True
+    error_ledger.record("site.a", "still written")
+    assert [line["site"] for line in _lines(tmp_path / "collector.jsonl")] == [
+        "process_start",
+        "site.a",
+    ]
+    assert any("below the floor" in r.getMessage() for r in caplog.records)
+    error_ledger.reset()
+
+
+def test_the_size_bound_is_measured_in_bytes_not_characters(tmp_path: Path) -> None:
+    r"""
+    A non-ASCII line must not overshoot `ERROR_LEDGER_MAX_BYTES` (P14).
+
+    Driven through `_emit` rather than `write()` because `json.dumps` escapes non-ASCII to
+    `\uXXXX` today, which makes the overshoot latent rather than live -- the byte bound is
+    `_emit`'s own invariant (it compares against a byte offset from `tell()`) and must hold
+    whatever the caller hands it.
+    """
+    sink = _sink(tmp_path / "svc.jsonl", max_bytes=200)
+    for _ in range(10):
+        sink._emit("ü" * 50)  # 50 characters, 100 UTF-8 bytes
+    sink.close()
+    assert all(p.stat().st_size <= 200 for p in tmp_path.iterdir())
+
+
 def test_cap_per_site_per_minute_with_exact_suppressed_carry(tmp_path: Path) -> None:
     sink = _sink(tmp_path / "svc.jsonl", cap=2)
     t0 = 1_000 * _MIN
@@ -222,3 +257,86 @@ def test_service_summary_counts_since_last_start_and_since_bound(tmp_path: Path)
     summary = error_ledger.service_summary(tmp_path, "collector", since_ns=45)
     assert summary["since"] == {"b": 1}
     assert summary["since_start"] == {"a": 3, "b": 1}
+
+
+def test_readers_skip_a_line_whose_site_is_not_a_string(tmp_path: Path) -> None:
+    """One bad line must not reach `sorted()`/`join()` as a number and abort a whole run (P12)."""
+    _write(
+        tmp_path / "collector.jsonl",
+        [
+            {"ts_ns": 10, "site": 42, "suppressed": 0},
+            {"ts_ns": 20, "site": "a", "suppressed": 0},
+        ],
+    )
+    records = list(error_ledger.iter_records(tmp_path, "collector"))
+    assert [r["site"] for r in records] == ["a"]
+
+
+def test_service_summary_is_identical_read_newest_first_over_a_rotated_set(
+    tmp_path: Path,
+) -> None:
+    """P6's early stop must not change the answer, on a rotated file set."""
+    _write(
+        tmp_path / "collector.jsonl.2",
+        [
+            {"ts_ns": 10, "site": "process_start", "suppressed": 0},
+            {"ts_ns": 20, "site": "a", "suppressed": 1},
+        ],
+    )
+    _write(
+        tmp_path / "collector.jsonl.1",
+        [
+            {"ts_ns": 30, "site": "b", "suppressed": 0},
+            {"ts_ns": 40, "site": "process_start", "suppressed": 0},
+        ],
+    )
+    _write(
+        tmp_path / "collector.jsonl",
+        [
+            {"ts_ns": 50, "site": "a", "suppressed": 2},
+            {"ts_ns": 60, "site": "b", "suppressed": 0},
+        ],
+    )
+    summary = error_ledger.service_summary(tmp_path, "collector")
+    assert summary == {"last_start_ns": 40, "since_start": {"a": 3, "b": 1}, "since": None}
+    bounded = error_ledger.service_summary(tmp_path, "collector", since_ns=25)
+    assert bounded["since"] == {"b": 2, "a": 3}
+    assert bounded["last_start_ns"] == 40
+
+
+def test_service_summary_without_any_process_start_is_unanchored_not_wrong(
+    tmp_path: Path,
+) -> None:
+    """`last_start_ns: None` is the signal that `since_start` means "since retention" (P16)."""
+    _write(
+        tmp_path / "collector.jsonl",
+        [{"ts_ns": 10, "site": "a", "suppressed": 0}, {"ts_ns": 20, "site": "a", "suppressed": 0}],
+    )
+    summary = error_ledger.service_summary(tmp_path, "collector")
+    assert summary["last_start_ns"] is None
+    assert summary["since_start"] == {"a": 2}
+
+
+def test_an_unreadable_ledger_file_is_counted_and_skipped_not_raised(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A `*.jsonl` path that is a directory must not 500 `/api/errors` (P10, DATA-07)."""
+    error_ledger.reset()
+    (tmp_path / "collector.jsonl").mkdir()
+    _write(tmp_path / "ranking_engine.jsonl", [{"ts_ns": 10, "site": "a", "suppressed": 0}])
+    with caplog.at_level(logging.ERROR):
+        assert list(error_ledger.iter_records(tmp_path, "collector")) == []
+        assert [r["site"] for r in error_ledger.iter_records(tmp_path, "ranking_engine")] == ["a"]
+    assert error_ledger.counts() == {error_ledger.READ_FAILED_SITE: 1}
+    assert "could not read" in error_ledger.last_details()[error_ledger.READ_FAILED_SITE]
+    error_ledger.reset()
+
+
+def test_an_unreadable_ledger_file_is_also_counted_by_service_summary(tmp_path: Path) -> None:
+    """The newest-first reader takes the same DATA-07 path, never a bare `continue`."""
+    error_ledger.reset()
+    (tmp_path / "collector.jsonl").mkdir()
+    summary = error_ledger.service_summary(tmp_path, "collector")
+    assert summary == {"last_start_ns": None, "since_start": {}, "since": None}
+    assert error_ledger.counts() == {error_ledger.READ_FAILED_SITE: 1}
+    error_ledger.reset()

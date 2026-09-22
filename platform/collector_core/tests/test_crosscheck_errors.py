@@ -193,6 +193,11 @@ def _iso(ns: int) -> str:
     return datetime.fromtimestamp(ns / _NS_PER_S, tz=UTC).isoformat().replace("+00:00", "Z")
 
 
+def _printed_iso(ns: int) -> str:
+    """How the report itself renders a timestamp (`+00:00`, not `Z`)."""
+    return datetime.fromtimestamp(ns / _NS_PER_S, tz=UTC).isoformat()
+
+
 def _argv(catalog_path: Path, errors_dir: Path, *extra: str) -> list[str]:
     return [
         "--catalog",
@@ -207,6 +212,18 @@ def _argv(catalog_path: Path, errors_dir: Path, *extra: str) -> list[str]:
     ]
 
 
+def _write_started_before_the_window(errors_dir: Path, service: str = "collector") -> None:
+    """
+    Write a realistic ledger: the service booted an hour before the window and ran since.
+
+    An hour is well outside `_MAX_TS_INIT_SKEW_NS`, so this line never explains an in-window
+    gap -- it exists so `main()`'s "nothing was checked" guard sees a real ledger file.
+    """
+    _write_ledger(
+        errors_dir, service, [{"ts_ns": _DAY0 - 3600 * _NS_PER_S, "site": "process_start"}]
+    )
+
+
 def test_main_cli_end_to_end_unexplained_gap_exits_nonzero(
     catalog_path: Path, errors_dir: Path
 ) -> None:
@@ -215,13 +232,142 @@ def test_main_cli_end_to_end_unexplained_gap_exits_nonzero(
     functions called directly, so a regression in argument plumbing (e.g. --fail-on never
     reaching _exit_code, or --since/--until swapped) fails a test.
     """
-    _write_snapshots(catalog_path, [0, 1, 2, 10, 11, 12])  # gap between 2 and 10, no ledger
+    _write_snapshots(catalog_path, [0, 1, 2, 10, 11, 12])  # gap between 2 and 10
+    _write_started_before_the_window(errors_dir)  # no entry anywhere near the gap
     assert crosscheck_errors.main(_argv(catalog_path, errors_dir)) == 1
 
 
 def test_main_cli_end_to_end_clean_window_exits_zero(catalog_path: Path, errors_dir: Path) -> None:
     _write_snapshots(catalog_path, list(range(61)))
+    _write_started_before_the_window(errors_dir)
     assert crosscheck_errors.main(_argv(catalog_path, errors_dir)) == 0
+
+
+def test_main_exits_nonzero_when_no_ledger_file_was_found(
+    catalog_path: Path, errors_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An absent `errors_dir` mount must not certify a clean day (P9, DATA-07)."""
+    _write_snapshots(catalog_path, list(range(61)))  # perfect data, no ledger at all
+    assert crosscheck_errors.main(_argv(catalog_path, errors_dir)) == 1
+    assert "no ledger file" in capsys.readouterr().err
+
+
+def test_main_exits_nonzero_when_no_instrument_was_selected(
+    catalog_path: Path, errors_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A `--catalog`/`--venue` that selects nothing must not certify a clean day either."""
+    _write_snapshots(catalog_path, list(range(61)))  # a dYdX instrument only
+    _write_started_before_the_window(errors_dir)
+    argv = _argv(catalog_path, errors_dir, "--venue", "bybit")
+    assert crosscheck_errors.main(argv) == 1
+    assert "no second-snapshot instrument" in capsys.readouterr().err
+
+
+def test_main_prints_an_instruments_section_with_row_coverage(
+    catalog_path: Path, errors_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """§6's dead-instrument check needs row counts, which a gap list alone cannot give (P11)."""
+    _write_snapshots(catalog_path, list(range(61)))
+    _write_started_before_the_window(errors_dir)
+    assert crosscheck_errors.main(_argv(catalog_path, errors_dir)) == 0
+    out = capsys.readouterr().out
+    assert "== Instruments ==" in out
+    assert f"  {_IID}: rows=61 " in out
+    assert f"first={_printed_iso(_DAY0)} " in out
+    assert f"last={_printed_iso(_WINDOW_END)}" in out
+
+
+def test_restarts_fail_the_exit_code_only_when_process_start_is_named(
+    catalog_path: Path, errors_dir: Path
+) -> None:
+    """A crash-loop must not certify a clean day just because every gap prints `restart` (P2)."""
+    _write_snapshots(catalog_path, [0, 1, 2, 10, 11, 12])  # gap between 2 and 10
+    _write_ledger(
+        errors_dir, "collector", [{"ts_ns": _DAY0 + 5 * _NS_PER_S, "site": "process_start"}]
+    )
+    report = crosscheck_errors.build_report(
+        str(catalog_path), str(errors_dir), _WINDOW_START, _WINDOW_END, venue=None
+    )
+    assert report.gaps[0].explanation == "restart"
+    assert crosscheck_errors._exit_code(report, crosscheck_errors._DEFAULT_FAIL_ON) == 0
+    assert crosscheck_errors._exit_code(report, ("process_start",)) == 1
+
+
+def test_process_start_in_fail_on_passes_when_there_was_no_restart(
+    catalog_path: Path, errors_dir: Path
+) -> None:
+    _write_snapshots(catalog_path, list(range(61)))
+    _write_started_before_the_window(errors_dir)  # boot is outside the window
+    report = crosscheck_errors.build_report(
+        str(catalog_path), str(errors_dir), _WINDOW_START, _WINDOW_END, venue=None
+    )
+    assert [svc.restarts for svc in report.services] == [0]
+    assert crosscheck_errors._exit_code(report, ("process_start",)) == 0
+
+
+def test_a_mid_gap_entry_does_not_explain_a_gap_longer_than_twice_the_skew(
+    catalog_path: Path, errors_dir: Path
+) -> None:
+    """
+    Match only a gap's edges, never its interior (P3).
+
+    One chatty site must not blanket a multi-hour window with a single mid-gap entry.
+    """
+    skew_s = crosscheck_errors._MAX_TS_INIT_SKEW_NS // _NS_PER_S
+    gap_s = 4 * skew_s  # comfortably longer than 2x skew, so the edge windows do not overlap
+    _write_snapshots(catalog_path, [0, 1, 2, 2 + gap_s, 3 + gap_s])
+    mid = _DAY0 + (2 + gap_s // 2) * _NS_PER_S
+    _write_ledger(errors_dir, "collector", [{"ts_ns": mid, "site": "collector.late_trade"}])
+    report = crosscheck_errors.build_report(
+        str(catalog_path),
+        str(errors_dir),
+        _WINDOW_START,
+        _DAY0 + (10 + gap_s) * _NS_PER_S,
+        venue=None,
+    )
+    assert len(report.gaps) == 1
+    assert report.gaps[0].unexplained
+
+
+def test_an_entry_at_a_long_gaps_edge_still_explains_it(
+    catalog_path: Path, errors_dir: Path
+) -> None:
+    """The edge match is the whole point: an entry at the gap's start still explains it."""
+    skew_s = crosscheck_errors._MAX_TS_INIT_SKEW_NS // _NS_PER_S
+    gap_s = 4 * skew_s
+    _write_snapshots(catalog_path, [0, 1, 2, 2 + gap_s, 3 + gap_s])
+    edge = _DAY0 + 3 * _NS_PER_S  # one second after the last row before the gap
+    _write_ledger(errors_dir, "collector", [{"ts_ns": edge, "site": "collector.resync"}])
+    report = crosscheck_errors.build_report(
+        str(catalog_path),
+        str(errors_dir),
+        _WINDOW_START,
+        _DAY0 + (10 + gap_s) * _NS_PER_S,
+        venue=None,
+    )
+    assert report.gaps[0].explanation == "explained: collector.resync"
+
+
+def test_a_malformed_site_is_skipped_not_fatal(catalog_path: Path, errors_dir: Path) -> None:
+    """One bad line must not abort a 24 h check (P12)."""
+    _write_snapshots(catalog_path, list(range(61)))
+    errors_dir.mkdir(parents=True, exist_ok=True)
+    (errors_dir / "collector.jsonl").write_text(
+        json.dumps({"ts_ns": _DAY0 + _NS_PER_S, "site": 42, "suppressed": 0})
+        + "\n"
+        + json.dumps({"ts_ns": _DAY0 + 2 * _NS_PER_S, "site": "collector.x", "suppressed": 0})
+        + "\n"
+    )
+    report = crosscheck_errors.build_report(
+        str(catalog_path), str(errors_dir), _WINDOW_START, _WINDOW_END, venue=None
+    )
+    assert report.services[0].site_counts == {"collector.x": 1}
+
+
+def test_parse_ts_keeps_the_sub_second_part() -> None:
+    """`--since ...00.750Z` must not silently become `...00.000Z` (P13)."""
+    assert crosscheck_errors._parse_ts("1970-01-01T00:00:00.750Z") == 750_000_000
+    assert crosscheck_errors._parse_ts("2026-09-21T00:00:00Z") % _NS_PER_S == 0
 
 
 def test_main_cli_fail_on_from_argv_reaches_exit_code(catalog_path: Path, errors_dir: Path) -> None:

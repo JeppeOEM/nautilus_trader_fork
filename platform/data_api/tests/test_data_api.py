@@ -168,11 +168,16 @@ def test_errors_route_reports_the_ledger() -> None:
     error_ledger.reset()
     client = TestClient(app_module.app)
     empty = client.get("/api/errors").json()
+    # The exact top-level shape is part of the contract: a renamed or extra field must fail here,
+    # not only the per-field claims below.
+    assert set(empty) == {"counts", "last", "services"}
     assert empty["counts"] == {}
     assert empty["last"] == {}
     error_ledger.record("test.site", "boom")
     body = client.get("/api/errors").json()
-    assert body["counts"] == {"test.site": 1} and body["last"] == {"test.site": "boom"}
+    assert set(body) == {"counts", "last", "services"}
+    assert body["counts"] == {"test.site": 1}
+    assert body["last"] == {"test.site": "boom"}
     error_ledger.reset()
 
 
