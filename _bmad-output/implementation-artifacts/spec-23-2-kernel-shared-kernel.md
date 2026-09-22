@@ -4,7 +4,7 @@ type: 'refactor'
 created: '2026-09-22'
 status: 'done'
 baseline_revision: '7bd64952fd'
-final_revision: '366ab1de8b'
+final_revision: '3fe7292069'
 review_loop_iteration: 0
 followup_review_recommended: true
 context:
@@ -199,6 +199,31 @@ warnings: ['oversized']
   - `[low]` `[patch]` The notebook `dydx_catalog_pandas.ipynb` still imported `ml_signals.indicators`, which the `.py`-only shim scan cannot see. Repointed to `kernel.indicators`, prose too.
   - `[low]` `[patch]` Stale citations: `ml_signals.performance_metrics` in `live_paper`/`bot_tui` docstrings; `ARCHITECTURE.md`'s writer→reader paragraph (wrong line numbers, pre-kernel imports); `ml_signals/BACKTESTING.md`; `platform/CLAUDE.md` DATA-05's fold path. All updated.
 
+### 2026-09-22 — Review pass (follow-up)
+- intent_gap: 0
+- bad_spec: 0
+- patch: 17 (high 0, medium 1, low 16)
+- defer: 1 (high 0, medium 0, low 1)
+- reject: 4
+- addressed_findings:
+  - `[medium]` `[patch]` `record_gap` could write an inverted span (a backward wall-clock step between a lost trade's arrival and the flush puts `now` before its `ts_init`); the previous pass's stricter `decode` would then refuse the line and wedge every rebuild of that instrument until the file was hand-edited. The writer now records the ordered span and ledgers `archive_gaps.inverted_span`; `encode` refuses an inverted `ArchiveGap` so the kernel can never produce a line it cannot read; `test_archive_gaps.py` (new) and a kernel test.
+  - `[low]` `[patch]` `bybit_url`/`dydx_indexer_url` joined a path without a leading `/` onto the host (`api.bybit.comv5/...`, a registrable domain). Both refuse it (`ValueError`); parametrised test.
+  - `[low]` `[patch]` `CatalogFileSpan.from_stem` accepted an inverted stem, so `overlaps`/`covers` answered for a span that can hold no row. It now raises `ValueError` like any other name the catalog did not write; tests for the inverted and the equal-bound stem.
+  - `[low]` `[patch]` The skew budget (`_check_skew_budget`, `READ_SPAN_MARGIN_NS` comment, `test_skew_constants`) described the sum of two opposite-direction skews as one row's trailing skew. The sum is kept (the spec's chain, and conservative for the symmetric widening) but the docstrings and the error text now state the two directions and that the sum is a ceiling on either.
+  - `[low]` `[patch]` `prune_catalog._leaf_statuses` gained an untested `MalformedInstrumentId` branch (a leaf that is not an id is kept, never pruned). Test added: kept as `unverified`, reported, survives `--apply`.
+  - `[low]` `[patch]` The kernel purity guard skipped bindings inside module-level `for`/`while`/`match` bodies and tuple unpacks (`A, B = [], []`). All are now walked; self-test.
+  - `[low]` `[patch]` The venue-HTTP guard missed `import urllib.request as ur` / `from urllib import request` followed by `ur.Request(...)`, although its docstring claimed "however imported or aliased". Module aliases are collected; self-test.
+  - `[low]` `[patch]` The id-suffix guard missed `'.' + v`, `f'{a}.{v}'` and the unbound `str.endswith(i, '.X')`. All three are read (a separator directly before a formatted part; `f'{stem}.parquet'` stays clean); self-test and the Known limit updated.
+  - `[low]` `[patch]` The venue-URL guard ran a regex over raw source, so a comment or docstring citing the venue's documentation would fail it. It now judges string literals (plain and f-string parts) through the AST and skips docstrings; self-test.
+  - `[low]` `[patch]` `test_namespace` judged whether a shim's package is shipped by `find_spec` of its top-level name (`common`), which any same-named third-party package satisfies. `_shipped` now looks up the full dotted name and treats an absent parent as not shipped.
+  - `[low]` `[patch]` Stale citation: `platform/CLAUDE.md` DATA-06 still named `ARRIVAL_MARGIN_NS`. Re-cited to `kernel.clocks.MAX_TS_INIT_SKEW_NS`.
+  - `[low]` `[patch]` User-facing docs still pointed at the shim with dead line numbers: the frontend docs page (`frontend/src/pages/docs/data.ts`, nine refs; `kbData.ts`) and `DATA_INTEGRITY_AUDIT.md` D-40/D-46. Repointed to `kernel/indicators.py` with the current lines; the audit rows keep their history and name the kernel successor.
+  - `[low]` `[patch]` `DATA_DICTIONARY.md` did not tell an operator that a malformed or inverted marker line now refuses the instrument's rebuild until hand-fixed. Added to the rebuild step.
+  - `[low]` `[patch]` Verbatim-moved docstrings were stale as the kernel's canonical text: `kernel/indicators.py` cited the retired `dashboard.py` twice; `DydxSecondSnapshot` claimed "microstructure signals" and an `ofi` field. Both now describe the raw-inputs contract (SIGNAL-01) and the real consumers.
+  - `[low]` `[patch]` Six shims carried the copy-pasted claim that a copied class "would register a second Arrow class", true only of the two `Data` shims. Reworded to the identity/drift reason that holds for all.
+  - `[low]` `[patch]` `kernel/__init__.py` claimed no import-time effects; it now names the two sanctioned ones (`register_arrow` per class, the zstd wrapper on `apply_zstd_default()`).
+  - `[low]` `[patch]` `kernel/indicators.py:298` carried the RUF002 `–`/`×` from the moved text; ASCII now, so the new file lints clean.
+
 ## Design Notes
 
 - **Why the skew coupling test lives in `platform/tests`.** `kernel/tests` belongs to the kernel context, and the kernel imports no context (AD-D2). Asserting capture's and archive's constants from there would itself be an illegal edge. So the test's consumer-side half sits in the cross-cutting guards (the `TESTS` context may import anything), and `kernel/tests/test_clocks.py` holds the kernel-internal half. This is a deliberate refinement of the story text "by a kernel test".
@@ -217,59 +242,39 @@ warnings: ['oversized']
 
 Status: done
 
-**Summary.**
-- `platform/kernel/` now holds exactly the AD-D3 members: `second_snapshot` (`DydxSecondSnapshot` + `SecondOHLC`), `open_interest`, `fold`, `indicators`, `performance_metrics`, `venues`, `clocks`, `archive_markers`, `venue_http`, `catalog_files` and `parquet_compat`, plus its `tests/`.
-- The moved modules went across with `git mv`. Every old path is a pure re-export shim (`REMOVE_AFTER = 24-2-...`), or a `_MOVED_NAMES`/`_REPLACED_NAMES` entry in a module that stays. About 70 callers were repointed.
-- `kernel.venues` is now the only `InstrumentId` parser. The six `_stamp_to_ns` users use `CatalogFileSpan`, and every skew margin is tied to `MAX_TS_INIT_SKEW_NS`.
-- Every venue REST request outside `ranking_engine` (25.2) is built through `kernel.venue_http`, keeping its own User-Agent.
-- The zstd patch is applied once, by `apply_zstd_default()`.
-- No schema, directory name, payload, marker format, env var, compose service or config key changed. Fixtures recorded with the pre-move code prove it.
+**Summary (follow-up review pass over the whole 23.2 diff since `7bd64952fd`).** The kernel package, the shims, the caller repointing and the guards from the first pass stand. This pass patched 17 findings (1 medium, 16 low): three small refusals in the kernel (`bybit_url`/`dydx_indexer_url` without a leading `/`, an inverted `CatalogFileSpan` stem, an inverted `ArchiveGap` in `encode`), the writer-side normalisation of an inverted gap span with a ledger entry, four guard extensions in `platform/tests/test_boundaries.py` (loop/match/tuple bindings, urllib module aliases, three more suffix spellings, venue URLs judged as string literals rather than raw text), the `_shipped` lookup in `test_namespace`, one new prune test, and docstring/citation fixes (CLAUDE.md DATA-06, the frontend docs page, the audit rows, the data dictionary, the kernel and shim docstrings). No schema, payload, directory name, marker byte format, request bytes, config key or env var changed.
 
-**Files changed (grouped):**
-- `platform/kernel/**`: the new package, 13 test modules, and the pre-move fixtures. A fixtures `.gitignore` is needed because the repo ignores `*.parquet`.
-- Shims:
-  - whole-module: `collector_core/{second_snapshot,open_interest,fold,venue_http}.py`, `common/venues.py`, `ml_signals/{venue,indicators,performance_metrics}.py`;
-  - moved-name tables in `ml_signals/catalog_stats.py` and `collector_core/archive_gaps.py`, which is now thin file I/O over `kernel.archive_markers`.
-- Callers:
-  - `collector_core/*` (collector, build_candles, rebuild_seconds, consolidate/prune/repair_catalog, compare_klines, trade_backfill, backfill_bars, nightly, measure_lag);
-  - the three venue collectors;
-  - `ml_signals/*`, `data_api/*`, `ranking_engine/*`, `live_paper/*`, `bot_tui/*`;
-  - their tests.
-- Guards:
-  - `tests/test_boundaries.py`: the remap; membership, purity, venue HTTP and id-suffix rules; expired 23-2 entries removed.
-  - `tests/test_namespace.py`: one `_SCHEMAS` key per kernel class.
-  - The new `tests/test_skew_constants.py`.
-- Build: the three dockerfiles `COPY kernel` (`live_paper` no longer needs `ml_signals`). The `Makefile` lists gain `kernel/tests` and drop `common/tests`.
-- Docs:
-  - `platform/CLAUDE.md` ("Adding a venue" step 5 → `kernel/venues.py`, DATA-05), `ARCHITECTURE.md` (kernel row, the writer→reader paragraph), `docs/DATA_DICTIONARY.md`, `docs/BOT_OPERATIONS.md`, `ml_signals/BACKTESTING.md`, the root `CLAUDE.md`, and the dydx notebook.
-  - The parent spine's Deferred "Writer→reader imports" entry is amended as partially resolved (ledger 23.1; types/clocks/read helpers 23.2; `candle_store` pending 24.1).
+**Files changed in this pass:**
+- `platform/kernel/{venue_http,clocks,archive_markers,__init__,indicators,second_snapshot}.py` -- the three refusals, the skew-direction wording, the sanctioned-effects note, docstrings, ASCII.
+- `platform/collector_core/archive_gaps.py` -- `record_gap` orders an inverted span and ledgers `archive_gaps.inverted_span`.
+- `platform/collector_core/collector.py` -- `_check_skew_budget` docstring and error text.
+- `platform/tests/test_boundaries.py` -- purity walk (`for`/`while`/`match`, tuple unpack), `_urllib_module_aliases`, `_joins_a_suffix`/`_formats_a_suffix`/unbound `str.endswith`, `_venue_url_literals` + `_docstrings`; self-tests for each; `_decorator_names` typed.
+- `platform/tests/test_namespace.py` -- `_shipped(module)` by full dotted name.
+- `platform/tests/test_skew_constants.py` -- docstring of the chain test.
+- Tests: `kernel/tests/test_{venue_http,clocks,archive_markers}.py` extended; `collector_core/tests/test_archive_gaps.py` new; `collector_core/tests/test_prune_catalog.py` gains the malformed-leaf test.
+- Shims: the six non-`Data` shims' docstring sentence.
+- Docs: `platform/CLAUDE.md` (DATA-06), `docs/DATA_DICTIONARY.md` (rebuild step), `docs/DATA_INTEGRITY_AUDIT.md` (D-40, D-46), `frontend/src/pages/docs/{data,kbData}.ts`.
+- `_bmad-output/implementation-artifacts/deferred-work.md` -- one entry.
 
-**Review.** One adversarial pass and one edge-case pass over the whole diff since `7bd64952fd`:
-- **12 patches applied** (2 medium, 10 low); see the triage log.
-- **0 deferred.**
-- **5 rejected:**
-  - `CatalogFileSpan.covers`' 300 s default is what the spine specifies.
-  - `COPY common` stays while its shim lives; removing `common/` breaks the build loudly, not silently.
-  - `decode` requiring all five keys: every writer since 22.13 wrote them, and refusal keeps live values, the safe direction.
-  - An `instrument_id` that does not match its file is hypothetical.
-  - The bare `assert` was moved verbatim, and no image runs `-O`.
-
-**Deviations from the story text, all recorded in the spec:**
-- The consumer half of the skew test lives in `platform/tests/test_skew_constants.py`, because a kernel test may not import other contexts (AD-D2).
-- `archive_gaps` maps to `archive` (25.1), no longer to kernel.
-- `bybit_category` maps `-INVERSE` to `inverse` as asked, but its three consumers refuse inverse until it is wire-verified.
+**Review.** One adversarial pass and one edge-case pass, both over the full diff:
+- **17 patches applied** (see the follow-up triage log).
+- **1 deferred:** one file-name parser, two pre-existing policies for a foreign `*.parquet` in a leaf (prune skips it; the read helpers, `compare_klines` and the rebuild abort the instrument). Verbatim from before the move; ledgered with evidence.
+- **4 rejected:**
+  - Three per-endpoint "wire-verified Bybit categories" sets are three facts (each endpoint's own verification), not one duplicated fact; refusing a request is not a wrong-data danger for the audit register.
+  - `CatalogFileSpan.covers` has no caller yet; the spec lists it as a kernel member with the spine's 300 s default, as the first pass already ruled.
+  - The bare `assert` in `second_ohlc_arrays` is an internal length invariant moved verbatim; no image runs `-O` (first-pass ruling stands).
+  - The hold-back ceiling lives in `Collector.__init__` rather than `config.py`; `run_forever` builds outside its retry, so it fails fast either way, and moving the collector's constants into the config module is a restructure with no behavioural gain.
 
 **Verification:**
-- **Full `make test` list** in image `story-23-2/collector` (built from the worktree, checkout read-only at `/src`, `-W default`): 1372 passed, 11 failed.
-  - Ten are the pre-existing baseline failures (dydx trade_ohlc ×5, ofi_strategy ×4, rankings redis ×1).
-  - The eleventh was `test_hotpath`'s wall-time bound under the loaded full run (load ~2.9). It passed 5/5 in each of three standalone runs right after, against the unchanged baseline; the allocation checks passed throughout.
-  - No `DeprecationWarning` comes from `platform/` code; the only ones are from starlette/fastapi.
-- **`test-live-paper` list** in `story-23-2/live_paper`: 397 passed, with `live_paper/tests/test_node.py` deselected (pre-existing hang, story 25.3).
-- **Image builds:** all three images built after the dockerfile change (subagent run). No dockerfile changed in the review pass.
-- **ruff** (`uvx`, repo config): format clean. Check is clean on every line this story wrote; the remaining RUF002 is in text moved verbatim into `kernel/indicators.py`.
-- **mypy** 1.20.2: no errors on the lines written. On the host, the `get_dydx_http_url` ignore shows as unused only because nautilus is not installed there; it matches `ranking_engine`'s identical import.
+- **Full `make test` list** in image `story-23-2/collector` (checkout read-only at `/src`, worktree `platform/` as the working dir, `-W default`): 1384 passed, 10 failed. The 10 are exactly the pre-existing baseline (dydx `test_collector_trade_ohlc` x5, `test_ofi_strategy` x3 + consistency x1, `test_rankings` redis x1). `test_hotpath` passed in this run. No `DeprecationWarning` from `platform/` code (one from starlette).
+- **Live_paper image** (`story-23-2/live_paper`): `tests/test_namespace.py tests/test_boundaries.py tests/test_skew_constants.py kernel/tests` 228 passed.
+- **Guards alone** (`test_boundaries`, `test_namespace`): 118 passed after the extensions; every new self-test asserts both the caught and the clean spelling.
+- **ruff** (`uvx`, repo config): format clean on every `.py` file; check clean on `platform/kernel`, `platform/tests`, `archive_gaps.py`, `collector.py` and the touched tests. The only `format --check` complaints are Markdown code fences this pass did not touch.
+- **mypy** 1.20.2 (`--ignore-missing-imports`, nautilus not installed on the host): clean on `test_boundaries.py`, `test_namespace.py`, `archive_gaps.py`. Three pre-existing errors on moved lines (`second_snapshot.py:72`, `catalog_files.py:116` x2) and the host-only unused-ignore on `get_dydx_http_url` are unchanged from the first pass.
+- No image was rebuilt: no dockerfile, dependency or package list changed in this pass.
 
 **Residual risks:**
-- `test_hotpath`'s wall-time bound stays host-load-sensitive (the 23.1 residual). The allocation bounds are the deterministic guard.
-- The live_paper test run used the worktree mounted as the working dir, so it does not by itself prove that image's closure. That closure is proven by `test_images` and the subagent's in-image smoke imports.
-- The shims expire at 24-2. `test_namespace` fails the run once that story is `done` while any shim remains.
+- The ~150 `ResourceWarning: unclosed database` under `-W default` are the pre-existing candle-store leak already ledgered by Story 23.1's review; unchanged here (TEST-04).
+- The skew budget is enforced as the sum of the two skew directions (spec chain), 5 s stricter than the binding per-direction limit; documented as deliberate.
+- The shims expire at 24-2; `test_namespace` fails the run once that story is `done` while any shim remains.
+- `from_stem`'s new inverted-stem refusal and `encode`'s inverted-span refusal are stricter than the moved code; no catalog or writer produces either, and both are the direction the marker/rebuild rules already chose (refuse, never guess).
