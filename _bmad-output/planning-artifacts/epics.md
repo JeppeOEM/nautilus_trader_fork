@@ -21,6 +21,8 @@ This document provides the complete epic and story breakdown for nautilus_trader
 
 Reopened again on 2026-09-17 to add Epic 17 (FR51–FR56), Epic 18 (FR57–FR60), Epic 19 (FR61–FR66), and Epic 20 (FR67–FR69, deferred): the next phase of Epic 15's chart+screener rewrite. Epic 17 evolves `RankingsPage.tsx` (Story 15.2) into the full tabbed screener (Performance + Technicals tabs), unparking Story 15.8 (31-day metrics history, parked in-progress since 2026-09-16) as part of wiring Performance's multi-window % change and the Rankings→History link. Epic 18 builds the chart features Epic 15 never scoped — drawing tools, Bar Replay, the full Volume Profile family, and a placement/operation-parity pass. Epic 19 adds Bybit and Hyperliquid alongside dYdX, mirroring `dydx_collector`'s direct-asyncio-PyO3 architecture (never `TradingNode`/`DataEngine`, per FORK-02) rather than the `TradingNode`-based `scripts/bybit_recorder/` on the `gg` branch. Epic 20 (Alerts/webhook delivery) is deliberately sequenced last, after Epics 17–19 ship. No PRD/Architecture update precedes this addition — created from a jointly-revised build spec (`_bmad-output/planning-artifacts/spec-multi-exchange-screener-chart.md`, itself a revision of an external TradingView-clone brief against this codebase, confirmed file-by-file this session), same "direct technical investigation" precedent as Epics 12/13/16.
 
+Reopened again on 2026-09-22 to add Epic 27 (FR70–FR79, NFR12): the research notebooks rebuilt on a shared analysis layer inside the `research/` context that Story 24.4 creates — typed analysis value objects and ports (`research/domain`, `research/application`), six executable jupytext-paired notebooks (catalog inspection, microstructure, correlation and cross-venue, backtest evaluation with sweeps and walk-forward, Monte Carlo and robustness, candlestick scanner), a candlestick pattern detector as a streaming `Indicator` in `kernel/` shared by the chart picker, the screener's Technicals tab, backtests and `live_paper`, and a `CandlePatternStrategy` that makes those patterns tradeable. Numbered 27 after the DDD migration epics; depends on Story 24.4 only. No PRD/Architecture update precedes this addition — created via direct investigation of the three existing notebooks (all three stale: hard-coded `ml_signals` paths, a `../catalog` relative path that predates `platform/data/`, a runtime `pip install` of TA-Lib/`pandas_ta` against the retired `custom_dydx_minute_bar` directory), same precedent as Epics 12/13/16; Story 27.1 amends the DDD spine's AD-D1 research row and 27.7 its AD-D3 kernel list.
+
 ## Requirements Inventory
 
 ### Functional Requirements
@@ -66,6 +68,26 @@ FR49 `[NEW — 2026-09-14, not yet in PRD, PM should fold in]`: Correct-by-const
 
 FR50 `[NEW — 2026-09-14, not yet in PRD, PM should fold in]`: Backfill capability — historical 1-second data already in the catalog (predating this feature, or after a rollup schema change) can be reprocessed into rollup rows via a standalone script, streaming raw 1s in time-bounded chunks per instrument, without touching or risking the raw 1-second archive.
 
+FR70 `[NEW — 2026-09-22, not yet in PRD, PM should fold in]`: Research analysis layer — `research/domain` holds typed analysis values with named invariants (`ReturnSeries`, `EquityCurve`, `TradeLedger`, `MetricReport`, `CorrelationMatrix`, `MonteCarloResult`) and `research/application` holds the ports (`MarketFrames`, `RankingHistory`, `BacktestRunner`) through which every notebook and backtest report reads data and runs `BacktestNode`; every portfolio statistic is `performance_metrics` (Nautilus `PortfolioStatistic`) and no notebook cell carries analysis logic.
+
+FR71 `[NEW — 2026-09-22, not yet in PRD, PM should fold in]`: Executable, version-controlled notebooks — every research notebook is a jupytext-paired percent-format `.py` plus an output-stripped `.ipynb`, parameterised by environment variables, and `make test` executes each against a synthetic fixture catalog with warnings as errors.
+
+FR72 `[NEW — 2026-09-22, not yet in PRD, PM should fold in]`: Catalog inspection notebook — per venue and instrument: inventory, coverage and gaps, outages, verified/provisional days, raw-trade-versus-folded-seconds agreement, snapshot sanity checks and ledger rejection counts over a bounded window.
+
+FR73 `[NEW — 2026-09-22, not yet in PRD, PM should fold in]`: Microstructure notebook — spread, depth profile, OBI/OFI and z-scores, microprice predictiveness, trade flow and CVD, price impact, funding/basis/open-interest overlays, return autocorrelation by horizon, volatility signature and realised volatility, all through `kernel.indicators`.
+
+FR74 `[NEW — 2026-09-22, not yet in PRD, PM should fold in]`: Correlation and cross-venue notebook — return correlation matrices at several horizons, rolling correlation, numpy-only clustering, funding and open-interest correlation, and for symbols collected on more than one venue the basis, the lead-lag cross-correlation and the volume share.
+
+FR75 `[NEW — 2026-09-22, not yet in PRD, PM should fold in]`: Backtest evaluation notebook — any strategy by string path over a bounded window: equity and drawdown episodes, the full `MetricReport`, rolling Sharpe, trade distributions, a parameter-sweep heatmap on `BacktestNode` multi-config runs and a walk-forward in/out-of-sample split.
+
+FR76 `[NEW — 2026-09-22, not yet in PRD, PM should fold in]`: Monte Carlo and robustness notebook — seeded trade-order bootstrap and block bootstrap of returns, drawdown and terminal-wealth distributions, risk of ruin, a Sharpe confidence interval, probabilistic and deflated Sharpe for sweep-selected parameters, hand-rolled on numpy.
+
+FR77 `[NEW — 2026-09-22, not yet in PRD, PM should fold in]`: Candlestick pattern detection — the classic single-, two- and three-bar patterns as one streaming `Indicator` in `kernel/` (no TA-Lib), registered in the chart picker's native catalog and offered as a screener Technicals column (a universe-wide pattern scanner), plus a scanner notebook with multi-timeframe hits, EMA filter, hit chart and forward-return statistics.
+
+FR78 `[NEW — 2026-09-22, not yet in PRD, PM should fold in]`: Candlestick patterns tradeable — `CandlePatternStrategy` (config + strategy, string-path importable) trades pattern signals with a trend filter and defined exits on the same detector, runs on `BacktestNode`, is evaluated by the FR75 notebook and is startable as a `live_paper` bot by config.
+
+FR79 `[NEW — 2026-09-22, not yet in PRD, PM should fold in]`: Research documentation and rules — `research/README.md` with the notebook index and the write-a-notebook recipe, `platform/CLAUDE.md` NB-01..NB-04, every legacy notebook and runtime `pip install` cell gone.
+
 ### NonFunctional Requirements
 
 _The PRD has no explicit NFR section; the following are derived from the Vision, Success Metrics, and Architecture spine invariants that constrain how the FRs above must be implemented._
@@ -87,6 +109,8 @@ NFR9 (PRD NFR-D, Feature parity): Every page and capability present in today's `
 NFR10 `[NEW — 2026-09-14]`: No data loss — the 1-second snapshot archive is never modified, deleted, or superseded by the minute-rollup feature; the rollup is fully regenerable from raw 1-second data at any time, so a bug or schema change in the rollup never risks the underlying market-data record.
 
 NFR11 `[NEW — 2026-09-17]`: No new frontend grid/table-framework dependency — the screener's tab/filter/column-management work (Epic 17) stays on a hand-rendered table, matching `RankingsPage.tsx`'s existing approach; TanStack Table or any equivalent is explicitly rejected for this scope.
+
+NFR12 `[NEW — 2026-09-22]`: No new dependency for the research epic (Epic 27) — numpy, pandas, pyarrow, plotly and jupytext are already in `uv.lock` and are the whole toolkit; scipy, statsmodels, matplotlib, seaborn, ipywidgets, nbclient/papermill, TA-Lib and `pandas_ta` are explicitly rejected (Monte Carlo, bootstrap, correlation, clustering and candlestick recognition are hand-rolled on numpy and unit-tested against closed-form cases); Jupyter itself stays a personal tool launched locally, never a compose service; every notebook read is time-bounded (NFR3).
 
 ### Additional Requirements
 
@@ -126,6 +150,10 @@ NFR11 `[NEW — 2026-09-17]`: No new frontend grid/table-framework dependency �
 - **Reuse `ml_signals/indicators.py`'s existing `MultiLevelOFI`/`MultiLevelOBI`/`microprice`/`spread` for the rollup builder (SSOT-01) — never reimplement this math** (Epic 16). Levels 5/10 for OFI/OBI reuse `ranking_engine`'s own existing level convention rather than inventing a third.
 - **1-hour rollup tier is explicitly out of scope for Epic 16** — 1-minute rollup rows are all scalars (no per-level depth arrays), so even 120 weekly bars (~2.3 years) is only ~1.2M rows to scan, which stays fast on its own. Revisit only if real-world read latency on `nifelheim` (resource-constrained 2vCPU/3.7GB, see Epic 13's incident) proves insufficient — if ever needed, derive it from already-built 1m rollup rows, never re-touch raw 1s.
 - **Epic 16 is forward-compatible with, but does not implement, Epic 15's not-yet-built `/api/candles` route** — its output is a plain time-ordered list, trivially sliceable into AD-F3's `before_ns`/`limit` cursor contract by whichever future Epic 15 story implements that route; the rollup only ever contains closed minutes, so AD-F7's live/forming-bar path is unaffected and keeps using the existing raw-1s live-buffer aggregation.
+
+- **Research context shape (Epic 27, amends DDD spine AD-D1 research row):** `research/` stays a consumer (reads the catalog, `metrics.db`, `/api/rankings` over HTTP; never imports `data_api`, `capture`/`collector_core` or `views` internals beyond the read functions the spine allows) but gains `domain/` (numpy-only analysis value objects with named invariants) and `application/` (`typing.Protocol` ports + services over `kernel.catalog_files`, `candles.application`, the ranking query service and `BacktestNode`). Notebooks are interface adapters: parameters cell, calls, figures, prose. The candlestick pattern detector lives in `kernel/candle_patterns.py` (amends AD-D3/MR5) because views, research and bots all consume it.
+- **Notebook execution in CI without a notebook runner (Epic 27):** the jupytext `.py` twin is the source of truth and is executed with `runpy` inside pytest against a fixture catalog built with `ParquetDataCatalog.write_data()`; `.ipynb` files are output-stripped artefacts for the user's local Jupyter. No `nbclient`/`papermill` and no Jupyter kernel in the collector image.
+- **`live_paper` strategy selection by string path (Epic 27, Story 27.8):** a bot's strategy is chosen by `BotConfig.strategy` and built through Nautilus's `StrategyFactory.create(ImportableStrategyConfig)`, the same mechanism `BacktestNode` uses, so `live_paper` gains no import edge to `research`; `test_images.py` needs an explicit entry because its `ast` walk cannot see a string path.
 
 ### UX Design Requirements
 
@@ -240,6 +268,17 @@ FR67: Epic 20 - Alert creation dialog (condition builder, frequency, expiration,
 FR68: Epic 20 - Local alert evaluation engine + webhook POST + in-app toast
 FR69: Epic 20 - Alerts list view
 
+FR70: Epic 27 - `research/domain` analysis value objects and `research/application` ports
+FR71: Epic 27 - Executable jupytext-paired notebooks run by `make test` against a fixture catalog
+FR72: Epic 27 - Catalog inspection notebook
+FR73: Epic 27 - Microstructure notebook
+FR74: Epic 27 - Correlation and cross-venue notebook
+FR75: Epic 27 - Backtest evaluation notebook with sweeps and walk-forward
+FR76: Epic 27 - Monte Carlo and robustness notebook
+FR77: Epic 27 - Candlestick pattern detector in `kernel/`, chart picker, screener column and scanner notebook
+FR78: Epic 27 - `CandlePatternStrategy` in backtests and `live_paper`
+FR79: Epic 27 - Research README, notebook index, NB-01..NB-04 rules, legacy notebooks retired
+
 ### DDD Migration Requirements (2026-09-21, from the DDD spine AD-D1..AD-D18)
 
 Extracted for Epics 23+ from `architecture-ddd-platform-2026-09-21/ARCHITECTURE-SPINE.md`. Step 0 (rename `troll/` → `platform/`, stores under `platform/data/`) is done (`18c12eedf4`).
@@ -261,7 +300,7 @@ Extracted for Epics 23+ from `architecture-ddd-platform-2026-09-21/ARCHITECTURE-
 
 ## Epic List
 
-### Epic 1: Trustworthy Coin Ranking & Watchlist
+## Epic 1: Trustworthy Coin Ranking & Watchlist
 Builder opens a ranking/watchlist view showing which coins are worth watching right now, backed by continuously-captured, integrity-gated market data, with opt-in deep (raw-delta) capture for coins worth studying further. FR1–FR5 largely restate already-adopted architecture (Gatekeeper gate is built) — stories here verify/close gaps rather than rebuild. FR6–FR8 are the newer surface to confirm/build against the existing dashboard. Extended 2026-07-24 with FR16: a second, user-selectable Ranking Mode (volatility, alongside FR-6's volume) sharing one `ranking_engine` so the dashboard, TUI, and backtests never diverge.
 **FRs covered:** FR1, FR2, FR3, FR4, FR5, FR6, FR7, FR8, FR16
 
@@ -339,6 +378,10 @@ The write gate is one pure function over explicit aggregates, venue variance is 
 ### MR Coverage Map (Epics 23–26)
 
 MR1, MR2, MR4, MR14: every epic (per-story rules) · MR3, MR5: Epic 23 · MR6, MR7: Epic 24 (MR7's notifier lands in 23.1) · MR8–MR11: Epic 25 · MR12: Epic 26 · MR13: 24.2 (readers) and 26.1 (sampler). Order 23 → 24 → 25 → 26 (AD-D12).
+
+### Epic 27: Research notebooks on a shared analysis layer, with candlestick patterns detectable and tradeable
+A researcher inspects the archive, the microstructure, cross-instrument and cross-venue correlation, a strategy's evaluation page and its Monte Carlo distribution from six executable notebooks that carry no analysis logic of their own; candlestick patterns are one kernel indicator shared by the chart, the screener, backtests and paper bots, and a pattern is one config file away from a backtest and a paper bot.
+**FRs covered:** FR70, FR71, FR72, FR73, FR74, FR75, FR76, FR77, FR78, FR79 · **NFRs:** NFR3, NFR12 · depends on Story 24.4; order 27.1 → 27.9.
 
 ## Epic 1: Trustworthy Coin Ranking & Watchlist
 
@@ -2918,3 +2961,183 @@ So that the architecture documents describe the code that runs.
 **Given** the guardrails
 **When** the story ships
 **Then** `test_boundaries.py`'s legacy map is deleted (every module is in a context), `test_images.py` and `test_hotpath.py` stay in `make test`, the hot-path baseline is re-recorded from the final tree, `docs/DATA_INTEGRITY_AUDIT.md` carries the final numbers, and `_bmad-output/implementation-artifacts/sprint-status.yaml` marks Epics 23–26 `done`
+
+## Epic 27: Research notebooks on a shared analysis layer, with candlestick patterns detectable and tradeable
+
+Research epic (FR70–FR79, NFR12), added 2026-09-22. It runs after Story 24.4 has landed `platform/research/` (the notebooks and strategies live there) and is otherwise independent of Epics 25–26: nothing here touches capture, archive, ranking's aggregates or the bots' aggregate types. The DDD spine (AD-D1) lists `research/` as a pure consumer with no aggregates; this epic keeps it a consumer (it still reads only the catalog, `metrics.db` and `/api/rankings`) but gives it a **domain layer of analysis value objects** so that a Sharpe ratio, a drawdown, a correlation matrix or a Monte Carlo distribution is computed exactly one way whether a notebook, a backtest report or (later) a bot report asks for it. Story 27.1 amends the spine's research row accordingly. Candlestick pattern detection (FR77/FR78) is the one piece that leaves `research/`: the detector is a pure streaming `Indicator` in `kernel/` so the chart picker, the screener's Technicals tab, backtests and `live_paper` all run the same code. Order inside the epic: 27.1 → 27.2 → 27.3 → 27.4 → 27.5 → 27.6 → 27.7 → 27.8 → 27.9; 27.3–27.6 depend only on 27.1 and 27.2. Rules that bind every story: NFR12 (no new dependency), NFR3/MEM-01 (every catalog read time-bounded), SSOT-02 (no metric recomputed outside its one home), TEST-04 (a `DeprecationWarning` or `FutureWarning` in a notebook run is a failure), DESIGN-01 (every value object and port docstring names its invariant), and MR4 (docs, dockerfile `COPY` sets and Makefile test lists updated in the same commit).
+
+### Story 27.1: `research/domain` analysis value objects and the `research/application` ports
+
+As a strategy researcher,
+I want the numbers every notebook and backtest report shows to be typed values with named invariants, computed by one function each,
+So that a Sharpe ratio in a notebook, in a backtest report and in a bot's history page can never disagree, and a notebook cell never carries analysis logic of its own.
+
+**Acceptance Criteria:**
+
+**Given** `platform/research/` as Story 24.4 left it (`strategies/`, `run_backtest.py`, `watchlist.py`, `notebooks/`, `BACKTESTING.md`)
+**When** the story ships
+**Then** `platform/research/domain/` holds `returns.py` (`ReturnSeries`: a float64 array of simple returns plus `period_seconds`; invariant: one period per series, so annualisation is `sqrt(periods_per_year)` from the stored period and never a caller-supplied constant; constructors `from_prices(prices, ts_ns)` and `from_equity(EquityCurve)`; `resample(period_seconds)` compounds, never averages), `equity.py` (`EquityCurve`: strictly increasing `ts_ns`, finite values, `starting_balance`; `drawdowns()` returns the underwater series and every drawdown episode as `(peak_ts, trough_ts, recovery_ts | None, depth)`; `from_pnl_by_day` matches `performance_metrics.equity_returns` bit-for-bit, proven by a test), `trades.py` (`TradeLedger`: closed trades as `(instrument_id, entry_ts, exit_ts, side, qty, realized_pnl, fees)`; invariant `exit_ts >= entry_ts`; `realized_pnls()` is the exact input `performance_metrics.trade_stats` expects), `report.py` (`MetricReport`: the `performance_metrics.all_metrics` dict frozen into a typed record with `as_table()`; it calls `all_metrics`, it never reimplements a statistic), and `correlation.py` (`correlation_matrix(aligned_returns) -> CorrelationMatrix` over numpy only, pairwise-complete on `None` gaps, `lead_lag(a, b, max_lag)` cross-correlation by lag, and `cluster(matrix) -> list[list[str]]` single-linkage hierarchical clustering on `1 - rho`, numpy only); every class docstring names the invariant it protects (DESIGN-01), and `research/domain/` imports only the standard library, numpy, `kernel/` and `nautilus_trader.model` (the spine AD-D2 layering rule with numpy admitted as pure arithmetic, recorded in `test_boundaries.py`)
+
+**Given** the catalog, `metrics.db` and `BacktestNode`
+**When** the story ships
+**Then** `platform/research/application/` holds `ports.py` (`MarketFrames`, `RankingHistory`, `BacktestRunner` as `typing.Protocol`s) and `frames.py`, `ranking_history.py`, `backtest_runner.py` implementing them: `MarketFrames.seconds(instrument_id, start, end) -> pandas.DataFrame` (the `DydxSecondSnapshot` columns plus derived `mid`, `spread`, `microprice`, `obi_N` computed through `kernel.indicators`' stateless functions and never inline), `MarketFrames.trades(instrument_id, start, end)`, `MarketFrames.bars(instrument_id, bar_seconds, start, end)` (from the candle store via `candles.application.window`, never a third seconds→bars fold), `MarketFrames.funding(...)`, `MarketFrames.open_interest(...)`, `MarketFrames.mark_index(...)`; every read is time-bounded (`start`/`end` are required, no defaults) and goes through `kernel.catalog_files` or the catalog's typed `query` with `start`/`end` (MEM-01); `RankingHistory.history(instrument_id, days)` reads `metrics.db` through the ranking query service and research computes no pct/volatility of its own (AD-D10); `BacktestRunner.run(RunSpec) -> RunResult` wraps `BacktestNode` + `BacktestDataConfig` (NAUT-03), takes strategies by `ImportableStrategyConfig` string path, and returns `EquityCurve`, `TradeLedger` and `MetricReport` built from the engine's `PortfolioAnalyzer` and the fills report, plus the run's `config_id`; `BacktestRunner.sweep(RunSpec, grid) -> list[RunResult]` runs one `BacktestNode` with one `BacktestRunConfig` per grid point and re-attributes results by `config_id` (the Story 2.4 attribution rule, `ml_signals/strategies/backtest_dydx.py:42-56`)
+
+**Given** `platform/CLAUDE.md` TEST-01 and the DDD spine's AD-D1 research row ("none (consumer)")
+**When** the story ships
+**Then** `research/tests/` covers every domain function with hand-computable cases (a 3-point equity curve with a known drawdown, a two-series correlation of exactly `±1`, a lead-lag of a shifted copy equal to the shift, `from_pnl_by_day` equality against `performance_metrics.equity_returns`), `BacktestRunner` against a two-day synthetic catalog built with `ParquetDataCatalog.write_data()` (real Nautilus objects, no mocks, TEST-03), the DDD spine's AD-D1 research row reads "value objects for analysis results (`ReturnSeries`, `EquityCurve`, `TradeLedger`, `MetricReport`, `CorrelationMatrix`, `MonteCarloResult`); ports `MarketFrames`, `RankingHistory`, `BacktestRunner`" with a `[amended 2026-..: Story 27.1]` note and the invariant list, `test_boundaries.py`'s research rows admit `research.domain` → numpy and nothing else new, `research/tests` is already in both Makefile lists (24.4) and stays there, `ARCHITECTURE.md`'s module map names the two research layers, and `ml_signals/BACKTESTING.md`'s successor `research/BACKTESTING.md` documents `BacktestRunner` as the one way a notebook runs a backtest
+
+### Story 27.2: Executable notebooks and the catalog inspection notebook
+
+As a strategy researcher,
+I want every notebook stored as reviewable source that the test suite executes against a fixture catalog, and a first notebook that shows me exactly what my archive contains,
+So that a notebook can never rot silently after a refactor again, and I can see coverage, gaps, verified days and data quality per venue before I trust a research result.
+
+**Acceptance Criteria:**
+
+**Given** `research/notebooks/` and the `jupytext` dev dependency already pinned in `pyproject.toml`
+**When** the story ships
+**Then** every notebook under `research/notebooks/` is a jupytext-paired `<nn>_<name>.py` (percent format, the source of truth, `ruff`- and `mypy`-clean like any other module) plus a `<nn>_<name>.ipynb` with outputs stripped (a `research/tests/test_notebooks.py` check fails on any stored output cell, on any `.ipynb` without its `.py` twin, and on a pair whose cells differ); each notebook's first code cell is a **Parameters** cell reading `CATALOG_PATH`, `CANDLES_DIR`, `METRICS_DB_PATH`, `INSTRUMENTS`, `START`, `END` from environment variables with the `platform/data/` defaults, so the same file runs against the fixture catalog in tests and the real archive on the user's machine; a `make notebooks` target syncs every pair (`jupytext --sync`) and is documented in `research/README.md` together with the one-line local launch (`uv run jupyter lab research/notebooks`, Jupyter itself stays a personal tool and is never containerised)
+
+**Given** the notebook smoke test
+**When** `make test` runs
+**Then** `research/tests/test_notebooks.py` builds one small fixture catalog per session with `ParquetDataCatalog.write_data()` (two instruments on each of dYdX, Bybit and Hyperliquid, ~10 minutes of `DydxSecondSnapshot`, `TradeTick`, `MarkPriceUpdate`, `IndexPriceUpdate`, `FundingRateUpdate`, `OpenInterest`, plus a candle store built by `candles.application.rebuild_day` and a `metrics.db` with two rows), executes every `.py` notebook with `runpy` under `warnings.simplefilter("error")` (TEST-04) with plotly's renderer forced off-screen, asserts each finishes in under 60 s, and lists the fixture's deliberate defects (one gap, one provisional day, one crossed second) so a notebook that claims to show them can be checked against them
+
+**Given** the archive, the candle stores and the durable error ledger from Story 23.3
+**When** `01_catalog_inspection` runs
+**Then** it shows, per venue and instrument: the instrument inventory (`MarketFrames` over `catalog.instruments()`, market kind from `kernel.venues`), the coverage timeline and gaps (`kernel.catalog_files.data_file_ranges` and `catalog_stats.find_gaps` via `views`/`kernel`, never re-derived), likely outages versus quiet market, verified/provisional day status from the candle store's `verified_days`, raw-trade-archive-versus-folded-seconds volume agreement per day (the Story 22.13 fold, `kernel.fold.fold_trades`, re-run over the raw `trade_tick/` archive for the window), a snapshot sanity table (spread `>= 0`, best bid `<` best ask, `Price.precision` uniform per instrument, `ts_init - ts_event` distribution) and the ledger's rejection counts by site over the same window; every read is bounded by `START`/`END`; the parent spine's Deferred item "Rejection-rate observability for research use" is struck with an amendment naming this notebook and the ledger reader it uses (MR14); `dydx_collector/notebooks/dydx_catalog_pandas.ipynb` (moved by 24.4) is deleted, with its one still-useful cell (the `to_dict` catalog-to-pandas idiom) folded into this notebook's first section
+
+### Story 27.3: Microstructure notebook
+
+As a strategy researcher,
+I want to inspect the microstructure of any collected instrument over any bounded window,
+So that I can see spread, depth, imbalance, order flow, trade flow, seasonality and the return-autocorrelation and volatility structure before I design a signal.
+
+**Acceptance Criteria:**
+
+**Given** `MarketFrames.seconds` and `kernel.indicators`
+**When** `02_microstructure` runs
+**Then** it shows, for each instrument in `INSTRUMENTS` over `START`–`END`: the spread in ticks and basis points over time with its distribution by hour of day (UTC); the depth profile (cumulative size by level and by distance from mid) for both sides, from `views.book_features.depth_profile` over the snapshot's 20 levels; order-book imbalance at N = 1, 5, 10, 20 (`MultiLevelOBI`) and OFI (`MultiLevelOFI` replayed over consecutive seconds) with their z-scores at the window the OFI strategy uses; microprice-minus-mid as a predictor of the next-second mid change (a binned scatter with the hit rate per bin); trade flow (`buy_volume`, `sell_volume`, counts, CVD) and a Kyle-lambda style price-impact regression of mid change on signed volume by bucket size; the funding rate, mark-minus-index basis and open interest overlaid on price; return autocorrelation at 1 s, 10 s, 1 m, 5 m and 1 h lags (`ReturnSeries.resample`), the volatility signature plot (realised variance per sampling interval) and rolling realised volatility; every indicator is the `kernel.indicators` class, never a formula in a cell
+
+**Given** the fixture catalog's deliberate defects
+**When** the smoke test executes the notebook
+**Then** the crossed second and the gap are visible as `None` gaps in the series (never interpolated, DATA-01), and no cell computes over an unbounded window
+
+**Given** a reader who has not seen the platform's signal architecture
+**When** they open the notebook
+**Then** each section's markdown states what is read from the archive, what is derived on read and by which `kernel.indicators` class (SIGNAL-01), and the closing section lists the observations the notebook is designed to surface (spread regime changes, depth asymmetry, seasonality, autocorrelation sign at each horizon) with a pointer to the strategy that uses each (`research/strategies/ofi_strategy.py` for OFI)
+
+### Story 27.4: Correlation and cross-venue notebook
+
+As a strategy researcher,
+I want return correlation, lead-lag and clustering across the collected universe and across venues for the same symbol,
+So that I can pick uncorrelated instruments for a portfolio, find which venue leads on price, and see where the same asset trades at a basis across venues.
+
+**Acceptance Criteria:**
+
+**Given** `research.domain.correlation` and `MarketFrames`
+**When** `03_correlation` runs
+**Then** it builds, for `INSTRUMENTS` over `START`–`END`, aligned `ReturnSeries` at 1 m, 5 m, 1 h and 1 d (from `MarketFrames.bars`, so the seconds→bars fold is the candle store's), shows the correlation matrix at each horizon as a diverging heatmap (plotly, clustered order from `cluster()`), rolling 1-day correlation for every pair against a chosen anchor instrument, the clustering dendrogram as an ordered list with the merge distances, and the correlation of funding rates and of open-interest changes across the same instruments; missing bars align as gaps and the matrix is pairwise-complete (the domain function's contract), never forward-filled
+
+**Given** the same symbol collected on more than one venue (BTC and ETH on dYdX, Bybit linear and Hyperliquid)
+**When** the cross-venue section runs
+**Then** it shows the mid-price basis between each venue pair in basis points over time, the lead-lag cross-correlation of 1 s returns for lags of ±1 s to ±30 s (`lead_lag`) with the peak lag and its sign stated in words ("Bybit leads dYdX by 2 s"), the funding-rate differential, and a trade-volume share per venue per hour; the symbol matching uses `kernel.venues` (`market_kind`, base/quote parsing), never string prefix guessing, and a venue absent from the fixture or the archive produces a stated "not collected in this window" line rather than an exception
+
+**Given** the smoke test
+**When** the notebook executes against the fixture catalog
+**Then** the two instruments per venue produce a `2 × 2` matrix per venue and the BTC cross-venue section finds all three venues, and the notebook's markdown explains how to feed the clustered universe into a multi-instrument `BacktestRunner.run` (the Story 1.3 watchlist idea, restated on this epic's types)
+
+### Story 27.5: Backtest evaluation notebook, parameter sweeps and walk-forward
+
+As a strategy researcher,
+I want to run any strategy by string path over any bounded window and read one standard evaluation page,
+So that every strategy is judged by the same equity, drawdown, metric, sweep and out-of-sample views, with nothing recomputed by hand.
+
+**Acceptance Criteria:**
+
+**Given** `BacktestRunner` and `research/strategies/*`
+**When** `04_backtest_evaluation` runs with `STRATEGY`, `STRATEGY_CONFIG`, `PARAMS` (the same three parameters `ml_signals/backtest.ipynb` had)
+**Then** it shows the equity curve with the underwater (drawdown) series and each drawdown episode listed, the `MetricReport` table (Sharpe, Sortino, Calmar, max drawdown, profit factor, expectancy, win rate, avg/max win and loss, returns volatility, exactly `performance_metrics.all_metrics`' keys, no additions), rolling Sharpe over a configurable window from `ReturnSeries`, the per-trade PnL distribution and holding-time distribution from `TradeLedger`, PnL by hour of day and by day of week, and the trade list; the notebook never touches `BacktestNode` directly and never sums a PnL itself
+
+**Given** `BacktestRunner.sweep`
+**When** the sweep section runs with a two-parameter grid
+**Then** it renders a heatmap of the chosen metric over the grid (plotly), lists the top runs with their full `MetricReport`, and states the grid size and total runtime; the walk-forward section splits `START`–`END` into `N` consecutive in-sample/out-of-sample folds, picks each fold's parameters on the in-sample metric and reports the concatenated out-of-sample equity and metrics next to the in-sample ones; both sections stream the catalog through `BacktestDataConfig` and never materialise the window twice
+
+**Given** `ml_signals/backtest.ipynb` (moved to `research/notebooks/` by 24.4)
+**When** the story ships
+**Then** it is deleted, `research/BACKTESTING.md` points at this notebook as the one way to evaluate a strategy interactively, and the smoke test runs the notebook against the fixture catalog with `OFIStrategy` and a `2 × 2` grid in under 60 s
+
+### Story 27.6: Monte Carlo and robustness notebook
+
+As a strategy researcher,
+I want the distribution of outcomes a strategy's trade record implies, not a single equity path,
+So that I can see the drawdown I should expect, the probability of ruin, a confidence interval on Sharpe, and whether a sweep-selected parameter set is likely overfit.
+
+**Acceptance Criteria:**
+
+**Given** `research/domain/monte_carlo.py`
+**When** the story ships
+**Then** it holds, over numpy only and a caller-supplied `numpy.random.Generator` seed recorded in every result (`MonteCarloResult.seed`, so a figure is reproducible): `bootstrap_trades(TradeLedger, n_paths, seed)` (trade-order resampling with replacement, returning terminal-wealth, max-drawdown and Sharpe distributions), `block_bootstrap_returns(ReturnSeries, block_len, n_paths, seed)` (stationary block bootstrap preserving autocorrelation), `risk_of_ruin(paths, ruin_level)`, `sharpe_confidence_interval(ReturnSeries, n_paths, seed, level)`, `deflated_sharpe(observed_sharpe, n_trials, returns_skew, returns_kurtosis, n_obs)` (Bailey & López de Prado's deflated Sharpe ratio, the multiple-testing correction for a sweep), and `probabilistic_sharpe(observed, benchmark, n_obs, skew, kurtosis)`; each function's docstring names its invariant (paths never exceed `n_paths`, a resampled ledger has the same trade count, a zero-variance series returns a stated `None` rather than a division error) and cites the formula's source; tests check closed-form cases (a constant-return series yields an interval of zero width, a ledger of one trade yields identical paths, `deflated_sharpe` with `n_trials = 1` equals `probabilistic_sharpe`)
+
+**Given** `BacktestRunner` and the domain functions
+**When** `05_monte_carlo` runs
+**Then** it takes a `RunResult` (or the notebook's own run with the same `STRATEGY` parameters as 27.5), shows the fan chart of bootstrapped equity paths with the observed path, the max-drawdown and terminal-wealth histograms with the observed values marked, risk of ruin at three ruin levels, the Sharpe confidence interval, and, when a sweep was run, the deflated Sharpe of the best grid point with a plain-language verdict line; every figure states its seed and path count; the smoke test runs it with `n_paths = 200`
+
+### Story 27.7: Candlestick pattern detector in the kernel, on the chart, in the screener, and a scanner notebook
+
+As a trader and researcher,
+I want the classic candlestick patterns detected by one streaming indicator that the chart, the screener and a strategy all share, with no TA-Lib,
+So that I can scan the whole collected universe for a pattern at any timeframe, see it on the chart, and later trade it with the same code.
+
+**Acceptance Criteria:**
+
+**Given** `kernel/indicators.py` (pure `Indicator` classes) and NFR12
+**When** the story ships
+**Then** `kernel/candle_patterns.py` holds `CandlePattern(Indicator)` with `update_raw(open, high, low, close)` and outputs `value` (`+100` bullish, `-100` bearish, `0` none, TA-Lib's convention so the scanner tables read the same) and a `pattern` parameter selecting one of: single-bar `DOJI`, `DRAGONFLY_DOJI`, `GRAVESTONE_DOJI`, `HAMMER`, `HANGING_MAN`, `INVERTED_HAMMER`, `SHOOTING_STAR`, `MARUBOZU`, `SPINNING_TOP`; two-bar `ENGULFING`, `HARAMI`, `HARAMI_CROSS`, `PIERCING`, `DARK_CLOUD_COVER`, `TWEEZER_TOP`, `TWEEZER_BOTTOM`; three-bar `MORNING_STAR`, `EVENING_STAR`, `THREE_WHITE_SOLDIERS`, `THREE_BLACK_CROWS`, `THREE_INSIDE_UP`, `THREE_INSIDE_DOWN`; the geometric thresholds (`body_ratio`, `shadow_ratio`, `doji_body_ratio`, `trend_bars` for the prior-trend requirement of hammer/hanging-man/star patterns) are explicit constructor parameters with documented defaults, the module docstring defines each pattern in words and by inequality, the detector keeps only the last three bars (`O(1)` per bar, no history list), and `CandlePatternSet` runs every pattern over one bar stream and returns the fired names for the scanner; `kernel/tests/test_candle_patterns.py` has one hand-drawn bar sequence per pattern for the bullish, bearish and negative case, plus a property test that a bar sequence never fires both an `X` and its mirror; the DDD spine's AD-D3 kernel list and MR5 are amended to include `candle_patterns` with the invariant "one pattern definition, shared by views, research and bots"
+
+**Given** `views`' native indicator catalog (`chart_indicators.INDICATOR_CATALOG`, an `IndicatorSpec` with `feed`, `outputs`, `panel`) and the screener's Technicals columns (`/api/rankings/technicals-values`, `screener_columns.toml`)
+**When** the story ships
+**Then** `CandlePattern` is registered in that catalog with `feed = ("open", "high", "low", "close")`, `outputs = ("value",)`, `panel = "histogram"` and its parameters JSON-safe (`pattern` as a string enum, listed in the picker's dropdown like `ma_type`); the chart page's picker offers it under the native category and draws the `±100` spikes in a histogram pane; the Technicals tab offers it as a column with a `pattern` parameter and a timeframe, so the screener becomes a pattern scanner across every collected instrument (the latest closed bar's `value` per instrument; sorting by the column groups the hits); `chart_indicators.toml` and `screener_columns.toml` key sets are unchanged (a new entry uses the existing `name`/`category`/`bar_seconds`/`params` keys); a `Known limit:` comment in `ChartPage.tsx`'s pane code records that pattern hits are histogram spikes, not on-candle markers, with the upgrade path (lightweight-charts series markers when the chart adopts them); frontend tests cover the catalog entry rendering and the column values; `views/tests` and `data_api/tests` cover the replay through the existing `replay_indicator` path with no special case
+
+**Given** `dydx_collector/notebooks/candlestick_pattern_scanner.ipynb` (moved by 24.4; it pip-installs TA-Lib and `pandas_ta` at runtime and reads the retired `custom_dydx_minute_bar` directory)
+**When** `06_candlestick_scanner` ships
+**Then** it scans `INSTRUMENTS` over `START`–`END` at every timeframe in `TIMEFRAMES` from `MarketFrames.bars` (the candle store's fold, never a pandas resample of its own), filters hits by the EMA condition (`above`/`below`/`any` against `nautilus_trader.indicators.ExponentialMovingAverage`) and an optional pattern filter, lists hits in one table tagged by timeframe and direction, renders a candlestick chart centred on a chosen hit with the EMA overlaid and the hit marked (plotly, a parameter cell selecting the hit; no `ipywidgets`), and computes the forward return after each hit at 1, 5 and 20 bars with the hit rate per pattern as the notebook's research output; the old notebook is deleted, the smoke test runs the new one against the fixture catalog, and a one-off parity check against TA-Lib (run locally by the developer where TA-Lib is installed, not in CI, not a dependency) is recorded in the story's Completion Notes with the per-pattern agreement rate and every documented deviation
+
+### Story 27.8: Candlestick patterns tradeable: `CandlePatternStrategy` in backtests and `live_paper`
+
+As a trader,
+I want a strategy that trades candlestick pattern signals with a trend filter and a defined exit, runnable by string path in a backtest, evaluated by the 27.5 notebook, and startable as a paper bot,
+So that a pattern I found in the scanner is one config file away from a backtest and one more from a paper bot, on the same detector the scanner used.
+
+**Acceptance Criteria:**
+
+**Given** `kernel.candle_patterns.CandlePattern` and the `StrategyConfig` + `Strategy` conventions in `research/BACKTESTING.md`
+**When** the story ships
+**Then** `research/strategies/candle_pattern_strategy.py` holds `CandlePatternStrategyConfig(StrategyConfig, frozen=True)` (`instrument_id`, `bar_type` as a Nautilus bar-spec string, `long_patterns` and `short_patterns` as tuples of pattern names, `trend_ema_period` and `trend_condition` `above | below | any` matching the scanner's filter, `trade_size`, `exit_bars`, `stop_atr_multiple` with `atr_period`, `allow_short`) and `CandlePatternStrategy(Strategy)`, which subscribes the bar type, feeds one `CandlePattern` per configured pattern plus the EMA and ATR through `handle_bar`/`update_raw`, enters at the next bar's open on a fired pattern that passes the trend filter, exits after `exit_bars` bars or on the ATR stop or on an opposite-direction pattern, holds at most one position, and never imports collector, views or `data_api` code (DESIGN-02, `test_boundaries.py`); internal bar aggregation from `TradeTick` is the default (so every venue with a raw trade archive works), with `EXTERNAL` catalog bars used when the config's bar type says so
+
+**Given** `BacktestRunner` and the evaluation notebook from 27.5
+**When** `research/strategies/backtest_candle_pattern.py` runs (`run()` returning a `RunResult`, `__main__` printing the `MetricReport`)
+**Then** it runs `CandlePatternStrategy` by `ImportableStrategyConfig` string path over a bounded window on `BacktestNode` + `BacktestDataConfig(data_cls=TradeTick)` (NAUT-03), `04_backtest_evaluation`'s parameters cell lists it as its second worked example (with a `long_patterns = ("HAMMER", "ENGULFING")`, `trend_condition = "above"` default), and `research/tests/test_candle_pattern_strategy.py` proves on a synthetic trade-tick catalog with one planted hammer that exactly one long entry occurs at the bar after the hammer, exits after `exit_bars`, and that no entry occurs when the trend filter fails; real Nautilus objects only (TEST-03)
+
+**Given** `live_paper`'s one hard-wired `DummyStrategy` per bot (`live_paper/node.py`, `BotConfig`)
+**When** the story ships
+**Then** `BotConfig` gains `strategy: str = "dummy"` and `params: dict[str, Any] = {}` (optional keys with defaults, so every existing `config.toml` parses unchanged; the frozen key set is extended, not altered, and `live_paper/README.md` documents the two keys), `node.py` resolves `strategy = "candle_pattern"` to `CandlePatternStrategy` through Nautilus's `StrategyFactory.create(ImportableStrategyConfig(...))` from a string path (the mechanism `BacktestNode` uses; no `live_paper → research` import edge, and `test_boundaries.py` states why), `bot_id` still maps to `order_id_tag`, `bot_status`/`trade_history` need no change because they are strategy-scoped `Cache` reads (AD-11), `live_paper.dockerfile` `COPY`s `research` and `kernel` and `test_images.py` gains an explicit entry for the string-path import (its `ast` walk cannot see a string), `make test-live-paper` covers a `candle_pattern` bot constructing on the sandbox venue, and `docs/BOT_OPERATIONS.md` gains the config example; the story parks `awaiting-operator` with "start one `candle_pattern` paper bot on the VPS and confirm a fill in `bot_tui`" as the operator action
+
+### Story 27.9: Closeout: research README, notebook index, rules, and the last legacy notebook gone
+
+As the platform owner,
+I want the research context documented as one page with a notebook index and a recipe, the rules for notebooks in `platform/CLAUDE.md`, and no legacy notebook or `pip install` cell left anywhere,
+So that the next notebook is written the platform's way by default and the docs describe the code that runs.
+
+**Acceptance Criteria:**
+
+**Given** the six notebooks and the analysis layer from 27.1–27.8
+**When** the story ships
+**Then** `research/README.md` replaces `research/BACKTESTING.md` (the backtesting content moves in unchanged, with a redirect stub for one release) and holds: the notebook index (number, purpose, inputs, the domain functions it calls, run time on the fixture), the "write a notebook" recipe (pair with jupytext, parameters cell, one section per question, analysis logic goes in `research/domain`, reads go through `MarketFrames`, run `make notebooks` and `make test`), the "add a metric" recipe (add to `performance_metrics` or `research/domain`, then the notebook, never the reverse), and the local launch instructions; `platform/README.md` and the frontend docs page link to it
+
+**Given** `platform/CLAUDE.md`
+**When** the story ships
+**Then** it gains a "Research notebooks" section with `NB-01` (a notebook holds no analysis logic: every computation is a `research/domain`, `kernel` or `performance_metrics` call; a formula in a cell is a review failure), `NB-02` (every notebook is jupytext-paired, output-stripped, parameterised by the environment variables of 27.2, and executed by `make test` against the fixture catalog), `NB-03` (no `%pip`/`!pip` cell, no dependency outside `uv.lock`; a notebook that needs a library files a dependency decision first) and `NB-04` (every catalog read in a notebook is bounded by `START`/`END`; MEM-01 restated for notebooks), and its "Development philosophy" indicator note points at `kernel/candle_patterns.py` as the second custom-`Indicator` precedent
+
+**Given** the repository
+**When** the story ships
+**Then** `git grep -n "pandas_ta\|talib\|%pip\|custom_dydx_minute_bar" platform/` returns nothing outside `docs/` history notes and `.planning/`, no `.ipynb` exists under `platform/` outside `research/notebooks/`, `ARCHITECTURE.md`'s module map and diagram show `research/{domain,application,notebooks,strategies}` and `kernel/candle_patterns.py`, `docs/DATA_DICTIONARY.md` gains a §"Research reads" listing which stored fields each notebook reads and which derived values it computes on read (SIGNAL-01), `sprint-status.yaml` marks Epic 27 `done` once 27.8's operator action is confirmed, and this epic's `Known limit:` comments (histogram-not-marker pattern display, no `ipywidgets` interactivity, Monte Carlo on closed trades only) are listed in the DDD spine's Deferred section with their upgrade paths

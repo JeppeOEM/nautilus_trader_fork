@@ -1,5 +1,5 @@
 # generated: 2026-07-01
-# last_updated: 2026-09-21 (Epics 23-26: DDD migration, 13 story files created; 22.12 merged, awaiting-operator)
+# last_updated: 2026-09-22 (Epic 27: research notebooks on a shared analysis layer + candlestick patterns, 9 story files created; depends on 24.4)
 # project: nautilus_trader_fork
 # project_key: NOKEY
 # tracking_system: file-system
@@ -319,6 +319,18 @@ development_status:
   26-2-capture-package-and-venue-packages-with-entrypoints: ready-for-dev
   26-3-closeout-shims-gone-spines-reconciled: ready-for-dev
   epic-26-retrospective: optional
+
+  epic-27: backlog
+  27-1-research-domain-analysis-values-and-application-ports: ready-for-dev
+  27-2-executable-notebooks-and-catalog-inspection-notebook: ready-for-dev
+  27-3-microstructure-notebook: ready-for-dev
+  27-4-correlation-and-cross-venue-notebook: ready-for-dev
+  27-5-backtest-evaluation-notebook-sweeps-and-walk-forward: ready-for-dev
+  27-6-monte-carlo-and-robustness-notebook: ready-for-dev
+  27-7-candlestick-pattern-detector-kernel-chart-screener-scanner: ready-for-dev
+  27-8-candle-pattern-strategy-backtests-and-live-paper: ready-for-dev
+  27-9-closeout-research-readme-rules-legacy-notebooks-gone: ready-for-dev
+  epic-27-retrospective: optional
 
 action_items:
   - epic: 1
