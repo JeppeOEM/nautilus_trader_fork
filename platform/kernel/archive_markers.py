@@ -56,7 +56,12 @@ def path_for(catalog_path: str | Path, iid: str) -> Path:
 
 
 def encode(gap: ArchiveGap) -> str:
-    """One marker line, without the newline (byte-identical to the story 22.13 writer)."""
+    """
+    One marker line, without the newline (byte-identical to the story 22.13 writer). An inverted
+    span is refused (`ValueError`): `decode` would refuse the line, so it must never be written.
+    """
+    if gap.from_ns > gap.to_ns:
+        raise ValueError(f"inverted archive-gap span {gap!r}")
     return json.dumps(
         {
             "instrument_id": gap.iid,

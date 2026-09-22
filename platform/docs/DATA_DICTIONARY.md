@@ -688,7 +688,10 @@ runs `collector_core.nightly`, each step its own process, stopping at the first 
    (`not covered`), and so do rows inside an archive-gap marker (`<catalog>/_archive_gaps/<iid>.jsonl`, format
    `kernel.archive_markers`:
    a trade write that failed while its snapshots landed, a quarantined or a pruned trade file) --
-   the archive is known to miss trades their live values hold. Trades with no covered row are
+   the archive is known to miss trades their live values hold. A marker line that does not
+   parse, lacks a key, or holds a non-integer or inverted span makes the rebuild refuse that
+   instrument every night, naming the file and line, until the line is fixed by hand: guessing a
+   span could overwrite exactly the rows the marker protects. Trades with no covered row are
    counted (`orphan trades`). An instrument-day with two rows in one second or mixed schemas is
    refused and left untouched (exit 2, the chain continues).
 2. `consolidate_catalog --apply --venue --days 2` -- one file per recent closed day and data type.

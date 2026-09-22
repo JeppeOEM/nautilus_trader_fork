@@ -74,11 +74,12 @@ def _optional_float(value: object) -> float | None:
 
 class DydxSecondSnapshot(Data):
     """
-    1-second sampled L2 book snapshot with microstructure signals.
+    1-second sampled L2 book snapshot: raw inputs only (SIGNAL-01), every signal is derived on read.
 
-    `bid_prices[0]` / `ask_prices[0]` are best bid/ask.
-    Lists are variable-length (up to BOOK_DEPTH=20); shorter for illiquid coins.
-    `ofi` is None for the first snapshot per instrument.
+    The top-of-book levels (`bid_prices[0]` / `ask_prices[0]` are best bid/ask; lists are
+    variable-length, up to BOOK_DEPTH=20, shorter for illiquid coins), the second's folded trades
+    (`buy_volume`/`sell_volume`/`buy_count`/`sell_count`, `kernel.fold`) and its OHLC
+    (`open_price`..`close_price`, None for a second with no trade or a pre-OHLC file).
     """
 
     def __init__(

@@ -81,7 +81,9 @@ def test_a_caught_up_row_stays_within_the_read_margin() -> None:
     """
     The tighter chain `collector._MAX_CATCH_UP_SECONDS` documents: a caught-up venue-timed row's
     `ts_init` trails its `ts_event` by up to catch-up + 1 s + hold-back, and a venue clock may run
-    `_VENUE_AHEAD_NS` ahead; the readers only widen file spans by `READ_SPAN_MARGIN_NS`.
+    hold-back + `_VENUE_AHEAD_NS` ahead; the readers widen file spans symmetrically by
+    `READ_SPAN_MARGIN_NS`, so each direction alone is the binding limit and their sum is a
+    conservative ceiling on both (`Collector._check_skew_budget` enforces the same sum).
     """
     worst = (
         (collector._MAX_CATCH_UP_SECONDS + 1) * NS_PER_S

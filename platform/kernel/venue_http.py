@@ -76,9 +76,16 @@ def post_json_request(
     )
 
 
+def _rooted(path_and_query: str) -> str:
+    """Return the path, refusing one without a leading `/` (bare, `v5/...` names another host)."""
+    if not path_and_query.startswith("/"):
+        raise ValueError(f"venue path must start with '/': {path_and_query!r}")
+    return path_and_query
+
+
 def bybit_url(environment: str, path_and_query: str) -> str:
     """Return `https://api.bybit.com` (or testnet) + `path_and_query` (`/v5/...`)."""
-    return f"{BYBIT_URLS[environment]}{path_and_query}"
+    return f"{BYBIT_URLS[environment]}{_rooted(path_and_query)}"
 
 
 def hyperliquid_info_url(environment: str) -> str:
@@ -88,4 +95,4 @@ def hyperliquid_info_url(environment: str) -> str:
 
 def dydx_indexer_url(network: DydxNetwork, path_and_query: str) -> str:
     """Return the dYdX indexer's base for `network` + `path_and_query` (`/v4/...`)."""
-    return f"{get_dydx_http_url(network)}{path_and_query}"
+    return f"{get_dydx_http_url(network)}{_rooted(path_and_query)}"

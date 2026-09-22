@@ -237,17 +237,22 @@ _MAX_CATCH_UP_SECONDS = 30
 
 def _check_skew_budget(hold_back_ns: int) -> None:
     """
-    Refuse a hold-back whose caught-up rows could trail their `ts_event` by more than the readers
-    widen a file span (`READ_SPAN_MARGIN_NS`): those rows would be silently skipped by every
-    reader. Checked at construction because deployed configs are bind-mounted, so the committed
-    `config.toml`s that `platform/tests/test_skew_constants.py` reads are not the whole story.
+    Refuse a hold-back whose rows' `ts_init` could sit further from their `ts_event` than the
+    readers widen a file span (`READ_SPAN_MARGIN_NS`): those rows would be silently skipped by
+    every reader. The skew has two independent directions -- a caught-up row trails by up to
+    catch-up + 1 s + hold-back, and a venue clock runs ahead by up to hold-back +
+    `_VENUE_AHEAD_NS` -- and the widening is symmetric, so each alone is the binding limit; the
+    sum is checked as a deliberately conservative ceiling on both. Checked at construction because
+    deployed configs are bind-mounted, so the committed `config.toml`s that
+    `platform/tests/test_skew_constants.py` reads are not the whole story.
     """
     worst = (_MAX_CATCH_UP_SECONDS + 1) * NS_PER_S + hold_back_ns + _VENUE_AHEAD_NS
     if worst > READ_SPAN_MARGIN_NS:
         raise ValueError(
-            f"hold_back_seconds {hold_back_ns / NS_PER_S} is too large: a caught-up row could trail "
-            f"its ts_event by {worst / NS_PER_S} s, beyond the {READ_SPAN_MARGIN_NS // NS_PER_S} s "
-            "the catalog readers widen a file span by (kernel.clocks.READ_SPAN_MARGIN_NS)"
+            f"hold_back_seconds {hold_back_ns / NS_PER_S} is too large: a row's ts_init could sit "
+            f"up to {worst / NS_PER_S} s from its ts_event (trailing plus leading skew), beyond the "
+            f"{READ_SPAN_MARGIN_NS // NS_PER_S} s the catalog readers widen a file span by "
+            "(kernel.clocks.READ_SPAN_MARGIN_NS)"
         )
 
 

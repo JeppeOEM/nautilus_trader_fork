@@ -15,8 +15,8 @@
 """
 Deprecated re-export shim (Story 23.2): `collector_core.venue_http` moved to the shared kernel (kernel.venue_http, kernel.venues).
 
-Pure re-export, defines nothing: every name here *is* the kernel object (a copied class would
-register a second Arrow class or break `is` dispatch). Import from the kernel instead, e.g.
+Pure re-export, defines nothing: every name here *is* the kernel object (a copy would leave two
+definitions to drift apart and break `is`/`except` identity). Import from the kernel instead, e.g.
 `from kernel import venue_http`.
 """
 

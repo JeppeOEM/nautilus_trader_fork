@@ -48,6 +48,15 @@ def test_dydx_indexer_url_uses_the_network_base() -> None:
     assert venue_http.DYDX_NETWORKS["testnet"] == DydxNetwork.TESTNET
 
 
+@pytest.mark.parametrize("path", ["v5/market/kline", "", "api.bybit.com/v5"])
+def test_a_path_without_a_leading_slash_is_refused(path: str) -> None:
+    """Joined bare, `v5/...` would name another host (`api.bybit.comv5/...`)."""
+    with pytest.raises(ValueError, match="must start with '/'"):
+        venue_http.bybit_url("mainnet", path)
+    with pytest.raises(ValueError, match="must start with '/'"):
+        venue_http.dydx_indexer_url(DydxNetwork.MAINNET, path)
+
+
 def test_url_tables_are_read_only() -> None:
     with pytest.raises(TypeError):
         venue_http.BYBIT_URLS["mainnet"] = "https://elsewhere"  # type: ignore[index]

@@ -25,5 +25,8 @@ the one zstd `write_table` patch (`parquet_compat`) -- and nothing else.
 
 The kernel imports no context (not even `observability`), holds no module-level mutable state,
 no store, no config loader and no ledger call, so every context may import it without importing
-anything else (`platform/tests/test_boundaries.py` enforces all of it).
+anything else (`platform/tests/test_boundaries.py` enforces all of it). Its only effects outside
+its own namespace are the two sanctioned ones: each `Data` class's single `register_arrow` at
+import (nautilus's Arrow registry, counted by `platform/tests/test_namespace.py`) and the zstd
+`write_table` wrapper, installed only when `parquet_compat.apply_zstd_default()` is called.
 """

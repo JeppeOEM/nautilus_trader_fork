@@ -28,9 +28,9 @@ has both a backtest Strategy consumer (ofi_strategy.py) and a direct-replay cons
 (metrics_computer.py/chart_data.py), but no research-notebook demo yet. Microprice has the
 direct-replay consumer and the research notebook, but no backtest Strategy consumer yet.
 OnlineLogisticTrend is only consumed by a backtest Strategy (example_strategy.py).
-MultiLevelOBI/MultiLevelOFI are only consumed by dashboard.py's live monitor loop (not a
-Nautilus Strategy). This is an honest
-note, not a gap to close here.
+MultiLevelOBI/MultiLevelOFI were then consumed only by the web dashboard's live monitor loop
+(retired in Story 15.10); today `ranking_engine`, `data_api`'s indicator series, `live_paper` and
+the snapshot/OFI strategies consume them. This is an honest note, not a gap to close here.
 """
 
 from collections import deque
@@ -295,7 +295,7 @@ class MultiLevelOFI(Indicator):
     zscore_window : int | None
         If set, normalises `value` to a z-score over the last `zscore_window`
         readings: ``(value - mean) / std``. Returns 0.0 when std is zero.
-        Must be >= 2. A window 10–20× the OFI `window` works well in practice.
+        Must be >= 2. A window 10-20x the OFI `window` works well in practice.
     """
 
     def __init__(
@@ -412,7 +412,7 @@ class MultiLevelOFI(Indicator):
 # -----------------------------------------------------------------------------------
 # Plain, stateless single-snapshot derivations (SSOT-01, platform/CLAUDE.md) -- pure
 # functions of one DydxSecondSnapshot.to_dict()-shaped dict, no window/history state.
-# Every caller (ranking_engine, dashboard, bot_tui) must call these rather than
+# Every caller (ranking_engine, data_api, bot_tui) must call these rather than
 # reimplementing the formula locally, so two processes fed the same snapshot can never
 # compute a different number for it.
 # -----------------------------------------------------------------------------------

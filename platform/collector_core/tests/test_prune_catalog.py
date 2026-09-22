@@ -267,6 +267,22 @@ def test_every_pruned_trade_file_is_recorded_as_an_archive_gap(tmp_path: Path) -
     assert load_gaps(str(catalog), _IID) == [(span.start_ns, span.end_ns)]
 
 
+def test_a_leaf_that_is_not_an_instrument_id_is_kept_and_reported(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """No venue can be parsed, so no candle store can prove its days: retained, never pruned."""
+    catalog, candles = tmp_path / "catalog", tmp_path / "candles"
+    candles.mkdir()
+    odd = _trade_file(catalog, 10, iid="notanid")
+    with caplog.at_level(logging.WARNING):
+        delete, kept = plan_trade_prune(str(catalog), str(candles), 7, time.time_ns())
+    assert delete == []
+    assert kept == [("notanid", _day(10), "unverified")]
+    assert "not an instrument id" in caplog.text
+    assert main(["--catalog", str(catalog), "--candles-dir", str(candles), "--apply"]) == 0
+    assert odd.exists()
+
+
 def test_an_unparseable_trade_file_name_is_skipped_not_deleted(tmp_path: Path) -> None:
     catalog, candles = tmp_path / "catalog", tmp_path / "candles"
     candles.mkdir()

@@ -231,6 +231,17 @@ def _resolve(dotted: str) -> object:
     raise ModuleNotFoundError(dotted)
 
 
+def _shipped(module: str) -> bool:
+    """
+    Whether this image ships `module`, found by its full dotted name: a stranger package that
+    merely shares the top-level name (`common`) must not make a shim look shipped.
+    """
+    try:
+        return importlib.util.find_spec(module) is not None
+    except ModuleNotFoundError:  # an absent parent package
+        return False
+
+
 def _require_shipped(module: str) -> None:
     """
     Skip, with the reason shown, a shim whose package this image does not ship.
@@ -238,9 +249,8 @@ def _require_shipped(module: str) -> None:
     The live_paper image deliberately ships no collector (AD-8): there a shim of an absent
     package cannot be imported. `make test` (collector image) checks every one.
     """
-    top = module.split(".")[0]
-    if importlib.util.find_spec(top) is None:
-        pytest.skip(f"{top} is not shipped in this image; checked by `make test`")
+    if not _shipped(module):
+        pytest.skip(f"{module} is not shipped in this image; checked by `make test`")
 
 
 def _import_fresh(module: str, monkeypatch: pytest.MonkeyPatch) -> object:
@@ -309,7 +319,7 @@ def test_each_kernel_data_class_is_registered_for_arrow_exactly_once() -> None:
         importlib.import_module(module)
     whole = {s.shim for s in _SHIM_NAMES if s.whole_module and s.target.startswith("kernel.")}
     for shim in sorted(whole):
-        if importlib.util.find_spec(shim.split(".")[0]) is None:
+        if not _shipped(shim):
             continue  # not shipped in this image (live_paper); `make test` imports every one
         fresh = shim not in sys.modules
         with (

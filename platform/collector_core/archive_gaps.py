@@ -70,7 +70,22 @@ def __getattr__(name: str) -> object:
 def record_gap(
     catalog_path: str, iid: str, from_ns: int, to_ns: int, reason: str, count: int
 ) -> None:
-    """Append one gap marker; a failure is ledgered, never raised (callers must carry on)."""
+    """
+    Append one gap marker; a failure is ledgered, never raised (callers must carry on).
+
+    An inverted span (a backward wall-clock step between a lost trade's arrival and the flush
+    puts `now` before its `ts_init`) is written as the ordered span and ledgered
+    (`archive_gaps.inverted_span`): `decode` refuses an inverted line, which would wedge the
+    rebuild of that instrument until the file is hand-edited, and the ordered span still covers
+    the rows the marker protects.
+    """
+    if from_ns > to_ns:
+        error_ledger.record(
+            "archive_gaps.inverted_span",
+            f"{iid} {reason}: from_ns {from_ns} > to_ns {to_ns} (clock stepped back?); "
+            "recorded as the ordered span",
+        )
+        from_ns, to_ns = to_ns, from_ns
     line = archive_markers.encode(ArchiveGap(iid, from_ns, to_ns, reason, count))
     path = archive_markers.path_for(catalog_path, iid)
     try:

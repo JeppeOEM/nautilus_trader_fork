@@ -50,11 +50,24 @@ def test_from_path_uses_the_stem() -> None:
 
 
 @pytest.mark.parametrize(
-    "stem", ["", "not-a-catalog-file", "2026-06-30T17-17-34Z_2026-06-30T17-18-00-0Z", "a_b"]
+    "stem",
+    [
+        "",
+        "not-a-catalog-file",
+        "2026-06-30T17-17-34Z_2026-06-30T17-18-00-0Z",
+        "a_b",
+        "2026-06-30T17-18-00-000000000Z_2026-06-30T17-17-34-103475440Z",  # inverted
+    ],
 )
 def test_a_stem_the_catalog_did_not_write_raises(stem: str) -> None:
     with pytest.raises(ValueError):
         CatalogFileSpan.from_stem(stem)
+
+
+def test_an_equal_bound_stem_is_a_span_of_one_instant() -> None:
+    stem = "2026-06-30T17-17-34-103475440Z_2026-06-30T17-17-34-103475440Z"
+    span = CatalogFileSpan.from_stem(stem)
+    assert span.start_ns == span.end_ns
 
 
 def test_covers_and_overlaps() -> None:

@@ -44,6 +44,13 @@ def test_a_malformed_line_raises_naming_it(line: str) -> None:
         archive_markers.decode(line)
 
 
+def test_encode_refuses_an_inverted_span() -> None:
+    """`decode` refuses the line, so the kernel never produces it."""
+    with pytest.raises(ValueError, match="inverted archive-gap span"):
+        archive_markers.encode(ArchiveGap("X.DYDX", 6, 5, "write_failed", 1))
+    assert archive_markers.decode(archive_markers.encode(ArchiveGap("X.DYDX", 5, 5, "p", 0)))
+
+
 def test_path_for_and_in_gap() -> None:
     assert archive_markers.path_for("/cat", "X.DYDX") == Path("/cat/_archive_gaps/X.DYDX.jsonl")
     assert archive_markers.in_gap(5, [(1, 5)])

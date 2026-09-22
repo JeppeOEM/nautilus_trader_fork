@@ -653,16 +653,24 @@ _CACHE_DECORATORS = frozenset({"cache", "lru_cache", "cached_property"})
 
 
 def _is_mutable_value(value: ast.expr | None) -> bool:
+    if isinstance(value, ast.Tuple | ast.List) and any(map(_is_mutable_value, value.elts)):
+        return True  # `A, B = [], []` and `X = ({},)`
+    return _is_mutable_scalar(value)
+
+
+def _is_mutable_scalar(value: ast.expr | None) -> bool:
     callee = value.func if isinstance(value, ast.Call) else None
     name = getattr(callee, "id", None) or getattr(callee, "attr", None)
     return isinstance(value, _MUTABLE_LITERALS) or name in _MUTABLE_FACTORIES
 
 
 def _decorator_names(node: ast.AST) -> set[str]:
-    names = set()
+    names: set[str] = set()
     for decorator in getattr(node, "decorator_list", []):
         target = decorator.func if isinstance(decorator, ast.Call) else decorator
-        names.add(getattr(target, "id", None) or getattr(target, "attr", None))
+        name = getattr(target, "id", None) or getattr(target, "attr", None)
+        if isinstance(name, str):
+            names.add(name)
     return names
 
 
@@ -679,10 +687,12 @@ def _state_sites(statements: list[ast.stmt]) -> list[str]:
                 found.append(f"line {node.lineno} (memoising cache)")
         elif isinstance(node, ast.ClassDef):
             found += _state_sites(node.body)
-        elif isinstance(node, ast.If | ast.Try | ast.With):
+        elif isinstance(node, ast.If | ast.Try | ast.With | ast.For | ast.AsyncFor | ast.While):
             nested = [*node.body, *getattr(node, "orelse", []), *getattr(node, "finalbody", [])]
             nested += [stmt for handler in getattr(node, "handlers", []) for stmt in handler.body]
             found += _state_sites(nested)
+        elif isinstance(node, ast.Match):
+            found += _state_sites([stmt for case in node.cases for stmt in case.body])
     return found
 
 
@@ -732,6 +742,18 @@ def test_kernel_purity_rule_catches_each_kind() -> None:
         "line 7",
         "line 9 (memoising cache)",
     ]
+    looped = ast.parse(
+        "for _ in ():\n    F = {}\nwhile False:\n    G = []\nelse:\n    H = set()\n"
+        "match 1:\n    case 1:\n        I = dict()\nJ, K = [], ()\nL = ({},)\nM = (1, (2,))\n"
+    )
+    assert _mutable_module_state(looped) == [
+        "line 2",
+        "line 4",
+        "line 6",
+        "line 9",
+        "line 10",
+        "line 11",
+    ]
 
 
 # Venue REST: every URL and request is built in `kernel.venue_http` (AD-D3). `ranking_engine`'s
@@ -746,6 +768,41 @@ NON_VENUE_HTTP_CLIENTS: dict[str, str] = {
     "ml_signals.watchlist": "the local data_api HTTP API",
 }
 _VENUE_URL = re.compile(r"https?://[^\s\"']*(?:dydx|bybit|hyperliquid)", re.IGNORECASE)
+
+
+def _docstrings(tree: ast.AST) -> set[int]:
+    """`id()` of every docstring constant: a citation of the venue's docs is not a request."""
+    found = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+            head = node.body[0] if node.body else None
+            if isinstance(head, ast.Expr) and isinstance(head.value, ast.Constant):
+                found.add(id(head.value))
+    return found
+
+
+def _venue_url_literals(tree: ast.AST) -> list[int]:
+    """Lines whose string literal (plain or f-string part) holds a venue URL; not comments/docs."""
+    docs = _docstrings(tree)
+    return [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and id(node) not in docs
+        and _VENUE_URL.search(node.value)
+    ]
+
+
+def test_venue_url_rule_reads_literals_not_comments_or_docstrings() -> None:
+    tree = ast.parse(
+        '"""See https://docs.dydx.trade/x for the wire format."""\n'
+        "# https://api.bybit.com/v5 is the base\n"
+        "def f():\n    'https://api.hyperliquid.xyz/info in a docstring'\n"
+        "    a = 'https://api.bybit.com/v5'\n    b = f'https://indexer.dydx.trade/{a}'\n"
+        "    return 'https://example.com/none'\n"
+    )
+    assert _venue_url_literals(tree) == [5, 6]
 
 
 def _judged_sources() -> dict[str, Path]:
@@ -773,9 +830,20 @@ def _urllib_aliases(tree: ast.AST) -> set[str]:
     }
 
 
+def _urllib_module_aliases(tree: ast.AST) -> set[str]:
+    """Local names bound to the `urllib.request` module (`import ... as`, `from urllib import`)."""
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            found |= {a.asname for a in node.names if a.name == "urllib.request" and a.asname}
+        elif isinstance(node, ast.ImportFrom) and node.module == "urllib":
+            found |= {a.asname or a.name for a in node.names if a.name == "request"}
+    return found
+
+
 def _urllib_calls(tree: ast.AST) -> list[int]:
     """Lines calling `urllib.request.Request`/`urlopen` (however imported or aliased)."""
-    aliases = _urllib_aliases(tree)
+    aliases, modules = _urllib_aliases(tree), _urllib_module_aliases(tree)
     lines = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
@@ -784,7 +852,12 @@ def _urllib_calls(tree: ast.AST) -> list[int]:
         if isinstance(func, ast.Name) and func.id in aliases:
             lines.append(node.lineno)
         elif isinstance(func, ast.Attribute) and func.attr in _URLLIB_REQUEST_NAMES:
-            if func.attr == "urlopen" or "urllib" in ast.unparse(func):
+            owner = func.value
+            if (
+                func.attr == "urlopen"
+                or "urllib" in ast.unparse(func)
+                or (isinstance(owner, ast.Name) and owner.id in modules)
+            ):
                 lines.append(node.lineno)
         elif isinstance(func, ast.Name) and func.id == "urlopen":
             lines.append(node.lineno)
@@ -806,19 +879,18 @@ def test_venue_http_rule_sees_aliases_and_the_dydx_url() -> None:
         "from urllib.request import Request as R\nimport urllib.request\n"
         "from nautilus_trader.core.nautilus_pyo3 import get_dydx_http_url\n"
         "R('u')\nurllib.request.urlopen('u')\nRequest('not urllib')\n"
+        "import urllib.request as ur\nfrom urllib import request as rq\nfrom urllib import request\n"
+        "ur.Request('u')\nrq.Request('u')\nrequest.Request('u')\nother.Request('not urllib')\n"
     )
-    assert _urllib_calls(tree) == [4, 5]
+    assert _urllib_calls(tree) == [4, 5, 10, 11, 12]
     assert _dydx_url_builders(tree) == [3]
 
 
 def _venue_http_offenders() -> dict[str, list[str]]:
     offenders: dict[str, list[str]] = {}
     for module, path in _judged_sources().items():
-        text = path.read_text()
-        sites = [
-            f"URL line {text.count(chr(10), 0, m.start()) + 1}" for m in _VENUE_URL.finditer(text)
-        ]
-        tree = ast.parse(text)
+        tree = ast.parse(path.read_text())
+        sites = [f"URL line {line}" for line in _venue_url_literals(tree)]
         sites += [f"dYdX URL line {line}" for line in _dydx_url_builders(tree)]
         if module not in NON_VENUE_HTTP_CLIENTS:
             sites += [f"request line {line}" for line in _urllib_calls(tree)]
@@ -858,34 +930,67 @@ _ID_SUFFIX = re.compile(r"^[.-][A-Z]")
 def _suffix_dispatches(tree: ast.AST) -> list[int]:
     lines = []
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Call) or getattr(node.func, "attr", None) != "endswith":
+        if not isinstance(node, ast.Call):
             continue
-        arg = node.args[0] if node.args else None
+        func = node.func
+        if not isinstance(func, ast.Attribute) or func.attr != "endswith":
+            continue
+        # `i.endswith(x)` and the unbound spelling `str.endswith(i, x)`
+        unbound = isinstance(func.value, ast.Name) and func.value.id == "str"
+        args = node.args[1:] if unbound else node.args
+        arg = args[0] if args else None
         candidates = arg.elts if isinstance(arg, ast.Tuple) else [arg]  # endswith((".A", ".B"))
         if any(_is_id_suffix(candidate) for candidate in candidates):
             lines.append(node.lineno)
     return lines
 
 
+def _joins_a_suffix(value: ast.expr) -> bool:
+    """`'.' + v` (a constant separator on the left of a concatenation)."""
+    return (
+        isinstance(value, ast.BinOp)
+        and isinstance(value.op, ast.Add)
+        and isinstance(value.left, ast.Constant)
+        and isinstance(value.left.value, str)
+        and value.left.value.endswith((".", "-"))
+    )
+
+
+def _formats_a_suffix(value: ast.expr) -> bool:
+    """`f'.{v}'` or `f'{a}.{v}'`: a separator part directly before a formatted part."""
+    if not isinstance(value, ast.JoinedStr):
+        return False
+    return any(
+        isinstance(part, ast.Constant)
+        and str(part.value).endswith((".", "-"))
+        and isinstance(following, ast.FormattedValue)
+        for part, following in zip(value.values, value.values[1:], strict=False)
+    )
+
+
 def _is_id_suffix(arg: ast.expr | None) -> bool:
+    if arg is None:
+        return False
     if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
         return bool(_ID_SUFFIX.match(arg.value))
-    head = arg.values[0] if isinstance(arg, ast.JoinedStr) and arg.values else None
-    return isinstance(head, ast.Constant) and head.value in {".", "-"}
+    return _joins_a_suffix(arg) or _formats_a_suffix(arg)
 
 
 def test_suffix_rule_sees_literals_formats_and_tuples() -> None:
     tree = ast.parse(
         "i.endswith('.BYBIT')\ni.endswith(f'.{v}')\ni.endswith(('.A', '.B'))\n"
-        "p.endswith('.parquet')\n"
+        "p.endswith('.parquet')\ni.endswith('.' + v)\ni.endswith(f'{a}.{v}')\n"
+        "str.endswith(i, '.BYBIT')\np.endswith(f'{stem}.parquet')\ni.endswith(f'{a}-{v}')\n"
+        "q.endswith(v + '.')\n"
     )
-    assert _suffix_dispatches(tree) == [1, 2, 3]
+    assert _suffix_dispatches(tree) == [1, 2, 3, 5, 6, 7, 9]
 
 
 def test_venue_dispatch_parses_ids_only_through_kernel_venues() -> None:
     """
-    Known limit: this catches the suffix-test shape every former parser used (`endswith`), not an
-    arbitrary hand-rolled `rpartition`; reviewers keep `kernel.venues` the only parser otherwise.
+    Known limit: this catches the suffix-test shape every former parser used (`endswith`, bound or
+    unbound, over a literal, a `'.' + v` join or an f-string), not an arbitrary hand-rolled
+    `rpartition`/`split`/slice; reviewers keep `kernel.venues` the only parser otherwise.
     """
     offending = sorted(
         f"{path.relative_to(PLATFORM_DIR)}:{line}"

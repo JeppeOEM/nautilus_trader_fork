@@ -48,9 +48,12 @@ NS_PER_DAY = 86_400 * NS_PER_S
 MAX_TS_INIT_SKEW_NS = 300 * NS_PER_S
 
 # How far the read helpers widen a file's `ts_init` span, on both sides, when choosing which files
-# can hold rows of a `ts_event` window (the exact `ts_event` filter then decides). Every live row's
-# skew is far below it: a venue-timed row trails by at most catch-up + 1 s + hold-back, and a
-# venue clock can run ahead by `_VENUE_AHEAD_NS` (asserted in `platform/tests/test_skew_constants`).
+# can hold rows of a `ts_event` window (the exact `ts_event` filter then decides). A row's skew has
+# two independent directions, and the symmetric widening must cover each on its own: a venue-timed
+# row's `ts_init` trails its `ts_event` by at most catch-up + 1 s + hold-back, and a venue clock
+# can run ahead of ours by hold-back + `_VENUE_AHEAD_NS`. `Collector._check_skew_budget` and
+# `platform/tests/test_skew_constants` bound the *sum* of the two terms, a deliberately
+# conservative ceiling on either direction.
 # Known limit: a backfilled trade's second row is not re-sampled, so a snapshot row's skew never
 # approaches `MAX_TS_INIT_SKEW_NS`; if one ever could, this margin must grow to that bound (more
 # files opened per read). Asserted <= `MAX_TS_INIT_SKEW_NS`.
@@ -94,9 +97,15 @@ class CatalogFileSpan:
 
     @classmethod
     def from_stem(cls, stem: str) -> "CatalogFileSpan":
-        """Parse a file-name stem; `ValueError` for a name the catalog did not write."""
+        """
+        Parse a file-name stem; `ValueError` for a name the catalog did not write, including an
+        inverted span (`overlaps`/`covers` would answer for a span that can hold no row).
+        """
         first, _, last = stem.partition("_")
-        return cls(_stamp_ns(first), _stamp_ns(last))
+        span = cls(_stamp_ns(first), _stamp_ns(last))
+        if span.start_ns > span.end_ns:
+            raise ValueError(f"inverted catalog file span {stem!r}")
+        return span
 
     @classmethod
     def from_path(cls, path: str | Path) -> "CatalogFileSpan":
