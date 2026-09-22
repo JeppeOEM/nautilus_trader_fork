@@ -133,3 +133,27 @@ def test_module_never_writes_or_builds_a_catalog() -> None:
     assert "ParquetDataCatalog" not in names | attrs
     forbidden = {"write_table", "write_data", "rename", "replace", "unlink", "remove", "rmtree"}
     assert attrs & forbidden == set()
+
+
+def test_the_projected_columns_all_exist_in_the_snapshot_schema() -> None:
+    """
+    `_OHLC_COLUMNS` is `SecondOHLC._fields`, so a field rename would silently project columns the
+    Parquet files do not hold -- and `_ohlc_rows`/`second_ohlc_arrays` substitute `None`/`0.0` for
+    an absent column, turning the whole catalog's candles into nulls with no error.
+    """
+    schema_names = set(DydxSecondSnapshot.schema().names)
+    assert set(catalog_files._OHLC_COLUMNS) <= schema_names
+
+
+def test_the_array_reader_projects_the_same_columns_it_reads() -> None:
+    """`second_ohlc_arrays` names its columns literally; they must be the projected ones."""
+    read_literally = {
+        "ts_event",
+        "open_price",
+        "high_price",
+        "low_price",
+        "close_price",
+        "buy_volume",
+        "sell_volume",
+    }
+    assert read_literally == set(catalog_files._OHLC_COLUMNS)

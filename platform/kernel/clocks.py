@@ -81,6 +81,12 @@ def _stamp_ns(stamp: str) -> int:
     """`2026-06-30T17-17-34-103475440Z` (a catalog filename bound) -> epoch ns; else `ValueError`."""
     date, _, clock = stamp.rstrip("Z").partition("T")
     hour, minute, second, nanos = clock.split("-")
+    # The fractional field is positional, not scaled: a shorter one would be read as fewer ns and
+    # place the bound at a silently wrong instant, which is worse than refusing the name. The
+    # catalog always writes nine digits (`unix_nanos_to_iso8601` never trims), so this refuses
+    # only names it did not write.
+    if len(nanos) != 9 or not nanos.isdigit():
+        raise ValueError(f"not a catalog file stamp: {stamp!r}")
     moment = datetime.strptime(f"{date} {hour}:{minute}:{second}", "%Y-%m-%d %H:%M:%S")  # noqa: DTZ007 (UTC set below)
     return int(moment.replace(tzinfo=UTC).timestamp()) * NS_PER_S + int(nanos)
 

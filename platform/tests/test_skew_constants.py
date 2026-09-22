@@ -49,9 +49,13 @@ _VENUE_CONFIGS = ("dydx_collector", "bybit_collector", "hyperliquid_collector")
 
 
 def _hold_back_seconds(node: object) -> list[float]:
+    # A list is walked too: `tomllib` parses an array-of-tables (`[[instruments]]`) into a list of
+    # dicts, so a dict-only walk would skip such a value and pass this guard vacuously.
     if isinstance(node, dict):
         found = [float(v) for k, v in node.items() if k == "hold_back_seconds"]
         return found + [x for v in node.values() for x in _hold_back_seconds(v)]
+    if isinstance(node, list):
+        return [x for v in node for x in _hold_back_seconds(v)]
     return []
 
 
@@ -112,3 +116,8 @@ def test_the_collector_refuses_a_hold_back_beyond_the_read_margin() -> None:
     with pytest.raises(ValueError, match="hold_back_seconds"):
         collector._check_skew_budget(headroom - collector._VENUE_AHEAD_NS + 1)
     assert "_check_skew_budget" in _names_in(collector.Collector.__init__)
+
+
+def test_the_config_walk_reads_an_array_of_tables() -> None:
+    """`[[section]]` parses to a list: a dict-only walk would pass this whole guard vacuously."""
+    assert _hold_back_seconds({"collector": [{"hold_back_seconds": 7.0}]}) == [7.0]

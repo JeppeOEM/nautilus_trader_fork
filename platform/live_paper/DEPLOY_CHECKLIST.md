@@ -35,11 +35,11 @@ Baseline before starting: `make test-live-paper` passes (34/34 as of writing).
 
 ## Build & static checks
 
-- [ ] `make build-base`, then build the `live-paper` image cleanly (ml_signals
-      + live_paper copied in, no dydx_collector).
+- [ ] `make build-base`, then build the `live-paper` image cleanly (kernel
+      + live_paper + observability copied in, no dydx_collector, no ml_signals).
 - [ ] `ruff check`, `ruff format --check`, `mypy` over `platform/live_paper/`
-      and `platform/ml_signals/` (indicators are imported directly into the
-      live strategy now).
+      and `platform/kernel/` (the indicators the live strategy imports moved to
+      the shared kernel in Story 23.2; `ml_signals` is no longer in this image).
 - [ ] `make test-live-paper` inside the actual image, not just host pytest —
       catches missing deps in `requirements.txt`.
 

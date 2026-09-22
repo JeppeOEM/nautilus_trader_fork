@@ -43,7 +43,8 @@ def test_stem_parses_both_bounds() -> None:
 
 def test_from_path_uses_the_stem() -> None:
     path = (
-        "/c/data/trade_tick/X.BYBIT/2026-01-01T00-00-00-000000001Z_2026-01-01T00-00-01-0Z.parquet"
+        "/c/data/trade_tick/X.BYBIT/"
+        "2026-01-01T00-00-00-000000001Z_2026-01-01T00-00-01-000000000Z.parquet"
     )
     span = CatalogFileSpan.from_path(path)
     assert (span.start_ns % NS_PER_DAY, span.end_ns % NS_PER_DAY) == (1, NS_PER_S)
@@ -96,3 +97,10 @@ def test_the_skew_bound_and_the_read_margin() -> None:
     """
     assert MAX_TS_INIT_SKEW_NS == 300 * NS_PER_S
     assert 0 < READ_SPAN_MARGIN_NS <= MAX_TS_INIT_SKEW_NS
+
+
+def test_a_stamp_whose_fractional_field_is_not_nanoseconds_is_refused() -> None:
+    """A shorter fractional field would parse to a silently wrong instant, not an error."""
+    for stamp in ("2026-06-30T17-17-34-103475Z", "2026-06-30T17-17-34-1034754400Z"):
+        with pytest.raises(ValueError, match="not a catalog file stamp"):
+            CatalogFileSpan.from_stem(f"{stamp}_{stamp}")

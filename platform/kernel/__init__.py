@@ -25,8 +25,17 @@ the one zstd `write_table` patch (`parquet_compat`) -- and nothing else.
 
 The kernel imports no context (not even `observability`), holds no module-level mutable state,
 no store, no config loader and no ledger call, so every context may import it without importing
-anything else (`platform/tests/test_boundaries.py` enforces all of it). Its only effects outside
-its own namespace are the two sanctioned ones: each `Data` class's single `register_arrow` at
-import (nautilus's Arrow registry, counted by `platform/tests/test_namespace.py`) and the zstd
-`write_table` wrapper, installed only when `parquet_compat.apply_zstd_default()` is called.
+anything else (`platform/tests/test_boundaries.py` enforces it).
+
+Known limit: that guard reads the source with `ast`, so it judges what a binding *looks* like. It
+catches a mutable literal, a call to one of the known mutable factories, and any unsanctioned bare
+call at module scope; it cannot see mutable state reached through a name it has no type for
+(`X = SomeMutableClass()`) or captured in a closure. Upgrade path: bind the check to runtime types
+(import each kernel module and walk its module dict for a non-hashable value) once the kernel holds
+a module-level object the AST rule cannot classify.
+
+Its only effects outside its own namespace are the two sanctioned ones: each `Data` class's single
+`register_arrow` at import (nautilus's Arrow registry, counted by
+`platform/tests/test_namespace.py`) and the zstd `write_table` wrapper, installed only when
+`parquet_compat.apply_zstd_default()` is called.
 """
