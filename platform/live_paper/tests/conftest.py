@@ -76,11 +76,11 @@ def _keep_nautilus_log_guard_alive():
     deferred-work.md's "Resolved: root cause of the BacktestEngine/BacktestNode native
     abort" entry).
 
-    `live_paper/tests` is a separate pytest collection root from `ml_signals/tests` and
+    `live_paper/tests` is a separate pytest collection root from `research/tests` and
     does not inherit that suite's own copy of this fixture -- each `TradingNode`/
     `BacktestEngine` construction re-initializes Nautilus's Rust logging subsystem unless
     at least one live `LogGuard` is kept alive for the whole session (see
-    `ml_signals/tests/conftest.py` for the full mechanism writeup this mirrors verbatim).
+    `research/tests/conftest.py` for the full mechanism writeup this mirrors verbatim).
     """
     engine = BacktestEngine(config=BacktestEngineConfig(logging=LoggingConfig(log_level="ERROR")))
     yield

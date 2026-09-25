@@ -362,8 +362,8 @@ service name, via `ERROR_LEDGER_SERVICE`).
 
 Everything here is computed **on read** from the raw types in §1 — nothing in this
 section is stored back to Parquet. Since Story 24.2 every value a UI shows is computed in the
-`views/` read-model context (§2.4, §2.6, §2.7, §2.10 moved there from `ml_signals/`, whose old
-module paths are deprecated re-exports); `data_api` and `bot_tui` only format and transport it. Per SSOT-01/02 (`platform/CLAUDE.md`), stateless
+`views/` read-model context (§2.4, §2.6, §2.7, §2.10 moved there from `ml_signals/`; the old
+module paths' re-exports were deleted in Story 24.4); `data_api` and `bot_tui` only format and transport it. Per SSOT-01/02 (`platform/CLAUDE.md`), stateless
 single-snapshot formulas live as plain functions in `kernel/indicators.py` (the shared kernel,
 Story 23.2; the `ml_signals.indicators` re-export was deleted in Story 24.2); stateful/rolling
 indicators are classes, and for anything shown in a live UI, exactly one process
@@ -508,10 +508,13 @@ Bridges §1's Parquet catalog and the SQLite `metrics_store` (§3.4). One entry 
   `DB_WRITE_INTERVAL_SECONDS` (60s, `engine.py`) to populate the
   `pct_1h`/`pct_24h`/`volatility` fields in the live ranking (§3).
 
-### 2.9 `rank_history.py` / `watchlist.py`
+### 2.9 `rank_history.py` / `research/watchlist.py`
+
+`[amended 2026-09-25: Story 24.4 -- `watchlist.py` moved from `ml_signals/` to the research
+context; `ml_signals.watchlist` is a deprecated re-export until Story 25.2.]`
 
 Thin, dependency-light HTTP fetch helpers, not computations: `fetch_rank_history`
-and `fetch_watchlist` pull already-computed data from the running `data_api`'s HTTP
+(`ml_signals/rank_history.py`) and `fetch_watchlist` (`research/watchlist.py`) pull already-computed data from the running `data_api`'s HTTP
 API (`/api/metrics/nearest/{iid}`, `/api/rankings`) for scripts/notebooks that don't want to
 import the full dependency set (fastapi, redis).
 

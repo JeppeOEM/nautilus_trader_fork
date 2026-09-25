@@ -13,27 +13,29 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-Lean, dependency-light fetch helper for the live Watchlist (FR-7).
+Deprecated re-export shim (Story 24.4): `ml_signals.watchlist` moved to the research context
+(`research.watchlist`).
 
-Deliberately dependency-light: a backtest script or Jupyter notebook
-that only wants the current coin-set should not have to import aiohttp, plotly,
-redis, or every indicator class just to call fetch_watchlist().
+Pure re-export, defines nothing: every name here *is* the `research.watchlist` object. Import from
+`research.watchlist` instead, e.g. `from research.watchlist import fetch_watchlist`.
 """
 
-import json
-import urllib.request
+import warnings
+
+from research.watchlist import fetch_watchlist
 
 
-def fetch_watchlist(data_api_url: str = "http://127.0.0.1:9100") -> list[str]:
-    """
-    Fetch the current live Watchlist coin-set from a running data_api.
+__all__ = [
+    "fetch_watchlist",
+]
 
-    Requires data_api to be up and reachable at data_api_url -- the live Watchlist only
-    exists as ranking_engine's published rankings, which data_api relays at /api/rankings
-    (503 until its first message arrives, which raises here rather than returning []).
-    """
-    url = f"{data_api_url.rstrip('/')}/api/rankings"
-    request = urllib.request.Request(url)  # noqa: S310 (local data_api, not a remote host)
-    with urllib.request.urlopen(request, timeout=10) as response:  # noqa: S310
-        items = json.load(response)["items"]
-    return [r["instrument_id"] for r in items if isinstance(r, dict) and "instrument_id" in r]
+REMOVE_AFTER = "25-2-ranking-context-rankingboard-replaces-module-globals"
+
+
+# Attributed to the importing module, not to importlib's frames.
+warnings.warn(
+    "ml_signals.watchlist moved to research.watchlist (Story 24.4); "
+    f"this shim is removed after {REMOVE_AFTER}",
+    DeprecationWarning,
+    skip_file_prefixes=("<frozen importlib",),
+)

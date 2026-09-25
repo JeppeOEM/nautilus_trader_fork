@@ -57,8 +57,6 @@ from decimal import Decimal
 
 from kernel.second_snapshot import DydxSecondSnapshot
 
-from ml_signals.strategies.snapshot_strategy import SnapshotStrategy
-from ml_signals.strategies.snapshot_strategy import SnapshotStrategyConfig
 from nautilus_trader.backtest.engine import BacktestEngine
 from nautilus_trader.backtest.engine import BacktestEngineConfig
 from nautilus_trader.config import LoggingConfig
@@ -80,6 +78,8 @@ from nautilus_trader.model.instruments import CryptoPerpetual
 from nautilus_trader.model.objects import Money
 from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
+from research.strategies.snapshot_strategy import SnapshotStrategy
+from research.strategies.snapshot_strategy import SnapshotStrategyConfig
 
 
 _IID = InstrumentId(Symbol("BTC-USD-PERP"), Venue("DYDX"))

@@ -271,14 +271,14 @@ free allowances change -- check the current pricing pages before choosing.
 
 ```bash
 # from the repo root (default catalog path is platform/data/catalog)
-PYTHONPATH=platform python -m ml_signals.strategies.backtest_dydx
+PYTHONPATH=platform python -m research.strategies.backtest_dydx
 ```
 
 Streams trade ticks from the catalog and aggregates bars internally at a configurable wall-clock interval. Adjust `bar_interval` (e.g. `"1-SECOND"`, `"1-MINUTE"`, `"5-MINUTE"`), `buy_threshold`, `sell_threshold` by passing args to `run()`.
 
 By default `run()` backtests every coin in the live Watchlist (requires `data_api` running -- if it's not reachable, `run()` raises a clear error rather than a raw connection traceback) and returns a `dict[str, BacktestResult]` keyed by symbol. Pass `symbols=["BTC-USD-PERP.DYDX", ...]` to backtest an explicit coin-set instead. A Watchlist coin with no matching catalog instrument yet is skipped (logged as a warning, not a crash) rather than aborting the whole run -- check the logs if the returned dict has fewer entries than expected.
 
-See [`ml_signals/BACKTESTING.md`](ml_signals/BACKTESTING.md) for the other backtest runners, how to build a new strategy, and which data feed to subscribe to.
+Strategies are referenced by `ImportableStrategyConfig` string path, `research.strategies.<module>:<Class>` (the `research/` context since Story 24.4). See [`research/BACKTESTING.md`](research/BACKTESTING.md) for the other backtest runners, how to build a new strategy, and which data feed to subscribe to; the notebooks are in `research/notebooks/`.
 
 ---
 

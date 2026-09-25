@@ -1,28 +1,47 @@
+# -------------------------------------------------------------------------------------------------
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
+#  https://nautechsystems.io
+#
+#  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
+#  You may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at https://www.gnu.org/licenses/lgpl-3.0.en.html
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+# -------------------------------------------------------------------------------------------------
 """
-OFIStrategy backtest on 1s snapshots. Run from ml_signals/:
+Deprecated re-export shim (Story 24.4): `ml_signals.run_backtest` moved to the research context
+(`research.run_backtest`).
 
-python run_backtest.py --start 2026-09-05 --end 2026-09-06 [--symbol ETH-USD-PERP.DYDX] [--threshold 2.0]
+Pure re-export, defines nothing: every name here *is* the `research.run_backtest` object. Import
+from `research.run_backtest` instead, e.g. `from research.run_backtest import main`.
+
+`python -m ml_signals.run_backtest` still runs it; use `python -m research.run_backtest`.
 """
 
-import argparse
-import sys
-from pathlib import Path
+import warnings
+
+from research.run_backtest import main
 
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))  # "ml_signals.…" string paths
+__all__ = [
+    "main",
+]
 
-from ml_signals.strategies.backtest_ofi import run
+REMOVE_AFTER = "25-2-ranking-context-rankingboard-replaces-module-globals"
 
 
-p = argparse.ArgumentParser()
-p.add_argument("--symbol", default="BTC-USD-PERP.DYDX")
-p.add_argument("--start", required=True, help="bounded window, e.g. 2026-09-05 (MEM-01)")
-p.add_argument("--end", required=True)
-p.add_argument("--threshold", type=float, default=2.0, help="OFI z-score entry threshold")
-p.add_argument("--warmup", type=int, default=600, help="seconds of data before trading")
-a = p.parse_args()
+# Attributed to the importing module, not to importlib's frames.
+warnings.warn(
+    "ml_signals.run_backtest moved to research.run_backtest (Story 24.4); "
+    f"this shim is removed after {REMOVE_AFTER}",
+    DeprecationWarning,
+    skip_file_prefixes=("<frozen importlib",),
+)
 
-result = run(a.symbol, a.start, a.end, ofi_threshold=a.threshold, warmup_seconds=a.warmup)
-print(f"Events: {result.iterations}")
-print(f"PnL: {result.stats_pnls}")
-print(f"Returns: {result.stats_returns}")
+
+if __name__ == "__main__":
+    main()

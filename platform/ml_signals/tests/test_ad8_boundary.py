@@ -18,35 +18,29 @@ Regression guard for Story 3.1 AC2 / ARCHITECTURE-SPINE.md's AD-8.
 AD-8 binds a named list of ml_signals "reader" modules -- they must never import
 TradingNode, Strategy, or DataEngine (that usage is confined to the new platform/live_paper
 module). Checks for the literal substring "import Strategy" rather than bare "Strategy",
-since backtest_dydx.py/backtest_ofi.py legitimately reference strategies via
-`ImportableStrategyConfig`/`strategy_path="..."` string paths (AD-6's mandated pattern) --
-a bare "Strategy" substring check would false-positive on `ImportableStrategyConfig` and on
-docstring/string mentions of `LogisticTrendStrategy`/`OFIStrategy`, none of which import the
-`Strategy` class itself. Confirmed via `grep -rn "import Strategy" ml_signals` that neither
-file contains that literal substring today.
+which a docstring may mention without importing the class.
 
-Also includes backtest_snapshot.py even though AD-8's spine text doesn't name it explicitly
--- it's the same category of backtest-driver module as backtest_dydx.py/backtest_ofi.py, and
-checking it costs nothing.
+The list's three backtest drivers (backtest_dydx.py, backtest_ofi.py, backtest_snapshot.py)
+moved to research/strategies in Story 24.4 and are checked by research/tests/test_ad8_boundary.py;
+the views/ranking reader modules are checked here. `chart_data.py` became `views/chart_series.py`
+in Story 24.2 (its re-export shim was deleted in Story 24.4), so the guard follows it there.
 
-Lives in ml_signals/tests (not live_paper/tests) because it checks ml_signals' own source
-files -- the live_paper Docker image deliberately does not copy ml_signals in at all (see
-platform/live_paper.dockerfile), so this guard can only run where those files actually exist.
+Lives in ml_signals/tests (not live_paper/tests) because it checks source files the live_paper
+Docker image deliberately does not copy (see platform/live_paper.dockerfile), so this guard can
+only run where those files actually exist.
 """
 
 from pathlib import Path
 
 
-_ML_SIGNALS_DIR = Path(__file__).resolve().parent.parent
+_PLATFORM_DIR = Path(__file__).resolve().parents[2]
 
-# AD-8's exact named reader-module list, plus backtest_snapshot.py (see module docstring).
+# AD-8's named non-backtest reader modules, at their current paths (the backtest drivers are
+# research's).
 _READER_MODULES = (
-    "catalog_stats.py",
-    "chart_data.py",
-    "metrics_computer.py",
-    "backtest_dydx.py",
-    "backtest_ofi.py",
-    "backtest_snapshot.py",
+    "ml_signals/catalog_stats.py",
+    "views/chart_series.py",
+    "ml_signals/metrics_computer.py",
 )
 
 _BANNED_SUBSTRINGS = ("TradingNode", "DataEngine", "import Strategy")
@@ -54,7 +48,7 @@ _BANNED_SUBSTRINGS = ("TradingNode", "DataEngine", "import Strategy")
 
 def test_ad8_reader_modules_never_import_tradingnode_strategy_or_dataengine() -> None:
     for name in _READER_MODULES:
-        path = _ML_SIGNALS_DIR / ("strategies" if name.startswith("backtest_") else "") / name
+        path = _PLATFORM_DIR / name
         assert path.is_file(), f"expected AD-8 reader module not found: {path}"
         text = path.read_text()
         for banned in _BANNED_SUBSTRINGS:

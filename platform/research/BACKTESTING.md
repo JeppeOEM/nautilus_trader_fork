@@ -1,6 +1,7 @@
 # Backtesting & Strategy Development
 
-How to build a strategy and run it against the dYdX catalog in `platform/ml_signals/`.
+How to build a strategy and run it against the dYdX catalog in `platform/research/` (the research
+context since Story 24.4: strategies, runners, the watchlist client and the notebooks).
 
 Governing rules: `platform/CLAUDE.md` NAUT-03 (BacktestNode + BacktestDataConfig only, no
 custom engine) and DESIGN-02 (strategies never import collector internals — depend on
@@ -12,16 +13,19 @@ shared data types only).
 
 ```bash
 # from the repo root (default catalog path is platform/data/catalog)
-PYTHONPATH=platform python -m ml_signals.strategies.backtest_dydx       # LogisticTrendStrategy on internally-aggregated Bars
-PYTHONPATH=platform python -m ml_signals.strategies.backtest_snapshot   # SnapshotStrategy on raw 1s DydxSecondSnapshot
-PYTHONPATH=platform python -m ml_signals.strategies.backtest_ofi        # OFIStrategy on OrderBookDelta + TradeTick + 1-min Bars
+PYTHONPATH=platform python -m research.strategies.backtest_dydx       # LogisticTrendStrategy on internally-aggregated Bars
+PYTHONPATH=platform python -m research.strategies.backtest_snapshot   # SnapshotStrategy on raw 1s DydxSecondSnapshot
+PYTHONPATH=platform python -m research.strategies.backtest_ofi        # OFIStrategy on 1s DydxSecondSnapshot, quotes from level 0
+PYTHONPATH=platform python -m research.run_backtest --start 2026-09-05 --end 2026-09-06   # OFIStrategy, CLI window
 ```
+
+`research/notebooks/backtest.ipynb` runs the same OFI backtest interactively.
 
 Each file's `run()` returns results programmatically (from a notebook/script) and its
 `__main__` block prints a report when run directly. See each file's docstring for
 tuning knobs — e.g. `backtest_dydx.run(symbols=["BTC-USD-PERP.DYDX"], bar_interval="5-MINUTE")`.
 
-`strategies/backtest_dydx.py` defaults to backtesting every coin in the live Watchlist (needs
+`research/strategies/backtest_dydx.py` defaults to backtesting every coin in the live Watchlist (needs
 `data_api` running); pass `symbols=[...]` to skip that dependency.
 
 ---
@@ -30,9 +34,9 @@ tuning knobs — e.g. `backtest_dydx.run(symbols=["BTC-USD-PERP.DYDX"], bar_inte
 
 | Data granularity | Feed | Copy |
 |---|---|---|
-| Bars (aggregated from trades) | `TradeTick` → internal `Bar` | `strategies/backtest_dydx.py` |
-| Raw 1s book snapshots | `DydxSecondSnapshot` | `strategies/backtest_snapshot.py` |
-| Raw order book deltas + trades + bars | `OrderBookDelta`, `TradeTick`, `Bar` | `strategies/backtest_ofi.py` |
+| Bars (aggregated from trades) | `TradeTick` → internal `Bar` | `research/strategies/backtest_dydx.py` |
+| Raw 1s book snapshots | `DydxSecondSnapshot` | `research/strategies/backtest_snapshot.py` |
+| Raw 1s book snapshots, fills at the snapshot's best bid/ask | `DydxSecondSnapshot` + `QuoteTick` derived by `kernel.catalog_files.query_top_of_book` | `research/strategies/backtest_ofi.py` (via `research/strategies/snapshot_backtest.py`) |
 
 Don't write a new backtest runner from scratch — copy the closest match above and swap
 the `strategy_path`/`config_path`/`data=[...]` list.
@@ -74,10 +78,15 @@ class MyStrategy(Strategy):
             self.log.error(f"Instrument not found: {self.config.instrument_id}")
             self.stop()
             return
-        self.subscribe_bars(...)  # or subscribe_trade_ticks / subscribe_order_book_deltas / subscribe_data
+        self.subscribe_bars(
+            ...
+        )  # or subscribe_trade_ticks / subscribe_order_book_deltas / subscribe_data
 
     def on_bar(self, bar: Bar) -> None:
-        if self.portfolio.is_flat(self.config.instrument_id) and bar.close.as_double() > self.config.threshold:
+        if (
+            self.portfolio.is_flat(self.config.instrument_id)
+            and bar.close.as_double() > self.config.threshold
+        ):
             self._submit(OrderSide.BUY)
 
     def _submit(self, side: OrderSide) -> None:
@@ -89,8 +98,8 @@ class MyStrategy(Strategy):
         self.submit_order(order)
 ```
 
-**Conventions used by every strategy here** (`strategies/example_strategy.py`, `strategies/ofi_strategy.py`,
-`strategies/snapshot_strategy.py`):
+**Conventions used by every strategy here** (`research/strategies/example_strategy.py`,
+`research/strategies/ofi_strategy.py`, `research/strategies/snapshot_strategy.py`):
 - `frozen=True` on the config class.
 - `on_start`: look up `self.instrument` via `self.cache.instrument(...)`, `self.stop()` and
   log an error if missing — never assume it's there.
@@ -109,19 +118,26 @@ class MyStrategy(Strategy):
   `tick.aggressor_side` in `on_trade_tick`.
 - Need book-level microstructure (OFI, depth, imbalance) → `subscribe_order_book_deltas`,
   maintain your own `OrderBook(instrument_id, BookType.L2_MBP)` and `apply_delta` in
-  `on_order_book_deltas` (see `strategies/ofi_strategy.py`).
+  `on_order_book_deltas`. Raw deltas exist only for the dYdX instruments opted in via
+  `store_order_book_deltas`; no strategy here uses them (`ofi_strategy.py` moved to the 1s
+  snapshot below), so prefer the snapshot unless you need tick-by-tick resolution.
 - Need the pre-computed 1s snapshot (top-20 levels + per-second buy/sell volume) instead of
   raw deltas → `subscribe_data(DataType(DydxSecondSnapshot), instrument_id=...)`, handle in
-  `on_data` (see `strategies/snapshot_strategy.py`). Cheaper than rebuilding an `OrderBook` if you don't
+  `on_data` (see `research/strategies/snapshot_strategy.py` and `research/strategies/ofi_strategy.py`). Cheaper than rebuilding an `OrderBook` if you don't
   need tick-by-tick delta resolution.
 
 **Reuse existing signal math** — don't reimplement OFI/OBI/microprice/spread. They're in
 `kernel/indicators.py` (`OrderFlowImbalance`, `MultiLevelOFI`, `MultiLevelOBI`,
-`Microprice`, `OnlineLogisticTrend`) and `views/chart_series.py` (was `ml_signals/book_features.py`)
-(`compute_features`, `CancellationTracker`) per SIGNAL-01 in `platform/CLAUDE.md` — raw data is
-stored, signals are computed on read. A new strategy must **not** import `views/` itself: research
-→ views is outside the context graph (`platform/tests/test_boundaries.py`), tolerated only for the one
-existing test until Story 24.4 gives research its own source of these features.
+`Microprice`, `OnlineLogisticTrend`) per SIGNAL-01 in `platform/CLAUDE.md` — raw data is
+stored, signals are computed on read. In-repo, research imports only `kernel` and `observability`:
+never `views/`, `data_api/`, `ranking_engine/` or `ml_signals/`
+(`platform/tests/test_boundaries.py`). Rolling metrics such as pct-change and volatility are
+ranking's (`metrics.db`, the rankings API), never recomputed here.
+
+**Read the catalog through the kernel** — outside a `BacktestDataConfig`, read market-data rows
+with `kernel.catalog_files` (`query_top_of_book`, `query_second_ohlc`: column-projected and
+time-bounded, MEM-01), never `catalog.query`/`trade_ticks`/`read_parquet`
+(`research/tests/test_research_reads.py`). `catalog.instruments(...)` (metadata) is fine.
 
 ---
 
@@ -129,7 +145,8 @@ existing test until Story 24.4 gives research its own source of these features.
 
 Copy the closest existing `backtest_*.py`, then in `_build_run_config`/`run()`:
 
-1. Point `strategy_path`/`config_path` at your new files (`"ml_signals.my_strategy:MyStrategy"`).
+1. Point `strategy_path`/`config_path` at your new files
+   (`"research.strategies.my_strategy:MyStrategy"`).
 2. Set `config={...}` to your `MyStrategyConfig` fields (as plain dict values, not the
    Pydantic model itself).
 3. List every `BacktestDataConfig` your strategy subscribes to. Missing one means the
@@ -137,11 +154,12 @@ Copy the closest existing `backtest_*.py`, then in `_build_run_config`/`run()`:
    - Custom types (anything not a Nautilus built-in, e.g. `DydxSecondSnapshot`) need an
      explicit `client_id=str(venue)` and, if the strategy also needs `cache.instrument()` to
      resolve, a parallel `TradeTick` config purely for instrument auto-registration
-     (see `strategies/backtest_snapshot.py`'s comment on this).
-   - For a `Bar` feed, match `bar_spec` to what's actually in the catalog — only
-     `1-MINUTE` bars are currently collected (`platform/dydx_collector/config.toml`'s
-     `bar_intervals`); anything else needs internal aggregation from `TradeTick`
-     (`strategies/backtest_dydx.py`'s pattern) instead of an `EXTERNAL` bar query.
+     (see `research/strategies/backtest_snapshot.py`'s comment on this).
+   - For a `Bar` feed, aggregate internally from `TradeTick` (`research/strategies/
+     backtest_dydx.py`'s `-LAST-INTERNAL` pattern): the catalog holds no `Bar` at all since
+     minute bars were retired on 2026-09-20 (D-35), so an `EXTERNAL` bar query streams
+     nothing. The `TradeTick` archive is the Story 22.13 raw trade archive, kept for
+     `--trade-retention-days` (`docs/DATA_DICTIONARY.md` §1.1), so bound the window to it.
 4. Trust `BacktestResult.stats_pnls`/`stats_returns` for whether trades happened —
    `total_orders`/`total_positions` were found unreliable (sometimes 0 despite real fills)
    in this pinned nautilus_trader version.
@@ -151,10 +169,10 @@ Copy the closest existing `backtest_*.py`, then in `_build_run_config`/`run()`:
 ## Test it
 
 Per `platform/CLAUDE.md` TEST-01: strategies with real branching/arithmetic need a test. See
-`tests/test_ofi_strategy.py` and `tests/test_snapshot_strategy.py` for the pattern — feed
-the strategy real `Bar`/`OrderBookDelta`/`DydxSecondSnapshot` objects directly (never mock
+`research/tests/test_ofi_strategy.py` and `research/tests/test_snapshot_strategy.py` for the
+pattern — feed the strategy real `Bar`/`TradeTick`/`DydxSecondSnapshot` objects directly (never mock
 Nautilus internals, TEST-03), assert on `portfolio.is_flat`/order submissions.
 
-To backtest-test end-to-end, mirror `tests/test_watchlist_multi_coin_backtest.py` or
-`tests/test_snapshot_backtest_node.py` — always pass an explicit `symbols=[...]`/`symbol=`
+To backtest-test end-to-end, mirror `research/tests/test_watchlist_multi_coin_backtest.py` or
+`research/tests/test_snapshot_backtest_node.py` — always pass an explicit `symbols=[...]`/`symbol=`
 rather than relying on the live Watchlist.

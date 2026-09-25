@@ -48,7 +48,6 @@ from decimal import Decimal
 
 import pytest
 
-from ml_signals.strategies import backtest_dydx
 from nautilus_trader.model.currencies import BTC
 from nautilus_trader.model.currencies import ETH
 from nautilus_trader.model.currencies import USDC
@@ -62,6 +61,7 @@ from nautilus_trader.model.instruments import CryptoPerpetual
 from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
+from research.strategies import backtest_dydx
 
 
 _BTC_IID = InstrumentId(Symbol("BTC-USD-PERP"), Venue("DYDX"))
