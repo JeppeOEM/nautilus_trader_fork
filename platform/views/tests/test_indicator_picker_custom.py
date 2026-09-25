@@ -13,13 +13,14 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-Unit tests for custom_indicators.py's dispatch mechanism (Story 10.1) and its registered
+Unit tests for `views.indicator_picker`'s custom half (was `ml_signals/custom_indicators.py`;
+`replay_indicator`/`catalog_json` are `replay_custom`/`custom_catalog_json`): its dispatch mechanism (Story 10.1) and its registered
 indicators (CumulativeVolumeDelta, Story 10.2; CancelPressure, Story 10.3; OFI to follow,
 Story 10.4).
 
 The dispatch-mechanism tests below register a placeholder entry directly to prove
 replay_indicator's dispatch contract and catalog_json's shape, matching chart_indicators.py's
-own dispatch (proven separately in test_chart_indicators.py) rather than duplicating that
+own dispatch (proven separately in test_indicator_picker_native.py) rather than duplicating that
 coverage here -- they use subset/membership assertions, not exact-dict equality, since real
 entries (CumulativeVolumeDelta and later additions) live in the same module-level catalog.
 """
@@ -29,9 +30,6 @@ import tempfile
 import pytest
 from kernel.second_snapshot import DydxSecondSnapshot
 
-from ml_signals import custom_indicators as ci
-from ml_signals.custom_indicators import CustomIndicatorSpec
-from ml_signals.custom_indicators import ReplayWindow
 from nautilus_trader.model.data import BookOrder
 from nautilus_trader.model.data import OrderBookDelta
 from nautilus_trader.model.data import OrderBookDeltas
@@ -41,6 +39,9 @@ from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
+from views import indicator_picker as ci
+from views.indicator_picker import CustomIndicatorSpec
+from views.indicator_picker import ReplayWindow
 
 
 _IID = "BTC-USD-PERP.DYDX"
@@ -71,30 +72,30 @@ def _placeholder_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_replay_indicator_calls_the_registered_replay_function() -> None:
     candles = [{"t": 0, "c": 2.0}, {"t": 60_000, "c": 3.0}]
-    result = ci.replay_indicator(candles, "PlaceholderCustom", {"scale": 2.0}, _window())
+    result = ci.replay_custom(candles, "PlaceholderCustom", {"scale": 2.0}, _window())
     assert result == {"value": [4.0, 6.0]}
 
 
 def test_replay_indicator_merges_params_over_catalog_defaults() -> None:
     candles = [{"t": 0, "c": 5.0}]
-    result = ci.replay_indicator(candles, "PlaceholderCustom", {}, _window())
+    result = ci.replay_custom(candles, "PlaceholderCustom", {}, _window())
     assert result == {"value": [5.0]}  # default scale=1.0 applied
 
 
 def test_replay_indicator_raises_for_unknown_name() -> None:
     with pytest.raises(ValueError, match="Unknown custom indicator"):
-        ci.replay_indicator([], "NotRegistered", {}, _window())
+        ci.replay_custom([], "NotRegistered", {}, _window())
 
 
 def test_catalog_json_returns_params_and_panel_per_entry() -> None:
     # Subset check, not exact-dict equality -- the catalog also carries real entries
     # (CumulativeVolumeDelta, Story 10.2+) alongside whatever a test adds via monkeypatch.
-    assert ci.catalog_json()["PlaceholderCustom"] == {
+    assert ci.custom_catalog_json()["PlaceholderCustom"] == {
         "params": {"scale": 1.0},
         "panel": "histogram",
     }
     assert (
-        "category" not in ci.catalog_json()["PlaceholderCustom"]
+        "category" not in ci.custom_catalog_json()["PlaceholderCustom"]
     )  # tagged only at the merge point
 
 
@@ -147,16 +148,14 @@ def test_cvd_accumulates_buy_minus_sell_volume_per_candle(monkeypatch: pytest.Mo
         window = ReplayWindow(
             instrument_id=_IID, bar_seconds=3, start_ms=start_ms, end_ms=start_ms + 6000
         )
-        result = ci.replay_indicator(candles, "CumulativeVolumeDelta", {}, window)
+        result = ci.replay_custom(candles, "CumulativeVolumeDelta", {}, window)
         # bucket 1: (5-2)+(1-1)+(0-3) = 0; bucket 2 adds (4-0)+(2-2)+(1-0) = +5 -> running 5
         assert result["value"] == [0.0, 5.0]
 
 
 def test_cvd_returns_none_for_every_candle_in_live_mode() -> None:
     live_window = ReplayWindow(instrument_id=_IID, bar_seconds=60, start_ms=None, end_ms=None)
-    result = ci.replay_indicator(
-        [{"t": 0}, {"t": 60_000}], "CumulativeVolumeDelta", {}, live_window
-    )
+    result = ci.replay_custom([{"t": 0}, {"t": 60_000}], "CumulativeVolumeDelta", {}, live_window)
     assert result == {"value": [None, None]}
 
 
@@ -184,7 +183,7 @@ def test_cvd_flags_a_snapshot_gap_as_none_instead_of_a_flat_carry_forward(
         window = ReplayWindow(
             instrument_id=_IID, bar_seconds=3, start_ms=start_ms, end_ms=start_ms + 6000
         )
-        result = ci.replay_indicator(candles, "CumulativeVolumeDelta", {}, window)
+        result = ci.replay_custom(candles, "CumulativeVolumeDelta", {}, window)
         assert result["value"] == [0.0, None]
 
 
@@ -205,7 +204,7 @@ def test_cvd_resumes_running_total_after_a_gap(monkeypatch: pytest.MonkeyPatch) 
         window = ReplayWindow(
             instrument_id=_IID, bar_seconds=3, start_ms=start_ms, end_ms=start_ms + 9000
         )
-        result = ci.replay_indicator(candles, "CumulativeVolumeDelta", {}, window)
+        result = ci.replay_custom(candles, "CumulativeVolumeDelta", {}, window)
         assert result["value"] == [3.0, None, 6.0]  # 3.0 carries through the gap, then +3.0
 
 
@@ -213,7 +212,10 @@ def test_cvd_registered_in_production_catalog_with_correct_shape() -> None:
     # Exercises the real entry (not a monkeypatched placeholder) through the same dispatch
     # path a request actually uses -- catalog_json() and dashboard's merge point both read
     # this without needing to know CumulativeVolumeDelta's internals.
-    assert ci.catalog_json()["CumulativeVolumeDelta"] == {"params": {}, "panel": "oscillator"}
+    assert ci.custom_catalog_json()["CumulativeVolumeDelta"] == {
+        "params": {},
+        "panel": "oscillator",
+    }
 
 
 # -- Story 10.3: CancelPressure ---------------------------------------------------------------
@@ -287,7 +289,7 @@ def test_cancel_pressure_samples_last_value_in_bucket_and_forward_fills_gaps(
             start_ms=start_ms,
             end_ms=start_ms + 4 * 3000,
         )
-        result = ci.replay_indicator(candles, "CancelPressure", {}, window)
+        result = ci.replay_custom(candles, "CancelPressure", {}, window)
         # Tracker window=200 accumulates events across the whole replay (not per-bucket): by
         # bucket 2 the deque holds DELETE 5.0 (bucket 0) + ADD 3.0 + ADD 4.0 (bucket 2), so
         # pressure = (deleted - added) / total = (5.0 - 7.0) / 12.0 = -1/6 -- but the ADD/SELL
@@ -300,12 +302,15 @@ def test_cancel_pressure_samples_last_value_in_bucket_and_forward_fills_gaps(
 
 def test_cancel_pressure_returns_none_for_every_candle_in_live_mode() -> None:
     live_window = ReplayWindow(instrument_id=_IID, bar_seconds=60, start_ms=None, end_ms=None)
-    result = ci.replay_indicator([{"t": 0}, {"t": 60_000}], "CancelPressure", {}, live_window)
+    result = ci.replay_custom([{"t": 0}, {"t": 60_000}], "CancelPressure", {}, live_window)
     assert result == {"bid_pressure": [None, None], "ask_pressure": [None, None]}
 
 
 def test_cancel_pressure_registered_in_production_catalog_with_correct_shape() -> None:
-    assert ci.catalog_json()["CancelPressure"] == {"params": {"window": 200}, "panel": "histogram"}
+    assert ci.custom_catalog_json()["CancelPressure"] == {
+        "params": {"window": 200},
+        "panel": "histogram",
+    }
 
 
 def test_cancel_pressure_clear_bucket_is_none_and_forward_fill_resumes_after_it(
@@ -341,7 +346,7 @@ def test_cancel_pressure_clear_bucket_is_none_and_forward_fill_resumes_after_it(
             start_ms=start_ms,
             end_ms=start_ms + 3 * 3000,
         )
-        result = ci.replay_indicator(candles, "CancelPressure", {}, window)
+        result = ci.replay_custom(candles, "CancelPressure", {}, window)
         assert result["bid_pressure"] == [1.0, None, 1.0]
         assert result["ask_pressure"] == [0.0, None, 0.0]
 
@@ -369,7 +374,7 @@ def test_cancel_pressure_forward_fill_reverts_to_none_past_the_bucket_cap(
             start_ms=start_ms,
             end_ms=start_ms + (gap_buckets + 2) * 3000,
         )
-        result = ci.replay_indicator(candles, "CancelPressure", {}, window)
+        result = ci.replay_custom(candles, "CancelPressure", {}, window)
         assert result["bid_pressure"][0] == 1.0
         # Still forward-filled at exactly the cap...
         assert result["bid_pressure"][gap_buckets] == 1.0
@@ -417,7 +422,7 @@ def test_ofi_samples_last_value_in_bucket_and_forward_fills_gaps(
             start_ms=start_ms,
             end_ms=start_ms + 4 * 3000,
         )
-        result = ci.replay_indicator(candles, "OrderFlowImbalance", {}, window)
+        result = ci.replay_custom(candles, "OrderFlowImbalance", {}, window)
         assert result["value"] == pytest.approx([None, 3.0, 3.0, 6.0])
 
 
@@ -443,7 +448,7 @@ def test_ofi_forward_fill_reverts_to_none_past_the_bucket_cap(
             start_ms=start_ms,
             end_ms=start_ms + (gap_buckets + 2) * 3000,
         )
-        result = ci.replay_indicator(candles, "OrderFlowImbalance", {}, window)
+        result = ci.replay_custom(candles, "OrderFlowImbalance", {}, window)
         assert result["value"][0] == 3.0
         assert result["value"][gap_buckets] == 3.0
         assert result["value"][gap_buckets + 1] is None
@@ -451,12 +456,12 @@ def test_ofi_forward_fill_reverts_to_none_past_the_bucket_cap(
 
 def test_ofi_returns_none_for_every_candle_in_live_mode() -> None:
     live_window = ReplayWindow(instrument_id=_IID, bar_seconds=60, start_ms=None, end_ms=None)
-    result = ci.replay_indicator([{"t": 0}, {"t": 60_000}], "OrderFlowImbalance", {}, live_window)
+    result = ci.replay_custom([{"t": 0}, {"t": 60_000}], "OrderFlowImbalance", {}, live_window)
     assert result == {"value": [None, None]}
 
 
 def test_ofi_registered_in_production_catalog_with_correct_shape() -> None:
-    assert ci.catalog_json()["OrderFlowImbalance"] == {
+    assert ci.custom_catalog_json()["OrderFlowImbalance"] == {
         "params": {"window": 20},
         "panel": "oscillator",
     }

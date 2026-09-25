@@ -22,8 +22,8 @@ import pyarrow.parquet as pq
 from candles.application.rebuild import parse_date_ns
 from kernel.fold import fold_trades
 from kernel.second_snapshot import DydxSecondSnapshot
-from ml_signals.catalog_stats import query_second_snapshots
 from observability import error_ledger
+from views.catalog_reads import query_second_snapshots
 
 from collector_core.archive_gaps import record_gap
 from collector_core.rebuild_seconds import covered_from

@@ -34,14 +34,17 @@ and `kernel` only. `application/` holds the ports (`VerifiedDays`), the query an
 the rebuild logic and the retention process manager. `infrastructure/` holds `CandleStore`, the only
 read-write opener of a `candles_<venue>.db`, and the `VerifiedDays` adapters.
 
-Composition roots -- each venue entrypoint, the rebuild CLI, `collector_core.nightly`, the two
-archive tools and, until Story 24.2 moves the reads behind views, `data_api`'s two candle routes --
-are what construct `infrastructure`; no context outside candles imports it for any other reason.
+Composition roots -- each venue entrypoint, the rebuild CLI, `collector_core.nightly` and the two
+archive tools -- are what construct `infrastructure`; no context outside candles imports it for any
+other reason. Readers (the views context since Story 24.2) open a store through
+`application.queries.open_store` and call only the query services.
 Known limit: `application/` is not storage-agnostic. `application.sink` and `application.rebuild`
 name `CandleStore` concretely rather than a port, and `application.queries` goes further -- it takes
-a `sqlite3.Connection` in every signature and holds the `SELECT` text itself, so every reader must
-open the file through `infrastructure.connect_ro` to call the application layer at all. The layering
-rule therefore holds by convention rather than by type across those three modules
+a `sqlite3.Connection` in every signature and holds the `SELECT` text itself, so a reader needs a
+SQLite connection to call the application layer at all. `application.queries.open_store` (Story 24.2)
+hands one out through `infrastructure.connect_ro`/`db_path_for_venue`, so readers outside the context
+never import `infrastructure` -- but it is an `application` -> `infrastructure` import in its own
+right. The layering rule therefore holds by convention rather than by type across those three modules
 (`application.prune` shows the shape, declaring the `RetentionStore` Protocol it needs). Upgrade
 path: give them the same treatment -- a read-model port for `queries` above all -- when a second
 store implementation earns one.

@@ -117,9 +117,11 @@ class MyStrategy(Strategy):
 
 **Reuse existing signal math** — don't reimplement OFI/OBI/microprice/spread. They're in
 `kernel/indicators.py` (`OrderFlowImbalance`, `MultiLevelOFI`, `MultiLevelOBI`,
-`Microprice`, `OnlineLogisticTrend`) and `ml_signals/book_features.py`
+`Microprice`, `OnlineLogisticTrend`) and `views/chart_series.py` (was `ml_signals/book_features.py`)
 (`compute_features`, `CancellationTracker`) per SIGNAL-01 in `platform/CLAUDE.md` — raw data is
-stored, signals are computed on read.
+stored, signals are computed on read. A new strategy must **not** import `views/` itself: research
+→ views is outside the context graph (`platform/tests/test_boundaries.py`), tolerated only for the one
+existing test until Story 24.4 gives research its own source of these features.
 
 ---
 

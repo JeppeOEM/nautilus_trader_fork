@@ -19,15 +19,15 @@ urwid import, no I/O.
 Full metric parity with the web dashboard's rankings table (platform/CLAUDE.md SSOT-03):
 every rank entry ranking_engine publishes already carries every RANKING_COLS field
 (ofi_10_z/obi_10/5/3/cvd/spread/microprice/pct_1h/pct_24h/volatility/... -- see
-ml_signals/ranking_columns.py, the single column-metadata definition both this pane and
+views/ranking_columns.py, the single column-metadata definition both this pane and
 the dashboard's HTML table render from), so this module does no computation of its own
 -- format_coin_row/coin_header_text just re-shape that same shared metadata into urwid
 markup/header text.
 """
 
-from ml_signals.ranking_columns import NEGATIVE_COLOR
-from ml_signals.ranking_columns import POSITIVE_COLOR
-from ml_signals.ranking_columns import RANKING_COLS
+from views.ranking_columns import NEGATIVE_COLOR
+from views.ranking_columns import POSITIVE_COLOR
+from views.ranking_columns import RANKING_COLS
 
 from bot_tui.bots_pane import fit
 
@@ -162,7 +162,7 @@ def format_coin_row(row: dict) -> list:
     dashboard's own missing-cell convention.
 
     Only two colors are ever used across RANKING_COLS (POSITIVE_COLOR/NEGATIVE_COLOR,
-    ml_signals/ranking_columns.py) -- mapped here onto this product's own
+    views/ranking_columns.py) -- mapped here onto this product's own
     "pnl-pos"/"pnl-neg" palette entries rather than reimplementing each column's own
     sign/threshold rule (e.g. OBI's ">0.5" boundary) a second time. Returns a list of
     plain strings and (attr, text) tuples, ready to hand straight to urwid.Text.

@@ -15,18 +15,25 @@
 """
 Read models over the candle store: the closed bars charts, indicators and reconciliation read.
 
-Every reader takes a connection the caller owns (`infrastructure.sqlite_store.connect_ro`), so the
-store stays single-writer: nothing here opens a file read-write.
+Every reader takes a connection the caller owns, so the store stays single-writer: nothing here opens
+a file read-write. A reader outside the candles context opens it through `open_store` (read-only), so
+it never imports `candles.infrastructure` itself (Story 24.2: the views context calls only these
+query services).
 """
 
 import sqlite3
 from collections.abc import Callable
+from collections.abc import Iterator
 from collections.abc import Sequence
+from contextlib import contextmanager
+from pathlib import Path
 
 from kernel.second_snapshot import SecondRow
 
 from candles.application.forming import bars_from_rows
 from candles.domain.candle import is_partial
+from candles.infrastructure.sqlite_store import connect_ro
+from candles.infrastructure.sqlite_store import db_path_for_venue
 
 
 _COLUMNS = "t, o, h, l, c, v, seconds_observed, bar_seconds"
@@ -45,6 +52,19 @@ def _candle(row: tuple) -> dict:
         "partial": is_partial(seconds_observed, bar),
         "source": "candle_store",
     }
+
+
+@contextmanager
+def open_store(candles_dir: str | Path, venue: str) -> Iterator[sqlite3.Connection | None]:
+    """
+    Open `venue`'s candle store read-only for the readers below: yields the connection, or None when
+    the store file does not exist yet (the caller then falls back to the archive).
+
+    The file is the frozen per-venue path (`<candles_dir>/candles_<venue lowercased>.db`, AD-D12);
+    it is never opened read-write here, so the collector stays the store's single writer.
+    """
+    with connect_ro(db_path_for_venue(candles_dir, venue)) as db:
+        yield db
 
 
 def window(

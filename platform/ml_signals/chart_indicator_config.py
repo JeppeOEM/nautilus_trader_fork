@@ -13,66 +13,36 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-Per-instrument chart indicator configuration: persisted `_activeIndicators` selections
-(Story 10.5).
+Deprecated re-export shim (Story 24.2): `ml_signals.chart_indicator_config` moved to the views
+context (`views.preferences`).
 
-Mirrors dydx_collector/config.py's load_config()/save_config() shape -- tomllib to
-read, tomli_w to write, full rewrite (not a patch). Schema is a table keyed by
-instrument_id, each holding a list of indicator entries; `id` is never persisted --
-it's a client-side sequence counter for the multi-instance picker UI, regenerated
-fresh on every load.
+Pure re-export, defines nothing: every name here *is* the `views.preferences` object. Import from
+`views.preferences` instead, e.g. `from views.preferences import load_chart_indicators`.
+
+`load_config`/`save_config` are served as `views.preferences.load_chart_indicators`/
+`save_chart_indicators` (renamed: `views.preferences` holds both preference files' loaders).
 """
 
-import tomllib
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Any
+import warnings
 
-import tomli_w
-
-
-@dataclass(frozen=True)
-class IndicatorEntry:
-    name: str
-    params: dict[str, Any]
-    category: str
+from views.preferences import IndicatorEntry
+from views.preferences import load_chart_indicators as load_config
+from views.preferences import save_chart_indicators as save_config
 
 
-def load_config(path: Path) -> dict[str, list[IndicatorEntry]]:
-    """
-    Load persisted per-instrument indicator selections.
+__all__ = [
+    "IndicatorEntry",
+    "load_config",
+    "save_config",
+]
 
-    A missing file (nothing saved yet) returns an empty dict, not an error -- same
-    "nothing saved yet" treatment the rest of this codebase gives an absent data
-    source, so a fresh install or a coin with no saved config just sees no entries.
-    """
-    if not path.exists():
-        return {}
-    with path.open("rb") as f:
-        raw = tomllib.load(f)
-    return {
-        instrument_id: [
-            IndicatorEntry(name=e["name"], params=e.get("params", {}), category=e["category"])
-            for e in entries
-        ]
-        for instrument_id, entries in raw.items()
-    }
+REMOVE_AFTER = "24-4-research-pure-consumer-and-broken-tests-repaired"
 
 
-def save_config(config: dict[str, list[IndicatorEntry]], path: Path) -> None:
-    """
-    Persist `config` back to `path` as TOML.
-
-    Full rewrite, not a patch -- `tomli_w` has no comment-preservation support, so any
-    hand-written comments in the file are lost on a Save-button-triggered write. Same
-    accepted, deliberate tradeoff as `dydx_collector/config.py`'s `save_config`
-    (see its docstring); revisit only if it becomes a real complaint.
-    """
-    raw = {
-        instrument_id: [
-            {"name": e.name, "params": e.params, "category": e.category} for e in entries
-        ]
-        for instrument_id, entries in config.items()
-    }
-    with path.open("wb") as f:
-        tomli_w.dump(raw, f)
+# Attributed to the importing module, not to importlib's frames.
+warnings.warn(
+    "ml_signals.chart_indicator_config moved to views.preferences (Story 24.2); "
+    f"this shim is removed after {REMOVE_AFTER}",
+    DeprecationWarning,
+    skip_file_prefixes=("<frozen importlib",),
+)

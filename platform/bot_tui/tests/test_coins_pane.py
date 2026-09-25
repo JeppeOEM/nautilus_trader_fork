@@ -22,9 +22,9 @@ Pure functions only, no urwid import -- see Story 4.1's Dev Notes "Testing strat
 pure logic vs. urwid wiring" for why.
 """
 
-from ml_signals.ranking_columns import NEGATIVE_COLOR
-from ml_signals.ranking_columns import POSITIVE_COLOR
-from ml_signals.ranking_columns import RANKING_COLS
+from views.ranking_columns import NEGATIVE_COLOR
+from views.ranking_columns import POSITIVE_COLOR
+from views.ranking_columns import RANKING_COLS
 
 from bot_tui.coins_pane import COLD_OPEN_TEXT
 from bot_tui.coins_pane import NO_MATCHES_TEXT

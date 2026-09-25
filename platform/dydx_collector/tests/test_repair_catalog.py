@@ -6,7 +6,7 @@ from candles.infrastructure.sqlite_store import CandleStore
 from collector_core.repair_catalog import find_impossible_snapshots
 from collector_core.repair_catalog import repair_instrument
 from kernel.second_snapshot import DydxSecondSnapshot
-from ml_signals.catalog_stats import query_second_snapshots
+from views.catalog_reads import query_second_snapshots
 
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog

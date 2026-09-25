@@ -14,8 +14,8 @@
 # -------------------------------------------------------------------------------------------------
 """
 Tests for bot_tui.coin_detail -- Story 4.3, AC1/AC4/AC5; SSOT-02 migration (indicator
-computation moved to ranking_engine, this module only formats/looks up already-computed
-values now).
+computation moved to ranking_engine, this module only formats already-computed values now;
+the rank-row lookup and its tests moved to `views.coin_detail` in Story 24.2).
 
 Pure functions only, no urwid import.
 """
@@ -26,36 +26,7 @@ from bot_tui.coin_detail import dashboard_chart_url
 from bot_tui.coin_detail import format_indicator
 from bot_tui.coin_detail import order_book_lines
 from bot_tui.coin_detail import osc52_copy_sequence
-from bot_tui.coin_detail import rank_row_for
 from bot_tui.coin_detail import ratchet_width
-
-
-def _ranking(ranks: list[dict]) -> dict:
-    return {"mode": "volume", "updated_at": 1, "ranks": ranks}
-
-
-def test_rank_row_for_finds_matching_instrument() -> None:
-    ranking = _ranking(
-        [
-            {"instrument_id": "ETH-USD-PERP", "spread": 0.1},
-            {"instrument_id": "BTC-USD-PERP", "spread": 0.5},
-        ]
-    )
-    assert rank_row_for(ranking, "BTC-USD-PERP") == {"instrument_id": "BTC-USD-PERP", "spread": 0.5}
-
-
-def test_rank_row_for_none_when_no_ranking_message_yet() -> None:
-    assert rank_row_for(None, "BTC-USD-PERP") is None
-
-
-def test_rank_row_for_none_when_instrument_not_yet_ranked() -> None:
-    ranking = _ranking([{"instrument_id": "ETH-USD-PERP"}])
-    assert rank_row_for(ranking, "BTC-USD-PERP") is None
-
-
-def test_rank_row_for_skips_malformed_entry() -> None:
-    ranking = _ranking(["not-a-dict", {"instrument_id": "BTC-USD-PERP", "spread": 0.5}])
-    assert rank_row_for(ranking, "BTC-USD-PERP") == {"instrument_id": "BTC-USD-PERP", "spread": 0.5}
 
 
 def test_format_indicator_none_is_warming_up() -> None:

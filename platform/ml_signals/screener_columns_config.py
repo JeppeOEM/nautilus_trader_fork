@@ -13,65 +13,40 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-Screener-wide Technicals column selection (Story 17.5): one flat list applied to every row
-of the Rankings table -- deliberately NOT keyed by instrument_id like
-`chart_indicator_config.py`'s per-coin selection, which it otherwise mirrors (tomllib to
-read, tomli_w to write, full rewrite). Reuses that module's `IndicatorEntry`.
+Deprecated re-export shim (Story 24.2): `ml_signals.screener_columns_config` moved to the views
+context (`views.preferences`).
 
-Schema: a top-level `columns` array of `{name, params, category}` tables, in display order.
+Pure re-export, defines nothing: every name here *is* the `views.preferences` object. Import from
+`views.preferences` instead, e.g. `from views.preferences import load_screener_columns`.
+
+`load_config`/`save_config` are served as `views.preferences.load_screener_columns`/
+`save_screener_columns` (renamed: `views.preferences` holds both preference files' loaders).
 """
 
-import tomllib
-from dataclasses import dataclass
-from pathlib import Path
+import warnings
 
-import tomli_w
-
-from ml_signals.chart_indicator_config import IndicatorEntry
-
-
-DEFAULT_BAR_SECONDS = 3600
+from views.preferences import DEFAULT_BAR_SECONDS
+from views.preferences import ColumnEntry
+from views.preferences import IndicatorEntry
+from views.preferences import load_screener_columns as load_config
+from views.preferences import save_screener_columns as save_config
 
 
-@dataclass(frozen=True)
-class ColumnEntry(IndicatorEntry):
-    """
-    A column is an indicator plus the bar size it is computed on -- a field of its own, not a
-    param: params feed the indicator constructor and its series id.
-    """
+__all__ = [
+    "DEFAULT_BAR_SECONDS",
+    "ColumnEntry",
+    "IndicatorEntry",
+    "load_config",
+    "save_config",
+]
 
-    bar_seconds: int = DEFAULT_BAR_SECONDS
-
-
-def load_config(path: Path) -> list[ColumnEntry]:
-    """A missing or empty file (nothing configured yet) is `[]`, not an error."""
-    if not path.exists():
-        return []
-    with path.open("rb") as f:
-        raw = tomllib.load(f)
-    return [
-        ColumnEntry(
-            name=e["name"],
-            params=e.get("params", {}),
-            category=e["category"],
-            bar_seconds=e.get("bar_seconds", DEFAULT_BAR_SECONDS),
-        )
-        for e in raw.get("columns", [])
-    ]
+REMOVE_AFTER = "24-4-research-pure-consumer-and-broken-tests-repaired"
 
 
-def save_config(entries: list[ColumnEntry], path: Path) -> None:
-    raw = {
-        "columns": [
-            {
-                "name": e.name,
-                "params": e.params,
-                "category": e.category,
-                "bar_seconds": e.bar_seconds,
-            }
-            for e in entries
-        ]
-    }
-    # Serialize first: a bad value must fail before the file is truncated. (Not a temp-file
-    # rename -- the docker single-file bind mount can't be renamed over.)
-    path.write_bytes(tomli_w.dumps(raw).encode())
+# Attributed to the importing module, not to importlib's frames.
+warnings.warn(
+    "ml_signals.screener_columns_config moved to views.preferences (Story 24.2); "
+    f"this shim is removed after {REMOVE_AFTER}",
+    DeprecationWarning,
+    skip_file_prefixes=("<frozen importlib",),
+)

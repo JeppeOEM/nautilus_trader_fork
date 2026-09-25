@@ -18,10 +18,10 @@ from pathlib import Path
 
 import pytest
 from candles.infrastructure.sqlite_store import CandleStore
-from candles.tests.test_candle_store import _DAY0_MS
-from candles.tests.test_candle_store import _second
 from fastapi.testclient import TestClient
 from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.second_snapshot import SecondOHLC
+from views import chart_series
 
 import data_api.app as app_module
 import data_api.routes.candles as candles_routes
@@ -36,6 +36,24 @@ _IID = "BTC-USD-PERP.DYDX"
 # test from accidentally tripping a timestamp-smallness edge case rather than a real one.
 _BASE_NS = 1_800_000_000_000_000_000
 assert _BASE_NS % 60_000_000_000 == 0
+
+
+# A UTC midnight well in the past, for the candle-store fixtures (a local copy of the candle tests'
+# own fixture day: a test module of another context may not import their private helpers).
+_DAY0_MS = 20_000 * 86_400_000
+
+
+def _second(sec: int, price: float) -> SecondOHLC:
+    """One traded second, `sec` seconds after `_DAY0_MS`, shaped like the candle tests' rows."""
+    return SecondOHLC(
+        ts_event=_DAY0_MS * 1_000_000 + sec * 1_000_000_000,
+        open_price=price,
+        high_price=price + 0.5,
+        low_price=price - 0.5,
+        close_price=price + 0.1,
+        buy_volume=1.0,
+        sell_volume=0.25,
+    )
 
 
 def _client(catalog_path: str, monkeypatch: pytest.MonkeyPatch) -> TestClient:
@@ -245,7 +263,7 @@ def test_large_limit_and_bar_seconds_combination_does_not_blow_the_query_span(
     snapshot placed just past the cap must be excluded from the main query window.
     """
     catalog_path = str(tmp_path / "catalog")
-    cap_seconds = candles_routes._MAX_QUERY_SPAN_SECONDS
+    cap_seconds = chart_series.MAX_QUERY_SPAN_SECONDS
     within_cap_ns = _BASE_NS - (cap_seconds - 60) * 1_000_000_000
     past_cap_ns = _BASE_NS - (cap_seconds + 60) * 1_000_000_000
     _write_snapshots(catalog_path, [(within_cap_ns, 100.0), (past_cap_ns, 90.0)])
@@ -281,14 +299,6 @@ def test_weekly_bar_seconds_is_not_clamped_down_to_a_day(
     assert [(b["t"], b["o"], b["c"]) for b in bars] == [(week_start // 1_000_000, 100.0, 102.0)]
 
 
-def test_archive_fallback_window_is_capped_for_every_bar_size() -> None:
-    week_ns = 7 * 86_400 * 1_000_000_000
-    assert candles_routes._window_start_ns(0, 120, 3600) == -week_ns
-    assert (
-        candles_routes._window_start_ns(0, 120, 86_400) == -week_ns
-    )  # no wider tier without rollups
-
-
 def test_one_second_bars_return_one_candle_per_snapshot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -301,10 +311,6 @@ def test_one_second_bars_return_one_candle_per_snapshot(
     )
 
     assert [i["c"] for i in resp.json()["items"]] == [100.0, 101.0, 102.0, 103.0, 104.0]
-
-
-def test_sub_minute_bars_look_back_at_least_an_hour() -> None:
-    assert candles_routes._window_start_ns(0, 120, 1) == -3600 * 1_000_000_000
 
 
 def test_venue_field_and_malformed_id_400(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -321,14 +327,14 @@ def test_invalid_candle_fails_the_request_loudly(
 
     catalog_path = str(tmp_path / "catalog")
     _write_snapshots(catalog_path, [(_BASE_NS - i * 60_000_000_000, 100.0 + i) for i in range(3)])
-    real = candles_routes.queries.candle_dicts_for_window
+    real = chart_series.queries.candle_dicts_for_window
 
     def corrupt(*args, **kwargs):
         out = real(*args, **kwargs)
         out[0] = {**out[0], "h": out[0]["l"] - 1.0}  # high below low
         return out
 
-    monkeypatch.setattr(candles_routes.queries, "candle_dicts_for_window", corrupt)
+    monkeypatch.setattr(chart_series.queries, "candle_dicts_for_window", corrupt)
     error_ledger.reset()
     resp = _client(catalog_path, monkeypatch).get(
         f"/api/candles/{_IID}?before_ns={_BASE_NS + 60_000_000_000}&limit=10&bar_seconds=60",

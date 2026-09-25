@@ -23,6 +23,11 @@ thin network-reachable wrapper around the same existing functions
 its own threadpool automatically, which offloads the blocking SQLite/Parquet
 reads without hand-rolled `asyncio.to_thread`.
 
+Every value served is computed by the `views` context (Story 24.2): this app and its routes
+format and transport only -- they pass their own env-derived paths in, build the pydantic
+response models, and map views' exceptions to HTTP status codes. The two Redis buses are
+constructed once in `data_api.buses`.
+
 Bound to 127.0.0.1 only (SEC-01) -- see docker-compose.yml's `data_api`
 service (`network_mode: host` + `uvicorn --host 127.0.0.1`), no `ports:` entry.
 """
@@ -37,17 +42,14 @@ from fastapi import FastAPI
 from fastapi import HTTPException
 from fastapi import Request
 from fastapi.responses import JSONResponse
-from kernel.second_snapshot import DydxSecondSnapshot
 from kernel.venues import MalformedInstrumentId
-from ml_signals import catalog_stats as _catalog_stats
-from ml_signals import chart_data as _chart_data
 from observability import error_ledger
 from pydantic import BaseModel
-from ranking_engine import metrics_store
+from views import chart_series
+from views import coin_detail
 
 from data_api import alerts
-from data_api import live_candles
-from data_api import redis_bus
+from data_api import buses
 from data_api.routes import alerts as alerts_routes
 from data_api.routes import candles as candles_routes
 from data_api.routes import indicator_series as indicator_series_routes
@@ -57,6 +59,7 @@ from data_api.routes import rankings as rankings_routes
 from data_api.routes import snapshots as snapshots_routes
 from data_api.settings import CATALOG_PATH
 from data_api.settings import ERROR_LEDGER_DIR
+from data_api.settings import REDIS_URL
 from data_api.ws import live as live_ws
 
 
@@ -81,13 +84,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """
     Start the two shared Redis subscribers for the app's whole lifetime: `RankingsBus`
     (Story 15.2) and `LiveCandleBus` (Story 15.5). Every `GET /api/rankings` request and
-    every `/ws/live` connection read/subscribe against these same `redis_bus.bus` /
-    `live_candles.live_candle_bus` instances, never opening a per-request or
+    every `/ws/live` connection read/subscribe against these same `buses.bus` /
+    `buses.live_candle_bus` instances, never opening a per-request or
     per-websocket Redis connection of their own.
     """
     error_ledger.start()
-    rankings_task = asyncio.create_task(redis_bus.bus.run(redis_bus.REDIS_URL))
-    live_candles_task = asyncio.create_task(live_candles.live_candle_bus.run(redis_bus.REDIS_URL))
+    rankings_task = asyncio.create_task(buses.bus.run(REDIS_URL))
+    live_candles_task = asyncio.create_task(buses.live_candle_bus.run(REDIS_URL))
     try:
         yield
     finally:
@@ -102,44 +105,30 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 app = FastAPI(docs_url=None, redoc_url=None, lifespan=lifespan)
 
-live_candles.live_candle_bus.observers.append(alerts.engine.on_snapshot)
+buses.live_candle_bus.observers.append(alerts.engine.on_snapshot)
 
 
 @app.get("/metrics/history/{symbol}")
 def metrics_history(symbol: str, days: int = 31) -> list[dict]:
-    return metrics_store.history(symbol, METRICS_DB_PATH, days)
+    return coin_detail.metrics_history(symbol, METRICS_DB_PATH, days)
 
 
 @app.get("/metrics/nearest/{symbol}")
 def metrics_nearest(symbol: str, ts_ns: int) -> dict | None:
-    return metrics_store.nearest(symbol, ts_ns, METRICS_DB_PATH)
+    return coin_detail.metrics_nearest(symbol, ts_ns, METRICS_DB_PATH)
 
 
 @app.get("/catalog/chart-series/{symbol}")
 def catalog_chart_series(symbol: str, start_ns: int, end_ns: int) -> dict[str, list[dict]]:
-    return _chart_data.compute_chart_series(CATALOG_PATH, symbol, start_ns, end_ns)
-
-
-def _snapshot_to_dict(snapshot: DydxSecondSnapshot) -> dict:
-    return {
-        "bid_prices": snapshot.bid_prices,
-        "bid_sizes": snapshot.bid_sizes,
-        "ask_prices": snapshot.ask_prices,
-        "ask_sizes": snapshot.ask_sizes,
-        "buy_volume": snapshot.buy_volume,
-        "sell_volume": snapshot.sell_volume,
-        "ts_event": snapshot.ts_event,
-        "open_price": snapshot.open_price,
-        "high_price": snapshot.high_price,
-        "low_price": snapshot.low_price,
-        "close_price": snapshot.close_price,
-    }
+    try:
+        return chart_series.compute_chart_series(CATALOG_PATH, symbol, start_ns, end_ns)
+    except chart_series.EmptyTopOfBook as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 @app.get("/catalog/snapshots/{iid}")
 def catalog_snapshots(iid: str, start_ns: int, end_ns: int) -> list[dict]:
-    snapshots = _catalog_stats.query_second_snapshots(CATALOG_PATH, iid, start_ns, end_ns)
-    return [_snapshot_to_dict(s) for s in snapshots]
+    return coin_detail.catalog_snapshot_rows(CATALOG_PATH, iid, start_ns, end_ns)
 
 
 class HealthResponse(BaseModel):

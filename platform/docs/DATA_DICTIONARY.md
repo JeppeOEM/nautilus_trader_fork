@@ -358,12 +358,14 @@ service name, via `ERROR_LEDGER_SERVICE`).
 
 ---
 
-## 2. Computed signals / ML features (`platform/ml_signals/`)
+## 2. Computed signals / ML features (`platform/kernel/`, `platform/views/`, `platform/ml_signals/`)
 
 Everything here is computed **on read** from the raw types in §1 — nothing in this
-section is stored back to Parquet. Per SSOT-01/02 (`platform/CLAUDE.md`), stateless
+section is stored back to Parquet. Since Story 24.2 every value a UI shows is computed in the
+`views/` read-model context (§2.4, §2.6, §2.7, §2.10 moved there from `ml_signals/`, whose old
+module paths are deprecated re-exports); `data_api` and `bot_tui` only format and transport it. Per SSOT-01/02 (`platform/CLAUDE.md`), stateless
 single-snapshot formulas live as plain functions in `kernel/indicators.py` (the shared kernel,
-Story 23.2; `ml_signals.indicators` is a deprecated re-export); stateful/rolling
+Story 23.2; the `ml_signals.indicators` re-export was deleted in Story 24.2); stateful/rolling
 indicators are classes, and for anything shown in a live UI, exactly one process
 (`ranking_engine`) is allowed to own the running instance (§3).
 
@@ -411,7 +413,7 @@ that side. `contribution = bid_term - ask_term`, summed over a rolling window.
 1.0 = all depth on the bid side, 0.5 = balanced, 0.0 = all ask. `ranking_engine` runs
 three instances per instrument at levels 3/5/10.
 
-### 2.4 Footprint / order-book flow (`footprint.py`)
+### 2.4 Footprint / order-book flow (`views/chart_series.py`'s `build_footprint`, was `ml_signals/footprint.py`)
 
 `build_footprint` buckets **resting order-book size changes** (not executed trades —
 dYdX L2 deltas have no order IDs, so a shrinking level can't be told apart from a
@@ -441,7 +443,7 @@ Three readers, all over that one fold, so they cannot disagree:
   (`o IS NOT NULL`). `latest`, `oldest_t` and `watermarks` are the other reads.
 - **The forming bar** — `candles.application.forming.forming_bar(rows, bar_seconds)`: the newest
   traded bucket of the live 1 s rows it is given, as `{t (ms), o, h, l, c, v}`, or `None` when
-  nothing traded in them. `data_api/live_candles.py` calls it per `snapshots:raw` tick over the
+  nothing traded in them. `views/live_candles.py`'s `LiveCandleBus` calls it per `snapshots:raw` tick over the
   in-progress bucket's buffer; that dict *is* the `/ws/live` `bar` payload. `bar_seconds` need
   not be one the store keeps (the chart offers 10 m, 30 m, 1 w).
 - **The archive-side read** — `candles.application.queries.candle_dicts_for_window(iid, start_ns,
@@ -452,7 +454,7 @@ Three readers, all over that one fold, so they cannot disagree:
 (`l <= min(o,c) <= max(o,c) <= h`, `v >= 0`, all finite); a violator is a bug upstream, failed
 loudly as a 500 and counted (`candles.invalid_candle`), never clamped (DATA-07).
 
-### 2.6 Book features (`book_features.py`)
+### 2.6 Book features (`views/chart_series.py`, was `ml_signals/book_features.py`)
 
 A second, independent set of L2-derived features, computed by replaying raw
 `OrderBookDelta`s (not `DydxSecondSnapshot`) — used by the chart page (§2.7), not by
@@ -465,22 +467,36 @@ A second, independent set of L2-derived features, computed by replaying raw
 | `liquidity_distance` | price distance from best to where cumulative depth reaches `pct_threshold` (default 80%) of one side's total | small = dense support/resistance nearby; large = a liquidity vacuum |
 | `CancellationTracker` / `cancel_pressure` | `(deleted_size - added_size) / (deleted_size + added_size)` at the best bid/ask, over a rolling event window (default 200) | +1 = all cancellations, -1 = all additions; only tracks ADD/DELETE at the *current* best price, UPDATE is ambiguous-direction and skipped |
 
-### 2.7 Chart series (`chart_data.py`)
+### 2.7 Chart series (`views/chart_series.py`, was `ml_signals/chart_data.py` and the `data_api` routes)
 
-`compute_chart_series` is the web dashboard's per-coin chart backend: replays
-`OrderBookDelta`s and `TradeTick`s for a time window and emits per-event series for
-OFI (top-of-book `OrderFlowImbalance`), `Microprice`, spread, book imbalance/depth
-(via `book_features.compute_features`), cancel pressure, 1-minute candles, a 5-minute
-rolling cumulative trade delta, and fast/slow `ExponentialMovingAverage` trend lines
-(Nautilus's own `ExponentialMovingAverage` indicator, EMA-8/EMA-21 defaults) computed
-over those candles. Entirely a read-time replay — nothing here is persisted or fed
-into ranking.
+The chart page's pages are `views.chart_series` read models (Story 24.2): `candle_page` (the
+candle store, then the archive's seconds -> bars fold), `snapshot_series_page`/`price_series_rows`
+(Lines mode: bid, ask, mid, `kernel.indicators.microprice`, and the CVD-weighted price
+`mid + ((buy_volume - sell_volume) / (buy_volume + sell_volume)) * (ask - bid) / 2`),
+`indicator_series_page` (per-bar OFI/OBI replay, microprice, spread) and `indicator_values_page`
+(the picker's indicators over the chart's own candles, via `views.indicator_picker`). Every
+archived second is priced as written -- a crossed second (`bid >= ask`) included: today's gate
+never writes one (`_handle_crossed_book` skips and ledgers it), so one in the archive predates that
+gate or is a capture bug to fix at the gate or with `repair_catalog`, never a reader filter (AD-3).
+A second with an empty side cannot be drawn at all and is never written by the gate, so reading one
+fails the request (500) and counts `views.snapshot_without_top`. Gap rows are the only rendering rule:
+`SNAPSHOT_GAP_THRESHOLD_MS` (2500 ms) in Lines mode, one bar in the bar-spaced panes
+(`with_gap_markers`).
+
+`compute_chart_series` (the legacy `/catalog/chart-series` endpoint's backend) reads the window's
+archived 1s snapshots (`views.catalog_reads.query_second_snapshots`, `DydxSecondSnapshot` rows)
+and emits one point per second for `microprice` (`kernel.indicators.microprice`), `spread`
+(best ask - best bid, as written), `imbalance` (aggregate top-10-level book imbalance),
+`mid_imbalance` (mean of levels 2-3), and `bid_depth`/`ask_depth` (top-10-level size sums).
+It does not replay `OrderBookDelta`s or `TradeTick`s. An empty-top second raises
+`EmptyTopOfBook` like the pages above. Entirely a read-time computation — nothing here is
+persisted or fed into ranking.
 
 ### 2.8 `metrics_computer.py` — periodic snapshot metrics
 
 Bridges §1's Parquet catalog and the SQLite `metrics_store` (§3.4). One entry point:
 
-- `compute_all` — adds `price_stats` (`catalog_stats.py`) — latest price,
+- `compute_all` — adds `price_stats` (`ml_signals/catalog_stats.py`, ranking's part of it) — latest price,
   `pct_change_1h`/`pct_change_24h`, and `volatility` (stdev of consecutive-return
   percentages over a 25-hour trailing window read straight from the Parquet
   trade/price history) — to the `ofi`/`microprice`/`spread` fields its required
@@ -497,9 +513,9 @@ and `fetch_watchlist` pull already-computed data from the running `data_api`'s H
 API (`/api/metrics/nearest/{iid}`, `/api/rankings`) for scripts/notebooks that don't want to
 import the full dependency set (fastapi, redis).
 
-### 2.10 `ranking_columns.py` — shared column definitions
+### 2.10 `views/ranking_columns.py` — shared column definitions (was `ml_signals/ranking_columns.py`)
 
-Untracked in git but **actively wired up**, not a work-in-progress stub: it defines
+**Actively wired up**, not a work-in-progress stub: it defines
 `RANKING_COLS`, the ordered list of `(store_key, label, format_fn, color_fn)` tuples
 that `bot_tui`'s Coins pane renders as the ranking table (`platform/CLAUDE.md` SSOT-04).
 The web UI no longer uses it: `ml_signals/dashboard.py` was retired in Story 15.10 and
@@ -509,7 +525,9 @@ The web UI no longer uses it: `ml_signals/dashboard.py` was retired in Story 15.
 `volume24h`) is a field name coming straight off a `rankings:live` rank entry —
 i.e. every column this file defines maps 1:1 to a field `ranking_engine` publishes
 (§3). It is display metadata (labels, `f"{v:+.2f}"`-style formatting, red/green
-sign-coloring), not a new computation.
+sign-coloring), not a new computation. The same module also holds the Technicals tab's per-coin
+values (`technicals_values`, Story 24.2): each column's latest value through the chart's own
+indicator dispatch over the chart's own candles -- no indicator or ranking math of its own.
 
 ---
 

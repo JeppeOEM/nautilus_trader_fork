@@ -34,7 +34,12 @@ both ranking_engine's and dashboard's own copies -- a real SSOT-02 violation
 (platform/CLAUDE.md): three separate processes independently running the same rolling
 indicators against the same feed. That computation is deleted; Coin-detail now reads
 those values straight off the matching ranking_state._LATEST_RANKING rank entry
-instead (see coin_detail.rank_row_for) -- already-received, no new subscription.
+instead (see views.coin_detail.rank_row_for) -- already-received, no new subscription.
+
+Each batch is decoded by `views.coin_detail.snapshot_for` (spine AD-D3: `snapshots:raw` is parsed
+only through `DydxSecondSnapshot.from_dict`, never hand-indexed), so `_LATEST_SNAPSHOT` holds the
+open coin's newest `DydxSecondSnapshot`; an entry that fails to decode is ledgered at
+`views.snapshot_decode` and skipped (Story 24.2).
 """
 
 import asyncio
@@ -44,6 +49,8 @@ import os
 import time
 
 import redis.asyncio as aioredis
+from kernel.second_snapshot import DydxSecondSnapshot
+from views.coin_detail import snapshot_for
 
 
 logger = logging.getLogger(__name__)
@@ -54,7 +61,7 @@ REDIS_URL: str = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
 # builder is on the Coins/Bots pane) -- every snapshots:raw message is discarded while
 # this is None.
 _CURRENT_INSTRUMENT_ID: str | None = None
-_LATEST_SNAPSHOT: dict | None = None
+_LATEST_SNAPSHOT: DydxSecondSnapshot | None = None
 _LATEST_SNAPSHOT_RECEIVED_AT: float = 0.0
 
 
@@ -76,23 +83,19 @@ def close_coin() -> None:
 
 def _handle_snapshot_batch(batch: object) -> None:
     """
-    Mirrors ranking_state._handle_rankings_message's defensive-shape-guard discipline.
-    Scans a snapshots:raw batch for the one row matching _CURRENT_INSTRUMENT_ID; every
-    other row (typically ~19 of ~20 in a full watchlist batch) is discarded. A row
-    missing instrument_id or shaped unexpectedly is skipped, not fatal.
+    Keep the open coin's second from one snapshots:raw batch (`views.coin_detail.snapshot_for`);
+    every other coin's row (typically ~19 of ~20 in a full watchlist batch) is discarded. A
+    batch without the open coin leaves the previous snapshot -- and its received-at clock, so
+    the stale badge still ages -- untouched. Nothing is decoded while no coin is open.
     """
     global _LATEST_SNAPSHOT, _LATEST_SNAPSHOT_RECEIVED_AT
-    if not isinstance(batch, list):
-        logger.warning("snapshots:raw message not list-shaped, ignoring: %r", batch)
-        return
     if _CURRENT_INSTRUMENT_ID is None:
         return
-    for row in batch:
-        if not isinstance(row, dict) or row.get("instrument_id") != _CURRENT_INSTRUMENT_ID:
-            continue
-        _LATEST_SNAPSHOT = row
-        _LATEST_SNAPSHOT_RECEIVED_AT = time.time()
+    snapshot = snapshot_for(batch, _CURRENT_INSTRUMENT_ID)
+    if snapshot is None:
         return
+    _LATEST_SNAPSHOT = snapshot
+    _LATEST_SNAPSHOT_RECEIVED_AT = time.time()
 
 
 async def _redis_listener(redis_url: str) -> None:

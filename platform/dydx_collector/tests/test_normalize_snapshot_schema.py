@@ -6,7 +6,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from kernel.second_snapshot import DydxSecondSnapshot
-from ml_signals.catalog_stats import query_second_snapshots
+from views.catalog_reads import query_second_snapshots
 
 from dydx_collector.normalize_snapshot_schema import files_needing_migration
 from dydx_collector.normalize_snapshot_schema import migrate_file

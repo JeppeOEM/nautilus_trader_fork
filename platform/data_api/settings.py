@@ -21,6 +21,10 @@ CATALOG_PATH: str = os.environ.get("CATALOG_PATH", "platform/data/catalog")
 # metrics.db.
 CANDLES_DB_DIR: str = os.environ.get("CANDLES_DB_DIR", str(Path(CATALOG_PATH).parent / "candles"))
 
+# The Redis both buses subscribe to (`data_api.buses`): `rankings:live` and `snapshots:raw`. Same
+# variable and default as the pre-Story-24.2 `data_api/redis_bus.py` (AD-D12: env vars are frozen).
+REDIS_URL: str = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
+
 # Durable per-service error ledger (`observability.error_ledger`, story 23.3): every service that
 # calls `error_ledger.start()` writes its own `<service>.jsonl` here; `/api/errors` reads every
 # service's file back through this same shared directory (docker-compose.yml's `errors_dir` mount).

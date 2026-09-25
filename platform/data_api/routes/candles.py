@@ -17,30 +17,24 @@
 frontend's chart page fetches its initial 120-bar window and every scroll-back page
 through this one `before_ns`/`limit` contract, never an unbounded full-range load.
 
-Reuses the candles context's query services unchanged (AD-F2): `queries.window` for the
-store page and `queries.candle_dicts_for_window` for the archive page, both over the one
-seconds -> bars fold. This module adds no aggregation or query logic of its own, only
-bounded-query construction, gap-marker insertion, and the `has_more` probe.
+Format + transport only (Story 24.2): the page itself is `views.chart_series.candle_page` (the
+candle store first, the archive's one seconds -> bars fold for what it does not cover) and its
+gap rows `views.chart_series.with_gap_markers`. This module clamps the query params, passes its
+own `CATALOG_PATH`/`CANDLES_DB_DIR` and the live bus's unflushed tail in, builds the response
+models, and maps `ImpossibleCandle` to a 500.
 
 `CATALOG_PATH` comes from `data_api.settings` (a leaf module -- routes can't import it from
 `app.py`, which imports them).
 """
 
-from candles.application import queries
-from candles.domain.candle import is_valid_candle
-from candles.domain.fold import BAR_SECONDS
-from candles.infrastructure.sqlite_store import connect_ro
-from candles.infrastructure.sqlite_store import db_path_for_venue
 from fastapi import APIRouter
 from fastapi import HTTPException
-from kernel import catalog_files
 from kernel.venues import market_kind
 from kernel.venues import venue_of
-from observability import error_ledger
 from pydantic import BaseModel
+from views import chart_series
 
-from data_api import live_candles
-from data_api.routes import paging
+from data_api import buses
 from data_api.settings import CANDLES_DB_DIR
 from data_api.settings import CATALOG_PATH
 
@@ -51,37 +45,11 @@ _MAX_CANDLES_LIMIT = 500
 
 # Server-enforced bound on `bar_seconds` -- same silent-clamp philosophy as `limit` above
 # (AC #7's "no error, silently clamped"), not a 422: a non-positive value would zero or
-# invert every window/bucket computation below, and an unbounded one would let a client
+# invert every window/bucket computation, and an unbounded one would let a client
 # blow up the query span this route otherwise keeps deliberately bounded (AD-F3/MEM-01).
 _MAX_BAR_SECONDS = 604_800  # 1w -- the timeframe selector's widest bar
 
-# How many multiples of `limit * bar_seconds` to look back for the main query window.
-# Real second-snapshot coverage has gaps (thin trading, collector downtime), so a 1x
-# window can come up short of `limit` candles even when enough history exists a bit
-# further back -- 3x gives headroom without unbounding the read (still a fixed multiple
-# of a bounded window, never open-ended).
-_QUERY_WINDOW_MULTIPLIER = 3
-
-# Floor on the main query window for sub-minute bars. A bar only exists for a second that traded, so at 1s/5s the
-# `limit * bar_seconds * 3` window (6 min at 1s) can hold 0-1 candles on a quiet coin -- the
-# chart then has nothing to scroll and never refills. An hour of raw 1s is only ~3.6k rows.
-_MIN_QUERY_WINDOW_SECONDS = 3600
-
-# Hard cap on any single query's total time span (MEM-01), independent of the
-# limit/bar_seconds product that produced it -- `_MAX_CANDLES_LIMIT * _MAX_BAR_SECONDS *
-# _QUERY_WINDOW_MULTIPLIER` alone would allow a single request to pull ~4 years of raw
-# 1-second snapshots, defeating the bounded-read guarantee this route exists to provide.
-_MAX_QUERY_SPAN_SECONDS = 7 * 86_400
-
 router = APIRouter()
-
-
-def _catalog_plus_recent(instrument_id: str, start_ns: int, end_ns: int) -> list:
-    """Catalog rows plus the live tail the collector has not flushed yet (see live_candles.RECENT_SECONDS)."""
-    rows = catalog_files.query_second_ohlc(CATALOG_PATH, instrument_id, start_ns, end_ns)
-    have = {r.ts_event for r in rows}
-    tail = live_candles.live_candle_bus.recent_rows(instrument_id, start_ns, end_ns)
-    return rows + [r for r in tail if r.ts_event not in have]
 
 
 class CandleItem(BaseModel):
@@ -103,123 +71,6 @@ class CandlesResponse(BaseModel):
     market: str
 
 
-def _window_start_ns(before_ns: int, limit: int, bar_seconds: int) -> int:
-    span_seconds = limit * bar_seconds * _QUERY_WINDOW_MULTIPLIER
-    if bar_seconds < 60:
-        span_seconds = max(span_seconds, _MIN_QUERY_WINDOW_SECONDS)
-    span_seconds = min(span_seconds, _MAX_QUERY_SPAN_SECONDS)
-    return before_ns - span_seconds * 1_000_000_000
-
-
-def _insert_gap_markers(candles: list[dict], bar_seconds: int) -> list[CandleItem]:
-    """
-    Insert one explicit null-OHLC gap item wherever two consecutive kept candles' `t`
-    (ms) differ by more than one `bar_seconds` interval (AC #5, AD-F6) -- `t` is placed
-    immediately after the earlier candle so lightweight-charts' whitespace data renders
-    the break starting right where real data stops, not at the next candle's own time.
-    """
-    bar_ms = bar_seconds * 1000
-    items: list[CandleItem] = []
-    for i, c in enumerate(candles):
-        if i > 0 and c["t"] - candles[i - 1]["t"] > bar_ms:
-            items.append(CandleItem(t=candles[i - 1]["t"] + bar_ms))
-        items.append(CandleItem(**c))
-    return items
-
-
-def _checked(instrument_id: str, bar_seconds: int, c: dict) -> dict:
-    # An impossible candle means upstream code malfunctioned (DATA-07): never serve it,
-    # never drop it quietly -- fail the request so the chart shows an error, and count it.
-    if not is_valid_candle(c):
-        detail = f"impossible candle for {instrument_id} (bar_seconds={bar_seconds}): {c!r}"
-        error_ledger.record("candles.invalid_candle", detail)
-        raise HTTPException(status_code=500, detail=detail)
-    return c
-
-
-def _parquet_page(
-    instrument_id: str, before_ns: int, limit: int, bar_seconds: int
-) -> tuple[list[dict], bool]:
-    """
-    One page straight from the Parquet archive (slow: reads a window of tiny files). Serves
-    history the candle store does not hold (older than its first day, or pruned).
-    """
-    before_ms = before_ns // 1_000_000
-
-    def fetch(start_ns: int, end_ns: int) -> list[dict]:
-        return [
-            c
-            for c in queries.candle_dicts_for_window(
-                instrument_id,
-                start_ns,
-                end_ns,
-                bar_seconds,
-                snapshot_rows_fn=_catalog_plus_recent,
-            )
-            if c["t"] < before_ms and _checked(instrument_id, bar_seconds, c)
-        ]
-
-    ranges = catalog_files.data_file_ranges(CATALOG_PATH, instrument_id)
-    span_ns = before_ns - _window_start_ns(before_ns, limit, bar_seconds)
-    kept = paging.fetch_page(fetch, ranges, before_ns, span_ns)[-limit:]
-    return kept, bool(kept) and paging.has_older_data(ranges, kept[0]["t"] * 1_000_000)
-
-
-def _store_path(instrument_id: str) -> str:
-    return db_path_for_venue(CANDLES_DB_DIR, venue_of(instrument_id))
-
-
-def _store_page(
-    instrument_id: str, before_ns: int, limit: int, bar_seconds: int
-) -> tuple[list[dict], bool, int | None]:
-    """
-    One page from the SQLite candle store (an indexed read, no Parquet I/O): `(candles,
-    store_has_more, start of the store's coverage in ms)`. Empty when the store is missing or has
-    nothing for this coin.
-    """
-    if bar_seconds not in BAR_SECONDS:
-        return [], False, None
-    with connect_ro(_store_path(instrument_id)) as db:
-        if db is None:
-            return [], False, None
-        kept = queries.window(db, instrument_id, bar_seconds, before_ns // 1_000_000, limit)
-        if not kept:
-            return (
-                [],
-                False,
-                queries.oldest_t(db, instrument_id, bar_seconds, traded_only=False),
-            )
-        oldest = queries.oldest_t(db, instrument_id, bar_seconds)
-        coverage = queries.oldest_t(db, instrument_id, bar_seconds, traded_only=False)
-        return (
-            [_checked(instrument_id, bar_seconds, c) for c in kept],
-            oldest is not None and oldest < kept[0]["t"],
-            coverage,
-        )
-
-
-def candle_page(
-    instrument_id: str, before_ns: int, limit: int, bar_seconds: int
-) -> tuple[list[dict], bool]:
-    """
-    The one candle source for the chart, its indicator panes and anything else that must agree
-    with them: `(candles oldest-first, has_more)` for the `limit` bars before `before_ns`. Reads the
-    SQLite candle store, and only what it does not cover (history older than its first bucket, or
-    pruned) from Parquet -- never when the store already reaches the archive's first file.
-    """
-    kept, store_has_more, coverage_ms = _store_page(instrument_id, before_ns, limit, bar_seconds)
-    if store_has_more:
-        return kept, True
-    ranges = catalog_files.data_file_ranges(CATALOG_PATH, instrument_id)  # a directory listing
-    if coverage_ms is not None and not paging.has_older_data(ranges, coverage_ms * 1_000_000):
-        return kept, False
-    if len(kept) >= limit:
-        return kept, True  # older archive history exists beyond this full page
-    older_before_ns = kept[0]["t"] * 1_000_000 if kept else before_ns
-    older, has_more = _parquet_page(instrument_id, older_before_ns, limit - len(kept), bar_seconds)
-    return older + kept, has_more
-
-
 @router.get("/api/candles/{instrument_id}")
 def get_candles(
     instrument_id: str,
@@ -229,7 +80,20 @@ def get_candles(
 ) -> CandlesResponse:
     limit = max(1, min(limit, _MAX_CANDLES_LIMIT))
     bar_seconds = max(1, min(bar_seconds, _MAX_BAR_SECONDS))
-    kept, has_more = candle_page(instrument_id, before_ns, limit, bar_seconds)
+    try:
+        kept, has_more = chart_series.candle_page(
+            instrument_id,
+            before_ns,
+            limit,
+            bar_seconds,
+            catalog_path=CATALOG_PATH,
+            candles_dir=CANDLES_DB_DIR,
+            recent_rows=buses.live_candle_bus.recent_rows,
+        )
+    except chart_series.ImpossibleCandle as exc:
+        # An impossible candle means upstream code malfunctioned (DATA-07): views has already
+        # ledgered it; fail the request so the chart shows an error, never serve or drop it.
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
     if not kept:
         return CandlesResponse(
             items=[],
@@ -238,7 +102,7 @@ def get_candles(
             market=market_kind(instrument_id),
         )
     return CandlesResponse(
-        items=_insert_gap_markers(kept, bar_seconds),
+        items=[CandleItem(**row) for row in chart_series.with_gap_markers(kept, bar_seconds)],
         has_more=has_more,
         venue=venue_of(instrument_id),
         market=market_kind(instrument_id),

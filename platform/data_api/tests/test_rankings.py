@@ -13,12 +13,12 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-Story 15.2: `GET /api/rankings` + `/ws/live` relay, backed by `redis_bus.RankingsBus`.
+Story 15.2: `GET /api/rankings` + `/ws/live` relay, backed by `views.rankings_bus.RankingsBus`.
 
 Pure-logic tests (503-before-cache, malformed-payload-skip) use an isolated
 `RankingsBus()` instance -- `RankingsBus` is deliberately a plain class, not a baked-in
 singleton, exactly so these tests never share state with each other or with the app's
-real `redis_bus.bus`. The one integration test exercises the real `dydx-redis` Redis
+real `buses.bus`. The one integration test exercises the real `dydx-redis` Redis
 container already running on this host (`docker ps` confirms `redis://127.0.0.1:6379`)
 -- no mocking, no fakeredis/testcontainers dependency, per this story's TEST-03
 requirement and platform/CLAUDE.md's minimize-dependencies preference.
@@ -31,10 +31,12 @@ from collections.abc import Callable
 import pytest
 import redis as redis_sync
 from fastapi.testclient import TestClient
+from views import rankings_bus
+from views.rankings_bus import RankingsBus
 
 import data_api.app as app_module
-from data_api import redis_bus
-from data_api.redis_bus import RankingsBus
+from data_api import buses
+from data_api import settings
 
 
 def _sample_message(**overrides: object) -> dict:
@@ -133,7 +135,7 @@ def test_unsubscribe_stops_further_fan_out() -> None:
 def test_get_rankings_returns_503_before_any_cached_message(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(redis_bus, "bus", RankingsBus())
+    monkeypatch.setattr(buses, "bus", RankingsBus())
     client = TestClient(app_module.app)
 
     response = client.get("/api/rankings")
@@ -147,7 +149,7 @@ def test_get_rankings_renames_ranks_to_items_and_passes_everything_else_through(
     isolated_bus = RankingsBus()
     message = _sample_message()
     isolated_bus.handle_message(message)
-    monkeypatch.setattr(redis_bus, "bus", isolated_bus)
+    monkeypatch.setattr(buses, "bus", isolated_bus)
     client = TestClient(app_module.app)
 
     response = client.get("/api/rankings")
@@ -176,11 +178,11 @@ def _publish_until_observed(
     app's lifespan starts it. Publish repeatedly until `observed()` reports the message
     was actually received, rather than guessing a fixed sleep duration.
 
-    Publishes via `redis_bus.REDIS_URL` (not a hardcoded literal) so this test always
+    Publishes via `settings.REDIS_URL` (not a hardcoded literal) so this test always
     targets the same Redis instance the running `RankingsBus` subscribes to, even if
     `REDIS_URL`/`REDIS_PORT` is shifted away from the default in some environment.
     """
-    publisher = redis_sync.Redis.from_url(redis_bus.REDIS_URL)
+    publisher = redis_sync.Redis.from_url(settings.REDIS_URL)
     try:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -199,9 +201,9 @@ def test_rankings_live_message_reflected_by_rest_and_ws_relay() -> None:
 
     with TestClient(app_module.app) as client:
         delivered = _publish_until_observed(
-            redis_bus.RANKINGS_CHANNEL,
+            rankings_bus.RANKINGS_CHANNEL,
             payload,
-            lambda: redis_bus.bus.latest == message,
+            lambda: buses.bus.latest == message,
         )
         assert delivered, "rankings:live message was never observed by the running RankingsBus"
 
@@ -223,7 +225,7 @@ def test_rankings_live_message_reflected_by_rest_and_ws_relay() -> None:
 def test_put_drop_oldest_keeps_newest_when_full() -> None:
     import asyncio
 
-    from data_api.redis_bus import put_drop_oldest
+    from views.rankings_bus import put_drop_oldest
 
     queue: asyncio.Queue[dict] = asyncio.Queue(2)
     for i in range(3):

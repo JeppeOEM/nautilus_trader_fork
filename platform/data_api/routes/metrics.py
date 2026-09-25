@@ -14,8 +14,8 @@
 # -------------------------------------------------------------------------------------------------
 """
 `GET /api/metrics/history/{symbol}` / `GET /api/metrics/nearest/{symbol}` -- relocated
-(AD-F2), not reimplemented: both call straight into `ranking_engine.metrics_store.history()`/
-`nearest()` unchanged. Story 17.2 (originally 15.8)'s 31-day metrics-history page fetches
+(AD-F2), not reimplemented: both call `views.coin_detail.metrics_history`/`metrics_nearest`, the
+views read over the ranking context's `metrics_store.history()`/`nearest()` (Story 24.2), unchanged. Story 17.2 (originally 15.8)'s 31-day metrics-history page fetches
 its trailing-31-day window through the first of these; the second exists for any
 nearest-value lookup that page (or a future one) needs.
 
@@ -39,7 +39,7 @@ from pathlib import Path
 
 from fastapi import APIRouter
 from pydantic import BaseModel
-from ranking_engine import metrics_store
+from views import coin_detail
 
 from data_api.settings import CATALOG_PATH
 
@@ -80,11 +80,11 @@ class MetricsHistoryResponse(BaseModel):
 
 @router.get("/api/metrics/history/{symbol}")
 def get_metrics_history(symbol: str, days: int = 31) -> MetricsHistoryResponse:
-    rows = metrics_store.history(symbol, METRICS_DB_PATH, days)
+    rows = coin_detail.metrics_history(symbol, METRICS_DB_PATH, days)
     return MetricsHistoryResponse(items=[MetricHistoryItem(**row) for row in rows])
 
 
 @router.get("/api/metrics/nearest/{symbol}")
 def get_metrics_nearest(symbol: str, ts_ns: int) -> MetricHistoryItem | None:
-    row = metrics_store.nearest(symbol, ts_ns, METRICS_DB_PATH)
+    row = coin_detail.metrics_nearest(symbol, ts_ns, METRICS_DB_PATH)
     return MetricHistoryItem(**row) if row is not None else None

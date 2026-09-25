@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 // Reconnect-with-backoff, client-side analog of the backend's own reconnect-forever
-// discipline (redis_bus.py's RankingsBus.run(), itself mirroring dashboard.py's
+// discipline (views/rankings_bus.py's RankingsBus.run(), itself mirroring dashboard.py's
 // _redis_listener). Backoff grows linearly per attempt, capped -- no reason to hammer
 // data_api every second if it's genuinely down for a while.
 const RECONNECT_BASE_MS = 1000;
@@ -61,7 +61,7 @@ export function useLiveChannel<T>(): LiveChannelState<T> {
         } catch {
           // Malformed frame -- ignore, keep the previous state. Mirrors the backend's
           // own "malformed payload is logged and skipped, previous cache kept" rule
-          // (redis_bus.py's RankingsBus.handle_message) -- the frontend should never
+          // (views/rankings_bus.py's RankingsBus.handle_message) -- the frontend should never
           // crash or blank the table over one bad frame either.
         }
       };

@@ -17,7 +17,7 @@ COPY platform/collector_core ./collector_core
 COPY platform/dydx_collector ./dydx_collector
 COPY platform/bybit_collector ./bybit_collector
 COPY platform/hyperliquid_collector ./hyperliquid_collector
-COPY platform/common ./common
+COPY platform/views ./views
 COPY platform/ml_signals ./ml_signals
 COPY platform/ranking_engine ./ranking_engine
 COPY platform/bot_tui ./bot_tui

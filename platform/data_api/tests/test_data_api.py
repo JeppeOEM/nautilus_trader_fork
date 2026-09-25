@@ -19,9 +19,9 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 from kernel.second_snapshot import DydxSecondSnapshot
-from ml_signals import catalog_stats as _catalog_stats
-from ml_signals import chart_data as _chart_data
 from ranking_engine import metrics_store
+from views import catalog_reads
+from views import chart_series
 
 import data_api.app as app_module
 from nautilus_trader.model.identifiers import InstrumentId
@@ -126,7 +126,9 @@ def test_catalog_chart_series_route(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     response = client.get(f"/catalog/chart-series/{_IID}?start_ns=0&end_ns=3000000000")
 
     assert response.status_code == 200
-    assert response.json() == _chart_data.compute_chart_series(catalog_path, _IID, 0, 3_000_000_000)
+    assert response.json() == chart_series.compute_chart_series(
+        catalog_path, _IID, 0, 3_000_000_000
+    )
 
 
 def test_catalog_snapshots_route(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -153,7 +155,7 @@ def test_catalog_snapshots_route(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
             "low_price": s.low_price,
             "close_price": s.close_price,
         }
-        for s in _catalog_stats.query_second_snapshots(catalog_path, _IID, 0, 2_000_000_000)
+        for s in catalog_reads.query_second_snapshots(catalog_path, _IID, 0, 2_000_000_000)
     ]
     assert response.json() == expected
 

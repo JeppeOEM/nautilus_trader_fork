@@ -12,7 +12,3 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
-"""
-Deprecated shim package (Story 23.2): the venue registry moved to `kernel.venues`, the only
-`InstrumentId` parser. `common.venues` re-exports it until its `REMOVE_AFTER` story.
-"""

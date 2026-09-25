@@ -12,7 +12,14 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
-"""Catalog analytics: per-instrument data coverage, gap detection, price/volatility stats."""
+"""
+Catalog analytics: per-instrument data coverage, gap detection, price/volatility stats.
+
+Split across contexts (spine AD-D1): the coverage/gap helpers are archive's, the price series and
+stats ranking's (`list_instruments` too, for `metrics_computer`). The one views read that lived here,
+`query_second_snapshots`, moved to `views.catalog_reads` in Story 24.2 and is served below with a
+DeprecationWarning; `overview_table` was deleted (see `_REPLACED_NAMES`).
+"""
 
 import glob
 import os
@@ -21,9 +28,6 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
-from kernel import catalog_files
-from kernel import second_snapshot
-from kernel.clocks import READ_SPAN_MARGIN_NS
 from kernel.second_snapshot import DydxSecondSnapshot
 from observability import error_ledger
 
@@ -32,40 +36,46 @@ from nautilus_trader.model.data import MarkPriceUpdate
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
 
-# Story 23.2 moved the second-OHLC read helpers and the `SecondOHLC` row to the shared kernel.
-# Old names whose successor is the same object with the same call shape are served with a
-# DeprecationWarning until the story below is done; `_stamp_to_ns` changed shape (a whole file
-# stem -> a span) and raises, naming its successor.
-MOVED_NAMES_REMOVE_AFTER = "24-2-views-read-models-and-reader-side-revalidation-removed"
+# Story 24.2 moved the views read below to the views context. The old name is served, as the same
+# object, with a DeprecationWarning until the story below is done. Replaced names changed shape or
+# were retired and raise, naming their successor: `_stamp_to_ns` (Story 23.2: a whole file stem ->
+# a span) and `overview_table` (Story 24.2: it recomputed the pct-change/volatility math only the
+# ranking context may compute -- AD-D10 -- and had no caller since Story 15.10 retired the
+# dashboard; the same per-instrument stats are ranking's published output).
+MOVED_NAMES_REMOVE_AFTER = "24-4-research-pure-consumer-and-broken-tests-repaired"
 _MOVED_NAMES: dict[str, str] = {
-    "SecondOHLC": "kernel.second_snapshot.SecondOHLC",
-    "data_file_ranges": "kernel.catalog_files.data_file_ranges",
-    "query_second_ohlc": "kernel.catalog_files.query_second_ohlc",
-    "second_ohlc_arrays": "kernel.catalog_files.second_ohlc_arrays",
+    "query_second_snapshots": "views.catalog_reads.query_second_snapshots",
 }
 _REPLACED_NAMES: dict[str, str] = {
     "_stamp_to_ns": "kernel.clocks.CatalogFileSpan.from_stem(stem)",
+    "overview_table": (
+        "the rankings:live payload (GET /api/rankings) or metrics.db "
+        "(ranking_engine.metrics_store.latest(db_path))"
+    ),
 }
-
-_TARGET_MODULES = {"kernel.second_snapshot": second_snapshot, "kernel.catalog_files": catalog_files}
 
 
 def __getattr__(name: str) -> object:
     if name in _REPLACED_NAMES:
         raise AttributeError(
-            f"ml_signals.catalog_stats.{name} was replaced by {_REPLACED_NAMES[name]} (Story 23.2)"
+            f"ml_signals.catalog_stats.{name} was replaced by {_REPLACED_NAMES[name]}"
         )
     if name not in _MOVED_NAMES:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
     target = _MOVED_NAMES[name]
     warnings.warn(
-        f"ml_signals.catalog_stats.{name} moved to {target} (Story 23.2); "
+        f"ml_signals.catalog_stats.{name} moved to {target} (Story 24.2); "
         f"removed after {MOVED_NAMES_REMOVE_AFTER}",
         DeprecationWarning,
         stacklevel=2,
     )
     module, _, attr = target.rpartition(".")
-    return getattr(_TARGET_MODULES[module], attr)  # a KeyError is a table typo: loud
+    # Imported on access, not at module top: `ranking_engine` imports this module in production,
+    # and an eager import would load `views` into the ranking process for a name it never reads.
+    # A literal import (not `importlib`) so `tests/test_images.py` still sees it in the closure.
+    from views import catalog_reads
+
+    return getattr({"views.catalog_reads": catalog_reads}[module], attr)  # KeyError: table typo
 
 
 # Order matters only for price_series()'s fallback preference below.
@@ -87,42 +97,6 @@ def list_instruments(catalog_path: str) -> list[str]:
         for path in glob.glob(os.path.join(catalog_path, "data", data_type, "*")):
             ids.add(Path(path).name)
     return sorted(ids)
-
-
-def query_second_snapshots(
-    catalog_path: str,
-    instrument_id: str,
-    start_ns: int,
-    end_ns: int,
-) -> list[DydxSecondSnapshot]:
-    """
-    DydxSecondSnapshot rows for `instrument_id` in [start_ns, end_ns], CustomData-unwrapped.
-
-    Shared by dashboard.py's _historical_lines_json and custom_indicators.py's
-    _second_snapshots -- both projected different fields off this same query, so only
-    the catalog-query + CustomData-unwrap boilerplate lives here.
-    """
-    catalog = ParquetDataCatalog(catalog_path)
-    # `query` bounds on ts_init, the window is ts_event: a venue-timed row (story 22.12) is
-    # sampled up to 1 + hold_back s (a catch-up: more) after its ts_event, so the end is widened
-    # and the exact ts_event filter decides.
-    # Known limit: the start is not widened, so a row whose venue clock ran ahead of ours
-    # (`ts_init < ts_event`, the second direction `kernel.clocks.READ_SPAN_MARGIN_NS` documents)
-    # is dropped when its ts_event is within READ_SPAN_MARGIN_NS of `start_ns`. The ceiling is one
-    # margin's worth of rows at the window's lower edge; `kernel.catalog_files.query_second_ohlc`
-    # widens both sides and keeps them, so the two readers can disagree there. The upgrade path is
-    # `start=start_ns - READ_SPAN_MARGIN_NS` (the exact ts_event filter below already makes it
-    # safe); held back here because this story moves read margins without changing them.
-    results = catalog.query(
-        data_cls=DydxSecondSnapshot,
-        identifiers=[instrument_id],
-        start=start_ns,
-        end=end_ns + READ_SPAN_MARGIN_NS,
-    )
-    # query() wraps custom Data subclasses in CustomData -- unwrap via .data to reach the
-    # actual DydxSecondSnapshot (confirmed via direct introspection this session).
-    snapshots = [r.data if hasattr(r, "data") else r for r in results]
-    return [s for s in snapshots if start_ns <= s.ts_event <= end_ns]
 
 
 def _load(catalog: ParquetDataCatalog, data_type: str, instrument_id: str) -> list:
@@ -332,15 +306,3 @@ def price_stats(
     price_stats_from_series() -- see that function's docstring.
     """
     return price_stats_from_series(price_series(catalog, instrument_id, start_ns=start_ns))
-
-
-def overview_table(catalog_path: str) -> list[dict]:
-    """One row per known instrument with price/volatility/pct-change stats."""
-    catalog = ParquetDataCatalog(catalog_path)
-    rows = []
-    # Known limit: recomputed from scratch on every call, ~300 catalog lookups for
-    # instruments with no price data at all. Fine for a personal dashboard;
-    # add a TTL cache if the overview page becomes measurably slow.
-    for instrument_id in list_instruments(catalog_path):
-        rows.append({"instrument_id": instrument_id, **price_stats(catalog, instrument_id)})
-    return rows

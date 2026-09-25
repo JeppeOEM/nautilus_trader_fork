@@ -18,7 +18,7 @@ Alerts are delivered to Telegram (when `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID`
 the alert's own webhook URL (optional), and as a toast pushed over `/ws/live`. The first two are
 channels of `observability.notify` (Story 23.1), which owns the transports and ledgers failures.
 
-Persistence mirrors `ml_signals/chart_indicator_config.py` (TOML, full rewrite). The engine is a
+Persistence mirrors `views/preferences.py` (TOML, full rewrite). The engine is a
 server-side observer of `LiveCandleBus` (the one existing `snapshots:raw` subscriber), so alerts
 fire with no browser tab open and there is no second Redis subscription or polling loop.
 
@@ -43,9 +43,8 @@ from typing import Callable
 
 import tomli_w
 from observability import notify
-
-from data_api.redis_bus import QUEUE_MAX
-from data_api.redis_bus import put_drop_oldest
+from views.rankings_bus import QUEUE_MAX
+from views.rankings_bus import put_drop_oldest
 
 
 logger = logging.getLogger(__name__)
