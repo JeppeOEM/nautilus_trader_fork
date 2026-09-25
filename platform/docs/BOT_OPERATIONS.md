@@ -4,7 +4,7 @@ Two separate strategy paths exist in `platform/`, and they are not interchangeab
 
 | | Backtest / research | Live paper bot |
 |---|---|---|
-| Where | `ml_signals/strategies/*_strategy.py` + `ml_signals/strategies/backtest_dydx.py` | `live_paper/strategy.py` + `live_paper/node.py` |
+| Where | `research/strategies/*_strategy.py` + `research/strategies/backtest_dydx.py` | `live_paper/strategy.py` + `live_paper/node.py` |
 | Runtime | `BacktestNode` (deterministic replay of the collector's Parquet catalog) | `TradingNode` (real dYdX WS data, sandbox execution) — the one place `platform/CLAUDE.md`'s TradingNode ban is lifted (AD-8) |
 | Wiring | `ImportableStrategyConfig(strategy_path=..., config_path=...)` — string path, per-symbol config | One strategy class hardcoded via `node.trader.add_strategy(...)` in `node.py`, mirroring `examples/sandbox/dydx_sandbox.py` |
 | Start/stop | One-shot Python process call, exits when done | Long-running Docker container, controlled via Redis pub/sub or `bot_tui` |
@@ -76,13 +76,13 @@ docker exec dydx-redis redis-cli SUBSCRIBE bots:status          # heartbeat ever
 
 ---
 
-## 2. Creating a backtest strategy (`ml_signals/`)
+## 2. Creating a backtest strategy (`research/`)
 
 This is the research path — a `Strategy` subclass run by `BacktestNode` against the
 collector's own Parquet catalog, referenced by string path so parameter sweeps and
 symbol/date changes never require touching the strategy file.
 
-**Minimal shape** (see `ml_signals/strategies/example_strategy.py` for the full working
+**Minimal shape** (see `research/strategies/example_strategy.py` for the full working
 version):
 
 ```python
@@ -121,11 +121,11 @@ Reuse an existing indicator from `kernel/indicators.py` (SIGNAL-01: derive from
 stored snapshot fields, don't reinvent) rather than rolling your own math inline.
 
 **Wire it into a backtest run** by pointing `ImportableStrategyConfig` at the new class
-(`ml_signals/strategies/backtest_dydx.py:_build_run_config`, ~line 85):
+(`research/strategies/backtest_dydx.py:_build_run_config`, ~line 85):
 ```python
 ImportableStrategyConfig(
-    strategy_path="ml_signals.strategies.my_strategy:MyStrategy",
-    config_path="ml_signals.strategies.my_strategy:MyStrategyConfig",
+    strategy_path="research.strategies.my_strategy:MyStrategy",
+    config_path="research.strategies.my_strategy:MyStrategyConfig",
     config={
         "instrument_id": f"{symbol}.DYDX",
         "bar_type": f"{symbol}.DYDX-{bar_interval}-LAST-INTERNAL",
@@ -137,9 +137,9 @@ ImportableStrategyConfig(
 **Run it:**
 ```bash
 cd platform
-python3 -c "from ml_signals.strategies.backtest_dydx import run; print(run(symbols=['BTC-USD-PERP']))"
+python3 -c "from research.strategies.backtest_dydx import run; print(run(symbols=['BTC-USD-PERP']))"
 ```
-or directly: `python3 -m ml_signals.strategies.backtest_dydx` (runs against the full live Watchlist
+or directly: `python3 -m research.strategies.backtest_dydx` (runs against the full live Watchlist
 by default — pass `symbols=[...]` explicitly for a quick single-coin check). `run()`
 also takes `catalog_path`, `bar_interval` (a plain bar-spec string, e.g. `"5-MINUTE"` —
 no code change needed), and per-strategy threshold kwargs; returns a

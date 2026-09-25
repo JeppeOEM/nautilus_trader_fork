@@ -14,7 +14,7 @@
 # -------------------------------------------------------------------------------------------------
 """
 Integration test: DummyStrategy in a raw BacktestEngine (Story 3.2), mirroring
-ml_signals/tests/test_ofi_strategy.py's established pattern.
+research/tests/test_ofi_strategy.py's established pattern.
 
 Thresholds are deliberately set so entries are guaranteed/blocked independent of whether
 OnlineLogisticTrend's online SGD has actually "learned" a direction yet -- it starts at

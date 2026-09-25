@@ -18,10 +18,10 @@ import json
 import urllib.request
 from typing import Self
 
-from ml_signals import watchlist
 from nautilus_trader.backtest.node import BacktestDataConfig
 from nautilus_trader.model.data import TradeTick
 from nautilus_trader.model.identifiers import InstrumentId
+from research import watchlist
 
 
 class _FakeResponse:

@@ -20,6 +20,7 @@ COPY platform/hyperliquid_collector ./hyperliquid_collector
 COPY platform/views ./views
 COPY platform/alerting ./alerting
 COPY platform/ml_signals ./ml_signals
+COPY platform/research ./research
 COPY platform/ranking_engine ./ranking_engine
 COPY platform/bot_tui ./bot_tui
 COPY platform/data_api ./data_api

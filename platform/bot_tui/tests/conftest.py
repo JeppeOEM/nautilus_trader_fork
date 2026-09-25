@@ -15,7 +15,7 @@
 """
 bot_tui's tests are pure Python/dict/urwid-widget-construction logic -- no
 BacktestEngine/BacktestNode is ever constructed anywhere in this package, so the
-LOGGING_INITIALIZED native-abort guard fixture that ml_signals/tests/conftest.py needs
+LOGGING_INITIALIZED native-abort guard fixture that research/tests/conftest.py needs
 (see that file's docstring) does not apply here.
 """
 

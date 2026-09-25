@@ -22,15 +22,19 @@ objects; these helpers read the Parquet files directly with `pyarrow`). The dire
 from Nautilus's own `class_to_filename`, so they can never drift from what `write_data` writes.
 Files are selected by their name's `ts_init` span (`kernel.clocks.CatalogFileSpan`) and rows by
 their exact `ts_event` (MEM-01: callers read one instrument, and the rebuilds one day, at a time).
-Only `query_second_ohlc` widens the span by `READ_SPAN_MARGIN_NS`; `files_by_day` and
-`data_file_ranges` take the span as written, as their pre-kernel originals did -- the rebuild
-re-reads a whole day, so a row whose `ts_init` lands in the neighbouring file is picked up there.
+Only `query_second_ohlc` and `query_top_of_book` widen the span by `READ_SPAN_MARGIN_NS`;
+`files_by_day` and `data_file_ranges` take the span as written, as their pre-kernel originals did --
+the rebuild re-reads a whole day, so a row whose `ts_init` lands in the neighbouring file is picked
+up there.
 """
 
 import glob
 import os
+from typing import NamedTuple
 
 import numpy as np
+import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from kernel.clocks import NS_PER_DAY
@@ -122,6 +126,57 @@ def _ohlc_rows(path: str, start_ns: int, end_ns: int) -> list[SecondOHLC]:
         )
         for i in range(table.num_rows)
     ]
+
+
+class TopOfBook(NamedTuple):
+    """Level 0 of one second-snapshot row: what a quote needs, without the 20-level book."""
+
+    ts_event: int
+    ts_init: int
+    bid_price: float
+    bid_size: float
+    ask_price: float
+    ask_size: float
+
+
+_BOOK_COLUMNS = ("bid_prices", "bid_sizes", "ask_prices", "ask_sizes")
+
+
+def query_top_of_book(
+    catalog_path: str, instrument_id: str, start_ns: int, end_ns: int
+) -> list[TopOfBook]:
+    """
+    Level-0 bid/ask price and size of every second-snapshot row in [start_ns, end_ns] (ts_event),
+    sorted by `ts_event`; the same file selection as `query_second_ohlc`.
+
+    A row with an empty side is omitted: it has no top of book to quote. Only element 0 of each
+    list column leaves Arrow, so a multi-day window never builds the 20-level book in Python
+    (MEM-01), which is what the catalog decoder would do.
+    """
+    rows: list[TopOfBook] = []
+    for path in snapshot_files(catalog_path, instrument_id):
+        if not CatalogFileSpan.from_path(path).overlaps(start_ns, end_ns, READ_SPAN_MARGIN_NS):
+            continue
+        rows.extend(_top_rows(path, start_ns, end_ns))
+    rows.sort(key=lambda r: r.ts_event)
+    return rows
+
+
+def _top_rows(path: str, start_ns: int, end_ns: int) -> list[TopOfBook]:
+    table = pq.read_table(
+        path,
+        columns=["ts_event", "ts_init", *_BOOK_COLUMNS],
+        filters=[("ts_event", ">=", start_ns), ("ts_event", "<=", end_ns)],
+    )
+    # A null or empty list compares to null or False, and `filter` drops both.
+    quotable = pc.and_(
+        pc.greater(pc.list_value_length(table.column("bid_prices")), 0),
+        pc.greater(pc.list_value_length(table.column("ask_prices")), 0),
+    )
+    table = table.filter(quotable)
+    columns: list[pa.ChunkedArray] = [table.column("ts_event"), table.column("ts_init")]
+    columns += [pc.list_element(table.column(name), 0) for name in _BOOK_COLUMNS]
+    return [TopOfBook(*values) for values in zip(*(c.to_pylist() for c in columns), strict=True)]
 
 
 def second_ohlc_arrays(paths: list[str]) -> dict[str, np.ndarray]:

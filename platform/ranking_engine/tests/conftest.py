@@ -15,6 +15,6 @@
 """
 ranking_engine's tests are pure Python/SQLite/Redis-JSON logic -- no BacktestEngine/
 BacktestNode construction happens anywhere in this package, so the LOGGING_INITIALIZED
-native-abort guard fixture that ml_signals/tests/conftest.py needs (see that file's
+native-abort guard fixture that research/tests/conftest.py needs (see that file's
 docstring) does not apply here. Intentionally empty.
 """

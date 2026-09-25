@@ -25,7 +25,8 @@ so the graph holds from the first move, not only once a module has been relocate
 - a cross-context edge must be in `GRAPH` (AD-D2);
 - a `_private` name is never imported across contexts;
 - `observability` imports only the standard library, and `kernel` no context;
-- `research` imports nothing from `data_api`, legacy or not;
+- `research` imports nothing from `data_api`, legacy or not, nor `views`, `ranking_engine` or
+  `ml_signals`;
 - a `domain/` module or a venue `policies.py` imports only the standard library, `kernel` and
   `nautilus_trader.model`/`core`;
 - `kernel/` holds exactly spine AD-D3's modules and stays pure: no in-repo import beyond itself,
@@ -55,7 +56,7 @@ from _source_tree import story_statuses
 from _source_tree import unknown_or_done
 
 
-THIS_STORY = "24-3-alerting-context-as-forming-bar-observer"
+THIS_STORY = "24-4-research-pure-consumer-and-broken-tests-repaired"
 
 KERNEL = "kernel"
 OBSERVABILITY = "observability"
@@ -165,44 +166,26 @@ LEGACY_MODULE_TO_CONTEXT: dict[str, str] = {
     "dydx_collector.tests.test_repair_catalog": ARCHIVE,
     # --- ml_signals: no package default, so a new module there must be placed deliberately
     "ml_signals.__init__": RESEARCH,  # the package itself; see `_context_of`
-    "ml_signals.book_features": VIEWS,  # Story 24.2 shim, as are the other VIEWS modules here
     "ml_signals.catalog_stats": VIEWS,  # split per symbol below
-    "ml_signals.chart_data": VIEWS,
-    "ml_signals.chart_indicator_config": VIEWS,
-    "ml_signals.chart_indicators": VIEWS,
-    "ml_signals.custom_indicators": VIEWS,
-    "ml_signals.footprint": VIEWS,
     "ml_signals.metrics_computer": RANKING,
     "ml_signals.rank_history": RANKING,
-    "ml_signals.ranking_columns": VIEWS,
-    "ml_signals.run_backtest": RESEARCH,
-    "ml_signals.screener_columns_config": VIEWS,
+    "ml_signals.run_backtest": RESEARCH,  # Story 24.4 shim, as are the other RESEARCH modules here
     "ml_signals.strategies": RESEARCH,
     "ml_signals.watchlist": RESEARCH,
     "ml_signals.tests.__init__": RESEARCH,
-    "ml_signals.tests.conftest": RESEARCH,
-    "ml_signals.tests.test_ad8_boundary": RESEARCH,
+    # guards the views/ranking reader modules that stayed (research/tests has the backtest half)
+    "ml_signals.tests.test_ad8_boundary": VIEWS,
     # catalog_stats' own tests cover what stayed: ranking's price stats and archive's gap helpers
     "ml_signals.tests.test_catalog_stats": RANKING,
     "ml_signals.tests.test_metrics_computer": RANKING,
-    "ml_signals.tests.test_ofi_strategy": RESEARCH,
-    "ml_signals.tests.test_ofi_strategy_indicator_consistency": RESEARCH,
     "ml_signals.tests.test_rank_history": RANKING,
-    "ml_signals.tests.test_snapshot_backtest_node": RESEARCH,
-    "ml_signals.tests.test_snapshot_strategy": RESEARCH,
-    "ml_signals.tests.test_timeframe_backtest": RESEARCH,
-    "ml_signals.tests.test_watchlist": RESEARCH,
-    "ml_signals.tests.test_watchlist_multi_coin_backtest": RESEARCH,
     # --- ranking_engine / live_paper: one context each
     "ranking_engine": RANKING,
     "live_paper": BOTS,
-    # --- data_api: the interface adapter, hosting the Story 24.3 shim of alerting and three
-    # Story 24.2 shims of views modules
+    # --- data_api: the interface adapter, hosting the Story 24.3 shim of alerting (its Story 24.2
+    # views shims were deleted in Story 24.4)
     "data_api": DATA_API,
     "data_api.alerts": ALERTING,  # Story 24.3 shim
-    "data_api.live_candles": VIEWS,
-    "data_api.redis_bus": VIEWS,
-    "data_api.routes.paging": VIEWS,
     # --- bot_tui: the terminal interface adapter
     "bot_tui": BOT_TUI,
 }
@@ -211,8 +194,8 @@ LEGACY_MODULE_TO_CONTEXT: dict[str, str] = {
 # class of a split module is listed (asserted), so its move is fully planned.
 LEGACY_SYMBOL_TO_CONTEXT: dict[tuple[str, str], str] = {
     # catalog_stats: AD-D1's three-way split. Its kernel read helpers moved in Story 23.2 and its
-    # views read in Story 24.2; the module `__getattr__` only serves that moved views name
-    # (`query_second_snapshots`), with a DeprecationWarning.
+    # views read in Story 24.2 (its forwarding ended in Story 24.4); the module `__getattr__` now
+    # only raises for `_REPLACED_NAMES`, naming each successor.
     ("ml_signals.catalog_stats", "__getattr__"): VIEWS,
     ("ml_signals.catalog_stats", "find_gaps"): ARCHIVE,
     ("ml_signals.catalog_stats", "_overlapping_intervals"): ARCHIVE,
@@ -244,13 +227,6 @@ LEGACY_EDGES_UNTIL: dict[tuple[str, str], str] = {
     # The capture tests read their own written snapshots back with `query_second_snapshots`
     # (a views read); they move with capture into capture/tests.
     (CAPTURE, VIEWS): "26-2-capture-package-and-venue-packages-with-entrypoints",
-    # The one edge Story 24.2's move newly exposed: `ml_signals.tests.
-    # test_ofi_strategy_indicator_consistency` replays OFI through `top_of_book_series`, a views
-    # function since `book_features` moved (it was intra-package before). Research consumes the
-    # catalog and ranking's published output only once Story 24.4 repairs that test. The same
-    # import sits in `dydx_collector/notebooks/dydx_catalog_pandas.ipynb`, which this `.py` scan
-    # cannot see: Story 24.4 must repoint it too before deleting this entry.
-    (RESEARCH, VIEWS): "24-4-research-pure-consumer-and-broken-tests-repaired",
 }
 
 # Cross-context imports of a `_private` name: (importing module, "module._name") -> story. Empty
@@ -550,6 +526,22 @@ def test_research_imports_nothing_from_data_api() -> None:
     )
     assert reaching == [], "research reads rankings over HTTP, never by importing data_api"
     assert (RESEARCH, DATA_API) not in LEGACY_EDGES_UNTIL
+
+
+# Packages research never imports (AD-D1 research row, Story 24.4): the read models, ranking and
+# the legacy signals package. Rolling metrics come from ranking's published output, never code.
+_RESEARCH_FORBIDDEN_PACKAGES = frozenset({VIEWS, "ranking_engine", "ml_signals"})
+
+
+def test_research_imports_no_views_ranking_engine_or_ml_signals() -> None:
+    reaching = sorted(
+        _site(imp)
+        for imp in _IMPORTS
+        if imp.src.split(".")[0] == RESEARCH
+        and imp.dst.split(".")[0] in _RESEARCH_FORBIDDEN_PACKAGES
+    )
+    assert reaching == [], "research consumes the catalog and ranking's published output only"
+    assert {edge for edge in LEGACY_EDGES_UNTIL if edge[0] == RESEARCH} == set()
 
 
 # The non-test modules outside `alerting.infrastructure` that may import it (AD-D2: infrastructure
@@ -928,7 +920,7 @@ LEGACY_VENUE_HTTP_UNTIL: dict[str, str] = {
 NON_VENUE_HTTP_CLIENTS: dict[str, str] = {
     "observability.notify": "ntfy / Telegram / webhook alert transport",
     "ml_signals.rank_history": "the local data_api HTTP API",
-    "ml_signals.watchlist": "the local data_api HTTP API",
+    "research.watchlist": "the local data_api HTTP API",
 }
 _VENUE_URL = re.compile(r"https?://[^\s\"']*(?:dydx|bybit|hyperliquid)", re.IGNORECASE)
 

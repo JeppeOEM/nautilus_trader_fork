@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 
 from kernel import catalog_files
+from kernel.catalog_files import TopOfBook
 from kernel.clocks import NS_PER_DAY
 from kernel.clocks import NS_PER_S
 from kernel.clocks import READ_SPAN_MARGIN_NS
@@ -123,6 +124,83 @@ def test_second_ohlc_arrays(catalog: str) -> None:
     assert math.isnan(cols["c"][1])
     assert list(cols["v"]) == [1.5, 0.0, 1.5, 1.5, 1.5]
     assert len(catalog_files.second_ohlc_arrays([])["ts_ms"]) == 0
+
+
+def _book(ts_event: int, bids: list[float], asks: list[float]) -> DydxSecondSnapshot:
+    """Build a book row whose sizes are each price's tenth, so every level is traceable."""
+    return DydxSecondSnapshot(
+        InstrumentId.from_str(_IID),
+        bids,
+        [p / 10 for p in bids],
+        asks,
+        [p / 10 for p in asks],
+        0.0,
+        0.0,
+        0,
+        0,
+        ts_event,
+        ts_event + NS_PER_S // 2,
+    )
+
+
+@pytest.fixture
+def book_catalog(tmp_path: Path) -> str:
+    """Written out of order across two files, with an empty bid side and an empty ask side."""
+    writer = ParquetDataCatalog(str(tmp_path))
+    at = [_DAY0 + k * NS_PER_S for k in range(6)]
+    writer.write_data(
+        [
+            _book(at[3], [103.0, 102.0], [104.0, 105.0]),
+            _book(at[4], [], [106.0]),
+            _book(at[5], [107.0], []),
+        ]
+    )
+    writer.write_data(
+        [
+            _book(at[0], [100.0, 99.0], [101.0, 102.0]),
+            _book(at[1], [101.0], [102.0]),
+            _book(at[2], [102.0, 101.0], [103.0]),
+        ]
+    )
+    return str(tmp_path)
+
+
+def _top(ts_event: int, bid: float, ask: float) -> TopOfBook:
+    return TopOfBook(ts_event, ts_event + NS_PER_S // 2, bid, bid / 10, ask, ask / 10)
+
+
+def test_query_top_of_book_returns_level_zero_sorted_by_ts_event(book_catalog: str) -> None:
+    rows = catalog_files.query_top_of_book(book_catalog, _IID, _DAY0, _DAY0 + 3 * NS_PER_S)
+    assert rows == [
+        _top(_DAY0, 100.0, 101.0),
+        _top(_DAY0 + NS_PER_S, 101.0, 102.0),
+        _top(_DAY0 + 2 * NS_PER_S, 102.0, 103.0),
+        _top(_DAY0 + 3 * NS_PER_S, 103.0, 104.0),
+    ]
+
+
+def test_query_top_of_book_window_bounds_are_inclusive_ts_event(book_catalog: str) -> None:
+    lo, hi = _DAY0 + NS_PER_S, _DAY0 + 2 * NS_PER_S
+    rows = catalog_files.query_top_of_book(book_catalog, _IID, lo, hi)
+    assert [r.ts_event for r in rows] == [lo, hi]
+
+
+def test_query_top_of_book_omits_a_row_with_an_empty_side(book_catalog: str) -> None:
+    rows = catalog_files.query_top_of_book(book_catalog, _IID, _DAY0, _DAY0 + NS_PER_DAY)
+    assert [r.ts_event for r in rows] == [_DAY0 + k * NS_PER_S for k in range(4)]
+
+
+def test_query_top_of_book_reads_files_within_the_read_margin(book_catalog: str) -> None:
+    """A row whose `ts_init` (file span) lies past the window's end is still found by `ts_event`."""
+    rows = catalog_files.query_top_of_book(book_catalog, _IID, _DAY0, _DAY0)
+    assert rows == [_top(_DAY0, 100.0, 101.0)]
+    assert READ_SPAN_MARGIN_NS > NS_PER_S // 2  # the file's span starts 0.5 s after the window
+
+
+def test_query_top_of_book_empty_window_and_unknown_instrument(book_catalog: str) -> None:
+    after = _DAY0 + 10 * NS_PER_S
+    assert catalog_files.query_top_of_book(book_catalog, _IID, after, after + NS_PER_DAY) == []
+    assert catalog_files.query_top_of_book(book_catalog, "NOPE.DYDX", 0, 2 * _DAY0) == []
 
 
 def test_module_never_writes_or_builds_a_catalog() -> None:

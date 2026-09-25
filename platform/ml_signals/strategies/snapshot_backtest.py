@@ -1,112 +1,43 @@
+# -------------------------------------------------------------------------------------------------
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
+#  https://nautechsystems.io
+#
+#  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
+#  You may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at https://www.gnu.org/licenses/lgpl-3.0.en.html
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+# -------------------------------------------------------------------------------------------------
 """
-Backtest any strategy that consumes DydxSecondSnapshot, with orders that actually fill.
+Deprecated re-export shim (Story 24.4): `ml_signals.strategies.snapshot_backtest` moved to the
+research context (`research.strategies.snapshot_backtest`).
 
-The collector catalog holds no QuoteTick/TradeTick/book data, and the simulated exchange
-rejects every order with "no market for <instrument>" when it has none. So each run derives
-top-of-book QuoteTicks from the requested snapshot window into a throwaway catalog and feeds
-them to the engine alongside the snapshots. Fills happen at the snapshot's best bid/ask.
+Pure re-export, defines nothing: every name here *is* the `research.strategies.snapshot_backtest`
+object. Import from `research.strategies.snapshot_backtest` instead, e.g. `from
+research.strategies.snapshot_backtest import run`.
 """
 
-import tempfile
-from typing import Any
+import warnings
 
-from kernel.second_snapshot import DydxSecondSnapshot
-
-from nautilus_trader.backtest.engine import BacktestEngineConfig
-from nautilus_trader.backtest.node import BacktestDataConfig
-from nautilus_trader.backtest.node import BacktestNode
-from nautilus_trader.backtest.node import BacktestRunConfig
-from nautilus_trader.backtest.node import BacktestVenueConfig
-from nautilus_trader.backtest.results import BacktestResult
-from nautilus_trader.config import ImportableStrategyConfig
-from nautilus_trader.config import LoggingConfig
-from nautilus_trader.model.data import QuoteTick
-from nautilus_trader.model.enums import AccountType
-from nautilus_trader.model.enums import OmsType
-from nautilus_trader.model.instruments import Instrument
-from nautilus_trader.persistence.catalog import ParquetDataCatalog
+from research.strategies.snapshot_backtest import run
 
 
-def _quotes(instrument: Instrument, snapshots: list[DydxSecondSnapshot]) -> list[QuoteTick]:
-    return [
-        QuoteTick(
-            instrument_id=instrument.id,
-            bid_price=instrument.make_price(s.bid_prices[0]),
-            ask_price=instrument.make_price(s.ask_prices[0]),
-            bid_size=instrument.make_qty(s.bid_sizes[0]),
-            ask_size=instrument.make_qty(s.ask_sizes[0]),
-            ts_event=s.ts_event,
-            ts_init=s.ts_init,
-        )
-        for s in snapshots
-        if s.bid_prices and s.ask_prices  # an empty side has no top of book to quote
-    ]
+__all__ = [
+    "run",
+]
+
+REMOVE_AFTER = "25-2-ranking-context-rankingboard-replaces-module-globals"
 
 
-def run(
-    catalog_path: str,
-    symbol: str,
-    start: str,
-    end: str,
-    strategy_path: str,
-    config_path: str,
-    params: dict[str, Any],
-    starting_balance: int = 10_000,
-) -> BacktestResult:
-    """`start`/`end` are required: the window is materialised in memory (MEM-01)."""
-    catalog = ParquetDataCatalog(catalog_path)
-    instrument = catalog.instruments(instrument_ids=[symbol])[0]
-    venue = str(instrument.id.venue)
-    snapshots = [  # query() wraps custom types in CustomData
-        c.data
-        for c in catalog.query(DydxSecondSnapshot, identifiers=[symbol], start=start, end=end)
-    ]
-    if not snapshots:
-        raise ValueError(f"No {symbol} snapshots between {start} and {end}")
-
-    with tempfile.TemporaryDirectory() as tmp:
-        derived = ParquetDataCatalog(tmp)
-        derived.write_data([instrument])
-        derived.write_data(_quotes(instrument, snapshots))
-
-        config = BacktestRunConfig(
-            engine=BacktestEngineConfig(
-                # Rust logger can only be initialised once per process; bypass so re-runs work.
-                logging=LoggingConfig(bypass_logging=True),
-                strategies=[
-                    ImportableStrategyConfig(
-                        strategy_path=strategy_path,
-                        config_path=config_path,
-                        config={"instrument_id": str(instrument.id), **params},
-                    ),
-                ],
-            ),
-            venues=[
-                BacktestVenueConfig(
-                    name=venue,
-                    oms_type=OmsType.NETTING,
-                    account_type=AccountType.MARGIN,
-                    base_currency=str(instrument.settlement_currency),
-                    starting_balances=[f"{starting_balance} {instrument.settlement_currency}"],
-                ),
-            ],
-            data=[
-                BacktestDataConfig(
-                    catalog_path=tmp,
-                    data_cls=QuoteTick,
-                    instrument_id=instrument.id,
-                ),
-                BacktestDataConfig(
-                    catalog_path=catalog_path,
-                    data_cls=DydxSecondSnapshot,
-                    instrument_id=instrument.id,
-                    client_id=venue,  # custom type: bookkeeping label only
-                    start_time=start,
-                    end_time=end,
-                ),
-            ],
-        )
-        node = BacktestNode(configs=[config])
-        result = node.run()[0]
-        node.dispose()
-    return result
+# Attributed to the importing module, not to importlib's frames.
+warnings.warn(
+    "ml_signals.strategies.snapshot_backtest moved to research.strategies.snapshot_backtest"
+    " (Story 24.4); "
+    f"this shim is removed after {REMOVE_AFTER}",
+    DeprecationWarning,
+    skip_file_prefixes=("<frozen importlib",),
+)

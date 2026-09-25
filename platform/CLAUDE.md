@@ -2,7 +2,7 @@
 
 These rules govern all code under `platform/`: `collector_core/`, the venue collectors
 (`dydx_collector/`, `bybit_collector/`, `hyperliquid_collector/`), the contexts (`kernel/`,
-`observability/`, `candles/`, `views/`, `alerting/`), `ml_signals/`, `ranking_engine/`, `data_api/` +
+`observability/`, `candles/`, `views/`, `alerting/`, `research/`), `ml_signals/`, `ranking_engine/`, `data_api/` +
 `frontend/` and `bot_tui/`.
 `nautilus_trader` is consumed as a library only — never as a live runtime — in all of
 them. **Exception:** `platform/live_paper/` is a separate, structurally isolated module
@@ -140,7 +140,7 @@ A venue is a thin package over `collector_core.collector.Collector` — no new g
 
 - **NAUT-02** — All data written via `ParquetDataCatalog.write_data()`. No hand-rolled Parquet schemas. The catalog API owns the Arrow schema and partitioning; working around it breaks catalog reads.
 
-- **NAUT-03** — Backtests use `BacktestNode` + `BacktestDataConfig`. No custom simulation engine. Reference strategies via `ImportableStrategyConfig` by string path so parameter sweeps and time-range filtering require no code changes.
+- **NAUT-03** — Backtests use `BacktestNode` + `BacktestDataConfig`. No custom simulation engine. Reference strategies via `ImportableStrategyConfig` by string path so parameter sweeps and time-range filtering require no code changes. Since Story 24.4 the strategies, runners, watchlist client and notebooks live in the `research/` context, so the path is `research.strategies.<module>:<Class>` (e.g. `research.strategies.ofi_strategy:OFIStrategy`; the `ml_signals.strategies.*` paths are deprecated re-exports until Story 25.2). Research reads market-data rows only through `kernel.catalog_files` or `BacktestDataConfig` (`research/tests/test_research_reads.py`) `[amended 2026-09-25: Story 24.4]`.
 
 ---
 

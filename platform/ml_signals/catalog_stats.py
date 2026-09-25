@@ -17,13 +17,12 @@ Catalog analytics: per-instrument data coverage, gap detection, price/volatility
 
 Split across contexts (spine AD-D1): the coverage/gap helpers are archive's, the price series and
 stats ranking's (`list_instruments` too, for `metrics_computer`). The one views read that lived here,
-`query_second_snapshots`, moved to `views.catalog_reads` in Story 24.2 and is served below with a
-DeprecationWarning; `overview_table` was deleted (see `_REPLACED_NAMES`).
+`query_second_snapshots`, moved to `views.catalog_reads` in Story 24.2 (the old name's forwarding
+ended in Story 24.4); `overview_table` was deleted (see `_REPLACED_NAMES`).
 """
 
 import glob
 import os
-import warnings
 from pathlib import Path
 
 import numpy as np
@@ -36,16 +35,11 @@ from nautilus_trader.model.data import MarkPriceUpdate
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
 
-# Story 24.2 moved the views read below to the views context. The old name is served, as the same
-# object, with a DeprecationWarning until the story below is done. Replaced names changed shape or
-# were retired and raise, naming their successor: `_stamp_to_ns` (Story 23.2: a whole file stem ->
-# a span) and `overview_table` (Story 24.2: it recomputed the pct-change/volatility math only the
-# ranking context may compute -- AD-D10 -- and had no caller since Story 15.10 retired the
-# dashboard; the same per-instrument stats are ranking's published output).
-MOVED_NAMES_REMOVE_AFTER = "24-4-research-pure-consumer-and-broken-tests-repaired"
-_MOVED_NAMES: dict[str, str] = {
-    "query_second_snapshots": "views.catalog_reads.query_second_snapshots",
-}
+# Replaced names changed shape or were retired and raise, naming their successor: `_stamp_to_ns`
+# (Story 23.2: a whole file stem -> a span) and `overview_table` (Story 24.2: it recomputed the
+# pct-change/volatility math only the ranking context may compute -- AD-D10 -- and had no caller
+# since Story 15.10 retired the dashboard; the same per-instrument stats are ranking's published
+# output).
 _REPLACED_NAMES: dict[str, str] = {
     "_stamp_to_ns": "kernel.clocks.CatalogFileSpan.from_stem(stem)",
     "overview_table": (
@@ -60,22 +54,7 @@ def __getattr__(name: str) -> object:
         raise AttributeError(
             f"ml_signals.catalog_stats.{name} was replaced by {_REPLACED_NAMES[name]}"
         )
-    if name not in _MOVED_NAMES:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    target = _MOVED_NAMES[name]
-    warnings.warn(
-        f"ml_signals.catalog_stats.{name} moved to {target} (Story 24.2); "
-        f"removed after {MOVED_NAMES_REMOVE_AFTER}",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    module, _, attr = target.rpartition(".")
-    # Imported on access, not at module top: `ranking_engine` imports this module in production,
-    # and an eager import would load `views` into the ranking process for a name it never reads.
-    # A literal import (not `importlib`) so `tests/test_images.py` still sees it in the closure.
-    from views import catalog_reads
-
-    return getattr({"views.catalog_reads": catalog_reads}[module], attr)  # KeyError: table typo
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 # Order matters only for price_series()'s fallback preference below.

@@ -41,7 +41,6 @@ from decimal import Decimal
 
 from kernel.second_snapshot import DydxSecondSnapshot
 
-from ml_signals.strategies import backtest_snapshot
 from nautilus_trader.model.currencies import BTC
 from nautilus_trader.model.currencies import USDC
 from nautilus_trader.model.data import TradeTick
@@ -54,6 +53,7 @@ from nautilus_trader.model.instruments import CryptoPerpetual
 from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
+from research.strategies import backtest_snapshot
 
 
 _IID = InstrumentId(Symbol("BTC-USD-PERP"), Venue("DYDX"))

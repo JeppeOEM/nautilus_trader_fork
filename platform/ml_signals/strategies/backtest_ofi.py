@@ -13,38 +13,39 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-Backtest OFIStrategy on locally collected dYdX 1s snapshots. See snapshot_backtest.py.
+Deprecated re-export shim (Story 24.4): `ml_signals.strategies.backtest_ofi` moved to the research
+context (`research.strategies.backtest_ofi`).
 
-    python -m ml_signals.strategies.backtest_ofi   # from platform/
+Pure re-export, defines nothing: every name here *is* the `research.strategies.backtest_ofi` object.
+Import from `research.strategies.backtest_ofi` instead, e.g. `from research.strategies.backtest_ofi
+import run`.
+
+`python -m ml_signals.strategies.backtest_ofi` still runs it; use
+`python -m research.strategies.backtest_ofi`.
 """
 
-from decimal import Decimal
-from pathlib import Path
+import warnings
 
-from ml_signals.strategies.snapshot_backtest import run as run_snapshot_backtest
-from nautilus_trader.backtest.results import BacktestResult
+from research.strategies.backtest_ofi import run
 
 
-_CATALOG = str(Path(__file__).resolve().parents[2] / "dydx_collector" / "catalog")
-_S = "ml_signals.strategies.ofi_strategy:"
+__all__ = [
+    "run",
+]
+
+REMOVE_AFTER = "25-2-ranking-context-rankingboard-replaces-module-globals"
 
 
-def run(
-    symbol: str = "BTC-USD-PERP.DYDX",
-    start: str = "2026-09-05",
-    end: str = "2026-09-06",
-    catalog_path: str = _CATALOG,
-    **params: object,
-) -> BacktestResult:
-    """`params` are OFIStrategyConfig fields, e.g. ofi_threshold=2.0, trade_size=Decimal("0.01")."""
-    params.setdefault("trade_size", Decimal("0.01"))
-    return run_snapshot_backtest(
-        catalog_path, symbol, start, end, _S + "OFIStrategy", _S + "OFIStrategyConfig", params
-    )
+# Attributed to the importing module, not to importlib's frames.
+warnings.warn(
+    "ml_signals.strategies.backtest_ofi moved to research.strategies.backtest_ofi (Story 24.4); "
+    f"this shim is removed after {REMOVE_AFTER}",
+    DeprecationWarning,
+    skip_file_prefixes=("<frozen importlib",),
+)
 
 
 if __name__ == "__main__":
-    result = run(ofi_threshold=2.0, warmup_seconds=600)
-    print(f"Events processed: {result.iterations:,}")
-    print(f"PnL: {result.stats_pnls}")
-    print(f"Returns: {result.stats_returns}")
+    import runpy
+
+    runpy.run_module("research.strategies.backtest_ofi", run_name="__main__")
