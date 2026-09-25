@@ -6,13 +6,18 @@ frontend called routes the running backend didn't serve. A stale image can't be 
 but frontend/backend drift in this repo can -- the failure shows up in CI instead of a console.
 """
 
+import os
 import re
 from pathlib import Path
 
 import data_api.app as app_module
 
 
-_CLIENT = Path(__file__).resolve().parents[2] / "frontend" / "src" / "api" / "client.ts"
+# `frontend/` is source, never shipped in an image: `make test` mounts the checkout at
+# PLATFORM_SOURCE_DIR; a host run finds it two levels up.
+_SOURCE = os.environ.get("PLATFORM_SOURCE_DIR")
+_PLATFORM_DIR = Path(_SOURCE) if _SOURCE else Path(__file__).resolve().parents[2]
+_CLIENT = _PLATFORM_DIR / "frontend" / "src" / "api" / "client.ts"
 _CALL = re.compile(
     r"""fetch\(\s*[`"'](/api/[^`"'?]*)[`"']?(?:[^)]*?method:\s*"(\w+)")?""", re.DOTALL
 )

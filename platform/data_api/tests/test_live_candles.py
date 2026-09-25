@@ -18,12 +18,15 @@ Story 15.5: `LiveCandleBus` -- real `DydxSecondSnapshot` objects, no real Redis
 how `test_rankings.py` unit-tests `RankingsBus.handle_message` in isolation).
 """
 
+import asyncio
+import threading
 import time
 from pathlib import Path
 
 import pytest
 from kernel.second_snapshot import DydxSecondSnapshot
 from ml_signals.candles import candle_dicts_from_snapshots
+from observability import error_ledger
 
 from data_api import settings
 from data_api.live_candles import LiveCandleBus
@@ -300,6 +303,85 @@ async def test_seed_failure_allows_a_retry(monkeypatch: pytest.MonkeyPatch) -> N
     with pytest.raises(OSError):
         await bus.seed(_IID, _BAR_SECONDS)
     assert (_IID, _BAR_SECONDS) not in bus._seeded
+
+
+def _blocking_read(monkeypatch: pytest.MonkeyPatch) -> threading.Event:
+    """Make the seed's catalog read block until the returned event is set."""
+    import data_api.live_candles as lc
+
+    release = threading.Event()
+
+    def read(*_a: object, **_k: object) -> list:
+        release.wait(timeout=10)
+        return []
+
+    monkeypatch.setattr(lc, "query_second_ohlc", read)
+    return release
+
+
+@pytest.mark.asyncio
+async def test_seed_is_held_by_the_bus_and_outlives_a_departing_listener(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One seed serves every listener of a pair, so one connection leaving must not cancel it."""
+    release = _blocking_read(monkeypatch)
+    bus = LiveCandleBus()
+    key = (_IID, _BAR_SECONDS)
+    leaving = bus.subscribe(_IID, _BAR_SECONDS)
+    bus.subscribe(_IID, _BAR_SECONDS)
+    try:
+        bus.start_seed(_IID, _BAR_SECONDS)
+        bus.start_seed(_IID, _BAR_SECONDS)  # a second subscriber: no second read
+        task = bus._seed_tasks[key]
+        await asyncio.sleep(0)
+        bus.unsubscribe(_IID, _BAR_SECONDS, leaving)
+        assert not task.cancelled()
+    finally:
+        release.set()
+    await task
+    assert key in bus._seeded
+    assert key not in bus._seed_tasks
+
+
+@pytest.mark.asyncio
+async def test_last_listener_leaving_cancels_the_seed_and_unmarks_the_pair(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    release = _blocking_read(monkeypatch)
+    bus = LiveCandleBus()
+    key = (_IID, _BAR_SECONDS)
+    queue = bus.subscribe(_IID, _BAR_SECONDS)
+    try:
+        bus.start_seed(_IID, _BAR_SECONDS)
+        task = bus._seed_tasks[key]
+        await asyncio.sleep(0)
+        bus.unsubscribe(_IID, _BAR_SECONDS, queue)
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release.set()
+    assert key not in bus._seeded
+    assert key not in bus._seed_tasks
+
+
+@pytest.mark.asyncio
+async def test_a_failed_bus_seed_is_ledgered(monkeypatch: pytest.MonkeyPatch) -> None:
+    import data_api.live_candles as lc
+
+    def boom(*_a: object, **_k: object) -> list:
+        raise OSError("catalog unreadable")
+
+    monkeypatch.setattr(lc, "query_second_ohlc", boom)
+    error_ledger.reset()
+    bus = LiveCandleBus()
+    bus.subscribe(_IID, _BAR_SECONDS)
+    bus.start_seed(_IID, _BAR_SECONDS)
+    task = bus._seed_tasks[(_IID, _BAR_SECONDS)]
+    with pytest.raises(OSError):
+        await task
+    await asyncio.sleep(0)  # the done-callback
+    assert error_ledger.counts() == {"live_candles.seed": 1}
+    error_ledger.reset()
 
 
 def test_recent_rows_keep_traded_seconds_and_expire_old_ones() -> None:

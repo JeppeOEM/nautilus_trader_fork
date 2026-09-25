@@ -113,8 +113,7 @@ class _CandleSubscriptions:
         task = asyncio.create_task(_forward(queue, self._outbox))
         task.add_done_callback(_log_forward_error)
         self._entries[channel] = (iid, bar_seconds, queue, task)
-        seed = asyncio.create_task(live_candles.live_candle_bus.seed(iid, bar_seconds))
-        seed.add_done_callback(_log_forward_error)
+        live_candles.live_candle_bus.start_seed(iid, bar_seconds)
 
     def unsubscribe(self, channel: str) -> None:
         entry = self._entries.pop(channel, None)

@@ -36,7 +36,6 @@ from nautilus_trader.model.objects import Quantity
 
 
 _IID = InstrumentId.from_str("BTC-USD-PERP.DYDX")
-_TS = time.time_ns()
 
 
 def _make_config(catalog_path: Path) -> DydxConfig:
@@ -56,8 +55,11 @@ def _make_config(catalog_path: Path) -> DydxConfig:
 
 
 def _trade(
-    price: float, size: float, side: AggressorSide, trade_id: str, ts: int = _TS
+    price: float, size: float, side: AggressorSide, trade_id: str, ts: int | None = None
 ) -> TradeTick:
+    # Stamped at call time, never at import: the collector's stale-trade filter (DATA-06) is
+    # relative to the wall clock, and a full suite can take longer than its window to reach here.
+    ts = time.time_ns() if ts is None else ts
     return TradeTick(
         instrument_id=_IID,
         price=Price(price, 1),
@@ -76,7 +78,7 @@ def _second(collector: DydxCollector) -> dict:
 def test_trade_tick_is_buffered_for_catalog_write(tmp_path: Path) -> None:
     """Raw TradeTicks reach the catalog write buffer, both clocks untouched (story 22.13)."""
     collector = DydxCollector(_make_config(tmp_path / "catalog"))
-    trade = _trade(100.0, 1.0, AggressorSide.BUYER, "1", ts=_TS - 5)
+    trade = _trade(100.0, 1.0, AggressorSide.BUYER, "1", ts=time.time_ns() - 5)
     collector._process_data(trade)
     (buffered,) = collector._buffer[(TradeTick, str(_IID))]
     assert (buffered.ts_event, buffered.ts_init) == (trade.ts_event, trade.ts_init)

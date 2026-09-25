@@ -90,6 +90,9 @@ class LiveCandleBus:
         # never needs its own `snapshots:raw` subscription.
         self.observers: list[Callable[[DydxSecondSnapshot], None]] = []
         self._seeded: set[_BufferKey] = set()
+        # One seed per pair, owned here (not by a connection): it serves every listener of the
+        # pair, and asyncio holds only a weak reference to a task, so an unheld one can vanish.
+        self._seed_tasks: dict[_BufferKey, asyncio.Task[None]] = {}
         self._recent: defaultdict[str, deque[SecondOHLC]] = defaultdict(deque)
 
     def recent_rows(self, instrument_id: str, start_ns: int, end_ns: int) -> list[SecondOHLC]:
@@ -145,6 +148,31 @@ class LiveCandleBus:
             del self._listeners[key]
             self._buffers.pop(key, None)
             self._seeded.discard(key)
+            task = self._seed_tasks.pop(key, None)
+            if task is not None:
+                task.cancel()  # nobody is left to seed for
+
+    def start_seed(self, instrument_id: str, bar_seconds: int) -> None:
+        """Run `seed` for the pair as a bus-held task, once per pair while it has listeners."""
+        key = (instrument_id, bar_seconds)
+        if key in self._seed_tasks or key in self._seeded or key not in self._listeners:
+            return
+        task = asyncio.create_task(self.seed(instrument_id, bar_seconds))
+        self._seed_tasks[key] = task
+        task.add_done_callback(lambda done: self._seed_done(key, done))
+
+    def _seed_done(self, key: _BufferKey, task: "asyncio.Task[None]") -> None:
+        if self._seed_tasks.get(key) is task:
+            del self._seed_tasks[key]
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            error_ledger.record(
+                "live_candles.seed",
+                f"forming-bar seed for {key[0]}/{key[1]}s failed; the bar misses the bucket start",
+                exc,
+            )
 
     async def seed(self, instrument_id: str, bar_seconds: int) -> None:
         """
@@ -166,8 +194,8 @@ class LiveCandleBus:
             rows = await asyncio.to_thread(
                 _catalog_rows_for_seed, instrument_id, bar_seconds, start_ns, now_ns
             )
-        except Exception:
-            self._seeded.discard(key)  # a failed read must not leave this pair permanently unseeded
+        except BaseException:  # a cancel too: never leave the pair marked seeded but unseeded
+            self._seeded.discard(key)
             raise
         if key not in self._listeners:
             return  # everyone left while the read ran

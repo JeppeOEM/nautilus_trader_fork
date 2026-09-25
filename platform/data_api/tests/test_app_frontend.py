@@ -27,7 +27,10 @@ from fastapi.testclient import TestClient
 import data_api.app as app_module
 
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]  # platform/data_api/tests -> platform
+# `frontend/` is source, never shipped in an image: `make test` mounts the checkout at
+# PLATFORM_SOURCE_DIR; a host run finds it two levels up.
+_SOURCE = os.environ.get("PLATFORM_SOURCE_DIR")
+_PLATFORM_DIR = Path(_SOURCE) if _SOURCE else Path(__file__).resolve().parents[2]
 
 
 def test_api_health_returns_pydantic_modeled_json() -> None:
@@ -105,7 +108,7 @@ def test_committed_openapi_json_matches_the_live_schema() -> None:
     Regenerate via: `PYTHONPATH=. python3 -m data_api.export_openapi > frontend/openapi.json`
     (from `platform/`), then `cd frontend && npm run codegen`.
     """
-    committed_path = _REPO_ROOT / "frontend" / "openapi.json"
+    committed_path = _PLATFORM_DIR / "frontend" / "openapi.json"
     committed = json.loads(committed_path.read_text())
 
     assert committed == app_module.app.openapi()
