@@ -390,21 +390,22 @@ def test_values_come_from_the_candle_store_without_touching_parquet(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from ml_signals import candle_store
-    from ml_signals.tests.test_candle_store import _second
+    from candles.infrastructure.sqlite_store import CandleStore
+    from candles.tests.test_candle_store import _second
 
     _ranked(monkeypatch, _IID)
     client = _client(tmp_path, monkeypatch)  # no Parquet catalog exists at all
     db_path = str(tmp_path / "candles" / "candles_dydx.db")
     monkeypatch.setattr(rankings_routes, "CANDLES_DB_DIR", str(tmp_path / "candles"))
-    db = candle_store.connect_rw(db_path)
+    store = CandleStore(db_path)
     now_minute = int(time.time()) // 60 * 60 * 1000
     rows = []
     for i in range(45):  # 45 traded minutes ending now (the helper stamps a fixed day, so restamp)
         row = _second(0, 100.0 + (i * 7) % 13)
         row.ts_event = (now_minute - (45 - i) * 60_000) * 1_000_000
         rows.append(row)
-    candle_store.apply_seconds(db, _IID, rows)
+    store.apply(_IID, rows)
+    store.close()
     entries = json.dumps([{"name": "RelativeStrengthIndex", "params": {}, "bar_seconds": 60}])
 
     got = client.get("/api/rankings/technicals-values", params={"entries": entries}).json()

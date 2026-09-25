@@ -20,8 +20,10 @@ import time
 from pathlib import Path
 
 import pytest
+from candles.infrastructure.sqlite_store import CandleStore
+from candles.infrastructure.sqlite_store import db_path_for_venue
+from candles.infrastructure.verified_days import VerifiedDaysDir
 from kernel.clocks import CatalogFileSpan
-from ml_signals import candle_store
 
 from collector_core.archive_gaps import load_gaps
 from collector_core.prune_catalog import _filename_end_ns
@@ -160,9 +162,15 @@ def _trade_file(catalog: Path, days_ago: int, iid: str = _IID) -> Path:
 
 
 def _verify(candles_dir: Path, days_ago: int, status: str, iid: str = _IID) -> None:
-    db = candle_store.connect_rw(str(candles_dir / "candles_bybit.db"))
-    candle_store.mark_verified(db, iid, _day(days_ago), status, 0 if status == "pass" else 3, 0)
-    db.close()
+    store = CandleStore(db_path_for_venue(candles_dir, "BYBIT"))
+    store.mark_verified(iid, _day(days_ago), status, 0 if status == "pass" else 3, 0)
+    store.close()
+
+
+def _plan(catalog: Path, candles: Path, retention_days: int = 7) -> tuple[list, list]:
+    """Plan the trade prune through the `VerifiedDays` port, as `main` wires it."""
+    with VerifiedDaysDir(candles) as verified:
+        return plan_trade_prune(str(catalog), verified, retention_days, time.time_ns())
 
 
 def test_trade_policy_deletes_only_old_passed_days(tmp_path: Path) -> None:
@@ -174,7 +182,7 @@ def test_trade_policy_deletes_only_old_passed_days(tmp_path: Path) -> None:
     _verify(candles, 8, "pass")
     _verify(candles, 3, "pass")
 
-    delete, kept = plan_trade_prune(str(catalog), str(candles), 7, time.time_ns())
+    delete, kept = _plan(catalog, candles)
 
     assert delete == [passed_old]
     assert kept == [(_IID, _day(10), "unverified"), (_IID, _day(9), "failed")]
@@ -197,7 +205,7 @@ def test_a_file_spanning_two_days_needs_both_passed(tmp_path: Path) -> None:
         f"{second}T00-00-01-000000000Z",
     )
     _verify(candles, 11, "pass")
-    delete, kept = plan_trade_prune(str(catalog), str(candles), 7, time.time_ns())
+    delete, kept = _plan(catalog, candles)
     assert (delete, kept) == ([], [(_IID, second, "unverified")])
     assert spanning.exists()
 
@@ -250,10 +258,10 @@ def test_a_file_starting_just_after_midnight_also_needs_the_previous_day(tmp_pat
         f"{day}T00-59-00-000000000Z",
     )
     _verify(candles, 9, "pass")
-    delete, kept = plan_trade_prune(str(catalog), str(candles), 7, time.time_ns())
+    delete, kept = _plan(catalog, candles)
     assert (delete, kept) == ([], [(_IID, _day(10), "unverified")])
     _verify(candles, 10, "pass")
-    assert plan_trade_prune(str(catalog), str(candles), 7, time.time_ns())[0] == [early]
+    assert _plan(catalog, candles)[0] == [early]
 
 
 def test_every_pruned_trade_file_is_recorded_as_an_archive_gap(tmp_path: Path) -> None:
@@ -275,7 +283,7 @@ def test_a_leaf_that_is_not_an_instrument_id_is_kept_and_reported(
     candles.mkdir()
     odd = _trade_file(catalog, 10, iid="notanid")
     with caplog.at_level(logging.WARNING):
-        delete, kept = plan_trade_prune(str(catalog), str(candles), 7, time.time_ns())
+        delete, kept = _plan(catalog, candles)
     assert delete == []
     assert kept == [("notanid", _day(10), "unverified")]
     assert "not an instrument id" in caplog.text

@@ -52,9 +52,9 @@ services:
       # container mounts it, bot_tui coordinates via Redis only, never the filesystem.
       - ./data/dydx_config.toml:/app/dydx_collector/config.toml:rw
       - ./data/catalog:/app/catalog
-      # Derived SQLite candle store (ml_signals/candle_store.py): the collector is its only writer.
-      # A directory, not the single file, for the same WAL-sidecar reason as metrics/ below.
-      # Rebuildable from the catalog: python -m collector_core.build_candles.
+      # Derived SQLite candle store (candles/infrastructure/sqlite_store.py): the collector is its
+      # only writer. A directory, not the single file, for the same WAL-sidecar reason as metrics/
+      # below. Rebuildable from the catalog: python -m candles.rebuild.
       - ./data/candles:/app/candles_dir
       # Story 5.1: permanent incident reports (crossed book, stale book, resync, etc.),
       # auto-snapshotted from the [WS_RAW] rolling debug buffer -- see

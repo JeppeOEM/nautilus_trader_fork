@@ -37,7 +37,8 @@ if cross-candle price alignment turns out to matter.
 
 from dataclasses import dataclass
 
-from ml_signals.candles import Candle
+from candles.domain.candle import Candle
+
 from nautilus_trader.model.data import OrderBookDelta
 from nautilus_trader.model.enums import BookAction
 from nautilus_trader.model.enums import OrderSide

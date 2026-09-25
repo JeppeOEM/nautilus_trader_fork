@@ -19,13 +19,11 @@ with the second, as `_venue_second_loop` does.
 """
 
 import asyncio
-import os
 import time
 from pathlib import Path
 
 import pytest
 from kernel.second_snapshot import DydxSecondSnapshot
-from ml_signals import candle_store
 from ml_signals.catalog_stats import query_second_snapshots
 from observability import error_ledger
 
@@ -70,7 +68,6 @@ class _SnapshotClient:
 def _collector(
     tmp_path: Path, source: str = "venue", client: object | None = None, hold_back: float = 0.0
 ) -> Collector:
-    os.environ["CANDLES_DB_PATH"] = str(tmp_path / "candles.db")
     cfg = CoreConfig(
         environment="mainnet",
         catalog_path=str(tmp_path),
@@ -275,7 +272,12 @@ def test_a_stall_catches_up_at_most_thirty_seconds() -> None:
     assert len(_due_seconds(_at(_SEC + 3600), 0, _SEC)) == 30
 
 
-def test_a_full_minute_of_venue_rows_is_fully_observed_in_the_candle_store(tmp_path: Path) -> None:
+def test_a_full_minute_of_venue_rows_closes_sixty_distinct_seconds(tmp_path: Path) -> None:
+    """
+    Venue mode must close each exchange second exactly once, so the minute a downstream fold sees
+    is 60 rows -- not 59 (one second dropped) and not 61 (one closed twice). What the candle store
+    then makes of those rows (`seconds_observed`, `partial`) is `candles/tests`'.
+    """
     c = _collector(tmp_path)
     minute = _SEC - _SEC % 60
     rows = []
@@ -283,9 +285,8 @@ def test_a_full_minute_of_venue_rows_is_fully_observed_in_the_candle_store(tmp_p
         c._process_data(_book(100.0, 102.0, s + 0.2))
         c._process_data(_trade(s, s + 0.4))
         rows += _close(c, s)
-    candle_store.apply_batch(c._candle_db, {_IID: rows})
-    (bar,) = candle_store.window(c._candle_db, _IID, 60, (minute + 60) * 1000, 1)
-    assert (bar["t"], bar["seconds_observed"]) == (minute * 1000, 60)
+    assert len(rows) == 60
+    assert sorted(r.ts_event // _S for r in rows) == list(range(minute, minute + 60))
 
 
 def test_arrival_mode_never_holds_deltas_or_buckets_trades(tmp_path: Path) -> None:

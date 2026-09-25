@@ -54,6 +54,14 @@ router = APIRouter()
 
 _MAX_SUBSCRIPTIONS = 32
 
+# Same bound `routes/candles.py` clamps `/api/candles` to (1w, the timeframe selector's widest
+# bar), enforced here because a subscribe channel is client-written text: an unbounded
+# `bar_seconds` reaches `candles.domain.fold`'s int64 bucket arithmetic and raises there, and the
+# raise escapes `LiveCandleBus.handle_batch` into its reconnect loop -- one bad channel would stop
+# live candles for every connected client. Rejected, not clamped: a silently widened bar would
+# publish on a channel name the client never subscribed to.
+_MAX_BAR_SECONDS = 604_800
+
 
 def _parse_candle_channel(channel: str) -> tuple[str, int] | None:
     """
@@ -68,8 +76,8 @@ def _parse_candle_channel(channel: str) -> tuple[str, int] | None:
     if not iid or not bar_seconds_str.isdigit():
         return None
     bar_seconds = int(bar_seconds_str)
-    if bar_seconds <= 0:
-        return None  # bar_seconds=0 would divide-by-zero in LiveCandleBus's bucket math
+    if not 0 < bar_seconds <= _MAX_BAR_SECONDS:
+        return None  # 0 would divide-by-zero, and an oversized one overflows, in the bucket math
     return iid, bar_seconds
 
 

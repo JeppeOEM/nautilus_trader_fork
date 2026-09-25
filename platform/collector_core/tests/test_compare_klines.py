@@ -13,7 +13,8 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-compare_klines: our candle store (built by `build_candles.rebuild_instrument` from real snapshots
+compare_klines: our candle store (built by `candles.application.rebuild.rebuild_instrument` from
+real snapshots
 in a tmp catalog) against injected venue klines, plus the venue parsers on recorded real responses
 (`fixtures/`, captured 2026-09-21 for 2026-09-20). No network.
 """
@@ -27,13 +28,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from candles.application.rebuild import parse_date_ns
+from candles.application.rebuild import rebuild_instrument
+from candles.infrastructure.verified_days import VerifiedDaysStore
 from kernel.fold import fold_trades
 from kernel.second_snapshot import DydxSecondSnapshot
-from ml_signals import candle_store
 from observability import error_ledger
 
-from collector_core.build_candles import _parse_date_ns
-from collector_core.build_candles import rebuild_instrument
 from collector_core.compare_klines import Kline
 from collector_core.compare_klines import KlineError
 from collector_core.compare_klines import fetch_klines
@@ -64,7 +65,7 @@ _FIXTURES = Path(__file__).parent / "fixtures"
 _IID = "BTC-USD-PERP.HYPERLIQUID"  # no venue-specific kline definition
 _BYBIT = "BTCUSDT-LINEAR.BYBIT"
 _DAY = "2026-09-10"
-_D0_MS = _parse_date_ns(_DAY) // 1_000_000
+_D0_MS = parse_date_ns(_DAY) // 1_000_000
 _S = 1_000_000_000
 
 
@@ -142,14 +143,14 @@ def _store(tmp_path: Path, iid: str = _IID, trades: dict | None = None, first: i
 def _reconcile(tmp_path: Path, theirs: list[Kline]) -> tuple[Any, str]:
     db = _store(tmp_path)
     catalog = ParquetDataCatalog(str(tmp_path / "catalog"))
-    result = reconcile_instrument(db, catalog, _IID, _D0_MS, lambda _inst, _day: theirs)
+    result = reconcile_instrument(
+        db, catalog, _IID, _D0_MS, lambda _inst, _day: theirs, VerifiedDaysStore(db)
+    )
     return result, db
 
 
 def _status(db: str) -> str | None:
-    with candle_store.connect_ro(db) as ro:
-        assert ro is not None
-        return candle_store.verified_status(ro, _IID, _DAY)
+    return VerifiedDaysStore(db).verified_status(_IID, _DAY)
 
 
 def test_equal_klines_pass_and_mark_the_day_verified(tmp_path: Path) -> None:
@@ -206,7 +207,7 @@ def test_fetch_error_leaves_the_day_unverified(tmp_path: Path) -> None:
     def failing(_inst: Instrument, _day: int) -> list[Kline]:
         raise KlineError("bybit retCode 10001: params error")
 
-    result = reconcile_instrument(db, catalog, _IID, _D0_MS, failing)
+    result = reconcile_instrument(db, catalog, _IID, _D0_MS, failing, VerifiedDaysStore(db))
     assert result.status == "error"
     assert _status(db) is None
     assert error_ledger.counts() == {"reconcile.error": 1}
@@ -216,7 +217,9 @@ def test_missing_instrument_definition_is_an_error(tmp_path: Path) -> None:
     error_ledger.reset()
     db = _store(tmp_path)
     catalog = ParquetDataCatalog(str(tmp_path / "catalog"))
-    result = reconcile_instrument(db, catalog, "ETHUSDT-LINEAR.BYBIT", _D0_MS, lambda i, d: [])
+    result = reconcile_instrument(
+        db, catalog, "ETHUSDT-LINEAR.BYBIT", _D0_MS, lambda i, d: [], VerifiedDaysStore(db)
+    )
     assert result.status == "error"
     assert error_ledger.counts() == {"reconcile.error": 1}
 
@@ -225,14 +228,25 @@ def test_run_exit_codes_pass_findings_and_run_failure(tmp_path: Path) -> None:
     db = _store(tmp_path)
     catalog = str(tmp_path / "catalog")
     venue = "HYPERLIQUID"
-    assert run(db, catalog, venue, _D0_MS, [_IID], lambda i, d: _THEIRS) == 0
-    assert run(db, catalog, venue, _D0_MS, [_IID], lambda i, d: _THEIRS[:1]) == 2
+    verified = VerifiedDaysStore(db)
+    assert run(db, catalog, venue, _D0_MS, [_IID], lambda i, d: _THEIRS, verified) == 0
+    assert run(db, catalog, venue, _D0_MS, [_IID], lambda i, d: _THEIRS[:1], verified) == 2
     # A per-instrument error (here: no definition) is a finding too, not a halt.
     assert (
-        run(db, catalog, venue, _D0_MS, [_IID, "X-USD-PERP.HYPERLIQUID"], lambda i, d: _THEIRS) == 2
+        run(
+            db,
+            catalog,
+            venue,
+            _D0_MS,
+            [_IID, "X-USD-PERP.HYPERLIQUID"],
+            lambda i, d: _THEIRS,
+            verified,
+        )
+        == 2
     )
     # Run-level: an unusable candle store means nothing could be compared.
-    assert run(str(tmp_path / "nope.db"), catalog, venue, _D0_MS, [_IID], lambda i, d: []) == 1
+    missing = str(tmp_path / "nope.db")
+    assert run(missing, catalog, venue, _D0_MS, [_IID], lambda i, d: [], verified) == 1
 
 
 def test_seed_with_previous_close_is_bybits_kline_definition() -> None:
@@ -254,9 +268,13 @@ def test_bybit_is_compared_in_its_seeded_definition_across_the_day_boundary(
         Kline(_D0_MS, 1000, 1004, 999, 999, 7),  # open = 23:59's close, as Bybit serves it
         Kline(_D0_MS + 300_000, 999, 1005, 999, 1005, 10),
     ]
-    result = reconcile_instrument(db, catalog, _BYBIT, _D0_MS, lambda _i, _d: theirs)
+    result = reconcile_instrument(
+        db, catalog, _BYBIT, _D0_MS, lambda _i, _d: theirs, VerifiedDaysStore(db)
+    )
     assert (result.status, result.mismatches) == ("pass", [])
-    unseeded = reconcile_instrument(db, catalog, _BYBIT, _D0_MS, lambda _i, _d: _THEIRS)
+    unseeded = reconcile_instrument(
+        db, catalog, _BYBIT, _D0_MS, lambda _i, _d: _THEIRS, VerifiedDaysStore(db)
+    )
     assert len(unseeded.mismatches) == 2
 
 
@@ -300,7 +318,7 @@ def test_dydx_parser_and_fetch_drop_zero_volume_minutes() -> None:
     assert len(parse_dydx_candles(payload, 0, 4)) == 5
     inst = _instrument("BTC-USD-PERP.DYDX", "BTC-USD", 0, 4)
     http = _Recorder(payload)
-    day = _parse_date_ns("2026-09-20") // 1_000_000
+    day = parse_date_ns("2026-09-20") // 1_000_000
     assert fetch_klines("DYDX", inst, day, "mainnet", http) == [
         Kline(day + 240_000, 81222, 81222, 81204, 81204, 4)
     ]
@@ -313,7 +331,7 @@ def test_dydx_parser_and_fetch_drop_zero_volume_minutes() -> None:
 def test_bybit_parser_and_fetch() -> None:
     payload = _fixture("bybit_kline_btcusdt_linear_20260920.json")
     inst = _instrument("BTCUSDT-LINEAR.BYBIT", "BTCUSDT", 1, 3)
-    day = _parse_date_ns("2026-09-20") // 1_000_000
+    day = parse_date_ns("2026-09-20") // 1_000_000
     http = _Recorder(payload)
     klines = fetch_klines("BYBIT", inst, day, "mainnet", http)
     assert klines[0] == Kline(day, 812349, 812352, 811905, 811994, 17881)
@@ -330,7 +348,7 @@ def test_bybit_error_code_is_an_error() -> None:
 
 def test_bybit_fetch_pages_backwards_until_the_day_start() -> None:
     inst = _instrument("BTCUSDT-SPOT.BYBIT", "BTCUSDT", 1, 3)
-    day = _parse_date_ns("2026-09-20") // 1_000_000
+    day = parse_date_ns("2026-09-20") // 1_000_000
 
     def page(starts: range) -> dict:
         rows = [[str(day + m * 60_000), "1.0", "1.0", "1.0", "1.0", "0.001", "1"] for m in starts]
@@ -346,7 +364,7 @@ def test_bybit_fetch_pages_backwards_until_the_day_start() -> None:
 def test_hyperliquid_parser_and_fetch() -> None:
     payload = _fixture("hyperliquid_candles_btc_20260920.json")
     inst = _instrument("BTC-USD-PERP.HYPERLIQUID", "BTC", 0, 5)
-    day = _parse_date_ns("2026-09-20") // 1_000_000
+    day = parse_date_ns("2026-09-20") // 1_000_000
     http = _Recorder(payload, [])
     klines = fetch_klines("HYPERLIQUID", inst, day, "mainnet", http)
     assert klines[0] == Kline(day, 81292, 81297, 81255, 81263, 772335)
@@ -362,7 +380,7 @@ def test_hyperliquid_parser_and_fetch() -> None:
 def test_catalog_kline_source_never_writes_verified_days(tmp_path: Path) -> None:
     db = _store(tmp_path)
     catalog = str(tmp_path / "catalog")
-    assert run(db, catalog, "HYPERLIQUID", _D0_MS, [_IID], lambda i, d: _THEIRS, False) == 0
+    assert run(db, catalog, "HYPERLIQUID", _D0_MS, [_IID], lambda i, d: _THEIRS, None) == 0
     assert _status(db) is None  # D-52 f64 bars must never release trades to the prune
 
 
@@ -401,7 +419,10 @@ def test_transport_and_payload_failures_are_per_instrument_errors(
     def failing(_inst: Instrument, _day: int) -> list[Kline]:
         raise exc
 
-    assert reconcile_instrument(db, catalog, _IID, _D0_MS, failing).status == "error"
+    assert (
+        reconcile_instrument(db, catalog, _IID, _D0_MS, failing, VerifiedDaysStore(db)).status
+        == "error"
+    )
 
 
 def test_a_seed_consequence_is_named_in_the_second_mismatch(tmp_path: Path) -> None:
@@ -411,7 +432,9 @@ def test_a_seed_consequence_is_named_in_the_second_mismatch(tmp_path: Path) -> N
         Kline(_D0_MS, 1001, 1004, 999, 998, 7),  # the venue closed minute 0 one unit lower
         Kline(_D0_MS + 300_000, 998, 1005, 998, 1005, 10),  # so it seeds minute 5 with it
     ]
-    result = reconcile_instrument(db, catalog, _BYBIT, _D0_MS, lambda _i, _d: wrong_close)
+    result = reconcile_instrument(
+        db, catalog, _BYBIT, _D0_MS, lambda _i, _d: wrong_close, VerifiedDaysStore(db)
+    )
     assert len(result.mismatches) == 2
     assert "seed" not in result.mismatches[0]
     assert result.mismatches[1].endswith("(seed from a mismatched minute)")

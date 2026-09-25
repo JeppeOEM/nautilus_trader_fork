@@ -23,7 +23,7 @@ precision label, so trades carrying different precisions compare and sum exactly
 labelled with the highest precision seen. The only float conversion is `snapshot_values()`, at
 the `DydxSecondSnapshot` boundary, once per field of an exact total.
 
-Seconds -> bars (1 m and wider) is a different fold: `ml_signals.candle_store.fold_arrays`.
+Seconds -> bars (1 m and wider) is a different fold: `candles.domain.fold.fold_arrays`.
 """
 
 from collections.abc import Sequence

@@ -27,7 +27,7 @@ as live trades (before the `stale_trade_seconds` filter in `collector_core/confi
 cleared (OHLC None, volumes/counts 0 -- the real trades in that second cannot be told
 apart from the replayed ones, so "no trade recorded" is the honest value, DATA-01), delete
 and (with --candles-db) rebuild the candle-store days it touched from the corrected raw 1s.
-Without --candles-db the store still holds the spike: run `build_candles` for those days. The book fields
+Without --candles-db the store still holds the spike: run `python -m candles.rebuild` for those days. The book fields
 are untouched. Manually run, like prune_catalog.py; reads raw 1s in day chunks (MEM-01).
 
 Never run it on a day `rebuild_seconds` has rebuilt (story 22.13): a rebuilt second holds the
@@ -40,13 +40,13 @@ archive existed; this tool is for pre-archive rows only.
 import argparse
 import logging
 
+from candles.application.rebuild import all_instruments
+from candles.application.rebuild import data_range_ns
+from candles.application.rebuild import day_chunks
+from candles.application.rebuild import rebuild_instrument
 from kernel.second_snapshot import DydxSecondSnapshot
 from ml_signals.catalog_stats import query_second_snapshots
 
-from collector_core.build_candles import all_instruments
-from collector_core.build_candles import data_range_ns
-from collector_core.build_candles import day_chunks
-from collector_core.build_candles import rebuild_instrument
 from collector_core.integrity import ohlc_outside_book
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 

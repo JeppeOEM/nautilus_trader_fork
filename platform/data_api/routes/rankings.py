@@ -27,15 +27,17 @@ import time
 import tomllib
 from pathlib import Path
 
+from candles.application import queries
+from candles.application.forming import bars_from_rows
+from candles.infrastructure.sqlite_store import connect_ro
+from candles.infrastructure.sqlite_store import db_path_for_venue
 from fastapi import APIRouter
 from fastapi import HTTPException
 from fastapi import Request
 from kernel import catalog_files
 from kernel.venues import venue_of
-from ml_signals import candle_store
 from ml_signals import custom_indicators
 from ml_signals import screener_columns_config
-from ml_signals.candles import candle_dicts_from_snapshots
 from observability import error_ledger
 from pydantic import BaseModel
 
@@ -196,10 +198,10 @@ def _recent_candles(instrument_id: str, bar_seconds: int, now_ns: int) -> list[d
     I/O), else the slow archive read.
     """
     try:
-        store = Path(CANDLES_DB_DIR) / f"candles_{venue_of(instrument_id).lower()}.db"
-        with candle_store.connect_ro(str(store)) as db:
+        store = db_path_for_venue(CANDLES_DB_DIR, venue_of(instrument_id))
+        with connect_ro(store) as db:
             if db is not None:
-                stored = candle_store.window(
+                stored = queries.window(
                     db, instrument_id, bar_seconds, 1 << 62, _TECHNICALS_STORE_BARS
                 )
                 if stored:
@@ -222,7 +224,7 @@ def _read_candles(instrument_id: str, bar_seconds: int, now_ns: int) -> list[dic
         rows = catalog_files.query_second_ohlc(
             CATALOG_PATH, instrument_id, now_ns - span_ns, now_ns
         )
-        return candle_dicts_from_snapshots(rows, bar_seconds)[-bars:]
+        return bars_from_rows(rows, bar_seconds)[-bars:]
     except Exception as exc:
         raise _CatalogReadError(str(exc)) from exc
 

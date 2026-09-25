@@ -57,10 +57,12 @@ import logging
 import os
 import re
 import time
-import warnings
 from pathlib import Path
 
 import redis.asyncio as aioredis
+from candles.application.prune import loop as candle_prune_loop
+from candles.application.sink import CandleSink
+from candles.infrastructure.sqlite_store import store_from_env
 from collector_core.collector import Collector
 from collector_core.collector import run_forever
 from collector_core.prune_catalog import prune_instrument
@@ -204,6 +206,9 @@ class DydxCollector(Collector):
 
     def __init__(self, config: DydxConfig) -> None:
         client = DydxClient(on_data=self._on_data, network=config.network)
+        # Composition root: this process owns dYdX's candle store, so it opens it (one file per
+        # venue, `CANDLES_DB_PATH`), hands capture the sink port and runs the retention loop.
+        store = store_from_env(config.catalog_path)
         super().__init__(
             config,
             client,
@@ -218,7 +223,9 @@ class DydxCollector(Collector):
                 # logger only flushes its BufWriter to disk on an explicit Sync event --
                 # without this, [WS_RAW] lines sit in memory forever.
                 functools.partial(incidents.raw_log_flush_loop, nautilus_pyo3.logging_sync_to_disk),
+                candle_prune_loop(store),
             ),
+            second_sink=CandleSink(store),
         )
         self._config: DydxConfig  # narrows the core's CoreConfig
 
@@ -659,50 +666,6 @@ INCIDENTS = IncidentConfig(
         IncidentRule("Resyncing", "resync"),
     ),
 )
-
-# Story 23.1 moved the incident subsystem to `observability.incidents`. The one old name with a
-# same-object, same-shape successor is served below with a DeprecationWarning. Every other name
-# raises, naming its successor: the handler now needs an `IncidentConfig`, and the constants are
-# fields of `INCIDENTS` -- serving a copy would make a stale monkeypatch silently do nothing.
-MOVED_NAMES_REMOVE_AFTER = "24-1-candles-context-behind-the-secondsink-port"
-_MOVED_NAMES: dict[str, str] = {
-    "_ns_to_iso": "observability.incidents.ns_to_iso",
-}
-_REPLACED_NAMES: dict[str, str] = {
-    "_IncidentHandler": "observability.incidents.IncidentHandler(config, loop)",
-    "_IID_RE": "dydx_collector.collector.INCIDENTS.iid_pattern",
-    "_WS_RAW_LOG_DIR": "dydx_collector.collector.INCIDENTS.raw_log_dir",
-    "_INCIDENT_DIR": "dydx_collector.collector.INCIDENTS.report_dir",
-    "_INCIDENT_DEBOUNCE_NS": "dydx_collector.collector.INCIDENTS.debounce_ns",
-    "_INCIDENT_LOOKBACK_NS": "dydx_collector.collector.INCIDENTS.lookback_ns",
-    "_INCIDENT_DIR_MAX_BYTES": "dydx_collector.collector.INCIDENTS.report_dir_max_bytes",
-    "_INCIDENT_LOOKAHEAD_DELAY_S": "dydx_collector.collector.INCIDENTS.lookahead_s",
-    "_ws_raw_debug_flush_loop": "observability.incidents.raw_log_flush_loop(sync)",
-    "_classify_incident": "observability.incidents.classify_incident(config, message)",
-    "_scan_ws_raw_window": "observability.incidents.scan_raw_window(config, ...)",
-    "_write_incident_report": "observability.incidents.IncidentReportWriter.write",
-    "_prune_incident_reports": "observability.incidents.IncidentReportWriter.prune",
-    "_INCIDENT_PRUNE_LOCK": "observability.incidents.IncidentReportWriter (owns the lock)",
-    "_report_incident": "observability.incidents.IncidentHandler.report",
-    "_prune_stale_ws_raw_logs": "observability.incidents.prune_stale_raw_logs(config)",
-}
-
-
-def __getattr__(name: str) -> object:
-    if name in _MOVED_NAMES:
-        target = _MOVED_NAMES[name]
-        warnings.warn(
-            f"dydx_collector.collector.{name} moved to {target} (Story 23.1); "
-            f"removed after {MOVED_NAMES_REMOVE_AFTER}",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        return getattr(incidents, target.rpartition(".")[2])
-    if name in _REPLACED_NAMES:
-        raise AttributeError(
-            f"dydx_collector.collector.{name} was replaced by {_REPLACED_NAMES[name]} (Story 23.1)"
-        )
-    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
 async def main() -> None:

@@ -22,8 +22,9 @@ Usage:
 Runs, in order, each as its own subprocess (so each step's memory is returned to the OS before the
 next one starts -- MEM-01; the job never runs inside a collector):
 
-    rebuild_seconds --apply -> consolidate_catalog --apply --days 2 -> build_candles --day
-        --workers 1 -> compare_klines -> prune_catalog --apply --trade-retention-days 7
+    rebuild_seconds --apply -> consolidate_catalog --apply --days 2 -> build_candles
+        (`python -m candles.rebuild`) --day --workers 1 -> compare_klines
+        -> prune_catalog --apply --trade-retention-days 7
 
 A step's exit 2 means "findings": it finished, but some instruments were refused (rebuild) or
 mismatched / could not be compared (compare) -- all ledgered, and a mismatch or error keeps that
@@ -45,6 +46,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from candles.infrastructure.sqlite_store import db_path_for_venue
 from observability import error_ledger
 
 from collector_core.compare_klines import VENUES
@@ -82,23 +84,36 @@ StepRunner = Callable[[list[str]], int]
 
 
 def steps(catalog: str, candles_dir: str, venue: str, day: str) -> list[Step]:
-    """Build the nightly chain for one venue-day, in order."""
-    db = f"{candles_dir}/candles_{venue.lower()}.db"
+    """
+    Build the nightly chain for one venue-day, in order.
 
-    def module(name: str, *args: str) -> list[str]:
-        return [sys.executable, "-m", f"collector_core.{name}", *args]
+    A step's name is its ledger suffix and its place in the frozen summary line, so it is not the
+    module it runs: `build_candles` keeps its name while running `candles.rebuild` (Story 24.1).
+    """
+    db = db_path_for_venue(candles_dir, venue)
+
+    def module(dotted: str, *args: str) -> list[str]:
+        """Build one step's argv from a full dotted path (the chain spans two contexts)."""
+        return [sys.executable, "-m", dotted, *args]
 
     return [
         Step(
             "rebuild_seconds",
             module(
-                "rebuild_seconds", "--catalog", catalog, "--day", day, "--venue", venue, "--apply"
+                "collector_core.rebuild_seconds",
+                "--catalog",
+                catalog,
+                "--day",
+                day,
+                "--venue",
+                venue,
+                "--apply",
             ),
         ),
         Step(
             "consolidate_catalog",
             module(
-                "consolidate_catalog",
+                "collector_core.consolidate_catalog",
                 "--catalog",
                 catalog,
                 "--apply",
@@ -111,7 +126,7 @@ def steps(catalog: str, candles_dir: str, venue: str, day: str) -> list[Step]:
         Step(
             "build_candles",
             module(
-                "build_candles",
+                "candles.rebuild",
                 "--catalog",
                 catalog,
                 "--db",
@@ -127,13 +142,21 @@ def steps(catalog: str, candles_dir: str, venue: str, day: str) -> list[Step]:
         Step(
             "compare_klines",
             module(
-                "compare_klines", "--catalog", catalog, "--db", db, "--venue", venue, "--day", day
+                "collector_core.compare_klines",
+                "--catalog",
+                catalog,
+                "--db",
+                db,
+                "--venue",
+                venue,
+                "--day",
+                day,
             ),
         ),
         Step(
             "prune_catalog",
             module(
-                "prune_catalog",
+                "collector_core.prune_catalog",
                 "--catalog",
                 catalog,
                 "--apply",

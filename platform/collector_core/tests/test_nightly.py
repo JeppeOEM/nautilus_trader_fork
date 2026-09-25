@@ -26,15 +26,21 @@ from collector_core.nightly import steps
 _ARGS = ["--catalog", "/c", "--candles-dir", "/cd", "--venue", "BYBIT", "--day", "2026-09-20"]
 
 
+# A step's module is a full dotted path and no longer matches its name (`build_candles` runs
+# `candles.rebuild` since Story 24.1), so the fake runner maps the argv it is handed back to the
+# step that produced it. An argv naming no step is a KeyError: loud, never a silently skipped step.
+_MODULE_TO_STEP = {step.argv[2]: step.name for step in steps(*_ARGS[1::2])}
+
+
 class _FakeRunner:
-    """Exit codes by step module; records which steps ran."""
+    """Exit codes by step name; records which steps ran."""
 
     def __init__(self, codes: dict[str, int] | None = None) -> None:
         self.codes = codes or {}
         self.ran: list[str] = []
 
     def __call__(self, argv: list[str]) -> int:
-        name = argv[2].removeprefix("collector_core.")
+        name = _MODULE_TO_STEP[argv[2]]
         self.ran.append(name)
         return self.codes.get(name, 0)
 
@@ -52,6 +58,15 @@ def test_steps_are_the_documented_chain_as_subprocess_modules() -> None:
     chain = steps("/c", "/cd", "BYBIT", "2026-09-20")
     assert [s.name for s in chain] == _ORDER
     assert all(s.argv[:2] == [sys.executable, "-m"] for s in chain)
+    # A step's name is its ledger suffix and its place in the frozen summary line, not its module:
+    # `build_candles` runs the candles context's rebuild CLI (Story 24.1).
+    assert [s.argv[2] for s in chain] == [
+        "collector_core.rebuild_seconds",
+        "collector_core.consolidate_catalog",
+        "candles.rebuild",
+        "collector_core.compare_klines",
+        "collector_core.prune_catalog",
+    ]
     assert chain[0].argv[3:] == [
         "--catalog",
         "/c",

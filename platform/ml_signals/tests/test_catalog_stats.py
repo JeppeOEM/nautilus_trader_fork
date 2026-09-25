@@ -29,6 +29,9 @@ from nautilus_trader.model.objects import Price
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
 
+_OHLC_IID = "BTC-USD.DYDX"
+
+
 _IID = "BTC-USD-PERP.DYDX"
 
 
@@ -215,3 +218,52 @@ if __name__ == "__main__":
     test_price_series_skips_seconds_with_no_trade()
     test_price_series_falls_back_to_mark_price_when_no_trades_exist()
     print("ok")
+
+
+def _write_ohlc_snapshots(catalog_path: str, base: int, n: int) -> None:
+    ParquetDataCatalog(catalog_path).write_data(
+        [
+            DydxSecondSnapshot(
+                instrument_id=InstrumentId.from_str(_OHLC_IID),
+                bid_prices=[99.0],
+                bid_sizes=[1.0],
+                ask_prices=[101.0],
+                ask_sizes=[1.0],
+                buy_volume=0.5 * i,
+                sell_volume=0.25,
+                buy_count=1,
+                sell_count=1,
+                open_price=100.0 + i,
+                high_price=101.0 + i,
+                low_price=99.5 + i,
+                close_price=100.5 + i,
+                ts_event=base + i * 1_000_000_000,
+                ts_init=base + i * 1_000_000_000,
+            )
+            for i in range(n)
+        ]
+    )
+
+
+def test_query_second_ohlc_matches_this_readers_decoder() -> None:
+    """
+    The two production readers of a second snapshot must agree (Story 21.5).
+
+    `kernel.catalog_files.query_second_ohlc` projects columns; `catalog_stats.query_second_snapshots`
+    decodes whole objects, and `repair_catalog` plus the views reads still use it. Story 24.1 moved
+    the candle fold into `candles/`, which may not import `ml_signals` -- so the pairing is asserted
+    here, from the side that owns the decoder, rather than being lost with the moved test.
+    """
+    from candles.application.forming import bars_from_rows
+    from kernel.catalog_files import query_second_ohlc
+
+    from ml_signals.catalog_stats import query_second_snapshots
+
+    base = 1_800_000_000_000_000_000
+    with tempfile.TemporaryDirectory() as tmp:
+        _write_ohlc_snapshots(tmp, base, 120)
+        lo, hi = base + 10_000_000_000, base + 90_000_000_000
+        decoded = bars_from_rows(query_second_snapshots(tmp, _OHLC_IID, lo, hi), 60)
+        projected = bars_from_rows(query_second_ohlc(tmp, _OHLC_IID, lo, hi), 60)
+        assert projected == decoded
+        assert len(projected) == 2

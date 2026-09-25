@@ -124,7 +124,7 @@ LEGACY_MODULE_TO_CONTEXT: dict[str, str] = {
     "collector_core.archive_gaps": ARCHIVE,
     "collector_core.backfill_bars": ARCHIVE,
     "collector_core.book_check": CAPTURE,
-    "collector_core.build_candles": CANDLES,
+    "collector_core.build_candles": CANDLES,  # Story 24.1 shim
     "collector_core.collector": CAPTURE,
     "collector_core.compare_klines": ARCHIVE,
     "collector_core.config": CAPTURE,
@@ -138,6 +138,7 @@ LEGACY_MODULE_TO_CONTEXT: dict[str, str] = {
     "collector_core.migrate_open_interest": ARCHIVE,
     "collector_core.nightly": ARCHIVE,
     "collector_core.open_interest": KERNEL,
+    "collector_core.ports": CAPTURE,
     "collector_core.prune_catalog": ARCHIVE,
     "collector_core.rebuild_seconds": ARCHIVE,
     "collector_core.repair_catalog": ARCHIVE,
@@ -172,14 +173,13 @@ LEGACY_MODULE_TO_CONTEXT: dict[str, str] = {
     # --- ml_signals: no package default, so a new module there must be placed deliberately
     "ml_signals.__init__": RESEARCH,  # the package itself; see `_context_of`
     "ml_signals.book_features": VIEWS,
-    "ml_signals.candle_store": CANDLES,
-    "ml_signals.candles": CANDLES,
+    "ml_signals.candle_store": CANDLES,  # Story 24.1 shim
+    "ml_signals.candles": CANDLES,  # Story 24.1 shim
     "ml_signals.catalog_stats": VIEWS,  # split per symbol below
     "ml_signals.chart_data": VIEWS,
     "ml_signals.chart_indicator_config": VIEWS,
     "ml_signals.chart_indicators": VIEWS,
     "ml_signals.custom_indicators": VIEWS,
-    "ml_signals.error_ledger": OBSERVABILITY,  # Story 23.1 shim
     "ml_signals.footprint": VIEWS,
     "ml_signals.indicators": KERNEL,
     "ml_signals.metrics_computer": RANKING,
@@ -195,8 +195,6 @@ LEGACY_MODULE_TO_CONTEXT: dict[str, str] = {
     "ml_signals.tests.conftest": RESEARCH,
     "ml_signals.tests.test_ad8_boundary": RESEARCH,
     "ml_signals.tests.test_book_features": VIEWS,
-    "ml_signals.tests.test_candle_store": CANDLES,
-    "ml_signals.tests.test_candles": CANDLES,
     "ml_signals.tests.test_catalog_stats": VIEWS,
     "ml_signals.tests.test_chart_data": VIEWS,
     "ml_signals.tests.test_chart_indicator_config": VIEWS,
@@ -253,11 +251,8 @@ LEGACY_SYMBOL_TO_CONTEXT: dict[tuple[str, str], str] = {
 # Cross-context edges the tree still has, (importer context, imported context) -> the story whose
 # `done` retires the edge. The sites named are the ones the retiring story removes.
 LEGACY_EDGES_UNTIL: dict[tuple[str, str], str] = {
-    # collector.py's direct candle_store calls (and the capture tests reading the store back);
-    # capture reaches candles only through the SecondSink port.
-    (CAPTURE, CANDLES): "24-1-candles-context-behind-the-secondsink-port",
-    # data_api routes (and their tests) read candle_store / ml_signals.candles directly instead
-    # of through views' query services.
+    # data_api routes (and their tests) read the candles context's query services and its SQLite
+    # adapter directly instead of going through views' read models.
     (DATA_API, CANDLES): "24-2-views-read-models-and-reader-side-revalidation-removed",
     # data_api reads ranking_engine.metrics_store instead of the ranking query service via views.
     (DATA_API, RANKING): "24-2-views-read-models-and-reader-side-revalidation-removed",
@@ -282,12 +277,30 @@ _VIEWS_STORY = "24-2-views-read-models-and-reader-side-revalidation-removed"
 LEGACY_PRIVATE_IMPORTS_UNTIL: dict[tuple[str, str], str] = {
     # data_api route tests seed a candle store with the candle tests' private row helpers; they
     # go when data_api stops touching the candle store directly (views move).
-    ("data_api.tests.test_candles", "ml_signals.tests.test_candle_store._DAY0_MS"): _VIEWS_STORY,
-    ("data_api.tests.test_candles", "ml_signals.tests.test_candle_store._second"): _VIEWS_STORY,
+    ("data_api.tests.test_candles", "candles.tests.test_candle_store._DAY0_MS"): _VIEWS_STORY,
+    ("data_api.tests.test_candles", "candles.tests.test_candle_store._second"): _VIEWS_STORY,
     (
         "data_api.tests.test_screener_columns",
-        "ml_signals.tests.test_candle_store._second",
+        "candles.tests.test_candle_store._second",
     ): _VIEWS_STORY,
+}
+
+
+# A composition root wires an adapter into a port its own context declares, so it is the one module
+# allowed to import the implementing context -- and only that one. Each entry names the module and
+# the single extra context it may reach; anything else it imports is judged normally. This is not a
+# widening of `_exempt` (which never covers a cross-context edge): it is a per-module whitelist.
+COMPOSITION_ROOTS: dict[str, frozenset[str]] = {
+    # The three venue entrypoints open their own `candles_<venue>.db` and hand capture the
+    # `SecondSink` adapter plus the retention loop (Story 24.1).
+    "dydx_collector.collector": frozenset({CANDLES}),
+    "bybit_collector.collector": frozenset({CANDLES}),
+    "hyperliquid_collector.collector": frozenset({CANDLES}),
+    # ...and the tests that drive exactly that wiring: one per venue, because `Collector` no longer
+    # starts the retention loop itself and a venue that forgot it would fail silently.
+    "dydx_collector.tests.test_candle_feed": frozenset({CANDLES}),
+    "bybit_collector.tests.test_candle_wiring": frozenset({CANDLES}),
+    "hyperliquid_collector.tests.test_candle_wiring": frozenset({CANDLES}),
 }
 
 
@@ -372,6 +385,11 @@ def _exempt(imp: Import) -> bool:
     return imp.src_ctx == TESTS or (src_top == dst_top and src_top in LEGACY_PACKAGES)
 
 
+def _composition_root_edge(imp: Import) -> bool:
+    """Whether this import is a whitelisted composition root reaching its one allowed context."""
+    return imp.dst_ctx in COMPOSITION_ROOTS.get(imp.src, frozenset())
+
+
 def _judged() -> list[Import]:
     return [imp for imp in _IMPORTS if imp.src_ctx != imp.dst_ctx and not _exempt(imp)]
 
@@ -431,8 +449,37 @@ def test_cross_context_edges_follow_the_graph() -> None:
         for imp in _judged()
         if (imp.src_ctx, imp.dst_ctx) not in GRAPH
         and (imp.src_ctx, imp.dst_ctx) not in LEGACY_EDGES_UNTIL
+        and not _composition_root_edge(imp)
     )
     assert illegal == [], "edges outside spine AD-D2's graph (fix the import, never the table)"
+
+
+def test_every_composition_root_still_wires_its_context() -> None:
+    """A root that no longer reaches its context is a stale whitelist entry: delete it."""
+    reached = {(imp.src, imp.dst_ctx) for imp in _judged()}
+    unused = sorted(
+        f"{module} -> {ctx}"
+        for module, contexts in COMPOSITION_ROOTS.items()
+        for ctx in contexts
+        if (module, ctx) not in reached
+    )
+    assert unused == [], "no import needs these composition-root entries: delete them"
+    assert set(COMPOSITION_ROOTS) <= _KNOWN, "a composition root naming no module"
+
+
+@pytest.mark.parametrize("root", sorted(COMPOSITION_ROOTS))
+def test_a_composition_root_may_reach_only_its_own_named_contexts(root: str) -> None:
+    """Every root is checked, not whichever the dict happens to yield first."""
+    for allowed in COMPOSITION_ROOTS[root]:
+        assert _composition_root_edge(Import(root, CAPTURE, f"{allowed}.x", "y", allowed, 1))
+    for denied in CONTEXTS - COMPOSITION_ROOTS[root] - _SHARED:
+        assert not _composition_root_edge(Import(root, CAPTURE, f"{denied}.x", "y", denied, 1))
+
+
+def test_a_module_that_is_not_a_composition_root_gets_no_such_exemption() -> None:
+    assert not _composition_root_edge(
+        Import("collector_core.collector", CAPTURE, "candles.x", "y", CANDLES, 1)
+    )
 
 
 def test_no_private_name_crosses_a_context() -> None:
@@ -492,9 +539,7 @@ def test_observability_imports_only_the_standard_library() -> None:
     foreign = sorted(
         f"{module}:{ref.line} -> {ref.target}"
         for module, path in _MODULES.items()
-        if _context_of(module) == OBSERVABILITY
-        and ".tests" not in f".{module}"
-        and module != "ml_signals.error_ledger"  # the shim re-exports observability; judged above
+        if _context_of(module) == OBSERVABILITY and ".tests" not in f".{module}"
         for ref in imports_of(module, path, _KNOWN)
         if not _stdlib(ref.target) and _context_of(_in_repo(ref.target) or "") != OBSERVABILITY
     )
@@ -530,6 +575,10 @@ def test_research_imports_nothing_from_data_api() -> None:
 
 # nautilus_trader's value types are domain-safe; its runtime, persistence and adapters are not.
 _DOMAIN_SAFE_EXTERNAL = ("nautilus_trader.model", "nautilus_trader.core")
+# Pure array arithmetic with no I/O, no clock and no process state: a domain module may vectorise
+# its own fold with it (`candles.domain.fold`). Matched on the top-level package, so a lookalike
+# distribution (`numpydoc`, ...) is still foreign.
+_DOMAIN_SAFE_ROOTS = frozenset({"numpy"})
 
 
 def _is_domain_module(module: str) -> bool:
@@ -547,7 +596,11 @@ def _domain_violations(module: str, targets: list[str]) -> list[str]:
             ctx = _context_of(in_repo)
             if ctx != KERNEL and not (ctx == module.split(".")[0] and _is_domain_module(in_repo)):
                 bad.append(target)
-        elif not _stdlib(target) and not target.startswith(_DOMAIN_SAFE_EXTERNAL):
+        elif (
+            not _stdlib(target)
+            and not target.startswith(_DOMAIN_SAFE_EXTERNAL)
+            and target.split(".")[0] not in _DOMAIN_SAFE_ROOTS
+        ):
             bad.append(target)
     return bad
 
@@ -567,8 +620,16 @@ def test_domain_rule_recognises_policy_files_and_foreign_imports() -> None:
     assert not _is_domain_module("capture.venues.dydx.client")
     assert _domain_violations(
         "capture.venues.dydx.policies",
-        ["dataclasses", "nautilus_trader.model.data", "asyncio", "redis", "nautilus_trader.live"],
-    ) == ["redis", "nautilus_trader.live"]
+        [
+            "dataclasses",
+            "nautilus_trader.model.data",
+            "numpy",
+            "asyncio",
+            "redis",
+            "nautilus_trader.live",
+            "numpydoc",
+        ],
+    ) == ["redis", "nautilus_trader.live", "numpydoc"]
 
 
 def test_every_import_resolves_to_a_mapped_context() -> None:

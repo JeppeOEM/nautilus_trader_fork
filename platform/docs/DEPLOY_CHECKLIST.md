@@ -15,7 +15,8 @@ CRON_TZ=UTC
 ```
 
 - One `make nightly` per venue, for yesterday (UTC). Each runs `rebuild_seconds` ->
-  `consolidate_catalog --days 2` -> `build_candles` -> `compare_klines` -> `prune_catalog` as
+  `consolidate_catalog --days 2` -> `build_candles` (which runs `python -m candles.rebuild` since
+  Story 24.1; the step keeps its name) -> `compare_klines` -> `prune_catalog` as
   separate processes. A step's exit 2 is "findings" (some instruments refused, mismatched or not
   comparable -- all ledgered, and none of them releases trades to the prune): the chain continues.
   Any other non-zero exit stops that venue's chain.

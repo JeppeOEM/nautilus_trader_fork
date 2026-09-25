@@ -13,18 +13,20 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-`build_candles` rebuilds the SQLite store from a real catalog's 1s snapshots; the result must equal
-`candle_dicts_from_snapshots` over those same snapshots (one aggregation result, two paths).
+`python -m candles.rebuild` rebuilds the SQLite store from a real catalog's 1s snapshots; the result
+must equal the same fold read straight off those snapshots (one fold, two paths).
 """
 
 from pathlib import Path
 
-from collector_core.build_candles import all_instruments
-from collector_core.build_candles import rebuild_instrument
-from collector_core.build_candles import venue_instruments
+from candles.application import queries
+from candles.application.forming import bars_from_rows
+from candles.application.rebuild import all_instruments
+from candles.application.rebuild import rebuild_instrument
+from candles.application.rebuild import venue_instruments
+from candles.domain.fold import BAR_SECONDS
+from candles.infrastructure.sqlite_store import CandleStore
 from kernel.second_snapshot import DydxSecondSnapshot
-from ml_signals import candle_store
-from ml_signals.candles import candle_dicts_from_snapshots
 
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
@@ -72,10 +74,10 @@ def test_rebuild_from_catalog_matches_raw_aggregation_and_is_idempotent(tmp_path
         assert rebuild_instrument(
             db_path, str(catalog_dir), IID, snaps[0].ts_event, snaps[-1].ts_event
         ) == len(snaps)
-        db = candle_store.connect_rw(db_path)
-        for bar in candle_store.BAR_SECONDS:
-            got = candle_store.window(db, IID, bar, 1 << 62, 1000)
-            want = candle_dicts_from_snapshots(snaps, bar)
+        store = CandleStore(db_path)
+        for bar in BAR_SECONDS:
+            got = queries.window(store.connection, IID, bar, 1 << 62, 1000)
+            want = bars_from_rows(snaps, bar)
             assert [(c["t"], c["o"], c["h"], c["l"], c["c"]) for c in got] == [
                 (c["t"], c["o"], c["h"], c["l"], c["c"]) for c in want
             ]
@@ -87,6 +89,7 @@ def test_rebuild_from_catalog_matches_raw_aggregation_and_is_idempotent(tmp_path
                 )
                 for c in got
             ]
+        store.close()
 
 
 def test_venue_instruments_filters_on_the_id_suffix() -> None:

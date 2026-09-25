@@ -20,7 +20,8 @@ buffer and flush timer over a duck-typed venue client, writing to the shared
 Extracted from the (identical) Bybit and Hyperliquid collectors, plus dYdX's venue-neutral
 integrity guards: stale-trade age filter + bounded trade_id dedup (DATA-06), stale-book
 skip with accumulator discard (DATA-01), crossed-book skip + ledger with resync as a
-fallback only (DATA-03), `ohlc_outside_book` canary, candle-store feed, `snapshots:raw` Redis
+fallback only (DATA-03), `ohlc_outside_book` canary, the `SecondSink` feed (`ports.py`;
+the candle store, injected by the venue entrypoint), `snapshots:raw` Redis
 publish, the `_second_loop` lag canary and the OBS-01 watchdog.
 
 Trades (story 22.13): every accepted `TradeTick` is both kept for the live second (folded once
@@ -124,7 +125,7 @@ import os
 import shutil
 import signal
 import time
-import warnings
+from collections import Counter
 from collections import defaultdict
 from collections import deque
 from collections.abc import Awaitable
@@ -148,7 +149,6 @@ from kernel.fold import fold_trades
 from kernel.parquet_compat import apply_zstd_default
 from kernel.second_snapshot import BOOK_DEPTH
 from kernel.second_snapshot import DydxSecondSnapshot
-from ml_signals import candle_store
 from observability import error_ledger
 from observability import notify
 from observability import watchdog
@@ -165,6 +165,7 @@ from collector_core.feed import MAIN_FEED
 from collector_core.feed import REST_FEED_NAME
 from collector_core.feed import Feed
 from collector_core.integrity import ohlc_outside_book
+from collector_core.ports import SecondSink
 from nautilus_trader.core import nautilus_pyo3
 from nautilus_trader.model.book import OrderBook
 from nautilus_trader.model.data import OrderBookDeltas
@@ -368,39 +369,8 @@ def _one_sided_texts(
     )
 
 
-# Story 23.1 moved the generic alert transition and the notify transport to `observability`. Old
-# names whose successor is the same object with the same call shape are served with a
-# DeprecationWarning until the story below is done; a name whose successor changed shape raises,
-# naming it, because serving it would break a stale caller in a less obvious way.
-MOVED_NAMES_REMOVE_AFTER = "24-1-candles-context-behind-the-secondsink-port"
-_MOVED_NAMES: dict[str, str] = {
-    "AlertTexts": "observability.watchdog.AlertTexts",
-    "_alert_transition": "observability.watchdog.transition",
-}
-_REPLACED_NAMES: dict[str, str] = {
-    "_notify": "observability.notify.notify(notify.OPERATOR, title, body)",
-}
-
-
-def __getattr__(name: str) -> object:
-    if name in _REPLACED_NAMES:
-        raise AttributeError(
-            f"collector_core.collector.{name} was replaced by {_REPLACED_NAMES[name]} (Story 23.1)"
-        )
-    if name not in _MOVED_NAMES:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    target = _MOVED_NAMES[name]
-    warnings.warn(
-        f"collector_core.collector.{name} moved to {target} (Story 23.1); "
-        f"removed after {MOVED_NAMES_REMOVE_AFTER}",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    return getattr(watchdog, target.rpartition(".")[2])
-
-
 # Parquet is flushed this many seconds past each interval boundary (:02 for the default 60 s), so a
-# minute that just closed is in the archive -- and, right after it, in the candle store -- ~2 s later.
+# minute that just closed is in the archive -- and, right after it, in the second sink -- ~2 s later.
 _FLUSH_PHASE_S = 2.0
 _CATCH_UP_MAX_NS = 86_400 * 1_000_000_000
 
@@ -544,6 +514,11 @@ class Collector:
     One venue's collector: `config` thresholds, a duck-typed `client` (contract in the
     module docstring) and `extra_loops` -- no-arg coroutine functions started as tasks
     alongside the core loops (e.g. a REST open-interest poll).
+
+    `second_sink` is the `ports.SecondSink` the flushed 1 s rows go to (the candle store; each
+    venue entrypoint constructs and injects it, Story 24.1). It is fed only rows whose
+    `write_data` succeeded, so nothing downstream can be ahead of the archive, and it is optional
+    only so a capture test can run without one -- never in a deployed process.
     """
 
     def __init__(
@@ -551,18 +526,18 @@ class Collector:
         config: CoreConfig,
         client: Any,
         extra_loops: tuple[Callable[[], Awaitable[None]], ...] = (),
+        *,
+        second_sink: SecondSink | None = None,
     ) -> None:
         self._config = config
         self._client = client
         self._extra_loops = extra_loops
+        # Where the archived seconds go next (the candle store, wired by the venue entrypoint).
+        # None in tests that exercise capture alone; every entrypoint injects one.
+        self._second_sink = second_sink
         catalog_path = Path(config.catalog_path).resolve()
         catalog_path.mkdir(parents=True, exist_ok=True)
         self._catalog = ParquetDataCatalog(str(catalog_path))
-        # Derived candle store for the UI (the catalog stays the archive): this collector is its
-        # single writer, one file per venue (compose sets CANDLES_DB_PATH). Rebuildable via build_candles.
-        self._candle_db = candle_store.connect_rw(
-            os.environ.get("CANDLES_DB_PATH", str(catalog_path.parent / "candles" / "candles.db"))
-        )
 
         self._buffer: dict[tuple[type, str], list[Any]] = defaultdict(list)
         # Unbounded: a real overflow would mean the process can't keep up with the
@@ -1125,19 +1100,43 @@ class Collector:
 
     def _apply_to_candle_store(self, flushed: dict[str, list[DydxSecondSnapshot]]) -> None:
         """
-        Fold what just reached Parquet into the candle store, in one transaction.
+        Hand what just reached Parquet to the second sink, one instrument at a time.
 
         Only flushed seconds are applied, so the store is never ahead of the archive. A failure must
-        not stop ingestion: it is loud (DATA-07), and the next start's catch-up or `build_candles`
-        repairs it.
+        not stop ingestion or the other instruments: it is loud (DATA-07), and the next start's
+        catch-up or `python -m candles.rebuild` repairs it.
+
+        One instrument's failure is isolated but the flush is ledgered once, naming every instrument
+        that failed. A store-wide fault (disk full, a locked file) fails every subscribed instrument
+        in the same flush, and one line each would exceed the ledger's 60-lines-per-site-per-minute
+        cap and suppress the very detail this is here to record.
         """
-        try:
-            candle_store.apply_batch(self._candle_db, flushed)
-        except Exception as e:
+        if self._second_sink is None:
+            return
+        failed: list[str] = []
+        by_type: dict[str, Exception] = {}
+        hits: Counter[str] = Counter()
+        for iid, rows in flushed.items():
+            try:
+                self._second_sink.apply(iid, rows)
+            except Exception as e:
+                failed.append(iid)
+                # One line carries one traceback, so keep one exception per distinct type and name
+                # them all in the detail: a store-wide fault plus an incidental second cause must
+                # not reduce to whichever instrument `flushed` happened to yield first.
+                by_type.setdefault(type(e).__name__, e)
+                hits[type(e).__name__] += 1
+        if failed:
+            # The traceback goes to the cause that hit the most instruments, not the alphabetically
+            # first one: a store-wide `OSError` on 29 coins must not be masked by an incidental
+            # `AttributeError` on the thirtieth. Ties break on the name, so the line is reproducible.
+            worst = min(hits, key=lambda name: (-hits[name], name))
             error_ledger.record(
                 "collector.candle_store",
-                f"candle store write failed for {len(flushed)} instruments",
-                e,
+                f"candle store write failed for {len(failed)} instruments "
+                f"({', '.join(f'{n} on {hits[n]}' for n in sorted(hits))}): "
+                + ", ".join(sorted(failed)),
+                by_type[worst],
             )
 
     def _catch_up_candle_store(self) -> None:
@@ -1145,21 +1144,36 @@ class Collector:
         Apply, at startup, the seconds the archive holds beyond each instrument's watermark.
 
         A crash between a Parquet flush and its store write (or a failed store write) leaves the
-        store behind the archive, and nothing else would ever fill that hole. A gap wider than a day
-        is left to `build_candles` (it would read too much here) and logged.
+        store behind the archive, and nothing else would ever fill that hole. Runs before the first
+        subscribe, so no live second can reach the sink first and push the watermark past the gap. A
+        gap wider than a day is left to the rebuild CLI (it would read too much here) and logged.
+
+        No sink is a legal construction (the collector's own tests build one), but in a deployed
+        process it means a venue entrypoint forgot `second_sink=` and every bar is silently missing
+        -- which the base class made structurally impossible while it opened the store itself. This
+        is the one place that runs exactly once per start, so the report belongs here. It goes to
+        the error ledger, not to a bare `logger.warning`: DATA-07 makes the ledger the one channel a
+        continue-past-failure site reports on, so the gap reaches `GET /api/errors` and the
+        frontend's non-dismissible `<ErrorBar>` instead of one Dozzle line lost in startup chatter.
         """
+        if self._second_sink is None:
+            error_ledger.record(
+                "collector.no_second_sink",
+                "no SecondSink injected: this collector archives Parquet but builds no candles. "
+                "A venue entrypoint must pass second_sink=CandleSink(store_from_env(...)).",
+            )
+            return
         catalog_path = str(Path(self._config.catalog_path).resolve())
         now_ns = time.time_ns()
-        for iid, mark in candle_store.watermarks(self._candle_db).items():
+        for iid, mark in self._second_sink.watermarks().items():
             if now_ns - mark > _CATCH_UP_MAX_NS:
                 logger.warning(
-                    f"Candle store for {iid} is more than a day behind: run build_candles"
+                    f"Candle store for {iid} is more than a day behind: "
+                    "run python -m candles.rebuild"
                 )
                 continue
             try:
-                candle_store.apply_seconds(
-                    self._candle_db, iid, query_second_ohlc(catalog_path, iid, mark + 1, now_ns)
-                )
+                self._second_sink.apply(iid, query_second_ohlc(catalog_path, iid, mark + 1, now_ns))
             except Exception as e:
                 error_ledger.record(
                     "collector.candle_store_catch_up", f"candle store catch-up failed for {iid}", e
@@ -1172,15 +1186,6 @@ class Collector:
             )
             await self._flush_once()
             self._report_stale_trades()
-
-    async def _candle_prune_loop(self) -> None:
-        """Hourly: drop 1m/5m bars past their retention (`candle_store.RETAIN_DAYS`); wide bars are kept."""
-        while not self._stop.is_set():
-            try:
-                candle_store.prune(self._candle_db)
-            except Exception as e:
-                error_ledger.record("collector.candle_store_prune", "candle store prune failed", e)
-            await asyncio.sleep(3600)
 
     # -- sample ------------------------------------------------------------------------------
 
@@ -1878,7 +1883,6 @@ class Collector:
         loops: tuple[Callable[[], Awaitable[None]], ...] = (
             self._ingest_loop,
             self._flush_loop,
-            self._candle_prune_loop,
             self._second_loop,
             self._watchdog_loop,
             self._trade_backfill_loop,

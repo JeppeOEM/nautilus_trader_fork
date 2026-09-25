@@ -47,12 +47,13 @@ import re
 import time
 from pathlib import Path
 
+from candles.application.verified_days import VerifiedDays
+from candles.infrastructure.verified_days import VerifiedDaysDir
 from kernel.clocks import MAX_TS_INIT_SKEW_NS
 from kernel.clocks import CatalogFileSpan
 from kernel.venues import MalformedInstrumentId
 from kernel.venues import has_venue
 from kernel.venues import venue_of
-from ml_signals import candle_store
 
 from collector_core.archive_gaps import record_gap
 from collector_core.consolidate_catalog import MAINTENANCE_LOCK_NAME
@@ -209,22 +210,26 @@ def _parsed_files(leaf: Path) -> dict[Path, range]:
     return files
 
 
-def _leaf_statuses(candles_dir: Path, iid: str, days: set[int]) -> dict[int, str | None]:
-    """Each day's `verified_days` status in that venue's candle store (None: unverified)."""
+def _leaf_statuses(verified: VerifiedDays, iid: str, days: set[int]) -> dict[int, str | None]:
+    """
+    Each day's `verified_days` status from the day-status port (None: unverified).
+
+    The id is parsed up front rather than left to the port: a leaf with no day past the cutoff has
+    an empty `days`, so a lazy parse inside the comprehension would never run and the operator would
+    lose the warning that a directory is not an instrument and can never be pruned. A port is also
+    free not to parse ids at all (`VerifiedDaysStore` resolves no venue).
+    """
     try:
-        venue = venue_of(iid).lower()
+        venue_of(iid)
     except MalformedInstrumentId:
         logger.warning("  skipped %s: not an instrument id, its files are never pruned", iid)
         return dict.fromkeys(days)
-    with candle_store.connect_ro(str(candles_dir / f"candles_{venue}.db")) as db:
-        if db is None:
-            return dict.fromkeys(days)
-        return {d: candle_store.verified_status(db, iid, _day_text(d)) for d in days}
+    return {d: verified.verified_status(iid, _day_text(d)) for d in days}
 
 
 def plan_trade_prune(
     catalog_path: str,
-    candles_dir: str,
+    verified: VerifiedDays,
     retention_days: int,
     now_ns: int,
     venue: str | None = None,
@@ -232,6 +237,9 @@ def plan_trade_prune(
     """
     (trade files to delete, sorted (instrument, day, reason) kept although old enough). A file
     goes only when every day it spans is older than `retention_days` and verified `pass`.
+
+    Day status comes from the `VerifiedDays` port (AD-D9): this tool never opens the candle store,
+    so there is no second reader deciding a deletion on a connection of its own.
     """
     old_before = now_ns // _DAY_NS - retention_days  # day indices below this are old enough
     delete: list[Path] = []
@@ -241,9 +249,7 @@ def plan_trade_prune(
             continue
         files = _parsed_files(leaf)
         old = {f: days for f, days in files.items() if days[-1] < old_before}
-        statuses = _leaf_statuses(
-            Path(candles_dir), leaf.name, {d for ds in old.values() for d in ds}
-        )
+        statuses = _leaf_statuses(verified, leaf.name, {d for ds in old.values() for d in ds})
         for f, days in old.items():
             unproven = [d for d in days if statuses[d] != "pass"]
             if not unproven:
@@ -256,15 +262,13 @@ def plan_trade_prune(
 
 def prune_trades(
     catalog_path: str,
-    candles_dir: str,
+    verified: VerifiedDays,
     retention_days: int,
     apply: bool,
     venue: str | None = None,
 ) -> tuple[int, int]:
     """Apply (or report) the trade policy; returns (files deleted or deletable, bytes)."""
-    delete, kept = plan_trade_prune(
-        catalog_path, candles_dir, retention_days, time.time_ns(), venue
-    )
+    delete, kept = plan_trade_prune(catalog_path, verified, retention_days, time.time_ns(), venue)
     freed = 0
     for path in delete:
         freed += path.stat().st_size
@@ -325,9 +329,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.types:
             prune(args.catalog, args.types, args.days, not args.apply, args.venue)
         if args.candles_dir:
-            prune_trades(
-                args.catalog, args.candles_dir, args.trade_retention_days, args.apply, args.venue
-            )
+            with VerifiedDaysDir(args.candles_dir) as verified:
+                prune_trades(
+                    args.catalog, verified, args.trade_retention_days, args.apply, args.venue
+                )
     return 0
 
 

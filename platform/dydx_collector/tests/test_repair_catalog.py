@@ -1,10 +1,11 @@
 from pathlib import Path
 
-from collector_core.build_candles import rebuild_instrument
+from candles.application import queries
+from candles.application.rebuild import rebuild_instrument
+from candles.infrastructure.sqlite_store import CandleStore
 from collector_core.repair_catalog import find_impossible_snapshots
 from collector_core.repair_catalog import repair_instrument
 from kernel.second_snapshot import DydxSecondSnapshot
-from ml_signals import candle_store
 from ml_signals.catalog_stats import query_second_snapshots
 
 from nautilus_trader.model.identifiers import InstrumentId
@@ -46,8 +47,8 @@ def test_spike_snapshot_is_cleared_and_its_candle_rebuilt(tmp_path: Path) -> Non
     catalog.write_data(snaps)
     db_path = str(tmp_path / "candles.db")
     rebuild_instrument(db_path, catalog_path, _IID, _T0, _T0 + 200 * _SEC)
-    db = candle_store.connect_rw(db_path)
-    assert [c["h"] for c in candle_store.window(db, _IID, 60, 1 << 62, 10)] == [
+    store = CandleStore(db_path)
+    assert [c["h"] for c in queries.window(store.connection, _IID, 60, 1 << 62, 10)] == [
         150.0
     ]  # the spike is in the store
 
@@ -60,4 +61,5 @@ def test_spike_snapshot_is_cleared_and_its_candle_rebuilt(tmp_path: Path) -> Non
     rows = query_second_snapshots(catalog_path, _IID, _T0, _T0 + 200 * _SEC)
     assert len(rows) == 180
     assert all(r.high_price is None for r in rows)
-    assert candle_store.window(db, _IID, 60, 1 << 62, 10) == []  # no trade left in that minute
+    assert queries.window(store.connection, _IID, 60, 1 << 62, 10) == []  # no trade left
+    store.close()

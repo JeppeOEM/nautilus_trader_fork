@@ -28,6 +28,9 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Literal
 
+from candles.application.prune import loop as candle_prune_loop
+from candles.application.sink import CandleSink
+from candles.infrastructure.sqlite_store import store_from_env
 from collector_core.collector import Collector
 from collector_core.collector import run_forever
 from observability import error_ledger
@@ -105,7 +108,15 @@ class BybitCollector(Collector):
             else BybitEnvironment.MAINNET
         )
         client = BybitClient(on_data=self._on_data, environment=env, trade_feeds=config.trade_feeds)
-        super().__init__(config, client, extra_loops=(self._open_interest_loop,))
+        # Composition root: this process owns Bybit's candle store (`CANDLES_DB_PATH`), so it
+        # opens it, hands capture the sink port and runs the retention loop.
+        store = store_from_env(config.catalog_path)
+        super().__init__(
+            config,
+            client,
+            extra_loops=(self._open_interest_loop, candle_prune_loop(store)),
+            second_sink=CandleSink(store),
+        )
         self._last_u: dict[str, int] = {}
         self._book_sequence_errors: defaultdict[str, int] = defaultdict(int)
 

@@ -301,7 +301,7 @@ development_status:
   epic-23-retrospective: optional
 
   epic-24: backlog
-  24-1-candles-context-behind-the-secondsink-port: ready-for-dev
+  24-1-candles-context-behind-the-secondsink-port: done
   24-2-views-read-models-and-reader-side-revalidation-removed: ready-for-dev
   24-3-alerting-context-as-forming-bar-observer: ready-for-dev
   24-4-research-pure-consumer-and-broken-tests-repaired: ready-for-dev
