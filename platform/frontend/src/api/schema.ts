@@ -45,6 +45,7 @@ export interface CandlesResponse {
 export interface ErrorsResponse {
   counts: Record<string, number>;
   last: Record<string, string>;
+  services: Record<string, ServiceErrorSummary>;
 }
 
 export interface HealthResponse {
@@ -115,6 +116,12 @@ export interface RankingsResponse {
   updated_at: number;
   mode: string;
   stale_instrument_ids: string[];
+}
+
+export interface ServiceErrorSummary {
+  last_start_ns: number | null;
+  since_start: Record<string, number>;
+  since: Record<string, number> | null;
 }
 
 export interface SnapshotSeriesPoint {

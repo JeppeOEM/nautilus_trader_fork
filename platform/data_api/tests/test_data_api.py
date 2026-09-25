@@ -159,6 +159,7 @@ def test_catalog_snapshots_route(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 
 
 def test_errors_route_reports_the_ledger() -> None:
+    """Fixture test on the old response shape (story 23.3 AC #6): `counts`/`last` unchanged."""
     from fastapi.testclient import TestClient
     from observability import error_ledger
 
@@ -166,8 +167,66 @@ def test_errors_route_reports_the_ledger() -> None:
 
     error_ledger.reset()
     client = TestClient(app_module.app)
-    assert client.get("/api/errors").json() == {"counts": {}, "last": {}}
+    empty = client.get("/api/errors").json()
+    # The exact top-level shape is part of the contract: a renamed or extra field must fail here,
+    # not only the per-field claims below.
+    assert set(empty) == {"counts", "last", "services"}
+    assert empty["counts"] == {}
+    assert empty["last"] == {}
     error_ledger.record("test.site", "boom")
     body = client.get("/api/errors").json()
-    assert body["counts"] == {"test.site": 1} and body["last"] == {"test.site": "boom"}
+    assert set(body) == {"counts", "last", "services"}
+    assert body["counts"] == {"test.site": 1}
+    assert body["last"] == {"test.site": "boom"}
+    error_ledger.reset()
+
+
+def test_errors_route_services_block_reads_durable_ledgers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Story 23.3 AC #6: `services` summarises every ledger file under `ERROR_LEDGER_DIR`."""
+    import json
+
+    from fastapi.testclient import TestClient
+    from observability import error_ledger
+
+    import data_api.app as app_module
+
+    lines = [
+        {"ts_ns": 10, "site": "process_start", "suppressed": 0},
+        {"ts_ns": 20, "site": "collector.book_sequence", "suppressed": 0},
+        {"ts_ns": 30, "site": "collector.book_sequence", "suppressed": 1},
+    ]
+    errors_dir = tmp_path / "errors"
+    errors_dir.mkdir()
+    (errors_dir / "collector.jsonl").write_text("".join(json.dumps(r) + "\n" for r in lines))
+    monkeypatch.setattr(app_module, "ERROR_LEDGER_DIR", str(errors_dir))
+
+    error_ledger.reset()
+    client = TestClient(app_module.app)
+    body = client.get("/api/errors").json()
+    assert set(body["services"]) == {"collector"}
+    summary = body["services"]["collector"]
+    assert summary["last_start_ns"] == 10
+    assert summary["since_start"] == {"collector.book_sequence": 3}
+    assert summary["since"] is None
+
+    body = client.get("/api/errors", params={"since_ns": 25}).json()
+    assert body["services"]["collector"]["since"] == {"collector.book_sequence": 2}
+    error_ledger.reset()
+
+
+def test_errors_route_services_block_is_empty_without_a_ledger_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing `ERROR_LEDGER_DIR` is an empty `services` block, never an error."""
+    from fastapi.testclient import TestClient
+    from observability import error_ledger
+
+    import data_api.app as app_module
+
+    monkeypatch.setattr(app_module, "ERROR_LEDGER_DIR", str(tmp_path / "missing"))
+    error_ledger.reset()
+    client = TestClient(app_module.app)
+    assert client.get("/api/errors").json()["services"] == {}
     error_ledger.reset()

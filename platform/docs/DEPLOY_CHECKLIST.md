@@ -203,3 +203,81 @@ Record numbers where each line says, never in a story file.
 - Do not run `repair_catalog` on a day `rebuild_seconds` has rebuilt: its `ohlc_outside_book`
   detector compares exchange-timed trades with the mid-second book and would clear real trades.
 - Do not run `rebuild_seconds --include-open-day` while that venue's collector is running.
+
+## 6. Day-long clean-run check (story 23.3)
+
+Before the first `make redeploy-all` that ships this story: `mkdir -p platform/data/errors` on
+the VPS, owned by the container user (`chown 1000:1000 platform/data/errors` if created as
+another user) -- every service bind-mounts it `rw` as `/app/errors_dir` and writes its own
+`<service>.jsonl` there from its first line, so the directory must exist and be writable before
+the containers start, the same as `platform/data/catalog` and the other `platform/data/*` stores.
+
+`python3 -m collector_core.crosscheck_errors` reads every service's durable ledger under
+`platform/data/errors/` together with the archived catalog, in the collector image (the
+`errors_dir`/`catalog` mounts are already present):
+
+```bash
+docker compose run --rm --no-deps collector python3 -m collector_core.crosscheck_errors \
+  --catalog /app/catalog --errors-dir /app/errors_dir \
+  --fail-on collector.book_crosscheck collector.book_sequence collector.pending_deltas \
+            ranking_engine.volume24h process_start
+```
+
+(`docker compose run` has no `--network` flag -- and needs none here: the cross-check is pure
+local file and Parquet I/O against the two mounts, with no venue or Redis access at all.)
+
+(No `--since`/`--until` needed for the usual "did the last 24 hours run clean" check -- that is
+the tool's default window; pass both as ISO-8601 UTC instants, e.g. `--since
+2026-09-21T00:00:00Z --until 2026-09-22T00:00:00Z`, to pin an exact day for the record instead.)
+Exit 0 closes, in one command, the day-long evidence these operator actions were each left
+waiting on:
+
+- **22.5 #1** — `collector.book_crosscheck` is 0 for Bybit and Hyperliquid over the whole window
+  (already in the tool's default `--fail-on` list).
+- **22.1 #2** — the "Instrument gaps" section prints `(none)` *and* the "Instruments" section
+  lists every expected collected instrument with a plausible `rows=` count and `first=`/`last=`
+  spanning the window: no `[collector.*]`-caused gap, snapshots 1 s apart throughout. `(none)`
+  on its own is not sufficient -- the tool only diffs gaps *between* two observed rows (see the
+  module's own `Known limits`), so an instrument with zero rows for the whole window (dead the
+  entire time) also prints no gap; that is exactly what `rows=0`, or a `last=` well short of
+  the window end, catches. Cross-check the instrument list itself against `config.toml`/
+  `dydx_config.toml` — an id that was never collected has no partition and so no row here at
+  all. An instrument *delisted* mid-window shows rows then stops, and its trailing absence can
+  never be ledger-explained; recognise it from the venue's own listing rather than chasing it
+  as a gap.
+- **22.10 #4** — `ranking_engine.volume24h`'s printed count is 0 (in `--fail-on` above, so a
+  nonzero count fails the exit code instead of only showing in the printed report).
+- **22.12 #5** — `collector.late_trade`, `collector.pending_deltas` and `collector.book_sequence`
+  are printed per service for Bybit and Hyperliquid; `pending_deltas`/`book_sequence` are
+  already `--fail-on` defaults, while `late_trade` is deliberately **not** in the `--fail-on`
+  list above: a steady nonzero rate does not fail the exit code on its own (it means
+  `hold_back_seconds` is too short, not a loss). It is printed, read by the operator every run,
+  and root-caused by hand in `DATA_INTEGRITY_AUDIT.md` (D-63).
+- **A nonzero `restarts=` on any service is itself a finding**, not an explanation. Every gap a
+  crash-loop causes prints `restart`, so without `process_start` in `--fail-on` (as above) 40
+  OOM-kills would still exit 0 — the exact inversion DATA-07 forbids ("a restart-tolerant
+  pipeline does not make a crash-looping one acceptable", audit D-06). Root-cause the restarts;
+  do not drop the token to make the command pass.
+
+Read the sites a gap is `explained:` by — do not trust the word. The match is time proximity
+within 300 s of one of the gap's own edges, with no instrument id on the ledger line, so a site
+that fires continuously (a steadily nonzero `collector.late_trade`) explains every gap whose
+edge it brackets. `explained: collector.late_trade` on a 40-minute hole is a DATA-02 question,
+not a closed one.
+
+Expect `UNEXPLAINED` gaps on the first real run, from three sampler skip paths that today emit
+no snapshot row **and** no ledger entry: empty top-of-book, stale book and no book at all
+(`collector_core/collector.py` ~:1208, ~:1218, ~:1342). That is the check working — an
+unledgered skip is a DATA-07 finding. The resolution is to give those three paths their own
+ledger sites (the DDD spine assigns that to the `SecondSampler` story), never to relax the
+check or widen the matcher.
+
+The command also exits 1, with a message on stderr, when it found **no ledger file at all**
+(missing `errors_dir` mount, `ERROR_LEDGER_DIR` unset) or **no second-snapshot instrument**
+(wrong `--catalog`, or a `--venue` matching nothing). A run that checked nothing must never
+read as a clean day.
+
+Add `--venue bybit`/`--venue hyperliquid`/`--venue dydx` to narrow which instruments' gaps are
+checked (and so which collector's ledger explains them) to one venue. It never narrows the
+"Services"/`--fail-on` check -- a site belonging to a different service, e.g.
+`ranking_engine.volume24h`, is still checked under `--venue bybit`.

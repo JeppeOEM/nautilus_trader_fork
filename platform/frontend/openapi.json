@@ -265,8 +265,26 @@
     "/api/errors": {
       "get": {
         "summary": "Errors",
-        "description": "Every failure this process carried on past (`observability.error_ledger`). Empty means none\nsince start; the frontend's error bar polls this so a malfunction cannot go unseen.",
+        "description": "Every failure this process carried on past (`observability.error_ledger`). `counts`/`last`\nare this process's own in-memory tallies, unchanged since Story 23.1; `services` is every\nother process's durable ledger (story 23.3), read back from `ERROR_LEDGER_DIR` -- so a\ncollector's failure is visible here too, not only in its own container's log. Empty means\nnone since start; the frontend's error bar polls this so a malfunction cannot go unseen.",
         "operationId": "errors_api_errors_get",
+        "parameters": [
+          {
+            "name": "since_ns",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Since Ns"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Successful Response",
@@ -274,6 +292,16 @@
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/ErrorsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
                 }
               }
             }
@@ -1263,12 +1291,20 @@
             },
             "type": "object",
             "title": "Last"
+          },
+          "services": {
+            "additionalProperties": {
+              "$ref": "#/components/schemas/ServiceErrorSummary"
+            },
+            "type": "object",
+            "title": "Services"
           }
         },
         "type": "object",
         "required": [
           "counts",
-          "last"
+          "last",
+          "services"
         ],
         "title": "ErrorsResponse"
       },
@@ -1686,6 +1722,49 @@
           "stale_instrument_ids"
         ],
         "title": "RankingsResponse"
+      },
+      "ServiceErrorSummary": {
+        "properties": {
+          "last_start_ns": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Start Ns"
+          },
+          "since_start": {
+            "additionalProperties": {
+              "type": "integer"
+            },
+            "type": "object",
+            "title": "Since Start"
+          },
+          "since": {
+            "anyOf": [
+              {
+                "additionalProperties": {
+                  "type": "integer"
+                },
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Since"
+          }
+        },
+        "type": "object",
+        "required": [
+          "last_start_ns",
+          "since_start",
+          "since"
+        ],
+        "title": "ServiceErrorSummary"
       },
       "SnapshotSeriesPoint": {
         "properties": {

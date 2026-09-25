@@ -17,6 +17,7 @@ operator_actions:
   - "Set `hold_back_seconds` in troll/bybit_collector/config.toml and troll/hyperliquid_collector/config.toml to each venue's VPS TradeTick p99.9 rounded up to 0.5 s (or 0.0, with the reason written in the comment). Replace the provisional dev-box comment, then redeploy."
   - "After one full UTC day per venue has been rebuilt by `make nightly VENUE=BYBIT` / `VENUE=HYPERLIQUID`, record each venue's compare_klines pass rate (instruments and minutes) in DATA_INTEGRITY_AUDIT.md D-63/D-51. Root-cause every remaining mismatch (a missing trade is a 22.14 gap; a book-related one is a new finding). Never add a tolerance."
   - "For the first day after deploy, watch the `collector.late_trade`, `collector.pending_deltas` and `collector.book_sequence` counts in /api/errors for Bybit and Hyperliquid. A steady late-trade rate means the hold-back is too short; any pending_deltas or book_sequence entry is a DATA-02 finding to root-cause in D-63."
+  - "Story 23.3 makes the counts above durable across restarts: run the day-long clean-run check in platform/docs/DEPLOY_CHECKLIST.md §6."
 ---
 
 <intent-contract>

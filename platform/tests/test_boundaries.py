@@ -129,6 +129,8 @@ LEGACY_MODULE_TO_CONTEXT: dict[str, str] = {
     "collector_core.compare_klines": ARCHIVE,
     "collector_core.config": CAPTURE,
     "collector_core.consolidate_catalog": ARCHIVE,
+    # Story 23.3; moves with archive in 25.1.
+    "collector_core.crosscheck_errors": ARCHIVE,
     "collector_core.feed": CAPTURE,
     "collector_core.fold": KERNEL,
     "collector_core.integrity": CAPTURE,
@@ -146,6 +148,7 @@ LEGACY_MODULE_TO_CONTEXT: dict[str, str] = {
     "collector_core.tests.test_backfill_bars": ARCHIVE,
     "collector_core.tests.test_compare_klines": ARCHIVE,
     "collector_core.tests.test_consolidate_catalog": ARCHIVE,
+    "collector_core.tests.test_crosscheck_errors": ARCHIVE,
     "collector_core.tests.test_measure_lag": ARCHIVE,
     "collector_core.tests.test_migrate_open_interest": ARCHIVE,
     "collector_core.tests.test_nightly": ARCHIVE,

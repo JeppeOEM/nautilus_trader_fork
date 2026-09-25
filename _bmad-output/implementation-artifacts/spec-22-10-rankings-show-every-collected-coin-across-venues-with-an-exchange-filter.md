@@ -17,6 +17,7 @@ operator_actions:
   - "Run make tui with Hyperliquid and Bybit rows present. Confirm the coins-pane columns stay aligned and that `/` + `.bybit` narrows to Bybit rows."
   - "After about 10 minutes of steady state, check GET /api/errors and confirm the ranking_engine.volume24h count is not growing (a growing count means a collected instrument has no USD volume from its venue)."
   - "On nifelheim, watch `docker stats ranking_engine` over about an hour and confirm memory stays flat at about 3x the instrument count (epic 13 baseline). The engine now makes 4 volume polls a minute instead of 1."
+  - "Story 23.3 gives the 'ranking_engine.volume24h not growing' check above a day-long, restart-proof form: run the day-long clean-run check in platform/docs/DEPLOY_CHECKLIST.md §6."
 ---
 
 <intent-contract>

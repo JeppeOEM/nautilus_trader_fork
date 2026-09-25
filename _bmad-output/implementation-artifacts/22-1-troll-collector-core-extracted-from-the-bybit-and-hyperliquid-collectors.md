@@ -9,6 +9,7 @@ operator_actions:
   - "Watch Dozzle for at least 10 minutes: both containers stay up, no `[collector.*]` error_ledger lines, at most one `Dropped subscribe-time trade history` line per (re)subscribe, and `DydxSecondSnapshot` rows for `BTCUSDT-LINEAR.BYBIT` and `BTC-USD-PERP.HYPERLIQUID` land 1 s apart (e.g. via `/api/candles` or a catalog query)."
   - "Confirm `dydx-ranking-engine` lists the `.BYBIT`/`.HYPERLIQUID` ids in `/api/rankings` and its memory stays flat (`docker stats dydx-ranking-engine`) over those 10 minutes."
   - "Tick the VPS bullet under Task 6 in this story file and set its status to done."
+  - "Story 23.3 closes this action's evidence gap: run the day-long clean-run check in `platform/docs/DEPLOY_CHECKLIST.md` §6 instead of a 10-minute Dozzle watch."
 ---
 
 # Story 22.1: `troll/collector_core/` extracted from the Bybit and Hyperliquid collectors

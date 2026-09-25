@@ -62,6 +62,7 @@ import webbrowser
 from pathlib import Path
 
 import urwid
+from observability import error_ledger
 
 from bot_tui import bot_history_state
 from bot_tui import bot_incidents_state
@@ -1779,6 +1780,7 @@ def main() -> None:
     # stray log line visibly bled into the footer on startup. Log to a file instead
     # (relative to the container's own WORKDIR, /app -- not a shared /tmp path).
     logging.basicConfig(level=logging.INFO, filename=_LOG_PATH)
+    error_ledger.start()  # durable error ledger (story 23.3); no-op without ERROR_LEDGER_DIR
     BotTuiApp().run()
 
 
