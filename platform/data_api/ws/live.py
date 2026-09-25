@@ -45,7 +45,7 @@ from fastapi import WebSocketDisconnect
 from views.rankings_bus import QUEUE_MAX
 from views.rankings_bus import put_drop_oldest
 
-from data_api import alerts
+from data_api import alert_wiring
 from data_api import buses
 
 
@@ -187,7 +187,7 @@ async def ws_live(websocket: WebSocket) -> None:
     # instead arrives twice (via the initial send below and the queue) -- harmless for a
     # full-snapshot relay, unlike a silent drop. Unchanged from before Story 15.5.
     rankings_queue = buses.bus.subscribe()
-    alerts_queue = alerts.engine.subscribe()
+    alerts_queue = alert_wiring.engine.subscribe()
     subs = _CandleSubscriptions(outbox)
     alerts_forward_task = asyncio.create_task(_forward(alerts_queue, outbox))
     rankings_forward_task = asyncio.create_task(_forward(rankings_queue, outbox))
@@ -223,6 +223,6 @@ async def ws_live(websocket: WebSocket) -> None:
         reader_task.cancel()
         rankings_forward_task.cancel()
         alerts_forward_task.cancel()
-        alerts.engine.unsubscribe(alerts_queue)
+        alert_wiring.engine.unsubscribe(alerts_queue)
         subs.teardown_all()
         buses.bus.unsubscribe(rankings_queue)

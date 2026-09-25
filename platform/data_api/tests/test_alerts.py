@@ -11,183 +11,180 @@
 #  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
+# -------------------------------------------------------------------------------------------------
 """
-Stories 20.1/20.2: alert store round-trip, `/api/alerts` routes, the pure frequency/
-expiration state machine, template rendering, and engine fire path (real objects; the network
-POST is injected as a recording callable, not a mock of any library).
+Stories 20.1/20.2/24.3: the `/api/alerts` routes, the frozen `/api/alerts` JSON and `/ws/live`
+toast payloads (pinned against the pre-24.3 code), and the engine driven the way the running app
+drives it -- attached to a real `LiveCandleBus` fed real `DydxSecondSnapshot` batches, so an alert
+is evaluated on the forming bar the chart shows. The pure frequency rules, the store and the
+deliverer are tested in `alerting/tests`.
 """
 
-import json
+import asyncio
 import threading
-from http.server import BaseHTTPRequestHandler
-from http.server import HTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 
+import alerting.domain.alert as alert_module
 import pytest
+from alerting.application.engine import QUEUE_MAX as ALERTING_QUEUE_MAX
+from alerting.application.engine import AlertEngine
+from alerting.application.service import AlertService
+from alerting.domain.alert import Alert
+from alerting.domain.alert import new_alert
+from alerting.infrastructure.deliverer import NotifyDeliverer
+from alerting.infrastructure.toml_store import AlertStore
 from fastapi.testclient import TestClient
 from kernel.second_snapshot import DydxSecondSnapshot
 from observability import error_ledger
+from views.live_candles import LiveCandleBus
+from views.rankings_bus import QUEUE_MAX as VIEWS_QUEUE_MAX
 
 import data_api.app as app_module
-from data_api import alerts
+from data_api import alert_wiring
+from data_api import buses
 from nautilus_trader.model.identifiers import InstrumentId
 
 
 _IID = "BTC-USD-PERP.DYDX"
 _S = 1_000_000_000
 _T0 = 1_800_000_000 * _S  # multiple of 60s
+# The archive a bus's seed would read; these tests never subscribe a chart, so never seed.
+_NO_CATALOG = "no-catalog-read-in-this-test"
 
 
-def _alert(frequency: str = "only_once", **kw) -> alerts.Alert:
-    fields = dict(
-        instrument_id=_IID,
-        level=100.0,
-        frequency=frequency,
-        bar_seconds=60,
-        template="{{ticker}} {{close}}",
-        webhook_url="http://localhost:1/hook",
-    )
+def _alert(frequency: str = "only_once", **kw: object) -> Alert:
+    fields: dict[str, object] = {
+        "instrument_id": _IID,
+        "level": 100.0,
+        "frequency": frequency,
+        "bar_seconds": 60,
+        "template": "{{ticker}} {{close}}",
+        "webhook_url": "http://localhost:1/hook",
+    }
     fields.update(kw)
-    return alerts.new_alert(**fields)
+    return new_alert(**fields)
 
 
-def _run(alert: alerts.Alert, ticks: list[tuple[int, float]]) -> list[int]:
-    """Feed (seconds-after-T0, price) ticks through evaluate(); return indexes that fired."""
-    state = alerts.RunState()
-    return [
-        i
-        for i, (s, p) in enumerate(ticks)
-        if alerts.evaluate(alert, state, p, _T0 + s * _S) is not None
-    ]
+class _RecordingDeliverer:
+    """A `Deliverer` by shape: records the bodies a fire would send."""
+
+    def __init__(self) -> None:
+        self.posted: list[str] = []
+
+    def channels(self, alert: Alert) -> tuple[str, ...]:
+        return (f"webhook:{alert.webhook_url}",)
+
+    def deliver(self, alert: Alert, body: str) -> None:
+        self.posted.append(body)
 
 
-def test_store_round_trip_keeps_optional_fields(tmp_path: Path) -> None:
-    path = tmp_path / "alerts.toml"
-    store = alerts.AlertStore(path)
-    a, b = _alert(expires_at_ns=_T0 + _S), _alert()
-    store.add(a)
-    store.add(b)
-    store.record_fire(a, _T0)
-    reloaded = alerts.AlertStore(path).list()
-    assert [x.id for x in reloaded] == [a.id, b.id]
-    assert reloaded[0].expires_at_ns == _T0 + _S
-    assert reloaded[0].triggered is True
-    assert reloaded[1].expires_at_ns is None
-    assert store.delete(a.id) is True
-    assert store.delete(a.id) is False
-    assert [x.id for x in alerts.AlertStore(path).list()] == [b.id]
+def _engine(store: AlertStore) -> AlertEngine:
+    return AlertEngine(store, _RecordingDeliverer())
 
 
-def test_cross_up_and_down_fire_but_touching_without_crossing_does_not() -> None:
-    assert _run(_alert("once_per_bar", bar_seconds=1), [(0, 99), (1, 101)]) == [1]
-    assert _run(_alert("once_per_bar", bar_seconds=1), [(0, 101), (1, 99)]) == [1]
-    assert _run(_alert("once_per_bar", bar_seconds=1), [(0, 99), (1, 99.5)]) == []
-    assert _run(_alert("once_per_bar", bar_seconds=1), [(0, 100), (1, 100)]) == []
+def _drive(engine: AlertEngine, ticks: list[tuple[int, float | None]]) -> None:
+    """Feed (ts_ns, close) seconds to `engine` the way the running app does: one bus batch each."""
+    bus = LiveCandleBus(_NO_CATALOG)
+    bus.attach(engine)
+    for ts_ns, close in ticks:
+        bus.handle_batch([DydxSecondSnapshot.to_dict(_snapshot(ts_ns, close))])
 
 
 def test_only_once_engine_fires_a_single_time(tmp_path: Path) -> None:
-    posted: list[str] = []
-    store = alerts.AlertStore(tmp_path / "a.toml")
+    store = AlertStore(tmp_path / "a.toml")
     store.add(_alert("only_once", bar_seconds=1))
-    engine = alerts.AlertEngine(store, post=lambda a, body: posted.append(body))
-    for i, price in enumerate([99, 101, 99, 101]):
-        engine.on_snapshot(_snapshot(_T0 + i * _S, price))
+    deliverer = _RecordingDeliverer()
+    engine = AlertEngine(store, deliverer)
+    _drive(engine, [(_T0 + i * _S, price) for i, price in enumerate([99, 101, 99, 101])])
     _join_post_threads()
-    assert posted == [f"{_IID} 101.0"]
+    assert deliverer.posted == [f"{_IID} 101.0"]
     assert store.list()[0].triggered is True
 
 
-def test_once_per_bar_fires_at_most_once_per_bar() -> None:
-    # bar 0 (0-59s): crosses at idx 1, 2, 3 -> only idx 1 fires. Bar 1 (60s+): crosses at idx 4
-    # (101->99 across the bar boundary) and 5 -> only idx 4 fires.
-    ticks = [(0, 99), (1, 101), (2, 99), (3, 101), (60, 99), (61, 101)]
-    assert _run(_alert("once_per_bar"), ticks) == [1, 4]
-
-
-def test_once_per_bar_close_decides_on_the_bar_close_not_intrabar_wicks() -> None:
-    # bar 0 closes 99, bar 1 wicks to 101 but closes 99 -> no fire; bar 2 closes 101 -> fires
-    # on the first tick of bar 3 (the bar's close is only known once the bucket rolls over).
-    ticks = [(0, 99), (30, 99), (60, 101), (90, 99), (120, 101), (150, 101), (180, 101)]
-    assert _run(_alert("once_per_bar_close"), ticks) == [6]
-
-
-def test_once_per_bar_close_reports_the_closed_bars_close_price() -> None:
-    alert, state = _alert("once_per_bar_close"), alerts.RunState()
-    ticks = [(0, 99), (60, 99), (90, 101), (119, 102), (120, 50)]  # bar 1 closes at 102
-    reported = [alerts.evaluate(alert, state, p, _T0 + s * _S) for s, p in ticks]
-    assert reported == [None, None, None, None, 102]
-
-
 def test_failed_persist_still_fires_the_alert(tmp_path: Path) -> None:
-    posted: list[str] = []
-    store = alerts.AlertStore(tmp_path / "a.toml")
+    error_ledger.reset()
+    store = AlertStore(tmp_path / "a.toml")
     store.add(_alert("only_once", bar_seconds=1))
-    engine = alerts.AlertEngine(store, post=lambda a, body: posted.append(body))
+    deliverer = _RecordingDeliverer()
+    engine = AlertEngine(store, deliverer)
     (tmp_path / "a.toml").unlink()
     (tmp_path / "a.toml").mkdir()  # makes every later save raise IsADirectoryError
-    engine.on_snapshot(_snapshot(_T0, 99))
-    engine.on_snapshot(_snapshot(_T0 + _S, 101))
+    _drive(engine, [(_T0, 99), (_T0 + _S, 101)])
     _join_post_threads()
-    assert len(posted) == 1
-
-
-def test_expired_alert_never_fires_and_reports_expired() -> None:
-    alert = _alert("once_per_bar", bar_seconds=1, expires_at_ns=_T0 + _S)
-    assert _run(alert, [(0, 99), (1, 101), (2, 99), (3, 101)]) == []
-    assert alerts.status_of(alert, _T0 + _S) == "expired"
-    assert alerts.status_of(alert, _T0) == "active"
-
-
-def test_render_substitutes_all_four_placeholders() -> None:
-    out = alerts.render(
-        "{{ticker}}|{{close}}|{{time}}|{{interval}}|{{ticker}}", _IID, 65000.5, _T0, 60
-    )
-    assert out == f"{_IID}|65000.5|2027-01-15T08:00:00+00:00|60|{_IID}"
-
-
-def test_failed_webhook_is_ledgered_with_alert_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    assert len(deliverer.posted) == 1
+    assert error_ledger.counts() == {"alerting.store.persist": 1}
     error_ledger.reset()
-    alert = _alert(webhook_url="http://127.0.0.1:1/hook")  # nothing listens on port 1
-    alerts.deliver(alert, "x")
-    assert error_ledger.counts() == {"observability.notify.webhook": 1}
-    assert f"alert {alert.id}" in error_ledger.last_details()["observability.notify.webhook"]
-    error_ledger.reset()
-
-
-def test_alert_names_channels_never_transports(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
-    assert alerts.channels(_alert(webhook_url="")) == ()
-    assert alerts.channels(_alert(webhook_url="https://h/x")) == ("webhook:https://h/x",)
-    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
-    monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
-    assert alerts.channels(_alert(webhook_url="https://h/x")) == (
-        "webhook:https://h/x",
-        "telegram",
-    )
 
 
 def test_toast_is_pushed_to_subscribers(tmp_path: Path) -> None:
-    store = alerts.AlertStore(tmp_path / "a.toml")
+    store = AlertStore(tmp_path / "a.toml")
     store.add(_alert("only_once", bar_seconds=1, template="hit {{close}}"))
-    engine = alerts.AlertEngine(store, post=lambda a, body: None)
+    engine = _engine(store)
     queue = engine.subscribe()
-    engine.on_snapshot(_snapshot(_T0, 99))
-    engine.on_snapshot(_snapshot(_T0 + _S, 101))
+    _drive(engine, [(_T0, 99), (_T0 + _S, 101)])
     assert queue.get_nowait()["alert"]["message"] == "hit 101.0"
 
 
 def test_second_without_a_trade_is_ignored(tmp_path: Path) -> None:
-    store = alerts.AlertStore(tmp_path / "a.toml")
+    store = AlertStore(tmp_path / "a.toml")
     store.add(_alert("only_once", bar_seconds=1))
-    engine = alerts.AlertEngine(store, post=lambda a, body: None)
-    engine.on_snapshot(_snapshot(_T0, 99))
-    engine.on_snapshot(_snapshot(_T0 + _S, None))
+    engine = _engine(store)
+    _drive(engine, [(_T0, 99), (_T0 + _S, None)])
     assert store.list()[0].triggered is False
 
 
+def test_alert_on_an_uncharted_pair_fires_on_the_forming_bar_close(tmp_path: Path) -> None:
+    # No `/ws/live` listener at all: the bus folds the pair because the engine watches it, and the
+    # 60 s bar's close (the latest traded second) is what crosses -- an untraded second between
+    # republishes the same close and cannot fire.
+    store = AlertStore(tmp_path / "a.toml")
+    store.add(_alert("once_per_bar", bar_seconds=60))
+    deliverer = _RecordingDeliverer()
+    engine = AlertEngine(store, deliverer)
+    _drive(engine, [(_T0, 99), (_T0 + _S, None), (_T0 + 2 * _S, 101), (_T0 + 3 * _S, None)])
+    _join_post_threads()
+    assert deliverer.posted == [f"{_IID} 101.0"]
+
+
+async def _idle(_redis_url: str) -> None:
+    await asyncio.Event().wait()  # stands in for a bus's Redis loop until the lifespan cancels it
+
+
+@pytest.mark.asyncio
+async def test_lifespan_attaches_the_engine_to_the_bus_and_detaches_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("ERROR_LEDGER_DIR", raising=False)
+    bus = LiveCandleBus(_NO_CATALOG)
+    monkeypatch.setattr(bus, "run", _idle)
+    monkeypatch.setattr(buses, "live_candle_bus", bus)
+    monkeypatch.setattr(buses.bus, "run", _idle)
+    store = AlertStore(tmp_path / "a.toml")
+    store.add(_alert("once_per_bar", bar_seconds=1, template="hit {{close}}"))
+    engine = _engine(store)
+    monkeypatch.setattr(alert_wiring, "engine", engine)
+    queue = engine.subscribe()
+
+    def feed(ts_ns: int, close: float) -> None:
+        bus.handle_batch([DydxSecondSnapshot.to_dict(_snapshot(ts_ns, close))])
+
+    async with app_module.lifespan(app_module.app):
+        feed(_T0, 99)
+        feed(_T0 + _S, 101)
+        assert queue.get_nowait()["alert"]["message"] == "hit 101.0"
+    feed(_T0 + 2 * _S, 99)  # a cross the detached engine never sees
+    _join_post_threads()
+    assert queue.empty()
+
+
 def _client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
-    monkeypatch.setattr(alerts, "store", alerts.AlertStore(tmp_path / "alerts.toml"))
+    store = AlertStore(tmp_path / "alerts.toml")
+    deliverer = NotifyDeliverer()
+    engine = AlertEngine(store, deliverer)
+    monkeypatch.setattr(alert_wiring, "store", store)
+    monkeypatch.setattr(alert_wiring, "engine", engine)
+    monkeypatch.setattr(alert_wiring, "service", AlertService(store, deliverer, engine))
     return TestClient(app_module.app)
 
 
@@ -257,29 +254,6 @@ def _join_post_threads() -> None:
             t.join(timeout=2)
 
 
-def test_deliver_sends_telegram_message_to_bot_api(monkeypatch: pytest.MonkeyPatch) -> None:
-    received: list[tuple[str, dict]] = []
-
-    class Handler(BaseHTTPRequestHandler):
-        def do_POST(self) -> None:
-            length = int(self.headers["Content-Length"])
-            received.append((self.path, json.loads(self.rfile.read(length))))
-            self.send_response(200)
-            self.end_headers()
-
-        def log_message(self, *args: object) -> None:
-            pass
-
-    server = HTTPServer(("127.0.0.1", 0), Handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    monkeypatch.setenv("TELEGRAM_API_BASE", f"http://127.0.0.1:{server.server_port}")
-    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "123:abc")
-    monkeypatch.setenv("TELEGRAM_CHAT_ID", "42")
-    alerts.deliver(_alert(webhook_url=""), "BTC crossed 65000")
-    server.shutdown()
-    assert received == [("/bot123:abc/sendMessage", {"chat_id": "42", "text": "BTC crossed 65000"})]
-
-
 def test_route_requires_a_delivery_channel(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     client = _client(tmp_path, monkeypatch)
     monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
@@ -287,3 +261,65 @@ def test_route_requires_a_delivery_channel(tmp_path: Path, monkeypatch: pytest.M
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "t")
     monkeypatch.setenv("TELEGRAM_CHAT_ID", "1")
     assert client.post("/api/alerts", json={**_BODY, "webhook_url": ""}).status_code == 201
+
+
+# --- Frozen payloads (AD-D12), recorded against the pre-24.3 `data_api/alerts.py` -----------------
+
+_PINNED_ID = "0123456789abcdef0123456789abcdef"
+_PINNED_CREATED_NS = 1_800_000_000_123_456_789
+
+
+def _pin_id_and_clock(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Only the id/clock `new_alert` reads are fixed; the route's own `time` (status) stays real.
+    monkeypatch.setattr(
+        alert_module, "uuid", SimpleNamespace(uuid4=lambda: SimpleNamespace(hex=_PINNED_ID))
+    )
+    monkeypatch.setattr(alert_module, "time", SimpleNamespace(time_ns=lambda: _PINNED_CREATED_NS))
+
+
+def test_api_alerts_json_is_pinned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _client(tmp_path, monkeypatch)
+    _pin_id_and_clock(monkeypatch)
+    expected = (
+        '{"instrument_id":"BTC-USD-PERP.DYDX","level":65000.0,"frequency":"once_per_bar",'
+        '"bar_seconds":60,"expires_at_ns":null,"template":"{{ticker}}",'
+        '"webhook_url":"https://example.com/h","id":"0123456789abcdef0123456789abcdef",'
+        '"status":"active","created_ns":1800000000123456789,"last_fired_ns":null}'
+    )
+    created = client.post("/api/alerts", json=_BODY)
+    assert created.status_code == 201
+    assert created.content == expected.encode()
+    listed = client.get("/api/alerts")
+    assert listed.content == f"[{expected}]".encode()
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    rejected = client.post("/api/alerts", json={**_BODY, "webhook_url": ""})
+    assert rejected.status_code == 422
+    assert rejected.content == (
+        b'{"detail":"no delivery channel: set a webhook URL or configure '
+        b'TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID"}'
+    )
+    missing = client.delete("/api/alerts/nope")
+    assert missing.content == b'{"detail":"alert not found"}'
+
+
+def test_toast_payload_is_pinned(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _pin_id_and_clock(monkeypatch)
+    store = AlertStore(tmp_path / "a.toml")
+    store.add(_alert("only_once", bar_seconds=1, template="{{ticker}} crossed {{close}}"))
+    engine = _engine(store)
+    queue = engine.subscribe()
+    _drive(engine, [(_T0, 99), (_T0 + _S, 101)])
+    _join_post_threads()
+    assert queue.get_nowait() == {
+        "channel": "alerts",
+        "alert": {"id": _PINNED_ID, "message": "BTC-USD-PERP.DYDX crossed 101.0"},
+    }
+    assert queue.empty()
+
+
+def test_toast_queue_bound_matches_the_views_queue_bound() -> None:
+    """
+    `alerting` copies `views.rankings_bus.QUEUE_MAX` by value (it may not import views); this is the
+    one place both are importable, so it pins them equal -- every `/ws/live` feed drops alike.
+    """
+    assert ALERTING_QUEUE_MAX == VIEWS_QUEUE_MAX

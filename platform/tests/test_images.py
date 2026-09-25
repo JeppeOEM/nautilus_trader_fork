@@ -431,7 +431,7 @@ def test_uvicorn_app_is_the_first_non_option_token() -> None:
 
 
 def test_closure_follows_a_shim_to_its_target() -> None:
-    assert "candles.application.queries" in import_closure("ml_signals.candle_store")
+    assert "alerting.application.engine" in import_closure("data_api.alerts")
 
 
 def test_closure_follows_a_literal_import_module_call() -> None:

@@ -2,7 +2,7 @@
 
 These rules govern all code under `platform/`: `collector_core/`, the venue collectors
 (`dydx_collector/`, `bybit_collector/`, `hyperliquid_collector/`), the contexts (`kernel/`,
-`observability/`, `candles/`, `views/`), `ml_signals/`, `ranking_engine/`, `data_api/` +
+`observability/`, `candles/`, `views/`, `alerting/`), `ml_signals/`, `ranking_engine/`, `data_api/` +
 `frontend/` and `bot_tui/`.
 `nautilus_trader` is consumed as a library only — never as a live runtime — in all of
 them. **Exception:** `platform/live_paper/` is a separate, structurally isolated module

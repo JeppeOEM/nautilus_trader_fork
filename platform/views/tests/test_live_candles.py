@@ -31,6 +31,7 @@ from kernel.second_snapshot import DydxSecondSnapshot
 from observability import error_ledger
 
 from nautilus_trader.model.identifiers import InstrumentId
+from views.live_candles import MAX_OBSERVED_BAR_SECONDS
 from views.live_candles import BarObserver
 from views.live_candles import LiveCandleBus
 
@@ -407,8 +408,12 @@ def test_a_venue_timed_row_published_late_lands_in_its_exchange_time_bucket() ->
 class _RecordingObserver:
     """A test double that is a `BarObserver` by shape alone -- it neither imports nor subclasses it."""
 
-    def __init__(self) -> None:
+    def __init__(self, watched: frozenset[tuple[str, int]] = frozenset()) -> None:
+        self.watched = watched
         self.seen: list[tuple[str, int, dict, int]] = []
+
+    def watched_bars(self) -> frozenset[tuple[str, int]]:
+        return self.watched
 
     def on_bar(self, instrument_id: str, bar_seconds: int, bar: dict, ts_ns: int) -> None:
         self.seen.append((instrument_id, bar_seconds, bar, ts_ns))
@@ -417,9 +422,9 @@ class _RecordingObserver:
 def test_bar_observer_is_satisfied_structurally_by_a_plain_class() -> None:
     """
     The port alerting implements in Story 24.3 without importing views' internals: any object with
-    this `on_bar` signature is one (mypy checks the annotated assignment below).
+    these `watched_bars`/`on_bar` signatures is one (mypy checks the annotated assignment below).
     """
-    observer: BarObserver = _RecordingObserver()
+    observer: BarObserver = _RecordingObserver(frozenset({(_IID, _BAR_SECONDS)}))
     bar = forming_bar([_snapshot(_BASE_NS, 100.0)], _BAR_SECONDS)
     assert bar is not None
 
@@ -427,8 +432,215 @@ def test_bar_observer_is_satisfied_structurally_by_a_plain_class() -> None:
 
     assert isinstance(observer, _RecordingObserver)
     assert observer.seen == [(_IID, _BAR_SECONDS, bar, _BASE_NS)]
+    assert observer.watched_bars() == frozenset({(_IID, _BAR_SECONDS)})
     protocol_params = list(inspect.signature(BarObserver.on_bar).parameters)
     double_params = list(inspect.signature(_RecordingObserver.on_bar).parameters)
     assert (
         double_params == protocol_params == ["self", "instrument_id", "bar_seconds", "bar", "ts_ns"]
     )
+    watched_protocol = inspect.signature(BarObserver.watched_bars)
+    watched_double = inspect.signature(_RecordingObserver.watched_bars)
+    assert list(watched_double.parameters) == list(watched_protocol.parameters) == ["self"]
+    assert watched_double.return_annotation == watched_protocol.return_annotation
+
+
+def _batch(*snapshots: DydxSecondSnapshot) -> list[dict]:
+    return [DydxSecondSnapshot.to_dict(s) for s in snapshots]
+
+
+def test_observer_only_pair_is_folded_and_observed_with_no_listener() -> None:
+    bus = LiveCandleBus(_NO_CATALOG)
+    observer = _RecordingObserver(frozenset({(_IID, _BAR_SECONDS)}))
+    bus.attach(observer)
+    first, second = _snapshot(_BASE_NS, 100.0), _snapshot(_BASE_NS + 1_000_000_000, 105.0)
+
+    bus.handle_batch(_batch(first, second))
+
+    assert bus._listeners == {}
+    assert observer.seen == [
+        (_IID, _BAR_SECONDS, forming_bar([first], _BAR_SECONDS), first.ts_event),
+        (_IID, _BAR_SECONDS, forming_bar([first, second], _BAR_SECONDS), second.ts_event),
+    ]
+
+
+def test_charted_and_observed_pair_hands_the_observer_the_published_bar() -> None:
+    bus = LiveCandleBus(_NO_CATALOG)
+    queue = bus.subscribe(_IID, _BAR_SECONDS)
+    observer = _RecordingObserver(frozenset({(_IID, _BAR_SECONDS)}))
+    bus.attach(observer)
+    snapshot = _snapshot(_BASE_NS, 100.0)
+
+    bus.handle_batch(_batch(snapshot))
+
+    published = queue.get_nowait()["bar"]
+    [(_iid, _bs, observed, ts_ns)] = observer.seen
+    assert observed is published  # the identical object, not an equal re-fold
+    assert ts_ns == snapshot.ts_event
+    assert queue.empty()
+
+
+def test_observer_is_not_called_for_a_pair_it_does_not_watch() -> None:
+    bus = LiveCandleBus(_NO_CATALOG)
+    queue = bus.subscribe(_IID, _BAR_SECONDS)
+    observer = _RecordingObserver(frozenset({(_IID, 300)}))
+    bus.attach(observer)
+
+    bus.handle_batch(_batch(_snapshot(_BASE_NS, 100.0)))
+
+    assert queue.get_nowait()["bar"]["c"] == 100.0
+    assert [(iid, bs) for iid, bs, _bar, _ts in observer.seen] == [(_IID, 300)]
+
+
+def test_untraded_second_starting_a_bucket_is_neither_published_nor_observed() -> None:
+    bus = LiveCandleBus(_NO_CATALOG)
+    observer = _RecordingObserver(frozenset({(_IID, _BAR_SECONDS)}))
+    bus.attach(observer)
+    untraded = DydxSecondSnapshot.from_dict(
+        {**DydxSecondSnapshot.to_dict(_snapshot(_BASE_NS, 100.0)), "close_price": None}
+    )
+
+    bus.handle_batch(_batch(untraded))
+
+    assert observer.seen == []
+
+
+def test_unwatched_pair_buffer_is_pruned_on_the_next_batch() -> None:
+    bus = LiveCandleBus(_NO_CATALOG)
+    observer = _RecordingObserver(frozenset({(_IID, _BAR_SECONDS)}))
+    bus.attach(observer)
+    bus.handle_batch(_batch(_snapshot(_BASE_NS, 100.0)))
+    assert (_IID, _BAR_SECONDS) in bus._buffers
+
+    observer.watched = frozenset()  # e.g. the alert was deleted, triggered or expired
+    bus.handle_batch(_batch(_snapshot(_BASE_NS + 1_000_000_000, 101.0)))
+
+    assert bus._buffers == {}
+    assert len(observer.seen) == 1
+
+
+def test_detached_observer_is_not_called_and_its_buffers_are_dropped() -> None:
+    bus = LiveCandleBus(_NO_CATALOG)
+    observer = _RecordingObserver(frozenset({(_IID, _BAR_SECONDS)}))
+    bus.attach(observer)
+    bus.handle_batch(_batch(_snapshot(_BASE_NS, 100.0)))
+
+    bus.detach(observer)
+    bus.handle_batch(_batch(_snapshot(_BASE_NS + 1_000_000_000, 101.0)))
+
+    assert bus._buffers == {}
+    assert len(observer.seen) == 1
+
+
+def test_last_unsubscribe_keeps_the_buffer_of_an_observed_pair() -> None:
+    bus = LiveCandleBus(_NO_CATALOG)
+    queue = bus.subscribe(_IID, _BAR_SECONDS)
+    observer = _RecordingObserver(frozenset({(_IID, _BAR_SECONDS)}))
+    bus.attach(observer)
+    first = _snapshot(_BASE_NS, 100.0)
+    bus.handle_batch(_batch(first))
+
+    bus.unsubscribe(_IID, _BAR_SECONDS, queue)
+    second = _snapshot(_BASE_NS + 1_000_000_000, 90.0)
+    bus.handle_batch(_batch(second))
+
+    key = (_IID, _BAR_SECONDS)
+    assert key not in bus._listeners
+    assert [r.ts_event for r in bus._buffers[key]] == [first.ts_event, second.ts_event]
+    assert observer.seen[-1][2] == forming_bar([first, second], _BAR_SECONDS)
+
+
+class _RaisingObserver:
+    def __init__(self, raise_in: str) -> None:
+        self.raise_in = raise_in
+
+    def watched_bars(self) -> frozenset[tuple[str, int]]:
+        if self.raise_in == "watched_bars":
+            raise RuntimeError("watched_bars broke")
+        return frozenset({(_IID, _BAR_SECONDS)})
+
+    def on_bar(self, instrument_id: str, bar_seconds: int, bar: dict, ts_ns: int) -> None:
+        raise RuntimeError("on_bar broke")
+
+
+@pytest.mark.parametrize("raise_in", ["watched_bars", "on_bar"])
+def test_raising_observer_is_ledgered_and_never_stops_the_others(raise_in: str) -> None:
+    error_ledger.reset()
+    bus = LiveCandleBus(_NO_CATALOG)
+    queue = bus.subscribe(_IID, _BAR_SECONDS)
+    bus.attach(_RaisingObserver(raise_in))
+    healthy = _RecordingObserver(frozenset({(_IID, _BAR_SECONDS)}))
+    bus.attach(healthy)
+
+    bus.handle_batch(_batch(_snapshot(_BASE_NS, 100.0)))
+
+    assert queue.get_nowait()["bar"]["c"] == 100.0
+    assert [bar["c"] for _iid, _bs, bar, _ts in healthy.seen] == [100.0]
+    assert error_ledger.counts() == {"live_candles.observer": 1}
+    assert f"_RaisingObserver.{raise_in}" in error_ledger.last_details()["live_candles.observer"]
+    error_ledger.reset()
+
+
+def test_observed_pair_with_a_non_positive_width_is_ledgered_and_never_folded() -> None:
+    """A bad width (a hand-edited `bar_seconds = 0`) must not raise out of the batch for everyone."""
+    error_ledger.reset()
+    bus = LiveCandleBus(_NO_CATALOG)
+    queue = bus.subscribe(_IID, _BAR_SECONDS)
+    observer = _RecordingObserver(frozenset({(_IID, 0), (_IID, _BAR_SECONDS)}))
+    bus.attach(observer)
+
+    bus.handle_batch(_batch(_snapshot(_BASE_NS, 100.0)))
+
+    assert queue.get_nowait()["bar"]["c"] == 100.0
+    assert [bs for _iid, bs, _bar, _ts in observer.seen] == [_BAR_SECONDS]
+    assert (_IID, 0) not in bus._buffers
+    assert error_ledger.counts() == {"live_candles.observer": 1}
+    assert "invalid pairs" in error_ledger.last_details()["live_candles.observer"]
+    error_ledger.reset()
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [(_IID, MAX_OBSERVED_BAR_SECONDS + 1), (_IID, True), (_IID, 1.5), (_IID,), _IID, (1, 60)],
+)
+def test_observed_malformed_or_oversized_pair_is_ledgered_and_never_folded(bad: object) -> None:
+    """A width past one day never rolls over (unbounded buffer); a malformed pair must not raise."""
+    error_ledger.reset()
+    bus = LiveCandleBus(_NO_CATALOG)
+    queue = bus.subscribe(_IID, _BAR_SECONDS)
+    observer = _RecordingObserver(frozenset({bad, (_IID, _BAR_SECONDS)}))  # type: ignore[arg-type]
+    bus.attach(observer)
+
+    bus.handle_batch(_batch(_snapshot(_BASE_NS, 100.0)))
+
+    assert queue.get_nowait()["bar"]["c"] == 100.0
+    assert [bs for _iid, bs, _bar, _ts in observer.seen] == [_BAR_SECONDS]
+    assert set(bus._buffers) == {(_IID, _BAR_SECONDS)}
+    assert error_ledger.counts() == {"live_candles.observer": 1}
+    error_ledger.reset()
+
+
+def test_observed_one_day_width_is_folded() -> None:
+    bus = LiveCandleBus(_NO_CATALOG)
+    observer = _RecordingObserver(frozenset({(_IID, MAX_OBSERVED_BAR_SECONDS)}))
+    bus.attach(observer)
+
+    bus.handle_batch(_batch(_snapshot(_BASE_NS, 100.0)))
+
+    assert [bs for _iid, bs, _bar, _ts in observer.seen] == [MAX_OBSERVED_BAR_SECONDS]
+
+
+def test_seed_publish_is_not_handed_to_observers(monkeypatch: pytest.MonkeyPatch) -> None:
+    import views.live_candles as lc
+
+    bus = LiveCandleBus(_NO_CATALOG)
+    now_ns = time.time_ns()
+    seeded = _snapshot(now_ns // 60_000_000_000 * 60_000_000_000, 100.0)
+    monkeypatch.setattr(lc, "query_second_ohlc", lambda *_a: [lc._second_row(seeded)])
+    queue = bus.subscribe(_IID, _BAR_SECONDS)
+    observer = _RecordingObserver(frozenset({(_IID, _BAR_SECONDS)}))
+    bus.attach(observer)
+
+    asyncio.run(bus.seed(_IID, _BAR_SECONDS))
+
+    assert queue.get_nowait()["bar"]["c"] == 100.0
+    assert observer.seen == []
