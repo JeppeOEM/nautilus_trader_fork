@@ -445,7 +445,9 @@ Three readers, all over that one fold, so they cannot disagree:
   traded bucket of the live 1 s rows it is given, as `{t (ms), o, h, l, c, v}`, or `None` when
   nothing traded in them. `views/live_candles.py`'s `LiveCandleBus` calls it per `snapshots:raw` tick over the
   in-progress bucket's buffer; that dict *is* the `/ws/live` `bar` payload. `bar_seconds` need
-  not be one the store keeps (the chart offers 10 m, 30 m, 1 w).
+  not be one the store keeps (the chart offers 10 m, 30 m, 1 w). The same dict is handed to every
+  attached `BarObserver` watching the pair -- the alert engine (§2.11) -- so an alert is evaluated
+  on the candle the chart draws, whether or not a chart is open.
 - **The archive-side read** — `candles.application.queries.candle_dicts_for_window(iid, start_ns,
   end_ns, bar_seconds, snapshot_rows_fn)`: the same fold over raw 1 s rows read from Parquet, for
   history older than the store's first bucket. Each dict carries `source: "raw_1s"`.
@@ -528,6 +530,30 @@ i.e. every column this file defines maps 1:1 to a field `ranking_engine` publish
 sign-coloring), not a new computation. The same module also holds the Technicals tab's per-coin
 values (`technicals_values`, Story 24.2): each column's latest value through the chart's own
 indicator dispatch over the chart's own candles -- no indicator or ranking math of its own.
+
+### 2.11 Price alerts (the `alerting/` context, Story 24.3, was `data_api/alerts.py`)
+
+**Store:** `alerts.toml` (`ALERTS_PATH`, default `platform/data_api/alerts.toml`; compose sets
+`/app/data_api/alerts.toml`, bind-mounted from `platform/data_api/alerts.toml`). Owner: the
+`alerting` context -- `alerting/infrastructure/toml_store.py`'s `AlertStore` is its only reader and
+writer (full rewrite on every change; a corrupt file raises at load rather than starting empty),
+constructed once per process by `data_api/alert_wiring.py`. Key set, frozen (AD-D12): one
+`[[alerts]]` table per alert with `id`, `instrument_id`, `level`, `frequency`
+(`once_per_bar_close` | `once_per_bar` | `only_once`, `alerting.domain.policy.FiringPolicy`),
+`bar_seconds`, `template`, `webhook_url` (may be empty), `created_ns`, optional `expires_at_ns`,
+`triggered`, optional `last_fired_ns` (TOML has no null: an absent optional key is `None`).
+
+**Evaluation:** on the forming bar's close `c` (§2.5) for the alert's own `(instrument_id,
+bar_seconds)`, at the producing second's `ts_event`, by `AlertEngine.on_bar` -- never on a raw
+snapshot or a bar folded anywhere else. A second with no trade republishes an unchanged close (or
+no bar at all at a bucket's start), so it can never fire. Run state (the previous price) is
+in-memory: the first bar after a restart cannot fire.
+
+**Delivery:** a fire is recorded in the store (a failed persist is ledgered at
+`alerting.store.persist`, the fire still happens), sent on the alert's channels through
+`observability.notify` (its webhook, and Telegram when `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` are
+set; a failed send is ledgered at `observability.notify.<transport>`), and toasted on `/ws/live` as
+`{"channel": "alerts", "alert": {"id", "message"}}` (frozen).
 
 ---
 

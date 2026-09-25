@@ -12,8 +12,11 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 """
-Story 20.1: `GET`/`POST /api/alerts`, `DELETE /api/alerts/{id}` -- CRUD over `data_api.alerts`'
-store. The write path is a sanctioned AD-F2 exception (config persistence), same category as
+Story 20.1: `GET`/`POST /api/alerts`, `DELETE /api/alerts/{id}` -- a thin adapter over
+`alerting.application.service.AlertService` (Story 24.3), reached as
+`data_api.alert_wiring.service`: this module validates the request, maps `NoDeliveryChannel` to 422
+and formats the response. The request/response JSON and every `detail` string are frozen (AD-D12).
+The write path is a sanctioned AD-F2 exception (config persistence), same category as
 `PUT /api/coin/{iid}/indicators`. `status` (active/triggered/expired) is derived per request so
 the Alerts list view (Story 20.3) needs no extra route.
 """
@@ -23,13 +26,16 @@ import time
 from typing import Literal
 from urllib.parse import urlparse
 
+from alerting.application.service import NoDeliveryChannel
+from alerting.domain.alert import Alert
+from alerting.domain.alert import status_of
 from fastapi import APIRouter
 from fastapi import HTTPException
 from fastapi import Response
 from pydantic import BaseModel
 from pydantic import field_validator
 
-from data_api import alerts
+from data_api import alert_wiring
 
 
 router = APIRouter()
@@ -79,7 +85,8 @@ class AlertCreate(BaseModel):
     @classmethod
     def _looks_like_url(cls, v: str) -> str:
         if not v:
-            return v  # Telegram-only alert; checked against the server config in create_alert
+            # Telegram-only alert; checked against the server config by AlertService.create.
+            return v
         parsed = urlparse(v)
         if parsed.scheme not in ("http", "https") or not parsed.netloc:
             raise ValueError("webhook_url must be an http(s) URL")
@@ -93,34 +100,30 @@ class AlertResponse(AlertCreate):
     last_fired_ns: int | None = None
 
 
-def _to_response(alert: alerts.Alert, now_ns: int) -> AlertResponse:
+def _to_response(alert: Alert, now_ns: int) -> AlertResponse:
     return AlertResponse(
         **{k: v for k, v in alert.__dict__.items() if k != "triggered"},
-        status=alerts.status_of(alert, now_ns),
+        status=status_of(alert, now_ns),
     )
 
 
 @router.get("/api/alerts")
 def list_alerts() -> list[AlertResponse]:
     now_ns = time.time_ns()
-    return [_to_response(a, now_ns) for a in alerts.store.list()]
+    return [_to_response(a, now_ns) for a in alert_wiring.service.list()]
 
 
 @router.post("/api/alerts", status_code=201)
 def create_alert(body: AlertCreate) -> AlertResponse:
-    if not body.webhook_url and not alerts.telegram_configured():
-        raise HTTPException(
-            status_code=422,
-            detail="no delivery channel: set a webhook URL or configure TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID",
-        )
-    alert = alerts.new_alert(**body.model_dump())
-    alerts.store.add(alert)
+    try:
+        alert = alert_wiring.service.create(**body.model_dump())
+    except NoDeliveryChannel as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     return _to_response(alert, time.time_ns())
 
 
 @router.delete("/api/alerts/{alert_id}", status_code=204)
 def delete_alert(alert_id: str) -> Response:
-    if not alerts.store.delete(alert_id):
+    if not alert_wiring.service.delete(alert_id):
         raise HTTPException(status_code=404, detail="alert not found")
-    alerts.engine.forget(alert_id)
     return Response(status_code=204)

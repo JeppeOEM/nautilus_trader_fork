@@ -26,7 +26,7 @@ reads without hand-rolled `asyncio.to_thread`.
 Every value served is computed by the `views` context (Story 24.2): this app and its routes
 format and transport only -- they pass their own env-derived paths in, build the pydantic
 response models, and map views' exceptions to HTTP status codes. The two Redis buses are
-constructed once in `data_api.buses`.
+constructed once in `data_api.buses`, the alerting instances once in `data_api.alert_wiring`.
 
 Bound to 127.0.0.1 only (SEC-01) -- see docker-compose.yml's `data_api`
 service (`network_mode: host` + `uvicorn --host 127.0.0.1`), no `ports:` entry.
@@ -48,7 +48,7 @@ from pydantic import BaseModel
 from views import chart_series
 from views import coin_detail
 
-from data_api import alerts
+from data_api import alert_wiring
 from data_api import buses
 from data_api.routes import alerts as alerts_routes
 from data_api.routes import candles as candles_routes
@@ -87,13 +87,21 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     every `/ws/live` connection read/subscribe against these same `buses.bus` /
     `buses.live_candle_bus` instances, never opening a per-request or
     per-websocket Redis connection of their own.
+
+    It is also the one place the alert engine is wired to the candle bus (Story 24.3): attached as
+    a `BarObserver` before the bus task starts, so no batch is folded without it, and detached on
+    shutdown.
     """
     error_ledger.start()
+    # Bound once so shutdown detaches exactly what startup attached, even if a test swaps them.
+    live_candle_bus, alert_engine = buses.live_candle_bus, alert_wiring.engine
+    live_candle_bus.attach(alert_engine)
     rankings_task = asyncio.create_task(buses.bus.run(REDIS_URL))
-    live_candles_task = asyncio.create_task(buses.live_candle_bus.run(REDIS_URL))
+    live_candles_task = asyncio.create_task(live_candle_bus.run(REDIS_URL))
     try:
         yield
     finally:
+        live_candle_bus.detach(alert_engine)
         rankings_task.cancel()
         live_candles_task.cancel()
         for task in (rankings_task, live_candles_task):
@@ -104,8 +112,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(docs_url=None, redoc_url=None, lifespan=lifespan)
-
-buses.live_candle_bus.observers.append(alerts.engine.on_snapshot)
 
 
 @app.get("/metrics/history/{symbol}")

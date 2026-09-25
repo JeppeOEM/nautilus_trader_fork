@@ -10,7 +10,7 @@ export interface AlertToast {
   message: string;
 }
 
-/** `{"channel": "alerts", "alert": {"id", "message"}}` -- pushed by `data_api/alerts.py` on fire. */
+/** `{"channel": "alerts", "alert": {"id", "message"}}` -- pushed by alerting's `AlertEngine` on fire. */
 function parseToast(data: string): AlertToast | null {
   try {
     const parsed: unknown = JSON.parse(data);

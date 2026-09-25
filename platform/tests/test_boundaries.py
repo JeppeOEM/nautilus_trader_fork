@@ -55,7 +55,7 @@ from _source_tree import story_statuses
 from _source_tree import unknown_or_done
 
 
-THIS_STORY = "24-2-views-read-models-and-reader-side-revalidation-removed"
+THIS_STORY = "24-3-alerting-context-as-forming-bar-observer"
 
 KERNEL = "kernel"
 OBSERVABILITY = "observability"
@@ -124,7 +124,6 @@ LEGACY_MODULE_TO_CONTEXT: dict[str, str] = {
     "collector_core.archive_gaps": ARCHIVE,
     "collector_core.backfill_bars": ARCHIVE,
     "collector_core.book_check": CAPTURE,
-    "collector_core.build_candles": CANDLES,  # Story 24.1 shim
     "collector_core.collector": CAPTURE,
     "collector_core.compare_klines": ARCHIVE,
     "collector_core.config": CAPTURE,
@@ -167,8 +166,6 @@ LEGACY_MODULE_TO_CONTEXT: dict[str, str] = {
     # --- ml_signals: no package default, so a new module there must be placed deliberately
     "ml_signals.__init__": RESEARCH,  # the package itself; see `_context_of`
     "ml_signals.book_features": VIEWS,  # Story 24.2 shim, as are the other VIEWS modules here
-    "ml_signals.candle_store": CANDLES,  # Story 24.1 shim
-    "ml_signals.candles": CANDLES,  # Story 24.1 shim
     "ml_signals.catalog_stats": VIEWS,  # split per symbol below
     "ml_signals.chart_data": VIEWS,
     "ml_signals.chart_indicator_config": VIEWS,
@@ -199,11 +196,10 @@ LEGACY_MODULE_TO_CONTEXT: dict[str, str] = {
     # --- ranking_engine / live_paper: one context each
     "ranking_engine": RANKING,
     "live_paper": BOTS,
-    # --- data_api: the interface adapter, hosting alerting until it moves (Story 24.3) and three
+    # --- data_api: the interface adapter, hosting the Story 24.3 shim of alerting and three
     # Story 24.2 shims of views modules
     "data_api": DATA_API,
-    "data_api.alerts": ALERTING,
-    "data_api.routes.alerts": ALERTING,
+    "data_api.alerts": ALERTING,  # Story 24.3 shim
     "data_api.live_candles": VIEWS,
     "data_api.redis_bus": VIEWS,
     "data_api.routes.paging": VIEWS,
@@ -239,9 +235,6 @@ LEGACY_SYMBOL_TO_CONTEXT: dict[tuple[str, str], str] = {
 # Cross-context edges the tree still has, (importer context, imported context) -> the story whose
 # `done` retires the edge. The sites named are the ones the retiring story removes.
 LEGACY_EDGES_UNTIL: dict[tuple[str, str], str] = {
-    # data_api/alerts.py uses views.rankings_bus's queue helpers; AlertEngine becomes a
-    # BarObserver wired by the composition root, with no alerting -> views import.
-    (ALERTING, VIEWS): "24-3-alerting-context-as-forming-bar-observer",
     # dYdX `_prune_loop` calls `prune_catalog.prune_instrument`; archive's RetentionPolicy becomes
     # the only code that deletes a catalog file.
     (CAPTURE, ARCHIVE): "25-1-archive-context-archiveday-one-deleter-one-rewriter",
@@ -559,6 +552,31 @@ def test_research_imports_nothing_from_data_api() -> None:
     assert (RESEARCH, DATA_API) not in LEGACY_EDGES_UNTIL
 
 
+# The non-test modules outside `alerting.infrastructure` that may import it (AD-D2: infrastructure
+# is imported only by a composition root). `data_api.alerts` is the Story 24.3 re-export shim, which
+# serves `AlertStore`/`ALERTS_PATH` at their old path until its REMOVE_AFTER story deletes it.
+ALERTING_INFRASTRUCTURE_IMPORTERS = frozenset({"data_api.alert_wiring", "data_api.alerts"})
+
+
+def _is_test_module(module: str) -> bool:
+    return _context_of(module) == TESTS or ".tests." in f".{module}."
+
+
+def test_alerting_infrastructure_is_imported_only_by_its_composition_root() -> None:
+    importers = {
+        imp.src
+        for imp in _IMPORTS
+        if imp.dst.startswith("alerting.infrastructure")
+        and not imp.src.startswith("alerting.infrastructure")
+        and not _is_test_module(imp.src)
+    }
+    assert importers - ALERTING_INFRASTRUCTURE_IMPORTERS == set(), (
+        "only data_api.alert_wiring constructs the alerting adapters (AD-D2)"
+    )
+    assert ALERTING_INFRASTRUCTURE_IMPORTERS - importers == set(), "stale entries: delete them"
+    assert "data_api.alert_wiring" in _KNOWN
+
+
 # nautilus_trader's value types are domain-safe; its runtime, persistence and adapters are not.
 _DOMAIN_SAFE_EXTERNAL = ("nautilus_trader.model", "nautilus_trader.core")
 # Pure array arithmetic with no I/O, no clock and no process state: a domain module may vectorise
@@ -646,9 +664,9 @@ def test_tree_walk_rejects_a_module_and_a_package_of_one_name(tmp_path: Path) ->
 
 def test_exemption_covers_only_one_unmoved_package_and_platform_tests() -> None:
     inside = Import("collector_core.collector", CAPTURE, "collector_core.nightly", "x", ARCHIVE, 1)
-    across = Import("collector_core.collector", CAPTURE, "ml_signals.candles", "x", CANDLES, 1)
-    interface = Import("data_api.alerts", ALERTING, "data_api.redis_bus", "x", VIEWS, 1)
-    guard = Import("tests.test_x", TESTS, "ml_signals.candles", "_x", CANDLES, 1)
+    across = Import("collector_core.collector", CAPTURE, "candles.domain.fold", "x", CANDLES, 1)
+    interface = Import("data_api.app", DATA_API, "data_api.alerts", "x", ALERTING, 1)
+    guard = Import("tests.test_x", TESTS, "candles.domain.fold", "_x", CANDLES, 1)
     assert _exempt(inside)
     assert not _exempt(across)
     assert not _exempt(interface)
