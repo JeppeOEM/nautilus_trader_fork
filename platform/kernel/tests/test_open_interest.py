@@ -17,7 +17,7 @@
 from decimal import Decimal
 from pathlib import Path
 
-from collector_core.open_interest import OpenInterest
+from kernel.open_interest import OpenInterest
 from nautilus_trader.core import nautilus_pyo3
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog

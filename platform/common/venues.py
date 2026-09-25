@@ -1,27 +1,39 @@
+# -------------------------------------------------------------------------------------------------
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
+#  https://nautechsystems.io
+#
+#  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
+#  You may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at https://www.gnu.org/licenses/lgpl-3.0.en.html
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+# -------------------------------------------------------------------------------------------------
 """
-Hand-maintained venue -> kind registry (Story 19.6). Deliberately not Nautilus's
-`Venue.is_dex()`: that only fires on a "<Chain>:<DexType>" venue string behind the `defi`
-feature, and none of dYdX/Bybit/Hyperliquid use that format, so it would answer wrongly for all
-three. A new venue is one more line here.
+Deprecated re-export shim (Story 23.2): `common.venues` moved to the shared kernel (kernel.venues).
+
+Pure re-export, defines nothing: every name here *is* the kernel object (a copy would leave two
+definitions to drift apart and break `is`/`except` identity). Import from the kernel instead, e.g.
+`from kernel.venues import market_kind`.
 """
 
-VENUE_KINDS: dict[str, str] = {"DYDX": "dex", "HYPERLIQUID": "dex", "BYBIT": "cex"}
+import warnings
+
+from kernel.venues import VENUE_KINDS
+from kernel.venues import market_kind
+from kernel.venues import venue_kind
 
 
-def venue_kind(venue: str) -> str:
-    """ "cex" | "dex", or "unknown" for a venue not yet registered (never raises)."""
-    return VENUE_KINDS.get(venue, "unknown")
+__all__ = ["VENUE_KINDS", "market_kind", "venue_kind"]
 
+REMOVE_AFTER = "24-2-views-read-models-and-reader-side-revalidation-removed"
 
-_PERP_SUFFIXES = {"PERP", "LINEAR", "INVERSE"}
-
-
-def market_kind(instrument_id: str) -> str:
-    """ "perp" | "spot" | "unknown" from the Nautilus id's symbol suffix (never raises)."""
-    symbol, dot, _venue = instrument_id.rpartition(".")
-    if not dot:
-        return "unknown"
-    suffix = symbol.rpartition("-")[2]
-    if suffix in _PERP_SUFFIXES:
-        return "perp"
-    return "spot" if suffix == "SPOT" else "unknown"
+# Attributed to the importing module, not to importlib's frames.
+warnings.warn(
+    f"common.venues moved to kernel.venues (Story 23.2); this shim is removed after {REMOVE_AFTER}",
+    DeprecationWarning,
+    skip_file_prefixes=("<frozen importlib",),
+)

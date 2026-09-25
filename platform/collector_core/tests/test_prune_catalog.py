@@ -20,8 +20,8 @@ import time
 from pathlib import Path
 
 import pytest
+from kernel.clocks import CatalogFileSpan
 from ml_signals import candle_store
-from ml_signals.catalog_stats import _stamp_to_ns
 
 from collector_core.archive_gaps import load_gaps
 from collector_core.prune_catalog import _filename_end_ns
@@ -262,9 +262,25 @@ def test_every_pruned_trade_file_is_recorded_as_an_archive_gap(tmp_path: Path) -
     passed = _trade_file(catalog, 8)
     _verify(candles, 8, "pass")
     assert main(["--catalog", str(catalog), "--candles-dir", str(candles), "--apply"]) == 0
-    first, _, last = passed.stem.partition("_")
+    span = CatalogFileSpan.from_path(passed)
     assert not passed.exists()
-    assert load_gaps(str(catalog), _IID) == [(_stamp_to_ns(first), _stamp_to_ns(last))]
+    assert load_gaps(str(catalog), _IID) == [(span.start_ns, span.end_ns)]
+
+
+def test_a_leaf_that_is_not_an_instrument_id_is_kept_and_reported(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """No venue can be parsed, so no candle store can prove its days: retained, never pruned."""
+    catalog, candles = tmp_path / "catalog", tmp_path / "candles"
+    candles.mkdir()
+    odd = _trade_file(catalog, 10, iid="notanid")
+    with caplog.at_level(logging.WARNING):
+        delete, kept = plan_trade_prune(str(catalog), str(candles), 7, time.time_ns())
+    assert delete == []
+    assert kept == [("notanid", _day(10), "unverified")]
+    assert "not an instrument id" in caplog.text
+    assert main(["--catalog", str(catalog), "--candles-dir", str(candles), "--apply"]) == 0
+    assert odd.exists()
 
 
 def test_an_unparseable_trade_file_name_is_skipped_not_deleted(tmp_path: Path) -> None:

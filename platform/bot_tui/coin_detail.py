@@ -27,7 +27,7 @@ from coin_detail_state.py's own snapshots:raw subscription.
 
 import base64
 
-from ml_signals.indicators import mid_price
+from kernel.indicators import mid_price
 
 
 # Verbatim UX copy (EXPERIENCE.md State Patterns: "Thin order book") -- keep exact,
@@ -113,7 +113,7 @@ def order_book_lines(
     levels rather than independently centered. Mid is read from the same book snapshot
     the levels themselves come from (not ranking_engine's own mid), so it can never
     disagree with the best bid/ask shown directly above/below it -- computed via
-    ml_signals.indicators.mid_price on that same local snapshot, not a reimplemented
+    kernel.indicators.mid_price on that same local snapshot, not a reimplemented
     formula (SSOT-01: mid price is a pure, single-snapshot derivation and must have
     exactly one implementation).
 

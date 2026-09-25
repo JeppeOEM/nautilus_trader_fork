@@ -40,6 +40,7 @@ archive existed; this tool is for pre-archive rows only.
 import argparse
 import logging
 
+from kernel.second_snapshot import DydxSecondSnapshot
 from ml_signals.catalog_stats import query_second_snapshots
 
 from collector_core.build_candles import all_instruments
@@ -47,7 +48,6 @@ from collector_core.build_candles import data_range_ns
 from collector_core.build_candles import day_chunks
 from collector_core.build_candles import rebuild_instrument
 from collector_core.integrity import ohlc_outside_book
-from collector_core.second_snapshot import DydxSecondSnapshot
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
 

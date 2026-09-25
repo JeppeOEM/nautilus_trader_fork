@@ -14,15 +14,15 @@
 # -------------------------------------------------------------------------------------------------
 """Self-check: each indicator's loop/branch logic against hand-computed expectations."""
 
-from ml_signals.indicators import Microprice
-from ml_signals.indicators import MultiLevelOBI
-from ml_signals.indicators import MultiLevelOFI
-from ml_signals.indicators import OnlineLogisticTrend
-from ml_signals.indicators import OrderFlowImbalance
-from ml_signals.indicators import mid_price
-from ml_signals.indicators import spread
-from ml_signals.indicators import trade_aggregates
-from ml_signals.indicators import volume_delta
+from kernel.indicators import Microprice
+from kernel.indicators import MultiLevelOBI
+from kernel.indicators import MultiLevelOFI
+from kernel.indicators import OnlineLogisticTrend
+from kernel.indicators import OrderFlowImbalance
+from kernel.indicators import mid_price
+from kernel.indicators import spread
+from kernel.indicators import trade_aggregates
+from kernel.indicators import volume_delta
 
 
 def test_uptrend_converges_above_half() -> None:

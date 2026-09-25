@@ -24,7 +24,7 @@ fallback only (DATA-03), `ohlc_outside_book` canary, candle-store feed, `snapsho
 publish, the `_second_loop` lag canary and the OBS-01 watchdog.
 
 Trades (story 22.13): every accepted `TradeTick` is both kept for the live second (folded once
-per sample by `collector_core.fold.fold_trades`) and archived raw to `data/trade_tick/<iid>/`
+per sample by `kernel.fold.fold_trades`) and archived raw to `data/trade_tick/<iid>/`
 with both clocks untouched (`ts_event` = venue, `ts_init` = arrival). The live snapshot is
 provisional and arrival-timed; `collector_core.rebuild_seconds` re-derives closed days from the
 archive on exchange time.
@@ -96,7 +96,7 @@ Known limit: a crash or restart gap is not backfilled, because `_last_trade_ts` 
 Upgrade path: seed it from the newest archived trade per instrument at startup.
 Known limit: seconds the stale-book gate skipped during an outage have no snapshot row, so their
 backfilled trades are rebuild orphans and those minutes can still mismatch the venue's klines.
-Known limit: a backfill never archives a trade older than `ARRIVAL_MARGIN_NS` (the rebuild's and
+Known limit: a backfill never archives a trade older than `MAX_TS_INIT_SKEW_NS` (the rebuild's and
 prune's `ts_init` window), so a dYdX outage longer than 5 minutes stays partly unrecovered and is
 reported as such. Upgrade path: a backfill-span marker the rebuild and prune read.
 Known limit: the one-sided alert compares trade arrival within a group only; a group where every
@@ -138,15 +138,22 @@ from typing import Any
 
 import pyarrow.parquet as pq
 import redis.asyncio as aioredis
+from kernel.catalog_files import query_second_ohlc
+from kernel.clocks import MAX_TS_INIT_SKEW_NS
+from kernel.clocks import NS_PER_S
+from kernel.clocks import READ_SPAN_MARGIN_NS
+from kernel.clocks import CatalogFileSpan
+from kernel.clocks import TwoClocks
+from kernel.fold import fold_trades
+from kernel.parquet_compat import apply_zstd_default
+from kernel.second_snapshot import BOOK_DEPTH
+from kernel.second_snapshot import DydxSecondSnapshot
 from ml_signals import candle_store
-from ml_signals.catalog_stats import _stamp_to_ns
-from ml_signals.catalog_stats import query_second_ohlc
 from observability import error_ledger
 from observability import notify
 from observability import watchdog
 
 from collector_core import trade_backfill
-from collector_core.archive_gaps import ARRIVAL_MARGIN_NS
 from collector_core.archive_gaps import record_gap
 from collector_core.book_check import EXACT_PRICE_TOLERANCE_LEVELS
 from collector_core.book_check import EXACT_SIZE_REL_TOLERANCE
@@ -157,10 +164,7 @@ from collector_core.config import CoreConfig
 from collector_core.feed import MAIN_FEED
 from collector_core.feed import REST_FEED_NAME
 from collector_core.feed import Feed
-from collector_core.fold import fold_trades
 from collector_core.integrity import ohlc_outside_book
-from collector_core.second_snapshot import BOOK_DEPTH
-from collector_core.second_snapshot import DydxSecondSnapshot
 from nautilus_trader.core import nautilus_pyo3
 from nautilus_trader.model.book import OrderBook
 from nautilus_trader.model.data import OrderBookDeltas
@@ -225,32 +229,41 @@ _VENUE_AHEAD_NS: int = 5_000_000_000
 # Venue mode: after a stall, at most this many overdue seconds are closed in one wake-up.
 # Known limit: a longer stall (host suspend) leaves the older seconds without a live row; their
 # trades are counted late and placed by the nightly rebuild. Upgrade path: close them from the
-# archive instead of from memory. Kept well under `catalog_stats._FILE_MARGIN_NS` (60 s): every
+# archive instead of from memory. Kept well under `kernel.clocks.READ_SPAN_MARGIN_NS` (60 s): every
 # caught-up row gets the wake-up's `ts_init`, so its `ts_init` trails its `ts_event` by up to
 # this + 1 + hold_back seconds, and readers only widen file spans by that margin.
 _MAX_CATCH_UP_SECONDS = 30
+
+
+def _check_skew_budget(hold_back_ns: int) -> None:
+    """
+    Refuse a hold-back whose rows' `ts_init` could sit further from their `ts_event` than the
+    readers widen a file span (`READ_SPAN_MARGIN_NS`): those rows would be silently skipped by
+    every reader. The skew has two independent directions -- a caught-up row trails by up to
+    catch-up + 1 s + hold-back, and a venue clock runs ahead by up to hold-back +
+    `_VENUE_AHEAD_NS` -- and the widening is symmetric, so each alone is the binding limit; the
+    sum is checked as a deliberately conservative ceiling on both. Checked at construction because
+    deployed configs are bind-mounted, so the committed `config.toml`s that
+    `platform/tests/test_skew_constants.py` reads are not the whole story.
+    """
+    worst = (_MAX_CATCH_UP_SECONDS + 1) * NS_PER_S + hold_back_ns + _VENUE_AHEAD_NS
+    if worst > READ_SPAN_MARGIN_NS:
+        raise ValueError(
+            f"hold_back_seconds {hold_back_ns / NS_PER_S} is too large: a row's ts_init could sit "
+            f"up to {worst / NS_PER_S} s from its ts_event (trailing plus leading skew), beyond the "
+            f"{READ_SPAN_MARGIN_NS // NS_PER_S} s the catalog readers widen a file span by "
+            "(kernel.clocks.READ_SPAN_MARGIN_NS)"
+        )
+
 
 # _second_loop staleness canary: if its wakeup arrives this much later than the configured
 # interval, the event loop was busy and the crossed-book detection/resync guard was silently
 # not running for that gap -- surface it rather than let it look like a quiet market.
 _SECOND_LOOP_LAG_WARN_NS: int = 2_000_000_000
 
-# Workaround: ParquetDataCatalog.write_data() (pinned nautilus_trader 1.229.0) has no
-# compression passthrough -- it calls pq.write_table() with pyarrow's "snappy" default,
-# and nautilus_trader/persistence/catalog/parquet.py can't be modified (fork rule). Patch
-# pyarrow's default here instead. `pq` is a shared module object (Python caches modules in
-# sys.modules), so this reaches nautilus's `import pyarrow.parquet as pq` call site too.
-# Ceiling: if a future nautilus_trader version passes `compression=` explicitly, this patch
-# is silently ignored -- revisit on version bump.
-_orig_write_table = pq.write_table
-
-
-def _write_table_zstd(*args: Any, **kwargs: Any) -> None:
-    kwargs.setdefault("compression", "zstd")
-    _orig_write_table(*args, **kwargs)
-
-
-pq.write_table = _write_table_zstd
+# Every file this process writes through `ParquetDataCatalog.write_data()` is zstd-compressed:
+# the one patch, shared with `backfill_bars` (see `kernel.parquet_compat` for why and its limit).
+apply_zstd_default()
 
 
 def quarantine_corrupt_parquet(catalog_path: str, instrument_ids: Iterable[str]) -> None:
@@ -298,8 +311,8 @@ def _mark_quarantined_trades(catalog_path: str, iid: str, path: Path) -> None:
     unparseable name marks nothing and is ledgered: that file was never written by the collector.
     """
     try:
-        first, _, last = path.stem.partition("_")
-        from_ns, to_ns = _stamp_to_ns(first), _stamp_to_ns(last) + ARRIVAL_MARGIN_NS
+        span = CatalogFileSpan.from_path(path)
+        from_ns, to_ns = span.start_ns, span.end_ns + MAX_TS_INIT_SKEW_NS
     except ValueError as e:
         error_ledger.record(
             "collector.corrupt_parquet", f"no span in {path.name}; no gap marked", e
@@ -520,7 +533,7 @@ class _BackfillReport:
         return (
             f"feed {self.feed} ({'; '.join(self.reasons)}): {self.instruments} instruments, "
             f"backfilled {self.backfilled}, already archived {self.already}, refused "
-            f"{self.refused} (older than the {ARRIVAL_MARGIN_NS // 1_000_000_000} s arrival "
+            f"{self.refused} (older than the {MAX_TS_INIT_SKEW_NS // 1_000_000_000} s arrival "
             f"margin), unrecoverable seconds {unrecoverable}, no baseline {self.no_baseline}, "
             f"errors {self.errors}"
         )
@@ -587,6 +600,7 @@ class Collector:
         # Venue mode (story 22.12) only -- every structure below stays empty in arrival mode.
         self._venue_time = config.book_time_source == "venue"
         self._hold_back_ns = int(config.hold_back_seconds * 1e9)
+        _check_skew_budget(self._hold_back_ns)
         # Held deltas per instrument, sorted by (ts_event, arrival seq); ts_init kept for the
         # overflow bound. `_pending_seq` makes every key unique, so deltas are never compared.
         self._pending_deltas: defaultdict[str, list[tuple[int, int, int, OrderBookDeltas]]] = (
@@ -1722,7 +1736,7 @@ class Collector:
                 trade_backfill.fetch_trades,
                 instrument,
                 last - _BACKFILL_LOOKBACK_NS,
-                fetch_ns - ARRIVAL_MARGIN_NS,
+                fetch_ns - MAX_TS_INIT_SKEW_NS,
                 self._config.environment,
                 fetch_ns,
             )
@@ -1757,7 +1771,7 @@ class Collector:
             if self._first_copy_feed(iid, trade_id) is not None:
                 report.already += 1
                 continue
-            if now_ns - trade.ts_event > ARRIVAL_MARGIN_NS:
+            if not TwoClocks(trade.ts_event, now_ns).within_skew(MAX_TS_INIT_SKEW_NS):
                 report.refused += 1  # invisible to the rebuild/prune window (archive invariant)
                 newest_refused = trade.ts_event  # oldest first: the last one is the newest
                 continue

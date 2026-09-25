@@ -74,7 +74,7 @@ export const INDICATORS: Indicator[] = [
       "Two implementations exist on purpose: a stateless function (<code>indicators.py:409</code>) for one-off reads, and a stateful <code>Microprice</code> <code>Indicator</code> class (<code>indicators.py:116</code>) with <code>.initialized</code> semantics for streaming contexts (chart replay, live_paper). Same formula, different call shape — never a second, independently-written formula.",
       'Is <b>not</b> a ranking-table column in either UI — only its derivative, <a data-nav="i:microprice_lean">Microprice Lean</a>, appears there indirectly (moved to history-only, see that page). Raw microprice is coin-detail only.',
     ],
-    refs: ["ml_signals/indicators.py:116 (Microprice class)", "ml_signals/indicators.py:409 (microprice() function)"],
+    refs: ["kernel/indicators.py:121 (Microprice class)", "kernel/indicators.py:421 (microprice() function)"],
     related: ["microprice_lean", "spread", "mid_price"],
   },
   {
@@ -101,7 +101,7 @@ export const INDICATORS: Indicator[] = [
       "None when either side of the book is empty (thin/no book) — never fabricated as zero.",
       "Displayed in basis points client-side on both the ranking table and coin detail (<code>bpsFromPriceUnits</code>), same normalization as Microprice Lean.",
     ],
-    refs: ["ml_signals/indicators.py:431"],
+    refs: ["kernel/indicators.py:444"],
     related: ["microprice", "mid_price"],
   },
   {
@@ -113,7 +113,7 @@ export const INDICATORS: Indicator[] = [
     notes: [
       "This is <em>not</em> microprice — no size weighting. It's the baseline every normalized bps/USD figure on the tables (spread, lean, CVD, volume delta) is scaled against.",
     ],
-    refs: ["ml_signals/indicators.py:440"],
+    refs: ["kernel/indicators.py:453"],
     related: ["microprice", "spread"],
   },
   {
@@ -126,7 +126,7 @@ export const INDICATORS: Indicator[] = [
       "Range 0–1: <b>1.0</b> = all visible depth on the bid, <b>0.5</b> = balanced, <b>0.0</b> = all ask. The ranking table colors it green above 0.5, red below.",
       "Three separate instances run per instrument — <code>obi_3</code>/<code>obi_5</code>/<code>obi_10</code> — not one computation resliced three ways. A thin top level can disagree sharply with the 10-level view during a large resting order a few ticks back.",
     ],
-    refs: ["ml_signals/indicators.py:234 (MultiLevelOBI)", "ranking_engine/engine.py:348"],
+    refs: ["kernel/indicators.py:239 (MultiLevelOBI)", "ranking_engine/engine.py:348"],
     related: ["ofi_raw", "ofi_z"],
   },
   {
@@ -140,7 +140,7 @@ export const INDICATORS: Indicator[] = [
       'Informational column only — <b>OFI never affects an instrument\'s rank.</b> The ranking table\'s sort key is exclusively 24h volume or the cross-sectional <a data-nav="i:vol_score">Volatility Score</a>, depending on Ranking Mode.',
       'The engine also runs a fourth, differently-configured OFI instance for the z-scored variant — see <a data-nav="i:ofi_z">OFI10z</a>, not a rescaling of this one.',
     ],
-    refs: ["ml_signals/indicators.py:269 (MultiLevelOFI)", "ranking_engine/engine.py:346"],
+    refs: ["kernel/indicators.py:274 (MultiLevelOFI)", "ranking_engine/engine.py:346"],
     related: ["ofi_z", "obi", "cvd"],
   },
   {
@@ -166,7 +166,7 @@ export const INDICATORS: Indicator[] = [
       "Raw base-token units server-side; normalized to USD client-side via <code>usdFromTokens(raw, price)</code> on both the ranking table and coin detail.",
       'Shares its rolling window with <a data-nav="i:volume_counts">buy/sell count and avg trade size</a> — all four come from the same <code>trade_aggregates()</code> reduction over the same 300-entry buffer.',
     ],
-    refs: ["ml_signals/indicators.py:454 (trade_aggregates)", "ranking_engine/engine.py:349"],
+    refs: ["kernel/indicators.py:467 (trade_aggregates)", "ranking_engine/engine.py:349"],
     related: ["volume_delta", "volume_counts"],
   },
   {
@@ -179,7 +179,7 @@ export const INDICATORS: Indicator[] = [
       '<span class="callout">Label note:</span> the ranking table\'s column header reads “Vol d 60s” — that “60s” describes the table\'s own poll/refresh interval, <em>not</em> the underlying window. The value itself is always exactly one snapshot tick (≈ 1 second), the fastest-updating field on the whole table. Don\'t confuse this with <a data-nav="i:cvd">CVD</a>, which genuinely does sum over 300 snapshots.',
       "Raw base-token units; normalized to USD client-side, same as CVD.",
     ],
-    refs: ["ml_signals/indicators.py:449"],
+    refs: ["kernel/indicators.py:462"],
     related: ["cvd"],
   },
   {
@@ -189,7 +189,7 @@ export const INDICATORS: Indicator[] = [
     tagline: "Trade counts per side, and mean trade size, over the same rolling window CVD uses.",
     formula: "avg_trade_size = (buy_volume + sell_volume) / (buy_count + sell_count), over the last 300 snapshots",
     notes: ["Not shown on the ranking table in either UI — coin-detail only, in the “order flow (~5m rolling)” group."],
-    refs: ["ml_signals/indicators.py:454 (trade_aggregates)"],
+    refs: ["kernel/indicators.py:467 (trade_aggregates)"],
     related: ["cvd"],
   },
   {
@@ -301,7 +301,7 @@ export const INDICATORS: Indicator[] = [
       "Deliberately minimal: a single online SGD step per bar, no batch retraining, no persistence across restarts. Documented in-code as a known limit with a named upgrade path (<code>sklearn.linear_model.SGDClassifier</code> + periodic refit) if it drifts on a long-running deployment.",
       "Never published to <code>rankings:live</code> — this is a strategy-internal signal, not a UI metric.",
     ],
-    refs: ["ml_signals/indicators.py:41–113"],
+    refs: ["kernel/indicators.py:46–118"],
     related: [],
   },
 ];

@@ -10,7 +10,7 @@ them to the engine alongside the snapshots. Fills happen at the snapshot's best 
 import tempfile
 from typing import Any
 
-from collector_core.second_snapshot import DydxSecondSnapshot
+from kernel.second_snapshot import DydxSecondSnapshot
 
 from nautilus_trader.backtest.engine import BacktestEngineConfig
 from nautilus_trader.backtest.node import BacktestDataConfig

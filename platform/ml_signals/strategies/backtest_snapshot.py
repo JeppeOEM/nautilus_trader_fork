@@ -28,7 +28,7 @@ generation was found to unreliably report an empty state even after a real fill 
 
 from decimal import Decimal
 
-from collector_core.second_snapshot import DydxSecondSnapshot
+from kernel.second_snapshot import DydxSecondSnapshot
 
 from nautilus_trader.backtest.engine import BacktestEngineConfig
 from nautilus_trader.backtest.node import BacktestDataConfig

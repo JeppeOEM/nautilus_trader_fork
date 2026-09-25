@@ -22,7 +22,8 @@ shared registry needed — each strategy owns its own indicator instance.
 
 from decimal import Decimal
 
-from ml_signals.indicators import OnlineLogisticTrend
+from kernel.indicators import OnlineLogisticTrend
+
 from nautilus_trader.config import StrategyConfig
 from nautilus_trader.model.data import Bar
 from nautilus_trader.model.data import BarType

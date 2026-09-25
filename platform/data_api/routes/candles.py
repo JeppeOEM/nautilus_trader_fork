@@ -28,14 +28,14 @@ and the `has_more` probe.
 
 from pathlib import Path
 
-from common.venues import market_kind
 from fastapi import APIRouter
 from fastapi import HTTPException
+from kernel import catalog_files
+from kernel.venues import market_kind
+from kernel.venues import venue_of
 from ml_signals import candle_store
-from ml_signals import catalog_stats as _catalog_stats
 from ml_signals.candles import candle_dicts_for_window
 from ml_signals.candles import is_valid_candle
-from ml_signals.venue import venue_of
 from observability import error_ledger
 from pydantic import BaseModel
 
@@ -78,7 +78,7 @@ router = APIRouter()
 
 def _catalog_plus_recent(instrument_id: str, start_ns: int, end_ns: int) -> list:
     """Catalog rows plus the live tail the collector has not flushed yet (see live_candles.RECENT_SECONDS)."""
-    rows = _catalog_stats.query_second_ohlc(CATALOG_PATH, instrument_id, start_ns, end_ns)
+    rows = catalog_files.query_second_ohlc(CATALOG_PATH, instrument_id, start_ns, end_ns)
     have = {r.ts_event for r in rows}
     tail = live_candles.live_candle_bus.recent_rows(instrument_id, start_ns, end_ns)
     return rows + [r for r in tail if r.ts_event not in have]
@@ -159,7 +159,7 @@ def _parquet_page(
             if c["t"] < before_ms and _checked(instrument_id, bar_seconds, c)
         ]
 
-    ranges = _catalog_stats.data_file_ranges(CATALOG_PATH, instrument_id)
+    ranges = catalog_files.data_file_ranges(CATALOG_PATH, instrument_id)
     span_ns = before_ns - _window_start_ns(before_ns, limit, bar_seconds)
     kept = paging.fetch_page(fetch, ranges, before_ns, span_ns)[-limit:]
     return kept, bool(kept) and paging.has_older_data(ranges, kept[0]["t"] * 1_000_000)
@@ -210,7 +210,7 @@ def candle_page(
     kept, store_has_more, coverage_ms = _store_page(instrument_id, before_ns, limit, bar_seconds)
     if store_has_more:
         return kept, True
-    ranges = _catalog_stats.data_file_ranges(CATALOG_PATH, instrument_id)  # a directory listing
+    ranges = catalog_files.data_file_ranges(CATALOG_PATH, instrument_id)  # a directory listing
     if coverage_ms is not None and not paging.has_older_data(ranges, coverage_ms * 1_000_000):
         return kept, False
     if len(kept) >= limit:

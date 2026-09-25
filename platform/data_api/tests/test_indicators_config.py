@@ -24,8 +24,8 @@ import json
 from pathlib import Path
 
 import pytest
-from collector_core.second_snapshot import DydxSecondSnapshot
 from fastapi.testclient import TestClient
+from kernel.second_snapshot import DydxSecondSnapshot
 from ml_signals.chart_indicator_config import IndicatorEntry
 from ml_signals.chart_indicator_config import load_config
 from ml_signals.chart_indicator_config import save_config

@@ -70,3 +70,8 @@ def test_fetch_orderbook_uses_the_injected_http_and_raises_on_ret_code() -> None
 
     with pytest.raises(RuntimeError, match="retCode=10001"):
         asyncio.run(fetch_orderbook("mainnet", "BTCUSDT-LINEAR.BYBIT", 50, http=rejected))
+
+
+def test_an_inverse_id_is_refused_not_requested() -> None:
+    with pytest.raises(ValueError, match="not wire-verified"):
+        _request("mainnet", "BTCUSD-INVERSE.BYBIT", 50)

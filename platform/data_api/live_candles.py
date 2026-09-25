@@ -36,10 +36,10 @@ from collections import deque
 from typing import Callable
 
 import redis.asyncio as aioredis
-from collector_core.second_snapshot import DydxSecondSnapshot
+from kernel.catalog_files import query_second_ohlc
+from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.second_snapshot import SecondOHLC
 from ml_signals.candles import candle_dicts_from_snapshots
-from ml_signals.catalog_stats import SecondOHLC
-from ml_signals.catalog_stats import query_second_ohlc
 from observability import error_ledger
 
 from data_api import settings

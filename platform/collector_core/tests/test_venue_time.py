@@ -24,6 +24,7 @@ import time
 from pathlib import Path
 
 import pytest
+from kernel.second_snapshot import DydxSecondSnapshot
 from ml_signals import candle_store
 from ml_signals.catalog_stats import query_second_snapshots
 from observability import error_ledger
@@ -36,7 +37,6 @@ from collector_core.config import core_config_from_dict
 from collector_core.feed import MAIN_FEED
 from collector_core.feed import Feed
 from collector_core.rebuild_seconds import rebuild_day
-from collector_core.second_snapshot import DydxSecondSnapshot
 from nautilus_trader.model.data import BookOrder
 from nautilus_trader.model.data import OrderBookDelta
 from nautilus_trader.model.data import OrderBookDeltas

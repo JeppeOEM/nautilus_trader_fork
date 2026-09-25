@@ -5,7 +5,7 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from collector_core.second_snapshot import DydxSecondSnapshot
+from kernel.second_snapshot import DydxSecondSnapshot
 from ml_signals.catalog_stats import query_second_snapshots
 
 from dydx_collector.normalize_snapshot_schema import files_needing_migration

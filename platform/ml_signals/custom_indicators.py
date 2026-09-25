@@ -35,9 +35,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from kernel.indicators import trade_aggregates
+
 from ml_signals.book_features import CancellationTracker
 from ml_signals.chart_indicators import Panel
-from ml_signals.indicators import trade_aggregates
 from nautilus_trader.model.data import OrderBookDelta
 
 
@@ -295,7 +296,8 @@ def _ofi_bucket_samples(window: ReplayWindow, ofi_window: int) -> dict[int, floa
     unchanged reuse). This call order is the opposite of Cancel Pressure's
     `CancellationTracker.update`, which needs PRE-delta best prices -- do not conflate the two.
     """
-    from ml_signals.indicators import OrderFlowImbalance
+    from kernel.indicators import OrderFlowImbalance
+
     from nautilus_trader.model.book import OrderBook
     from nautilus_trader.model.enums import BookType
     from nautilus_trader.model.identifiers import InstrumentId

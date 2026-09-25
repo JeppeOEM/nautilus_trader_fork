@@ -32,6 +32,7 @@ lists, never fails on, so the stale caller is caught here statically instead.
 """
 
 import ast
+import contextlib
 import importlib
 import importlib.util
 import re
@@ -230,6 +231,17 @@ def _resolve(dotted: str) -> object:
     raise ModuleNotFoundError(dotted)
 
 
+def _shipped(module: str) -> bool:
+    """
+    Whether this image ships `module`, found by its full dotted name: a stranger package that
+    merely shares the top-level name (`common`) must not make a shim look shipped.
+    """
+    try:
+        return importlib.util.find_spec(module) is not None
+    except ModuleNotFoundError:  # an absent parent package
+        return False
+
+
 def _require_shipped(module: str) -> None:
     """
     Skip, with the reason shown, a shim whose package this image does not ship.
@@ -237,9 +249,8 @@ def _require_shipped(module: str) -> None:
     The live_paper image deliberately ships no collector (AD-8): there a shim of an absent
     package cannot be imported. `make test` (collector image) checks every one.
     """
-    top = module.split(".")[0]
-    if importlib.util.find_spec(top) is None:
-        pytest.skip(f"{top} is not shipped in this image; checked by `make test`")
+    if not _shipped(module):
+        pytest.skip(f"{module} is not shipped in this image; checked by `make test`")
 
 
 def _import_fresh(module: str, monkeypatch: pytest.MonkeyPatch) -> object:
@@ -291,3 +302,32 @@ def test_scanner_reads_both_shim_shapes() -> None:
     moved = ast.parse("MOVED_NAMES_REMOVE_AFTER = 'k'\n_MOVED_NAMES = {'_old': 'new.mod.b'}\n")
     assert _shim_names("old.mod", whole) == [_ShimName("old.mod", "a", "new.mod.a", True)]
     assert _shim_names("old.mod", moved) == [_ShimName("old.mod", "_old", "new.mod.b", False)]
+
+
+# Kernel `Data` classes whose `__name__` is a persistence identifier (catalog directory name).
+_KERNEL_DATA_CLASSES = ("DydxSecondSnapshot", "OpenInterest")
+
+
+def test_each_kernel_data_class_is_registered_for_arrow_exactly_once() -> None:
+    """
+    Story 23.2: a shim that copied a class body would register a second class under the same name
+    (and its catalog directory). Import the kernel modules and every shim of them, then count.
+    """
+    from nautilus_trader.serialization.arrow.serializer import _SCHEMAS
+
+    for module in ("kernel.second_snapshot", "kernel.open_interest"):
+        importlib.import_module(module)
+    whole = {s.shim for s in _SHIM_NAMES if s.whole_module and s.target.startswith("kernel.")}
+    for shim in sorted(whole):
+        if not _shipped(shim):
+            continue  # not shipped in this image (live_paper); `make test` imports every one
+        fresh = shim not in sys.modules
+        with (
+            pytest.warns(DeprecationWarning, match="Story 23.2")
+            if fresh
+            else contextlib.nullcontext()
+        ):
+            importlib.import_module(shim)
+    names = [cls.__name__ for cls in _SCHEMAS]
+    counts = {name: names.count(name) for name in _KERNEL_DATA_CLASSES}
+    assert counts == dict.fromkeys(_KERNEL_DATA_CLASSES, 1)

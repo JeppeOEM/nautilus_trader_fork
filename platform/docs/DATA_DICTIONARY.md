@@ -7,7 +7,11 @@ against the `bmad` branch as of 2026-09-05.
 Every "error ledger" site named below (`collector.late_trade`, `collector.trade_backfill`,
 `collector.candle_store`, ...) is recorded through `observability.error_ledger.record`
 (Story 23.1; formerly `ml_signals.error_ledger`, now a deprecated re-export). The sites, their
-names and what they count are unchanged `[re-cited 2026-09-21: Story 23.1]`.
+names and what they count are unchanged `[re-cited 2026-09-21: Story 23.1]`, with one addition:
+`archive_gaps.inverted_span` counts a gap marker whose `from_ns > to_ns` — a backward wall-clock
+step between a lost trade's arrival and the flush. The marker is written as the ordered span and
+still protects its rows, so the count is the only signal that the clock stepped back
+`[added 2026-09-22: Story 23.2]`.
 
 ---
 
@@ -41,7 +45,7 @@ PyO3 bindings don't expose the fields another way.
   still be queued): `write_data` refuses a file whose `ts_init` interval touches an existing
   one, which would lose the next flush's whole batch. The shutdown flush writes everything.
 - **Live use:** each accepted trade is also kept for the current sample and folded once by
-  `collector_core.fold.fold_trades` (exact: `Quantity.raw` sums, `Price.raw` comparisons)
+  `kernel.fold.fold_trades` (exact: `Quantity.raw` sums, `Price.raw` comparisons)
   into that second's `DydxSecondSnapshot` (§1.7). Live is provisional -- arrival-timed on
   dYdX, exchange-timed on Bybit/Hyperliquid (story 22.12, §1.7) -- and
   `collector_core.rebuild_seconds` re-derives closed days from this archive (§6).
@@ -69,7 +73,7 @@ Unseen ids are archived with the venue's `ts_event` and `ts_init` = the time the
 (so `ts_init - ts_event` shows the recovery lag); they are **never** folded into the live second
 -- the nightly rebuild places them. One `collector.trade_backfill` ledger entry per backfill
 names the feed, the detections, and the counts: backfilled, already archived, refused (older
-than the 300 s `ARRIVAL_MARGIN_NS`, which the rebuild and prune depend on), unrecoverable
+than the 300 s `kernel.clocks.MAX_TS_INIT_SKEW_NS`, which the rebuild and prune depend on), unrecoverable
 seconds, no baseline, errors. dYdX's `collector:status` carries the per-instrument cumulative
 `trade_backfill`; Bybit and Hyperliquid report it in the per-flush log line.
 
@@ -193,11 +197,16 @@ Hyperliquid only** (dYdX bars are derived from its 1 s archive instead).
   `ml_signals/` or `ranking_engine/` reads `FundingRateUpdate` — dead data as of this
   writing.
 
-### 1.7 `DydxSecondSnapshot` (custom `Data` type, `collector_core/second_snapshot.py`)
+### 1.7 `DydxSecondSnapshot` (custom `Data` type, `kernel/second_snapshot.py`)
 
 The core microstructure record — a 1-second-sampled L2 book snapshot, **not** raw
 deltas. Per `platform/CLAUDE.md`'s Signal Architecture rule: store raw inputs, compute
-signals on read (SIGNAL-01).
+signals on read (SIGNAL-01). Moved from `collector_core/` to the shared kernel in Story 23.2
+with its class name, Arrow schema and `snapshots:raw` encoding unchanged (the catalog directory
+`custom_dydx_second_snapshot` derives from the class name; proven by
+`kernel/tests/test_pre_move_fixtures.py`). `DydxSecondSnapshot.from_dict` is the one parser of a
+`snapshots:raw` entry. The seven candle columns are read without the book by
+`kernel.catalog_files.query_second_ohlc` as `SecondOHLC` rows.
 
 - **Fields** (`second_snapshot.py`, schema at `DydxSecondSnapshot.schema()`):
   - `instrument_id`
@@ -208,7 +217,7 @@ signals on read (SIGNAL-01).
   - `open_price`, `high_price`, `low_price`, `close_price` — OHLC of actual executed
     trade prices within this second, `None` if no trade occurred. Live, each accepted
     `TradeTick` is kept in `Collector._second_trades` and folded once per sample by
-    `collector_core.fold.fold_trades` (the same exact fold the nightly rebuild uses; the
+    `kernel.fold.fold_trades` (the same exact fold the nightly rebuild uses; the
     float columns hold one conversion of an exact total). A closed day's rows are
     re-derived from the raw archive (§1.1) on exchange time by `rebuild_seconds` (§6);
     book columns and timestamps are never touched. `ml_signals/candles.py`'s
@@ -255,7 +264,10 @@ signals on read (SIGNAL-01).
   this Redis stream is what `ranking_engine` actually consumes live (§3); the Parquet
   copy is for backtest/historical replay.
 
-### 1.8 `OpenInterest` (custom `Data` type, `collector_core/open_interest.py`)
+### 1.8 `OpenInterest` (custom `Data` type, `kernel/open_interest.py`)
+
+Moved from `collector_core/` to the shared kernel in Story 23.2; class name (hence
+`custom_open_interest/`) and Arrow schema unchanged.
 
 - **Spot has none, by design** (Story 22.4): Bybit `-SPOT.BYBIT` instruments produce only book+trade
   snapshots -- Bybit's spot ticker has no bid/ask, funding or open interest, and mark/index price are
@@ -311,11 +323,12 @@ signals on read (SIGNAL-01).
 
 Everything here is computed **on read** from the raw types in §1 — nothing in this
 section is stored back to Parquet. Per SSOT-01/02 (`platform/CLAUDE.md`), stateless
-single-snapshot formulas live as plain functions in `indicators.py`; stateful/rolling
+single-snapshot formulas live as plain functions in `kernel/indicators.py` (the shared kernel,
+Story 23.2; `ml_signals.indicators` is a deprecated re-export); stateful/rolling
 indicators are classes, and for anything shown in a live UI, exactly one process
 (`ranking_engine`) is allowed to own the running instance (§3).
 
-### 2.1 Stateless, single-snapshot functions (`indicators.py`)
+### 2.1 Stateless, single-snapshot functions (`kernel/indicators.py`)
 
 All take one `DydxSecondSnapshot`-shaped dict (§1.7) and return a value with no memory
 of prior calls:
@@ -676,9 +689,13 @@ runs `collector_core.nightly`, each step its own process, stopping at the first 
 1. `rebuild_seconds --apply` -- rewrites the day's snapshot trade columns from the raw
    archive on `ts_event` (late trades move to their exchange second; the arrival row is
    cleared). Rows before the instrument's first archived trade keep live values
-   (`not covered`), and so do rows inside an archive-gap marker (`<catalog>/_archive_gaps/<iid>.jsonl`:
+   (`not covered`), and so do rows inside an archive-gap marker (`<catalog>/_archive_gaps/<iid>.jsonl`, format
+   `kernel.archive_markers`:
    a trade write that failed while its snapshots landed, a quarantined or a pruned trade file) --
-   the archive is known to miss trades their live values hold. Trades with no covered row are
+   the archive is known to miss trades their live values hold. A marker line that does not
+   parse, lacks a key, or holds a non-integer or inverted span makes the rebuild refuse that
+   instrument every night, naming the file and line, until the line is fixed by hand: guessing a
+   span could overwrite exactly the rows the marker protects. Trades with no covered row are
    counted (`orphan trades`). An instrument-day with two rows in one second or mixed schemas is
    refused and left untouched (exit 2, the chain continues).
 2. `consolidate_catalog --apply --venue --days 2` -- one file per recent closed day and data type.

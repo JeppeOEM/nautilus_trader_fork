@@ -5,5 +5,7 @@ As of Story 3.1, this module has zero imports from dydx_collector/ml_signals (co
 grep, not assumption): it depends only on nautilus_trader and the stdlib. AC1 permits
 depending on dydx_collector's/ml_signals' shared data types and pure utilities, never their
 stateful internals -- Story 3.2 will be the first to actually exercise that allowance, via
-ml_signals.indicators. Don't manufacture a dependency here that isn't needed yet.
+ml_signals.indicators. Don't manufacture a dependency here that isn't needed yet. Since Story 23.2
+the indicators, the venue-id parser and the performance metrics come from the shared kernel
+(`kernel/`), so live_paper imports nothing from ml_signals any more.
 """

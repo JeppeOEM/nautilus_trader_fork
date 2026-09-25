@@ -25,6 +25,7 @@ COPY platform/requirements.txt ./requirements.txt
 ARG PIP_INSECURE_ARGS=
 RUN pip install --no-cache-dir $PIP_INSECURE_ARGS -r requirements.txt
 COPY platform/observability ./observability
+COPY platform/kernel ./kernel
 COPY platform/collector_core ./collector_core
 COPY platform/common ./common
 COPY platform/dydx_collector ./dydx_collector

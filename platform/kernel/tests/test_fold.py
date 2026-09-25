@@ -17,8 +17,8 @@
 import random
 from decimal import Decimal
 
-from collector_core.fold import SecondTradeFields
-from collector_core.fold import fold_trades
+from kernel.fold import SecondTradeFields
+from kernel.fold import fold_trades
 from nautilus_trader.model.data import TradeTick
 from nautilus_trader.model.enums import AggressorSide
 from nautilus_trader.model.identifiers import InstrumentId

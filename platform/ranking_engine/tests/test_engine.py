@@ -21,7 +21,7 @@ import tempfile
 import time
 
 import pytest
-from collector_core.second_snapshot import DydxSecondSnapshot
+from kernel.second_snapshot import DydxSecondSnapshot
 from observability import error_ledger
 
 import ranking_engine.engine as engine

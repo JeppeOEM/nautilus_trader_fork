@@ -28,8 +28,8 @@ path so we can unit-test it without running the full asyncio collector.
 
 from pathlib import Path
 
-from collector_core.second_snapshot import BOOK_DEPTH
-from collector_core.second_snapshot import DydxSecondSnapshot
+from kernel.second_snapshot import BOOK_DEPTH
+from kernel.second_snapshot import DydxSecondSnapshot
 
 from dydx_collector.collector import _prune_delta_retention
 from dydx_collector.collector import _prune_interval_seconds

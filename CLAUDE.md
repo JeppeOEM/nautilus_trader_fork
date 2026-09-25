@@ -70,7 +70,7 @@ decode logic directly, so it gets battle-tested networking without the buggy `Da
   - Bybit: dropped on the linear-ticker WS path, so likewise a REST poll
     (`platform/bybit_collector/open_interest.py`). Bybit spot has no open interest at all.
   - Hyperliquid: forwarded over the WebSocket (`subscribe_open_interest`), so no poll.
-  - All land in the one shared `collector_core.open_interest.OpenInterest` custom `Data`
+  - All land in the one shared `kernel.open_interest.OpenInterest` custom `Data`
     type (story 22.3), registered for Arrow/Parquet serialization.
 - **Rate limits:** dYdX relies on the Rust WebSocket client's built-in subscribe throttle
   (2/sec) and reconnect handling; no custom throttling. Bybit and Hyperliquid needed no cap
@@ -105,7 +105,7 @@ decode logic directly, so it gets battle-tested networking without the buggy `Da
     WMA/Hull/Adaptive MA, RSI, MACD, Stochastics, CCI, ATR, Bollinger/Donchian/Keltner, OBV,
     VWAP, Ichimoku, more), `O(1)` per event via `update_raw()`. Reach for these before
     `pandas-ta` or a hand-rolled version. Only write a custom `Indicator` subclass (as
-    `platform/ml_signals/indicators.py` does for OFI/OBI/microprice) when no built-in covers it.
+    `platform/kernel/indicators.py` does for OFI/OBI/microprice) when no built-in covers it.
 - **Future-proof the data pipeline.** Avoid loading entire catalog slices into memory
   (e.g. `catalog.trade_ticks()` with no time bounds). Prefer `BacktestDataConfig`
   streaming, which also enables parameter sweeps and time-range filtering.
@@ -116,7 +116,7 @@ decode logic directly, so it gets battle-tested networking without the buggy `Da
 ### Signal architecture
 
 Signals are computed from 1-second sampled snapshots (`DydxSecondSnapshot`, now shared by
-every venue from `platform/collector_core/second_snapshot.py`), not from raw delta events. Store
+every venue from `platform/kernel/second_snapshot.py`), not from raw delta events. Store
 raw inputs, compute signals on read. The full rule (SIGNAL-01) and the stored/derived field
 split live in `platform/CLAUDE.md`.
 

@@ -16,20 +16,56 @@
 
 import glob
 import os
-from datetime import UTC
-from datetime import datetime
+import warnings
 from pathlib import Path
-from typing import NamedTuple
 
 import numpy as np
 import pandas as pd
-import pyarrow.parquet as pq
-from collector_core.second_snapshot import DydxSecondSnapshot
+from kernel import catalog_files
+from kernel import second_snapshot
+from kernel.clocks import READ_SPAN_MARGIN_NS
+from kernel.second_snapshot import DydxSecondSnapshot
 from observability import error_ledger
 
 from nautilus_trader.model.data import IndexPriceUpdate
 from nautilus_trader.model.data import MarkPriceUpdate
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
+
+
+# Story 23.2 moved the second-OHLC read helpers and the `SecondOHLC` row to the shared kernel.
+# Old names whose successor is the same object with the same call shape are served with a
+# DeprecationWarning until the story below is done; `_stamp_to_ns` changed shape (a whole file
+# stem -> a span) and raises, naming its successor.
+MOVED_NAMES_REMOVE_AFTER = "24-2-views-read-models-and-reader-side-revalidation-removed"
+_MOVED_NAMES: dict[str, str] = {
+    "SecondOHLC": "kernel.second_snapshot.SecondOHLC",
+    "data_file_ranges": "kernel.catalog_files.data_file_ranges",
+    "query_second_ohlc": "kernel.catalog_files.query_second_ohlc",
+    "second_ohlc_arrays": "kernel.catalog_files.second_ohlc_arrays",
+}
+_REPLACED_NAMES: dict[str, str] = {
+    "_stamp_to_ns": "kernel.clocks.CatalogFileSpan.from_stem(stem)",
+}
+
+_TARGET_MODULES = {"kernel.second_snapshot": second_snapshot, "kernel.catalog_files": catalog_files}
+
+
+def __getattr__(name: str) -> object:
+    if name in _REPLACED_NAMES:
+        raise AttributeError(
+            f"ml_signals.catalog_stats.{name} was replaced by {_REPLACED_NAMES[name]} (Story 23.2)"
+        )
+    if name not in _MOVED_NAMES:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    target = _MOVED_NAMES[name]
+    warnings.warn(
+        f"ml_signals.catalog_stats.{name} moved to {target} (Story 23.2); "
+        f"removed after {MOVED_NAMES_REMOVE_AFTER}",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    module, _, attr = target.rpartition(".")
+    return getattr(_TARGET_MODULES[module], attr)  # a KeyError is a table typo: loud
 
 
 # Order matters only for price_series()'s fallback preference below.
@@ -69,153 +105,24 @@ def query_second_snapshots(
     catalog = ParquetDataCatalog(catalog_path)
     # `query` bounds on ts_init, the window is ts_event: a venue-timed row (story 22.12) is
     # sampled up to 1 + hold_back s (a catch-up: more) after its ts_event, so the end is widened
-    # and the exact ts_event filter decides. ts_init >= ts_event, so the start needs no margin.
+    # and the exact ts_event filter decides.
+    # Known limit: the start is not widened, so a row whose venue clock ran ahead of ours
+    # (`ts_init < ts_event`, the second direction `kernel.clocks.READ_SPAN_MARGIN_NS` documents)
+    # is dropped when its ts_event is within READ_SPAN_MARGIN_NS of `start_ns`. The ceiling is one
+    # margin's worth of rows at the window's lower edge; `kernel.catalog_files.query_second_ohlc`
+    # widens both sides and keeps them, so the two readers can disagree there. The upgrade path is
+    # `start=start_ns - READ_SPAN_MARGIN_NS` (the exact ts_event filter below already makes it
+    # safe); held back here because this story moves read margins without changing them.
     results = catalog.query(
         data_cls=DydxSecondSnapshot,
         identifiers=[instrument_id],
         start=start_ns,
-        end=end_ns + _FILE_MARGIN_NS,
+        end=end_ns + READ_SPAN_MARGIN_NS,
     )
     # query() wraps custom Data subclasses in CustomData -- unwrap via .data to reach the
     # actual DydxSecondSnapshot (confirmed via direct introspection this session).
     snapshots = [r.data if hasattr(r, "data") else r for r in results]
     return [s for s in snapshots if start_ns <= s.ts_event <= end_ns]
-
-
-class SecondOHLC(NamedTuple):
-    """The per-second fields candle aggregation needs (duck-types `DydxSecondSnapshot` there)."""
-
-    ts_event: int
-    open_price: float | None
-    high_price: float | None
-    low_price: float | None
-    close_price: float | None
-    buy_volume: float
-    sell_volume: float
-
-
-_OHLC_COLUMNS = [
-    "ts_event",
-    "open_price",
-    "high_price",
-    "low_price",
-    "close_price",
-    "buy_volume",
-    "sell_volume",
-]
-# Catalog filenames span ts_init, rows are filtered on ts_event; ts_init trails ts_event by well
-# under this, so files this close to the window are read and the exact ts_event filter decides.
-_FILE_MARGIN_NS = 60_000_000_000
-
-
-def query_second_ohlc(
-    catalog_path: str, instrument_id: str, start_ns: int, end_ns: int
-) -> list[SecondOHLC]:
-    """
-    Per-second OHLC + volume rows in [start_ns, end_ns] (ts_event), read straight from the
-    catalog's Parquet files with only the seven columns candles need.
-
-    `query_second_snapshots` deserialises every row's 20-level book into Python objects through
-    the catalog decoder -- ~95% of a candle request's time (Story 21.5 profile) for fields
-    candles never look at. Same files, same rows, same values; just a column projection.
-    """
-    pattern = os.path.join(
-        catalog_path, "data", "custom_dydx_second_snapshot", instrument_id, "*.parquet"
-    )
-    rows: list[SecondOHLC] = []
-    for path in glob.glob(pattern):
-        start, _, end = Path(path).stem.partition("_")
-        if (
-            _stamp_to_ns(end) < start_ns - _FILE_MARGIN_NS
-            or _stamp_to_ns(start) > end_ns + _FILE_MARGIN_NS
-        ):
-            continue
-        # Files from before the OHLC fields existed lack those columns: they read as None (the
-        # candle path skips a second with no close), never as a crash.
-        names = pq.read_schema(path).names
-        present = [c for c in _OHLC_COLUMNS if c in names]
-        table = pq.read_table(
-            path,
-            columns=present,
-            filters=[("ts_event", ">=", start_ns), ("ts_event", "<=", end_ns)],
-        )
-        cols = {c: table.column(c).to_pylist() for c in present}
-        n = table.num_rows
-        rows.extend(
-            SecondOHLC(
-                *(
-                    cols[c][i] if c in cols else (0.0 if c.endswith("volume") else None)
-                    for c in _OHLC_COLUMNS
-                )
-            )
-            for i in range(n)
-        )
-    rows.sort(key=lambda r: r.ts_event)
-    return rows
-
-
-def second_ohlc_arrays(paths: list[str]) -> dict[str, np.ndarray]:
-    """
-    Read OHLC + volume columns of the given snapshot files as arrays.
-
-    Keys `ts_ms`, `o`, `h`, `l`, `c`, `v` (NaN = no trade that second); each file opened once. The
-    rebuild's read path: no per-row Python objects, no per-call directory scan.
-    """
-    tables = []
-    for path in paths:
-        pf = pq.ParquetFile(path)
-        present = [c for c in _OHLC_COLUMNS if c in pf.schema_arrow.names]
-        tables.append(pf.read(columns=present))
-    out = {k: np.empty(0, dtype=np.float64) for k in ("o", "h", "l", "c", "v")}
-    out["ts_ms"] = np.empty(0, dtype=np.int64)
-    if not tables:
-        return out
-    n = sum(t.num_rows for t in tables)
-    ts = np.concatenate([t.column("ts_event").to_numpy() for t in tables]).astype(np.int64)
-    out["ts_ms"] = ts // 1_000_000
-
-    def col(name: str, default: float) -> np.ndarray:
-        parts = [
-            t.column(name).to_numpy(zero_copy_only=False).astype(np.float64)
-            if name in t.column_names
-            else np.full(t.num_rows, default)
-            for t in tables
-        ]
-        return np.concatenate(parts) if parts else np.empty(0)
-
-    out["o"], out["h"], out["l"], out["c"] = (
-        col(k, np.nan) for k in ("open_price", "high_price", "low_price", "close_price")
-    )
-    out["v"] = col("buy_volume", 0.0) + col("sell_volume", 0.0)
-    assert len(out["ts_ms"]) == n
-    return out
-
-
-def _stamp_to_ns(stamp: str) -> int:
-    """`2026-06-30T17-17-34-103475440Z` (a catalog filename bound) -> epoch ns."""
-    date, _, clock = stamp.rstrip("Z").partition("T")
-    hour, minute, second, nanos = clock.split("-")
-    moment = datetime.strptime(f"{date} {hour}:{minute}:{second}", "%Y-%m-%d %H:%M:%S")
-    return int(moment.replace(tzinfo=UTC).timestamp()) * 1_000_000_000 + int(nanos)
-
-
-def data_file_ranges(catalog_path: str, instrument_id: str) -> list[tuple[int, int]]:
-    """
-    Return ascending (start_ns, end_ns) of every second-snapshot Parquet file for the instrument.
-
-    Read from the catalog's filenames -- a directory listing, no Parquet I/O. Lets paging routes know
-    where data actually exists instead of guessing with fixed-size probe windows (a data gap wider
-    than the window otherwise reads as "no more history").
-    """
-    ranges = []
-    for path in glob.glob(
-        os.path.join(
-            catalog_path, "data", "custom_dydx_second_snapshot", instrument_id, "*.parquet"
-        )
-    ):
-        start, _, end = Path(path).stem.partition("_")
-        ranges.append((_stamp_to_ns(start), _stamp_to_ns(end)))
-    return sorted(ranges)
 
 
 def _load(catalog: ParquetDataCatalog, data_type: str, instrument_id: str) -> list:

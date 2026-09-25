@@ -26,10 +26,11 @@ per-instrument when dydx_collector's store_order_book_deltas is opted in
 series for every instrument in the live catalog.
 """
 
+from kernel.indicators import microprice as calc_microprice
+
 from ml_signals.book_features import DepthProfile
 from ml_signals.book_features import book_imbalance
 from ml_signals.catalog_stats import query_second_snapshots
-from ml_signals.indicators import microprice as calc_microprice
 
 
 _LEVELS = 10

@@ -18,7 +18,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-from collector_core.open_interest import OpenInterest
+from kernel.open_interest import OpenInterest
 
 from bybit_collector.config import load_config
 from bybit_collector.open_interest import parse_open_interest

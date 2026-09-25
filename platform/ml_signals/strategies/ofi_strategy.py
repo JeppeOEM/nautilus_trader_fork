@@ -28,9 +28,9 @@ Exits: OFI crosses zero back (`exit_on_zero`), or trend flips against the positi
 from collections import deque
 from decimal import Decimal
 
-from collector_core.second_snapshot import DydxSecondSnapshot
+from kernel.indicators import MultiLevelOFI
+from kernel.second_snapshot import DydxSecondSnapshot
 
-from ml_signals.indicators import MultiLevelOFI
 from nautilus_trader.config import StrategyConfig
 from nautilus_trader.core.data import Data
 from nautilus_trader.indicators import ExponentialMovingAverage

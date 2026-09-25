@@ -38,16 +38,16 @@ from functools import partial
 from pathlib import Path
 
 import redis.asyncio as aioredis
-from common.venues import market_kind
-from common.venues import venue_kind
+from kernel.indicators import MultiLevelOBI
+from kernel.indicators import MultiLevelOFI
+from kernel.indicators import microprice as calc_microprice
+from kernel.indicators import mid_price as calc_mid_price
+from kernel.indicators import spread as calc_spread
+from kernel.indicators import trade_aggregates
+from kernel.venues import market_kind
+from kernel.venues import venue_kind
+from kernel.venues import venue_of
 from ml_signals import catalog_stats
-from ml_signals.indicators import MultiLevelOBI
-from ml_signals.indicators import MultiLevelOFI
-from ml_signals.indicators import microprice as calc_microprice
-from ml_signals.indicators import mid_price as calc_mid_price
-from ml_signals.indicators import spread as calc_spread
-from ml_signals.indicators import trade_aggregates
-from ml_signals.venue import venue_of
 from observability import error_ledger
 
 from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
@@ -126,7 +126,7 @@ _VOLATILITY = VolatilityTracker(lookback_seconds=RANKING_VOLATILITY_LOOKBACK_SEC
 _OFI_INDS: dict[str, MultiLevelOFI] = {}
 _OFI_RAW_INDS: dict[str, dict[int, MultiLevelOFI]] = {}
 _OBI_INDS: dict[str, dict[int, MultiLevelOBI]] = {}
-# No persistent Microprice() instance -- ml_signals.indicators.microprice() is a pure
+# No persistent Microprice() instance -- kernel.indicators.microprice() is a pure
 # function of one snapshot (no meaningful state to hold between calls), computed fresh
 # per rank-building pass in _fast_metrics_for below.
 

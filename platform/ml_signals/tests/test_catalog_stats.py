@@ -17,7 +17,7 @@
 import tempfile
 from unittest.mock import MagicMock
 
-from collector_core.second_snapshot import DydxSecondSnapshot
+from kernel.second_snapshot import DydxSecondSnapshot
 
 from ml_signals.catalog_stats import _overlapping_intervals
 from ml_signals.catalog_stats import find_gaps

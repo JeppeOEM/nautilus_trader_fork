@@ -57,7 +57,7 @@ from collector_core.book_check import BookSnapshot
 from collector_core.feed import MAIN_FEED
 from collector_core.feed import Feed
 from collector_core.feed import optional_feed_step
-from collector_core.open_interest import OpenInterest
+from kernel.open_interest import OpenInterest
 
 from hyperliquid_collector.book_snapshot import fetch_l2_book
 from nautilus_trader.core import nautilus_pyo3

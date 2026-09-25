@@ -21,28 +21,21 @@ answers with that `time` whenever no later block changed the book.
 """
 
 import asyncio
-import json
-import urllib.request
 from decimal import Decimal
 
 from collector_core.book_check import BookSnapshot
 from collector_core.book_check import Level
+from kernel.venue_http import http_json
+from kernel.venue_http import hyperliquid_info_url
+from kernel.venue_http import post_json_request
 
 
-_URLS = {
-    "mainnet": "https://api.hyperliquid.xyz/info",
-    "testnet": "https://api.hyperliquid-testnet.xyz/info",
-}
+_USER_AGENT = "nautilus-hl-collector/1.0"
 
 
 def _post_l2_book(environment: str, coin: str) -> dict:
-    request = urllib.request.Request(  # noqa: S310 (fixed https URL)
-        _URLS[environment],
-        data=json.dumps({"type": "l2Book", "coin": coin}).encode(),
-        headers={"Content-Type": "application/json", "User-Agent": "nautilus-hl-collector/1.0"},
-    )
-    with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310
-        return json.load(response)
+    body = {"type": "l2Book", "coin": coin}
+    return http_json(post_json_request(hyperliquid_info_url(environment), body, _USER_AGENT))
 
 
 def _levels(raw: list[dict]) -> list[Level]:

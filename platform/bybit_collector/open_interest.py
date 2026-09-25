@@ -19,29 +19,23 @@ Stdlib only, same as `dydx_collector.open_interest`.
 """
 
 import asyncio
-import json
 import time
-import urllib.request
 from decimal import Decimal
 
-from collector_core.open_interest import OpenInterest
+from kernel.open_interest import OpenInterest
+from kernel.venue_http import bybit_url
+from kernel.venue_http import get_request
+from kernel.venue_http import http_json
 
 from nautilus_trader.model.identifiers import InstrumentId
 
 
-_URLS = {
-    "mainnet": "https://api.bybit.com",
-    "testnet": "https://api-testnet.bybit.com",
-}
+_USER_AGENT = "nautilus-bybit-collector/1.0"
 
 
 def _fetch_tickers_json(environment: str) -> dict:
-    request = urllib.request.Request(  # noqa: S310 (fixed https URL)
-        f"{_URLS[environment]}/v5/market/tickers?category=linear",
-        headers={"User-Agent": "nautilus-bybit-collector/1.0"},
-    )
-    with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310
-        return json.load(response)
+    url = bybit_url(environment, "/v5/market/tickers?category=linear")
+    return http_json(get_request(url, _USER_AGENT))
 
 
 async def fetch_open_interest(environment: str) -> list[OpenInterest]:

@@ -47,10 +47,13 @@ import re
 import time
 from pathlib import Path
 
+from kernel.clocks import MAX_TS_INIT_SKEW_NS
+from kernel.clocks import CatalogFileSpan
+from kernel.venues import MalformedInstrumentId
+from kernel.venues import has_venue
+from kernel.venues import venue_of
 from ml_signals import candle_store
-from ml_signals.catalog_stats import _stamp_to_ns
 
-from collector_core.archive_gaps import ARRIVAL_MARGIN_NS
 from collector_core.archive_gaps import record_gap
 from collector_core.consolidate_catalog import MAINTENANCE_LOCK_NAME
 from collector_core.consolidate_catalog import maintenance_lock
@@ -100,7 +103,7 @@ def prune(
             continue
 
         for parquet_file in sorted(type_dir.rglob("*.parquet")):
-            if venue is not None and not parquet_file.parent.name.endswith(f".{venue}"):
+            if venue is not None and not has_venue(parquet_file.parent.name, venue):
                 continue
             end_str = _filename_end_ns(parquet_file)
             if end_str is None:
@@ -178,8 +181,8 @@ def _day_text(day: int) -> str:
 
 def _file_span(path: Path) -> tuple[int, int]:
     """Return the file name's `ts_init` span (ns); `ValueError` if the catalog did not write it."""
-    first, _, last = path.stem.partition("_")
-    return _stamp_to_ns(first), _stamp_to_ns(last)
+    span = CatalogFileSpan.from_path(path)
+    return span.start_ns, span.end_ns
 
 
 def _file_days(path: Path) -> range:
@@ -190,7 +193,7 @@ def _file_days(path: Path) -> range:
     """
     start, end = _file_span(path)
     first_day = start // _DAY_NS
-    if start - first_day * _DAY_NS < ARRIVAL_MARGIN_NS:
+    if start - first_day * _DAY_NS < MAX_TS_INIT_SKEW_NS:
         first_day -= 1
     return range(first_day, end // _DAY_NS + 1)
 
@@ -208,7 +211,11 @@ def _parsed_files(leaf: Path) -> dict[Path, range]:
 
 def _leaf_statuses(candles_dir: Path, iid: str, days: set[int]) -> dict[int, str | None]:
     """Each day's `verified_days` status in that venue's candle store (None: unverified)."""
-    venue = iid.rpartition(".")[2].lower()
+    try:
+        venue = venue_of(iid).lower()
+    except MalformedInstrumentId:
+        logger.warning("  skipped %s: not an instrument id, its files are never pruned", iid)
+        return dict.fromkeys(days)
     with candle_store.connect_ro(str(candles_dir / f"candles_{venue}.db")) as db:
         if db is None:
             return dict.fromkeys(days)
@@ -230,7 +237,7 @@ def plan_trade_prune(
     delete: list[Path] = []
     kept: set[tuple[str, str, str]] = set()
     for leaf in sorted((Path(catalog_path) / "data" / TRADE_TICK).glob("*")):
-        if not leaf.is_dir() or (venue is not None and not leaf.name.endswith(f".{venue}")):
+        if not leaf.is_dir() or (venue is not None and not has_venue(leaf.name, venue)):
             continue
         files = _parsed_files(leaf)
         old = {f: days for f, days in files.items() if days[-1] < old_before}

@@ -3,7 +3,7 @@ from pathlib import Path
 from collector_core.build_candles import rebuild_instrument
 from collector_core.repair_catalog import find_impossible_snapshots
 from collector_core.repair_catalog import repair_instrument
-from collector_core.second_snapshot import DydxSecondSnapshot
+from kernel.second_snapshot import DydxSecondSnapshot
 from ml_signals import candle_store
 from ml_signals.catalog_stats import query_second_snapshots
 

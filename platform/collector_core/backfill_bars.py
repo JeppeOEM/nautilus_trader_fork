@@ -82,7 +82,7 @@ from datetime import datetime
 from datetime import timedelta
 from typing import Any
 
-import pyarrow.parquet as pq
+from kernel.parquet_compat import apply_zstd_default
 
 from nautilus_trader.core import nautilus_pyo3
 from nautilus_trader.core.datetime import unix_nanos_to_iso8601
@@ -134,20 +134,9 @@ _SUPPORTED_SPECS: dict[str, dict[str, frozenset[int]]] = {
     "HYPERLIQUID": _SHARED_STEPS,
 }
 
-# Same workaround as `collector.py`: `ParquetDataCatalog.write_data()` (pinned nautilus_trader
-# 1.229.0) has no compression passthrough and `parquet.py` cannot be modified (FORK-01), so patch
-# pyarrow's default. The name check makes this a no-op when `collector.py` was imported **first**;
-# `collector.py` has no guard of its own, so importing it *after* this module still double-wraps
-# (harmless -- `setdefault` is idempotent -- but do not read the guard as covering both orders).
-_orig_write_table = pq.write_table
-
-if _orig_write_table.__name__ != "_write_table_zstd":
-
-    def _write_table_zstd(*args: Any, **kwargs: Any) -> None:
-        kwargs.setdefault("compression", "zstd")
-        _orig_write_table(*args, **kwargs)
-
-    pq.write_table = _write_table_zstd
+# Bars written here are zstd-compressed, like the collector's own files: the one patch, shared with
+# `collector.py` and idempotent in either import order (see `kernel.parquet_compat`).
+apply_zstd_default()
 
 
 _Fetcher = Callable[[BarType, int, int], Awaitable[list[Bar]]]

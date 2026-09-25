@@ -12,9 +12,9 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
-"""Tests for ml_signals.performance_metrics (financial calculations, platform/CLAUDE.md TEST-01)."""
+"""Tests for kernel.performance_metrics (financial calculations, platform/CLAUDE.md TEST-01)."""
 
-from ml_signals import performance_metrics
+from kernel import performance_metrics
 
 
 _NS_PER_DAY = 24 * 3600 * 1_000_000_000

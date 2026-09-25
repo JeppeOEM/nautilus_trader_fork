@@ -23,7 +23,7 @@ Live, a snapshot row holds the trades that *arrived* since the previous sample, 
 job re-derives every row of the day from `data/trade_tick/<iid>/` on exchange time: a trade whose
 `ts_event` lies in `[S, S+1 s)` belongs to the row whose `ts_event // 1 s == S`, whatever second it
 arrived in (late trades, boundary misattribution: audit D-31/D-44). The fold is the live one,
-`collector_core.fold.fold_trades`. Only the eight trade columns (`buy_volume`, `sell_volume`,
+`kernel.fold.fold_trades`. Only the eight trade columns (`buy_volume`, `sell_volume`,
 `buy_count`, `sell_count`, `open/high/low/close_price`) of rows inside the day change; book
 columns, `ts_event` and `ts_init` never do.
 
@@ -76,20 +76,20 @@ from typing import Any
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
-from ml_signals.catalog_stats import _stamp_to_ns
+from kernel.archive_markers import in_gap
+from kernel.catalog_files import files_by_day
+from kernel.clocks import MAX_TS_INIT_SKEW_NS
+from kernel.clocks import CatalogFileSpan
+from kernel.fold import SecondTradeFields
+from kernel.fold import fold_trades
 from observability import error_ledger
 
-from collector_core.archive_gaps import ARRIVAL_MARGIN_NS
-from collector_core.archive_gaps import in_gap
 from collector_core.archive_gaps import load_gaps
-from collector_core.build_candles import _files_by_day
 from collector_core.build_candles import _parse_date_ns
 from collector_core.build_candles import all_instruments
 from collector_core.build_candles import venue_instruments
 from collector_core.consolidate_catalog import MAINTENANCE_LOCK_NAME
 from collector_core.consolidate_catalog import maintenance_lock
-from collector_core.fold import SecondTradeFields
-from collector_core.fold import fold_trades
 from nautilus_trader.model.data import TradeTick
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
@@ -99,9 +99,9 @@ logger = logging.getLogger(__name__)
 _S_NS = 1_000_000_000
 _HOUR_NS = 3_600 * _S_NS
 _DAY_NS = 86_400 * _S_NS
-# Trades are queried on `ts_init` (what the catalog filters on) and kept on `ts_event`; the live age
-# filter (`stale_trade_seconds`, 10 s) bounds `ts_init - ts_event`, so a 5 minute margin is ample.
-_TS_INIT_MARGIN_NS = ARRIVAL_MARGIN_NS
+# Trades are queried on `ts_init` (what the catalog filters on) and kept on `ts_event`; every writer
+# keeps `ts_init - ts_event` within the one skew bound, so the window is exactly that bound.
+_TS_INIT_MARGIN_NS = MAX_TS_INIT_SKEW_NS
 _TMP_SUFFIX = ".rebuild.tmp"
 _TRADE_COLUMNS = (
     "buy_volume",
@@ -164,7 +164,7 @@ def covered_from(catalog_path: str, iid: str) -> int | None:
     `stale_trade_seconds`, 10 s). Upgrade path: record the archive's start in the catalog.
     """
     paths = glob.glob(os.path.join(catalog_path, "data", "trade_tick", iid, "*.parquet"))
-    starts = {p: _stamp_to_ns(Path(p).stem.partition("_")[0]) for p in paths}
+    starts = {p: CatalogFileSpan.from_path(p).start_ns for p in paths}
     if not starts:
         return None
     earliest = min(starts.values())
@@ -223,10 +223,9 @@ def _row_seconds(files: list[str], lo: int, hi: int, label: str) -> dict[int, in
 def trade_files(catalog_path: str, iid: str) -> list[tuple[str, int, int]]:
     """Return (path, first ts_init, last ts_init) of each of the instrument's trade files."""
     paths = glob.glob(os.path.join(catalog_path, "data", "trade_tick", iid, "*.parquet"))
-    spans = [Path(p).stem.partition("_") for p in paths]
+    spans = [CatalogFileSpan.from_path(p) for p in paths]
     return sorted(
-        (path, _stamp_to_ns(first), _stamp_to_ns(last))
-        for path, (first, _, last) in zip(paths, spans, strict=True)
+        (path, span.start_ns, span.end_ns) for path, span in zip(paths, spans, strict=True)
     )
 
 
@@ -347,7 +346,7 @@ def rebuild_day(catalog_path: str, iid: str, day_start_ns: int, apply: bool) -> 
     label = f"{iid} {_day_text(day_start_ns)}"
     report = DayReport(iid)
     files = sorted(
-        _files_by_day(catalog_path, iid, day_start_ns, day_start_ns + _DAY_NS - 1).get(
+        files_by_day(catalog_path, iid, day_start_ns, day_start_ns + _DAY_NS - 1).get(
             day_start_ns // _DAY_NS, []
         )
     )

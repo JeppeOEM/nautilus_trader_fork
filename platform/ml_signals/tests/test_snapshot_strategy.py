@@ -55,7 +55,7 @@ that same deferred-work.md entry.
 
 from decimal import Decimal
 
-from collector_core.second_snapshot import DydxSecondSnapshot
+from kernel.second_snapshot import DydxSecondSnapshot
 
 from ml_signals.strategies.snapshot_strategy import SnapshotStrategy
 from ml_signals.strategies.snapshot_strategy import SnapshotStrategyConfig

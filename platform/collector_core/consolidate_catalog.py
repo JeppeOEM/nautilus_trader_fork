@@ -68,7 +68,8 @@ from pathlib import Path
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
-from ml_signals.catalog_stats import _stamp_to_ns
+from kernel.clocks import CatalogFileSpan
+from kernel.venues import has_venue
 from observability import error_ledger
 
 from nautilus_trader.persistence.catalog.parquet import _timestamps_to_filename
@@ -141,15 +142,13 @@ def leaf_dirs(
         and t.name not in _NEVER_CONSOLIDATED
         and (not data_types or t.name in data_types)
         for d in t.iterdir()
-        if d.is_dir()
-        and (venue is None or d.name.endswith(f".{venue}"))
-        and any(d.glob("*.parquet"))
+        if d.is_dir() and (venue is None or has_venue(d.name, venue)) and any(d.glob("*.parquet"))
     )
 
 
 def _file_span(path: Path) -> tuple[int, int]:
-    first, _, last = path.stem.partition("_")
-    return _stamp_to_ns(first), _stamp_to_ns(last)
+    span = CatalogFileSpan.from_path(path)
+    return span.start_ns, span.end_ns
 
 
 def closed_days_needing_work(

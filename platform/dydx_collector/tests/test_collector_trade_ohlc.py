@@ -14,7 +14,7 @@
 # -------------------------------------------------------------------------------------------------
 """
 Tests for the collector's per-second trade tracking on dYdX: accepted trades are kept for the
-live second (`_second_trades`, folded once per sample by `collector_core.fold.fold_trades`) and
+live second (`_second_trades`, folded once per sample by `kernel.fold.fold_trades`) and
 archived raw (`_buffer[(TradeTick, iid)]`, story 22.13 -- the reverse of the earlier retention
 cutover that discarded them).
 """
@@ -22,7 +22,7 @@ cutover that discarded them).
 import time
 from pathlib import Path
 
-from collector_core.fold import fold_trades
+from kernel.fold import fold_trades
 
 from dydx_collector.collector import DydxCollector
 from dydx_collector.config import DydxConfig

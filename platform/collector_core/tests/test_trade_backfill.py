@@ -324,3 +324,12 @@ def test_a_row_without_a_valid_time_is_rejected_alone() -> None:
     fetched = fetch_trades(_HL, 0, 0, "mainnet", _TS_INIT, _Recorder(payload))
     assert len(fetched.trades) == 9
     assert fetched.rejected[0].endswith("no valid trade time")
+
+
+def test_an_inverse_bybit_id_is_refused_before_any_request() -> None:
+    """Only linear and spot recent-trade depths are wire-verified (22.14): inverse is not guessed."""
+    http = _Recorder()
+    inverse = _instrument("BTCUSD-INVERSE.BYBIT", "BTCUSD", 1, 0)
+    with pytest.raises(BackfillError, match="not wire-verified"):
+        fetch_trades(inverse, 0, 0, "mainnet", _TS_INIT, http)
+    assert http.requests == []

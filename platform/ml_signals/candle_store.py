@@ -101,7 +101,7 @@ def _fold(rows: Iterable[Any]) -> dict[tuple[int, int], list]:
     ts_event (ns), open/high/low/close_price (None = no trade that second) and buy_volume/
     sell_volume: a `DydxSecondSnapshot` or a `SecondOHLC`. Any order.
 
-    This folds seconds into bars; trades into seconds is `collector_core.fold.fold_trades`.
+    This folds seconds into bars; trades into seconds is `kernel.fold.fold_trades`.
     """
     rows = list(rows)
     if not rows:
