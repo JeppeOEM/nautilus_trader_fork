@@ -134,6 +134,21 @@ patterns. Read it before changing anything there.
 - Absolute imports, one import per line, `nautilus_trader` as known first-party.
 - All source files carry the LGPL-3.0 header; the pre-commit hook checks the year.
 
+## Running Python in a git worktree
+
+A fresh worktree (e.g. any `.bmad-loop/runs/*/worktrees/*`) has its own empty `target/`, so
+the first `uv run pytest`/`uv run maturin develop`/etc. in it triggers `build.py` to run a
+from-scratch `cargo build --release` of the whole Rust workspace (`nautilus-core`,
+`nautilus-model`, `nautilus-pyo3`, and their `arrow`/`datafusion` deps) — tens of parallel
+rustc jobs, ~10GB+ RAM per concurrent build. Two such builds run at once has exhausted RAM
+and swap on this box before (2026-09-22 incident, traced mid-session).
+
+The main checkout's `target/` (repo root) is already built. Always point a worktree's build
+at it instead of letting it rebuild from scratch: `CARGO_TARGET_DIR=<repo-root>/target uv run
+pytest ...`. Cargo then reuses the cached dependency artifacts and only recompiles the crates
+that actually changed. Never run two uncached (`CARGO_TARGET_DIR`-less) Rust builds
+concurrently across worktrees.
+
 ## Upstream reference
 
 Conventions, crate layout, engine architecture and version pins for the upstream
