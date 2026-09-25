@@ -59,7 +59,7 @@ Files are rewritten temp-then-rename (`<file>.rebuild.tmp`): full schema (Arrow 
 included) and row count are checked before `os.replace`; only files with a changed row are
 written; `--apply` absent = report only. One instrument-day in memory at a time, trades one hour at
 a time (MEM-01). Holds the catalog maintenance flock (`consolidate_catalog.maintenance_lock`).
-Run `build_candles --day D` afterwards: the candle store is folded from these columns.
+Run `python -m candles.rebuild --day D` afterwards: the candle store is folded from these columns.
 """
 
 import argparse
@@ -76,6 +76,9 @@ from typing import Any
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
+from candles.application.rebuild import all_instruments
+from candles.application.rebuild import parse_date_ns
+from candles.application.rebuild import venue_instruments
 from kernel.archive_markers import in_gap
 from kernel.catalog_files import files_by_day
 from kernel.clocks import MAX_TS_INIT_SKEW_NS
@@ -85,9 +88,6 @@ from kernel.fold import fold_trades
 from observability import error_ledger
 
 from collector_core.archive_gaps import load_gaps
-from collector_core.build_candles import _parse_date_ns
-from collector_core.build_candles import all_instruments
-from collector_core.build_candles import venue_instruments
 from collector_core.consolidate_catalog import MAINTENANCE_LOCK_NAME
 from collector_core.consolidate_catalog import maintenance_lock
 from nautilus_trader.model.data import TradeTick
@@ -451,7 +451,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     started = time.monotonic()
-    day_start_ns = _parse_date_ns(args.day)
+    day_start_ns = parse_date_ns(args.day)
     if day_start_ns >= time.time_ns() // _DAY_NS * _DAY_NS and not args.include_open_day:
         error_ledger.record(
             "rebuild.open_day", f"{args.day} is not a closed UTC day; --include-open-day to force"

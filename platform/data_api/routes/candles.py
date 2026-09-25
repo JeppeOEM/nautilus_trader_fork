@@ -17,25 +17,25 @@
 frontend's chart page fetches its initial 120-bar window and every scroll-back page
 through this one `before_ns`/`limit` contract, never an unbounded full-range load.
 
-Reuses `ml_signals.candles.candle_dicts_from_snapshots` and
-`ml_signals.catalog_stats.query_second_snapshots` unchanged (AD-F2) -- this module adds
-no new aggregation/query logic, only bounded-query construction, gap-marker insertion,
-and the `has_more` probe.
+Reuses the candles context's query services unchanged (AD-F2): `queries.window` for the
+store page and `queries.candle_dicts_for_window` for the archive page, both over the one
+seconds -> bars fold. This module adds no aggregation or query logic of its own, only
+bounded-query construction, gap-marker insertion, and the `has_more` probe.
 
 `CATALOG_PATH` comes from `data_api.settings` (a leaf module -- routes can't import it from
 `app.py`, which imports them).
 """
 
-from pathlib import Path
-
+from candles.application import queries
+from candles.domain.candle import is_valid_candle
+from candles.domain.fold import BAR_SECONDS
+from candles.infrastructure.sqlite_store import connect_ro
+from candles.infrastructure.sqlite_store import db_path_for_venue
 from fastapi import APIRouter
 from fastapi import HTTPException
 from kernel import catalog_files
 from kernel.venues import market_kind
 from kernel.venues import venue_of
-from ml_signals import candle_store
-from ml_signals.candles import candle_dicts_for_window
-from ml_signals.candles import is_valid_candle
 from observability import error_ledger
 from pydantic import BaseModel
 
@@ -149,7 +149,7 @@ def _parquet_page(
     def fetch(start_ns: int, end_ns: int) -> list[dict]:
         return [
             c
-            for c in candle_dicts_for_window(
+            for c in queries.candle_dicts_for_window(
                 instrument_id,
                 start_ns,
                 end_ns,
@@ -166,7 +166,7 @@ def _parquet_page(
 
 
 def _store_path(instrument_id: str) -> str:
-    return str(Path(CANDLES_DB_DIR) / f"candles_{venue_of(instrument_id).lower()}.db")
+    return db_path_for_venue(CANDLES_DB_DIR, venue_of(instrument_id))
 
 
 def _store_page(
@@ -177,20 +177,20 @@ def _store_page(
     store_has_more, start of the store's coverage in ms)`. Empty when the store is missing or has
     nothing for this coin.
     """
-    if bar_seconds not in candle_store.BAR_SECONDS:
+    if bar_seconds not in BAR_SECONDS:
         return [], False, None
-    with candle_store.connect_ro(_store_path(instrument_id)) as db:
+    with connect_ro(_store_path(instrument_id)) as db:
         if db is None:
             return [], False, None
-        kept = candle_store.window(db, instrument_id, bar_seconds, before_ns // 1_000_000, limit)
+        kept = queries.window(db, instrument_id, bar_seconds, before_ns // 1_000_000, limit)
         if not kept:
             return (
                 [],
                 False,
-                candle_store.oldest_t(db, instrument_id, bar_seconds, traded_only=False),
+                queries.oldest_t(db, instrument_id, bar_seconds, traded_only=False),
             )
-        oldest = candle_store.oldest_t(db, instrument_id, bar_seconds)
-        coverage = candle_store.oldest_t(db, instrument_id, bar_seconds, traded_only=False)
+        oldest = queries.oldest_t(db, instrument_id, bar_seconds)
+        coverage = queries.oldest_t(db, instrument_id, bar_seconds, traded_only=False)
         return (
             [_checked(instrument_id, bar_seconds, c) for c in kept],
             oldest is not None and oldest < kept[0]["t"],

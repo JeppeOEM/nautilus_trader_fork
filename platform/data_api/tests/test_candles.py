@@ -17,11 +17,11 @@
 from pathlib import Path
 
 import pytest
+from candles.infrastructure.sqlite_store import CandleStore
+from candles.tests.test_candle_store import _DAY0_MS
+from candles.tests.test_candle_store import _second
 from fastapi.testclient import TestClient
 from kernel.second_snapshot import DydxSecondSnapshot
-from ml_signals import candle_store
-from ml_signals.tests.test_candle_store import _DAY0_MS
-from ml_signals.tests.test_candle_store import _second
 
 import data_api.app as app_module
 import data_api.routes.candles as candles_routes
@@ -220,8 +220,8 @@ def test_bar_seconds_zero_or_negative_is_clamped_up_to_one(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
-    `bar_seconds=0` would otherwise zero-divide inside `candle_dicts_from_snapshots`'
-    bucketing; clamped to 1 (a legal, if unusual, 1-second bar) instead of erroring.
+    `bar_seconds=0` would otherwise zero-divide inside the seconds -> bars fold's bucketing;
+    clamped to 1 (a legal, if unusual, 1-second bar) instead of erroring.
     """
     catalog_path = str(tmp_path / "catalog")
     _write_snapshots(catalog_path, [(_BASE_NS - 5_000_000_000, 100.0)])
@@ -321,14 +321,14 @@ def test_invalid_candle_fails_the_request_loudly(
 
     catalog_path = str(tmp_path / "catalog")
     _write_snapshots(catalog_path, [(_BASE_NS - i * 60_000_000_000, 100.0 + i) for i in range(3)])
-    real = candles_routes.candle_dicts_for_window
+    real = candles_routes.queries.candle_dicts_for_window
 
     def corrupt(*args, **kwargs):
         out = real(*args, **kwargs)
         out[0] = {**out[0], "h": out[0]["l"] - 1.0}  # high below low
         return out
 
-    monkeypatch.setattr(candles_routes, "candle_dicts_for_window", corrupt)
+    monkeypatch.setattr(candles_routes.queries, "candle_dicts_for_window", corrupt)
     error_ledger.reset()
     resp = _client(catalog_path, monkeypatch).get(
         f"/api/candles/{_IID}?before_ns={_BASE_NS + 60_000_000_000}&limit=10&bar_seconds=60",
@@ -343,10 +343,9 @@ def _store_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, minutes: rang
     client = _client(catalog_path, monkeypatch)
     db_path = str(tmp_path / "candles" / "candles_dydx.db")
     monkeypatch.setattr(candles_routes, "CANDLES_DB_DIR", str(tmp_path / "candles"))
-    db = candle_store.connect_rw(db_path)
-    candle_store.apply_seconds(
-        db, _IID, [_second(m * 60, 100.0 + m) for m in minutes]
-    )  # one trade per minute
+    store = CandleStore(db_path)
+    store.apply(_IID, [_second(m * 60, 100.0 + m) for m in minutes])  # one trade per minute
+    store.close()
     return client
 
 

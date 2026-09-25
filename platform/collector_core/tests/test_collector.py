@@ -18,21 +18,24 @@ client is a tiny in-test duck type -- it is *our* contract, not a Nautilus inter
 """
 
 import asyncio
+import logging
 import math
-import os
 import random
 import time
 from collections.abc import Mapping
+from collections.abc import Sequence
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from kernel.clocks import MAX_TS_INIT_SKEW_NS
 from kernel.clocks import CatalogFileSpan
 from kernel.second_snapshot import DydxSecondSnapshot
-from ml_signals import candle_store
+from kernel.second_snapshot import SecondRow
 from ml_signals.catalog_stats import query_second_snapshots
 from observability import error_ledger
 
+import collector_core.collector as collector_mod
 from collector_core import trade_backfill
 from collector_core.archive_gaps import load_gaps
 from collector_core.collector import _BACKFILL_SETTLE_NS
@@ -96,19 +99,68 @@ class _SnapshotClient:
     """Full-snapshot venue shape (Hyperliquid): no resync_orderbook, on purpose."""
 
 
+# Passed as `second_sink=` to build a collector with no sink at all (the tests-only shape).
+_NO_SINK = object()
+
+
+class _RecordingSink:
+    """
+    A fake `collector_core.ports.SecondSink`: records what capture handed it, per instrument.
+
+    Capture's tests assert *what reaches the port and when*, never what a store does with it -- the
+    candle store's own behaviour is `candles/tests`'. Applies the port's exactly-once rule so a
+    replayed batch reads the same here as in the real adapter.
+    """
+
+    def __init__(
+        self,
+        failing: set[str] | None = None,
+        failing_with: dict[str, type[Exception]] | None = None,
+    ) -> None:
+        self.applied: dict[str, list[SecondRow]] = {}
+        self.calls: list[str] = []
+        self._failing: dict[str, type[Exception]] = dict.fromkeys(failing or (), RuntimeError)
+        self._failing.update(failing_with or {})
+        self._through: dict[str, int] = {}
+
+    def apply(self, instrument_id: str, rows: Sequence[SecondRow]) -> int:
+        self.calls.append(instrument_id)
+        if instrument_id in self._failing:
+            raise self._failing[instrument_id]("candle store write failed")
+        mark = self._through.get(instrument_id, -1)
+        fresh = sorted((r for r in rows if r.ts_event > mark), key=lambda r: r.ts_event)
+        if not fresh:
+            return 0
+        self.applied.setdefault(instrument_id, []).extend(fresh)
+        self._through[instrument_id] = fresh[-1].ts_event
+        return len(fresh)
+
+    def watermarks(self) -> Mapping[str, int]:
+        return dict(self._through)
+
+    def seconds(self, instrument_id: str) -> list[int]:
+        return [r.ts_event for r in self.applied.get(instrument_id, [])]
+
+
 def _collector(
-    tmp_path: Path, iid: str = _BYBIT, client: object | None = None, seen_trade_ids: int = 2000
+    tmp_path: Path,
+    iid: str = _BYBIT,
+    client: object | None = None,
+    seen_trade_ids: int = 2000,
+    second_sink: object | None = None,
 ) -> Collector:
-    os.environ["CANDLES_DB_PATH"] = str(
-        tmp_path / "candles.db"
-    )  # the default dir is tmp_path's shared parent
     cfg = CoreConfig(
         environment="mainnet",
         catalog_path=str(tmp_path),
         instruments=(iid,),
         seen_trade_ids=seen_trade_ids,
     )
-    return Collector(cfg, client if client is not None else _ResyncClient())
+    sink = _RecordingSink() if second_sink is None else second_sink
+    return Collector(
+        cfg,
+        client if client is not None else _ResyncClient(),
+        second_sink=None if sink is _NO_SINK else sink,  # type: ignore[arg-type]
+    )
 
 
 def _adds(bids: list[tuple[float, float]], asks: list[tuple[float, float]]) -> OrderBookDeltas:
@@ -344,8 +396,9 @@ def test_ohlc_outside_book_canary_fires_once_per_minute(
     assert len([r for r in caplog.records if "IMPOSSIBLE" in r.message]) == 2
 
 
-def test_flush_feeds_the_candle_store_with_exactly_the_flushed_seconds(tmp_path: Path) -> None:
-    c = _collector(tmp_path)
+def test_flush_feeds_the_second_sink_with_exactly_the_flushed_seconds(tmp_path: Path) -> None:
+    sink = _RecordingSink()
+    c = _collector(tmp_path, second_sink=sink)
     c._process_data(_deltas([(100.0, 1.0)], [(100.5, 1.0)]))
     for sec in (0, 1, 2, 60):
         now = sec * _S
@@ -353,18 +406,207 @@ def test_flush_feeds_the_candle_store_with_exactly_the_flushed_seconds(tmp_path:
         c._process_data(_trade(100.0 + sec, 1.0, AggressorSide.BUYER, sec))
         (snap,) = _tick(c, now)
         assert snap.ts_event == now
-    assert (
-        candle_store.window(c._candle_db, _BYBIT, 60, 1 << 62, 5) == []
-    )  # nothing until the flush
+    assert sink.calls == []  # nothing reaches the sink until the flush wrote Parquet
 
     asyncio.run(c._flush_once())
 
-    bars = candle_store.window(c._candle_db, _BYBIT, 60, 1 << 62, 5)
-    assert [(b["t"], b["o"], b["c"], b["seconds_observed"]) for b in bars] == [
-        (0, 100.0, 102.0, 3),
-        (60_000, 160.0, 160.0, 1),
+    assert sink.seconds(_BYBIT) == [0, _S, 2 * _S, 60 * _S]
+    assert [(r.open_price, r.close_price) for r in sink.applied[_BYBIT]] == [
+        (100.0, 100.0),
+        (101.0, 101.0),
+        (102.0, 102.0),
+        (160.0, 160.0),
     ]
-    assert candle_store.window(c._candle_db, _BYBIT, 3600, 1 << 62, 5)[0]["seconds_observed"] == 4
+
+
+def test_a_failed_parquet_write_keeps_that_instruments_rows_from_the_sink(tmp_path: Path) -> None:
+    """The ordering invariant: a sink never sees a second the archive refused (AC #1)."""
+    sink = _RecordingSink()
+    c = _two_instrument_collector(tmp_path)
+    c._second_sink = sink
+    real = c._catalog.write_data
+
+    def refuse_one(items: list) -> None:
+        """Refuse only `_BYBIT`'s snapshot batch, as a full disk would for one partition."""
+        head = items[0] if items else None
+        if isinstance(head, DydxSecondSnapshot) and str(head.instrument_id) == _BYBIT:
+            raise OSError("no space left on device")
+        real(items)
+
+    for iid in (_BYBIT, _SPOT_ID):
+        c._process_data(_deltas([(100.0, 1.0)], [(100.5, 1.0)], iid))
+        c._last_book_update_ns[iid] = 0
+    error_ledger.reset()
+    c._catalog.write_data = refuse_one
+    asyncio.run(c._sample_tick(0))
+    asyncio.run(c._flush_once())
+
+    assert sink.calls == [_SPOT_ID]
+    assert _BYBIT not in sink.applied
+    assert error_ledger.counts() == {"collector.flush_write": 1}
+    error_ledger.reset()
+
+
+def test_one_sinks_failure_is_loud_and_never_stops_the_other_instruments(tmp_path: Path) -> None:
+    """
+    AC #2: a failing sink is loud once per flush; ingestion and the other instruments carry on.
+
+    One line, not one per instrument: a store-wide fault fails every subscribed instrument in the
+    same flush, and one line each would exceed the ledger's 60-lines-per-site-per-minute cap and
+    suppress the very detail the site exists to record.
+    """
+    sink = _RecordingSink(failing={_BYBIT})
+    c = _two_instrument_collector(tmp_path)
+    c._second_sink = sink
+    for iid in (_BYBIT, _SPOT_ID):
+        c._process_data(_deltas([(100.0, 1.0)], [(100.5, 1.0)], iid))
+        c._last_book_update_ns[iid] = 0
+    error_ledger.reset()
+    asyncio.run(c._sample_tick(0))
+    asyncio.run(c._flush_once())
+
+    assert sorted(sink.calls) == sorted([_BYBIT, _SPOT_ID])
+    assert sink.seconds(_SPOT_ID) == [0]
+    assert error_ledger.counts() == {"collector.candle_store": 1}
+    error_ledger.reset()
+
+
+def test_the_one_flush_line_names_every_failed_instrument_and_every_distinct_cause(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """
+    One line carries one traceback, so the detail has to carry the rest.
+
+    A store-wide fault plus an incidental second cause must not reduce to whichever instrument
+    `flushed` happened to yield first -- that is the detail an operator needs to tell "the disk is
+    full" from "one instrument decodes wrong".
+    """
+    sink = _RecordingSink(failing_with={_BYBIT: OSError, _SPOT_ID: TypeError})
+    c = _two_instrument_collector(tmp_path)
+    c._second_sink = sink
+    for iid in (_BYBIT, _SPOT_ID):
+        c._process_data(_deltas([(100.0, 1.0)], [(100.5, 1.0)], iid))
+        c._last_book_update_ns[iid] = 0
+    error_ledger.reset()
+    asyncio.run(c._sample_tick(0))
+    with caplog.at_level(logging.ERROR):
+        asyncio.run(c._flush_once())
+
+    detail = "\n".join(r.getMessage() for r in caplog.records)
+    assert "OSError" in detail
+    assert "TypeError" in detail
+    assert _BYBIT in detail
+    assert _SPOT_ID in detail
+    assert error_ledger.counts() == {"collector.candle_store": 1}
+    error_ledger.reset()
+
+
+def test_the_flush_lines_traceback_is_the_cause_that_hit_the_most_instruments(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """
+    The one traceback goes to the dominant cause, not the alphabetically first type.
+
+    A store-wide `OSError` across most instruments plus one incidental `AttributeError` is exactly
+    the shape the single line has to resolve: picking by name would hand the operator the incident
+    on one coin and leave "the disk is full" as a bare word in the detail.
+    """
+    c = _two_instrument_collector(tmp_path)
+    c._second_sink = _RecordingSink(
+        failing_with={_BYBIT: OSError, _SPOT_ID: OSError, _HL: AttributeError}
+    )
+    error_ledger.reset()
+    with caplog.at_level(logging.ERROR):
+        # Called directly: three failing instruments in one flush is the state under test, not the
+        # sampling that produced them.
+        c._apply_to_candle_store({_BYBIT: [], _SPOT_ID: [], _HL: []})
+
+    (record,) = [r for r in caplog.records if "candle store write failed" in r.getMessage()]
+    assert record.exc_info is not None
+    assert record.exc_info[0] is OSError
+    assert "OSError on 2" in record.getMessage()
+    assert "AttributeError on 1" in record.getMessage()
+    assert error_ledger.counts() == {"collector.candle_store": 1}
+    error_ledger.reset()
+
+
+class _ListedInstrument:
+    """What a venue client's `fetch_instruments` returns: only `.id.value` is read by `run`."""
+
+    def __init__(self, iid: str) -> None:
+        self.id = SimpleNamespace(value=iid)
+
+
+class _LifecycleClient:
+    """Records the order `run()` drives the venue client in."""
+
+    def __init__(self, events: list[str], iid: str = _BYBIT) -> None:
+        self.events = events
+        self._iid = iid
+
+    async def fetch_instruments(self) -> list[_ListedInstrument]:
+        return [_ListedInstrument(self._iid)]
+
+    async def connect(self, loop: object, instruments: list) -> None:
+        self.events.append("connect")
+
+    async def subscribe(self, iid: str) -> None:
+        self.events.append(f"subscribe {iid}")
+
+    async def unsubscribe(self, iid: str) -> None:
+        pass  # pragma: no cover -- run() never unsubscribes
+
+    async def disconnect(self) -> None:
+        self.events.append("disconnect")
+
+
+def test_the_catch_up_runs_before_the_first_subscribe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Ordering invariant: the sink drops rows at or below its watermark, so a live second applied
+    before the catch-up would advance the watermark past the archive gap and that gap would then
+    never be filled by anything but a full rebuild.
+    """
+    events: list[str] = []
+
+    class _OrderingSink(_RecordingSink):
+        def watermarks(self) -> Mapping[str, int]:
+            events.append("catch_up")
+            return super().watermarks()
+
+    monkeypatch.setattr(collector_mod, "instruments_from_pyo3", lambda pyo3: [])
+    c = _collector(tmp_path, client=_LifecycleClient(events), second_sink=_OrderingSink())
+    c._stop.set()  # run() reaches the loops, sees the stop and unwinds
+    asyncio.run(c.run())
+
+    assert events == ["connect", "catch_up", f"subscribe {_BYBIT}", "disconnect"]
+
+
+def test_a_collector_without_a_sink_still_flushes(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """
+    `second_sink=None` is the tests-only shape; every entrypoint injects one.
+
+    It is not silent, though: the base class used to open the store itself, so a venue entrypoint
+    that forgets `second_sink=` is now a deployable process that archives Parquet and builds no bars
+    at all. DATA-07 makes the error ledger the channel for that -- a bare log line would leave the
+    gap out of `/api/errors` and the `<ErrorBar>` -- so the entry is asserted here rather than left
+    to a venue's wiring test. The flush itself still succeeds: capture does not depend on the sink.
+    """
+    c = _collector(tmp_path, second_sink=_NO_SINK)
+    c._process_data(_deltas([(100.0, 1.0)], [(100.5, 1.0)]))
+    c._last_book_update_ns[_BYBIT] = 0
+    asyncio.run(c._sample_tick(0))
+    error_ledger.reset()
+    asyncio.run(c._flush_once())
+    with caplog.at_level(logging.ERROR):
+        c._catch_up_candle_store()
+    assert "no SecondSink injected" in "\n".join(r.getMessage() for r in caplog.records)
+    assert error_ledger.counts() == {"collector.no_second_sink": 1}
+    error_ledger.reset()
+    assert len(query_second_snapshots(str(tmp_path), _BYBIT, 0, 1 << 62)) == 1
 
 
 @pytest.mark.asyncio
@@ -539,7 +781,6 @@ def test_next_sample_at_hits_every_bucket_under_jitter() -> None:
 
 def _day_collector(tmp_path: Path, interval: float = 1.0) -> Collector:
     """Build a collector for a past UTC day: no age filter, so fixed timestamps pass."""
-    os.environ["CANDLES_DB_PATH"] = str(tmp_path / "candles.db")
     cfg = CoreConfig(
         environment="mainnet",
         catalog_path=str(tmp_path),
@@ -547,7 +788,7 @@ def _day_collector(tmp_path: Path, interval: float = 1.0) -> Collector:
         stale_trade_seconds=10**9,
         snapshot_interval_seconds=interval,
     )
-    return Collector(cfg, _ResyncClient())
+    return Collector(cfg, _ResyncClient(), second_sink=_RecordingSink())
 
 
 _D0 = 1_789_000_000 * _S // (86_400 * _S) * (86_400 * _S)  # a past UTC midnight
@@ -605,10 +846,12 @@ def test_rows_sampled_after_a_carried_trade_group_are_carried_with_it(tmp_path: 
     assert [s.ts_event for s in query_second_snapshots(str(tmp_path), _BYBIT, 0, 1 << 62)] == [
         before.ts_event
     ]
-    # The candle store only saw what was written: the carried row is still to come, in order.
-    assert candle_store.watermarks(c._candle_db)[_BYBIT] == before.ts_event
+    # The sink only saw what was written: the carried row is still to come, in order.
+    sink = c._second_sink
+    assert isinstance(sink, _RecordingSink)
+    assert sink.watermarks()[_BYBIT] == before.ts_event
     asyncio.run(c._flush_once(final=True))
-    assert candle_store.watermarks(c._candle_db)[_BYBIT] == after.ts_event
+    assert sink.watermarks()[_BYBIT] == after.ts_event
 
 
 def test_an_old_trade_group_is_carried_while_the_ingest_queue_lags(tmp_path: Path) -> None:
@@ -673,11 +916,12 @@ def _perp(iid: str) -> CryptoPerpetual:
 
 
 def _two_instrument_collector(tmp_path: Path, client: object | None = None) -> Collector:
-    os.environ["CANDLES_DB_PATH"] = str(tmp_path / "candles.db")
     cfg = CoreConfig(
         environment="mainnet", catalog_path=str(tmp_path), instruments=(_BYBIT, _SPOT_ID)
     )
-    c = Collector(cfg, client if client is not None else _FeedStateClient())
+    c = Collector(
+        cfg, client if client is not None else _FeedStateClient(), second_sink=_RecordingSink()
+    )
     c._instruments = {iid: _perp(iid) for iid in (_BYBIT, _SPOT_ID)}
     return c
 

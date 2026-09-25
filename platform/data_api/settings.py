@@ -15,8 +15,10 @@ from pathlib import Path
 # instrument_id, so no venue -> path registry is needed.
 CATALOG_PATH: str = os.environ.get("CATALOG_PATH", "platform/data/catalog")
 
-# Derived SQLite candle stores (`ml_signals.candle_store`): each venue's collector writes its own
-# file in this directory, the UI routes read them. A directory for the same WAL-sidecar reason as metrics.db.
+# Derived SQLite candle stores (`candles.infrastructure.sqlite_store`): each venue's collector
+# writes its own
+# file in this directory, the UI routes read them. A directory for the same WAL-sidecar reason as
+# metrics.db.
 CANDLES_DB_DIR: str = os.environ.get("CANDLES_DB_DIR", str(Path(CATALOG_PATH).parent / "candles"))
 
 # Durable per-service error ledger (`observability.error_ledger`, story 23.3): every service that

@@ -21,7 +21,8 @@ Usage:
         [--instrument BTCUSDT-LINEAR.BYBIT ...] [--environment mainnet|testnet] \\
         [--kline-source venue|catalog]
 
-Ours: `candle_store.window(db, iid, 60, ...)` -- the bars `build_candles --day D` folded from the
+Ours: `candles.application.queries.window(db, iid, 60, ...)` -- the bars
+`python -m candles.rebuild --day D` folded from the
 rebuilt seconds. Theirs: the venue's 1 m klines, fetched with stdlib `urllib` and parsed from the
 venue's decimal strings with `Decimal(text).scaleb(precision)` -- never through float (the pyo3
 kline paths parse through `f64`, audit D-52, which cannot prove raw-unit equality). Every value is
@@ -82,6 +83,11 @@ from decimal import InvalidOperation
 from pathlib import Path
 from typing import Any
 
+from candles.application import queries
+from candles.application.rebuild import parse_date_ns
+from candles.application.verified_days import VerifiedDays
+from candles.infrastructure.sqlite_store import connect_ro
+from candles.infrastructure.verified_days import VerifiedDaysStore
 from kernel.catalog_files import SNAPSHOT_DIRNAME
 from kernel.clocks import CatalogFileSpan
 from kernel.venue_http import DYDX_NETWORKS
@@ -94,10 +100,8 @@ from kernel.venue_http import hyperliquid_info_url
 from kernel.venue_http import post_json_request
 from kernel.venues import bybit_category
 from kernel.venues import has_venue
-from ml_signals import candle_store
 from observability import error_ledger
 
-from collector_core.build_candles import _parse_date_ns
 from nautilus_trader.model.data import Bar
 from nautilus_trader.model.instruments import Instrument
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
@@ -379,7 +383,7 @@ def our_klines(db: Any, iid: str, day_ms: int, price_p: int, size_p: int) -> lis
                 float_units(b["c"], price_p, "close"),
                 float_units(b["v"], size_p, "volume"),
             )
-            for b in candle_store.window(db, iid, 60, day_ms + _DAY_MS, 1440)
+            for b in queries.window(db, iid, 60, day_ms + _DAY_MS, 1440)
         ],
         day_ms,
     )
@@ -402,7 +406,7 @@ def seed_with_previous_close(ours: list[Kline], previous_close: int | None) -> l
 
 def _close_before(db: Any, iid: str, day_ms: int, price_p: int) -> int | None:
     """Our last traded 1 m close before the day (None when the store has none)."""
-    before = candle_store.window(db, iid, 60, day_ms, 1)
+    before = queries.window(db, iid, 60, day_ms, 1)
     return float_units(before[0]["c"], price_p, "previous close") if before else None
 
 
@@ -489,33 +493,26 @@ def _check_venue_history(iid: str, ours: list[Kline], theirs: list[Kline]) -> No
         )
 
 
-def _record_verdict(db_path: str, iid: str, day: str, result: InstrumentResult) -> None:
-    db = candle_store.connect_rw(db_path)
-    try:
-        candle_store.mark_verified(
-            db, iid, day, result.status, len(result.mismatches), int(time.time() * 1000)
-        )
-    finally:
-        db.close()
-
-
 def reconcile_instrument(
     db_path: str,
     catalog: ParquetDataCatalog,
     iid: str,
     day_ms: int,
     fetch: KlineFetch,
-    record_verdict: bool = True,
+    verified_days: VerifiedDays | None,
 ) -> InstrumentResult:
     """
-    Compare one instrument-day, ledger every mismatch and (unless `record_verdict` is off, as for
+    Compare one instrument-day, ledger every mismatch and (unless `verified_days` is None, as for
     the f64 catalog klines) record the verdict. Any per-instrument failure is an "error" result.
+
+    The verdict goes through the `VerifiedDays` port, never a connection of this tool's own: the
+    candle store owns day status (AD-D9), and this tool only reads its bars.
     """
     day = _day_text(day_ms)
     try:
         inst = _load_instrument(catalog, iid)
         theirs = _in_day(fetch(inst, day_ms), day_ms)
-        with candle_store.connect_ro(db_path) as ro:
+        with connect_ro(db_path) as ro:
             if ro is None:
                 raise KlineError(f"candle store {db_path} does not exist")
             ours = _ours_in_venue_definition(ro, iid, day_ms, inst)
@@ -523,8 +520,10 @@ def reconcile_instrument(
         result = compare(iid, ours, theirs, inst, seeded=has_venue(iid, "BYBIT"))
         for message in result.mismatches:
             error_ledger.record("reconcile.kline_mismatch", message)
-        if record_verdict:
-            _record_verdict(db_path, iid, day, result)
+        if verified_days is not None:
+            verified_days.mark_verified(
+                iid, day, result.status, len(result.mismatches), int(time.time() * 1000)
+            )
     except (  # urllib's errors are OSErrors; sqlite3 from `mark_verified` on a locked store
         KlineError,
         OSError,
@@ -584,11 +583,14 @@ def run(
     day_ms: int,
     iids: list[str],
     fetch: KlineFetch,
-    record_verdict: bool = True,
+    verified_days: VerifiedDays | None,
 ) -> int:
     """
     Reconcile every instrument; returns the exit code: 0 all passed, 2 findings (mismatches or
     per-instrument errors), 1 when the candle store or catalog is unusable (nothing compared).
+
+    `verified_days` is the day-status port the verdicts go to; None reports without recording
+    (the f64 catalog-kline source).
     """
     if not Path(db_path).exists() or not Path(catalog_path).is_dir():
         error_ledger.record(
@@ -599,7 +601,7 @@ def run(
     day = _day_text(day_ms)
     results = []
     for iid in iids:
-        result = reconcile_instrument(db_path, catalog, iid, day_ms, fetch, record_verdict)
+        result = reconcile_instrument(db_path, catalog, iid, day_ms, fetch, verified_days)
         results.append(result)
         logger.info(
             "%s %s: %s -- minutes %d, mismatched %d",
@@ -627,7 +629,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--kline-source", default="venue", choices=("venue", "catalog"))
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    day_ms = _parse_date_ns(args.day) // _MS_NS
+    day_ms = parse_date_ns(args.day) // _MS_NS
     if day_ms + _DAY_MS > time.time() * 1000:
         error_ledger.record("reconcile.error", f"{args.day} is not a closed UTC day")
         return 1
@@ -644,7 +646,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.kline_source == "catalog":
         logger.info("kline source catalog (D-52 f64 bars): report only, verified_days untouched")
-    return run(args.db, args.catalog, args.venue, day_ms, iids, fetch, args.kline_source == "venue")
+    verified = VerifiedDaysStore(args.db) if args.kline_source == "venue" else None
+    return run(args.db, args.catalog, args.venue, day_ms, iids, fetch, verified)
 
 
 if __name__ == "__main__":

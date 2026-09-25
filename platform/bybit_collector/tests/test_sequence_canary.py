@@ -64,10 +64,11 @@ def _msg(u: int, snapshot: bool = False, bid: float = 100.0, ask: float = 100.5)
     return OrderBookDeltas(inst, deltas)
 
 
-def _collector(tmp_path: Path) -> BybitCollector:
-    import os
-
-    os.environ["CANDLES_DB_PATH"] = str(tmp_path / "candles.db")
+def _collector(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> BybitCollector:
+    # Pin the candle store inside this test's tmp_path: the default resolves beside the catalog,
+    # i.e. into pytest's shared tmp root, where every test here would open the same file read-write
+    # and leave it open (`CandleStore` is meant to have exactly one writer per file).
+    monkeypatch.setenv("CANDLES_DB_PATH", str(tmp_path / "candles.db"))
     return BybitCollector(
         BybitConfig(environment="mainnet", catalog_path=str(tmp_path), instruments=(_IID,))
     )
@@ -77,9 +78,11 @@ def test_message_u_reads_order_id_and_skips_clear() -> None:
     assert _message_u(_msg(7, snapshot=True)) == 7
 
 
-def test_regress_ledgers_drops_book_and_queues_resync(tmp_path: Path) -> None:
+def test_regress_ledgers_drops_book_and_queues_resync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     error_ledger.reset()
-    c = _collector(tmp_path)
+    c = _collector(tmp_path, monkeypatch)
     c._apply_deltas(_IID, _msg(100, snapshot=True))
     c._apply_deltas(_IID, _msg(101))
     assert error_ledger.counts() == {}
@@ -90,10 +93,12 @@ def test_regress_ledgers_drops_book_and_queues_resync(tmp_path: Path) -> None:
     assert _IID not in c._last_u
 
 
-def test_gap_ledgers_drops_book_and_queues_resync(tmp_path: Path) -> None:
+def test_gap_ledgers_drops_book_and_queues_resync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A skipped `u` is lost messages: `u` was measured contiguous in a healthy stream (D-41)."""
     error_ledger.reset()
-    c = _collector(tmp_path)
+    c = _collector(tmp_path, monkeypatch)
     c._apply_deltas(_IID, _msg(100, snapshot=True))
     c._apply_deltas(_IID, _msg(105))
     assert error_ledger.counts() == {"collector.book_sequence": 1}
@@ -102,9 +107,9 @@ def test_gap_ledgers_drops_book_and_queues_resync(tmp_path: Path) -> None:
     assert _IID not in c._last_u
 
 
-def test_restart_snapshot_rebaselines(tmp_path: Path) -> None:
+def test_restart_snapshot_rebaselines(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     error_ledger.reset()
-    c = _collector(tmp_path)
+    c = _collector(tmp_path, monkeypatch)
     c._apply_deltas(_IID, _msg(900, snapshot=True))
     c._apply_deltas(_IID, _msg(1, snapshot=True))
     assert error_ledger.counts() == {}

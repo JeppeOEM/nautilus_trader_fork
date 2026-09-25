@@ -25,14 +25,15 @@ from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+from candles.application import queries
+from candles.application.rebuild import rebuild_instrument
+from candles.domain.fold import BAR_SECONDS
+from candles.infrastructure.sqlite_store import CandleStore
 from kernel.catalog_files import data_file_ranges
 from kernel.catalog_files import query_second_ohlc
 from kernel.second_snapshot import DydxSecondSnapshot
-from ml_signals import candle_store
-from ml_signals.candle_store import BAR_SECONDS
 from observability import error_ledger
 
-from collector_core.build_candles import rebuild_instrument
 from collector_core.consolidate_catalog import _file_span
 from collector_core.consolidate_catalog import consolidate_directory
 from collector_core.consolidate_catalog import leaf_dirs
@@ -289,9 +290,11 @@ def _catalog_ts_events(path: Path, iid: str) -> list[int]:
 
 
 def _candle_windows(db_path: str, iid: str) -> dict[int, list[dict]]:
-    db = candle_store.connect_rw(db_path)
-    windows = {bar: candle_store.window(db, iid, bar, 1 << 62, 10_000) for bar in BAR_SECONDS}
-    db.close()
+    store = CandleStore(db_path)
+    windows = {
+        bar: queries.window(store.connection, iid, bar, 1 << 62, 10_000) for bar in BAR_SECONDS
+    }
+    store.close()
     return windows
 
 

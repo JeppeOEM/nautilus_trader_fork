@@ -22,8 +22,8 @@ import time
 from pathlib import Path
 
 import pytest
+from candles.application.forming import forming_bar
 from kernel.second_snapshot import DydxSecondSnapshot
-from ml_signals.candles import candle_dicts_from_snapshots
 
 from data_api import settings
 from data_api.live_candles import LiveCandleBus
@@ -69,8 +69,7 @@ def test_first_tick_for_subscribed_pair_publishes_single_snapshot_bar() -> None:
 
     message = queue.get_nowait()
     assert message["channel"] == f"candles:{_IID}:{_BAR_SECONDS}"
-    expected = candle_dicts_from_snapshots([snapshot], _BAR_SECONDS)[-1]
-    assert message["bar"] == expected
+    assert message["bar"] == forming_bar([snapshot], _BAR_SECONDS)
 
 
 def test_second_tick_same_bucket_keeps_same_bar_identity_updates_ohlcv() -> None:
@@ -165,8 +164,8 @@ def test_incremental_buffer_converges_to_batch_aggregation_final_bar() -> None:
     """
     The load-bearing correctness AC: an incremental per-tick buffer run through
     `LiveCandleBus` must produce, on its final publish, exactly the bar that
-    `candle_dicts_from_snapshots` produces when called once on the whole same-bucket
-    snapshot set.
+    `candles.application.forming.forming_bar` produces when called once on the whole
+    same-bucket snapshot set.
     """
     bus = LiveCandleBus()
     queue = bus.subscribe(_IID, _BAR_SECONDS)
@@ -177,10 +176,11 @@ def test_incremental_buffer_converges_to_batch_aggregation_final_bar() -> None:
         bus.handle_batch([DydxSecondSnapshot.to_dict(snapshot)])
         last_message = queue.get_nowait()
 
-    expected = candle_dicts_from_snapshots(snapshots, _BAR_SECONDS)
-    assert len(expected) == 1  # all 10 one-second snapshots land in the same 60s bucket
+    expected = forming_bar(snapshots, _BAR_SECONDS)
+    assert expected is not None  # all 10 one-second snapshots land in the same 60s bucket
+    assert expected["t"] == _BASE_NS // 1_000_000
     assert last_message is not None
-    assert last_message["bar"] == expected[-1]
+    assert last_message["bar"] == expected
 
 
 @pytest.mark.asyncio

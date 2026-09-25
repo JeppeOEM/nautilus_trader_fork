@@ -13,10 +13,10 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-The SQLite candle store must agree exactly with `candle_dicts_from_snapshots` (the raw-1s
-aggregation the chart used before it): same buckets and OHLCV; `seconds_observed` counts every
-second present, traded or not. Plain rows with the snapshot fields, a real SQLite file
-(platform/CLAUDE.md TEST-03).
+The SQLite candle store must agree exactly with the same fold read straight off the rows
+(`application.forming.bars_from_rows`, the archive-side path): same buckets and OHLCV;
+`seconds_observed` counts every second present, traded or not. Plain rows with the snapshot fields,
+a real SQLite file (platform/CLAUDE.md TEST-03).
 """
 
 import random
@@ -25,9 +25,12 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-from ml_signals import candle_store
-from ml_signals.candles import PARTIAL_OBSERVED_FRACTION
-from ml_signals.candles import candle_dicts_from_snapshots
+from candles.application import queries
+from candles.application.forming import bars_from_rows
+from candles.domain.candle import PARTIAL_OBSERVED_FRACTION
+from candles.domain.fold import BAR_SECONDS
+from candles.infrastructure import sqlite_store
+from candles.infrastructure.sqlite_store import CandleStore
 
 
 _IID = "BTC-USD-PERP.DYDX"
@@ -37,15 +40,14 @@ _SEC_NS = 1_000_000_000
 
 def _second(sec: int, price: float | None, volume: float = 1.0) -> SimpleNamespace:
     """`sec` counts from _DAY0_MS; price None = a second with a book but no trade."""
-    traded = price is not None
     return SimpleNamespace(
         ts_event=_DAY0_MS * 1_000_000 + sec * _SEC_NS,
         open_price=price,
-        high_price=price + 0.5 if traded else None,
-        low_price=price - 0.5 if traded else None,
-        close_price=price + 0.1 if traded else None,
-        buy_volume=volume if traded else 0.0,
-        sell_volume=0.25 if traded else 0.0,
+        high_price=None if price is None else price + 0.5,
+        low_price=None if price is None else price - 0.5,
+        close_price=None if price is None else price + 0.1,
+        buy_volume=0.0 if price is None else volume,
+        sell_volume=0.0 if price is None else 0.25,
     )
 
 
@@ -62,14 +64,14 @@ def _fixture() -> list[SimpleNamespace]:
     return rows
 
 
-def _stored(db, bar: int) -> list[dict]:
-    return candle_store.window(db, _IID, bar, 1 << 62, 10_000)
+def _stored(db: sqlite3.Connection, bar: int) -> list[dict]:
+    return queries.window(db, _IID, bar, 1 << 62, 10_000)
 
 
-def _check_matches_raw_aggregation(db, rows: list[SimpleNamespace]) -> None:
-    for bar in candle_store.BAR_SECONDS:
+def _check_matches_raw_aggregation(db: sqlite3.Connection, rows: list[SimpleNamespace]) -> None:
+    for bar in BAR_SECONDS:
         got = _stored(db, bar)
-        want = candle_dicts_from_snapshots(rows, bar)
+        want = bars_from_rows(rows, bar)
         assert [c["t"] for c in got] == [c["t"] for c in want]
         for g, w in zip(got, want, strict=True):
             for k in ("o", "h", "l", "c"):
@@ -83,41 +85,40 @@ def _check_matches_raw_aggregation(db, rows: list[SimpleNamespace]) -> None:
 
 
 def test_apply_in_flush_sized_batches_matches_raw_aggregation(tmp_path: Path) -> None:
-    db = candle_store.connect_rw(str(tmp_path / "c.db"))
+    db = sqlite_store.connect_rw(str(tmp_path / "c.db"))
     rows = _fixture()
     for i in range(0, len(rows), 90):  # a batch per flush; batches split buckets mid-way
-        assert candle_store.apply_seconds(db, _IID, rows[i : i + 90]) == len(rows[i : i + 90])
+        assert sqlite_store.apply_seconds(db, _IID, rows[i : i + 90]) == len(rows[i : i + 90])
     _check_matches_raw_aggregation(db, rows)
 
 
-def test_batch_of_many_instruments_in_one_transaction_matches_raw_aggregation(
-    tmp_path: Path,
-) -> None:
-    db = candle_store.connect_rw(str(tmp_path / "c.db"))
+def test_many_instruments_applied_one_by_one_match_raw_aggregation(tmp_path: Path) -> None:
+    """The live feed's shape since Story 24.1: the sink applies each instrument on its own."""
+    store = CandleStore(str(tmp_path / "c.db"))
     rows = _fixture()
     other = "ETH-USD-PERP.DYDX"
-    for i in range(0, len(rows), 1800):  # a feed every 30 min, both coins in one commit
+    for i in range(0, len(rows), 1800):  # a feed every 30 min, both coins
         chunk = rows[i : i + 1800]
-        assert candle_store.apply_batch(db, {_IID: chunk, other: chunk}) == 2 * len(chunk)
-    _check_matches_raw_aggregation(db, rows)
-    assert candle_store.window(db, other, 3600, 1 << 62, 10) == candle_store.window(
-        db, _IID, 3600, 1 << 62, 10
+        assert [store.apply(_IID, chunk), store.apply(other, chunk)] == [len(chunk)] * 2
+    _check_matches_raw_aggregation(store.connection, rows)
+    assert queries.window(store.connection, other, 3600, 1 << 62, 10) == queries.window(
+        store.connection, _IID, 3600, 1 << 62, 10
     )
 
 
 def test_replayed_seconds_are_not_double_counted(tmp_path: Path) -> None:
-    db = candle_store.connect_rw(str(tmp_path / "c.db"))
+    db = sqlite_store.connect_rw(str(tmp_path / "c.db"))
     rows = _fixture()
-    candle_store.apply_seconds(db, _IID, rows)
-    assert candle_store.apply_seconds(db, _IID, rows) == 0  # a re-delivered flush
-    assert candle_store.apply_seconds(db, _IID, rows[100:5000]) == 0
+    sqlite_store.apply_seconds(db, _IID, rows)
+    assert sqlite_store.apply_seconds(db, _IID, rows) == 0  # a re-delivered flush
+    assert sqlite_store.apply_seconds(db, _IID, rows[100:5000]) == 0
     _check_matches_raw_aggregation(db, rows)
 
 
 def test_rebuild_repairs_a_hole_and_is_idempotent(tmp_path: Path) -> None:
-    db = candle_store.connect_rw(str(tmp_path / "c.db"))
+    db = sqlite_store.connect_rw(str(tmp_path / "c.db"))
     rows = _fixture()
-    candle_store.apply_seconds(
+    sqlite_store.apply_seconds(
         db,
         _IID,
         [r for r in rows if not 3000 <= (r.ts_event - _DAY0_MS * 1_000_000) // _SEC_NS < 3600],
@@ -127,12 +128,12 @@ def test_rebuild_repairs_a_hole_and_is_idempotent(tmp_path: Path) -> None:
         hour0["seconds_observed"] == 3000
     )  # the missed 10 minutes are visibly absent before the rebuild
     for _ in range(2):  # the second run must change nothing
-        candle_store.rebuild(db, _IID, rows, _DAY0_MS, _DAY0_MS + 86_400_000)
+        sqlite_store.rebuild(db, _IID, rows, _DAY0_MS, _DAY0_MS + 86_400_000)
         _check_matches_raw_aggregation(db, rows)
 
 
 def test_rebuild_refuses_the_open_day_unless_told(tmp_path: Path) -> None:
-    db = candle_store.connect_rw(str(tmp_path / "c.db"))
+    db = sqlite_store.connect_rw(str(tmp_path / "c.db"))
     today_ms = int(time.time() * 1000) // 86_400_000 * 86_400_000
     now_row = SimpleNamespace(
         ts_event=today_ms * 1_000_000,
@@ -143,9 +144,9 @@ def test_rebuild_refuses_the_open_day_unless_told(tmp_path: Path) -> None:
         buy_volume=1.0,
         sell_volume=0.0,
     )
-    assert candle_store.rebuild(db, _IID, [now_row], today_ms, today_ms + 86_400_000) == 0
+    assert sqlite_store.rebuild(db, _IID, [now_row], today_ms, today_ms + 86_400_000) == 0
     assert (
-        candle_store.rebuild(
+        sqlite_store.rebuild(
             db, _IID, [now_row], today_ms, today_ms + 86_400_000, allow_open_day=True
         )
         == 1
@@ -153,37 +154,38 @@ def test_rebuild_refuses_the_open_day_unless_told(tmp_path: Path) -> None:
 
 
 def test_prune_drops_old_short_bars_but_keeps_wide_ones(tmp_path: Path) -> None:
-    db = candle_store.connect_rw(str(tmp_path / "c.db"))
-    candle_store.apply_seconds(db, _IID, _fixture())
-    candle_store.prune(db, _DAY0_MS + 400 * 86_400_000)
-    assert candle_store.oldest_t(db, _IID, 60) is None
-    assert candle_store.oldest_t(db, _IID, 300) is None
-    assert candle_store.oldest_t(db, _IID, 14400) is not None
+    db = sqlite_store.connect_rw(str(tmp_path / "c.db"))
+    sqlite_store.apply_seconds(db, _IID, _fixture())
+    sqlite_store.prune(db, _DAY0_MS + 400 * 86_400_000)
+    assert queries.oldest_t(db, _IID, 60) is None
+    assert queries.oldest_t(db, _IID, 300) is None
+    assert queries.oldest_t(db, _IID, 14400) is not None
 
 
 def test_read_only_reader_sees_writer_and_missing_store_is_none(tmp_path: Path) -> None:
     path = str(tmp_path / "c.db")
-    with candle_store.connect_ro(path) as db:
+    with sqlite_store.connect_ro(path) as db:
         assert db is None
-    writer = candle_store.connect_rw(path)
-    candle_store.apply_seconds(writer, _IID, [_second(0, 100.0)])
-    with candle_store.connect_ro(path) as db:
-        assert len(candle_store.window(db, _IID, 60, 1 << 62, 5)) == 1
+    writer = sqlite_store.connect_rw(path)
+    sqlite_store.apply_seconds(writer, _IID, [_second(0, 100.0)])
+    with sqlite_store.connect_ro(path) as db:
+        assert db is not None
+        assert len(queries.window(db, _IID, 60, 1 << 62, 5)) == 1
 
 
 def test_verified_days_upsert_and_read_back(tmp_path: Path) -> None:
-    db = candle_store.connect_rw(str(tmp_path / "candles.db"))
-    assert candle_store.verified_status(db, _IID, "2026-09-20") is None
-    candle_store.mark_verified(db, _IID, "2026-09-20", "fail", 3, 1_000)
-    candle_store.mark_verified(db, _IID, "2026-09-20", "pass", 0, 2_000)  # a rerun after a fix
-    assert candle_store.verified_status(db, _IID, "2026-09-20") == "pass"
-    assert candle_store.verified_status(db, _IID, "2026-09-19") is None
+    db = sqlite_store.connect_rw(str(tmp_path / "candles.db"))
+    assert sqlite_store.verified_status(db, _IID, "2026-09-20") is None
+    sqlite_store.mark_verified(db, _IID, "2026-09-20", "fail", 3, 1_000)
+    sqlite_store.mark_verified(db, _IID, "2026-09-20", "pass", 0, 2_000)  # a rerun after a fix
+    assert sqlite_store.verified_status(db, _IID, "2026-09-20") == "pass"
+    assert sqlite_store.verified_status(db, _IID, "2026-09-19") is None
     assert db.execute("SELECT checked_at, mismatches FROM verified_days").fetchall() == [(2_000, 0)]
 
 
 def test_verified_status_on_a_store_that_predates_the_table(tmp_path: Path) -> None:
     path = tmp_path / "old.db"
     sqlite3.connect(path).execute("CREATE TABLE candles (t INTEGER)").connection.commit()
-    with candle_store.connect_ro(str(path)) as ro:
+    with sqlite_store.connect_ro(str(path)) as ro:
         assert ro is not None
-        assert candle_store.verified_status(ro, _IID, "2026-09-20") is None
+        assert sqlite_store.verified_status(ro, _IID, "2026-09-20") is None

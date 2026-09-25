@@ -14,7 +14,8 @@
 # -------------------------------------------------------------------------------------------------
 """Self-check: footprint cells match a hand-computed add/remove/net example."""
 
-from ml_signals.candles import Candle
+from candles.domain.candle import Candle
+
 from ml_signals.footprint import build_footprint
 from nautilus_trader.model.data import BookOrder
 from nautilus_trader.model.data import OrderBookDelta

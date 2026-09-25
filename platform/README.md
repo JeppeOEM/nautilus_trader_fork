@@ -207,7 +207,8 @@ once by hand first to fold the existing history.
 **`make nightly`** (`collector_core.nightly` in the collector image) runs, each as its own
 process: `rebuild_seconds --apply` (the closed day's snapshot trade columns re-derived from the
 raw trade archive on exchange time) -> `consolidate_catalog --apply --venue --days 2` (below) ->
-`build_candles --day --workers 1` -> `compare_klines` (every traded minute against the venue's own
+`build_candles` (`python -m candles.rebuild --day --workers 1`; the step keeps its name) ->
+`compare_klines` (every traded minute against the venue's own
 1 m klines, exact; verdict in `verified_days`) -> `prune_catalog --apply` (raw trades released 7
 days after their day reconciled `pass`). A step's exit 2 is "findings" (per-instrument refusals,
 mismatches or uncomparable instruments, all ledgered): the chain continues; any other failure

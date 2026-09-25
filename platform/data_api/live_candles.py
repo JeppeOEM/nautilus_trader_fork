@@ -20,9 +20,9 @@ subscribed to.
 
 Unlike `RankingsBus` (which relays an already-fully-formed upstream message verbatim),
 `LiveCandleBus` recomputes each pair's forming bar itself -- but only ever via
-`ml_signals.candles.candle_dicts_from_snapshots` (AD-F7/AD-F2: never a second,
-independent aggregation), replayed over a small in-progress-bucket buffer instead of a
-full history query. A `(instrument_id, bar_seconds)` buffer/listener-set is created
+`candles.application.forming.forming_bar` (AD-F7/AD-F2: never a second, independent
+aggregation -- it is the same `fold_arrays` the store writes), replayed over a small
+in-progress-bucket buffer instead of a full history query. A `(instrument_id, bar_seconds)` buffer/listener-set is created
 lazily on the first `subscribe()` for that pair and torn down on the last matching
 `unsubscribe()` (MEM-02 spirit: never accumulate state for an unwatched pair).
 """
@@ -36,10 +36,10 @@ from collections import deque
 from typing import Callable
 
 import redis.asyncio as aioredis
+from candles.application.forming import forming_bar
 from kernel.catalog_files import query_second_ohlc
 from kernel.second_snapshot import DydxSecondSnapshot
 from kernel.second_snapshot import SecondOHLC
-from ml_signals.candles import candle_dicts_from_snapshots
 from observability import error_ledger
 
 from data_api import settings
@@ -254,13 +254,13 @@ class LiveCandleBus:
         buffer: list[DydxSecondSnapshot],
     ) -> None:
         # The one and only aggregation call (AD-F7/AD-F2) -- `buffer` holds only the
-        # current bucket's snapshots, so its one (last) resulting candle is the forming
-        # bar. Empty result means no trade occurred in this tick (close_price is None
+        # current bucket's snapshots, so the candles context's forming bar over it *is* this
+        # pair's forming bar. None means no trade occurred in this tick (close_price is None
         # for every buffered snapshot) -- a no-op, not an error.
-        candles = candle_dicts_from_snapshots(buffer, bar_seconds)
-        if not candles:
+        bar = forming_bar(buffer, bar_seconds)
+        if bar is None:
             return
-        message = {"channel": f"candles:{instrument_id}:{bar_seconds}", "bar": candles[-1]}
+        message = {"channel": f"candles:{instrument_id}:{bar_seconds}", "bar": bar}
         for queue in self._listeners.get(key, ()):
             put_drop_oldest(queue, message)
 

@@ -16,7 +16,6 @@
 
 import asyncio
 import logging
-import os
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -330,7 +329,6 @@ def test_ts_event_from_a_later_block_than_the_push_is_skipped(
 def test_venue_mode_aligns_on_the_capture_taken_at_drain_time(tmp_path: Path) -> None:
     """With held deltas the capture happens when the second closes, after REST returned."""
     error_ledger.reset()
-    os.environ["CANDLES_DB_PATH"] = str(tmp_path / "candles.db")
     push_ts = _T0 + 5 * _S
     rest = _RestClient(BookSnapshot(*_BOOK, ts_event_ns=push_ts))
     cfg = CoreConfig(

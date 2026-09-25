@@ -39,10 +39,12 @@ since the previous sample; the raw `TradeTick`s are archived too (`data/trade_ti
 story 22.13) and `collector_core.rebuild_seconds` rewrites a closed day's trade
 columns from them on exchange time (`ts_event`), leaving book columns and timestamps
 untouched. Candles at any resolution >= 1s are built by aggregating these fields
-(`ml_signals/candle_store.py`), not by replaying individual trades.
+(`candles/domain/fold.py`), not by replaying individual trades.
 """
 
 from typing import NamedTuple
+from typing import Protocol
+from typing import runtime_checkable
 
 import pyarrow as pa
 
@@ -54,6 +56,44 @@ from nautilus_trader.serialization.arrow.serializer import register_arrow
 
 
 BOOK_DEPTH = 20
+
+
+@runtime_checkable
+class SecondRow(Protocol):
+    """
+    The per-second fields the seconds -> bars fold reads, whatever object carries them.
+
+    Invariant (one name for the duck-typed row): capture hands rows to its `SecondSink` port and
+    `candles` folds them, and the two must mean the same thing by "a second". Three shapes reach
+    that fold -- `DydxSecondSnapshot` live, `SecondOHLC` from the catalog read, and a plain stand-in
+    in tests -- so the contract cannot be a base class; it is this structural type, declared in the
+    kernel because that is the only package both sides may import (AD-D2/AD-D3).
+
+    Read-only properties, not attributes: `SecondOHLC` is a `NamedTuple` (immutable fields) and
+    `DydxSecondSnapshot.ts_event` is a property, and a mutable-attribute protocol would reject both.
+    `open_price`..`close_price` are `None` for a second in which nothing traded.
+    """
+
+    @property
+    def ts_event(self) -> int: ...
+
+    @property
+    def open_price(self) -> float | None: ...
+
+    @property
+    def high_price(self) -> float | None: ...
+
+    @property
+    def low_price(self) -> float | None: ...
+
+    @property
+    def close_price(self) -> float | None: ...
+
+    @property
+    def buy_volume(self) -> float: ...
+
+    @property
+    def sell_volume(self) -> float: ...
 
 
 class SecondOHLC(NamedTuple):

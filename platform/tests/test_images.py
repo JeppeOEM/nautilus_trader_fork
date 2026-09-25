@@ -236,21 +236,39 @@ def _makefile_runs() -> Iterator[tuple[str, str, list[str]]]:
                 yield target, run[0], run[1]
 
 
+def _step_module(step: ast.Call) -> str:
+    """
+    Return the dotted module one `Step(name, module("<dotted>", ...))` runs.
+
+    Read from the `module(...)` call, not from the step's name: since Story 24.1 a step's name is
+    its ledger suffix and its place in the frozen summary line, and one of them (`build_candles`)
+    runs a module in another context (`candles.rebuild`). A step written any other way fails here
+    rather than dropping out of the image check unseen.
+    """
+    assert len(step.args) >= 2, f"nightly Step(...) with no command: {ast.unparse(step)}"
+    inner = step.args[1]
+    shape = f"nightly step {ast.unparse(step.args[0])}"
+    assert isinstance(inner, ast.Call), (
+        f"{shape} does not build its argv with module(...): teach this parser the new shape, "
+        "or its image closure goes unchecked"
+    )
+    assert getattr(inner.func, "id", None) == "module", f"{shape} calls something else than module"
+    dotted = inner.args[0] if inner.args else None
+    assert isinstance(dotted, ast.Constant), f"{shape} runs a non-literal module"
+    assert isinstance(dotted.value, str), f"{shape} runs a non-string module"
+    return dotted.value
+
+
 def _nightly_steps() -> list[str]:
     """Return the modules `collector_core.nightly` runs as child processes (`Step(...)`)."""
-    source = _MODULES["collector_core.nightly"].read_text()
-    assert 'f"collector_core.{name}"' in source, "nightly no longer runs collector_core modules"
-    tree = ast.parse(source)
-    return [
-        f"collector_core.{node.args[0].value}"
+    tree = ast.parse(_MODULES["collector_core.nightly"].read_text())
+    steps = [
+        node
         for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Name)
-        and node.func.id == "Step"
-        and node.args
-        and isinstance(node.args[0], ast.Constant)
-        and isinstance(node.args[0].value, str)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "Step"
     ]
+    assert steps, "nightly no longer builds its chain from Step(...) calls"
+    return [_step_module(step) for step in steps]
 
 
 # Modules that launch other in-repo modules as separate processes, which `ast` imports miss.
@@ -413,7 +431,7 @@ def test_uvicorn_app_is_the_first_non_option_token() -> None:
 
 
 def test_closure_follows_a_shim_to_its_target() -> None:
-    assert "observability.error_ledger" in import_closure("ml_signals.error_ledger")
+    assert "candles.application.queries" in import_closure("ml_signals.candle_store")
 
 
 def test_closure_follows_a_literal_import_module_call() -> None:

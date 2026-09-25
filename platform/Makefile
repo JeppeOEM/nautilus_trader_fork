@@ -146,7 +146,7 @@ build-insecure:
 TEST_SOURCE_MOUNT := -v $(REPO_ROOT):/src:ro -e PLATFORM_SOURCE_DIR=/src/platform
 test:
 	$(COMPOSE) run --rm --no-deps -e HOME=/tmp -e USER=collector $(TEST_SOURCE_MOUNT) collector \
-		python3 -m pytest collector_core/tests dydx_collector/tests bybit_collector/tests hyperliquid_collector/tests ml_signals/tests ranking_engine/tests bot_tui/tests data_api/tests observability/tests kernel/tests tests -q
+		python3 -m pytest candles/tests collector_core/tests dydx_collector/tests bybit_collector/tests hyperliquid_collector/tests ml_signals/tests ranking_engine/tests bot_tui/tests data_api/tests observability/tests kernel/tests tests -q
 
 ## Record the capture hot path's cost baseline (tests/fixtures/hotpath_baseline.json, audit D-65,
 ## spine AD-D5) into the checkout: the one place the source tree is mounted writable, because
@@ -219,7 +219,7 @@ backup-catalog:
 ## and --include-open-day is added.
 build-candles:
 	$(COMPOSE) run --rm --no-deps -e HOME=/tmp collector \
-		python3 -m collector_core.build_candles --catalog /app/catalog --db /app/candles_dir/candles_dydx.db
+		python3 -m candles.rebuild --catalog /app/catalog --db /app/candles_dir/candles_dydx.db
 
 ## Launch the bot_tui terminal UI (Story 4.1) -- an interactive urwid app, not a
 ## daemon, so it's run via `docker compose run` (never `up -d`) and gated behind the

@@ -6,7 +6,7 @@ against the `bmad` branch as of 2026-09-05.
 
 Every "error ledger" site named below (`collector.late_trade`, `collector.trade_backfill`,
 `collector.candle_store`, ...) is recorded through `observability.error_ledger.record`
-(Story 23.1; formerly `ml_signals.error_ledger`, now a deprecated re-export). The sites, their
+(Story 23.1; formerly `ml_signals.error_ledger`, whose shim Story 24.1 deleted). The sites, their
 names and what they count are unchanged `[re-cited 2026-09-21: Story 23.1]`, with one addition:
 `archive_gaps.inverted_span` counts a gap marker whose `from_ns > to_ns` — a backward wall-clock
 step between a lost trade's arrival and the flush. The marker is written as the ordered span and
@@ -123,8 +123,8 @@ have no snapshot row, so their backfilled trades are rebuild orphans.
 - **Note:** the collector's `run()` (`collector.py`) never calls
   `subscribe_bars` — no bar subscription is currently active. The capability exists in
   `client.py` but is unused; **no `Bar` data is currently written to the catalog by this
-  collector.** (`ml_signals/candles.py`'s `aggregate_ohlc` instead derives candles from
-  `DydxSecondSnapshot`'s per-second OHLC fields on read — see §2.3.)
+  collector.** (the candles context's one seconds → bars fold instead derives candles from
+  `DydxSecondSnapshot`'s per-second OHLC fields — see §2.5.)
 
 #### Backfilled `Bar`s (Story 22.9)
 
@@ -220,8 +220,8 @@ with its class name, Arrow schema and `snapshots:raw` encoding unchanged (the ca
     `kernel.fold.fold_trades` (the same exact fold the nightly rebuild uses; the
     float columns hold one conversion of an exact total). A closed day's rows are
     re-derived from the raw archive (§1.1) on exchange time by `rebuild_seconds` (§6);
-    book columns and timestamps are never touched. `ml_signals/candles.py`'s
-    `aggregate_ohlc` combines these across multiple seconds for coarser candles;
+    book columns and timestamps are never touched. `candles.domain.fold.fold_arrays`
+    combines these across multiple seconds for coarser candles (§2.5);
     `ml_signals/catalog_stats.py`'s `price_series` reads `close_price` as its primary
     price source (falling back to `MarkPriceUpdate` only when no snapshot ever
     recorded a trade for that instrument).
@@ -421,21 +421,36 @@ gross `bid_added`/`bid_removed`/`ask_added`/`ask_removed` size (not just net, so
 churning level is visible). Input: `OrderBookDelta`s + `Candle`s (§2.5). Used by the
 web dashboard's footprint chart only — no ranking/live-tick consumer.
 
-### 2.5 Candles (`candles.py`)
+### 2.5 Candles (the `candles/` context, Story 24.1)
 
-Two builder functions, both recomputed fresh on every request, not stored — this is
-where minute-bar candles come from since the collector itself never subscribes to
-`Bar`s (§1.3):
+Every bar the platform shows comes from **one** seconds → bars fold,
+`candles.domain.fold.fold_arrays`: open of the first traded second in the bucket, high/low across
+all of them, close of the last, volume summed, and `seconds_observed` counting every second a row
+existed for (traded or not). It is the only such aggregation in `platform/`; the only other fold
+anywhere is trades → second, `kernel.fold.fold_trades`. The collector never subscribes to `Bar`s
+(§1.3), so this is where minute-and-wider candles come from.
 
-- `build_candles` buckets a flat list of `(ts_event, price, size)` rows into OHLC
-  candles at an arbitrary `period_seconds`. Legacy path, kept for any caller still
-  working from individual trade prices.
-- `aggregate_ohlc` — the one actually used by `dashboard.py`'s
-  `_historical_candles_json` — re-buckets already-built 1-second OHLC rows (from
-  `DydxSecondSnapshot.open/high/low/close_price`, §1.7/§1.1) into wider candles,
-  combining them correctly (open of the first second in the bucket, high/low across
-  all of them, close of the last, volume summed) rather than rederiving OHLC from a
-  flat price list.
+Three readers, all over that one fold, so they cannot disagree:
+
+- **The stored closed bar** — `candles.application.queries.window(db, iid, bar_seconds,
+  before_ms, limit)`: up to `limit` traded buckets with `t < before_ms`, oldest first, read from
+  `candles_<venue>.db` (§5). Each dict is
+  `{t (ms), o, h, l, c, v, seconds_observed, partial, source: "candle_store"}`; `partial` is
+  `seconds_observed < 0.9 * bar_seconds` (D-15), meaning the collector only saw part of the
+  bucket and its high/low/volume are understated. Only buckets that traded are returned
+  (`o IS NOT NULL`). `latest`, `oldest_t` and `watermarks` are the other reads.
+- **The forming bar** — `candles.application.forming.forming_bar(rows, bar_seconds)`: the newest
+  traded bucket of the live 1 s rows it is given, as `{t (ms), o, h, l, c, v}`, or `None` when
+  nothing traded in them. `data_api/live_candles.py` calls it per `snapshots:raw` tick over the
+  in-progress bucket's buffer; that dict *is* the `/ws/live` `bar` payload. `bar_seconds` need
+  not be one the store keeps (the chart offers 10 m, 30 m, 1 w).
+- **The archive-side read** — `candles.application.queries.candle_dicts_for_window(iid, start_ns,
+  end_ns, bar_seconds, snapshot_rows_fn)`: the same fold over raw 1 s rows read from Parquet, for
+  history older than the store's first bucket. Each dict carries `source: "raw_1s"`.
+
+`candles.domain.candle.is_valid_candle` is the shape guard every served candle passes
+(`l <= min(o,c) <= max(o,c) <= h`, `v >= 0`, all finite); a violator is a bug upstream, failed
+loudly as a 500 and counted (`candles.invalid_candle`), never clamped (DATA-07).
 
 ### 2.6 Book features (`book_features.py`)
 
@@ -738,7 +753,8 @@ runs `collector_core.nightly`, each step its own process, stopping at the first 
    counted (`orphan trades`). An instrument-day with two rows in one second or mixed schemas is
    refused and left untouched (exit 2, the chain continues).
 2. `consolidate_catalog --apply --venue --days 2` -- one file per recent closed day and data type.
-3. `build_candles --day --venue --workers 1` -- refolds the day into `candles_<venue>.db`.
+3. `python -m candles.rebuild --day --venue --workers 1` -- refolds the day into
+   `candles_<venue>.db` (the nightly step is still named `build_candles`).
 4. `compare_klines` -- every traded minute against the venue's own 1 m klines, exact
    integer units (no tolerance), parsed from the venue's decimal strings. Bybit's klines are
    seeded with the previous close, so our Bybit bars are put in that definition first

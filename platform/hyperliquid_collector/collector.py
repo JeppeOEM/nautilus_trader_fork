@@ -25,6 +25,9 @@ import asyncio
 import os
 from pathlib import Path
 
+from candles.application.prune import loop as candle_prune_loop
+from candles.application.sink import CandleSink
+from candles.infrastructure.sqlite_store import store_from_env
 from collector_core.collector import Collector
 from collector_core.collector import run_forever
 from collector_core.config import CoreConfig
@@ -45,7 +48,16 @@ class HyperliquidCollector(Collector):
             environment=config.environment,
             trade_feeds=config.trade_feeds,
         )
-        super().__init__(config, client)
+        # Composition root: this process owns Hyperliquid's candle store (`CANDLES_DB_PATH`), so it
+        # opens it, hands capture the sink port and runs the retention loop -- this venue's first
+        # `extra_loops` entry (its open interest arrives over the WebSocket, so it needs no poll).
+        store = store_from_env(config.catalog_path)
+        super().__init__(
+            config,
+            client,
+            extra_loops=(candle_prune_loop(store),),
+            second_sink=CandleSink(store),
+        )
 
 
 if __name__ == "__main__":

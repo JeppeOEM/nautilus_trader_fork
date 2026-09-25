@@ -47,6 +47,13 @@ _IID = "BTC-USD-PERP.DYDX"
         ("candles:BTC-USD-PERP.DYDX", None),  # missing bar_seconds
         ("candles:BTC-USD-PERP.DYDX:sixty", None),  # non-numeric bar_seconds
         ("candles::60", None),  # empty iid
+        ("candles:BTC-USD-PERP.DYDX:0", None),  # 0 would divide-by-zero in the bucket math
+        ("candles:BTC-USD-PERP.DYDX:604800", (_IID, 604_800)),  # 1w, the widest bar served
+        # Above the bound, `candles.domain.fold` raises from numpy's int64 bucket arithmetic, and
+        # that raise escapes LiveCandleBus.handle_batch into its reconnect loop -- one such channel
+        # would stop live candles for every connected client, so it must never reach a subscription.
+        ("candles:BTC-USD-PERP.DYDX:604801", None),
+        ("candles:BTC-USD-PERP.DYDX:99999999999999999999", None),
     ],
 )
 def test_parse_candle_channel(channel: str, expected: tuple[str, int] | None) -> None:

@@ -234,7 +234,6 @@ def _collectors(root: Path) -> list[tuple[Any, list[str], dict[str, Any]]]:
     for n, venue in enumerate(_venues()):
         iids = [venue["iid"].format(t=t) for t in _TICKERS[:_INSTRUMENTS_PER_VENUE]]
         catalog = root / f"catalog_{n}"
-        os.environ["CANDLES_DB_PATH"] = str(root / f"candles_{n}.db")
         config = CoreConfig(
             environment="mainnet",
             catalog_path=str(catalog),

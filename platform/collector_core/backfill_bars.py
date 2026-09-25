@@ -541,7 +541,7 @@ def _resolve(
     if venue not in _SUPPORTED_SPECS:
         return None, (
             f"venue {venue} is not backfillable by this tool; dYdX bars are derived from its own "
-            f"1 s archive (python -m collector_core.build_candles), not from a kline REST backfill"
+            f"1 s archive (python -m candles.rebuild), not from a kline REST backfill"
         )
     if venue == "HYPERLIQUID" and environment not in _HYPERLIQUID_ENVIRONMENTS:
         return None, f"Hyperliquid has no '{environment}' environment (mainnet or testnet only)"
