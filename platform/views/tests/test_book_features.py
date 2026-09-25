@@ -14,13 +14,6 @@
 # -------------------------------------------------------------------------------------------------
 """Unit tests for book_features: depth_profile, imbalance, liquidity_distance, CancellationTracker."""
 
-from ml_signals.book_features import CancellationTracker
-from ml_signals.book_features import DepthProfile
-from ml_signals.book_features import book_imbalance
-from ml_signals.book_features import compute_features
-from ml_signals.book_features import depth_profile
-from ml_signals.book_features import liquidity_distance
-from ml_signals.book_features import top_of_book_series
 from nautilus_trader.model.book import OrderBook
 from nautilus_trader.model.data import BookOrder
 from nautilus_trader.model.data import OrderBookDelta
@@ -30,6 +23,13 @@ from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
+from views.chart_series import CancellationTracker
+from views.chart_series import DepthProfile
+from views.chart_series import book_imbalance
+from views.chart_series import compute_features
+from views.chart_series import depth_profile
+from views.chart_series import liquidity_distance
+from views.chart_series import top_of_book_series
 
 
 IID = InstrumentId.from_str("TEST-PERP.SIM")

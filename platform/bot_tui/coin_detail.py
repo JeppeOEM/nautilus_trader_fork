@@ -18,16 +18,21 @@ import, no I/O.
 
 Every live indicator (microprice, OFI, OBI, spread, cvd, ...) shown in Coin-detail is
 now read straight off ranking_engine's rankings:live rank entry for the open
-instrument via rank_row_for() below -- bot_tui itself computes none of it (SSOT-02,
-platform/CLAUDE.md: this used to be a 3rd independent computation of the same numbers,
-alongside ranking_engine's own and dashboard's now-since-deleted copy). Only the raw
-order-book ladder (bid/ask price/size arrays, no scalar-message equivalent) still comes
-from coin_detail_state.py's own snapshots:raw subscription.
+instrument via `views.coin_detail.rank_row_for` -- bot_tui itself computes none of it
+(SSOT-02, platform/CLAUDE.md: this used to be a 3rd independent computation of the same
+numbers, alongside ranking_engine's own and dashboard's now-since-deleted copy). Only the
+raw order-book ladder (bid/ask price/size arrays, no scalar-message equivalent) still
+comes from coin_detail_state.py's own snapshots:raw subscription, decoded by
+`views.coin_detail.snapshot_for`. Since Story 24.2 this module formats only; the lookup
+itself moved to `views.coin_detail` and is served here, with a DeprecationWarning, until
+`MOVED_NAMES_REMOVE_AFTER`.
 """
 
 import base64
+import warnings
 
 from kernel.indicators import mid_price
+from views import coin_detail as _views_coin_detail
 
 
 # Verbatim UX copy (EXPERIENCE.md State Patterns: "Thin order book") -- keep exact,
@@ -36,18 +41,26 @@ NO_BIDS_TEXT = "no bids"
 NO_ASKS_TEXT = "no asks"
 
 
-def rank_row_for(ranking: dict | None, instrument_id: str) -> dict | None:
-    """
-    The rankings:live rank entry matching instrument_id, or None if no rankings:live
-    message has arrived yet or this instrument isn't (yet) in it -- e.g. a coin just
-    opened before its first live tick has propagated through ranking_engine.
-    """
-    if ranking is None:
-        return None
-    for row in ranking.get("ranks", []):
-        if isinstance(row, dict) and row.get("instrument_id") == instrument_id:
-            return row
-    return None
+# Story 24.2 moved the rank-row lookup to the views context. The old name is served, as the same
+# object, with a DeprecationWarning until the story below is done.
+MOVED_NAMES_REMOVE_AFTER = "24-4-research-pure-consumer-and-broken-tests-repaired"
+_MOVED_NAMES: dict[str, str] = {"rank_row_for": "views.coin_detail.rank_row_for"}
+
+_TARGET_MODULES = {"views.coin_detail": _views_coin_detail}
+
+
+def __getattr__(name: str) -> object:
+    if name not in _MOVED_NAMES:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    target = _MOVED_NAMES[name]
+    warnings.warn(
+        f"bot_tui.coin_detail.{name} moved to {target} (Story 24.2); "
+        f"removed after {MOVED_NAMES_REMOVE_AFTER}",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    module, _, attr = target.rpartition(".")
+    return getattr(_TARGET_MODULES[module], attr)  # a KeyError is a table typo: loud
 
 
 def format_indicator(value: float | None, decimals: int = 8) -> str:

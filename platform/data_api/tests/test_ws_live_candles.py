@@ -26,9 +26,9 @@ import asyncio
 
 import pytest
 from kernel.second_snapshot import DydxSecondSnapshot
+from views.live_candles import LiveCandleBus
 
-from data_api import live_candles
-from data_api.live_candles import LiveCandleBus
+from data_api import buses
 from data_api.ws.live import _CandleSubscriptions
 from data_api.ws.live import _handle_control_message
 from data_api.ws.live import _parse_candle_channel
@@ -65,11 +65,11 @@ def isolated_bus(monkeypatch: pytest.MonkeyPatch) -> LiveCandleBus:
     """
     A fresh `LiveCandleBus`, isolated from the module-level `live_candle_bus` the
     running app uses -- `_CandleSubscriptions` (ws/live.py) calls through
-    `live_candles.live_candle_bus` dynamically, so patching the module attribute is
+    `buses.live_candle_bus` dynamically, so patching the module attribute is
     enough to redirect it without editing ws/live.py's own code.
     """
-    bus = LiveCandleBus()
-    monkeypatch.setattr(live_candles, "live_candle_bus", bus)
+    bus = LiveCandleBus("no-catalog-read-in-this-test")
+    monkeypatch.setattr(buses, "live_candle_bus", bus)
     return bus
 
 

@@ -402,7 +402,7 @@
     "/api/rankings": {
       "get": {
         "summary": "Get Rankings",
-        "description": "503 before the bus has cached its first message -- an honest transient state, not a\nfabricated empty snapshot (I/O matrix). Referencing `redis_bus.bus` via the module\n(not importing the `bus` name directly) so tests can `monkeypatch.setattr(redis_bus,\n\"bus\", RankingsBus())` to exercise this route against an isolated cache.",
+        "description": "503 before the bus has cached its first message -- an honest transient state, not a\nfabricated empty snapshot (I/O matrix). Referencing `buses.bus` via the module\n(not importing the `bus` name directly) so tests can `monkeypatch.setattr(buses,\n\"bus\", RankingsBus())` to exercise this route against an isolated cache.",
         "operationId": "get_rankings_api_rankings_get",
         "responses": {
           "200": {
@@ -464,7 +464,7 @@
     "/api/rankings/technicals-values": {
       "get": {
         "summary": "Get Technicals Values",
-        "description": "Latest value of every requested indicator for every currently-ranked instrument.\n\nComputes nothing itself (AD-F2): it dispatches to the chart's own `replay_indicator`, so a\ncolumn always equals what that coin's chart shows. Known limit: sequential per-coin catalog\nreads behind a 90s TTL cache (> the client's 60s poll, or it never hits) (one live key) -- no single-flight, add one if concurrent\nviewers ever load the box.",
+        "description": "Latest value of every requested indicator for every currently-ranked instrument.\n\nComputes nothing itself (AD-F2): `views.ranking_columns.technicals_values` dispatches to the\nchart's own indicator replay, so a column always equals what that coin's chart shows. Known limit: sequential per-coin catalog\nreads behind a 90s TTL cache (> the client's 60s poll, or it never hits) (one live key) -- no single-flight, add one if concurrent\nviewers ever load the box.",
         "operationId": "get_technicals_values_api_rankings_technicals_values_get",
         "parameters": [
           {
@@ -748,7 +748,7 @@
     "/api/coin/{instrument_id}/indicator-values": {
       "get": {
         "summary": "Get Indicator Values",
-        "description": "Bounded candle window (mirrors `candles.py`'s window/limit/bar_seconds contract), then\nper-requested-name `replay_indicator` dispatch, results keyed by `_indicator_id(name,\nparams)` (AD-F2/AD-F3).\n\nRe-derives its own bounded window server-side rather than accepting client-supplied\ncandles in the request body (Design Notes: DESIGN-01) -- always a bounded *historical*\nreplay of `[start_ns, before_ns)`, mirroring `indicator_series.py`'s own purely-historical\nscroll-back model; the candlestick's live edge has its own sanctioned path (AD-F7) that\nthis route does not duplicate.\n\nA custom indicator whose instrument never opted into raw-delta capture returns `None` for\nevery point (pre-existing `custom_indicators.py` behavior, reused unchanged) -- not an\nerror (I/O matrix: \"Values route returns None per-point for an uncaptured custom\nindicator, not an error\").",
+        "description": "Bounded candle window (mirrors `candles.py`'s window/limit/bar_seconds contract), then\nper-requested-name `indicator_picker.replay_entry` dispatch, results keyed by\n`indicator_picker.indicator_id(name, params)` (AD-F2/AD-F3).\n\nRe-derives its own bounded window server-side rather than accepting client-supplied\ncandles in the request body (Design Notes: DESIGN-01) -- always a bounded *historical*\nreplay of `[start_ns, before_ns)`, mirroring `indicator_series.py`'s own purely-historical\nscroll-back model; the candlestick's live edge has its own sanctioned path (AD-F7) that\nthis route does not duplicate.\n\nA custom indicator whose instrument never opted into raw-delta capture returns `None` for\nevery point (pre-existing custom-indicator behavior, reused unchanged) -- not an\nerror (I/O matrix: \"Values route returns None per-point for an uncaptured custom\nindicator, not an error\").",
         "operationId": "get_indicator_values_api_coin__instrument_id__indicator_values_get",
         "parameters": [
           {

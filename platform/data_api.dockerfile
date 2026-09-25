@@ -28,7 +28,7 @@ COPY platform/observability ./observability
 COPY platform/kernel ./kernel
 COPY platform/candles ./candles
 COPY platform/collector_core ./collector_core
-COPY platform/common ./common
+COPY platform/views ./views
 COPY platform/dydx_collector ./dydx_collector
 COPY platform/ml_signals ./ml_signals
 COPY platform/ranking_engine ./ranking_engine

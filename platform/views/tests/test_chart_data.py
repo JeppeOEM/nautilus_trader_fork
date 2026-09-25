@@ -28,10 +28,12 @@ import tempfile
 
 import pytest
 from kernel.second_snapshot import DydxSecondSnapshot
+from observability import error_ledger
 
-from ml_signals.chart_data import compute_chart_series
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
+from views.chart_series import EmptyTopOfBook
+from views.chart_series import compute_chart_series
 
 
 _IID = "BTC-USD-PERP.DYDX"
@@ -137,25 +139,33 @@ def test_compute_chart_series_thin_ask_side_does_not_crash_or_populate_mid_imbal
     assert data["imbalance"][0]["value"] == pytest.approx(3.0 / 5.0)
 
 
-def test_compute_chart_series_skips_crossed_snapshot() -> None:
+def test_compute_chart_series_feeds_a_crossed_snapshot_through_unchanged() -> None:
     """
-    A crossed/touched snapshot (bid >= ask) is a normal, expected dYdX v4 condition during
-    reconnect replay (DATA-04) -- must be dropped from every series, not fed through as a
-    negative spread.
+    A crossed/touched second in the archive is data, not something the reader second-guesses
+    (spine AD-D11, Story 24.2): it is fed through every series as written -- including a negative
+    spread -- instead of being dropped (the pre-24.2 behaviour this test used to pin).
     """
     crossed = _snapshot(_TS_NS, [101.0], [1.0], [100.0], [1.0])
     with tempfile.TemporaryDirectory() as tmp:
         _write(tmp, [crossed])
         data = compute_chart_series(tmp, _IID, start_ns=_TS_NS - 1, end_ns=_TS_NS + 1)
 
-    assert data == {
-        "microprice": [],
-        "spread": [],
-        "imbalance": [],
-        "mid_imbalance": [],
-        "bid_depth": [],
-        "ask_depth": [],
-    }
+    assert data["spread"] == [{"time": _TS_NS / 1e9, "value": -1.0}]
+    assert data["bid_depth"] == [{"time": _TS_NS / 1e9, "value": 1.0}]
+    assert data["ask_depth"] == [{"time": _TS_NS / 1e9, "value": 1.0}]
+    assert len(data["imbalance"]) == 1
+
+
+def test_compute_chart_series_fails_loudly_on_an_empty_top() -> None:
+    """An empty side is a gate malfunction (DATA-07): ledgered and raised, never skipped."""
+    error_ledger.reset()
+    one_sided = _snapshot(_TS_NS, [], [], [100.0], [1.0])
+    with tempfile.TemporaryDirectory() as tmp:
+        _write(tmp, [one_sided])
+        with pytest.raises(EmptyTopOfBook):
+            compute_chart_series(tmp, _IID, start_ns=_TS_NS - 1, end_ns=_TS_NS + 1)
+
+    assert error_ledger.counts() == {"views.snapshot_without_top": 1}
 
 
 def test_compute_chart_series_output_is_chronological_across_write_batches() -> None:

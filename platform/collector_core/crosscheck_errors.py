@@ -124,7 +124,7 @@ _DEFAULT_FAIL_ON = (
 # used to pick which service's ledger explains a given instrument's gap. `ranking_engine`,
 # `data_api`, `live-paper` and `bot_tui` have no owning venue and are never gap-matched through
 # this map -- they are still always in the printed "Services" section (`build_report` never
-# filters that by venue). Kept in parity with `common.venues.VENUE_KINDS` by
+# filters that by venue). Kept in parity with `kernel.venues.VENUE_KINDS` by
 # `test_venue_service_map_covers_every_registered_venue`: a new venue there needs an entry here.
 _VENUE_SERVICE = {
     "DYDX": "collector",

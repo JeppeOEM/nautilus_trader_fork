@@ -33,38 +33,10 @@ written is ledgered (`archive_gaps.write`).
 """
 
 import os
-import warnings
 
 from kernel import archive_markers
-from kernel import clocks
 from kernel.archive_markers import ArchiveGap
 from observability import error_ledger
-
-
-# Story 23.2 moved the marker format and the skew bound to the kernel. The old names are served,
-# as the same objects, with a DeprecationWarning until the story below is done.
-MOVED_NAMES_REMOVE_AFTER = "24-2-views-read-models-and-reader-side-revalidation-removed"
-_MOVED_NAMES: dict[str, str] = {
-    "ARRIVAL_MARGIN_NS": "kernel.clocks.MAX_TS_INIT_SKEW_NS",
-    "GAPS_DIRNAME": "kernel.archive_markers.GAPS_DIRNAME",
-    "in_gap": "kernel.archive_markers.in_gap",
-}
-
-_TARGET_MODULES = {"kernel.clocks": clocks, "kernel.archive_markers": archive_markers}
-
-
-def __getattr__(name: str) -> object:
-    if name not in _MOVED_NAMES:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    target = _MOVED_NAMES[name]
-    warnings.warn(
-        f"collector_core.archive_gaps.{name} moved to {target} (Story 23.2); "
-        f"removed after {MOVED_NAMES_REMOVE_AFTER}",
-        DeprecationWarning,
-        stacklevel=2,
-    )
-    module, _, attr = target.rpartition(".")
-    return getattr(_TARGET_MODULES[module], attr)  # a KeyError is a table typo: loud
 
 
 def record_gap(

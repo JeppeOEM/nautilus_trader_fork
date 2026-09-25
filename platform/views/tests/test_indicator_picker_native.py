@@ -12,11 +12,14 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
-"""Unit tests for chart_indicators.py's INDICATOR_CATALOG dispatch/replay mechanism."""
+"""
+Unit tests for `views.indicator_picker`'s native half (was `ml_signals/chart_indicators.py`):
+the INDICATOR_CATALOG dispatch/replay mechanism. `replay_indicator` is `replay_native`.
+"""
 
 import nautilus_trader.indicators as nt_indicators
-from ml_signals.chart_indicators import INDICATOR_CATALOG
-from ml_signals.chart_indicators import replay_indicator
+from views.indicator_picker import INDICATOR_CATALOG
+from views.indicator_picker import replay_native as replay_indicator
 
 
 def _candle(t: int, o: float, h: float, low: float, c: float, v: float = 1.0) -> dict:

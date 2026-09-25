@@ -55,7 +55,7 @@ from _source_tree import story_statuses
 from _source_tree import unknown_or_done
 
 
-THIS_STORY = "23-2-kernel-shared-kernel"
+THIS_STORY = "24-2-views-read-models-and-reader-side-revalidation-removed"
 
 KERNEL = "kernel"
 OBSERVABILITY = "observability"
@@ -118,7 +118,7 @@ GRAPH: frozenset[tuple[str, str]] = frozenset(
 # Longest dotted prefix wins. A test module belongs to the context of the code it tests, so it
 # moves with that code.
 LEGACY_MODULE_TO_CONTEXT: dict[str, str] = {
-    # --- collector_core: capture, except the kernel shims and archive/candles modules it still hosts
+    # --- collector_core: capture, except the archive/candles modules it still hosts
     "collector_core": CAPTURE,
     # the marker file I/O over `kernel.archive_markers` (archive's, Story 25.1)
     "collector_core.archive_gaps": ARCHIVE,
@@ -132,19 +132,15 @@ LEGACY_MODULE_TO_CONTEXT: dict[str, str] = {
     # Story 23.3; moves with archive in 25.1.
     "collector_core.crosscheck_errors": ARCHIVE,
     "collector_core.feed": CAPTURE,
-    "collector_core.fold": KERNEL,
     "collector_core.integrity": CAPTURE,
     "collector_core.measure_lag": ARCHIVE,
     "collector_core.migrate_open_interest": ARCHIVE,
     "collector_core.nightly": ARCHIVE,
-    "collector_core.open_interest": KERNEL,
     "collector_core.ports": CAPTURE,
     "collector_core.prune_catalog": ARCHIVE,
     "collector_core.rebuild_seconds": ARCHIVE,
     "collector_core.repair_catalog": ARCHIVE,
-    "collector_core.second_snapshot": KERNEL,
     "collector_core.trade_backfill": CAPTURE,
-    "collector_core.venue_http": KERNEL,
     "collector_core.tests": CAPTURE,
     "collector_core.tests.test_backfill_bars": ARCHIVE,
     "collector_core.tests.test_compare_klines": ARCHIVE,
@@ -168,11 +164,9 @@ LEGACY_MODULE_TO_CONTEXT: dict[str, str] = {
     "dydx_collector.tests.test_config": COLLECTION_CONTROL,
     "dydx_collector.tests.test_normalize_snapshot_schema": ARCHIVE,
     "dydx_collector.tests.test_repair_catalog": ARCHIVE,
-    # --- common: a shim package over the one venue-id parser (kernel.venues, Story 23.2)
-    "common": KERNEL,
     # --- ml_signals: no package default, so a new module there must be placed deliberately
     "ml_signals.__init__": RESEARCH,  # the package itself; see `_context_of`
-    "ml_signals.book_features": VIEWS,
+    "ml_signals.book_features": VIEWS,  # Story 24.2 shim, as are the other VIEWS modules here
     "ml_signals.candle_store": CANDLES,  # Story 24.1 shim
     "ml_signals.candles": CANDLES,  # Story 24.1 shim
     "ml_signals.catalog_stats": VIEWS,  # split per symbol below
@@ -181,26 +175,18 @@ LEGACY_MODULE_TO_CONTEXT: dict[str, str] = {
     "ml_signals.chart_indicators": VIEWS,
     "ml_signals.custom_indicators": VIEWS,
     "ml_signals.footprint": VIEWS,
-    "ml_signals.indicators": KERNEL,
     "ml_signals.metrics_computer": RANKING,
-    "ml_signals.performance_metrics": KERNEL,
     "ml_signals.rank_history": RANKING,
     "ml_signals.ranking_columns": VIEWS,
     "ml_signals.run_backtest": RESEARCH,
     "ml_signals.screener_columns_config": VIEWS,
     "ml_signals.strategies": RESEARCH,
-    "ml_signals.venue": KERNEL,
     "ml_signals.watchlist": RESEARCH,
     "ml_signals.tests.__init__": RESEARCH,
     "ml_signals.tests.conftest": RESEARCH,
     "ml_signals.tests.test_ad8_boundary": RESEARCH,
-    "ml_signals.tests.test_book_features": VIEWS,
-    "ml_signals.tests.test_catalog_stats": VIEWS,
-    "ml_signals.tests.test_chart_data": VIEWS,
-    "ml_signals.tests.test_chart_indicator_config": VIEWS,
-    "ml_signals.tests.test_chart_indicators": VIEWS,
-    "ml_signals.tests.test_custom_indicators": VIEWS,
-    "ml_signals.tests.test_footprint": VIEWS,
+    # catalog_stats' own tests cover what stayed: ranking's price stats and archive's gap helpers
+    "ml_signals.tests.test_catalog_stats": RANKING,
     "ml_signals.tests.test_metrics_computer": RANKING,
     "ml_signals.tests.test_ofi_strategy": RESEARCH,
     "ml_signals.tests.test_ofi_strategy_indicator_consistency": RESEARCH,
@@ -213,13 +199,14 @@ LEGACY_MODULE_TO_CONTEXT: dict[str, str] = {
     # --- ranking_engine / live_paper: one context each
     "ranking_engine": RANKING,
     "live_paper": BOTS,
-    # --- data_api: the interface adapter, hosting alerting and two views modules until they move
+    # --- data_api: the interface adapter, hosting alerting until it moves (Story 24.3) and three
+    # Story 24.2 shims of views modules
     "data_api": DATA_API,
     "data_api.alerts": ALERTING,
     "data_api.routes.alerts": ALERTING,
     "data_api.live_candles": VIEWS,
     "data_api.redis_bus": VIEWS,
-    "data_api.tests.test_live_candles": VIEWS,
+    "data_api.routes.paging": VIEWS,
     # --- bot_tui: the terminal interface adapter
     "bot_tui": BOT_TUI,
 }
@@ -227,9 +214,10 @@ LEGACY_MODULE_TO_CONTEXT: dict[str, str] = {
 # Modules split across contexts: (module, top-level name) -> context. Every top-level function and
 # class of a split module is listed (asserted), so its move is fully planned.
 LEGACY_SYMBOL_TO_CONTEXT: dict[tuple[str, str], str] = {
-    # catalog_stats: AD-D1's three-way split (its kernel read helpers moved in Story 23.2; the
-    # module `__getattr__` only serves those moved names, with a DeprecationWarning).
-    ("ml_signals.catalog_stats", "__getattr__"): KERNEL,
+    # catalog_stats: AD-D1's three-way split. Its kernel read helpers moved in Story 23.2 and its
+    # views read in Story 24.2; the module `__getattr__` only serves that moved views name
+    # (`query_second_snapshots`), with a DeprecationWarning.
+    ("ml_signals.catalog_stats", "__getattr__"): VIEWS,
     ("ml_signals.catalog_stats", "find_gaps"): ARCHIVE,
     ("ml_signals.catalog_stats", "_overlapping_intervals"): ARCHIVE,
     ("ml_signals.catalog_stats", "_load"): ARCHIVE,
@@ -238,9 +226,9 @@ LEGACY_SYMBOL_TO_CONTEXT: dict[tuple[str, str], str] = {
     ("ml_signals.catalog_stats", "price_series"): RANKING,
     ("ml_signals.catalog_stats", "price_stats_from_series"): RANKING,
     ("ml_signals.catalog_stats", "price_stats"): RANKING,
-    ("ml_signals.catalog_stats", "query_second_snapshots"): VIEWS,
-    ("ml_signals.catalog_stats", "overview_table"): VIEWS,
-    ("ml_signals.catalog_stats", "list_instruments"): VIEWS,
+    # its only caller is ranking's `metrics_computer` (`overview_table`, its views caller, was
+    # deleted in Story 24.2)
+    ("ml_signals.catalog_stats", "list_instruments"): RANKING,
     # dydx open interest: `classify_liquidity` is the collection plan's admission rule.
     ("dydx_collector.open_interest", "classify_liquidity"): COLLECTION_CONTROL,
     ("dydx_collector.open_interest", "_fetch_markets_json"): CAPTURE,
@@ -251,14 +239,7 @@ LEGACY_SYMBOL_TO_CONTEXT: dict[tuple[str, str], str] = {
 # Cross-context edges the tree still has, (importer context, imported context) -> the story whose
 # `done` retires the edge. The sites named are the ones the retiring story removes.
 LEGACY_EDGES_UNTIL: dict[tuple[str, str], str] = {
-    # data_api routes (and their tests) read the candles context's query services and its SQLite
-    # adapter directly instead of going through views' read models.
-    (DATA_API, CANDLES): "24-2-views-read-models-and-reader-side-revalidation-removed",
-    # data_api reads ranking_engine.metrics_store instead of the ranking query service via views.
-    (DATA_API, RANKING): "24-2-views-read-models-and-reader-side-revalidation-removed",
-    # data_api/live_candles (and its test) read data_api.settings for the catalog/candle paths.
-    (VIEWS, DATA_API): "24-2-views-read-models-and-reader-side-revalidation-removed",
-    # data_api/alerts.py uses data_api.redis_bus's queue helpers; AlertEngine becomes a
+    # data_api/alerts.py uses views.rankings_bus's queue helpers; AlertEngine becomes a
     # BarObserver wired by the composition root, with no alerting -> views import.
     (ALERTING, VIEWS): "24-3-alerting-context-as-forming-bar-observer",
     # dYdX `_prune_loop` calls `prune_catalog.prune_instrument`; archive's RetentionPolicy becomes
@@ -270,20 +251,18 @@ LEGACY_EDGES_UNTIL: dict[tuple[str, str], str] = {
     # The capture tests read their own written snapshots back with `query_second_snapshots`
     # (a views read); they move with capture into capture/tests.
     (CAPTURE, VIEWS): "26-2-capture-package-and-venue-packages-with-entrypoints",
+    # The one edge Story 24.2's move newly exposed: `ml_signals.tests.
+    # test_ofi_strategy_indicator_consistency` replays OFI through `top_of_book_series`, a views
+    # function since `book_features` moved (it was intra-package before). Research consumes the
+    # catalog and ranking's published output only once Story 24.4 repairs that test. The same
+    # import sits in `dydx_collector/notebooks/dydx_catalog_pandas.ipynb`, which this `.py` scan
+    # cannot see: Story 24.4 must repoint it too before deleting this entry.
+    (RESEARCH, VIEWS): "24-4-research-pure-consumer-and-broken-tests-repaired",
 }
 
-# Cross-context imports of a `_private` name: (importing module, "module._name") -> story.
-_VIEWS_STORY = "24-2-views-read-models-and-reader-side-revalidation-removed"
-LEGACY_PRIVATE_IMPORTS_UNTIL: dict[tuple[str, str], str] = {
-    # data_api route tests seed a candle store with the candle tests' private row helpers; they
-    # go when data_api stops touching the candle store directly (views move).
-    ("data_api.tests.test_candles", "candles.tests.test_candle_store._DAY0_MS"): _VIEWS_STORY,
-    ("data_api.tests.test_candles", "candles.tests.test_candle_store._second"): _VIEWS_STORY,
-    (
-        "data_api.tests.test_screener_columns",
-        "candles.tests.test_candle_store._second",
-    ): _VIEWS_STORY,
-}
+# Cross-context imports of a `_private` name: (importing module, "module._name") -> story. Empty
+# since Story 24.2 replaced the data_api route tests' borrowed candle-test helpers with their own.
+LEGACY_PRIVATE_IMPORTS_UNTIL: dict[tuple[str, str], str] = {}
 
 
 # A composition root wires an adapter into a port its own context declares, so it is the one module
@@ -301,6 +280,13 @@ COMPOSITION_ROOTS: dict[str, frozenset[str]] = {
     "dydx_collector.tests.test_candle_feed": frozenset({CANDLES}),
     "bybit_collector.tests.test_candle_wiring": frozenset({CANDLES}),
     "hyperliquid_collector.tests.test_candle_wiring": frozenset({CANDLES}),
+    # The data_api route tests seed the upstream store through its only writer -- the candle store
+    # (`CandleStore`) and ranking's `metrics_store.write` -- so the route under test reads a real
+    # store; `data_api` itself reaches neither context (Story 24.2).
+    "data_api.tests.test_candles": frozenset({CANDLES}),
+    "data_api.tests.test_screener_columns": frozenset({CANDLES}),
+    "data_api.tests.test_data_api": frozenset({RANKING}),
+    "data_api.tests.test_metrics": frozenset({RANKING}),
 }
 
 
@@ -348,7 +334,7 @@ _PACKAGE_INITS = {name for name, path in _MODULES.items() if path.name == "__ini
 # The legacy packages: every top-level package that is not itself a context. `data_api` and
 # `bot_tui` keep their names (interface adapters) and are judged like any context package.
 LEGACY_PACKAGES = frozenset(
-    {"collector_core", "dydx_collector", "bybit_collector", "hyperliquid_collector", "common"}
+    {"collector_core", "dydx_collector", "bybit_collector", "hyperliquid_collector"}
     | {"ml_signals", "ranking_engine", "live_paper"}
 )
 
@@ -1190,3 +1176,165 @@ def test_suffix_rule_catches_literal_and_formatted_suffixes() -> None:
         'a.endswith(".BYBIT")\nb.endswith(f".{v}")\nc.endswith(".parquet")\nd.endswith("x")\n'
     )
     assert _suffix_dispatches(tree) == [1, 2]
+
+
+# --- views: the read models both interfaces show (spine AD-D11, Story 24.2) ----------------------
+
+# The only names a non-test `views` module may take from candles or ranking: their query services
+# (AC #3 of Story 24.2). An upper bound on the spine's illustrative list, naming exactly what the
+# read models need -- `latest`/`verified_status` are unused by views, so unlisted. A store adapter
+# (`candles.infrastructure`) is never reachable: `open_store` hands out the read-only connection.
+VIEWS_QUERY_SERVICES: dict[str, frozenset[str]] = {
+    "candles.application.queries": frozenset(
+        {"window", "oldest_t", "candle_dicts_for_window", "open_store"}
+    ),
+    "candles.application.forming": frozenset({"forming_bar", "bars_from_rows"}),
+    "candles.domain.candle": frozenset({"Candle", "is_valid_candle"}),
+    "ranking_engine.metrics_store": frozenset({"history", "nearest"}),
+}
+# Packages views never imports (AD-D2): the interfaces, research, capture and the legacy shims.
+_VIEWS_FORBIDDEN_PACKAGES = frozenset({DATA_API, BOT_TUI, "ml_signals", "collector_core", "common"})
+# What an interface adapter never imports directly: every read goes through views (AC #3).
+_INTERFACE_FORBIDDEN_PACKAGES = frozenset(
+    {"ml_signals", "collector_core", "ranking_engine", "candles", "common"}
+)
+
+
+def _is_test_module(module: str) -> bool:
+    return ".tests" in f".{module}"
+
+
+def _views_upstream_imports() -> list[Import]:
+    """Every import a non-test `views` module takes from the candles or ranking context."""
+    return [
+        imp
+        for imp in _IMPORTS
+        if imp.src.split(".")[0] == VIEWS
+        and not _is_test_module(imp.src)
+        and imp.dst_ctx in (CANDLES, RANKING)
+    ]
+
+
+def test_views_takes_only_the_listed_query_services_from_candles_and_ranking() -> None:
+    beyond = sorted(
+        _site(imp)
+        for imp in _views_upstream_imports()
+        if imp.name not in VIEWS_QUERY_SERVICES.get(imp.dst, frozenset())
+    )
+    assert beyond == [], (
+        "views calls only the candles/ranking query services (VIEWS_QUERY_SERVICES)"
+    )
+
+
+def test_every_listed_views_query_service_is_still_used() -> None:
+    used = {(imp.dst, imp.name) for imp in _views_upstream_imports()}
+    unused = sorted(
+        f"{module}.{name}"
+        for module, names in VIEWS_QUERY_SERVICES.items()
+        for name in names
+        if (module, name) not in used
+    )
+    assert unused == [], "no views module needs these any more: delete them from the table"
+
+
+def test_views_imports_no_interface_research_capture_or_legacy_package() -> None:
+    reaching = sorted(
+        _site(imp)
+        for imp in _IMPORTS
+        if imp.src.split(".")[0] == VIEWS
+        and not _is_test_module(imp.src)
+        and imp.dst.split(".")[0] in _VIEWS_FORBIDDEN_PACKAGES
+    )
+    assert reaching == [], "views imports only kernel, observability and the query services"
+
+
+def test_no_interface_module_imports_a_context_views_should_read_for_it() -> None:
+    reaching = sorted(
+        _site(imp)
+        for imp in _IMPORTS
+        if imp.src.split(".")[0] in (DATA_API, BOT_TUI)
+        and not _is_test_module(imp.src)
+        and imp.dst.split(".")[0] in _INTERFACE_FORBIDDEN_PACKAGES
+    )
+    assert reaching == [], "data_api and bot_tui format and transport; views reads (AD-D11)"
+
+
+# A `snapshots:raw` payload (or any `DydxSecondSnapshot.to_dict()`) is parsed only by its own type,
+# `DydxSecondSnapshot.from_dict` (spine AD-D3): reading one of these keys off a dict is hand-parsing.
+_SNAPSHOT_FIELDS = frozenset(
+    {
+        "bid_prices",
+        "bid_sizes",
+        "ask_prices",
+        "ask_sizes",
+        "buy_volume",
+        "sell_volume",
+        "buy_count",
+        "sell_count",
+        "open_price",
+        "high_price",
+        "low_price",
+        "close_price",
+    }
+)
+# Modules still hand-indexing a snapshot payload -> the story whose `done` retires the site.
+LEGACY_SNAPSHOT_INDEXING_UNTIL: dict[str, str] = {
+    # the ranking engine's own `snapshots:raw` ingest; RankingBoard decodes through from_dict.
+    "ranking_engine.engine": "25-2-ranking-context-rankingboard-replaces-module-globals",
+}
+
+
+def _snapshot_key_reads(tree: ast.AST) -> list[int]:
+    """Lines reading a snapshot field by key: `x["bid_prices"]` or `x.get("bid_prices", ...)`."""
+    lines = []
+    for node in ast.walk(tree):
+        key = None
+        if isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Load):
+            key = node.slice.value if isinstance(node.slice, ast.Constant) else None
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == "get"
+            and node.args
+            and isinstance(node.args[0], ast.Constant)
+        ):
+            key = node.args[0].value
+        if key in _SNAPSHOT_FIELDS:
+            lines.append(node.lineno)
+    return lines
+
+
+def test_snapshot_key_rule_sees_subscripts_and_gets_not_writes_or_attributes() -> None:
+    tree = ast.parse(
+        "a = s['bid_prices']\nb = s.get('close_price')\nd = {'bid_prices': []}\n"
+        "e = s.bid_prices\nf = s['instrument_id']\ns['ask_sizes'] = 1\ng = s.get('ask_prices', [])\n"
+    )
+    assert _snapshot_key_reads(tree) == [1, 2, 7]
+
+
+_SNAPSHOT_INDEXERS = {
+    module: lines
+    for module, path in _judged_sources().items()
+    if (lines := _snapshot_key_reads(ast.parse(path.read_text())))
+}
+
+
+def test_no_module_outside_the_kernel_indexes_a_snapshot_payload_by_key() -> None:
+    offending = {
+        module: lines
+        for module, lines in _SNAPSHOT_INDEXERS.items()
+        if module not in LEGACY_SNAPSHOT_INDEXING_UNTIL
+    }
+    assert offending == {}, "decode with DydxSecondSnapshot.from_dict and read attributes (AD-D3)"
+
+
+def test_snapshot_indexing_exemptions_are_still_needed() -> None:
+    assert sorted(set(LEGACY_SNAPSHOT_INDEXING_UNTIL) - set(_SNAPSHOT_INDEXERS)) == []
+
+
+@pytest.mark.parametrize(("module", "story"), sorted(LEGACY_SNAPSHOT_INDEXING_UNTIL.items()))
+def test_legacy_snapshot_indexing_expires_with_its_story(module: str, story: str) -> None:
+    reason = unknown_or_done(story, story_statuses())
+    assert reason is None, (
+        f"{reason}: decode {module}'s snapshots with DydxSecondSnapshot.from_dict"
+    )

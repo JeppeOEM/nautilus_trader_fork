@@ -148,73 +148,81 @@ def test_short_page_with_has_more_true_is_legal(
     assert body["has_more"] is True
 
 
-def test_gap_marker_inserted_between_rows_separated_by_more_than_threshold(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    catalog_path = str(tmp_path / "catalog")
-    # limit=10 -> main query window span = 10 * _QUERY_WINDOW_MULTIPLIER(2) = 20s -- both
-    # rows below must sit inside that window to be queried at all.
-    earlier_ns = _BASE_NS - 10_000_000_000  # 10s before base
-    later_ns = earlier_ns + 3_000_000_000  # 3s later -- exceeds the 2.5s gap threshold
-    _write_snapshots(catalog_path, [(earlier_ns, 100.0, 101.0), (later_ns, 105.0, 106.0)])
-    client = _client(catalog_path, monkeypatch)
-
-    response = client.get(f"/api/snapshots/{_IID}?before_ns={_BASE_NS}&limit=10")
-
-    assert response.status_code == 200
-    items = response.json()["items"]
-    assert len(items) == 3  # real row, gap marker, real row
-    real_first, gap, real_second = items
-    assert real_first["bid"] is not None
-    assert real_second["bid"] is not None
-    assert gap["t"] == real_second["t"] - 1
-    assert gap["bid"] is None
-    assert gap["ask"] is None
-    assert gap["mid"] is None
-    assert gap["micro"] is None
-    assert gap["price"] is None
+def _write_raw(catalog_path: str, ts_ns: int, bids: list[float], asks: list[float]) -> None:
+    """Write one second exactly as given (the `_write_snapshots` helper always writes bid < ask)."""
+    ParquetDataCatalog(catalog_path).write_data(
+        [
+            DydxSecondSnapshot(
+                instrument_id=InstrumentId.from_str(_IID),
+                bid_prices=bids,
+                bid_sizes=[1.0] * len(bids),
+                ask_prices=asks,
+                ask_sizes=[1.0] * len(asks),
+                buy_volume=1.0,
+                sell_volume=0.5,
+                buy_count=1,
+                sell_count=1,
+                ts_event=ts_ns,
+                ts_init=ts_ns,
+            ),
+        ]
+    )
 
 
-def test_crossed_book_row_is_skipped_and_not_counted_toward_limit(
+def test_crossed_row_written_by_the_gate_is_returned_unchanged(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
-    A crossed/touched snapshot (`bid_prices[0] >= ask_prices[0]`, stale reconnect data,
-    DATA-04) is silently dropped -- it must not consume any of the requested `limit` budget,
-    same discipline as `_price_series_rows`' original (`ml_signals/dashboard.py`).
+    A crossed second (`bid_prices[0] >= ask_prices[0]`) in the archive -- today's gate skips one,
+    but older days and a capture bug can hold it -- is returned as written and counted toward
+    `limit`: the reader never re-validates the archive (Story 24.2 removed the reader-side skip,
+    the AD-3 deviation).
     """
     catalog_path = str(tmp_path / "catalog")
     crossed_ns = _BASE_NS - 3_000_000_000
     healthy_ns = _BASE_NS - 2_000_000_000
     _write_snapshots(catalog_path, [(healthy_ns, 100.0, 101.0)])
-    # Write the crossed row directly (helper always writes bid < ask).
-    ParquetDataCatalog(catalog_path).write_data(
-        [
-            DydxSecondSnapshot(
-                instrument_id=InstrumentId.from_str(_IID),
-                bid_prices=[105.0],
-                bid_sizes=[1.0],
-                ask_prices=[100.0],  # crossed: bid >= ask
-                ask_sizes=[1.0],
-                buy_volume=1.0,
-                sell_volume=0.5,
-                buy_count=1,
-                sell_count=1,
-                ts_event=crossed_ns,
-                ts_init=crossed_ns,
-            ),
-        ]
-    )
+    _write_raw(catalog_path, crossed_ns, [105.0], [100.0])  # crossed: bid >= ask
     client = _client(catalog_path, monkeypatch)
 
     response = client.get(f"/api/snapshots/{_IID}?before_ns={_BASE_NS}&limit=10")
 
     assert response.status_code == 200
     items = response.json()["items"]
-    assert len(items) == 1  # only the healthy row -- the crossed row never appears
-    assert items[0]["bid"] == 100.0
+    assert [(i["t"], i["bid"], i["ask"]) for i in items] == [
+        (crossed_ns // 1_000_000, 105.0, 100.0),  # as written
+        (healthy_ns // 1_000_000, 100.0, 101.0),
+    ]
+    assert items[0]["mid"] == 102.5
+
+    # It counts toward `limit`: a one-row page holds only the newest row, and the crossed row is
+    # what the next (older) page returns.
+    newest = client.get(f"/api/snapshots/{_IID}?before_ns={_BASE_NS}&limit=1").json()
+    assert [i["bid"] for i in newest["items"]] == [100.0]
+    assert newest["has_more"] is True
+
+
+def test_empty_top_of_book_row_fails_the_request_loudly(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The gate never writes a one-sided book: such a row is a malfunction, 500 + ledger (DATA-07)."""
+    from observability import error_ledger
+
+    catalog_path = str(tmp_path / "catalog")
+    empty_ns = _BASE_NS - 2_000_000_000
+    _write_snapshots(catalog_path, [(_BASE_NS - 3_000_000_000, 100.0, 101.0)])
+    _write_raw(catalog_path, empty_ns, [], [101.0])
+    error_ledger.reset()
+
+    response = _client(catalog_path, monkeypatch).get(
+        f"/api/snapshots/{_IID}?before_ns={_BASE_NS}&limit=10"
+    )
+
+    assert response.status_code == 500  # never served, never silently dropped
+    assert f"{_IID} at ts_event={empty_ns}" in response.json()["detail"]
+    assert error_ledger.counts() == {"views.snapshot_without_top": 1}
 
 
 def test_limit_far_above_max_never_returns_more_than_max_snapshots_limit(

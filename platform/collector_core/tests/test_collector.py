@@ -32,8 +32,8 @@ from kernel.clocks import MAX_TS_INIT_SKEW_NS
 from kernel.clocks import CatalogFileSpan
 from kernel.second_snapshot import DydxSecondSnapshot
 from kernel.second_snapshot import SecondRow
-from ml_signals.catalog_stats import query_second_snapshots
 from observability import error_ledger
+from views.catalog_reads import query_second_snapshots
 
 import collector_core.collector as collector_mod
 from collector_core import trade_backfill

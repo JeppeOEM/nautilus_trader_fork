@@ -82,13 +82,16 @@ def test_coin_detail_breadcrumb_has_no_stale_markup_before_first_snapshot() -> N
 
 
 def test_coin_detail_breadcrumb_includes_stale_markup_once_snapshot_ages_out() -> None:
+    # A real `snapshots:raw` entry carries the full Nautilus id (`to_dict()` output): since
+    # Story 24.2 the batch is decoded through `DydxSecondSnapshot.from_dict`, which rejects a
+    # venue-less id, so the fixture uses the shape the collector actually publishes.
     _reset()
     app = BotTuiApp()
-    app._open_coin_detail("BTC-USD-PERP")
+    app._open_coin_detail("BTC-USD-PERP.DYDX")
     coin_detail_state._handle_snapshot_batch(
         [
             {
-                "instrument_id": "BTC-USD-PERP",
+                "instrument_id": "BTC-USD-PERP.DYDX",
                 "bid_prices": [100.0],
                 "bid_sizes": [1.0],
                 "ask_prices": [100.5],

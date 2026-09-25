@@ -42,10 +42,11 @@ import logging
 from fastapi import APIRouter
 from fastapi import WebSocket
 from fastapi import WebSocketDisconnect
+from views.rankings_bus import QUEUE_MAX
+from views.rankings_bus import put_drop_oldest
 
 from data_api import alerts
-from data_api import live_candles
-from data_api import redis_bus
+from data_api import buses
 
 
 logger = logging.getLogger(__name__)
@@ -87,7 +88,7 @@ async def _forward(source: "asyncio.Queue[dict]", outbox: "asyncio.Queue[dict]")
     forever, until cancelled -- runs as its own task per active subscription.
     """
     while True:
-        redis_bus.put_drop_oldest(outbox, await source.get())
+        put_drop_oldest(outbox, await source.get())
 
 
 def _log_forward_error(task: "asyncio.Task[None]") -> None:
@@ -117,11 +118,11 @@ class _CandleSubscriptions:
     def subscribe(self, channel: str, iid: str, bar_seconds: int) -> None:
         if channel in self._entries or len(self._entries) >= _MAX_SUBSCRIPTIONS:
             return  # idempotent; the cap stops a buggy client growing per-channel state forever
-        queue = live_candles.live_candle_bus.subscribe(iid, bar_seconds)
+        queue = buses.live_candle_bus.subscribe(iid, bar_seconds)
         task = asyncio.create_task(_forward(queue, self._outbox))
         task.add_done_callback(_log_forward_error)
         self._entries[channel] = (iid, bar_seconds, queue, task)
-        live_candles.live_candle_bus.start_seed(iid, bar_seconds)
+        buses.live_candle_bus.start_seed(iid, bar_seconds)
 
     def unsubscribe(self, channel: str) -> None:
         entry = self._entries.pop(channel, None)
@@ -129,7 +130,7 @@ class _CandleSubscriptions:
             return
         iid, bar_seconds, queue, task = entry
         task.cancel()
-        live_candles.live_candle_bus.unsubscribe(iid, bar_seconds, queue)
+        buses.live_candle_bus.unsubscribe(iid, bar_seconds, queue)
 
     def teardown_all(self) -> None:
         for channel in list(self._entries):
@@ -178,14 +179,14 @@ async def _reader(websocket: WebSocket, subs: _CandleSubscriptions) -> None:
 @router.websocket("/ws/live")
 async def ws_live(websocket: WebSocket) -> None:
     await websocket.accept()
-    outbox: asyncio.Queue[dict] = asyncio.Queue(redis_bus.QUEUE_MAX)
+    outbox: asyncio.Queue[dict] = asyncio.Queue(QUEUE_MAX)
 
     # Subscribe before reading/sending `latest`: a message published between reading
     # `.latest` and registering the listener queue would otherwise be missed entirely
     # for this connection (a narrow but real race). Subscribing first means that message
     # instead arrives twice (via the initial send below and the queue) -- harmless for a
     # full-snapshot relay, unlike a silent drop. Unchanged from before Story 15.5.
-    rankings_queue = redis_bus.bus.subscribe()
+    rankings_queue = buses.bus.subscribe()
     alerts_queue = alerts.engine.subscribe()
     subs = _CandleSubscriptions(outbox)
     alerts_forward_task = asyncio.create_task(_forward(alerts_queue, outbox))
@@ -196,10 +197,10 @@ async def ws_live(websocket: WebSocket) -> None:
     try:
         # Inside the try/finally (unlike pre-Story-15.5 code, where this send sat before
         # the try): a client that disconnects between accept() and this send must still
-        # hit `finally` below, or `rankings_queue` leaks in `redis_bus.bus`'s listener set
+        # hit `finally` below, or `rankings_queue` leaks in `buses.bus`'s listener set
         # forever.
-        if redis_bus.bus.latest is not None:
-            await websocket.send_json(redis_bus.bus.latest)
+        if buses.bus.latest is not None:
+            await websocket.send_json(buses.bus.latest)
         done, _pending = await asyncio.wait(
             {sender_task, reader_task, rankings_forward_task, alerts_forward_task},
             return_when=asyncio.FIRST_COMPLETED,
@@ -224,4 +225,4 @@ async def ws_live(websocket: WebSocket) -> None:
         alerts_forward_task.cancel()
         alerts.engine.unsubscribe(alerts_queue)
         subs.teardown_all()
-        redis_bus.bus.unsubscribe(rankings_queue)
+        buses.bus.unsubscribe(rankings_queue)

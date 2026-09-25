@@ -26,9 +26,9 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 from kernel.second_snapshot import DydxSecondSnapshot
-from ml_signals.chart_indicator_config import IndicatorEntry
-from ml_signals.chart_indicator_config import load_config
-from ml_signals.chart_indicator_config import save_config
+from views.preferences import IndicatorEntry
+from views.preferences import load_chart_indicators as load_config
+from views.preferences import save_chart_indicators as save_config
 
 import data_api.app as app_module
 import data_api.routes.candles as candles_routes
@@ -284,14 +284,14 @@ def test_indicator_values_dispatches_custom_indicator_via_replay_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
-    `CumulativeVolumeDelta` is only in `custom_indicators.CUSTOM_INDICATOR_CATALOG`, so a
-    successful response here proves `_replay_entry`'s custom-catalog branch (the `ReplayWindow`
+    `CumulativeVolumeDelta` is only in `indicator_picker.CUSTOM_INDICATOR_CATALOG`, so a
+    successful response here proves `indicator_picker.replay_entry`'s custom-catalog branch (the `ReplayWindow`
     path, untested by every other case in this file) actually dispatches, not just the native
-    branch every other test exercises. `custom_indicators.py` reads its own module-level
+    branch every other test exercises. `views.indicator_picker` reads its own module-level
     `_CATALOG_PATH` (a separate constant from this route's `CATALOG_PATH`), so both are
     monkeypatched to the same temp catalog.
     """
-    import ml_signals.custom_indicators as custom_indicators_module
+    import views.indicator_picker as custom_indicators_module
 
     catalog_path = str(tmp_path / "cat")
     monkeypatch.setattr(custom_indicators_module, "_CATALOG_PATH", catalog_path)

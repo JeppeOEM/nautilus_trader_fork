@@ -23,6 +23,7 @@ the manual smoke check, per this story's own Dev Notes.
 """
 
 import urwid
+from kernel.second_snapshot import DydxSecondSnapshot
 
 from bot_tui import coin_detail_state
 from bot_tui import ranking_state
@@ -134,19 +135,23 @@ def test_order_book_region_line_count_changes_between_collapsed_and_expanded() -
     ranking_state._handle_rankings_message(_ranking())
     app = BotTuiApp()
     app._open_coin_detail("BTC-USD-PERP")
-    coin_detail_state._LATEST_SNAPSHOT = {
-        "instrument_id": "BTC-USD-PERP",
-        "bid_prices": [float(100 - i) for i in range(20)],
-        "bid_sizes": [1.0] * 20,
-        "ask_prices": [float(100 + i) for i in range(20)],
-        "ask_sizes": [1.0] * 20,
-        "buy_volume": 1.0,
-        "sell_volume": 1.0,
-        "buy_count": 1,
-        "sell_count": 1,
-        "ts_event": 1,
-        "ts_init": 1,
-    }
+    # The decoded `DydxSecondSnapshot` `coin_detail_state` stores since Story 24.2 (the ladder reads
+    # its attributes); a real id, as every published `snapshots:raw` entry carries one.
+    coin_detail_state._LATEST_SNAPSHOT = DydxSecondSnapshot.from_dict(
+        {
+            "instrument_id": "BTC-USD-PERP.DYDX",
+            "bid_prices": [float(100 - i) for i in range(20)],
+            "bid_sizes": [1.0] * 20,
+            "ask_prices": [float(100 + i) for i in range(20)],
+            "ask_sizes": [1.0] * 20,
+            "buy_volume": 1.0,
+            "sell_volume": 1.0,
+            "buy_count": 1,
+            "sell_count": 1,
+            "ts_event": 1,
+            "ts_init": 1,
+        }
+    )
     collapsed_body = app._build_coin_detail_body()
     # Body is a ListBox (scrollable -- see _build_coin_detail_body); the ladder box
     # is the last item in its walker, itself Padding(LineBox(Pile(rows))) -- one

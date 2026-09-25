@@ -63,6 +63,8 @@ from pathlib import Path
 
 import urwid
 from observability import error_ledger
+from views.coin_detail import COIN_DETAIL_GROUPS
+from views.coin_detail import rank_row_for
 
 from bot_tui import bot_history_state
 from bot_tui import bot_incidents_state
@@ -214,68 +216,9 @@ _PALETTE = [
 _LADDER_COLLAPSED_LEVELS = 4
 _LADDER_EXPANDED_LEVELS = 20
 
-# Every value column gets at least this many decimals -- user wants enough visible
-# precision that a small tick registers as a changing digit instead of a static
-# number. buy_count/sell_count are the one deliberate exception below (they're
-# integer counts, not decimal quantities -- "7.00000000" would be noise, not
-# precision).
-_MIN_INDICATOR_DECIMALS = 8
-
-# Coin-detail's full-parity indicator list (label, rankings:live rank-entry key,
-# display decimals) -- every metric ranking_engine publishes for the open instrument,
-# same SSOT-02 source the Coins pane's own columns come from. Not reusing
-# ml_signals.ranking_columns.RANKING_COLS' own format_fn/color_fn here: those assume a
-# non-None value (they'd raise on the "warming up" case this vertical list needs to
-# handle for every row) and are tuned for compact table cells, not a labeled list --
-# coin_detail.format_indicator already owns the None-safe formatting this view needs.
-#
-# Grouped into one box per update cadence (matches ml_signals/dashboard.py's
-# /coin/{id} grouping) rather than one flat list -- a value's box tells you how often
-# it can actually change without reading engine.py. "volatility & market" is a cadence
-# group by convention, not strictly: pct_1h/pct_24h/volume24h aren't volatility, but
-# they update on the same 60s-or-slower cadence as the volatility fields and would be
-# noise scattered elsewhere.
-_COIN_DETAIL_INDICATOR_GROUPS: list[tuple[str, list[tuple[str, str, int]]]] = [
-    (
-        "live  (1s book state)",
-        [
-            ("microprice", "microprice", _MIN_INDICATOR_DECIMALS),
-            ("microprice lean", "microprice_lean", _MIN_INDICATOR_DECIMALS),
-            ("spread", "spread", _MIN_INDICATOR_DECIMALS),
-            ("obi(3)", "obi_3", _MIN_INDICATOR_DECIMALS),
-            ("obi(5)", "obi_5", _MIN_INDICATOR_DECIMALS),
-            ("obi(10)", "obi_10", _MIN_INDICATOR_DECIMALS),
-            ("price", "price", _MIN_INDICATOR_DECIMALS),
-        ],
-    ),
-    (
-        "order flow  (~5m rolling)",
-        [
-            ("ofi(3)", "ofi_3", _MIN_INDICATOR_DECIMALS),
-            ("ofi(5)", "ofi_5", _MIN_INDICATOR_DECIMALS),
-            ("ofi(10)", "ofi_10", _MIN_INDICATOR_DECIMALS),
-            ("ofi(10) z", "ofi_10_z", _MIN_INDICATOR_DECIMALS),
-            ("cvd", "cvd", _MIN_INDICATOR_DECIMALS),
-            ("volume delta (60s)", "volume_delta", _MIN_INDICATOR_DECIMALS),
-            ("buy count", "buy_count", 0),
-            ("sell count", "sell_count", 0),
-            ("avg trade size", "avg_trade_size", _MIN_INDICATOR_DECIMALS),
-        ],
-    ),
-    (
-        "volatility & market  (60s-1h)",
-        [
-            ("volatility (fast)", "volatility_fast", _MIN_INDICATOR_DECIMALS),
-            ("volatility (catalog)", "volatility", _MIN_INDICATOR_DECIMALS),
-            ("volatility score", "volatility_score", _MIN_INDICATOR_DECIMALS),
-            ("pct 1h", "pct_1h", _MIN_INDICATOR_DECIMALS),
-            ("pct 24h", "pct_24h", _MIN_INDICATOR_DECIMALS),
-            ("pct 1w", "pct_1w", _MIN_INDICATOR_DECIMALS),
-            ("pct 1m", "pct_1m", _MIN_INDICATOR_DECIMALS),
-            ("volume 24h", "volume24h", _MIN_INDICATOR_DECIMALS),
-        ],
-    ),
-]
+# Coin-detail's metric list and its display precision are `views.coin_detail.COIN_DETAIL_GROUPS`
+# (Story 24.2: the one definition of which values the single-coin view shows, SSOT-05); this
+# module only lays them out.
 
 # Bot-detail's trades-blotter region (Story 4.7) -- a fixed visible height inside a
 # scrollable ListBox (BoxAdapter), not "however many fills happen to exist" (Story
@@ -897,9 +840,7 @@ class BotTuiApp:
         # precedent _open_dashboard_chart's own assert already documents.
         assert self._coin_detail_instrument_id is not None
         snapshot = coin_detail_state._LATEST_SNAPSHOT
-        row = coin_detail.rank_row_for(
-            ranking_state._LATEST_RANKING, self._coin_detail_instrument_id
-        )
+        row = rank_row_for(ranking_state._LATEST_RANKING, self._coin_detail_instrument_id)
         row = row or {}
 
         # Right-justify values to the widest one ever seen this Coin-detail session,
@@ -915,7 +856,7 @@ class BotTuiApp:
         # line up with each other, not just internally.
         all_pairs = [
             (label, coin_detail.format_indicator(row.get(key), decimals))
-            for _, specs in _COIN_DETAIL_INDICATOR_GROUPS
+            for _, specs in COIN_DETAIL_GROUPS
             for label, key, decimals in specs
         ]
         label_w = max(len(label) for label, _ in all_pairs)
@@ -924,7 +865,7 @@ class BotTuiApp:
         )
         value_w = self._indicator_value_w
 
-        def _group_box(title: str, specs: list[tuple[str, str, int]]) -> urwid.LineBox:
+        def _group_box(title: str, specs: tuple[tuple[str, str, int], ...]) -> urwid.LineBox:
             lines = [
                 urwid.Text(
                     f"{label:<{label_w}}  "
@@ -934,14 +875,14 @@ class BotTuiApp:
             ]
             return urwid.LineBox(urwid.Pile(lines), title=title)
 
-        indicator_boxes = [
-            _group_box(title, specs) for title, specs in _COIN_DETAIL_INDICATOR_GROUPS
-        ]
+        indicator_boxes = [_group_box(title, specs) for title, specs in COIN_DETAIL_GROUPS]
 
-        bid_prices = snapshot["bid_prices"] if snapshot is not None else []
-        bid_sizes = snapshot["bid_sizes"] if snapshot is not None else []
-        ask_prices = snapshot["ask_prices"] if snapshot is not None else []
-        ask_sizes = snapshot["ask_sizes"] if snapshot is not None else []
+        # The open coin's newest decoded `DydxSecondSnapshot` (`views.coin_detail.snapshot_for`),
+        # read by attribute -- the payload is never indexed by key here (spine AD-D3).
+        bid_prices = snapshot.bid_prices if snapshot is not None else []
+        bid_sizes = snapshot.bid_sizes if snapshot is not None else []
+        ask_prices = snapshot.ask_prices if snapshot is not None else []
+        ask_sizes = snapshot.ask_sizes if snapshot is not None else []
 
         # This one parameter is the entire mechanism behind AC2/AC3's collapse/expand
         # behavior -- no separate "collapsed" vs. "expanded" code path exists.

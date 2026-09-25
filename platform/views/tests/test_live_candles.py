@@ -13,12 +13,14 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-Story 15.5: `LiveCandleBus` -- real `DydxSecondSnapshot` objects, no real Redis
+Story 15.5: `LiveCandleBus` (moved from `data_api/tests/` with the bus in Story 24.2, plus the
+`BarObserver` port it declares) -- real `DydxSecondSnapshot` objects, no real Redis
 (the class's buffer/listener logic is exercised directly via `handle_batch`, mirroring
 how `test_rankings.py` unit-tests `RankingsBus.handle_message` in isolation).
 """
 
 import asyncio
+import inspect
 import threading
 import time
 from pathlib import Path
@@ -28,12 +30,14 @@ from candles.application.forming import forming_bar
 from kernel.second_snapshot import DydxSecondSnapshot
 from observability import error_ledger
 
-from data_api import settings
-from data_api.live_candles import LiveCandleBus
 from nautilus_trader.model.identifiers import InstrumentId
+from views.live_candles import BarObserver
+from views.live_candles import LiveCandleBus
 
 
 _IID = "BTC-USD-PERP.DYDX"
+# The archive a bus's seed reads from, for tests that never seed or replace the read itself.
+_NO_CATALOG = "no-catalog-read-in-this-test"
 _BAR_SECONDS = 60
 
 # Large, arbitrary, far-from-epoch base timestamp -- a multiple of 60s in ns, so bucket
@@ -64,7 +68,7 @@ def _snapshot(ts_event: int, price: float, iid: str = _IID) -> DydxSecondSnapsho
 
 
 def test_first_tick_for_subscribed_pair_publishes_single_snapshot_bar() -> None:
-    bus = LiveCandleBus()
+    bus = LiveCandleBus(_NO_CATALOG)
     queue = bus.subscribe(_IID, _BAR_SECONDS)
     snapshot = _snapshot(_BASE_NS, 100.0)
 
@@ -76,7 +80,7 @@ def test_first_tick_for_subscribed_pair_publishes_single_snapshot_bar() -> None:
 
 
 def test_second_tick_same_bucket_keeps_same_bar_identity_updates_ohlcv() -> None:
-    bus = LiveCandleBus()
+    bus = LiveCandleBus(_NO_CATALOG)
     queue = bus.subscribe(_IID, _BAR_SECONDS)
     first_snapshot = _snapshot(_BASE_NS, 100.0)
     second_snapshot = _snapshot(_BASE_NS + 1_000_000_000, 105.0)  # 1s later, same 60s bucket
@@ -93,7 +97,7 @@ def test_second_tick_same_bucket_keeps_same_bar_identity_updates_ohlcv() -> None
 
 
 def test_bucket_boundary_crossed_resets_buffer_and_new_bar_has_later_t() -> None:
-    bus = LiveCandleBus()
+    bus = LiveCandleBus(_NO_CATALOG)
     queue = bus.subscribe(_IID, _BAR_SECONDS)
     first_snapshot = _snapshot(_BASE_NS, 100.0)
     next_bucket_snapshot = _snapshot(_BASE_NS + _BAR_SECONDS * 1_000_000_000, 110.0)
@@ -111,7 +115,7 @@ def test_bucket_boundary_crossed_resets_buffer_and_new_bar_has_later_t() -> None
 
 
 def test_no_subscriber_means_no_buffer_or_listener_created() -> None:
-    bus = LiveCandleBus()
+    bus = LiveCandleBus(_NO_CATALOG)
     snapshot = _snapshot(_BASE_NS, 100.0)
 
     bus.handle_batch([DydxSecondSnapshot.to_dict(snapshot)])
@@ -121,7 +125,7 @@ def test_no_subscriber_means_no_buffer_or_listener_created() -> None:
 
 
 def test_last_unsubscribe_tears_down_buffer_and_listeners() -> None:
-    bus = LiveCandleBus()
+    bus = LiveCandleBus(_NO_CATALOG)
     queue = bus.subscribe(_IID, _BAR_SECONDS)
 
     bus.unsubscribe(_IID, _BAR_SECONDS, queue)
@@ -132,7 +136,7 @@ def test_last_unsubscribe_tears_down_buffer_and_listeners() -> None:
 
 
 def test_one_of_two_listeners_unsubscribing_keeps_the_pair_alive() -> None:
-    bus = LiveCandleBus()
+    bus = LiveCandleBus(_NO_CATALOG)
     queue_a = bus.subscribe(_IID, _BAR_SECONDS)
     queue_b = bus.subscribe(_IID, _BAR_SECONDS)
 
@@ -146,7 +150,7 @@ def test_one_of_two_listeners_unsubscribing_keeps_the_pair_alive() -> None:
 
 
 def test_unmatched_instrument_in_batch_publishes_nothing() -> None:
-    bus = LiveCandleBus()
+    bus = LiveCandleBus(_NO_CATALOG)
     queue = bus.subscribe(_IID, _BAR_SECONDS)
     other_instrument_snapshot = _snapshot(_BASE_NS, 100.0, iid="ETH-USD-PERP.DYDX")
 
@@ -156,7 +160,7 @@ def test_unmatched_instrument_in_batch_publishes_nothing() -> None:
 
 
 def test_malformed_batch_payload_is_skipped_without_raising() -> None:
-    bus = LiveCandleBus()
+    bus = LiveCandleBus(_NO_CATALOG)
     bus.subscribe(_IID, _BAR_SECONDS)
 
     bus.handle_batch({"not": "a list"})  # must log & return, never raise
@@ -170,7 +174,7 @@ def test_incremental_buffer_converges_to_batch_aggregation_final_bar() -> None:
     `candles.application.forming.forming_bar` produces when called once on the whole
     same-bucket snapshot set.
     """
-    bus = LiveCandleBus()
+    bus = LiveCandleBus(_NO_CATALOG)
     queue = bus.subscribe(_IID, _BAR_SECONDS)
     snapshots = [_snapshot(_BASE_NS + i * 1_000_000_000, 100.0 + i) for i in range(10)]
 
@@ -189,7 +193,6 @@ def test_incremental_buffer_converges_to_batch_aggregation_final_bar() -> None:
 @pytest.mark.asyncio
 async def test_seed_fills_bucket_start_so_forming_bar_covers_whole_bucket(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
@@ -199,9 +202,7 @@ async def test_seed_fills_bucket_start_so_forming_bar_covers_whole_bucket(
     # Two snapshots already in the catalog for this bucket, before we "subscribe".
     early = [_snapshot(start_ns, 100.0), _snapshot(start_ns + 1, 90.0)]
     ParquetDataCatalog(str(tmp_path)).write_data(early)
-    monkeypatch.setattr(settings, "CATALOG_PATH", str(tmp_path))
-
-    bus = LiveCandleBus()
+    bus = LiveCandleBus(str(tmp_path))
     queue = bus.subscribe(_IID, _BAR_SECONDS)
     await bus.seed(_IID, _BAR_SECONDS)
     bar = queue.get_nowait()["bar"]
@@ -224,7 +225,7 @@ async def test_seed_wide_bar_reads_raw_seconds_plus_unflushed_tail(
     """
     from kernel.second_snapshot import SecondOHLC
 
-    import data_api.live_candles as lc
+    import views.live_candles as lc
 
     bar_seconds = 14_400
     bucket_ns = bar_seconds * 1_000_000_000
@@ -240,7 +241,7 @@ async def test_seed_wide_bar_reads_raw_seconds_plus_unflushed_tail(
         ]
 
     monkeypatch.setattr(lc, "query_second_ohlc", seconds)
-    bus = LiveCandleBus()
+    bus = LiveCandleBus(_NO_CATALOG)
     queue = bus.subscribe(_IID, bar_seconds)
     # A live second the collector has not flushed yet, newer than every archived second.
     bus.handle_batch([DydxSecondSnapshot.to_dict(_snapshot(now_ns - 1_000_000_000, 120.0))])
@@ -254,15 +255,10 @@ async def test_seed_wide_bar_reads_raw_seconds_plus_unflushed_tail(
 
 
 @pytest.mark.asyncio
-async def test_seed_includes_unflushed_recent_seconds(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(
-        settings, "CATALOG_PATH", str(tmp_path)
-    )  # empty catalog: nothing flushed yet
+async def test_seed_includes_unflushed_recent_seconds(tmp_path: Path) -> None:
     bucket_ns = _BAR_SECONDS * 1_000_000_000
     start_ns = time.time_ns() // bucket_ns * bucket_ns
-    bus = LiveCandleBus()
+    bus = LiveCandleBus(str(tmp_path))  # empty catalog: nothing flushed yet
     # Seen live before this subscriber arrived (another pair was watching the coin).
     bus.handle_batch([DydxSecondSnapshot.to_dict(_snapshot(start_ns, 100.0))])
     queue = bus.subscribe(_IID, _BAR_SECONDS)
@@ -273,15 +269,13 @@ async def test_seed_includes_unflushed_recent_seconds(
 @pytest.mark.asyncio
 async def test_seed_never_prepends_previous_bucket_after_rollover(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
     bucket_ns = _BAR_SECONDS * 1_000_000_000
     start_ns = time.time_ns() // bucket_ns * bucket_ns
     ParquetDataCatalog(str(tmp_path)).write_data([_snapshot(start_ns, 100.0)])
-    monkeypatch.setattr(settings, "CATALOG_PATH", str(tmp_path))
-    bus = LiveCandleBus()
+    bus = LiveCandleBus(str(tmp_path))
     queue = bus.subscribe(_IID, _BAR_SECONDS)
     # A tick from the NEXT bucket lands before the seed read finishes.
     bus._buffers[(_IID, _BAR_SECONDS)] = [_snapshot(start_ns + bucket_ns, 500.0)]
@@ -292,13 +286,13 @@ async def test_seed_never_prepends_previous_bucket_after_rollover(
 
 @pytest.mark.asyncio
 async def test_seed_failure_allows_a_retry(monkeypatch: pytest.MonkeyPatch) -> None:
-    import data_api.live_candles as lc
+    import views.live_candles as lc
 
     def boom(*_a, **_k):
         raise OSError("catalog unreadable")
 
     monkeypatch.setattr(lc, "query_second_ohlc", boom)
-    bus = LiveCandleBus()
+    bus = LiveCandleBus(_NO_CATALOG)
     bus.subscribe(_IID, _BAR_SECONDS)
     with pytest.raises(OSError):
         await bus.seed(_IID, _BAR_SECONDS)
@@ -307,7 +301,7 @@ async def test_seed_failure_allows_a_retry(monkeypatch: pytest.MonkeyPatch) -> N
 
 def _blocking_read(monkeypatch: pytest.MonkeyPatch) -> threading.Event:
     """Make the seed's catalog read block until the returned event is set."""
-    import data_api.live_candles as lc
+    import views.live_candles as lc
 
     release = threading.Event()
 
@@ -325,7 +319,7 @@ async def test_seed_is_held_by_the_bus_and_outlives_a_departing_listener(
 ) -> None:
     """One seed serves every listener of a pair, so one connection leaving must not cancel it."""
     release = _blocking_read(monkeypatch)
-    bus = LiveCandleBus()
+    bus = LiveCandleBus(_NO_CATALOG)
     key = (_IID, _BAR_SECONDS)
     leaving = bus.subscribe(_IID, _BAR_SECONDS)
     bus.subscribe(_IID, _BAR_SECONDS)
@@ -348,7 +342,7 @@ async def test_last_listener_leaving_cancels_the_seed_and_unmarks_the_pair(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     release = _blocking_read(monkeypatch)
-    bus = LiveCandleBus()
+    bus = LiveCandleBus(_NO_CATALOG)
     key = (_IID, _BAR_SECONDS)
     queue = bus.subscribe(_IID, _BAR_SECONDS)
     try:
@@ -366,14 +360,14 @@ async def test_last_listener_leaving_cancels_the_seed_and_unmarks_the_pair(
 
 @pytest.mark.asyncio
 async def test_a_failed_bus_seed_is_ledgered(monkeypatch: pytest.MonkeyPatch) -> None:
-    import data_api.live_candles as lc
+    import views.live_candles as lc
 
     def boom(*_a: object, **_k: object) -> list:
         raise OSError("catalog unreadable")
 
     monkeypatch.setattr(lc, "query_second_ohlc", boom)
     error_ledger.reset()
-    bus = LiveCandleBus()
+    bus = LiveCandleBus(_NO_CATALOG)
     bus.subscribe(_IID, _BAR_SECONDS)
     bus.start_seed(_IID, _BAR_SECONDS)
     task = bus._seed_tasks[(_IID, _BAR_SECONDS)]
@@ -385,7 +379,7 @@ async def test_a_failed_bus_seed_is_ledgered(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_recent_rows_keep_traded_seconds_and_expire_old_ones() -> None:
-    bus = LiveCandleBus()
+    bus = LiveCandleBus(_NO_CATALOG)
     base = 1_800_000_000_000_000_000
     bus.handle_batch([DydxSecondSnapshot.to_dict(_snapshot(base, 10.0))])
     bus.handle_batch([DydxSecondSnapshot.to_dict(_snapshot(base + 700 * 1_000_000_000, 11.0))])
@@ -398,7 +392,7 @@ def test_a_venue_timed_row_published_late_lands_in_its_exchange_time_bucket() ->
     Story 22.12: a Bybit/Hyperliquid row for the bucket's last second is sampled (ts_init)
     after the boundary; the bar it belongs to is decided by ts_event alone.
     """
-    bus = LiveCandleBus()
+    bus = LiveCandleBus(_NO_CATALOG)
     queue = bus.subscribe(_IID, _BAR_SECONDS)
     last_second = _snapshot(_BASE_NS + 59_500_000_000, 100.0)
     late = DydxSecondSnapshot.from_dict(
@@ -408,3 +402,33 @@ def test_a_venue_timed_row_published_late_lands_in_its_exchange_time_bucket() ->
     bus.handle_batch([DydxSecondSnapshot.to_dict(late)])
 
     assert queue.get_nowait()["bar"]["t"] == _BASE_NS // 1_000_000
+
+
+class _RecordingObserver:
+    """A test double that is a `BarObserver` by shape alone -- it neither imports nor subclasses it."""
+
+    def __init__(self) -> None:
+        self.seen: list[tuple[str, int, dict, int]] = []
+
+    def on_bar(self, instrument_id: str, bar_seconds: int, bar: dict, ts_ns: int) -> None:
+        self.seen.append((instrument_id, bar_seconds, bar, ts_ns))
+
+
+def test_bar_observer_is_satisfied_structurally_by_a_plain_class() -> None:
+    """
+    The port alerting implements in Story 24.3 without importing views' internals: any object with
+    this `on_bar` signature is one (mypy checks the annotated assignment below).
+    """
+    observer: BarObserver = _RecordingObserver()
+    bar = forming_bar([_snapshot(_BASE_NS, 100.0)], _BAR_SECONDS)
+    assert bar is not None
+
+    observer.on_bar(_IID, _BAR_SECONDS, bar, _BASE_NS)
+
+    assert isinstance(observer, _RecordingObserver)
+    assert observer.seen == [(_IID, _BAR_SECONDS, bar, _BASE_NS)]
+    protocol_params = list(inspect.signature(BarObserver.on_bar).parameters)
+    double_params = list(inspect.signature(_RecordingObserver.on_bar).parameters)
+    assert (
+        double_params == protocol_params == ["self", "instrument_id", "bar_seconds", "bar", "ts_ns"]
+    )

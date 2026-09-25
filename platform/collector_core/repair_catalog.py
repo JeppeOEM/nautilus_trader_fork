@@ -45,7 +45,7 @@ from candles.application.rebuild import data_range_ns
 from candles.application.rebuild import day_chunks
 from candles.application.rebuild import rebuild_instrument
 from kernel.second_snapshot import DydxSecondSnapshot
-from ml_signals.catalog_stats import query_second_snapshots
+from views.catalog_reads import query_second_snapshots
 
 from collector_core.integrity import ohlc_outside_book
 from nautilus_trader.persistence.catalog import ParquetDataCatalog

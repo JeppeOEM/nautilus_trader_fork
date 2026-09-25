@@ -27,19 +27,34 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.second_snapshot import SecondOHLC
+from views import ranking_columns
+from views.rankings_bus import RankingsBus
 
 import data_api.app as app_module
 import data_api.routes.candles as candles_routes
 import data_api.routes.indicators as indicators_routes
 import data_api.routes.rankings as rankings_routes
-from data_api import redis_bus
-from data_api.redis_bus import RankingsBus
+from data_api import buses
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
 
 _IID = "BTC-USD-PERP.DYDX"
 _MINUTE_NS = 60_000_000_000
+
+
+def _traded_second(ts_ns: int, price: float) -> SecondOHLC:
+    """One traded second for the candle-store fixture, shaped like the candle tests' own rows."""
+    return SecondOHLC(
+        ts_event=ts_ns,
+        open_price=price,
+        high_price=price + 0.5,
+        low_price=price - 0.5,
+        close_price=price + 0.1,
+        buy_volume=1.0,
+        sell_volume=0.25,
+    )
 
 
 def _client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
@@ -141,7 +156,7 @@ def test_columns_are_independent_of_per_coin_indicator_config(
 def test_values_503_before_first_rankings_message(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(redis_bus, "bus", RankingsBus())
+    monkeypatch.setattr(buses, "bus", RankingsBus())
     client = _client(tmp_path, monkeypatch)
     entries = json.dumps([{"name": "RelativeStrengthIndex", "params": {}, "bar_seconds": 60}])
     assert (
@@ -161,7 +176,7 @@ def test_values_match_the_chart_route_for_single_and_multi_value_entries(
         "updated_at": 1,
         "ranks": [{"instrument_id": _IID}, {"instrument_id": "NEW-USD-PERP.DYDX"}],
     }
-    monkeypatch.setattr(redis_bus, "bus", bus)
+    monkeypatch.setattr(buses, "bus", bus)
     client = _client(tmp_path, monkeypatch)
     entries = json.dumps(
         [
@@ -198,7 +213,7 @@ def test_values_reject_bad_entries_with_400(
 ) -> None:
     bus = RankingsBus()
     bus.latest = {"mode": "volume", "updated_at": 1, "ranks": []}
-    monkeypatch.setattr(redis_bus, "bus", bus)
+    monkeypatch.setattr(buses, "bus", bus)
     client = _client(tmp_path, monkeypatch)
     assert (
         client.get("/api/rankings/technicals-values", params={"entries": "not json"}).status_code
@@ -209,7 +224,7 @@ def test_values_reject_bad_entries_with_400(
 def _ranked(monkeypatch: pytest.MonkeyPatch, *iids: str) -> None:
     bus = RankingsBus()
     bus.latest = {"mode": "volume", "updated_at": 1, "ranks": [{"instrument_id": i} for i in iids]}
-    monkeypatch.setattr(redis_bus, "bus", bus)
+    monkeypatch.setattr(buses, "bus", bus)
 
 
 def test_values_omit_a_coin_whose_newest_candle_is_stale(
@@ -247,14 +262,14 @@ def test_one_coins_catalog_failure_does_not_blank_the_others(
     _seed_recent_minutes(tmp_path)
     _ranked(monkeypatch, _IID, "BAD-USD-PERP.DYDX")
     client = _client(tmp_path, monkeypatch)
-    real = rankings_routes._latest_values
+    real = ranking_columns.technicals_values
 
-    def flaky(iid: str, entries: list, now_ns: int) -> dict:
+    def flaky(iid: str, entries: list, now_ns: int, **paths: str) -> dict:
         if iid.startswith("BAD"):
             raise OSError("corrupt partition")
-        return real(iid, entries, now_ns)
+        return real(iid, entries, now_ns, **paths)
 
-    monkeypatch.setattr(rankings_routes, "_latest_values", flaky)
+    monkeypatch.setattr(ranking_columns, "technicals_values", flaky)
     entries = json.dumps([{"name": "RelativeStrengthIndex", "params": {}, "bar_seconds": 60}])
 
     body = client.get("/api/rankings/technicals-values", params={"entries": entries}).json()
@@ -272,11 +287,11 @@ def test_values_are_served_from_the_ttl_cache_on_a_repeat_poll(
     _ranked(monkeypatch, _IID)
     client = _client(tmp_path, monkeypatch)
     calls: list[str] = []
-    real = rankings_routes._latest_values
+    real = ranking_columns.technicals_values
     monkeypatch.setattr(
-        rankings_routes,
-        "_latest_values",
-        lambda i, e, n: calls.append(i) or real(i, e, n),
+        ranking_columns,
+        "technicals_values",
+        lambda i, e, n, **paths: calls.append(i) or real(i, e, n, **paths),
     )
     entries = json.dumps([{"name": "RelativeStrengthIndex", "params": {}, "bar_seconds": 60}])
 
@@ -295,14 +310,14 @@ def test_a_valueerror_from_one_coins_catalog_read_does_not_become_a_whole_reques
     _seed_recent_minutes(tmp_path)
     _ranked(monkeypatch, _IID, "BAD-USD-PERP.DYDX")
     client = _client(tmp_path, monkeypatch)
-    real = rankings_routes.catalog_files.query_second_ohlc
+    real = ranking_columns.catalog_files.query_second_ohlc
 
     def read(path: str, iid: str, a: int, b: int) -> list:
         if iid.startswith("BAD"):
             raise ValueError("Arrow schema mismatch")
         return real(path, iid, a, b)
 
-    monkeypatch.setattr(rankings_routes.catalog_files, "query_second_ohlc", read)
+    monkeypatch.setattr(ranking_columns.catalog_files, "query_second_ohlc", read)
     entries = json.dumps([{"name": "RelativeStrengthIndex", "params": {}, "bar_seconds": 60}])
 
     response = client.get("/api/rankings/technicals-values", params={"entries": entries})
@@ -316,9 +331,11 @@ def test_cache_key_ignores_rank_order(tmp_path: Path, monkeypatch: pytest.Monkey
     _seed_recent_minutes(tmp_path)
     client = _client(tmp_path, monkeypatch)
     calls: list[str] = []
-    real = rankings_routes._latest_values
+    real = ranking_columns.technicals_values
     monkeypatch.setattr(
-        rankings_routes, "_latest_values", lambda i, e, n: calls.append(i) or real(i, e, n)
+        ranking_columns,
+        "technicals_values",
+        lambda i, e, n, **paths: calls.append(i) or real(i, e, n, **paths),
     )
     entries = json.dumps([{"name": "RelativeStrengthIndex", "params": {}, "bar_seconds": 60}])
 
@@ -362,13 +379,13 @@ def test_each_column_is_computed_on_its_own_timeframe(
     _seed_recent_minutes(tmp_path)
     bus = RankingsBus()
     bus.latest = {"mode": "volume", "updated_at": 1, "ranks": [{"instrument_id": _IID}]}
-    monkeypatch.setattr(redis_bus, "bus", bus)
+    monkeypatch.setattr(buses, "bus", bus)
     client = _client(tmp_path, monkeypatch)
     seen: list[int] = []
     monkeypatch.setattr(
-        rankings_routes,
+        ranking_columns,
         "_recent_candles",
-        lambda iid, bar_seconds, now_ns: seen.append(bar_seconds) or [],
+        lambda iid, bar_seconds, now_ns, *paths: seen.append(bar_seconds) or [],
     )
     entries = json.dumps(
         [
@@ -391,7 +408,6 @@ def test_values_come_from_the_candle_store_without_touching_parquet(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from candles.infrastructure.sqlite_store import CandleStore
-    from candles.tests.test_candle_store import _second
 
     _ranked(monkeypatch, _IID)
     client = _client(tmp_path, monkeypatch)  # no Parquet catalog exists at all
@@ -400,10 +416,10 @@ def test_values_come_from_the_candle_store_without_touching_parquet(
     store = CandleStore(db_path)
     now_minute = int(time.time()) // 60 * 60 * 1000
     rows = []
-    for i in range(45):  # 45 traded minutes ending now (the helper stamps a fixed day, so restamp)
-        row = _second(0, 100.0 + (i * 7) % 13)
-        row.ts_event = (now_minute - (45 - i) * 60_000) * 1_000_000
-        rows.append(row)
+    for i in range(45):  # 45 traded minutes ending now
+        rows.append(
+            _traded_second((now_minute - (45 - i) * 60_000) * 1_000_000, 100.0 + (i * 7) % 13)
+        )
     store.apply(_IID, rows)
     store.close()
     entries = json.dumps([{"name": "RelativeStrengthIndex", "params": {}, "bar_seconds": 60}])

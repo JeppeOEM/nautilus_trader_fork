@@ -1,38 +1,43 @@
+# -------------------------------------------------------------------------------------------------
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
+#  https://nautechsystems.io
+#
+#  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
+#  You may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at https://www.gnu.org/licenses/lgpl-3.0.en.html
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+# -------------------------------------------------------------------------------------------------
 """
-Shared cursor-paging helpers for the scroll-back routes (candles, snapshots, indicator
-series/values): find a page across data gaps and answer "is there anything older?" from the
-catalog's own file ranges (`kernel.catalog_files.data_file_ranges`), not fixed-size probe windows.
+Deprecated re-export shim (Story 24.2): `data_api.routes.paging` moved to the views context
+(`views.catalog_reads`).
+
+Pure re-export, defines nothing: every name here *is* the `views.catalog_reads` object. Import from
+`views.catalog_reads` instead, e.g. `from views.catalog_reads import fetch_page`.
 """
 
-from collections.abc import Callable
-from typing import TypeVar
+import warnings
+
+from views.catalog_reads import fetch_page
+from views.catalog_reads import has_older_data
 
 
-T = TypeVar("T")
+__all__ = [
+    "fetch_page",
+    "has_older_data",
+]
+
+REMOVE_AFTER = "24-4-research-pure-consumer-and-broken-tests-repaired"
 
 
-def has_older_data(ranges: list[tuple[int, int]], ns: int) -> bool:
-    return bool(ranges) and ranges[0][0] < ns
-
-
-def fetch_page(
-    fetch: Callable[[int, int], list[T]],
-    ranges: list[tuple[int, int]],
-    before_ns: int,
-    span_ns: int,
-) -> list[T]:
-    """
-    First non-empty `fetch(start_ns, end_ns)` walking back from `before_ns` in `span_ns`
-    windows, jumping over gaps straight to the last data before each empty window. `[]` only
-    when nothing older exists at all.
-    """
-    end_ns = before_ns
-    while True:
-        start_ns = end_ns - span_ns
-        result = fetch(start_ns, end_ns)
-        if result:
-            return result
-        older_ends = [end for start, end in ranges if start < start_ns]
-        if not older_ends:
-            return []
-        end_ns = min(max(older_ends), start_ns)  # min(): always progress, even mid-file
+# Attributed to the importing module, not to importlib's frames.
+warnings.warn(
+    "data_api.routes.paging moved to views.catalog_reads (Story 24.2); "
+    f"this shim is removed after {REMOVE_AFTER}",
+    DeprecationWarning,
+    skip_file_prefixes=("<frozen importlib",),
+)

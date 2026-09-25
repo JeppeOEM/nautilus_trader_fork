@@ -53,7 +53,7 @@ function saveDeselectedVenues(venues: Set<string>): void {
 // so a saved condition survives reordering/removing other columns.
 const TECHNICAL_FIELD_PREFIX = "tech:";
 
-// Hand-declared TS mirror of ml_signals/ranking_columns.py's RANKING_COLS
+// Hand-declared TS mirror of views/ranking_columns.py's RANKING_COLS
 // (platform/CLAUDE.md SSOT-03) -- same precedent as bot_tui's own urwid renderer
 // independently mirroring the same metadata. If ranking_columns.py's column list
 // changes, port the change here too; this is deliberately a short, flat array so that

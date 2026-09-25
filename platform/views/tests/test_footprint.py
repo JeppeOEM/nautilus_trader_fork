@@ -16,7 +16,6 @@
 
 from candles.domain.candle import Candle
 
-from ml_signals.footprint import build_footprint
 from nautilus_trader.model.data import BookOrder
 from nautilus_trader.model.data import OrderBookDelta
 from nautilus_trader.model.enums import BookAction
@@ -24,6 +23,7 @@ from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
+from views.chart_series import build_footprint
 
 
 INSTRUMENT_ID = InstrumentId.from_str("TEST-PERP.SIM")
