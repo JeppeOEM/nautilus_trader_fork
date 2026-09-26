@@ -62,7 +62,7 @@ from _source_tree import story_statuses
 from _source_tree import unknown_or_done
 
 
-THIS_STORY = "25-4-collection-control-plan-intent-vs-applied-set"
+THIS_STORY = "26-1-livebook-tradeintake-feedgroup-pure-secondsampler-in-place"
 
 KERNEL = "kernel"
 OBSERVABILITY = "observability"
@@ -144,8 +144,6 @@ LEGACY_MODULE_TO_CONTEXT: dict[str, str] = {
     "dydx_collector": CAPTURE,
     "dydx_collector.config": COLLECTION_CONTROL,
     "dydx_collector.tests.test_build_candles": CANDLES,
-    # --- live_paper (Story 25.3 re-export shims of `bots`)
-    "live_paper": BOTS,
     # --- data_api: the interface adapter (its Story 24.2 views shims were deleted in Story 24.4,
     # its Story 24.3 alerting shim in Story 25.1)
     "data_api": DATA_API,
@@ -250,7 +248,7 @@ _PACKAGE_INITS = {name for name, path in _MODULES.items() if path.name == "__ini
 # The legacy packages: every top-level package that is not itself a context. `data_api` and
 # `bot_tui` keep their names (interface adapters) and are judged like any context package.
 LEGACY_PACKAGES = frozenset(
-    {"collector_core", "dydx_collector", "bybit_collector", "hyperliquid_collector", "live_paper"}
+    {"collector_core", "dydx_collector", "bybit_collector", "hyperliquid_collector"}
 )
 
 
@@ -524,8 +522,14 @@ _DOMAIN_SAFE_ROOTS = frozenset({"numpy"})
 
 
 def _is_domain_module(module: str) -> bool:
+    """
+    Tell a `domain/` module or a venue's `policies.py` -- `capture/venues/<v>/policies.py` after
+    Story 26.2, `<venue>_collector/policies.py` until then (Story 26.1: pure values, AD-D6).
+    """
     parts = module.split(".")
-    policies = len(parts) == 4 and parts[1] == "venues" and parts[3] == "policies"
+    policies = (len(parts) == 4 and parts[1] == "venues" and parts[3] == "policies") or (
+        len(parts) == 2 and parts[0].endswith("_collector") and parts[1] == "policies"
+    )
     return "domain" in parts[1:] or policies
 
 
@@ -536,7 +540,9 @@ def _domain_violations(module: str, targets: list[str]) -> list[str]:
         in_repo = _in_repo(target)
         if in_repo is not None:
             ctx = _context_of(in_repo)
-            if ctx != KERNEL and not (ctx == module.split(".")[0] and _is_domain_module(in_repo)):
+            # Another domain module of the same context: until Story 26.2 moves capture into one
+            # package, a venue's policies import `collector_core.domain` across packages.
+            if ctx != KERNEL and not (ctx == _context_of(module) and _is_domain_module(in_repo)):
                 bad.append(target)
         elif (
             not _stdlib(target)
@@ -560,6 +566,9 @@ def test_domain_rule_recognises_policy_files_and_foreign_imports() -> None:
     assert _is_domain_module("capture.venues.dydx.policies")
     assert _is_domain_module("capture.domain.live_book")
     assert not _is_domain_module("capture.venues.dydx.client")
+    assert _is_domain_module("dydx_collector.policies")
+    assert _is_domain_module("collector_core.domain.live_book")
+    assert not _is_domain_module("dydx_collector.collector")
     assert _domain_violations(
         "capture.venues.dydx.policies",
         [
@@ -574,6 +583,141 @@ def test_domain_rule_recognises_policy_files_and_foreign_imports() -> None:
     ) == ["redis", "nautilus_trader.live", "numpydoc"]
 
 
+def _not_test(module: str) -> bool:
+    return ".tests." not in f".{module}."
+
+
+_CAPTURE_MODULES = {
+    module: path
+    for module, path in _MODULES.items()
+    if _context_of(module) == CAPTURE and _not_test(module)
+}
+# Forbidden in a capture aggregate or policy (AD-D6): it reports through verdicts and events, and
+# the `Collector` alone logs, ledgers, awaits and reads the clock.
+_IMPURE_IMPORTS = ("logging", "asyncio", "time", "observability")
+
+
+def _impurities(module: str, tree: ast.Module, targets: list[str]) -> list[str]:
+    found = [t for t in targets if t.split(".")[0] in _IMPURE_IMPORTS]
+    found += [
+        f"{type(node).__name__} at line {node.lineno}"
+        for node in ast.walk(tree)
+        if isinstance(node, ast.AsyncFunctionDef | ast.Await)
+    ]
+    return found
+
+
+def test_capture_domain_and_policies_never_log_ledger_await_or_read_the_clock() -> None:
+    """Story 26.1: policies and aggregates are pure and synchronous (spine AD-D6)."""
+    impure = {
+        module: found
+        for module, path in _CAPTURE_MODULES.items()
+        if _is_domain_module(module)
+        and (
+            found := _impurities(
+                module,
+                ast.parse(path.read_text()),
+                [ref.target for ref in imports_of(module, path, _KNOWN)],
+            )
+        )
+    }
+    assert impure == {}
+    assert any(module.endswith(".policies") for module in _CAPTURE_MODULES), "rule saw no policy"
+
+
+def test_the_purity_rule_catches_each_kind() -> None:
+    tree = ast.parse("import logging\nasync def f():\n    await g()\n")
+    assert _impurities("m", tree, ["logging", "kernel.fold"]) == [
+        "logging",
+        "AsyncFunctionDef at line 2",
+        "Await at line 3",
+    ]
+
+
+_SITE_LITERAL = re.compile(r"(collector|archive_gaps)\.[a-z_]+")
+_SITES_MODULE = "collector_core.sites"
+# The application service: the one module that calls `error_ledger.record` in capture (AD-D6).
+_LEDGER_CALLER = "collector_core.collector"
+
+
+def _ledger_calls(tree: ast.Module) -> list[int]:
+    return [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Attribute)
+        and node.attr == "record"
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "error_ledger"
+    ]
+
+
+def _site_literals(tree: ast.Module) -> list[str]:
+    return [
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and _SITE_LITERAL.fullmatch(node.value)
+    ]
+
+
+def test_the_collector_is_captures_only_ledger_caller() -> None:
+    callers = {
+        module: lines
+        for module, path in _CAPTURE_MODULES.items()
+        if (lines := _ledger_calls(ast.parse(path.read_text()))) and module != _LEDGER_CALLER
+    }
+    assert callers == {}, "report through `Collector._ledger` (a `Ledger` handed to adapters)"
+    assert len(_ledger_calls(ast.parse(_MODULES[_LEDGER_CALLER].read_text()))) == 1
+
+
+def test_every_capture_ledger_site_is_named_once_in_sites() -> None:
+    literal_sites = {
+        module: literals
+        for module, path in _CAPTURE_MODULES.items()
+        if module != _SITES_MODULE and (literals := _site_literals(ast.parse(path.read_text())))
+    }
+    assert literal_sites == {}, "name every site through `collector_core.sites`"
+    sites_tree = ast.parse(_MODULES[_SITES_MODULE].read_text())
+    declared = [
+        target.id
+        for node in sites_tree.body
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    ]
+    values = _site_literals(sites_tree)
+    assert len(values) == len(set(values)) == len(declared), "one constant per distinct site"
+    used = {
+        node.attr
+        for path in _CAPTURE_MODULES.values()
+        for node in ast.walk(ast.parse(path.read_text()))
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "sites"
+    }
+    assert sorted(set(declared) - used) == [], "a site no code reports: delete it"
+
+
+# Capture's composition roots (the venue entrypoints) are the only non-test importers of its
+# adapters (spine AD-D2). The adapters import each other and the application's ports only.
+_CAPTURE_ROOTS = frozenset(
+    {"dydx_collector.collector", "bybit_collector.collector", "hyperliquid_collector.collector"}
+)
+_CAPTURE_INFRASTRUCTURE = "collector_core.infrastructure"
+
+
+def test_capture_infrastructure_is_imported_only_by_its_composition_roots() -> None:
+    importers = sorted(
+        f"{module} -> {ref.target}"
+        for module, path in _CAPTURE_MODULES.items()
+        if module not in _CAPTURE_ROOTS and not module.startswith(_CAPTURE_INFRASTRUCTURE)
+        for ref in imports_of(module, path, _KNOWN)
+        if ref.target.startswith(_CAPTURE_INFRASTRUCTURE)
+    )
+    assert importers == []
+
+
 def test_every_import_resolves_to_a_mapped_context() -> None:
     """A split module's symbol or an import target the map cannot place is a map gap."""
     unplaced = sorted(_site(imp) for imp in _IMPORTS if "?" in (imp.src_ctx, imp.dst_ctx))
@@ -583,7 +727,7 @@ def test_every_import_resolves_to_a_mapped_context() -> None:
 def test_checker_flags_unmapped_modules_and_expired_stories() -> None:
     assert _context_of("some_legacy_package.a_module_nobody_placed") is None
     assert _context_of("observability.anything") == OBSERVABILITY
-    assert _context_of("live_paper.config") == BOTS  # a Story 25.3 shim
+    assert _context_of("dydx_collector.config") == COLLECTION_CONTROL  # a Story 25.4 shim
     board = {"24-1-x": "done", "24-2-y": "ready-for-dev", "24-3-z": "superseded"}
     assert unknown_or_done("24-1-x", board) is not None
     assert unknown_or_done("24-9-typo", board) is not None

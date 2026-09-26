@@ -27,7 +27,7 @@ _IID = "BTCUSDT-LINEAR.BYBIT"
 
 def test_a_marker_is_the_frozen_line_and_an_inverted_span_is_ordered(tmp_path: Path) -> None:
     error_ledger.reset()
-    record_gap(str(tmp_path), _IID, 20, 10, "write_failed", 3)
+    record_gap(str(tmp_path), _IID, 20, 10, "write_failed", 3, error_ledger.record)
     line = archive_markers.path_for(tmp_path, _IID).read_text()
     assert line == (
         '{"instrument_id": "BTCUSDT-LINEAR.BYBIT", "from_ns": 10, "to_ns": 20, '
@@ -39,5 +39,5 @@ def test_a_marker_is_the_frozen_line_and_an_inverted_span_is_ordered(tmp_path: P
 def test_an_unwritable_marker_is_ledgered_never_raised(tmp_path: Path) -> None:
     error_ledger.reset()
     (tmp_path / archive_markers.GAPS_DIRNAME).write_text("a file where the directory should be")
-    record_gap(str(tmp_path), _IID, 1, 2, "quarantined", 0)
+    record_gap(str(tmp_path), _IID, 1, 2, "quarantined", 0, error_ledger.record)
     assert error_ledger.counts() == {"archive_gaps.write": 1}

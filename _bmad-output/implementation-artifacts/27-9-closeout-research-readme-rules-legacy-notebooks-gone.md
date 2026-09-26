@@ -40,7 +40,7 @@ so that the next notebook is written the platform's way by default and the docs 
   - [ ] `git grep` sweep per AC #3; delete any stray `.ipynb` outside `research/notebooks/` (the three legacy notebooks were deleted by 27.2/27.5/27.7 — verify, and check `.claude/worktrees/` is not in scope).
   - [ ] `ARCHITECTURE.md` module map + diagram; `docs/DATA_DICTIONARY.md` §"Research reads" (per notebook: stored fields read, derived-on-read values and the kernel function that derives them).
   - [ ] DDD spine Deferred: three entries with upgrade paths (markers on the chart; notebook interactivity without `ipywidgets`; Monte Carlo mark-to-market of open positions).
-  - [ ] `sprint-status.yaml`: Epic 27 `done` only after 27.8's `awaiting-operator` is confirmed; otherwise this story records the pending operator action and leaves the epic `in-progress`.
+  - [ ] `sprint-status.yaml`: Epic 27 `done` when its stories are; 27.8's VPS step lives in `docs/DEPLOY_CHECKLIST.md`'s "Deferred operator actions" and does not hold the epic open.
 
 ## Dev Notes
 

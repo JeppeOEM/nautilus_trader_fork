@@ -17,9 +17,6 @@ RUN pip install --no-cache-dir $PIP_INSECURE_ARGS -r requirements.txt
 COPY platform/kernel ./kernel
 COPY platform/observability ./observability
 COPY platform/bots ./bots
-# Story 25.3 re-export shims (removed after Story 26.1): shipped so `make test-live-paper`'s
-# platform/tests/test_namespace.py checks them in the image that serves them.
-COPY platform/live_paper ./live_paper
 # The cross-cutting guards in platform/tests, which read the read-only source mount
 # (PLATFORM_SOURCE_DIR), not this image.
 COPY platform/tests ./tests

@@ -19,11 +19,12 @@ latency to `Collector._process_data`.
 A fixed burst is replayed through `_process_data` (the queue bypassed): three collectors -- dYdX
 arrival-timed, Bybit and Hyperliquid venue-timed -- with ten instruments each, and per
 instrument one synthetic top-20 snapshot, `_DELTAS_PER_INSTRUMENT` incremental deltas and the
-venue's recorded REST trades (`collector_core/tests/fixtures/*trades*.json`, re-stamped to now so
-the stale-history filter accepts them). A venue-timed collector only holds a delta on arrival and
-applies it when the second closes, so the burst ends with that close (`_drain_pending_deltas`,
-exactly what `_sample_tick` runs): the apply is inside the measurement, and nothing stays held
-between bursts. Measured per message, median of `_REPETITIONS` fresh repetitions after a warm-up
+venue's recorded REST trades (`<venue>_collector/tests/fixtures/*trades*.json`, re-stamped to now
+so the stale-history filter accepts them). A venue-timed collector only holds a delta on arrival
+(`LiveBook.hold`) and applies it when the second closes, so the burst ends with that close
+(`_drain_pending_deltas`, exactly what `_sample_tick` runs): the apply is inside the measurement,
+and nothing stays held between bursts. Since Story 26.1 the path runs through the gate's
+aggregates (`LiveBook`, `TradeIntake`, `FeedGroup`); the burst and the baseline are unchanged. Measured per message, median of `_REPETITIONS` fresh repetitions after a warm-up
 burst on the same collectors:
 
 - `tracemalloc` (gc off): retained blocks, retained bytes and peak bytes above the start;
@@ -39,12 +40,13 @@ baseline fails and `make hotpath-baseline` records it. Every later run asserts e
 figure <= baseline and, on the CPU the baseline was recorded on, wall time <= 2x baseline (on
 another CPU the wall-time check is skipped with the reason shown; allocations still assert).
 
-Known limit: the replay drives the base `Collector`, so the venue `_apply_deltas` overrides
-(dYdX's per-level tagging, Bybit's `u` canary) are not on the measured path until capture's
-policies move into the core (Story 26.1). Known limit: `tracemalloc` sees only the Python
-allocator, not the Rust/Cython heaps behind `OrderBook.apply_delta`. Upgrade path for both: a
-per-venue replay through the policy values once they exist, and an RSS-based soak for the
-native heaps.
+Known limit: the replay drives the base `Collector` with the core's default policies, so dYdX's
+`DydxLevelTagger` and Bybit's `BybitSequenceCanary` (Story 26.1's policy values) are not on the
+measured path: adding them changes the burst, which needs a newly recorded baseline in its own
+reviewed change. Upgrade path: a per-venue replay through each venue's `CapturePolicies`,
+recorded when Story 26.3 re-records the baseline from the final tree. Known limit: `tracemalloc`
+sees only the Python allocator, not the Rust/Cython heaps behind `OrderBook.apply_delta`. Upgrade
+path: an RSS-based soak for the native heaps.
 """
 
 import gc
@@ -68,7 +70,6 @@ import pytest
 
 _HERE = Path(__file__).resolve().parent
 _CODE_ROOT = _HERE.parent  # the tree under test: the image's /app, or a checkout's platform/
-_TRADE_FIXTURES = _CODE_ROOT / "collector_core" / "tests" / "fixtures"
 
 
 def _baseline_path() -> Path:
@@ -106,28 +107,37 @@ _TICKERS = ("BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "AVAX", "LINK", "DOT", "L
 
 def _venues() -> list[dict[str, Any]]:
     """Venue shape: id format, time source, trade fixture and its parser, fixture precisions."""
-    from collector_core import trade_backfill
+    from bybit_collector.trade_history import parse_bybit_trades
+    from dydx_collector.trade_history import parse_dydx_trades
+    from hyperliquid_collector.trade_history import parse_hyperliquid_trades
 
     return [
         {
             "iid": "{t}-USD-PERP.DYDX",
             "source": "arrival",
-            "fixture": "dydx_trades_btc_usd_20260921.json",
-            "parse": trade_backfill.parse_dydx_trades,
+            "fixture": _CODE_ROOT
+            / "dydx_collector/tests/fixtures/dydx_trades_btc_usd_20260921.json",
+            "parse": parse_dydx_trades,
             "precisions": (0, 4),
         },
         {
             "iid": "{t}USDT-LINEAR.BYBIT",
             "source": "venue",
-            "fixture": "bybit_trades_btcusdt_linear_20260921.json",
-            "parse": trade_backfill.parse_bybit_trades,
+            "fixture": (
+                _CODE_ROOT
+                / "bybit_collector/tests/fixtures/bybit_trades_btcusdt_linear_20260921.json"
+            ),
+            "parse": parse_bybit_trades,
             "precisions": (2, 3),
         },
         {
             "iid": "{t}-USD-PERP.HYPERLIQUID",
             "source": "venue",
-            "fixture": "hyperliquid_recent_trades_btc_20260921.json",
-            "parse": trade_backfill.parse_hyperliquid_trades,
+            "fixture": (
+                _CODE_ROOT
+                / "hyperliquid_collector/tests/fixtures/hyperliquid_recent_trades_btc_20260921.json"
+            ),
+            "parse": parse_hyperliquid_trades,
             "precisions": (1, 5),
         },
     ]
@@ -195,7 +205,7 @@ def _trades(venue: dict[str, Any], iid: str, tag: str, now_ns: int) -> list[Any]
     from nautilus_trader.model.data import TradeTick
     from nautilus_trader.model.identifiers import TradeId
 
-    payload = json.loads((_TRADE_FIXTURES / venue["fixture"]).read_text())
+    payload = json.loads(venue["fixture"].read_text())
     instrument = _instrument(iid, *venue["precisions"])
     recorded = venue["parse"](payload, instrument, now_ns)
     return [
@@ -229,6 +239,7 @@ def _burst(venue: dict[str, Any], iids: list[str], tag: str) -> list[Any]:
 def _collectors(root: Path) -> list[tuple[Any, list[str], dict[str, Any]]]:
     from collector_core.collector import Collector
     from collector_core.config import CoreConfig
+    from collector_core.infrastructure.parquet_writer import ParquetArchiveWriter
 
     built = []
     for n, venue in enumerate(_venues()):
@@ -239,7 +250,13 @@ def _collectors(root: Path) -> list[tuple[Any, list[str], dict[str, Any]]]:
             catalog_path=str(catalog),
             book_time_source=venue["source"],
         )
-        collector = Collector(config, object(), plan=iids)
+        collector = Collector(
+            config,
+            object(),
+            plan=iids,
+            archive=ParquetArchiveWriter(str(catalog)),
+            live_stream=None,
+        )
         collector._applied.update(iids)  # as `run()`'s initial apply leaves it
         built.append((collector, iids, venue))
     return built
@@ -285,27 +302,26 @@ def _assert_the_live_path_was_taken(prepared: _Prepared) -> None:
 
     for collector, burst in prepared:
         trades = sum(1 for message in burst if type(message).__name__ == "TradeTick")
+        intakes, books = collector._intakes, collector._books
         bypassed = {
-            "stale": dict(collector._stale_trades_dropped),
-            "duplicate": dict(collector._duplicate_trades_dropped),
-            "duplicate_feed": dict(collector._duplicate_feed_dropped),
-            "late": dict(collector._late_trades),
-            "ahead": dict(collector._ahead_trades),
-            "before_snapshot": dict(collector._deltas_before_snapshot_dropped),
-            "late_deltas": dict(collector._late_deltas),
-            "still_held": {iid: len(held) for iid, held in collector._pending_deltas.items()},
+            counter: {iid: n for iid, i in intakes.items() if (n := getattr(i, counter))}
+            for counter in ("stale", "duplicate", "duplicate_feed", "late", "ahead")
         }
+        bypassed.update(
+            {
+                counter: {iid: n for iid, b in books.items() if (n := getattr(b, counter))}
+                for counter in ("before_snapshot", "late_deltas", "pending_count")
+            }
+        )
         assert not any(bypassed.values()), f"replay left the live path: {bypassed}"
-        books = len(collector._live_books)
-        assert books == _INSTRUMENTS_PER_VENUE, f"{books} live books, expected every instrument's"
+        live_books = sum(1 for b in books.values() if b.book is not None)
+        assert live_books == _INSTRUMENTS_PER_VENUE, (
+            f"{live_books} live books, expected every instrument's"
+        )
         live = (
-            sum(
-                len(t)
-                for per_second in collector._venue_trades.values()
-                for t in per_second.values()
-            )
+            sum(len(t) for i in intakes.values() for t in i.buckets.values())
             if collector._venue_time
-            else sum(len(t) for t in collector._second_trades.values())
+            else sum(len(i.live) for i in intakes.values())
         )
         assert live == 2 * trades, f"{live} trades folded live, expected {2 * trades} (warm + run)"
     assert error_ledger.counts() == {}, f"the replay ledgered: {error_ledger.counts()}"

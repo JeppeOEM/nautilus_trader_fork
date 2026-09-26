@@ -13,44 +13,36 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-Feed tags (story 22.14): which WebSocket connection a message arrived on.
+Feed tags (story 22.14): which WebSocket connection a message arrived on, and the redundant
+trades-only socket's failure handling for the venue clients.
 
-A `Feed` names one connection (`name`) and the group of connections that carry the same trades
-(`group`: a primary socket and its optional trades-only twin, `trade_feeds = 2`). The core keeps
-liveness, reconnect detection and first-copy arbitration per feed name; the one-sided-outage
-alert compares feeds within a group. `trades_only` feeds carry no book, so they never count
-towards the book-feed staleness gate (`_last_feed_message_ns`) or the silence detection.
+`Feed`/`MAIN_FEED` are `collector_core.domain.feed_group`'s (the `FeedGroup` aggregate keeps
+liveness, reconnect detection and arbitration per feed since Story 26.1), and `REST_FEED_NAME`
+is `collector_core.domain.trade_intake`'s; this module is the clients' import point for them.
 """
 
 from collections.abc import Awaitable
-from dataclasses import dataclass
 from typing import Any
 
-from observability import error_ledger
+from collector_core import sites
+from collector_core.domain.feed_group import MAIN_FEED
+from collector_core.domain.feed_group import Feed
+from collector_core.domain.trade_intake import REST_FEED_NAME
+from collector_core.ports import Ledger
 
 
-@dataclass(frozen=True)
-class Feed:
-    name: str
-    group: str
-    trades_only: bool = False
+__all__ = ["MAIN_FEED", "REST_FEED_NAME", "Feed", "optional_feed_step"]
 
 
-MAIN_FEED = Feed("main", "main")
-# The first-copy source name of a trade archived by the REST backfill. Never a WS feed: REST data
-# never goes through `_on_data`, so it never counts as liveness.
-REST_FEED_NAME = "rest"
-
-
-async def optional_feed_step(feed: Feed, action: str, step: Awaitable[Any]) -> bool:
+async def optional_feed_step(feed: Feed, action: str, step: Awaitable[Any], ledger: Ledger) -> bool:
     """
     Run one step (connect, subscribe, ...) on a redundant trades-only socket; False, ledgered
-    (`collector.trade_feed`), when it fails. The second feed exists to add redundancy, so its
-    failure must never take the primary connection's data down with it.
+    (`collector.trade_feed`, through the collector's `ledger`), when it fails. The second feed
+    exists to add redundancy, so its failure must never take the primary connection's data down.
     """
     try:
         await step
     except Exception as e:
-        error_ledger.record("collector.trade_feed", f"{feed.name}: {action} failed", e)
+        ledger(sites.TRADE_FEED, f"{feed.name}: {action} failed", e)
         return False
     return True

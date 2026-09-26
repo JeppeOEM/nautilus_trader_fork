@@ -78,14 +78,14 @@ def test_a_failed_trade_write_marks_a_gap_and_the_rebuild_keeps_live_values(
     asyncio.run(c._flush_once(final=True))  # the archive exists from second 1000 on
     c._process_data(_bybit_trade(2, _BYBIT_D0 + 2000 * _S_NS, _BYBIT_D0 + 2000 * _S_NS))
     live = _bybit_sample_at(c, 2000.5)
-    write = c._catalog.write_data
+    write = c._archive.catalog.write_data
 
     def trades_fail(items: list) -> None:
         if isinstance(items[0], TradeTick):
             raise OSError("disk full")
         write(items)
 
-    monkeypatch.setattr(c._catalog, "write_data", trades_fail)
+    monkeypatch.setattr(c._archive.catalog, "write_data", trades_fail)
     asyncio.run(c._flush_once(final=True))  # the snapshot lands, its trade does not
 
     (gap,) = load_gaps(str(tmp_path), _BYBIT)
@@ -116,7 +116,7 @@ def test_a_late_trade_is_archived_counted_excluded_live_and_rebuilt_into_its_sec
     c._process_data(
         _venue_trade(2, _VENUE_SEC + 0.7, init_s=_VENUE_SEC + 1.9)
     )  # second S already closed
-    assert c._late_trades[_VENUE_IID] == 1
+    assert c._intake(_VENUE_IID).late == 1
     assert [t.trade_id.value for t in c._buffer[(TradeTick, _VENUE_IID)]] == ["1", "2"]
     (live,) = _venue_close(c, _VENUE_SEC + 1)
     assert live.buy_count == 0  # not folded into the arrival second either
@@ -130,7 +130,9 @@ def test_a_late_trade_is_archived_counted_excluded_live_and_rebuilt_into_its_sec
 
 def test_archive_sees_a_running_capture_and_capture_releases_it_on_exit(tmp_path: Path) -> None:
     async def scenario() -> None:
-        lock = await acquire_capture_lock(tmp_path, "BYBIT", asyncio.Event())
+        lock = await acquire_capture_lock(
+            tmp_path, "BYBIT", asyncio.Event(), ledger=error_ledger.record
+        )
         assert lock is not None
         with capture_exclusive(tmp_path, "BYBIT") as exclusive:
             assert not exclusive  # a collector runs: repair_catalog must refuse

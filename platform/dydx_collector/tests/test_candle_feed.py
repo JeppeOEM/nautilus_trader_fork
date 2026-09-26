@@ -162,7 +162,7 @@ def test_a_failed_parquet_write_never_reaches_the_store(
     def boom(_items: list) -> None:
         raise OSError("disk full")
 
-    monkeypatch.setattr(collector._catalog, "write_data", boom)
+    monkeypatch.setattr(collector._archive.catalog, "write_data", boom)
     asyncio.run(collector._flush_once())
 
     assert _bars(db_path) == []  # store never ahead of the archive
@@ -177,7 +177,7 @@ def test_startup_catch_up_applies_seconds_the_archive_has_beyond_the_watermark(
     ParquetDataCatalog(str(tmp_path / "catalog")).write_data(snaps)
     assert collector._second_sink is not None
     collector._second_sink.apply(_IID, snaps[:40])  # crashed before the rest was applied
-    monkeypatch.setattr("dydx_collector.collector.time.time_ns", lambda: _T0 + 3600 * 1_000_000_000)
+    monkeypatch.setattr("collector_core.collector.time.time_ns", lambda: _T0 + 3600 * 1_000_000_000)
 
     collector._catch_up_candle_store()
 

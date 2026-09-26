@@ -9,7 +9,7 @@ Every "error ledger" site named below (`collector.late_trade`, `collector.trade_
 (Story 23.1; formerly `ml_signals.error_ledger`, whose shim Story 24.1 deleted). The sites, their
 names and what they count are unchanged `[re-cited 2026-09-21: Story 23.1]`, with one addition:
 `archive_gaps.inverted_span` counts a gap marker whose `from_ns > to_ns` — a backward wall-clock
-step between a lost trade's arrival and the flush. The marker is written as the ordered span and
+step between a lost trade's arrival and the flush. Since Story 26.1 every capture site is a constant in `collector_core/sites.py` and `Collector._ledger` is capture's only `record` call; it added `collector.empty_top` (a book with no best bid or ask: seconds skipped, one WARNING and one ledger line per instrument per minute) `[amended 2026-09-26: Story 26.1]`. The marker is written as the ordered span and
 still protects its rows, so the count is the only signal that the clock stepped back
 `[added 2026-09-22: Story 23.2]`.
 
@@ -68,7 +68,7 @@ The Rust WS clients reconnect and resubscribe silently, so the core detects a re
 connection ("feed") on evidence -- an `is_active()` flip (Bybit, Hyperliquid), a book feed
 silent past `feed_stale_seconds or stale_book_seconds`, or the same feed replaying a trade id
 after the startup grace -- and, 3 s later, fetches each affected instrument's trades of
-`[last archived ts_event - 5 s, now]` over stdlib REST (`collector_core/trade_backfill.py`).
+`[last archived ts_event - 5 s, now]` over stdlib REST (each venue's `<venue>_collector/trade_history.py`, a `VenueTradeHistory` `[amended 2026-09-26: Story 26.1]`).
 Unseen ids are archived with the venue's `ts_event` and `ts_init` = the time they were archived
 (so `ts_init - ts_event` shows the recovery lag); they are **never** folded into the live second
 -- the nightly rebuild places them. One `collector.trade_backfill` ledger entry per backfill
@@ -245,23 +245,26 @@ with its class name, Arrow schema and `snapshots:raw` encoding unchanged (the ca
   is set per venue from `python -m archive.tools.measure_lag` (the per-kind distribution of
   `ts_init - ts_event`); it only makes fewer trades late, the rebuild is what makes a second
   correct (audit D-50).
-- **Built by:** `collector_core/collector.py`'s `Collector._second_loop`, every
+- **Built by:** `collector_core/collector.py`'s `Collector._second_loop` (the gate itself is `collector_core/domain/sampler.py`'s `SecondSampler` `[amended 2026-09-26: Story 26.1]`), every
   `snapshot_interval_seconds` (config default 1.0s, overrideable in `config.toml`), on a
   drift-free wall-clock schedule at mid-interval (`_next_sample_at`): exactly one row per
   floor second, which the rebuild's trade-to-row mapping relies on. Venue mode
   (`_venue_second_loop`) instead closes each exchange second at wall
   `S + 1 + hold_back_seconds`; after a stall it closes every overdue second (at most 60) in
   order, each from the book as of its own end.
-- **Guards before emission:** skips crossed books (the venue's `_handle_crossed_book` —
-  on dYdX it also drives a forced resubscribe/resync after a persistent cross), and skips
+- **Guards before emission:** skips a missing book and an empty top of book (no best bid or
+  ask; rate-limited WARNING + `collector.empty_top` since Story 26.1), skips crossed books (the
+  venue's `CrossedBookPolicy` -- on dYdX the active uncross first, then a forced resync after a
+  persistent cross; on Bybit a forced resync past `crossed_resync_seconds`) `[amended 2026-09-26: Story 26.1]`, and skips
   stale books with no `OrderBookDeltas` for `config.stale_book_seconds` (5s; in venue mode
   measured from the last applied delta's `ts_event` to the end of the second, the feed-dead
   test staying on arrival) — both are
   `platform/CLAUDE.md` DATA-01 "flag the gap, never fabricate" implementations.
 - **Scope:** pinned + liquid instruments only. Illiquid instruments get no snapshots.
 - **Dual delivery:** written to the catalog via the normal buffer/flush path
-  (`self._on_data(snapshot)`, `collector.py`) **and** published live to Redis
-  channel `snapshots:raw` (`_publish_snapshot_batch`, `collector.py`) —
+  (`Collector._sample_tick` appends it to the flush buffer, `collector.py`) **and** published
+  live to Redis channel `snapshots:raw` (`publish_snapshot_batch`,
+  `collector_core/infrastructure/redis_stream.py`) `[amended 2026-09-26: Story 26.1]` —
   this Redis stream is what `ranking_engine` actually consumes live (§3); the Parquet
   copy is for backtest/historical replay.
 
@@ -558,7 +561,7 @@ candle store, then the archive's seconds -> bars fold), `snapshot_series_page`/`
 `indicator_series_page` (per-bar OFI/OBI replay, microprice, spread) and `indicator_values_page`
 (the picker's indicators over the chart's own candles, via `views.indicator_picker`). Every
 archived second is priced as written -- a crossed second (`bid >= ask`) included: today's gate
-never writes one (`_handle_crossed_book` skips and ledgers it), so one in the archive predates that
+never writes one (`SecondSampler` rejects it as `Crossed`, Story 26.1), so one in the archive predates that
 gate or is a capture bug to fix at the gate or with `repair_catalog`, never a reader filter (AD-3).
 A second with an empty side cannot be drawn at all and is never written by the gate, so reading one
 fails the request (500) and counts `views.snapshot_without_top`. Gap rows are the only rendering rule:

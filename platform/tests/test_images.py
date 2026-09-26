@@ -487,7 +487,7 @@ def test_uvicorn_app_is_the_first_non_option_token() -> None:
 
 
 def test_closure_follows_a_shim_to_its_target() -> None:
-    assert "bots.strategies.dummy" in import_closure("live_paper.strategy")
+    assert "dydx_collector.trade_history" in import_closure("collector_core.trade_backfill")
 
 
 def test_an_option_value_is_not_a_collected_path() -> None:

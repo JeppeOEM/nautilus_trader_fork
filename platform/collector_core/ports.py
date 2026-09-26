@@ -12,14 +12,127 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
-"""The ports capture declares: what a downstream context must offer for capture to feed it."""
+"""
+The ports capture declares (DDD spine AD-D2/AD-D6): what a venue client, a downstream context and
+each I/O adapter must offer for the `Collector` to drive them. All `typing.Protocol`, satisfied
+structurally and wired explicitly at a venue collector's `__init__` (the composition root).
+"""
 
+import asyncio
 from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import IO
+from typing import Any
 from typing import Protocol
 
+from kernel.second_snapshot import DydxSecondSnapshot
 from kernel.second_snapshot import SecondRow
+
+from collector_core.domain.trade_history import Fetched
+from nautilus_trader.model.instruments import Instrument
+
+
+class Ledger(Protocol):
+    """
+    Where capture reports a failure it continues past (DATA-07). Invariant: the `Collector` is the
+    only caller of `observability.error_ledger.record` in capture; an adapter or client that must
+    report one is handed the collector's own `_ledger` and names a `collector_core.sites` site.
+    """
+
+    def __call__(self, site: str, detail: str, exc: BaseException | None = None) -> None: ...
+
+
+class VenueFeed(Protocol):
+    """
+    A venue's WebSocket/REST client (was the `collector.py` module docstring's duck-typed contract).
+
+    Invariant: every decoded market-data message reaches the collector through the `on_data(data,
+    feed)` callable the client was built with, from the event loop (`call_soon_threadsafe`), and
+    `on_data` only enqueues. All methods are coroutines. `subscribe`/`unsubscribe` are called only
+    by `Collector.apply` and its retry loop, and must be idempotent per channel.
+
+    Optional capabilities, found by `hasattr`: `subscribe_global()` (venue-wide channels, e.g.
+    dYdX markets); `fetch_book_snapshot(iid) -> BookSnapshot` (the aligned REST cross-check,
+    22.5/D-64); `resync_orderbook(iid)` (force a fresh snapshot -- only a venue whose local book can
+    drift; a full-snapshot venue must not have it); `feed_states() -> dict[Feed, bool]`
+    (*synchronous*: each connection's `is_active()`, polled every 0.1 s for reconnects).
+    """
+
+    async def fetch_instruments(self) -> list: ...
+
+    async def connect(self, loop: asyncio.AbstractEventLoop, instruments: list) -> None: ...
+
+    async def disconnect(self) -> None: ...
+
+    async def subscribe(self, iid: str) -> None: ...
+
+    async def unsubscribe(self, iid: str) -> None: ...
+
+
+class VenueTradeHistory(Protocol):
+    """
+    A venue's REST trades for the reconnect backfill (story 22.14).
+
+    Invariant: `fetch` returns exact `TradeTick`s (`collector_core.domain.trade_history`), oldest
+    first, at or after `since_ns`, and says whether the venue's depth covered `since_ns`
+    (`reached_since`); it pages no further back than `floor_ns`. Synchronous (stdlib REST): the
+    `Collector` runs it off the event loop. It may raise; the failure is named per instrument in
+    that backfill's one ledger entry.
+    """
+
+    def fetch(
+        self, instrument: Instrument, since_ns: int, floor_ns: int, ts_init: int
+    ) -> Fetched: ...
+
+
+class ArchiveWriter(Protocol):
+    """
+    The one live writer of this venue's catalog leaves (AD-D18): the Parquet batch write, the
+    instrument definitions, the archive-gap markers capture causes, the startup quarantine of
+    unreadable files and the capture lock.
+
+    Invariant: every catalog write goes through `ParquetDataCatalog.write_data` (NAUT-02), so the
+    schema and partitioning are Nautilus's own; a batch whose write raised is reported to the caller
+    (which marks the gap), never retried silently. The only module naming the batch encoder, so a
+    columnar encoder can replace it without touching a caller (Epic 28). Synchronous methods run
+    off the event loop where they do disk I/O on the hot path (`write`).
+    """
+
+    @property
+    def catalog_path(self) -> str: ...
+
+    def write(self, items: list) -> None: ...
+
+    def write_instruments(self, instruments: list) -> None: ...
+
+    def mark_gap(
+        self, iid: str, from_ns: int, to_ns: int, reason: str, count: int, ledger: Ledger
+    ) -> None: ...
+
+    def quarantine_corrupt(self, instrument_ids: Sequence[str], ledger: Ledger) -> None: ...
+
+    async def acquire_lock(
+        self, venue: str, shutting_down: asyncio.Event, ledger: Ledger
+    ) -> IO[str] | None: ...
+
+
+class LiveStream(Protocol):
+    """
+    The live `snapshots:raw` fan-out (parent spine AD-1). Invariant: it publishes exactly the
+    batch the gate accepted, the same objects the archive buffer holds; a failed publish loses
+    that tick's live view only (the Parquet write is durable) and never stalls the sampler.
+    """
+
+    async def publish(self, snapshots: list[DydxSecondSnapshot]) -> None: ...
+
+    async def close(self) -> None: ...
+
+
+class Notifier(Protocol):
+    """The operator push (OBS-01); `observability.notify` satisfies it as a module."""
+
+    def notify(self, channel: str, title: str, body: str) -> Any: ...
 
 
 class SecondSink(Protocol):

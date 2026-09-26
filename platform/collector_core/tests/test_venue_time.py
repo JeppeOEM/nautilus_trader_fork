@@ -34,6 +34,7 @@ from collector_core.config import CoreConfig
 from collector_core.config import core_config_from_dict
 from collector_core.feed import MAIN_FEED
 from collector_core.feed import Feed
+from collector_core.infrastructure.parquet_writer import ParquetArchiveWriter
 from nautilus_trader.model.data import BookOrder
 from nautilus_trader.model.data import OrderBookDelta
 from nautilus_trader.model.data import OrderBookDeltas
@@ -74,7 +75,13 @@ def _collector(
         book_time_source=source,  # type: ignore[arg-type]
         hold_back_seconds=hold_back,
     )
-    c = Collector(cfg, client if client is not None else _SnapshotClient(), plan=(_IID,))
+    c = Collector(
+        cfg,
+        client if client is not None else _SnapshotClient(),
+        plan=(_IID,),
+        archive=ParquetArchiveWriter(cfg.catalog_path),
+        live_stream=None,
+    )
     c._applied.add(_IID)  # as `run()`'s initial apply leaves it (no network here)
     return c
 
@@ -109,7 +116,7 @@ def _trade(n: int, event_s: float, init_s: float | None = None, price: float = 1
 def _close(c: Collector, second: int, wall_s: float | None = None) -> list[DydxSecondSnapshot]:
     """Close `second` at wall `second + 1.2` (or `wall_s`), with a live feed."""
     now = _at(second + 1.2 if wall_s is None else wall_s)
-    c._last_feed_message_ns = now
+    c._feeds.last_book_message_ns = now
     return asyncio.run(c._sample_tick(now, second))
 
 
@@ -156,7 +163,7 @@ def test_dual_feed_copies_fold_once_into_their_exchange_second(tmp_path: Path) -
     c._process_data(_trade(1, _SEC + 0.5, init_s=_SEC + 0.6), MAIN_FEED)
     c._process_data(_trade(1, _SEC + 0.5, init_s=_SEC + 0.7), trades_feed)
     c._process_data(_trade(2, _SEC + 0.8, init_s=_SEC + 1.1), trades_feed)  # only this feed
-    assert dict(c._duplicate_feed_dropped) == {_IID: 1}
+    assert c._intake(_IID).duplicate_feed == 1
     assert [t.trade_id.value for t in c._buffer[(TradeTick, _IID)]] == ["1", "2"]
     (row,) = _close(c, _SEC)
     assert row.buy_count == 2
@@ -167,19 +174,19 @@ def test_a_live_copy_of_a_rest_backfilled_trade_folds_into_its_exchange_second(
 ) -> None:
     c = _collector(tmp_path)
     c._process_data(_book(100.0, 102.0, _SEC + 0.1))
-    c._register_trade(_IID, "5", "rest")  # the backfill archived it first
+    c._intake(_IID).register("5", "rest")  # the backfill archived it first
     c._process_data(_trade(5, _SEC + 0.99, init_s=_SEC + 1.05))  # in S, arrived in S+1
     assert c._buffer[(TradeTick, _IID)] == []  # never archived twice
     (row,) = _close(c, _SEC)
     assert (row.buy_count, row.close_price) == (1, 100.25)
-    assert c._second_trades == {}  # not in the arrival-second list
+    assert not c._intake(_IID).live  # not in the arrival-second list
 
 
 def test_a_trade_stamped_far_ahead_of_arrival_is_archived_and_counted(tmp_path: Path) -> None:
     c = _collector(tmp_path, hold_back=1.0)
     c._process_data(_trade(1, _SEC + 6.5, init_s=_SEC))  # 6.5 s > hold-back 1 s + 5 s
-    assert c._ahead_trades[_IID] == 1
-    assert _IID not in c._venue_trades
+    assert c._intake(_IID).ahead == 1
+    assert c._intake(_IID).buckets == {}
     assert len(c._buffer[(TradeTick, _IID)]) == 1
 
 
@@ -192,22 +199,22 @@ def test_a_held_delta_past_the_bound_drops_the_book_and_queues_a_resync(tmp_path
     _close(c, _SEC + 1)
     c._check_pending_overflow(_at(_SEC + 6.4))  # held 5.1 s
     assert error_ledger.counts() == {"collector.pending_deltas": 1}
-    assert (_IID in c._pending_deltas, _IID in c._live_books) == (False, False)
-    assert c._resync_pending == {_IID}
+    assert (c._book(_IID).has_pending, c._live_book(_IID) is not None) == (False, False)
+    assert c._resync_pending() == {_IID}
 
 
 def test_a_held_delta_within_the_bound_is_kept(tmp_path: Path) -> None:
     c = _collector(tmp_path, hold_back=2.0)
     c._process_data(_book(101.0, 102.0, _SEC + 3.0, init_s=_SEC + 1.3))
     c._check_pending_overflow(_at(_SEC + 8.2))  # held 6.9 s <= 2 + 5 s
-    assert len(c._pending_deltas[_IID]) == 1
+    assert c._book(_IID).pending_count == 1
 
 
 def test_overflow_on_a_snapshot_venue_only_clears_the_book(tmp_path: Path) -> None:
     c = _collector(tmp_path)
     c._process_data(_book(101.0, 102.0, _SEC + 30.0, init_s=_SEC))
     c._check_pending_overflow(_at(_SEC + 6))
-    assert (_IID in c._pending_deltas, c._resync_pending) == (False, set())
+    assert (c._book(_IID).has_pending, c._resync_pending()) == (False, set())
 
 
 def test_venue_book_age_is_judged_on_exchange_time(tmp_path: Path) -> None:
@@ -215,15 +222,15 @@ def test_venue_book_age_is_judged_on_exchange_time(tmp_path: Path) -> None:
     c._process_data(_book(100.0, 102.0, _SEC - 5.5))  # 6.5 s before the end of S (> 5 s)
     c._process_data(_trade(1, _SEC + 0.5))
     assert _close(c, _SEC) == []
-    assert _SEC not in c._venue_trades.get(_IID, {})  # the skipped second's trades go too
-    assert c._late_trades[_IID] == 0
+    assert _SEC not in c._intake(_IID).buckets  # the skipped second's trades go too
+    assert c._intake(_IID).late == 0
 
 
 def test_watchdog_tracker_is_stamped_on_arrival_not_ts_event(tmp_path: Path) -> None:
     c = _collector(tmp_path)
     before = time.time_ns()
     c._process_data(_book(100.0, 102.0, _SEC))  # ts_event long ago
-    assert c._last_book_update_ns[_IID] >= before
+    assert c._last_book_update_ns(_IID) >= before
 
 
 def test_a_catch_up_closes_every_due_second_at_its_own_boundary(tmp_path: Path) -> None:
@@ -270,9 +277,9 @@ def test_arrival_mode_never_holds_deltas_or_buckets_trades(tmp_path: Path) -> No
     c = _collector(tmp_path, source="arrival")
     c._process_data(_book(100.0, 102.0, _SEC + 0.5))
     c._process_data(_trade(1, _SEC + 0.6))
-    assert (dict(c._pending_deltas), dict(c._venue_trades)) == ({}, {})
-    assert _IID in c._live_books
-    assert len(c._second_trades[_IID]) == 1
+    assert (c._book(_IID).has_pending, c._intake(_IID).buckets) == (False, {})
+    assert c._live_book(_IID) is not None
+    assert len(c._intake(_IID).live) == 1
 
 
 def test_a_venue_row_is_carried_with_a_trade_group_that_arrived_before_it(tmp_path: Path) -> None:
@@ -281,7 +288,7 @@ def test_a_venue_row_is_carried_with_a_trade_group_that_arrived_before_it(tmp_pa
     second = now // _S - 2
     c._process_data(_book(100.0, 102.0, second + 0.5))
     c._process_data(_trade(1, second + 0.6, init_s=(now - _S // 2) / _S))  # young: carried
-    c._last_feed_message_ns = now
+    c._feeds.last_book_message_ns = now
     (row,) = asyncio.run(c._sample_tick(now, second))  # ts_event is 1.5 s+ before the trade
     asyncio.run(c._flush_once())
     assert c._buffer[(DydxSecondSnapshot, _IID)] == [row]
@@ -318,7 +325,7 @@ def test_trades_before_the_first_close_are_logged_not_counted_late(tmp_path: Pat
     c._process_data(_book(100.0, 102.0, _SEC + 0.5))
     c._process_data(_trade(1, _SEC - 3.5))  # received before the loop closed anything
     _close(c, _SEC)
-    assert (c._pre_start_trades[_IID], c._late_trades[_IID]) == (1, 0)
+    assert (c._intake(_IID).pre_start, c._intake(_IID).late) == (1, 0)
 
 
 def test_a_catch_up_ledgers_one_crossed_episode_once(tmp_path: Path) -> None:
@@ -336,8 +343,8 @@ def test_a_late_message_does_not_age_the_book(tmp_path: Path) -> None:
     _close(c, _SEC)
     c._process_data(_book(100.5, 102.0, _SEC + 0.6))  # late: its second already closed
     _close(c, _SEC + 1)
-    assert c._book_event_ns[_IID] == _at(_SEC + 0.8)
-    assert c._late_deltas[_IID] == 1
+    assert c._book(_IID).book_event_ns == _at(_SEC + 0.8)
+    assert c._book(_IID).late_deltas == 1
 
 
 def test_dropping_the_book_counts_its_held_messages(tmp_path: Path) -> None:
@@ -345,7 +352,7 @@ def test_dropping_the_book_counts_its_held_messages(tmp_path: Path) -> None:
     c._process_data(_book(100.0, 102.0, _SEC + 0.5))
     c._process_data(_book(100.0, 102.0, _SEC + 0.6))
     c._clear_book_state(_IID)
-    assert c._deltas_before_snapshot_dropped[_IID] == 2
+    assert c._book(_IID).before_snapshot == 2
 
 
 def test_snapshot_queries_window_on_ts_event_not_sampling_time(tmp_path: Path) -> None:

@@ -12,7 +12,11 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
-"""Bybit `u` canary: the pure verdict matrix plus `_apply_deltas` with real OrderBookDeltas."""
+"""
+Bybit `u` canary (DATA-08): the pure policy (`bybit_collector.policies`) -- verdict matrix, message
+key, the zero-level case -- plus the policy running inside the core's `LiveBook` through a real
+`BybitCollector` with real OrderBookDeltas.
+"""
 
 import time
 from pathlib import Path
@@ -22,8 +26,9 @@ from collector_core.config import BybitConfig
 from observability import error_ledger
 
 from bybit_collector.collector import BybitCollector
-from bybit_collector.collector import _message_u
-from bybit_collector.collector import _sequence_verdict
+from bybit_collector.policies import BybitSequenceCanary
+from bybit_collector.policies import message_u as _message_u
+from bybit_collector.policies import sequence_verdict as _sequence_verdict
 from nautilus_trader.model.data import BookOrder
 from nautilus_trader.model.data import OrderBookDelta
 from nautilus_trader.model.data import OrderBookDeltas
@@ -88,9 +93,9 @@ def test_regress_ledgers_drops_book_and_queues_resync(
     assert error_ledger.counts() == {}
     c._apply_deltas(_IID, _msg(101))  # replayed id
     assert error_ledger.counts() == {"collector.book_sequence": 1}
-    assert _IID not in c._live_books
-    assert _IID in c._resync_pending
-    assert _IID not in c._last_u
+    assert c._live_book(_IID) is None
+    assert _IID in c._resync_pending()
+    assert c._book(_IID).last_u is None
 
 
 def test_gap_ledgers_drops_book_and_queues_resync(
@@ -102,9 +107,9 @@ def test_gap_ledgers_drops_book_and_queues_resync(
     c._apply_deltas(_IID, _msg(100, snapshot=True))
     c._apply_deltas(_IID, _msg(105))
     assert error_ledger.counts() == {"collector.book_sequence": 1}
-    assert _IID not in c._live_books
-    assert _IID in c._resync_pending
-    assert _IID not in c._last_u
+    assert c._live_book(_IID) is None
+    assert _IID in c._resync_pending()
+    assert c._book(_IID).last_u is None
 
 
 def test_restart_snapshot_rebaselines(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -113,4 +118,26 @@ def test_restart_snapshot_rebaselines(tmp_path: Path, monkeypatch: pytest.Monkey
     c._apply_deltas(_IID, _msg(900, snapshot=True))
     c._apply_deltas(_IID, _msg(1, snapshot=True))
     assert error_ledger.counts() == {}
-    assert c._last_u[_IID] == 1
+    assert c._book(_IID).last_u == 1
+
+
+def test_a_zero_level_message_carries_no_u_and_leaves_the_baseline() -> None:
+    """
+    A message with no level (the adapter's `total_levels == 0` branch) has no `u`: the canary is
+    not asked, so the baseline stays where it was (DATA-08's documented, still-open no-verdict
+    case: the next message is judged against the older `u`).
+    """
+    inst = InstrumentId.from_str(_IID)
+    ts = time.time_ns()
+    levelless = OrderBookDeltas(inst, [OrderBookDelta.clear(inst, 0, ts, ts)])
+    assert BybitSequenceCanary().message_key(levelless) is None
+
+
+def test_the_canary_value_is_what_the_live_book_checks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    c = _collector(tmp_path, monkeypatch)
+    c._apply_deltas(_IID, _msg(100, snapshot=True))
+    c._apply_deltas(_IID, _msg(101))
+    assert c._book(_IID).last_u == 101
+    assert isinstance(c._canary, BybitSequenceCanary)

@@ -12,30 +12,4 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
-"""
-Deprecated re-export shim (Story 25.3): `live_paper.strategy` moved to `bots.strategies.dummy`.
-
-Pure re-export, defines nothing: every name here *is* the `bots.strategies.dummy` object.
-"""
-
-import warnings
-
-from bots.strategies.dummy import DummyStrategy
-from bots.strategies.dummy import DummyStrategyConfig
-
-
-__all__ = [
-    "DummyStrategy",
-    "DummyStrategyConfig",
-]
-
-REMOVE_AFTER = "26-1-livebook-tradeintake-feedgroup-pure-secondsampler-in-place"
-
-
-# Attributed to the importing module, not to importlib's frames.
-warnings.warn(
-    "live_paper.strategy moved to bots.strategies.dummy (Story 25.3); "
-    f"this shim is removed after {REMOVE_AFTER}",
-    DeprecationWarning,
-    skip_file_prefixes=("<frozen importlib",),
-)
+"""Capture's application layer: services the `Collector` loops call (spine AD-D2)."""

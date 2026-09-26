@@ -122,7 +122,7 @@ _MAX_COLLECTED_INSTRUMENTS = 29
 # (collector.dockerfile) never COPYs live_paper/ in (AD-8's module isolation stays
 # intact: this mount is view-only, no import/execution of live_paper code happens
 # here). Hardcoded to the one strategy this system currently runs -- see
-# live_paper/node.py's build_node(), which attaches DummyStrategy directly rather
+# bots.infrastructure.nautilus_host's build_node(), which attaches DummyStrategy directly rather
 # than by string path; revisit as a per-bot lookup (bots:status already carries a
 # `strategy` class-name field) if a second strategy is ever added.
 _STRATEGY_SOURCE_PATH = Path(os.environ.get("STRATEGY_SOURCE_PATH", "/app/live_paper/strategy.py"))

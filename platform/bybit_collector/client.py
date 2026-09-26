@@ -42,6 +42,7 @@ from typing import Any
 from collector_core.book_check import BookSnapshot
 from collector_core.feed import Feed
 from collector_core.feed import optional_feed_step
+from collector_core.ports import Ledger
 
 from bybit_collector.book_snapshot import fetch_orderbook
 from nautilus_trader.core import nautilus_pyo3
@@ -87,8 +88,11 @@ class BybitClient:
         on_data: Callable[[object, Feed], None],
         environment: BybitEnvironment = BybitEnvironment.MAINNET,
         trade_feeds: int = 1,
+        *,
+        ledger: Ledger,
     ) -> None:
         self._on_data = on_data
+        self._ledger = ledger  # the collector's: a failed trades-only socket is ledgered there
         self._rest_environment = "testnet" if environment == BybitEnvironment.TESTNET else "mainnet"
         self._http = nautilus_pyo3.BybitHttpClient(  # type: ignore[attr-defined]
             testnet=environment == BybitEnvironment.TESTNET,
@@ -160,7 +164,7 @@ class BybitClient:
                 loop_=loop, callback=functools.partial(self._handle_message, feed)
             )
             if feed.trades_only:
-                if not await optional_feed_step(feed, "connect", connecting):
+                if not await optional_feed_step(feed, "connect", connecting, self._ledger):
                     self._drop_trade_ws(feed)
             else:
                 await connecting
@@ -193,7 +197,10 @@ class BybitClient:
         trade_ws = self._trade_ws_for(product_type)
         if trade_ws is not None:
             await optional_feed_step(
-                _trade_feed(product_type), "subscribe", trade_ws.subscribe_trades(iid)
+                _trade_feed(product_type),
+                "subscribe",
+                trade_ws.subscribe_trades(iid),
+                self._ledger,
             )
 
     async def unsubscribe(self, instrument_id: str) -> None:
@@ -206,7 +213,10 @@ class BybitClient:
         trade_ws = self._trade_ws_for(product_type)
         if trade_ws is not None:
             await optional_feed_step(
-                _trade_feed(product_type), "unsubscribe", trade_ws.unsubscribe_trades(iid)
+                _trade_feed(product_type),
+                "unsubscribe",
+                trade_ws.unsubscribe_trades(iid),
+                self._ledger,
             )
 
     async def resync_orderbook(self, instrument_id: str) -> None:

@@ -73,7 +73,11 @@ class _StubWs:
 
 def _client(trade_feeds: int) -> tuple[BybitClient, list[tuple[object, Feed]], dict[Feed, _StubWs]]:
     received: list[tuple[object, Feed]] = []
-    client = BybitClient(lambda data, feed: received.append((data, feed)), trade_feeds=trade_feeds)
+    client = BybitClient(
+        lambda data, feed: received.append((data, feed)),
+        trade_feeds=trade_feeds,
+        ledger=error_ledger.record,
+    )
     stubs = {feed: _StubWs() for feed in client.feed_states()}
     client._ws_linear, client._ws_spot = stubs[LINEAR_FEED], stubs[SPOT_FEED]
     if trade_feeds == 2:

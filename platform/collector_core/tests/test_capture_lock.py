@@ -47,8 +47,12 @@ def _exclusive_would_succeed(path: Path) -> bool:
 
 def test_capture_holds_the_lock_shared_and_records_its_owner(tmp_path: Path) -> None:
     async def scenario() -> None:
-        first = await acquire_capture_lock(tmp_path, "BYBIT", asyncio.Event())
-        second = await acquire_capture_lock(tmp_path, "BYBIT", asyncio.Event())  # AD-D18
+        first = await acquire_capture_lock(
+            tmp_path, "BYBIT", asyncio.Event(), ledger=error_ledger.record
+        )
+        second = await acquire_capture_lock(
+            tmp_path, "BYBIT", asyncio.Event(), ledger=error_ledger.record
+        )  # AD-D18
         assert first is not None
         assert second is not None
         path = capture_lock_path(tmp_path, "BYBIT")
@@ -68,7 +72,9 @@ def test_an_exclusive_holder_blocks_capture_until_it_releases(tmp_path: Path) ->
         holder = path.open("a")
         fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)  # e.g. repair_catalog
         waiting = asyncio.create_task(
-            acquire_capture_lock(tmp_path, "DYDX", asyncio.Event(), retry_seconds=0.01)
+            acquire_capture_lock(
+                tmp_path, "DYDX", asyncio.Event(), retry_seconds=0.01, ledger=error_ledger.record
+            )
         )
         await asyncio.sleep(0.05)
         assert not waiting.done()  # capture waits
@@ -90,7 +96,13 @@ def test_a_shutdown_while_waiting_gives_up_the_wait(tmp_path: Path) -> None:
             fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
             shutting_down = asyncio.Event()
             waiting = asyncio.create_task(
-                acquire_capture_lock(tmp_path, "HYPERLIQUID", shutting_down, retry_seconds=5.0)
+                acquire_capture_lock(
+                    tmp_path,
+                    "HYPERLIQUID",
+                    shutting_down,
+                    retry_seconds=5.0,
+                    ledger=error_ledger.record,
+                )
             )
             await asyncio.sleep(0.01)
             shutting_down.set()
@@ -101,7 +113,9 @@ def test_a_shutdown_while_waiting_gives_up_the_wait(tmp_path: Path) -> None:
 
 def test_closing_releases_the_lock_and_keeps_the_file(tmp_path: Path) -> None:
     async def scenario() -> None:
-        lock = await acquire_capture_lock(tmp_path / "catalog", "BYBIT", asyncio.Event())
+        lock = await acquire_capture_lock(
+            tmp_path / "catalog", "BYBIT", asyncio.Event(), ledger=error_ledger.record
+        )
         assert lock is not None
         lock.close()  # the collector exits (a SIGKILL releases it the same way)
 
@@ -129,7 +143,13 @@ def test_a_cancelled_wait_closes_its_descriptor(tmp_path: Path) -> None:
             fcntl.flock(holder, fcntl.LOCK_EX | fcntl.LOCK_NB)
             before = _open_fds()
             waiting = asyncio.create_task(
-                acquire_capture_lock(tmp_path, "BYBIT", asyncio.Event(), retry_seconds=5.0)
+                acquire_capture_lock(
+                    tmp_path,
+                    "BYBIT",
+                    asyncio.Event(),
+                    retry_seconds=5.0,
+                    ledger=error_ledger.record,
+                )
             )
             await asyncio.sleep(0.01)
             assert _open_fds() == before + 1  # the waiter's own descriptor

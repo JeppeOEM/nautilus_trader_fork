@@ -22,18 +22,21 @@ in the frozen `kernel.archive_markers` format, so the nightly rebuild keeps thos
 Archive owns the rest of the file's life (its `pruned` markers, every read:
 `archive.infrastructure.gap_markers`); the two share only the kernel's line format and path, so
 neither context imports the other. Ledger sites are the pre-move ones: `archive_gaps.write`,
-`archive_gaps.inverted_span`.
+`archive_gaps.inverted_span`, reported through the caller's `Ledger` (the `Collector` is capture's
+only ledger caller, Story 26.1).
 """
 
 import os
 
 from kernel import archive_markers
 from kernel.archive_markers import ArchiveGap
-from observability import error_ledger
+
+from collector_core import sites
+from collector_core.ports import Ledger
 
 
 def record_gap(
-    catalog_path: str, iid: str, from_ns: int, to_ns: int, reason: str, count: int
+    catalog_path: str, iid: str, from_ns: int, to_ns: int, reason: str, count: int, ledger: Ledger
 ) -> None:
     """
     Append one gap marker; a failure is ledgered, never raised (the flush must carry on).
@@ -45,8 +48,8 @@ def record_gap(
     the rows the marker protects.
     """
     if from_ns > to_ns:
-        error_ledger.record(
-            "archive_gaps.inverted_span",
+        ledger(
+            sites.ARCHIVE_GAPS_INVERTED_SPAN,
             f"{iid} {reason}: from_ns {from_ns} > to_ns {to_ns} (clock stepped back?); "
             "recorded as the ordered span",
         )
@@ -60,4 +63,4 @@ def record_gap(
             f.flush()
             os.fsync(f.fileno())
     except OSError as e:
-        error_ledger.record("archive_gaps.write", f"could not record archive gap {line}", e)
+        ledger(sites.ARCHIVE_GAPS_WRITE, f"could not record archive gap {line}", e)

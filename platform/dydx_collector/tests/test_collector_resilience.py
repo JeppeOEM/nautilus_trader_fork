@@ -14,9 +14,9 @@
 # -------------------------------------------------------------------------------------------------
 """
 Tests for VPS-longevity safety behaviors: WS callback fault isolation, the
-startup corrupt-parquet quarantine scan, and the crossed-book resync watchdog
-(see collector.py's `_on_data` / `_ingest_loop` / `quarantine_corrupt_parquet` /
-`_resync_book`).
+startup corrupt-parquet quarantine scan, and dYdX's crossed-book handling (DATA-04): the level
+tagging and uncross ladder are `dydx_collector.policies` values the core's `LiveBook` and
+`SecondSampler` run, and the resync the core's `Collector._resync` executes (Story 26.1).
 """
 
 import asyncio
@@ -29,13 +29,18 @@ from types import SimpleNamespace
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
-from collector_core.collector import quarantine_corrupt_parquet
 from collector_core.config import DydxConfig
+from collector_core.domain.policies import LevelTags
+from collector_core.domain.verdicts import Uncrossed
 from collector_core.feed import MAIN_FEED
 from collector_core.feed import Feed
+from collector_core.infrastructure.parquet_writer import quarantine_corrupt_parquet
 from collector_core.ports import PlanChange
+from observability import error_ledger
 
 from dydx_collector.collector import DydxCollector
+from dydx_collector.policies import DydxUncrossPolicy
+from dydx_collector.policies import uncross_step
 from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
 from nautilus_trader.model.book import OrderBook
 from nautilus_trader.model.data import BookOrder
@@ -111,7 +116,7 @@ def test_quarantine_corrupt_parquet_moves_only_bad_files(tmp_path: Path) -> None
     corrupt_file = good_dir / "100-200.parquet"
     corrupt_file.write_bytes(b"not a real parquet file")
 
-    quarantine_corrupt_parquet(str(catalog), [_IID])
+    quarantine_corrupt_parquet(str(catalog), [_IID], error_ledger.record)
 
     assert good_file.exists()
     assert not corrupt_file.exists()
@@ -120,7 +125,9 @@ def test_quarantine_corrupt_parquet_moves_only_bad_files(tmp_path: Path) -> None
 
 
 def test_quarantine_corrupt_parquet_missing_catalog_is_noop(tmp_path: Path) -> None:
-    quarantine_corrupt_parquet(str(tmp_path / "does-not-exist"), [_IID])  # must not raise
+    quarantine_corrupt_parquet(
+        str(tmp_path / "does-not-exist"), [_IID], error_ledger.record
+    )  # must not raise
 
 
 class _FakeClient:
@@ -160,14 +167,14 @@ async def test_resync_book_resubscribes_and_drops_local_state(tmp_path: Path) ->
     fake_client = _FakeClient()
     collector._client = fake_client  # type: ignore[assignment]
 
-    collector._live_books[iid] = OrderBook(InstrumentId.from_str(iid), BookType.L2_MBP)
-    collector._crossed_since_ns[iid] = 123
+    collector._book(iid).book = OrderBook(InstrumentId.from_str(iid), BookType.L2_MBP)
+    collector._book(iid).crossed_since_ns = 123
 
-    await collector._resync_book(iid)
+    await collector._resync(iid)
 
     assert fake_client.calls == [f"unsubscribe:{iid}", f"subscribe:{iid}"]
-    assert iid not in collector._live_books
-    assert iid not in collector._crossed_since_ns
+    assert collector._live_book(iid) is None
+    assert collector._book(iid).crossed_since_ns is None
 
 
 @pytest.mark.asyncio
@@ -178,7 +185,7 @@ async def test_resync_book_never_resubscribes_an_id_no_longer_collected(tmp_path
     fake_client = _FakeClient()
     collector._client = fake_client  # type: ignore[assignment]
 
-    await collector._resync_book(iid)
+    await collector._resync(iid)
 
     assert fake_client.calls == []
 
@@ -199,20 +206,23 @@ async def test_unsubscribe_drops_crossed_book_tracking_state(tmp_path: Path) -> 
     fake_client = _FakeClient()
     collector._client = fake_client  # type: ignore[assignment]
 
-    collector._live_books[iid] = OrderBook(InstrumentId.from_str(iid), BookType.L2_MBP)
-    collector._crossed_since_ns[iid] = 123
-    collector._crossed_prices[iid] = (100.0, 101.0)
-    collector._level_msg_id[iid] = {(OrderSide.BUY, 100.0): 1}
+    live = collector._book(iid)
+    live.book = OrderBook(InstrumentId.from_str(iid), BookType.L2_MBP)
+    live.crossed_since_ns = 123
+    live.crossed_prices = (100.0, 101.0)
+    live.tags[(OrderSide.BUY, 100.0)] = 1
 
     applied = await collector.apply(PlanChange(removed=frozenset({iid})))
 
     assert applied.unsubscribed == {iid}
 
     assert fake_client.calls == [f"unsubscribe_trades:{iid}", f"unsubscribe:{iid}"]
-    assert iid not in collector._live_books
-    assert iid not in collector._crossed_since_ns
-    assert iid not in collector._crossed_prices
-    assert iid not in collector._level_msg_id
+    assert (live.book, live.crossed_since_ns, live.crossed_prices, live.tags) == (
+        None,
+        None,
+        None,
+        {},
+    )
 
 
 _IID = "BTC-USD-PERP.DYDX"
@@ -247,8 +257,8 @@ def test_an_incremental_delta_without_a_snapshot_builds_no_book(tmp_path: Path) 
     """
     collector = DydxCollector(_make_config(tmp_path / "catalog"), ())
     collector._apply_deltas(_IID, _delta(4, price=100.0))
-    assert _IID not in collector._live_books
-    assert collector._deltas_before_snapshot_dropped == {_IID: 1}
+    assert collector._live_book(_IID) is None
+    assert collector._book(_IID).before_snapshot == 1
 
 
 def test_apply_deltas_applies_regardless_of_sequence_jump(tmp_path: Path) -> None:
@@ -263,7 +273,8 @@ def test_apply_deltas_applies_regardless_of_sequence_jump(tmp_path: Path) -> Non
     collector._apply_deltas(_IID, _delta(4, price=100.0))
     collector._apply_deltas(_IID, _delta(55, price=101.0))  # big jump: still just applies
 
-    book = collector._live_books[_IID]
+    book = collector._live_book(_IID)
+    assert book is not None
     assert book.best_bid_price().as_double() == 101.0
 
 
@@ -271,9 +282,9 @@ def test_apply_deltas_empty_batch_is_noop(tmp_path: Path) -> None:
     """A content-less update carries no delta to apply -- must not raise on an empty list."""
     collector = DydxCollector(_make_config(tmp_path / "catalog"), ())
 
-    collector._apply_deltas(_IID, SimpleNamespace(deltas=[]))
+    collector._apply_deltas(_IID, SimpleNamespace(deltas=[]))  # type: ignore[arg-type]
 
-    assert _IID not in collector._live_books
+    assert collector._live_book(_IID) is None
 
 
 def _side_delta(
@@ -304,17 +315,17 @@ def _side_delta(
 def test_apply_deltas_tags_and_untags_price_levels(tmp_path: Path) -> None:
     """
     Story 5.2: each ADD/UPDATE tags its (side, price) with the delta's message-id
-    (`sequence`) in `_level_msg_id`; a DELETE removes that tag; a Clear wipes every tag
-    for the instrument. This is the data `_uncross_step` arbitrates on.
+    (`sequence`) in the `LiveBook`'s `tags` (`DydxLevelTagger`); a DELETE removes that tag; a
+    Clear wipes every tag for the instrument. This is the data `uncross_step` arbitrates on.
     """
     collector = _snapshotted(tmp_path)
 
     collector._apply_deltas(_IID, _side_delta(OrderSide.BUY, sequence=7, price=100.0))
-    assert collector._level_msg_id[_IID][(OrderSide.BUY, 100.0)] == 7
+    assert collector._book(_IID).tags[(OrderSide.BUY, 100.0)] == 7
 
     delete = _side_delta(OrderSide.BUY, sequence=8, price=100.0, size=0.0, action=BookAction.DELETE)
     collector._apply_deltas(_IID, delete)
-    assert (OrderSide.BUY, 100.0) not in collector._level_msg_id[_IID]
+    assert (OrderSide.BUY, 100.0) not in collector._book(_IID).tags
 
     collector._apply_deltas(_IID, _side_delta(OrderSide.SELL, sequence=9, price=101.0))
     clear_order = BookOrder(
@@ -331,7 +342,7 @@ def test_apply_deltas_tags_and_untags_price_levels(tmp_path: Path) -> None:
     )
     clear_deltas = OrderBookDeltas(instrument_id=InstrumentId.from_str(_IID), deltas=[clear_delta])
     collector._apply_deltas(_IID, clear_deltas)
-    assert collector._level_msg_id[_IID] == {}
+    assert collector._book(_IID).tags == {}
 
 
 # ---------------------------------------------------------------------------
@@ -395,8 +406,7 @@ async def test_crossed_book_resolution_is_logged_with_before_after_prices(
     Story 5.1: a crossed book that clears on its own must log a resolution line proving
     a real price change happened (before/after bid+ask), so a genuine sub-second touch
     that self-heals via normal delta activity is distinguishable at a glance from a stuck
-    desync that only recovers via _resync_book's forced resubscribe (logged separately,
-    as CRITICAL).
+    desync that only recovers via the forced resubscribe (logged separately, as CRITICAL).
     """
     collector = DydxCollector(
         _make_config(tmp_path / "catalog", snapshot_interval_seconds=0.01), ()
@@ -405,11 +415,12 @@ async def test_crossed_book_resolution_is_logged_with_before_after_prices(
     collector._applied.add(_IID)
     collector._client = _FakeClient()  # type: ignore[assignment]
     # Book has already resolved to uncrossed by the time this tick runs.
-    collector._live_books[_IID] = _uncrossed_book()
-    collector._last_book_update_ns[_IID] = time.time_ns()
+    live = collector._book(_IID)
+    live.book = _uncrossed_book()
+    live.last_update_ns = time.time_ns()
     # Simulate having detected the crossing on a previous tick.
-    collector._crossed_since_ns[_IID] = time.time_ns() - 500_000_000  # 0.5s ago
-    collector._crossed_prices[_IID] = (101.0, 100.0)
+    live.crossed_since_ns = time.time_ns() - 500_000_000  # 0.5s ago
+    live.crossed_prices = (101.0, 100.0)
 
     with caplog.at_level(logging.INFO):
         loop_task = asyncio.create_task(collector._second_loop())
@@ -423,44 +434,43 @@ async def test_crossed_book_resolution_is_logged_with_before_after_prices(
     assert _IID in msg
     assert "was bid=101.000000/ask=100.000000" in msg
     assert "now bid=100.000000/ask=101.000000" in msg
-    assert _IID not in collector._crossed_since_ns
-    assert _IID not in collector._crossed_prices
+    assert (live.crossed_since_ns, live.crossed_prices) == (None, None)
 
 
 @pytest.mark.asyncio
 async def test_crossed_book_within_grace_window_does_not_escalate(tmp_path: Path, caplog) -> None:
-    """A crossed book just detected (within _CROSSED_RESYNC_NS) is a silent skip, unchanged."""
+    """A crossed book just detected (within `crossed_resync_seconds`) is a skip, no escalation."""
     collector = DydxCollector(
         _make_config(tmp_path / "catalog", snapshot_interval_seconds=0.01), ()
     )
     collector._plan_ids.add(_IID)
     collector._applied.add(_IID)
     collector._client = _FakeClient()  # type: ignore[assignment]
-    collector._live_books[_IID] = _crossed_book()
-    collector._last_book_update_ns[_IID] = time.time_ns()
-    # No pre-seeded _crossed_since_ns -- first detection sets it to "now" this tick.
+    collector._book(_IID).book = _crossed_book()
+    collector._book(_IID).last_update_ns = time.time_ns()
+    # No pre-seeded crossed-since -- first detection sets it to "now" this tick.
 
-    with caplog.at_level(logging.CRITICAL, logger="dydx_collector.critical"):
+    with caplog.at_level(logging.CRITICAL, logger="collector_core.critical"):
         loop_task = asyncio.create_task(collector._second_loop())
         await asyncio.sleep(0.05)
         collector._stop.set()
         await asyncio.wait_for(loop_task, timeout=1.0)
 
-    assert [r for r in caplog.records if r.name == "dydx_collector.critical"] == []
-    assert collector._client.calls == []  # _resync_book must not have fired either
+    assert [r for r in caplog.records if r.name == "collector_core.critical"] == []
+    assert collector._client.calls == []  # no resync either
 
 
 @pytest.mark.asyncio
 async def test_crossed_book_past_grace_window_escalates_critical(tmp_path: Path, caplog) -> None:
     """
-    A crossed book that has persisted past _CROSSED_RESYNC_NS with no known cause (not
-    mid-resync) is steady-state desync -- CRITICAL to the distinct logger, plus the
-    existing _resync_book recovery still fires. Not re-logged on every _second_loop tick
-    within one ~15s window: _resync_book resets _crossed_since_ns on every call, so
-    re-entering this branch takes another full _CROSSED_RESYNC_NS -- naturally spacing
-    repeats to match _resync_book's own retry cadence rather than the (much faster)
-    snapshot_interval_seconds tick rate.
+    A crossed book that has persisted past `crossed_resync_seconds` with no known cause (not
+    mid-resync) is steady-state desync -- CRITICAL to the distinct logger, plus the forced
+    resync still fires. Not re-logged on every _second_loop tick within one window: the resync
+    drops the book and its crossed-since, so re-entering this branch takes another full grace
+    window -- naturally spacing repeats to match the resync's own retry cadence rather than the
+    (much faster) snapshot_interval_seconds tick rate.
     """
+    error_ledger.reset()
     collector = DydxCollector(
         _make_config(tmp_path / "catalog", snapshot_interval_seconds=0.01), ()
     )
@@ -468,28 +478,29 @@ async def test_crossed_book_past_grace_window_escalates_critical(tmp_path: Path,
     collector._applied.add(_IID)
     fake_client = _FakeClient()
     collector._client = fake_client  # type: ignore[assignment]
-    collector._live_books[_IID] = _crossed_book()
-    collector._last_book_update_ns[_IID] = time.time_ns()
-    collector._crossed_since_ns[_IID] = (
+    collector._book(_IID).book = _crossed_book()
+    collector._book(_IID).last_update_ns = time.time_ns()
+    collector._book(_IID).crossed_since_ns = (
         time.time_ns() - int(collector._config.crossed_resync_seconds * 1e9) - 1
     )
 
-    with caplog.at_level(logging.CRITICAL, logger="dydx_collector.critical"):
+    with caplog.at_level(logging.CRITICAL, logger="collector_core.critical"):
         loop_task = asyncio.create_task(collector._second_loop())
         await asyncio.sleep(0.05)
         collector._stop.set()
         await asyncio.wait_for(loop_task, timeout=1.0)
 
-    critical_records = [r for r in caplog.records if r.name == "dydx_collector.critical"]
+    critical_records = [r for r in caplog.records if r.name == "collector_core.critical"]
     assert len(critical_records) == 1, (
         "must not re-escalate on every _second_loop tick within one _CROSSED_RESYNC_NS window"
     )
     payload = json.loads(critical_records[0].message)
     assert payload["instrument_id"] == _IID
     assert payload["reason"] == "steady_state_crossed_book"
-    # _resync_book's existing recovery behavior must still fire alongside the escalation.
+    # The DATA-03 fallback itself still fires alongside the escalation, and is ledgered.
     assert f"unsubscribe:{_IID}" in fake_client.calls
     assert f"subscribe:{_IID}" in fake_client.calls
+    assert error_ledger.counts().get("collector.resync") == 1
 
 
 # ---------------------------------------------------------------------------
@@ -498,18 +509,25 @@ async def test_crossed_book_past_grace_window_escalates_critical(tmp_path: Path,
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_crossed_book_actively_uncrossed_when_both_levels_tagged(
-    tmp_path: Path, caplog
+def _gate(collector: DydxCollector) -> list:
+    """One pass of the core gate over `_IID` with a live feed (the policies run inside it)."""
+    collector._plan_ids.add(_IID)
+    collector._applied.add(_IID)
+    now = time.time_ns()
+    collector._feeds.last_book_message_ns = now
+    return asyncio.run(collector._sample_tick(now))
+
+
+def test_crossed_book_actively_uncrossed_when_both_levels_tagged(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """
-    Both crossed levels tagged (via _apply_deltas, so _level_msg_id is populated) ->
-    _handle_crossed_book drops the older-tagged (bid) side itself, resolves within the
-    same tick, and never reaches the WARNING/CRITICAL/_resync_book path. The bid side
-    keeps a second, untouched level (99.0) so dropping the stale 101.0 level does not
-    empty that side -- this is the ordinary, benign case, logged at INFO. See
-    test_crossed_book_uncrossing_the_last_level_logs_a_warning below for the case where
-    the dropped level was the side's only one.
+    Both crossed levels tagged (via the `LevelTagger`) -> the uncross policy drops the
+    older-tagged (bid) side itself, the gate accepts the second in the same tick, and the
+    WARNING/CRITICAL/resync path is never reached. The bid side keeps a second, untouched level
+    (99.0) so dropping the stale 101.0 level does not empty that side -- the ordinary, benign case,
+    logged at INFO. See test_crossed_book_uncrossing_the_last_level_logs_a_warning below for the
+    case where the dropped level was the side's only one.
     """
     collector = _snapshotted(tmp_path)
     fake_client = _FakeClient()
@@ -518,16 +536,17 @@ async def test_crossed_book_actively_uncrossed_when_both_levels_tagged(
     collector._apply_deltas(_IID, _side_delta(OrderSide.BUY, sequence=1, price=101.0))
     collector._apply_deltas(_IID, _side_delta(OrderSide.BUY, sequence=1, price=99.0))
     collector._apply_deltas(_IID, _side_delta(OrderSide.SELL, sequence=2, price=100.0))
-    book = collector._live_books[_IID]
+    book = collector._live_book(_IID)
+    assert book is not None
 
     with caplog.at_level(logging.INFO):
-        still_crossed = await collector._handle_crossed_book(_IID, book, time.time_ns())
+        rows = _gate(collector)
 
-    assert still_crossed is False
+    assert len(rows) == 1  # not crossed any more: the second was written
     assert book.best_bid_price().as_double() == 99.0  # surviving, untouched bid level
     assert book.best_ask_price().as_double() == 100.0
     assert fake_client.calls == []  # no resync
-    assert [r for r in caplog.records if r.name == "dydx_collector.critical"] == []
+    assert [r for r in caplog.records if r.name == "collector_core.critical"] == []
     assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
     uncrossed_logs = [r for r in caplog.records if "actively uncrossed" in r.getMessage()]
     assert len(uncrossed_logs) == 1
@@ -535,35 +554,41 @@ async def test_crossed_book_actively_uncrossed_when_both_levels_tagged(
     assert "BUY" in uncrossed_logs[0].getMessage()
 
 
-@pytest.mark.asyncio
-async def test_crossed_book_uncrossing_the_last_level_logs_a_warning(
-    tmp_path: Path, caplog
+def test_crossed_book_uncrossing_the_last_level_logs_a_warning(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     """
     DATA-02: dropping the *only* remaining level on one side (leaving that side fully
     empty) is a real one-sided-book data-loss event, not routine self-healing -- it must
-    be distinguishable from the benign case above, not logged identically at INFO.
+    be distinguishable from the benign case above, not logged identically at INFO. The
+    one-sided book is then an empty top of book, so the gate writes no row for it (Story 26.1:
+    before it, the uncrossed-but-one-sided book was sampled with an empty side).
     """
     collector = _snapshotted(tmp_path)
     collector._client = _FakeClient()  # type: ignore[assignment]
     collector._apply_deltas(_IID, _side_delta(OrderSide.BUY, sequence=1, price=101.0))
     collector._apply_deltas(_IID, _side_delta(OrderSide.SELL, sequence=2, price=100.0))
-    book = collector._live_books[_IID]
+    book = collector._live_book(_IID)
+    assert book is not None
 
     with caplog.at_level(logging.INFO):
-        still_crossed = await collector._handle_crossed_book(_IID, book, time.time_ns())
+        rows = _gate(collector)
 
-    assert still_crossed is False
+    assert rows == []
     assert book.best_bid_price() is None  # bid side is now fully empty
     assert [r for r in caplog.records if "actively uncrossed" in r.getMessage()] == []
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    warnings = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "Crossed book" in r.getMessage()
+    ]
     assert len(warnings) == 1
     assert "LAST remaining" in warnings[0].getMessage()
     assert "BUY" in warnings[0].getMessage()
+    assert any("Empty top of book" in r.getMessage() for r in caplog.records)
 
 
-@pytest.mark.asyncio
-async def test_crossed_book_tie_break_uses_smaller_size(tmp_path: Path) -> None:
+def test_crossed_book_tie_break_uses_smaller_size(tmp_path: Path) -> None:
     """
     Equal message-ids on both crossed levels -> the smaller-size side is stale (dYdX's
     own documented tie-break), not an arbitrary/undefined choice.
@@ -572,28 +597,30 @@ async def test_crossed_book_tie_break_uses_smaller_size(tmp_path: Path) -> None:
     collector._client = _FakeClient()  # type: ignore[assignment]
     collector._apply_deltas(_IID, _side_delta(OrderSide.BUY, sequence=5, price=101.0, size=0.5))
     collector._apply_deltas(_IID, _side_delta(OrderSide.SELL, sequence=5, price=100.0, size=2.0))
-    book = collector._live_books[_IID]
+    book = collector._live_book(_IID)
+    assert book is not None
 
-    still_crossed = await collector._handle_crossed_book(_IID, book, time.time_ns())
+    policy = DydxUncrossPolicy(resync_after_ns=10**12)
+    verdict = policy.step(book, collector._book(_IID).tags, None, time.time_ns())
 
-    assert still_crossed is False
+    assert isinstance(verdict, Uncrossed)  # resolved by the tie-break, no escalation
+    assert verdict.dropped[0].side == OrderSide.BUY
     assert book.best_bid_price() is None  # smaller-size bid (0.5) was the stale side
     assert book.best_ask_price().as_double() == 100.0
 
 
-def test_uncross_step_falls_back_when_a_level_is_untagged(tmp_path: Path) -> None:
+def test_uncross_step_falls_back_when_a_level_is_untagged() -> None:
     """
-    A crossed book built without going through _apply_deltas (e.g. right after
-    _resync_book, before any delta has repopulated _level_msg_id) has no tags to
-    arbitrate with -- _uncross_step must decline rather than guess, leaving the book
-    and _level_msg_id untouched so the caller falls back to the existing resync path.
+    A crossed book with no tags (e.g. right after a resync, before any delta has repopulated
+    them) cannot be arbitrated -- `uncross_step` must decline rather than guess, leaving the book
+    and tags untouched, so the policy falls back to the escalation ladder.
     """
-    collector = DydxCollector(_make_config(tmp_path / "catalog"), ())
     book = _crossed_book()
-    collector._live_books[_IID] = book
+    tags: LevelTags = {}
 
-    dropped = collector._uncross_step(_IID, book)
+    dropped = uncross_step(book, tags, time.time_ns())
 
-    assert dropped is False
+    assert dropped is None
     assert book.best_bid_price().as_double() == 101.0
     assert book.best_ask_price().as_double() == 100.0
+    assert tags == {}

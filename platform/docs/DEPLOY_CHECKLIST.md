@@ -473,7 +473,7 @@ so the bmad-loop chain never stops for them and every story still gets its indep
 Run the entries oldest first; tick each one and add the date when done. A story that is still
 parked on the board says so in its entry: run `bmad-loop confirm <story-key>` after its steps.
 
-### 25-1b `archive` service (commit 35e155e004, parked `awaiting-operator` on the board)
+### 25-1b `archive` service (commit 35e155e004; marked done on the board 2026-09-26 at the operator's request, VPS steps still owed)
 
 - [ ] On the VPS, pull this commit and run `make up` from `platform/` (it creates `platform/data/archive`
       and the rclone config dir, builds the collector image with rclone, and starts the new `archive`
@@ -486,4 +486,18 @@ parked on the board says so in its entry: run `bmad-loop confirm <story-key>` af
 - [ ] After the first 03:07 UTC slot, open the dashboard (or `docker compose logs archive`) and confirm
       `archive:status` shows `last_run` with every venue's saga, `consolidate_catalog` and
       `backup_catalog` at exit 0 or 2.
-- [ ] Then: `bmad-loop confirm 25-1b-archive-service-nightly-maintenance-scheduled-no-host-cron`.
+
+### 26-1 capture gate as aggregates (LiveBook / TradeIntake / FeedGroup / SecondSampler; commit: this story's)
+
+- [ ] On the VPS, pull this commit and run `make up` from `platform/` (rebuilds the collector image
+      and restarts `collector`, `bybit_collector` and `hyperliquid_collector`; no config, env var,
+      compose service or bind mount changed).
+- [ ] After 10 minutes, check `GET /api/errors` (or the three services' ledger files under
+      `platform/data/errors/`) against the hour before the deploy: no new site other than
+      `collector.empty_top`, and no rising `collector.resync`, `collector.book_sequence`,
+      `collector.pending_deltas` or `collector.process` counts. `collector.resync` now also counts
+      dYdX's forced resyncs (they were only a `dydx_collector.critical` log line before), and the
+      CRITICAL `steady_state_crossed_book` line now comes from the `collector_core.critical` logger.
+- [ ] Confirm rows are still arriving for every venue (the web chart's live candles, or
+      `snapshots:raw` in `redis-cli SUBSCRIBE snapshots:raw`), and that the dYdX incident reports
+      still trigger on a crossed-book resync (`platform/data/incident_reports/`, when one occurs).

@@ -34,8 +34,12 @@ from collector_core.collector import Collector
 from collector_core.collector import run_forever
 from collector_core.config import CoreConfig
 from collector_core.config import load_venue_config
+from collector_core.infrastructure.parquet_writer import ParquetArchiveWriter
+from collector_core.infrastructure.redis_stream import RedisLiveStream
+from collector_core.infrastructure.redis_stream import redis_url_from_env
 
 from hyperliquid_collector.client import HyperliquidClient
+from hyperliquid_collector.trade_history import HyperliquidTradeHistory
 
 
 CONFIG_PATH = Path(
@@ -44,6 +48,13 @@ CONFIG_PATH = Path(
 
 
 class HyperliquidCollector(Collector):
+    """
+    Hyperliquid's composition root on the shared gate: every `l2Book` message is a full snapshot,
+    so it takes the core's default policies (a crossed sample is skipped and ledgered; no resync,
+    since the client exposes none) and adds only its client, `recentTrades` history, adapters and
+    candle store. It overrides nothing but `__init__` (Story 26.1).
+    """
+
     VENUE: ClassVar[str] = "HYPERLIQUID"
 
     def __init__(self, config: CoreConfig, plan_ids: Iterable[str]) -> None:
@@ -51,6 +62,7 @@ class HyperliquidCollector(Collector):
             on_data=self._on_data,
             environment=config.environment,
             trade_feeds=config.trade_feeds,
+            ledger=self._ledger,
         )
         # Composition root: this process owns Hyperliquid's candle store (`CANDLES_DB_PATH`), so it
         # opens it, hands capture the sink port and runs the retention loop -- this venue's first
@@ -61,7 +73,10 @@ class HyperliquidCollector(Collector):
             client,
             extra_loops=(candle_prune_loop(store),),
             plan=plan_ids,
+            archive=ParquetArchiveWriter(config.catalog_path),
+            live_stream=RedisLiveStream(redis_url_from_env()),
             second_sink=CandleSink(store),
+            trade_history=HyperliquidTradeHistory(config.environment),
         )
 
 

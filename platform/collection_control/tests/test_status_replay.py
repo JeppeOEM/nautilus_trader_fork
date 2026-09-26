@@ -26,6 +26,7 @@ from typing import Any
 
 from collector_core.collector import Collector
 from collector_core.config import CoreConfig
+from collector_core.infrastructure.parquet_writer import ParquetArchiveWriter
 
 from collection_control.application.ports import STATUS_CHANNEL
 from collection_control.application.status import StatusPublisher
@@ -77,11 +78,17 @@ def _plan(state: dict[str, Any]) -> CollectionPlan:
 
 def _capture(tmp_path: Path, state: dict[str, Any], plan: CollectionPlan) -> Collector:
     capture = Collector(
-        CoreConfig(environment="mainnet", catalog_path=str(tmp_path)), object(), plan=plan.collected
+        CoreConfig(environment="mainnet", catalog_path=str(tmp_path)),
+        object(),
+        plan=plan.collected,
+        archive=ParquetArchiveWriter(str(tmp_path)),
+        live_stream=None,
     )
     capture._applied.update(plan.collected)  # every recorded instrument was subscribed
-    capture._last_book_update_ns.update(state["last_book_update_ns"])
-    capture._trade_backfill_counts.update(state["trade_backfill"])
+    for iid, ns in state["last_book_update_ns"].items():
+        capture._book(iid).last_update_ns = ns
+    for iid, count in state["trade_backfill"].items():
+        capture._intake(iid).backfilled = count
     return capture
 
 

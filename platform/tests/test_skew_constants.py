@@ -45,6 +45,7 @@ if (
 from archive.application import rebuild_day
 from archive.domain import retention
 from collector_core import collector
+from collector_core.application import trade_backfill as backfill
 from kernel.clocks import MAX_TS_INIT_SKEW_NS
 from kernel.clocks import NS_PER_S
 from kernel.clocks import READ_SPAN_MARGIN_NS
@@ -88,21 +89,21 @@ def test_the_read_margin_is_within_the_bound() -> None:
 def test_catch_up_and_hold_back_stay_within_the_bound() -> None:
     catch_up_ns = collector._MAX_CATCH_UP_SECONDS * NS_PER_S
     assert catch_up_ns <= MAX_TS_INIT_SKEW_NS
-    assert _max_hold_back_ns() + collector._VENUE_AHEAD_NS <= MAX_TS_INIT_SKEW_NS
+    assert _max_hold_back_ns() + collector.VENUE_AHEAD_NS <= MAX_TS_INIT_SKEW_NS
 
 
 def test_a_caught_up_row_stays_within_the_read_margin() -> None:
     """
     The tighter chain `collector._MAX_CATCH_UP_SECONDS` documents: a caught-up venue-timed row's
     `ts_init` trails its `ts_event` by up to catch-up + 1 s + hold-back, and a venue clock may run
-    hold-back + `_VENUE_AHEAD_NS` ahead; the readers widen file spans symmetrically by
+    hold-back + `VENUE_AHEAD_NS` ahead; the readers widen file spans symmetrically by
     `READ_SPAN_MARGIN_NS`, so each direction alone is the binding limit and their sum is a
     conservative ceiling on both (`Collector._check_skew_budget` enforces the same sum).
     """
     worst = (
         (collector._MAX_CATCH_UP_SECONDS + 1) * NS_PER_S
         + _max_hold_back_ns()
-        + collector._VENUE_AHEAD_NS
+        + collector.VENUE_AHEAD_NS
     )
     assert worst <= READ_SPAN_MARGIN_NS
 
@@ -114,7 +115,7 @@ def _names_in(function: Callable[..., object]) -> set[str]:
 
 def test_the_backfill_refusal_and_fetch_floor_use_the_bound() -> None:
     """Both halves of the backfill rule read the one constant, never a second literal."""
-    assert "MAX_TS_INIT_SKEW_NS" in _names_in(collector.Collector._apply_backfill)
+    assert "MAX_TS_INIT_SKEW_NS" in _names_in(backfill.admit_backfill)
     assert "MAX_TS_INIT_SKEW_NS" in _names_in(collector.Collector._backfill_instrument)
 
 
@@ -122,9 +123,9 @@ def test_the_collector_refuses_a_hold_back_beyond_the_read_margin() -> None:
     """Deployed configs are bind-mounted: the bound is enforced at construction, not only here."""
     collector._check_skew_budget(_max_hold_back_ns())
     headroom = READ_SPAN_MARGIN_NS - (collector._MAX_CATCH_UP_SECONDS + 1) * NS_PER_S
-    collector._check_skew_budget(headroom - collector._VENUE_AHEAD_NS)
+    collector._check_skew_budget(headroom - collector.VENUE_AHEAD_NS)
     with pytest.raises(ValueError, match="hold_back_seconds"):
-        collector._check_skew_budget(headroom - collector._VENUE_AHEAD_NS + 1)
+        collector._check_skew_budget(headroom - collector.VENUE_AHEAD_NS + 1)
     assert "_check_skew_budget" in _names_in(collector.Collector.__init__)
 
 

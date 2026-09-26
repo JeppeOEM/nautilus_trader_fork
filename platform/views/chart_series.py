@@ -646,7 +646,8 @@ def price_series_rows(snapshots: Sequence[DydxSecondSnapshot]) -> list[dict]:
     Every archived second is priced as written, a crossed or touched one (`bid >= ask`) exactly
     like any other (its skew term `(ask - bid)` is then negative, as written): the reader does not
     re-validate the archive (AD-3). Today's gate never writes a crossed second
-    (`_handle_crossed_book` skips it and ledgers `collector.crossed_book`); one the archive holds
+    (`SecondSampler` rejects it as `Crossed`; a central book's episode is ledgered
+    `collector.crossed_book`); one the archive holds
     anyway predates that gate or is a capture bug, whose fix is at the gate or through
     `repair_catalog`, never a reader-side filter (DATA-07). A second with an empty side cannot be
     drawn at all and raises `EmptyTopOfBook` (see `_require_top`).

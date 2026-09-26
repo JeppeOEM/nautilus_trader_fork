@@ -29,6 +29,7 @@ from collector_core.book_check import top_levels_mismatch
 from collector_core.collector import Collector
 from collector_core.config import CoreConfig
 from collector_core.config import core_config_from_dict
+from collector_core.infrastructure.parquet_writer import ParquetArchiveWriter
 from collector_core.tests.test_collector import _BYBIT
 from collector_core.tests.test_collector import _HL
 from collector_core.tests.test_collector import _S
@@ -92,14 +93,14 @@ def test_gate_names_dead_feed_vs_silent_instrument(tmp_path: Path, caplog) -> No
     c._process_data(_deltas([(100.0, 1.0)], [(100.5, 1.0)]))
     now = time.time_ns()
     # Feed alive (message just now) but this instrument's book is old -> instrument silent.
-    c._last_book_update_ns[_BYBIT] = now - 60 * _S
+    c._book(_BYBIT).last_update_ns = now - 60 * _S
     with caplog.at_level(logging.WARNING, logger="collector_core.collector"):
         assert _tick(c, now) == []
     assert "instrument silent" in caplog.text
     # Nothing at all for a minute -> feed dead, said so.
     caplog.clear()
-    c._last_book_update_ns[_BYBIT] = now
-    c._last_feed_message_ns = now - 60 * _S
+    c._book(_BYBIT).last_update_ns = now
+    c._feeds.last_book_message_ns = now - 60 * _S
     with caplog.at_level(logging.WARNING, logger="collector_core.collector"):
         assert _tick(c, now) == []
     assert "feed dead" in caplog.text
@@ -263,7 +264,7 @@ def test_stream_never_passing_rest_seq_times_out_as_unaligned(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     error_ledger.reset()
-    monkeypatch.setattr(collector_mod, "_VENUE_AHEAD_NS", 0)  # align timeout = 1 s
+    monkeypatch.setattr(collector_mod, "VENUE_AHEAD_NS", 0)  # align timeout = 1 s
     rest = _RestClient(BookSnapshot(*_BOOK, sequence=99))
     c = _seq_collector(tmp_path, rest)
     asyncio.run(_drive(c, _BYBIT, [_framed(*_BOOK, seq=11, ts=_T0 + _S)]))
@@ -316,7 +317,7 @@ def test_ts_event_from_a_later_block_than_the_push_is_skipped(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     error_ledger.reset()
-    monkeypatch.setattr(collector_mod, "_VENUE_AHEAD_NS", 0)
+    monkeypatch.setattr(collector_mod, "VENUE_AHEAD_NS", 0)
     push_ts = _T0 + 5 * _S
     rest = _RestClient(BookSnapshot(*_BOOK, ts_event_ns=push_ts + 500_000_000))
     c = _collector(tmp_path, iid=_HL, client=rest)
@@ -337,11 +338,13 @@ def test_venue_mode_aligns_on_the_capture_taken_at_drain_time(tmp_path: Path) ->
         book_time_source="venue",
         hold_back_seconds=0.0,
     )
-    c = Collector(cfg, rest, plan=(_HL,))
+    c = Collector(
+        cfg, rest, plan=(_HL,), archive=ParquetArchiveWriter(cfg.catalog_path), live_stream=None
+    )
     c._applied.add(_HL)
     c._process_data(_framed(*_BOOK, seq=0, ts=_T0, iid=_HL))
     c._drain_pending_deltas(_T0 + _S)
-    assert _HL in c._live_books
+    assert c._live_book(_HL) is not None
     asyncio.run(
         _drive(
             c,

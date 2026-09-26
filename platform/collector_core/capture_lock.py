@@ -37,7 +37,9 @@ from pathlib import Path
 from typing import IO
 
 from kernel.archive_markers import capture_lock_path
-from observability import error_ledger
+
+from collector_core import sites
+from collector_core.ports import Ledger
 
 
 logger = logging.getLogger(__name__)
@@ -66,6 +68,8 @@ async def acquire_capture_lock(
     venue: str,
     shutting_down: asyncio.Event,
     retry_seconds: float = RETRY_SECONDS,
+    *,
+    ledger: Ledger,
 ) -> IO[str] | None:
     """
     Take the venue's capture lock shared and return the open file (keep it open for the whole
@@ -76,7 +80,7 @@ async def acquire_capture_lock(
     path.parent.mkdir(parents=True, exist_ok=True)
     lock = path.open("a+")
     try:
-        acquired = await _wait_shared(lock, venue, shutting_down, retry_seconds)
+        acquired = await _wait_shared(lock, venue, shutting_down, retry_seconds, ledger)
         if acquired:
             _write_owner(lock)
     except BaseException:  # CancelledError included: a cancelled start leaks no descriptor
@@ -89,14 +93,14 @@ async def acquire_capture_lock(
 
 
 async def _wait_shared(
-    lock: IO[str], venue: str, shutting_down: asyncio.Event, retry_seconds: float
+    lock: IO[str], venue: str, shutting_down: asyncio.Event, retry_seconds: float, ledger: Ledger
 ) -> bool:
     """Retry the shared lock every `retry_seconds`; False when shutdown came first."""
     waited = False
     while not _try_shared(lock):
         if not waited:
-            error_ledger.record(
-                "collector.capture_lock_wait",
+            ledger(
+                sites.CAPTURE_LOCK_WAIT,
                 f"{venue}: an archive tool holds {lock.name} exclusively; capture waits for it",
             )
             waited = True

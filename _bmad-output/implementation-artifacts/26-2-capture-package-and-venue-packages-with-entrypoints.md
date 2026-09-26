@@ -24,7 +24,7 @@ So that "Adding a venue" is a recipe over named files, and no `Collector` subcla
 
 3. **Given** the deployed collectors
 **When** the story is deployed
-**Then** `docs/DEPLOY_CHECKLIST.md` gains the redeploy order (all three collectors in one `make redeploy-all`, Dozzle check, `GET /api/errors` flat) as operator actions, and the story parks `awaiting-operator` with those actions
+**Then** `docs/DEPLOY_CHECKLIST.md` gains the redeploy order (all three collectors in one `make redeploy-all`, Dozzle check, `GET /api/errors` flat) as one entry in its "Deferred operator actions" section headed with this story's key and commit, and the story finalizes `done` through the normal review path; it never parks `awaiting-operator` (operator rule, 2026-09-26)
 
 ## Tasks / Subtasks
 
@@ -33,7 +33,7 @@ So that "Adding a venue" is a recipe over named files, and no `Collector` subcla
 - [ ] Task 2 — shims, images, lists, docs, recipe (AC: #2)
   - [ ] Shim packages `collector_core`, `dydx_collector`, `bybit_collector`, `hyperliquid_collector` (`REMOVE_AFTER = "26-3-closeout-shims-gone-spines-reconciled"`); `collector.dockerfile` `COPY platform/capture ./capture`; Makefile lists (`capture/tests`, `capture/venues/*/tests`); remove the last `LEGACY_EDGES_UNTIL` rows so the full AD-D2 graph is active; rewrite `platform/CLAUDE.md` "Adding a venue" over the new files; `ARCHITECTURE.md` module map + diagram; `docs/DATA_DICTIONARY.md` §1.
 - [ ] Task 3 — deploy (AC: #3)
-  - [ ] `docs/DEPLOY_CHECKLIST.md`: redeploy order for the three collectors; park `awaiting-operator` with those actions in `operator_actions:`.
+  - [ ] `docs/DEPLOY_CHECKLIST.md`: redeploy order for the three collectors; append them to the "Deferred operator actions" section; no `operator_actions:` frontmatter, no park.
 
 ## Dev Notes
 

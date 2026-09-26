@@ -14,7 +14,7 @@
 # -------------------------------------------------------------------------------------------------
 """
 Tests for the collector's per-second trade tracking on dYdX: accepted trades are kept for the
-live second (`_second_trades`, folded once per sample by `kernel.fold.fold_trades`) and
+live second (the `TradeIntake`'s `live` list, folded once per sample by `kernel.fold.fold_trades`) and
 archived raw (`_buffer[(TradeTick, iid)]`, story 22.13 -- the reverse of the earlier retention
 cutover that discarded them).
 """
@@ -75,7 +75,7 @@ def _trade(
 
 
 def _second(collector: DydxCollector) -> dict:
-    return fold_trades(collector._second_trades.get(str(_IID), [])).snapshot_values()._asdict()
+    return fold_trades(collector._intake(str(_IID)).live).snapshot_values()._asdict()
 
 
 def test_trade_tick_is_buffered_for_catalog_write(tmp_path: Path) -> None:
@@ -107,7 +107,7 @@ def test_no_trade_leaves_ohlc_trackers_empty(tmp_path: Path) -> None:
     Distinguishes "no trade occurred" from a fabricated price.
     """
     collector = _collector(tmp_path)
-    assert str(_IID) not in collector._second_trades
+    assert not collector._intake(str(_IID)).live
     assert _second(collector)["open_price"] is None
     assert _second(collector)["close_price"] is None
 
@@ -141,9 +141,9 @@ def test_discard_second_accumulators_clears_ohlc_and_volume(tmp_path: Path) -> N
     collector._process_data(_trade(100.0, 2.0, AggressorSide.BUYER, "1"))
     collector._process_data(_trade(9000.0, 3.0, AggressorSide.SELLER, "2"))
 
-    collector._discard_second_accumulators(iid)
+    collector._intake(iid).discard(None)  # what the gate does on a skipped sample
 
-    assert iid not in collector._second_trades
+    assert not collector._intake(iid).live
     assert _second(collector)["high_price"] is None
     assert _second(collector)["buy_volume"] == 0.0
     assert len(collector._buffer[(TradeTick, iid)]) == 2
@@ -156,9 +156,9 @@ def test_historical_trades_from_subscribe_reply_are_dropped(tmp_path: Path) -> N
     old = time.time_ns() - 3600 * 1_000_000_000
     collector._process_data(_trade(100.0, 5.0, AggressorSide.BUYER, "old", ts=old))
 
-    assert iid not in collector._second_trades
+    assert not collector._intake(iid).live
     assert _second(collector)["buy_volume"] == 0.0
-    assert collector._stale_trades_dropped[iid] == 1
+    assert collector._intake(iid).stale == 1
     assert (TradeTick, iid) not in collector._buffer  # not archived either
 
 
@@ -170,5 +170,5 @@ def test_replayed_trade_id_is_not_counted_twice(tmp_path: Path) -> None:
     collector._process_data(_trade(100.0, 2.0, AggressorSide.BUYER, "same"))
 
     assert _second(collector)["buy_volume"] == 2.0
-    assert collector._duplicate_trades_dropped[iid] == 1
+    assert collector._intake(iid).duplicate == 1
     assert len(collector._buffer[(TradeTick, iid)]) == 1

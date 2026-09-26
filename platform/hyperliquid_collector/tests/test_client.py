@@ -68,7 +68,9 @@ def _client(
     trade_feeds: int,
 ) -> tuple[HyperliquidClient, list[tuple[object, Feed]], _StubWs, _StubWs]:
     received: list[tuple[object, Feed]] = []
-    client = HyperliquidClient(lambda d, f: received.append((d, f)), trade_feeds=trade_feeds)
+    client = HyperliquidClient(
+        lambda d, f: received.append((d, f)), trade_feeds=trade_feeds, ledger=error_ledger.record
+    )
     main, trades = _StubWs(), _StubWs()
     client._ws = main
     if trade_feeds == 2:
@@ -156,7 +158,9 @@ def test_an_already_exact_trade_time_is_kept() -> None:
 def test_a_trades_socket_that_cannot_connect_is_dropped_and_ledgered() -> None:
     error_ledger.reset()
     received: list[tuple[object, Feed]] = []
-    client = HyperliquidClient(lambda d, f: received.append((d, f)), trade_feeds=2)
+    client = HyperliquidClient(
+        lambda d, f: received.append((d, f)), trade_feeds=2, ledger=error_ledger.record
+    )
     main, trades = _StubWs(), _StubWs()
 
     async def refuse(*_args: Any) -> None:

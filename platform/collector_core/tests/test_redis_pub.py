@@ -12,7 +12,7 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
-"""Unit tests for _publish_snapshot_batch — Redis pub/sub publish function."""
+"""Unit tests for publish_snapshot_batch — Redis pub/sub publish function."""
 
 import asyncio
 import json
@@ -20,7 +20,7 @@ from unittest.mock import AsyncMock
 
 from kernel.second_snapshot import DydxSecondSnapshot
 
-from collector_core.collector import _publish_snapshot_batch
+from collector_core.infrastructure.redis_stream import publish_snapshot_batch
 from nautilus_trader.model.identifiers import InstrumentId
 
 
@@ -45,14 +45,14 @@ def _snap(ts_event: int = 1_000_000_000) -> DydxSecondSnapshot:
 
 def test_empty_batch_does_not_publish() -> None:
     redis_client = AsyncMock()
-    asyncio.run(_publish_snapshot_batch(redis_client, []))
+    asyncio.run(publish_snapshot_batch(redis_client, []))
     redis_client.publish.assert_not_called()
 
 
 def test_single_snapshot_calls_publish() -> None:
     redis_client = AsyncMock()
     snap = _snap()
-    asyncio.run(_publish_snapshot_batch(redis_client, [snap]))
+    asyncio.run(publish_snapshot_batch(redis_client, [snap]))
     redis_client.publish.assert_called_once()
     call_args = redis_client.publish.call_args
     assert call_args[0][0] == "snapshots:raw"
@@ -61,7 +61,7 @@ def test_single_snapshot_calls_publish() -> None:
 def test_payload_is_valid_json() -> None:
     redis_client = AsyncMock()
     snap = _snap()
-    asyncio.run(_publish_snapshot_batch(redis_client, [snap]))
+    asyncio.run(publish_snapshot_batch(redis_client, [snap]))
     call_args = redis_client.publish.call_args
     payload = call_args[0][1]
     parsed = json.loads(payload)
@@ -71,7 +71,7 @@ def test_payload_is_valid_json() -> None:
 def test_payload_has_one_element_with_correct_instrument_id() -> None:
     redis_client = AsyncMock()
     snap = _snap()
-    asyncio.run(_publish_snapshot_batch(redis_client, [snap]))
+    asyncio.run(publish_snapshot_batch(redis_client, [snap]))
     call_args = redis_client.publish.call_args
     payload = call_args[0][1]
     parsed = json.loads(payload)
@@ -84,4 +84,4 @@ def test_connection_error_is_caught_silently() -> None:
     redis_client.publish.side_effect = ConnectionError("Redis down")
     snap = _snap()
     # Must not raise
-    asyncio.run(_publish_snapshot_batch(redis_client, [snap]))
+    asyncio.run(publish_snapshot_batch(redis_client, [snap]))

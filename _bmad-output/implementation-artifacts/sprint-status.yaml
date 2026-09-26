@@ -42,7 +42,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-07-01
-last_updated: 2026-09-21
+last_updated: 2026-09-26
 project: nautilus_trader_fork
 project_key: NOKEY
 tracking_system: file-system
@@ -307,17 +307,18 @@ development_status:
   24-4-research-pure-consumer-and-broken-tests-repaired: done
   epic-24-retrospective: optional
 
-  epic-25: backlog
+  epic-25: done
   25-1-archive-context-archiveday-one-deleter-one-rewriter: done
   25-1a-rankings-web-only-mode-toggle-on-web-tui-coins-pane-deleted: done
   25-2-ranking-context-rankingboard-replaces-module-globals: done
   25-3-bots-context-paper-and-exec-types-nautilus-acl: done
   25-4-collection-control-plan-intent-vs-applied-set: done
-  25-1b-archive-service-nightly-maintenance-scheduled-no-host-cron: awaiting-operator
+  25-1b-archive-service-nightly-maintenance-scheduled-no-host-cron: done
   epic-25-retrospective: optional
 
   epic-26: backlog
-  26-1-livebook-tradeintake-feedgroup-pure-secondsampler-in-place: ready-for-dev
+  26-1-livebook-tradeintake-feedgroup-pure-secondsampler-in-place: done
+  26-1b-offsite-backup-explicit-setting-off-until-storage-exists: ready-for-dev
   26-2-capture-package-and-venue-packages-with-entrypoints: ready-for-dev
   26-3-closeout-shims-gone-spines-reconciled: ready-for-dev
   epic-26-retrospective: optional

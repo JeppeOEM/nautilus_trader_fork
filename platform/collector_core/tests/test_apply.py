@@ -28,6 +28,7 @@ from observability import error_ledger
 
 from collector_core.collector import Collector
 from collector_core.config import CoreConfig
+from collector_core.infrastructure.parquet_writer import ParquetArchiveWriter
 from collector_core.ports import Applied
 from collector_core.ports import PlanChange
 from nautilus_trader.model.data import BookOrder
@@ -74,7 +75,13 @@ class _WireClient:
 
 def _collector(tmp_path: Path, client: _WireClient, plan: tuple[str, ...] = ()) -> Collector:
     config = CoreConfig(environment="mainnet", catalog_path=str(tmp_path))
-    return Collector(config, client, plan=plan)
+    return Collector(
+        config,
+        client,
+        plan=plan,
+        archive=ParquetArchiveWriter(config.catalog_path),
+        live_stream=None,
+    )
 
 
 def _apply(c: Collector, **diff: frozenset[str]) -> Applied:
@@ -114,7 +121,7 @@ def test_a_subscribed_id_is_booked_and_sampled(tmp_path: Path) -> None:
     applied = _apply(c, added=frozenset({_A}))
     assert (applied.subscribed, applied.failed) == ({_A}, frozenset())
     c._process_data(_book(_A))
-    c._last_feed_message_ns = time.time_ns()
+    c._feeds.last_book_message_ns = time.time_ns()
     assert _sampled(c) == [_A]
     assert c.capture_status().applied == {_A}
 
@@ -129,7 +136,7 @@ def test_a_subscribe_failed_on_the_wire_is_pending_ledgered_and_not_sampled(tmp_
     assert c.capture_status().pending == {_A}
     assert error_ledger.counts() == {"collector.subscribe_failed": 1}
     c._process_data(_book(_A))  # the snapshot of a subscribe that half-happened
-    assert _A not in c._live_books
+    assert c._live_book(_A) is None
     assert c._unplanned_messages == {_A: 1}
     assert _sampled(c) == []
 
@@ -159,7 +166,7 @@ def test_the_subscribe_time_snapshot_is_booked_not_counted(tmp_path: Path) -> No
 
     client.subscribe = _subscribe_delivering_a_snapshot  # type: ignore[method-assign]
     _apply(c, added=frozenset({_A}))
-    assert _A in c._live_books
+    assert c._live_book(_A) is not None
     assert c._unplanned_messages == {}
 
 
@@ -174,11 +181,11 @@ def test_an_unsubscribe_failed_on_the_wire_clears_the_book_and_counts_its_messag
     c._process_data(_book(_A))
     applied = _apply(c, removed=frozenset({_A}))
     assert applied.failed == {_A}
-    assert _A not in c._live_books  # cleared whether or not the wire unsubscribe succeeded
+    assert c._live_book(_A) is None  # cleared whether or not the wire unsubscribe succeeded
     assert (c._applied, c._plan_ids) == ({_A}, set())  # still subscribed, no longer planned
     c._process_data(_book(_A))
     c._process_data(_trade(_A, 1))
-    assert _A not in c._live_books
+    assert c._live_book(_A) is None
     assert c._buffer.get((TradeTick, _A), []) == []  # never archived
     assert _sampled(c) == []
     c._report_stale_trades()  # the per-flush report
@@ -399,17 +406,17 @@ def test_a_resync_during_a_wire_change_is_queued_not_sent(tmp_path: Path) -> Non
 
     c, client = asyncio.run(_run())
     assert client.calls == [f"subscribe {_A}"]
-    assert c._resync_pending == {_A}
+    assert c._resync_pending() == {_A}
 
 
 def test_a_removed_id_drops_its_queued_resync(tmp_path: Path) -> None:
     client = _WireClient(resync=True)
     c = _collector(tmp_path, client, plan=(_A,))
     _apply(c, added=frozenset({_A}))
-    c._resync_pending.add(_A)
+    c._book(_A).resync_pending = True
     _apply(c, removed=frozenset({_A}))
     asyncio.run(c._resync(_A))
-    assert c._resync_pending == set()
+    assert c._resync_pending() == set()
     assert f"resync {_A}" not in client.calls
 
 

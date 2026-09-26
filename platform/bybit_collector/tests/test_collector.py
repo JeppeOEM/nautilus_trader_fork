@@ -21,6 +21,7 @@ import pytest
 from collector_core.config import BybitConfig
 from collector_core.config import load_venue_config
 from kernel.open_interest import OpenInterest
+from observability import error_ledger
 
 from bybit_collector.open_interest import parse_open_interest
 from nautilus_trader.model.identifiers import InstrumentId
@@ -82,7 +83,7 @@ def test_client_routes_by_product_type() -> None:
     from bybit_collector.client import BybitClient
     from nautilus_trader.core.nautilus_pyo3 import BybitProductType
 
-    client = BybitClient(on_data=lambda _: None)
+    client = BybitClient(on_data=lambda _: None, ledger=error_ledger.record)
     ws, pt = client._ws_for("BTCUSDT-SPOT.BYBIT")
     assert ws is client._ws_spot and pt == BybitProductType.SPOT
     ws, pt = client._ws_for("BTCUSDT-LINEAR.BYBIT")

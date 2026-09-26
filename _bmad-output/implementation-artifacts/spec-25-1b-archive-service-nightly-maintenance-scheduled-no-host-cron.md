@@ -2,7 +2,7 @@
 title: 'archive service: the nightly maintenance scheduled in our own code, no host cron'
 type: 'feature'
 created: '2026-09-26'
-status: 'awaiting-operator'
+status: done
 baseline_revision: '0e6c6f76cde70b000ae76922c1013702bdedbcec'
 final_revision: 'dd82e5a6e544a11d33148025d6930b161f38cf9d'
 review_loop_iteration: 0
@@ -268,3 +268,14 @@ Status: awaiting-operator
 - The intraday late-file refusal on a sparse leaf (see the Known limit).
 - The rclone config is mounted read-only, so no OAuth refresh.
 - The `archive` service has not yet run on the VPS, and the cron line is still installed there. See `operator_actions`.
+
+## Operator Confirmation
+
+Confirmed 2026-09-26: the external actions this story owed were carried out.
+
+- On the VPS, pull this commit and run `make up` from platform/ (it creates platform/data/archive and the rclone config dir, builds the collector image with rclone, and starts the new `archive` service).
+- On the VPS, delete the old nightly crontab line (`crontab -e`), then confirm `crontab -l | grep -E 'make (nightly|consolidate|backup-catalog)'` prints nothing (docs/DEPLOY_CHECKLIST.md section 1).
+- On the VPS, confirm RCLONE_REMOTE and RCLONE_BUCKET are set in platform/.env and that the rclone config sits in ~/.config/rclone (or set RCLONE_CONFIG_DIR in .env), then run `make backup-catalog` once and check that it exits 0.
+- After the first 03:07 UTC slot, open the dashboard (or `docker compose logs archive`) and confirm that archive:status shows last_run with every venue's saga, consolidate_catalog and backup_catalog at exit 0 or 2.
+
+_Appended by the bmad-loop orchestrator (`bmad-loop confirm`, #335): a human confirmed these external actions out of band, and the story was advanced from `awaiting-operator` to `done`._

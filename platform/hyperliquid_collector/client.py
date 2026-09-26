@@ -57,6 +57,7 @@ from collector_core.book_check import BookSnapshot
 from collector_core.feed import MAIN_FEED
 from collector_core.feed import Feed
 from collector_core.feed import optional_feed_step
+from collector_core.ports import Ledger
 from kernel.open_interest import OpenInterest
 
 from hyperliquid_collector.book_snapshot import fetch_l2_book
@@ -109,8 +110,11 @@ class HyperliquidClient:
         on_data: Callable[[object, Feed], None],
         environment: str = "mainnet",
         trade_feeds: int = 1,
+        *,
+        ledger: Ledger,
     ) -> None:
         self._on_data = on_data
+        self._ledger = ledger  # the collector's: a failed trades-only socket is ledgered there
         env = nautilus_pyo3.HyperliquidEnvironment.from_str(environment)  # type: ignore[attr-defined]
         self._http = nautilus_pyo3.HyperliquidHttpClient(environment=env)  # type: ignore[attr-defined]
         self._ws: Any = nautilus_pyo3.HyperliquidWebSocketClient(environment=env)  # type: ignore[attr-defined]
@@ -149,6 +153,7 @@ class HyperliquidClient:
             TRADES_FEED,
             "connect",
             self._connect_socket(self._ws_trades, TRADES_FEED, loop, instruments),
+            self._ledger,
         ):
             self._ws_trades = None
 
@@ -180,7 +185,7 @@ class HyperliquidClient:
         await self._ws.subscribe_open_interest(iid)
         if self._ws_trades is not None:
             await optional_feed_step(
-                TRADES_FEED, "subscribe", self._ws_trades.subscribe_trades(iid)
+                TRADES_FEED, "subscribe", self._ws_trades.subscribe_trades(iid), self._ledger
             )
 
     async def unsubscribe(self, instrument_id: str) -> None:
@@ -193,7 +198,7 @@ class HyperliquidClient:
         await self._ws.unsubscribe_open_interest(iid)
         if self._ws_trades is not None:
             await optional_feed_step(
-                TRADES_FEED, "unsubscribe", self._ws_trades.unsubscribe_trades(iid)
+                TRADES_FEED, "unsubscribe", self._ws_trades.unsubscribe_trades(iid), self._ledger
             )
 
     def _handle_message(self, feed: Feed, message: object) -> None:
