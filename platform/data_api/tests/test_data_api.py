@@ -19,7 +19,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 from kernel.second_snapshot import DydxSecondSnapshot
-from ranking_engine import metrics_store
+from ranking.infrastructure.metrics_store import SqliteMetricsStore
 from views import catalog_reads
 from views import chart_series
 
@@ -85,26 +85,28 @@ def _metrics_row(ts: int, price: float = 100.0) -> dict:
 
 def test_metrics_history_route(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     db_path = str(tmp_path / "metrics.db")
-    metrics_store.write(
-        [_metrics_row(1_000_000_000), _metrics_row(2_000_000_000, price=101.0)], db_path
-    )
+    store = SqliteMetricsStore(db_path)
+    store.write([_metrics_row(1_000_000_000), _metrics_row(2_000_000_000, price=101.0)])
     client = _client(str(tmp_path / "catalog"), db_path, monkeypatch)
 
     response = client.get(f"/metrics/history/{_IID}?days=31")
 
     assert response.status_code == 200
-    assert response.json() == metrics_store.history(_IID, db_path, 31)
+    assert response.json() == store.history(_IID, 31)
+    store.close()
 
 
 def test_metrics_nearest_route_happy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     db_path = str(tmp_path / "metrics.db")
-    metrics_store.write([_metrics_row(1_000_000_000)], db_path)
+    store = SqliteMetricsStore(db_path)
+    store.write([_metrics_row(1_000_000_000)])
     client = _client(str(tmp_path / "catalog"), db_path, monkeypatch)
 
     response = client.get(f"/metrics/nearest/{_IID}?ts_ns=1500000000")
 
     assert response.status_code == 200
-    assert response.json() == metrics_store.nearest(_IID, 1_500_000_000, db_path)
+    assert response.json() == store.nearest(_IID, 1_500_000_000)
+    store.close()
 
 
 def test_metrics_nearest_route_no_data(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

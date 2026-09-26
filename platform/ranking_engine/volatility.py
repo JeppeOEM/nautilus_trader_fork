@@ -13,55 +13,29 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-Cross-sectional volatility tracker (Story 1.8 / FR16) -- a per-instrument rolling
-mid-price/return buffer with a configurable age-based lookback, default 3600s (1h).
+Deprecated re-export shim (Story 25.2): `ranking_engine.volatility` moved to the ranking context
+(`ranking.domain.volatility`).
 
-This is a fourth, purpose-built volatility computation, distinct from the three
-pre-existing ones in this codebase (ml_signals.catalog_stats.price_stats's 25h
-catalog-driven np.std; ml_signals.dashboard._ingest_batch's live 300-entry/~5min
-statistics.stdev; ml_signals.dashboard's pre-existing RANKING_COLS "volatility"
-column/metrics_store "volatility" column, fed by the first one). Do not consolidate
-with any of those -- see Story 1.8's Dev Notes for why that's explicit scope creep.
-
-Age-based eviction (not a fixed-length maxlen deque) is deliberate: a fixed-length
-window silently shrinks its effective time span across a variable snapshot rate or a
-resync gap, whereas this lookback must represent a stable wall-clock/event-time window
-regardless of cadence.
+Pure re-export, defines nothing: every name here *is* the `ranking.domain.volatility` object. Import from
+`ranking.domain.volatility` instead.
 """
 
-import statistics
-from collections import deque
+import warnings
+
+from ranking.domain.volatility import VolatilityTracker
 
 
-class VolatilityTracker:
-    """
-    Cross-sectional volatility: per-instrument stdev of consecutive-price percentage
-    returns over the trailing `lookback_seconds` (default 3600s = 1h).
-    """
+__all__ = [
+    "VolatilityTracker",
+]
 
-    def __init__(self, lookback_seconds: int = 3600) -> None:
-        self._lookback_ns = lookback_seconds * 1_000_000_000
-        self._buffers: dict[str, deque[tuple[int, float]]] = {}
+REMOVE_AFTER = "25-4-collection-control-plan-intent-vs-applied-set"
 
-    def update(self, instrument_id: str, ts_event_ns: int, mid_price: float) -> None:
-        """Append (ts_event_ns, mid_price) and evict entries older than lookback_seconds."""
-        buf = self._buffers.setdefault(instrument_id, deque())
-        buf.append((ts_event_ns, mid_price))
-        cutoff = ts_event_ns - self._lookback_ns
-        while buf and buf[0][0] < cutoff:
-            buf.popleft()
 
-    def score(self, instrument_id: str) -> float | None:
-        """
-        Stdev of the buffer's consecutive-price returns, or None if fewer than 2
-        returns are available -- an instrument with insufficient history (newly
-        subscribed, or mid-resync-gap) is a missing value, not an error.
-        """
-        buf = self._buffers.get(instrument_id)
-        if buf is None:
-            return None
-        prices = [price for _, price in buf]
-        rets = [(prices[i] - prices[i - 1]) / prices[i - 1] for i in range(1, len(prices))]
-        if len(rets) < 2:
-            return None
-        return statistics.stdev(rets)
+# Attributed to the importing module, not to importlib's frames.
+warnings.warn(
+    "ranking_engine.volatility moved to ranking.domain.volatility (Story 25.2); "
+    f"this shim is removed after {REMOVE_AFTER}",
+    DeprecationWarning,
+    skip_file_prefixes=("<frozen importlib",),
+)

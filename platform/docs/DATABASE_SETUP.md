@@ -43,7 +43,7 @@ ever back up or migrate.
 | Channel | Publisher | Subscribers | Payload |
 |---|---|---|---|
 | `snapshots:raw` | `collector_core/collector.py`'s `_second_loop` — every ~1s tick, in **all three** collector containers (dYdX, Bybit, Hyperliquid) | `ranking_engine`, `data_api` | JSON list of `DydxSecondSnapshot` dicts (book top-20 + trade volume/count), one per collected instrument. Each publisher sends only its own venue's instruments, so entries stay disjoint by `instrument_id` — this is the architecture spine's "one producer per (channel, venue)" convention |
-| `rankings:live` | `ranking_engine/engine.py` (**sole publisher**, AD-9) | `data_api` | JSON: `{mode, updated_at, ranks: [...], stale_instrument_ids: [...]}` — every rank row carries volume/volatility/OFI/OBI/microprice/spread/CVD/price/pct-change fields |
+| `rankings:live` | `ranking/` (the `ranking_engine` service; **sole publisher**, AD-9) | `data_api` | JSON: `{mode, updated_at, ranks: [...], stale_instrument_ids: [...]}` — every rank row carries volume/volatility/OFI/OBI/microprice/spread/CVD/price/pct-change fields |
 | `ranking:control` | `data_api` (`PUT /api/rankings/mode`, the web rankings page's mode control; Story 25.1a) | `ranking_engine` | `{"mode": "volume"\|"volatility"}` |
 | `collector:control` | `bot_tui` | `dydx_collector/collector.py` | `{"action": "start"\|"unpin"\|"stop"\|"pin_top_liquid", "id": "<instrument_id>"|null}` |
 | `collector:status` | `dydx_collector/collector.py` | `bot_tui` | Per-instrument `{id, pinned, liquid, last_trade_ts}`, or removal/unpin summaries |
@@ -96,7 +96,7 @@ are bind-mounted as **directories**, not single files, in `docker-compose.yml` �
 creates `<name>.db-wal`/`<name>.db-shm` sidecar files next to the main one, which a
 single-file mount can't expose.
 
-### 2.1 `metrics.db` — owned by `ranking_engine/metrics_store.py`
+### 2.1 `metrics.db` — owned by `ranking/infrastructure/metrics_store.py`
 
 - **Path:** `./data/metrics/metrics.db` on the host (`METRICS_DB_PATH` env,
   mounted `/app/metrics_dir/metrics.db` in the `ranking_engine`/`data_api` containers).

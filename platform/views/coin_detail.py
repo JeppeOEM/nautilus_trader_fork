@@ -17,7 +17,7 @@ The single-coin detail read model's data reads (SSOT-05): the inputs the web coi
 one coin.
 
 - `metrics_history`/`metrics_nearest` -- the ranking context's `metrics.db` history reads
-  (`ranking_engine.metrics_store`), and `catalog_snapshot_rows` -- the archived seconds of one
+  (its query service `ranking.application.queries`), and `catalog_snapshot_rows` -- the archived seconds of one
   coin as plain dicts.
 
 Moved out of `data_api/routes/metrics.py` and `data_api/app.py` (Story 24.2). Story 25.1a deleted
@@ -25,19 +25,20 @@ the metric groups (`COIN_DETAIL_GROUPS`), the rank-row lookup and the `snapshots
 came from bot_tui's Coin-detail view: that view was their only reader, and it went web-only.
 """
 
-from ranking_engine import metrics_store
+from ranking.application.queries import history
+from ranking.application.queries import nearest
 
 from views.catalog_reads import query_second_snapshots
 
 
 def metrics_history(symbol: str, db_path: str, days: int = 31) -> list[dict]:
     """One coin's `metrics.db` rows over the last `days` days, oldest first (ranking's own read)."""
-    return metrics_store.history(symbol, db_path, days)
+    return history(symbol, db_path, days)
 
 
 def metrics_nearest(symbol: str, ts_ns: int, db_path: str) -> dict | None:
     """Return the `metrics.db` row of one coin closest to `ts_ns`; None if never stored."""
-    return metrics_store.nearest(symbol, ts_ns, db_path)
+    return nearest(symbol, ts_ns, db_path)
 
 
 def catalog_snapshot_rows(

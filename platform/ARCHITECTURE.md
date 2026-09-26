@@ -15,7 +15,7 @@ it to a Nautilus-native Parquet catalog, publishing a live 1-second snapshot fee
 Redis as it goes. A ranking engine reads that feed, scores every coin by volume or volatility,
 and publishes the result back to Redis. A web dashboard reads those two Redis feeds (never
 recomputing anything itself) to show live charts, the rankings and the ranking-mode switch; a
-terminal UI controls the bots and the collector (rankings are web-only since Story 25.1a). Indicators written once in `ml_signals` get reused unmodified in Jupyter
+terminal UI controls the bots and the collector (rankings are web-only since Story 25.1a). Indicators written once in the shared `kernel` get reused unmodified in Jupyter
 research, Nautilus backtests, and a live paper-trading bot (`live_paper`), which
 publishes its own status to Redis so the TUI can monitor and start/stop it. Nothing
 downstream of the collector ever touches `nautilus_trader`'s live `TradingNode`/
@@ -36,9 +36,8 @@ downstream of the collector ever touches `nautilus_trader`'s live `TradingNode`/
 | `alerting/` | The alerting context (Story 24.3, DDD spine AD-D2/AD-D16): saved price alerts (`domain/`: `Alert`, `FiringPolicy`, the pure `evaluate`/`render`), `AlertEngine` (a structural `views.live_candles.BarObserver`, evaluated on the forming bar the chart draws for every pair an active alert watches, chart open or not) and `AlertService` (the `/api/alerts` use cases) in `application/`, and the `AlertStore`/`NotifyDeliverer` adapters in `infrastructure/`, constructed only by `data_api/alert_wiring.py`. An alert names channels, never transports. Imports only `kernel`, `observability`, stdlib and `tomli_w`; no module state | `alerts.toml` (read/write), webhook / Telegram URLs (outbound HTTP POST, through `observability.notify`) |
 | `research/` | The research context (Story 24.4, DDD spine AD-D1 research row): a pure consumer with no aggregates -- the backtest strategies and runners (`strategies/`, referenced by `ImportableStrategyConfig` string path `research.strategies.<module>:<Class>`), `run_backtest.py`, the watchlist client (`watchlist.py`), the notebooks (`notebooks/`) and `BACKTESTING.md`. Reads market-data rows only through `kernel.catalog_files` or `BacktestDataConfig` (`research/tests/test_research_reads.py`), the live coin-set only over HTTP, and computes no rolling metric (pct-change and volatility are ranking's). In-repo it imports only `kernel` and `observability` (beside stdlib, `nautilus_trader` and pandas) | Parquet catalog (read; `snapshot_backtest` writes only a throwaway catalog in a temp dir), `data_api` `/api/rankings` (HTTP GET) |
 | `observability/` | The generic observability context (Story 23.1, DDD spine AD-D16), standard library only and venue-free: `error_ledger` (every continue-past-failure site, DATA-07; in-memory per process, plus a durable per-service `<service>.jsonl` sink behind the same `record()` call, Story 23.3), `notify` (the one outbound transport: channels `operator` = ntfy/`WATCHDOG_NTFY_URL`, `telegram` = `TELEGRAM_*`, `webhook:<url>`), `watchdog` (the generic `(down_since, reminder)` alert transition), `incidents` (the WARNING+ incident-report handler, parameterised by the venue entrypoint's `IncidentConfig`). Every context except `kernel` may import it (spine AD-D2); it imports none | ntfy / Telegram / webhook URLs (outbound HTTP POST), `data/incident_reports/` (write, dYdX collector only), `data/errors/*.jsonl` (write, every service; Story 23.3) |
-| `ml_signals/` | The ranking math `ranking_engine` still imports (`metrics_computer`, `catalog_stats`' price stats); the candle store moved to `candles/` in Story 24.1, the UI read models to `views/` in Story 24.2 and the backtest strategies, runners, watchlist client and notebooks to `research/` in Story 24.4 -- `ml_signals.{strategies.*,watchlist,run_backtest}` are deprecated re-exports (the Story 24.2 `ml_signals.{ranking_columns,screener_columns_config,chart_indicators,chart_indicator_config,custom_indicators,book_features,footprint,chart_data}` shims were deleted in Story 24.4, the Story 24.1 `ml_signals.{candle_store,candles}` shims were deleted in Story 24.3) `[amended 2026-09-25: Story 24.4]` | Parquet catalog (read), Redis (`snapshots:raw`, `rankings:live` read), `metrics.db` (read) `[amended 2026-09-25: Story 24.1 — no `candles_*.db` read remains: the store moved to `candles/` and the only `ml_signals` reference is the dead re-export shim, which `tests/test_namespace.py` proves nothing imports]` `[amended 2026-09-20: Epic 22 story 22.8, review pass — `ranking:control` publish removed: the sole producer is `bot_tui/ranking_state.py:128` since Story 15.10 retired `dashboard`]` `[amended 2026-09-26: Story 25.1a — that module was deleted; the sole producer is now `data_api`'s `PUT /api/rankings/mode`]` |
 | `data_api/` + `frontend/` | Web UI (React SPA) + REST/WS on `:9100`, read-only except the saved preferences/alerts and the ranking-mode switch. Format + transport only since Story 24.2: every value comes from `views/`; `data_api/buses.py` constructs the two Redis bus instances, `data_api/alert_wiring.py` the alerting instances (Story 24.3), and `app.py`'s lifespan attaches the alert engine to the live-candle bus -- the only such wiring; `routes/alerts.py` is a thin adapter over `alerting.application` (the deprecated `data_api/alerts.py` re-export was deleted in Story 25.1) `[amended 2026-09-25: Story 25.1]` | Redis (read; `ranking:control` publish from `PUT /api/rankings/mode`, Story 25.1a), Parquet catalog + `candles_*.db` + `metrics.db` (read-only, through `views/`), `alerts.toml` (through `alerting/`) |
-| `ranking_engine/` | Sole computer of coin ranking (volume + volatility) | Redis (`snapshots:raw` read; `rankings:live` publish; `ranking:control` read), `metrics.db` (write), dYdX REST (24h volume poll) |
+| `ranking/` | The ranking context (Story 25.2, DDD spine AD-D10): sole computer of coin ranking (volume + volatility) and of the pct-change/volatility math. `RankingBoard` (`domain/`) owns the mode, one `InstrumentMetrics` per instrument, the volume book and the publisher; `RankingEngine` (`application/`) drives it through the `VolumeSource`/`PriceHistory`/`RankingHistory`/`LivePublisher` ports, whose adapters (`infrastructure/`) only `__main__` wires; `application/queries.py` (`history`/`nearest`) is the `metrics.db` read service views calls. No module-level state. Runs as `python3 -m ranking` (compose service `ranking_engine`); `ranking_engine/` is a deprecated re-export shim until Story 25.4 `[amended 2026-09-26: Story 25.2]` | Redis (`snapshots:raw` read; `rankings:live` publish; `ranking:control` read), `metrics.db` (write), Parquet catalog (read, one-time price backfill), dYdX/Bybit/Hyperliquid REST (24h USD volume poll, through `kernel.venue_http`) |
 | `live_paper/` | The actual trading bot — `TradingNode` + `Strategy` in paper (or gated real-money) mode | dYdX WS/HTTP (via `TradingNode`), Redis (`bots:status` publish, `bots:control` read) |
 | `bot_tui/` | Keyboard-only terminal UI, interactive/on-demand: the control surface for the bots and the collector (two panes, Bots and Collector). Rankings, the ranking-mode switch and the single-coin view are web-only since Story 25.1a, so it imports no `views/` read model `[amended 2026-09-26: Story 25.1a]` | Redis (`bots:*` and `collector:status` read; `bots:control`, `collector:control` publish), dashboard (HTTP deep-link only) |
 
@@ -179,10 +178,13 @@ Story 19.2) and `data/candles/candles_{dydx,bybit,hyperliquid}.db`.
 
 ---
 
-## 2. `ml_signals/` — shared signals, dashboard (backtesting moved to `research/`, 2b)
+## 2. Shared indicators — `kernel/indicators.py`
 
-Indicators are implemented once, in the shared kernel (below) — everything imports them from
-there, never reimplements; what remains in `ml_signals` is ranking's math and the research shims.
+Indicators are implemented once, in the shared kernel — everything imports them from there,
+never reimplements. `ml_signals/`, which hosted them and later ranking's math and the research
+shims, was deleted in Story 25.2 `[amended 2026-09-26: Story 25.2 -- its last modules moved to
+`ranking/` (the pct-change/volatility math, the catalog price read) and `research/`
+(`rank_history`); its two preference TOMLs moved to `data/`]`.
 
 - **`kernel/indicators.py`** (moved from `ml_signals/indicators.py` in Story 23.2) — five
   Nautilus `Indicator` subclasses, each used identically in Jupyter, backtest, and live
@@ -192,21 +194,9 @@ there, never reimplements; what remains in `ml_signals` is ranking's math and th
   - `MultiLevelOBI` — N-level order book imbalance
   - `MultiLevelOFI` — N-level order flow imbalance, replayed across snapshots
   - `OnlineLogisticTrend` — online-updating trend classifier fed from bars
-- **`book_features.py` / `footprint.py` / `chart_data.py`** — gone: the derived-view helpers
-  (spread, microprice, footprint charts) moved to `views/chart_series.py` in Story 24.2 and their
-  re-export shims were deleted in Story 24.4 — none of it is stored, all computed on read per
-  `platform/CLAUDE.md`'s 1s-based signal architecture rule.
-- **`strategies/`, `watchlist.py`, `run_backtest.py`** — deprecated re-exports since Story 24.4:
-  the backtest strategies, runners and watchlist client live in `research/` (section 2b).
-- **`metrics_computer.py`** — pure computation used by `ranking_engine` to score coins;
-  lives here (not in `ranking_engine`) so the same math is reachable from research code.
-- **`rank_history.py` / `catalog_stats.py`** — supporting queries for the history view
-  and catalog coverage/gap diagnostics.
-
-**Reads:** Parquet catalog, Redis (`snapshots:raw`, `rankings:live`), `metrics.db`.
-**Publishes:** nothing (the `ranking:control` mode switch is `data_api`'s `PUT /api/rankings/mode`
-since Story 25.1a).
-**Serves:** nothing itself -- the web UI is `data_api` + `frontend/` (next section).
+- The derived-view helpers (spread, microprice, footprint charts) live in `views/chart_series.py`
+  (Story 24.2) — none of it is stored, all computed on read per `platform/CLAUDE.md`'s 1s-based
+  signal architecture rule.
 
 ---
 
@@ -234,6 +224,8 @@ API, and computes nothing another context owns `[amended 2026-09-25: Story 24.4 
 
 - **`watchlist.py`** — `fetch_watchlist()` reads `data_api`'s `/api/rankings` to get the live, ranked coin set — this is how a backtest gets a dynamic instrument
   universe instead of a hardcoded list. HTTP only: `research` never imports `data_api`.
+- **`rank_history.py`** — `fetch_rank_history()` reads `data_api`'s `/api/metrics/nearest` for a
+  past rank at a timestamp (moved from `ml_signals/` in Story 25.2). HTTP only, like the watchlist.
 - **`strategies/backtest_dydx.py` / `strategies/backtest_ofi.py` / `strategies/backtest_snapshot.py`** — `BacktestNode` +
   `BacktestDataConfig` runs (no custom matching engine anywhere). `strategies/backtest_dydx.py`
   defaults to backtesting every coin in the live Watchlist, keyed results per symbol.
@@ -253,26 +245,35 @@ API, and computes nothing another context owns `[amended 2026-09-25: Story 24.4 
 
 ---
 
-## 3. `ranking_engine/` — the one place ranking gets computed
+## 3. `ranking/` — the one place ranking gets computed
 
 Extracted from what used to be inline logic in `dashboard.py` (Story 1.8) specifically
-so the web UI and any future reader can never disagree on coin order.
+so the web UI and any future reader can never disagree on coin order; a bounded context with
+its own aggregate since Story 25.2 (it was `ranking_engine/engine.py`, twelve module globals).
 
-- **`engine.py`** — subscribes to `snapshots:raw`, ingests each batch, computes both
-  volume and volatility scores every cycle (both are always present in the output
-  regardless of active mode), and publishes the merged result to `rankings:live` — on
-  every rank change **and** on a fixed heartbeat (`RANKING_HEARTBEAT_SECONDS`), so
-  readers can tell "stale" apart from "nothing changed." Listens on `ranking:control`
-  for mode-switch requests (`"volume"` | `"volatility"`) — last-write-wins on a
-  near-simultaneous double switch. Also polls dYdX REST for 24h volume.
-- **`volatility.py`** — `VolatilityTracker`: stddev of price/returns over a configurable
-  lookback (default 1h), ranked cross-sectionally against all other subscribed coins.
-- **`metrics_store.py`** — SQLite (`metrics.db`) persistence for ranking history:
-  `write()`, `latest()`, `history()`, `nearest()`. This is what answers "how did this
-  coin's rank evolve over time" (Story 1.4/FR8) — `ranking_engine` is the sole writer,
-  `dashboard`/others read-only.
+- **`domain/board.py`** — `RankingBoard`, the aggregate: the one global mode (last-write-wins),
+  one `InstrumentMetrics` per instrument (the OFI/OBI trackers, the 300-snapshot rolling window,
+  arrival-time freshness, the slow-loop metrics), the per-venue USD volumes and the
+  `RankingsPublisher` (publish on every rank/mode change **and** on a fixed heartbeat,
+  `RANKING_HEARTBEAT_SECONDS`, so readers can tell "stale" apart from "nothing changed"). Both
+  volume and volatility scores are always present in every row; a row with no fresh USD volume
+  leaves volume mode and stays, `volume24h: null`, in volatility mode. An instrument silent for
+  an hour is aged out.
+- **`domain/metrics.py`, `price_series.py`, `volatility.py`** — the pct-change/volatility formula
+  (`price_stats_from_series`, ranking's alone: views and research read the published values),
+  the in-memory 25 h price series and `VolatilityTracker` (the cross-sectional 1 h stdev).
+- **`application/engine.py`** — `RankingEngine`: the `snapshots:raw`/`ranking:control` handler
+  (`snapshots:raw` decoded only by `DydxSecondSnapshot.from_dict`), the volume poll, the slow
+  metrics loop (one-time catalog backfill per instrument, then `metrics.db` every minute) and
+  the heartbeat, through the ports in `application/ports.py`.
+- **`application/queries.py`** — `history()`/`nearest()`, the read service for `metrics.db`
+  (Story 1.4/FR8's "how did this coin's rank evolve over time"): read-only connections per call.
+- **`infrastructure/`** — Redis (publisher + listener), `metrics_store.py`
+  (`SqliteMetricsStore`, the sole writer), `catalog_prices.py` (over `kernel.catalog_files`) and
+  one volume source per venue (`volume_{dydx,bybit,hyperliquid}.py`, requests built with
+  `kernel.venue_http`), all constructed by `__main__.py`.
 
-**Reads:** `snapshots:raw`, `ranking:control`.
+**Reads:** `snapshots:raw`, `ranking:control`, the Parquet catalog (backfill only).
 **Publishes:** `rankings:live`.
 **Writes:** `metrics.db`.
 
@@ -340,7 +341,7 @@ Coin-detail and their `rankings:live`/`snapshots:raw` listeners were deleted;
 **Reads:** `bots:status`, `bots:history:*`, `bots:incidents:*`, `collector:status`.
 **Publishes:** `bots:control`, `collector:control`.
 **Never imports:** `live_paper` internals (control-plane only, per AD-10) or
-`dydx_collector`/`ml_signals` stateful internals (pure/shared-type imports only).
+`dydx_collector`/`ranking` stateful internals (pure/shared-type imports only).
 
 ---
 
@@ -360,9 +361,9 @@ Coin-detail and their `rankings:live`/`snapshots:raw` listeners were deleted;
 
 | Store | Writer | Readers | Contents |
 |---|---|---|---|
-| Parquet catalog (`data/catalog/`) | all three collectors | `ml_signals`, `data_api`, `research` (backtests, notebooks) `[amended 2026-09-25: Story 24.4]` | Second-snapshots (`DydxSecondSnapshot`, trades folded in rather than stored raw — audit D-45), mark/index price, funding rate, `OpenInterest`, instrument definitions, plus `order_book_deltas` for the dYdX instruments that opt in, and the Story 22.13 raw `trade_tick/` archive (pruned nightly by `archive.prune_catalog --trade-retention-days 7`; `docs/DATA_DICTIONARY.md` §1.1). Minute bars retired 2026-09-20 (D-35). Nautilus-native, zero-conversion `[amended 2026-09-20: Epic 22 story 22.8, review pass]` |
+| Parquet catalog (`data/catalog/`) | all three collectors | `ranking` (price backfill), `data_api`, `research` (backtests, notebooks) `[amended 2026-09-26: Story 25.2]` | Second-snapshots (`DydxSecondSnapshot`, trades folded in rather than stored raw — audit D-45), mark/index price, funding rate, `OpenInterest`, instrument definitions, plus `order_book_deltas` for the dYdX instruments that opt in, and the Story 22.13 raw `trade_tick/` archive (pruned nightly by `archive.prune_catalog --trade-retention-days 7`; `docs/DATA_DICTIONARY.md` §1.1). Minute bars retired 2026-09-20 (D-35). Nautilus-native, zero-conversion `[amended 2026-09-20: Epic 22 story 22.8, review pass]` |
 | `candles_{dydx,bybit,hyperliquid}.db` (SQLite, `data/candles/`) | that venue's collector (through the `SecondSink` port its entrypoint injects, Story 24.1 — the collector core no longer opens the file), plus `compare_klines` for the `verified_days` table | `data_api`, `prune_catalog` (via the `VerifiedDays` port) | Finished 1m..1D bars derived from raw 1s (D-35), plus the `verified_days` day-status table the archive tools reach through the `VerifiedDays` port. Fully rebuildable: `python -m candles.rebuild` |
-| `metrics.db` (SQLite) | `ranking_engine` | `data_api` (read-only mount) | Historical ranking snapshots (Story 1.4/FR8) |
+| `metrics.db` (SQLite) | `ranking_engine` (`ranking.infrastructure.metrics_store`) | `data_api` (read-only mount, through `views` → `ranking.application.queries`) | Historical ranking snapshots (Story 1.4/FR8) |
 | Nautilus `Cache` (in-memory, `live_paper`) | `live_paper` | nobody external yet | Orders/positions/fills for the running bot — **not yet Redis-backed**, lost on restart |
 | `data/errors/<service>.jsonl` (JSON lines, Story 23.3) | that service (`collector`, `bybit_collector`, `hyperliquid_collector`, `ranking_engine`, `data_api`, `live-paper`, `bot_tui`) | `data_api` (`GET /api/errors`'s `services` block), `archive.crosscheck_errors` | Every `observability.error_ledger.record()` call, durably: `ts_ns`, `service`, `pid`, `site`, `detail`, `exc_type`, `suppressed`; plus one `process_start` line per boot. Rotates by size (`.1`..`.N`, default 20 MB, 10 backups kept alongside the live file); at most 60 lines/site/minute, exact `suppressed` carry |
 

@@ -13,167 +13,32 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-SQLite store for rolling 31-day metric snapshots.
+Deprecated re-export shim (Story 25.2): `ranking_engine.metrics_store` moved to the ranking context
+(`ranking.application.queries`).
 
-One row per (ts, instrument_id) snapshot. Pruning happens on every write.
-Add columns to COLS and the INSERT below to extend the schema with new metrics.
+Pure re-export, defines nothing: every name here *is* the `ranking.application.queries` object
+(the store's read service; the writer is `ranking.infrastructure.metrics_store`). Import from
+`ranking.application.queries` instead.
 """
 
-import sqlite3
-import threading
-import time
+import warnings
+
+from ranking.application.queries import history
+from ranking.application.queries import nearest
 
 
-# RLock: write() holds _lock while calling _conn(), which also takes _lock internally
-# on first-open -- must be reentrant for the same thread to avoid deadlocking itself.
-_lock = threading.RLock()
-_connections: dict[str, sqlite3.Connection] = {}
+__all__ = [
+    "history",
+    "nearest",
+]
 
-# Metric columns stored per snapshot. Extend here to track new metrics.
-COLS = (
-    "price",
-    "pct_1h",
-    "pct_24h",
-    "pct_1w",
-    "pct_1m",
-    "volatility",
-    "ofi",
-    "microprice",
-    "spread",
-    "rank",
-    "volume24h",
+REMOVE_AFTER = "25-4-collection-control-plan-intent-vs-applied-set"
+
+
+# Attributed to the importing module, not to importlib's frames.
+warnings.warn(
+    "ranking_engine.metrics_store moved to ranking.application.queries (Story 25.2); "
+    f"this shim is removed after {REMOVE_AFTER}",
+    DeprecationWarning,
+    skip_file_prefixes=("<frozen importlib",),
 )
-
-_SCHEMA = f"""
-CREATE TABLE IF NOT EXISTS snapshots (
-    ts             INTEGER NOT NULL,
-    instrument_id  TEXT    NOT NULL,
-    {", ".join(f"{c} REAL" for c in COLS)},
-    PRIMARY KEY (ts, instrument_id)
-);
-CREATE INDEX IF NOT EXISTS idx_iid_ts ON snapshots(instrument_id, ts);
-"""
-
-
-def _migrate(db: sqlite3.Connection) -> None:
-    """
-    Add any COLS missing from an already-existing table (CREATE TABLE IF NOT EXISTS is a no-op
-    against a pre-existing db, so extending COLS alone would otherwise break on deployed data).
-    """
-    existing = {row[1] for row in db.execute("PRAGMA table_info(snapshots)")}
-    for col in COLS:
-        if col not in existing:
-            db.execute(f"ALTER TABLE snapshots ADD COLUMN {col} REAL")
-
-
-def _conn(db_path: str) -> sqlite3.Connection:
-    if db_path not in _connections:
-        # First-open (schema create + migration) is serialized so two concurrent callers
-        # can't both run _migrate()'s ALTER TABLE against the same fresh db and collide.
-        with _lock:
-            if db_path not in _connections:
-                db = sqlite3.connect(db_path, check_same_thread=False)
-                db.execute("PRAGMA journal_mode=WAL")
-                db.executescript(_SCHEMA)
-                _migrate(db)
-                db.commit()
-                _connections[db_path] = db
-    return _connections[db_path]
-
-
-def write(rows: list[dict], db_path: str, retain_days: int = 31) -> None:
-    """Upsert snapshots and prune rows older than retain_days."""
-    cutoff = time.time_ns() - retain_days * 86_400 * 1_000_000_000
-    placeholders = ", ".join("?" * (2 + len(COLS)))
-    sql = (
-        f"INSERT OR REPLACE INTO snapshots(ts, instrument_id, {', '.join(COLS)}) "
-        f"VALUES({placeholders})"
-    )
-    with _lock:
-        db = _conn(db_path)
-        db.execute("DELETE FROM snapshots WHERE ts < ?", (cutoff,))
-        db.executemany(
-            sql, [(r["ts"], r["instrument_id"], *[r.get(c) for c in COLS]) for r in rows]
-        )
-        db.commit()
-
-
-def latest(db_path: str) -> list[dict]:
-    """Most recent snapshot per instrument, for the rankings table."""
-    with _lock:
-        rows = (
-            _conn(db_path)
-            .execute(f"""
-            SELECT instrument_id, {", ".join(COLS)}
-            FROM snapshots
-            WHERE (instrument_id, ts) IN (
-                SELECT instrument_id, MAX(ts) FROM snapshots GROUP BY instrument_id
-            )
-            ORDER BY instrument_id
-        """)
-            .fetchall()
-        )
-    keys = ("instrument_id", *COLS)
-    return [dict(zip(keys, r)) for r in rows]
-
-
-def history(instrument_id: str, db_path: str, days: int = 31) -> list[dict]:
-    """All snapshots for one instrument over the last `days` days, ordered by ts."""
-    cutoff = time.time_ns() - days * 86_400 * 1_000_000_000
-    with _lock:
-        rows = (
-            _conn(db_path)
-            .execute(
-                f"SELECT ts, {', '.join(COLS)} FROM snapshots "
-                "WHERE instrument_id=? AND ts>=? ORDER BY ts",
-                (instrument_id, cutoff),
-            )
-            .fetchall()
-        )
-    keys = ("ts", *COLS)
-    return [dict(zip(keys, r)) for r in rows]
-
-
-def price_near_days_ago(
-    db_path: str,
-    days: float,
-    tolerance_s: float = 3600.0,
-) -> dict[str, float]:
-    """
-    Per instrument, the stored price at or just before `now - days`.
-
-    Only a row within `tolerance_s` before that target counts -- an instrument whose store
-    doesn't reach back that far (or has a gap there) is absent from the result, never
-    padded with a stale or zero price (DATA-01). One bulk query, not one per instrument.
-    """
-    target = time.time_ns() - int(days * 86_400 * 1_000_000_000)
-    floor = target - int(tolerance_s * 1_000_000_000)
-    with _lock:
-        rows = (
-            _conn(db_path)
-            .execute(
-                "SELECT instrument_id, price, MAX(ts) FROM snapshots "
-                "WHERE ts <= ? AND ts > ? AND price IS NOT NULL GROUP BY instrument_id",
-                (target, floor),
-            )
-            .fetchall()
-        )
-    return {iid: price for iid, price, _ts in rows}
-
-
-def nearest(instrument_id: str, ts: int, db_path: str) -> dict | None:
-    """Snapshot for instrument_id with ts closest to the given ts (ns). None if never stored."""
-    with _lock:
-        row = (
-            _conn(db_path)
-            .execute(
-                f"SELECT ts, {', '.join(COLS)} FROM snapshots WHERE instrument_id=? "
-                "ORDER BY ABS(ts - ?) LIMIT 1",
-                (instrument_id, ts),
-            )
-            .fetchone()
-        )
-    if row is None:
-        return None
-    keys = ("ts", *COLS)
-    return dict(zip(keys, row))

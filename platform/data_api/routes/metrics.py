@@ -15,12 +15,13 @@
 """
 `GET /api/metrics/history/{symbol}` / `GET /api/metrics/nearest/{symbol}` -- relocated
 (AD-F2), not reimplemented: both call `views.coin_detail.metrics_history`/`metrics_nearest`, the
-views read over the ranking context's `metrics_store.history()`/`nearest()` (Story 24.2), unchanged. Story 17.2 (originally 15.8)'s 31-day metrics-history page fetches
+views read over the ranking context's query service `history()`/`nearest()` (Story 24.2;
+`ranking.application.queries` since Story 25.2), unchanged. Story 17.2 (originally 15.8)'s 31-day metrics-history page fetches
 its trailing-31-day window through the first of these; the second exists for any
 nearest-value lookup that page (or a future one) needs.
 
 Deliberately NOT cursor-paginated -- a documented exception to AD-F3's "every history
-endpoint... without exception" language, not an oversight. `metrics_store.history()` is
+endpoint... without exception" language, not an oversight. The ranking query service's `history()` is
 already a small, fixed-size 31-day window (one row per instrument per polling tick, not
 per-second order-book depth), fetched once per page load, with no scroll-back concept.
 
@@ -55,7 +56,7 @@ router = APIRouter()
 
 class MetricHistoryItem(BaseModel):
     """
-    One row per `ranking_engine.metrics_store.COLS` (plus its own `ts`) -- a `None` field
+    One row per `ranking.infrastructure.metrics_store.COLS` (plus its own `ts`) -- a `None` field
     is the real gap signal (DATA-01/AD-F6), never coerced to `0` or dropped from the
     response. Field list mirrors `COLS` verbatim; extend both together if `COLS` changes.
     """

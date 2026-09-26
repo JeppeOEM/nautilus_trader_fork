@@ -1,6 +1,6 @@
 # Data Dictionary: Collection → Signals → Ranking
 
-What the dYdX collector stores, what `ml_signals`/`ranking_engine` compute from it, and
+What the dYdX collector stores, what `views`/`ranking` compute from it, and
 how a value traces from raw feed to the ranking table. All file:line references are
 against the `bmad` branch as of 2026-09-05.
 
@@ -195,7 +195,7 @@ Hyperliquid only** (dYdX bars are derived from its 1 s archive instead).
   via `FundingRateUpdate.from_pyo3` with no transformation.
 - **Fields:** `instrument_id`, funding rate value, `ts_event`, `ts_init`.
 - **Downstream use:** **none found.** Stored to the catalog but no file in
-  `ml_signals/` or `ranking_engine/` reads `FundingRateUpdate` — dead data as of this
+  `views/`, `ranking/` or `research/` reads `FundingRateUpdate` — dead data as of this
   writing.
 
 ### 1.7 `DydxSecondSnapshot` (custom `Data` type, `kernel/second_snapshot.py`)
@@ -223,7 +223,7 @@ with its class name, Arrow schema and `snapshots:raw` encoding unchanged (the ca
     re-derived from the raw archive (§1.1) on exchange time by `rebuild_seconds` (§6);
     book columns and timestamps are never touched. `candles.domain.fold.fold_arrays`
     combines these across multiple seconds for coarser candles (§2.5);
-    `ml_signals/catalog_stats.py`'s `price_series` reads `close_price` as its primary
+    `ranking/infrastructure/catalog_prices.py` (the ranking price backfill) reads `close_price` as its primary
     price source (falling back to `MarkPriceUpdate` only when no snapshot ever
     recorded a trade for that instrument).
   - `ts_event`, `ts_init`
@@ -241,7 +241,7 @@ with its class name, Arrow schema and `snapshots:raw` encoding unchanged (the ca
   gap logic rely on that), and `ts_init` is when the row could first be known -- backtests
   replay on it. A Bybit/Hyperliquid row therefore reaches Redis and Parquet
   `1 + hold_back_seconds` after its second began; freshness readers stamp arrival
-  (`ranking_engine._LAST_SEEN`), so that lag never reads as a stale feed. `hold_back_seconds`
+  (`ranking`'s `InstrumentMetrics.last_seen_ns`), so that lag never reads as a stale feed. `hold_back_seconds`
   is set per venue from `python -m archive.tools.measure_lag` (the per-kind distribution of
   `ts_init - ts_event`); it only makes fewer trades late, the rebuild is what makes a second
   correct (audit D-50).
@@ -298,7 +298,7 @@ Moved from `collector_core/` to the shared kernel in Story 23.2; class name (hen
   which instruments get trade/book subscriptions (pinned/liquid/illiquid tiers,
   `collector.py`), independent of storing `OpenInterest` itself.
 - **Downstream use of the stored `open_interest` field:** **none found** in
-  `ml_signals/`/`ranking_engine/` — only the *volume*-based liquidity classification
+  `views/`/`ranking/`/`research/` — only the *volume*-based liquidity classification
   (a separate, parallel computation in the same module) is used live. The OI Parquet
   record itself is written and retained but not read back by any of the code
   inspected. Likely intended for future backtest/research use, not currently wired
@@ -307,8 +307,8 @@ Moved from `collector_core/` to the shared kernel in Story 23.2; class name (hen
 ### 1.9 `InstrumentStatus` (native Nautilus type)
 
 - **Source:** markets channel, plain pyo3-object path (`client.py`).
-- **Downstream use:** **none found** — stored, not read anywhere in `ml_signals/`/
-  `ranking_engine/`.
+- **Downstream use:** **none found** — stored, not read anywhere in `views/`/`ranking/`/
+  `research/`.
 
 ### 1.10 Instrument definitions
 
@@ -359,7 +359,7 @@ service name, via `ERROR_LEDGER_SERVICE`).
 
 ---
 
-## 2. Computed signals / ML features (`platform/kernel/`, `platform/views/`, `platform/ml_signals/`)
+## 2. Computed signals / ML features (`platform/kernel/`, `platform/views/`, `platform/ranking/`)
 
 Everything here is computed **on read** from the raw types in §1 — nothing in this
 section is stored back to Parquet. Since Story 24.2 every value a UI shows is computed in the
@@ -496,27 +496,23 @@ It does not replay `OrderBookDelta`s or `TradeTick`s. An empty-top second raises
 `EmptyTopOfBook` like the pages above. Entirely a read-time computation — nothing here is
 persisted or fed into ranking.
 
-### 2.8 `metrics_computer.py` — periodic snapshot metrics
+### 2.8 Price stats — moved to the ranking context (§3)
 
-Bridges §1's Parquet catalog and the SQLite `metrics_store` (§3.4). One entry point:
+`[amended 2026-09-26: Story 25.2 -- `ml_signals/metrics_computer.py` (`compute_all`, dead since
+Story 13.2 replaced its recurring Parquet re-scan with the in-memory price series) was deleted, and
+`catalog_stats`' price math moved to `ranking/`: the formula is
+`ranking/domain/metrics.py`'s `price_stats_from_series`, the catalog read
+`ranking/infrastructure/catalog_prices.py`. See §3.2/§3.4.]`
 
-- `compute_all` — adds `price_stats` (`ml_signals/catalog_stats.py`, ranking's part of it) — latest price,
-  `pct_change_1h`/`pct_change_24h`, and `volatility` (stdev of consecutive-return
-  percentages over a 25-hour trailing window read straight from the Parquet
-  trade/price history) — to the `ofi`/`microprice`/`spread` fields its required
-  `book_metrics_fn` argument supplies (`ranking_engine._legacy_book_metrics_for`,
-  reading the same live indicator state `rankings:live` uses — SSOT-02, no
-  from-Parquet OFI replay). This is what `ranking_engine._slow_loop_task` calls every
-  `DB_WRITE_INTERVAL_SECONDS` (60s, `engine.py`) to populate the
-  `pct_1h`/`pct_24h`/`volatility` fields in the live ranking (§3).
-
-### 2.9 `rank_history.py` / `research/watchlist.py`
+### 2.9 `research/rank_history.py` / `research/watchlist.py`
 
 `[amended 2026-09-25: Story 24.4 -- `watchlist.py` moved from `ml_signals/` to the research
-context; `ml_signals.watchlist` is a deprecated re-export until Story 25.2.]`
+context; `ml_signals.watchlist` is a deprecated re-export until Story 25.2.]` `[amended 2026-09-26:
+Story 25.2 -- `rank_history.py` moved from `ml_signals/` to the research context too, and
+`ml_signals` was deleted.]`
 
 Thin, dependency-light HTTP fetch helpers, not computations: `fetch_rank_history`
-(`ml_signals/rank_history.py`) and `fetch_watchlist` (`research/watchlist.py`) pull already-computed data from the running `data_api`'s HTTP
+(`research/rank_history.py`) and `fetch_watchlist` (`research/watchlist.py`) pull already-computed data from the running `data_api`'s HTTP
 API (`/api/metrics/nearest/{iid}`, `/api/rankings`) for scripts/notebooks that don't want to
 import the full dependency set (fastapi, redis).
 
@@ -565,9 +561,18 @@ set; a failed send is ledgered at `observability.notify.<transport>`), and toast
 
 ---
 
-## 3. Ranking engine (`platform/ranking_engine/`)
+## 3. Ranking engine (`platform/ranking/`, the `ranking_engine` service)
 
-`ranking_engine/engine.py` is the **sole computer and publisher** of the live coin
+`[amended 2026-09-26: Story 25.2 -- moved from `ranking_engine/engine.py`'s module globals to the
+`ranking/` bounded context: `RankingBoard` (`ranking/domain/board.py`) holds the state,
+`RankingEngine` (`ranking/application/engine.py`) runs the loops, `python3 -m ranking` wires them.
+Every payload field, store column and ledger site below keeps its name. `ranking/tests/test_replay.py`
+proves the `rankings:live` bytes and `metrics.db` rows identical to the pre-move engine for a
+recorded 200 s burst over an empty catalog (live ingest, three venues' volumes, one slow-loop cycle,
+a mode switch); it does not exercise the catalog backfill or `age_out`. Deliberate changes,
+both in §3.3: `age_out` and the dYdX volume parse.]`
+
+The ranking context is the **sole computer and publisher** of the live coin
 ranking (architecture decision AD-9) — `data_api` and the web UI are pure readers
 of its output, never independent computers of the same indicators (`platform/CLAUDE.md`
 SSOT-02). This exists specifically to prevent two processes independently running
@@ -577,23 +582,25 @@ time / window contents / float accumulation order.
 ### 3.1 Inputs
 
 - **`snapshots:raw`** — the Redis pub/sub stream of `DydxSecondSnapshot` dicts
-  published live by the collector (§1.7). This is the engine's only per-tick market
-  data input; it never reads Parquet directly for live-tick fields.
+  published live by the collector (§1.7), decoded only by `DydxSecondSnapshot.from_dict`
+  (an entry it rejects is skipped and counted at `ranking_engine.snapshot_entry`). This is the
+  engine's only per-tick market data input; it never reads Parquet directly for live-tick fields.
 - **USD 24 h volume, per venue** (Story 22.10) — polled independently every 60s,
-  all sources concurrently (`_volume_cycle`, `engine.py`): dYdX's indexer
-  `/v4/perpetualMarkets` `volume24H` (`_fetch_volume_24h_json`), Bybit's
-  `/v5/market/tickers?category=linear|spot` `turnover24h`
-  (`_fetch_bybit_tickers_json`; spot kept only for USDT/USDC quotes) and Hyperliquid's
-  `POST /info {"type":"metaAndAssetCtxs"}` `dayNtlVlm`
-  (`_fetch_hyperliquid_meta_and_ctxs_json`). `DYDX_NETWORK`, `BYBIT_ENVIRONMENT` and
+  all sources concurrently (`RankingEngine.volume_cycle`), one `VolumeSource` adapter per
+  source in `ranking/infrastructure/`: dYdX's indexer `/v4/perpetualMarkets` `volume24H`
+  (`volume_dydx.py`), Bybit's `/v5/market/tickers?category=linear|spot` `turnover24h`
+  (`volume_bybit.py`; spot kept only for USDT/USDC quotes) and Hyperliquid's
+  `POST /info {"type":"metaAndAssetCtxs"}` `dayNtlVlm` (`volume_hyperliquid.py`), every request
+  built with `kernel.venue_http`. `DYDX_NETWORK`, `BYBIT_ENVIRONMENT` and
   `HYPERLIQUID_ENVIRONMENT` pick mainnet/testnet. Each source's last good result is
   kept on a failed poll and expires after 3 missed polls; failures, expiries and fresh
-  instruments with no volume are counted at `ranking_engine.volume24h`. None of these
-  fetchers is reused from the collectors even where the endpoint is the same, because
-  architecture rule AD-4 disallows cross-module reuse of anything that does network
-  I/O (`engine.py`).
-- **Parquet catalog** (via `metrics_computer.compute_all`, §2.8) — read once per
-  minute for `price`/`pct_1h`/`pct_24h`/`volatility`.
+  instruments with no volume are counted at `ranking_engine.volume24h`. A source's fetch is
+  bounded at 45 s as a whole (`RankingConfig.volume_fetch_timeout_s`), on top of the kernel's
+  per-socket-operation timeout.
+- **Parquet catalog** — read **once per instrument** (a lazy backfill of the in-memory 25 h
+  price series, `ranking/infrastructure/catalog_prices.py` over `kernel.catalog_files`, falling
+  back to mark prices when the window holds no trade), never re-read; `price`/`pct_1h`/`pct_24h`/
+  `volatility` come from that series every minute.
 - **`ranking:control`** — a Redis control channel that switches the active ranking
   mode between `"volume"` (default) and `"volatility"`. Global and last-write-wins.
   - Publisher: `data_api`'s `PUT /api/rankings/mode` (body `{"mode": "volume" | "volatility"}`,
@@ -602,7 +609,7 @@ time / window contents / float accumulation order.
     `{"mode": "volume"}`, byte-identical to the retired TUI `m` key
     (`data_api/tests/test_rankings_mode.py`). A publish no subscriber received (the engine is
     down) or a Redis error is a 503, shown on the page.
-  - Consumer: `ranking_engine/engine.py`'s `_handle_control_message`, which reads only `mode`
+  - Consumer: `RankingEngine.switch_mode` (`ranking/application/engine.py`), which reads only `mode`
     and logs-and-ignores an unknown one. The page shows the new mode only once
     `rankings:live` carries it (publish-and-wait, never optimistic).
   `[amended 2026-09-26: Story 25.1a -- the publisher moved from `bot_tui/ranking_state.py`
@@ -610,10 +617,10 @@ time / window contents / float accumulation order.
 
 ### 3.2 What's computed, per instrument, on every `snapshots:raw` batch
 
-`_ingest_snapshot_batch` (`engine.py`) feeds every incoming snapshot into
-long-lived per-instrument indicator instances:
+`RankingBoard.ingest` (`ranking/domain/board.py`) feeds every incoming snapshot into the
+instrument's `InstrumentMetrics` -- long-lived per-instrument indicator instances:
 
-- **`VolatilityTracker`** (`volatility.py`) — a *fourth*, deliberately separate
+- **`VolatilityTracker`** (`ranking/domain/volatility.py`) — a *fourth*, deliberately separate
   volatility computation from the other three in this codebase (the module's own
   docstring calls this out explicitly, `volatility.py`): cross-sectional stdev
   of consecutive mid-price percentage returns over an age-based (not fixed-length)
@@ -624,36 +631,39 @@ long-lived per-instrument indicator instances:
 - **`MultiLevelOFI(levels=n, window=300)` for n in (3, 5, 10)** → `ofi_3`, `ofi_5`,
   `ofi_10` (raw, unscored)
 - **`MultiLevelOBI(levels=n)` for n in (3, 5, 10)** → `obi_3`, `obi_5`, `obi_10`
-- A 300-entry rolling window of raw snapshots per instrument (`_SECOND_ROLLING`) —
+- A 300-entry rolling window of snapshot dicts (`DydxSecondSnapshot.to_dict`) per instrument (`InstrumentMetrics.rolling`) —
   feeds `trade_aggregates` (§2.1) for CVD/`avg_trade_size`, and a fast 300-tick
   `statistics.stdev` of mid-price returns (`volatility_fast`) — a *fifth*, separate
   volatility number, distinct from both `VolatilityTracker`'s and the catalog-derived
-  one, by explicit design (`engine.py`).
-- A reconnect-gap guard (`_OFI_GAP_NS = 3s`) clears OFI trackers' previous-tick state
+  one, by explicit design (`board.py`).
+- A reconnect-gap guard (`OFI_GAP_NS = 3s`) clears OFI trackers' previous-tick state
   after a gap, so a stale pre-gap price never gets diffed against a fresh one.
 
 ### 3.3 The published `rankings:live` message
 
-`_current_ranks()` (`engine.py`) builds one row per instrument that has had a
-snapshot within the last 30 seconds (`_WATCHLIST_STALE_NS`, reusing OBS-01's
-"pipeline failure, not quiet market" threshold verbatim). Each row combines:
+`RankingBoard.current_ranks()` builds one row per instrument that has had a
+snapshot within the last 30 seconds (`STALE_NS`, reusing OBS-01's
+"pipeline failure, not quiet market" threshold verbatim; stamped on arrival). An instrument
+silent for longer is listed in `stale_instrument_ids` for an hour, then aged out (its state
+dropped, `RankingBoard.age_out`, Story 25.2). Each row combines:
 
-- Live-tick fields from §3.2's indicators (`_fast_metrics_for`, `engine.py`):
+- Live-tick fields from §3.2's indicators (`InstrumentMetrics.fast_metrics`):
   `ofi_10_z`, `ofi_3/5/10`, `obi_3/5/10`, `microprice`, `microprice_lean`
   (`microprice - mid`), `spread`, `cvd` (`buy_vol - sell_vol` from the rolling
-  window), `volume_delta` (latest snapshot's `buy_volume - sell_volume`),
+  window), `volume_delta` (`buy_volume - sell_volume` over the last 60 snapshots),
   `buy_count`/`sell_count`, `avg_trade_size`, `volatility_fast`, `price` (mid).
-- Slow fields folded in from the last `compute_all` pass (§2.8): `pct_1h`, `pct_24h`,
-  `volatility`.
+- Slow fields folded in from the last slow-loop pass (at most 3 minutes old, else null): `pct_1h`,
+  `pct_24h`, `pct_1w`, `pct_1m`, `volatility` (the formula `ranking/domain/metrics.py`'s
+  `price_stats_from_series`, the only one in `platform/`).
 - `volume24h` and `volatility_score` — always both present regardless of active mode.
   `volume24h` is the venue's own USD 24 h volume (Story 22.10) and is `null` when that
   venue has no current volume for the instrument; such a row is left out of volume mode
-  entirely (never ranked at 0) and appears only in volatility mode. Exception, older than
-  Story 22.10: dYdX's `parse_volume_24h` still reads a market whose `volume24H` field is
-  absent or null as 0 (an unparseable string is left out); tracked in deferred work.
+  entirely (never ranked at 0) and appears only in volatility mode. Since Story 25.2 this
+  includes a dYdX market whose `volume24H` field is absent, null, empty or non-finite: it is
+  left out and counted at `ranking_engine.volume24h`, no longer read as 0.
 - **`rank`** — 1-indexed position after sorting all rows by the active mode's score
   descending: `volatility_score` if mode is `"volatility"`, else `volume24h`
-  (`engine.py`). This is the actual ranking: **default mode ranks
+  (`board.py`). This is the actual ranking: **default mode ranks
   instruments purely by 24-hour USD volume**; switching mode re-sorts the identical
   row set by the cross-sectional volatility stdev instead. No other field in the row
   affects sort order — OFI/OBI/CVD/etc. are informational columns on the ranked row,
@@ -664,17 +674,16 @@ changes (`RankingsPublisher._ranks_key`: instrument_id, rank, `ofi_10_z`, `sprea
 `cvd`, `microprice`, `price`) or at least every `RANKING_HEARTBEAT_SECONDS` (default
 5s) regardless, so a quiet market still gets a heartbeat.
 
-### 3.4 Persistence (`metrics_store.py`)
+### 3.4 Persistence (`ranking/infrastructure/metrics_store.py`)
 
-Every `DB_WRITE_INTERVAL_SECONDS` (60s), `_slow_loop_task` merges the current rank +
-`volume24h` into that pass's snapshots and writes them to a SQLite table
-(`ranking_engine/metrics_store.py`), columns: `price`, `pct_1h`, `pct_24h`, `pct_1w`, `pct_1m`,
+Every `db_write_interval_seconds` (60s), `RankingEngine.slow_loop_once` merges the current rank +
+`volume24h` into that pass's snapshots and writes them to a SQLite table through
+`SqliteMetricsStore`, the store's only writer; other processes read it through
+`ranking.application.queries` (`history`/`nearest`, read-only connections), columns: `price`, `pct_1h`, `pct_24h`, `pct_1w`, `pct_1m`,
 `volatility`, `ofi`, `microprice`, `spread`, `rank`, `volume24h` — a 31-day rolling
 history used by the dashboard's per-coin history page. Note this stored `ofi` column
-is the **top-of-book-only** `OrderFlowImbalance` from `metrics_computer.compute_all`
-(§2.8), not the multi-level `ofi_10_z`/`ofi_3/5/10` fields that only live in the
-`rankings:live` Redis message — the SQLite history and the live ranking table
-track genuinely different OFI computations.
+is the live raw `ofi_5` (`InstrumentMetrics.book_metrics`, the same tracker the rank entry
+reads -- SSOT-02), not the z-scored `ofi_10_z` the live ranking table leads with.
 
 ### 3.5 What the ranking is used for
 
@@ -682,7 +691,7 @@ track genuinely different OFI computations.
 and its `/ws/live` relay feed the web rankings page, which renders `rankings:live` directly, row
 order and column values unchanged (the web page is the only renderer since Story 25.1a deleted
 `bot_tui`'s Coins pane) — no independent computation on the read side. No code path in
-`platform/live_paper/` (the actual trading-bot module) imports `ranking_engine` or reads
+`platform/live_paper/` (the actual trading-bot module) imports `ranking` or reads
 `rankings:live` — bots are configured independently, not auto-selected from the live
 ranking. The ranking's current, only
 confirmed consumer is the human-facing web dashboard's coin-picker UI, not an automated
@@ -695,12 +704,12 @@ trading decision.
 | Raw field (§1) | Computed signal (§2) | In `rankings:live` (§3) | Notes |
 |---|---|---|---|
 | `DydxSecondSnapshot.bid/ask_prices[0]`, `bid/ask_sizes[0]` | `microprice()`, `spread()`, `mid_price()` | `microprice`, `microprice_lean`, `spread`, `price` | pure functions, `indicators.py` |
-| `DydxSecondSnapshot.bid/ask_prices[:N]`, `bid/ask_sizes[:N]` | `MultiLevelOFI`, `MultiLevelOBI` | `ofi_10_z`, `ofi_3/5/10`, `obi_3/5/10` | `ranking_engine` is the only live runner of these classes |
+| `DydxSecondSnapshot.bid/ask_prices[:N]`, `bid/ask_sizes[:N]` | `MultiLevelOFI`, `MultiLevelOBI` | `ofi_10_z`, `ofi_3/5/10`, `obi_3/5/10` | the `ranking_engine` service (`ranking/`) is the only live runner of these classes |
 | `DydxSecondSnapshot.buy_volume`/`sell_volume`/`buy_count`/`sell_count` | `trade_aggregates()`, `volume_delta()` | `cvd`, `volume_delta`, `avg_trade_size`, `buy_count`, `sell_count` | |
 | `DydxSecondSnapshot` mid-price sequence | `VolatilityTracker` (3600s cross-sectional) | `volatility_score` | **this is the sort key when mode = `"volatility"`** |
 | `DydxSecondSnapshot` mid-price sequence (300-tick window) | `statistics.stdev` fast volatility | `volatility_fast` | separate from `volatility_score` and catalog `volatility` — 3 distinct volatility numbers by design |
-| `DydxSecondSnapshot.close_price` (25h lookback; `TradeTick` pre-cutover) | `price_stats()` → `pct_change_1h/24h`, catalog `volatility` | `pct_1h`, `pct_24h`, `volatility` | via `metrics_computer.compute_all`, refreshed every 60s. `pct_1w`/`pct_1m` come from `metrics_store`'s persisted prices (`price_near_days_ago`), `None` until 7/30 days of history exist |
-| dYdX indexer `volume24H`, Bybit v5 tickers `turnover24h` (linear; spot USDT/USDC-quoted only), Hyperliquid `metaAndAssetCtxs` `dayNtlVlm` (independent polls in `ranking_engine`) | — (used as-is, USD) | `volume24h` | **this is the sort key when mode = `"volume"` (default)**; an instrument with no volume is absent from that mode and counted at `ranking_engine.volume24h` |
+| `DydxSecondSnapshot.close_price` (25h lookback; `TradeTick` pre-cutover) | `ranking.domain.metrics.price_stats_from_series()` → `pct_change_1h/24h`, catalog `volatility` | `pct_1h`, `pct_24h`, `volatility` | over the in-memory `PriceSeriesStore` (fed live, backfilled once per instrument from the catalog), refreshed every 60s by the ranking slow loop. `pct_1w`/`pct_1m` come from `metrics_store`'s persisted prices (`price_near_days_ago`), `None` until 7/30 days of history exist |
+| dYdX indexer `volume24H`, Bybit v5 tickers `turnover24h` (linear; spot USDT/USDC-quoted only), Hyperliquid `metaAndAssetCtxs` `dayNtlVlm` (independent polls in `ranking/infrastructure/volume_*`) | — (used as-is, USD) | `volume24h` | **this is the sort key when mode = `"volume"` (default)**; an instrument with no volume is absent from that mode and counted at `ranking_engine.volume24h` |
 | `OrderBookDeltas` | `book_features.py`, `chart_data.py`, `footprint.py` | *not present* | chart-page-only; never reaches `ranking_engine` |
 | `MarkPriceUpdate` / `IndexPriceUpdate` | — | *not present* | stored, no downstream reader found |
 | `FundingRateUpdate` | — | *not present* | stored, no downstream reader found |
@@ -713,8 +722,8 @@ or adjacent to the book-level signal machinery. Every OFI/OBI/CVD/microprice col
 visible on the ranking table is informational, derived from `DydxSecondSnapshot`
 alone, and does not itself move an instrument's rank. Three raw types collected today
 (`FundingRateUpdate`, `InstrumentStatus`, and the `open_interest` field of
-`OpenInterest`) have no confirmed downstream consumer anywhere in `ml_signals/`
-or `ranking_engine/`.
+`OpenInterest`) have no confirmed downstream consumer anywhere in `views/`, `ranking/`
+or `research/`.
 
 ---
 

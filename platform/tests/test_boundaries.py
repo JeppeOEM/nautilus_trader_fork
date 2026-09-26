@@ -25,14 +25,16 @@ so the graph holds from the first move, not only once a module has been relocate
 - a cross-context edge must be in `GRAPH` (AD-D2);
 - a `_private` name is never imported across contexts;
 - `observability` imports only the standard library, and `kernel` no context;
-- `research` imports nothing from `data_api`, legacy or not, nor `views`, `ranking_engine` or
-  `ml_signals`;
+- `research` imports nothing from `data_api`, legacy or not, nor `views` or `ranking` (nor the
+  `ranking_engine` shims);
 - a `domain/` module or a venue `policies.py` imports only the standard library, `kernel` and
   `nautilus_trader.model`/`core`;
 - `kernel/` holds exactly spine AD-D3's modules and stays pure: no in-repo import beyond itself,
   no store, no config loader, no module-level mutable state (Story 23.2);
 - every venue REST URL and request lives in `kernel.venue_http`, and every venue dispatch on an
-  instrument id's suffix goes through `kernel.venues` (Story 23.2).
+  instrument id's suffix goes through `kernel.venues` (Story 23.2);
+- `ranking/` holds no module-level mutable runtime state, and exactly one module defines the
+  pct-change/volatility formula `price_stats_from_series` (Story 25.2).
 
 Two exemptions only. An edge whose both ends sit in one *unmoved* legacy package (e.g. inside
 `collector_core`) is not judged: it becomes judged the moment one end moves out. `platform/tests`
@@ -56,7 +58,7 @@ from _source_tree import story_statuses
 from _source_tree import unknown_or_done
 
 
-THIS_STORY = "25-1-archive-context-archiveday-one-deleter-one-rewriter"
+THIS_STORY = "25-2-ranking-context-rankingboard-replaces-module-globals"
 
 KERNEL = "kernel"
 OBSERVABILITY = "observability"
@@ -153,23 +155,7 @@ LEGACY_MODULE_TO_CONTEXT: dict[str, str] = {
     "dydx_collector.tests.test_build_candles": CANDLES,
     "dydx_collector.tests.test_collector_control": COLLECTION_CONTROL,
     "dydx_collector.tests.test_config": COLLECTION_CONTROL,
-    # --- ml_signals: no package default, so a new module there must be placed deliberately
-    "ml_signals.__init__": RESEARCH,  # the package itself; see `_context_of`
-    "ml_signals.catalog_stats": VIEWS,  # split per symbol below
-    "ml_signals.metrics_computer": RANKING,
-    "ml_signals.rank_history": RANKING,
-    "ml_signals.run_backtest": RESEARCH,  # Story 24.4 shim, as are the other RESEARCH modules here
-    "ml_signals.strategies": RESEARCH,
-    "ml_signals.watchlist": RESEARCH,
-    "ml_signals.tests.__init__": RESEARCH,
-    # guards the views/ranking reader modules that stayed (research/tests has the backtest half)
-    "ml_signals.tests.test_ad8_boundary": VIEWS,
-    # catalog_stats' own tests cover what stayed: ranking's price stats (the gap helpers' tests
-    # moved to archive/tests/test_diagnostics.py in Story 25.1)
-    "ml_signals.tests.test_catalog_stats": RANKING,
-    "ml_signals.tests.test_metrics_computer": RANKING,
-    "ml_signals.tests.test_rank_history": RANKING,
-    # --- ranking_engine / live_paper: one context each
+    # --- ranking_engine (Story 25.2 re-export shims of `ranking`) / live_paper: one context each
     "ranking_engine": RANKING,
     "live_paper": BOTS,
     # --- data_api: the interface adapter (its Story 24.2 views shims were deleted in Story 24.4,
@@ -182,17 +168,6 @@ LEGACY_MODULE_TO_CONTEXT: dict[str, str] = {
 # Modules split across contexts: (module, top-level name) -> context. Every top-level function and
 # class of a split module is listed (asserted), so its move is fully planned.
 LEGACY_SYMBOL_TO_CONTEXT: dict[tuple[str, str], str] = {
-    # catalog_stats: AD-D1's three-way split. Its kernel read helpers moved in Story 23.2, its
-    # views read in Story 24.2 (its forwarding ended in Story 24.4) and its archive gap helpers in
-    # Story 25.1 (`archive.application.diagnostics`); the module `__getattr__` serves those from
-    # `_MOVED_NAMES` and raises for `_REPLACED_NAMES`, naming each successor.
-    ("ml_signals.catalog_stats", "__getattr__"): VIEWS,
-    ("ml_signals.catalog_stats", "price_series"): RANKING,
-    ("ml_signals.catalog_stats", "price_stats_from_series"): RANKING,
-    ("ml_signals.catalog_stats", "price_stats"): RANKING,
-    # its only caller is ranking's `metrics_computer` (`overview_table`, its views caller, was
-    # deleted in Story 24.2)
-    ("ml_signals.catalog_stats", "list_instruments"): RANKING,
     # dydx open interest: `classify_liquidity` is the collection plan's admission rule.
     ("dydx_collector.open_interest", "classify_liquidity"): COLLECTION_CONTROL,
     ("dydx_collector.open_interest", "_fetch_markets_json"): CAPTURE,
@@ -286,7 +261,7 @@ _PACKAGE_INITS = {name for name, path in _MODULES.items() if path.name == "__ini
 # `bot_tui` keep their names (interface adapters) and are judged like any context package.
 LEGACY_PACKAGES = frozenset(
     {"collector_core", "dydx_collector", "bybit_collector", "hyperliquid_collector"}
-    | {"ml_signals", "ranking_engine", "live_paper"}
+    | {"ranking_engine", "live_paper"}
 )
 
 
@@ -510,12 +485,12 @@ def test_research_imports_nothing_from_data_api() -> None:
     assert (RESEARCH, DATA_API) not in LEGACY_EDGES_UNTIL
 
 
-# Packages research never imports (AD-D1 research row, Story 24.4): the read models, ranking and
-# the legacy signals package. Rolling metrics come from ranking's published output, never code.
-_RESEARCH_FORBIDDEN_PACKAGES = frozenset({VIEWS, "ranking_engine", "ml_signals"})
+# Packages research never imports (AD-D1 research row, Story 24.4): the read models and ranking
+# (with its legacy shims). Rolling metrics come from ranking's published output, never code.
+_RESEARCH_FORBIDDEN_PACKAGES = frozenset({VIEWS, RANKING, "ranking_engine"})
 
 
-def test_research_imports_no_views_ranking_engine_or_ml_signals() -> None:
+def test_research_imports_no_views_or_ranking() -> None:
     reaching = sorted(
         _site(imp)
         for imp in _IMPORTS
@@ -617,7 +592,7 @@ def test_every_import_resolves_to_a_mapped_context() -> None:
 
 
 def test_checker_flags_unmapped_modules_and_expired_stories() -> None:
-    assert _context_of("ml_signals.a_module_nobody_placed") is None
+    assert _context_of("some_legacy_package.a_module_nobody_placed") is None
     assert _context_of("observability.anything") == OBSERVABILITY
     assert _context_of("collector_core.rebuild_seconds") == ARCHIVE  # a Story 25.1 shim
     board = {"24-1-x": "done", "24-2-y": "ready-for-dev", "24-3-z": "superseded"}
@@ -746,22 +721,25 @@ def _decorator_names(node: ast.AST) -> set[str]:
 _COMPOUND = (ast.If, ast.Try, ast.With, ast.AsyncWith, ast.For, ast.AsyncFor, ast.While)
 
 
-def _import_time_call(node: ast.stmt) -> str | None:
-    """Return the callee of an unsanctioned import-time call, bare or bound to a name."""
+def _import_time_call(node: ast.stmt, extra: frozenset[str] = frozenset()) -> str | None:
+    """
+    Return the callee of an unsanctioned import-time call, bare or bound to a name; `extra` names
+    calls a caller's rule sanctions on top of the kernel's.
+    """
     if (bare := _bare_call_name(node)) is not None:
-        return None if bare in _SANCTIONED_BARE_CALLS else bare
+        return None if bare in _SANCTIONED_BARE_CALLS | extra else bare
     bound = _bound_call_name(node)
-    sanctioned = _SANCTIONED_VALUE_CALLS | _SANCTIONED_BARE_CALLS
+    sanctioned = _SANCTIONED_VALUE_CALLS | _SANCTIONED_BARE_CALLS | extra
     return None if bound is None or bound in sanctioned else bound
 
 
-def _own_state_site(node: ast.stmt) -> str | None:
+def _own_state_site(node: ast.stmt, extra: frozenset[str] = frozenset()) -> str | None:
     """Return this statement's own impurity label, ignoring anything nested inside it."""
     if isinstance(node, ast.AugAssign):
         return f"line {node.lineno} (augmented assignment)"
     if isinstance(node, ast.Assign | ast.AnnAssign) and _is_mutable_value(node.value):
         return f"line {node.lineno}"
-    if (callee := _import_time_call(node)) is not None:
+    if (callee := _import_time_call(node, extra)) is not None:
         return f"line {node.lineno} (unsanctioned import-time call: {callee})"
     if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
         return (
@@ -784,15 +762,15 @@ def _nested_statements(node: ast.stmt) -> list[ast.stmt]:
     return []
 
 
-def _state_sites(statements: list[ast.stmt]) -> list[str]:
+def _state_sites(statements: list[ast.stmt], extra: frozenset[str] = frozenset()) -> list[str]:
     """Return module- or class-level mutable bindings, including ones under `if`/`try`/`with`."""
     found = []
     for node in statements:
-        site = _own_state_site(node)
+        site = _own_state_site(node, extra)
         if site is not None:
             found.append(site)
         else:
-            found += _state_sites(_nested_statements(node))
+            found += _state_sites(_nested_statements(node), extra)
     return found
 
 
@@ -893,15 +871,14 @@ def test_kernel_purity_rule_follows_an_environ_alias() -> None:
     assert _env_aliases(ast.parse("from typing import environ\n")) == set()
 
 
-# Venue REST: every URL and request is built in `kernel.venue_http` (AD-D3). `ranking_engine`'s
-# own volume polls keep their duplicate maps until its move -- the sites that story removes.
-LEGACY_VENUE_HTTP_UNTIL: dict[str, str] = {
-    "ranking_engine.engine": "25-2-ranking-context-rankingboard-replaces-module-globals",
-}
+# Venue REST: every URL and request is built in `kernel.venue_http` (AD-D3). Empty since Story 25.2
+# moved the ranking engine's volume polls onto the kernel; a module listed here must name the
+# story that retires it.
+LEGACY_VENUE_HTTP_UNTIL: dict[str, str] = {}
 # HTTP clients that talk to no venue, so `kernel.venue_http` does not own them.
 NON_VENUE_HTTP_CLIENTS: dict[str, str] = {
     "observability.notify": "ntfy / Telegram / webhook alert transport",
-    "ml_signals.rank_history": "the local data_api HTTP API",
+    "research.rank_history": "the local data_api HTTP API",
     "research.watchlist": "the local data_api HTTP API",
 }
 _VENUE_URL = re.compile(r"https?://[^\s\"']*(?:dydx|bybit|hyperliquid)", re.IGNORECASE)
@@ -1080,10 +1057,11 @@ def test_venue_http_exemptions_are_still_needed() -> None:
     assert unused == [], "these clients no longer make HTTP requests: delete their entries"
 
 
-@pytest.mark.parametrize(("module", "story"), sorted(LEGACY_VENUE_HTTP_UNTIL.items()))
-def test_legacy_venue_http_expires_with_its_story(module: str, story: str) -> None:
-    reason = unknown_or_done(story, story_statuses())
-    assert reason is None, f"{reason}: move {module}'s venue requests onto kernel.venue_http"
+def test_legacy_venue_http_expires_with_its_story() -> None:
+    # A loop, not a parametrization: the table is empty today, and an empty parameter set is a skip.
+    board = story_statuses()
+    expired = {m: r for m, s in LEGACY_VENUE_HTTP_UNTIL.items() if (r := unknown_or_done(s, board))}
+    assert expired == {}, "move these modules' venue requests onto kernel.venue_http"
 
 
 # An instrument-id suffix test: `.endswith(".BYBIT")`, `.endswith("-LINEAR")`, `.endswith(f".{v}")`.
@@ -1182,13 +1160,15 @@ VIEWS_QUERY_SERVICES: dict[str, frozenset[str]] = {
     ),
     "candles.application.forming": frozenset({"forming_bar", "bars_from_rows"}),
     "candles.domain.candle": frozenset({"Candle", "is_valid_candle"}),
-    "ranking_engine.metrics_store": frozenset({"history", "nearest"}),
+    "ranking.application.queries": frozenset({"history", "nearest"}),
 }
 # Packages views never imports (AD-D2): the interfaces, research, capture and the legacy shims.
-_VIEWS_FORBIDDEN_PACKAGES = frozenset({DATA_API, BOT_TUI, "ml_signals", "collector_core", "common"})
+_VIEWS_FORBIDDEN_PACKAGES = frozenset(
+    {DATA_API, BOT_TUI, "ranking_engine", "collector_core", "common"}
+)
 # What an interface adapter never imports directly: every read goes through views (AC #3).
 _INTERFACE_FORBIDDEN_PACKAGES = frozenset(
-    {"ml_signals", "collector_core", "ranking_engine", "candles", "common"}
+    {RANKING, "collector_core", "ranking_engine", "candles", "common"}
 )
 
 
@@ -1269,11 +1249,9 @@ _SNAPSHOT_FIELDS = frozenset(
         "close_price",
     }
 )
-# Modules still hand-indexing a snapshot payload -> the story whose `done` retires the site.
-LEGACY_SNAPSHOT_INDEXING_UNTIL: dict[str, str] = {
-    # the ranking engine's own `snapshots:raw` ingest; RankingBoard decodes through from_dict.
-    "ranking_engine.engine": "25-2-ranking-context-rankingboard-replaces-module-globals",
-}
+# Modules still hand-indexing a snapshot payload -> the story whose `done` retires the site. Empty
+# since Story 25.2: `ranking` decodes `snapshots:raw` through `DydxSecondSnapshot.from_dict`.
+LEGACY_SNAPSHOT_INDEXING_UNTIL: dict[str, str] = {}
 
 
 def _snapshot_key_reads(tree: ast.AST) -> list[int]:
@@ -1324,9 +1302,111 @@ def test_snapshot_indexing_exemptions_are_still_needed() -> None:
     assert sorted(set(LEGACY_SNAPSHOT_INDEXING_UNTIL) - set(_SNAPSHOT_INDEXERS)) == []
 
 
-@pytest.mark.parametrize(("module", "story"), sorted(LEGACY_SNAPSHOT_INDEXING_UNTIL.items()))
-def test_legacy_snapshot_indexing_expires_with_its_story(module: str, story: str) -> None:
-    reason = unknown_or_done(story, story_statuses())
-    assert reason is None, (
-        f"{reason}: decode {module}'s snapshots with DydxSecondSnapshot.from_dict"
+def test_legacy_snapshot_indexing_expires_with_its_story() -> None:
+    # A loop, not a parametrization: the table is empty today, and an empty parameter set is a skip.
+    board = story_statuses()
+    expired = {
+        m: r for m, s in LEGACY_SNAPSHOT_INDEXING_UNTIL.items() if (r := unknown_or_done(s, board))
+    }
+    assert expired == {}, "decode these modules' snapshots with DydxSecondSnapshot.from_dict"
+
+
+# --- ranking: no module-level runtime state, one formula (spine AD-D10, Story 25.2) -------------
+
+# On top of the kernel's sanctioned import-time calls, a ranking module may bind a module logger:
+# `logging.getLogger` returns the process-wide logger registry's entry, not state the module owns.
+_RANKING_SANCTIONED_CALLS = frozenset({"getLogger"})
+
+
+def _module_scope_nodes(tree: ast.Module) -> list[ast.AST]:
+    """Every node that runs at import time: the module and class bodies, not function bodies."""
+    found: list[ast.AST] = []
+    pending: list[ast.AST] = list(tree.body)
+    while pending:
+        node = pending.pop()
+        found.append(node)
+        if not isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.Lambda):
+            pending.extend(ast.iter_child_nodes(node))
+    return found
+
+
+def _is_main_guard(node: ast.stmt) -> bool:
+    """`if __name__ == "__main__":` -- the entrypoint's body, which an import never runs."""
+    test = node.test if isinstance(node, ast.If) else None
+    return (
+        isinstance(test, ast.Compare)
+        and isinstance(test.left, ast.Name)
+        and test.left.id == "__name__"
+        and any(isinstance(c, ast.Constant) and c.value == "__main__" for c in test.comparators)
     )
+
+
+def _ranking_state(module: str, tree: ast.Module) -> list[str]:
+    """Module/class-level mutable state, `global` statements and import-time environment reads."""
+    tree = ast.Module(body=[n for n in tree.body if not _is_main_guard(n)], type_ignores=[])
+    bad = [
+        f"{module}: mutable module state at {site}"
+        for site in _state_sites(tree.body, _RANKING_SANCTIONED_CALLS)
+    ]
+    env_names = _ENV_NAMES | _env_aliases(tree)
+    bad += [
+        f"{module}:{n.lineno}: `global` statement"
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Global)
+    ]
+    for node in _module_scope_nodes(tree):
+        name = node.attr if isinstance(node, ast.Attribute) else getattr(node, "id", None)
+        if isinstance(node, ast.Attribute | ast.Name) and name in env_names:
+            bad.append(f"{module}:{node.lineno}: reads the environment at import time")
+    return bad
+
+
+def _ranking_sources() -> dict[str, Path]:
+    return {
+        module: path
+        for module, path in _MODULES.items()
+        if module.split(".")[0] == RANKING and ".tests" not in f".{module}"
+    }
+
+
+def test_ranking_holds_no_module_level_runtime_state() -> None:
+    """Every piece of ranking state lives on the board or engine `__main__` builds (AD-D10)."""
+    assert len(_ranking_sources()) > 10, "the ranking context's modules were not found"
+    stateful = sorted(
+        entry
+        for module, path in _ranking_sources().items()
+        for entry in _ranking_state(module, ast.parse(path.read_text()))
+    )
+    assert stateful == [], "ranking/ holds no module-level mutable runtime state (AD-D10)"
+
+
+def test_ranking_state_rule_catches_each_kind() -> None:
+    tree = ast.parse(
+        "import logging\nimport os\nlogger = logging.getLogger(__name__)\n"
+        "URL = os.environ.get('X')\n_S = {}\nK = os.environ['K']\n"
+        "def f():\n    global _S\n    return os.environ.get('Y')\n"
+        "class C:\n    seen = []\n"
+        "if __name__ == '__main__':\n    main()\n"
+    )
+    assert _ranking_state("m", tree) == [
+        "m: mutable module state at line 4 (unsanctioned import-time call: get)",
+        "m: mutable module state at line 5",
+        "m: mutable module state at line 11",
+        "m:8: `global` statement",
+        "m:6: reads the environment at import time",
+        "m:4: reads the environment at import time",
+    ]
+
+
+def _definitions_of(name: str) -> list[str]:
+    return sorted(
+        str(path.relative_to(PLATFORM_DIR))
+        for path in _MODULES.values()
+        for node in ast.walk(ast.parse(path.read_text()))
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name == name
+    )
+
+
+def test_the_pct_change_and_volatility_formula_is_defined_exactly_once() -> None:
+    """SSOT-02 / AD-D10: views and research read ranking's published values, never recompute."""
+    assert _definitions_of("price_stats_from_series") == ["ranking/domain/metrics.py"]

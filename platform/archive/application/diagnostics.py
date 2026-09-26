@@ -31,7 +31,8 @@ from nautilus_trader.model.data import MarkPriceUpdate
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
 
-# The catalog data types `coverage` reports on (the same list `ml_signals.catalog_stats` keeps).
+# The catalog data types `coverage` reports on (the list `ml_signals.catalog_stats` kept until
+# Story 25.2).
 DATA_TYPES = (
     "trade_tick",
     "bar",

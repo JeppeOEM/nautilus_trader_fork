@@ -8,7 +8,7 @@ import type { MetricHistoryItem } from "../api/schema";
 import MetricTile, { type MetricDatum } from "../components/chart/MetricTile";
 
 // `metrics_store.COLS` minus `rank` (not one of the "ranking-input metrics" AC #2 names) --
-// order here is also render order. Extend alongside `ranking_engine/metrics_store.py`'s
+// order here is also render order. Extend alongside `ranking/infrastructure/metrics_store.py`'s
 // `COLS` if that ever changes.
 type MetricColumnKey = Exclude<keyof Omit<MetricHistoryItem, "ts">, "rank">;
 

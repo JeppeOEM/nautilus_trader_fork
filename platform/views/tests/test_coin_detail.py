@@ -21,7 +21,7 @@ were deleted with it in Story 25.1a.)
 from pathlib import Path
 
 from kernel.second_snapshot import DydxSecondSnapshot
-from ranking_engine import metrics_store
+from ranking.infrastructure.metrics_store import SqliteMetricsStore
 
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
@@ -58,14 +58,16 @@ def _snapshot(iid: str, ts_ns: int = 1_000_000_000) -> DydxSecondSnapshot:
 def test_metrics_reads_return_ranking_contexts_own_rows(tmp_path: Path) -> None:
     db_path = str(tmp_path / "metrics.db")
     now_ns = 1_900_000_000_000_000_000
-    metrics_store.write([{"instrument_id": _IID, "ts": now_ns, "price": 100.0}], db_path)
+    store = SqliteMetricsStore(db_path)
+    try:
+        store.write([{"instrument_id": _IID, "ts": now_ns, "price": 100.0}])
 
-    history = coin_detail.metrics_history(_IID, db_path)
-    assert [row["price"] for row in history] == [100.0]
-    assert history == metrics_store.history(_IID, db_path, 31)
-    assert coin_detail.metrics_nearest(_IID, now_ns, db_path) == metrics_store.nearest(
-        _IID, now_ns, db_path
-    )
+        history = coin_detail.metrics_history(_IID, db_path)
+        assert [row["price"] for row in history] == [100.0]
+        assert history == store.history(_IID, 31)
+        assert coin_detail.metrics_nearest(_IID, now_ns, db_path) == store.nearest(_IID, now_ns)
+    finally:
+        store.close()
 
 
 def test_catalog_snapshot_rows_project_book_and_ohlc_fields(tmp_path: Path) -> None:

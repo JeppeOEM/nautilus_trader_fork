@@ -21,7 +21,7 @@ contention, and it's one fewer file/connection to manage). Append-only: a row is
 written once, as its OrderFilled event is observed, and never rewritten -- unlike
 Nautilus's own Cache, which overwrites a NETTING position's closed history the
 instant it reopens (see trade_history.py's module docstring for why that made
-Cache reconstruction unusable here). Mirrors ranking_engine/metrics_store.py's
+Cache reconstruction unusable here). Mirrors ranking/infrastructure/metrics_store.py's
 plain-sqlite3, no-ORM style.
 """
 

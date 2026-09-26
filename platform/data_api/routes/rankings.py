@@ -164,7 +164,7 @@ async def put_ranking_mode(body: RankingModeRequest) -> RankingModeResponse:
 # ---------------------------------------------------------------------------------------------
 
 SCREENER_COLUMNS_CONFIG_PATH: str = os.environ.get(
-    "SCREENER_COLUMNS_CONFIG_PATH", "platform/ml_signals/screener_columns.toml"
+    "SCREENER_COLUMNS_CONFIG_PATH", "platform/data/screener_columns.toml"
 )
 
 # The column timeframes the UI offers; anything else is a 400, not a silent fallback.

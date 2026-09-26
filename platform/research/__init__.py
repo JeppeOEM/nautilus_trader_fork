@@ -29,7 +29,7 @@ Strategies are referenced by `ImportableStrategyConfig` string path
 code change.
 
 Dependency direction: in-repo, `research` imports only `kernel` and `observability` (beside
-stdlib, `nautilus_trader` and pandas), never `views`, `data_api`, `ranking_engine` or
-`ml_signals`; `platform/tests/test_boundaries.py` enforces the edges and
+stdlib, `nautilus_trader` and pandas), never `views`, `data_api` or `ranking` (nor its
+`ranking_engine` shims); `platform/tests/test_boundaries.py` enforces the edges and
 `research/tests/test_research_reads.py` the reads.
 """

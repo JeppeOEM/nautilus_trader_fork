@@ -1712,7 +1712,7 @@
           "ts"
         ],
         "title": "MetricHistoryItem",
-        "description": "One row per `ranking_engine.metrics_store.COLS` (plus its own `ts`) -- a `None` field\nis the real gap signal (DATA-01/AD-F6), never coerced to `0` or dropped from the\nresponse. Field list mirrors `COLS` verbatim; extend both together if `COLS` changes."
+        "description": "One row per `ranking.infrastructure.metrics_store.COLS` (plus its own `ts`) -- a `None` field\nis the real gap signal (DATA-01/AD-F6), never coerced to `0` or dropped from the\nresponse. Field list mirrors `COLS` verbatim; extend both together if `COLS` changes."
       },
       "MetricsHistoryResponse": {
         "properties": {

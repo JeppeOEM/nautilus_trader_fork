@@ -101,6 +101,31 @@ service names, env vars, container paths and the catalog layout are identical.
 6. `platform/` must never gain an `__init__.py` (`platform` is a stdlib module);
    `tests/test_namespace.py` guards it and runs in `make test`.
 
+## Story 25.2: the ranking context and the two preference TOMLs (2026-09-26)
+
+One-off, on `nifelheim`, the first deploy that contains Story 25.2. `ml_signals/` was deleted,
+so the two web-UI preference files it held (`chart_indicators.toml`, `screener_columns.toml`,
+both rewritten by `data_api` from the UI) moved to `platform/data/` and are mounted at
+`/app/preferences/` (`CHART_INDICATOR_CONFIG_PATH`/`SCREENER_COLUMNS_CONFIG_PATH` keep their
+names; key sets unchanged). The ranking process now runs as `python3 -m ranking` (same compose
+service `ranking_engine`, same env vars, same `metrics.db`).
+
+1. Keep the live selections before pulling: the UI has rewritten the tracked files in place, so
+   `git pull` would refuse (or overwrite them):
+   ```bash
+   cd ~/nautilus_trader_fork/platform
+   docker compose stop data_api   # no UI save may land between the copy and the checkout
+   cp ml_signals/chart_indicators.toml ml_signals/screener_columns.toml /tmp/
+   git checkout -- ml_signals/chart_indicators.toml ml_signals/screener_columns.toml
+   git pull
+   cp /tmp/chart_indicators.toml /tmp/screener_columns.toml data/
+   ls ml_signals 2>/dev/null   # only __pycache__ may remain; then rm -r ml_signals
+   ```
+2. `make build && make up` (rebuilds the thin images: `ranking` is copied, `ml_signals` no longer
+   is), then check: the rankings page updates, the ranking-mode switch round-trips, a coin's
+   saved chart indicators and the Technicals columns are still there, and `GET /api/errors`
+   shows no new `ranking_engine.*` site.
+
 ## 2. First-run measurements owed
 
 None of these can be taken off the VPS; each is **NOT measured** until recorded.

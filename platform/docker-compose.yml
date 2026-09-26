@@ -8,10 +8,11 @@ x-logging: &default-logging
     max-file: "20"
 
 # data_api's picker PUT (Story 15.6) is the one `rw` writer of this host file; kept as an
-# anchor so the path/mount is defined in one place.
-x-chart-indicator-config-path: &chart-indicator-config-path "/app/ml_signals/chart_indicators.toml"
+# anchor so the path/mount is defined in one place. A views preference store, so it lives under
+# data/ with the other durable stores (moved out of the deleted ml_signals/ package in Story 25.2).
+x-chart-indicator-config-path: &chart-indicator-config-path "/app/preferences/chart_indicators.toml"
 x-chart-indicator-config-mount: &chart-indicator-config-mount
-  ./ml_signals/chart_indicators.toml:/app/ml_signals/chart_indicators.toml:rw
+  ./data/chart_indicators.toml:/app/preferences/chart_indicators.toml:rw
 
 # CPU priority under contention (proposed 2026-09-26, applied by Story 28.1; not enabled yet).
 # nifelheim is 2 vCPU / 3.7 GB (`.planning/debug/nifelheim-resource-exhaustion-2026-09-12.md`):
@@ -144,7 +145,7 @@ services:
       context: ..
       dockerfile: platform/collector.dockerfile
       network: host
-    command: python3 -m ranking_engine.engine
+    command: python3 -m ranking
     environment:
       PYTHONUNBUFFERED: "1"
       REDIS_URL: "redis://127.0.0.1:${REDIS_PORT:-6379}"
@@ -161,8 +162,8 @@ services:
       ERROR_LEDGER_SERVICE: "ranking_engine"
     user: "1000:1000"
     volumes:
-      # Catalog is read-only -- ranking_engine only reads it via
-      # ml_signals.metrics_computer.compute_all(), same AD-3 "reader trusts the gate"
+      # Catalog is read-only -- ranking only reads it for the one-time per-instrument price
+      # backfill (ranking.infrastructure.catalog_prices), same AD-3 "reader trusts the gate"
       # discipline as data_api's mount. metrics/ is read-write -- this is now
       # the sole writer (Task 7). Mounted as a directory, not the single metrics.db file:
       # SQLite WAL mode creates -wal/-shm sidecars next to it, and a single-file bind
@@ -189,7 +190,7 @@ services:
       METRICS_DB_PATH: "/app/metrics_dir/metrics.db"
       CANDLES_DB_DIR: "/app/candles_dir"
       CHART_INDICATOR_CONFIG_PATH: *chart-indicator-config-path
-      SCREENER_COLUMNS_CONFIG_PATH: "/app/ml_signals/screener_columns.toml"
+      SCREENER_COLUMNS_CONFIG_PATH: "/app/preferences/screener_columns.toml"
       ALERTS_PATH: "/app/data_api/alerts.toml"
       TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
       TELEGRAM_CHAT_ID: "${TELEGRAM_CHAT_ID:-}"
@@ -207,7 +208,7 @@ services:
       - ./data_api/alerts.toml:/app/data_api/alerts.toml:rw
       # rw: the Technicals tab's screener-wide column list (Story 17.5). The host file must
       # exist (committed empty) or Docker would create a directory at this path.
-      - ./ml_signals/screener_columns.toml:/app/ml_signals/screener_columns.toml:rw
+      - ./data/screener_columns.toml:/app/preferences/screener_columns.toml:rw
       # rw (not ro): the picker's PUT /api/coin/{iid}/indicators (Story 15.6) writes this
       # file back on every add/remove/param-apply change -- the one `rw` mount
       # of this file.

@@ -41,7 +41,7 @@ dicts/dataclasses and raise their own exceptions, which each interface maps to i
 
 Dependency direction: views imports `kernel`, `observability` and the query services of `candles`
 (`candles.application.queries`, `candles.application.forming`, `candles.domain.candle`) and of
-ranking (`ranking_engine.metrics_store.history`/`nearest`) -- never a store adapter
+ranking (`ranking.application.queries.history`/`nearest`) -- never a store adapter
 (`candles.infrastructure`), never capture, research or an interface. `data_api` imports views.
 `platform/tests/test_boundaries.py` enforces all of it, the query-service names included
 (`VIEWS_QUERY_SERVICES`).

@@ -120,7 +120,7 @@ function formatCell(col: RankingColumn, value: unknown): string {
 
 // /ws/live's rankings:live relay shape -- hand-written per the architecture spine's
 // AD-F5 WS exception (no OpenAPI coverage for WebSocket frames); mirrors
-// ranking_engine/engine.py:605-687's _build_rankings_message() wire format exactly.
+// ranking/domain/board.py's RankingBoard.build_message() wire format exactly.
 // Never rename "ranks" here -- /ws/live relays it verbatim, unlike GET /api/rankings's
 // "items" (epics AC2: "no reshaping beyond channel subscription").
 export interface RankingRow {

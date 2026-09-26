@@ -310,7 +310,7 @@ development_status:
   epic-25: backlog
   25-1-archive-context-archiveday-one-deleter-one-rewriter: done
   25-1a-rankings-web-only-mode-toggle-on-web-tui-coins-pane-deleted: done
-  25-2-ranking-context-rankingboard-replaces-module-globals: ready-for-dev
+  25-2-ranking-context-rankingboard-replaces-module-globals: done
   25-3-bots-context-paper-and-exec-types-nautilus-acl: ready-for-dev
   25-4-collection-control-plan-intent-vs-applied-set: ready-for-dev
   epic-25-retrospective: optional

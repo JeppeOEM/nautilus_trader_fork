@@ -1,0 +1,278 @@
+# -------------------------------------------------------------------------------------------------
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
+#  https://nautechsystems.io
+#
+#  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
+#  You may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at https://www.gnu.org/licenses/lgpl-3.0.en.html
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+# -------------------------------------------------------------------------------------------------
+"""
+`RankingEngine` -- ranking's application service (Story 25.2): the four loops of the ranking
+process (the `snapshots:raw`/`ranking:control` handler, the volume poll, the slow metrics loop and
+the heartbeat), driving one `RankingBoard` through the ports. Constructed by `ranking/__main__.py`.
+"""
+
+import asyncio
+import json
+import logging
+import time
+from collections.abc import Callable
+from collections.abc import Sequence
+from dataclasses import dataclass
+
+from kernel.second_snapshot import DydxSecondSnapshot
+from observability import error_ledger
+
+from ranking.application.ports import CONTROL_CHANNEL
+from ranking.application.ports import SNAPSHOTS_CHANNEL
+from ranking.application.ports import LivePublisher
+from ranking.application.ports import PriceHistory
+from ranking.application.ports import RankingHistory
+from ranking.application.ports import VolumeSource
+from ranking.domain.board import RankingBoard
+from ranking.domain.values import RankingMode
+
+
+logger = logging.getLogger(__name__)
+
+VOLUME_SITE = "ranking_engine.volume24h"  # ledger site names are published language: kept
+
+
+@dataclass(frozen=True)
+class RankingConfig:
+    """The engine's cadences: fixed defaults, not read from the environment."""
+
+    # How often every venue's USD volume is polled.
+    volume_poll_seconds: int = 60
+    # Upper bound on one source's whole fetch. The kernel's socket timeout bounds each socket
+    # operation, not the whole response, so a slowly trickling body could otherwise hold the
+    # gathered cycle -- and with it every other venue's refresh -- open indefinitely.
+    volume_fetch_timeout_s: float = 45.0
+    # How often the slow loop recomputes price/pct/volatility and writes metrics.db.
+    db_write_interval_seconds: int = 60
+
+    @property
+    def volume_max_age_ns(self) -> int:
+        """About 3 missed polls: past this a source's last good volumes are no longer current."""
+        return 3 * self.volume_poll_seconds * 1_000_000_000
+
+
+class RankingEngine:
+    """
+    The ranking process: every board command is issued from here, on the event loop thread.
+
+    Invariant: one publish decision at a time -- `maybe_publish` is called by two independently
+    scheduled loops (every handled message and the heartbeat), and its check-then-publish-then-
+    record sequence spans an `await`, so it runs under one lock or both could publish the same
+    state twice. Only genuinely blocking I/O (the catalog backfill read, metrics.db) leaves the
+    event loop thread; board state is never touched from a worker thread.
+    """
+
+    def __init__(
+        self,
+        board: RankingBoard,
+        *,
+        volume_sources: Sequence[VolumeSource],
+        prices: PriceHistory,
+        history: RankingHistory,
+        live: LivePublisher,
+        config: RankingConfig,
+        clock: Callable[[], int] = time.time_ns,
+    ) -> None:
+        self._board = board
+        self._volume_sources = tuple(volume_sources)
+        self._prices = prices
+        self._history = history
+        self._live = live
+        self._config = config
+        self._clock = clock
+        self._publish_lock = asyncio.Lock()
+
+    # --- snapshots:raw / ranking:control -----------------------------------------------------
+
+    async def handle(self, channel: str, data: str) -> None:
+        """One Redis message: decode, apply to the board, then publish if the publisher says so."""
+        try:
+            payload = json.loads(data)
+            if channel == SNAPSHOTS_CHANNEL:
+                self.ingest_snapshot_batch(payload)
+            elif channel == CONTROL_CHANNEL:
+                self.switch_mode(payload)
+            await self.maybe_publish()
+        except Exception as exc:
+            # A failed decode or publish is not market data lost here (the next message or
+            # heartbeat republishes the whole state), but it must be counted, never only logged.
+            error_ledger.record("ranking_engine.message", f"{channel} message not handled", exc)
+
+    def ingest_snapshot_batch(self, batch: list) -> None:
+        """
+        Decode each entry with `DydxSecondSnapshot.from_dict` (the one `snapshots:raw` parser) and
+        ingest it. One malformed entry is ledgered and skipped, never the rest of the batch; a
+        field the board drops from an otherwise usable entry is ledgered at the same site. A payload
+        that is not a list is one failed message, never one ledger entry per key or character.
+        """
+        if not isinstance(batch, list):
+            raise ValueError(f"snapshots:raw payload is a {type(batch).__name__}, not a list")
+        for entry in batch:
+            try:
+                dropped = self._board.ingest(DydxSecondSnapshot.from_dict(entry), self._clock())
+            except Exception as exc:
+                error_ledger.record(
+                    "ranking_engine.snapshot_entry",
+                    f"malformed snapshots:raw entry SKIPPED: {entry!r}",
+                    exc,
+                )
+                continue
+            for detail in dropped:
+                # The rest of the entry was used; only the named field was not (DATA-07).
+                error_ledger.record("ranking_engine.snapshot_entry", detail)
+
+    def switch_mode(self, message: object) -> None:
+        """Apply a ranking:control request; an unrecognised mode is logged and ignored (AD-2)."""
+        requested = message.get("mode") if isinstance(message, dict) else None
+        mode = RankingMode.parse(requested)
+        if mode is None:
+            logger.warning("ranking:control unrecognized mode ignored: %r", requested)
+            return
+        self._board.switch_mode(mode)
+
+    async def maybe_publish(self) -> None:
+        """Build the current rankings message and publish it iff the publisher says to."""
+        async with self._publish_lock:
+            message = self._board.build_message(self._clock())
+            publisher = self._board.publisher
+            if publisher.should_publish(message["ranks"], message["mode"]):
+                await self._live.publish(json.dumps(message))
+                publisher.record_published(message["ranks"], message["mode"])
+
+    async def heartbeat(self) -> None:
+        """Publish even in a quiet market with no snapshots:raw/ranking:control traffic."""
+        while True:
+            await asyncio.sleep(1)
+            try:
+                await self.maybe_publish()
+            except Exception as exc:
+                error_ledger.record("ranking_engine.publish", "heartbeat publish failed", exc)
+
+    # --- USD 24 h volume ---------------------------------------------------------------------
+
+    async def volume_cycle(self) -> None:
+        """One poll cycle: every source concurrently, then the rebuild, then the missing ledger."""
+        await asyncio.gather(*(self._poll(source) for source in self._volume_sources))
+        now_ns = self._clock()
+        max_age_s = self._config.volume_max_age_ns // 1_000_000_000
+        for source, age_ns in self._board.refresh_volumes(now_ns):
+            error_ledger.record(
+                VOLUME_SITE,
+                f"{source}: last good volume poll is {age_ns // 1_000_000_000}s old "
+                f"(max {max_age_s}s), its rows are out of volume mode",
+            )
+        for iid in self._board.missing_volume_ids(now_ns):
+            error_ledger.record(
+                VOLUME_SITE, f"{iid}: no USD 24h volume from its venue, left out of volume mode"
+            )
+
+    async def _poll(self, source: VolumeSource) -> None:
+        """Replace the source's volumes on success; on failure ledger and keep the last good."""
+        try:
+            timeout = self._config.volume_fetch_timeout_s
+            volumes = await asyncio.wait_for(source.fetch(), timeout=timeout)
+            if not volumes:
+                # Every venue lists hundreds of markets: an empty parse is a broken or error
+                # response, never "no volume anywhere" -- it must not wipe the last good values.
+                raise ValueError("poll returned no volumes at all")
+        except Exception as exc:
+            error_ledger.record(
+                VOLUME_SITE,
+                f"{source.name}: volume poll failed, keeping its last good volumes",
+                exc,
+            )
+            return
+        self._board.record_volume_poll(source.name, volumes, self._clock())
+
+    async def volume_loop(self) -> None:
+        while True:
+            try:
+                await self.volume_cycle()
+            except Exception as exc:
+                error_ledger.record(VOLUME_SITE, "volume poll cycle failed", exc)
+            await asyncio.sleep(self._config.volume_poll_seconds)
+
+    # --- slow metrics loop -------------------------------------------------------------------
+
+    async def slow_loop_once(self) -> None:
+        """One cycle: age out, backfill new instruments, compute and persist every row."""
+        now_ns = self._clock()
+        self._board.age_out(now_ns)
+        await self._backfill_new_instruments(now_ns)
+        price_1w, price_1m = await self._prices_days_ago()
+        rows = self._board.slow_rows(now_ns, price_1w, price_1m)
+        if rows:
+            persisted = self._board.with_ranks(rows, now_ns)
+            await asyncio.to_thread(self._history.write, persisted)
+
+    async def _backfill_new_instruments(self, now_ns: int) -> None:
+        """
+        One-time catalog backfill per instrument, marked done even when the read fails: a failing
+        instrument must not be retried every cycle -- that is the recurring read Story 13.2 removed.
+        """
+        for iid in self._board.unbackfilled_ids():
+            try:
+                start_ns = now_ns - self._board.price_lookback_ns
+                series = await asyncio.to_thread(self._prices.series, iid, start_ns)
+                mismatch = self._board.backfill(iid, series)
+                if mismatch is not None:
+                    error_ledger.record("ranking_engine.price_backfill", mismatch)
+            except Exception as exc:
+                error_ledger.record(
+                    "ranking_engine.price_backfill",
+                    f"price-series backfill failed for {iid}, NOT retried",
+                    exc,
+                )
+            finally:
+                self._board.mark_backfilled(iid)
+
+    async def _prices_days_ago(self) -> tuple[dict[str, float], dict[str, float]]:
+        """
+        1w/1m need more history than the 25h series holds, so they come from metrics.db. Optional
+        enrichment: a failed read leaves pct_1w/pct_1m None and must not stall the rest.
+        """
+        price_1w: dict[str, float] = {}
+        price_1m: dict[str, float] = {}
+        try:
+            price_1w = await asyncio.to_thread(self._history.price_near_days_ago, 7)
+            price_1m = await asyncio.to_thread(self._history.price_near_days_ago, 30)
+        except Exception as exc:
+            error_ledger.record(
+                "ranking_engine.metrics_history",
+                "1w/1m price lookup failed; pct_1w/pct_1m unavailable this cycle",
+                exc,
+            )
+        return price_1w, price_1m
+
+    async def slow_loop(self) -> None:
+        """
+        Every db_write_interval_seconds, with a cycle-duration canary (DATA-02): a cold start that
+        backfills every instrument in one cycle must stay visible if it runs past the interval.
+        """
+        interval = self._config.db_write_interval_seconds
+        while True:
+            cycle_start = time.monotonic()
+            try:
+                await self.slow_loop_once()
+            except Exception as exc:
+                error_ledger.record("ranking_engine.slow_loop", "slow metrics cycle failed", exc)
+            cycle_seconds = time.monotonic() - cycle_start
+            if cycle_seconds > interval:
+                logger.warning(
+                    "Slow metrics loop cycle took %.1fs, exceeding the %ds write interval",
+                    cycle_seconds,
+                    interval,
+                )
+            await asyncio.sleep(interval)

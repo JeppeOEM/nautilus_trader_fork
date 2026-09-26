@@ -280,17 +280,20 @@ def test_old_name_warns_and_is_the_new_object(
     assert old is _resolve(shim.target), f"{shim.shim}.{shim.name} is a copy of {shim.target}"
 
 
-@pytest.mark.parametrize("entry", _REPLACED, ids=lambda e: f"{e[0]}.{e[1]}")
-def test_replaced_name_raises_naming_its_successor(entry: tuple[str, str, str]) -> None:
-    """A name whose successor changed shape is never served: a stale caller fails loudly."""
-    module, name, successor = entry
-    _require_shipped(module)
-    with pytest.raises(AttributeError, match=re.escape(successor)):
-        getattr(importlib.import_module(module), name)
+def test_replaced_name_raises_naming_its_successor() -> None:
+    """
+    A name whose successor changed shape is never served: a stale caller fails loudly. A loop, not
+    a parametrization: none exist since Story 25.2 deleted `ml_signals.catalog_stats` (the last
+    `_REPLACED_NAMES` table), and an empty parameter set is a skip.
+    """
+    for module, name, successor in _REPLACED:
+        if not _shipped(module):
+            continue  # checked by `make test` in the image that ships it
+        with pytest.raises(AttributeError, match=re.escape(successor)):
+            getattr(importlib.import_module(module), name)
 
 
 def test_replaced_names_are_not_also_served() -> None:
-    assert _REPLACED, "replaced names exist (Story 23.1) but none were parsed"
     served = {(shim.shim, shim.name) for shim in _SHIM_NAMES}
     assert {(module, name) for module, name, _ in _REPLACED} & served == set()
 
@@ -300,8 +303,10 @@ def test_scanner_reads_both_shim_shapes() -> None:
         "import warnings\nfrom new.mod import a\nREMOVE_AFTER = 'k'\nwarnings.warn('x')\n"
     )
     moved = ast.parse("MOVED_NAMES_REMOVE_AFTER = 'k'\n_MOVED_NAMES = {'_old': 'new.mod.b'}\n")
+    replaced = ast.parse("_REPLACED_NAMES = {'gone': 'its.successor'}\n")
     assert _shim_names("old.mod", whole) == [_ShimName("old.mod", "a", "new.mod.a", True)]
     assert _shim_names("old.mod", moved) == [_ShimName("old.mod", "_old", "new.mod.b", False)]
+    assert _replaced_names("old.mod", replaced) == [("old.mod", "gone", "its.successor")]
 
 
 # Kernel `Data` classes whose `__name__` is a persistence identifier (catalog directory name).

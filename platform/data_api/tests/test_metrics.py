@@ -14,14 +14,14 @@
 # -------------------------------------------------------------------------------------------------
 """
 Story 17.2/15.8: `GET /api/metrics/history/{symbol}` / `GET /api/metrics/nearest/{symbol}`
--- real `ranking_engine.metrics_store` SQLite store, no mocking (TEST-01/03).
+-- real `ranking.infrastructure.metrics_store` SQLite store, no mocking (TEST-01/03).
 """
 
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from ranking_engine import metrics_store
+from ranking.infrastructure.metrics_store import SqliteMetricsStore
 
 import data_api.app as app_module
 import data_api.routes.metrics as metrics_routes
@@ -33,6 +33,13 @@ _IID = "BTC-USD-PERP.DYDX"
 # 31-day retention cutoff regardless of when this test runs (mirrors test_candles.py's
 # own `_BASE_NS` precedent for the same reason).
 _BASE_NS = 1_800_000_000_000_000_000
+
+
+def _seed(db_path: str, rows: list[dict]) -> None:
+    """Write through ranking's own writer (the store's only writer), then release it."""
+    store = SqliteMetricsStore(db_path)
+    store.write(rows)
+    store.close()
 
 
 def _client(db_path: str, monkeypatch: pytest.MonkeyPatch) -> TestClient:
@@ -62,11 +69,11 @@ def test_history_reflects_full_row_and_preserves_none_gap_verbatim(
         "ts": _BASE_NS + 60_000_000_000,
         "instrument_id": _IID,
         "price": 101.0,
-        # Every other metric column deliberately omitted -- metrics_store.write() stores
+        # Every other metric column deliberately omitted -- SqliteMetricsStore.write() stores
         # a missing key as None via r.get(c); this is the deliberate gap case the route
         # must reflect verbatim (DATA-01/AD-F6), never as 0 or a dropped key.
     }
-    metrics_store.write([full_row, gap_row], db_path)
+    _seed(db_path, [full_row, gap_row])
     client = _client(db_path, monkeypatch)
 
     response = client.get(f"/api/metrics/history/{_IID}")
@@ -96,7 +103,7 @@ def test_nearest_returns_row_when_data_exists(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     db_path = str(tmp_path / "metrics.db")
-    metrics_store.write([{"ts": _BASE_NS, "instrument_id": _IID, "price": 100.0}], db_path)
+    _seed(db_path, [{"ts": _BASE_NS, "instrument_id": _IID, "price": 100.0}])
     client = _client(db_path, monkeypatch)
 
     response = client.get(f"/api/metrics/nearest/{_IID}?ts_ns={_BASE_NS}")

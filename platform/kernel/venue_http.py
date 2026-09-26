@@ -20,8 +20,8 @@ the kline reconciliation (`compare_klines`, story 22.13).
 
 Invariant: one place holds every venue REST URL, so two contexts can never send the same
 request to two different hosts or with two different encodings; a literal venue URL outside
-the kernel fails `platform/tests/test_boundaries.py` (`ranking_engine`'s own maps retire in
-Story 25.2). Every built request is `https` -- the builders take a `url: str` rather than a
+the kernel fails `platform/tests/test_boundaries.py` (the ranking volume polls' own maps retired
+in Story 25.2). Every built request is `https` -- the builders take a `url: str` rather than a
 visible literal, so the scheme each `# noqa: S310` asserts is checked here instead.
 
 Stdlib `urllib` only: no extra dependency, and the pyo3 HTTP clients parse decimals through

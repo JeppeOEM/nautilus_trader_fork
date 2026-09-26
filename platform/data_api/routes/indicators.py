@@ -50,7 +50,7 @@ from data_api.routes import candles as _candles
 # Default mirrors dashboard.py:85-88 exactly (same env var name, same default path).
 CHART_INDICATOR_CONFIG_PATH: str = os.environ.get(
     "CHART_INDICATOR_CONFIG_PATH",
-    "platform/ml_signals/chart_indicators.toml",
+    "platform/data/chart_indicators.toml",
 )
 
 # Own clamps (MEM-01 extended to this route, independently of candles.py's values). The candles
