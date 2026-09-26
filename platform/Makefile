@@ -109,10 +109,11 @@ redeploy-no-paper:
 	@docker image prune -f
 	@echo "Dashboard: http://localhost:$(DATA_API_PORT)"
 
-## Start the paper-trading node (Epic 3, live_paper module). Not part of plain `make up`
-## -- gated behind the `live-paper` compose profile so it's never started by accident.
-## Runs in paper mode only by default (SandboxExecutionClientConfig, no wallet/private
-## key) -- see platform/live_paper/config.py for how real-money mode is separately gated.
+## Start the paper-trading node (Epic 3; the bots context, `python3 -m bots`, since Story 25.3).
+## Not part of plain `make up` -- gated behind the `live-paper` compose profile so it's never
+## started by accident. Runs in paper mode only by default (SandboxExecutionClientConfig, no
+## wallet/private key) -- see platform/bots/infrastructure/config.py for how real-money mode is
+## separately gated.
 up-live-paper:
 	$(COMPOSE) --profile live-paper up -d --build live-paper
 	@docker image prune -f
@@ -237,16 +238,26 @@ tui:
 	$(COMPOSE) --profile tui build bot_tui
 	$(COMPOSE) --profile tui run --rm bot_tui python3 -m bot_tui.app
 
-## Run live_paper's test suite inside its own image (not the collector image -- that
-## image deliberately does not copy in live_paper/, per AD-8's module isolation).
+## Run the bots context's test suite inside its own image (not the collector image -- that
+## image deliberately does not copy in bots/, per AD-8's module isolation).
 ## -e HOME=/tmp -e USER=collector works around the same pre-existing "OSError: No
 ## username set" pytest tmp_path issue documented in deferred-work.md for
 ## dydx_collector/tests (image runs as uid 1000 with no matching /etc/passwd entry).
 ## tests/test_hotpath.py replays the collector's ingest path, which this image deliberately
 ## does not ship; it runs in `make test`.
+## Every build_node test in test_node.py connects the node's Redis-backed Cache at construction,
+## so this target needs the compose Redis up (`--no-deps` does not start it) -- without it those
+## tests block, not fail; on a host run set REDIS_URL=redis://127.0.0.1:$(REDIS_PORT) likewise.
+## The two deselected tests cannot pass against that Redis: `..._configures_redis_backed_cache`
+## asserts the default port 6379 (true only where REDIS_URL is unset) and
+## `..._passes_redis_credentials_and_ssl_from_url` blocks on the unreachable
+## `rediss://myhost:6380` it builds against. Their URL parsing is still covered, host-independently,
+## by `test_cache_config_*` in the same file.
 test-live-paper:
 	$(COMPOSE) --profile live-paper run --rm --no-deps -e HOME=/tmp -e USER=collector $(TEST_SOURCE_MOUNT) live-paper \
-		python3 -m pytest live_paper/tests observability/tests kernel/tests tests --ignore=tests/test_hotpath.py --ignore=tests/test_capture_archive_handoff.py -q
+		python3 -m pytest bots/tests observability/tests kernel/tests tests --ignore=tests/test_hotpath.py --ignore=tests/test_capture_archive_handoff.py \
+		--deselect bots/tests/test_node.py::test_build_node_configures_redis_backed_cache \
+		--deselect bots/tests/test_node.py::test_build_node_passes_redis_credentials_and_ssl_from_url -q
 
 ## Stop containers (catalog data is preserved)
 down:

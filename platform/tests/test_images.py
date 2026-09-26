@@ -140,11 +140,17 @@ def _uvicorn_app(tokens: list[str]) -> str:
 
 
 def _module_of(command: str) -> str | None:
-    """Return the in-repo module a command runs: `python3 -m <mod>` or `uvicorn <mod>:<app>`."""
+    """
+    Return the in-repo module a command runs: `python3 -m <mod>` or `uvicorn <mod>:<app>`. For
+    `-m <package>` that is the package's `__main__` -- what Python actually executes; the package's
+    `__init__` alone would leave the entrypoint's whole closure unchecked.
+    """
     tokens = shlex.split(command)
     if "-m" in tokens:
         module = tokens[tokens.index("-m") + 1]
-        return module if module.split(".")[0] in _TOP_PACKAGES else None
+        if module.split(".")[0] not in _TOP_PACKAGES:
+            return None
+        return f"{module}.__main__" if f"{module}.__main__" in _KNOWN else module
     if tokens and tokens[0] == "uvicorn":
         return _uvicorn_app(tokens).split(":")[0]
     return None
@@ -372,7 +378,8 @@ def test_every_service_and_make_target_contributes_entrypoints() -> None:
     assert {entry.module for entry in _ENTRYPOINTS} >= {
         "dydx_collector.collector",
         "data_api.app",
-        "live_paper.node",
+        "bots.__main__",
+        "ranking.__main__",
         "archive.nightly",
         "archive.rebuild_seconds",
         "bot_tui.app",
@@ -388,10 +395,32 @@ def test_image_copies_every_package_the_entrypoint_imports(entry: Entrypoint) ->
     )
 
 
+# pytest options whose value is the next token (`--deselect <node id>`), not a path to collect.
+_PYTEST_VALUE_OPTIONS = frozenset(
+    {
+        "--deselect",
+        "--ignore",
+        "--ignore-glob",
+        "--rootdir",
+        "--junitxml",
+        "--basetemp",
+        "-c",
+        "-k",
+        "-m",
+        "-p",
+        "-o",
+        "-W",
+    }
+)
+
+
 def _pytest_paths(line: str) -> list[str]:
     tokens = shlex.split(line)
-    start = tokens.index("pytest") + 1
-    return [t for t in tokens[start:] if not t.startswith("-") and "=" not in t]
+    args = tokens[tokens.index("pytest") + 1 :]
+    values = {i + 1 for i, token in enumerate(args) if token in _PYTEST_VALUE_OPTIONS}
+    return [
+        t for i, t in enumerate(args) if i not in values and not t.startswith("-") and "=" not in t
+    ]
 
 
 @pytest.mark.parametrize("target", ["test", "test-live-paper"])
@@ -431,7 +460,21 @@ def test_uvicorn_app_is_the_first_non_option_token() -> None:
 
 
 def test_closure_follows_a_shim_to_its_target() -> None:
-    assert "archive.rebuild_seconds" in import_closure("collector_core.rebuild_seconds")
+    assert "bots.strategies.dummy" in import_closure("live_paper.strategy")
+
+
+def test_an_option_value_is_not_a_collected_path() -> None:
+    assert _pytest_paths("python3 -m pytest a/tests --deselect a/tests/t.py::x -q b") == [
+        "a/tests",
+        "b",
+    ]
+
+
+def test_running_a_package_checks_its_main_module() -> None:
+    assert _module_of("python3 -m bots") == "bots.__main__"
+    assert _module_of("python3 -m ranking") == "ranking.__main__"
+    assert _module_of("python3 -m archive.nightly --venue DYDX") == "archive.nightly"
+    assert "bots.infrastructure.nautilus_host" in import_closure("bots.__main__")
 
 
 def test_closure_follows_a_literal_import_module_call() -> None:

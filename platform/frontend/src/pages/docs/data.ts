@@ -71,7 +71,7 @@ export const INDICATORS: Indicator[] = [
     formula: "microprice = (bid_price×ask_size + ask_price×bid_size) / (bid_size + ask_size)",
     notes: [
       "Uses level-0 (best bid/ask) price and size only. When one side has more resting size than the other, microprice sits closer to the <em>thinner</em> side — the side more likely to move first — making it a better short-horizon fair-value estimate than the plain mid.",
-      "Two implementations exist on purpose: a stateless function (<code>indicators.py:409</code>) for one-off reads, and a stateful <code>Microprice</code> <code>Indicator</code> class (<code>indicators.py:116</code>) with <code>.initialized</code> semantics for streaming contexts (chart replay, live_paper). Same formula, different call shape — never a second, independently-written formula.",
+      "Two implementations exist on purpose: a stateless function (<code>indicators.py:409</code>) for one-off reads, and a stateful <code>Microprice</code> <code>Indicator</code> class (<code>indicators.py:116</code>) with <code>.initialized</code> semantics for streaming contexts (chart replay, the live bots). Same formula, different call shape — never a second, independently-written formula.",
       'Is <b>not</b> a ranking-table column in either UI — only its derivative, <a data-nav="i:microprice_lean">Microprice Lean</a>, appears there indirectly (moved to history-only, see that page). Raw microprice is coin-detail only.',
     ],
     refs: ["kernel/indicators.py:121 (Microprice class)", "kernel/indicators.py:421 (microprice() function)"],
@@ -293,7 +293,7 @@ export const INDICATORS: Indicator[] = [
   {
     id: "logistic_trend", group: "chart", name: "OnlineLogisticTrend", cadence: "static", window: "online, one SGD step per bar",
     owner: "strategy-only — fed manually by a Strategy subclass",
-    shownIn: ["Backtest / live_paper strategies only (research/strategies/example_strategy.py)"],
+    shownIn: ["Backtest / live bot strategies only (research/strategies/example_strategy.py)"],
     tagline: "Online (incremental) logistic regression predicting P(next bar's return > 0) from the last N bar-to-bar returns.",
     formula: "z = weights · features + bias\nP(up) = 1 / (1 + e⁻ᶻ)\neach new bar: one SGD step trains on the PREVIOUS prediction now that the true outcome is known, then predicts the next probability",
     notes: [

@@ -29,7 +29,7 @@ has both a backtest Strategy consumer (ofi_strategy.py) and a direct-replay cons
 direct-replay consumer and the research notebook, but no backtest Strategy consumer yet.
 OnlineLogisticTrend is only consumed by a backtest Strategy (example_strategy.py).
 MultiLevelOBI/MultiLevelOFI were then consumed only by the web dashboard's live monitor loop
-(retired in Story 15.10); today `ranking_engine`, `data_api`'s indicator series, `live_paper` and
+(retired in Story 15.10); today `ranking_engine`, `data_api`'s indicator series, `bots` and
 the snapshot/OFI strategies consume them. This is an honest note, not a gap to close here.
 """
 

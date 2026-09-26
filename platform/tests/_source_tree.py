@@ -16,7 +16,7 @@
 Where the cross-cutting static tests read the source tree, and the sprint board they expire on.
 
 `make test` runs inside the collector image, whose `/app` holds only the packages that image
-ships (no `live_paper`, no `docker-compose.yml`) and is not even named `platform`: reading it
+ships (no `bots`, no `docker-compose.yml`) and is not even named `platform`: reading it
 would silently check a subset. So the static tests read the whole checkout, mounted read-only
 at `PLATFORM_SOURCE_DIR` (`make test` sets `/src/platform`); run on a host from the checkout,
 it defaults to this directory's parent. A tree without `docker-compose.yml` fails loudly

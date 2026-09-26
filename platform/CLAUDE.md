@@ -2,20 +2,23 @@
 
 These rules govern all code under `platform/`: `collector_core/`, the venue collectors
 (`dydx_collector/`, `bybit_collector/`, `hyperliquid_collector/`), the contexts (`kernel/`,
-`observability/`, `candles/`, `archive/`, `views/`, `alerting/`, `research/`, `ranking/`), the `ranking_engine/` re-export shims, `data_api/` +
+`observability/`, `candles/`, `archive/`, `views/`, `alerting/`, `research/`, `ranking/`, `bots/`), the `ranking_engine/` and `live_paper/` re-export shims, `data_api/` +
 `frontend/` and `bot_tui/`.
 `nautilus_trader` is consumed as a library only — never as a live runtime — in all of
-them. **Exception:** `platform/live_paper/` is a separate, structurally isolated module
-(architecture spine's AD-8 amendment) where `TradingNode`/`Strategy` usage is sanctioned —
-it is the one place in `platform/` this file's `TradingNode`/`DataEngine` ban does not apply.
-See `platform/live_paper/node.py`'s module docstring for the full rationale.
+them. **Exception:** `platform/bots/` (the bots context, `python3 -m bots`; `live_paper/` until
+Story 25.3) is a separate, structurally isolated context (architecture spine's AD-8 amendment,
+DDD spine AD-D15) where `TradingNode`/`Strategy` usage is sanctioned — it is the one place in
+`platform/` this file's `TradingNode`/`DataEngine` ban does not apply, and inside it only
+`bots/infrastructure/nautilus_host.py` imports `TradingNode` (`platform/tests/test_boundaries.py`
+fails any other importer, tests included). See `platform/bots/infrastructure/nautilus_host.py`'s
+and `platform/bots/__init__.py`'s module docstrings for the full rationale `[amended 2026-09-26: Story 25.3]`.
 
 ---
 
 ## Fork Safety
 
 - **FORK-01** — Never modify `nautilus_trader/` or `crates/`. All `platform/` code is additive-only. The fork must stay untouched so upstream merges remain possible.
-- **FORK-02** — `nautilus_trader` is a library here: use its domain types (`Price`, `Quantity`, `InstrumentId`, …) and `ParquetDataCatalog.write_data()`. Never instantiate `TradingNode` or `DataEngine` in any `platform/` module. **Why:** the live `DataEngine` has a documented unbounded-queue-growth + shutdown-wedge bug under sustained high-message-load that OOM-crashed the earlier `Strategy`/`TradingNode`-based recorder on the `gg` branch. **Does not apply to `live_paper/`** — that module's entire purpose is running an actual (paper or, behind an explicit separate gate, real) trading strategy via `TradingNode`, which AD-8 explicitly carves out as a distinct, sanctioned usage from the recorder-misuse this rule prevents.
+- **FORK-02** — `nautilus_trader` is a library here: use its domain types (`Price`, `Quantity`, `InstrumentId`, …) and `ParquetDataCatalog.write_data()`. Never instantiate `TradingNode` or `DataEngine` in any `platform/` module. **Why:** the live `DataEngine` has a documented unbounded-queue-growth + shutdown-wedge bug under sustained high-message-load that OOM-crashed the earlier `Strategy`/`TradingNode`-based recorder on the `gg` branch. **Does not apply to `bots/`** (was `live_paper/`, Story 25.3) — that context's entire purpose is running an actual (paper or, behind an explicit separate gate, real) trading strategy via `TradingNode`, which AD-8 explicitly carves out as a distinct, sanctioned usage from the recorder-misuse this rule prevents.
 
 ---
 

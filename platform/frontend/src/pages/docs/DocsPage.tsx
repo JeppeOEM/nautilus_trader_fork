@@ -52,7 +52,7 @@ function SideNav({ tab, activeKey }: { tab: Tab; activeKey: string | null }) {
       </div>
       <p className="tagline">
         Indicator reference + engineering knowledge base for the dYdX collector, ranking engine, dashboard,
-        bot_tui and live_paper.
+        bot_tui and the bots.
       </p>
       <div className="tabs">
         <div className={`tabbtn${tab === "ind" ? " active" : ""}`} data-nav="home-ind">

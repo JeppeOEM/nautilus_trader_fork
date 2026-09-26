@@ -108,7 +108,8 @@ _MAX_WS_SUBSCRIPTIONS: int = 32
 _MAX_COLLECTED_INSTRUMENTS: int = 30
 
 # Redis channels for live instrument control (Story 6.1) -- mirrors the bots:control/
-# bots:status pattern already used between bot_tui and live_paper (bot_status.py).
+# bots:status pattern already used between bot_tui and the bots context
+# (bots/application/supervise.py).
 _CONTROL_CHANNEL = "collector:control"
 _STATUS_CHANNEL = "collector:status"
 

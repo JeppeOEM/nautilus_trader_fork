@@ -126,6 +126,45 @@ service `ranking_engine`, same env vars, same `metrics.db`).
    saved chart indicators and the Technicals columns are still there, and `GET /api/errors`
    shows no new `ranking_engine.*` site.
 
+## Story 25.3: the bots context (2026-09-26)
+
+One-off, on `nifelheim`, the first deploy that contains Story 25.3. `live_paper/` became the bots
+context `platform/bots/` (`python3 -m bots`, same compose service `live-paper`, same env vars,
+same `./data/live_paper` mount and every `bots:*` key unchanged); `live_paper/` is now only
+re-export shims. The paper config moved with the code: `live_paper/config.toml` →
+`bots/config.toml`, mounted at `/app/bots/config.toml`. The archive tools' old
+`collector_core.*`/`dydx_collector.normalize_snapshot_schema` shim paths were deleted -- use
+`python -m archive.<tool>` (the cron line runs `make nightly` and is unaffected).
+
+1. If the VPS copy of `live_paper/config.toml` has local edits, keep them before pulling:
+   ```bash
+   cd ~/nautilus_trader_fork/platform
+   cp live_paper/config.toml /tmp/bots-config.toml
+   git checkout -- live_paper/config.toml
+   git pull
+   diff /tmp/bots-config.toml bots/config.toml   # re-apply any local edits to bots/config.toml
+   ```
+2. Confirm nothing outside the repo still runs a deleted archive shim path -- each would now fail
+   with `ModuleNotFoundError` instead of a deprecation warning:
+   ```bash
+   crontab -l | grep -nE 'collector_core\.|normalize_snapshot_schema' || echo "crontab clean"
+   ```
+   Repoint any hit to `python -m archive.<tool>` (or `archive.tools.<tool>`) before the next run.
+3. Two startup changes to know before restarting (neither touches the compose defaults):
+   - A `REDIS_URL` naming a non-zero Redis database (`/2` or `?db=2`) now refuses to start: the
+     Nautilus Cache can only use database 0, so it used to split silently from the `bots:*` bus.
+     Compose's `redis://127.0.0.1:${REDIS_PORT:-6379}` is unaffected; check any override with
+     `docker compose --profile live-paper config | grep REDIS_URL`.
+   - A host run (`python3 -m bots` without `FILLS_DB_PATH`) now defaults to
+     `platform/data/live_paper/fills.db`, the same file compose mounts, not the old in-package
+     `platform/live_paper/data/fills.db`. If that old file exists, move it over first or its
+     history is not read.
+4. `docker compose --profile live-paper build live-paper && make up-live-paper`, then check:
+   `bot_tui`'s Bots pane shows every bot heartbeating, a `bots:control` stop/start round-trips,
+   and `GET /api/errors` shows at most a couple of `bots.status_build` at boot (the known
+   first-quote race, ledgered since this story) and no other new `bots.*` site. Full checklist:
+   `bots/DEPLOY_CHECKLIST.md`.
+
 ## 2. First-run measurements owed
 
 None of these can be taken off the VPS; each is **NOT measured** until recorded.

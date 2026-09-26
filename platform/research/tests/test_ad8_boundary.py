@@ -16,7 +16,7 @@
 Regression guard for Story 3.1 AC2 / ARCHITECTURE-SPINE.md's AD-8, research half.
 
 AD-8 binds a named list of "reader" modules -- they must never import TradingNode, Strategy, or
-DataEngine (that usage is confined to platform/live_paper). Checks for the literal substring
+DataEngine (that usage is confined to platform/bots). Checks for the literal substring
 "import Strategy" rather than bare "Strategy", since backtest_dydx.py/backtest_ofi.py legitimately
 reference strategies via `ImportableStrategyConfig`/`strategy_path="..."` string paths (AD-6's
 mandated pattern) -- a bare "Strategy" substring check would false-positive on
@@ -29,9 +29,9 @@ checking it costs nothing.
 
 The three backtest drivers moved to research/strategies in Story 24.4; the list's other reader
 modules (catalog_stats, metrics_computer, and views/chart_series.py, which chart_data became in
-Story 24.2) are checked by ml_signals/tests/test_ad8_boundary.py. Lives here (not live_paper/tests) because the live_paper
-Docker image deliberately ships no research code (see platform/live_paper.dockerfile), so this
-guard can only run where those files actually exist.
+Story 24.2) are checked by ml_signals/tests/test_ad8_boundary.py. Lives here (not bots/tests)
+because the live-paper Docker image deliberately ships no research code (see
+platform/live_paper.dockerfile), so this guard can only run where those files actually exist.
 """
 
 from pathlib import Path

@@ -30,7 +30,7 @@ failures survive container restarts, image rebuilds and Redis loss (Redis has no
     {"ts_ns", "service", "pid", "site", "detail", "exc_type", "suppressed"}
 
 `start()` (called once by each process entrypoint -- `collector_core.collector.run_forever`,
-`ranking.__main__.main`, `data_api.app`'s lifespan, `live_paper.node.main`,
+`ranking.__main__.main`, `data_api.app`'s lifespan, `bots.__main__.main`,
 `bot_tui.app.main`) writes a `{"site": "process_start", ...}` line carrying the pid and, when
 `ERROR_LEDGER_REVISION` is exported, the code revision, so a reader can tell a zero-error window
 from a restarted one even when nothing ever failed. `detail` is truncated to `_MAX_DETAIL_CHARS`

@@ -691,7 +691,7 @@ reads -- SSOT-02), not the z-scored `ofi_10_z` the live ranking table leads with
 and its `/ws/live` relay feed the web rankings page, which renders `rankings:live` directly, row
 order and column values unchanged (the web page is the only renderer since Story 25.1a deleted
 `bot_tui`'s Coins pane) — no independent computation on the read side. No code path in
-`platform/live_paper/` (the actual trading-bot module) imports `ranking` or reads
+`platform/bots/` (the bots context, the actual trading bots) imports `ranking` or reads
 `rankings:live` — bots are configured independently, not auto-selected from the live
 ranking. The ranking's current, only
 confirmed consumer is the human-facing web dashboard's coin-picker UI, not an automated

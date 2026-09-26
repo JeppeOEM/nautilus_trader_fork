@@ -16,10 +16,11 @@ Redis as it goes. A ranking engine reads that feed, scores every coin by volume 
 and publishes the result back to Redis. A web dashboard reads those two Redis feeds (never
 recomputing anything itself) to show live charts, the rankings and the ranking-mode switch; a
 terminal UI controls the bots and the collector (rankings are web-only since Story 25.1a). Indicators written once in the shared `kernel` get reused unmodified in Jupyter
-research, Nautilus backtests, and a live paper-trading bot (`live_paper`), which
+research, Nautilus backtests, and a live paper-trading bot (the `bots` context), which
 publishes its own status to Redis so the TUI can monitor and start/stop it. Nothing
 downstream of the collector ever touches `nautilus_trader`'s live `TradingNode`/
-`DataEngine` except `live_paper` — that's the one sanctioned exception.
+`DataEngine` except `bots` — that's the one sanctioned exception, and inside it only
+`bots/infrastructure/nautilus_host.py` imports `TradingNode`.
 
 ---
 
@@ -38,7 +39,7 @@ downstream of the collector ever touches `nautilus_trader`'s live `TradingNode`/
 | `observability/` | The generic observability context (Story 23.1, DDD spine AD-D16), standard library only and venue-free: `error_ledger` (every continue-past-failure site, DATA-07; in-memory per process, plus a durable per-service `<service>.jsonl` sink behind the same `record()` call, Story 23.3), `notify` (the one outbound transport: channels `operator` = ntfy/`WATCHDOG_NTFY_URL`, `telegram` = `TELEGRAM_*`, `webhook:<url>`), `watchdog` (the generic `(down_since, reminder)` alert transition), `incidents` (the WARNING+ incident-report handler, parameterised by the venue entrypoint's `IncidentConfig`). Every context except `kernel` may import it (spine AD-D2); it imports none | ntfy / Telegram / webhook URLs (outbound HTTP POST), `data/incident_reports/` (write, dYdX collector only), `data/errors/*.jsonl` (write, every service; Story 23.3) |
 | `data_api/` + `frontend/` | Web UI (React SPA) + REST/WS on `:9100`, read-only except the saved preferences/alerts and the ranking-mode switch. Format + transport only since Story 24.2: every value comes from `views/`; `data_api/buses.py` constructs the two Redis bus instances, `data_api/alert_wiring.py` the alerting instances (Story 24.3), and `app.py`'s lifespan attaches the alert engine to the live-candle bus -- the only such wiring; `routes/alerts.py` is a thin adapter over `alerting.application` (the deprecated `data_api/alerts.py` re-export was deleted in Story 25.1) `[amended 2026-09-25: Story 25.1]` | Redis (read; `ranking:control` publish from `PUT /api/rankings/mode`, Story 25.1a), Parquet catalog + `candles_*.db` + `metrics.db` (read-only, through `views/`), `alerts.toml` (through `alerting/`) |
 | `ranking/` | The ranking context (Story 25.2, DDD spine AD-D10): sole computer of coin ranking (volume + volatility) and of the pct-change/volatility math. `RankingBoard` (`domain/`) owns the mode, one `InstrumentMetrics` per instrument, the volume book and the publisher; `RankingEngine` (`application/`) drives it through the `VolumeSource`/`PriceHistory`/`RankingHistory`/`LivePublisher` ports, whose adapters (`infrastructure/`) only `__main__` wires; `application/queries.py` (`history`/`nearest`) is the `metrics.db` read service views calls. No module-level state. Runs as `python3 -m ranking` (compose service `ranking_engine`); `ranking_engine/` is a deprecated re-export shim until Story 25.4 `[amended 2026-09-26: Story 25.2]` | Redis (`snapshots:raw` read; `rankings:live` publish; `ranking:control` read), `metrics.db` (write), Parquet catalog (read, one-time price backfill), dYdX/Bybit/Hyperliquid REST (24h USD volume poll, through `kernel.venue_http`) |
-| `live_paper/` | The actual trading bot — `TradingNode` + `Strategy` in paper (or gated real-money) mode | dYdX WS/HTTP (via `TradingNode`), Redis (`bots:status` publish, `bots:control` read) |
+| `bots/` | The bots context (Story 25.3, DDD spine AD-D15; was `live_paper/`, now a deprecated re-export shim until Story 26.1): the actual trading bots — one `TradingNode` + one `DummyStrategy` per bot, in paper (or gated demo/real-money) mode. `PaperFleet`/`ExecBot` make the paper/non-paper split a type, `Bot` holds the incident log, `FillLedger` the per-fill PnL; `nautilus_host.py` is the only `TradingNode` importer. Runs as `python3 -m bots` (compose service `live-paper`) `[amended 2026-09-26: Story 25.3]` | Venue WS/HTTP (via `TradingNode`), Redis (`bots:status` publish, `bots:history:*`/`bots:incidents:*` set, `bots:control` read; the Nautilus Cache), `fills.db` (write) |
 | `bot_tui/` | Keyboard-only terminal UI, interactive/on-demand: the control surface for the bots and the collector (two panes, Bots and Collector). Rankings, the ranking-mode switch and the single-coin view are web-only since Story 25.1a, so it imports no `views/` read model `[amended 2026-09-26: Story 25.1a]` | Redis (`bots:*` and `collector:status` read; `bots:control`, `collector:control` publish), dashboard (HTTP deep-link only) |
 
 Module boundary rule enforced throughout (architecture AD-4): every module downstream
@@ -105,7 +106,7 @@ dYdX WS/REST      Bybit WS/REST      Hyperliquid WS
         ├──► bot_tui (terminal, on-demand)        — reads bots:* + collector:status;
         │                                            writes bots:control + collector:control
         │
-        └──► live_paper (TradingNode, paper/live) — writes bots:status; reads bots:control
+        └──► bots (TradingNode, paper/live)       — writes bots:status; reads bots:control
                      │
                      ▼
               dYdX (paper fills, or real fills behind an explicit gate)
@@ -188,7 +189,7 @@ shims, was deleted in Story 25.2 `[amended 2026-09-26: Story 25.2 -- its last mo
 
 - **`kernel/indicators.py`** (moved from `ml_signals/indicators.py` in Story 23.2) — five
   Nautilus `Indicator` subclasses, each used identically in Jupyter, backtest, and live
-  (`live_paper`):
+  (`bots`):
   - `Microprice` — size-weighted mid from top-of-book
   - `OrderFlowImbalance` — top-of-book OFI
   - `MultiLevelOBI` — N-level order book imbalance
@@ -279,13 +280,32 @@ its own aggregate since Story 25.2 (it was `ranking_engine/engine.py`, twelve mo
 
 ---
 
-## 4. `live_paper/` — the actual trading bot
+## 4. `bots/` — the actual trading bots
 
 The one place in `platform/` where `TradingNode`/`Strategy` usage is sanctioned
 (architecture AD-8 amendment) — everywhere else in `platform/` treats `nautilus_trader` as
-a library only.
+a library only. Moved from `live_paper/` in Story 25.3 (`live_paper` is a deprecated re-export
+shim until Story 26.1); every `bots:*` payload, `fills.db` row, env var and the `live-paper`
+compose service are unchanged, proven by `bots/tests/test_replay.py` against payloads recorded
+from the pre-move code.
 
-- **`strategy.py`** — `DummyStrategy`: wires all five `kernel.indicators` into a
+- **`domain/`** — `config.py`: `PaperFleet` (many bots, one Sandbox pool per venue; its
+  `PaperConfig` has no `mode` field) and `ExecBot` (one bot, `ExecConfig.mode` ∈
+  {`real_money`, `exchange_demo`}, agreeing with `environment`) are distinct aggregates built by
+  distinct loaders, so no config key, control message or list reorder can promote a paper bot
+  (AD-D15; Known limit: demo vs real is a validated value, not a type). `bot.py`: `Bot`
+  (id == the strategy's `order_id_tag`, the bounded `bots:incidents:*` log). `fill_ledger.py`:
+  `FillLedger` (per-fill realized PnL, the rolling day/week/month/all windows of AD-10).
+- **`application/`** — the ports (`BotRuntime`, `FillsStore`, `BusConnection`),
+  `supervise.py` (`bots:status` on a 5 s heartbeat, `bots:control` start/stop — the channel never
+  carries a mode) and `history.py` (fills recorded on-fill, `bots:history:*` every 30 s).
+- **`infrastructure/`** — the Nautilus anti-corruption layer: `nautilus_host.py` (the one
+  `TradingNode` per process, one data + one Sandbox exec client per venue from `VENUES`;
+  `test_boundaries.py` fails any other `TradingNode` importer), `cache_reader.py` (every
+  position read scoped to the bot's own `strategy_id`), plus `fills_store.py`, `redis.py` and
+  `config.py` (the two loaders; real money needs `LIVE_PAPER_REAL_MONEY_CONFIG` naming a file
+  the paper loader cannot parse).
+- **`strategies/dummy.py`** — `DummyStrategy`: wires all five `kernel.indicators` into a
   live `TradingNode` run. Explicitly framed as an integration proof, not a tuned alpha
   strategy — it proves every signal stays alive end-to-end from research through
   backtest through live paper trading. Feeds `Microprice`/`OrderFlowImbalance` from
@@ -294,23 +314,11 @@ a library only.
   against in backtest), and `OnlineLogisticTrend` from `Bar` via INTERNAL aggregation.
   Has an `orders_inflight()` guard to avoid duplicate submissions while a fill is
   pending — flagged as still needing a concurrency test, see below.
-- **`config.py`** — `PaperConfig` vs `ExecConfig`: two structurally separate
-  dataclasses/loaders, not one schema with a mode flag, specifically so a stray `mode`
-  key in the default config can never silently promote to real money. Real-money mode
-  requires setting `LIVE_PAPER_REAL_MONEY_CONFIG` to a distinct file path that
-  `load_paper_config()` doesn't even know how to parse.
-- **`node.py`** — builds and runs the `TradingNode`; branches on `ExecConfig` vs
-  `PaperConfig` to pick paper vs live execution clients.
-- **`bot_status.py`** — publishes `bots:status` (PnL, position, mode, heartbeat) on a
-  timer; subscribes to `bots:control` for `{bot_id, action: "start"|"stop"}` commands.
-  The control channel deliberately never carries a paper/live mode field — that gate
-  lives solely in `config.py`.
 
-**Reads:** dYdX WS/HTTP (via `TradingNode`), `bots:control`.
-**Publishes:** `bots:status`.
-**Known gap:** trade/position history is in-memory only (no `CacheConfig(database=...)`
-wired up yet) — restart loses it, and nothing outside the process can query it. This is
-tracked as backlog (Story 4.6/4.7), not yet built.
+**Reads:** venue WS/HTTP (via `TradingNode`), `bots:control`.
+**Publishes:** `bots:status`; sets `bots:history:*` and `bots:incidents:*`.
+**Durable state:** orders/positions in the Redis-backed Nautilus Cache (Story 4.6), fills in
+`fills.db` (append-only, since the Cache loses a NETTING position's closed history on reopen).
 
 ---
 
@@ -340,7 +348,7 @@ Coin-detail and their `rankings:live`/`snapshots:raw` listeners were deleted;
 
 **Reads:** `bots:status`, `bots:history:*`, `bots:incidents:*`, `collector:status`.
 **Publishes:** `bots:control`, `collector:control`.
-**Never imports:** `live_paper` internals (control-plane only, per AD-10) or
+**Never imports:** `bots` internals (control-plane only, per AD-10) or
 `dydx_collector`/`ranking` stateful internals (pure/shared-type imports only).
 
 ---
@@ -352,8 +360,8 @@ Coin-detail and their `rankings:live`/`snapshots:raw` listeners were deleted;
 | `snapshots:raw` | the three collectors | `ranking_engine`, `data_api` | One `DydxSecondSnapshot`-shaped message per instrument per second |
 | `rankings:live` | `ranking_engine` | `data_api` | `{mode, updated_at, ranks: [{instrument_id, rank, volume24h, volatility_score}]}`, on change + heartbeat |
 | `ranking:control` | `data_api` (`PUT /api/rankings/mode`, Story 25.1a) | `ranking_engine` | Mode-switch request `{"mode": "volume"` \| `"volatility"}`, last-write-wins |
-| `bots:status` | `live_paper` | `bot_tui` | Per-bot PnL/position/mode/heartbeat, on a timer |
-| `bots:control` | `bot_tui` | `live_paper` | `{bot_id, action: "start"` \| `"stop"}` — never a mode field |
+| `bots:status` | `bots` | `bot_tui` | Per-bot PnL/position/mode/heartbeat, on a timer |
+| `bots:control` | `bot_tui` | `bots` | `{bot_id, action: "start"` \| `"stop"}` — never a mode field |
 | `collector:status` | `dydx_collector` | `bot_tui` | One message per collected instrument (liquid status) plus the unpinned list |
 | `collector:control` | `bot_tui` | `dydx_collector` | `start`/`unpin`/`stop`/`pin_top_liquid` requests |
 
@@ -364,7 +372,8 @@ Coin-detail and their `rankings:live`/`snapshots:raw` listeners were deleted;
 | Parquet catalog (`data/catalog/`) | all three collectors | `ranking` (price backfill), `data_api`, `research` (backtests, notebooks) `[amended 2026-09-26: Story 25.2]` | Second-snapshots (`DydxSecondSnapshot`, trades folded in rather than stored raw — audit D-45), mark/index price, funding rate, `OpenInterest`, instrument definitions, plus `order_book_deltas` for the dYdX instruments that opt in, and the Story 22.13 raw `trade_tick/` archive (pruned nightly by `archive.prune_catalog --trade-retention-days 7`; `docs/DATA_DICTIONARY.md` §1.1). Minute bars retired 2026-09-20 (D-35). Nautilus-native, zero-conversion `[amended 2026-09-20: Epic 22 story 22.8, review pass]` |
 | `candles_{dydx,bybit,hyperliquid}.db` (SQLite, `data/candles/`) | that venue's collector (through the `SecondSink` port its entrypoint injects, Story 24.1 — the collector core no longer opens the file), plus `compare_klines` for the `verified_days` table | `data_api`, `prune_catalog` (via the `VerifiedDays` port) | Finished 1m..1D bars derived from raw 1s (D-35), plus the `verified_days` day-status table the archive tools reach through the `VerifiedDays` port. Fully rebuildable: `python -m candles.rebuild` |
 | `metrics.db` (SQLite) | `ranking_engine` (`ranking.infrastructure.metrics_store`) | `data_api` (read-only mount, through `views` → `ranking.application.queries`) | Historical ranking snapshots (Story 1.4/FR8) |
-| Nautilus `Cache` (in-memory, `live_paper`) | `live_paper` | nobody external yet | Orders/positions/fills for the running bot — **not yet Redis-backed**, lost on restart |
+| Nautilus `Cache` (Redis-backed, `bots`) | `bots` | `bots` only (strategy-scoped reads, `bots.infrastructure.cache_reader`) | Orders/positions for the running bots (Story 4.6); never read outside `bots` — its Redis encoding is not a contract |
+| `fills.db` (SQLite, `data/live_paper/`) | `bots` (`bots.infrastructure.fills_store`) | `bots` only; published as `bots:history:*` | One append-only row per fill, every bot (Story 4.6) |
 | `data/errors/<service>.jsonl` (JSON lines, Story 23.3) | that service (`collector`, `bybit_collector`, `hyperliquid_collector`, `ranking_engine`, `data_api`, `live-paper`, `bot_tui`) | `data_api` (`GET /api/errors`'s `services` block), `archive.crosscheck_errors` | Every `observability.error_ledger.record()` call, durably: `ts_ns`, `service`, `pid`, `site`, `detail`, `exc_type`, `suppressed`; plus one `process_start` line per boot. Rotates by size (`.1`..`.N`, default 20 MB, 10 backups kept alongside the live file); at most 60 lines/site/minute, exact `suppressed` carry |
 
 ---
@@ -388,7 +397,8 @@ without an SSH tunnel over Tailscale (see README's remote-access section).
 Two-image split: `nautilus-trader-base` (rebuilt rarely, `make build-base`, ~15 min) →
 `collector.dockerfile` (thin layer, rebuilds in seconds) reused by collector,
 ranking_engine, `data_api`, and bot_tui; `live_paper.dockerfile` is `live-paper`'s own
-thin layer on the same base.
+thin layer on the same base (it ships `bots`, `kernel`, `observability`, the `live_paper` shims
+and `tests`).
 
 ### Running the UI/`bot_tui` off the VPS
 
@@ -434,8 +444,8 @@ Cross-referenced against `_bmad-output/implementation-artifacts/sprint-status.ya
 
 - **`DummyStrategy` is a wiring proof, not a tuned strategy** — by design, but means
   nothing here is validated to make money.
-- **Story 4.6/4.7 (backlog)** — `live_paper` Cache persistence + TUI trades
-  blotter/PnL chart. Blocks real trade-history visibility across restarts.
+- ~~**Story 4.6/4.7 (backlog)** — Cache persistence + TUI trades blotter/PnL chart.~~ Built:
+  the Redis-backed Cache, `fills.db` and `bots:history:*` (§4) `[amended 2026-09-26: Story 25.3]`.
 - **`orders_inflight()` race guard has no test** proving it holds under a real
   concurrent-fill race (open action item, epic-3 retro).
 - **EXTERNAL vs INTERNAL bar aggregation choice unverified live** — INTERNAL was

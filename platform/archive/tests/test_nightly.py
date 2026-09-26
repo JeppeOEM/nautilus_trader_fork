@@ -204,7 +204,7 @@ def test_the_dydx_plan_is_forwarded_to_the_prune_for_dydx_only(tmp_path: Path) -
 
 
 def test_dydx_without_its_plan_runs_the_chain_as_findings(tmp_path: Path) -> None:
-    """The pre-25.1 `collector_core.nightly --venue DYDX` line keeps working -- loudly."""
+    """A pre-25.1 `--venue DYDX` line (no `--dydx-plan`) keeps working -- loudly."""
     error_ledger.reset()
     runner = _FakeRunner()
     assert main(_dydx_args(tmp_path)[:-2], runner) == 2

@@ -47,15 +47,15 @@ ever back up or migrate.
 | `ranking:control` | `data_api` (`PUT /api/rankings/mode`, the web rankings page's mode control; Story 25.1a) | `ranking_engine` | `{"mode": "volume"\|"volatility"}` |
 | `collector:control` | `bot_tui` | `dydx_collector/collector.py` | `{"action": "start"\|"unpin"\|"stop"\|"pin_top_liquid", "id": "<instrument_id>"|null}` |
 | `collector:status` | `dydx_collector/collector.py` | `bot_tui` | Per-instrument `{id, pinned, liquid, last_trade_ts}`, or removal/unpin summaries |
-| `bots:control` | `bot_tui` | `live_paper/bot_status.py` | `{"bot_id": "...", "action": "start"\|"stop"}` |
-| `bots:status` | `live_paper/bot_status.py` — every 5s heartbeat | `bot_tui` | `{bot_id, strategy, symbol, running, position_side, net_exposure, realized_pnl, unrealized_pnl, win_rate, closed_trades, ...}` |
+| `bots:control` | `bot_tui` | `bots/application/supervise.py` | `{"bot_id": "...", "action": "start"\|"stop"}` |
+| `bots:status` | `bots/application/supervise.py` — every 5s heartbeat | `bot_tui` | `{bot_id, strategy, symbol, running, position_side, net_exposure, realized_pnl, unrealized_pnl, win_rate, closed_trades, ...}` |
 
 ### 1.2 Plain keys (GET/SET, no TTL)
 
 | Key | Writer | Reader | Shape |
 |---|---|---|---|
-| `bots:incidents:{bot_id}` | `live_paper/bot_status.py` | `bot_tui` (polled) | JSON list of `{type: "data_stale"\|"process_start", started_at, ended_at}`, capped at 50 entries |
-| `bots:history:{bot_id}:{day\|week\|month\|all}` | `live_paper/trade_history.py` | `bot_tui` (polled) | JSON blob of performance stats derived from `fills.db` |
+| `bots:incidents:{bot_id}` | `bots/application/supervise.py` (the log itself: `bots/domain/bot.py`) | `bot_tui` (polled) | JSON list of `{type: "data_stale"\|"process_start", started_at, ended_at}`, capped at 50 entries |
+| `bots:history:{bot_id}:{day\|week\|month\|all}` | `bots/application/history.py` | `bot_tui` (polled) | JSON blob of performance stats derived from `fills.db` |
 
 ### 1.3 Who owns what
 
@@ -69,7 +69,7 @@ ever back up or migrate.
   `collector:status`/`collector:control` stay **dYdX-only**: `dydx_collector` is their
   sole writer and the sole actor on `collector:control` (the other two collectors have
   no control plane).
-- **`live_paper`** is the sole writer of `bots:status`/`bots:incidents:*`/
+- **`bots`** (the bots context, `python3 -m bots`; was `live_paper` until Story 25.3) is the sole writer of `bots:status`/`bots:incidents:*`/
   `bots:history:*`, and the sole actor on `bots:control`.
 - **`bot_tui`** never writes status data — it only publishes control messages and
   reads everything else. It never touches SQLite or the catalog directly either;
@@ -77,7 +77,7 @@ ever back up or migrate.
 
 ### 1.4 Nautilus's own internal Cache also lives here
 
-Separately from everything above, `live_paper/node.py` configures Nautilus's built-in
+Separately from everything above, `bots/infrastructure/nautilus_host.py` configures Nautilus's built-in
 `CacheConfig(database=DatabaseConfig(type="redis", ...))` for its `TradingNode` —
 this is `nautilus_trader`'s own order/position/account state persistence, not
 `platform/`-authored code, and it's wired to the *same* `dydx-redis` container rather
@@ -111,9 +111,10 @@ single-file mount can't expose.
   `rankings:live`. See [Data Dictionary](DATA_DICTIONARY.md) if that distinction
   matters for what you're building.
 
-### 2.2 `fills.db` — owned by `live_paper/fills_store.py`
+### 2.2 `fills.db` — owned by `bots/infrastructure/fills_store.py`
 
-- **Path:** `./live_paper/data/fills.db` on the host (`FILLS_DB_PATH` env).
+- **Path:** `./data/live_paper/fills.db` on the host, `/app/live_paper/data/fills.db` in the
+  container (`FILLS_DB_PATH` env).
 - **Table:** `fills(ts, bot_id, side, price, qty, realized_pnl,
   position_realized_pnl)`.
 - **Purpose:** append-only, event-sourced fill log — one row per `OrderFilled` event,
@@ -121,9 +122,10 @@ single-file mount can't expose.
   Nautilus's `Cache.positions_closed()` silently discards prior closed positions on a
   NETTING-mode position reopen — `fills.db` is the durable source of truth trade
   history is rebuilt from, not the Nautilus cache.
-- **Writer:** `live_paper/trade_history.py`. **Readers:** `live_paper/bot_status.py`
-  (win-rate stats) and `trade_history.py` itself, to build the `bots:history:*` Redis
-  blobs above. Nothing outside `live_paper/` reads this file directly — `bot_tui`/
+- **Writer:** `bots/application/history.py` (through `bots.domain.fill_ledger.FillLedger`).
+  **Readers:** `bots/application/supervise.py` (win-rate stats) and `history.py` itself, to
+  build the `bots:history:*` Redis blobs above. Nothing outside `bots/` reads this file
+  directly — `bot_tui`/
   `data_api` only ever sees it via Redis.
 
 ---
@@ -163,7 +165,7 @@ persisted runtime state** — the one file the running system rewrites on its ow
   `retain_hours`) — this array is the single authoritative source of what the
   collector currently subscribes to.
 - **Docker mount:** the only `rw` config mount in `docker-compose.yml` — every other
-  config file (`live_paper/config.toml` included) is mounted `:ro` and never written
+  config file (`bots/config.toml` included) is mounted `:ro` and never written
   back by the running process.
 - `bot_tui` never edits this file directly — it only publishes `collector:control`
   messages, keeping filesystem access to a single container.
@@ -179,9 +181,10 @@ platform/
 │   ├── catalog/                   # Parquet catalog (§3)
 │   └── metrics/
 │       ├── metrics.db             # + -wal/-shm sidecars (§2.1)
-├── live_paper/
-│   ├── config.toml                # static per-bot config (ro)
-│   └── data/
+├── bots/
+│   └── config.toml                # static per-bot config (ro)
+├── data/
+│   └── live_paper/
 │       └── fills.db               # + -wal/-shm sidecars (§2.2)
 ```
 

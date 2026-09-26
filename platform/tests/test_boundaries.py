@@ -34,7 +34,10 @@ so the graph holds from the first move, not only once a module has been relocate
 - every venue REST URL and request lives in `kernel.venue_http`, and every venue dispatch on an
   instrument id's suffix goes through `kernel.venues` (Story 23.2);
 - `ranking/` holds no module-level mutable runtime state, and exactly one module defines the
-  pct-change/volatility formula `price_stats_from_series` (Story 25.2).
+  pct-change/volatility formula `price_stats_from_series` (Story 25.2);
+- `bots/` holds no module-level mutable runtime state either, and no module in `platform/` but
+  `bots/infrastructure/nautilus_host.py` imports `TradingNode` or `nautilus_trader.live`
+  (Story 25.3).
 
 Two exemptions only. An edge whose both ends sit in one *unmoved* legacy package (e.g. inside
 `collector_core`) is not judged: it becomes judged the moment one end moves out. `platform/tests`
@@ -58,7 +61,7 @@ from _source_tree import story_statuses
 from _source_tree import unknown_or_done
 
 
-THIS_STORY = "25-2-ranking-context-rankingboard-replaces-module-globals"
+THIS_STORY = "25-3-bots-context-paper-and-exec-types-nautilus-acl"
 
 KERNEL = "kernel"
 OBSERVABILITY = "observability"
@@ -122,40 +125,28 @@ GRAPH: frozenset[tuple[str, str]] = frozenset(
 # Longest dotted prefix wins. A test module belongs to the context of the code it tests, so it
 # moves with that code.
 LEGACY_MODULE_TO_CONTEXT: dict[str, str] = {
-    # --- collector_core: capture. The archive modules it hosted moved to `archive/` in Story 25.1
-    # and left re-export shims, each mapped to the context it forwards to.
+    # --- collector_core: capture. The archive modules it hosted moved to `archive/` in Story 25.1;
+    # their re-export shims were deleted in Story 25.3.
     "collector_core": CAPTURE,
-    "collector_core.archive_gaps": ARCHIVE,  # Story 25.1 shims, as are the ARCHIVE entries below
-    "collector_core.backfill_bars": ARCHIVE,
     "collector_core.book_check": CAPTURE,
     "collector_core.collector": CAPTURE,
-    "collector_core.compare_klines": ARCHIVE,
     "collector_core.config": CAPTURE,
-    "collector_core.consolidate_catalog": ARCHIVE,
-    "collector_core.crosscheck_errors": ARCHIVE,
     "collector_core.feed": CAPTURE,
-    "collector_core.integrity": KERNEL,  # Story 25.1 shim of `kernel.second_snapshot`
-    "collector_core.measure_lag": ARCHIVE,
-    "collector_core.migrate_open_interest": ARCHIVE,
-    "collector_core.nightly": ARCHIVE,
     "collector_core.ports": CAPTURE,
-    "collector_core.prune_catalog": ARCHIVE,
-    "collector_core.rebuild_seconds": ARCHIVE,
-    "collector_core.repair_catalog": ARCHIVE,
     "collector_core.trade_backfill": CAPTURE,
     "collector_core.tests": CAPTURE,
-    # --- venue collectors: capture; dYdX also hosts its control plane and one archive tool.
+    # --- venue collectors: capture; dYdX also hosts its control plane.
     # `dydx_collector.collector` stays capture as one module until the control-plane split (25.4).
     "bybit_collector": CAPTURE,
     "hyperliquid_collector": CAPTURE,
     "dydx_collector": CAPTURE,
     "dydx_collector.config": COLLECTION_CONTROL,
-    "dydx_collector.normalize_snapshot_schema": ARCHIVE,  # Story 25.1 shim
     "dydx_collector.open_interest": CAPTURE,
     "dydx_collector.tests.test_build_candles": CANDLES,
     "dydx_collector.tests.test_collector_control": COLLECTION_CONTROL,
     "dydx_collector.tests.test_config": COLLECTION_CONTROL,
-    # --- ranking_engine (Story 25.2 re-export shims of `ranking`) / live_paper: one context each
+    # --- ranking_engine (Story 25.2 re-export shims of `ranking`) / live_paper (Story 25.3
+    # re-export shims of `bots`): one context each
     "ranking_engine": RANKING,
     "live_paper": BOTS,
     # --- data_api: the interface adapter (its Story 24.2 views shims were deleted in Story 24.4,
@@ -594,7 +585,7 @@ def test_every_import_resolves_to_a_mapped_context() -> None:
 def test_checker_flags_unmapped_modules_and_expired_stories() -> None:
     assert _context_of("some_legacy_package.a_module_nobody_placed") is None
     assert _context_of("observability.anything") == OBSERVABILITY
-    assert _context_of("collector_core.rebuild_seconds") == ARCHIVE  # a Story 25.1 shim
+    assert _context_of("live_paper.config") == BOTS  # a Story 25.3 shim
     board = {"24-1-x": "done", "24-2-y": "ready-for-dev", "24-3-z": "superseded"}
     assert unknown_or_done("24-1-x", board) is not None
     assert unknown_or_done("24-9-typo", board) is not None
@@ -612,7 +603,7 @@ def test_tree_walk_rejects_a_module_and_a_package_of_one_name(tmp_path: Path) ->
 
 
 def test_exemption_covers_only_one_unmoved_package_and_platform_tests() -> None:
-    inside = Import("collector_core.collector", CAPTURE, "collector_core.nightly", "x", ARCHIVE, 1)
+    inside = Import("collector_core.collector", CAPTURE, "collector_core.feed", "x", CAPTURE, 1)
     across = Import("collector_core.collector", CAPTURE, "candles.domain.fold", "x", CANDLES, 1)
     interface = Import("data_api.app", DATA_API, "data_api.alert_wiring", "x", ALERTING, 1)
     guard = Import("tests.test_x", TESTS, "candles.domain.fold", "_x", CANDLES, 1)
@@ -1311,11 +1302,17 @@ def test_legacy_snapshot_indexing_expires_with_its_story() -> None:
     assert expired == {}, "decode these modules' snapshots with DydxSecondSnapshot.from_dict"
 
 
-# --- ranking: no module-level runtime state, one formula (spine AD-D10, Story 25.2) -------------
+# --- ranking and bots: no module-level runtime state (spine AD-D10, Stories 25.2/25.3); ranking:
+# one formula (Story 25.2) ----------------------------------------------------------------------
 
 # On top of the kernel's sanctioned import-time calls, a ranking module may bind a module logger:
 # `logging.getLogger` returns the process-wide logger registry's entry, not state the module owns.
 _RANKING_SANCTIONED_CALLS = frozenset({"getLogger"})
+# ...and a bots module may also declare a dataclass default: `Decimal(...)` builds an immutable
+# value, and `field(default_factory=...)` is a declaration whose factory runs per instance -- both
+# are how the frozen config value objects spell their defaults, neither is state the module owns.
+_BOTS_SANCTIONED_CALLS = _RANKING_SANCTIONED_CALLS | {"Decimal", "field"}
+_STATE_RULED_CONTEXTS = {RANKING: _RANKING_SANCTIONED_CALLS, BOTS: _BOTS_SANCTIONED_CALLS}
 
 
 def _module_scope_nodes(tree: ast.Module) -> list[ast.AST]:
@@ -1341,12 +1338,13 @@ def _is_main_guard(node: ast.stmt) -> bool:
     )
 
 
-def _ranking_state(module: str, tree: ast.Module) -> list[str]:
+def _ranking_state(
+    module: str, tree: ast.Module, sanctioned: frozenset[str] = _RANKING_SANCTIONED_CALLS
+) -> list[str]:
     """Module/class-level mutable state, `global` statements and import-time environment reads."""
     tree = ast.Module(body=[n for n in tree.body if not _is_main_guard(n)], type_ignores=[])
     bad = [
-        f"{module}: mutable module state at {site}"
-        for site in _state_sites(tree.body, _RANKING_SANCTIONED_CALLS)
+        f"{module}: mutable module state at {site}" for site in _state_sites(tree.body, sanctioned)
     ]
     env_names = _ENV_NAMES | _env_aliases(tree)
     bad += [
@@ -1361,23 +1359,30 @@ def _ranking_state(module: str, tree: ast.Module) -> list[str]:
     return bad
 
 
-def _ranking_sources() -> dict[str, Path]:
+def _context_sources(context: str) -> dict[str, Path]:
     return {
         module: path
         for module, path in _MODULES.items()
-        if module.split(".")[0] == RANKING and ".tests" not in f".{module}"
+        if module.split(".")[0] == context and ".tests" not in f".{module}"
     }
 
 
-def test_ranking_holds_no_module_level_runtime_state() -> None:
-    """Every piece of ranking state lives on the board or engine `__main__` builds (AD-D10)."""
-    assert len(_ranking_sources()) > 10, "the ranking context's modules were not found"
+@pytest.mark.parametrize("context", sorted(_STATE_RULED_CONTEXTS))
+def test_context_holds_no_module_level_runtime_state(context: str) -> None:
+    """
+    Every piece of ranking state lives on the board or engine `__main__` builds, every piece of
+    bots state on the bot, ledger, supervisor or store instances its `__main__` builds (AD-D10).
+    """
+    sources = _context_sources(context)
+    assert len(sources) > 10, f"the {context} context's modules were not found"
     stateful = sorted(
         entry
-        for module, path in _ranking_sources().items()
-        for entry in _ranking_state(module, ast.parse(path.read_text()))
+        for module, path in sources.items()
+        for entry in _ranking_state(
+            module, ast.parse(path.read_text()), _STATE_RULED_CONTEXTS[context]
+        )
     )
-    assert stateful == [], "ranking/ holds no module-level mutable runtime state (AD-D10)"
+    assert stateful == [], f"{context}/ holds no module-level mutable runtime state (AD-D10)"
 
 
 def test_ranking_state_rule_catches_each_kind() -> None:
@@ -1398,6 +1403,19 @@ def test_ranking_state_rule_catches_each_kind() -> None:
     ]
 
 
+def test_bots_state_rule_sanctions_only_dataclass_defaults() -> None:
+    tree = ast.parse(
+        "from dataclasses import dataclass, field\nfrom decimal import Decimal\n"
+        "@dataclass(frozen=True)\nclass C:\n    a: Decimal = Decimal('1')\n"
+        "    b: dict = field(default_factory=dict)\n_CACHE = {}\n_X = make()\n"
+    )
+    assert _ranking_state("m", tree, _BOTS_SANCTIONED_CALLS) == [
+        "m: mutable module state at line 7",
+        "m: mutable module state at line 8 (unsanctioned import-time call: make)",
+    ]
+    assert len(_ranking_state("m", tree)) == 4  # ranking sanctions neither
+
+
 def _definitions_of(name: str) -> list[str]:
     return sorted(
         str(path.relative_to(PLATFORM_DIR))
@@ -1410,3 +1428,76 @@ def _definitions_of(name: str) -> list[str]:
 def test_the_pct_change_and_volatility_formula_is_defined_exactly_once() -> None:
     """SSOT-02 / AD-D10: views and research read ranking's published values, never recompute."""
     assert _definitions_of("price_stats_from_series") == ["ranking/domain/metrics.py"]
+
+
+# --- bots: Nautilus's live runtime behind one module (spine AD-D2, AD-8, Story 25.3) -------------
+
+# The one module in `platform/` -- tests included -- that may import the live runtime.
+TRADING_NODE_HOSTS = frozenset({"bots.infrastructure.nautilus_host"})
+_TRADING_NODE_NAMES = frozenset({"TradingNode", "TradingNodeConfig"})
+
+
+def _is_live_runtime(target: str, name: str | None) -> bool:
+    parts = target.split(".")
+    return (
+        parts[:2] == ["nautilus_trader", "live"]
+        or (parts == ["nautilus_trader"] and name == "live")
+        or name in _TRADING_NODE_NAMES
+    )
+
+
+def _dynamic_live_imports(module: str, path: Path) -> list[str]:
+    """`importlib.import_module("nautilus_trader.live...")`/`__import__(...)` with a literal."""
+    return [
+        f"{module}:{node.lineno} -> {node.args[0].value} (dynamic)"
+        for node in ast.walk(ast.parse(path.read_text()))
+        if isinstance(node, ast.Call)
+        and _call_name(node) in ("import_module", "__import__")
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+        and str(node.args[0].value).startswith("nautilus_trader.live")
+    ]
+
+
+def _trading_node_refs(module: str, path: Path) -> list[str]:
+    """Every import (or bound-module attribute read) of `TradingNode` or `nautilus_trader.live`."""
+    static = [
+        f"{module}:{ref.line} -> {ref.target}.{ref.name}" if ref.name else f"{module}:{ref.line}"
+        for ref in imports_of(module, path, _KNOWN)
+        if _is_live_runtime(ref.target, ref.name)
+    ]
+    return static + _dynamic_live_imports(module, path)
+
+
+def test_only_the_nautilus_host_imports_trading_node() -> None:
+    found = {
+        module: refs
+        for module, path in _MODULES.items()
+        if (refs := _trading_node_refs(module, path))
+    }
+    strays = sorted(
+        ref for module, refs in found.items() if module not in TRADING_NODE_HOSTS for ref in refs
+    )
+    assert strays == [], "only bots/infrastructure/nautilus_host.py builds a TradingNode (AD-8)"
+    assert set(found) == TRADING_NODE_HOSTS, "the host no longer imports TradingNode: update this"
+
+
+def test_trading_node_rule_catches_each_import_form(tmp_path: Path) -> None:
+    source = tmp_path / "m.py"
+    source.write_text(
+        "from nautilus_trader.live.node import TradingNode\n"
+        "from nautilus_trader.config import TradingNodeConfig\n"
+        "import nautilus_trader.live.node as live\n"
+        "from nautilus_trader.config import CacheConfig\n"
+        "from nautilus_trader import live as runtime\n"
+        "import importlib\n"
+        "importlib.import_module('nautilus_trader.live.node')\n"
+        "importlib.import_module('nautilus_trader.model')\n"
+    )
+    assert _trading_node_refs("m", source) == [
+        "m:1 -> nautilus_trader.live.node.TradingNode",
+        "m:2 -> nautilus_trader.config.TradingNodeConfig",
+        "m:3",
+        "m:5 -> nautilus_trader.live",
+        "m:7 -> nautilus_trader.live.node (dynamic)",
+    ]

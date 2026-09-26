@@ -13,7 +13,7 @@ const HOUR = 3600;
 const DAY = 86_400;
 
 // UTC throughout: candle times are UTC seconds, and UTC is the only calendar-day convention
-// this codebase uses where a "day" exists at all (live_paper's per-UTC-day PnL) -- the
+// this codebase uses where a "day" exists at all (the bots' per-UTC-day PnL) -- the
 // rankings are rolling 24h windows, not calendar sessions. Weeks start Monday 00:00 UTC.
 /** Start (UTC seconds) of the period containing `timeSec`. */
 export function periodStart(timeSec: number, period: SessionPeriod): number {

@@ -47,7 +47,8 @@ decode logic directly, so it gets battle-tested networking without the buggy `Da
   loop, buffer and flush timer. A venue package supplies a duck-typed client plus at most a
   few hook overrides; the write gate itself is never overridden. `nautilus_trader` is used
   purely as a library (domain types + `ParquetDataCatalog.write_data()`), never as a live
-  runtime. The one sanctioned exception is `platform/live_paper/`; see `platform/CLAUDE.md`.
+  runtime. The one sanctioned exception is `platform/bots/` (was `platform/live_paper/`, now a
+  re-export shim, Story 25.3); see `platform/CLAUDE.md`.
 - **Repo location:** lives inside `nautilus_trader_fork` under `platform/`, co-located with
   this repo's git history rather than in a separate repo.
 - **Fork safety:** never modify `nautilus_trader/` or `crates/`. The collector is new,
@@ -60,7 +61,8 @@ decode logic directly, so it gets battle-tested networking without the buggy `Da
   target and rebuilt only when `nautilus_trader` core/deps change. Three thin layers rebuild
   in seconds: `platform/collector.dockerfile` (one image, one service per collector via
   different `command:`, all writing the same catalog root), `platform/data_api.dockerfile`
-  (separate because it runs a Node frontend-build stage) and `platform/live_paper.dockerfile`.
+  (separate because it runs a Node frontend-build stage) and `platform/live_paper.dockerfile`
+  (the bots context, `python3 -m bots`).
   Plus a Dozzle container for logs.
 - **Open interest** arrives differently per venue and is a per-venue investigation, never
   an assumption:

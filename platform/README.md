@@ -151,7 +151,7 @@ make tui    # rebuilds the thin bot_tui layer, then runs it interactively (never
 
 A keyboard-only control surface for the bots and the collector, with two panes:
 
-- **Bots** (the start pane, `:bots`): one row per `live_paper` bot from `bots:status`, with
+- **Bots** (the start pane, `:bots`): one row per bot (the `bots` context, `python3 -m bots`) from `bots:status`, with
   per-row stale markers. `s` starts/stops the highlighted bot (stopping asks you to type
   `stop`), Enter opens its detail view (trades, PnL, strategy source `v`, incidents `i`,
   dashboard link `o`).
@@ -254,8 +254,8 @@ is the operator's attestation -- `rebuilt` is never persisted, so the tool canno
 Every archive tool is `python -m archive.<tool>` (`rebuild_seconds`, `consolidate_catalog`,
 `prune_catalog`, `repair_catalog`, `compare_klines`, `nightly`, `backfill_bars`,
 `crosscheck_errors`, `tools.measure_lag`, `tools.migrate_open_interest`,
-`tools.normalize_snapshot_schema`); the old `collector_core.*`/`dydx_collector.*` paths still run
-them with a deprecation warning until Story 25.3. Each collector holds
+`tools.normalize_snapshot_schema`); the old `collector_core.*`/`dydx_collector.*` paths were
+removed in Story 25.3. Each collector holds
 `<catalog>/.capture-<VENUE>.lock` while it runs, and `repair_catalog --apply` refuses that venue
 until it is stopped.
 

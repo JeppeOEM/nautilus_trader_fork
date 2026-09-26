@@ -246,8 +246,8 @@ def _require_shipped(module: str) -> None:
     """
     Skip, with the reason shown, a shim whose package this image does not ship.
 
-    The live_paper image deliberately ships no collector (AD-8): there a shim of an absent
-    package cannot be imported. `make test` (collector image) checks every one.
+    The live-paper image (`live_paper.dockerfile`, the bots context) deliberately ships no
+    collector (AD-8): there a shim of an absent package cannot be imported. `make test` (collector image) checks every one.
     """
     if not _shipped(module):
         pytest.skip(f"{module} is not shipped in this image; checked by `make test`")

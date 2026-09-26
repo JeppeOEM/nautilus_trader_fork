@@ -1,0 +1,546 @@
+{
+  "inputs": {
+    "bot_id": "bot-01",
+    "n_seconds": 120,
+    "cycle_len": 30,
+    "amplitude": 20.0,
+    "trend_buy_threshold": 0.58,
+    "trend_sell_threshold": 0.48,
+    "seeded_fills": [
+      [
+        3455000000000000,
+        "BUY",
+        100.0,
+        1.0,
+        null,
+        null
+      ],
+      [
+        3455100000000000,
+        "SELL",
+        104.5,
+        1.0,
+        4.5,
+        4.5
+      ],
+      [
+        3450000000000000,
+        "SELL",
+        110.0,
+        2.0,
+        null,
+        null
+      ],
+      [
+        3450500000000000,
+        "BUY",
+        111.25,
+        1.0,
+        -1.25,
+        null
+      ],
+      [
+        3450600000000000,
+        "BUY",
+        109.0,
+        1.0,
+        1.0,
+        -0.25
+      ],
+      [
+        1000000000000000,
+        "BUY",
+        50.0,
+        1.0,
+        null,
+        null
+      ],
+      [
+        1000900000000000,
+        "SELL",
+        49.0,
+        1.0,
+        -1.0,
+        -1.0
+      ]
+    ],
+    "status_started_at": 1000.0,
+    "status_now": 2000.0,
+    "status_mode": "paper",
+    "history_now_ns": 3456000000000000,
+    "starting_balance": 10000.0
+  },
+  "fills": [
+    {
+      "ts": 18000000000,
+      "side": "BUY",
+      "price": 100.5,
+      "qty": 0.001,
+      "realized_pnl": null
+    },
+    {
+      "ts": 56000000000,
+      "side": "SELL",
+      "price": 119.5,
+      "qty": 0.001,
+      "realized_pnl": 0.01878
+    },
+    {
+      "ts": 57000000000,
+      "side": "SELL",
+      "price": 119.5,
+      "qty": 0.001,
+      "realized_pnl": null
+    },
+    {
+      "ts": 85000000000,
+      "side": "BUY",
+      "price": 100.5,
+      "qty": 0.001,
+      "realized_pnl": 0.01878
+    },
+    {
+      "ts": 86000000000,
+      "side": "BUY",
+      "price": 100.5,
+      "qty": 0.001,
+      "realized_pnl": null
+    },
+    {
+      "ts": 113000000000,
+      "side": "SELL",
+      "price": 119.5,
+      "qty": 0.001,
+      "realized_pnl": 0.01878
+    },
+    {
+      "ts": 114000000000,
+      "side": "SELL",
+      "price": 119.5,
+      "qty": 0.001,
+      "realized_pnl": null
+    },
+    {
+      "ts": 1000000000000000,
+      "side": "BUY",
+      "price": 50.0,
+      "qty": 1.0,
+      "realized_pnl": null
+    },
+    {
+      "ts": 1000900000000000,
+      "side": "SELL",
+      "price": 49.0,
+      "qty": 1.0,
+      "realized_pnl": -1.0
+    },
+    {
+      "ts": 3450000000000000,
+      "side": "SELL",
+      "price": 110.0,
+      "qty": 2.0,
+      "realized_pnl": null
+    },
+    {
+      "ts": 3450500000000000,
+      "side": "BUY",
+      "price": 111.25,
+      "qty": 1.0,
+      "realized_pnl": -1.25
+    },
+    {
+      "ts": 3450600000000000,
+      "side": "BUY",
+      "price": 109.0,
+      "qty": 1.0,
+      "realized_pnl": 1.0
+    },
+    {
+      "ts": 3455000000000000,
+      "side": "BUY",
+      "price": 100.0,
+      "qty": 1.0,
+      "realized_pnl": null
+    },
+    {
+      "ts": 3455100000000000,
+      "side": "SELL",
+      "price": 104.5,
+      "qty": 1.0,
+      "realized_pnl": 4.5
+    }
+  ],
+  "status": "{\"bot_id\": \"bot-01\", \"strategy\": \"DummyStrategy\", \"symbol\": \"BTCUSDT.BINANCE\", \"mode\": \"paper\", \"running\": false, \"position_side\": \"short\", \"net_exposure\": -0.10067, \"realized_pnl\": -0.0001195, \"unrealized_pnl\": 0.01883, \"win_rate\": 0.6666666666666666, \"closed_trades\": 6, \"started_at\": 1000.0, \"updated_at\": 2000.0}",
+  "history": {
+    "day": "{\"bot_id\": \"bot-01\", \"range\": \"day\", \"updated_at\": 3456000000000000, \"trades\": [{\"ts\": 3450000000000000, \"side\": \"SELL\", \"price\": 110.0, \"qty\": 2.0, \"realized_pnl\": null}, {\"ts\": 3450500000000000, \"side\": \"BUY\", \"price\": 111.25, \"qty\": 1.0, \"realized_pnl\": -1.25}, {\"ts\": 3450600000000000, \"side\": \"BUY\", \"price\": 109.0, \"qty\": 1.0, \"realized_pnl\": 1.0}, {\"ts\": 3455000000000000, \"side\": \"BUY\", \"price\": 100.0, \"qty\": 1.0, \"realized_pnl\": null}, {\"ts\": 3455100000000000, \"side\": \"SELL\", \"price\": 104.5, \"qty\": 1.0, \"realized_pnl\": 4.5}], \"pnl_series\": [{\"period_start\": 3369600000000000, \"pnl\": 4.25}], \"metrics\": {\"win_rate\": 0.5, \"expectancy\": 2.125, \"avg_win\": 4.5, \"avg_loss\": -0.25, \"max_win\": 4.5, \"max_loss\": -0.25, \"sharpe_ratio\": null, \"sortino_ratio\": null, \"calmar_ratio\": null, \"max_drawdown\": -0.0, \"profit_factor\": null}}",
+    "week": "{\"bot_id\": \"bot-01\", \"range\": \"week\", \"updated_at\": 3456000000000000, \"trades\": [{\"ts\": 3450000000000000, \"side\": \"SELL\", \"price\": 110.0, \"qty\": 2.0, \"realized_pnl\": null}, {\"ts\": 3450500000000000, \"side\": \"BUY\", \"price\": 111.25, \"qty\": 1.0, \"realized_pnl\": -1.25}, {\"ts\": 3450600000000000, \"side\": \"BUY\", \"price\": 109.0, \"qty\": 1.0, \"realized_pnl\": 1.0}, {\"ts\": 3455000000000000, \"side\": \"BUY\", \"price\": 100.0, \"qty\": 1.0, \"realized_pnl\": null}, {\"ts\": 3455100000000000, \"side\": \"SELL\", \"price\": 104.5, \"qty\": 1.0, \"realized_pnl\": 4.5}], \"pnl_series\": [{\"period_start\": 3369600000000000, \"pnl\": 4.25}], \"metrics\": {\"win_rate\": 0.5, \"expectancy\": 2.125, \"avg_win\": 4.5, \"avg_loss\": -0.25, \"max_win\": 4.5, \"max_loss\": -0.25, \"sharpe_ratio\": null, \"sortino_ratio\": null, \"calmar_ratio\": null, \"max_drawdown\": -0.0, \"profit_factor\": null}}",
+    "month": "{\"bot_id\": \"bot-01\", \"range\": \"month\", \"updated_at\": 3456000000000000, \"trades\": [{\"ts\": 1000000000000000, \"side\": \"BUY\", \"price\": 50.0, \"qty\": 1.0, \"realized_pnl\": null}, {\"ts\": 1000900000000000, \"side\": \"SELL\", \"price\": 49.0, \"qty\": 1.0, \"realized_pnl\": -1.0}, {\"ts\": 3450000000000000, \"side\": \"SELL\", \"price\": 110.0, \"qty\": 2.0, \"realized_pnl\": null}, {\"ts\": 3450500000000000, \"side\": \"BUY\", \"price\": 111.25, \"qty\": 1.0, \"realized_pnl\": -1.25}, {\"ts\": 3450600000000000, \"side\": \"BUY\", \"price\": 109.0, \"qty\": 1.0, \"realized_pnl\": 1.0}, {\"ts\": 3455000000000000, \"side\": \"BUY\", \"price\": 100.0, \"qty\": 1.0, \"realized_pnl\": null}, {\"ts\": 3455100000000000, \"side\": \"SELL\", \"price\": 104.5, \"qty\": 1.0, \"realized_pnl\": 4.5}], \"pnl_series\": [{\"period_start\": 950400000000000, \"pnl\": -1.0}, {\"period_start\": 3369600000000000, \"pnl\": 4.25}], \"metrics\": {\"win_rate\": 0.3333333333333333, \"expectancy\": 1.0833333333333333, \"avg_win\": 4.5, \"avg_loss\": -0.625, \"max_win\": 4.5, \"max_loss\": -1.0, \"sharpe_ratio\": 8.363289432773433, \"sortino_ratio\": 43.910824255492834, \"calmar_ratio\": 610.9654957311653, \"max_drawdown\": -9.999943660321531e-05, \"profit_factor\": 4.250425040109335}}",
+    "all": "{\"bot_id\": \"bot-01\", \"range\": \"all\", \"updated_at\": 3456000000000000, \"trades\": [{\"ts\": 18000000000, \"side\": \"BUY\", \"price\": 100.5, \"qty\": 0.001, \"realized_pnl\": null}, {\"ts\": 56000000000, \"side\": \"SELL\", \"price\": 119.5, \"qty\": 0.001, \"realized_pnl\": 0.01878}, {\"ts\": 57000000000, \"side\": \"SELL\", \"price\": 119.5, \"qty\": 0.001, \"realized_pnl\": null}, {\"ts\": 85000000000, \"side\": \"BUY\", \"price\": 100.5, \"qty\": 0.001, \"realized_pnl\": 0.01878}, {\"ts\": 86000000000, \"side\": \"BUY\", \"price\": 100.5, \"qty\": 0.001, \"realized_pnl\": null}, {\"ts\": 113000000000, \"side\": \"SELL\", \"price\": 119.5, \"qty\": 0.001, \"realized_pnl\": 0.01878}, {\"ts\": 114000000000, \"side\": \"SELL\", \"price\": 119.5, \"qty\": 0.001, \"realized_pnl\": null}, {\"ts\": 1000000000000000, \"side\": \"BUY\", \"price\": 50.0, \"qty\": 1.0, \"realized_pnl\": null}, {\"ts\": 1000900000000000, \"side\": \"SELL\", \"price\": 49.0, \"qty\": 1.0, \"realized_pnl\": -1.0}, {\"ts\": 3450000000000000, \"side\": \"SELL\", \"price\": 110.0, \"qty\": 2.0, \"realized_pnl\": null}, {\"ts\": 3450500000000000, \"side\": \"BUY\", \"price\": 111.25, \"qty\": 1.0, \"realized_pnl\": -1.25}, {\"ts\": 3450600000000000, \"side\": \"BUY\", \"price\": 109.0, \"qty\": 1.0, \"realized_pnl\": 1.0}, {\"ts\": 3455000000000000, \"side\": \"BUY\", \"price\": 100.0, \"qty\": 1.0, \"realized_pnl\": null}, {\"ts\": 3455100000000000, \"side\": \"SELL\", \"price\": 104.5, \"qty\": 1.0, \"realized_pnl\": 4.5}], \"pnl_series\": [{\"period_start\": 0, \"pnl\": 0.05634}, {\"period_start\": 950400000000000, \"pnl\": -1.0}, {\"period_start\": 3369600000000000, \"pnl\": 4.25}], \"metrics\": {\"win_rate\": 0.6666666666666666, \"expectancy\": 0.5510566666666665, \"avg_win\": 1.139085, \"avg_loss\": -0.625, \"max_win\": 4.5, \"max_loss\": -1.0, \"sharpe_ratio\": 7.582974244529584, \"sortino_ratio\": 36.4744862991018, \"calmar_ratio\": 410.40516899274786, \"max_drawdown\": -9.999943660316317e-05, \"profit_factor\": 4.306765357528077}}"
+  },
+  "history_no_balance_all": "{\"bot_id\": \"bot-01\", \"range\": \"all\", \"updated_at\": 3456000000000000, \"trades\": [{\"ts\": 18000000000, \"side\": \"BUY\", \"price\": 100.5, \"qty\": 0.001, \"realized_pnl\": null}, {\"ts\": 56000000000, \"side\": \"SELL\", \"price\": 119.5, \"qty\": 0.001, \"realized_pnl\": 0.01878}, {\"ts\": 57000000000, \"side\": \"SELL\", \"price\": 119.5, \"qty\": 0.001, \"realized_pnl\": null}, {\"ts\": 85000000000, \"side\": \"BUY\", \"price\": 100.5, \"qty\": 0.001, \"realized_pnl\": 0.01878}, {\"ts\": 86000000000, \"side\": \"BUY\", \"price\": 100.5, \"qty\": 0.001, \"realized_pnl\": null}, {\"ts\": 113000000000, \"side\": \"SELL\", \"price\": 119.5, \"qty\": 0.001, \"realized_pnl\": 0.01878}, {\"ts\": 114000000000, \"side\": \"SELL\", \"price\": 119.5, \"qty\": 0.001, \"realized_pnl\": null}, {\"ts\": 1000000000000000, \"side\": \"BUY\", \"price\": 50.0, \"qty\": 1.0, \"realized_pnl\": null}, {\"ts\": 1000900000000000, \"side\": \"SELL\", \"price\": 49.0, \"qty\": 1.0, \"realized_pnl\": -1.0}, {\"ts\": 3450000000000000, \"side\": \"SELL\", \"price\": 110.0, \"qty\": 2.0, \"realized_pnl\": null}, {\"ts\": 3450500000000000, \"side\": \"BUY\", \"price\": 111.25, \"qty\": 1.0, \"realized_pnl\": -1.25}, {\"ts\": 3450600000000000, \"side\": \"BUY\", \"price\": 109.0, \"qty\": 1.0, \"realized_pnl\": 1.0}, {\"ts\": 3455000000000000, \"side\": \"BUY\", \"price\": 100.0, \"qty\": 1.0, \"realized_pnl\": null}, {\"ts\": 3455100000000000, \"side\": \"SELL\", \"price\": 104.5, \"qty\": 1.0, \"realized_pnl\": 4.5}], \"pnl_series\": [{\"period_start\": 0, \"pnl\": 0.05634}, {\"period_start\": 950400000000000, \"pnl\": -1.0}, {\"period_start\": 3369600000000000, \"pnl\": 4.25}], \"metrics\": {\"win_rate\": 0.6666666666666666, \"expectancy\": 0.5510566666666665, \"avg_win\": 1.139085, \"avg_loss\": -0.625, \"max_win\": 4.5, \"max_loss\": -1.0, \"sharpe_ratio\": null, \"sortino_ratio\": null, \"calmar_ratio\": null, \"max_drawdown\": null, \"profit_factor\": null}}",
+  "incidents": {
+    "prior": [
+      {
+        "type": "data_stale",
+        "started_at": 0.0,
+        "ended_at": 0.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 1.0,
+        "ended_at": 1.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 2.0,
+        "ended_at": 2.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 3.0,
+        "ended_at": 3.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 4.0,
+        "ended_at": 4.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 5.0,
+        "ended_at": 5.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 6.0,
+        "ended_at": 6.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 7.0,
+        "ended_at": 7.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 8.0,
+        "ended_at": 8.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 9.0,
+        "ended_at": 9.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 10.0,
+        "ended_at": 10.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 11.0,
+        "ended_at": 11.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 12.0,
+        "ended_at": 12.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 13.0,
+        "ended_at": 13.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 14.0,
+        "ended_at": 14.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 15.0,
+        "ended_at": 15.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 16.0,
+        "ended_at": 16.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 17.0,
+        "ended_at": 17.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 18.0,
+        "ended_at": 18.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 19.0,
+        "ended_at": 19.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 20.0,
+        "ended_at": 20.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 21.0,
+        "ended_at": 21.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 22.0,
+        "ended_at": 22.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 23.0,
+        "ended_at": 23.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 24.0,
+        "ended_at": 24.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 25.0,
+        "ended_at": 25.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 26.0,
+        "ended_at": 26.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 27.0,
+        "ended_at": 27.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 28.0,
+        "ended_at": 28.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 29.0,
+        "ended_at": 29.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 30.0,
+        "ended_at": 30.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 31.0,
+        "ended_at": 31.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 32.0,
+        "ended_at": 32.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 33.0,
+        "ended_at": 33.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 34.0,
+        "ended_at": 34.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 35.0,
+        "ended_at": 35.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 36.0,
+        "ended_at": 36.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 37.0,
+        "ended_at": 37.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 38.0,
+        "ended_at": 38.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 39.0,
+        "ended_at": 39.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 40.0,
+        "ended_at": 40.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 41.0,
+        "ended_at": 41.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 42.0,
+        "ended_at": 42.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 43.0,
+        "ended_at": 43.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 44.0,
+        "ended_at": 44.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 45.0,
+        "ended_at": 45.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 46.0,
+        "ended_at": 46.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 47.0,
+        "ended_at": 47.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 48.0,
+        "ended_at": 48.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 49.0,
+        "ended_at": 49.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 50.0,
+        "ended_at": 50.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 51.0,
+        "ended_at": 51.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 52.0,
+        "ended_at": 52.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 53.0,
+        "ended_at": 53.5
+      },
+      {
+        "type": "data_stale",
+        "started_at": 90.0,
+        "ended_at": null
+      }
+    ],
+    "start_now": 100.0,
+    "started_at": 100.0,
+    "ticks": [
+      [
+        101.0,
+        101000000000,
+        0,
+        true
+      ],
+      [
+        131.5,
+        131500000000,
+        0,
+        true
+      ],
+      [
+        140.0,
+        140000000000,
+        139000000000,
+        true
+      ],
+      [
+        141.0,
+        141000000000,
+        140500000000,
+        true
+      ],
+      [
+        200.0,
+        200000000000,
+        141000000000,
+        false
+      ],
+      [
+        205.0,
+        205000000000,
+        141000000000,
+        true
+      ],
+      [
+        206.0,
+        206000000000,
+        141000000000,
+        true
+      ],
+      [
+        207.0,
+        207000000000,
+        206900000000,
+        true
+      ]
+    ],
+    "snapshots": [
+      "[{\"type\": \"data_stale\", \"started_at\": 6.0, \"ended_at\": 6.5}, {\"type\": \"data_stale\", \"started_at\": 7.0, \"ended_at\": 7.5}, {\"type\": \"data_stale\", \"started_at\": 8.0, \"ended_at\": 8.5}, {\"type\": \"data_stale\", \"started_at\": 9.0, \"ended_at\": 9.5}, {\"type\": \"data_stale\", \"started_at\": 10.0, \"ended_at\": 10.5}, {\"type\": \"data_stale\", \"started_at\": 11.0, \"ended_at\": 11.5}, {\"type\": \"data_stale\", \"started_at\": 12.0, \"ended_at\": 12.5}, {\"type\": \"data_stale\", \"started_at\": 13.0, \"ended_at\": 13.5}, {\"type\": \"data_stale\", \"started_at\": 14.0, \"ended_at\": 14.5}, {\"type\": \"data_stale\", \"started_at\": 15.0, \"ended_at\": 15.5}, {\"type\": \"data_stale\", \"started_at\": 16.0, \"ended_at\": 16.5}, {\"type\": \"data_stale\", \"started_at\": 17.0, \"ended_at\": 17.5}, {\"type\": \"data_stale\", \"started_at\": 18.0, \"ended_at\": 18.5}, {\"type\": \"data_stale\", \"started_at\": 19.0, \"ended_at\": 19.5}, {\"type\": \"data_stale\", \"started_at\": 20.0, \"ended_at\": 20.5}, {\"type\": \"data_stale\", \"started_at\": 21.0, \"ended_at\": 21.5}, {\"type\": \"data_stale\", \"started_at\": 22.0, \"ended_at\": 22.5}, {\"type\": \"data_stale\", \"started_at\": 23.0, \"ended_at\": 23.5}, {\"type\": \"data_stale\", \"started_at\": 24.0, \"ended_at\": 24.5}, {\"type\": \"data_stale\", \"started_at\": 25.0, \"ended_at\": 25.5}, {\"type\": \"data_stale\", \"started_at\": 26.0, \"ended_at\": 26.5}, {\"type\": \"data_stale\", \"started_at\": 27.0, \"ended_at\": 27.5}, {\"type\": \"data_stale\", \"started_at\": 28.0, \"ended_at\": 28.5}, {\"type\": \"data_stale\", \"started_at\": 29.0, \"ended_at\": 29.5}, {\"type\": \"data_stale\", \"started_at\": 30.0, \"ended_at\": 30.5}, {\"type\": \"data_stale\", \"started_at\": 31.0, \"ended_at\": 31.5}, {\"type\": \"data_stale\", \"started_at\": 32.0, \"ended_at\": 32.5}, {\"type\": \"data_stale\", \"started_at\": 33.0, \"ended_at\": 33.5}, {\"type\": \"data_stale\", \"started_at\": 34.0, \"ended_at\": 34.5}, {\"type\": \"data_stale\", \"started_at\": 35.0, \"ended_at\": 35.5}, {\"type\": \"data_stale\", \"started_at\": 36.0, \"ended_at\": 36.5}, {\"type\": \"data_stale\", \"started_at\": 37.0, \"ended_at\": 37.5}, {\"type\": \"data_stale\", \"started_at\": 38.0, \"ended_at\": 38.5}, {\"type\": \"data_stale\", \"started_at\": 39.0, \"ended_at\": 39.5}, {\"type\": \"data_stale\", \"started_at\": 40.0, \"ended_at\": 40.5}, {\"type\": \"data_stale\", \"started_at\": 41.0, \"ended_at\": 41.5}, {\"type\": \"data_stale\", \"started_at\": 42.0, \"ended_at\": 42.5}, {\"type\": \"data_stale\", \"started_at\": 43.0, \"ended_at\": 43.5}, {\"type\": \"data_stale\", \"started_at\": 44.0, \"ended_at\": 44.5}, {\"type\": \"data_stale\", \"started_at\": 45.0, \"ended_at\": 45.5}, {\"type\": \"data_stale\", \"started_at\": 46.0, \"ended_at\": 46.5}, {\"type\": \"data_stale\", \"started_at\": 47.0, \"ended_at\": 47.5}, {\"type\": \"data_stale\", \"started_at\": 48.0, \"ended_at\": 48.5}, {\"type\": \"data_stale\", \"started_at\": 49.0, \"ended_at\": 49.5}, {\"type\": \"data_stale\", \"started_at\": 50.0, \"ended_at\": 50.5}, {\"type\": \"data_stale\", \"started_at\": 51.0, \"ended_at\": 51.5}, {\"type\": \"data_stale\", \"started_at\": 52.0, \"ended_at\": 52.5}, {\"type\": \"data_stale\", \"started_at\": 53.0, \"ended_at\": 53.5}, {\"type\": \"data_stale\", \"started_at\": 90.0, \"ended_at\": 100.0, \"note\": \"closed by restart\"}, {\"type\": \"process_start\", \"started_at\": 100.0, \"ended_at\": 100.0}]",
+      null,
+      "[{\"type\": \"data_stale\", \"started_at\": 7.0, \"ended_at\": 7.5}, {\"type\": \"data_stale\", \"started_at\": 8.0, \"ended_at\": 8.5}, {\"type\": \"data_stale\", \"started_at\": 9.0, \"ended_at\": 9.5}, {\"type\": \"data_stale\", \"started_at\": 10.0, \"ended_at\": 10.5}, {\"type\": \"data_stale\", \"started_at\": 11.0, \"ended_at\": 11.5}, {\"type\": \"data_stale\", \"started_at\": 12.0, \"ended_at\": 12.5}, {\"type\": \"data_stale\", \"started_at\": 13.0, \"ended_at\": 13.5}, {\"type\": \"data_stale\", \"started_at\": 14.0, \"ended_at\": 14.5}, {\"type\": \"data_stale\", \"started_at\": 15.0, \"ended_at\": 15.5}, {\"type\": \"data_stale\", \"started_at\": 16.0, \"ended_at\": 16.5}, {\"type\": \"data_stale\", \"started_at\": 17.0, \"ended_at\": 17.5}, {\"type\": \"data_stale\", \"started_at\": 18.0, \"ended_at\": 18.5}, {\"type\": \"data_stale\", \"started_at\": 19.0, \"ended_at\": 19.5}, {\"type\": \"data_stale\", \"started_at\": 20.0, \"ended_at\": 20.5}, {\"type\": \"data_stale\", \"started_at\": 21.0, \"ended_at\": 21.5}, {\"type\": \"data_stale\", \"started_at\": 22.0, \"ended_at\": 22.5}, {\"type\": \"data_stale\", \"started_at\": 23.0, \"ended_at\": 23.5}, {\"type\": \"data_stale\", \"started_at\": 24.0, \"ended_at\": 24.5}, {\"type\": \"data_stale\", \"started_at\": 25.0, \"ended_at\": 25.5}, {\"type\": \"data_stale\", \"started_at\": 26.0, \"ended_at\": 26.5}, {\"type\": \"data_stale\", \"started_at\": 27.0, \"ended_at\": 27.5}, {\"type\": \"data_stale\", \"started_at\": 28.0, \"ended_at\": 28.5}, {\"type\": \"data_stale\", \"started_at\": 29.0, \"ended_at\": 29.5}, {\"type\": \"data_stale\", \"started_at\": 30.0, \"ended_at\": 30.5}, {\"type\": \"data_stale\", \"started_at\": 31.0, \"ended_at\": 31.5}, {\"type\": \"data_stale\", \"started_at\": 32.0, \"ended_at\": 32.5}, {\"type\": \"data_stale\", \"started_at\": 33.0, \"ended_at\": 33.5}, {\"type\": \"data_stale\", \"started_at\": 34.0, \"ended_at\": 34.5}, {\"type\": \"data_stale\", \"started_at\": 35.0, \"ended_at\": 35.5}, {\"type\": \"data_stale\", \"started_at\": 36.0, \"ended_at\": 36.5}, {\"type\": \"data_stale\", \"started_at\": 37.0, \"ended_at\": 37.5}, {\"type\": \"data_stale\", \"started_at\": 38.0, \"ended_at\": 38.5}, {\"type\": \"data_stale\", \"started_at\": 39.0, \"ended_at\": 39.5}, {\"type\": \"data_stale\", \"started_at\": 40.0, \"ended_at\": 40.5}, {\"type\": \"data_stale\", \"started_at\": 41.0, \"ended_at\": 41.5}, {\"type\": \"data_stale\", \"started_at\": 42.0, \"ended_at\": 42.5}, {\"type\": \"data_stale\", \"started_at\": 43.0, \"ended_at\": 43.5}, {\"type\": \"data_stale\", \"started_at\": 44.0, \"ended_at\": 44.5}, {\"type\": \"data_stale\", \"started_at\": 45.0, \"ended_at\": 45.5}, {\"type\": \"data_stale\", \"started_at\": 46.0, \"ended_at\": 46.5}, {\"type\": \"data_stale\", \"started_at\": 47.0, \"ended_at\": 47.5}, {\"type\": \"data_stale\", \"started_at\": 48.0, \"ended_at\": 48.5}, {\"type\": \"data_stale\", \"started_at\": 49.0, \"ended_at\": 49.5}, {\"type\": \"data_stale\", \"started_at\": 50.0, \"ended_at\": 50.5}, {\"type\": \"data_stale\", \"started_at\": 51.0, \"ended_at\": 51.5}, {\"type\": \"data_stale\", \"started_at\": 52.0, \"ended_at\": 52.5}, {\"type\": \"data_stale\", \"started_at\": 53.0, \"ended_at\": 53.5}, {\"type\": \"data_stale\", \"started_at\": 90.0, \"ended_at\": 100.0, \"note\": \"closed by restart\"}, {\"type\": \"process_start\", \"started_at\": 100.0, \"ended_at\": 100.0}, {\"type\": \"data_stale\", \"started_at\": 131.5, \"ended_at\": null}]",
+      "[{\"type\": \"data_stale\", \"started_at\": 7.0, \"ended_at\": 7.5}, {\"type\": \"data_stale\", \"started_at\": 8.0, \"ended_at\": 8.5}, {\"type\": \"data_stale\", \"started_at\": 9.0, \"ended_at\": 9.5}, {\"type\": \"data_stale\", \"started_at\": 10.0, \"ended_at\": 10.5}, {\"type\": \"data_stale\", \"started_at\": 11.0, \"ended_at\": 11.5}, {\"type\": \"data_stale\", \"started_at\": 12.0, \"ended_at\": 12.5}, {\"type\": \"data_stale\", \"started_at\": 13.0, \"ended_at\": 13.5}, {\"type\": \"data_stale\", \"started_at\": 14.0, \"ended_at\": 14.5}, {\"type\": \"data_stale\", \"started_at\": 15.0, \"ended_at\": 15.5}, {\"type\": \"data_stale\", \"started_at\": 16.0, \"ended_at\": 16.5}, {\"type\": \"data_stale\", \"started_at\": 17.0, \"ended_at\": 17.5}, {\"type\": \"data_stale\", \"started_at\": 18.0, \"ended_at\": 18.5}, {\"type\": \"data_stale\", \"started_at\": 19.0, \"ended_at\": 19.5}, {\"type\": \"data_stale\", \"started_at\": 20.0, \"ended_at\": 20.5}, {\"type\": \"data_stale\", \"started_at\": 21.0, \"ended_at\": 21.5}, {\"type\": \"data_stale\", \"started_at\": 22.0, \"ended_at\": 22.5}, {\"type\": \"data_stale\", \"started_at\": 23.0, \"ended_at\": 23.5}, {\"type\": \"data_stale\", \"started_at\": 24.0, \"ended_at\": 24.5}, {\"type\": \"data_stale\", \"started_at\": 25.0, \"ended_at\": 25.5}, {\"type\": \"data_stale\", \"started_at\": 26.0, \"ended_at\": 26.5}, {\"type\": \"data_stale\", \"started_at\": 27.0, \"ended_at\": 27.5}, {\"type\": \"data_stale\", \"started_at\": 28.0, \"ended_at\": 28.5}, {\"type\": \"data_stale\", \"started_at\": 29.0, \"ended_at\": 29.5}, {\"type\": \"data_stale\", \"started_at\": 30.0, \"ended_at\": 30.5}, {\"type\": \"data_stale\", \"started_at\": 31.0, \"ended_at\": 31.5}, {\"type\": \"data_stale\", \"started_at\": 32.0, \"ended_at\": 32.5}, {\"type\": \"data_stale\", \"started_at\": 33.0, \"ended_at\": 33.5}, {\"type\": \"data_stale\", \"started_at\": 34.0, \"ended_at\": 34.5}, {\"type\": \"data_stale\", \"started_at\": 35.0, \"ended_at\": 35.5}, {\"type\": \"data_stale\", \"started_at\": 36.0, \"ended_at\": 36.5}, {\"type\": \"data_stale\", \"started_at\": 37.0, \"ended_at\": 37.5}, {\"type\": \"data_stale\", \"started_at\": 38.0, \"ended_at\": 38.5}, {\"type\": \"data_stale\", \"started_at\": 39.0, \"ended_at\": 39.5}, {\"type\": \"data_stale\", \"started_at\": 40.0, \"ended_at\": 40.5}, {\"type\": \"data_stale\", \"started_at\": 41.0, \"ended_at\": 41.5}, {\"type\": \"data_stale\", \"started_at\": 42.0, \"ended_at\": 42.5}, {\"type\": \"data_stale\", \"started_at\": 43.0, \"ended_at\": 43.5}, {\"type\": \"data_stale\", \"started_at\": 44.0, \"ended_at\": 44.5}, {\"type\": \"data_stale\", \"started_at\": 45.0, \"ended_at\": 45.5}, {\"type\": \"data_stale\", \"started_at\": 46.0, \"ended_at\": 46.5}, {\"type\": \"data_stale\", \"started_at\": 47.0, \"ended_at\": 47.5}, {\"type\": \"data_stale\", \"started_at\": 48.0, \"ended_at\": 48.5}, {\"type\": \"data_stale\", \"started_at\": 49.0, \"ended_at\": 49.5}, {\"type\": \"data_stale\", \"started_at\": 50.0, \"ended_at\": 50.5}, {\"type\": \"data_stale\", \"started_at\": 51.0, \"ended_at\": 51.5}, {\"type\": \"data_stale\", \"started_at\": 52.0, \"ended_at\": 52.5}, {\"type\": \"data_stale\", \"started_at\": 53.0, \"ended_at\": 53.5}, {\"type\": \"data_stale\", \"started_at\": 90.0, \"ended_at\": 100.0, \"note\": \"closed by restart\"}, {\"type\": \"process_start\", \"started_at\": 100.0, \"ended_at\": 100.0}, {\"type\": \"data_stale\", \"started_at\": 131.5, \"ended_at\": 140.0}]",
+      null,
+      null,
+      "[{\"type\": \"data_stale\", \"started_at\": 8.0, \"ended_at\": 8.5}, {\"type\": \"data_stale\", \"started_at\": 9.0, \"ended_at\": 9.5}, {\"type\": \"data_stale\", \"started_at\": 10.0, \"ended_at\": 10.5}, {\"type\": \"data_stale\", \"started_at\": 11.0, \"ended_at\": 11.5}, {\"type\": \"data_stale\", \"started_at\": 12.0, \"ended_at\": 12.5}, {\"type\": \"data_stale\", \"started_at\": 13.0, \"ended_at\": 13.5}, {\"type\": \"data_stale\", \"started_at\": 14.0, \"ended_at\": 14.5}, {\"type\": \"data_stale\", \"started_at\": 15.0, \"ended_at\": 15.5}, {\"type\": \"data_stale\", \"started_at\": 16.0, \"ended_at\": 16.5}, {\"type\": \"data_stale\", \"started_at\": 17.0, \"ended_at\": 17.5}, {\"type\": \"data_stale\", \"started_at\": 18.0, \"ended_at\": 18.5}, {\"type\": \"data_stale\", \"started_at\": 19.0, \"ended_at\": 19.5}, {\"type\": \"data_stale\", \"started_at\": 20.0, \"ended_at\": 20.5}, {\"type\": \"data_stale\", \"started_at\": 21.0, \"ended_at\": 21.5}, {\"type\": \"data_stale\", \"started_at\": 22.0, \"ended_at\": 22.5}, {\"type\": \"data_stale\", \"started_at\": 23.0, \"ended_at\": 23.5}, {\"type\": \"data_stale\", \"started_at\": 24.0, \"ended_at\": 24.5}, {\"type\": \"data_stale\", \"started_at\": 25.0, \"ended_at\": 25.5}, {\"type\": \"data_stale\", \"started_at\": 26.0, \"ended_at\": 26.5}, {\"type\": \"data_stale\", \"started_at\": 27.0, \"ended_at\": 27.5}, {\"type\": \"data_stale\", \"started_at\": 28.0, \"ended_at\": 28.5}, {\"type\": \"data_stale\", \"started_at\": 29.0, \"ended_at\": 29.5}, {\"type\": \"data_stale\", \"started_at\": 30.0, \"ended_at\": 30.5}, {\"type\": \"data_stale\", \"started_at\": 31.0, \"ended_at\": 31.5}, {\"type\": \"data_stale\", \"started_at\": 32.0, \"ended_at\": 32.5}, {\"type\": \"data_stale\", \"started_at\": 33.0, \"ended_at\": 33.5}, {\"type\": \"data_stale\", \"started_at\": 34.0, \"ended_at\": 34.5}, {\"type\": \"data_stale\", \"started_at\": 35.0, \"ended_at\": 35.5}, {\"type\": \"data_stale\", \"started_at\": 36.0, \"ended_at\": 36.5}, {\"type\": \"data_stale\", \"started_at\": 37.0, \"ended_at\": 37.5}, {\"type\": \"data_stale\", \"started_at\": 38.0, \"ended_at\": 38.5}, {\"type\": \"data_stale\", \"started_at\": 39.0, \"ended_at\": 39.5}, {\"type\": \"data_stale\", \"started_at\": 40.0, \"ended_at\": 40.5}, {\"type\": \"data_stale\", \"started_at\": 41.0, \"ended_at\": 41.5}, {\"type\": \"data_stale\", \"started_at\": 42.0, \"ended_at\": 42.5}, {\"type\": \"data_stale\", \"started_at\": 43.0, \"ended_at\": 43.5}, {\"type\": \"data_stale\", \"started_at\": 44.0, \"ended_at\": 44.5}, {\"type\": \"data_stale\", \"started_at\": 45.0, \"ended_at\": 45.5}, {\"type\": \"data_stale\", \"started_at\": 46.0, \"ended_at\": 46.5}, {\"type\": \"data_stale\", \"started_at\": 47.0, \"ended_at\": 47.5}, {\"type\": \"data_stale\", \"started_at\": 48.0, \"ended_at\": 48.5}, {\"type\": \"data_stale\", \"started_at\": 49.0, \"ended_at\": 49.5}, {\"type\": \"data_stale\", \"started_at\": 50.0, \"ended_at\": 50.5}, {\"type\": \"data_stale\", \"started_at\": 51.0, \"ended_at\": 51.5}, {\"type\": \"data_stale\", \"started_at\": 52.0, \"ended_at\": 52.5}, {\"type\": \"data_stale\", \"started_at\": 53.0, \"ended_at\": 53.5}, {\"type\": \"data_stale\", \"started_at\": 90.0, \"ended_at\": 100.0, \"note\": \"closed by restart\"}, {\"type\": \"process_start\", \"started_at\": 100.0, \"ended_at\": 100.0}, {\"type\": \"data_stale\", \"started_at\": 131.5, \"ended_at\": 140.0}, {\"type\": \"data_stale\", \"started_at\": 205.0, \"ended_at\": null}]",
+      null,
+      "[{\"type\": \"data_stale\", \"started_at\": 8.0, \"ended_at\": 8.5}, {\"type\": \"data_stale\", \"started_at\": 9.0, \"ended_at\": 9.5}, {\"type\": \"data_stale\", \"started_at\": 10.0, \"ended_at\": 10.5}, {\"type\": \"data_stale\", \"started_at\": 11.0, \"ended_at\": 11.5}, {\"type\": \"data_stale\", \"started_at\": 12.0, \"ended_at\": 12.5}, {\"type\": \"data_stale\", \"started_at\": 13.0, \"ended_at\": 13.5}, {\"type\": \"data_stale\", \"started_at\": 14.0, \"ended_at\": 14.5}, {\"type\": \"data_stale\", \"started_at\": 15.0, \"ended_at\": 15.5}, {\"type\": \"data_stale\", \"started_at\": 16.0, \"ended_at\": 16.5}, {\"type\": \"data_stale\", \"started_at\": 17.0, \"ended_at\": 17.5}, {\"type\": \"data_stale\", \"started_at\": 18.0, \"ended_at\": 18.5}, {\"type\": \"data_stale\", \"started_at\": 19.0, \"ended_at\": 19.5}, {\"type\": \"data_stale\", \"started_at\": 20.0, \"ended_at\": 20.5}, {\"type\": \"data_stale\", \"started_at\": 21.0, \"ended_at\": 21.5}, {\"type\": \"data_stale\", \"started_at\": 22.0, \"ended_at\": 22.5}, {\"type\": \"data_stale\", \"started_at\": 23.0, \"ended_at\": 23.5}, {\"type\": \"data_stale\", \"started_at\": 24.0, \"ended_at\": 24.5}, {\"type\": \"data_stale\", \"started_at\": 25.0, \"ended_at\": 25.5}, {\"type\": \"data_stale\", \"started_at\": 26.0, \"ended_at\": 26.5}, {\"type\": \"data_stale\", \"started_at\": 27.0, \"ended_at\": 27.5}, {\"type\": \"data_stale\", \"started_at\": 28.0, \"ended_at\": 28.5}, {\"type\": \"data_stale\", \"started_at\": 29.0, \"ended_at\": 29.5}, {\"type\": \"data_stale\", \"started_at\": 30.0, \"ended_at\": 30.5}, {\"type\": \"data_stale\", \"started_at\": 31.0, \"ended_at\": 31.5}, {\"type\": \"data_stale\", \"started_at\": 32.0, \"ended_at\": 32.5}, {\"type\": \"data_stale\", \"started_at\": 33.0, \"ended_at\": 33.5}, {\"type\": \"data_stale\", \"started_at\": 34.0, \"ended_at\": 34.5}, {\"type\": \"data_stale\", \"started_at\": 35.0, \"ended_at\": 35.5}, {\"type\": \"data_stale\", \"started_at\": 36.0, \"ended_at\": 36.5}, {\"type\": \"data_stale\", \"started_at\": 37.0, \"ended_at\": 37.5}, {\"type\": \"data_stale\", \"started_at\": 38.0, \"ended_at\": 38.5}, {\"type\": \"data_stale\", \"started_at\": 39.0, \"ended_at\": 39.5}, {\"type\": \"data_stale\", \"started_at\": 40.0, \"ended_at\": 40.5}, {\"type\": \"data_stale\", \"started_at\": 41.0, \"ended_at\": 41.5}, {\"type\": \"data_stale\", \"started_at\": 42.0, \"ended_at\": 42.5}, {\"type\": \"data_stale\", \"started_at\": 43.0, \"ended_at\": 43.5}, {\"type\": \"data_stale\", \"started_at\": 44.0, \"ended_at\": 44.5}, {\"type\": \"data_stale\", \"started_at\": 45.0, \"ended_at\": 45.5}, {\"type\": \"data_stale\", \"started_at\": 46.0, \"ended_at\": 46.5}, {\"type\": \"data_stale\", \"started_at\": 47.0, \"ended_at\": 47.5}, {\"type\": \"data_stale\", \"started_at\": 48.0, \"ended_at\": 48.5}, {\"type\": \"data_stale\", \"started_at\": 49.0, \"ended_at\": 49.5}, {\"type\": \"data_stale\", \"started_at\": 50.0, \"ended_at\": 50.5}, {\"type\": \"data_stale\", \"started_at\": 51.0, \"ended_at\": 51.5}, {\"type\": \"data_stale\", \"started_at\": 52.0, \"ended_at\": 52.5}, {\"type\": \"data_stale\", \"started_at\": 53.0, \"ended_at\": 53.5}, {\"type\": \"data_stale\", \"started_at\": 90.0, \"ended_at\": 100.0, \"note\": \"closed by restart\"}, {\"type\": \"process_start\", \"started_at\": 100.0, \"ended_at\": 100.0}, {\"type\": \"data_stale\", \"started_at\": 131.5, \"ended_at\": 140.0}, {\"type\": \"data_stale\", \"started_at\": 205.0, \"ended_at\": 207.0}]"
+    ]
+  },
+  "control": {
+    "bot_id": "bot-01",
+    "messages": [
+      "{\"bot_id\": \"bot-01\", \"action\": \"start\"}",
+      "{\"bot_id\": \"bot-01\", \"action\": \"stop\"}",
+      "{\"bot_id\": \"bot-02\", \"action\": \"start\"}",
+      "{\"bot_id\": \"bot-01\", \"action\": \"pause\"}",
+      "{\"action\": \"start\"}",
+      "{\"bot_id\": \"bot-01\", \"action\": \"start\", \"mode\": \"real_money\"}",
+      "{\"bot_id\": \"bot-01\", \"action\": \"stop\", \"mode\": \"paper\"}",
+      "not json"
+    ],
+    "decisions": [
+      "start",
+      "stop",
+      null,
+      null,
+      null,
+      "start",
+      "stop",
+      "unparseable"
+    ]
+  }
+}

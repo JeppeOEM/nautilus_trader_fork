@@ -15,7 +15,7 @@
 """
 Regression guard for architecture AD-8: the ranking context is a reader/derived-data context and
 must never import TradingNode, Strategy or DataEngine (that usage is confined to
-platform/live_paper). Checks every non-test module of `ranking/` -- the whole context, not a
+platform/bots). Checks every non-test module of `ranking/` -- the whole context, not a
 named list, so a new module is covered without editing this file. Checks the literal substring
 "import Strategy" rather than bare "Strategy", which a docstring may mention without importing.
 """

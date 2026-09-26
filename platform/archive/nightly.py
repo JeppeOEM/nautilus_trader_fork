@@ -33,8 +33,8 @@ Consolidation is limited to the last 2 closed days (an old refused day is the st
 `--dydx-plan` is forwarded to the prune step for `--venue DYDX` (dropped-instrument and per-coin
 delta retention); for another venue it is accepted and not forwarded (`make nightly` passes it for
 every venue). Without it a DYDX run still runs the chain, ledgers `nightly.dydx_plan_missing` and
-ends as findings (exit 2) unless a step failed -- so the pre-25.1 `collector_core.nightly --venue
-DYDX` command line keeps working, loudly.
+ends as findings (exit 2) unless a step failed -- so a pre-25.1 command line without the flag
+keeps working, loudly (the `collector_core.nightly` shim itself was removed in Story 25.3).
 
 A missing catalog stops the saga before any step (`archive.catalog_missing`, exit 1).
 

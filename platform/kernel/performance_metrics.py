@@ -22,7 +22,7 @@ no state), shared by live trading and research.
 A thin wrapper over nautilus_trader's own PyO3 `PortfolioStatistic` classes
 (`nautilus_trader.analysis` -- Rust implementations in `crates/analysis/src/statistics/`)
 rather than reimplementing these formulas (platform/CLAUDE.md's "use Nautilus built-ins
-first"). `live_paper/trade_history.py` is the only writer of `bots:history`'s "metrics"
+first"). `bots/application/history.py` is the only writer of `bots:history`'s "metrics"
 field (SSOT-02) -- every reader of these numbers (bot_tui today; ML/backtest evaluation
 code tomorrow) calls the functions in this module directly on its own realized-pnl/
 pnl-by-day data rather than recomputing Sharpe/Sortino by hand, so there is exactly one
