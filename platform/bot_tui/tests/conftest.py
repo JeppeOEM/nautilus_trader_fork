@@ -21,6 +21,7 @@ LOGGING_INITIALIZED native-abort guard fixture that research/tests/conftest.py n
 
 import pytest
 
+from bot_tui import archive_state
 from bot_tui import bot_history_state
 from bot_tui import bots_state
 
@@ -42,3 +43,10 @@ def _reset_bots_state() -> None:
 def _reset_bot_history_state() -> None:
     """Guarantee the same cross-test-file isolation as above, for bot_history_state's globals."""
     bot_history_state.close_bot()
+
+
+@pytest.fixture(autouse=True)
+def _reset_archive_state() -> None:
+    """Isolate archive_state's latest `archive:status` across test files (Story 25.1b)."""
+    archive_state._LATEST_ARCHIVE_STATUS = None
+    archive_state._LATEST_RECEIVED_AT = 0.0

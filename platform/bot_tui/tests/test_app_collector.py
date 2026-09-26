@@ -23,6 +23,7 @@ real, since its first statement schedules a real asyncio task that needs a runni
 
 import urwid
 
+from bot_tui import archive_state
 from bot_tui import collector_state
 from bot_tui.app import BotTuiApp
 from bot_tui.app import _SelectableCollectorRow
@@ -33,6 +34,11 @@ def _reset() -> None:
     collector_state._LATEST_COLLECTOR_STATUS = {}
     collector_state._LATEST_RECEIVED_AT = {}
     collector_state._LATEST_UNPINNED_IDS = []
+
+
+def _instrument_rows(body: urwid.ListBox) -> int:
+    """Count the selectable instrument rows only, not the trailing informational Text lines."""
+    return sum(1 for w in body.body if isinstance(w, urwid.AttrMap))
 
 
 def _status(iid: str, **overrides: object) -> dict:
@@ -58,7 +64,7 @@ def test_populated_collector_pane_has_one_row_per_instrument() -> None:
     collector_state._handle_status_message(_status("ETH-USD-PERP.DYDX"))
     app = BotTuiApp()
     app._refresh_collector_body()
-    assert len(app._collector_body.body) == 2
+    assert _instrument_rows(app._collector_body) == 2
 
 
 def test_rows_sorted_by_id_and_selectable() -> None:
@@ -247,7 +253,7 @@ def test_collector_body_removed_message_drops_row_immediately() -> None:
     collector_state._handle_status_message({"id": "BTC-USD-PERP.DYDX", "removed": True})
     app = BotTuiApp()
     app._refresh_collector_body()
-    assert len(app._collector_body.body) == 1
+    assert _instrument_rows(app._collector_body) == 1
 
 
 def test_refresh_collector_body_rebuilds_on_cold_open_to_populated_transition() -> None:
@@ -261,4 +267,84 @@ def test_refresh_collector_body_rebuilds_on_cold_open_to_populated_transition() 
     app._refresh_collector_body()
 
     assert app._collector_body is not filler_before
-    assert len(app._collector_body.body) == 1
+    assert _instrument_rows(app._collector_body) == 1
+
+
+def _archive_status() -> dict:
+    return {
+        "next_run": "2099-01-02T03:07:00Z",
+        "running": None,
+        "last_run": {
+            "run_id": "r-1",
+            "kind": "nightly",
+            "day": "2098-12-31",
+            "started": "2099-01-01T03:07:00Z",
+            "finished": "2099-01-01T03:41:00Z",
+            "steps": [{"venue": "BYBIT", "name": "reconcile", "exit": 0, "duration_s": 1.0}],
+        },
+    }
+
+
+def test_collector_body_shows_archive_status_trailing_line() -> None:
+    _reset()
+    collector_state._handle_status_message(_status("BTC-USD-PERP.DYDX"))
+    collector_state._handle_status_message({"unpinned_ids": ["ETH-USD-PERP.DYDX"]})
+    archive_state._handle_status_message(_archive_status())
+    app = BotTuiApp()
+    app._refresh_collector_body()
+    plain_texts = [w.text for w in app._collector_body.body if isinstance(w, urwid.Text)]
+    assert plain_texts[-1].startswith("archive: last 2098-12-31 ok 03:07-03:41Z")
+    assert any("ETH-USD-PERP.DYDX" in t for t in plain_texts[:-1])
+
+
+def test_collector_body_says_no_archive_status_yet_before_any_message() -> None:
+    _reset()
+    collector_state._handle_status_message(_status("BTC-USD-PERP.DYDX"))
+    app = BotTuiApp()
+    app._refresh_collector_body()
+    assert app._collector_body.body[-1].text == "archive: no status yet"
+
+
+def test_archive_line_never_takes_focus_from_the_instrument_rows() -> None:
+    _reset()
+    collector_state._handle_status_message(_status("BTC-USD-PERP.DYDX"))
+    archive_state._handle_status_message(_archive_status())
+    app = BotTuiApp()
+    app._switch_view("collector", [])
+    app._refresh_collector_body()
+    app._body.original_widget = app._collector_body
+    assert app._highlighted_collector_id() == "BTC-USD-PERP.DYDX"
+
+
+def test_cold_open_shows_the_archive_line_and_updates_it_in_place() -> None:
+    _reset()
+    app = BotTuiApp()
+    app._refresh_collector_body()
+    filler_before = app._collector_body
+    assert "archive: no status yet" in filler_before.original_widget.text
+
+    archive_state._handle_status_message(_archive_status())
+    app._refresh_collector_body()
+
+    assert app._collector_body is filler_before
+    text = app._collector_body.original_widget.text
+    assert COLD_OPEN_TEXT in text
+    assert "archive: last 2098-12-31 ok" in text
+
+
+def test_archive_line_refresh_keeps_the_listbox_and_focus() -> None:
+    _reset()
+    for iid in ("AAA-USD-PERP.DYDX", "BTC-USD-PERP.DYDX"):
+        collector_state._handle_status_message(_status(iid))
+    app = BotTuiApp()
+    app._switch_view("collector", [])
+    app._refresh_collector_body()
+    app._body.original_widget = app._collector_body
+    body_before = app._collector_body
+    app._collector_body.focus_position = 1
+
+    archive_state._handle_status_message(_archive_status())
+    app._refresh_collector_body()
+
+    assert app._collector_body is body_before
+    assert app._highlighted_collector_id() == "BTC-USD-PERP.DYDX"

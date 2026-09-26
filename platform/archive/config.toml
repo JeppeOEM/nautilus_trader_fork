@@ -1,0 +1,33 @@
+# The `archive` service's schedule (Story 25.1b; `python3 -m archive.scheduler`, compose service
+# `archive`). Mounted read-only into the container over the package's own copy, so an edit here
+# takes effect on `docker compose restart archive` without a rebuild. Every key is required and an
+# unknown key refuses start (archive/infrastructure/scheduler_config.py).
+#
+# The backup target is not here: it is RCLONE_REMOTE/RCLONE_BUCKET in platform/.env, the one
+# personal, gitignored source `make backup-catalog` reads too.
+
+# UTC wall time of the nightly run (HH:MM): each venue's nightly saga for yesterday, then the
+# consolidate, then the backup. Also the minute of the intraday grid below.
+nightly_at = "03:07"
+
+# The venues whose nightly saga runs, in this order within each day (a subset of DYDX, BYBIT,
+# HYPERLIQUID). One venue's failure never skips the next venue, the consolidate or the backup.
+venues = ["DYDX", "BYBIT", "HYPERLIQUID"]
+
+# After downtime, how many missed closed days are caught up (newest first kept, run oldest
+# first). Older missed days are ledgered once (`archive.catch_up_capped`) and left to `make nightly`.
+catch_up_max_days = 7
+
+# How long a job waits for the catalog maintenance lock (e.g. a manual `make nightly` holds it)
+# before it is recorded as a failed `lock_timeout` step. 0 = do not wait.
+lock_wait_minutes = 60
+
+# Every N hours (N divides 24; slots at hour % N == 0, at nightly_at's minute) the current UTC
+# day's closed hours of the small types (mark/index, funding, open interest, instrument status)
+# are merged into one file per hour.
+intraday_consolidate_hours = 4
+
+# The longest one step (one child process) may run before it is killed and recorded as a failed
+# step with exit 124 (`archive.step_timeout`), so a hung rclone or a wedged rebuild can never stall
+# every later job. Generous on purpose: the first backup of a large catalog uploads everything.
+step_timeout_minutes = 360

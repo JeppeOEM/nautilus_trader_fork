@@ -313,7 +313,7 @@ development_status:
   25-2-ranking-context-rankingboard-replaces-module-globals: done
   25-3-bots-context-paper-and-exec-types-nautilus-acl: done
   25-4-collection-control-plan-intent-vs-applied-set: done
-  25-1b-archive-service-nightly-maintenance-scheduled-no-host-cron: ready-for-dev
+  25-1b-archive-service-nightly-maintenance-scheduled-no-host-cron: awaiting-operator
   epic-25-retrospective: optional
 
   epic-26: backlog

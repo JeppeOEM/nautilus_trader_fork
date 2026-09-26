@@ -125,9 +125,20 @@ def _read_proof(step: Step, result: StepResult, run_id: str, venue: str, day: st
 
 
 def run_steps(
-    chain: list[Step], runner: StepRunner, run_id: str, venue: str, day: str
+    chain: list[Step],
+    runner: StepRunner,
+    run_id: str,
+    venue: str,
+    day: str,
+    on_step: Callable[[StepResult], None] | None = None,
 ) -> list[StepResult]:
-    """Run the chain, stopping after the first failed step (a step's findings, exit 2, continue)."""
+    """
+    Run the chain, stopping after the first failed step (a step's findings, exit 2, continue).
+
+    `on_step` (the `archive` service's status, Story 25.1b) is called with each step's result once
+    it is final -- after the rebuild's proof is read, which may still fail that step -- and before
+    the next step starts. It is called on the thread running the chain.
+    """
     results: list[StepResult] = []
     proof: RebuildProof | None = None
     for step in chain:
@@ -137,6 +148,8 @@ def run_steps(
         _read_proof(step, result, run_id, venue, day)
         proof = result.proof or proof
         results.append(result)
+        if on_step is not None:
+            on_step(result)
         if result.outcome() == "FAILED":
             error_ledger.record(f"nightly.{step.name}", f"exit {result.code}; later steps not run")
             break

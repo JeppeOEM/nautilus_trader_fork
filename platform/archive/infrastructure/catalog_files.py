@@ -27,10 +27,20 @@ UTC day -- capture is its writer; a `KEEP_OPEN_DAY_ROWS` rewrite (the rebuild) m
 file, but only after proving, against the original, that every row whose `ts_event` lies in the
 open day comes out identical in value and order.
 
+A merge in `MergeScope.CLOSED_HOUR` (the intraday merge, Story 25.1b) may write and remove files
+of the current UTC day, but only ones lying wholly inside a single hour before the current UTC
+hour -- the same guard one period finer, enforced here and not only by the caller's grouping.
+
 Instances come only from `archive.infrastructure.maintenance_lock.maintenance`, which holds the
 catalog maintenance flock for their lifetime, so no two archive tools mutate files at once.
+
+`write_json_atomic` is the archive's one writer of a small JSON file outside the catalog (the
+`archive` service's `state.json` scheduler cursor): temp, fsync, `Path.replace`, directory fsync.
+It lives here so the one-rewriter rule has no second rename site, and takes no maintenance lock:
+that file is the scheduler's alone, never a catalog file.
 """
 
+import json
 import logging
 import os
 import time
@@ -44,11 +54,13 @@ from kernel.clocks import NS_PER_DAY
 from kernel.clocks import CatalogFileSpan
 from kernel.parquet_compat import apply_zstd_default
 
+from archive.application.ports import MergeScope
 from archive.application.ports import OpenDayWriteError
 from archive.application.ports import PartialCommitError
 from archive.application.ports import RewriteMode
 from archive.application.ports import RewriteVerifyError
 from archive.application.ports import StagedRewrite
+from archive.domain.intraday import NS_PER_HOUR
 from nautilus_trader.persistence.catalog.parquet import _timestamps_to_filename
 
 
@@ -126,9 +138,27 @@ class CatalogFiles:
                 f"span [{start_ns}, {end_ns}] reaches the current UTC day: capture writes it"
             )
 
-    def _assert_file_closed(self, path: Path) -> None:
+    def _assert_span_in_closed_hour(self, start_ns: int, end_ns: int) -> None:
+        """
+        Protects capture's sole ownership of the current UTC hour through an intraday merge: the
+        span must lie wholly inside one hour, and that hour must be before the current one.
+        """
+        hour = start_ns // NS_PER_HOUR
+        if hour != end_ns // NS_PER_HOUR:
+            raise OpenDayWriteError(
+                f"span [{start_ns}, {end_ns}] crosses an hour boundary: not a closed-hour merge"
+            )
+        if max(start_ns, end_ns) >= self._now_ns() // NS_PER_HOUR * NS_PER_HOUR:
+            raise OpenDayWriteError(
+                f"span [{start_ns}, {end_ns}] reaches the current UTC hour: capture writes it"
+            )
+
+    def _assert_file_closed(self, path: Path, scope: MergeScope = MergeScope.CLOSED_DAY) -> None:
         span = CatalogFileSpan.from_path(path)
-        self.assert_span_closed(span.start_ns, span.end_ns)
+        if scope is MergeScope.CLOSED_HOUR:
+            self._assert_span_in_closed_hour(span.start_ns, span.end_ns)
+        else:
+            self.assert_span_closed(span.start_ns, span.end_ns)
 
     def _open_day_rows(self, path: Path, midnight_ns: int) -> pa.Table | None:
         """Return the file's rows whose `ts_event` is at or after `midnight_ns`, in order; or None."""
@@ -194,7 +224,14 @@ class CatalogFiles:
         for item in staged:
             _unlink_if_present(item.tmp)
 
-    def write_merged(self, directory: Path, table: pa.Table, expected_rows: int) -> Path:
+    def write_merged(
+        self,
+        directory: Path,
+        table: pa.Table,
+        expected_rows: int,
+        *,
+        scope: MergeScope = MergeScope.CLOSED_DAY,
+    ) -> Path:
         """
         Write a merge as a new file; `ValueError` for an empty table, `FileExistsError` when the
         span's name is taken -- a merge never overwrites a file, least of all one of its sources
@@ -205,7 +242,7 @@ class CatalogFiles:
         ts = table.column("ts_init")
         name = _timestamps_to_filename(int(pc.min(ts).as_py()), int(pc.max(ts).as_py()))
         final = directory / name
-        self._assert_file_closed(final)
+        self._assert_file_closed(final, scope)
         if final.exists():
             raise FileExistsError(f"{final} exists: a merge never overwrites a file")
         staged = StagedRewrite(final, directory / (name + TMP_SUFFIX))
@@ -233,10 +270,12 @@ class CatalogFiles:
                 f"{expected_rows}; schema {'kept' if kept else 'changed'}); original kept"
             )
 
-    def remove_merged_sources(self, paths: list[Path]) -> None:
+    def remove_merged_sources(
+        self, paths: list[Path], *, scope: MergeScope = MergeScope.CLOSED_DAY
+    ) -> None:
         unique = list(dict.fromkeys(paths))  # a path listed twice is removed once
         for path in unique:  # all checked before the first removal
-            self._assert_file_closed(path)
+            self._assert_file_closed(path, scope)
         directories = sorted({path.parent for path in unique})
         for directory in directories:
             if directory.is_dir():
@@ -277,3 +316,23 @@ class CatalogFiles:
         except OSError:  # a file appeared (or the directory went) since the check: leave it
             return False
         return True
+
+
+def write_json_atomic(path: Path, obj: object) -> None:
+    """
+    Replace `path` with `obj` as JSON, durably and atomically: a reader (or a crash) sees the old
+    file or the new one, never a torn one. The temp is removed when anything before the rename
+    fails.
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        with tmp.open("w", encoding="utf-8") as f:
+            json.dump(obj, f, indent=2, sort_keys=True)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        tmp.replace(path)
+    except BaseException:
+        _unlink_if_present(tmp)
+        raise
+    _fsync_dir(path.parent)

@@ -29,7 +29,7 @@ downstream of the collector ever touches `nautilus_trader`'s live `TradingNode`/
 | Module | Role | Talks to |
 |---|---|---|
 | `collector_core/` | The venue-neutral collector engine (Story 22.1) — ingest → 1s sample → flush → Parquet + `snapshots:raw` + the `SecondSink` port, and the capture lock `<catalog>/.capture-<VENUE>.lock` held for the process life (Story 25.1); the operator-run catalog tools moved to `archive/` in Story 25.1 (their old paths are deprecated re-exports) `[amended 2026-09-25: Story 25.1]` | Parquet catalog (read/write), Redis (publish), `collector_core/ports.py`'s `SecondSink` (the candle store, injected by the venue entrypoint) |
-| `archive/` | The archive context (Story 25.1, DDD spine AD-D9/AD-D18): the nightly saga (`archive.nightly`: rebuild -> consolidate -> build_candles -> reconcile -> prune) over the `ArchiveDay` state machine, `RetentionPolicy` (the one deleter), `CatalogFiles` (the one in-place rewriter), and the operator CLIs `python -m archive.<tool>` | Parquet catalog (read/write, never today's files), `candles.application` (`VerifiedDays`, `queries`, `rebuild`), the venues' kline REST (`kernel.venue_http`), the dYdX plan file (read, prune only) |
+| `archive/` | The archive context (Story 25.1, DDD spine AD-D9/AD-D18): the nightly saga (`archive.nightly`: rebuild -> consolidate -> build_candles -> reconcile -> prune) over the `ArchiveDay` state machine, `RetentionPolicy` (the one deleter), `CatalogFiles` (the one in-place rewriter), and the operator CLIs `python -m archive.<tool>`. Since Story 25.1b also the `archive` service (`python -m archive.scheduler`, `ArchiveScheduler` in `application/scheduler.py`): the one place nightly maintenance is scheduled -- each venue's saga, then consolidate, then `archive.backup_catalog`, per missed closed day, plus the closed-hour merge of the small types (`consolidate_catalog --closed-hours`) every `intraday_consolidate_hours` -- each step a child process, the maintenance lock only probed, never held `[amended 2026-09-26: Story 25.1b]` | Parquet catalog (read/write, never today's files; intraday, never the current hour), `candles.application` (`VerifiedDays`, `queries`, `rebuild`), the venues' kline REST (`kernel.venue_http`), the dYdX plan file (read, prune only), Redis (`archive:status` publish, `archive:control` read), `data/archive/state.json` (read/write), object storage (rclone, the backup step) |
 | `dydx_collector/`, `bybit_collector/`, `hyperliquid_collector/` | Venue subclasses of `collector_core.Collector`: WS/HTTP client, venue quirks, and each entrypoint's `build_collector` (the composition root: config + plan through `collector_core.config`'s one loader, `load_venue_config`). `Collector.apply(diff) -> Applied` makes the applied set the fact: the sampler, watchdog, cross-check and backfill iterate `applied ∩ plan`, and a book/trade message outside it is counted (`collector.unplanned_message`), never archived (Story 25.4) `[amended 2026-09-26: Story 25.4]` | Their venue's WS/REST (via Rust `nautilus_pyo3` clients) |
 | `collection_control/` | The collection-control context (Story 25.4, DDD spine AD-D17): the plan is the intent, capture's applied set the fact. `CollectionPlan` (`domain/`: instruments, `exclude`, `cap` = 30 for dYdX, the liquidity threshold, the dropped-instrument retention; commands `add`/`remove`/`pin`/`unpin`/`exclude`/`reload` return a `PlanDiff`), the pure `classify_liquidity` that alone admits a pin; `ControlService` (`collector:control`: save, then apply, then publish), `StatusPublisher` (`collector:status`, `pending` for a planned-but-unapplied id) and the plan-file `reload_loop` in `application/`; `TomlPlanStore`, the Redis bus/channel and `DydxMarkets` in `infrastructure/`. Wired into the dYdX collector's `extra_loops` by `dydx_collector.collector.build_collector`; no module state, deletes nothing | Redis (`collector:status` publish, `collector:control` read), the dYdX plan file `data/dydx_config.toml` (read/write), dYdX indexer `perpetualMarkets` (through `kernel.venue_http`) |
 | `kernel/` | The shared kernel (Story 23.2, DDD spine AD-D3): the one copy of every type, fold, parser, constant, transport and read helper more than one context uses — `second_snapshot` (`DydxSecondSnapshot`, `SecondOHLC`), `open_interest`, `fold` (`fold_trades`), `indicators` (pure `Indicator`s and snapshot functions), `performance_metrics`, `venues` (the only `InstrumentId` parser: `venue_of`, `has_venue`, `venue_kind`, `market_kind`, `market_suffix`, `bybit_category`), `clocks` (`TwoClocks`, `CatalogFileSpan`, the one skew bound `MAX_TS_INIT_SKEW_NS` = 300 s), `archive_markers` (the `_archive_gaps/<iid>.jsonl` format), `venue_http` (every venue REST URL and request), `catalog_files` (read-only snapshot-file helpers), `parquet_compat` (the one zstd `write_table` default). Imports no context, holds no state, store, config loader or ledger call; every context may import it | venue REST endpoints (outbound GET/POST, via callers), the Parquet catalog (read-only) |
@@ -144,7 +144,9 @@ unbounded-queue-growth bug under sustained load that OOM-crashed an earlier
   `collector_core.<tool>` paths are deprecated re-exports -- never automatic; the candle rebuild
   is `python -m candles.rebuild` since Story 24.1):
   `candles.rebuild` (rebuild a candle store from raw 1s), `consolidate_catalog`
-  (`make consolidate`, nightly, every venue; `make backup-catalog` syncs the result off-box),
+  (`make consolidate`, every venue; `--closed-hours` for the current day's closed hours of the
+  small types), `backup_catalog` (`make backup-catalog`: the guarded `rclone sync` of the closed
+  files off-box, rclone from the image),
   `repair_catalog` (clear impossible trade OHLC; never on a day `rebuild_seconds` rebuilt),
   `migrate_open_interest` (one-shot layout migration). Story 22.13: `kernel.fold` (the one exact
   trades -> second fold, live and rebuild), `rebuild_seconds` (a closed day's trade columns from
@@ -152,7 +154,10 @@ unbounded-queue-growth bug under sustained load that OOM-crashed an earlier
   exact, into `verified_days`, only for what the same saga run rebuilt), `prune_catalog` (age
   retention + verification-gated trade retention + the dYdX plan's dropped-instrument and delta
   retention; `make prune`) and `nightly` (`make nightly VENUE=...`: rebuild -> consolidate ->
-  build_candles -> compare -> prune).
+  build_candles -> compare -> prune). The `make` targets are manual tools: their schedule is the
+  `archive` service (`python -m archive.scheduler`, Story 25.1b), which runs `nightly`'s chain per
+  venue-day, then `consolidate_catalog --apply` and `backup_catalog`, every night, and replaced
+  the host crontab line `[amended 2026-09-26: Story 25.1b]`.
 - **`{dydx,bybit,hyperliquid}_collector/`** — per-venue `Collector` subclass, `client.py`
   (thin wrapper around that venue's Rust clients) and the `build_collector` composition root.
   Every venue's `config.toml` goes through the one loader `collector_core.config.load_venue_config`
@@ -388,17 +393,20 @@ Coin-detail and their `rankings:live`/`snapshots:raw` listeners were deleted;
 | `bots:control` | `bot_tui` | `bots` | `{bot_id, action: "start"` \| `"stop"}` — never a mode field |
 | `collector:status` | `collection_control` (`StatusPublisher`, in the dYdX collector process) | `bot_tui` | One message per planned instrument (`id`, `liquid`, `last_trade_ts`, `trade_backfill`, plus `"pending": true` when capture has not applied it, Story 25.4), the `unpinned_ids` list, and a `removed` tombstone on stop/unpin |
 | `collector:control` | `bot_tui` | `collection_control` (`ControlService`, in the dYdX collector process) | `start`/`unpin`/`stop`/`pin_top_liquid` requests |
+| `archive:status` | `archive` (`ArchiveScheduler`, Story 25.1b) | `data_api` (`GET /api/archive/status`), `bot_tui` (Collector pane) | `{next_run, next_intraday, running, last_run, last_intraday}`: each run `{run_id, kind, day, days, started, finished, steps: [{venue, name, exit, duration_s}]}` (`running` has no `finished`), after every step, on start and every 30 s |
+| `archive:control` | `data_api` (`POST /api/archive/run`, Story 25.1b) | `archive` | `{"command": "run_now", "day": "YYYY-MM-DD"` \| `null}` (null: yesterday); anything else is ledgered `archive.control_rejected` and ignored |
 
 ## Storage reference
 
 | Store | Writer | Readers | Contents |
 |---|---|---|---|
-| Parquet catalog (`data/catalog/`) | all three collectors | `ranking` (price backfill), `data_api`, `research` (backtests, notebooks) `[amended 2026-09-26: Story 25.2]` | Second-snapshots (`DydxSecondSnapshot`, trades folded in rather than stored raw — audit D-45), mark/index price, funding rate, `OpenInterest`, instrument definitions, plus `order_book_deltas` for the dYdX instruments that opt in, and the Story 22.13 raw `trade_tick/` archive (pruned nightly by `archive.prune_catalog --trade-retention-days 7`; `docs/DATA_DICTIONARY.md` §1.1). Minute bars retired 2026-09-20 (D-35). Nautilus-native, zero-conversion `[amended 2026-09-20: Epic 22 story 22.8, review pass]` |
+| Parquet catalog (`data/catalog/`) | all three collectors; the `archive` service's steps (closed days, and closed hours of the small types, only; Story 25.1b) | `ranking` (price backfill), `data_api`, `research` (backtests, notebooks) `[amended 2026-09-26: Story 25.2]` | Second-snapshots (`DydxSecondSnapshot`, trades folded in rather than stored raw — audit D-45), mark/index price, funding rate, `OpenInterest`, instrument definitions, plus `order_book_deltas` for the dYdX instruments that opt in, and the Story 22.13 raw `trade_tick/` archive (pruned nightly by `archive.prune_catalog --trade-retention-days 7`; `docs/DATA_DICTIONARY.md` §1.1). Minute bars retired 2026-09-20 (D-35). Nautilus-native, zero-conversion `[amended 2026-09-20: Epic 22 story 22.8, review pass]` |
 | `candles_{dydx,bybit,hyperliquid}.db` (SQLite, `data/candles/`) | that venue's collector (through the `SecondSink` port its entrypoint injects, Story 24.1 — the collector core no longer opens the file), plus `compare_klines` for the `verified_days` table | `data_api`, `prune_catalog` (via the `VerifiedDays` port) | Finished 1m..1D bars derived from raw 1s (D-35), plus the `verified_days` day-status table the archive tools reach through the `VerifiedDays` port. Fully rebuildable: `python -m candles.rebuild` |
 | `metrics.db` (SQLite) | `ranking_engine` (`ranking.infrastructure.metrics_store`) | `data_api` (read-only mount, through `views` → `ranking.application.queries`) | Historical ranking snapshots (Story 1.4/FR8) |
 | Nautilus `Cache` (Redis-backed, `bots`) | `bots` | `bots` only (strategy-scoped reads, `bots.infrastructure.cache_reader`) | Orders/positions for the running bots (Story 4.6); never read outside `bots` — its Redis encoding is not a contract |
 | `fills.db` (SQLite, `data/live_paper/`) | `bots` (`bots.infrastructure.fills_store`) | `bots` only; published as `bots:history:*` | One append-only row per fill, every bot (Story 4.6) |
-| `data/errors/<service>.jsonl` (JSON lines, Story 23.3) | that service (`collector`, `bybit_collector`, `hyperliquid_collector`, `ranking_engine`, `data_api`, `live-paper`, `bot_tui`) | `data_api` (`GET /api/errors`'s `services` block), `archive.crosscheck_errors` | Every `observability.error_ledger.record()` call, durably: `ts_ns`, `service`, `pid`, `site`, `detail`, `exc_type`, `suppressed`; plus one `process_start` line per boot. Rotates by size (`.1`..`.N`, default 20 MB, 10 backups kept alongside the live file); at most 60 lines/site/minute, exact `suppressed` carry |
+| `data/archive/state.json` (JSON, Story 25.1b) | the `archive` service (`archive.infrastructure.state_store`, atomic via `CatalogFiles`' `write_json_atomic`) | the `archive` service only | The scheduler cursor: `last_run_day`, each venue's `last_success_day`, the last run and last intraday run. Never a data verdict: `verified_days` is the only day status (AD-D9), and reconcile and prune never read it |
+| `data/errors/<service>.jsonl` (JSON lines, Story 23.3) | that service (`collector`, `bybit_collector`, `hyperliquid_collector`, `archive`, `ranking_engine`, `data_api`, `live-paper`, `bot_tui`) | `data_api` (`GET /api/errors`'s `services` block), `archive.crosscheck_errors` | Every `observability.error_ledger.record()` call, durably: `ts_ns`, `service`, `pid`, `site`, `detail`, `exc_type`, `suppressed`; plus one `process_start` line per boot. Rotates by size (`.1`..`.N`, default 20 MB, 10 backups kept alongside the live file); at most 60 lines/site/minute, exact `suppressed` carry |
 
 ---
 
@@ -412,6 +420,7 @@ without an SSH tunnel over Tailscale (see README's remote-access section).
 | `redis` | yes (`make up`) | `always` | Shared bus, no state to lose |
 | `collector` (dYdX) | yes | `always` | Core data path, must self-heal |
 | `bybit_collector`, `hyperliquid_collector` | yes | `always` | Same engine, same catalog, other venues (Epic 22) |
+| `archive` | yes | `always` | Nightly maintenance scheduled in our own code (Story 25.1b): must survive reboots and redeploys; replaces the host crontab line |
 | `ranking_engine` | yes | `always` | Sole ranking computer |
 | `data_api` | yes | `always` | Web UI (React SPA) + read-only FastAPI over the catalog/`metrics.db`, `:9100` |
 | `dozzle` | yes | `always` | Log viewer, `:8080` |
@@ -419,8 +428,9 @@ without an SSH tunnel over Tailscale (see README's remote-access section).
 | `bot_tui` | **no** — `profiles: ["tui"]`, `docker compose run` | n/a (one-shot) | Interactive tool, never a background daemon |
 
 Two-image split: `nautilus-trader-base` (rebuilt rarely, `make build-base`, ~15 min) →
-`collector.dockerfile` (thin layer, rebuilds in seconds) reused by collector,
-ranking_engine, `data_api`, and bot_tui; `live_paper.dockerfile` is `live-paper`'s own
+`collector.dockerfile` (thin layer, rebuilds in seconds; it also installs Debian's `rclone` for
+the backup step) reused by the three collectors, `archive`, ranking_engine and bot_tui (`data_api`
+has its own `data_api.dockerfile`, with a frontend-build stage); `live_paper.dockerfile` is `live-paper`'s own
 thin layer on the same base (it ships `bots`, `kernel`, `observability`, the `live_paper` shims
 and `tests`).
 

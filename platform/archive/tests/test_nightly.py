@@ -24,6 +24,8 @@ from pathlib import Path
 import pytest
 from observability import error_ledger
 
+from archive.application.nightly import StepResult
+from archive.application.nightly import run_steps
 from archive.nightly import main
 from archive.nightly import steps
 
@@ -273,3 +275,24 @@ def test_a_missing_catalog_stops_the_saga_before_any_step(tmp_path: Path) -> Non
     assert main(args, runner) == 1
     assert runner.ran == []
     assert error_ledger.counts() == {"archive.catalog_missing": 1}
+
+
+def test_on_step_sees_each_final_result_before_the_next_step_runs(tmp_path: Path) -> None:
+    runner = _FakeRunner(result="missing")  # the rebuild's proof is unusable: it fails late
+    seen: list[tuple[str, int, list[str]]] = []
+
+    def on_step(result: StepResult) -> None:
+        seen.append((result.name, result.code, runner.ran))
+
+    chain = steps("/c", "/cd", "BYBIT", "2026-09-20", str(tmp_path / "r.json"))
+    results = run_steps(chain, runner, "run", "BYBIT", "2026-09-20", on_step)
+    assert seen == [("rebuild_seconds", 1, ["rebuild_seconds"])]
+    assert [r.name for r in results] == ["rebuild_seconds"]
+
+
+def test_on_step_is_called_once_per_step_in_order(tmp_path: Path) -> None:
+    runner = _FakeRunner(codes={"compare_klines": 2})
+    seen: list[str] = []
+    chain = steps("/c", "/cd", "BYBIT", "2026-09-20", str(tmp_path / "r.json"))
+    run_steps(chain, runner, "run", "BYBIT", "2026-09-20", lambda r: seen.append(r.outcome()))
+    assert seen == ["ok", "ok", "ok", "findings", "ok"]

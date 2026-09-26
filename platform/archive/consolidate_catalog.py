@@ -15,8 +15,10 @@
 """
 Merge each closed UTC day's many small Parquet files into one file per (data type, instrument).
 
-Usage (nightly, e.g. from cron via `make consolidate`):
+Usage (the `archive` service runs it after every nightly run and, with --closed-hours, every
+`intraday_consolidate_hours`; `make consolidate` is the manual tool):
     python -m archive.consolidate_catalog --catalog /app/catalog --apply [--days 3] [--data-type custom_dydx_second_snapshot ...] [--venue BYBIT]
+    python -m archive.consolidate_catalog --catalog /app/catalog --apply --closed-hours [--venue BYBIT]
 
 How and why is `archive.application.consolidate_day`'s docstring (audit D-36). One run at a time:
 the catalog maintenance flock (`<catalog>/.consolidate.lock`, also taken by `rebuild_seconds`,
@@ -24,6 +26,12 @@ the catalog maintenance flock (`<catalog>/.consolidate.lock`, also taken by `reb
 Report-only unless --apply; a report-only run writes nothing and takes no lock. A missing catalog
 is `archive.catalog_missing`, exit 1. `--venue V` limits the run to leaves whose instrument directory ends in
 `.V` (the nightly job's per-venue form).
+
+`--closed-hours` (Story 25.1b) merges instead the closed hours of the *current* UTC day of the small
+types only (mark/index price, funding rate, open interest, instrument status --
+`archive.domain.intraday`): each hour before the current one with more than one file wholly inside
+it becomes one file; a file reaching the current hour is never touched. It takes neither `--days`
+nor `--data-type`, and `--apply` takes the maintenance flock exactly as a day run does.
 
 Each run ends with one summary line (days consolidated/refused, files and MB before -> after, wall
 seconds, peak RSS of this process) and exits 1 when any day was refused (DATA-07): the refusal's
@@ -38,6 +46,8 @@ from pathlib import Path
 from archive.application.catalog_check import catalog_missing
 from archive.application.consolidate_day import RunStats
 from archive.application.consolidate_day import run
+from archive.application.consolidate_day import run_closed_hours
+from archive.application.ports import CatalogWriter
 from archive.infrastructure.maintenance_lock import MAINTENANCE_LOCK_NAME
 from archive.infrastructure.maintenance_lock import maintenance
 
@@ -45,10 +55,18 @@ from archive.infrastructure.maintenance_lock import maintenance
 logger = logging.getLogger(__name__)
 
 
+def _consolidate(writer: CatalogWriter | None, args: argparse.Namespace) -> RunStats:
+    if args.closed_hours:
+        return run_closed_hours(writer, args.catalog, time.time_ns(), args.apply, args.venue)
+    return run(
+        writer, args.catalog, args.data_type, args.days, args.apply, time.time_ns(), args.venue
+    )
+
+
 def _run(args: argparse.Namespace) -> RunStats | None:
     """Apply under the maintenance flock (None when it is held); a report takes no lock."""
     if not args.apply:
-        return run(None, args.catalog, args.data_type, args.days, False, time.time_ns(), args.venue)
+        return _consolidate(None, args)
     catalog = Path(args.catalog)
     with maintenance(catalog) as writer:
         if writer is None:
@@ -56,9 +74,7 @@ def _run(args: argparse.Namespace) -> RunStats | None:
                 "consolidate: another run holds %s; not starting", catalog / MAINTENANCE_LOCK_NAME
             )
             return None
-        return run(
-            writer, args.catalog, args.data_type, args.days, True, time.time_ns(), args.venue
-        )
+        return _consolidate(writer, args)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -75,9 +91,16 @@ def main(argv: list[str] | None = None) -> int:
         "--data-type", action="append", help="repeatable directory name under data/; default: all"
     )
     parser.add_argument("--venue", help="only instruments of this venue, e.g. BYBIT")
+    parser.add_argument(
+        "--closed-hours",
+        action="store_true",
+        help="merge the current UTC day's closed hours of the small types instead of closed days",
+    )
     args = parser.parse_args(argv)
     if args.days is not None and args.days < 1:
         parser.error("--days must be at least 1")
+    if args.closed_hours and (args.days is not None or args.data_type):
+        parser.error("--closed-hours takes neither --days nor --data-type")
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     if catalog_missing("consolidate", args.catalog):
         return 1
@@ -87,9 +110,10 @@ def main(argv: list[str] | None = None) -> int:
     logger.info("consolidate: %s", stats.summary(args.apply))
     if stats.days_refused or stats.leaves_failed:
         logger.error(
-            "consolidate: %d day(s) refused, %d leaf/leaves failed -- see the consolidate.* "
+            "consolidate: %d %s(s) refused, %d leaf/leaves failed -- see the consolidate.* "
             "entries above (DATA-07)",
             stats.days_refused,
+            stats.unit,
             stats.leaves_failed,
         )
         return 1

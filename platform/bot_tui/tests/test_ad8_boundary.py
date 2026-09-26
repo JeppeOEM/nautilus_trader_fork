@@ -29,6 +29,7 @@ _BOT_TUI_DIR = Path(__file__).resolve().parent.parent
 
 _READER_MODULES = (
     "app.py",
+    "archive_state.py",
     "bots_pane.py",
     "bots_state.py",
     "bot_history_state.py",

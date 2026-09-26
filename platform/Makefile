@@ -28,6 +28,13 @@ DOZZLE_PORT ?= 8080
 endif
 export REDIS_PORT DATA_API_PORT DOZZLE_PORT
 
+# The operator's rclone config directory (`rclone config` on the host), mounted read-only into the
+# `archive` service for its nightly backup and `make backup-catalog` (Story 25.1b). Override in
+# platform/.env when it lives elsewhere. Created by `up`/`redeploy*` below: a bind-mount source
+# that does not exist would be created by dockerd as an empty root-owned directory.
+RCLONE_CONFIG_DIR ?= $(HOME)/.config/rclone
+export RCLONE_CONFIG_DIR
+
 ## Build the base nautilus image (~15 min, only needed once or after core changes)
 ## On networks with TLS inspection (e.g. Zscaler), export your root CA to
 ## ~/.docker/corporate-ca.pem and it will be injected automatically.
@@ -69,21 +76,28 @@ build-base-vps:
 ## first (seconds -- it's just the thin platform/ layer on top of the base image). Run
 ## `make build-base` once beforehand for the base image itself. Use this only for first
 ## bring-up or when dydx_collector/ itself changed -- otherwise use `make redeploy` so
-## the collector's live WS connection/book state is never disturbed.
+## the collector's live WS connection/book state is never disturbed. Starts the `archive`
+## service too (the nightly maintenance schedule, Story 25.1b; no profile). data/archive (its
+## state) and the rclone config directory are created first, as the invoking user, for the same
+## root-owned-bind-mount reason as `tui`'s mkdir.
 up:
+	mkdir -p $(PLATFORM_DIR)data/archive $(RCLONE_CONFIG_DIR)
 	$(COMPOSE) up -d --build
 	@docker image prune -f
 	@echo "Dashboard: http://localhost:$(DATA_API_PORT)"
 
-## Rebuild and restart everything that doesn't collect market data (ranking_engine, live-paper, bot_tui's image) -- never touches the collector
+## Rebuild and restart everything that doesn't collect market data (archive, ranking_engine, live-paper, bot_tui's image) -- never touches the collector
 ## container, so its WS connection/book state stays untouched. Use this for all
 ## non-collector iteration; reach for `make up` (or `docker compose up -d --build
 ## collector`) only when dydx_collector/ itself changed. live-paper is rebuilt+restarted
 ## under its profile same as `make up-live-paper` -- only run this if you actually want
 ## live-paper (re)started. bot_tui is `run`-only (never a daemon), so it's just rebuilt
 ## here for a fresh image; `make tui` also rebuilds it on every invocation regardless.
+## Restarting `archive` mid-run kills the running maintenance step; every step is crash-safe and
+## the scheduler repeats that venue-day on its next run (archive/application/scheduler.py).
 redeploy:
-	$(COMPOSE) up -d --build ranking_engine data_api
+	mkdir -p $(PLATFORM_DIR)data/archive $(RCLONE_CONFIG_DIR)
+	$(COMPOSE) up -d --build archive ranking_engine data_api
 	$(COMPOSE) --profile live-paper up -d --build live-paper
 	$(COMPOSE) --profile tui build bot_tui
 	@docker image prune -f
@@ -93,7 +107,8 @@ redeploy:
 ## dydx_collector/ changed (e.g. the candle-store feed). Briefly drops the collector's WS
 ## connection and loses its in-memory book state; prefer `redeploy` otherwise.
 redeploy-all:
-	$(COMPOSE) up -d --build collector ranking_engine data_api
+	mkdir -p $(PLATFORM_DIR)data/archive $(RCLONE_CONFIG_DIR)
+	$(COMPOSE) up -d --build collector archive ranking_engine data_api
 	$(COMPOSE) --profile live-paper up -d --build live-paper
 	$(COMPOSE) --profile tui build bot_tui
 	@docker image prune -f
@@ -104,7 +119,8 @@ redeploy-all:
 ## troll-redeploy in ~/.zshrc) without disturbing a running paper-trading bot's
 ## position/order state.
 redeploy-no-paper:
-	$(COMPOSE) up -d --build ranking_engine data_api
+	mkdir -p $(PLATFORM_DIR)data/archive $(RCLONE_CONFIG_DIR)
+	$(COMPOSE) up -d --build archive ranking_engine data_api
 	$(COMPOSE) --profile tui build bot_tui
 	@docker image prune -f
 	@echo "Dashboard: http://localhost:$(DATA_API_PORT)"
@@ -130,7 +146,7 @@ up-live-paper:
 build-insecure:
 	$(COMPOSE) build \
 		--build-arg PIP_INSECURE_ARGS="--trusted-host pypi.org --trusted-host files.pythonhosted.org --trusted-host pypi.python.org" \
-		collector ranking_engine data_api bot_tui live-paper
+		collector archive ranking_engine data_api bot_tui live-paper
 
 ## Run the platform test suite inside the collector image. Can't run against host
 ## Python -- nautilus_trader is only compiled/installed inside this image (see
@@ -168,9 +184,9 @@ hotpath-baseline:
 ## files per instrument per type per day. Safe while the collectors run (today's files are never
 ## touched). Ends with one summary line (days, files/MB before -> after, wall s, peak RSS) and
 ## exits 1 when any day was refused. Extra flags via CONSOLIDATE_ARGS, e.g.
-## `make consolidate CONSOLIDATE_ARGS="--days 3"`. Nightly, `make nightly` (below) runs this per
-## venue as one of its steps; the cron line (nightly per venue, THEN backup) is in
-## docs/DEPLOY_CHECKLIST.md.
+## `make consolidate CONSOLIDATE_ARGS="--days 3"`. A manual tool: the `archive` compose service
+## (Story 25.1b) is the schedule -- it runs this after every nightly run and the
+## `--closed-hours` merge intraday -- so no host cron line runs it any more.
 consolidate:
 	$(COMPOSE) run --rm --no-deps -e HOME=/tmp collector \
 		python3 -m archive.consolidate_catalog --catalog /app/catalog --apply $(CONSOLIDATE_ARGS)
@@ -180,9 +196,11 @@ consolidate:
 ## --days 2 -> build_candles --day --workers 1 -> compare_klines --rebuilt-by <this run> ->
 ## prune_catalog --apply (trade retention 7 days, gated on verified_days; for DYDX also the plan's
 ## dropped-instrument and per-coin delta retention, read from the mounted dYdX config.toml). A
-## step's "findings" exit 2 continues; any other failure stops the chain; one summary line. Keep a
-## standalone `make consolidate` in the cron line too. VENUE is required (DYDX|BYBIT|HYPERLIQUID);
-## DAY defaults to yesterday (UTC). Cron line: docs/DEPLOY_CHECKLIST.md.
+## step's "findings" exit 2 continues; any other failure stops the chain; one summary line.
+## VENUE is required (DYDX|BYBIT|HYPERLIQUID); DAY defaults to yesterday (UTC). A manual tool (a
+## re-run, or a day past the catch-up cap): the `archive` compose service runs this saga every
+## night for every venue in archive/config.toml (Story 25.1b; no host cron line). It shares the
+## catalog maintenance lock with that service, which waits for it (bounded) rather than overlap.
 DAY ?= $(shell date -u -d yesterday +%Y-%m-%d)
 nightly:
 	@test -n "$(VENUE)" || { echo "nightly: VENUE is required, e.g. make nightly VENUE=BYBIT [DAY=YYYY-MM-DD]" >&2; exit 1; }
@@ -190,33 +208,24 @@ nightly:
 		python3 -m archive.nightly --catalog /app/catalog --candles-dir /app/candles_dir \
 		--venue $(VENUE) --day $(DAY) --dydx-plan /app/dydx_collector/config.toml
 
-## Copy the catalog's closed-day files to object storage (audit D-33: there is no other copy).
-## Runs rclone on the HOST (install it there; the remote -- R2, B2, ... -- is configured with
-## `rclone config` in the operator's ~/.config/rclone, never in this repo). RCLONE_REMOTE and
-## RCLONE_BUCKET come from platform/.env or the environment. Run AFTER `make consolidate`, or the
-## upload is millions of tiny objects. Today's (UTC) files, still being written, are excluded,
-## as are *.tmp leftovers (an interrupted archive rewrite's `*.archive.tmp`, archive.infrastructure.
-## catalog_files); the `.capture-<VENUE>.lock` files sit in the catalog root, outside data/. `sync` deletes/overwrites on the remote what the local catalog no
-## longer has (every nightly consolidation replaces minute files) -- `--backup-dir` moves those
-## objects under a dated catalog-replaced/ prefix instead of deleting them, so a wiped local
-## catalog can never erase the only backup. Prune catalog-replaced/ only by hand, after checking
-## that catalog/data on the remote is intact -- never with an automatic expiry rule, which would
-## silently delete the only copy after a local wipe. Values in .env are taken literally: no quotes,
-## and the remote is its bare name (a trailing ':' is tolerated).
-BACKUP_SRC   := $(PLATFORM_DIR)data/catalog/data
-BACKUP_DEST   = $(patsubst %:,%,$(RCLONE_REMOTE)):$(RCLONE_BUCKET)
-BACKUP_TODAY  = $(shell date -u +%Y-%m-%d)
-BACKUP_STAMP  = $(shell date -u +%Y-%m-%dT%H-%M-%SZ)
+## Copy the catalog's closed-day files to object storage (audit D-33: there is no other copy), by
+## hand. A manual tool: the `archive` compose service runs the same module after every nightly run
+## (Story 25.1b; no host cron line). Runs `python3 -m archive.backup_catalog` in the `archive`
+## service's container, so rclone comes from the image (not the host) and reads the operator's
+## rclone config directory (RCLONE_CONFIG_DIR, default ~/.config/rclone, mounted read-only; the
+## remote -- R2, B2, ... -- is configured with `rclone config`, never in this repo). RCLONE_REMOTE
+## and RCLONE_BUCKET come from platform/.env. Run AFTER `make consolidate`, or the upload is
+## millions of tiny objects. The module's docstring has the guards (an unset target, an absent or
+## empty catalog: refused, ledgered, exit 1) and the exact `rclone sync ... --backup-dir
+## .../catalog-replaced/<stamp>` command: today's files and *.tmp leftovers are excluded, and
+## objects the sync would delete or overwrite move under a dated catalog-replaced/ prefix, so a
+## wiped local catalog can never erase the only backup. Prune catalog-replaced/ only by hand, after
+## checking that catalog/data on the remote is intact -- never with an automatic expiry rule. Values
+## in .env are taken literally: no quotes, and the remote is its bare name (a trailing ':' is
+## tolerated).
 backup-catalog:
-	@test -n "$(RCLONE_REMOTE)" || { echo "backup-catalog: RCLONE_REMOTE is not set (platform/.env or env; see README 'Nightly maintenance')" >&2; exit 1; }
-	@test -n "$(RCLONE_BUCKET)" || { echo "backup-catalog: RCLONE_BUCKET is not set (platform/.env or env; see README 'Nightly maintenance')" >&2; exit 1; }
-	@command -v rclone >/dev/null 2>&1 || { echo "backup-catalog: rclone is not installed on this host (https://rclone.org/install/)" >&2; exit 1; }
-	@test -d "$(BACKUP_SRC)" || { echo "backup-catalog: $(BACKUP_SRC) does not exist -- refusing to sync an absent catalog" >&2; exit 1; }
-	@test -n "$$(find "$(BACKUP_SRC)" -name '*.parquet' ! -name '$(BACKUP_TODAY)T*' -print -quit)" || { echo "backup-catalog: $(BACKUP_SRC) holds no closed-day .parquet file -- refusing to sync an empty (or freshly wiped) catalog" >&2; exit 1; }
-	rclone sync "$(BACKUP_SRC)" "$(BACKUP_DEST)/catalog/data" \
-		--backup-dir "$(BACKUP_DEST)/catalog-replaced/$(BACKUP_STAMP)" \
-		--exclude "**/$(BACKUP_TODAY)T*" --exclude "*.tmp" \
-		--transfers 8 --fast-list
+	mkdir -p $(RCLONE_CONFIG_DIR)
+	$(COMPOSE) run --rm --no-deps archive python3 -m archive.backup_catalog --catalog /app/catalog
 
 ## Rebuild the SQLite candle store from the raw 1s archive (first deploy, or after a
 ## "candle store write failed" / archive.repair_catalog run). Skips today unless the collector is stopped

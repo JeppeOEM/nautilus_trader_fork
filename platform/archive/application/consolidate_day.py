@@ -42,6 +42,24 @@ bars and plans its next fetch from the catalog's *file intervals*
 (`get_missing_intervals_for_request`), so merging two runs of a day across a missing range would
 name one file over the hole and seal it as covered forever (DATA-05). They are also few (one file
 per backfill window), so they are not the D-36 problem.
+
+`run_closed_hours` (Story 25.1b, the `archive` service's intraday merge) is the same
+schema/covering/merge/verify path one period finer: over the small types only
+(`archive.domain.intraday.INTRADAY_DATA_TYPES`), it merges each *closed hour* of the current UTC
+day (`closed_hours_needing_work`) in `MergeScope.CLOSED_HOUR`, so a file reaching the current hour
+is never read, written or removed. The nightly run later merges those hourly files into the day's
+one file like any other files of a closed day.
+
+Known limit: a file capture writes into an hour *after* that hour was merged (a flush delayed past
+the intraday slot) lies inside the merged file's span, so the covering-file check refuses that
+hour (`consolidate.row_count`, loud, nothing deleted). The nightly day merge usually absorbs it
+(the day's covering span is then some other file's), but not when the hourly file alone spans the
+whole day -- a sparse leaf, e.g. `instrument_status`, whose every row of the day lies in that one
+hour: then the day is refused the same way every night, and the standalone consolidate fails
+until an operator merges the late file by hand. The intraday slot runs at `nightly_at`'s minute
+past the hour, several flush periods after the hour closed, so this needs a flush delayed by
+minutes. Upgrade path: merge a late file into the existing merged file (a verified rewrite of it
+plus the late one) instead of refusing, at both the hour and the day grain.
 """
 
 import logging
@@ -59,9 +77,13 @@ from kernel.venues import has_venue
 from observability import error_ledger
 
 from archive.application.ports import CatalogWriter
+from archive.application.ports import MergeScope
 from archive.application.ports import OpenDayWriteError
 from archive.application.ports import PartialCommitError
 from archive.application.ports import RewriteVerifyError
+from archive.domain.intraday import INTRADAY_DATA_TYPES
+from archive.domain.intraday import NS_PER_HOUR
+from archive.domain.intraday import closed_hours_needing_work
 
 
 logger = logging.getLogger(__name__)
@@ -85,11 +107,12 @@ class RunStats:
     bytes_after: int = 0
     wall_seconds: float = 0.0
     peak_rss_mb: float = 0.0
+    unit: str = "day"  # what `days_done`/`days_refused` count: a day, or an hour (closed hours)
 
     def summary(self, apply: bool) -> str:
         verb = "consolidated" if apply else "would be consolidated (report only, nothing changed)"
         return (
-            f"{self.days_done} day(s) {verb}, {self.days_refused} refused, "
+            f"{self.days_done} {self.unit}(s) {verb}, {self.days_refused} refused, "
             f"{self.leaves_failed} leaf/leaves failed; "
             f"files {self.files_before} -> {self.files_after}; "
             f"{self.bytes_before / _MB:.1f} -> {self.bytes_after / _MB:.1f} MB; "
@@ -186,10 +209,12 @@ def merged_table(files: list[Path]) -> pa.Table:
     return table.take(order)
 
 
-def _merge(writer: CatalogWriter, directory: Path, sources: list[Path], label: str) -> bool:
+def _merge(
+    writer: CatalogWriter, directory: Path, sources: list[Path], label: str, scope: MergeScope
+) -> bool:
     """Write the merged file; False (ledgered, sources kept) when its read-back row count differs."""
     try:
-        writer.write_merged(directory, merged_table(sources), _row_count(sources))
+        writer.write_merged(directory, merged_table(sources), _row_count(sources), scope=scope)
     except RewriteVerifyError as e:
         error_ledger.record(
             "consolidate.row_count", f"{label}: merged file failed verification ({e}); sources kept"
@@ -202,11 +227,17 @@ def _merge(writer: CatalogWriter, directory: Path, sources: list[Path], label: s
 
 
 def _consolidate_day(
-    writer: CatalogWriter | None, directory: Path, label: str, files: list[Path], apply: bool
+    writer: CatalogWriter | None,
+    directory: Path,
+    label: str,
+    files: list[Path],
+    apply: bool,
+    scope: MergeScope = MergeScope.CLOSED_DAY,
 ) -> bool:
     """
-    Consolidate one closed day's files; return False when the day was refused (recorded in the
-    error ledger, nothing deleted), True when done (or reported without --apply).
+    Consolidate one closed period's files (a day, or an hour in `CLOSED_HOUR` scope); return False
+    when it was refused (recorded in the error ledger, nothing deleted), True when done (or
+    reported without --apply).
     """
     # Known limit: a refused day stays refused -- every nightly run records it again and exits 1
     # until an operator rewrites that day's odd file(s) to the common schema (as
@@ -225,7 +256,7 @@ def _consolidate_day(
         logger.info("%s: %d files, %d rows (report only)", label, len(files), expected)
         return True
     if big is None:
-        if not _merge(writer, directory, sources, label):
+        if not _merge(writer, directory, sources, label, scope):
             return False
     elif pq.read_metadata(str(big)).num_rows != expected or not _is_merge_of(big, sources):
         error_ledger.record(
@@ -233,9 +264,54 @@ def _consolidate_day(
             f"{label}: covering file {big.name} does not match its sources; nothing deleted",
         )
         return False
-    writer.remove_merged_sources(sources)
+    writer.remove_merged_sources(sources, scope=scope)
     logger.info("%s: %d files -> 1, %d rows", label, len(files), expected)
     return True
+
+
+def _consolidate_period(
+    writer: CatalogWriter | None,
+    directory: Path,
+    label: str,
+    files: list[Path],
+    apply: bool,
+    scope: MergeScope,
+) -> bool:
+    """One period's consolidation, with every tolerated failure confined to it and ledgered."""
+    try:
+        return _consolidate_day(writer, directory, label, files, apply, scope)
+    except OpenDayWriteError as e:  # never for a closed period; refused loudly if it ever is
+        error_ledger.record("consolidate.open_day", f"{label}: {e}; sources kept")
+    except (OSError, pa.ArrowException) as e:  # e.g. a truncated file: this period only
+        error_ledger.record("consolidate.error", f"{label}: {e!r}; sources kept", exc=e)
+    return False
+
+
+def _consolidate_groups(
+    writer: CatalogWriter | None,
+    directory: Path,
+    groups: dict[int, list[Path]],
+    scope: MergeScope,
+    apply: bool,
+    stats: RunStats | None,
+) -> int:
+    """
+    Consolidate each period's group of one leaf, oldest first; return how many were done. A group
+    is keyed by its day index in `CLOSED_DAY` scope, by its hour index in `CLOSED_HOUR` scope.
+    """
+    period_ns = NS_PER_HOUR if scope is MergeScope.CLOSED_HOUR else _DAY_NS
+    done = 0
+    for period, files in sorted(groups.items()):
+        stamp = pd.Timestamp(period * period_ns, unit="ns")
+        when = stamp.date() if scope is MergeScope.CLOSED_DAY else stamp.strftime("%Y-%m-%d %H:00")
+        label = f"{directory.parent.name}/{directory.name} {when}"
+        if _consolidate_period(writer, directory, label, files, apply, scope):
+            done += 1
+        elif stats is not None:
+            stats.days_refused += 1
+    if stats is not None:
+        stats.days_done += done
+    return done
 
 
 def consolidate_directory(
@@ -250,25 +326,24 @@ def consolidate_directory(
     Consolidate one leaf directory; return the number of days done (or reported without --apply).
     Refused days are recorded in the error ledger and, when `stats` is given, counted there.
     """
-    done = 0
-    for day, files in sorted(closed_days_needing_work(directory, now_ns, max_days).items()):
-        date = pd.Timestamp(day * _DAY_NS, unit="ns").date()
-        label = f"{directory.parent.name}/{directory.name} {date}"
-        try:
-            ok = _consolidate_day(writer, directory, label, files, apply)
-        except OpenDayWriteError as e:  # never for a closed day; refused loudly if it ever is
-            error_ledger.record("consolidate.open_day", f"{label}: {e}; sources kept")
-            ok = False
-        except (OSError, pa.ArrowException) as e:  # e.g. a truncated file: this day only
-            error_ledger.record("consolidate.error", f"{label}: {e!r}; sources kept", exc=e)
-            ok = False
-        if ok:
-            done += 1
-        elif stats is not None:
-            stats.days_refused += 1
-    if stats is not None:
-        stats.days_done += done
-    return done
+    groups = closed_days_needing_work(directory, now_ns, max_days)
+    return _consolidate_groups(writer, directory, groups, MergeScope.CLOSED_DAY, apply, stats)
+
+
+def consolidate_closed_hours(
+    writer: CatalogWriter | None,
+    directory: Path,
+    now_ns: int,
+    apply: bool,
+    stats: RunStats | None = None,
+) -> int:
+    """
+    Consolidate one leaf's closed hours of the current UTC day (`closed_hours_needing_work`);
+    return the number of hours done (or reported without --apply).
+    """
+    spans = {path: file_span(path) for path in directory.glob("*.parquet")}
+    groups = closed_hours_needing_work(spans, now_ns)
+    return _consolidate_groups(writer, directory, groups, MergeScope.CLOSED_HOUR, apply, stats)
 
 
 def _leaf_size(directory: Path) -> tuple[int, int]:
@@ -289,14 +364,19 @@ def _consolidate_leaf(
     max_days: int | None,
     apply: bool,
     stats: RunStats,
+    scope: MergeScope = MergeScope.CLOSED_DAY,
 ) -> None:
+    """Consolidate one leaf: its closed days, or in `CLOSED_HOUR` scope today's closed hours."""
     files, size = _leaf_size(directory)
     stats.files_before += files
     stats.bytes_before += size
     try:
         if apply and writer is not None:
             writer.remove_stale_tmp(directory)
-        consolidate_directory(writer, directory, now_ns, max_days, apply, stats)
+        if scope is MergeScope.CLOSED_HOUR:
+            consolidate_closed_hours(writer, directory, now_ns, apply, stats)
+        else:
+            consolidate_directory(writer, directory, now_ns, max_days, apply, stats)
     except (OSError, ValueError, pa.ArrowException) as e:  # e.g. an unparseable file name
         error_ledger.record("consolidate.error", f"{directory}: leaf abandoned: {e!r}", exc=e)
         stats.leaves_failed += 1
@@ -320,10 +400,43 @@ def run(
     recorded and confined to its day (or, for a listing failure, its leaf): the other venues'
     leaves still run and the summary is still printed.
     """
+    return _run_leaves(
+        writer, catalog_path, data_types, max_days, apply, now_ns, venue, MergeScope.CLOSED_DAY
+    )
+
+
+def run_closed_hours(
+    writer: CatalogWriter | None,
+    catalog_path: str,
+    now_ns: int,
+    apply: bool = True,
+    venue: str | None = None,
+) -> RunStats:
+    """
+    Merge the closed hours of the current UTC day of the small types (`INTRADAY_DATA_TYPES`), one
+    leaf at a time, in `MergeScope.CLOSED_HOUR`; return what was done (`unit` "hour"). Failures
+    are confined and ledgered exactly as in `run`.
+    """
+    types = sorted(INTRADAY_DATA_TYPES)
+    return _run_leaves(
+        writer, catalog_path, types, None, apply, now_ns, venue, MergeScope.CLOSED_HOUR
+    )
+
+
+def _run_leaves(
+    writer: CatalogWriter | None,
+    catalog_path: str,
+    data_types: list[str] | None,
+    max_days: int | None,
+    apply: bool,
+    now_ns: int,
+    venue: str | None,
+    scope: MergeScope,
+) -> RunStats:
     started = time.monotonic()
-    stats = RunStats()
+    stats = RunStats(unit="hour" if scope is MergeScope.CLOSED_HOUR else "day")
     for directory in leaf_dirs(catalog_path, data_types, venue):
-        _consolidate_leaf(writer, directory, now_ns, max_days, apply, stats)
+        _consolidate_leaf(writer, directory, now_ns, max_days, apply, stats, scope)
     stats.wall_seconds = time.monotonic() - started
     # ru_maxrss is KiB on Linux (the only platform this runs on: the collector image).
     stats.peak_rss_mb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024

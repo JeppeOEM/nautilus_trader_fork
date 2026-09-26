@@ -17,8 +17,10 @@ Every image ships the packages its entrypoints import (spine AD-D12).
 
 An entrypoint is what a container of a compose service runs: the service's `command:` (or its
 dockerfile's `CMD` when it has none), every `python3 -m <module>` the `Makefile` runs in that
-service, and every step a module launches as its own process (`archive.nightly`'s chain).
-The nightly cron line runs `make` targets only, so it is covered through the `Makefile`.
+service, and every step a module launches as its own process (`archive.nightly`'s chain, and the
+`archive` service's `archive.scheduler`, which runs that chain plus its consolidate and backup
+steps). Nightly maintenance is scheduled by that service, not a host cron line (Story 25.1b):
+`test_the_deploy_checklist_has_no_crontab_line_and_names_the_removal_check` holds the docs to it.
 
 For each entrypoint the transitive closure of in-repo imports is computed with `ast` (a shim is
 followed to its target like any import) and its top-level packages must all be in that service's
@@ -265,20 +267,29 @@ def _step_module(step: ast.Call) -> str:
     return dotted.value
 
 
-def _nightly_steps() -> list[str]:
-    """Return the modules `archive.nightly` runs as child processes (its `Step(...)` calls)."""
-    tree = ast.parse(_MODULES["archive.nightly"].read_text())
+def _step_modules(module: str) -> list[str]:
+    """Return the modules `module` runs as child processes (its `Step(...)` calls)."""
+    tree = ast.parse(_MODULES[module].read_text())
     steps = [
         node
         for node in ast.walk(tree)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "Step"
     ]
-    assert steps, "nightly no longer builds its chain from Step(...) calls"
+    assert steps, f"{module} no longer builds its chains from Step(...) calls"
     return [_step_module(step) for step in steps]
 
 
+def _nightly_steps() -> list[str]:
+    return _step_modules("archive.nightly")
+
+
+def _scheduler_steps() -> list[str]:
+    """Return the `archive` service's children: its own chains' steps plus the saga's."""
+    return _step_modules("archive.scheduler") + _nightly_steps()
+
+
 # Modules that launch other in-repo modules as separate processes, which `ast` imports miss.
-_CHILD_PROCESSES = {"archive.nightly": _nightly_steps}
+_CHILD_PROCESSES = {"archive.nightly": _nightly_steps, "archive.scheduler": _scheduler_steps}
 
 
 def _entrypoints() -> list[Entrypoint]:
@@ -382,6 +393,9 @@ def test_every_service_and_make_target_contributes_entrypoints() -> None:
         "ranking.__main__",
         "archive.nightly",
         "archive.rebuild_seconds",
+        "archive.scheduler",
+        "archive.backup_catalog",
+        "archive.consolidate_catalog",
         "bot_tui.app",
     }, "the parser lost an entrypoint it found when this test was written"
 
@@ -435,15 +449,28 @@ def test_makefile_test_lists_run_inside_an_image_that_ships_them(target: str) ->
     assert tops <= copied, f"make {target} runs {sorted(tops - copied)}, absent from its image"
 
 
-def test_the_cron_line_runs_only_make_targets() -> None:
-    cron = [
-        line for line in _CRON_DOC.read_text().splitlines() if re.match(r"^\S+ \S+ \* \* \* ", line)
-    ]
-    assert len(cron) == 1, f"expected one cron line in {_CRON_DOC.name}"
-    targets = re.findall(r"\bmake (\w[\w-]*)", cron[0])
-    assert targets, "the cron line runs no make target"
-    assert set(targets) <= set(_makefile_recipes()), "the cron line names an unknown make target"
-    assert not re.search(r"\b(python3?|docker)\b", cron[0]), "cron must go through make targets"
+def _section(text: str, heading: str) -> str:
+    """Return the body of the `## <heading>...` section of a Markdown document."""
+    match = re.search(
+        rf"^## {re.escape(heading)}.*?$(.*?)(?=^## |\Z)", text, re.DOTALL | re.MULTILINE
+    )
+    assert match, f"{_CRON_DOC.name} has no section starting '## {heading}'"
+    return match.group(1)
+
+
+def test_the_deploy_checklist_has_no_crontab_line_and_names_the_removal_check() -> None:
+    """
+    Nightly maintenance is the `archive` service's (Story 25.1b): the checklist installs no crontab
+    line anywhere, and its §1 names the check proving the old one is gone.
+    """
+    text = _CRON_DOC.read_text()
+    # Five schedule fields (`7 3 * * *`, `*/5 ...`) then a command, or a `CRON_TZ=` setting.
+    schedule = re.compile(r"^\s*(CRON_TZ=|([\d*/,-]+\s+){5}\S)")
+    cron = [line for line in text.splitlines() if schedule.match(line)]
+    assert cron == [], f"{_CRON_DOC.name} still carries a crontab line: {cron}"
+    section = _section(text, "1.")
+    assert "crontab -l | grep -E 'make (nightly|consolidate|backup-catalog)'" in section
+    assert "archive" in _compose_services(), "the archive service schedules the maintenance"
 
 
 @pytest.mark.parametrize("raw", [">", "|", "", "- python3", '["python3", "-m", "x"]'])

@@ -3,6 +3,10 @@
 import type {
   AlertCreate,
   AlertResponse,
+  ArchiveRun,
+  ArchiveRunResponse,
+  ArchiveStatusResponse,
+  ArchiveStep,
   CandlesResponse,
   HealthResponse,
   IndicatorCatalogEntry,
@@ -20,6 +24,10 @@ import type {
 export type {
   AlertCreate,
   AlertResponse,
+  ArchiveRun,
+  ArchiveRunResponse,
+  ArchiveStatusResponse,
+  ArchiveStep,
   CandlesResponse,
   HealthResponse,
   IndicatorCatalogEntry,
@@ -256,4 +264,34 @@ export async function createAlert(body: AlertCreate): Promise<AlertResponse> {
 export async function deleteAlert(id: string): Promise<void> {
   const res = await fetch(`/api/alerts/${encodeURIComponent(id)}`, { method: "DELETE" });
   if (!res.ok) throw new Error(`DELETE /api/alerts/${id} failed: ${res.status}`);
+}
+
+// Story 25.1b: the nightly-maintenance status the `archive` service publishes. A 503 means no
+// status has reached data_api yet (the service is down or still starting) -- the caller shows
+// that as "unavailable", never as "never ran".
+export async function fetchArchiveStatus(): Promise<ArchiveStatusResponse> {
+  const res = await fetch("/api/archive/status");
+  if (!res.ok) throw new HttpError(res.status, `GET /api/archive/status failed: ${res.status}`);
+  return (await res.json()) as ArchiveStatusResponse;
+}
+
+// Well above data_api's own 2 s Redis connect/publish bound (as SET_RANKING_MODE_TIMEOUT_MS).
+const RUN_ARCHIVE_TIMEOUT_MS = 10_000;
+
+// Story 25.1b: queue the full nightly sequence for `day` (null = yesterday). A 202 only means the
+// scheduler received the command; the run shows up in the next archive status. A 422/503 carries
+// the server's detail in the message.
+export async function runArchiveNow(day: string | null): Promise<ArchiveRunResponse> {
+  const res = await fetch("/api/archive/run", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ day }),
+    signal: AbortSignal.timeout(RUN_ARCHIVE_TIMEOUT_MS),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { detail?: unknown };
+    const detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail ?? body);
+    throw new HttpError(res.status, `POST /api/archive/run failed: ${res.status} ${detail}`);
+  }
+  return (await res.json()) as ArchiveRunResponse;
 }

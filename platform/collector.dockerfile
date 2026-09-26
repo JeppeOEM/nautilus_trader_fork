@@ -4,6 +4,13 @@ FROM nautilus-trader-base:1.229.0
 
 WORKDIR /app
 RUN chown 1000:1000 /app
+# rclone for `archive.backup_catalog` (the `archive` service's nightly backup and `make
+# backup-catalog`, Story 25.1b): Debian's package (the base is python:3.13-slim, Debian trixie), not
+# a Python dependency. Its own layer before the pip install, so a requirements change reuses it.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends rclone && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 COPY platform/requirements.txt ./requirements.txt
 # PIP_INSECURE_ARGS is empty by default (normal TLS-verified install). Set via
 # --build-arg when behind a TLS-intercepting proxy (e.g. Zscaler) that breaks pip's

@@ -25,6 +25,7 @@ from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 from candles.application import queries
 from candles.application.rebuild import rebuild_instrument
 from candles.domain.fold import BAR_SECONDS
@@ -641,3 +642,90 @@ def test_a_report_only_run_takes_no_lock(tmp_path: Path) -> None:
         assert held is not None
         assert main(["--catalog", str(tmp_path)]) == 0
         assert main(["--catalog", str(tmp_path), "--apply"]) == 1
+
+
+# -- story 25.1b: the intraday merge of the current day's closed hours ----------------------------
+
+_HOUR_NS = 3_600 * _SEC
+_NOW_1420 = _DAY0 * _DAY_NS + 14 * _HOUR_NS + 20 * _MIN
+
+
+def _seed_mark_at(catalog: ParquetDataCatalog, day: int, minutes: list[int]) -> None:
+    """One `MarkPriceUpdate` file per given minute of `day` (minute of the day, 0..1439)."""
+    iid = InstrumentId.from_str(_MARK_IID)
+    for minute in minutes:
+        catalog.write_data(
+            [
+                MarkPriceUpdate(iid, Price.from_str("2500.5"), ts, ts)
+                for ts in _minute_stamps(day, minute)
+            ]
+        )
+
+
+def _hours_of(directory: Path) -> list[int]:
+    """Return the hour of day of each file, sorted (-1 for a file crossing an hour)."""
+    hours = []
+    for path in directory.glob("*.parquet"):
+        a, b = _file_span(path)
+        hours.append((a % _DAY_NS) // _HOUR_NS if a // _HOUR_NS == b // _HOUR_NS else -1)
+    return sorted(hours)
+
+
+def test_closed_hours_are_merged_and_nothing_reaching_the_current_hour_is_touched(
+    tmp_path: Path,
+) -> None:
+    catalog = ParquetDataCatalog(str(tmp_path))
+    _seed_mark_at(catalog, _DAY0, [9 * 60, 9 * 60 + 1, 9 * 60 + 2, 13 * 60 + 58, 13 * 60 + 59])
+    _seed_mark_at(catalog, _DAY0, [14 * 60, 14 * 60 + 1])  # the current hour: capture's
+    crossing = [
+        MarkPriceUpdate(InstrumentId.from_str(_MARK_IID), Price.from_str("2500.5"), ts, ts)
+        for ts in (_DAY0 * _DAY_NS + 12 * _HOUR_NS - _SEC, _DAY0 * _DAY_NS + 12 * _HOUR_NS)
+    ]
+    catalog.write_data(crossing)
+    _seed_minutes(catalog, IID, _DAY0, 3)  # snapshots: nightly-only
+    mark_dir = tmp_path / "data" / "mark_price_update" / _MARK_IID
+    snap_dir = tmp_path / "data" / "custom_dydx_second_snapshot" / IID
+    current = {p: p.read_bytes() for p in mark_dir.glob("*.parquet") if _hours_of_path(p) == 14}
+    snapshots = sorted(snap_dir.glob("*.parquet"))
+
+    stats = consolidate_day.run_closed_hours(
+        CatalogFiles(lambda: _NOW_1420), str(tmp_path), _NOW_1420
+    )
+
+    assert (stats.days_done, stats.days_refused, stats.unit) == (2, 0, "hour")
+    assert _hours_of(mark_dir) == [-1, 9, 13, 14, 14]
+    assert all(p.read_bytes() == b for p, b in current.items())
+    assert sorted(snap_dir.glob("*.parquet")) == snapshots
+    rows = sum(pq.read_metadata(p).num_rows for p in mark_dir.glob("*.parquet"))
+    assert rows == 7 * 6 + len(crossing)  # every row kept
+
+
+def _hours_of_path(path: Path) -> int:
+    a, _ = _file_span(path)
+    return (a % _DAY_NS) // _HOUR_NS
+
+
+def test_the_nightly_consolidate_absorbs_the_hourly_files(tmp_path: Path) -> None:
+    catalog = ParquetDataCatalog(str(tmp_path))
+    minutes = [9 * 60, 9 * 60 + 1, 13 * 60 + 58, 13 * 60 + 59, 14 * 60, 14 * 60 + 1]
+    _seed_mark_at(catalog, _DAY0, minutes)
+    consolidate_day.run_closed_hours(CatalogFiles(lambda: _NOW_1420), str(tmp_path), _NOW_1420)
+    mark_dir = tmp_path / "data" / "mark_price_update" / _MARK_IID
+    assert len(list(mark_dir.glob("*.parquet"))) == 4
+
+    stats = run(str(tmp_path), None, None, apply=True, now_ns=(_DAY0 + 1) * _DAY_NS)
+
+    assert stats.days_done == 1
+    (merged,) = mark_dir.glob("*.parquet")
+    ts = pq.read_table(merged).column("ts_init").to_pylist()
+    assert ts == sorted(t for m in minutes for t in _minute_stamps(_DAY0, m))
+
+
+def test_closed_hours_takes_neither_days_nor_data_types_and_takes_the_lock(tmp_path: Path) -> None:
+    for extra in (["--days", "1"], ["--data-type", "mark_price_update"]):
+        with pytest.raises(SystemExit):
+            main(["--catalog", str(tmp_path), "--closed-hours", *extra])
+    with (tmp_path / ".consolidate.lock").open("a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        assert main(["--catalog", str(tmp_path), "--apply", "--closed-hours"]) == 1
+    assert main(["--catalog", str(tmp_path), "--apply", "--closed-hours"]) == 0

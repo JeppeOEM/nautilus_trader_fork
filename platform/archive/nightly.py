@@ -13,7 +13,8 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 r"""
-One venue's nightly maintenance for one closed day (story 22.13; `make nightly VENUE=... DAY=...`).
+One venue's nightly maintenance for one closed day (story 22.13; `make nightly VENUE=... DAY=...`
+by hand; the `archive` service runs the same chain, `steps`, every night -- Story 25.1b).
 
 Usage:
     python -m archive.nightly --catalog /app/catalog --candles-dir /app/candles_dir \\
@@ -41,8 +42,9 @@ A missing catalog stops the saga before any step (`archive.catalog_missing`, exi
 Known limit: plan retention runs only as the saga's last step, so an earlier FAILED step (e.g. a
 standing consolidate refusal) also postpones dYdX dropped-instrument and delta retention -- and the
 trade retention -- until that failure is fixed. Upgrade path: a standalone
-`archive.prune_catalog --dydx-plan` cron entry, or a saga that runs retention after a failure
-that does not concern the files it would delete. Ends with one summary line
+`archive.prune_catalog --dydx-plan` job in the `archive` service's chains
+(`archive/scheduler.py`), or a saga that runs retention after a failure that does not concern
+the files it would delete. Ends with one summary line
 (per-step outcome and wall seconds, peak child RSS, the run id). Exit code: the failing step's,
 else 2 when any step had findings, else 0.
 """

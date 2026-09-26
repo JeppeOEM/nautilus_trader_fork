@@ -399,6 +399,70 @@
         }
       }
     },
+    "/api/archive/status": {
+      "get": {
+        "summary": "Get Archive Status",
+        "description": "503 until the bus has cached its first message -- the scheduler may be down or still\nstarting, and an invented \"never ran\" status would be a lie -- and 503 again once the\nscheduler's 30 s heartbeat has been silent for the bus's stale bound, so a dead `archive`\nservice never shows as a frozen \"ok\" or \"running\". Read through `buses` (not an imported\nname) so tests can swap the bus.",
+        "operationId": "get_archive_status_api_archive_status_get",
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArchiveStatusResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No `archive:status` message received yet, or none recently"
+          }
+        }
+      }
+    },
+    "/api/archive/run": {
+      "post": {
+        "summary": "Post Archive Run",
+        "description": "Ask the scheduler to run the full nightly sequence for `day`. 202: it is queued, and\n`archive:status` confirms it. A short-lived connection per call -- a rare human action.\n\n503 when nobody received it (`publish()` counts 0 subscribers: the `archive` service is\ndown) or Redis fails or stalls -- the caller sees a lost command (DATA-07).\n\nKnown limit: `publish()` counts every subscriber, so a stray `redis-cli SUBSCRIBE\narchive:control` makes a 202 while the scheduler is down, and a command the scheduler\nrejects (`archive.control_rejected`) or drops as a duplicate is still a 202 here. The page\nshows the run only once `archive:status` carries it. Upgrade path: an acknowledged command\n(the scheduler echoes a request id in `archive:status`).",
+        "operationId": "post_archive_run_api_archive_run_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ArchiveRunRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ArchiveRunResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No subscriber on `archive:control`, or Redis failed"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/rankings": {
       "get": {
         "summary": "Get Rankings",
@@ -1207,6 +1271,204 @@
           "created_ns"
         ],
         "title": "AlertResponse"
+      },
+      "ArchiveRun": {
+        "properties": {
+          "run_id": {
+            "type": "string",
+            "title": "Run Id"
+          },
+          "kind": {
+            "type": "string",
+            "title": "Kind"
+          },
+          "day": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Day"
+          },
+          "days": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Days"
+          },
+          "started": {
+            "type": "string",
+            "title": "Started"
+          },
+          "finished": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Finished"
+          },
+          "steps": {
+            "items": {
+              "$ref": "#/components/schemas/ArchiveStep"
+            },
+            "type": "array",
+            "title": "Steps"
+          }
+        },
+        "type": "object",
+        "required": [
+          "run_id",
+          "kind",
+          "day",
+          "started",
+          "steps"
+        ],
+        "title": "ArchiveRun",
+        "description": "One maintenance run. `finished` is null while it is running."
+      },
+      "ArchiveRunRequest": {
+        "properties": {
+          "day": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Day"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "title": "ArchiveRunRequest",
+        "description": "`day` is a closed UTC day (`YYYY-MM-DD`, before today), or null for yesterday. The scheduler\nrefuses today and future days too; checking here turns a command it would only ledger and\ndrop into an immediate 422 for the operator."
+      },
+      "ArchiveRunResponse": {
+        "properties": {
+          "day": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Day"
+          }
+        },
+        "type": "object",
+        "required": [
+          "day"
+        ],
+        "title": "ArchiveRunResponse"
+      },
+      "ArchiveStatusResponse": {
+        "properties": {
+          "next_run": {
+            "type": "string",
+            "title": "Next Run"
+          },
+          "next_intraday": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Next Intraday"
+          },
+          "running": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ArchiveRun"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_run": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ArchiveRun"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_intraday": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ArchiveRun"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        },
+        "type": "object",
+        "required": [
+          "next_run",
+          "last_run"
+        ],
+        "title": "ArchiveStatusResponse"
+      },
+      "ArchiveStep": {
+        "properties": {
+          "venue": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Venue"
+          },
+          "name": {
+            "type": "string",
+            "title": "Name"
+          },
+          "exit": {
+            "type": "integer",
+            "title": "Exit"
+          },
+          "duration_s": {
+            "type": "number",
+            "title": "Duration S"
+          }
+        },
+        "type": "object",
+        "required": [
+          "venue",
+          "name",
+          "exit",
+          "duration_s"
+        ],
+        "title": "ArchiveStep"
       },
       "CandleItem": {
         "properties": {

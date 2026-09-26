@@ -3,69 +3,113 @@
 Operator actions for the collector host (the VPS, `nifelheim`) that no code can do for itself.
 Record every measurement in `docs/DATA_INTEGRITY_AUDIT.md` (the row named next to it).
 
-## 1. Install the nightly cron line (story 22.13)
+## 1. Remove the old cron line: the `archive` service schedules maintenance (Story 25.1b)
 
-After `make redeploy-all` has shipped story 22.13, replace the old
-`make consolidate; make backup-catalog` line with this one (host crontab, `crontab -e`). The
-times are UTC: put `CRON_TZ=UTC` on the line above if the box's clock is not UTC.
+Nightly maintenance is no longer a host crontab line. The compose service `archive`
+(`python3 -m archive.scheduler`, started by `make up` with no profile, `restart: always`) runs it,
+so a reboot or redeploy at 03:07 no longer loses the night, and `archive:status` (the web UI's
+maintenance status, the TUI's Collector pane) shows whether it ran.
+
+After the first deploy that contains Story 25.1b (`make up`, or `make redeploy`, which starts
+`archive`), delete the old line with `crontab -e`, then confirm it is gone:
 
 ```bash
-CRON_TZ=UTC
-7 3 * * * cd /path/to/platform && { for v in DYDX BYBIT HYPERLIQUID; do make nightly VENUE=$v >> nightly.log 2>&1; done; make consolidate >> consolidate.log 2>&1; make backup-catalog >> backup.log 2>&1; }
+crontab -l | grep -E 'make (nightly|consolidate|backup-catalog)'   # must print nothing
+docker compose -f platform/docker-compose.yml ps archive              # Up
 ```
 
-- One `make nightly` per venue, for yesterday (UTC): the `archive.nightly` saga (Story 25.1).
-  Each runs `rebuild_seconds` -> `consolidate_catalog --days 2` -> `build_candles` (which runs
-  `python -m candles.rebuild` since Story 24.1; the step keeps its name) -> `compare_klines` ->
-  `prune_catalog` as separate processes (`python -m archive.<step>`). The rebuild writes its result
-  into the saga's temp dir and the saga hands the reconcile `--rebuilt-by <run id>`, one
-  `--rebuilt <iid>` per instrument the rebuild rebuilt and one `--not-rebuilt <iid>` per instrument
-  it refused: only the rebuilt are reconciled, any other instrument-day is never judged
-  (`reconcile.not_rebuilt`), and a missing result file stops the saga before
-  consolidating. The run id is on the summary line. A step's exit 2 is "findings" (some instruments refused, mismatched or not
-  comparable -- all ledgered, and none of them releases trades to the prune): the chain continues.
-  Any other non-zero exit stops that venue's chain.
-- The standalone `make consolidate` after the nightlies covers every closed day and every data
-  type; it is the one that keeps reporting an old refused day, which the nightly's `--days 2` no
-  longer sees (so one bad old day cannot block every night).
-- `;` between the steps, never `&&`: one venue's failure must not skip the next venue or the
-  backup.
-- Each job runs in its own container (`docker compose run --rm collector ...`), never inside a
-  running collector (MEM-01).
-- **Locking:** each catalog-rewriting step (`rebuild_seconds`, `consolidate_catalog`,
+A line left in place would run the whole sequence a second time each night: harmless (every
+step is idempotent and the two share the maintenance lock), but it wastes the night's memory
+headroom and doubles the backup traffic.
+
+What the service runs (schedule in `platform/archive/config.toml`, times UTC):
+
+- **Nightly, at `nightly_at` (03:07).** For each closed day due, oldest first, and each venue in
+  `venues`, the `archive.nightly` saga (Story 25.1). Then one `consolidate_catalog --apply` over
+  every closed day and data type, then `archive.backup_catalog`. Every step is its own child
+  process (MEM-01), so no job runs inside a collector. `;` semantics: one venue's FAILED saga
+  never skips the next venue, the consolidate or the backup.
+  - The saga runs `rebuild_seconds` -> `consolidate_catalog --days 2` -> `build_candles` (which
+    runs `python -m candles.rebuild` since Story 24.1; the step keeps its name) ->
+    `compare_klines` -> `prune_catalog`, as separate processes (`python -m archive.<step>`).
+  - The rebuild writes its result into the saga's temp dir, and the saga hands the reconcile
+    `--rebuilt-by <run id>`, one `--rebuilt <iid>` per instrument the rebuild rebuilt and one
+    `--not-rebuilt <iid>` per instrument it refused. Only the rebuilt are reconciled: any other
+    instrument-day is never judged (`reconcile.not_rebuilt`). A missing result file stops the saga
+    before consolidating. The run id is on the summary line.
+  - A step's exit 2 is "findings" (some instruments refused, mismatched or not comparable, all
+    ledgered, and none of them releases trades to the prune): the chain continues. Any other
+    non-zero exit stops that venue's chain.
+  - The full `consolidate_catalog` after the sagas covers every closed day and every data type. It
+    is the step that keeps reporting an old refused day, which the saga's `--days 2` no longer sees,
+    so one bad old day cannot block every night.
+- **Catch-up.** Each venue's last day of unbroken success (`last_success_day`) and the last
+  completed scheduled run (`last_run_day`) are kept in `platform/data/archive/state.json`. That
+  file is a scheduler cursor, not a data verdict: `verified_days` stays the only day status.
+  - After downtime the next run covers every missed closed day, oldest first, up to
+    `catch_up_max_days` (7). Older days are ledgered once (`archive.catch_up_capped`, naming them)
+    and left to `make nightly`.
+  - A venue whose saga FAILED keeps its watermark, so the next night's run covers that day again
+    plus the new one. There is no tight retry loop: `last_run_day` advances whatever the outcome.
+  - With no state file (first start), every slot already past is taken as handled by the host cron
+    it replaces: the first run is the next slot, covering that slot's yesterday only, so a daytime
+    cutover never re-runs last night in the day. A night missed across the cutover is one "Run now"
+    (web) or `make nightly VENUE=... DAY=...` away.
+  - A step still running after `step_timeout_minutes` (360) is killed and fails with exit 124
+    (`archive.step_timeout`), so a hung rclone or rebuild never stalls later jobs.
+- **Intraday, every `intraday_consolidate_hours` (4).** At slots 00:07, 04:07, ... it runs
+  `consolidate_catalog --apply --closed-hours`, which merges the current UTC day's closed hours of
+  the small types (mark/index price, funding, open interest, instrument status). A file reaching
+  the current hour is never touched. The nightly consolidate later merges those hourly files into
+  the day's one file.
+- **Run now.** The web UI's "Run now" (or a `{"command": "run_now", "day": "YYYY-MM-DD" | null}`
+  message on `archive:control`) queues one closed day's full sequence (null: yesterday). It runs
+  after any running job; the same day queued twice runs once.
+- **Locking.** Each catalog-rewriting step (`rebuild_seconds`, `consolidate_catalog`,
   `prune_catalog`, and the manual `repair_catalog`/migration tools) takes the catalog maintenance
-  lock (`<catalog>/.consolidate.lock`) separately, for its own duration -- not the whole chain. A
-  manual run of one of them overlapping the cron job makes that step exit 1 (lock held), which
-  stops that venue's chain for the night; rerun the day afterwards. A report-only run
-  (`make prune-dry`, a rebuild or consolidation without `--apply`, a repair report) writes nothing
-  and takes no lock, so it can run beside the cron job. The dYdX collector no longer
-  prunes anything itself (Story 25.1): dropped coins' files and per-coin delta retention are the
-  nightly prune step's, under that lock, from the plan file `--dydx-plan` names.
-- **Capture lock (Story 25.1):** every collector holds a shared `flock` on
-  `<catalog>/.capture-<VENUE>.lock` for its whole life (pid and start time inside, informational
-  only; the file is never deleted, and a killed collector's lock is released by the kernel).
-  `python -m archive.repair_catalog --apply` refuses a venue whose collector holds it
-  (`repair.capture_running`, exit 1): stop that collector first. While a tool holds it
-  exclusively, a starting collector waits (`collector.capture_lock_wait`, once) and starts when
-  it is released. No archive tool changes a row of the current UTC day: a whole-file write,
-  merge or delete of a file whose span reaches it is refused (`<tool>.open_day` in the ledger
-  when one is met), and the rebuild rewrites the midnight files (the one crossing midnight, and
-  one starting after it that holds yesterday's last rows) with every row of today verified
-  identical -- so the nightly (the 03:07 UTC cron line above) never refuses `rebuild.open_day`.
-- **Retention granularity (Story 25.1):** plan retention (`non_config_retain_hours`, per-coin
-  `retain_hours`) now runs only in the nightly, on closed UTC days: the effective floor is "the
-  day closes, plus the next nightly", about 24 h worst case, where the old 15-minute in-collector
-  loop pruned intra-day. A dropped instrument is now any DYDX leaf not in the plan -- a delisted
-  market's leftovers age out too, not only known indexer markets. An empty (0-byte) plan file is
-  refused (prune exit 1), never read as "collect nothing".
+  lock (`<catalog>/.consolidate.lock`) itself, for its own duration, not the whole chain.
+  - Before each job the service *probes* the lock without holding it. While a manual run holds it,
+    the service waits, up to `lock_wait_minutes` (60), ledgering `archive.lock_wait` once. Past the
+    bound it ledgers `archive.lock_timeout` and records that job as a failed `lock_timeout` step.
+  - A manual run started in the gap between the probe and a step's own attempt makes that step exit
+    1 (lock held), as before. Rerun the day afterwards (`make nightly`, or Run now).
+  - A report-only run (`make prune-dry`, a rebuild or consolidation without `--apply`, a repair
+    report) writes nothing and takes no lock, so it can run beside the service.
+  - The dYdX collector no longer prunes anything itself (Story 25.1): dropped coins' files and
+    per-coin delta retention are the nightly prune step's, under that lock, from the plan file
+    `--dydx-plan` names (the `archive` service mounts `data/dydx_config.toml` read-only).
+- **Capture lock (Story 25.1).** Every collector holds a shared `flock` on
+  `<catalog>/.capture-<VENUE>.lock` for its whole life. The pid and start time inside are
+  informational only. The file is never deleted, and the kernel releases a killed collector's lock.
+  - `python -m archive.repair_catalog --apply` refuses a venue whose collector holds it
+    (`repair.capture_running`, exit 1): stop that collector first. While a tool holds it
+    exclusively, a starting collector waits (`collector.capture_lock_wait`, once) and starts when it
+    is released.
+  - The `archive` service never takes it: its steps write closed days and closed hours only.
+  - No archive tool changes a row of the current UTC day. A whole-file write, merge or delete of a
+    file whose span reaches it is refused (`<tool>.open_day` in the ledger when one is met).
+  - The rebuild rewrites the midnight files (the one crossing midnight, and one starting after it
+    that holds yesterday's last rows) with every row of today verified identical, so the 03:07 run
+    never refuses `rebuild.open_day`.
+- **Retention granularity (Story 25.1).** Plan retention (`non_config_retain_hours`, per-coin
+  `retain_hours`) runs only in the nightly, on closed UTC days.
+  - The effective floor is "the day closes, plus the next nightly", about 24 h worst case. The old
+    15-minute in-collector loop pruned intra-day.
+  - A dropped instrument is now any DYDX leaf not in the plan, so a delisted market's leftovers age
+    out too, not only known indexer markets.
+  - An empty (0-byte) plan file is refused (prune exit 1), never read as "collect nothing".
+- **Stops.** A redeploy or `docker compose stop archive` mid-run kills the running step at compose's
+  grace period. Every step is crash-safe (temp-then-rename, covering-file recovery), and that
+  venue's watermark does not advance, so the next run repeats the day.
 
 ### Re-running a missed or failed day
 
-`make nightly VENUE=BYBIT DAY=2026-09-20`. Every step is idempotent for a closed day (the rebuild
-changes 0 rows the second time; `compare_klines` overwrites that day's `verified_days` row -- a
-rerun re-proves a verified day), so a
-day missed by cron, or failed at any step, is simply run again after fixing the cause. Run the
-venues' missed days oldest first. Expect the prune report (`kept <iid> <day>: unverified|failed`)
+The service retries a failed day by itself on the next night (see Catch-up above). By hand:
+Run now on the web UI (all venues, one day), or `make nightly VENUE=BYBIT DAY=2026-09-20` for one
+venue. Every step is idempotent for a closed day (the rebuild changes 0 rows the second time;
+`compare_klines` overwrites that day's `verified_days` row -- a rerun re-proves a verified day), so
+a day missed by the service (e.g. past `catch_up_max_days`), or failed at any step, is simply run
+again after fixing the cause. Run the venues' missed days oldest first. Expect the prune report (`kept <iid> <day>: unverified|failed`)
 to list every old unverified or failed day on **every** night until it passes or is dealt with by
 hand -- that repetition is the reminder, not noise.
 
@@ -134,7 +178,8 @@ same `./data/live_paper` mount and every `bots:*` key unchanged); `live_paper/` 
 re-export shims. The paper config moved with the code: `live_paper/config.toml` →
 `bots/config.toml`, mounted at `/app/bots/config.toml`. The archive tools' old
 `collector_core.*`/`dydx_collector.normalize_snapshot_schema` shim paths were deleted -- use
-`python -m archive.<tool>` (the cron line runs `make nightly` and is unaffected).
+`python -m archive.<tool>` (the cron line runs `make nightly` and is unaffected; since Story 25.1b
+there is no cron line at all -- the `archive` service schedules the saga, section 1).
 
 1. If the VPS copy of `live_paper/config.toml` has local edits, keep them before pulling:
    ```bash
@@ -317,16 +362,21 @@ Record numbers where each line says, never in a story file.
 - One full day of Hyperliquid trade arrival lag (`ts_init - ts_event`) into D-59 to confirm
   the 10 s stale-trade filter drops no live trades (22.13).
 
-### 5.4 Cron, backup, and the trade-feed flip
+### 5.4 Nightly maintenance, backup, and the trade-feed flip
 
-- Install the nightly cron line from section 1 (CRON_TZ=UTC if the box is not on UTC); it
-  replaces story 22.11's consolidate-only line. After the first nightly run, copy that night's
-  `consolidate: ...` line into D-36 as the measured nightly run (22.11, 22.13).
+- Nightly maintenance is the `archive` service (section 1, Story 25.1b): remove any old host
+  crontab line as section 1 says and confirm `archive` is Up. After its first nightly run, copy
+  that night's `consolidate: ...` line (`docker compose logs archive`) into D-36 as the measured
+  nightly run (22.11, 22.13), and check `GET /api/archive/status` shows every step with its exit.
 - Object storage: choose Cloudflare R2 or Backblaze B2, create a bucket, `rclone config` on
-  the host (credentials stay in `~/.config/rclone`), set `RCLONE_REMOTE` and `RCLONE_BUCKET`
-  (bare values) in `platform/.env`, run `make backup-catalog` once after a consolidation,
-  confirm with `rclone lsf $RCLONE_REMOTE:$RCLONE_BUCKET/catalog/data --max-depth 2`, then
-  update D-33 to say the backup is scheduled. Also answer D-33's open question: was the
+  the host (credentials stay in `~/.config/rclone`, which the `archive` service mounts read-only;
+  set `RCLONE_CONFIG_DIR` in `platform/.env` if it lives elsewhere), set `RCLONE_REMOTE` and
+  `RCLONE_BUCKET` (bare values) in `platform/.env`, `docker compose up -d archive` so the service
+  picks them up, run `make backup-catalog` once after a consolidation (it runs rclone inside the
+  image; the host needs no rclone), confirm with
+  `rclone lsf $RCLONE_REMOTE:$RCLONE_BUCKET/catalog/data --max-depth 2`, then update D-33 to say
+  the backup is scheduled. Until the target is set every nightly run's backup step fails loudly
+  (`archive.backup_not_configured`). Also answer D-33's open question: was the
   2026-09-19 17:53 VPS catalog reset deliberate? (22.11)
 - Trade gap closure: run section 3 above in full (before figure with `trade_feeds = 1`, flip
   to 2, 24 h and one-week numbers into D-47/D-48; 22.14).

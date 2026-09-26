@@ -12,7 +12,9 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
-"""Tests for bot_tui.collector_pane -- Story 6.1. Pure-logic only, no urwid/I/O."""
+"""Tests for bot_tui.collector_pane -- Stories 6.1, 25.1b. Pure-logic only, no urwid/I/O."""
+
+import datetime as dt
 
 from bot_tui import collector_pane
 
@@ -74,3 +76,105 @@ def test_format_unpinned_line_empty_is_blank() -> None:
 def test_format_unpinned_line_lists_sorted_ids() -> None:
     line = collector_pane.format_unpinned_line(["ETH-USD-PERP.DYDX", "AAA-USD-PERP.DYDX"])
     assert line == "unpinned (add back with :start <ID>): AAA-USD-PERP.DYDX, ETH-USD-PERP.DYDX"
+
+
+# --- Story 25.1b: format_archive_line ---
+
+_NOW = dt.datetime(2026, 9, 26, 14, 27, tzinfo=dt.UTC)
+
+
+def _step(name: str, exit_code: int, venue: str | None = None) -> dict:
+    return {"venue": venue, "name": name, "exit": exit_code, "duration_s": 1.0}
+
+
+def _run(steps: list[dict], **overrides: object) -> dict:
+    run = {
+        "run_id": "r-1",
+        "kind": "nightly",
+        "day": "2026-09-25",
+        "days": ["2026-09-25"],
+        "started": "2026-09-26T03:07:00Z",
+        "finished": "2026-09-26T03:41:00Z",
+        "steps": steps,
+    }
+    run.update(overrides)
+    return run
+
+
+def _archive(**overrides: object) -> dict:
+    status = {
+        "next_run": "2026-09-27T03:07:00Z",
+        "next_intraday": "2026-09-26T16:07:00Z",
+        "running": None,
+        "last_run": _run([_step("reconcile", 0, "BYBIT"), _step("consolidate", 0)]),
+        "last_intraday": None,
+    }
+    status.update(overrides)
+    return status
+
+
+def test_archive_line_before_any_status() -> None:
+    assert collector_pane.format_archive_line(None, _NOW) == "archive: no status yet"
+
+
+def test_archive_line_last_run_ok_with_times_and_next_run() -> None:
+    line = collector_pane.format_archive_line(_archive(), _NOW)
+    assert line == ("archive: last 2026-09-25 ok 03:07-03:41Z · next 2026-09-27 03:07Z (in 12h40m)")
+
+
+def test_archive_line_findings_when_only_exit_2() -> None:
+    last = _run([_step("reconcile", 2, "BYBIT"), _step("consolidate", 0)])
+    line = collector_pane.format_archive_line(_archive(last_run=last), _NOW)
+    assert "last 2026-09-25 findings (BYBIT reconcile=2) 03:07-03:41Z" in line
+
+
+def test_archive_line_failed_names_every_non_zero_step() -> None:
+    last = _run([_step("reconcile", 2, "BYBIT"), _step("backup", 1)])
+    line = collector_pane.format_archive_line(_archive(last_run=last), _NOW)
+    assert "last 2026-09-25 FAILED (BYBIT reconcile=2, backup=1)" in line
+
+
+def test_archive_line_running_shows_the_current_step() -> None:
+    running = _run([_step("rebuild", 0, "DYDX"), _step("candles", 0, "DYDX")], finished=None)
+    line = collector_pane.format_archive_line(_archive(running=running), _NOW)
+    assert line.startswith("archive: running nightly 2026-09-25 (step 3) · next")
+
+
+def test_archive_line_appends_a_failed_intraday_merge() -> None:
+    intraday = _run([_step("consolidate", 1)], kind="intraday", day="2026-09-26")
+    line = collector_pane.format_archive_line(_archive(last_intraday=intraday), _NOW)
+    assert "· intraday 2026-09-26 FAILED (consolidate=1) 03:07-03:41Z ·" in line
+
+
+def test_archive_line_omits_a_clean_intraday_merge() -> None:
+    intraday = _run([_step("consolidate", 0)], kind="intraday", day="2026-09-26")
+    line = collector_pane.format_archive_line(_archive(last_intraday=intraday), _NOW)
+    assert "intraday" not in line
+
+
+def test_archive_line_no_run_yet_and_stale_marker() -> None:
+    line = collector_pane.format_archive_line(_archive(last_run=None), _NOW, stale=True)
+    assert line.startswith("~ archive: no run yet · next 2026-09-27 03:07Z")
+
+
+def test_archive_line_multi_day_catch_up_without_day() -> None:
+    last = _run([_step("x", 0)], kind="catch_up", day=None, days=["2026-09-23", "2026-09-24"])
+    line = collector_pane.format_archive_line(_archive(last_run=last), _NOW)
+    assert "last 2026-09-23,2026-09-24 ok" in line
+
+
+def test_archive_line_tolerates_malformed_nested_fields() -> None:
+    last = {"steps": "nope", "started": 5}
+    line = collector_pane.format_archive_line(_archive(last_run=last, next_run="soon"), _NOW)
+    assert line == "archive: last ? ok ?-?Z · next 'soon'"
+
+
+def test_archive_line_tolerates_a_non_string_venue() -> None:
+    last = {"steps": [{"venue": 7, "name": "backup_catalog", "exit": 1}], "day": "2026-09-25"}
+    line = collector_pane.format_archive_line(_archive(last_run=last), _NOW)
+    assert "FAILED (backup_catalog=1)" in line
+
+
+def test_archive_line_next_run_in_the_past_is_zero_minutes() -> None:
+    line = collector_pane.format_archive_line(_archive(next_run="2026-09-26T03:07:00Z"), _NOW)
+    assert line.endswith("next 2026-09-26 03:07Z (in 0h00m)")

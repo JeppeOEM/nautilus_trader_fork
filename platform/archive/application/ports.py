@@ -70,6 +70,20 @@ class RewriteMode(enum.Enum):
     KEEP_OPEN_DAY_ROWS = "keep_open_day_rows"
 
 
+class MergeScope(enum.Enum):
+    """
+    Which files a merge may write and remove (`CatalogWriter.write_merged`/`remove_merged_sources`).
+
+    `CLOSED_DAY` (the nightly consolidate, the migrations): no file whose `ts_init` span reaches the
+    current UTC day. `CLOSED_HOUR` (the intraday merge, Story 25.1b): files of the current UTC day
+    too, but only one lying wholly inside a single hour before the current UTC hour -- capture's
+    current hour is its own, exactly as its current day is under `CLOSED_DAY`.
+    """
+
+    CLOSED_DAY = "closed_day"
+    CLOSED_HOUR = "closed_hour"
+
+
 @dataclass(frozen=True)
 class StagedRewrite:
     """A verified temp file waiting to replace `path` (`CatalogWriter.commit_rewrites`)."""
@@ -84,7 +98,8 @@ class CatalogWriter(Protocol):
 
     Invariants: (1) one leaf, one writer -- capture writes the current UTC day, so a whole-file
     mutation (`rewrite` in `WHOLE_FILE` mode, `write_merged`, `remove_merged_sources`, `delete`)
-    refuses (`OpenDayWriteError`) a file whose span reaches it (`assert_span_closed` lets a caller
+    refuses (`OpenDayWriteError`) a file whose span reaches it -- or, for a merge in `CLOSED_HOUR`
+    scope, a file reaching the current UTC hour or crossing an hour boundary (`assert_span_closed` lets a caller
     check first), and a `KEEP_OPEN_DAY_ROWS` rewrite refuses to change any row of that day -- a
     check inside the rewrite itself, which no caller can skip; (2) an in-place rewrite is
     temp-then-rename with the table's Arrow schema metadata and row count verified before the
@@ -123,14 +138,27 @@ class CatalogWriter(Protocol):
         """Remove staged temps without renaming any: every original stays as it was."""
         ...
 
-    def write_merged(self, directory: Path, table: pa.Table, expected_rows: int) -> Path:
-        """Write `table` as one new file named by its `ts_init` span; return its final path."""
+    def write_merged(
+        self,
+        directory: Path,
+        table: pa.Table,
+        expected_rows: int,
+        *,
+        scope: MergeScope = MergeScope.CLOSED_DAY,
+    ) -> Path:
+        """
+        Write `table` as one new file named by its `ts_init` span; return its final path. `scope`
+        is the open-period guard the new file's span must pass (`MergeScope`).
+        """
         ...
 
-    def remove_merged_sources(self, paths: list[Path]) -> None:
+    def remove_merged_sources(
+        self, paths: list[Path], *, scope: MergeScope = MergeScope.CLOSED_DAY
+    ) -> None:
         """
         Delete source files whose rows a verified merged (or migrated) file now holds; a path
-        given twice is removed once, one already gone is not an error.
+        given twice is removed once, one already gone is not an error. Every path must pass
+        `scope`'s guard before the first removal.
         """
         ...
 

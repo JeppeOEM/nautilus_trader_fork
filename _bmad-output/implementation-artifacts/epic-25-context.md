@@ -4,93 +4,89 @@
 
 ## Goal
 
-This is the third epic of the DDD migration of `platform/`. It moves four contexts (`archive/`, `ranking/`, `bots/`, `collection_control/`) out of their legacy packages into their own bounded contexts, and gives each one an aggregate that enforces a real invariant. After it lands, the nightly saga cannot zero rows over an archive gap or reconcile a day that was never rebuilt. The ranking engine has no module globals. The bots' paper/real split is enforced by types, so no config key, control message or list reorder can promote a bot to real money. A venue's collected set is the plan capture actually applied, not the plan control intended. Rankings are web-only, and the TUI controls only bots and the collector. Every move keeps the live wire, file and store contracts byte-identical, so each story can be deployed on its own to the three 24/7 writers.
+This is the third epic of the DDD migration of `platform/`. It moves four contexts (`archive/`, `ranking/`, `bots/`, `collection_control/`) out of their legacy packages into bounded contexts, each with an aggregate that enforces a real invariant. After it lands, the nightly saga cannot zero rows over an archive gap or reconcile a day it never rebuilt. The ranking engine has no module globals. The paper/real split for bots is enforced by types. A venue's collected set is what capture actually applied, not what control intended. Rankings live on the web only, and the TUI controls only bots and the collector. The epic ends by replacing the host crontab with an `archive` service of our own, so nightly maintenance survives reboots and redeploys and the operator can see and trigger it. Every move keeps the live wire, file and store contracts byte-identical, so each story can be deployed on its own to the 24/7 writers.
 
 ## Stories
 
 - Story 25.1: `archive/` context: `ArchiveDay`, one deleter, one rewriter, one writer per leaf
 - Story 25.1a: Rankings web-only: the ranking-mode toggle moves to the web and the TUI's Coins pane is deleted
+- Story 25.1b: `archive` service: the nightly maintenance scheduled in our own code, no host cron
 - Story 25.2: `ranking/` context: `RankingBoard` replaces the module globals
 - Story 25.3: `bots/` context: paper and non-paper as types, Nautilus behind an ACL
 - Story 25.4: `collection_control/` context: the plan is the intent, the applied set is the fact
 
 ## Requirements & Constraints
 
-- **Deployable alone, published language frozen.** These stay unchanged for the whole migration:
-  - every Parquet schema and catalog directory name;
-  - the Redis payloads `snapshots:raw`, `rankings:live`, `ranking:control`, `bots:status`, `bots:control`, `bots:history:*`, `bots:incidents:*`, `collector:status` and `collector:control`;
-  - the `candles_<venue>.db`, `metrics.db` and `fills.db` schemas;
-  - the TOML key sets, including the venue `config.toml` and the paper/exec bot configs;
-  - compose service names, env vars and the `platform/data/` bind mounts, including the `live-paper` container path `/app/live_paper/data`.
+- **The published language is frozen.** None of these change:
+  - Parquet schemas and catalog directory names.
+  - The Redis payloads: `snapshots:raw`, `rankings:live`, `ranking:control`, `bots:*`, `collector:status`, `collector:control`.
+  - The SQLite schemas: `candles_<venue>.db`, `metrics.db`, `fills.db`.
+  - The key sets of the TOML files.
+  - Compose service names, env vars and the `platform/data/` bind mounts.
 
-  Wherever a story rewires a publisher, replay or byte-identity tests against recorded messages prove the payload is unchanged.
-- **Shims.** Every old import path becomes a pure re-export shim: `from <new> import <names>`, a `DeprecationWarning` and `REMOVE_AFTER = "<story key>"`. A shim defines nothing. `test_namespace.py` asserts `old.X is new.X` and fails once the `REMOVE_AFTER` story is `done`, so the story named there must delete its shims.
-- **Same-commit housekeeping.** Each move updates these in the same commit: the `platform/CLAUDE.md` citations, `ARCHITECTURE.md`, `docs/DATA_DICTIONARY.md`, the dockerfile `COPY` sets (`test_images.py` proves the import closure), compose `command:` lines and both Makefile test lists (`test`, `test-live-paper`).
-- **Failures are ledgered.** Every tolerated failure goes through `observability.error_ledger.record`, with one site per event type. The sites still to add in this epic are `collector.subscribe_failed` and `collector.unplanned_message`.
-- **Invariant tests.** Every aggregate ships one invariant test per command. Every port ships a contract test that its adapters run.
-- **Rankings stay web-only.** Nothing under `bot_tui/` subscribes to `rankings:live` or `snapshots:raw`. The TUI reads only `bots:*` and `collector:status`, and it must need no change for 25.3 or 25.4.
-- **Binding rules.** The DATA/OBS/MEM/NAUT/SSOT/TEST rules in `platform/CLAUDE.md` apply. A deliberate simplification is written as a `Known limit:` comment that names the ceiling and the upgrade path.
+  A new channel, such as `archive:status`/`archive:control`, is additive, and `docs/DATA_DICTIONARY.md` §3 must record it. Any rewired publisher needs a replay test against recorded messages.
+- **Shims.** An old import path becomes a pure re-export: `from <new> import <names>`, a `DeprecationWarning` and `REMOVE_AFTER = "<story key>"`. A shim defines nothing. `test_namespace.py` fails once the named story is `done`, so that story must delete the shim.
+- **Same-commit housekeeping.** A story updates all of these in the same commit:
+  - the `platform/CLAUDE.md` citations;
+  - `ARCHITECTURE.md` and `docs/DATA_DICTIONARY.md`;
+  - the dockerfile `COPY` sets (`test_images.py` walks the imports of every compose `command:` and Makefile `-m` entrypoint);
+  - compose `command:` lines;
+  - both Makefile test lists (`test`, `test-live-paper`).
+- **Failures are ledgered.** Every tolerated failure goes through `observability.error_ledger.record`, one site per event type (DATA-07). A service sets `ERROR_LEDGER_SERVICE` and uses the shared errors mount.
+- **Invariants are tested.** Each aggregate command gets one invariant test. Each port gets a contract test that its adapters run.
+- **No new dependencies.** Scheduling is plain asyncio, with no APScheduler. The scheduler is Python, not Go, and does not live inside `data_api`: that service mounts the catalog `:ro`, restarts on every frontend redeploy, and needs its memory for serving.
+- **Memory.** Each maintenance step runs as a separate subprocess, so its RSS returns to the OS (MEM-01).
+- **Binding rules.** The DATA/OBS/MEM/NAUT/SSOT/TEST/DESIGN rules in `platform/CLAUDE.md` apply. A deliberate simplification is written as a `Known limit:` comment that names the ceiling and the upgrade path.
 
 ## Technical Decisions
 
 - **Layering in every context.**
-  - `domain/` imports only the stdlib, `kernel/` and Nautilus model/core types. It does no I/O and uses no asyncio, Redis, SQLite or Parquet.
+  - `domain/` is pure: stdlib, `kernel/` and Nautilus model types only, with no I/O or asyncio.
   - `application/` declares ports as `typing.Protocol` and holds the services and loops.
-  - `infrastructure/` implements the ports and is imported only by the composition root (`__main__`).
-  - There is no DI container and no event bus, and no private names are imported across contexts.
-  - Module-level mutable runtime state is forbidden; a boundary test enforces this. State lives in aggregates or in service instances built at the composition root.
-  - Contexts are top-level packages, never imported with a `platform.` prefix.
-- **Kernel reuse.**
-  - Every venue REST call goes through `kernel.venue_http`, and a boundary test fails any literal venue URL or `urllib` request outside it.
-  - Catalog reads go through `kernel.catalog_files` and zstd writes through `kernel.parquet_compat`.
-  - `snapshots:raw` is parsed only through `DydxSecondSnapshot.from_dict`.
-- **Archive (landed; later stories must not bypass it).**
-  - `archive.RetentionPolicy` is the only code that deletes catalog files. That includes dropped-instrument (`non_config_retain_hours`) and per-instrument `order_book_deltas` retention, so no venue package or control loop may hold a prune loop.
-  - `CatalogFiles.rewrite` is the only in-place rewriter.
-  - Capture holds `.capture-<venue>.lock` for its whole run.
-- **Ranking (landed).**
-  - `RankingBoard` owns the mode and per-instrument metrics.
-  - The pct/volatility math lives in `ranking/domain` alone.
-  - Volume is polled per venue through `VolumeSource` adapters.
-- **Bots (Story 25.3).**
-  - `PaperFleet` and `ExecBot` are distinct aggregate types, built by distinct loaders from distinct files.
-    - `PaperFleet` has many `Bot`s sharing one Sandbox balance pool per venue. `PaperConfig` has no mode field, and its loader rejects a `mode` key.
-    - `ExecBot` is one bot on one subaccount, one bot per file, never the paper `[[bots]]` shape. `ExecConfig.mode` selects only between `exchange_demo` (demo/testnet) and `real_money` (mainnet), is validated against `environment`, and can never select paper.
-    - Known limit: demo vs real inside `ExecConfig` is a validated value, not a type. The upgrade path is `ExchangeDemoBot`/`RealMoneyBot`, with the value used only as the loader's discriminator.
-  - `Bot.id == order_id_tag`, pinned explicitly and never auto-assigned by insertion order. A `Bot` carries its heartbeat state and a bounded `Incident` list (max 50, `bots:incidents:*`). The node's `TraderId` is fleet-level and bot-agnostic.
-  - A `FillLedger` per bot keeps per-fill realized PnL and the rolling `day`/`week`/`month`/`all` buckets, all timestamps in ns:
-    - `trades[].realized_pnl` is per fill and `pnl_series[].pnl` is per bucket; neither is cumulative.
-    - Buckets are rolling from now, not calendar-aligned.
-    - `trades` is capped at 500, and `all` is daily-bucketed.
-    - The four keys are refreshed independently on a timer and on each fill.
-  - `bots:control` carries only `{bot_id, action: "start" | "stop"}` and never a mode. `bots:status` publishes on change and on a heartbeat, and a missing heartbeat must read as stale. Readers only `GET` the history keys and never read Nautilus's Cache encoding.
-  - The Nautilus ACL:
-    - Only `bots/infrastructure/nautilus_host.py` imports `TradingNode`, and `test_boundaries.py` asserts this.
-    - It builds one node per process, with one data client and one Sandbox exec client per venue, taken from the `VENUES` table.
-    - `cache_reader.py` computes each bot's PnL and exposure from `cache.positions_open/closed(strategy_id=...)`, never from the portfolio's instrument-scoped aggregates, because those blend bots that share an instrument.
-    - The Nautilus `Cache`, persisted in Redis, remains the durable order/position store.
-- **Collection control (Story 25.4).**
-  - `CollectionPlan(venue)` owns `instruments` (with per-instrument delta-storage and retention entries), `exclude`, pins and `cap` (30 for dYdX).
-    - Its invariants are `exclude ∩ collected = ∅` and `|collected| ≤ cap`, and a pin is admitted only by `classify_liquidity` on USD volume.
-    - The commands `add`/`remove`/`pin`/`unpin`/`exclude`/`reload` return plan diffs.
-  - `Collector.apply(plan_diff)` returns `Applied(subscribed, unsubscribed, failed)`. It is one new method on the legacy capture class.
-    - The sampler iterates `applied ∩ plan`.
-    - A `failed` instrument shows as `pending` on `collector:status`, is ledgered once per attempt and is retried by capture.
-    - A book or `LiveBook` exists only for a subscribed instrument and is cleared on unsubscribe.
-    - An unsolicited message is counted, not booked.
-  - `ControlService` consumes `collector:control`. `StatusPublisher` publishes `collector:status` from the plan plus capture's read-only counters.
-  - `InstrumentRemoved` sets the retention attributes that the nightly `RetentionPolicy` reads; control deletes nothing.
-  - `collector_core/config.py` is the one `config.toml` loader and returns `(CoreConfig, CollectionPlan)`. Control validates through it before `CollectionPlanStore.save`.
-  - Known limit: saves are full rewrites, so comments in the file are lost.
-  - Known limit: only dYdX has a live plan. Bybit and Hyperliquid have static tuples, applied once at start through the same `apply`.
+  - `infrastructure/` implements the ports and is imported only by the composition root (`__main__` or a named entrypoint).
+  - There is no DI container, no event bus, no module-level mutable runtime state (a boundary test enforces this) and no `platform.` import prefix.
+- **Kernel reuse.** Venue REST goes through `kernel.venue_http`, catalog reads through `kernel.catalog_files` and zstd writes through `kernel.parquet_compat`.
+- **Archive invariants (landed in 25.1; 25.1b must run through them, never around them).**
+  - The only persisted day status is `verified_days`, reached through the `VerifiedDays` port.
+  - `reconcile_day` runs only in a saga run whose `rebuild_day` succeeded for the same (venue, day). Otherwise it refuses with `reconcile.not_rebuilt`.
+  - `RetentionPolicy` is the only code that deletes catalog files, and `CatalogFiles.rewrite` is the only in-place rewriter.
+  - There is one writer process per catalog leaf. Capture holds `<catalog>/.capture-<venue>.lock` for its whole run. Archive tools write closed days only, under the maintenance lock `.consolidate.lock`. No archive tool writes a file whose `ts_init` span reaches the current UTC day.
+  - Within one venue, the saga stops at its first failed step and ledgers it.
+- **Scheduler (25.1b).**
+  - The composition root is `archive/scheduler.py`, run as `python -m archive.scheduler`.
+  - It runs the existing sequence through `archive.application.nightly.run_steps`: `nightly` per venue, then `consolidate`, then `backup-catalog`. Across venues it uses `;` semantics, so one venue's failure never skips the next venue or the backup.
+  - Config lives in `platform/archive/config.toml`: `nightly_at` (UTC), `venues`, the backup target, `catch_up_max_days` (7), `lock_wait_minutes` (60) and `intraday_consolidate_hours` (4). Its loader rejects unknown keys.
+  - `next_run(now, schedule, last_success)` is a pure function in `archive/domain/`. It is tested across midnight and against a clock that jumps.
+  - Per-venue state lives in `platform/data/archive/state.json`, written atomically. A day counts as successful only if `run_steps` had no FAILED step for that venue.
+  - On start, the scheduler catches up the missed closed days, oldest first. Past the cap it ledgers `archive.catch_up_capped` once.
+  - On lock contention it waits, bounded by `lock_wait_minutes`, and ledgers `archive.lock_wait` or `archive.lock_timeout`. It never runs two of its own jobs at once.
+  - Intraday consolidation merges only the *closed hours* of the small types: mark/index, funding, open interest and instrument status. Snapshots, trades and deltas stay nightly-only. A merged hour never includes a file that reaches the current hour.
+  - The compose `archive` service uses the collector image, mounts the catalog and candles `rw`, sets `restart: always` and the logging anchor, and is started by `make up`. The `make nightly`/`consolidate`/`backup-catalog` targets remain as manual tools.
+- **Ranking (landed).** `RankingBoard` owns the mode, which is global and last-write-wins. The pct/volatility math lives only in `ranking/domain`.
+- **Bots (landed).**
+  - `PaperFleet` and `ExecBot` are distinct types with distinct loaders, and no config key or control message can promote a bot to real money.
+  - Only `bots/infrastructure/nautilus_host.py` imports `TradingNode`.
+- **Collection control (landed).**
+  - `CollectionPlan` is the intent and `Collector.apply` returns `Applied(subscribed, unsubscribed, failed)`.
+  - Control deletes nothing. It sets the retention attributes that `RetentionPolicy` reads.
+  - `collector_core/config.py` is the one `config.toml` loader.
+
+## UX & Interaction Patterns
+
+- **Archive status.** The scheduler publishes `archive:status` after every step: `next_run`, `running`, and `last_run` with its run id, day, times, and per-step venue, name, exit code and duration.
+- **Archive control.** The scheduler listens on `archive:control` for `{"command": "run_now", "day": "YYYY-MM-DD" | null}`, where `null` means yesterday.
+- **Web.** `data_api` adds `GET /api/archive/status` and `POST /api/archive/run`. The POST only publishes the control message, because `data_api` never writes the catalog. The web UI shows the status and a "Run now" button behind a confirm.
+- **TUI.** `bot_tui`'s Collector pane shows the same status line. The TUI has two panes, Bots and then Collector, and never subscribes to `rankings:live` or `snapshots:raw`. The ranking-mode switch is on the web only.
 
 ## Cross-Story Dependencies
 
-- **Fixed order: 25.1 → 25.1a → 25.2 → 25.3 → 25.4.** 25.1, 25.1a and 25.2 are done, and Epic 24 is done, so `kernel/`, `observability/`, `candles/`, `views/`, `research/`, `archive/` and `ranking/` already exist.
-- **Shim expiry chain.**
-  - 25.3 must delete the archive shims left in `collector_core/` and `dydx_collector/normalize_snapshot_schema.py`, all marked `REMOVE_AFTER = "25-3-..."`.
-  - 25.4 must delete the `ranking_engine` shims, marked `REMOVE_AFTER = "25-4-..."`.
-  - 25.3 leaves a `live_paper` shim package with `REMOVE_AFTER = "26-1-..."`. 25.4 leaves the moved `dydx_collector` modules as shims with `REMOVE_AFTER = "26-2-..."`.
-- **25.1 → 25.4.** `DydxCollector._prune_loop` is already gone. 25.4 must not reintroduce a pruner, and the plan must keep exposing the retention attributes that `RetentionPolicy` reads.
-- **25.4 → Epic 26.** Epic 26's capture move later takes over `Collector.apply` as `CaptureService.apply`.
-- **Epic 29 builds on this epic.** 29.2 (per-venue Collector pane) and 29.4 (runtime control for Bybit/Hyperliquid) need 25.4's per-venue `CollectionPlan` and applied-set report.
+- **Order and status.** The order is 25.1 → 25.1a → 25.2 → 25.3 → 25.4 → 25.1b. All stories except 25.1b are done, as is Epic 24, so `kernel/`, `observability/`, `candles/`, `archive/`, `ranking/`, `bots/` and `collection_control/` all exist.
+- **25.1 → 25.1b.** 25.1b reuses 25.1's `nightly` saga, `.consolidate.lock`, the capture lock and `consolidate_day`. The per-hour merge rule and the open-hour exclusion are added to `archive/application/consolidate_day.py`.
+- **Deploy docs.**
+  - `docs/DEPLOY_CHECKLIST.md` §1 becomes "remove the old cron line", with the command that confirms it is gone.
+  - The DDD spine's `archive` row and its "nightly cron" mention are struck with an amendment.
+  - `platform/CLAUDE.md` DATA-05/06 name the service as the one place where maintenance is scheduled.
+- **Later epics.**
+  - `live_paper` shims expire at 26-1 and the `dydx_collector` control shims at 26-2.
+  - Epic 26 turns `Collector.apply` into `CaptureService.apply`.
+  - Epic 29 (the per-venue Collector pane and runtime control for Bybit/Hyperliquid) builds on 25.4's `CollectionPlan`.

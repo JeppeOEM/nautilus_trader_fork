@@ -24,7 +24,8 @@ there is no "collected but not pinned" state -- with liquid status, `p` to unpin
 + add to config.exclude) and `x` to stop (don't exclude), both behind the same
 type-to-confirm guard as Bots-pane's `s`, `:start <ID>`/`:pintop` command-bar actions to
 pin one coin by name or fill empty slots with the current top-by-volume coins -- all
-published to collector:control, read back via collector:status), and `esc`/`:q`
+published to collector:control, read back via collector:status; since Story 25.1b its last
+line is the nightly archive maintenance, read-only from archive:status), and `esc`/`:q`
 navigation.
 
 The TUI is a control surface for bots and the collector only (Story 25.1a, operator
@@ -45,6 +46,7 @@ screen -- see Story 4.1's Dev Notes "Testing strategy: pure logic vs. urwid wiri
 """
 
 import asyncio
+import datetime as dt
 import logging
 import os
 import socket
@@ -56,6 +58,7 @@ from pathlib import Path
 import urwid
 from observability import error_ledger
 
+from bot_tui import archive_state
 from bot_tui import bot_history_state
 from bot_tui import bot_incidents_state
 from bot_tui import bots_pane
@@ -171,7 +174,10 @@ COLLECTOR PANE (:data)
   esc              back
 
   The "unpinned" list at the bottom of this pane is config.exclude as a whole -- it
-  shows any excluded id, whether it got there via p or a hand-edit of config.toml."""
+  shows any excluded id, whether it got there via p or a hand-edit of config.toml.
+  The last line is the nightly archive maintenance (archive:status): the last run's
+  day, outcome (ok / findings / FAILED with the failing steps) and times, or the
+  running job, and the next run; "~" marks it stale. Run it now from the web UI."""
 
 _PALETTE = [
     ("stale", "yellow", "default"),
@@ -205,9 +211,9 @@ _RECOGNIZED_COMMANDS["data"] = "collector"
 # exactly like ":help".
 _COMMAND_ALIASES = {"h": "help"}
 
-# Poll interval for picking up new bots:status/collector:status state and redrawing --
-# urwid does not auto-redraw for state changed by a background asyncio.Task (see urwid's
-# Main Loop docs: "you must call MainLoop.draw_screen() manually"), so app.py owns a
+# Poll interval for picking up new bots:status/collector:status/archive:status state and
+# redrawing -- urwid does not auto-redraw for state changed by a background asyncio.Task (see
+# urwid's Main Loop docs: "you must call MainLoop.draw_screen() manually"), so app.py owns a
 # small loop that re-renders the active view and triggers a redraw.
 _REDRAW_POLL_SECONDS = 0.5
 
@@ -472,8 +478,13 @@ class BotTuiApp:
         production: this was exactly the reported bug.
         """
         statuses = collector_state._LATEST_COLLECTOR_STATUS
+        archive_line = collector_pane.format_archive_line(
+            archive_state._LATEST_ARCHIVE_STATUS,
+            dt.datetime.now(dt.UTC),
+            stale=archive_state.is_stale(),
+        )
         if not statuses:
-            self._set_collector_filler(collector_pane.COLD_OPEN_TEXT)
+            self._set_collector_filler(f"{collector_pane.COLD_OPEN_TEXT}\n\n{archive_line}")
             return
 
         rows = collector_pane.collector_rows(statuses)
@@ -488,6 +499,10 @@ class BotTuiApp:
             # only ever sees a real _SelectableCollectorRow.
             widgets.append(urwid.Text(""))
             widgets.append(urwid.Text(unpinned_line))
+        # Same non-selectable trailing-Text rule as the unpinned line; always shown, so a
+        # missing archive service reads "no status yet" rather than nothing.
+        widgets.append(urwid.Text(""))
+        widgets.append(urwid.Text(archive_line))
         if self._collector_shape != "rows":
             self._collector_body = urwid.ListBox(urwid.SimpleListWalker(widgets))
             self._collector_shape = "rows"
@@ -500,6 +515,12 @@ class BotTuiApp:
         if self._collector_shape != "cold_open":
             self._collector_body = urwid.Filler(urwid.Text(text), valign="top")
             self._collector_shape = "cold_open"
+            return
+        # Same shape: update the text in place (the archive line changes while no
+        # collector:status has arrived), keeping the widget object per TUI-01.
+        filler = self._collector_body
+        assert isinstance(filler, urwid.Filler)
+        filler.original_widget.set_text(text)
 
     def _build_collector_row_widget(self, row: dict, stale: bool) -> urwid.Widget:
         markup = collector_pane.format_collector_line(row, stale)
@@ -1149,6 +1170,7 @@ class BotTuiApp:
 
         bots_listener_task = loop.create_task(bots_state._redis_listener(self._redis_url))
         collector_listener_task = loop.create_task(collector_state._redis_listener(self._redis_url))
+        archive_listener_task = loop.create_task(archive_state._redis_listener(self._redis_url))
         history_poll_task = loop.create_task(bot_history_state.poll_loop(self._redis_url))
         incidents_poll_task = loop.create_task(bot_incidents_state.poll_loop(self._redis_url))
         redraw_task = loop.create_task(self._redraw_loop())
@@ -1157,6 +1179,7 @@ class BotTuiApp:
         finally:
             bots_listener_task.cancel()
             collector_listener_task.cancel()
+            archive_listener_task.cancel()
             history_poll_task.cancel()
             incidents_poll_task.cancel()
             redraw_task.cancel()

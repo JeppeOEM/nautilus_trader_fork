@@ -51,6 +51,7 @@ from views import coin_detail
 from data_api import alert_wiring
 from data_api import buses
 from data_api.routes import alerts as alerts_routes
+from data_api.routes import archive as archive_routes
 from data_api.routes import candles as candles_routes
 from data_api.routes import indicator_series as indicator_series_routes
 from data_api.routes import indicators as indicators_routes
@@ -82,11 +83,12 @@ FRONTEND_DIST_PATH: str = os.environ.get("FRONTEND_DIST_PATH", "frontend_dist")
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """
-    Start the two shared Redis subscribers for the app's whole lifetime: `RankingsBus`
-    (Story 15.2) and `LiveCandleBus` (Story 15.5). Every `GET /api/rankings` request and
-    every `/ws/live` connection read/subscribe against these same `buses.bus` /
-    `buses.live_candle_bus` instances, never opening a per-request or
-    per-websocket Redis connection of their own.
+    Start the three shared Redis subscribers for the app's whole lifetime: `RankingsBus`
+    (Story 15.2), `LiveCandleBus` (Story 15.5) and `ArchiveStatusBus` (Story 25.1b). Every
+    `GET /api/rankings`/`GET /api/archive/status` request and every `/ws/live` connection
+    read/subscribe against these same `buses.bus` / `buses.live_candle_bus` /
+    `buses.archive_bus` instances, never opening a per-request or per-websocket Redis
+    subscription of their own.
 
     It is also the one place the alert engine is wired to the candle bus (Story 24.3): attached as
     a `BarObserver` before the bus task starts, so no batch is folded without it, and detached on
@@ -98,13 +100,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     live_candle_bus.attach(alert_engine)
     rankings_task = asyncio.create_task(buses.bus.run(REDIS_URL))
     live_candles_task = asyncio.create_task(live_candle_bus.run(REDIS_URL))
+    archive_status_task = asyncio.create_task(buses.archive_bus.run(REDIS_URL))
     try:
         yield
     finally:
         live_candle_bus.detach(alert_engine)
         rankings_task.cancel()
         live_candles_task.cancel()
-        for task in (rankings_task, live_candles_task):
+        archive_status_task.cancel()
+        for task in (rankings_task, live_candles_task, archive_status_task):
             try:
                 await task
             except asyncio.CancelledError:
@@ -186,7 +190,8 @@ def errors(since_ns: int | None = None) -> ErrorsResponse:
 
 
 # Story 15.2: rankings REST + WS relay. Story 15.3: candles REST. Story 15.7: snapshots
-# (Lines mode) REST. Story 17.2/15.8: metrics history/nearest REST. All must register
+# (Lines mode) REST. Story 17.2/15.8: metrics history/nearest REST. Story 25.1b: archive
+# maintenance status + run-now. All must register
 # above the /api/* catch-all below -- a route registered after it would silently 404
 # (confirmed failure mode from Story 15.1's own SPA-fallback investigation; the same
 # "declared routes win over the catch-all" rule applies here).
@@ -198,6 +203,7 @@ async def _malformed_instrument_id(_: Request, exc: MalformedInstrumentId) -> JS
 
 
 app.include_router(alerts_routes.router)
+app.include_router(archive_routes.router)
 app.include_router(rankings_routes.router)
 app.include_router(candles_routes.router)
 app.include_router(indicator_series_routes.router)

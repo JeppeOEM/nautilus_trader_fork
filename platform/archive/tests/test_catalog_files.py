@@ -18,6 +18,7 @@ writes zstd, a failed verification leaves the original intact, the open UTC day 
 temp files are cleaned -- and the `CatalogWriter` port contract it meets. Real catalog files.
 """
 
+import json
 import os
 from collections.abc import Callable
 from decimal import Decimal
@@ -28,6 +29,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from archive.application.ports import CatalogWriter
+from archive.application.ports import MergeScope
 from archive.application.ports import OpenDayWriteError
 from archive.application.ports import PartialCommitError
 from archive.application.ports import RewriteMode
@@ -345,3 +347,56 @@ def test_catalog_files_meet_the_port_contract(tmp_path: Path) -> None:
         with maintenance(tmp_path) as second:
             assert second is None  # one maintenance run at a time
         _contract(writer, path.parent)
+
+
+# -- story 25.1b: the closed-hour scope and the scheduler's state file ----------------------------
+
+_HOUR = 3_600 * _SEC
+
+
+def _hour_files(tmp_path: Path) -> tuple[Path, Path]:
+    """Two one-row files of `_DAY0`: one in 03:00-04:00 (closed at 04:30), one in 04:00-05:00."""
+    catalog = ParquetDataCatalog(str(tmp_path))
+    iid = InstrumentId.from_str(_IID)
+    for ts in (_DAY0 * _DAY_NS + 3 * _HOUR + 10 * _SEC, _DAY0 * _DAY_NS + 4 * _HOUR + 10 * _SEC):
+        catalog.write_data([MarkPriceUpdate(iid, Price(Decimal("2000.25"), 2), ts, ts)])
+    closed, current = sorted((tmp_path / "data" / "mark_price_update" / _IID).glob("*.parquet"))
+    return closed, current
+
+
+def test_a_closed_hour_merge_refuses_the_current_hour_and_a_crossing_span(tmp_path: Path) -> None:
+    closed, current = _hour_files(tmp_path)
+    at_0430 = CatalogFiles(lambda: _DAY0 * _DAY_NS + 4 * _HOUR + 30 * 60 * _SEC)
+    before = current.read_bytes()
+    table = pq.read_table(current)
+    both = pa.concat_tables([pq.read_table(closed), table])
+    for mutate in (
+        lambda: at_0430.write_merged(current.parent, table, 1, scope=MergeScope.CLOSED_HOUR),
+        lambda: at_0430.remove_merged_sources([current], scope=MergeScope.CLOSED_HOUR),
+        lambda: at_0430.write_merged(current.parent, both, 2, scope=MergeScope.CLOSED_HOUR),
+    ):
+        with pytest.raises(OpenDayWriteError):
+            mutate()
+    assert current.read_bytes() == before
+    assert not list(current.parent.glob("*" + TMP_SUFFIX))
+    with pytest.raises(OpenDayWriteError):  # the default scope still refuses all of today
+        at_0430.remove_merged_sources([closed])
+    at_0430.remove_merged_sources([closed], scope=MergeScope.CLOSED_HOUR)  # a closed hour: allowed
+    assert not closed.exists()
+
+
+def test_the_state_file_is_replaced_atomically_and_leaves_no_temp(tmp_path: Path) -> None:
+    path = tmp_path / "state.json"
+    catalog_files.write_json_atomic(path, {"a": 1})
+    catalog_files.write_json_atomic(path, {"b": [1, 2]})
+    assert json.loads(path.read_text()) == {"b": [1, 2]}
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["state.json"]
+
+
+def test_a_failed_state_write_keeps_the_old_file(tmp_path: Path) -> None:
+    path = tmp_path / "state.json"
+    catalog_files.write_json_atomic(path, {"a": 1})
+    with pytest.raises(TypeError):
+        catalog_files.write_json_atomic(path, {"a": object()})
+    assert json.loads(path.read_text()) == {"a": 1}
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["state.json"]

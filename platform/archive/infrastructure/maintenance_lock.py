@@ -26,6 +26,11 @@ keeps one from starting (capture waits and retries) until the block ends; refuse
 running. A flock dies with its process, so a SIGKILL/OOM never leaves a stale "running": the
 file's presence alone means nothing, and it is never unlinked (a later opener would lock another
 inode).
+
+`maintenance_free` only *probes* the maintenance flock (take non-blocking, release at once): the
+`archive` service waits on it before each job without ever holding it while its children run --
+they take it themselves, and this process holding a second open file description on it would
+lock them out (Story 25.1b).
 """
 
 import contextlib
@@ -64,6 +69,29 @@ def maintenance(
     """
     with _exclusive(Path(catalog) / MAINTENANCE_LOCK_NAME) as locked:
         yield CatalogFiles(now_ns) if locked else None
+
+
+def maintenance_free(catalog: str | Path) -> bool:
+    """
+    Whether no maintenance run holds the catalog's flock right now; the probe's own hold is
+    released before this returns. A catalog that does not exist has no holder (True): the job's
+    steps then refuse it loudly themselves (`archive.catalog_missing`).
+    """
+    root = Path(catalog)
+    if not root.is_dir():
+        return True
+    with _exclusive(root / MAINTENANCE_LOCK_NAME) as locked:
+        return locked
+
+
+class MaintenanceLockProbe:
+    """`LockProbe` over one catalog's maintenance flock. Invariant: never keeps the lock."""
+
+    def __init__(self, catalog: str | Path) -> None:
+        self._catalog = catalog
+
+    def is_free(self) -> bool:
+        return maintenance_free(self._catalog)
 
 
 @contextlib.contextmanager

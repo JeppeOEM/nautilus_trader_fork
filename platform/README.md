@@ -27,8 +27,9 @@ Run all `make` commands from `platform/`:
 | `make tui` | Open the terminal UI: bots and collector control (see below) |
 | `make prune` | Delete `order_book_deltas` older than 14 days |
 | `make prune-dry` | Preview what `prune` would delete |
-| `make consolidate` | Merge each closed UTC day into one Parquet file per (type, instrument) |
-| `make backup-catalog` | `rclone sync` closed-day catalog files to object storage |
+| `make consolidate` | Merge each closed UTC day into one Parquet file per (type, instrument), by hand |
+| `make nightly VENUE=...` | One venue-day's nightly saga, by hand (the `archive` service runs it nightly) |
+| `make backup-catalog` | `rclone sync` closed-day catalog files to object storage, by hand |
 
 ---
 
@@ -94,7 +95,7 @@ make logs      # tail live collector output
 make web       # open Dozzle log viewer (http://localhost:8080)
 ```
 
-The catalog appears at `platform/data/catalog/` on the host, owned by your user (uid 1000). Under `docker-compose.yml` all three collectors mount that one root (and the `platform/data/candles/` directory, with a separate `candles_<venue>.db` per collector via `CANDLES_DB_PATH`), so `data_api` and every backtest read every venue from a single catalog. Every durable store lives under `platform/data/` (DDD spine AD-D13): `catalog/`, `candles/`, `metrics/`, `incident_reports/`, `live_paper/`, `bot_tui_logs/` and the dYdX plan file `dydx_config.toml`. The sharing is the compose mounts, not the config: Bybit's and Hyperliquid's `catalog_path` is the container-absolute `/app/catalog`, so running either outside Docker needs that value changed.
+The catalog appears at `platform/data/catalog/` on the host, owned by your user (uid 1000). Under `docker-compose.yml` all three collectors mount that one root (and the `platform/data/candles/` directory, with a separate `candles_<venue>.db` per collector via `CANDLES_DB_PATH`), so `data_api` and every backtest read every venue from a single catalog. Every durable store lives under `platform/data/` (DDD spine AD-D13): `catalog/`, `candles/`, `metrics/`, `incident_reports/`, `live_paper/`, `bot_tui_logs/`, `archive/` (the `archive` service's scheduler cursor, below) and the dYdX plan file `dydx_config.toml`. The sharing is the compose mounts, not the config: Bybit's and Hyperliquid's `catalog_path` is the container-absolute `/app/catalog`, so running either outside Docker needs that value changed.
 
 **Web dashboard:** `make up` starts `data_api`, which serves the React UI on `http://localhost:9100` — rankings, per-coin candlestick/indicator charts, 31-day metrics history, and docs. Reads directly from the catalog — no collector restart needed.
 
@@ -220,16 +221,71 @@ archived range plans zero windows and issues zero REST calls.
 
 Every collector flushes once a minute, so the shared catalog gains ~1,440 Parquet files per
 (data type, instrument) per day -- for dYdX, Bybit and Hyperliquid alike. Inodes, directory
-listings, reads and backups all scale with the file count, not the bytes (audit D-36). Since
-story 22.13 the nightly job is **`make nightly VENUE=<DYDX|BYBIT|HYPERLIQUID> [DAY=YYYY-MM-DD]`**
-(default: yesterday, UTC), once per venue, then a standalone `make consolidate` (every closed day,
-every type: it keeps reporting an old refused day the nightly's `--days 2` skips) and
-`make backup-catalog`. The cron line, re-running a missed day, and the first-run measurements
-still owed are in [`docs/DEPLOY_CHECKLIST.md`](docs/DEPLOY_CHECKLIST.md). Run `make consolidate`
-once by hand first to fold the existing history.
+listings, reads and backups all scale with the file count, not the bytes (audit D-36). The raw
+trade archive also has to be folded back into each closed day, proven against the venue's klines,
+pruned and backed up. All of it is scheduled by our own code, not a host crontab.
 
-**`make nightly`** (`archive.nightly` in the collector image, the archive context's saga since
-Story 25.1) runs, each as its own process: `rebuild_seconds --apply` (the closed day's snapshot
+### The `archive` service (Story 25.1b)
+
+`make up` starts the compose service **`archive`** (`python3 -m archive.scheduler`, the collector
+image, `restart: always`, no profile). It is the one place nightly maintenance is scheduled:
+
+- **Nightly** at `nightly_at` UTC: for each closed day due, oldest first, and each venue, the
+  nightly saga (`make nightly`'s, below), then one `consolidate_catalog --apply` (every closed day,
+  every type: it keeps reporting an old refused day the saga's `--days 2` skips), then the backup
+  (`archive.backup_catalog`, `make backup-catalog`'s, below). Each step is its own child process
+  (MEM-01). One venue's failure never skips the next venue, the consolidate or the backup.
+- **Catch-up** after downtime: every missed closed day per venue, up to `catch_up_max_days`. A day
+  whose saga FAILED is retried by the next night's run. A reboot or redeploy at 03:07 loses nothing.
+- **Intraday** every `intraday_consolidate_hours`: the current UTC day's *closed hours* of the small
+  types (mark/index price, funding, open interest, instrument status) are merged into one file per
+  hour (`consolidate_catalog --apply --closed-hours`). A file reaching the current hour is never
+  touched.
+- It waits (bounded by `lock_wait_minutes`) while a manual run holds the catalog maintenance lock,
+  probing it without holding it, and never runs two of its own jobs at once.
+
+**Config:** `platform/archive/config.toml`, mounted read-only (an edit applies on
+`docker compose restart archive`). Every key is required; an unknown one refuses start.
+
+| Key | Default | Meaning |
+|---|---|---|
+| `nightly_at` | `"03:07"` | UTC time of the nightly run, and the minute of the intraday grid |
+| `venues` | `["DYDX", "BYBIT", "HYPERLIQUID"]` | Venues whose saga runs, in this order within a day |
+| `catch_up_max_days` | `7` | Missed days caught up after downtime; older ones are ledgered (`archive.catch_up_capped`) |
+| `lock_wait_minutes` | `60` | How long a job waits for the maintenance lock before it fails as `lock_timeout` |
+| `intraday_consolidate_hours` | `4` | Period of the closed-hour merge (divides 24) |
+| `step_timeout_minutes` | `360` | A step still running after this is killed and fails with exit 124 (`archive.step_timeout`) |
+
+The backup target is `RCLONE_REMOTE`/`RCLONE_BUCKET` in `platform/.env` (below), not this file.
+
+**State:** `platform/data/archive/state.json` holds `last_run_day` (the last completed scheduled
+run), each venue's `last_success_day` (the last day of unbroken no-FAILED sagas) and the last run
+and last intraday run. It is a scheduler cursor, written atomically, and never a data verdict:
+`verified_days` stays the only day status, and reconcile and prune never read this file.
+
+**Status:** after every step, on start and every 30 s the service publishes `archive:status`
+(`next_run`, `next_intraday`, `running`, `last_run`, `last_intraday`, each run with its steps'
+venue, name, exit code and duration; `docs/DATA_DICTIONARY.md` §3). The web UI shows it next to
+the error bar (`GET /api/archive/status`), and the TUI shows it at the bottom of the Collector pane.
+Logs: `docker compose logs -f archive` (Dozzle: `archive`). Every tolerated failure is in the
+error ledger (`archive.*`, `nightly.*`, `consolidate.*` sites; `data/errors/archive.jsonl`).
+
+**Run now:** the web UI's "Run now" button (behind a confirm) posts `POST /api/archive/run`, which
+publishes `{"command": "run_now", "day": "YYYY-MM-DD" | null}` on `archive:control` (null:
+yesterday). The service queues that closed day's full sequence (all venues, consolidate, backup)
+after any running job; a day already queued is dropped, and a bad message is ledgered
+(`archive.control_rejected`).
+
+### Manual tools
+
+The `make` targets below stay as manual tools: re-running a day, a day past the catch-up cap, or a
+first fold of existing history (run `make consolidate` once by hand on a new deploy). They share
+the maintenance lock with the service. Re-running a missed day and the first-run measurements still
+owed are in [`docs/DEPLOY_CHECKLIST.md`](docs/DEPLOY_CHECKLIST.md), whose §1 also says how to remove
+the old host cron line.
+
+**`make nightly VENUE=<DYDX|BYBIT|HYPERLIQUID> [DAY=YYYY-MM-DD]`** (default: yesterday, UTC;
+`archive.nightly` in the collector image, the archive context's saga since Story 25.1) runs, each as its own process: `rebuild_seconds --apply` (the closed day's snapshot
 trade columns re-derived from the raw trade archive on exchange time; rows inside an archive-gap
 marker keep their live values and are counted `in gap`) -> `consolidate_catalog --apply --venue
 --days 2` (below) -> `build_candles` (`python -m candles.rebuild --day --workers 1`; the step keeps
@@ -261,7 +317,8 @@ until it is stopped.
 
 Details of each step: `docs/DATA_DICTIONARY.md` §6.
 
-**`make consolidate`** (`archive.consolidate_catalog --apply` in the collector image) walks
+**`make consolidate`** (`archive.consolidate_catalog --apply` in the collector image; with
+`CONSOLIDATE_ARGS="--closed-hours"` it runs the service's intraday merge by hand) walks
 every `data/<type>/<instrument>/` leaf and merges each closed UTC day's files into one; today's
 files are never read or rewritten, and a batch that crosses midnight stays as it is. `bar` leaves
 are skipped: `backfill_bars` plans from their file intervals, so merging two runs across a missing
@@ -282,8 +339,10 @@ the container -- `/usr/bin/time -v make consolidate` would only measure the `doc
 The exit code is 1 when any day was refused or leaf failed; the reason is logged above the summary line and in
 the `consolidate.*` error-ledger entries.
 
-**`make backup-catalog`** runs `rclone` **on the host** and syncs
-`data/catalog/data` to `$RCLONE_REMOTE:$RCLONE_BUCKET/catalog/data`:
+**`make backup-catalog`** runs `python3 -m archive.backup_catalog` in the `archive` service's
+container -- the same module the service runs after every nightly run, with `rclone` from the image
+(the host needs none) -- and syncs `data/catalog/data` to
+`$RCLONE_REMOTE:$RCLONE_BUCKET/catalog/data`:
 
 - Consolidate first: without it the upload is millions of tiny objects (per-request cost and
   hours of listing), with it a few hundred new files a night.
@@ -293,14 +352,19 @@ the `consolidate.*` error-ledger entries.
   wiped local catalog (D-33) cannot erase the only backup. Prune that prefix **only by hand**,
   after checking the remote `catalog/data` is intact -- never with an automatic expiry rule: after
   a local wipe that prefix holds the only copy of the history.
-- It refuses (exit non-zero, nothing uploaded) when `RCLONE_REMOTE` or `RCLONE_BUCKET` is unset,
-  `rclone` is not installed, or the local `catalog/data` is missing or holds no closed-day Parquet
-  file (a freshly wiped catalog holding only today's files must not be mirrored).
+- It refuses (exit 1, nothing uploaded, one error-ledger entry) when `RCLONE_REMOTE` or
+  `RCLONE_BUCKET` is unset (`archive.backup_not_configured`), or when `rclone` is missing or the
+  local `catalog/data` is missing or holds no closed-day Parquet file (`archive.backup_failed`; a
+  freshly wiped catalog holding only today's files must not be mirrored). A failed sync is
+  `archive.backup_failed` too. In the service each shows as a FAILED `backup_catalog` step.
 
-Setup, once, on the host: install rclone, run `rclone config` to create the remote -- it lives in
-the operator's `~/.config/rclone/rclone.conf`, **never in this repo** -- and set `RCLONE_REMOTE`
-and `RCLONE_BUCKET` in `platform/.env` (gitignored; see `.env-example`) -- bare values, no quotes,
-the remote without its trailing `:`. Cheap targets: Cloudflare R2
+Setup, once, on the host: run `rclone config` there (a one-time step; the nightly runs use the
+image's rclone) to create the remote -- it lives in the operator's `~/.config/rclone/rclone.conf`, **never in this repo**, and
+is mounted read-only into the `archive` service (`RCLONE_CONFIG_DIR` in `platform/.env` when it
+lives elsewhere) -- and set `RCLONE_REMOTE` and `RCLONE_BUCKET` in `platform/.env` (gitignored;
+see `.env-example`) -- bare values, no quotes, the remote without its trailing `:`. Known limit:
+the read-only mount cannot store a refreshed OAuth token, so use a remote with static keys (R2,
+B2). Cheap targets: Cloudflare R2
 (no egress fees) or Backblaze B2; both have a free tier covering the first few GB, but prices and
 free allowances change -- check the current pricing pages before choosing.
 

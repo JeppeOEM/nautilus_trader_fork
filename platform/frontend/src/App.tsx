@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { lazy, Suspense } from "react";
 import { BrowserRouter, Link, Route, Routes } from "react-router";
 
+import ArchiveStatus from "./components/ArchiveStatus";
 import ErrorBar from "./components/ErrorBar";
 import { useAlertToasts } from "./hooks/useAlertToasts";
 
@@ -17,8 +18,20 @@ const queryClient = new QueryClient();
 
 function TopNav() {
   return (
-    <nav style={{ borderBottom: "1px solid var(--color-border)", padding: "0.6em 1em" }}>
-      <Link to="/">Rankings</Link> · <Link to="/alerts">Alerts</Link> · <Link to="/docs">Docs</Link>
+    <nav
+      style={{
+        borderBottom: "1px solid var(--color-border)",
+        padding: "0.6em 1em",
+        display: "flex",
+        flexWrap: "wrap",
+        justifyContent: "space-between",
+        gap: "0.3em 1em",
+      }}
+    >
+      <span>
+        <Link to="/">Rankings</Link> · <Link to="/alerts">Alerts</Link> · <Link to="/docs">Docs</Link>
+      </span>
+      <ArchiveStatus />
     </nav>
   );
 }

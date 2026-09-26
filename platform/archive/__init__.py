@@ -48,8 +48,10 @@ catalog-bar adapter.
 Composition roots -- the only importers of `infrastructure` (and of `candles.infrastructure`) --
 are the operator CLIs `python -m archive.<tool>` (`rebuild_seconds`, `consolidate_catalog`,
 `prune_catalog`, `repair_catalog`, `compare_klines`, `nightly`, `backfill_bars`,
-`crosscheck_errors`) and `archive/tools/*` (`measure_lag`, `migrate_open_interest`,
-`normalize_snapshot_schema`). Their old `collector_core.*` / `dydx_collector.*` re-export shims
+`crosscheck_errors`, `backup_catalog`), the `archive` service `python -m archive.scheduler`
+(Story 25.1b: the one scheduler of the nightly saga, consolidate, backup and the intraday
+closed-hour merge -- `application.scheduler` over the `domain.schedule`/`domain.intraday` rules)
+and `archive/tools/*` (`measure_lag`, `migrate_open_interest`, `normalize_snapshot_schema`). Their old `collector_core.*` / `dydx_collector.*` re-export shims
 were removed in Story 25.3.
 
 Dependency direction: archive imports `kernel`, `observability` and candles' application layer

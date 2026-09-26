@@ -386,6 +386,55 @@ Collector pane (Story 6.1). Published language, frozen (AD-D12); the bytes are r
   `data/dydx_config.toml` (validated through the one loader first), then applied through
   `Collector.apply`, then published.
 
+### 1.13 `archive:status` / `archive:control` (the `archive/` context's scheduler, Story 25.1b)
+
+Not market data: the nightly-maintenance scheduler's status and its one command. The publisher is
+`archive.scheduler` (`python3 -m archive.scheduler`, compose service `archive`), the one place
+maintenance is scheduled (§6). No reader imports `archive`: `views/archive_status_bus.py`,
+`data_api/routes/archive.py` and `bot_tui/archive_state.py` each keep their own copy of the
+channel names and shape, as for `ranking:control`/`collector:status`
+`[amended 2026-09-26: Story 25.1b -- new channels]`.
+
+- **`archive:status`** — published by the scheduler after every step, on start and on a 30 s
+  heartbeat. One `json.dumps` object holding the whole status, keys in this order:
+  - `next_run` — the next nightly slot, ISO-8601 UTC (`2026-09-27T03:07:00Z`);
+  - `next_intraday` — the next intraday closed-hour merge slot, same format;
+  - `running` — `null`, or the job in progress: `{run_id, kind, day, days, started, steps}`;
+  - `last_run` — `null`, or the last finished nightly-sequence run (`kind` `nightly`,
+    `catch_up` or `run_now`): `{run_id, kind, day, days, started, finished, steps}`;
+  - `last_intraday` — `null`, or the last finished intraday merge (`kind` `intraday`), same shape,
+    kept apart so a 4-hourly merge never hides the nightly's `last_run`.
+
+  `kind` is one of `nightly`, `catch_up`, `run_now`, `intraday`; `day` is the run's (first) UTC
+  day and `days` every day it covers (a catch-up runs several, oldest first); `started`/`finished`
+  are ISO-8601 UTC. Each `steps` entry is `{venue, name, exit, duration_s}`: `venue` is `null` for
+  the venue-less steps (consolidate, backup), `exit` the step subprocess's exit code (0 clean,
+  2 findings, anything else failed -- the archive tools' convention), `duration_s` its wall
+  seconds. Readers require an object carrying `next_run` and `last_run` (neither may be
+  omitted; `last_run` may be `null`), treat `next_intraday`/`running`/`last_intraday` as optional
+  and ignore keys they do not know, so a key can be added without breaking them.
+  Consumers:
+  - `data_api`'s `GET /api/archive/status` (through `views.archive_status_bus.ArchiveStatusBus`,
+    one subscriber per process): the latest valid message, 503 until one has arrived. A message
+    failing the shape check keeps the previous one and is ledgered `views.archive_status`;
+  - the web UI's maintenance status in the top bar (`frontend/src/components/ArchiveStatus.tsx`,
+    polled every 30 s): last run day and outcome -- `ok` when every step exited 0, `findings` when
+    the only non-zero exits are 2, else `FAILED` with the non-zero steps named -- its finish time,
+    the next run, the running job, and a failed intraday merge;
+  - `bot_tui`'s Collector pane, its last line (`collector_pane.format_archive_line`), the same
+    verdicts; `~` marks it stale after 120 s without a message.
+- **`archive:control`** — `{"command": "run_now", "day": "YYYY-MM-DD" | null}` (`null` =
+  yesterday, UTC). Publisher: `data_api`'s `POST /api/archive/run` (body `{"day": ...}`, extra
+  keys, a malformed or non-existent date, today or a future day a 422), driven by the web UI's
+  "Run now" button behind a confirm dialog; it publishes exactly
+  `json.dumps({"command": "run_now", "day": day})`, and a publish no subscriber received (the
+  `archive` service is down) or a Redis error is a 503, shown in the dialog
+  (`data_api/tests/test_archive.py`). Consumer: the scheduler, which queues the day's full nightly
+  sequence behind any running job and drops a duplicate queued day; bad JSON, an unknown command,
+  a bad date, today or a future day are ledgered `archive.control_rejected` and ignored. The 202
+  therefore means "received", not "accepted": the run is confirmed only when `archive:status`
+  shows it.
+
 ---
 
 ## 2. Computed signals / ML features (`platform/kernel/`, `platform/views/`, `platform/ranking/`)
@@ -887,8 +936,28 @@ at the first failure:
    `verified_days`.
 5. `prune_catalog --apply [--dydx-plan]` -- the retention rules above (§5).
 
-One summary line per venue (per-step outcome and seconds, peak child RSS, the run id). The cron
-line and the first-run measurements still owed are in `docs/DEPLOY_CHECKLIST.md`.
+One summary line per venue (per-step outcome and seconds, peak child RSS, the run id). The
+first-run measurements still owed are in `docs/DEPLOY_CHECKLIST.md`.
+
+**Scheduled by the `archive` service, not cron (Story 25.1b).** `python3 -m archive.scheduler`
+(compose service `archive`) runs this saga for every venue, then `consolidate_catalog`, then the
+rclone backup, each step its own subprocess, every night at `nightly_at` (`archive/config.toml`),
+catching up missed days, and merges the current day's closed hours of the small types every
+`intraday_consolidate_hours`. Its status and "run now" command are §1.13's channels. `make nightly`
+stays a manual tool; the host crontab line is retired (`docs/DEPLOY_CHECKLIST.md` §1). Its cursor
+is `platform/data/archive/state.json` (mounted at `/app/archive_state`), written atomically
+through `CatalogFiles.write_json_atomic`:
+- `last_run_day` — the last day whose scheduled run completed (drives `next_run`, so a standing
+  failure is retried the next night, never in a tight loop);
+- per venue, `last_success_day` — the last day of an unbroken run of days with no FAILED saga
+  (drives which days the next run covers: a failed day is run again, up to `catch_up_max_days`);
+- `last_run` / `last_intraday` — the last finished runs, republished on start.
+
+It is a scheduling cursor, **not a data verdict**: reconcile and prune never read it, and
+`verified_days` stays the only per-day status. An unreadable or corrupt file is ledgered
+`archive.state_unreadable` and treated as no state: every slot already past counts as handled,
+so the first run is the next slot and targets that slot's yesterday only
+`[amended 2026-09-26: Story 25.1b -- the scheduler replaces the host cron line]`.
 
 **Who writes what, offline (Story 25.1).** Every in-place Parquet rewrite by an archive tool --
 the rebuild, the consolidation's merge, `tools.migrate_open_interest`,

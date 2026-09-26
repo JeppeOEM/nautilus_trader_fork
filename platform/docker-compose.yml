@@ -20,7 +20,8 @@ x-chart-indicator-config-mount: &chart-indicator-config-mount
 # `_second_loop` woke 2-21.5 s late about every 3 minutes (audit D-06/D-07/D-10). Every such stall
 # delays the live chart, rankings and alerts, suspends the crossed-book check, and on dYdX leaves
 # the missed second without a row. The three collectors are the only services whose work cannot
-# wait; ranking_engine, data_api, bot_tui, live-paper and dozzle are batch or interactive and can.
+# wait; archive, ranking_engine, data_api, bot_tui, live-paper and dozzle are batch or interactive
+# and can.
 # `cpu_shares` is a relative weight the kernel's CFS scheduler applies ONLY when cores are
 # contended: with 1024 on each collector and 256 on the rest, a collector gets ~4x the CPU of any
 # batch service while the box is busy, and nothing is limited while it is idle. Deliberately not
@@ -134,6 +135,59 @@ services:
       - ./data/catalog:/app/catalog
       - ./data/candles:/app/candles_dir
       - ./data/errors:/app/errors_dir
+    network_mode: host
+    restart: always
+    logging: *default-logging
+
+  archive:
+    container_name: archive
+    # cpu_shares: 256   # see the CPU-priority note above services: (batch: may wait)
+    # Nightly maintenance scheduled in our own code (Story 25.1b; archive/scheduler.py): each
+    # venue's nightly saga at archive/config.toml's `nightly_at` (UTC), then consolidate, then the
+    # rclone backup, each step its own child process; catch-up of missed days after downtime; the
+    # closed-hour merge of the small types every `intraday_consolidate_hours`. Replaces the host
+    # crontab line (docs/DEPLOY_CHECKLIST.md §1). Status on `archive:status`, run-now on
+    # `archive:control`. Takes no capture lock: every step writes closed days or closed hours only,
+    # so the collectors keep running; `make nightly`/`consolidate`/`backup-catalog` stay as manual
+    # tools and share the catalog maintenance lock with it.
+    build:
+      context: ..
+      dockerfile: platform/collector.dockerfile
+      network: host
+    command: python3 -m archive.scheduler
+    environment:
+      PYTHONUNBUFFERED: "1"
+      # uid 1000 has no /etc/passwd entry in the image: rclone and tempfile need a writable HOME.
+      HOME: "/tmp"
+      REDIS_URL: "redis://127.0.0.1:${REDIS_PORT:-6379}"
+      CATALOG_PATH: "/app/catalog"
+      CANDLES_DIR: "/app/candles_dir"
+      DYDX_PLAN_PATH: "/app/dydx_collector/config.toml"
+      ARCHIVE_STATE_DIR: "/app/archive_state"
+      ARCHIVE_CONFIG: "/app/archive/config.toml"
+      # The backup target, from platform/.env (see .env-example): empty = the backup step fails
+      # loudly (archive.backup_not_configured), never a silent skip.
+      RCLONE_REMOTE: "${RCLONE_REMOTE:-}"
+      RCLONE_BUCKET: "${RCLONE_BUCKET:-}"
+      RCLONE_CONFIG: "/app/rclone/rclone.conf"
+      ERROR_LEDGER_DIR: "/app/errors_dir"
+      ERROR_LEDGER_SERVICE: "archive"
+    user: "1000:1000"
+    volumes:
+      # rw: the nightly saga rebuilds, consolidates and prunes closed days (never today's files).
+      - ./data/catalog:/app/catalog
+      # rw: the saga's build_candles step refolds closed days into the candle store.
+      - ./data/candles:/app/candles_dir
+      - ./data/errors:/app/errors_dir
+      # The scheduler cursor state.json (not a data verdict). Never mounted over /app/archive,
+      # which is the package itself.
+      - ./data/archive:/app/archive_state
+      # ro: the dYdX plan, for the saga's dYdX retention (the collector is its one writer).
+      - ./data/dydx_config.toml:/app/dydx_collector/config.toml:ro
+      # ro: the schedule; an edit applies on `docker compose restart archive`, no rebuild.
+      - ./archive/config.toml:/app/archive/config.toml:ro
+      # ro: the operator's rclone config (`rclone config` on the host; never in this repo).
+      - ${RCLONE_CONFIG_DIR:-${HOME}/.config/rclone}:/app/rclone:ro
     network_mode: host
     restart: always
     logging: *default-logging

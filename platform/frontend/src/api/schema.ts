@@ -25,6 +25,39 @@ export interface AlertResponse {
   last_fired_ns?: number | null;
 }
 
+export interface ArchiveRun {
+  run_id: string;
+  kind: string;
+  day: string | null;
+  days?: string[] | null;
+  started: string;
+  finished?: string | null;
+  steps: ArchiveStep[];
+}
+
+export interface ArchiveRunRequest {
+  day?: string | null;
+}
+
+export interface ArchiveRunResponse {
+  day: string | null;
+}
+
+export interface ArchiveStatusResponse {
+  next_run: string;
+  next_intraday?: string | null;
+  running?: ArchiveRun | null;
+  last_run: ArchiveRun | null;
+  last_intraday?: ArchiveRun | null;
+}
+
+export interface ArchiveStep {
+  venue: string | null;
+  name: string;
+  exit: number;
+  duration_s: number;
+}
+
 export interface CandleItem {
   t: number;
   o?: number | null;
