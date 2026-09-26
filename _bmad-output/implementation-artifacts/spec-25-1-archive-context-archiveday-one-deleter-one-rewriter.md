@@ -2,8 +2,8 @@
 title: 'Story 25.1: archive/ context: ArchiveDay, one deleter, one rewriter, one writer per leaf'
 type: 'refactor'
 created: '2026-09-25'
-status: 'blocked'
-baseline_revision: '8378923332c2c780f8bddccca39e0076e64aecb7'
+status: ready-for-dev
+baseline_revision: f3f17560e3a7161063dd9d7af2591de1f8a78cac
 final_revision: '3a0d680d24a5a123fad46257f9c88b5cfc304576'
 review_loop_iteration: 0
 followup_review_recommended: true
@@ -300,43 +300,3 @@ Resolution (2026-09-26, human-decided via bmad-loop-resolve): intent_gap resolve
 
 Note: this was a follow-up review (a fresh pass over the committed `3a0d680d24`). Under the cascade, the intent_gap makes every lower finding moot, so the bad_spec, patch and defer counts are provisional. No deferred-work entries were written and no code was changed in this pass.
 
-## Auto Run Result
-
-Status: blocked
-
-**Blocking condition: intent gap in intent contract.** The open-day rule in `<intent-contract>` breaks the nightly saga it is meant to protect.
-
-**Intent-gap finding (high, verified by reading the code):**
-- **The rule.** The I/O matrix row "Open-day write" says any `CatalogFiles` rewrite, delete or merge of a file whose `ts_init` span *reaches* the current UTC day must be refused.
-- **Why it bites every night.** Capture flushes at :02 past each minute (`collector_core/collector.py`, `_FLUSH_PHASE_S`), so the 00:00:02 flush always writes one file per leaf spanning about 23:59:02 → 00:00:01. `kernel.catalog_files.files_by_day` lists that file under yesterday.
-- **Where it fails.** `archive/application/rebuild_day.py` `_prepare_writes` asserts `assert_closed` on every day file. The crossing file's end is today, so every instrument raises `rebuild.open_day`.
-- **What the operator sees.** `make nightly` (DAY defaults to yesterday) refuses every instrument, and all of them go to `--not-rebuilt`. `compare_klines` writes no verdict, no day ever reaches `verified`, and `trade_tick` retention frees nothing.
-- **Why it is new.** The pre-story `rebuild_seconds` only refused when the *day* was today, and it rewrote the crossing file. So this is a regression introduced by this story.
-- **Why the tests missed it.** No test covers a file that crosses midnight into the run's "today".
-
-**Why this cannot be fixed without a decision.** The literal contract refuses the file, and any fix changes either the contract or operations. There is more than one reasonable reading:
-1. **Judge "open" by the file's start or the day's rows.** Capture writes each file once and never reopens it. The rebuild only changes rows whose `ts_event` falls in the (closed) target day. So a crossing file whose start lies in a closed day could be treated as closed.
-2. **Allow a bounded margin.** Treat a span ending within one flush interval plus `MAX_TS_INIT_SKEW_NS` after midnight as closed.
-3. **Keep the rule and shift operations.** Make the nightly default DAY two days back. This delays verification and retention by a day and changes the documented cron.
-
-Options 1 and 2 also change `prune` and `consolidate` behaviour for crossing files, and option 3 changes the deploy docs. Please amend the "Open-day write" row (and the matching `CatalogFiles` task line), then re-drive the story.
-
-**Other findings to settle in the same amendment (provisional, not processed this pass):**
-- **bad_spec (high): the rebuild proof is a denylist.** `RebuildProof.covers(iid)` is `iid not in not_rebuilt`, as the spec defines it. `nightly.read_rebuild_result` validates the `rebuilt` list and then discards it. So reconcile can write a verdict for an instrument the rebuild never processed, for example a leaf that appears between steps, or an instrument with no snapshot files, which `rebuild_day` returns as a successful empty report. Suggested fix: carry `rebuilt` in the proof, with `covers = iid in rebuilt and iid not in not_rebuilt`.
-- **patch candidates (medium):**
-  - `archive/application/reconcile_day.py` `instruments_on_day`: an unparsable `*.parquet` name raises `ValueError` and aborts the whole compare step, so prune never runs.
-  - `rebuild_day.py`: a multi-file day can be left half rewritten when a later rewrite fails, yet it is ledgered as "untouched".
-  - `archive/prune_catalog.py`: the exit code ignores `report.errors`, `open_day` and `marker_failed`.
-  - `archive/tools/{normalize_snapshot_schema,migrate_open_interest}.py`: a per-file `RewriteVerifyError`/`OSError` aborts the run with no ledger entry.
-  - Report-only runs (`prune-dry`, report-only rebuild) take the exclusive maintenance lock, so an overlap fails the nightly step.
-- **patch candidates (low):**
-  - `remove_merged_sources` does not tolerate duplicate or vanished paths.
-  - `prune_catalog --venue` has no choices, so a misspelt venue is silently a no-op.
-  - `repair_catalog` does not ledger an unknown venue.
-  - Tools do not check that the catalog directory exists.
-- **defer candidates (pre-existing, carried over unchanged from the old `prune_catalog`):**
-  - The `pruned` marker is not widened by `MAX_TS_INIT_SKEW_NS`.
-  - The spanned-days rule ignores the skew at the end of the span.
-  - `repair_catalog` is not atomic: `delete_data_range` and then `write_data`, per row.
-
-**Verification.** Code reading only this pass: `archive/infrastructure/catalog_files.py:109-118`, `archive/application/rebuild_day.py:185-197,331-365`, `kernel/catalog_files.py:74-86`, `collector_core/collector.py:375-383`, and the `Makefile` `nightly` target (DAY defaults to yesterday). No tests were run and no code was changed. The committed implementation (`3a0d680d24`) was left in place: it is the base the amended spec will be re-derived on, and reverting a reviewed 116-file commit is the orchestrator's call, not this session's.
