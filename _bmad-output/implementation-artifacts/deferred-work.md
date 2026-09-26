@@ -633,3 +633,6 @@ Discarded by operator: locking/atomic TOML writes; `bot_tui` malformed-message h
 - source_spec: `_bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md`
   summary: `make prune` (order_book_deltas age rule, 14 days) deletes raw deltas of a dYdX instrument whose plan entry says `retain_hours = None` (unlimited), because the age rule is decided independently of the plan's per-instrument delta retention.
   evidence: platform/Makefile `prune` target and archive/domain/retention.py, where rule (b) runs regardless of rule (d)'s None. This predates 25.1 (baseline Makefile prune target, plus the old `_prune_loop`).
+- source_spec: `_bmad-output/implementation-artifacts/spec-25-1a-rankings-web-only-mode-toggle-on-web-tui-coins-pane-deleted.md`
+  summary: bot_tui Bot-detail's `o` deep-link opens `<DASHBOARD_BASE_URL>/bot/{bot_id}`, which the web app has no route for, so the only remaining TUI deep-link (and the open_listener.go hand-off now serving it) lands on a blank page.
+  evidence: platform/bot_tui/bots_pane.py `dashboard_bot_url` docstring states the route does not exist; platform/frontend/src/App.tsx routes are `/`, `/chart/:iid`, `/history/:iid`, `/alerts`, `/docs/*`. This predates 25.1a (the URL builder and route gap were there at baseline f00ab8aeea).

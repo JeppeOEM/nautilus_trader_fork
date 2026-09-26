@@ -111,6 +111,14 @@ export interface MetricsHistoryResponse {
   items: MetricHistoryItem[];
 }
 
+export interface RankingModeRequest {
+  mode: string;
+}
+
+export interface RankingModeResponse {
+  mode: string;
+}
+
 export interface RankingsResponse {
   items: Record<string, unknown>[];
   updated_at: number;

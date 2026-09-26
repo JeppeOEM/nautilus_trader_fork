@@ -42,9 +42,9 @@ ever back up or migrate.
 
 | Channel | Publisher | Subscribers | Payload |
 |---|---|---|---|
-| `snapshots:raw` | `collector_core/collector.py`'s `_second_loop` — every ~1s tick, in **all three** collector containers (dYdX, Bybit, Hyperliquid) | `ranking_engine`, `data_api`, `bot_tui` | JSON list of `DydxSecondSnapshot` dicts (book top-20 + trade volume/count), one per collected instrument. Each publisher sends only its own venue's instruments, so entries stay disjoint by `instrument_id` — this is the architecture spine's "one producer per (channel, venue)" convention |
-| `rankings:live` | `ranking_engine/engine.py` (**sole publisher**, AD-9) | `data_api`, `bot_tui` | JSON: `{mode, updated_at, ranks: [...], stale_instrument_ids: [...]}` — every rank row carries volume/volatility/OFI/OBI/microprice/spread/CVD/price/pct-change fields |
-| `ranking:control` | `bot_tui` (mode toggle) | `ranking_engine` | `{"mode": "volume"\|"volatility"}` |
+| `snapshots:raw` | `collector_core/collector.py`'s `_second_loop` — every ~1s tick, in **all three** collector containers (dYdX, Bybit, Hyperliquid) | `ranking_engine`, `data_api` | JSON list of `DydxSecondSnapshot` dicts (book top-20 + trade volume/count), one per collected instrument. Each publisher sends only its own venue's instruments, so entries stay disjoint by `instrument_id` — this is the architecture spine's "one producer per (channel, venue)" convention |
+| `rankings:live` | `ranking_engine/engine.py` (**sole publisher**, AD-9) | `data_api` | JSON: `{mode, updated_at, ranks: [...], stale_instrument_ids: [...]}` — every rank row carries volume/volatility/OFI/OBI/microprice/spread/CVD/price/pct-change fields |
+| `ranking:control` | `data_api` (`PUT /api/rankings/mode`, the web rankings page's mode control; Story 25.1a) | `ranking_engine` | `{"mode": "volume"\|"volatility"}` |
 | `collector:control` | `bot_tui` | `dydx_collector/collector.py` | `{"action": "start"\|"unpin"\|"stop"\|"pin_top_liquid", "id": "<instrument_id>"|null}` |
 | `collector:status` | `dydx_collector/collector.py` | `bot_tui` | Per-instrument `{id, pinned, liquid, last_trade_ts}`, or removal/unpin summaries |
 | `bots:control` | `bot_tui` | `live_paper/bot_status.py` | `{"bot_id": "...", "action": "start"\|"stop"}` |

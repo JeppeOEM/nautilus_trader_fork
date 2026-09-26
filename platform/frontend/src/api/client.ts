@@ -10,6 +10,7 @@ import type {
   IndicatorSeriesResponse,
   IndicatorValuesResponse,
   MetricsHistoryResponse,
+  RankingModeResponse,
   RankingsResponse,
   SnapshotSeriesResponse,
   TechnicalsColumn,
@@ -55,6 +56,32 @@ export async function fetchRankings(): Promise<RankingsResponse> {
   const res = await fetch("/api/rankings");
   if (!res.ok) throw new Error(`GET /api/rankings failed: ${res.status}`);
   return (await res.json()) as RankingsResponse;
+}
+
+// Story 25.1a: the one ranking-mode switch (global, last write wins). A 202 only means
+// ranking_engine received the request -- the caller shows the mode from rankings:live, never
+// from this response, so a switch is visible only once the engine has applied it. A 503 (no
+// ranking_engine subscribed, or Redis down) carries the server's detail in the message. The
+// request is aborted after SET_RANKING_MODE_TIMEOUT_MS: the page disables its mode buttons while a
+// switch is in flight, so a request stalled in transit (SSH tunnel) must fail, not hang them.
+export type RankingMode = "volume" | "volatility";
+
+// Well above data_api's own 2 s Redis connect/publish bound, so a slow-but-alive server still answers.
+const SET_RANKING_MODE_TIMEOUT_MS = 10_000;
+
+export async function setRankingMode(mode: RankingMode): Promise<RankingModeResponse> {
+  const res = await fetch("/api/rankings/mode", {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ mode }),
+    signal: AbortSignal.timeout(SET_RANKING_MODE_TIMEOUT_MS),
+  });
+  if (!res.ok) {
+    const body = (await res.json().catch(() => ({}))) as { detail?: unknown };
+    const detail = typeof body.detail === "string" ? body.detail : JSON.stringify(body.detail ?? body);
+    throw new HttpError(res.status, `PUT /api/rankings/mode failed: ${res.status} ${detail}`);
+  }
+  return (await res.json()) as RankingModeResponse;
 }
 
 // Story 15.3: cursor-paginated candle history (AD-F3) -- `useCandles` calls this once for

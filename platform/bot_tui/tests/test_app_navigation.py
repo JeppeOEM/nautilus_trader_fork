@@ -28,47 +28,54 @@ from bot_tui.app import _pop_view
 
 
 def test_dispatch_recognized_command_switches_view_and_pushes_history() -> None:
-    new_view, stack, echo = _dispatch_command("coins", [], "bots")
-    assert (new_view, stack, echo) == ("bots", ["coins"], None)
+    new_view, stack, echo = _dispatch_command("bots", [], "data")
+    assert (new_view, stack, echo) == ("collector", ["bots"], None)
 
 
 def test_dispatch_same_view_command_is_a_no_op_push() -> None:
-    new_view, stack, echo = _dispatch_command("coins", [], "coins")
-    assert (new_view, stack, echo) == ("coins", [], None)
+    new_view, stack, echo = _dispatch_command("bots", [], "bots")
+    assert (new_view, stack, echo) == ("bots", [], None)
 
 
 def test_dispatch_unrecognized_command_echoes_and_does_not_navigate() -> None:
-    new_view, stack, echo = _dispatch_command("coins", [], "frobnicate")
-    assert new_view == "coins"
+    new_view, stack, echo = _dispatch_command("bots", [], "frobnicate")
+    assert new_view == "bots"
     assert stack == []
     assert echo == "unknown command: frobnicate"
 
 
 def test_dispatch_empty_command_is_unrecognized() -> None:
-    new_view, stack, echo = _dispatch_command("coins", [], "")
+    new_view, stack, echo = _dispatch_command("bots", [], "")
     assert echo == "unknown command: "
 
 
 def test_dispatch_h_alias_opens_help_same_as_full_name() -> None:
-    new_view, stack, echo = _dispatch_command("coins", [], "h")
-    assert (new_view, stack, echo) == ("help", ["coins"], None)
+    new_view, stack, echo = _dispatch_command("bots", [], "h")
+    assert (new_view, stack, echo) == ("help", ["bots"], None)
 
 
 def test_dispatch_quit_returns_quit_sentinel() -> None:
-    new_view, stack, echo = _dispatch_command("coins", [], "q")
+    new_view, stack, echo = _dispatch_command("bots", [], "q")
     assert new_view == _QUIT_SENTINEL
     assert echo is None
 
 
-def test_dispatch_data_command_opens_collector_view() -> None:
-    new_view, stack, echo = _dispatch_command("coins", [], "data")
-    assert (new_view, stack, echo) == ("collector", ["coins"], None)
+def test_dispatch_bots_command_returns_to_bots_from_collector() -> None:
+    new_view, stack, echo = _dispatch_command("collector", [], "bots")
+    assert (new_view, stack, echo) == ("bots", ["collector"], None)
 
 
 def test_dispatch_old_collector_command_no_longer_recognized() -> None:
-    new_view, stack, echo = _dispatch_command("coins", [], "collector")
-    assert new_view == "coins"
+    new_view, stack, echo = _dispatch_command("bots", [], "collector")
+    assert new_view == "bots"
     assert echo == "unknown command: collector"
+
+
+def test_dispatch_retired_coins_command_no_longer_recognized() -> None:
+    # Story 25.1a: rankings are web-only, so `:coins` is an unknown command, not a view.
+    new_view, stack, echo = _dispatch_command("bots", [], "coins")
+    assert (new_view, stack) == ("bots", [])
+    assert echo == "unknown command: coins"
 
 
 def test_parse_collector_command_pintop() -> None:
@@ -88,19 +95,19 @@ def test_parse_collector_command_old_refresh_no_longer_recognized() -> None:
 
 
 def test_pop_view_from_non_root_returns_to_previous() -> None:
-    new_view, stack = _pop_view("bots", ["coins"])
-    assert (new_view, stack) == ("coins", [])
+    new_view, stack = _pop_view("collector", ["bots"])
+    assert (new_view, stack) == ("bots", [])
 
 
 def test_pop_view_at_root_is_a_no_op() -> None:
-    new_view, stack = _pop_view("coins", [])
-    assert (new_view, stack) == ("coins", [])
+    new_view, stack = _pop_view("bots", [])
+    assert (new_view, stack) == ("bots", [])
 
 
 def test_pop_view_never_raises_on_empty_stack() -> None:
     # AC4: esc must never exit/raise, even repeatedly at the root.
-    view: str = "coins"
+    view: str = "bots"
     stack: list[str] = []
     for _ in range(3):
         view, stack = _pop_view(view, stack)
-    assert (view, stack) == ("coins", [])
+    assert (view, stack) == ("bots", [])

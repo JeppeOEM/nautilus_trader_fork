@@ -23,13 +23,17 @@ import pytest
 
 from bot_tui import bot_history_state
 from bot_tui import bots_state
-from bot_tui import coin_detail_state
-from bot_tui import ranking_state
 
 
 @pytest.fixture(autouse=True)
 def _reset_bots_state() -> None:
-    """Guarantee the same cross-test-file isolation as above, for bots_state's globals."""
+    """
+    bots_state's globals are module-level state shared across every test in this
+    package. Individual test files call their own `_reset()` helper, but that only
+    guards against ordering within one file -- a test in another file that forgets to
+    reset first would otherwise inherit whatever the previous test left behind. This
+    autouse fixture makes that reset unconditional regardless of collection order.
+    """
     bots_state._LATEST_STATUSES = {}
     bots_state._LATEST_RECEIVED_AT = {}
 
@@ -38,22 +42,3 @@ def _reset_bots_state() -> None:
 def _reset_bot_history_state() -> None:
     """Guarantee the same cross-test-file isolation as above, for bot_history_state's globals."""
     bot_history_state.close_bot()
-
-
-@pytest.fixture(autouse=True)
-def _reset_latest_ranking() -> None:
-    """
-    ranking_state._LATEST_RANKING is a module-level global shared across every test in
-    this package. Individual test files call their own `_reset()` helper, but that only
-    guards against ordering within one file -- a test in another file that forgets to
-    reset first would otherwise inherit whatever the previous test left behind. This
-    autouse fixture makes that reset unconditional regardless of collection order.
-    """
-    ranking_state._LATEST_RANKING = None
-    ranking_state._LATEST_RANKING_RECEIVED_AT = 0.0
-
-
-@pytest.fixture(autouse=True)
-def _reset_coin_detail_state() -> None:
-    """Guarantee the same cross-test-file isolation as above, for coin_detail_state's globals."""
-    coin_detail_state.close_coin()

@@ -28,7 +28,7 @@ export const IND_GROUPS: IndicatorGroup[] = [
   {
     id: "flow",
     name: "Order Flow",
-    desc: "Derived from a rolling window of recent snapshots or tick-to-tick book changes. ranking_engine is the sole live computer of every one of these — the dashboard and bot_tui only ever read its output (SSOT-02).",
+    desc: "Derived from a rolling window of recent snapshots or tick-to-tick book changes. ranking_engine is the sole live computer of every one of these — the dashboard only ever reads its output (SSOT-02).",
   },
   {
     id: "vol",
@@ -66,7 +66,7 @@ export const INDICATORS: Indicator[] = [
   {
     id: "microprice", group: "book", name: "Microprice", cadence: "live", window: "per snapshot (≈ 1s)",
     owner: "stateless — pure function, no shared-owner concern",
-    shownIn: ["Coin detail (web + bot_tui)", "/data/live/{id} JSON"],
+    shownIn: ["Coin detail (web)", "/data/live/{id} JSON"],
     tagline: "Size-weighted mid price, pulled toward whichever side of the book is thinner.",
     formula: "microprice = (bid_price×ask_size + ask_price×bid_size) / (bid_size + ask_size)",
     notes: [
@@ -80,12 +80,12 @@ export const INDICATORS: Indicator[] = [
   {
     id: "microprice_lean", group: "book", name: "Microprice Lean (“u lean”)", cadence: "live", window: "per snapshot (≈ 1s)",
     owner: "ranking_engine (sole live computer)",
-    shownIn: ["Coin detail (web + bot_tui)", "31-day history chart (/history/{id})"],
+    shownIn: ["Coin detail (web)", "31-day history chart (/history/{id})"],
     tagline: "How far the size-weighted fair value has drifted from the plain mid — a directional book-tilt signal.",
     formula: "microprice_lean = microprice − mid_price",
     notes: [
       "Positive = book pressure tilts the fair value above the plain mid (bid side thinner — more supportive of price rising); negative = the opposite.",
-      '<span class="callout">Moved off the cross-instrument ranking table on 2026-09-13.</span> Before that date it sat on the ranking table as a bare column labeled “u lean” next to a dozen other columns — useful as a per-coin signal, but not something you scan across instruments to rank them, and it crowded the table. It now lives only on the single-coin page (web <code>/coin/{id}</code> and bot_tui\'s coin detail), plus the 31-day history chart, via <code>views/ranking_columns.py</code>\'s <code>_HISTORY_ONLY_COLS</code> — the same mechanism already used to keep <code>rank</code> off the live table.',
+      '<span class="callout">Moved off the cross-instrument ranking table on 2026-09-13.</span> Before that date it sat on the ranking table as a bare column labeled “u lean” next to a dozen other columns — useful as a per-coin signal, but not something you scan across instruments to rank them, and it crowded the table. It now lives only on the single-coin page (web <code>/coin/{id}</code>; bot_tui\'s coin detail also showed it until rankings went web-only on 2026-09-26), plus the 31-day history chart, via <code>views/ranking_columns.py</code>\'s <code>_HISTORY_ONLY_COLS</code> — the same mechanism already used to keep <code>rank</code> off the live table.',
       "Displayed in basis points client-side (<code>bpsFromPriceUnits(raw, price)</code>) — the value stored/published is a raw price-unit delta, not already scaled to bps. A script reading <code>/api/rankings</code> or <code>/data/live/{id}</code> directly must do that scaling itself.",
     ],
     refs: ["ranking_engine/engine.py:364 (fast metrics)", "views/ranking_columns.py (_HISTORY_ONLY_COLS)", "ml_signals/dashboard.py (IND_GROUPS “Live (1s book state)”)"],
@@ -94,7 +94,7 @@ export const INDICATORS: Indicator[] = [
   {
     id: "spread", group: "book", name: "Spread", cadence: "live", window: "per snapshot (≈ 1s)",
     owner: "stateless — pure function",
-    shownIn: ["Ranking table (web + bot_tui)", "Coin detail"],
+    shownIn: ["Ranking table (web)", "Coin detail"],
     tagline: "Best ask minus best bid, in raw price units.",
     formula: "spread = ask_prices[0] − bid_prices[0]",
     notes: [
@@ -107,7 +107,7 @@ export const INDICATORS: Indicator[] = [
   {
     id: "mid_price", group: "book", name: "Mid Price (“Price”)", cadence: "live", window: "per snapshot (≈ 1s)",
     owner: "stateless — pure function",
-    shownIn: ["Ranking table (web + bot_tui)", "Coin detail"],
+    shownIn: ["Ranking table (web)", "Coin detail"],
     tagline: "Plain average of best bid and best ask — the “Price” column shown everywhere.",
     formula: "mid_price = (bid_prices[0] + ask_prices[0]) / 2",
     notes: [
@@ -119,7 +119,7 @@ export const INDICATORS: Indicator[] = [
   {
     id: "obi", group: "book", name: "Order Book Imbalance (OBI 3 / 5 / 10)", cadence: "live", window: "per snapshot (≈ 1s)",
     owner: "ranking_engine — 3 live MultiLevelOBI instances per instrument (levels 3, 5, 10)",
-    shownIn: ["Ranking table (web + bot_tui)", "Coin detail"],
+    shownIn: ["Ranking table (web)", "Coin detail"],
     tagline: "Fraction of resting size on the bid side, across the top N price levels.",
     formula: "OBI(N) = sum(bid_sizes[:N]) / (sum(bid_sizes[:N]) + sum(ask_sizes[:N]))",
     notes: [
@@ -132,7 +132,7 @@ export const INDICATORS: Indicator[] = [
   {
     id: "ofi_raw", group: "flow", name: "Order Flow Imbalance — raw (OFI 3 / 5 / 10)", cadence: "rolling", window: "rolling sum over the last 300 updates",
     owner: "ranking_engine — 3 live MultiLevelOFI instances per instrument (levels 3, 5, 10; window=300)",
-    shownIn: ["Ranking table (web + bot_tui, informational only)", "Coin detail"],
+    shownIn: ["Ranking table (web, informational only)", "Coin detail"],
     tagline: "Cont–Kukanov–Stoikov order flow imbalance, summed across the top N price levels.",
     formula: "at each level: price improves → count full new size\nprice unchanged → count the size delta\nprice worsens → count a full withdrawal (negative)\ncontribution = bid_term − ask_term, summed across levels and over the rolling window",
     notes: [
@@ -146,7 +146,7 @@ export const INDICATORS: Indicator[] = [
   {
     id: "ofi_z", group: "flow", name: "OFI10z (z-scored)", cadence: "rolling", window: "window=50, z-scored over the last 3600 readings",
     owner: "ranking_engine — one MultiLevelOFI(levels=10, window=50, zscore_window=3600) instance",
-    shownIn: ["Ranking table (web + bot_tui, leading column, informational only)", "Coin detail"],
+    shownIn: ["Ranking table (web, leading column, informational only)", "Coin detail"],
     tagline: "Level-10 OFI, standardized against its own recent history so it's comparable across instruments of any scale.",
     formula: "z = (raw_ofi − mean(last 3600 raw readings)) / std(last 3600 raw readings)\n(returns 0.0 when std is 0)",
     notes: [
@@ -159,7 +159,7 @@ export const INDICATORS: Indicator[] = [
   {
     id: "cvd", group: "flow", name: "CVD (Cumulative Volume Delta)", cadence: "rolling", window: "rolling 300-snapshot buffer",
     owner: "ranking_engine — fed from the shared _SECOND_ROLLING buffer",
-    shownIn: ["Ranking table (web + bot_tui)", "Coin detail"],
+    shownIn: ["Ranking table (web)", "Coin detail"],
     tagline: "Total buy volume minus total sell volume across the engine's rolling 300-snapshot window.",
     formula: "cvd = sum(buy_volume for last 300 snapshots) − sum(sell_volume for last 300 snapshots)",
     notes: [
@@ -172,7 +172,7 @@ export const INDICATORS: Indicator[] = [
   {
     id: "volume_delta", group: "flow", name: "Volume Delta (“Vol d 60s”)", cadence: "live", window: "single latest snapshot only — not a rolling sum",
     owner: "stateless — pure function of the latest snapshot",
-    shownIn: ["Ranking table (web + bot_tui)", "Coin detail"],
+    shownIn: ["Ranking table (web)", "Coin detail"],
     tagline: "Buy minus sell volume for the single most recent 1-second snapshot — despite sitting next to CVD, this one is not a rolling figure.",
     formula: "volume_delta = latest_snapshot.buy_volume − latest_snapshot.sell_volume",
     notes: [
@@ -205,7 +205,7 @@ export const INDICATORS: Indicator[] = [
   {
     id: "vol_catalog", group: "vol", name: "Volatility — Catalog (“Vol(catalog)”)", cadence: "slow", window: "60s refresh; window grows from 0 up to a 25-hour cap",
     owner: "ranking_engine.PriceSeriesStore → ml_signals.catalog_stats.price_stats_from_series(), called every 60s by _slow_loop_task",
-    shownIn: ["Ranking table (web + bot_tui)", "Coin detail", "31-day history chart"],
+    shownIn: ["Ranking table (web)", "Coin detail", "31-day history chart"],
     tagline: "stdev of consecutive per-second return percentages, over an in-memory price series backfilled from the Parquet catalog and retained up to 25 hours.",
     formula: "returns = diff(close_prices) / close_prices[:-1]\nvolatility = stdev(returns)   — over whatever history is retained (0–25h)",
     notes: [
@@ -219,7 +219,7 @@ export const INDICATORS: Indicator[] = [
   {
     id: "vol_score", group: "vol", name: "Volatility Score", cadence: "slow", window: "age-based rolling window, default 3600s (1h)",
     owner: "ranking_engine.VolatilityTracker (volatility.py) — a fourth, deliberately separate volatility computation",
-    shownIn: ["Ranking table (web + bot_tui)", "Coin detail"],
+    shownIn: ["Ranking table (web)", "Coin detail"],
     tagline: "Cross-sectional stdev of consecutive mid-price % returns, ranked against every other subscribed instrument. The sort key when Ranking Mode = “volatility.”",
     formula: "per instrument: stdev of mid-price % returns over an age-based window (default 3600s)\n→ rows sorted by volatility_score descending when mode = “volatility”",
     notes: [
@@ -233,7 +233,7 @@ export const INDICATORS: Indicator[] = [
   {
     id: "pct_change", group: "market", name: "pct_1h / pct_24h (+ pct_1w / pct_1m from metrics_store)", cadence: "slow", window: "60s refresh, read from the same 25h price series as Vol(catalog)",
     owner: "ml_signals.catalog_stats.price_stats_from_series()",
-    shownIn: ["Ranking table (web + bot_tui)", "Coin detail"],
+    shownIn: ["Ranking table (web)", "Coin detail"],
     tagline: "Percent change in mid price over the trailing 1h / 24h.",
     formula: "pct_change(H) = (latest_price − price_at(now − H)) / price_at(now − H) × 100",
     notes: ["<code>None</code> — not zero, not extrapolated — until the retained price series genuinely spans that long. A freshly-added instrument shows <code>pct_24h = None</code> for up to 24 hours, by design (DATA-01: never fabricate a value that isn't really known yet)."],
@@ -243,7 +243,7 @@ export const INDICATORS: Indicator[] = [
   {
     id: "volume24h", group: "market", name: "Volume24h (“Vol24h”)", cadence: "slow", window: "independent 60s poll",
     owner: "ranking_engine — direct per-venue REST polls (dYdX, Bybit, Hyperliquid), deliberately not reused from the collectors' own polls (AD-4: no cross-module network-I/O reuse)",
-    shownIn: ["Ranking table (web + bot_tui)", "Coin detail"],
+    shownIn: ["Ranking table (web)", "Coin detail"],
     tagline: "24-hour USD volume straight from the venue. The sort key when Ranking Mode = “volume” — the default.",
     formula: "polled every 60s per venue, all already USD: dYdX indexer /v4/perpetualMarkets volume24H; Bybit /v5/market/tickers turnover24h (linear, and spot for USDT/USDC quotes only, stablecoin at par); Hyperliquid /info metaAndAssetCtxs dayNtlVlm",
     notes: ["A coin whose venue has no current volume for it is left out of volume mode (never ranked at 0) and shows “—” in volatility mode; each one is counted in the error bar under ranking_engine.volume24h. Exception: a dYdX market whose volume24H field is absent or null still reads as 0 (older behaviour, tracked).", "This is the actual default ranking order for the whole system: with Ranking Mode left on “volume,” every OFI/OBI/CVD/microprice column on the table is informational only — none of them move an instrument's position in the list."],

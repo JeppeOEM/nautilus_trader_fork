@@ -43,13 +43,15 @@ Stopping does **not** flatten an open position — no auto-flatten logic exists.
 with the wrong `bot_id` is silently ignored, so this is safe to run against a shared
 Redis instance with multiple bots.
 
-**Via `bot_tui`** (the interactive terminal dashboard — status, start/stop, trades
+**Via `bot_tui`** (the interactive terminal control surface — status, start/stop, trades
 blotter, PnL sparkline):
 ```bash
 cd platform
 make tui
 ```
-Navigate to the Bots pane (`:bots`), highlight a bot, press `s` to start/stop it.
+`bot_tui` has two panes: Bots, which it opens on, and Collector (`:data`); `:bots` returns
+to Bots and `:help` lists every key. Rankings and the ranking-mode switch are web-only
+(the web UI's home page, `/`, Story 25.1a). Highlight a bot, press `s` to start/stop it.
 Stopping a *running* bot opens a type-to-confirm prompt (type `stop` + Enter); starting
 has no such guard. `bot_tui` needs `redis` up (`make up` or `make up-live-paper` bring it
 up) but not `live-paper` itself — an offline bot just shows as stale.
@@ -196,9 +198,9 @@ behavior, both are read-only additions:
   drops an instrument from the ranked list once its book has been silent for 30s+
   (OBS-01) — it now *also* publishes that instrument's id separately, as
   `stale_instrument_ids` on the same `rankings:live` message, instead of the coin just
-  vanishing from the table with no trace. Shows as a `~ stale feed: SOL-USD-PERP.DYDX`
-  banner in `bot_tui`'s Coins-pane breadcrumb and in the web dashboard's status line,
-  both reading the same field (SSOT-04).
+  vanishing from the table with no trace. Shows in the web dashboard's rankings page,
+  read verbatim from that field (the `bot_tui` Coins-pane banner that also read it was
+  deleted with the pane in Story 25.1a: rankings are web-only).
 - **A bot's own WS/data feed going stale, or the bot process restarting.** See
   section 1's "Incidents log (`i` key)" above — `live_paper/bot_status.py` watches the
   running strategy's own last-quote timestamp and logs start/end spans plus restart

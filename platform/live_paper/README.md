@@ -185,7 +185,7 @@ is.
 | Key | Where | Does |
 |---|---|---|
 | `:` then type `bots` + Enter | anywhere | switch to the Bots pane |
-| `:` then type `coins` + Enter | anywhere | switch to the Coins pane (collector/ranking view) |
+| `:` then type `data` + Enter | anywhere | switch to the Collector pane (rankings are web-only since Story 25.1a) |
 | `:` then type `q` + Enter | anywhere | quit |
 | `Enter` | Bots pane, row highlighted | open that bot's full-screen detail view |
 | `s` | Bots pane or Bot-detail | start/stop the highlighted or open bot. Stopping a *running* bot opens a type-to-confirm prompt (type `stop` + Enter) — starting has no such guard |

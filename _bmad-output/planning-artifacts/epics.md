@@ -2502,9 +2502,10 @@ So that a multi-venue watchlist is the normal view and a single venue is a filte
 **When** the rankings page shows a venue chip row (all venues present, all selected by default, per-viewer selection in `localStorage`)
 **Then** deselecting a chip hides that venue's rows, chips compose with `FilterPanel` conditions and sort, and a newly appearing venue is shown by default
 
-**Given** SSOT-04 (web and bot_tui are two renderers of one ranking page)
-**When** the bot_tui coins pane renders Hyperliquid's 24-char ids
-**Then** the instrument column fits without misaligning later columns (TUI-02) and the existing substring filter (`.BYBIT`, `.DYDX`, `.HYPERLIQUID`) is documented as the venue filter
+~~**Given** SSOT-04 (web and bot_tui are two renderers of one ranking page)~~
+~~**When** the bot_tui coins pane renders Hyperliquid's 24-char ids~~
+~~**Then** the instrument column fits without misaligning later columns (TUI-02) and the existing substring filter (`.BYBIT`, `.DYDX`, `.HYPERLIQUID`) is documented as the venue filter~~
+`[amended 2026-09-26: Story 25.1a -- struck: rankings are web-only and the bot_tui coins pane was deleted, so the web rankings page (venue chips above) is the only ranking renderer; see "Story 25.1a: Rankings web-only"]`
 
 ### Story 22.11: Nightly catalog consolidation for every venue
 

@@ -14,8 +14,8 @@
 # -------------------------------------------------------------------------------------------------
 """
 Tests for bot_tui.bots_state -- Story 4.4 (AC1/AC2 message-ingest and per-bot
-staleness). Pure-logic tests only, no real Redis, mirroring test_ranking_state.py's
-established no-real-clock-in-tests discipline.
+staleness). Pure-logic tests only, no real Redis; staleness checks pass an explicit
+`now` (no real clock in tests).
 """
 
 import pytest

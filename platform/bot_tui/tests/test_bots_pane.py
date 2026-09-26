@@ -367,3 +367,8 @@ def test_format_incident_line_closed_incident_shows_fixed_duration() -> None:
     line = bots_pane.format_incident_line(incident, now=999.0)
     assert "0m35s" in line
     assert "ongoing" not in line
+
+
+def test_osc52_copy_sequence_wraps_base64_payload_in_escape_codes() -> None:
+    seq = bots_pane.osc52_copy_sequence("hello")
+    assert seq == "\x1b]52;c;aGVsbG8=\x07"

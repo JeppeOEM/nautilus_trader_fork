@@ -1,7 +1,7 @@
 // Local helper: listens on 127.0.0.1:<port> for a URL and opens it in the
 // operator's default browser.
 //
-// Paired with bot_tui's space/o keys (see app.py's _open_via_local_listener)
+// Paired with bot_tui's Bot-detail `o` key (see app.py's _open_via_local_listener)
 // via troll-tui's reverse SSH tunnel (-R <port>:localhost:<port>) -- bot_tui
 // runs on the VPS with no browser of its own, so webbrowser.open() there is
 // always a no-op. This runs on the operator's actual machine instead; bot_tui
@@ -63,7 +63,7 @@ func handle(conn net.Conn) {
 	}
 	url := strings.TrimSpace(string(body))
 
-	// Only ever asked to open the dashboard's own chart URLs, but this port is
+	// Only ever asked to open the dashboard's own URLs (bot_tui's Bot-detail `o`), but this port is
 	// reachable from anything that can reach the VPS's own loopback -- refuse
 	// anything that isn't a plain http(s) URL rather than shelling out to
 	// xdg-open with an arbitrary string.

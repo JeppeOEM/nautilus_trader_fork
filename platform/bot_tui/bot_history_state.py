@@ -20,8 +20,8 @@ Unlike every other *_state.py module in this package, bots:history is not a pub/
 channel -- platform/live_paper/trade_history.py refreshes these four keys on a 30s timer,
 so this module polls them with plain Redis GETs instead of pubsub.listen().
 
-Tracks a single bot at a time (open_bot()/close_bot()), mirroring coin_detail_state's
-open_coin()/close_coin() shape rather than bots_state's accumulate-every-bot shape:
+Tracks a single bot at a time (open_bot()/close_bot()) rather than bots_state's
+accumulate-every-bot shape:
 history is only ever rendered for the one bot open in Bot-detail (Bots-pane rows show
 live status only, never history), so there is nothing to gain from polling every known
 bot's history in the background, and no Redis calls happen at all while no bot is
@@ -55,7 +55,7 @@ _LATEST_RECEIVED_AT: dict[str, float] = {}
 
 
 def open_bot(bot_id: str) -> None:
-    """Start tracking bot_id's history -- mirrors coin_detail_state.open_coin()."""
+    """Start tracking bot_id's history, dropping whatever the previous bot left behind."""
     global _TRACKED_BOT_ID
     _TRACKED_BOT_ID = bot_id
     _LATEST_HISTORY.clear()
@@ -63,7 +63,7 @@ def open_bot(bot_id: str) -> None:
 
 
 def close_bot() -> None:
-    """Stop tracking -- mirrors coin_detail_state.close_coin()."""
+    """Stop tracking; no Redis calls happen until the next open_bot()."""
     global _TRACKED_BOT_ID
     _TRACKED_BOT_ID = None
     _LATEST_HISTORY.clear()

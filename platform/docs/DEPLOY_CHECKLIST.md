@@ -180,8 +180,14 @@ Record numbers where each line says, never in a story file.
 - `redis-cli subscribe rankings:live` shows DYDX, BYBIT (-LINEAR and -SPOT) and HYPERLIQUID
   rows, each with non-zero USD `volume24h`; `/api/rankings` lists the `.BYBIT`/`.HYPERLIQUID`
   ids; the web rankings page has every venue chip selected by default, deselecting one hides
-  only that venue and survives a reload; `make tui` columns stay aligned and `/` + `.bybit`
-  narrows to Bybit rows (22.1, 22.10).
+  only that venue and survives a reload (22.1, 22.10). ~~`make tui` columns stay aligned and
+  `/` + `.bybit` narrows to Bybit rows~~ `[amended 2026-09-26: Story 25.1a -- the TUI Coins
+  pane was deleted, rankings are web-only; nothing to check in the TUI]`.
+- The web rankings page's Volume / Volatility control: clicking the other mode returns 202
+  (`PUT /api/rankings/mode`), and the pressed button flips only once `rankings:live` carries
+  the new mode (`redis-cli subscribe rankings:live` shows `"mode"` change within a heartbeat);
+  switch back afterwards so the VPS keeps its usual mode. With `ranking_engine` stopped the
+  same click shows an inline 503 `no ranking_engine subscribed to ranking:control` (25.1a).
 - `GET /api/errors`: `ranking_engine.volume24h` is not growing (a growing count means a
   collected instrument has no USD volume from its venue; 22.10).
 - `docker stats dydx-ranking-engine` flat over the 10 minutes, then about 3x the instrument

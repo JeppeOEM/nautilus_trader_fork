@@ -24,6 +24,7 @@ Run all `make` commands from `platform/`:
 | `make down` | Stop containers (catalog data is preserved) |
 | `make logs` | Tail collector logs |
 | `make web` | Open Dozzle log viewer in browser |
+| `make tui` | Open the terminal UI: bots and collector control (see below) |
 | `make prune` | Delete `order_book_deltas` older than 14 days |
 | `make prune-dry` | Preview what `prune` would delete |
 | `make consolidate` | Merge each closed UTC day into one Parquet file per (type, instrument) |
@@ -139,6 +140,29 @@ push notification if every subscribed instrument's order book goes stale for 30s
 make down   # stop containers, catalog persists
 make up     # restart (rebuilds collector image automatically)
 ```
+
+---
+
+## Terminal UI (`bot_tui`)
+
+```bash
+make tui    # rebuilds the thin bot_tui layer, then runs it interactively (never a daemon)
+```
+
+A keyboard-only control surface for the bots and the collector, with two panes:
+
+- **Bots** (the start pane, `:bots`): one row per `live_paper` bot from `bots:status`, with
+  per-row stale markers. `s` starts/stops the highlighted bot (stopping asks you to type
+  `stop`), Enter opens its detail view (trades, PnL, strategy source `v`, incidents `i`,
+  dashboard link `o`).
+- **Collector** (`:data`): every collected dYdX instrument from `collector:status`. `p`
+  unpins, `x` stops collecting (both ask for confirmation); `:start <ID>` and `:pintop` add
+  coins. Every action is written through to the collector's `config.toml`.
+
+`:help` lists every key; `esc` goes back one view, `:q` quits. It reads only `bots:*` and
+`collector:status` and publishes only `bots:control` and `collector:control`. Rankings, the
+ranking-mode switch (volume / volatility) and the single-coin view are in the web UI's
+rankings page (its home page, `/`) only (Story 25.1a). Operating the bots: `docs/BOT_OPERATIONS.md`.
 
 ---
 

@@ -418,6 +418,48 @@
         }
       }
     },
+    "/api/rankings/mode": {
+      "put": {
+        "summary": "Put Ranking Mode",
+        "description": "Ask `ranking_engine` to switch the global ranking mode. 202, not 200: the switch is\napplied asynchronously, and `rankings:live` confirms it.\n\nThe payload is `json.dumps({\"mode\": mode})`, the exact bytes the retired TUI toggle\npublished (replay test: `tests/test_rankings_mode.py`). A short-lived connection per call,\nas the TUI had: a mode switch is a rare human action, not worth a held publisher.\n\n503 when nobody received it (`publish()` counts 0 subscribers, i.e. `ranking_engine` is\ndown) or Redis fails or stalls past `_REDIS_TIMEOUT_SECONDS`. The TUI ignored both, so a\nswitch sent while the engine was down vanished silently; here the caller sees it (DATA-07).\n\nKnown limit: `publish()` counts every subscriber of the channel, so a stray `redis-cli\nSUBSCRIBE ranking:control` makes a 202 while `ranking_engine` is down. The page still never\nshows the new mode until `rankings:live` carries it. Upgrade path: an acknowledged command\n(the engine echoes a request id on `rankings:live`) once `RankingBoard.switch_mode` exists\n(Story 25.2).",
+        "operationId": "put_ranking_mode_api_rankings_mode_put",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RankingModeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RankingModeResponse"
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "No subscriber on `ranking:control`, or Redis failed"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/rankings/technicals-columns": {
       "get": {
         "summary": "Get Technicals Columns",
@@ -1687,6 +1729,42 @@
           "items"
         ],
         "title": "MetricsHistoryResponse"
+      },
+      "RankingModeRequest": {
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "volume",
+              "volatility"
+            ],
+            "title": "Mode"
+          }
+        },
+        "additionalProperties": false,
+        "type": "object",
+        "required": [
+          "mode"
+        ],
+        "title": "RankingModeRequest",
+        "description": "The whole request: one of the two modes `ranking_engine` accepts, nothing else."
+      },
+      "RankingModeResponse": {
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "volume",
+              "volatility"
+            ],
+            "title": "Mode"
+          }
+        },
+        "type": "object",
+        "required": [
+          "mode"
+        ],
+        "title": "RankingModeResponse"
       },
       "RankingsResponse": {
         "properties": {

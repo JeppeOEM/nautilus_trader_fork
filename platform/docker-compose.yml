@@ -243,8 +243,8 @@ services:
       # not the host's own TERM -- an unusual host terminal (e.g. "xterm-ghostty") has
       # no matching terminfo entry inside the container at all.
       TERM: "xterm-256color"
-      # Story 4.3's `o` deep-link target -- data_api serves the chart SPA, and 127.0.0.1:<port>
-      # is reachable here exactly as from the host (both run network_mode: host).
+      # Bot-detail's `o` deep-link target (Story 4.7) -- data_api serves the SPA, and
+      # 127.0.0.1:<port> is reachable here exactly as from the host (both run network_mode: host).
       DASHBOARD_BASE_URL: "http://127.0.0.1:${DATA_API_PORT:-9100}"
       # Set by troll-tui (~/.zshrc) to the port its -R reverse SSH tunnel binds
       # on this host -- see app.py's _open_via_local_listener. Unset (e.g.

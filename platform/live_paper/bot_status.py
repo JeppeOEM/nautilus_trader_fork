@@ -159,9 +159,9 @@ def build_status(
 
     win_rate is None (not 0.0) until at least one position has closed -- distinguishing
     "no trades yet" from "0% win rate so far" mirrors this codebase's own established
-    "None means genuinely unknown, not a fabricated default" convention (see
-    coin_detail.py's format_indicator "warming up..." sentinel for the same idea
-    applied to a different signal).
+    "None means genuinely unknown, not a fabricated default" convention (the since-
+    deleted bot_tui coin_detail.py's format_indicator "warming up..." sentinel was the
+    same idea applied to a different signal).
 
     closed_trades/win_rate are read from fills_store (Story 4.6's durable, event-
     sourced fill log), never cache.positions_closed() -- under OmsType.NETTING, a
@@ -328,8 +328,8 @@ async def run(strategy: Strategy, bot_id: str, mode: str, redis_url: str, db_pat
     reopened together on any error -- if the heartbeat side errors while the control
     side is still blocked in pubsub.listen(), that stale listener task is left to fail
     on its own closed connection rather than being explicitly cancelled here. An
-    accepted, already-precedented looseness in this codebase (see
-    coin_detail_state.py's own two-independent-uncoordinated-backoff tradeoff,
+    accepted, already-precedented looseness in this codebase (the since-deleted
+    bot_tui coin_detail_state.py's two-independent-uncoordinated-backoff tradeoff,
     deferred-work.md) -- not worth extra machinery for a personal, single-bot tool.
     """
     started_at = time.time()

@@ -16,12 +16,11 @@
 Pure Bots-pane row/formatting functions (Story 4.4, AC1/AC2; Story 4.5, AC1) -- no
 urwid import, no I/O.
 
-bots:status is published one message per bot (one live_paper process = one bot),
-unlike rankings:live's single aggregated list -- bots_state.py accumulates the latest
-message per bot_id into a dict; this module turns that dict into a deterministic,
-orderable row list and formats individual fields for display. app.py assembles the
-final urwid markup itself (coloring only the PnL segment, mirroring Story 4.3's
-bid/ask ladder-column precedent of "fixed position + color, never color alone").
+bots:status is published one message per bot (one live_paper process = one bot) --
+bots_state.py accumulates the latest message per bot_id into a dict; this module turns
+that dict into a deterministic, orderable row list and formats individual fields for
+display. app.py assembles the final urwid markup itself (coloring only the PnL segment:
+"fixed position + color, never color alone").
 
 Story 4.5 adds bot_detail_lines()/format_win_rate_detail() for Bot-detail's live-
 snapshot-header region (a different text layout from the Bots-pane row, sharing the
@@ -33,9 +32,11 @@ Story 4.7 adds the trades-blotter/PnL-sparkline formatters for Bot-detail's othe
 regions (bots:history:{bot_id}:{range}, read via bot_history_state.py -- a distinct
 wire contract from bots:status, so these take a `dict | None` history entry directly
 rather than the `row: dict` shape every function above takes) plus next_range() and
-dashboard_bot_url(), the pure logic behind the `t`/`o` keys app.py wires in.
+dashboard_bot_url(), the pure logic behind the `t`/`o` keys app.py wires in, and
+osc52_copy_sequence(), the clipboard fallback `o` writes the URL through.
 """
 
+import base64
 from datetime import UTC
 from datetime import datetime
 
@@ -94,9 +95,9 @@ _SPARK_CHARS = "▁▂▃▄▅▆▇█"
 def bot_rows(statuses: dict[str, dict]) -> list[dict]:
     """
     Return the latest known status dict per bot, sorted by bot_id for a stable render
-    order. bots:status has no ranking concept of its own (unlike rankings:live's "row
-    order is the wire contract" rule) -- alphabetical bot_id is simply the simplest
-    deterministic choice available, not a meaningful order preserved from the wire.
+    order. bots:status has no ranking concept of its own -- alphabetical bot_id is
+    simply the simplest deterministic choice available, not a meaningful order
+    preserved from the wire.
     """
     return [statuses[bot_id] for bot_id in sorted(statuses)]
 
@@ -132,8 +133,7 @@ def format_uptime(started_at: float, now: float) -> str:
 
 def format_win_rate(win_rate: float | None) -> str:
     """
-    "n/a" before any position has closed -- never a fabricated 0% (mirrors
-    coin_detail.format_indicator's "warming up..." sentinel for the same idea).
+    "n/a" before any position has closed -- never a fabricated 0%.
     """
     if win_rate is None:
         return "n/a"
@@ -306,13 +306,29 @@ def metrics_lines(entry: dict | None) -> list[str]:
 
 def dashboard_bot_url(base_url: str, bot_id: str) -> str:
     """
-    `/bot/{bot_id}` (Story 4.7, AC3) -- mirrors coin_detail.dashboard_chart_url()'s
-    exact URL-building shape. The web dashboard has no route there yet (checked: its
-    route list has nothing bot-shaped) -- that gap pre-dates this story and building
+    `/bot/{bot_id}` (Story 4.7, AC3). The web dashboard has no route there yet (checked:
+    its route list has nothing bot-shaped) -- that gap pre-dates this story and building
     it is explicitly out of this story's scope (spec's Never section); this function's
     only job is producing the URL bot_tui itself opens.
     """
     return f"{base_url.rstrip('/')}/bot/{bot_id}"
+
+
+def osc52_copy_sequence(text: str) -> str:
+    """
+    OSC 52 terminal escape sequence that sets the system clipboard to `text` -- a
+    native terminal feature (iTerm2, kitty, wezterm, most VTE/xterm-derived
+    terminals, tmux) rather than a Python clipboard dependency. Works over SSH with
+    no clipboard utility needed on either end, since the terminal emulator itself
+    (running on the user's machine) intercepts the sequence. Caller writes this
+    straight to stdout, bypassing urwid's widget rendering -- the same technique
+    tmux/vim/fzf use to reach the real terminal underneath urwid's raw_display screen.
+
+    Moved here from the Coin-detail module Story 25.1a deleted: Bot-detail's `o` is its
+    only caller now.
+    """
+    payload = base64.b64encode(text.encode()).decode()
+    return f"\x1b]52;c;{payload}\x07"
 
 
 def format_incident_line(incident: dict, now: float) -> str:

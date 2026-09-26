@@ -412,7 +412,7 @@ class MultiLevelOFI(Indicator):
 # -----------------------------------------------------------------------------------
 # Plain, stateless single-snapshot derivations (SSOT-01, platform/CLAUDE.md) -- pure
 # functions of one DydxSecondSnapshot.to_dict()-shaped dict, no window/history state.
-# Every caller (ranking_engine, data_api, bot_tui) must call these rather than
+# Every caller (ranking_engine, data_api via views) must call these rather than
 # reimplementing the formula locally, so two processes fed the same snapshot can never
 # compute a different number for it.
 # -----------------------------------------------------------------------------------

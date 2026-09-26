@@ -4,11 +4,12 @@
 
 ## Goal
 
-This is the third epic of the DDD migration of `platform/`. It moves four supporting and core contexts (`archive/`, `ranking/`, `bots/`, `collection_control/`) out of their legacy packages into their own bounded contexts, and gives each one an aggregate that enforces a real invariant. After it lands, the nightly saga cannot zero rows over an archive gap or reconcile a day that was never rebuilt. The ranking engine has no module globals. The bots' paper/real split is enforced by types. A venue's collected set is the plan capture actually applied, not the plan control intended. The contexts touch disjoint files. Every move keeps the live wire, file and store contracts byte-identical, so each story can be deployed on its own to the three 24/7 writers.
+This is the third epic of the DDD migration of `platform/`. It moves four supporting and core contexts (`archive/`, `ranking/`, `bots/`, `collection_control/`) out of their legacy packages into their own bounded contexts, and gives each one an aggregate that enforces a real invariant. After it lands, the nightly saga cannot zero rows over an archive gap or reconcile a day that was never rebuilt. The ranking engine has no module globals. The bots' paper/real split is enforced by types. A venue's collected set is the plan capture actually applied, not the plan control intended. Before the ranking move, rankings become web-only: the ranking-mode switch moves to the web and the TUI's Coins pane is deleted, so no later story refactors code that is about to disappear. The contexts touch disjoint files. Every move keeps the live wire, file and store contracts byte-identical, so each story can be deployed on its own to the three 24/7 writers.
 
 ## Stories
 
 - Story 25.1: `archive/` context: `ArchiveDay`, one deleter, one rewriter, one writer per leaf
+- Story 25.1a: Rankings web-only: the ranking-mode toggle moves to the web and the TUI's Coins pane is deleted
 - Story 25.2: `ranking/` context: `RankingBoard` replaces the module globals
 - Story 25.3: `bots/` context: paper and non-paper as types, Nautilus behind an ACL
 - Story 25.4: `collection_control/` context: the plan is the intent, the applied set is the fact
@@ -21,6 +22,7 @@ This is the third epic of the DDD migration of `platform/`. It moves four suppor
 - **Parent-spine Deferred items.** When a story resolves one, it strikes it with an amendment. 25.2 resolves "`open_interest` vs `volume24h` polling in different namespaces".
 - **Failures are ledgered.** Every tolerated failure goes through `observability.error_ledger.record` at one site per event type. New sites named in this epic: `reconcile.not_rebuilt`, `repair.capture_running`, `ranking_engine.volume24h`, `collector.subscribe_failed`, `collector.unplanned_message`.
 - **Invariant tests.** Every aggregate ships one invariant test per command, and every port ships a contract test that its adapters run.
+- **Rankings web-only (25.1a).** The ranking mode stays global and last-write-wins, and must never be unreachable: the web control (`PUT /api/rankings/mode`, body `{"mode": "volume" | "volatility"}`, unknown mode → 422) ships in the same commit that removes the TUI's `m` key, and it publishes the exact Redis message the TUI's mode toggle sends today (byte-for-byte replay test). The rankings page reads the current mode from `rankings:live` and shows a two-state control beside the venue chips. The TUI keeps only the Bots pane and the Collector pane, and nothing under `bot_tui/` subscribes to `rankings:live` or `snapshots:raw` (grep test). `RANKING_COLS` in `views/ranking_columns.py` stays the web's single column source; its urwid-only colour members go only if the web does not read them, and the story records which. `rankings:live`, `collector:status`, `collector:control` and `bots:*` payloads are unchanged. TUI-02 and TEST-04 apply.
 - **Binding rules.** The DATA/OBS/MEM/NAUT/SSOT/TEST rules in `platform/CLAUDE.md` still apply. Deliberate simplifications are written as `Known limit:` comments that name the ceiling and the upgrade path.
 
 ## Technical Decisions
@@ -35,6 +37,7 @@ This is the third epic of the DDD migration of `platform/`. It moves four suppor
   - `backfill_bars` and `repair_catalog` are the only offline `write_data()` callers, and `backfill_bars` shares the `VenueKlines` ACL with `compare_klines`.
   - Each catalog leaf has one writer. Capture holds `.capture-<venue>.lock` for its whole run, and archive tools never write a file whose `ts_init` span intersects the current UTC day.
   - Archive is the only writer of `pruned` markers and the only reader of the `_archive_gaps/` markers.
+- **TUI after 25.1a.** `bot_tui` reads only `bots:*` and `collector:status`, which should be reflected in the architecture module map, the operations docs and the README's TUI section. Deleted modules leave `test_images.py`'s `bot_tui` expectations and `test_boundaries.py`'s legacy map in the same commit. Story 22.10's AC naming the TUI coins pane is struck in `epics.md` with an amendment.
 - **Ranking (AD-D10).**
   - `RankingBoard` owns `mode`, per-instrument `InstrumentMetrics` (indicators, rolling windows, price series, last-seen, `VolumeReading(value_usd, observed_ns)`) and the publisher.
   - The pct/volatility math is `ranking/domain`'s alone. Views and research read those values from `rankings:live` or `metrics.db` through the ranking query service and never recompute them.
@@ -53,7 +56,8 @@ This is the third epic of the DDD migration of `platform/`. It moves four suppor
 
 ## Cross-Story Dependencies
 
-- **Fixed order: 25.1 → 25.2 → 25.3 → 25.4.** This follows the migration order (…research → archive → ranking → bots → collection_control → capture). Epic 24 is done, so `kernel/`, `observability/`, `candles/` (with the `VerifiedDays` port and `forming_bar`), `views/` and `research/` already exist.
+- **Fixed order: 25.1 → 25.1a → 25.2 → 25.3 → 25.4.** This follows the migration order (…research → archive → ranking → bots → collection_control → capture). Epic 24 is done, so `kernel/`, `observability/`, `candles/` (with the `VerifiedDays` port and `forming_bar`), `views/` and `research/` already exist.
+- **25.1a → 25.2/25.4/26.3.** 25.1a was pulled forward from Epic 29 so that the ranking move, the collection-control move and the Epic 26 closeout never shim or re-point the TUI's coins pane, coin-detail and ranking-state modules (which import `views.ranking_columns`, `views.coin_detail` and `kernel.second_snapshot` and own the only ranking-mode publisher). 25.2's `RankingBoard.switch_mode` must accept the message the web now sends. Epic 29's remaining stories (Exchange/Symbol columns, per-venue Collector pane, venue cutover) build on this epic afterwards.
 - **Shim expiry chains.** Archive shims expire at 25-3, `ranking_engine` at 25-4, `live_paper` at 26-1 and the moved `dydx_collector` modules at 26-2. The `ml_signals` package is deleted in 25.2.
 - **25.1 → 25.4.** 25.1 deletes `DydxCollector._prune_loop` and moves dropped-instrument/delta retention into `RetentionPolicy`, which reads `non_config_retain_hours` from the venue plan file. 25.4 must not reintroduce a pruner. 25.1 also adds the collector's capture lock, which is the only capture edit in that story.
 - **25.4 → Epic 26.** 25.4 adds `Collector.apply` on the legacy capture class. Epic 26 (the capture move) later owns it as `CaptureService.apply`.

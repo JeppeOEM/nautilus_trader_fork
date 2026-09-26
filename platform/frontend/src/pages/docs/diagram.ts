@@ -48,7 +48,7 @@ function poly(points: [number, number][], label?: string, labelPos?: [number, nu
 
 export function svgArchitecture(): string {
   return (
-    '<svg viewBox="0 0 700 640" role="img" aria-label="Data flows from dYdX via the collector into the Parquet catalog and a live Redis snapshots:raw feed. ranking_engine subscribes to that feed and publishes rankings:live back to Redis, plus writes metrics.db. The web dashboard and bot_tui both read snapshots:raw and rankings:live directly and never compute either themselves. Separately, live_paper runs its own TradingNode connection straight to dYdX and exchanges bots:status and bots:control with bot_tui over Redis.">' +
+    '<svg viewBox="0 0 700 640" role="img" aria-label="Data flows from dYdX via the collector into the Parquet catalog and a live Redis snapshots:raw feed. ranking_engine subscribes to that feed and publishes rankings:live back to Redis, plus writes metrics.db. The web dashboard reads snapshots:raw and rankings:live directly and never computes either itself; bot_tui (terminal) reads neither and only controls the bots and the collector. Separately, live_paper runs its own TradingNode connection straight to dYdX and exchanges bots:status and bots:control with bot_tui over Redis.">' +
     '<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="currentColor"/></marker></defs>' +
     box(260, 20, 260, 46, "dYdX WS / REST") +
     box(260, 110, 260, 46, "Collector") +
@@ -57,9 +57,12 @@ export function svgArchitecture(): string {
     box(260, 290, 260, 46, "ranking_engine") +
     box(20, 290, 180, 46, "metrics.db (SQLite)") +
     box(260, 380, 260, 46, "Redis: rankings:live") +
-    box(260, 470, 260, 60, "dashboard (web) +\nbot_tui (terminal)") +
+    box(260, 470, 260, 60, "dashboard (web)") +
     box(20, 470, 180, 46, "live_paper\n(TradingNode)") +
     box(20, 560, 300, 46, "Redis: bots:status / bots:control") +
+    // bot_tui reads bots:* and collector:status only (Story 25.1a) -- never rankings:live.
+    box(380, 560, 200, 46, "bot_tui (terminal)") +
+    line(380, 583, 320, 583, "bots:*") +
     line(390, 66, 390, 110, "WS / HTTP") +
     line(390, 156, 390, 200, "publishes ~1/s") +
     line(390, 246, 390, 290, "subscribes") +

@@ -13,18 +13,15 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-Shared rankings-table column metadata (platform/CLAUDE.md SSOT-03): the web dashboard and
-bot_tui's Coins pane both render one row per instrument from the exact same
-ranking_engine-published rankings:live rank entry -- this module is the single place
-that says which columns exist, in what order, with what label and text formatting, so
-neither UI can drift from the other by adding/reordering/reformatting a column alone.
+Rankings-table column metadata (platform/CLAUDE.md SSOT-04): the one place that says which
+columns the web rankings page renders from each `ranking_engine`-published rankings:live rank
+entry, in what order, with what label and text formatting. The page's TS mirror
+(`frontend/src/pages/RankingsPage.tsx`) is held to the same `(key, label)` sequence by
+`data_api/tests/test_ranking_columns_mirror.py`.
 
-`color_fn` returns a CSS hex color for the dashboard's HTML rendering (`None` = no
-sign-coloring for that column). Only two colors are ever used across this whole table
--- POSITIVE_COLOR (green) and NEGATIVE_COLOR (red) -- so bot_tui's urwid renderer maps
-a `color_fn` result back onto its own `pnl-pos`/`pnl-neg` palette entries by comparing
-against these same two constants, rather than reimplementing each column's own
-sign/threshold rule (e.g. OBI's ">0.5" boundary) a second time.
+Story 25.1a removed the `color_fn` member and `POSITIVE_COLOR`/`NEGATIVE_COLOR`: their only
+reader was bot_tui's Coins pane (deleted, rankings are web-only), and the web table never
+coloured cells from them.
 
 The Technicals tab's per-coin values are the same kind of read model (Story 24.2 moved them out of
 `data_api/routes/rankings.py`): `technicals_values` gives each requested column's latest value for
@@ -33,6 +30,7 @@ from the candle store's query service, else the archive's one seconds -> bars fo
 always equals what that coin's chart shows. It computes no indicator and no ranking metric itself.
 """
 
+from collections.abc import Callable
 from collections.abc import Sequence
 from typing import Any
 from typing import Protocol
@@ -45,12 +43,16 @@ from kernel.venues import venue_of
 from views import indicator_picker
 
 
-POSITIVE_COLOR = "#2a9d2a"
-NEGATIVE_COLOR = "#c0392b"
-
-# Each entry: (store_key, header_label, format_fn, color_fn|None).
-# Reorder, add, or remove rows here to control what's shown and how -- in both UIs.
-# color_fn receives the raw float value and returns a CSS color string or None.
+# Each entry: (store_key, header_label, format_fn).
+# Reorder, add, or remove rows here to control what's shown and how -- then port the change to
+# the TS mirror (the mirror test fails until you do).
+#
+# Known limit: since Story 25.1a no Python code calls `format_fn` -- the web page formats with
+# its own TS functions, and the mirror test holds only `(key, label)` equal, so a decimals change
+# on one side alone goes unnoticed. `format_fn` stays as the recorded text format for each column
+# (Story 25.1a's spec keeps the 3-tuple). Upgrade path: replace it with a declarative spec
+# (kind + decimals + sign) that both sides read and the mirror test compares, or serve the column
+# metadata to the page over `/api/rankings` so there is no mirror at all.
 # Unit contract for direct consumers of /api/rankings and /data/live/{id}: "cvd" and
 # "volume_delta" are raw base-asset-token deltas, "spread"/"microprice_lean" are raw
 # price-unit deltas -- neither is scaled by price server-side. The rankings/coin-detail
@@ -63,81 +65,32 @@ NEGATIVE_COLOR = "#c0392b"
 # volatility figures -- "volatility_fast" (live-tick, ~300s) and "volatility_score"
 # (VolatilityTracker's cross-sectional rank, 3600s) -- rather than a bare "Vol", which
 # used to collide with those on the same row/page. "catalog" matches the label already
-# used for this same field on both the web coin-detail page (dashboard.py's IND_GROUPS)
-# and bot_tui's coin-detail groups (app.py's _DETAIL_GROUPS) -- same field, same name,
-# everywhere it appears.
-RANKING_COLS: list[tuple[str, str, object, object]] = [
-    (
-        "ofi_10_z",
-        "OFI10z",
-        lambda v: f"{v:+.2f}",
-        lambda v: POSITIVE_COLOR if v > 0 else NEGATIVE_COLOR,
-    ),
-    (
-        "obi_10",
-        "OBI10",
-        lambda v: f"{v:.3f}",
-        lambda v: POSITIVE_COLOR if v > 0.5 else NEGATIVE_COLOR,
-    ),
-    (
-        "obi_5",
-        "OBI5",
-        lambda v: f"{v:.3f}",
-        lambda v: POSITIVE_COLOR if v > 0.5 else NEGATIVE_COLOR,
-    ),
-    (
-        "obi_3",
-        "OBI3",
-        lambda v: f"{v:.3f}",
-        lambda v: POSITIVE_COLOR if v > 0.5 else NEGATIVE_COLOR,
-    ),
-    ("cvd", "CVD", lambda v: f"{v:+.2f}", lambda v: POSITIVE_COLOR if v > 0 else NEGATIVE_COLOR),
-    ("spread", "Spread", lambda v: f"{v:.6f}", None),
-    (
-        "volume_delta",
-        "Vol d 60s",
-        lambda v: f"{v:+.2f}",
-        lambda v: POSITIVE_COLOR if v > 0 else NEGATIVE_COLOR,
-    ),
-    ("price", "Price", lambda v: f"{v:.4f}", None),
-    (
-        "pct_1h",
-        "1h %",
-        lambda v: f"{v:+.2f}%",
-        lambda v: POSITIVE_COLOR if v > 0 else NEGATIVE_COLOR,
-    ),
-    (
-        "pct_24h",
-        "24h %",
-        lambda v: f"{v:+.2f}%",
-        lambda v: POSITIVE_COLOR if v > 0 else NEGATIVE_COLOR,
-    ),
-    (
-        "pct_1w",
-        "1w %",
-        lambda v: f"{v:+.2f}%",
-        lambda v: POSITIVE_COLOR if v > 0 else NEGATIVE_COLOR,
-    ),
-    (
-        "pct_1m",
-        "1m %",
-        lambda v: f"{v:+.2f}%",
-        lambda v: POSITIVE_COLOR if v > 0 else NEGATIVE_COLOR,
-    ),
-    ("volatility", "Vol(catalog)", lambda v: f"{v:.6f}", None),
-    ("volatility_score", "Vol Score", lambda v: f"{v:.6f}" if v is not None else "—", None),
-    ("volume24h", "Vol24h", lambda v: f"{v / 1e6:.3f}M", None),
+# used for this same field on the web coin-detail page -- same field, same name, everywhere
+# it appears.
+RANKING_COLS: list[tuple[str, str, Callable[[Any], str]]] = [
+    ("ofi_10_z", "OFI10z", lambda v: f"{v:+.2f}"),
+    ("obi_10", "OBI10", lambda v: f"{v:.3f}"),
+    ("obi_5", "OBI5", lambda v: f"{v:.3f}"),
+    ("obi_3", "OBI3", lambda v: f"{v:.3f}"),
+    ("cvd", "CVD", lambda v: f"{v:+.2f}"),
+    ("spread", "Spread", lambda v: f"{v:.6f}"),
+    ("volume_delta", "Vol d 60s", lambda v: f"{v:+.2f}"),
+    ("price", "Price", lambda v: f"{v:.4f}"),
+    ("pct_1h", "1h %", lambda v: f"{v:+.2f}%"),
+    ("pct_24h", "24h %", lambda v: f"{v:+.2f}%"),
+    ("pct_1w", "1w %", lambda v: f"{v:+.2f}%"),
+    ("pct_1m", "1m %", lambda v: f"{v:+.2f}%"),
+    ("volatility", "Vol(catalog)", lambda v: f"{v:.6f}"),
+    ("volatility_score", "Vol Score", lambda v: f"{v:.6f}" if v is not None else "—"),
+    ("volume24h", "Vol24h", lambda v: f"{v / 1e6:.3f}M"),
 ]
 
 # History-only columns (store_key, header_label): plotted on /history/{id}'s per-coin
 # 31-day charts from metrics_store rows, but deliberately NOT in RANKING_COLS -- that
-# list is also used to render the cross-instrument *ranking* table (both the web
-# dashboard's table and bot_tui's Coins pane), so anything here is single-coin-page-only.
-# "rank" is here because live rankings:live rank entries never carry a "rank" key (row
-# order itself is the live rank); bot_tui's Coins pane already shows rank as its own
-# leading column, not sourced from this list. "microprice_lean" ("u lean") is here
-# because it belongs on the single-coin page only, not the cross-instrument ranking
-# table -- it's already shown on both the web and bot_tui coin-detail views.
+# list renders the cross-instrument *ranking* table, so anything here is
+# single-coin-page-only. "rank" is here because live rankings:live rank entries never carry
+# a "rank" key (row order itself is the live rank). "microprice_lean" ("u lean") is here
+# because it belongs on the single-coin page only, not the cross-instrument ranking table.
 _HISTORY_ONLY_COLS: list[tuple[str, str]] = [
     ("rank", "Rank"),
     ("microprice_lean", "u lean"),

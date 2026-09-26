@@ -3,7 +3,13 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-li
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { fetchRankings, fetchTechnicalsColumns, fetchTechnicalsValues, saveTechnicalsColumns } from "../api/client";
+import {
+  fetchRankings,
+  fetchTechnicalsColumns,
+  fetchTechnicalsValues,
+  saveTechnicalsColumns,
+  setRankingMode,
+} from "../api/client";
 import type { RankingsLiveMessage } from "./RankingsPage";
 
 // api/client's fetchRankings would otherwise hit a real network fetch under jsdom --
@@ -23,6 +29,8 @@ vi.mock("../api/client", () => ({
   fetchTechnicalsColumns: vi.fn().mockResolvedValue([]),
   saveTechnicalsColumns: vi.fn().mockResolvedValue(undefined),
   fetchTechnicalsValues: vi.fn().mockResolvedValue({}),
+  // Story 25.1a: the ranking-mode switch.
+  setRankingMode: vi.fn().mockResolvedValue({ mode: "volatility" }),
 }));
 
 const useLiveChannelMock = vi.fn();
@@ -644,6 +652,178 @@ describe("RankingsPage", () => {
           setItem.mockRestore();
         }
       });
+    });
+  });
+
+  describe("ranking mode control", () => {
+    function modeButton(label: "Volume" | "Volatility"): HTMLElement {
+      return within(screen.getByRole("group", { name: "Ranking mode" })).getByRole("button", { name: label });
+    }
+
+    beforeEach(() => {
+      vi.mocked(setRankingMode).mockReset();
+    });
+
+    it("presses the mode rankings:live carries", () => {
+      useLiveChannelMock.mockReturnValue({ latest: liveMessage({ mode: "volatility" }), connected: true });
+
+      renderPage();
+
+      expect(modeButton("Volatility")).toHaveAttribute("aria-pressed", "true");
+      expect(modeButton("Volume")).toHaveAttribute("aria-pressed", "false");
+    });
+
+    it("presses the REST seed's mode until a live message arrives", async () => {
+      useLiveChannelMock.mockReturnValue({ latest: null, connected: false });
+
+      renderPage();
+
+      await waitFor(() => expect(modeButton("Volume")).toHaveAttribute("aria-pressed", "true"));
+      expect(modeButton("Volatility")).toHaveAttribute("aria-pressed", "false");
+    });
+
+    it("on a cold open shows both buttons, neither pressed, both enabled", () => {
+      vi.mocked(fetchRankings).mockReturnValueOnce(new Promise(() => {})); // no seed yet
+      useLiveChannelMock.mockReturnValue({ latest: null, connected: false });
+
+      renderPage();
+
+      expect(screen.getByText(/Loading rankings/i)).toBeInTheDocument();
+      for (const label of ["Volume", "Volatility"] as const) {
+        expect(modeButton(label)).toHaveAttribute("aria-pressed", "false");
+        expect(modeButton(label)).toBeEnabled();
+      }
+    });
+
+    it("clicking the other mode sends it and waits for rankings:live instead of flipping", async () => {
+      let resolveSend: (value: { mode: string }) => void = () => {};
+      vi.mocked(setRankingMode).mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolveSend = resolve;
+        }),
+      );
+      useLiveChannelMock.mockReturnValue({ latest: liveMessage({ mode: "volume" }), connected: true });
+
+      renderPage();
+      fireEvent.click(modeButton("Volatility"));
+
+      expect(setRankingMode).toHaveBeenCalledExactlyOnceWith("volatility");
+      expect(modeButton("Volume")).toBeDisabled();
+      expect(modeButton("Volatility")).toBeDisabled();
+      resolveSend({ mode: "volatility" });
+      await waitFor(() => expect(modeButton("Volatility")).toBeEnabled());
+      // Accepted is not applied: the pressed button still follows rankings:live.
+      expect(modeButton("Volume")).toHaveAttribute("aria-pressed", "true");
+      expect(modeButton("Volatility")).toHaveAttribute("aria-pressed", "false");
+    });
+
+    it("clicking the already-active mode sends nothing", () => {
+      useLiveChannelMock.mockReturnValue({ latest: liveMessage({ mode: "volume" }), connected: true });
+
+      renderPage();
+      fireEvent.click(modeButton("Volume"));
+
+      expect(setRankingMode).not.toHaveBeenCalled();
+      expect(modeButton("Volume")).toBeEnabled();
+    });
+
+    it("shows a failed switch inline and reports it to console.error", async () => {
+      const failure = new Error("PUT /api/rankings/mode failed: 503 no ranking_engine subscribed to ranking:control");
+      vi.mocked(setRankingMode).mockRejectedValueOnce(failure);
+      const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+      useLiveChannelMock.mockReturnValue({ latest: liveMessage({ mode: "volume" }), connected: true });
+      try {
+        renderPage();
+        fireEvent.click(modeButton("Volatility"));
+
+        const alert = await within(screen.getByRole("group", { name: "Ranking mode" })).findByRole("alert");
+        expect(alert).toHaveTextContent("no ranking_engine subscribed to ranking:control");
+        expect(consoleError).toHaveBeenCalledWith(
+          "RankingsPage: failed to switch ranking mode to volatility",
+          failure,
+        );
+        expect(modeButton("Volatility")).toBeEnabled(); // a retry stays possible
+      } finally {
+        consoleError.mockRestore();
+      }
+    });
+
+    it("keeps an in-flight switch when the first payload arrives mid-request", () => {
+      vi.mocked(fetchRankings).mockReturnValueOnce(new Promise(() => {})); // no seed yet
+      vi.mocked(setRankingMode).mockReturnValueOnce(new Promise(() => {})); // never settles
+      useLiveChannelMock.mockReturnValue({ latest: null, connected: false });
+      const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+
+      const { rerender } = render(pageElement(queryClient));
+      fireEvent.click(modeButton("Volatility"));
+      useLiveChannelMock.mockReturnValue({ latest: liveMessage({ mode: "volume" }), connected: true });
+      rerender(pageElement(queryClient));
+
+      expect(screen.queryByText(/Loading rankings/i)).not.toBeInTheDocument();
+      expect(modeButton("Volume")).toBeDisabled(); // same component instance, still sending
+      expect(setRankingMode).toHaveBeenCalledOnce();
+    });
+
+    it("clears a failed switch's alert once rankings:live carries a new mode", async () => {
+      vi.mocked(setRankingMode).mockRejectedValueOnce(new Error("503"));
+      const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+      useLiveChannelMock.mockReturnValue({ latest: liveMessage({ mode: "volume" }), connected: true });
+      const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      try {
+        const { rerender } = render(pageElement(queryClient));
+        fireEvent.click(modeButton("Volatility"));
+        const group = screen.getByRole("group", { name: "Ranking mode" });
+        await within(group).findByRole("alert");
+
+        useLiveChannelMock.mockReturnValue({ latest: liveMessage({ mode: "volatility" }), connected: true });
+        rerender(pageElement(queryClient));
+
+        expect(within(screen.getByRole("group", { name: "Ranking mode" })).queryByRole("alert")).toBeNull();
+      } finally {
+        consoleError.mockRestore();
+      }
+    });
+
+    it("keeps a cold-open failure when the first payload only reveals the unchanged mode", async () => {
+      vi.mocked(fetchRankings).mockReturnValueOnce(new Promise(() => {})); // no seed yet
+      vi.mocked(setRankingMode).mockRejectedValueOnce(new Error("503 no subscriber"));
+      const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+      useLiveChannelMock.mockReturnValue({ latest: null, connected: false });
+      const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      try {
+        const { rerender } = render(pageElement(queryClient));
+        fireEvent.click(modeButton("Volatility"));
+        await within(screen.getByRole("group", { name: "Ranking mode" })).findByRole("alert");
+
+        useLiveChannelMock.mockReturnValue({ latest: liveMessage({ mode: "volume" }), connected: true });
+        rerender(pageElement(queryClient));
+
+        const alert = within(screen.getByRole("group", { name: "Ranking mode" })).getByRole("alert");
+        expect(alert).toHaveTextContent("503 no subscriber");
+      } finally {
+        consoleError.mockRestore();
+      }
+    });
+
+    it("never brings a superseded failure back when the mode returns to where it was", async () => {
+      vi.mocked(setRankingMode).mockRejectedValueOnce(new Error("503"));
+      const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+      useLiveChannelMock.mockReturnValue({ latest: liveMessage({ mode: "volume" }), connected: true });
+      const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+      try {
+        const { rerender } = render(pageElement(queryClient));
+        fireEvent.click(modeButton("Volatility"));
+        await within(screen.getByRole("group", { name: "Ranking mode" })).findByRole("alert");
+
+        for (const mode of ["volatility", "volume"]) {
+          useLiveChannelMock.mockReturnValue({ latest: liveMessage({ mode }), connected: true });
+          rerender(pageElement(queryClient));
+        }
+
+        expect(within(screen.getByRole("group", { name: "Ranking mode" })).queryByRole("alert")).toBeNull();
+      } finally {
+        consoleError.mockRestore();
+      }
     });
   });
 });

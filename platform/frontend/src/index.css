@@ -144,6 +144,23 @@ table {
   padding: 7px 10px;
 }
 
+/* Story 25.1a: the ranking-mode control and the venue chips share one row; each group keeps
+   its own .filter-panel spacing. */
+.rankings-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  column-gap: 18px;
+}
+
+/* A failed mode switch (503: ranking_engine down, Redis down) -- same alert colours as
+   .chart-load-error, inline beside the buttons. */
+.rankings-mode-error {
+  padding: 4px 8px;
+  color: var(--vga-black);
+  background: var(--vga-light-red);
+}
+
 .filter-chip {
   border: 1px solid var(--color-border);
   padding: 2px 6px;

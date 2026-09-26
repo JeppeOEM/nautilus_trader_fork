@@ -16,14 +16,16 @@
 Tests for bot_tui.app's Bot-detail wiring -- Story 4.5, AC1-AC4; Story 4.7, AC1-AC4.
 
 Widget-construction-level tests only (no real screen needed), same pattern as
-test_app_coin_detail.py/test_app_bots.py. `_toggle_bot`'s actual asyncio-scheduled
-publish call is not independently re-tested here beyond confirming `_active_bot_id()`
-returns the right target -- same established precedent as test_app_bots.py's own
-docstring: the first side-effecting statement needs a running event loop, left to the
-manual smoke check. `webbrowser.open()`'s actual behavior is the same established
-manual-smoke-check exception test_app_coin_detail.py's own docstring already
-documents for the `o` key -- only the footer-echo half is asserted here.
+test_app_bots.py. `_toggle_bot`'s actual asyncio-scheduled publish call is not
+independently re-tested here beyond confirming `_active_bot_id()` returns the right
+target -- same established precedent as test_app_bots.py's own docstring: the first
+side-effecting statement needs a running event loop, left to the manual smoke check.
+`webbrowser.open()`'s actual behavior is a manual-smoke-check exception too -- only the
+`o` key's footer echo and the local-listener hand-off (a real loopback socket) are
+asserted here.
 """
+
+import socket
 
 import urwid
 
@@ -267,7 +269,8 @@ def test_right_key_full_cycle_returns_to_day() -> None:
     assert app._bot_history_range == "day"
 
 
-def test_o_key_sets_footer_to_bot_dashboard_url() -> None:
+def test_o_key_sets_footer_to_bot_dashboard_url(monkeypatch) -> None:
+    monkeypatch.delenv("BOT_TUI_OPEN_URL_PORT", raising=False)
     _reset()
     bots_state._handle_status_message(_status("bot-07"))
     app = BotTuiApp()
@@ -276,6 +279,58 @@ def test_o_key_sets_footer_to_bot_dashboard_url() -> None:
     assert (
         app._footer_hint.text == "dashboard (copied to clipboard): http://127.0.0.1:9100/bot/bot-07"
     )
+
+
+# --- BOT_TUI_OPEN_URL_PORT: hand off to a local open_listener.go instead of
+# webbrowser.open()/OSC52, when troll-tui's reverse SSH tunnel is up ---
+
+
+def _listening_socket() -> tuple[socket.socket, int]:
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    # accept() raises instead of hanging the suite if the app never connects.
+    server.settimeout(5.0)
+    return server, server.getsockname()[1]
+
+
+def test_open_via_local_listener_sends_url_and_returns_true(monkeypatch) -> None:
+    server, port = _listening_socket()
+    monkeypatch.setenv("BOT_TUI_OPEN_URL_PORT", str(port))
+
+    with server:
+        result = BotTuiApp._open_via_local_listener("http://127.0.0.1:9100/bot/bot-07")
+        conn, _ = server.accept()
+        with conn:
+            received = conn.recv(4096)
+
+    assert result is True
+    assert received == b"http://127.0.0.1:9100/bot/bot-07"
+
+
+def test_open_via_local_listener_false_when_port_unset(monkeypatch) -> None:
+    monkeypatch.delenv("BOT_TUI_OPEN_URL_PORT", raising=False)
+    assert BotTuiApp._open_via_local_listener("http://127.0.0.1:9100/bot/bot-07") is False
+
+
+def test_open_via_local_listener_false_when_nothing_listening(monkeypatch) -> None:
+    monkeypatch.setenv("BOT_TUI_OPEN_URL_PORT", "1")  # privileged/unused port, connect refused
+    assert BotTuiApp._open_via_local_listener("http://127.0.0.1:9100/bot/bot-07") is False
+
+
+def test_o_key_uses_local_listener_when_port_set(monkeypatch) -> None:
+    server, port = _listening_socket()
+    monkeypatch.setenv("BOT_TUI_OPEN_URL_PORT", str(port))
+    _reset()
+    bots_state._handle_status_message(_status("bot-07"))
+    app = BotTuiApp()
+    app._open_bot_detail("bot-07")
+
+    with server:
+        app._handle_bot_detail_key("o")
+        conn, _ = server.accept()
+        conn.close()
+    assert app._footer_hint.text == "dashboard: http://127.0.0.1:9100/bot/bot-07"
 
 
 def test_v_key_opens_strategy_view_with_breadcrumb(monkeypatch, tmp_path) -> None:

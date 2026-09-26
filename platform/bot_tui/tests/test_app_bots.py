@@ -15,13 +15,11 @@
 """
 Tests for bot_tui.app.BotTuiApp's Bots pane -- Story 4.4, AC1/AC2.
 
-Widget-construction-level tests only, same pattern/scope as test_app_stale_badge.py:
-`_toggle_bot` itself is not unit-tested here since its first side-effecting statement
-schedules a real asyncio task (`asyncio.ensure_future(bots_state.publish_control(...))`),
-which needs a running event loop -- this codebase's own established precedent already
-leaves the equivalent `_toggle_mode` untested at this level for the identical reason
-(only the pure `ranking_state.toggle_mode` is unit-tested; see test_ranking_state.py).
-Real keypress-triggered start/stop is covered by the manual smoke check instead.
+Widget-construction-level tests only: `_toggle_bot`'s real publish path is not
+unit-tested here since its first side-effecting statement schedules a real asyncio task
+(`asyncio.ensure_future(bots_state.publish_control(...))`), which needs a running event
+loop -- tests below monkeypatch `_publish_bot_action` instead. Real keypress-triggered
+start/stop is covered by the manual smoke check.
 """
 
 from bot_tui import bots_state
@@ -169,12 +167,13 @@ def test_bots_pane_footer_hint_switches_on_entry() -> None:
     assert "start/stop" in app._footer_hint.text
 
 
-def test_leaving_bots_pane_restores_default_footer_hint() -> None:
+def test_leaving_bots_pane_switches_to_the_collector_footer_hint() -> None:
     _reset()
     app = BotTuiApp()
     app._switch_view("bots", [])
-    app._switch_view("coins", [])
+    app._switch_view("collector", [])
     assert "start/stop" not in app._footer_hint.text
+    assert "p unpin" in app._footer_hint.text
 
 
 def test_s_on_running_bot_opens_stop_confirm_without_publishing() -> None:

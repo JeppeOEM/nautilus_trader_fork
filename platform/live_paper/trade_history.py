@@ -109,7 +109,8 @@ def _fill_pnl(strategy: Strategy, fill: OrderFilled) -> tuple[float | None, floa
 
     Both are (None, None) for a fill that only opens or adds to a position
     (order_side == position.entry), matching this codebase's "None means not
-    applicable" convention (see coin_detail.py's format_indicator).
+    applicable" convention (as the since-deleted bot_tui coin_detail.py's
+    format_indicator did).
     """
     if fill.position_id is None:
         return None, None

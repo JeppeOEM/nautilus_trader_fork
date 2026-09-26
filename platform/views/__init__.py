@@ -13,15 +13,16 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-The views context (DDD spine AD-D11): the read models both user interfaces show -- the CQRS query
-side. Every value the web UI (`data_api` + `frontend/`) and the TUI (`bot_tui`) display comes from
-one function here over one input, so the two surfaces cannot disagree by construction (SSOT-01..05):
-the interfaces format and transport, they compute nothing.
+The views context (DDD spine AD-D11): the read models the user interfaces show -- the CQRS query
+side. Every market value the web UI (`data_api` + `frontend/`) displays comes from one function
+here over one input (SSOT-01..05): the interface formats and transports, it computes nothing. The
+TUI (`bot_tui`) shows only bots and the collector since Story 25.1a, so it reads no read model
+here.
 
 The modules: `ranking_columns` (the ranking table's column set, and the Technicals tab's latest
-values), `coin_detail` (the single-coin view's metric set, the `snapshots:raw` decode, the metrics
-history reads), `chart_series` (every chart series and page: candles, Lines-mode snapshots,
-indicator series and values, footprint, book features, and the gap-marker rendering rules),
+values), `coin_detail` (the single-coin page's metrics.db history and archived-seconds reads),
+`chart_series` (every chart series and page: candles, Lines-mode snapshots, indicator series and
+values, footprint, book features, and the gap-marker rendering rules),
 `indicator_picker` (the native + custom indicator catalogs and their replay dispatch),
 `preferences` (the one loader/saver of `chart_indicators.toml` and `screener_columns.toml`),
 `catalog_reads` (the catalog series read and the cursor-paging helpers), `live_candles` (the live
@@ -41,7 +42,7 @@ dicts/dataclasses and raise their own exceptions, which each interface maps to i
 Dependency direction: views imports `kernel`, `observability` and the query services of `candles`
 (`candles.application.queries`, `candles.application.forming`, `candles.domain.candle`) and of
 ranking (`ranking_engine.metrics_store.history`/`nearest`) -- never a store adapter
-(`candles.infrastructure`), never capture, research or an interface. `data_api` and `bot_tui`
-import views. `platform/tests/test_boundaries.py` enforces all of it, the query-service names
-included (`VIEWS_QUERY_SERVICES`).
+(`candles.infrastructure`), never capture, research or an interface. `data_api` imports views.
+`platform/tests/test_boundaries.py` enforces all of it, the query-service names included
+(`VIEWS_QUERY_SERVICES`).
 """

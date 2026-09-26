@@ -364,7 +364,8 @@ service name, via `ERROR_LEDGER_SERVICE`).
 Everything here is computed **on read** from the raw types in §1 — nothing in this
 section is stored back to Parquet. Since Story 24.2 every value a UI shows is computed in the
 `views/` read-model context (§2.4, §2.6, §2.7, §2.10 moved there from `ml_signals/`; the old
-module paths' re-exports were deleted in Story 24.4); `data_api` and `bot_tui` only format and transport it. Per SSOT-01/02 (`platform/CLAUDE.md`), stateless
+module paths' re-exports were deleted in Story 24.4); `data_api` only formats and transports it
+(`bot_tui` shows no market value at all since Story 25.1a: rankings are web-only). Per SSOT-01/02 (`platform/CLAUDE.md`), stateless
 single-snapshot formulas live as plain functions in `kernel/indicators.py` (the shared kernel,
 Story 23.2; the `ml_signals.indicators` re-export was deleted in Story 24.2); stateful/rolling
 indicators are classes, and for anything shown in a live UI, exactly one process
@@ -522,16 +523,19 @@ import the full dependency set (fastapi, redis).
 ### 2.10 `views/ranking_columns.py` — shared column definitions (was `ml_signals/ranking_columns.py`)
 
 **Actively wired up**, not a work-in-progress stub: it defines
-`RANKING_COLS`, the ordered list of `(store_key, label, format_fn, color_fn)` tuples
-that `bot_tui`'s Coins pane renders as the ranking table (`platform/CLAUDE.md` SSOT-04).
-The web UI no longer uses it: `ml_signals/dashboard.py` was retired in Story 15.10 and
-`frontend/` defines its own columns. Every `store_key` in this list
+`RANKING_COLS`, the ordered list of `(store_key, label, format_fn)` tuples that is the web
+rankings table's single column source (`platform/CLAUDE.md` SSOT-04). `frontend/`'s
+`RankingsPage.tsx` renders a hand-declared TS mirror of it, held to the same `(key, label)`
+sequence by `data_api/tests/test_ranking_columns_mirror.py`. `[amended 2026-09-26: Story 25.1a
+-- its old renderer, `bot_tui`'s Coins pane, was deleted (rankings are web-only), and with it the
+`color_fn` member and `POSITIVE_COLOR`/`NEGATIVE_COLOR`, which only that pane read.]` Every
+`store_key` in this list
 (`ofi_10_z`, `obi_10`, `obi_5`, `obi_3`, `cvd`, `spread`, `microprice_lean`,
 `volume_delta`, `price`, `pct_1h`, `pct_24h`, `volatility`, `volatility_score`,
 `volume24h`) is a field name coming straight off a `rankings:live` rank entry —
 i.e. every column this file defines maps 1:1 to a field `ranking_engine` publishes
-(§3). It is display metadata (labels, `f"{v:+.2f}"`-style formatting, red/green
-sign-coloring), not a new computation. The same module also holds the Technicals tab's per-coin
+(§3). It is display metadata (labels, `f"{v:+.2f}"`-style formatting), not a new
+computation. The same module also holds the Technicals tab's per-coin
 values (`technicals_values`, Story 24.2): each column's latest value through the chart's own
 indicator dispatch over the chart's own candles -- no indicator or ranking math of its own.
 
@@ -564,7 +568,7 @@ set; a failed send is ledgered at `observability.notify.<transport>`), and toast
 ## 3. Ranking engine (`platform/ranking_engine/`)
 
 `ranking_engine/engine.py` is the **sole computer and publisher** of the live coin
-ranking (architecture decision AD-9) — `dashboard.py` and `bot_tui` are pure readers
+ranking (architecture decision AD-9) — `data_api` and the web UI are pure readers
 of its output, never independent computers of the same indicators (`platform/CLAUDE.md`
 SSOT-02). This exists specifically to prevent two processes independently running
 the same rolling-window indicator class and silently diverging via differing startup
@@ -591,7 +595,18 @@ time / window contents / float accumulation order.
 - **Parquet catalog** (via `metrics_computer.compute_all`, §2.8) — read once per
   minute for `price`/`pct_1h`/`pct_24h`/`volatility`.
 - **`ranking:control`** — a Redis control channel that switches the active ranking
-  mode between `"volume"` (default) and `"volatility"`.
+  mode between `"volume"` (default) and `"volatility"`. Global and last-write-wins.
+  - Publisher: `data_api`'s `PUT /api/rankings/mode` (body `{"mode": "volume" | "volatility"}`,
+    anything else a 422), driven by the web rankings page's Volume/Volatility control. It
+    publishes `json.dumps({"mode": mode})` -- exactly `{"mode": "volatility"}` /
+    `{"mode": "volume"}`, byte-identical to the retired TUI `m` key
+    (`data_api/tests/test_rankings_mode.py`). A publish no subscriber received (the engine is
+    down) or a Redis error is a 503, shown on the page.
+  - Consumer: `ranking_engine/engine.py`'s `_handle_control_message`, which reads only `mode`
+    and logs-and-ignores an unknown one. The page shows the new mode only once
+    `rankings:live` carries it (publish-and-wait, never optimistic).
+  `[amended 2026-09-26: Story 25.1a -- the publisher moved from `bot_tui/ranking_state.py`
+  (deleted) to `data_api`]`
 
 ### 3.2 What's computed, per instrument, on every `snapshots:raw` batch
 
@@ -664,12 +679,13 @@ track genuinely different OFI computations.
 ### 3.5 What the ranking is used for
 
 `data_api`'s `GET /api/rankings` (a verbatim passthrough, `data_api/routes/rankings.py`)
-and `bot_tui`'s Coins pane both render `rankings:live` directly, row order and column
-values unchanged — no independent computation on the read side. No code path in
+and its `/ws/live` relay feed the web rankings page, which renders `rankings:live` directly, row
+order and column values unchanged (the web page is the only renderer since Story 25.1a deleted
+`bot_tui`'s Coins pane) — no independent computation on the read side. No code path in
 `platform/live_paper/` (the actual trading-bot module) imports `ranking_engine` or reads
 `rankings:live` — bots are configured independently, not auto-selected from the live
 ranking. The ranking's current, only
-confirmed consumer is the human-facing dashboard/TUI coin-picker UI, not an automated
+confirmed consumer is the human-facing web dashboard's coin-picker UI, not an automated
 trading decision.
 
 ---

@@ -25,6 +25,11 @@ The Technicals tab's routes are format + transport only (Story 24.2): the column
 candles). This module validates the untrusted request, passes its own `CATALOG_PATH`/
 `CANDLES_DB_DIR` in, keeps the short TTL cache and maps failures (bad params -> 400, one coin's
 failed read -> that coin's `errors` entry).
+
+`PUT /api/rankings/mode` (Story 25.1a) is the one ranking-mode switch now that rankings are
+web-only: it publishes the message `ranking_engine` reads on `ranking:control`, byte-identical to
+what the retired TUI `m` key sent, and never touches the mode itself -- the page shows the new
+mode only once `rankings:live` carries it (publish-and-wait, last write wins).
 """
 
 import json
@@ -33,12 +38,15 @@ import os
 import time
 import tomllib
 from pathlib import Path
+from typing import Literal
 
+import redis.asyncio as aioredis
 from fastapi import APIRouter
 from fastapi import HTTPException
 from fastapi import Request
 from observability import error_ledger
 from pydantic import BaseModel
+from pydantic import ConfigDict
 from views import indicator_picker
 from views import preferences
 from views import ranking_columns
@@ -47,6 +55,7 @@ from data_api import buses
 from data_api.routes import indicators as _indicators
 from data_api.settings import CANDLES_DB_DIR
 from data_api.settings import CATALOG_PATH
+from data_api.settings import REDIS_URL
 
 
 router = APIRouter()
@@ -77,6 +86,77 @@ def get_rankings() -> RankingsResponse:
         mode=latest["mode"],
         stale_instrument_ids=latest.get("stale_instrument_ids", []),
     )
+
+
+# ---------------------------------------------------------------------------------------------
+# Story 25.1a: ranking-mode switch
+# ---------------------------------------------------------------------------------------------
+
+# `ranking_engine`'s control channel (a frozen published name, epic 25). Module-level so tests
+# can monkeypatch a unique channel: the local stack's live `ranking_engine` listens on the real
+# one, and a test publish there would flip the live mode.
+RANKING_CONTROL_CHANNEL = "ranking:control"
+
+# A blackholed Redis must fail the request promptly (503), not hang it -- and with it the page's
+# mode buttons, which stay disabled while a switch is in flight.
+_REDIS_TIMEOUT_SECONDS = 2.0
+
+
+class RankingModeRequest(BaseModel):
+    """The whole request: one of the two modes `ranking_engine` accepts, nothing else."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["volume", "volatility"]
+
+
+class RankingModeResponse(BaseModel):
+    mode: Literal["volume", "volatility"]
+
+
+@router.put(
+    "/api/rankings/mode",
+    status_code=202,
+    responses={503: {"description": "No subscriber on `ranking:control`, or Redis failed"}},
+)
+async def put_ranking_mode(body: RankingModeRequest) -> RankingModeResponse:
+    """
+    Ask `ranking_engine` to switch the global ranking mode. 202, not 200: the switch is
+    applied asynchronously, and `rankings:live` confirms it.
+
+    The payload is `json.dumps({"mode": mode})`, the exact bytes the retired TUI toggle
+    published (replay test: `tests/test_rankings_mode.py`). A short-lived connection per call,
+    as the TUI had: a mode switch is a rare human action, not worth a held publisher.
+
+    503 when nobody received it (`publish()` counts 0 subscribers, i.e. `ranking_engine` is
+    down) or Redis fails or stalls past `_REDIS_TIMEOUT_SECONDS`. The TUI ignored both, so a
+    switch sent while the engine was down vanished silently; here the caller sees it (DATA-07).
+
+    Known limit: `publish()` counts every subscriber of the channel, so a stray `redis-cli
+    SUBSCRIBE ranking:control` makes a 202 while `ranking_engine` is down. The page still never
+    shows the new mode until `rankings:live` carries it. Upgrade path: an acknowledged command
+    (the engine echoes a request id on `rankings:live`) once `RankingBoard.switch_mode` exists
+    (Story 25.2).
+    """
+    payload = json.dumps({"mode": body.mode})
+    try:
+        async with aioredis.Redis.from_url(
+            REDIS_URL,
+            decode_responses=True,
+            socket_connect_timeout=_REDIS_TIMEOUT_SECONDS,
+            socket_timeout=_REDIS_TIMEOUT_SECONDS,
+        ) as client:
+            receivers = await client.publish(RANKING_CONTROL_CHANNEL, payload)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503, detail=f"failed to publish to {RANKING_CONTROL_CHANNEL}: {exc!r}"
+        ) from exc
+    if receivers == 0:
+        raise HTTPException(
+            status_code=503,
+            detail=f"no ranking_engine subscribed to {RANKING_CONTROL_CHANNEL}",
+        )
+    return RankingModeResponse(mode=body.mode)
 
 
 # ---------------------------------------------------------------------------------------------

@@ -16,11 +16,11 @@
 bot_tui's own bots:status reader + bots:control publisher (Story 4.4, AC1-AC4;
 architecture AD-10).
 
-Unlike rankings:live's single aggregated message, bots:status is published one message
-per bot (one live_paper process = one bot) -- this module accumulates the latest
-message and its own per-bot received-at timestamp into two dicts keyed by bot_id, so a
-crashed bot's row can go stale independently of every other bot's (AC2: "a healthy bot
-next to a crashed one shows exactly one stale row, never a pane-wide flag").
+bots:status is published one message per bot (one live_paper process = one bot) -- this
+module accumulates the latest message and its own per-bot received-at timestamp into two
+dicts keyed by bot_id, so a crashed bot's row can go stale independently of every other
+bot's (AC2: "a healthy bot next to a crashed one shows exactly one stale row, never a
+pane-wide flag").
 """
 
 import asyncio
@@ -39,10 +39,9 @@ REDIS_URL: str = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
 _LATEST_STATUSES: dict[str, dict] = {}
 _LATEST_RECEIVED_AT: dict[str, float] = {}
 
-# Same threshold ranking_state.py uses for the identical staleness problem, applied to
-# a different heartbeat producer (live_paper's bot_status.py, also a 5s heartbeat --
-# see that module's own _STATUS_HEARTBEAT_SECONDS) -- both readers agree on what
-# "stale" means for a heartbeat of this cadence.
+# 3x the heartbeat producer's cadence (live_paper's bot_status.py, a 5s heartbeat --
+# see that module's own _STATUS_HEARTBEAT_SECONDS), so a missed heartbeat or two is
+# tolerated before the row reads stale.
 _BOT_STALE_SECONDS: float = 15.0
 
 
@@ -50,7 +49,7 @@ def _handle_status_message(message: dict) -> None:
     """
     Record the latest bots:status message for its bot_id, validating shape first
     (AD-3's "readers trust the gate", applied per-message rather than per-batch --
-    this channel has no list wrapper the way rankings:live does).
+    this channel has no list wrapper).
     """
     bot_id = message.get("bot_id")
     if not isinstance(bot_id, str) or not bot_id:
@@ -73,9 +72,8 @@ def is_stale(bot_id: str, now: float | None = None) -> bool:
 async def publish_control(redis_url: str, bot_id: str, action: str) -> None:
     """
     Publish a start/stop request to bots:control (Story 4.4, AC3) -- never a mode/
-    paper-live parameter (AC4). Short-lived per-call connection, mirroring
-    ranking_state.publish_mode_toggle's identical reasoning: `s` is a rare, human-
-    triggered action, not worth a persistent publisher connection (YAGNI).
+    paper-live parameter (AC4). Short-lived per-call connection: `s` is a rare,
+    human-triggered action, not worth a persistent publisher connection (YAGNI).
     """
     try:
         async with aioredis.Redis.from_url(redis_url, decode_responses=True) as client:
@@ -87,9 +85,7 @@ async def publish_control(redis_url: str, bot_id: str, action: str) -> None:
 async def _redis_listener(redis_url: str) -> None:
     """
     Subscribe to bots:status only -- bot_tui's own connection (AD-4/AD-9), separate
-    from ranking_state's and coin_detail_state's own listeners (Story 4.3's own
-    already-documented independent-connections tradeoff, extended here for a third
-    channel).
+    from collector_state's own listener (one independent connection per channel).
     """
     logger.info("bot_tui bots:status listener starting, url=%s", redis_url)
     while True:

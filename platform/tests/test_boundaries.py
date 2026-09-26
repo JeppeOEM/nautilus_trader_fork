@@ -108,7 +108,8 @@ GRAPH: frozenset[tuple[str, str]] = frozenset(
         (VIEWS, RANKING),
         (DATA_API, VIEWS),
         (DATA_API, ALERTING),
-        (BOT_TUI, VIEWS),
+        # No (BOT_TUI, VIEWS): since Story 25.1a bot_tui shows no ranking or market data, only
+        # bots:* and collector:status, so it reads no views read model.
         # An operator harness drives an interface adapter in-process (e.g. `bench_candles`
         # times `/api/candles` through FastAPI's TestClient), exactly as an HTTP client would.
         (SCRIPTS, DATA_API),

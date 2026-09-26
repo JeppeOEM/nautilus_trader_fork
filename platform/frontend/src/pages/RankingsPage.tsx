@@ -2,7 +2,14 @@ import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 
-import { fetchRankings, fetchTechnicalsColumns, fetchTechnicalsValues, saveTechnicalsColumns } from "../api/client";
+import {
+  fetchRankings,
+  fetchTechnicalsColumns,
+  fetchTechnicalsValues,
+  type RankingMode,
+  saveTechnicalsColumns,
+  setRankingMode,
+} from "../api/client";
 import type { TechnicalsColumn } from "../api/schema";
 import IndicatorPicker from "../components/chart/IndicatorPicker";
 import { useLiveChannel } from "../hooks/useLiveChannel";
@@ -10,10 +17,9 @@ import FilterPanel, { type FilterField } from "./FilterPanel";
 import { applyFilters, type FilterCondition } from "./filters";
 import { buildGroups, COLUMN_TIMEFRAMES, columnBarSeconds, reorder } from "./technicals";
 
-// Client-side heartbeat staleness threshold: mirrors bot_tui/ranking_state.py's
-// _RANKING_STALE_SECONDS = 15.0 (3x ranking_engine's RANKING_HEARTBEAT_SECONDS=5)
-// for cross-surface consistency (platform/CLAUDE.md SSOT-03 spirit) -- hand-declared, not
-// imported, since no cross-language import path exists between Python and TS.
+// Client-side heartbeat staleness threshold: 3x ranking_engine's RANKING_HEARTBEAT_SECONDS=5,
+// so a missed heartbeat or two is tolerated before the feed reads stale -- hand-declared,
+// not imported, since no cross-language import path exists between Python and TS.
 //
 // This answers a different question than `stale_instrument_ids` below: this is
 // "data_api/the browser hasn't heard a rankings:live message recently at all" (the
@@ -53,11 +59,12 @@ function saveDeselectedVenues(venues: Set<string>): void {
 // so a saved condition survives reordering/removing other columns.
 const TECHNICAL_FIELD_PREFIX = "tech:";
 
-// Hand-declared TS mirror of views/ranking_columns.py's RANKING_COLS
-// (platform/CLAUDE.md SSOT-03) -- same precedent as bot_tui's own urwid renderer
-// independently mirroring the same metadata. If ranking_columns.py's column list
-// changes, port the change here too; this is deliberately a short, flat array so that
-// drift is easy to notice.
+// Hand-declared TS mirror of views/ranking_columns.py's RANKING_COLS (platform/CLAUDE.md
+// SSOT-04; this page is the list's only renderer since Story 25.1a made rankings web-only).
+// If ranking_columns.py's column list changes, port the change here too:
+// data_api/tests/test_ranking_columns_mirror.py fails until the (key, label) sequences match.
+// Keep it a short, flat array of `{ key: "...", label: "...", ... }` literals -- that test
+// reads it as text.
 interface RankingColumn {
   key: string;
   label: string;
@@ -126,6 +133,67 @@ export interface RankingsLiveMessage {
   updated_at: number;
   ranks: RankingRow[];
   stale_instrument_ids: string[];
+}
+
+// Story 25.1a: the ranking-mode switch, web-only now (it was the TUI's `m` key). Global and
+// last-write-wins across every viewer, publish-and-wait: the pressed button is whatever mode
+// rankings:live last carried, never flipped locally on click, so it changes only once
+// ranking_engine has actually switched. `mode` is undefined before the first payload -- then
+// neither button is pressed and both can send.
+const RANKING_MODES: readonly { mode: RankingMode; label: string }[] = [
+  { mode: "volume", label: "Volume" },
+  { mode: "volatility", label: "Volatility" },
+];
+
+function RankingModeControl({ mode }: { mode: string | undefined }) {
+  const [sending, setSending] = useState(false);
+  const [failure, setFailure] = useState<{ message: string; target: RankingMode } | null>(null);
+  // A failure stays up until a real mode change on rankings:live supersedes it (a retry, another
+  // viewer, the engine coming back) -- cleared once, at that change, so it can never come back if
+  // the mode later returns. The cold-open undefined -> first-payload step is not a change (it only
+  // reveals the mode that was already active), unless that mode is the failed switch's target.
+  // Adjusted during render, React's pattern for state derived from a changed prop (no effect).
+  const [seenMode, setSeenMode] = useState(mode);
+  if (mode !== seenMode) {
+    setSeenMode(mode);
+    if (failure !== null && (seenMode !== undefined || mode === failure.target)) setFailure(null);
+  }
+  const error = failure?.message ?? null;
+
+  function select(next: RankingMode): void {
+    if (next === mode) return; // already active: nothing to switch
+    setSending(true);
+    setFailure(null);
+    setRankingMode(next)
+      .catch((err: unknown) => {
+        // Never swallowed (DATA-07): shown inline, and console.error reaches the ErrorBar.
+        console.error(`RankingsPage: failed to switch ranking mode to ${next}`, err);
+        setFailure({ message: err instanceof Error ? err.message : String(err), target: next });
+      })
+      .finally(() => setSending(false));
+  }
+
+  return (
+    <div className="filter-panel" role="group" aria-label="Ranking mode">
+      {RANKING_MODES.map(({ mode: option, label }) => (
+        <button
+          key={option}
+          type="button"
+          className={`tabbtn${option === mode ? " active" : ""}`}
+          aria-pressed={option === mode}
+          disabled={sending}
+          onClick={() => select(option)}
+        >
+          {label}
+        </button>
+      ))}
+      {error !== null && (
+        <span role="alert" className="rankings-mode-error">
+          mode switch failed: {error}
+        </span>
+      )}
+    </div>
+  );
 }
 
 export default function RankingsPage() {
@@ -264,8 +332,21 @@ export default function RankingsPage() {
   // Before the bus has cached anything (GET /api/rankings 503, no /ws/live message
   // yet), show a loading state -- never an empty table (I/O matrix: "first load,
   // before any message cached").
+  // The mode control is shown here too: a mode switch must stay reachable while no payload
+  // has arrived yet.
+  const mode: string | undefined = live.latest?.mode ?? data?.mode;
   if (rows.length === 0 && updatedAtNs === undefined) {
-    return <p className="term-loading">Loading rankings…</p>;
+    // Same element path to <RankingModeControl> as the loaded branch below (term-box >
+    // rankings-toolbar > first child), so React keeps its in-flight/error state when the first
+    // payload arrives instead of remounting it.
+    return (
+      <div className="term-box" data-label="Rankings">
+        <div className="rankings-toolbar">
+          <RankingModeControl mode={mode} />
+        </div>
+        <p className="term-loading">Loading rankings…</p>
+      </div>
+    );
   }
 
   // Rank is the row's position in the live message, so it stays the true rank when filtered.
@@ -293,21 +374,24 @@ export default function RankingsPage() {
 
   return (
     <div className="term-box" data-label="Rankings">
-      <div className="filter-panel" role="group" aria-label="Venues">
-        {venues.map((venue) => {
-          const on = !deselectedVenues.has(venue);
-          return (
-            <button
-              key={venue}
-              type="button"
-              className={`tabbtn${on ? " active" : ""}`}
-              aria-pressed={on}
-              onClick={() => toggleVenue(venue)}
-            >
-              {venue}
-            </button>
-          );
-        })}
+      <div className="rankings-toolbar">
+        <RankingModeControl mode={mode} />
+        <div className="filter-panel" role="group" aria-label="Venues">
+          {venues.map((venue) => {
+            const on = !deselectedVenues.has(venue);
+            return (
+              <button
+                key={venue}
+                type="button"
+                className={`tabbtn${on ? " active" : ""}`}
+                aria-pressed={on}
+                onClick={() => toggleVenue(venue)}
+              >
+                {venue}
+              </button>
+            );
+          })}
+        </div>
       </div>
       {rows.length > 0 && venueRows.length === 0 && (
         <p className="rankings-empty">every venue is deselected — select one above to show its coins</p>

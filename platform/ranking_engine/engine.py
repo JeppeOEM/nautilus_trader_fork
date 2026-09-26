@@ -18,7 +18,7 @@ Ranking engine (Story 1.8 / architecture AD-9): sole computer/publisher of Coin 
 Owns the per-venue USD volume24h polls (dYdX, Bybit linear + spot, Hyperliquid -- Story
 22.10; the dYdX one relocated from ml_signals.dashboard), the cross-sectional
 volatility tracker (ranking_engine.volatility), the single active Ranking Mode, and the
-snapshots:raw / rankings:live / ranking:control Redis wiring. dashboard/bot_tui are pure
+snapshots:raw / rankings:live / ranking:control Redis wiring. data_api/the web UI are pure
 readers of rankings:live -- see AD-9's Consistency Conventions row for the exact wire
 schema every reader depends on.
 """
@@ -122,7 +122,7 @@ _VOLATILITY = VolatilityTracker(lookback_seconds=RANKING_VOLATILITY_LOOKBACK_SEC
 # Live per-tick indicator state, one instance per instrument, fed on every
 # snapshots:raw ingest -- relocated from ml_signals.dashboard's own independent copy
 # (platform/CLAUDE.md SSOT-02): ranking_engine is now the sole computer of these,
-# dashboard/bot_tui are pure readers of the rankings:live fields they produce below.
+# data_api/the web UI are pure readers of the rankings:live fields they produce below.
 _OFI_INDS: dict[str, MultiLevelOFI] = {}
 _OFI_RAW_INDS: dict[str, dict[int, MultiLevelOFI]] = {}
 _OBI_INDS: dict[str, dict[int, MultiLevelOBI]] = {}
@@ -155,7 +155,7 @@ _VOLUME_DELTA_WINDOW: int = 60
 # Latest catalog-derived slow-loop snapshot per instrument (price/pct_1h/pct_24h/
 # volatility) -- relocated from dashboard's _LIVE_SLOW; refreshed every
 # DB_WRITE_INTERVAL_SECONDS by _slow_loop_task and folded into _current_ranks() below
-# so dashboard/bot_tui get it via rankings:live instead of touching metrics_store
+# so data_api/the web UI get it via rankings:live instead of touching metrics_store
 # directly.
 _SLOW_METRICS: dict[str, dict] = {}
 # 3 missed slow-loop cycles: past this the cached pct/volatility/price are no longer current.
@@ -967,7 +967,7 @@ def _build_rankings_message() -> dict:
     The exact rankings:live wire schema -- AD-9/Consistency Conventions table field
     names, nesting, and per-rank shape are load-bearing; never rename for "clarity."
 
-    stale_instrument_ids is an additive field (dashboard/bot_tui readers predating it
+    stale_instrument_ids is an additive field (rankings:live readers predating it
     simply never look at it) -- never renamed either, once shipped. Each rank entry's `venue`
     (Story 19.1) is derived from its instrument_id's ".VENUE" suffix, not stored.
     """

@@ -13,15 +13,12 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-bot_tui urwid app shell (Story 4.1, AC1-AC4; Story 4.2, AC1-AC5; Story 4.3, AC1-AC7;
-Story 4.4, AC1-AC4; Story 4.7, AC1-AC4): MainLoop wiring, breadcrumb/footer, Coins
-pane, the `:` command bar, the `/` inline filter, the `m` Ranking-Mode toggle, a
-pane-level stale badge, a full-screen Coin-detail view (live indicators + collapsible
-order-book ladder + `o` dashboard deep-link), a Bots pane (live per-bot PnL/status
-rows, per-row stale badges, `s` start/stop with a footer-echo confirmation), a
-full-screen Bot-detail view (live-snapshot header, left/right- (or h/l-) stepped trades
-blotter + PnL sparkline sourced from Story 4.6's bots:history:* keys, `o` dashboard
-deep-link), a
+bot_tui urwid app shell (Story 4.1, AC1-AC4; Story 4.4, AC1-AC4; Story 4.7, AC1-AC4;
+Story 25.1a): MainLoop wiring, breadcrumb/footer, the `:` command bar, a Bots pane (the
+start view: live per-bot PnL/status rows, per-row stale badges, `s` start/stop with a
+footer-echo confirmation), a full-screen Bot-detail view (live-snapshot header,
+left/right- (or h/l-) stepped trades blotter + PnL sparkline sourced from Story 4.6's
+bots:history:* keys, `o` dashboard deep-link), a
 Collector pane (Story 6.1: every currently-collected dYdX instrument -- always pinned,
 there is no "collected but not pinned" state -- with liquid status, `p` to unpin (stop
 + add to config.exclude) and `x` to stop (don't exclude), both behind the same
@@ -30,26 +27,21 @@ pin one coin by name or fill empty slots with the current top-by-volume coins --
 published to collector:control, read back via collector:status), and `esc`/`:q`
 navigation.
 
+The TUI is a control surface for bots and the collector only (Story 25.1a, operator
+decision 2026-09-26): rankings, the ranking-mode switch and the single-coin view are
+web-only, so nothing here subscribes to the rankings or raw-snapshot feeds
+(tests/test_no_rankings_feed.py).
+
 `s` on a running bot does not stop it immediately -- it opens a type-to-confirm prompt
 (operator must type "stop" + Enter) before the stop command is published, per an
 explicit operator request: a bare `s` keypress is too easy to hit by accident to let it
 directly stop a live/paper bot. Starting a stopped bot has no such guard -- only
 stopping a running one carries real-world consequence.
 
-This is the only file in this story allowed to import urwid and hold live async
+This is the only file in this package allowed to import urwid and hold live async
 state. Command dispatch and view-stack pop-back are implemented as plain, urwid-free
 functions (_dispatch_command / _pop_view) so they're unit-testable without a real
 screen -- see Story 4.1's Dev Notes "Testing strategy: pure logic vs. urwid wiring."
-
-Story 4.2 registered this product's first real urwid palette entry ("stale", yellow-
-on-default). Story 4.3 adds "bid"/"ask" (green/red) for the order-book ladder.
-
-Coin-detail (Story 4.3) always shows only the single most-recently-received
-snapshots:raw row for the open instrument -- there is no stored history, no time-
-index, no "as of" state anywhere in this view or in coin_detail_state.py. No future
-extension of this view should add a time-range picker, scrub bar, or "go to
-timestamp" control (AC7) -- historical/graph analysis for market data stays the web
-dashboard's job via the `o` deep-link.
 """
 
 import asyncio
@@ -63,47 +55,29 @@ from pathlib import Path
 
 import urwid
 from observability import error_ledger
-from views.coin_detail import COIN_DETAIL_GROUPS
-from views.coin_detail import rank_row_for
 
 from bot_tui import bot_history_state
 from bot_tui import bot_incidents_state
 from bot_tui import bots_pane
 from bot_tui import bots_state
-from bot_tui import coin_detail
-from bot_tui import coin_detail_state
 from bot_tui import collector_pane
 from bot_tui import collector_state
-from bot_tui import ranking_state
-from bot_tui.coins_pane import COLD_OPEN_TEXT
-from bot_tui.coins_pane import NO_MATCHES_TEXT
-from bot_tui.coins_pane import coin_header_text
-from bot_tui.coins_pane import coin_rows
-from bot_tui.coins_pane import filter_rows
-from bot_tui.coins_pane import format_coin_row
-from bot_tui.coins_pane import stale_feed_banner_text
 
 
 logger = logging.getLogger(__name__)
 
-_BREADCRUMB_LABELS = {"coins": "Coins", "bots": "Bots", "collector": "Collector", "help": "Help"}
+# Bots is the start view (Story 25.1a: the Coins pane it used to open on is web-only now).
+_START_VIEW = "bots"
 
-# "/"/"m" (Story 4.2) and now Enter (Story 4.3, opens Coin-detail) do something real
-# on the Coins pane -- advertised alongside the Story 4.1 keys. `j`/`k` row-focus
-# movement is still "free" via urwid.ListBox and still isn't advertised as a distinct
-# feature.
-_FOOTER_HINT_TEXT = "/ filter  m mode  space dashboard  : command  esc back  :q quit"
+_BREADCRUMB_LABELS = {"bots": "Bots", "collector": "Collector", "help": "Help"}
 
-# Coin-detail's own footer -- distinct keys, distinct hints (Story 4.3).
-_COIN_DETAIL_FOOTER_HINT_TEXT = "d expand book  o dashboard  esc back  :q quit"
-
-# Bots pane's own footer (Story 4.4) -- `/`/`m`/Enter are Coins-pane-only (see
-# _handle_global_key), `s` is Bots-pane-only.
+# Bots pane's own footer (Story 4.4). Enter (open Bot-detail) and `j`/`k` row-focus
+# movement are "free" via urwid.ListBox and aren't advertised as distinct features.
 _BOTS_FOOTER_HINT_TEXT = "s start/stop  : command  esc back  :q quit"
 
 # Bot-detail's own footer (Story 4.5 added s/esc; Story 4.7 adds left/right (h/l) for
 # the new blotter/PnL-sparkline regions' history range). No j/k (scroll) hint -- the
-# blotter's own ListBox scrolling is "free" the same way the Coins-pane's j/k movement
+# blotter's own ListBox scrolling is "free" the same way the Bots-pane's j/k movement
 # already is.
 _BOT_DETAIL_FOOTER_HINT_TEXT = (
     "s start/stop  h/l range  o dashboard  v strategy  i incidents  esc back  :q quit"
@@ -121,6 +95,17 @@ _INCIDENTS_FOOTER_HINT_TEXT = "esc back  :q quit"
 # Collector pane's own footer (Story 6.1) -- `:start <ID>`/`:pintop` are command-bar-
 # only (no single key maps cleanly to "type an instrument id"), so only p/x get key hints.
 _COLLECTOR_FOOTER_HINT_TEXT = "p unpin  x stop  : command  esc back  :q quit"
+
+# View id -> its footer. Every view has exactly one entry, so an unknown view fails loudly
+# (KeyError) instead of falling back to another view's keys.
+_FOOTER_HINT_TEXTS = {
+    "bots": _BOTS_FOOTER_HINT_TEXT,
+    "bot_detail": _BOT_DETAIL_FOOTER_HINT_TEXT,
+    "strategy": _STRATEGY_FOOTER_HINT_TEXT,
+    "incidents": _INCIDENTS_FOOTER_HINT_TEXT,
+    "collector": _COLLECTOR_FOOTER_HINT_TEXT,
+    "help": _HELP_FOOTER_HINT_TEXT,
+}
 
 # This collector's own operating cap (Story 6.1) -- must match dydx_collector/
 # collector.py's _MAX_COLLECTED_INSTRUMENTS. Duplicated rather than imported: bot_tui
@@ -143,22 +128,12 @@ _STRATEGY_SOURCE_PATH = Path(os.environ.get("STRATEGY_SOURCE_PATH", "/app/live_p
 # section per view, listing every key that view's own footer hint above only
 # abbreviates. Plain text, not urwid markup: nothing here needs color.
 _HELP_TEXT = """GLOBAL
-  :          command bar (coins / bots / help, :q to quit)
+  :          command bar (bots / data / help, :q to quit)
   :h, :help  open this help
   esc        back one view
   :q         quit
 
-COINS PANE
-  j/k, up/down  move selection
-  /             filter by instrument id (enter confirms, esc clears);
-                .DYDX / .BYBIT / .HYPERLIQUID narrow to one venue
-  m             toggle ranking mode (volume <-> volatility)
-  enter         open coin detail
-
-COIN DETAIL
-  d          expand/collapse order book ladder
-  o          open dashboard chart in browser
-  esc        back to coins
+  Rankings, the ranking mode and coin detail live in the web UI (its home page, /).
 
 BOTS PANE
   j/k, up/down  move selection
@@ -173,7 +148,7 @@ BOT DETAIL
   i          view this bot's incidents log: restarts, WS/data-stale spans
   esc        back to bots
 
-COLLECTOR PANE
+COLLECTOR PANE (:data)
   Every action here writes straight through to config.toml on the collector -- it's
   the permanent record of what's collected, and it's what the collector re-reads if
   it restarts. Nothing here is temporary or TUI-only. Every currently-collected
@@ -200,25 +175,14 @@ COLLECTOR PANE
 
 _PALETTE = [
     ("stale", "yellow", "default"),
-    ("bid", "dark green", "default"),
-    ("ask", "dark red", "default"),
     ("pnl-pos", "dark green", "default"),
     ("pnl-neg", "dark red", "default"),
-    # Row-focus indicator for the Coins/Bots-pane ListBoxes -- "default,standout"
+    # Row-focus indicator for the Bots/Collector-pane ListBoxes -- "default,standout"
     # reverses the terminal's own default fg/bg rather than picking a fixed color, so
     # it still reads correctly against any terminal theme (same UX-DR1 "inherit the
     # terminal's own default" discipline the other palette entries already follow).
     ("focus", "default,standout", "default"),
-    # Mid-price divider row between the classic ladder's ask/bid halves.
-    ("mid", "yellow,bold", "default"),
 ]
-
-_LADDER_COLLAPSED_LEVELS = 4
-_LADDER_EXPANDED_LEVELS = 20
-
-# Coin-detail's metric list and its display precision are `views.coin_detail.COIN_DETAIL_GROUPS`
-# (Story 24.2: the one definition of which values the single-coin view shows, SSOT-05); this
-# module only lays them out.
 
 # Bot-detail's trades-blotter region (Story 4.7) -- a fixed visible height inside a
 # scrollable ListBox (BoxAdapter), not "however many fills happen to exist" (Story
@@ -230,8 +194,8 @@ _BOT_DETAIL_BLOTTER_HEIGHT = 8
 # this function stays a plain, urwid-free, directly-testable function.
 _QUIT_SENTINEL = "__quit__"
 
-# Command-bar word -> view id. Defaults to each view id typing itself (":coins" ->
-# "coins"), except "collector" -- the command bar uses ":data" for that view instead,
+# Command-bar word -> view id. Defaults to each view id typing itself (":bots" ->
+# "bots"), except "collector" -- the command bar uses ":data" for that view instead,
 # so its own view id is deliberately absent from the left-hand side here.
 _RECOGNIZED_COMMANDS = {v: v for v in _BREADCRUMB_LABELS if v != "collector"}
 _RECOGNIZED_COMMANDS["data"] = "collector"
@@ -241,10 +205,10 @@ _RECOGNIZED_COMMANDS["data"] = "collector"
 # exactly like ":help".
 _COMMAND_ALIASES = {"h": "help"}
 
-# Poll interval for picking up a new rankings:live message and redrawing -- urwid does
-# not auto-redraw for state changed by a background asyncio.Task (see urwid's Main
-# Loop docs: "you must call MainLoop.draw_screen() manually"), so app.py owns a small
-# loop that notices a new _LATEST_RANKING object and triggers a redraw.
+# Poll interval for picking up new bots:status/collector:status state and redrawing --
+# urwid does not auto-redraw for state changed by a background asyncio.Task (see urwid's
+# Main Loop docs: "you must call MainLoop.draw_screen() manually"), so app.py owns a
+# small loop that re-renders the active view and triggers a redraw.
 _REDRAW_POLL_SECONDS = 0.5
 
 
@@ -297,34 +261,15 @@ def _pop_view(current_view: str, stack: list[str]) -> tuple[str, list[str]]:
     return stack[-1], stack[:-1]
 
 
-class _SelectableCoinRow(urwid.Text):
-    """
-    A coin row that ListBox can move focus to/from, but that never itself consumes a
-    keypress (Story 4.3, AC1). Plain urwid.Text.selectable() is False -- verified
-    directly against urwid==4.0.6 that a ListBox of plain Text rows never moves
-    focus_position on "up"/"down" at all. Returning `key` unchanged from keypress()
-    (rather than None) means ListBox handles up/down navigation itself, and Enter
-    bubbles all the way to unhandled_input unconsumed, exactly like every other
-    currently-unhandled key already does.
-    """
-
-    def __init__(self, markup: object, instrument_id: str) -> None:
-        # markup is coins_pane.format_coin_row's own return shape (str | tuple | list
-        # of either) -- same urwid._TagMarkup stub-gap precedent as _SelectableBotRow.
-        super().__init__(markup)  # type: ignore[arg-type]
-        self.instrument_id = instrument_id
-
-    def selectable(self) -> bool:
-        return True
-
-    def keypress(self, size: object, key: str) -> str:
-        return key
-
-
 class _SelectableBotRow(urwid.Text):
     """
-    Same selectable-but-non-consuming shape as _SelectableCoinRow (Story 4.3),
-    applied to Bots-pane rows so `s` can act on whichever row is highlighted.
+    A Bots-pane row that ListBox can move focus to/from, but that never itself consumes
+    a keypress, so `s`/Enter act on whichever row is highlighted. Plain
+    urwid.Text.selectable() is False -- verified directly against urwid==4.0.6 that a
+    ListBox of plain Text rows never moves focus_position on "up"/"down" at all.
+    Returning `key` unchanged from keypress() (rather than None) means ListBox handles
+    up/down navigation itself, and Enter bubbles all the way to unhandled_input
+    unconsumed, exactly like every other currently-unhandled key already does.
     """
 
     def __init__(self, markup: object, bot_id: str) -> None:
@@ -356,51 +301,32 @@ class _SelectableCollectorRow(urwid.Text):
 
 
 class BotTuiApp:
-    """Owns the urwid Frame, the view stack, and the async wiring to ranking_state."""
+    """Owns the urwid Frame, the view stack, and the async wiring to the bots/collector state."""
 
-    def __init__(self, redis_url: str = ranking_state.REDIS_URL) -> None:
+    def __init__(self, redis_url: str = bots_state.REDIS_URL) -> None:
         self._redis_url = redis_url
-        self._view = "coins"
+        self._view = _START_VIEW
         self._stack: list[str] = []
         self._command_active = False
-        self._filter_active = False
-        self._filter_text = ""
-        self._last_seen_ranking: dict | None = None
         self._background_tasks: set[asyncio.Task] = set()
-
-        # Coin-detail state (Story 4.3).
-        self._coin_detail_instrument_id: str | None = None
-        self._ladder_expanded = False
-        # Ladder/indicator column-width ratchets (only grow, never shrink) so a value
-        # crossing a digit boundary (9.xx -> 10.xx) doesn't visibly reflow the layout --
-        # see coin_detail.order_book_lines' docstring. Reset to 0 on every fresh coin
-        # open (_open_coin_detail) same as _ladder_expanded, so one coin's wide numbers
-        # don't force a wide box on the next, unrelated coin.
-        self._ladder_size_w = 0
-        self._ladder_price_w = 0
-        self._indicator_value_w = 0
         self._dashboard_base_url = os.environ.get("DASHBOARD_BASE_URL", "http://127.0.0.1:9100")
-        # The ListBox itself persists across the redraw loop's every-tick rebuild
-        # (only its SimpleListWalker's contents are replaced in place) so mid-scroll
-        # position survives a data refresh -- same fix as Story 4.2's Coins-pane
-        # regression (_refresh_coins_body's docstring). None until _open_coin_detail
-        # creates it fresh for the newly-opened coin.
-        self._coin_detail_listbox: urwid.ListBox | None = None
 
         # Bot-detail state (Story 4.5). No open_bot()/close_bot() lifecycle pair is
-        # needed here, unlike coin_detail_state's open_coin()/close_coin() -- bots:status
-        # is already accumulated unconditionally for every bot regardless of which view
-        # is active (see _open_bot_detail's own comment).
+        # needed for the snapshot -- bots:status is already accumulated unconditionally
+        # for every bot regardless of which view is active (see _open_bot_detail's own
+        # comment).
         self._bot_detail_bot_id: str | None = None
 
         # Bot-detail's history state (Story 4.7). Unlike the bots:status snapshot
         # above, bots:history *does* have an explicit open/close lifecycle
         # (bot_history_state.open_bot()/close_bot()) -- see that module's own
         # docstring for why. Always resets to "day" on a fresh Bot-detail open
-        # (_open_bot_detail), never carried over from a previous bot, mirroring
-        # _ladder_expanded's identical reset-on-entry discipline for Coin-detail.
+        # (_open_bot_detail), never carried over from a previous bot.
         self._bot_history_range: str = "day"
-        # Same persist-the-ListBox-across-ticks fix as _coin_detail_listbox above.
+        # The ListBox itself persists across the redraw loop's every-tick rebuild (only
+        # its SimpleListWalker's contents are replaced in place) so mid-scroll position
+        # survives a data refresh (TUI-01). None until _open_bot_detail creates it fresh
+        # for the newly-opened bot.
         self._bot_detail_listbox: urwid.ListBox | None = None
 
         # Stop-confirmation guard: active while the operator must type "stop" + Enter
@@ -422,24 +348,18 @@ class BotTuiApp:
         self._collector_confirm_action: str | None = None
         self._collector_confirm_id: str | None = None
 
-        # The Coins-pane body is a persistent object, mutated in place rather than
-        # rebuilt on every view switch (Story 4.3, AC6 -- see _refresh_coins_body).
-        # _coins_shape is None until the first _refresh_coins_body() call below builds
-        # it for real; that sentinel guarantees the first call always constructs
+        # Collector pane's body: a persistent object, mutated in place rather than rebuilt
+        # on every redraw tick or view switch (TUI-01, Story 6.1 fix -- see
+        # _refresh_collector_body). _collector_shape is None until the first refresh
+        # builds it for real; that sentinel guarantees the first call always constructs
         # fresh rather than skipping because "cold_open" happens to already match.
-        self._coins_shape: str | None = None
-        self._coins_body: urwid.Widget = urwid.Filler(urwid.Text(COLD_OPEN_TEXT), valign="top")
-        self._refresh_coins_body()
-
-        # Collector pane's body, same persistent-object/scroll-preservation contract as
-        # the Coins pane above (Story 6.1 fix -- see _refresh_collector_body).
         self._collector_shape: str | None = None
         self._collector_body: urwid.Widget = urwid.Filler(
             urwid.Text(collector_pane.COLD_OPEN_TEXT), valign="top"
         )
 
         # Bots pane's body, same persistent-object/scroll-preservation contract as
-        # Coins/Collector above (see _refresh_bots_body) -- previously rebuilt fresh
+        # Collector above (see _refresh_bots_body) -- previously rebuilt fresh
         # every redraw tick (_build_bots_body), which reset scroll/focus to the top
         # within _REDRAW_POLL_SECONDS of any user scroll. Confirmed in production as
         # "the bots page jumps up" -- the same bug already found and fixed once for
@@ -450,118 +370,32 @@ class BotTuiApp:
             urwid.Text(bots_pane.COLD_OPEN_TEXT), valign="top"
         )
 
+        # The start view's body holds real rows from the first draw, not a cold-open
+        # placeholder that only the redraw loop's first tick would replace.
+        self._refresh_bots_body()
+
         self._breadcrumb = urwid.Text(_BREADCRUMB_LABELS[self._view])
-        # Coins-only column-header row ("#  INSTRUMENT  OFI10z ..." -- every RANKING_COLS label),
-        # stacked under the breadcrumb rather than folded into the Coins-pane body --
-        # keeps _build_body/_coins_body exactly what Story 4.3's AC6 comment already
-        # documents (Filler <-> ListBox, mutated in place for scroll preservation),
-        # so this doesn't disturb that logic or its tests at all. Blank on every other
-        # view; _refresh_breadcrumb sets/clears it alongside the breadcrumb text since
-        # both need the same "runs every redraw tick while on this view" treatment.
-        self._coins_column_header = urwid.Text("")
         self._refresh_breadcrumb()
-        self._footer_hint = urwid.Text(_FOOTER_HINT_TEXT)
+        self._footer_hint = urwid.Text("")
+        self._refresh_footer_hint()
         self._command_edit = urwid.Edit(":")
-        self._filter_edit = urwid.Edit("/")
-        urwid.connect_signal(self._filter_edit, "change", self._on_filter_change)
         self._stop_confirm_edit = urwid.Edit("")
         self._body = urwid.WidgetPlaceholder(self._build_body())
         self._frame = urwid.Frame(
-            header=urwid.Pile([self._breadcrumb, self._coins_column_header]),
+            header=self._breadcrumb,
             body=self._body,
             footer=self._footer_hint,
         )
 
         self._main_loop: urwid.MainLoop | None = None
 
-    def _refresh_coins_body(self) -> None:
-        """
-        Rebuild/mutate self._coins_body to reflect the Coins pane's own current data
-        (a new rankings:live message, a filter-text change) -- never called merely
-        because the active view switched to or from Coins (Story 4.3, AC6). Only the
-        three genuinely-different-shape transitions (cold-open Filler <-> no-matches
-        Filler <-> populated ListBox) swap self._coins_body's type; a same-shape
-        update (new rows, same non-empty ListBox) mutates the existing
-        ListBox/SimpleListWalker in place instead, which is what actually preserves
-        scroll/focus position across an unrelated view round-trip -- constructing a
-        brand-new ListBox object here would reset it every time, silently
-        reintroducing the exact regression Story 4.2's review already fixed once for
-        the redraw loop's own rebuild.
-        """
-        ranking = ranking_state._LATEST_RANKING
-        if ranking is None:
-            # True cold-open (AC5, Story 4.1): no message has ever arrived. Distinct
-            # from a received message whose "ranks" happens to be empty -- that
-            # renders as an empty ListBox, not cold-open.
-            self._set_coins_filler(COLD_OPEN_TEXT, "cold_open")
-            return
-
-        rows = coin_rows(ranking)
-        if self._filter_text:
-            # Narrowing is keyed on filter_text alone, not _filter_active -- a
-            # confirmed filter (see _confirm_filter) keeps narrowing the list after
-            # focus has already returned to the body, which is exactly what lets
-            # Enter reach a filtered row for Story 4.3's Coin-detail hand-off.
-            rows = filter_rows(rows, self._filter_text)
-            if not rows:
-                # Not hidden, just empty (Story 4.2, AC1) -- same Filler shape as
-                # cold-open.
-                self._set_coins_filler(NO_MATCHES_TEXT, "no_matches")
-                return
-
-        self._set_coins_rows(rows)
-
-    def _set_coins_filler(self, text: str, shape: str) -> None:
-        if self._coins_shape != shape:
-            self._coins_body = urwid.Filler(urwid.Text(text), valign="top")
-            self._coins_shape = shape
-
-    def _set_coins_rows(self, rows: list[dict]) -> None:
-        widgets = [
-            urwid.AttrMap(
-                _SelectableCoinRow(format_coin_row(row), instrument_id=row["instrument_id"]),
-                None,
-                focus_map="focus",
-            )
-            for row in rows
-        ]
-        if self._coins_shape != "rows":
-            self._coins_body = urwid.ListBox(urwid.SimpleListWalker(widgets))
-            self._coins_shape = "rows"
-        else:
-            # Slice-assignment on the existing SimpleListWalker -- verified directly
-            # against urwid==4.0.6 that this preserves/auto-clamps focus_position
-            # rather than resetting it, unlike constructing a new ListBox.
-            listbox = self._coins_body
-            assert isinstance(listbox, urwid.ListBox)
-            # listbox.body is typed as the abstract ListWalker (no indexed assignment
-            # in the stub), though the concrete SimpleListWalker built above supports
-            # slice-assignment at runtime (same stub gap as test_app_body.py's
-            # ListBox.body iteration).
-            listbox.body[:] = widgets  # type: ignore[index]
-
-    def _highlighted_instrument_id(self) -> str | None:
-        """Return the Coins-pane row currently focused, or None if empty/not a ListBox."""
-        if not isinstance(self._coins_body, urwid.ListBox):
-            return None
-        focus_widget = self._coins_body.focus
-        if focus_widget is None:
-            return None
-        assert isinstance(focus_widget, urwid.AttrMap)
-        row = focus_widget.original_widget
-        assert isinstance(row, _SelectableCoinRow)
-        return row.instrument_id
-
     def _build_body(self) -> urwid.Widget:
         if self._view == "bots":
             # Returned as-is, whatever it currently holds -- same "never rebuilt
-            # here" discipline as Coins/Collector below; only _refresh_bots_body()
+            # here" discipline as Collector below; only _refresh_bots_body()
             # (called by the redraw loop while this view is active) ever changes
             # what this holds.
             return self._bots_body
-
-        if self._view == "coin_detail":
-            return self._build_coin_detail_body()
 
         if self._view == "bot_detail":
             return self._build_bot_detail_body()
@@ -574,27 +408,23 @@ class BotTuiApp:
 
         if self._view == "collector":
             # Returned as-is, whatever it currently holds -- same "never rebuilt here"
-            # discipline as the Coins pane below; only _refresh_collector_body() (called
+            # discipline as the Bots pane above; only _refresh_collector_body() (called
             # by the redraw loop while this view is active) ever changes what this holds.
             return self._collector_body
 
-        if self._view == "help":
-            return urwid.Filler(urwid.Text(_HELP_TEXT), valign="top")
-
-        # "coins" -- returned as-is, whatever it currently holds. Never rebuilt here;
-        # only _refresh_coins_body() (called when the Coins pane's own data actually
-        # changes, not on a mere view switch) ever changes what this holds.
-        return self._coins_body
+        if self._view != "help":
+            raise KeyError(f"unknown view {self._view!r}")
+        return urwid.Filler(urwid.Text(_HELP_TEXT), valign="top")
 
     def _refresh_bots_body(self) -> None:
         """
         Rebuild/mutate self._bots_body to reflect current bots:status data.
 
-        Follows _refresh_collector_body's fix (itself following _refresh_coins_body):
-        only the two genuinely-different-shape transitions (cold-open <-> populated)
-        swap self._bots_body's type; a same-shape update mutates the existing
-        ListBox's SimpleListWalker in place via slice-assignment, which is what
-        actually preserves scroll/focus position. Each row's stale badge and uptime
+        Follows _refresh_collector_body's fix (TUI-01): only the two genuinely-
+        different-shape transitions (cold-open <-> populated) swap self._bots_body's
+        type; a same-shape update mutates the existing ListBox's SimpleListWalker in
+        place via slice-assignment, which is what actually preserves scroll/focus
+        position. Each row's stale badge and uptime
         text must keep advancing purely from the passage of time, so the redraw loop
         still calls this every _REDRAW_POLL_SECONDS while this view is active --
         without the in-place mutation, that would silently wipe a user's scroll
@@ -628,11 +458,11 @@ class BotTuiApp:
         """
         Rebuild/mutate self._collector_body to reflect current collector:status data.
 
-        Follows _refresh_coins_body's fix (also now mirrored by _refresh_bots_body):
-        only the three genuinely-different-shape transitions (cold-open <-> populated) swap
+        TUI-01's reference implementation (also mirrored by _refresh_bots_body): only
+        the two genuinely-different-shape transitions (cold-open <-> populated) swap
         self._collector_body's type; a same-shape update mutates the existing ListBox's
         SimpleListWalker in place via slice-assignment, which is what actually preserves
-        scroll/focus position. Collector rows update far less often than bots/coins rows
+        scroll/focus position. Collector rows update far less often than bots rows
         (collector:status republishes every liquidity_check_seconds, default 30 min,
         plus immediately after a control action) but the redraw loop still calls this
         every _REDRAW_POLL_SECONDS while this view is active (so a row's stale marker
@@ -654,7 +484,7 @@ class BotTuiApp:
         unpinned_line = collector_pane.format_unpinned_line(collector_state._LATEST_UNPINNED_IDS)
         if unpinned_line:
             # Plain, non-selectable urwid.Text -- ListBox never lands focus on it (same
-            # precedent as _SelectableCoinRow's docstring), so _highlighted_collector_id
+            # precedent as _SelectableBotRow's docstring), so _highlighted_collector_id
             # only ever sees a real _SelectableCollectorRow.
             widgets.append(urwid.Text(""))
             widgets.append(urwid.Text(unpinned_line))
@@ -691,9 +521,9 @@ class BotTuiApp:
         return row.instrument_id
 
     def _build_bot_row_widget(self, row: dict, stale: bool, now: float) -> urwid.Widget:
-        # Color applied only to the PnL segment (sign, not magnitude) -- mirrors Story
-        # 4.3's bid/ask ladder-column precedent of "fixed position + color, never color
-        # alone"; the sign is also always in the text itself via bots_pane.format_pnl.
+        # Color applied only to the PnL segment (sign, not magnitude) -- "fixed position +
+        # color, never color alone"; the sign is also always in the text itself via
+        # bots_pane.format_pnl.
         pnl_value = row["realized_pnl"] + row["unrealized_pnl"]
         pnl_color = "pnl-pos" if pnl_value >= 0 else "pnl-neg"
         prefix = "~ " if stale else "  "
@@ -713,11 +543,7 @@ class BotTuiApp:
         )
 
     def _highlighted_bot_id(self) -> str | None:
-        """
-        Return the Bots-pane row currently focused, mirroring
-        _highlighted_instrument_id's (Story 4.3) same read-the-ListBox's-own-focus
-        pattern, applied to the Bots pane.
-        """
+        """Return the Bots-pane row currently focused, read off the ListBox's own focus."""
         body = self._body.original_widget
         if not isinstance(body, urwid.ListBox):
             return None
@@ -744,8 +570,8 @@ class BotTuiApp:
         # Guarded defensively (unlike most of this codebase's AD-3 "readers trust the
         # gate" precedent): Enter is only reachable from an already-status-backed row,
         # so status should never actually be None here, but this method has no
-        # pre-existing None-threaded shape to inherit that discipline from the way
-        # _build_coin_detail_body does (Story 4.5, Dev Notes item 7).
+        # pre-existing None-threaded shape to inherit that discipline from (Story 4.5,
+        # Dev Notes item 7).
         bot_id = self._bot_detail_bot_id
         status = bots_state._LATEST_STATUSES.get(bot_id) if bot_id is not None else None
         if status is None:
@@ -756,8 +582,7 @@ class BotTuiApp:
         pnl_color = "pnl-pos" if pnl_value >= 0 else "pnl-neg"
         lines = bots_pane.bot_detail_lines(status, now=time.time())
         # Color only the PnL segment within line 2 -- same "fixed position + color,
-        # never color alone" precedent as the Bots-pane row (_build_bot_row_widget)
-        # and Coin-detail's bid/ask ladder columns.
+        # never color alone" precedent as the Bots-pane row (_build_bot_row_widget).
         pnl_text = bots_pane.format_pnl(pnl_value)
         pnl_line = lines[1]
         pnl_start = pnl_line.index(pnl_text)
@@ -799,17 +624,17 @@ class BotTuiApp:
         if self._bot_detail_listbox is None:
             self._bot_detail_listbox = urwid.ListBox(urwid.SimpleListWalker(widgets))
         else:
-            # Same slice-assignment-not-fresh-ListBox fix as _coin_detail_listbox
-            # above / _set_coins_rows: preserves scroll/focus position across the
-            # redraw loop's every-tick rebuild.
+            # Slice-assignment on the existing SimpleListWalker, not a fresh ListBox
+            # (TUI-01): preserves scroll/focus position across the redraw loop's
+            # every-tick rebuild.
             self._bot_detail_listbox.body[:] = widgets  # type: ignore[index]
         return self._bot_detail_listbox
 
     def _build_strategy_body(self) -> urwid.Widget:
         # A plain ListBox (not Filler+Text, unlike the static Help view) -- a
         # strategy source file can easily exceed one screen's height, and ListBox
-        # gets free up/down/page scrolling the same way the Coins/Bots-pane row
-        # lists already do, with no extra wiring.
+        # gets free up/down/page scrolling the same way the Bots-pane row list
+        # already does, with no extra wiring.
         try:
             lines = _STRATEGY_SOURCE_PATH.read_text().splitlines()
         except OSError as e:
@@ -824,179 +649,11 @@ class BotTuiApp:
         lines = bots_pane.incidents_lines(incidents, now=time.time())
         return urwid.ListBox(urwid.SimpleListWalker([urwid.Text(line) for line in lines]))
 
-    def _build_coin_detail_body(self) -> urwid.Widget:
-        # AC7: the order-book ladder below is always the single most-recently-received
-        # snapshots:raw row for the open instrument -- no time-index, no history, no
-        # "as of" state anywhere in this method or in coin_detail_state.py. Do not add
-        # a time-range picker, scrub bar, or "go to timestamp" control here; that
-        # belongs to the web dashboard's own `/chart/{id}` view (the `o` deep-link).
-        #
-        # Every indicator below (SSOT-02, platform/CLAUDE.md) comes from the matching
-        # rankings:live rank entry instead of a local instance -- ranking_engine is the
-        # sole computer of all of it now; this view is a pure reader, same as the Coins
-        # pane and the web dashboard's /coin/{id} panel.
-        # Only reachable while self._view == "coin_detail", which _open_coin_detail
-        # always sets alongside a real instrument_id -- same never-None-in-practice
-        # precedent _open_dashboard_chart's own assert already documents.
-        assert self._coin_detail_instrument_id is not None
-        snapshot = coin_detail_state._LATEST_SNAPSHOT
-        row = rank_row_for(ranking_state._LATEST_RANKING, self._coin_detail_instrument_id)
-        row = row or {}
-
-        # Right-justify values to the widest one ever seen this Coin-detail session,
-        # not just this tick -- self._indicator_value_w is a ratchet (only grows, reset
-        # on a fresh coin open below), same fix as the ladder's size_w/price_w: a plain
-        # per-tick max + margin still visibly reflows the column the instant a value's
-        # digit count crosses a boundary (e.g. 9.xx -> 10.xx), because the margin gets
-        # re-added on top of a fresh max each time instead of held fixed while a value
-        # grows into previously-reserved space. A long label ("volatility (catalog)")
-        # or a long value (a meme-coin OFI in the trillions) would otherwise also push
-        # just that row's number out of line with the rest. Widths are shared across all
-        # three boxes (computed over every group's pairs together) so the boxes still
-        # line up with each other, not just internally.
-        all_pairs = [
-            (label, coin_detail.format_indicator(row.get(key), decimals))
-            for _, specs in COIN_DETAIL_GROUPS
-            for label, key, decimals in specs
-        ]
-        label_w = max(len(label) for label, _ in all_pairs)
-        self._indicator_value_w = coin_detail.ratchet_width(
-            max(len(value) for _, value in all_pairs), self._indicator_value_w
-        )
-        value_w = self._indicator_value_w
-
-        def _group_box(title: str, specs: tuple[tuple[str, str, int], ...]) -> urwid.LineBox:
-            lines = [
-                urwid.Text(
-                    f"{label:<{label_w}}  "
-                    f"{coin_detail.format_indicator(row.get(key), decimals):>{value_w}}",
-                )
-                for label, key, decimals in specs
-            ]
-            return urwid.LineBox(urwid.Pile(lines), title=title)
-
-        indicator_boxes = [_group_box(title, specs) for title, specs in COIN_DETAIL_GROUPS]
-
-        # The open coin's newest decoded `DydxSecondSnapshot` (`views.coin_detail.snapshot_for`),
-        # read by attribute -- the payload is never indexed by key here (spine AD-D3).
-        bid_prices = snapshot.bid_prices if snapshot is not None else []
-        bid_sizes = snapshot.bid_sizes if snapshot is not None else []
-        ask_prices = snapshot.ask_prices if snapshot is not None else []
-        ask_sizes = snapshot.ask_sizes if snapshot is not None else []
-
-        # This one parameter is the entire mechanism behind AC2/AC3's collapse/expand
-        # behavior -- no separate "collapsed" vs. "expanded" code path exists.
-        levels = _LADDER_EXPANDED_LEVELS if self._ladder_expanded else _LADDER_COLLAPSED_LEVELS
-        ask_lines, mid_line, bid_lines, size_w, price_w = coin_detail.order_book_lines(
-            bid_prices,
-            bid_sizes,
-            ask_prices,
-            ask_sizes,
-            levels,
-            min_size_w=self._ladder_size_w,
-            min_price_w=self._ladder_price_w,
-        )
-        self._ladder_size_w = size_w
-        self._ladder_price_w = price_w
-
-        # Classic centered ladder: asks stacked above (worst-to-best, best ask nearest
-        # the middle), a mid-price divider, then bids below (best-to-worst, best bid
-        # nearest the middle). mid_line is pre-padded by order_book_lines to the same
-        # size/price columns as every level row (not centered across the box), so the
-        # price digits of asks/mid/bids all land in the same column -- a real ladder's
-        # price axis is one line straight down the middle, not a caption floating over
-        # two stacked tables.
-        all_lines = [*ask_lines, mid_line, *bid_lines]
-        ladder_rows = [urwid.Text(("ask", line)) for line in ask_lines]
-        ladder_rows.append(urwid.Text(("mid", mid_line)))
-        ladder_rows.extend(urwid.Text(("bid", line)) for line in bid_lines)
-
-        ladder_state_text = (
-            "20 lvl  (d: collapse)"
-            if self._ladder_expanded
-            else f"{_LADDER_COLLAPSED_LEVELS} lvl  (d: expand)"
-        )
-        ladder_title = f"order book  {self._coin_detail_instrument_id}  {ladder_state_text}"
-        ladder_box = urwid.LineBox(urwid.Pile(ladder_rows), title=ladder_title)
-        # Sized to its own content (longest row + the 2 border columns) instead of
-        # stretching to the terminal's full width -- a real order-book widget is a
-        # narrow column, not a full-width panel. Never narrower than the title needs
-        # (LineBox wraps the title onto a second line rather than truncating it once
-        # the box is too narrow to fit "┌─ title ┐"), so a long instrument id/state
-        # string still sets the floor when it's wider than the levels themselves.
-        content_width = max((len(line) for line in all_lines), default=0) + 2
-        # +10, not the border's own +4: urwid.LineBox's centered title has a narrow
-        # "vanishes entirely" zone a few chars above its true minimum (a rendering
-        # quirk of its centering math, confirmed empirically -- +4 sometimes rendered
-        # a blank border), so this leaves real slack rather than hugging the edge.
-        title_width = len(ladder_title) + 10
-        ladder_box = urwid.Padding(ladder_box, align="left", width=max(content_width, title_width))
-
-        widgets = [*indicator_boxes, ladder_box]
-        if self._coin_detail_listbox is None:
-            self._coin_detail_listbox = urwid.ListBox(urwid.SimpleListWalker(widgets))
-        else:
-            # Slice-assignment on the existing SimpleListWalker, not a fresh ListBox --
-            # same fix, same reason as _set_coins_rows: preserves scroll/focus position
-            # across the redraw loop's every-tick rebuild instead of resetting it to
-            # the top.
-            self._coin_detail_listbox.body[:] = widgets  # type: ignore[index]
-        return self._coin_detail_listbox
-
-    def _stale_badge_active(self) -> bool:
-        # Pane-level only (AC3) -- never on the Bots pane, never before cold-open.
-        if self._view != "coins" or ranking_state._LATEST_RANKING is None:
-            return False
-        return ranking_state.is_stale(ranking_state._LATEST_RANKING_RECEIVED_AT, now=time.time())
-
-    def _stale_feed_banner(self) -> str:
-        # Coins-pane only -- reads rankings:live's own stale_instrument_ids field
-        # verbatim (ranking_engine._recently_stale_iids), no local staleness
-        # computation here.
-        if self._view != "coins" or ranking_state._LATEST_RANKING is None:
-            return ""
-        stale_ids = ranking_state._LATEST_RANKING.get("stale_instrument_ids", [])
-        return stale_feed_banner_text(stale_ids)
-
-    def _coin_detail_stale_badge_active(self) -> bool:
-        # DATA-01: Coin-detail must never keep showing a frozen snapshot with no
-        # visual cue. Reuses ranking_state.is_stale (a plain now-received_at compare,
-        # not ranking-specific) against coin_detail_state's own received-at clock --
-        # same threshold as the Coins-pane badge, same "never before first snapshot"
-        # guard (no snapshot yet is the legitimate warming-up state, not staleness).
-        if coin_detail_state._LATEST_SNAPSHOT is None:
-            return False
-        return ranking_state.is_stale(
-            coin_detail_state._LATEST_SNAPSHOT_RECEIVED_AT, now=time.time()
-        )
-
     def _refresh_breadcrumb(self) -> None:
-        # Column header lives here, not in its own refresh path -- every call site
-        # below already runs on exactly the occasions the header needs to update too
-        # (view switch, and every redraw-loop tick while the Coins pane is active).
-        if self._view == "coins":
-            # No longer mode-dependent (unlike the old single-score-column header):
-            # full column parity means volume24h/volatility_score are both always-
-            # present regular columns now, same as every other RANKING_COLS field.
-            self._coins_column_header.set_text(coin_header_text())
-        else:
-            self._coins_column_header.set_text("")
-
-        if self._view == "coin_detail":
-            # Verbatim mockup format (mockups/key-coin-detail.html) as the base text;
-            # the stale badge (Review finding, post-4.3) is appended the same way the
-            # Coins-pane breadcrumb appends it below.
-            breadcrumb_text = f"Coins > {self._coin_detail_instrument_id}"
-            if self._coin_detail_stale_badge_active():
-                self._breadcrumb.set_text([breadcrumb_text, "  ", ("stale", "~ STALE")])
-            else:
-                self._breadcrumb.set_text(breadcrumb_text)
-            return
         if self._view == "bot_detail":
             # Verbatim mockup format (mockups/key-bot-detail.html: "Bots > bot-03").
             # Stale-badge source is bots_state.is_stale (Story 4.4's own per-bot
-            # function, a different heartbeat producer/threshold than
-            # coin_detail_state's snapshots:raw badge above) -- not ranking_state.is_stale.
+            # heartbeat function).
             breadcrumb_text = f"Bots > {self._bot_detail_bot_id}"
             if self._bot_detail_bot_id is not None and bots_state.is_stale(self._bot_detail_bot_id):
                 self._breadcrumb.set_text([breadcrumb_text, "  ", ("stale", "~ STALE")])
@@ -1005,8 +662,7 @@ class BotTuiApp:
             return
         if self._view == "strategy":
             # No stale badge here -- a source file's own contents have no heartbeat
-            # concept, unlike the live bots:status/snapshots:raw feeds the other two
-            # detail views badge.
+            # concept, unlike the live bots:status feed Bot-detail badges.
             self._breadcrumb.set_text(f"Bots > {self._bot_detail_bot_id} > strategy")
             return
         if self._view == "incidents":
@@ -1015,39 +671,12 @@ class BotTuiApp:
             # is the expected healthy state, not staleness.
             self._breadcrumb.set_text(f"Bots > {self._bot_detail_bot_id} > incidents")
             return
-        label = _BREADCRUMB_LABELS[self._view]
-        if self._stale_badge_active():
-            # DESIGN.md's stale-badge component: "~" glyph, "STALE" text-suffix,
-            # {colors.attention-stale}. Disappears the instant a heartbeat resumes --
-            # this is recomputed, never latched. Takes priority over the per-coin
-            # banner below: if the whole rankings:live heartbeat is down, its
-            # stale_instrument_ids payload is itself frozen/stale data, not worth
-            # showing alongside a "the feed itself is dead" badge.
-            self._breadcrumb.set_text([label, "  ", ("stale", "~ STALE")])
-            return
-        banner = self._stale_feed_banner()
-        if banner:
-            self._breadcrumb.set_text([label, "  ", ("stale", f"~ {banner}")])
-        else:
-            self._breadcrumb.set_text(label)
+        # Top-level panes: per-row stale markers live in the rows themselves (Bots-pane
+        # "~ " prefix, Collector-pane stale marker), so the breadcrumb is the plain label.
+        self._breadcrumb.set_text(_BREADCRUMB_LABELS[self._view])
 
     def _refresh_footer_hint(self) -> None:
-        if self._view == "coin_detail":
-            self._footer_hint.set_text(_COIN_DETAIL_FOOTER_HINT_TEXT)
-        elif self._view == "bots":
-            self._footer_hint.set_text(_BOTS_FOOTER_HINT_TEXT)
-        elif self._view == "bot_detail":
-            self._footer_hint.set_text(_BOT_DETAIL_FOOTER_HINT_TEXT)
-        elif self._view == "strategy":
-            self._footer_hint.set_text(_STRATEGY_FOOTER_HINT_TEXT)
-        elif self._view == "incidents":
-            self._footer_hint.set_text(_INCIDENTS_FOOTER_HINT_TEXT)
-        elif self._view == "collector":
-            self._footer_hint.set_text(_COLLECTOR_FOOTER_HINT_TEXT)
-        elif self._view == "help":
-            self._footer_hint.set_text(_HELP_FOOTER_HINT_TEXT)
-        else:
-            self._footer_hint.set_text(_FOOTER_HINT_TEXT)
+        self._footer_hint.set_text(_FOOTER_HINT_TEXTS[self._view])
 
     def _switch_view(self, view: str, stack: list[str]) -> None:
         self._view = view
@@ -1069,63 +698,6 @@ class BotTuiApp:
         self._frame.footer = self._footer_hint
         self._frame.focus_position = "body"
 
-    def _open_filter(self) -> None:
-        self._filter_active = True
-        self._filter_text = ""
-        self._filter_edit.set_caption("/")
-        self._filter_edit.set_edit_text("")
-        self._frame.footer = self._filter_edit
-        self._frame.focus_position = "footer"
-
-    def _close_filter(self) -> None:
-        # AC1: clears the filter without leaving the pane -- restores the full,
-        # unfiltered row list; does not touch self._view/self._stack.
-        self._filter_active = False
-        self._filter_text = ""
-        self._frame.footer = self._footer_hint
-        self._frame.focus_position = "body"
-        self._refresh_coins_body()
-        self._body.original_widget = self._coins_body
-
-    def _confirm_filter(self) -> None:
-        # Enter while filtering: unlike esc (_close_filter), this keeps filter_text
-        # narrowing the list -- it only returns focus/footer to the body so j/k/Enter
-        # work against the filtered subset. This is what makes "Enter opens
-        # Coin-detail while a filter is still active" (Story 4.3, AC6) a real,
-        # keyboard-reachable path rather than only true of the unfiltered list.
-        self._filter_active = False
-        self._frame.footer = self._footer_hint
-        self._frame.focus_position = "body"
-        self._refresh_coins_body()
-        self._body.original_widget = self._coins_body
-
-    def _on_filter_change(self, widget: urwid.Edit, new_text: str) -> None:
-        # Live narrowing as the builder types (AC1). No manual draw_screen() needed
-        # here -- unlike the background-asyncio.Task-driven redraw below, a keystroke
-        # handled while this Edit has focus is itself a synchronous urwid input event,
-        # and urwid redraws automatically after processing any input event.
-        self._filter_text = new_text
-        self._refresh_coins_body()
-        self._body.original_widget = self._coins_body
-
-    def _toggle_mode(self) -> None:
-        # Publish-and-wait, never optimistic (AC2): no local mode variable is flipped
-        # and no re-render happens here. The next rankings:live message carrying the
-        # confirmed mode is what actually changes what's on screen, via the existing
-        # redraw-loop machinery below.
-        current_mode = None
-        if ranking_state._LATEST_RANKING is not None:
-            current_mode = ranking_state._LATEST_RANKING.get("mode")
-        new_mode = ranking_state.toggle_mode(current_mode)
-        # Kept in self._background_tasks (with a done-callback to discard it) so the
-        # task isn't garbage-collected mid-flight -- a bare asyncio.ensure_future()
-        # result with no retained reference is a documented asyncio footgun, and a
-        # second `m` press before the first publish completes would otherwise
-        # overwrite the only reference to it.
-        task = asyncio.ensure_future(ranking_state.publish_mode_toggle(self._redis_url, new_mode))
-        self._background_tasks.add(task)
-        task.add_done_callback(self._background_tasks.discard)
-
     def _toggle_bot(self) -> None:
         # _active_bot_id() (Story 4.5) makes this identical from the Bots pane
         # (highlighted row) and from Bot-detail (the open bot). Starting a stopped bot
@@ -1143,8 +715,8 @@ class BotTuiApp:
         self._publish_bot_action(bot_id, "start")
 
     def _publish_bot_action(self, bot_id: str, action: str) -> None:
-        # Publish-and-wait, never optimistic (AC3, same discipline as _toggle_mode):
-        # no local running/stopped flip happens here -- the row only reflects the new
+        # Publish-and-wait, never optimistic (AC3): no local running/stopped flip
+        # happens here -- the row only reflects the new
         # state once live_paper's own next bots:status heartbeat carries it back.
         task = asyncio.ensure_future(bots_state.publish_control(self._redis_url, bot_id, action))
         self._background_tasks.add(task)
@@ -1264,38 +836,17 @@ class BotTuiApp:
         self._close_stop_confirm()
         self._publish_bot_action(bot_id, "stop")
 
-    def _open_coin_detail(self, instrument_id: str) -> None:
-        # Same plain-stack mechanism _dispatch_command already uses -- Story 4.1's
-        # Dev Notes built this stack expecting exactly this kind of later full-screen
-        # detail-view push, so no new navigation machinery is needed here.
-        self._stack = [*self._stack, self._view]
-        self._view = "coin_detail"
-        self._coin_detail_instrument_id = instrument_id
-        # Collapsed on every entry, never carried over from a prior visit to this or
-        # any other coin (AC2) -- this is the entire mechanism behind that AC.
-        self._ladder_expanded = False
-        self._ladder_size_w = 0
-        self._ladder_price_w = 0
-        self._indicator_value_w = 0
-        self._coin_detail_listbox = None
-        coin_detail_state.open_coin(instrument_id)
-        self._refresh_breadcrumb()
-        self._refresh_footer_hint()
-        self._body.original_widget = self._build_body()
-        self._frame.focus_position = "body"
-
     def _open_bot_detail(self, bot_id: str) -> None:
-        # Same plain-stack push _open_coin_detail already uses. No subscription-
-        # lifecycle call is needed here (unlike coin_detail_state.open_coin()) --
-        # bots_state.py already accumulates every bot's latest status unconditionally,
-        # regardless of which view is active (Story 4.4's design has no per-bot
-        # subscribe/unsubscribe concept to open/close on entry/exit here).
+        # Plain-stack push, the same mechanism _dispatch_command uses. No bots:status
+        # subscription-lifecycle call is needed here -- bots_state.py already
+        # accumulates every bot's latest status unconditionally, regardless of which
+        # view is active (Story 4.4's design has no per-bot subscribe/unsubscribe
+        # concept to open/close on entry/exit here).
         self._stack = [*self._stack, self._view]
         self._view = "bot_detail"
         self._bot_detail_bot_id = bot_id
         # Reset to "day" and start tracking this bot's history fresh on every entry
-        # (Story 4.7) -- never carries over a previous bot's range or stale data,
-        # same reset-on-entry discipline _open_coin_detail applies to _ladder_expanded.
+        # (Story 4.7) -- never carries over a previous bot's range or stale data.
         self._bot_history_range = "day"
         self._bot_detail_listbox = None
         bot_history_state.open_bot(bot_id)
@@ -1306,7 +857,7 @@ class BotTuiApp:
         self._frame.focus_position = "body"
 
     def _open_strategy_view(self) -> None:
-        # Same plain-stack push _open_bot_detail/_open_coin_detail already use --
+        # Same plain-stack push _open_bot_detail already uses --
         # esc pops back to Bot-detail via _handle_global_key's generic _pop_view
         # mechanism (no dedicated "strategy" key handler needed: no key other than
         # esc/":" does anything in this view, and both of those are already handled
@@ -1331,20 +882,13 @@ class BotTuiApp:
         self._body.original_widget = self._build_body()
         self._frame.focus_position = "body"
 
-    def _open_dashboard_chart(self) -> None:
-        # Only reachable via the "o" key while self._view == "coin_detail", which
-        # _open_coin_detail always sets alongside a real instrument_id -- never None
-        # in practice (same stub-gap-narrowing precedent as Story 4.1's own
-        # test_app_body.py, applied here to this Optional instance attribute instead).
-        assert self._coin_detail_instrument_id is not None
-        self._open_dashboard_chart_for(self._coin_detail_instrument_id)
-
-    def _open_dashboard_chart_for(self, instrument_id: str) -> None:
-        # Shared by the "o" key (Coin-detail) and the Coins-pane space key below --
-        # same open-attempt + OSC52-clipboard-copy fallback either way, just
-        # parameterized on which instrument_id to open rather than always reading
-        # self._coin_detail_instrument_id.
-        url = coin_detail.dashboard_chart_url(self._dashboard_base_url, instrument_id)
+    def _open_url(self, url: str) -> None:
+        """
+        Open `url` on the operator's machine: the local open_listener hand-off first,
+        else webbrowser.open() plus an OSC 52 clipboard copy. Bot-detail's `o` is the
+        only caller since Story 25.1a deleted the Coins-pane/Coin-detail chart links
+        that used to share it.
+        """
         if self._open_via_local_listener(url):
             self._footer_hint.set_text(f"dashboard: {url}")
             return
@@ -1357,7 +901,7 @@ class BotTuiApp:
             webbrowser.open(url)
         except Exception:
             logger.warning("webbrowser.open failed for %s", url)
-        sys.stdout.write(coin_detail.osc52_copy_sequence(url))
+        sys.stdout.write(bots_pane.osc52_copy_sequence(url))
         sys.stdout.flush()
         self._footer_hint.set_text(f"dashboard (copied to clipboard): {url}")
 
@@ -1366,7 +910,7 @@ class BotTuiApp:
         """
         Best-effort hand-off to platform/scripts/open_listener.go running on the
         operator's own machine (see troll-tui's -R reverse SSH tunnel in
-        ~/.zshrc) -- lets a space/o press on a VPS-hosted bot_tui actually pop a
+        ~/.zshrc) -- lets an `o` press on a VPS-hosted bot_tui actually pop a
         Firefox tab locally, which webbrowser.open() alone can't do with no
         DISPLAY on the remote host.
 
@@ -1393,26 +937,20 @@ class BotTuiApp:
 
     def _set_bot_history_range(self, range_name: str) -> None:
         # Footer-echoes the new range and redraws immediately (Story 4.7, AC2) --
-        # doesn't wait for the redraw loop's own next tick, same "keystroke handled
-        # synchronously" idiom _on_filter_change already uses.
+        # doesn't wait for the redraw loop's own next tick: a keystroke is itself a
+        # synchronous urwid input event, redrawn automatically after it is processed.
         self._bot_history_range = range_name
         self._footer_hint.set_text(f"range: {self._bot_history_range}")
         self._body.original_widget = self._build_body()
 
     def _open_dashboard_bot(self) -> None:
         # Only reachable via "o" while self._view == "bot_detail", which
-        # _open_bot_detail always sets alongside a real bot_id -- same never-None-in-
-        # practice precedent _open_dashboard_chart's own assert already documents for
-        # Coin-detail.
+        # _open_bot_detail always sets alongside a real bot_id -- never None in
+        # practice; the assert narrows the Optional for the type checker.
         assert self._bot_detail_bot_id is not None
-        url = bots_pane.dashboard_bot_url(self._dashboard_base_url, self._bot_detail_bot_id)
-        try:
-            webbrowser.open(url)
-        except Exception:
-            logger.warning("webbrowser.open failed for %s", url)
-        sys.stdout.write(coin_detail.osc52_copy_sequence(url))
-        sys.stdout.flush()
-        self._footer_hint.set_text(f"dashboard (copied to clipboard): {url}")
+        self._open_url(
+            bots_pane.dashboard_bot_url(self._dashboard_base_url, self._bot_detail_bot_id)
+        )
 
     def _submit_command(self) -> None:
         text = self._command_edit.edit_text
@@ -1468,27 +1006,11 @@ class BotTuiApp:
         if self._handle_modal_guard_key(key):
             return None
 
-        if self._filter_active:
-            # Third, distinct esc meaning (Story 4.2): clears the filter entirely,
-            # never pops the view stack. Enter (Story 4.3) instead *confirms* the
-            # filter -- keeps it narrowing the list, only releases footer focus back
-            # to the body. Ordinary character keys are consumed by the focused Edit
-            # widget itself (see _on_filter_change) and never reach here.
-            if key == "esc":
-                self._close_filter()
-            elif key == "enter":
-                self._confirm_filter()
-            return None
-
         # `:` opens the command bar from any page (every footer hint advertises
         # ":q quit") -- checked ahead of the view-specific branches below, which
         # otherwise return early and never reach _handle_global_key's own dispatch.
         if key == ":":
             self._open_command_bar()
-            return None
-
-        if self._view == "coin_detail":
-            self._handle_coin_detail_key(key)
             return None
 
         if self._view == "bot_detail":
@@ -1499,25 +1021,13 @@ class BotTuiApp:
         return None
 
     def _handle_global_key(self, key: str) -> None:
-        # Coins-pane-only keys (`/`, `m`, Enter) are a deliberate no-op on the Bots
-        # pane, not an oversight -- EXPERIENCE.md: "`/` is the only pane FR-21
-        # specifies filtering for." (Enter/Coin-detail follows the same rule.)
+        # Any key not handled below is a deliberate no-op -- including the retired
+        # Coins-pane keys (`/`, `m`, space, Enter-to-coin), which went web-only with
+        # Story 25.1a.
         if key == "esc":
             new_view, new_stack = _pop_view(self._view, self._stack)
             if new_view != self._view or new_stack != self._stack:
                 self._switch_view(new_view, new_stack)
-        elif key == "/" and self._view == "coins":
-            self._open_filter()
-        elif key == "m" and self._view == "coins":
-            self._toggle_mode()
-        elif key == "enter" and self._view == "coins":
-            instrument_id = self._highlighted_instrument_id()
-            if instrument_id is not None:
-                self._open_coin_detail(instrument_id)
-        elif key == " " and self._view == "coins":
-            instrument_id = self._highlighted_instrument_id()
-            if instrument_id is not None:
-                self._open_dashboard_chart_for(instrument_id)
         elif self._view == "bots":
             self._handle_bots_pane_key(key)
         elif self._view == "collector":
@@ -1525,7 +1035,7 @@ class BotTuiApp:
 
     def _handle_bots_pane_key(self, key: str) -> None:
         # Extracted from _handle_global_key (Story 4.5) -- same cognitive-complexity-
-        # threshold reasoning as _handle_coin_detail_key/_handle_bot_detail_key below.
+        # threshold reasoning as _handle_bot_detail_key below.
         if key == "enter":
             bot_id = self._highlighted_bot_id()
             if bot_id is not None:
@@ -1544,9 +1054,8 @@ class BotTuiApp:
                 self._open_collector_confirm("stop", instrument_id)
 
     def _handle_bot_detail_key(self, key: str) -> None:
-        # Extracted from _handle_global_key, same rationale as _handle_coin_detail_key
-        # (Story 4.3): keeps each dispatch function under this codebase's cognitive-
-        # complexity threshold as more per-view keys accumulate.
+        # Extracted from _handle_global_key: keeps each dispatch function under this
+        # codebase's cognitive-complexity threshold as more per-view keys accumulate.
         if key == "s":
             self._toggle_bot()
         elif key in ("left", "h"):
@@ -1566,67 +1075,16 @@ class BotTuiApp:
             new_view, new_stack = _pop_view(self._view, self._stack)
             self._switch_view(new_view, new_stack)
 
-    def _handle_coin_detail_key(self, key: str) -> None:
-        # Extracted from _handle_global_key (same reason Story 4.2 extracted that
-        # method from _unhandled_input): keeps each dispatch function under this
-        # codebase's cognitive-complexity threshold as more keys accumulate.
-        if key == "d":
-            # Scoped entirely to the ladder region (AC3) -- never touches the
-            # breadcrumb, the indicators region, self._stack, or what esc does.
-            self._ladder_expanded = not self._ladder_expanded
-            self._body.original_widget = self._build_body()
-        elif key == "o":
-            self._open_dashboard_chart()
-        elif key == "esc":
-            coin_detail_state.close_coin()
-            new_view, new_stack = _pop_view(self._view, self._stack)
-            self._switch_view(new_view, new_stack)
-
     async def _redraw_loop(self) -> None:
-        # The Coins-pane breadcrumb (and its stale badge) is refreshed every tick,
-        # unconditionally, while on the Coins pane -- the badge must keep
-        # re-evaluating purely from the passage of time even once ranking_engine's
-        # heartbeat has stopped and _LATEST_RANKING's identity never changes again
-        # (Story 4.1's original identity-diff-only condition would silently swallow
-        # this).
-        #
-        # The row-list body, however, is only rebuilt on an actual _LATEST_RANKING
-        # identity change (back to Story 4.1's original condition) -- rebuilding it
-        # unconditionally every tick was tried and reverted during Story 4.2's own
-        # review: a real urwid.ListBox/SimpleListWalker is a fresh object each time,
-        # so an unconditional rebuild silently resets any scroll/focus position the
-        # builder had inside the coins list back to the top twice a second, making a
-        # list longer than one screen effectively unscrollable. Gating the body
-        # rebuild on identity change avoids that regression while still satisfying the
-        # breadcrumb's independent, always-on refresh above.
-        #
-        # Coin-detail (and Bot-detail below) also rebuild every tick, unlike the
-        # Coins-pane's identity-gated body -- but now that both are a scrollable
-        # ListBox too (small-terminal fix), _build_coin_detail_body/
-        # _build_bot_detail_body protect scroll position themselves, the same way
-        # _set_coins_rows does: they mutate the persisted ListBox's SimpleListWalker
-        # in place (self._coin_detail_listbox/self._bot_detail_listbox) instead of
-        # handing back a fresh ListBox object every call.
+        # Every live view is re-rendered every tick so time-driven text (stale badges,
+        # uptimes, an open incident's duration) keeps advancing. Bots, Collector and
+        # Bot-detail protect their scroll position by mutating a persisted ListBox's
+        # walker in place (TUI-01: _refresh_bots_body/_refresh_collector_body/
+        # _build_bot_detail_body) instead of handing back a fresh ListBox every call;
+        # Incidents does not yet (see its NOTE below).
         while True:
             try:
-                if self._view == "coins":
-                    self._refresh_breadcrumb()
-                    current = ranking_state._LATEST_RANKING
-                    if current is not self._last_seen_ranking:
-                        self._last_seen_ranking = current
-                        self._refresh_coins_body()
-                        self._body.original_widget = self._coins_body
-                    self._draw_screen()
-                elif self._view == "coin_detail":
-                    # Breadcrumb refreshed every tick too (Review finding, post-4.3) --
-                    # same reasoning as the Coins-pane breadcrumb above: its stale badge
-                    # must keep re-evaluating from the passage of time alone, even once
-                    # snapshots:raw stops arriving and _LATEST_SNAPSHOT's identity never
-                    # changes again.
-                    self._refresh_breadcrumb()
-                    self._body.original_widget = self._build_body()
-                    self._draw_screen()
-                elif self._view == "bots":
+                if self._view == "bots":
                     # Unlike the old _build_bots_body, this pane now preserves scroll
                     # position the same way Collector does (see _refresh_bots_body) --
                     # each row's stale badge/uptime text is still rebuilt every tick,
@@ -1637,10 +1095,9 @@ class BotTuiApp:
                     self._draw_screen()
                 elif self._view == "bot_detail":
                     # Breadcrumb (and its stale badge) needs to keep advancing purely
-                    # from wall-clock time, same as Coin-detail above. The body is
-                    # rebuilt every tick too -- scroll position is protected by
-                    # _build_bot_detail_body itself (see the comment on
-                    # self._coin_detail_listbox above), not by gating this call.
+                    # from wall-clock time. The body is rebuilt every tick too -- scroll
+                    # position is protected by _build_bot_detail_body itself (see the
+                    # comment on self._bot_detail_listbox), not by gating this call.
                     self._refresh_breadcrumb()
                     self._body.original_widget = self._build_bot_detail_body()
                     self._draw_screen()
@@ -1656,8 +1113,8 @@ class BotTuiApp:
                     self._body.original_widget = self._build_incidents_body()
                     self._draw_screen()
                 elif self._view == "collector":
-                    # Unlike Bots/Incidents above, this pane preserves scroll position
-                    # (Story 6.1 fix) -- _refresh_collector_body mutates the existing
+                    # Like Bots above (and unlike Incidents), this pane preserves scroll
+                    # position (Story 6.1 fix) -- _refresh_collector_body mutates the existing
                     # ListBox in place rather than the redraw loop assigning a fresh one.
                     self._refresh_collector_body()
                     self._body.original_widget = self._collector_body
@@ -1690,10 +1147,6 @@ class BotTuiApp:
             event_loop=evl,
         )
 
-        listener_task = loop.create_task(ranking_state._redis_listener(self._redis_url))
-        snapshot_listener_task = loop.create_task(
-            coin_detail_state._redis_listener(self._redis_url)
-        )
         bots_listener_task = loop.create_task(bots_state._redis_listener(self._redis_url))
         collector_listener_task = loop.create_task(collector_state._redis_listener(self._redis_url))
         history_poll_task = loop.create_task(bot_history_state.poll_loop(self._redis_url))
@@ -1702,8 +1155,6 @@ class BotTuiApp:
         try:
             self._main_loop.run()
         finally:
-            listener_task.cancel()
-            snapshot_listener_task.cancel()
             bots_listener_task.cancel()
             collector_listener_task.cancel()
             history_poll_task.cancel()
