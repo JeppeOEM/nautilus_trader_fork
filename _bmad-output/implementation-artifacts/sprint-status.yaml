@@ -332,6 +332,11 @@ development_status:
   27-9-closeout-research-readme-rules-legacy-notebooks-gone: ready-for-dev
   epic-27-retrospective: optional
 
+  epic-28: backlog
+  28-1-capture-hotpath-metrics-cpu-priority-and-vps-profile: ready-for-dev
+  28-2-capture-python-overhead-removed-baseline-lowered: ready-for-dev
+  epic-28-retrospective: optional
+
 action_items:
   - epic: 1
     action: "Add a lifecycle-cleanup checklist item: any subscribe/unsubscribe/resubscribe/shutdown transition must explicitly state what tracking state gets reset or removed (4 bugs across 3 stories in Epic 1 were this exact shape)."
