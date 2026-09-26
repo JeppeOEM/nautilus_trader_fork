@@ -18,8 +18,11 @@ crontab.
 
 `ArchiveScheduler` runs the existing nightly saga, never a copy of it. A *full run* is, per closed
 day oldest first and per venue, one `run_steps` of that venue-day's nightly chain; then one
-`consolidate_catalog --apply` chain; then one backup chain. It is `;` semantics: a venue's FAILED
-saga never skips the next venue, the consolidate or the backup. Every step is its own child process
+`consolidate_catalog --apply` chain; then, when `backup_enabled` (Story 26.1b), one backup chain. It
+is `;` semantics: a venue's FAILED saga never skips the next venue, the consolidate or the backup.
+With the backup off the service logs one WARNING at start and every status says
+`"backup": "disabled"`, so the missing off-site copy (audit D-33) is a visible choice, never a
+nightly failure. Every step is its own child process
 (MEM-01), and the chain runs in `asyncio.to_thread` so the loop keeps publishing status. Each
 step's result comes back to the loop through `loop.call_soon_threadsafe`.
 
@@ -189,13 +192,15 @@ class Chains:
     CLI modules (`archive.nightly.steps` is the nightly chain).
 
     Invariant: every step is its own child process (MEM-01). `nightly(venue, day, result_file)`
-    is the venue-day saga whose rebuild writes its proof to `result_file`.
+    is the venue-day saga whose rebuild writes its proof to `result_file`. `backup` is None when
+    the off-site backup is off (`SchedulerConfig.backup_enabled`), and `ArchiveScheduler` refuses
+    chains that disagree with the config.
     """
 
     nightly: Callable[[str, str, str], list[Step]]
     consolidate: Callable[[], list[Step]]
     closed_hours: Callable[[], list[Step]]
-    backup: Callable[[], list[Step]]
+    backup: Callable[[], list[Step]] | None
 
 
 @dataclass(frozen=True)
@@ -205,6 +210,8 @@ class SchedulerConfig:
 
     Invariant: `venues` is a non-empty subset of `archive.domain.reconciliation.VENUES` with no
     duplicate, `catch_up_max_days >= 1`, `lock_wait_minutes >= 0` and `step_timeout_minutes >= 1`.
+    `backup_enabled` alone decides whether a full run ends in the backup and what the status says
+    about it; it is keyword-only with no default, so no caller can leave it implicit.
     """
 
     schedule: Schedule
@@ -212,6 +219,7 @@ class SchedulerConfig:
     catch_up_max_days: int
     lock_wait_minutes: int
     step_timeout_minutes: int = 360
+    backup_enabled: bool = field(kw_only=True)
 
 
 # --- state and status ----------------------------------------------------------------------------
@@ -384,8 +392,10 @@ class ArchiveScheduler:
     Invariants: (1) at most one job runs at a time -- only `tick` starts one and the main loop
     awaits it, the control listener only queues; (2) a venue's `last_success_day` advances only
     through contiguous no-FAILED days (`advance_watermark`), and `last_run_day` only when a
-    scheduled run completed; (3) the maintenance lock is only ever probed here, never held. The
-    commands that could violate them are `tick` (every run) and `handle_control`.
+    scheduled run completed; (3) the maintenance lock is only ever probed here, never held; (4) a
+    backup job runs exactly when `config.backup_enabled` (a `Chains.backup` that disagrees is
+    refused at construction). The commands that could violate them are `tick` (every run) and
+    `handle_control`.
     """
 
     def __init__(
@@ -401,6 +411,11 @@ class ArchiveScheduler:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         peak_rss_mb: Callable[[], float] = lambda: 0.0,
     ) -> None:
+        if config.backup_enabled != (chains.backup is not None):
+            raise ValueError(
+                f"backup_enabled={config.backup_enabled} but the chains "
+                f"{'have no' if chains.backup is None else 'have a'} backup step"
+            )
         self._config = config
         self._schedule = config.schedule
         self._chains = chains
@@ -423,7 +438,12 @@ class ArchiveScheduler:
         return self._state
 
     def start(self) -> None:
-        """Load the persisted cursor and queue a first status (republishing the last runs)."""
+        """
+        Load the persisted cursor and queue a first status (republishing the last runs); warn once
+        when the off-site backup is off.
+        """
+        if not self._config.backup_enabled:
+            logger.warning("off-site backup disabled: the catalog has no copy off this host")
         try:
             state = self._store.load()
         except (OSError, ValueError) as e:
@@ -561,7 +581,8 @@ class ArchiveScheduler:
     ) -> dict[str, dict[dt.date, bool]]:
         """
         Every planned venue-day oldest first (all venues of a day before the next day), then the
-        consolidate, then the backup -- `;` semantics: nothing is skipped because a saga failed.
+        consolidate, then the backup when it is enabled -- `;` semantics: nothing is skipped
+        because a saga failed.
         Returns each venue's per-day outcome (True: no FAILED step).
         """
         days = tuple(sorted({d for venue_days in plan.values() for d in venue_days}))
@@ -572,7 +593,8 @@ class ArchiveScheduler:
                 if venue_day in plan.get(venue, ()):
                     outcomes[venue][venue_day] = await self._venue_day(run, venue, venue_day)
         await self._run_job(run, None, self._chains.consolidate(), day, "consolidate")
-        await self._run_job(run, None, self._chains.backup(), day, "backup")
+        if self._chains.backup is not None:
+            await self._run_job(run, None, self._chains.backup(), day, "backup")
         self._end(run)
         return outcomes
 
@@ -720,7 +742,10 @@ class ArchiveScheduler:
         self._wake.set()
 
     def _covers(self, day: dt.date) -> bool:
-        """Whether the run in progress already maintains `day` (every venue, then the backup)."""
+        """
+        Whether the run in progress already maintains `day` (every venue, the consolidate, then
+        the backup when it is enabled).
+        """
         running = self._running
         return running is not None and running.kind != INTRADAY and day in running.days
 
@@ -759,6 +784,7 @@ class ArchiveScheduler:
             "running": self._running.to_json() if self._running else None,
             "last_run": last_run.to_json() if last_run else None,
             "last_intraday": last_intraday.to_json() if last_intraday else None,
+            "backup": "enabled" if self._config.backup_enabled else "disabled",
         }
 
     def _notify(self) -> None:

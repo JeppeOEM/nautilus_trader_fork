@@ -694,3 +694,7 @@ Discarded by operator: locking/atomic TOML writes; `bot_tui` malformed-message h
 - source_spec: `_bmad-output/implementation-artifacts/spec-26-1-livebook-tradeintake-feedgroup-pure-secondsampler-in-place.md`
   summary: A reconnect backfill that admits more unseen trades than the `seen_trade_ids` window (2000 by default; dYdX can page up to 20 x 1000 rows) evicts, oldest-first, the ids of the post-gap trades the live feed had already archived, so when those newest REST rows are reached they pass the dedup check and are archived a second time.
   evidence: platform/collector_core/application/trade_backfill.py `admit_backfill` checks `intake.first_feed` and `intake.register`s one trade at a time into the bounded FIFO window (`TradeIntake`); the same per-trade check-then-register existed in `Collector._apply_backfill` at baseline aae75c5707.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-26-1b-offsite-backup-explicit-setting-off-until-storage-exists.md`
+  summary: `frontend/scripts/gen-api-types.mjs` emits a string `enum` (e.g. `ArchiveStatusResponse.backup: "enabled" | "disabled"`) as plain `string`, so a mistyped literal comparison in the frontend type-checks and silently never matches.
+  evidence: `frontend/openapi.json` carries `"enum": ["enabled", "disabled"]` for `backup`, while the regenerated `frontend/src/api/schema.ts` has `backup?: string | null`; the generator has no enum branch (pre-existing, affects every Literal field).

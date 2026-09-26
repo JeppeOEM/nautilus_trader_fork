@@ -48,6 +48,7 @@ def _status(**overrides: object) -> dict:
         "running": None,
         "last_run": _run(),
         "last_intraday": None,
+        "backup": "disabled",
     }
     status.update(overrides)
     return status
@@ -82,6 +83,16 @@ def test_minimal_message_with_null_last_run_is_accepted() -> None:
     assert bus.latest is not None
 
 
+def test_a_status_without_the_backup_key_is_accepted() -> None:
+    bus = ArchiveStatusBus()
+    message = _status()
+    del message["backup"]
+
+    bus.handle_message(message)
+
+    assert bus.latest == message
+
+
 def test_additive_keys_are_tolerated() -> None:
     bus = ArchiveStatusBus()
     message = _status(future_key=1, running=_run(finished=None, extra="x"))
@@ -111,6 +122,9 @@ def test_additive_keys_are_tolerated() -> None:
         _status(last_run=_run(days=[20260925])),
         _status(last_run=_run(days="2026-09-25")),
         _status(running=_run(finished=5)),
+        _status(backup="maybe"),
+        _status(backup=None),
+        _status(backup=True),
     ],
 )
 def test_malformed_message_is_ledgered_and_keeps_previous_cache(message: object) -> None:

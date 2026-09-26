@@ -38,6 +38,7 @@ def _raw(**overrides: Any) -> dict[str, Any]:
         "lock_wait_minutes": 60,
         "intraday_consolidate_hours": 4,
         "step_timeout_minutes": 360,
+        "backup_enabled": False,
     }
     raw.update(overrides)
     return raw
@@ -50,6 +51,11 @@ def test_the_committed_config_loads_with_the_documented_values() -> None:
     assert config.venues == ("DYDX", "BYBIT", "HYPERLIQUID")
     assert (config.catch_up_max_days, config.lock_wait_minutes) == (7, 60)
     assert config.step_timeout_minutes == 360
+    assert config.backup_enabled is False
+
+
+def test_backup_enabled_true_is_kept() -> None:
+    assert parse_scheduler_config(_raw(backup_enabled=True)).backup_enabled is True
 
 
 def test_a_zero_lock_wait_is_allowed() -> None:
@@ -76,6 +82,10 @@ def test_a_zero_lock_wait_is_allowed() -> None:
         _raw(intraday_consolidate_hours=0),
         _raw(intraday_consolidate_hours=5),
         _raw(step_timeout_minutes=0),
+        _raw(backup_enabled="no"),
+        _raw(backup_enabled=1),
+        _raw(backup_enabled=0),
+        {k: v for k, v in _raw().items() if k != "backup_enabled"},
     ],
 )
 def test_a_bad_or_unknown_key_refuses_start(raw: dict[str, Any]) -> None:

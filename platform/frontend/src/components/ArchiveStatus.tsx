@@ -55,6 +55,14 @@ function StatusText({ status }: { status: ArchiveStatusResponse }) {
         </>
       )}
       <> · next {shortUtc(status.next_run)}</>
+      {status.backup === "disabled" && (
+        <span
+          style={{ color: "var(--color-warn)" }}
+          title="Off-site backup is disabled (backup_enabled = false in archive/config.toml): the catalog has no copy off this host."
+        >
+          {" · backup off"}
+        </span>
+      )}
     </>
   );
 }
@@ -111,8 +119,8 @@ function ConfirmRunDialog({ open, onClose }: ConfirmRunDialogProps) {
     <dialog ref={ref} aria-label="Run maintenance now" onClose={close}>
       <h3>Run nightly maintenance now?</h3>
       <p>
-        Queues the full nightly sequence for yesterday (every venue, then consolidate, then backup). It
-        starts after any job already running.
+        Queues the full nightly sequence for yesterday (every venue, then consolidate, then the off-site
+        backup if it is enabled). It starts after any job already running.
       </p>
       {error && (
         <p role="alert" style={{ color: "var(--color-danger)" }}>
@@ -131,7 +139,10 @@ function ConfirmRunDialog({ open, onClose }: ConfirmRunDialogProps) {
   );
 }
 
-/** Compact nightly-maintenance status (Story 25.1b): last run + outcome, next run, run-now. */
+/**
+ * Compact nightly-maintenance status (Story 25.1b): last run + outcome, next run, run-now, and
+ * "backup off" when the off-site backup is disabled (Story 26.1b).
+ */
 export default function ArchiveStatus() {
   const { data, error } = useArchiveStatus();
   const [confirmOpen, setConfirmOpen] = useState(false);

@@ -38,6 +38,7 @@ _KEYS = frozenset(
         "lock_wait_minutes",
         "intraday_consolidate_hours",
         "step_timeout_minutes",
+        "backup_enabled",
     }
 )
 _HH_MM = re.compile(r"([01]\d|2[0-3]):([0-5]\d)")
@@ -47,6 +48,13 @@ def _int(raw: dict[str, Any], key: str, minimum: int) -> int:
     value = raw[key]
     if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
         raise ValueError(f"{key} must be an integer >= {minimum}, got {value!r}")
+    return value
+
+
+def _bool(raw: dict[str, Any], key: str) -> bool:
+    value = raw[key]
+    if not isinstance(value, bool):
+        raise ValueError(f"{key} must be true or false, got {value!r}")
     return value
 
 
@@ -81,6 +89,7 @@ def parse_scheduler_config(raw: dict[str, Any]) -> SchedulerConfig:
         catch_up_max_days=_int(raw, "catch_up_max_days", 1),
         lock_wait_minutes=_int(raw, "lock_wait_minutes", 0),
         step_timeout_minutes=_int(raw, "step_timeout_minutes", 1),
+        backup_enabled=_bool(raw, "backup_enabled"),
     )
 
 

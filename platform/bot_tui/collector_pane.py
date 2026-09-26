@@ -136,9 +136,10 @@ def format_archive_line(status: dict | None, now: dt.datetime, stale: bool = Fal
     One line for the nightly maintenance (`archive:status`, Story 25.1b), e.g.
     `archive: last 2026-09-25 ok 03:07-03:41Z · next 2026-09-27 03:07Z (in 12h40m)` or
     `archive: running nightly 2026-09-25 (step 3)`. A failed intraday merge is appended so it
-    never hides behind a clean nightly. `stale` (no message for several heartbeats) prefixes
-    `~ `, the Collector rows' stale marker. Nested fields are read defensively: a message only
-    guarantees `next_run`/`last_run`.
+    never hides behind a clean nightly, and `backup off` when the status says the off-site backup
+    is disabled (Story 26.1b: the catalog then has no copy off the host). `stale` (no message for
+    several heartbeats) prefixes `~ `, the Collector rows' stale marker. Nested fields are read
+    defensively: a message only guarantees `next_run`/`last_run`.
     """
     if status is None:
         return ARCHIVE_NO_STATUS_TEXT
@@ -157,4 +158,6 @@ def format_archive_line(status: dict | None, now: dt.datetime, stale: bool = Fal
     if isinstance(intraday, dict) and _run_outcome(_run_steps(intraday)) != "ok":
         parts.append(_finished_run_text("intraday", intraday))
     parts.append(_next_run_text(status.get("next_run"), now))
+    if status.get("backup") == "disabled":
+        parts.append("backup off")
     return f"{marker}archive: " + " · ".join(parts)

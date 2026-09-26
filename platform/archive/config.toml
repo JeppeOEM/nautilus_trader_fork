@@ -3,11 +3,12 @@
 # takes effect on `docker compose restart archive` without a rebuild. Every key is required and an
 # unknown key refuses start (archive/infrastructure/scheduler_config.py).
 #
-# The backup target is not here: it is RCLONE_REMOTE/RCLONE_BUCKET in platform/.env, the one
-# personal, gitignored source `make backup-catalog` reads too.
+# Whether the backup runs is `backup_enabled` below; its target is not here: it is
+# RCLONE_REMOTE/RCLONE_BUCKET in platform/.env, the one personal, gitignored source
+# `make backup-catalog` reads too.
 
 # UTC wall time of the nightly run (HH:MM): each venue's nightly saga for yesterday, then the
-# consolidate, then the backup. Also the minute of the intraday grid below.
+# consolidate, then the backup (when enabled). Also the minute of the intraday grid below.
 nightly_at = "03:07"
 
 # The venues whose nightly saga runs, in this order within each day (a subset of DYDX, BYBIT,
@@ -31,3 +32,10 @@ intraday_consolidate_hours = 4
 # step with exit 124 (`archive.step_timeout`), so a hung rclone or a wedged rebuild can never stall
 # every later job. Generous on purpose: the first backup of a large catalog uploads everything.
 step_timeout_minutes = 360
+
+# Whether every full run ends with `archive.backup_catalog` (the off-site copy, audit D-33).
+# false until off-site storage exists: the catalog then has NO copy off this host, the service logs
+# one WARNING at start and `archive:status` says "backup": "disabled". Set true only after rclone
+# is configured (RCLONE_REMOTE/RCLONE_BUCKET in platform/.env, README "Nightly maintenance"): with
+# true and either one unset the service refuses to start (`archive.config_invalid`).
+backup_enabled = false

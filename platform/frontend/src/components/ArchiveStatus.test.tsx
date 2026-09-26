@@ -26,6 +26,7 @@ function status(overrides: Partial<ArchiveStatusResponse> = {}): ArchiveStatusRe
     running: null,
     last_run: run([0, 0]),
     last_intraday: null,
+    backup: "enabled",
     ...overrides,
   };
 }
@@ -101,6 +102,22 @@ describe("ArchiveStatus", () => {
     await waitFor(() => expect(statusText()).toContain("intraday 2026-09-26 FAILED"));
   });
 
+  it("flags a disabled off-site backup in the warn colour, with why", async () => {
+    stubFetch(statusOnly(status({ backup: "disabled" })));
+    renderStatus();
+    await waitFor(() => expect(statusText()).toContain("next 2026-09-27 03:07Z · backup off"));
+    const flag = screen.getByTitle(/no copy off this host/);
+    expect(flag.textContent).toBe(" · backup off");
+    expect(flag).toHaveStyle({ color: "var(--color-warn)" });
+  });
+
+  it.each(["enabled", undefined])("says nothing about the backup when it is %s", async (backup) => {
+    stubFetch(statusOnly(status({ backup })));
+    renderStatus();
+    await waitFor(() => expect(statusText()).toContain("next 2026-09-27 03:07Z"));
+    expect(statusText()).not.toContain("backup off");
+  });
+
   it("says unavailable on a 503 rather than inventing a status", async () => {
     stubFetch(() => new Response(JSON.stringify({ detail: "Archive status not yet available" }), { status: 503 }));
     renderStatus();
@@ -117,6 +134,7 @@ describe("ArchiveStatus", () => {
     fireEvent.click(screen.getByRole("button", { name: "Run now" }));
     const dialog = screen.getByRole("dialog", { name: "Run maintenance now" });
     expect(dialog).toHaveAttribute("open");
+    expect(dialog.textContent).toContain("backup if it is enabled");
     expect(fetchMock.mock.calls.some(([, init]) => init?.method === "POST")).toBe(false);
 
     fireEvent.click(screen.getByRole("button", { name: "Run" }));

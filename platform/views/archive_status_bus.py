@@ -55,6 +55,9 @@ _LEDGER_SITE = "views.archive_status"
 # Four of the scheduler's 30 s heartbeats (`archive.application.scheduler.HEARTBEAT_SECONDS`).
 STALE_AFTER_SECONDS = 120.0
 _POLL_SECONDS = 5.0
+# `backup` (Story 26.1b): whether the service's full runs end in the off-site backup. Optional, so
+# a status from a scheduler before that story still reads.
+_BACKUP_STATES = ("enabled", "disabled")
 
 
 def _is_int(value: object) -> bool:
@@ -103,7 +106,8 @@ def _valid_run(run: object, *, finished: bool) -> bool:
 def valid_status(message: object) -> bool:
     """
     `next_run` and `last_run` must be present (the latter may be null); `next_intraday`,
-    `running` and `last_intraday` are optional and may be null.
+    `running` and `last_intraday` are optional and may be null; `backup` is optional and, when
+    present, `"enabled"` or `"disabled"`.
     """
     if not isinstance(message, dict) or "last_run" not in message:
         return False
@@ -111,6 +115,8 @@ def valid_status(message: object) -> bool:
         return False
     next_intraday = message.get("next_intraday")
     if next_intraday is not None and not isinstance(next_intraday, str):
+        return False
+    if "backup" in message and message["backup"] not in _BACKUP_STATES:
         return False
     running = message.get("running")
     last_run = message.get("last_run")

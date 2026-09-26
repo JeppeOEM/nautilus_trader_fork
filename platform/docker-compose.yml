@@ -144,7 +144,8 @@ services:
     # cpu_shares: 256   # see the CPU-priority note above services: (batch: may wait)
     # Nightly maintenance scheduled in our own code (Story 25.1b; archive/scheduler.py): each
     # venue's nightly saga at archive/config.toml's `nightly_at` (UTC), then consolidate, then the
-    # rclone backup, each step its own child process; catch-up of missed days after downtime; the
+    # rclone backup when that file's `backup_enabled` is true (committed false until off-site
+    # storage exists, Story 26.1b), each step its own child process; catch-up of missed days after downtime; the
     # closed-hour merge of the small types every `intraday_consolidate_hours`. Replaces the host
     # crontab line (docs/DEPLOY_CHECKLIST.md §1). Status on `archive:status`, run-now on
     # `archive:control`. Takes no capture lock: every step writes closed days or closed hours only,
@@ -165,8 +166,9 @@ services:
       DYDX_PLAN_PATH: "/app/dydx_collector/config.toml"
       ARCHIVE_STATE_DIR: "/app/archive_state"
       ARCHIVE_CONFIG: "/app/archive/config.toml"
-      # The backup target, from platform/.env (see .env-example): empty = the backup step fails
-      # loudly (archive.backup_not_configured), never a silent skip.
+      # The backup target, from platform/.env (see .env-example). Unused while archive/config.toml
+      # has `backup_enabled = false`; with true, an empty one refuses the service's start
+      # (archive.config_invalid), never a silent skip.
       RCLONE_REMOTE: "${RCLONE_REMOTE:-}"
       RCLONE_BUCKET: "${RCLONE_BUCKET:-}"
       RCLONE_CONFIG: "/app/rclone/rclone.conf"

@@ -20,7 +20,8 @@ What it runs and when is `archive.application.scheduler`'s docstring; the schedu
 `archive/config.toml` (`ARCHIVE_CONFIG`). This composition root wires the chains, each step a
 child process:
 - per venue-day, `archive.nightly.steps` (the nightly saga);
-- `archive.consolidate_catalog --apply`, then `archive.backup_catalog` after every full run;
+- `archive.consolidate_catalog --apply`, then `archive.backup_catalog` when `backup_enabled`
+  (Story 26.1b), after every full run;
 - `archive.consolidate_catalog --apply --closed-hours`, the intraday merge.
 
 It also wires the lock probe, the `state.json` store and the Redis status bus and control
@@ -34,7 +35,9 @@ Environment:
   `/app/dydx_collector/config.toml`)
 - `ARCHIVE_STATE_DIR` (default `/app/archive_state`)
 - `ARCHIVE_CONFIG` (default: the package's `config.toml`)
-- `RCLONE_REMOTE`/`RCLONE_BUCKET`/`RCLONE_CONFIG`, read by the backup step.
+- `RCLONE_REMOTE`/`RCLONE_BUCKET`/`RCLONE_CONFIG`, read by the backup step. With
+  `backup_enabled = true` and either of the first two unset or blank, the service refuses to start
+  (`archive.config_invalid`, exit 1), rather than fail every night; with it false they are unused.
 
 Status is published on `archive:status`; `{"command": "run_now", "day": "YYYY-MM-DD" | null}` on
 `archive:control` queues one day's full run.
@@ -58,6 +61,7 @@ from archive.application.nightly import StepRunner
 from archive.application.scheduler import LOCK_TIMEOUT_EXIT
 from archive.application.scheduler import ArchiveScheduler
 from archive.application.scheduler import Chains
+from archive.backup_catalog import configured_target
 from archive.infrastructure.maintenance_lock import MaintenanceLockProbe
 from archive.infrastructure.redis_bus import RedisControlChannel
 from archive.infrastructure.redis_bus import RedisStatusBus
@@ -99,8 +103,13 @@ def timed_runner(timeout_seconds: float) -> StepRunner:
     return run
 
 
-def build_chains(catalog: str, candles_dir: str, dydx_plan: str | None) -> Chains:
-    """Each job's chain of child-process steps (a step's name is its `nightly.<name>` ledger)."""
+def build_chains(
+    catalog: str, candles_dir: str, dydx_plan: str | None, backup_enabled: bool
+) -> Chains:
+    """
+    Each job's chain of child-process steps (a step's name is its `nightly.<name>` ledger); no
+    backup chain when `backup_enabled` is false.
+    """
 
     def module(dotted: str, *args: str) -> list[str]:
         """One step's argv (`tests/test_images.py` reads the dotted path from this call)."""
@@ -130,17 +139,27 @@ def build_chains(catalog: str, candles_dir: str, dydx_plan: str | None) -> Chain
     def backup() -> list[Step]:
         return [Step("backup_catalog", module("archive.backup_catalog", "--catalog", catalog))]
 
-    return Chains(nightly, consolidate, closed_hours, backup)
+    return Chains(nightly, consolidate, closed_hours, backup if backup_enabled else None)
 
 
 def build_scheduler(env: Mapping[str, str]) -> tuple[ArchiveScheduler, str]:
-    """Wire the scheduler; return it and the Redis URL its control channel subscribes to."""
+    """
+    Wire the scheduler; return it and the Redis URL its control channel subscribes to.
+    `ValueError` for an invalid config, or an enabled backup with no target (`configured_target`,
+    the backup step's own rule); `OSError` for a missing or unreadable config file.
+    """
     catalog = env.get("CATALOG_PATH", "/app/catalog")
     config = load_scheduler_config(env.get("ARCHIVE_CONFIG") or _DEFAULT_CONFIG)
+    if config.backup_enabled and configured_target(env) is None:
+        raise ValueError(
+            "backup_enabled = true but RCLONE_REMOTE or RCLONE_BUCKET is not set (platform/.env; "
+            "README 'Nightly maintenance'); set both, or backup_enabled = false"
+        )
     chains = build_chains(
         catalog,
         env.get("CANDLES_DIR", "/app/candles_dir"),
         env.get("DYDX_PLAN_PATH", "/app/dydx_collector/config.toml"),
+        config.backup_enabled,
     )
     redis_url = env.get("REDIS_URL", "redis://127.0.0.1:6379")
     scheduler = ArchiveScheduler(
@@ -178,7 +197,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     error_ledger.start()
-    scheduler, redis_url = build_scheduler(os.environ)
+    try:
+        scheduler, redis_url = build_scheduler(os.environ)
+    except (ValueError, OSError) as e:  # a bad key or value, or a missing/unreadable config file
+        error_ledger.record("archive.config_invalid", f"archive service not started: {e}", e)
+        return 1
     asyncio.run(_serve(scheduler, redis_url))
     return 0
 

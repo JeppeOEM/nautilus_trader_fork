@@ -1426,6 +1426,21 @@
                 "type": "null"
               }
             ]
+          },
+          "backup": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "enabled",
+                  "disabled"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Backup"
           }
         },
         "type": "object",
@@ -1433,7 +1448,8 @@
           "next_run",
           "last_run"
         ],
-        "title": "ArchiveStatusResponse"
+        "title": "ArchiveStatusResponse",
+        "description": "`backup` (Story 26.1b) says whether the scheduler's full runs end in the off-site backup; null\nwhen the status predates the key."
       },
       "ArchiveStep": {
         "properties": {

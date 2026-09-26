@@ -26,7 +26,8 @@ What the service runs (schedule in `platform/archive/config.toml`, times UTC):
 
 - **Nightly, at `nightly_at` (03:07).** For each closed day due, oldest first, and each venue in
   `venues`, the `archive.nightly` saga (Story 25.1). Then one `consolidate_catalog --apply` over
-  every closed day and data type, then `archive.backup_catalog`. Every step is its own child
+  every closed day and data type, then `archive.backup_catalog` when `backup_enabled = true`
+  (committed `false` until off-site storage exists, Story 26.1b). Every step is its own child
   process (MEM-01), so no job runs inside a collector. `;` semantics: one venue's FAILED saga
   never skips the next venue, the consolidate or the backup.
   - The saga runs `rebuild_seconds` -> `consolidate_catalog --days 2` -> `build_candles` (which
@@ -368,16 +369,21 @@ Record numbers where each line says, never in a story file.
   crontab line as section 1 says and confirm `archive` is Up. After its first nightly run, copy
   that night's `consolidate: ...` line (`docker compose logs archive`) into D-36 as the measured
   nightly run (22.11, 22.13), and check `GET /api/archive/status` shows every step with its exit.
-- Object storage: choose Cloudflare R2 or Backblaze B2, create a bucket, `rclone config` on
-  the host (credentials stay in `~/.config/rclone`, which the `archive` service mounts read-only;
-  set `RCLONE_CONFIG_DIR` in `platform/.env` if it lives elsewhere), set `RCLONE_REMOTE` and
-  `RCLONE_BUCKET` (bare values) in `platform/.env`, `docker compose up -d archive` so the service
-  picks them up, run `make backup-catalog` once after a consolidation (it runs rclone inside the
-  image; the host needs no rclone), confirm with
-  `rclone lsf $RCLONE_REMOTE:$RCLONE_BUCKET/catalog/data --max-depth 2`, then update D-33 to say
-  the backup is scheduled. Until the target is set every nightly run's backup step fails loudly
-  (`archive.backup_not_configured`). Also answer D-33's open question: was the
-  2026-09-19 17:53 VPS catalog reset deliberate? (22.11)
+- Object storage (optional until storage exists; Story 26.1b): the off-site backup is the explicit
+  setting `backup_enabled` in `platform/archive/config.toml`, committed `false`, so until storage
+  exists no backup step runs, `archive:status` says `"backup": "disabled"` (web panel and TUI:
+  `backup off`) and the catalog has no copy off the host (D-33 stays OPEN). When storage exists:
+  choose Cloudflare R2 or Backblaze B2, create a bucket, `rclone config` on the host (credentials
+  stay in `~/.config/rclone`, which the `archive` service mounts read-only; set
+  `RCLONE_CONFIG_DIR` in `platform/.env` if it lives elsewhere), set `RCLONE_REMOTE` and
+  `RCLONE_BUCKET` (bare values) in `platform/.env`, run `make backup-catalog` once after a
+  consolidation (it runs rclone inside the image; the host needs no rclone), confirm with
+  `rclone lsf $RCLONE_REMOTE:$RCLONE_BUCKET/catalog/data --max-depth 2`, then set
+  `backup_enabled = true` and `make up` (the service refuses to start, `archive.config_invalid`,
+  if either rclone value is missing, and `restart: always` then repeats the refusal: check
+  `docker compose logs archive`), check the status says `"backup": "enabled"`, and update
+  D-33 to say the backup is scheduled. Also answer D-33's open question: was the 2026-09-19 17:53
+  VPS catalog reset deliberate? (22.11)
 - Trade gap closure: run section 3 above in full (before figure with `trade_feeds = 1`, flip
   to 2, 24 h and one-week numbers into D-47/D-48; 22.14).
 
@@ -480,12 +486,14 @@ parked on the board says so in its entry: run `bmad-loop confirm <story-key>` af
       service).
 - [ ] On the VPS, delete the old nightly crontab line (`crontab -e`), then confirm
       `crontab -l | grep -E 'make (nightly|consolidate|backup-catalog)'` prints nothing (section 1).
-- [ ] Confirm `RCLONE_REMOTE` and `RCLONE_BUCKET` are set in `platform/.env` and the rclone config sits
-      in `~/.config/rclone` (or set `RCLONE_CONFIG_DIR` in `.env`), then run `make backup-catalog` once
-      and check that it exits 0.
+- [ ] When off-site storage exists: configure rclone (the remote in `~/.config/rclone`, or set
+      `RCLONE_CONFIG_DIR` in `.env`; `RCLONE_REMOTE` and `RCLONE_BUCKET` in `platform/.env`), run
+      `make backup-catalog` once and check that it exits 0, then set `backup_enabled = true` in
+      `platform/archive/config.toml` and `make up` (section 5.4; replaced 2026-09-26 by Story 26.1b,
+      which made the backup an explicit setting, off until then).
 - [ ] After the first 03:07 UTC slot, open the dashboard (or `docker compose logs archive`) and confirm
-      `archive:status` shows `last_run` with every venue's saga, `consolidate_catalog` and
-      `backup_catalog` at exit 0 or 2.
+      `archive:status` shows `last_run` with every venue's saga and `consolidate_catalog` (plus
+      `backup_catalog`, once `backup_enabled = true`) at exit 0 or 2.
 
 ### 26-1 capture gate as aggregates (LiveBook / TradeIntake / FeedGroup / SecondSampler; commit: this story's)
 
@@ -501,3 +509,15 @@ parked on the board says so in its entry: run `bmad-loop confirm <story-key>` af
 - [ ] Confirm rows are still arriving for every venue (the web chart's live candles, or
       `snapshots:raw` in `redis-cli SUBSCRIBE snapshots:raw`), and that the dYdX incident reports
       still trigger on a crossed-book resync (`platform/data/incident_reports/`, when one occurs).
+
+### 26-1b off-site backup as an explicit setting (commit: this story's)
+
+- [ ] On the VPS, pull this commit and run `make up` from `platform/` (rebuilds the collector image
+      and recreates `archive`, `data_api` and `bot_tui`; the committed `archive/config.toml` now
+      carries `backup_enabled = false`; no env var or compose service changed, but the key is
+      required, so a locally edited `config.toml` without it refuses start, `archive.config_invalid`).
+- [ ] Confirm `docker compose logs archive` shows the one start WARNING `off-site backup disabled:
+      the catalog has no copy off this host`, and that `GET /api/archive/status` (or the web
+      maintenance panel / the TUI's archive line: `backup off`) says `"backup": "disabled"`.
+- [ ] After the next 03:07 UTC slot, confirm `last_run` has no `backup_catalog` step and
+      `platform/data/errors/archive.jsonl` gained no new `archive.backup_not_configured` line.

@@ -223,7 +223,8 @@ Every collector flushes once a minute, so the shared catalog gains ~1,440 Parque
 (data type, instrument) per day -- for dYdX, Bybit and Hyperliquid alike. Inodes, directory
 listings, reads and backups all scale with the file count, not the bytes (audit D-36). The raw
 trade archive also has to be folded back into each closed day, proven against the venue's klines,
-pruned and backed up. All of it is scheduled by our own code, not a host crontab.
+pruned and, once off-site storage exists, backed up. All of it is scheduled by our own code, not
+a host crontab.
 
 ### The `archive` service (Story 25.1b)
 
@@ -232,9 +233,10 @@ image, `restart: always`, no profile). It is the one place nightly maintenance i
 
 - **Nightly** at `nightly_at` UTC: for each closed day due, oldest first, and each venue, the
   nightly saga (`make nightly`'s, below), then one `consolidate_catalog --apply` (every closed day,
-  every type: it keeps reporting an old refused day the saga's `--days 2` skips), then the backup
-  (`archive.backup_catalog`, `make backup-catalog`'s, below). Each step is its own child process
-  (MEM-01). One venue's failure never skips the next venue, the consolidate or the backup.
+  every type: it keeps reporting an old refused day the saga's `--days 2` skips), then, only when
+  `backup_enabled = true`, the off-site backup (`archive.backup_catalog`, `make backup-catalog`'s,
+  below). Each step is its own child process (MEM-01). One venue's failure never skips the next
+  venue, the consolidate or the backup.
 - **Catch-up** after downtime: every missed closed day per venue, up to `catch_up_max_days`. A day
   whose saga FAILED is retried by the next night's run. A reboot or redeploy at 03:07 loses nothing.
 - **Intraday** every `intraday_consolidate_hours`: the current UTC day's *closed hours* of the small
@@ -255,8 +257,19 @@ image, `restart: always`, no profile). It is the one place nightly maintenance i
 | `lock_wait_minutes` | `60` | How long a job waits for the maintenance lock before it fails as `lock_timeout` |
 | `intraday_consolidate_hours` | `4` | Period of the closed-hour merge (divides 24) |
 | `step_timeout_minutes` | `360` | A step still running after this is killed and fails with exit 124 (`archive.step_timeout`) |
+| `backup_enabled` | `false` | Whether every full run ends with the off-site backup (Story 26.1b; a strict `true`/`false`) |
 
-The backup target is `RCLONE_REMOTE`/`RCLONE_BUCKET` in `platform/.env` (below), not this file.
+**The off-site backup is optional and off by default** (committed `backup_enabled = false`) until
+off-site storage exists. While it is off, the catalog has **no copy off this host** (audit D-33,
+still OPEN): the service logs one WARNING at start (`off-site backup disabled: the catalog has no
+copy off this host`), and every status says `"backup": "disabled"`, which the web panel shows as
+`backup off` (warn colour) and the TUI's archive line as `backup off`. No backup step runs, so a
+night is never FAILED by the missing target. With `backup_enabled = true` the target is
+`RCLONE_REMOTE`/`RCLONE_BUCKET` in `platform/.env` (below), not this file, and the service refuses
+to start (exit 1, `archive.config_invalid`) while either one is unset or blank, rather than fail
+every night. Under compose's `restart: always` that refusal repeats on every restart: each one
+ledgers `archive.config_invalid` again and no `archive:status` is published, so the web panel shows
+"status unavailable" and the TUI line goes stale -- set both values or `backup_enabled = false`.
 
 **State:** `platform/data/archive/state.json` holds `last_run_day` (the last completed scheduled
 run), each venue's `last_success_day` (the last day of unbroken no-FAILED sagas) and the last run
@@ -265,15 +278,16 @@ and last intraday run. It is a scheduler cursor, written atomically, and never a
 
 **Status:** after every step, on start and every 30 s the service publishes `archive:status`
 (`next_run`, `next_intraday`, `running`, `last_run`, `last_intraday`, each run with its steps'
-venue, name, exit code and duration; `docs/DATA_DICTIONARY.md` §3). The web UI shows it next to
+venue, name, exit code and duration, then `backup`: `"enabled"` or `"disabled"`;
+`docs/DATA_DICTIONARY.md` §1.13). The web UI shows it next to
 the error bar (`GET /api/archive/status`), and the TUI shows it at the bottom of the Collector pane.
 Logs: `docker compose logs -f archive` (Dozzle: `archive`). Every tolerated failure is in the
 error ledger (`archive.*`, `nightly.*`, `consolidate.*` sites; `data/errors/archive.jsonl`).
 
 **Run now:** the web UI's "Run now" button (behind a confirm) posts `POST /api/archive/run`, which
 publishes `{"command": "run_now", "day": "YYYY-MM-DD" | null}` on `archive:control` (null:
-yesterday). The service queues that closed day's full sequence (all venues, consolidate, backup)
-after any running job; a day already queued is dropped, and a bad message is ledgered
+yesterday). The service queues that closed day's full sequence (all venues, consolidate, and the
+backup when enabled) after any running job; a day already queued is dropped, and a bad message is ledgered
 (`archive.control_rejected`).
 
 ### Manual tools
@@ -340,7 +354,8 @@ The exit code is 1 when any day was refused or leaf failed; the reason is logged
 the `consolidate.*` error-ledger entries.
 
 **`make backup-catalog`** runs `python3 -m archive.backup_catalog` in the `archive` service's
-container -- the same module the service runs after every nightly run, with `rclone` from the image
+container -- the same module the service runs after every nightly run when `backup_enabled =
+true`, with `rclone` from the image
 (the host needs none) -- and syncs `data/catalog/data` to
 `$RCLONE_REMOTE:$RCLONE_BUCKET/catalog/data`:
 
@@ -356,13 +371,23 @@ container -- the same module the service runs after every nightly run, with `rcl
   `RCLONE_BUCKET` is unset (`archive.backup_not_configured`), or when `rclone` is missing or the
   local `catalog/data` is missing or holds no closed-day Parquet file (`archive.backup_failed`; a
   freshly wiped catalog holding only today's files must not be mirrored). A failed sync is
-  `archive.backup_failed` too. In the service each shows as a FAILED `backup_catalog` step.
+  `archive.backup_failed` too. In the service each shows as a FAILED `backup_catalog` step. The
+  manual run ignores `backup_enabled`: without a target it still exits 1 with
+  `archive.backup_not_configured`.
 
-Setup, once, on the host: run `rclone config` there (a one-time step; the nightly runs use the
-image's rclone) to create the remote -- it lives in the operator's `~/.config/rclone/rclone.conf`, **never in this repo**, and
-is mounted read-only into the `archive` service (`RCLONE_CONFIG_DIR` in `platform/.env` when it
-lives elsewhere) -- and set `RCLONE_REMOTE` and `RCLONE_BUCKET` in `platform/.env` (gitignored;
-see `.env-example`) -- bare values, no quotes, the remote without its trailing `:`. Known limit:
+Setup, once off-site storage exists:
+
+1. On the host, run `rclone config` (a one-time step; the nightly runs use the image's rclone) to
+   create the remote. It lives in the operator's `~/.config/rclone/rclone.conf`, **never in this
+   repo**, and is mounted read-only into the `archive` service (`RCLONE_CONFIG_DIR` in
+   `platform/.env` when it lives elsewhere).
+2. Set `RCLONE_REMOTE` and `RCLONE_BUCKET` in `platform/.env` (gitignored; see `.env-example`):
+   bare values, no quotes, the remote without its trailing `:`.
+3. Run `make backup-catalog` once by hand and check the remote's `catalog/data`.
+4. Set `backup_enabled = true` in `platform/archive/config.toml`, then `make up` (the service
+   re-reads `.env` only when recreated). Its status now says `"backup": "enabled"`.
+
+Known limit:
 the read-only mount cannot store a refreshed OAuth token, so use a remote with static keys (R2,
 B2). Cheap targets: Cloudflare R2
 (no egress fees) or Backblaze B2; both have a free tier covering the first few GB, but prices and

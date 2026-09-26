@@ -54,6 +54,7 @@ def _status(**overrides: object) -> dict:
             "steps": [{"venue": "BYBIT", "name": "reconcile", "exit": 0, "duration_s": 1.5}],
         },
         "last_intraday": None,
+        "backup": "disabled",
     }
     status.update(overrides)
     return status
@@ -134,6 +135,7 @@ def test_get_status_fills_optional_keys_with_null(monkeypatch: pytest.MonkeyPatc
         "running": None,
         "last_run": None,
         "last_intraday": None,
+        "backup": None,
     }
 
 

@@ -15,8 +15,8 @@
 r"""
 Copy the catalog's closed-day files to object storage (audit D-33: there is no other copy).
 
-Usage (the `archive` service runs it after every nightly run's consolidate; `make backup-catalog`
-runs it by hand in the same image):
+Usage (the `archive` service runs it after every nightly run's consolidate when `backup_enabled`
+is true in `archive/config.toml`; `make backup-catalog` runs it by hand in the same image):
     python -m archive.backup_catalog --catalog /app/catalog
 
 The module form of the former host-side `make backup-catalog` recipe (Story 25.1b), with the same
@@ -79,6 +79,18 @@ def remote_target(remote: str, bucket: str) -> str:
     return f"{remote.removesuffix(':')}:{bucket}"
 
 
+def configured_target(env: Mapping[str, str]) -> str | None:
+    """
+    Return the rclone target from `RCLONE_REMOTE`/`RCLONE_BUCKET`, or None when either is unset
+    or blank. It is the one definition of "the backup is configured": this step refuses without it,
+    and the `archive` service refuses to start with `backup_enabled = true` without it.
+    """
+    remote, bucket = env.get("RCLONE_REMOTE", "").strip(), env.get("RCLONE_BUCKET", "").strip()
+    if not remote or not bucket:
+        return None
+    return remote_target(remote, bucket)
+
+
 def backup_argv(source: Path, target: str, today: str, stamp: str) -> list[str]:
     """Build the rclone command: `source` (the catalog's `data/`) to `<target>/catalog/data`."""
     return [
@@ -122,8 +134,8 @@ def backup(
     which: Callable[[str], str | None] = shutil.which,
 ) -> int:
     """Run the guarded sync; return 0, or 1 after one ledger entry naming why not."""
-    remote, bucket = env.get("RCLONE_REMOTE", "").strip(), env.get("RCLONE_BUCKET", "").strip()
-    if not remote or not bucket:
+    target = configured_target(env)
+    if target is None:
         error_ledger.record(
             "archive.backup_not_configured",
             "RCLONE_REMOTE or RCLONE_BUCKET is not set (platform/.env; README 'Nightly "
@@ -140,7 +152,7 @@ def backup(
         error_ledger.record("archive.backup_failed", refusal)
         return 1
     stamp = time.strftime(_STAMP_FORMAT, time.gmtime(seconds))
-    argv = backup_argv(source, remote_target(remote, bucket), today, stamp)
+    argv = backup_argv(source, target, today, stamp)
     logger.info("backup: %s", " ".join(argv))
     code = runner(argv)
     if code != 0:

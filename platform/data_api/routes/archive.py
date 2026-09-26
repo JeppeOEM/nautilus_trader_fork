@@ -30,6 +30,7 @@ import datetime as dt
 import json
 import re
 import time
+from typing import Literal
 
 import redis.asyncio as aioredis
 from fastapi import APIRouter
@@ -74,11 +75,17 @@ class ArchiveRun(BaseModel):
 
 
 class ArchiveStatusResponse(BaseModel):
+    """
+    `backup` (Story 26.1b) says whether the scheduler's full runs end in the off-site backup; null
+    when the status predates the key.
+    """
+
     next_run: str
     next_intraday: str | None = None
     running: ArchiveRun | None = None
     last_run: ArchiveRun | None
     last_intraday: ArchiveRun | None = None
+    backup: Literal["enabled", "disabled"] | None = None
 
 
 @router.get(

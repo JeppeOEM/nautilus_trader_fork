@@ -24,6 +24,7 @@ from observability import error_ledger
 
 from archive.backup_catalog import backup
 from archive.backup_catalog import backup_argv
+from archive.backup_catalog import configured_target
 from archive.backup_catalog import main
 from archive.backup_catalog import remote_target
 from archive.infrastructure.maintenance_lock import maintenance
@@ -105,6 +106,32 @@ def test_an_unset_target_is_not_configured(tmp_path: Path, env: dict[str, str]) 
     rclone = _Rclone()
     assert backup(str(_catalog(tmp_path)), env, rclone, _NOW_NS, _which) == 1
     assert rclone.calls == []
+    assert error_ledger.counts() == {"archive.backup_not_configured": 1}
+
+
+@pytest.mark.parametrize(
+    ("env", "target"),
+    [
+        (_ENV, "r2:catalog-bucket"),
+        ({"RCLONE_REMOTE": " r2: ", "RCLONE_BUCKET": " b "}, "r2:b"),
+        ({}, None),
+        ({"RCLONE_REMOTE": "r2", "RCLONE_BUCKET": "  "}, None),
+        ({"RCLONE_REMOTE": "", "RCLONE_BUCKET": "b"}, None),
+    ],
+)
+def test_the_configured_target_needs_both_values_after_strip(
+    env: dict[str, str], target: str | None
+) -> None:
+    assert configured_target(env) == target
+
+
+def test_a_manual_run_without_a_target_still_exits_1_not_configured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    error_ledger.reset()
+    monkeypatch.delenv("RCLONE_REMOTE", raising=False)
+    monkeypatch.delenv("RCLONE_BUCKET", raising=False)
+    assert main(["--catalog", str(_catalog(tmp_path))]) == 1
     assert error_ledger.counts() == {"archive.backup_not_configured": 1}
 
 

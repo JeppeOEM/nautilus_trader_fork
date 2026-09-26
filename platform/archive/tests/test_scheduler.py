@@ -21,6 +21,7 @@ process. The steps themselves have their own tests (`test_nightly.py`, `test_con
 import asyncio
 import datetime as dt
 import json
+import logging
 import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -81,7 +82,7 @@ class _Runner:
         return 1 if tuple(argv[1:]) in self.fail else 0
 
 
-def _chains() -> Chains:
+def _chains(backup_enabled: bool = True) -> Chains:
     def nightly(venue: str, day: str, result_file: str) -> list[Step]:
         assert result_file.endswith("rebuild_result.json")
         return [Step(name, ["nightly", venue, day, name]) for name in _NIGHTLY_STEPS]
@@ -90,7 +91,7 @@ def _chains() -> Chains:
         nightly=nightly,
         consolidate=lambda: [Step("consolidate_catalog", ["consolidate"])],
         closed_hours=lambda: [Step("consolidate_closed_hours", ["closed_hours"])],
-        backup=lambda: [Step("backup_catalog", ["backup"])],
+        backup=(lambda: [Step("backup_catalog", ["backup"])]) if backup_enabled else None,
     )
 
 
@@ -154,6 +155,7 @@ class _Rig:
         bus: _Bus | None = None,
         cap: int = 7,
         lock_wait_minutes: int = 60,
+        backup_enabled: bool = True,
     ) -> None:
         error_ledger.reset()
         self.clock = _Clock(now)
@@ -162,10 +164,16 @@ class _Rig:
         self.store = store or _Store(state)
         self.bus = bus or _Bus()
         self.slept: list[float] = []
-        config = SchedulerConfig(Schedule(dt.time(3, 7), 4), _VENUES, cap, lock_wait_minutes)
+        config = SchedulerConfig(
+            Schedule(dt.time(3, 7), 4),
+            _VENUES,
+            cap,
+            lock_wait_minutes,
+            backup_enabled=backup_enabled,
+        )
         self.scheduler = ArchiveScheduler(
             config,
-            _chains(),
+            _chains(backup_enabled),
             self.runner,
             self.lock,
             self.store,
@@ -223,7 +231,15 @@ def test_status_is_published_after_every_step_in_the_wire_shape() -> None:
     running_counts = [len(m["running"]["steps"]) for m in rig.bus.messages if m["running"]]
     assert running_counts == list(range(3 * len(_NIGHTLY_STEPS) + 2 + 1))  # begin, every step
     final = rig.bus.messages[-1]
-    assert list(final) == ["next_run", "next_intraday", "running", "last_run", "last_intraday"]
+    assert list(final) == [
+        "next_run",
+        "next_intraday",
+        "running",
+        "last_run",
+        "last_intraday",
+        "backup",
+    ]
+    assert final["backup"] == "enabled"
     assert final["running"] is None
     assert final["next_run"] == "2026-09-27T03:07:00Z"
     assert final["next_intraday"] == "2026-09-26T04:07:00Z"
@@ -495,6 +511,48 @@ def test_a_failing_backup_is_a_failed_step_in_the_status() -> None:
     assert steps[-1]["exit"] == 1
     assert steps[-2]["exit"] == 1  # consolidate, argv ["consolidate"], fails the same way
     assert error_ledger.counts() == {"nightly.consolidate_catalog": 1, "nightly.backup_catalog": 1}
+
+
+def test_with_the_backup_off_a_full_run_ends_at_the_consolidate(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.WARNING, logger="archive.application.scheduler"):
+        rig = _Rig(_at(_D, 3, 7), _state(_day(-2), _day(-2)), backup_enabled=False)
+        rig.tick()
+    assert _sequence(rig.runner) == [
+        *(f"{venue}:{step}" for venue in _VENUES for step in _NIGHTLY_STEPS),
+        "consolidate",
+    ]
+    assert rig.bus.messages[-1]["last_run"]["steps"][-1]["name"] == "consolidate_catalog"
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert warnings == ["off-site backup disabled: the catalog has no copy off this host"]
+    assert {m["backup"] for m in rig.bus.messages} == {"disabled"}
+    assert error_ledger.counts() == {}
+
+
+def test_with_the_backup_on_no_warning_is_logged(caplog: pytest.LogCaptureFixture) -> None:
+    with caplog.at_level(logging.WARNING, logger="archive.application.scheduler"):
+        _Rig(_at(_D, 14, 0), _state(_day(-1), _day(-1)))
+    assert not [r for r in caplog.records if "off-site backup" in r.getMessage()]
+
+
+@pytest.mark.parametrize("backup_enabled", [True, False])
+def test_a_config_and_chains_that_disagree_on_the_backup_are_refused(
+    backup_enabled: bool,
+) -> None:
+    config = SchedulerConfig(
+        Schedule(dt.time(3, 7), 4), _VENUES, 7, 60, backup_enabled=backup_enabled
+    )
+    with pytest.raises(ValueError, match="backup"):
+        ArchiveScheduler(
+            config,
+            _chains(not backup_enabled),
+            _Runner(),
+            _Lock(),
+            _Store(),
+            _Bus(),
+            _Clock(_at(_D, 0)),
+        )
 
 
 def test_the_last_runs_are_persisted_and_republished_on_start() -> None:

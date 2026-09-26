@@ -49,6 +49,7 @@ export interface ArchiveStatusResponse {
   running?: ArchiveRun | null;
   last_run: ArchiveRun | null;
   last_intraday?: ArchiveRun | null;
+  backup?: string | null;
 }
 
 export interface ArchiveStep {

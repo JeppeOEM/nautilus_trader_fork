@@ -157,6 +157,16 @@ def test_archive_line_no_run_yet_and_stale_marker() -> None:
     assert line.startswith("~ archive: no run yet · next 2026-09-27 03:07Z")
 
 
+def test_archive_line_says_backup_off_when_the_backup_is_disabled() -> None:
+    line = collector_pane.format_archive_line(_archive(backup="disabled"), _NOW)
+    assert line.endswith("· next 2026-09-27 03:07Z (in 12h40m) · backup off")
+
+
+def test_archive_line_says_nothing_of_an_enabled_backup() -> None:
+    line = collector_pane.format_archive_line(_archive(backup="enabled"), _NOW)
+    assert "backup" not in line
+
+
 def test_archive_line_multi_day_catch_up_without_day() -> None:
     last = _run([_step("x", 0)], kind="catch_up", day=None, days=["2026-09-23", "2026-09-24"])
     line = collector_pane.format_archive_line(_archive(last_run=last), _NOW)

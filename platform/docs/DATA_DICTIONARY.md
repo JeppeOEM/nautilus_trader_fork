@@ -406,7 +406,11 @@ channel names and shape, as for `ranking:control`/`collector:status`
   - `last_run` — `null`, or the last finished nightly-sequence run (`kind` `nightly`,
     `catch_up` or `run_now`): `{run_id, kind, day, days, started, finished, steps}`;
   - `last_intraday` — `null`, or the last finished intraday merge (`kind` `intraday`), same shape,
-    kept apart so a 4-hourly merge never hides the nightly's `last_run`.
+    kept apart so a 4-hourly merge never hides the nightly's `last_run`;
+  - `backup` — `"enabled"` or `"disabled"`: whether the scheduler's full runs end in the off-site
+    backup (`backup_enabled` in `archive/config.toml`, committed `false`). `"disabled"` means the
+    catalog has no copy off the host (audit D-33) and no run carries a `backup_catalog` step
+    `[amended 2026-09-26: Story 26.1b -- new key]`.
 
   `kind` is one of `nightly`, `catch_up`, `run_now`, `intraday`; `day` is the run's (first) UTC
   day and `days` every day it covers (a catch-up runs several, oldest first); `started`/`finished`
@@ -414,8 +418,9 @@ channel names and shape, as for `ranking:control`/`collector:status`
   the venue-less steps (consolidate, backup), `exit` the step subprocess's exit code (0 clean,
   2 findings, anything else failed -- the archive tools' convention), `duration_s` its wall
   seconds. Readers require an object carrying `next_run` and `last_run` (neither may be
-  omitted; `last_run` may be `null`), treat `next_intraday`/`running`/`last_intraday` as optional
-  and ignore keys they do not know, so a key can be added without breaking them.
+  omitted; `last_run` may be `null`), treat `next_intraday`/`running`/`last_intraday`/`backup` as
+  optional (a present `backup` other than `"enabled"`/`"disabled"` is malformed) and ignore keys
+  they do not know, so a key can be added without breaking them.
   Consumers:
   - `data_api`'s `GET /api/archive/status` (through `views.archive_status_bus.ArchiveStatusBus`,
     one subscriber per process): the latest valid message, 503 until one has arrived. A message
@@ -423,9 +428,11 @@ channel names and shape, as for `ranking:control`/`collector:status`
   - the web UI's maintenance status in the top bar (`frontend/src/components/ArchiveStatus.tsx`,
     polled every 30 s): last run day and outcome -- `ok` when every step exited 0, `findings` when
     the only non-zero exits are 2, else `FAILED` with the non-zero steps named -- its finish time,
-    the next run, the running job, and a failed intraday merge;
+    the next run, the running job, a failed intraday merge, and `backup off` in the warn colour
+    when `backup` is `"disabled"`;
   - `bot_tui`'s Collector pane, its last line (`collector_pane.format_archive_line`), the same
-    verdicts; `~` marks it stale after 120 s without a message.
+    verdicts, `backup off` appended when `backup` is `"disabled"`; `~` marks it stale after 120 s
+    without a message.
 - **`archive:control`** — `{"command": "run_now", "day": "YYYY-MM-DD" | null}` (`null` =
   yesterday, UTC). Publisher: `data_api`'s `POST /api/archive/run` (body `{"day": ...}`, extra
   keys, a malformed or non-existent date, today or a future day a 422), driven by the web UI's
@@ -944,7 +951,8 @@ first-run measurements still owed are in `docs/DEPLOY_CHECKLIST.md`.
 
 **Scheduled by the `archive` service, not cron (Story 25.1b).** `python3 -m archive.scheduler`
 (compose service `archive`) runs this saga for every venue, then `consolidate_catalog`, then the
-rclone backup, each step its own subprocess, every night at `nightly_at` (`archive/config.toml`),
+rclone backup when `backup_enabled = true` (off by default until off-site storage exists, Story
+26.1b), each step its own subprocess, every night at `nightly_at` (`archive/config.toml`),
 catching up missed days, and merges the current day's closed hours of the small types every
 `intraday_consolidate_hours`. Its status and "run now" command are §1.13's channels. `make nightly`
 stays a manual tool; the host crontab line is retired (`docs/DEPLOY_CHECKLIST.md` §1). Its cursor
