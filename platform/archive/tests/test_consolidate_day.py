@@ -34,11 +34,15 @@ from kernel.catalog_files import query_second_ohlc
 from kernel.second_snapshot import DydxSecondSnapshot
 from observability import error_ledger
 
-from collector_core.consolidate_catalog import _file_span
-from collector_core.consolidate_catalog import consolidate_directory
-from collector_core.consolidate_catalog import leaf_dirs
-from collector_core.consolidate_catalog import main
-from collector_core.consolidate_catalog import run
+from archive.application import consolidate_day
+from archive.application.consolidate_day import RunStats
+from archive.application.consolidate_day import file_span as _file_span
+from archive.application.consolidate_day import leaf_dirs
+from archive.application.consolidate_day import merged_table
+from archive.consolidate_catalog import main
+from archive.infrastructure.catalog_files import TMP_SUFFIX
+from archive.infrastructure.catalog_files import CatalogFiles
+from archive.infrastructure.maintenance_lock import maintenance
 from nautilus_trader.model.data import Bar
 from nautilus_trader.model.data import BarType
 from nautilus_trader.model.data import MarkPriceUpdate
@@ -52,6 +56,34 @@ from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
 
 IID = "BTC-USD-PERP.DYDX"
+
+
+def consolidate_directory(
+    directory: Path,
+    now_ns: int,
+    max_days: int | None,
+    apply: bool,
+    stats: RunStats | None = None,
+) -> int:
+    """Run the service with the adapter the CLI wires (days here are long closed: real clock)."""
+    return consolidate_day.consolidate_directory(
+        CatalogFiles(), directory, now_ns, max_days, apply, stats
+    )
+
+
+def run(
+    catalog_path: str,
+    data_types: list[str] | None,
+    max_days: int | None,
+    apply: bool,
+    now_ns: int,
+    venue: str | None = None,
+) -> RunStats:
+    return consolidate_day.run(
+        CatalogFiles(), catalog_path, data_types, max_days, apply, now_ns, venue
+    )
+
+
 _SEC = 1_000_000_000
 _DAY_NS = 86_400 * _SEC
 _DAY0 = 20_000  # a UTC day long ago
@@ -160,11 +192,10 @@ def test_an_interrupted_run_is_finished_without_duplicating_rows(tmp_path: Path)
     catalog = ParquetDataCatalog(str(tmp_path))
     written = _seed(catalog, _DAY0, 10)
     (directory,) = leaf_dirs(str(tmp_path))
-    from collector_core.consolidate_catalog import _merge
 
     sources = sorted(directory.glob("*.parquet"))
-    tmp = _merge(directory, sources)
-    tmp.rename(tmp.with_name(tmp.name.removesuffix(".consolidate.tmp")))  # sources still there
+    rows = sum(pq.read_metadata(str(f)).num_rows for f in sources)
+    CatalogFiles().write_merged(directory, merged_table(sources), rows)  # sources still there
     assert len(list(directory.glob("*.parquet"))) == 11
 
     assert consolidate_directory(directory, (_DAY0 + 1) * _DAY_NS, None, apply=True) == 1
@@ -407,18 +438,20 @@ def test_a_clean_run_exits_0_and_report_only_changes_nothing(tmp_path: Path) -> 
 
 def test_a_leftover_tmp_file_is_removed_only_by_an_apply_run(tmp_path: Path) -> None:
     """
-    A crash inside `_merge` leaves `<name>.parquet.consolidate.tmp`; it is removed. Another tool's
-    `*.parquet.tmp` (`migrate_open_interest`, `normalize_snapshot_schema`) is never touched.
+    A crash inside the merged write leaves `<name>.parquet.archive.tmp`; it is removed, as are the
+    pre-Story-25.1 rewriters' temp suffixes (every archive tool writes under the one maintenance
+    flock, so no temp file of another run can be in flight).
     """
     catalog = ParquetDataCatalog(str(tmp_path))
     _seed_minutes(catalog, IID, _DAY0, 3)
     (directory,) = leaf_dirs(str(tmp_path))
-    from collector_core.consolidate_catalog import _merge
 
-    tmp = _merge(directory, sorted(directory.glob("*.parquet")))
-    assert tmp.name.endswith(".parquet.consolidate.tmp")
-    foreign = directory / "someone-elses.parquet.tmp"
-    foreign.write_bytes(b"in flight")
+    first = sorted(directory.glob("*.parquet"))[0]
+    tmp = first.with_name(first.name + TMP_SUFFIX)
+    pq.write_table(merged_table(sorted(directory.glob("*.parquet"))), str(tmp))
+    legacy = [directory / f"old.parquet{suffix}" for suffix in (".consolidate.tmp", ".tmp")]
+    for leftover in legacy:
+        leftover.write_bytes(b"torn")
     now_ns = (_DAY0 + 1) * _DAY_NS
 
     run(str(tmp_path), None, None, apply=False, now_ns=now_ns)
@@ -426,7 +459,7 @@ def test_a_leftover_tmp_file_is_removed_only_by_an_apply_run(tmp_path: Path) -> 
 
     stats = run(str(tmp_path), None, None, apply=True, now_ns=now_ns)
     assert not tmp.exists()
-    assert foreign.read_bytes() == b"in flight"
+    assert not any(leftover.exists() for leftover in legacy)
     assert (stats.days_done, stats.days_refused, stats.files_after) == (1, 0, 1)
     assert len(query_second_ohlc(str(tmp_path), IID, 0, now_ns)) == 3 * 6
 
@@ -600,3 +633,11 @@ def test_venue_limits_the_leaves(tmp_path: Path) -> None:
     catalog.write_data([_trade(2, _DAY0 * _DAY_NS + _SEC, "BTCUSDT-LINEAR.BYBIT")])
     assert [d.name for d in leaf_dirs(str(tmp_path), venue="BYBIT")] == ["BTCUSDT-LINEAR.BYBIT"]
     assert [d.name for d in leaf_dirs(str(tmp_path), venue="DYDX")] == [IID]
+
+
+def test_a_report_only_run_takes_no_lock(tmp_path: Path) -> None:
+    tmp_path.joinpath("data").mkdir()
+    with maintenance(tmp_path) as held:
+        assert held is not None
+        assert main(["--catalog", str(tmp_path)]) == 0
+        assert main(["--catalog", str(tmp_path), "--apply"]) == 1

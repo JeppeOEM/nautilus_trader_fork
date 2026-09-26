@@ -27,8 +27,9 @@ publish, the `_second_loop` lag canary and the OBS-01 watchdog.
 Trades (story 22.13): every accepted `TradeTick` is both kept for the live second (folded once
 per sample by `kernel.fold.fold_trades`) and archived raw to `data/trade_tick/<iid>/`
 with both clocks untouched (`ts_event` = venue, `ts_init` = arrival). The live snapshot is
-provisional and arrival-timed; `collector_core.rebuild_seconds` re-derives closed days from the
-archive on exchange time.
+provisional and arrival-timed; `archive.rebuild_seconds` re-derives closed days from the
+archive on exchange time. `run_forever` holds the venue's capture lock (`capture_lock`) for the
+process lifetime.
 
 Two clocks per mode (story 22.12, `CoreConfig.book_time_source`):
   * "arrival" (dYdX -- its book deltas carry no venue timestamp, D-49): a row is sampled at
@@ -136,6 +137,7 @@ from dataclasses import dataclass
 from dataclasses import field
 from pathlib import Path
 from typing import Any
+from typing import ClassVar
 
 import pyarrow.parquet as pq
 import redis.asyncio as aioredis
@@ -149,22 +151,23 @@ from kernel.fold import fold_trades
 from kernel.parquet_compat import apply_zstd_default
 from kernel.second_snapshot import BOOK_DEPTH
 from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.second_snapshot import ohlc_outside_book
 from observability import error_ledger
 from observability import notify
 from observability import watchdog
 
 from collector_core import trade_backfill
-from collector_core.archive_gaps import record_gap
 from collector_core.book_check import EXACT_PRICE_TOLERANCE_LEVELS
 from collector_core.book_check import EXACT_SIZE_REL_TOLERANCE
 from collector_core.book_check import BookSnapshot
 from collector_core.book_check import persistent
 from collector_core.book_check import top_levels_mismatch
+from collector_core.capture_lock import acquire_capture_lock
 from collector_core.config import CoreConfig
 from collector_core.feed import MAIN_FEED
 from collector_core.feed import REST_FEED_NAME
 from collector_core.feed import Feed
-from collector_core.integrity import ohlc_outside_book
+from collector_core.gap_markers import record_gap
 from collector_core.ports import SecondSink
 from nautilus_trader.core import nautilus_pyo3
 from nautilus_trader.model.book import OrderBook
@@ -519,7 +522,12 @@ class Collector:
     venue entrypoint constructs and injects it, Story 24.1). It is fed only rows whose
     `write_data` succeeded, so nothing downstream can be ahead of the archive, and it is optional
     only so a capture test can run without one -- never in a deployed process.
+
+    `VENUE` is the `kernel.venues` code each venue subclass declares; `run_forever` takes that
+    venue's capture lock (`collector_core.capture_lock`) with it.
     """
+
+    VENUE: ClassVar[str]
 
     def __init__(
         self,
@@ -1982,21 +1990,36 @@ async def run_forever(build: Callable[[], Collector], *, init_rust_logging: bool
 
     backoff_seconds = 1.0
     first = True
-    while not shutting_down.is_set():
-        collector = build()
-        if first:
-            quarantine_corrupt_parquet(collector._config.catalog_path, collector._instrument_ids())
-            first = False
-        watcher = asyncio.create_task(_stop_on_shutdown(shutting_down, collector))
-        try:
-            await collector.run()
-            backoff_seconds = 1.0  # clean stop (signal) -- reset for any future crash
-        except Exception:
-            logger.exception(f"Collector crashed, restarting in {backoff_seconds:.0f}s")
-            await asyncio.sleep(backoff_seconds)
-            backoff_seconds = min(backoff_seconds * 2, 60.0)
-        finally:
-            watcher.cancel()
+    capture_lock = None
+    try:
+        while not shutting_down.is_set():
+            collector = build()
+            if first:
+                # Held (shared) for the process lifetime: `repair_catalog` refuses to write under
+                # a running collector, and an archive tool holding it exclusively makes capture
+                # wait. Released by the `finally` below however this loop ends.
+                capture_lock = await acquire_capture_lock(
+                    collector._config.catalog_path, type(collector).VENUE, shutting_down
+                )
+                if capture_lock is None or shutting_down.is_set():  # shut down while waiting
+                    break
+                quarantine_corrupt_parquet(
+                    collector._config.catalog_path, collector._instrument_ids()
+                )
+                first = False
+            watcher = asyncio.create_task(_stop_on_shutdown(shutting_down, collector))
+            try:
+                await collector.run()
+                backoff_seconds = 1.0  # clean stop (signal) -- reset for any future crash
+            except Exception:
+                logger.exception(f"Collector crashed, restarting in {backoff_seconds:.0f}s")
+                await asyncio.sleep(backoff_seconds)
+                backoff_seconds = min(backoff_seconds * 2, 60.0)
+            finally:
+                watcher.cancel()
+    finally:
+        if capture_lock is not None:
+            capture_lock.close()  # releases the flock; the file itself is never unlinked
     del _log_guard
 
 

@@ -28,6 +28,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from kernel import archive_markers
 from kernel.clocks import MAX_TS_INIT_SKEW_NS
 from kernel.clocks import CatalogFileSpan
 from kernel.second_snapshot import DydxSecondSnapshot
@@ -37,7 +38,6 @@ from views.catalog_reads import query_second_snapshots
 
 import collector_core.collector as collector_mod
 from collector_core import trade_backfill
-from collector_core.archive_gaps import load_gaps
 from collector_core.collector import _BACKFILL_SETTLE_NS
 from collector_core.collector import _IMPOSSIBLE_LOG_EVERY_NS
 from collector_core.collector import _WATCHDOG_REMINDER_NS
@@ -49,7 +49,6 @@ from collector_core.collector import quarantine_corrupt_parquet
 from collector_core.config import CoreConfig
 from collector_core.feed import MAIN_FEED
 from collector_core.feed import Feed
-from collector_core.rebuild_seconds import rebuild_day
 from nautilus_trader.backtest.node import BacktestNode
 from nautilus_trader.config import BacktestDataConfig
 from nautilus_trader.model.currencies import BTC
@@ -802,38 +801,6 @@ def _sample_at(c: Collector, second: float) -> DydxSecondSnapshot:
     return snap
 
 
-def test_a_failed_trade_write_marks_a_gap_and_the_rebuild_keeps_live_values(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    c = _day_collector(tmp_path)
-    c._process_data(_deltas([(100.0, 1.0)], [(100.5, 1.0)]))
-    c._process_data(_clocked_trade(1, _D0 + 1000 * _S, _D0 + 1000 * _S))
-    _sample_at(c, 1000.5)
-    asyncio.run(c._flush_once(final=True))  # the archive exists from second 1000 on
-    c._process_data(_clocked_trade(2, _D0 + 2000 * _S, _D0 + 2000 * _S))
-    live = _sample_at(c, 2000.5)
-    write = c._catalog.write_data
-
-    def trades_fail(items: list) -> None:
-        if isinstance(items[0], TradeTick):
-            raise OSError("disk full")
-        write(items)
-
-    monkeypatch.setattr(c._catalog, "write_data", trades_fail)
-    asyncio.run(c._flush_once(final=True))  # the snapshot lands, its trade does not
-
-    (gap,) = load_gaps(str(tmp_path), _BYBIT)
-    assert gap[0] == _D0 + 2000 * _S
-    report = rebuild_day(str(tmp_path), _BYBIT, _D0, apply=True)
-    (row,) = [
-        s
-        for s in query_second_snapshots(str(tmp_path), _BYBIT, 0, 1 << 62)
-        if s.ts_event == live.ts_event
-    ]
-    assert (row.close_price, row.sell_count) == (live.close_price, 1)  # not zeroed
-    assert (report.not_covered, report.rebuilt) == (1, 1)
-
-
 def test_rows_sampled_after_a_carried_trade_group_are_carried_with_it(tmp_path: Path) -> None:
     c = _collector(tmp_path)
     now = time.time_ns()
@@ -871,7 +838,9 @@ def test_quarantining_a_trade_file_marks_its_span_as_an_archive_gap(tmp_path: Pa
     quarantine_corrupt_parquet(str(tmp_path), [_BYBIT])
     span = CatalogFileSpan.from_stem(name)
     expected = [(span.start_ns, span.end_ns + MAX_TS_INIT_SKEW_NS)]
-    assert load_gaps(str(tmp_path), _BYBIT) == expected
+    lines = archive_markers.path_for(tmp_path, _BYBIT).read_text().splitlines()
+    assert [archive_markers.decode(line).span for line in lines] == expected
+    assert archive_markers.decode(lines[0]).reason == "quarantined"
 
 
 def test_a_non_one_second_cadence_is_ledgered_once_at_start(tmp_path: Path) -> None:

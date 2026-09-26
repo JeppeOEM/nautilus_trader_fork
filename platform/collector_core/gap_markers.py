@@ -1,0 +1,63 @@
+# -------------------------------------------------------------------------------------------------
+#  Copyright (C) 2015-2026 Nautech Systems Pty Ltd. All rights reserved.
+#  https://nautechsystems.io
+#
+#  Licensed under the GNU Lesser General Public License Version 3.0 (the "License");
+#  You may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at https://www.gnu.org/licenses/lgpl-3.0.en.html
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+# -------------------------------------------------------------------------------------------------
+"""
+Capture's archive-gap marker writer (story 22.13; capture's own since Story 25.1).
+
+Capture records the two gaps it causes -- `write_failed` (a trade batch's `write_data` failed
+while the same instrument's snapshot rows landed) and `quarantined` (`quarantine_corrupt_parquet`
+moved an unreadable trade file aside) -- as one line each in `<catalog>/_archive_gaps/<iid>.jsonl`,
+in the frozen `kernel.archive_markers` format, so the nightly rebuild keeps those rows' live values.
+Archive owns the rest of the file's life (its `pruned` markers, every read:
+`archive.infrastructure.gap_markers`); the two share only the kernel's line format and path, so
+neither context imports the other. Ledger sites are the pre-move ones: `archive_gaps.write`,
+`archive_gaps.inverted_span`.
+"""
+
+import os
+
+from kernel import archive_markers
+from kernel.archive_markers import ArchiveGap
+from observability import error_ledger
+
+
+def record_gap(
+    catalog_path: str, iid: str, from_ns: int, to_ns: int, reason: str, count: int
+) -> None:
+    """
+    Append one gap marker; a failure is ledgered, never raised (the flush must carry on).
+
+    An inverted span (a backward wall-clock step between a lost trade's arrival and the flush
+    puts `now` before its `ts_init`) is written as the ordered span and ledgered
+    (`archive_gaps.inverted_span`): `decode` refuses an inverted line, which would wedge the
+    rebuild of that instrument until the file is hand-edited, and the ordered span still covers
+    the rows the marker protects.
+    """
+    if from_ns > to_ns:
+        error_ledger.record(
+            "archive_gaps.inverted_span",
+            f"{iid} {reason}: from_ns {from_ns} > to_ns {to_ns} (clock stepped back?); "
+            "recorded as the ordered span",
+        )
+        from_ns, to_ns = to_ns, from_ns
+    line = archive_markers.encode(ArchiveGap(iid, from_ns, to_ns, reason, count))
+    path = archive_markers.path_for(catalog_path, iid)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a") as f:
+            f.write(line + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+    except OSError as e:
+        error_ledger.record("archive_gaps.write", f"could not record archive gap {line}", e)

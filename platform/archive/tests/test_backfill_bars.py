@@ -13,7 +13,7 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-Tests for `collector_core.backfill_bars`.
+Tests for `archive.application.backfill_bars` (the `archive.backfill_bars` CLI's logic).
 
 Real Nautilus objects and a real `ParquetDataCatalog` throughout -- nothing is mocked (TEST-01).
 The venue call is the one thing that cannot run here (no outbound network), so `_Session.fetch` is
@@ -33,7 +33,7 @@ from decimal import Decimal
 
 import pytest
 
-from collector_core import backfill_bars
+from archive.application import backfill_bars
 from nautilus_trader.backtest.config import BacktestDataConfig
 from nautilus_trader.model.currencies import BTC
 from nautilus_trader.model.currencies import USDC

@@ -22,13 +22,14 @@ import pytest
 from kernel.second_snapshot import DydxSecondSnapshot
 from kernel.venues import VENUE_KINDS
 
-from collector_core import crosscheck_errors
+from archive import crosscheck_errors
+from archive.application import crosscheck
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
 
-_NS_PER_S = crosscheck_errors.NS_PER_S
-_NS_PER_DAY = crosscheck_errors.NS_PER_DAY
+_NS_PER_S = crosscheck.NS_PER_S
+_NS_PER_DAY = crosscheck.NS_PER_DAY
 
 _IID = "ETH-USD-PERP.DYDX"
 _DAY0 = 20_000 * _NS_PER_DAY
@@ -90,11 +91,11 @@ def errors_dir(tmp_path: Path) -> Path:
 
 def test_clean_day_passes(catalog_path: Path, errors_dir: Path) -> None:
     _write_snapshots(catalog_path, list(range(61)))  # every second, no gaps
-    report = crosscheck_errors.build_report(
+    report = crosscheck.build_report(
         str(catalog_path), str(errors_dir), _WINDOW_START, _WINDOW_END, venue=None
     )
     assert report.gaps == []
-    assert crosscheck_errors._exit_code(report, crosscheck_errors._DEFAULT_FAIL_ON) == 0
+    assert crosscheck.exit_code(report, crosscheck.DEFAULT_FAIL_ON) == 0
 
 
 def test_gap_with_matching_ledger_entry_is_explained(catalog_path: Path, errors_dir: Path) -> None:
@@ -104,14 +105,14 @@ def test_gap_with_matching_ledger_entry_is_explained(catalog_path: Path, errors_
         "collector",
         [{"ts_ns": _DAY0 + 5 * _NS_PER_S, "site": "collector.resync", "detail": "resync"}],
     )
-    report = crosscheck_errors.build_report(
+    report = crosscheck.build_report(
         str(catalog_path), str(errors_dir), _WINDOW_START, _WINDOW_END, venue=None
     )
     assert len(report.gaps) == 1
     gap = report.gaps[0]
     assert not gap.unexplained
     assert "collector.resync" in gap.explanation
-    assert crosscheck_errors._exit_code(report, crosscheck_errors._DEFAULT_FAIL_ON) == 0
+    assert crosscheck.exit_code(report, crosscheck.DEFAULT_FAIL_ON) == 0
 
 
 def test_gap_across_restart_is_explained_as_restart(catalog_path: Path, errors_dir: Path) -> None:
@@ -119,12 +120,12 @@ def test_gap_across_restart_is_explained_as_restart(catalog_path: Path, errors_d
     _write_ledger(
         errors_dir, "collector", [{"ts_ns": _DAY0 + 5 * _NS_PER_S, "site": "process_start"}]
     )
-    report = crosscheck_errors.build_report(
+    report = crosscheck.build_report(
         str(catalog_path), str(errors_dir), _WINDOW_START, _WINDOW_END, venue=None
     )
     assert len(report.gaps) == 1
     assert report.gaps[0].explanation == "restart"
-    assert crosscheck_errors._exit_code(report, crosscheck_errors._DEFAULT_FAIL_ON) == 0
+    assert crosscheck.exit_code(report, crosscheck.DEFAULT_FAIL_ON) == 0
     assert [svc.restarts for svc in report.services] == [1]
 
 
@@ -133,12 +134,12 @@ def test_gap_with_neither_is_unexplained_and_exits_nonzero(
 ) -> None:
     _write_snapshots(catalog_path, [0, 1, 2, 10, 11, 12])  # gap between 2 and 10
     # No ledger file at all for "collector".
-    report = crosscheck_errors.build_report(
+    report = crosscheck.build_report(
         str(catalog_path), str(errors_dir), _WINDOW_START, _WINDOW_END, venue=None
     )
     assert len(report.gaps) == 1
     assert report.gaps[0].unexplained
-    assert crosscheck_errors._exit_code(report, crosscheck_errors._DEFAULT_FAIL_ON) == 1
+    assert crosscheck.exit_code(report, crosscheck.DEFAULT_FAIL_ON) == 1
 
 
 def test_a_ledger_entry_outside_the_skew_bound_does_not_explain_a_gap(
@@ -146,9 +147,9 @@ def test_a_ledger_entry_outside_the_skew_bound_does_not_explain_a_gap(
 ) -> None:
     """The matcher's tolerance is the 300 s skew bound, not "anywhere in the window"."""
     _write_snapshots(catalog_path, [0, 1, 2, 10, 11, 12])
-    far = _DAY0 + 5 * _NS_PER_S + crosscheck_errors._MAX_TS_INIT_SKEW_NS + 10 * _NS_PER_S
+    far = _DAY0 + 5 * _NS_PER_S + crosscheck._MAX_TS_INIT_SKEW_NS + 10 * _NS_PER_S
     _write_ledger(errors_dir, "collector", [{"ts_ns": far, "site": "collector.resync"}])
-    report = crosscheck_errors.build_report(
+    report = crosscheck.build_report(
         str(catalog_path), str(errors_dir), _WINDOW_START, far + _NS_PER_S, venue=None
     )
     assert len(report.gaps) == 1
@@ -164,13 +165,13 @@ def test_fail_on_site_with_nonzero_count_exits_nonzero(
         "collector",
         [{"ts_ns": _DAY0 + 5 * _NS_PER_S, "site": "collector.book_sequence", "detail": "gap"}],
     )
-    report = crosscheck_errors.build_report(
+    report = crosscheck.build_report(
         str(catalog_path), str(errors_dir), _WINDOW_START, _WINDOW_END, venue=None
     )
     assert report.gaps == []
-    assert crosscheck_errors._exit_code(report, crosscheck_errors._DEFAULT_FAIL_ON) == 1
+    assert crosscheck.exit_code(report, crosscheck.DEFAULT_FAIL_ON) == 1
     # A site outside the fail-on list does not affect the exit code.
-    assert crosscheck_errors._exit_code(report, ("some.other.site",)) == 0
+    assert crosscheck.exit_code(report, ("some.other.site",)) == 0
 
 
 def test_suppressed_carries_are_folded_into_the_printed_counts(
@@ -183,7 +184,7 @@ def test_suppressed_carries_are_folded_into_the_printed_counts(
         json.dumps({"ts_ns": _DAY0 + _NS_PER_S, "site": "collector.late_trade", "suppressed": 7})
         + "\n"
     )
-    report = crosscheck_errors.build_report(
+    report = crosscheck.build_report(
         str(catalog_path), str(errors_dir), _WINDOW_START, _WINDOW_END, venue=None
     )
     assert report.services[0].site_counts == {"collector.late_trade": 8}
@@ -285,12 +286,12 @@ def test_restarts_fail_the_exit_code_only_when_process_start_is_named(
     _write_ledger(
         errors_dir, "collector", [{"ts_ns": _DAY0 + 5 * _NS_PER_S, "site": "process_start"}]
     )
-    report = crosscheck_errors.build_report(
+    report = crosscheck.build_report(
         str(catalog_path), str(errors_dir), _WINDOW_START, _WINDOW_END, venue=None
     )
     assert report.gaps[0].explanation == "restart"
-    assert crosscheck_errors._exit_code(report, crosscheck_errors._DEFAULT_FAIL_ON) == 0
-    assert crosscheck_errors._exit_code(report, ("process_start",)) == 1
+    assert crosscheck.exit_code(report, crosscheck.DEFAULT_FAIL_ON) == 0
+    assert crosscheck.exit_code(report, ("process_start",)) == 1
 
 
 def test_process_start_in_fail_on_passes_when_there_was_no_restart(
@@ -298,11 +299,11 @@ def test_process_start_in_fail_on_passes_when_there_was_no_restart(
 ) -> None:
     _write_snapshots(catalog_path, list(range(61)))
     _write_started_before_the_window(errors_dir)  # boot is outside the window
-    report = crosscheck_errors.build_report(
+    report = crosscheck.build_report(
         str(catalog_path), str(errors_dir), _WINDOW_START, _WINDOW_END, venue=None
     )
     assert [svc.restarts for svc in report.services] == [0]
-    assert crosscheck_errors._exit_code(report, ("process_start",)) == 0
+    assert crosscheck.exit_code(report, ("process_start",)) == 0
 
 
 def test_a_mid_gap_entry_does_not_explain_a_gap_longer_than_twice_the_skew(
@@ -313,12 +314,12 @@ def test_a_mid_gap_entry_does_not_explain_a_gap_longer_than_twice_the_skew(
 
     One chatty site must not blanket a multi-hour window with a single mid-gap entry.
     """
-    skew_s = crosscheck_errors._MAX_TS_INIT_SKEW_NS // _NS_PER_S
+    skew_s = crosscheck._MAX_TS_INIT_SKEW_NS // _NS_PER_S
     gap_s = 4 * skew_s  # comfortably longer than 2x skew, so the edge windows do not overlap
     _write_snapshots(catalog_path, [0, 1, 2, 2 + gap_s, 3 + gap_s])
     mid = _DAY0 + (2 + gap_s // 2) * _NS_PER_S
     _write_ledger(errors_dir, "collector", [{"ts_ns": mid, "site": "collector.late_trade"}])
-    report = crosscheck_errors.build_report(
+    report = crosscheck.build_report(
         str(catalog_path),
         str(errors_dir),
         _WINDOW_START,
@@ -333,12 +334,12 @@ def test_an_entry_at_a_long_gaps_edge_still_explains_it(
     catalog_path: Path, errors_dir: Path
 ) -> None:
     """The edge match is the whole point: an entry at the gap's start still explains it."""
-    skew_s = crosscheck_errors._MAX_TS_INIT_SKEW_NS // _NS_PER_S
+    skew_s = crosscheck._MAX_TS_INIT_SKEW_NS // _NS_PER_S
     gap_s = 4 * skew_s
     _write_snapshots(catalog_path, [0, 1, 2, 2 + gap_s, 3 + gap_s])
     edge = _DAY0 + 3 * _NS_PER_S  # one second after the last row before the gap
     _write_ledger(errors_dir, "collector", [{"ts_ns": edge, "site": "collector.resync"}])
-    report = crosscheck_errors.build_report(
+    report = crosscheck.build_report(
         str(catalog_path),
         str(errors_dir),
         _WINDOW_START,
@@ -358,7 +359,7 @@ def test_a_malformed_site_is_skipped_not_fatal(catalog_path: Path, errors_dir: P
         + json.dumps({"ts_ns": _DAY0 + 2 * _NS_PER_S, "site": "collector.x", "suppressed": 0})
         + "\n"
     )
-    report = crosscheck_errors.build_report(
+    report = crosscheck.build_report(
         str(catalog_path), str(errors_dir), _WINDOW_START, _WINDOW_END, venue=None
     )
     assert report.services[0].site_counts == {"collector.x": 1}
@@ -366,8 +367,8 @@ def test_a_malformed_site_is_skipped_not_fatal(catalog_path: Path, errors_dir: P
 
 def test_parse_ts_keeps_the_sub_second_part() -> None:
     """`--since ...00.750Z` must not silently become `...00.000Z` (P13)."""
-    assert crosscheck_errors._parse_ts("1970-01-01T00:00:00.750Z") == 750_000_000
-    assert crosscheck_errors._parse_ts("2026-09-21T00:00:00Z") % _NS_PER_S == 0
+    assert crosscheck.parse_ts("1970-01-01T00:00:00.750Z") == 750_000_000
+    assert crosscheck.parse_ts("2026-09-21T00:00:00Z") % _NS_PER_S == 0
 
 
 def test_main_cli_fail_on_from_argv_reaches_exit_code(catalog_path: Path, errors_dir: Path) -> None:
@@ -422,29 +423,29 @@ def test_venue_filter_still_checks_other_services_fail_on_sites(
         "ranking_engine",
         [{"ts_ns": _DAY0 + 5 * _NS_PER_S, "site": "ranking_engine.volume24h", "detail": "x"}],
     )
-    report = crosscheck_errors.build_report(
+    report = crosscheck.build_report(
         str(catalog_path), str(errors_dir), _WINDOW_START, _WINDOW_END, venue="bybit"
     )
     assert any(svc.service == "ranking_engine" for svc in report.services)
     assert report.gaps == []  # the dYdX instrument is out of scope for --venue bybit
-    assert crosscheck_errors._exit_code(report, ("ranking_engine.volume24h",)) == 1
+    assert crosscheck.exit_code(report, ("ranking_engine.volume24h",)) == 1
 
 
 def test_venue_filter_selects_only_that_venues_instruments(catalog_path: Path) -> None:
     _write_snapshots(catalog_path, [0])
-    assert crosscheck_errors._instruments_for_venue(str(catalog_path), None) == [_IID]
-    assert crosscheck_errors._instruments_for_venue(str(catalog_path), "dydx") == [_IID]
-    assert crosscheck_errors._instruments_for_venue(str(catalog_path), "bybit") == []
+    assert crosscheck._instruments_for_venue(str(catalog_path), None) == [_IID]
+    assert crosscheck._instruments_for_venue(str(catalog_path), "dydx") == [_IID]
+    assert crosscheck._instruments_for_venue(str(catalog_path), "bybit") == []
 
 
 def test_missing_catalog_or_errors_dir_is_an_empty_report(tmp_path: Path) -> None:
-    report = crosscheck_errors.build_report(
+    report = crosscheck.build_report(
         str(tmp_path / "nope"), str(tmp_path / "also-nope"), _WINDOW_START, _WINDOW_END, venue=None
     )
     assert report.services == []
     assert report.gaps == []
-    assert crosscheck_errors._exit_code(report, crosscheck_errors._DEFAULT_FAIL_ON) == 0
+    assert crosscheck.exit_code(report, crosscheck.DEFAULT_FAIL_ON) == 0
 
 
 def test_venue_service_map_covers_every_registered_venue() -> None:
-    assert set(crosscheck_errors._VENUE_SERVICE) == set(VENUE_KINDS)
+    assert set(crosscheck._VENUE_SERVICE) == set(VENUE_KINDS)

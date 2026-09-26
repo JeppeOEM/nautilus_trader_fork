@@ -56,7 +56,7 @@ from _source_tree import story_statuses
 from _source_tree import unknown_or_done
 
 
-THIS_STORY = "24-4-research-pure-consumer-and-broken-tests-repaired"
+THIS_STORY = "25-1-archive-context-archiveday-one-deleter-one-rewriter"
 
 KERNEL = "kernel"
 OBSERVABILITY = "observability"
@@ -119,20 +119,19 @@ GRAPH: frozenset[tuple[str, str]] = frozenset(
 # Longest dotted prefix wins. A test module belongs to the context of the code it tests, so it
 # moves with that code.
 LEGACY_MODULE_TO_CONTEXT: dict[str, str] = {
-    # --- collector_core: capture, except the archive/candles modules it still hosts
+    # --- collector_core: capture. The archive modules it hosted moved to `archive/` in Story 25.1
+    # and left re-export shims, each mapped to the context it forwards to.
     "collector_core": CAPTURE,
-    # the marker file I/O over `kernel.archive_markers` (archive's, Story 25.1)
-    "collector_core.archive_gaps": ARCHIVE,
+    "collector_core.archive_gaps": ARCHIVE,  # Story 25.1 shims, as are the ARCHIVE entries below
     "collector_core.backfill_bars": ARCHIVE,
     "collector_core.book_check": CAPTURE,
     "collector_core.collector": CAPTURE,
     "collector_core.compare_klines": ARCHIVE,
     "collector_core.config": CAPTURE,
     "collector_core.consolidate_catalog": ARCHIVE,
-    # Story 23.3; moves with archive in 25.1.
     "collector_core.crosscheck_errors": ARCHIVE,
     "collector_core.feed": CAPTURE,
-    "collector_core.integrity": CAPTURE,
+    "collector_core.integrity": KERNEL,  # Story 25.1 shim of `kernel.second_snapshot`
     "collector_core.measure_lag": ARCHIVE,
     "collector_core.migrate_open_interest": ARCHIVE,
     "collector_core.nightly": ARCHIVE,
@@ -142,28 +141,17 @@ LEGACY_MODULE_TO_CONTEXT: dict[str, str] = {
     "collector_core.repair_catalog": ARCHIVE,
     "collector_core.trade_backfill": CAPTURE,
     "collector_core.tests": CAPTURE,
-    "collector_core.tests.test_backfill_bars": ARCHIVE,
-    "collector_core.tests.test_compare_klines": ARCHIVE,
-    "collector_core.tests.test_consolidate_catalog": ARCHIVE,
-    "collector_core.tests.test_crosscheck_errors": ARCHIVE,
-    "collector_core.tests.test_measure_lag": ARCHIVE,
-    "collector_core.tests.test_migrate_open_interest": ARCHIVE,
-    "collector_core.tests.test_nightly": ARCHIVE,
-    "collector_core.tests.test_prune_catalog": ARCHIVE,
-    "collector_core.tests.test_rebuild_seconds": ARCHIVE,
     # --- venue collectors: capture; dYdX also hosts its control plane and one archive tool.
     # `dydx_collector.collector` stays capture as one module until the control-plane split (25.4).
     "bybit_collector": CAPTURE,
     "hyperliquid_collector": CAPTURE,
     "dydx_collector": CAPTURE,
     "dydx_collector.config": COLLECTION_CONTROL,
-    "dydx_collector.normalize_snapshot_schema": ARCHIVE,
+    "dydx_collector.normalize_snapshot_schema": ARCHIVE,  # Story 25.1 shim
     "dydx_collector.open_interest": CAPTURE,
     "dydx_collector.tests.test_build_candles": CANDLES,
     "dydx_collector.tests.test_collector_control": COLLECTION_CONTROL,
     "dydx_collector.tests.test_config": COLLECTION_CONTROL,
-    "dydx_collector.tests.test_normalize_snapshot_schema": ARCHIVE,
-    "dydx_collector.tests.test_repair_catalog": ARCHIVE,
     # --- ml_signals: no package default, so a new module there must be placed deliberately
     "ml_signals.__init__": RESEARCH,  # the package itself; see `_context_of`
     "ml_signals.catalog_stats": VIEWS,  # split per symbol below
@@ -175,17 +163,17 @@ LEGACY_MODULE_TO_CONTEXT: dict[str, str] = {
     "ml_signals.tests.__init__": RESEARCH,
     # guards the views/ranking reader modules that stayed (research/tests has the backtest half)
     "ml_signals.tests.test_ad8_boundary": VIEWS,
-    # catalog_stats' own tests cover what stayed: ranking's price stats and archive's gap helpers
+    # catalog_stats' own tests cover what stayed: ranking's price stats (the gap helpers' tests
+    # moved to archive/tests/test_diagnostics.py in Story 25.1)
     "ml_signals.tests.test_catalog_stats": RANKING,
     "ml_signals.tests.test_metrics_computer": RANKING,
     "ml_signals.tests.test_rank_history": RANKING,
     # --- ranking_engine / live_paper: one context each
     "ranking_engine": RANKING,
     "live_paper": BOTS,
-    # --- data_api: the interface adapter, hosting the Story 24.3 shim of alerting (its Story 24.2
-    # views shims were deleted in Story 24.4)
+    # --- data_api: the interface adapter (its Story 24.2 views shims were deleted in Story 24.4,
+    # its Story 24.3 alerting shim in Story 25.1)
     "data_api": DATA_API,
-    "data_api.alerts": ALERTING,  # Story 24.3 shim
     # --- bot_tui: the terminal interface adapter
     "bot_tui": BOT_TUI,
 }
@@ -193,15 +181,11 @@ LEGACY_MODULE_TO_CONTEXT: dict[str, str] = {
 # Modules split across contexts: (module, top-level name) -> context. Every top-level function and
 # class of a split module is listed (asserted), so its move is fully planned.
 LEGACY_SYMBOL_TO_CONTEXT: dict[tuple[str, str], str] = {
-    # catalog_stats: AD-D1's three-way split. Its kernel read helpers moved in Story 23.2 and its
-    # views read in Story 24.2 (its forwarding ended in Story 24.4); the module `__getattr__` now
-    # only raises for `_REPLACED_NAMES`, naming each successor.
+    # catalog_stats: AD-D1's three-way split. Its kernel read helpers moved in Story 23.2, its
+    # views read in Story 24.2 (its forwarding ended in Story 24.4) and its archive gap helpers in
+    # Story 25.1 (`archive.application.diagnostics`); the module `__getattr__` serves those from
+    # `_MOVED_NAMES` and raises for `_REPLACED_NAMES`, naming each successor.
     ("ml_signals.catalog_stats", "__getattr__"): VIEWS,
-    ("ml_signals.catalog_stats", "find_gaps"): ARCHIVE,
-    ("ml_signals.catalog_stats", "_overlapping_intervals"): ARCHIVE,
-    ("ml_signals.catalog_stats", "_load"): ARCHIVE,
-    ("ml_signals.catalog_stats", "likely_outages"): ARCHIVE,
-    ("ml_signals.catalog_stats", "coverage"): ARCHIVE,
     ("ml_signals.catalog_stats", "price_series"): RANKING,
     ("ml_signals.catalog_stats", "price_stats_from_series"): RANKING,
     ("ml_signals.catalog_stats", "price_stats"): RANKING,
@@ -218,12 +202,6 @@ LEGACY_SYMBOL_TO_CONTEXT: dict[tuple[str, str], str] = {
 # Cross-context edges the tree still has, (importer context, imported context) -> the story whose
 # `done` retires the edge. The sites named are the ones the retiring story removes.
 LEGACY_EDGES_UNTIL: dict[tuple[str, str], str] = {
-    # dYdX `_prune_loop` calls `prune_catalog.prune_instrument`; archive's RetentionPolicy becomes
-    # the only code that deletes a catalog file.
-    (CAPTURE, ARCHIVE): "25-1-archive-context-archiveday-one-deleter-one-rewriter",
-    # repair_catalog (and the archive tests) read `catalog_stats.query_second_snapshots`, a views
-    # read; archive reads through kernel.catalog_files.
-    (ARCHIVE, VIEWS): "25-1-archive-context-archiveday-one-deleter-one-rewriter",
     # The capture tests read their own written snapshots back with `query_second_snapshots`
     # (a views read); they move with capture into capture/tests.
     (CAPTURE, VIEWS): "26-2-capture-package-and-venue-packages-with-entrypoints",
@@ -256,6 +234,9 @@ COMPOSITION_ROOTS: dict[str, frozenset[str]] = {
     "data_api.tests.test_screener_columns": frozenset({CANDLES}),
     "data_api.tests.test_data_api": frozenset({RANKING}),
     "data_api.tests.test_metrics": frozenset({RANKING}),
+    # The retention run reads the dYdX collection plan through collection control's one loader
+    # (`dydx_collector.config.load_config`) for its dropped-instrument and delta rules (Story 25.1).
+    "archive.prune_catalog": frozenset({COLLECTION_CONTROL}),
 }
 
 
@@ -545,9 +526,9 @@ def test_research_imports_no_views_ranking_engine_or_ml_signals() -> None:
 
 
 # The non-test modules outside `alerting.infrastructure` that may import it (AD-D2: infrastructure
-# is imported only by a composition root). `data_api.alerts` is the Story 24.3 re-export shim, which
-# serves `AlertStore`/`ALERTS_PATH` at their old path until its REMOVE_AFTER story deletes it.
-ALERTING_INFRASTRUCTURE_IMPORTERS = frozenset({"data_api.alert_wiring", "data_api.alerts"})
+# is imported only by a composition root). The Story 24.3 `data_api.alerts` shim was deleted in
+# Story 25.1.
+ALERTING_INFRASTRUCTURE_IMPORTERS = frozenset({"data_api.alert_wiring"})
 
 
 def _is_test_module(module: str) -> bool:
@@ -637,7 +618,7 @@ def test_every_import_resolves_to_a_mapped_context() -> None:
 def test_checker_flags_unmapped_modules_and_expired_stories() -> None:
     assert _context_of("ml_signals.a_module_nobody_placed") is None
     assert _context_of("observability.anything") == OBSERVABILITY
-    assert _context_of("data_api.alerts") == ALERTING
+    assert _context_of("collector_core.rebuild_seconds") == ARCHIVE  # a Story 25.1 shim
     board = {"24-1-x": "done", "24-2-y": "ready-for-dev", "24-3-z": "superseded"}
     assert unknown_or_done("24-1-x", board) is not None
     assert unknown_or_done("24-9-typo", board) is not None
@@ -657,7 +638,7 @@ def test_tree_walk_rejects_a_module_and_a_package_of_one_name(tmp_path: Path) ->
 def test_exemption_covers_only_one_unmoved_package_and_platform_tests() -> None:
     inside = Import("collector_core.collector", CAPTURE, "collector_core.nightly", "x", ARCHIVE, 1)
     across = Import("collector_core.collector", CAPTURE, "candles.domain.fold", "x", CANDLES, 1)
-    interface = Import("data_api.app", DATA_API, "data_api.alerts", "x", ALERTING, 1)
+    interface = Import("data_api.app", DATA_API, "data_api.alert_wiring", "x", ALERTING, 1)
     guard = Import("tests.test_x", TESTS, "candles.domain.fold", "_x", CANDLES, 1)
     assert _exempt(inside)
     assert not _exempt(across)

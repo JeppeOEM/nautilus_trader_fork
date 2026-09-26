@@ -36,10 +36,14 @@ executed trade prices within this second (None if no trade occurred), and the
 volumes/counts the per-side totals -- all produced by the one exact fold,
 `kernel.fold.fold_trades`. Live, a second holds the trades that *arrived*
 since the previous sample; the raw `TradeTick`s are archived too (`data/trade_tick/`,
-story 22.13) and `collector_core.rebuild_seconds` rewrites a closed day's trade
+story 22.13) and `archive.rebuild_seconds` rewrites a closed day's trade
 columns from them on exchange time (`ts_event`), leaving book columns and timestamps
 untouched. Candles at any resolution >= 1s are built by aggregating these fields
 (`candles/domain/fold.py`), not by replaying individual trades.
+
+`ohlc_outside_book` is the one plausibility check of a second's trade OHLC against that same
+second's book (moved here from `collector_core.integrity` in Story 25.1, so capture's live canary
+and archive's `repair_catalog` share it without either importing the other).
 """
 
 from typing import NamedTuple
@@ -106,6 +110,41 @@ class SecondOHLC(NamedTuple):
     close_price: float | None
     buy_volume: float
     sell_volume: float
+
+
+# Book depth moves within the second we sample it; allow 0.1% before calling it impossible.
+OHLC_BOOK_TOLERANCE = 0.001
+
+
+class _BookAndRange(Protocol):
+    bid_prices: list[float]
+    ask_prices: list[float]
+    high_price: float | None
+    low_price: float | None
+
+
+def ohlc_outside_book(snapshot: _BookAndRange, tolerance: float = OHLC_BOOK_TOLERANCE) -> bool:
+    """
+    Return whether the second's trade high/low lies outside its own top-20 book range.
+
+    A trade executes against resting liquidity, so its price must lie inside the book's visible
+    depth: no higher than the deepest ask level and no lower than the deepest bid level (a sweep
+    that consumes levels only lands prices *between* the pre-trade levels, which the stored top-20
+    depth still brackets). A high/low outside that range cannot come from that second's real
+    trading -- it is the signature of replayed history (dYdX's `v4_trades` subscribed reply,
+    dropped by `config.stale_trade_seconds`) or another ingestion bug. Derived purely from stored
+    fields, so it works identically as a live canary and as a scan over old catalog data
+    (`archive.repair_catalog`).
+    """
+    if snapshot.high_price is None or snapshot.low_price is None:
+        return False
+    if not snapshot.bid_prices or not snapshot.ask_prices:
+        return False  # no book to judge against -- not evidence either way
+    deepest_ask = max(snapshot.ask_prices)
+    deepest_bid = min(snapshot.bid_prices)
+    return snapshot.high_price > deepest_ask * (
+        1 + tolerance
+    ) or snapshot.low_price < deepest_bid * (1 - tolerance)
 
 
 def _optional_float(value: object) -> float | None:

@@ -13,40 +13,32 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-Plausibility check for a second's trade OHLC against that same second's order book.
+Deprecated re-export shim (Story 25.1): `collector_core.integrity` moved to the kernel
+(`kernel.second_snapshot`).
 
-A trade executes against resting liquidity, so its price must lie inside the book's
-visible depth: no higher than the deepest ask level and no lower than the deepest bid
-level (a sweep that consumes levels only lands prices *between* the pre-trade levels,
-which the stored top-20 depth still brackets). A high/low outside that range cannot come
-from that second's real trading -- it is the signature of replayed history (dYdX's
-`v4_trades` subscribed reply, dropped by `config.stale_trade_seconds`) or another
-ingestion bug.
-Derived purely from stored fields, so it works identically as a live canary and as a
-scan over old catalog data (see repair_catalog.py).
+Pure re-export, defines nothing: every name here *is* the object at its new home. Import from there
+instead, e.g. `from kernel.second_snapshot import OHLC_BOOK_TOLERANCE`. Names whose contract changed
+in the move are not served here (see the new module).
 """
 
-from typing import Protocol
+import warnings
+
+from kernel.second_snapshot import OHLC_BOOK_TOLERANCE as TOLERANCE
+from kernel.second_snapshot import ohlc_outside_book
 
 
-# Book depth moves within the second we sample it; allow 0.1% before calling it impossible.
-TOLERANCE = 0.001
+__all__ = [
+    "TOLERANCE",
+    "ohlc_outside_book",
+]
+
+REMOVE_AFTER = "25-3-bots-context-paper-and-exec-types-nautilus-acl"
 
 
-class _Snapshot(Protocol):
-    bid_prices: list[float]
-    ask_prices: list[float]
-    high_price: float | None
-    low_price: float | None
-
-
-def ohlc_outside_book(snapshot: _Snapshot, tolerance: float = TOLERANCE) -> bool:
-    if snapshot.high_price is None or snapshot.low_price is None:
-        return False
-    if not snapshot.bid_prices or not snapshot.ask_prices:
-        return False  # no book to judge against -- not evidence either way
-    deepest_ask = max(snapshot.ask_prices)
-    deepest_bid = min(snapshot.bid_prices)
-    return snapshot.high_price > deepest_ask * (
-        1 + tolerance
-    ) or snapshot.low_price < deepest_bid * (1 - tolerance)
+# Attributed to the importing module, not to importlib's frames.
+warnings.warn(
+    "collector_core.integrity moved to kernel.second_snapshot (Story 25.1); "
+    f"this shim is removed after {REMOVE_AFTER}",
+    DeprecationWarning,
+    skip_file_prefixes=("<frozen importlib",),
+)

@@ -12,15 +12,13 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
-"""Self-check: gap/outage detection finds obvious cases and ignores regular spacing; price_stats arithmetic."""
+"""Self-check: price_stats arithmetic and the price series (the gap helpers moved to archive)."""
 
 import tempfile
 from unittest.mock import MagicMock
 
 from kernel.second_snapshot import DydxSecondSnapshot
 
-from ml_signals.catalog_stats import _overlapping_intervals
-from ml_signals.catalog_stats import find_gaps
 from ml_signals.catalog_stats import price_series
 from ml_signals.catalog_stats import price_stats
 from nautilus_trader.model.data import MarkPriceUpdate
@@ -30,40 +28,6 @@ from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
 
 _IID = "BTC-USD-PERP.DYDX"
-
-
-def test_finds_a_single_obvious_gap() -> None:
-    one_second = 1_000_000_000
-    regular = [i * one_second for i in range(10)]  # 0s, 1s, 2s, ... 9s
-    after_gap = [t + 600 * one_second for t in range(10, 15)]  # resumes 10 minutes later
-    ts_ns = regular + after_gap
-
-    gaps = find_gaps(ts_ns)
-
-    assert len(gaps) == 1
-    assert gaps[0] == (regular[-1], after_gap[0])
-
-
-def test_no_gaps_in_regularly_spaced_series() -> None:
-    one_second = 1_000_000_000
-    ts_ns = [i * one_second for i in range(20)]
-
-    assert find_gaps(ts_ns) == []
-
-
-def test_overlapping_intervals_finds_only_shared_outage() -> None:
-    # Mark price gapped 100-200 and 500-600; book deltas gapped 150-300.
-    # Only the 150-200 overlap represents both streams being silent at once.
-    mark_gaps = [(100, 200), (500, 600)]
-    book_gaps = [(150, 300)]
-
-    overlaps = _overlapping_intervals(mark_gaps, book_gaps)
-
-    assert overlaps == [(150, 200)]
-
-
-def test_overlapping_intervals_empty_when_no_shared_window() -> None:
-    assert _overlapping_intervals([(100, 200)], [(300, 400)]) == []
 
 
 # ---- price_stats ----
@@ -201,10 +165,6 @@ def test_price_series_falls_back_to_mark_price_when_no_trades_exist() -> None:
 
 
 if __name__ == "__main__":
-    test_finds_a_single_obvious_gap()
-    test_no_gaps_in_regularly_spaced_series()
-    test_overlapping_intervals_finds_only_shared_outage()
-    test_overlapping_intervals_empty_when_no_shared_window()
     test_price_stats_empty_returns_all_none()
     test_price_stats_single_point_returns_price_only()
     test_price_stats_pct_1h_correct()

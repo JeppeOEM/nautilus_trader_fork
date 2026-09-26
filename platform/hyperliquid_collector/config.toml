@@ -13,7 +13,7 @@ stale_book_seconds = 12.0
 instruments = ["BTC-USD-PERP.HYPERLIQUID", "ETH-USD-PERP.HYPERLIQUID"]
 # Story 22.12: a live row is exchange second S, closed at wall S + 1 + hold_back_seconds from the
 # book/trades stamped inside it (DATA_DICTIONARY.md §1.7). hold_back_seconds = trade p99.9 lag
-# (`python -m collector_core.measure_lag --venue hyperliquid`) rounded up to 0.5 s. Local dev-box
+# (`python -m archive.tools.measure_lag --venue hyperliquid`) rounded up to 0.5 s. Local dev-box
 # run 2026-09-21, 600 s, BTC + ETH: TradeTick n=9,596 p50 382.6 ms, p99 823.2 ms, p99.9 2307.6 ms,
 # max 2403.2 ms (l2Book p99.9 2307.6 ms). PROVISIONAL: the >= 3 h run on the VPS that hosts this
 # collector is owed (audit D-63); set the value from that run.

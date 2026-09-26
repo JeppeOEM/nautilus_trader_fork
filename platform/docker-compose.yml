@@ -13,6 +13,20 @@ x-chart-indicator-config-path: &chart-indicator-config-path "/app/ml_signals/cha
 x-chart-indicator-config-mount: &chart-indicator-config-mount
   ./ml_signals/chart_indicators.toml:/app/ml_signals/chart_indicators.toml:rw
 
+# CPU priority under contention (proposed 2026-09-26, applied by Story 28.1; not enabled yet).
+# nifelheim is 2 vCPU / 3.7 GB (`.planning/debug/nifelheim-resource-exhaustion-2026-09-12.md`):
+# the load average reached 10.85 on 2 cores, dydx-collector alone sat at ~105 % CPU, and its
+# `_second_loop` woke 2-21.5 s late about every 3 minutes (audit D-06/D-07/D-10). Every such stall
+# delays the live chart, rankings and alerts, suspends the crossed-book check, and on dYdX leaves
+# the missed second without a row. The three collectors are the only services whose work cannot
+# wait; ranking_engine, data_api, bot_tui, live-paper and dozzle are batch or interactive and can.
+# `cpu_shares` is a relative weight the kernel's CFS scheduler applies ONLY when cores are
+# contended: with 1024 on each collector and 256 on the rest, a collector gets ~4x the CPU of any
+# batch service while the box is busy, and nothing is limited while it is idle. Deliberately not
+# `cpus:` (a hard cap): a cap would throttle a collector during a message burst, which is the
+# exact moment it must not fall behind. Uncomment the `cpu_shares:` line in each service to apply
+# (a `docker compose up -d` recreates the containers); the acceptance check is one hour with the
+# load average <= number of cores and zero "_second_loop tick arrived ... late" lines in Dozzle.
 services:
   redis:
     container_name: dydx-redis
@@ -28,6 +42,7 @@ services:
 
   collector:
     container_name: dydx-collector
+    # cpu_shares: 1024   # see the CPU-priority note above services: (capture: must not wait)
     build:
       context: ..
       dockerfile: platform/collector.dockerfile
@@ -69,6 +84,7 @@ services:
 
   bybit_collector:
     container_name: bybit-collector
+    # cpu_shares: 1024   # see the CPU-priority note above services: (capture: must not wait)
     build:
       context: ..
       dockerfile: platform/collector.dockerfile
@@ -96,6 +112,7 @@ services:
 
   hyperliquid_collector:
     container_name: hyperliquid-collector
+    # cpu_shares: 1024   # see the CPU-priority note above services: (capture: must not wait)
     build:
       context: ..
       dockerfile: platform/collector.dockerfile
@@ -122,6 +139,7 @@ services:
 
   ranking_engine:
     container_name: dydx-ranking-engine
+    # cpu_shares: 256   # see the CPU-priority note above services: (batch/interactive: may wait)
     build:
       context: ..
       dockerfile: platform/collector.dockerfile
@@ -158,6 +176,7 @@ services:
 
   data_api:
     container_name: dydx-data-api
+    # cpu_shares: 256   # see the CPU-priority note above services: (batch/interactive: may wait)
     build:
       context: ..
       dockerfile: platform/data_api.dockerfile
@@ -199,6 +218,7 @@ services:
 
   bot_tui:
     container_name: dydx-bot-tui
+    # cpu_shares: 256   # see the CPU-priority note above services: (batch/interactive: may wait)
     # Not part of `make up` / `docker compose up -d` at all -- bot_tui is an
     # interactive urwid app (Story 4.1, architecture spine's Deployment &
     # Environments section: "not a long-running background service... not a
@@ -250,6 +270,7 @@ services:
 
   live-paper:
     container_name: dydx-live-paper
+    # cpu_shares: 256   # see the CPU-priority note above services: (batch/interactive: may wait)
     # Not started by plain `make up`/`docker compose up -d` -- this profile keeps the
     # paper-trading node an explicit, opt-in action (`make up-live-paper`), consistent
     # with Story 3.1's "unreachable by any default or accidental config state" goal.
@@ -313,6 +334,7 @@ services:
 
   dozzle:
     container_name: dydx-collector-dozzle
+    # cpu_shares: 256   # see the CPU-priority note above services: (batch/interactive: may wait)
     image: amir20/dozzle:latest
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro

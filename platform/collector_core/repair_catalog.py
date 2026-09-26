@@ -13,126 +13,47 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-Find and repair second snapshots whose trade OHLC is impossible given their own book.
+Deprecated re-export shim (Story 25.1): `collector_core.repair_catalog` moved to the archive context
+(`archive.repair_catalog`).
 
-Usage:
-    python -m collector_core.repair_catalog --catalog /app/catalog [--instrument X ...]      # report only
-    python -m collector_core.repair_catalog --catalog /app/catalog --apply                   # rewrite
+Pure re-export, defines nothing: every name here *is* the object at its new home. Import from there
+instead, e.g. `from archive.application.repair import find_impossible_snapshots`. Names whose
+contract changed in the move are not served here (see the new module).
 
-Detection is `integrity.ohlc_outside_book` -- see there for why it is sound. It finds the
-rows written by the pre-fix collector, which counted dYdX's subscribed-reply trade history
-as live trades (before the `stale_trade_seconds` filter in `collector_core/config.py`).
-
---apply, per flagged second: replace the snapshot with a copy whose trade fields are
-cleared (OHLC None, volumes/counts 0 -- the real trades in that second cannot be told
-apart from the replayed ones, so "no trade recorded" is the honest value, DATA-01), delete
-and (with --candles-db) rebuild the candle-store days it touched from the corrected raw 1s.
-Without --candles-db the store still holds the spike: run `python -m candles.rebuild` for those days. The book fields
-are untouched. Manually run, like prune_catalog.py; reads raw 1s in day chunks (MEM-01).
-
-Never run it on a day `rebuild_seconds` has rebuilt (story 22.13): a rebuilt second holds the
-trades whose *exchange* time falls in it, while its book is still sampled at mid-second on
-arrival time, so a fast market can put a real trade outside that book range -- this tool would
-then clear real trades. The rebuild itself is the repair for rows written after the trade
-archive existed; this tool is for pre-archive rows only.
+`python -m collector_core.repair_catalog` still runs it; use `python -m archive.repair_catalog`.
 """
 
-import argparse
-import logging
+import warnings
 
-from candles.application.rebuild import all_instruments
-from candles.application.rebuild import data_range_ns
-from candles.application.rebuild import day_chunks
-from candles.application.rebuild import rebuild_instrument
-from kernel.second_snapshot import DydxSecondSnapshot
-from views.catalog_reads import query_second_snapshots
-
-from collector_core.integrity import ohlc_outside_book
-from nautilus_trader.persistence.catalog import ParquetDataCatalog
+from archive.application.repair import find_impossible_snapshots
+from archive.application.repair import repair_instrument
+from archive.repair_catalog import main
 
 
-logger = logging.getLogger(__name__)
+__all__ = [
+    "find_impossible_snapshots",
+    "main",
+    "repair_instrument",
+]
+
+REMOVE_AFTER = "25-3-bots-context-paper-and-exec-types-nautilus-acl"
 
 
-def find_impossible_snapshots(
-    catalog_path: str, iid: str, start_ns: int, end_ns: int
-) -> list[DydxSecondSnapshot]:
-    return [
-        snap
-        for a, b in day_chunks(start_ns, end_ns)
-        for snap in query_second_snapshots(catalog_path, iid, a, min(b, end_ns))
-        if ohlc_outside_book(snap)
-    ]
-
-
-def _cleared_copy(snap: DydxSecondSnapshot) -> DydxSecondSnapshot:
-    values = DydxSecondSnapshot.to_dict(snap)
-    values.update(
-        buy_volume=0.0,
-        sell_volume=0.0,
-        buy_count=0,
-        sell_count=0,
-        open_price=None,
-        high_price=None,
-        low_price=None,
-        close_price=None,
-    )
-    return DydxSecondSnapshot.from_dict(values)
-
-
-def repair_instrument(
-    catalog: ParquetDataCatalog,
-    catalog_path: str,
-    iid: str,
-    flagged: list[DydxSecondSnapshot],
-    candles_db_path: str | None = None,
-) -> None:
-    # Build every replacement first so a bad row fails before anything is deleted.
-    replacements = [(snap, _cleared_copy(snap)) for snap in flagged]
-    for snap, cleared in replacements:
-        catalog.delete_data_range(DydxSecondSnapshot, iid, snap.ts_event, snap.ts_event)
-        catalog.write_data([cleared])
-    if candles_db_path is not None:
-        first, last = min(s.ts_event for s in flagged), max(s.ts_event for s in flagged)
-        rebuild_instrument(candles_db_path, catalog_path, iid, first, last)
-
-
-def main() -> None:
-    parser = argparse.ArgumentParser(
-        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
-    )
-    parser.add_argument("--catalog", required=True)
-    parser.add_argument("--instrument", action="append", help="repeatable; default: all")
-    parser.add_argument(
-        "--apply", action="store_true", help="rewrite the catalog (default: report only)"
-    )
-    parser.add_argument(
-        "--candles-db", help="candles.db to rebuild the repaired days in (closed days only)"
-    )
-    args = parser.parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(message)s")
-
-    catalog = ParquetDataCatalog(args.catalog)
-    for iid in args.instrument or all_instruments(args.catalog):
-        span = data_range_ns(args.catalog, iid)
-        if span is None:
-            continue
-        flagged = find_impossible_snapshots(args.catalog, iid, *span)
-        if not flagged:
-            continue
-        logger.info("%s: %d impossible snapshot(s)", iid, len(flagged))
-        for snap in flagged:
-            logger.info(
-                "  ts=%d high=%s low=%s vol=%.4f",
-                snap.ts_event,
-                snap.high_price,
-                snap.low_price,
-                snap.buy_volume + snap.sell_volume,
-            )
-        if args.apply:
-            repair_instrument(catalog, args.catalog, iid, flagged, args.candles_db)
-            logger.info("  repaired")
+# Attributed to the importing module, not to importlib's frames.
+warnings.warn(
+    "collector_core.repair_catalog moved to archive.repair_catalog (Story 25.1); "
+    f"this shim is removed after {REMOVE_AFTER}",
+    DeprecationWarning,
+    skip_file_prefixes=("<frozen importlib",),
+)
 
 
 if __name__ == "__main__":
-    main()
+    # Under `python -m` the import-time warning above is attributed to runpy's frame and hidden
+    # by the default filters; this one is issued from `__main__`, where it is shown.
+    warnings.warn(
+        f"python -m {__spec__.name} is deprecated: use python -m archive.repair_catalog (Story 25.1)",
+        DeprecationWarning,
+        stacklevel=1,
+    )
+    raise SystemExit(main())

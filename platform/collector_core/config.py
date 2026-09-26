@@ -52,7 +52,7 @@ class CoreConfig:
     # S + 1 + hold_back_seconds from deltas/trades ordered and bucketed by their `ts_event`.
     book_time_source: Literal["arrival", "venue"] = "arrival"
     # Venue mode only: extra wait before closing a second so fewer in-flight messages miss it.
-    # Set from `collector_core.measure_lag`, never to make reconciliation pass (the nightly
+    # Set from `archive.tools.measure_lag`, never to make reconciliation pass (the nightly
     # rebuild is the correctness device, D-50).
     hold_back_seconds: float = 0.0
     # WebSocket connections carrying trades per feed group (story 22.14): 1 = the primary socket

@@ -588,3 +588,48 @@ Discarded by operator: locking/atomic TOML writes; `bot_tui` malformed-message h
 - source_spec: `_bmad-output/implementation-artifacts/spec-24-4-research-pure-consumer-and-broken-tests-repaired.md`
   summary: `research.strategies.backtest_dydx.run` and `backtest_snapshot.run` default `catalog_path` to the cwd-relative `"platform/data/catalog"`, while `docs/BOT_OPERATIONS.md` tells the user to `cd platform` first, so the documented call resolves `platform/platform/data/catalog`: `backtest_dydx` then skips every symbol and returns `{}`, and `backtest_snapshot` raises `IndexError` on `instruments(...)[0]`.
   evidence: both defaults are literal relative strings, and `backtest_ofi` alone derives its path from `__file__`. Pre-existing: the baseline `ml_signals.strategies.backtest_*` had the same defaults, and the baseline BOT_OPERATIONS.md had the same `cd platform` instruction. This story only renamed the module paths. The fix (one `__file__`-anchored default shared by all three runners, plus how the collector image's `/app/catalog` mount is addressed) spans the runners and the image layout, so it belongs with Story 27.8's research-in-image work.
+- source_spec: `_bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md`
+  summary: A `pruned` archive-gap marker spans the deleted file's `ts_init` name range, but the rebuild tests gaps on the row's `ts_event`, so rows in `[start - MAX_TS_INIT_SKEW_NS, start)` are treated as covered after their trades were deleted.
+  evidence: archive/application/prune.py records `CatalogFileSpan` start/end, and archive/domain/gaps.py `Coverage.covers(ts_event)`. This predates 25.1 (old prune_catalog did the same).
+- source_spec: `_bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md`
+  summary: `rebuild_day` rewrites a day's files one at a time, so a refusal on file k leaves files 1..k-1 rebuilt while the day is reported "refused, untouched".
+  evidence: archive/application/rebuild_day.py per-file rewrite loop. This predates 25.1 (old `_replace_file` loop).
+- source_spec: `_bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md`
+  summary: A stored `verified_days = pass` is not invalidated when a later rebuild or repair changes that day's seconds and the reconcile then errors, is refused, or is skipped. Prune can then release the trades behind stale proof.
+  evidence: Documented as a Known limit in archive/domain/archive_day.py. The fix needs rebuild to report changed rows per instrument and reconcile to refuse to leave a stale pass.
+- source_spec: `_bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md`
+  summary: repair_catalog runs `delete_data_range` then `write_data` per row with no backup or atomicity; a crash between them loses that second's snapshot.
+  evidence: archive/application/repair.py `repair_instrument`. This predates 25.1.
+- source_spec: `_bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md`
+  summary: The retention `file_days` rule widens only backwards (the previous day). A file ending just before midnight can hold venue-clock-ahead trades of the next day, and that day is never required to be verified.
+  evidence: archive/domain/retention.py `file_days`, and `kernel.clocks.CatalogFileSpan` documents `ts_init < ts_event`. This predates 25.1.
+- source_spec: `_bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md`
+  summary: repair_catalog's "never run on a rebuilt day" rule is enforced only by its docstring; nothing checks the rebuild or `verified_days` state before clearing trades.
+  evidence: archive/repair_catalog.py. This predates 25.1.
+- source_spec: `_bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md`
+  summary: One stray `*.parquet` with an unparsable name in a snapshot or trade leaf crashes `compare_klines` (`instruments_on_day`) before any instrument is compared, every night, until someone removes it.
+  evidence: archive/application/reconcile_day.py calls `CatalogFileSpan.from_path` with no guard. This predates 25.1.
+- source_spec: `_bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md`
+  summary: The dropped-instrument rule deletes a dropped dYdX coin's instrument-definition leaves while its unverified `trade_tick` days are kept, so those days can never be reconciled and are kept forever.
+  evidence: archive/domain/retention.py rule (c) covers every type except trade_tick, the same set as the old `prune_instrument`. Semantics predate 25.1.
+- source_spec: `_bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md`
+  summary: Capture appends `_archive_gaps/*.jsonl` without a lock, so a nightly `load_gaps` can read a torn last line, raise ValueError and refuse the instrument-day.
+  evidence: archive/infrastructure/gap_markers.py `load_gaps`, collector_core/gap_markers.py append. This predates 25.1.
+- source_spec: `_bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md`
+  summary: repair_catalog deletes a flagged snapshot with `delete_data_range(..., snap.ts_event, snap.ts_event)`, but the catalog range-filters on `ts_init`, which venue-time capture stamps after `ts_event`, so the delete can miss and `write_data` then adds a duplicate second.
+  evidence: archive/application/repair.py (was collector_core/repair_catalog.py:93 at baseline 983d0c792c); test_repair.py builds every snapshot with ts_init == ts_event. This predates 25.1.
+- source_spec: `_bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md`
+  summary: `record_gap` can leave a torn `_archive_gaps/*.jsonl` line on a mid-write OSError (e.g. ENOSPC), and `load_gaps` then raises ValueError every later night, refusing that instrument's rebuild until the file is hand-edited.
+  evidence: archive/infrastructure/gap_markers.py and collector_core/gap_markers.py write with f.write + fsync and no truncate-back on failure. This predates 25.1 (collector_core/archive_gaps.py:66).
+- source_spec: `_bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md`
+  summary: The venue kline paging loops (dYdX/Bybit/Hyperliquid) have no iteration cap or strict-progress check, so a server returning a page that does not advance the cursor loops forever.
+  evidence: archive/infrastructure/klines_{dydx,bybit,hyperliquid}.py, moved as-is from collector_core/compare_klines.py:248,287,329. This predates 25.1.
+- source_spec: `_bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md`
+  summary: consolidate_catalog exits 1 on any refused day, so one standing mixed-schema day stops candles.rebuild, compare_klines and prune in every nightly saga run, not just the prune the Known limit names.
+  evidence: archive/consolidate_catalog.py exit code and application/nightly.py stop-at-first-failure. This predates 25.1 (collector_core/consolidate_catalog.py:53).
+- source_spec: `_bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md`
+  summary: The prune's `pruned` marker covers the deleted trade file's raw `ts_init` span, but a trade's `ts_event` can precede its `ts_init` by up to `MAX_TS_INIT_SKEW_NS`, so a later rebuild of that day re-folds the edge seconds without the pruned trades.
+  evidence: archive/application/prune.py `_delete` records `ArchiveGap(f.iid, *span, "pruned", 0)`, while the rebuild tests gap membership on the snapshot row's `ts_event`. This predates 25.1 (collector_core/prune_catalog.py:278 at baseline 983d0c792c).
+- source_spec: `_bmad-output/implementation-artifacts/spec-25-1-archive-context-archiveday-one-deleter-one-rewriter.md`
+  summary: `make prune` (order_book_deltas age rule, 14 days) deletes raw deltas of a dYdX instrument whose plan entry says `retain_hours = None` (unlimited), because the age rule is decided independently of the plan's per-instrument delta retention.
+  evidence: platform/Makefile `prune` target and archive/domain/retention.py, where rule (b) runs regardless of rule (d)'s None. This predates 25.1 (baseline Makefile prune target, plus the old `_prune_loop`).

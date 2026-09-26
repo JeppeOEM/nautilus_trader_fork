@@ -34,9 +34,9 @@ and `kernel` only. `application/` holds the ports (`VerifiedDays`), the query an
 the rebuild logic and the retention process manager. `infrastructure/` holds `CandleStore`, the only
 read-write opener of a `candles_<venue>.db`, and the `VerifiedDays` adapters.
 
-Composition roots -- each venue entrypoint, the rebuild CLI, `collector_core.nightly` and the two
-archive tools -- are what construct `infrastructure`; no context outside candles imports it for any
-other reason. Readers (the views context since Story 24.2) open a store through
+Composition roots -- each venue entrypoint, the rebuild CLI, and the archive CLIs `archive.nightly`,
+`archive.compare_klines` and `archive.prune_catalog` (Story 25.1) -- are what construct
+`infrastructure`; no context outside candles imports it for any other reason. Readers (the views context since Story 24.2) open a store through
 `application.queries.open_store` and call only the query services.
 Known limit: `application/` is not storage-agnostic. `application.sink` and `application.rebuild`
 name `CandleStore` concretely rather than a port, and `application.queries` goes further -- it takes

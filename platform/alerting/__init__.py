@@ -33,6 +33,6 @@ declares the `AlertRepository` and `Deliverer` ports and holds `AlertEngine` and
 
 Dependency direction: `alerting` imports stdlib, `tomli_w`, `kernel` and `observability` only, never
 `views`, `candles` or `data_api` (which depend on it); `platform/tests/test_boundaries.py` enforces
-the edges and that `alerting.infrastructure` has no importer but `data_api.alert_wiring` (and,
-until it is removed, the deprecated `data_api.alerts` re-export shim).
+the edges and that `alerting.infrastructure` has no importer but `data_api.alert_wiring` (the
+deprecated `data_api.alerts` re-export shim was deleted in Story 25.1).
 """

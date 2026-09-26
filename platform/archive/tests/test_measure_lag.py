@@ -14,10 +14,11 @@
 # -------------------------------------------------------------------------------------------------
 """measure_lag's pure parts on real TradeTicks (the live run is manual, see its docstring)."""
 
-from collector_core.measure_lag import LagRecorder
-from collector_core.measure_lag import percentile
-from collector_core.measure_lag import report
-from collector_core.measure_lag import suggest_hold_back
+from archive.tools.measure_lag import LagRecorder
+from archive.tools.measure_lag import _default_instruments
+from archive.tools.measure_lag import percentile
+from archive.tools.measure_lag import report
+from archive.tools.measure_lag import suggest_hold_back
 from nautilus_trader.model.data import TradeTick
 from nautilus_trader.model.enums import AggressorSide
 from nautilus_trader.model.identifiers import InstrumentId
@@ -87,3 +88,9 @@ def test_report_suggests_the_hold_back_from_trades() -> None:
     for n in range(1000):
         recorder(_trade(n, 100 if n < 998 else 1_200))
     assert report(recorder)[-1].endswith(": 1.5")
+
+
+def test_default_instruments_are_read_from_the_venue_package_config() -> None:
+    """The tool moved two levels down (`archive/tools/`): the config path must still resolve."""
+    assert _default_instruments("bybit")  # the committed Bybit config lists its instruments
+    assert _default_instruments("dydx") == []  # dYdX's committed config is a 0-byte placeholder

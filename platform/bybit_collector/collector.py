@@ -26,6 +26,7 @@ import asyncio
 import os
 from collections import defaultdict
 from pathlib import Path
+from typing import ClassVar
 from typing import Literal
 
 from candles.application.prune import loop as candle_prune_loop
@@ -98,6 +99,8 @@ class BybitCollector(Collector):
     """
 
     _config: BybitConfig
+
+    VENUE: ClassVar[str] = "BYBIT"
 
     def __init__(self, config: BybitConfig) -> None:
         # `self._on_data` is a bound method: safe to hand out before super().__init__ since

@@ -168,11 +168,11 @@ catalog.order_book_deltas(instrument_ids=["BTC-USD-PERP.DYDX"])
 
 ```bash
 # from platform/ -- report-only: plans the windows, contacts nothing, writes nothing
-PYTHONPATH=. python -m collector_core.backfill_bars --catalog /app/catalog \
+PYTHONPATH=. python -m archive.backfill_bars --catalog /app/catalog \
     --instrument BTCUSDT-LINEAR.BYBIT --start 2026-09-01 --end 2026-09-18
 
 # same command + --apply actually fetches and writes
-PYTHONPATH=. python -m collector_core.backfill_bars --catalog /app/catalog \
+PYTHONPATH=. python -m archive.backfill_bars --catalog /app/catalog \
     --instrument BTCUSDT-LINEAR.BYBIT --instrument BTC-USDC-PERP.HYPERLIQUID \
     --start 2026-09-01 --end 2026-09-18 --bar-spec 1-MINUTE-LAST --apply
 ```
@@ -204,23 +204,40 @@ every type: it keeps reporting an old refused day the nightly's `--days 2` skips
 still owed are in [`docs/DEPLOY_CHECKLIST.md`](docs/DEPLOY_CHECKLIST.md). Run `make consolidate`
 once by hand first to fold the existing history.
 
-**`make nightly`** (`collector_core.nightly` in the collector image) runs, each as its own
-process: `rebuild_seconds --apply` (the closed day's snapshot trade columns re-derived from the
-raw trade archive on exchange time) -> `consolidate_catalog --apply --venue --days 2` (below) ->
-`build_candles` (`python -m candles.rebuild --day --workers 1`; the step keeps its name) ->
-`compare_klines` (every traded minute against the venue's own
-1 m klines, exact; verdict in `verified_days`) -> `prune_catalog --apply` (raw trades released 7
-days after their day reconciled `pass`). A step's exit 2 is "findings" (per-instrument refusals,
-mismatches or uncomparable instruments, all ledgered): the chain continues; any other failure
-stops it. One summary line per venue:
+**`make nightly`** (`archive.nightly` in the collector image, the archive context's saga since
+Story 25.1) runs, each as its own process: `rebuild_seconds --apply` (the closed day's snapshot
+trade columns re-derived from the raw trade archive on exchange time; rows inside an archive-gap
+marker keep their live values and are counted `in gap`) -> `consolidate_catalog --apply --venue
+--days 2` (below) -> `build_candles` (`python -m candles.rebuild --day --workers 1`; the step keeps
+its name) -> `compare_klines --rebuilt-by <run id>` (every traded minute against the venue's own
+1 m klines, exact; verdict in `verified_days`; only the instruments the rebuild names are passed as
+`--rebuilt` and compared, one it refused is passed as `--not-rebuilt`, and any instrument not
+rebuilt gets no verdict) -> `prune_catalog --apply` (raw trades released 7 days after
+their day reconciled `pass`; for DYDX also the plan's dropped-instrument and per-coin delta
+retention, `--dydx-plan`). A step's exit 2 is "findings" (per-instrument refusals, mismatches or
+uncomparable instruments, all ledgered): the chain continues; any other failure stops it -- a
+rebuild whose result file is missing counts as failed. One summary line per venue:
 
 ```text
-nightly <VENUE> <DAY>: rebuild_seconds ok <s>s, consolidate_catalog ok <s>s, build_candles ok <s>s, compare_klines ok|findings <s>s, prune_catalog ok <s>s; peak child RSS <M> MB; outcome ok|findings|FAILED
+nightly <VENUE> <DAY>: rebuild_seconds ok <s>s, consolidate_catalog ok <s>s, build_candles ok <s>s, compare_klines ok|findings <s>s, prune_catalog ok <s>s; peak child RSS <M> MB; outcome ok|findings|FAILED; run id <id>
 ```
+
+Run standalone, `python -m archive.rebuild_seconds --day D --apply` logs `run id <id>; pass
+--rebuilt-by <id> to compare_klines`: `python -m archive.compare_klines` compares and records
+nothing without `--rebuilt-by` (`reconcile.not_rebuilt`, exit 1), and with it compares only the
+instruments named by `--rebuilt IID` (repeatable). Known limit: standalone, that id
+is the operator's attestation -- `rebuilt` is never persisted, so the tool cannot check it.
+Every archive tool is `python -m archive.<tool>` (`rebuild_seconds`, `consolidate_catalog`,
+`prune_catalog`, `repair_catalog`, `compare_klines`, `nightly`, `backfill_bars`,
+`crosscheck_errors`, `tools.measure_lag`, `tools.migrate_open_interest`,
+`tools.normalize_snapshot_schema`); the old `collector_core.*`/`dydx_collector.*` paths still run
+them with a deprecation warning until Story 25.3. Each collector holds
+`<catalog>/.capture-<VENUE>.lock` while it runs, and `repair_catalog --apply` refuses that venue
+until it is stopped.
 
 Details of each step: `docs/DATA_DICTIONARY.md` §6.
 
-**`make consolidate`** (`collector_core.consolidate_catalog --apply` in the collector image) walks
+**`make consolidate`** (`archive.consolidate_catalog --apply` in the collector image) walks
 every `data/<type>/<instrument>/` leaf and merges each closed UTC day's files into one; today's
 files are never read or rewritten, and a batch that crosses midnight stays as it is. `bar` leaves
 are skipped: `backfill_bars` plans from their file intervals, so merging two runs across a missing

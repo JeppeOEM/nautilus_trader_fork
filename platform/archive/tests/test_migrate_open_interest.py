@@ -14,14 +14,16 @@
 # -------------------------------------------------------------------------------------------------
 """Migration of legacy per-venue open-interest directories into custom_open_interest/."""
 
+import time
 from decimal import Decimal
 from pathlib import Path
 
 import pyarrow.parquet as pq
 import pytest
 from kernel.open_interest import OpenInterest
+from observability import error_ledger
 
-from collector_core import migrate_open_interest
+from archive.tools import migrate_open_interest
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
@@ -111,3 +113,36 @@ def test_resumes_after_crash_between_replace_and_unlink(tmp_path: Path) -> None:
     assert migrate_open_interest.main(args) == 0
     assert not src.exists()
     assert len(_files(tmp_path, "custom_open_interest")) == 3
+
+
+def test_an_open_day_file_is_skipped_ledgered_and_exit_two(tmp_path: Path) -> None:
+    error_ledger.reset()
+    _legacy_catalog(tmp_path)
+    src = _files(tmp_path, "custom_bybit_open_interest")[0]
+    today = time.strftime("%Y-%m-%d", time.gmtime())
+    todays = src.with_name(f"{today}T00-00-00-000000000Z_{today}T00-00-01-000000000Z.parquet")
+    src.rename(todays)
+    args = ["--catalog", str(tmp_path), "--backup-dir", str(tmp_path / "bak"), "--apply"]
+    assert migrate_open_interest.main(args) == 2
+    assert todays.exists()  # left for tomorrow's run
+    assert len(_files(tmp_path, "custom_open_interest")) == 2
+    assert error_ledger.counts() == {"migrate_open_interest.open_day": 1}
+
+
+def test_a_failing_file_is_ledgered_and_the_run_goes_on(tmp_path: Path) -> None:
+    error_ledger.reset()
+    _legacy_catalog(tmp_path)
+    broken = _files(tmp_path, "custom_bybit_open_interest")[0]
+    broken.write_bytes(b"not parquet")  # e.g. a torn file
+    args = ["--catalog", str(tmp_path), "--backup-dir", str(tmp_path / "bak"), "--apply"]
+    assert migrate_open_interest.main(args) == 2
+    assert broken.read_bytes() == b"not parquet"  # left as it was
+    assert len(_files(tmp_path, "custom_open_interest")) == 2  # the others migrated
+    assert error_ledger.counts() == {"migrate_open_interest.error": 1}
+    assert str(broken) in error_ledger.last_details()["migrate_open_interest.error"]
+
+
+def test_a_missing_catalog_is_ledgered_and_exit_one(tmp_path: Path) -> None:
+    error_ledger.reset()
+    assert migrate_open_interest.main(["--catalog", str(tmp_path / "nope")]) == 1
+    assert error_ledger.counts() == {"archive.catalog_missing": 1}

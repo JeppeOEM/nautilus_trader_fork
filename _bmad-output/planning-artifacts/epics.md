@@ -2826,6 +2826,28 @@ So that a rebuild can never zero rows over an archive gap, a reconcile can never
 **When** the story is merged
 **Then** the moved modules are pure re-export shims with `REMOVE_AFTER = "25-3-..."`, the collector image `COPY`s `archive`, the Makefile test lists include `archive/tests`, `docs/DATA_DICTIONARY.md` §6 and `DATA_INTEGRITY_AUDIT.md` D-36/D-45..D-51 cite the new paths, and `platform/CLAUDE.md` DATA-05/DATA-06 name `archive.` tools
 
+### Story 25.1a: Rankings web-only: the ranking-mode toggle moves to the web and the TUI's Coins pane is deleted
+
+Pulled forward from Epic 29 on 2026-09-26 (operator decision: "from now on all rankings are in the web only; the TUI is for controlling bots and collector settings"). It runs before Story 25.2 so that 25.2 (ranking context), 25.4 (collection control) and 26.3 (closeout) never refactor, shim or re-point modules that are about to be deleted: `bot_tui/coins_pane.py` imports `views.ranking_columns`, `bot_tui/coin_detail_state.py` imports `views.coin_detail` and `kernel.second_snapshot`, and `bot_tui/ranking_state.py` owns the only ranking-mode publisher. Rules: TUI-02, TEST-04, MR4; `rankings:live`, `collector:status`, `collector:control` and `bots:*` payloads unchanged.
+
+As the bot and collector operator,
+I want the TUI to show only what it controls (bots and the collector) and the rankings, including the ranking-mode switch, to live in the web only,
+So that there is exactly one rankings UI and no later refactor carries TUI rankings code that is about to be deleted.
+
+**Acceptance Criteria:**
+
+**Given** the ranking mode is global and last-write-wins (`ranking_engine` today; Story 25.2's `RankingBoard` keeps the same rule) and today only the TUI's `m` key can change it
+**When** the story ships
+**Then** `data_api` gains `PUT /api/rankings/mode` (`{"mode": "volume" | "volatility"}`) that publishes the same Redis message `bot_tui/ranking_state.py`'s `publish_mode_toggle` sends today (recorded byte-for-byte in a replay test), the rankings page shows the current mode from the `rankings:live` payload with a two-state control next to the venue chips, an unknown mode is a 422, and `docs/DATA_DICTIONARY.md` §3 records the channel and payload; the web control ships in the same commit that removes the TUI's `m` key below, so the mode is never unreachable
+
+**Given** `bot_tui/{coins_pane,coin_detail,coin_detail_state,ranking_state}.py` and the Coins-pane parts of `bot_tui/app.py` (the `/` inline filter, the `m` mode toggle, the `o` dashboard deep-link, the Enter Coin-detail view, the `j`/`k` row focus, the stale-feed banner, `COLD_OPEN_TEXT`/`NO_MATCHES_TEXT`)
+**When** the story ships
+**Then** those four modules and their tests are deleted, `app.py` starts on the Bots pane with the Collector pane as the second and last pane, no `rankings:live` or `snapshots:raw` subscription remains anywhere under `bot_tui/` (a grep test), the footers and the `:help` text list only the keys that still exist, `views/ranking_columns.py` keeps `RANKING_COLS` as the web's single column source (its urwid colour tuple members and `NEGATIVE_COLOR`/`POSITIVE_COLOR` are removed only if the web does not read them; record which), `bot_tui/tests` pass with real Redis where they did before, and `test_boundaries.py`'s legacy map loses the entries for the deleted modules
+
+**Given** MR4
+**When** the story is merged
+**Then** `test_images.py`'s expectations for the `bot_tui` image drop the removed modules, `ARCHITECTURE.md`'s module map shows `bot_tui` reading `bots:*` and `collector:status` only, `docs/BOT_OPERATIONS.md` and `platform/README.md`'s TUI section describe the two-pane TUI, and the Story 22.10 AC that names "the bot_tui coins pane" is struck in `epics.md` with an amendment pointing here
+
 ### Story 25.2: `ranking/` context: `RankingBoard` replaces the module globals
 
 As a trader watching the rankings,
@@ -3185,3 +3207,102 @@ So that `_second_loop` stalls stop recurring, live data stays fresh, and no late
 **Given** `tests/fixtures/hotpath_baseline.json` and the DDD spine
 **When** the code fixes are merged
 **Then** `make hotpath-baseline` is re-run on the same CPU the current baseline names and the lower figures are committed as the new baseline (so Epic 26's and later refactors are held to the improved cost, not the old one), `docs/DATA_INTEGRITY_AUDIT.md` D-65 records the before/after per-message allocation and wall-time figures per venue, and the DDD spine's Deferred section gains one entry: "Capture in Rust: a `platform/capture_rs` binary over `nautilus-adapters`/`nautilus-model`/`nautilus-persistence`, no Python object per message; upgrade path once the Python budget from Epic 28 is exhausted; Go is not an option (no Nautilus bindings)"
+
+## Epic 29: Rankings web-only across exchanges, the TUI as a control surface, and the venue cutover from dYdX to Bybit + Hyperliquid
+
+Product epic, added 2026-09-26 from the operator's decision to stop collecting from dYdX and collect Bybit `BTCUSDT`/`ETHUSDT` and Hyperliquid `SOL` instead, with the switch made only once the new venues are proven end to end. Two facts shape it. First, the rankings are already multi-venue: Story 22.10 lists one row per collected instrument from every venue, each rank entry carries `venue`/`venue_kind`/`market` (`ranking_engine/engine.py:751-754`; `RankingBoard` in `ranking/` after Story 25.2), and the web page has per-viewer venue chips plus `venue = X` filter conditions (`frontend/src/pages/RankingsPage.tsx:28-46,200-201,279-283`). What is missing is a way to see and sort the same coin across exchanges: the exchange lives only in the id's suffix and there is no base-symbol field, so `BTC` on Bybit and `BTC` on Hyperliquid cannot be lined up. Second, the operator wants rankings in the web only: `bot_tui` keeps its Bots pane and its Collector pane (Story 6.1: the dYdX plan's pins, excludes, `:start`, `:pintop`, every action through `collector:control`) and loses the Coins pane, the Coin-detail view and the `rankings:live` listener. The one thing that pane owns which nothing else provides is the `m` ranking-mode toggle (`bot_tui/ranking_state.py:100-113` publishes it); the web gains it before the TUI loses it. Order: 29.1 → 29.2 → 29.3 → 29.4 → 29.5 (the TUI rankings removal and the web ranking-mode toggle were pulled forward into Story 25.1a on 2026-09-26) (29.4 and 29.5, added the same day, give the TUI a name-only market browser to add coins from and a per-exchange count of what is collected; how many coins to collect is the operator's decision, made from outside research, so no cap or capacity estimate is built for Bybit or Hyperliquid). The epic runs after Epic 25 (29.1 reads the rank entry `RankingBoard` publishes and 29.3's static Bybit/Hyperliquid lists are the `CollectionPlan`s Story 25.4 defines) and is independent of Epics 26–28. Rules that bind it: 25.2's wire rule (rank entry fields are added, never renamed or removed), SIGNAL-01 (the venue and symbol are derived from the id on read, in one kernel helper, never stored twice), TUI-02, DATA-01 (a stopped venue's rows age out as stale, never hidden), TEST-04, MR4 (docs, images and Makefile updated in the same commit), and the archive rule that a venue's catalog is never deleted by a cutover: dYdX's days keep being verified and pruned by the nightly until they age out under the normal retention.
+
+### Story 29.1: Exchange and Symbol on the web rankings, sortable and filterable
+
+As a trader comparing the same coin on several exchanges,
+I want every rankings row to show its exchange and its base symbol as real columns I can sort and filter on,
+So that `BTC` on Bybit and `BTC` on Hyperliquid line up next to each other.
+
+**Acceptance Criteria:**
+
+**Given** `kernel/venues.py` (`venue_of`, `venue_kind`, `market_kind`, `market_suffix`, `bybit_category`)
+**When** the story ships
+**Then** it gains `base_symbol(instrument_id) -> str`, pure and tested for every id shape the three venues emit (`BTC-USD-PERP.DYDX` → `BTC`, `BTCUSDT-LINEAR.BYBIT` and `BTCUSDT-SPOT.BYBIT` → `BTC`, `SOL-USD-PERP.HYPERLIQUID` → `SOL`, plus a Bybit id whose quote is not `USDT` (`USDC`, `USD`) and an id with a numeric prefix such as `1000PEPEUSDT-LINEAR.BYBIT` → `1000PEPE`), with the Bybit quote list a named constant and a `Known limit:` naming the ceiling (a symbol whose base itself ends in a quote name) and the upgrade path (the venue's instrument definition, which the catalog stores); the rank entry gains `symbol` computed by it next to `venue` (added field, 25.2's wire rule), `docs/DATA_DICTIONARY.md` §3 lists it, and the `rankings:live` replay test from 25.2 is extended with the new field
+
+**Given** `views/ranking_columns.py`'s `RANKING_COLS` (the single column-metadata list the web mirrors) and `RankingsPage.tsx`
+**When** the story ships
+**Then** the table shows `Symbol` and `Exchange` as pinned columns between Rank and Instrument (rendered from `symbol` and `venue`, with `market` shown as a small tag on the exchange cell: `BYBIT · linear`, `BYBIT · spot`), both sortable (sorting by Symbol groups the same coin across exchanges, ties broken by the current rank), both available as `=` conditions in `FilterPanel` alongside the existing `venue`/`venue_kind` text fields, the venue chips unchanged, the instrument column narrowed accordingly without misaligning later columns (TUI-02), and `RankingsPage.test.tsx` covers: two rows with the same symbol on different exchanges sort adjacent, an exchange filter hides the other venue's rows, and a `symbol = BTC` condition shows both `BTC` rows
+
+### Story 29.2: Collector pane shows every venue's plan
+
+The TUI's rankings removal that used to open this story moved to Story 25.1a (2026-09-26), so it lands before Epic 25's refactors; this story keeps only the Collector pane change, which needs Story 25.4's per-venue `CollectionPlan`.
+
+As the collector operator,
+I want the Collector pane to show every venue's collected set, not only dYdX's,
+So that the TUI is the one place I see and control what each exchange collects.
+
+**Acceptance Criteria:**
+
+**Given** the Collector pane (Story 6.1) and Story 25.4's `CollectionPlan` per venue
+**When** the story ships
+**Then** the pane shows every venue's plan, not only dYdX's: one section per venue with its collected set, pins, excludes and cap, the applied-set report (`Applied(subscribed, unsubscribed, failed)`, `pending` instruments marked) from `collector:status`, and the existing `p`/`x`/`:start`/`:pintop` actions enabled for dYdX and shown read-only with the reason ("static plan: edit `<venue>_collector/config.toml`") for Bybit and Hyperliquid until their plans accept commands; `collector:status` and `collector:control` payloads are byte-identical (replay tests), and `docs/BOT_OPERATIONS.md` and `platform/README.md`'s TUI section describe the two-pane TUI
+
+### Story 29.3: Venue cutover: Bybit `BTCUSDT`/`ETHUSDT` and Hyperliquid `SOL` proven, then dYdX stopped
+
+As the platform operator,
+I want the two new venue sets collected and proven end to end (rankings, chart, candles, nightly verification) before the dYdX collector is stopped, with dYdX's archive left to the normal retention,
+So that the switch never leaves a gap in what the platform shows and never deletes data.
+
+**Acceptance Criteria:**
+
+**Given** `bybit_collector/config.toml` (`BTCUSDT`/`ETHUSDT` linear + spot today) and `hyperliquid_collector/config.toml` (`BTC-USD-PERP`/`ETH-USD-PERP` today)
+**When** the story ships
+**Then** Hyperliquid's list becomes `["SOL-USD-PERP.HYPERLIQUID"]` (decision 2026-09-26: Solana on Hyperliquid, BTC/ETH on Bybit; the two Hyperliquid majors are dropped, reversible by config, recorded in the file's comment), Bybit's list keeps the four ids (linear for mark/funding/OI, spot for the spot book; the comment says why both stay), `ranking/`'s Hyperliquid volume poll and `views` need no change (proven by the existing tests), and `docs/DATA_DICTIONARY.md` §1's collected-set table is updated
+
+**Given** `docker-compose.yml`'s `collector` service (dYdX) started by every `make up`
+**When** the story ships
+**Then** the service is gated by `profiles: ["dydx"]` the same way `live-paper` and `bot_tui` are, `make up` no longer starts it, `make up-dydx` / `make down-dydx` start and stop it explicitly, `make redeploy-all` and `redeploy-no-paper` follow, the nightly cron line keeps its `VENUE=DYDX` step (the archive keeps verifying and pruning dYdX's days until they age out; the deploy checklist says when the line may be dropped: once `verified_days` holds no dYdX day younger than the trade retention), `ranking`'s dYdX volume poll stays (a venue with no fresh rows publishes none, DATA-01), and every doc, knowledge-base entry and example string that uses a `.DYDX` id as the default (`frontend/src/pages/docs/kbData.ts`, `AlertsPage.tsx`'s example, `README.md`, `docs/*.md`) uses `BTCUSDT-LINEAR.BYBIT` instead, with the dYdX form kept where the text is about dYdX
+
+**Given** the acceptance gate the operator asked for ("once it works")
+**When** the story parks `awaiting-operator`
+**Then** `docs/DEPLOY_CHECKLIST.md` gains a §8 "Venue cutover" runbook with these checks in order, each with the command or URL and the expected result: (1) `make redeploy-all` with the new configs, dYdX still running; (2) within 10 minutes the rankings page shows `BTCUSDT-LINEAR.BYBIT`, `ETHUSDT-LINEAR.BYBIT`, `BTCUSDT-SPOT.BYBIT`, `ETHUSDT-SPOT.BYBIT` and `SOL-USD-PERP.HYPERLIQUID` fresh, with `volume24h` present for the linear and Hyperliquid rows, and an `Exchange` filter for each venue shows only its rows; (3) the chart loads 1 m candles and a forming bar for each of the five; (4) `GET /api/errors` shows no new collector site for either venue over one hour; (5) the next nightly (`VENUE=BYBIT` and `VENUE=HYPERLIQUID`) rebuilds, reconciles and marks that day `verified` for every one of the five (`verified_days`, `reconcile.*` ledger flat); (6) only then `make down-dydx`, and the rankings show dYdX's rows ageing out as stale and then gone, never hidden; (7) `make up` on a fresh boot brings up Bybit and Hyperliquid only. The story is confirmed done (`bmad-loop confirm`) only after step 7, and the checklist records the date and the last dYdX day collected
+
+### Story 29.4: Runtime collection control for Bybit and Hyperliquid
+
+As the collector operator,
+I want Bybit's and Hyperliquid's collected sets to be plans I can change while the collector runs, exactly as dYdX's is,
+So that adding a coin on any venue is one control command with an applied-set report, never a config edit and a container restart.
+
+**Acceptance Criteria:**
+
+**Given** Story 25.4's `CollectionPlan` (Bybit/Hyperliquid as static tuples applied once) and `ControlService` (dYdX only)
+**When** the story ships
+**Then** every venue's plan accepts `add`/`remove`/`pin`/`unpin`/`exclude`/`reload` through the one `ControlService` and the one `collector:control` channel (payload gains a `venue` field, added not renamed; a message without it means dYdX for compatibility, replay-tested), the Bybit and Hyperliquid collectors run the same control loop, status loop and hot-reload as dYdX (`collector:status` per venue, byte-identical shape), the plan file for each venue is written back through `CollectionPlanStore` with the same frozen key set (`instruments` stays a flat list for these two venues), and `Collector.apply(plan_diff)` returns `Applied(subscribed, unsubscribed, failed)` for them with `pending` on failure and one `collector.subscribe_failed` ledger entry per attempt
+
+**Given** `platform/CLAUDE.md`'s "Adding a venue" rule that a venue's limits are investigated, never inherited
+**When** the story ships
+**Then** each venue's WebSocket subscribe/unsubscribe limits are measured on the live endpoint (Bybit: args per request and requests per second; Hyperliquid: subscriptions per connection and per second) and recorded in `docs/DATA_DICTIONARY.md` §1 with the date and method, the control loop paces subscribes under the measured limit (a named constant per venue with the citation). Bybit's and Hyperliquid's plans have no `cap` (decision 2026-09-26: the operator decides how many to collect from outside research); `CollectionPlan`'s `cap` stays optional and dYdX keeps its 30
+
+**Given** DATA-01 and the archive
+**When** an instrument is removed from a plan
+**Then** its book state is cleared, its rows stop, its catalog files are untouched (retention alone deletes, Story 25.1), and the rankings show it ageing out as stale, never hidden
+
+### Story 29.5: Market browser in the Collector pane: search a venue's coins by name and add them
+
+As the collector operator,
+I want to type a coin name, see the matching markets each venue lists, and add one to that venue's collection with one key, with the pane showing how many coins I collect on each exchange,
+So that I never look up an instrument id by hand or edit a config file to start collecting a coin.
+
+**Acceptance Criteria:**
+
+**Given** the ranking engine's per-venue market polls (`ranking/` after 25.2: every venue's full market list with 24 h USD volume, refreshed each cycle)
+**When** the story ships
+**Then** `ranking` publishes the per-venue market list on a new Redis channel `markets:live` (one message per poll: `{venue, ts, markets: [{instrument_id, symbol}]}`, symbol from `kernel.venues.base_symbol`; the list is names only by decision 2026-09-26, no volume or metrics), the TUI's Collector pane gains a `/` search box that filters that list by symbol or instrument id across all venues (case-insensitive substring, matching the web's filter semantics), each result row shows the name only (the instrument id, e.g. `SOL-USD-PERP.HYPERLIQUID`, which already names the coin, market and exchange) plus a `collected` marker when the id is in that venue's applied set; no volume, price or other metric is shown (decision 2026-09-26), and a cold open before the first message shows "waiting for markets:live" rather than an empty list
+
+**Given** a focused result row and Story 29.4's control plane
+**When** the operator presses `a`
+**Then** the pane sends `add` for that instrument to its venue through `collector:control` behind the same type-to-confirm guard as `s`/`x`, the row turns `pending` until `collector:status` reports it applied (or `failed`, with the reason from the status payload), and an id already collected or excluded is refused in the pane with the reason before any message is sent
+
+**Given** the operator decides how many coins to collect per exchange from outside research
+**When** the pane renders
+**Then** each venue section's header reads `<VENUE>: N collected` (N = that venue's applied set, `pending` ones counted separately as `+P pending`), the count updates from `collector:status` without a reload, and the pane enforces no Bybit or Hyperliquid limit and shows no capacity estimate; dYdX's existing cap of 30 still refuses `a` with "cap reached"
+
+**Given** MR4
+**When** the story is merged
+**Then** `docs/DATA_DICTIONARY.md` §3 records `markets:live`, `docs/BOT_OPERATIONS.md` documents the browser keys, `bot_tui/tests` cover the search, the add flow with a fake control channel, the per-exchange count, dYdX's cap refusal and the cold open, and `test_boundaries.py` records `bot_tui` reading `markets:live` alongside `bots:*` and `collector:status`
+

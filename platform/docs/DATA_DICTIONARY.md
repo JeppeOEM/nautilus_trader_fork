@@ -48,7 +48,7 @@ PyO3 bindings don't expose the fields another way.
   `kernel.fold.fold_trades` (exact: `Quantity.raw` sums, `Price.raw` comparisons)
   into that second's `DydxSecondSnapshot` (§1.7). Live is provisional -- arrival-timed on
   dYdX, exchange-timed on Bybit/Hyperliquid (story 22.12, §1.7) -- and
-  `collector_core.rebuild_seconds` re-derives closed days from this archive (§6).
+  `archive.rebuild_seconds` re-derives closed days from this archive (§6).
 - **Late trades (venue mode):** a trade processed after its exchange second closed is still
   archived here, counted (`collector.late_trade` in the error ledger, once per instrument per
   flush) and left out of every live row; the rebuild places it in its own second. A trade
@@ -109,8 +109,9 @@ have no snapshot row, so their backfilled trades are rebuild orphans.
   raw, high-volume type, opt-in per instrument. Independently of storage, every
   pinned/liquid instrument's deltas are always applied to an in-memory `OrderBook`
   (`_apply_deltas`, `collector.py`) used to build `DydxSecondSnapshot` (§1.7).
-- **Retention:** per-instrument `retain_hours` in `config.toml`, pruned by
-  `_prune_delta_retention` (`collector.py`); `None` = kept forever.
+- **Retention:** per-instrument `retain_hours` in `config.toml`, pruned by the nightly
+  `archive.prune_catalog --dydx-plan` (`RetentionPolicy`'s `delta_retention` rule, §5; Story 25.1
+  deleted the in-collector `_prune_delta_retention`); `None` = kept forever.
 - **No sequence-gap detection:** dYdX's WS `sequence` field is connection-global, not
   per-market, so it can't be used to detect a dropped delta for one instrument — see
   `_apply_deltas`'s docstring (`collector.py`) and `platform/.planning/debug/
@@ -128,7 +129,7 @@ have no snapshot row, so their backfilled trades are rebuild orphans.
 
 #### Backfilled `Bar`s (Story 22.9)
 
-The one `Bar` path that *does* write to the catalog: `python -m collector_core.backfill_bars`, an
+The one `Bar` path that *does* write to the catalog: `python -m archive.backfill_bars`, an
 offline operator CLI that fetches the venues' own historical klines over REST for **Bybit and
 Hyperliquid only** (dYdX bars are derived from its 1 s archive instead).
 
@@ -241,7 +242,7 @@ with its class name, Arrow schema and `snapshots:raw` encoding unchanged (the ca
   replay on it. A Bybit/Hyperliquid row therefore reaches Redis and Parquet
   `1 + hold_back_seconds` after its second began; freshness readers stamp arrival
   (`ranking_engine._LAST_SEEN`), so that lag never reads as a stale feed. `hold_back_seconds`
-  is set per venue from `python -m collector_core.measure_lag` (the per-kind distribution of
+  is set per venue from `python -m archive.tools.measure_lag` (the per-kind distribution of
   `ts_init - ts_event`); it only makes fewer trades late, the rebuild is what makes a second
   correct (audit D-50).
 - **Built by:** `collector_core/collector.py`'s `Collector._second_loop`, every
@@ -277,7 +278,7 @@ Moved from `collector_core/` to the shared kernel in Story 23.2; class name (hen
   via REST poll, Hyperliquid via WebSocket (`OpenInterest.from_pyo3`). Catalog directory
   `data/custom_open_interest/`. Replaces `DydxOpenInterest`/`BybitOpenInterest`/
   `HyperliquidOpenInterest` (history in `custom_{dydx,bybit,hyperliquid}_open_interest/` moves
-  with `python -m collector_core.migrate_open_interest`, audit D-40). The dYdX-specific
+  with `python -m archive.tools.migrate_open_interest`, audit D-40). The dYdX-specific
   notes below describe `dydx_collector/open_interest.py`, which keeps the poll and
   `classify_liquidity`.
 
@@ -351,7 +352,7 @@ service name, via `ERROR_LEDGER_SERVICE`).
   `last_start_ns is not None` before reading it as "since start".
 - **Downstream use:** `GET /api/errors`'s `services` block (per-service restart count and
   per-site totals since the last `process_start` / since an optional `?since_ns=`);
-  `python3 -m collector_core.crosscheck_errors` (§6 of `docs/DEPLOY_CHECKLIST.md`), which
+  `python3 -m archive.crosscheck_errors` (§6 of `docs/DEPLOY_CHECKLIST.md`), which
   matches a gap in §1.7's second-snapshot rows against these files within the 300 s skew bound
   `kernel.clocks.MAX_TS_INIT_SKEW_NS` **of one of the gap's own edges** — never across its
   interior — before calling it `UNEXPLAINED`.
@@ -703,48 +704,48 @@ or `ranking_engine/`.
 
 ## 5. Retention: how long is each type kept, and why the catalog keeps growing
 
-Two independent pruning mechanisms exist. Neither one bounds the data that actually
-accumulates day to day, which is why the catalog only ever grows.
+Every catalog file that leaves the archive is chosen by one policy,
+`archive.domain.retention.RetentionPolicy`, and deleted by one executor,
+`archive.application.prune` through `CatalogFiles.delete` (Story 25.1; before it the dYdX
+collector ran a second pruner of its own, `_prune_loop`, under no lock). It runs as
+`python -m archive.prune_catalog` (the nightly's last step, and `make prune`), under the catalog
+maintenance lock, and never deletes a file whose span reaches the current UTC day. Four rules;
+each deletion is logged with its rule and reason. None of them bounds the data that actually
+accumulates day to day for collected instruments, which is why the catalog only ever grows.
 
-**1. `Collector._prune_loop` (`collector.py`), running inside the collector
-process itself.** Every `min(active retain_hours) * 900` seconds (≥ 900s floor,
-`_prune_interval_seconds`), it deletes catalog files — across *every* data type, not
-just one — for two groups of instrument only:
+**1. Dropped instruments (`dropped_instrument`, dYdX only, `--dydx-plan`).** Every DYDX leaf whose
+instrument the collection plan (`dydx_collector/config.toml`'s `instruments`, read through
+`dydx_collector.config.load_config`) does not collect loses every data type except `trade_tick`
+once its files end more than `non_config_retain_hours` ago -- **currently `4` hours**. This is why
+`crypto_perpetual`/`instrument_status`/etc. exist for ~140 markets on disk even though only the
+configured ones are subscribed: the markets channel is global, so mark/index price, funding rate
+and instrument status/definitions get written for every market dYdX lists, and only the
+configured ones are exempt. Known limit: it runs nightly on closed UTC days only, so the effective
+floor is "the day closes, plus the next nightly" (about 24 h worst case), where the old 15-minute
+loop pruned intra-day; and a dropped instrument is now any DYDX leaf not in the plan (a delisted
+market's leftovers age out too), not only a market the indexer still lists. An empty plan file is
+refused, never read as "collect nothing". Upgrade path: a capture-exclusive retention pass over
+closed files run more often than nightly.
 
-- Any instrument in `config.toml` with `pinned = false` (a legacy state — nothing
-  creates one today; every instrument this collector actively adds is pinned by
-  definition).
-- Any market dYdX lists that *isn't* in `config.toml` at all, or was just dropped by a
-  `stop`/`unpin` control action (`_prune_candidates`, `collector.py`) — this is
-  why `crypto_perpetual`/`instrument_status`/etc. exist for ~140 markets on disk even
-  though only the 29 in `config.toml` are actually subscribed: the markets channel is
-  global, so mark/index price, funding rate, and instrument status/definitions get
-  written for every market dYdX lists, and only the ~29 configured ones are exempt from
-  this prune.
+**2. Per-instrument raw `OrderBookDeltas` retention (`delta_retention`, dYdX only).** `retain_hours`
+on an `InstrumentEntry`, only meaningful if that same entry also sets
+`store_order_book_deltas = true`: its `order_book_deltas` files ending more than that many hours
+ago are deleted; `None` = unlimited. **None of the 29 instruments in the current `config.toml`
+set `store_order_book_deltas = true`**, so no raw deltas are being written at all right now
+(`order_book_deltas/` is an empty directory) and this rule currently has nothing to do.
 
-The retention window for that non-pinned/unknown group is `non_config_retain_hours` in
-`config.toml` — **currently `4` hours**. It applies uniformly to every data type.
+**3. Plain age retention (`age`, `--types T --days N`, `make prune`)** -- `make prune` targets
+`order_book_deltas` at a flat **14-day** global cutoff, regardless of pinned status. Since
+nothing is stored there today (see above), running it currently frees nothing. `trade_tick` is
+refused in `--types`, and rule 1 skips it too: trades have their own policy (4).
 
-**2. Per-instrument raw `OrderBookDeltas` retention** (`retain_hours` on an
-`InstrumentEntry`, only meaningful if that same entry also sets
-`store_order_book_deltas = true`) — enforced by the same loop via
-`_prune_delta_retention` (`collector.py`). **None of the 29 instruments in the
-current `config.toml` set `store_order_book_deltas = true`**, so no raw deltas are
-being written at all right now (`order_book_deltas/` is an empty directory) and this
-mechanism currently has nothing to do.
-
-**3. `collector_core/prune_catalog.py` / `make prune`** — a separate, manual/cron-only
-script, not run by the collector itself (moved from `dydx_collector/` by story 22.13; report
-only unless `--apply`). `make prune` targets `order_book_deltas` at a flat **14-day**
-global cutoff, regardless of pinned status. Since nothing is stored there today (see
-above), running it currently frees nothing. `trade_tick` is refused in `--types`, and
-mechanism 1 above skips it too: trades have their own policy (4).
-
-**4. Trade retention, gated on reconciliation** (`prune_catalog --candles-dir ...
+**4. Trade retention, gated on reconciliation (`trade`)** (`archive.prune_catalog --candles-dir ...
 --trade-retention-days 7`, run by `make nightly`): a `data/trade_tick/<iid>/` file is
 deleted only when every UTC day its name spans is older than 7 days **and** that
-instrument-day's `verified_days` row (`candles_<venue>.db`, written by `compare_klines`)
-is `pass`. Otherwise it is kept and listed with its reason (`unverified` / `failed`).
+instrument-day's `verified_days` row (`candles_<venue>.db`, written by `archive.compare_klines`,
+read through the `VerifiedDays` port) is `pass` -- the `ArchiveDay` is `verified`, the only status
+`released` accepts. Otherwise it is kept and listed with its reason (`unverified` / `failed`).
+Each deleted trade file is first recorded as a `pruned` archive-gap marker.
 
 **Known limit:** raw trades exist to correct and prove the aggregates (the rebuild and the
 kline reconciliation), not as a tick-level research archive, so the window is 7 days after
@@ -772,8 +773,8 @@ set by the operator, that the prune honours.
 | Instrument definitions (`crypto_perpetual`) | **Unlimited** | 4h |
 | `Bar` / `custom_dydx_minute_bar` | **Dead legacy data.** Written by an earlier pre-pivot architecture (§1.3 — the collector no longer calls `subscribe_bars` at all); nothing writes new files here and nothing prunes the old ones. Safe to delete manually if disk space matters; not wired into anything live. | — |
 
-**Bottom line:** every instrument you've configured is `pinned = true`, and pinned
-instruments are permanently exempt from `_prune_loop`. So for all 29 configured coins,
+**Bottom line:** every instrument you've configured is collected, and collected instruments
+are exempt from the dropped-instrument rule. So for all 29 configured coins,
 mark/index price, funding rate, open interest, instrument status, and the 1-second book
 snapshots (which now also carry trade OHLC) still accumulate forever with no built-in
 cap. Raw `TradeTick` is archived again since story 22.13 (§1.1), but bounded: a proven day
@@ -782,35 +783,93 @@ is released after 7 days (mechanism 4). The other unlimited types above still ne
 
 ---
 
-## 6. Nightly maintenance: rebuild, reconcile, release (story 22.13)
+## 6. Nightly maintenance: rebuild, reconcile, release (story 22.13, the `archive/` context since Story 25.1)
 
 `make nightly VENUE=<DYDX|BYBIT|HYPERLIQUID> [DAY=YYYY-MM-DD]` (default: yesterday, UTC)
-runs `collector_core.nightly`, each step its own process, stopping at the first failure:
+runs the `archive.nightly` saga, each step its own process (`python -m archive.<step>`), stopping
+at the first failure:
 
-1. `rebuild_seconds --apply` -- rewrites the day's snapshot trade columns from the raw
-   archive on `ts_event` (late trades move to their exchange second; the arrival row is
-   cleared). Rows before the instrument's first archived trade keep live values
+1. `rebuild_seconds --apply --result-file <saga temp>` -- rewrites the day's snapshot trade
+   columns from the raw archive on `ts_event` (late trades move to their exchange second; the
+   arrival row is cleared). Rows before the instrument's first archived trade keep live values
    (`not covered`), and so do rows inside an archive-gap marker (`<catalog>/_archive_gaps/<iid>.jsonl`, format
    `kernel.archive_markers`:
    a trade write that failed while its snapshots landed, a quarantined or a pruned trade file) --
-   the archive is known to miss trades their live values hold. A marker line that does not
-   parse, lacks a key, or holds a non-integer or inverted span makes the rebuild refuse that
-   instrument every night, naming the file and line, until the line is fixed by hand: guessing a
-   span could overwrite exactly the rows the marker protects. Trades with no covered row are
-   counted (`orphan trades`). An instrument-day with two rows in one second or mixed schemas is
-   refused and left untouched (exit 2, the chain continues).
+   the archive is known to miss trades their live values hold; those are counted `in gap`. A marker
+   line that does not parse, lacks a key, or holds a non-integer or inverted span makes the rebuild
+   refuse that instrument every night, naming the file and line, until the line is fixed by hand:
+   guessing a span could overwrite exactly the rows the marker protects. Trades with no covered row
+   are counted (`orphan trades`). The day's files are every snapshot file whose `ts_init` span
+   overlaps `[D, D end + MAX_TS_INIT_SKEW_NS]` -- a row of D can be sampled after midnight (venue
+   time closes second S at `S + 1 + hold_back_seconds`), so it may sit in a file that starts in
+   D+1 -- and rows are chosen by `ts_event` in D. Every write keeps the rows of the current UTC day
+   identical (`RewriteMode.KEEP_OPEN_DAY_ROWS`, verified against the original before the rename),
+   and all of an instrument-day's changed files are staged and verified before the first rename.
+   An instrument-day with two rows in one second, mixed schemas, a change to a row of the current
+   UTC day (`rebuild.open_day`) or a temp failing its read-back (`rebuild.verify`) is refused and
+   left untouched (exit 2, the chain continues); a rename failing part-way is `rebuild.error`
+   naming how many files were replaced (the rerun completes the day). The result file
+   (`{"venue", "day", "rebuilt", "refused"}`) is the run's rebuild proof -- `rebuilt` names only
+   instruments with snapshot rows that day, one with none is in neither list; the saga reads it
+   and a missing or unparsable one fails the step
+   (`nightly.rebuild_seconds`). `--apply` on the current UTC day is always refused
+   (`rebuild.open_day`, exit 1).
 2. `consolidate_catalog --apply --venue --days 2` -- one file per recent closed day and data type.
 3. `python -m candles.rebuild --day --venue --workers 1` -- refolds the day into
    `candles_<venue>.db` (the nightly step is still named `build_candles`).
-4. `compare_klines` -- every traded minute against the venue's own 1 m klines, exact
-   integer units (no tolerance), parsed from the venue's decimal strings. Bybit's klines are
-   seeded with the previous close, so our Bybit bars are put in that definition first
-   (wire-verified; see the tool's docstring). Each mismatch is a
-   `reconcile.kline_mismatch`; the verdict goes to `verified_days`. A per-instrument error (no
-   definition, fetch error, no venue history for the day, unrepresentable value) is a
-   `reconcile.error` with no verdict. Exit 2 = findings of either kind (the chain continues),
-   1 = run-level failure (stops). `--kline-source catalog` never writes `verified_days`.
-5. `prune_catalog --apply` -- the trade retention policy above.
+4. `compare_klines --rebuilt-by <run id> --rebuilt <iid> ... [--not-rebuilt <iid> ...]` -- every
+   traded minute
+   against the venue's own 1 m klines (`archive.infrastructure.klines_<venue>`), exact integer
+   units (no tolerance), parsed from the venue's decimal strings. Bybit's klines are seeded with
+   the previous close, so our Bybit bars are put in that definition first (wire-verified; see
+   `archive.application.reconcile_day`). Each mismatch is a `reconcile.kline_mismatch`; the verdict
+   goes to `verified_days` through the `ArchiveDay` transitions (rebuilt -> verified/mismatched,
+   stored `pass`/`fail`). Only instruments named by `--rebuilt` and not by `--not-rebuilt` are
+   compared (an allowlist); any other instrument on the day is `reconcile.not_rebuilt` and gets no
+   verdict; without `--rebuilt-by` nothing is compared or written (`reconcile.not_rebuilt`,
+   exit 1). A per-instrument error (no definition, fetch error, no venue history for the day,
+   unrepresentable value) is a `reconcile.error` with no verdict. Exit 2 = findings of any kind
+   (the chain continues), 1 = run-level failure (stops). `--kline-source catalog` never writes
+   `verified_days`.
+5. `prune_catalog --apply [--dydx-plan]` -- the retention rules above (§5).
 
-One summary line per venue (per-step outcome and seconds, peak child RSS). The cron line
-and the first-run measurements still owed are in `docs/DEPLOY_CHECKLIST.md`.
+One summary line per venue (per-step outcome and seconds, peak child RSS, the run id). The cron
+line and the first-run measurements still owed are in `docs/DEPLOY_CHECKLIST.md`.
+
+**Who writes what, offline (Story 25.1).** Every in-place Parquet rewrite by an archive tool --
+the rebuild, the consolidation's merge, `tools.migrate_open_interest`,
+`tools.normalize_snapshot_schema` -- is `archive.infrastructure.catalog_files.CatalogFiles`: it
+writes `<file>.archive.tmp` (zstd), reads it back, and renames it into place only when its full
+schema (Arrow metadata included) and row count match; a crash leaves only the temp file, which
+the next run of any archive tool deletes (with the pre-25.1 `*.rebuild.tmp`,
+`*.consolidate.tmp`, `*.parquet.tmp`). The only offline `ParquetDataCatalog.write_data()` callers
+are `archive.backfill_bars` (venue bars, §1.3) and `archive.repair_catalog` (cleared snapshot
+rows, through `delete_data_range` + `write_data`). No archive tool changes a row of the current
+UTC day: a whole-file rewrite (the migration tools), merge or delete of a file whose `ts_init` span
+reaches it is refused (`OpenDayWriteError`; ledgered `<tool>.open_day` and skipped), and the
+rebuild's row-preserving rewrite may touch such a file only with every row whose `ts_event` lies in
+the open day identical in value and order: capture is that day's one writer, and it writes each
+file once and never reopens it. A report-only run of any tool takes no lock. Each collector holds a shared `flock` on
+`<catalog>/.capture-<VENUE>.lock` for its whole run (pid and start time inside, informational;
+never unlinked -- a killed process's flock is released by the kernel), and
+`repair_catalog --apply` refuses that venue while it is held (`repair.capture_running`, exit 1);
+a collector starting while a tool holds it exclusively waits and ledgers
+`collector.capture_lock_wait` once. New ledger sites in Story 25.1: `reconcile.not_rebuilt`,
+`repair.capture_running`, `repair.open_day`, `rebuild.open_day` on `--apply` (the site existed),
+`consolidate.open_day`, `prune.open_day`, `migrate_open_interest.open_day`,
+`normalize_snapshot_schema.open_day`, `collector.capture_lock_wait`, `prune.bad_plan` (a plan
+file that is unreadable, empty, malformed, or holds a window that is not finite hours >= 0: exit 1,
+nothing pruned), `prune.error` (one file's stat/delete failed: skipped, the run goes on; with
+`prune.open_day` or a `marker_failed` keep, the run exits 2),
+`repair.error` (an instrument id with no venue, or a venue `kernel.venues` does not know: refused,
+never repaired without its capture lock), `archive.catalog_missing` (any archive tool given a
+catalog directory that does not exist: exit 1, nothing done), `migrate_open_interest.error` and
+`normalize_snapshot_schema.error` (one file failed -- unreadable, refused, a failed read-back or
+an I/O error: left as it was, the run goes on, exit 2)
+and `nightly.dydx_plan_missing` (a DYDX saga without `--dydx-plan`: the chain runs, plan retention
+is not applied, the outcome is findings). A trade file whose `pruned` marker could not be written is
+kept (`kept <iid> <day>: marker_failed`; the failure itself is `archive_gaps.write`), an unknown
+`verified_days` status keeps its day's files (`unknown_status:<s>`), and a dYdX instrument with any
+file reaching the current UTC day is never treated as dropped (a torn read of the plan file, which
+control rewrites in place, must not delete a collected coin's history). Every rewrite fsyncs the
+temp file before its rename and the directory after it, and before any source or file removal.

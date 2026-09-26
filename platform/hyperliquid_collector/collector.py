@@ -24,6 +24,7 @@ ledgered, the next message replaces the book. Pushes arrive ~5.4s apart (raw cap
 import asyncio
 import os
 from pathlib import Path
+from typing import ClassVar
 
 from candles.application.prune import loop as candle_prune_loop
 from candles.application.sink import CandleSink
@@ -42,6 +43,8 @@ CONFIG_PATH = Path(
 
 
 class HyperliquidCollector(Collector):
+    VENUE: ClassVar[str] = "HYPERLIQUID"
+
     def __init__(self, config: CoreConfig) -> None:
         client = HyperliquidClient(
             on_data=self._on_data,

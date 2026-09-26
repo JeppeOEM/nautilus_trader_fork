@@ -23,13 +23,20 @@ so the nightly rebuild keeps those rows' live values. One JSON line per gap in
 Invariant: the line bytes are the published format shared by capture (writes `write_failed`,
 `quarantined`), archive (writes `pruned`, reads all) -- `encode` must keep producing exactly what
 the original writer produced, and `decode` refuses a malformed line (`ValueError`) rather than
-guess a span. The file I/O and its failure ledgering live with the writers
-(`collector_core.archive_gaps`), never here.
+guess a span. The file I/O and its failure ledgering live with the writers -- capture's
+`collector_core.gap_markers` and archive's `archive.infrastructure.gap_markers` -- never here.
+
+`capture_lock_path` names the other file the two share: `<catalog>/.capture-<VENUE>.lock`, which
+a running collector holds a shared `flock` on for its whole life and an archive tool that must not
+collide with capture tries to take exclusively (Story 25.1). Only the path is here; the locking is
+each side's own.
 """
 
 import json
 from dataclasses import dataclass
 from pathlib import Path
+
+from kernel.venues import VENUE_KINDS
 
 
 GAPS_DIRNAME = "_archive_gaps"
@@ -53,6 +60,18 @@ class ArchiveGap:
 def path_for(catalog_path: str | Path, iid: str) -> Path:
     """Return the instrument's marker file under the catalog root."""
     return Path(catalog_path) / GAPS_DIRNAME / f"{iid}.jsonl"
+
+
+def capture_lock_path(catalog_path: str | Path, venue: str) -> Path:
+    """
+    Return the venue's capture lock file, `<catalog>/.capture-<VENUE>.lock`.
+
+    `venue` is the `kernel.venues` code (`"DYDX"`, `"BYBIT"`, `"HYPERLIQUID"`); anything else is a
+    `ValueError`: a misspelt venue would name a lock nobody holds, so the check would always pass.
+    """
+    if venue not in VENUE_KINDS:
+        raise ValueError(f"unknown venue {venue!r}: expected one of {sorted(VENUE_KINDS)}")
+    return Path(catalog_path) / f".capture-{venue}.lock"
 
 
 def encode(gap: ArchiveGap) -> str:

@@ -70,3 +70,14 @@ def test_a_span_that_would_protect_no_row_is_refused(line: str) -> None:
     """An inverted or truncated span would match no row, so the rebuild would overwrite them."""
     with pytest.raises(ValueError, match="archive-gap marker"):
         archive_markers.decode(line)
+
+
+def test_the_capture_lock_is_named_by_the_venue_code(tmp_path: Path) -> None:
+    assert archive_markers.capture_lock_path(tmp_path, "BYBIT") == tmp_path / ".capture-BYBIT.lock"
+    assert archive_markers.capture_lock_path(str(tmp_path), "DYDX").name == ".capture-DYDX.lock"
+
+
+@pytest.mark.parametrize("venue", ["bybit", "BYBIT.LINEAR", ""])
+def test_a_capture_lock_for_an_unknown_venue_is_refused(tmp_path: Path, venue: str) -> None:
+    with pytest.raises(ValueError, match="unknown venue"):
+        archive_markers.capture_lock_path(tmp_path, venue)

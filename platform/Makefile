@@ -146,7 +146,7 @@ build-insecure:
 TEST_SOURCE_MOUNT := -v $(REPO_ROOT):/src:ro -e PLATFORM_SOURCE_DIR=/src/platform
 test:
 	$(COMPOSE) run --rm --no-deps -e HOME=/tmp -e USER=collector $(TEST_SOURCE_MOUNT) collector \
-		python3 -m pytest research/tests alerting/tests views/tests candles/tests collector_core/tests dydx_collector/tests bybit_collector/tests hyperliquid_collector/tests ml_signals/tests ranking_engine/tests bot_tui/tests data_api/tests observability/tests kernel/tests tests -q
+		python3 -m pytest archive/tests research/tests alerting/tests views/tests candles/tests collector_core/tests dydx_collector/tests bybit_collector/tests hyperliquid_collector/tests ml_signals/tests ranking_engine/tests bot_tui/tests data_api/tests observability/tests kernel/tests tests -q
 
 ## Record the capture hot path's cost baseline (tests/fixtures/hotpath_baseline.json, audit D-65,
 ## spine AD-D5) into the checkout: the one place the source tree is mounted writable, because
@@ -172,27 +172,30 @@ hotpath-baseline:
 ## docs/DEPLOY_CHECKLIST.md.
 consolidate:
 	$(COMPOSE) run --rm --no-deps -e HOME=/tmp collector \
-		python3 -m collector_core.consolidate_catalog --catalog /app/catalog --apply $(CONSOLIDATE_ARGS)
+		python3 -m archive.consolidate_catalog --catalog /app/catalog --apply $(CONSOLIDATE_ARGS)
 
-## One venue's nightly maintenance for one closed UTC day (story 22.13), each step its own process:
-## rebuild_seconds --apply -> consolidate_catalog --apply --days 2 -> build_candles --day
-## --workers 1 -> compare_klines -> prune_catalog --apply (trade retention 7 days, gated on
-## verified_days). A step's "findings" exit 2 continues; any other failure stops the chain; one
-## summary line. Keep a standalone `make consolidate` in the cron line too. VENUE is required
-## (DYDX|BYBIT|HYPERLIQUID); DAY defaults to yesterday (UTC). Cron line: docs/DEPLOY_CHECKLIST.md.
+## One venue's nightly maintenance for one closed UTC day (story 22.13; the archive.nightly saga,
+## Story 25.1), each step its own process: rebuild_seconds --apply -> consolidate_catalog --apply
+## --days 2 -> build_candles --day --workers 1 -> compare_klines --rebuilt-by <this run> ->
+## prune_catalog --apply (trade retention 7 days, gated on verified_days; for DYDX also the plan's
+## dropped-instrument and per-coin delta retention, read from the mounted dYdX config.toml). A
+## step's "findings" exit 2 continues; any other failure stops the chain; one summary line. Keep a
+## standalone `make consolidate` in the cron line too. VENUE is required (DYDX|BYBIT|HYPERLIQUID);
+## DAY defaults to yesterday (UTC). Cron line: docs/DEPLOY_CHECKLIST.md.
 DAY ?= $(shell date -u -d yesterday +%Y-%m-%d)
 nightly:
 	@test -n "$(VENUE)" || { echo "nightly: VENUE is required, e.g. make nightly VENUE=BYBIT [DAY=YYYY-MM-DD]" >&2; exit 1; }
 	$(COMPOSE) run --rm --no-deps -e HOME=/tmp collector \
-		python3 -m collector_core.nightly --catalog /app/catalog --candles-dir /app/candles_dir \
-		--venue $(VENUE) --day $(DAY)
+		python3 -m archive.nightly --catalog /app/catalog --candles-dir /app/candles_dir \
+		--venue $(VENUE) --day $(DAY) --dydx-plan /app/dydx_collector/config.toml
 
 ## Copy the catalog's closed-day files to object storage (audit D-33: there is no other copy).
 ## Runs rclone on the HOST (install it there; the remote -- R2, B2, ... -- is configured with
 ## `rclone config` in the operator's ~/.config/rclone, never in this repo). RCLONE_REMOTE and
 ## RCLONE_BUCKET come from platform/.env or the environment. Run AFTER `make consolidate`, or the
 ## upload is millions of tiny objects. Today's (UTC) files, still being written, are excluded,
-## as are *.tmp leftovers. `sync` deletes/overwrites on the remote what the local catalog no
+## as are *.tmp leftovers (an interrupted archive rewrite's `*.archive.tmp`, archive.infrastructure.
+## catalog_files); the `.capture-<VENUE>.lock` files sit in the catalog root, outside data/. `sync` deletes/overwrites on the remote what the local catalog no
 ## longer has (every nightly consolidation replaces minute files) -- `--backup-dir` moves those
 ## objects under a dated catalog-replaced/ prefix instead of deleting them, so a wiped local
 ## catalog can never erase the only backup. Prune catalog-replaced/ only by hand, after checking
@@ -215,7 +218,7 @@ backup-catalog:
 		--transfers 8 --fast-list
 
 ## Rebuild the SQLite candle store from the raw 1s archive (first deploy, or after a
-## "candle store write failed" / repair_catalog run). Skips today unless the collector is stopped
+## "candle store write failed" / archive.repair_catalog run). Skips today unless the collector is stopped
 ## and --include-open-day is added.
 build-candles:
 	$(COMPOSE) run --rm --no-deps -e HOME=/tmp collector \
@@ -243,7 +246,7 @@ tui:
 ## does not ship; it runs in `make test`.
 test-live-paper:
 	$(COMPOSE) --profile live-paper run --rm --no-deps -e HOME=/tmp -e USER=collector $(TEST_SOURCE_MOUNT) live-paper \
-		python3 -m pytest live_paper/tests observability/tests kernel/tests tests --ignore=tests/test_hotpath.py -q
+		python3 -m pytest live_paper/tests observability/tests kernel/tests tests --ignore=tests/test_hotpath.py --ignore=tests/test_capture_archive_handoff.py -q
 
 ## Stop containers (catalog data is preserved)
 down:
@@ -302,16 +305,16 @@ harden-ssh:
 	sudo systemctl reload ssh
 
 ## Prune order_book_deltas older than 14 days (run daily to bound storage). Trades are pruned
-## by `make nightly` only (verification-gated, see collector_core/prune_catalog.py).
+## by `make nightly` only (verification-gated, see archive/prune_catalog.py).
 prune:
 	$(COMPOSE) run --rm --no-deps -e HOME=/tmp collector \
-		python3 -m collector_core.prune_catalog --catalog /app/catalog \
+		python3 -m archive.prune_catalog --catalog /app/catalog \
 		--types order_book_deltas --days 14 --apply
 
 ## Preview what prune would delete without removing anything (the tool's default: report only)
 prune-dry:
 	$(COMPOSE) run --rm --no-deps -e HOME=/tmp collector \
-		python3 -m collector_core.prune_catalog --catalog /app/catalog \
+		python3 -m archive.prune_catalog --catalog /app/catalog \
 		--types order_book_deltas --days 14
 
 ## Local frontend dev, fully self-contained: brings up collector + ranking_engine +

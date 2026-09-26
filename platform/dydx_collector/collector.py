@@ -58,6 +58,7 @@ import os
 import re
 import time
 from pathlib import Path
+from typing import ClassVar
 
 import redis.asyncio as aioredis
 from candles.application.prune import loop as candle_prune_loop
@@ -65,7 +66,6 @@ from candles.application.sink import CandleSink
 from candles.infrastructure.sqlite_store import store_from_env
 from collector_core.collector import Collector
 from collector_core.collector import run_forever
-from collector_core.prune_catalog import prune_instrument
 from observability import error_ledger
 from observability import incidents
 from observability.incidents import IncidentConfig
@@ -143,66 +143,16 @@ _STATUS_CHANNEL = "collector:status"
 # episodes) while Story 5.1 keeps gathering real duration data on both categories.
 
 
-def _prune_interval_seconds(
-    non_config_retain_hours: float, delta_retain_hours: dict[str, float | None]
-) -> float:
-    """
-    Prune-loop cadence: roughly 4x per the shortest active retention window, minimum 15 min.
-
-    Considers both the global non_config_retain_hours and any finite per-coin
-    retain_hours, so a short per-coin window isn't left stale by a larger global one.
-    """
-    active_retain_hours = [
-        non_config_retain_hours,
-        *(h for h in delta_retain_hours.values() if h is not None),
-    ]
-    return max(min(active_retain_hours) * 900, 900)
-
-
-def _prune_candidates(
-    instruments: tuple[InstrumentEntry, ...], known_markets: set[str]
-) -> set[str]:
-    """
-    Ids whose catalog data is subject to non_config_retain_hours pruning (Story 6.1).
-
-    Every known market not currently collected (dropped by `stop` or `unpin`, or never
-    added) -- its leftover catalog data must still age out.
-    """
-    collected_ids = {e.id for e in instruments}
-    return known_markets - collected_ids
-
-
-def _prune_all_instruments(catalog_path: str, ids: set[str], retain_hours: float) -> int:
-    """Blocking filesystem walk over every candidate -- always call via asyncio.to_thread."""
-    freed = 0
-    for iid in ids:
-        freed += prune_instrument(catalog_path, iid, retain_hours)
-    return freed
-
-
-def _prune_delta_retention(catalog_path: str, delta_retain_hours: dict[str, float | None]) -> int:
-    """
-    Prune order_book_deltas for instruments with a finite per-coin retain_hours.
-
-    A `None` value means unlimited retention -- that instrument is skipped entirely.
-    Extracted from _prune_loop so the None-skip behavior can be unit-tested directly.
-    """
-    freed = 0
-    for iid, retain_hours in delta_retain_hours.items():
-        if retain_hours is None:
-            continue
-        freed += prune_instrument(catalog_path, iid, retain_hours, data_types=["order_book_deltas"])
-    return freed
-
-
 class DydxCollector(Collector):
     """
     dYdX on the shared write gate: the core owns ingest/flush/sample/write; this class adds
     dYdX's per-level message-id book tagging + uncross (`uncross.py`, wired by overriding
     `_apply_deltas` / `_handle_crossed_book`) and the control plane as `extra_loops`
-    (hot-reload, `collector:status`/`collector:control`, prune, open interest, `[WS_RAW]`
-    flush).
+    (hot-reload, `collector:status`/`collector:control`, open interest, `[WS_RAW]` flush). It
+    holds no prune loop: retention is the nightly `archive.prune_catalog`'s (Story 25.1).
     """
+
+    VENUE: ClassVar[str] = "DYDX"
 
     def __init__(self, config: DydxConfig) -> None:
         client = DydxClient(on_data=self._on_data, network=config.network)
@@ -217,7 +167,6 @@ class DydxCollector(Collector):
                 self._open_interest_loop,
                 self._status_loop,
                 self._control_loop,
-                self._prune_loop,
                 # Raw-WS debug feed (Story 5.1) for the incident reports (INCIDENTS below) --
                 # a permanent feature, not scoped to any one investigation. Rust's file
                 # logger only flushes its BufWriter to disk on an explicit Sync event --
@@ -229,12 +178,6 @@ class DydxCollector(Collector):
         )
         self._config: DydxConfig  # narrows the core's CoreConfig
 
-        # All ids dYdX currently lists, whether collected or not -- refreshed by
-        # _status_loop. Used only by _prune_loop to clean up catalog data left behind
-        # by an instrument that's no longer in config.instruments (dropped by a stop or
-        # unpin control action) -- see that loop's docstring. Empty until the first
-        # _status_loop tick.
-        self._known_markets: set[str] = set()
         # Most recent volume-based liquidity classification, keyed by id -- refreshed by
         # _status_loop, reused by _publish_status for an immediate post-control-action
         # publish so pin/start/stop show up in the TUI without waiting up to
@@ -244,11 +187,6 @@ class DydxCollector(Collector):
         # Instruments for which raw OrderBookDeltas are written to the catalog
         self._delta_store: set[str] = {
             e.id for e in config.instruments if e.store_order_book_deltas
-        }
-        # Per-coin raw-delta retention, in hours; None means unlimited (never pruned).
-        # Independent of the collected/uncollected split used for non_config_retain_hours below.
-        self._delta_retain_hours: dict[str, float | None] = {
-            e.id: e.retain_hours for e in config.instruments if e.store_order_book_deltas
         }
         # Wall-clock ns of the last delta seen *for that side specifically*, keyed by
         # instrument. _last_book_update_ns updates on ANY delta (either side), which
@@ -401,16 +339,14 @@ class DydxCollector(Collector):
             await self._unsubscribe(iid)
 
         self._delta_store = {e.id for e in new_config.instruments if e.store_order_book_deltas}
-        self._delta_retain_hours = {
-            e.id: e.retain_hours for e in new_config.instruments if e.store_order_book_deltas
-        }
         self._config = new_config
 
     async def _status_loop(self) -> None:
         """
         Publish collector:status (an informational liquid/illiquid label per currently-
-        collected instrument) and refresh self._known_markets for _prune_loop's cleanup
-        of abandoned instruments' catalog data (Story 6.1).
+        collected instrument, Story 6.1). The catalog data an abandoned instrument leaves
+        behind is aged out by the nightly `archive.prune_catalog --dydx-plan` (Story 25.1),
+        not here.
 
         Read-only: unlike the auto-resubscribing loop this replaces, it never
         subscribes/unsubscribes anything itself -- the collected set only changes via an
@@ -427,11 +363,6 @@ class DydxCollector(Collector):
         while not self._stop.is_set():
             try:
                 markets_json = await asyncio.to_thread(_fetch_markets_json, self._config.network)
-                self._known_markets = {
-                    f"{m['ticker']}-PERP.DYDX"
-                    for m in markets_json.get("markets", {}).values()
-                    if m.get("ticker")
-                }
                 # No max_liquid cap here -- this is a display label, not a selection.
                 self._last_liquid_by_volume, _ = classify_liquidity(
                     markets_json, self._config.liquidity_min_oi_usd, self._config.exclude
@@ -604,41 +535,6 @@ class DydxCollector(Collector):
             except Exception as exc:
                 logger.warning("collector:control listener error — reconnecting in 2s: %s", exc)
                 await asyncio.sleep(2)
-
-    async def _prune_loop(self) -> None:
-        """Prune uncollected instruments' catalog data, and any per-coin raw-delta retention."""
-        while not self._stop.is_set():
-            # Recomputed each iteration so a hot-reloaded retain_hours takes effect promptly.
-            interval = _prune_interval_seconds(
-                self._config.non_config_retain_hours, self._delta_retain_hours
-            )
-            await asyncio.sleep(interval)
-            catalog_path = str(Path(self._config.catalog_path).resolve())
-            dropped_ids = _prune_candidates(self._config.instruments, self._known_markets)
-
-            # Both calls do real synchronous filesystem walks (up to 267 instruments'
-            # worth) -- to_thread keeps them off the event loop, which _ingest_loop and
-            # _second_loop's crossed-book/staleness detection also depend on running
-            # promptly. A same-thread version of this loop once blocked the loop for
-            # 20s+ and stalled every instrument's book simultaneously (2026-09-11 OOM).
-            freed = await asyncio.to_thread(
-                _prune_all_instruments,
-                catalog_path,
-                dropped_ids,
-                self._config.non_config_retain_hours,
-            )
-            if freed:
-                logger.info(
-                    f"Pruned {freed / 1024 / 1024:.1f} MB from {len(dropped_ids)} uncollected instruments"
-                )
-
-            delta_freed = await asyncio.to_thread(
-                _prune_delta_retention, catalog_path, self._delta_retain_hours
-            )
-            if delta_freed:
-                logger.info(
-                    f"Pruned {delta_freed / 1024 / 1024:.1f} MB of raw order-book deltas (per-coin retention)"
-                )
 
 
 # ---------------------------------------------------------------------------

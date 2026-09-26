@@ -33,13 +33,18 @@ import pytest
 from _source_tree import PLATFORM_DIR
 
 
-if importlib.util.find_spec("collector_core") is None:
+if (
+    importlib.util.find_spec("collector_core") is None
+    or importlib.util.find_spec("archive") is None
+):
     pytest.skip(
-        "collector_core is not shipped in this image; run by `make test`", allow_module_level=True
+        "collector_core/archive are not shipped in this image; run by `make test`",
+        allow_module_level=True,
     )
 
+from archive.application import rebuild_day
+from archive.domain import retention
 from collector_core import collector
-from collector_core import rebuild_seconds
 from kernel.clocks import MAX_TS_INIT_SKEW_NS
 from kernel.clocks import NS_PER_S
 from kernel.clocks import READ_SPAN_MARGIN_NS
@@ -68,7 +73,12 @@ def _max_hold_back_ns() -> int:
 
 
 def test_the_rebuild_window_is_the_bound() -> None:
-    assert rebuild_seconds._TS_INIT_MARGIN_NS == MAX_TS_INIT_SKEW_NS
+    assert rebuild_day._TS_INIT_MARGIN_NS == MAX_TS_INIT_SKEW_NS
+
+
+def test_the_prune_gates_midnight_margin_uses_the_bound() -> None:
+    """A trade file starting within the bound after midnight needs the previous day proven."""
+    assert "MAX_TS_INIT_SKEW_NS" in _names_in(retention.file_days)
 
 
 def test_the_read_margin_is_within_the_bound() -> None:

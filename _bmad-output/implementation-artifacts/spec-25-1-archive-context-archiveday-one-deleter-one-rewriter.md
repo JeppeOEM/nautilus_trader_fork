@@ -2,11 +2,11 @@
 title: 'Story 25.1: archive/ context: ArchiveDay, one deleter, one rewriter, one writer per leaf'
 type: 'refactor'
 created: '2026-09-25'
-status: ready-for-dev
-baseline_revision: f3f17560e3a7161063dd9d7af2591de1f8a78cac
-final_revision: '3a0d680d24a5a123fad46257f9c88b5cfc304576'
+status: done
+baseline_revision: 983d0c792cd3a77bdea602bd6a110188130dbfb7
+final_revision: '2ca69795873166f174298c0b5919892334326345'
 review_loop_iteration: 0
-followup_review_recommended: true
+followup_review_recommended: false
 context:
   - '{project-root}/_bmad-output/implementation-artifacts/25-1-archive-context-archiveday-one-deleter-one-rewriter.md'
   - '{project-root}/_bmad-output/implementation-artifacts/epic-25-context.md'
@@ -299,4 +299,69 @@ A complete implementation of the pre-amendment spec exists at commit `3a0d680d24
 Resolution (2026-09-26, human-decided via bmad-loop-resolve): intent_gap resolved by making the rebuild's open-day rule row-scoped (a row-preserving rewrite may touch any file but changes only closed-day rows, verified by `CatalogFiles`; merge, whole-file rewrite and delete stay refused for files reaching today) and by widening the rebuild's file selection by `MAX_TS_INIT_SKEW_NS` so yesterday's rows in a file starting today are rebuilt too; bad_spec resolved by making `RebuildProof.covers` an allowlist over `rebuilt`. Both are encoded in the intent contract, tasks, tests and ACs above.
 
 Note: this was a follow-up review (a fresh pass over the committed `3a0d680d24`). Under the cascade, the intent_gap makes every lower finding moot, so the bad_spec, patch and defer counts are provisional. No deferred-work entries were written and no code was changed in this pass.
+
+
+### 2026-09-26 — Review pass (re-drive after resolution)
+- intent_gap: 0
+- bad_spec: 0
+- patch: 7: (high 1, medium 1, low 5)
+- defer: 4: (medium 3, low 1)
+- reject: 25: (low 25)
+- addressed_findings:
+  - `[high]` `[patch]` A dYdX plan listing no instruments (e.g. read mid-save) read as "every leaf dropped", and a plan entry missing `id` escaped as a traceback: `DydxPlanFile.retention` now refuses an empty instrument list and `main` ledgers KeyError/TypeError as `prune.bad_plan` (exit 1); test `test_a_plan_listing_no_instruments_prunes_nothing`.
+  - `[medium]` `[patch]` `PartialCommitError` from a failed rename escaped consolidate's `_merge` and both migration tools' per-file handlers, aborting the run: now caught (`consolidate.error`, `<tool>.error`, continue).
+  - `[low]` `[patch]` `normalize_snapshot_schema` aborted listing on one unreadable file: now ledgered and skipped (`_needs_migration`).
+  - `[low]` `[patch]` A rebuild proof for another day raised a bare ValueError and the proof's venue was never checked: `reconcile_day.run` now refuses both via `_proof_refusal` (`reconcile.not_rebuilt`, exit 1); test updated.
+  - `[low]` `[patch]` `rebuild_seconds --venue` took any text, so a lowercase venue produced a result file the saga rejects: now `choices=sorted(VENUE_KINDS)`.
+  - `[low]` `[patch]` `consolidate_day` used `pa.compute` without importing `pyarrow.compute`: explicit `import pyarrow.compute as pc`.
+  - `[low]` `[patch]` `archive/__init__` claimed nothing imports archive and that only retention removes rows: now names the re-export shims and repair's `delete_data_range` correction.
+
+### 2026-09-26 — Review pass
+- intent_gap: 0
+- bad_spec: 0
+- patch: 5: (high 0, medium 2, low 3)
+- defer: 2: (medium 2)
+- reject: 17: (low 17)
+- addressed_findings:
+  - `[medium]` `[patch]` `DydxPlanFile.retention` could parse a plan read mid-`save_config` (an in-place truncate and rewrite of a single-file bind mount) as a valid list of only the first instruments, and the dropped-instrument rule would then age out the rest. Fixed: the plan's stat and bytes are fingerprinted before a settle wait and again after `load_config`, and any change is refused (`prune.bad_plan`, exit 1). A `Known limit:` comment names atomic save plus a directory mount as the upgrade path. Test: `test_a_plan_saved_while_it_is_read_is_refused`.
+  - `[medium]` `[patch]` `record_gap` returned "durably appended" for a newly created `_archive_gaps/*.jsonl` without fsyncing its directory entry, while `CatalogFiles.delete` wrongly claimed its own leaf fsync covered the marker. Fixed: `record_gap` now fsyncs the new file's directory, and the parent directory too when `_archive_gaps/` itself is new. The `delete` comment is corrected.
+  - `[low]` `[patch]` Standalone `rebuild_seconds --apply` told the operator to pass only `--rebuilt-by <id>`, which under the allowlist proof compares nothing. Fixed: the log line now also lists the run's `--rebuilt`/`--not-rebuilt` flags.
+  - `[low]` `[patch]` `run_forever` could start capture after shutdown was requested, when the lock freed in the same wakeup. Fixed: it breaks when `shutting_down` is set after the lock is acquired.
+  - `[low]` `[patch]` `rebuild_day.py` and `DEPLOY_CHECKLIST.md` called the run "the 00:30 nightly", but the cron line runs it at 03:07 UTC. Both wordings are corrected.
+
+## Auto Run Result
+
+Status: done
+
+**Summary.** This was a follow-up review, a fresh pass over the committed 25.1 implementation (`983d0c792c..b40b17fdce`, 123 files, run by Blind Hunter and Edge Case Hunter). It found no intent_gap and no bad_spec. It applied 5 patches, which are committed in `2ca6979587`.
+
+**Files changed.**
+- `platform/archive/prune_catalog.py`: `DydxPlanFile` refuses a plan that changes while it is read (a fingerprint before a settle wait and again after `load_config`), with a `Known limit:` comment.
+- `platform/archive/infrastructure/gap_markers.py`: `record_gap` fsyncs the directory entry of a new marker file, and of `_archive_gaps/` when that directory is new.
+- `platform/archive/infrastructure/catalog_files.py`: corrected the `delete` fsync comment.
+- `platform/archive/rebuild_seconds.py`: the standalone `--apply` log lists the `--rebuilt`/`--not-rebuilt` flags.
+- `platform/collector_core/collector.py`: `run_forever` does not start capture once shutdown is set.
+- `platform/archive/application/rebuild_day.py`, `platform/docs/DEPLOY_CHECKLIST.md`: the nightly's time now matches the 03:07 UTC cron.
+- `platform/archive/tests/test_prune.py`: a test for a plan saved mid-read, plus a fixture that zeroes the settle wait.
+- `_bmad-output/implementation-artifacts/deferred-work.md`: 2 new deferred entries.
+
+**Review.**
+- 5 patches applied: medium 2, low 3.
+- 2 deferred, both pre-existing: the `pruned` marker span is not widened by `MAX_TS_INIT_SKEW_NS`, and `make prune`'s age rule overrides unlimited `retain_hours`.
+- 17 rejected:
+  - Already in the ledger: repair's `ts_event` delete, the torn marker line, and the dropped rule deleting instrument definitions.
+  - Spec-mandated: the footer-only read-back verify, capture's separate marker writer, the lock taken after the first `build()`, the dropped-rule type set, and a neither-list instrument being `not_rebuilt`.
+  - Not reachable: NaN in snapshot floats (capture writes nulls), and a flush lag before the 03:07 nightly.
+  - Operator-only, manual-write or migration-only edge cases.
+
+**Verification.**
+- `cd platform && python3 -m pytest -o addopts="" --rootdir=. archive/tests research/tests alerting/tests views/tests candles/tests collector_core/tests dydx_collector/tests bybit_collector/tests hyperliquid_collector/tests ml_signals/tests ranking_engine/tests bot_tui/tests data_api/tests observability/tests kernel/tests tests -q -W error::DeprecationWarning`: 1 failed (the known redis `test_rankings_live_message_reflected_by_rest_and_ws_relay`), 1763 passed, and no DeprecationWarning.
+- `python3 -m archive.<tool> --help` for all eleven tools: no FAIL.
+- ruff 0.15.16 check and format over `platform/archive platform/collector_core platform/kernel`: clean.
+- mypy 1.20.2 over `archive collector_core kernel`: 30 findings, the same count as the control run with this pass's changes stashed.
+
+**Residual risks.**
+- The plan-read guard cannot catch a save that stalls for the whole 1 s settle window with identical partial bytes on both reads (`Known limit:`). The real fix is an atomic save, which needs a directory bind mount.
+- `make prune`/nightly for DYDX now spends 1 s on the plan settle wait.
+- The deferred items above, plus the residual risks of the earlier pass: the multi-file rename is not atomic as a set, and the VPS has not yet run the new saga.
 

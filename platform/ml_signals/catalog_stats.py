@@ -15,22 +15,24 @@
 """
 Catalog analytics: per-instrument data coverage, gap detection, price/volatility stats.
 
-Split across contexts (spine AD-D1): the coverage/gap helpers are archive's, the price series and
-stats ranking's (`list_instruments` too, for `metrics_computer`). The one views read that lived here,
-`query_second_snapshots`, moved to `views.catalog_reads` in Story 24.2 (the old name's forwarding
-ended in Story 24.4); `overview_table` was deleted (see `_REPLACED_NAMES`).
+Split across contexts (spine AD-D1): the price series and stats are ranking's (`list_instruments`
+too, for `metrics_computer`). The coverage/gap helpers (`find_gaps`, `likely_outages`, `coverage`)
+moved to `archive.application.diagnostics` in Story 25.1 and are served here, deprecated, from
+`_MOVED_NAMES`. The one views read that lived here, `query_second_snapshots`, moved to
+`views.catalog_reads` in Story 24.2 (the old name's forwarding ended in Story 24.4);
+`overview_table` was deleted (see `_REPLACED_NAMES`).
 """
 
 import glob
+import importlib
 import os
+import warnings
 from pathlib import Path
 
 import numpy as np
-import pandas as pd
 from kernel.second_snapshot import DydxSecondSnapshot
 from observability import error_ledger
 
-from nautilus_trader.model.data import IndexPriceUpdate
 from nautilus_trader.model.data import MarkPriceUpdate
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
@@ -49,7 +51,25 @@ _REPLACED_NAMES: dict[str, str] = {
 }
 
 
+# Moved names (Story 25.1): served from their new home with a DeprecationWarning until then.
+MOVED_NAMES_REMOVE_AFTER = "25-3-bots-context-paper-and-exec-types-nautilus-acl"
+_MOVED_NAMES: dict[str, str] = {
+    "find_gaps": "archive.application.diagnostics.find_gaps",
+    "likely_outages": "archive.application.diagnostics.likely_outages",
+    "coverage": "archive.application.diagnostics.coverage",
+}
+
+
 def __getattr__(name: str) -> object:
+    if name in _MOVED_NAMES:
+        warnings.warn(
+            f"ml_signals.catalog_stats.{name} moved to {_MOVED_NAMES[name]} (Story 25.1); "
+            f"it is served here until {MOVED_NAMES_REMOVE_AFTER}",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        # A literal module name, so `platform/tests/test_images.py` follows it into the image check.
+        return getattr(importlib.import_module("archive.application.diagnostics"), name)
     if name in _REPLACED_NAMES:
         raise AttributeError(
             f"ml_signals.catalog_stats.{name} was replaced by {_REPLACED_NAMES[name]}"
@@ -76,127 +96,6 @@ def list_instruments(catalog_path: str) -> list[str]:
         for path in glob.glob(os.path.join(catalog_path, "data", data_type, "*")):
             ids.add(Path(path).name)
     return sorted(ids)
-
-
-def _load(catalog: ParquetDataCatalog, data_type: str, instrument_id: str) -> list:
-    if data_type == "trade_tick":
-        return catalog.trade_ticks(instrument_ids=[instrument_id])
-    if data_type == "bar":
-        return catalog.bars(instrument_ids=[instrument_id])
-    if data_type == "order_book_deltas":
-        return catalog.order_book_deltas(instrument_ids=[instrument_id])
-    if data_type == "mark_price_update":
-        return catalog.query(MarkPriceUpdate, identifiers=[instrument_id])
-    if data_type == "index_price_update":
-        return catalog.query(IndexPriceUpdate, identifiers=[instrument_id])
-    if data_type == "funding_rate_update":
-        return catalog.funding_rates(instrument_ids=[instrument_id])
-    if data_type == "instrument_status":
-        return catalog.instrument_status(instrument_ids=[instrument_id])
-    raise ValueError(f"Unknown data type: {data_type}")  # pragma: no cover
-
-
-def find_gaps(
-    ts_ns: list[int],
-    threshold_seconds: float | None = None,
-    min_multiple: float = 5.0,
-    floor_seconds: float = 30.0,
-) -> list[tuple[int, int]]:
-    """
-    Find irregularly large spacing in a sorted-ascending timestamp series (nanoseconds).
-
-    This is spacing, not error detection: for trade-driven types (trade_tick,
-    order_book_deltas, bar) a "gap" here is just as likely to mean the market
-    was quiet as it is a dropped connection. See `likely_outages()` for a
-    cross-type signal that's actually indicative of a real outage.
-
-    Known limit: adaptive heuristic (median inter-arrival time * `min_multiple`,
-    floored at `floor_seconds`), not a statistical changepoint model. Pass an
-    explicit `threshold_seconds` for data with a known fixed cadence instead
-    of relying on the heuristic.
-    """
-    if len(ts_ns) < 2:
-        return []
-
-    deltas = np.diff(ts_ns) / 1e9  # seconds
-    if threshold_seconds is None:
-        threshold_seconds = max(float(np.median(deltas)) * min_multiple, floor_seconds)
-
-    return [(ts_ns[i], ts_ns[i + 1]) for i, delta in enumerate(deltas) if delta > threshold_seconds]
-
-
-def _overlapping_intervals(
-    a: list[tuple[int, int]],
-    b: list[tuple[int, int]],
-) -> list[tuple[int, int]]:
-    """Pairwise intersections between two lists of sorted, non-overlapping (start, end) intervals."""
-    result = []
-    i = j = 0
-    while i < len(a) and j < len(b):
-        start = max(a[i][0], b[j][0])
-        end = min(a[i][1], b[j][1])
-        if start < end:
-            result.append((start, end))
-        if a[i][1] < b[j][1]:
-            i += 1
-        else:
-            j += 1
-    return result
-
-
-def likely_outages(catalog: ParquetDataCatalog, instrument_id: str) -> list[tuple[int, int]]:
-    """
-    Periods where mark_price_update AND order_book_deltas were both silent at once.
-
-    mark_price_update is pushed by the venue on its own clock, independent of
-    trading activity, so a gap there alone is already a decent outage signal.
-    Requiring order_book_deltas to be silent over the same window too filters
-    out the case where a single stream gap is just a deserialization hiccup
-    rather than a real disconnect.
-    """
-    try:
-        mark_rows = _load(catalog, "mark_price_update", instrument_id)
-    except (NotImplementedError, RuntimeError) as exc:
-        error_ledger.record(
-            "catalog_stats.likely_outages", f"{instrument_id} mark_price_update unreadable", exc
-        )
-        return []
-    book_rows = _load(catalog, "order_book_deltas", instrument_id)
-    if not mark_rows or not book_rows:
-        return []
-
-    mark_gaps = find_gaps(sorted(row.ts_event for row in mark_rows))
-    book_gaps = find_gaps(sorted(row.ts_event for row in book_rows))
-    return _overlapping_intervals(mark_gaps, book_gaps)
-
-
-def coverage(catalog: ParquetDataCatalog, instrument_id: str) -> dict[str, dict]:
-    """Per-data-type row count, start/end timestamp, duration, and detected gaps."""
-    result = {}
-    for data_type in DATA_TYPES:
-        try:
-            rows = _load(catalog, data_type, instrument_id)
-        except (NotImplementedError, RuntimeError) as exc:
-            # IndexPriceUpdate has no Arrow deserializer in this nautilus_trader version
-            # (NotImplementedError); conflicting embedded schema metadata across flush batches
-            # (e.g. ETH mark_price_update "price_precision" 6 vs 5) raises RuntimeError. Both
-            # leave this data type out of the result -- recorded, never silent (DATA-07).
-            error_ledger.record(
-                "catalog_stats.coverage", f"{instrument_id} {data_type} unreadable", exc
-            )
-            continue
-        if not rows:
-            continue
-
-        ts = sorted(row.ts_event for row in rows)
-        result[data_type] = {
-            "count": len(ts),
-            "start": pd.Timestamp(ts[0], unit="ns", tz="UTC"),
-            "end": pd.Timestamp(ts[-1], unit="ns", tz="UTC"),
-            "duration_seconds": (ts[-1] - ts[0]) / 1e9,
-            "gaps": find_gaps(ts),
-        }
-    return result
 
 
 def price_series(

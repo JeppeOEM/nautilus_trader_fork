@@ -29,7 +29,6 @@ import dydx_collector.collector as collector_module
 from dydx_collector.collector import _MAX_COLLECTED_INSTRUMENTS
 from dydx_collector.collector import _STATUS_CHANNEL
 from dydx_collector.collector import DydxCollector
-from dydx_collector.collector import _prune_candidates
 from dydx_collector.config import DydxConfig
 from dydx_collector.config import InstrumentEntry
 from dydx_collector.config import load_config
@@ -362,21 +361,6 @@ async def test_pin_top_liquid_at_cap_is_noop(
     await collector._handle_control_message("pin_top_liquid", None)
 
     assert fetch_calls == []  # no network call needed -- there's nowhere to put a result
-
-
-def test_prune_candidates_includes_dropped_instrument() -> None:
-    """
-    Regression guard for AC #8: an instrument removed from `instruments` (via stop or
-    unpin) must still be a prune candidate as long as it's a known market -- catalog
-    data for abandoned instruments must not be orphaned.
-    """
-    instruments = (InstrumentEntry(id="COLLECTED-PERP.DYDX"),)
-    known_markets = {"COLLECTED-PERP.DYDX", "STOPPED-PERP.DYDX"}
-
-    candidates = _prune_candidates(instruments, known_markets)
-
-    assert "STOPPED-PERP.DYDX" in candidates
-    assert "COLLECTED-PERP.DYDX" not in candidates
 
 
 @pytest.mark.asyncio

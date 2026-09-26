@@ -14,10 +14,15 @@ CRON_TZ=UTC
 7 3 * * * cd /path/to/platform && { for v in DYDX BYBIT HYPERLIQUID; do make nightly VENUE=$v >> nightly.log 2>&1; done; make consolidate >> consolidate.log 2>&1; make backup-catalog >> backup.log 2>&1; }
 ```
 
-- One `make nightly` per venue, for yesterday (UTC). Each runs `rebuild_seconds` ->
-  `consolidate_catalog --days 2` -> `build_candles` (which runs `python -m candles.rebuild` since
-  Story 24.1; the step keeps its name) -> `compare_klines` -> `prune_catalog` as
-  separate processes. A step's exit 2 is "findings" (some instruments refused, mismatched or not
+- One `make nightly` per venue, for yesterday (UTC): the `archive.nightly` saga (Story 25.1).
+  Each runs `rebuild_seconds` -> `consolidate_catalog --days 2` -> `build_candles` (which runs
+  `python -m candles.rebuild` since Story 24.1; the step keeps its name) -> `compare_klines` ->
+  `prune_catalog` as separate processes (`python -m archive.<step>`). The rebuild writes its result
+  into the saga's temp dir and the saga hands the reconcile `--rebuilt-by <run id>`, one
+  `--rebuilt <iid>` per instrument the rebuild rebuilt and one `--not-rebuilt <iid>` per instrument
+  it refused: only the rebuilt are reconciled, any other instrument-day is never judged
+  (`reconcile.not_rebuilt`), and a missing result file stops the saga before
+  consolidating. The run id is on the summary line. A step's exit 2 is "findings" (some instruments refused, mismatched or not
   comparable -- all ledgered, and none of them releases trades to the prune): the chain continues.
   Any other non-zero exit stops that venue's chain.
 - The standalone `make consolidate` after the nightlies covers every closed day and every data
@@ -28,16 +33,37 @@ CRON_TZ=UTC
 - Each job runs in its own container (`docker compose run --rm collector ...`), never inside a
   running collector (MEM-01).
 - **Locking:** each catalog-rewriting step (`rebuild_seconds`, `consolidate_catalog`,
-  `prune_catalog`) takes the catalog maintenance lock separately, for its own duration -- not the
-  whole chain. A manual run of one of them overlapping the cron job makes that step exit 1 (lock
-  held), which stops that venue's chain for the night; rerun the day afterwards. Pre-existing
-  limitation: dYdX's in-collector `_prune_loop` (dropped coins' files, per-coin delta retention)
-  takes no lock at all.
+  `prune_catalog`, and the manual `repair_catalog`/migration tools) takes the catalog maintenance
+  lock (`<catalog>/.consolidate.lock`) separately, for its own duration -- not the whole chain. A
+  manual run of one of them overlapping the cron job makes that step exit 1 (lock held), which
+  stops that venue's chain for the night; rerun the day afterwards. A report-only run
+  (`make prune-dry`, a rebuild or consolidation without `--apply`, a repair report) writes nothing
+  and takes no lock, so it can run beside the cron job. The dYdX collector no longer
+  prunes anything itself (Story 25.1): dropped coins' files and per-coin delta retention are the
+  nightly prune step's, under that lock, from the plan file `--dydx-plan` names.
+- **Capture lock (Story 25.1):** every collector holds a shared `flock` on
+  `<catalog>/.capture-<VENUE>.lock` for its whole life (pid and start time inside, informational
+  only; the file is never deleted, and a killed collector's lock is released by the kernel).
+  `python -m archive.repair_catalog --apply` refuses a venue whose collector holds it
+  (`repair.capture_running`, exit 1): stop that collector first. While a tool holds it
+  exclusively, a starting collector waits (`collector.capture_lock_wait`, once) and starts when
+  it is released. No archive tool changes a row of the current UTC day: a whole-file write,
+  merge or delete of a file whose span reaches it is refused (`<tool>.open_day` in the ledger
+  when one is met), and the rebuild rewrites the midnight files (the one crossing midnight, and
+  one starting after it that holds yesterday's last rows) with every row of today verified
+  identical -- so the nightly (the 03:07 UTC cron line above) never refuses `rebuild.open_day`.
+- **Retention granularity (Story 25.1):** plan retention (`non_config_retain_hours`, per-coin
+  `retain_hours`) now runs only in the nightly, on closed UTC days: the effective floor is "the
+  day closes, plus the next nightly", about 24 h worst case, where the old 15-minute in-collector
+  loop pruned intra-day. A dropped instrument is now any DYDX leaf not in the plan -- a delisted
+  market's leftovers age out too, not only known indexer markets. An empty (0-byte) plan file is
+  refused (prune exit 1), never read as "collect nothing".
 
 ### Re-running a missed or failed day
 
 `make nightly VENUE=BYBIT DAY=2026-09-20`. Every step is idempotent for a closed day (the rebuild
-changes 0 rows the second time; `compare_klines` overwrites that day's `verified_days` row), so a
+changes 0 rows the second time; `compare_klines` overwrites that day's `verified_days` row -- a
+rerun re-proves a verified day), so a
 day missed by cron, or failed at any step, is simply run again after fixing the cause. Run the
 venues' missed days oldest first. Expect the prune report (`kept <iid> <day>: unverified|failed`)
 to list every old unverified or failed day on **every** night until it passes or is dealt with by
@@ -132,7 +158,7 @@ Record numbers where each line says, never in a story file.
    Leave `trade_feeds = 1` for now (step 5.4).
 4. Stop the three collectors (`docker compose stop collector bybit_collector
    hyperliquid_collector`), then in the collector image run
-   `python -m collector_core.migrate_open_interest --catalog /app/catalog` (report), then again
+   `python -m archive.tools.migrate_open_interest --catalog /app/catalog` (report), then again
    with `--apply --backup-dir <dir>` (22.3, audit D-40).
 5. `cd platform && make redeploy-all` (rebuilds the thin images with `collector_core`,
    `observability` when 23.1 lands, and starts every service; 22.1, 22.4, 22.5, 22.7, 22.10,
@@ -170,7 +196,7 @@ Record numbers where each line says, never in a story file.
   Hyperliquid in `/api/errors`: a steady late-trade rate means `hold_back_seconds` is too
   short; any `pending_deltas` or `book_sequence` entry is a DATA-02 finding for D-63 (22.12).
 - Lag measurement, once per venue, in the collector image with `--network host`:
-  `python3 -m collector_core.measure_lag --venue bybit --seconds 10800` and
+  `python3 -m archive.tools.measure_lag --venue bybit --seconds 10800` and
   `--venue hyperliquid --seconds 10800`; record the per-kind distributions in D-63, then set
   each venue's `hold_back_seconds` to its TradeTick p99.9 rounded up to 0.5 s (or 0.0 with the
   reason in the comment), replace the provisional dev-box comment, and redeploy (22.12).
@@ -213,12 +239,12 @@ another user) -- every service bind-mounts it `rw` as `/app/errors_dir` and writ
 `<service>.jsonl` there from its first line, so the directory must exist and be writable before
 the containers start, the same as `platform/data/catalog` and the other `platform/data/*` stores.
 
-`python3 -m collector_core.crosscheck_errors` reads every service's durable ledger under
+`python3 -m archive.crosscheck_errors` reads every service's durable ledger under
 `platform/data/errors/` together with the archived catalog, in the collector image (the
 `errors_dir`/`catalog` mounts are already present):
 
 ```bash
-docker compose run --rm --no-deps collector python3 -m collector_core.crosscheck_errors \
+docker compose run --rm --no-deps collector python3 -m archive.crosscheck_errors \
   --catalog /app/catalog --errors-dir /app/errors_dir \
   --fail-on collector.book_crosscheck collector.book_sequence collector.pending_deltas \
             ranking_engine.volume24h process_start

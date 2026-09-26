@@ -13,16 +13,17 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-compare_klines: our candle store (built by `candles.application.rebuild.rebuild_instrument` from
-real snapshots
-in a tmp catalog) against injected venue klines, plus the venue parsers on recorded real responses
-(`fixtures/`, captured 2026-09-21 for 2026-09-20). No network.
+`archive.application.reconcile_day`: our candle store (built by
+`candles.application.rebuild.rebuild_instrument` from real snapshots in a tmp catalog) against
+injected venue klines, the rebuild-proof refusals, plus the `VenueKlines` adapters on recorded real
+responses (`fixtures/`, captured 2026-09-21 for 2026-09-20). No network.
 """
 
 import http.client
 import json
 import sqlite3
 import urllib.request
+from collections.abc import Callable
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -30,23 +31,29 @@ from typing import Any
 import pytest
 from candles.application.rebuild import parse_date_ns
 from candles.application.rebuild import rebuild_instrument
+from candles.infrastructure.sqlite_store import connect_ro
 from candles.infrastructure.verified_days import VerifiedDaysStore
 from kernel.fold import fold_trades
 from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.venues import venue_of
 from observability import error_ledger
 
-from collector_core.compare_klines import Kline
-from collector_core.compare_klines import KlineError
-from collector_core.compare_klines import fetch_klines
-from collector_core.compare_klines import float_units
-from collector_core.compare_klines import instruments_on_day
-from collector_core.compare_klines import parse_bybit_klines
-from collector_core.compare_klines import parse_dydx_candles
-from collector_core.compare_klines import parse_hyperliquid_candles
-from collector_core.compare_klines import reconcile_instrument
-from collector_core.compare_klines import run
-from collector_core.compare_klines import seed_with_previous_close
-from collector_core.compare_klines import units
+from archive import compare_klines
+from archive.application import reconcile_day
+from archive.application.ports import VenueKlines
+from archive.application.reconcile_day import instruments_on_day
+from archive.compare_klines import main
+from archive.compare_klines import proof_for
+from archive.compare_klines import venue_klines
+from archive.domain.archive_day import RebuildProof
+from archive.domain.reconciliation import Kline
+from archive.domain.reconciliation import KlineError
+from archive.domain.reconciliation import float_units
+from archive.domain.reconciliation import seed_with_previous_close
+from archive.domain.reconciliation import units
+from archive.infrastructure.klines_bybit import parse_bybit_klines
+from archive.infrastructure.klines_dydx import parse_dydx_candles
+from archive.infrastructure.klines_hyperliquid import parse_hyperliquid_candles
 from nautilus_trader.model.currencies import BTC
 from nautilus_trader.model.currencies import USDT
 from nautilus_trader.model.data import TradeTick
@@ -67,6 +74,59 @@ _BYBIT = "BTCUSDT-LINEAR.BYBIT"
 _DAY = "2026-09-10"
 _D0_MS = parse_date_ns(_DAY) // 1_000_000
 _S = 1_000_000_000
+
+
+KlineFetch = Callable[[Instrument, int], list[Kline]]
+
+
+class _Klines:
+    """`VenueKlines` over a plain function (the injected venue side)."""
+
+    def __init__(self, fetch: KlineFetch) -> None:
+        self._fetch = fetch
+
+    def fetch(self, inst: Instrument, day_ms: int) -> list[Kline]:
+        return self._fetch(inst, day_ms)
+
+
+def _proof(iid: str, not_rebuilt: frozenset[str] = frozenset()) -> RebuildProof:
+    """Build the run's proof naming `iid` rebuilt (and `not_rebuilt` refused)."""
+    return RebuildProof("run1", venue_of(iid), _DAY, frozenset({iid}), not_rebuilt)
+
+
+def reconcile_instrument(
+    db: str,
+    catalog: ParquetDataCatalog,
+    iid: str,
+    day_ms: int,
+    fetch: KlineFetch,
+    verified: VerifiedDaysStore | None,
+) -> reconcile_day.ReconciliationResult:
+    """One instrument-day as the saga runs it: this run's proof covers it."""
+    return reconcile_day.reconcile_instrument(
+        lambda: connect_ro(db), catalog, iid, day_ms, _Klines(fetch), verified, _proof(iid)
+    )
+
+
+def run(
+    db: str,
+    catalog: str,
+    venue: str,
+    day_ms: int,
+    iids: list[str],
+    fetch: KlineFetch,
+    verified: VerifiedDaysStore | None,
+    proof: RebuildProof | None = RebuildProof(
+        "run1", "HYPERLIQUID", _DAY, frozenset({_IID, "X-USD-PERP.HYPERLIQUID"})
+    ),
+) -> int:
+    return reconcile_day.run(
+        lambda: connect_ro(db), catalog, venue, day_ms, iids, _Klines(fetch), verified, proof
+    )
+
+
+def fetch_klines(venue: str, inst: Instrument, day_ms: int, environment: str, http: Any) -> list:
+    return venue_klines(venue, environment, http).fetch(inst, day_ms)
 
 
 def _instrument(iid: str, raw: str, price_p: int, size_p: int) -> CryptoPerpetual:
@@ -246,7 +306,8 @@ def test_run_exit_codes_pass_findings_and_run_failure(tmp_path: Path) -> None:
     )
     # Run-level: an unusable candle store means nothing could be compared.
     missing = str(tmp_path / "nope.db")
-    assert run(missing, catalog, venue, _D0_MS, [_IID], lambda i, d: [], verified) == 1
+    args = ["--venue", venue, "--day", _DAY, "--catalog", catalog, "--db", missing]
+    assert main([*args, "--rebuilt-by", "run1"]) == 1
 
 
 def test_seed_with_previous_close_is_bybits_kline_definition() -> None:
@@ -468,3 +529,202 @@ def test_an_inverse_bybit_id_is_refused_before_any_request() -> None:
     with pytest.raises(KlineError, match="not wire-verified"):
         fetch_klines("BYBIT", inverse, 0, "mainnet", http)
     assert http.requests == []
+
+
+# -- the rebuild proof (AD-D9, Story 25.1) ---------------------------------------------------------
+
+
+def test_without_a_proof_nothing_is_compared_or_written(tmp_path: Path) -> None:
+    error_ledger.reset()
+    db = _store(tmp_path)
+    catalog = str(tmp_path / "catalog")
+    verified = VerifiedDaysStore(db)
+    assert (
+        run(db, catalog, "HYPERLIQUID", _D0_MS, [_IID], lambda i, d: _THEIRS, verified, None) == 1
+    )
+    assert _status(db) is None
+    assert error_ledger.counts() == {"reconcile.not_rebuilt": 1}
+
+
+def test_standalone_compare_klines_without_rebuilt_by_refuses(tmp_path: Path) -> None:
+    error_ledger.reset()
+    db = _store(tmp_path)
+    args = ["--venue", "HYPERLIQUID", "--day", _DAY, "--catalog", str(tmp_path / "catalog")]
+    assert main([*args, "--db", db, "--instrument", _IID]) == 1
+    assert _status(db) is None
+    assert error_ledger.counts() == {"reconcile.not_rebuilt": 1}
+
+
+def test_an_instrument_the_rebuild_refused_gets_no_verdict(tmp_path: Path) -> None:
+    error_ledger.reset()
+    db = _store(tmp_path)
+    catalog = str(tmp_path / "catalog")
+    proof = _proof(_IID, frozenset({_IID}))
+    verified = VerifiedDaysStore(db)
+    assert (
+        run(db, catalog, "HYPERLIQUID", _D0_MS, [_IID], lambda i, d: _THEIRS, verified, proof) == 2
+    )
+    assert _status(db) is None
+    assert error_ledger.counts() == {"reconcile.not_rebuilt": 1}
+    assert _IID in error_ledger.last_details()["reconcile.not_rebuilt"]
+
+
+def test_an_instrument_in_neither_list_gets_no_verdict(tmp_path: Path) -> None:
+    """The proof is an allowlist: an instrument the rebuild never named rebuilt is not judged."""
+    error_ledger.reset()
+    db = _store(tmp_path)
+    catalog = str(tmp_path / "catalog")
+    proof = RebuildProof("run1", "HYPERLIQUID", _DAY, frozenset({"ETH-USD-PERP.HYPERLIQUID"}))
+    verified = VerifiedDaysStore(db)
+    assert (
+        run(db, catalog, "HYPERLIQUID", _D0_MS, [_IID], lambda i, d: _THEIRS, verified, proof) == 2
+    )
+    assert _status(db) is None
+    assert error_ledger.counts() == {"reconcile.not_rebuilt": 1}
+    assert "did not rebuild it" in error_ledger.last_details()["reconcile.not_rebuilt"]
+
+
+def test_only_the_rebuilt_are_judged_every_other_instrument_is_not_rebuilt(
+    tmp_path: Path,
+) -> None:
+    error_ledger.reset()
+    db = _store(tmp_path)
+    catalog = str(tmp_path / "catalog")
+    other = "ETH-USD-PERP.HYPERLIQUID"
+    proof = _proof(_IID)
+    verified = VerifiedDaysStore(db)
+    iids = [_IID, other]
+    assert run(db, catalog, "HYPERLIQUID", _D0_MS, iids, lambda i, d: _THEIRS, verified, proof) == 2
+    assert _status(db) == "pass"
+    assert verified.verified_status(other, _DAY) is None
+    assert error_ledger.counts() == {"reconcile.not_rebuilt": 1}
+    assert other in error_ledger.last_details()["reconcile.not_rebuilt"]
+
+
+def test_the_cli_builds_an_allowlist_proof_from_rebuilt_and_not_rebuilt() -> None:
+    args = ["--venue", "HYPERLIQUID", "--day", _DAY, "--catalog", "c", "--db", "d"]
+    args += ["--rebuilt-by", "run1", "--rebuilt", _IID, "--rebuilt", "B.HYPERLIQUID"]
+    parsed = compare_klines._parser().parse_args([*args, "--not-rebuilt", "B.HYPERLIQUID"])
+    proof = proof_for(parsed.rebuilt_by, "HYPERLIQUID", _D0_MS, parsed.rebuilt, parsed.not_rebuilt)
+    assert proof is not None
+    assert proof.covers(_IID)
+    assert not proof.covers("B.HYPERLIQUID")  # named by --not-rebuilt
+    assert not proof.covers("C.HYPERLIQUID")  # named by neither
+
+
+def test_the_cli_refuses_a_missing_catalog(tmp_path: Path) -> None:
+    error_ledger.reset()
+    args = ["--venue", "HYPERLIQUID", "--day", _DAY, "--catalog", str(tmp_path / "nope")]
+    assert main([*args, "--db", str(tmp_path / "db"), "--rebuilt-by", "run1"]) == 1
+    assert error_ledger.counts() == {"archive.catalog_missing": 1}
+
+
+def test_an_unparsable_file_name_is_ledgered_and_skipped_not_fatal(tmp_path: Path) -> None:
+    error_ledger.reset()
+    day_ms = 1_779_926_400_000  # 2026-05-28 00:00 UTC
+    stamp = "2026-05-28T12-00-00-000000000Z"
+    good = tmp_path / "data" / "trade_tick" / "BTCUSDT-LINEAR.BYBIT"
+    bad = tmp_path / "data" / "trade_tick" / "ETHUSDT-LINEAR.BYBIT"
+    for leaf in (good, bad):
+        leaf.mkdir(parents=True)
+    (good / f"{stamp}_{stamp}.parquet").write_bytes(b"")
+    (bad / "backup-copy.parquet").write_bytes(b"")
+    assert instruments_on_day(str(tmp_path), "BYBIT", day_ms) == ["BTCUSDT-LINEAR.BYBIT"]
+    assert error_ledger.counts() == {"reconcile.error": 1}
+    assert "backup-copy.parquet" in error_ledger.last_details()["reconcile.error"]
+
+
+def test_a_reconcile_after_a_rebuild_re_proves_a_verified_day(tmp_path: Path) -> None:
+    """Verified -> rebuilt -> (mis)matched: a rerun re-derives the day and must prove it again."""
+    result, db = _reconcile(tmp_path, _THEIRS)
+    assert (result.status, _status(db)) == ("pass", "pass")
+    catalog = ParquetDataCatalog(str(tmp_path / "catalog"))
+    again = reconcile_instrument(db, catalog, _IID, _D0_MS, lambda i, d: _THEIRS[:1], None)
+    assert again.status == "fail"
+    reconcile_instrument(db, catalog, _IID, _D0_MS, lambda i, d: _THEIRS[:1], VerifiedDaysStore(db))
+    assert _status(db) == "fail"
+
+
+# -- the `VenueKlines` port contract, run against each adapter -------------------------------------
+
+
+def _contract(klines: VenueKlines, inst: Instrument, day: int) -> list[Kline]:
+    """Traded minutes of the day only, oldest first, one per minute, exact integers."""
+    fetched = klines.fetch(inst, day)
+    assert [k.t_ms for k in fetched] == sorted({k.t_ms for k in fetched})
+    assert all(day <= k.t_ms < day + 86_400_000 and k.v != 0 for k in fetched)
+    assert all(isinstance(x, int) for k in fetched for x in (k.o, k.h, k.low, k.c, k.v))
+    return fetched
+
+
+def test_each_venue_adapter_meets_the_port_contract() -> None:
+    day = parse_date_ns("2026-09-20") // 1_000_000
+    cases = [
+        (
+            "DYDX",
+            _instrument("BTC-USD-PERP.DYDX", "BTC-USD", 0, 4),
+            "dydx_candles_btc_usd_20260920.json",
+        ),
+        ("BYBIT", _instrument(_BYBIT, "BTCUSDT", 1, 3), "bybit_kline_btcusdt_linear_20260920.json"),
+        ("HYPERLIQUID", _instrument(_IID, "BTC", 0, 5), "hyperliquid_candles_btc_20260920.json"),
+    ]
+    for venue, inst, fixture in cases:
+        payload = _fixture(fixture)
+        pages = (payload, []) if venue == "HYPERLIQUID" else (payload,)
+        assert _contract(venue_klines(venue, "mainnet", _Recorder(*pages)), inst, day)
+
+
+def test_a_minute_returned_twice_is_refused_by_every_adapter() -> None:
+    day = parse_date_ns("2026-09-20") // 1_000_000
+    dydx = _fixture("dydx_candles_btc_usd_20260920.json")
+    dydx = {**dydx, "candles": dydx["candles"] + dydx["candles"][:1]}
+    bybit = _fixture("bybit_kline_btcusdt_linear_20260920.json")
+    bybit = {**bybit, "result": {**bybit["result"], "list": bybit["result"]["list"] * 2}}
+    hyper = _fixture("hyperliquid_candles_btc_20260920.json")
+    cases: list[tuple[str, Instrument, tuple[Any, ...]]] = [
+        ("DYDX", _instrument("BTC-USD-PERP.DYDX", "BTC-USD", 0, 4), (dydx,)),
+        ("BYBIT", _instrument(_BYBIT, "BTCUSDT", 1, 3), (bybit,)),
+        ("HYPERLIQUID", _instrument(_IID, "BTC", 0, 5), (hyper + hyper[:1], [])),
+    ]
+    for venue, inst, pages in cases:
+        with pytest.raises(KlineError, match="same minute twice"):
+            venue_klines(venue, "mainnet", _Recorder(*pages)).fetch(inst, day)
+
+
+def test_the_proof_and_the_verdict_use_the_normalized_day(tmp_path: Path) -> None:
+    """`--day 2026-9-10` must prove, and record, `2026-09-10` -- never the raw text."""
+    db = _store(tmp_path)
+    day_ms = parse_date_ns("2026-9-10") // 1_000_000
+    proof = proof_for("run1", "HYPERLIQUID", day_ms, [_IID], [])
+    assert proof is not None
+    assert proof.day == "2026-09-10"
+    catalog = str(tmp_path / "catalog")
+    verified = VerifiedDaysStore(db)
+    assert (
+        run(db, catalog, "HYPERLIQUID", day_ms, [_IID], lambda i, d: _THEIRS, verified, proof) == 0
+    )
+    assert verified.verified_status(_IID, "2026-09-10") == "pass"
+    assert verified.verified_status(_IID, "2026-9-10") is None
+
+
+def test_a_proof_for_another_venue_day_is_refused(tmp_path: Path) -> None:
+    db = _store(tmp_path)
+    verified = VerifiedDaysStore(db)
+    for other in (
+        RebuildProof("run1", "HYPERLIQUID", "2026-09-11", frozenset({_IID})),
+        RebuildProof("run1", "BYBIT", _DAY, frozenset({_IID})),
+    ):
+        error_ledger.reset()
+        code = run(
+            db,
+            str(tmp_path / "catalog"),
+            "HYPERLIQUID",
+            _D0_MS,
+            [_IID],
+            lambda i, d: _THEIRS,
+            verified,
+            other,
+        )
+        assert code == 1
+        assert error_ledger.counts() == {"reconcile.not_rebuilt": 1}
+    assert verified.verified_status(_IID, _DAY) is None

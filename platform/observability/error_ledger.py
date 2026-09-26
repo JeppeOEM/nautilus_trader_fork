@@ -356,7 +356,7 @@ def reset() -> None:
 
 
 # --- Readers -------------------------------------------------------------------------------------
-# `data_api`'s `/api/errors` and `collector_core.crosscheck_errors` read the files back. A reader
+# `data_api`'s `/api/errors` and `archive.crosscheck_errors` read the files back. A reader
 # never assumes a line is well formed (a rotation or a crash mid-write can truncate the last one).
 
 

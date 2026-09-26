@@ -17,7 +17,7 @@ Every image ships the packages its entrypoints import (spine AD-D12).
 
 An entrypoint is what a container of a compose service runs: the service's `command:` (or its
 dockerfile's `CMD` when it has none), every `python3 -m <module>` the `Makefile` runs in that
-service, and every step a module launches as its own process (`collector_core.nightly`'s chain).
+service, and every step a module launches as its own process (`archive.nightly`'s chain).
 The nightly cron line runs `make` targets only, so it is covered through the `Makefile`.
 
 For each entrypoint the transitive closure of in-repo imports is computed with `ast` (a shim is
@@ -260,8 +260,8 @@ def _step_module(step: ast.Call) -> str:
 
 
 def _nightly_steps() -> list[str]:
-    """Return the modules `collector_core.nightly` runs as child processes (`Step(...)`)."""
-    tree = ast.parse(_MODULES["collector_core.nightly"].read_text())
+    """Return the modules `archive.nightly` runs as child processes (its `Step(...)` calls)."""
+    tree = ast.parse(_MODULES["archive.nightly"].read_text())
     steps = [
         node
         for node in ast.walk(tree)
@@ -272,7 +272,7 @@ def _nightly_steps() -> list[str]:
 
 
 # Modules that launch other in-repo modules as separate processes, which `ast` imports miss.
-_CHILD_PROCESSES = {"collector_core.nightly": _nightly_steps}
+_CHILD_PROCESSES = {"archive.nightly": _nightly_steps}
 
 
 def _entrypoints() -> list[Entrypoint]:
@@ -321,7 +321,7 @@ def _in_repo(target: str) -> str | None:
 def _dynamic_imports(module: str) -> list[str]:
     """
     Modules `module` loads by name, `importlib.import_module("<literal>")`, which the `ast`
-    import scan cannot see (`collector_core.measure_lag` loads the venue clients this way). A
+    import scan cannot see (`archive.tools.measure_lag` loads the venue clients this way). A
     non-literal name cannot be checked at all, so it fails here rather than passing unseen.
     """
     tree = ast.parse(_MODULES[module].read_text())
@@ -373,8 +373,8 @@ def test_every_service_and_make_target_contributes_entrypoints() -> None:
         "dydx_collector.collector",
         "data_api.app",
         "live_paper.node",
-        "collector_core.nightly",
-        "collector_core.rebuild_seconds",
+        "archive.nightly",
+        "archive.rebuild_seconds",
         "bot_tui.app",
     }, "the parser lost an entrypoint it found when this test was written"
 
@@ -431,10 +431,10 @@ def test_uvicorn_app_is_the_first_non_option_token() -> None:
 
 
 def test_closure_follows_a_shim_to_its_target() -> None:
-    assert "alerting.application.engine" in import_closure("data_api.alerts")
+    assert "archive.rebuild_seconds" in import_closure("collector_core.rebuild_seconds")
 
 
 def test_closure_follows_a_literal_import_module_call() -> None:
     assert {"bybit_collector.client", "hyperliquid_collector.client", "dydx_collector.client"} <= (
-        import_closure("collector_core.measure_lag")
+        import_closure("archive.tools.measure_lag")
     )

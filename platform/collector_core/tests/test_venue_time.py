@@ -34,7 +34,6 @@ from collector_core.config import CoreConfig
 from collector_core.config import core_config_from_dict
 from collector_core.feed import MAIN_FEED
 from collector_core.feed import Feed
-from collector_core.rebuild_seconds import rebuild_day
 from nautilus_trader.model.data import BookOrder
 from nautilus_trader.model.data import OrderBookDelta
 from nautilus_trader.model.data import OrderBookDeltas
@@ -173,29 +172,6 @@ def test_a_live_copy_of_a_rest_backfilled_trade_folds_into_its_exchange_second(
     (row,) = _close(c, _SEC)
     assert (row.buy_count, row.close_price) == (1, 100.25)
     assert c._second_trades == {}  # not in the arrival-second list
-
-
-def test_a_late_trade_is_archived_counted_excluded_live_and_rebuilt_into_its_second(
-    tmp_path: Path,
-) -> None:
-    error_ledger.reset()
-    c = _collector(tmp_path)
-    c._process_data(_book(100.0, 102.0, _SEC - 0.5))
-    c._process_data(_trade(1, _SEC - 0.5))  # on time: the archive starts before second S
-    _close(c, _SEC - 1)
-    _close(c, _SEC)
-    c._process_data(_book(100.0, 102.0, _SEC + 1.5))
-    c._process_data(_trade(2, _SEC + 0.7, init_s=_SEC + 1.9))  # second S already closed
-    assert c._late_trades[_IID] == 1
-    assert [t.trade_id.value for t in c._buffer[(TradeTick, _IID)]] == ["1", "2"]
-    (live,) = _close(c, _SEC + 1)
-    assert live.buy_count == 0  # not folded into the arrival second either
-    c._report_stale_trades()
-    assert error_ledger.counts()["collector.late_trade"] == 1
-    asyncio.run(c._flush_once(final=True))
-    rebuild_day(str(tmp_path), _IID, _D0, apply=True)
-    rows = {s.ts_event // _S: s for s in query_second_snapshots(str(tmp_path), _IID, 0, 1 << 62)}
-    assert (rows[_SEC].buy_count, rows[_SEC].close_price) == (1, 100.25)
 
 
 def test_a_trade_stamped_far_ahead_of_arrival_is_archived_and_counted(tmp_path: Path) -> None:

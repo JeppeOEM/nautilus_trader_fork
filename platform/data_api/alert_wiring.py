@@ -22,8 +22,8 @@ Invariant: one store and one engine per process -- the route's writes and the en
 through the same in-memory list, so a created alert is evaluated on the next batch and a deleted one
 stops at once. They are constructed here, in the interface's composition module, because the
 `alerting` context holds no module state and reads no interface wiring; this is the only module
-outside `alerting` that imports `alerting.infrastructure`, bar the deprecated `data_api.alerts`
-re-export shim until it is removed (`platform/tests/test_boundaries.py`).
+outside `alerting` that imports `alerting.infrastructure` (`platform/tests/test_boundaries.py`; the
+deprecated `data_api.alerts` re-export shim was deleted in Story 25.1).
 `app.py`'s lifespan attaches the engine; routes and `ws/live.py` reference `alert_wiring.engine`/
 `alert_wiring.service` through this module, so a test can swap either with
 `monkeypatch.setattr(alert_wiring, ...)`.
