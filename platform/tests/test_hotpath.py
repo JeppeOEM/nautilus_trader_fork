@@ -237,10 +237,11 @@ def _collectors(root: Path) -> list[tuple[Any, list[str], dict[str, Any]]]:
         config = CoreConfig(
             environment="mainnet",
             catalog_path=str(catalog),
-            instruments=tuple(iids),
             book_time_source=venue["source"],
         )
-        built.append((Collector(config, object()), iids, venue))
+        collector = Collector(config, object(), plan=iids)
+        collector._applied.update(iids)  # as `run()`'s initial apply leaves it
+        built.append((collector, iids, venue))
     return built
 
 

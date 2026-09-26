@@ -12,10 +12,22 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
-"""Self-check: re-stamping a Price at fixed precision never changes its value."""
+"""
+Self-check: re-stamping a Price at fixed precision never changes its value. Also: a subscribe or
+unsubscribe of an instrument's two channels is idempotent and converges after a partial failure,
+including a channel the Rust client may replay on reconnect (Story 25.4's retry).
+"""
 
+import asyncio
+import contextlib
+from collections.abc import Callable
+from collections.abc import Coroutine
 from decimal import Decimal
+from typing import Any
 
+import pytest
+
+from dydx_collector.client import DydxClient
 from dydx_collector.client import _at_fixed_precision
 from nautilus_trader.core.nautilus_pyo3 import FIXED_PRECISION
 from nautilus_trader.model.objects import Price
@@ -50,6 +62,125 @@ def test_all_results_share_the_same_precision_label() -> None:
         for value_str, precision in VALUES_AT_VARYING_PRECISION
     ]
     assert len({p.precision for p in fixed_prices}) == 1
+
+
+def _channels(fail: set[str]) -> tuple[DydxClient, list[str]]:
+    """Build a client whose four channel calls are recorded; the names in `fail` raise."""
+    client = object.__new__(DydxClient)  # no pyo3 clients: only the per-channel logic is tested
+    client._held = set()
+    client._replayable = set()
+    calls: list[str] = []
+
+    def _channel(name: str) -> Callable[[str], Coroutine[Any, Any, None]]:
+        async def call(iid: str) -> None:
+            calls.append(name)
+            if name in fail:
+                raise ConnectionError(f"{name} {iid} rejected")
+
+        return call
+
+    for name in (
+        "subscribe_trades",
+        "subscribe_orderbook",
+        "unsubscribe_trades",
+        "unsubscribe_orderbook",
+    ):
+        setattr(client, name, _channel(name))
+    return client, calls
+
+
+_ID = "BTC-USD-PERP.DYDX"
+
+
+def _run(call: Coroutine[Any, Any, None]) -> None:
+    """Run one wire call; a failure is the scenario under test, not the assertion."""
+    with contextlib.suppress(ConnectionError):
+        asyncio.run(call)
+
+
+def test_a_repeated_subscribe_sends_nothing() -> None:
+    client, calls = _channels(set())
+    _run(client.subscribe(_ID))
+    _run(client.subscribe(_ID))
+    assert calls == ["subscribe_trades", "subscribe_orderbook"]
+
+
+def test_a_failed_subscribe_raises_and_keeps_the_half_that_went_through() -> None:
+    client, _ = _channels({"subscribe_orderbook"})
+    with pytest.raises(ConnectionError, match="subscribe_orderbook"):
+        asyncio.run(client.subscribe(_ID))
+    assert client._held == {("trades", _ID)}
+    assert client._replayable == {("orderbook", _ID)}
+
+
+def test_a_retried_subscribe_forces_a_fresh_snapshot_of_a_replayable_orderbook() -> None:
+    """The Rust client may have replayed the failed topic: a duplicate subscribe sends no snapshot."""
+    fail = {"subscribe_orderbook"}
+    client, calls = _channels(fail)
+    _run(client.subscribe(_ID))
+    fail.clear()
+    calls.clear()
+    _run(client.subscribe(_ID))
+    assert calls == ["subscribe_orderbook", "unsubscribe_orderbook", "subscribe_orderbook"]
+    assert (client._held, client._replayable) == ({("trades", _ID), ("orderbook", _ID)}, set())
+
+
+def test_a_fresh_snapshot_interrupted_by_a_failed_unsubscribe_is_forced_again() -> None:
+    fail = {"subscribe_orderbook"}
+    client, calls = _channels(fail)
+    _run(client.subscribe(_ID))
+    fail.clear()
+    fail.add("unsubscribe_orderbook")
+    _run(client.subscribe(_ID))  # held again, but the fresh snapshot is still owed
+    fail.clear()
+    calls.clear()
+    _run(client.subscribe(_ID))
+    assert calls == ["unsubscribe_orderbook", "subscribe_orderbook"]
+
+
+def test_unsubscribe_ends_a_channel_only_a_reconnect_replay_may_hold() -> None:
+    """With no reference held the Rust unsubscribe is a no-op: take one first, then end it."""
+    fail = {"subscribe_orderbook"}
+    client, calls = _channels(fail)
+    _run(client.subscribe(_ID))
+    fail.clear()
+    calls.clear()
+    _run(client.unsubscribe(_ID))
+    assert calls == ["unsubscribe_trades", "subscribe_orderbook", "unsubscribe_orderbook"]
+    assert (client._held, client._replayable) == (set(), set())
+
+
+def test_unsubscribe_of_a_never_sent_channel_sends_nothing() -> None:
+    client, calls = _channels(set())
+    _run(client.unsubscribe(_ID))
+    assert calls == []
+
+
+def test_a_failed_unsubscribe_keeps_the_rest_held_and_a_re_subscribe_restores_only_the_ended() -> (
+    None
+):
+    fail = {"unsubscribe_orderbook"}
+    client, calls = _channels(fail)
+    _run(client.subscribe(_ID))
+    with pytest.raises(ConnectionError, match="unsubscribe_orderbook"):
+        asyncio.run(client.unsubscribe(_ID))
+    assert client._held == {("orderbook", _ID)}
+    calls.clear()
+    _run(client.subscribe(_ID))  # a re-add of the lingering id
+    assert calls == ["subscribe_trades"]
+
+
+def test_a_half_failed_resync_is_completed_by_the_removal() -> None:
+    fail: set[str] = set()
+    client, calls = _channels(fail)
+    _run(client.subscribe(_ID))
+    fail.add("subscribe_orderbook")
+    _run(client.resync_orderbook(_ID))  # the unsubscribe half went through
+    fail.clear()
+    calls.clear()
+    _run(client.unsubscribe(_ID))
+    assert calls == ["unsubscribe_trades", "subscribe_orderbook", "unsubscribe_orderbook"]
+    assert (client._held, client._replayable) == (set(), set())
 
 
 if __name__ == "__main__":

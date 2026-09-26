@@ -25,10 +25,10 @@ import sys
 import tempfile
 from pathlib import Path
 
+from collector_core.config import DydxConfig
+
 from dydx_collector.client import DydxClient
 from dydx_collector.collector import DydxCollector
-from dydx_collector.config import DydxConfig
-from dydx_collector.config import InstrumentEntry
 from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
 
 
@@ -61,9 +61,8 @@ async def main() -> None:
             flush_interval_seconds=FLUSH_INTERVAL,
             config_reload_seconds=9999,
             open_interest_poll_seconds=9999,
-            instruments=(InstrumentEntry(id=instrument_id, bar_intervals=()),),
         )
-        collector = DydxCollector(config)
+        collector = DydxCollector(config, (instrument_id,))
 
         async def _stopper() -> None:
             await asyncio.sleep(RUN_SECONDS)

@@ -50,7 +50,7 @@ def _pruned_store(loops: object) -> object:
 def _collector(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> HyperliquidCollector:
     monkeypatch.setenv("CANDLES_DB_PATH", str(tmp_path / "candles.db"))
     return HyperliquidCollector(
-        CoreConfig(environment="mainnet", catalog_path=str(tmp_path), instruments=(_IID,))
+        CoreConfig(environment="mainnet", catalog_path=str(tmp_path)), (_IID,)
     )
 
 

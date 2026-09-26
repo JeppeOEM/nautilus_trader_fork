@@ -165,6 +165,42 @@ re-export shims. The paper config moved with the code: `live_paper/config.toml` 
    first-quote race, ledgered since this story) and no other new `bots.*` site. Full checklist:
    `bots/DEPLOY_CHECKLIST.md`.
 
+## Story 25.4: collection control, the one venue loader (2026-09-26)
+
+One-off, on `nifelheim`, the first deploy that contains Story 25.4. dYdX's control plane moved out
+of `DydxCollector` into `platform/collection_control/` (same compose service `collector`, same
+`collector:status`/`collector:control` channels, same `./data/dydx_config.toml` bind mount), and
+every venue's `config.toml` now goes through one strict loader
+(`collector_core.config.load_venue_config`). The expired `ranking_engine/` shims were deleted.
+
+1. Check `data/dydx_config.toml` **before** restarting the collector: the file now refuses start
+   (fail closed, `ValueError` naming the key or ids, in the `collector` logs) where the old loader
+   ignored a problem. `git pull && make build` (the collector image now copies
+   `collection_control` and no longer `ranking_engine`), then parse the mounted file in the new
+   image without starting anything:
+   ```bash
+   cd ~/nautilus_trader_fork/platform
+   docker compose run --rm --no-deps collector python3 -c "from pathlib import Path; \
+   from collector_core.config import load_venue_config; \
+   c, p = load_venue_config(Path('/app/dydx_collector/config.toml'), 'DYDX'); \
+   print(len(p.collected), 'instruments,', sorted(p.excluded), c)"
+   ```
+   Or check by hand: only the known keys (`network`, the core thresholds, `config_reload_seconds`,
+   `open_interest_poll_seconds`, `liquidity_check_seconds`, `liquidity_min_oi_usd`,
+   `non_config_retain_hours`, `instruments`, `exclude`; no `environment`); each `[[instruments]]`
+   entry holds only `id`, `store_order_book_deltas` (true/false) and `retain_hours`; at most 30
+   instruments; no id both in `instruments` and in `exclude`.
+2. The core thresholds are now **honoured** for dYdX: any of `stale_book_seconds`,
+   `crossed_resync_seconds`, `stale_trade_seconds`, `seen_trade_ids`, `feed_stale_seconds` or
+   `book_crosscheck_seconds` present in `data/dydx_config.toml` now takes effect (it was silently
+   ignored before), and a `trade_feeds` other than 1 refuses start (dYdX opens one trade feed).
+   Remove any you did not mean to set.
+3. `make up`, then check: `bot_tui`'s Collector pane lists every planned coin, a
+   `:start`/`p` (unpin)/`x` (stop) round-trips and rewrites `data/dydx_config.toml`, and
+   `GET /api/errors` shows no `collector.subscribe_failed`. A `collector.unplanned_message` right
+   after a stop/unpin is the in-flight messages of the unsubscribed coin, counted and dropped; a
+   steady one is an open DATA-02 question.
+
 ## 2. First-run measurements owed
 
 None of these can be taken off the VPS; each is **NOT measured** until recorded.

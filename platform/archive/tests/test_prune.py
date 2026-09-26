@@ -245,7 +245,7 @@ def _dydx_plan(tmp_path: Path, body: str) -> Path:
 
 
 _PLAN = """
-environment = "mainnet"
+network = "mainnet"
 catalog_path = "/unused"
 non_config_retain_hours = 4.0
 

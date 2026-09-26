@@ -22,84 +22,47 @@ single infrequent GET (no need for a dependency that may not even be in the
 production image -- aiohttp is a `test`-only extra of nautilus_trader, not a
 runtime dependency).
 
+`classify_liquidity` moved to `collection_control.domain.liquidity` (Story 25.4: it is the plan's pin
+admission rule, not capture's) and is served here, deprecated, from `_MOVED_NAMES`. It now returns a
+`LiquidityClassification` rather than a `(liquid, illiquid)` tuple.
 """
 
 import asyncio
+import importlib
 import time
+import warnings
 from decimal import Decimal
 
 from kernel.open_interest import OpenInterest
 from kernel.venue_http import dydx_indexer_url
 from kernel.venue_http import get_request
 from kernel.venue_http import http_json
-from observability import error_ledger
 
 from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
 from nautilus_trader.model.identifiers import InstrumentId
 
 
-def classify_liquidity(
-    markets_json: dict,
-    min_volume_usd: float,
-    exclude: frozenset[str] | None = None,
-    max_liquid: int | None = None,
-) -> tuple[set[str], set[str]]:
-    """
-    Split all dYdX markets into (liquid, illiquid) by 24-hour volume (USD).
-
-    Uses volume24H (already in USD) rather than openInterest (base-token units).
-    openInterest is in tokens, not USD — comparing it directly to a USD threshold
-    incorrectly marks BTC/ETH/SOL as illiquid (BTC=458 tokens < 100_000).
-
-    Instruments in `exclude` are placed in illiquid regardless of volume.
-
-    `max_liquid`, if given, keeps only the highest-volume markets in `liquid` and
-    demotes the rest to `illiquid` -- the caller is responsible for sizing this to
-    leave room for pinned instruments (see collector.py's _MAX_WS_SUBSCRIPTIONS:
-    dYdX's WS connection hard-caps subscriptions per channel at 32, so subscribing
-    more markets than that gets the overflow rejected and the whole connection
-    stuck in a reconnect loop, not just those markets skipped).
-
-    Returns sets of instrument ID strings (`"{ticker}-PERP.DYDX"` format).
-    Markets with missing or unparseable volume are treated as illiquid.
-    """
-    _exclude = exclude or frozenset()
-    illiquid: set[str] = set()
-    volumes: dict[str, float] = {}
-    for market in markets_json.get("markets", {}).values():
-        ticker = market.get("ticker")
-        if ticker is None:
-            continue
-        iid = f"{ticker}-PERP.DYDX"
-        if iid in _exclude:
-            illiquid.add(iid)
-            continue
-        try:
-            vol = float(market.get("volume24H") or 0)
-        except (ValueError, TypeError) as exc:
-            # No volume is not zero volume (DATA-01): an unparseable value must not silently
-            # reclassify a coin as illiquid. Leave it unclassified, loudly.
-            error_ledger.record(
-                "open_interest.volume24h",
-                f"{iid}: unparseable volume24H {market.get('volume24H')!r}",
-                exc,
-            )
-            continue
-        if vol >= min_volume_usd:
-            volumes[iid] = vol
-        else:
-            illiquid.add(iid)
-
-    if max_liquid is not None and len(volumes) > max_liquid:
-        overflow = sorted(volumes, key=volumes.get)[: len(volumes) - max_liquid]
-        illiquid.update(overflow)
-        for iid in overflow:
-            del volumes[iid]
-
-    return set(volumes), illiquid
+# Moved names (Story 25.4): served from their new home with a DeprecationWarning until then.
+MOVED_NAMES_REMOVE_AFTER = "26-2-capture-package-and-venue-packages-with-entrypoints"
+_MOVED_NAMES: dict[str, str] = {
+    "classify_liquidity": "collection_control.domain.liquidity.classify_liquidity",
+}
 
 
-def _fetch_markets_json(network: DydxNetwork) -> dict:
+def __getattr__(name: str) -> object:
+    if name in _MOVED_NAMES:
+        warnings.warn(
+            f"dydx_collector.open_interest.{name} moved to {_MOVED_NAMES[name]} (Story 25.4); "
+            f"it is served here until {MOVED_NAMES_REMOVE_AFTER}",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        # A literal module name, so `platform/tests/test_images.py` follows it into the image check.
+        return getattr(importlib.import_module("collection_control.domain.liquidity"), name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def fetch_markets_json(network: DydxNetwork) -> dict:
     # dYdX's indexer rejects urllib's default User-Agent (403); needs a real one.
     url = dydx_indexer_url(network, "/v4/perpetualMarkets")
     return http_json(get_request(url, "nautilus-dydx-collector/1.0"))
@@ -107,7 +70,7 @@ def _fetch_markets_json(network: DydxNetwork) -> dict:
 
 async def fetch_open_interest(network: DydxNetwork) -> list[OpenInterest]:
     """Poll dYdX's REST indexer for current open interest across all markets."""
-    markets_json = await asyncio.to_thread(_fetch_markets_json, network)
+    markets_json = await asyncio.to_thread(fetch_markets_json, network)
     return parse_open_interest(markets_json, ts=time.time_ns())
 
 

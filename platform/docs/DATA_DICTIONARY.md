@@ -279,8 +279,8 @@ Moved from `collector_core/` to the shared kernel in Story 23.2; class name (hen
   `data/custom_open_interest/`. Replaces `DydxOpenInterest`/`BybitOpenInterest`/
   `HyperliquidOpenInterest` (history in `custom_{dydx,bybit,hyperliquid}_open_interest/` moves
   with `python -m archive.tools.migrate_open_interest`, audit D-40). The dYdX-specific
-  notes below describe `dydx_collector/open_interest.py`, which keeps the poll and
-  `classify_liquidity`.
+  notes below describe `dydx_collector/open_interest.py`, which keeps the poll
+  (`classify_liquidity` moved to `collection_control.domain.liquidity` in Story 25.4).
 
 - **Why custom/separate:** open interest is parsed Rust-side but never forwarded to
   Python on either the REST or WS markets-channel path (`open_interest.py`
@@ -289,14 +289,15 @@ Moved from `collector_core/` to the shared kernel in Story 23.2; class name (hen
 - **Fields:** `instrument_id`, `open_interest` (`Decimal`, stored as a string in Arrow
   to avoid float round-tripping), `ts_event`, `ts_init`.
 - **Source:** plain stdlib `urllib` poll of dYdX's public indexer
-  `/v4/perpetualMarkets` REST endpoint (`_fetch_markets_json`, `open_interest.py`),
-  every `open_interest_poll_seconds` (config default 300s, `config.py`).
-- **Also drives liquidity tiering:** `classify_liquidity` (`open_interest.py`)
-  reads the *same* markets JSON response but keys off `volume24H` (USD), not
-  `openInterest` (base-token units) — `platform/CLAUDE.md` OBS-03 explicitly calls out
-  the token-vs-USD confusion as a past production bug. This classification decides
-  which instruments get trade/book subscriptions (pinned/liquid/illiquid tiers,
-  `collector.py`), independent of storing `OpenInterest` itself.
+  `/v4/perpetualMarkets` REST endpoint (`fetch_markets_json`, `open_interest.py`),
+  every `open_interest_poll_seconds` (config default 300s, `collector_core/config.py`'s
+  `DydxConfig`).
+- **Also drives liquidity tiering:** `classify_liquidity` (`collection_control/domain/
+  liquidity.py`, Story 25.4) reads the *same* markets JSON response but keys off `volume24H`
+  (USD), not `openInterest` (base-token units) — `platform/CLAUDE.md` OBS-03 explicitly calls out
+  the token-vs-USD confusion as a past production bug. It labels each collected instrument
+  liquid/illiquid on `collector:status` and alone admits a `pin_top_liquid` pin (§1.12),
+  independent of storing `OpenInterest` itself.
 - **Downstream use of the stored `open_interest` field:** **none found** in
   `views/`/`ranking/`/`research/` — only the *volume*-based liquidity classification
   (a separate, parallel computation in the same module) is used live. The OI Parquet
@@ -356,6 +357,34 @@ service name, via `ERROR_LEDGER_SERVICE`).
   matches a gap in §1.7's second-snapshot rows against these files within the 300 s skew bound
   `kernel.clocks.MAX_TS_INIT_SKEW_NS` **of one of the gap's own edges** — never across its
   interior — before calling it `UNEXPLAINED`.
+
+### 1.12 `collector:status` / `collector:control` (the `collection_control/` context, Story 25.4)
+
+Not market data: the dYdX collection plan's live control surface, read and written by `bot_tui`'s
+Collector pane (Story 6.1). Published language, frozen (AD-D12); the bytes are replay-tested
+(`collection_control/tests/test_status_replay.py` against a pre-move recording,
+`bot_tui/tests/test_collector_status_replay.py` through the TUI's reader).
+
+- **`collector:status`** — published by `StatusPublisher` in the dYdX collector process at start,
+  every `liquidity_check_seconds`, right after every control action, and within 30 s of a row's
+  `pending` state changing (capture's retry applied it). One `json.dumps` message
+  per planned instrument, in plan order, keys in this order:
+  - `id` — the instrument id;
+  - `liquid` — `true` when its USD `volume24H` is at or above the plan's `liquidity_min_oi_usd`
+    (the last classification; `false` until the first one);
+  - `last_trade_ts` — capture's last book update for it (wall-clock ns; `0` = never);
+  - `trade_backfill` — trades recovered over REST after reconnects since start (§1.1);
+  - `pending` — present, and `true`, only when the instrument is planned but capture has **not**
+    applied it (its subscribe failed on the wire and is being retried, or the venue does not list
+    it). Absent on an applied instrument, so every pre-25.4 row shape is unchanged.
+  Then one `{"unpinned_ids": [...]}` (every `exclude` id, sorted), and on `stop`/`unpin` a
+  `{"id": ..., "removed": true}` tombstone.
+- **`collector:control`** — `{action, id}` published by `bot_tui`: `start` (plan `add`), `unpin`
+  (stop and exclude), `stop` (plan `remove`), `pin_top_liquid` (fill the free slots under the
+  30-instrument cap with the top USD-volume liquid ids, never an excluded one). A refused command
+  or an unknown action logs a WARNING and changes nothing. A valid one is saved to
+  `data/dydx_config.toml` (validated through the one loader first), then applied through
+  `Collector.apply`, then published.
 
 ---
 
@@ -740,7 +769,7 @@ accumulates day to day for collected instruments, which is why the catalog only 
 
 **1. Dropped instruments (`dropped_instrument`, dYdX only, `--dydx-plan`).** Every DYDX leaf whose
 instrument the collection plan (`dydx_collector/config.toml`'s `instruments`, read through
-`dydx_collector.config.load_config`) does not collect loses every data type except `trade_tick`
+`collection_control`'s `TomlPlanStore`, over the one venue loader) does not collect loses every data type except `trade_tick`
 once its files end more than `non_config_retain_hours` ago -- **currently `4` hours**. This is why
 `crypto_perpetual`/`instrument_status`/etc. exist for ~140 markets on disk even though only the
 configured ones are subscribed: the markets channel is global, so mark/index price, funding rate

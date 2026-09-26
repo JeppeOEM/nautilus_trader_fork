@@ -3,7 +3,7 @@
 #
 # Deliberately at the collector's own established safety margin: 30 distinct
 # instruments = 30 v4_orderbook subscriptions on this ONE connection, right at
-# _MAX_COLLECTED_INSTRUMENTS's cap (dydx_collector/collector.py) -- a real test of
+# DYDX_MAX_COLLECTED_INSTRUMENTS's cap (collector_core/config.py) -- a real test of
 # the subscription budget, not just bot count. 10 of the 30 coins get a second bot
 # with different thresholds (same instrument_id, different bot_id) -- this is the
 # exact scenario AD-11's bot_status.py fix (strategy_id-scoped Cache queries,

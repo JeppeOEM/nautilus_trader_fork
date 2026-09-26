@@ -18,12 +18,12 @@ import time
 from pathlib import Path
 
 import pytest
+from collector_core.config import BybitConfig
 from observability import error_ledger
 
 from bybit_collector.collector import BybitCollector
 from bybit_collector.collector import _message_u
 from bybit_collector.collector import _sequence_verdict
-from bybit_collector.config import BybitConfig
 from nautilus_trader.model.data import BookOrder
 from nautilus_trader.model.data import OrderBookDelta
 from nautilus_trader.model.data import OrderBookDeltas
@@ -69,9 +69,9 @@ def _collector(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> BybitCollecto
     # i.e. into pytest's shared tmp root, where every test here would open the same file read-write
     # and leave it open (`CandleStore` is meant to have exactly one writer per file).
     monkeypatch.setenv("CANDLES_DB_PATH", str(tmp_path / "candles.db"))
-    return BybitCollector(
-        BybitConfig(environment="mainnet", catalog_path=str(tmp_path), instruments=(_IID,))
-    )
+    c = BybitCollector(BybitConfig(environment="mainnet", catalog_path=str(tmp_path)), (_IID,))
+    c._applied.add(_IID)  # as `run()`'s initial apply leaves it (no network here)
+    return c
 
 
 def test_message_u_reads_order_id_and_skips_clear() -> None:

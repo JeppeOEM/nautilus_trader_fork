@@ -46,6 +46,10 @@ from nautilus_trader.model.objects import Price
 
 logger = logging.getLogger(__name__)
 
+# The two per-instrument channels, named as the `{op}_{channel}` wire methods below.
+_TRADES = "trades"
+_ORDERBOOK = "orderbook"
+
 
 def _at_fixed_precision(price: Price) -> Price:
     """
@@ -92,6 +96,16 @@ class DydxClient:
             url=nautilus_pyo3.get_dydx_ws_url(network),  # type: ignore[attr-defined]
             heartbeat=20,
         )
+        # The channel subscriptions this wrapper holds, as (channel, id). The Rust client counts a
+        # reference per subscribe and sends a frame only on 0 <-> 1, so a held channel must never
+        # be subscribed again: the extra reference would make a later unsubscribe a silent no-op.
+        # Exact because every per-instrument subscribe on this WS client goes through here, so its
+        # count is only ever 0 or 1.
+        self._held: set[tuple[str, str]] = set()
+        # Channels whose subscribe frame failed to send. The Rust client keeps such a topic for its
+        # reconnect replay with no reference held, so it may be on the wire although not held --
+        # an unsubscribe alone would be a no-op, and a re-subscribe a duplicate with no snapshot.
+        self._replayable: set[tuple[str, str]] = set()
 
     async def fetch_instruments(self) -> list[Instrument]:
         """
@@ -128,19 +142,71 @@ class DydxClient:
     # collector_core client contract: one call per lifecycle step; the per-channel
     # methods above stay for the control plane and tests.
     async def subscribe(self, iid: str) -> None:
-        await self.subscribe_trades(iid)
-        await self.subscribe_orderbook(iid)
+        """
+        Hold both channels. Idempotent and convergent: capture retries a failed subscribe as a
+        whole, and a repeat subscribes only the channels not yet held, so a half that went through
+        is neither re-sent nor leaked. A failure raises; what went through stays held, for the
+        retry or for the `unsubscribe` of a removal to end.
+        """
+        await self._hold(_TRADES, iid)
+        await self._hold(_ORDERBOOK, iid)
 
     async def unsubscribe(self, iid: str) -> None:
-        await self.unsubscribe_trades(iid)
-        await self.unsubscribe_orderbook(iid)
+        """
+        End both channels, including one only a reconnect replay subscribed. Idempotent like
+        `subscribe`: a failure raises with the remaining channels still held, the retry ends only
+        those, and a re-add's `subscribe` restores a channel this already ended.
+        """
+        await self._release(_TRADES, iid)
+        await self._release(_ORDERBOOK, iid)
 
     async def subscribe_global(self) -> None:
         await self.subscribe_markets()
 
     async def resync_orderbook(self, iid: str) -> None:
-        await self.unsubscribe_orderbook(iid)
-        await self.subscribe_orderbook(iid)
+        """Force a fresh orderbook snapshot; a retry after a half that went through completes it."""
+        await self._release(_ORDERBOOK, iid)
+        await self._hold(_ORDERBOOK, iid)
+
+    async def _hold(self, channel: str, iid: str) -> None:
+        key = (channel, iid)
+        if key not in self._held:
+            await self._send("subscribe", channel, iid)
+        if key in self._replayable and channel == _ORDERBOOK:
+            # A reconnect may have replayed this topic already, and dYdX answers a duplicate
+            # subscribe with no snapshot -- the book would never start. End it and subscribe anew.
+            await self._send("unsubscribe", channel, iid)
+            await self._send("subscribe", channel, iid)
+        # A replayed trades topic needs nothing more: its stream is live, the duplicate harmless.
+        self._replayable.discard(key)
+
+    async def _release(self, channel: str, iid: str) -> None:
+        key = (channel, iid)
+        if key not in self._held:
+            if key not in self._replayable:
+                return
+            # Not held but possibly replayed: take the reference, so the unsubscribe frame is sent.
+            await self._send("subscribe", channel, iid)
+        await self._send("unsubscribe", channel, iid)
+
+    async def _send(self, op: str, channel: str, iid: str) -> None:
+        """
+        One channel frame, mirroring the Rust client's per-topic reference: a failed send leaves
+        the reference as it was (the Rust client restores it), so only a success changes `_held`.
+        """
+        key = (channel, iid)
+        try:
+            await getattr(self, f"{op}_{channel}")(iid)
+        except Exception:
+            if op == "subscribe":
+                self._replayable.add(key)
+            raise
+        if op == "subscribe":
+            self._held.add(key)
+        else:
+            # The Rust client's unsubscribe also drops the topic from its replay set.
+            self._held.discard(key)
+            self._replayable.discard(key)
 
     async def subscribe_bars(self, bar_type: str) -> None:
         await self._ws.subscribe_bars(nautilus_pyo3.BarType.from_str(bar_type))

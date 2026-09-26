@@ -22,10 +22,10 @@ cutover that discarded them).
 import time
 from pathlib import Path
 
+from collector_core.config import DydxConfig
 from kernel.fold import fold_trades
 
 from dydx_collector.collector import DydxCollector
-from dydx_collector.config import DydxConfig
 from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
 from nautilus_trader.model.data import TradeTick
 from nautilus_trader.model.enums import AggressorSide
@@ -46,12 +46,15 @@ def _make_config(catalog_path: Path) -> DydxConfig:
         snapshot_interval_seconds=1.0,
         config_reload_seconds=60,
         open_interest_poll_seconds=60,
-        non_config_retain_hours=24.0,
-        liquidity_min_oi_usd=100_000.0,
         liquidity_check_seconds=60,
-        instruments=(),
-        exclude=frozenset(),
     )
+
+
+def _collector(tmp_path: Path) -> DydxCollector:
+    """Build a collector planning and applied on `_IID`, as `run()`'s initial apply leaves it."""
+    collector = DydxCollector(_make_config(tmp_path / "catalog"), (str(_IID),))
+    collector._applied.add(str(_IID))
+    return collector
 
 
 def _trade(
@@ -77,7 +80,7 @@ def _second(collector: DydxCollector) -> dict:
 
 def test_trade_tick_is_buffered_for_catalog_write(tmp_path: Path) -> None:
     """Raw TradeTicks reach the catalog write buffer, both clocks untouched (story 22.13)."""
-    collector = DydxCollector(_make_config(tmp_path / "catalog"))
+    collector = _collector(tmp_path)
     trade = _trade(100.0, 1.0, AggressorSide.BUYER, "1", ts=time.time_ns() - 5)
     collector._process_data(trade)
     (buffered,) = collector._buffer[(TradeTick, str(_IID))]
@@ -86,7 +89,7 @@ def test_trade_tick_is_buffered_for_catalog_write(tmp_path: Path) -> None:
 
 def test_open_high_low_close_track_a_single_second_of_trades(tmp_path: Path) -> None:
     """open=first trade, close=last trade, high/low across all trades this second."""
-    collector = DydxCollector(_make_config(tmp_path / "catalog"))
+    collector = _collector(tmp_path)
     for price in (100.0, 105.0, 98.0, 102.0):
         collector._process_data(_trade(price, 1.0, AggressorSide.BUYER, str(price)))
 
@@ -103,7 +106,7 @@ def test_no_trade_leaves_ohlc_trackers_empty(tmp_path: Path) -> None:
 
     Distinguishes "no trade occurred" from a fabricated price.
     """
-    collector = DydxCollector(_make_config(tmp_path / "catalog"))
+    collector = _collector(tmp_path)
     assert str(_IID) not in collector._second_trades
     assert _second(collector)["open_price"] is None
     assert _second(collector)["close_price"] is None
@@ -111,7 +114,7 @@ def test_no_trade_leaves_ohlc_trackers_empty(tmp_path: Path) -> None:
 
 def test_buy_and_sell_volume_still_tracked_alongside_ohlc(tmp_path: Path) -> None:
     """OHLC tracking is additive -- buy/sell volume/count aggregation unaffected."""
-    collector = DydxCollector(_make_config(tmp_path / "catalog"))
+    collector = _collector(tmp_path)
     collector._process_data(_trade(100.0, 2.0, AggressorSide.BUYER, "1"))
     collector._process_data(_trade(101.0, 3.0, AggressorSide.SELLER, "2"))
 
@@ -133,7 +136,7 @@ def test_discard_second_accumulators_clears_ohlc_and_volume(tmp_path: Path) -> N
     recovery instead of an honest gap (see DATA-01/DATA-02 in platform/CLAUDE.md).
     The raw trades stay archived (the nightly rebuild reports them as orphans).
     """
-    collector = DydxCollector(_make_config(tmp_path / "catalog"))
+    collector = _collector(tmp_path)
     iid = str(_IID)
     collector._process_data(_trade(100.0, 2.0, AggressorSide.BUYER, "1"))
     collector._process_data(_trade(9000.0, 3.0, AggressorSide.SELLER, "2"))
@@ -148,7 +151,7 @@ def test_discard_second_accumulators_clears_ohlc_and_volume(tmp_path: Path) -> N
 
 def test_historical_trades_from_subscribe_reply_are_dropped(tmp_path: Path) -> None:
     """Drop the old trades dYdX's subscribed reply replays: they must not enter the live second."""
-    collector = DydxCollector(_make_config(tmp_path / "catalog"))
+    collector = _collector(tmp_path)
     iid = str(_IID)
     old = time.time_ns() - 3600 * 1_000_000_000
     collector._process_data(_trade(100.0, 5.0, AggressorSide.BUYER, "old", ts=old))
@@ -161,7 +164,7 @@ def test_historical_trades_from_subscribe_reply_are_dropped(tmp_path: Path) -> N
 
 def test_replayed_trade_id_is_not_counted_twice(tmp_path: Path) -> None:
     """A reconnect replays trades still inside the age window; the trade id catches them."""
-    collector = DydxCollector(_make_config(tmp_path / "catalog"))
+    collector = _collector(tmp_path)
     iid = str(_IID)
     collector._process_data(_trade(100.0, 2.0, AggressorSide.BUYER, "same"))
     collector._process_data(_trade(100.0, 2.0, AggressorSide.BUYER, "same"))

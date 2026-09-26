@@ -22,10 +22,10 @@ from pathlib import Path
 
 import pytest
 from candles.application.sink import CandleSink
+from collector_core.config import BybitConfig
 from collector_core.ports import SecondSink
 
 from bybit_collector.collector import BybitCollector
-from bybit_collector.config import BybitConfig
 
 
 _IID = "BTCUSDT-LINEAR.BYBIT"
@@ -49,9 +49,7 @@ def _pruned_store(loops: object) -> object:
 
 def _collector(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> BybitCollector:
     monkeypatch.setenv("CANDLES_DB_PATH", str(tmp_path / "candles.db"))
-    return BybitCollector(
-        BybitConfig(environment="mainnet", catalog_path=str(tmp_path), instruments=(_IID,))
-    )
+    return BybitCollector(BybitConfig(environment="mainnet", catalog_path=str(tmp_path)), (_IID,))
 
 
 def test_the_entrypoint_injects_a_sink_that_satisfies_the_port(

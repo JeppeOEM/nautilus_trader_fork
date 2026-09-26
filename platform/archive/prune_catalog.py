@@ -37,7 +37,7 @@ previous day proven: its trades' `ts_event` can belong to it. Every deleted trad
 recorded as a `pruned` archive gap so a later rebuild keeps those rows' live values.
 
 Plan retention (with `--dydx-plan`, the dYdX collection plan's `config.toml`, read through
-collection control's one loader `dydx_collector.config.load_config`): dYdX leaves whose instrument
+collection control's `TomlPlanStore`, over capture's one venue loader): dYdX leaves whose instrument
 the plan no longer collects lose every type except `trade_tick` once older than
 `non_config_retain_hours`; a collected instrument with `store_order_book_deltas` and a finite
 `retain_hours` loses its older `order_book_deltas`. Applied to DYDX leaves only, for `--venue DYDX`
@@ -64,7 +64,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from candles.infrastructure.verified_days import VerifiedDaysDir
-from dydx_collector.config import load_config
+from collection_control.infrastructure.plan_store import TomlPlanStore
 from kernel.venues import VENUE_KINDS
 from observability import error_ledger
 
@@ -102,8 +102,7 @@ class DydxPlanFile:
     out every dYdX instrument's data. A plan listing no instruments (e.g. read mid-save) is
     refused for the same reason.
 
-    A plan that changes while it is read is refused too: `dydx_collector.config.save_config`
-    truncates and rewrites the bind-mounted file in place, and a read landing mid-save can parse
+    A plan that changes while it is read is refused too: `TomlPlanStore.save` truncates and rewrites the bind-mounted file in place, and a read landing mid-save can parse
     as a valid plan listing only the first instruments, which would age out the rest. The file's
     bytes and stat are taken, then `settle` waits, the plan is loaded, and both are taken again;
     any difference means a save was in flight.
@@ -126,17 +125,17 @@ class DydxPlanFile:
         if before[1] == 0:
             raise ValueError(f"{self._path} is empty (the placeholder, not a collection plan)")
         self._settle()
-        config = load_config(self._path)
+        plan = TomlPlanStore(self._path, "DYDX").load()
         if self._fingerprint() != before:
             raise ValueError(f"{self._path} changed while being read (a save in flight?)")
-        if not config.instruments:  # e.g. a half-saved plan: never "every leaf was dropped"
+        if not plan.collected:  # e.g. a half-saved plan: never "every leaf was dropped"
             raise ValueError(f"{self._path} lists no instruments; refusing to age out every leaf")
+        if plan.non_config_retain_hours is None:
+            raise ValueError(f"{self._path} holds no non_config_retain_hours")
         return PlanRetention(
-            collected=frozenset(e.id for e in config.instruments),
-            non_config_retain_hours=config.non_config_retain_hours,
-            delta_retain_hours={
-                e.id: e.retain_hours for e in config.instruments if e.store_order_book_deltas
-            },
+            collected=frozenset(plan.collected),
+            non_config_retain_hours=plan.non_config_retain_hours,
+            delta_retain_hours=dict(plan.delta_retain_hours),
         )
 
 

@@ -12,30 +12,3 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
-"""
-Deprecated re-export shim (Story 25.2): `ranking_engine.price_series` moved to the ranking context
-(`ranking.domain.price_series`).
-
-Pure re-export, defines nothing: every name here *is* the `ranking.domain.price_series` object. Import from
-`ranking.domain.price_series` instead.
-"""
-
-import warnings
-
-from ranking.domain.price_series import PriceSeriesStore
-
-
-__all__ = [
-    "PriceSeriesStore",
-]
-
-REMOVE_AFTER = "25-4-collection-control-plan-intent-vs-applied-set"
-
-
-# Attributed to the importing module, not to importlib's frames.
-warnings.warn(
-    "ranking_engine.price_series moved to ranking.domain.price_series (Story 25.2); "
-    f"this shim is removed after {REMOVE_AFTER}",
-    DeprecationWarning,
-    skip_file_prefixes=("<frozen importlib",),
-)

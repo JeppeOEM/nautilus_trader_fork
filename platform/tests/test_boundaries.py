@@ -25,8 +25,7 @@ so the graph holds from the first move, not only once a module has been relocate
 - a cross-context edge must be in `GRAPH` (AD-D2);
 - a `_private` name is never imported across contexts;
 - `observability` imports only the standard library, and `kernel` no context;
-- `research` imports nothing from `data_api`, legacy or not, nor `views` or `ranking` (nor the
-  `ranking_engine` shims);
+- `research` imports nothing from `data_api`, legacy or not, nor `views` or `ranking`;
 - a `domain/` module or a venue `policies.py` imports only the standard library, `kernel` and
   `nautilus_trader.model`/`core`;
 - `kernel/` holds exactly spine AD-D3's modules and stays pure: no in-repo import beyond itself,
@@ -37,7 +36,9 @@ so the graph holds from the first move, not only once a module has been relocate
   pct-change/volatility formula `price_stats_from_series` (Story 25.2);
 - `bots/` holds no module-level mutable runtime state either, and no module in `platform/` but
   `bots/infrastructure/nautilus_host.py` imports `TradingNode` or `nautilus_trader.live`
-  (Story 25.3).
+  (Story 25.3);
+- `collection_control/` holds no module-level mutable runtime state, and capture reaches it only
+  from its composition roots and the one venue loader, `collector_core.config` (Story 25.4).
 
 Two exemptions only. An edge whose both ends sit in one *unmoved* legacy package (e.g. inside
 `collector_core`) is not judged: it becomes judged the moment one end moves out. `platform/tests`
@@ -61,7 +62,7 @@ from _source_tree import story_statuses
 from _source_tree import unknown_or_done
 
 
-THIS_STORY = "25-3-bots-context-paper-and-exec-types-nautilus-acl"
+THIS_STORY = "25-4-collection-control-plan-intent-vs-applied-set"
 
 KERNEL = "kernel"
 OBSERVABILITY = "observability"
@@ -135,19 +136,15 @@ LEGACY_MODULE_TO_CONTEXT: dict[str, str] = {
     "collector_core.ports": CAPTURE,
     "collector_core.trade_backfill": CAPTURE,
     "collector_core.tests": CAPTURE,
-    # --- venue collectors: capture; dYdX also hosts its control plane.
-    # `dydx_collector.collector` stays capture as one module until the control-plane split (25.4).
+    # --- venue collectors: capture. dYdX's control plane moved to `collection_control/` in Story
+    # 25.4; `dydx_collector.config` is its re-export shim (of the plan's `InstrumentEntry` and
+    # capture's `DydxConfig`), so it stays mapped to collection control.
     "bybit_collector": CAPTURE,
     "hyperliquid_collector": CAPTURE,
     "dydx_collector": CAPTURE,
     "dydx_collector.config": COLLECTION_CONTROL,
-    "dydx_collector.open_interest": CAPTURE,
     "dydx_collector.tests.test_build_candles": CANDLES,
-    "dydx_collector.tests.test_collector_control": COLLECTION_CONTROL,
-    "dydx_collector.tests.test_config": COLLECTION_CONTROL,
-    # --- ranking_engine (Story 25.2 re-export shims of `ranking`) / live_paper (Story 25.3
-    # re-export shims of `bots`): one context each
-    "ranking_engine": RANKING,
+    # --- live_paper (Story 25.3 re-export shims of `bots`)
     "live_paper": BOTS,
     # --- data_api: the interface adapter (its Story 24.2 views shims were deleted in Story 24.4,
     # its Story 24.3 alerting shim in Story 25.1)
@@ -157,14 +154,10 @@ LEGACY_MODULE_TO_CONTEXT: dict[str, str] = {
 }
 
 # Modules split across contexts: (module, top-level name) -> context. Every top-level function and
-# class of a split module is listed (asserted), so its move is fully planned.
-LEGACY_SYMBOL_TO_CONTEXT: dict[tuple[str, str], str] = {
-    # dydx open interest: `classify_liquidity` is the collection plan's admission rule.
-    ("dydx_collector.open_interest", "classify_liquidity"): COLLECTION_CONTROL,
-    ("dydx_collector.open_interest", "_fetch_markets_json"): CAPTURE,
-    ("dydx_collector.open_interest", "fetch_open_interest"): CAPTURE,
-    ("dydx_collector.open_interest", "parse_open_interest"): CAPTURE,
-}
+# class of a split module is listed (asserted), so its move is fully planned. Empty since Story 25.4
+# moved `classify_liquidity` out of `dydx_collector.open_interest` (served there by `__getattr__`
+# until its `MOVED_NAMES_REMOVE_AFTER`), leaving that module wholly capture's.
+LEGACY_SYMBOL_TO_CONTEXT: dict[tuple[str, str], str] = {}
 
 # Cross-context edges the tree still has, (importer context, imported context) -> the story whose
 # `done` retires the edge. The sites named are the ones the retiring story removes.
@@ -186,7 +179,9 @@ LEGACY_PRIVATE_IMPORTS_UNTIL: dict[tuple[str, str], str] = {}
 COMPOSITION_ROOTS: dict[str, frozenset[str]] = {
     # The three venue entrypoints open their own `candles_<venue>.db` and hand capture the
     # `SecondSink` adapter plus the retention loop (Story 24.1).
-    "dydx_collector.collector": frozenset({CANDLES}),
+    # dYdX's also builds collection control's `ControlService`/`StatusPublisher` and their adapters
+    # and hands their loops to capture as `extra_loops` (Story 25.4).
+    "dydx_collector.collector": frozenset({CANDLES, COLLECTION_CONTROL}),
     "bybit_collector.collector": frozenset({CANDLES}),
     "hyperliquid_collector.collector": frozenset({CANDLES}),
     # ...and the tests that drive exactly that wiring: one per venue, because `Collector` no longer
@@ -201,9 +196,13 @@ COMPOSITION_ROOTS: dict[str, frozenset[str]] = {
     "data_api.tests.test_screener_columns": frozenset({CANDLES}),
     "data_api.tests.test_data_api": frozenset({RANKING}),
     "data_api.tests.test_metrics": frozenset({RANKING}),
-    # The retention run reads the dYdX collection plan through collection control's one loader
-    # (`dydx_collector.config.load_config`) for its dropped-instrument and delta rules (Story 25.1).
+    # The retention run reads the dYdX collection plan through collection control's plan store
+    # (`TomlPlanStore`) for its dropped-instrument and delta rules (Stories 25.1, 25.4).
     "archive.prune_catalog": frozenset({COLLECTION_CONTROL}),
+    # AD-D17's one venue loader returns the `CollectionPlan` aggregate, so it builds one: it
+    # imports `collection_control.domain` only. Everything else in capture sees the plan as ids and
+    # the `collector_core.ports.PlanDiff` protocol.
+    "collector_core.config": frozenset({COLLECTION_CONTROL}),
 }
 
 
@@ -251,8 +250,7 @@ _PACKAGE_INITS = {name for name, path in _MODULES.items() if path.name == "__ini
 # The legacy packages: every top-level package that is not itself a context. `data_api` and
 # `bot_tui` keep their names (interface adapters) and are judged like any context package.
 LEGACY_PACKAGES = frozenset(
-    {"collector_core", "dydx_collector", "bybit_collector", "hyperliquid_collector"}
-    | {"ranking_engine", "live_paper"}
+    {"collector_core", "dydx_collector", "bybit_collector", "hyperliquid_collector", "live_paper"}
 )
 
 
@@ -476,9 +474,9 @@ def test_research_imports_nothing_from_data_api() -> None:
     assert (RESEARCH, DATA_API) not in LEGACY_EDGES_UNTIL
 
 
-# Packages research never imports (AD-D1 research row, Story 24.4): the read models and ranking
-# (with its legacy shims). Rolling metrics come from ranking's published output, never code.
-_RESEARCH_FORBIDDEN_PACKAGES = frozenset({VIEWS, RANKING, "ranking_engine"})
+# Packages research never imports (AD-D1 research row, Story 24.4): the read models and ranking.
+# Rolling metrics come from ranking's published output, never code.
+_RESEARCH_FORBIDDEN_PACKAGES = frozenset({VIEWS, RANKING})
 
 
 def test_research_imports_no_views_or_ranking() -> None:
@@ -1154,13 +1152,9 @@ VIEWS_QUERY_SERVICES: dict[str, frozenset[str]] = {
     "ranking.application.queries": frozenset({"history", "nearest"}),
 }
 # Packages views never imports (AD-D2): the interfaces, research, capture and the legacy shims.
-_VIEWS_FORBIDDEN_PACKAGES = frozenset(
-    {DATA_API, BOT_TUI, "ranking_engine", "collector_core", "common"}
-)
+_VIEWS_FORBIDDEN_PACKAGES = frozenset({DATA_API, BOT_TUI, "collector_core", "common"})
 # What an interface adapter never imports directly: every read goes through views (AC #3).
-_INTERFACE_FORBIDDEN_PACKAGES = frozenset(
-    {RANKING, "collector_core", "ranking_engine", "candles", "common"}
-)
+_INTERFACE_FORBIDDEN_PACKAGES = frozenset({RANKING, "collector_core", "candles", "common"})
 
 
 def _is_test_module(module: str) -> bool:
@@ -1302,8 +1296,8 @@ def test_legacy_snapshot_indexing_expires_with_its_story() -> None:
     assert expired == {}, "decode these modules' snapshots with DydxSecondSnapshot.from_dict"
 
 
-# --- ranking and bots: no module-level runtime state (spine AD-D10, Stories 25.2/25.3); ranking:
-# one formula (Story 25.2) ----------------------------------------------------------------------
+# --- ranking, bots and collection control: no module-level runtime state (spine AD-D10, Stories
+# 25.2/25.3/25.4); ranking: one formula (Story 25.2) --------------------------------------------
 
 # On top of the kernel's sanctioned import-time calls, a ranking module may bind a module logger:
 # `logging.getLogger` returns the process-wide logger registry's entry, not state the module owns.
@@ -1312,7 +1306,14 @@ _RANKING_SANCTIONED_CALLS = frozenset({"getLogger"})
 # value, and `field(default_factory=...)` is a declaration whose factory runs per instance -- both
 # are how the frozen config value objects spell their defaults, neither is state the module owns.
 _BOTS_SANCTIONED_CALLS = _RANKING_SANCTIONED_CALLS | {"Decimal", "field"}
-_STATE_RULED_CONTEXTS = {RANKING: _RANKING_SANCTIONED_CALLS, BOTS: _BOTS_SANCTIONED_CALLS}
+# Collection control's modules bind only their module logger (its plan and service state live on
+# the instances `build_collector` makes; its frozen tables are the kernel's sanctioned builders).
+_COLLECTION_CONTROL_SANCTIONED_CALLS = _RANKING_SANCTIONED_CALLS
+_STATE_RULED_CONTEXTS = {
+    RANKING: _RANKING_SANCTIONED_CALLS,
+    BOTS: _BOTS_SANCTIONED_CALLS,
+    COLLECTION_CONTROL: _COLLECTION_CONTROL_SANCTIONED_CALLS,
+}
 
 
 def _module_scope_nodes(tree: ast.Module) -> list[ast.AST]:
@@ -1371,7 +1372,8 @@ def _context_sources(context: str) -> dict[str, Path]:
 def test_context_holds_no_module_level_runtime_state(context: str) -> None:
     """
     Every piece of ranking state lives on the board or engine `__main__` builds, every piece of
-    bots state on the bot, ledger, supervisor or store instances its `__main__` builds (AD-D10).
+    bots state on the bot, ledger, supervisor or store instances its `__main__` builds, every piece
+    of collection-control state on the plan and service instances `build_collector` makes (AD-D10).
     """
     sources = _context_sources(context)
     assert len(sources) > 10, f"the {context} context's modules were not found"

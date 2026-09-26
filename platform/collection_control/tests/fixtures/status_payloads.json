@@ -1,0 +1,55 @@
+{
+  "state": {
+    "instruments": [
+      {
+        "id": "BTC-USD-PERP.DYDX",
+        "store_order_book_deltas": true,
+        "retain_hours": 48.0
+      },
+      {
+        "id": "ETH-USD-PERP.DYDX"
+      },
+      {
+        "id": "SOL-USD-PERP.DYDX"
+      }
+    ],
+    "exclude": [
+      "ZZZ-USD-PERP.DYDX",
+      "AAA-USD-PERP.DYDX"
+    ],
+    "liquid": [
+      "BTC-USD-PERP.DYDX",
+      "SOL-USD-PERP.DYDX"
+    ],
+    "last_book_update_ns": {
+      "BTC-USD-PERP.DYDX": 1758888000123456789,
+      "ETH-USD-PERP.DYDX": 1758888001000000000
+    },
+    "trade_backfill": {
+      "ETH-USD-PERP.DYDX": 17
+    },
+    "removed": "ETH-USD-PERP.DYDX"
+  },
+  "published": [
+    [
+      "collector:status",
+      "{\"id\": \"BTC-USD-PERP.DYDX\", \"liquid\": true, \"last_trade_ts\": 1758888000123456789, \"trade_backfill\": 0}"
+    ],
+    [
+      "collector:status",
+      "{\"id\": \"ETH-USD-PERP.DYDX\", \"liquid\": false, \"last_trade_ts\": 1758888001000000000, \"trade_backfill\": 17}"
+    ],
+    [
+      "collector:status",
+      "{\"id\": \"SOL-USD-PERP.DYDX\", \"liquid\": true, \"last_trade_ts\": 0, \"trade_backfill\": 0}"
+    ],
+    [
+      "collector:status",
+      "{\"unpinned_ids\": [\"AAA-USD-PERP.DYDX\", \"ZZZ-USD-PERP.DYDX\"]}"
+    ],
+    [
+      "collector:status",
+      "{\"id\": \"ETH-USD-PERP.DYDX\", \"removed\": true}"
+    ]
+  ]
+}

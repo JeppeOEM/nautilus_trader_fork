@@ -194,10 +194,10 @@ class RetentionPolicy:
         Instruments with a file of any type reaching the current UTC day: capture writes them now.
 
         The dropped-instrument rule never applies to these, whatever the plan says: the plan file
-        is read while control may be rewriting it (`dydx_collector.config.save_config` truncates
-        and rewrites the bind-mounted file in place -- a single-file bind mount cannot be renamed
-        over, so the write cannot be made atomic), and a torn or partial read would otherwise
-        list a collected instrument as dropped and delete its history.
+        is read while control may be rewriting it (`collection_control`'s `TomlPlanStore.save`
+        truncates and rewrites the bind-mounted file in place -- a single-file bind mount cannot be
+        renamed over, so the write cannot be made atomic), and a torn or partial read would
+        otherwise list a collected instrument as dropped and delete its history.
         """
         return {f.iid for f in files if f.span is not None and self._reaches_today(f.span)}
 

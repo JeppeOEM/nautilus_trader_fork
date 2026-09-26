@@ -12,28 +12,31 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
-"""Bybit collector config: the venue-neutral `CoreConfig` plus the REST open-interest poll cadence."""
+"""
+Deprecated re-export shim (Story 25.4): `BybitConfig` moved to capture's one venue loader,
+`collector_core.config` (`load_config(path)` -> `collector_core.config.load_venue_config(path,
+"BYBIT")`, which returns `(BybitConfig, CollectionPlan)` -- a changed shape, so it is not
+re-exported).
 
-from dataclasses import asdict
-from dataclasses import dataclass
-from pathlib import Path
+Pure re-export, defines nothing: every name here *is* the `collector_core.config` object.
+"""
 
-from collector_core.config import CoreConfig
-from collector_core.config import core_config_from_dict
-from collector_core.config import load_toml
+import warnings
 
-
-@dataclass(frozen=True)
-class BybitConfig(CoreConfig):
-    open_interest_poll_seconds: int = 300
+from collector_core.config import BybitConfig
 
 
-def load_config(path: Path) -> BybitConfig:
-    raw = load_toml(path)
-    core = core_config_from_dict(
-        raw, ("mainnet", "testnet"), extra_keys=("open_interest_poll_seconds",)
-    )
-    poll = int(raw.get("open_interest_poll_seconds", BybitConfig.open_interest_poll_seconds))
-    if poll <= 0:
-        raise ValueError(f"open_interest_poll_seconds must be > 0, got {poll}")
-    return BybitConfig(**asdict(core), open_interest_poll_seconds=poll)
+__all__ = [
+    "BybitConfig",
+]
+
+REMOVE_AFTER = "26-2-capture-package-and-venue-packages-with-entrypoints"
+
+
+# Attributed to the importing module, not to importlib's frames.
+warnings.warn(
+    "bybit_collector.config moved to collector_core.config (Story 25.4); "
+    f"this shim is removed after {REMOVE_AFTER}",
+    DeprecationWarning,
+    skip_file_prefixes=("<frozen importlib",),
+)

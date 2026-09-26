@@ -312,7 +312,8 @@ development_status:
   25-1a-rankings-web-only-mode-toggle-on-web-tui-coins-pane-deleted: done
   25-2-ranking-context-rankingboard-replaces-module-globals: done
   25-3-bots-context-paper-and-exec-types-nautilus-acl: done
-  25-4-collection-control-plan-intent-vs-applied-set: ready-for-dev
+  25-4-collection-control-plan-intent-vs-applied-set: done
+  25-1b-archive-service-nightly-maintenance-scheduled-no-host-cron: ready-for-dev
   epic-25-retrospective: optional
 
   epic-26: backlog
@@ -344,7 +345,13 @@ development_status:
   29-3-venue-cutover-bybit-hyperliquid-proven-then-dydx-stopped: ready-for-dev
   29-4-runtime-collection-control-bybit-hyperliquid: ready-for-dev
   29-5-market-browser-search-by-name-and-add-in-collector-pane: ready-for-dev
+  29-6-bots-pane-take-profit-stop-loss-and-position-details: ready-for-dev
   epic-29-retrospective: optional
+
+  epic-30: backlog
+  30-1-compact-parquet-encoding-for-consolidated-and-rewritten-files: ready-for-dev
+  30-2-second-snapshot-book-and-trade-fields-as-exact-integers: ready-for-dev
+  epic-30-retrospective: optional
 
 action_items:
   - epic: 1

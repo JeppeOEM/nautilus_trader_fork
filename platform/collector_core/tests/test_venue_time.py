@@ -70,12 +70,13 @@ def _collector(
     cfg = CoreConfig(
         environment="mainnet",
         catalog_path=str(tmp_path),
-        instruments=(_IID,),
         stale_trade_seconds=10**9,  # fixed past timestamps must pass the age filter
         book_time_source=source,  # type: ignore[arg-type]
         hold_back_seconds=hold_back,
     )
-    return Collector(cfg, client if client is not None else _SnapshotClient())
+    c = Collector(cfg, client if client is not None else _SnapshotClient(), plan=(_IID,))
+    c._applied.add(_IID)  # as `run()`'s initial apply leaves it (no network here)
+    return c
 
 
 def _at(second: float) -> int:

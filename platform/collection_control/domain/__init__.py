@@ -12,18 +12,3 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
-"""Hyperliquid collector config: the venue-neutral `CoreConfig`, nothing extra (see config.toml)."""
-
-from pathlib import Path
-
-from collector_core.config import CoreConfig
-from collector_core.config import core_config_from_dict
-from collector_core.config import load_toml
-
-
-def load_config(path: Path) -> CoreConfig:
-    raw = load_toml(path)
-    # l2Book pushes every ~5.4 s (max 6 s in the 22.5 raw capture, see config.toml): the core's
-    # 5 s stale guard would skip most samples, so this venue defaults to 2x the cadence.
-    raw.setdefault("stale_book_seconds", 12.0)
-    return core_config_from_dict(raw, ("mainnet", "testnet"))

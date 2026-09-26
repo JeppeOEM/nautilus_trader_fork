@@ -87,7 +87,7 @@ def save_chart_indicators(config: dict[str, list[IndicatorEntry]], path: Path) -
 
     Full rewrite, not a patch -- `tomli_w` has no comment-preservation support, so any
     hand-written comments in the file are lost on a Save-button-triggered write. Same
-    accepted, deliberate tradeoff as `dydx_collector/config.py`'s `save_config`
+    accepted, deliberate tradeoff as `collection_control`'s `TomlPlanStore.save`
     (see its docstring); revisit only if it becomes a real complaint.
     """
     raw = {

@@ -12,22 +12,34 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
-"""CoreConfig: dYdX's production thresholds are the defaults; env + cadence validated."""
+"""
+CoreConfig: dYdX's production thresholds are the defaults; env + cadence validated. The one venue
+loader (`load_venue_config`, Story 25.4): each venue's keys, defaults and plan shape.
+"""
 
 from pathlib import Path
 
 import pytest
 
+from collector_core.config import DYDX_MAX_COLLECTED_INSTRUMENTS
+from collector_core.config import DydxConfig
 from collector_core.config import core_config_from_dict
-from collector_core.config import load_core_config
+from collector_core.config import load_venue_config
+from collector_core.config import plan_toml_fields
+from collector_core.config import venue_config_from_dict
+
+
+def _load(path: Path) -> object:
+    config, _plan = load_venue_config(path, "BYBIT")
+    return config
 
 
 def test_defaults(tmp_path: Path) -> None:
     path = tmp_path / "c.toml"
     path.write_text('instruments = ["BTCUSDT-LINEAR.BYBIT"]\n')
-    cfg = load_core_config(path, ("mainnet", "testnet"))
+    cfg, plan = load_venue_config(path, "BYBIT")
     assert cfg.environment == "mainnet"
-    assert cfg.instruments == ("BTCUSDT-LINEAR.BYBIT",)
+    assert plan.collected == ("BTCUSDT-LINEAR.BYBIT",)
     assert (cfg.snapshot_interval_seconds, cfg.stale_book_seconds, cfg.crossed_resync_seconds) == (
         1.0,
         5.0,
@@ -44,21 +56,21 @@ def test_environment_validated(tmp_path: Path) -> None:
     path = tmp_path / "c.toml"
     path.write_text('environment = "prod"\n')
     with pytest.raises(ValueError, match="environment"):
-        load_core_config(path, ("mainnet", "testnet"))
+        _load(path)
 
 
 def test_non_positive_snapshot_interval_rejected(tmp_path: Path) -> None:
     path = tmp_path / "c.toml"
     path.write_text("snapshot_interval_seconds = 0\n")
     with pytest.raises(ValueError, match="snapshot_interval_seconds"):
-        load_core_config(path, ("mainnet",))
+        _load(path)
 
 
 def test_unknown_key_rejected_unless_declared_extra(tmp_path: Path) -> None:
     path = tmp_path / "c.toml"
     path.write_text("stale_book_secs = 30.0\n")  # a typo must not silently mean 5.0
     with pytest.raises(ValueError, match="stale_book_secs"):
-        load_core_config(path, ("mainnet",))
+        _load(path)
     assert core_config_from_dict(
         {"stale_book_secs": 30.0}, ("mainnet",), extra_keys=("stale_book_secs",)
     )
@@ -71,8 +83,87 @@ def test_non_positive_threshold_rejected(key: str) -> None:
 
 
 def test_duplicate_instruments_collapsed() -> None:
-    cfg = core_config_from_dict({"instruments": ["A.X", "B.X", "A.X"]}, ("mainnet",))
-    assert cfg.instruments == ("A.X", "B.X")
+    _config, plan = venue_config_from_dict({"instruments": ["A.X", "B.X", "A.X"]}, "BYBIT")
+    assert plan.collected == ("A.X", "B.X")
+    assert plan.cap == 2  # a static plan's cap is its own size
+
+
+def test_instruments_is_the_plans_not_a_core_key() -> None:
+    with pytest.raises(ValueError, match="instruments"):
+        core_config_from_dict({"instruments": ["A.X"]}, ("mainnet",))
+
+
+def test_hyperliquid_defaults_its_stale_guard_and_takes_no_exclude() -> None:
+    config, _plan = venue_config_from_dict({}, "HYPERLIQUID")
+    assert config.stale_book_seconds == 12.0
+    with pytest.raises(ValueError, match="exclude"):
+        venue_config_from_dict({"exclude": ["A.X"]}, "HYPERLIQUID")
+
+
+_DYDX = """
+network = "testnet"
+stale_book_seconds = 7.5
+liquidity_min_oi_usd = 250000
+exclude = ["BAD-USD-PERP.DYDX"]
+
+[[instruments]]
+id = "BTC-USD-PERP.DYDX"
+store_order_book_deltas = true
+retain_hours = 24.0
+
+[[instruments]]
+id = "ETH-USD-PERP.DYDX"
+"""
+
+
+def test_dydx_core_keys_are_now_honoured(tmp_path: Path) -> None:
+    """Story 25.4: dYdX's file goes through the core's strict loader, so its thresholds apply."""
+    path = tmp_path / "c.toml"
+    path.write_text(_DYDX)
+    config, plan = load_venue_config(path, "DYDX")
+    assert isinstance(config, DydxConfig)
+    assert (config.environment, config.stale_book_seconds) == ("testnet", 7.5)
+    assert plan.collected == ("BTC-USD-PERP.DYDX", "ETH-USD-PERP.DYDX")
+    assert plan.delta_retain_hours == {"BTC-USD-PERP.DYDX": 24.0}
+    assert (plan.cap, plan.min_liquidity_usd, plan.non_config_retain_hours) == (
+        DYDX_MAX_COLLECTED_INSTRUMENTS,
+        250_000.0,
+        4.0,
+    )
+
+
+@pytest.mark.parametrize(
+    ("raw", "match"),
+    [
+        ({"environment": "mainnet"}, "network"),
+        ({"network": "prod"}, "network"),
+        ({"stale_book_secs": 1.0}, "stale_book_secs"),
+        ({"instruments": [{"id": "A-PERP.DYDX", "bar_intervals": []}]}, "bar_intervals"),
+        ({"instruments": [{"store_order_book_deltas": True}]}, "id"),
+        ({"instruments": [{"id": "A-PERP.DYDX", "store_order_book_deltas": 1}]}, "true or false"),
+        ({"config_reload_seconds": 0}, "config_reload_seconds"),
+        ({"trade_feeds": 2}, "dYdX runs one trade feed"),
+        (
+            {"instruments": [{"id": f"C{i}-PERP.DYDX"} for i in range(31)]},
+            "above its cap of 30",
+        ),
+        ({"instruments": [{"id": "A-PERP.DYDX"}], "exclude": ["A-PERP.DYDX"]}, "A-PERP.DYDX"),
+    ],
+)
+def test_dydx_file_is_refused_on_any_unknown_key_or_broken_invariant(
+    raw: dict[str, object], match: str
+) -> None:
+    with pytest.raises(ValueError, match=match):
+        venue_config_from_dict(raw, "DYDX")
+
+
+def test_plan_toml_fields_read_back_as_the_same_plan(tmp_path: Path) -> None:
+    path = tmp_path / "c.toml"
+    path.write_text(_DYDX)
+    _config, plan = load_venue_config(path, "DYDX")
+    fields = plan_toml_fields(plan)
+    assert fields["instruments"][1] == {"id": "ETH-USD-PERP.DYDX"}  # defaults omitted
+    assert venue_config_from_dict({"network": "testnet", **fields}, "DYDX")[1] == plan
 
 
 def test_trade_feeds_defaults_to_one_and_accepts_two() -> None:

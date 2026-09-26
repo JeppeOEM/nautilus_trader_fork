@@ -18,54 +18,44 @@ dYdX market data collector entrypoint.
 Owns its own asyncio loop, a typed in-memory buffer, and a configurable snapshot loop.
 No TradingNode/Strategy/DataEngine involved -- see client.py for why.
 
-Instrument control (Story 6.1)
--------------------------------
-`config.toml`'s [[instruments]] list is the single, always-authoritative source of what
-gets collected -- at startup the collector subscribes to exactly that list and nothing
-else. There is no automatic, timer-driven reclassification: the collected set only
-changes in response to an explicit `collector:control` Redis message (see
-`_control_loop`), never on its own.
-
-Every instrument in `instruments` is pinned by definition -- there is no "collected but
-not pinned" middle state. The four control actions:
-
-start          : add a brand-new (or previously-unpinned) id and start collecting it,
-                 pinned immediately -- also removes it from `config.exclude` if it was
-                 there. Rejected past `_MAX_COLLECTED_INSTRUMENTS`.
-unpin          : stop collecting an id and add it to `config.exclude` (persisted) --
-                 same permanent denylist a hand-edited exclude entry uses, so an
-                 unpinned coin is also excluded from any future liquidity ranking, not
-                 just out of the collected set. `:start <ID>` reverses this. This is
-                 the only way an actively-collected id stops via the TUI's `p` key.
-stop           : stop collecting an id, same as unpin, but without excluding it --
-                 use for an id you don't want bot_tui listing as "available to re-add."
-pin_top_liquid : fill any empty collector slots (up to the cap) with the current
-                 top-by-volume coins not already collected, pinned immediately. Never
-                 removes or replaces an existing entry -- there's nothing left for it to
-                 protect against, since every entry is already pinned.
-
-`_MAX_WS_SUBSCRIPTIONS` (32) is dYdX's real per-connection WS hard subscription limit;
-`_MAX_COLLECTED_INSTRUMENTS` (30) is this collector's own, smaller operating cap
-(2-slot safety margin) enforced on `start`/`pin_top_liquid` -- never exceed it.
+`DydxCollector` is capture only: dYdX's per-level message-id book tagging and uncross
+(`uncross.py`), its forced resync, the open-interest poll and the `[WS_RAW]` flush. What is
+collected is the collection-control context's (Story 25.4, `collection_control/`): the plan in
+`config.toml` (`CollectionPlan`: the `[[instruments]]` list, `exclude`, the 30-instrument cap under
+dYdX's 32-per-connection WS limit), changed only by an explicit `collector:control` command or a
+hand edit of the file, and applied here through `Collector.apply`, whose `Applied` result is the
+fact `collector:status` reports. `build_collector` is the composition root that wires that context's
+three loops (plan reload, `collector:status`, `collector:control`) in as `extra_loops`.
 """
 
 import asyncio
-import dataclasses
 import functools
-import json
 import logging
 import os
 import re
 import time
+from collections.abc import Awaitable
+from collections.abc import Callable
+from collections.abc import Iterable
 from pathlib import Path
 from typing import ClassVar
 
-import redis.asyncio as aioredis
 from candles.application.prune import loop as candle_prune_loop
 from candles.application.sink import CandleSink
 from candles.infrastructure.sqlite_store import store_from_env
+from collection_control.application.control import ControlService
+from collection_control.application.reload import reload_loop
+from collection_control.application.status import StatusPublisher
+from collection_control.infrastructure.markets import DydxMarkets
+from collection_control.infrastructure.plan_store import TomlPlanStore
+from collection_control.infrastructure.redis import RedisControlChannel
+from collection_control.infrastructure.redis import RedisStatusBus
 from collector_core.collector import Collector
 from collector_core.collector import run_forever
+from collector_core.config import DydxConfig
+from collector_core.config import load_venue_config
+from collector_core.ports import Applied
+from collector_core.ports import PlanDiff
 from observability import error_ledger
 from observability import incidents
 from observability.incidents import IncidentConfig
@@ -73,12 +63,6 @@ from observability.incidents import IncidentRule
 
 from dydx_collector import uncross
 from dydx_collector.client import DydxClient
-from dydx_collector.config import DydxConfig
-from dydx_collector.config import InstrumentEntry
-from dydx_collector.config import load_config
-from dydx_collector.config import save_config
-from dydx_collector.open_interest import _fetch_markets_json
-from dydx_collector.open_interest import classify_liquidity
 from dydx_collector.open_interest import fetch_open_interest
 from nautilus_trader.core import nautilus_pyo3
 from nautilus_trader.model.book import OrderBook
@@ -91,27 +75,14 @@ logger = logging.getLogger(__name__)
 
 CONFIG_PATH = Path(__file__).parent / "config.toml"
 
-# dYdX's WS server hard-caps subscriptions per channel per connection at 32 (confirmed
-# live via its own error: "Per-connection subscription limit reached for v4_trades
-# (limit=32)"). Every liquid/pinned instrument subscribes both v4_trades and
-# v4_orderbook, so this must bound the *combined* pinned+liquid instrument count, not
-# just liquid alone -- going over it doesn't just drop the overflow, the repeated
-# rejections get the whole connection detected as dead and endlessly reconnected/
-# rejected again, which is what produced permanent "Stale book" warnings on every
-# instrument (not just the overflow ones) rather than a one-off blip.
-_MAX_WS_SUBSCRIPTIONS: int = 32
+# The control-plane loops a composition root hands the collector (`build_collector`); a capture
+# test builds a collector with none.
+ControlPlane = Callable[["DydxCollector"], tuple[Callable[[], Awaitable[None]], ...]]
 
-# This collector's own operating cap (Story 6.1) -- a deliberate 2-slot safety margin
-# below dYdX's real _MAX_WS_SUBSCRIPTIONS above, enforced on `start`/`pin_top_liquid`
-# control actions. Intentionally a separate constant from _MAX_WS_SUBSCRIPTIONS: one is
-# the venue's hard ceiling, the other is our own choice of how close to run to it.
-_MAX_COLLECTED_INSTRUMENTS: int = 30
 
-# Redis channels for live instrument control (Story 6.1) -- mirrors the bots:control/
-# bots:status pattern already used between bot_tui and the bots context
-# (bots/application/supervise.py).
-_CONTROL_CHANNEL = "collector:control"
-_STATUS_CHANNEL = "collector:status"
+def _no_control_plane(_capture: "DydxCollector") -> tuple[Callable[[], Awaitable[None]], ...]:
+    return ()
+
 
 # CONFIRMED root cause, category 2 -- evidence for `CoreConfig.crossed_resync_seconds`
 # (default 10 s; it was this module's `_CROSSED_RESYNC_NS` before story 22.2 moved the
@@ -146,16 +117,24 @@ _STATUS_CHANNEL = "collector:status"
 
 class DydxCollector(Collector):
     """
-    dYdX on the shared write gate: the core owns ingest/flush/sample/write; this class adds
-    dYdX's per-level message-id book tagging + uncross (`uncross.py`, wired by overriding
-    `_apply_deltas` / `_handle_crossed_book`) and the control plane as `extra_loops`
-    (hot-reload, `collector:status`/`collector:control`, open interest, `[WS_RAW]` flush). It
-    holds no prune loop: retention is the nightly `archive.prune_catalog`'s (Story 25.1).
+    dYdX on the shared write gate: the core owns ingest/flush/sample/write and the applied set;
+    this class adds dYdX's per-level message-id book tagging + uncross (`uncross.py`, wired by
+    overriding `_apply_deltas` / `_handle_crossed_book`), the raw-delta store of the plan's
+    `store_order_book_deltas` instruments (kept current by `apply`), the open-interest poll and the
+    `[WS_RAW]` flush. The control plane arrives as `control_plane`'s loops. It holds no prune loop:
+    retention is the nightly `archive.prune_catalog`'s (Story 25.1).
     """
 
     VENUE: ClassVar[str] = "DYDX"
 
-    def __init__(self, config: DydxConfig) -> None:
+    def __init__(
+        self,
+        config: DydxConfig,
+        plan_ids: Iterable[str],
+        *,
+        store_deltas: Iterable[str] = (),
+        control_plane: ControlPlane = _no_control_plane,
+    ) -> None:
         client = DydxClient(on_data=self._on_data, network=config.network)
         # Composition root: this process owns dYdX's candle store, so it opens it (one file per
         # venue, `CANDLES_DB_PATH`), hands capture the sink port and runs the retention loop.
@@ -164,10 +143,7 @@ class DydxCollector(Collector):
             config,
             client,
             extra_loops=(
-                self._reload_config_loop,
                 self._open_interest_loop,
-                self._status_loop,
-                self._control_loop,
                 # Raw-WS debug feed (Story 5.1) for the incident reports (INCIDENTS below) --
                 # a permanent feature, not scoped to any one investigation. Rust's file
                 # logger only flushes its BufWriter to disk on an explicit Sync event --
@@ -175,20 +151,14 @@ class DydxCollector(Collector):
                 functools.partial(incidents.raw_log_flush_loop, nautilus_pyo3.logging_sync_to_disk),
                 candle_prune_loop(store),
             ),
+            plan=plan_ids,
             second_sink=CandleSink(store),
         )
         self._config: DydxConfig  # narrows the core's CoreConfig
 
-        # Most recent volume-based liquidity classification, keyed by id -- refreshed by
-        # _status_loop, reused by _publish_status for an immediate post-control-action
-        # publish so pin/start/stop show up in the TUI without waiting up to
-        # liquidity_check_seconds for the next periodic tick. Empty (so "liquid" reads
-        # False for everyone) until the first _status_loop tick.
-        self._last_liquid_by_volume: set[str] = set()
-        # Instruments for which raw OrderBookDeltas are written to the catalog
-        self._delta_store: set[str] = {
-            e.id for e in config.instruments if e.store_order_book_deltas
-        }
+        # Instruments for which raw OrderBookDeltas are written to the catalog: the plan's
+        # `store_order_book_deltas` entries, replaced by every `apply`.
+        self._delta_store: set[str] = set(store_deltas)
         # Wall-clock ns of the last delta seen *for that side specifically*, keyed by
         # instrument. _last_book_update_ns updates on ANY delta (either side), which
         # can't tell "book is crossed because bid-side deltas stopped arriving" apart
@@ -207,11 +177,17 @@ class DydxCollector(Collector):
         # (Roundtable's uncross-orderbook.ts) to resolve a crossed book without a full
         # resync. See DATA-04 in platform/CLAUDE.md and uncross.uncross_step.
         self._level_msg_id: dict[str, dict[tuple[OrderSide, float], int]] = {}
+        self._extra_loops = (*self._extra_loops, *control_plane(self))
 
     # -- core hooks --------------------------------------------------------------------------
 
-    def _instrument_ids(self) -> set[str]:
-        return {e.id for e in self._config.instruments}
+    async def apply(self, diff: PlanDiff) -> Applied:
+        """Adopt the diff's complete raw-delta storage set, then run the core's apply."""
+        self._delta_store = set(diff.store_deltas)
+        return await super().apply(diff)
+
+    def _store_deltas(self) -> frozenset[str]:
+        return frozenset(self._delta_store)
 
     def _clear_book_state(self, iid: str) -> None:
         """
@@ -251,6 +227,13 @@ class DydxCollector(Collector):
         """
         if iid in self._delta_store:
             self._buffer[(OrderBookDeltas, iid)].append(deltas)
+        if iid not in self._live_books and deltas.deltas and not deltas.deltas[0].is_clear:
+            # A book starts only from a snapshot (dYdX's always leads with a Clear), as in the
+            # core: after a resync drops the book, in-flight incremental deltas would otherwise
+            # rebuild a shallow one that is sampled, and -- a book existing again -- the queued
+            # resync (`_handle_missing_book`) would never run. Counted, reported each flush.
+            self._deltas_before_snapshot_dropped[iid] += 1
+            return
         self._last_book_update_ns[iid] = time.time_ns()
         if not deltas.deltas:
             return
@@ -292,13 +275,15 @@ class DydxCollector(Collector):
         )
 
     async def _resync_book(self, iid: str) -> None:
-        """Force a fresh order-book snapshot for a desynced instrument via resubscribe."""
+        """
+        Force a fresh order-book snapshot for a desynced instrument via resubscribe. Through
+        capture's `_resync`, so it is serialized with `apply` and never re-subscribes an id a
+        concurrent `stop` removed; a failure is ledgered and retried from the next tick.
+        """
         logger.warning(f"Resyncing desynced order book for {iid}")
-        await self._client.unsubscribe_orderbook(iid)
-        await self._client.subscribe_orderbook(iid)
-        self._clear_book_state(iid)
+        await self._resync(iid)
 
-    # -- control plane (extra_loops) ---------------------------------------------------------
+    # -- extra loops -------------------------------------------------------------------------
 
     async def _open_interest_loop(self) -> None:
         while not self._stop.is_set():
@@ -312,230 +297,6 @@ class DydxCollector(Collector):
                     self._buffer[(type(item), str(item.instrument_id))].append(item)
             except Exception:
                 error_ledger.record("collector.open_interest_poll", "failed to poll open interest")
-
-    async def _subscribe(self, iid: str) -> None:
-        await self._client.subscribe_trades(iid)
-        await self._client.subscribe_orderbook(iid)
-        logger.info(f"Subscribed {iid}")
-
-    async def _unsubscribe(self, iid: str) -> None:
-        await self._client.unsubscribe_trades(iid)
-        await self._client.unsubscribe_orderbook(iid)
-        self._clear_book_state(iid)
-        logger.info(f"Unsubscribed {iid}")
-
-    async def _apply_config(self, new_config: DydxConfig) -> None:
-        """
-        Diff old vs. new `instruments` and subscribe/unsubscribe accordingly, then adopt
-        `new_config`. The one shared place this diffing happens (Story 6.1) -- used by
-        both the periodic file-reload loop and every control-action handler below, so
-        there is exactly one implementation of "what changed."
-        """
-        old_ids = {e.id for e in self._config.instruments}
-        new_ids = {e.id for e in new_config.instruments}
-
-        for iid in new_ids - old_ids:
-            await self._subscribe(iid)
-        for iid in old_ids - new_ids:
-            await self._unsubscribe(iid)
-
-        self._delta_store = {e.id for e in new_config.instruments if e.store_order_book_deltas}
-        self._config = new_config
-
-    async def _status_loop(self) -> None:
-        """
-        Publish collector:status (an informational liquid/illiquid label per currently-
-        collected instrument, Story 6.1). The catalog data an abandoned instrument leaves
-        behind is aged out by the nightly `archive.prune_catalog --dydx-plan` (Story 25.1),
-        not here.
-
-        Read-only: unlike the auto-resubscribing loop this replaces, it never
-        subscribes/unsubscribes anything itself -- the collected set only changes via an
-        explicit collector:control message (see this module's docstring and
-        _handle_control_message).
-
-        Publishes immediately on the first iteration, then every
-        liquidity_check_seconds after that -- run-then-sleep, not sleep-then-run.
-        liquidity_check_seconds defaults to 1800s (30 min); a sleep-first loop would
-        leave the bot_tui Collector page showing "waiting for collector:status" for up
-        to half an hour after every collector restart, which is exactly the bug a user
-        hit in production before this fix.
-        """
-        while not self._stop.is_set():
-            try:
-                markets_json = await asyncio.to_thread(_fetch_markets_json, self._config.network)
-                # No max_liquid cap here -- this is a display label, not a selection.
-                self._last_liquid_by_volume, _ = classify_liquidity(
-                    markets_json, self._config.liquidity_min_oi_usd, self._config.exclude
-                )
-                await self._publish_status()
-            except Exception:
-                error_ledger.record("collector.status_loop", "status loop failed")
-            await asyncio.sleep(self._config.liquidity_check_seconds)
-
-    async def _publish_status(self) -> None:
-        """
-        Publish one collector:status message per currently-collected instrument, using
-        the most recent volume classification (self._last_liquid_by_volume, refreshed by
-        _status_loop), plus one aggregate message carrying config.exclude (bot_tui's
-        "unpinned" section -- everything excluded, whether by hand or via unpin). Called
-        both by _status_loop's own periodic tick and by _apply_and_persist, so a
-        start/unpin/stop/pin_top_liquid action is reflected in the TUI immediately
-        rather than waiting up to liquidity_check_seconds.
-
-        No-op if self._redis isn't set yet (e.g. a control action fired before run()'s
-        first _status_loop tick, or a unit test driving _handle_control_message directly
-        without a real Redis connection).
-        """
-        if self._redis is None:
-            return
-        for entry in self._config.instruments:
-            payload = {
-                "id": entry.id,
-                "liquid": entry.id in self._last_liquid_by_volume,
-                "last_trade_ts": self._last_book_update_ns.get(entry.id, 0),
-                # Trades recovered over REST after reconnects since start (story 22.14).
-                "trade_backfill": self._trade_backfill_counts.get(entry.id, 0),
-            }
-            await self._redis.publish(_STATUS_CHANNEL, json.dumps(payload))
-        await self._redis.publish(
-            _STATUS_CHANNEL, json.dumps({"unpinned_ids": sorted(self._config.exclude)})
-        )
-
-    async def _reload_config_loop(self) -> None:
-        """Hot-reload: picks up a hand-edited config.toml (e.g. after a git pull) without a restart."""
-        while not self._stop.is_set():
-            await asyncio.sleep(self._config.config_reload_seconds)
-            new_config = load_config(CONFIG_PATH)
-            await self._apply_config(new_config)
-
-    async def _apply_and_persist(self, new_config: DydxConfig) -> None:
-        await self._apply_config(new_config)
-        save_config(self._config, CONFIG_PATH)
-        await self._publish_status()
-
-    async def _handle_control_message(self, action: str | None, iid: str | None) -> None:
-        """Dispatch one collector:control message (Story 6.1, AC #3/#4/#5)."""
-        entries = {e.id: e for e in self._config.instruments}
-
-        if action == "start":
-            if iid in entries:
-                logger.warning("Cannot start %s: already collected", iid)
-                return
-            if len(entries) >= _MAX_COLLECTED_INSTRUMENTS:
-                logger.warning(
-                    "Cannot start %s: at %s-instrument cap", iid, _MAX_COLLECTED_INSTRUMENTS
-                )
-                return
-            new_instruments = (*self._config.instruments, InstrumentEntry(id=iid))
-            new_config = dataclasses.replace(
-                self._config, instruments=new_instruments, exclude=self._config.exclude - {iid}
-            )
-            await self._apply_and_persist(new_config)
-
-        elif action == "unpin":
-            if iid not in entries:
-                logger.warning("Cannot unpin %s: not currently collected", iid)
-                return
-            del entries[iid]
-            new_config = dataclasses.replace(
-                self._config,
-                instruments=tuple(entries.values()),
-                exclude=self._config.exclude | {iid},
-            )
-            await self._apply_and_persist(new_config)
-            await self._publish_removed(iid)
-
-        elif action == "stop":
-            if iid not in entries:
-                logger.warning("Cannot stop %s: not currently collected", iid)
-                return
-            del entries[iid]
-            new_config = dataclasses.replace(self._config, instruments=tuple(entries.values()))
-            await self._apply_and_persist(new_config)
-            await self._publish_removed(iid)
-
-        elif action == "pin_top_liquid":
-            await self._pin_top_liquid()
-
-        else:
-            logger.warning("Unknown collector:control action: %r", action)
-
-    async def _publish_removed(self, iid: str) -> None:
-        """
-        Tell bot_tui to drop `iid` immediately rather than waiting up to
-        collector_state._STATUS_STALE_SECONDS for it to notice `iid` is no longer being
-        republished by _publish_status -- stop/unpin both fully remove an instrument
-        from collection, so its row should disappear from the Collector pane right away.
-        """
-        if self._redis is None:
-            return
-        await self._redis.publish(_STATUS_CHANNEL, json.dumps({"id": iid, "removed": True}))
-
-    async def _pin_top_liquid(self) -> None:
-        """
-        Fill any empty collector slots (up to _MAX_COLLECTED_INSTRUMENTS) with the
-        current top-by-volume coins not already collected and not in config.exclude,
-        pinning them immediately.
-
-        Additive only -- never removes or replaces an existing entry. Unlike the old
-        refresh_top_coins this replaces, there is no "collected but not pinned" state
-        left for it to overwrite; every entry is already pinned and stays put.
-
-        An explicitly-unpinned id is excluded from the candidate set for free here --
-        unpin adds it to config.exclude, and classify_liquidity already treats every
-        excluded id as illiquid regardless of volume. Re-adding one is always
-        `:start <ID>`, never automatic.
-        """
-        existing_ids = {e.id for e in self._config.instruments}
-        free_slots = max(0, _MAX_COLLECTED_INSTRUMENTS - len(existing_ids))
-        if free_slots == 0:
-            return
-        markets_json = await asyncio.to_thread(_fetch_markets_json, self._config.network)
-        top, _ = classify_liquidity(
-            markets_json,
-            self._config.liquidity_min_oi_usd,
-            self._config.exclude | existing_ids,
-            max_liquid=free_slots,
-        )
-        new_instruments = self._config.instruments + tuple(
-            InstrumentEntry(id=iid) for iid in sorted(top)
-        )
-        new_config = dataclasses.replace(self._config, instruments=new_instruments)
-        await self._apply_and_persist(new_config)
-
-    async def _control_loop(self) -> None:
-        """
-        Act on start/unpin/stop/pin_top_liquid messages published to collector:control
-        (Story 6.1). Own connection + reconnect loop, mirroring
-        bot_tui/bots_state.py's _redis_listener shape -- independent of self._redis
-        (used for publishing snapshots/status).
-        """
-        redis_url = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
-        while not self._stop.is_set():
-            try:
-                async with aioredis.Redis.from_url(redis_url, decode_responses=True) as client:
-                    pubsub = client.pubsub()
-                    await pubsub.subscribe(_CONTROL_CHANNEL)
-                    logger.info("collector:control listener subscribed")
-                    async for message in pubsub.listen():
-                        if message["type"] != "message":
-                            continue
-                        try:
-                            payload = json.loads(message["data"])
-                            await self._handle_control_message(
-                                payload.get("action"), payload.get("id")
-                            )
-                        except Exception:
-                            error_ledger.record(
-                                "collector.control",
-                                f"collector:control message failed: {message!r}",
-                            )
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                logger.warning("collector:control listener error — reconnecting in 2s: %s", exc)
-                await asyncio.sleep(2)
 
 
 # ---------------------------------------------------------------------------
@@ -563,6 +324,37 @@ INCIDENTS = IncidentConfig(
         IncidentRule("Resyncing", "resync"),
     ),
 )
+
+
+def build_collector(config_path: Path = CONFIG_PATH) -> DydxCollector:
+    """
+    Build the collector -- the composition root (DDD spine AD-D2/AD-D17): load the venue config and
+    the plan through the one loader, and wire collection control's loops -- plan reload, `collector:status`,
+    `collector:control` -- into a fresh collector as `extra_loops`. Called per `run_forever`
+    attempt, so a restart starts from the plan the file holds now.
+    """
+    config, plan = load_venue_config(config_path, "DYDX")
+    if not isinstance(config, DydxConfig):
+        raise TypeError(f"the DYDX loader returned {type(config).__name__}, not DydxConfig")
+    redis_url = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
+
+    def control_plane(capture: DydxCollector) -> tuple[Callable[[], Awaitable[None]], ...]:
+        markets = DydxMarkets(config.network)
+        status = StatusPublisher(capture, RedisStatusBus(redis_url), markets)
+        store = TomlPlanStore(config_path, "DYDX")
+        control = ControlService(plan, store, capture, status, markets)
+        return (
+            functools.partial(reload_loop, control, config.config_reload_seconds),
+            functools.partial(status.loop, lambda: control.plan, config.liquidity_check_seconds),
+            functools.partial(control.control_loop, RedisControlChannel(redis_url)),
+        )
+
+    return DydxCollector(
+        config,
+        plan.collected,
+        store_deltas=plan.delta_store_ids,
+        control_plane=control_plane,
+    )
 
 
 async def main() -> None:
@@ -623,7 +415,7 @@ async def main() -> None:
 
     # run_forever owns the restart loop, signal handling and per-process quarantine; it
     # must not install a second Rust logger over the WS_RAW file sink above.
-    await run_forever(lambda: DydxCollector(load_config(CONFIG_PATH)), init_rust_logging=False)
+    await run_forever(build_collector, init_rust_logging=False)
 
 
 if __name__ == "__main__":

@@ -334,11 +334,11 @@ def test_venue_mode_aligns_on_the_capture_taken_at_drain_time(tmp_path: Path) ->
     cfg = CoreConfig(
         environment="mainnet",
         catalog_path=str(tmp_path),
-        instruments=(_HL,),
         book_time_source="venue",
         hold_back_seconds=0.0,
     )
-    c = Collector(cfg, rest)
+    c = Collector(cfg, rest, plan=(_HL,))
+    c._applied.add(_HL)
     c._process_data(_framed(*_BOOK, seq=0, ts=_T0, iid=_HL))
     c._drain_pending_deltas(_T0 + _S)
     assert _HL in c._live_books

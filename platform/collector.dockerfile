@@ -15,6 +15,7 @@ COPY platform/kernel ./kernel
 COPY platform/candles ./candles
 COPY platform/archive ./archive
 COPY platform/collector_core ./collector_core
+COPY platform/collection_control ./collection_control
 COPY platform/dydx_collector ./dydx_collector
 COPY platform/bybit_collector ./bybit_collector
 COPY platform/hyperliquid_collector ./hyperliquid_collector
@@ -22,7 +23,6 @@ COPY platform/views ./views
 COPY platform/alerting ./alerting
 COPY platform/research ./research
 COPY platform/ranking ./ranking
-COPY platform/ranking_engine ./ranking_engine
 COPY platform/bot_tui ./bot_tui
 COPY platform/data_api ./data_api
 COPY platform/tests ./tests

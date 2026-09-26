@@ -16,6 +16,7 @@
 
 from collections.abc import Mapping
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Protocol
 
 from kernel.second_snapshot import SecondRow
@@ -44,3 +45,73 @@ class SecondSink(Protocol):
     def apply(self, instrument_id: str, rows: Sequence[SecondRow]) -> int: ...
 
     def watermarks(self) -> Mapping[str, int]: ...
+
+
+class PlanDiff(Protocol):
+    """
+    What `Collector.apply` is asked to change in the collected set (spine AD-D17).
+
+    Invariant (capture never re-derives the plan): `added` and `removed` are disjoint and name
+    exactly the ids whose planned status changed, and `store_deltas` is the complete post-change
+    set of ids whose raw `OrderBookDeltas` are archived -- not a delta of it -- so applying one
+    diff is enough to know the whole delta-storage rule. The command that could violate it is a
+    caller building a diff by hand from two id lists that were read at different times; the one
+    producer is `collection_control.domain.plan.CollectionPlan`'s commands (and, for capture's own
+    initial apply and the static venues, `PlanChange`). Declared here, in capture, so capture never
+    imports `collection_control`: the plan's `PlanDiff` satisfies it structurally.
+    """
+
+    @property
+    def added(self) -> frozenset[str]: ...
+
+    @property
+    def removed(self) -> frozenset[str]: ...
+
+    @property
+    def store_deltas(self) -> frozenset[str]: ...
+
+
+@dataclass(frozen=True)
+class PlanChange:
+    """
+    Capture's own concrete `PlanDiff`: the initial apply of a plan's ids at `run()`, and the static
+    Bybit/Hyperliquid plans, which have no control plane to produce one.
+    """
+
+    added: frozenset[str] = frozenset()
+    removed: frozenset[str] = frozenset()
+    store_deltas: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True)
+class Applied:
+    """
+    What one `Collector.apply` actually did on the wire: the ids now subscribed, the ids now
+    unsubscribed, and the ids whose subscribe or unsubscribe failed (ledgered, retried by capture's
+    own retry loop, or -- an id the venue does not list -- never retried). The three are disjoint.
+    """
+
+    subscribed: frozenset[str] = frozenset()
+    unsubscribed: frozenset[str] = frozenset()
+    failed: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True)
+class CaptureStatus:
+    """
+    Capture's read-only view for `collector:status` (AD-D17: the plan is the intent, the applied
+    set is the fact).
+
+    Invariant: `applied` is only ids whose subscribe succeeded and that are still planned, and
+    `pending` is the planned ids that are not applied -- so a status row can never show as
+    collected an id the feed never subscribed. `lingering` is the reverse gap: ids no longer
+    planned that are still subscribed because their unsubscribe failed (retried) -- they hold venue
+    wire slots the plan's cap cannot see. Built by `Collector.capture_status()` from its own sets
+    at one instant; the counters are copies, so a reader cannot mutate capture's state.
+    """
+
+    applied: frozenset[str]
+    pending: frozenset[str]
+    last_book_update_ns: Mapping[str, int]
+    trade_backfill: Mapping[str, int]
+    lingering: frozenset[str] = frozenset()

@@ -54,7 +54,7 @@ were removed in Story 25.3.
 
 Dependency direction: archive imports `kernel`, `observability` and candles' application layer
 (`VerifiedDays`, `queries`, `rebuild`); `prune_catalog` alone also reads the collection plan
-through `dydx_collector.config.load_config`. Nothing imports archive but its own
+through `collection_control.infrastructure.plan_store.TomlPlanStore` (Story 25.4). Nothing imports archive but its own
 composition roots and tests (capture writes its own
 `write_failed`/`quarantined` markers, `collector_core.gap_markers`), and archive imports neither
 capture nor views (`platform/tests/test_boundaries.py`).

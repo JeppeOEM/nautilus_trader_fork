@@ -18,9 +18,10 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from collector_core.config import BybitConfig
+from collector_core.config import load_venue_config
 from kernel.open_interest import OpenInterest
 
-from bybit_collector.config import load_config
 from bybit_collector.open_interest import parse_open_interest
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
@@ -54,19 +55,20 @@ def test_parse_open_interest() -> None:
 def test_config_defaults_and_validation(tmp_path: Path) -> None:
     path = tmp_path / "c.toml"
     path.write_text('instruments = ["BTCUSDT-LINEAR.BYBIT"]\nopen_interest_poll_seconds = 300\n')
-    cfg = load_config(path)
-    assert (cfg.environment, cfg.snapshot_interval_seconds, cfg.instruments) == (
+    cfg, plan = load_venue_config(path, "BYBIT")
+    assert (cfg.environment, cfg.snapshot_interval_seconds, plan.collected) == (
         "mainnet",
         1.0,
         (_IID,),
     )
+    assert isinstance(cfg, BybitConfig)
     assert (cfg.open_interest_poll_seconds, cfg.stale_book_seconds) == (300, 5.0)
     path.write_text('environment = "prod"\n')
     with pytest.raises(ValueError, match="environment"):
-        load_config(path)
+        load_venue_config(path, "BYBIT")
     path.write_text("open_interest_poll_seconds = 0\n")
     with pytest.raises(ValueError, match="open_interest_poll_seconds"):
-        load_config(path)
+        load_venue_config(path, "BYBIT")
 
 
 def test_spot_id_never_in_open_interest() -> None:

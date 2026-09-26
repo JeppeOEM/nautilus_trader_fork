@@ -23,6 +23,7 @@ ledgered, the next message replaces the book. Pushes arrive ~5.4s apart (raw cap
 
 import asyncio
 import os
+from collections.abc import Iterable
 from pathlib import Path
 from typing import ClassVar
 
@@ -32,9 +33,9 @@ from candles.infrastructure.sqlite_store import store_from_env
 from collector_core.collector import Collector
 from collector_core.collector import run_forever
 from collector_core.config import CoreConfig
+from collector_core.config import load_venue_config
 
 from hyperliquid_collector.client import HyperliquidClient
-from hyperliquid_collector.config import load_config
 
 
 CONFIG_PATH = Path(
@@ -45,7 +46,7 @@ CONFIG_PATH = Path(
 class HyperliquidCollector(Collector):
     VENUE: ClassVar[str] = "HYPERLIQUID"
 
-    def __init__(self, config: CoreConfig) -> None:
+    def __init__(self, config: CoreConfig, plan_ids: Iterable[str]) -> None:
         client = HyperliquidClient(
             on_data=self._on_data,
             environment=config.environment,
@@ -59,9 +60,19 @@ class HyperliquidCollector(Collector):
             config,
             client,
             extra_loops=(candle_prune_loop(store),),
+            plan=plan_ids,
             second_sink=CandleSink(store),
         )
 
 
+def build_collector(config_path: Path = CONFIG_PATH) -> HyperliquidCollector:
+    """
+    Composition root: the config and the static plan through the one loader; the plan is applied
+    once at start through `Collector.apply` (Hyperliquid has no live control plane, Story 25.4).
+    """
+    config, plan = load_venue_config(config_path, "HYPERLIQUID")
+    return HyperliquidCollector(config, plan.collected)
+
+
 if __name__ == "__main__":
-    asyncio.run(run_forever(lambda: HyperliquidCollector(load_config(CONFIG_PATH))))
+    asyncio.run(run_forever(build_collector))

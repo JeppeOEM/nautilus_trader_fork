@@ -25,6 +25,7 @@ over REST as an extra loop.
 import asyncio
 import os
 from collections import defaultdict
+from collections.abc import Iterable
 from pathlib import Path
 from typing import ClassVar
 from typing import Literal
@@ -34,11 +35,11 @@ from candles.application.sink import CandleSink
 from candles.infrastructure.sqlite_store import store_from_env
 from collector_core.collector import Collector
 from collector_core.collector import run_forever
+from collector_core.config import BybitConfig
+from collector_core.config import load_venue_config
 from observability import error_ledger
 
 from bybit_collector.client import BybitClient
-from bybit_collector.config import BybitConfig
-from bybit_collector.config import load_config
 from bybit_collector.open_interest import fetch_open_interest
 from nautilus_trader.core.nautilus_pyo3 import BybitEnvironment
 from nautilus_trader.model.data import OrderBookDeltas
@@ -102,7 +103,7 @@ class BybitCollector(Collector):
 
     VENUE: ClassVar[str] = "BYBIT"
 
-    def __init__(self, config: BybitConfig) -> None:
+    def __init__(self, config: BybitConfig, plan_ids: Iterable[str]) -> None:
         # `self._on_data` is a bound method: safe to hand out before super().__init__ since
         # no message can arrive before connect().
         env = (
@@ -118,6 +119,7 @@ class BybitCollector(Collector):
             config,
             client,
             extra_loops=(self._open_interest_loop, candle_prune_loop(store)),
+            plan=plan_ids,
             second_sink=CandleSink(store),
         )
         self._last_u: dict[str, int] = {}
@@ -154,7 +156,8 @@ class BybitCollector(Collector):
         while not self._stop.is_set():
             await asyncio.sleep(self._config.open_interest_poll_seconds)
             try:
-                wanted = set(self._instrument_ids())
+                # The plan, not the applied set: ticker data is never gated by it (Story 25.4).
+                wanted = set(self._plan_ids)
                 for item in await fetch_open_interest(self._config.environment):
                     if str(item.instrument_id) in wanted:
                         # Straight to the buffer, not _on_data: REST-polled data must not
@@ -164,5 +167,16 @@ class BybitCollector(Collector):
                 error_ledger.record("collector.open_interest_poll", "open interest poll failed", e)
 
 
+def build_collector(config_path: Path = CONFIG_PATH) -> BybitCollector:
+    """
+    Composition root: the config and the static plan through the one loader; the plan is applied
+    once at start through `Collector.apply` (Bybit has no live control plane, Story 25.4).
+    """
+    config, plan = load_venue_config(config_path, "BYBIT")
+    if not isinstance(config, BybitConfig):
+        raise TypeError(f"the BYBIT loader returned {type(config).__name__}, not BybitConfig")
+    return BybitCollector(config, plan.collected)
+
+
 if __name__ == "__main__":
-    asyncio.run(run_forever(lambda: BybitCollector(load_config(CONFIG_PATH))))
+    asyncio.run(run_forever(build_collector))

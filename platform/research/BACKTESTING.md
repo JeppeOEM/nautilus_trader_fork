@@ -130,7 +130,7 @@ class MyStrategy(Strategy):
 `kernel/indicators.py` (`OrderFlowImbalance`, `MultiLevelOFI`, `MultiLevelOBI`,
 `Microprice`, `OnlineLogisticTrend`) per SIGNAL-01 in `platform/CLAUDE.md` — raw data is
 stored, signals are computed on read. In-repo, research imports only `kernel` and `observability`:
-never `views/`, `data_api/` or `ranking/` (nor its `ranking_engine/` shims)
+never `views/`, `data_api/` or `ranking/`
 (`platform/tests/test_boundaries.py`). Rolling metrics such as pct-change and volatility are
 ranking's (`metrics.db`, the rankings API), never recomputed here.
 

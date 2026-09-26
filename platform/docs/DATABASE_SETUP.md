@@ -150,20 +150,24 @@ repeat it.
 
 ## 4. `config.toml` — the collector's instrument registry
 
-Easy to mistake for static config, but `platform/config.toml` is actually **mutable,
+Easy to mistake for static config, but `platform/data/dydx_config.toml` (bind-mounted over
+`/app/dydx_collector/config.toml`) is actually **mutable,
 persisted runtime state** — the one file the running system rewrites on its own.
 
-- **Owner:** `dydx_collector/config.py` (`load_config()`/`save_config()`, via
-  `tomllib`/`tomli_w`). `save_config()` does a full rewrite, not a patch — hand-added
-  comments won't survive a control action.
-- **Read:** `dydx_collector/collector.py` hot-reloads it every 30s, so a hand-edit is
-  picked up without a restart.
+- **Owner:** the `collection_control/` context (Story 25.4): `TomlPlanStore`
+  (`collection_control/infrastructure/plan_store.py`) loads and saves the plan through the one
+  venue loader, `collector_core.config.load_venue_config` (`tomllib`/`tomli_w`). A save
+  re-reads the file, replaces only the plan keys, validates the result and rewrites the file in
+  place, not a patch — hand-added comments won't survive a control action.
+- **Read:** `collection_control`'s `reload_loop` re-reads it every `config_reload_seconds`
+  (30 s), so a hand-edit of the plan is picked up without a restart (the thresholds are read
+  once per start).
 - **Write:** every `collector:control` action (start/unpin/stop/pin_top_liquid)
   triggers a rewrite.
 - **Content:** network, catalog path, flush/snapshot intervals, liquidity threshold,
-  and the `[[instruments]]` array (`id`, `pinned`, `store_order_book_deltas`,
-  `retain_hours`) — this array is the single authoritative source of what the
-  collector currently subscribes to.
+  the `instruments` array (`id`, `store_order_book_deltas`, `retain_hours`) and `exclude`
+  — the plan (the intent). What capture actually subscribed is the applied set, reported on
+  `collector:status` (a planned id not yet applied carries `"pending": true`).
 - **Docker mount:** the only `rw` config mount in `docker-compose.yml` — every other
   config file (`bots/config.toml` included) is mounted `:ro` and never written
   back by the running process.
@@ -176,7 +180,6 @@ persisted runtime state** — the one file the running system rewrites on its ow
 
 ```
 platform/
-├── config.toml                    # collector instrument registry (rw, §4)
 ├── dydx_collector/
 │   ├── catalog/                   # Parquet catalog (§3)
 │   └── metrics/
@@ -184,6 +187,7 @@ platform/
 ├── bots/
 │   └── config.toml                # static per-bot config (ro)
 ├── data/
+│   ├── dydx_config.toml           # collector instrument registry (rw, §4)
 │   └── live_paper/
 │       └── fills.db               # + -wal/-shm sidecars (§2.2)
 ```

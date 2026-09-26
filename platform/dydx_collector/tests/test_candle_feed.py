@@ -83,7 +83,7 @@ def _pruned_store(loops: object) -> object:
 def _collector(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[DydxCollector, str]:
     db_path = str(tmp_path / "candles.db")
     monkeypatch.setenv("CANDLES_DB_PATH", db_path)
-    return DydxCollector(_make_config(tmp_path / "catalog")), db_path
+    return DydxCollector(_make_config(tmp_path / "catalog"), ()), db_path
 
 
 def _bars(db_path: str, bar_seconds: int = 60) -> list[dict]:

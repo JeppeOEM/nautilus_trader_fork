@@ -50,8 +50,9 @@ Client contract (duck-typed -- this docstring is the contract, there is no base 
     connect(loop, instruments) -> None   open the WS; deliver every decoded message to the
                                          `on_data(data, feed)` callable the client was built with
     disconnect() -> None
-    subscribe(iid: str) -> None          trades + book (+ whatever else the venue offers)
-    unsubscribe(iid: str) -> None        one WS unsubscribe per topic subscribed
+    subscribe(iid: str) -> None          trades + book (+ whatever else the venue offers);
+                                         called only by `Collector.apply` and its retry loop
+    unsubscribe(iid: str) -> None        one WS unsubscribe per topic subscribed (likewise)
     subscribe_global() -> None           OPTIONAL: venue-wide channels (e.g. dYdX markets)
     fetch_book_snapshot(iid: str)        OPTIONAL: the venue's REST book as a
         -> BookSnapshot                  `collector_core.book_check.BookSnapshot` carrying the
@@ -168,6 +169,10 @@ from collector_core.feed import MAIN_FEED
 from collector_core.feed import REST_FEED_NAME
 from collector_core.feed import Feed
 from collector_core.gap_markers import record_gap
+from collector_core.ports import Applied
+from collector_core.ports import CaptureStatus
+from collector_core.ports import PlanChange
+from collector_core.ports import PlanDiff
 from collector_core.ports import SecondSink
 from nautilus_trader.core import nautilus_pyo3
 from nautilus_trader.model.book import OrderBook
@@ -525,9 +530,22 @@ class Collector:
 
     `VENUE` is the `kernel.venues` code each venue subclass declares; `run_forever` takes that
     venue's capture lock (`collector_core.capture_lock`) with it.
+
+    `plan` is the collection plan's ids (spine AD-D17: the plan is the intent). Nothing is
+    subscribed until `run()` applies them through `apply`, and from then on the applied set is the
+    fact: the sampler, the watchdog, the cross-check and the trade backfill iterate
+    `applied & plan` (`_instrument_ids`), and a book or trade message of any other instrument is
+    counted (`collector.unplanned_message`), never booked, folded or archived. A subscribe or
+    unsubscribe that fails on the wire is ledgered and retried by `_subscription_retry_loop`.
+    Known limit: mark/index/funding/open-interest data is archived for every instrument it arrives
+    for (venue-wide channels and polls carry every market), so an id whose unsubscribe failed keeps
+    its per-instrument ticker data archived until the retry succeeds: the client does not tag a
+    message with the subscription that produced it. Upgrade path: provenance-tagged messages.
     """
 
     VENUE: ClassVar[str]
+    # How often `_subscription_retry_loop` retries the wire-failed subscribes and unsubscribes.
+    _SUBSCRIBE_RETRY_SECONDS: ClassVar[float] = 30.0
 
     def __init__(
         self,
@@ -535,11 +553,30 @@ class Collector:
         client: Any,
         extra_loops: tuple[Callable[[], Awaitable[None]], ...] = (),
         *,
+        plan: Iterable[str],
         second_sink: SecondSink | None = None,
     ) -> None:
         self._config = config
         self._client = client
         self._extra_loops = extra_loops
+        # AD-D17: `_plan_ids` mirrors the plan (the intent), `_applied` what the wire accepted (the
+        # fact). An id stays applied after a failed unsubscribe until the retry succeeds, so the
+        # two are intersected wherever capture reads "collected".
+        self._plan_ids: set[str] = set(plan)
+        self._applied: set[str] = set()
+        self._retry_subscribe: set[str] = set()
+        self._retry_unsubscribe: set[str] = set()
+        self._unplanned_messages: defaultdict[str, int] = defaultdict(int)
+        # Serializes every wire change (`apply` and the retry round): without it a retry awaiting
+        # one subscribe could subscribe an id a concurrent `apply` just removed, leaking a wire
+        # subscription nothing tracks, or unsubscribe an id `apply` just re-added.
+        self._subscription_lock = asyncio.Lock()
+        # The ids `fetch_instruments` returned at `run()`; None before it (then every id is tried).
+        # Known limit: fetched once per run, so a market the venue lists after startup stays
+        # pending until the next restart -- the WS client is also connected with that instrument
+        # list (dYdX parses by it), so a refetch alone would not be enough. Upgrade path: on an
+        # unlisted add, refetch the instruments and reconnect the client with the new list.
+        self._listed: frozenset[str] | None = None
         # Where the archived seconds go next (the candle store, wired by the venue entrypoint).
         # None in tests that exercise capture alone; every entrypoint injects one.
         self._second_sink = second_sink
@@ -649,8 +686,16 @@ class Collector:
 
     # -- hooks a venue subclass may override -------------------------------------------------
 
-    def _instrument_ids(self) -> Iterable[str]:
-        return self._config.instruments
+    def _instrument_ids(self) -> list[str]:
+        """Return the collected instruments: planned *and* subscribed on the wire (AD-D17)."""
+        return sorted(self._applied & self._plan_ids)
+
+    def _is_collected(self, iid: str) -> bool:
+        return iid in self._applied and iid in self._plan_ids
+
+    def _store_deltas(self) -> frozenset[str]:
+        """Return the ids whose raw deltas are archived, for `run()`'s initial apply."""
+        return frozenset()
 
     def _clear_book_state(self, iid: str) -> None:
         """
@@ -741,8 +786,27 @@ class Collector:
         return True
 
     async def _resync(self, iid: str) -> None:
-        """Drop the local book and ask the venue for a fresh snapshot; retried on failure."""
+        """
+        Drop the local book and ask the venue for a fresh snapshot; retried on failure.
+
+        The wire half runs under `_subscription_lock`: a resync is an unsubscribe plus a
+        subscribe, so interleaved with `apply` removing the id it would re-subscribe a book
+        nothing tracks. While a wire change holds the lock the resync is queued for the next
+        tick (`_handle_missing_book`) instead, so the sampler never stalls behind an `apply`.
+        """
         self._clear_book_state(iid)
+        if self._subscription_lock.locked():
+            self._resync_pending.add(iid)
+            return
+        async with self._subscription_lock:
+            await self._resync_wire(iid)
+
+    async def _resync_wire(self, iid: str) -> None:
+        """Run the wire half of `_resync`; the caller holds `_subscription_lock`."""
+        if not self._is_collected(iid):
+            # Removed while the resync was queued: its subscription is `apply`'s to end.
+            self._resync_pending.discard(iid)
+            return
         try:
             await self._client.resync_orderbook(iid)
             self._resync_pending.discard(iid)
@@ -789,6 +853,9 @@ class Collector:
         self._note_feed_message(feed, now_ns, arrival_ns)
         if isinstance(data, OrderBookDeltas):
             iid = str(data.instrument_id)
+            if not self._is_collected(iid):
+                self._unplanned_messages[iid] += 1
+                return
             self._feed_instruments[feed.name].add(iid)
             if iid in self._crosscheck_arrivals:  # armed: REST is fetched right after a push
                 self._crosscheck_arrivals[iid] += 1
@@ -798,6 +865,10 @@ class Collector:
             else:
                 self._apply_deltas(iid, data)
         elif isinstance(data, TradeTick):
+            iid = str(data.instrument_id)
+            if not self._is_collected(iid):
+                self._unplanned_messages[iid] += 1
+                return
             self._accept_live_trade(data, feed, now_ns, arrival_ns)
         elif isinstance(data, QuoteTick):
             pass  # derivable from the snapshots; not persisted
@@ -978,6 +1049,20 @@ class Collector:
             self._deltas_before_snapshot_dropped.clear()
         self._report_venue_counts()
         self._report_trade_sources()
+        self._report_unplanned_messages()
+
+    def _report_unplanned_messages(self) -> None:
+        """
+        One ledger entry per flush for every book/trade message of an instrument outside
+        `applied & plan` (in flight across an unsubscribe, or a wire-failed one still delivering).
+        """
+        if self._unplanned_messages:
+            error_ledger.record(
+                "collector.unplanned_message",
+                "book/trade messages for instruments not both planned and subscribed, counted and "
+                f"never booked, folded or archived: {dict(sorted(self._unplanned_messages.items()))}",
+            )
+            self._unplanned_messages.clear()
 
     def _report_trade_sources(self) -> None:
         """Cumulative REST-backfilled counts and, with more than one live feed, arbitration."""
@@ -1856,6 +1941,145 @@ class Collector:
             for message in ([book] if book else []) + self._one_sided_messages(now_ns, name):
                 await asyncio.to_thread(notify.notify, notify.OPERATOR, name, message)
 
+    # -- the applied set (spine AD-D17) -------------------------------------------------------
+
+    async def apply(self, diff: PlanDiff) -> Applied:
+        """
+        Apply one plan change on the wire and report what actually happened.
+
+        Removed ids leave the plan and lose their book state first, whether or not the wire
+        unsubscribe then succeeds (a book exists only for `applied & plan`). Added ids are marked
+        applied *before* the subscribe is awaited, so the venue's subscribe-time snapshot is booked
+        rather than counted unplanned; a failed subscribe un-marks it. Every wire failure is
+        ledgered once per attempt and retried by `_subscription_retry_loop`; an id the venue does
+        not list is ledgered and never retried. Never raises for a per-instrument failure. Runs
+        under `_subscription_lock`, so it never interleaves with a retry round.
+        """
+        subscribed: set[str] = set()
+        unsubscribed: set[str] = set()
+        failed: set[str] = set()
+        async with self._subscription_lock:
+            for iid in sorted(diff.removed):
+                # A failed subscribe may have sent part of the id's channels, or left them for the
+                # client's reconnect replay: its removal unsubscribes it too, and it lingers (holds
+                # a wire slot, messages counted) until that unsubscribe succeeds.
+                on_wire = iid in self._applied or iid in self._retry_subscribe
+                self._plan_ids.discard(iid)
+                self._retry_subscribe.discard(iid)
+                self._clear_book_state(iid)
+                # Its last book time must not outlive it: a later re-add would otherwise report
+                # (and judge staleness from) a book the removed subscription left behind.
+                self._last_book_update_ns.pop(iid, None)
+                self._resync_pending.discard(iid)
+                if on_wire:
+                    self._applied.add(iid)
+                    (unsubscribed if await self._unsubscribe_one(iid) else failed).add(iid)
+            for iid in sorted(diff.added):
+                self._plan_ids.add(iid)
+                (subscribed if await self._subscribe_added(iid) else failed).add(iid)
+        return Applied(frozenset(subscribed), frozenset(unsubscribed), frozenset(failed))
+
+    async def _subscribe_added(self, iid: str) -> bool:
+        if iid in self._applied:
+            # Still (partly) subscribed from a failed unsubscribe: cancel that retry, re-subscribe
+            # any channel the failed unsubscribe did end (a no-op for the channels still held),
+            # and force a fresh baseline, since the book was cleared when the id left the plan.
+            self._retry_unsubscribe.discard(iid)
+            if not await self._subscribe_one(iid):
+                return False
+            if hasattr(self._client, "resync_orderbook"):
+                await self._resync_wire(iid)  # `apply` already holds the lock
+            return True
+        if self._listed is not None and iid not in self._listed:
+            error_ledger.record(
+                "collector.subscribe_failed",
+                f"{iid} is not listed on the venue: pending, not subscribed and not retried",
+            )
+            return False
+        return await self._subscribe_one(iid)
+
+    async def _subscribe_one(self, iid: str) -> bool:
+        """
+        Subscribe one id, marking it applied first (its subscribe-time snapshot must be booked).
+
+        Known limit: "applied" means the subscribe frames were sent -- the venue clients raise
+        only on a local send failure, so a venue that rejects a subscription asynchronously
+        (dYdX's per-connection limit, an unknown market) leaves the id applied, not pending; the
+        rejection shows only in the Rust client's log and as the book watchdog's silence. The
+        client's `subscribe`/`unsubscribe` must also be idempotent per channel, because a retry,
+        a re-add of a lingering id and the removal of a pending one repeat them after a partial
+        failure: `DydxClient`'s are (it mirrors the Rust client's per-topic reference and its
+        reconnect replay of a failed subscribe); Bybit's and Hyperliquid's are not, harmless
+        while their plans are static (only the startup subscribe and its retry ever run).
+        Upgrade path: surface the venue's subscribe acknowledgement from the Rust clients
+        (outside this fork's `platform/` boundary) and track per-channel state in every client.
+        """
+        self._applied.add(iid)
+        try:
+            await self._client.subscribe(iid)
+        except Exception as e:
+            self._applied.discard(iid)
+            self._clear_book_state(iid)
+            # A message booked during the await must not show a pending id with a book time.
+            self._last_book_update_ns.pop(iid, None)
+            self._retry_subscribe.add(iid)
+            error_ledger.record(
+                "collector.subscribe_failed",
+                f"subscribe {iid} failed on the wire: pending, retried every "
+                f"{self._SUBSCRIBE_RETRY_SECONDS:.0f}s",
+                e,
+            )
+            return False
+        self._retry_subscribe.discard(iid)
+        logger.info(f"Subscribed {iid}")
+        return True
+
+    async def _unsubscribe_one(self, iid: str) -> bool:
+        try:
+            await self._client.unsubscribe(iid)
+        except Exception as e:
+            self._retry_unsubscribe.add(iid)
+            error_ledger.record(
+                "collector.unsubscribe_failed",
+                f"unsubscribe {iid} failed on the wire: its book and trade messages are counted, "
+                f"not sampled; retried every {self._SUBSCRIBE_RETRY_SECONDS:.0f}s",
+                e,
+            )
+            return False
+        self._applied.discard(iid)
+        self._retry_unsubscribe.discard(iid)
+        logger.info(f"Unsubscribed {iid}")
+        return True
+
+    async def _retry_subscriptions(self) -> None:
+        """
+        One retry round: planned ids whose subscribe failed, unplanned ids still subscribed. Under
+        `_subscription_lock`, so the sets it iterates cannot change under it.
+        """
+        async with self._subscription_lock:
+            self._retry_subscribe &= self._plan_ids
+            for iid in sorted(self._retry_subscribe):
+                await self._subscribe_one(iid)
+            self._retry_unsubscribe -= self._plan_ids
+            self._retry_unsubscribe &= self._applied
+            for iid in sorted(self._retry_unsubscribe):
+                await self._unsubscribe_one(iid)
+
+    async def _subscription_retry_loop(self) -> None:
+        while not self._stop.is_set():
+            await asyncio.sleep(self._SUBSCRIBE_RETRY_SECONDS)
+            await self._retry_subscriptions()
+
+    def capture_status(self) -> CaptureStatus:
+        """Return capture's read-only counters for `collector:status`, copied at one instant."""
+        return CaptureStatus(
+            applied=frozenset(self._applied & self._plan_ids),
+            pending=frozenset(self._plan_ids - self._applied),
+            lingering=frozenset(self._applied - self._plan_ids),
+            last_book_update_ns=dict(self._last_book_update_ns),
+            trade_backfill=dict(self._trade_backfill_counts),
+        )
+
     # -- lifecycle ---------------------------------------------------------------------------
 
     async def run(self) -> None:
@@ -1875,18 +2099,17 @@ class Collector:
         await self._connect(list(by_id.values()))
         if hasattr(self._client, "subscribe_global"):
             await self._client.subscribe_global()
-        configured = set(self._instrument_ids())
-        unknown = configured - set(by_id)
+        self._listed = frozenset(by_id)
+        unknown = self._plan_ids - self._listed
         if unknown:
             logger.warning(
                 "Configured instruments not found on the venue, skipping: %s", sorted(unknown)
             )
         self._catch_up_candle_store()
-        subscribed = sorted(configured & set(by_id))
-        for iid in subscribed:
-            await self._client.subscribe(iid)
-            logger.info(f"Subscribed {iid}")
-        logger.info(f"Started: {len(subscribed)} subscribed")
+        applied = await self.apply(
+            PlanChange(added=frozenset(self._plan_ids), store_deltas=self._store_deltas())
+        )
+        logger.info(f"Started: {len(applied.subscribed)} subscribed")
 
         loops: tuple[Callable[[], Awaitable[None]], ...] = (
             self._ingest_loop,
@@ -1894,6 +2117,7 @@ class Collector:
             self._second_loop,
             self._watchdog_loop,
             self._trade_backfill_loop,
+            self._subscription_retry_loop,
             *((self._feed_state_loop,) if hasattr(self._client, "feed_states") else ()),
             *(
                 (self._crosscheck_loop,)
@@ -2003,8 +2227,9 @@ async def run_forever(build: Callable[[], Collector], *, init_rust_logging: bool
                 )
                 if capture_lock is None or shutting_down.is_set():  # shut down while waiting
                     break
+                # The plan, not `_instrument_ids()`: nothing is applied before `run()`.
                 quarantine_corrupt_parquet(
-                    collector._config.catalog_path, collector._instrument_ids()
+                    collector._config.catalog_path, sorted(collector._plan_ids)
                 )
                 first = False
             watcher = asyncio.create_task(_stop_on_shutdown(shutting_down, collector))

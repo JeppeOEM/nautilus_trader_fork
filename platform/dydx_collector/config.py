@@ -12,131 +12,40 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
-"""Collector configuration: TOML loading/saving + hot-reload diffing."""
+"""
+Deprecated re-export shim (Story 25.4): dYdX's config is read by capture's one venue loader, and
+the plan it holds is the collection-control context's aggregate.
 
-import tomllib
-from dataclasses import dataclass
-from pathlib import Path
+- `DydxConfig` -> `collector_core.config.DydxConfig` (the thresholds and cadences only: the plan
+  keys moved to the plan).
+- `InstrumentEntry` -> `collection_control.domain.plan.InstrumentEntry`.
+- `load_config(path)` -> `collector_core.config.load_venue_config(path, "DYDX")`, which returns
+  `(DydxConfig, CollectionPlan)` -- a changed shape, so it is not re-exported.
+- `save_config(config, path)` -> `collection_control.infrastructure.plan_store.TomlPlanStore(path,
+  "DYDX").save(plan)` -- a changed shape (it saves a plan), so it is not re-exported.
 
-import tomli_w
-from collector_core.config import CoreConfig
+Pure re-export, defines nothing: every name here *is* its successor object.
+"""
 
-from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
+import warnings
 
-
-@dataclass(frozen=True)
-class InstrumentEntry:
-    # Every id in `instruments` is collected -- there is no "listed but not collected"
-    # state. Removed from `config.toml`'s [[instruments]] entirely (via "stop"/"unpin")
-    # to stop collecting it.
-    id: str
-    store_order_book_deltas: bool = False
-    # Retention for this instrument's raw order-book-delta data, in hours.
-    # None means unlimited (never pruned) -- distinct from the global
-    # non_config_retain_hours, which only applies to instruments no longer collected.
-    retain_hours: float | None = None
+from collection_control.domain.plan import InstrumentEntry
+from collector_core.config import DydxConfig
 
 
-@dataclass(frozen=True, kw_only=True)
-class DydxConfig(CoreConfig):
-    """
-    The core's thresholds plus dYdX's control-plane keys.
+__all__ = [
+    "DydxConfig",
+    "InstrumentEntry",
+]
 
-    Keyword-only, so `network` can be required. `environment` is always derived from
-    `network` so `CoreConfig` stays satisfied. `instruments` narrows the
-    core's `tuple[str, ...]` to entries; `DydxCollector._instrument_ids()` keeps the
-    core agnostic of that.
-    """
-
-    environment: str = ""
-    network: DydxNetwork
-    instruments: tuple[InstrumentEntry, ...] = ()  # type: ignore[assignment]
-    config_reload_seconds: int = 30
-    open_interest_poll_seconds: int = 300
-    non_config_retain_hours: float = 4.0
-    liquidity_min_oi_usd: float = 20_000.0
-    liquidity_check_seconds: int = 1800
-    # Permanent denylist: classify_liquidity always treats these as illiquid regardless
-    # of volume, so nothing (including pin_top_liquid) ever picks them. Also doubles as
-    # where a collector:control "unpin" action lands an id -- unpinning a coin is
-    # exactly "add it to exclude", so it also stays out of any future liquidity ranking,
-    # not just out of the collected set. bot_tui shows this whole list, whatever its
-    # origin (hand-edited or via unpin), as its "unpinned" section.
-    exclude: frozenset[str] = frozenset()
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "environment", str(self.network))
+REMOVE_AFTER = "26-2-capture-package-and-venue-packages-with-entrypoints"
 
 
-def load_config(path: Path) -> DydxConfig:
-    with path.open("rb") as f:
-        raw = tomllib.load(f)
-
-    instruments = tuple(
-        InstrumentEntry(
-            id=entry["id"],
-            store_order_book_deltas=entry.get("store_order_book_deltas", False),
-            retain_hours=entry.get("retain_hours"),
-        )
-        for entry in raw.get("instruments", [])
-    )
-    for entry in instruments:
-        if entry.retain_hours is not None and entry.retain_hours < 0:
-            raise ValueError(
-                f"retain_hours must be >= 0 for instrument {entry.id!r}, got {entry.retain_hours}"
-            )
-
-    snapshot_interval_seconds = float(raw.get("snapshot_interval_seconds", 1.0))
-    if snapshot_interval_seconds <= 0:
-        raise ValueError(f"snapshot_interval_seconds must be > 0, got {snapshot_interval_seconds}")
-
-    return DydxConfig(
-        network=DydxNetwork.from_str(  # type: ignore[attr-defined]
-            raw.get("network", "mainnet").lower(),
-        ),
-        catalog_path=raw.get("catalog_path", "catalog"),
-        flush_interval_seconds=raw.get("flush_interval_seconds", 60),
-        config_reload_seconds=raw.get("config_reload_seconds", 30),
-        open_interest_poll_seconds=raw.get("open_interest_poll_seconds", 300),
-        snapshot_interval_seconds=snapshot_interval_seconds,
-        non_config_retain_hours=raw.get("non_config_retain_hours", 4.0),
-        liquidity_min_oi_usd=raw.get("liquidity_min_oi_usd", 20_000.0),
-        liquidity_check_seconds=raw.get("liquidity_check_seconds", 1800),
-        instruments=instruments,
-        exclude=frozenset(raw.get("exclude", [])),
-    )
-
-
-def _instrument_to_raw(entry: InstrumentEntry) -> dict:
-    raw: dict = {"id": entry.id}
-    if entry.store_order_book_deltas:
-        raw["store_order_book_deltas"] = entry.store_order_book_deltas
-    if entry.retain_hours is not None:
-        raw["retain_hours"] = entry.retain_hours
-    return raw
-
-
-def save_config(config: DydxConfig, path: Path) -> None:
-    """
-    Persist `config` back to `path` as TOML.
-
-    Full rewrite, not a patch -- `tomli_w` has no comment-preservation support, so any
-    hand-written comments in the file are lost on a control-action-triggered save. This
-    is an accepted, deliberate tradeoff (see Story 6.1 Dev Notes); revisit only if it
-    becomes a real complaint.
-    """
-    raw = {
-        "network": str(config.network),
-        "catalog_path": config.catalog_path,
-        "flush_interval_seconds": config.flush_interval_seconds,
-        "config_reload_seconds": config.config_reload_seconds,
-        "open_interest_poll_seconds": config.open_interest_poll_seconds,
-        "snapshot_interval_seconds": config.snapshot_interval_seconds,
-        "non_config_retain_hours": config.non_config_retain_hours,
-        "liquidity_min_oi_usd": config.liquidity_min_oi_usd,
-        "liquidity_check_seconds": config.liquidity_check_seconds,
-        "instruments": [_instrument_to_raw(e) for e in config.instruments],
-        "exclude": sorted(config.exclude),
-    }
-    with path.open("wb") as f:
-        tomli_w.dump(raw, f)
+# Attributed to the importing module, not to importlib's frames.
+warnings.warn(
+    "dydx_collector.config moved to collector_core.config (DydxConfig, load_venue_config) and "
+    "collection_control (InstrumentEntry, TomlPlanStore) (Story 25.4); "
+    f"this shim is removed after {REMOVE_AFTER}",
+    DeprecationWarning,
+    skip_file_prefixes=("<frozen importlib",),
+)

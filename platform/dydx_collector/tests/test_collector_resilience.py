@@ -20,7 +20,6 @@ startup corrupt-parquet quarantine scan, and the crossed-book resync watchdog
 """
 
 import asyncio
-import dataclasses
 import json
 import logging
 import time
@@ -31,12 +30,12 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from collector_core.collector import quarantine_corrupt_parquet
+from collector_core.config import DydxConfig
 from collector_core.feed import MAIN_FEED
 from collector_core.feed import Feed
+from collector_core.ports import PlanChange
 
 from dydx_collector.collector import DydxCollector
-from dydx_collector.config import DydxConfig
-from dydx_collector.config import InstrumentEntry
 from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
 from nautilus_trader.model.book import OrderBook
 from nautilus_trader.model.data import BookOrder
@@ -58,17 +57,13 @@ def _make_config(catalog_path: Path, snapshot_interval_seconds: float = 1.0) -> 
         snapshot_interval_seconds=snapshot_interval_seconds,
         config_reload_seconds=60,
         open_interest_poll_seconds=60,
-        non_config_retain_hours=24.0,
-        liquidity_min_oi_usd=100_000.0,
         liquidity_check_seconds=60,
-        instruments=(),
-        exclude=frozenset(),
     )
 
 
 def test_on_data_enqueues_without_processing(tmp_path: Path) -> None:
     """_on_data is just the queue hand-off now -- _ingest_loop does the real work."""
-    collector = DydxCollector(_make_config(tmp_path / "catalog"))
+    collector = DydxCollector(_make_config(tmp_path / "catalog"), ())
 
     sentinel = object()
     collector._on_data(sentinel)
@@ -80,7 +75,7 @@ def test_on_data_enqueues_without_processing(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_ingest_loop_isolates_bad_message(tmp_path: Path, monkeypatch) -> None:
     """One malformed message must not kill _ingest_loop or block later messages."""
-    collector = DydxCollector(_make_config(tmp_path / "catalog"))
+    collector = DydxCollector(_make_config(tmp_path / "catalog"), ())
     processed: list[object] = []
     good_message = object()
 
@@ -143,6 +138,14 @@ class _FakeClient:
     async def unsubscribe_trades(self, iid: str) -> None:
         self.calls.append(f"unsubscribe_trades:{iid}")
 
+    async def unsubscribe(self, iid: str) -> None:  # `DydxClient.unsubscribe`'s two topics
+        await self.unsubscribe_trades(iid)
+        await self.unsubscribe_orderbook(iid)
+
+    async def resync_orderbook(self, iid: str) -> None:  # `DydxClient.resync_orderbook`
+        await self.unsubscribe_orderbook(iid)
+        await self.subscribe_orderbook(iid)
+
 
 @pytest.mark.asyncio
 async def test_resync_book_resubscribes_and_drops_local_state(tmp_path: Path) -> None:
@@ -151,11 +154,12 @@ async def test_resync_book_resubscribes_and_drops_local_state(tmp_path: Path) ->
     a fresh venue snapshot -- _resync_book forces that via unsubscribe+subscribe
     and clears the local book so the next OrderBookDeltas rebuilds it clean.
     """
-    collector = DydxCollector(_make_config(tmp_path / "catalog"))
+    iid = "BTC-USD-PERP.DYDX"
+    collector = DydxCollector(_make_config(tmp_path / "catalog"), (iid,))
+    collector._applied.add(iid)
     fake_client = _FakeClient()
     collector._client = fake_client  # type: ignore[assignment]
 
-    iid = "BTC-USD-PERP.DYDX"
     collector._live_books[iid] = OrderBook(InstrumentId.from_str(iid), BookType.L2_MBP)
     collector._crossed_since_ns[iid] = 123
 
@@ -167,26 +171,42 @@ async def test_resync_book_resubscribes_and_drops_local_state(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
-async def test_unsubscribe_drops_crossed_book_tracking_state(tmp_path: Path) -> None:
-    """
-    A stale `_crossed_since_ns` entry left behind by `_unsubscribe` would make the first
-    harmless cross after a later resubscribe read as hours/days old
-    (`setdefault` returns the old value), firing a false steady_state_crossed_book
-    CRITICAL and an unwarranted destructive resync on data that was never actually
-    stuck. `_unsubscribe` must clear the same per-instrument book state `_resync_book`
-    already does.
-    """
-    collector = DydxCollector(_make_config(tmp_path / "catalog"))
+async def test_resync_book_never_resubscribes_an_id_no_longer_collected(tmp_path: Path) -> None:
+    """A resync queued behind a `stop` must not re-subscribe the book `apply` just ended."""
+    iid = "BTC-USD-PERP.DYDX"
+    collector = DydxCollector(_make_config(tmp_path / "catalog"), ())
     fake_client = _FakeClient()
     collector._client = fake_client  # type: ignore[assignment]
 
+    await collector._resync_book(iid)
+
+    assert fake_client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_unsubscribe_drops_crossed_book_tracking_state(tmp_path: Path) -> None:
+    """
+    A stale `_crossed_since_ns` entry left behind by an unsubscribe would make the first
+    harmless cross after a later resubscribe read as hours/days old
+    (`setdefault` returns the old value), firing a false steady_state_crossed_book
+    CRITICAL and an unwarranted destructive resync on data that was never actually
+    stuck. Removing an id from the plan (`apply`) must clear the same per-instrument book
+    state `_resync_book` already does.
+    """
     iid = "BTC-USD-PERP.DYDX"
+    collector = DydxCollector(_make_config(tmp_path / "catalog"), (iid,))
+    collector._applied.add(iid)
+    fake_client = _FakeClient()
+    collector._client = fake_client  # type: ignore[assignment]
+
     collector._live_books[iid] = OrderBook(InstrumentId.from_str(iid), BookType.L2_MBP)
     collector._crossed_since_ns[iid] = 123
     collector._crossed_prices[iid] = (100.0, 101.0)
     collector._level_msg_id[iid] = {(OrderSide.BUY, 100.0): 1}
 
-    await collector._unsubscribe(iid)
+    applied = await collector.apply(PlanChange(removed=frozenset({iid})))
+
+    assert applied.unsubscribed == {iid}
 
     assert fake_client.calls == [f"unsubscribe_trades:{iid}", f"unsubscribe:{iid}"]
     assert iid not in collector._live_books
@@ -212,6 +232,25 @@ def _delta(sequence: int, price: float = 100.0) -> OrderBookDeltas:
     return OrderBookDeltas(instrument_id=InstrumentId.from_str(_IID), deltas=[delta])
 
 
+def _snapshotted(tmp_path: Path) -> DydxCollector:
+    """Build a collector whose book for `_IID` started from a snapshot's Clear, as on the wire."""
+    collector = DydxCollector(_make_config(tmp_path / "catalog"), ())
+    clear = OrderBookDelta.clear(InstrumentId.from_str(_IID), 0, 1, 1)
+    collector._apply_deltas(_IID, OrderBookDeltas(InstrumentId.from_str(_IID), [clear]))
+    return collector
+
+
+def test_an_incremental_delta_without_a_snapshot_builds_no_book(tmp_path: Path) -> None:
+    """
+    After a resync drops the book, in-flight incremental deltas must not rebuild a shallow one:
+    it would be sampled, and a book existing again would keep the queued resync from running.
+    """
+    collector = DydxCollector(_make_config(tmp_path / "catalog"), ())
+    collector._apply_deltas(_IID, _delta(4, price=100.0))
+    assert _IID not in collector._live_books
+    assert collector._deltas_before_snapshot_dropped == {_IID: 1}
+
+
 def test_apply_deltas_applies_regardless_of_sequence_jump(tmp_path: Path) -> None:
     """
     `OrderBookDelta.sequence` is dYdX's WS *connection-level* message_id, shared with
@@ -219,7 +258,7 @@ def test_apply_deltas_applies_regardless_of_sequence_jump(tmp_path: Path) -> Non
     -- a jump between two messages for one market is normal interleaved traffic, not a
     dropped delta, so it must apply immediately with no buffering or resync.
     """
-    collector = DydxCollector(_make_config(tmp_path / "catalog"))
+    collector = _snapshotted(tmp_path)
 
     collector._apply_deltas(_IID, _delta(4, price=100.0))
     collector._apply_deltas(_IID, _delta(55, price=101.0))  # big jump: still just applies
@@ -230,7 +269,7 @@ def test_apply_deltas_applies_regardless_of_sequence_jump(tmp_path: Path) -> Non
 
 def test_apply_deltas_empty_batch_is_noop(tmp_path: Path) -> None:
     """A content-less update carries no delta to apply -- must not raise on an empty list."""
-    collector = DydxCollector(_make_config(tmp_path / "catalog"))
+    collector = DydxCollector(_make_config(tmp_path / "catalog"), ())
 
     collector._apply_deltas(_IID, SimpleNamespace(deltas=[]))
 
@@ -268,7 +307,7 @@ def test_apply_deltas_tags_and_untags_price_levels(tmp_path: Path) -> None:
     (`sequence`) in `_level_msg_id`; a DELETE removes that tag; a Clear wipes every tag
     for the instrument. This is the data `_uncross_step` arbitrates on.
     """
-    collector = DydxCollector(_make_config(tmp_path / "catalog"))
+    collector = _snapshotted(tmp_path)
 
     collector._apply_deltas(_IID, _side_delta(OrderSide.BUY, sequence=7, price=100.0))
     assert collector._level_msg_id[_IID][(OrderSide.BUY, 100.0)] == 7
@@ -359,10 +398,11 @@ async def test_crossed_book_resolution_is_logged_with_before_after_prices(
     desync that only recovers via _resync_book's forced resubscribe (logged separately,
     as CRITICAL).
     """
-    collector = DydxCollector(_make_config(tmp_path / "catalog", snapshot_interval_seconds=0.01))
-    collector._config = dataclasses.replace(
-        collector._config, instruments=(InstrumentEntry(id=_IID),)
+    collector = DydxCollector(
+        _make_config(tmp_path / "catalog", snapshot_interval_seconds=0.01), ()
     )
+    collector._plan_ids.add(_IID)
+    collector._applied.add(_IID)
     collector._client = _FakeClient()  # type: ignore[assignment]
     # Book has already resolved to uncrossed by the time this tick runs.
     collector._live_books[_IID] = _uncrossed_book()
@@ -390,10 +430,11 @@ async def test_crossed_book_resolution_is_logged_with_before_after_prices(
 @pytest.mark.asyncio
 async def test_crossed_book_within_grace_window_does_not_escalate(tmp_path: Path, caplog) -> None:
     """A crossed book just detected (within _CROSSED_RESYNC_NS) is a silent skip, unchanged."""
-    collector = DydxCollector(_make_config(tmp_path / "catalog", snapshot_interval_seconds=0.01))
-    collector._config = dataclasses.replace(
-        collector._config, instruments=(InstrumentEntry(id=_IID),)
+    collector = DydxCollector(
+        _make_config(tmp_path / "catalog", snapshot_interval_seconds=0.01), ()
     )
+    collector._plan_ids.add(_IID)
+    collector._applied.add(_IID)
     collector._client = _FakeClient()  # type: ignore[assignment]
     collector._live_books[_IID] = _crossed_book()
     collector._last_book_update_ns[_IID] = time.time_ns()
@@ -420,10 +461,11 @@ async def test_crossed_book_past_grace_window_escalates_critical(tmp_path: Path,
     repeats to match _resync_book's own retry cadence rather than the (much faster)
     snapshot_interval_seconds tick rate.
     """
-    collector = DydxCollector(_make_config(tmp_path / "catalog", snapshot_interval_seconds=0.01))
-    collector._config = dataclasses.replace(
-        collector._config, instruments=(InstrumentEntry(id=_IID),)
+    collector = DydxCollector(
+        _make_config(tmp_path / "catalog", snapshot_interval_seconds=0.01), ()
     )
+    collector._plan_ids.add(_IID)
+    collector._applied.add(_IID)
     fake_client = _FakeClient()
     collector._client = fake_client  # type: ignore[assignment]
     collector._live_books[_IID] = _crossed_book()
@@ -469,7 +511,7 @@ async def test_crossed_book_actively_uncrossed_when_both_levels_tagged(
     test_crossed_book_uncrossing_the_last_level_logs_a_warning below for the case where
     the dropped level was the side's only one.
     """
-    collector = DydxCollector(_make_config(tmp_path / "catalog"))
+    collector = _snapshotted(tmp_path)
     fake_client = _FakeClient()
     collector._client = fake_client  # type: ignore[assignment]
     # bid @101 tagged with the OLDER sequence -> bid is stale and must be dropped.
@@ -502,7 +544,7 @@ async def test_crossed_book_uncrossing_the_last_level_logs_a_warning(
     empty) is a real one-sided-book data-loss event, not routine self-healing -- it must
     be distinguishable from the benign case above, not logged identically at INFO.
     """
-    collector = DydxCollector(_make_config(tmp_path / "catalog"))
+    collector = _snapshotted(tmp_path)
     collector._client = _FakeClient()  # type: ignore[assignment]
     collector._apply_deltas(_IID, _side_delta(OrderSide.BUY, sequence=1, price=101.0))
     collector._apply_deltas(_IID, _side_delta(OrderSide.SELL, sequence=2, price=100.0))
@@ -526,7 +568,7 @@ async def test_crossed_book_tie_break_uses_smaller_size(tmp_path: Path) -> None:
     Equal message-ids on both crossed levels -> the smaller-size side is stale (dYdX's
     own documented tie-break), not an arbitrary/undefined choice.
     """
-    collector = DydxCollector(_make_config(tmp_path / "catalog"))
+    collector = _snapshotted(tmp_path)
     collector._client = _FakeClient()  # type: ignore[assignment]
     collector._apply_deltas(_IID, _side_delta(OrderSide.BUY, sequence=5, price=101.0, size=0.5))
     collector._apply_deltas(_IID, _side_delta(OrderSide.SELL, sequence=5, price=100.0, size=2.0))
@@ -546,7 +588,7 @@ def test_uncross_step_falls_back_when_a_level_is_untagged(tmp_path: Path) -> Non
     arbitrate with -- _uncross_step must decline rather than guess, leaving the book
     and _level_msg_id untouched so the caller falls back to the existing resync path.
     """
-    collector = DydxCollector(_make_config(tmp_path / "catalog"))
+    collector = DydxCollector(_make_config(tmp_path / "catalog"), ())
     book = _crossed_book()
     collector._live_books[_IID] = book
 

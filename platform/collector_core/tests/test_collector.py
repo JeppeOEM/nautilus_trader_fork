@@ -151,15 +151,17 @@ def _collector(
     cfg = CoreConfig(
         environment="mainnet",
         catalog_path=str(tmp_path),
-        instruments=(iid,),
         seen_trade_ids=seen_trade_ids,
     )
     sink = _RecordingSink() if second_sink is None else second_sink
-    return Collector(
+    c = Collector(
         cfg,
         client if client is not None else _ResyncClient(),
+        plan=(iid,),
         second_sink=None if sink is _NO_SINK else sink,  # type: ignore[arg-type]
     )
+    c._applied.add(iid)  # as `run()`'s initial apply leaves it (no network here)
+    return c
 
 
 def _adds(bids: list[tuple[float, float]], asks: list[tuple[float, float]]) -> OrderBookDeltas:
@@ -576,6 +578,7 @@ def test_the_catch_up_runs_before_the_first_subscribe(
 
     monkeypatch.setattr(collector_mod, "instruments_from_pyo3", lambda pyo3: [])
     c = _collector(tmp_path, client=_LifecycleClient(events), second_sink=_OrderingSink())
+    c._applied.clear()  # `run()` applies the plan itself
     c._stop.set()  # run() reaches the loops, sees the stop and unwinds
     asyncio.run(c.run())
 
@@ -721,13 +724,28 @@ def test_flush_sorts_a_batch_by_ts_init_before_writing(tmp_path: Path) -> None:
     assert [t.trade_id.value for t in c._catalog.trade_ticks(instrument_ids=[_BYBIT])] == ["0", "1"]
 
 
-def test_trades_of_an_unsampled_instrument_do_not_accumulate(tmp_path: Path) -> None:
+def test_trades_of_an_unplanned_instrument_are_counted_never_folded_or_archived(
+    tmp_path: Path,
+) -> None:
+    """Story 25.4: a book or trade message outside `applied & plan` is counted, nothing else."""
     c = _collector(tmp_path)
     c._process_data(_deltas([(100.0, 1.0)], [(100.5, 1.0)]))
     c._process_data(_trade(100.0, 0.5, AggressorSide.BUYER, 1, iid=_HL))
     _tick(c)
     assert _HL not in c._second_trades  # MEM-02
-    assert len(c._buffer[(TradeTick, _HL)]) == 1  # still archived
+    assert c._buffer.get((TradeTick, _HL), []) == []
+    assert c._unplanned_messages == {_HL: 1}
+
+
+def test_trades_of_an_applied_but_unsampled_instrument_do_not_accumulate(tmp_path: Path) -> None:
+    """MEM-02: an applied instrument with no book is not sampled; its trades are still archived."""
+    c = _collector(tmp_path)
+    c._plan_ids.add(_HL)
+    c._applied.add(_HL)
+    c._process_data(_trade(100.0, 0.5, AggressorSide.BUYER, 1, iid=_HL))
+    _tick(c)
+    assert _HL not in c._second_trades
+    assert len(c._buffer[(TradeTick, _HL)]) == 1
 
 
 def test_live_second_is_the_exact_fold_of_its_trades(tmp_path: Path) -> None:
@@ -783,11 +801,12 @@ def _day_collector(tmp_path: Path, interval: float = 1.0) -> Collector:
     cfg = CoreConfig(
         environment="mainnet",
         catalog_path=str(tmp_path),
-        instruments=(_BYBIT,),
         stale_trade_seconds=10**9,
         snapshot_interval_seconds=interval,
     )
-    return Collector(cfg, _ResyncClient(), second_sink=_RecordingSink())
+    c = Collector(cfg, _ResyncClient(), plan=(_BYBIT,), second_sink=_RecordingSink())
+    c._applied.add(_BYBIT)
+    return c
 
 
 _D0 = 1_789_000_000 * _S // (86_400 * _S) * (86_400 * _S)  # a past UTC midnight
@@ -885,12 +904,14 @@ def _perp(iid: str) -> CryptoPerpetual:
 
 
 def _two_instrument_collector(tmp_path: Path, client: object | None = None) -> Collector:
-    cfg = CoreConfig(
-        environment="mainnet", catalog_path=str(tmp_path), instruments=(_BYBIT, _SPOT_ID)
-    )
+    cfg = CoreConfig(environment="mainnet", catalog_path=str(tmp_path))
     c = Collector(
-        cfg, client if client is not None else _FeedStateClient(), second_sink=_RecordingSink()
+        cfg,
+        client if client is not None else _FeedStateClient(),
+        plan=(_BYBIT, _SPOT_ID),
+        second_sink=_RecordingSink(),
     )
+    c._applied.update((_BYBIT, _SPOT_ID))
     c._instruments = {iid: _perp(iid) for iid in (_BYBIT, _SPOT_ID)}
     return c
 

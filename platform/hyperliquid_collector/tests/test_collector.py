@@ -17,21 +17,21 @@
 from pathlib import Path
 
 import pytest
-
-from hyperliquid_collector.config import load_config
+from collector_core.config import load_venue_config
 
 
 def test_config_defaults_and_validation(tmp_path: Path) -> None:
     path = tmp_path / "c.toml"
     path.write_text('instruments = ["BTC-USD-PERP.HYPERLIQUID"]\n')
-    cfg = load_config(path)  # venue default: 12s stale guard (l2Book pushes ~5.4s apart)
+    # Venue default: 12s stale guard (l2Book pushes ~5.4s apart).
+    cfg, _plan = load_venue_config(path, "HYPERLIQUID")
     assert (cfg.environment, cfg.snapshot_interval_seconds, cfg.stale_book_seconds) == (
         "mainnet",
         1.0,
         12.0,
     )
     path.write_text("stale_book_seconds = 20.0\n")
-    assert load_config(path).stale_book_seconds == 20.0
+    assert load_venue_config(path, "HYPERLIQUID")[0].stale_book_seconds == 20.0
     path.write_text('environment = "prod"\n')
     with pytest.raises(ValueError, match="environment"):
-        load_config(path)
+        load_venue_config(path, "HYPERLIQUID")

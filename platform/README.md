@@ -50,21 +50,21 @@ Each venue has its own `config.toml`; `docker-compose.yml` mounts each one into 
 
 | Venue | File on the host | Mounted as |
 |---|---|---|
-| dYdX | `platform/config.toml` | `/app/dydx_collector/config.toml` (`rw` — the control plane writes it back) |
+| dYdX | `platform/data/dydx_config.toml` | `/app/dydx_collector/config.toml` (`rw` — the control plane writes it back) |
 | Bybit | `platform/bybit_collector/config.toml` | `/app/bybit_config.toml` (`:ro`) |
 | Hyperliquid | `platform/hyperliquid_collector/config.toml` | `/app/hyperliquid_config.toml` (`:ro`) |
 
-The thresholds every venue shares are the fields of `collector_core/config.py`'s `CoreConfig` (`environment`, `catalog_path`, `flush_interval_seconds`, `snapshot_interval_seconds`, `stale_book_seconds`, `crossed_resync_seconds`, `stale_trade_seconds`, `seen_trade_ids`, `feed_stale_seconds`, `book_crosscheck_seconds`, `instruments`); a venue adds keys only where it needs them (Bybit's `open_interest_poll_seconds`, dYdX's control-plane keys). One name does not carry over: dYdX's TOML key for the network is `network`, not `environment` — `DydxConfig.__post_init__` derives `environment` from it, so an `environment = ...` line in `platform/config.toml` is read by nothing.
+The thresholds every venue shares are the fields of `collector_core/config.py`'s `CoreConfig` (`environment`, `catalog_path`, `flush_interval_seconds`, `snapshot_interval_seconds`, `stale_book_seconds`, `crossed_resync_seconds`, `stale_trade_seconds`, `seen_trade_ids`, `feed_stale_seconds`, `book_crosscheck_seconds`, `book_time_source`, `hold_back_seconds`, `trade_feeds`); `instruments` (and, for dYdX, `exclude`, `liquidity_min_oi_usd` and `non_config_retain_hours`) are the venue's collection plan (`collection_control`'s `CollectionPlan`), and a venue adds keys only where it needs them (Bybit's `open_interest_poll_seconds`, dYdX's `config_reload_seconds`/`open_interest_poll_seconds`/`liquidity_check_seconds`). One name does not carry over: dYdX's TOML key for the network is `network`, not `environment` — and an `environment = ...` line in dYdX's file refuses start.
 
-**Two loaders, and only one of them is strict.** Bybit and Hyperliquid go through `core_config_from_dict`, which rejects an unknown key outright rather than letting a misspelt threshold fall back to a default. dYdX's `load_config` (`dydx_collector/config.py`) predates the core and still reads key-by-key: it ignores unknown keys silently, and it never reads `stale_book_seconds`, `crossed_resync_seconds`, `stale_trade_seconds`, `seen_trade_ids`, `feed_stale_seconds` or `book_crosscheck_seconds` at all — dYdX always runs `CoreConfig`'s defaults for those six. Setting one of them in `platform/config.toml` neither takes effect nor errors.
+**One loader, strict for every venue** (Story 25.4). Every venue's file goes through `collector_core.config.load_venue_config` (one `VENUE_SCHEMAS` row per venue), which rejects an unknown key outright rather than letting a misspelt threshold fall back to a default, and refuses a plan that breaks an invariant (more than 30 dYdX instruments, an id both collected and excluded, a repeated id). Before Story 25.4 dYdX had its own key-by-key loader that ignored unknown keys and the core thresholds; they are now honoured.
 
-dYdX (`platform/config.toml`) — hot-reloaded every `config_reload_seconds`, no restart needed:
+dYdX (`platform/data/dydx_config.toml`) — its plan (`instruments`, `exclude`) is hot-reloaded every `config_reload_seconds`, no restart needed; the thresholds are read at start:
 
 ```toml
 network = "mainnet"
 catalog_path = "catalog"          # relative to the container's /app — maps to ./catalog on the host
 flush_interval_seconds = 60
-config_reload_seconds = 30        # hot-reload: edit this file while running to add/remove instruments
+config_reload_seconds = 30        # hot-reload of the plan: edit instruments/exclude while running
 open_interest_poll_seconds = 300
 instruments = [
     { id = "BTC-USD-PERP.DYDX" },
