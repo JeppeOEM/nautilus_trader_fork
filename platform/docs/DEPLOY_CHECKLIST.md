@@ -464,3 +464,26 @@ Add `--venue bybit`/`--venue hyperliquid`/`--venue dydx` to narrow which instrum
 checked (and so which collector's ledger explains them) to one venue. It never narrows the
 "Services"/`--fail-on` check -- a site belonging to a different service, e.g.
 `ranking_engine.volume24h`, is still checked under `--venue bybit`.
+
+## Deferred operator actions
+
+VPS steps a story needed that the operator chose to run later, in one batch at the next deploy
+(decision 2026-09-26: stories record their VPS steps here instead of parking `awaiting-operator`,
+so the bmad-loop chain never stops for them and every story still gets its independent review).
+Run the entries oldest first; tick each one and add the date when done. A story that is still
+parked on the board says so in its entry: run `bmad-loop confirm <story-key>` after its steps.
+
+### 25-1b `archive` service (commit 35e155e004, parked `awaiting-operator` on the board)
+
+- [ ] On the VPS, pull this commit and run `make up` from `platform/` (it creates `platform/data/archive`
+      and the rclone config dir, builds the collector image with rclone, and starts the new `archive`
+      service).
+- [ ] On the VPS, delete the old nightly crontab line (`crontab -e`), then confirm
+      `crontab -l | grep -E 'make (nightly|consolidate|backup-catalog)'` prints nothing (section 1).
+- [ ] Confirm `RCLONE_REMOTE` and `RCLONE_BUCKET` are set in `platform/.env` and the rclone config sits
+      in `~/.config/rclone` (or set `RCLONE_CONFIG_DIR` in `.env`), then run `make backup-catalog` once
+      and check that it exits 0.
+- [ ] After the first 03:07 UTC slot, open the dashboard (or `docker compose logs archive`) and confirm
+      `archive:status` shows `last_run` with every venue's saga, `consolidate_catalog` and
+      `backup_catalog` at exit 0 or 2.
+- [ ] Then: `bmad-loop confirm 25-1b-archive-service-nightly-maintenance-scheduled-no-host-cron`.

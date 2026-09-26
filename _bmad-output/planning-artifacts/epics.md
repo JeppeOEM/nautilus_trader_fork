@@ -2995,9 +2995,9 @@ So that "Adding a venue" is a recipe over named files, and no `Collector` subcla
 **When** the story is merged
 **Then** `collector_core`, `dydx_collector`, `bybit_collector`, `hyperliquid_collector` are pure re-export shim packages with `REMOVE_AFTER = "26-3-..."`, the collector image `COPY`s `capture`, the Makefile test lists include `capture/tests` and `capture/venues/*/tests`, `test_images.py` and `test_boundaries.py` pass with the full AD-D2 graph active (no unmoved package remains), `platform/CLAUDE.md`'s "Adding a venue" recipe is rewritten over the new files (steps 1–8, same evidence requirements, `capture/venues/<v>/trade_history.py` and `policies.py` added), `ARCHITECTURE.md`'s module map and diagram show the target tree, and `docs/DATA_DICTIONARY.md` §1 cites `capture/`
 
-**Given** the deployed collectors
-**When** the story is deployed
-**Then** `docs/DEPLOY_CHECKLIST.md` gains the redeploy order (all three collectors in one `make redeploy-all`, Dozzle check, `GET /api/errors` flat) as operator actions, and the story parks `awaiting-operator` with those actions
+**Given** the deployed collectors, and the operator's decision (2026-09-26) that VPS steps are deferred rather than parked, so the loop never stops for them and the story still gets its independent review
+**When** the story ships
+**Then** the redeploy order (all three collectors in one `make redeploy-all`, the Dozzle check, `GET /api/errors` flat) is appended to `docs/DEPLOY_CHECKLIST.md`'s "Deferred operator actions" section as one entry headed with this story's key and commit, and the story finalizes `done` through the normal review path: it does not park `awaiting-operator` and carries no `operator_actions`
 
 ### Story 26.3: Closeout: last shims gone, spines reconciled, guardrails permanent
 
