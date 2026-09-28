@@ -335,11 +335,6 @@ development_status:
   27-9-closeout-research-readme-rules-legacy-notebooks-gone: ready-for-dev
   epic-27-retrospective: optional
 
-  epic-28: backlog
-  28-1-capture-hotpath-metrics-cpu-priority-and-vps-profile: ready-for-dev
-  28-2-capture-python-overhead-removed-baseline-lowered: ready-for-dev
-  epic-28-retrospective: optional
-
   epic-29: backlog
   29-1-exchange-symbol-columns-and-mode-toggle-on-web-rankings: ready-for-dev
   29-2-collector-pane-shows-every-venue-plan: ready-for-dev
@@ -367,6 +362,11 @@ development_status:
   31-10-fault-injection-proves-every-loss-is-accounted-for: ready-for-dev
   31-11-verification-run-report-and-permanent-nightly-gate: ready-for-dev
   epic-31-retrospective: optional
+
+  epic-28: backlog
+  28-1-capture-hotpath-metrics-cpu-priority-and-vps-profile: ready-for-dev
+  28-2-capture-python-overhead-removed-baseline-lowered: ready-for-dev
+  epic-28-retrospective: optional
 
 action_items:
   - epic: 1
