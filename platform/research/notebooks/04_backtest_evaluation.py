@@ -305,8 +305,8 @@ wf_fig.show()
 # - **The grid's best is optimistic.** The heatmap's top cell is the maximum of several noisy
 #   estimates, so it overstates what that point will do: the more points tried, the higher the
 #   best one scores by luck alone. A plateau of similar cells is more believable than one bright
-#   cell among dark neighbours. Story 27.6 quantifies this with the deflated Sharpe ratio of the
-#   best grid point (and Monte Carlo resampling of the trades).
+#   cell among dark neighbours. `05_monte_carlo` quantifies this with the deflated Sharpe ratio
+#   of the best grid point (and Monte Carlo resampling of the trades).
 # - **Few trades, short windows.** Every statistic here rests on the closed trades: a handful of
 #   trades or a window under two UTC days leaves the return statistics undefined (None) rather than
 #   invented. Widen `START`/`END` before trusting a number.

@@ -121,6 +121,15 @@ class TradeLedger:
         are absent, not zero.
         """
         sums: dict[int, float] = defaultdict(float)
-        for trade in self.trades:
-            sums[trade.exit_ts // NS_PER_DAY * NS_PER_DAY] += trade.realized_pnl
+        for day, trade in zip(self.exit_day_starts().tolist(), self.trades, strict=True):
+            sums[day] += trade.realized_pnl
         return [{"period_start": day, "pnl": pnl} for day, pnl in sorted(sums.items())]
+
+    def exit_day_starts(self) -> np.ndarray:
+        """
+        Return the UTC day start (int64 ns) of each trade's exit, in ledger order: the one day-binning
+        rule `pnl_by_day` groups by, shared with `monte_carlo.bootstrap_trades` (Story 27.6) so a
+        resampled path is binned into exactly the days its ledger is.
+        """
+        exits = np.array([t.exit_ts for t in self.trades], dtype=np.int64)
+        return exits // NS_PER_DAY * NS_PER_DAY

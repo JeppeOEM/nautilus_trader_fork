@@ -28,6 +28,13 @@ runs from the full starting balance and is shifted by the earlier folds' PnL
 (`walk_forward.concat_equity`), and each fold's run spends its strategy's warm-up inside its own
 out-of-sample window (the `Known limit:` in `walk_forward.py`).
 
+**How robust is the result?** `research/notebooks/05_monte_carlo` (Story 27.6) runs the same
+strategy and grid and resamples the run: a trade-order bootstrap and a stationary block bootstrap
+of the equity's returns (fans, terminal-wealth and drawdown histograms), risk of ruin, a Sharpe
+confidence interval, and the deflated Sharpe ratio of the sweep's best point, which says whether
+that point is distinguishable from the luck of trying `len(grid)` points. The functions are
+`research.domain.monte_carlo` (seeded; each result records its seed and path count).
+
 `research.application.backtest_runner.NodeRunner` (the `BacktestRunner` port, Story 27.1) is the
 one way a notebook runs a backtest: it wraps `BacktestNode` + `BacktestDataConfig` +
 `ImportableStrategyConfig`, so a notebook never builds a node, a run config or a report by hand.

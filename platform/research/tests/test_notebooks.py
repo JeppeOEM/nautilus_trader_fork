@@ -97,6 +97,19 @@ NOTEBOOK_ENV: dict[str, dict[str, str]] = {
         "NOTEBOOK_N_FOLDS": json.dumps(2),
         "NOTEBOOK_SELECT_BY": json.dumps("expectancy"),
     },
+    # The same run and 2 x 2 grid as 04, 200 paths, and minute returns in blocks of three (the
+    # fixture's ten minutes hold ten returns; they straddle UTC midnight, so Nautilus's daily-binned
+    # Sharpe has its two bins and every section draws).
+    "05_monte_carlo.py": {
+        "START": _iso(DATA_START_NS),
+        "END": _iso(DATA_END_NS),
+        "NOTEBOOK_INSTRUMENT": json.dumps("BTC-USD-PERP.HYPERLIQUID"),
+        "NOTEBOOK_PARAMS": json.dumps(_FIXTURE_OFI),
+        "NOTEBOOK_GRID": json.dumps({"ofi_threshold": [0.5, 1.0], "ofi_window": [2, 3]}),
+        "NOTEBOOK_N_PATHS": json.dumps(200),
+        "NOTEBOOK_RETURN_PERIOD_S": json.dumps(60),
+        "NOTEBOOK_BLOCK_LEN": json.dumps(3),
+    },
 }
 
 
