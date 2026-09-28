@@ -354,6 +354,20 @@ development_status:
   30-2-second-snapshot-book-and-trade-fields-as-exact-integers: ready-for-dev
   epic-30-retrospective: optional
 
+  epic-31: backlog
+  31-1-verification-context-reference-recorder-and-clean-slate-stack: ready-for-dev
+  31-2-every-drop-counted-ledgered-and-explainable: ready-for-dev
+  31-3-derived-signals-against-independent-reference-implementations: ready-for-dev
+  31-4-trades-proven-id-by-id-against-the-venue: ready-for-dev
+  31-5-stored-book-proven-against-an-independently-rebuilt-book: ready-for-dev
+  31-6-mark-index-funding-open-interest-and-instruments-proven: ready-for-dev
+  31-7-catalog-integrity-and-backtest-read-parity: ready-for-dev
+  31-8-candles-and-klines-on-every-timeframe-with-pass-rates: ready-for-dev
+  31-9-live-backtest-and-display-parity-including-bot-signals: ready-for-dev
+  31-10-fault-injection-proves-every-loss-is-accounted-for: ready-for-dev
+  31-11-verification-run-report-and-permanent-nightly-gate: ready-for-dev
+  epic-31-retrospective: optional
+
 action_items:
   - epic: 1
     action: "Add a lifecycle-cleanup checklist item: any subscribe/unsubscribe/resubscribe/shutdown transition must explicitly state what tracking state gets reset or removed (4 bugs across 3 stories in Epic 1 were this exact shape)."

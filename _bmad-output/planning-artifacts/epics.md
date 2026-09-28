@@ -23,6 +23,8 @@ Reopened again on 2026-09-17 to add Epic 17 (FR51–FR56), Epic 18 (FR57–FR60)
 
 Reopened again on 2026-09-22 to add Epic 27 (FR70–FR79, NFR12): the research notebooks rebuilt on a shared analysis layer inside the `research/` context that Story 24.4 creates — typed analysis value objects and ports (`research/domain`, `research/application`), six executable jupytext-paired notebooks (catalog inspection, microstructure, correlation and cross-venue, backtest evaluation with sweeps and walk-forward, Monte Carlo and robustness, candlestick scanner), a candlestick pattern detector as a streaming `Indicator` in `kernel/` shared by the chart picker, the screener's Technicals tab, backtests and `live_paper`, and a `CandlePatternStrategy` that makes those patterns tradeable. Numbered 27 after the DDD migration epics; depends on Story 24.4 only. No PRD/Architecture update precedes this addition — created via direct investigation of the three existing notebooks (all three stale: hard-coded `ml_signals` paths, a `../catalog` relative path that predates `platform/data/`, a runtime `pip install` of TA-Lib/`pandas_ta` against the retired `custom_dydx_minute_bar` directory), same precedent as Epics 12/13/16; Story 27.1 amends the DDD spine's AD-D1 research row and 27.7 its AD-D3 kernel list.
 
+Reopened again on 2026-09-28 to add Epic 31: trade-grade data verification for Bybit and Hyperliquid (dYdX out of scope) — an independent reference recorder sharing no code with capture, id-by-id trade, book, mark/index/funding/OI and instrument comparisons, catalog and backtest-read parity, candle/kline pass rates, independent reference implementations of every derived signal, live-vs-backtest bot signal parity, fault injection with a conservation report, and a permanent nightly `verify_day` gate. Created from a direct code survey (same precedent as Epics 27/28/30); runs on branch `verify/data-correctness`.
+
 ## Requirements Inventory
 
 ### Functional Requirements
@@ -3461,3 +3463,251 @@ So that no stored value carries float noise (20.7 % of stored book prices do tod
 **Given** MR4
 **When** the story is merged
 **Then** `docs/DATA_DICTIONARY.md` §1 documents the new layout (units, gap encoding, precision columns, how to decode by hand), the root `CLAUDE.md`'s price-integrity section cites the snapshot as integer-exact, and `research/README.md`'s snapshot-reading note points at the kernel decoder
+
+## Epic 31: Trade-grade data: every captured value and every derived signal proven against an independent oracle (Bybit + Hyperliquid)
+
+Verification epic, added 2026-09-28 at the operator's request ("I want to ensure that every datapoint is correct and no data is lost silently or misrepresented or interpreted, so that I can trust my bots to trade on the signals derived from it"). Scope: Bybit (`BTCUSDT`/`ETHUSDT` linear and spot) and Hyperliquid (`BTC`/`ETH` perp); **dYdX is out of scope** (operator, 2026-09-28: Epic 29 cuts it over). Deliverable is both a one-off verdict over a fresh local capture (the dev-box catalog was wiped 2026-09-28 for a clean slate) and permanent gates (tests in `make test`, a nightly verification step in the `archive` saga). Runs on branch `verify/data-correctness` in its own worktree, alongside the in-place epic 27 run; merged into `troll` when closed.
+
+What exists already and is reused, not rebuilt: `archive.compare_klines` (trade OHLCV vs venue klines, exact units, D-51), `archive.rebuild_seconds` (`kernel/fold.py` refold), the live REST book cross-check (`capture/application/book_check.py`, D-64), `archive.crosscheck_errors`, `research/application/inspection.py` (`fold_agreement`, `second_grid`, `gap_report`, `snapshot_sanity`), `archive/tools/measure_lag.py`, the durable error ledger. What is missing, found by a three-part code survey on 2026-09-28:
+- **No independent oracle** for the book columns, individual trade ids, mark/index/funding/open interest, instrument definitions, or any derived signal. Every existing derived-value test except `compare_klines` is either hand-computed on toy inputs or a consistency check that runs the same code on both sides.
+- **Silent or log-only drop sites (DATA-07):** the stale-trade age filter is judged at *processing* time (`capture/domain/trade_intake.py` `accept`, `now_ns` from `_process_data`), so an ingest backlog >10 s drops genuine live trades unarchived with an INFO line only; the OHLC-outside-book canary is `logger.error` only (no ledger); stale/no-book second rejections are warnings only; a `snapshots:raw` publish failure is a swallowed warning (`capture/infrastructure/redis_stream.py`); a `run()` crash is `logger.exception` only; open-interest parsers skip malformed rows silently; unknown message types are dropped at DEBUG; the 2000-id dedup window can re-archive an evicted id; `DydxSecondSnapshot.from_dict` turns a missing volume/count into 0.
+- **Silent substitutions in derived values:** micro→mid (`views/chart_series.py` `price_series_rows`), price→slow close (`ranking/domain/board.py`), trades→mark prices in the ranking price backfill (`ranking/infrastructure/catalog_prices.py`), `pct_1h`/`pct_24h` horizon shortened at a gap (`ranking/domain/metrics.py`, first trade at or after the cutoff), `metrics_nearest` with no tolerance, OFI previous-state never reset on a time gap in `views._replay_bucket_samples`, `research/strategies/snapshot_strategy.py` and `bots/strategies/dummy.py`, 1W indicator panes computed on 1D bars (`data_api/routes/indicators.py` clamp) and 1W buckets starting Thursday (epoch-aligned) while the frontend week starts Monday, three differently defined volatilities, empty rolling buffer → `cvd = 0.0`.
+- **The live bot does not read the collector:** `DummyStrategy` computes its signals from its own ungated `TradingNode` book; backtests compute theirs from the catalog. Nothing proves the two agree.
+
+Principles binding every story: **oracle independence** (DATA-02: the reference side shares zero code with capture — aiohttp WebSocket/REST, `json`, `Decimal`, its own book builder and fold; never `nautilus_pyo3`, `capture.*`, `candles.*`, `kernel.fold`; enforced by `tests/test_boundaries.py`); **exact comparison** (Decimal at the instrument's precision; float64 storage noise, Epic 30.2, is measured and reported as its own class, never absorbed into a tolerance, and every comparator works unchanged once 30.2 lands); **verify the verifiers** (every comparator ships a planted-defect test that must fail it); **two end states per finding** (fixed with a test and an audit row, or registered OPEN in `docs/DATA_INTEGRITY_AUDIT.md` with a follow-up story — never "probably fine"). New code lives in a new DDD context `platform/verification/` (domain / application / infrastructure / tests, registered in `tests/test_boundaries.py`'s `CONTEXTS`, its composition roots in `COMPOSITION_ROOTS`), with REST URLs from `kernel/venue_http.py` (WS URLs added there too). Order: 31.1 → 31.2 (then the soak restarts from empty on the fixed code) → 31.3 (needs no soak data) → 31.4 → 31.5 → 31.6 → 31.7 → 31.8 → 31.9 → 31.10 → 31.11. Rules: DATA-01..08, OPS-01, FORK-01, NAUT-01/02/03, MEM-01, TEST-01..04, DESIGN-01, SSOT-01/02, MR4, no new dependency (aiohttp, numpy, pandas, pyarrow are already pinned; property-style tests use seeded stdlib `random`, not `hypothesis`).
+
+### Story 31.1: Verification context, independent reference recorder and a clean-slate side-by-side stack
+
+As the platform operator,
+I want a recorder that captures each venue's raw market-data frames with a client sharing no code with the collectors, running next to them on a fresh catalog,
+So that every later story compares our stored data against an independent source of truth instead of against itself.
+
+**Acceptance Criteria:**
+
+**Given** DATA-02's standard of proof ("a second independent client with zero shared code path")
+**When** the story ships
+**Then** `platform/verification/` exists as a context (domain / application / infrastructure / tests, module docstrings naming its invariant: "the reference side never imports the code it checks"); `tests/test_boundaries.py` registers it and fails any import from `verification/` of `nautilus_pyo3`, `capture`, `candles`, `ranking`, `views`, `kernel.fold` or `kernel.second_snapshot` (the reference parses wire JSON itself; it may import `kernel.venue_http`, `kernel.venues` and `observability`), and fails any import of `verification` from another context except `archive`'s nightly composition root (Story 31.11)
+
+**Given** Bybit's public WS (`orderbook.50.<symbol>`, `publicTrade.<symbol>` for linear and spot; `tickers.<symbol>` for linear) and Hyperliquid's (`l2Book`, `trades`, `activeAssetCtx` per coin), with URLs added to `kernel/venue_http.py`'s map
+**When** `python3 -m verification.recorder --venue {BYBIT,HYPERLIQUID}` runs
+**Then** it subscribes the same instruments as that venue's `config.toml` (read from the file, not copied), writes every received frame verbatim with its local receive time (`time.time_ns()`, taken before parsing) as one JSON line to `<VERIFY_DATA_DIR>/raw/<venue>/<channel>/<UTC hour>.jsonl.zst`, rotates hourly, reconnects with backoff and writes a `{"kind": "connection", "event": "open"|"close"|"error", ...}` line for every transition (so a recorder gap is itself visible and never mistaken for a collector gap), sends each venue's documented ping/keepalive, and ledgers every failure through `observability.error_ledger.record` at a new `verification.recorder.*` site; REST pollers write the same way (Bybit `/v5/market/instruments-info`, `/v5/market/open-interest`, `/v5/market/recent-trade` every 30 s, `/v5/market/orderbook` every 60 s; Hyperliquid `metaAndAssetCtxs` every 30 s and `l2Book` every 60 s), all built with `kernel/venue_http.py`; a retention prune keeps `VERIFY_RETAIN_DAYS` (default 7) and logs the bytes/day per venue at each hourly rotation
+
+**Given** the live epic 27 run's `make test` (main checkout, compose project `platform`, hard-coded `container_name: dydx-redis` etc., `REDIS_PORT` 16379)
+**When** the verify stack runs from this worktree
+**Then** `platform/docker-compose.verify.yml` (an override, the base file unchanged) gives every service a `verify-` container name, sets `REDIS_PORT`/`DATA_API_PORT`/`DOZZLE_PORT` to 26379/29100/28080 by default, adds the `reference_recorder_bybit` and `reference_recorder_hyperliquid` services (collector image, `network_mode: host`, **a uid other than the collectors' 1000:1000** so Story 31.10 can cut the collectors' venue connections by uid without cutting the recorder's, `logging: *default-logging`, `ERROR_LEDGER_DIR`/`ERROR_LEDGER_SERVICE`), and excludes the dYdX `collector` service; `make verify-up` / `verify-down` / `verify-wipe` (the last refuses while any verify container runs, lists what it deletes, and keeps `dydx_config.toml`, `chart_indicators.toml`, `screener_columns.toml`) drive it with `-p verify -f docker-compose.yml -f docker-compose.verify.yml`; all ports stay `127.0.0.1` (SEC-01)
+
+**Given** the tests need wire shapes without the network
+**When** the story ships
+**Then** small recorded fixtures (a few minutes per channel per venue, a Bybit snapshot + ≥200 deltas, a reconnect) live under `verification/tests/fixtures/`, and the parser tests use them; `make test` includes `verification/tests`
+
+**Given** OPS-01
+**When** the story finalizes
+**Then** the verify stack (`bybit_collector`, `hyperliquid_collector`, `archive`, `ranking_engine`, `data_api`, `redis`, both recorders) is left running detached from an empty `platform/data/`, the start time is recorded in `docs/VERIFICATION_REPORT.md` (created with a skeleton verdict table), and the measured recorder footprint (bytes/day/venue, RSS, CPU) is written there too
+
+### Story 31.2: Every drop is counted, ledgered and explainable (DATA-07 closure)
+
+As the platform operator,
+I want every site where capture discards, defers or fails to store a message to leave a durable, countable trace, and the stale-trade filter to judge age on arrival,
+So that a missing trade or a missing second is always explainable from the record, never silent.
+
+**Acceptance Criteria:**
+
+**Given** `TradeIntake.accept`'s stale filter compares `now_ns` at processing time with `ts_event`
+**When** the story ships
+**Then** first the recorder's frames prove (or refute) that an ingest backlog drops genuine live trades (replay a recorded burst through `CaptureService` with an artificially slowed `_ingest_loop` and count trades the reference saw that are neither archived nor ledgered); if proven, the age is judged on the trade's arrival `ts_init` (the Rust client's receipt stamp), a replay (DATA-06) is still classified from its evidenced shape, and a test pins both; every trade the filter drops is counted per instrument per flush **and** ledgered at `collector.stale_trade` with the count and the oldest/youngest age (one line per flush, within the write cap); the audit gains a row with the evidence
+
+**Given** the log-only sites listed in this epic's preamble (OHLC-outside-book canary, stale/no-book/empty-top/crossed second rejections, `snapshots:raw` publish failure, `run()` crash, open-interest parser skips, unknown message types, `from_dict` defaults)
+**When** the story ships
+**Then** each one records through `CaptureService._ledger` (or, for the kernel/parsers, raises to a caller that does) at a named constant in `capture/application/sites.py`; `DydxSecondSnapshot.from_dict` raises on a missing field instead of defaulting it to 0 (the only legitimate default, pre-OHLC files, is handled by the catalog reader with a named `Known limit:`); a grep test fails a new bare `logger.warning(...)`/`logger.debug(...)` followed by `continue`/`return` in `capture/`
+
+**Given** the per-instrument dedup window (`seen_trade_ids`, 2000) evicts old ids
+**When** a REST backfill or a late duplicate carries an evicted id
+**Then** the archive still holds each `trade_id` at most once per instrument (proven by a test that evicts then replays), by a bounded, time-based check against the archive's own recent ids or an equivalent documented mechanism; the rebuild's per-hour dedup is no longer the only guard
+
+**Given** a second that is sampled but written no row (NoBook, EmptyTop, Crossed, Stale, venue-mode catch-up cap exceeded)
+**When** the story ships
+**Then** durable per-instrument, per-reason counts of rejected seconds (with the first and last second of each run) are written each flush to `<catalog>/../coverage/<venue>.jsonl` (append-only, fsync'd, the gap-marker pattern), documented in `docs/DATA_DICTIONARY.md`; `python -m verification.conservation --venue V --day D` reports, per instrument: reference trade ids seen, archived, backfilled, ledgered-unrecoverable, **unexplained** (must be 0), and expected seconds, rows written, rows explained by a coverage reason, **unexplained** (must be 0); a planted-defect test (an archived trade deleted, a coverage line deleted) makes it report a non-zero unexplained count
+
+**Given** OPS-01
+**When** the story finalizes
+**Then** the verify stack is stopped, wiped (`make verify-wipe`) and restarted on the fixed code, and the new soak start time is recorded in `docs/VERIFICATION_REPORT.md`
+
+### Story 31.3: Derived signals against independent reference implementations
+
+As a strategy researcher,
+I want every derived value the bots, backtests, rankings and charts use recomputed by an independent, obviously correct implementation and compared on adversarial and real inputs,
+So that a signal means exactly what `docs/DATA_DICTIONARY.md` §2 says it means.
+
+**Acceptance Criteria:**
+
+**Given** the formulas in `docs/DATA_DICTIONARY.md` §2–§3
+**When** the story ships
+**Then** `verification/domain/reference_signals.py` implements, in plain Python over `Decimal` (floats only where the production definition is itself statistical, e.g. z-score, stdev, Pearson), written from the dictionary text and not from the production code: microprice, spread, mid, OBI_N, multi-level OFI_N (count and USD-notional; level-aligned by position as production does, with the definition's source cited), rolling z-score (ddof=0), CVD, volume_delta, avg_trade_size, depth_within_bps, the candle fold at every stored and read-time width, `pct_1h`/`pct_24h`/`pct_1w`, each of the three volatility definitions (`VolatilityTracker.score`, `price_stats_from_series`, `volatility_fast`), returns and resampling, Pearson/rolling correlation, lead-lag, basis bps, `funding_per_hour`
+
+**Given** `kernel/indicators.py`, `candles/domain/fold.py`, `ranking/domain/*`, `views/chart_series.py`, `views/indicator_picker.py`, `research/domain/*` and `research/application/{frames,aligned,microstructure}.py`
+**When** `verification/tests/test_reference_signals.py` runs in `make test`
+**Then** each production function is compared with its reference on (a) seeded stdlib-`random` generators including empty sides, zero totals, one-sided and crossed books, time gaps, NaN, duplicate seconds, mixed precisions, 1–50 levels; (b) real snapshot fixtures cut from the 31.2 soak (Bybit linear + spot, Hyperliquid; committed, small); (c) hand-computed golden cases; every tolerance is written next to its justification (exact for Decimal-exact functions); and a planted-defect test (e.g. OBI with bid/ask swapped) must fail the comparison
+
+**Given** the silent substitutions listed in this epic's preamble
+**When** the story ships
+**Then** each one is decided and recorded: either fixed to be loud (None/NaN plus a canary or a visible marker — e.g. micro→mid removed and the chart shows no microprice for that second; OFI previous-state reset on a gap in `views._replay_bucket_samples` and `SnapshotStrategy` with the same threshold semantics as `ranking` and `OFIStrategy`; `metrics_nearest` given a tolerance; the `pct_*` horizon reported, or NaN when shortened beyond a named bound; the ranking backfill no longer mixing mark prices into a trade-close series, or labelling it) or kept as a documented `Known limit:` in the code and `docs/DATA_DICTIONARY.md` with a test pinning the behaviour; the three volatility definitions are documented as three named, distinct metrics wherever they are displayed; every displayed unit matches its label (the rankings page shows raw token and price units while `views/ranking_columns.py`'s comments and `frontend/src/pages/docs/data.ts` claim a client-side `usdFromTokens`/`bpsFromPriceUnits` normalisation that does not exist — fix the display or the docs, with a test); `DummyStrategy`'s gap handling is decided in Story 31.9
+
+### Story 31.4: Trades proven id by id against the venue
+
+As the platform operator,
+I want every archived trade matched against the reference stream and every second's trade columns re-folded independently,
+So that trade volume, OHLC and flow are provably complete and exact.
+
+**Acceptance Criteria:**
+
+**Given** the recorder's `publicTrade`/`trades` frames and the catalog's `trade_tick` archive for one closed UTC day
+**When** `python -m verification.trades --venue V --day D` runs
+**Then** per instrument it reports: ids in reference only (missing), in archive only (extra — each must be a REST-backfilled row inside a recorder `connection` gap, or it is a finding), duplicated ids, and for every matched id exact equality of price, size (Decimal at the instrument precision), aggressor side, and `ts_event` (Hyperliquid compared at its millisecond truth, D-62), plus `ts_init − receive_ts` distribution (a plausibility check, not an equality); missing/extra ids are cross-referenced with the ledger and coverage (31.2) and anything unexplained is non-zero in the report
+
+**Given** the snapshot rows' eight trade columns (OHLC, buy/sell volume, buy/sell count)
+**When** the same tool runs
+**Then** it folds each exchange second independently in `Decimal` from the **reference** trades (its own fold, not `kernel.fold`) and compares with both the live row and, after the nightly `rebuild_seconds`, the rebuilt row; differences are classified (live-provisional boundary effect the rebuild fixes / rebuild mismatch / missing row) and the rebuilt row must match exactly; the NO_AGGRESSOR→sell convention is confirmed against each venue's wire (does either venue send one?) and documented
+
+**Given** "verify the verifiers"
+**When** the tests run
+**Then** planted defects (one trade removed, one size changed by one unit, one `ts_event` moved across a second boundary) each make the report non-zero
+
+### Story 31.5: The stored book proven against an independently rebuilt book
+
+As a strategy researcher,
+I want each stored top-20 book compared with a book rebuilt from the raw frames by independent code,
+So that every OFI/OBI/microprice input is known to be the venue's actual book at that second.
+
+**Acceptance Criteria:**
+
+**Given** Bybit `orderbook.50` (snapshot + deltas, `u` per topic) and Hyperliquid `l2Book` (full snapshot per message)
+**When** `verification/domain/reference_book.py` replays a day
+**Then** it maintains its own book (Decimal levels; Bybit `u` contiguity checked independently, re-baselined only on a snapshot; Hyperliquid replaced per message), and for every exchange second S produces the top 20 per side using the collector's documented close rule (DATA-01: deltas with `ts_event < S+1`, venue time); the reference book is itself checked against the recorder's REST order-book polls (at the matching `seq`/`time`), and that agreement rate is reported first — a reference that disagrees with REST invalidates the comparison
+
+**Given** the `second_snapshot` rows for the same day
+**When** `python -m verification.book --venue V --day D` runs
+**Then** per instrument it reports rows compared, rows exactly equal (after converting the stored floats to Decimal at the instrument precision), rows equal only after that rounding (the float-noise class, counted separately — the Epic 30.2 measurement), rows differing in content (level missing, extra, wrong size, wrong price) with the level index, and seconds where the reference has a valid book but no row exists, each of which must be explained by a coverage reason (31.2) or is unexplained; boundary-timing differences are separated from content differences by comparing against the reference at S±1 message
+
+**Given** DATA-08's open question (Bybit empty-level message leaves `last_u` one behind → false `collector.book_sequence`) and `book_check.py`'s blind spot for levels missing below the best
+**When** the story ships
+**Then** both are settled with recorded evidence: the recorder's raw frames show whether zero-level messages occur and whether a `collector.book_sequence` entry coincides with one; the fix (advance the baseline on an empty message, if proven) ships with a test; the cross-check blind spot is either closed or recorded as a `Known limit:` now covered by this nightly comparison; Bybit spot's `u` behaviour is measured (D-41's scope note) and recorded
+
+**Given** "verify the verifiers"
+**When** the tests run
+**Then** planted defects (a level's size perturbed by one unit, a level deleted, a whole row shifted by one second) each make the report non-zero
+
+### Story 31.6: Mark, index, funding, open interest and instrument definitions proven
+
+As a strategy researcher,
+I want the non-trade, non-book streams checked value by value against the venue,
+So that funding carry, basis and open-interest signals rest on correct inputs.
+
+**Acceptance Criteria:**
+
+**Given** the recorder's Bybit linear `tickers` (markPrice, indexPrice, fundingRate, nextFundingTime, openInterest) and Hyperliquid `activeAssetCtx` (markPx, oraclePx, funding, openInterest), plus the REST open-interest polls
+**When** `python -m verification.derivs --venue V --day D` runs
+**Then** per instrument and type it reports coverage (reference updates vs stored updates, with the collector's own sampling/throttle documented as the expected ratio) and exact value agreement for every stored update matched to its reference frame (by venue timestamp where carried, else nearest receive time within a stated bound); `OpenInterest`'s `ts_event` semantics (poll wall-clock on Bybit) are checked against the dictionary; each instrument carries exactly one precision label per type across the whole day (a disagreement is a finding: it breaks catalog reads, cf. the dYdX incident)
+
+**Given** Bybit spot is documented to produce trades and book only
+**When** the tool runs
+**Then** it asserts no mark, index, funding or open-interest row exists for any `-SPOT.BYBIT` id (none fabricated) and reports it
+
+**Given** the instrument definitions written at `CaptureService.run`
+**When** compared with the recorder's instruments-info / `meta` snapshots
+**Then** tick size, lot size, price and size precision, min quantity and multiplier match exactly; a venue-side change during the soak is detected and reported with how the collector handled it
+
+### Story 31.7: Catalog integrity and backtest-read parity
+
+As a strategy researcher,
+I want proof that the catalog is internally consistent and that a backtest sees exactly the rows that were stored,
+So that research results and live signals are computed on the same data.
+
+**Acceptance Criteria:**
+
+**Given** the verify catalog
+**When** `python -m verification.catalog --day D` runs
+**Then** every Parquet file opens through `ParquetDataCatalog`; each data type has one schema (D-24's class); within each instrument and type, files' `[start, end]` intervals do not overlap, rows are sorted by `ts_init`, and no `(instrument, ts_event)` appears twice in `second_snapshot` (no reader dedupes, so a duplicate reaches every consumer); a planted duplicate or overlap fails it
+
+**Given** `consolidate_catalog` and the intraday consolidation rewrite files
+**When** a day is consolidated in the verify stack
+**Then** a per-type row hash (order-independent, over all columns) is identical before and after, recorded in the report
+
+**Given** NAUT-03 (`BacktestNode` + `BacktestDataConfig` streaming)
+**When** a backtest streams one full day of `TradeTick` and `DydxSecondSnapshot` for each instrument
+**Then** the rows the strategy receives equal, by count and hash, a direct query bounded by both `start=` and `end=` (MEM-01), and the candle store's bars for that day equal a fold of the same rows; any difference is a finding
+
+### Story 31.8: Candles and klines on every timeframe, with pass rates recorded
+
+As the platform operator,
+I want every stored and read-time candle width proven against an independent fold and against the venue's klines,
+So that the chart, the technicals and the bar-based strategies show the market as it traded.
+
+**Acceptance Criteria:**
+
+**Given** the candle store (1m, 5m, 15m, 1h, 4h, 1d) and read-time widths (10m, 30m, 45m, 1W)
+**When** `python -m verification.candles --venue V --day D` runs
+**Then** every bar equals the reference fold (31.3) of the reference trades bucketed on `ts_event`, and equals a fold of the catalog's rebuilt seconds; `seconds_observed` and `partial` are checked against the coverage record (31.2); untraded buckets are reported distinctly from missing data
+
+**Given** the `archive` service's nightly saga on the verify stack
+**When** each closed UTC day of the soak has been processed
+**Then** `compare_klines` pass rates per venue and instrument are recorded in `docs/VERIFICATION_REPORT.md` and audit D-51 is updated with the numbers (it closes locally when every compared minute passes or each failing minute is explained with evidence)
+
+**Given** 1W buckets are epoch-aligned (Thursday) while the frontend week starts Monday, and 1W indicator panes are clamped to 1D bars (`data_api/routes/indicators.py`, `indicator_series.py`)
+**When** the story ships
+**Then** both are fixed (one documented week start used by every layer; 1W indicators computed on 1W bars) or each is a documented `Known limit:` shown in the UI, with a test pinning whichever is chosen
+
+### Story 31.9: Live, backtest and display parity, including the bot's own signals
+
+As a trader,
+I want proof that the signal a bot acts on live equals the signal the same strategy computes in a backtest, and that every screen shows the same value,
+So that a backtest's edge is an edge the live bot can actually see.
+
+**Acceptance Criteria:**
+
+**Given** one second's snapshot row on the verify stack
+**When** `verification/tests/test_ssot_trace.py` (live, marked for the verify stack) and a recorded-fixture unit variant run
+**Then** the value of each field and each derived metric is equal (or the difference accounted for) along: catalog row → `snapshots:raw` payload → `RankingBoard` metrics → `rankings:live` → `metrics.db` → the `data_api` response the frontend receives
+
+**Given** `bots/strategies/dummy.py` reads its own live `TradingNode` book (ungated) and `bots/config.toml` configures dYdX data
+**When** the live-paper bot runs on Bybit and Hyperliquid data for at least one hour (config added for the verify stack, paper execution only), logging per-second signal inputs (top-10 levels used, trend input bars) and outputs (microprice, OBI, MLOFI, trend, decision)
+**Then** a backtest of the same strategy over the same window from the catalog recomputes the same series, and the report quantifies divergence per signal (exact-equal share, max abs difference, decision disagreements) with each divergence class explained (book source: full live book vs gated top-20 snapshot; timing; gaps); the decision whether the bot must gate its book (stale/crossed/gap) and reset OFI on a gap like the collector does is made with the operator and implemented or recorded as a `Known limit:`
+
+**Given** `research.strategies.ofi_strategy:OFIStrategy`
+**When** its backtest runs over a soak day
+**Then** its OFI z-score series equals `research/application/microstructure.py`'s `ofi_replay` over the same rows and the reference implementation (31.3) within the stated tolerance
+
+### Story 31.10: Fault injection proves every loss is accounted for
+
+As the platform operator,
+I want the failures that happen in production injected deliberately while the reference keeps recording,
+So that every recovery path is proven to leave no silent loss.
+
+**Acceptance Criteria:**
+
+**Given** the verify stack with both recorders running under their own uid
+**When** `python -m verification.chaos --scenario S` runs each scenario on a running collector
+**Then** the scenarios are: SIGKILL during the `:02` flush; graceful restart; a 15 s `docker pause` (exercises the stale-trade filter); a 45 s pause (past the 30 s venue catch-up cap); a 60 s cut of the collectors' venue connections by uid (iptables owner match, recorder unaffected) — Bybit recovered by REST backfill, Hyperliquid unrecoverable per D-48; a catalog write failure (the catalog mount made read-only for one flush); Redis stopped for 60 s; each records its start/end in a scenario log
+
+**Given** an expected-outcome table per scenario (what is backfilled, what is gap-marked, what is ledgered unrecoverable, which seconds have no row and which coverage reason explains them)
+**When** `verification.conservation` (31.2) runs over each scenario window
+**Then** unexplained trades and unexplained seconds are 0 for every scenario, the observed outcome matches the table, and a mismatch is either fixed or registered OPEN in the audit with the scenario that reproduces it
+
+### Story 31.11: The verification run, the report and the permanent nightly gate
+
+As the platform operator,
+I want one report that states, per data type and instrument, whether the data is verified, and a nightly job that keeps checking it,
+So that trust in the data is a measured, continuously re-earned fact.
+
+**Acceptance Criteria:**
+
+**Given** at least one full closed UTC day (target 48 h) of clean soak after Story 31.2's restart, and the chaos windows kept separate
+**When** every verifier (31.2 conservation, 31.4 trades, 31.5 book, 31.6 derivs, 31.7 catalog, 31.8 candles) runs over it
+**Then** `docs/VERIFICATION_REPORT.md` holds a verdict table per data type × instrument — VERIFIED (zero unexplained), DEVIATION (each with its audit row) or OPEN — with the numbers, the soak window, the code revision, and the reproduction command for each row
+
+**Given** the `archive` service's nightly saga (`archive/application/nightly.py`)
+**When** the story ships
+**Then** a `verify_day` step runs after `compare_klines` for each venue whose recorder data covers the day, writes its per-type verdicts into `archive:status` and `data/archive/state.json` as `verification_days` (never gating trade pruning on its own, which stays `verified_days`), ledgers every non-zero unexplained count at `archive.verify_day`, and is skipped with one visible `"verification": "no reference data"` status (not an error) on a stack without recorders
+
+**Given** MR4 and OPS-01
+**When** the epic closes
+**Then** `docs/DATA_INTEGRITY_AUDIT.md` has a row for every finding, `docs/DATA_DICTIONARY.md` documents the verification context, the coverage record and every signal definition change, `platform/CLAUDE.md` DATA-02 names the reference recorder and `verification.*` tools as the standing independent source, and `docs/DEPLOY_CHECKLIST.md`'s "Deferred operator actions" gains one entry for this epic: the recorder's resource budget on nifelheim (2 vCPU / 3.7 GB, already oversubscribed — decide recorder-on-VPS vs recorder-on-desktop), and the VPS rollout of the 31.2/31.3/31.5/31.8 fixes
