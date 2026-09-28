@@ -619,3 +619,24 @@ not just restarted.
       (e.g. `BTC` / `BYBIT · perp`), and clicking Symbol puts the same coin's rows from different
       exchanges next to each other.
 - [ ] After 10 minutes, `GET /api/errors` is flat against the hour before the deploy (no new site).
+
+### 29-2 Collector pane shows every venue's plan (commit: this story's)
+
+- [ ] On the VPS, pull this commit and run `make redeploy-all` from `platform/` (`capture/`
+      changed, so the three collectors must restart; `redeploy-no-paper` restarts none of them).
+      It rebuilds the collector image, restarts `collector`, `bybit_collector` and
+      `hyperliquid_collector` and rebuilds `bot_tui`: Bybit's and Hyperliquid's collectors now
+      publish their static plan on `collector:status`, and every venue's aggregate gains `venue`,
+      `cap`, `accepts_commands`, `min_liquidity_usd` and `last_apply`. No config key, env var,
+      compose service or bind mount changed. `redeploy-all` also rebuilds and restarts
+      `live-paper`: run it when no paper bot holds a position you care about, or restart only
+      what this story changed: `docker compose up -d --build collector bybit_collector
+      hyperliquid_collector` then `docker compose --profile tui build bot_tui`.
+- [ ] `make tui`, then `:data`. Pub/sub keeps no history, so a section appears only at its
+      collector's next publish: each publishes on startup and then every 30 minutes. Open the TUI
+      within a minute of the restart, or wait up to 30 minutes. Expect three sections, `BYBIT`, `DYDX` and `HYPERLIQUID`, each headed
+      `<VENUE>: N collected +P pending · cap C` with a `last apply` line. On a Bybit row, `p` shows
+      `BYBIT: static plan: edit platform/capture/venues/bybit/config.toml` in the footer and opens
+      no prompt; `p` on a dYdX row still opens the type-to-confirm prompt (`esc` to cancel).
+- [ ] After 10 minutes, `GET /api/errors` is flat against the hour before the deploy (no new
+      `collector.status_loop` site on Bybit or Hyperliquid).

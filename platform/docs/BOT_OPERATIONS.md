@@ -52,6 +52,17 @@ make tui
 `bot_tui` has two panes: Bots, which it opens on, and Collector (`:data`); `:bots` returns
 to Bots and `:help` lists every key. Rankings and the ranking-mode switch are web-only
 (the web UI's home page, `/`, Story 25.1a). Highlight a bot, press `s` to start/stop it.
+
+The Collector pane has one section per venue that publishes `collector:status` (dYdX, Bybit,
+Hyperliquid; Story 29.2), sorted by venue. Each section is headed
+`<VENUE>: N collected +P pending · cap C` (P = planned but not yet subscribed), then shows the
+plan's last apply (what the collector last subscribed, unsubscribed or failed, with its time),
+the rows (`pending` marks a planned id not yet subscribed; a liquidity label only on a plan that
+classifies liquidity, i.e. dYdX) and the venue's `unpinned` line. `~` marks a stale row or a
+stale section. Only dYdX's plan accepts commands: `p`, `x`, `:start <ID>` and `:pintop` work
+there, and on a Bybit or Hyperliquid row (or a `:start` of such an id) they are refused with
+`<VENUE>: static plan: edit platform/capture/venues/<venue>/config.toml` and nothing is sent
+— edit that file and restart the collector instead (runtime control for them is Story 29.4).
 Stopping a *running* bot opens a type-to-confirm prompt (type `stop` + Enter); starting
 has no such guard. `bot_tui` needs `redis` up (`make up` or `make up-live-paper` bring it
 up) but not `live-paper` itself — an offline bot just shows as stale.

@@ -73,7 +73,7 @@ instruments = [
 ]
 ```
 
-Bybit and Hyperliquid take a plain list of ids and are read once at startup (no hot-reload):
+Bybit and Hyperliquid take a plain list of ids and are read once at startup (no hot-reload). They publish that static plan on `collector:status` too (Story 29.2), so `bot_tui`'s Collector pane shows it, read-only:
 
 ```toml
 environment = "mainnet"
@@ -156,9 +156,13 @@ A keyboard-only control surface for the bots and the collector, with two panes:
   per-row stale markers. `s` starts/stops the highlighted bot (stopping asks you to type
   `stop`), Enter opens its detail view (trades, PnL, strategy source `v`, incidents `i`,
   dashboard link `o`).
-- **Collector** (`:data`): every collected dYdX instrument from `collector:status`. `p`
-  unpins, `x` stops collecting (both ask for confirmation); `:start <ID>` and `:pintop` add
-  coins. Every action is written through to the collector's `config.toml`.
+- **Collector** (`:data`): one section per venue from `collector:status` (dYdX, Bybit,
+  Hyperliquid), each headed `<VENUE>: N collected +P pending · cap C`, with the plan's last
+  apply, its rows (`pending` = planned, not yet subscribed) and its unpinned ids. On dYdX, `p`
+  unpins, `x` stops collecting (both ask for confirmation), and `:start <ID>` and `:pintop` add
+  coins; every action is written through to the collector's `config.toml`. Bybit and
+  Hyperliquid are shown read-only: their actions are refused with the reason (a static plan:
+  edit `capture/venues/<venue>/config.toml` and restart the collector).
 
 `:help` lists every key; `esc` goes back one view, `:q` quits. It reads only `bots:*` and
 `collector:status` and publishes only `bots:control` and `collector:control`. Rankings, the

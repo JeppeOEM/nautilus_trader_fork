@@ -76,8 +76,9 @@ Unseen ids are archived with the venue's `ts_event` and `ts_init` = the time the
 -- the nightly rebuild places them. One `collector.trade_backfill` ledger entry per backfill
 names the feed, the detections, and the counts: backfilled, already archived, refused (older
 than the 300 s `kernel.clocks.MAX_TS_INIT_SKEW_NS`, which the rebuild and prune depend on), unrecoverable
-seconds, no baseline, errors. dYdX's `collector:status` carries the per-instrument cumulative
-`trade_backfill`; Bybit and Hyperliquid report it in the per-flush log line.
+seconds, no baseline, errors. Every venue's `collector:status` carries the per-instrument
+cumulative `trade_backfill` (Bybit and Hyperliquid since Story 29.2), and the per-flush log line
+reports it too.
 
 What a reconnect gap costs, per venue (endpoints and depths verified live 2026-09-21):
 
@@ -370,15 +371,19 @@ service name, via `ERROR_LEDGER_SERVICE`).
 
 ### 1.12 `collector:status` / `collector:control` (the `collection_control/` context, Story 25.4)
 
-Not market data: the dYdX collection plan's live control surface, read and written by `bot_tui`'s
-Collector pane (Story 6.1). Published language, frozen (AD-D12); the bytes are replay-tested
+Not market data: every venue's collection plan as `bot_tui`'s Collector pane shows it (Story 6.1;
+every venue since Story 29.2), and dYdX's live control surface. Published language, frozen
+(AD-D12): fields are only ever appended. The bytes are replay-tested
 (`collection_control/tests/test_status_replay.py` against a pre-move recording,
-`bot_tui/tests/test_collector_status_replay.py` through the TUI's reader).
+`bot_tui/tests/test_collector_status_replay.py` through the TUI's reader, and
+`collection_control/tests/fixtures/control_payloads.json` for `collector:control`).
 
-- **`collector:status`** — published by `StatusPublisher` in the dYdX collector process at start,
-  every `liquidity_check_seconds`, right after every control action, and within 30 s of a row's
-  `pending` state changing (capture's retry applied it). One `json.dumps` message
-  per planned instrument, in plan order, keys in this order:
+- **`collector:status`** — published by `StatusPublisher` in each collector process (dYdX, Bybit,
+  Hyperliquid) at start, then every `liquidity_check_seconds` (dYdX) or
+  `STATIC_PLAN_STATUS_SECONDS` = 1800 s (Bybit, Hyperliquid: a static plan), right after every
+  control action (dYdX), and within 30 s of a row's `pending` state changing (capture's retry
+  applied it) or of a new apply. One `json.dumps` message per planned instrument, in plan order,
+  keys in this order (no `venue`: a reader derives it from the id, SIGNAL-01):
   - `id` — the instrument id;
   - `liquid` — `true` when its USD `volume24H` is at or above the plan's `liquidity_min_oi_usd`
     (the last classification; `false` until the first one);
@@ -387,9 +392,24 @@ Collector pane (Story 6.1). Published language, frozen (AD-D12); the bytes are r
   - `pending` — present, and `true`, only when the instrument is planned but capture has **not**
     applied it (its subscribe failed on the wire and is being retried, or the venue does not list
     it). Absent on an applied instrument, so every pre-25.4 row shape is unchanged.
-  Then one `{"unpinned_ids": [...]}` (every `exclude` id, sorted), and on `stop`/`unpin` a
-  `{"id": ..., "removed": true}` tombstone.
-- **`collector:control`** — `{action, id}` published by `bot_tui`: `start` (plan `add`), `unpin`
+  Then the venue's plan aggregate, keys in this order (all but `unpinned_ids` appended in
+  Story 29.2; an aggregate without `venue` is a pre-29.2 dYdX producer's):
+  - `unpinned_ids` — every `exclude` id, sorted (always `[]` for Bybit and Hyperliquid, which
+    have no `exclude`);
+  - `venue` — the plan's `kernel.venues` code (`DYDX`, `BYBIT`, `HYPERLIQUID`);
+  - `cap` — the plan's cap (dYdX 30; a static plan's cap is its own size);
+  - `accepts_commands` — `true` only when a `ControlService` consumes `collector:control` for this
+    plan (dYdX); `false` for a static plan. Absent (older producer): `true` only for dYdX;
+  - `min_liquidity_usd` — the plan's liquidity threshold (a float), `null` when the plan
+    classifies no liquidity (then every row's `liquid` stays `false` and means nothing);
+  - `last_apply` — `null` before capture's first `CaptureService.apply`, then
+    `{"ts": <wall-clock ns>, "subscribed": [...], "unsubscribed": [...], "failed": [...]}` for the
+    most recent apply (startup or command), each id list sorted. It is history: a failed id
+    capture's retry has since subscribed loses its row's `pending` while this still lists it.
+  And on `stop`/`unpin` a `{"id": ..., "removed": true}` tombstone.
+- **`collector:control`** — `{action, id}` published by `bot_tui`, consumed by dYdX's collector
+  only (it carries no venue, so `bot_tui` sends it only for a plan whose aggregate says
+  `accepts_commands`): `start` (plan `add`), `unpin`
   (stop and exclude), `stop` (plan `remove`), `pin_top_liquid` (fill the free slots under the
   30-instrument cap with the top USD-volume liquid ids, never an excluded one). A refused command
   or an unknown action logs a WARNING and changes nothing. A valid one is saved to

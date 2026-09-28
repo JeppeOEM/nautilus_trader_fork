@@ -22,6 +22,7 @@ import contextlib
 import json
 import logging
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -40,6 +41,10 @@ from collection_control.domain.plan import InstrumentEntry
 
 _CAP = 30
 _MIN_USD = 100_000.0
+# What `bot_tui.collector_state.publish_control` sent before Story 29.2, recorded from it unchanged.
+_CONTROL_FIXTURE = json.loads(
+    (Path(__file__).parent / "fixtures" / "control_payloads.json").read_text()
+)
 
 
 def _plan(*ids: str, excluded: frozenset[str] = frozenset()) -> CollectionPlan:
@@ -54,17 +59,22 @@ def _plan(*ids: str, excluded: frozenset[str] = frozenset()) -> CollectionPlan:
 
 
 class _Capture:
-    """Records every diff; everything planned counts as applied unless listed in `pending`."""
+    """
+    Records every diff; everything planned counts as applied unless listed in `pending`. Reports
+    the last diff as its last apply, time-stamped with the apply count.
+    """
 
     def __init__(self) -> None:
         self.diffs: list[PlanDiff] = []
         self.planned: tuple[str, ...] = ()
         self.pending: frozenset[str] = frozenset()
         self.lingering: frozenset[str] = frozenset()
+        self.last_applied: Applied | None = None
 
     async def apply(self, diff: PlanDiff) -> Applied:
         self.diffs.append(diff)
-        return Applied(subscribed=diff.added, unsubscribed=diff.removed)
+        self.last_applied = Applied(subscribed=diff.added, unsubscribed=diff.removed)
+        return self.last_applied
 
     def capture_status(self) -> CaptureStatus:
         return CaptureStatus(
@@ -73,6 +83,8 @@ class _Capture:
             last_book_update_ns={},
             trade_backfill={},
             lingering=self.lingering,
+            last_applied=self.last_applied,
+            last_applied_ns=len(self.diffs),  # a fake clock: one tick per apply
         )
 
 
@@ -123,7 +135,7 @@ class _Rig:
         self.store = _Store(plan)
         self.bus = _Bus()
         self.markets = _Markets(volumes)
-        self.status = StatusPublisher(self.capture, self.bus, self.markets)
+        self.status = StatusPublisher(self.capture, self.bus, self.markets, accepts_commands=True)
         self.control = ControlService(plan, self.store, self.capture, self.status, self.markets)
 
     def handle(self, action: str | None, iid: str | None = None) -> None:
@@ -142,7 +154,14 @@ def test_start_saves_then_applies_then_publishes() -> None:
     assert rig.control.plan.collected == ("SOL-USD-PERP.DYDX",)
     assert rig.store.saved == [rig.control.plan]
     assert [d.added for d in rig.capture.diffs] == [{"SOL-USD-PERP.DYDX"}]
-    assert rig.payloads()[-1] == {"unpinned_ids": []}
+    aggregate = rig.payloads()[-1]
+    assert aggregate["unpinned_ids"] == []
+    assert aggregate["last_apply"] == {
+        "ts": 1,
+        "subscribed": ["SOL-USD-PERP.DYDX"],
+        "unsubscribed": [],
+        "failed": [],
+    }
 
 
 def test_start_clears_the_id_from_exclude() -> None:
@@ -157,10 +176,9 @@ def test_unpin_removes_excludes_and_publishes_the_tombstone() -> None:
     assert rig.store.plan.collected == ()
     assert rig.store.plan.excluded == {"BTC-USD-PERP.DYDX"}
     assert [d.removed for d in rig.capture.diffs] == [{"BTC-USD-PERP.DYDX"}]
-    assert rig.payloads()[-2:] == [
-        {"unpinned_ids": ["BTC-USD-PERP.DYDX"]},
-        {"id": "BTC-USD-PERP.DYDX", "removed": True},
-    ]
+    aggregate, tombstone = rig.payloads()[-2:]
+    assert aggregate["unpinned_ids"] == ["BTC-USD-PERP.DYDX"]
+    assert tombstone == {"id": "BTC-USD-PERP.DYDX", "removed": True}
 
 
 def test_stop_removes_without_excluding_and_publishes_the_tombstone() -> None:
@@ -402,7 +420,7 @@ def test_an_added_instrument_capture_has_not_reached_yet_is_published_pending() 
 def test_hand_edited_exclude_entries_are_published_as_unpinned() -> None:
     rig = _Rig(_plan(excluded=frozenset({"HANDEDITED-PERP.DYDX"})))
     asyncio.run(rig.status.publish(rig.control.plan))
-    assert {"unpinned_ids": ["HANDEDITED-PERP.DYDX"]} in rig.payloads()
+    assert rig.payloads()[-1]["unpinned_ids"] == ["HANDEDITED-PERP.DYDX"]
 
 
 def test_the_status_loop_still_publishes_when_the_indexer_is_down() -> None:
@@ -514,3 +532,28 @@ def test_the_control_loop_survives_a_bad_message_and_a_lost_connection(
 
 def test_the_status_channel_is_the_published_name() -> None:
     assert STATUS_CHANNEL == "collector:status"
+
+
+_BTC = "BTC-USD-PERP.DYDX"
+
+
+@pytest.mark.parametrize(
+    ("index", "before", "collected", "excluded"),
+    [
+        (0, (), (_BTC,), frozenset()),  # start
+        (1, (_BTC,), (), frozenset({_BTC})),  # unpin
+        (2, (_BTC,), (), frozenset()),  # stop
+        (3, (), (_BTC,), frozenset()),  # pin_top_liquid
+    ],
+)
+def test_each_recorded_control_payload_maps_to_its_plan_command(
+    index: int, before: tuple[str, ...], collected: tuple[str, ...], excluded: frozenset[str]
+) -> None:
+    """The recorded `collector:control` bytes (no `venue` field) still drive dYdX's plan."""
+    channel_name, payload = _CONTROL_FIXTURE["published"][index]
+    assert channel_name == "collector:control"
+    rig = _Rig(_plan(*before), {"BTC-USD": 500_000.0})
+
+    # The loop's own per-message step, awaited to completion: no wall-clock wait to race.
+    asyncio.run(rig.control._handle_message(payload))
+    assert (rig.control.plan.collected, rig.control.plan.excluded) == (collected, excluded)

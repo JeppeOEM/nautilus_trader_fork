@@ -21,6 +21,7 @@ _publish_collector_action is monkeypatched to a plain list-append rather than ca
 real, since its first statement schedules a real asyncio task that needs a running loop.
 """
 
+import pytest
 import urwid
 
 from bot_tui import archive_state
@@ -33,12 +34,23 @@ from bot_tui.collector_pane import COLD_OPEN_TEXT
 def _reset() -> None:
     collector_state._LATEST_COLLECTOR_STATUS = {}
     collector_state._LATEST_RECEIVED_AT = {}
-    collector_state._LATEST_UNPINNED_IDS = []
+    collector_state._LATEST_PLANS = {}
+    collector_state._PLAN_RECEIVED_AT = {}
+    collector_state._REPUBLISHED_SINCE_PLAN = {}
 
 
 def _instrument_rows(body: urwid.ListBox) -> int:
-    """Count the selectable instrument rows only, not the trailing informational Text lines."""
-    return sum(1 for w in body.body if isinstance(w, urwid.AttrMap))
+    """Count the selectable instrument rows only, not the section and trailing Text lines."""
+    return len(_row_positions(body))
+
+
+def _row_positions(body: urwid.ListBox) -> list[int]:
+    """Walker positions of the instrument rows (each venue section starts with Text lines)."""
+    return [i for i, w in enumerate(body.body) if isinstance(w, urwid.AttrMap)]
+
+
+def _row_ids(body: urwid.ListBox) -> list[str]:
+    return [body.body[i].original_widget.instrument_id for i in _row_positions(body)]
 
 
 def _status(iid: str, **overrides: object) -> dict:
@@ -49,6 +61,15 @@ def _status(iid: str, **overrides: object) -> dict:
     }
     base.update(overrides)
     return base
+
+
+def _recording_publishes(app: BotTuiApp) -> list[tuple[str, str | None]]:
+    """Replace the real publish (it needs a running loop) with a recording list."""
+    published: list[tuple[str, str | None]] = []
+    app._publish_collector_action = lambda action, instrument_id: published.append(  # type: ignore[method-assign]
+        (action, instrument_id)
+    )
+    return published
 
 
 def test_cold_open_before_any_collector_status_message() -> None:
@@ -74,9 +95,11 @@ def test_rows_sorted_by_id_and_selectable() -> None:
     app = BotTuiApp()
     app._refresh_collector_body()
     body = app._collector_body
-    assert isinstance(body.body[0].original_widget, _SelectableCollectorRow)
-    assert body.body[0].original_widget.instrument_id == "BTC-USD-PERP.DYDX"
-    assert body.body[1].original_widget.instrument_id == "ETH-USD-PERP.DYDX"
+    assert all(
+        isinstance(body.body[i].original_widget, _SelectableCollectorRow)
+        for i in _row_positions(body)
+    )
+    assert _row_ids(body) == ["BTC-USD-PERP.DYDX", "ETH-USD-PERP.DYDX"]
 
 
 def test_highlighted_collector_id_reads_listbox_focus() -> None:
@@ -88,7 +111,7 @@ def test_highlighted_collector_id_reads_listbox_focus() -> None:
     app._refresh_collector_body()
     app._body.original_widget = app._collector_body
     assert app._highlighted_collector_id() == "BTC-USD-PERP.DYDX"
-    app._collector_body.focus_position = 1
+    app._collector_body.focus_position = _row_positions(app._collector_body)[1]
     assert app._highlighted_collector_id() == "ETH-USD-PERP.DYDX"
 
 
@@ -113,8 +136,7 @@ def _collector_app_with_one_row(instrument_id: str = "BTC-USD-PERP.DYDX") -> Bot
 
 def test_p_opens_unpin_confirm_without_publishing() -> None:
     app = _collector_app_with_one_row()
-    published: list[tuple[str, str | None]] = []
-    app._publish_collector_action = lambda action, iid: published.append((action, iid))  # type: ignore[method-assign]
+    published = _recording_publishes(app)
 
     app._toggle_pin()
 
@@ -126,8 +148,7 @@ def test_p_opens_unpin_confirm_without_publishing() -> None:
 
 def test_typing_unpin_and_enter_confirms_and_publishes() -> None:
     app = _collector_app_with_one_row()
-    published: list[tuple[str, str | None]] = []
-    app._publish_collector_action = lambda action, iid: published.append((action, iid))  # type: ignore[method-assign]
+    published = _recording_publishes(app)
     app._toggle_pin()
 
     app._stop_confirm_edit.set_edit_text("unpin")
@@ -139,8 +160,7 @@ def test_typing_unpin_and_enter_confirms_and_publishes() -> None:
 
 def test_x_opens_stop_confirm_without_publishing() -> None:
     app = _collector_app_with_one_row()
-    published: list[tuple[str, str | None]] = []
-    app._publish_collector_action = lambda action, iid: published.append((action, iid))  # type: ignore[method-assign]
+    published = _recording_publishes(app)
 
     app._handle_collector_pane_key("x")
 
@@ -152,8 +172,7 @@ def test_x_opens_stop_confirm_without_publishing() -> None:
 
 def test_typing_stop_and_enter_confirms_and_publishes() -> None:
     app = _collector_app_with_one_row()
-    published: list[tuple[str, str | None]] = []
-    app._publish_collector_action = lambda action, iid: published.append((action, iid))  # type: ignore[method-assign]
+    published = _recording_publishes(app)
     app._handle_collector_pane_key("x")
 
     app._stop_confirm_edit.set_edit_text("stop")
@@ -165,8 +184,7 @@ def test_typing_stop_and_enter_confirms_and_publishes() -> None:
 
 def test_wrong_text_keeps_collector_confirm_open_without_publishing() -> None:
     app = _collector_app_with_one_row()
-    published: list[tuple[str, str | None]] = []
-    app._publish_collector_action = lambda action, iid: published.append((action, iid))  # type: ignore[method-assign]
+    published = _recording_publishes(app)
     app._toggle_pin()
 
     app._stop_confirm_edit.set_edit_text("nope")
@@ -179,8 +197,7 @@ def test_wrong_text_keeps_collector_confirm_open_without_publishing() -> None:
 
 def test_esc_cancels_collector_confirm_without_publishing() -> None:
     app = _collector_app_with_one_row()
-    published: list[tuple[str, str | None]] = []
-    app._publish_collector_action = lambda action, iid: published.append((action, iid))  # type: ignore[method-assign]
+    published = _recording_publishes(app)
     app._toggle_pin()
 
     app._close_collector_confirm()
@@ -195,8 +212,7 @@ def test_collector_confirm_intercepts_keys_via_unhandled_input() -> None:
     # End-to-end through the real dispatch path (Story 6.1's own precedent for this,
     # see test_app_bots.py's test_stop_confirm_intercepts_keys_via_unhandled_input).
     app = _collector_app_with_one_row()
-    published: list[tuple[str, str | None]] = []
-    app._publish_collector_action = lambda action, iid: published.append((action, iid))  # type: ignore[method-assign]
+    published = _recording_publishes(app)
 
     app._unhandled_input("p")
     assert app._collector_confirm_active is True
@@ -226,7 +242,7 @@ def test_refresh_collector_body_preserves_scroll_position_across_repeated_ticks(
     app._refresh_collector_body()
     app._body.original_widget = app._collector_body
     body_before = app._collector_body
-    app._collector_body.focus_position = 2  # scroll to the last row
+    app._collector_body.focus_position = _row_positions(body_before)[-1]  # scroll to the last row
 
     # Simulate several more redraw ticks with unchanged status data.
     app._refresh_collector_body()
@@ -341,10 +357,231 @@ def test_archive_line_refresh_keeps_the_listbox_and_focus() -> None:
     app._refresh_collector_body()
     app._body.original_widget = app._collector_body
     body_before = app._collector_body
-    app._collector_body.focus_position = 1
+    app._collector_body.focus_position = _row_positions(body_before)[1]
 
     archive_state._handle_status_message(_archive_status())
     app._refresh_collector_body()
 
     assert app._collector_body is body_before
     assert app._highlighted_collector_id() == "BTC-USD-PERP.DYDX"
+
+
+# --- Story 29.2: one section per venue; actions only where the plan accepts commands ---
+
+_BYBIT_ROW = "BTCUSDT-LINEAR.BYBIT"
+
+
+def _plan(venue: str, **overrides: object) -> dict:
+    base: dict = {
+        "unpinned_ids": [],
+        "venue": venue,
+        "cap": 4,
+        "accepts_commands": False,
+        "min_liquidity_usd": None,
+        "last_apply": None,
+    }
+    base.update(overrides)
+    return base
+
+
+def _dydx_plan(**overrides: object) -> dict:
+    return _plan(
+        "DYDX", **{"cap": 30, "accepts_commands": True, "min_liquidity_usd": 20000.0, **overrides}
+    )
+
+
+def _collector_app(*messages: dict) -> BotTuiApp:
+    _reset()
+    for message in messages:
+        collector_state._handle_status_message(message)
+    app = BotTuiApp()
+    app._switch_view("collector", [])
+    app._refresh_collector_body()
+    app._body.original_widget = app._collector_body
+    return app
+
+
+def _texts(app: BotTuiApp) -> list[str]:
+    """Every line of the pane in order, rows included (a row's Text sits inside its AttrMap)."""
+    return [
+        (w.original_widget if isinstance(w, urwid.AttrMap) else w).text
+        for w in app._collector_body.body
+    ]
+
+
+def _submit(app: BotTuiApp, text: str) -> str:
+    """Submit `text` on the command bar; return the caption it left (the refusal, if any)."""
+    app._open_command_bar()
+    app._command_edit.set_edit_text(text)
+    app._submit_command()
+    return app._command_edit.caption
+
+
+def test_every_venue_gets_a_section_sorted_with_the_archive_line_last() -> None:
+    app = _collector_app(
+        _status("BTC-USD-PERP.DYDX", liquid=True),
+        _status(_BYBIT_ROW, liquid=False),
+        _status("SOL-USD-PERP.HYPERLIQUID", liquid=False, pending=True),
+        _dydx_plan(unpinned_ids=["AAA-USD-PERP.DYDX"]),
+        _plan("BYBIT"),
+        _plan("HYPERLIQUID", cap=1),
+    )
+    texts = _texts(app)
+    headers = [t for t in texts if ": " in t and "collected" in t]
+    assert headers == [
+        "BYBIT: 1 collected +0 pending · cap 4",
+        "DYDX: 1 collected +0 pending · cap 30",
+        "HYPERLIQUID: 0 collected +1 pending · cap 1",
+    ]
+    assert "  BTC-USD-PERP.DYDX            liquid  " in texts
+    assert f"  {_BYBIT_ROW:<28}" in texts  # no liquidity label for a static plan
+    assert "  SOL-USD-PERP.HYPERLIQUID     pending" in texts
+    assert "unpinned (add back with :start <ID>): AAA-USD-PERP.DYDX" in texts
+    assert "BYBIT: static plan: edit platform/capture/venues/bybit/config.toml" in texts
+    assert texts[-1] == "archive: no status yet"
+
+
+def test_p_and_x_on_a_static_plan_row_are_refused_in_the_footer() -> None:
+    app = _collector_app(_status(_BYBIT_ROW), _plan("BYBIT"))
+    published = _recording_publishes(app)
+    for key in ("p", "x"):
+        app._handle_collector_pane_key(key)
+        assert app._collector_confirm_active is False
+        assert "BYBIT: static plan: edit platform/capture/venues/bybit/config.toml" in (
+            app._footer_hint.text
+        )
+    assert published == []
+
+
+def test_start_of_a_static_plan_id_is_refused() -> None:
+    app = _collector_app(_status(_BYBIT_ROW), _plan("BYBIT"))
+    published = _recording_publishes(app)
+    caption = _submit(app, "start ETHUSDC-SPOT.BYBIT")
+    assert caption == (
+        "cannot start ETHUSDC-SPOT.BYBIT: BYBIT: static plan: edit "
+        "platform/capture/venues/bybit/config.toml\n:"
+    )
+    assert published == []
+
+
+def test_start_at_the_dydx_cap_counts_only_dydx_rows() -> None:
+    dydx_rows = [_status(f"C{i}-USD-PERP.DYDX") for i in range(29)]
+    app = _collector_app(*dydx_rows, _status(_BYBIT_ROW), _dydx_plan(), _plan("BYBIT"))
+    published = _recording_publishes(app)
+    _submit(app, "start NEW-USD-PERP.DYDX")  # 29 of 30: the Bybit row does not count
+    assert published == [("start", "NEW-USD-PERP.DYDX")]
+
+    collector_state._handle_status_message(_status("NEW-USD-PERP.DYDX", pending=True))
+    caption = _submit(app, "start MORE-USD-PERP.DYDX")
+    assert caption == "cannot start MORE-USD-PERP.DYDX: at 30-instrument cap\n:"
+    assert published == [("start", "NEW-USD-PERP.DYDX")]
+
+
+def test_an_older_aggregate_is_dydx_s_with_an_unknown_cap_and_actions_allowed() -> None:
+    app = _collector_app(_status("BTC-USD-PERP.DYDX"), {"unpinned_ids": ["X-USD-PERP.DYDX"]})
+    texts = _texts(app)
+    assert texts[0] == "DYDX: 1 collected +0 pending · cap ?"
+    assert "unpinned (add back with :start <ID>): X-USD-PERP.DYDX" in texts
+    published = _recording_publishes(app)
+    _submit(app, "start NEW-USD-PERP.DYDX")  # no cap known: the collector checks it
+    assert published == [("start", "NEW-USD-PERP.DYDX")]
+    app._toggle_pin()
+    assert app._collector_confirm_active is True
+
+
+def test_pintop_is_refused_when_the_dydx_plan_does_not_accept_commands() -> None:
+    app = _collector_app(_dydx_plan(accepts_commands=False))
+    published = _recording_publishes(app)
+    caption = _submit(app, "pintop")
+    assert caption.startswith("cannot pintop: DYDX: static plan")
+    assert published == []
+
+
+def test_a_venue_with_only_an_aggregate_shows_its_empty_section() -> None:
+    app = _collector_app(_plan("HYPERLIQUID", cap=0))
+    assert _texts(app)[0] == "HYPERLIQUID: 0 collected +0 pending · cap 0"
+    assert app._highlighted_collector_id() is None
+
+
+def test_rows_without_their_venue_s_aggregate_wait_for_it() -> None:
+    app = _collector_app(_status(_BYBIT_ROW))
+    assert "waiting for BYBIT plan on collector:status" in _texts(app)
+    published = _recording_publishes(app)
+    app._toggle_pin()
+    assert app._collector_confirm_active is False
+    assert published == []
+
+
+def test_a_malformed_id_is_grouped_under_unknown_and_refused() -> None:
+    app = _collector_app(_status("BTCUSDT"))
+    assert _texts(app)[0] == "UNKNOWN: 1 collected +0 pending · cap ?"
+    published = _recording_publishes(app)
+    app._toggle_pin()
+    assert app._collector_confirm_active is False
+    assert "unknown venue" in app._footer_hint.text
+    assert _submit(app, "start BTCUSDT").startswith("cannot start BTCUSDT: unknown venue")
+    assert published == []
+
+
+def test_a_stale_aggregate_marks_its_section_header() -> None:
+    app = _collector_app(_plan("BYBIT"))
+    collector_state._PLAN_RECEIVED_AT["BYBIT"] -= collector_state._STATUS_STALE_SECONDS + 1
+    app._refresh_collector_body()
+    assert _texts(app)[0].startswith("~ BYBIT: ")
+
+
+def test_the_last_apply_line_shows_under_its_header() -> None:
+    last_apply = {"ts": 1_790_000_000_000_000_000, "subscribed": [], "unsubscribed": []}
+    app = _collector_app(_plan("BYBIT", last_apply={**last_apply, "failed": [_BYBIT_ROW]}))
+    assert _texts(app)[1] == (
+        f"last apply 2026-09-21 14:13:20Z: 0 subscribed, 0 unsubscribed, 1 failed ({_BYBIT_ROW})"
+    )
+
+
+def test_focus_on_a_section_line_highlights_no_row() -> None:
+    app = _collector_app(_status("BTC-USD-PERP.DYDX"))
+    app._collector_body.focus_position = 0  # the DYDX header
+    assert app._highlighted_collector_id() is None
+
+
+def test_focus_follows_its_row_when_a_section_line_appears_above_it() -> None:
+    app = _collector_app(_status(_BYBIT_ROW), _status("BTC-USD-PERP.DYDX"), _dydx_plan())
+    body = app._collector_body
+    body.focus_position = _row_positions(body)[1]
+    assert app._highlighted_collector_id() == "BTC-USD-PERP.DYDX"
+    collector_state._handle_status_message(_plan("BYBIT"))  # its "waiting" line becomes two
+    app._refresh_collector_body()
+    assert app._highlighted_collector_id() == "BTC-USD-PERP.DYDX"
+
+
+def test_a_row_its_venue_did_not_republish_is_dropped_by_the_next_aggregate() -> None:
+    app = _collector_app(_status(_BYBIT_ROW), _status("ETHUSDT-LINEAR.BYBIT"), _plan("BYBIT"))
+    # The collector restarted from an edited plan: only ETH is republished, then the aggregate.
+    collector_state._handle_status_message(_status("ETHUSDT-LINEAR.BYBIT"))
+    collector_state._handle_status_message(_plan("BYBIT"))
+    app._refresh_collector_body()
+    assert _row_ids(app._collector_body) == ["ETHUSDT-LINEAR.BYBIT"]
+
+
+def test_the_row_sweep_orders_by_arrival_not_by_the_wall_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _collector_app(_status(_BYBIT_ROW), _plan("BYBIT"))
+    # NTP steps the clock back between the republished row and its aggregate.
+    monkeypatch.setattr(collector_state.time, "time", lambda: 1_000.0)
+    collector_state._handle_status_message(_status(_BYBIT_ROW))
+    monkeypatch.setattr(collector_state.time, "time", lambda: 999.0)
+    collector_state._handle_status_message(_plan("BYBIT"))
+    app._refresh_collector_body()
+    assert _row_ids(app._collector_body) == [_BYBIT_ROW]
+
+
+def test_a_confirm_is_refused_when_the_plan_stops_accepting_commands_meanwhile() -> None:
+    app = _collector_app(_status("BTC-USD-PERP.DYDX"), _dydx_plan())
+    published = _recording_publishes(app)
+    app._handle_collector_pane_key("x")
+    collector_state._handle_status_message(_dydx_plan(accepts_commands=False))
+    app._stop_confirm_edit.set_edit_text("stop")
+    app._submit_collector_confirm()
+    assert published == []
+    assert "DYDX: static plan" in app._footer_hint.text

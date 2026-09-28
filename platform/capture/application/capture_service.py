@@ -413,6 +413,9 @@ class CaptureService:
         self._retry_subscribe: set[str] = set()
         self._retry_unsubscribe: set[str] = set()
         self._delta_store: set[str] = set(store_deltas)
+        # The most recent `apply`'s result and wall-clock ns, reported on `collector:status`.
+        self._last_applied: Applied | None = None
+        self._last_applied_ns = 0
         self._unplanned_messages: defaultdict[str, int] = defaultdict(int)
         # Serializes every wire change (`apply`, the retry round and a resync): without it a retry
         # awaiting one subscribe could subscribe an id a concurrent `apply` just removed, leaking a
@@ -1591,7 +1594,7 @@ class CaptureService:
         failed subscribe un-marks it. Every wire failure is ledgered once per attempt and retried
         by `_subscription_retry_loop`; an id the venue does not list is ledgered and never retried.
         Never raises for a per-instrument failure. Runs under `_subscription_lock`, so it never
-        interleaves with a retry round.
+        interleaves with a retry round. The result and its time are kept for `capture_status()`.
         """
         self._delta_store = set(diff.store_deltas)
         subscribed: set[str] = set()
@@ -1616,7 +1619,11 @@ class CaptureService:
             for iid in sorted(diff.added):
                 self._plan_ids.add(iid)
                 (subscribed if await self._subscribe_added(iid) else failed).add(iid)
-        return Applied(frozenset(subscribed), frozenset(unsubscribed), frozenset(failed))
+            # Recorded under the lock, so the last apply to finish is the one reported.
+            applied = Applied(frozenset(subscribed), frozenset(unsubscribed), frozenset(failed))
+            self._last_applied = applied
+            self._last_applied_ns = time.time_ns()
+        return applied
 
     async def _subscribe_added(self, iid: str) -> bool:
         if iid in self._applied:
@@ -1723,6 +1730,8 @@ class CaptureService:
                 if book.last_update_ns is not None
             },
             trade_backfill={iid: i.backfilled for iid, i in self._intakes.items() if i.backfilled},
+            last_applied=self._last_applied,
+            last_applied_ns=self._last_applied_ns,
         )
 
     # -- composition -------------------------------------------------------------------------

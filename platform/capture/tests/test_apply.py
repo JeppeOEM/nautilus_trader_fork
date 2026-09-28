@@ -441,3 +441,23 @@ def test_a_failed_subscribe_leaves_no_book_time_on_its_pending_row(tmp_path: Pat
     _apply(c, added=frozenset({_A}))
     status = c.capture_status()
     assert (status.pending, status.last_book_update_ns) == ({_A}, {})
+
+
+def test_no_apply_is_reported_before_the_first_one(tmp_path: Path) -> None:
+    status = _collector(tmp_path, _WireClient(), plan=(_A,)).capture_status()
+    assert (status.last_applied, status.last_applied_ns) == (None, 0)
+
+
+def test_the_most_recent_apply_is_reported_with_its_time(tmp_path: Path) -> None:
+    error_ledger.reset()
+    client = _WireClient()
+    client.fail_subscribe.add(_B)
+    c = _collector(tmp_path, client)
+    before_ns = time.time_ns()
+    failed = _apply(c, added=frozenset({_A, _B}))
+    status = c.capture_status()
+    assert status.last_applied == failed
+    assert status.last_applied_ns >= before_ns
+    removed = _apply(c, removed=frozenset({_A}))
+    assert c.capture_status().last_applied == removed
+    assert c.capture_status().last_applied_ns >= status.last_applied_ns

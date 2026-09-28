@@ -1,0 +1,38 @@
+{
+  "calls": [
+    [
+      "start",
+      "BTC-USD-PERP.DYDX"
+    ],
+    [
+      "unpin",
+      "BTC-USD-PERP.DYDX"
+    ],
+    [
+      "stop",
+      "BTC-USD-PERP.DYDX"
+    ],
+    [
+      "pin_top_liquid",
+      null
+    ]
+  ],
+  "published": [
+    [
+      "collector:control",
+      "{\"action\": \"start\", \"id\": \"BTC-USD-PERP.DYDX\"}"
+    ],
+    [
+      "collector:control",
+      "{\"action\": \"unpin\", \"id\": \"BTC-USD-PERP.DYDX\"}"
+    ],
+    [
+      "collector:control",
+      "{\"action\": \"stop\", \"id\": \"BTC-USD-PERP.DYDX\"}"
+    ],
+    [
+      "collector:control",
+      "{\"action\": \"pin_top_liquid\"}"
+    ]
+  ]
+}

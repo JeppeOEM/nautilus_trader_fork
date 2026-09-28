@@ -18,10 +18,16 @@ the pre-move `DydxCollector._publish_status`/`_publish_removed` (`collection_con
 status_payloads.json`, inlined here: `bot_tui` imports no collector context) plus the one addition,
 a pending row, go through the TUI's own reader and renderer unchanged -- `bot_tui` needs no change
 for the control plane's move.
+
+Story 29.2 appends the plan facts to the aggregate (`_AGGREGATE`); the recorded one without them
+still reads as dYdX's. `publish_control` stays byte-identical to its recording
+(`collection_control/tests/fixtures/control_payloads.json`).
 """
 
+import asyncio
 import json
 from pathlib import Path
+from typing import Self
 
 import pytest
 
@@ -43,13 +49,19 @@ _PENDING = (
     '{"id": "NEW-USD-PERP.DYDX", "liquid": false, "last_trade_ts": 0, "trade_backfill": 0, '
     '"pending": true}'
 )
-
-
-@pytest.fixture(autouse=True)
-def _fresh_collector_state(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(collector_state, "_LATEST_COLLECTOR_STATUS", {})
-    monkeypatch.setattr(collector_state, "_LATEST_RECEIVED_AT", {})
-    monkeypatch.setattr(collector_state, "_LATEST_UNPINNED_IDS", [])
+# Story 29.2's aggregate: the recorded one's bytes, then the appended plan facts.
+_AGGREGATE = _RECORDED[3].removesuffix("}") + (
+    ', "venue": "DYDX", "cap": 30, "accepts_commands": true, "min_liquidity_usd": 20000.0, '
+    '"last_apply": {"ts": 1758888000000000000, "subscribed": ["SOL-USD-PERP.DYDX"], '
+    '"unsubscribed": [], "failed": []}}'
+)
+_BYBIT_AGGREGATE = (
+    '{"unpinned_ids": [], "venue": "BYBIT", "cap": 4, "accepts_commands": false, '
+    '"min_liquidity_usd": null, "last_apply": null}'
+)
+_CONTROL_FIXTURE = Path(__file__).parents[2] / (
+    "collection_control/tests/fixtures/control_payloads.json"
+)
 
 
 def _replay(*messages: str) -> list[str]:
@@ -61,11 +73,31 @@ def _replay(*messages: str) -> list[str]:
 
 def test_the_recorded_status_renders_every_row_and_the_unpinned_ids() -> None:
     assert _replay(*_RECORDED) == [
-        "  BTC-USD-PERP.DYDX      liquid  ",
-        "  ETH-USD-PERP.DYDX      illiquid",
-        "  SOL-USD-PERP.DYDX      liquid  ",
+        "  BTC-USD-PERP.DYDX            liquid  ",
+        "  ETH-USD-PERP.DYDX            illiquid",
+        "  SOL-USD-PERP.DYDX            liquid  ",
     ]
-    assert collector_state._LATEST_UNPINNED_IDS == ["AAA-USD-PERP.DYDX", "ZZZ-USD-PERP.DYDX"]
+    # The recorded aggregate has no `venue`: it is dYdX's, and dYdX keeps taking commands.
+    dydx_plan = collector_state._LATEST_PLANS["DYDX"]
+    assert dydx_plan["unpinned_ids"] == ["AAA-USD-PERP.DYDX", "ZZZ-USD-PERP.DYDX"]
+    assert collector_state.command_refusal("DYDX") is None
+    assert collector_state.plan_cap("DYDX") is None
+
+
+def test_the_29_2_aggregate_is_kept_per_venue() -> None:
+    _replay(*_RECORDED[:3], _AGGREGATE, _BYBIT_AGGREGATE)
+    assert set(collector_state._LATEST_PLANS) == {"DYDX", "BYBIT"}
+    assert collector_state._LATEST_PLANS["DYDX"]["unpinned_ids"] == [
+        "AAA-USD-PERP.DYDX",
+        "ZZZ-USD-PERP.DYDX",
+    ]
+    assert collector_state.plan_cap("DYDX") == 30
+    assert collector_state.command_refusal("DYDX") is None
+    assert collector_state.command_refusal("BYBIT") == (
+        "BYBIT: static plan: edit platform/capture/venues/bybit/config.toml"
+    )
+    apply_line = collector_pane.format_last_apply_line(collector_state._LATEST_PLANS["DYDX"])
+    assert apply_line.endswith("1 subscribed, 0 unsubscribed, 0 failed")
 
 
 def test_the_recorded_tombstone_drops_its_row() -> None:
@@ -73,10 +105,36 @@ def test_the_recorded_tombstone_drops_its_row() -> None:
     assert [line.split()[0] for line in lines] == ["BTC-USD-PERP.DYDX", "SOL-USD-PERP.DYDX"]
 
 
-def test_a_pending_row_is_read_and_rendered_like_any_other() -> None:
+def test_a_pending_row_is_read_and_rendered_with_its_pending_marker() -> None:
     lines = _replay(*_RECORDED, _PENDING)
-    assert "  NEW-USD-PERP.DYDX      illiquid" in lines
+    assert "  NEW-USD-PERP.DYDX            illiquid pending" in lines
     assert collector_state._LATEST_COLLECTOR_STATUS["NEW-USD-PERP.DYDX"]["pending"] is True
+
+
+def test_publish_control_is_byte_identical_to_the_recording(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recording = json.loads(_CONTROL_FIXTURE.read_text())
+    published: list[list[str]] = []
+
+    class _Client:
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
+        async def publish(self, channel: str, message: str) -> None:
+            published.append([channel, message])
+
+    monkeypatch.setattr(collector_state.aioredis.Redis, "from_url", lambda *_a, **_k: _Client())
+
+    async def _send() -> None:
+        for action, instrument_id in recording["calls"]:
+            await collector_state.publish_control("redis://unused", action, instrument_id)
+
+    asyncio.run(_send())
+    assert published == recording["published"]
 
 
 def test_the_inlined_strings_are_the_recording() -> None:

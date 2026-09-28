@@ -24,6 +24,7 @@ import pytest
 from bot_tui import archive_state
 from bot_tui import bot_history_state
 from bot_tui import bots_state
+from bot_tui import collector_state
 
 
 @pytest.fixture(autouse=True)
@@ -50,3 +51,13 @@ def _reset_archive_state() -> None:
     """Isolate archive_state's latest `archive:status` across test files (Story 25.1b)."""
     archive_state._LATEST_ARCHIVE_STATUS = None
     archive_state._LATEST_RECEIVED_AT = 0.0
+
+
+@pytest.fixture(autouse=True)
+def _reset_collector_state() -> None:
+    """Isolate collector_state's rows and per-venue plan aggregates across test files."""
+    collector_state._LATEST_COLLECTOR_STATUS = {}
+    collector_state._LATEST_RECEIVED_AT = {}
+    collector_state._LATEST_PLANS = {}
+    collector_state._PLAN_RECEIVED_AT = {}
+    collector_state._REPUBLISHED_SINCE_PLAN = {}

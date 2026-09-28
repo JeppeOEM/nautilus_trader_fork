@@ -18,6 +18,11 @@ bot_tui's own collector:status reader + collector:control publisher (Story 6.1).
 Same shape as bots_state.py's bots:status/bots:control pair (Story 4.4) -- a separate,
 independent Redis connection for this channel pair (AD-4/AD-9's precedent), and one
 message per instrument rather than a single aggregated payload.
+
+Story 29.2: every venue's collector publishes here, each with its own plan aggregate
+(`unpinned_ids` plus `venue`, `cap`, `accepts_commands`, `min_liquidity_usd`, `last_apply`),
+kept per venue. A row carries no venue: it is derived from the id (SIGNAL-01). Only a plan
+that accepts commands can be driven from here; the rest are shown read-only.
 """
 
 import asyncio
@@ -27,6 +32,8 @@ import os
 import time
 
 import redis.asyncio as aioredis
+from kernel.venues import MalformedInstrumentId
+from kernel.venues import venue_of
 
 
 logger = logging.getLogger(__name__)
@@ -36,11 +43,23 @@ REDIS_URL: str = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
 _LATEST_COLLECTOR_STATUS: dict[str, dict] = {}
 _LATEST_RECEIVED_AT: dict[str, float] = {}
 
-# Every id in collector.py's config.exclude (whether it landed there via a past "unpin"
-# control action or a hand-edit of config.toml) -- published as one aggregate message
-# rather than per-instrument, since these aren't currently collected and so have no
-# per-instrument status of their own.
-_LATEST_UNPINNED_IDS: list[str] = []
+# The latest plan aggregate per venue: its `unpinned_ids` (the plan's exclude -- via a past
+# "unpin" or a hand-edit of config.toml -- which has no per-instrument row of its own) and,
+# from Story 29.2 producers, the plan facts appended after it. Keyed by venue so one venue's
+# aggregate never overwrites another's.
+_LATEST_PLANS: dict[str, dict] = {}
+_PLAN_RECEIVED_AT: dict[str, float] = {}
+
+# Per venue, the row ids received since that venue's latest aggregate: which rows the next
+# aggregate's publish republished. Arrival order, not receipt time, so a wall-clock step (an NTP
+# correction) can never make a just-republished row look older than the aggregate before it.
+_REPUBLISHED_SINCE_PLAN: dict[str, set[str]] = {}
+
+# The venue of an aggregate without `venue`: only dYdX published one before Story 29.2.
+LEGACY_PLAN_VENUE = "DYDX"
+
+# The section a row whose id has no venue suffix is grouped under; nothing can control it.
+UNKNOWN_VENUE = "UNKNOWN"
 
 # collector.py's _status_loop publishes on its own liquidity_check_seconds cadence
 # (default 1800s) *plus* immediately after any control action -- a row is only
@@ -48,13 +67,39 @@ _LATEST_UNPINNED_IDS: list[str] = []
 _STATUS_STALE_SECONDS: float = 3600.0
 
 
+def _handle_plan_message(message: dict) -> None:
+    ids = message["unpinned_ids"]
+    venue = message.get("venue", LEGACY_PLAN_VENUE)
+    well_formed = isinstance(ids, list) and all(isinstance(i, str) for i in ids)
+    if not (well_formed and isinstance(venue, str) and venue):
+        logger.warning("collector:status plan aggregate malformed, ignoring: %r", message)
+        return
+    if venue in _LATEST_PLANS:
+        _drop_rows_not_republished(venue, _REPUBLISHED_SINCE_PLAN.get(venue, set()))
+    _REPUBLISHED_SINCE_PLAN[venue] = set()
+    _LATEST_PLANS[venue] = message
+    _PLAN_RECEIVED_AT[venue] = time.time()
+
+
+def _drop_rows_not_republished(venue: str, republished: set[str]) -> None:
+    """
+    Drop `venue`'s rows not republished since its previous aggregate: every publish sends all of a
+    plan's rows and then its aggregate, as one uninterrupted burst (`StatusPublisher.publish`
+    serializes its publishes), so such a row left the plan without a tombstone -- a static plan
+    edited and its collector restarted, or a stop missed while this TUI was down.
+    Known limit: a listener that reconnects in the middle of a publish drops the rows it missed
+    until the next one (a republish within `STATUS_CHANGE_POLL_SECONDS` of a change, else at the
+    full cadence); upgrade path: a per-publish sequence number on every message.
+    """
+    for iid in [i for i in _LATEST_COLLECTOR_STATUS if venue_of_row(i) == venue]:
+        if iid not in republished:
+            _LATEST_COLLECTOR_STATUS.pop(iid, None)
+            _LATEST_RECEIVED_AT.pop(iid, None)
+
+
 def _handle_status_message(message: dict) -> None:
     if "unpinned_ids" in message:
-        ids = message["unpinned_ids"]
-        if isinstance(ids, list) and all(isinstance(i, str) for i in ids):
-            _LATEST_UNPINNED_IDS[:] = ids
-        else:
-            logger.warning("collector:status unpinned_ids message malformed, ignoring: %r", message)
+        _handle_plan_message(message)
         return
 
     iid = message.get("id")
@@ -66,9 +111,11 @@ def _handle_status_message(message: dict) -> None:
         # up to _STATUS_STALE_SECONDS for is_stale() to notice it stopped republishing.
         _LATEST_COLLECTOR_STATUS.pop(iid, None)
         _LATEST_RECEIVED_AT.pop(iid, None)
+        _REPUBLISHED_SINCE_PLAN.get(venue_of_row(iid), set()).discard(iid)
         return
     _LATEST_COLLECTOR_STATUS[iid] = message
     _LATEST_RECEIVED_AT[iid] = time.time()
+    _REPUBLISHED_SINCE_PLAN.setdefault(venue_of_row(iid), set()).add(iid)
 
 
 def is_stale(instrument_id: str, now: float | None = None) -> bool:
@@ -78,6 +125,60 @@ def is_stale(instrument_id: str, now: float | None = None) -> bool:
     if now is None:
         now = time.time()
     return (now - received_at) > _STATUS_STALE_SECONDS
+
+
+def plan_is_stale(venue: str, now: float | None = None) -> bool:
+    """Return whether `venue`'s aggregate is missing or older than `_STATUS_STALE_SECONDS`."""
+    received_at = _PLAN_RECEIVED_AT.get(venue, 0.0)
+    if received_at == 0.0:
+        return True
+    if now is None:
+        now = time.time()
+    return (now - received_at) > _STATUS_STALE_SECONDS
+
+
+def venue_of_row(instrument_id: str) -> str:
+    """Return the row's venue from its id suffix (SIGNAL-01), `UNKNOWN_VENUE` if it has none."""
+    try:
+        return venue_of(instrument_id)
+    except MalformedInstrumentId:
+        return UNKNOWN_VENUE
+
+
+def plan_cap(venue: str) -> int | None:
+    """Return `venue`'s published cap, or None when unknown (no aggregate, or an older one)."""
+    cap = _LATEST_PLANS.get(venue, {}).get("cap")
+    return cap if isinstance(cap, int) and not isinstance(cap, bool) else None
+
+
+def collected_count(venue: str) -> int:
+    """Return how many rows (collected or pending) `venue` has: what its cap counts."""
+    return sum(1 for iid in _LATEST_COLLECTOR_STATUS if venue_of_row(iid) == venue)
+
+
+def command_refusal(venue: str) -> str | None:
+    """
+    Return why `venue`'s plan cannot take a `collector:control` command, or None if it can.
+
+    Known limit: `collector:control` carries no venue, so every listening `ControlService` acts on
+    a command. That is safe only while dYdX is the one plan with `accepts_commands` (its
+    `CollectionPlan.add` does not check an id's venue); upgrade path: Story 29.4's venue field on
+    `collector:control`, read by each venue's control loop.
+
+    `collector:control` carries no venue, so only a plan whose aggregate says
+    `accepts_commands` is driven from here. An aggregate without that key (a pre-29.2
+    producer), or none yet, keeps the pre-story contract: only dYdX accepts commands.
+    """
+    if venue == UNKNOWN_VENUE:
+        return "unknown venue: the id has no venue suffix"
+    plan = _LATEST_PLANS.get(venue)
+    if plan is None:
+        return (
+            None if venue == LEGACY_PLAN_VENUE else f"waiting for {venue} plan on collector:status"
+        )
+    if plan.get("accepts_commands", venue == LEGACY_PLAN_VENUE) is True:
+        return None
+    return f"{venue}: static plan: edit platform/capture/venues/{venue.lower()}/config.toml"
 
 
 async def publish_control(redis_url: str, action: str, instrument_id: str | None = None) -> None:

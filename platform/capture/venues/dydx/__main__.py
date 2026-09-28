@@ -178,7 +178,7 @@ def build_capture_from_file(config_path: Path = CONFIG_PATH) -> CaptureService:
 
     def control_plane(capture: CaptureService) -> tuple[Callable[[], Awaitable[None]], ...]:
         markets = DydxMarkets(config.network)
-        status = StatusPublisher(capture, RedisStatusBus(redis_url), markets)
+        status = StatusPublisher(capture, RedisStatusBus(redis_url), markets, accepts_commands=True)
         store = TomlPlanStore(config_path, VENUE)
         control = ControlService(plan, store, capture, status, markets)
         return (

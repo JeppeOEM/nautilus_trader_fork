@@ -235,6 +235,11 @@ class CaptureStatus:
     planned that are still subscribed because their unsubscribe failed (retried) -- they hold venue
     wire slots the plan's cap cannot see. Built by `CaptureService.capture_status()` from its own sets
     at one instant; the counters are copies, so a reader cannot mutate capture's state.
+
+    `last_applied` is the most recent `apply`'s result (startup or command), `None` before the
+    first, and `last_applied_ns` its wall-clock time (0 before the first). It is history, not the
+    live truth: an id it lists as failed may since have been subscribed by the retry loop, which
+    `pending` reflects.
     """
 
     applied: frozenset[str]
@@ -242,3 +247,5 @@ class CaptureStatus:
     last_book_update_ns: Mapping[str, int]
     trade_backfill: Mapping[str, int]
     lingering: frozenset[str] = frozenset()
+    last_applied: Applied | None = None
+    last_applied_ns: int = 0

@@ -19,14 +19,15 @@ start view: live per-bot PnL/status rows, per-row stale badges, `s` start/stop w
 footer-echo confirmation), a full-screen Bot-detail view (live-snapshot header,
 left/right- (or h/l-) stepped trades blotter + PnL sparkline sourced from Story 4.6's
 bots:history:* keys, `o` dashboard deep-link), a
-Collector pane (Story 6.1: every currently-collected dYdX instrument -- always pinned,
+Collector pane (Story 6.1: every currently-collected instrument -- always pinned,
 there is no "collected but not pinned" state -- with liquid status, `p` to unpin (stop
 + add to config.exclude) and `x` to stop (don't exclude), both behind the same
 type-to-confirm guard as Bots-pane's `s`, `:start <ID>`/`:pintop` command-bar actions to
 pin one coin by name or fill empty slots with the current top-by-volume coins -- all
 published to collector:control, read back via collector:status; since Story 25.1b its last
-line is the nightly archive maintenance, read-only from archive:status), and `esc`/`:q`
-navigation.
+line is the nightly archive maintenance, read-only from archive:status; since Story 29.2
+one section per venue, the actions refused with the reason on a venue whose plan does not
+accept commands), and `esc`/`:q` navigation.
 
 The TUI is a control surface for bots and the collector only (Story 25.1a, operator
 decision 2026-09-26): rankings, the ranking-mode switch and the single-coin view are
@@ -110,13 +111,6 @@ _FOOTER_HINT_TEXTS = {
     "help": _HELP_FOOTER_HINT_TEXT,
 }
 
-# This collector's own operating cap (Story 6.1) -- must match capture/venues/dydx/
-# config.py's DYDX_MAX_COLLECTED_INSTRUMENTS. Duplicated rather than imported: bot_tui
-# and capture are separate module boundaries (platform/CLAUDE.md DESIGN-02),
-# coordinating only via Redis, never by importing each other's internals. This is a
-# client-side check for instant feedback only -- the collector re-validates regardless.
-_MAX_COLLECTED_INSTRUMENTS = 29
-
 # Read-only bind mount of bots/strategies/dummy.py (docker-compose.yml's bot_tui service) -- the
 # `v` key's only way to reach the strategy's source, since bot_tui's own image
 # (collector.dockerfile) never COPYs bots/ in (AD-8's module isolation stays
@@ -155,6 +149,13 @@ BOT DETAIL
   esc        back to bots
 
 COLLECTOR PANE (:data)
+  One section per venue (dYdX, Bybit, Hyperliquid), headed
+  "<VENUE>: N collected +P pending · cap C", then its last apply (what the collector
+  last subscribed, unsubscribed or failed), its rows ("pending" = planned, not yet
+  subscribed) and its "unpinned" line. "~" marks a stale row or section.
+  Only a venue whose plan accepts commands (today: dYdX) can be changed here. On the
+  others (Bybit, Hyperliquid: a static plan) p, x and :start are refused with the
+  reason -- edit that venue's config.toml and restart its collector instead.
   Every action here writes straight through to config.toml on the collector -- it's
   the permanent record of what's collected, and it's what the collector re-reads if
   it restarts. Nothing here is temporary or TUI-only. Every currently-collected
@@ -168,16 +169,16 @@ COLLECTOR PANE (:data)
                    exclude it (asks for confirmation)
   :start <ID>      pin a coin by name: adds it if new, or re-adds it if it's in the
                    unpinned/excluded list -- either way it starts collecting,
-                   pinned, immediately (rejected past the 29-coin cap)
-  :pintop          fill every empty collector slot (up to the 29-coin cap) with the
+                   pinned, immediately (rejected past the venue's cap)
+  :pintop          fill every empty dYdX slot (up to dYdX's cap) with the
                    current top-by-volume coins not already collected, pinned
                    immediately -- never removes or replaces an existing coin, and
                    never re-adds a coin you've explicitly unpinned (that only ever
                    happens via :start <ID>)
   esc              back
 
-  The "unpinned" list at the bottom of this pane is config.exclude as a whole -- it
-  shows any excluded id, whether it got there via p or a hand-edit of config.toml.
+  A venue's "unpinned" line is its config.exclude as a whole -- it shows any
+  excluded id, whether it got there via p or a hand-edit of config.toml.
   The last line is the nightly archive maintenance (archive:status): the last run's
   day, outcome (ok / findings / FAILED with the failing steps) and times, or the
   running job, and the next run; "~" marks it stale. Run it now from the web UI."""
@@ -263,6 +264,29 @@ def _parse_collector_command(text: str) -> tuple[str, str | None] | None:
     return None
 
 
+def _collector_command_refusal(action: str, instrument_id: str | None) -> str | None:
+    """
+    Return why a `:start <ID>`/`:pintop` must not be published, or None to publish it.
+
+    `:start` targets its id's venue; `:pintop` carries no id and only dYdX's plan can pin by
+    liquidity. The cap check is instant feedback against the venue's published cap (skipped
+    while unknown) -- the collector refuses past its cap regardless.
+    """
+    venue = (
+        collector_state.LEGACY_PLAN_VENUE
+        if instrument_id is None
+        else collector_state.venue_of_row(instrument_id)
+    )
+    target = "pintop" if instrument_id is None else f"{action} {instrument_id}"
+    refusal = collector_state.command_refusal(venue)
+    if refusal is not None:
+        return f"cannot {target}: {refusal}"
+    cap = collector_state.plan_cap(venue)
+    if action == "start" and cap is not None and collector_state.collected_count(venue) >= cap:
+        return f"cannot {target}: at {cap}-instrument cap"
+    return None
+
+
 def _pop_view(current_view: str, stack: list[str]) -> tuple[str, list[str]]:
     """Esc pops back exactly one level; never raises, no-ops at the root (AC4)."""
     if not stack:
@@ -307,6 +331,19 @@ class _SelectableCollectorRow(urwid.Text):
 
     def keypress(self, size: object, key: str) -> str:
         return key
+
+
+def _focused_collector_id(body: urwid.Widget) -> str | None:
+    """Return the id of the Collector ListBox's focused row; None on a section line or no list."""
+    if not isinstance(body, urwid.ListBox):
+        return None
+    focus_widget = body.focus
+    if not isinstance(focus_widget, urwid.AttrMap):
+        return None
+    row = focus_widget.original_widget
+    if not isinstance(row, _SelectableCollectorRow):
+        return None
+    return row.instrument_id
 
 
 class BotTuiApp:
@@ -481,31 +518,28 @@ class BotTuiApp:
         production: this was exactly the reported bug.
         """
         statuses = collector_state._LATEST_COLLECTOR_STATUS
+        plans = collector_state._LATEST_PLANS
         archive_line = collector_pane.format_archive_line(
             archive_state._LATEST_ARCHIVE_STATUS,
             dt.datetime.now(dt.UTC),
             stale=archive_state.is_stale(),
         )
-        if not statuses:
+        if not statuses and not plans:
             self._set_collector_filler(f"{collector_pane.COLD_OPEN_TEXT}\n\n{archive_line}")
             return
 
-        rows = collector_pane.collector_rows(statuses)
-        widgets = [
-            self._build_collector_row_widget(row, collector_state.is_stale(row["id"]))
-            for row in rows
-        ]
-        unpinned_line = collector_pane.format_unpinned_line(collector_state._LATEST_UNPINNED_IDS)
-        if unpinned_line:
-            # Plain, non-selectable urwid.Text -- ListBox never lands focus on it (same
-            # precedent as _SelectableBotRow's docstring), so _highlighted_collector_id
-            # only ever sees a real _SelectableCollectorRow.
+        widgets: list[urwid.Widget] = []
+        for section in collector_pane.venue_sections(statuses, plans):
+            widgets.extend(self._build_collector_section_widgets(section))
             widgets.append(urwid.Text(""))
-            widgets.append(urwid.Text(unpinned_line))
-        # Same non-selectable trailing-Text rule as the unpinned line; always shown, so a
-        # missing archive service reads "no status yet" rather than nothing.
-        widgets.append(urwid.Text(""))
+        # Same non-selectable Text rule as the section lines; always shown, so a missing
+        # archive service reads "no status yet" rather than nothing.
         widgets.append(urwid.Text(archive_line))
+        # Taken before the walker changes: a section line appearing or vanishing above the
+        # focused row shifts every row below it, so focus follows the id, not the position.
+        focused_id = (
+            _focused_collector_id(self._collector_body) if self._collector_shape == "rows" else None
+        )
         if self._collector_shape != "rows":
             self._collector_body = urwid.ListBox(urwid.SimpleListWalker(widgets))
             self._collector_shape = "rows"
@@ -513,6 +547,60 @@ class BotTuiApp:
             listbox = self._collector_body
             assert isinstance(listbox, urwid.ListBox)
             listbox.body[:] = widgets  # type: ignore[index]
+        self._keep_collector_focus_on_a_row(focused_id)
+
+    def _build_collector_section_widgets(
+        self, section: collector_pane.VenueSection
+    ) -> list[urwid.Widget]:
+        """
+        One venue's widgets: the header, the last-apply and refusal-reason lines, the rows and
+        the unpinned line. Everything but a row is a plain, non-selectable urwid.Text, so
+        ListBox's own up/down never lands on it (same precedent as _SelectableBotRow's
+        docstring).
+        """
+        venue = section.venue
+        stale_plan = section.plan is not None and collector_state.plan_is_stale(venue)
+        lines = [
+            collector_pane.format_section_header(section, stale_plan),
+            collector_pane.format_last_apply_line(section.plan),
+            collector_state.command_refusal(venue) or "",
+        ]
+        widgets: list[urwid.Widget] = [urwid.Text(line) for line in lines if line]
+        show_liquidity = collector_pane.shows_liquidity(venue, section.plan)
+        for row in section.rows:
+            stale = collector_state.is_stale(row["id"])
+            widgets.append(self._build_collector_row_widget(row, stale, show_liquidity))
+        unpinned = (section.plan or {}).get("unpinned_ids", [])
+        unpinned_line = collector_pane.format_unpinned_line(unpinned)
+        if unpinned_line:
+            widgets.append(urwid.Text(unpinned_line))
+        return widgets
+
+    def _keep_collector_focus_on_a_row(self, focused_id: str | None = None) -> None:
+        """
+        Keep the ListBox's focus on the row of `focused_id` (the row focused before the
+        refresh) wherever it moved, so a refresh never silently moves `p`/`x` to another
+        instrument. Once that row is gone (a stop, an unpin, a sweep), focus lands on whichever
+        row now holds its position, possibly another venue's; `p`/`x` still name the id in their
+        confirm prompt. A focus resting on a section line moves onto a row: a fresh ListBox starts
+        on the first header, and `p`/`x` would then silently act on nothing. The nearest row at or
+        below the position wins, else the last one above it; no rows, no move.
+        """
+        listbox = self._collector_body
+        assert isinstance(listbox, urwid.ListBox)
+        walker = listbox.body
+        for i, widget in enumerate(walker):
+            row = widget.original_widget if isinstance(widget, urwid.AttrMap) else None
+            if isinstance(row, _SelectableCollectorRow) and row.instrument_id == focused_id:
+                listbox.focus_position = i
+                return
+        position = listbox.focus_position
+        if isinstance(walker[position], urwid.AttrMap):
+            return
+        rows = [i for i, w in enumerate(walker) if isinstance(w, urwid.AttrMap)]
+        if rows:
+            below = [i for i in rows if i > position]
+            listbox.focus_position = below[0] if below else rows[-1]
 
     def _set_collector_filler(self, text: str) -> None:
         if self._collector_shape != "cold_open":
@@ -525,24 +613,20 @@ class BotTuiApp:
         assert isinstance(filler, urwid.Filler)
         filler.original_widget.set_text(text)
 
-    def _build_collector_row_widget(self, row: dict, stale: bool) -> urwid.Widget:
-        markup = collector_pane.format_collector_line(row, stale)
+    def _build_collector_row_widget(
+        self, row: dict, stale: bool, show_liquidity: bool
+    ) -> urwid.Widget:
+        markup = collector_pane.format_collector_line(row, stale, show_liquidity)
         return urwid.AttrMap(
             _SelectableCollectorRow(markup, instrument_id=row["id"]), None, focus_map="focus"
         )
 
     def _highlighted_collector_id(self) -> str | None:
-        """Mirrors _highlighted_bot_id's read-the-ListBox's-own-focus pattern."""
-        body = self._body.original_widget
-        if not isinstance(body, urwid.ListBox):
-            return None
-        focus_widget = body.focus
-        if focus_widget is None:
-            return None
-        assert isinstance(focus_widget, urwid.AttrMap)
-        row = focus_widget.original_widget
-        assert isinstance(row, _SelectableCollectorRow)
-        return row.instrument_id
+        """
+        Mirrors _highlighted_bot_id's read-the-ListBox's-own-focus pattern; None when the
+        focus rests on a section line rather than an instrument row.
+        """
+        return _focused_collector_id(self._body.original_widget)
 
     def _build_bot_row_widget(self, row: dict, stale: bool, now: float) -> urwid.Widget:
         # Color applied only to the PnL segment (sign, not magnitude) -- "fixed position +
@@ -778,10 +862,21 @@ class BotTuiApp:
 
     def _toggle_pin(self) -> None:
         # Every listed row is pinned by definition (Story 6.1) -- p always means unpin.
+        self._confirm_row_action("unpin")
+
+    def _confirm_row_action(self, action: str) -> None:
+        """
+        Open the type-to-confirm guard for `action` on the focused row -- unless its venue's
+        plan cannot take commands, when the footer shows why and nothing opens or publishes.
+        """
         instrument_id = self._highlighted_collector_id()
         if instrument_id is None:
             return
-        self._open_collector_confirm("unpin", instrument_id)
+        refusal = collector_state.command_refusal(collector_state.venue_of_row(instrument_id))
+        if refusal is not None:
+            self._footer_hint.set_text(f"cannot {action} {instrument_id}: {refusal}")
+            return
+        self._open_collector_confirm(action, instrument_id)
 
     # Verb shown in the confirm prompt for each collector action -- "stop" and "unpin"
     # are also the exact word the operator must type, so this only supplies the extra
@@ -817,7 +912,9 @@ class BotTuiApp:
     def _submit_collector_confirm(self) -> None:
         action = self._collector_confirm_action
         instrument_id = self._collector_confirm_id
-        assert action is not None and instrument_id is not None  # only while confirm active
+        # Both are set only while the confirm is active.
+        assert action is not None
+        assert instrument_id is not None
         text = self._stop_confirm_edit.edit_text.strip().lower()
         if text != action:
             verb = self._COLLECTOR_CONFIRM_VERBS[action]
@@ -827,6 +924,12 @@ class BotTuiApp:
             self._stop_confirm_edit.set_edit_text("")
             return
         self._close_collector_confirm()
+        # Re-checked: the venue's aggregate may have withdrawn `accepts_commands` while the
+        # operator was typing.
+        refusal = collector_state.command_refusal(collector_state.venue_of_row(instrument_id))
+        if refusal is not None:
+            self._footer_hint.set_text(f"cannot {action} {instrument_id}: {refusal}")
+            return
         self._publish_collector_action(action, instrument_id)
 
     def _handle_command_bar_key(self, key: str) -> None:
@@ -981,13 +1084,9 @@ class BotTuiApp:
         parsed = _parse_collector_command(text)
         if parsed is not None:
             action, instrument_id = parsed
-            if action == "start" and len(collector_state._LATEST_COLLECTOR_STATUS) >= (
-                _MAX_COLLECTED_INSTRUMENTS
-            ):
-                self._command_edit.set_caption(
-                    f"cannot start {instrument_id}: at {_MAX_COLLECTED_INSTRUMENTS}-instrument "
-                    "cap\n:"
-                )
+            refusal = _collector_command_refusal(action, instrument_id)
+            if refusal is not None:
+                self._command_edit.set_caption(f"{refusal}\n:")
                 self._command_edit.set_edit_text("")
                 return
             self._publish_collector_action(action, instrument_id)
@@ -1073,9 +1172,7 @@ class BotTuiApp:
         if key == "p":
             self._toggle_pin()
         elif key == "x":
-            instrument_id = self._highlighted_collector_id()
-            if instrument_id is not None:
-                self._open_collector_confirm("stop", instrument_id)
+            self._confirm_row_action("stop")
 
     def _handle_bot_detail_key(self, key: str) -> None:
         # Extracted from _handle_global_key: keeps each dispatch function under this

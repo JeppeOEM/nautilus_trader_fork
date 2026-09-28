@@ -32,6 +32,9 @@ from pathlib import Path
 from candles.application.prune import loop as candle_prune_loop
 from candles.application.sink import CandleSink
 from candles.infrastructure.sqlite_store import store_from_env
+from collection_control.application.status import STATIC_PLAN_STATUS_SECONDS
+from collection_control.application.status import StatusPublisher
+from collection_control.infrastructure.redis import RedisStatusBus
 
 from capture.application import sites
 from capture.application.capture_service import CaptureService
@@ -98,12 +101,22 @@ def build_capture(config: BybitConfig, plan_ids: Iterable[str]) -> CaptureServic
 def build_capture_from_file(config_path: Path = CONFIG_PATH) -> CaptureService:
     """
     Composition root: the config and the static plan through the one loader; the plan is applied
-    once at start through `CaptureService.apply` (Bybit has no live control plane, Story 25.4).
+    once at start through `CaptureService.apply`. Bybit has no live control plane (Story 25.4;
+    Story 29.4 adds one), so the only collection-control loop wired is `collector:status` over the
+    static plan (Story 29.2), published with `accepts_commands` false so `bot_tui` shows the plan
+    read-only. The plan has no liquidity threshold, so the publisher needs no markets source.
     """
     config, plan = load_venue_config(config_path, VENUE)
     if not isinstance(config, BybitConfig):
         raise TypeError(f"the BYBIT loader returned {type(config).__name__}, not BybitConfig")
-    return build_capture(config, plan.collected)
+    capture = build_capture(config, plan.collected)
+    status = StatusPublisher(
+        capture, RedisStatusBus(redis_url_from_env()), None, accepts_commands=False
+    )
+    capture.add_loops(
+        functools.partial(status.loop, lambda: plan, STATIC_PLAN_STATUS_SECONDS),
+    )
+    return capture
 
 
 if __name__ == "__main__":
