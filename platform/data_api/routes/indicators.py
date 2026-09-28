@@ -77,6 +77,8 @@ class IndicatorCatalogEntry(BaseModel):
     params: dict[str, Any]
     panel: str
     category: str
+    # Enum param -> its allowed member names (the picker's dropdown); `{}` for custom entries.
+    choices: dict[str, list[str]] = {}
 
 
 @router.get("/api/indicators/catalog")

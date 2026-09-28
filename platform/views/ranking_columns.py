@@ -24,10 +24,11 @@ reader was bot_tui's Coins pane (deleted, rankings are web-only), and the web ta
 coloured cells from them.
 
 The Technicals tab's per-coin values are the same kind of read model (Story 24.2 moved them out of
-`data_api/routes/rankings.py`): `technicals_values` gives each requested column's latest value for
-one instrument through the chart's own indicator dispatch (`views.indicator_picker`), over candles
+`data_api/routes/rankings.py`): `technicals_values` gives each requested column's value at the latest
+closed bar (Story 27.7: a still-forming newest bucket is left out) for one
+instrument through the chart's own indicator dispatch (`views.indicator_picker`), over candles
 from the candle store's query service, else the archive's one seconds -> bars fold -- so a column
-always equals what that coin's chart shows. It computes no indicator and no ranking metric itself.
+always equals what that coin's chart shows at that bar. It computes no indicator and no ranking metric itself.
 """
 
 from collections.abc import Callable
@@ -182,24 +183,52 @@ def technicals_values(
     candles_dir: str,
 ) -> dict[str, float | None]:
     """
-    Each requested indicator's latest value for one instrument, keyed `"{entry index}.{output}"`,
-    via the chart's own `replay_entry` dispatch, each entry over its own column's timeframe (no
-    indicator math here). Candles are built once per distinct bar size.
+    Each requested indicator's value at the latest *closed* bar for one instrument, keyed
+    `"{entry index}.{output}"`, via the chart's own `replay_entry` dispatch, each entry over its own
+    column's timeframe (no indicator math here). Candles are built once per distinct bar size.
 
-    A timeframe with no data, or whose newest candle is older than
+    Closed bars only (Story 27.7): the candle store's newest bucket is normally the forming one
+    (the capture sink upserts it every flush), so a newest candle whose bucket `[t, t + bar)` has
+    not closed at `now_ns` is dropped before the replay (`_closed_candles`). One rule for every
+    column: a candlestick pattern fired on a forming bar could vanish a flush later, and an RSI on
+    it would move under the reader.
+
+    Known limit: "closed" is wall-clock only. Capture upserts seconds every flush (60 s by
+    default), so for up to one flush after a bucket closes its last seconds may not be stored yet,
+    and a value read then can still change once they land (a transient repaint, then cached for
+    the technicals TTL). Upgrade path: close a bucket only once a capture watermark (the newest
+    flushed second) has passed its end, rather than `now_ns`.
+
+    A timeframe with no data, or whose newest closed candle is older than
     `_TECHNICALS_MAX_CANDLE_AGE_BARS` bars, contributes nothing: an honest gap, never a stale value
     shown as current (DATA-01). Raises `CatalogReadError` for a failed read, and `ValueError` when
     an entry's replay fails (bad params are client input).
     """
     keyed: dict[str, float | None] = {}
     for bar_seconds in sorted({e.bar_seconds for e in entries}):
-        candles = _recent_candles(instrument_id, bar_seconds, now_ns, catalog_path, candles_dir)
+        candles = _closed_candles(
+            _recent_candles(instrument_id, bar_seconds, now_ns, catalog_path, candles_dir),
+            bar_seconds,
+            now_ns,
+        )
         max_age_ms = _TECHNICALS_MAX_CANDLE_AGE_BARS * bar_seconds * 1000
         if not candles or now_ns // 1_000_000 - candles[-1]["t"] > max_age_ms:
             continue  # no data / stopped: an honest gap, never a stale value shown as current (DATA-01)
         group = [(i, e) for i, e in enumerate(entries) if e.bar_seconds == bar_seconds]
         keyed.update(_latest_of_group(instrument_id, bar_seconds, candles, group))
     return keyed
+
+
+def _closed_candles(candles: list[dict], bar_seconds: int, now_ns: int) -> list[dict]:
+    """
+    Return `candles` (oldest first) without every candle whose bucket has not closed at `now_ns`.
+
+    Normally only the newest bucket is still forming, but the store is read unbounded above
+    (`_recent_candles`), so a capture clock ahead of this host's by more than a bar leaves several
+    unclosed candles; each is dropped, never only the last.
+    """
+    bar_ns = bar_seconds * 1_000_000_000
+    return [c for c in candles if c["t"] * 1_000_000 + bar_ns <= now_ns]
 
 
 def _latest_of_group(

@@ -22,6 +22,16 @@ describe("buildGroups", () => {
     expect(groups[0].attrs).toEqual([]);
   });
 
+  it("gives a CandlePattern column its one value output, whatever the sign (Story 27.7)", () => {
+    const pattern = { name: "CandlePattern", params: { pattern: "HAMMER" }, category: "native", bar_seconds: 60 };
+    const groups = buildGroups([rsi, pattern], {
+      "BTC-USD-PERP.DYDX": { "0.value": 55, "1.value": 100 },
+      "ETH-USD-PERP.DYDX": { "0.value": 40, "1.value": -100 },
+      "SOL-USD-PERP.DYDX": { "0.value": 50, "1.value": 0 },
+    });
+    expect(groups[1]).toEqual({ entryIndex: 1, entry: pattern, attrs: ["value"] });
+  });
+
   it("has no attrs before any values arrive", () => {
     expect(buildGroups([rsi], undefined)[0].attrs).toEqual([]);
   });

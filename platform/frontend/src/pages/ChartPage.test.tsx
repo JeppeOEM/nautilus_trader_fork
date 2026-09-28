@@ -18,6 +18,12 @@ vi.mock("../api/client", () => ({
     SimpleMovingAverage: { params: {}, panel: "overlay", category: "native" },
     RelativeStrengthIndex: { params: {}, panel: "oscillator", category: "native" },
     CancelPressure: { params: {}, panel: "histogram", category: "custom" },
+    CandlePattern: {
+      params: { pattern: "ENGULFING", trend_bars: 3 },
+      panel: "histogram",
+      category: "native",
+      choices: { pattern: ["DOJI", "HAMMER", "ENGULFING"] },
+    },
   }),
 }));
 
@@ -126,6 +132,7 @@ const render = (ui: ReactElement) =>
   ui.type === MemoryRouter ? rtlRender(ui) : rtlRender(ui, { wrapper: MemoryRouter });
 // Imported after the mocks above so ChartPage picks up the mocked client/hooks/chart.
 const { default: ChartPage } = await import("./ChartPage");
+const { fetchCoinIndicatorConfig } = await import("../api/client");
 const page = () => (
   <MemoryRouter>
     <ChartPage />
@@ -296,6 +303,34 @@ describe("ChartPage default layout and per-coin persistence", () => {
     expect(lastChartProps.current?.panes?.find((p) => p.id === "volume")).toMatchObject({ groupLabel: "Volume" });
   });
 
+  it("offers a CandlePattern's pattern as a dropdown of the catalog's choices and draws it as a histogram", async () => {
+    const entry = { name: "CandlePattern", params: { pattern: "ENGULFING", trend_bars: 3 }, category: "native" };
+    vi.mocked(fetchCoinIndicatorConfig).mockResolvedValueOnce([entry]);
+    picker.values = { "CandlePattern_pattern=ENGULFING,trend_bars=3.value": [] };
+    render(page());
+    await act(async () => {}); // catalog + saved config
+
+    const select = screen.getByLabelText<HTMLSelectElement>(/pattern/);
+    expect(select.tagName).toBe("SELECT");
+    expect(Array.from(select.options).map((o) => o.value)).toEqual(["DOJI", "HAMMER", "ENGULFING"]);
+    expect(select.value).toBe("ENGULFING");
+    expect(screen.getByLabelText(/trend_bars/).tagName).toBe("INPUT"); // no choices: a text field
+
+    fireEvent.change(select, { target: { value: "HAMMER" } });
+    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+    await act(async () => {});
+
+    expect(saveConfigMock).toHaveBeenCalledWith("BTC-USD-PERP.DYDX", [
+      { ...entry, params: { pattern: "HAMMER", trend_bars: 3 } },
+    ]);
+    const byId = Object.fromEntries((lastChartProps.current?.panes ?? []).map((p) => [p.id, p]));
+    expect(byId["CandlePattern_pattern=ENGULFING,trend_bars=3.value"]).toMatchObject({
+      kind: "Histogram",
+      placement: "pane",
+      group: "CandlePattern",
+    });
+  });
+
   it("persists placed horizontal lines per coin across a remount", () => {
     const first = render(page());
     fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
@@ -390,7 +425,7 @@ describe("ChartPage indicators dialog (spec A4.1)", () => {
   it("opens a searchable dialog from the Indicators button", async () => {
     const dialog = await openDialog();
 
-    expect(within(dialog).getAllByRole("listitem")).toHaveLength(3);
+    expect(within(dialog).getAllByRole("listitem")).toHaveLength(4);
     fireEvent.change(within(dialog).getByLabelText("Search indicators"), { target: { value: "rela" } });
     expect(within(dialog).getAllByRole("listitem")).toHaveLength(1);
     expect(within(dialog).getByText("RelativeStrengthIndex")).toBeInTheDocument();
@@ -403,7 +438,7 @@ describe("ChartPage indicators dialog (spec A4.1)", () => {
     expect(within(dialog).getAllByRole("listitem").map((li) => li.textContent)).toEqual(["SimpleMovingAverageoverlay"]);
 
     fireEvent.click(within(dialog).getByRole("button", { name: "Oscillators" }));
-    expect(within(dialog).getAllByRole("listitem")).toHaveLength(2);
+    expect(within(dialog).getAllByRole("listitem")).toHaveLength(3);
   });
 
   it("adds a result immediately with default params -- no confirm step -- and marks it added", async () => {

@@ -1,6 +1,9 @@
 /** True when `raw` is a well-formed replacement for a `previous`-typed param -- what
- * `coerceParamValue` would otherwise silently swallow by keeping the prior value. */
-export function isValidParamText(previous: unknown, raw: string): boolean {
+ * `coerceParamValue` would otherwise silently swallow by keeping the prior value. With the
+ * catalog's `choices` for this param (an enum's member names, Story 27.7) only one of them is
+ * valid: the backend resolves the name to its enum and would reject any other. */
+export function isValidParamText(previous: unknown, raw: string, choices?: readonly string[]): boolean {
+  if (choices !== undefined) return choices.includes(raw);
   if (typeof previous === "boolean") return ["true", "false"].includes(raw.trim().toLowerCase());
   if (typeof previous === "number") return raw.trim() !== "" && !Number.isNaN(Number(raw));
   return true;

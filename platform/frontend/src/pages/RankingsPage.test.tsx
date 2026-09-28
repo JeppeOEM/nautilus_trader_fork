@@ -303,6 +303,34 @@ describe("RankingsPage", () => {
       expect(screen.getByText("0.5000")).toBeInTheDocument();
     });
 
+    it("shows a CandlePattern column's +100 / -100 / 0 per coin (Story 27.7: the screener as a scanner)", async () => {
+      const pattern = { name: "CandlePattern", params: { pattern: "ENGULFING" }, category: "native", bar_seconds: 60 };
+      useLiveChannelMock.mockReturnValue({
+        latest: liveMessage({
+          ranks: [
+            { instrument_id: "AAA-USD-PERP.DYDX", price: 1 },
+            { instrument_id: "BBB-USD-PERP.DYDX", price: 2 },
+            { instrument_id: "CCC-USD-PERP.DYDX", price: 3 },
+          ],
+        }),
+        connected: true,
+      });
+      vi.mocked(fetchTechnicalsColumns).mockResolvedValue([pattern]);
+      vi.mocked(fetchTechnicalsValues).mockResolvedValue({
+        "AAA-USD-PERP.DYDX": { "0.value": 100 },
+        "BBB-USD-PERP.DYDX": { "0.value": -100 },
+        "CCC-USD-PERP.DYDX": { "0.value": 0 },
+      });
+
+      renderPage();
+      fireEvent.click(screen.getByText("Technicals"));
+
+      const cellOf = (iid: string) => within(screen.getByText(iid).closest("tr")!).getAllByRole("cell").at(-1);
+      await waitFor(() => expect(cellOf("AAA-USD-PERP.DYDX")).toHaveTextContent("100.0000"));
+      expect(cellOf("BBB-USD-PERP.DYDX")).toHaveTextContent("-100.0000");
+      expect(cellOf("CCC-USD-PERP.DYDX")).toHaveTextContent("0.0000");
+    });
+
     it("removes a column from its header, persisting the list without it", async () => {
       configureTechnicals();
 

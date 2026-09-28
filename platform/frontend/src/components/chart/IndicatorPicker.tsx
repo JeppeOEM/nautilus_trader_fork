@@ -190,6 +190,7 @@ export default function IndicatorPicker({
           <IndicatorEntryRow
             key={`${entry.name}:${JSON.stringify(entry.params)}`}
             entry={entry}
+            choices={catalog[entry.name]?.choices ?? {}}
             disabled={disabled}
             onRemove={() => handleRemove(index)}
             onApplyParams={(params) => handleApplyParams(index, params)}
@@ -202,11 +203,14 @@ export default function IndicatorPicker({
 
 function IndicatorEntryRow({
   entry,
+  choices,
   disabled,
   onRemove,
   onApplyParams,
 }: {
   entry: IndicatorConfigEntry;
+  /** The catalog's allowed names per enum param (Story 27.7): those params get a dropdown. */
+  choices: Record<string, string[]>;
   disabled: boolean;
   onRemove: () => void;
   onApplyParams: (params: Record<string, unknown>) => void;
@@ -222,7 +226,10 @@ function IndicatorEntryRow({
   );
   // Invalid text is shown, not silently reverted -- coerceParamValue alone would keep the
   // prior value and leave the field looking like it ignored the keystroke.
-  const invalidKeys = Object.keys(params).filter((k) => !isValidParamText(params[k], raw[k] ?? ""));
+  const invalidKeys = Object.keys(params).filter(
+    (k) => !isValidParamText(params[k], raw[k] ?? "", choices[k]),
+  );
+  const onEdit = (key: string, value: string) => setRaw((prev) => ({ ...prev, [key]: value }));
 
   return (
     <li>
@@ -230,11 +237,28 @@ function IndicatorEntryRow({
       {Object.keys(params).map((key) => (
         <label key={key}>
           {key}:
-          <input
-            value={raw[key] ?? ""}
-            aria-invalid={invalidKeys.includes(key)}
-            onChange={(e) => setRaw((prev) => ({ ...prev, [key]: e.target.value }))}
-          />
+          {choices[key] ? (
+            <select
+              value={raw[key] ?? ""}
+              aria-invalid={invalidKeys.includes(key)}
+              onChange={(e) => onEdit(key, e.target.value)}
+            >
+              {/* A saved value the catalog no longer offers stays visible (and invalid), never
+                  silently replaced by the first option. */}
+              {!choices[key].includes(raw[key] ?? "") && <option value={raw[key] ?? ""}>{raw[key]}</option>}
+              {choices[key].map((choice) => (
+                <option key={choice} value={choice}>
+                  {choice}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <input
+              value={raw[key] ?? ""}
+              aria-invalid={invalidKeys.includes(key)}
+              onChange={(e) => onEdit(key, e.target.value)}
+            />
+          )}
         </label>
       ))}
       {invalidKeys.length > 0 && <span role="alert">Invalid value for {invalidKeys.join(", ")}</span>}

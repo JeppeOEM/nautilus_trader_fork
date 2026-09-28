@@ -53,12 +53,9 @@ from research.tests.source_tree import SOURCE_TREE
 NOTEBOOKS_DIR = Path(__file__).resolve().parents[1] / "notebooks"
 RUN_SECONDS_LIMIT = 60.0
 
-# `.ipynb` with no `.py` twin -> the story whose `done` retires it (it is deleted by then).
-LEGACY_NOTEBOOKS_UNTIL: dict[str, str] = {
-    "candlestick_pattern_scanner.ipynb": (
-        "27-7-candlestick-pattern-detector-kernel-chart-screener-scanner"
-    ),
-}
+# `.ipynb` with no `.py` twin -> the story whose `done` retires it (it is deleted by then). Empty
+# since Story 27.7 deleted `candlestick_pattern_scanner.ipynb`, the last legacy notebook.
+LEGACY_NOTEBOOKS_UNTIL: dict[str, str] = {}
 
 
 def _iso(ns: int) -> str:
@@ -109,6 +106,17 @@ NOTEBOOK_ENV: dict[str, dict[str, str]] = {
         "NOTEBOOK_N_PATHS": json.dumps(200),
         "NOTEBOOK_RETURN_PERIOD_S": json.dumps(60),
         "NOTEBOOK_BLOCK_LEN": json.dumps(3),
+    },
+    # The fixture's ten minutes (not its two whole days, so the grids are the data), 1 m and 5 m
+    # bars plus a size the store does not keep (skipped with a line), an EMA that warms within the
+    # minutes, horizons the ten bars can reach, and a hit window of a few bars.
+    "06_candlestick_scanner.py": {
+        "START": _iso(DATA_START_NS),
+        "END": _iso(DATA_END_NS),
+        "NOTEBOOK_TIMEFRAMES": json.dumps([60, 300, 45]),
+        "NOTEBOOK_EMA_LEN": json.dumps(3),
+        "NOTEBOOK_HORIZONS": json.dumps([1, 2, 3]),
+        "NOTEBOOK_WINDOW_BARS": json.dumps(5),
     },
 }
 

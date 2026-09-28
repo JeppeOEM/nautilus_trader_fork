@@ -90,6 +90,7 @@ export interface IndicatorCatalogEntry {
   params: Record<string, unknown>;
   panel: string;
   category: string;
+  choices?: Record<string, string[]>;
 }
 
 export interface IndicatorConfigEntry {

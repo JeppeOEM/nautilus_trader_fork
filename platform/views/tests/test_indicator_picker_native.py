@@ -17,8 +17,17 @@ Unit tests for `views.indicator_picker`'s native half (was the `chart_indicators
 the INDICATOR_CATALOG dispatch/replay mechanism. `replay_indicator` is `replay_native`.
 """
 
+import random
+
+import pytest
+from kernel.candle_patterns import CandlePattern
+from kernel.candle_patterns import PatternName
+
 import nautilus_trader.indicators as nt_indicators
 from views.indicator_picker import INDICATOR_CATALOG
+from views.indicator_picker import _resolve_enum_params
+from views.indicator_picker import merged_catalog
+from views.indicator_picker import native_catalog_json
 from views.indicator_picker import replay_native as replay_indicator
 
 
@@ -95,6 +104,95 @@ def test_unknown_indicator_name_raises_value_error() -> None:
     except ValueError:
         raised = True
     assert raised
+
+
+# --- CandlePattern (Story 27.7): the kernel's detector through the same native path -------------
+
+
+def _walk_candles(seed: int, count: int) -> list[dict]:
+    """Return seeded random-walk candles whose opens gap off the previous close."""
+    rng = random.Random(seed)  # noqa: S311 -- a reproducible walk, not a secret
+    close = 100.0
+    candles = []
+    for i in range(count):
+        open_ = close + rng.gauss(0, 0.4)
+        close = open_ + rng.gauss(0, 1.0)
+        high = max(open_, close) + abs(rng.gauss(0, 0.5))
+        low = min(open_, close) - abs(rng.gauss(0, 0.5))
+        candles.append(_candle(i * 60_000, open_, high, low, close))
+    return candles
+
+
+@pytest.mark.parametrize("pattern", list(PatternName))
+def test_candle_pattern_replay_equals_the_kernel_detector(pattern: PatternName) -> None:
+    candles = _walk_candles(7, 400)
+    result = replay_indicator(candles, "CandlePattern", {"pattern": pattern.name})
+
+    detector = CandlePattern(pattern)
+    expected: list[float | None] = []
+    for c in candles:
+        detector.update_raw(c["o"], c["h"], c["l"], c["c"])
+        expected.append(float(detector.value) if detector.initialized else None)
+    assert result == {"value": expected}
+
+
+def test_candle_pattern_replay_by_name_gives_none_then_signed_hundreds() -> None:
+    values = replay_indicator(_walk_candles(8, 300), "CandlePattern", {"pattern": "HAMMER"})[
+        "value"
+    ]
+    assert values[:4] == [None] * 4  # 1 bar + trend_bars (3) + 1 before the first verdict
+    assert set(values[4:]) <= {-100.0, 0.0, 100.0}
+    assert 100.0 in values[4:]
+
+
+def test_the_first_bar_of_a_three_bar_pattern_replays_as_none() -> None:
+    candles = [_candle(0, 12.0, 12.1, 9.9, 10.0)]
+    assert replay_indicator(candles, "CandlePattern", {"pattern": "THREE_INSIDE_UP"}) == {
+        "value": [None]
+    }
+
+
+def test_the_pattern_param_round_trips_from_its_name_to_the_enum() -> None:
+    spec = INDICATOR_CATALOG["CandlePattern"]
+    assert spec.params["pattern"] == "ENGULFING"
+    assert _resolve_enum_params(spec, {})["pattern"] is PatternName.ENGULFING
+    assert _resolve_enum_params(spec, {"pattern": "HAMMER"})["pattern"] is PatternName.HAMMER
+    with pytest.raises(KeyError):
+        replay_indicator(_walk_candles(1, 5), "CandlePattern", {"pattern": "NOT_A_PATTERN"})
+
+
+def test_the_catalog_lists_every_enum_params_choices() -> None:
+    catalog = native_catalog_json()
+    assert catalog["CandlePattern"]["choices"] == {"pattern": [p.name for p in PatternName]}
+    assert catalog["CandlePattern"]["panel"] == "histogram"
+    assert catalog["SimpleMovingAverage"]["choices"]["price_type"][:4] == [
+        "BID",
+        "ASK",
+        "MID",
+        "LAST",
+    ]
+    assert catalog["RelativeStrengthIndex"]["choices"] == {}
+    for name, spec in INDICATOR_CATALOG.items():
+        assert set(catalog[name]["choices"]) == set(spec.enum_params), name
+        for key, names in catalog[name]["choices"].items():
+            assert spec.params[key] in names, (name, key)  # every default is one of its choices
+
+
+def test_a_moving_average_type_the_factory_cannot_build_is_neither_offered_nor_accepted() -> None:
+    assert (
+        "ADAPTIVE"
+        not in native_catalog_json()["MovingAverageConvergenceDivergence"]["choices"]["ma_type"]
+    )
+    with pytest.raises(ValueError, match="ADAPTIVE"):
+        replay_indicator(
+            _walk_candles(1, 40), "MovingAverageConvergenceDivergence", {"ma_type": "ADAPTIVE"}
+        )
+
+
+def test_the_merged_catalog_carries_the_choices_as_native() -> None:
+    entry = merged_catalog()["CandlePattern"]
+    assert entry["category"] == "native"
+    assert len(entry["choices"]["pattern"]) == len(PatternName)
 
 
 if __name__ == "__main__":

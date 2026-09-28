@@ -1668,6 +1668,17 @@
           "category": {
             "type": "string",
             "title": "Category"
+          },
+          "choices": {
+            "additionalProperties": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            "type": "object",
+            "title": "Choices",
+            "default": {}
           }
         },
         "type": "object",

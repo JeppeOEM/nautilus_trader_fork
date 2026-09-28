@@ -45,4 +45,16 @@ describe("isValidParamText", () => {
     expect(isValidParamText(true, "1")).toBe(false);
     expect(isValidParamText(true, "False")).toBe(true);
   });
+
+  it("with choices, accepts exactly one of them whatever the default's type (Story 27.7)", () => {
+    const patterns = ["DOJI", "HAMMER", "ENGULFING"];
+    expect(isValidParamText("ENGULFING", "HAMMER", patterns)).toBe(true);
+    expect(isValidParamText("ENGULFING", "hammer", patterns)).toBe(false);
+    expect(isValidParamText("ENGULFING", "THREE_LINE_STRIKE", patterns)).toBe(false);
+    expect(isValidParamText("ENGULFING", "", patterns)).toBe(false);
+  });
+
+  it("without choices, a string param stays free text", () => {
+    expect(isValidParamText("ENGULFING", "anything")).toBe(true);
+  });
 });

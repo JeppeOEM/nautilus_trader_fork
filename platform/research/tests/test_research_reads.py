@@ -71,14 +71,9 @@ FORBIDDEN_READS = frozenset(
     }
 )
 
-# File name -> the story whose `done` retires the exemption.
-LEGACY_READS_UNTIL: dict[str, str] = {
-    # Reads the retired `custom_dydx_minute_bar` directory with `pd.read_parquet` (its leading
-    # `Known limit:` cell); Story 27.7 replaces the notebook.
-    "candlestick_pattern_scanner.ipynb": (
-        "27-7-candlestick-pattern-detector-kernel-chart-screener-scanner"
-    ),
-}
+# File name -> the story whose `done` retires the exemption. Empty since Story 27.7 deleted
+# `candlestick_pattern_scanner.ipynb` (it read the retired `custom_dydx_minute_bar` directory).
+LEGACY_READS_UNTIL: dict[str, str] = {}
 
 
 def _called_name(call: ast.Call) -> str | None:

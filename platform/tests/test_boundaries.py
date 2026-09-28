@@ -806,6 +806,7 @@ KERNEL_MODULES = frozenset(
     {
         "__init__",
         "archive_markers",
+        "candle_patterns",
         "catalog_files",
         "clocks",
         "fold",

@@ -20,10 +20,13 @@ dispatch out of `data_api/routes/indicators.py`). Only the two colliding public 
 renamed: `replay_native`/`native_catalog_json` (was `chart_indicators.replay_indicator/catalog_json`)
 and `replay_custom`/`custom_catalog_json` (was `custom_indicators.replay_indicator/catalog_json`).
 
-**Native** -- dispatch/metadata over `nautilus_trader.indicators`, no indicator math of its own
+**Native** -- dispatch/metadata over OHLCV-fed `Indicator` classes: `nautilus_trader.indicators`,
+plus the kernel's own candle-fed indicators (`kernel.candle_patterns.CandlePattern`, Story 27.7:
+one pattern definition, shared by views, research and bots) -- no indicator math of its own
 (DESIGN-02). `INDICATOR_CATALOG` maps a registered name to an `IndicatorSpec` describing how to
 build and feed the real indicator class. `replay_native` instantiates it and drives it from candle
-data. Six of `nautilus_trader.indicators`'s public classes are intentionally excluded:
+data. An enum-typed param travels as its member name (`enum_params`), and `native_catalog_json`
+lists each one's allowed names as `choices`, which the picker renders as a dropdown. Six of `nautilus_trader.indicators`'s public classes are intentionally excluded:
 `Candle*`/`FuzzyCandle` are enums/value-types, not indicators; `SpreadAnalyzer` is tick-driven, not
 candle-driven; `FuzzyCandlesticks`/`Swings` produce non-float outputs that don't fit this module's
 `list[float | None]` contract.
@@ -49,6 +52,7 @@ import os
 from collections import defaultdict
 from collections.abc import Callable
 from collections.abc import Sequence
+from dataclasses import asdict
 from dataclasses import dataclass
 from dataclasses import field
 from enum import Enum
@@ -56,6 +60,9 @@ from typing import Any
 from typing import Literal
 from typing import Protocol
 
+from kernel.candle_patterns import CandlePattern
+from kernel.candle_patterns import PatternName
+from kernel.candle_patterns import Thresholds
 from kernel.indicators import trade_aggregates
 
 from nautilus_trader import indicators as _ind
@@ -320,6 +327,15 @@ INDICATOR_CATALOG: dict[str, IndicatorSpec] = {
     "VerticalHorizontalFilter": IndicatorSpec(
         _ind.VerticalHorizontalFilter, {"period": 28}, ("close",), ("value",), "oscillator"
     ),
+    # +100 bullish / -100 bearish / 0 per bar: drawn as histogram spikes (Story 27.7).
+    "CandlePattern": IndicatorSpec(
+        CandlePattern,
+        {"pattern": PatternName.ENGULFING.name, **asdict(Thresholds())},
+        ("open", "high", "low", "close"),
+        ("value",),
+        "histogram",
+        {"pattern": PatternName},
+    ),
 }
 
 
@@ -351,13 +367,29 @@ def replay_native(
     return out
 
 
+# `MovingAverageFactory.create` returns None for ADAPTIVE (it needs extra periods the factory
+# cannot take), so a `ma_type` of ADAPTIVE would fail deep in the replay as `'NoneType'.update_raw`.
+# It is left out of the picker's dropdown and rejected by name up front instead.
+_UNBUILDABLE_MEMBERS: frozenset[Enum] = frozenset({MovingAverageType.ADAPTIVE})
+
+
+def _choices(enum_type: type[Enum]) -> list[str]:
+    return [m.name for m in enum_type if m not in _UNBUILDABLE_MEMBERS]
+
+
 def _resolve_enum_params(spec: IndicatorSpec, params: dict[str, Any]) -> dict[str, Any]:
-    """Merge caller params over the spec's defaults, converting enum-name strings back to enums."""
+    """
+    Merge caller params over the spec's defaults, converting enum-name strings back to enums. An
+    unknown name raises `KeyError`; a member the replay cannot build raises `ValueError`.
+    """
     merged = {**spec.params, **params}
     for key, enum_type in spec.enum_params.items():
         value = merged.get(key)
         if isinstance(value, str):
             merged[key] = enum_type[value]
+            if merged[key] in _UNBUILDABLE_MEMBERS:
+                allowed = _choices(enum_type)
+                raise ValueError(f"{key}={value} is not supported (choose one of {allowed})")
     return merged
 
 
@@ -376,11 +408,17 @@ def _feed_values(spec: IndicatorSpec, candle: dict) -> tuple[Any, ...]:
 def native_catalog_json() -> dict[str, Any]:
     """
     `INDICATOR_CATALOG` serialized for `GET /data/indicators/catalog` -- name, params
-    with JSON-safe defaults, panel classification. The single source Story 8.4's picker
-    UI builds its list from.
+    with JSON-safe defaults, panel classification, and `choices`: every enum param's allowed
+    member names (what `_resolve_enum_params` accepts: every member the replay can build), `{}`
+    for an entry without one. The single source Story 8.4's picker UI builds its list and its
+    dropdowns from.
     """
     return {
-        name: {"params": spec.params, "panel": spec.panel}
+        name: {
+            "params": spec.params,
+            "panel": spec.panel,
+            "choices": {key: _choices(enum) for key, enum in spec.enum_params.items()},
+        }
         for name, spec in INDICATOR_CATALOG.items()
     }
 

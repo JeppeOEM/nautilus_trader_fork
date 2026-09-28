@@ -330,7 +330,7 @@ development_status:
   27-4-correlation-and-cross-venue-notebook: done
   27-5-backtest-evaluation-notebook-sweeps-and-walk-forward: done
   27-6-monte-carlo-and-robustness-notebook: done
-  27-7-candlestick-pattern-detector-kernel-chart-screener-scanner: ready-for-dev
+  27-7-candlestick-pattern-detector-kernel-chart-screener-scanner: done
   27-8-candle-pattern-strategy-backtests-and-live-paper: ready-for-dev
   27-9-closeout-research-readme-rules-legacy-notebooks-gone: ready-for-dev
   epic-27-retrospective: optional

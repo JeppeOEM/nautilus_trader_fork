@@ -69,8 +69,90 @@ so that I can scan the whole collected universe for a pattern at any timeframe, 
 
 ### Agent Model Used
 
+claude-opus-5-5 (bmad-loop dev session, 2026-09-28)
+
 ### Debug Log References
+
+- Baseline full suite before any change: 10 failed (9 Redis-dependent `data_api` tests + `ranking/tests/test_metrics_store.py::test_price_near_days_ago_returns_price_at_or_before_target_per_instrument`), 2529 passed, 1 skipped. After: the same 10 failed, 2685 passed, 3 skipped (the 2 new skips are pytest's empty-parameter-set skips of `test_legacy_notebook_exemption_expires_with_its_story` and its `test_research_reads.py` twin, whose tables this story empties).
 
 ### Completion Notes List
 
+- 22 patterns, not 23: the story's (and epics.md's) enumerated list holds 22 names (9 single-bar, 7 two-bar, 6 three-bar); the spec's "23" is a count slip. `PatternName` has exactly the 22 listed (spec Change Log).
+- Trend patterns (need `trend_bars` closes in one direction before their first bar, and `trend_bars + 1` extra warm-up bars): hammer, hanging man, inverted hammer, shooting star, morning/evening star, three white soldiers/black crows, tweezer top/bottom. Engulfing, harami, harami cross, piercing, dark cloud cover and three inside up/down do not (as TA-Lib).
+- The scanner treats a `partial` bar (under 90% of its span observed) as a NaN row, like an absent bucket: its OHLC is not the bucket's, so it resets the pattern set and EMA (as `aligned.bar_returns` blanks it).
+- `06_candlestick_scanner` on the fixture: 1.49 s in the harness (limit 60 s), under `warnings.simplefilter("error")`.
+- **TA-Lib parity check** (one-off, scratch venv outside the repo, TA-Lib 0.8.1 + numpy 2.5.3; script not committed). Data: Bybit public REST `v5/market/kline?category=linear&symbol=BTCUSDT&interval=1`, the 1440 closed 1 m bars of 2026-09-27 UTC (two requests, contiguous, no flat bar; every bar opens exactly at the previous close). Agreement = share of the 1440 bars where `sign(ours) == sign(TA-Lib)`; our value is 0 before `initialized`.
+
+  | Pattern | TA-Lib | Agree | Ours fired | TA-Lib fired | Both (same sign) |
+  |---|---|---:|---:|---:|---:|
+  | DOJI | CDLDOJI | 90.69% | 143 | 259 | 134 |
+  | DRAGONFLY_DOJI | CDLDRAGONFLYDOJI | 97.29% | 60 | 37 | 29 |
+  | GRAVESTONE_DOJI | CDLGRAVESTONEDOJI | 95.35% (96.81% by magnitude) | 51 | 37 | 0 (21 opposite sign) |
+  | HAMMER | CDLHAMMER | 94.86% | 8 | 76 | 5 |
+  | HANGING_MAN | CDLHANGINGMAN | 96.25% | 12 | 54 | 6 |
+  | INVERTED_HAMMER | CDLINVERTEDHAMMER | 99.51% | 7 | 0 | 0 |
+  | SHOOTING_STAR | CDLSHOOTINGSTAR | 99.03% | 14 | 0 | 0 |
+  | MARUBOZU | CDLMARUBOZU | 81.04% | 537 | 288 | 276 |
+  | SPINNING_TOP | CDLSPINNINGTOP | 97.36% | 46 | 84 | 46 |
+  | ENGULFING | CDLENGULFING | 98.33% | 323 | 345 | 322 |
+  | HARAMI | CDLHARAMI | 87.43% | 127 | 174 | 60 |
+  | HARAMI_CROSS | CDLHARAMICROSS | 95.28% | 79 | 59 | 35 |
+  | PIERCING | CDLPIERCING | 96.25% | 54 | 0 | 0 |
+  | DARK_CLOUD_COVER | CDLDARKCLOUDCOVER | 96.32% | 53 | 0 | 0 |
+  | MORNING_STAR | CDLMORNINGSTAR | 100.00% | 0 | 0 | 0 |
+  | EVENING_STAR | CDLEVENINGSTAR | 100.00% | 0 | 0 | 0 |
+  | THREE_WHITE_SOLDIERS | CDL3WHITESOLDIERS | 99.03% | 7 | 9 | 1 |
+  | THREE_BLACK_CROWS | CDL3BLACKCROWS | 99.79% | 3 | 0 | 0 |
+  | THREE_INSIDE_UP | CDL3INSIDE (+100) | 99.31% | 10 | 0 | 0 |
+  | THREE_INSIDE_DOWN | CDL3INSIDE (-100) | 99.24% | 11 | 0 | 0 |
+  | TWEEZER_TOP | none | -- | 13 | -- | -- |
+  | TWEEZER_BOTTOM | none | -- | 10 | -- | -- |
+
+  No bar ever got opposite signs except the documented gravestone convention. Every deviation, each checked on the same bars:
+
+  - **Own range vs trailing average (DOJI, SPINNING_TOP, MARUBOZU, HARAMI, HARAMI_CROSS, DRAGONFLY, THREE_INSIDE_*).** TA-Lib calls a body "doji"/"short"/"long" against the average range or body of the previous 10 bars; ours compares with the bar's own range (stateless, O(1)). Verified: TA-Lib's `CDLDOJI` equals "body <= 10% of the prior 10 bars' average range" on 100% of bars, and all 125 TA-Lib-only doji have a body over 10% of their own range. 252 of our 261 MARUBOZU-only hits have a body no longer than the prior 10 bars' average (small bars with no shadows: their median range is $6.2 against $21.2 for all bars), and 64 of our 67 HARAMI-only hits have a first body that TA-Lib does not count as long; 113 of TA-Lib's 114 HARAMI-only hits have a second body over 30% of its own range. The first 10 bars are also TA-Lib's lookback (always 0 there). *Known limit worth stating:* own-range thresholds cannot tell a small bar from a long one, so MARUBOZU and HARAMI fire on quiet bars; upgrade path: a body-vs-trailing-average threshold (bounded state), a 27.8 decision.
+  - **Direction convention (GRAVESTONE_DOJI).** TA-Lib gives +100; ours gives -100 (Nison, spec). By magnitude the two agree on 96.81% of bars; all 21 shared hits differ only in sign.
+  - **Prior trend (HAMMER, HANGING_MAN, THREE_WHITE_SOLDIERS, THREE_BLACK_CROWS).** TA-Lib has no trend test: its hammer only needs the body near the prior bar's low (hanging man: high), its crows only a white bar before them. Ours needs 3 consecutive falling (rising) closes. Verified: only 10 of TA-Lib's 76 hammers and 10 of its 54 hanging men follow 3 falling (rising) closes.
+  - **Gaps (INVERTED_HAMMER, SHOOTING_STAR, PIERCING, DARK_CLOUD_COVER, MORNING/EVENING_STAR).** TA-Lib requires a real-body gap (inverted hammer, shooting star, stars) or an open beyond the prior low/high (piercing, dark cloud). On this day 1439 of 1439 bars open at the previous close: no bar opens beyond the prior low or high and no body gaps, so TA-Lib fires none of them. Ours tests `s.o <= f.c` (`>=`) for piercing/dark cloud (the 24/7 adaptation in the spec) and has no gap test for inverted hammer/shooting star, so it fires; the stars keep `star_gap=True` and fire on neither side.
+  - **THREE_INSIDE_*.** TA-Lib's `CDL3INSIDE` needs the first body long against the 10-bar average and the second strictly inside; zero hits that day. Ours uses own-range long/small (above).
+  - **Tweezers** have no TA-Lib function.
+
 ### File List
+
+Added:
+- platform/kernel/candle_patterns.py
+- platform/kernel/tests/test_candle_patterns.py
+- platform/views/tests/test_ranking_columns_closed_bar.py
+- platform/data_api/tests/test_technicals_candle_pattern.py
+- platform/research/domain/events.py
+- platform/research/application/patterns.py
+- platform/research/notebooks/06_candlestick_scanner.py
+- platform/research/notebooks/06_candlestick_scanner.ipynb
+- platform/research/tests/test_events.py
+- platform/research/tests/test_patterns.py
+- platform/research/tests/test_notebook_candlestick_scanner.py
+
+Modified:
+- platform/views/indicator_picker.py
+- platform/views/ranking_columns.py
+- platform/views/tests/test_indicator_picker_native.py
+- platform/data_api/routes/indicators.py
+- platform/frontend/openapi.json
+- platform/frontend/src/api/schema.ts
+- platform/frontend/src/components/chart/IndicatorPicker.tsx
+- platform/frontend/src/components/chart/paramCoercion.ts
+- platform/frontend/src/components/chart/paramCoercion.test.ts
+- platform/frontend/src/pages/ChartPage.tsx
+- platform/frontend/src/pages/ChartPage.test.tsx
+- platform/frontend/src/pages/RankingsPage.test.tsx
+- platform/frontend/src/pages/technicals.test.ts
+- platform/research/tests/test_notebooks.py
+- platform/research/tests/test_research_reads.py
+- platform/tests/test_boundaries.py
+- platform/research/README.md
+- platform/ARCHITECTURE.md
+- _bmad-output/planning-artifacts/architecture/architecture-ddd-platform-2026-09-21/ARCHITECTURE-SPINE.md
+- _bmad-output/planning-artifacts/epics.md
+
+Deleted:
+- platform/research/notebooks/candlestick_pattern_scanner.ipynb

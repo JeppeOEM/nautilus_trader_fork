@@ -13,7 +13,7 @@ Give the researcher six executable notebooks: catalog inspection, microstructure
 - Story 27.3: Microstructure notebook (done)
 - Story 27.4: Correlation and cross-venue notebook (done)
 - Story 27.5: Backtest evaluation notebook, parameter sweeps and walk-forward (done)
-- Story 27.6: Monte Carlo and robustness notebook
+- Story 27.6: Monte Carlo and robustness notebook (done)
 - Story 27.7: Candlestick pattern detector in the kernel, on the chart, in the screener, and a scanner notebook
 - Story 27.8: Candlestick patterns tradeable: `CandlePatternStrategy` in backtests and paper bots
 - Story 27.9: Closeout: research README, notebook index, rules, and the last legacy notebook gone
@@ -40,8 +40,8 @@ Give the researcher six executable notebooks: catalog inspection, microstructure
 ## Technical Decisions
 
 - **Research stays a consumer.** It has no aggregate and writes only throwaway backtest catalogs.
-  - The spine's research row lists the values: `ReturnSeries`, `EquityCurve`, `TradeLedger`, `MetricReport`, `CorrelationMatrix`, the microstructure result tuples, and `MonteCarloResult` (still to come, in 27.6). It also lists the ports: `MarketFrames`, `RankingHistory` and `BacktestRunner`. Each entry carries its invariant.
-  - A story that adds a research module, value or context edge amends the spine in the same commit: the research row, the dependency graph and the tree. It uses a `[amended <date>: Story 27.x — ...]` note, as 27.1–27.5 did.
+  - The spine's research row lists the values: `ReturnSeries`, `EquityCurve`, `TradeLedger`, `MetricReport`, `CorrelationMatrix`, the microstructure result tuples, and `MonteCarloResult`. It also lists the ports: `MarketFrames`, `RankingHistory` and `BacktestRunner`. Each entry carries its invariant.
+  - A story that adds a research module, value or context edge amends the spine in the same commit: the research row, the dependency graph and the tree. It uses a `[amended <date>: Story 27.x — ...]` note, as 27.1–27.6 did.
 - **Layering.** `research/domain` imports only stdlib, numpy, `kernel/` and `nautilus_trader.model`/`core`. pandas stays in `research/application`.
 - **Context edges** are name-allowlisted in `test_boundaries.py`, and each has a "still used" check.
   - `research → candles` (`RESEARCH_CANDLES_SERVICES`): `open_store`, `window`, `oldest_t`, `newest_t`, `bucket_starts`, `verified_status` and `BAR_SECONDS`. A window past the store's coverage raises; it never reads as "no trades".
@@ -55,6 +55,11 @@ Give the researcher six executable notebooks: catalog inspection, microstructure
   - `RunResult` carries an `EquityCurve`, a `TradeLedger` and a `MetricReport`, attributed by `BacktestRunConfig.id`. A missing result raises.
   - A sweep is one node with one run config per grid point. Walk-forward (`walk_forward.py`) and the evaluation frames (`evaluation.py`) exist for 27.6/27.8 to reuse.
   - Notebooks never touch `BacktestNode` and never sum a PnL.
+- **Monte Carlo and robustness (27.6, available for reuse).**
+  - `research/domain/monte_carlo.py` holds `MonteCarloResult`, which records its `seed` and `n_paths` so the same call reproduces it. Its arrays are read-only, and an empty input gives flat paths with a `note`.
+  - It also holds `bootstrap_trades` (resampled at the ledger's exit stamps), `block_bootstrap_returns` (stationary bootstrap), `risk_of_ruin`, `sharpe_confidence_interval`, `probabilistic_sharpe` and `deflated_sharpe`. These return `None`, never a division warning, when the Sharpe is undefined.
+  - Every Sharpe goes through `kernel.performance_metrics.return_stats`. `TradeLedger.exit_day_starts` is the one day-binning rule.
+  - `research/application/robustness.py` reshapes these values for `05_monte_carlo` and computes no statistic. Every figure title ends `seed=S paths=N`.
 - **Notebook format.**
   - The source of truth is a jupytext percent-format `<nn>_<name>.py`, which must be ruff- and mypy-clean. It is paired with an output-stripped `.ipynb`, and `make notebooks` syncs the pair.
   - The Parameters cell uses `notebooks/_params.py`: `Params.from_env()` for paths and the window, and `_params.setting` for archive-sized constants. The test harness shrinks those constants through `NOTEBOOK_<NAME>` JSON.
@@ -80,8 +85,7 @@ Give the researcher six executable notebooks: catalog inspection, microstructure
 
 ## Cross-Story Dependencies
 
-- Stories run in order, 27.6 → 27.9, and all build on 27.1's values and ports and on 27.2's `_params.py`, notebook harness and fixture catalog.
-- 27.6 reuses 27.5's `STRATEGY` parameters and sweep results for the deflated Sharpe of the best grid point.
+- 27.1–27.6 are done. The remaining stories run in order, 27.7 → 27.9, and all build on 27.1's values and ports and on 27.2's `_params.py`, notebook harness and fixture catalog.
 - 27.8 depends on 27.7's detector and on `BacktestRunner`. It becomes the second worked example in 27.5's `04_backtest_evaluation` notebook.
 - 27.9 closes the epic:
   - `research/README.md` replaces `research/BACKTESTING.md`, leaving a redirect stub.

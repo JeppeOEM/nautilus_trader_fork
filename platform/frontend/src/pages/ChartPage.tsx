@@ -277,6 +277,9 @@ function ChartInner({ instrumentId, barSeconds, onTimeframeChange }: ChartInnerP
           group: name,
           groupLabel: legendTitle(name, pickerEntries),
           outputLabel: key.slice(key.lastIndexOf(".") + 1),
+          // Known limit: pattern hits are ±100 histogram spikes, not on-candle markers. Upgrade
+          // path: lightweight-charts `createSeriesMarkers`. (Story 27.7's `CandlePattern` is a
+          // "histogram" catalog entry like any other: no special case here.)
           kind: panel === "histogram" ? ("Histogram" as const) : ("Line" as const),
           data: trimAfter(pickerValues[key], cutoffTime),
           // Combined with DEFAULT_PANE_IDS so a picker series never lands on volume's slot.
