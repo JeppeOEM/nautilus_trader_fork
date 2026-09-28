@@ -40,7 +40,11 @@
 # ten-minute fixture:
 #
 # - `STRATEGY`, `STRATEGY_CONFIG` -- the strategy and its config class by string path
-#   (`research.strategies.<module>:<Class>`);
+#   (`research.strategies.<module>:<Class>`). The first worked example is `OFIStrategy` on 1 s
+#   snapshots; the second, commented out under it, is `CandlePatternStrategy` (Story 27.8) on the
+#   trade archive -- `HAMMER`/`ENGULFING` entries above the trend EMA, 1-minute bars aggregated
+#   from the trades, its grid over `exit_bars` x `stop_atr_multiple`. Swap the two blocks to
+#   evaluate it (a candlestick scanner hit is one config away from this page);
 # - `INSTRUMENT` (*setting*) -- the instrument backtested, by default the first of `INSTRUMENTS`;
 # - `PARAMS` (*setting*) -- the strategy parameters of the single run, and the base every grid
 #   point is merged over;
@@ -83,6 +87,15 @@ STARTING_BALANCE = 10_000
 ROLLING_PERIOD_S = 3_600
 ROLLING_WINDOW = 48
 GRID = setting("GRID", {"ofi_threshold": [1.5, 2.0], "ofi_window": [20, 40]})
+# Second worked example -- candlestick patterns on the trade archive (Story 27.8):
+# STRATEGY = "research.strategies.candle_pattern_strategy:CandlePatternStrategy"
+# STRATEGY_CONFIG = "research.strategies.candle_pattern_strategy:CandlePatternStrategyConfig"
+# PARAMS = setting(
+#     "PARAMS",
+#     {"trade_size": "0.01", "long_patterns": ["HAMMER", "ENGULFING"], "trend_condition": "above"},
+# )
+# DATA = "trades"
+# GRID = setting("GRID", {"exit_bars": [5, 10], "stop_atr_multiple": [1.5, 2.0]})
 N_FOLDS = setting("N_FOLDS", 3)
 IN_SAMPLE_FRACTION = 0.7
 SELECT_BY = setting("SELECT_BY", "expectancy")

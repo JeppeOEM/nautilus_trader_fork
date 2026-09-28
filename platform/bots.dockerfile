@@ -17,6 +17,11 @@ RUN pip install --no-cache-dir $PIP_INSECURE_ARGS -r requirements.txt
 COPY platform/kernel ./kernel
 COPY platform/observability ./observability
 COPY platform/bots ./bots
+# A paper bot with `strategy = "candle_pattern"` runs research's CandlePatternStrategy, which the
+# host loads by string path through Nautilus's StrategyFactory (Story 27.8) -- no bots -> research
+# import exists for the image closure check to follow, so tests/test_images.py names the path in
+# `_STRING_PATH_IMPORTS`. research's strategy imports only kernel and nautilus_trader.
+COPY platform/research ./research
 # The cross-cutting guards in platform/tests, which read the read-only source mount
 # (PLATFORM_SOURCE_DIR), not this image.
 COPY platform/tests ./tests

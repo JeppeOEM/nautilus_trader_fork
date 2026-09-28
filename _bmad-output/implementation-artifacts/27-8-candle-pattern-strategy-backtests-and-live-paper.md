@@ -68,8 +68,32 @@ so that a pattern I found in the scanner is one config file away from a backtest
 
 ### Agent Model Used
 
+Claude Opus 5.5 (claude-opus-5-5), implementation per `spec-27-8-candle-pattern-strategy-backtests-and-live-paper.md`.
+
 ### Debug Log References
+
+- Measured on nautilus_trader 1.229.0 (BacktestEngine, trade ticks, `1-MINUTE-LAST-INTERNAL`): a market order submitted in `on_bar(t)` fills at bar t's close stamp at bar t's last trade price (not t+1's first trade); minutes with no trade still emit a flat zero-volume bar (`time_bars_build_with_no_updates=True`), so a trade gap never shows as a `ts_event` gap; a reduce-only SELL `STOP_MARKET` triggers only on a seller-aggressor trade (Nautilus `trade_execution`), filled at that trade.
 
 ### Completion Notes List
 
+- Written against the bots context (Story 25.3 landed): `BotConfig` in `bots/domain/config.py`, loader `bots/infrastructure/config.py`, host `bots/infrastructure/nautilus_host.py`, `bots.dockerfile`, `bots/README.md`, `bots/tests/`.
+- Deviation (Design Notes): entry is submitted in `on_bar` of the closed pattern bar, not a `pending_side` on bar t+1 (which would fill at t+1's close). Its fill is stamped at the pattern bar's close; in a trade-only backtest the price is that bar's last trade (documented as a `Known limit:`).
+- Deviation (spec detail): a zero-volume bar is also treated as a hole (reset, not fed), because with Nautilus's default no-update time bars a trade gap never produces a `ts_event` gap; this mirrors the scanner, where a bucket with no trade is a NaN row.
+- Extra refusals beyond the matrix: an ATR value of 0 blocks entry (a stop at the entry price is no stop); a config where no pattern can open a position raises.
+- `build_node` builds every strategy before the `TradingNode`, so a bad strategy fails before any node/Redis connection exists.
+- Makefile test lists unchanged: the new tests live in already-listed directories (`research/tests` in `make test`, `bots/tests` in `make test-live-paper`); `research/tests` cannot run in the bots image (its conftest/fixture needs `candles`).
+
 ### File List
+
+- platform/research/strategies/candle_pattern_strategy.py (new)
+- platform/research/strategies/backtest_candle_pattern.py (new)
+- platform/research/tests/test_candle_pattern_strategy.py (new)
+- platform/research/notebooks/04_backtest_evaluation.py, .ipynb
+- platform/research/BACKTESTING.md
+- platform/bots/domain/config.py, platform/bots/infrastructure/config.py, platform/bots/infrastructure/nautilus_host.py, platform/bots/infrastructure/cache_reader.py, platform/bots/__init__.py
+- platform/bots/tests/test_config.py, platform/bots/tests/test_candle_pattern_bot.py (new)
+- platform/bot_tui/app.py, platform/bot_tui/tests/test_app_bot_detail.py
+- platform/docker-compose.yml, platform/bots.dockerfile
+- platform/tests/test_images.py, platform/tests/test_boundaries.py
+- platform/bots/README.md, platform/docs/BOT_OPERATIONS.md, platform/docs/DEPLOY_CHECKLIST.md, platform/ARCHITECTURE.md
+- _bmad-output/planning-artifacts/architecture/architecture-ddd-platform-2026-09-21/ARCHITECTURE-SPINE.md

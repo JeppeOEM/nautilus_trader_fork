@@ -334,7 +334,7 @@ def test_o_key_uses_local_listener_when_port_set(monkeypatch) -> None:
 
 
 def test_v_key_opens_strategy_view_with_breadcrumb(monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr(app_module, "_STRATEGY_SOURCE_PATH", tmp_path / "strategy.py")
+    monkeypatch.setattr(app_module, "_STRATEGY_SOURCE_DIR", tmp_path)
     _reset()
     bots_state._handle_status_message(_status("bot-01"))
     app = BotTuiApp()
@@ -344,30 +344,85 @@ def test_v_key_opens_strategy_view_with_breadcrumb(monkeypatch, tmp_path) -> Non
     assert app._breadcrumb.text == "Bots > bot-01 > strategy"
 
 
+def _source_lines(body: urwid.Widget) -> list[str]:
+    assert isinstance(body, urwid.ListBox)
+    return [widget.text for widget in body.body]  # type: ignore[attr-defined]
+
+
+def _filler_text(body: urwid.Widget) -> str:
+    assert isinstance(body, urwid.Filler)
+    return body.original_widget.text
+
+
 def test_build_strategy_body_renders_file_lines_scrollable(monkeypatch, tmp_path) -> None:
-    source = tmp_path / "strategy.py"
-    source.write_text("class DummyStrategy:\n    pass\n")
-    monkeypatch.setattr(app_module, "_STRATEGY_SOURCE_PATH", source)
+    (tmp_path / "DummyStrategy.py").write_text("class DummyStrategy:\n    pass\n")
+    monkeypatch.setattr(app_module, "_STRATEGY_SOURCE_DIR", tmp_path)
     _reset()
     bots_state._handle_status_message(_status("bot-01"))
     app = BotTuiApp()
     app._open_bot_detail("bot-01")
     app._handle_bot_detail_key("v")
-    body = app._build_strategy_body()
-    assert isinstance(body, urwid.ListBox)
+    assert _source_lines(app._build_strategy_body()) == ["class DummyStrategy:", "    pass"]
+
+
+def test_each_bot_shows_the_source_of_the_strategy_it_runs(monkeypatch, tmp_path) -> None:
+    (tmp_path / "DummyStrategy.py").write_text("class DummyStrategy: ...\n")
+    (tmp_path / "CandlePatternStrategy.py").write_text("class CandlePatternStrategy: ...\n")
+    monkeypatch.setattr(app_module, "_STRATEGY_SOURCE_DIR", tmp_path)
+    _reset()
+    bots_state._handle_status_message(_status("bot-01"))
+    bots_state._handle_status_message(_status("candle-01", strategy="CandlePatternStrategy"))
+    app = BotTuiApp()
+    app._open_bot_detail("candle-01")
+    app._handle_bot_detail_key("v")
+    assert _source_lines(app._build_strategy_body()) == ["class CandlePatternStrategy: ..."]
 
 
 def test_build_strategy_body_handles_missing_file(monkeypatch, tmp_path) -> None:
-    monkeypatch.setattr(app_module, "_STRATEGY_SOURCE_PATH", tmp_path / "missing.py")
+    monkeypatch.setattr(app_module, "_STRATEGY_SOURCE_DIR", tmp_path)
     _reset()
-    body = BotTuiApp()._build_strategy_body()
-    assert isinstance(body, urwid.Filler)
+    bots_state._handle_status_message(_status("bot-01"))
+    app = BotTuiApp()
+    app._open_bot_detail("bot-01")
+    assert _filler_text(app._build_strategy_body()).startswith(
+        f"could not read {tmp_path / 'DummyStrategy.py'}"
+    )
+
+
+def test_build_strategy_body_names_a_bot_with_no_status_yet(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(app_module, "_STRATEGY_SOURCE_DIR", tmp_path)
+    _reset()
+    app = BotTuiApp()
+    app._open_bot_detail("bot-09")
+    assert _filler_text(app._build_strategy_body()) == (
+        "no bots:status received yet for bot-09: strategy unknown"
+    )
+
+
+def test_a_strategy_name_that_is_not_a_class_name_reads_no_file(monkeypatch, tmp_path) -> None:
+    (tmp_path / "secret.py").write_text("never shown\n")
+    monkeypatch.setattr(app_module, "_STRATEGY_SOURCE_DIR", tmp_path / "sources")
+    _reset()
+    bots_state._handle_status_message(_status("bot-01", strategy="../secret"))
+    app = BotTuiApp()
+    app._open_bot_detail("bot-01")
+    assert "not a class name" in _filler_text(app._build_strategy_body())
+
+
+def test_a_source_that_is_not_utf8_is_reported_not_raised(monkeypatch, tmp_path) -> None:
+    (tmp_path / "DummyStrategy.py").write_bytes(b"\xff\xfe\xfa")
+    monkeypatch.setattr(app_module, "_STRATEGY_SOURCE_DIR", tmp_path)
+    _reset()
+    bots_state._handle_status_message(_status("bot-01"))
+    app = BotTuiApp()
+    app._open_bot_detail("bot-01")
+    assert _filler_text(app._build_strategy_body()).startswith("could not read")
 
 
 def test_esc_from_strategy_view_returns_to_bot_detail_without_clearing_it(
     monkeypatch, tmp_path
 ) -> None:
-    monkeypatch.setattr(app_module, "_STRATEGY_SOURCE_PATH", tmp_path / "strategy.py")
+    monkeypatch.setattr(app_module, "_STRATEGY_SOURCE_DIR", tmp_path)
     _reset()
     bots_state._handle_status_message(_status("bot-01"))
     app = BotTuiApp()

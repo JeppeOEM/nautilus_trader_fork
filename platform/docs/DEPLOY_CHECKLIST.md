@@ -608,3 +608,33 @@ not just restarted.
       read-only mount moved to `/app/strategy_source/strategy.py`).
 - [ ] After 10 minutes, `GET /api/errors` is flat against the hour before the deploy for all
       services (no new site).
+
+### 27-8-candle-pattern-strategy-backtests-and-live-paper (`candle_pattern` paper bots; commit: see `git log --grep 27-8-candle`)
+
+The live-paper image now also copies `research/` (a `candle_pattern` bot's strategy is loaded from
+it by string path), and `bot_tui` reads each bot's strategy source from
+`/app/strategy_source/<Class>.py`: two new read-only mounts replace
+`/app/strategy_source/strategy.py`.
+The checked-in `platform/bots/config.toml` is unchanged: every bot there stays `dummy`, so the
+redeploy alone changes no bot's behaviour.
+
+- [ ] `git pull`, then rebuild the live-paper image (its `COPY` set changed) and recreate it:
+      `docker compose -f platform/docker-compose.yml --profile live-paper build live-paper` and
+      `make up-live-paper` from `platform/`. In Dozzle the `live-paper` start shows every bot
+      `RUNNING` exactly as before.
+- [ ] Restart `bot_tui` (`make tui`; its mounts changed). Open any dummy bot and press `v`:
+      `DummyStrategy`'s source shows (a "could not read /app/strategy_source/DummyStrategy.py"
+      line means the new mount is missing).
+- [ ] Add one paper bot to `platform/bots/config.toml` (a new `bot_id`; the other bots keep
+      theirs), e.g. `strategy = "candle_pattern"` on `BTC-USD-PERP.DYDX` with a
+      `[bots.params]` table as in `bots/README.md` ("Choosing a bot's strategy"), then
+      `make up-live-paper`. The start must not fail naming that bot (a typo'd params key does).
+- [ ] In `bot_tui`, the new bot heartbeats with strategy `CandlePatternStrategy`, and `v`
+      shows the source mounted at `/app/strategy_source/CandlePatternStrategy.py` (the host's
+      `platform/research/strategies/candle_pattern_strategy.py`). Leave it running until it logs a fill (a pattern has to
+      fire and pass the trend filter, which can take hours on 1-minute bars); confirm the fill in
+      its trades blotter and its position side, and that `GET /api/errors` shows no new `bots.*`
+      site. The strategy's own failures are not ledgered (a strategy module imports only `kernel`
+      and `nautilus_trader`), so also search the `live-paper` log in Dozzle for
+      `CandlePatternStrategy` `ERROR`/`WARN` lines: a refused or lost stop, "no stop price", a
+      stop "still open while flat", or a `trade_size` refused at start.

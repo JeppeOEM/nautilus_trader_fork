@@ -124,6 +124,12 @@ GRAPH: frozenset[tuple[str, str]] = frozenset(
         (RESEARCH, ARCHIVE),
         (DATA_API, VIEWS),
         (DATA_API, ALERTING),
+        # No (BOTS, RESEARCH), deliberately (Story 27.8): a paper bot runs a research strategy
+        # (`CandlePatternStrategy`), but the bots host loads it by string path through Nautilus's
+        # own resolver, `StrategyFactory.create(ImportableStrategyConfig(...))` -- the mechanism a
+        # backtest uses -- so bots depends on no research code, only on a path in
+        # `nautilus_host.STRATEGIES`. The image side is covered by `test_images.py`'s
+        # `_STRING_PATH_IMPORTS`; `test_no_bots_module_imports_research` holds the absence.
         # No (BOT_TUI, VIEWS): since Story 25.1a bot_tui shows no ranking or market data, only
         # bots:*, collector:status and archive:status (Story 25.1b), so it reads no views model.
         # An operator harness drives an interface adapter in-process (e.g. `bench_candles`
@@ -1593,6 +1599,58 @@ def _definitions_of(name: str) -> list[str]:
 def test_the_pct_change_and_volatility_formula_is_defined_exactly_once() -> None:
     """SSOT-02 / AD-D10: views and research read ranking's published values, never recompute."""
     assert _definitions_of("price_stats_from_series") == ["ranking/domain/metrics.py"]
+
+
+# --- bots: research strategies by string path only (Story 27.8) ---------------------------------
+
+
+def _research_imports(module: str, path: Path) -> list[str]:
+    """Every static import of `research` and every `import_module`/`__import__` of it."""
+    static = [
+        f"{module}:{ref.line} -> {ref.target}"
+        for ref in imports_of(module, path, _KNOWN)
+        if ref.target.split(".")[0] == RESEARCH
+    ]
+    dynamic = [
+        f"{module}:{node.lineno} -> {ast.unparse(node.args[0])} (dynamic)"
+        for node in ast.walk(ast.parse(path.read_text()))
+        if isinstance(node, ast.Call)
+        and _call_name(node) in ("import_module", "__import__")
+        and node.args
+        and RESEARCH in ast.unparse(node.args[0])
+    ]
+    return static + dynamic
+
+
+def test_no_bots_module_imports_research() -> None:
+    """
+    The bots host names research strategies only as `StrategyFactory` string paths, so bots has
+    no research edge (see `GRAPH`): neither a static import nor an `import_module` of it, in any
+    bots module, tests included.
+    """
+    found = [
+        ref
+        for module, path in _MODULES.items()
+        if module.split(".")[0] == BOTS
+        for ref in _research_imports(module, path)
+    ]
+    assert found == [], "bots loads a research strategy by string path only (Story 27.8)"
+
+
+def test_the_research_import_rule_catches_each_form(tmp_path: Path) -> None:
+    source = tmp_path / "m.py"
+    source.write_text(
+        "from research.strategies.candle_pattern_strategy import CandlePatternStrategy\n"
+        "import research.strategies.ofi_strategy\n"
+        "import importlib\n"
+        "importlib.import_module('research.strategies.candle_pattern_strategy')\n"
+        "PATH = 'research.strategies.candle_pattern_strategy:CandlePatternStrategy'\n"
+    )
+    assert [ref.split(" -> ")[0] for ref in _research_imports("m", source)] == [
+        "m:1",
+        "m:2",
+        "m:4",
+    ]
 
 
 # --- bots: Nautilus's live runtime behind one module (spine AD-D2, AD-8, Story 25.3) -------------

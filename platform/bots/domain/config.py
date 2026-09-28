@@ -42,6 +42,7 @@ from dataclasses import dataclass
 from dataclasses import field
 from decimal import Decimal
 from types import MappingProxyType
+from typing import Any
 
 from kernel.venues import venue_of
 
@@ -88,6 +89,24 @@ def venue_rules(venue: str) -> VenueRules:
     return VENUE_RULES[venue]
 
 
+def frozen_params(value: Any) -> Any:
+    """Return `value` read-only all the way down: tables as `MappingProxyType`, arrays as tuples."""
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: frozen_params(item) for key, item in value.items()})
+    if isinstance(value, list | tuple):
+        return tuple(frozen_params(item) for item in value)
+    return value
+
+
+def plain_params(value: Any) -> Any:
+    """Return frozen params as plain dicts and lists again (what a JSON encoder takes)."""
+    if isinstance(value, Mapping):
+        return {key: plain_params(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [plain_params(item) for item in value]
+    return value
+
+
 @dataclass(frozen=True)
 class BotConfig:
     """
@@ -97,6 +116,14 @@ class BotConfig:
     `kernel.performance_metrics.equity_returns`) -- NOT this bot's real simulated balance, since
     every bot on one venue draws from that venue's single shared pool (Nautilus allows one exec
     client per venue per node). Left empty it defaults to 10_000 of the venue's paper currency.
+
+    `strategy` names the bot's strategy in `bots.infrastructure.nautilus_host.STRATEGIES`
+    (default `"dummy"`, `DummyStrategy`), and `params` holds that strategy's own config fields
+    (a TOML `[bots.params]` table; empty for `dummy`, whose tunables are the
+    `trend_*`/`ofi_confirm_threshold` keys above). Both are optional keys with defaults, so every
+    existing paper file parses unchanged; the host checks both (`check_strategy`) before any node
+    is built. `params` is stored read-only all the way down (`frozen_params`) and left out of
+    the hash.
     """
 
     bot_id: str
@@ -106,11 +133,16 @@ class BotConfig:
     trend_sell_threshold: float = 0.4
     ofi_confirm_threshold: float = 0.0
     starting_balance: str = ""
+    strategy: str = "dummy"
+    # Excluded from the hash: a params table is a mapping, and `BotConfig` stays hashable.
+    params: Mapping[str, Any] = field(default_factory=dict, hash=False)
 
     def __post_init__(self) -> None:
         rules = venue_rules(venue_of(self.instrument_id))
         if not self.starting_balance:
             object.__setattr__(self, "starting_balance", f"10_000 {rules.paper_quote_currency}")
+        # Frozen all the way down (nested tables and arrays too): a checked bot must not change.
+        object.__setattr__(self, "params", frozen_params(self.params))
 
 
 @dataclass(frozen=True)

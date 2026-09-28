@@ -12,16 +12,21 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
+import dataclasses
+import tomllib
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
+from bots.domain.config import BotConfig
 from bots.domain.config import ExecBot
 from bots.domain.config import PaperFleet
+from bots.infrastructure.config import _DUMMY_ONLY_KEYS
 from bots.infrastructure.config import load_paper_config
 from bots.infrastructure.config import load_real_money_config
 from bots.infrastructure.config import resolve_config
+from bots.strategies.dummy import DummyStrategyConfig
 
 
 _ONE_BOT = '\n[[bots]]\nbot_id = "bot-01"\n'
@@ -368,3 +373,99 @@ def test_bot_on_an_unsupported_venue_fails_at_load_naming_the_venue(tmp_path) ->
     )
     with pytest.raises(ValueError, match="unsupported venue 'KRAKEN'"):
         load_paper_config(path)
+
+
+# --- strategy / params (Story 27.8) ------------------------------------------------------------
+
+_CHECKED_IN = Path(__file__).resolve().parents[1] / "config.toml"
+_CANDLE_BOT = """
+[[bots]]
+bot_id = "candle-01"
+instrument_id = "BTC-USD-PERP.DYDX"
+trade_size = "0.002"
+strategy = "candle_pattern"
+
+[bots.params]
+long_patterns = ["HAMMER", "ENGULFING"]
+trend_condition = "above"
+exit_bars = 5
+"""
+
+
+def test_the_checked_in_config_parses_with_every_bot_dummy() -> None:
+    raw_bots = tomllib.loads(_CHECKED_IN.read_text())["bots"]
+    parsed = {bot.bot_id: bot for bot in load_paper_config(_CHECKED_IN).bots}
+    without_key = [raw["bot_id"] for raw in raw_bots if "strategy" not in raw]
+    assert without_key, "the checked-in file sets no strategy key: every bot defaults"
+    for bot_id in without_key:
+        assert (parsed[bot_id].strategy, dict(parsed[bot_id].params)) == ("dummy", {}), bot_id
+
+
+def test_a_candle_pattern_bot_with_a_params_table_parses(tmp_path: Path) -> None:
+    config = load_paper_config(_write(tmp_path, "c.toml", _ONE_BOT + _CANDLE_BOT))
+    dummy, candle = config.bots
+    assert (dummy.strategy, dict(dummy.params)) == ("dummy", {})
+    assert candle.strategy == "candle_pattern"
+    assert dict(candle.params) == {
+        "long_patterns": ("HAMMER", "ENGULFING"),
+        "trend_condition": "above",
+        "exit_bars": 5,
+    }
+
+
+def test_bot_params_are_read_only_all_the_way_down_and_the_bot_stays_hashable() -> None:
+    bot = BotConfig(
+        bot_id="candle-01",
+        strategy="candle_pattern",
+        params={"long_patterns": ["HAMMER"], "nested": {"levels": [1, 2]}},
+    )
+    with pytest.raises(TypeError):
+        bot.params["exit_bars"] = 1  # type: ignore[index]
+    with pytest.raises(AttributeError):
+        bot.params["long_patterns"].append("ENGULFING")
+    with pytest.raises(TypeError):
+        bot.params["nested"]["levels"] = []
+    assert bot.params["nested"]["levels"] == (1, 2)
+    assert hash(bot) == hash(BotConfig(bot_id="candle-01", strategy="candle_pattern"))
+
+
+@pytest.mark.parametrize(
+    ("bot", "message"),
+    [
+        ('strategy = "candel_pattern"', r"candle-01: unknown strategy 'candel_pattern'"),
+        ("strategy = 1", "strategy must be a string"),
+        ('strategy = "dummy"\nparams = { exit_bars = 5 }', "takes no \\[bots.params\\]"),
+        ('strategy = "candle_pattern"\nparams = "exit_bars=5"', "params must be a TOML table"),
+        (
+            'strategy = "candle_pattern"\ntrend_buy_threshold = 0.7',
+            r"\['trend_buy_threshold'\] tune only the dummy strategy",
+        ),
+        (
+            'strategy = "candle_pattern"\nparams = { order_id_tag = "x" }',
+            r"may not set \['order_id_tag'\]",
+        ),
+        (
+            'strategy = "candle_pattern"\nparams = { trade_size = "1", strategy_id = "S-1" }',
+            r"may not set \['strategy_id', 'trade_size'\]",
+        ),
+        ('strategy = "candle_pattern"\nparams = { instrument_id = "X" }', "may not set"),
+    ],
+)
+def test_a_bad_strategy_or_params_fails_at_load_naming_file_and_bot(
+    tmp_path: Path, bot: str, message: str
+) -> None:
+    path = _write(tmp_path, "c.toml", f'[[bots]]\nbot_id = "candle-01"\n{bot}\n')
+    with pytest.raises(ValueError, match=message) as raised:
+        load_paper_config(path)
+    assert str(path) in str(raised.value)
+    assert "candle-01" in str(raised.value)
+
+
+def test_the_dummy_only_keys_are_every_dummy_tunable_on_botconfig() -> None:
+    # A new `DummyStrategy` tunable on `BotConfig` missing from `_DUMMY_ONLY_KEYS` would be
+    # silently ignored on a bot running another strategy (DATA-07); the tuple follows the fields.
+    shared = {"instrument_id", "trade_size"}  # every strategy gets these from `BotConfig`
+    tunables = {f.name for f in dataclasses.fields(BotConfig)} & set(
+        DummyStrategyConfig.__struct_fields__
+    )
+    assert set(_DUMMY_ONLY_KEYS) == tunables - shared

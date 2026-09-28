@@ -46,6 +46,7 @@ from bots.domain.config import PaperFleet
 from bots.domain.config import VenuePaperConfig
 from bots.domain.config import venue_rules
 from bots.infrastructure.nautilus_host import VENUES
+from bots.infrastructure.nautilus_host import check_strategy
 
 
 def _reject_unknown_keys(raw: dict, config_cls: type, path: Path, where: str = "") -> None:
@@ -102,11 +103,37 @@ def _parse_venue(venue: str, raw: dict, path: Path) -> VenuePaperConfig:
     )
 
 
+# `DummyStrategy`'s tunables, which live on `BotConfig` itself: set on a bot running another
+# strategy they would be silently ignored, so they are refused instead (DATA-07).
+_DUMMY_ONLY_KEYS = ("trend_buy_threshold", "trend_sell_threshold", "ofi_confirm_threshold")
+
+
+def _parse_strategy(raw_bot: dict, path: Path) -> tuple[str, dict]:
+    """Return the bot's `strategy` name and `params` table, each checked for its TOML type."""
+    where = f"[[bots]] {raw_bot['bot_id']}"
+    strategy = raw_bot.get("strategy", "dummy")
+    if not isinstance(strategy, str):
+        raise ValueError(f"{path}: {where}: strategy must be a string, got {strategy!r}")
+    params = raw_bot.get("params", {})
+    if not isinstance(params, dict):
+        raise ValueError(
+            f"{path}: {where}: params must be a TOML table ([bots.params]), got {params!r}"
+        )
+    stray = [key for key in _DUMMY_ONLY_KEYS if key in raw_bot]
+    if strategy != "dummy" and stray:
+        raise ValueError(
+            f"{path}: {where}: {stray} tune only the dummy strategy, not {strategy!r} -- "
+            "set that strategy's parameters in [bots.params]"
+        )
+    return strategy, params
+
+
 def _parse_bot(raw_bot: dict, path: Path) -> BotConfig:
     if "bot_id" not in raw_bot:
         raise ValueError(f"{path}: every [[bots]] entry must set bot_id")
     _reject_unknown_keys(raw_bot, BotConfig, path, " in [[bots]] entry")
-    return _named(
+    strategy, params = _parse_strategy(raw_bot, path)
+    bot = _named(
         path,
         BotConfig,
         bot_id=raw_bot["bot_id"],
@@ -116,7 +143,11 @@ def _parse_bot(raw_bot: dict, path: Path) -> BotConfig:
         trend_sell_threshold=raw_bot.get("trend_sell_threshold", 0.4),
         ofi_confirm_threshold=raw_bot.get("ofi_confirm_threshold", 0.0),
         starting_balance=raw_bot.get("starting_balance", ""),
+        strategy=strategy,
+        params=params,
     )
+    _named(path, check_strategy, bot)
+    return bot
 
 
 def _named[T](path: Path, build: Callable[..., T], *args: object, **kwargs: object) -> T:

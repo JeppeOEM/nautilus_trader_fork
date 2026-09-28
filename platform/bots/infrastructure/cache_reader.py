@@ -54,8 +54,9 @@ class StrategyCacheReader:
 
     @property
     def last_data_ns(self) -> int:
-        # The ts_event of the strategy's last QuoteTick, set from a market-data callback that
-        # keeps firing whether or not the strategy runs (see `DummyStrategy`).
+        # The ts_event of the strategy's last market data, set from a market-data callback that
+        # keeps firing whether or not the strategy runs (see `DummyStrategy`; every hosted
+        # strategy keeps one, e.g. research's `CandlePatternStrategy`).
         return self._strategy.last_data_ns
 
     def start(self) -> None:

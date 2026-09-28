@@ -99,6 +99,7 @@ statistic.
 PYTHONPATH=platform python -m research.strategies.backtest_dydx       # LogisticTrendStrategy on internally-aggregated Bars
 PYTHONPATH=platform python -m research.strategies.backtest_snapshot   # SnapshotStrategy on raw 1s DydxSecondSnapshot
 PYTHONPATH=platform python -m research.strategies.backtest_ofi        # OFIStrategy on 1s DydxSecondSnapshot, quotes from level 0
+PYTHONPATH=platform python -m research.strategies.backtest_candle_pattern   # CandlePatternStrategy on 1-minute bars from trade ticks
 PYTHONPATH=platform python -m research.run_backtest --start 2026-09-05 --end 2026-09-06   # OFIStrategy, CLI window
 ```
 
@@ -121,6 +122,7 @@ tuning knobs — e.g. `backtest_dydx.run(symbols=["BTC-USD-PERP.DYDX"], bar_inte
 | Bars (aggregated from trades) | `TradeTick` → internal `Bar` | `research/strategies/backtest_dydx.py` |
 | Raw 1s book snapshots | `DydxSecondSnapshot` | `research/strategies/backtest_snapshot.py` |
 | Raw 1s book snapshots, fills at the snapshot's best bid/ask | `DydxSecondSnapshot` + `QuoteTick` derived by `kernel.catalog_files.query_top_of_book` | `research/strategies/backtest_ofi.py` (via `research/strategies/snapshot_backtest.py`) |
+| Bars from trades, pattern entries | `TradeTick` → internal `Bar`, through `NodeRunner` (`data="trades"`) | `research/strategies/backtest_candle_pattern.py` (`CandlePatternStrategy`, Story 27.8; also the second worked example in `04_backtest_evaluation`, and a paper bot with `strategy = "candle_pattern"`, `bots/README.md`) |
 
 Don't write a new backtest runner from scratch — copy the closest match above and swap
 the `strategy_path`/`config_path`/`data=[...]` list.

@@ -360,6 +360,17 @@ def _dynamic_imports(module: str) -> list[str]:
     return names
 
 
+# Modules a module loads through a `"<module>:<Class>"` string path handed to Nautilus's resolver
+# (`StrategyFactory.create(ImportableStrategyConfig(...))`), which neither the `ast` import scan
+# nor `_dynamic_imports` can see: the import happens inside `nautilus_trader`. The bots host builds
+# every non-dummy paper strategy this way (Story 27.8), so `research` must ship in its image.
+# `test_every_bots_string_path_is_in_the_table` keeps this table equal to the literals.
+_STRING_PATH_IMPORTS: dict[str, tuple[str, ...]] = {
+    "bots.infrastructure.nautilus_host": ("research.strategies.candle_pattern_strategy",),
+}
+_STRING_PATH = re.compile(r"[a-z_][\w.]*:[A-Za-z_]\w*")
+
+
 def import_closure(module: str) -> set[str]:
     """Every in-repo module `module` imports, transitively (function-level imports included)."""
     seen: set[str] = set()
@@ -371,6 +382,7 @@ def import_closure(module: str) -> set[str]:
                 seen.add(name)
                 targets = [ref.target for ref in imports_of(name, _MODULES[name], _KNOWN)]
                 targets.extend(_dynamic_imports(name))
+                targets.extend(_STRING_PATH_IMPORTS.get(name, ()))
                 pending.extend(
                     resolved for target in targets if (resolved := _in_repo(target)) is not None
                 )
@@ -517,3 +529,79 @@ def test_closure_follows_a_literal_import_module_call() -> None:
         "capture.venues.hyperliquid.client",
         "capture.venues.dydx.client",
     } <= import_closure("archive.tools.measure_lag")
+
+
+def _docstrings(tree: ast.Module) -> set[int]:
+    """Return the `id`s of the module's, classes' and functions' docstring constants."""
+    found: set[int] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+            continue
+        first = node.body[0] if node.body else None
+        if isinstance(first, ast.Expr) and isinstance(first.value, ast.Constant):
+            found.add(id(first.value))
+    return found
+
+
+def _bound_names(node: ast.stmt) -> set[str]:
+    """Return the names one top-level statement binds (a definition, assignment or import)."""
+    if isinstance(node, ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
+        return {node.name}
+    if isinstance(node, ast.ImportFrom | ast.Import):
+        return {alias.asname or alias.name for alias in node.names}
+    targets = node.targets if isinstance(node, ast.Assign) else [getattr(node, "target", None)]
+    return {target.id for target in targets if isinstance(target, ast.Name)}
+
+
+def _top_level_names(module: str) -> set[str]:
+    """Return the names `module` defines at top level: what a resolver's `getattr` can find."""
+    return {
+        name for node in ast.parse(_MODULES[module].read_text()).body for name in _bound_names(node)
+    }
+
+
+def _is_string_path(text: str) -> bool:
+    """`"<in-repo module>:<a name it defines>"` -- not a Redis key such as `"bots:status"`."""
+    if not _STRING_PATH.fullmatch(text):
+        return False
+    module, _, name = text.partition(":")
+    return module in _KNOWN and name in _top_level_names(module)
+
+
+def string_path_modules(module: str) -> set[str]:
+    """Return the in-repo modules named by a `"<module>:<Name>"` literal (docstrings aside)."""
+    tree = ast.parse(_MODULES[module].read_text())
+    docstrings = _docstrings(tree)
+    return {
+        node.value.partition(":")[0]
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and id(node) not in docstrings
+        and _is_string_path(node.value)
+    }
+
+
+def test_every_bots_string_path_is_in_the_table() -> None:
+    found = {
+        module: tuple(sorted(paths))
+        for module in _MODULES
+        if module.split(".")[0] == "bots" and (paths := string_path_modules(module))
+    }
+    assert found == _STRING_PATH_IMPORTS, (
+        "a bots module loads an in-repo module by string path: name it in _STRING_PATH_IMPORTS "
+        "so the image closure follows it"
+    )
+
+
+def test_the_bots_closure_follows_the_string_path_strategy() -> None:
+    closure = import_closure("bots.__main__")
+    assert "research.strategies.candle_pattern_strategy" in closure
+    assert "research.application.backtest_runner" not in closure, "only the strategy is loaded"
+
+
+def test_a_string_path_names_a_defined_attribute_of_an_in_repo_module() -> None:
+    assert _is_string_path("research.strategies.candle_pattern_strategy:CandlePatternStrategy")
+    assert not _is_string_path("bots:status"), "a Redis channel, not a string path"
+    assert not _is_string_path("research.strategies.candle_pattern_strategy:Missing")
+    assert not _is_string_path("nautilus_trader.config:ImportableStrategyConfig")

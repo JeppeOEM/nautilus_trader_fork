@@ -2,8 +2,9 @@
 
 The bots context (`platform/bots/`, `python3 -m bots`, compose service `live-paper`; moved
 into its own context in Story 25.3) is a real
-`TradingNode` + `Strategy` (`DummyStrategy`, Story 3.2) that
-subscribes to live dYdX market data and trades against it. **Paper mode is always 100%
+`TradingNode` + one `Strategy` per bot (`DummyStrategy`, Story 3.2, by default; a bot may
+run `CandlePatternStrategy` instead, Story 27.8 — see "Choosing a bot's strategy") that
+subscribes to live market data and trades against it. **Paper mode is always 100%
 simulated money** — it uses `SandboxExecutionClientConfig`, which has no wallet address
 or private key anywhere in the path, so real funds are structurally unreachable
 regardless of `network` (`mainnet` vs `testnet` only changes which market data feed is
@@ -79,6 +80,49 @@ balance pool. An unsupported venue or unknown `[venues.*]` key fails at load.
 `MARGIN` account fills both a spot `CurrencyPair` and a linear perpetual (proved in
 `tests/test_sandbox_mixed_account.py` on the same `SimulatedExchange` the Sandbox client
 wraps) -- so no config restriction is needed.
+
+### Choosing a bot's strategy (`strategy`, `[bots.params]`)
+
+Each `[[bots]]` entry may name its strategy and that strategy's parameters (Story 27.8):
+
+| `strategy` | Runs | Its parameters |
+|---|---|---|
+| `"dummy"` (the default) | `bots/strategies/dummy.py`'s `DummyStrategy` | the `trend_buy_threshold`/`trend_sell_threshold`/`ofi_confirm_threshold` keys above; no `[bots.params]` |
+| `"candle_pattern"` | `research/strategies/candle_pattern_strategy.py`'s `CandlePatternStrategy` — the candlestick scanner's detector with its EMA trend filter, a bar-count exit, an opposite-pattern exit and a reduce-only ATR stop | any `CandlePatternStrategyConfig` field in `[bots.params]` (`long_patterns`, `short_patterns`, `trend_ema_period`, `trend_condition`, `exit_bars`, `atr_period`, `stop_atr_multiple`, `allow_short`, `bar_type`) |
+
+```toml
+[[bots]]
+bot_id = "candle-01"
+instrument_id = "BTC-USD-PERP.DYDX"
+trade_size = "0.001"
+strategy = "candle_pattern"
+
+[bots.params]
+long_patterns = ["HAMMER", "ENGULFING"]
+short_patterns = ["SHOOTING_STAR", "ENGULFING"]
+trend_condition = "above"   # above | below | any -- the scanner's filter
+exit_bars = 10
+stop_atr_multiple = 2.0
+```
+
+- The two keys extend the frozen `[[bots]]` key set with **optional keys that default**
+  (`strategy = "dummy"`, empty params), so every existing `config.toml` parses unchanged and
+  every bot in the checked-in file stays `dummy`.
+- The bot still owns its identity and sizing: `instrument_id`, `trade_size` and `bot_id`
+  (pinned as the strategy's `order_id_tag`, AD-11) come from the `[[bots]]` keys, and
+  `[bots.params]` may not set them or any other `StrategyConfig` base field (`strategy_id`,
+  `oms_type`, ...).
+- Nothing falls back silently to `dummy`: an unknown `strategy`, a `[bots.params]` table on a
+  `dummy` bot, a reserved params key or a dummy-only threshold key on a non-dummy bot fails at
+  load, naming the file and the bot; an unknown params key (a typo such as `exit_bar`) or a bad
+  value (`short_patterns = ["HAMMER"]`) fails when the node is built, naming the bot.
+- A non-dummy strategy is built by string path through Nautilus's own
+  `StrategyFactory.create(ImportableStrategyConfig(...))` — the mechanism a backtest uses — so the
+  class a backtest ran (`research/strategies/backtest_candle_pattern.py`, the
+  `04_backtest_evaluation` notebook) is the class the bot runs, and bots imports no research
+  code; the image copies `research/` for it (`platform/bots.dockerfile`).
+- The non-Sandbox file below (`ExecConfig`) has no `strategy` key: `real_money`/`exchange_demo`
+  always run `DummyStrategy` (a `Known limit:` in `bots/infrastructure/nautilus_host.py`).
 
 This file must never contain a `mode` key — `load_paper_config()` hard-errors if it
 finds one (that's the point: non-Sandbox execution is a separate file/loader, never a
@@ -194,7 +238,7 @@ is.
 | `s` | Bots pane or Bot-detail | start/stop the highlighted or open bot. Stopping a *running* bot opens a type-to-confirm prompt (type `stop` + Enter) — starting has no such guard |
 | `t` | Bot-detail | cycle the trades blotter / PnL sparkline's range: day → week → month → all |
 | `o` | Bot-detail | open this bot's chart in the web dashboard (browser) |
-| `v` | Bot-detail | view this bot's strategy source, read-only, scrollable (`esc` back) |
+| `v` | Bot-detail | view the source of the strategy this bot runs (by its `bots:status` `strategy` class name, from `bot_tui`'s read-only `/app/strategy_source/<Class>.py` mounts), scrollable (`esc` back) |
 | `i` | Bot-detail | view this bot's incidents log: restarts + WS/data-stale spans (`esc` back) |
 | `Esc` | any sub-view | go back one level |
 

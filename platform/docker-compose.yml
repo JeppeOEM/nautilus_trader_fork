@@ -328,11 +328,15 @@ services:
       - ./data/bot_tui_logs:/app/bot_tui_logs
       - ./data/errors:/app/errors_dir
       # Read-only: bot_tui's own image (collector.dockerfile) never COPYs bots/ in, per
-      # AD-8's module isolation. This mount only lets the `v` key display the strategy's
-      # source text -- no bots code is imported or run here. The container path is the one
-      # bot_tui reads (STRATEGY_SOURCE_PATH's default): outside every package directory, so the
-      # mount can never shadow or create an importable package (Story 26.3).
-      - ./bots/strategies/dummy.py:/app/strategy_source/strategy.py:ro
+      # AD-8's module isolation. These mounts only let the `v` key display a bot's strategy
+      # source text -- no bots or research code is imported or run here. One file per strategy
+      # class, named `<class name>.py`: the view picks it by the bot's `bots:status` `strategy`
+      # field (Story 27.8), so a new strategy in bots.infrastructure.nautilus_host.STRATEGIES
+      # gets a line here too. The directory is the one bot_tui reads (STRATEGY_SOURCE_DIR's
+      # default): outside every package directory, so a mount can never shadow or create an
+      # importable package (Story 26.3).
+      - ./bots/strategies/dummy.py:/app/strategy_source/DummyStrategy.py:ro
+      - ./research/strategies/candle_pattern_strategy.py:/app/strategy_source/CandlePatternStrategy.py:ro
     network_mode: host
     logging: *default-logging
 

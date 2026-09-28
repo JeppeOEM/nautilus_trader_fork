@@ -1,12 +1,13 @@
 # Bot Operations: Starting/Stopping Bots and Writing Strategies
 
-Two separate strategy paths exist in `platform/`, and they are not interchangeable:
+Two separate runtimes exist in `platform/`; since Story 27.8 a strategy written for the first
+can run in the second:
 
 | | Backtest / research | Live paper bot |
 |---|---|---|
-| Where | `research/strategies/*_strategy.py` + `research/strategies/backtest_dydx.py` | `bots/strategies/dummy.py` + `bots/infrastructure/nautilus_host.py` (was `live_paper/`, Story 25.3) |
-| Runtime | `BacktestNode` (deterministic replay of the collector's Parquet catalog) | `TradingNode` (real dYdX WS data, sandbox execution) — the one place `platform/CLAUDE.md`'s TradingNode ban is lifted (AD-8) |
-| Wiring | `ImportableStrategyConfig(strategy_path=..., config_path=...)` — string path, per-symbol config | One strategy class hardcoded via `node.trader.add_strategy(...)` in `nautilus_host.py`'s `build_node()`, mirroring `examples/sandbox/dydx_sandbox.py` |
+| Where | `research/strategies/*_strategy.py` + `research/strategies/backtest_*.py` | `bots/infrastructure/nautilus_host.py` (was `live_paper/`, Story 25.3), running `bots/strategies/dummy.py` or a research strategy |
+| Runtime | `BacktestNode` (deterministic replay of the collector's Parquet catalog) | `TradingNode` (real venue WS data, sandbox execution) — the one place `platform/CLAUDE.md`'s TradingNode ban is lifted (AD-8) |
+| Wiring | `ImportableStrategyConfig(strategy_path=..., config_path=...)` — string path, per-symbol config | Per bot, the `strategy` key in `bots/config.toml` → `nautilus_host.STRATEGIES`: `dummy` is `DummyStrategy`, built directly (mirroring `examples/sandbox/dydx_sandbox.py`); `candle_pattern` is `research.strategies.candle_pattern_strategy:CandlePatternStrategy`, built by the same string path via `StrategyFactory.create(ImportableStrategyConfig(...))`, its `[bots.params]` as the config |
 | Start/stop | One-shot Python process call, exits when done | Long-running Docker container, controlled via Redis pub/sub or `bot_tui` |
 
 If you just want to try an idea against history, use the backtest path — it's a function
@@ -154,42 +155,67 @@ TEST-01 — use real `Price`/`Quantity`/`Bar` objects, never mocked Nautilus int
 
 ---
 
-## 3. Creating a live paper bot strategy (`bots/`)
+## 3. Running a strategy as a live paper bot (`bots/`)
 
-The bots run exactly **one** strategy class, attached directly in code (not by string
-path — that's a deliberate difference from the backtest path, see
-`bots/infrastructure/nautilus_host.py`'s module docstring). To trade a different strategy live:
+Each `[[bots]]` entry in `bots/config.toml` picks its strategy with the optional `strategy` key
+and passes that strategy's parameters in an optional `[bots.params]` table (Story 27.8; full
+rules in `bots/README.md`, "Choosing a bot's strategy"). Both default — `strategy = "dummy"`, no
+params — so existing files parse unchanged. For example, the candlestick strategy a scanner hit
+and a `04_backtest_evaluation` run pointed at:
 
-1. Write a new `Strategy` + `StrategyConfig` pair in `bots/strategies/` (e.g.
-   `bots/strategies/my_strategy.py`), following `bots/strategies/dummy.py`'s `DummyStrategy`
-   as the reference — same subscribe/`on_start`/`on_bar` shape as a backtest strategy, but
-   review that file's module docstring first: it documents which live data sources back
-   which indicator (no `DydxSecondSnapshot` exists live; OBI/OFI are sampled from a 1s
-   clock timer, not raw deltas, to match the backtest calibration cadence). It must keep a
-   public `last_data_ns` (the last quote's `ts_event`): `bots.infrastructure.cache_reader`
-   reads it for the feed-staleness incident log.
-2. Swap the import and instantiation in `bots/infrastructure/nautilus_host.py`'s
-   `build_node()`:
-   ```python
-   from bots.strategies.my_strategy import MyStrategy, MyStrategyConfig
-   ...
-   strategy = MyStrategy(config=MyStrategyConfig(...))
-   ```
-3. Add any new tunable fields to `BotConfig`/`ExecConfig` in `bots/domain/config.py`, to both
-   loaders in `bots/infrastructure/config.py`, and to `config.toml`, mirroring the existing
-   `trend_buy_threshold`-style fields. Never add a `mode` key to the paper config —
-   `load_paper_config()` hard-errors on it by design (the paper/real-money split is structural:
-   `PaperFleet` and `ExecBot` are distinct types).
-4. Rebuild and restart — code is baked into the image, not bind-mounted:
+```toml
+[[bots]]
+bot_id = "candle-01"
+instrument_id = "BTC-USD-PERP.DYDX"
+trade_size = "0.001"
+strategy = "candle_pattern"
+
+[bots.params]
+long_patterns = ["HAMMER", "ENGULFING"]
+trend_condition = "above"
+exit_bars = 10
+stop_atr_multiple = 2.0
+```
+
+The bot owns `instrument_id`, `trade_size` and its identity (`bot_id` is pinned as the strategy's
+`order_id_tag`, AD-11); `[bots.params]` may not set those or any other `StrategyConfig` base
+field, an unknown strategy or params key fails loudly (never a silent `dummy`), and the
+`trend_*`/`ofi_confirm_threshold` keys belong to `dummy` alone.
+
+To make another backtested strategy runnable as a paper bot:
+
+1. Keep it a `StrategyConfig` + `Strategy` pair in `research/strategies/` that imports only
+   `kernel` and `nautilus_trader` (never bots code), give its config
+   `forbid_unknown_fields=True`, and have it keep a public `last_data_ns` set from a market-data
+   callback (e.g. `on_quote_tick`): `bots.infrastructure.cache_reader` reads it for the
+   feed-staleness incident log. Live, subscribe quote ticks too — they drive the Sandbox fill
+   engine. `CandlePatternStrategy` is the reference.
+2. Add one row to `STRATEGIES` in `bots/infrastructure/nautilus_host.py`
+   (`"<name>": ("research.strategies.<module>:<Class>", "research.strategies.<module>:<Config>")`),
+   the same path to `_STRING_PATH_IMPORTS` in `platform/tests/test_images.py` (its `ast` walk
+   cannot follow a string; a test fails until it is there), and a read-only source mount
+   `/app/strategy_source/<Class>.py` to the `bot_tui` service in `docker-compose.yml` for the
+   `v` key. Never import the strategy from bots: `platform/tests/test_boundaries.py` fails a
+   bots → research import.
+3. Rebuild and restart — code is baked into the image, not bind-mounted:
    ```bash
    docker compose -f platform/docker-compose.yml --profile live-paper build live-paper
    make up-live-paper
    ```
 
+A strategy that belongs to the bots context alone (like `DummyStrategy`, whose tunables are
+`BotConfig` keys) lives in `bots/strategies/` and is built directly in `_strategy_for`; review
+`bots/strategies/dummy.py`'s module docstring first: it documents which live data sources back
+which indicator (no `DydxSecondSnapshot` exists live; OBI/OFI are sampled from a 1s clock timer,
+not raw deltas, to match the backtest calibration cadence). Never add a `mode` key to the paper
+config — `load_paper_config()` hard-errors on it by design (the paper/real-money split is
+structural: `PaperFleet` and `ExecBot` are distinct types).
+
 Real-money execution is a completely separate, explicitly-gated config file/loader
 (`ExecConfig`/`ExecBot`/`load_real_money_config`) — never reachable from the default
-`config.toml` path. See `bots/README.md` and `bots/infrastructure/config.py`'s module docstring
-before touching that path.
+`config.toml` path, and it always runs `DummyStrategy` (`ExecConfig` has no `strategy` key; a
+`Known limit:` in `nautilus_host.py`). See `bots/README.md` and
+`bots/infrastructure/config.py`'s module docstring before touching that path.
 
 ---
 

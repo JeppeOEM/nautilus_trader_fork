@@ -27,7 +27,9 @@ through its Redis Open Host Service -- `bots:status`, `bots:control`, `bots:hist
 - `infrastructure/` -- the Nautilus anti-corruption layer: `nautilus_host` (the only module that
   imports `TradingNode`, asserted by `platform/tests/test_boundaries.py`), `cache_reader` (every
   read strategy-scoped), plus `fills_store`, `redis` and the two config loaders (`config`).
-- `strategies/` -- `DummyStrategy`, framework code attached by `nautilus_host`.
+- `strategies/` -- `DummyStrategy`, framework code attached by `nautilus_host`. A bot may run a
+  research strategy instead (`strategy = "candle_pattern"`, Story 27.8), which `nautilus_host`
+  loads by string path through Nautilus's `StrategyFactory` -- bots never imports research.
 
 `__main__` (`python3 -m bots`, compose service `live-paper`) is the composition root. No module
 here holds mutable runtime state: every piece of state lives on an instance `__main__` builds.

@@ -59,6 +59,11 @@ def _handle_status_message(message: dict) -> None:
     _LATEST_RECEIVED_AT[bot_id] = time.time()
 
 
+def latest_status(bot_id: str) -> dict | None:
+    """Return bot_id's last-received bots:status message, or None if none has arrived yet."""
+    return _LATEST_STATUSES.get(bot_id)
+
+
 def is_stale(bot_id: str, now: float | None = None) -> bool:
     """Whether bot_id's last-received status should count as stale (Story 4.4, AC2)."""
     received_at = _LATEST_RECEIVED_AT.get(bot_id, 0.0)

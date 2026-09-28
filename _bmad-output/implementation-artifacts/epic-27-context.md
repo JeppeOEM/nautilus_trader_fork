@@ -4,7 +4,7 @@
 
 ## Goal
 
-Give the researcher six executable notebooks: catalog inspection, microstructure, correlation and cross-venue behaviour, backtest evaluation with sweeps and walk-forward, Monte Carlo robustness, and a candlestick scanner. No notebook holds analysis logic of its own. Every number comes from one typed analysis layer (`research/domain` value objects plus `research/application` ports and services), so a Sharpe ratio or a drawdown is computed one way in a notebook, a backtest report or a later bot report. The epic also makes candlestick patterns a first-class signal. One streaming `Indicator` in `kernel/` is shared by the chart picker, the screener's Technicals tab, the scanner notebook, backtests and paper bots, so a pattern found in the scanner is one config file away from a backtest and one more from a paper bot. The legacy notebooks, with their hard-coded paths, runtime `pip install` of TA-Lib/`pandas_ta` and reads of the retired `custom_dydx_minute_bar` directory, are replaced.
+Give the researcher six executable notebooks: catalog inspection, microstructure, correlation and cross-venue behaviour, backtest evaluation with sweeps and walk-forward, Monte Carlo robustness, and a candlestick scanner. No notebook holds analysis logic of its own. Every number comes from one typed analysis layer (`research/domain` value objects plus `research/application` ports and services), so a Sharpe ratio or a drawdown is computed one way in a notebook, a backtest report or a later bot report. The epic also makes candlestick patterns a first-class signal. One streaming `Indicator` in `kernel/` is shared by the chart picker, the screener's Technicals tab, the scanner notebook, backtests and paper bots, so a pattern found in the scanner is one config file away from a backtest and one more from a paper bot. The legacy notebooks, with their hard-coded paths, runtime `pip install` of TA-Lib/`pandas_ta` and reads of the retired `custom_dydx_minute_bar` directory, are replaced, and the research context is documented with binding notebook rules.
 
 ## Stories
 
@@ -14,7 +14,7 @@ Give the researcher six executable notebooks: catalog inspection, microstructure
 - Story 27.4: Correlation and cross-venue notebook (done)
 - Story 27.5: Backtest evaluation notebook, parameter sweeps and walk-forward (done)
 - Story 27.6: Monte Carlo and robustness notebook (done)
-- Story 27.7: Candlestick pattern detector in the kernel, on the chart, in the screener, and a scanner notebook
+- Story 27.7: Candlestick pattern detector in the kernel, on the chart, in the screener, and a scanner notebook (done)
 - Story 27.8: Candlestick patterns tradeable: `CandlePatternStrategy` in backtests and paper bots
 - Story 27.9: Closeout: research README, notebook index, rules, and the last legacy notebook gone
 
@@ -66,13 +66,12 @@ Give the researcher six executable notebooks: catalog inspection, microstructure
   - Logic lives in a `research/application` service; the precedents are `inspection.py`, `microstructure.py`, `aligned.py` and `evaluation.py`. Pure arithmetic lives in `research/domain`.
   - Sections read one instrument at a time.
   - `research/tests/test_notebooks.py` runs each notebook via `runpy` against the session fixture catalog, with plotly headless and a limit of under 60 s each. The fixture has 3 venues × 2 instruments, with a planted gap, a provisional day and a crossed second.
-- **Candlestick detector (27.7).**
-  - `kernel/candle_patterns.py` holds `CandlePattern(Indicator)` with `update_raw(o, h, l, c)`. Its `value` is +100, -100 or 0, following the TA-Lib convention.
-  - State is O(1): the last three bars only. Thresholds are explicit constructor parameters.
-  - `CandlePatternSet` runs every pattern for the scanner.
-  - It is registered through the existing `chart_indicators.INDICATOR_CATALOG`/`IndicatorSpec` and the screener's Technicals path, with no TOML key-set change.
+- **Candlestick detector (27.7, done, available for reuse).**
+  - `kernel/candle_patterns.py` holds `PatternName` (22 names), the frozen validated `Thresholds`, `CandlePattern(Indicator)` with `update_raw(open, high, low, close)` and `CandlePatternSet` (every pattern over one bar stream).
+  - `value` is +100, -100 or 0 (TA-Lib's convention). Warm-up is the pattern's bars, plus `trend_bars + 1` for trend patterns. State is O(1): at most three bar records.
+  - It is already consumed by the chart picker and screener Technicals (`views.indicator_picker`) and by the scanner (`research.application.patterns`, `research.domain.events`). A strategy uses the same class, never a second definition.
+  - The scanner's trend filter vocabulary is `any`/`above`/`below` against Nautilus's `ExponentialMovingAverage`; a strategy's `trend_condition` must match it.
   - Hits are drawn as histogram spikes. This is a `Known limit:`, and the upgrade path is lightweight-charts markers.
-  - 27.7 also adds `candle_patterns` to the spine's kernel list.
 - **Bots paths.** The epic text predates the move from `live_paper` to `bots/`. Read its references as follows:
   - `live_paper/node.py` means `bots/infrastructure/nautilus_host.py`.
   - `BotConfig` means `bots/domain/config.py` (plus `bots/infrastructure/config.py`).
@@ -81,11 +80,11 @@ Give the researcher six executable notebooks: catalog inspection, microstructure
   - The compose service is still named `live-paper`.
 
   Paper and non-paper configs are distinct types (`PaperConfig`/`PaperFleet` versus `ExecConfig`/`ExecBot`). The new `strategy`/`params` keys must be optional with defaults and must never add a mode to a paper config. The strategy resolves by string path through `StrategyFactory.create(ImportableStrategyConfig(...))`, so there is no bots → research import edge, and `test_images.py` needs an explicit entry for that import.
-- **Legacy notebook remaining:** `research/notebooks/candlestick_pattern_scanner.ipynb`, which 27.7 deletes. `backtest.ipynb` is already gone.
+- **No legacy notebook remains** (27.5 and 27.7 deleted them). `research/README.md` already exists as 27.2's index stub, with all six notebooks listed; `research/BACKTESTING.md` still exists and is folded into the README by 27.9.
 
 ## Cross-Story Dependencies
 
-- 27.1–27.6 are done. The remaining stories run in order, 27.7 → 27.9, and all build on 27.1's values and ports and on 27.2's `_params.py`, notebook harness and fixture catalog.
+- 27.1–27.7 are done. The remaining stories run in order, 27.8 → 27.9, and all build on 27.1's values and ports and on 27.2's `_params.py`, notebook harness and fixture catalog.
 - 27.8 depends on 27.7's detector and on `BacktestRunner`. It becomes the second worked example in 27.5's `04_backtest_evaluation` notebook.
 - 27.9 closes the epic:
   - `research/README.md` replaces `research/BACKTESTING.md`, leaving a redirect stub.

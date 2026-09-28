@@ -117,18 +117,16 @@ _FOOTER_HINT_TEXTS = {
 # client-side check for instant feedback only -- the collector re-validates regardless.
 _MAX_COLLECTED_INSTRUMENTS = 29
 
-# Read-only bind mount of bots/strategies/dummy.py (docker-compose.yml's bot_tui service) -- the
-# `v` key's only way to reach the strategy's source, since bot_tui's own image
-# (collector.dockerfile) never COPYs bots/ in (AD-8's module isolation stays
-# intact: this mount is view-only, no import/execution of bots code happens
-# here). The container path lies outside every package directory (Story 26.3).
-# Hardcoded to the one strategy this system currently runs -- see
-# bots.infrastructure.nautilus_host's build_node(), which attaches DummyStrategy directly rather
-# than by string path; revisit as a per-bot lookup (bots:status already carries a
-# `strategy` class-name field) if a second strategy is ever added.
-_STRATEGY_SOURCE_PATH = Path(
-    os.environ.get("STRATEGY_SOURCE_PATH", "/app/strategy_source/strategy.py")
-)
+# Read-only bind mounts of each strategy's source, one file per strategy class named
+# `<class name>.py` (docker-compose.yml's bot_tui service: `DummyStrategy.py` from
+# bots/strategies/dummy.py, `CandlePatternStrategy.py` from
+# research/strategies/candle_pattern_strategy.py) -- the `v` key's only way to reach a
+# strategy's source, since bot_tui's own image (collector.dockerfile) never COPYs bots/ in (AD-8's
+# module isolation stays intact: the mounts are view-only, no import/execution of bots or
+# research code happens here). The view picks the file by the bot's own `bots:status` `strategy`
+# field (its class name, `StrategyCacheReader.strategy_name`), so each bot shows the strategy it
+# actually runs. The container directory lies outside every package directory (Story 26.3).
+_STRATEGY_SOURCE_DIR = Path(os.environ.get("STRATEGY_SOURCE_DIR", "/app/strategy_source"))
 
 # Full control reference shown by `:h`/`:help` (see _COMMAND_ALIASES below) -- one
 # section per view, listing every key that view's own footer hint above only
@@ -597,7 +595,7 @@ class BotTuiApp:
         # pre-existing None-threaded shape to inherit that discipline from (Story 4.5,
         # Dev Notes item 7).
         bot_id = self._bot_detail_bot_id
-        status = bots_state._LATEST_STATUSES.get(bot_id) if bot_id is not None else None
+        status = bots_state.latest_status(bot_id) if bot_id is not None else None
         if status is None:
             self._bot_detail_listbox = None
             return urwid.Filler(urwid.Text("no status yet"), valign="top")
@@ -659,13 +657,30 @@ class BotTuiApp:
         # strategy source file can easily exceed one screen's height, and ListBox
         # gets free up/down/page scrolling the same way the Bots-pane row list
         # already does, with no extra wiring.
+        source = self._strategy_source_path()
+        if isinstance(source, str):
+            return urwid.Filler(urwid.Text(source), valign="top")
         try:
-            lines = _STRATEGY_SOURCE_PATH.read_text().splitlines()
-        except OSError as e:
-            return urwid.Filler(
-                urwid.Text(f"could not read {_STRATEGY_SOURCE_PATH}: {e}"), valign="top"
-            )
+            lines = source.read_text().splitlines()
+        except (OSError, UnicodeDecodeError) as e:
+            return urwid.Filler(urwid.Text(f"could not read {source}: {e}"), valign="top")
         return urwid.ListBox(urwid.SimpleListWalker([urwid.Text(line) for line in lines]))
+
+    def _strategy_source_path(self) -> Path | str:
+        """
+        Return the mounted source of the open bot's strategy class, from its latest
+        `bots:status`, or the line saying why there is none. The class name arrives over Redis,
+        so one that is not a plain identifier never gets to pick a path outside
+        `_STRATEGY_SOURCE_DIR`.
+        """
+        bot_id = self._bot_detail_bot_id
+        status = bots_state.latest_status(bot_id) if bot_id is not None else None
+        if status is None:
+            return f"no bots:status received yet for {bot_id}: strategy unknown"
+        strategy = status.get("strategy")
+        if not isinstance(strategy, str) or not strategy.isidentifier():
+            return f"{bot_id} reports strategy {strategy!r}, not a class name: no source to show"
+        return _STRATEGY_SOURCE_DIR / f"{strategy}.py"
 
     def _build_incidents_body(self) -> urwid.Widget:
         bot_id = self._bot_detail_bot_id
@@ -731,7 +746,7 @@ class BotTuiApp:
         bot_id = self._active_bot_id()
         if bot_id is None:
             return
-        status = bots_state._LATEST_STATUSES.get(bot_id)
+        status = bots_state.latest_status(bot_id)
         running = bool(status.get("running")) if status is not None else False
         if running:
             self._open_stop_confirm(bot_id)

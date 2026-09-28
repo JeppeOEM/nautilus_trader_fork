@@ -28,9 +28,22 @@ non-Sandbox exec client. The pure per-venue facts (allowed environments, paper q
 `bots.domain.config.VENUE_RULES`, keyed by the same venue tokens (a test pins it). Adding a venue is
 one row in each, never an `if venue == ...` branch here.
 
-Strategies are attached directly with `node.trader.add_strategy(...)` -- the live reference
-examples' pattern (`examples/sandbox/dydx_sandbox.py`), not `ImportableStrategyConfig`, which is a
-BacktestNode sweep convenience (AD-6).
+Each bot's strategy is named by its `strategy` key and resolved through `STRATEGIES`, then attached
+with `node.trader.add_strategy(...)`. `dummy` (the default, and the only strategy of an `ExecBot`)
+is `DummyStrategy`, built directly from the bot's config as the live reference examples do
+(`examples/sandbox/dydx_sandbox.py`). Every other strategy is built by string path with Nautilus's
+own resolver, `StrategyFactory.create(ImportableStrategyConfig(...))` -- the mechanism
+`BacktestNode` uses (AD-6), so the class a backtest ran is the class the paper bot runs, from the
+same `research.strategies.<module>:<Class>` path. The string is deliberate: a direct import would
+be a bots -> research edge the context map does not have (`platform/tests/test_boundaries.py`
+states why there is none); the image still ships `research` (`bots.dockerfile`), and
+`platform/tests/test_images.py`'s `_STRING_PATH_IMPORTS` names each path because its `ast` walk
+cannot see a string.
+
+Known limit: an `ExecBot` (`real_money`/`exchange_demo`) always runs `DummyStrategy` --
+`ExecConfig` has no `strategy`/`params` keys, so a strategy reaches real signing only after it has
+run as a paper bot. Upgrade path: the same two keys on `ExecConfig` and its loader, checked by
+`check_strategy`, once a paper-proven strategy is promoted.
 """
 
 from collections.abc import Callable
@@ -47,6 +60,7 @@ from bots.domain.config import BotConfig
 from bots.domain.config import ExecBot
 from bots.domain.config import ExecConfig
 from bots.domain.config import PaperFleet
+from bots.domain.config import plain_params
 from bots.strategies.dummy import DummyStrategy
 from bots.strategies.dummy import DummyStrategyConfig
 from nautilus_trader.adapters.bybit.config import BybitDataClientConfig
@@ -68,8 +82,10 @@ from nautilus_trader.adapters.sandbox.config import SandboxExecutionClientConfig
 from nautilus_trader.adapters.sandbox.factory import SandboxLiveExecClientFactory
 from nautilus_trader.config import CacheConfig
 from nautilus_trader.config import DatabaseConfig
+from nautilus_trader.config import ImportableStrategyConfig
 from nautilus_trader.config import InstrumentProviderConfig
 from nautilus_trader.config import LoggingConfig
+from nautilus_trader.config import StrategyConfig
 from nautilus_trader.config import TradingNodeConfig
 from nautilus_trader.core.nautilus_pyo3 import BybitEnvironment
 from nautilus_trader.core.nautilus_pyo3 import BybitProductType
@@ -78,13 +94,34 @@ from nautilus_trader.core.nautilus_pyo3 import HyperliquidEnvironment
 from nautilus_trader.live.node import TradingNode
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.identifiers import TraderId
+from nautilus_trader.trading.config import StrategyFactory
+from nautilus_trader.trading.strategy import Strategy
 
 
 # One fixed id for the whole node (AD-11): per-bot addressing lives entirely in bot_id /
 # StrategyId (order_id_tag), never in trader_id.
 TRADER_ID = "LIVE-PAPER-001"
 
-type HostedBot = tuple[BotConfig | ExecConfig, DummyStrategy]
+type HostedBot = tuple[BotConfig | ExecConfig, Strategy]
+
+# `strategy` key -> (strategy path, config path) for `StrategyFactory`, or None for the one class
+# built directly (`DummyStrategy`). Adding a strategy is one row here, one in `_STRING_PATH_IMPORTS`
+# (`platform/tests/test_images.py`) and one bot_tui source mount (`docker-compose.yml`).
+STRATEGIES: MappingProxyType[str, tuple[str, str] | None] = MappingProxyType(
+    {
+        "dummy": None,
+        "candle_pattern": (
+            "research.strategies.candle_pattern_strategy:CandlePatternStrategy",
+            "research.strategies.candle_pattern_strategy:CandlePatternStrategyConfig",
+        ),
+    }
+)
+# Keys a bot's `params` may never set: `BotConfig` owns the identity (`order_id_tag` is the bot's
+# `bot_id`, AD-11; `strategy_id` would override it) and the sizing, and every other
+# `StrategyConfig` base field is the host's (e.g. `oms_type`, `manage_stop`).
+_RESERVED_PARAMS = frozenset({"instrument_id", "trade_size"}) | frozenset(
+    StrategyConfig.__struct_fields__
+)
 
 
 @dataclass(frozen=True)
@@ -234,7 +271,9 @@ def _cache_config(redis_url: str) -> CacheConfig:
 
 
 def build_node(fleet: PaperFleet | ExecBot, redis_url: str) -> tuple[TradingNode, list[HostedBot]]:
-    """Build the process's one node and attach one `DummyStrategy` per bot, in config order."""
+    """Build the process's one node and attach each bot's strategy (`STRATEGIES`) in order."""
+    # Every strategy first: a bad one fails the build before any node (Cache, Redis, loop) exists.
+    hosted: list[HostedBot] = [(bot, _strategy_for(bot)) for bot in fleet.bots]
     instrument_provider = InstrumentProviderConfig(load_all=True)
     if isinstance(fleet, ExecBot):
         data_clients, exec_clients, data_factories = _exec_venue_clients(fleet, instrument_provider)
@@ -258,23 +297,83 @@ def build_node(fleet: PaperFleet | ExecBot, redis_url: str) -> tuple[TradingNode
         node.add_data_client_factory(venue, data_factory)
         node.add_exec_client_factory(venue, exec_factory)
 
-    hosted: list[HostedBot] = []
-    for bot in fleet.bots:
-        strategy = DummyStrategy(
+    for _bot, strategy in hosted:
+        node.trader.add_strategy(strategy)
+
+    node.build()
+    return node, hosted
+
+
+def check_strategy(bot: BotConfig) -> None:
+    """
+    Refuse a bot whose `strategy`/`params` cannot mean what they say (DATA-07: never a silent
+    fallback to `dummy`): an unknown strategy, `params` on `dummy` (its tunables are `BotConfig`
+    keys), or a params key `BotConfig` or the host owns (`_RESERVED_PARAMS`). A params key the
+    strategy's config does not have fails at build, where its config class rejects it.
+    """
+    if bot.strategy not in STRATEGIES:
+        raise ValueError(
+            f"[[bots]] {bot.bot_id}: unknown strategy {bot.strategy!r} -- known: {list(STRATEGIES)}"
+        )
+    if STRATEGIES[bot.strategy] is None and bot.params:
+        raise ValueError(
+            f"[[bots]] {bot.bot_id}: strategy {bot.strategy!r} takes no [bots.params] "
+            f"(got {sorted(bot.params)}); its tunables are [[bots]] keys"
+        )
+    reserved = sorted(_RESERVED_PARAMS & set(bot.params))
+    if reserved:
+        raise ValueError(
+            f"[[bots]] {bot.bot_id}: [bots.params] may not set {reserved}: the bot's own keys "
+            "and the host set them"
+        )
+
+
+def _strategy_for(bot: BotConfig | ExecConfig) -> Strategy:
+    """
+    Build `bot`'s strategy with its `order_id_tag` pinned to `bot_id` -- never
+    `Trader.add_strategy()`'s insertion-order default (AD-11): an auto-assigned tag would make a
+    bot's Cache/Redis/fills.db identity depend on config list order, silently reassigning history
+    on a reorder.
+    """
+    paths = None
+    if isinstance(bot, BotConfig):
+        check_strategy(bot)  # a directly built BotConfig is checked too, never a bare KeyError
+        paths = STRATEGIES[bot.strategy]
+    if paths is None:
+        return DummyStrategy(
             config=DummyStrategyConfig(
                 instrument_id=InstrumentId.from_str(bot.instrument_id),
                 trade_size=bot.trade_size,
                 trend_buy_threshold=bot.trend_buy_threshold,
                 trend_sell_threshold=bot.trend_sell_threshold,
                 ofi_confirm_threshold=bot.ofi_confirm_threshold,
-                # Pinned to bot_id, never Trader.add_strategy()'s insertion-order default
-                # (AD-11): an auto-assigned tag would make a bot's Cache/Redis/fills.db identity
-                # depend on config list order, silently reassigning history on a reorder.
                 order_id_tag=bot.bot_id,
             ),
         )
-        node.trader.add_strategy(strategy)
-        hosted.append((bot, strategy))
+    assert isinstance(bot, BotConfig)  # an ExecConfig has no paths (see the module's Known limit)
+    return _importable_strategy(bot, *paths)
 
-    node.build()
-    return node, hosted
+
+def _importable_strategy(bot: BotConfig, strategy_path: str, config_path: str) -> Strategy:
+    config = {
+        **plain_params(bot.params),
+        "instrument_id": bot.instrument_id,
+        "trade_size": str(bot.trade_size),
+        "order_id_tag": bot.bot_id,
+    }
+    try:
+        strategy = StrategyFactory.create(
+            ImportableStrategyConfig(
+                strategy_path=strategy_path, config_path=config_path, config=config
+            )
+        )
+    except Exception as exc:  # the resolver's import, msgspec and strategy errors alike
+        raise ValueError(f"[[bots]] {bot.bot_id}: strategy {bot.strategy!r}: {exc}") from exc
+    if not hasattr(strategy, "last_data_ns"):
+        # `StrategyCacheReader.last_data_ns` feeds the heartbeat; without it the bot would crash
+        # at its first status publish instead of here.
+        raise ValueError(
+            f"[[bots]] {bot.bot_id}: strategy {bot.strategy!r} ({strategy_path}) has no "
+            "`last_data_ns` for the heartbeat"
+        )
+    return strategy

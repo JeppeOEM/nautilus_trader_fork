@@ -40,7 +40,7 @@ downstream of the collector ever touches `nautilus_trader`'s live `TradingNode`/
 | `observability/` | The generic observability context (Story 23.1, DDD spine AD-D16), standard library only and venue-free: `error_ledger` (every continue-past-failure site, DATA-07; in-memory per process, plus a durable per-service `<service>.jsonl` sink behind the same `record()` call, Story 23.3), `notify` (the one outbound transport: channels `operator` = ntfy/`WATCHDOG_NTFY_URL`, `telegram` = `TELEGRAM_*`, `webhook:<url>`), `watchdog` (the generic `(down_since, reminder)` alert transition), `incidents` (the WARNING+ incident-report handler, parameterised by the venue entrypoint's `IncidentConfig`). Every context except `kernel` may import it (spine AD-D2); it imports none | ntfy / Telegram / webhook URLs (outbound HTTP POST), `data/incident_reports/` (write, dYdX collector only), `data/errors/*.jsonl` (write, every service; Story 23.3) |
 | `data_api/` + `frontend/` | Web UI (React SPA) + REST/WS on `:9100`, read-only except the saved preferences/alerts and the ranking-mode switch. Format + transport only since Story 24.2: every value comes from `views/`; `data_api/buses.py` constructs the two Redis bus instances, `data_api/alert_wiring.py` the alerting instances (Story 24.3), and `app.py`'s lifespan attaches the alert engine to the live-candle bus -- the only such wiring; `routes/alerts.py` is a thin adapter over `alerting.application` (the deprecated `data_api/alerts.py` re-export was deleted in Story 25.1) `[amended 2026-09-25: Story 25.1]` | Redis (read; `ranking:control` publish from `PUT /api/rankings/mode`, Story 25.1a), Parquet catalog + `candles_*.db` + `metrics.db` (read-only, through `views/`), `alerts.toml` (through `alerting/`) |
 | `ranking/` | The ranking context (Story 25.2, DDD spine AD-D10): sole computer of coin ranking (volume + volatility) and of the pct-change/volatility math. `RankingBoard` (`domain/`) owns the mode, one `InstrumentMetrics` per instrument, the volume book and the publisher; `RankingEngine` (`application/`) drives it through the `VolumeSource`/`PriceHistory`/`RankingHistory`/`LivePublisher` ports, whose adapters (`infrastructure/`) only `__main__` wires; `application/queries.py` (`history`/`nearest`) is the `metrics.db` read service views calls. No module-level state. Runs as `python3 -m ranking` (compose service `ranking_engine`); the old package path's re-export shims were deleted in Story 25.4 `[amended 2026-09-26: Story 25.2]` `[amended 2026-09-26: Story 25.4]` | Redis (`snapshots:raw` read; `rankings:live` publish; `ranking:control` read), `metrics.db` (write), Parquet catalog (read, one-time price backfill), dYdX/Bybit/Hyperliquid REST (24h USD volume poll, through `kernel.venue_http`) |
-| `bots/` | The bots context (Story 25.3, DDD spine AD-D15; its old package path's re-export shims were deleted in Story 26.1 `[amended 2026-09-26: Story 26.1]`): the actual trading bots — one `TradingNode` + one `DummyStrategy` per bot, in paper (or gated demo/real-money) mode. `PaperFleet`/`ExecBot` make the paper/non-paper split a type, `Bot` holds the incident log, `FillLedger` the per-fill PnL; `nautilus_host.py` is the only `TradingNode` importer. Runs as `python3 -m bots` (compose service `live-paper`) `[amended 2026-09-26: Story 25.3]` | Venue WS/HTTP (via `TradingNode`), Redis (`bots:status` publish, `bots:history:*`/`bots:incidents:*` set, `bots:control` read; the Nautilus Cache), `fills.db` (write) |
+| `bots/` | The bots context (Story 25.3, DDD spine AD-D15; its old package path's re-export shims were deleted in Story 26.1 `[amended 2026-09-26: Story 26.1]`): the actual trading bots — one `TradingNode` + one strategy per bot (`DummyStrategy`, or since Story 27.8 a research strategy such as `CandlePatternStrategy` loaded by string path `[amended 2026-09-28: Story 27.8]`), in paper (or gated demo/real-money) mode. `PaperFleet`/`ExecBot` make the paper/non-paper split a type, `Bot` holds the incident log, `FillLedger` the per-fill PnL; `nautilus_host.py` is the only `TradingNode` importer. Runs as `python3 -m bots` (compose service `live-paper`) `[amended 2026-09-26: Story 25.3]` | Venue WS/HTTP (via `TradingNode`), Redis (`bots:status` publish, `bots:history:*`/`bots:incidents:*` set, `bots:control` read; the Nautilus Cache), `fills.db` (write) |
 | `bot_tui/` | Keyboard-only terminal UI, interactive/on-demand: the control surface for the bots and the collector (two panes, Bots and Collector). Rankings, the ranking-mode switch and the single-coin view are web-only since Story 25.1a, so it imports no `views/` read model `[amended 2026-09-26: Story 25.1a]` | Redis (`bots:*` and `collector:status` read; `bots:control`, `collector:control` publish), dashboard (HTTP deep-link only) |
 
 Module boundary rule enforced throughout (architecture AD-4): every module downstream
@@ -304,6 +304,12 @@ the old signals package and the dYdX collector's notebooks]`.
 - **`strategies/example_strategy.py` / `strategies/ofi_strategy.py` / `strategies/snapshot_strategy.py`** — backtest-only
   reference strategies, referenced via `ImportableStrategyConfig` by string path
   (`research.strategies.<module>:<Class>`).
+- **`strategies/candle_pattern_strategy.py` / `strategies/backtest_candle_pattern.py`** — the
+  candlestick strategy (Story 27.8): `kernel.candle_patterns` detectors with the scanner's EMA
+  filter, entered in `on_bar` of the closed pattern bar, out after `exit_bars`, on an opposite
+  pattern or on a reduce-only ATR stop; imports only `kernel` and `nautilus_trader`, so the same
+  string path runs in a `NodeRunner` backtest (`data="trades"`), `04_backtest_evaluation` and a
+  paper bot (`strategy = "candle_pattern"`, section 4) `[amended 2026-09-28: Story 27.8]`.
 - **`domain/`** (Story 27.1) — the analysis values every notebook and backtest report shows, each
   with its invariant in its docstring: `returns.ReturnSeries` (one period per series; `from_prices`
   never bridges a gap, `from_equity`, `resample` compounds, `rolling_sharpe` through
@@ -454,7 +460,9 @@ compose service are unchanged, proven by `bots/tests/test_replay.py` against pay
 from the pre-move code.
 
 - **`domain/`** — `config.py`: `PaperFleet` (many bots, one Sandbox pool per venue; its
-  `PaperConfig` has no `mode` field) and `ExecBot` (one bot, `ExecConfig.mode` ∈
+  `PaperConfig` has no `mode` field; each `BotConfig` names its `strategy`, default `dummy`, and
+  a read-only `params` table for it, both optional keys that default `[amended 2026-09-28: Story
+  27.8]`) and `ExecBot` (one bot, `ExecConfig.mode` ∈
   {`real_money`, `exchange_demo`}, agreeing with `environment`) are distinct aggregates built by
   distinct loaders, so no config key, control message or list reorder can promote a paper bot
   (AD-D15; Known limit: demo vs real is a validated value, not a type). `bot.py`: `Bot`
@@ -465,7 +473,13 @@ from the pre-move code.
   carries a mode) and `history.py` (fills recorded on-fill, `bots:history:*` every 30 s).
 - **`infrastructure/`** — the Nautilus anti-corruption layer: `nautilus_host.py` (the one
   `TradingNode` per process, one data + one Sandbox exec client per venue from `VENUES`;
-  `test_boundaries.py` fails any other `TradingNode` importer), `cache_reader.py` (every
+  `test_boundaries.py` fails any other `TradingNode` importer; each bot's strategy from
+  `STRATEGIES` by its `strategy` key — `dummy` built directly, `candle_pattern` by the string
+  path `research.strategies.candle_pattern_strategy:CandlePatternStrategy` through Nautilus's
+  `StrategyFactory`, so bots has no research import (`test_boundaries.py`) while the image ships
+  `research/` (`test_images.py`'s `_STRING_PATH_IMPORTS`); `check_strategy` refuses an unknown
+  strategy, params on `dummy` and a params key the bot owns; an `ExecBot` always runs
+  `DummyStrategy`, a Known limit `[amended 2026-09-28: Story 27.8]`), `cache_reader.py` (every
   position read scoped to the bot's own `strategy_id`), plus `fills_store.py`, `redis.py` and
   `config.py` (the two loaders; real money needs `LIVE_PAPER_REAL_MONEY_CONFIG` naming a file
   the paper loader cannot parse).
@@ -478,6 +492,12 @@ from the pre-move code.
   against in backtest), and `OnlineLogisticTrend` from `Bar` via INTERNAL aggregation.
   Has an `orders_inflight()` guard to avoid duplicate submissions while a fill is
   pending — flagged as still needing a concurrency test, see below.
+- **A research strategy as a paper bot** `[amended 2026-09-28: Story 27.8]` — a bot with
+  `strategy = "candle_pattern"` runs `research/strategies/candle_pattern_strategy.py`'s
+  `CandlePatternStrategy` (the scanner's `kernel.candle_patterns` detector, its EMA filter, a
+  bar-count/opposite-pattern exit and a reduce-only ATR stop), the same class and string path a
+  backtest runs; its `[bots.params]` are the strategy's config. `bot_tui`'s `v` key shows each
+  bot's own strategy source from `/app/strategy_source/<Class>.py`.
 
 **Reads:** venue WS/HTTP (via `TradingNode`), `bots:control`.
 **Publishes:** `bots:status`; sets `bots:history:*` and `bots:incidents:*`.
