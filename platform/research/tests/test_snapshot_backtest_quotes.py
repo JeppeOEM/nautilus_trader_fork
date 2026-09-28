@@ -13,7 +13,7 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-`snapshot_backtest._quotes`: the derived QuoteTicks are written in `ts_init` order even when the
+`research.application.quotes.derived_quotes`: the derived QuoteTicks are written in `ts_init` order even when the
 top-of-book rows (sorted by `ts_event`) disagree, which `ParquetDataCatalog.write_data` requires.
 """
 
@@ -25,7 +25,7 @@ from kernel.clocks import NS_PER_S
 from nautilus_trader.model.data import QuoteTick
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 from nautilus_trader.test_kit.providers import TestInstrumentProvider
-from research.strategies.snapshot_backtest import _quotes
+from research.application.quotes import derived_quotes
 
 
 _T0 = 1_760_000_000 * NS_PER_S
@@ -42,7 +42,7 @@ def test_quotes_are_ordered_by_ts_init_and_the_derived_catalog_accepts_them(
         TopOfBook(_T0 + NS_PER_S, _T0 + 2 * NS_PER_S, 100.2, 1.0, 100.3, 2.0),
     ]
 
-    quotes = _quotes(instrument, tops)
+    quotes = derived_quotes(instrument, tops)
 
     assert [(q.ts_event, q.ts_init) for q in quotes] == [
         (_T0 + NS_PER_S, _T0 + 2 * NS_PER_S),

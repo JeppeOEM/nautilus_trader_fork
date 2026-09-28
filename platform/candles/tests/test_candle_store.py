@@ -160,6 +160,17 @@ def test_prune_drops_old_short_bars_but_keeps_wide_ones(tmp_path: Path) -> None:
     assert queries.oldest_t(db, _IID, 60) is None
     assert queries.oldest_t(db, _IID, 300) is None
     assert queries.oldest_t(db, _IID, 14400) is not None
+    assert queries.newest_t(db, _IID, 60) is None
+    assert queries.newest_t(db, _IID, 14400) is not None
+
+
+def test_bucket_starts_lists_every_observed_bucket_and_skips_the_outage(tmp_path: Path) -> None:
+    db = sqlite_store.connect_rw(str(tmp_path / "c.db"))
+    sqlite_store.apply_seconds(db, _IID, _fixture())
+    starts = queries.bucket_starts(db, _IID, 60, _DAY0_MS, _DAY0_MS + 6 * 3_600_000)
+    outage = set(range(_DAY0_MS + 7_200_000, _DAY0_MS + 9_600_000, 60_000))
+    expected = [t for t in range(_DAY0_MS, _DAY0_MS + 6 * 3_600_000, 60_000) if t not in outage]
+    assert starts == expected  # untraded minutes included, the collector-down minutes absent
 
 
 def test_read_only_reader_sees_writer_and_missing_store_is_none(tmp_path: Path) -> None:

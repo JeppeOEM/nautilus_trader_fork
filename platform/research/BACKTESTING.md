@@ -9,6 +9,65 @@ shared data types only).
 
 ---
 
+## Run from a notebook
+
+`research.application.backtest_runner.NodeRunner` (the `BacktestRunner` port, Story 27.1) is the
+one way a notebook runs a backtest: it wraps `BacktestNode` + `BacktestDataConfig` +
+`ImportableStrategyConfig`, so a notebook never builds a node, a run config or a report by hand.
+
+```python
+from research.application.backtest_runner import NodeRunner
+from research.application.ports import RunSpec
+
+spec = RunSpec(
+    catalog_path="platform/data/catalog",
+    instrument_ids=("BTC-USD-PERP.DYDX",),        # one venue per run (Known limit)
+    start="2026-09-05",                            # required: every read is bounded (MEM-01)
+    end="2026-09-07",
+    strategy_path="research.strategies.ofi_strategy:OFIStrategy",
+    config_path="research.strategies.ofi_strategy:OFIStrategyConfig",
+    params={"ofi_threshold": 2.0, "warmup_seconds": 600, "trade_size": "0.01"},
+    starting_balance=10_000,
+    data="seconds",   # DydxSecondSnapshot + quotes derived from its top of book
+                      # "trades" = TradeTick; "bars:1-MINUTE" = TradeTick aggregated by Nautilus
+                      # into <iid>-1-MINUTE-LAST-INTERNAL, injected as the strategy's `bar_type`
+)
+runner = NodeRunner()
+result = runner.run(spec)
+result.metrics.as_table()      # MetricReport: kernel.performance_metrics.all_metrics, typed
+result.equity.drawdowns()      # EquityCurve: underwater series + drawdown episodes
+result.trades.by_hour_of_day() # TradeLedger: closed round trips (net realized PnL)
+
+# A sweep: one BacktestNode, one BacktestRunConfig per grid point (identical points raise), each
+# point's params merged over spec.params; results come back in grid order, each attributed by its
+# BacktestRunConfig.id.
+results = runner.sweep(spec, [{"ofi_threshold": t} for t in (1.0, 1.5, 2.0)])
+{r.params["ofi_threshold"]: r.metrics.sharpe_ratio for r in results}
+```
+
+What `RunResult` carries: `config_id`, the merged `params`, `equity` (the account report's
+balance `total` after each of the account's own events, in event order, including a position
+still open at the end -- so it can differ from `metrics`, which cover closed trades only), `trades` (every closed position of the positions report, NETTING
+snapshots included; a position still open at the end is not a trade), `metrics`, `pnl_by_day`,
+Nautilus's own `nautilus_stats` (`stats_pnls`/`stats_returns`, for cross-checking),
+`iterations` and `wall_seconds`. The runner reads each engine's reports before disposing the node
+(`dispose_on_completion=False`), which is why they are not empty the way `backtest_dydx.py`'s
+docstring found them after `run()`. A config Nautilus returns no result for raises -- never a
+silent gap. The runner's `Known limit:`s (one venue and one settlement currency per run; a sweep
+holds every grid point's engine until its reports are read; one-shot data loading per grid point
+because the pinned Nautilus cannot stream a custom data type) are in
+`research/application/backtest_runner.py` and `research/application/ports.py`.
+
+Market data for the same window comes from `research.application.frames.CatalogFrames`
+(`frames.seconds(iid, start=..., end=...)`, `trades`, `bars(iid, 60, ...)` from the candle store,
+`funding`, `open_interest`, `mark_index`), and ranking history from
+`research.application.ranking_history.HttpRankingHistory` (data_api over HTTP). Returns,
+correlation and clustering live in `research.domain` (`ReturnSeries`, `align`,
+`correlation_matrix`, `lead_lag`, `cluster`): a notebook cell calls them, it never re-derives a
+statistic.
+
+---
+
 ## Run an existing backtest
 
 ```bash
@@ -129,14 +188,16 @@ class MyStrategy(Strategy):
 **Reuse existing signal math** — don't reimplement OFI/OBI/microprice/spread. They're in
 `kernel/indicators.py` (`OrderFlowImbalance`, `MultiLevelOFI`, `MultiLevelOBI`,
 `Microprice`, `OnlineLogisticTrend`) per SIGNAL-01 in `platform/CLAUDE.md` — raw data is
-stored, signals are computed on read. In-repo, research imports only `kernel` and `observability`:
-never `views/`, `data_api/` or `ranking/`
+stored, signals are computed on read. In-repo, research imports only `kernel`, `observability` and
+the candles query services (`open_store`, `window`, `oldest_t`, `newest_t`, `bucket_starts` and the `BAR_SECONDS` sizes, Story 27.1): never `views/`, `data_api/` or `ranking/`
 (`platform/tests/test_boundaries.py`). Rolling metrics such as pct-change and volatility are
 ranking's (`metrics.db`, the rankings API), never recomputed here.
 
-**Read the catalog through the kernel** — outside a `BacktestDataConfig`, read market-data rows
-with `kernel.catalog_files` (`query_top_of_book`, `query_second_ohlc`: column-projected and
-time-bounded, MEM-01), never `catalog.query`/`trade_ticks`/`read_parquet`
+**Read the catalog through a bounded path** — outside a `BacktestDataConfig`, read market-data
+rows through `research.application.frames.CatalogFrames` or `kernel.catalog_files`
+(`query_top_of_book`, `query_second_ohlc`, `query_index_prices`: column-projected and
+time-bounded, MEM-01). A catalog `query`/`trade_ticks`/`bars` call must name both `start=` and
+`end=`, and `read_parquet`/`read_table`/`ParquetFile` are never allowed
 (`research/tests/test_research_reads.py`). `catalog.instruments(...)` (metadata) is fine.
 
 ---

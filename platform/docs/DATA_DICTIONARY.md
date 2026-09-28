@@ -190,15 +190,20 @@ Hyperliquid only** (dYdX bars are derived from its 1 s archive instead).
 
 - Same channel/path/precision-fix as mark price (`client.py`). Oracle index
   price, distinct from the venue's own mark price.
+- **Reading it back:** `ParquetDataCatalog.query(IndexPriceUpdate, ...)` raises
+  `NotImplementedError` in the pinned nautilus_trader (no Arrow decoder, and the Rust backend has
+  no such data type), so the one reader is `kernel.catalog_files.query_index_prices` (column
+  projection, `Price.from_raw` at the file's `price_precision`), used by
+  `research.application.frames.CatalogFrames.mark_index` `[amended 2026-09-28: Story 27.1]`.
 
 ### 1.6 `FundingRateUpdate` (native Nautilus type)
 
 - **Source:** markets channel, plain pyo3-object path (`client.py`), forwarded
   via `FundingRateUpdate.from_pyo3` with no transformation.
 - **Fields:** `instrument_id`, funding rate value, `ts_event`, `ts_init`.
-- **Downstream use:** **none found.** Stored to the catalog but no file in
-  `views/`, `ranking/` or `research/` reads `FundingRateUpdate` — dead data as of this
-  writing.
+- **Downstream use:** research only: `research.application.frames.CatalogFrames.funding`
+  reads it (time-bounded `catalog.query`) for notebooks; no file in `views/` or `ranking/`
+  reads `FundingRateUpdate` `[amended 2026-09-28: Story 27.1 -- was "none found ... dead data"]`.
 
 ### 1.7 `DydxSecondSnapshot` (custom `Data` type, `kernel/second_snapshot.py`)
 
@@ -304,12 +309,11 @@ Moved from `collector_core/` to the shared kernel in Story 23.2; class name (hen
   the token-vs-USD confusion as a past production bug. It labels each collected instrument
   liquid/illiquid on `collector:status` and alone admits a `pin_top_liquid` pin (§1.12),
   independent of storing `OpenInterest` itself.
-- **Downstream use of the stored `open_interest` field:** **none found** in
-  `views/`/`ranking/`/`research/` — only the *volume*-based liquidity classification
-  (a separate, parallel computation in the same module) is used live. The OI Parquet
-  record itself is written and retained but not read back by any of the code
-  inspected. Likely intended for future backtest/research use, not currently wired
-  into any live signal or ranking.
+- **Downstream use of the stored `open_interest` field:** research only
+  (`research.application.frames.CatalogFrames.open_interest`, a time-bounded `catalog.query`,
+  for notebooks) `[amended 2026-09-28: Story 27.1]`; none in `views/`/`ranking/` — only the
+  *volume*-based liquidity classification (a separate, parallel computation in the same module)
+  is used live. Not wired into any live signal or ranking.
 
 ### 1.9 `InstrumentStatus` (native Nautilus type)
 
@@ -606,6 +610,9 @@ Thin, dependency-light HTTP fetch helpers, not computations: `fetch_rank_history
 (`research/rank_history.py`) and `fetch_watchlist` (`research/watchlist.py`) pull already-computed data from the running `data_api`'s HTTP
 API (`/api/metrics/nearest/{iid}`, `/api/rankings`) for scripts/notebooks that don't want to
 import the full dependency set (fastapi, redis).
+`research.application.ranking_history.HttpRankingHistory` (Story 27.1) is the notebook-facing
+`RankingHistory` port over `/api/metrics/history/{iid}?days=N`: the same rows, as a DataFrame,
+values untouched `[amended 2026-09-28: Story 27.1]`.
 
 ### 2.10 `views/ranking_columns.py` — shared column definitions (was `ml_signals/ranking_columns.py`)
 
@@ -802,19 +809,20 @@ trading decision.
 | `DydxSecondSnapshot.close_price` (25h lookback; `TradeTick` pre-cutover) | `ranking.domain.metrics.price_stats_from_series()` → `pct_change_1h/24h`, catalog `volatility` | `pct_1h`, `pct_24h`, `volatility` | over the in-memory `PriceSeriesStore` (fed live, backfilled once per instrument from the catalog), refreshed every 60s by the ranking slow loop. `pct_1w`/`pct_1m` come from `metrics_store`'s persisted prices (`price_near_days_ago`), `None` until 7/30 days of history exist |
 | dYdX indexer `volume24H`, Bybit v5 tickers `turnover24h` (linear; spot USDT/USDC-quoted only), Hyperliquid `metaAndAssetCtxs` `dayNtlVlm` (independent polls in `ranking/infrastructure/volume_*`) | — (used as-is, USD) | `volume24h` | **this is the sort key when mode = `"volume"` (default)**; an instrument with no volume is absent from that mode and counted at `ranking_engine.volume24h` |
 | `OrderBookDeltas` | `book_features.py`, `chart_data.py`, `footprint.py` | *not present* | chart-page-only; never reaches `ranking_engine` |
-| `MarkPriceUpdate` / `IndexPriceUpdate` | — | *not present* | stored, no downstream reader found |
-| `FundingRateUpdate` | — | *not present* | stored, no downstream reader found |
+| `MarkPriceUpdate` / `IndexPriceUpdate` | — | *not present* | `ranking` backfills prices from marks; research notebook frames (`CatalogFrames.mark_index`, Story 27.1) |
+| `FundingRateUpdate` | — | *not present* | research notebook frames only (`CatalogFrames.funding`, Story 27.1) |
 | `InstrumentStatus` | — | *not present* | stored, no downstream reader found |
-| `OpenInterest` (stored) | — | *not present* | stored, no downstream reader found — only the *parallel* `volume24H`-based liquidity classification (not this field) affects anything live |
+| `OpenInterest` (stored) | — | *not present* | research notebook frames only (`CatalogFrames.open_interest`, Story 27.1) — only the *parallel* `volume24H`-based liquidity classification (not this field) affects anything live |
 
 **Bottom line:** the live ranking table's actual sort key is either raw 24h USD
 volume or a 1-hour cross-sectional volatility stdev — both computed from data outside
 or adjacent to the book-level signal machinery. Every OFI/OBI/CVD/microprice column
 visible on the ranking table is informational, derived from `DydxSecondSnapshot`
-alone, and does not itself move an instrument's rank. Three raw types collected today
-(`FundingRateUpdate`, `InstrumentStatus`, and the `open_interest` field of
-`OpenInterest`) have no confirmed downstream consumer anywhere in `views/`, `ranking/`
-or `research/`.
+alone, and does not itself move an instrument's rank. Of the raw types collected today,
+`InstrumentStatus` has no downstream consumer anywhere in `views/`, `ranking/` or `research/`,
+and `FundingRateUpdate` and the `open_interest` field of `OpenInterest` are read only by
+research's notebook frames (`research.application.frames`), never by a live signal or ranking
+`[amended 2026-09-28: Story 27.1]`.
 
 ---
 

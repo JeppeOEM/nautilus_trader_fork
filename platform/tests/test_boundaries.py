@@ -23,8 +23,12 @@ the contexts of both ends:
 - a cross-context edge must be in `GRAPH` (AD-D2);
 - a `_private` name is never imported across contexts;
 - `observability` imports only the standard library, and `kernel` no context;
-- `research` imports nothing from `data_api`, `views` or `ranking`;
-- a `domain/` module or a venue `policies.py` imports only the standard library, `kernel` and
+- `research` imports nothing from `data_api`, `views` or `ranking`; its one context edge beyond
+  `kernel`/`observability` is the candle store's query service, exactly the names in
+  `RESEARCH_CANDLES_SERVICES` (Story 27.1: `research.application.frames` reads bars from the store,
+  never a third seconds-to-bars fold);
+- a `domain/` module or a venue `policies.py` imports only the standard library, numpy (pure array
+  arithmetic, e.g. `research.domain`'s analysis values -- Story 27.1), `kernel` and
   `nautilus_trader.model`/`core`;
 - `kernel/` holds exactly spine AD-D3's modules and stays pure: no in-repo import beyond itself,
   no store, no config loader, no module-level mutable state (Story 23.2);
@@ -109,6 +113,9 @@ GRAPH: frozenset[tuple[str, str]] = frozenset(
         (ARCHIVE, CANDLES),
         (VIEWS, CANDLES),
         (VIEWS, RANKING),
+        # Query services only, held to `RESEARCH_CANDLES_SERVICES` below (Story 27.1):
+        # `research.application.frames.bars` reads the candle store, never a third fold.
+        (RESEARCH, CANDLES),
         (DATA_API, VIEWS),
         (DATA_API, ALERTING),
         # No (BOT_TUI, VIEWS): since Story 25.1a bot_tui shows no ranking or market data, only
@@ -327,6 +334,47 @@ def test_research_imports_nothing_from_data_api() -> None:
 _RESEARCH_FORBIDDEN_PACKAGES = frozenset({VIEWS, RANKING})
 
 
+# What a non-test research module may take from candles (Story 27.1): the read-only query services
+# and the bar sizes the store keeps. Tests seed a real store through `CandleStore`, as the views
+# rule below also leaves test modules out.
+RESEARCH_CANDLES_SERVICES: dict[str, frozenset[str]] = {
+    "candles.application.queries": frozenset(
+        {"open_store", "window", "oldest_t", "newest_t", "bucket_starts"}
+    ),
+    "candles.domain.fold": frozenset({"BAR_SECONDS"}),
+}
+
+
+def _research_candles_imports() -> list[Import]:
+    return [
+        imp
+        for imp in _IMPORTS
+        if imp.src.split(".")[0] == RESEARCH
+        and ".tests" not in f".{imp.src}"
+        and imp.dst_ctx == CANDLES
+    ]
+
+
+def test_research_takes_only_the_listed_query_services_from_candles() -> None:
+    beyond = sorted(
+        _site(imp)
+        for imp in _research_candles_imports()
+        if imp.name not in RESEARCH_CANDLES_SERVICES.get(imp.dst, frozenset())
+    )
+    assert beyond == [], "research reads candles only through RESEARCH_CANDLES_SERVICES"
+
+
+def test_every_listed_research_candles_service_is_still_used() -> None:
+    used = {(imp.dst, imp.name) for imp in _research_candles_imports()}
+    unused = sorted(
+        f"{module}.{name}"
+        for module, names in RESEARCH_CANDLES_SERVICES.items()
+        for name in names
+        if (module, name) not in used
+    )
+    assert unused == [], "no research module needs these any more: delete them from the table"
+
+
 def test_research_imports_no_views_or_ranking() -> None:
     reaching = sorted(
         _site(imp)
@@ -365,7 +413,8 @@ def test_alerting_infrastructure_is_imported_only_by_its_composition_root() -> N
 # nautilus_trader's value types are domain-safe; its runtime, persistence and adapters are not.
 _DOMAIN_SAFE_EXTERNAL = ("nautilus_trader.model", "nautilus_trader.core")
 # Pure array arithmetic with no I/O, no clock and no process state: a domain module may vectorise
-# its own fold with it (`candles.domain.fold`). Matched on the top-level package, so a lookalike
+# its own fold with it (`candles.domain.fold`) or hold its analysis values in arrays
+# (`research.domain`, Story 27.1). Matched on the top-level package, so a lookalike
 # distribution (`numpydoc`, ...) is still foreign.
 _DOMAIN_SAFE_ROOTS = frozenset({"numpy"})
 
@@ -427,6 +476,16 @@ def test_domain_rule_recognises_policy_files_and_foreign_imports() -> None:
             "numpydoc",
         ],
     ) == ["redis", "nautilus_trader.live", "numpydoc"]
+
+
+def test_research_domain_is_domain_code_admitting_numpy_not_pandas() -> None:
+    """Story 27.1: `research/domain` is pure numpy arithmetic; pandas lives in its application."""
+    assert _is_domain_module("research.domain.returns")
+    assert not _is_domain_module("research.application.frames")
+    assert "research.domain.returns" in _KNOWN
+    assert _domain_violations(
+        "research.domain.returns", ["numpy", "kernel.performance_metrics", "pandas", "pyarrow"]
+    ) == ["pandas", "pyarrow"]
 
 
 def _not_test(module: str) -> bool:
@@ -966,6 +1025,7 @@ def test_kernel_purity_rule_follows_an_environ_alias() -> None:
 NON_VENUE_HTTP_CLIENTS: dict[str, str] = {
     "observability.notify": "ntfy / Telegram / webhook alert transport",
     "research.rank_history": "the local data_api HTTP API",
+    "research.application.ranking_history": "the local data_api HTTP API (Story 27.1)",
     "research.watchlist": "the local data_api HTTP API",
 }
 _VENUE_URL = re.compile(r"https?://[^\s\"']*(?:dydx|bybit|hyperliquid)", re.IGNORECASE)

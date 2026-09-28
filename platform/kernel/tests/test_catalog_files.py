@@ -18,6 +18,7 @@ import ast
 import math
 from pathlib import Path
 
+import pyarrow.parquet as pq
 import pytest
 
 from kernel import catalog_files
@@ -27,7 +28,9 @@ from kernel.clocks import NS_PER_S
 from kernel.clocks import READ_SPAN_MARGIN_NS
 from kernel.second_snapshot import DydxSecondSnapshot
 from kernel.second_snapshot import SecondOHLC
+from nautilus_trader.model.data import IndexPriceUpdate
 from nautilus_trader.model.identifiers import InstrumentId
+from nautilus_trader.model.objects import Price
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
 
@@ -235,3 +238,77 @@ def test_the_array_reader_projects_the_same_columns_it_reads() -> None:
         "sell_volume",
     }
     assert read_literally == set(catalog_files._OHLC_COLUMNS)
+
+
+def _index_catalog(tmp_path: Path) -> str:
+    """Two files at two precision labels; the catalog's own `query` cannot decode either."""
+    writer = ParquetDataCatalog(str(tmp_path))
+    iid = InstrumentId.from_str(_IID)
+    writer.write_data(
+        [
+            IndexPriceUpdate(
+                iid, Price.from_str("61090.59855"), _DAY0 + k * NS_PER_S, _DAY0 + k * NS_PER_S
+            )
+            for k in (2, 3)
+        ]
+    )
+    writer.write_data(
+        [
+            IndexPriceUpdate(
+                iid, Price.from_str("100.25"), _DAY0 + k * NS_PER_S, _DAY0 + k * NS_PER_S
+            )
+            for k in (0, 1)
+        ]
+    )
+    return str(tmp_path)
+
+
+def test_query_index_prices_decodes_the_exact_price_sorted_and_bounded(tmp_path: Path) -> None:
+    catalog = _index_catalog(tmp_path)
+    rows = catalog_files.query_index_prices(catalog, _IID, _DAY0 + NS_PER_S, _DAY0 + 2 * NS_PER_S)
+    assert [(r.ts_event - _DAY0, str(r.price), r.price.precision) for r in rows] == [
+        (NS_PER_S, "100.25", 2),
+        (2 * NS_PER_S, "61090.59855", 5),
+    ]
+
+
+def test_query_index_prices_unknown_instrument_is_empty(tmp_path: Path) -> None:
+    catalog = _index_catalog(tmp_path)
+    assert catalog_files.query_index_prices(catalog, "BTC-USD-PERP.DYDX", 0, 1 << 62) == []
+
+
+def test_the_catalog_itself_still_cannot_decode_index_prices(tmp_path: Path) -> None:
+    """The reason `query_index_prices` exists: drop it once this upstream gap closes."""
+    catalog = ParquetDataCatalog(_index_catalog(tmp_path))
+    with pytest.raises(NotImplementedError):
+        catalog.query(IndexPriceUpdate, identifiers=[_IID], start=_DAY0, end=_DAY0 + NS_PER_DAY)
+
+
+def test_query_index_prices_refuses_a_file_without_its_precision_label(tmp_path: Path) -> None:
+    catalog = _index_catalog(tmp_path)
+    path = sorted((tmp_path / "data" / "index_price_update" / _IID).glob("*.parquet"))[0]
+    pq.write_table(pq.read_table(path).replace_schema_metadata(None), path)
+    with pytest.raises(ValueError, match="price_precision"):
+        catalog_files.query_index_prices(catalog, _IID, 0, 1 << 62)
+
+
+def test_query_index_prices_refuses_a_raw_value_finer_than_its_precision_label(
+    tmp_path: Path,
+) -> None:
+    catalog = _index_catalog(tmp_path)
+    for path in (tmp_path / "data" / "index_price_update" / _IID).glob("*.parquet"):
+        table = pq.read_table(path)
+        pq.write_table(table.replace_schema_metadata({b"price_precision": b"2"}), path)
+    with pytest.raises(ValueError, match="more digits than"):
+        catalog_files.query_index_prices(catalog, _IID, 0, 1 << 62)
+
+
+def test_query_index_prices_refuses_a_precision_label_this_build_cannot_hold(
+    tmp_path: Path,
+) -> None:
+    catalog = _index_catalog(tmp_path)
+    path = sorted((tmp_path / "data" / "index_price_update" / _IID).glob("*.parquet"))[0]
+    table = pq.read_table(path)
+    pq.write_table(table.replace_schema_metadata({b"price_precision": b"99"}), path)
+    with pytest.raises(ValueError, match="outside this build"):
+        catalog_files.query_index_prices(catalog, _IID, 0, 1 << 62)

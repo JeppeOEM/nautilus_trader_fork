@@ -13,14 +13,18 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-Research reads market data only through the kernel or streaming backtest configs (Story 24.4).
+Research reads market data only through bounded paths (Story 24.4; amended Story 27.1).
 
 Every market-data row a research module or notebook reads goes through `kernel.catalog_files`
-(column-projected, time-bounded) or `BacktestDataConfig` (streamed by `BacktestNode`), never a
-direct catalog query or a hand-rolled Parquet read: those decode or materialise whole slices
-(MEM-01) and bypass the one read path the kernel keeps consistent with what capture writes.
-Instrument definitions (`ParquetDataCatalog.instruments`) are metadata, not market data, and
-writing a throwaway catalog (`strategies.snapshot_backtest`) reads nothing, so neither is flagged.
+(column-projected, time-bounded), `BacktestDataConfig` (streamed by `BacktestNode`), the candle
+store's query service, or a catalog-object query that names **both** `start=` and `end=` keywords
+(`ParquetDataCatalog.query(..., start=, end=)`, as `research.application.frames` does, and any
+`MarketFrames` call, whose `start`/`end` are required keyword-only). An unbounded catalog query
+decodes or materialises a whole slice (MEM-01) and fails here; a direct Parquet file read
+(`read_parquet`, `read_table`, `ParquetFile`, ...) fails unconditionally -- it bypasses the one read
+path the kernel keeps consistent with what capture writes. Instrument definitions
+(`ParquetDataCatalog.instruments`) are metadata, not market data, and writing a throwaway catalog
+(`strategies.snapshot_backtest`) reads nothing, so neither is flagged.
 
 The scan is static (AST): every non-test `.py` under `research/` and the code cells of every
 notebook, with IPython magics and shell escapes stripped. The only exemption names the story that
@@ -54,8 +58,9 @@ def _load_source_tree() -> ModuleType:
 _SOURCE_TREE = _load_source_tree()
 _RESEARCH_DIR = _SOURCE_TREE.PLATFORM_DIR / "research"
 
-# Catalog-object queries and direct Parquet reads, matched as a called name or attribute.
-FORBIDDEN_READS = frozenset(
+# Catalog-object queries, matched as a called name or attribute: allowed only with both `start=`
+# and `end=` keywords (Story 27.1).
+BOUNDABLE_READS = frozenset(
     {
         "query",
         "trade_ticks",
@@ -65,6 +70,11 @@ FORBIDDEN_READS = frozenset(
         "bars",
         "custom_data",
         "generic_data",
+    }
+)
+# Direct Parquet reads, forbidden however they are called.
+FORBIDDEN_READS = frozenset(
+    {
         "read_parquet",
         "read_pandas",
         "read_table",
@@ -94,12 +104,29 @@ def _called_name(call: ast.Call) -> str | None:
     return None
 
 
+def _bounded(call: ast.Call) -> bool:
+    """Both `start=` and `end=` passed, neither as the literal `None` (which is no bound)."""
+    keywords = {
+        keyword.arg
+        for keyword in call.keywords
+        if not (isinstance(keyword.value, ast.Constant) and keyword.value.value is None)
+    }
+    return {"start", "end"} <= keywords
+
+
+def _forbidden(call: ast.Call) -> str | None:
+    name = _called_name(call)
+    if name in FORBIDDEN_READS or (name in BOUNDABLE_READS and not _bounded(call)):
+        return name
+    return None
+
+
 def forbidden_reads(source: str) -> list[tuple[int, str]]:
     """Return (line, name) of every forbidden read call in `source`."""
     return sorted(
         (node.lineno, name)
         for node in ast.walk(ast.parse(source))
-        if isinstance(node, ast.Call) and (name := _called_name(node)) in FORBIDDEN_READS
+        if isinstance(node, ast.Call) and (name := _forbidden(node)) is not None
     )
 
 
@@ -144,6 +171,7 @@ def test_the_scan_sees_modules_and_notebooks() -> None:
     names = set(_SOURCES)
     assert "strategies/snapshot_backtest.py" in names
     assert "notebooks/dydx_catalog_pandas.ipynb" in names
+    assert "application/frames.py" in names
     assert not any(name.startswith("tests/") for name in names)
 
 
@@ -154,7 +182,8 @@ def test_research_reads_market_data_only_through_the_kernel_or_backtest_configs(
         if Path(name).name not in LEGACY_READS_UNTIL
     }
     assert offending == {}, (
-        "read market data via kernel.catalog_files or BacktestDataConfig (MEM-01, Story 24.4)"
+        "read market data via kernel.catalog_files, BacktestDataConfig or a start=/end=-bounded "
+        "catalog query (MEM-01, Stories 24.4 and 27.1)"
     )
 
 
@@ -192,3 +221,27 @@ def test_notebook_scan_strips_magics(tmp_path: Path) -> None:
     ]
     notebook.write_text(json.dumps({"cells": cells}))
     assert forbidden_reads(_notebook_code(notebook)) == [(3, "bars")]
+
+
+def test_a_catalog_query_needs_both_bounds() -> None:
+    source = (
+        "catalog.query(X, identifiers=[i], start=a, end=b)\n"
+        "catalog.query(X, start=a)\n"
+        "catalog.trade_ticks(end=b)\n"
+        "frames.bars(i, 60, start=a, end=b)\n"
+        "frames.bars(i, 60)\n"
+        "pd.read_parquet(p, start=a, end=b)\n"
+        "catalog.query(X, a, b)\n"
+        "catalog.query(X, start=None, end=b)\n"
+        "catalog.query(X, start=a, end=None)\n"
+        "frames.seconds(i, start=a, end=b)\n"
+    )
+    assert forbidden_reads(source) == [
+        (2, "query"),
+        (3, "trade_ticks"),
+        (5, "bars"),
+        (6, "read_parquet"),
+        (7, "query"),
+        (8, "query"),
+        (9, "query"),
+    ]

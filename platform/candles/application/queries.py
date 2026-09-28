@@ -94,6 +94,34 @@ def oldest_t(
     return row[0]
 
 
+def newest_t(db: sqlite3.Connection, iid: str, bar_seconds: int) -> int | None:
+    """
+    Start of the newest bucket (ms), traded or not: the store's coverage of the archive ends at
+    this bucket's close (the bucket itself may still be forming, flagged `partial`).
+    """
+    row = db.execute(
+        "SELECT MAX(t) FROM candles WHERE instrument_id = ? AND bar_seconds = ?",
+        (iid, bar_seconds),
+    ).fetchone()
+    return row[0]
+
+
+def bucket_starts(
+    db: sqlite3.Connection, iid: str, bar_seconds: int, from_ms: int, before_ms: int
+) -> list[int]:
+    """
+    Start (ms) of every stored bucket, traded or not, with `from_ms <= t < before_ms`, oldest first.
+    A bucket is stored once any second of it was observed, so a start missing from a contiguous
+    grid is a span with no observation at all (a collector outage), not a span with no trade.
+    """
+    rows = db.execute(
+        "SELECT t FROM candles WHERE instrument_id = ? AND bar_seconds = ? AND t >= ? AND t < ? "
+        "ORDER BY t",
+        (iid, bar_seconds, from_ms, before_ms),
+    ).fetchall()
+    return [row[0] for row in rows]
+
+
 def latest(
     db: sqlite3.Connection, iids: list[str], bar_seconds: int, n: int
 ) -> dict[str, list[dict]]:
