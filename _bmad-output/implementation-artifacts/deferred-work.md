@@ -758,3 +758,7 @@ Discarded by operator: locking/atomic TOML writes; `bot_tui` malformed-message h
 - source_spec: `_bmad-output/implementation-artifacts/spec-27-7-candlestick-pattern-detector-kernel-chart-screener-scanner.md`
   summary: The chart and Technicals replay (`views.indicator_picker.replay_native` via `views.chart_series`/`views.ranking_columns._recent_candles`) feeds candles flagged `partial` (under 90% of the span observed) as if they were the bucket's real OHLC, so after a capture outage a truncated bar can read as a DOJI/HARAMI on the chart and screener while the scanner (`research/application/patterns.bar_grid`) blanks and resets on the same bar.
   evidence: `research/application/patterns.py` turns a `partial` row into a NaN row (27.7 Spec Change Log), but the replay loop has no `partial` check and the spec forbids a pattern special case in `replay_native`; distinct from the untraded-bucket hole entry above because the partial bar is present, just truncated. Affects every native indicator, so it belongs with the hole-aware replay story.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-27-9-closeout-research-readme-rules-legacy-notebooks-gone.md`
+  summary: Delete the `platform/research/BACKTESTING.md` redirect stub in the first story of the next research epic, and re-point any link that still names it at `research/README.md`.
+  evidence: Story 27.9 moved the content into `research/README.md` ("Backtesting & Strategy Development") and left a stub for one release that promises this deletion; nothing else tracks the promise.

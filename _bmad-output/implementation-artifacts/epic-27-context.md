@@ -4,7 +4,7 @@
 
 ## Goal
 
-Give the researcher six executable notebooks: catalog inspection, microstructure, correlation and cross-venue behaviour, backtest evaluation with sweeps and walk-forward, Monte Carlo robustness, and a candlestick scanner. No notebook holds analysis logic of its own. Every number comes from one typed analysis layer (`research/domain` value objects plus `research/application` ports and services), so a Sharpe ratio or a drawdown is computed one way in a notebook, a backtest report or a later bot report. The epic also makes candlestick patterns a first-class signal. One streaming `Indicator` in `kernel/` is shared by the chart picker, the screener's Technicals tab, the scanner notebook, backtests and paper bots, so a pattern found in the scanner is one config file away from a backtest and one more from a paper bot. The legacy notebooks, with their hard-coded paths, runtime `pip install` of TA-Lib/`pandas_ta` and reads of the retired `custom_dydx_minute_bar` directory, are replaced, and the research context is documented with binding notebook rules.
+Give the researcher six executable notebooks: catalog inspection, microstructure, correlation and cross-venue behaviour, backtest evaluation with sweeps and walk-forward, Monte Carlo robustness, and a candlestick scanner. No notebook holds analysis logic of its own. Every number comes from one typed analysis layer (`research/domain` value objects plus `research/application` ports and services), so a Sharpe ratio or a drawdown is computed one way in a notebook, a backtest report or a later bot report. Candlestick patterns become a first-class signal: one streaming `Indicator` in `kernel/` is shared by the chart picker, the screener's Technicals tab, the scanner notebook, backtests and paper bots, so a pattern found in the scanner is one config file away from a backtest and one more from a paper bot. The legacy notebooks (hard-coded paths, runtime `pip install` of TA-Lib/`pandas_ta`, reads of the retired `custom_dydx_minute_bar` directory) are replaced, and the research context ends documented with binding notebook rules.
 
 ## Stories
 
@@ -15,81 +15,39 @@ Give the researcher six executable notebooks: catalog inspection, microstructure
 - Story 27.5: Backtest evaluation notebook, parameter sweeps and walk-forward (done)
 - Story 27.6: Monte Carlo and robustness notebook (done)
 - Story 27.7: Candlestick pattern detector in the kernel, on the chart, in the screener, and a scanner notebook (done)
-- Story 27.8: Candlestick patterns tradeable: `CandlePatternStrategy` in backtests and paper bots
+- Story 27.8: Candlestick patterns tradeable: `CandlePatternStrategy` in backtests and paper bots (done)
 - Story 27.9: Closeout: research README, notebook index, rules, and the last legacy notebook gone
 
 ## Requirements & Constraints
 
-- **No new dependency.** Only numpy, pandas, pyarrow, plotly and jupytext, which are already locked. scipy, statsmodels, matplotlib, seaborn, ipywidgets, papermill/nbclient, TA-Lib and `pandas_ta` are all out.
-  - Bootstrap, deflated/probabilistic Sharpe and pattern recognition are hand-rolled on numpy and tested against closed-form cases.
-  - The TA-Lib parity check is a one-off local run recorded in the story notes, never CI.
-- **Jupyter is a personal tool.** It is launched locally (`uv run jupyter lab research/notebooks`) and is never a compose service.
-- **Every read is time-bounded.** `start`/`end` are required with no defaults. Backtests stream through `BacktestDataConfig`, and no window is materialised twice.
-- **Each metric has one home.**
-  - Portfolio statistics come from `kernel.performance_metrics`. `MetricReport` wraps `all_metrics` and adds nothing.
-  - Microstructure values come from `kernel.indicators` classes, never from a formula in a cell.
-  - Bars come from the candle store, never from a pandas resample or a third fold.
-  - Ranking values are read from ranking's published output, never recomputed.
-- **Gaps stay visible.** They are `None`/NaN, never interpolated or forward-filled, and correlation is pairwise-complete.
+- **No new dependency.** The toolkit is numpy, pandas, pyarrow, plotly and jupytext, all already locked. scipy, statsmodels, matplotlib, seaborn, ipywidgets, papermill/nbclient, TA-Lib and `pandas_ta` are rejected. Jupyter is a personal tool launched locally (`uv run jupyter lab research/notebooks`), never a compose service.
+- **Every read is time-bounded.** `start`/`end` are required with no defaults; backtests stream through `BacktestDataConfig`.
+- **Each metric has one home.** Portfolio statistics come from `kernel.performance_metrics` (`MetricReport` wraps `all_metrics` and adds nothing); microstructure values from `kernel.indicators`; bars from the candle store, never a pandas resample; ranking values from ranking's published output. A formula in a notebook cell is a review failure.
+- **Gaps stay visible.** `None`/NaN, never interpolated or forward-filled.
 - **Warnings are failures.** Notebooks run under `warnings.simplefilter("error")`.
-- **Invariants and seeds are documented.** Every value object, port and Monte Carlo function docstring names its invariant and cites any formula's source. Monte Carlo results record their seed and path count, and a zero-variance input returns a stated `None`, never a division error.
-- **Tests use real Nautilus objects.** Fixture catalogs are written with `ParquetDataCatalog.write_data()`, with no mocks.
-- **Docs ship with the code.** Docs, dockerfile `COPY` sets and both Makefile test lists (`test`, `test-live-paper`) change in the same commit.
-- **VPS steps are deferred, never parked.** 27.8's paper-bot fill check is appended to `platform/docs/DEPLOY_CHECKLIST.md` under "Deferred operator actions", and the story still finalizes `done`.
+- **Docstrings name invariants** on every value object, port and Monte Carlo function.
+- **Tests use real Nautilus objects**, fixture catalogs written with `ParquetDataCatalog.write_data()`.
+- **Docs ship with the code.** Docs, dockerfile `COPY` sets and Makefile test lists change in the same commit.
+- **Closeout success criteria (27.9):**
+  - `research/README.md` replaces `research/BACKTESTING.md` (content moved unchanged, a redirect stub kept for one release) and holds the notebook index (number, purpose, inputs, domain functions called, fixture run time), the "write a notebook" recipe, the "add a metric" recipe (`performance_metrics` or `research/domain` first, then the notebook) and the local launch; `platform/README.md` and the frontend docs page link to it.
+  - `platform/CLAUDE.md` gains a "Research notebooks" section with NB-01 (no analysis logic in a notebook), NB-02 (jupytext-paired, output-stripped, env-parameterised, executed by `make test`), NB-03 (no `%pip`/`!pip`, nothing outside `uv.lock`) and NB-04 (every read bounded by `START`/`END`); its indicator note names `kernel/candle_patterns.py` as the second custom-`Indicator` precedent.
+  - `git grep` for `pandas_ta`, `talib`, `%pip`, `custom_dydx_minute_bar` under `platform/` is empty outside `docs/` history notes and `.planning/`; no `.ipynb` exists outside `research/notebooks/`.
+  - `ARCHITECTURE.md` shows `research/{domain,application,notebooks,strategies}` and `kernel/candle_patterns.py`; `docs/DATA_DICTIONARY.md` gains "Research reads" (stored fields read and derived values computed per notebook).
+  - The epic's `Known limit:`s (histogram-not-marker pattern display, no `ipywidgets` interactivity, Monte Carlo on closed trades only) go into the DDD spine's Deferred section with upgrade paths.
+  - `sprint-status.yaml` marks Epic 27 `done`; 27.8's deferred VPS step does not hold it open.
 
 ## Technical Decisions
 
-- **Research stays a consumer.** It has no aggregate and writes only throwaway backtest catalogs.
-  - The spine's research row lists the values: `ReturnSeries`, `EquityCurve`, `TradeLedger`, `MetricReport`, `CorrelationMatrix`, the microstructure result tuples, and `MonteCarloResult`. It also lists the ports: `MarketFrames`, `RankingHistory` and `BacktestRunner`. Each entry carries its invariant.
-  - A story that adds a research module, value or context edge amends the spine in the same commit: the research row, the dependency graph and the tree. It uses a `[amended <date>: Story 27.x — ...]` note, as 27.1–27.6 did.
-- **Layering.** `research/domain` imports only stdlib, numpy, `kernel/` and `nautilus_trader.model`/`core`. pandas stays in `research/application`.
-- **Context edges** are name-allowlisted in `test_boundaries.py`, and each has a "still used" check.
-  - `research → candles` (`RESEARCH_CANDLES_SERVICES`): `open_store`, `window`, `oldest_t`, `newest_t`, `bucket_starts`, `verified_status` and `BAR_SECONDS`. A window past the store's coverage raises; it never reads as "no trades".
-  - `research → archive` (`RESEARCH_ARCHIVE_SERVICES`): only the pure `find_gaps`, over timestamps research read itself.
-  - `research → views`, `research → ranking` and `research → data_api` stay forbidden, and `RankingHistory` reads over HTTP.
-  - The depth functions and `RollingZScore` live in `kernel.indicators`. Same-asset matching lives in `kernel.venues` (`asset_key`, `same_asset`, `USD_QUOTES`); research never splits an id itself.
-  - Catalog reads the pinned Nautilus cannot do go through `kernel/catalog_files.py`'s column-projected helpers. New helpers are added there.
-  - A new need extends these tables deliberately, with a stated reason, and never routes around the test.
-- **`BacktestRunner` is the one way to backtest.**
-  - It wraps `BacktestNode` + `BacktestDataConfig` and takes strategies by `ImportableStrategyConfig` string path.
-  - `RunResult` carries an `EquityCurve`, a `TradeLedger` and a `MetricReport`, attributed by `BacktestRunConfig.id`. A missing result raises.
-  - A sweep is one node with one run config per grid point. Walk-forward (`walk_forward.py`) and the evaluation frames (`evaluation.py`) exist for 27.6/27.8 to reuse.
-  - Notebooks never touch `BacktestNode` and never sum a PnL.
-- **Monte Carlo and robustness (27.6, available for reuse).**
-  - `research/domain/monte_carlo.py` holds `MonteCarloResult`, which records its `seed` and `n_paths` so the same call reproduces it. Its arrays are read-only, and an empty input gives flat paths with a `note`.
-  - It also holds `bootstrap_trades` (resampled at the ledger's exit stamps), `block_bootstrap_returns` (stationary bootstrap), `risk_of_ruin`, `sharpe_confidence_interval`, `probabilistic_sharpe` and `deflated_sharpe`. These return `None`, never a division warning, when the Sharpe is undefined.
-  - Every Sharpe goes through `kernel.performance_metrics.return_stats`. `TradeLedger.exit_day_starts` is the one day-binning rule.
-  - `research/application/robustness.py` reshapes these values for `05_monte_carlo` and computes no statistic. Every figure title ends `seed=S paths=N`.
-- **Notebook format.**
-  - The source of truth is a jupytext percent-format `<nn>_<name>.py`, which must be ruff- and mypy-clean. It is paired with an output-stripped `.ipynb`, and `make notebooks` syncs the pair.
-  - The Parameters cell uses `notebooks/_params.py`: `Params.from_env()` for paths and the window, and `_params.setting` for archive-sized constants. The test harness shrinks those constants through `NOTEBOOK_<NAME>` JSON.
-  - Logic lives in a `research/application` service; the precedents are `inspection.py`, `microstructure.py`, `aligned.py` and `evaluation.py`. Pure arithmetic lives in `research/domain`.
-  - Sections read one instrument at a time.
-  - `research/tests/test_notebooks.py` runs each notebook via `runpy` against the session fixture catalog, with plotly headless and a limit of under 60 s each. The fixture has 3 venues × 2 instruments, with a planted gap, a provisional day and a crossed second.
-- **Candlestick detector (27.7, done, available for reuse).**
-  - `kernel/candle_patterns.py` holds `PatternName` (22 names), the frozen validated `Thresholds`, `CandlePattern(Indicator)` with `update_raw(open, high, low, close)` and `CandlePatternSet` (every pattern over one bar stream).
-  - `value` is +100, -100 or 0 (TA-Lib's convention). Warm-up is the pattern's bars, plus `trend_bars + 1` for trend patterns. State is O(1): at most three bar records.
-  - It is already consumed by the chart picker and screener Technicals (`views.indicator_picker`) and by the scanner (`research.application.patterns`, `research.domain.events`). A strategy uses the same class, never a second definition.
-  - The scanner's trend filter vocabulary is `any`/`above`/`below` against Nautilus's `ExponentialMovingAverage`; a strategy's `trend_condition` must match it.
-  - Hits are drawn as histogram spikes. This is a `Known limit:`, and the upgrade path is lightweight-charts markers.
-- **Bots paths.** The epic text predates the move from `live_paper` to `bots/`. Read its references as follows:
-  - `live_paper/node.py` means `bots/infrastructure/nautilus_host.py`.
-  - `BotConfig` means `bots/domain/config.py` (plus `bots/infrastructure/config.py`).
-  - `live_paper.dockerfile` means `bots.dockerfile`.
-  - The existing strategy is `bots/strategies/dummy.py`.
-  - The compose service is still named `live-paper`.
-
-  Paper and non-paper configs are distinct types (`PaperConfig`/`PaperFleet` versus `ExecConfig`/`ExecBot`). The new `strategy`/`params` keys must be optional with defaults and must never add a mode to a paper config. The strategy resolves by string path through `StrategyFactory.create(ImportableStrategyConfig(...))`, so there is no bots → research import edge, and `test_images.py` needs an explicit entry for that import.
-- **No legacy notebook remains** (27.5 and 27.7 deleted them). `research/README.md` already exists as 27.2's index stub, with all six notebooks listed; `research/BACKTESTING.md` still exists and is folded into the README by 27.9.
+- **Research stays a consumer**: no aggregate, writes only throwaway backtest catalogs. The DDD spine's research row lists the value objects (`ReturnSeries`, `EquityCurve`, `TradeLedger`, `MetricReport`, `CorrelationMatrix`, microstructure result tuples, `MonteCarloResult`) and ports (`MarketFrames`, `RankingHistory`, `BacktestRunner`) with their invariants. Spine changes use `[amended <date>: Story 27.x — ...]` notes.
+- **Layering.** `research/domain` imports only stdlib, numpy, `kernel/` and `nautilus_trader.model`/`core`; pandas stays in `research/application`.
+- **Context edges are name-allowlisted** in `platform/tests/test_boundaries.py`: `research → candles` (`RESEARCH_CANDLES_SERVICES`), `research → archive` (`RESEARCH_ARCHIVE_SERVICES`, pure `find_gaps` only); `research → views/ranking/data_api` forbidden. `bots → research` is a runtime string-path dependency only (`StrategyFactory`), never an import edge; `test_images.py`'s `_STRING_PATH_IMPORTS` covers the image closure.
+- **`BacktestRunner` is the one way to backtest** (`BacktestNode` + `BacktestDataConfig`, strategies by `ImportableStrategyConfig` string path, results attributed by `BacktestRunConfig.id`).
+- **Notebook format.** Source of truth is a jupytext percent-format `research/notebooks/<nn>_<name>.py` (ruff/mypy-clean), paired with an output-stripped `.ipynb`; `make notebooks` syncs pairs. Parameters via `notebooks/_params.py` (`Params.from_env()`, `_params.setting` shrunk by `NOTEBOOK_<NAME>` JSON in tests). Logic lives in a `research/application` service per notebook (`inspection`, `microstructure`, `aligned`, `evaluation`, `robustness`, `patterns`). `research/tests/test_notebooks.py` runs each via `runpy` against a session fixture catalog (3 venues x 2 instruments, planted gap, provisional day, crossed second), under 60 s each.
+- **Candlestick detector.** `kernel/candle_patterns.py`: `PatternName` (22 names), frozen `Thresholds`, `CandlePattern(Indicator)` (+100/-100/0, O(1) state), `CandlePatternSet`. Consumed by `views.indicator_picker`, `research.application.patterns` and `research/strategies/candle_pattern_strategy.py`.
+- **Paper bots.** The epic text's `live_paper` references map to `bots/` (`bots/infrastructure/nautilus_host.py`, `bots/domain/config.py`, `bots.dockerfile`; compose service still `live-paper`). Bot configs carry optional `strategy`/`params` keys; `strategy = "candle_pattern"` resolves by string path.
 
 ## Cross-Story Dependencies
 
-- 27.1–27.7 are done. The remaining stories run in order, 27.8 → 27.9, and all build on 27.1's values and ports and on 27.2's `_params.py`, notebook harness and fixture catalog.
-- 27.8 depends on 27.7's detector and on `BacktestRunner`. It becomes the second worked example in 27.5's `04_backtest_evaluation` notebook.
-- 27.9 closes the epic:
-  - `research/README.md` replaces `research/BACKTESTING.md`, leaving a redirect stub.
-  - Rules NB-01..NB-04 are added to `platform/CLAUDE.md`.
-  - `pandas_ta`, `talib`, `%pip` and `custom_dydx_minute_bar` are gone from `platform/`.
-  - `docs/DATA_DICTIONARY.md` gains a "Research reads" section.
-  - The epic's `Known limit:`s are listed in the spine's Deferred section.
-  - Epic 27 is marked done.
+- 27.1–27.8 are done; only 27.9 remains. It documents and closes what 27.1–27.8 built and adds no analysis code.
+- 27.9 depends on the six notebooks, the analysis layer, `kernel/candle_patterns.py` and `CandlePatternStrategy` being in place, and on the `Known limit:` comments those stories left in code (collect them from the tree, not from memory).
+- 27.8's VPS paper-bot fill check already sits in `platform/docs/DEPLOY_CHECKLIST.md` "Deferred operator actions"; 27.9 leaves it there.

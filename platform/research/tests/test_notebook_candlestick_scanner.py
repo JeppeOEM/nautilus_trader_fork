@@ -16,12 +16,12 @@
 `06_candlestick_scanner` over the session fixture archive (Story 27.7), read from the notebook's own
 namespace: the hits table has the scanner's columns and only kept timeframes, the unkept size is
 skipped with a line, the forward table covers exactly the harness's horizons, both figures are
-drawn, a filter that matches nothing prints a sentence instead of a chart, and no code cell does
-array math, averages, sums, resamples or reaches for TA-Lib.
+drawn, and a filter that matches nothing prints a sentence instead of a chart. That no code cell
+holds array math or a TA library is `platform/tests/test_notebook_rules.py`'s, for every numbered
+notebook (Story 27.9).
 """
 
 import json
-import re
 
 import plotly.graph_objects as go
 import pytest
@@ -92,31 +92,3 @@ def test_a_filter_matching_nothing_prints_a_sentence_instead_of_a_chart(
     out = capsys.readouterr().out
     assert "No hit in this window for pattern filter 'MORNING_STAR'" in out
     assert "the forward table is empty" in out
-
-
-# A percent-format cell header: `# %%` opens a code cell, with or without cell metadata after it;
-# `# %% [markdown]`/`[raw]` do not.
-_CELL = re.compile(r"^# %%(.*)$", re.MULTILINE)
-_FORBIDDEN_TOKENS = ("np.", ".mean(", "sum(", ".resample(", "talib", "pandas_ta", "%pip")
-
-
-def _code_cells() -> list[str]:
-    parts = _CELL.split(NOTEBOOK.read_text())
-    # `split` alternates [before the first header, header suffix, body, header suffix, body, ...].
-    return [
-        body
-        for suffix, body in zip(parts[1::2], parts[2::2], strict=True)
-        if not suffix.strip().startswith("[")
-    ]
-
-
-def test_no_code_cell_holds_array_math_or_ta_lib() -> None:
-    cells = _code_cells()
-    assert any("patterns.scan_grids(" in cell for cell in cells), "the code cells were not found"
-    found = [
-        (token, i)
-        for i, cell in enumerate(cells)
-        for token in _FORBIDDEN_TOKENS
-        if token in cell.lower()
-    ]
-    assert found == []

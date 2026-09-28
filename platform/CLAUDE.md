@@ -155,7 +155,52 @@ A venue is one package, `capture/venues/<v>/`, of named files wired into the one
 
 - **NAUT-02** — All data written via `ParquetDataCatalog.write_data()`. No hand-rolled Parquet schemas. The catalog API owns the Arrow schema and partitioning; working around it breaks catalog reads.
 
-- **NAUT-03** — Backtests use `BacktestNode` + `BacktestDataConfig`. No custom simulation engine. Reference strategies via `ImportableStrategyConfig` by string path so parameter sweeps and time-range filtering require no code changes. Since Story 24.4 the strategies, runners, watchlist client and notebooks live in the `research/` context, so the path is `research.strategies.<module>:<Class>` (e.g. `research.strategies.ofi_strategy:OFIStrategy`; the old strategy paths' re-exports were deleted in Story 25.2). Research reads market-data rows only through `kernel.catalog_files`, `BacktestDataConfig`, a typed catalog `query` bounded by both `start=` and `end=`, or the candle store's query service (`research/tests/test_research_reads.py`), and a notebook runs a backtest only through `research.application.backtest_runner.NodeRunner` (the `BacktestRunner` port: `RunSpec`, `run`, `sweep`; `research/BACKTESTING.md`) `[amended 2026-09-25: Story 24.4]` `[amended 2026-09-26: Story 25.2]` `[amended 2026-09-28: Story 27.1]`.
+- **NAUT-03** — Backtests use `BacktestNode` + `BacktestDataConfig`. No custom simulation engine. Reference strategies via `ImportableStrategyConfig` by string path so parameter sweeps and time-range filtering require no code changes. Since Story 24.4 the strategies, runners, watchlist client and notebooks live in the `research/` context, so the path is `research.strategies.<module>:<Class>` (e.g. `research.strategies.ofi_strategy:OFIStrategy`; the old strategy paths' re-exports were deleted in Story 25.2). Research reads market-data rows only through `kernel.catalog_files`, `BacktestDataConfig`, a typed catalog `query` bounded by both `start=` and `end=`, or the candle store's query service (`research/tests/test_research_reads.py`), and a notebook runs a backtest only through `research.application.backtest_runner.NodeRunner` (the `BacktestRunner` port: `RunSpec`, `run`, `sweep`; `research/README.md`'s "Backtesting & Strategy Development") `[amended 2026-09-25: Story 24.4]` `[amended 2026-09-26: Story 25.2]` `[amended 2026-09-28: Story 27.1]` `[amended 2026-09-28: Story 27.9]`.
+
+---
+
+## Research notebooks
+
+The six notebooks of `research/notebooks/` (index, recipes and launch: `research/README.md`) read
+the archive, never write it, and are the researcher's view of numbers computed elsewhere
+`[amended 2026-09-28: Story 27.9]`.
+
+- **NB-01** — **A notebook holds no analysis logic.** Every computation is a `research/domain`,
+  `research/application`, `kernel` or `kernel.performance_metrics` call; a code cell only calls
+  functions and shows what they return. A formula in a cell is a review failure: move it into
+  `research/domain` (or the notebook's `research/application` service) with a unit test, then call
+  it. **Why:** a Sharpe ratio or a drawdown computed in a cell is a second implementation that
+  drifts from the backtest report's (SSOT-02). Review is the gate;
+  `platform/tests/test_notebook_rules.py` (`test_no_numbered_notebook_code_cell_holds_a_formula`)
+  is a token backstop behind it: no numpy/`math`/`statistics` call and no reducer such as
+  `.mean(`, `.max(`, `.rolling(` or `.resample(` in any numbered notebook's code cell. Plain
+  arithmetic on two variables passes that test, so the review must catch it (the test's
+  `Known limit:`).
+- **NB-02** — **Every notebook is jupytext-paired, output-stripped, parameterised and executed by
+  `make test`.** `research/notebooks/<nn>_<name>.py` (percent format, the source of truth, ruff- and
+  mypy-clean) plus its `.ipynb` twin with no outputs, synced by `make notebooks`; its first code cell
+  reads the environment variables of Story 27.2 through `notebooks/_params.py` (`Params.from_env()`,
+  `_params.setting`), so the same file runs on the fixture and on the real archive; `make test`
+  runs it against the fixture catalog under `warnings.simplefilter("error")`. Enforced by
+  `research/tests/test_notebooks.py` (pairing, stripped outputs, the fixture run) and
+  `research/tests/test_notebook_params.py`.
+- **NB-03** — **No IPython `pip` magic and no `!pip` shell escape in any cell, and no dependency
+  outside `uv.lock`.** A notebook that needs a library files a dependency decision first (the
+  epic's NFR12 rejected-list is the precedent); a cell never installs one. Enforced by
+  `platform/tests/test_notebook_rules.py`:
+  - `test_no_notebook_installs_a_package` covers every `.ipynb` in `research/notebooks/`. It fails
+    a `pip`/`conda`/`mamba`/`uv` magic or shell escape, `python -m pip`, and an install inside a
+    `%%bash`/`%%sh` cell.
+  - `test_no_legacy_token_outside_the_history_notes` fails the story's acceptance tokens (the
+    legacy TA-library names, the IPython `pip` magic spelled with its percent sign, and the
+    retired minute-bar directory) in any tracked text file under `platform/` outside `docs/`
+    and `.planning/` (without git, in any file of the walked text types).
+  - `test_no_notebook_outside_research_notebooks` fails a notebook anywhere else.
+- **NB-04** — **Every catalog read in a notebook is bounded by `START`/`END`.** MEM-01 restated for
+  notebooks: market-data rows come through `MarketFrames` (`CatalogFrames`), `kernel.catalog_files`,
+  `BacktestDataConfig` or the candle store's query service, each call given the notebook's window;
+  a catalog `query`/`trade_ticks`/`bars` call without both `start=` and `end=` and any direct
+  Parquet read are refused. Enforced by `research/tests/test_research_reads.py`.
 
 ---
 

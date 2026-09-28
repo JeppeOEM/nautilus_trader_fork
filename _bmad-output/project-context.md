@@ -39,6 +39,7 @@ _This file contains critical rules and patterns that AI agents must follow when 
 - **Backtests use `BacktestNode` + `BacktestDataConfig`** (see `research/strategies/backtest_dydx.py:122`), not a custom simulation loop — this streams the catalog in time-bounded chunks rather than loading it fully into memory.
 - **Reference strategies via `ImportableStrategyConfig` by string path** (`research/strategies/backtest_dydx.py:99`), not by direct class import — enables parameter sweeps/time-range filtering with no code changes.
 - **1s-snapshot signal architecture**: HFT signals (OFI, OBI, microprice, spread) are computed on read from `DydxSecondSnapshot` (top-20 book levels + per-side trade volume), never stored pre-computed. If a value is exactly derivable from stored level data (e.g. `microprice`, `spread`), it must not be persisted — see `kernel/indicators.py`.
+- **Research notebooks** (`platform/CLAUDE.md` NB-01/NB-02, Story 27.9): no formula in a notebook cell, every number is a `research/domain`/`research/application`/`kernel` call; every notebook is a jupytext pair (`.py` source, output-free `.ipynb`) parameterised through `notebooks/_params.py` and run against the fixture by `make test` — see `platform/research/README.md`.
 
 ### Testing Rules
 

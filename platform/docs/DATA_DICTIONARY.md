@@ -657,6 +657,104 @@ in-memory: the first bar after a restart cannot fire.
 set; a failed send is ledgered at `observability.notify.<transport>`), and toasted on `/ws/live` as
 `{"channel": "alerts", "alert": {"id", "message"}}` (frozen).
 
+### 2.12 Research reads (the six notebooks of `research/notebooks/`, Epic 27)
+
+`[amended 2026-09-28: Story 27.9]` What each notebook reads from the stores, and every value it
+shows that is derived on read, with the one function that derives it (SIGNAL-01: nothing below is
+stored; every market-data read is bounded by the notebook's `START`/`END`, NB-04). Index,
+purpose and run times: `research/README.md`. No notebook reads `metrics.db`: ranking history
+reaches research only over HTTP (§2.9).
+
+**`01_catalog_inspection`**
+
+- *Stored, read:* instrument definitions (all fields, `price_precision` among them); the
+  `DydxSecondSnapshot` files' `ts_init` spans (`kernel.catalog_files.data_file_ranges`);
+  `DydxSecondSnapshot` rows (`ts_event`, `ts_init`, `bid_prices`/`bid_sizes`/`ask_prices`/
+  `ask_sizes`, `buy_volume`/`sell_volume`, `buy_count`/`sell_count`,
+  `open_price`/`high_price`/`low_price`/`close_price`) through `CatalogFrames.seconds`;
+  `TradeTick` (`price`, `size`, `aggressor_side`, `trade_id`, `ts_event`); `MarkPriceUpdate`
+  `ts_event`; the Parquet `price_precision` metadata of the `TradeTick`, `MarkPriceUpdate` and
+  `IndexPriceUpdate` files (`kernel.catalog_files.price_precision_labels`); the candle store's
+  `verified_days.status` (`candles.application.queries.verified_status`); the error ledger's
+  `data/errors/*.jsonl` lines (`ts_ns`, `site`, `suppressed`, `process_start`; §1.11) through
+  `observability.error_ledger`.
+- *Derived on read:* mid, spread and microprice (`kernel.indicators.mid_price`/`spread`/
+  `microprice`, in `CatalogFrames.seconds`); `obi_1`/`obi_5`/`obi_10`/`obi_20`
+  (`kernel.indicators.MultiLevelOBI`); the gap classes (outage / book gap / quiet market, the
+  archive's `find_gaps` through `research.application.inspection.gap_report`); the trades re-fold
+  per day (`kernel.fold.fold_trades`, in `inspection.fold_agreement`); the sanity counts (crossed,
+  spread; `inspection.snapshot_sanity`); the receive lag `ts_init - ts_event`
+  (`inspection.receive_lag_ms`).
+
+**`02_microstructure`**
+
+- *Stored, read:* `DydxSecondSnapshot` (as `01`); the instrument's `price_increment`;
+  `MarkPriceUpdate` (`value`, `ts_event`, `ts_init`); `IndexPriceUpdate` (`value`, timestamps)
+  through `kernel.catalog_files.query_index_prices` (`CatalogFrames.mark_index`);
+  `FundingRateUpdate` (`rate`, `interval`, `next_funding_ns`, timestamps); `OpenInterest`
+  (`open_interest`, timestamps).
+- *Derived on read:* mid, spread, microprice and OBI (as `01`); `volume_delta`
+  (`kernel.indicators.volume_delta`); spread in ticks and bps
+  (`research.application.microstructure.spread_frame`); OFI (`kernel.indicators.MultiLevelOFI`,
+  USD notional) and its z-scores (`kernel.indicators.RollingZScore`); depth by level and by
+  distance from mid (`kernel.indicators.snapshot_depth`/`cumulative_depth`/`depth_within_bps`);
+  the microprice edge and its hit rate per bin (`microstructure.microprice_edge`,
+  `research.domain.microstructure.hit_rate_by_bin`); trade flow and CVD
+  (`microstructure.trade_flow`); the impact fit (`research.domain.microstructure.price_impact`);
+  the basis (`microstructure.basis_frame`); returns (`research.domain.returns.ReturnSeries.
+  from_prices`/`resample`); autocorrelation, volatility signature and realised volatility
+  (`research.domain.microstructure.autocorrelation`/`volatility_signature`/
+  `realised_volatility`).
+
+**`03_correlation`**
+
+- *Stored, read:* the candle store's `candles` rows (`t`, `o`, `h`, `l`, `c`, `v`,
+  `seconds_observed`; `c` and `partial` used) at 60/300/3600/86400 s through
+  `candles.application.queries` (`window`, `bucket_starts`, `oldest_t`, `newest_t`);
+  `DydxSecondSnapshot` level-0 prices (the mid), `buy_volume`/`sell_volume`, `ts_event`;
+  `FundingRateUpdate` (`rate`, `interval`, `ts_event`); `OpenInterest` (`open_interest`,
+  `ts_event`); the instrument ids.
+- *Derived on read:* bar returns (`ReturnSeries.from_prices`); the correlation matrices, clusters,
+  merge order and rolling correlation (`research.domain.correlation.correlation_matrix`/`cluster`/
+  `merge_order`/`rolling_correlation`/`correlation_of`); the cross-venue basis in bps and the
+  lead-lag with its peak (`correlation.basis_bps`/`lead_lag`/`peak_lag`); funding per hour
+  (`research.application.aligned.funding_per_hour`); OI change (`aligned.oi_changes`); each
+  venue's volume share (`aligned.venue_volume_share`).
+
+**`04_backtest_evaluation`**
+
+- *Stored, read* (through `NodeRunner`, `data="seconds"`): instrument definitions;
+  `DydxSecondSnapshot` level 0, turned into `QuoteTick`s by `kernel.catalog_files.query_top_of_book`
+  and `research.application.quotes.derived_quotes`; the full snapshots streamed by
+  `BacktestDataConfig` (`OFIStrategy` reads `bid_prices`/`bid_sizes`/`ask_prices`/`ask_sizes`,
+  `buy_volume`/`sell_volume`, `ts_event`); `TradeTick` only for a `data="trades"` or
+  `"bars:..."` run.
+- *Derived on read:* the equity (`research.application.backtest_runner.equity_from_account`); the
+  metrics table (`MetricReport.from_ledger` → `kernel.performance_metrics.all_metrics`); the
+  underwater series and drawdowns (`EquityCurve.underwater`/`drawdowns`); the rolling Sharpe
+  (`ReturnSeries.from_equity(...).rolling_sharpe` → `performance_metrics.return_stats`); PnL by
+  hour and weekday and the holding times (`TradeLedger.by_hour_of_day`/`by_weekday`/
+  `holding_times_s`); the sweep grid and top runs (`research.application.evaluation.metric_grid`/
+  `top_runs`); the walk-forward and its joined equity
+  (`research.application.walk_forward.walk_forward`/`concat_equity`).
+
+**`05_monte_carlo`**
+
+- *Stored, read:* as `04`.
+- *Derived on read:* the trade-order and block bootstraps, risk of ruin, the Sharpe confidence
+  interval and the deflated Sharpe (`research.domain.monte_carlo.bootstrap_trades`/
+  `block_bootstrap_returns`/`risk_of_ruin`/`sharpe_confidence_interval`/`deflated_sharpe`, the
+  last through `research.application.robustness.deflated_check`); the metrics (`MetricReport`).
+
+**`06_candlestick_scanner`**
+
+- *Stored, read:* the candle store only (`t`, `o`, `h`, `l`, `c`, `seconds_observed` → `partial`,
+  `bucket_starts`) through `CatalogFrames.bars`/`bar_coverage`; no catalog row.
+- *Derived on read:* the EMA (`nautilus_trader.indicators.ExponentialMovingAverage`, in
+  `research.application.patterns.ema_values`); the patterns
+  (`kernel.candle_patterns.CandlePatternSet`); forward returns and the hit rate
+  (`research.domain.events.forward_returns`/`hit_rate`).
+
 ---
 
 ## 3. Ranking engine (`platform/ranking/`, the `ranking_engine` service)

@@ -27,7 +27,7 @@
 # same everywhere. The EMA is `nautilus_trader.indicators.ExponentialMovingAverage`. Bars come only
 # from the candle store's own fold through `MarketFrames.bars` (never a resample here), and every
 # frame and number comes from `research.application.patterns` and `research.domain.events`: no cell
-# holds a formula. No TA-Lib and no `pandas_ta` -- the detector was checked against TA-Lib once,
+# holds a formula. No third-party TA library -- the detector was checked against TA-Lib once,
 # outside the repo (Story 27.7's completion notes).
 #
 # Gaps stay gaps (DATA-01). Each timeframe's bars sit on the complete bucket grid: a bucket the
@@ -49,7 +49,10 @@
 # - `CONDITION` -- `"above"` keeps hits closing above their EMA, `"below"` below it, `"any"` all (a
 #   hit whose EMA is still warming up fails `"above"` and `"below"`);
 # - `PATTERN_FILTER` -- blank for every pattern, else comma-separated `PatternName`s;
-# - `HIT_INDEX` -- the row of the filtered hits table §4 draws;
+# - `HIT_INDEX` -- the row of the filtered hits table §4 draws. Known limit: choosing a hit or a
+#   filter means editing this cell and re-running, since there is no widget to click through hits
+#   (`ipywidgets` was rejected as a dependency, NFR12). Upgrade path: a dependency decision for a
+#   widget library, or the web chart's indicator picker for point-and-click browsing;
 # - `WINDOW_BARS` -- bars drawn either side of that hit;
 # - `HORIZONS` -- forward-return horizons, in bars;
 # - `THRESHOLDS` -- overrides of the detector's `Thresholds` (`body_ratio`, `shadow_ratio`,

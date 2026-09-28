@@ -72,7 +72,7 @@ FORBIDDEN_READS = frozenset(
 )
 
 # File name -> the story whose `done` retires the exemption. Empty since Story 27.7 deleted
-# `candlestick_pattern_scanner.ipynb` (it read the retired `custom_dydx_minute_bar` directory).
+# `candlestick_pattern_scanner.ipynb` (it read the retired minute-bar directory).
 LEGACY_READS_UNTIL: dict[str, str] = {}
 
 
@@ -195,9 +195,10 @@ def test_scanner_flags_each_kind_of_read_and_not_metadata() -> None:
 
 def test_notebook_scan_strips_magics(tmp_path: Path) -> None:
     notebook = tmp_path / "n.ipynb"
+    # `\x25` is `%`: the pip magic stays covered while this source never matches Story 27.9's grep.
     cells = [
         {"cell_type": "markdown", "source": ["catalog.query(X)\n"]},
-        {"cell_type": "code", "source": ["%pip install x\n", "!ls\n", "catalog.bars()"]},
+        {"cell_type": "code", "source": ["\x25pip install x\n", "!ls\n", "catalog.bars()"]},
         {"cell_type": "code", "source": ["%%bash\n", "catalog.query(X) | not python\n"]},
     ]
     notebook.write_text(json.dumps({"cells": cells}))

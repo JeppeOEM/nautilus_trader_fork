@@ -109,8 +109,10 @@ decode logic directly, so it gets battle-tested networking without the buggy `Da
   - Indicators: `nautilus_trader.indicators` is a full streaming Cython TA library (SMA/EMA/
     WMA/Hull/Adaptive MA, RSI, MACD, Stochastics, CCI, ATR, Bollinger/Donchian/Keltner, OBV,
     VWAP, Ichimoku, more), `O(1)` per event via `update_raw()`. Reach for these before
-    `pandas-ta` or a hand-rolled version. Only write a custom `Indicator` subclass (as
-    `platform/kernel/indicators.py` does for OFI/OBI/microprice) when no built-in covers it.
+    `pandas-ta` or a hand-rolled version. Only write a custom `Indicator` subclass when no
+    built-in covers it. The two precedents: `platform/kernel/indicators.py` (OFI/OBI/microprice)
+    and `platform/kernel/candle_patterns.py` (`CandlePattern`, the 22 candlestick patterns, Story
+    27.7).
 - **Future-proof the data pipeline.** Avoid loading entire catalog slices into memory
   (e.g. `catalog.trade_ticks()` with no time bounds). Prefer `BacktestDataConfig`
   streaming, which also enables parameter sweeps and time-range filtering.

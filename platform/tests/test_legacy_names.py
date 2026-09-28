@@ -29,18 +29,20 @@ Reads the checkout with `git grep` (tracked files, exactly the story's acceptanc
 git can read it -- `make test`'s collector image ships no git binary -- it walks the mounted
 checkout's text files instead, skipping what git ignores here (`data/` but its committed
 `.toml` configs, build and cache directories), so the guard runs in the canonical test run too;
-on a host, `test_walk_reads_every_tracked_text_file` holds the walk to git's file set.
+on a host, `test_walk_reads_every_tracked_text_file` holds the walk to git's file set. Both scans
+are `_source_tree`'s (`grep_hits`, `walk_hits`), shared with `test_notebook_rules` since Story 27.9.
 """
 
 import re
 import shutil
-import subprocess
-from collections.abc import Iterator
-from pathlib import Path
 from typing import NamedTuple
 
 import pytest
 from _source_tree import PLATFORM_DIR
+from _source_tree import grep_hits
+from _source_tree import tracked_text_files
+from _source_tree import walk_hits
+from _source_tree import walked_files
 
 
 LEGACY_NAMES = (
@@ -103,19 +105,7 @@ ALLOWANCES = (
 )
 
 # The guard's own file names every token, in its patterns and its examples.
-_GREP = (
-    "git",
-    "grep",
-    "-n",
-    "-I",  # a binary file prints no line to judge
-    "-E",
-    LEGACY_NAMES,
-    "--",
-    ".",
-    ":(exclude)docs",
-    ":(exclude).planning",
-    ":(exclude)tests/test_legacy_names.py",
-)
+_SELF = frozenset({"tests/test_legacy_names.py"})
 
 
 def stale_mentions(line: str) -> list[str]:
@@ -130,70 +120,8 @@ def stale_mentions(line: str) -> list[str]:
     ]
 
 
-# What the walk skips where git cannot list the tracked files: git-ignored or generated trees, the
-# story's own exclusions, and this file. `data/` is runtime state except its committed top-level
-# `.toml` configs, which the walk reads. Every tracked text file must be walked:
-# `test_walk_reads_every_tracked_text_file` fails the day a new suffix or directory is committed.
-_WALK_SKIP_DIRS = frozenset(
-    {"docs", ".planning", "data", "node_modules", "dist", "__pycache__", ".git", ".venv"}
-    | {".pytest_cache", ".mypy_cache", ".ruff_cache"}
-)
-_WALK_SUFFIXES = frozenset(
-    {".py", ".md", ".toml", ".yml", ".yaml", ".ts", ".tsx", ".css", ".json", ".txt", ".sh"}
-    | {".ipynb", ".dockerfile", ".html", ".go", ".mjs", ".sql", ".jsonl", ".svg"}
-)
-_WALK_NAMES = frozenset({"Makefile", ".gitignore", ".env-example"})
-
-
-def _walked_files(top: Path) -> Iterator[Path]:
-    for path in sorted(top.iterdir()):
-        if path.is_dir():
-            # Only the top-level `docs/` is a history-notes exclusion; `frontend/.../docs/` is copy.
-            nested_docs = path.name == "docs" and path.parent != PLATFORM_DIR
-            if path.name not in _WALK_SKIP_DIRS or nested_docs:
-                yield from _walked_files(path)
-            elif path == PLATFORM_DIR / "data":
-                yield from sorted(path.glob("*.toml"))
-        elif path.suffix in _WALK_SUFFIXES or path.name in _WALK_NAMES:
-            yield path
-
-
-def _walk_hits() -> list[str]:
-    """`git grep -n` output, rebuilt by walking the checkout's text files."""
-    hits = []
-    for path in _walked_files(PLATFORM_DIR):
-        relative = path.relative_to(PLATFORM_DIR).as_posix()
-        if relative == "tests/test_legacy_names.py":
-            continue
-        text = path.read_text(encoding="utf-8", errors="replace")
-        # `\n` only, as git numbers lines: `splitlines()` also splits on `\f`, `\x1c`, U+2028...
-        for number, line in enumerate(text.split("\n"), start=1):
-            if _LEGACY.search(line):
-                hits.append(f"{relative}:{number}:{line}")
-    return hits
-
-
 def _grep_hits() -> list[str]:
-    if shutil.which("git") is None:
-        return _walk_hits()
-    inside = subprocess.run(
-        ["git", "rev-parse", "--is-inside-work-tree"],  # noqa: S607
-        cwd=PLATFORM_DIR,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if inside.returncode != 0 or inside.stdout.strip() != "true":
-        return _walk_hits()  # e.g. git's safe.directory refusing a mount owned by another uid
-    found = subprocess.run(  # noqa: S603 (fixed git arguments)
-        _GREP,
-        cwd=PLATFORM_DIR,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert found.returncode in (0, 1), found.stderr  # 1: no hit at all
-    return found.stdout.splitlines()
+    return grep_hits(_LEGACY, _SELF)
 
 
 def test_only_published_language_keeps_a_legacy_name() -> None:
@@ -267,21 +195,15 @@ def test_walk_finds_what_git_grep_finds() -> None:
     """The image's fallback sees every line the host's `git grep` does (plus untracked files)."""
     if shutil.which("git") is None:
         pytest.skip("no git here to compare the walk against (the walk itself ran above)")
-    assert set(_grep_hits()) <= set(_walk_hits())
+    assert set(_grep_hits()) <= set(walk_hits(_LEGACY, _SELF))
 
 
 def test_walk_reads_every_tracked_text_file() -> None:
     """The image's walk reads each file the host's `git grep` would, not only today's hits."""
     if shutil.which("git") is None:
         pytest.skip("no git here to list the tracked files (the walk itself ran above)")
-    listed = subprocess.run(  # noqa: S603 (fixed git arguments)
-        ["git", "grep", "-I", "-l", "-e", "", "--", *_GREP[_GREP.index("--") + 1 :]],  # noqa: S607
-        cwd=PLATFORM_DIR,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if listed.returncode not in (0, 1):
-        pytest.skip(f"git cannot read this checkout: {listed.stderr.strip()}")
-    walked = {path.relative_to(PLATFORM_DIR).as_posix() for path in _walked_files(PLATFORM_DIR)}
-    assert set(listed.stdout.splitlines()) - walked == set()
+    listed = tracked_text_files(_SELF)
+    if listed is None:
+        pytest.skip("git cannot read this checkout (the walk itself ran above)")
+    walked = {path.relative_to(PLATFORM_DIR).as_posix() for path in walked_files()}
+    assert listed - walked == set()

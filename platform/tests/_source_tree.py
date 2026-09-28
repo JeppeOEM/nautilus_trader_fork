@@ -26,6 +26,9 @@ instead of skipping, because a skipped guard is a loosened guard.
 import ast
 import os
 import re
+import shutil
+import subprocess
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -214,3 +217,137 @@ def _bound_module(
     attrs = _module_attrs(tree, binding, bound, known)
     used = [ref for ref in attrs if ref.target == module or ref.target.startswith(module + ".")]
     return used or [ImportRef(module, None, line)]
+
+
+# The checkout's text files, for the source sweeps (`test_legacy_names`, `test_notebook_rules`;
+# moved here from the former in Story 27.9). A sweep reads the tracked files with `git grep`, the
+# acceptance greps' own tool. Where no git can read the checkout -- `make test`'s collector image
+# ships no git binary, and git's safe.directory refuses a mount owned by another uid -- it walks the
+# checkout's text files instead, so each sweep runs in the canonical test run too.
+
+# A sweep never reads the history notes (`docs/`) or the planning files: a note that records a
+# retired name is history, not a stale reference.
+HISTORY_DIRS = ("docs", ".planning")
+
+# What the walk skips: git-ignored or generated trees and the history directories. `data/` is
+# runtime state except its committed top-level `.toml` configs, which the walk reads. Every tracked
+# text file must be walked: `test_legacy_names.test_walk_reads_every_tracked_text_file` fails the
+# day a new suffix or directory is committed.
+# Git-ignored trees, skipped by every no-git fallback as `git ls-files --exclude-standard` does.
+IGNORED_DIRS = frozenset(
+    {"data", "node_modules", "dist", "__pycache__", ".git", ".venv"}
+    | {".pytest_cache", ".mypy_cache", ".ruff_cache", ".ipynb_checkpoints"}
+)
+_WALK_SKIP_DIRS = IGNORED_DIRS | frozenset(HISTORY_DIRS)
+_WALK_SUFFIXES = frozenset(
+    {".py", ".md", ".toml", ".yml", ".yaml", ".ts", ".tsx", ".css", ".json", ".txt", ".sh"}
+    | {".ipynb", ".dockerfile", ".html", ".go", ".mjs", ".sql", ".jsonl", ".svg"}
+)
+_WALK_NAMES = frozenset({"Makefile", ".gitignore", ".env-example"})
+
+
+def walked_files(top: Path = PLATFORM_DIR) -> Iterator[Path]:
+    """Every text file the walk reads under `top` (the platform), in sorted order."""
+    yield from _walk(top, top)
+
+
+def _walk(top: Path, directory: Path) -> Iterator[Path]:
+    for path in sorted(directory.iterdir()):
+        if path.is_dir():
+            # Only the top-level `docs/` is a history-notes exclusion; `frontend/.../docs/` is copy.
+            nested_docs = path.name == "docs" and path.parent != top
+            if path.name not in _WALK_SKIP_DIRS or nested_docs:
+                yield from _walk(top, path)
+            elif path == top / "data":
+                yield from sorted(path.glob("*.toml"))
+        elif path.suffix in _WALK_SUFFIXES or path.name in _WALK_NAMES:
+            yield path
+
+
+def walk_hits(
+    pattern: re.Pattern[str],
+    skip: frozenset[str] = frozenset(),
+    top: Path = PLATFORM_DIR,
+) -> list[str]:
+    """
+    `git grep -n` output (`path:line:text`, paths relative to `top`) rebuilt by walking `top`'s
+    text files; `skip` holds relative paths never read (a guard's own file).
+    """
+    hits = []
+    for path in walked_files(top):
+        relative = path.relative_to(top).as_posix()
+        if relative in skip:
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        # `\n` only, as git numbers lines: `splitlines()` also splits on `\f`, `\x1c`, U+2028...
+        for number, line in enumerate(text.split("\n"), start=1):
+            if pattern.search(line):
+                hits.append(f"{relative}:{number}:{line}")
+    return hits
+
+
+def _git(*args: str) -> subprocess.CompletedProcess[str] | None:
+    """`git <args>` run in the platform checkout, or None where no git can read it."""
+    if shutil.which("git") is None:
+        return None
+    inside = subprocess.run(
+        ["git", "rev-parse", "--is-inside-work-tree"],  # noqa: S607
+        cwd=PLATFORM_DIR,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if inside.returncode != 0 or inside.stdout.strip() != "true":
+        return None  # e.g. git's safe.directory refusing a mount owned by another uid
+    # `core.quotePath=false`: a non-ASCII path prints as itself, as the walk spells it.
+    return subprocess.run(  # noqa: S603 (git with the caller's fixed arguments)
+        ["git", "-c", "core.quotePath=false", *args],  # noqa: S607
+        cwd=PLATFORM_DIR,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _sweep_pathspec(skip: frozenset[str]) -> list[str]:
+    excluded = [*HISTORY_DIRS, *sorted(skip)]
+    return ["--", ".", *(f":(exclude){path}" for path in excluded)]
+
+
+def grep_hits(pattern: re.Pattern[str], skip: frozenset[str] = frozenset()) -> list[str]:
+    r"""
+    Every `path:line:text` of a tracked text file under the platform, outside the history
+    directories and `skip`, that `pattern` matches. `pattern` is handed to `git grep -E` as is, so
+    it must mean the same in POSIX ERE and Python `re` (no `\d`, lookarounds or lazy repeats).
+    """
+    found = _git("grep", "-n", "-I", "-E", pattern.pattern, *_sweep_pathspec(skip))
+    if found is None:
+        return walk_hits(pattern, skip)
+    assert found.returncode in (0, 1), found.stderr  # 1: no hit at all
+    return found.stdout.splitlines()
+
+
+def tracked_text_files(skip: frozenset[str] = frozenset()) -> set[str] | None:
+    """
+    Return the tracked text files `grep_hits` reads (a binary file prints no line to judge), or
+    None where no git can list them.
+    """
+    listed = _git("grep", "-I", "-l", "-e", "", *_sweep_pathspec(skip))
+    if listed is None:
+        return None
+    # A git that runs but fails fails the guard, never skips it: a skipped guard is loosened.
+    assert listed.returncode in (0, 1), listed.stderr
+    return set(listed.stdout.splitlines())
+
+
+def listed_files(pattern: str) -> list[str] | None:
+    """
+    Every file under the platform, history directories included, whose path matches the git
+    pathspec `pattern` and that is tracked or untracked-but-not-ignored (a stray file is caught
+    before its commit), sorted; None where no git can list them.
+    """
+    listed = _git("ls-files", "--cached", "--others", "--exclude-standard", "--", pattern)
+    if listed is None:
+        return None
+    assert listed.returncode == 0, listed.stderr
+    return sorted(set(listed.stdout.splitlines()))
