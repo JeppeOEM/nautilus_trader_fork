@@ -310,7 +310,7 @@ class CandleStore:
     `sqlite3.OperationalError: database is locked` (`--workers 1`, which `nightly` uses, avoids it).
     Upgrade path: one writer process fed by a queue, or per-instrument store files.
 
-    Satisfies `collector_core.ports.SecondSink` through `CandleSink`, and
+    Satisfies `capture.application.ports.SecondSink` through `CandleSink`, and
     `candles.application.verified_days.VerifiedDays` directly.
     """
 

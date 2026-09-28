@@ -13,113 +13,57 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-The write gate's verdicts (DDD spine AD-D6): what `LiveBook.snapshot_top` says about one book at
-one sample, and what a `CrossedBookPolicy` says about a crossed one.
+Deprecated re-export shim (Story 26.2): `collector_core.domain.verdicts` moved to
+`capture.domain.verdicts`.
 
-Invariant: a sample is written only on `Accepted`; every other verdict names the one reason the
-second was skipped (`NoBook`, `EmptyTop`, `Crossed`, `Stale`), so the application can log and
-ledger it without re-deriving anything. Verdicts exist per sampled instrument per second, never
-per message (AD-D5).
+Pure re-export, defines nothing: every name here *is* its successor object.
 """
 
-from dataclasses import dataclass
-from typing import Literal
+import warnings
 
-from nautilus_trader.model.book import BookLevel
-from nautilus_trader.model.enums import OrderSide
-
-
-@dataclass(frozen=True, slots=True)
-class NoBook:
-    """No local book: never subscribed, awaiting its first snapshot, or dropped for a resync."""
-
-
-@dataclass(frozen=True, slots=True)
-class EmptyTop:
-    """The book has no best bid or no best ask, so no top of book can be written."""
-
-
-NO_BOOK = NoBook()
-EMPTY_TOP = EmptyTop()
+from capture.domain.verdicts import EMPTY_TOP
+from capture.domain.verdicts import NO_BOOK
+from capture.domain.verdicts import Accepted
+from capture.domain.verdicts import Crossed
+from capture.domain.verdicts import CrossVerdict
+from capture.domain.verdicts import DroppedLevel
+from capture.domain.verdicts import EmptyTop
+from capture.domain.verdicts import NoBook
+from capture.domain.verdicts import Rejected
+from capture.domain.verdicts import ResyncRequested
+from capture.domain.verdicts import SampleVerdict
+from capture.domain.verdicts import Stale
+from capture.domain.verdicts import StaleKind
+from capture.domain.verdicts import StillCrossed
+from capture.domain.verdicts import Uncrossed
 
 
-@dataclass(frozen=True, slots=True)
-class DroppedLevel:
-    """One stale level a policy deleted to uncross a book (DATA-04), for the application's log."""
+__all__ = [
+    "EMPTY_TOP",
+    "NO_BOOK",
+    "Accepted",
+    "CrossVerdict",
+    "Crossed",
+    "DroppedLevel",
+    "EmptyTop",
+    "NoBook",
+    "Rejected",
+    "ResyncRequested",
+    "SampleVerdict",
+    "Stale",
+    "StaleKind",
+    "StillCrossed",
+    "Uncrossed",
+]
 
-    side: OrderSide
-    price: float
-    stale_seq: int
-    other_seq: int
-    side_now_empty: bool
-
-
-@dataclass(frozen=True, slots=True)
-class Crossed:
-    """
-    Best bid >= best ask after the venue's crossed-book policy ran. `first_seen`: the episode
-    started at this sample. `resync`: the policy asked for the DATA-03 fallback.
-    `last_bid_delta_ns`/`last_ask_delta_ns`: when each side last changed, where the venue tracks it
-    (dYdX's level tagging); None otherwise. `dropped`: levels the policy deleted at this sample
-    without uncrossing the book.
-    """
-
-    bid: float
-    ask: float
-    since_ns: int
-    first_seen: bool
-    resync: bool
-    last_bid_delta_ns: int | None = None
-    last_ask_delta_ns: int | None = None
-    dropped: tuple[DroppedLevel, ...] = ()
+REMOVE_AFTER = "26-3-closeout-shims-gone-spines-reconciled"
 
 
-StaleKind = Literal["feed_dead", "instrument_silent"]
-
-
-@dataclass(frozen=True, slots=True)
-class Stale:
-    """The book may be old: the whole feed is silent, or this one instrument is (DATA-01)."""
-
-    kind: StaleKind
-    detail: str
-
-
-Rejected = NoBook | EmptyTop | Crossed | Stale
-
-
-@dataclass(frozen=True, slots=True)
-class Accepted:
-    """The top `depth` levels per side, best first, of a book that passed every check."""
-
-    bids: list[BookLevel]
-    asks: list[BookLevel]
-
-
-SampleVerdict = Accepted | Rejected
-
-
-@dataclass(frozen=True, slots=True)
-class Uncrossed:
-    """The policy resolved the cross itself; `dropped` lists what it deleted to do so."""
-
-    dropped: tuple[DroppedLevel, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
-class StillCrossed:
-    """Still crossed; the episode began at `since_ns`. `dropped`: levels deleted this step."""
-
-    since_ns: int
-    dropped: tuple[DroppedLevel, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
-class ResyncRequested:
-    """Still crossed past the grace window: the application must force a fresh snapshot."""
-
-    since_ns: int
-    dropped: tuple[DroppedLevel, ...] = ()
-
-
-CrossVerdict = Uncrossed | StillCrossed | ResyncRequested
+# Attributed to the importing module, not to importlib's frames.
+warnings.warn(
+    "collector_core.domain.verdicts moved to "
+    "capture.domain.verdicts (Story 26.2); "
+    f"this shim is removed after {REMOVE_AFTER}",
+    DeprecationWarning,
+    skip_file_prefixes=("<frozen importlib",),
+)

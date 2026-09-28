@@ -17,7 +17,7 @@ The collection-control context (DDD spine AD-D17, Story 25.4): what a venue *int
 kept apart from what capture actually subscribed.
 
 A venue's collected set is one aggregate, `CollectionPlan` (the intent). Capture applies each
-change through `collector_core.collector.Collector.apply` and reports the result as `Applied`
+change through `capture.application.capture_service.CaptureService.apply` and reports the result as `Applied`
 (the fact), and `collector:status` shows both -- an instrument planned but not applied carries
 `"pending": true`. Control never touches a book, a gate or a catalog file: `archive.RetentionPolicy`
 stays the only deleter, and reads the plan's retention attributes through `TomlPlanStore`.
@@ -34,10 +34,10 @@ Published language (frozen, AD-D12): `collector:status` (one row per planned ins
   `MarketsSource`), `ControlService` (`collector:control`: save, then apply, then publish),
   `StatusPublisher` (`collector:status`) and the plan-file `reload_loop`.
 - `infrastructure/` -- `TomlPlanStore` over the venue `config.toml` through capture's one loader
-  (`collector_core.config`), the Redis bus and channel, and `DydxMarkets` (the indexer's markets).
+  (`capture.infrastructure.config`), the Redis bus and channel, and `DydxMarkets` (the indexer's markets).
 
-The composition root is `dydx_collector/collector.py`'s `build_collector`: it starts the three
-loops as the collector's `extra_loops` (only dYdX has a live plan; Bybit and Hyperliquid apply a
+The composition root is `capture/venues/dydx/__main__.py`'s `build_capture_from_file`: it hands the
+three loops to the capture service through `add_loops` (only dYdX has a live plan; Bybit and Hyperliquid apply a
 static one once at start). No module here holds mutable runtime state: every piece of state lives
 on an instance the composition root builds.
 """

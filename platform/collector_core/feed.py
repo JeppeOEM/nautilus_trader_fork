@@ -13,36 +13,34 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-Feed tags (story 22.14): which WebSocket connection a message arrived on, and the redundant
-trades-only socket's failure handling for the venue clients.
+Deprecated re-export shim (Story 26.2): `collector_core.feed` moved to `capture.application.feed`.
 
-`Feed`/`MAIN_FEED` are `collector_core.domain.feed_group`'s (the `FeedGroup` aggregate keeps
-liveness, reconnect detection and arbitration per feed since Story 26.1), and `REST_FEED_NAME`
-is `collector_core.domain.trade_intake`'s; this module is the clients' import point for them.
+Pure re-export, defines nothing: every name here *is* its successor object.
 """
 
-from collections.abc import Awaitable
-from typing import Any
+import warnings
 
-from collector_core import sites
-from collector_core.domain.feed_group import MAIN_FEED
-from collector_core.domain.feed_group import Feed
-from collector_core.domain.trade_intake import REST_FEED_NAME
-from collector_core.ports import Ledger
+from capture.application.feed import MAIN_FEED
+from capture.application.feed import REST_FEED_NAME
+from capture.application.feed import Feed
+from capture.application.feed import optional_feed_step
 
 
-__all__ = ["MAIN_FEED", "REST_FEED_NAME", "Feed", "optional_feed_step"]
+__all__ = [
+    "MAIN_FEED",
+    "REST_FEED_NAME",
+    "Feed",
+    "optional_feed_step",
+]
+
+REMOVE_AFTER = "26-3-closeout-shims-gone-spines-reconciled"
 
 
-async def optional_feed_step(feed: Feed, action: str, step: Awaitable[Any], ledger: Ledger) -> bool:
-    """
-    Run one step (connect, subscribe, ...) on a redundant trades-only socket; False, ledgered
-    (`collector.trade_feed`, through the collector's `ledger`), when it fails. The second feed
-    exists to add redundancy, so its failure must never take the primary connection's data down.
-    """
-    try:
-        await step
-    except Exception as e:
-        ledger(sites.TRADE_FEED, f"{feed.name}: {action} failed", e)
-        return False
-    return True
+# Attributed to the importing module, not to importlib's frames.
+warnings.warn(
+    "collector_core.feed moved to "
+    "capture.application.feed (Story 26.2); "
+    f"this shim is removed after {REMOVE_AFTER}",
+    DeprecationWarning,
+    skip_file_prefixes=("<frozen importlib",),
+)

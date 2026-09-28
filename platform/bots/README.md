@@ -207,7 +207,7 @@ once.
 
 **Incidents log (`i` key):** `bots/application/supervise.py`'s heartbeat loop watches
 `strategy.last_data_ns` (the last `QuoteTick`'s timestamp) and treats 30s+ of silence as
-a WS/data-feed problem — the same OBS-01 doctrine `dydx_collector`'s watchdog already
+a WS/data-feed problem — the same OBS-01 doctrine the collectors' watchdog (`capture`) already
 applies, since no typed "WS reconnected" event exists to hook from Python (the dYdX
 adapter's Rust client handles reconnects internally). Each stale span is logged with a
 start time immediately and its end filled in once the feed recovers — a still-open span

@@ -27,10 +27,8 @@ RUN pip install --no-cache-dir $PIP_INSECURE_ARGS -r requirements.txt
 COPY platform/observability ./observability
 COPY platform/kernel ./kernel
 COPY platform/candles ./candles
-COPY platform/collector_core ./collector_core
 COPY platform/views ./views
 COPY platform/alerting ./alerting
-COPY platform/dydx_collector ./dydx_collector
 COPY platform/ranking ./ranking
 COPY platform/data_api ./data_api
 # Must land at ./frontend_dist -- data_api/app.py's FRONTEND_DIST_PATH default ("frontend_dist",

@@ -14,13 +14,13 @@
 # -------------------------------------------------------------------------------------------------
 """
 The capture hot path's cost budget (spine AD-D5): no refactor may add per-message allocation or
-latency to `Collector._process_data`.
+latency to `CaptureService._process_data`.
 
 A fixed burst is replayed through `_process_data` (the queue bypassed): three collectors -- dYdX
 arrival-timed, Bybit and Hyperliquid venue-timed -- with ten instruments each, and per
 instrument one synthetic top-20 snapshot, `_DELTAS_PER_INSTRUMENT` incremental deltas and the
-venue's recorded REST trades (`<venue>_collector/tests/fixtures/*trades*.json`, re-stamped to now
-so the stale-history filter accepts them). A venue-timed collector only holds a delta on arrival
+venue's recorded REST trades (`capture/venues/<venue>/tests/fixtures/*trades*.json`, re-stamped
+to now so the stale-history filter accepts them). A venue-timed collector only holds a delta on arrival
 (`LiveBook.hold`) and applies it when the second closes, so the burst ends with that close
 (`_drain_pending_deltas`, exactly what `_sample_tick` runs): the apply is inside the measurement,
 and nothing stays held between bursts. Since Story 26.1 the path runs through the gate's
@@ -40,7 +40,7 @@ baseline fails and `make hotpath-baseline` records it. Every later run asserts e
 figure <= baseline and, on the CPU the baseline was recorded on, wall time <= 2x baseline (on
 another CPU the wall-time check is skipped with the reason shown; allocations still assert).
 
-Known limit: the replay drives the base `Collector` with the core's default policies, so dYdX's
+Known limit: the replay drives the base `CaptureService` with the core's default policies, so dYdX's
 `DydxLevelTagger` and Bybit's `BybitSequenceCanary` (Story 26.1's policy values) are not on the
 measured path: adding them changes the burst, which needs a newly recorded baseline in its own
 reviewed change. Upgrade path: a per-venue replay through each venue's `CapturePolicies`,
@@ -107,16 +107,16 @@ _TICKERS = ("BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "AVAX", "LINK", "DOT", "L
 
 def _venues() -> list[dict[str, Any]]:
     """Venue shape: id format, time source, trade fixture and its parser, fixture precisions."""
-    from bybit_collector.trade_history import parse_bybit_trades
-    from dydx_collector.trade_history import parse_dydx_trades
-    from hyperliquid_collector.trade_history import parse_hyperliquid_trades
+    from capture.venues.bybit.trade_history import parse_bybit_trades
+    from capture.venues.dydx.trade_history import parse_dydx_trades
+    from capture.venues.hyperliquid.trade_history import parse_hyperliquid_trades
 
     return [
         {
             "iid": "{t}-USD-PERP.DYDX",
             "source": "arrival",
             "fixture": _CODE_ROOT
-            / "dydx_collector/tests/fixtures/dydx_trades_btc_usd_20260921.json",
+            / "capture/venues/dydx/tests/fixtures/dydx_trades_btc_usd_20260921.json",
             "parse": parse_dydx_trades,
             "precisions": (0, 4),
         },
@@ -125,7 +125,7 @@ def _venues() -> list[dict[str, Any]]:
             "source": "venue",
             "fixture": (
                 _CODE_ROOT
-                / "bybit_collector/tests/fixtures/bybit_trades_btcusdt_linear_20260921.json"
+                / "capture/venues/bybit/tests/fixtures/bybit_trades_btcusdt_linear_20260921.json"
             ),
             "parse": parse_bybit_trades,
             "precisions": (2, 3),
@@ -135,7 +135,7 @@ def _venues() -> list[dict[str, Any]]:
             "source": "venue",
             "fixture": (
                 _CODE_ROOT
-                / "hyperliquid_collector/tests/fixtures/hyperliquid_recent_trades_btc_20260921.json"
+                / "capture/venues/hyperliquid/tests/fixtures/hyperliquid_recent_trades_btc_20260921.json"
             ),
             "parse": parse_hyperliquid_trades,
             "precisions": (1, 5),
@@ -237,9 +237,9 @@ def _burst(venue: dict[str, Any], iids: list[str], tag: str) -> list[Any]:
 
 
 def _collectors(root: Path) -> list[tuple[Any, list[str], dict[str, Any]]]:
-    from collector_core.collector import Collector
-    from collector_core.config import CoreConfig
-    from collector_core.infrastructure.parquet_writer import ParquetArchiveWriter
+    from capture.application.capture_service import CaptureService
+    from capture.application.config import CoreConfig
+    from capture.infrastructure.parquet_writer import ParquetArchiveWriter
 
     built = []
     for n, venue in enumerate(_venues()):
@@ -250,9 +250,10 @@ def _collectors(root: Path) -> list[tuple[Any, list[str], dict[str, Any]]]:
             catalog_path=str(catalog),
             book_time_source=venue["source"],
         )
-        collector = Collector(
+        collector = CaptureService(
             config,
-            object(),
+            lambda _on_data, _ledger: object(),
+            venue=venue["iid"].rsplit(".", 1)[1],
             plan=iids,
             archive=ParquetArchiveWriter(str(catalog)),
             live_stream=None,

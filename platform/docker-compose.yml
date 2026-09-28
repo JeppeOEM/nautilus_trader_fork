@@ -42,6 +42,12 @@ services:
     restart: always
     logging: *default-logging
 
+  # dYdX capture. Deliberately NOT renamed `dydx_collector` for symmetry with the two services
+  # below (Story 26.2 decision): the service name `collector` and container `dydx-collector` are
+  # operator-visible (Dozzle, `make logs`/`test`/`nightly`/`hotpath-baseline`, the `~/.zshrc`
+  # helpers) and published language (the `collector` ERROR_LEDGER_SERVICE ledger file, AD-D12);
+  # the rename would buy symmetry only. The image's CMD runs the same module; the explicit
+  # `command:` keeps every capture entrypoint visible here and checked by tests/test_images.py.
   collector:
     container_name: dydx-collector
     # cpu_shares: 1024   # see the CPU-priority note above services: (capture: must not wait)
@@ -49,6 +55,7 @@ services:
       context: ..
       dockerfile: platform/collector.dockerfile
       network: host
+    command: python3 -m capture.venues.dydx
     environment:
       PYTHONUNBUFFERED: "1"
       REDIS_URL: "redis://127.0.0.1:${REDIS_PORT:-6379}"
@@ -67,6 +74,8 @@ services:
       # rw (not ro): the collector itself writes this file back after a pin/unpin/
       # start/stop/refresh_top_coins control action (Story 6.1) -- still only this
       # container mounts it, bot_tui coordinates via Redis only, never the filesystem.
+      # The container path is frozen (AD-D12): capture.venues.dydx.config.CONFIG_PATH defaults
+      # to it, and the archive service reads the same path (DYDX_PLAN_PATH).
       - ./data/dydx_config.toml:/app/dydx_collector/config.toml:rw
       - ./data/catalog:/app/catalog
       # Derived SQLite candle store (candles/infrastructure/sqlite_store.py): the collector is its
@@ -75,7 +84,7 @@ services:
       - ./data/candles:/app/candles_dir
       # Story 5.1: permanent incident reports (crossed book, stale book, resync, etc.),
       # auto-snapshotted from the [WS_RAW] rolling debug buffer -- see
-      # observability/incidents.py's IncidentHandler, configured by dydx_collector/collector.py's
+      # observability/incidents.py's IncidentHandler, configured by capture/venues/dydx/__main__.py's
       # INCIDENTS. Must survive container restarts, unlike /tmp/nautilus_logs.
       - ./data/incident_reports:/app/incident_reports
       # Story 23.3: durable per-service error ledger, survives restarts/rebuilds/Redis loss.
@@ -91,7 +100,7 @@ services:
       context: ..
       dockerfile: platform/collector.dockerfile
       network: host
-    command: python3 -m bybit_collector.collector
+    command: python3 -m capture.venues.bybit
     environment:
       PYTHONUNBUFFERED: "1"
       BYBIT_COLLECTOR_CONFIG: "/app/bybit_config.toml"
@@ -103,7 +112,7 @@ services:
       ERROR_LEDGER_SERVICE: "bybit_collector"
     user: "1000:1000"
     volumes:
-      - ./bybit_collector/config.toml:/app/bybit_config.toml:ro
+      - ./capture/venues/bybit/config.toml:/app/bybit_config.toml:ro
       # Same catalog root as the dYdX collector (Story 19.2): data_api serves both.
       - ./data/catalog:/app/catalog
       - ./data/candles:/app/candles_dir
@@ -119,7 +128,7 @@ services:
       context: ..
       dockerfile: platform/collector.dockerfile
       network: host
-    command: python3 -m hyperliquid_collector.collector
+    command: python3 -m capture.venues.hyperliquid
     environment:
       PYTHONUNBUFFERED: "1"
       HYPERLIQUID_COLLECTOR_CONFIG: "/app/hyperliquid_config.toml"
@@ -130,7 +139,7 @@ services:
       ERROR_LEDGER_SERVICE: "hyperliquid_collector"
     user: "1000:1000"
     volumes:
-      - ./hyperliquid_collector/config.toml:/app/hyperliquid_config.toml:ro
+      - ./capture/venues/hyperliquid/config.toml:/app/hyperliquid_config.toml:ro
       # Same catalog root as the dYdX collector (Story 19.2): data_api serves both.
       - ./data/catalog:/app/catalog
       - ./data/candles:/app/candles_dir
@@ -207,7 +216,7 @@ services:
       REDIS_URL: "redis://127.0.0.1:${REDIS_PORT:-6379}"
       CATALOG_PATH: "/app/catalog"
       DYDX_NETWORK: "mainnet"
-      # Must match bybit_collector's / hyperliquid_collector's config.toml `environment`
+      # Must match capture/venues/bybit's / capture/venues/hyperliquid's config.toml `environment`
       # (ranking_engine polls each venue's USD 24h volume from that network).
       BYBIT_ENVIRONMENT: "mainnet"
       HYPERLIQUID_ENVIRONMENT: "mainnet"

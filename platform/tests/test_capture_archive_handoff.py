@@ -26,10 +26,7 @@ from pathlib import Path
 import pytest
 
 
-if (
-    importlib.util.find_spec("collector_core") is None
-    or importlib.util.find_spec("archive") is None
-):
+if importlib.util.find_spec("capture") is None or importlib.util.find_spec("archive") is None:
     pytest.skip("needs the collector image (capture and archive)", allow_module_level=True)
 
 from archive.application.rebuild_day import DayReport
@@ -39,20 +36,20 @@ from archive.infrastructure.gap_markers import GapMarkerFiles
 from archive.infrastructure.gap_markers import load_gaps
 from archive.infrastructure.maintenance_lock import capture_exclusive
 from archive.infrastructure.maintenance_lock import maintenance
-from collector_core.capture_lock import acquire_capture_lock
-from collector_core.tests.test_collector import _BYBIT
-from collector_core.tests.test_collector import _D0 as _BYBIT_D0
-from collector_core.tests.test_collector import _clocked_trade as _bybit_trade
-from collector_core.tests.test_collector import _day_collector as _bybit_day_collector
-from collector_core.tests.test_collector import _deltas as _bybit_deltas
-from collector_core.tests.test_collector import _sample_at as _bybit_sample_at
-from collector_core.tests.test_venue_time import _D0 as _VENUE_D0
-from collector_core.tests.test_venue_time import _IID as _VENUE_IID
-from collector_core.tests.test_venue_time import _SEC as _VENUE_SEC
-from collector_core.tests.test_venue_time import _book as _venue_book
-from collector_core.tests.test_venue_time import _close as _venue_close
-from collector_core.tests.test_venue_time import _collector as _venue_collector
-from collector_core.tests.test_venue_time import _trade as _venue_trade
+from capture.infrastructure.capture_lock import acquire_capture_lock
+from capture.tests.test_collector import _BYBIT
+from capture.tests.test_collector import _D0 as _BYBIT_D0
+from capture.tests.test_collector import _clocked_trade as _bybit_trade
+from capture.tests.test_collector import _day_collector as _bybit_day_collector
+from capture.tests.test_collector import _deltas as _bybit_deltas
+from capture.tests.test_collector import _sample_at as _bybit_sample_at
+from capture.tests.test_venue_time import _D0 as _VENUE_D0
+from capture.tests.test_venue_time import _IID as _VENUE_IID
+from capture.tests.test_venue_time import _SEC as _VENUE_SEC
+from capture.tests.test_venue_time import _book as _venue_book
+from capture.tests.test_venue_time import _close as _venue_close
+from capture.tests.test_venue_time import _collector as _venue_collector
+from capture.tests.test_venue_time import _trade as _venue_trade
 from observability import error_ledger
 
 from nautilus_trader.model.data import TradeTick

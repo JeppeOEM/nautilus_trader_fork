@@ -13,84 +13,35 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-Hyperliquid's REST trade history for the reconnect backfill (`VenueTradeHistory`, story 22.14).
+Deprecated re-export shim (Story 26.2): `hyperliquid_collector.trade_history` moved to
+`capture.venues.hyperliquid.trade_history`.
 
-Wire facts, verified live 2026-09-21 (fixture `tests/fixtures/hyperliquid_recent_trades_btc_20260921.json`):
-`POST /info {"type": "recentTrades", "coin"}` returns `[{coin, side B|A, px, sz, time ms, tid}]`,
-newest first, **exactly the last 10 trades**; `startTime` is ignored. The WS id is `tid`.
-
-Known limit: that 10-trade depth (`CAPABILITY`) means a backfill covers only a very short outage;
-the rest is reported `unrecoverable`. Upgrade path: `trade_feeds = 2`.
+Pure re-export, defines nothing: every name here *is* its successor object.
 """
 
-from typing import Any
+import warnings
 
-from collector_core.domain.trade_history import BackfillCapability
-from collector_core.domain.trade_history import BackfillError
-from collector_core.domain.trade_history import Fetched
-from collector_core.domain.trade_history import RowReader
-from collector_core.domain.trade_history import collect
-from collector_core.domain.trade_history import ms_to_ns
-from collector_core.domain.trade_history import side_of
-from collector_core.domain.trade_history import tick
-from kernel.venue_http import HYPERLIQUID_URLS
-from kernel.venue_http import HttpJson
-from kernel.venue_http import http_json
-from kernel.venue_http import hyperliquid_info_url
-from kernel.venue_http import post_json_request
-
-from nautilus_trader.model.data import TradeTick
-from nautilus_trader.model.enums import AggressorSide
-from nautilus_trader.model.instruments import Instrument
+from capture.venues.hyperliquid.trade_history import CAPABILITY
+from capture.venues.hyperliquid.trade_history import READER
+from capture.venues.hyperliquid.trade_history import HyperliquidTradeHistory
+from capture.venues.hyperliquid.trade_history import parse_hyperliquid_trades
 
 
-CAPABILITY = BackfillCapability(rows_per_page=10)
+__all__ = [
+    "CAPABILITY",
+    "READER",
+    "HyperliquidTradeHistory",
+    "parse_hyperliquid_trades",
+]
 
-_SIDES = {"B": AggressorSide.BUYER, "A": AggressorSide.SELLER}
-
-
-def _rows(payload: Any) -> list[dict]:
-    if not isinstance(payload, list):
-        raise BackfillError(f"hyperliquid recentTrades is not a list: {str(payload)[:200]}")
-    return payload
-
-
-def _time(row: dict) -> int:
-    return ms_to_ns(row["time"])
+REMOVE_AFTER = "26-3-closeout-shims-gone-spines-reconciled"
 
 
-def _trade(row: dict, instrument: Instrument, ts_init: int) -> TradeTick:
-    side = side_of(_SIDES, row["side"])
-    return tick(instrument, (row["px"], row["sz"], side, str(row["tid"]), _time(row)), ts_init)
-
-
-READER = RowReader(_time, _trade)
-
-
-def parse_hyperliquid_trades(payload: Any, instrument: Instrument, ts_init: int) -> list[TradeTick]:
-    """Parse Hyperliquid's `recentTrades`, newest first as sent; an inexact value raises."""
-    return [_trade(row, instrument, ts_init) for row in _rows(payload)]
-
-
-class HyperliquidTradeHistory:
-    """
-    `VenueTradeHistory` over Hyperliquid's `recentTrades`. Invariant: a 10-row response may be
-    cut by the venue's depth, so it covers `since` only if its oldest trade does.
-    """
-
-    capability = CAPABILITY
-
-    def __init__(self, environment: str, http: HttpJson = http_json) -> None:
-        if environment not in HYPERLIQUID_URLS:
-            # At construction, not at the first backfill after a reconnect.
-            raise ValueError(
-                f"unknown Hyperliquid environment {environment!r}: {sorted(HYPERLIQUID_URLS)}"
-            )
-        self._environment = environment
-        self._http = http
-
-    def fetch(self, instrument: Instrument, since_ns: int, floor_ns: int, ts_init: int) -> Fetched:
-        body = {"type": "recentTrades", "coin": instrument.raw_symbol.value}
-        request = post_json_request(hyperliquid_info_url(self._environment), body)
-        rows = _rows(self._http(request))
-        return collect(rows, READER, instrument, since_ns, ts_init, not CAPABILITY.cut(len(rows)))
+# Attributed to the importing module, not to importlib's frames.
+warnings.warn(
+    "hyperliquid_collector.trade_history moved to "
+    "capture.venues.hyperliquid.trade_history (Story 26.2); "
+    f"this shim is removed after {REMOVE_AFTER}",
+    DeprecationWarning,
+    skip_file_prefixes=("<frozen importlib",),
+)

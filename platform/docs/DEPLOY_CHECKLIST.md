@@ -217,7 +217,8 @@ One-off, on `nifelheim`, the first deploy that contains Story 25.4. dYdX's contr
 of `DydxCollector` into `platform/collection_control/` (same compose service `collector`, same
 `collector:status`/`collector:control` channels, same `./data/dydx_config.toml` bind mount), and
 every venue's `config.toml` now goes through one strict loader
-(`collector_core.config.load_venue_config`). The expired `ranking_engine/` shims were deleted.
+(`collector_core.config.load_venue_config`, `capture.infrastructure.config` since Story 26.2, which
+the command below uses). The expired `ranking_engine/` shims were deleted.
 
 1. Check `data/dydx_config.toml` **before** restarting the collector: the file now refuses start
    (fail closed, `ValueError` naming the key or ids, in the `collector` logs) where the old loader
@@ -227,7 +228,7 @@ every venue's `config.toml` now goes through one strict loader
    ```bash
    cd ~/nautilus_trader_fork/platform
    docker compose run --rm --no-deps collector python3 -c "from pathlib import Path; \
-   from collector_core.config import load_venue_config; \
+   from capture.infrastructure.config import load_venue_config; \
    c, p = load_venue_config(Path('/app/dydx_collector/config.toml'), 'DYDX'); \
    print(len(p.collected), 'instruments,', sorted(p.excluded), c)"
    ```
@@ -271,8 +272,9 @@ and D-60 (Bybit spot depth).
    that night's `compare_klines <VENUE> <DAY>: ...` line, and the day's count of
    `collector.trade_backfill` entries per venue (`GET /api/errors`, or `grep -c` in the
    collector logs) with their `backfilled` / `unrecoverable` totals.
-2. **Flip:** set `trade_feeds = 2` in `bybit_collector/config.toml` **and**
-   `hyperliquid_collector/config.toml` (dYdX has no second feed), then
+2. **Flip:** set `trade_feeds = 2` in `capture/venues/bybit/config.toml` **and**
+   `capture/venues/hyperliquid/config.toml` (dYdX has no second feed; both files lived in
+   `bybit_collector/`/`hyperliquid_collector/` before Story 26.2), then
    `make redeploy-all`. Check the first flush logs a `Trade feed arbitration (cumulative)` line
    per venue.
 3. **After 24 h:** copy the last `Trade feed arbitration (cumulative)` line per venue (first
@@ -306,8 +308,8 @@ Record numbers where each line says, never in a story file.
    hyperliquid_collector`), then in the collector image run
    `python -m archive.tools.migrate_open_interest --catalog /app/catalog` (report), then again
    with `--apply --backup-dir <dir>` (22.3, audit D-40).
-5. `cd platform && make redeploy-all` (rebuilds the thin images with `collector_core`,
-   `observability` when 23.1 lands, and starts every service; 22.1, 22.4, 22.5, 22.7, 22.10,
+5. `cd platform && make redeploy-all` (rebuilds the thin images with `capture` -- `collector_core`
+   before Story 26.2 -- and `observability`, and starts every service; 22.1, 22.4, 22.5, 22.7, 22.10,
    22.13). Confirm the paper path starts with none of the new credential env vars exported
    (they default to empty in `docker-compose.yml`; 22.7).
 
@@ -456,7 +458,9 @@ not a closed one.
 
 Expect `UNEXPLAINED` gaps on the first real run, from three sampler skip paths that today emit
 no snapshot row **and** no ledger entry: empty top-of-book, stale book and no book at all
-(`collector_core/collector.py` ~:1208, ~:1218, ~:1342). That is the check working — an
+(then `collector_core/collector.py` ~:1208, ~:1218, ~:1342; since Story 26.1 the empty-top path is
+ledgered `collector.empty_top`, and the service is `capture/application/capture_service.py` since
+Story 26.2). That is the check working — an
 unledgered skip is a DATA-07 finding. The resolution is to give those three paths their own
 ledger sites (the DDD spine assigns that to the `SecondSampler` story), never to relax the
 check or widen the matcher.
@@ -505,7 +509,8 @@ parked on the board says so in its entry: run `bmad-loop confirm <story-key>` af
       `collector.empty_top`, and no rising `collector.resync`, `collector.book_sequence`,
       `collector.pending_deltas` or `collector.process` counts. `collector.resync` now also counts
       dYdX's forced resyncs (they were only a `dydx_collector.critical` log line before), and the
-      CRITICAL `steady_state_crossed_book` line now comes from the `collector_core.critical` logger.
+      CRITICAL `steady_state_crossed_book` line now comes from the `collector_core.critical` logger
+      (`capture.critical` once Story 26.2 is deployed too, see its entry below).
 - [ ] Confirm rows are still arriving for every venue (the web chart's live candles, or
       `snapshots:raw` in `redis-cli SUBSCRIBE snapshots:raw`), and that the dYdX incident reports
       still trigger on a crossed-book resync (`platform/data/incident_reports/`, when one occurs).
@@ -521,3 +526,46 @@ parked on the board says so in its entry: run `bmad-loop confirm <story-key>` af
       maintenance panel / the TUI's archive line: `backup off`) says `"backup": "disabled"`.
 - [ ] After the next 03:07 UTC slot, confirm `last_run` has no `backup_catalog` step and
       `platform/data/errors/archive.jsonl` gained no new `archive.backup_not_configured` line.
+
+### 26-2-capture-package-and-venue-packages-with-entrypoints (`capture/` package, `python3 -m capture.venues.<v>`; commit 8c894e4aae)
+
+- [ ] Before pulling, on the VPS: `git -C platform status --short -- bybit_collector/config.toml
+      hyperliquid_collector/config.toml`. Both files moved to `platform/capture/venues/{bybit,
+      hyperliquid}/config.toml` and the compose mounts now read the new paths. If either shows a
+      local edit, save it (`git stash`), pull, and re-apply the edit to the new path
+      (`git stash show -p | git apply` with the path adjusted, or by hand) before redeploying: a
+      compose bind-mount source that does not exist is silently created as an empty *directory*,
+      and the collector then refuses start on an unreadable config. dYdX's plan is unaffected
+      (`platform/data/dydx_config.toml` still mounts at `/app/dydx_collector/config.toml`).
+- [ ] Order: `git pull`; `make build-base` only if `nautilus_trader`/`crates` changed since the
+      last base build (this story changes neither); then **one** `make redeploy-all` from
+      `platform/`. It now rebuilds and restarts all three collectors -- `collector`,
+      `bybit_collector` and `hyperliquid_collector` (before this story it restarted only
+      `collector`, leaving the other two on the old image) -- plus `archive`, `ranking_engine`,
+      `data_api`, `live-paper` and the `bot_tui` image.
+- [ ] Service names are unchanged on purpose (decision recorded in `docker-compose.yml` above the
+      `collector` service): `collector`/`dydx-collector` was **not** renamed `dydx_collector`,
+      so Dozzle, `make logs`/`test`/`nightly`, the `~/.zshrc` helpers and the ledger file
+      `data/errors/collector.jsonl` keep their names. `docker compose ps` must list the same
+      containers as before, with no orphan.
+- [ ] Dozzle, first 10 minutes, all three collectors: each logs `Started: N subscribed`, and
+      `docker compose ps` shows their commands as `python3 -m capture.venues.{dydx,bybit,
+      hyperliquid}`. Logger names changed
+      with the move (the messages did not): the service's lines now come from
+      `capture.application.capture_service` (was `collector_core.collector`), the
+      `steady_state_crossed_book` CRITICAL from `capture.critical` (was `collector_core.critical`),
+      the clients' from `capture.venues.<v>.client` (was `<venue>_collector.client`). A saved
+      Dozzle filter on an old logger name needs the new one. The logs cannot show a stale
+      old-path import (Python hides a `DeprecationWarning` raised outside `__main__`), so prove
+      none exists instead: `docker compose exec collector python3 -W error::DeprecationWarning -c
+      "import capture.venues.dydx.__main__, capture.venues.bybit.__main__,
+      capture.venues.hyperliquid.__main__"` exits 0 (importing a `__main__` module by name runs
+      no capture: its `if __name__ == "__main__":` guard is false).
+- [ ] After 10 minutes, `GET /api/errors` (or the three services' `platform/data/errors/*.jsonl`)
+      is flat against the hour before the deploy: no new site, and no rising
+      `collector.open_interest_poll` (the dYdX and Bybit REST polls now run through
+      `CaptureService.poll_loop`; the ledger site and detail strings are unchanged), `collector.resync`,
+      `collector.process` or `collector.subscribe_failed`.
+- [ ] Confirm rows still arrive for every venue (the web chart's live candles, or `redis-cli
+      SUBSCRIBE snapshots:raw`), and that `custom_open_interest/` gains dYdX and Bybit linear rows
+      at the poll cadence (`open_interest_poll_seconds`, 300 s).

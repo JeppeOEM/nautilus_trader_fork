@@ -24,7 +24,7 @@ Invariant: the line bytes are the published format shared by capture (writes `wr
 `quarantined`), archive (writes `pruned`, reads all) -- `encode` must keep producing exactly what
 the original writer produced, and `decode` refuses a malformed line (`ValueError`) rather than
 guess a span. The file I/O and its failure ledgering live with the writers -- capture's
-`collector_core.gap_markers` and archive's `archive.infrastructure.gap_markers` -- never here.
+`capture.infrastructure.gap_markers` and archive's `archive.infrastructure.gap_markers` -- never here.
 
 `capture_lock_path` names the other file the two share: `<catalog>/.capture-<VENUE>.lock`, which
 a running collector holds a shared `flock` on for its whole life and an archive tool that must not

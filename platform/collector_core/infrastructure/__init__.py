@@ -12,4 +12,6 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
-"""Capture's adapters behind `collector_core.ports` (spine AD-D2): imported only by composition roots."""
+"""
+Deprecated shim package (Story 26.2): moved to `capture.infrastructure`.
+"""

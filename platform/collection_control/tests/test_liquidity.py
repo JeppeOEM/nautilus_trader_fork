@@ -86,8 +86,8 @@ def test_excluded_coin_is_always_illiquid() -> None:
 
 def test_max_liquid_keeps_highest_volume() -> None:
     # dYdX's WS server hard-caps subscriptions per channel at 32 per connection -- exceeding it
-    # gets every subscription rejected in a loop (the plan's cap, `collector_core.config`), so
-    # overflow must be demoted by volume, not left in.
+    # gets every subscription rejected in a loop (the plan's cap, `capture.venues.dydx.config`),
+    # so overflow must be demoted by volume, not left in.
     result = classify_liquidity(
         _markets(
             BTC={"ticker": "BTC-USD", "volume24H": "500000"},

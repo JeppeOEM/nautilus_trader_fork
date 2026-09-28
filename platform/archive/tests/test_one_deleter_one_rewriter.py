@@ -158,9 +158,9 @@ def test_no_module_level_mutable_state_in_the_context() -> None:
     assert offenders == []
 
 
-@pytest.mark.parametrize("venue", ["dydx_collector", "bybit_collector", "hyperliquid_collector"])
+@pytest.mark.parametrize("venue", ["dydx", "bybit", "hyperliquid"])
 def test_no_venue_collector_keeps_a_prune_loop(venue: str) -> None:
-    tree = ast.parse((_PLATFORM / venue / "collector.py").read_text())
+    tree = ast.parse((_PLATFORM / "capture" / "venues" / venue / "__main__.py").read_text())
     defined = {
         node.name
         for node in ast.walk(tree)

@@ -38,14 +38,17 @@ so the graph holds from the first move, not only once a module has been relocate
   `bots/infrastructure/nautilus_host.py` imports `TradingNode` or `nautilus_trader.live`
   (Story 25.3);
 - `collection_control/` holds no module-level mutable runtime state, and capture reaches it only
-  from its composition roots and the one venue loader, `collector_core.config` (Story 25.4).
+  from its composition roots and the one venue loader, `capture.infrastructure.config` (Story
+  25.4);
+- no class anywhere in `platform/` subclasses `CaptureService` (or its old name `Collector`):
+  venue variance is policy values and composition-root loops (Story 26.2).
 
-Two exemptions only. An edge whose both ends sit in one *unmoved* legacy package (e.g. inside
-`collector_core`) is not judged: it becomes judged the moment one end moves out. `platform/tests`
-is cross-cutting and may import anything. Every other deviation today is listed in
-`LEGACY_EDGES_UNTIL`/`LEGACY_PRIVATE_IMPORTS_UNTIL` with the story that retires it; an entry
-fails once that story is `done` on the sprint board, and fails when no import needs it any
-more, so both tables can only shrink.
+One exemption only: `platform/tests` is cross-cutting and may import anything. Since Story 26.2
+moved capture, the last context, no unmoved package remains, so the full AD-D2 graph is judged;
+the legacy packages left are pure re-export shims mapped to the context they re-export. A
+deviation would be listed in `LEGACY_EDGES_UNTIL`/`LEGACY_PRIVATE_IMPORTS_UNTIL` with the story
+that retires it; an entry fails once that story is `done` on the sprint board, and fails when no
+import needs it any more, so both tables can only shrink (both are empty).
 """
 
 import ast
@@ -62,7 +65,7 @@ from _source_tree import story_statuses
 from _source_tree import unknown_or_done
 
 
-THIS_STORY = "26-1-livebook-tradeintake-feedgroup-pure-secondsampler-in-place"
+THIS_STORY = "26-2-capture-package-and-venue-packages-with-entrypoints"
 
 KERNEL = "kernel"
 OBSERVABILITY = "observability"
@@ -126,24 +129,11 @@ GRAPH: frozenset[tuple[str, str]] = frozenset(
 # Longest dotted prefix wins. A test module belongs to the context of the code it tests, so it
 # moves with that code.
 LEGACY_MODULE_TO_CONTEXT: dict[str, str] = {
-    # --- collector_core: capture. The archive modules it hosted moved to `archive/` in Story 25.1;
-    # their re-export shims were deleted in Story 25.3.
+    # --- the Story 26.2 re-export shims of capture (removed after Story 26.3): capture's.
     "collector_core": CAPTURE,
-    "collector_core.book_check": CAPTURE,
-    "collector_core.collector": CAPTURE,
-    "collector_core.config": CAPTURE,
-    "collector_core.feed": CAPTURE,
-    "collector_core.ports": CAPTURE,
-    "collector_core.trade_backfill": CAPTURE,
-    "collector_core.tests": CAPTURE,
-    # --- venue collectors: capture. dYdX's control plane moved to `collection_control/` in Story
-    # 25.4; `dydx_collector.config` is its re-export shim (of the plan's `InstrumentEntry` and
-    # capture's `DydxConfig`), so it stays mapped to collection control.
     "bybit_collector": CAPTURE,
     "hyperliquid_collector": CAPTURE,
     "dydx_collector": CAPTURE,
-    "dydx_collector.config": COLLECTION_CONTROL,
-    "dydx_collector.tests.test_build_candles": CANDLES,
     # --- data_api: the interface adapter (its Story 24.2 views shims were deleted in Story 24.4,
     # its Story 24.3 alerting shim in Story 25.1)
     "data_api": DATA_API,
@@ -153,17 +143,15 @@ LEGACY_MODULE_TO_CONTEXT: dict[str, str] = {
 
 # Modules split across contexts: (module, top-level name) -> context. Every top-level function and
 # class of a split module is listed (asserted), so its move is fully planned. Empty since Story 25.4
-# moved `classify_liquidity` out of `dydx_collector.open_interest` (served there by `__getattr__`
-# until its `MOVED_NAMES_REMOVE_AFTER`), leaving that module wholly capture's.
+# moved `classify_liquidity` out of `dydx_collector.open_interest`, leaving that module wholly
+# capture's (Story 26.2 deleted its `__getattr__` alias with the move).
 LEGACY_SYMBOL_TO_CONTEXT: dict[tuple[str, str], str] = {}
 
 # Cross-context edges the tree still has, (importer context, imported context) -> the story whose
 # `done` retires the edge. The sites named are the ones the retiring story removes.
-LEGACY_EDGES_UNTIL: dict[tuple[str, str], str] = {
-    # The capture tests read their own written snapshots back with `query_second_snapshots`
-    # (a views read); they move with capture into capture/tests.
-    (CAPTURE, VIEWS): "26-2-capture-package-and-venue-packages-with-entrypoints",
-}
+# Empty since Story 26.2: the capture tests read their snapshots back through their own
+# `capture/tests/catalog_kit.py`, which retired the last one, (capture -> views).
+LEGACY_EDGES_UNTIL: dict[tuple[str, str], str] = {}
 
 # Cross-context imports of a `_private` name: (importing module, "module._name") -> story. Empty
 # since Story 24.2 replaced the data_api route tests' borrowed candle-test helpers with their own.
@@ -178,15 +166,15 @@ COMPOSITION_ROOTS: dict[str, frozenset[str]] = {
     # The three venue entrypoints open their own `candles_<venue>.db` and hand capture the
     # `SecondSink` adapter plus the retention loop (Story 24.1).
     # dYdX's also builds collection control's `ControlService`/`StatusPublisher` and their adapters
-    # and hands their loops to capture as `extra_loops` (Story 25.4).
-    "dydx_collector.collector": frozenset({CANDLES, COLLECTION_CONTROL}),
-    "bybit_collector.collector": frozenset({CANDLES}),
-    "hyperliquid_collector.collector": frozenset({CANDLES}),
-    # ...and the tests that drive exactly that wiring: one per venue, because `Collector` no longer
-    # starts the retention loop itself and a venue that forgot it would fail silently.
-    "dydx_collector.tests.test_candle_feed": frozenset({CANDLES}),
-    "bybit_collector.tests.test_candle_wiring": frozenset({CANDLES}),
-    "hyperliquid_collector.tests.test_candle_wiring": frozenset({CANDLES}),
+    # and hands their loops to capture through `add_loops` (Story 25.4; Story 26.2).
+    "capture.venues.dydx.__main__": frozenset({CANDLES, COLLECTION_CONTROL}),
+    "capture.venues.bybit.__main__": frozenset({CANDLES}),
+    "capture.venues.hyperliquid.__main__": frozenset({CANDLES}),
+    # ...and the tests that drive exactly that wiring: one per venue, because `CaptureService`
+    # never starts the retention loop itself and a venue that forgot it would fail silently.
+    "capture.venues.dydx.tests.test_candle_feed": frozenset({CANDLES}),
+    "capture.venues.bybit.tests.test_candle_wiring": frozenset({CANDLES}),
+    "capture.venues.hyperliquid.tests.test_candle_wiring": frozenset({CANDLES}),
     # The data_api route tests seed the upstream store through its only writer -- the candle store
     # (`CandleStore`) and ranking's `metrics_store.write` -- so the route under test reads a real
     # store; `data_api` itself reaches neither context (Story 24.2).
@@ -199,8 +187,8 @@ COMPOSITION_ROOTS: dict[str, frozenset[str]] = {
     "archive.prune_catalog": frozenset({COLLECTION_CONTROL}),
     # AD-D17's one venue loader returns the `CollectionPlan` aggregate, so it builds one: it
     # imports `collection_control.domain` only. Everything else in capture sees the plan as ids and
-    # the `collector_core.ports.PlanDiff` protocol.
-    "collector_core.config": frozenset({COLLECTION_CONTROL}),
+    # the `capture.application.ports.PlanDiff` protocol.
+    "capture.infrastructure.config": frozenset({COLLECTION_CONTROL}),
 }
 
 
@@ -245,11 +233,6 @@ def _symbol_context(module: str, name: str | None) -> str | None:
 _MODULES = python_modules()
 _KNOWN = set(_MODULES)
 _PACKAGE_INITS = {name for name, path in _MODULES.items() if path.name == "__init__.py"}
-# The legacy packages: every top-level package that is not itself a context. `data_api` and
-# `bot_tui` keep their names (interface adapters) and are judged like any context package.
-LEGACY_PACKAGES = frozenset(
-    {"collector_core", "dydx_collector", "bybit_collector", "hyperliquid_collector"}
-)
 
 
 def _in_repo(target: str) -> str | None:
@@ -279,9 +262,8 @@ _IMPORTS = _all_imports()
 
 
 def _exempt(imp: Import) -> bool:
-    """Within one unmoved legacy package, or from the cross-cutting `platform/tests`."""
-    src_top, dst_top = imp.src.split(".")[0], imp.dst.split(".")[0]
-    return imp.src_ctx == TESTS or (src_top == dst_top and src_top in LEGACY_PACKAGES)
+    """From the cross-cutting `platform/tests`: the one exemption left (Story 26.2)."""
+    return imp.src_ctx == TESTS
 
 
 def _composition_root_edge(imp: Import) -> bool:
@@ -377,7 +359,7 @@ def test_a_composition_root_may_reach_only_its_own_named_contexts(root: str) -> 
 
 def test_a_module_that_is_not_a_composition_root_gets_no_such_exemption() -> None:
     assert not _composition_root_edge(
-        Import("collector_core.collector", CAPTURE, "candles.x", "y", CANDLES, 1)
+        Import("capture.application.capture_service", CAPTURE, "candles.x", "y", CANDLES, 1)
     )
 
 
@@ -412,17 +394,22 @@ _LEGACY_STORIES = sorted(
 )
 
 
-@pytest.mark.parametrize("story", _LEGACY_STORIES)
-def test_legacy_entries_expire_with_their_story(story: str) -> None:
-    reason = unknown_or_done(story, story_statuses())
-    entries = sorted(
-        str(key)
-        for table in (LEGACY_EDGES_UNTIL, LEGACY_PRIVATE_IMPORTS_UNTIL)
-        for key, until in table.items()
-        if until == story
-    )
-    assert reason is None, f"{reason}: retire {entries} (fix the imports, then delete the entries)"
-    assert _story_order(story) > _story_order(THIS_STORY), f"{story} is not a later story"
+def test_legacy_entries_expire_with_their_story() -> None:
+    """
+    A loop, not a parametrization: both tables are empty since Story 26.2, and an empty parameter
+    set is a skip. A new entry is still checked here the moment it is added.
+    """
+    statuses = story_statuses()
+    for story in _LEGACY_STORIES:
+        reason = unknown_or_done(story, statuses)
+        entries = sorted(
+            str(key)
+            for table in (LEGACY_EDGES_UNTIL, LEGACY_PRIVATE_IMPORTS_UNTIL)
+            for key, until in table.items()
+            if until == story
+        )
+        assert reason is None, f"{reason}: retire {entries} (fix the imports, then delete them)"
+        assert _story_order(story) > _story_order(THIS_STORY), f"{story} is not a later story"
 
 
 def test_graph_gives_kernel_and_observability_no_outgoing_edge() -> None:
@@ -523,13 +510,11 @@ _DOMAIN_SAFE_ROOTS = frozenset({"numpy"})
 
 def _is_domain_module(module: str) -> bool:
     """
-    Tell a `domain/` module or a venue's `policies.py` -- `capture/venues/<v>/policies.py` after
-    Story 26.2, `<venue>_collector/policies.py` until then (Story 26.1: pure values, AD-D6).
+    Tell a `domain/` module (`capture.domain.*` and every context's) or a venue's
+    `capture/venues/<v>/policies.py` (Story 26.1: pure values, AD-D6; moved there in Story 26.2).
     """
     parts = module.split(".")
-    policies = (len(parts) == 4 and parts[1] == "venues" and parts[3] == "policies") or (
-        len(parts) == 2 and parts[0].endswith("_collector") and parts[1] == "policies"
-    )
+    policies = parts[:2] == [CAPTURE, "venues"] and len(parts) == 4 and parts[3] == "policies"
     return "domain" in parts[1:] or policies
 
 
@@ -540,8 +525,8 @@ def _domain_violations(module: str, targets: list[str]) -> list[str]:
         in_repo = _in_repo(target)
         if in_repo is not None:
             ctx = _context_of(in_repo)
-            # Another domain module of the same context: until Story 26.2 moves capture into one
-            # package, a venue's policies import `collector_core.domain` across packages.
+            # Another domain module of the same context: a venue's policies import
+            # `capture.domain` (its verdicts and policy protocols).
             if ctx != KERNEL and not (ctx == _context_of(module) and _is_domain_module(in_repo)):
                 bad.append(target)
         elif (
@@ -566,9 +551,9 @@ def test_domain_rule_recognises_policy_files_and_foreign_imports() -> None:
     assert _is_domain_module("capture.venues.dydx.policies")
     assert _is_domain_module("capture.domain.live_book")
     assert not _is_domain_module("capture.venues.dydx.client")
-    assert _is_domain_module("dydx_collector.policies")
-    assert _is_domain_module("collector_core.domain.live_book")
-    assert not _is_domain_module("dydx_collector.collector")
+    assert not _is_domain_module("capture.venues.dydx.__main__")
+    assert not _is_domain_module("dydx_collector.policies")  # a Story 26.2 re-export shim
+    assert not _is_domain_module("kernel.venues.x.policies")
     assert _domain_violations(
         "capture.venues.dydx.policies",
         [
@@ -593,7 +578,7 @@ _CAPTURE_MODULES = {
     if _context_of(module) == CAPTURE and _not_test(module)
 }
 # Forbidden in a capture aggregate or policy (AD-D6): it reports through verdicts and events, and
-# the `Collector` alone logs, ledgers, awaits and reads the clock.
+# the `CaptureService` alone logs, ledgers, awaits and reads the clock.
 _IMPURE_IMPORTS = ("logging", "asyncio", "time", "observability")
 
 
@@ -635,9 +620,9 @@ def test_the_purity_rule_catches_each_kind() -> None:
 
 
 _SITE_LITERAL = re.compile(r"(collector|archive_gaps)\.[a-z_]+")
-_SITES_MODULE = "collector_core.sites"
+_SITES_MODULE = "capture.application.sites"
 # The application service: the one module that calls `error_ledger.record` in capture (AD-D6).
-_LEDGER_CALLER = "collector_core.collector"
+_LEDGER_CALLER = "capture.application.capture_service"
 
 
 def _ledger_calls(tree: ast.Module) -> list[int]:
@@ -667,7 +652,7 @@ def test_the_collector_is_captures_only_ledger_caller() -> None:
         for module, path in _CAPTURE_MODULES.items()
         if (lines := _ledger_calls(ast.parse(path.read_text()))) and module != _LEDGER_CALLER
     }
-    assert callers == {}, "report through `Collector._ledger` (a `Ledger` handed to adapters)"
+    assert callers == {}, "report through `CaptureService._ledger` (a `Ledger` handed to adapters)"
     assert len(_ledger_calls(ast.parse(_MODULES[_LEDGER_CALLER].read_text()))) == 1
 
 
@@ -677,7 +662,7 @@ def test_every_capture_ledger_site_is_named_once_in_sites() -> None:
         for module, path in _CAPTURE_MODULES.items()
         if module != _SITES_MODULE and (literals := _site_literals(ast.parse(path.read_text())))
     }
-    assert literal_sites == {}, "name every site through `collector_core.sites`"
+    assert literal_sites == {}, "name every site through `capture.application.sites`"
     sites_tree = ast.parse(_MODULES[_SITES_MODULE].read_text())
     declared = [
         target.id
@@ -700,22 +685,191 @@ def test_every_capture_ledger_site_is_named_once_in_sites() -> None:
 
 
 # Capture's composition roots (the venue entrypoints) are the only non-test importers of its
-# adapters (spine AD-D2). The adapters import each other and the application's ports only.
+# adapters and its loader (spine AD-D2). The adapters import each other and the application's ports
+# only; the Story 26.2 re-export shims of the old paths re-export them and are not importers.
 _CAPTURE_ROOTS = frozenset(
-    {"dydx_collector.collector", "bybit_collector.collector", "hyperliquid_collector.collector"}
+    {
+        "capture.venues.dydx.__main__",
+        "capture.venues.bybit.__main__",
+        "capture.venues.hyperliquid.__main__",
+    }
 )
-_CAPTURE_INFRASTRUCTURE = "collector_core.infrastructure"
+_CAPTURE_INFRASTRUCTURE = "capture.infrastructure"
+
+
+# The only module-level names a re-export shim assigns.
+_SHIM_CONSTANTS = frozenset({"__all__", "REMOVE_AFTER", "_REPLACED_NAMES"})
+
+
+def _is_shim_statement(node: ast.stmt) -> bool:
+    """
+    One statement MR2 allows in a shim: the docstring, an import, a shim constant, the module-level
+    `warnings.warn(...)`, or a `__getattr__` that only raises (a `_REPLACED_NAMES` name).
+    """
+    if isinstance(node, ast.Import | ast.ImportFrom):
+        return True
+    if isinstance(node, ast.Assign | ast.AnnAssign):
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        return all(isinstance(t, ast.Name) and t.id in _SHIM_CONSTANTS for t in targets)
+    if isinstance(node, ast.Expr):
+        value = node.value
+        is_warn = isinstance(value, ast.Call) and ast.unparse(value.func) == "warnings.warn"
+        return is_warn or (isinstance(value, ast.Constant) and isinstance(value.value, str))
+    if isinstance(node, ast.FunctionDef) and node.name == "__getattr__":
+        # Every nested statement: an `if` or a `raise`, so no import, return or assignment hides.
+        return all(
+            isinstance(inner, ast.If | ast.Raise)
+            for inner in ast.walk(node)
+            if isinstance(inner, ast.stmt) and inner is not node
+        )
+    return False
+
+
+def _is_reexport_shim(path: Path) -> bool:
+    """
+    Tell a pure re-export shim: it declares `REMOVE_AFTER` and holds nothing but shim statements, so
+    a module carrying real code beside a stray `REMOVE_AFTER` never earns the shim exemption
+    (`test_namespace.py` holds each served name to MR2's `old is new`).
+    """
+    body = ast.parse(path.read_text()).body
+    declares = any(
+        isinstance(node, ast.Assign)
+        and any(isinstance(t, ast.Name) and t.id == "REMOVE_AFTER" for t in node.targets)
+        for node in body
+    )
+    return declares and all(_is_shim_statement(node) for node in body)
+
+
+def test_the_shim_exemption_needs_a_pure_body(tmp_path: Path) -> None:
+    shim = '"""Doc."""\nimport warnings\nfrom a import b\n__all__ = ["b"]\nREMOVE_AFTER = "x"\n'
+    pure = tmp_path / "pure.py"
+    pure.write_text(shim + 'warnings.warn("moved", DeprecationWarning)\n')
+    impure = tmp_path / "impure.py"
+    impure.write_text(shim + "def helper() -> int:\n    return 1\n")
+    replaced = tmp_path / "replaced.py"
+    getattr_head = "def __getattr__(name: str) -> object:\n    if name == 'gone':\n"
+    replaced.write_text(shim + getattr_head + "        raise ImportError(name)\n")
+    serving = tmp_path / "serving.py"
+    serving.write_text(
+        shim + getattr_head + "        globals()[name] = 1\n    raise AttributeError\n"
+    )
+    assert _is_reexport_shim(pure)
+    assert _is_reexport_shim(replaced)
+    assert not _is_reexport_shim(impure)
+    assert not _is_reexport_shim(serving)
 
 
 def test_capture_infrastructure_is_imported_only_by_its_composition_roots() -> None:
     importers = sorted(
         f"{module} -> {ref.target}"
         for module, path in _CAPTURE_MODULES.items()
-        if module not in _CAPTURE_ROOTS and not module.startswith(_CAPTURE_INFRASTRUCTURE)
+        if module not in _CAPTURE_ROOTS
+        and not module.startswith(_CAPTURE_INFRASTRUCTURE)
+        and not _is_reexport_shim(path)
         for ref in imports_of(module, path, _KNOWN)
         if ref.target.startswith(_CAPTURE_INFRASTRUCTURE)
     )
     assert importers == []
+    assert set(_CAPTURE_ROOTS) <= _KNOWN, "a capture composition root naming no module"
+
+
+def test_the_capture_service_imports_no_capture_infrastructure() -> None:
+    """The application service sees the adapters as ports only; the roots inject them."""
+    assert not any(
+        ref.target.startswith(_CAPTURE_INFRASTRUCTURE)
+        for ref in imports_of(_LEDGER_CALLER, _MODULES[_LEDGER_CALLER], _KNOWN)
+    )
+
+
+# The capture service and its pre-Story-26.2 name. The `collector_core.collector` shim does not
+# serve `Collector` (a `_REPLACED_NAMES` entry); the old name is kept so a stale alias still trips.
+_CAPTURE_SERVICE_NAMES = frozenset({"CaptureService", "Collector"})
+
+
+def _base_names(node: ast.ClassDef) -> set[str]:
+    """Return the bare names a class derives from: `X`, `mod.X` and `X[...]` all name X."""
+    names = set()
+    for base in node.bases:
+        target = base.value if isinstance(base, ast.Subscript) else base
+        name = getattr(target, "id", None) or getattr(target, "attr", None)
+        if isinstance(name, str):
+            names.add(name)
+    return names
+
+
+def _capture_service_aliases(tree: ast.Module) -> set[str]:
+    """
+    Return the names a module binds to the service: the two real names, any `import ... as` of
+    them and any plain rebinding (`Base = CaptureService`), so an alias cannot hide a subclass.
+    """
+    names = set(_CAPTURE_SERVICE_NAMES)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            names |= {a.asname for a in node.names if a.name in names and a.asname}
+    changed = True
+    while changed:  # a rebinding of a rebinding
+        changed = False
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign) and _bare_name(node.value) in names:
+                bound = {t.id for t in node.targets if isinstance(t, ast.Name)} - names
+                names |= bound
+                changed = changed or bool(bound)
+    return names
+
+
+def _bare_name(node: ast.expr) -> str | None:
+    name = getattr(node, "id", None) or getattr(node, "attr", None)
+    return name if isinstance(name, str) else None
+
+
+def _dynamic_subclass(node: ast.AST, names: set[str]) -> bool:
+    """`type("X", (CaptureService,), {...})`: a subclass built without a `class` statement."""
+    if not (isinstance(node, ast.Call) and _bare_name(node.func) == "type" and len(node.args) == 3):
+        return False
+    bases = node.args[1]
+    return isinstance(bases, ast.Tuple) and any(_bare_name(b) in names for b in bases.elts)
+
+
+def _capture_service_subclasses(tree: ast.Module) -> list[str]:
+    names = _capture_service_aliases(tree)
+    return [
+        f"{getattr(node, 'name', 'type()')} at line {node.lineno}"
+        for node in ast.walk(tree)
+        if (isinstance(node, ast.ClassDef) and _base_names(node) & names)
+        or _dynamic_subclass(node, names)
+    ]
+
+
+def test_no_class_anywhere_subclasses_the_capture_service() -> None:
+    """
+    Story 26.2 (spine AD-D6, parent AD-1): a venue is a composition root over policy values, never
+    a subclass, so no venue -- and no test -- can override a core method or the gate itself.
+    """
+    subclasses = {
+        module: found
+        for module, path in _MODULES.items()
+        if (found := _capture_service_subclasses(ast.parse(path.read_text())))
+    }
+    assert subclasses == {}, "wire the venue in its `__main__.py`, never subclass the service"
+
+
+def test_the_subclass_rule_catches_each_base_form() -> None:
+    tree = ast.parse(
+        "class A(CaptureService): pass\nclass B(capture_service.CaptureService): pass\n"
+        "class C(Collector, Mixin): pass\nclass D(Generic[T]): pass\n"
+        "class E(DydxCollector): pass\n"
+        "from capture.application.capture_service import CaptureService as Core\n"
+        "class F(Core): pass\nBase = Core\nclass G(Base): pass\n"
+        'H = type("H", (CaptureService,), {})\n'
+    )
+    assert _capture_service_subclasses(tree) == [
+        "A at line 1",
+        "B at line 2",
+        "C at line 3",
+        "F at line 7",
+        "G at line 9",
+        "type() at line 10",
+    ]
 
 
 def test_every_import_resolves_to_a_mapped_context() -> None:
@@ -727,7 +881,7 @@ def test_every_import_resolves_to_a_mapped_context() -> None:
 def test_checker_flags_unmapped_modules_and_expired_stories() -> None:
     assert _context_of("some_legacy_package.a_module_nobody_placed") is None
     assert _context_of("observability.anything") == OBSERVABILITY
-    assert _context_of("dydx_collector.config") == COLLECTION_CONTROL  # a Story 25.4 shim
+    assert _context_of("dydx_collector.client") == CAPTURE  # a Story 26.2 re-export shim
     board = {"24-1-x": "done", "24-2-y": "ready-for-dev", "24-3-z": "superseded"}
     assert unknown_or_done("24-1-x", board) is not None
     assert unknown_or_done("24-9-typo", board) is not None
@@ -744,12 +898,14 @@ def test_tree_walk_rejects_a_module_and_a_package_of_one_name(tmp_path: Path) ->
         python_modules(tmp_path)
 
 
-def test_exemption_covers_only_one_unmoved_package_and_platform_tests() -> None:
-    inside = Import("collector_core.collector", CAPTURE, "collector_core.feed", "x", CAPTURE, 1)
-    across = Import("collector_core.collector", CAPTURE, "candles.domain.fold", "x", CANDLES, 1)
+def test_exemption_covers_only_platform_tests() -> None:
+    shim = Import(
+        "collector_core.config", CAPTURE, "collection_control.x", "x", COLLECTION_CONTROL, 2
+    )
+    across = Import("capture.application.capture_service", CAPTURE, "candles.x", "x", CANDLES, 1)
     interface = Import("data_api.app", DATA_API, "data_api.alert_wiring", "x", ALERTING, 1)
     guard = Import("tests.test_x", TESTS, "candles.domain.fold", "_x", CANDLES, 1)
-    assert _exempt(inside)
+    assert not _exempt(shim)
     assert not _exempt(across)
     assert not _exempt(interface)
     assert _exempt(guard)
@@ -1296,9 +1452,9 @@ VIEWS_QUERY_SERVICES: dict[str, frozenset[str]] = {
     "ranking.application.queries": frozenset({"history", "nearest"}),
 }
 # Packages views never imports (AD-D2): the interfaces, research, capture and the legacy shims.
-_VIEWS_FORBIDDEN_PACKAGES = frozenset({DATA_API, BOT_TUI, "collector_core", "common"})
+_VIEWS_FORBIDDEN_PACKAGES = frozenset({DATA_API, BOT_TUI, CAPTURE, "collector_core", "common"})
 # What an interface adapter never imports directly: every read goes through views (AC #3).
-_INTERFACE_FORBIDDEN_PACKAGES = frozenset({RANKING, "collector_core", "candles", "common"})
+_INTERFACE_FORBIDDEN_PACKAGES = frozenset({RANKING, CAPTURE, "collector_core", "candles", "common"})
 
 
 def _is_test_module(module: str) -> bool:
@@ -1451,7 +1607,7 @@ _RANKING_SANCTIONED_CALLS = frozenset({"getLogger"})
 # are how the frozen config value objects spell their defaults, neither is state the module owns.
 _BOTS_SANCTIONED_CALLS = _RANKING_SANCTIONED_CALLS | {"Decimal", "field"}
 # Collection control's modules bind only their module logger (its plan and service state live on
-# the instances `build_collector` makes; its frozen tables are the kernel's sanctioned builders).
+# the instances `build_capture_from_file` makes; its frozen tables are the kernel's sanctioned builders).
 _COLLECTION_CONTROL_SANCTIONED_CALLS = _RANKING_SANCTIONED_CALLS
 _STATE_RULED_CONTEXTS = {
     RANKING: _RANKING_SANCTIONED_CALLS,
@@ -1517,7 +1673,8 @@ def test_context_holds_no_module_level_runtime_state(context: str) -> None:
     """
     Every piece of ranking state lives on the board or engine `__main__` builds, every piece of
     bots state on the bot, ledger, supervisor or store instances its `__main__` builds, every piece
-    of collection-control state on the plan and service instances `build_collector` makes (AD-D10).
+    of collection-control state on the plan and service instances `build_capture_from_file` makes
+    (AD-D10).
     """
     sources = _context_sources(context)
     assert len(sources) > 10, f"the {context} context's modules were not found"

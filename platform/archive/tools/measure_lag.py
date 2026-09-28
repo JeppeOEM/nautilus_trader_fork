@@ -107,22 +107,26 @@ def _build_client(venue: str, environment: str, on_data: Callable[[object], None
     if venue == "bybit":
         from nautilus_trader.core.nautilus_pyo3 import BybitEnvironment
 
-        bybit = importlib.import_module("bybit_collector.client")
+        bybit = importlib.import_module("capture.venues.bybit.client")
         env = BybitEnvironment.TESTNET if environment == "testnet" else BybitEnvironment.MAINNET
         return bybit.BybitClient(on_data=on_data, environment=env)
     if venue == "hyperliquid":
-        hyperliquid = importlib.import_module("hyperliquid_collector.client")
+        hyperliquid = importlib.import_module("capture.venues.hyperliquid.client")
         return hyperliquid.HyperliquidClient(on_data=on_data, environment=environment)
     from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
 
-    dydx = importlib.import_module("dydx_collector.client")
+    dydx = importlib.import_module("capture.venues.dydx.client")
     return dydx.DydxClient(on_data=on_data, network=DydxNetwork.from_str(environment))  # type: ignore[attr-defined]
 
 
 def _default_instruments(venue: str) -> list[str]:
-    """Return the venue collector's committed config.toml instruments (dYdX's is empty)."""
+    """
+    Return the venue's committed config.toml instruments. dYdX's is the empty placeholder its compose
+    bind mount covers (`dydx_collector/config.toml`); the others moved with capture (Story 26.2).
+    """
     platform_dir = Path(__file__).resolve().parents[2]  # archive/tools/measure_lag.py
-    path = platform_dir / f"{venue}_collector" / "config.toml"
+    relative = "dydx_collector" if venue == "dydx" else f"capture/venues/{venue}"
+    path = platform_dir / relative / "config.toml"
     with path.open("rb") as f:
         return list(tomllib.load(f).get("instruments", []))
 

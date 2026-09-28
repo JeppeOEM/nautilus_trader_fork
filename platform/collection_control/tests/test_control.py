@@ -25,9 +25,9 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import pytest
-from collector_core.ports import Applied
-from collector_core.ports import CaptureStatus
-from collector_core.ports import PlanDiff
+from capture.application.ports import Applied
+from capture.application.ports import CaptureStatus
+from capture.application.ports import PlanDiff
 from observability import error_ledger
 
 import collection_control.application.control as control_module

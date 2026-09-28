@@ -13,45 +13,31 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-Bybit linear open interest. The Rust adapter drops it on the linear ticker WS path (see
-client.py), so poll the public REST tickers endpoint -- one GET returns every linear symbol.
-Stdlib only, same as `dydx_collector.open_interest`.
+Deprecated re-export shim (Story 26.2): `bybit_collector.open_interest` moved to
+`capture.venues.bybit.open_interest`.
+
+Pure re-export, defines nothing: every name here *is* its successor object.
 """
 
-import asyncio
-import time
-from decimal import Decimal
+import warnings
 
-from kernel.open_interest import OpenInterest
-from kernel.venue_http import bybit_url
-from kernel.venue_http import get_request
-from kernel.venue_http import http_json
-
-from nautilus_trader.model.identifiers import InstrumentId
+from capture.venues.bybit.open_interest import fetch_open_interest
+from capture.venues.bybit.open_interest import parse_open_interest
 
 
-_USER_AGENT = "nautilus-bybit-collector/1.0"
+__all__ = [
+    "fetch_open_interest",
+    "parse_open_interest",
+]
+
+REMOVE_AFTER = "26-3-closeout-shims-gone-spines-reconciled"
 
 
-def _fetch_tickers_json(environment: str) -> dict:
-    url = bybit_url(environment, "/v5/market/tickers?category=linear")
-    return http_json(get_request(url, _USER_AGENT))
-
-
-async def fetch_open_interest(environment: str) -> list[OpenInterest]:
-    tickers_json = await asyncio.to_thread(_fetch_tickers_json, environment)
-    return parse_open_interest(tickers_json, ts=time.time_ns())
-
-
-def parse_open_interest(tickers_json: dict, ts: int) -> list[OpenInterest]:
-    # The Nautilus Bybit adapter's linear ids are "{symbol}-LINEAR.BYBIT".
-    return [
-        OpenInterest(
-            instrument_id=InstrumentId.from_str(f"{row['symbol']}-LINEAR.BYBIT"),
-            open_interest=Decimal(row["openInterest"]),
-            ts_event=ts,
-            ts_init=ts,
-        )
-        for row in tickers_json.get("result", {}).get("list", [])
-        if row.get("symbol") and row.get("openInterest")
-    ]
+# Attributed to the importing module, not to importlib's frames.
+warnings.warn(
+    "bybit_collector.open_interest moved to "
+    "capture.venues.bybit.open_interest (Story 26.2); "
+    f"this shim is removed after {REMOVE_AFTER}",
+    DeprecationWarning,
+    skip_file_prefixes=("<frozen importlib",),
+)

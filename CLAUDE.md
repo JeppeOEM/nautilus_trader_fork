@@ -2,12 +2,14 @@
 
 ## Project
 
-**Multi-Venue Market Data Collector** — `platform/collector_core/` plus `platform/dydx_collector/`,
-`platform/bybit_collector/`, `platform/hyperliquid_collector/`.
+**Multi-Venue Market Data Collector** — `platform/capture/` (the capture context) with one
+package per venue under `platform/capture/venues/{dydx,bybit,hyperliquid}/` (Story 26.2; the old
+`collector_core/` and `<venue>_collector/` paths are re-export shims until Story 26.3).
 
-Standalone Python asyncio services, one per venue, each subclassing the shared
-`collector_core.collector.Collector` (Epic 22). Each connects directly to its venue's
-Rust/PyO3 HTTP and WebSocket clients (`nautilus_pyo3.DydxHttpClient`/`DydxWebSocketClient`
+Standalone Python asyncio services, one per venue (`python3 -m capture.venues.<venue>`), each
+wiring the one shared `capture.application.capture_service.CaptureService` (Epic 22's
+`Collector`, never subclassed) in its `__main__.py` composition root. Each connects directly
+to its venue's Rust/PyO3 HTTP and WebSocket clients (`nautilus_pyo3.DydxHttpClient`/`DydxWebSocketClient`
 and the Bybit/Hyperliquid equivalents, wrapped by that venue package's duck-typed
 `client.py`), bypassing `TradingNode`/`Strategy`/`DataEngine` entirely, and archives market
 data continuously into one shared `ParquetDataCatalog` in the exact format Nautilus expects.
@@ -29,9 +31,9 @@ decode logic directly, so it gets battle-tested networking without the buggy `Da
 - Raw order book deltas only for instruments opted in via `store_order_book_deltas`. This is
   **dYdX-only**: only `DydxConfig`'s per-instrument entry has it. Bybit's and Hyperliquid's
   `instruments` are a flat `tuple[str, ...]`.
-- Bybit **spot** yields trades and book only. `bybit_collector/client.py` subscribes the
+- Bybit **spot** yields trades and book only. `capture/venues/bybit/client.py` subscribes the
   ticker for `LINEAR` alone, so a spot id produces no mark/index price and no funding rate,
-  and `bybit_collector/open_interest.py` builds `-LINEAR.BYBIT` ids only.
+  and `capture/venues/bybit/open_interest.py` builds `-LINEAR.BYBIT` ids only.
 
 ### Constraints
 
@@ -43,9 +45,10 @@ decode logic directly, so it gets battle-tested networking without the buggy `Da
   in-code as a `Known limit:` comment naming the ceiling and the upgrade path, never left
   implicit.
 - **Architecture:** no `TradingNode`/`Strategy`/`DataEngine`. A plain asyncio class
-  (`platform/collector_core/collector.py`'s `Collector`, subclassed per venue) owns its own
-  loop, buffer and flush timer. A venue package supplies a duck-typed client plus at most a
-  few hook overrides; the write gate itself is never overridden. `nautilus_trader` is used
+  (`platform/capture/application/capture_service.py`'s `CaptureService`, one per venue process)
+  owns its own loop, buffer and flush timer. A venue package supplies a duck-typed client,
+  policy values and its extra loops through its `__main__.py` composition root; nothing
+  subclasses the service, so the write gate itself is never overridden. `nautilus_trader` is used
   purely as a library (domain types + `ParquetDataCatalog.write_data()`), never as a live
   runtime. The one sanctioned exception is `platform/bots/` (was `platform/live_paper/`, now a
   re-export shim, Story 25.3); see `platform/CLAUDE.md`.
@@ -68,9 +71,9 @@ decode logic directly, so it gets battle-tested networking without the buggy `Da
   an assumption:
   - dYdX: dropped by the PyO3 bindings on both REST and WS markets-channel paths, so it is
     fetched by a stdlib `urllib` poll against the public indexer
-    (`platform/dydx_collector/open_interest.py`).
+    (`platform/capture/venues/dydx/open_interest.py`).
   - Bybit: dropped on the linear-ticker WS path, so likewise a REST poll
-    (`platform/bybit_collector/open_interest.py`). Bybit spot has no open interest at all.
+    (`platform/capture/venues/bybit/open_interest.py`). Bybit spot has no open interest at all.
   - Hyperliquid: forwarded over the WebSocket (`subscribe_open_interest`), so no poll.
   - All land in the one shared `kernel.open_interest.OpenInterest` custom `Data`
     type (story 22.3), registered for Arrow/Parquet serialization.
@@ -85,7 +88,7 @@ decode logic directly, so it gets battle-tested networking without the buggy `Da
     value's decimal count after stripping trailing zeros (`crates/adapters/dydx/src/common/
     parse.rs`'s `parse_price`), so consecutive ticks for one instrument can carry different
     precision labels, and `ParquetDataCatalog` correctly refuses to read/merge files whose
-    labels disagree. Fixed in `platform/dydx_collector/client.py`'s `_at_fixed_precision()`,
+    labels disagree. Fixed in `platform/capture/venues/dydx/client.py`'s `_at_fixed_precision()`,
     which re-stamps every mark/index price at `nautilus_pyo3.FIXED_PRECISION` via
     `Decimal.scaleb()` + `Price.from_raw()`. dYdX-only: Bybit and Hyperliquid parse at the
     instrument's constant precision.

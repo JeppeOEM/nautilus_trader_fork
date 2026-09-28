@@ -17,7 +17,7 @@
 import asyncio
 from typing import Any
 
-from dydx_collector.open_interest import fetch_markets_json
+from capture.venues.dydx.open_interest import fetch_markets_json
 
 from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
 

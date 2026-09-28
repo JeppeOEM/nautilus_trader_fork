@@ -282,15 +282,19 @@ def test_old_name_warns_and_is_the_new_object(
 
 def test_replaced_name_raises_naming_its_successor() -> None:
     """
-    A name whose successor changed shape is never served: a stale caller fails loudly. A loop, not
-    a parametrization: none exist since Story 25.2 deleted `ml_signals.catalog_stats` (the last
-    `_REPLACED_NAMES` table), and an empty parameter set is a skip.
+    A name whose successor changed shape is never served: a stale caller fails loudly, with an
+    `ImportError` naming the successor. A loop, not a parametrization: an empty parameter set would
+    be a skip once 26.3 deletes the last `_REPLACED_NAMES` table (`collector_core.collector`).
     """
     for module, name, successor in _REPLACED:
         if not _shipped(module):
             continue  # checked by `make test` in the image that ships it
-        with pytest.raises(AttributeError, match=re.escape(successor)):
+        with pytest.raises(ImportError, match=re.escape(successor)):
             getattr(importlib.import_module(module), name)
+        # The usual stale form: an AttributeError here would surface as a bare "cannot import".
+        # `exec` of names read from this repo's own shim ASTs, never outside input.
+        with pytest.raises(ImportError, match=re.escape(successor)):
+            exec(f"from {module} import {name}", {})  # noqa: S102
 
 
 def test_replaced_names_are_not_also_served() -> None:

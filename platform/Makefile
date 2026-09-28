@@ -75,7 +75,7 @@ build-base-vps:
 ## Start collecting data, rebuilding every default-profile service (collector included)
 ## first (seconds -- it's just the thin platform/ layer on top of the base image). Run
 ## `make build-base` once beforehand for the base image itself. Use this only for first
-## bring-up or when dydx_collector/ itself changed -- otherwise use `make redeploy` so
+## bring-up or when capture/ itself changed -- otherwise use `make redeploy` so
 ## the collector's live WS connection/book state is never disturbed. Starts the `archive`
 ## service too (the nightly maintenance schedule, Story 25.1b; no profile). data/archive (its
 ## state) and the rclone config directory are created first, as the invoking user, for the same
@@ -89,7 +89,7 @@ up:
 ## Rebuild and restart everything that doesn't collect market data (archive, ranking_engine, live-paper, bot_tui's image) -- never touches the collector
 ## container, so its WS connection/book state stays untouched. Use this for all
 ## non-collector iteration; reach for `make up` (or `docker compose up -d --build
-## collector`) only when dydx_collector/ itself changed. live-paper is rebuilt+restarted
+## collector`) only when capture/ itself changed. live-paper is rebuilt+restarted
 ## under its profile same as `make up-live-paper` -- only run this if you actually want
 ## live-paper (re)started. bot_tui is `run`-only (never a daemon), so it's just rebuilt
 ## here for a fresh image; `make tui` also rebuilds it on every invocation regardless.
@@ -103,12 +103,14 @@ redeploy:
 	@docker image prune -f
 	@echo "Dashboard: http://localhost:$(DATA_API_PORT)"
 
-## Rebuild and restart EVERYTHING, collector included -- `redeploy` plus the collector. Use when
-## dydx_collector/ changed (e.g. the candle-store feed). Briefly drops the collector's WS
+## Rebuild and restart EVERYTHING, the three collectors included -- `redeploy` plus `collector`,
+## `bybit_collector` and `hyperliquid_collector` (all built from the one collector image, so a
+## capture/ change must restart all three: before Story 26.2 this target restarted only dYdX's).
+## Use when capture/ changed (e.g. the candle-store feed). Briefly drops each collector's WS
 ## connection and loses its in-memory book state; prefer `redeploy` otherwise.
 redeploy-all:
 	mkdir -p $(PLATFORM_DIR)data/archive $(RCLONE_CONFIG_DIR)
-	$(COMPOSE) up -d --build collector archive ranking_engine data_api
+	$(COMPOSE) up -d --build collector bybit_collector hyperliquid_collector archive ranking_engine data_api
 	$(COMPOSE) --profile live-paper up -d --build live-paper
 	$(COMPOSE) --profile tui build bot_tui
 	@docker image prune -f
@@ -163,7 +165,7 @@ build-insecure:
 TEST_SOURCE_MOUNT := -v $(REPO_ROOT):/src:ro -e PLATFORM_SOURCE_DIR=/src/platform
 test:
 	$(COMPOSE) run --rm --no-deps -e HOME=/tmp -e USER=collector $(TEST_SOURCE_MOUNT) collector \
-		python3 -m pytest archive/tests research/tests alerting/tests views/tests candles/tests collector_core/tests dydx_collector/tests bybit_collector/tests hyperliquid_collector/tests collection_control/tests ranking/tests bot_tui/tests data_api/tests observability/tests kernel/tests tests -q
+		python3 -m pytest archive/tests research/tests alerting/tests views/tests candles/tests capture/tests capture/venues/dydx/tests capture/venues/bybit/tests capture/venues/hyperliquid/tests collection_control/tests ranking/tests bot_tui/tests data_api/tests observability/tests kernel/tests tests -q
 
 ## Record the capture hot path's cost baseline (tests/fixtures/hotpath_baseline.json, audit D-65,
 ## spine AD-D5) into the checkout: the one place the source tree is mounted writable, because
@@ -251,7 +253,7 @@ tui:
 ## image deliberately does not copy in bots/, per AD-8's module isolation).
 ## -e HOME=/tmp -e USER=collector works around the same pre-existing "OSError: No
 ## username set" pytest tmp_path issue documented in deferred-work.md for
-## dydx_collector/tests (image runs as uid 1000 with no matching /etc/passwd entry).
+## capture/venues/dydx/tests (image runs as uid 1000 with no matching /etc/passwd entry).
 ## tests/test_hotpath.py replays the collector's ingest path, which this image deliberately
 ## does not ship; it runs in `make test`.
 ## Every build_node test in test_node.py connects the node's Redis-backed Cache at construction,

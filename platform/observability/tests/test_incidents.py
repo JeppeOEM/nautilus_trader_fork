@@ -15,7 +15,7 @@
 """
 `observability.incidents` on a synthetic, venue-free config: classification, the raw-log window
 scan, report writing, debounce, cross-thread emit, serialised pruning and stale-log cleanup.
-The dYdX entrypoint's own config is tested in `dydx_collector/tests/test_incident_config.py`.
+The dYdX entrypoint's own config is tested in `capture/venues/dydx/tests/test_incident_config.py`.
 """
 
 import asyncio

@@ -22,7 +22,7 @@ re-export shims were deleted in Story 24.2):
 - `pre_move_catalog/`: `ParquetDataCatalog.write_data` (with the collector's zstd patch applied)
   of `_snapshot_with_trades()` and `_open_interest()` below, one call each;
 - `snapshots_raw.json`: `json.dumps([DydxSecondSnapshot.to_dict(s) for s in snapshots])`, the
-  collector's `publish_snapshot_batch` encoding (`collector_core/infrastructure/redis_stream.py`), of `_snapshot_with_trades()` and
+  collector's `publish_snapshot_batch` encoding (`capture/infrastructure/redis_stream.py`), of `_snapshot_with_trades()` and
   `_snapshot_without_trades()`;
 - `archive_gap_line.jsonl`: `record_gap(catalog, "BTC-USD-PERP.DYDX", T, T + 300 s,
   "quarantined", 7)`.

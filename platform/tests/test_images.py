@@ -387,7 +387,9 @@ def test_every_service_and_make_target_contributes_entrypoints() -> None:
     covered = {entry.service for entry in _ENTRYPOINTS}
     assert set(services) <= covered, "a compose service with no parsed entrypoint"
     assert {entry.module for entry in _ENTRYPOINTS} >= {
-        "dydx_collector.collector",
+        "capture.venues.dydx.__main__",
+        "capture.venues.bybit.__main__",
+        "capture.venues.hyperliquid.__main__",
         "data_api.app",
         "bots.__main__",
         "ranking.__main__",
@@ -487,7 +489,7 @@ def test_uvicorn_app_is_the_first_non_option_token() -> None:
 
 
 def test_closure_follows_a_shim_to_its_target() -> None:
-    assert "dydx_collector.trade_history" in import_closure("collector_core.trade_backfill")
+    assert "capture.venues.dydx.trade_history" in import_closure("collector_core.trade_backfill")
 
 
 def test_an_option_value_is_not_a_collected_path() -> None:
@@ -499,12 +501,15 @@ def test_an_option_value_is_not_a_collected_path() -> None:
 
 def test_running_a_package_checks_its_main_module() -> None:
     assert _module_of("python3 -m bots") == "bots.__main__"
+    assert _module_of("python3 -m capture.venues.bybit") == "capture.venues.bybit.__main__"
     assert _module_of("python3 -m ranking") == "ranking.__main__"
     assert _module_of("python3 -m archive.nightly --venue DYDX") == "archive.nightly"
     assert "bots.infrastructure.nautilus_host" in import_closure("bots.__main__")
 
 
 def test_closure_follows_a_literal_import_module_call() -> None:
-    assert {"bybit_collector.client", "hyperliquid_collector.client", "dydx_collector.client"} <= (
-        import_closure("archive.tools.measure_lag")
-    )
+    assert {
+        "capture.venues.bybit.client",
+        "capture.venues.hyperliquid.client",
+        "capture.venues.dydx.client",
+    } <= import_closure("archive.tools.measure_lag")

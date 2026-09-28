@@ -42,11 +42,11 @@ ever back up or migrate.
 
 | Channel | Publisher | Subscribers | Payload |
 |---|---|---|---|
-| `snapshots:raw` | `collector_core/collector.py`'s `_second_loop` — every ~1s tick, in **all three** collector containers (dYdX, Bybit, Hyperliquid) | `ranking_engine`, `data_api` | JSON list of `DydxSecondSnapshot` dicts (book top-20 + trade volume/count), one per collected instrument. Each publisher sends only its own venue's instruments, so entries stay disjoint by `instrument_id` — this is the architecture spine's "one producer per (channel, venue)" convention |
+| `snapshots:raw` | `capture/application/capture_service.py`'s `_second_loop` — every ~1s tick, in **all three** collector containers (dYdX, Bybit, Hyperliquid) | `ranking_engine`, `data_api` | JSON list of `DydxSecondSnapshot` dicts (book top-20 + trade volume/count), one per collected instrument. Each publisher sends only its own venue's instruments, so entries stay disjoint by `instrument_id` — this is the architecture spine's "one producer per (channel, venue)" convention |
 | `rankings:live` | `ranking/` (the `ranking_engine` service; **sole publisher**, AD-9) | `data_api` | JSON: `{mode, updated_at, ranks: [...], stale_instrument_ids: [...]}` — every rank row carries volume/volatility/OFI/OBI/microprice/spread/CVD/price/pct-change fields |
 | `ranking:control` | `data_api` (`PUT /api/rankings/mode`, the web rankings page's mode control; Story 25.1a) | `ranking_engine` | `{"mode": "volume"\|"volatility"}` |
-| `collector:control` | `bot_tui` | `dydx_collector/collector.py` | `{"action": "start"\|"unpin"\|"stop"\|"pin_top_liquid", "id": "<instrument_id>"|null}` |
-| `collector:status` | `dydx_collector/collector.py` | `bot_tui` | Per-instrument `{id, pinned, liquid, last_trade_ts}`, or removal/unpin summaries |
+| `collector:control` | `bot_tui` | `capture/venues/dydx/__main__.py` | `{"action": "start"\|"unpin"\|"stop"\|"pin_top_liquid", "id": "<instrument_id>"|null}` |
+| `collector:status` | `capture/venues/dydx/__main__.py` | `bot_tui` | Per-instrument `{id, pinned, liquid, last_trade_ts}`, or removal/unpin summaries |
 | `bots:control` | `bot_tui` | `bots/application/supervise.py` | `{"bot_id": "...", "action": "start"\|"stop"}` |
 | `bots:status` | `bots/application/supervise.py` — every 5s heartbeat | `bot_tui` | `{bot_id, strategy, symbol, running, position_side, net_exposure, realized_pnl, unrealized_pnl, win_rate, closed_trades, ...}` |
 
@@ -63,10 +63,11 @@ ever back up or migrate.
   (OFI/OBI z-scores, volatility). `data_api`/`bot_tui` only ever parse
   `rankings:live` — neither runs its own copy of these indicators (`platform/CLAUDE.md`
   SSOT-02).
-- **The three collectors** (`dydx_collector`, `bybit_collector`, `hyperliquid_collector`,
-  all publishing through the shared `collector_core`) are the only writers of
+- **The three collectors** (compose services `collector`, `bybit_collector`,
+  `hyperliquid_collector`, i.e. `python3 -m capture.venues.{dydx,bybit,hyperliquid}`, all
+  publishing through the shared `capture` context) are the only writers of
   `snapshots:raw` — one producer per venue, each publishing only its own instruments.
-  `collector:status`/`collector:control` stay **dYdX-only**: `dydx_collector` is their
+  `collector:status`/`collector:control` stay **dYdX-only**: the dYdX collector is their
   sole writer and the sole actor on `collector:control` (the other two collectors have
   no control plane).
 - **`bots`** (the bots context, `python3 -m bots`; was `live_paper` until Story 25.3) is the sole writer of `bots:status`/`bots:incidents:*`/
@@ -156,7 +157,7 @@ persisted runtime state** — the one file the running system rewrites on its ow
 
 - **Owner:** the `collection_control/` context (Story 25.4): `TomlPlanStore`
   (`collection_control/infrastructure/plan_store.py`) loads and saves the plan through the one
-  venue loader, `collector_core.config.load_venue_config` (`tomllib`/`tomli_w`). A save
+  venue loader, `capture.infrastructure.config.load_venue_config` (`tomllib`/`tomli_w`). A save
   re-reads the file, replaces only the plan keys, validates the result and rewrites the file in
   place, not a patch — hand-added comments won't survive a control action.
 - **Read:** `collection_control`'s `reload_loop` re-reads it every `config_reload_seconds`
@@ -180,13 +181,12 @@ persisted runtime state** — the one file the running system rewrites on its ow
 
 ```
 platform/
-├── dydx_collector/
-│   ├── catalog/                   # Parquet catalog (§3)
-│   └── metrics/
-│       ├── metrics.db             # + -wal/-shm sidecars (§2.1)
 ├── bots/
 │   └── config.toml                # static per-bot config (ro)
 ├── data/
+│   ├── catalog/                   # Parquet catalog (§3)
+│   ├── metrics/
+│   │   └── metrics.db             # + -wal/-shm sidecars (§2.1)
 │   ├── dydx_config.toml           # collector instrument registry (rw, §4)
 │   └── live_paper/
 │       └── fills.db               # + -wal/-shm sidecars (§2.2)

@@ -42,7 +42,7 @@ def loop(store: RetentionStore) -> Callable[[], Awaitable[None]]:
     Build the zero-argument coroutine function a collector starts through `extra_loops`.
 
     Prunes once immediately (a process that restarts more often than hourly would otherwise never
-    prune at all), then every hour. Runs until cancelled: `Collector.run`'s `finally` cancels every
+    prune at all), then every hour. Runs until cancelled: `CaptureService.run`'s `finally` cancels every
     loop task, and the `await` is the cancellation point. A failed prune is loud and never stops the
     loop (DATA-07) -- the store simply keeps bars past their retention until the next attempt.
 

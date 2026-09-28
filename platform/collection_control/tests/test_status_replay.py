@@ -16,7 +16,7 @@
 `collector:status` byte identity (Story 25.4, AD-D12): `fixtures/status_payloads.json` is what the
 pre-move `DydxCollector._publish_status`/`_publish_removed` published for a fixed state (recorded
 before the control plane moved). The same state, rebuilt through the plan, a real capture
-`Collector` and `StatusPublisher`, must publish the identical strings.
+`CaptureService` and `StatusPublisher`, must publish the identical strings.
 """
 
 import asyncio
@@ -24,9 +24,9 @@ import json
 from pathlib import Path
 from typing import Any
 
-from collector_core.collector import Collector
-from collector_core.config import CoreConfig
-from collector_core.infrastructure.parquet_writer import ParquetArchiveWriter
+from capture.application.capture_service import CaptureService
+from capture.application.config import CoreConfig
+from capture.infrastructure.parquet_writer import ParquetArchiveWriter
 
 from collection_control.application.ports import STATUS_CHANNEL
 from collection_control.application.status import StatusPublisher
@@ -76,10 +76,11 @@ def _plan(state: dict[str, Any]) -> CollectionPlan:
     )
 
 
-def _capture(tmp_path: Path, state: dict[str, Any], plan: CollectionPlan) -> Collector:
-    capture = Collector(
+def _capture(tmp_path: Path, state: dict[str, Any], plan: CollectionPlan) -> CaptureService:
+    capture = CaptureService(
         CoreConfig(environment="mainnet", catalog_path=str(tmp_path)),
-        object(),
+        lambda _on_data, _ledger: object(),
+        venue=plan.venue,
         plan=plan.collected,
         archive=ParquetArchiveWriter(str(tmp_path)),
         live_stream=None,

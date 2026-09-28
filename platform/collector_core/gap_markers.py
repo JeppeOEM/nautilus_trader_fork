@@ -13,54 +13,29 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-Capture's archive-gap marker writer (story 22.13; capture's own since Story 25.1).
+Deprecated re-export shim (Story 26.2): `collector_core.gap_markers` moved to
+`capture.infrastructure.gap_markers`.
 
-Capture records the two gaps it causes -- `write_failed` (a trade batch's `write_data` failed
-while the same instrument's snapshot rows landed) and `quarantined` (`quarantine_corrupt_parquet`
-moved an unreadable trade file aside) -- as one line each in `<catalog>/_archive_gaps/<iid>.jsonl`,
-in the frozen `kernel.archive_markers` format, so the nightly rebuild keeps those rows' live values.
-Archive owns the rest of the file's life (its `pruned` markers, every read:
-`archive.infrastructure.gap_markers`); the two share only the kernel's line format and path, so
-neither context imports the other. Ledger sites are the pre-move ones: `archive_gaps.write`,
-`archive_gaps.inverted_span`, reported through the caller's `Ledger` (the `Collector` is capture's
-only ledger caller, Story 26.1).
+Pure re-export, defines nothing: every name here *is* its successor object.
 """
 
-import os
+import warnings
 
-from kernel import archive_markers
-from kernel.archive_markers import ArchiveGap
-
-from collector_core import sites
-from collector_core.ports import Ledger
+from capture.infrastructure.gap_markers import record_gap
 
 
-def record_gap(
-    catalog_path: str, iid: str, from_ns: int, to_ns: int, reason: str, count: int, ledger: Ledger
-) -> None:
-    """
-    Append one gap marker; a failure is ledgered, never raised (the flush must carry on).
+__all__ = [
+    "record_gap",
+]
 
-    An inverted span (a backward wall-clock step between a lost trade's arrival and the flush
-    puts `now` before its `ts_init`) is written as the ordered span and ledgered
-    (`archive_gaps.inverted_span`): `decode` refuses an inverted line, which would wedge the
-    rebuild of that instrument until the file is hand-edited, and the ordered span still covers
-    the rows the marker protects.
-    """
-    if from_ns > to_ns:
-        ledger(
-            sites.ARCHIVE_GAPS_INVERTED_SPAN,
-            f"{iid} {reason}: from_ns {from_ns} > to_ns {to_ns} (clock stepped back?); "
-            "recorded as the ordered span",
-        )
-        from_ns, to_ns = to_ns, from_ns
-    line = archive_markers.encode(ArchiveGap(iid, from_ns, to_ns, reason, count))
-    path = archive_markers.path_for(catalog_path, iid)
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("a") as f:
-            f.write(line + "\n")
-            f.flush()
-            os.fsync(f.fileno())
-    except OSError as e:
-        ledger(sites.ARCHIVE_GAPS_WRITE, f"could not record archive gap {line}", e)
+REMOVE_AFTER = "26-3-closeout-shims-gone-spines-reconciled"
+
+
+# Attributed to the importing module, not to importlib's frames.
+warnings.warn(
+    "collector_core.gap_markers moved to "
+    "capture.infrastructure.gap_markers (Story 26.2); "
+    f"this shim is removed after {REMOVE_AFTER}",
+    DeprecationWarning,
+    skip_file_prefixes=("<frozen importlib",),
+)

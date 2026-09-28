@@ -13,42 +13,31 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-Hyperliquid REST book snapshot (`POST /info {"type":"l2Book"}`, weight 2 of 1200/min) for the
-aligned live-book cross-check (story 22.5, audit D-64). Stdlib only, same as
-`dydx_collector.open_interest`. The response's `time` (ms) is the alignment key: the WS
-`l2Book` push carries the same `time` as its `ts_event`, and REST fetched right after a push
-answers with that `time` whenever no later block changed the book.
+Deprecated re-export shim (Story 26.2): `hyperliquid_collector.book_snapshot` moved to
+`capture.venues.hyperliquid.book_snapshot`.
+
+Pure re-export, defines nothing: every name here *is* its successor object.
 """
 
-import asyncio
-from decimal import Decimal
+import warnings
 
-from collector_core.book_check import BookSnapshot
-from collector_core.book_check import Level
-from kernel.venue_http import http_json
-from kernel.venue_http import hyperliquid_info_url
-from kernel.venue_http import post_json_request
+from capture.venues.hyperliquid.book_snapshot import fetch_l2_book
+from capture.venues.hyperliquid.book_snapshot import parse_l2_book
 
 
-_USER_AGENT = "nautilus-hl-collector/1.0"
+__all__ = [
+    "fetch_l2_book",
+    "parse_l2_book",
+]
+
+REMOVE_AFTER = "26-3-closeout-shims-gone-spines-reconciled"
 
 
-def _post_l2_book(environment: str, coin: str) -> dict:
-    body = {"type": "l2Book", "coin": coin}
-    return http_json(post_json_request(hyperliquid_info_url(environment), body, _USER_AGENT))
-
-
-def _levels(raw: list[dict]) -> list[Level]:
-    return [(float(Decimal(lv["px"])), float(Decimal(lv["sz"]))) for lv in raw]
-
-
-def parse_l2_book(payload: dict) -> BookSnapshot:
-    """`levels[0]` = bids, `levels[1]` = asks (best-first `{px, sz}` strings); `time` in ms."""
-    bids, asks = payload["levels"]
-    return BookSnapshot(
-        bids=_levels(bids), asks=_levels(asks), ts_event_ns=int(payload["time"]) * 1_000_000
-    )
-
-
-async def fetch_l2_book(environment: str, coin: str) -> BookSnapshot:
-    return parse_l2_book(await asyncio.to_thread(_post_l2_book, environment, coin))
+# Attributed to the importing module, not to importlib's frames.
+warnings.warn(
+    "hyperliquid_collector.book_snapshot moved to "
+    "capture.venues.hyperliquid.book_snapshot (Story 26.2); "
+    f"this shim is removed after {REMOVE_AFTER}",
+    DeprecationWarning,
+    skip_file_prefixes=("<frozen importlib",),
+)

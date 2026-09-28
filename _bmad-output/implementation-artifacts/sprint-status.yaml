@@ -319,7 +319,7 @@ development_status:
   epic-26: backlog
   26-1-livebook-tradeintake-feedgroup-pure-secondsampler-in-place: done
   26-1b-offsite-backup-explicit-setting-off-until-storage-exists: done
-  26-2-capture-package-and-venue-packages-with-entrypoints: ready-for-dev
+  26-2-capture-package-and-venue-packages-with-entrypoints: done
   26-3-closeout-shims-gone-spines-reconciled: ready-for-dev
   epic-26-retrospective: optional
 

@@ -22,7 +22,7 @@ trades. Where the archive lost trades that the live second still holds, that wou
 values. The ways it can happen, each recorded as a marker:
 
 - `write_failed`: a trade batch's `write_data` failed while the same instrument's snapshot rows
-  landed (capture's flush, written by `collector_core.gap_markers`);
+  landed (capture's flush, written by `capture.infrastructure.gap_markers`);
 - `quarantined`: `quarantine_corrupt_parquet` moved an unreadable trade file aside (capture too);
 - `pruned`: `archive.prune_catalog` deleted a verified trade file, but an older unverified day's
   files remain, so `covered_from` still reaches back past it (written here).

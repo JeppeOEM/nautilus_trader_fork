@@ -12,7 +12,7 @@ ARG PIP_INSECURE_ARGS=
 RUN pip install --no-cache-dir $PIP_INSECURE_ARGS -r requirements.txt
 # The bots context (Story 25.3, was live_paper/): `python3 -m bots` imports the shared kernel
 # (indicators, venue-id parser, performance metrics) and the generic observability context (the
-# error ledger). Still deliberately does NOT copy dydx_collector or any collector -- bots never
+# error ledger). Still deliberately does NOT copy capture (or its shims) -- bots never
 # imports capture (AD-8 keeps the trading runtime structurally separate from the write path).
 COPY platform/kernel ./kernel
 COPY platform/observability ./observability

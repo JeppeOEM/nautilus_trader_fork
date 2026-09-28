@@ -21,7 +21,7 @@ a pre-25.1 tool still running during a deploy excludes a new one) exclusively an
 
 `capture_exclusive` tries a non-blocking exclusive `flock` on the venue's capture lock
 (`kernel.archive_markers.capture_lock_path`), which every running collector holds shared for its
-whole life (`collector_core.capture_lock`). Taken, it proves no collector of that venue runs and
+whole life (`capture.infrastructure.capture_lock`). Taken, it proves no collector of that venue runs and
 keeps one from starting (capture waits and retries) until the block ends; refused, a collector is
 running. A flock dies with its process, so a SIGKILL/OOM never leaves a stale "running": the
 file's presence alone means nothing, and it is never unlinked (a later opener would lock another

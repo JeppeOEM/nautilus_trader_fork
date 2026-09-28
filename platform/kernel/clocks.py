@@ -20,7 +20,7 @@ arrival/sampling time). Catalog file names span `ts_init`; readers and the rebui
 `ts_event`. They meet only through one number:
 
 Invariant: `MAX_TS_INIT_SKEW_NS` is the largest `ts_init - ts_event` any writer may produce for a
-row (the reconnect trade backfill refuses older trades, `Collector._apply_backfill`), and every
+row (the reconnect trade backfill refuses older trades, `CaptureService._apply_backfill`), and every
 other skew-related margin -- the readers' file-span widening (`READ_SPAN_MARGIN_NS`), the
 rebuild's `ts_init` window, the sampler's catch-up and hold-back bounds -- is defined as, or
 asserted to be, at most it (`kernel/tests/test_clocks.py`, `platform/tests/test_skew_constants.py`).
@@ -51,7 +51,7 @@ MAX_TS_INIT_SKEW_NS = 300 * NS_PER_S
 # can hold rows of a `ts_event` window (the exact `ts_event` filter then decides). A row's skew has
 # two independent directions, and the symmetric widening must cover each on its own: a venue-timed
 # row's `ts_init` trails its `ts_event` by at most catch-up + 1 s + hold-back, and a venue clock
-# can run ahead of ours by hold-back + `_VENUE_AHEAD_NS`. `Collector._check_skew_budget` and
+# can run ahead of ours by hold-back + `_VENUE_AHEAD_NS`. `CaptureService._check_skew_budget` and
 # `platform/tests/test_skew_constants` bound the *sum* of the two terms, a deliberately
 # conservative ceiling on either direction.
 # Known limit: a backfilled trade's second row is not re-sampled, so a snapshot row's skew never

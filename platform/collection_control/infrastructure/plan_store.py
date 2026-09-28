@@ -12,14 +12,17 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
-"""`PlanStore` over a venue's `config.toml`, through capture's one loader (`collector_core.config`)."""
+"""
+`PlanStore` over a venue's `config.toml`, through capture's one loader
+(`capture.infrastructure.config`).
+"""
 
 from pathlib import Path
 
 import tomli_w
-from collector_core.config import load_toml
-from collector_core.config import plan_toml_fields
-from collector_core.config import venue_config_from_dict
+from capture.infrastructure.config import load_toml
+from capture.infrastructure.config import plan_toml_fields
+from capture.infrastructure.config import venue_config_from_dict
 
 from collection_control.domain.plan import CollectionPlan
 

@@ -110,9 +110,9 @@ _FOOTER_HINT_TEXTS = {
     "help": _HELP_FOOTER_HINT_TEXT,
 }
 
-# This collector's own operating cap (Story 6.1) -- must match dydx_collector/
-# collector.py's _MAX_COLLECTED_INSTRUMENTS. Duplicated rather than imported: bot_tui
-# and dydx_collector are separate module boundaries (platform/CLAUDE.md DESIGN-02),
+# This collector's own operating cap (Story 6.1) -- must match capture/venues/dydx/
+# config.py's DYDX_MAX_COLLECTED_INSTRUMENTS. Duplicated rather than imported: bot_tui
+# and capture are separate module boundaries (platform/CLAUDE.md DESIGN-02),
 # coordinating only via Redis, never by importing each other's internals. This is a
 # client-side check for instant feedback only -- the collector re-validates regardless.
 _MAX_COLLECTED_INSTRUMENTS = 29

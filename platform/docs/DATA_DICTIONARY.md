@@ -9,15 +9,17 @@ Every "error ledger" site named below (`collector.late_trade`, `collector.trade_
 (Story 23.1; formerly `ml_signals.error_ledger`, whose shim Story 24.1 deleted). The sites, their
 names and what they count are unchanged `[re-cited 2026-09-21: Story 23.1]`, with one addition:
 `archive_gaps.inverted_span` counts a gap marker whose `from_ns > to_ns` — a backward wall-clock
-step between a lost trade's arrival and the flush. Since Story 26.1 every capture site is a constant in `collector_core/sites.py` and `Collector._ledger` is capture's only `record` call; it added `collector.empty_top` (a book with no best bid or ask: seconds skipped, one WARNING and one ledger line per instrument per minute) `[amended 2026-09-26: Story 26.1]`. The marker is written as the ordered span and
+step between a lost trade's arrival and the flush. Since Story 26.1 every capture site is a constant in `capture/application/sites.py` and `CaptureService._ledger` is capture's only `record` call; it added `collector.empty_top` (a book with no best bid or ask: seconds skipped, one WARNING and one ledger line per instrument per minute) `[amended 2026-09-26: Story 26.1]`. The marker is written as the ordered span and
 still protects its rows, so the count is the only signal that the clock stepped back
 `[added 2026-09-22: Story 23.2]`.
 
 ---
 
-## 1. Raw data collected (`platform/collector_core/` + the venue collectors)
+## 1. Raw data collected (`platform/capture/` + its venue packages `capture/venues/<venue>/`)
 
-Each collector (`collector_core/collector.py` plus a venue subclass) owns one WS
+Each collector (one `CaptureService`, `capture/application/capture_service.py`, wired by its
+venue's composition root `capture/venues/<venue>/__main__.py` and run as `python3 -m
+capture.venues.<venue>`; no subclass since Story 26.2 `[amended 2026-09-28: Story 26.2]`) owns one WS
 connection per venue network and writes
 everything through `ParquetDataCatalog.write_data()` — no hand-rolled schemas
 (`platform/CLAUDE.md` NAUT-02). Nine distinct types land in the catalog. Six are native
@@ -28,7 +30,7 @@ PyO3 bindings don't expose the fields another way.
 ### 1.1 `TradeTick` (native Nautilus type) — raw trade archive (story 22.13)
 
 - **Source:** every venue's trade channel, decoded by the Rust adapter and delivered to
-  `Collector._on_data` (dYdX `v4_trades`, Bybit `publicTrade`, Hyperliquid `trades`).
+  `CaptureService._on_data` (dYdX `v4_trades`, Bybit `publicTrade`, Hyperliquid `trades`).
 - **Fields:** `instrument_id`, `price`, `size`, `aggressor_side` (`AggressorSide.BUYER`/
   `SELLER`), `trade_id`, `ts_event`, `ts_init`.
 - **Two clocks, stored untouched:** `ts_event` is the venue's trade time, `ts_init` the
@@ -68,7 +70,7 @@ The Rust WS clients reconnect and resubscribe silently, so the core detects a re
 connection ("feed") on evidence -- an `is_active()` flip (Bybit, Hyperliquid), a book feed
 silent past `feed_stale_seconds or stale_book_seconds`, or the same feed replaying a trade id
 after the startup grace -- and, 3 s later, fetches each affected instrument's trades of
-`[last archived ts_event - 5 s, now]` over stdlib REST (each venue's `<venue>_collector/trade_history.py`, a `VenueTradeHistory` `[amended 2026-09-26: Story 26.1]`).
+`[last archived ts_event - 5 s, now]` over stdlib REST (each venue's `capture/venues/<venue>/trade_history.py`, a `VenueTradeHistory` `[amended 2026-09-26: Story 26.1]`).
 Unseen ids are archived with the venue's `ts_event` and `ts_init` = the time they were archived
 (so `ts_init - ts_event` shows the recovery lag); they are **never** folded into the live second
 -- the nightly rebuild places them. One `collector.trade_backfill` ledger entry per backfill
@@ -217,7 +219,7 @@ with its class name, Arrow schema and `snapshots:raw` encoding unchanged (the ca
   - `buy_count`, `sell_count` — trade count per side since the last tick
   - `open_price`, `high_price`, `low_price`, `close_price` — OHLC of actual executed
     trade prices within this second, `None` if no trade occurred. Live, each accepted
-    `TradeTick` is kept in `Collector._second_trades` and folded once per sample by
+    `TradeTick` is kept in `CaptureService._second_trades` and folded once per sample by
     `kernel.fold.fold_trades` (the same exact fold the nightly rebuild uses; the
     float columns hold one conversion of an exact total). A closed day's rows are
     re-derived from the raw archive (§1.1) on exchange time by `rebuild_seconds` (§6);
@@ -245,7 +247,7 @@ with its class name, Arrow schema and `snapshots:raw` encoding unchanged (the ca
   is set per venue from `python -m archive.tools.measure_lag` (the per-kind distribution of
   `ts_init - ts_event`); it only makes fewer trades late, the rebuild is what makes a second
   correct (audit D-50).
-- **Built by:** `collector_core/collector.py`'s `Collector._second_loop` (the gate itself is `collector_core/domain/sampler.py`'s `SecondSampler` `[amended 2026-09-26: Story 26.1]`), every
+- **Built by:** `capture/application/capture_service.py`'s `CaptureService._second_loop` (the gate itself is `capture/domain/sampler.py`'s `SecondSampler` `[amended 2026-09-26: Story 26.1]`), every
   `snapshot_interval_seconds` (config default 1.0s, overrideable in `config.toml`), on a
   drift-free wall-clock schedule at mid-interval (`_next_sample_at`): exactly one row per
   floor second, which the rebuild's trade-to-row mapping relies on. Venue mode
@@ -262,9 +264,9 @@ with its class name, Arrow schema and `snapshots:raw` encoding unchanged (the ca
   `platform/CLAUDE.md` DATA-01 "flag the gap, never fabricate" implementations.
 - **Scope:** pinned + liquid instruments only. Illiquid instruments get no snapshots.
 - **Dual delivery:** written to the catalog via the normal buffer/flush path
-  (`Collector._sample_tick` appends it to the flush buffer, `collector.py`) **and** published
+  (`CaptureService._sample_tick` appends it to the flush buffer, `capture_service.py`) **and** published
   live to Redis channel `snapshots:raw` (`publish_snapshot_batch`,
-  `collector_core/infrastructure/redis_stream.py`) `[amended 2026-09-26: Story 26.1]` —
+  `capture/infrastructure/redis_stream.py`) `[amended 2026-09-26: Story 26.1]` —
   this Redis stream is what `ranking_engine` actually consumes live (§3); the Parquet
   copy is for backtest/historical replay.
 
@@ -282,7 +284,7 @@ Moved from `collector_core/` to the shared kernel in Story 23.2; class name (hen
   `data/custom_open_interest/`. Replaces `DydxOpenInterest`/`BybitOpenInterest`/
   `HyperliquidOpenInterest` (history in `custom_{dydx,bybit,hyperliquid}_open_interest/` moves
   with `python -m archive.tools.migrate_open_interest`, audit D-40). The dYdX-specific
-  notes below describe `dydx_collector/open_interest.py`, which keeps the poll
+  notes below describe `capture/venues/dydx/open_interest.py`, which keeps the poll
   (`classify_liquidity` moved to `collection_control.domain.liquidity` in Story 25.4).
 
 - **Why custom/separate:** open interest is parsed Rust-side but never forwarded to
@@ -293,8 +295,9 @@ Moved from `collector_core/` to the shared kernel in Story 23.2; class name (hen
   to avoid float round-tripping), `ts_event`, `ts_init`.
 - **Source:** plain stdlib `urllib` poll of dYdX's public indexer
   `/v4/perpetualMarkets` REST endpoint (`fetch_markets_json`, `open_interest.py`),
-  every `open_interest_poll_seconds` (config default 300s, `collector_core/config.py`'s
-  `DydxConfig`).
+  every `open_interest_poll_seconds` (config default 300s, `capture/venues/dydx/config.py`'s
+  `DydxConfig`), run by `CaptureService.poll_loop` from the dYdX composition root (Story 26.2;
+  every market kept, a failure ledgered `collector.open_interest_poll`).
 - **Also drives liquidity tiering:** `classify_liquidity` (`collection_control/domain/
   liquidity.py`, Story 25.4) reads the *same* markets JSON response but keys off `volume24H`
   (USD), not `openInterest` (base-token units) — `platform/CLAUDE.md` OBS-03 explicitly calls out
@@ -387,7 +390,7 @@ Collector pane (Story 6.1). Published language, frozen (AD-D12); the bytes are r
   30-instrument cap with the top USD-volume liquid ids, never an excluded one). A refused command
   or an unknown action logs a WARNING and changes nothing. A valid one is saved to
   `data/dydx_config.toml` (validated through the one loader first), then applied through
-  `Collector.apply`, then published.
+  `CaptureService.apply`, then published.
 
 ### 1.13 `archive:status` / `archive:control` (the `archive/` context's scheduler, Story 25.1b)
 

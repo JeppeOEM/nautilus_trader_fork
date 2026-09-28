@@ -58,7 +58,7 @@ Dependency direction: archive imports `kernel`, `observability` and candles' app
 (`VerifiedDays`, `queries`, `rebuild`); `prune_catalog` alone also reads the collection plan
 through `collection_control.infrastructure.plan_store.TomlPlanStore` (Story 25.4). Nothing imports archive but its own
 composition roots and tests (capture writes its own
-`write_failed`/`quarantined` markers, `collector_core.gap_markers`), and archive imports neither
+`write_failed`/`quarantined` markers, `capture.infrastructure.gap_markers`), and archive imports neither
 capture nor views (`platform/tests/test_boundaries.py`).
 
 Known limits: `repair_catalog` rewrites through Nautilus's `delete_data_range` + `write_data`

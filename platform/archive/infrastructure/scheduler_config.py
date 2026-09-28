@@ -15,8 +15,8 @@
 """
 The `archive` service's config loader: `platform/archive/config.toml` into a `SchedulerConfig`.
 
-Every key is required and an unknown one refuses start, like `collector_core.config`'s venue
-loader, so a typo is never silently the default.
+Every key is required and an unknown one refuses start, like `capture.infrastructure.config`'s
+venue loader, so a typo is never silently the default.
 """
 
 import datetime as dt

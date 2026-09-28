@@ -65,7 +65,7 @@ id. Upgrade path: persist each run's last-seen timestamp per instrument, compare
 first row against it, and read the venue's own instrument list to tell "delisted" from "dead".
 
 Known limit (expected on the first real run): three sampler skip paths in
-`collector_core/collector.py` -- empty top-of-book (~:1208), stale book (~:1218) and no book at
+`capture/application/capture_service.py` -- empty top-of-book (~:1208), stale book (~:1218) and no book at
 all (~:1342) -- emit neither a snapshot row nor a ledger entry, so every such episode surfaces
 here as an `UNEXPLAINED` gap. That is AC5 working as designed: an unledgered skip *is* the
 DATA-07 finding. The resolution is to give those three paths their own ledger sites (the spine

@@ -26,7 +26,7 @@ import json
 from collections.abc import Callable
 from collections.abc import Iterable
 
-from collector_core.ports import CaptureStatus
+from capture.application.ports import CaptureStatus
 from observability import error_ledger
 
 from collection_control.application.ports import Capture

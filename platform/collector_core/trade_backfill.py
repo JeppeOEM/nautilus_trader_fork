@@ -13,26 +13,26 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-Deprecated module (Story 26.1): the REST trade backfill was split in two. The fetch and parse half
-is per venue -- `dydx_collector.trade_history`, `bybit_collector.trade_history`,
-`hyperliquid_collector.trade_history` (each a `collector_core.ports.VenueTradeHistory`) -- over the
-shared exact conversions in `collector_core.domain.trade_history`; the scheduling half and the
-report are `collector_core.application.trade_backfill` and the `Collector`. The venue dispatcher
-`fetch_trades` is gone (the venue's composition root injects its own history). The surviving names
-are re-exported here.
+Deprecated module (Story 26.1; retargeted in Story 26.2): the REST trade backfill was split in two.
+The fetch and parse half is per venue -- `capture.venues.dydx.trade_history`,
+`capture.venues.bybit.trade_history`, `capture.venues.hyperliquid.trade_history` (each a
+`capture.application.ports.VenueTradeHistory`) -- over the shared exact conversions in
+`capture.domain.trade_history`; the scheduling half and the report are
+`capture.application.trade_backfill` and the `CaptureService`. The venue dispatcher `fetch_trades`
+is gone (the venue's composition root injects its own history). The surviving names are
+re-exported here.
 """
 
 import warnings
 
-from bybit_collector.trade_history import parse_bybit_trades
-from dydx_collector.trade_history import parse_dydx_trades
-from hyperliquid_collector.trade_history import parse_hyperliquid_trades
-
-from collector_core.domain.trade_history import BackfillError
-from collector_core.domain.trade_history import Fetched
-from collector_core.domain.trade_history import exact_text
-from collector_core.domain.trade_history import iso_to_ns
-from collector_core.domain.trade_history import ms_to_ns
+from capture.domain.trade_history import BackfillError
+from capture.domain.trade_history import Fetched
+from capture.domain.trade_history import exact_text
+from capture.domain.trade_history import iso_to_ns
+from capture.domain.trade_history import ms_to_ns
+from capture.venues.bybit.trade_history import parse_bybit_trades
+from capture.venues.dydx.trade_history import parse_dydx_trades
+from capture.venues.hyperliquid.trade_history import parse_hyperliquid_trades
 
 
 __all__ = [
@@ -50,7 +50,7 @@ REMOVE_AFTER = "26-3-closeout-shims-gone-spines-reconciled"
 
 warnings.warn(
     "collector_core.trade_backfill is deprecated (Story 26.1): import from "
-    "collector_core.domain.trade_history or <venue>_collector.trade_history; "
+    "capture.domain.trade_history or capture.venues.<venue>.trade_history; "
     f"this shim is removed after {REMOVE_AFTER}",
     DeprecationWarning,
     skip_file_prefixes=("<frozen importlib",),

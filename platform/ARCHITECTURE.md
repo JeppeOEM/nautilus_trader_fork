@@ -10,7 +10,7 @@ coding rules see `CLAUDE.md`, for planning history see `_bmad-output/`.
 ## The one-paragraph version
 
 Three collectors (dYdX, Bybit, Hyperliquid) share one venue-neutral engine
-(`collector_core`): each pulls live market data straight off the Rust adapters and writes
+(the `capture` context's `CaptureService`): each pulls live market data straight off the Rust adapters and writes
 it to a Nautilus-native Parquet catalog, publishing a live 1-second snapshot feed to
 Redis as it goes. A ranking engine reads that feed, scores every coin by volume or volatility,
 and publishes the result back to Redis. A web dashboard reads those two Redis feeds (never
@@ -28,10 +28,10 @@ downstream of the collector ever touches `nautilus_trader`'s live `TradingNode`/
 
 | Module | Role | Talks to |
 |---|---|---|
-| `collector_core/` | The venue-neutral collector engine (Story 22.1) — ingest → 1s sample → flush → Parquet + `snapshots:raw` + the `SecondSink` port, and the capture lock `<catalog>/.capture-<VENUE>.lock` held for the process life (Story 25.1); the operator-run catalog tools moved to `archive/` in Story 25.1 (their old paths are deprecated re-exports) `[amended 2026-09-25: Story 25.1]`. Since Story 26.1 the gate is explicit aggregates in `domain/` (`LiveBook`, `TradeIntake`, `FeedGroup`, the pure `SecondSampler`, `FlushBatch`) with venue variance as policy values (`CapturePolicies`); `Collector` is the application service (the loops, every resync, the only `error_ledger` caller, sites in `sites.py`), and its I/O goes through `ports.py` (`VenueFeed`, `VenueTradeHistory`, `ArchiveWriter`, `LiveStream`, `Notifier`, `SecondSink`) with the adapters in `infrastructure/` (`parquet_writer.py`, `redis_stream.py`) `[amended 2026-09-26: Story 26.1]` | Parquet catalog (read/write, through `ArchiveWriter`), Redis (publish, through `LiveStream`), `collector_core/ports.py`'s `SecondSink` (the candle store, injected by the venue entrypoint) |
+| `capture/` | The capture context (`collector_core/` until Story 26.2, which moved it into the DDD spine's Structural Seed; the old path is a re-export shim until Story 26.3 `[amended 2026-09-28: Story 26.2]`): the venue-neutral collector engine (Story 22.1) — ingest → 1s sample → flush → Parquet + `snapshots:raw` + the `SecondSink` port, and the capture lock `<catalog>/.capture-<VENUE>.lock` held for the process life (Story 25.1); the operator-run catalog tools moved to `archive/` in Story 25.1 (their old paths' shims were removed in Story 25.3) `[amended 2026-09-25: Story 25.1]`. Since Story 26.1 the gate is explicit aggregates in `domain/` (`LiveBook`, `TradeIntake`, `FeedGroup`, the pure `SecondSampler`, `FlushBatch`) with venue variance as policy values (`CapturePolicies`); `application/capture_service.py`'s `CaptureService` (was `Collector`) is the application service (the loops, every resync, the only `error_ledger` caller, sites in `application/sites.py`, thresholds in `application/config.py`), and its I/O goes through `application/ports.py` (`VenueFeed`, `VenueTradeHistory`, `ArchiveWriter`, `LiveStream`, `Notifier`, `SecondSink`) with the adapters in `infrastructure/` (`parquet_writer.py`, `redis_stream.py`, `capture_lock.py`, `gap_markers.py`, and `config.py`, the one venue loader) `[amended 2026-09-26: Story 26.1]` | Parquet catalog (read/write, through `ArchiveWriter`), Redis (publish, through `LiveStream`), `capture/application/ports.py`'s `SecondSink` (the candle store, injected by the venue entrypoint) |
 | `archive/` | The archive context (Story 25.1, DDD spine AD-D9/AD-D18): the nightly saga (`archive.nightly`: rebuild -> consolidate -> build_candles -> reconcile -> prune) over the `ArchiveDay` state machine, `RetentionPolicy` (the one deleter), `CatalogFiles` (the one in-place rewriter), and the operator CLIs `python -m archive.<tool>`. Since Story 25.1b also the `archive` service (`python -m archive.scheduler`, `ArchiveScheduler` in `application/scheduler.py`): the one place nightly maintenance is scheduled -- each venue's saga, then consolidate, then `archive.backup_catalog` when `backup_enabled` `[amended 2026-09-26: Story 26.1b]`, per missed closed day, plus the closed-hour merge of the small types (`consolidate_catalog --closed-hours`) every `intraday_consolidate_hours` -- each step a child process, the maintenance lock only probed, never held `[amended 2026-09-26: Story 25.1b]` | Parquet catalog (read/write, never today's files; intraday, never the current hour), `candles.application` (`VerifiedDays`, `queries`, `rebuild`), the venues' kline REST (`kernel.venue_http`), the dYdX plan file (read, prune only), Redis (`archive:status` publish, `archive:control` read), `data/archive/state.json` (read/write), object storage (rclone, the backup step) |
-| `dydx_collector/`, `bybit_collector/`, `hyperliquid_collector/` | Venue subclasses of `collector_core.Collector` that override nothing but `__init__` (the composition root of the client, the venue's `policies.py` values, its `trade_history.py` REST backfill and the adapters) `[amended 2026-09-26: Story 26.1]`: WS/HTTP client, venue quirks, and each entrypoint's `build_collector` (the composition root: config + plan through `collector_core.config`'s one loader, `load_venue_config`). `Collector.apply(diff) -> Applied` makes the applied set the fact: the sampler, watchdog, cross-check and backfill iterate `applied ∩ plan`, and a book/trade message outside it is counted (`collector.unplanned_message`), never archived (Story 25.4) `[amended 2026-09-26: Story 25.4]` | Their venue's WS/REST (via Rust `nautilus_pyo3` clients) |
-| `collection_control/` | The collection-control context (Story 25.4, DDD spine AD-D17): the plan is the intent, capture's applied set the fact. `CollectionPlan` (`domain/`: instruments, `exclude`, `cap` = 30 for dYdX, the liquidity threshold, the dropped-instrument retention; commands `add`/`remove`/`pin`/`unpin`/`exclude`/`reload` return a `PlanDiff`), the pure `classify_liquidity` that alone admits a pin; `ControlService` (`collector:control`: save, then apply, then publish), `StatusPublisher` (`collector:status`, `pending` for a planned-but-unapplied id) and the plan-file `reload_loop` in `application/`; `TomlPlanStore`, the Redis bus/channel and `DydxMarkets` in `infrastructure/`. Wired into the dYdX collector's `extra_loops` by `dydx_collector.collector.build_collector`; no module state, deletes nothing | Redis (`collector:status` publish, `collector:control` read), the dYdX plan file `data/dydx_config.toml` (read/write), dYdX indexer `perpetualMarkets` (through `kernel.venue_http`) |
+| `capture/venues/dydx/`, `capture/venues/bybit/`, `capture/venues/hyperliquid/` | One package per venue (Story 26.2; the `dydx_collector/`, `bybit_collector/`, `hyperliquid_collector/` subclasses of `collector_core.Collector` until then, now re-export shims): `client.py` (the `VenueFeed` WS/HTTP client), `trade_history.py` (the `VenueTradeHistory` REST backfill), `policies.py` (dYdX's uncross ladder, Bybit's `u` canary; none for Hyperliquid), the optional `open_interest.py` (dYdX, Bybit) and `book_snapshot.py` (Bybit, Hyperliquid), `config.py` (the venue's config class, caps and `CONFIG_PATH`) and `__main__.py`, the composition root (`python3 -m capture.venues.<venue>`): `build_capture(config, plan_ids)` wires the client factory, the policy values, the adapters, the candle sink and retention loop, the REST open-interest poll (`CaptureService.poll_loop`) and, for dYdX, collection control's loops (`add_loops`) into one `CaptureService`, never a subclass; `build_capture_from_file` loads config + plan through `capture.infrastructure.config`'s one loader, `load_venue_config` `[amended 2026-09-28: Story 26.2]`. `CaptureService.apply(diff) -> Applied` makes the applied set the fact: the sampler, watchdog, cross-check and backfill iterate `applied ∩ plan`, and a book/trade message outside it is counted (`collector.unplanned_message`), never archived (Story 25.4) `[amended 2026-09-26: Story 25.4]` | Their venue's WS/REST (via Rust `nautilus_pyo3` clients) |
+| `collection_control/` | The collection-control context (Story 25.4, DDD spine AD-D17): the plan is the intent, capture's applied set the fact. `CollectionPlan` (`domain/`: instruments, `exclude`, `cap` = 30 for dYdX, the liquidity threshold, the dropped-instrument retention; commands `add`/`remove`/`pin`/`unpin`/`exclude`/`reload` return a `PlanDiff`), the pure `classify_liquidity` that alone admits a pin; `ControlService` (`collector:control`: save, then apply, then publish), `StatusPublisher` (`collector:status`, `pending` for a planned-but-unapplied id) and the plan-file `reload_loop` in `application/`; `TomlPlanStore`, the Redis bus/channel and `DydxMarkets` in `infrastructure/`. Wired into the dYdX capture service through `add_loops` by `capture.venues.dydx.__main__.build_capture_from_file` (Story 26.2); no module state, deletes nothing | Redis (`collector:status` publish, `collector:control` read), the dYdX plan file `data/dydx_config.toml` (read/write), dYdX indexer `perpetualMarkets` (through `kernel.venue_http`) |
 | `kernel/` | The shared kernel (Story 23.2, DDD spine AD-D3): the one copy of every type, fold, parser, constant, transport and read helper more than one context uses — `second_snapshot` (`DydxSecondSnapshot`, `SecondOHLC`), `open_interest`, `fold` (`fold_trades`), `indicators` (pure `Indicator`s and snapshot functions), `performance_metrics`, `venues` (the only `InstrumentId` parser: `venue_of`, `has_venue`, `venue_kind`, `market_kind`, `market_suffix`, `bybit_category`), `clocks` (`TwoClocks`, `CatalogFileSpan`, the one skew bound `MAX_TS_INIT_SKEW_NS` = 300 s), `archive_markers` (the `_archive_gaps/<iid>.jsonl` format), `venue_http` (every venue REST URL and request), `catalog_files` (read-only snapshot-file helpers), `parquet_compat` (the one zstd `write_table` default). Imports no context, holds no state, store, config loader or ledger call; every context may import it | venue REST endpoints (outbound GET/POST, via callers), the Parquet catalog (read-only) |
 | `candles/` | The candles context (Story 24.1, DDD spine AD-D8): the one seconds → bars fold (`domain/fold.py`), the `CandleSeries` watermark aggregate, the query/forming/rebuild services, the retention process manager and `CandleStore` — the only read-write opener of a `candles_*.db`. Behind capture's `SecondSink` port, so nothing upstream imports it | Parquet catalog (read, the rebuild), `candles_*.db` (read/write) |
 | `views/` | The views context (Story 24.2, DDD spine AD-D11): the read models both UIs show -- `ranking_columns` (the ranking table's columns, the Technicals tab's values), `coin_detail` (the single-coin metric set, the `snapshots:raw` decode via `DydxSecondSnapshot.from_dict`, the `metrics.db` history reads), `chart_series` (every chart page -- candles, Lines mode, indicator series/values -- plus book features, footprint and the gap-marker rendering rules), `indicator_picker` (the native + custom indicator catalogs and their dispatch), `preferences` (the one loader/saver of `chart_indicators.toml` and `screener_columns.toml`), `catalog_reads`, `live_candles` (`LiveCandleBus` and the `BarObserver` port) and `rankings_bus`. Framework-free, no module state; imports only `kernel`, `observability` and the candles/ranking query services. The reader never re-validates the capture gate | Parquet catalog (read), `candles_*.db` (read, via `candles.application.queries.open_store`), `metrics.db` (read), Redis (`snapshots:raw`, `rankings:live` subscribe, through the bus instances `data_api.buses` constructs) |
@@ -55,8 +55,8 @@ Three of the four writer -> reader imports are gone. The ledger moved to `observ
 (Story 23.1), which every context except `kernel` may import. The shared types, the fold, the
 clocks (`_stamp_to_ns` is now `kernel.clocks.CatalogFileSpan`) and the catalog read helpers
 (`kernel.catalog_files`) moved to `kernel/` in Story 23.2. And the candle store became its own
-context in Story 24.1: `collector_core/collector.py` declares a `SecondSink` port
-(`collector_core/ports.py`), each venue entrypoint injects `candles.application.sink.CandleSink`,
+context in Story 24.1: capture declares a `SecondSink` port
+(`capture/application/ports.py`), each venue entrypoint injects `candles.application.sink.CandleSink`,
 and the two archive tools take a `VerifiedDays` port instead of a database connection, so no
 capture -> candles import exists at all `[amended 2026-09-25: Story 24.1]`.
 The last one -- `repair_catalog`'s `views.catalog_reads.query_second_snapshots` -- is gone too:
@@ -89,9 +89,12 @@ dYdX WS/REST      Bybit WS/REST      Hyperliquid WS
         └─────────────────┴─────────────────┘
         │
         ▼
-  collector_core.Collector  ─────► Parquet catalog (Nautilus-native, zero-conversion)
-  (one write gate; DydxCollector /                one shared catalog root
-   BybitCollector / HyperliquidCollector)
+  capture/venues/<venue>/__main__.py  (composition roots: python3 -m capture.venues.<venue>;
+        │                               client, policies, trade history, REST polls, adapters)
+        ▼
+  capture.CaptureService  ─────► Parquet catalog (Nautilus-native, zero-conversion)
+  (capture/domain aggregates:            one shared catalog root
+   LiveBook · TradeIntake · FeedGroup · SecondSampler = the one write gate)
         │                                 │
         │ publish "snapshots:raw"         │ read (time-bounded / BacktestDataConfig)
         ▼                                 ▼
@@ -118,7 +121,7 @@ Redis (live/current) — never both conflated, per NFR3's memory-bounded-access 
 
 ---
 
-## 1. `collector_core/` + the venue collectors — the data source
+## 1. `capture/` + its venue packages — the data source
 
 Three standalone asyncio services (one per venue) over one shared engine. All bypass
 `TradingNode`/`Strategy`/`DataEngine` entirely and talk directly to the Rust
@@ -126,7 +129,27 @@ Three standalone asyncio services (one per venue) over one shared engine. All by
 unbounded-queue-growth bug under sustained load that OOM-crashed an earlier
 `Strategy`-based recorder.
 
-- **`collector_core/collector.py`** — the application service: owns the asyncio loops, the
+Layout (Story 26.2, the DDD spine's Structural Seed; `collector_core/` and the three
+`<venue>_collector/` packages are re-export shims until Story 26.3):
+
+```
+capture/
+  domain/          live_book.py trade_intake.py feed_group.py sampler.py verdicts.py events.py
+                   flush_batch.py policies.py trade_history.py   (pure: stdlib, kernel, Nautilus values)
+  application/     capture_service.py (CaptureService) ports.py sites.py config.py (CoreConfig)
+                   trade_backfill.py book_check.py feed.py
+  infrastructure/  parquet_writer.py redis_stream.py capture_lock.py gap_markers.py
+                   config.py (the one venue loader)   (imported only by the composition roots)
+  venues/
+    dydx/          client.py trade_history.py policies.py open_interest.py config.py __main__.py
+    bybit/         client.py trade_history.py policies.py open_interest.py book_snapshot.py
+                   config.py config.toml __main__.py
+    hyperliquid/   client.py trade_history.py book_snapshot.py config.py config.toml __main__.py
+  tests/           (and venues/<venue>/tests/)
+```
+
+- **`capture/application/capture_service.py`** — `CaptureService`, the application service
+  (`Collector` until Story 26.2; never subclassed): owns the asyncio loops, the
   flush buffer (`domain/flush_batch.py`) and the flush timer for every venue, executes the
   resyncs the domain requests and is capture's only error-ledger caller (`sites.py`). The gate
   (Story 26.1) is `domain/`: a `LiveBook` per collected instrument, a `TradeIntake` per
@@ -142,12 +165,12 @@ unbounded-queue-growth bug under sustained load that OOM-crashed an earlier
   the venue entrypoint (Story 24.1), so a bar can never be ahead of the archive.
 - **`kernel/second_snapshot.py`** — defines `DydxSecondSnapshot(Data)`, the one
   custom Arrow-registered type this whole system is built around (Story 23.2 moved it from
-  `collector_core/`; the old path is a deprecated re-export).
+  `collector_core/`; the old path's shim was deleted).
 - **`kernel.second_snapshot.ohlc_outside_book()`** (was `collector_core/integrity.py` until
   Story 25.1) — a second's trade high/low must lie inside that same second's own book. Live ERROR
   canary and offline detector (DATA-06).
 - **Operator-run catalog tools** (`python -m archive.<tool>` since Story 25.1 -- the
-  `collector_core.<tool>` paths are deprecated re-exports -- never automatic; the candle rebuild
+  `collector_core.<tool>` shims were removed in Story 25.3 -- never automatic; the candle rebuild
   is `python -m candles.rebuild` since Story 24.1):
   `candles.rebuild` (rebuild a candle store from raw 1s), `consolidate_catalog`
   (`make consolidate`, every venue; `--closed-hours` for the current day's closed hours of the
@@ -165,9 +188,11 @@ unbounded-queue-growth bug under sustained load that OOM-crashed an earlier
   venue-day, then `consolidate_catalog --apply` and `backup_catalog` (the latter only when `backup_enabled`,
   `[amended 2026-09-26: Story 26.1b]`), every night, and replaced the host crontab line
   `[amended 2026-09-26: Story 25.1b]`.
-- **`{dydx,bybit,hyperliquid}_collector/`** — per-venue `Collector` subclass, `client.py`
-  (thin wrapper around that venue's Rust clients) and the `build_collector` composition root.
-  Every venue's `config.toml` goes through the one loader `collector_core.config.load_venue_config`
+- **`capture/venues/{dydx,bybit,hyperliquid}/`** — per-venue package: `client.py` (thin wrapper
+  around that venue's Rust clients, built by the service from the root's factory so it can hand
+  messages to `_on_data` and failures to `_ledger`) and the `__main__.py` composition root
+  (`build_capture`, `build_capture_from_file`; a venue is wired, never subclassed, Story 26.2).
+  Every venue's `config.toml` goes through the one loader `capture.infrastructure.config.load_venue_config`
   (a frozen `VENUE_SCHEMAS` row per venue; an unknown key refuses start), which returns the
   thresholds plus the venue's `CollectionPlan` (Story 25.4). dYdX-only:
   `client.py`'s `_at_fixed_precision()` re-stamps mark/index prices to a single precision
@@ -176,13 +201,16 @@ unbounded-queue-growth bug under sustained load that OOM-crashed an earlier
   resolve crossed books (DATA-04); Bybit's `policies.py` is the `u` sequence canary (DATA-08).
   Each venue's `trade_history.py` is its REST reconnect backfill (`VenueTradeHistory`: fetch,
   exact parse, `BackfillCapability`, fixtures under its `tests/fixtures/`) `[amended 2026-09-26: Story 26.1]`.
-- **`dydx_collector/open_interest.py`** — the dYdX REST poll (the
-  shared `OpenInterest(Data)` type lives in `kernel/open_interest.py`); open
-  interest is the one field the Rust bindings drop, so it's polled separately via
-  `kernel.venue_http` against dYdX's indexer REST endpoint every 5 min. `classify_liquidity`
-  moved to `collection_control.domain.liquidity` (Story 25.4; served here, deprecated).
+- **`capture/venues/{dydx,bybit}/open_interest.py`** — the REST open-interest fetches (the
+  shared `OpenInterest(Data)` type lives in `kernel/open_interest.py`); open interest is the
+  one field the Rust bindings drop (dYdX everywhere, Bybit on the linear ticker), so it's polled
+  via `kernel.venue_http` every `open_interest_poll_seconds` (5 min) by the service's generic
+  `poll_loop` (Story 26.2: dYdX keeps every market, Bybit the plan's ids only; a failure is
+  `collector.open_interest_poll`). `classify_liquidity` moved to
+  `collection_control.domain.liquidity` (Story 25.4; its deprecated alias here was removed in
+  Story 26.2).
 - **The applied set (Story 25.4, AD-D17)**: capture subscribes only through
-  `Collector.apply(diff) -> Applied(subscribed, unsubscribed, failed)`; `run()` applies the plan
+  `CaptureService.apply(diff) -> Applied(subscribed, unsubscribed, failed)`; `run()` applies the plan
   once, then the control plane applies each change. A wire-failed subscribe is `pending`
   (`collector.subscribe_failed`), a wire-failed unsubscribe keeps the id subscribed but never
   sampled (`collector.unsubscribe_failed`); both are retried every 30 s by
@@ -195,7 +223,7 @@ unbounded-queue-growth bug under sustained load that OOM-crashed an earlier
   failed unsubscribe is reported `lingering` and keeps its wire slot out of control's `start`/
   `pin_top_liquid`/`reload` budget, so the wire never exceeds the cap. "Applied" means the
   subscribe frames were sent: an asynchronous venue rejection is not seen (a `Known limit:` in
-  `Collector._subscribe_one`). A book exists only for `applied ∩ plan`, and a book or trade message
+  `CaptureService._subscribe_one`). A book exists only for `applied ∩ plan`, and a book or trade message
   for any other instrument is counted (`collector.unplanned_message`, once per flush), never
   booked, folded or archived; mark/index/funding/open interest stay ungated (venue-wide channels).
 - **Control (dYdX only; `collection_control/`)**: the plan is changed only by a `collector:control`
@@ -388,7 +416,7 @@ Coin-detail and their `rankings:live`/`snapshots:raw` listeners were deleted;
 **Reads:** `bots:status`, `bots:history:*`, `bots:incidents:*`, `collector:status`.
 **Publishes:** `bots:control`, `collector:control`.
 **Never imports:** `bots` internals (control-plane only, per AD-10) or
-`dydx_collector`/`ranking` stateful internals (pure/shared-type imports only).
+`capture`/`ranking` stateful internals (pure/shared-type imports only).
 
 ---
 
@@ -478,7 +506,7 @@ context and fails any import outside the AD-D2 graph or any `_private` import ac
 except the legacy edges it lists with the story that retires each (expired from
 `sprint-status.yaml`); `test_images.py` fails when a dockerfile's `COPY` set misses a package an
 entrypoint imports; `test_hotpath.py` replays a 30-instrument burst through
-`Collector._process_data` against `tests/fixtures/hotpath_baseline.json` (AD-D5; the baseline is
+`CaptureService._process_data` against `tests/fixtures/hotpath_baseline.json` (AD-D5; the baseline is
 recorded into the checkout by `make hotpath-baseline` only, and a missing one fails `make test`).
 
 ## What's genuinely not finished

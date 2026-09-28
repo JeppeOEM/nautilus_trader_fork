@@ -13,46 +13,33 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-Capture's domain events (DDD spine AD-D5/AD-D6): state transitions an aggregate reports to the
-`Collector`, which alone logs and ledgers them.
+Deprecated re-export shim (Story 26.2): `collector_core.domain.events` moved to
+`capture.domain.events`.
 
-Invariant: an event exists only per state transition (a sequence break, a pending-delta overflow,
-a crossed episode ending), never per delta or trade, so the hot path allocates none in the steady
-state. Every type here has a consumer in `collector_core.collector`.
+Pure re-export, defines nothing: every name here *is* its successor object.
 """
 
-from dataclasses import dataclass
+import warnings
 
-from collector_core.domain.policies import SequenceVerdict
-from collector_core.domain.verdicts import DroppedLevel
-
-
-@dataclass(frozen=True, slots=True)
-class SequenceBroken:
-    """A `SequenceCanary` found a gap or regress: the message was dropped, the book cleared."""
-
-    u: int
-    last: int | None
-    verdict: SequenceVerdict
+from capture.domain.events import BookUncrossed
+from capture.domain.events import PendingOverflow
+from capture.domain.events import SequenceBroken
 
 
-@dataclass(frozen=True, slots=True)
-class PendingOverflow:
-    """Venue mode: held deltas outlived the MEM-02 bound; the book and its pending were dropped."""
+__all__ = [
+    "BookUncrossed",
+    "PendingOverflow",
+    "SequenceBroken",
+]
 
-    held: int
-    held_ns: int
+REMOVE_AFTER = "26-3-closeout-shims-gone-spines-reconciled"
 
 
-@dataclass(frozen=True, slots=True)
-class BookUncrossed:
-    """
-    A crossed episode ended: by itself (`dropped` empty) or because the policy deleted stale
-    levels. `since_ns`/`was` are None when the policy uncrossed a book at its first crossed sample.
-    """
-
-    since_ns: int | None
-    was: tuple[float, float] | None
-    bid: float | None
-    ask: float | None
-    dropped: tuple[DroppedLevel, ...] = ()
+# Attributed to the importing module, not to importlib's frames.
+warnings.warn(
+    "collector_core.domain.events moved to "
+    "capture.domain.events (Story 26.2); "
+    f"this shim is removed after {REMOVE_AFTER}",
+    DeprecationWarning,
+    skip_file_prefixes=("<frozen importlib",),
+)

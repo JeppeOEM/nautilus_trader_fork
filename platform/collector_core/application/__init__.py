@@ -12,4 +12,6 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
-"""Capture's application layer: services the `Collector` loops call (spine AD-D2)."""
+"""
+Deprecated shim package (Story 26.2): moved to `capture.application`.
+"""

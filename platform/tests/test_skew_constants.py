@@ -33,25 +33,29 @@ import pytest
 from _source_tree import PLATFORM_DIR
 
 
-if (
-    importlib.util.find_spec("collector_core") is None
-    or importlib.util.find_spec("archive") is None
-):
+if importlib.util.find_spec("capture") is None or importlib.util.find_spec("archive") is None:
     pytest.skip(
-        "collector_core/archive are not shipped in this image; run by `make test`",
+        "capture/archive are not shipped in this image; run by `make test`",
         allow_module_level=True,
     )
 
 from archive.application import rebuild_day
 from archive.domain import retention
-from collector_core import collector
-from collector_core.application import trade_backfill as backfill
+from capture.application import capture_service as collector
+from capture.application import trade_backfill as backfill
 from kernel.clocks import MAX_TS_INIT_SKEW_NS
 from kernel.clocks import NS_PER_S
 from kernel.clocks import READ_SPAN_MARGIN_NS
 
 
-_VENUE_CONFIGS = ("dydx_collector", "bybit_collector", "hyperliquid_collector")
+# The committed venue config files: dYdX's is the placeholder its compose bind mount covers at the
+# frozen container path (`/app/dydx_collector/config.toml`, AD-D12); the others moved with their
+# venue in Story 26.2.
+_VENUE_CONFIGS = (
+    "dydx_collector/config.toml",
+    "capture/venues/bybit/config.toml",
+    "capture/venues/hyperliquid/config.toml",
+)
 
 
 def _hold_back_seconds(node: object) -> list[float]:
@@ -67,8 +71,8 @@ def _hold_back_seconds(node: object) -> list[float]:
 
 def _max_hold_back_ns() -> int:
     values = [0.0]
-    for package in _VENUE_CONFIGS:
-        with (PLATFORM_DIR / package / "config.toml").open("rb") as f:
+    for config in _VENUE_CONFIGS:
+        with (PLATFORM_DIR / config).open("rb") as f:
             values += _hold_back_seconds(tomllib.load(f))
     return int(max(values) * NS_PER_S)
 
@@ -98,7 +102,7 @@ def test_a_caught_up_row_stays_within_the_read_margin() -> None:
     `ts_init` trails its `ts_event` by up to catch-up + 1 s + hold-back, and a venue clock may run
     hold-back + `VENUE_AHEAD_NS` ahead; the readers widen file spans symmetrically by
     `READ_SPAN_MARGIN_NS`, so each direction alone is the binding limit and their sum is a
-    conservative ceiling on both (`Collector._check_skew_budget` enforces the same sum).
+    conservative ceiling on both (`CaptureService._check_skew_budget` enforces the same sum).
     """
     worst = (
         (collector._MAX_CATCH_UP_SECONDS + 1) * NS_PER_S
@@ -116,7 +120,7 @@ def _names_in(function: Callable[..., object]) -> set[str]:
 def test_the_backfill_refusal_and_fetch_floor_use_the_bound() -> None:
     """Both halves of the backfill rule read the one constant, never a second literal."""
     assert "MAX_TS_INIT_SKEW_NS" in _names_in(backfill.admit_backfill)
-    assert "MAX_TS_INIT_SKEW_NS" in _names_in(collector.Collector._backfill_instrument)
+    assert "MAX_TS_INIT_SKEW_NS" in _names_in(collector.CaptureService._backfill_instrument)
 
 
 def test_the_collector_refuses_a_hold_back_beyond_the_read_margin() -> None:
@@ -126,7 +130,7 @@ def test_the_collector_refuses_a_hold_back_beyond_the_read_margin() -> None:
     collector._check_skew_budget(headroom - collector.VENUE_AHEAD_NS)
     with pytest.raises(ValueError, match="hold_back_seconds"):
         collector._check_skew_budget(headroom - collector.VENUE_AHEAD_NS + 1)
-    assert "_check_skew_budget" in _names_in(collector.Collector.__init__)
+    assert "_check_skew_budget" in _names_in(collector.CaptureService.__init__)
 
 
 def test_the_config_walk_reads_an_array_of_tables() -> None:

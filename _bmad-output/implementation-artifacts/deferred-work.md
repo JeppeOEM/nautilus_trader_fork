@@ -698,3 +698,25 @@ Discarded by operator: locking/atomic TOML writes; `bot_tui` malformed-message h
 - source_spec: `_bmad-output/implementation-artifacts/spec-26-1b-offsite-backup-explicit-setting-off-until-storage-exists.md`
   summary: `frontend/scripts/gen-api-types.mjs` emits a string `enum` (e.g. `ArchiveStatusResponse.backup: "enabled" | "disabled"`) as plain `string`, so a mistyped literal comparison in the frontend type-checks and silently never matches.
   evidence: `frontend/openapi.json` carries `"enum": ["enabled", "disabled"]` for `backup`, while the regenerated `frontend/src/api/schema.ts` has `backup?: string | null`; the generator has no enum branch (pre-existing, affects every Literal field).
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-26-2-capture-package-and-venue-packages-with-entrypoints.md`
+  summary: `CaptureService.poll_loop` sleeps one full period (`open_interest_poll_seconds`, 300 s) before its first fetch, so a collector crash-looping faster than that (`run_forever` backs off at most 60 s) never records open interest, and nothing is ledgered; the gap shows only in the data.
+  evidence: platform/capture/application/capture_service.py `poll_loop` (`await asyncio.sleep(every_seconds)` precedes the first `fetch()`, now marked Known limit); the same sleep-first order in dydx_collector/collector.py and bybit_collector/collector.py `_open_interest_loop` at baseline 7fbdb4fe76.
+- source_spec: `_bmad-output/implementation-artifacts/spec-26-2-capture-package-and-venue-packages-with-entrypoints.md`
+  summary: `platform/tests/test_skew_constants.py` checks dYdX's `hold_back_seconds` against `READ_SPAN_MARGIN_NS` by reading the committed 0-byte placeholder `dydx_collector/config.toml`, so the operator's real plan (`data/dydx_config.toml`) never enters the read-margin check; only the runtime `_check_skew_budget` guards it.
+  evidence: platform/tests/test_skew_constants.py `_VENUE_CONFIGS` dYdX entry; the same placeholder path at baseline 7fbdb4fe76.
+- source_spec: `_bmad-output/implementation-artifacts/spec-26-2-capture-package-and-venue-packages-with-entrypoints.md`
+  summary: The in-app docs (`frontend/src/pages/docs/kbData.ts`) show `bar_intervals = ["1-MINUTE"]` under the dYdX `[[instruments]]` example, a key the strict loader rejects (`_DYDX_ENTRY_KEYS` is id/store_order_book_deltas/retain_hours), so an operator copying it gets a collector that refuses to start.
+  evidence: platform/frontend/src/pages/docs/kbData.ts line 50; identical at baseline 7fbdb4fe76; loader in platform/capture/infrastructure/config.py.
+- source_spec: `_bmad-output/implementation-artifacts/spec-26-2-capture-package-and-venue-packages-with-entrypoints.md`
+  summary: `archive/tools/measure_lag.py` `_default_instruments` reads fixed in-tree paths: for dYdX inside a container that is the bind-mounted live plan whose `[[instruments]]` are tables (so bare `--venue dydx` yields dicts as ids), and for Bybit/Hyperliquid it ignores `BYBIT_COLLECTOR_CONFIG`/`HYPERLIQUID_COLLECTOR_CONFIG`.
+  evidence: platform/archive/tools/measure_lag.py `_default_instruments` (`tomllib.load(f).get("instruments", [])` returned as-is); same logic at baseline 7fbdb4fe76.
+- source_spec: `_bmad-output/implementation-artifacts/spec-26-2-capture-package-and-venue-packages-with-entrypoints.md`
+  summary: `run_forever` calls `build()` outside its try/backoff block, so a build failure on a restart attempt (config load, candle store, Redis, control plane) escapes and exits the process instead of backing off; only compose's `restart: always` recovers it.
+  evidence: platform/capture/application/capture_service.py `run_forever` (`collector = build()` precedes the `try`); same structure in collector_core/collector.py at baseline 7fbdb4fe76.
+- source_spec: `_bmad-output/implementation-artifacts/spec-26-2-capture-package-and-venue-packages-with-entrypoints.md`
+  summary: `bot_tui/app.py` `_MAX_COLLECTED_INSTRUMENTS = 29`, whose comment says it must match dYdX's `DYDX_MAX_COLLECTED_INSTRUMENTS = 30`, so the TUI refuses a `start` one instrument short of the collector's real cap.
+  evidence: platform/bot_tui/app.py line 118 against platform/capture/venues/dydx/config.py line 47; at baseline 7fbdb4fe76 the comment cited a `dydx_collector/collector.py` `_MAX_COLLECTED_INSTRUMENTS` that did not exist, and the value was already 29.
+- source_spec: `_bmad-output/implementation-artifacts/spec-26-2-capture-package-and-venue-packages-with-entrypoints.md`
+  summary: `core_config_from_dict` accepts TOML `nan`/`inf` for its float thresholds (`nan <= 0` is False, so a `nan` `stale_book_seconds` disables the stale gate and `inf` overflows `int(x * 1e9)`), and silently truncates a float or bool `flush_interval_seconds`/`seen_trade_ids` through `int()`.
+  evidence: platform/capture/application/config.py `core_config_from_dict` (`float(raw.get(...))`, `int(raw.get(...))`, then `<= 0` checks only); the same code in collector_core/config.py at baseline 7fbdb4fe76.

@@ -12,4 +12,6 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
-"""Capture's domain (DDD spine AD-D6): the gate's aggregates, verdicts and venue policies; no I/O."""
+"""
+Deprecated shim package (Story 26.2): moved to `capture.domain`.
+"""

@@ -16,7 +16,7 @@
 The collection plan: what one venue intends to collect (DDD spine AD-D17).
 
 The plan is the intent, capture's applied set is the fact: every command here returns a `PlanDiff`
-that capture applies (`collector_core.collector.Collector.apply`) and reports back as `Applied`.
+that capture applies (`capture.application.capture_service.CaptureService.apply`) and reports back as `Applied`.
 The plan itself never subscribes, samples or deletes anything.
 """
 
@@ -63,7 +63,7 @@ class PlanDiff:
     The result of one plan command: the plan after it, and the ids it added and removed.
 
     `store_deltas` is the complete post-change set of ids whose raw deltas are archived, so a
-    `PlanDiff` satisfies capture's `collector_core.ports.PlanDiff` port structurally.
+    `PlanDiff` satisfies capture's `capture.application.ports.PlanDiff` port structurally.
     """
 
     plan: "CollectionPlan"

@@ -37,10 +37,10 @@ def _sink(tmp_path: Path) -> tuple[CandleSink, CandleStore]:
 
 def test_the_sink_offers_exactly_the_ports_two_methods(tmp_path: Path) -> None:
     """
-    `CandleSink` never imports `collector_core.ports.SecondSink` -- candles imports no context but
+    `CandleSink` never imports `capture.application.ports.SecondSink` -- candles imports no context but
     kernel and observability, so the port is satisfied structurally (spine AD-D2). The typed
     conformance is asserted from the composition root's side, in
-    `dydx_collector/tests/test_candle_feed.py`; here only the shape and the return values.
+    `capture/venues/dydx/tests/test_candle_feed.py`; here only the shape and the return values.
     """
     sink, _ = _sink(tmp_path)
     assert sink.apply(_IID, [_second(0, 100.0)]) == 1

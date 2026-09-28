@@ -15,18 +15,18 @@
 """
 The collection-control context's ports (DDD spine AD-D2/AD-D17): every input and output of
 `ControlService` and `StatusPublisher` crosses one of these, implemented in
-`collection_control.infrastructure` (and, for `Capture`, by capture's `Collector`) and wired by
-the composition root, `dydx_collector/collector.py`'s `build_collector`. The channel names are the
-published language (frozen by AD-D12).
+`collection_control.infrastructure` (and, for `Capture`, by capture's `CaptureService`) and wired by
+the composition root, `capture/venues/dydx/__main__.py`'s `build_capture_from_file`. The channel
+names are the published language (frozen by AD-D12).
 """
 
 from collections.abc import AsyncIterator
 from typing import Any
 from typing import Protocol
 
-from collector_core.ports import Applied
-from collector_core.ports import CaptureStatus
-from collector_core.ports import PlanDiff
+from capture.application.ports import Applied
+from capture.application.ports import CaptureStatus
+from capture.application.ports import PlanDiff
 
 from collection_control.domain.plan import CollectionPlan
 
@@ -42,7 +42,7 @@ class Capture(Protocol):
     Invariant (AD-D17): the plan is the intent, the applied set is the fact -- control reports an
     instrument as collected only from `capture_status()`, never from its own plan, and changes the
     wire only through `apply`, whose `Applied` names what failed instead of raising. Implemented by
-    `collector_core.collector.Collector` (structurally; capture never imports this module).
+    `capture.application.capture_service.CaptureService` (structurally; capture never imports this module).
     """
 
     async def apply(self, diff: PlanDiff) -> Applied: ...

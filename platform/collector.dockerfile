@@ -21,6 +21,10 @@ COPY platform/observability ./observability
 COPY platform/kernel ./kernel
 COPY platform/candles ./candles
 COPY platform/archive ./archive
+COPY platform/capture ./capture
+# The four Story 26.2 re-export shim packages (collector_core, dydx_collector, bybit_collector,
+# hyperliquid_collector) ship until Story 26.3 deletes them: `make test` imports each shim
+# (tests/test_namespace.py), and the dYdX plan's bind mount keeps /app/dydx_collector/config.toml.
 COPY platform/collector_core ./collector_core
 COPY platform/collection_control ./collection_control
 COPY platform/dydx_collector ./dydx_collector
@@ -34,4 +38,4 @@ COPY platform/bot_tui ./bot_tui
 COPY platform/data_api ./data_api
 COPY platform/tests ./tests
 
-CMD ["python3", "-m", "dydx_collector.collector"]
+CMD ["python3", "-m", "capture.venues.dydx"]

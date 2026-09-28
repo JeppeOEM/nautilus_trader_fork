@@ -13,47 +13,82 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-Every error-ledger site capture writes (DDD spine AD-D6, DATA-07): one per event type.
+Deprecated re-export shim (Story 26.2): `collector_core.sites` moved to `capture.application.sites`.
 
-Invariant: `Collector._ledger` is the only caller of `observability.error_ledger.record` in
-capture, and every site it (or an adapter, client or venue loop handed it) names is a constant
-here -- `platform/tests/test_boundaries.py` greps for both. The strings are published language
-(`GET /api/errors`, the durable ledger files, `archive.crosscheck_errors`): frozen (AD-D12).
+Pure re-export, defines nothing: every name here *is* its successor object.
 """
 
-# ingest
-ENQUEUE = "collector.enqueue"
-PROCESS = "collector.process"
-UNPLANNED_MESSAGE = "collector.unplanned_message"
-# the gate and the book
-EMPTY_TOP = "collector.empty_top"
-CROSSED_BOOK = "collector.crossed_book"
-RESYNC = "collector.resync"
-BOOK_SEQUENCE = "collector.book_sequence"
-PENDING_DELTAS = "collector.pending_deltas"
-BOOK_CROSSCHECK = "collector.book_crosscheck"
-BOOK_CROSSCHECK_UNALIGNED = "collector.book_crosscheck_unaligned"
-CADENCE = "collector.cadence"
-# venue time (story 22.12)
-LATE_TRADE = "collector.late_trade"
-VENUE_CLOCK_AHEAD = "collector.venue_clock_ahead"
-# flush and the downstream sink
-FLUSH_WRITE = "collector.flush_write"
-CANDLE_STORE = "collector.candle_store"
-CANDLE_STORE_CATCH_UP = "collector.candle_store_catch_up"
-NO_SECOND_SINK = "collector.no_second_sink"
-# the archive adapter
-CORRUPT_PARQUET = "collector.corrupt_parquet"
-CAPTURE_LOCK_WAIT = "collector.capture_lock_wait"
-ARCHIVE_GAPS_WRITE = "archive_gaps.write"
-ARCHIVE_GAPS_INVERTED_SPAN = "archive_gaps.inverted_span"
-# feeds, reconnects and the trade backfill (story 22.14)
-FEED_STATE = "collector.feed_state"
-TRADE_FEED = "collector.trade_feed"
-TRADE_BACKFILL = "collector.trade_backfill"
-# the applied set (Story 25.4)
-SUBSCRIBE_FAILED = "collector.subscribe_failed"
-UNSUBSCRIBE_FAILED = "collector.unsubscribe_failed"
-DISCONNECT = "collector.disconnect"
-# venue REST polls
-OPEN_INTEREST_POLL = "collector.open_interest_poll"
+import warnings
+
+from capture.application.sites import ARCHIVE_GAPS_INVERTED_SPAN
+from capture.application.sites import ARCHIVE_GAPS_WRITE
+from capture.application.sites import BOOK_CROSSCHECK
+from capture.application.sites import BOOK_CROSSCHECK_UNALIGNED
+from capture.application.sites import BOOK_SEQUENCE
+from capture.application.sites import CADENCE
+from capture.application.sites import CANDLE_STORE
+from capture.application.sites import CANDLE_STORE_CATCH_UP
+from capture.application.sites import CAPTURE_LOCK_WAIT
+from capture.application.sites import CORRUPT_PARQUET
+from capture.application.sites import CROSSED_BOOK
+from capture.application.sites import DISCONNECT
+from capture.application.sites import EMPTY_TOP
+from capture.application.sites import ENQUEUE
+from capture.application.sites import FEED_STATE
+from capture.application.sites import FLUSH_WRITE
+from capture.application.sites import LATE_TRADE
+from capture.application.sites import NO_SECOND_SINK
+from capture.application.sites import OPEN_INTEREST_POLL
+from capture.application.sites import PENDING_DELTAS
+from capture.application.sites import PROCESS
+from capture.application.sites import RESYNC
+from capture.application.sites import SUBSCRIBE_FAILED
+from capture.application.sites import TRADE_BACKFILL
+from capture.application.sites import TRADE_FEED
+from capture.application.sites import UNPLANNED_MESSAGE
+from capture.application.sites import UNSUBSCRIBE_FAILED
+from capture.application.sites import VENUE_CLOCK_AHEAD
+
+
+__all__ = [
+    "ARCHIVE_GAPS_INVERTED_SPAN",
+    "ARCHIVE_GAPS_WRITE",
+    "BOOK_CROSSCHECK",
+    "BOOK_CROSSCHECK_UNALIGNED",
+    "BOOK_SEQUENCE",
+    "CADENCE",
+    "CANDLE_STORE",
+    "CANDLE_STORE_CATCH_UP",
+    "CAPTURE_LOCK_WAIT",
+    "CORRUPT_PARQUET",
+    "CROSSED_BOOK",
+    "DISCONNECT",
+    "EMPTY_TOP",
+    "ENQUEUE",
+    "FEED_STATE",
+    "FLUSH_WRITE",
+    "LATE_TRADE",
+    "NO_SECOND_SINK",
+    "OPEN_INTEREST_POLL",
+    "PENDING_DELTAS",
+    "PROCESS",
+    "RESYNC",
+    "SUBSCRIBE_FAILED",
+    "TRADE_BACKFILL",
+    "TRADE_FEED",
+    "UNPLANNED_MESSAGE",
+    "UNSUBSCRIBE_FAILED",
+    "VENUE_CLOCK_AHEAD",
+]
+
+REMOVE_AFTER = "26-3-closeout-shims-gone-spines-reconciled"
+
+
+# Attributed to the importing module, not to importlib's frames.
+warnings.warn(
+    "collector_core.sites moved to "
+    "capture.application.sites (Story 26.2); "
+    f"this shim is removed after {REMOVE_AFTER}",
+    DeprecationWarning,
+    skip_file_prefixes=("<frozen importlib",),
+)

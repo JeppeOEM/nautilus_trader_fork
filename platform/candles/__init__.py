@@ -23,7 +23,7 @@ replayed batch would otherwise double-count. *Rebuildable from seconds*: the Par
 are the archive and the source of truth, this store is derived, and `application.rebuild` recomputes
 any whole UTC day from them idempotently (`python -m candles.rebuild`). *Never ahead of the
 archive*: `application.sink.CandleSink` is fed only rows whose `ParquetDataCatalog.write_data`
-already succeeded (capture's `collector_core.ports.SecondSink` port). *One fold*: `domain.fold`'s
+already succeeded (capture's `capture.application.ports.SecondSink` port). *One fold*: `domain.fold`'s
 `fold_arrays` is the only seconds -> bars aggregation in `platform/` -- the stored closed bar
 (`application.queries.window`), the chart's forming bar (`application.forming.forming_bar`) and the
 archive-side read (`application.queries.candle_dicts_for_window`) all call it, so they cannot
@@ -50,6 +50,6 @@ path: give them the same treatment -- a read-model port for `queries` above all 
 store implementation earns one.
 
 The context imports `kernel` and `observability` and no other context; capture depends on it only
-through the `SecondSink` port it declares itself, so no `candles` -> `collector_core` edge exists
+through the `SecondSink` port it declares itself, so no `candles` -> `capture` edge exists
 (`platform/tests/test_boundaries.py` enforces it).
 """

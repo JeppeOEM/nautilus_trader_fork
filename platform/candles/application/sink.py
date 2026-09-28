@@ -32,7 +32,7 @@ class CandleSink:
     violate it is applying the buffer instead of the flushed batch -- which is why this is a port
     capture hands rows to, not a store capture reaches into.
 
-    Structural, not inherited: this class never imports `collector_core.ports.SecondSink`, it merely
+    Structural, not inherited: this class never imports `capture.application.ports.SecondSink`, it merely
     has its shape, so no `candles` -> capture edge exists (spine AD-D2).
 
     One transaction per instrument, not one per flush (this replaced `apply_batch`): a crash
