@@ -186,6 +186,17 @@ class MarketFrames(Protocol):
         self, instrument_id: str, *, start: str | int, end: str | int
     ) -> pd.DataFrame: ...
 
+    def objects(
+        self, data_cls: type, instrument_id: str, *, start: str | int, end: str | int
+    ) -> list:
+        """
+        Return the typed rows of the window, `ts_event` ascending, for checks that need the exact
+        `Price`/`Quantity` a frame's float columns drop (the trade fold). Rows are the catalog's own
+        class, except `IndexPriceUpdate`, which the pinned catalog cannot decode: its rows are
+        `kernel.catalog_files.IndexPrice` (`ts_event`, `ts_init`, an exact `price`, not `value`).
+        """
+        ...
+
 
 class RankingHistory(Protocol):
     """

@@ -15,6 +15,11 @@ urwid==4.0.6
 # not "test" -- pytest isn't otherwise present in the image `make test` runs against.
 pytest>=7.4.4,<8.0.0
 pytest-asyncio==0.23.8
+# research/tests/test_notebooks.py's pairing check reads each notebook's `.py` twin with jupytext
+# (Story 27.2). Already locked in uv.lock's dev group (1.19.3), but the base image's final stage
+# installs only the nautilus_trader wheel's runtime dependencies, so it is installed here at the
+# locked version -- the same package, not a new dependency.
+jupytext==1.19.3
 # data_api's read-only FastAPI service (Story 12.1).
 fastapi==0.141.1
 uvicorn[standard]==0.52.4

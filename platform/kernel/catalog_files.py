@@ -260,6 +260,40 @@ def _index_rows(path: str, start_ns: int, end_ns: int) -> list[IndexPrice]:
     return rows
 
 
+class PrecisionLabel(NamedTuple):
+    """One Parquet file's `price_precision` metadata label (None when the file carries none)."""
+
+    path: str
+    price_precision: int | None
+
+
+def price_precision_labels(
+    catalog_path: str, data_cls: type, instrument_id: str, start_ns: int, end_ns: int
+) -> list[PrecisionLabel]:
+    """
+    Return the `price_precision` label of every `data_cls` file of the instrument whose `ts_init` span,
+    widened by `MAX_TS_INIT_SKEW_NS`, overlaps [start_ns, end_ns], sorted by path. Schema metadata
+    only, no row is read: `ParquetDataCatalog` refuses to read files whose labels disagree (the
+    dYdX mark/index incident, CLAUDE.md), so disagreeing labels are only visible here.
+    """
+    directory = os.path.join(catalog_path, "data", class_to_filename(data_cls), instrument_id)
+    labels = []
+    for path in sorted(glob.glob(os.path.join(directory, "*.parquet"))):
+        if not CatalogFileSpan.from_path(path).overlaps(start_ns, end_ns, MAX_TS_INIT_SKEW_NS):
+            continue
+        metadata = pq.read_schema(path).metadata or {}
+        label = metadata.get(b"price_precision")
+        labels.append(PrecisionLabel(path, None if label is None else _precision(path, label)))
+    return labels
+
+
+def _precision(path: str, label: bytes) -> int:
+    try:
+        return int(label)
+    except ValueError:
+        raise ValueError(f"{path}: price_precision metadata is not an integer: {label!r}") from None
+
+
 def second_ohlc_arrays(paths: list[str]) -> dict[str, np.ndarray]:
     """
     Read OHLC + volume columns of the given snapshot files as arrays.

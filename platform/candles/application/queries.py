@@ -34,6 +34,7 @@ from candles.application.forming import bars_from_rows
 from candles.domain.candle import is_partial
 from candles.infrastructure.sqlite_store import connect_ro
 from candles.infrastructure.sqlite_store import db_path_for_venue
+from candles.infrastructure.sqlite_store import verified_status as _store_verified_status
 
 
 _COLUMNS = "t, o, h, l, c, v, seconds_observed, bar_seconds"
@@ -65,6 +66,15 @@ def open_store(candles_dir: str | Path, venue: str) -> Iterator[sqlite3.Connecti
     """
     with connect_ro(db_path_for_venue(candles_dir, venue)) as db:
         yield db
+
+
+def verified_status(db: sqlite3.Connection, iid: str, day: str) -> str | None:
+    """
+    Return that instrument-day's last kline reconciliation verdict ("pass"/"fail"), or None when
+    never verified (a provisional day) -- read-only, over a connection from `open_store`. The
+    store's own reader, so a research caller never imports `candles.infrastructure` (Story 27.2).
+    """
+    return _store_verified_status(db, iid, day)
 
 
 def window(

@@ -44,6 +44,7 @@ from kernel.venues import venue_of
 
 from nautilus_trader.model.data import CustomData
 from nautilus_trader.model.data import FundingRateUpdate
+from nautilus_trader.model.data import IndexPriceUpdate
 from nautilus_trader.model.data import MarkPriceUpdate
 from nautilus_trader.model.data import TradeTick
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
@@ -311,3 +312,21 @@ class CatalogFrames:
         ]
         rows.sort(key=lambda row: row["ts_event"])
         return _frame(rows, MARK_INDEX_COLUMNS)
+
+    def objects(
+        self, data_cls: type, instrument_id: str, *, start: str | int, end: str | int
+    ) -> list:
+        """
+        Return the typed rows (`TradeTick`, `MarkPriceUpdate`, `DydxSecondSnapshot`, ...) of the
+        window, `ts_event` ascending, through the same bounded read as the frames. `IndexPriceUpdate`
+        yields `kernel.catalog_files.IndexPrice` rows (`ts_event`, `ts_init`, an exact `price`):
+        the pinned catalog cannot decode index prices, so they come through the kernel's reader,
+        as `mark_index` reads them.
+
+        Known limit: every object of the window is materialised at once (a busy instrument's
+        trades over a day is ~10^6 objects); read a long span day by day.
+        """
+        if data_cls is IndexPriceUpdate:
+            start_ns, end_ns = window_ns(start, end)
+            return query_index_prices(self._catalog_path, instrument_id, start_ns, end_ns - 1)
+        return self._query(data_cls, instrument_id, start, end)

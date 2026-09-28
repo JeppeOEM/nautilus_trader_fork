@@ -1,0 +1,7 @@
+# Every numbered notebook is a pair (Story 27.2): `<nn>_<name>.py` in percent format is the source
+# of truth (reviewed, ruff/mypy-clean, run by research/tests/test_notebooks.py); `<nn>_<name>.ipynb`
+# is its output-free twin for Jupyter. `make notebooks` syncs them. No kernel or cell metadata is
+# kept, so a diff shows only code and prose.
+formats = "ipynb,py:percent"
+notebook_metadata_filter = "-all"
+cell_metadata_filter = "-all"

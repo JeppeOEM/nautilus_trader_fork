@@ -3,7 +3,7 @@ PLATFORM_DIR  := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 COMPOSE    := docker compose -f $(PLATFORM_DIR)docker-compose.yml
 BASE_IMAGE := nautilus-trader-base:1.229.0
 
-.PHONY: nightly consolidate backup-catalog build-candles prune prune-dry build-base build-base-vps up redeploy redeploy-all redeploy-no-paper up-live-paper build-insecure test test-live-paper down logs logs-dash web enable-boot enable-firewall harden-ssh frontend-dev frontend-remote
+.PHONY: nightly consolidate backup-catalog build-candles prune prune-dry build-base build-base-vps up redeploy redeploy-all redeploy-no-paper up-live-paper build-insecure test test-live-paper notebooks down logs logs-dash web enable-boot enable-firewall harden-ssh frontend-dev frontend-remote
 
 # Personal, gitignored overrides (see .env-example for the documented default).
 -include $(PLATFORM_DIR).env
@@ -167,6 +167,14 @@ TEST_SOURCE_MOUNT := -v $(REPO_ROOT):/src:ro -e PLATFORM_SOURCE_DIR=/src/platfor
 test:
 	$(COMPOSE) run --rm --no-deps -e HOME=/tmp -e USER=collector $(TEST_SOURCE_MOUNT) collector \
 		python3 -m pytest archive/tests research/tests alerting/tests views/tests candles/tests capture/tests capture/venues/dydx/tests capture/venues/bybit/tests capture/venues/hyperliquid/tests collection_control/tests ranking/tests bot_tui/tests data_api/tests observability/tests kernel/tests tests -q
+
+## Sync every numbered research notebook pair (Story 27.2): `research/notebooks/<nn>_<name>.py`
+## (jupytext percent format, the source of truth) <-> its output-free `.ipynb`, whichever was edited
+## last wins (research/notebooks/jupytext.toml sets the pairing and strips all metadata). Runs on
+## the host with the repo's locked dev dependencies; `research/tests/test_notebooks.py` (in `make
+## test`) fails an unsynced pair, a stored output or a `.py` with no `.ipynb`.
+notebooks:
+	cd $(REPO_ROOT) && uv run jupytext --sync $(PLATFORM_DIR)research/notebooks/[0-9]*_*.py
 
 ## Record the capture hot path's cost baseline (tests/fixtures/hotpath_baseline.json, audit D-65,
 ## spine AD-D5) into the checkout: the one place the source tree is mounted writable, because

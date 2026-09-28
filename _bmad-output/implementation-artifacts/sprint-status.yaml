@@ -325,7 +325,7 @@ development_status:
 
   epic-27: backlog
   27-1-research-domain-analysis-values-and-application-ports: done
-  27-2-executable-notebooks-and-catalog-inspection-notebook: ready-for-dev
+  27-2-executable-notebooks-and-catalog-inspection-notebook: done
   27-3-microstructure-notebook: ready-for-dev
   27-4-correlation-and-cross-venue-notebook: ready-for-dev
   27-5-backtest-evaluation-notebook-sweeps-and-walk-forward: ready-for-dev

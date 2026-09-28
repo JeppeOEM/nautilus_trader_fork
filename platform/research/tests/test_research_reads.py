@@ -32,30 +32,14 @@ replaces the file and fails once that story is `done`, or once the file no longe
 """
 
 import ast
-import importlib.util
 import json
-import sys
 from pathlib import Path
-from types import ModuleType
 
 import pytest
 
-
-def _load_source_tree() -> ModuleType:
-    """`platform/tests/_source_tree`: the sprint board parser the other expiring tables use."""
-    if "_source_tree" in sys.modules:
-        return sys.modules["_source_tree"]
-    path = Path(__file__).resolve().parents[2] / "tests" / "_source_tree.py"
-    spec = importlib.util.spec_from_file_location("_source_tree", path)
-    assert spec is not None, path
-    assert spec.loader is not None, path
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["_source_tree"] = module
-    spec.loader.exec_module(module)
-    return module
+from research.tests.source_tree import SOURCE_TREE as _SOURCE_TREE
 
 
-_SOURCE_TREE = _load_source_tree()
 _RESEARCH_DIR = _SOURCE_TREE.PLATFORM_DIR / "research"
 
 # Catalog-object queries, matched as a called name or attribute: allowed only with both `start=`
@@ -70,6 +54,7 @@ BOUNDABLE_READS = frozenset(
         "bars",
         "custom_data",
         "generic_data",
+        "objects",  # `MarketFrames.objects` (Story 27.2)
     }
 )
 # Direct Parquet reads, forbidden however they are called.
@@ -170,7 +155,8 @@ def _violations() -> dict[str, list[tuple[int, str]]]:
 def test_the_scan_sees_modules_and_notebooks() -> None:
     names = set(_SOURCES)
     assert "strategies/snapshot_backtest.py" in names
-    assert "notebooks/dydx_catalog_pandas.ipynb" in names
+    assert "notebooks/01_catalog_inspection.ipynb" in names
+    assert "notebooks/01_catalog_inspection.py" in names
     assert "application/frames.py" in names
     assert not any(name.startswith("tests/") for name in names)
 
@@ -245,3 +231,8 @@ def test_a_catalog_query_needs_both_bounds() -> None:
         (8, "query"),
         (9, "query"),
     ]
+
+
+def test_market_frames_objects_needs_both_bounds() -> None:
+    source = "frames.objects(TradeTick, i, start=a, end=b)\nframes.objects(TradeTick, i)\n"
+    assert forbidden_reads(source) == [(2, "objects")]

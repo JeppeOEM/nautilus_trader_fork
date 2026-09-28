@@ -23,6 +23,8 @@ never as an error.
 import sqlite3
 from pathlib import Path
 
+from candles.application.queries import open_store
+from candles.application.queries import verified_status
 from candles.infrastructure.sqlite_store import CandleStore
 from candles.infrastructure.sqlite_store import db_path_for_venue
 from candles.infrastructure.verified_days import VerifiedDaysDir
@@ -85,3 +87,26 @@ def test_the_directory_adapter_can_also_write_its_venues_verdict(tmp_path: Path)
     assert VerifiedDaysStore(db_path_for_venue(tmp_path, "BYBIT")).verified_status(_IID, _DAY) == (
         "pass"
     )
+
+
+def test_the_read_only_query_service_reads_the_verdict_and_never_verified(tmp_path: Path) -> None:
+    """`candles.application.queries.verified_status`: research's day status (Story 27.2)."""
+    store = CandleStore(db_path_for_venue(tmp_path, "BYBIT"))
+    store.mark_verified(_IID, _DAY, "fail", 4, 1_000)
+    store.close()
+    with open_store(tmp_path, "BYBIT") as db:
+        assert db is not None
+        assert verified_status(db, _IID, _DAY) == "fail"
+        assert verified_status(db, _IID, "2026-09-21") is None
+
+
+def test_the_query_service_reads_a_store_that_predates_the_table_as_unverified(
+    tmp_path: Path,
+) -> None:
+    legacy = sqlite3.connect(db_path_for_venue(tmp_path, "BYBIT"))
+    legacy.execute("CREATE TABLE candles (t INTEGER)")
+    legacy.commit()
+    legacy.close()
+    with open_store(tmp_path, "BYBIT") as db:
+        assert db is not None
+        assert verified_status(db, _IID, _DAY) is None

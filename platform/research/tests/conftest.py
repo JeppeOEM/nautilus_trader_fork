@@ -12,11 +12,14 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
+from pathlib import Path
+
 import pytest
 
 from nautilus_trader.backtest.engine import BacktestEngine
 from nautilus_trader.backtest.engine import BacktestEngineConfig
 from nautilus_trader.config import LoggingConfig
+from research.tests import fixture_catalog
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -46,3 +49,10 @@ def _keep_nautilus_log_guard_alive():
     engine = BacktestEngine(config=BacktestEngineConfig(logging=LoggingConfig(log_level="ERROR")))
     yield
     del engine
+
+
+@pytest.fixture(scope="session")
+def fixture_archive(tmp_path_factory: pytest.TempPathFactory) -> fixture_catalog.FixturePaths:
+    """Build the notebooks' fixture archive (`fixture_catalog.build`) once per session."""
+    root: Path = tmp_path_factory.mktemp("notebook_fixture")
+    return fixture_catalog.build(root)

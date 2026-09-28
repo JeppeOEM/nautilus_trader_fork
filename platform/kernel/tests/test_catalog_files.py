@@ -312,3 +312,33 @@ def test_query_index_prices_refuses_a_precision_label_this_build_cannot_hold(
     pq.write_table(table.replace_schema_metadata({b"price_precision": b"99"}), path)
     with pytest.raises(ValueError, match="outside this build"):
         catalog_files.query_index_prices(catalog, _IID, 0, 1 << 62)
+
+
+def test_price_precision_labels_read_each_overlapping_files_label(tmp_path: Path) -> None:
+    catalog = _index_catalog(tmp_path)
+    labels = catalog_files.price_precision_labels(catalog, IndexPriceUpdate, _IID, 0, 1 << 62)
+    assert {label.price_precision for label in labels} == {2, 5}
+
+
+def test_price_precision_labels_skip_files_outside_the_window(tmp_path: Path) -> None:
+    catalog = _index_catalog(tmp_path)
+    far = _DAY0 + NS_PER_DAY
+    labels = catalog_files.price_precision_labels(catalog, IndexPriceUpdate, _IID, far, far + 1)
+    assert labels == []
+
+
+def test_price_precision_labels_report_a_missing_label_as_none(tmp_path: Path) -> None:
+    catalog = _index_catalog(tmp_path)
+    path = sorted((tmp_path / "data" / "index_price_update" / _IID).glob("*.parquet"))[0]
+    pq.write_table(pq.read_table(path).replace_schema_metadata(None), path)
+    labels = catalog_files.price_precision_labels(catalog, IndexPriceUpdate, _IID, 0, 1 << 62)
+    assert None in {label.price_precision for label in labels}
+
+
+def test_price_precision_labels_name_the_file_of_a_malformed_label(tmp_path: Path) -> None:
+    catalog = _index_catalog(tmp_path)
+    path = sorted((tmp_path / "data" / "index_price_update" / _IID).glob("*.parquet"))[0]
+    table = pq.read_table(path)
+    pq.write_table(table.replace_schema_metadata({b"price_precision": b"x"}), path)
+    with pytest.raises(ValueError, match=path.name):
+        catalog_files.price_precision_labels(catalog, IndexPriceUpdate, _IID, 0, 1 << 62)

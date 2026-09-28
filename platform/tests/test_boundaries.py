@@ -23,10 +23,13 @@ the contexts of both ends:
 - a cross-context edge must be in `GRAPH` (AD-D2);
 - a `_private` name is never imported across contexts;
 - `observability` imports only the standard library, and `kernel` no context;
-- `research` imports nothing from `data_api`, `views` or `ranking`; its one context edge beyond
-  `kernel`/`observability` is the candle store's query service, exactly the names in
+- `research` imports nothing from `data_api`, `views` or `ranking`; its context edges beyond
+  `kernel`/`observability` are the candle store's query service, exactly the names in
   `RESEARCH_CANDLES_SERVICES` (Story 27.1: `research.application.frames` reads bars from the store,
-  never a third seconds-to-bars fold);
+  never a third seconds-to-bars fold; Story 27.2: `inspection` reads the day verdicts), and the
+  archive's pure gap heuristics, exactly the names in `RESEARCH_ARCHIVE_SERVICES` (Story 27.2: the
+  catalog inspection classifies gaps with the one rule, never a second one or the unbounded
+  catalog readers);
 - a `domain/` module or a venue `policies.py` imports only the standard library, numpy (pure array
   arithmetic, e.g. `research.domain`'s analysis values -- Story 27.1), `kernel` and
   `nautilus_trader.model`/`core`;
@@ -116,6 +119,9 @@ GRAPH: frozenset[tuple[str, str]] = frozenset(
         # Query services only, held to `RESEARCH_CANDLES_SERVICES` below (Story 27.1):
         # `research.application.frames.bars` reads the candle store, never a third fold.
         (RESEARCH, CANDLES),
+        # Pure functions only, held to `RESEARCH_ARCHIVE_SERVICES` below (Story 27.2):
+        # `research.application.inspection` classifies gaps with the archive's one heuristic.
+        (RESEARCH, ARCHIVE),
         (DATA_API, VIEWS),
         (DATA_API, ALERTING),
         # No (BOT_TUI, VIEWS): since Story 25.1a bot_tui shows no ranking or market data, only
@@ -335,44 +341,67 @@ _RESEARCH_FORBIDDEN_PACKAGES = frozenset({VIEWS, RANKING})
 
 
 # What a non-test research module may take from candles (Story 27.1): the read-only query services
-# and the bar sizes the store keeps. Tests seed a real store through `CandleStore`, as the views
-# rule below also leaves test modules out.
+# (`verified_status`: the catalog inspection's day status, Story 27.2) and the bar sizes the store
+# keeps. Tests seed a real store through `CandleStore`, as the views rule below also leaves test
+# modules out.
 RESEARCH_CANDLES_SERVICES: dict[str, frozenset[str]] = {
     "candles.application.queries": frozenset(
-        {"open_store", "window", "oldest_t", "newest_t", "bucket_starts"}
+        {"open_store", "window", "oldest_t", "newest_t", "bucket_starts", "verified_status"}
     ),
     "candles.domain.fold": frozenset({"BAR_SECONDS"}),
 }
 
+# What a non-test research module may take from archive (Story 27.2): the pure gap heuristics over
+# timestamps research read itself, bounded -- never `likely_outages`/`coverage`, which read a whole
+# data type of an instrument unbounded (MEM-01).
+RESEARCH_ARCHIVE_SERVICES: dict[str, frozenset[str]] = {
+    "archive.application.diagnostics": frozenset({"find_gaps"}),
+}
 
-def _research_candles_imports() -> list[Import]:
+# Research's allowlisted context -> its table.
+_RESEARCH_SERVICE_TABLES: dict[str, dict[str, frozenset[str]]] = {
+    CANDLES: RESEARCH_CANDLES_SERVICES,
+    ARCHIVE: RESEARCH_ARCHIVE_SERVICES,
+}
+
+
+def _research_imports_of(ctx: str) -> list[Import]:
     return [
         imp
         for imp in _IMPORTS
         if imp.src.split(".")[0] == RESEARCH
         and ".tests" not in f".{imp.src}"
-        and imp.dst_ctx == CANDLES
+        and imp.dst_ctx == ctx
     ]
 
 
-def test_research_takes_only_the_listed_query_services_from_candles() -> None:
+@pytest.mark.parametrize("ctx", sorted(_RESEARCH_SERVICE_TABLES))
+def test_research_takes_only_the_listed_services(ctx: str) -> None:
+    table = _RESEARCH_SERVICE_TABLES[ctx]
     beyond = sorted(
         _site(imp)
-        for imp in _research_candles_imports()
-        if imp.name not in RESEARCH_CANDLES_SERVICES.get(imp.dst, frozenset())
+        for imp in _research_imports_of(ctx)
+        if imp.name not in table.get(imp.dst, frozenset())
     )
-    assert beyond == [], "research reads candles only through RESEARCH_CANDLES_SERVICES"
+    assert beyond == [], f"research reads {ctx} only through its RESEARCH_*_SERVICES table"
 
 
-def test_every_listed_research_candles_service_is_still_used() -> None:
-    used = {(imp.dst, imp.name) for imp in _research_candles_imports()}
+@pytest.mark.parametrize("ctx", sorted(_RESEARCH_SERVICE_TABLES))
+def test_every_listed_research_service_is_still_used(ctx: str) -> None:
+    used = {(imp.dst, imp.name) for imp in _research_imports_of(ctx)}
     unused = sorted(
         f"{module}.{name}"
-        for module, names in RESEARCH_CANDLES_SERVICES.items()
+        for module, names in _RESEARCH_SERVICE_TABLES[ctx].items()
         for name in names
         if (module, name) not in used
     )
     assert unused == [], "no research module needs these any more: delete them from the table"
+
+
+def test_every_research_context_edge_has_a_service_table() -> None:
+    """A research edge beyond kernel/observability is reachable only through a listed table."""
+    edges = {dst for src, dst in GRAPH if src == RESEARCH} - _SHARED
+    assert edges == set(_RESEARCH_SERVICE_TABLES)
 
 
 def test_research_imports_no_views_or_ranking() -> None:

@@ -189,7 +189,7 @@ class MyStrategy(Strategy):
 `kernel/indicators.py` (`OrderFlowImbalance`, `MultiLevelOFI`, `MultiLevelOBI`,
 `Microprice`, `OnlineLogisticTrend`) per SIGNAL-01 in `platform/CLAUDE.md` — raw data is
 stored, signals are computed on read. In-repo, research imports only `kernel`, `observability` and
-the candles query services (`open_store`, `window`, `oldest_t`, `newest_t`, `bucket_starts` and the `BAR_SECONDS` sizes, Story 27.1): never `views/`, `data_api/` or `ranking/`
+the candles query services (`open_store`, `window`, `oldest_t`, `newest_t`, `bucket_starts`, `verified_status` and the `BAR_SECONDS` sizes, Stories 27.1/27.2) and the archive's pure gap heuristic (`find_gaps`, Story 27.2): never `views/`, `data_api/` or `ranking/`
 (`platform/tests/test_boundaries.py`). Rolling metrics such as pct-change and volatility are
 ranking's (`metrics.db`, the rankings API), never recomputed here.
 

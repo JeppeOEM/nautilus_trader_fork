@@ -286,3 +286,26 @@ def test_a_missing_candle_store_names_its_path(tmp_path: Path) -> None:
     frames = CatalogFrames(str(tmp_path), str(tmp_path / "candles"))
     with pytest.raises(FileNotFoundError, match=r"candles_dydx\.db"):
         frames.bars(_IID, 60, start=_DAY0, end=_at(60))
+
+
+def test_objects_are_the_typed_rows_of_the_half_open_window(frames: CatalogFrames) -> None:
+    ticks = frames.objects(TradeTick, _IID, start=_at(2), end=_at(4))
+    assert [t.ts_event for t in ticks] == [_at(2), _at(3)]
+    assert all(isinstance(t, TradeTick) for t in ticks)
+    assert ticks[0].price == Price.from_str("100.1")  # the exact value, precision label kept
+    marks = frames.objects(MarkPriceUpdate, _IID, start=_at(0), end=_at(2))
+    assert [(m.ts_event, m.value) for m in marks] == [(_at(1), Price.from_str("100.05"))]
+    oi = frames.objects(OpenInterest, _IID, start=_at(1), end=_at(3))
+    assert [row.open_interest for row in oi] == [Decimal("122.5")]
+
+
+def test_objects_read_index_prices_through_the_kernel_reader(frames: CatalogFrames) -> None:
+    """The pinned catalog cannot decode `IndexPriceUpdate`: `end` stays exclusive all the same."""
+    rows = frames.objects(IndexPriceUpdate, _IID, start=_at(2), end=_at(3))
+    assert [(r.ts_event, r.price) for r in rows] == [(_at(2), Price.from_str("100.01"))]
+    assert rows[0].price.precision == 2
+
+
+def test_objects_is_bounded_like_every_read(frames: CatalogFrames) -> None:
+    with pytest.raises(TypeError):
+        frames.objects(TradeTick, _IID)  # type: ignore[call-arg]
