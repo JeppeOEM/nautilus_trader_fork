@@ -17,8 +17,8 @@ Rebuild the SQLite candle store from the Parquet 1s snapshots (the archive is th
 
 Usage:
     python -m candles.rebuild --catalog /app/catalog --db /app/candles_dir/candles.db \\
-        [--instrument BTC-USD-PERP.DYDX ...] [--venue DYDX] [--start 2026-09-01] [--end 2026-09-18] \\
-        [--day 2026-09-20] [--include-open-day]
+        [--instrument BTCUSDT-LINEAR.BYBIT ...] [--venue BYBIT] \\
+        [--start 2026-09-01] [--end 2026-09-18] [--day 2026-09-20] [--include-open-day]
 
 Use it for first population and to repair after a "candle store write failed" error. Idempotent: each
 UTC day is deleted and recomputed whole. Today is skipped unless --include-open-day, which is only safe

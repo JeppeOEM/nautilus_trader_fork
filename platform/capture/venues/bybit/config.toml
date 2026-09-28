@@ -4,6 +4,10 @@ catalog_path = "/app/catalog"
 flush_interval_seconds = 60
 open_interest_poll_seconds = 300
 snapshot_interval_seconds = 1.0
+# Both markets of each coin stay collected (Story 29.3, operator decision 2026-09-26: BTC/ETH move
+# here from Hyperliquid). The linear perp carries what spot cannot: mark/index price, funding rate
+# and open interest (the ticker is subscribed for LINEAR only, open_interest.py polls linear ids
+# only). The spot id carries the spot book and spot trades, which the perp's do not replace.
 instruments = ["BTCUSDT-LINEAR.BYBIT", "ETHUSDT-LINEAR.BYBIT",
                "BTCUSDT-SPOT.BYBIT", "ETHUSDT-SPOT.BYBIT"]
 # Story 22.12: a live row is exchange second S, closed at wall S + 1 + hold_back_seconds from the

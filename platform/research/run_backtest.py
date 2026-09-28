@@ -16,7 +16,7 @@
 OFIStrategy backtest on 1s snapshots. Run from platform/:
 
     python -m research.run_backtest --start 2026-09-05 --end 2026-09-06
-        [--symbol ETH-USD-PERP.DYDX] [--threshold 2.0]
+        [--symbol BTCUSDT-LINEAR.BYBIT] [--threshold 2.0]
 """
 
 import argparse

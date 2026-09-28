@@ -22,7 +22,7 @@ const architectureHtml = `<figure class="diagram">${svgArchitecture()}<figcaptio
 <tr><td><code>bots:status</code></td><td>bots</td><td>bot_tui</td><td>Per-bot PnL/position/mode/heartbeat, every 5s</td></tr>
 <tr><td><code>bots:control</code></td><td>bot_tui</td><td>bots</td><td>{bot_id, action: start|stop} — never a mode field</td></tr>
 </table></div>
-<div class="sec"><h2>Deployment topology</h2><p>All services bind <code>127.0.0.1</code> only / <code>network_mode: host</code> — nothing is reachable without an SSH tunnel over Tailscale. <code>redis</code>/<code>collector</code>/<code>dashboard</code>/<code>ranking_engine</code>/<code>data_api</code>/<code>dozzle</code> start by default with <code>restart: always</code>. <code>live-paper</code> is explicit opt-in (<code>profiles: ["live-paper"]</code>, <code>make up-live-paper</code>) with a capped <code>on-failure:5</code> restart policy so a bad config can't crash-loop against dYdX's API. <code>bot_tui</code> is a one-shot interactive tool, never a background daemon.</p></div>
+<div class="sec"><h2>Deployment topology</h2><p>All services bind <code>127.0.0.1</code> only / <code>network_mode: host</code> — nothing is reachable without an SSH tunnel over Tailscale. <code>redis</code>/<code>bybit_collector</code>/<code>hyperliquid_collector</code>/<code>archive</code>/<code>ranking_engine</code>/<code>data_api</code>/<code>dozzle</code> start by default with <code>restart: always</code>. The dYdX <code>collector</code> is explicit opt-in since the venue cutover (<code>profiles: ["dydx"]</code>, <code>make up-dydx</code>; <code>make down-dydx</code> removes it). <code>live-paper</code> is explicit opt-in (<code>profiles: ["live-paper"]</code>, <code>make up-live-paper</code>) with a capped <code>on-failure:5</code> restart policy so a bad config can't crash-loop against dYdX's API. <code>bot_tui</code> is a one-shot interactive tool, never a background daemon.</p></div>
 <div class="sec"><h2>What's genuinely not finished</h2><ul>
 <li><b>DummyStrategy is a wiring proof, not a tuned strategy</b> — by design, but means nothing here is validated to make money.</li>
 <li><b>Bot Cache persistence + TUI trades blotter/PnL chart</b> (done, Stories 4.6/4.7) — the Redis-backed Cache, <code>fills.db</code> and <code>bots:history:*</code>.</li>
@@ -45,7 +45,7 @@ export const KB: KbDoc[] = [
 make up            # build collector image (seconds) and start collecting
 make logs          # tail live collector output
 make web           # open Dozzle log viewer (http://localhost:8080)</div></div>
-<div class="sec"><h2>Configure instruments</h2><p>Edit <code>platform/data/dydx_config.toml</code> (mounted at <code>/app/dydx_collector/config.toml</code>) — hot-reloaded every <code>config_reload_seconds</code> (30s default), no restart needed:</p><div class="formula">[[instruments]]
+<div class="sec"><h2>Configure instruments</h2><p>Bybit and Hyperliquid read <code>platform/capture/venues/bybit/config.toml</code> / <code>hyperliquid/config.toml</code> (a plain <code>instruments</code> list, e.g. <code>BTCUSDT-LINEAR.BYBIT</code>) at start: edit, then <code>docker compose restart bybit_collector</code>. dYdX runs only after <code>make up-dydx</code> since the venue cutover. Its plan is <code>platform/data/dydx_config.toml</code> (mounted at <code>/app/dydx_collector/config.toml</code>) — hot-reloaded every <code>config_reload_seconds</code> (30s default), no restart needed:</p><div class="formula">[[instruments]]
 id = "BTC-USD-PERP.DYDX"
 bar_intervals = ["1-MINUTE"]</div></div>
 <div class="sec"><h2>Run the dashboard</h2><p><code>make up</code> starts <code>data_api</code>, which serves this UI at <code>http://localhost:9100</code>. Reads directly from the catalog + Redis, no collector restart needed.</p></div>
@@ -54,7 +54,7 @@ bar_intervals = ["1-MINUTE"]</div></div>
 <div class="sec"><h2>Inspect the catalog directly</h2><div class="formula">from nautilus_trader.persistence.catalog import ParquetDataCatalog
 catalog = ParquetDataCatalog("platform/data/catalog")
 catalog.instruments()
-catalog.trade_ticks(instrument_ids=["BTC-USD-PERP.DYDX"])</div></div>`,
+catalog.trade_ticks(instrument_ids=["BTCUSDT-LINEAR.BYBIT"])</div></div>`,
     refs: ["platform/README.md"],
   },
   {
@@ -70,7 +70,7 @@ docker exec dydx-redis redis-cli PUBLISH bots:control '{"bot_id":"bot-01","actio
 docker exec dydx-redis redis-cli PUBLISH bots:control '{"bot_id":"bot-01","action":"start"}'</div><p>Stopping does <b>not</b> flatten an open position — no auto-flatten logic exists. A message with the wrong <code>bot_id</code> is silently ignored, so this is safe against a shared Redis instance with multiple bots.</p>
 <p>Via <code>bot_tui</code>: <code>make tui</code> → Bots pane (<code>:bots</code>) → highlight → <code>s</code> to start/stop. Stopping a <em>running</em> bot opens a type-to-confirm prompt; starting doesn't. Press <code>v</code> on a bot's detail view to read its strategy source read-only; <code>i</code> to see its incidents log (restarts, feed interruptions), persisted in Redis (<code>bots:incidents:{bot_id}</code>, last 50 kept).</p></div>
 <div class="sec"><h2>Writing a new live strategy</h2><ol style="padding-left:20px"><li>New <code>Strategy</code> + <code>StrategyConfig</code> pair in <code>bots/strategies/</code>, following <code>dummy.py</code>'s <code>DummyStrategy</code> as reference.</li><li>Swap the import/instantiation in <code>bots/infrastructure/nautilus_host.py</code>'s <code>build_node()</code>.</li><li>Add new tunables to <code>BotConfig</code>/<code>ExecConfig</code> (<code>bots/domain/config.py</code>), both loaders and <code>config.toml</code>. Never add a <code>mode</code> key — <code>load_paper_config()</code> hard-errors on it by design.</li><li>Rebuild — code is baked into the image, not bind-mounted.</li></ol></div>
-<div class="sec"><h2>Spotting downtime without digging through logs</h2><ul><li>A single coin's feed going stale shows as a <code>~ stale feed: SOL-USD-PERP.DYDX</code> banner in the web dashboard's status line, from the <code>stale_instrument_ids</code> field (SSOT-04; rankings are web-only since Story 25.1a).</li><li>A bot's own feed going stale, or the process restarting, is in its Incidents log (<code>i</code> key in bot_tui's Bot-detail).</li></ul><p>Neither parses log files — both are computed from data these processes already track.</p></div>`,
+<div class="sec"><h2>Spotting downtime without digging through logs</h2><ul><li>A single coin's feed going stale shows as a <code>~ stale feed: SOL-USD-PERP.HYPERLIQUID</code> banner in the web dashboard's status line, from the <code>stale_instrument_ids</code> field (SSOT-04; rankings are web-only since Story 25.1a).</li><li>A bot's own feed going stale, or the process restarting, is in its Incidents log (<code>i</code> key in bot_tui's Bot-detail).</li></ul><p>Neither parses log files — both are computed from data these processes already track.</p></div>`,
     refs: ["platform/docs/BOT_OPERATIONS.md"],
   },
   {

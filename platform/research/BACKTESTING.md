@@ -21,7 +21,7 @@ from research.application.ports import RunSpec
 
 spec = RunSpec(
     catalog_path="platform/data/catalog",
-    instrument_ids=("BTC-USD-PERP.DYDX",),        # one venue per run (Known limit)
+    instrument_ids=("BTCUSDT-LINEAR.BYBIT",),     # one venue per run (Known limit)
     start="2026-09-05",                            # required: every read is bounded (MEM-01)
     end="2026-09-07",
     strategy_path="research.strategies.ofi_strategy:OFIStrategy",

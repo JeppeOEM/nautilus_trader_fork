@@ -343,7 +343,7 @@ development_status:
   epic-29: backlog
   29-1-exchange-symbol-columns-and-mode-toggle-on-web-rankings: done
   29-2-collector-pane-shows-every-venue-plan: done
-  29-3-venue-cutover-bybit-hyperliquid-proven-then-dydx-stopped: ready-for-dev
+  29-3-venue-cutover-bybit-hyperliquid-proven-then-dydx-stopped: done
   29-4-runtime-collection-control-bybit-hyperliquid: ready-for-dev
   29-5-market-browser-search-by-name-and-add-in-collector-pane: ready-for-dev
   29-6-bots-pane-take-profit-stop-loss-and-position-details: ready-for-dev

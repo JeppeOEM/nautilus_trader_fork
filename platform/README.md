@@ -2,7 +2,7 @@
 
 Continuously records dYdX, Bybit and Hyperliquid market data to one local `ParquetDataCatalog`: 1-second book/trade snapshots (`DydxSecondSnapshot` — top-20 levels plus that second's trade OHLC/volume/counts), mark/index prices, funding rates, open interest and instrument definitions. Individual `TradeTick`s are folded into the second's snapshot and **not** stored raw, and `order_book_deltas` are a per-instrument opt-in (`store_order_book_deltas`) that is off by default and exists **for dYdX only** — Bybit and Hyperliquid take a flat `instruments = ["..."]` list with no per-instrument options. See `docs/DATA_INTEGRITY_AUDIT.md` D-45. Coverage is not uniform across venues either: a Bybit **spot** id yields trades and book only — no mark/index price, no funding rate (`capture/venues/bybit/client.py` subscribes the ticker for `LINEAR` alone) and no open interest (Bybit spot has none). The catalog is Nautilus-native — load it directly into backtests with zero conversion.
 
-All three collectors run the same class: `capture.application.capture_service.CaptureService` (the write gate and every invariant check), never subclassed. Each venue is a package under `capture/venues/` (`dydx/`, `bybit/`, `hyperliquid/`: `client.py`, `trade_history.py`, `policies.py` where the venue has policy values, an optional REST poll or book snapshot, `config.py`) whose `__main__.py` composition root wires the venue's client, policy values and extra loops into it, run as `python3 -m capture.venues.<venue>` (Story 26.2; the old import paths' re-export shims were deleted in Story 26.3). `make up` starts one container per venue from one image.
+All three collectors run the same class: `capture.application.capture_service.CaptureService` (the write gate and every invariant check), never subclassed. Each venue is a package under `capture/venues/` (`dydx/`, `bybit/`, `hyperliquid/`: `client.py`, `trade_history.py`, `policies.py` where the venue has policy values, an optional REST poll or book snapshot, `config.py`) whose `__main__.py` composition root wires the venue's client, policy values and extra loops into it, run as `python3 -m capture.venues.<venue>` (Story 26.2; the old import paths' re-export shims were deleted in Story 26.3). Each venue runs in its own container from one image. `make up` starts Bybit's and Hyperliquid's; dYdX's (`collector`) sits behind the `dydx` compose profile since the venue cutover (Story 29.3) and runs only through `make up-dydx` (`make down-dydx` removes it; runbook `docs/DEPLOY_CHECKLIST.md` §8).
 
 ---
 
@@ -20,9 +20,11 @@ Run all `make` commands from `platform/`:
 | Command | What it does |
 |---|---|
 | `make build-base` | Build the base Nautilus image (~15 min, once only) |
-| `make up` | Build collector image and start collecting |
+| `make up` | Build collector image and start collecting (Bybit and Hyperliquid; not dYdX) |
+| `make up-dydx` | Start (or rebuild and restart) the dYdX collector, gated behind the `dydx` compose profile |
+| `make down-dydx` | Stop and remove the dYdX collector container (removed, so a reboot cannot restart it; data is kept) |
 | `make down` | Stop containers (catalog data is preserved) |
-| `make logs` | Tail collector logs |
+| `make logs` | Tail the three collectors' logs |
 | `make web` | Open Dozzle log viewer in browser |
 | `make tui` | Open the terminal UI: bots and collector control (see below) |
 | `make prune` | Delete `order_book_deltas` older than 14 days |
@@ -59,7 +61,7 @@ The thresholds every venue shares are the fields of `capture/application/config.
 
 **One loader, strict for every venue** (Story 25.4). Every venue's file goes through `capture.infrastructure.config.load_venue_config` (one `VENUE_SCHEMAS` row per venue), which rejects an unknown key outright rather than letting a misspelt threshold fall back to a default, and refuses a plan that breaks an invariant (more than 30 dYdX instruments, an id both collected and excluded, a repeated id). Before Story 25.4 dYdX had its own key-by-key loader that ignored unknown keys and the core thresholds; they are now honoured.
 
-dYdX (`platform/data/dydx_config.toml`) — its plan (`instruments`, `exclude`) is hot-reloaded every `config_reload_seconds`, no restart needed; the thresholds are read at start:
+dYdX (`platform/data/dydx_config.toml`) — its plan (`instruments`, `exclude`) is hot-reloaded every `config_reload_seconds`, no restart needed; the thresholds are read at start. Since the venue cutover (Story 29.3) the dYdX collector runs only after `make up-dydx`, so an edit here collects nothing while it is down:
 
 ```toml
 network = "mainnet"
@@ -73,7 +75,7 @@ instruments = [
 ]
 ```
 
-Bybit and Hyperliquid take a plain list of ids and are read once at startup (no hot-reload). They publish that static plan on `collector:status` too (Story 29.2), so `bot_tui`'s Collector pane shows it, read-only:
+Bybit and Hyperliquid take a plain list of ids and are read once at startup (no hot-reload): edit the file, then `docker compose restart bybit_collector` (or `hyperliquid_collector`). The committed sets are Bybit `BTCUSDT`/`ETHUSDT` linear + spot and Hyperliquid `SOL-USD-PERP.HYPERLIQUID` (`docs/DATA_DICTIONARY.md` §1). They publish that static plan on `collector:status` too (Story 29.2), so `bot_tui`'s Collector pane shows it, read-only:
 
 ```toml
 environment = "mainnet"
@@ -90,7 +92,7 @@ Add any dYdX perpetual in `<BASE>-USD-PERP.DYDX` format, any Bybit linear/spot i
 From `platform/`:
 
 ```bash
-make up        # build collector image (seconds) and start everything
+make up        # build collector image (seconds) and start everything (dYdX: make up-dydx)
 make logs      # tail live collector output
 make web       # open Dozzle log viewer (http://localhost:8080)
 ```
@@ -139,7 +141,7 @@ push notification if every subscribed instrument's order book goes stale for 30s
 
 ```bash
 make down   # stop containers, catalog persists
-make up     # restart (rebuilds collector image automatically)
+make up     # restart (rebuilds collector image automatically; dYdX only via make up-dydx)
 ```
 
 ---
@@ -177,7 +179,7 @@ Only needed when `nautilus_trader` Python/Rust core changes (e.g. after a `git p
 
 ```bash
 make build-base   # ~15 min
-make up           # rebuild collector layer on top and restart
+make up           # rebuild collector layer on top and restart (plus make up-dydx if dYdX runs)
 ```
 
 ---
@@ -189,8 +191,8 @@ from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
 catalog = ParquetDataCatalog("platform/data/catalog")
 catalog.instruments()
-catalog.trade_ticks(instrument_ids=["BTC-USD-PERP.DYDX"])
-catalog.order_book_deltas(instrument_ids=["BTC-USD-PERP.DYDX"])
+catalog.trade_ticks(instrument_ids=["BTCUSDT-LINEAR.BYBIT"])
+catalog.order_book_deltas(instrument_ids=["BTCUSDT-LINEAR.BYBIT"])
 ```
 
 ### Backfill historical venue bars (Bybit / Hyperliquid)

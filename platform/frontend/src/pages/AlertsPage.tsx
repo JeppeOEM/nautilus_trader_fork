@@ -9,7 +9,7 @@ const FREQUENCY_LABELS: Record<string, string> = {
   only_once: "only once",
 };
 
-/** e.g. "BTC-USD-PERP.DYDX price crosses 65000 (once per bar, 60s bars)" */
+/** e.g. "BTCUSDT-LINEAR.BYBIT price crosses 65000 (once per bar, 60s bars)" */
 function describeAlert(alert: AlertResponse): string {
   const frequency = FREQUENCY_LABELS[alert.frequency] ?? alert.frequency;
   return `${alert.instrument_id} price crosses ${alert.level} (${frequency}, ${alert.bar_seconds}s bars)`;

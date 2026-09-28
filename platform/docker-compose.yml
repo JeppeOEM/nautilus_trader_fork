@@ -51,6 +51,15 @@ services:
   collector:
     container_name: dydx-collector
     # cpu_shares: 1024   # see the CPU-priority note above services: (capture: must not wait)
+    # Not started by plain `make up`/`docker compose up -d` since the venue cutover (Story 29.3):
+    # collection moved to Bybit and Hyperliquid, so dYdX is an explicit, opt-in action --
+    # `make up-dydx` starts it, `make down-dydx` removes it. The same profile pattern as
+    # live-paper below. The service keeps its name, image and mounts: the maintenance targets
+    # (`make test`/`nightly`/`consolidate`/`prune`/`build-candles`/`hotpath-baseline`) still
+    # `run` it, and compose enables a profile of a service that is named explicitly. Its archive
+    # stays: the `archive` service keeps DYDX in its nightly `venues` until the days age out
+    # (docs/DEPLOY_CHECKLIST.md §8).
+    profiles: ["dydx"]
     build:
       context: ..
       dockerfile: platform/collector.dockerfile

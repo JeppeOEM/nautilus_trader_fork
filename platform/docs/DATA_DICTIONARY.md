@@ -27,6 +27,22 @@ Nautilus types decoded straight from the Rust adapter; two (`DydxSecondSnapshot`
 `OpenInterest`) are custom `Data` subclasses this collector defines because the
 PyO3 bindings don't expose the fields another way.
 
+**The collected set** (the committed plans, venue cutover Story 29.3, operator decision
+2026-09-26: BTC/ETH on Bybit, SOL on Hyperliquid; reversible by config):
+
+| Venue | Instrument ids | Market | What each yields |
+|---|---|---|---|
+| Bybit (`capture/venues/bybit/config.toml`) | `BTCUSDT-LINEAR.BYBIT`, `ETHUSDT-LINEAR.BYBIT` | linear perp | trades, book (`DydxSecondSnapshot`), mark/index price, funding rate, open interest (REST poll) |
+| Bybit | `BTCUSDT-SPOT.BYBIT`, `ETHUSDT-SPOT.BYBIT` | spot | trades and book only: no mark/index price, no funding rate (the ticker is subscribed for `LINEAR` alone), no open interest (spot has none) |
+| Hyperliquid (`capture/venues/hyperliquid/config.toml`) | `SOL-USD-PERP.HYPERLIQUID` | perp | trades, book, mark/index price, funding rate, open interest (over the WebSocket) |
+| dYdX (`platform/data/dydx_config.toml`) | operator data (the live plan file, hot-reloaded) | perp | trades, book, mark/index price, funding rate, open interest (indexer REST poll); raw `OrderBookDeltas` per opt-in |
+
+dYdX's collector (compose service `collector`) is gated behind the `dydx` compose profile since
+the cutover: `make up` does not start it, `make up-dydx` does and `make down-dydx` removes it.
+Its archived days stay in the catalog and the `archive` service keeps verifying and pruning them
+(`DYDX` stays in `archive/config.toml`'s `venues`) until they age out
+(`docs/DEPLOY_CHECKLIST.md` §8).
+
 ### 1.1 `TradeTick` (native Nautilus type) — raw trade archive (story 22.13)
 
 - **Source:** every venue's trade channel, decoded by the Rust adapter and delivered to

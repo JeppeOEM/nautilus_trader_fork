@@ -513,7 +513,7 @@ without an SSH tunnel over Tailscale (see README's remote-access section).
 | Service | Started by default? | Restart policy | Why |
 |---|---|---|---|
 | `redis` | yes (`make up`) | `always` | Shared bus, no state to lose |
-| `collector` (dYdX) | yes | `always` | Core data path, must self-heal |
+| `collector` (dYdX) | **no** — `profiles: ["dydx"]`, `make up-dydx` (`make down-dydx` removes it) | `always` | Collection moved to Bybit and Hyperliquid (Story 29.3, decision 2026-09-26); kept runnable, its archive ages out through the nightly (`docs/DEPLOY_CHECKLIST.md` §8) |
 | `bybit_collector`, `hyperliquid_collector` | yes | `always` | Same engine, same catalog, other venues (Epic 22) |
 | `archive` | yes | `always` | Nightly maintenance scheduled in our own code (Story 25.1b): must survive reboots and redeploys; replaces the host crontab line |
 | `ranking_engine` | yes | `always` | Sole ranking computer |

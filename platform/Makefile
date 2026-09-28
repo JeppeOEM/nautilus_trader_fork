@@ -3,7 +3,7 @@ PLATFORM_DIR  := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 COMPOSE    := docker compose -f $(PLATFORM_DIR)docker-compose.yml
 BASE_IMAGE := nautilus-trader-base:1.229.0
 
-.PHONY: nightly consolidate backup-catalog build-candles prune prune-dry build-base build-base-vps up redeploy redeploy-all redeploy-no-paper up-live-paper build-insecure test test-live-paper notebooks down logs logs-dash web enable-boot enable-firewall harden-ssh frontend-dev frontend-remote
+.PHONY: nightly consolidate backup-catalog build-candles prune prune-dry build-base build-base-vps up redeploy redeploy-all redeploy-no-paper up-live-paper up-dydx down-dydx build-insecure test test-live-paper notebooks down logs logs-dash web enable-boot enable-firewall harden-ssh frontend-dev frontend-remote
 
 # Personal, gitignored overrides (see .env-example for the documented default).
 -include $(PLATFORM_DIR).env
@@ -72,24 +72,30 @@ build-base-vps:
 		$(REPO_ROOT)
 	@docker image prune -f
 
-## Start collecting data, rebuilding every default-profile service (collector included)
-## first (seconds -- it's just the thin platform/ layer on top of the base image). Run
-## `make build-base` once beforehand for the base image itself. Use this only for first
+## Start collecting data, rebuilding every default-profile service (the Bybit and Hyperliquid
+## collectors included; dYdX's `collector` is behind the `dydx` profile since the venue cutover,
+## Story 29.3 -- `make up-dydx`) first (seconds -- it's just the thin platform/ layer on top of
+## the base image). Run `make build-base` once beforehand for the base image itself. Use this only for first
 ## bring-up or when capture/ itself changed -- otherwise use `make redeploy` so
 ## the collector's live WS connection/book state is never disturbed. Starts the `archive`
 ## service too (the nightly maintenance schedule, Story 25.1b; no profile). data/archive (its
 ## state) and the rclone config directory are created first, as the invoking user, for the same
 ## root-owned-bind-mount reason as `tui`'s mkdir.
+## Also builds -- never starts -- dYdX's `collector` image: compose tags one image per service, and
+## `make test`/`nightly`/`consolidate`/`prune`/`build-candles`/`hotpath-baseline` all `run` that
+## one, so without this build they would run a stale image once `up` stopped naming `collector`.
+## Built first, so a failed build stops the target before any running service is replaced.
 up:
 	mkdir -p $(PLATFORM_DIR)data/archive $(RCLONE_CONFIG_DIR)
+	$(COMPOSE) build collector
 	$(COMPOSE) up -d --build
 	@docker image prune -f
 	@echo "Dashboard: http://localhost:$(DATA_API_PORT)"
 
 ## Rebuild and restart everything that doesn't collect market data (archive, ranking_engine, live-paper, bot_tui's image) -- never touches the collector
 ## container, so its WS connection/book state stays untouched. Use this for all
-## non-collector iteration; reach for `make up` (or `docker compose up -d --build
-## collector`) only when capture/ itself changed. live-paper is rebuilt+restarted
+## non-collector iteration; reach for `make up` or `make redeploy-all` (plus `make up-dydx` while
+## dYdX runs: neither restarts it) only when capture/ itself changed. live-paper is rebuilt+restarted
 ## under its profile same as `make up-live-paper` -- only run this if you actually want
 ## live-paper (re)started. bot_tui is `run`-only (never a daemon), so it's just rebuilt
 ## here for a fresh image; `make tui` also rebuilds it on every invocation regardless.
@@ -103,14 +109,18 @@ redeploy:
 	@docker image prune -f
 	@echo "Dashboard: http://localhost:$(DATA_API_PORT)"
 
-## Rebuild and restart EVERYTHING, the three collectors included -- `redeploy` plus `collector`,
-## `bybit_collector` and `hyperliquid_collector` (all built from the one collector image, so a
-## capture/ change must restart all three: before Story 26.2 this target restarted only dYdX's).
-## Use when capture/ changed (e.g. the candle-store feed). Briefly drops each collector's WS
-## connection and loses its in-memory book state; prefer `redeploy` otherwise.
+## Rebuild and restart EVERYTHING, the default collectors included -- `redeploy` plus
+## `bybit_collector` and `hyperliquid_collector` (both built from the one collector image, so a
+## capture/ change must restart both). Use when capture/ changed (e.g. the candle-store feed).
+## Briefly drops each collector's WS connection and loses its in-memory book state; prefer
+## `redeploy` otherwise. dYdX's `collector` is not named since the venue cutover (Story 29.3): it
+## is behind the `dydx` profile, so this target never starts, restarts or rebuilds it -- a running
+## dYdX container keeps its old image (the image itself is rebuilt, for the maintenance targets
+## that `run` it, as in `up`). Restart a running dYdX on the new image with `make up-dydx`.
 redeploy-all:
 	mkdir -p $(PLATFORM_DIR)data/archive $(RCLONE_CONFIG_DIR)
-	$(COMPOSE) up -d --build collector bybit_collector hyperliquid_collector archive ranking_engine data_api
+	$(COMPOSE) build collector
+	$(COMPOSE) up -d --build bybit_collector hyperliquid_collector archive ranking_engine data_api
 	$(COMPOSE) --profile live-paper up -d --build live-paper
 	$(COMPOSE) --profile tui build bot_tui
 	@docker image prune -f
@@ -135,6 +145,19 @@ redeploy-no-paper:
 up-live-paper:
 	$(COMPOSE) --profile live-paper up -d --build live-paper
 	@docker image prune -f
+
+## Start (or rebuild and restart) the dYdX collector. Not part of plain `make up` since the venue
+## cutover (Story 29.3) -- gated behind the `dydx` compose profile, the same pattern as
+## `up-live-paper`. Runbook: docs/DEPLOY_CHECKLIST.md §8.
+up-dydx:
+	$(COMPOSE) --profile dydx up -d --build collector
+	@docker image prune -f
+
+## Stop AND remove the dYdX collector container (catalog, candle store and plan file are kept).
+## Removed, not merely stopped: a stopped `restart: always` container is started again when the
+## Docker daemon starts, so a plain stop would bring dYdX back on the next reboot.
+down-dydx:
+	$(COMPOSE) --profile dydx rm -sf collector
 
 ## Build the collector/data_api/live-paper images bypassing pip's TLS verification, for
 ## networks with a TLS-intercepting proxy (e.g. Zscaler) where pip can't validate
@@ -182,7 +205,7 @@ notebooks:
 ## the container. Only in a change that deliberately re-baselines (a changed burst, a Python or
 ## nautilus_trader bump, or a reviewed per-message cost increase stated on audit row D-65),
 ## never to make `make test` pass; the test's allocation checks say why.
-## Measures the collector image, so build it from this checkout first (`make up` / `make build`).
+## Measures the collector image, so build it from this checkout first (`make up`, which builds it).
 HOTPATH_BASELINE := $(PLATFORM_DIR)tests/fixtures/hotpath_baseline.json
 hotpath-baseline:
 	rm -f $(HOTPATH_BASELINE)
@@ -283,9 +306,9 @@ test-live-paper:
 down:
 	$(COMPOSE) down
 
-## Tail collector logs
+## Tail the three collectors' logs (dYdX's shows only while its container exists: `make up-dydx`)
 logs:
-	$(COMPOSE) logs -f collector
+	$(COMPOSE) logs -f collector bybit_collector hyperliquid_collector
 
 ## Tail data_api (dashboard) logs
 logs-dash:
@@ -348,16 +371,17 @@ prune-dry:
 		python3 -m archive.prune_catalog --catalog /app/catalog \
 		--types order_book_deltas --days 14
 
-## Local frontend dev, fully self-contained: brings up collector + ranking_engine +
-## data_api + redis, all locally (network_mode: host, so data_api lands on
+## Local frontend dev, fully self-contained: brings up the Bybit and Hyperliquid collectors +
+## ranking_engine + data_api + redis, all locally (network_mode: host, so data_api lands on
 ## 127.0.0.1:$(DATA_API_PORT) -- exactly where frontend/vite.config.ts's dev-server
-## proxy expects it), then runs Vite in the foreground. Opens a REAL dYdX WS
-## connection via collector and needs time to build up real ranking history from
+## proxy expects it), then runs Vite in the foreground. Opens REAL Bybit and Hyperliquid WS
+## connections (dYdX is behind the `dydx` profile since Story 29.3: `make up-dydx` adds it)
+## and needs time to build up real ranking history from
 ## scratch via ranking_engine -- heavier than `frontend-remote` below, but fully
 ## self-contained (no VPS/tunnel dependency). Ctrl-C only stops the frontend -- the
 ## backend containers keep running (restart: always); `make down` stops those too.
 frontend-dev:
-	$(COMPOSE) up -d --build redis data_api collector ranking_engine
+	$(COMPOSE) up -d --build redis data_api bybit_collector hyperliquid_collector ranking_engine
 	cd $(PLATFORM_DIR)frontend && npm run dev
 
 ## Local frontend dev against the VPS's real, already-running data instead --
