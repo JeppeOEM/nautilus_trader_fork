@@ -62,8 +62,8 @@ def test_query_second_ohlc_matches_this_readers_decoder() -> None:
     `kernel.catalog_files.query_second_ohlc` projects columns; `views.catalog_reads.
     query_second_snapshots` decodes whole objects, and `repair_catalog` plus the views reads use
     it. Story 24.1 moved the candle fold into `candles/`, which may not import views -- so the
-    pairing is asserted here, from the side that owns the decoder (moved with it from
-    `ml_signals/tests/test_catalog_stats.py` in Story 24.2).
+    pairing is asserted here, from the side that owns the decoder (moved with it from the
+    catalog-stats tests in Story 24.2).
     """
     base = 1_800_000_000_000_000_000
     with tempfile.TemporaryDirectory() as tmp:

@@ -15,17 +15,15 @@
 """
 The DDD migration's import-boundary guard (spine AD-D1, AD-D2, AD-D16).
 
-Every Python module under `platform/` belongs to exactly one bounded context: a module inside a
-context package (`observability/`, later `kernel/`, `candles/`, ...) belongs to it by name, and
-every legacy module is mapped to its *target* context by `LEGACY_MODULE_TO_CONTEXT` (longest
-dotted prefix wins; an unmapped module fails). A module split across contexts is refined per
-symbol by `LEGACY_SYMBOL_TO_CONTEXT`. Each import is judged by the target contexts of both ends,
-so the graph holds from the first move, not only once a module has been relocated:
+Every Python module under `platform/` belongs to exactly one bounded context, by its top-level
+package (`capture/`, `kernel/`, `observability/`, ...; `platform/scripts` and `platform/tests` are
+contexts of their own); a module outside every context package fails. Each import is judged by
+the contexts of both ends:
 
 - a cross-context edge must be in `GRAPH` (AD-D2);
 - a `_private` name is never imported across contexts;
 - `observability` imports only the standard library, and `kernel` no context;
-- `research` imports nothing from `data_api`, legacy or not, nor `views` or `ranking`;
+- `research` imports nothing from `data_api`, `views` or `ranking`;
 - a `domain/` module or a venue `policies.py` imports only the standard library, `kernel` and
   `nautilus_trader.model`/`core`;
 - `kernel/` holds exactly spine AD-D3's modules and stays pure: no in-repo import beyond itself,
@@ -43,12 +41,11 @@ so the graph holds from the first move, not only once a module has been relocate
 - no class anywhere in `platform/` subclasses `CaptureService` (or its old name `Collector`):
   venue variance is policy values and composition-root loops (Story 26.2).
 
-One exemption only: `platform/tests` is cross-cutting and may import anything. Since Story 26.2
-moved capture, the last context, no unmoved package remains, so the full AD-D2 graph is judged;
-the legacy packages left are pure re-export shims mapped to the context they re-export. A
-deviation would be listed in `LEGACY_EDGES_UNTIL`/`LEGACY_PRIVATE_IMPORTS_UNTIL` with the story
-that retires it; an entry fails once that story is `done` on the sprint board, and fails when no
-import needs it any more, so both tables can only shrink (both are empty).
+One exemption only: `platform/tests` is cross-cutting and may import anything. The DDD migration
+is finished (Story 26.3 deleted its last re-export shims and, with them, every legacy-module map,
+dated deviation table and shim exemption this guard carried): the full AD-D2 graph is judged, and
+a deviation is fixed at the import, never listed. The only per-module allowances left are the
+permanent composition-root whitelist below and the non-venue HTTP clients.
 """
 
 import ast
@@ -61,11 +58,8 @@ import pytest
 from _source_tree import PLATFORM_DIR
 from _source_tree import imports_of
 from _source_tree import python_modules
-from _source_tree import story_statuses
 from _source_tree import unknown_or_done
 
-
-THIS_STORY = "26-2-capture-package-and-venue-packages-with-entrypoints"
 
 KERNEL = "kernel"
 OBSERVABILITY = "observability"
@@ -125,39 +119,6 @@ GRAPH: frozenset[tuple[str, str]] = frozenset(
     }
 )
 
-# Legacy module -> target context (spine AD-D1 "Today" column; AD-D3 for kernel membership).
-# Longest dotted prefix wins. A test module belongs to the context of the code it tests, so it
-# moves with that code.
-LEGACY_MODULE_TO_CONTEXT: dict[str, str] = {
-    # --- the Story 26.2 re-export shims of capture (removed after Story 26.3): capture's.
-    "collector_core": CAPTURE,
-    "bybit_collector": CAPTURE,
-    "hyperliquid_collector": CAPTURE,
-    "dydx_collector": CAPTURE,
-    # --- data_api: the interface adapter (its Story 24.2 views shims were deleted in Story 24.4,
-    # its Story 24.3 alerting shim in Story 25.1)
-    "data_api": DATA_API,
-    # --- bot_tui: the terminal interface adapter
-    "bot_tui": BOT_TUI,
-}
-
-# Modules split across contexts: (module, top-level name) -> context. Every top-level function and
-# class of a split module is listed (asserted), so its move is fully planned. Empty since Story 25.4
-# moved `classify_liquidity` out of `dydx_collector.open_interest`, leaving that module wholly
-# capture's (Story 26.2 deleted its `__getattr__` alias with the move).
-LEGACY_SYMBOL_TO_CONTEXT: dict[tuple[str, str], str] = {}
-
-# Cross-context edges the tree still has, (importer context, imported context) -> the story whose
-# `done` retires the edge. The sites named are the ones the retiring story removes.
-# Empty since Story 26.2: the capture tests read their snapshots back through their own
-# `capture/tests/catalog_kit.py`, which retired the last one, (capture -> views).
-LEGACY_EDGES_UNTIL: dict[tuple[str, str], str] = {}
-
-# Cross-context imports of a `_private` name: (importing module, "module._name") -> story. Empty
-# since Story 24.2 replaced the data_api route tests' borrowed candle-test helpers with their own.
-LEGACY_PRIVATE_IMPORTS_UNTIL: dict[tuple[str, str], str] = {}
-
-
 # A composition root wires an adapter into a port its own context declares, so it is the one module
 # allowed to import the implementing context -- and only that one. Each entry names the module and
 # the single extra context it may reach; anything else it imports is judged normally. This is not a
@@ -202,37 +163,13 @@ class Import(NamedTuple):
 
 
 def _context_of(module: str) -> str | None:
-    """
-    Target context of an in-repo module; None when it is unmapped. The legacy map wins (an
-    interface package such as `data_api` still hosts other contexts' modules); otherwise a
-    module inside a context package belongs to that context.
-    """
-    ctx = LEGACY_MODULE_TO_CONTEXT.get(f"{module}.__init__") if module in _PACKAGE_INITS else None
-    ctx = ctx or _longest(module)
+    """Return an in-repo module's context, by its top-level package; None outside every one."""
     top = module.split(".")[0]
-    if ctx is None and top in CONTEXTS:
-        return top
-    return ctx
-
-
-def _longest(module: str) -> str | None:
-    parts = module.split(".")
-    for cut in range(len(parts), 0, -1):
-        ctx = LEGACY_MODULE_TO_CONTEXT.get(".".join(parts[:cut]))
-        if ctx is not None:
-            return ctx
-    return None
-
-
-def _symbol_context(module: str, name: str | None) -> str | None:
-    if name is not None and (module, name) in LEGACY_SYMBOL_TO_CONTEXT:
-        return LEGACY_SYMBOL_TO_CONTEXT[(module, name)]
-    return _context_of(module)
+    return top if top in CONTEXTS else None
 
 
 _MODULES = python_modules()
 _KNOWN = set(_MODULES)
-_PACKAGE_INITS = {name for name, path in _MODULES.items() if path.name == "__init__.py"}
 
 
 def _in_repo(target: str) -> str | None:
@@ -253,7 +190,7 @@ def _all_imports() -> list[Import]:
             dst = _in_repo(ref.target)
             if dst is None:
                 continue
-            dst_ctx = _symbol_context(dst, ref.name) or "?"
+            dst_ctx = _context_of(dst) or "?"
             found.append(Import(module, src_ctx, dst, ref.name, dst_ctx, ref.line))
     return found
 
@@ -262,7 +199,7 @@ _IMPORTS = _all_imports()
 
 
 def _exempt(imp: Import) -> bool:
-    """From the cross-cutting `platform/tests`: the one exemption left (Story 26.2)."""
+    """From the cross-cutting `platform/tests`: the one exemption (Story 26.2)."""
     return imp.src_ctx == TESTS
 
 
@@ -288,51 +225,20 @@ def _private_key(imp: Import) -> tuple[str, str]:
     return (imp.src, f"{imp.dst}.{imp.name}")
 
 
-def test_every_module_is_mapped_to_a_context() -> None:
+def test_every_module_is_in_a_context() -> None:
     unmapped = sorted(module for module in _MODULES if _context_of(module) is None)
     assert unmapped == [], (
-        "modules with no target context: add each to LEGACY_MODULE_TO_CONTEXT (spine AD-D1) or "
-        "move it into its context package"
+        "modules outside every context package: move each into its context (spine AD-D1)"
     )
-
-
-def test_every_map_entry_names_a_real_module_and_context() -> None:
-    stale = sorted(
-        prefix
-        for prefix in LEGACY_MODULE_TO_CONTEXT
-        if prefix.removesuffix(".__init__") not in _KNOWN
-        and not any(m.startswith(prefix + ".") for m in _KNOWN)
-    )
-    assert stale == [], "map entries naming no module: delete them"
-    assert set(LEGACY_MODULE_TO_CONTEXT.values()) <= CONTEXTS
-    assert set(LEGACY_SYMBOL_TO_CONTEXT.values()) <= CONTEXTS
-
-
-def _top_level_definitions(module: str) -> set[str]:
-    tree = ast.parse(_MODULES[module].read_text())
-    kinds = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
-    return {node.name for node in tree.body if isinstance(node, kinds)}
-
-
-def test_split_modules_map_every_function_and_class() -> None:
-    split = {module for module, _ in LEGACY_SYMBOL_TO_CONTEXT}
-    for module in sorted(split):
-        mapped = {name for owner, name in LEGACY_SYMBOL_TO_CONTEXT if owner == module}
-        missing = sorted(_top_level_definitions(module) - mapped)
-        unknown = sorted(mapped - _top_level_definitions(module))
-        assert missing == [], f"{module}: place each in LEGACY_SYMBOL_TO_CONTEXT"
-        assert unknown == [], f"{module}: these names no longer exist, delete their entries"
 
 
 def test_cross_context_edges_follow_the_graph() -> None:
     illegal = sorted(
         _site(imp) + f"  [{imp.src_ctx} -> {imp.dst_ctx}]"
         for imp in _judged()
-        if (imp.src_ctx, imp.dst_ctx) not in GRAPH
-        and (imp.src_ctx, imp.dst_ctx) not in LEGACY_EDGES_UNTIL
-        and not _composition_root_edge(imp)
+        if (imp.src_ctx, imp.dst_ctx) not in GRAPH and not _composition_root_edge(imp)
     )
-    assert illegal == [], "edges outside spine AD-D2's graph (fix the import, never the table)"
+    assert illegal == [], "edges outside spine AD-D2's graph (fix the import, never the graph)"
 
 
 def test_every_composition_root_still_wires_its_context() -> None:
@@ -365,56 +271,13 @@ def test_a_module_that_is_not_a_composition_root_gets_no_such_exemption() -> Non
 
 def test_no_private_name_crosses_a_context() -> None:
     crossing = sorted(
-        _site(imp) + f"  [{imp.src_ctx} -> {imp.dst_ctx}]"
-        for imp in _judged()
-        if _is_private(imp) and _private_key(imp) not in LEGACY_PRIVATE_IMPORTS_UNTIL
+        _site(imp) + f"  [{imp.src_ctx} -> {imp.dst_ctx}]" for imp in _judged() if _is_private(imp)
     )
     assert crossing == [], "a `_private` name imported across contexts: make it public in its owner"
 
 
-def test_every_legacy_entry_is_still_needed() -> None:
-    judged = _judged()
-    used_edges = {
-        (imp.src_ctx, imp.dst_ctx) for imp in judged if (imp.src_ctx, imp.dst_ctx) not in GRAPH
-    }
-    used_private = {_private_key(imp) for imp in judged if _is_private(imp)}
-    assert sorted(set(LEGACY_EDGES_UNTIL) - used_edges) == [], "no import needs these: delete them"
-    assert sorted(set(LEGACY_PRIVATE_IMPORTS_UNTIL) - used_private) == [], (
-        "no import needs these: delete them"
-    )
-
-
-def _story_order(key: str) -> tuple[int, int]:
-    epic, story = key.split("-")[:2]
-    return (int(epic), int(story))
-
-
-_LEGACY_STORIES = sorted(
-    set(LEGACY_EDGES_UNTIL.values()) | set(LEGACY_PRIVATE_IMPORTS_UNTIL.values())
-)
-
-
-def test_legacy_entries_expire_with_their_story() -> None:
-    """
-    A loop, not a parametrization: both tables are empty since Story 26.2, and an empty parameter
-    set is a skip. A new entry is still checked here the moment it is added.
-    """
-    statuses = story_statuses()
-    for story in _LEGACY_STORIES:
-        reason = unknown_or_done(story, statuses)
-        entries = sorted(
-            str(key)
-            for table in (LEGACY_EDGES_UNTIL, LEGACY_PRIVATE_IMPORTS_UNTIL)
-            for key, until in table.items()
-            if until == story
-        )
-        assert reason is None, f"{reason}: retire {entries} (fix the imports, then delete them)"
-        assert _story_order(story) > _story_order(THIS_STORY), f"{story} is not a later story"
-
-
 def test_graph_gives_kernel_and_observability_no_outgoing_edge() -> None:
     assert {edge for edge in GRAPH if edge[0] in _SHARED} == set()
-    assert {edge for edge in LEGACY_EDGES_UNTIL if edge[0] == OBSERVABILITY} == set()
 
 
 def _stdlib(target: str) -> bool:
@@ -456,7 +319,7 @@ def test_research_imports_nothing_from_data_api() -> None:
         and (imp.dst_ctx == DATA_API or imp.dst.split(".")[0] == DATA_API)
     )
     assert reaching == [], "research reads rankings over HTTP, never by importing data_api"
-    assert (RESEARCH, DATA_API) not in LEGACY_EDGES_UNTIL
+    assert (RESEARCH, DATA_API) not in GRAPH
 
 
 # Packages research never imports (AD-D1 research row, Story 24.4): the read models and ranking.
@@ -472,7 +335,6 @@ def test_research_imports_no_views_or_ranking() -> None:
         and imp.dst.split(".")[0] in _RESEARCH_FORBIDDEN_PACKAGES
     )
     assert reaching == [], "research consumes the catalog and ranking's published output only"
-    assert {edge for edge in LEGACY_EDGES_UNTIL if edge[0] == RESEARCH} == set()
 
 
 # The non-test modules outside `alerting.infrastructure` that may import it (AD-D2: infrastructure
@@ -552,7 +414,6 @@ def test_domain_rule_recognises_policy_files_and_foreign_imports() -> None:
     assert _is_domain_module("capture.domain.live_book")
     assert not _is_domain_module("capture.venues.dydx.client")
     assert not _is_domain_module("capture.venues.dydx.__main__")
-    assert not _is_domain_module("dydx_collector.policies")  # a Story 26.2 re-export shim
     assert not _is_domain_module("kernel.venues.x.policies")
     assert _domain_violations(
         "capture.venues.dydx.policies",
@@ -686,7 +547,7 @@ def test_every_capture_ledger_site_is_named_once_in_sites() -> None:
 
 # Capture's composition roots (the venue entrypoints) are the only non-test importers of its
 # adapters and its loader (spine AD-D2). The adapters import each other and the application's ports
-# only; the Story 26.2 re-export shims of the old paths re-export them and are not importers.
+# only.
 _CAPTURE_ROOTS = frozenset(
     {
         "capture.venues.dydx.__main__",
@@ -697,75 +558,11 @@ _CAPTURE_ROOTS = frozenset(
 _CAPTURE_INFRASTRUCTURE = "capture.infrastructure"
 
 
-# The only module-level names a re-export shim assigns.
-_SHIM_CONSTANTS = frozenset({"__all__", "REMOVE_AFTER", "_REPLACED_NAMES"})
-
-
-def _is_shim_statement(node: ast.stmt) -> bool:
-    """
-    One statement MR2 allows in a shim: the docstring, an import, a shim constant, the module-level
-    `warnings.warn(...)`, or a `__getattr__` that only raises (a `_REPLACED_NAMES` name).
-    """
-    if isinstance(node, ast.Import | ast.ImportFrom):
-        return True
-    if isinstance(node, ast.Assign | ast.AnnAssign):
-        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-        return all(isinstance(t, ast.Name) and t.id in _SHIM_CONSTANTS for t in targets)
-    if isinstance(node, ast.Expr):
-        value = node.value
-        is_warn = isinstance(value, ast.Call) and ast.unparse(value.func) == "warnings.warn"
-        return is_warn or (isinstance(value, ast.Constant) and isinstance(value.value, str))
-    if isinstance(node, ast.FunctionDef) and node.name == "__getattr__":
-        # Every nested statement: an `if` or a `raise`, so no import, return or assignment hides.
-        return all(
-            isinstance(inner, ast.If | ast.Raise)
-            for inner in ast.walk(node)
-            if isinstance(inner, ast.stmt) and inner is not node
-        )
-    return False
-
-
-def _is_reexport_shim(path: Path) -> bool:
-    """
-    Tell a pure re-export shim: it declares `REMOVE_AFTER` and holds nothing but shim statements, so
-    a module carrying real code beside a stray `REMOVE_AFTER` never earns the shim exemption
-    (`test_namespace.py` holds each served name to MR2's `old is new`).
-    """
-    body = ast.parse(path.read_text()).body
-    declares = any(
-        isinstance(node, ast.Assign)
-        and any(isinstance(t, ast.Name) and t.id == "REMOVE_AFTER" for t in node.targets)
-        for node in body
-    )
-    return declares and all(_is_shim_statement(node) for node in body)
-
-
-def test_the_shim_exemption_needs_a_pure_body(tmp_path: Path) -> None:
-    shim = '"""Doc."""\nimport warnings\nfrom a import b\n__all__ = ["b"]\nREMOVE_AFTER = "x"\n'
-    pure = tmp_path / "pure.py"
-    pure.write_text(shim + 'warnings.warn("moved", DeprecationWarning)\n')
-    impure = tmp_path / "impure.py"
-    impure.write_text(shim + "def helper() -> int:\n    return 1\n")
-    replaced = tmp_path / "replaced.py"
-    getattr_head = "def __getattr__(name: str) -> object:\n    if name == 'gone':\n"
-    replaced.write_text(shim + getattr_head + "        raise ImportError(name)\n")
-    serving = tmp_path / "serving.py"
-    serving.write_text(
-        shim + getattr_head + "        globals()[name] = 1\n    raise AttributeError\n"
-    )
-    assert _is_reexport_shim(pure)
-    assert _is_reexport_shim(replaced)
-    assert not _is_reexport_shim(impure)
-    assert not _is_reexport_shim(serving)
-
-
 def test_capture_infrastructure_is_imported_only_by_its_composition_roots() -> None:
     importers = sorted(
         f"{module} -> {ref.target}"
         for module, path in _CAPTURE_MODULES.items()
-        if module not in _CAPTURE_ROOTS
-        and not module.startswith(_CAPTURE_INFRASTRUCTURE)
-        and not _is_reexport_shim(path)
+        if module not in _CAPTURE_ROOTS and not module.startswith(_CAPTURE_INFRASTRUCTURE)
         for ref in imports_of(module, path, _KNOWN)
         if ref.target.startswith(_CAPTURE_INFRASTRUCTURE)
     )
@@ -781,8 +578,7 @@ def test_the_capture_service_imports_no_capture_infrastructure() -> None:
     )
 
 
-# The capture service and its pre-Story-26.2 name. The `collector_core.collector` shim does not
-# serve `Collector` (a `_REPLACED_NAMES` entry); the old name is kept so a stale alias still trips.
+# The capture service and its pre-Story-26.2 class name, kept so a revived `Collector` still trips.
 _CAPTURE_SERVICE_NAMES = frozenset({"CaptureService", "Collector"})
 
 
@@ -872,16 +668,21 @@ def test_the_subclass_rule_catches_each_base_form() -> None:
     ]
 
 
-def test_every_import_resolves_to_a_mapped_context() -> None:
-    """A split module's symbol or an import target the map cannot place is a map gap."""
+def test_every_import_resolves_to_a_context() -> None:
+    """An import whose either end lies outside every context package is a placement gap."""
     unplaced = sorted(_site(imp) for imp in _IMPORTS if "?" in (imp.src_ctx, imp.dst_ctx))
     assert unplaced == []
 
 
-def test_checker_flags_unmapped_modules_and_expired_stories() -> None:
-    assert _context_of("some_legacy_package.a_module_nobody_placed") is None
+def test_checker_places_modules_by_top_level_package_only() -> None:
+    assert _context_of("some_package.a_module_nobody_placed") is None
     assert _context_of("observability.anything") == OBSERVABILITY
-    assert _context_of("dydx_collector.client") == CAPTURE  # a Story 26.2 re-export shim
+    assert _context_of("capture.venues.dydx.client") == CAPTURE
+    assert _context_of("kernel") == KERNEL
+
+
+def test_story_expiry_reads_each_board_status() -> None:
+    """`_source_tree.unknown_or_done`, which `research/tests/test_research_reads.py` expires on."""
     board = {"24-1-x": "done", "24-2-y": "ready-for-dev", "24-3-z": "superseded"}
     assert unknown_or_done("24-1-x", board) is not None
     assert unknown_or_done("24-9-typo", board) is not None
@@ -899,13 +700,13 @@ def test_tree_walk_rejects_a_module_and_a_package_of_one_name(tmp_path: Path) ->
 
 
 def test_exemption_covers_only_platform_tests() -> None:
-    shim = Import(
-        "collector_core.config", CAPTURE, "collection_control.x", "x", COLLECTION_CONTROL, 2
+    root = Import(
+        "capture.infrastructure.config", CAPTURE, "collection_control.x", "x", COLLECTION_CONTROL, 2
     )
     across = Import("capture.application.capture_service", CAPTURE, "candles.x", "x", CANDLES, 1)
     interface = Import("data_api.app", DATA_API, "data_api.alert_wiring", "x", ALERTING, 1)
     guard = Import("tests.test_x", TESTS, "candles.domain.fold", "_x", CANDLES, 1)
-    assert not _exempt(shim)
+    assert not _exempt(root)
     assert not _exempt(across)
     assert not _exempt(interface)
     assert _exempt(guard)
@@ -1160,10 +961,7 @@ def test_kernel_purity_rule_follows_an_environ_alias() -> None:
     assert _env_aliases(ast.parse("from typing import environ\n")) == set()
 
 
-# Venue REST: every URL and request is built in `kernel.venue_http` (AD-D3). Empty since Story 25.2
-# moved the ranking engine's volume polls onto the kernel; a module listed here must name the
-# story that retires it.
-LEGACY_VENUE_HTTP_UNTIL: dict[str, str] = {}
+# Venue REST: every URL and request is built in `kernel.venue_http` (AD-D3).
 # HTTP clients that talk to no venue, so `kernel.venue_http` does not own them.
 NON_VENUE_HTTP_CLIENTS: dict[str, str] = {
     "observability.notify": "ntfy / Telegram / webhook alert transport",
@@ -1332,25 +1130,18 @@ _VENUE_HTTP_OFFENDERS = _venue_http_offenders()
 
 
 def test_every_venue_rest_request_is_built_in_the_kernel() -> None:
-    illegal = {m: s for m, s in _VENUE_HTTP_OFFENDERS.items() if m not in LEGACY_VENUE_HTTP_UNTIL}
-    assert illegal == {}, "build venue URLs and requests with kernel.venue_http (AD-D3)"
+    assert _VENUE_HTTP_OFFENDERS == {}, (
+        "build venue URLs and requests with kernel.venue_http (AD-D3)"
+    )
 
 
-def test_venue_http_exemptions_are_still_needed() -> None:
-    assert sorted(set(LEGACY_VENUE_HTTP_UNTIL) - set(_VENUE_HTTP_OFFENDERS)) == []
+def test_non_venue_http_clients_are_still_needed() -> None:
     unused = sorted(
         module
         for module in NON_VENUE_HTTP_CLIENTS
         if module not in _MODULES or not _urllib_calls(ast.parse(_MODULES[module].read_text()))
     )
     assert unused == [], "these clients no longer make HTTP requests: delete their entries"
-
-
-def test_legacy_venue_http_expires_with_its_story() -> None:
-    # A loop, not a parametrization: the table is empty today, and an empty parameter set is a skip.
-    board = story_statuses()
-    expired = {m: r for m, s in LEGACY_VENUE_HTTP_UNTIL.items() if (r := unknown_or_done(s, board))}
-    assert expired == {}, "move these modules' venue requests onto kernel.venue_http"
 
 
 # An instrument-id suffix test: `.endswith(".BYBIT")`, `.endswith("-LINEAR")`, `.endswith(f".{v}")`.
@@ -1451,10 +1242,10 @@ VIEWS_QUERY_SERVICES: dict[str, frozenset[str]] = {
     "candles.domain.candle": frozenset({"Candle", "is_valid_candle"}),
     "ranking.application.queries": frozenset({"history", "nearest"}),
 }
-# Packages views never imports (AD-D2): the interfaces, research, capture and the legacy shims.
-_VIEWS_FORBIDDEN_PACKAGES = frozenset({DATA_API, BOT_TUI, CAPTURE, "collector_core", "common"})
+# Packages views never imports (AD-D2): the interfaces and capture.
+_VIEWS_FORBIDDEN_PACKAGES = frozenset({DATA_API, BOT_TUI, CAPTURE})
 # What an interface adapter never imports directly: every read goes through views (AC #3).
-_INTERFACE_FORBIDDEN_PACKAGES = frozenset({RANKING, CAPTURE, "collector_core", "candles", "common"})
+_INTERFACE_FORBIDDEN_PACKAGES = frozenset({RANKING, CAPTURE, CANDLES})
 
 
 def _is_test_module(module: str) -> bool:
@@ -1494,7 +1285,7 @@ def test_every_listed_views_query_service_is_still_used() -> None:
     assert unused == [], "no views module needs these any more: delete them from the table"
 
 
-def test_views_imports_no_interface_research_capture_or_legacy_package() -> None:
+def test_views_imports_no_interface_or_capture() -> None:
     reaching = sorted(
         _site(imp)
         for imp in _IMPORTS
@@ -1534,9 +1325,6 @@ _SNAPSHOT_FIELDS = frozenset(
         "close_price",
     }
 )
-# Modules still hand-indexing a snapshot payload -> the story whose `done` retires the site. Empty
-# since Story 25.2: `ranking` decodes `snapshots:raw` through `DydxSecondSnapshot.from_dict`.
-LEGACY_SNAPSHOT_INDEXING_UNTIL: dict[str, str] = {}
 
 
 def _snapshot_key_reads(tree: ast.AST) -> list[int]:
@@ -1575,25 +1363,9 @@ _SNAPSHOT_INDEXERS = {
 
 
 def test_no_module_outside_the_kernel_indexes_a_snapshot_payload_by_key() -> None:
-    offending = {
-        module: lines
-        for module, lines in _SNAPSHOT_INDEXERS.items()
-        if module not in LEGACY_SNAPSHOT_INDEXING_UNTIL
-    }
-    assert offending == {}, "decode with DydxSecondSnapshot.from_dict and read attributes (AD-D3)"
-
-
-def test_snapshot_indexing_exemptions_are_still_needed() -> None:
-    assert sorted(set(LEGACY_SNAPSHOT_INDEXING_UNTIL) - set(_SNAPSHOT_INDEXERS)) == []
-
-
-def test_legacy_snapshot_indexing_expires_with_its_story() -> None:
-    # A loop, not a parametrization: the table is empty today, and an empty parameter set is a skip.
-    board = story_statuses()
-    expired = {
-        m: r for m, s in LEGACY_SNAPSHOT_INDEXING_UNTIL.items() if (r := unknown_or_done(s, board))
-    }
-    assert expired == {}, "decode these modules' snapshots with DydxSecondSnapshot.from_dict"
+    assert _SNAPSHOT_INDEXERS == {}, (
+        "decode with DydxSecondSnapshot.from_dict and read attributes (AD-D3)"
+    )
 
 
 # --- ranking, bots and collection control: no module-level runtime state (spine AD-D10, Stories

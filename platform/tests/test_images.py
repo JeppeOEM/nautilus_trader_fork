@@ -22,11 +22,12 @@ service, and every step a module launches as its own process (`archive.nightly`'
 steps). Nightly maintenance is scheduled by that service, not a host cron line (Story 25.1b):
 `test_the_deploy_checklist_has_no_crontab_line_and_names_the_removal_check` holds the docs to it.
 
-For each entrypoint the transitive closure of in-repo imports is computed with `ast` (a shim is
-followed to its target like any import) and its top-level packages must all be in that service's
-dockerfile `COPY platform/<pkg> ./<pkg>` set: a missing one is an `ImportError` at container start
-or, worse, at the first call of a lazily imported path. The `Makefile` test lists are held to the
-same rule: a test directory runs inside its image, so its package must be copied there.
+For each entrypoint the transitive closure of in-repo imports is computed with `ast` (followed
+through every intermediate module, however deep) and its top-level packages must all be in that
+service's dockerfile `COPY platform/<pkg> ./<pkg>` set: a missing one is an `ImportError` at
+container start or, worse, at the first call of a lazily imported path. The `Makefile` test
+lists are held to the same rule: a test directory runs inside its image, so its package must be
+copied there.
 """
 
 import ast
@@ -488,8 +489,11 @@ def test_uvicorn_app_is_the_first_non_option_token() -> None:
     assert _module_of("uvicorn data_api.app:app --host 127.0.0.1") == "data_api.app"
 
 
-def test_closure_follows_a_shim_to_its_target() -> None:
-    assert "capture.venues.dydx.trade_history" in import_closure("collector_core.trade_backfill")
+def test_closure_follows_imports_transitively() -> None:
+    # The dYdX root imports none of these itself; each is reached through the service it builds.
+    closure = import_closure("capture.venues.dydx.__main__")
+    assert "capture.domain.sampler" in closure
+    assert "capture.application.trade_backfill" in closure
 
 
 def test_an_option_value_is_not_a_collected_path() -> None:

@@ -19,8 +19,8 @@ window, and answer the question the Epic 22 operator actions all needed -- "did 
 wrong, and does the archived data prove it" -- without trusting Docker's rotated json-file logs
 or a per-process in-memory count that resets on every restart.
 
-The CLI is `python -m archive.crosscheck_errors` (moved from `collector_core.crosscheck_errors`
-in Story 25.1); this module is its logic.
+The CLI is `python -m archive.crosscheck_errors` (moved to archive in Story 25.1); this module is
+its logic.
 
 Default window: the last 24 hours ending now (UTC). Default `--fail-on`:
 `collector.book_crosscheck`, `collector.book_sequence`, `collector.pending_deltas`.

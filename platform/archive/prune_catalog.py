@@ -94,7 +94,8 @@ PLAN_SETTLE_SECONDS = 1.0
 
 class DydxPlanFile:
     """
-    `RetentionPlanSource` over the dYdX collection plan file (`dydx_collector/config.toml`).
+    `RetentionPlanSource` over the dYdX collection plan file (`platform/data/dydx_config.toml`,
+    mounted at `/app/dydx_collector/config.toml`).
 
     Invariant: see `archive.application.ports.RetentionPlanSource` -- read fresh through the one
     plan loader on every run. An empty file is refused (`ValueError`): it is the committed

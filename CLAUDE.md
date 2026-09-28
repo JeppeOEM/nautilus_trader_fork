@@ -4,7 +4,7 @@
 
 **Multi-Venue Market Data Collector** — `platform/capture/` (the capture context) with one
 package per venue under `platform/capture/venues/{dydx,bybit,hyperliquid}/` (Story 26.2; the old
-`collector_core/` and `<venue>_collector/` paths are re-export shims until Story 26.3).
+packages' re-export shims were deleted in Story 26.3).
 
 Standalone Python asyncio services, one per venue (`python3 -m capture.venues.<venue>`), each
 wiring the one shared `capture.application.capture_service.CaptureService` (Epic 22's
@@ -50,8 +50,8 @@ decode logic directly, so it gets battle-tested networking without the buggy `Da
   policy values and its extra loops through its `__main__.py` composition root; nothing
   subclasses the service, so the write gate itself is never overridden. `nautilus_trader` is used
   purely as a library (domain types + `ParquetDataCatalog.write_data()`), never as a live
-  runtime. The one sanctioned exception is `platform/bots/` (was `platform/live_paper/`, now a
-  re-export shim, Story 25.3); see `platform/CLAUDE.md`.
+  runtime. The one sanctioned exception is `platform/bots/` (its own context since
+  Story 25.3); see `platform/CLAUDE.md`.
 - **Repo location:** lives inside `nautilus_trader_fork` under `platform/`, co-located with
   this repo's git history rather than in a separate repo.
 - **Fork safety:** never modify `nautilus_trader/` or `crates/`. The collector is new,
@@ -64,8 +64,8 @@ decode logic directly, so it gets battle-tested networking without the buggy `Da
   target and rebuilt only when `nautilus_trader` core/deps change. Three thin layers rebuild
   in seconds: `platform/collector.dockerfile` (one image, one service per collector via
   different `command:`, all writing the same catalog root), `platform/data_api.dockerfile`
-  (separate because it runs a Node frontend-build stage) and `platform/live_paper.dockerfile`
-  (the bots context, `python3 -m bots`).
+  (separate because it runs a Node frontend-build stage) and `platform/bots.dockerfile`
+  (the bots context, `python3 -m bots`, compose service `live-paper`).
   Plus a Dozzle container for logs.
 - **Open interest** arrives differently per venue and is a per-venue investigation, never
   an assumption:

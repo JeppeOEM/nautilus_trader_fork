@@ -42,8 +42,9 @@ untouched. Candles at any resolution >= 1s are built by aggregating these fields
 (`candles/domain/fold.py`), not by replaying individual trades.
 
 `ohlc_outside_book` is the one plausibility check of a second's trade OHLC against that same
-second's book (moved here from `collector_core.integrity` in Story 25.1, so capture's live canary
-and archive's `repair_catalog` share it without either importing the other).
+second's book (moved here from the collector core's integrity module in Story 25.1, so
+capture's live canary and archive's `repair_catalog` share it without either importing the
+other).
 """
 
 from typing import NamedTuple

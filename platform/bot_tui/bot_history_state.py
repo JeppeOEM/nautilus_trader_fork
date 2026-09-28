@@ -17,7 +17,7 @@ bot_tui's own bots:history:{bot_id}:{day,week,month,all} reader (Story 4.7; Stor
 4.6's read surface, architecture AD-10).
 
 Unlike every other *_state.py module in this package, bots:history is not a pub/sub
-channel -- platform/live_paper/trade_history.py refreshes these four keys on a 30s timer,
+channel -- platform/bots/application/history.py refreshes these four keys on a 30s timer,
 so this module polls them with plain Redis GETs instead of pubsub.listen().
 
 Tracks a single bot at a time (open_bot()/close_bot()) rather than bots_state's

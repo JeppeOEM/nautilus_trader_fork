@@ -16,7 +16,7 @@
 Pure Bots-pane row/formatting functions (Story 4.4, AC1/AC2; Story 4.5, AC1) -- no
 urwid import, no I/O.
 
-bots:status is published one message per bot (one live_paper process = one bot) --
+bots:status is published one message per bot (one bots process = one bot) --
 bots_state.py accumulates the latest message per bot_id into a dict; this module turns
 that dict into a deterministic, orderable row list and formats individual fields for
 display. app.py assembles the final urwid markup itself (coloring only the PnL segment:
@@ -334,10 +334,10 @@ def osc52_copy_sequence(text: str) -> str:
 def format_incident_line(incident: dict, now: float) -> str:
     """
     One incidents-log row: timestamp (from incident["started_at"], UNIX seconds --
-    live_paper/bot_status.py's own time.time()-based wire contract, distinct from the
+    bots/domain/bot.py's own time.time()-based wire contract, distinct from the
     trades blotter's ts_event-derived nanosecond timestamps), a type label, and a
     duration -- "ongoing (Nm..)" while ended_at is still None (an open incident, per
-    bot_status._incident_transition), a fixed duration once it closes. "process_start"
+    bots.domain.bot.incident_transition), a fixed duration once it closes. "process_start"
     incidents are zero-duration markers (no duration text).
     """
     ts_text = datetime.fromtimestamp(incident["started_at"], tz=UTC).strftime("%m-%d %H:%M:%S")

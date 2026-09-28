@@ -13,7 +13,7 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-Bybit's USD 24 h volume sources, linear and spot (moved from `ranking_engine/engine.py` in Story
+Bybit's USD 24 h volume sources, linear and spot (moved from the ranking engine module in Story
 25.2): the public v5 market tickers' `turnover24h`, requested through `kernel.venue_http`.
 """
 

@@ -1,5 +1,5 @@
-// Ported from platform/ml_signals/docs_page.py's svgArchitecture()/box()/line()/poly()/linelabel()/esc()
-// -- straight port, no redesign (Story 15.1 Task 4).
+// Ported from the retired aiohttp dashboard's docs_page.py's
+// svgArchitecture()/box()/line()/poly()/linelabel()/esc() -- straight port, no redesign (Story 15.1 Task 4).
 
 function esc(s: string): string {
   return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");

@@ -14,8 +14,8 @@
 # -------------------------------------------------------------------------------------------------
 """
 Reading and writing the archive-gap markers (story 22.13) -- the file I/O over the kernel's
-marker format (`kernel.archive_markers`); archive's side of it (moved from
-`collector_core.archive_gaps` in Story 25.1).
+marker format (`kernel.archive_markers`); archive's side of it (moved here from capture in
+Story 25.1).
 
 `archive.rebuild_seconds` replaces a covered row's trade columns with the fold of the archived
 trades. Where the archive lost trades that the live second still holds, that would zero correct

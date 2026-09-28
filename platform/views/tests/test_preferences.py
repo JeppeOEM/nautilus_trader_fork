@@ -15,10 +15,10 @@
 """
 `views.preferences`: the two UI preference files (Story 24.2 merged their loaders here).
 
-`chart_indicators.toml` (Story 10.5, moved from `ml_signals/tests/test_chart_indicator_config.py`)
+`chart_indicators.toml` (Story 10.5, its tests moved here in Story 24.2)
 and `screener_columns.toml` (Story 17.5): load/save round-trips, and -- the AD-D12 freeze -- the
 exact text each writer produces, recorded from the pre-move writers
-(`ml_signals.chart_indicator_config.save_config` / `ml_signals.screener_columns_config.save_config`
+(the `chart_indicator_config` and `screener_columns_config` modules' `save_config`
 at `f879c11ca3`), so a key rename or a serialisation change fails here, not on a deployed file.
 """
 

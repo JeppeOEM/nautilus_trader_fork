@@ -14,7 +14,7 @@
 # -------------------------------------------------------------------------------------------------
 """
 The `PriceHistory` adapter: one instrument's archived per-second close prices, for the one-time
-price-series backfill (moved from `ml_signals.catalog_stats.price_series` in Story 25.2).
+price-series backfill (moved from the catalog-stats module in Story 25.2).
 
 Close prices are read through `kernel.catalog_files.query_second_ohlc` (a column projection of the
 second-snapshot files, no 20-level book decode). An instrument with no trade in the window falls
@@ -57,7 +57,7 @@ class CatalogPriceHistory:
             marks = catalog.query(MarkPriceUpdate, identifiers=[instrument_id], start=start_ns)
         except (NotImplementedError, RuntimeError) as exc:
             error_ledger.record(
-                # Published ledger site name, kept from the deleted ml_signals.catalog_stats.
+                # Published ledger site name, kept from the deleted catalog-stats module.
                 "catalog_stats.mark_prices",
                 f"{instrument_id} mark_price_update unreadable",
                 exc,

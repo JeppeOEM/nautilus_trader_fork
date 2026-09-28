@@ -15,7 +15,7 @@
 """
 Ranking's price math (DDD spine AD-D10): the one pct-change/volatility formula in `platform/`.
 
-`price_stats_from_series` was `ml_signals.catalog_stats`' (Story 13.2 extracted it so the in-memory
+`price_stats_from_series` was the catalog-stats module's (Story 13.2 extracted it so the in-memory
 `PriceSeriesStore` and the old catalog-backed path shared one formula); Story 25.2 moved it here.
 Views and research read the values it produces from `rankings:live`/`metrics.db`, never recompute
 them (SSOT-02); `platform/tests/test_boundaries.py` fails a second definition.

@@ -15,9 +15,9 @@
 """
 Proof that the Story 23.2 move changed no published byte (spine AD-D12, MR1).
 
-The fixtures were recorded with the pre-move code (`collector_core.second_snapshot` /
-`collector_core.open_interest`, run in the `story-23-1/collector` image at `7bd64952fd`; both
-re-export shims were deleted in Story 24.2):
+The fixtures were recorded with the pre-move code (the two modules' previous home in the collector
+core, run in the `story-23-1/collector` image at `7bd64952fd`; both re-export shims were deleted in
+Story 24.2):
 
 - `pre_move_catalog/`: `ParquetDataCatalog.write_data` (with the collector's zstd patch applied)
   of `_snapshot_with_trades()` and `_open_interest()` below, one call each;

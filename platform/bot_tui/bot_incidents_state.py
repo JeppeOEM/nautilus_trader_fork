@@ -15,7 +15,7 @@
 """
 bot_tui's own bots:incidents:{bot_id} reader.
 
-live_paper/bot_status.py owns the incident log (data-staleness spans + process-start
+The bots context (bots/domain/bot.py) owns the incident log (data-staleness spans + process-start
 markers, see that module's docstring) and persists the whole list under one Redis
 STRING key, rewritten on every transition -- not a pub/sub channel, so this polls with
 plain Redis GETs, mirroring bot_history_state.py's own poll_loop shape exactly (same

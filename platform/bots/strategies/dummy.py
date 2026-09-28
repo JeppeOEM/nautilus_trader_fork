@@ -19,7 +19,7 @@ mode. Deliberately unsophisticated -- per epics.md's own "Dummy Strategy" framin
 this proves every signal is alive and flowing live, it is not a tuned alpha strategy.
 
 Live data sourcing per indicator (no `DydxSecondSnapshot` exists live -- that type is
-built by dydx_collector's own stateful aggregation loop, which this module never
+built by the capture context's own stateful aggregation loop, which this module never
 imports per AD-4):
 
   - Microprice, OrderFlowImbalance (top-of-book): fed from `QuoteTick` via
@@ -147,7 +147,7 @@ class DummyStrategy(Strategy):
         # ts_event (ns) of the last QuoteTick received -- read externally by
         # bots.application.supervise's heartbeat loop as a proxy for "is this bot's WS feed
         # alive" (OBS-01: 30s+ silence on a live instrument is a pipeline failure,
-        # same doctrine dydx_collector's own watchdog already applies). Deliberately a
+        # same doctrine the capture watchdog already applies). Deliberately a
         # plain public attribute set from a market-data callback (subscriptions stay
         # active regardless of Strategy.is_running), not a Strategy-internal clock
         # timer -- see bots.application.supervise's module docstring for why a Strategy-internal

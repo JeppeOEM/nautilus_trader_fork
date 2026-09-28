@@ -17,7 +17,7 @@ Thin wrapper around dYdX's Rust-backed HTTP/WebSocket clients.
 
 Deliberately bypasses TradingNode/Strategy/DataEngine: that live-runtime path
 has a documented unbounded-queue-growth + shutdown-wedge bug under high message
-load (see memory project_dydx_collector_python_pivot). This client drives the
+load (see the root CLAUDE.md's "Project" section). This client drives the
 same Rust connection/reconnect/throttle/decode logic directly with our own
 asyncio loop and callback, so the collector never touches the buggy layer.
 

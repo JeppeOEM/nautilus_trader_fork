@@ -15,7 +15,7 @@
 """
 The indicator picker's read model: the two indicator catalogs the chart and the Technicals tab
 offer, their replay over a candle window, and the dispatch between them (Story 24.2 merged
-`ml_signals.chart_indicators` and `ml_signals.custom_indicators` here verbatim, and moved the
+the `chart_indicators` and `custom_indicators` modules here verbatim, and moved the
 dispatch out of `data_api/routes/indicators.py`). Only the two colliding public names were
 renamed: `replay_native`/`native_catalog_json` (was `chart_indicators.replay_indicator/catalog_json`)
 and `replay_custom`/`custom_catalog_json` (was `custom_indicators.replay_indicator/catalog_json`).
@@ -67,7 +67,7 @@ from views.chart_series import CancellationTracker
 
 
 # =============================================================================================
-# Native: `nautilus_trader.indicators` (was ml_signals/chart_indicators.py)
+# Native: `nautilus_trader.indicators` (was the `chart_indicators` module)
 # =============================================================================================
 
 Panel = Literal["overlay", "oscillator", "histogram"]
@@ -386,7 +386,7 @@ def native_catalog_json() -> dict[str, Any]:
 
 
 # =============================================================================================
-# Custom: dYdX-specific indicators over the window's own rows (was ml_signals/custom_indicators.py)
+# Custom: dYdX-specific indicators over the window's own rows (was the `custom_indicators` module)
 # =============================================================================================
 
 # Duplicated from dashboard.py's own module-level constant (same env var, same default) --

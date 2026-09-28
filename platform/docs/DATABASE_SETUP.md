@@ -114,8 +114,9 @@ single-file mount can't expose.
 
 ### 2.2 `fills.db` — owned by `bots/infrastructure/fills_store.py`
 
-- **Path:** `./data/live_paper/fills.db` on the host, `/app/live_paper/data/fills.db` in the
-  container (`FILLS_DB_PATH` env).
+- **Path:** `./data/live_paper/fills.db` on the host, `/app/data/live_paper/fills.db` in the
+  container (`FILLS_DB_PATH` env; `/app/live_paper/data/fills.db` until Story 26.3 mirrored the
+  host path).
 - **Table:** `fills(ts, bot_id, side, price, qty, realized_pnl,
   position_realized_pnl)`.
 - **Purpose:** append-only, event-sourced fill log — one row per `OrderFilled` event,

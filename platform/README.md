@@ -2,7 +2,7 @@
 
 Continuously records dYdX, Bybit and Hyperliquid market data to one local `ParquetDataCatalog`: 1-second book/trade snapshots (`DydxSecondSnapshot` — top-20 levels plus that second's trade OHLC/volume/counts), mark/index prices, funding rates, open interest and instrument definitions. Individual `TradeTick`s are folded into the second's snapshot and **not** stored raw, and `order_book_deltas` are a per-instrument opt-in (`store_order_book_deltas`) that is off by default and exists **for dYdX only** — Bybit and Hyperliquid take a flat `instruments = ["..."]` list with no per-instrument options. See `docs/DATA_INTEGRITY_AUDIT.md` D-45. Coverage is not uniform across venues either: a Bybit **spot** id yields trades and book only — no mark/index price, no funding rate (`capture/venues/bybit/client.py` subscribes the ticker for `LINEAR` alone) and no open interest (Bybit spot has none). The catalog is Nautilus-native — load it directly into backtests with zero conversion.
 
-All three collectors run the same class: `capture.application.capture_service.CaptureService` (the write gate and every invariant check), never subclassed. Each venue is a package under `capture/venues/` (`dydx/`, `bybit/`, `hyperliquid/`: `client.py`, `trade_history.py`, `policies.py` where the venue has policy values, an optional REST poll or book snapshot, `config.py`) whose `__main__.py` composition root wires the venue's client, policy values and extra loops into it, run as `python3 -m capture.venues.<venue>` (Story 26.2; the old `collector_core`/`<venue>_collector` import paths are re-export shims until Story 26.3). `make up` starts one container per venue from one image.
+All three collectors run the same class: `capture.application.capture_service.CaptureService` (the write gate and every invariant check), never subclassed. Each venue is a package under `capture/venues/` (`dydx/`, `bybit/`, `hyperliquid/`: `client.py`, `trade_history.py`, `policies.py` where the venue has policy values, an optional REST poll or book snapshot, `config.py`) whose `__main__.py` composition root wires the venue's client, policy values and extra loops into it, run as `python3 -m capture.venues.<venue>` (Story 26.2; the old import paths' re-export shims were deleted in Story 26.3). `make up` starts one container per venue from one image.
 
 ---
 
@@ -95,7 +95,7 @@ make logs      # tail live collector output
 make web       # open Dozzle log viewer (http://localhost:8080)
 ```
 
-The catalog appears at `platform/data/catalog/` on the host, owned by your user (uid 1000). Under `docker-compose.yml` all three collectors mount that one root (and the `platform/data/candles/` directory, with a separate `candles_<venue>.db` per collector via `CANDLES_DB_PATH`), so `data_api` and every backtest read every venue from a single catalog. Every durable store lives under `platform/data/` (DDD spine AD-D13): `catalog/`, `candles/`, `metrics/`, `incident_reports/`, `live_paper/`, `bot_tui_logs/`, `archive/` (the `archive` service's scheduler cursor, below) and the dYdX plan file `dydx_config.toml`. The sharing is the compose mounts, not the config: Bybit's and Hyperliquid's `catalog_path` is the container-absolute `/app/catalog`, so running either outside Docker needs that value changed.
+The catalog appears at `platform/data/catalog/` on the host, owned by your user (uid 1000). Under `docker-compose.yml` all three collectors mount that one root (and the `platform/data/candles/` directory, with a separate `candles_<venue>.db` per collector via `CANDLES_DB_PATH`), so `data_api` and every backtest read every venue from a single catalog. Every durable store lives under `platform/data/` (DDD spine AD-D13): `catalog/`, `candles/`, `metrics/`, `incident_reports/`, the bots' `fills.db` directory (`platform/data/live_paper`), `bot_tui_logs/`, `archive/` (the `archive` service's scheduler cursor, below) and the dYdX plan file `dydx_config.toml`. The sharing is the compose mounts, not the config: Bybit's and Hyperliquid's `catalog_path` is the container-absolute `/app/catalog`, so running either outside Docker needs that value changed.
 
 **Web dashboard:** `make up` starts `data_api`, which serves the React UI on `http://localhost:9100` — rankings, per-coin candlestick/indicator charts, 31-day metrics history, and docs. Reads directly from the catalog — no collector restart needed.
 
@@ -324,7 +324,7 @@ is the operator's attestation -- `rebuilt` is never persisted, so the tool canno
 Every archive tool is `python -m archive.<tool>` (`rebuild_seconds`, `consolidate_catalog`,
 `prune_catalog`, `repair_catalog`, `compare_klines`, `nightly`, `backfill_bars`,
 `crosscheck_errors`, `tools.measure_lag`, `tools.migrate_open_interest`,
-`tools.normalize_snapshot_schema`); the old `collector_core.*`/`dydx_collector.*` paths were
+`tools.normalize_snapshot_schema`); their old module paths were
 removed in Story 25.3. Each collector holds
 `<catalog>/.capture-<VENUE>.lock` while it runs, and `repair_catalog --apply` refuses that venue
 until it is stopped.

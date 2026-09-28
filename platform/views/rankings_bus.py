@@ -16,7 +16,7 @@
 Story 15.2: one shared Redis subscriber feeding both `GET /api/rankings`'s cache and
 every `/ws/live` connection's per-listener queue (AD-F2: relay only, never recompute).
 
-Mirrors `ml_signals/dashboard.py`'s `_handle_rankings_message`/`_redis_listener`
+Mirrors the retired dashboard's `_handle_rankings_message`/`_redis_listener`
 validation and reconnect discipline exactly (platform/CLAUDE.md's SSOT rules: one
 computer/publisher of rankings, every reader mirrors the same guard rather than
 inventing its own).

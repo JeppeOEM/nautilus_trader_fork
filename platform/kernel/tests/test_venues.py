@@ -13,9 +13,9 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-`kernel.venues`, the only `InstrumentId` parser (the tests of the former `common.venues`,
-`ml_signals.venue` and `venue_http.bybit_category` -- whose re-export shims Story 24.2 deleted --
-plus the id-shape table).
+`kernel.venues`, the only `InstrumentId` parser (the tests of the three former venue-id parsers
+and `venue_http.bybit_category` -- whose re-export shims Story 24.2 deleted -- plus the id-shape
+table).
 """
 
 import pytest
@@ -111,7 +111,7 @@ def test_market_suffix() -> None:
 
 
 def test_market_kind_reads_a_dashless_symbol_whole_as_before() -> None:
-    """The former `common.venues.market_kind` contract; `market_suffix`/`bybit_category` stay strict."""
+    """The pre-kernel `market_kind` contract; `market_suffix`/`bybit_category` stay strict."""
     assert market_kind("PERP.X") == "perp"
     assert market_kind("SPOT.BYBIT") == "spot"
     assert market_suffix("SPOT.BYBIT") is None

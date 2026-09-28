@@ -16,7 +16,7 @@
 bot_tui's own bots:status reader + bots:control publisher (Story 4.4, AC1-AC4;
 architecture AD-10).
 
-bots:status is published one message per bot (one live_paper process = one bot) -- this
+bots:status is published one message per bot (one bots process = one bot) -- this
 module accumulates the latest message and its own per-bot received-at timestamp into two
 dicts keyed by bot_id, so a crashed bot's row can go stale independently of every other
 bot's (AC2: "a healthy bot next to a crashed one shows exactly one stale row, never a
@@ -39,8 +39,8 @@ REDIS_URL: str = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
 _LATEST_STATUSES: dict[str, dict] = {}
 _LATEST_RECEIVED_AT: dict[str, float] = {}
 
-# 3x the heartbeat producer's cadence (live_paper's bot_status.py, a 5s heartbeat --
-# see that module's own _STATUS_HEARTBEAT_SECONDS), so a missed heartbeat or two is
+# 3x the heartbeat producer's cadence (bots/application/supervise.py, a 5s heartbeat --
+# see that module's own STATUS_HEARTBEAT_SECONDS), so a missed heartbeat or two is
 # tolerated before the row reads stale.
 _BOT_STALE_SECONDS: float = 15.0
 

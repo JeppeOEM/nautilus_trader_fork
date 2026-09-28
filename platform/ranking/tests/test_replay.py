@@ -14,7 +14,7 @@
 # -------------------------------------------------------------------------------------------------
 """
 The `rankings:live` replay (Story 25.2, AC #2): the moved engine publishes the exact bytes the
-pre-move `ranking_engine.engine` published for one recorded `snapshots:raw` burst.
+pre-move ranking engine module published for one recorded `snapshots:raw` burst.
 
 `fixtures/replay_burst.json` was recorded by driving the pre-move engine (module globals, `time`
 patched to a fixed clock) through this sequence: a volume cycle; the burst below, one Redis

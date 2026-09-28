@@ -66,7 +66,7 @@ def settings_from_env() -> Settings:
     return Settings(
         redis_url=os.environ.get("REDIS_URL", "redis://127.0.0.1:6379"),
         fills_db_path=os.environ.get(
-            "FILLS_DB_PATH", str(_PACKAGE_DIR.parent / "data" / "live_paper" / "fills.db")
+            "FILLS_DB_PATH", str(_PACKAGE_DIR.parent / "data/live_paper/fills.db")
         ),
         paper_config_path=_PACKAGE_DIR / "config.toml",
         real_money_path=os.environ.get(REAL_MONEY_ENV_VAR),

@@ -830,7 +830,8 @@ each deletion is logged with its rule and reason. None of them bounds the data t
 accumulates day to day for collected instruments, which is why the catalog only ever grows.
 
 **1. Dropped instruments (`dropped_instrument`, dYdX only, `--dydx-plan`).** Every DYDX leaf whose
-instrument the collection plan (`dydx_collector/config.toml`'s `instruments`, read through
+instrument the collection plan (`data/dydx_config.toml`'s `instruments`, mounted at
+`/app/dydx_collector/config.toml` and read through
 `collection_control`'s `TomlPlanStore`, over the one venue loader) does not collect loses every data type except `trade_tick`
 once its files end more than `non_config_retain_hours` ago -- **currently `4` hours**. This is why
 `crypto_perpetual`/`instrument_status`/etc. exist for ~140 markets on disk even though only the

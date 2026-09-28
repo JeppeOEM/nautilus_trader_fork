@@ -208,8 +208,11 @@ there is no cron line at all -- the `archive` service schedules the saga, sectio
 4. `docker compose --profile live-paper build live-paper && make up-live-paper`, then check:
    `bot_tui`'s Bots pane shows every bot heartbeating, a `bots:control` stop/start round-trips,
    and `GET /api/errors` shows at most a couple of `bots.status_build` at boot (the known
-   first-quote race, ledgered since this story) and no other new `bots.*` site. Full checklist:
-   `bots/DEPLOY_CHECKLIST.md`.
+   first-quote race, ledgered since this story) and no other new `bots.*` site. The new sites
+   (`bots.fill_lost`, `bots.incidents_write`, `bots.status_build`, `bots.control_message`,
+   `bots.control_action`, `bots.history_refresh`, `bots.redis`) were each a log-only failure
+   before, so any may appear; a rising count is a real failure. Full checklist:
+   `bots/DEPLOY_CHECKLIST.md` (its own copy of this rollout moved here in Story 26.3).
 
 ## Story 25.4: collection control, the one venue loader (2026-09-26)
 
@@ -569,3 +572,39 @@ parked on the board says so in its entry: run `bmad-loop confirm <story-key>` af
 - [ ] Confirm rows still arrive for every venue (the web chart's live candles, or `redis-cli
       SUBSCRIBE snapshots:raw`), and that `custom_open_interest/` gains dYdX and Bybit linear rows
       at the poll cadence (`open_interest_poll_seconds`, 300 s).
+
+### 26-3-closeout-shims-gone-spines-reconciled (last shims gone, `bots.dockerfile`; commit: see `git log --grep 26-3-closeout`)
+
+Nothing moves on the host: every `platform/data/` path, compose service name, env var name,
+ledger file and Redis key is unchanged. The four capture re-export shim packages are deleted (a
+stale `python3 -m collector_core...`/`dydx_collector...` anywhere outside the repo now fails with
+`ModuleNotFoundError`; in the `collector` container a bare `import dydx_collector` still resolves
+to the empty namespace directory the plan mount creates, but any submodule of it does not), the live-paper image's dockerfile is renamed `platform/bots.dockerfile`,
+and three container-side mount targets changed, so the affected containers must be recreated,
+not just restarted.
+
+- [ ] Before pulling, confirm nothing outside the repo (crontab, `~/.zshrc` helpers, ad-hoc
+      scripts) names an old package path, a moved container path or the renamed dockerfile:
+      `crontab -l | grep -nE 'collector_core|dydx_collector|bybit_collector|hyperliquid_collector|/app/live_paper|live_paper\.dockerfile' || echo clean`,
+      and the same `grep -nE` over `~/.zshrc` and any operator scripts. Compose service names
+      such as `bybit_collector` and the dYdX mount `/app/dydx_collector/config.toml` are
+      unaffected; `python3 -m`/import paths, `/app/live_paper/...` (now `/app/data/live_paper/...`
+      and `/app/strategy_source/strategy.py`) and `-f platform/live_paper.dockerfile` (now
+      `bots.dockerfile`) need repointing.
+- [ ] `git pull`; `make build-base` only if `nautilus_trader`/`crates` changed since the last base
+      build (this story changes neither); then `make redeploy-all` from `platform/`. It rebuilds
+      the collector image (now without the shim packages) and recreates `collector`,
+      `bybit_collector`, `hyperliquid_collector`, `archive`, `ranking_engine`, `data_api` and
+      `live-paper` (built from `bots.dockerfile`), and rebuilds the `bot_tui` image.
+- [ ] `collector` still reads the dYdX plan at the unchanged mount `/app/dydx_collector/config.toml`
+      (the image no longer carries a placeholder there, so a missing mount now fails at start
+      instead of running an empty plan): in Dozzle, the first `collector` lines after start show
+      the plan's instruments subscribing (`Started: N subscribed` with the same N as before).
+- [ ] `live-paper`: fills now mount at `/app/data/live_paper` (host `platform/data/live_paper`
+      unchanged, `FILLS_DB_PATH` follows it). After the recreate, `bot_tui`'s Bots pane shows
+      every bot heartbeating and a bot's History view still lists its pre-deploy fills (same
+      `fills.db`), and `GET /api/errors` shows no `bots.fill_lost` or `bots.history_refresh`.
+- [ ] `bot_tui` (`make tui`): open a bot and press `v`; the strategy source still displays (the
+      read-only mount moved to `/app/strategy_source/strategy.py`).
+- [ ] After 10 minutes, `GET /api/errors` is flat against the hour before the deploy for all
+      services (no new site).

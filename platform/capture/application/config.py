@@ -21,7 +21,7 @@ and an invalid value (`ValueError`, naming it), so a typo can never fall back to
 silently. Thresholds default to the dYdX collector's production values (Story 22.1 AC #2). The
 file format, the per-venue schema rows and the plan are the loader's
 (`capture.infrastructure.config`); a venue's own keys are its `capture/venues/<v>/config.py`
-subclass (Story 26.2 split them out of `collector_core/config.py`).
+subclass (Story 26.2 split them out of the core's config module).
 """
 
 import math

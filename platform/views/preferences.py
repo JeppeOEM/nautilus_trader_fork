@@ -14,7 +14,7 @@
 # -------------------------------------------------------------------------------------------------
 """
 The two UI preference files, and their one loader/saver each (Story 24.2 merged
-`ml_signals.chart_indicator_config` and `ml_signals.screener_columns_config` here, bodies verbatim):
+the `chart_indicator_config` and `screener_columns_config` modules here, bodies verbatim):
 
 - `chart_indicators.toml` (`CHART_INDICATOR_CONFIG_PATH`): per-instrument chart indicator
   selections (Story 10.5), a table keyed by instrument_id, each holding a list of

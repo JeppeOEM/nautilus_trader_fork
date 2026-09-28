@@ -16,7 +16,7 @@
 Regression guard for Story 4.1 / ARCHITECTURE-SPINE.md's AD-8.
 
 AD-8 binds a named list of "reader"/derived-data modules -- bot_tui is one of them
-(alongside dydx_collector and ranking) -- that must never import
+(alongside capture and ranking) -- that must never import
 TradingNode, Strategy, or DataEngine (that usage is confined to platform/bots).
 Adapted from the retired ranking-engine AD-8 test's pattern to this module's own reader
 files.

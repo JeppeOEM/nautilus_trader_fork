@@ -13,7 +13,7 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-Unit tests for `views.indicator_picker`'s native half (was `ml_signals/chart_indicators.py`):
+Unit tests for `views.indicator_picker`'s native half (was the `chart_indicators` module):
 the INDICATOR_CATALOG dispatch/replay mechanism. `replay_indicator` is `replay_native`.
 """
 

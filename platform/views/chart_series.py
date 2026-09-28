@@ -13,8 +13,8 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-Every series the chart page draws, and every page of it (Story 24.2 moved them here out of
-`ml_signals.{chart_data,book_features,footprint}` and `data_api/routes/{candles,snapshots,
+Every series the chart page draws, and every page of it (Story 24.2 moved them here out of the
+chart-data, book-features and footprint modules and `data_api/routes/{candles,snapshots,
 indicator_series,indicators}.py`, bodies verbatim unless noted):
 
 - **Candles** -- `candle_page`: the one candle source for the chart, its indicator panes and
@@ -79,7 +79,7 @@ if TYPE_CHECKING:  # the runtime import is deferred: indicator_picker imports th
 
 
 # =============================================================================================
-# Book features (was ml_signals/book_features.py)
+# Book features (was the book-features module)
 #
 # L2 order book feature extraction for dYdX.
 #
@@ -362,7 +362,7 @@ def compute_features(
 
 
 # =============================================================================================
-# Footprint (was ml_signals/footprint.py)
+# Footprint (was the footprint module)
 #
 # Footprint chart cells: per-candle, per-price-band order-book flow.
 #
@@ -474,7 +474,7 @@ def build_footprint(
 
 
 # =============================================================================================
-# Per-snapshot book feature series (was ml_signals/chart_data.py)
+# Per-snapshot book feature series (was the chart-data module)
 #
 # Reads DydxSecondSnapshot records from the catalog for a time range, computing
 # book imbalance and depth at every 1-second snapshot. The result is a dict of
@@ -482,7 +482,7 @@ def build_footprint(
 #
 # Snapshot-based, not raw-delta-based (platform/CLAUDE.md's "Signal Architecture:
 # 1s-Based, Not Event-Driven" / SIGNAL-01): OrderBookDeltas are only persisted
-# per-instrument when dydx_collector's store_order_book_deltas is opted in
+# per-instrument when dYdX's `store_order_book_deltas` is opted in
 # (default off), so replaying raw deltas here would silently return empty
 # series for every instrument in the live catalog.
 #

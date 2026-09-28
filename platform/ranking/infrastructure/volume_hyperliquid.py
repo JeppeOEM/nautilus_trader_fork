@@ -13,7 +13,7 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-Hyperliquid's USD 24 h volume source (moved from `ranking_engine/engine.py` in Story 25.2): the
+Hyperliquid's USD 24 h volume source (moved from the ranking engine module in Story 25.2): the
 public `info` endpoint's `metaAndAssetCtxs` `dayNtlVlm`, requested through `kernel.venue_http`.
 """
 

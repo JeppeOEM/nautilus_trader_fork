@@ -18,7 +18,7 @@ The catalog series reads every chart view pages through: whole `DydxSecondSnapsh
 share (`fetch_page`, `has_older_data`), which walk the catalog's own file ranges
 (`kernel.catalog_files.data_file_ranges`) rather than fixed-size probe windows.
 
-Moved verbatim from `ml_signals.catalog_stats` and `data_api/routes/paging.py` (Story 24.2).
+Moved verbatim from the catalog-stats module and `data_api/routes/paging.py` (Story 24.2).
 """
 
 from collections.abc import Callable

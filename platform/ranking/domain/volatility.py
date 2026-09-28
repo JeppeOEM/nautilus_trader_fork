@@ -19,8 +19,8 @@ mid-price/return buffer with a configurable age-based lookback, default 3600s (1
 This is a purpose-built volatility computation, distinct from the other two the ranking
 publishes (`ranking.domain.metrics.price_stats_from_series`' 25h np.std -- the `volatility`
 field -- and `RankingBoard`'s live 300-entry `volatility_fast`). Do not consolidate them --
-see Story 1.8's Dev Notes for why that's explicit scope creep. Moved from
-`ranking_engine/volatility.py` in Story 25.2.
+see Story 1.8's Dev Notes for why that's explicit scope creep. Moved into the ranking context in
+Story 25.2.
 
 Age-based eviction (not a fixed-length maxlen deque) is deliberate: a fixed-length
 window silently shrinks its effective time span across a variable snapshot rate or a

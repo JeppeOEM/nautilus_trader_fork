@@ -19,7 +19,7 @@ The store's DDL and merge statement are frozen text (spine AD-D12).
 rebuilds, and `data_api` reads it live. A reformatted `CREATE TABLE` would not migrate anything (the
 `IF NOT EXISTS` means an existing file keeps its old shape while new files get the new one, silently
 diverging), and a reworded `_UPSERT` could change which of `o`/`c` wins a conflict or whether `v`
-accumulates. The fixtures below are the exact pre-move text of `ml_signals/candle_store.py`, copied
+accumulates. The fixtures below are the exact pre-move text of the candle store module, copied
 out of the tree at the Story 24.1 baseline revision.
 """
 

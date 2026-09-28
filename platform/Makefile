@@ -117,7 +117,7 @@ redeploy-all:
 	@echo "Dashboard: http://localhost:$(DATA_API_PORT)"
 
 ## Same as `redeploy` but never touches live-paper -- for iterating on
-## ranking_engine/data_api/bot_tui (e.g. the VPS-side half of
+## ranking_engine, data_api, bot_tui (e.g. the VPS-side half of
 ## troll-redeploy in ~/.zshrc) without disturbing a running paper-trading bot's
 ## position/order state.
 redeploy-no-paper:
@@ -159,7 +159,8 @@ build-insecure:
 ## (which shells out to getpass.getuser() to name its basetemp dir) raises OSError --
 ## same class of bug as the bot_tui_logs one above. test-live-paper already works
 ## around it with -e USER; mirror that here.
-## The cross-cutting guards in tests/ (import boundaries, image closures, shims -- Story 23.1)
+## The cross-cutting guards in tests/ (import boundaries, image closures, legacy names --
+## Story 23.1)
 ## read the whole checkout, mounted read-only at /src: no image holds every package, and /app is
 ## not named `platform`, so reading the image would silently check a subset.
 TEST_SOURCE_MOUNT := -v $(REPO_ROOT):/src:ro -e PLATFORM_SOURCE_DIR=/src/platform
@@ -352,7 +353,7 @@ frontend-dev:
 	cd $(PLATFORM_DIR)frontend && npm run dev
 
 ## Local frontend dev against the VPS's real, already-running data instead --
-## collector/ranking_engine stay on the VPS, nothing heavy runs locally. Opens one SSH
+## collector and ranking_engine stay on the VPS, nothing heavy runs locally. Opens one SSH
 ## tunnel to $(TROLL_VPS_HOST) forwarding its data_api port (9100 -- the VPS's own
 ## default, NOT $(DATA_API_PORT), which is LOCAL_DEV's shifted port for the
 ## locally-run containers `frontend-dev` starts above) to the same local port,

@@ -25,7 +25,7 @@ from nautilus_trader.backtest.results import BacktestResult
 from research.strategies.snapshot_backtest import run as run_snapshot_backtest
 
 
-# The collectors' shared catalog root; `dydx_collector/catalog` predates commit 18c12eedf4.
+# The collectors' shared catalog root; the dYdX-only catalog path predates commit 18c12eedf4.
 _CATALOG = str(Path(__file__).resolve().parents[2] / "data" / "catalog")
 _S = "research.strategies.ofi_strategy:"
 

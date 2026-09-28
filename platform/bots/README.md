@@ -1,7 +1,7 @@
 # bots — running and testing the bot locally
 
-The bots context (`platform/bots/`, `python3 -m bots`, compose service `live-paper`; the
-`live_paper` package until Story 25.3, now a deprecated re-export shim) is a real
+The bots context (`platform/bots/`, `python3 -m bots`, compose service `live-paper`; moved
+into its own context in Story 25.3) is a real
 `TradingNode` + `Strategy` (`DummyStrategy`, Story 3.2) that
 subscribes to live dYdX market data and trades against it. **Paper mode is always 100%
 simulated money** — it uses `SandboxExecutionClientConfig`, which has no wallet address
@@ -268,4 +268,4 @@ host-dependent `test_node.py` tests; see the Makefile).
 | `[bots.fill_lost] fill permanently lost` or `[bots.history_refresh] ...: unable to open database file` | `platform/data/live_paper/` is root-owned | `sudo rm -rf platform/data/live_paper && mkdir platform/data/live_paper` (parent dir is user-owned, so no `sudo` needed for the `mkdir` itself if you can remove the root-owned one) |
 | `[bots.status_build] bots:status not built this tick` a couple of times right at startup | A race: the heartbeat loop's first tick can land before the first quote price. Self-heals within ~1-2 ticks; since Story 25.3 each skipped tick is counted in the error ledger rather than logged at debug. | Nothing if it stops after boot — it no longer tears down the Redis connection (fixed 2026-09-02). A count that keeps rising is a real failure: read the traceback. |
 | Container restarts right after the very first fill | Old bug (fixed 2026-09-02): the on-fill handler had no error handling, so any fill-store write failure crashed the whole node | Rebuild the image if you're on an older one — `docker compose -f docker-compose.yml --profile live-paper build live-paper` |
-| Code edits don't seem to take effect | `live_paper.dockerfile` `COPY`s source into the image at build time — it's not bind-mounted like `config.toml`/`data/` are | Rebuild: `docker compose -f docker-compose.yml --profile live-paper build live-paper` |
+| Code edits don't seem to take effect | `bots.dockerfile` `COPY`s source into the image at build time — it's not bind-mounted like `config.toml`/`data/` are | Rebuild: `docker compose -f docker-compose.yml --profile live-paper build live-paper` |

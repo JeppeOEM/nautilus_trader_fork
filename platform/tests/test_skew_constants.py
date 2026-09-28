@@ -19,7 +19,7 @@ AD-D3, AD-D7, AD-D18; Story 23.2).
 `MAX_TS_INIT_SKEW_NS` couples capture's carry/backfill rules with archive's rebuild/prune
 windows (adversary review C1/H1). The kernel cannot import its consumers (AD-D2), so the consumer
 half of the rule lives here, in the cross-cutting guards; `kernel/tests/test_clocks.py` holds the
-kernel half. Skipped, with the reason shown, in an image without the collector (`live_paper`).
+kernel half. Skipped, with the reason shown, in an image without the collector (the bots image).
 """
 
 import ast
@@ -48,11 +48,11 @@ from kernel.clocks import NS_PER_S
 from kernel.clocks import READ_SPAN_MARGIN_NS
 
 
-# The committed venue config files: dYdX's is the placeholder its compose bind mount covers at the
-# frozen container path (`/app/dydx_collector/config.toml`, AD-D12); the others moved with their
-# venue in Story 26.2.
+# The committed venue config files. dYdX commits none: its plan is operator data (the host's
+# `data/dydx_config.toml`, mounted at the frozen container path), so its hold-back is a runtime
+# value this guard cannot read -- Known limit, as it was when the committed dYdX file was a 0-byte
+# placeholder; the upgrade path is a startup check in the dYdX config loader.
 _VENUE_CONFIGS = (
-    "dydx_collector/config.toml",
     "capture/venues/bybit/config.toml",
     "capture/venues/hyperliquid/config.toml",
 )

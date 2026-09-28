@@ -117,15 +117,18 @@ _FOOTER_HINT_TEXTS = {
 # client-side check for instant feedback only -- the collector re-validates regardless.
 _MAX_COLLECTED_INSTRUMENTS = 29
 
-# Read-only bind mount from live_paper/ (docker-compose.yml's bot_tui service) -- the
-# `v` key's only way to reach live_paper's source, since bot_tui's own image
-# (collector.dockerfile) never COPYs live_paper/ in (AD-8's module isolation stays
-# intact: this mount is view-only, no import/execution of live_paper code happens
-# here). Hardcoded to the one strategy this system currently runs -- see
+# Read-only bind mount of bots/strategies/dummy.py (docker-compose.yml's bot_tui service) -- the
+# `v` key's only way to reach the strategy's source, since bot_tui's own image
+# (collector.dockerfile) never COPYs bots/ in (AD-8's module isolation stays
+# intact: this mount is view-only, no import/execution of bots code happens
+# here). The container path lies outside every package directory (Story 26.3).
+# Hardcoded to the one strategy this system currently runs -- see
 # bots.infrastructure.nautilus_host's build_node(), which attaches DummyStrategy directly rather
 # than by string path; revisit as a per-bot lookup (bots:status already carries a
 # `strategy` class-name field) if a second strategy is ever added.
-_STRATEGY_SOURCE_PATH = Path(os.environ.get("STRATEGY_SOURCE_PATH", "/app/live_paper/strategy.py"))
+_STRATEGY_SOURCE_PATH = Path(
+    os.environ.get("STRATEGY_SOURCE_PATH", "/app/strategy_source/strategy.py")
+)
 
 # Full control reference shown by `:h`/`:help` (see _COMMAND_ALIASES below) -- one
 # section per view, listing every key that view's own footer hint above only
@@ -738,7 +741,7 @@ class BotTuiApp:
     def _publish_bot_action(self, bot_id: str, action: str) -> None:
         # Publish-and-wait, never optimistic (AC3): no local running/stopped flip
         # happens here -- the row only reflects the new
-        # state once live_paper's own next bots:status heartbeat carries it back.
+        # state once the bot's own next bots:status heartbeat carries it back.
         task = asyncio.ensure_future(bots_state.publish_control(self._redis_url, bot_id, action))
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)

@@ -15,9 +15,9 @@
 """
 `RankingBoard` -- the ranking aggregate (DDD spine AD-D10, Story 25.2; architecture AD-9).
 
-It replaces the twelve module globals `ranking_engine/engine.py` kept: the ranking mode, the
-freshness stamps, the live indicator trackers, the rolling windows, the price series, the slow-loop
-metrics and the per-venue USD volumes are all state of one board instance, built by
+It replaces the twelve module globals the pre-Story-25.2 ranking engine module kept: the ranking
+mode, the freshness stamps, the live indicator trackers, the rolling windows, the price series, the
+slow-loop metrics and the per-venue USD volumes are all state of one board instance, built by
 `ranking/__main__.py` and driven by `ranking.application.engine.RankingEngine`.
 
 Pure: no clock (every command takes `now_ns`/`received_ns`), no I/O, no ledger -- a command that

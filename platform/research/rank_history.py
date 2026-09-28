@@ -19,8 +19,8 @@ Deliberately dependency-light: a research script or Jupyter notebook that only w
 past rank at a timestamp should not have to import aiohttp, plotly, redis, or every
 indicator class just to call fetch_rank_history(). Reads data_api's /api/metrics/nearest --
 ranking's published `metrics.db` rows through the views read model, never the store itself
-(research imports neither `ranking` nor `data_api`). Moved from `ml_signals.rank_history` in Story 25.2, when
-`ml_signals` was deleted: research is its only consumer.
+(research imports neither `ranking` nor `data_api`). Moved here in Story 25.2, when its old
+package was deleted: research is its only consumer.
 """
 
 import json

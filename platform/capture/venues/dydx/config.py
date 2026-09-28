@@ -26,16 +26,14 @@ from capture.application.config import CoreConfig
 from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
 
 
-# The dYdX plan file: the compose bind-mount target `./data/dydx_config.toml:/app/dydx_collector/
-# config.toml:rw` (the container path is published language, AD-D12, shared with the `archive`
-# service's `DYDX_PLAN_PATH` and `make nightly`), so it stays at the pre-Story-26.2 path. The
-# default resolves from the platform root (`/app` in the image, `platform/` in a checkout), so it
-# is that container path in the image and the committed 0-byte placeholder the mount covers
-# anywhere else, as before the move; the env var points a run at another file.
-_PLATFORM_DIR = Path(__file__).resolve().parents[3]  # capture/venues/dydx/config.py
-CONFIG_PATH = Path(
-    os.environ.get("DYDX_PLAN_PATH", str(_PLATFORM_DIR / "dydx_collector" / "config.toml"))
-)
+# The dYdX plan file: compose bind-mounts the host's `./data/dydx_config.toml` at this frozen
+# container path (published language, AD-D12, shared with the `archive` service's
+# `DYDX_PLAN_PATH` default and `make nightly`). Unlike Bybit's and Hyperliquid's, no `config.toml`
+# is committed beside this module (Story 26.3): the plan is operator data, and a run with nothing
+# mounted there fails loudly on the missing file instead of silently collecting an empty plan.
+# `DYDX_PLAN_PATH` points a host run at another file (e.g. `platform/data/dydx_config.toml`); set
+# but empty, it counts as unset rather than naming the working directory.
+CONFIG_PATH = Path(os.environ.get("DYDX_PLAN_PATH") or "/app/dydx_collector/config.toml")
 
 # dYdX's WS server hard-caps subscriptions per channel per connection at 32 (confirmed live via its
 # own error: "Per-connection subscription limit reached for v4_trades (limit=32)"). Every collected

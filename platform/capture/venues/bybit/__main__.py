@@ -13,8 +13,8 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-Bybit capture's composition root: `python3 -m capture.venues.bybit` (Story 26.2; was
-`bybit_collector/collector.py`'s `BybitCollector` subclass of the Story 22.1 core).
+Bybit capture's composition root: `python3 -m capture.venues.bybit` (Story 26.2; was the
+`BybitCollector` subclass of the Story 22.1 core).
 
 Bybit has a central book, so a crossed local book is corruption: the core's default crossed
 policy skips the sample, ledgers it, and -- because `BybitClient` exposes `resync_orderbook` --

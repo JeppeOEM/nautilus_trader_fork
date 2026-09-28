@@ -13,8 +13,8 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-dYdX capture's composition root: `python3 -m capture.venues.dydx` (Story 26.2; was
-`dydx_collector/collector.py`'s `DydxCollector` subclass).
+dYdX capture's composition root: `python3 -m capture.venues.dydx` (Story 26.2; was the
+`DydxCollector` subclass of the Story 22.1 core).
 
 Owns its own asyncio loop through `run_forever`; no TradingNode/Strategy/DataEngine involved --
 see client.py for why. `build_capture` wires dYdX's values into the one `CaptureService`: the

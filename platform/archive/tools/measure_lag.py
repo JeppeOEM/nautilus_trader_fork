@@ -35,6 +35,7 @@ import argparse
 import asyncio
 import importlib
 import math
+import os
 import tomllib
 from collections import defaultdict
 from collections.abc import Callable
@@ -121,14 +122,18 @@ def _build_client(venue: str, environment: str, on_data: Callable[[object], None
 
 def _default_instruments(venue: str) -> list[str]:
     """
-    Return the venue's committed config.toml instruments. dYdX's is the empty placeholder its compose
-    bind mount covers (`dydx_collector/config.toml`); the others moved with capture (Story 26.2).
+    Return the venue's configured instruments: dYdX's from its mounted plan (`DYDX_PLAN_PATH`,
+    default the frozen container path, as the `archive` service reads it), the others from their
+    committed `config.toml`. The dYdX plan lists `{ id = "..." }` tables (per-instrument options
+    such as `store_order_book_deltas`); Bybit's and Hyperliquid's list bare ids.
     """
     platform_dir = Path(__file__).resolve().parents[2]  # archive/tools/measure_lag.py
-    relative = "dydx_collector" if venue == "dydx" else f"capture/venues/{venue}"
-    path = platform_dir / relative / "config.toml"
+    path = platform_dir / "capture" / "venues" / venue / "config.toml"
+    if venue == "dydx":
+        path = Path(os.environ.get("DYDX_PLAN_PATH") or "/app/dydx_collector/config.toml")
     with path.open("rb") as f:
-        return list(tomllib.load(f).get("instruments", []))
+        raw = tomllib.load(f).get("instruments", [])
+    return [entry["id"] if isinstance(entry, dict) else entry for entry in raw]
 
 
 async def measure(
@@ -167,7 +172,13 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.seconds <= 0 or args.warmup_seconds < 0 or args.stale_trade_seconds <= 0:
         parser.error("--seconds and --stale-trade-seconds must be > 0, --warmup-seconds >= 0")
-    instruments = args.instrument or _default_instruments(args.venue)
+    try:
+        instruments = args.instrument or _default_instruments(args.venue)
+    except FileNotFoundError as e:
+        hint = "set DYDX_PLAN_PATH or " if args.venue == "dydx" else ""
+        parser.error(f"{e.filename} not found: {hint}pass --instrument")
+    except (OSError, tomllib.TOMLDecodeError, KeyError) as e:
+        parser.error(f"cannot read the {args.venue} instruments: {e!r}; pass --instrument")
     if not instruments:
         parser.error(f"no instruments configured for {args.venue}: pass --instrument")
     recorder = LagRecorder(int(args.stale_trade_seconds * _S_NS))

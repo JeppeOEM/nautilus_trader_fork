@@ -1,5 +1,5 @@
-// Ported verbatim (content-wise) from platform/ml_signals/docs_page.py's CADENCE_META/IND_GROUPS/
-// INDICATORS/KB_GROUPS/KB data, as read 2026-09-13 (branch bmad). This is Story 15.1's Docs-page
+// Ported verbatim (content-wise) from the retired aiohttp dashboard's docs_page.py's
+// CADENCE_META/IND_GROUPS/INDICATORS/KB_GROUPS/KB data, as read 2026-09-13 (branch bmad). This is Story 15.1's Docs-page
 // content port -- see that story's Dev Notes/Completion Notes for the section-by-section checklist.
 // Fields containing markup (tagline, notes, gdesc, KB html) are trusted, self-authored HTML strings
 // rendered via TrustedHtml -- never user input.
@@ -252,7 +252,7 @@ export const INDICATORS: Indicator[] = [
   },
   {
     id: "book_features", group: "chart", name: "Book Microstructure (depth, imbalance, liquidity distance, cancel pressure)", cadence: "static", window: "computed on demand from a live-replayed OrderBook",
-    owner: "views/chart_series.py (book features + compute_chart_series' read-time replay; was ml_signals/book_features.py + chart_data.py)",
+    owner: "views/chart_series.py (book features + compute_chart_series' read-time replay; moved there in Story 24.2)",
     shownIn: ["Web dashboard per-coin chart page only"],
     tagline: "A second, independent set of L2-derived features, built by replaying raw order-book deltas — not the stored DydxSecondSnapshot fields OBI/OFI use.",
     formula: null,
@@ -268,7 +268,7 @@ export const INDICATORS: Indicator[] = [
   },
   {
     id: "footprint", group: "chart", name: "Footprint (resting order-book flow)", cadence: "static", window: "per-candle, per-price-band buckets",
-    owner: "views/chart_series.py (build_footprint; was ml_signals/footprint.py)",
+    owner: "views/chart_series.py (build_footprint; moved there in Story 24.2)",
     shownIn: ["Web dashboard footprint chart only"],
     tagline: "Buckets resting order-book size changes — not executed trades — into per-candle, per-price-band cells.",
     formula: null,
@@ -282,7 +282,7 @@ export const INDICATORS: Indicator[] = [
   },
   {
     id: "ema_trend", group: "chart", name: "EMA Trend Lines (fast/slow)", cadence: "static", window: "computed over internally-aggregated 1-minute candles",
-    owner: "views/chart_series.py (was ml_signals/chart_data.py), using Nautilus's own ExponentialMovingAverage indicator",
+    owner: "views/chart_series.py (moved there in Story 24.2), using Nautilus's own ExponentialMovingAverage indicator",
     shownIn: ["Web dashboard per-coin chart page only"],
     tagline: "EMA-8 / EMA-21 crossover lines on 1-minute candles — reuses nautilus_trader's built-in indicator, not a custom EMA.",
     formula: null,

@@ -13,7 +13,7 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-dYdX's USD 24 h volume source (moved from `ranking_engine/engine.py` in Story 25.2): the public
+dYdX's USD 24 h volume source (moved from the ranking engine module in Story 25.2): the public
 indexer's `perpetualMarkets` `volume24H`, requested through `kernel.venue_http`.
 """
 

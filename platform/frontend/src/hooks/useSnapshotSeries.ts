@@ -5,7 +5,7 @@ import { fetchSnapshotSeries } from "../api/client";
 import type { SnapshotSeriesPoint } from "../api/schema";
 
 // ~15 minutes of 1-second rows -- approximates `dashboard.py`'s own Lines-mode chunk width
-// (`_chunkSpanMs`'s 15-minute/900-row default, `ml_signals/dashboard.py:335`). Snapshot
+// (`_chunkSpanMs`'s 15-minute/900-row default, retired in Story 15.10). Snapshot
 // rows have no bar-count concept, so this is sized in rows-per-second terms, not reused
 // from `useCandles.ts`'s bar-count constants (120/20), which don't apply here.
 const INITIAL_LIMIT = 900;

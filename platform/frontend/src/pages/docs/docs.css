@@ -1,4 +1,5 @@
-/* Ported from platform/ml_signals/docs_page.py's HEAD <style> block (Story 15.1 Task 4).
+/* Ported from the retired aiohttp dashboard's docs_page.py's HEAD <style> block
+   (Story 15.1 Task 4).
    Scoped under .signal-atlas so it doesn't leak onto other pages. Story 15.9 replaced
    this file's own separate GitHub-dark palette below with the app-wide 16-color
    VGA/ANSI semantic tokens from theme.css -- every var here is now an alias onto one

@@ -15,7 +15,7 @@
 """
 Byte-identity of the bots' published language across the Story 25.3 move (AD-D12, MR2).
 
-`fixtures/replay_payloads.json` was recorded from the pre-move `live_paper` code (a scratch
+`fixtures/replay_payloads.json` was recorded from the pre-move bots code (a scratch
 recorder run once, before any file moved): one deterministic BacktestEngine run of
 `DummyStrategy` with its fills recorded, plus seeded round trips spanning the history windows,
 then the `bots:status` string, the four `bots:history` strings (and `all` without a starting

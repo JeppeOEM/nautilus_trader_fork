@@ -16,7 +16,7 @@
 Regression guard for architecture AD-8: the views read models are readers and must never import
 TradingNode, Strategy or DataEngine (that usage is confined to platform/bots). Checks every
 non-test module of `views/`, so a new read model is covered without editing this file (the guard
-lived in `ml_signals/tests` for `views/chart_series.py` until Story 25.2 deleted `ml_signals`).
+lived in the old package's tests for `views/chart_series.py` until Story 25.2 deleted it).
 Checks the literal substring "import Strategy" rather than bare "Strategy", which a docstring may
 mention without importing the class.
 """

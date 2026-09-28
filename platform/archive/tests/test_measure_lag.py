@@ -14,8 +14,14 @@
 # -------------------------------------------------------------------------------------------------
 """measure_lag's pure parts on real TradeTicks (the live run is manual, see its docstring)."""
 
+import os
+from pathlib import Path
+
+import pytest
+
 from archive.tools.measure_lag import LagRecorder
 from archive.tools.measure_lag import _default_instruments
+from archive.tools.measure_lag import main
 from archive.tools.measure_lag import percentile
 from archive.tools.measure_lag import report
 from archive.tools.measure_lag import suggest_hold_back
@@ -93,4 +99,47 @@ def test_report_suggests_the_hold_back_from_trades() -> None:
 def test_default_instruments_are_read_from_the_venue_package_config() -> None:
     """The tool moved two levels down (`archive/tools/`): the config path must still resolve."""
     assert _default_instruments("bybit")  # the committed Bybit config lists its instruments
-    assert _default_instruments("dydx") == []  # dYdX's committed config is a 0-byte placeholder
+
+
+def test_dydx_default_instruments_come_from_the_mounted_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DYdX commits no config: its instruments are the plan `DYDX_PLAN_PATH` names (Story 26.3)."""
+    plan = tmp_path / "dydx_config.toml"
+    plan.write_text(
+        'instruments = [\n    { id = "BTC-USD-PERP.DYDX" },\n'
+        '    { id = "ETH-USD-PERP.DYDX", store_order_book_deltas = true },\n]\n'
+    )
+    monkeypatch.setenv("DYDX_PLAN_PATH", str(plan))
+    assert _default_instruments("dydx") == ["BTC-USD-PERP.DYDX", "ETH-USD-PERP.DYDX"]
+
+
+def test_the_committed_dydx_plan_yields_instrument_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The plan compose mounts (`platform/data/dydx_config.toml`) lists tables, never bare ids."""
+    # `make test` runs from the image's copy, which has no `data/`: read the mounted checkout's.
+    platform_dir = os.environ.get("PLATFORM_SOURCE_DIR") or Path(__file__).resolve().parents[2]
+    plan = Path(platform_dir) / "data" / "dydx_config.toml"
+    monkeypatch.setenv("DYDX_PLAN_PATH", str(plan))
+    ids = _default_instruments("dydx")
+    assert ids
+    assert all(isinstance(iid, str) and iid.endswith(".DYDX") for iid in ids)
+
+
+def test_a_missing_dydx_plan_is_a_usage_error_not_an_empty_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DYDX_PLAN_PATH", str(tmp_path / "absent.toml"))
+    with pytest.raises(SystemExit) as exited:
+        main(["--venue", "dydx", "--seconds", "1"])
+    assert exited.value.code == 2
+
+
+def test_an_unreadable_dydx_plan_is_a_usage_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = tmp_path / "dydx_config.toml"
+    plan.write_text("instruments = [\n")
+    monkeypatch.setenv("DYDX_PLAN_PATH", str(plan))
+    with pytest.raises(SystemExit) as exited:
+        main(["--venue", "dydx", "--seconds", "1"])
+    assert exited.value.code == 2

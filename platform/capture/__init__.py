@@ -13,9 +13,9 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-The market-data capture context (DDD spine AD-D1/AD-D6; Story 22.1's collector core, moved here
-from `collector_core/` and the three `<venue>_collector/` packages in Story 26.2): one
-ingest/flush/sample/write path for every venue.
+The market-data capture context (DDD spine AD-D1/AD-D6; Story 22.1's collector core and the three
+venue collector packages, moved here in Story 26.2): one ingest/flush/sample/write path for every
+venue.
 
 - `domain/`: the gate's aggregates (`LiveBook`, `TradeIntake`, `FeedGroup`), the pure
   `SecondSampler`, verdicts, events and the core-default policies; no I/O.

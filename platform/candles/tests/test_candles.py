@@ -16,7 +16,7 @@
 Self-check: bucketing per-second rows produces correct OHLC per time bucket.
 
 Restated over the single fold in Story 24.1. The claims these tests carry were written against
-`ml_signals.candles`' `aggregate_ohlc`/`candle_dicts_from_snapshots`; both are retired, and
+the former candles module's `aggregate_ohlc`/`candle_dicts_from_snapshots`; both are retired, and
 `bars_from_rows`/`forming_bar` answer the same questions with `candles.domain.fold.fold_arrays`.
 `build_candles` (a flat list of trade prices -> bars) has no successor here at all: trades -> second
 is `kernel.fold.fold_trades` (tested in `kernel/tests/test_fold.py`) and second -> bars is this

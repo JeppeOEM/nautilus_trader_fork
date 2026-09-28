@@ -9,7 +9,7 @@ x-logging: &default-logging
 
 # data_api's picker PUT (Story 15.6) is the one `rw` writer of this host file; kept as an
 # anchor so the path/mount is defined in one place. A views preference store, so it lives under
-# data/ with the other durable stores (moved out of the deleted ml_signals/ package in Story 25.2).
+# data/ with the other durable stores (moved there from a package directory in Story 25.2).
 x-chart-indicator-config-path: &chart-indicator-config-path "/app/preferences/chart_indicators.toml"
 x-chart-indicator-config-mount: &chart-indicator-config-mount
   ./data/chart_indicators.toml:/app/preferences/chart_indicators.toml:rw
@@ -42,7 +42,7 @@ services:
     restart: always
     logging: *default-logging
 
-  # dYdX capture. Deliberately NOT renamed `dydx_collector` for symmetry with the two services
+  # dYdX capture. Deliberately NOT renamed after its venue for symmetry with the two services
   # below (Story 26.2 decision): the service name `collector` and container `dydx-collector` are
   # operator-visible (Dozzle, `make logs`/`test`/`nightly`/`hotpath-baseline`, the `~/.zshrc`
   # helpers) and published language (the `collector` ERROR_LEDGER_SERVICE ledger file, AD-D12);
@@ -330,9 +330,9 @@ services:
       # Read-only: bot_tui's own image (collector.dockerfile) never COPYs bots/ in, per
       # AD-8's module isolation. This mount only lets the `v` key display the strategy's
       # source text -- no bots code is imported or run here. The container path is the one
-      # bot_tui reads (STRATEGY_SOURCE_PATH's default), unchanged since Story 25.3 moved the
-      # strategy to bots/strategies/dummy.py.
-      - ./bots/strategies/dummy.py:/app/live_paper/strategy.py:ro
+      # bot_tui reads (STRATEGY_SOURCE_PATH's default): outside every package directory, so the
+      # mount can never shadow or create an importable package (Story 26.3).
+      - ./bots/strategies/dummy.py:/app/strategy_source/strategy.py:ro
     network_mode: host
     logging: *default-logging
 
@@ -345,16 +345,16 @@ services:
     profiles: ["live-paper"]
     build:
       context: ..
-      dockerfile: platform/live_paper.dockerfile
+      dockerfile: platform/bots.dockerfile
       network: host
     environment:
       PYTHONUNBUFFERED: "1"
       REDIS_URL: "redis://127.0.0.1:${REDIS_PORT:-6379}"
-      FILLS_DB_PATH: "/app/live_paper/data/fills.db"
+      FILLS_DB_PATH: "/app/data/live_paper/fills.db"
       # Set to an explicit, differently-named file path to enable the non-Sandbox exec
       # path (mode = "real_money" or "exchange_demo") -- never set by default here.
       # See bots/infrastructure/config.py's module docstring.
-      # LIVE_PAPER_REAL_MONEY_CONFIG: "/app/live_paper/real_money.toml"
+      # LIVE_PAPER_REAL_MONEY_CONFIG: "/app/bots/real_money.toml"
       # Venue credentials for that path only. Each adapter's Rust client picks the pair
       # matching the environment it was configured with, so they are passed straight
       # through rather than read anywhere in Python. Value-less entries forward a var
@@ -385,14 +385,15 @@ services:
       ERROR_LEDGER_SERVICE: "live-paper"
     user: "1000:1000"
     volumes:
-      # The paper fleet's config (Story 25.3: moved with the code from live_paper/, read by
-      # `python3 -m bots` next to its package).
+      # The paper fleet's config (Story 25.3: moved with the code, read by `python3 -m bots`
+      # next to its package).
       - ./bots/config.toml:/app/bots/config.toml:ro
       # Directory mount, not the single fills.db file (Story 4.6) -- SQLite WAL mode
       # creates fills.db-wal/fills.db-shm sidecar files next to the main file, which a
-      # single-file bind mount can't expose (same gotcha already documented on
-      # ranking_engine/data_api's metrics.db mounts above).
-      - ./data/live_paper:/app/live_paper/data
+      # single-file bind mount can't expose (same gotcha already documented on the
+      # ranking_engine and data_api metrics.db mounts above). The container path mirrors the host
+      # one, which is also FILLS_DB_PATH's in-image default (bots/__main__.py), since Story 26.3.
+      - ./data/live_paper:/app/data/live_paper
       - ./data/errors:/app/errors_dir
     network_mode: host
     # on-failure (not `always`, unlike collector/data_api) -- Story 3.2 attached a real

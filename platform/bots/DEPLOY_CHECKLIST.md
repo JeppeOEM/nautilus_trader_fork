@@ -1,29 +1,17 @@
 # bots Manual Test Checklist (pre-deploy)
 
-Grounded in the current code (the bots context, `platform/bots/`, was `live_paper/` until
-Story 25.3): `infrastructure/nautilus_host.py` (paper mode always uses
+Grounded in the current code (the bots context, `platform/bots/`, Story 25.3):
+`infrastructure/nautilus_host.py` (paper mode always uses
 `SandboxExecutionClientConfig` — no real funds reachable regardless of `[venues.*]`),
 `strategies/dummy.py` (`DummyStrategy`, Story 3.2), `application/supervise.py`
 (`bots:status`/`bots:control`), `infrastructure/config.py` + `domain/config.py`,
-`docker-compose.yml` / `live_paper.dockerfile`.
+`docker-compose.yml` / `bots.dockerfile`.
 
 Baseline before starting: `make test-live-paper` passes.
 
-## Story 25.3 VPS rollout (`live_paper/` → `bots/`, once)
-
-- [ ] Before `git pull`: if the VPS's `platform/live_paper/config.toml` has local edits, save
-      them (`cp platform/live_paper/config.toml /tmp/bots-config.toml`) -- the file moved to
-      `platform/bots/config.toml` and the pull would otherwise conflict or drop them. After the
-      pull, re-apply them to `platform/bots/config.toml`.
-- [ ] `docker compose --profile live-paper build live-paper && make up-live-paper`; the
-      container now runs `python3 -m bots` and reads `/app/bots/config.toml`. `FILLS_DB_PATH`,
-      the `./data/live_paper:/app/live_paper/data` mount and every `bots:*` key are unchanged,
-      so fill history and incident logs carry over.
-- [ ] The new `bots.*` error-ledger sites (`bots.fill_lost`, `bots.incidents_write`,
-      `bots.status_build`, `bots.control_message`, `bots.control_action`, `bots.history_refresh`,
-      `bots.redis`) may
-      appear in `/api/errors` -- each was a log-only failure before. A couple of
-      `bots.status_build` at boot is the known first-quote race; a rising count is not.
+The one-off Story 25.3 rollout (the move into `bots/`) is in `platform/docs/DEPLOY_CHECKLIST.md`
+("Story 25.3: the bots context"); the Story 26.3 image rename is its "Deferred operator actions"
+entry `26-3`.
 
 ## Pre-flight (before touching the container)
 
@@ -53,10 +41,10 @@ Baseline before starting: `make test-live-paper` passes.
 ## Build & static checks
 
 - [ ] `make build-base`, then build the `live-paper` image cleanly (kernel
-      + observability + bots + the live_paper shims copied in, no collector package).
+      + observability + bots copied in, no collector package).
 - [ ] `ruff check`, `ruff format --check`, `mypy` over `platform/bots/`
       and `platform/kernel/` (the indicators the live strategy imports moved to
-      the shared kernel in Story 23.2; `ml_signals` is no longer in this image).
+      the shared kernel in Story 23.2, so no other package is in this image).
 - [ ] `make test-live-paper` inside the actual image, not just host pytest —
       catches missing deps in `requirements.txt`.
 

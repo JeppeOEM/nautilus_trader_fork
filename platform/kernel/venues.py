@@ -78,7 +78,7 @@ def market_suffix(instrument_id: str) -> str | None:
 def market_kind(instrument_id: str) -> str:
     """
     Return "perp" | "spot" | "unknown" from the Nautilus id's symbol suffix (never raises). A
-    symbol with no `-` is read whole, as `common.venues.market_kind` always did (`PERP.X` ->
+    symbol with no `-` is read whole, as the pre-kernel `market_kind` always did (`PERP.X` ->
     "perp"); `market_suffix` is the strict form.
     """
     symbol, dot, _venue = instrument_id.rpartition(".")

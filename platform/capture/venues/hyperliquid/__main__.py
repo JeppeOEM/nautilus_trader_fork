@@ -14,7 +14,7 @@
 # -------------------------------------------------------------------------------------------------
 """
 Hyperliquid capture's composition root: `python3 -m capture.venues.hyperliquid` (Story 26.2; was
-`hyperliquid_collector/collector.py`'s `HyperliquidCollector` subclass of the Story 22.1 core).
+the `HyperliquidCollector` subclass of the Story 22.1 core).
 
 Every l2Book message is a full snapshot (Clear + levels), so the local book can't drift and
 `HyperliquidClient` deliberately has no `resync_orderbook`: a crossed sample is skipped and

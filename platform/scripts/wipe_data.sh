@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Permanently deletes every persisted data store the platform/ stack has written:
 # the Parquet market-data catalog (all coins), ranking_engine's metrics.db
-# (history charts), collector incident reports, live_paper's fills.db
+# (history charts), collector incident reports, the bots' fills.db
 # (bot trade/position history), and bot_tui's own debug log. Leaves
 # config.toml and .gitkeep files alone.
 #

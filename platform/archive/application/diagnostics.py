@@ -14,8 +14,8 @@
 # -------------------------------------------------------------------------------------------------
 """
 Catalog diagnostics: per-instrument data coverage, spacing gaps and likely outages (the archive
-half of the former `ml_signals.catalog_stats`, moved in Story 25.1; its price series and stats
-stay ranking's). Ledger sites keep their `catalog_stats.*` names (published language).
+half of the former catalog-stats module, moved in Story 25.1; its price series and stats stay
+ranking's). Ledger sites keep their `catalog_stats.*` names (published language).
 
 Known limit: `_load` reads a whole data type of one instrument unbounded in time (MEM-01's
 anti-pattern), as the original did; these are notebook/operator diagnostics over a small catalog,
@@ -31,8 +31,8 @@ from nautilus_trader.model.data import MarkPriceUpdate
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
 
-# The catalog data types `coverage` reports on (the list `ml_signals.catalog_stats` kept until
-# Story 25.2).
+# The catalog data types `coverage` reports on (the list the former catalog-stats module kept
+# until Story 25.2).
 DATA_TYPES = (
     "trade_tick",
     "bar",

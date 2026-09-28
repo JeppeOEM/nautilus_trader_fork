@@ -28,10 +28,12 @@ it's the same category of backtest-driver module as backtest_dydx.py/backtest_of
 checking it costs nothing.
 
 The three backtest drivers moved to research/strategies in Story 24.4; the list's other reader
-modules (catalog_stats, metrics_computer, and views/chart_series.py, which chart_data became in
-Story 24.2) are checked by ml_signals/tests/test_ad8_boundary.py. Lives here (not bots/tests)
-because the live-paper Docker image deliberately ships no research code (see
-platform/live_paper.dockerfile), so this guard can only run where those files actually exist.
+modules moved out of research: catalog_stats split into archive/ and ranking/, metrics_computer
+into ranking/, and chart_data became views/chart_series.py in Story 24.2. Those are checked by
+their contexts' AD-8 guards (ranking/ and views/tests/test_ad8_boundary.py) and, for archive/, by
+tests/test_boundaries.py's platform-wide TradingNode guard.
+Lives here (not bots/tests) because the live-paper Docker image deliberately ships no research code
+(see platform/bots.dockerfile), so this guard can only run where those files actually exist.
 """
 
 from pathlib import Path

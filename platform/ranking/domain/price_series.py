@@ -15,7 +15,7 @@
 """
 In-memory long-window price series (Story 13.2) -- replaced the ranking loop's old recurring
 catalog re-scan, the root cause of nifelheim's OOM-restart loop (platform/CLAUDE.md DATA-02
-incident, 2026-09-11). Moved from `ranking_engine/price_series.py` in Story 25.2.
+incident, 2026-09-11). Moved into the ranking context in Story 25.2.
 
 Per-instrument fixed-capacity numpy ring buffers of (ts_event_ns, close_price), fed incrementally
 from the live `snapshots:raw` ingest (`RankingBoard.ingest`), plus a one-time lazy catalog backfill

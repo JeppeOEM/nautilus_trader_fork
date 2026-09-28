@@ -13,8 +13,8 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-The trade backfill's application half (story 22.14; split from `collector_core/trade_backfill.py`
-in Story 26.1): what one backfill did, and how a venue fetch is admitted into a `TradeIntake`.
+The trade backfill's application half (story 22.14; split from the core's trade-backfill module in
+Story 26.1): what one backfill did, and how a venue fetch is admitted into a `TradeIntake`.
 The fetch and parse half is each venue's `trade_history.py` (`ports.VenueTradeHistory`); the
 scheduling (`FeedGroup` requests, the settle, the loop) is the `CaptureService`'s.
 """

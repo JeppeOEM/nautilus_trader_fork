@@ -13,7 +13,7 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-Unit tests for `views.indicator_picker`'s custom half (was `ml_signals/custom_indicators.py`;
+Unit tests for `views.indicator_picker`'s custom half (was the `custom_indicators` module;
 `replay_indicator`/`catalog_json` are `replay_custom`/`custom_catalog_json`): its dispatch mechanism (Story 10.1) and its registered
 indicators (CumulativeVolumeDelta, Story 10.2; CancelPressure, Story 10.3; OFI to follow,
 Story 10.4).

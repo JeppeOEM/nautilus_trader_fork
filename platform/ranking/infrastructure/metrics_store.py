@@ -14,7 +14,7 @@
 # -------------------------------------------------------------------------------------------------
 """
 `metrics.db`: rolling 31-day metric snapshots, one row per (ts, instrument_id) -- the `RankingHistory`
-adapter (moved from `ranking_engine/metrics_store.py` in Story 25.2; schema frozen, AD-D12).
+adapter (moved into the ranking context in Story 25.2; schema frozen, AD-D12).
 
 `SqliteMetricsStore` is the ranking process's one writer. `read_history`/`read_nearest` are the
 readers other processes use (through `ranking.application.queries`): each opens its own read-only

@@ -720,3 +720,9 @@ Discarded by operator: locking/atomic TOML writes; `bot_tui` malformed-message h
 - source_spec: `_bmad-output/implementation-artifacts/spec-26-2-capture-package-and-venue-packages-with-entrypoints.md`
   summary: `core_config_from_dict` accepts TOML `nan`/`inf` for its float thresholds (`nan <= 0` is False, so a `nan` `stale_book_seconds` disables the stale gate and `inf` overflows `int(x * 1e9)`), and silently truncates a float or bool `flush_interval_seconds`/`seen_trade_ids` through `int()`.
   evidence: platform/capture/application/config.py `core_config_from_dict` (`float(raw.get(...))`, `int(raw.get(...))`, then `<= 0` checks only); the same code in collector_core/config.py at baseline 7fbdb4fe76.
+
+## Deferred from: story 26.3 spine version lens (2026-09-28)
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-26-3-closeout-shims-gone-spines-reconciled.md`
+  summary: The platform images install `pandas==3.0.4` (`platform/requirements.txt:2`) over nautilus_trader 1.229.0's own `pandas>=2.3.3,<3.0.0` (`pyproject.toml:31`, `uv.lock` 2.3.3), so `pip check` fails in the collector image and host-side test runs (pandas 2.3.3) never exercise the pandas major version production runs. Resolve by pinning `pandas==2.3.3` or by proving pandas 3.x on the catalog read/backtest path; recorded as a DDD spine Deferred entry.
+  evidence: `pip check` inside `platform-collector:latest` built 2026-09-28: "nautilus-trader 1.229.0 has requirement pandas<3.0.0 … but you have pandas 3.0.4" (reviews/review-versions-2026-09-28.md H-1); predates 26.3, which changed no dependency.

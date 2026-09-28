@@ -28,9 +28,9 @@ downstream of the collector ever touches `nautilus_trader`'s live `TradingNode`/
 
 | Module | Role | Talks to |
 |---|---|---|
-| `capture/` | The capture context (`collector_core/` until Story 26.2, which moved it into the DDD spine's Structural Seed; the old path is a re-export shim until Story 26.3 `[amended 2026-09-28: Story 26.2]`): the venue-neutral collector engine (Story 22.1) — ingest → 1s sample → flush → Parquet + `snapshots:raw` + the `SecondSink` port, and the capture lock `<catalog>/.capture-<VENUE>.lock` held for the process life (Story 25.1); the operator-run catalog tools moved to `archive/` in Story 25.1 (their old paths' shims were removed in Story 25.3) `[amended 2026-09-25: Story 25.1]`. Since Story 26.1 the gate is explicit aggregates in `domain/` (`LiveBook`, `TradeIntake`, `FeedGroup`, the pure `SecondSampler`, `FlushBatch`) with venue variance as policy values (`CapturePolicies`); `application/capture_service.py`'s `CaptureService` (was `Collector`) is the application service (the loops, every resync, the only `error_ledger` caller, sites in `application/sites.py`, thresholds in `application/config.py`), and its I/O goes through `application/ports.py` (`VenueFeed`, `VenueTradeHistory`, `ArchiveWriter`, `LiveStream`, `Notifier`, `SecondSink`) with the adapters in `infrastructure/` (`parquet_writer.py`, `redis_stream.py`, `capture_lock.py`, `gap_markers.py`, and `config.py`, the one venue loader) `[amended 2026-09-26: Story 26.1]` | Parquet catalog (read/write, through `ArchiveWriter`), Redis (publish, through `LiveStream`), `capture/application/ports.py`'s `SecondSink` (the candle store, injected by the venue entrypoint) |
+| `capture/` | The capture context (the collector core until Story 26.2, which moved it into the DDD spine's Structural Seed; the old path's re-export shim was deleted in Story 26.3 `[amended 2026-09-28: Story 26.2; Story 26.3]`): the venue-neutral collector engine (Story 22.1) — ingest → 1s sample → flush → Parquet + `snapshots:raw` + the `SecondSink` port, and the capture lock `<catalog>/.capture-<VENUE>.lock` held for the process life (Story 25.1); the operator-run catalog tools moved to `archive/` in Story 25.1 (their old paths' shims were removed in Story 25.3) `[amended 2026-09-25: Story 25.1]`. Since Story 26.1 the gate is explicit aggregates in `domain/` (`LiveBook`, `TradeIntake`, `FeedGroup`, the pure `SecondSampler`, `FlushBatch`) with venue variance as policy values (`CapturePolicies`); `application/capture_service.py`'s `CaptureService` (was `Collector`) is the application service (the loops, every resync, the only `error_ledger` caller, sites in `application/sites.py`, thresholds in `application/config.py`), and its I/O goes through `application/ports.py` (`VenueFeed`, `VenueTradeHistory`, `ArchiveWriter`, `LiveStream`, `Notifier`, `SecondSink`) with the adapters in `infrastructure/` (`parquet_writer.py`, `redis_stream.py`, `capture_lock.py`, `gap_markers.py`, and `config.py`, the one venue loader) `[amended 2026-09-26: Story 26.1]` | Parquet catalog (read/write, through `ArchiveWriter`), Redis (publish, through `LiveStream`), `capture/application/ports.py`'s `SecondSink` (the candle store, injected by the venue entrypoint) |
 | `archive/` | The archive context (Story 25.1, DDD spine AD-D9/AD-D18): the nightly saga (`archive.nightly`: rebuild -> consolidate -> build_candles -> reconcile -> prune) over the `ArchiveDay` state machine, `RetentionPolicy` (the one deleter), `CatalogFiles` (the one in-place rewriter), and the operator CLIs `python -m archive.<tool>`. Since Story 25.1b also the `archive` service (`python -m archive.scheduler`, `ArchiveScheduler` in `application/scheduler.py`): the one place nightly maintenance is scheduled -- each venue's saga, then consolidate, then `archive.backup_catalog` when `backup_enabled` `[amended 2026-09-26: Story 26.1b]`, per missed closed day, plus the closed-hour merge of the small types (`consolidate_catalog --closed-hours`) every `intraday_consolidate_hours` -- each step a child process, the maintenance lock only probed, never held `[amended 2026-09-26: Story 25.1b]` | Parquet catalog (read/write, never today's files; intraday, never the current hour), `candles.application` (`VerifiedDays`, `queries`, `rebuild`), the venues' kline REST (`kernel.venue_http`), the dYdX plan file (read, prune only), Redis (`archive:status` publish, `archive:control` read), `data/archive/state.json` (read/write), object storage (rclone, the backup step) |
-| `capture/venues/dydx/`, `capture/venues/bybit/`, `capture/venues/hyperliquid/` | One package per venue (Story 26.2; the `dydx_collector/`, `bybit_collector/`, `hyperliquid_collector/` subclasses of `collector_core.Collector` until then, now re-export shims): `client.py` (the `VenueFeed` WS/HTTP client), `trade_history.py` (the `VenueTradeHistory` REST backfill), `policies.py` (dYdX's uncross ladder, Bybit's `u` canary; none for Hyperliquid), the optional `open_interest.py` (dYdX, Bybit) and `book_snapshot.py` (Bybit, Hyperliquid), `config.py` (the venue's config class, caps and `CONFIG_PATH`) and `__main__.py`, the composition root (`python3 -m capture.venues.<venue>`): `build_capture(config, plan_ids)` wires the client factory, the policy values, the adapters, the candle sink and retention loop, the REST open-interest poll (`CaptureService.poll_loop`) and, for dYdX, collection control's loops (`add_loops`) into one `CaptureService`, never a subclass; `build_capture_from_file` loads config + plan through `capture.infrastructure.config`'s one loader, `load_venue_config` `[amended 2026-09-28: Story 26.2]`. `CaptureService.apply(diff) -> Applied` makes the applied set the fact: the sampler, watchdog, cross-check and backfill iterate `applied ∩ plan`, and a book/trade message outside it is counted (`collector.unplanned_message`), never archived (Story 25.4) `[amended 2026-09-26: Story 25.4]` | Their venue's WS/REST (via Rust `nautilus_pyo3` clients) |
+| `capture/venues/dydx/`, `capture/venues/bybit/`, `capture/venues/hyperliquid/` | One package per venue (Story 26.2; three `Collector` subclasses, one per venue package, until then, whose re-export shims Story 26.3 deleted): `client.py` (the `VenueFeed` WS/HTTP client), `trade_history.py` (the `VenueTradeHistory` REST backfill), `policies.py` (dYdX's uncross ladder, Bybit's `u` canary; none for Hyperliquid), the optional `open_interest.py` (dYdX, Bybit) and `book_snapshot.py` (Bybit, Hyperliquid), `config.py` (the venue's config class, caps and `CONFIG_PATH`) and `__main__.py`, the composition root (`python3 -m capture.venues.<venue>`): `build_capture(config, plan_ids)` wires the client factory, the policy values, the adapters, the candle sink and retention loop, the REST open-interest poll (`CaptureService.poll_loop`) and, for dYdX, collection control's loops (`add_loops`) into one `CaptureService`, never a subclass; `build_capture_from_file` loads config + plan through `capture.infrastructure.config`'s one loader, `load_venue_config` `[amended 2026-09-28: Story 26.2]`. `CaptureService.apply(diff) -> Applied` makes the applied set the fact: the sampler, watchdog, cross-check and backfill iterate `applied ∩ plan`, and a book/trade message outside it is counted (`collector.unplanned_message`), never archived (Story 25.4) `[amended 2026-09-26: Story 25.4]` | Their venue's WS/REST (via Rust `nautilus_pyo3` clients) |
 | `collection_control/` | The collection-control context (Story 25.4, DDD spine AD-D17): the plan is the intent, capture's applied set the fact. `CollectionPlan` (`domain/`: instruments, `exclude`, `cap` = 30 for dYdX, the liquidity threshold, the dropped-instrument retention; commands `add`/`remove`/`pin`/`unpin`/`exclude`/`reload` return a `PlanDiff`), the pure `classify_liquidity` that alone admits a pin; `ControlService` (`collector:control`: save, then apply, then publish), `StatusPublisher` (`collector:status`, `pending` for a planned-but-unapplied id) and the plan-file `reload_loop` in `application/`; `TomlPlanStore`, the Redis bus/channel and `DydxMarkets` in `infrastructure/`. Wired into the dYdX capture service through `add_loops` by `capture.venues.dydx.__main__.build_capture_from_file` (Story 26.2); no module state, deletes nothing | Redis (`collector:status` publish, `collector:control` read), the dYdX plan file `data/dydx_config.toml` (read/write), dYdX indexer `perpetualMarkets` (through `kernel.venue_http`) |
 | `kernel/` | The shared kernel (Story 23.2, DDD spine AD-D3): the one copy of every type, fold, parser, constant, transport and read helper more than one context uses — `second_snapshot` (`DydxSecondSnapshot`, `SecondOHLC`), `open_interest`, `fold` (`fold_trades`), `indicators` (pure `Indicator`s and snapshot functions), `performance_metrics`, `venues` (the only `InstrumentId` parser: `venue_of`, `has_venue`, `venue_kind`, `market_kind`, `market_suffix`, `bybit_category`), `clocks` (`TwoClocks`, `CatalogFileSpan`, the one skew bound `MAX_TS_INIT_SKEW_NS` = 300 s), `archive_markers` (the `_archive_gaps/<iid>.jsonl` format), `venue_http` (every venue REST URL and request), `catalog_files` (read-only snapshot-file helpers), `parquet_compat` (the one zstd `write_table` default). Imports no context, holds no state, store, config loader or ledger call; every context may import it | venue REST endpoints (outbound GET/POST, via callers), the Parquet catalog (read-only) |
 | `candles/` | The candles context (Story 24.1, DDD spine AD-D8): the one seconds → bars fold (`domain/fold.py`), the `CandleSeries` watermark aggregate, the query/forming/rebuild services, the retention process manager and `CandleStore` — the only read-write opener of a `candles_*.db`. Behind capture's `SecondSink` port, so nothing upstream imports it | Parquet catalog (read, the rebuild), `candles_*.db` (read/write) |
@@ -39,8 +39,8 @@ downstream of the collector ever touches `nautilus_trader`'s live `TradingNode`/
 | `research/` | The research context (Story 24.4, DDD spine AD-D1 research row): a pure consumer with no aggregates -- the backtest strategies and runners (`strategies/`, referenced by `ImportableStrategyConfig` string path `research.strategies.<module>:<Class>`), `run_backtest.py`, the watchlist client (`watchlist.py`), the notebooks (`notebooks/`) and `BACKTESTING.md`. Reads market-data rows only through `kernel.catalog_files` or `BacktestDataConfig` (`research/tests/test_research_reads.py`), the live coin-set only over HTTP, and computes no rolling metric (pct-change and volatility are ranking's). In-repo it imports only `kernel` and `observability` (beside stdlib, `nautilus_trader` and pandas) | Parquet catalog (read; `snapshot_backtest` writes only a throwaway catalog in a temp dir), `data_api` `/api/rankings` (HTTP GET) |
 | `observability/` | The generic observability context (Story 23.1, DDD spine AD-D16), standard library only and venue-free: `error_ledger` (every continue-past-failure site, DATA-07; in-memory per process, plus a durable per-service `<service>.jsonl` sink behind the same `record()` call, Story 23.3), `notify` (the one outbound transport: channels `operator` = ntfy/`WATCHDOG_NTFY_URL`, `telegram` = `TELEGRAM_*`, `webhook:<url>`), `watchdog` (the generic `(down_since, reminder)` alert transition), `incidents` (the WARNING+ incident-report handler, parameterised by the venue entrypoint's `IncidentConfig`). Every context except `kernel` may import it (spine AD-D2); it imports none | ntfy / Telegram / webhook URLs (outbound HTTP POST), `data/incident_reports/` (write, dYdX collector only), `data/errors/*.jsonl` (write, every service; Story 23.3) |
 | `data_api/` + `frontend/` | Web UI (React SPA) + REST/WS on `:9100`, read-only except the saved preferences/alerts and the ranking-mode switch. Format + transport only since Story 24.2: every value comes from `views/`; `data_api/buses.py` constructs the two Redis bus instances, `data_api/alert_wiring.py` the alerting instances (Story 24.3), and `app.py`'s lifespan attaches the alert engine to the live-candle bus -- the only such wiring; `routes/alerts.py` is a thin adapter over `alerting.application` (the deprecated `data_api/alerts.py` re-export was deleted in Story 25.1) `[amended 2026-09-25: Story 25.1]` | Redis (read; `ranking:control` publish from `PUT /api/rankings/mode`, Story 25.1a), Parquet catalog + `candles_*.db` + `metrics.db` (read-only, through `views/`), `alerts.toml` (through `alerting/`) |
-| `ranking/` | The ranking context (Story 25.2, DDD spine AD-D10): sole computer of coin ranking (volume + volatility) and of the pct-change/volatility math. `RankingBoard` (`domain/`) owns the mode, one `InstrumentMetrics` per instrument, the volume book and the publisher; `RankingEngine` (`application/`) drives it through the `VolumeSource`/`PriceHistory`/`RankingHistory`/`LivePublisher` ports, whose adapters (`infrastructure/`) only `__main__` wires; `application/queries.py` (`history`/`nearest`) is the `metrics.db` read service views calls. No module-level state. Runs as `python3 -m ranking` (compose service `ranking_engine`); the `ranking_engine/` re-export shims were deleted in Story 25.4 `[amended 2026-09-26: Story 25.2]` `[amended 2026-09-26: Story 25.4]` | Redis (`snapshots:raw` read; `rankings:live` publish; `ranking:control` read), `metrics.db` (write), Parquet catalog (read, one-time price backfill), dYdX/Bybit/Hyperliquid REST (24h USD volume poll, through `kernel.venue_http`) |
-| `bots/` | The bots context (Story 25.3, DDD spine AD-D15; was `live_paper/`, whose re-export shims were deleted in Story 26.1 `[amended 2026-09-26: Story 26.1]`): the actual trading bots — one `TradingNode` + one `DummyStrategy` per bot, in paper (or gated demo/real-money) mode. `PaperFleet`/`ExecBot` make the paper/non-paper split a type, `Bot` holds the incident log, `FillLedger` the per-fill PnL; `nautilus_host.py` is the only `TradingNode` importer. Runs as `python3 -m bots` (compose service `live-paper`) `[amended 2026-09-26: Story 25.3]` | Venue WS/HTTP (via `TradingNode`), Redis (`bots:status` publish, `bots:history:*`/`bots:incidents:*` set, `bots:control` read; the Nautilus Cache), `fills.db` (write) |
+| `ranking/` | The ranking context (Story 25.2, DDD spine AD-D10): sole computer of coin ranking (volume + volatility) and of the pct-change/volatility math. `RankingBoard` (`domain/`) owns the mode, one `InstrumentMetrics` per instrument, the volume book and the publisher; `RankingEngine` (`application/`) drives it through the `VolumeSource`/`PriceHistory`/`RankingHistory`/`LivePublisher` ports, whose adapters (`infrastructure/`) only `__main__` wires; `application/queries.py` (`history`/`nearest`) is the `metrics.db` read service views calls. No module-level state. Runs as `python3 -m ranking` (compose service `ranking_engine`); the old package path's re-export shims were deleted in Story 25.4 `[amended 2026-09-26: Story 25.2]` `[amended 2026-09-26: Story 25.4]` | Redis (`snapshots:raw` read; `rankings:live` publish; `ranking:control` read), `metrics.db` (write), Parquet catalog (read, one-time price backfill), dYdX/Bybit/Hyperliquid REST (24h USD volume poll, through `kernel.venue_http`) |
+| `bots/` | The bots context (Story 25.3, DDD spine AD-D15; its old package path's re-export shims were deleted in Story 26.1 `[amended 2026-09-26: Story 26.1]`): the actual trading bots — one `TradingNode` + one `DummyStrategy` per bot, in paper (or gated demo/real-money) mode. `PaperFleet`/`ExecBot` make the paper/non-paper split a type, `Bot` holds the incident log, `FillLedger` the per-fill PnL; `nautilus_host.py` is the only `TradingNode` importer. Runs as `python3 -m bots` (compose service `live-paper`) `[amended 2026-09-26: Story 25.3]` | Venue WS/HTTP (via `TradingNode`), Redis (`bots:status` publish, `bots:history:*`/`bots:incidents:*` set, `bots:control` read; the Nautilus Cache), `fills.db` (write) |
 | `bot_tui/` | Keyboard-only terminal UI, interactive/on-demand: the control surface for the bots and the collector (two panes, Bots and Collector). Rankings, the ranking-mode switch and the single-coin view are web-only since Story 25.1a, so it imports no `views/` read model `[amended 2026-09-26: Story 25.1a]` | Redis (`bots:*` and `collector:status` read; `bots:control`, `collector:control` publish), dashboard (HTTP deep-link only) |
 
 Module boundary rule enforced throughout (architecture AD-4): every module downstream
@@ -129,8 +129,8 @@ Three standalone asyncio services (one per venue) over one shared engine. All by
 unbounded-queue-growth bug under sustained load that OOM-crashed an earlier
 `Strategy`-based recorder.
 
-Layout (Story 26.2, the DDD spine's Structural Seed; `collector_core/` and the three
-`<venue>_collector/` packages are re-export shims until Story 26.3):
+Layout (Story 26.2, the DDD spine's Structural Seed; the old packages' re-export shims were deleted
+in Story 26.3):
 
 ```
 capture/
@@ -165,12 +165,12 @@ capture/
   the venue entrypoint (Story 24.1), so a bar can never be ahead of the archive.
 - **`kernel/second_snapshot.py`** — defines `DydxSecondSnapshot(Data)`, the one
   custom Arrow-registered type this whole system is built around (Story 23.2 moved it from
-  `collector_core/`; the old path's shim was deleted).
-- **`kernel.second_snapshot.ohlc_outside_book()`** (was `collector_core/integrity.py` until
+  the collector core; the old path's shim was deleted).
+- **`kernel.second_snapshot.ohlc_outside_book()`** (was the collector core's integrity module until
   Story 25.1) — a second's trade high/low must lie inside that same second's own book. Live ERROR
   canary and offline detector (DATA-06).
 - **Operator-run catalog tools** (`python -m archive.<tool>` since Story 25.1 -- the
-  `collector_core.<tool>` shims were removed in Story 25.3 -- never automatic; the candle rebuild
+  old paths' shims were removed in Story 25.3 -- never automatic; the candle rebuild
   is `python -m candles.rebuild` since Story 24.1):
   `candles.rebuild` (rebuild a candle store from raw 1s), `consolidate_catalog`
   (`make consolidate`, every venue; `--closed-hours` for the current day's closed hours of the
@@ -249,12 +249,12 @@ Story 19.2) and `data/candles/candles_{dydx,bybit,hyperliquid}.db`.
 ## 2. Shared indicators — `kernel/indicators.py`
 
 Indicators are implemented once, in the shared kernel — everything imports them from there,
-never reimplements. `ml_signals/`, which hosted them and later ranking's math and the research
-shims, was deleted in Story 25.2 `[amended 2026-09-26: Story 25.2 -- its last modules moved to
+never reimplements. The package that hosted them and later ranking's math and the research
+shims was deleted in Story 25.2 `[amended 2026-09-26: Story 25.2 -- its last modules moved to
 `ranking/` (the pct-change/volatility math, the catalog price read) and `research/`
 (`rank_history`); its two preference TOMLs moved to `data/`]`.
 
-- **`kernel/indicators.py`** (moved from `ml_signals/indicators.py` in Story 23.2) — five
+- **`kernel/indicators.py`** (moved into the kernel in Story 23.2) — five
   Nautilus `Indicator` subclasses, each used identically in Jupyter, backtest, and live
   (`bots`):
   - `Microprice` — size-weighted mid from top-of-book
@@ -270,7 +270,7 @@ shims, was deleted in Story 25.2 `[amended 2026-09-26: Story 25.2 -- its last mo
 
 ## 2a. Web UI — `data_api/` + `frontend/`
 
-`ml_signals/dashboard.py` (the old aiohttp HTML app) was retired in Story 15.10. The web
+The old aiohttp HTML dashboard was retired in Story 15.10. The web
 UI is now the React SPA in `platform/frontend/` (Rankings, Chart, 31-day History, Docs),
 served by the `data_api` FastAPI app on `:9100` (`127.0.0.1` only) alongside its REST +
 WebSocket API: `/api/rankings`, `PUT /api/rankings/mode` (the ranking-mode switch, Story 25.1a:
@@ -288,12 +288,12 @@ React equivalent: the `/debug` state dump and the server-rendered `/live` table.
 
 A pure consumer (Story 24.4): it reads the catalog, ranking's published output and the rankings
 API, and computes nothing another context owns `[amended 2026-09-25: Story 24.4 -- moved from
-`ml_signals/` and `dydx_collector/notebooks/`]`.
+the old signals package and the dYdX collector's notebooks]`.
 
 - **`watchlist.py`** — `fetch_watchlist()` reads `data_api`'s `/api/rankings` to get the live, ranked coin set — this is how a backtest gets a dynamic instrument
   universe instead of a hardcoded list. HTTP only: `research` never imports `data_api`.
 - **`rank_history.py`** — `fetch_rank_history()` reads `data_api`'s `/api/metrics/nearest` for a
-  past rank at a timestamp (moved from `ml_signals/` in Story 25.2). HTTP only, like the watchlist.
+  past rank at a timestamp (moved here in Story 25.2). HTTP only, like the watchlist.
 - **`strategies/backtest_dydx.py` / `strategies/backtest_ofi.py` / `strategies/backtest_snapshot.py`** — `BacktestNode` +
   `BacktestDataConfig` runs (no custom matching engine anywhere). `strategies/backtest_dydx.py`
   defaults to backtesting every coin in the live Watchlist, keyed results per symbol.
@@ -317,7 +317,7 @@ API, and computes nothing another context owns `[amended 2026-09-25: Story 24.4 
 
 Extracted from what used to be inline logic in `dashboard.py` (Story 1.8) specifically
 so the web UI and any future reader can never disagree on coin order; a bounded context with
-its own aggregate since Story 25.2 (it was `ranking_engine/engine.py`, twelve module globals).
+its own aggregate since Story 25.2 (it was one engine module with twelve module globals).
 
 - **`domain/board.py`** — `RankingBoard`, the aggregate: the one global mode (last-write-wins),
   one `InstrumentMetrics` per instrument (the OFI/OBI trackers, the 300-snapshot rolling window,
@@ -351,7 +351,7 @@ its own aggregate since Story 25.2 (it was `ranking_engine/engine.py`, twelve mo
 
 The one place in `platform/` where `TradingNode`/`Strategy` usage is sanctioned
 (architecture AD-8 amendment) — everywhere else in `platform/` treats `nautilus_trader` as
-a library only. Moved from `live_paper/` in Story 25.3 (its re-export shims were deleted in
+a library only. Moved into its own context in Story 25.3 (its old path's re-export shims were deleted in
 Story 26.1); every `bots:*` payload, `fills.db` row, env var and the `live-paper`
 compose service are unchanged, proven by `bots/tests/test_replay.py` against payloads recorded
 from the pre-move code.
@@ -465,12 +465,13 @@ without an SSH tunnel over Tailscale (see README's remote-access section).
 | `live-paper` | **no** — `profiles: ["live-paper"]`, `make up-live-paper` | `on-failure:5` | Explicit opt-in per Story 3.1; capped restarts so a bad config doesn't crash-loop against dYdX's API |
 | `bot_tui` | **no** — `profiles: ["tui"]`, `docker compose run` | n/a (one-shot) | Interactive tool, never a background daemon |
 
-Two-image split: `nautilus-trader-base` (rebuilt rarely, `make build-base`, ~15 min) →
+One durable base image plus three thin layers (not a two-image split): `nautilus-trader-base` (rebuilt rarely, `make build-base`, ~15 min) →
 `collector.dockerfile` (thin layer, rebuilds in seconds; it also installs Debian's `rclone` for
 the backup step) reused by the three collectors, `archive`, ranking_engine and bot_tui (`data_api`
-has its own `data_api.dockerfile`, with a frontend-build stage); `live_paper.dockerfile` is `live-paper`'s own
-thin layer on the same base (it ships `bots`, `kernel`, `observability` and `tests`; the
-`live_paper` shims it shipped were deleted in Story 26.1).
+has its own `data_api.dockerfile`, with a frontend-build stage); `bots.dockerfile` (renamed after
+its context in Story 26.3) is `live-paper`'s own thin layer on the same base (it
+ships `bots`, `kernel`, `observability` and `tests`; the old path's shims it shipped were deleted
+in Story 26.1).
 
 ### Running the UI/`bot_tui` off the VPS
 
