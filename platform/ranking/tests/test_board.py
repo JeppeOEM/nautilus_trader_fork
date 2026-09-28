@@ -98,6 +98,7 @@ def test_volume_mode_sorts_by_descending_volume24h() -> None:
     assert [r["instrument_id"] for r in ranks] == [BTC, "SHIB-USD-PERP.DYDX"]
     assert [r["rank"] for r in ranks] == [1, 2]
     assert {(r["venue"], r["venue_kind"], r["market"]) for r in ranks} == {("DYDX", "dex", "perp")}
+    assert [r["symbol"] for r in ranks] == ["BTC", "SHIB"]
 
 
 def test_market_distinguishes_spot_from_linear() -> None:

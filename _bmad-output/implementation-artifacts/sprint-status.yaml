@@ -341,7 +341,7 @@ development_status:
   epic-28-retrospective: optional
 
   epic-29: backlog
-  29-1-exchange-symbol-columns-and-mode-toggle-on-web-rankings: ready-for-dev
+  29-1-exchange-symbol-columns-and-mode-toggle-on-web-rankings: done
   29-2-collector-pane-shows-every-venue-plan: ready-for-dev
   29-3-venue-cutover-bybit-hyperliquid-proven-then-dydx-stopped: ready-for-dev
   29-4-runtime-collection-control-bybit-hyperliquid: ready-for-dev

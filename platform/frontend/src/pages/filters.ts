@@ -30,7 +30,9 @@ export function compare(actual: unknown, op: FilterOperator, value: number | str
   }
 }
 
-/** AND across every condition, order-preserving (rankings are never re-sorted client-side). */
+/** AND across every condition, order-preserving: rows keep the order they came in (message
+ * order, the true rank). Sorting is not a filter's job -- it is RankingsPage's explicit
+ * viewer choice (the Symbol/Exchange headers, Story 29.1), applied after the filters. */
 export function applyFilters<T>(
   rows: T[],
   conditions: FilterCondition[],

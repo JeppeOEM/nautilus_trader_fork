@@ -633,6 +633,15 @@ computation. The same module also holds the Technicals tab's per-coin
 values (`technicals_values`, Story 24.2): each column's latest value through the chart's own
 indicator dispatch over the chart's own candles -- no indicator or ranking math of its own.
 
+The page's pinned identity columns are not part of `RANKING_COLS` and not in the mirror: Rank
+(the row's position in the message), Symbol (the rank entry's `symbol`), Exchange (`venue`, with
+`market` as a dim tag: `BYBIT · spot`) and Instrument (`instrument_id`), in that order, on both
+tabs (Story 29.1). Symbol and Exchange are sortable -- a header click cycles ascending,
+descending, then back to message order; an Exchange sort groups a venue's markets (`perp`
+before `spot` ascending) before the rank tie-break; ties break by rank, a row missing the field
+sorts last, and every row keeps its message rank -- and filterable with `=` (`Symbol`, `Exchange (venue)`).
+The page never derives a symbol from the id itself. `[amended 2026-09-28: Story 29.1]`
+
 ### 2.11 Price alerts (the `alerting/` context, Story 24.3, was `data_api/alerts.py`)
 
 **Store:** `alerts.toml` (`ALERTS_PATH`, default `platform/data_api/alerts.toml`; compose sets
@@ -744,6 +753,17 @@ snapshot within the last 30 seconds (`STALE_NS`, reusing OBS-01's
 "pipeline failure, not quiet market" threshold verbatim; stamped on arrival). An instrument
 silent for longer is listed in `stale_instrument_ids` for an hour, then aged out (its state
 dropped, `RankingBoard.age_out`, Story 25.2). Each row combines:
+
+- Identity fields, first in the entry and in this order: `instrument_id`; `venue`
+  (`kernel.venues.venue_of`: `BYBIT`); `symbol`, the base coin (`kernel.venues.base_symbol`:
+  `BTCUSDT-LINEAR.BYBIT` -> `BTC`, `km:US500-USD-PERP.HYPERLIQUID` -> `km:US500`; a Bybit head
+  with an unlisted quote such as `ETHBTC` is kept whole, never guessed); `venue_kind`
+  (`cex`/`dex`); `market` (`perp`/`spot`). `rank` comes last (below). All are derived from the id
+  on every publish (SIGNAL-01): `metrics.db` stores none of them. `symbol` was added in Story
+  29.1 as an added field only -- every earlier field keeps its bytes and order
+  (`ranking/tests/test_replay.py` strips it and re-hashes against the 25.2 recording); a message
+  from an older producer has no `symbol`, and the web page shows `—` for it.
+  `[amended 2026-09-28: Story 29.1]`
 
 - Live-tick fields from §3.2's indicators (`InstrumentMetrics.fast_metrics`):
   `ofi_10_z`, `ofi_3/5/10`, `obi_3/5/10`, `microprice`, `microprice_lean`

@@ -608,3 +608,14 @@ not just restarted.
       read-only mount moved to `/app/strategy_source/strategy.py`).
 - [ ] After 10 minutes, `GET /api/errors` is flat against the hour before the deploy for all
       services (no new site).
+
+### 29-1 Symbol and Exchange on the web rankings (commit: this story's)
+
+- [ ] On the VPS, pull this commit and run `make redeploy-no-paper` from `platform/`. It rebuilds
+      and restarts `ranking_engine`, which now publishes `symbol` on every `rankings:live` rank
+      entry, and `data_api`, which serves the new rankings page. No collector, config, env var,
+      compose service or bind mount changed.
+- [ ] Open the web rankings page. Every row shows Symbol and Exchange between Rank and Instrument
+      (e.g. `BTC` / `BYBIT · perp`), and clicking Symbol puts the same coin's rows from different
+      exchanges next to each other.
+- [ ] After 10 minutes, `GET /api/errors` is flat against the hour before the deploy (no new site).

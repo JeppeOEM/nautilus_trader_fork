@@ -37,6 +37,7 @@ from kernel.indicators import mid_price as calc_mid_price
 from kernel.indicators import spread as calc_spread
 from kernel.indicators import trade_aggregates
 from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.venues import base_symbol
 from kernel.venues import market_kind
 from kernel.venues import venue_kind
 from kernel.venues import venue_of
@@ -436,6 +437,7 @@ class RankingBoard:
         row = {
             "instrument_id": iid,
             "venue": (venue := venue_of(iid)),
+            "symbol": base_symbol(iid),
             "venue_kind": venue_kind(venue),
             "market": market_kind(iid),
             "volume24h": reading.value_usd if reading is not None else None,
