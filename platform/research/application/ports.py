@@ -176,6 +176,24 @@ class MarketFrames(Protocol):
         self, instrument_id: str, bar_seconds: int, *, start: str | int, end: str | int
     ) -> pd.DataFrame: ...
 
+    def bar_coverage(
+        self, instrument_id: str, bar_seconds: int, *, start: str | int, end: str | int
+    ) -> list[tuple[int, int]]:
+        """
+        Return the `[start_ns, end_ns)` spans of the maximal runs of stored `bar_seconds` buckets whose
+        whole bar lies in `[start, end)`, oldest first; `FileNotFoundError` without a store (as
+        `bars`), so a missing store is never read as an outage: each span is a window `bars` reads without raising, and the holes between spans are buckets never
+        observed (a collector outage) or outside the store (Story 27.4).
+        """
+        ...
+
+    def same_symbol(self, instrument_id: str) -> list[str]:
+        """
+        Return the catalog's defined ids trading the same asset (`kernel.venues.asset_key`), itself
+        included, sorted by venue then id; `[]` when the id has no asset key (Story 27.4).
+        """
+        ...
+
     def funding(self, instrument_id: str, *, start: str | int, end: str | int) -> pd.DataFrame: ...
 
     def open_interest(

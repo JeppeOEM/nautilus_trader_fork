@@ -14,7 +14,8 @@
 # -------------------------------------------------------------------------------------------------
 """
 Correlation of return series: alignment, pairwise-complete Pearson, lead-lag and clustering
-(Story 27.1), numpy only.
+(Story 27.1), plus the rolling correlation, the single-linkage merge order, the lead-lag peak and
+the basis in basis points (Story 27.4); numpy only.
 
 Gaps stay gaps: a timestamp one series lacks is NaN in the aligned matrix, and every statistic here
 uses only the rows where both of its inputs are finite (pairwise-complete), never a filled value.
@@ -22,9 +23,12 @@ uses only the rows where both of its inputs are finite (pairwise-complete), neve
 
 import math
 from collections.abc import Mapping
+from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import NamedTuple
 
 import numpy as np
+from numpy.lib.stride_tricks import sliding_window_view
 
 from research.domain.returns import ReturnSeries
 
@@ -148,37 +152,99 @@ class CorrelationMatrix:
         return float(self.values[self.ids.index(a), self.ids.index(b)])
 
 
-def correlation_matrix(aligned: AlignedReturns) -> CorrelationMatrix:
-    """Pairwise-complete Pearson correlation of every pair of columns."""
-    n = len(aligned.ids)
+def correlation_of(ids: Sequence[str], columns: np.ndarray) -> CorrelationMatrix:
+    """
+    Pairwise-complete Pearson correlation of every pair of value columns (`columns[:, j]` is
+    `ids[j]`), whatever the values are -- returns, funding levels, open-interest changes. Each pair
+    uses only the rows where both are finite; nothing is filled.
+    """
+    values_in = np.asarray(columns, dtype=np.float64)
+    n = len(ids)
+    if values_in.ndim != 2 or values_in.shape[1] != n:
+        raise ValueError("columns must be (rows, len(ids))")
     values = np.full((n, n), np.nan)
     for i in range(n):
         for j in range(i, n):
-            rho = _pearson(aligned.matrix[:, i], aligned.matrix[:, j])
+            rho = _pearson(values_in[:, i], values_in[:, j])
             if i == j and not math.isnan(rho):
                 rho = 1.0
             values[i, j] = values[j, i] = rho
-    return CorrelationMatrix(aligned.ids, values)
+    return CorrelationMatrix(tuple(ids), values)
 
 
-def lead_lag(a: np.ndarray, b: np.ndarray, max_lag: int) -> list[tuple[int, float]]:
+def correlation_matrix(aligned: AlignedReturns) -> CorrelationMatrix:
+    """Pairwise-complete Pearson correlation of every pair of columns (`correlation_of`)."""
+    return correlation_of(aligned.ids, aligned.matrix)
+
+
+def rolling_correlation(
+    a: np.ndarray, b: np.ndarray, window: int, min_pairs: int | None = None
+) -> np.ndarray:
+    """
+    Pearson correlation of each trailing `window` rows of two aligned series, at the window's last
+    row: pairwise-complete inside the window, NaN before the window fills and where the window
+    holds fewer than `min_pairs` finite pairs (default `max(2, window // 2)`) -- a correlation
+    over a handful of pairs in a mostly-empty window is not reported as the window's.
+
+    `window < 2`, `min_pairs` outside `[2, window]` or unequal lengths raise `ValueError`.
+
+    Known limit: one `_pearson` per full-enough window, O(n * window) -- a day of 1 m returns with
+    a one-day window is ~2 M operations, fine; a day of 1 s returns with a 1 h window is ~3 * 10^8.
+    Upgrade path: masked cumulative sums (sum, sum of squares, cross sum over finite pairs), O(n).
+    """
+    x = np.asarray(a, dtype=np.float64)
+    y = np.asarray(b, dtype=np.float64)
+    if x.shape != y.shape or x.ndim != 1:
+        raise ValueError("a and b must be aligned 1-D series of equal length")
+    if window < 2:
+        raise ValueError(f"window must be at least 2 rows, got {window}")
+    floor = max(2, window // 2) if min_pairs is None else min_pairs
+    if not 2 <= floor <= window:
+        raise ValueError(f"min_pairs must be in [2, {window}], got {floor}")
+    out = np.full(len(x), np.nan)
+    if len(x) < window:
+        return out
+    finite = (np.isfinite(x) & np.isfinite(y)).astype(np.int64)
+    pairs = np.convolve(finite, np.ones(window, dtype=np.int64), mode="valid")
+    xs, ys = sliding_window_view(x, window), sliding_window_view(y, window)
+    for k in np.flatnonzero(pairs >= floor).tolist():
+        out[k + window - 1] = _pearson(xs[k], ys[k])
+    return out
+
+
+def _lagged(a: np.ndarray, b: np.ndarray, lag: int) -> tuple[np.ndarray, np.ndarray]:
+    """Return the rows `(a[t], b[t + lag])` pair up, for a lag of either sign."""
+    n = len(a)
+    return (a[: n - lag], b[lag:]) if lag >= 0 else (a[-lag:], b[: n + lag])
+
+
+def lagged_pairs(a: np.ndarray, b: np.ndarray, lag: int) -> int:
+    """How many rows hold a finite `(a[t], b[t + lag])` pair: the sample behind that lag's rho."""
+    x, y = _lagged(a, b, lag)
+    return int((np.isfinite(x) & np.isfinite(y)).sum())
+
+
+def lead_lag(
+    a: np.ndarray, b: np.ndarray, max_lag: int, min_pairs: int = 2
+) -> list[tuple[int, float]]:
     """
     `(lag, corr(a[t], b[t + lag]))` for every lag in `-max_lag..max_lag`, pairwise-complete.
 
     A positive lag with the highest correlation means `a` leads `b` by that many periods. `a` and
-    `b` must be aligned (same length, same timestamps -- `AlignedReturns.column`).
+    `b` must be aligned (same length, same timestamps -- `AlignedReturns.column`). Invariant: a lag
+    whose shifted rows hold fewer than `min_pairs` finite pairs is NaN, so no lag's rho rests on a
+    handful of pairs (two pairs are ±1 by construction); `min_pairs < 2` raises `ValueError`.
     """
     if len(a) != len(b):
         raise ValueError("a and b must be aligned (equal length)")
     if max_lag < 0 or max_lag >= len(a):
         raise ValueError(f"max_lag must be in [0, {len(a) - 1}], got {max_lag}")
-    n = len(a)
+    if min_pairs < 2:
+        raise ValueError(f"min_pairs must be >= 2, got {min_pairs}")
     out = []
     for lag in range(-max_lag, max_lag + 1):
-        if lag >= 0:
-            out.append((lag, _pearson(a[: n - lag], b[lag:])))
-        else:
-            out.append((lag, _pearson(a[-lag:], b[: n + lag])))
+        rho = _pearson(*_lagged(a, b, lag)) if lagged_pairs(a, b, lag) >= min_pairs else math.nan
+        out.append((lag, rho))
     return out
 
 
@@ -199,6 +265,51 @@ def _closest_pair(distance: np.ndarray, clusters: list[list[int]]) -> tuple[floa
     return best
 
 
+class MergeStep(NamedTuple):
+    """One single-linkage merge: the two clusters' ids (each in `matrix.ids` order) and 1 - rho."""
+
+    left: tuple[str, ...]
+    right: tuple[str, ...]
+    distance: float
+
+
+def _single_linkage(
+    matrix: CorrelationMatrix, threshold: float
+) -> tuple[list[MergeStep], list[list[int]]]:
+    """
+    Run the one single-linkage loop `cluster` and `merge_order` share: merge the closest pair
+    (`_closest_pair`, earliest pair on a tie) while its distance is finite and at most
+    `threshold`; return the merges in order and the final clusters (member positions, sorted).
+    """
+    distance = 1.0 - matrix.values
+    clusters = [[i] for i in range(len(matrix.ids))]
+    steps: list[MergeStep] = []
+    while len(clusters) > 1:
+        d, p, q = _closest_pair(distance, clusters)
+        if math.isinf(d) or d > threshold:
+            break
+        steps.append(
+            MergeStep(
+                tuple(matrix.ids[i] for i in clusters[p]),
+                tuple(matrix.ids[i] for i in clusters[q]),
+                d,
+            )
+        )
+        clusters[p] = sorted(clusters[p] + clusters[q])
+        del clusters[q]
+    return steps, clusters
+
+
+def merge_order(matrix: CorrelationMatrix) -> list[MergeStep]:
+    """
+    Return the single-linkage dendrogram as an ordered list: every merge `cluster` would make with no
+    threshold, closest first, each with its distance `1 - rho`. A pair with a NaN correlation
+    never links, so the list stops where only such pairs remain (fewer than `n - 1` steps).
+    `left` is the cluster holding the earlier id in `matrix.ids`.
+    """
+    return _single_linkage(matrix, math.inf)[0]
+
+
 def cluster(matrix: CorrelationMatrix, threshold: float) -> list[list[str]]:
     """
     Single-linkage agglomerative clustering on the distance `1 - rho`: merge the two closest
@@ -213,13 +324,38 @@ def cluster(matrix: CorrelationMatrix, threshold: float) -> list[list[str]]:
     """
     if not (math.isfinite(threshold) and 0.0 <= threshold <= 2.0):
         raise ValueError(f"threshold is a distance 1 - rho, in [0, 2]; got {threshold}")
-    distance = 1.0 - matrix.values
-    clusters = [[i] for i in range(len(matrix.ids))]
-    while len(clusters) > 1:
-        d, p, q = _closest_pair(distance, clusters)
-        if math.isinf(d) or d > threshold:
-            break
-        clusters[p] = sorted(clusters[p] + clusters[q])
-        del clusters[q]
+    clusters = _single_linkage(matrix, threshold)[1]
     clusters.sort(key=lambda members: members[0])
     return [[matrix.ids[i] for i in members] for members in clusters]
+
+
+def peak_lag(pairs: Sequence[tuple[int, float]]) -> tuple[int, float] | None:
+    """
+    Return the `(lag, rho)` of `lead_lag`'s output with the highest finite correlation; on a tie the
+    smallest `|lag|`, then the negative lag. None when no lag has a finite correlation (no
+    overlapping returns), so a peak is never read from NaNs.
+    """
+    finite = [(lag, rho) for lag, rho in pairs if math.isfinite(rho)]
+    if not finite:
+        return None
+    return min(finite, key=lambda pair: (-pair[1], abs(pair[0]), pair[0]))
+
+
+def basis_bps(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """
+    Return `(a / b - 1) * 1e4` per aligned row: how far price `a` sits above price `b`, in basis points
+    of `b`. NaN where either is NaN (a gap stays a gap); a price that is infinite or not positive
+    is a defect and raises `ValueError`, never a basis.
+    """
+    x = np.asarray(a, dtype=np.float64)
+    y = np.asarray(b, dtype=np.float64)
+    if x.shape != y.shape:
+        raise ValueError("a and b must be aligned (equal shape)")
+    for prices in (x, y):
+        present = prices[~np.isnan(prices)]
+        if np.isinf(present).any() or (present <= 0).any():
+            raise ValueError("a price must be finite and positive (NaN marks a gap)")
+    out = np.full(x.shape, np.nan)
+    both = ~np.isnan(x) & ~np.isnan(y)
+    out[both] = (x[both] / y[both] - 1.0) * 1e4
+    return out

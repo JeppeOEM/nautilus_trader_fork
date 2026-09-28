@@ -327,7 +327,7 @@ development_status:
   27-1-research-domain-analysis-values-and-application-ports: done
   27-2-executable-notebooks-and-catalog-inspection-notebook: done
   27-3-microstructure-notebook: done
-  27-4-correlation-and-cross-venue-notebook: ready-for-dev
+  27-4-correlation-and-cross-venue-notebook: done
   27-5-backtest-evaluation-notebook-sweeps-and-walk-forward: ready-for-dev
   27-6-monte-carlo-and-robustness-notebook: ready-for-dev
   27-7-candlestick-pattern-detector-kernel-chart-screener-scanner: ready-for-dev

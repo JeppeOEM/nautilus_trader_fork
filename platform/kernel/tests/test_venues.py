@@ -20,11 +20,15 @@ table).
 
 import pytest
 
+from kernel.venues import USD_QUOTES
+from kernel.venues import AssetKey
 from kernel.venues import MalformedInstrumentId
+from kernel.venues import asset_key
 from kernel.venues import bybit_category
 from kernel.venues import has_venue
 from kernel.venues import market_kind
 from kernel.venues import market_suffix
+from kernel.venues import same_asset
 from kernel.venues import venue_kind
 from kernel.venues import venue_of
 
@@ -117,3 +121,59 @@ def test_market_kind_reads_a_dashless_symbol_whole_as_before() -> None:
     assert market_suffix("SPOT.BYBIT") is None
     with pytest.raises(MalformedInstrumentId):
         bybit_category("LINEAR.BYBIT")
+
+
+_BTC_PERP = AssetKey("BTC", "USD", "perp")
+
+# Real id shapes (Story 27.4) -> the asset they trade, or None where the tables cannot read them.
+_ASSET_KEYS = [
+    ("BTC-USD-PERP.DYDX", _BTC_PERP),
+    ("BTCUSDT-LINEAR.BYBIT", _BTC_PERP),
+    ("BTCPERP-LINEAR.BYBIT", _BTC_PERP),  # Bybit's USDC perpetual
+    ("BTC-USD-PERP.HYPERLIQUID", _BTC_PERP),
+    ("ETH-USD-PERP.DYDX", AssetKey("ETH", "USD", "perp")),
+    ("1000PEPEUSDT-LINEAR.BYBIT", AssetKey("1000PEPE", "USD", "perp")),
+    ("BTCUSDT-SPOT.BYBIT", AssetKey("BTC", "USD", "spot")),
+    ("BTCUSDC-SPOT.BYBIT", AssetKey("BTC", "USD", "spot")),
+    ("BTCUSDT-25SEP26-LINEAR.BYBIT", None),  # a dated future
+    ("BTCUSD-INVERSE.BYBIT", None),
+    ("ETHBTC-SPOT.BYBIT", None),
+    ("BTCUSD1-SPOT.BYBIT", None),
+    ("BBSOLSOL-SPOT.BYBIT", None),
+    ("BTCPERP-SPOT.BYBIT", None),  # PERP names a linear contract only
+    ("USDT-LINEAR.BYBIT", None),  # no base
+    ("HYPE-USDC-SPOT.HYPERLIQUID", None),
+    ("km:US500-USD-PERP.HYPERLIQUID", None),
+    ("BTC-USD-PERP-X.DYDX", None),
+    ("BTC-USD-PERP.NEWVENUE", None),
+    ("garbage", None),
+    ("", None),
+]
+
+
+@pytest.mark.parametrize(("iid", "key"), _ASSET_KEYS)
+def test_asset_key_reads_every_real_shape_and_refuses_the_rest(
+    iid: str, key: AssetKey | None
+) -> None:
+    assert asset_key(iid) == key
+
+
+def test_the_usd_quote_class_is_the_dollar_and_its_stablecoins() -> None:
+    assert frozenset({"USD", "USDC", "USDT"}) == USD_QUOTES
+
+
+@pytest.mark.parametrize(
+    ("a", "b", "same"),
+    [
+        ("BTC-USD-PERP.DYDX", "BTCUSDT-LINEAR.BYBIT", True),
+        ("BTC-USD-PERP.DYDX", "BTCPERP-LINEAR.BYBIT", True),
+        ("BTC-USD-PERP.DYDX", "BTC-USD-PERP.HYPERLIQUID", True),
+        ("BTC-USD-PERP.DYDX", "BTCUSDT-SPOT.BYBIT", False),  # a different kind
+        ("BTC-USD-PERP.DYDX", "ETH-USD-PERP.DYDX", False),
+        ("garbage", "garbage", False),  # no key never matches, not even itself
+        ("BTCUSDT-25SEP26-LINEAR.BYBIT", "BTCUSDT-25SEP26-LINEAR.BYBIT", False),
+    ],
+)
+def test_same_asset(a: str, b: str, same: bool) -> None:
+    assert same_asset(a, b) is same
+    assert same_asset(b, a) is same

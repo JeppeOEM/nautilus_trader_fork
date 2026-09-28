@@ -20,7 +20,11 @@ Six instruments, two per venue (`INSTRUMENTS`), over the ten minutes `2026-09-01
 `2026-09-02 00:05:00` UTC (so two UTC days): per second one `DydxSecondSnapshot` with 20 levels a
 side, stamped `S + 0.5 s` (the venue-time convention), a `MarkPriceUpdate` and an
 `IndexPriceUpdate` at `S + 0.25 s`, and `TradeTick`s in two of every three seconds; a
-`FundingRateUpdate` and an `OpenInterest` every minute. Everything is written through
+`FundingRateUpdate` (with the venue's real `interval`: 60 minutes on dYdX and Hyperliquid, 480 on
+Bybit) and an `OpenInterest` every minute. Every mid moves by one shared, seeded random wiggle
+(`random.Random(27)`, integer ticks in [-11, 11]), so the same asset's legs co-move across venues
+(`FixturePaths.same_asset`) and a lead-lag peak is unique -- a periodic wiggle would tie peaks one
+period apart. Everything is written through
 `ParquetDataCatalog.write_data()` as real Nautilus objects; prices and sizes are built from integer
 ticks with `Price.from_raw`/`Quantity.from_raw` (never a float before the `Price`), and each
 snapshot's eight trade columns are `kernel.fold.fold_trades` over that second's own ticks, so the
@@ -38,6 +42,9 @@ would:
 - **duplicate trade** -- one `BTCUSDT-LINEAR.BYBIT` trade is archived twice (a replay, same
   `trade_id`); its snapshot folds it once;
 - **provisional day** -- `2026-09-02` is never reconciled (`verified_day` is `2026-09-01`);
+- **leading venue** -- `BTCUSDT-LINEAR.BYBIT` reads the shared wiggle `LEAD_SECONDS` (2 s) ahead of
+  every other instrument, so its 1 s returns lead dYdX's and Hyperliquid's BTC by exactly 2 s
+  (Story 27.4);
 - **ledger** -- hand-written 23.3-format lines (`observability.error_ledger`'s field set): a
   restart and two `collector.crossed_book` lines (one carrying `suppressed: 3`) for `collector`, a
   `collector.book_sequence` line for `bybit_collector`, and one line before the window.
@@ -47,6 +54,7 @@ research code reads it); `metrics_db_path` names where one would be.
 """
 
 import json
+import random
 from dataclasses import dataclass
 from dataclasses import field
 from datetime import UTC
@@ -100,6 +108,13 @@ CROSSED_INSTRUMENT = "ETHUSDT-LINEAR.BYBIT"
 CROSSED_SECOND = 300  # 00:00:00, the first second of day 2
 DUPLICATE_INSTRUMENT = "BTCUSDT-LINEAR.BYBIT"
 DUPLICATE_SECOND = 100
+LEAD_INSTRUMENT = "BTCUSDT-LINEAR.BYBIT"
+LEAD_SECONDS = 2
+FUNDING_INTERVALS = {"DYDX": 60, "BYBIT": 480, "HYPERLIQUID": 60}  # minutes, as the venues publish
+# The shared mid wiggle (price ticks), one entry per second plus the lead's look-ahead; a fixed
+# seed, so every session builds the same archive.
+_WIGGLE_RNG = random.Random(27)  # noqa: S311 -- a reproducible fixture, not a secret
+_WIGGLE = tuple(_WIGGLE_RNG.randint(-11, 11) for _ in range(SECONDS + LEAD_SECONDS))
 
 
 @dataclass(frozen=True)
@@ -124,6 +139,9 @@ _SPECS = (
     _Spec("ETH-USD-PERP.HYPERLIQUID", ETH, USDC, USDC, 2, 4, 250_030),
 )
 INSTRUMENTS = tuple(spec.iid for spec in _SPECS)
+# The same-asset groups, sorted by venue then id (`MarketFrames.same_symbol`'s order).
+_BTC = ("BTCUSDT-LINEAR.BYBIT", "BTC-USD-PERP.DYDX", "BTC-USD-PERP.HYPERLIQUID")
+_ETH = ("ETHUSDT-LINEAR.BYBIT", "ETH-USD-PERP.DYDX", "ETH-USD-PERP.HYPERLIQUID")
 
 
 @dataclass(frozen=True)
@@ -140,6 +158,8 @@ class FixtureDefects:
     duplicate_trade_id: str
     verified_day: str
     provisional_day: str
+    lead_instrument: str  # whose 1 s returns lead its asset's other legs
+    lead_seconds: int  # by how many seconds
     ledger_counts: dict[tuple[str, str], int] = field(default_factory=dict)
     ledger_restarts: dict[str, int] = field(default_factory=dict)
 
@@ -156,6 +176,9 @@ class FixturePaths:
     start: str
     end: str
     defects: FixtureDefects
+    # Each instrument -> every fixture id of the same asset (`kernel.venues.asset_key`), itself
+    # included, sorted by venue then id: what `MarketFrames.same_symbol` must return.
+    same_asset: dict[str, tuple[str, ...]] = field(default_factory=dict)
 
     def env(self) -> dict[str, str]:
         """Return the notebooks' environment (`research/notebooks/_params.py`) for this fixture."""
@@ -183,8 +206,12 @@ def _size(ticks: int, precision: int) -> Quantity:
 
 
 def _mid(spec: _Spec, second: int) -> int:
-    """Return a deterministic wiggle around the spec's mid, in price ticks."""
-    return spec.mid_ticks + (second * 7) % 23 - 11
+    """
+    Return the spec's mid plus the shared seeded wiggle, in price ticks; the lead instrument reads
+    the wiggle `LEAD_SECONDS` ahead.
+    """
+    ahead = LEAD_SECONDS if spec.iid == LEAD_INSTRUMENT else 0
+    return spec.mid_ticks + _WIGGLE[second + ahead]
 
 
 def _book(spec: _Spec, second: int) -> tuple[list[int], list[int]]:
@@ -323,7 +350,10 @@ def _rows(spec: _Spec) -> _Rows:
         )
         if second % 60 == 0:
             at = _second_ns(second)
-            rows.funding.append(FundingRateUpdate(iid, Decimal("0.0001"), at, at))
+            interval = FUNDING_INTERVALS[venue_of(spec.iid)]
+            rows.funding.append(
+                FundingRateUpdate(iid, Decimal("0.0001"), at, at, interval=interval)
+            )
             rows.open_interest.append(OpenInterest(iid, Decimal(f"{1_000 + second}.5"), at, at))
     rows.trades.sort(key=lambda t: t.ts_init)
     return rows
@@ -366,6 +396,8 @@ def _defects(rows: dict[str, _Rows], ledger: tuple[dict, dict]) -> FixtureDefect
         duplicate_trade_id=f"{DUPLICATE_INSTRUMENT.split('.')[0]}-{DUPLICATE_SECOND}-0",
         verified_day="2026-09-01",
         provisional_day="2026-09-02",
+        lead_instrument=LEAD_INSTRUMENT,
+        lead_seconds=LEAD_SECONDS,
         ledger_counts=ledger[0],
         ledger_restarts=ledger[1],
     )
@@ -440,4 +472,12 @@ def build(root: Path) -> FixturePaths:
         start=START,
         end=END,
         defects=defects,
+        same_asset={
+            "BTC-USD-PERP.DYDX": _BTC,
+            "BTCUSDT-LINEAR.BYBIT": _BTC,
+            "BTC-USD-PERP.HYPERLIQUID": _BTC,
+            "ETH-USD-PERP.DYDX": _ETH,
+            "ETHUSDT-LINEAR.BYBIT": _ETH,
+            "ETH-USD-PERP.HYPERLIQUID": _ETH,
+        },
     )

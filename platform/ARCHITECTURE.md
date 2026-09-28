@@ -346,7 +346,13 @@ the old signals package and the dYdX collector's notebooks]`.
   `research/tests/test_notebooks.py`: `01_catalog_inspection` (what the archive holds over a
   window) and `02_microstructure` (spread, depth, OBI/OFI, microprice edge, trade flow and
   impact, funding/basis/OI, return autocorrelation, volatility signature and realised
-  volatility per instrument over a window) `[amended 2026-09-28: Story 27.3]`. Legacy: `backtest.ipynb` (replaced by Story 27.5) and
+  volatility per instrument over a window) `[amended 2026-09-28: Story 27.3]` and
+  `03_correlation` (return correlation at 1 m/5 m/1 h/1 d from the candle store's bars, clustered
+  heatmaps, rolling correlation against an anchor, single-linkage clusters with merge distances,
+  funding and OI-change correlation, a cluster built into a `RunSpec` that it does not run, and per
+  asset the cross-venue mid basis, lead-lag peak in words, funding differential and volume share;
+  every number from `research.domain.correlation` and `research.application.aligned`, same-asset
+  matching from `kernel.venues.asset_key`) `[amended 2026-09-28: Story 27.4]`. Legacy: `backtest.ipynb` (replaced by Story 27.5) and
   `candlestick_pattern_scanner.ipynb` (a `Known limit:` notebook over the retired minute-bar
   directory, replaced by Story 27.7); `dydx_catalog_pandas.ipynb` was deleted in Story 27.2.
   `README.md` is the notebook index, `BACKTESTING.md` the backtest how-to.

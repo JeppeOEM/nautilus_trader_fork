@@ -27,15 +27,31 @@ two contexts can never disagree about what an id means. A new venue is one more 
 `venue_kind` is deliberately not Nautilus's `Venue.is_dex()`: that only fires on a
 `"<Chain>:<DexType>"` venue string behind the `defi` feature, and none of dYdX/Bybit/Hyperliquid
 use that format, so it would answer wrongly for all three (19.6).
+
+Same-asset matching (Story 27.4): `asset_key` reads an id's base, quote class and kind, so the
+same asset on dYdX, Bybit and Hyperliquid is found without research ever splitting an id.
 """
 
 from types import MappingProxyType
+from typing import NamedTuple
 
 
 VENUE_KINDS = MappingProxyType({"DYDX": "dex", "HYPERLIQUID": "dex", "BYBIT": "cex"})
 
 _PERP_SUFFIXES = frozenset({"PERP", "LINEAR", "INVERSE"})
 _BYBIT_CATEGORIES = MappingProxyType({"LINEAR": "linear", "INVERSE": "inverse", "SPOT": "spot"})
+
+# Quotes that are one quote class for same-asset matching (Story 27.4): the dollar and the two
+# dollar stablecoins. Matching only -- a basis between a USDT and a USDC leg still carries the
+# USDT/USDC spread, which this table deliberately does not remove.
+USD_QUOTES = frozenset({"USD", "USDC", "USDT"})
+# The quote a Bybit symbol head ends with (`BTCUSDT`), per the head's suffix. `PERP` is Bybit's
+# USDC perpetual (`BTCPERP-LINEAR`), valid only on `-LINEAR`. Any other suffix (`BTCUSD1`,
+# `ETHBTC`, `BBSOLSOL`) is not read: no guess at where the base ends.
+_BYBIT_QUOTE_SUFFIXES = MappingProxyType({"USDT": "USDT", "USDC": "USDC", "PERP": "USDC"})
+_BYBIT_ASSET_KINDS = MappingProxyType({"LINEAR": "perp", "SPOT": "spot"})
+# Venues whose symbols are exactly `BASE-QUOTE-PERP` (dYdX v4 markets, Hyperliquid perps).
+_DASHED_PERP_VENUES = frozenset({"DYDX", "HYPERLIQUID"})
 
 
 class MalformedInstrumentId(ValueError):
@@ -102,3 +118,73 @@ def bybit_category(instrument_id: str) -> str:
     if category is None:
         raise MalformedInstrumentId(f"{instrument_id}: no Bybit category for this id suffix")
     return category
+
+
+class AssetKey(NamedTuple):
+    """
+    What an instrument trades, venue aside: `base` (`BTC`), `quote` class (`USD` for every
+    `USD_QUOTES` member) and `kind` (`perp` | `spot`). Invariant: two ids are the same asset
+    exactly when their keys are equal and neither is None (`same_asset`).
+    """
+
+    base: str
+    quote: str
+    kind: str
+
+
+def _quote_class(quote: str) -> str:
+    return "USD" if quote in USD_QUOTES else quote
+
+
+def _dashed_perp(symbol: str) -> AssetKey | None:
+    """`BASE-QUOTE-PERP` exactly (three segments, an alphanumeric base and quote), else None."""
+    parts = symbol.split("-")
+    if len(parts) != 3 or parts[2] != "PERP":
+        return None
+    base, quote = parts[0], parts[1]
+    if not (base.isalnum() and quote.isalnum()):
+        return None
+    return AssetKey(base, _quote_class(quote), "perp")
+
+
+def _bybit_asset(symbol: str) -> AssetKey | None:
+    """`<head>-LINEAR|SPOT` exactly, the head ending in a `_BYBIT_QUOTE_SUFFIXES` key, else None."""
+    head, dash, suffix = symbol.partition("-")
+    kind = _BYBIT_ASSET_KINDS.get(suffix)
+    if not dash or kind is None:
+        return None
+    quote = _BYBIT_QUOTE_SUFFIXES.get(head[-4:])
+    base = head[:-4]
+    if quote is None or not base.isalnum() or (head.endswith("PERP") and kind != "perp"):
+        return None
+    return AssetKey(base, _quote_class(quote), kind)
+
+
+def asset_key(instrument_id: str) -> AssetKey | None:
+    """
+    Return the id's `AssetKey`, or None when these tables cannot read it (never raises, never
+    guesses): dYdX and Hyperliquid take exactly `BASE-QUOTE-PERP` (so Hyperliquid spot and
+    builder-dex ids such as `km:US500-USD-PERP` are None); Bybit takes exactly `<head>-LINEAR` or
+    `<head>-SPOT` whose head ends in `USDT`, `USDC` or (linear only) `PERP` after a non-empty
+    alphanumeric base, so a dated future (`BTCUSDT-25SEP26-LINEAR`), an inverse contract and an
+    odd spot quote (`ETHBTC`, `BTCUSD1`) are None.
+
+    Known limit: a base named with a multiplier (`1000PEPEUSDT` on Bybit vs `kPEPE` on
+    Hyperliquid) never matches its other venues' base; upgrade path: a base-alias table here.
+    """
+    try:
+        venue = venue_of(instrument_id)
+    except MalformedInstrumentId:
+        return None
+    symbol = instrument_id.rpartition(".")[0]
+    if venue in _DASHED_PERP_VENUES:
+        return _dashed_perp(symbol)
+    if venue == "BYBIT":
+        return _bybit_asset(symbol)
+    return None
+
+
+def same_asset(a: str, b: str) -> bool:
+    """Whether both ids have an `AssetKey` and it is the same one (never raises)."""
+    key = asset_key(a)
+    return key is not None and key == asset_key(b)

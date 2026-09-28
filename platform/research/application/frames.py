@@ -40,6 +40,7 @@ from kernel.indicators import mid_price
 from kernel.indicators import spread
 from kernel.open_interest import OpenInterest
 from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.venues import asset_key
 from kernel.venues import venue_of
 
 from nautilus_trader.model.data import CustomData
@@ -249,6 +250,56 @@ class CatalogFrames:
             ],
             BARS_COLUMNS,
         )
+
+    def bar_coverage(
+        self, instrument_id: str, bar_seconds: int, *, start: str | int, end: str | int
+    ) -> list[tuple[int, int]]:
+        """
+        Return the ns spans `[first bucket start, last bucket close)` of the maximal runs of stored
+        buckets (traded or not) whose whole bar lies in `[start, end)`, oldest first; a venue with
+        no candle store raises `FileNotFoundError`, as `bars` does (a wrong `CANDLES_DIR` must not
+        read as an outage over the whole window). Invariant: `bars` over any one span never raises (every bucket
+        in it is stored, and it lies inside the store's coverage), and the buckets between two
+        spans were never observed -- so a caller reading span by span sees an outage, or a
+        window reaching past the store, as a hole, never as "no trades" and never as an error.
+        Reads only `bucket_starts` (the bucket starts, not the candles).
+        """
+        if bar_seconds not in BAR_SECONDS:
+            raise ValueError(f"the candle store keeps {BAR_SECONDS} second bars, not {bar_seconds}")
+        start_ns, end_ns = window_ns(start, end)
+        bar_ms = bar_seconds * 1000
+        first_ms = -(-start_ns // (bar_ms * NS_PER_MS)) * bar_ms
+        last_ms = end_ns // (bar_ms * NS_PER_MS) * bar_ms  # exclusive: the first bar past end
+        venue = venue_of(instrument_id)
+        with open_store(self._candles_dir, venue) as db:
+            if db is None:
+                raise FileNotFoundError(
+                    f"no candle store for {venue} in {self._candles_dir} "
+                    f"(expected {Path(self._candles_dir) / f'candles_{venue.lower()}.db'})"
+                )
+            starts = bucket_starts(db, instrument_id, bar_seconds, first_ms, last_ms)
+        spans: list[tuple[int, int]] = []
+        for t in starts:
+            if spans and spans[-1][1] == t * NS_PER_MS:
+                spans[-1] = (spans[-1][0], (t + bar_ms) * NS_PER_MS)
+            else:
+                spans.append((t * NS_PER_MS, (t + bar_ms) * NS_PER_MS))
+        return spans
+
+    def same_symbol(self, instrument_id: str) -> list[str]:
+        """
+        Return the catalog's instrument definitions (`ParquetDataCatalog.instruments()`) trading the same
+        asset as `instrument_id` (`kernel.venues.asset_key`: base, USD/USDC/USDT quote class, perp
+        or spot), the id itself included, sorted by venue then id; `[]` when the id has no asset
+        key. A definition says the venue lists it, not that the window holds its data: the window
+        read decides "collected".
+        """
+        key = asset_key(instrument_id)
+        if key is None:
+            return []
+        defined = {instrument.id.value for instrument in self._catalog.instruments()}
+        same = {iid for iid in defined if asset_key(iid) == key} | {instrument_id}
+        return sorted(same, key=lambda iid: (venue_of(iid), iid))
 
     def funding(self, instrument_id: str, *, start: str | int, end: str | int) -> pd.DataFrame:
         """`FundingRateUpdate` rows; `rate` is the venue's decimal rate as a float."""

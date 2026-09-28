@@ -37,19 +37,24 @@ from kernel.indicators import spread
 from kernel.open_interest import OpenInterest
 from kernel.second_snapshot import DydxSecondSnapshot
 
+from nautilus_trader.model.currencies import BTC
+from nautilus_trader.model.currencies import USDT
 from nautilus_trader.model.data import FundingRateUpdate
 from nautilus_trader.model.data import IndexPriceUpdate
 from nautilus_trader.model.data import MarkPriceUpdate
 from nautilus_trader.model.data import TradeTick
 from nautilus_trader.model.enums import AggressorSide
 from nautilus_trader.model.identifiers import InstrumentId
+from nautilus_trader.model.identifiers import Symbol
 from nautilus_trader.model.identifiers import TradeId
+from nautilus_trader.model.instruments import CurrencyPair
 from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 from research.application.frames import OBI_LEVELS
 from research.application.frames import SECONDS_COLUMNS
 from research.application.frames import CatalogFrames
+from research.tests.fixture_catalog import FixturePaths
 
 
 _IID = "BTC-USD-PERP.DYDX"
@@ -309,3 +314,82 @@ def test_objects_read_index_prices_through_the_kernel_reader(frames: CatalogFram
 def test_objects_is_bounded_like_every_read(frames: CatalogFrames) -> None:
     with pytest.raises(TypeError):
         frames.objects(TradeTick, _IID)  # type: ignore[call-arg]
+
+
+# --- Story 27.4: bar coverage and same-symbol discovery --------------------------------------
+
+
+def test_bar_coverage_is_one_span_over_a_contiguous_store(frames: CatalogFrames) -> None:
+    wide = frames.bar_coverage(_IID, 60, start=_DAY0 - NS_PER_DAY, end=_at(180) + NS_PER_DAY)
+    assert wide == [(_DAY0, _at(180))]  # a window past the store is clipped to what it holds
+    assert frames.bar_coverage(_IID, 60, start=_DAY0 + 1, end=_at(170)) == [(_at(60), _at(120))]
+
+
+def test_bar_coverage_splits_at_a_bucket_never_observed(tmp_path: Path) -> None:
+    snapshots = _write_catalog(tmp_path / "catalog")
+    outage = [s for s in snapshots if not _at(60) <= s.ts_event < _at(120)]
+    store = CandleStore(db_path_for_venue(tmp_path / "candles", "DYDX"))
+    store.apply(_IID, outage)
+    store.close()
+    frames = CatalogFrames(str(tmp_path / "catalog"), str(tmp_path / "candles"))
+    spans = frames.bar_coverage(_IID, 60, start=_DAY0 - NS_PER_DAY, end=_at(180) + NS_PER_DAY)
+    assert spans == [(_DAY0, _at(60)), (_at(120), _at(180))]
+    read = [frames.bars(_IID, 60, start=lo, end=hi)["t"].tolist() for lo, hi in spans]
+    assert read == [[_DAY0 // NS_PER_MS], [_at(120) // NS_PER_MS]]  # no span raises
+
+
+def test_bar_coverage_without_a_bucket_is_empty_and_without_a_store_raises(
+    frames: CatalogFrames, tmp_path: Path
+) -> None:
+    no_store = CatalogFrames(str(tmp_path), str(tmp_path / "nothing"))
+    with pytest.raises(FileNotFoundError, match="no candle store"):
+        no_store.bar_coverage(_IID, 60, start=_DAY0, end=_at(180))
+    assert frames.bar_coverage("ETH-USD-PERP.DYDX", 60, start=_DAY0, end=_at(180)) == []
+    with pytest.raises(ValueError, match="keeps"):
+        frames.bar_coverage(_IID, 7, start=_DAY0, end=_at(180))
+
+
+def test_same_symbol_on_the_fixture_is_the_three_venues(fixture_archive: FixturePaths) -> None:
+    frames = CatalogFrames(fixture_archive.catalog_path, fixture_archive.candles_dir)
+    for iid, expected in fixture_archive.same_asset.items():
+        assert frames.same_symbol(iid) == list(expected), iid
+    assert frames.same_symbol("BTC-USD-PERP.DYDX") == [
+        "BTCUSDT-LINEAR.BYBIT",
+        "BTC-USD-PERP.DYDX",
+        "BTC-USD-PERP.HYPERLIQUID",
+    ]
+
+
+def _spot(symbol: str) -> CurrencyPair:
+    return CurrencyPair(
+        instrument_id=InstrumentId.from_str(f"{symbol}.BYBIT"),
+        raw_symbol=Symbol(symbol),
+        base_currency=BTC,
+        quote_currency=USDT,
+        price_precision=2,
+        size_precision=6,
+        price_increment=Price.from_str("0.01"),
+        size_increment=Quantity.from_str("0.000001"),
+        lot_size=None,
+        max_quantity=None,
+        min_quantity=None,
+        max_notional=None,
+        min_notional=None,
+        max_price=None,
+        min_price=None,
+        margin_init=Decimal(0),
+        margin_maint=Decimal(0),
+        maker_fee=Decimal("0.001"),
+        taker_fee=Decimal("0.001"),
+        ts_event=0,
+        ts_init=0,
+    )
+
+
+def test_same_symbol_keeps_spot_apart_and_refuses_an_unreadable_id(tmp_path: Path) -> None:
+    catalog = ParquetDataCatalog(str(tmp_path))
+    catalog.write_data([_spot("BTCUSDT-SPOT"), _spot("BTCUSDC-SPOT"), _spot("ETHBTC-SPOT")])
+    frames = CatalogFrames(str(tmp_path), str(tmp_path))
+    assert frames.same_symbol("BTCUSDT-SPOT.BYBIT") == ["BTCUSDC-SPOT.BYBIT", "BTCUSDT-SPOT.BYBIT"]
+    assert frames.same_symbol("BTC-USD-PERP.DYDX") == ["BTC-USD-PERP.DYDX"]  # itself, no spot
+    assert frames.same_symbol("ETHBTC-SPOT.BYBIT") == []

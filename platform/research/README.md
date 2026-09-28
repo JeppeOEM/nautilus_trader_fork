@@ -13,6 +13,7 @@ values or `research.application`'s ports and services, every market-data read is
 |----------|---------------|
 | `notebooks/01_catalog_inspection` | What the archive holds per venue and instrument over a window: instrument inventory, snapshot-file coverage and gaps (likely outage vs book gap vs quiet market, or no mark coverage to tell), candle-store day status (verified / provisional / failed), raw-trades-vs-folded-seconds agreement per day, snapshot sanity (crossed, spread, `ts_init - ts_event`), per-file price-precision labels and the error ledger's rejections by site. Every number from `research.application.inspection`. |
 | `notebooks/02_microstructure` | Per instrument over a window: spread in ticks and bps (series and by UTC hour), depth by level and by distance from mid (one snapshot a minute), order-book imbalance at 1/5/10/20 levels and the OFI strategy's OFI replayed with both z-scores against its threshold, the microprice edge on the next-second mid (binned scatter, hit rate per bin), trade flow and CVD with a Kyle-lambda impact fit per volume bucket, funding/basis/open interest on price, return autocorrelation at 1 s-1 h, the volatility signature and rolling realised volatility. Every number from `kernel.indicators`, `research.domain.microstructure` and `research.application.microstructure`. |
+| `notebooks/03_correlation` | Across the collected universe over a window: return correlation at 1 m, 5 m, 1 h and 1 d (the candle store's bars, read span by span so an outage is a gap) as clustered diverging heatmaps plus per-venue matrices, rolling correlation against an anchor instrument, single-linkage clusters and the merge list with distances, funding-level (per hour, `rate * 60 / interval`) and OI-change correlation, and a cluster built into a `RunSpec` (printed, not run). Per asset across dYdX, Bybit and Hyperliquid: the mid basis in bps, the 1 s lead-lag with its peak in words ("BYBIT leads DYDX by 2 s"), the funding differential and each venue's volume share; a venue with no data prints "not collected in this window". Every number from `research.domain.correlation` and `research.application.aligned`; same-asset matching from `kernel.venues.asset_key`. |
 
 `backtest.ipynb` and `candlestick_pattern_scanner.ipynb` are legacy notebooks, replaced by Stories
 27.5 and 27.7.
@@ -36,7 +37,7 @@ the guard. It fails an `.ipynb` with stored outputs or execution counts, an `.ip
 `.py` twin, a numbered `.py` without its `.ipynb`, and a pair whose cells differ; and it runs every
 numbered `.py` with `runpy` against a small fixture archive (`research/tests/fixture_catalog.py`:
 3 venues x 2 instruments with a planted outage, quiet market, crossed second, duplicate trade,
-provisional day and ledger lines) under `warnings.simplefilter("error")`, in under 60 s each.
+provisional day, ledger lines and, since Story 27.4, a Bybit BTC leg leading its other venues by 2 s) under `warnings.simplefilter("error")`, in under 60 s each.
 
 ## Parameters
 
