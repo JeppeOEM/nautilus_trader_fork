@@ -14,6 +14,8 @@
 # -------------------------------------------------------------------------------------------------
 """Unit tests for book_features: depth_profile, imbalance, liquidity_distance, CancellationTracker."""
 
+from kernel.indicators import DepthProfile
+
 from nautilus_trader.model.book import OrderBook
 from nautilus_trader.model.data import BookOrder
 from nautilus_trader.model.data import OrderBookDelta
@@ -24,7 +26,6 @@ from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
 from views.chart_series import CancellationTracker
-from views.chart_series import DepthProfile
 from views.chart_series import book_imbalance
 from views.chart_series import compute_features
 from views.chart_series import depth_profile

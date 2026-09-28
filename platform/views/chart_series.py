@@ -26,7 +26,9 @@ indicator_series,indicators}.py`, bodies verbatim unless noted):
 - **Indicator panes** -- `indicator_series_page` (OFI/OBI/microprice/spread per bar) and
   `indicator_values_page` (the picker's configured indicators, dispatched through
   `views.indicator_picker`).
-- **Book features and footprint** -- the L2 feature extraction (`DepthProfile`, `book_imbalance`,
+- **Book features and footprint** -- the L2 feature extraction (`depth_profile` over an `OrderBook`,
+  returning the kernel's `DepthProfile` (Story 27.3 moved the type and the snapshot -> depth
+  derivation, `snapshot_depth`, to `kernel.indicators`), `book_imbalance`,
   `CancellationTracker`, ...), `compute_chart_series` and `build_footprint`.
 
 Two rendering rules, and nothing else, change what is drawn: `with_gap_markers` (one
@@ -54,9 +56,11 @@ from candles.application import queries
 from candles.domain.candle import Candle
 from candles.domain.candle import is_valid_candle
 from kernel import catalog_files
+from kernel.indicators import DepthProfile
 from kernel.indicators import MultiLevelOBI
 from kernel.indicators import MultiLevelOFI
 from kernel.indicators import microprice as calc_microprice
+from kernel.indicators import snapshot_depth
 from kernel.indicators import spread as calc_spread
 from kernel.second_snapshot import DydxSecondSnapshot
 from kernel.second_snapshot import SecondOHLC
@@ -135,26 +139,6 @@ def top_of_book_series(
 # ---------------------------------------------------------------------------
 # Depth snapshot
 # ---------------------------------------------------------------------------
-
-
-@dataclass
-class DepthProfile:
-    """Sizes and prices at the top N levels on both sides."""
-
-    bid_prices: list[float]  # index 0 = best bid
-    bid_sizes: list[float]
-    ask_prices: list[float]  # index 0 = best ask
-    ask_sizes: list[float]
-
-    @property
-    def levels(self) -> int:
-        return len(self.bid_prices)
-
-    def total_bid_depth(self) -> float:
-        return sum(self.bid_sizes)
-
-    def total_ask_depth(self) -> float:
-        return sum(self.ask_sizes)
 
 
 def depth_profile(book: OrderBook, levels: int = 10) -> DepthProfile | None:
@@ -528,25 +512,21 @@ def compute_chart_series(
         bid_p, ask_p = s.bid_prices[0], s.ask_prices[0]
         t = s.ts_event / 1e9
 
-        micro_value = calc_microprice(
-            {
-                "bid_prices": s.bid_prices,
-                "bid_sizes": s.bid_sizes,
-                "ask_prices": s.ask_prices,
-                "ask_sizes": s.ask_sizes,
-            }
-        )
+        book_sides = {
+            "bid_prices": s.bid_prices,
+            "bid_sizes": s.bid_sizes,
+            "ask_prices": s.ask_prices,
+            "ask_sizes": s.ask_sizes,
+        }
+        micro_value = calc_microprice(book_sides)
         if micro_value is not None:
             series["microprice"].append({"time": t, "value": micro_value})
 
         series["spread"].append({"time": t, "value": ask_p - bid_p})
 
-        profile = DepthProfile(
-            bid_prices=s.bid_prices[:_LEVELS],
-            bid_sizes=s.bid_sizes[:_LEVELS],
-            ask_prices=s.ask_prices[:_LEVELS],
-            ask_sizes=s.ask_sizes[:_LEVELS],
-        )
+        profile = snapshot_depth(book_sides, _LEVELS)
+        if profile is None:  # unreachable: `_require_top` raised on an empty side
+            raise EmptyTopOfBook(f"snapshot without a top of book at ts_event={s.ts_event}")
         imbalance = book_imbalance(profile)
         series["imbalance"].append({"time": t, "value": imbalance.aggregate})
         series["bid_depth"].append({"time": t, "value": profile.total_bid_depth()})

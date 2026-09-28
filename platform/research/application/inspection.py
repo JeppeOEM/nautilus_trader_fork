@@ -32,6 +32,7 @@ from bisect import bisect_left
 from bisect import bisect_right
 from collections import Counter
 from collections import defaultdict
+from collections.abc import Collection
 from collections.abc import Iterable
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -73,6 +74,7 @@ from nautilus_trader.model.objects import FIXED_PRECISION
 from nautilus_trader.model.objects import Quantity
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 from nautilus_trader.persistence.funcs import class_to_filename
+from research.application.frames import OBI_LEVELS
 
 
 INVENTORY_COLUMNS = ("instrument_id", "venue", "market_kind", "type")
@@ -508,23 +510,55 @@ def snapshot_sanity(seconds: pd.DataFrame) -> dict[str, Any]:
     }
 
 
-def mid_series(seconds: pd.DataFrame, start_ns: int, end_ns: int) -> pd.Series:
+# Columns derived from the book (`CatalogFrames.seconds`): blank on a crossed second.
+BOOK_COLUMNS = frozenset({"mid", "spread", "microprice", *(f"obi_{n}" for n in OBI_LEVELS)})
+
+
+def second_grid(
+    seconds: pd.DataFrame,
+    start_ns: int,
+    end_ns: int,
+    columns: Sequence[str],
+    book_columns: Collection[str] = BOOK_COLUMNS,
+) -> pd.DataFrame:
     """
-    Return the mid price on the 1 s grid of every second `[start_ns, end_ns)` touches, for plotting: NaN on every second with
-    no snapshot row, a crossed book (best bid >= best ask), an empty side, or two rows (ambiguous).
-    Invariant: gaps stay gaps -- nothing is forward-filled or interpolated (DATA-01).
+    Return `columns` of a seconds-shaped frame (`ts_event`, `spread` and the columns) on the 1 s
+    grid of every second `[start_ns, end_ns)` touches, for plotting and per-second statistics,
+    indexed by the second's UTC start (`ts`). A row belongs to second `ts_event // 1 s`.
+
+    Invariant: gaps stay gaps -- nothing is forward-filled or interpolated (DATA-01). Every column
+    is NaN on a second with no row and on a second holding two rows (ambiguous); each
+    `book_columns` column is NaN on a crossed second too (best bid >= best ask, from the row's
+    `spread`), while the others (trade columns) keep that second's value -- a crossed book says
+    nothing about the trades.
     """
-    mids = seconds["mid"].to_numpy(dtype="float64", copy=True)
-    mids[_spread(seconds) <= 0] = math.nan  # NaN compares False: an empty side's mid is NaN already
     keys = pd.Series(seconds["ts_event"].to_numpy(dtype="int64") // NS_PER_S)
-    mids[keys.duplicated(keep=False).to_numpy()] = math.nan
-    by_second = pd.Series(mids, index=keys.to_numpy()).loc[~keys.duplicated().to_numpy()]
+    shared = keys.duplicated(keep=False).to_numpy()
+    first = ~keys.duplicated().to_numpy()
+    crossed = _spread(seconds) <= 0  # NaN compares False: an empty side is no crossed book
     # Floor, not ceiling: a row of second S can lie inside a window that starts after S (its
     # `ts_event` is S + 0.5 s on the exchange-timed venues), so S is on the grid.
     grid = np.arange(start_ns // NS_PER_S, -(-end_ns // NS_PER_S), dtype="int64")
-    values = by_second.reindex(grid).to_numpy(dtype="float64")
+    data = {}
+    for name in columns:
+        values = seconds[name].to_numpy(dtype="float64", copy=True)
+        if name in book_columns:
+            values[crossed] = math.nan
+        values[shared] = math.nan
+        by_second = pd.Series(values[first], index=keys.to_numpy()[first])
+        data[name] = by_second.reindex(grid).to_numpy(dtype="float64")
     index = pd.DatetimeIndex(pd.to_datetime(grid * NS_PER_S, unit="ns", utc=True), name="ts")
-    return pd.Series(values, index=index, name="mid")
+    return pd.DataFrame(data, index=index, columns=list(columns))
+
+
+def mid_series(seconds: pd.DataFrame, start_ns: int, end_ns: int) -> pd.Series:
+    """
+    Return the mid price on the 1 s grid of every second `[start_ns, end_ns)` touches, for
+    plotting (`second_grid`'s `mid`): NaN on every second with no snapshot row, a crossed book
+    (best bid >= best ask), an empty side, or two rows (ambiguous). Invariant: gaps stay gaps --
+    nothing is forward-filled or interpolated (DATA-01).
+    """
+    return second_grid(seconds, start_ns, end_ns, ("mid",))["mid"]
 
 
 def plot_axis(index: pd.Index) -> np.ndarray:

@@ -310,7 +310,10 @@ the old signals package and the dYdX collector's notebooks]`.
   `performance_metrics.return_stats`), `equity.EquityCurve` (drawdown episodes; `from_pnl_by_day`
   equal to `performance_metrics.equity_returns` bit for bit), `trades.TradeLedger`,
   `report.MetricReport` (`performance_metrics.all_metrics` frozen, never a second formula) and
-  `correlation` (pairwise-complete Pearson, lead-lag, single-linkage clustering). Stdlib, numpy,
+  `correlation` (pairwise-complete Pearson, lead-lag, single-linkage clustering) and
+  `microstructure` (Story 27.3: autocorrelation, volatility signature, realised volatility, a
+  Kyle-lambda price-impact fit by `numpy.linalg.lstsq`, hit rate by bin; each docstring names its
+  invariant and formula source) `[amended 2026-09-28: Story 27.3]`. Stdlib, numpy,
   `kernel` and Nautilus value types only -- no pandas, no I/O.
 - **`application/`** (Story 27.1) — the ports a notebook uses (`ports.py`: `MarketFrames`,
   `RankingHistory`, `BacktestRunner`, `RunSpec`, `RunResult`) and their implementations:
@@ -328,11 +331,22 @@ the old signals package and the dYdX collector's notebooks]`.
   `verified_status`), the trade-fold agreement (`kernel.fold.fold_trades`), snapshot sanity,
   per-file precision labels (`kernel.catalog_files.price_precision_labels`), the gap-preserving `mid_series`, and the error ledger's window
   (`observability.error_ledger.iter_records`/`site_counts`) `[amended 2026-09-28: Story 27.2]`.
+  `inspection.second_grid` puts any seconds columns on the window's 1 s grid (NaN on a missing or
+  shared second, and in the book-derived columns on a crossed second; `mid_series` delegates to
+  it), and `microstructure` (Story 27.3) derives every frame `02_microstructure` plots from one
+  bounded read per instrument (`read_instrument`): spread in ticks/bps and by UTC hour, depth
+  from one snapshot a minute (`kernel.indicators.snapshot_depth`/`cumulative_depth`/
+  `depth_within_bps`), OBI z-scores and the OFI replay mirroring `OFIStrategy.on_data`
+  (`kernel.indicators.RollingZScore`, the one z-score formula `MultiLevelOFI` also delegates to),
+  microprice edge, trade flow/CVD, impact inputs, basis, and the return tables
+  `[amended 2026-09-28: Story 27.3]`.
 - **`notebooks/`** — numbered jupytext pairs since Story 27.2 (`<nn>_<name>.py`, percent format,
   the source of truth, plus its output-free `.ipynb`; `jupytext.toml`, `make notebooks`), every
   one parameterised through `_params.py` and run against a fixture archive by
   `research/tests/test_notebooks.py`: `01_catalog_inspection` (what the archive holds over a
-  window). Legacy: `backtest.ipynb` (replaced by Story 27.5) and
+  window) and `02_microstructure` (spread, depth, OBI/OFI, microprice edge, trade flow and
+  impact, funding/basis/OI, return autocorrelation, volatility signature and realised
+  volatility per instrument over a window) `[amended 2026-09-28: Story 27.3]`. Legacy: `backtest.ipynb` (replaced by Story 27.5) and
   `candlestick_pattern_scanner.ipynb` (a `Known limit:` notebook over the retired minute-bar
   directory, replaced by Story 27.7); `dydx_catalog_pandas.ipynb` was deleted in Story 27.2.
   `README.md` is the notebook index, `BACKTESTING.md` the backtest how-to.

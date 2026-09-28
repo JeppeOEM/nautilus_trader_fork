@@ -9,7 +9,7 @@ Give the researcher six executable notebooks: catalog inspection, microstructure
 ## Stories
 
 - Story 27.1: `research/domain` analysis value objects and the `research/application` ports (done)
-- Story 27.2: Executable notebooks and the catalog inspection notebook
+- Story 27.2: Executable notebooks and the catalog inspection notebook (done)
 - Story 27.3: Microstructure notebook
 - Story 27.4: Correlation and cross-venue notebook
 - Story 27.5: Backtest evaluation notebook, parameter sweeps and walk-forward
@@ -40,16 +40,20 @@ Give the researcher six executable notebooks: catalog inspection, microstructure
 - **Research stays a consumer.** It owns no aggregate and writes only throwaway backtest catalogs. The spine's research row already lists the values (`ReturnSeries`, `EquityCurve`, `TradeLedger`, `MetricReport`, `CorrelationMatrix`, plus `MonteCarloResult`, which is still to come in 27.6) and the ports (`MarketFrames`, `RankingHistory`, `BacktestRunner`), each with its invariant. A new value must be added to that row.
 - **Layering and boundaries (settled in 27.1).**
   - `research/domain` imports only the stdlib, numpy, `kernel/` and `nautilus_trader.model`/`core`. pandas stays in `research/application`.
-  - The one extra context edge is `research → candles`. It is limited to the read-only query services listed in `test_boundaries.py`'s `RESEARCH_CANDLES_SERVICES`, and a service that falls out of use must be removed from that list.
+  - Research has two extra context edges, each held to a name allowlist in `test_boundaries.py` with a "still used" check. A service that falls out of use must be removed from its list.
+    - `research → candles` (`RESEARCH_CANDLES_SERVICES`) covers the read-only query services `open_store`, `window`, `oldest_t`, `newest_t`, `bucket_starts` and `verified_status`, plus `BAR_SECONDS`. A window past the store's coverage raises; it never reads as "no trades".
+    - `research → archive` (`RESEARCH_ARCHIVE_SERVICES`) covers only the pure gap heuristic `find_gaps`, run over timestamps that research read itself within bounds. `likely_outages` and `coverage` are unbounded, so research never calls them. Gap semantics keep one home.
   - `research → views`, `ranking` and `data_api` stay forbidden. `RankingHistory` reads over data_api's HTTP API.
+  - Catalog reads that the pinned Nautilus cannot do go through `kernel/catalog_files.py`'s column-projected helpers: `query_top_of_book`, `query_index_prices` (because `ParquetDataCatalog.query(IndexPriceUpdate)` raises) and `price_precision_labels`. Put any new such read there, not in research.
   - A new need is met by extending these tables deliberately with a stated reason, never by routing around the test.
 - **`BacktestRunner` is the one way to backtest.** It wraps `BacktestNode` + `BacktestDataConfig` and takes strategies by `ImportableStrategyConfig` string path. It returns `EquityCurve`/`TradeLedger`/`MetricReport` attributed by `BacktestRunConfig.id`, and a missing result raises. A sweep is one node running one run config per grid point. Notebooks never touch `BacktestNode` directly and never sum PnL themselves.
 - **Notebook format.**
   - Each notebook is a jupytext percent-format `<nn>_<name>.py`. It is the source of truth and is ruff/mypy-clean.
   - Each `.py` is paired with an output-stripped `.ipynb`.
-  - The first code cell reads `CATALOG_PATH`, `CANDLES_DIR`, `METRICS_DB_PATH`, `INSTRUMENTS`, `START` and `END` from the environment, defaulting to `platform/data/` paths.
+  - The Parameters cell uses `notebooks/_params.py`'s `Params.from_env()` (built in 27.2) for `CATALOG_PATH`, `CANDLES_DIR`, `METRICS_DB_PATH`, the errors dir, `INSTRUMENTS`, `START` and `END`. Defaults are `platform/data/` paths. Importing it also puts `platform/` on `sys.path` and registers the headless plotly renderer. Reuse it and never re-read the environment in a notebook.
+  - Notebook logic lives in an `application/` service, never in cells. `01_catalog_inspection` stands on `research/application/inspection.py`, and later notebooks follow the same pattern. Sections read one instrument at a time to stay within the memory budget (MEM-01).
   - `make notebooks` syncs the pairs.
-  - `research/tests/test_notebooks.py` runs each `.py` notebook with `runpy` against one session fixture catalog, in under 60 s each, with plotly rendering off-screen. The fixture has 3 venues × 2 instruments and planted defects: one gap, one provisional day and one crossed second.
+  - `research/tests/test_notebooks.py` runs each `.py` notebook with `runpy` against one session fixture catalog (`research/tests/fixture_catalog.py`), in under 60 s each, with plotly rendering headless. The fixture has 3 venues × 2 instruments and planted defects: one gap, one provisional day and one crossed second.
 - **Candlestick detector.**
   - `kernel/candle_patterns.py` holds `CandlePattern(Indicator)`. It is fed with `update_raw(o, h, l, c)` and outputs `value` of +100, -100 or 0 (TA-Lib convention).
   - Its state is O(1): only the last three bars. Its thresholds are explicit constructor parameters.
@@ -61,11 +65,12 @@ Give the researcher six executable notebooks: catalog inspection, microstructure
   - The strategy is resolved by string path through `StrategyFactory.create(ImportableStrategyConfig(...))`, so there is no bots→research import edge.
   - `test_images.py` needs an explicit entry for that string-path import.
   - The new `strategy` and `params` keys are optional and have defaults.
-- **Legacy notebooks.** Three legacy notebooks sit in `research/notebooks/`. `dydx_catalog_pandas.ipynb` is deleted by 27.2, `backtest.ipynb` by 27.5 and `candlestick_pattern_scanner.ipynb` by 27.7.
+- **Legacy notebooks.** 27.2 deleted `dydx_catalog_pandas.ipynb`. Two remain: `backtest.ipynb`, which 27.5 deletes, and `candlestick_pattern_scanner.ipynb`, which 27.7 deletes.
+- **Spine upkeep.** A story that adds a research module, context edge or value amends the DDD spine's research row, dependency graph and tree in the same commit, as 27.1 and 27.2 did.
 
 ## Cross-Story Dependencies
 
-- The stories run in order 27.1 → 27.9. 27.3–27.6 depend only on 27.1 (values and ports) and 27.2 (notebook harness and fixture catalog).
+- The stories run in order 27.1 → 27.9. 27.1 and 27.2 are done, so 27.3–27.6 build on their values, ports, `_params.py`, notebook harness and fixture catalog.
 - 27.6 reuses 27.5's `STRATEGY` parameters and sweep results.
 - 27.8 depends on 27.7's detector and on 27.1's `BacktestRunner`, and it becomes the second worked example in 27.5's notebook.
 - 27.9 closes the epic:

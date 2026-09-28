@@ -31,9 +31,14 @@ OnlineLogisticTrend is only consumed by a backtest Strategy (example_strategy.py
 MultiLevelOBI/MultiLevelOFI were then consumed only by the web dashboard's live monitor loop
 (retired in Story 15.10); today `ranking_engine`, `data_api`'s indicator series, `bots` and
 the snapshot/OFI strategies consume them. This is an honest note, not a gap to close here.
+Story 27.3 added `RollingZScore` (the one z-score formula, which `MultiLevelOFI` delegates to)
+and moved `DepthProfile` here with the snapshot depth functions, for views and research alike.
 """
 
+import math
 from collections import deque
+from collections.abc import Sequence
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -236,6 +241,59 @@ class OrderFlowImbalance(Indicator):
         self._prev_ask_size = None
 
 
+class RollingZScore(Indicator):
+    """
+    Z-score of each reading against the last `window` readings (itself included): the one
+    z-score formula in `platform/` (Story 27.3) -- `MultiLevelOFI(zscore_window=...)` delegates to
+    it, and research z-scores OBI with it.
+
+    `value = (x - mean) / std` over the trailing `window` readings, `std` the population standard
+    deviation (numpy's default, ``ddof=0``); 0.0 while fewer than 2 readings are held or when the
+    readings are all equal (compared exactly, so float rounding in the mean cannot fake a
+    spread), never a division by zero. Invariant: at most `window` readings are held (a `deque`
+    with `maxlen`), so the oldest ages out as each new one arrives. The caller decides what a
+    reading is: a non-finite one (a gap) raises `ValueError` -- held, it would poison every
+    z-score until it aged out.
+
+    Parameters
+    ----------
+    window : int
+        Readings the mean and std are taken over (>= 2).
+
+    """
+
+    def __init__(self, window: int) -> None:
+        PyCondition.positive_int(window, "window")
+        if window < 2:
+            raise ValueError("window must be >= 2")
+        super().__init__(params=[window])
+        self.window = window
+        self.value = 0.0
+        self._history: deque[float] = deque(maxlen=window)
+
+    def update_raw(self, value: float) -> None:
+        if not math.isfinite(value):
+            raise ValueError(f"a z-score reading must be finite, got {value!r}")
+        self._history.append(value)
+        arr = np.array(self._history)
+        # Equal readings are flat by comparison, not by `std == 0`: their mean can round one ulp
+        # off the value (300 x 0.1), leaving a ~1e-17 std that turns a flat window into z = +-1.
+        # A zero std with unequal readings is possible too (their squared deviations underflow,
+        # e.g. [0.0, 1e-170]): still flat, never a division by zero.
+        std = float(arr.std())
+        if len(arr) < 2 or arr.max() == arr.min() or std == 0.0:
+            self.value = 0.0
+        else:
+            self.value = (value - float(arr.mean())) / std
+        self._set_has_inputs(True)
+        if len(self._history) == self.window:
+            self._set_initialized(True)
+
+    def _reset(self) -> None:
+        self.value = 0.0
+        self._history.clear()
+
+
 class MultiLevelOBI(Indicator):
     """
     Order Book Imbalance across the top N price levels.
@@ -294,8 +352,9 @@ class MultiLevelOFI(Indicator):
         vs FLOKI).
     zscore_window : int | None
         If set, normalises `value` to a z-score over the last `zscore_window`
-        readings: ``(value - mean) / std``. Returns 0.0 when std is zero.
-        Must be >= 2. A window 10-20x the OFI `window` works well in practice.
+        readings through `RollingZScore` (the one z-score formula): ``(value - mean) / std``.
+        Returns 0.0 when std is zero. Must be >= 2. A window 10-20x the OFI `window` works
+        well in practice.
     """
 
     def __init__(
@@ -318,8 +377,8 @@ class MultiLevelOFI(Indicator):
         self.zscore_window = zscore_window
         self.value = 0.0
         self._contributions: deque[float] = deque(maxlen=window)
-        self._zscore_history: deque[float] | None = (
-            deque(maxlen=zscore_window) if zscore_window is not None else None
+        self._zscore: RollingZScore | None = (
+            RollingZScore(zscore_window) if zscore_window is not None else None
         )
         self._prev_bid_prices: list[float] | None = None
         self._prev_bid_sizes: list[float] | None = None
@@ -366,14 +425,9 @@ class MultiLevelOFI(Indicator):
         self._contributions.append(contribution)
         raw_value = float(sum(self._contributions))
 
-        if self._zscore_history is not None:
-            self._zscore_history.append(raw_value)
-            if len(self._zscore_history) >= 2:
-                arr = np.array(self._zscore_history)
-                std = float(arr.std())
-                self.value = float((raw_value - float(arr.mean())) / std) if std > 0.0 else 0.0
-            else:
-                self.value = 0.0
+        if self._zscore is not None:
+            self._zscore.update_raw(raw_value)
+            self.value = self._zscore.value
         else:
             self.value = raw_value
 
@@ -401,8 +455,8 @@ class MultiLevelOFI(Indicator):
     def _reset(self) -> None:
         self.value = 0.0
         self._contributions.clear()
-        if self._zscore_history is not None:
-            self._zscore_history.clear()
+        if self._zscore is not None:
+            self._zscore.reset()
         self._prev_bid_prices = None
         self._prev_bid_sizes = None
         self._prev_ask_prices = None
@@ -477,4 +531,96 @@ def trade_aggregates(snapshots: list[dict]) -> tuple[float, float, int, int]:
         sum(s["sell_volume"] for s in snapshots),
         sum(s["buy_count"] for s in snapshots),
         sum(s["sell_count"] for s in snapshots),
+    )
+
+
+# -----------------------------------------------------------------------------------
+# Book depth (Story 27.3: moved from `views/chart_series.py`, SSOT-01 -- one home for the
+# snapshot -> depth derivation, shared by the chart and research).
+# -----------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class DepthProfile:
+    """Sizes and prices at the top N levels on both sides (a value: never mutated after build)."""
+
+    bid_prices: list[float]  # index 0 = best bid
+    bid_sizes: list[float]
+    ask_prices: list[float]  # index 0 = best ask
+    ask_sizes: list[float]
+
+    @property
+    def levels(self) -> int:
+        return len(self.bid_prices)
+
+    def total_bid_depth(self) -> float:
+        return sum(self.bid_sizes)
+
+    def total_ask_depth(self) -> float:
+        return sum(self.ask_sizes)
+
+
+def snapshot_depth(snapshot: dict, levels: int) -> DepthProfile | None:
+    """
+    Return the top `levels` levels of each side of one `DydxSecondSnapshot.to_dict()`-shaped
+    snapshot; None when either side is empty (like `mid_price`/`spread`). A side holding fewer
+    levels keeps what it has -- never padded. `levels` < 1 raises `ValueError`: an empty profile
+    has no touch to measure from.
+    """
+    if levels < 1:
+        raise ValueError(f"levels must be >= 1, got {levels}")
+    if not snapshot["bid_prices"] or not snapshot["ask_prices"]:
+        return None
+    return DepthProfile(
+        bid_prices=list(snapshot["bid_prices"][:levels]),
+        bid_sizes=list(snapshot["bid_sizes"][:levels]),
+        ask_prices=list(snapshot["ask_prices"][:levels]),
+        ask_sizes=list(snapshot["ask_sizes"][:levels]),
+    )
+
+
+def cumulative_depth(profile: DepthProfile) -> tuple[list[float], list[float]]:
+    """
+    Cumulative size from the touch outward, per side: element i is the size of levels 0..i.
+    Each side is as long as its own levels.
+    """
+    return (
+        np.cumsum(profile.bid_sizes, dtype=np.float64).tolist(),
+        np.cumsum(profile.ask_sizes, dtype=np.float64).tolist(),
+    )
+
+
+# A level exactly on an edge (BTC 100 000 with a 10 tick is 1 bp) computes as edge +- a few ulps;
+# this relative slack keeps it on one side of the edge in every snapshot instead of flapping.
+_BPS_EDGE_SLACK = 1e-9
+
+
+def _within(distances: np.ndarray, sizes: np.ndarray, edge: float) -> float:
+    slack = edge * _BPS_EDGE_SLACK
+    if not len(distances) or edge - slack > distances[-1]:
+        return math.nan
+    return float(sizes[distances <= edge + slack].sum())
+
+
+def depth_within_bps(
+    profile: DepthProfile, bps_edges: Sequence[float]
+) -> tuple[list[float], list[float]]:
+    """
+    Per side, the cumulative size of the levels whose price lies within each `bps_edges` distance
+    of the mid (`(best bid + best ask) / 2`, distance `|price - mid| / mid * 1e4`).
+
+    An edge past the side's deepest stored level is NaN: the book beyond it was not stored, so the
+    size within that distance is unknown, never the stored levels' total passed off as it.
+    Known limit: a side genuinely thinner than the stored depth reads NaN there too (the snapshot
+    does not say whether the book ended or the storage did); upgrade path: store the side's level
+    count with the snapshot.
+    """
+    mid = (profile.bid_prices[0] + profile.ask_prices[0]) / 2.0
+    bid_distance = (mid - np.asarray(profile.bid_prices, dtype=np.float64)) / mid * 1e4
+    ask_distance = (np.asarray(profile.ask_prices, dtype=np.float64) - mid) / mid * 1e4
+    bid_sizes = np.asarray(profile.bid_sizes, dtype=np.float64)
+    ask_sizes = np.asarray(profile.ask_sizes, dtype=np.float64)
+    return (
+        [_within(bid_distance, bid_sizes, edge) for edge in bps_edges],
+        [_within(ask_distance, ask_sizes, edge) for edge in bps_edges],
     )

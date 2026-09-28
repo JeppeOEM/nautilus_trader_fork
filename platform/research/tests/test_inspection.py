@@ -380,6 +380,36 @@ def test_mid_series_blanks_a_second_holding_two_rows() -> None:
     assert math.isnan(mid.iloc[0])
 
 
+def _with_trades(book: pd.DataFrame) -> pd.DataFrame:
+    return book.assign(buy_volume=[float(i + 1) for i in range(len(book))])
+
+
+def test_second_grid_blanks_book_columns_on_a_crossed_second_and_keeps_its_trades() -> None:
+    book = _with_trades(_book([(0.5, *_SANE), (1.5, [101.5], [101.0])]))
+    grid = inspection.second_grid(book, _at(0), _at(2), ("mid", "spread", "buy_volume"))
+    assert np.isnan(grid[["mid", "spread"]].to_numpy()[1]).all()
+    assert grid["buy_volume"].tolist() == [1.0, 2.0]
+
+
+def test_second_grid_is_nan_in_every_column_on_missing_and_shared_seconds() -> None:
+    book = _with_trades(_book([(0.2, *_SANE), (0.7, *_SANE), (2.5, *_SANE)]))
+    grid = inspection.second_grid(book, _at(0), _at(3), ("mid", "buy_volume"))
+    assert np.isnan(grid.to_numpy()[:2]).all()
+    assert grid.iloc[2].tolist() == [100.5, 3.0]
+
+
+def test_second_grid_treats_only_the_named_book_columns_as_book_derived() -> None:
+    book = _with_trades(_book([(0.5, [101.5], [101.0])]))
+    grid = inspection.second_grid(book, _at(0), _at(1), ("mid",), book_columns=())
+    assert grid["mid"].tolist() == [101.25]
+
+
+def test_mid_series_is_second_grid_mid() -> None:
+    book = _book([(0.5, *_SANE), (1.5, [101.5], [101.0]), (3.5, *_SANE)])
+    grid = inspection.second_grid(book, _at(0), _at(4), ("mid",))
+    assert inspection.mid_series(book, _at(0), _at(4)).equals(grid["mid"])
+
+
 # --- ledger_window ---------------------------------------------------------------------------
 
 
