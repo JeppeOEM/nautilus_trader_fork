@@ -14,9 +14,10 @@ values or `research.application`'s ports and services, every market-data read is
 | `notebooks/01_catalog_inspection` | What the archive holds per venue and instrument over a window: instrument inventory, snapshot-file coverage and gaps (likely outage vs book gap vs quiet market, or no mark coverage to tell), candle-store day status (verified / provisional / failed), raw-trades-vs-folded-seconds agreement per day, snapshot sanity (crossed, spread, `ts_init - ts_event`), per-file price-precision labels and the error ledger's rejections by site. Every number from `research.application.inspection`. |
 | `notebooks/02_microstructure` | Per instrument over a window: spread in ticks and bps (series and by UTC hour), depth by level and by distance from mid (one snapshot a minute), order-book imbalance at 1/5/10/20 levels and the OFI strategy's OFI replayed with both z-scores against its threshold, the microprice edge on the next-second mid (binned scatter, hit rate per bin), trade flow and CVD with a Kyle-lambda impact fit per volume bucket, funding/basis/open interest on price, return autocorrelation at 1 s-1 h, the volatility signature and rolling realised volatility. Every number from `kernel.indicators`, `research.domain.microstructure` and `research.application.microstructure`. |
 | `notebooks/03_correlation` | Across the collected universe over a window: return correlation at 1 m, 5 m, 1 h and 1 d (the candle store's bars, read span by span so an outage is a gap) as clustered diverging heatmaps plus per-venue matrices, rolling correlation against an anchor instrument, single-linkage clusters and the merge list with distances, funding-level (per hour, `rate * 60 / interval`) and OI-change correlation, and a cluster built into a `RunSpec` (printed, not run). Per asset across dYdX, Bybit and Hyperliquid: the mid basis in bps, the 1 s lead-lag with its peak in words ("BYBIT leads DYDX by 2 s"), the funding differential and each venue's volume share; a venue with no data prints "not collected in this window". Every number from `research.domain.correlation` and `research.application.aligned`; same-asset matching from `kernel.venues.asset_key`. |
+| `notebooks/04_backtest_evaluation` | One strategy (by string path, default `OFIStrategy`) on one instrument over a window, through `BacktestRunner` (`NodeRunner`): the equity with its underwater series and every drawdown episode, the `MetricReport` table (exactly `kernel.performance_metrics.all_metrics`), a rolling Sharpe (`ReturnSeries.rolling_sharpe`, or a sentence when the curve is shorter than the window), the realized-PnL and holding-time distributions, PnL by UTC hour and weekday of exit, the trade list; a two-parameter sweep as a heatmap with the top runs, grid size and runtime; and a walk-forward: `N` consecutive in-sample/out-of-sample folds, each fold's pick on the in-sample metric, the joined out-of-sample equity (a stated convention, not one continuous run) against the single run and the out-of-sample metrics beside the in-sample ones. Every number from `research.application.evaluation`, `research.application.walk_forward` and `research.domain`; no cell sums or averages. The one way to evaluate a strategy interactively (`BACKTESTING.md`). |
 
-`backtest.ipynb` and `candlestick_pattern_scanner.ipynb` are legacy notebooks, replaced by Stories
-27.5 and 27.7.
+`candlestick_pattern_scanner.ipynb` is the last legacy notebook, replaced by Story 27.7
+(`backtest.ipynb` was deleted in Story 27.5).
 
 ## Format
 
@@ -38,6 +39,10 @@ the guard. It fails an `.ipynb` with stored outputs or execution counts, an `.ip
 numbered `.py` with `runpy` against a small fixture archive (`research/tests/fixture_catalog.py`:
 3 venues x 2 instruments with a planted outage, quiet market, crossed second, duplicate trade,
 provisional day, ledger lines and, since Story 27.4, a Bybit BTC leg leading its other venues by 2 s) under `warnings.simplefilter("error")`, in under 60 s each.
+A constant sized for the real archive that the fixture cannot satisfy (04's instrument, warm-up,
+grid, fold count and selection metric) is read through `_params.setting(name, default)` -- JSON in
+`NOTEBOOK_<NAME>`, else the default, a type mismatch raising -- and `test_notebooks.py`'s
+`NOTEBOOK_ENV` shrinks it per notebook (Story 27.5); a notebook never reads the environment itself.
 
 ## Parameters
 

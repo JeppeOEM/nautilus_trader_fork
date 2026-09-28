@@ -25,10 +25,13 @@ one test, never the runs. The fixture's planted defects are asserted against
 `research.application.inspection` here too, so what the notebook claims to show is checked.
 """
 
+import json
 import math
 import runpy
 import time
 import warnings
+from datetime import UTC
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -41,6 +44,8 @@ from nautilus_trader.model.data import TradeTick
 from research.application import inspection
 from research.application.frames import CatalogFrames
 from research.application.ports import window_ns
+from research.tests.fixture_catalog import DATA_END_NS
+from research.tests.fixture_catalog import DATA_START_NS
 from research.tests.fixture_catalog import FixturePaths
 from research.tests.source_tree import SOURCE_TREE
 
@@ -50,10 +55,48 @@ RUN_SECONDS_LIMIT = 60.0
 
 # `.ipynb` with no `.py` twin -> the story whose `done` retires it (it is deleted by then).
 LEGACY_NOTEBOOKS_UNTIL: dict[str, str] = {
-    "backtest.ipynb": "27-5-backtest-evaluation-notebook-sweeps-and-walk-forward",
     "candlestick_pattern_scanner.ipynb": (
         "27-7-candlestick-pattern-detector-kernel-chart-screener-scanner"
     ),
+}
+
+
+def _iso(ns: int) -> str:
+    """Return a naive-UTC ISO timestamp (the `START`/`END` form) for a whole second in ns."""
+    if ns % NS_PER_S:
+        raise ValueError(f"{ns} is not a whole second: START/END would silently truncate it")
+    return datetime.fromtimestamp(ns // NS_PER_S, tz=UTC).replace(tzinfo=None).isoformat()
+
+
+# The OFI parameters that trade on the fixture's ten minutes (as `test_backtest_runner.py`'s): no
+# warm-up, two-snapshot OFI sums z-scored over five, and minute EMAs that warm within the window.
+_FIXTURE_OFI = {
+    "trade_size": "0.01",
+    "warmup_seconds": 0,
+    "ofi_window": 2,
+    "ofi_zscore_window": 5,
+    "ofi_threshold": 0.5,
+    "trend_ema_fast": 2,
+    "trend_ema_slow": 3,
+}
+
+# Per-notebook environment on top of `FixturePaths.env()`, applied by `_run` (so the parametrized
+# run and each notebook's namespace test see the same inputs). A notebook's defaults are sized for
+# the real archive; these shrink them to the fixture through its Parameters cell
+# (`_params.setting`: JSON in `NOTEBOOK_<NAME>`), never by editing the notebook.
+NOTEBOOK_ENV: dict[str, dict[str, str]] = {
+    # The fixture's data window (not its two whole days), a venue-timed instrument clear of the dYdX
+    # BTC outage, OFI parameters that trade, a 2 x 2 grid of them, two folds, and a statistic
+    # defined on ten minutes of trades (every return statistic needs two UTC days of PnL).
+    "04_backtest_evaluation.py": {
+        "START": _iso(DATA_START_NS),
+        "END": _iso(DATA_END_NS),
+        "NOTEBOOK_INSTRUMENT": json.dumps("BTC-USD-PERP.HYPERLIQUID"),
+        "NOTEBOOK_PARAMS": json.dumps(_FIXTURE_OFI),
+        "NOTEBOOK_GRID": json.dumps({"ofi_threshold": [0.5, 1.0], "ofi_window": [2, 3]}),
+        "NOTEBOOK_N_FOLDS": json.dumps(2),
+        "NOTEBOOK_SELECT_BY": json.dumps("expectancy"),
+    },
 }
 
 
@@ -67,7 +110,7 @@ def test_there_is_a_numbered_notebook_to_run() -> None:
 
 def _run(notebook: Path, fixture: FixturePaths, monkeypatch: pytest.MonkeyPatch) -> dict:
     """Run one notebook as the test harness does and return its namespace."""
-    for name, value in fixture.env().items():
+    for name, value in (fixture.env() | NOTEBOOK_ENV.get(notebook.name, {})).items():
         monkeypatch.setenv(name, value)
     monkeypatch.setenv("NOTEBOOK_HEADLESS", "1")
     # A Jupyter kernel starts in the notebooks directory, so `_params` imports from there.

@@ -339,7 +339,16 @@ the old signals package and the dYdX collector's notebooks]`.
   `depth_within_bps`), OBI z-scores and the OFI replay mirroring `OFIStrategy.on_data`
   (`kernel.indicators.RollingZScore`, the one z-score formula `MultiLevelOFI` also delegates to),
   microprice edge, trade flow/CVD, impact inputs, basis, and the return tables
-  `[amended 2026-09-28: Story 27.3]`.
+  `[amended 2026-09-28: Story 27.3]`. `walk_forward` (Story 27.5) splits a window into consecutive
+  in-sample/out-of-sample `Fold`s, picks each fold's grid point on the in-sample `MetricReport`
+  field (highest wins, undefined last, ties to grid order) through one `BacktestRunner.sweep` and
+  runs it out of sample through one `run`, and joins the out-of-sample equity by the stated
+  additive convention (each fold from the full balance, shifted by the earlier folds' PnL -- not
+  one continuous run); `evaluation` (Story 27.5) turns a `RunResult`, a timed sweep and a
+  `WalkForwardResult` into the frames `04_backtest_evaluation` shows (equity/underwater, drawdown
+  episodes, the metric table, rolling Sharpe, trades, PnL by hour/weekday via
+  `RunResult.pnl_by_hour_of_day`/`pnl_by_weekday`, the heatmap pivot, top runs, the fold table)
+  plus the sentences printed where there is nothing to draw `[amended 2026-09-28: Story 27.5]`.
 - **`notebooks/`** — numbered jupytext pairs since Story 27.2 (`<nn>_<name>.py`, percent format,
   the source of truth, plus its output-free `.ipynb`; `jupytext.toml`, `make notebooks`), every
   one parameterised through `_params.py` and run against a fixture archive by
@@ -352,9 +361,18 @@ the old signals package and the dYdX collector's notebooks]`.
   funding and OI-change correlation, a cluster built into a `RunSpec` that it does not run, and per
   asset the cross-venue mid basis, lead-lag peak in words, funding differential and volume share;
   every number from `research.domain.correlation` and `research.application.aligned`, same-asset
-  matching from `kernel.venues.asset_key`) `[amended 2026-09-28: Story 27.4]`. Legacy: `backtest.ipynb` (replaced by Story 27.5) and
+  matching from `kernel.venues.asset_key`) `[amended 2026-09-28: Story 27.4]` and
+  `04_backtest_evaluation` (one strategy by string path through `BacktestRunner`: equity,
+  underwater and drawdown episodes, the `MetricReport` table, rolling Sharpe, trade
+  distributions, PnL by UTC hour and weekday, the trade list, a two-parameter sweep heatmap with
+  its top runs and runtime, and a walk-forward with the joined out-of-sample equity and metrics
+  beside the in-sample ones; every number from `research.application.evaluation`/`walk_forward`
+  and `research.domain`, no `BacktestNode` or PnL arithmetic in a cell; the one way to evaluate a
+  strategy interactively; its archive-sized constants go through `_params.setting`, which the
+  harness's `NOTEBOOK_ENV` shrinks to the fixture) `[amended 2026-09-28: Story 27.5]`. Legacy:
   `candlestick_pattern_scanner.ipynb` (a `Known limit:` notebook over the retired minute-bar
-  directory, replaced by Story 27.7); `dydx_catalog_pandas.ipynb` was deleted in Story 27.2.
+  directory, replaced by Story 27.7); `dydx_catalog_pandas.ipynb` was deleted in Story 27.2 and
+  `backtest.ipynb` in Story 27.5.
   `README.md` is the notebook index, `BACKTESTING.md` the backtest how-to.
 
 **Reads:** Parquet catalog (market-data rows only via `kernel.catalog_files`,

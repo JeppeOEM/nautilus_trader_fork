@@ -22,6 +22,7 @@ Importing this module puts `platform/` on `sys.path` (a Jupyter kernel starts in
 environment that already imports them (the collector image's `/app`) keeps its own.
 """
 
+import json
 import os
 import sys
 from dataclasses import dataclass
@@ -38,6 +39,7 @@ PLATFORM_DIR = Path(__file__).resolve().parents[2]
 DATA_DIR = PLATFORM_DIR / "data"
 DEFAULT_INSTRUMENTS = ("BTC-USD-PERP.DYDX", "ETH-USD-PERP.DYDX")
 HEADLESS_RENDERER = "headless"
+SETTING_PREFIX = "NOTEBOOK_"
 
 if str(PLATFORM_DIR) not in sys.path:
     sys.path.append(str(PLATFORM_DIR))
@@ -101,3 +103,51 @@ class Params:
             start=os.environ.get("START") or (today - timedelta(days=1)).isoformat(),
             end=os.environ.get("END") or today.isoformat(),
         )
+
+
+def _refuse_constant(constant: str) -> object:
+    """`json.loads`' `parse_constant`: JSON has no NaN or infinity, Python's parser accepts them."""
+    raise ValueError(f"{constant} is not a finite JSON number")
+
+
+def setting[T](name: str, default: T) -> T:
+    """
+    Return a notebook constant the test harness may shrink to fit its fixture (Story 27.5): the
+    JSON in the environment variable `NOTEBOOK_<name>` when it is set and non-empty, else
+    `default`, so a notebook never reads the environment itself and needs no runtime branch.
+
+    Invariant: the value returned has `default`'s type -- a `bool` only for a `bool` default, an
+    `int` also accepted (as a float) for a `float` default -- else `ValueError` naming the variable;
+    a blank value is unset, and invalid JSON (e.g. an unquoted string) or a non-finite number
+    (`NaN`, `Infinity`) raises `ValueError` too. A default must be a JSON type (`str`, `int`,
+    `float`, `bool`, `list`, `dict`): a `tuple` or `None` default could never be overridden.
+    Known limit: only the top-level type is checked (a list's items, a dict's values are not); the
+    consumer validates the rest (`RunSpec`, `evaluation.grid_points`, `walk_forward.folds` all do);
+    upgrade path: a schema per setting if a notebook ever takes nested input the consumer cannot
+    check.
+    """
+    variable = f"{SETTING_PREFIX}{name}"
+    raw = (os.environ.get(variable) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = json.loads(raw, parse_constant=_refuse_constant)
+    except json.JSONDecodeError as error:
+        raise ValueError(
+            f"{variable}={raw!r} is not JSON (a string must be quoted: '\"BTC-USD-PERP.DYDX\"')"
+        ) from error
+    except ValueError as error:
+        raise ValueError(f"{variable}={raw!r}: {error}") from error
+    if isinstance(default, bool) or isinstance(value, bool):
+        matches = isinstance(default, bool) and isinstance(value, bool)
+    elif isinstance(default, float):
+        matches = isinstance(value, int | float)
+        value = float(value) if matches else value
+    else:
+        matches = type(value) is type(default)
+    if not matches:
+        raise ValueError(
+            f"{variable}={raw!r} is a {type(value).__name__}, the default is a "
+            f"{type(default).__name__}"
+        )
+    return value

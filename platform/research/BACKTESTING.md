@@ -11,6 +11,23 @@ shared data types only).
 
 ## Run from a notebook
 
+**`research/notebooks/04_backtest_evaluation` is the one way to evaluate a strategy
+interactively** (Story 27.5). Set `STRATEGY`, `STRATEGY_CONFIG`, `PARAMS` (and `GRID`, `N_FOLDS`,
+`SELECT_BY`) in its Parameters cell and it shows, for one instrument over `START`-`END`: the
+equity with its underwater series and every drawdown episode, the `MetricReport` table (exactly
+`kernel.performance_metrics.all_metrics`), a rolling Sharpe (`ReturnSeries.rolling_sharpe`), the
+realized-PnL and holding-time distributions, PnL by UTC hour and weekday, the trade list, a
+two-parameter sweep as a heatmap with its top runs, grid size and runtime, and a walk-forward
+(`research.application.walk_forward`: `N` consecutive folds, each fold's point picked on the
+in-sample metric and run out of sample, the joined out-of-sample equity and metrics beside the
+in-sample ones). Every backtest in it goes through `BacktestRunner`; every table comes from
+`research.application.evaluation`. Launch it locally: `uv run jupyter lab research/notebooks`.
+
+The walk-forward's joined out-of-sample equity is a convention, not one continuous run: each fold
+runs from the full starting balance and is shifted by the earlier folds' PnL
+(`walk_forward.concat_equity`), and each fold's run spends its strategy's warm-up inside its own
+out-of-sample window (the `Known limit:` in `walk_forward.py`).
+
 `research.application.backtest_runner.NodeRunner` (the `BacktestRunner` port, Story 27.1) is the
 one way a notebook runs a backtest: it wraps `BacktestNode` + `BacktestDataConfig` +
 `ImportableStrategyConfig`, so a notebook never builds a node, a run config or a report by hand.
@@ -78,7 +95,8 @@ PYTHONPATH=platform python -m research.strategies.backtest_ofi        # OFIStrat
 PYTHONPATH=platform python -m research.run_backtest --start 2026-09-05 --end 2026-09-06   # OFIStrategy, CLI window
 ```
 
-`research/notebooks/backtest.ipynb` runs the same OFI backtest interactively.
+To evaluate the same OFI backtest interactively, run `research/notebooks/04_backtest_evaluation`
+(see "Run from a notebook"; the legacy `backtest.ipynb` was deleted in Story 27.5).
 
 Each file's `run()` returns results programmatically (from a notebook/script) and its
 `__main__` block prints a report when run directly. See each file's docstring for

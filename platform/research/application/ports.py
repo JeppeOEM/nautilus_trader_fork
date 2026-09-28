@@ -155,6 +155,20 @@ class RunResult:
     iterations: int
     wall_seconds: float
 
+    def pnl_by_hour_of_day(self) -> dict[int, float]:
+        """
+        Realized PnL per UTC hour of exit, exactly `self.trades.by_hour_of_day()` (Story 27.5): an
+        hour with no exit is absent, never 0; nothing is summed here.
+        """
+        return self.trades.by_hour_of_day()
+
+    def pnl_by_weekday(self) -> dict[int, float]:
+        """
+        Realized PnL per UTC weekday of exit (0 = Monday), exactly `self.trades.by_weekday()`
+        (Story 27.5): a weekday with no exit is absent, never 0; nothing is summed here.
+        """
+        return self.trades.by_weekday()
+
 
 class MarketFrames(Protocol):
     """
