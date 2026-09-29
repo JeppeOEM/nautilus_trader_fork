@@ -56,8 +56,10 @@ from kernel.clocks import NS_PER_MS
 from kernel.clocks import NS_PER_S
 from kernel.clocks import CatalogFileSpan
 from kernel.fold import SecondTradeFields
-from kernel.fold import SnapshotTradeValues
 from kernel.fold import fold_trades
+from kernel.second_snapshot import SnapshotEncodingError
+from kernel.second_snapshot import SnapshotTradeUnits
+from kernel.second_snapshot import unit_float
 from kernel.venues import market_kind
 from kernel.venues import venue_of
 from observability import error_ledger
@@ -104,8 +106,8 @@ AGREEMENT_COLUMNS = (
     "snapshot_sell_volume",
     "agrees",
 )
-# The snapshot's stored trade columns, in `SnapshotTradeValues` order.
-TRADE_COLUMNS = SnapshotTradeValues._fields
+# The snapshot's stored trade columns, in `SnapshotTradeUnits` order.
+TRADE_COLUMNS = SnapshotTradeUnits._fields
 PRECISION_COLUMNS = ("stream", "files", "labels", "instrument_precision", "uniform")
 LEDGER_COUNT_COLUMNS = ("service", "site", "count")
 LEDGER_RESTART_COLUMNS = ("service", "restarts")
@@ -327,8 +329,30 @@ def _dedupe(trades: Iterable[TradeTick]) -> tuple[dict[int, list[TradeTick]], Co
     return by_second, duplicates
 
 
-def _same(expected: SnapshotTradeValues, stored: Sequence[float]) -> bool:
+def _expected(fields: SecondTradeFields, precisions: tuple[int, int]) -> tuple | None:
+    """
+    Return the fold's trade columns as the row stores them: units at the row's precisions, decoded by the
+    one `unit_float` (exact equality with the stored decoded floats is then meaningful); None when
+    a trade is finer than the row's precision, which no stored row can match.
+    """
+    price_precision, size_precision = precisions
+    try:
+        units = fields.snapshot_units(price_precision, size_precision)
+    except SnapshotEncodingError:
+        return None
+    return (
+        *(None if u is None else unit_float(u, price_precision) for u in units[:4]),
+        unit_float(units.buy_volume, size_precision),
+        unit_float(units.sell_volume, size_precision),
+        units.buy_count,
+        units.sell_count,
+    )
+
+
+def _same(expected: tuple | None, stored: Sequence[float]) -> bool:
     """Exact equality per column; an empty OHLC (None) equals the stored NaN, nothing else does."""
+    if expected is None:
+        return False
     for want, got in zip(expected, stored, strict=True):
         if want is None:
             if not math.isnan(got):
@@ -353,12 +377,22 @@ def _new_day() -> dict[str, Any]:
     }
 
 
-def _stored_rows(seconds: pd.DataFrame) -> dict[int, list[tuple]]:
-    """Snapshot rows' trade columns by floor second (a list: two rows in one second is a defect)."""
-    by_second: dict[int, list[tuple]] = defaultdict(list)
+_StoredRow = tuple[tuple[int, int], tuple]
+
+
+def _stored_rows(seconds: pd.DataFrame) -> dict[int, list[_StoredRow]]:
+    """
+    Snapshot rows' `(precisions, decoded trade columns)` by floor second (a list: two rows in one
+    second is a defect).
+    """
+    by_second: dict[int, list[_StoredRow]] = defaultdict(list)
     columns = [seconds[name].tolist() for name in TRADE_COLUMNS]
-    for ts_event, *stored in zip(seconds["ts_event"].tolist(), *columns, strict=True):
-        by_second[ts_event // NS_PER_S].append(tuple(stored))
+    precisions = zip(
+        seconds["price_precision"].tolist(), seconds["size_precision"].tolist(), strict=True
+    )
+    rows = zip(seconds["ts_event"].tolist(), precisions, *columns, strict=True)
+    for ts_event, precision, *stored in rows:
+        by_second[ts_event // NS_PER_S].append((precision, tuple(stored)))
     return by_second
 
 
@@ -378,7 +412,8 @@ def fold_agreement(
     """
     Per UTC day, re-run the one trade fold (`kernel.fold.fold_trades`, Story 22.13) over the raw
     trade archive and compare each snapshot second's eight stored trade columns with it, exactly
-    (no tolerance; an empty OHLC must be NaN, an untraded second 0 volumes and counts).
+    (no tolerance; an empty OHLC must be NaN, an untraded second 0 volumes and counts): the fold
+    is encoded at the row's own precisions and decoded by the same `unit_float` the row was.
 
     A trade belongs to the row whose `ts_event // 1 s` equals its own (`rebuild_day`'s mapping); a
     `trade_id` seen twice is folded once and counted in `duplicate_trades`. A trade second with no
@@ -408,17 +443,17 @@ def fold_agreement(
         day["orphan_trade_seconds"] += second not in stored
         day["trade_buy"] += [fields.buy_volume] if fields.buy_volume is not None else []
         day["trade_sell"] += [fields.sell_volume] if fields.sell_volume is not None else []
-    empty = SecondTradeFields().snapshot_values()
     for second, rows in stored.items():
         day = days[_day_of_second(second)]
         day["seconds"] += 1
-        day["snapshot_buy"] += [row[TRADE_COLUMNS.index("buy_volume")] for row in rows]
-        day["snapshot_sell"] += [row[TRADE_COLUMNS.index("sell_volume")] for row in rows]
+        day["snapshot_buy"] += [row[TRADE_COLUMNS.index("buy_volume")] for _, row in rows]
+        day["snapshot_sell"] += [row[TRADE_COLUMNS.index("sell_volume")] for _, row in rows]
         if len(rows) > 1:
             day["shared_seconds"] += 1
             continue
-        expected = folds[second].snapshot_values() if second in folds else empty
-        day["mismatched_seconds"] += not _same(expected, rows[0])
+        precisions, row = rows[0]
+        expected = _expected(folds.get(second, SecondTradeFields()), precisions)
+        day["mismatched_seconds"] += not _same(expected, row)
     for day_name, count in duplicates.items():
         days[day_name]["duplicate_trades"] += count
     return pd.DataFrame(

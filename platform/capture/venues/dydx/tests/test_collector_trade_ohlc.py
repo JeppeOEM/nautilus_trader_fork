@@ -23,8 +23,10 @@ import time
 from pathlib import Path
 
 from kernel.fold import fold_trades
+from kernel.second_snapshot import unit_float
 
 from capture.application.capture_service import CaptureService
+from capture.tests.definition_kit import definitions
 from capture.venues.dydx.__main__ import build_capture
 from capture.venues.dydx.config import DydxConfig
 from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
@@ -55,6 +57,7 @@ def _collector(tmp_path: Path) -> CaptureService:
     """Build a collector planning and applied on `_IID`, as `run()`'s initial apply leaves it."""
     collector = build_capture(_make_config(tmp_path / "catalog"), (str(_IID),))
     collector._applied.add(str(_IID))
+    collector._instruments = definitions(str(_IID))
     return collector
 
 
@@ -76,7 +79,11 @@ def _trade(
 
 
 def _second(collector: CaptureService) -> dict:
-    return fold_trades(collector._intake(str(_IID)).live).snapshot_values()._asdict()
+    """Return the live second's trade columns as a decoded snapshot shows them (precision 1 and 1)."""
+    units = fold_trades(collector._intake(str(_IID)).live).snapshot_units(1, 1)._asdict()
+    return {
+        k: v if v is None or k.endswith("_count") else unit_float(v, 1) for k, v in units.items()
+    }
 
 
 def test_trade_tick_is_buffered_for_catalog_write(tmp_path: Path) -> None:

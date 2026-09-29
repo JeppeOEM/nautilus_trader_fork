@@ -13,19 +13,49 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-`SecondRow` is the one name capture and candles share for a duck-typed second (Story 24.1).
+`kernel.second_snapshot`: the `SecondRow` protocol (Story 24.1) and the one encoder/decoder of the
+exact integer layout (Story 30.2).
 
-Both shapes that cross the `SecondSink` port must satisfy it: the live `DydxSecondSnapshot` and the
-`SecondOHLC` the catalog read returns. If either stopped satisfying it the fold would still run --
-duck typing -- and only fail at the attribute, deep inside a flush.
+`SecondRow` is the one name capture and candles share for a duck-typed second: both shapes that
+cross the `SecondSink` port must satisfy it. The layout tests prove the encoder refuses every value
+it cannot hold exactly, the decoder is strict, and encode -> Parquet -> decode (and the Redis JSON
+route) returns identical `Price`/`Quantity` values over a seeded generator of books.
 """
 
+import json
+import random
+from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
+import pytest
+
+from kernel.second_snapshot import INT64_MAX
 from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.second_snapshot import LegacySnapshotLayoutError
 from kernel.second_snapshot import SecondOHLC
 from kernel.second_snapshot import SecondRow
+from kernel.second_snapshot import Side
+from kernel.second_snapshot import SnapshotEncodingError
+from kernel.second_snapshot import SnapshotTradeUnits
+from kernel.second_snapshot import decode_book_prices
+from kernel.second_snapshot import encode_book_prices
+from kernel.second_snapshot import unit_float
+from kernel.second_snapshot import unit_floats
+from kernel.second_snapshot import units_of
+from kernel.tests.snapshot_factory import make_snapshot
+from kernel.tests.snapshot_factory import wire
 from nautilus_trader.model.identifiers import InstrumentId
+from nautilus_trader.model.objects import FIXED_PRECISION
+from nautilus_trader.model.objects import PRICE_MAX
+from nautilus_trader.model.objects import QUANTITY_MAX
+from nautilus_trader.model.objects import Price
+from nautilus_trader.model.objects import Quantity
+from nautilus_trader.persistence.catalog import ParquetDataCatalog
+from nautilus_trader.serialization.arrow.serializer import make_dict_deserializer
+from nautilus_trader.serialization.arrow.serializer import make_dict_serializer
 
 
 _IID = "BTC-USD-PERP.DYDX"
@@ -36,8 +66,8 @@ def _ohlc() -> SecondOHLC:
 
 
 def _snapshot() -> DydxSecondSnapshot:
-    return DydxSecondSnapshot(
-        instrument_id=InstrumentId.from_str(_IID),
+    return make_snapshot(
+        _IID,
         bid_prices=[99.0],
         bid_sizes=[1.0],
         ask_prices=[101.0],
@@ -47,7 +77,6 @@ def _snapshot() -> DydxSecondSnapshot:
         buy_count=1,
         sell_count=1,
         ts_event=1_000_000_000,
-        ts_init=1_000_000_000,
         open_price=100.0,
         high_price=101.0,
         low_price=99.0,
@@ -78,3 +107,309 @@ def test_the_two_shapes_carry_the_same_per_second_values() -> None:
 def test_a_row_missing_a_field_does_not_satisfy_the_protocol() -> None:
     """A stand-in that forgot `sell_volume` is caught here, not at the flush that folds it."""
     assert not isinstance(SimpleNamespace(ts_event=0, buy_volume=1.0), SecondRow)
+
+
+# -- units ---------------------------------------------------------------------------------------
+
+
+def test_units_are_the_raw_scaled_down_exactly() -> None:
+    assert units_of(Price.from_str("85891.9").raw, 1) == 858_919
+    assert units_of(Price.from_str("-0.5").raw, 1) == -5
+    assert units_of(Quantity.from_str("0.001").raw, 3) == 1
+    assert units_of(Quantity.from_str("7").raw, 0) == 7
+
+
+def test_a_raw_finer_than_the_precision_is_refused_never_rounded() -> None:
+    with pytest.raises(SnapshotEncodingError, match="not exact at precision 1"):
+        units_of(Price.from_str("85891.95").raw, 1)
+
+
+def test_a_precision_outside_this_build_is_refused() -> None:
+    for precision in (-1, FIXED_PRECISION + 1):
+        with pytest.raises(SnapshotEncodingError, match="precision"):
+            units_of(0, precision)
+
+
+def test_units_outside_int64_are_refused() -> None:
+    raw = (INT64_MAX + 1) * 10 ** (FIXED_PRECISION - 9)
+    with pytest.raises(SnapshotEncodingError, match="int64"):
+        units_of(raw, 9)
+    assert units_of(INT64_MAX * 10 ** (FIXED_PRECISION - 9), 9) == INT64_MAX
+
+
+def test_one_float_definition_for_the_scalar_and_the_array_path() -> None:
+    rng = random.Random(3002)  # noqa: S311 -- a deterministic fixture, not cryptography
+    values = [rng.randint(-(10**15), 10**15) for _ in range(2_000)]
+    precisions = [rng.randint(0, 9) for _ in values]
+    scalar = [unit_float(u, p) for u, p in zip(values, precisions, strict=True)]
+    array = unit_floats(np.array(values), np.array(precisions))
+    assert scalar == array.tolist()
+    assert unit_float(858_919, 1) == 85891.9  # no float noise: the nearest double to the decimal
+
+
+# -- the gap layout ------------------------------------------------------------------------------
+
+
+def test_the_spec_example_encodes_to_gaps() -> None:
+    row = wire(
+        bid_prices=[100.5, 100.3, 99.9],
+        bid_sizes=[1, 1, 1],
+        ask_prices=[100.7, 101.0],
+        ask_sizes=[1, 1],
+        price_precision=1,
+        size_precision=0,
+    )
+    assert (row["bid_prices"], row["ask_prices"]) == ([1005, 2, 4], [1007, 3])
+    assert decode_book_prices([1005, 2, 4], "bid") == [1005, 1003, 999]
+    assert decode_book_prices([1007, 3], "ask") == [1007, 1010]
+
+
+def test_an_empty_side_is_empty_both_ways() -> None:
+    assert encode_book_prices([], "bid") == []
+    assert decode_book_prices([], "ask") == []
+    row = DydxSecondSnapshot.from_dict(wire(ask_prices=[1.0], ask_sizes=[1.0]))
+    assert (row.bid_prices, row.bid_price_units, row.exact.bid_prices) == ([], [], ())
+
+
+@pytest.mark.parametrize(
+    ("units", "side"),
+    [([100, 100], "bid"), ([100, 101], "bid"), ([100, 99], "ask"), ([5, 5], "ask")],
+)
+def test_a_non_positive_gap_is_refused(units: list[int], side: Side) -> None:
+    with pytest.raises(SnapshotEncodingError, match="non-positive gap"):
+        encode_book_prices(units, side)
+
+
+def test_an_unsorted_book_cannot_even_be_built() -> None:
+    with pytest.raises(SnapshotEncodingError):
+        make_snapshot(bid_prices=[99.0, 100.0], bid_sizes=[1, 1])
+
+
+def test_a_stored_non_positive_gap_is_refused_on_decode() -> None:
+    row = wire(bid_prices=[100.0, 99.0], bid_sizes=[1, 1])
+    row["bid_prices"] = [1_000_000, 0]
+    with pytest.raises(ValueError, match="non-positive stored gap"):
+        DydxSecondSnapshot.from_dict(row)
+
+
+# -- strict decode ---------------------------------------------------------------------------------
+
+
+def test_a_row_without_precisions_is_a_legacy_row_naming_the_migration() -> None:
+    row = wire(bid_prices=[1.0], bid_sizes=[1.0])
+    for key in ("price_precision", "size_precision"):
+        legacy = {k: v for k, v in row.items() if k != key}
+        with pytest.raises(LegacySnapshotLayoutError, match="migrate_snapshot_ints"):
+            DydxSecondSnapshot.from_dict(legacy)
+    with pytest.raises(LegacySnapshotLayoutError):
+        DydxSecondSnapshot.from_dict({**row, "price_precision": None})
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("buy_volume", 1.0),
+        ("open_price", 100.0),
+        ("buy_count", True),
+        ("ts_event", 1.5),
+        ("price_precision", 4.0),
+        ("bid_prices", [10000.0]),
+        ("ask_sizes", [True]),
+    ],
+)
+def test_a_float_or_bool_in_an_integer_field_is_refused(key: str, value: object) -> None:
+    row = wire(bid_prices=[1.0], bid_sizes=[1.0], ask_prices=[2.0], ask_sizes=[1.0])
+    with pytest.raises(ValueError):
+        DydxSecondSnapshot.from_dict({**row, key: value})
+
+
+def test_a_missing_key_is_refused() -> None:
+    row = wire(bid_prices=[1.0], bid_sizes=[1.0])
+    del row["close_price"]
+    with pytest.raises(KeyError):
+        DydxSecondSnapshot.from_dict(row)
+
+
+def test_sizes_must_match_their_prices_and_never_be_negative() -> None:
+    with pytest.raises(SnapshotEncodingError, match="prices but"):
+        make_snapshot(bid_prices=[1.0], bid_sizes=[])
+    row = wire(bid_prices=[1.0], bid_sizes=[1.0])
+    with pytest.raises(SnapshotEncodingError, match="negative"):
+        DydxSecondSnapshot.from_dict({**row, "bid_sizes": [-1]})
+
+
+def test_a_trade_count_past_its_uint32_column_is_refused_at_encode() -> None:
+    row = wire(bid_prices=[1.0], bid_sizes=[1.0])
+    DydxSecondSnapshot.from_dict({**row, "buy_count": 2**32 - 1})
+    with pytest.raises(SnapshotEncodingError, match="uint32"):
+        DydxSecondSnapshot.from_dict({**row, "buy_count": 2**32})
+
+
+def test_a_stored_precision_outside_this_build_is_refused_on_the_array_path() -> None:
+    with pytest.raises(ValueError, match="precision"):
+        unit_floats(np.array([1]), np.array([FIXED_PRECISION + 1]))
+
+
+# -- decoded values --------------------------------------------------------------------------------
+
+
+def test_decoded_floats_and_exact_values() -> None:
+    row = DydxSecondSnapshot.from_dict(
+        wire(
+            bid_prices=[85891.9],
+            bid_sizes=[0.125],
+            ask_prices=[85892.0],
+            ask_sizes=[3],
+            buy_volume=0.3,
+            close_price=85891.9,
+            price_precision=1,
+            size_precision=3,
+        )
+    )
+    assert row.bid_prices == [85891.9]  # never 85891.90000000001
+    assert row.buy_volume == 0.3
+    assert (row.open_price, row.close_price) == (None, 85891.9)
+    assert row.exact.bid_prices == (Price.from_str("85891.9"),)
+    assert row.exact.bid_sizes == (Quantity.from_str("0.125"),)
+    assert row.exact.close_price == Price.from_str("85891.9")
+    assert row.exact.sell_volume == Quantity.from_str("0.000")
+    assert row.exact is row.exact  # built once
+
+
+def test_as_floats_is_the_indicator_view() -> None:
+    row = _snapshot()
+    view = row.as_floats()
+    assert view["bid_prices"] == [99.0]
+    assert (view["buy_volume"], view["close_price"], view["buy_count"]) == (1.0, 100.5, 1)
+
+
+def _catalog_round_trip(tmp_path: Path, rows: list[DydxSecondSnapshot]) -> list[DydxSecondSnapshot]:
+    catalog = ParquetDataCatalog(str(tmp_path))
+    catalog.write_data(rows)
+    read = catalog.query(DydxSecondSnapshot, identifiers=[_IID])
+    return [r.data if hasattr(r, "data") else r for r in read]
+
+
+def test_parquet_and_redis_decode_identically(tmp_path: Path) -> None:
+    rows = [
+        make_snapshot(
+            _IID,
+            bid_prices=[100.5, 100.25],
+            bid_sizes=[1.5, 2],
+            ask_prices=[100.75],
+            ask_sizes=[0.001],
+            buy_volume=2.5,
+            buy_count=2,
+            open_price=100.5,
+            high_price=100.75,
+            low_price=100.5,
+            close_price=100.75,
+            ts_event=1_000,
+            price_precision=2,
+            size_precision=3,
+        )
+    ]
+    from_parquet = _catalog_round_trip(tmp_path, rows)
+    from_redis = [
+        DydxSecondSnapshot.from_dict(entry)
+        for entry in json.loads(json.dumps([DydxSecondSnapshot.to_dict(r) for r in rows]))
+    ]
+    assert [DydxSecondSnapshot.to_dict(r) for r in from_parquet] == [
+        DydxSecondSnapshot.to_dict(r) for r in from_redis
+    ]
+    assert from_parquet[0].exact == from_redis[0].exact == rows[0].exact
+
+
+# -- the property test: seeded generated books ------------------------------------------------------
+
+_ITERATIONS = 400
+
+
+def _level_prices(rng: random.Random, n: int, best: int, step: int) -> list[int]:
+    out, level = [], best
+    for _ in range(n):
+        out.append(level)
+        level += step * rng.randint(1, 1_000)
+    return out
+
+
+def _size_units(rng: random.Random, precision: int) -> int:
+    """Up to QUANTITY_MAX (and so its raw) where int64 units allow it, else up to int64."""
+    ceiling = min(int(QUANTITY_MAX) * 10**precision, INT64_MAX)
+    return rng.choice((rng.randint(0, 10**6), rng.randint(0, ceiling)))
+
+
+def _generated(rng: random.Random, i: int) -> DydxSecondSnapshot:
+    pp, sp = rng.randint(0, 9), rng.randint(0, 9)
+    top = min(int(PRICE_MAX) * 10**pp, 10**15)
+    n_bids, n_asks = rng.randint(1, 50), rng.randint(1, 50)
+    best_bid = rng.randint(n_bids * 1_000 + 1, top // 2)
+    bids = _level_prices(rng, n_bids, best_bid, -1)
+    asks = _level_prices(rng, n_asks, best_bid + rng.randint(1, 100), 1)
+
+    def level(price_units: int) -> tuple[Price, Quantity]:
+        return (
+            Price.from_raw(price_units * 10 ** (FIXED_PRECISION - pp), pp),
+            Quantity.from_raw(_size_units(rng, sp) * 10 ** (FIXED_PRECISION - sp), sp),
+        )
+
+    traded = rng.random() < 0.7
+    close = asks[0] if traded else None
+    trades = SnapshotTradeUnits(
+        close, close, close, close, _size_units(rng, sp), _size_units(rng, sp), 3, 4
+    )
+    return DydxSecondSnapshot.from_levels(
+        InstrumentId.from_str(_IID),
+        pp,
+        sp,
+        [level(p) for p in bids],
+        [level(p) for p in asks],
+        trades,
+        ts_event=i,
+        ts_init=i,
+    )
+
+
+def test_generated_books_round_trip_exactly_through_parquet(tmp_path: Path) -> None:
+    rng = random.Random(30_2)  # noqa: S311 -- a deterministic generator, not cryptography
+    rows = [_generated(rng, i) for i in range(_ITERATIONS)]
+    batch = make_dict_serializer(DydxSecondSnapshot.schema())(rows)
+    path = tmp_path / "generated.parquet"
+    pq.write_table(pa.Table.from_batches([batch]), path)
+    decoded = make_dict_deserializer(DydxSecondSnapshot)(pq.read_table(path))
+    assert len(decoded) == len(rows)
+    for want, got in zip(rows, decoded, strict=True):
+        assert _raws(got) == _raws(want)
+        assert got.bid_prices == [unit_float(u, want.price_precision) for u in want.bid_price_units]
+
+
+def test_generated_books_reach_fifty_levels_and_every_precision() -> None:
+    rng = random.Random(30_2)  # noqa: S311
+    rows = [_generated(rng, i) for i in range(_ITERATIONS)]
+    assert max(len(r.bid_prices) for r in rows) == 50
+    assert {r.price_precision for r in rows} == set(range(10))
+    assert {r.size_precision for r in rows} == set(range(10))
+
+
+def _raws(row: DydxSecondSnapshot) -> list:
+    exact = row.exact
+    values = [*exact.bid_prices, *exact.bid_sizes, *exact.ask_prices, *exact.ask_sizes]
+    values += [exact.open_price, exact.close_price, exact.buy_volume, exact.sell_volume]
+    return [None if v is None else (v.raw, v.precision) for v in values]
+
+
+def test_a_size_whose_units_exceed_int64_is_refused() -> None:
+    """QUANTITY_MAX at size precision 9 is 3.4e22 units: past int64 (the Known limit)."""
+    huge = Quantity.from_raw(int(QUANTITY_MAX) * 10**FIXED_PRECISION, 0)
+    assert units_of(huge.raw, 0) == int(QUANTITY_MAX)  # fits at precision 0
+    with pytest.raises(SnapshotEncodingError, match="int64"):
+        DydxSecondSnapshot.from_levels(
+            InstrumentId.from_str(_IID),
+            2,
+            9,
+            [(Price.from_str("1.00"), huge)],
+            [],
+            SnapshotTradeUnits(None, None, None, None, 0, 0, 0, 0),
+            ts_event=0,
+            ts_init=0,
+        )

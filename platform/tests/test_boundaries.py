@@ -1472,6 +1472,68 @@ def test_no_module_outside_the_kernel_indexes_a_snapshot_payload_by_key() -> Non
     )
 
 
+# The stored snapshot layout (Story 30.2) -- `bid_prices`/`ask_prices` as the best price plus gaps
+# -- is decoded only by `kernel.second_snapshot`; the one other module that reads the raw columns
+# is the migration that writes them. A module holding a Parquet reader (`pyarrow`, or pandas'
+# `read_parquet`) and naming either column reads the gap layout itself. Known limit: numpy alone
+# does not count -- `kernel.indicators` and research's frames name the same keys for the decoded
+# float view (`as_floats()`, absolute prices), which is the point of keeping the names; a module
+# that reads Parquet through numpy only would slip past. Upgrade path: track the `DydxSecondSnapshot`
+# column reads by data flow instead of by module.
+_GAP_LAYOUT_COLUMNS = frozenset({"bid_prices", "ask_prices"})
+_GAP_LAYOUT_READERS = frozenset({"kernel.second_snapshot", "archive.tools.migrate_snapshot_ints"})
+
+
+def _reads_parquet(tree: ast.AST) -> bool:
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import) and any(
+            a.name.split(".")[0] == "pyarrow" for a in node.names
+        ):
+            return True
+        if isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] == "pyarrow":
+            return True
+        if isinstance(node, ast.Attribute) and node.attr == "read_parquet":
+            return True
+    return False
+
+
+def _names_gap_columns(tree: ast.AST) -> list[int]:
+    return [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and node.value in _GAP_LAYOUT_COLUMNS
+    ]
+
+
+def _gap_layout_readers() -> dict[str, list[int]]:
+    found = {}
+    for module, path in _MODULES.items():
+        if _is_test_module(module) or module.split(".")[0] == TESTS:
+            continue
+        tree = ast.parse(path.read_text())
+        if _reads_parquet(tree) and (lines := _names_gap_columns(tree)):
+            found[module] = lines
+    return found
+
+
+def test_the_gap_layout_rule_sees_parquet_readers_naming_the_columns() -> None:
+    reader = ast.parse("import pyarrow.parquet as pq\ncols = ['bid_prices']\n")
+    frame = ast.parse("import numpy as np\nrow = {'bid_prices': []}\n")
+    pandas = ast.parse("import pandas as pd\nt = pd.read_parquet(p, columns=['ask_prices'])\n")
+    assert (_reads_parquet(reader), _names_gap_columns(reader)) == (True, [2])
+    assert _reads_parquet(frame) is False
+    assert (_reads_parquet(pandas), _names_gap_columns(pandas)) == (True, [2])
+
+
+def test_only_the_kernel_and_the_migration_read_the_gap_encoded_book_columns() -> None:
+    readers = _gap_layout_readers()
+    assert set(readers) <= _GAP_LAYOUT_READERS, (
+        "decode the snapshot's gap-encoded book prices only through kernel.second_snapshot "
+        f"(Story 30.2): {sorted(set(readers) - _GAP_LAYOUT_READERS)}"
+    )
+    assert set(readers) == _GAP_LAYOUT_READERS  # both still read them: the rule is not vacuous
+
+
 # --- ranking, bots and collection control: no module-level runtime state (spine AD-D10, Stories
 # 25.2/25.3/25.4); ranking: one formula (Story 25.2) --------------------------------------------
 

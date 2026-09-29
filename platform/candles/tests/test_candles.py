@@ -30,6 +30,8 @@ import pytest
 from kernel.catalog_files import query_second_ohlc
 from kernel.clocks import READ_SPAN_MARGIN_NS
 from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.second_snapshot import LegacySnapshotLayoutError
+from kernel.tests.snapshot_factory import make_snapshot
 
 from candles.application.forming import bars_from_rows
 from candles.application.forming import forming_bar
@@ -228,7 +230,7 @@ def test_is_valid_candle_rejects_inverted_negative_and_nonfinite() -> None:
 
 def _write_ohlc_snapshots(catalog_path: str, base: int, n: int) -> list[DydxSecondSnapshot]:
     snaps = [
-        DydxSecondSnapshot(
+        make_snapshot(
             instrument_id=InstrumentId.from_str(IID),
             bid_prices=[99.0],
             bid_sizes=[1.0],
@@ -275,8 +277,12 @@ def test_query_second_ohlc_matches_catalog_decoder(tmp_path: Path) -> None:
     assert all(lo <= r.ts_event <= hi for r in query_second_ohlc(str(tmp_path), IID, lo, hi))
 
 
-def test_query_second_ohlc_tolerates_files_without_ohlc_columns(tmp_path: Path) -> None:
-    """Pre-OHLC files (no open/high/low/close columns) read as None instead of crashing."""
+def test_query_second_ohlc_refuses_a_float_layout_file(tmp_path: Path) -> None:
+    """
+    A pre-30.2 file (float layout; a pre-OHLC one lacks the OHLC columns too) is refused loudly,
+    never read as None or floats: `archive.tools.migrate_snapshot_ints` rewrites it first (it fills
+    a pre-OHLC file's OHLC with nulls, what the reader used to substitute).
+    """
     import pyarrow as pa
     import pyarrow.parquet as pq
 
@@ -287,11 +293,5 @@ def test_query_second_ohlc_tolerates_files_without_ohlc_columns(tmp_path: Path) 
     pq.write_table(
         pa.table({"ts_event": pa.array([ts], pa.uint64()), "buy_volume": [1.0]}), d / name
     )
-    (row,) = query_second_ohlc(str(tmp_path), IID, ts - 1, ts + 1)
-    assert (row.open_price, row.close_price, row.buy_volume, row.sell_volume) == (
-        None,
-        None,
-        1.0,
-        0.0,
-    )
-    assert bars_from_rows([row], 60) == []
+    with pytest.raises(LegacySnapshotLayoutError, match="migrate_snapshot_ints"):
+        query_second_ohlc(str(tmp_path), IID, ts - 1, ts + 1)

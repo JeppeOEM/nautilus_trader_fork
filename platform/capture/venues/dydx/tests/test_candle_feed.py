@@ -30,6 +30,7 @@ from candles.application import queries
 from candles.application.sink import CandleSink
 from candles.infrastructure.sqlite_store import connect_ro
 from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.tests.snapshot_factory import make_snapshot
 
 from capture.application.capture_service import CaptureService
 from capture.application.capture_service import _seconds_until_next_flush
@@ -47,7 +48,7 @@ _T0 = 1_800_000_000 * 1_000_000_000  # a UTC minute boundary
 
 def _snap(i: int) -> DydxSecondSnapshot:
     ts = _T0 + i * 1_000_000_000
-    return DydxSecondSnapshot(
+    return make_snapshot(
         instrument_id=InstrumentId.from_str(_IID),
         bid_prices=[100.0],
         bid_sizes=[1.0],

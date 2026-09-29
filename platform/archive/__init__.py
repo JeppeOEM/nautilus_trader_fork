@@ -52,9 +52,10 @@ are the operator CLIs `python -m archive.<tool>` (`rebuild_seconds`, `consolidat
 `crosscheck_errors`, `backup_catalog`), the `archive` service `python -m archive.scheduler`
 (Story 25.1b: the one scheduler of the nightly saga, consolidate, backup and the intraday
 closed-hour merge -- `application.scheduler` over the `domain.schedule`/`domain.intraday` rules)
-and `archive/tools/*` (`measure_lag`, `migrate_open_interest`, `normalize_snapshot_schema`). They
-moved here from the collector core package in Story 25.1, and the re-export shims of their old
-paths were removed in Story 25.3.
+and `archive/tools/*` (`measure_lag`, `migrate_open_interest`, `recompress` (Story 30.1),
+`migrate_snapshot_ints` (Story 30.2, which subsumed and replaced `normalize_snapshot_schema`)).
+They moved here from the collector core package in Story 25.1, and the re-export shims of their
+old paths were removed in Story 25.3.
 
 Dependency direction: archive imports `kernel`, `observability` and candles' application layer
 (`VerifiedDays`, `queries`, `rebuild`); `prune_catalog` alone also reads the collection plan

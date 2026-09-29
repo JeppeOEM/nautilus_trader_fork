@@ -20,6 +20,7 @@ must equal the same fold read straight off those snapshots (one fold, two paths)
 from pathlib import Path
 
 from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.tests.snapshot_factory import make_snapshot
 
 from candles.application import queries
 from candles.application.forming import bars_from_rows
@@ -41,7 +42,7 @@ def _seed(path: Path) -> list[DydxSecondSnapshot]:
     """200 traded seconds straddling a UTC midnight long ago, so two day chunks are crossed."""
     start = 3 * _DAY_NS - 90 * _SEC
     snaps = [
-        DydxSecondSnapshot(
+        make_snapshot(
             instrument_id=InstrumentId.from_str(IID),
             bid_prices=[100.0 + i - 1],
             bid_sizes=[1.0],

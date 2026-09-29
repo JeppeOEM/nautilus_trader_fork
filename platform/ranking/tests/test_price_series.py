@@ -17,7 +17,7 @@
 import tempfile
 
 import pytest
-from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.tests.snapshot_factory import make_snapshot
 
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
@@ -34,7 +34,7 @@ _1H_NS = 3_600 * 1_000_000_000
 def _write_snapshot(catalog_path: str, close_price: float, ts: int) -> None:
     ParquetDataCatalog(catalog_path).write_data(
         [
-            DydxSecondSnapshot(
+            make_snapshot(
                 instrument_id=InstrumentId.from_str(_IID),
                 bid_prices=[close_price - 1],
                 bid_sizes=[1.0],

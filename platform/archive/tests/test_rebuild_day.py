@@ -17,6 +17,7 @@
 import glob
 import json
 import time
+from decimal import Decimal
 from pathlib import Path
 
 import pyarrow as pa
@@ -25,6 +26,7 @@ import pytest
 from candles.application.rebuild import parse_date_ns
 from kernel.fold import fold_trades
 from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.tests.snapshot_factory import make_snapshot
 from observability import error_ledger
 
 from archive.application.rebuild_day import DayReport
@@ -37,6 +39,8 @@ from archive.infrastructure.gap_markers import GapMarkerFiles
 from archive.infrastructure.gap_markers import record_gap
 from archive.infrastructure.maintenance_lock import maintenance
 from archive.rebuild_seconds import main
+from archive.tests.legacy_snapshot_fixture import LegacyRow
+from archive.tests.legacy_snapshot_fixture import write_legacy
 from nautilus_trader.model.data import TradeTick
 from nautilus_trader.model.enums import AggressorSide
 from nautilus_trader.model.identifiers import InstrumentId
@@ -80,18 +84,24 @@ def _trade(
     )
 
 
+# The instrument definition's precisions the rows are stored at (prices "100.0", sizes "0.50").
+_PP, _SP = 2, 2
+
+
 def _snap(second: int, live_trades: list[TradeTick], offset: float = 0.5) -> DydxSecondSnapshot:
     """Build the row the live loop wrote at mid-second, holding the trades that *arrived* by then."""
     ts = _at(second + offset)
-    return DydxSecondSnapshot(
-        instrument_id=InstrumentId.from_str(_IID),
-        bid_prices=[99.5 - second / 100],
+    return make_snapshot(
+        _IID,
+        bid_prices=[Decimal("99.5") - Decimal(second) / 100],
         bid_sizes=[1.0],
         ask_prices=[100.5],
         ask_sizes=[2.0],
-        **fold_trades(live_trades).snapshot_values()._asdict(),
+        trades=fold_trades(live_trades).snapshot_units(_PP, _SP),
         ts_event=ts,
         ts_init=ts,
+        price_precision=_PP,
+        size_precision=_SP,
     )
 
 
@@ -234,6 +244,41 @@ def test_mixed_schema_day_is_refused_and_files_unchanged(tmp_path: Path) -> None
     assert main(["--catalog", str(tmp_path), "--day", _DAY, "--apply"]) == 2
     assert error_ledger.counts() == {"rebuild.mixed_schema": 1}
     assert [Path(f).read_bytes() for f in _snapshot_files(tmp_path)] == before
+
+
+def test_a_float_layout_day_is_refused_naming_the_migration(tmp_path: Path) -> None:
+    error_ledger.reset()
+    _catalog(tmp_path).write_data([_trade(1, 70.3, 70.4)])
+    legacy = [LegacyRow(_at(70.5), [99.5], [1.0], [100.5], [2.0])]
+    path = write_legacy(tmp_path, _IID, legacy)
+    before = path.read_bytes()
+    assert main(["--catalog", str(tmp_path), "--day", _DAY, "--apply"]) == 2
+    assert error_ledger.counts() == {"rebuild.legacy_layout": 1}
+    assert "migrate_snapshot_ints" in error_ledger.last_details()["rebuild.legacy_layout"]
+    assert path.read_bytes() == before
+
+
+def test_a_trade_finer_than_the_row_precision_is_refused_never_rounded(tmp_path: Path) -> None:
+    error_ledger.reset()
+    catalog = _catalog(tmp_path)
+    catalog.write_data([_snap(s, []) for s in range(80, 82)])
+    catalog.write_data([_trade(1, 80.3, 80.4, "100.125")])  # 3 decimals, the rows hold 2
+    before = [Path(f).read_bytes() for f in _snapshot_files(tmp_path)]
+    assert main(["--catalog", str(tmp_path), "--day", _DAY, "--apply"]) == 2
+    assert error_ledger.counts() == {"rebuild.off_grid": 1}
+    assert [Path(f).read_bytes() for f in _snapshot_files(tmp_path)] == before
+
+
+def test_rebuilt_trade_columns_are_integers_at_the_row_precision(tmp_path: Path) -> None:
+    catalog = _catalog(tmp_path)
+    catalog.write_data([_snap(s, []) for s in range(90, 92)])
+    catalog.write_data([_trade(1, 90.3, 90.4, "100.25", "0.75")])
+    assert main(["--catalog", str(tmp_path), "--day", _DAY, "--apply"]) == 0
+    (path,) = _snapshot_files(tmp_path)
+    table = pq.read_table(path)
+    assert table.schema.field("open_price").type == pa.int64()
+    assert table.column("open_price").to_pylist() == [10025, None]
+    assert table.column("buy_volume").to_pylist() == [75, 0]
 
 
 def test_cli_rebuilds_only_the_requested_venue(tmp_path: Path) -> None:
@@ -391,15 +436,17 @@ _D1 = _D0 + 86_400 * _S  # the open day at the nightly's 00:30
 
 
 def _row(ts_event: int, ts_init: int, trades: list[TradeTick]) -> DydxSecondSnapshot:
-    return DydxSecondSnapshot(
-        instrument_id=InstrumentId.from_str(_IID),
+    return make_snapshot(
+        _IID,
         bid_prices=[99.5],
         bid_sizes=[1.0],
         ask_prices=[100.5],
         ask_sizes=[2.0],
-        **fold_trades(trades).snapshot_values()._asdict(),
+        trades=fold_trades(trades).snapshot_units(_PP, _SP),
         ts_event=ts_event,
         ts_init=ts_init,
+        price_precision=_PP,
+        size_precision=_SP,
     )
 
 

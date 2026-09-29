@@ -135,7 +135,8 @@ class RankingEngine:
 
     def ingest_snapshot_batch(self, batch: list) -> None:
         """
-        Decode each entry with `DydxSecondSnapshot.from_dict` (the one `snapshots:raw` parser) and
+        Decode each entry with `DydxSecondSnapshot.from_dict` (the one `snapshots:raw` parser of the
+        integer layout, Story 30.2; the floats it computes are this process's own) and
         ingest it. One malformed entry is ledgered and skipped, never the rest of the batch; a
         field the board drops from an otherwise usable entry is ledgered at the same site. A payload
         that is not a list is one failed message, never one ledger entry per key or character.

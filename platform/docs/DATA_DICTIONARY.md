@@ -9,7 +9,7 @@ Every "error ledger" site named below (`collector.late_trade`, `collector.trade_
 (Story 23.1; formerly `ml_signals.error_ledger`, whose shim Story 24.1 deleted). The sites, their
 names and what they count are unchanged `[re-cited 2026-09-21: Story 23.1]`, with one addition:
 `archive_gaps.inverted_span` counts a gap marker whose `from_ns > to_ns` — a backward wall-clock
-step between a lost trade's arrival and the flush. Since Story 26.1 every capture site is a constant in `capture/application/sites.py` and `CaptureService._ledger` is capture's only `record` call; it added `collector.empty_top` (a book with no best bid or ask: seconds skipped, one WARNING and one ledger line per instrument per minute) `[amended 2026-09-26: Story 26.1]`. The marker is written as the ordered span and
+step between a lost trade's arrival and the flush. Since Story 26.1 every capture site is a constant in `capture/application/sites.py` and `CaptureService._ledger` is capture's only `record` call; it added `collector.empty_top` (a book with no best bid or ask: seconds skipped, one WARNING and one ledger line per instrument per minute) `[amended 2026-09-26: Story 26.1]`, and Story 30.2 `collector.unencodable` (a second whose row cannot be stored exactly at the instrument definition's precisions: skipped, one ERROR and one ledger line per instrument per minute). The marker is written as the ordered span and
 still protects its rows, so the count is the only signal that the clock stepped back
 `[added 2026-09-22: Story 23.2]`.
 
@@ -229,13 +229,58 @@ Hyperliquid only** (dYdX bars are derived from its 1 s archive instead).
 The core microstructure record — a 1-second-sampled L2 book snapshot, **not** raw
 deltas. Per `platform/CLAUDE.md`'s Signal Architecture rule: store raw inputs, compute
 signals on read (SIGNAL-01). Moved from `collector_core/` to the shared kernel in Story 23.2
-with its class name, Arrow schema and `snapshots:raw` encoding unchanged (the catalog directory
-`custom_dydx_second_snapshot` derives from the class name; proven by
-`kernel/tests/test_pre_move_fixtures.py`). `DydxSecondSnapshot.from_dict` is the one parser of a
-`snapshots:raw` entry. The seven candle columns are read without the book by
-`kernel.catalog_files.query_second_ohlc` as `SecondOHLC` rows.
+with its class name (the catalog directory `custom_dydx_second_snapshot` derives from it). Since
+Story 30.2 its book and trade fields are **exact integers** (the layout below), in Parquet and in
+the `snapshots:raw` payload alike: `kernel/second_snapshot.py` is the one encoder/decoder of that
+layout, `DydxSecondSnapshot.from_dict` the one parser of a stored row or a `snapshots:raw` entry,
+and no other module reads the gap-encoded book columns (`platform/tests/test_boundaries.py`). The
+trade columns are read without the book by `kernel.catalog_files.query_second_ohlc` as
+`SecondOHLC` rows (decoded floats), level 0 by `query_top_of_book` as exact `Price`/`Quantity`.
 
-- **Fields** (`second_snapshot.py`, schema at `DydxSecondSnapshot.schema()`):
+- **Stored layout (Story 30.2; `DydxSecondSnapshot.schema()`):**
+
+  | Column | Arrow type | Holds |
+  |---|---|---|
+  | `instrument_id` | `dictionary<int8, string>` | the id |
+  | `price_precision`, `size_precision` | `uint8` | the instrument definition's precisions, **per row** (a mid-day precision change can never make two files disagree) |
+  | `bid_prices`, `ask_prices` | `list<int64>` | element 0 = the best price in units of `10^-price_precision`; every later element = the strictly positive **gap** to the level above (bids: previous − this; asks: this − previous) |
+  | `bid_sizes`, `ask_sizes` | `list<int64>` | each level's size in units of `10^-size_precision` |
+  | `buy_volume`, `sell_volume` | `int64` | size units (0 when that side did not trade) |
+  | `buy_count`, `sell_count` | `uint32` | trade counts |
+  | `open_price`, `high_price`, `low_price`, `close_price` | nullable `int64` | price units, null when nothing traded |
+  | `ts_event`, `ts_init` | `uint64` | the two clocks (below) |
+
+  Units come from Nautilus's exact `Price.raw`/`Quantity.raw` scaled down by
+  `10^(FIXED_PRECISION − precision)` with integer division asserted exact (`units_of`), at the
+  precision of the instrument definition capture holds -- never through `float`, never from a
+  value's own digits. A value that is not exact at its precision, outside int64, or a book level
+  that is not strictly below (bids) / above (asks) the one before is refused
+  (`SnapshotEncodingError`): the sampler rejects that second as `Unencodable` (logged and
+  ledgered `collector.unencodable`, one line per instrument per minute), never rounds it. Known
+  limit: int64 units cap a value at 9.22e18 units (≈ 9.2e9 at size precision 9); upgrade path: a
+  per-row size exponent or decimal128.
+
+  **Decode by hand** (any language, no Nautilus): `value = units / 10^precision`, exactly as a
+  decimal (`858919` at precision 1 is `85891.9`). Book prices: `p[0] = stored[0]`, then
+  `p[i] = p[i−1] − stored[i]` for bids and `p[i] = p[i−1] + stored[i]` for asks. Example at
+  price precision 1: bids 100.5 / 100.3 / 99.9 are stored `[1005, 2, 4]`, asks 100.7 / 101.0
+  `[1007, 3]`. In Python, `DydxSecondSnapshot.from_dict(row)` does it and exposes the pre-30.2
+  attribute names as floats computed once by `unit_float` = `float(units) / 10.0**precision`
+  (`bid_prices`, `buy_volume`, `close_price`, ...), the integers (`bid_price_units`, ...), and
+  exact `Price`/`Quantity` values (`.exact`); `as_floats()` is the dict `kernel.indicators`' pure
+  functions take. The web formats units only in `frontend/src/lib/units.ts` (exact, string-based).
+
+  **The `snapshots:raw` payload** is the same row: a JSON list of `DydxSecondSnapshot.to_dict()`
+  results -- the integers, both precisions and the gap-encoded book -- published by
+  `capture/infrastructure/redis_stream.py`. Every consumer (`ranking`, `views.live_candles` and
+  through it `alerting` and `data_api`'s live candles) decodes it with `from_dict` and may use
+  floats only inside its own computation; `from_dict` refuses a float, a bool or a missing
+  precision (a pre-30.2 entry). `data_api` passes integers through to the web
+  (`/api/snapshots/{iid}`: `bid_units`/`ask_units`/`price_precision`; `/catalog/snapshots/{iid}`:
+  the wire dict itself). A float-layout file is refused by every reader
+  (`LegacySnapshotLayoutError`) until `archive.tools.migrate_snapshot_ints` has rewritten it (§6).
+
+- **Fields** (their meaning; decoded values):
   - `instrument_id`
   - `bid_prices`, `bid_sizes`, `ask_prices`, `ask_sizes` — up to `BOOK_DEPTH = 20`
     levels each (`second_snapshot.py`), index 0 = best bid/ask
@@ -245,7 +290,7 @@ with its class name, Arrow schema and `snapshots:raw` encoding unchanged (the ca
     trade prices within this second, `None` if no trade occurred. Live, each accepted
     `TradeTick` is kept in `CaptureService._second_trades` and folded once per sample by
     `kernel.fold.fold_trades` (the same exact fold the nightly rebuild uses; the
-    float columns hold one conversion of an exact total). A closed day's rows are
+    columns hold the exact totals in units, `SecondTradeFields.snapshot_units`). A closed day's rows are
     re-derived from the raw archive (§1.1) on exchange time by `rebuild_seconds` (§6);
     book columns and timestamps are never touched. `candles.domain.fold.fold_arrays`
     combines these across multiple seconds for coarser candles (§2.5);
@@ -279,7 +324,9 @@ with its class name, Arrow schema and `snapshots:raw` encoding unchanged (the ca
   `S + 1 + hold_back_seconds`; after a stall it closes every overdue second (at most 60) in
   order, each from the book as of its own end.
 - **Guards before emission:** skips a missing book and an empty top of book (no best bid or
-  ask; rate-limited WARNING + `collector.empty_top` since Story 26.1), skips crossed books (the
+  ask; rate-limited WARNING + `collector.empty_top` since Story 26.1), skips a row that cannot be
+  encoded exactly (no instrument definition, or a value finer than it: rate-limited ERROR +
+  `collector.unencodable`, Story 30.2), skips crossed books (the
   venue's `CrossedBookPolicy` -- on dYdX the active uncross first, then a forced resync after a
   persistent cross; on Bybit a forced resync past `crossed_resync_seconds`) `[amended 2026-09-26: Story 26.1]`, and skips
   stale books with no `OrderBookDeltas` for `config.stale_book_seconds` (5s; in venue mode
@@ -1259,7 +1306,8 @@ so the first run is the next slot and targets that slot's yesterday only
 
 **Who writes what, offline (Story 25.1).** Every in-place Parquet rewrite by an archive tool --
 the rebuild, the consolidation's merge, `tools.migrate_open_interest`,
-`tools.normalize_snapshot_schema`, `tools.recompress` -- is
+`tools.migrate_snapshot_ints` (Story 30.2; it replaced `tools.normalize_snapshot_schema`),
+`tools.recompress` -- is
 `archive.infrastructure.catalog_files.CatalogFiles`: it writes `<file>.archive.tmp` with the
 compact write settings below (Story 30.1; zstd before it), reads it back, and renames it into
 place only when its full schema (Arrow metadata included), its row count and every value in
@@ -1280,7 +1328,7 @@ a collector starting while a tool holds it exclusively waits and ledgers
 `collector.capture_lock_wait` once. New ledger sites in Story 25.1: `reconcile.not_rebuilt`,
 `repair.capture_running`, `repair.open_day`, `rebuild.open_day` on `--apply` (the site existed),
 `consolidate.open_day`, `prune.open_day`, `migrate_open_interest.open_day`,
-`normalize_snapshot_schema.open_day`, `collector.capture_lock_wait`, `prune.bad_plan` (a plan
+`normalize_snapshot_schema.open_day` (the tool was deleted in Story 30.2), `collector.capture_lock_wait`, `prune.bad_plan` (a plan
 file that is unreadable, empty, malformed, or holds a window that is not finite hours >= 0: exit 1,
 nothing pruned), `prune.error` (one file's stat/delete failed: skipped, the run goes on; with
 `prune.open_day` or a `marker_failed` keep, the run exits 2),
@@ -1288,7 +1336,7 @@ nothing pruned), `prune.error` (one file's stat/delete failed: skipped, the run 
 never repaired without its capture lock), `archive.catalog_missing` (any archive tool given a
 catalog directory that does not exist: exit 1, nothing done), `migrate_open_interest.error` and
 `normalize_snapshot_schema.error` (one file failed -- unreadable, refused, a failed read-back or
-an I/O error: left as it was, the run goes on, exit 2)
+an I/O error: left as it was, the run goes on, exit 2; the latter tool deleted in Story 30.2)
 and `nightly.dydx_plan_missing` (a DYDX saga without `--dydx-plan`: the chain runs, plan retention
 is not applied, the outcome is findings). A trade file whose `pruned` marker could not be written is
 kept (`kept <iid> <day>: marker_failed`; the failure itself is `archive_gaps.write`), an unknown
@@ -1368,3 +1416,44 @@ keeps Nautilus's encoding until the next recompress run; upgrade path: the `arch
 recompress over closed days after its nightly consolidation. The VPS run and its before/after
 totals are a deferred operator action (`docs/DEPLOY_CHECKLIST.md`), recorded in
 `docs/DATA_INTEGRITY_AUDIT.md`.
+
+### Exact snapshot integers: the migration and the rebuild (Story 30.2)
+
+`python -m archive.tools.migrate_snapshot_ints --catalog <root> [--apply] [--venue V]` rewrites the
+closed-day float-layout `DydxSecondSnapshot` files in the integer layout (§1.7). Report-only
+without `--apply` (no lock, nothing written; the whole conversion and its checks run in memory
+and the "after" bytes are projected); with it, under the maintenance flock, through
+`CatalogFiles.rewrite` with the compact write settings above. Per file, one at a time (MEM-01;
+about 0.3 GB above the interpreter and ~10 s for a full 86,400-row, 20-level day), converted and
+checked 8,192 rows at a time:
+
+- each row's precisions are those of the catalog's own instrument definition with the greatest
+  `ts_init` not after the row's `ts_event` (`ParquetDataCatalog.instruments`, every stored
+  definition); a row older than all of them refuses the file (`migrate_snapshot_ints.error`);
+- every float is snapped to its nearest unit `rint(v · 10^p)` only when it lies within float
+  noise of that unit's exact value: at most **1024 ULP** of the value (capture's `as_double()` is
+  within 2 ULP; a pre-22.13 float-summed volume within one ULP per trade) and never more than
+  **0.001 unit** (the bar `archive.domain.reconciliation.float_units` uses). A value carrying a
+  real digit finer than the precision (`100.00001` at p=1) is far outside that, as is a
+  non-finite value or one too large for a double to resolve 0.001 unit (about 2.2e12 units):
+  the file is refused and ledgered once as `migrate_snapshot_ints.off_grid` naming the file and
+  the value (never rounded);
+- book prices are gap-encoded by the kernel (`encode_book_prices`), a pre-OHLC file gets null
+  OHLC (what `normalize_snapshot_schema`, deleted, used to do for D-24);
+- the new rows are decoded back through `DydxSecondSnapshot.from_dict` and every book, OHLC and
+  volume value must lie within the snap bar of the original float, every other column identical,
+  before `CatalogFiles.rewrite` (which verifies its own read-back) replaces the file.
+
+Integer files are counted and skipped (a rerun is a no-op), a file whose span reaches the current
+UTC day is counted and skipped (a later run takes it). The report prints per venue: files, rows,
+snapped values (floats that were not already `unit_float` of their units: the removed noise),
+bytes before -> after. Exit 0 done, 1 missing catalog or held lock, 2 any refused/failed file.
+
+The rebuild (`rebuild_seconds`) folds each second to exact `SecondTradeFields`, encodes it at that
+row's own `price_precision`/`size_precision` and compares and writes integers -- no float, no
+tolerance. It refuses an instrument-day with a float-layout file (`rebuild.legacy_layout`: migrate,
+then rebuild the day again) or a trade finer than its row's precision (`rebuild.off_grid`).
+
+New ledger sites in Story 30.2: `collector.unencodable` (capture: a second not stored because its
+row cannot be encoded exactly; one line per instrument per minute), `migrate_snapshot_ints.off_grid`,
+`migrate_snapshot_ints.error`, `rebuild.legacy_layout`, `rebuild.off_grid`.

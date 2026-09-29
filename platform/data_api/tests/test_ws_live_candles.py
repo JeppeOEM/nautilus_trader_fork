@@ -26,6 +26,7 @@ import asyncio
 
 import pytest
 from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.tests.snapshot_factory import make_snapshot
 from views.live_candles import LiveCandleBus
 
 from data_api import buses
@@ -153,7 +154,7 @@ async def test_handle_control_message_ignores_malformed_or_unparseable(
 
 
 def _a_snapshot() -> DydxSecondSnapshot:
-    return DydxSecondSnapshot(
+    return make_snapshot(
         instrument_id=InstrumentId.from_str(_IID),
         bid_prices=[100.0],
         bid_sizes=[1.0],

@@ -21,6 +21,7 @@ were deleted with it in Story 25.1a.)
 from pathlib import Path
 
 from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.tests.snapshot_factory import make_snapshot
 from ranking.infrastructure.metrics_store import SqliteMetricsStore
 
 from nautilus_trader.model.identifiers import InstrumentId
@@ -33,7 +34,7 @@ _IID = "BTC-USD-PERP.DYDX"
 
 
 def _snapshot(iid: str, ts_ns: int = 1_000_000_000) -> DydxSecondSnapshot:
-    return DydxSecondSnapshot(
+    return make_snapshot(
         instrument_id=InstrumentId.from_str(iid),
         bid_prices=[100.0, 99.5],
         bid_sizes=[1.0, 2.0],
@@ -76,16 +77,24 @@ def test_catalog_snapshot_rows_project_book_and_ohlc_fields(tmp_path: Path) -> N
 
     (row,) = catalog_snapshot_rows(catalog_path, _IID, 0, 3_000_000_000)
 
+    # The kernel's wire dict: integer units at the stored precisions, book prices gap-encoded.
     assert row == {
-        "bid_prices": [100.0, 99.5],
-        "bid_sizes": [1.0, 2.0],
-        "ask_prices": [100.5, 101.0],
-        "ask_sizes": [1.5, 3.0],
-        "buy_volume": 1.0,
-        "sell_volume": 0.5,
+        "instrument_id": _IID,
+        "price_precision": 4,
+        "size_precision": 4,
+        "bid_prices": [1_000_000, 5_000],
+        "bid_sizes": [10_000, 20_000],
+        "ask_prices": [1_005_000, 5_000],
+        "ask_sizes": [15_000, 30_000],
+        "buy_volume": 10_000,
+        "sell_volume": 5_000,
+        "buy_count": 2,
+        "sell_count": 1,
+        "open_price": 1_000_000,
+        "high_price": 1_004_000,
+        "low_price": 999_000,
+        "close_price": 1_002_000,
         "ts_event": 2_000_000_000,
-        "open_price": 100.0,
-        "high_price": 100.4,
-        "low_price": 99.9,
-        "close_price": 100.2,
+        "ts_init": 2_000_000_000,
     }
+    assert DydxSecondSnapshot.from_dict(row).bid_prices == [100.0, 99.5]

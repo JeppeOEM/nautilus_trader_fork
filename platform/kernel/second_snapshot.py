@@ -13,54 +13,216 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-1-second L2 book snapshot — raw data only, no derived signals (DDD spine AD-D3).
+1-second L2 book snapshot — raw data only, no derived signals (DDD spine AD-D3) — and the one
+encoder/decoder of its exact integer layout (Story 30.2).
 
 Invariant: `DydxSecondSnapshot` is registered for Arrow exactly once, under this class name and
 this schema. The class name is a persistence identifier -- `nautilus_trader.persistence.funcs.
 class_to_filename` derives the catalog directory `custom_dydx_second_snapshot` from `__name__` --
-and `to_dict`/`from_dict` are the `snapshots:raw` wire format: `from_dict` is the only parser of a
-`snapshots:raw` entry. Changing either orphans every stored file or every consumer.
+and `to_dict`/`from_dict` are both the Parquet row (`make_dict_serializer`/`make_dict_deserializer`)
+and the `snapshots:raw` JSON wire format: `from_dict` is the only parser of either, and this
+module is the only place that knows the gap layout below (`platform/tests/test_boundaries.py`).
 
-Stores the top 20 price levels on each side plus per-side trade volume and
-per-second trade OHLC. All signals (OFI, OBI, microprice, spread) are computed
-from this data via indicator classes in kernel/indicators.py — never
-stored here.
+The layout -- every stored price and size is an exact integer, never a float:
+
+- `price_precision`/`size_precision` (`uint8`) per row: the instrument definition's precisions,
+  never a value's own digit count. Per row, not per file, so a precision change mid-day can never
+  make two files of one instrument disagree.
+- A *unit* is `10^-precision`: `units = Price.raw // 10^(FIXED_PRECISION - precision)`, integer
+  division asserted exact (`units_of`), so no value ever passes through `float` on its way in.
+- `bid_prices`/`ask_prices` (`list<int64>`): element 0 is the best price in units; each later
+  element is the strictly positive gap to the level above it (bids `previous - this`, asks
+  `this - previous`). Example at p=1: bids 100.5/100.3/99.9 -> `[1005, 2, 4]`, asks 100.7/101.0
+  -> `[1007, 3]`.
+- `bid_sizes`/`ask_sizes` (`list<int64>`), `buy_volume`/`sell_volume` (`int64`): size units.
+- `open_price`..`close_price` (nullable `int64`): price units, null for a second with no trade.
+- counts (`uint32`) and timestamps (`uint64`) as before.
+
+A value that cannot be encoded exactly is refused with `SnapshotEncodingError`, never rounded: a
+raw finer than the precision, units outside int64, a non-positive book gap, a precision outside
+`0..FIXED_PRECISION`. `from_dict` is strict: a missing precision (a float-layout row,
+`LegacySnapshotLayoutError`) or a float or bool in an integer field raises. There is no float
+read path; a float-layout file is migrated by `archive.tools.migrate_snapshot_ints`.
+
+Decoded objects keep the pre-30.2 attribute names as floats (`bid_prices`, `buy_volume`,
+`open_price`, ...), each computed once in `__init__` by the one definition `unit_float` =
+`float(units) / 10.0**precision` (the numpy path `unit_floats` uses the same table), plus the
+integers (`bid_price_units`, ...) and, on first access, the exact `Price`/`Quantity` values
+(`exact`). Signals are derived from the floats in `kernel/indicators.py` (`as_floats()` is their
+input) and never stored here (SIGNAL-01):
 
   spread      = ask_prices[0] - bid_prices[0]
   microprice  = Microprice().update_raw(bid_prices[0], bid_sizes[0], ask_prices[0], ask_sizes[0])
   ofi_N       = MultiLevelOFI(levels=N) replayed over consecutive snapshots
   obi_N       = MultiLevelOBI(levels=N).update_raw(bid_sizes, ask_sizes)
 
-`open_price`/`high_price`/`low_price`/`close_price` are the OHLC of actual
-executed trade prices within this second (None if no trade occurred), and the
-volumes/counts the per-side totals -- all produced by the one exact fold,
-`kernel.fold.fold_trades`. Live, a second holds the trades that *arrived*
-since the previous sample; the raw `TradeTick`s are archived too (`data/trade_tick/`,
-story 22.13) and `archive.rebuild_seconds` rewrites a closed day's trade
-columns from them on exchange time (`ts_event`), leaving book columns and timestamps
-untouched. Candles at any resolution >= 1s are built by aggregating these fields
-(`candles/domain/fold.py`), not by replaying individual trades.
+`open_price`..`close_price` are the OHLC of the trades executed within this second, and the
+volumes/counts the per-side totals -- all produced by the one exact fold, `kernel.fold.fold_trades`
+(`SecondTradeFields.snapshot_units`). The raw `TradeTick`s are archived too (story 22.13) and
+`archive.rebuild_seconds` rewrites a closed day's trade columns from them on exchange time.
+
+Known limit: int64 units cap a size at 9.22e18 units (about 9.2e9 at size precision 9) and a
+price likewise; a larger value is refused loudly (`SnapshotEncodingError`), never truncated.
+Upgrade path: a per-row size exponent, or a decimal128 column.
 
 `ohlc_outside_book` is the one plausibility check of a second's trade OHLC against that same
-second's book (moved here from the collector core's integrity module in Story 25.1, so
-capture's live canary and archive's `repair_catalog` share it without either importing the
-other).
+second's book (shared by capture's live canary and archive's `repair_catalog`).
 """
 
+from collections.abc import Mapping
+from collections.abc import Sequence
+from dataclasses import dataclass
+from itertools import pairwise
+from typing import Literal
 from typing import NamedTuple
 from typing import Protocol
 from typing import runtime_checkable
 
+import numpy as np
 import pyarrow as pa
+import pyarrow.compute as pc
 
 from nautilus_trader.core.data import Data
 from nautilus_trader.model.identifiers import InstrumentId
+from nautilus_trader.model.objects import FIXED_PRECISION
+from nautilus_trader.model.objects import Price
+from nautilus_trader.model.objects import Quantity
 from nautilus_trader.serialization.arrow.serializer import make_dict_deserializer
 from nautilus_trader.serialization.arrow.serializer import make_dict_serializer
 from nautilus_trader.serialization.arrow.serializer import register_arrow
 
 
 BOOK_DEPTH = 20
+MIGRATION_TOOL = "archive.tools.migrate_snapshot_ints"
+INT64_MIN = -(2**63)
+INT64_MAX = 2**63 - 1
+UINT32_MAX = 2**32 - 1
+
+
+Side = Literal["bid", "ask"]
+
+
+class SnapshotEncodingError(ValueError):
+    """A value the integer layout cannot hold exactly: refused, never rounded."""
+
+
+class LegacySnapshotLayoutError(ValueError):
+    """A float-layout (pre-30.2) snapshot row or file: there is no float read path."""
+
+
+def _check_precision(precision: object, name: str = "precision") -> int:
+    if type(precision) is not int or not 0 <= precision <= FIXED_PRECISION:
+        raise SnapshotEncodingError(
+            f"{name} {precision!r} is not an int in 0..{FIXED_PRECISION} (this build's range)"
+        )
+    return precision
+
+
+def _check_int64(units: int, what: str) -> int:
+    if not INT64_MIN <= units <= INT64_MAX:
+        raise SnapshotEncodingError(f"{what} {units} units lie outside int64")
+    return units
+
+
+def _raw_step(precision: int) -> int:
+    """Return the `Price.raw`/`Quantity.raw` of one unit at `precision` (raws: `FIXED_PRECISION`)."""
+    return 10 ** (FIXED_PRECISION - precision)
+
+
+def _scale(precision: int) -> float:
+    """`10.0**precision`, exact for every precision of this build: the one float divisor."""
+    return 10.0**precision
+
+
+def units_of(raw: int, precision: int) -> int:
+    """
+    Return `raw` (a `Price.raw`/`Quantity.raw` at `FIXED_PRECISION`) in units of `10^-precision`.
+
+    Integer division, asserted exact: a raw holding more digits than `precision` would be silently
+    rounded by a plain `//`, so it raises `SnapshotEncodingError` instead, as do units outside
+    int64 (the column type).
+    """
+    units, remainder = divmod(raw, _raw_step(_check_precision(precision)))
+    if remainder:
+        raise SnapshotEncodingError(
+            f"raw {raw} is not exact at precision {precision}: it has more digits than the "
+            "instrument definition allows"
+        )
+    return _check_int64(units, f"raw {raw} at precision {precision}:")
+
+
+def unit_float(units: int, precision: int) -> float:
+    """Return units as a float, the one definition: `float(units) / 10.0**precision` (display/indicators)."""
+    return float(units) / _scale(precision)
+
+
+def unit_floats(units: np.ndarray, precisions: np.ndarray) -> np.ndarray:
+    """`unit_float` over arrays, one precision per element (the per-row precision column)."""
+    precisions = np.asarray(precisions)
+    if precisions.size and not 0 <= precisions.min() <= precisions.max() <= FIXED_PRECISION:
+        raise ValueError(f"a precision outside this build's 0..{FIXED_PRECISION}")
+    # The same divisor as `unit_float`, element for element: one definition, two paths.
+    scales = np.array([_scale(p) for p in range(FIXED_PRECISION + 1)], dtype=np.float64)
+    return np.asarray(units, dtype=np.int64).astype(np.float64) / scales[precisions]
+
+
+def price_of(units: int, precision: int) -> Price:
+    """Return the exact `Price` of `units` at `precision` (`Price.from_raw`, no float step: NAUT-01)."""
+    return Price.from_raw(units * _raw_step(precision), precision)
+
+
+def quantity_of(units: int, precision: int) -> Quantity:
+    """Return the exact `Quantity` of `units` at `precision` (`Quantity.from_raw`, no float step)."""
+    return Quantity.from_raw(units * _raw_step(precision), precision)
+
+
+def encode_book_prices(units: Sequence[int], side: Side) -> list[int]:
+    """
+    Absolute level prices (best first) -> the stored layout: `[best, gap, gap, ...]`, each gap the
+    strictly positive distance to the level above (bids descend, asks ascend). A non-positive gap
+    (an unsorted or duplicated level) raises `SnapshotEncodingError`.
+    """
+    if not units:
+        return []
+    out = [units[0]]
+    for above, level in pairwise(units):
+        gap = above - level if side == "bid" else level - above
+        if gap <= 0:
+            raise SnapshotEncodingError(
+                f"{side} levels {above} -> {level}: a non-positive gap (levels must be strictly "
+                f"{'descending' if side == 'bid' else 'ascending'})"
+            )
+        out.append(_check_int64(gap, f"{side} gap"))
+    return out
+
+
+def decode_book_prices(encoded: Sequence[int], side: Side) -> list[int]:
+    """Decode the stored `[best, gap, ...]` into absolute level prices in units, best first."""
+    if not encoded:
+        return []
+    out = [encoded[0]]
+    for gap in encoded[1:]:
+        if gap <= 0:
+            raise ValueError(f"{side} book: a non-positive stored gap {gap}")
+        out.append(out[-1] - gap if side == "bid" else out[-1] + gap)
+    return out
+
+
+class SnapshotTradeUnits(NamedTuple):
+    """
+    The eight trade columns of a snapshot as it stores them: OHLC in price units (None when no
+    trade), volumes in size units (0 when that side did not trade), counts. Field names are the
+    column names (`archive.rebuild_seconds` writes them with `_asdict()`).
+    """
+
+    open_price: int | None
+    high_price: int | None
+    low_price: int | None
+    close_price: int | None
+    buy_volume: int
+    sell_volume: int
+    buy_count: int
+    sell_count: int
 
 
 @runtime_checkable
@@ -76,7 +238,9 @@ class SecondRow(Protocol):
 
     Read-only properties, not attributes: `SecondOHLC` is a `NamedTuple` (immutable fields) and
     `DydxSecondSnapshot.ts_event` is a property, and a mutable-attribute protocol would reject both.
-    `open_price`..`close_price` are `None` for a second in which nothing traded.
+    `open_price`..`close_price` are `None` for a second in which nothing traded. The values are the
+    decoded floats (`unit_float`); candle bars are aggregations and stay floats (Known limit in
+    `candles/domain/fold.py`).
     """
 
     @property
@@ -148,53 +312,172 @@ def ohlc_outside_book(snapshot: _BookAndRange, tolerance: float = OHLC_BOOK_TOLE
     ) or snapshot.low_price < deepest_bid * (1 - tolerance)
 
 
-def _optional_float(value: object) -> float | None:
-    return None if value is None else float(value)
+@dataclass(frozen=True, slots=True)
+class SnapshotExact:
+    """A snapshot's book and trade fields as exact Nautilus values (`from_raw`, no float step)."""
+
+    bid_prices: tuple[Price, ...]
+    bid_sizes: tuple[Quantity, ...]
+    ask_prices: tuple[Price, ...]
+    ask_sizes: tuple[Quantity, ...]
+    open_price: Price | None
+    high_price: Price | None
+    low_price: Price | None
+    close_price: Price | None
+    buy_volume: Quantity
+    sell_volume: Quantity
+
+
+def _is_int(value: object) -> bool:
+    return type(value) is int  # `bool` and floats are refused: `type(True) is bool`
+
+
+def _int_list(values: object, name: str) -> list[int]:
+    # Only the container is checked here: `__init__`'s `_check_units` refuses any element that is
+    # not an int unit (a float, a bool) with the field named, once per row, not twice.
+    if not isinstance(values, list | tuple):
+        raise ValueError(f"snapshot field {name!r} must be a list of int units, got {values!r}")
+    return list(values)
+
+
+def _int_field(values: Mapping[str, object], name: str) -> int:
+    value = values[name]
+    if not _is_int(value):
+        raise ValueError(f"snapshot field {name!r} must be an int, got {value!r}")
+    return value  # type: ignore[return-value]  # narrowed by `_is_int`
+
+
+def _optional_int_field(values: Mapping[str, object], name: str) -> int | None:
+    return None if values[name] is None else _int_field(values, name)
+
+
+def _floats(units: Sequence[int], scale: float) -> list[float]:
+    return [float(u) / scale for u in units]
+
+
+def _optional_float(units: int | None, scale: float) -> float | None:
+    return None if units is None else float(units) / scale
+
+
+def _check_units(values: Sequence[int], what: str, non_negative: bool) -> None:
+    """
+    Refuse any value that is not an int unit inside int64 (or is a negative size).
+
+    Runs for every decoded row, so the per-element Python work is kept to builtins.
+    """
+    if not values:
+        return
+    if not all(type(u) is int for u in values):
+        bad = next(u for u in values if type(u) is not int)
+        raise SnapshotEncodingError(f"{what}: {bad!r} is not an int unit")
+    low, high = min(values), max(values)
+    if non_negative and low < 0:
+        raise SnapshotEncodingError(f"{what}: a negative size {low}")
+    _check_int64(low, what)
+    _check_int64(high, what)
+
+
+def _check_levels(units: Sequence[int], side: Side) -> None:
+    """Strictly ordered levels whose every gap fits int64; `encode_book_prices` names a failure."""
+    ordered = (
+        all(a > b for a, b in pairwise(units))
+        if side == "bid"
+        else all(a < b for a, b in pairwise(units))
+    )
+    if not ordered or (units and max(units) - min(units) > INT64_MAX):
+        encode_book_prices(units, side)  # raises with the offending pair
 
 
 class DydxSecondSnapshot(Data):
     """
     1-second sampled L2 book snapshot: raw inputs only (SIGNAL-01), every signal is derived on read.
 
-    The top-of-book levels (`bid_prices[0]` / `ask_prices[0]` are best bid/ask; lists are
-    variable-length, up to BOOK_DEPTH=20, shorter for illiquid coins), the second's folded trades
-    (`buy_volume`/`sell_volume`/`buy_count`/`sell_count`, `kernel.fold`) and its OHLC
-    (`open_price`..`close_price`, None for a second with no trade or a pre-OHLC file).
+    Holds the precisions and the integer units (absolute level prices, best first; variable-length
+    sides, up to BOOK_DEPTH=20); `__init__` refuses anything the stored layout cannot hold
+    (`SnapshotEncodingError`: unsorted levels, sizes that are negative or mismatched in count,
+    non-int units) and computes the float attributes once under their pre-30.2 names.
     """
 
     def __init__(
         self,
         instrument_id: InstrumentId,
-        bid_prices: list[float],
-        bid_sizes: list[float],
-        ask_prices: list[float],
-        ask_sizes: list[float],
-        buy_volume: float,
-        sell_volume: float,
+        price_precision: int,
+        size_precision: int,
+        bid_price_units: Sequence[int],
+        bid_size_units: Sequence[int],
+        ask_price_units: Sequence[int],
+        ask_size_units: Sequence[int],
+        buy_volume_units: int,
+        sell_volume_units: int,
         buy_count: int,
         sell_count: int,
         ts_event: int,
         ts_init: int,
-        open_price: float | None = None,
-        high_price: float | None = None,
-        low_price: float | None = None,
-        close_price: float | None = None,
+        open_price_units: int | None = None,
+        high_price_units: int | None = None,
+        low_price_units: int | None = None,
+        close_price_units: int | None = None,
     ) -> None:
         self.instrument_id = instrument_id
-        self.bid_prices = bid_prices
-        self.bid_sizes = bid_sizes
-        self.ask_prices = ask_prices
-        self.ask_sizes = ask_sizes
-        self.buy_volume = buy_volume
-        self.sell_volume = sell_volume
+        self.price_precision = _check_precision(price_precision, "price_precision")
+        self.size_precision = _check_precision(size_precision, "size_precision")
+        self.bid_price_units = list(bid_price_units)
+        self.bid_size_units = list(bid_size_units)
+        self.ask_price_units = list(ask_price_units)
+        self.ask_size_units = list(ask_size_units)
+        self.buy_volume_units = buy_volume_units
+        self.sell_volume_units = sell_volume_units
         self.buy_count = buy_count
         self.sell_count = sell_count
-        self.open_price = open_price
-        self.high_price = high_price
-        self.low_price = low_price
-        self.close_price = close_price
+        self.open_price_units = open_price_units
+        self.high_price_units = high_price_units
+        self.low_price_units = low_price_units
+        self.close_price_units = close_price_units
         self._ts_event = ts_event
         self._ts_init = ts_init
+        self._exact: SnapshotExact | None = None
+        self._validate()
+        price_scale = _scale(self.price_precision)
+        size_scale = _scale(self.size_precision)
+        self.bid_prices = _floats(self.bid_price_units, price_scale)
+        self.bid_sizes = _floats(self.bid_size_units, size_scale)
+        self.ask_prices = _floats(self.ask_price_units, price_scale)
+        self.ask_sizes = _floats(self.ask_size_units, size_scale)
+        self.buy_volume = float(buy_volume_units) / size_scale
+        self.sell_volume = float(sell_volume_units) / size_scale
+        self.open_price = _optional_float(open_price_units, price_scale)
+        self.high_price = _optional_float(high_price_units, price_scale)
+        self.low_price = _optional_float(low_price_units, price_scale)
+        self.close_price = _optional_float(close_price_units, price_scale)
+
+    def _validate(self) -> None:
+        for side in ("bid", "ask"):
+            prices = getattr(self, f"{side}_price_units")
+            sizes = getattr(self, f"{side}_size_units")
+            if len(prices) != len(sizes):
+                raise SnapshotEncodingError(
+                    f"{self.instrument_id} {side}: {len(prices)} prices but {len(sizes)} sizes"
+                )
+            _check_units(prices, f"{self.instrument_id} {side} prices", non_negative=False)
+            _check_units(sizes, f"{self.instrument_id} {side} sizes", non_negative=True)
+            _check_levels(prices, side)
+        volumes = [self.buy_volume_units, self.sell_volume_units]
+        _check_units(volumes, f"{self.instrument_id} volumes", non_negative=True)
+        counts = [self.buy_count, self.sell_count]
+        _check_units(counts, f"{self.instrument_id} counts", non_negative=True)
+        if max(counts) > UINT32_MAX:  # the column is uint32: refused here, not at the flush
+            raise SnapshotEncodingError(f"{self.instrument_id}: a trade count above uint32")
+        ohlc = [
+            u
+            for u in (
+                self.open_price_units,
+                self.high_price_units,
+                self.low_price_units,
+                self.close_price_units,
+            )
+            if u is not None
+        ]
+        _check_units(ohlc, f"{self.instrument_id} OHLC", non_negative=False)
 
     @property
     def ts_event(self) -> int:
@@ -205,22 +488,111 @@ class DydxSecondSnapshot(Data):
         return self._ts_init
 
     @classmethod
+    def from_levels(
+        cls,
+        instrument_id: InstrumentId,
+        price_precision: int,
+        size_precision: int,
+        bids: Sequence[tuple[Price, Quantity]],
+        asks: Sequence[tuple[Price, Quantity]],
+        trades: SnapshotTradeUnits,
+        ts_event: int,
+        ts_init: int,
+    ) -> "DydxSecondSnapshot":
+        """
+        Encode a row from exact values (the encoder): each level's `Price`/`Quantity` raw becomes units at the
+        instrument definition's precisions (`units_of`, exact or `SnapshotEncodingError`), the
+        trade columns come already in units (`SecondTradeFields.snapshot_units`).
+        """
+        return cls(
+            instrument_id=instrument_id,
+            price_precision=price_precision,
+            size_precision=size_precision,
+            bid_price_units=[units_of(p.raw, price_precision) for p, _ in bids],
+            bid_size_units=[units_of(q.raw, size_precision) for _, q in bids],
+            ask_price_units=[units_of(p.raw, price_precision) for p, _ in asks],
+            ask_size_units=[units_of(q.raw, size_precision) for _, q in asks],
+            buy_volume_units=trades.buy_volume,
+            sell_volume_units=trades.sell_volume,
+            buy_count=trades.buy_count,
+            sell_count=trades.sell_count,
+            open_price_units=trades.open_price,
+            high_price_units=trades.high_price,
+            low_price_units=trades.low_price,
+            close_price_units=trades.close_price,
+            ts_event=ts_event,
+            ts_init=ts_init,
+        )
+
+    @property
+    def exact(self) -> SnapshotExact:
+        """
+        The book and trade fields as exact `Price`/`Quantity` values, built on first access and
+        kept on the instance (most readers need only the floats).
+        """
+        if self._exact is None:
+            self._exact = self._build_exact()
+        return self._exact
+
+    def _build_exact(self) -> SnapshotExact:
+        pp, sp = self.price_precision, self.size_precision
+
+        def price(units: int | None) -> Price | None:
+            return None if units is None else price_of(units, pp)
+
+        return SnapshotExact(
+            bid_prices=tuple(price_of(u, pp) for u in self.bid_price_units),
+            bid_sizes=tuple(quantity_of(u, sp) for u in self.bid_size_units),
+            ask_prices=tuple(price_of(u, pp) for u in self.ask_price_units),
+            ask_sizes=tuple(quantity_of(u, sp) for u in self.ask_size_units),
+            open_price=price(self.open_price_units),
+            high_price=price(self.high_price_units),
+            low_price=price(self.low_price_units),
+            close_price=price(self.close_price_units),
+            buy_volume=quantity_of(self.buy_volume_units, sp),
+            sell_volume=quantity_of(self.sell_volume_units, sp),
+        )
+
+    def as_floats(self) -> dict[str, object]:
+        """
+        Return the float view `kernel.indicators`' stateless functions take (absolute level prices, best
+        first; the decoded floats computed in `__init__`). Never published or stored: the wire and
+        the file carry `to_dict`'s integers.
+        """
+        return {
+            "bid_prices": self.bid_prices,
+            "bid_sizes": self.bid_sizes,
+            "ask_prices": self.ask_prices,
+            "ask_sizes": self.ask_sizes,
+            "buy_volume": self.buy_volume,
+            "sell_volume": self.sell_volume,
+            "buy_count": self.buy_count,
+            "sell_count": self.sell_count,
+            "open_price": self.open_price,
+            "high_price": self.high_price,
+            "low_price": self.low_price,
+            "close_price": self.close_price,
+        }
+
+    @classmethod
     def schema(cls) -> pa.Schema:
         return pa.schema(
             {
                 "instrument_id": pa.dictionary(pa.int8(), pa.string()),
-                "bid_prices": pa.list_(pa.float64()),
-                "bid_sizes": pa.list_(pa.float64()),
-                "ask_prices": pa.list_(pa.float64()),
-                "ask_sizes": pa.list_(pa.float64()),
-                "buy_volume": pa.float64(),
-                "sell_volume": pa.float64(),
+                "price_precision": pa.uint8(),
+                "size_precision": pa.uint8(),
+                "bid_prices": pa.list_(pa.int64()),
+                "bid_sizes": pa.list_(pa.int64()),
+                "ask_prices": pa.list_(pa.int64()),
+                "ask_sizes": pa.list_(pa.int64()),
+                "buy_volume": pa.int64(),
+                "sell_volume": pa.int64(),
                 "buy_count": pa.uint32(),
                 "sell_count": pa.uint32(),
-                "open_price": pa.float64(),
-                "high_price": pa.float64(),
-                "low_price": pa.float64(),
-                "close_price": pa.float64(),
+                "open_price": pa.int64(),
+                "high_price": pa.int64(),
+                "low_price": pa.int64(),
+                "close_price": pa.int64(),
                 "ts_event": pa.uint64(),
                 "ts_init": pa.uint64(),
             },
@@ -229,48 +601,146 @@ class DydxSecondSnapshot(Data):
 
     @staticmethod
     def to_dict(obj: "DydxSecondSnapshot") -> dict:
+        """Return the stored/wire row: integer units, gap-encoded book prices, the two precisions."""
         return {
             "instrument_id": obj.instrument_id.value,
-            "bid_prices": obj.bid_prices,
-            "bid_sizes": obj.bid_sizes,
-            "ask_prices": obj.ask_prices,
-            "ask_sizes": obj.ask_sizes,
-            "buy_volume": obj.buy_volume,
-            "sell_volume": obj.sell_volume,
+            "price_precision": obj.price_precision,
+            "size_precision": obj.size_precision,
+            "bid_prices": encode_book_prices(obj.bid_price_units, "bid"),
+            "bid_sizes": obj.bid_size_units,
+            "ask_prices": encode_book_prices(obj.ask_price_units, "ask"),
+            "ask_sizes": obj.ask_size_units,
+            "buy_volume": obj.buy_volume_units,
+            "sell_volume": obj.sell_volume_units,
             "buy_count": obj.buy_count,
             "sell_count": obj.sell_count,
-            "open_price": obj.open_price,
-            "high_price": obj.high_price,
-            "low_price": obj.low_price,
-            "close_price": obj.close_price,
+            "open_price": obj.open_price_units,
+            "high_price": obj.high_price_units,
+            "low_price": obj.low_price_units,
+            "close_price": obj.close_price_units,
             "ts_event": obj.ts_event,
             "ts_init": obj.ts_init,
         }
 
     @classmethod
-    def from_dict(cls, values: dict) -> "DydxSecondSnapshot":
+    def from_dict(cls, values: Mapping[str, object]) -> "DydxSecondSnapshot":
+        """
+        Parse one stored/wire row, strictly: every key present, every unit an int (not a float,
+        not a bool), gaps positive. A row without precisions is a float-layout row and raises
+        `LegacySnapshotLayoutError` naming the migration -- there is no float fallback.
+        """
+        if values.get("price_precision") is None or values.get("size_precision") is None:
+            raise LegacySnapshotLayoutError(
+                f"snapshot row for {values.get('instrument_id')!r} has no price_precision/"
+                f"size_precision: a float-layout row; run `python -m {MIGRATION_TOOL}`"
+            )
         return cls(
             instrument_id=InstrumentId.from_str(str(values["instrument_id"])),
-            bid_prices=list(values["bid_prices"]),
-            bid_sizes=list(values["bid_sizes"]),
-            ask_prices=list(values["ask_prices"]),
-            ask_sizes=list(values["ask_sizes"]),
-            buy_volume=float(values.get("buy_volume") or 0.0),
-            sell_volume=float(values.get("sell_volume") or 0.0),
-            buy_count=int(values.get("buy_count") or 0),
-            sell_count=int(values.get("sell_count") or 0),
-            open_price=_optional_float(values.get("open_price")),
-            high_price=_optional_float(values.get("high_price")),
-            low_price=_optional_float(values.get("low_price")),
-            close_price=_optional_float(values.get("close_price")),
-            ts_event=int(values["ts_event"]),
-            ts_init=int(values["ts_init"]),
+            price_precision=_int_field(values, "price_precision"),
+            size_precision=_int_field(values, "size_precision"),
+            bid_price_units=decode_book_prices(
+                _int_list(values["bid_prices"], "bid_prices"), "bid"
+            ),
+            bid_size_units=_int_list(values["bid_sizes"], "bid_sizes"),
+            ask_price_units=decode_book_prices(
+                _int_list(values["ask_prices"], "ask_prices"), "ask"
+            ),
+            ask_size_units=_int_list(values["ask_sizes"], "ask_sizes"),
+            buy_volume_units=_int_field(values, "buy_volume"),
+            sell_volume_units=_int_field(values, "sell_volume"),
+            buy_count=_int_field(values, "buy_count"),
+            sell_count=_int_field(values, "sell_count"),
+            open_price_units=_optional_int_field(values, "open_price"),
+            high_price_units=_optional_int_field(values, "high_price"),
+            low_price_units=_optional_int_field(values, "low_price"),
+            close_price_units=_optional_int_field(values, "close_price"),
+            ts_event=_int_field(values, "ts_event"),
+            ts_init=_int_field(values, "ts_init"),
         )
 
     def __repr__(self) -> str:
         bp = self.bid_prices[0] if self.bid_prices else None
         ap = self.ask_prices[0] if self.ask_prices else None
         return f"DydxSecondSnapshot({self.instrument_id} bid={bp} ask={ap} levels={len(self.bid_prices)})"
+
+
+# -- column-projected reads (`kernel.catalog_files`): the same decoding, without the row objects --
+
+PRECISION_COLUMNS = ("price_precision", "size_precision")
+OHLC_UNIT_COLUMNS = ("open_price", "high_price", "low_price", "close_price")
+VOLUME_UNIT_COLUMNS = ("buy_volume", "sell_volume")
+_TOP_COLUMNS = ("bid_prices", "bid_sizes", "ask_prices", "ask_sizes")
+TOP_OF_BOOK_COLUMNS = ("ts_event", "ts_init", *PRECISION_COLUMNS, *_TOP_COLUMNS)
+
+
+def require_integer_layout(schema: pa.Schema, path: str) -> None:
+    """Refuse a float-layout (pre-30.2) snapshot file: `LegacySnapshotLayoutError` naming it."""
+    if "price_precision" not in schema.names:
+        raise LegacySnapshotLayoutError(
+            f"{path}: a float-layout DydxSecondSnapshot file (no price_precision column); "
+            f"run `python -m {MIGRATION_TOOL}`"
+        )
+
+
+def _precisions(table: pa.Table, name: str) -> np.ndarray:
+    """Return a precision column; refuse a null or out-of-range one (a corrupt file)."""
+    column = table.column(name)
+    if column.null_count:
+        raise ValueError(f"a null {name} in a snapshot table")
+    values = column.to_numpy().astype(np.intp)
+    if values.size and not 0 <= values.min() <= values.max() <= FIXED_PRECISION:
+        raise ValueError(f"a stored {name} outside this build's 0..{FIXED_PRECISION}")
+    return values
+
+
+def trade_float_columns(table: pa.Table) -> dict[str, np.ndarray]:
+    """
+    Decode the OHLC (NaN = no trade) and the two volumes of a snapshot table as float arrays, decoded with
+    `unit_floats` at each row's precision; `table` holds the precision, OHLC and volume columns.
+    """
+    price_p = _precisions(table, "price_precision")
+    size_p = _precisions(table, "size_precision")
+    out = {}
+    for name in OHLC_UNIT_COLUMNS:
+        column = table.column(name)
+        units = column.fill_null(0).to_numpy()
+        values = unit_floats(units, price_p)
+        values[column.is_null().to_numpy(zero_copy_only=False)] = np.nan
+        out[name] = values
+    for name in VOLUME_UNIT_COLUMNS:
+        out[name] = unit_floats(table.column(name).to_numpy(), size_p)
+    return out
+
+
+class TopOfBookUnits(NamedTuple):
+    """Level 0 of one row in units (element 0 of the gap layout is the absolute best price)."""
+
+    ts_event: int
+    ts_init: int
+    price_precision: int
+    size_precision: int
+    bid_price: int
+    bid_size: int
+    ask_price: int
+    ask_size: int
+
+
+def top_of_book_units(table: pa.Table) -> list[TopOfBookUnits]:
+    """
+    Level 0 of every row of a table holding `TOP_OF_BOOK_COLUMNS` whose both sides are non-empty
+    (a row with an empty side has no top of book and is omitted); only element 0 of each list
+    leaves Arrow, so a long window never builds the 20-level book in Python (MEM-01).
+    """
+    # A null or empty list compares to null or False, and `filter` drops both.
+    quotable = pc.and_(
+        pc.greater(pc.list_value_length(table.column("bid_prices")), 0),
+        pc.greater(pc.list_value_length(table.column("ask_prices")), 0),
+    )
+    table = table.filter(quotable)
+    columns = [table.column(name).to_pylist() for name in ("ts_event", "ts_init")]
+    columns += [_precisions(table, name).tolist() for name in PRECISION_COLUMNS]
+    columns += [pc.list_element(table.column(name), 0).to_pylist() for name in _TOP_COLUMNS]
+    return [TopOfBookUnits(*values) for values in zip(*columns, strict=True)]
 
 
 register_arrow(

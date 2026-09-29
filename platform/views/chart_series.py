@@ -512,12 +512,7 @@ def compute_chart_series(
         bid_p, ask_p = s.bid_prices[0], s.ask_prices[0]
         t = s.ts_event / 1e9
 
-        book_sides = {
-            "bid_prices": s.bid_prices,
-            "bid_sizes": s.bid_sizes,
-            "ask_prices": s.ask_prices,
-            "ask_sizes": s.ask_sizes,
-        }
+        book_sides = s.as_floats()
         micro_value = calc_microprice(book_sides)
         if micro_value is not None:
             series["microprice"].append({"time": t, "value": micro_value})
@@ -598,7 +593,15 @@ class EmptyTopOfBook(Exception):
 
 
 def _gap_row(t: int) -> dict:
-    return {"t": t, "bid": None, "ask": None, "mid": None, "micro": None, "price": None}
+    return {
+        "t": t,
+        "bid_units": None,
+        "ask_units": None,
+        "price_precision": None,
+        "mid": None,
+        "micro": None,
+        "price": None,
+    }
 
 
 def _require_top(snapshot: DydxSecondSnapshot) -> None:
@@ -615,9 +618,13 @@ def _require_top(snapshot: DydxSecondSnapshot) -> None:
 
 def price_series_rows(snapshots: Sequence[DydxSecondSnapshot]) -> list[dict]:
     """
-    Build `{t, bid, ask, mid, micro, price}` rows from time-ordered snapshots, one per second,
-    with a gap row (`_gap_row`, `t = later - 1`) between two seconds more than
-    `SNAPSHOT_GAP_THRESHOLD_MS` apart.
+    Build `{t, bid_units, ask_units, price_precision, mid, micro, price}` rows from time-ordered
+    snapshots, one per second, with a gap row (`_gap_row`, `t = later - 1`, every value null)
+    between two seconds more than `SNAPSHOT_GAP_THRESHOLD_MS` apart.
+
+    The best bid/ask travel as the stored exact integers and their precision (Story 30.2: values a
+    machine moves stay integers; the frontend's `lib/units.ts` formats them for display). `mid`,
+    `micro` and `price` are derived signals, computed from the decoded floats, and stay floats.
 
     price = CVD-weighted effective trade price: skews from mid toward ask on net buying, toward bid
     on net selling. Equals mid when no trades occurred in that second. Timestamps are milliseconds
@@ -642,7 +649,7 @@ def price_series_rows(snapshots: Sequence[DydxSecondSnapshot]) -> list[dict]:
             rows.append(_gap_row(curr_ts_ms - 1))
         prev_ts_ms = curr_ts_ms
         mid = (bp + ap) / 2
-        micro_value = calc_microprice(DydxSecondSnapshot.to_dict(s))
+        micro_value = calc_microprice(s.as_floats())
         micro = micro_value if micro_value is not None else mid
         tv = s.buy_volume + s.sell_volume
         if tv > 0:
@@ -650,7 +657,15 @@ def price_series_rows(snapshots: Sequence[DydxSecondSnapshot]) -> list[dict]:
         else:
             price = mid
         rows.append(
-            {"t": curr_ts_ms, "bid": bp, "ask": ap, "mid": mid, "micro": micro, "price": price}
+            {
+                "t": curr_ts_ms,
+                "bid_units": s.bid_price_units[0],
+                "ask_units": s.ask_price_units[0],
+                "price_precision": s.price_precision,
+                "mid": mid,
+                "micro": micro,
+                "price": price,
+            }
         )
     return rows
 
@@ -662,7 +677,7 @@ def _snapshot_window_start_ns(before_ns: int, limit: int) -> int:
 
 def _take_last_n_real_rows(rows: list[dict], limit: int) -> list[dict]:
     """
-    Slice to the most recent `limit` REAL rows (gap markers, `bid is None`, are structural
+    Slice to the most recent `limit` REAL rows (gap markers, `bid_units is None`, are structural
     breaks, not data, and must never eat into the requested row budget) -- mirrors
     `candle_page`'s order of operations (slice to `limit` real candles first, insert gap
     markers into the kept slice second), adapted for `price_series_rows`' shape, which
@@ -674,7 +689,7 @@ def _take_last_n_real_rows(rows: list[dict], limit: int) -> list[dict]:
     checks gaps strictly inside its own rows; a page-boundary gap is instead the frontend's
     own seam check across two pages, see `useCandles.ts`).
     """
-    real_indices = [i for i, r in enumerate(rows) if r["bid"] is not None]
+    real_indices = [i for i, r in enumerate(rows) if r["bid_units"] is not None]
     if not real_indices:
         return []
     start_index = real_indices[-limit] if len(real_indices) > limit else 0
@@ -912,7 +927,7 @@ def _replay_bucket_samples(
             snapshot.ask_sizes,
         )
         obi.update_raw(snapshot.bid_sizes, snapshot.ask_sizes)
-        snapshot_dict = DydxSecondSnapshot.to_dict(snapshot)
+        snapshot_dict = snapshot.as_floats()
         bucket = snapshot.ts_event // bar_ns
         buckets[bucket] = {
             "t": bucket * bar_seconds * 1000,

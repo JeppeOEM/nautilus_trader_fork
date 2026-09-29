@@ -26,8 +26,8 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from kernel.second_snapshot import DydxSecondSnapshot
 from kernel.second_snapshot import SecondOHLC
+from kernel.tests.snapshot_factory import make_snapshot
 from views import ranking_columns
 from views.rankings_bus import RankingsBus
 
@@ -77,7 +77,7 @@ def _seed_recent_minutes(tmp_path: Path, count: int = 45, ended_minutes_ago: int
     end = time.time_ns() // _MINUTE_NS * _MINUTE_NS - ended_minutes_ago * _MINUTE_NS
     ParquetDataCatalog(str(tmp_path / "cat")).write_data(
         [
-            DydxSecondSnapshot(
+            make_snapshot(
                 instrument_id=InstrumentId.from_str(_IID),
                 bid_prices=[100.0],
                 bid_sizes=[1.0],

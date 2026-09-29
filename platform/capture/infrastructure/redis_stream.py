@@ -14,7 +14,10 @@
 # -------------------------------------------------------------------------------------------------
 """
 `RedisLiveStream`: capture's `LiveStream` over Redis pub/sub `snapshots:raw` (parent spine AD-1).
-Moved out of `capture.application.capture_service` in Story 26.1; the payload is frozen (AD-D12).
+Moved out of `capture.application.capture_service` in Story 26.1. The payload is the kernel's wire
+dict (`DydxSecondSnapshot.to_dict`): since Story 30.2 exact integer units, both precisions and the
+gap-encoded book, the same layout as the Parquet row -- never floats (`docs/DATA_DICTIONARY.md`
+§1.7).
 """
 
 import json

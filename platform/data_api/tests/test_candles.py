@@ -19,8 +19,8 @@ from pathlib import Path
 import pytest
 from candles.infrastructure.sqlite_store import CandleStore
 from fastapi.testclient import TestClient
-from kernel.second_snapshot import DydxSecondSnapshot
 from kernel.second_snapshot import SecondOHLC
+from kernel.tests.snapshot_factory import make_snapshot
 from views import chart_series
 
 import data_api.app as app_module
@@ -71,7 +71,7 @@ def _write_snapshots(catalog_path: str, entries: list[tuple[int, float]]) -> Non
     entries = sorted(entries, key=lambda e: e[0])
     ParquetDataCatalog(catalog_path).write_data(
         [
-            DydxSecondSnapshot(
+            make_snapshot(
                 instrument_id=InstrumentId.from_str(_IID),
                 bid_prices=[price],
                 bid_sizes=[1.0],

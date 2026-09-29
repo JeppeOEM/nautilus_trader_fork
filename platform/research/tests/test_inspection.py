@@ -32,6 +32,7 @@ from kernel.clocks import NS_PER_DAY
 from kernel.clocks import NS_PER_MS
 from kernel.clocks import NS_PER_S
 from kernel.fold import fold_trades
+from kernel.second_snapshot import unit_float
 from observability import error_ledger
 
 from nautilus_trader.model.data import MarkPriceUpdate
@@ -181,20 +182,35 @@ def _trade(second: float, size: str, side: AggressorSide, trade_id: str) -> Trad
     )
 
 
+# The row precisions of the frames below (the trades are "100.25" and sizes of 3 decimals at most).
+_PP, _SP = 2, 3
+
+
+def _decoded(column: str, units: int | None) -> float:
+    """Return a stored trade column as `CatalogFrames.seconds` shows it: the kernel's decoded float."""
+    if units is None:
+        return math.nan
+    if column.endswith("_count"):
+        return units
+    return unit_float(units, _SP if column.endswith("volume") else _PP)
+
+
 def _seconds(rows: list[tuple[float, list[TradeTick]]]) -> pd.DataFrame:
     """Build a seconds frame in `CatalogFrames.seconds`' shape, trade columns folded from `trades`."""
     records = []
     for second, trades in rows:
-        values = fold_trades(trades).snapshot_values()
+        units = fold_trades(trades).snapshot_units(_PP, _SP)._asdict()
         records.append(
             {
                 "ts_event": _at(second),
                 "ts_init": _at(second) + NS_PER_S,
+                "price_precision": _PP,
+                "size_precision": _SP,
                 "bid_prices": [100.0],
                 "ask_prices": [100.5],
                 "mid": 100.25,
                 "spread": 0.5,
-                **{k: math.nan if v is None else v for k, v in values._asdict().items()},
+                **{k: _decoded(k, v) for k, v in units.items()},
             }
         )
     frame = pd.DataFrame(records)
@@ -262,7 +278,10 @@ def test_fold_agreement_splits_by_utc_day_of_the_second() -> None:
 
 def test_an_empty_window_has_no_day() -> None:
     table = inspection.fold_agreement(
-        [], pd.DataFrame(columns=["ts_event", *inspection.TRADE_COLUMNS])
+        [],
+        pd.DataFrame(
+            columns=["ts_event", "price_precision", "size_precision", *inspection.TRADE_COLUMNS]
+        ),
     )
     assert table.empty
     assert tuple(table.columns) == inspection.AGREEMENT_COLUMNS

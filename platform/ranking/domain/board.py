@@ -302,7 +302,8 @@ class RankingBoard:
         out_of_order = self._prices.ingest(iid, snap.ts_event, close_price)
         if out_of_order is not None:
             dropped.append(out_of_order)
-        row = DydxSecondSnapshot.to_dict(snap)
+        # The indicator functions take the decoded float view; the wire's integers stay in `snap`.
+        row = snap.as_floats()
         mid = calc_mid_price(row)
         if mid is None:
             return dropped

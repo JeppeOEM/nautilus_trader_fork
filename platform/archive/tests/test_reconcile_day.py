@@ -34,7 +34,7 @@ from candles.application.rebuild import rebuild_instrument
 from candles.infrastructure.sqlite_store import connect_ro
 from candles.infrastructure.verified_days import VerifiedDaysStore
 from kernel.fold import fold_trades
-from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.tests.snapshot_factory import make_snapshot
 from kernel.venues import venue_of
 from observability import error_ledger
 
@@ -180,13 +180,13 @@ def _store(tmp_path: Path, iid: str = _IID, trades: dict | None = None, first: i
     for second in range(first, 400):
         ts = _D0_MS * 1_000_000 + second * _S + _S // 2
         snaps.append(
-            DydxSecondSnapshot(
+            make_snapshot(
                 instrument_id=InstrumentId.from_str(iid),
                 bid_prices=[99.0],
                 bid_sizes=[1.0],
                 ask_prices=[101.0],
                 ask_sizes=[1.0],
-                **fold_trades(trades.get(second, [])).snapshot_values()._asdict(),
+                trades=fold_trades(trades.get(second, [])).snapshot_units(4, 4),
                 ts_event=ts,
                 ts_init=ts,
             )

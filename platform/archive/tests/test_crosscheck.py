@@ -20,6 +20,7 @@ from typing import Any
 
 import pytest
 from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.tests.snapshot_factory import make_snapshot
 from kernel.venues import VENUE_KINDS
 
 from archive import crosscheck_errors
@@ -38,22 +39,22 @@ _WINDOW_END = _DAY0 + 60 * _NS_PER_S  # a short 60 s window is plenty for these 
 
 
 def _snapshot(ts_event: int, ts_init: int) -> DydxSecondSnapshot:
-    return DydxSecondSnapshot(
-        InstrumentId.from_str(_IID),
-        [1.0],
-        [1.0],
-        [2.0],
-        [1.0],
-        1.0,
-        0.5,
-        1,
-        1,
-        ts_event,
-        ts_init,
-        1.0,
-        1.0,
-        1.0,
-        1.0,
+    return make_snapshot(
+        instrument_id=InstrumentId.from_str(_IID),
+        bid_prices=[1.0],
+        bid_sizes=[1.0],
+        ask_prices=[2.0],
+        ask_sizes=[1.0],
+        buy_volume=1.0,
+        sell_volume=0.5,
+        buy_count=1,
+        sell_count=1,
+        ts_event=ts_event,
+        ts_init=ts_init,
+        open_price=1.0,
+        high_price=1.0,
+        low_price=1.0,
+        close_price=1.0,
     )
 
 

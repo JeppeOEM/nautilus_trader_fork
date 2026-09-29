@@ -32,6 +32,7 @@ from kernel.clocks import NS_PER_DAY
 from kernel.clocks import NS_PER_S
 from kernel.performance_metrics import all_metrics
 from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.tests.snapshot_factory import make_snapshot
 
 from nautilus_trader.config import StrategyConfig
 from nautilus_trader.core.data import Data
@@ -121,18 +122,20 @@ def _snapshot(i: int, ts: int) -> DydxSecondSnapshot:
     """Build a drifting mid whose book imbalance swings side every ~30 s, so OFI crosses often."""
     mid = 100.0 + 5 * math.sin(i / 37.0) + i * 0.002
     tilt = math.sin(i / 5.0)
-    return DydxSecondSnapshot(
-        _IID,
-        [round(mid - 0.05 - j * 0.1, 1) for j in range(5)],
-        [5.0 + 4 * tilt] * 5,
-        [round(mid + 0.05 + j * 0.1, 1) for j in range(5)],
-        [5.0 - 4 * tilt] * 5,
-        1.0,
-        1.0,
-        1,
-        1,
-        ts,
-        ts,
+    return make_snapshot(
+        instrument_id=_IID,
+        bid_prices=[round(mid - 0.05 - j * 0.1, 1) for j in range(5)],
+        bid_sizes=[round(5.0 + 4 * tilt, 3)] * 5,
+        ask_prices=[round(mid + 0.05 + j * 0.1, 1) for j in range(5)],
+        ask_sizes=[round(5.0 - 4 * tilt, 3)] * 5,
+        buy_volume=1.0,
+        sell_volume=1.0,
+        buy_count=1,
+        sell_count=1,
+        ts_event=ts,
+        ts_init=ts,
+        price_precision=1,  # the instrument definition's (`_instrument`)
+        size_precision=3,
     )
 
 

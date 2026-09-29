@@ -179,7 +179,11 @@ capture/
   the venue entrypoint (Story 24.1), so a bar can never be ahead of the archive.
 - **`kernel/second_snapshot.py`** — defines `DydxSecondSnapshot(Data)`, the one
   custom Arrow-registered type this whole system is built around (Story 23.2 moved it from
-  the collector core; the old path's shim was deleted).
+  the collector core; the old path's shim was deleted), and since Story 30.2 the one
+  encoder/decoder of its exact integer layout (per-row precisions, integer units, gap-encoded
+  book prices) for Parquet and the `snapshots:raw` payload alike; every reader decodes through
+  it and a float-layout file is refused (`archive.tools.migrate_snapshot_ints` migrates it;
+  `docs/DATA_DICTIONARY.md` §1.7) `[amended 2026-09-29: Story 30.2]`.
 - **`kernel.second_snapshot.ohlc_outside_book()`** (was the collector core's integrity module until
   Story 25.1) — a second's trade high/low must lie inside that same second's own book. Live ERROR
   canary and offline detector (DATA-06).

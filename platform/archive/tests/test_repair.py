@@ -23,6 +23,7 @@ from candles.application.rebuild import rebuild_instrument
 from candles.infrastructure.sqlite_store import CandleStore
 from kernel.archive_markers import capture_lock_path
 from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.tests.snapshot_factory import make_snapshot
 from observability import error_ledger
 
 from archive.application.repair import closed_rows
@@ -45,7 +46,7 @@ def _snap(
     second: int, high: float | None = None, low: float | None = None, t0: int = _T0
 ) -> DydxSecondSnapshot:
     traded = high is not None
-    return DydxSecondSnapshot(
+    return make_snapshot(
         instrument_id=InstrumentId.from_str(_IID),
         bid_prices=[100.0, 99.0],
         bid_sizes=[1.0, 1.0],

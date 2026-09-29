@@ -73,7 +73,7 @@ logger = logging.getLogger(__name__)
 
 TMP_SUFFIX = ".archive.tmp"
 # What the pre-Story-25.1 rewriters left behind on a crash: rebuild_seconds, consolidate_catalog,
-# migrate_open_interest/normalize_snapshot_schema (`<file>.parquet.tmp`).
+# migrate_open_interest and the since-deleted normalize_snapshot_schema (`<file>.parquet.tmp`).
 LEGACY_TMP_SUFFIXES = (".rebuild.tmp", ".consolidate.tmp", ".parquet.tmp")
 
 

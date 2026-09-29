@@ -211,6 +211,9 @@ HFT signals are computed from **1-second sampled snapshots** (`DydxSecondSnapsho
 **What is stored in Parquet (`DydxSecondSnapshot`):**
 - Top-20 bid/ask levels: `bid_prices`, `bid_sizes`, `ask_prices`, `ask_sizes` (lists)
 - Per-side trade volume: `buy_volume`, `sell_volume`
+- All as exact integer units at the row's `price_precision`/`size_precision`, book prices as the best
+  level plus gaps; `kernel/second_snapshot.py` is the one encoder/decoder, and the formulas below
+  read its decoded floats (`docs/DATA_DICTIONARY.md` §1.7) `[amended 2026-09-29: Story 30.2]`.
 
 **What is NOT stored — computed on read via `kernel/indicators.py`:**
 - `microprice` = `Microprice().update_raw(bp, bs, ap, as_)` — derivable from level 0

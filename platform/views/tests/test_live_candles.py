@@ -28,6 +28,7 @@ from pathlib import Path
 import pytest
 from candles.application.forming import forming_bar
 from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.tests.snapshot_factory import make_snapshot
 from observability import error_ledger
 
 from nautilus_trader.model.identifiers import InstrumentId
@@ -49,7 +50,7 @@ assert _BASE_NS % (_BAR_SECONDS * 1_000_000_000) == 0
 
 
 def _snapshot(ts_event: int, price: float, iid: str = _IID) -> DydxSecondSnapshot:
-    return DydxSecondSnapshot(
+    return make_snapshot(
         instrument_id=InstrumentId.from_str(iid),
         bid_prices=[price],
         bid_sizes=[1.0],

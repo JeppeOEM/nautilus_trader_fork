@@ -56,6 +56,7 @@ that same deferred-work.md entry.
 from decimal import Decimal
 
 from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.tests.snapshot_factory import make_snapshot
 
 from nautilus_trader.backtest.engine import BacktestEngine
 from nautilus_trader.backtest.engine import BacktestEngineConfig
@@ -111,18 +112,20 @@ _INSTRUMENT = CryptoPerpetual(
 
 
 def _snapshot(ts: int, bid_size: float) -> DydxSecondSnapshot:
-    return DydxSecondSnapshot(
+    return make_snapshot(
         instrument_id=_IID,
-        bid_prices=[100.0 - j * 0.1 for j in range(10)],
-        bid_sizes=[bid_size - j * 0.1 for j in range(10)],
-        ask_prices=[100.1 + j * 0.1 for j in range(10)],
-        ask_sizes=[5.0 - j * 0.1 for j in range(10)],
+        bid_prices=[round(100.0 - j * 0.1, 1) for j in range(10)],
+        bid_sizes=[round(bid_size - j * 0.1, 3) for j in range(10)],
+        ask_prices=[round(100.1 + j * 0.1, 1) for j in range(10)],
+        ask_sizes=[round(5.0 - j * 0.1, 3) for j in range(10)],
         buy_volume=1.0,
         sell_volume=1.0,
         buy_count=1,
         sell_count=1,
         ts_event=ts,
         ts_init=ts,
+        price_precision=1,  # the instrument definition's
+        size_precision=3,
     )
 
 

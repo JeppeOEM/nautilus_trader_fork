@@ -14,7 +14,15 @@ const { useSnapshotSeries } = await import("./useSnapshotSeries");
 
 function page(items: Array<Partial<SnapshotSeriesPoint> & { t: number }>, hasMore: boolean): SnapshotSeriesResponse {
   return {
-    items: items.map((i) => ({ bid: null, ask: null, mid: null, micro: null, price: null, ...i })),
+    items: items.map((i) => ({
+      bid_units: null,
+      ask_units: null,
+      price_precision: null,
+      mid: null,
+      micro: null,
+      price: null,
+      ...i,
+    })),
     has_more: hasMore,
     venue: "dydx", market: "perp",
   };
@@ -58,7 +66,7 @@ describe("useSnapshotSeries", () => {
   });
 
   it("fetches the initial page anchored on `now` once enabled, when the chart has no visible range yet", async () => {
-    fetchSnapshotSeriesMock.mockResolvedValue(page([{ t: 60_000, bid: 1, ask: 2, mid: 1.5, micro: 1.4, price: 1.5 }], true));
+    fetchSnapshotSeriesMock.mockResolvedValue(page([{ t: 60_000, bid_units: 10, ask_units: 20, price_precision: 1, mid: 1.5, micro: 1.4, price: 1.5 }], true));
 
     const { result } = renderHook(() => useSnapshotSeries("BTC-USD-PERP.DYDX", null, true));
 
@@ -66,8 +74,27 @@ describe("useSnapshotSeries", () => {
     expect(fetchSnapshotSeriesMock).toHaveBeenCalledWith("BTC-USD-PERP.DYDX", expect.any(Number), 900);
   });
 
+  it("plots the integer bid/ask through the exact units helper and keeps a gap row as whitespace", async () => {
+    fetchSnapshotSeriesMock.mockResolvedValue(
+      page(
+        [
+          { t: 60_000, bid_units: 858919, ask_units: 858920, price_precision: 1, mid: 85891.95 },
+          { t: 62_999 },
+        ],
+        false,
+      ),
+    );
+
+    const { result } = renderHook(() => useSnapshotSeries("BTC-USD-PERP.DYDX", null, true));
+
+    await waitFor(() => expect(result.current.bid).toHaveLength(2));
+    expect(result.current.bid[0]).toEqual({ time: 60, value: 85891.9 });
+    expect(result.current.ask[0]).toEqual({ time: 60, value: 85892 });
+    expect("value" in result.current.bid[1]).toBe(false);
+  });
+
   it("anchors the initial fetch off the chart's current visible range when it isn't at the live edge", async () => {
-    fetchSnapshotSeriesMock.mockResolvedValue(page([{ t: 60_000, bid: 1, ask: 2, mid: 1.5, micro: 1.4, price: 1.5 }], false));
+    fetchSnapshotSeriesMock.mockResolvedValue(page([{ t: 60_000, bid_units: 10, ask_units: 20, price_precision: 1, mid: 1.5, micro: 1.4, price: 1.5 }], false));
     // Visible range far in the past (not near "now") -- from=0s, to=1000s (not live edge).
     const chart = fakeChart({ from: 0, to: 1000 });
 
@@ -94,12 +121,12 @@ describe("useSnapshotSeries", () => {
   it("refills using the earliest loaded row as before_ns when the visible range nears the start", async () => {
     // Adjacent, 1-second-apart rows (61s then 60s) -- no seam gap (rows are ~1/second, so
     // only a >2.5s seam triggers a marker, unlike useCandles' 60s bar spacing).
-    fetchSnapshotSeriesMock.mockResolvedValueOnce(page([{ t: 61_000, bid: 1, ask: 2, mid: 1.5, micro: 1.5, price: 1.5 }], true));
+    fetchSnapshotSeriesMock.mockResolvedValueOnce(page([{ t: 61_000, bid_units: 10, ask_units: 20, price_precision: 1, mid: 1.5, micro: 1.5, price: 1.5 }], true));
     const chart = fakeChart();
     const { result } = renderHook(() => useSnapshotSeries("BTC-USD-PERP.DYDX", chart.api, true));
     await waitFor(() => expect(result.current.bid).toHaveLength(1));
 
-    fetchSnapshotSeriesMock.mockResolvedValueOnce(page([{ t: 60_000, bid: 2, ask: 3, mid: 2.5, micro: 2.5, price: 2.5 }], false));
+    fetchSnapshotSeriesMock.mockResolvedValueOnce(page([{ t: 60_000, bid_units: 20, ask_units: 30, price_precision: 1, mid: 2.5, micro: 2.5, price: 2.5 }], false));
     chart.fire({ from: 5 as LogicalRange["from"], to: 50 as LogicalRange["to"] });
 
     await waitFor(() => expect(result.current.bid).toHaveLength(2));
@@ -113,14 +140,14 @@ describe("useSnapshotSeries", () => {
     // DATA-01 gap, and must render identically whether or not it happens to straddle a
     // scroll-back page boundary.
     fetchSnapshotSeriesMock.mockResolvedValueOnce(
-      page([{ t: 63_000, bid: 1, ask: 2, mid: 1.5, micro: 1.5, price: 1.5 }], true),
+      page([{ t: 63_000, bid_units: 10, ask_units: 20, price_precision: 1, mid: 1.5, micro: 1.5, price: 1.5 }], true),
     );
     const chart = fakeChart();
     const { result } = renderHook(() => useSnapshotSeries("BTC-USD-PERP.DYDX", chart.api, true));
     await waitFor(() => expect(result.current.bid).toHaveLength(1));
 
     fetchSnapshotSeriesMock.mockResolvedValueOnce(
-      page([{ t: 61_000, bid: 2, ask: 3, mid: 2.5, micro: 2.5, price: 2.5 }], false),
+      page([{ t: 61_000, bid_units: 20, ask_units: 30, price_precision: 1, mid: 2.5, micro: 2.5, price: 2.5 }], false),
     );
     chart.fire({ from: 5 as LogicalRange["from"], to: 50 as LogicalRange["to"] });
 

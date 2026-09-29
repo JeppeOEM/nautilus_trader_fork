@@ -196,6 +196,8 @@ there is no cron line at all -- the `archive` service schedules the saga, sectio
    crontab -l | grep -nE 'collector_core\.|normalize_snapshot_schema' || echo "crontab clean"
    ```
    Repoint any hit to `python -m archive.<tool>` (or `archive.tools.<tool>`) before the next run.
+   (`archive.tools.normalize_snapshot_schema` itself was deleted in Story 30.2: its job is part of
+   `archive.tools.migrate_snapshot_ints`, entry `30-2` under "Deferred operator actions".)
 3. Two startup changes to know before restarting (neither touches the compose defaults):
    - A `REDIS_URL` naming a non-zero Redis database (`/2` or `?db=2`) now refuses to start: the
      Nautilus Cache can only use database 0, so it used to split silently from the `bots:*` bus.
@@ -948,3 +950,52 @@ consolidated before the deploy keep the old encoding until this one-off run.
 - [ ] After the next nightly, check `archive:status`: `consolidate_catalog` exits 0, and
       `GET /api/errors` shows no new `consolidate.*` or `rebuild.verify` site (the read-back now
       compares every value, so a refused merge would surface there).
+
+### 30-2 second snapshot as exact integers (commit: this story's -- `git log --grep 30-2-second-snapshot`)
+
+The `DydxSecondSnapshot` Parquet layout and the `snapshots:raw` Redis payload change together, from
+floats to exact integer units. There is no float read path: every
+reader refuses a float-layout file (`LegacySnapshotLayoutError`, naming the migration) and every
+consumer refuses a float payload (layout: `docs/DATA_DICTIONARY.md` §1.7). So the collectors
+switch layout at a UTC midnight (no day mixes layouts), the closed float days are migrated, and
+only then do the readers start again.
+`snapshots:raw` is Redis pub/sub, not a stream: there is nothing queued to drain or trim.
+
+- [ ] Take a catalog backup first (`make backup-catalog` if off-site storage is configured, else a
+      local copy of `platform/data/catalog` on a disk with room for it).
+- [ ] Before 00:00 UTC: `git pull`, then build without restarting (`docker compose build` from
+      `platform/`). Stop the readers: `docker compose stop ranking_engine data_api live-paper
+      archive bot_tui` (`data_api` also runs the alerting; `bot_tui` reads no snapshot field but
+      is rebuilt with the rest).
+- [ ] Just before 00:00 UTC stop the three collectors (`docker compose stop collector
+      bybit_collector hyperliquid_collector`; dYdX's only if it runs, `make up-dydx` profile), and
+      start them right after 00:00 UTC on the new image (`docker compose up -d bybit_collector
+      hyperliquid_collector`, plus `make up-dydx` if dYdX is collected). From here on the new day
+      is written in the integer layout only.
+- [ ] Report first (no lock, nothing written; every closed float file is converted and checked
+      in memory): `docker compose run --rm --no-deps archive python3 -m
+      archive.tools.migrate_snapshot_ints --catalog /app/catalog`. Note each venue's files, rows,
+      snapped values and bytes before -> after. Any `migrate_snapshot_ints.off_grid` or
+      `.error` line in `platform/data/errors/archive.jsonl` is investigated before applying (an
+      off-grid value is a real digit finer than the instrument definition, never rounded; an
+      error names e.g. a row older than every stored definition). The report does the whole
+      conversion and decode-back check in memory, so it costs as much CPU as `--apply` (about
+      10 s per instrument-day on the dev box): on the 2 vCPU VPS run it per `--venue` and expect
+      it to take as long as the apply will.
+- [ ] Apply: the same command with `--apply` (optionally one `--venue V` at a time). Exit 0
+      expected; 1 = the lock is held (rerun later); 2 = refused/failed files, each ledgered and
+      left as it was. With the collectors stopped before 00:00 UTC no float file reaches today, so
+      the report's open-day count is 0; a non-zero count means a float file holds today's rows
+      (the collectors ran past midnight on the old image): readers refuse it, so keep them
+      stopped, or accept its window failing loudly, until the `--apply` rerun the next day takes
+      it.
+- [ ] Rerun the report: every closed file counts as "already integer", 0 in scope.
+- [ ] Start the readers: `docker compose up -d archive ranking_engine data_api live-paper bot_tui`.
+      Check the web chart (Lines mode shows bid/ask) and the rankings update, and
+      `GET /api/errors` shows no `ranking_engine.snapshot_entry`, `live_candles.decode` or
+      `views.*` site rising.
+- [ ] For every day the nightly or a manual rebuild ledgered `rebuild.legacy_layout` (a day that
+      was still float when the rebuild ran), rerun `python -m archive.rebuild_seconds --day D
+      --apply` for it (or let the next nightly's missed-day catch-up do it).
+- [ ] Record the `--apply` run's per-venue and total files, rows, snapped values and bytes before
+      -> after in `docs/DATA_INTEGRITY_AUDIT.md` row D-69 and set its status to FIXED.

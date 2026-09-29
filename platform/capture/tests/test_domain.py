@@ -46,6 +46,7 @@ from capture.domain.verdicts import SampleVerdict
 from capture.domain.verdicts import Stale
 from capture.domain.verdicts import StillCrossed
 from capture.domain.verdicts import Uncrossed
+from capture.domain.verdicts import Unencodable
 from capture.tests.test_collector import _BYBIT
 from capture.tests.test_collector import _adds
 from capture.tests.test_collector import _deltas
@@ -323,6 +324,43 @@ def test_an_inactive_then_active_feed_reconnects_with_its_pre_gap_baselines() ->
 # -- SecondSampler and FlushBatch ------------------------------------------------------------------
 
 
+def test_a_row_is_encoded_exactly_at_the_definition_precisions() -> None:
+    sampler = SecondSampler(20, _NEVER, _CORE)
+    book = _snapshotted([(100.25, 1.5), (100.0, 0.125)], [(100.5, 3.0)])
+    intakes = {_BYBIT: TradeIntake(10)}
+    intakes[_BYBIT].fold(_trade(100.25, 0.5, AggressorSide.BUYER, 1), None, None)
+    result = sampler.sample([_BYBIT], {_BYBIT: book}, intakes, _T, None, None, {_BYBIT: (2, 3)})
+    (row,) = result.accepted
+    wire = DydxSecondSnapshot.to_dict(row)
+    assert (wire["price_precision"], wire["size_precision"]) == (2, 3)
+    assert (wire["bid_prices"], wire["bid_sizes"]) == ([10025, 25], [1500, 125])
+    assert (wire["ask_prices"], wire["close_price"], wire["buy_volume"]) == ([10050], 10025, 500)
+    level = book.book.bids()[0]  # the book's own exact values, not `BookLevel.size()`'s float
+    assert row.exact.bid_prices[0] == level.price
+    assert row.exact.bid_sizes[0] == level.orders()[0].size
+
+
+def test_a_book_without_a_definition_is_rejected_unencodable_never_guessed() -> None:
+    sampler = SecondSampler(20, _NEVER, _CORE)
+    book = _snapshotted([(100.0, 1.0)], [(101.0, 1.0)])
+    intakes = {_BYBIT: TradeIntake(10)}
+    intakes[_BYBIT].fold(_trade(100.5, 1.0, AggressorSide.BUYER, 1), None, None)
+    result = sampler.sample([_BYBIT], {_BYBIT: book}, intakes, _T, None, None, {})
+    assert result.accepted == []
+    assert result.rejected == [(_BYBIT, Unencodable("no instrument definition"))]
+    assert intakes[_BYBIT].live == []  # taken with the second: never carried onto a later row
+
+
+def test_a_value_finer_than_the_definition_is_rejected_unencodable_never_rounded() -> None:
+    sampler = SecondSampler(20, _NEVER, _CORE)
+    book = _snapshotted([(100.25, 1.0)], [(101.0, 1.0)])
+    result = sampler.sample([_BYBIT], {_BYBIT: book}, {}, _T, None, None, {_BYBIT: (1, 3)})
+    ((iid, verdict),) = result.rejected
+    assert iid == _BYBIT
+    assert isinstance(verdict, Unencodable)
+    assert "not exact at precision 1" in verdict.reason
+
+
 def test_the_sampler_writes_accepted_books_and_drops_everyone_elses_trades() -> None:
     sampler = SecondSampler(20, _NEVER, _CORE)
     good = _snapshotted([(100.0, 1.0)], [(101.0, 1.0)])
@@ -331,7 +369,9 @@ def test_the_sampler_writes_accepted_books_and_drops_everyone_elses_trades() -> 
     intakes = {iid: TradeIntake(10) for iid in (_BYBIT, "B", "C")}
     for intake in intakes.values():
         intake.fold(_trade(100.5, 1.0, AggressorSide.BUYER, 1), None, None)
-    result = sampler.sample([_BYBIT, "B"], {_BYBIT: good, "B": pending}, intakes, _T, None, None)
+    precisions = {_BYBIT: (2, 3), "B": (2, 3)}
+    books = {_BYBIT: good, "B": pending}
+    result = sampler.sample([_BYBIT, "B"], books, intakes, _T, None, None, precisions)
     (row,) = result.accepted
     assert isinstance(row, DydxSecondSnapshot)
     assert row.buy_count == 1

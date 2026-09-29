@@ -25,6 +25,12 @@ the recorded input), the sha256 of every published message, the last message in 
 persisted `metrics.db` row. Any change to a published byte, to a publish decision or to a stored
 row fails here. Story 29.1 added `symbol` to each rank entry (right after `venue`): with it
 stripped, every message still hashes to the recorded bytes, so it is the only difference.
+
+Story 30.2 made `snapshots:raw` the exact integer layout. The recorded float burst is still
+generated (its digest still proves the input) and each entry is re-encoded exactly at 6 price and
+3 size decimals -- the digits the generator rounds to -- before it is replayed. The kernel decodes
+`units / 10**p` to the nearest double of each decimal, i.e. to the very float the pre-move engine
+read, so every published byte and stored row must still match the recording.
 """
 
 import asyncio
@@ -33,6 +39,8 @@ import json
 import random
 import sqlite3
 from pathlib import Path
+
+from kernel.tests.snapshot_factory import wire
 
 from ranking.application.engine import RankingConfig
 from ranking.application.engine import RankingEngine
@@ -119,6 +127,25 @@ def generate_burst() -> list[str]:
         )
         for k in range(BATCHES)
     ]
+
+
+# The decimals `_snapshot` rounds prices and sizes to: the instrument precisions of the burst.
+PRICE_PRECISION = 6
+SIZE_PRECISION = 3
+
+
+def as_integer_wire(batch: str) -> str:
+    """Re-encode one recorded float batch in the kernel's integer layout (exact, see docstring)."""
+    return json.dumps(
+        [
+            wire(
+                **entry,
+                price_precision=PRICE_PRECISION,
+                size_precision=SIZE_PRECISION,
+            )
+            for entry in json.loads(batch)
+        ]
+    )
 
 
 class _Source:
@@ -223,7 +250,7 @@ def test_rankings_live_bytes_and_metrics_rows_match_the_pre_move_engine(tmp_path
         clock=clock.time_ns,
     )
 
-    asyncio.run(_replay(engine, clock, batches))
+    asyncio.run(_replay(engine, clock, [as_integer_wire(b) for b in batches]))
     history.close()
 
     assert hashlib.sha256("\n".join(batches).encode()).hexdigest() == fixture["input_sha256"]

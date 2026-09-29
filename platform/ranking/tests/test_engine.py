@@ -24,6 +24,7 @@ from pathlib import Path
 
 import pytest
 from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.tests.snapshot_factory import make_snapshot
 from observability import error_ledger
 
 from nautilus_trader.model.identifiers import InstrumentId
@@ -160,20 +161,38 @@ def test_snapshots_are_decoded_only_through_from_dict() -> None:
     b = board()
     engine, _, _ = _engine(b)
     wire = snap_dict(BTC, 100.0, 101.0)
-    wire.pop("buy_volume")  # from_dict's documented default: no trade volume
 
     engine.ingest_snapshot_batch([wire])
 
-    assert DydxSecondSnapshot.from_dict(wire).buy_volume == 0.0
+    assert DydxSecondSnapshot.from_dict(wire).bid_prices == [100.0]
     assert b.instrument_ids() == [BTC]
     assert error_ledger.counts() == {}
+
+
+@pytest.mark.parametrize(
+    "broken",
+    [
+        {"buy_volume": None},  # a missing value: never defaulted
+        {"bid_prices": [100.0]},  # a float where the layout holds integer units
+        {"price_precision": None},  # a pre-30.2 float-layout entry
+    ],
+)
+def test_an_entry_the_strict_decoder_refuses_is_ledgered_never_guessed(broken: dict) -> None:
+    b = board()
+    engine, _, _ = _engine(b)
+    wire = {**snap_dict(BTC, 100.0, 101.0), **broken}
+
+    engine.ingest_snapshot_batch([wire])
+
+    assert b.instrument_ids() == []
+    assert error_ledger.counts() == {"ranking_engine.snapshot_entry": 1}
 
 
 def test_a_field_the_board_drops_from_a_usable_entry_is_ledgered() -> None:
     b = board()
     engine, _, _ = _engine(b)
     wire = snap_dict(BTC, 100.0, 101.0)
-    wire["close_price"] = -1.0
+    wire["close_price"] = -10_000  # -1.0 in units of the entry's price precision (4)
 
     engine.ingest_snapshot_batch([wire])
 
@@ -425,7 +444,7 @@ def test_an_id_without_a_venue_is_ledgered_and_left_out_of_every_message() -> No
 def _write_snapshot(catalog_path: str, iid: str, close_price: float, ts: int) -> None:
     ParquetDataCatalog(catalog_path).write_data(
         [
-            DydxSecondSnapshot(
+            make_snapshot(
                 instrument_id=InstrumentId.from_str(iid),
                 bid_prices=[close_price - 1],
                 bid_sizes=[1.0],

@@ -355,7 +355,9 @@ class LiveCandleBus:
     def handle_batch(self, payload: object) -> None:
         """
         Decode and apply one `snapshots:raw` batch (a JSON list of
-        `DydxSecondSnapshot.to_dict()` results, per capture's `publish_snapshot_batch`).
+        `DydxSecondSnapshot.to_dict()` results -- the integer layout, Story 30.2 -- per capture's
+        `publish_snapshot_batch`); each entry is decoded by the kernel's strict `from_dict`, and
+        only its decoded floats reach the fold.
         A malformed payload is logged and skipped, never raised. The observed pairs are refreshed
         once per batch, before any of its seconds is folded.
         """

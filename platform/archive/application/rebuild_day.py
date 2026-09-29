@@ -21,7 +21,10 @@ re-derives every row of the day from `data/trade_tick/<iid>/` on exchange time: 
 arrived in (late trades, boundary misattribution: audit D-31/D-44). The fold is the live one,
 `kernel.fold.fold_trades`. Only the eight trade columns (`buy_volume`, `sell_volume`,
 `buy_count`, `sell_count`, `open/high/low/close_price`) of rows inside the day change; book
-columns, `ts_event` and `ts_init` never do.
+columns, precisions, `ts_event` and `ts_init` never do. The columns are exact integers (Story 30.2):
+each second's fold is encoded at that row's own `price_precision`/`size_precision`
+(`SecondTradeFields.snapshot_units`) and compared and written as integers -- no float, no
+tolerance anywhere.
 
 Coverage: the live loop and the archive are written by the same flush, so every live-folded trade
 is archived -- unless the archive did not exist yet. Rows before the floor second of the
@@ -56,8 +59,10 @@ nightly never refuses `rebuild.open_day`; only a rebuild that would change a row
 (i.e. of today itself) does.
 
 Refusals are per instrument-day (error ledger, that instrument-day untouched, the run continues):
-two rows in one floor second (`rebuild.duplicate_second`: the mapping would be ambiguous), day
-files whose full schema differs or lacks the trade columns (`rebuild.mixed_schema`, D-24), a change
+two rows in one floor second (`rebuild.duplicate_second`: the mapping would be ambiguous), a
+float-layout day file (`rebuild.legacy_layout`: run `archive.tools.migrate_snapshot_ints` first,
+then rerun the day), a trade finer than its row's precision (`rebuild.off_grid`: never rounded),
+day files whose full schema differs or lacks the trade columns (`rebuild.mixed_schema`, D-24), a change
 to a row of the current UTC day (`rebuild.open_day`), a temp that failed its read-back
 (`rebuild.verify`), an unreadable file or gap marker (`rebuild.error`). All of an instrument-day's
 changed files are staged and verified before the first one is renamed, so a refusal leaves every
@@ -91,6 +96,9 @@ from kernel.clocks import MAX_TS_INIT_SKEW_NS
 from kernel.clocks import CatalogFileSpan
 from kernel.fold import SecondTradeFields
 from kernel.fold import fold_trades
+from kernel.second_snapshot import MIGRATION_TOOL
+from kernel.second_snapshot import PRECISION_COLUMNS
+from kernel.second_snapshot import SnapshotEncodingError
 from observability import error_ledger
 
 from archive.application.ports import CatalogWriter
@@ -123,7 +131,7 @@ _TRADE_COLUMNS = (
     "low_price",
     "close_price",
 )
-_NO_TRADES = SecondTradeFields().snapshot_values()._asdict()
+_NO_TRADE = SecondTradeFields()
 
 
 class RefusedError(Exception):
@@ -198,10 +206,21 @@ def coverage(catalog_path: str, iid: str, gaps: GapMarkers) -> Coverage:
     return Coverage(covered_from(catalog_path, iid), tuple(gaps.load(iid)))
 
 
+_PRECISIONS = frozenset({"price_precision", "size_precision"})
+
+
 def _check_schema(files: list[str], label: str) -> None:
-    first = pq.read_schema(files[0])
+    schemas = {f: pq.read_schema(f) for f in files}  # each footer read once
+    legacy = [f for f, schema in schemas.items() if not set(schema.names) >= _PRECISIONS]
+    if legacy:
+        raise RefusedError(
+            "rebuild.legacy_layout",
+            f"{label}: {len(legacy)} float-layout day file(s), e.g. {legacy[0]}; run "
+            f"`python -m {MIGRATION_TOOL} --apply`, then rebuild the day again",
+        )
+    first = schemas[files[0]]
     missing = [c for c in _TRADE_COLUMNS if c not in first.names]
-    if missing or any(not pq.read_schema(f).equals(first, check_metadata=True) for f in files[1:]):
+    if missing or any(not schemas[f].equals(first, check_metadata=True) for f in files[1:]):
         raise RefusedError(
             "rebuild.mixed_schema",
             f"{label}: day files differ in full schema or lack {missing or 'nothing'} (D-24)",
@@ -282,10 +301,13 @@ def fold_day(
     rows: dict[int, int],
     covered: Coverage,
     report: DayReport,
-) -> dict[int, dict[str, Any]]:
-    """Floor second -> rebuilt trade columns, for every covered row that has archived trades."""
+) -> dict[int, SecondTradeFields]:
+    """
+    Floor second -> that second's exact fold, for every covered row that has archived trades
+    (encoded to the row's units by `_updated_columns`, which knows the row's precisions).
+    """
     catalog, files = ParquetDataCatalog(catalog_path), trade_files(catalog_path, iid)
-    rebuilt: dict[int, dict[str, Any]] = {}
+    rebuilt: dict[int, SecondTradeFields] = {}
     for hour in range(lo, lo + _DAY_NS, _HOUR_NS):
         trades, duplicates = _hour_trades(catalog, iid, hour, files)
         report.duplicates += duplicates
@@ -298,7 +320,7 @@ def fold_day(
                 report.orphan_trades += len(bucket)
                 report.orphan_seconds += 1
                 continue
-            rebuilt[second] = fold_trades(bucket).snapshot_values()._asdict()
+            rebuilt[second] = fold_trades(bucket)
     return rebuilt
 
 
@@ -309,15 +331,31 @@ def _count_kept(ts: int, covered: Coverage, report: DayReport) -> None:
         report.not_covered += 1
 
 
+def _row_units(
+    fields: SecondTradeFields, precisions: tuple[int, int], ts: int, label: str
+) -> dict[str, Any]:
+    """One second's fold in the row's units; a trade finer than the row's precision refuses."""
+    try:
+        return fields.snapshot_units(*precisions)._asdict()
+    except SnapshotEncodingError as e:
+        raise RefusedError(
+            "rebuild.off_grid",
+            f"{label}: the second at ts_event {ts} cannot be stored at the row's price/size "
+            f"precision {precisions}: {e}",
+        ) from e
+
+
 def _updated_columns(
     table: pa.Table,
     lo: int,
     covered: Coverage,
-    rebuilt: dict[int, dict[str, Any]],
+    rebuilt: dict[int, SecondTradeFields],
     report: DayReport,
 ) -> tuple[dict[str, list], int]:
     """Return the file's trade columns with the day's covered rows replaced, and how many changed."""
     cols = {c: table.column(c).to_pylist() for c in _TRADE_COLUMNS}
+    precisions = list(zip(*(table.column(c).to_pylist() for c in PRECISION_COLUMNS), strict=True))
+    label = f"{report.iid} {day_text(lo)}"
     changed = 0
     for i, ts in enumerate(table.column("ts_event").to_pylist()):
         if not lo <= ts < lo + _DAY_NS:
@@ -326,10 +364,11 @@ def _updated_columns(
             _count_kept(ts, covered, report)
             continue
         report.rebuilt += 1
-        values = rebuilt.get(ts // _S_NS)
-        if values is None:
+        fields = rebuilt.get(ts // _S_NS)
+        if fields is None:
             report.without_trades += 1
-            values = _NO_TRADES
+            fields = _NO_TRADE
+        values = _row_units(fields, precisions[i], ts, label)
         if any(cols[c][i] != values[c] for c in _TRADE_COLUMNS):
             changed += 1
             for c in _TRADE_COLUMNS:
@@ -405,7 +444,7 @@ def _rebuild_files(
     files: list[str],
     lo: int,
     covered: Coverage,
-    rebuilt: dict[int, dict[str, Any]],
+    rebuilt: dict[int, SecondTradeFields],
     report: DayReport,
     writer: CatalogWriter | None,
 ) -> None:
@@ -433,7 +472,7 @@ def _rebuild_file(
     path: str,
     lo: int,
     covered: Coverage,
-    rebuilt: dict[int, dict[str, Any]],
+    rebuilt: dict[int, SecondTradeFields],
     report: DayReport,
     label: str,
 ) -> pa.Table | None:

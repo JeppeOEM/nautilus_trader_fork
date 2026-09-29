@@ -35,6 +35,7 @@ from capture.application.feed import MAIN_FEED
 from capture.application.feed import Feed
 from capture.infrastructure.parquet_writer import ParquetArchiveWriter
 from capture.tests.catalog_kit import query_second_snapshots
+from capture.tests.definition_kit import definitions
 from nautilus_trader.model.data import BookOrder
 from nautilus_trader.model.data import OrderBookDelta
 from nautilus_trader.model.data import OrderBookDeltas
@@ -85,6 +86,7 @@ def _collector(
         live_stream=None,
     )
     c._applied.add(_IID)  # as `run()`'s initial apply leaves it (no network here)
+    c._instruments = definitions(_IID)  # as `run()`'s `fetch_instruments` leaves them
     return c
 
 

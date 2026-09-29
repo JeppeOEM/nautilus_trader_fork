@@ -28,6 +28,7 @@ path so we can unit-test it without running the full asyncio collector.
 
 from kernel.second_snapshot import BOOK_DEPTH
 from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.tests.snapshot_factory import make_snapshot
 
 from nautilus_trader.model.book import OrderBook
 from nautilus_trader.model.data import BookOrder
@@ -89,7 +90,7 @@ def _snapshot_from_book(book: OrderBook, ts: int = _TS) -> DydxSecondSnapshot | 
         return None  # crossed book guard — matches collector._second_loop
     bid_levels = book.bids()[:BOOK_DEPTH]
     ask_levels = book.asks()[:BOOK_DEPTH]
-    return DydxSecondSnapshot(
+    return make_snapshot(
         instrument_id=_IID,
         bid_prices=[lv.price.as_double() for lv in bid_levels],
         bid_sizes=[lv.size() for lv in bid_levels],

@@ -22,6 +22,13 @@ The only other fold in the platform is trades -> second, `kernel.fold.fold_trade
 Every second a row exists for counts toward `seconds_observed` (the `partial` flag's input), traded
 or not, and a bucket entry exists for every bucket a row touched -- a no-trade bucket carries NULL
 OHLC and `v = 0.0`. Reads return only buckets that traded (`o IS NOT NULL`).
+
+Known limit (Story 30.2): the snapshot is exact integers, but bars fold its decoded floats
+(`SecondRow`, `unit_float`), and the candle store and the forming bar stay floats (REAL columns):
+a bar is an aggregation read for display and indicators, not a stored market value, so the
+"integers wherever a machine moves them" rule covers the raw snapshot fields only; the volume sum
+can drift in the last place over a long bucket (the reconcile's `float_units` bar absorbs it).
+Upgrade path: an integer candle store (units and a per-bar precision) folded from the units.
 """
 
 from collections.abc import Iterable

@@ -37,7 +37,10 @@ gap markers in `chart_series`). *No module state*: nothing here holds a process-
 `indicator_picker`'s custom replays (its `Known limit:`); callers pass the catalog, candle-store and
 metrics paths in. *Framework-free*: no `fastapi`, `pydantic` or `urwid`; functions return plain
 dicts/dataclasses and raise their own exceptions, which each interface maps to its own errors.
-`snapshots:raw` is parsed only through `kernel.second_snapshot.DydxSecondSnapshot.from_dict`.
+`snapshots:raw` is parsed only through `kernel.second_snapshot.DydxSecondSnapshot.from_dict` (the
+exact integer layout since Story 30.2); what views returns to an interface carries the integers
+(`price_series_rows`' `bid_units`/`ask_units`, `catalog_snapshot_rows`' wire dicts) or derived
+floats, never re-encoded float prices.
 
 Dependency direction: views imports `kernel`, `observability` and the query services of `candles`
 (`candles.application.queries`, `candles.application.forming`, `candles.domain.candle`) and of

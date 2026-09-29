@@ -335,8 +335,9 @@ instruments named by `--rebuilt IID` (repeatable). Known limit: standalone, that
 is the operator's attestation -- `rebuilt` is never persisted, so the tool cannot check it.
 Every archive tool is `python -m archive.<tool>` (`rebuild_seconds`, `consolidate_catalog`,
 `prune_catalog`, `repair_catalog`, `compare_klines`, `nightly`, `backfill_bars`,
-`crosscheck_errors`, `tools.measure_lag`, `tools.migrate_open_interest`,
-`tools.normalize_snapshot_schema`); their old module paths were
+`crosscheck_errors`, `tools.measure_lag`, `tools.migrate_open_interest`, `tools.recompress`,
+`tools.migrate_snapshot_ints` -- Story 30.2's one-off float -> exact-integer snapshot migration,
+which replaced `tools.normalize_snapshot_schema`); their old module paths were
 removed in Story 25.3. Each collector holds
 `<catalog>/.capture-<VENUE>.lock` while it runs, and `repair_catalog --apply` refuses that venue
 until it is stopped.

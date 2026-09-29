@@ -2139,27 +2139,38 @@
             "type": "integer",
             "title": "T"
           },
-          "bid": {
+          "bid_units": {
             "anyOf": [
               {
-                "type": "number"
+                "type": "integer"
               },
               {
                 "type": "null"
               }
             ],
-            "title": "Bid"
+            "title": "Bid Units"
           },
-          "ask": {
+          "ask_units": {
             "anyOf": [
               {
-                "type": "number"
+                "type": "integer"
               },
               {
                 "type": "null"
               }
             ],
-            "title": "Ask"
+            "title": "Ask Units"
+          },
+          "price_precision": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Price Precision"
           },
           "mid": {
             "anyOf": [

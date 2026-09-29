@@ -18,6 +18,7 @@ Nautilus objects throughout (TEST-03); nothing here is a mock.
 """
 
 from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.tests.snapshot_factory import make_snapshot
 
 from nautilus_trader.model.identifiers import InstrumentId
 from ranking.application.engine import RankingConfig
@@ -65,7 +66,7 @@ def snap(
     close_price: float | None = None,
 ) -> DydxSecondSnapshot:
     """Build a one-level snapshot; `bid=None`/`ask=None` makes that side empty."""
-    return DydxSecondSnapshot(
+    return make_snapshot(
         instrument_id=InstrumentId.from_str(iid),
         bid_prices=[] if bid is None else [bid],
         bid_sizes=[] if bid is None else [bid_size],

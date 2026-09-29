@@ -32,6 +32,7 @@ from pathlib import Path
 
 import pytest
 from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.tests.snapshot_factory import make_snapshot
 
 from candles.application import queries
 from candles.application.rebuild import parse_date_ns
@@ -49,7 +50,7 @@ _SECOND_NS = 1_000_000_000
 
 def _snapshot(ts_event: int, price: float | None) -> DydxSecondSnapshot:
     traded = price is not None
-    return DydxSecondSnapshot(
+    return make_snapshot(
         instrument_id=InstrumentId.from_str(_IID),
         bid_prices=[99.0],
         bid_sizes=[1.0],

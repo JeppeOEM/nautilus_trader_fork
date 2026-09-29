@@ -58,7 +58,8 @@ def test_ingest_feeds_close_price_into_the_price_series() -> None:
     assert b.slow_rows(NOW_NS, {}, {})[0]["price"] == 101.0
 
 
-@pytest.mark.parametrize("bad_price", [float("nan"), float("inf"), -1.0, 0.0])
+# NaN/inf can no longer reach the board: the integer layout cannot carry them (Story 30.2).
+@pytest.mark.parametrize("bad_price", [-1.0, 0.0])
 def test_ingest_drops_a_nonfinite_or_nonpositive_close_price(bad_price: float) -> None:
     b = board()
     dropped = b.ingest(snap(BTC, ts_event=1 * SEC_NS, close_price=bad_price), NOW_NS)

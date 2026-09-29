@@ -26,6 +26,7 @@ from kernel.indicators import MultiLevelOFI
 from kernel.indicators import microprice as _microprice
 from kernel.indicators import spread as _spread
 from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.tests.snapshot_factory import make_snapshot
 
 import data_api.app as app_module
 import data_api.routes.indicator_series as indicator_series_routes
@@ -57,7 +58,7 @@ def _snapshot(
     ask_prices: list[float],
     ask_sizes: list[float],
 ) -> DydxSecondSnapshot:
-    return DydxSecondSnapshot(
+    return make_snapshot(
         instrument_id=InstrumentId.from_str(_IID),
         bid_prices=bid_prices,
         bid_sizes=bid_sizes,
@@ -278,7 +279,7 @@ def test_thin_book_snapshot_yields_null_microprice_and_spread(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     catalog_path = str(tmp_path / "catalog")
-    snapshot = DydxSecondSnapshot(
+    snapshot = make_snapshot(
         instrument_id=InstrumentId.from_str(_IID),
         bid_prices=[],
         bid_sizes=[],

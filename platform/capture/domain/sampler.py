@@ -17,7 +17,9 @@
 
 Invariant: a `DydxSecondSnapshot` exists only for an instrument whose `LiveBook` passed all four
 checks at this sample -- present, two-sided, uncrossed (after the venue's `CrossedBookPolicy`)
-and fresh -- and it holds exactly the trades of its own second. A rejected instrument's trades
+and fresh -- and it holds exactly the trades of its own second, encoded exactly at the precisions
+of the instrument's definition (`DydxSecondSnapshot.from_levels`, Story 30.2); a row that cannot
+be encoded exactly is rejected `Unencodable`, never rounded. A rejected instrument's trades
 are discarded from the live row (never carried onto a later one) and stay archived for the
 nightly rebuild. This is the only place the four checks run; no venue can override it.
 
@@ -36,6 +38,7 @@ from dataclasses import field
 
 from kernel.fold import fold_trades
 from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.second_snapshot import SnapshotEncodingError
 
 from capture.domain.events import BookUncrossed
 from capture.domain.live_book import S_NS
@@ -49,7 +52,11 @@ from capture.domain.verdicts import Crossed
 from capture.domain.verdicts import Rejected
 from capture.domain.verdicts import SampleVerdict
 from capture.domain.verdicts import Stale
+from capture.domain.verdicts import Unencodable
+from nautilus_trader.model.book import BookLevel
 from nautilus_trader.model.identifiers import InstrumentId
+from nautilus_trader.model.objects import Price
+from nautilus_trader.model.objects import Quantity
 
 
 _HALF_S_NS = 500_000_000
@@ -82,8 +89,12 @@ class SecondSampler:
         now_ns: int,
         second: int | None,
         feed_dead: Stale | None,
+        precisions: Mapping[str, tuple[int, int]],
     ) -> SampleResult:
-        """Gate every instrument in `iids` (the collected set) at `now_ns` / exchange `second`."""
+        """
+        Gate every instrument in `iids` (the collected set) at `now_ns` / exchange `second`.
+        `precisions`: each instrument definition's `(price_precision, size_precision)`.
+        """
         result = SampleResult()
         sampled: set[str] = set()
         for iid in iids:
@@ -101,7 +112,11 @@ class SecondSampler:
             intake = intakes.get(iid)
             if isinstance(verdict, Accepted):
                 trades = intake.take_second(second) if intake is not None else []
-                result.accepted.append(self._row(iid, verdict, trades, now_ns, second))
+                row = self._encoded_row(iid, verdict, trades, now_ns, second, precisions)
+                if isinstance(row, DydxSecondSnapshot):
+                    result.accepted.append(row)
+                else:
+                    result.rejected.append((iid, row))  # its trades were taken: archived only
                 continue
             result.rejected.append((iid, verdict))
             if intake is not None:
@@ -122,26 +137,63 @@ class SecondSampler:
         for intake in intakes.values():
             intake.close(second, first_close)
 
+    @classmethod
+    def _encoded_row(
+        cls,
+        iid: str,
+        top: Accepted,
+        trade_list: list,
+        now_ns: int,
+        second: int | None,
+        precisions: Mapping[str, tuple[int, int]],
+    ) -> DydxSecondSnapshot | Unencodable:
+        """
+        Known limit: `precisions` are the definitions the service fetched at start, so a venue
+        that refines an instrument's tick or lot size mid-run makes each of its seconds
+        `Unencodable` (ledgered, never rounded) until the collector restarts. Upgrade path:
+        refetch the instrument's definition on its first `Unencodable` and retry once.
+        """
+        precision = precisions.get(iid)
+        if precision is None:
+            return Unencodable("no instrument definition")
+        try:
+            return cls._row(iid, top, trade_list, now_ns, second, precision)
+        except (SnapshotEncodingError, ValueError, OverflowError) as e:
+            # `SnapshotEncodingError` is the kernel's refusal; a `Quantity.from_raw` or level
+            # accessor refusing a value is the same verdict for this one instrument, and must not
+            # escape `sample` and cost every other instrument its second.
+            return Unencodable(str(e))
+
     @staticmethod
     def _row(
-        iid: str, top: Accepted, trade_list: list, now_ns: int, second: int | None
+        iid: str,
+        top: Accepted,
+        trade_list: list,
+        now_ns: int,
+        second: int | None,
+        precision: tuple[int, int],
     ) -> DydxSecondSnapshot:
         ts_event = now_ns if second is None else second * S_NS + _HALF_S_NS
-        trades = fold_trades(trade_list).snapshot_values()
-        return DydxSecondSnapshot(
+        price_precision, size_precision = precision
+        return DydxSecondSnapshot.from_levels(
             instrument_id=InstrumentId.from_str(iid),
-            bid_prices=[lv.price.as_double() for lv in top.bids],
-            bid_sizes=[lv.size() for lv in top.bids],
-            ask_prices=[lv.price.as_double() for lv in top.asks],
-            ask_sizes=[lv.size() for lv in top.asks],
-            buy_volume=trades.buy_volume,
-            sell_volume=trades.sell_volume,
-            buy_count=trades.buy_count,
-            sell_count=trades.sell_count,
-            open_price=trades.open_price,
-            high_price=trades.high_price,
-            low_price=trades.low_price,
-            close_price=trades.close_price,
+            price_precision=price_precision,
+            size_precision=size_precision,
+            bids=[_exact_level(lv) for lv in top.bids],
+            asks=[_exact_level(lv) for lv in top.asks],
+            trades=fold_trades(trade_list).snapshot_units(price_precision, size_precision),
             ts_event=ts_event,
             ts_init=now_ns,
         )
+
+
+def _exact_level(level: BookLevel) -> tuple[Price, Quantity]:
+    """
+    Return a level's exact price and size. `BookLevel.size()` returns a float, so the size is the sum of
+    its orders' `Quantity.raw` (one order per level in an L2 book), never that float.
+    """
+    orders = level.orders()
+    if not orders:
+        raise SnapshotEncodingError(f"book level {level.price} holds no order")
+    raw = sum(order.size.raw for order in orders)
+    return level.price, Quantity.from_raw(raw, max(order.size.precision for order in orders))

@@ -36,6 +36,7 @@ from kernel.indicators import mid_price
 from kernel.indicators import spread
 from kernel.open_interest import OpenInterest
 from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.tests.snapshot_factory import make_snapshot
 
 from nautilus_trader.model.currencies import BTC
 from nautilus_trader.model.currencies import USDT
@@ -70,22 +71,22 @@ def _snapshot(second: int) -> DydxSecondSnapshot:
     """Three levels a side; second 4 has no asks; a trade in minutes 0 and 2 only."""
     traded = second // 60 in (0, 2)
     close = 100.0 + second / 100 if traded else None
-    return DydxSecondSnapshot(
-        InstrumentId.from_str(_IID),
-        [99.9, 99.8, 99.7],
-        [1.0 + second % 3, 2.0, 3.0],
-        [] if second == _EMPTY_ASK_SECOND else [100.1, 100.2, 100.3],
-        [] if second == _EMPTY_ASK_SECOND else [2.0, 1.0, 0.5],
-        1.0 if traded else 0.0,
-        0.5 if traded else 0.0,
-        1 if traded else 0,
-        1 if traded else 0,
-        _at(second),
-        _at(second),
-        close,
-        close,
-        close,
-        close,
+    return make_snapshot(
+        instrument_id=InstrumentId.from_str(_IID),
+        bid_prices=[99.9, 99.8, 99.7],
+        bid_sizes=[1.0 + second % 3, 2.0, 3.0],
+        ask_prices=[] if second == _EMPTY_ASK_SECOND else [100.1, 100.2, 100.3],
+        ask_sizes=[] if second == _EMPTY_ASK_SECOND else [2.0, 1.0, 0.5],
+        buy_volume=1.0 if traded else 0.0,
+        sell_volume=0.5 if traded else 0.0,
+        buy_count=1 if traded else 0,
+        sell_count=1 if traded else 0,
+        ts_event=_at(second),
+        ts_init=_at(second),
+        open_price=close,
+        high_price=close,
+        low_price=close,
+        close_price=close,
     )
 
 
@@ -144,7 +145,7 @@ def test_seconds_window_is_half_open_and_indexed_by_ts(frames: CatalogFrames) ->
 def test_seconds_derived_columns_are_the_kernel_functions(frames: CatalogFrames) -> None:
     df = frames.seconds(_IID, start=_at(0), end=_at(4))
     for second, row in zip(range(4), df.itertuples(), strict=True):
-        fields = DydxSecondSnapshot.to_dict(_snapshot(second))
+        fields = _snapshot(second).as_floats()
         assert row.mid == mid_price(fields)
         assert row.spread == spread(fields)
         assert row.microprice == microprice(fields)
