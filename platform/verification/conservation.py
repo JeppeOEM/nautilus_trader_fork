@@ -84,7 +84,8 @@ class Refused(Exception):
     """A run that cannot give a verdict: its message is ledgered and becomes the exit message."""
 
 
-def _directory(value: str | None, name: str) -> Path:
+def directory(value: str | None, name: str) -> Path:
+    """Return `value` as an existing directory; `Refused` naming `name` otherwise."""
     if not value:
         raise Refused(f"{name} is required")
     path = Path(value)
@@ -94,9 +95,9 @@ def _directory(value: str | None, name: str) -> Path:
 
 
 def _inputs(args: argparse.Namespace, environ: Mapping[str, str]) -> Inputs:
-    raw_root = _directory(args.raw_dir or environ.get("VERIFY_DATA_DIR"), "VERIFY_DATA_DIR")
-    _directory(str(venue_dir(raw_root, args.venue)), "the raw venue directory")
-    catalog = _directory(args.catalog or environ.get("CATALOG_PATH"), "CATALOG_PATH")
+    raw_root = directory(args.raw_dir or environ.get("VERIFY_DATA_DIR"), "VERIFY_DATA_DIR")
+    directory(str(venue_dir(raw_root, args.venue)), "the raw venue directory")
+    catalog = directory(args.catalog or environ.get("CATALOG_PATH"), "CATALOG_PATH")
     return Inputs(
         reference=RawReader(raw_root, args.venue, day_hours(args.day)),
         archive=ParquetArchive(catalog),
@@ -104,7 +105,8 @@ def _inputs(args: argparse.Namespace, environ: Mapping[str, str]) -> Inputs:
     )
 
 
-def _plan(venue: str, environ: Mapping[str, str]) -> RecordingPlan:
+def plan_of(venue: str, environ: Mapping[str, str]) -> RecordingPlan:
+    """Read the venue's plan (its collector `config.toml`); `Refused` when it cannot be read."""
     path = config_path(venue, environ)
     try:
         return read_plan_file(path, venue)
@@ -120,7 +122,7 @@ def run(args: argparse.Namespace, environ: Mapping[str, str], now_ns: int) -> Da
             f"({DAY_SETTLE_NS // NS_PER_HOUR} h after midnight)"
         )
     inputs = _inputs(args, environ)
-    plan = _plan(args.venue, environ)
+    plan = plan_of(args.venue, environ)
     try:
         return conserve(plan, args.day, inputs)
     except (TruncatedTail, ValueError, OSError) as exc:  # MalformedLine is a ValueError

@@ -22,7 +22,7 @@ from verification.application import sites
 
 _CONTEXT = Path(__file__).resolve().parents[1]
 _SITES_FILE = _CONTEXT / "application" / "sites.py"
-_PREFIXES = ("verification.recorder.", "verification.conservation.")
+_PREFIXES = ("verification.recorder.", "verification.conservation.", "verification.trades.")
 
 
 def _production_sources() -> list[Path]:

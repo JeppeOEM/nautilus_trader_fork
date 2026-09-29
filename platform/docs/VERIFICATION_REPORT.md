@@ -72,11 +72,11 @@ delivers the comparator (`python -m verification.<tool> --venue V --day D`).
 |---|---|---|---|---|---|
 | Drops and conservation (trade ids, rejected seconds) | all 5 | pending — tool built (Story 31.2); verdict pending the first full clean closed UTC day after the soak restart (Story 31.11 computes it) | | | `python3 -m verification.conservation --venue V --day D` (`docs/DATA_DICTIONARY.md` §1.16) |
 | Derived signals vs reference implementations | all 5 | **VERIFIED** after fixes (DEVIATIONs D-77..D-88 and D-90 fixed in code; pinned Known limits D-89) | 0 DIFFERENT, 0 undefined mismatch in every family | Real rows: 300 stored rows per instrument, Bybit ts_event 2026-09-29T13:01:25.5Z..13:06:24.5Z, Hyperliquid 13:01:23.5Z..13:06:22.5Z (restarted soak, revision 5e324bbb8e; `verification/tests/fixtures/snapshots/README.md`). Fixture-only float noise / compared: mid 247/1500, spread 0/1500 (after D-88), volume_delta 80/1500, CVD 227/645, count OFI L10 w300 896/1500, depth-within-bps sums 6323/24109 defined, candle volume 31/80; microprice, OBI, USD OFI and the stdevs agree EXACT or within 1e-9. All inputs (12 seeds x 160 rows, 12 sparse 40-day series, 8 seeds x 360 rows, the 5 fixtures): e.g. count OFI 12206 float noise / 20520, candle volume 3675 / 34428, board fields 14650 / 55445, research simple returns 3 exact + 5148 within 1e-9 / 9576 (4425 both undefined). Six planted defects each caught (DIFFERENT > 0). Scope: the real fixtures are 300 gap-free two-sided rows each, so gaps, one-sided and crossed books, 1D/1W boundaries and the 1h/24h windows are covered by the seeded generators and golden cases only (31.11's longer soak is where real rows reach them). Families and tolerances: DATA_DICTIONARY §2.13 | `python3 -m pytest -o addopts="" --rootdir=. verification/tests/test_reference_signals.py verification/tests/test_reference_series.py -q -s` |
-| Trades, id by id; per-second trade columns | BTCUSDT-LINEAR | pending — Story 31.4 | | | |
-| | ETHUSDT-LINEAR | pending — Story 31.4 | | | |
-| | BTCUSDT-SPOT | pending — Story 31.4 | | | |
-| | ETHUSDT-SPOT | pending — Story 31.4 | | | |
-| | SOL-USD-PERP.HYPERLIQUID | pending — Story 31.4 | | | |
+| Trades id-by-id + second fold | BTCUSDT-LINEAR | pending — tool built (Story 31.4); verdict pending Story 31.11 (smoke below is `--stage live`, provisional) | smoke: 0 | Smoke 2026-09-29T13:00-15:00Z (restarted soak; tool at f7c9e3ea38 + the Story 31.4 change set): seen 279,155, matched 279,155, missing/extra/duplicated 0, every field mismatch 0, conflict 0; seconds exact 7,200/7,200; latency ts_init − recv_ns min −137 / p50 −1 / p99 33 / max 161 ms; wire NO_AGGRESSOR 0 | `python3 -m verification.trades --venue V --day D --stage rebuilt` (`docs/DATA_DICTIONARY.md` §1.17) |
+| | ETHUSDT-LINEAR | pending — as above | smoke: 0 | Smoke as above: seen 349,574, matched 349,574, all failing counts 0; seconds exact 7,200/7,200; latency −139 / −1 / 20 / 149 ms; NO_AGGRESSOR 0 | as above |
+| | BTCUSDT-SPOT | pending — as above; smoke **DEVIATION** D-91 (OPEN) | smoke: 8 ids, 3 seconds (all D-91) | Smoke as above: seen 131,534, matched 131,534, missing/extra/duplicated 0, **mismatch_price 8** (sub-tick prints stored rounded, D-91), other mismatches 0; seconds exact 7,197, **off_grid 3** (the same prints); latency −296 / −2 / 4 / 120 ms; NO_AGGRESSOR 0 | as above |
+| | ETHUSDT-SPOT | pending — as above | smoke: 0 | Smoke as above: seen 29,429, matched 29,429, all failing counts 0; seconds exact 7,200/7,200; latency −271 / −1 / 7 / 52 ms; NO_AGGRESSOR 0 | as above |
+| | SOL-USD-PERP.HYPERLIQUID | pending — as above | smoke: 0 | Smoke as above: seen 11,464, matched 11,464, all failing counts 0; seconds exact 7,200/7,200; latency −154 / 21 / 280 / 394 ms; NO_AGGRESSOR 0 | as above |
 | Stored book (1 s snapshot) vs rebuilt reference book | BTCUSDT-LINEAR | pending — Story 31.5 | | | |
 | | ETHUSDT-LINEAR | pending — Story 31.5 | | | |
 | | BTCUSDT-SPOT | pending — Story 31.5 | | | |
@@ -96,6 +96,14 @@ delivers the comparator (`python -m verification.<tool> --venue V --day D`).
 | Candles and klines, every timeframe | all 5 | pending — Story 31.8 | | | |
 | Live, backtest and display parity (incl. the bot's signals) | all 5 | pending — Story 31.9 | | | |
 | Fault injection: every loss accounted for | Bybit, Hyperliquid | pending — Story 31.10 | | | |
+
+**Trades smoke (Story 31.4), how it was run.** The soak's first closed day is 2026-09-30, so the
+smoke ran the tool's per-hour pieces (`verification.application.trades.check_hours`, the function
+`check_day` runs over all 24 hours) on today's two complete hours, 13:00-15:00Z, read-only against
+the running stack, `--stage live`. Hour 12 (the soak began 12:59:19Z) and hour 15 (still being
+written) were excluded: their edges are boundary artefacts, not findings. The Bybit day would
+also fail on its coverage record, which does not exist yet (D-92); the smoke reports it as
+MISSING. `main` over the whole day refuses it, as it must (the hour 15 raw file is still open).
 
 ## Reference recorder footprint
 

@@ -799,3 +799,11 @@ Discarded by operator: locking/atomic TOML writes; `bot_tui` malformed-message h
 - source_spec: `_bmad-output/implementation-artifacts/spec-31-3-derived-signals-against-independent-reference-implementations.md`
   summary: `research/tests/test_backtest_runner.py::test_an_order_fills_at_the_top_of_book_after_its_latency` (5 parametrizations) errors with `TypeError: DydxSecondSnapshot.__init__() missing 2 required positional arguments`: its fixture builder at `:427` still calls the pre-Story-30.2 constructor.
   evidence: the same `DydxSecondSnapshot(` call is at line 426 of the baseline revision 5e324bbb8e, and the 5 errors show in both 31.3 review passes' full pytest runs, so the fixture was never updated for 30.2's precision arguments. It is pre-existing and not caused by 31.3.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-31-4-trades-proven-id-by-id-against-the-venue.md`
+  summary: Bybit prints BTCUSDT spot trades below the instrument's 0.1 tick (e.g. `84528.67`), and capture archives them rounded (`84528.7`) with no trace, so the stored trade price and that second's OHLC are not what the venue published (audit D-91, OPEN).
+  evidence: `verification.trades` on the 2026-09-29 13:00-15:00Z soak: `BTCUSDT-SPOT` `mismatch_price` 8 of 131,534 and 3 `off_grid` seconds. The rounding is in `crates/adapters/bybit/src/common/parse.rs` `parse_price_with_precision` (f64, then `Price::new_checked` at the instrument precision). FORK-01 forbids a fix there, so a follow-up story must keep the exact venue price in capture, or ledger every rounding.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-31-4-trades-proven-id-by-id-against-the-venue.md`
+  summary: A collector that has never written a coverage line has no `coverage/<venue>.jsonl`, so `verification.conservation` and `verification.trades` fail a clean day as "coverage record MISSING" (audit D-92, OPEN). Capture should create and fsync the file at start.
+  evidence: `CaptureService._write_coverage` returns on an empty flush (`if not lines: return`). On the soak, `data/coverage/bybit.jsonl` was still absent at 15:16Z, 2 h 17 min into a clean Bybit run. This blocks a passing Bybit verdict in Story 31.11.

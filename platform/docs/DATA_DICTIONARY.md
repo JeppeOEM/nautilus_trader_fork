@@ -109,6 +109,16 @@ Its archived days stay in the catalog and the `archive` service keeps verifying 
   flush) and left out of every live row; the rebuild places it in its own second. A trade
   stamped more than `hold_back_seconds + 5 s` after its arrival is handled the same way
   (`collector.venue_clock_ahead`).
+- **NO_AGGRESSOR on the wire** (Story 31.4): the fold counts every non-BUYER trade as a sell.
+  That convention matters only if a venue sends a side token other than its two documented ones.
+  Bybit's adapter maps `S: ""` to `NoAggressor` (`BybitOrderSide::Unknown`); Hyperliquid's has no
+  such variant (`HyperliquidSide` is `B`/`A` only), so another token would fail the message in
+  the adapter, not reach the fold. Measured on the Story 31.2 soak, 2026-09-29T13:00-15:00Z
+  (`verification.trades`, §1.17): **0** of 789,692 Bybit reference trades (BTCUSDT/ETHUSDT linear
+  and spot) and **0** of 11,464 Hyperliquid SOL trades carried a token other than `Buy`/`Sell` or
+  `B`/`A`. The convention is kept and stays checked: the tool counts `wire_no_aggressor` with its
+  tokens per instrument, and folds such a trade to the sell side exactly as production does (audit
+  D-93).
 - **Footprint:** expected ~1 MB/venue/day on dYdX (ETH ~2.9k, BTC ~1.4k trades/day);
   Bybit/Hyperliquid majors are far busier (the 200 s run archived ~7.2k BTCUSDT-LINEAR and
   ~1.4k Hyperliquid BTC trades). **Not measured** per venue-day yet (operator action, see
@@ -810,7 +820,8 @@ recorder that keeps restarting still prunes. Measured footprint: `docs/VERIFICAT
 **Consumers.** The recordings are read by Epic 31's comparators. The first is
 `python3 -m verification.conservation` (Story 31.2, §1.16). It reads only four things: these
 verbatim raw records, the catalog's raw Parquet (through pyarrow), capture's coverage record
-(§1.16) and the archive-gap markers. It never reads through the code it checks.
+(§1.16) and the archive-gap markers. It never reads through the code it checks. The second,
+`python3 -m verification.trades` (Story 31.4, §1.17), reads the same four.
 
 ### 1.16 Capture coverage record (`<catalog>/../coverage/<venue>.jsonl`, Story 31.2)
 
@@ -982,6 +993,133 @@ coverage or marker line is refused (file:line), never skipped.
   is decoded up to three times per instrument that shares it. A trade first received two or more
   hours after its venue time (only a quiet-market `recent-trade` poll can reach that far) is not
   counted as seen. The plan is today's, not the one in force on the day.
+
+### 1.17 Trades proven id by id and second by second (`verification.trades`, Story 31.4)
+
+Not stored data: the check that every archived trade and every snapshot second's eight trade
+columns equal what the venue published. `python3 -m verification.trades --venue BYBIT|HYPERLIQUID
+--day D --stage live|rebuilt [--json] [--raw-dir DIR] [--catalog DIR]`
+(`verification/trades.py`, the root; `verification/application/trades.py`;
+`verification/domain/trade_check.py`; the readers in `verification/infrastructure/catalog_reader.py`).
+It reads what conservation reads (§1.16) plus every stored `trade_tick` column and the snapshot's
+trade columns, and imports nothing of `capture`, `candles`, `kernel.fold`, `kernel.second_snapshot`,
+`nautilus_pyo3` or `nautilus_trader` (`tests/test_boundaries.py`, a registered root). It reuses
+conservation's raw reader, coverage parser, explanations, channel table and closed-day rule, so the
+two tools never disagree about what was seen.
+
+**Inputs, decoded exactly.**
+- Reference: the recorder's WS `publicTrade`/`trades` frames and Bybit `recent-trade` polls (§1.15),
+  hour H read from the raw files of H-1..H+1. Price and size are the wire's decimal strings as
+  `Decimal` (anything but ASCII digits with an optional fraction is refused as a malformed line; so
+  is a missing side). Side: Bybit `Buy`/`Sell`, Hyperliquid `B`/`A` -> BUYER (1) / SELLER (2); any
+  other token -> NO_AGGRESSOR (0), counted with the token (see §1.1). Every copy of an id (a replay,
+  the poll) is merged: the first WS frame's copy is kept, and a copy that disagrees on price, size,
+  side or time is a `reference_conflict`.
+- Archive: `trade_tick` Parquet read raw with pyarrow. `price`/`size` are `fixed_size_binary[16]`,
+  little-endian signed 128-bit integers at 10^16 (`FIXED_PRECISION` 16, restated), decoded as
+  `Decimal(raw).scaleb(-16)` in a context whose `Inexact` trap makes any rounding an error; each
+  file's `price_precision`/`size_precision` come from its schema metadata (a file without them is
+  refused). `aggressor_side` is the enum value (0/1/2).
+- Snapshot rows: the eight stored integers (`open/high/low/close_price`, `buy/sell_volume`,
+  `buy/sell_count`) at the row's own `price_precision`/`size_precision` (§1.7).
+
+**Ids** (per instrument; both sides partitioned by their own venue-time hour):
+`seen`, `matched`; `missing_explained` / `missing_unexplained` (a reference id not archived,
+explained by conservation's rules: a `trades_dropped` range, a `trades_unrecoverable` window or an
+archive-gap marker, §1.16); `extra_explained` / `extra_unexplained` (an archived id the reference
+did not see: explained only when it is on a `trades_backfilled` line **and** its `ts_event` lies in a
+recorder connection gap of its trade channel); `duplicated` (ids stored more than once);
+`mismatch_price` / `mismatch_size` (numeric `Decimal` equality), `mismatch_side`,
+`mismatch_ts_event` (must equal the venue's ms x 10^6 exactly; Hyperliquid's ms truth is D-62's);
+`reference_conflict`; `off_precision` (an archived raw that is not a whole unit at its file's
+precision); `implausible_latency`. `backfilled` and `wire_no_aggressor` are evidence only. There is
+no tolerance anywhere.
+
+**Recorder connection gap.** Built from the trade channel's own lines (which carry every
+`connection` line of their endpoint, §1.15), read from the start of hour H-1 of the window's first
+hour to the end of the hour after its last: `close`/`error` to the next `open`; an `open` with no
+gap open before it (a crash's `startup` open, or a reconnect whose `close` lies before the read)
+starts the gap at the channel's previous line, or at the read's start when it is the first line
+read (the gap began before the read); a gap still open at the end runs to the end of the read. Each gap is widened by `RECORDER_GAP_MARGIN_NS` = 5 s
+on both sides (the recorder's subscribe after its `open`, and venue-clock skew).
+
+**Latency.** `ts_init - recv_ns` of every matched id seen on WS, not backfilled and whose `ts_event`
+lies outside the instrument's recorder gaps, `recv_ns` from the first WS frame carrying it, as a histogram of whole milliseconds (floor): min, nearest-rank p50
+and p99, max. `|delta| > 60 s` is `implausible_latency` and fails: both processes stamp from the same
+host clock, and 60 s is the catalog read-span margin (`kernel.clocks.READ_SPAN_MARGIN_NS`, restated).
+A trade inside a recorder gap is no latency sample: the recorder was not connected when it
+happened, so its first WS copy (if any) is a replay. Hyperliquid's `trades` subscribe answers with
+the recent trades (the soak's startup frame held trades 55 s older than its `open`), and after a
+recorder restart that copy's `recv_ns` is the reconnect, not the arrival (audit D-95).
+
+**The reference fold** (its own, written from this rule, not `kernel.fold`): second = venue ms //
+1000; order = `(ts_ns, recv_ns of the id's first WS frame, index in that frame)`, and a REST-only
+trade takes its poll's `recv_ns` and its chronological position in the list (Bybit lists newest
+first); open = first, close = last, high/low = max/min; buy = BUYER, sell = every other side (the
+NO_AGGRESSOR convention, §1.1); units = `Decimal.scaleb(precision)` at the row's precisions, and a
+value that is not a whole unit is `off_grid`. An empty second is OHLC None and zeros. `arc` is the
+same fold over the second's archived trades (each id once; a seen id in the reference's order), so no
+production code is involved on either side. Known limit (REST-only tie order, a `Known limit:` at
+`fold_second`): a REST-only trade folds after every WS trade of its millisecond, as production's
+rebuild places a backfilled trade (arrival order), but the venue's own order (Bybit's `seq`) may
+differ; such a tie can make open/close differ, a loud false `rebuild_mismatch`, never a false pass.
+Upgrade path: order Bybit ties by `seq` on both sides.
+
+**Seconds.** A second is judged when it has a row, reference trades or archived trades (a second
+holding only an archive-only id is judged too). A row that differs from ref is judged against arc
+whenever arc is trusted: arc == ref, or every id discrepancy of the second is explained (an
+explained missing id or an explained extra id). The archive is the rebuild's input, so an explained
+second passes only when its row is arc's fold.
+
+| Class | Condition | Fails |
+|---|---|---|
+| `exact` | row == ref | no |
+| `explained_loss` | row != ref, arc != ref, every id discrepancy explained, row == arc | no |
+| `live_provisional` | `--stage live`, row != ref, arc trusted, and not `explained_loss` (row != arc) | no |
+| `rebuild_mismatch` | `--stage rebuilt`, row != ref, arc trusted, not `explained_loss` (row != arc), second not rebuild-exempt | yes |
+| `live_kept` | as `rebuild_mismatch`, but the row's `ts_event` lies in an archive-gap marker's own `ts_init` span, or before the floor second of the instrument's first archived trade: the rebuild keeps live values there (§6) | no |
+| `archive_differs` | row != ref, arc != ref, and an id discrepancy of the second is unexplained (or there is none) | yes |
+| `missing_row` | ref or the archive has trades, no row, no coverage `seconds` run | yes |
+| `missing_row_explained` | ref or the archive has trades, no row, a coverage `seconds` run covers it | no |
+| `duplicate_row` | two rows in one second | yes |
+| `off_grid` | the reference or archive fold cannot be held at the row's precisions | yes |
+
+**Stage.** `archive.rebuild_seconds` rewrites rows in place and leaves no marker (`state.json` is a
+scheduler cursor, not a verdict), so the stage is an explicit flag, never inferred (audit D-94). The
+live window runs from the day's 2 h settle (`DAY_SETTLE_NS`) to the scheduler's `nightly_at`
+(03:07 UTC by default); a `live` report labels its verdict provisional and never claims the rebuilt
+guarantee; a wrong `rebuilt` can only false-fail. Story 31.11's nightly `verify_day` runs after
+`compare_klines` with `--stage rebuilt`.
+
+**Verdict and exit.** An instrument passes with every failing id count (`missing_unexplained`,
+`extra_unexplained`, `duplicated`, the four `mismatch_*`, `reference_conflict`, `off_precision`,
+`implausible_latency`) and every failing second class at 0; the day passes when every instrument
+does, the coverage record exists and no raw reference hour of the day is missing. Exit 0 pass, 1
+fail, 2 usage. Refusals exit 1 with their message, ledgered at `verification.trades.refused`: an
+unknown `--stage`, a day not closed, no raw root or catalog, an unreadable plan, a malformed line,
+a truncated raw file of an hour of the day, a trade file without precision metadata or `ts_event`
+column, a snapshot row without its precisions, a value the exact decode cannot hold (an
+`ArithmeticError` such as `decimal.Inexact` from an over-long wire decimal). Any other exception is
+a crash: ledgered at the same site (detail `crashed: ...`), then re-raised. Failing id and second
+examples are deterministic, never set order: hour by hour, and within an hour by kind
+(`off_precision`, then field mismatches and conflicts, then missing, then extra ids), each kind in
+venue-time order. `--json` gives
+`passed`, `provisional`, `venue`, `day`, `stage`, `hours`, `coverage_file`, `coverage_present`,
+`missing_raw_files`, `truncated_neighbour_files` and per instrument `ids` (every count, the
+`no_aggressor_tokens`, up to 5 failing `examples`), `seconds` (`classes`, all ten, and up to 5
+failing `examples`) and `latency_ms` (`count`, `min_ms`, `p50_ms`, `p99_ms`, `max_ms`).
+
+**Repro** (host, from `platform/`, on the verify stack's data): `VERIFY_DATA_DIR=data/verification
+CATALOG_PATH=data/catalog python3 -m verification.trades --venue BYBIT --day YYYY-MM-DD --stage
+rebuilt [--json]`. Results: `docs/VERIFICATION_REPORT.md`.
+
+Known limits (each a `Known limit:` in `verification/application/trades.py` or the reader). Memory
+is one instrument-window of trades and rows in Arrow plus one hour of Python objects. The plan is
+today's. A trade whose archived `ts_event` falls in another UTC hour than its venue time is one
+missing and one extra id (both failing), not a `mismatch_ts_event`. A trade capture archived live
+while only the recorder was disconnected, or before a recorder that started mid-day, is
+`extra_unexplained` (a loud false fail; upgrade path: a second recorder connection per endpoint).
+`first_ts_event` reads one footer per trade file of the instrument.
 
 ---
 

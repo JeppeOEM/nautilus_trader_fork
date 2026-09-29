@@ -39,6 +39,7 @@ from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
 from dataclasses import replace
+from decimal import Decimal
 from types import MappingProxyType
 from typing import Any
 
@@ -46,6 +47,7 @@ from kernel.venues import bybit_category
 
 from verification.domain.plan_file import RecordingPlan
 from verification.domain.subscriptions import BYBIT
+from verification.domain.subscriptions import HYPERLIQUID
 from verification.domain.subscriptions import bybit_symbol
 from verification.domain.subscriptions import hyperliquid_coin
 from verification.domain.subscriptions import rest_polls
@@ -219,11 +221,11 @@ def parse_coverage_line(text: str, where: str) -> CoverageEntry:
     return _BUILDERS[str(kind)](entry, where)
 
 
-def parse_gap_marker_line(text: str, where: str) -> TradeWindow:
+def parse_gap_marker_span(text: str, where: str) -> TradeWindow:
     """
-    Parse one archive-gap marker line into the venue-time window it explains: its `ts_init` span
-    widened below by `GAP_MARKER_MARGIN_NS`, capped at its `count`. A count of 0 (a `quarantined`
-    file: the rows lost are unknown) is uncapped.
+    Parse one archive-gap marker line into its own `ts_init` span, unwidened, capped at its
+    `count` (0, a `quarantined` file whose lost rows are unknown, is uncapped): the span the
+    nightly rebuild keeps live rows in (`docs/DATA_DICTIONARY.md` section 6).
     """
     entry = _json_object(text, where)
     if set(entry) != _GAP_MARKER_KEYS:
@@ -231,8 +233,16 @@ def parse_gap_marker_line(text: str, where: str) -> TradeWindow:
     first, last = _span(entry, ("from_ns", "to_ns"), where)
     cap = _int(entry, "count", where) or None
     source = f"{ARCHIVE_GAP}:{_str(entry, 'reason', where)}"
-    iid = _str(entry, "instrument_id", where)
-    return TradeWindow(iid, source, max(0, first - GAP_MARKER_MARGIN_NS), last, cap)
+    return TradeWindow(_str(entry, "instrument_id", where), source, first, last, cap)
+
+
+def parse_gap_marker_line(text: str, where: str) -> TradeWindow:
+    """
+    Parse one archive-gap marker line into the venue-time window it explains: its `ts_init` span
+    widened below by `GAP_MARKER_MARGIN_NS`, capped at its `count`.
+    """
+    span = parse_gap_marker_span(text, where)
+    return replace(span, from_ns=max(0, span.from_ns - GAP_MARKER_MARGIN_NS))
 
 
 @dataclass(frozen=True)
@@ -330,14 +340,41 @@ class TradeChannel:
     rest: bool
 
 
+# Aggressor sides as Nautilus's `AggressorSide` enum values, restated (the reference side never
+# imports `nautilus_trader`): the archive's `aggressor_side` column stores exactly these.
+NO_AGGRESSOR = 0
+BUYER = 1
+SELLER = 2
+
+# Each venue's documented side tokens (Bybit `S`/`side`: "Buy"/"Sell"; Hyperliquid `side`: "B"
+# bid/buyer, "A" ask/seller). Any other token -- Bybit's adapter maps "" to NoAggressor -- is
+# NO_AGGRESSOR, kept with its token so the report can show what the wire carried.
+_SIDE_TOKENS: Mapping[str, Mapping[str, int]] = MappingProxyType(
+    {
+        BYBIT: MappingProxyType({"Buy": BUYER, "Sell": SELLER}),
+        HYPERLIQUID: MappingProxyType({"B": BUYER, "A": SELLER}),
+    }
+)
+
+
 @dataclass(frozen=True)
 class ReferenceTrade:
-    """One trade the venue published: its instrument, id, own venue time and source."""
+    """
+    One trade the venue published: its instrument, id, own venue time and source, and its values
+    exactly as the wire's decimal strings (`Decimal`, never `float`). `side` is BUYER / SELLER /
+    NO_AGGRESSOR, `side_token` the wire's own token. `order` is the fold's tie-break within one
+    venue time: `(ts_ns, recv_ns of the line, chronological position in the line)`.
+    """
 
     instrument_id: str
     trade_id: str
     ts_ns: int
     via_rest: bool
+    price: Decimal
+    size: Decimal
+    side: int
+    side_token: str
+    order: tuple[int, ...]
 
 
 def instrument_category(venue: str, instrument_id: str) -> str:
@@ -391,19 +428,53 @@ def _ms_digits(value: str, where: str) -> int:
     return int(value)
 
 
-def _bybit_ws(item: Mapping[str, Any], where: str) -> tuple[str, str, int]:
+@dataclass(frozen=True)
+class _WireTrade:
+    """One trade item as the wire spelled it."""
+
+    wire: str
+    trade_id: str
+    ms: int
+    price: Decimal
+    size: Decimal
+    side_token: str
+
+
+def _digits(text: str) -> bool:
+    return text.isascii() and text.isdigit()
+
+
+def _decimal(item: Mapping[str, Any], key: str, where: str) -> Decimal:
+    """
+    Parse a wire price or size: ASCII digits with an optional fraction, nothing else `Decimal` would
+    also take (exponents, signs, `NaN`, `Infinity`, underscores, whitespace).
+    """
+    value = _field(item, key, str, where)
+    whole, dot, fraction = value.partition(".")
+    if not (_digits(whole) and (not dot or _digits(fraction))):
+        raise MalformedLine(f"{where}: trade field `{key}` {value!r} is not a decimal string")
+    return Decimal(value)
+
+
+def _bybit_ws(item: Mapping[str, Any], where: str) -> _WireTrade:
     symbol, trade_id = _field(item, "s", str, where), _field(item, "i", str, where)
-    return symbol, trade_id, _field(item, "T", int, where)
+    price, size = _decimal(item, "p", where), _decimal(item, "v", where)
+    side = _field(item, "S", str, where)
+    return _WireTrade(symbol, trade_id, _field(item, "T", int, where), price, size, side)
 
 
-def _bybit_rest(item: Mapping[str, Any], where: str) -> tuple[str, str, int]:
+def _bybit_rest(item: Mapping[str, Any], where: str) -> _WireTrade:
     symbol, trade_id = _field(item, "symbol", str, where), _field(item, "execId", str, where)
-    return symbol, trade_id, _ms_digits(_field(item, "time", str, where), where)
+    ms = _ms_digits(_field(item, "time", str, where), where)
+    price, size = _decimal(item, "price", where), _decimal(item, "size", where)
+    return _WireTrade(symbol, trade_id, ms, price, size, _field(item, "side", str, where))
 
 
-def _hyperliquid_ws(item: Mapping[str, Any], where: str) -> tuple[str, str, int]:
+def _hyperliquid_ws(item: Mapping[str, Any], where: str) -> _WireTrade:
     tid = _field(item, "tid", int, where)  # capture archives `str(tid)`
-    return _field(item, "coin", str, where), str(tid), _field(item, "time", int, where)
+    price, size = _decimal(item, "px", where), _decimal(item, "sz", where)
+    coin, ms = _field(item, "coin", str, where), _field(item, "time", int, where)
+    return _WireTrade(coin, str(tid), ms, price, size, _field(item, "side", str, where))
 
 
 def _items(payload: Any, path: tuple[str, ...], where: str) -> list[Any]:
@@ -436,6 +507,23 @@ def _wanted_kind(record: Mapping[str, object], channel: TradeChannel, where: str
     return not channel.rest or (record.get("status") == 200 and "refusal" not in record)
 
 
+def _recv_ns(record: Mapping[str, object], where: str) -> int:
+    value = record.get("recv_ns")
+    if not isinstance(value, int) or isinstance(value, bool):
+        raise MalformedLine(f"{where}: a trade line without an integer `recv_ns`")
+    return value
+
+
+def _parsed(venue: str, channel: TradeChannel, payload: Any, where: str) -> list[_WireTrade]:
+    """Return the line's trades in time order (a Bybit `recent-trade` list is newest first)."""
+    if venue != BYBIT:
+        return [_hyperliquid_ws(item, where) for item in _items(payload, ("data",), where)]
+    if channel.rest:
+        items = _items(payload, ("result", "list"), where)
+        return [_bybit_rest(item, where) for item in reversed(items)]
+    return [_bybit_ws(item, where) for item in _items(payload, ("data",), where)]
+
+
 def reference_trades(
     venue: str,
     channel: TradeChannel,
@@ -453,18 +541,22 @@ def reference_trades(
     where = f"{channel.name} line recv_ns={record.get('recv_ns')}"
     if not _wanted_kind(record, channel, where):
         return []
-    payload = _payload(record, where)
-    if venue != BYBIT:
-        parsed = [_hyperliquid_ws(item, where) for item in _items(payload, ("data",), where)]
-    elif channel.rest:
-        items = _items(payload, ("result", "list"), where)
-        parsed = [_bybit_rest(item, where) for item in items]
-    else:
-        parsed = [_bybit_ws(item, where) for item in _items(payload, ("data",), where)]
+    recv_ns = _recv_ns(record, where)
+    sides = _SIDE_TOKENS[venue]
     return [
-        ReferenceTrade(index[(channel.category, wire)], trade_id, ms * NS_PER_MS, channel.rest)
-        for wire, trade_id, ms in parsed
-        if (channel.category, wire) in index
+        ReferenceTrade(
+            instrument_id=index[(channel.category, trade.wire)],
+            trade_id=trade.trade_id,
+            ts_ns=trade.ms * NS_PER_MS,
+            via_rest=channel.rest,
+            price=trade.price,
+            size=trade.size,
+            side=sides.get(trade.side_token, NO_AGGRESSOR),
+            side_token=trade.side_token,
+            order=(trade.ms * NS_PER_MS, recv_ns, position),
+        )
+        for position, trade in enumerate(_parsed(venue, channel, _payload(record, where), where))
+        if (channel.category, trade.wire) in index
     ]
 
 

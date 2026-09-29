@@ -2004,6 +2004,7 @@ VERIFICATION_ROOTS = frozenset(
         "verification.tools.record_fixtures",
         "verification.tools.cut_snapshot_fixtures",
         "verification.conservation",
+        "verification.trades",
     }
 )
 # The reference signals and their comparison rules (Story 31.3) are written from the dictionary
@@ -2119,6 +2120,7 @@ def test_importing_the_verification_roots_loads_no_denied_module() -> None:
     probe = (
         "import sys, verification.recorder, verification.tools.record_fixtures\n"
         "import verification.conservation, verification.tools.cut_snapshot_fixtures\n"
+        "import verification.trades\n"
         "print('\\n'.join(sorted(sys.modules)))\n"
     )
     env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": str(PLATFORM_DIR)}

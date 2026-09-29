@@ -24,6 +24,7 @@ from collections.abc import Iterable
 from collections.abc import Mapping
 from collections.abc import Sequence
 from datetime import date
+from decimal import Decimal
 from itertools import pairwise
 from pathlib import Path
 from typing import Any
@@ -629,3 +630,35 @@ def test_the_coverage_record_lies_beside_the_resolved_catalog(
     status, report = _run(capsys)
     assert status == 0
     assert report["coverage_file"] == str(tmp_path.resolve() / "coverage" / "bybit.jsonl")
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [
+        ({"p": "8.4e4"}, "`p` '8.4e4' is not a decimal string"),
+        ({"p": 84034.3}, "`p` is 84034.3, not str"),
+        ({"v": "-0.001"}, "`v` '-0.001' is not a decimal string"),
+        ({"S": None}, "`S` is None, not str"),
+    ],
+)
+def test_a_trade_with_a_malformed_price_size_or_side_is_refused(
+    change: dict[str, object], message: str
+) -> None:
+    """Values are the wire's decimal strings, never floats; a trade without a side is refused."""
+    frame = _bybit_frame(_A, _A[1] + 100 * _MS)
+    raw = json.loads(str(frame["raw"]))
+    raw["data"][0] = {k: v for k, v in (raw["data"][0] | change).items() if v is not None}
+    channel = TradeChannel("linear.publicTrade", "linear", rest=False)
+    with pytest.raises(MalformedLine, match=message.replace("(", r"\(")):
+        reference_trades(
+            "BYBIT", channel, frame | {"raw": json.dumps(raw)}, {("linear", "BTCUSDT"): _BTC}
+        )
+
+
+def test_a_wire_trade_keeps_its_exact_decimal_values_side_and_order() -> None:
+    frame = _bybit_frame(_A, _A[1] + 100 * _MS)
+    channel = TradeChannel("linear.publicTrade", "linear", rest=False)
+    (trade,) = reference_trades("BYBIT", channel, frame, {("linear", "BTCUSDT"): _BTC})
+    assert (trade.price, trade.size) == (Decimal("84034.30"), Decimal("0.001"))
+    assert (trade.side, trade.side_token) == (1, "Buy")
+    assert trade.order == (_A[1], _A[1] + 100 * _MS, 0)

@@ -214,10 +214,21 @@ class _Day:
     inputs: Inputs
 
 
-def _channel_trades(channel: TradeChannel, hour: int, day: _Day) -> Iterator[ReferenceTrade]:
+def channel_trades(
+    venue: str,
+    channel: TradeChannel,
+    hour: int,
+    reference: ReferenceRecords,
+    index: Mapping[tuple[str, str], str],
+) -> Iterator[ReferenceTrade]:
+    """
+    Yield the reference trades of the raw files of hours `hour - 1 .. hour + 1`: the store files
+    lines by receive hour, so a trade of venue hour H can be received in either neighbour. The
+    caller keeps the ones whose venue time lies in H.
+    """
     for file_hour in (hour - 1, hour, hour + 1):
-        for record in day.inputs.reference.records(channel.name, file_hour):
-            yield from reference_trades(day.venue, channel, record, day.index)
+        for record in reference.records(channel.name, file_hour):
+            yield from reference_trades(venue, channel, record, index)
 
 
 def _reference_hour(
@@ -226,7 +237,7 @@ def _reference_hour(
     times: dict[str, int] = {}
     ws_ids: set[str] = set()
     for channel in channels:
-        for trade in _channel_trades(channel, hour, day):
+        for trade in channel_trades(day.venue, channel, hour, day.inputs.reference, day.index):
             if trade.instrument_id == instrument_id and trade.ts_ns // NS_PER_HOUR == hour:
                 times.setdefault(trade.trade_id, trade.ts_ns)
                 if not trade.via_rest:
@@ -267,14 +278,14 @@ def hour_label(hour: int) -> str:
     return datetime.fromtimestamp(hour * 3600, UTC).strftime("%Y-%m-%dT%H")
 
 
-def _missing_raw(
-    channels: Iterable[TradeChannel], start_ns: int, reference: ReferenceRecords
+def missing_raw(
+    channels: Iterable[TradeChannel], hours: range, reference: ReferenceRecords
 ) -> tuple[str, ...]:
-    first_hour = start_ns // NS_PER_HOUR
+    """Return `<channel>/<hour>` of every reference channel file of `hours` that does not exist."""
     return tuple(
         f"{channel.name}/{hour_label(hour)}"
         for channel in channels
-        for hour in range(first_hour, first_hour + HOURS_PER_DAY)
+        for hour in hours
         if not reference.exists(channel.name, hour)
     )
 
@@ -316,7 +327,7 @@ def conserve(plan: RecordingPlan, day: date, inputs: Inputs) -> DayReport:
         day=day.isoformat(),
         coverage_file=inputs.coverage.path,
         coverage_present=inputs.coverage.present(),
-        missing_raw_files=_missing_raw(shared.channels, start_ns, inputs.reference),
+        missing_raw_files=missing_raw(shared.channels, day_hours(day), inputs.reference),
         truncated_neighbour_files=inputs.reference.truncated_neighbours(),
         instruments=reports,
     )

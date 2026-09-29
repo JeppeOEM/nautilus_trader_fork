@@ -14,7 +14,8 @@
 # -------------------------------------------------------------------------------------------------
 """
 The verification context's error-ledger sites (DATA-07), the reference recorder's
-(`verification.recorder.*`) and the conservation tool's (`verification.conservation.*`): every
+(`verification.recorder.*`), the conservation tool's (`verification.conservation.*`) and the
+trades tool's (`verification.trades.*`): every
 failure either survives or refuses on is recorded at one of these through
 `observability.error_ledger.record`, never a bare log line.
 
@@ -56,3 +57,7 @@ CRASH = "verification.recorder.crash"
 # The conservation tool refused to run: a missing raw root or catalog, an unreadable plan, a
 # malformed coverage or archive-gap line, a truncated raw file of a closed hour.
 CONSERVATION_REFUSED = "verification.conservation.refused"
+# The trades tool refused to run: a day not closed, a missing raw root or catalog, an unreadable
+# plan, a malformed line, a truncated raw file of a checked hour, an unknown `--stage`; or it
+# crashed on any other exception (the detail says `crashed`; the exception is then re-raised).
+TRADES_REFUSED = "verification.trades.refused"
