@@ -37,9 +37,11 @@ read-back, an I/O error) is ledgered (`normalize_snapshot_schema.error`, one ent
 as it was, and the run goes on to the next (exit 2). A missing catalog is
 `archive.catalog_missing`, exit 1.
 
-Deliberate change (Story 25.1): the rewritten file is zstd-compressed like every other archive
-rewrite (`kernel.parquet_compat`), where this tool used to write pyarrow's snappy default -- the
-bytes differ, the schema and the rows are identical.
+Deliberate change (Story 25.1, Story 30.1): the rewritten file is written with the archive's
+compact settings like every other archive rewrite
+(`archive.infrastructure.compact_parquet.compact_write_options`: zstd 16, delta-packed
+timestamps), where this tool used to write pyarrow's snappy default -- the bytes differ, the
+schema and the rows are identical.
 """
 
 import argparse

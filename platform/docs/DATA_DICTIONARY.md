@@ -1082,9 +1082,11 @@ so the first run is the next slot and targets that slot's yesterday only
 
 **Who writes what, offline (Story 25.1).** Every in-place Parquet rewrite by an archive tool --
 the rebuild, the consolidation's merge, `tools.migrate_open_interest`,
-`tools.normalize_snapshot_schema` -- is `archive.infrastructure.catalog_files.CatalogFiles`: it
-writes `<file>.archive.tmp` (zstd), reads it back, and renames it into place only when its full
-schema (Arrow metadata included) and row count match; a crash leaves only the temp file, which
+`tools.normalize_snapshot_schema`, `tools.recompress` -- is
+`archive.infrastructure.catalog_files.CatalogFiles`: it writes `<file>.archive.tmp` with the
+compact write settings below (Story 30.1; zstd before it), reads it back, and renames it into
+place only when its full schema (Arrow metadata included), its row count and every value in
+order match `[amended 2026-09-29: Story 30.1]`; a crash leaves only the temp file, which
 the next run of any archive tool deletes (with the pre-25.1 `*.rebuild.tmp`,
 `*.consolidate.tmp`, `*.parquet.tmp`). The only offline `ParquetDataCatalog.write_data()` callers
 are `archive.backfill_bars` (venue bars, §1.3) and `archive.repair_catalog` (cleared snapshot
@@ -1117,3 +1119,75 @@ kept (`kept <iid> <day>: marker_failed`; the failure itself is `archive_gaps.wri
 file reaching the current UTC day is never treated as dropped (a torn read of the plan file, which
 control rewrites in place, must not delete a collected coin's history). Every rewrite fsyncs the
 temp file before its rename and the directory after it, and before any source or file removal.
+
+### Write settings (Story 30.1)
+
+Every file archive writes itself -- nightly and intraday consolidation merges, the nightly
+snapshot rebuild, the migration tools, `archive.tools.recompress` -- takes its Parquet write
+options from one function, `archive.infrastructure.compact_parquet.compact_write_options`, the only place they
+are chosen (`platform/CLAUDE.md` DATA-05); `CatalogFiles` is the only caller that writes with them.
+Capture's live minute files keep the encoding of Nautilus's own `write_data` (FORK-01;
+`kernel.parquet_compat` only makes it zstd), as do the files of the two offline `write_data`
+callers above (`archive.backfill_bars`, `archive.repair_catalog`), so a file gets these settings
+when archive merges or rewrites it.
+
+| Setting | Value | Why |
+|---|---|---|
+| compression | zstd, level `COMPACT_ZSTD_LEVEL` = 16 | the most compact level inside the CPU budget (below) |
+| integer timestamp columns (`ts_*`, `*_ns`: `ts_event`, `ts_init`, funding's `next_funding_ns`) | `DELTA_BINARY_PACKED`, dictionary off | consecutive nanosecond stamps differ by about a second: the deltas pack into a few bits, a dictionary of unique 64-bit values only adds a page |
+| every other leaf column | dictionary on, named by its Parquet leaf path (`bid_prices.list.element`, a struct child as `<name>.<child>`) | pyarrow silently leaves a nested column PLAIN when only its top-level name is given; an unknown nesting (map, union) raises instead. Booleans are bit-packed by Parquet whatever is asked |
+| row groups | one per instrument-day, capped at `_MAX_ROW_GROUP_ROWS` = 1,048,576 rows | a bigger day splits, each group with its own statistics |
+| statistics | on | `ts_event`/`ts_init` filter pushdown still prunes row groups |
+
+**Measured** (epic 30, one consolidated Bybit BTC day, zstd level 19), bytes per row from the
+pre-story default zstd write to these settings: second snapshot 96.8 -> 59.2 (-39 %), mark price
+22.3 -> 10.7 (-52 %), index price 21.4 -> 9.4 (-56 %), funding rate 22.4 -> 12.3 (-45 %), trade tick
+19.9 -> 14.1 (-29 %). **Rejected by measurement, not to be reintroduced:** `BYTE_STREAM_SPLIT` on
+the float book columns (+43 %), float32 book columns (no gain after zstd, and lossy), dropping
+`ts_event` (on Bybit/Hyperliquid it is the exchange second, 1.0-5.2 s from `ts_init`, and cannot be
+recovered).
+
+**Level and CPU budget (Story 30.1, synthetic instrument-day: 86,340 snapshot rows, 172,264 trade
+ticks, 86,400 mark prices, each first written as 1,440 minute files through `write_data`).** Pure
+write time of the consolidated day with these options, default zstd level vs 19: trade ticks
+0.025 s vs 0.513 s (20.7x), mark prices 0.004 s vs 0.059 s (14.5x), snapshot 0.164 s vs 1.218 s
+(7.4x). Over the epic's 10x budget, so the level is the smallest one within 2 % of level 19's size
+for every type: 16 (snapshot 8,914,680 B vs 8,793,072 B at 19, +1.4 %, where 15 is +3.1 %; trade
+ticks -0.7 %; mark prices +0.5 %), at 0.848 s / 0.267 s / 0.033 s. The consolidate step on that
+day (`python -m archive.consolidate_catalog --apply`, 4,321 minute files -> 5, separate process
+per run, two runs each): before this story 4.1-4.2 s wall, peak RSS 479-482 MB, 15.6 MB out;
+with it 5.2-5.3 s wall, peak RSS 547-570 MB, 10.3 MB out. Merged-file bytes per row there, before
+-> after: snapshot 131.3 -> 103.3 (-21 %), trade ticks 20.9 -> 9.5 (-55 %), mark prices 15.9 -> 2.5
+(-84 %) -- synthetic values (random book sizes, a regular price walk), so the epic's real-day
+numbers above are the reference for the saving; the time and memory costs are what this measured.
+
+**Verification is value-level.** Before the rename, the temp file is read back and compared with
+the table it was written from: full schema and metadata, row count, and every value in order
+(`ChunkedArray.equals`, one column of one row group at a time so the check never holds a second
+copy of the day -- a whole-table read-back measured +140 MB peak RSS). A mismatch is
+`RewriteVerifyError` ("values changed"): the temp is removed and the original kept. The check is
+what makes a new encoding safe to adopt: a lossy option fails it before anything is replaced. A
+NaN would fail it too (NaN is unequal to itself); no catalog writer stores one (Known limit in
+`catalog_files._read_back_mismatch`).
+
+**Files written before these settings: `python -m archive.tools.recompress`.** Report-only by
+default (no lock, nothing written: per data type the files in scope, their bytes and the bytes
+they would take, measured by an in-memory write, `catalog_files.encoded_size`); `--apply` holds
+the maintenance flock and rewrites each closed-day, not-yet-compact file through
+`CatalogFiles.rewrite`, one file in memory at a time; `--venue V`, `--type T` (repeatable, a
+directory under `data/`) narrow it. A file reaching the current UTC day and an already-compact
+file (its `ts_event` chunk is `DELTA_BINARY_PACKED`, which `write_data` never produces) are
+skipped and counted, so a second run is a no-op. Each ends with one line per type and a total:
+files, MB before -> after, % saved, wall seconds, peak RSS. A file failing on its own, or a leaf
+that cannot be listed or cleaned of its temps, is `recompress.error` (left as it was, the run goes
+on, exit 2); a file gone between the listing and its read (a lock-free report racing a
+consolidation's merge) is counted as vanished, not a failure; a missing catalog or a held lock is
+exit 1. `is_compact` checks the timestamp encoding only, so a later change of the level or the
+dictionary set would not be picked up by a rerun (Known limit in `compact_parquet.is_compact`).
+`bar` leaves are never merged nor recompressed (their file intervals are `backfill_bars`'
+coverage record) and keep Nautilus's encoding. **Known limit:** consolidation merges only a closed day holding more than one file and
+never a midnight-crossing file, so a closed day already one file, or a file crossing midnight,
+keeps Nautilus's encoding until the next recompress run; upgrade path: the `archive` service runs
+recompress over closed days after its nightly consolidation. The VPS run and its before/after
+totals are a deferred operator action (`docs/DEPLOY_CHECKLIST.md`), recorded in
+`docs/DATA_INTEGRITY_AUDIT.md`.

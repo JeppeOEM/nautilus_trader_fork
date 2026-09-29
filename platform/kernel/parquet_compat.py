@@ -30,6 +30,12 @@ written.
 
 Known limit: if a future nautilus_trader version passes `compression=` explicitly, this default
 is silently ignored -- revisit on a version bump (the upgrade path is that passthrough).
+
+Scope: this default is for files Nautilus's own `write_data` writes (capture's minute files,
+`backfill_bars`), whose encoding is not ours to choose (FORK-01). Anything written outside
+`write_data` -- every archive merge and rewrite -- passes explicit options from
+`archive.infrastructure.compact_parquet.compact_write_options` (Story 30.1: zstd 16,
+delta-packed timestamps, dictionary leaves), which win over this default.
 """
 
 import functools

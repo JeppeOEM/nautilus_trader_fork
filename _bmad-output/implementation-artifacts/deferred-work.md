@@ -762,3 +762,7 @@ Discarded by operator: locking/atomic TOML writes; `bot_tui` malformed-message h
 - source_spec: `_bmad-output/implementation-artifacts/spec-27-9-closeout-research-readme-rules-legacy-notebooks-gone.md`
   summary: Delete the `platform/research/BACKTESTING.md` redirect stub in the first story of the next research epic, and re-point any link that still names it at `research/README.md`.
   evidence: Story 27.9 moved the content into `research/README.md` ("Backtesting & Strategy Development") and left a stub for one release that promises this deletion; nothing else tracks the promise.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-30-1-compact-parquet-encoding-for-consolidated-and-rewritten-files.md`
+  summary: `archive.repair_catalog --apply` writes its replacement snapshot files through Nautilus's `write_data` without `kernel.parquet_compat.apply_zstd_default()` ever running in that process, so they land snappy-compressed, contrary to `parquet_compat`'s "the writers make it zstd" contract.
+  evidence: `archive/application/repair.py:148` calls `catalog.write_data([cleared])`; neither `repair.py` nor `archive/repair_catalog.py` imports or calls `apply_zstd_default` (only `capture/infrastructure/parquet_writer.py` and `archive/application/backfill_bars.py` do), and before Story 30.1 the only other call sat inside `CatalogFiles`' rewrite, which the repair path never reaches before its `write_data`. Pre-existing; such a file stays snappy until a consolidation merge or an `archive.tools.recompress --apply` run re-encodes it.

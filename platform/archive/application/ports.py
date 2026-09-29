@@ -120,7 +120,10 @@ class CatalogWriter(Protocol):
     def rewrite(
         self, path: Path, table: pa.Table, mode: RewriteMode = RewriteMode.WHOLE_FILE
     ) -> None:
-        """Replace `path` with `table` (zstd), verified; `path` may not exist yet (`WHOLE_FILE`)."""
+        """
+        Replace `path` with `table` (compact settings), verified; `path` may not exist yet
+        (`WHOLE_FILE`).
+        """
         ...
 
     def stage_rewrite(self, path: Path, table: pa.Table, mode: RewriteMode) -> StagedRewrite:

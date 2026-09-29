@@ -345,7 +345,7 @@ development_status:
   epic-29-retrospective: optional
 
   epic-30: backlog
-  30-1-compact-parquet-encoding-for-consolidated-and-rewritten-files: ready-for-dev
+  30-1-compact-parquet-encoding-for-consolidated-and-rewritten-files: done
   30-2-second-snapshot-book-and-trade-fields-as-exact-integers: ready-for-dev
   epic-30-retrospective: optional
 

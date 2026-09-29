@@ -29,7 +29,8 @@ collector holds no prune loop any more); the one exception is `application.repai
 replaces a wrong row through Nautilus's own `delete_data_range` + `write_data` (a correction,
 not a retention; its Known limit). *One rewriter*: every in-place Parquet rewrite is
 `infrastructure.catalog_files.CatalogFiles.rewrite` (verified temp-then-rename, Arrow metadata
-kept, zstd). *One writer per leaf*: capture writes the current UTC day and archive never changes
+and every value kept, written with `infrastructure.compact_parquet.compact_write_options`, Story
+30.1). *One writer per leaf*: capture writes the current UTC day and archive never changes
 a row of it -- `CatalogFiles` refuses a whole-file write, merge or delete of a file whose `ts_init`
 span reaches it, and lets the rebuild's row-preserving rewrite (`RewriteMode.KEEP_OPEN_DAY_ROWS`)
 touch such a file only when every open-day row comes out identical (`OpenDayWriteError`

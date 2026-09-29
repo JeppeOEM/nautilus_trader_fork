@@ -29,9 +29,9 @@ Usage:
 
 --apply refuses to run without --backup-dir: each source file is copied there (same relative path)
 before anything is touched, and the new file is written through `CatalogFiles.rewrite` (a verified
-temp-then-rename, zstd) and only then is the source removed, so an interrupted run leaves either
-the source or the target, never a torn file. Idempotent: with no old directories left it does
-nothing. A target file that already exists (and is not a finished copy of its source) aborts
+temp-then-rename, compact settings) and only then is the source removed, so an interrupted run
+leaves either the source or the target, never a torn file. Idempotent: with no old directories
+left it does nothing. A target file that already exists (and is not a finished copy of its source) aborts
 before anything is touched (never overwritten). One file in memory at a time (MEM-01). Holds the
 catalog maintenance flock. A file whose span reaches the current UTC day is skipped
 (`migrate_open_interest.open_day`, with the count; exit 2): capture writes that day. A file that
