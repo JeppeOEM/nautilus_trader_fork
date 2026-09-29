@@ -46,7 +46,11 @@ the contexts of both ends:
   from its composition roots and the one venue loader, `capture.infrastructure.config` (Story
   25.4);
 - no class anywhere in `platform/` subclasses `CaptureService` (or its old name `Collector`):
-  venue variance is policy values and composition-root loops (Story 26.2).
+  venue variance is policy values and composition-root loops (Story 26.2);
+- `verification/` (the independent reference side, Story 31.1) never imports the code it checks
+  (`nautilus_pyo3`, `capture`, `candles`, `ranking`, `views`, `kernel.fold`,
+  `kernel.second_snapshot`), no other context imports it, its adapters are imported only by its
+  composition roots, and it holds no module-level mutable runtime state.
 
 One exemption only: `platform/tests` is cross-cutting and may import anything. The DDD migration
 is finished (Story 26.3 deleted its last re-export shims and, with them, every legacy-module map,
@@ -81,6 +85,7 @@ RESEARCH = "research"
 VIEWS = "views"
 DATA_API = "data_api"
 BOT_TUI = "bot_tui"
+VERIFICATION = "verification"
 SCRIPTS = "scripts"  # operator surfaces (AD-D1's `platform/scripts/` row)
 TESTS = "tests"  # `platform/tests`: the cross-cutting guards themselves
 
@@ -100,6 +105,7 @@ CONTEXTS = frozenset(
         VIEWS,
         DATA_API,
         BOT_TUI,
+        VERIFICATION,
         SCRIPTS,
         TESTS,
     }
@@ -823,6 +829,7 @@ KERNEL_MODULES = frozenset(
         "candle_patterns",
         "catalog_files",
         "clocks",
+        "dydx_http",
         "fold",
         "indicators",
         "open_interest",
@@ -1547,10 +1554,14 @@ _BOTS_SANCTIONED_CALLS = _RANKING_SANCTIONED_CALLS | {"Decimal", "field"}
 # Collection control's modules bind only their module logger (its plan and service state live on
 # the instances `build_capture_from_file` makes; its frozen tables are the kernel's sanctioned builders).
 _COLLECTION_CONTROL_SANCTIONED_CALLS = _RANKING_SANCTIONED_CALLS
+# The verification context's modules bind only their module logger too: the recorder's plan,
+# sessions and streams live on the instances its composition root builds (Story 31.1).
+_VERIFICATION_SANCTIONED_CALLS = _RANKING_SANCTIONED_CALLS
 _STATE_RULED_CONTEXTS = {
     RANKING: _RANKING_SANCTIONED_CALLS,
     BOTS: _BOTS_SANCTIONED_CALLS,
     COLLECTION_CONTROL: _COLLECTION_CONTROL_SANCTIONED_CALLS,
+    VERIFICATION: _VERIFICATION_SANCTIONED_CALLS,
 }
 
 
@@ -1884,3 +1895,210 @@ def test_the_channel_scan_resolves_literals_and_module_constants() -> None:
         "<unresolved name>",
         "<unresolved extra>",
     }
+
+
+# --- verification: the reference side never imports the code it checks (Story 31.1) -------------
+
+# DATA-02's "second independent client with zero shared code path": what no non-test
+# `verification` module may import, directly or by module path (`nautilus_pyo3` under any parent).
+# It may import `kernel.venue_http`, `kernel.venues` and `observability`. Its tests may import
+# production code: comparing it with the reference is their job (Story 31.3).
+VERIFICATION_DENIED_MODULES = (
+    CAPTURE,
+    CANDLES,
+    RANKING,
+    VIEWS,
+    "kernel.fold",
+    "kernel.second_snapshot",
+)
+_PYO3 = "nautilus_pyo3"
+# The allowlist behind the denylist: the only in-repo modules outside `verification` a non-test
+# `verification` module may reach, however deep. A new kernel module (`kernel.indicators`, ...) is
+# refused by default: adding one here is a reviewed decision that it is not code the reference
+# side checks.
+VERIFICATION_ALLOWED_MODULES = frozenset(
+    {"kernel", "kernel.venue_http", "kernel.venues", "observability", "observability.error_ledger"}
+)
+# The modules of other contexts allowed to import `verification`: none yet. Story 31.11 reserves
+# the one exception, `archive`'s nightly composition root (its `verify_day` step).
+VERIFICATION_IMPORTERS: frozenset[str] = frozenset()
+# `verification.infrastructure` (the raw store and the aiohttp adapters) is wired only here.
+VERIFICATION_ROOTS = frozenset({"verification.recorder", "verification.tools.record_fixtures"})
+
+
+def _verification_denied(target: str, name: str | None) -> bool:
+    full = f"{target}.{name}" if name else target
+    if _PYO3 in full.split("."):
+        return True
+    return any(
+        full == denied or full.startswith(denied + ".") for denied in VERIFICATION_DENIED_MODULES
+    )
+
+
+def _dynamic_import_literals(path: Path) -> list[tuple[str, int]]:
+    """`import_module("<literal>")` / `__import__("<literal>")` targets, which `ast` imports miss."""
+    return [
+        (node.args[0].value, node.lineno)
+        for node in ast.walk(ast.parse(path.read_text()))
+        if isinstance(node, ast.Call)
+        and _call_name(node) in ("import_module", "__import__")
+        and node.args
+        and isinstance(node.args[0], ast.Constant)
+        and isinstance(node.args[0].value, str)
+    ]
+
+
+def _verification_denied_imports(module: str, path: Path) -> list[str]:
+    static = [
+        f"{module}:{ref.line} -> {ref.target}" + (f".{ref.name}" if ref.name else "")
+        for ref in imports_of(module, path, _KNOWN)
+        if _verification_denied(ref.target, ref.name)
+    ]
+    dynamic = [
+        f"{module}:{line} -> {target} (dynamic)"
+        for target, line in _dynamic_import_literals(path)
+        if _verification_denied(target, None)
+    ]
+    return static + dynamic
+
+
+def _module_parents(module: str) -> list[str]:
+    """`a.b.c` -> `a`, `a.b`, `a.b.c`: importing a module runs every parent package's `__init__`."""
+    parts = module.split(".")
+    return [".".join(parts[:cut]) for cut in range(1, len(parts) + 1)]
+
+
+def _verification_reach(roots: list[str]) -> dict[str, str]:
+    """
+    Every in-repo module the given modules reach through imports, transitively (parent packages
+    included), mapped to the module that first imported it -- what an import of the roots runs.
+    """
+    reached: dict[str, str] = {}
+    pending = [(root, root) for root in roots]
+    while pending:
+        current, via = pending.pop()
+        for name in _module_parents(current):
+            if name in _KNOWN and name not in reached:
+                reached[name] = via
+                for ref in imports_of(name, _MODULES[name], _KNOWN):
+                    target = _in_repo(ref.target)
+                    if target is not None:
+                        pending.append((target, name))
+    return reached
+
+
+def test_verification_never_imports_the_code_it_checks() -> None:
+    """
+    Transitively: nothing any non-test `verification` module imports -- nor anything those import,
+    however deep (`kernel.venue_http` is standard library only for this reason) -- is a denied
+    module or imports `nautilus_pyo3`.
+    """
+    sources = _context_sources(VERIFICATION)
+    assert len(sources) > 10, "the verification context's modules were not found"
+    reached = _verification_reach(sorted(sources))
+    denied_modules = sorted(
+        f"{module} (imported by {via})"
+        for module, via in reached.items()
+        if _verification_denied(module, None)
+    )
+    denied_imports = [
+        entry
+        for module in sorted(reached)
+        for entry in _verification_denied_imports(module, _MODULES[module])
+    ]
+    assert denied_modules == [], "the reference side never reaches the code it checks (DATA-02)"
+    assert denied_imports == [], "the reference side never reaches the code it checks (DATA-02)"
+
+
+def test_verification_reaches_only_its_allowlisted_modules() -> None:
+    reached = _verification_reach(sorted(_context_sources(VERIFICATION)))
+    outside = sorted(
+        f"{module} (imported by {via})"
+        for module, via in reached.items()
+        if module != VERIFICATION
+        and not module.startswith(VERIFICATION + ".")
+        and module not in VERIFICATION_ALLOWED_MODULES
+    )
+    assert outside == [], "extend VERIFICATION_ALLOWED_MODULES only for code it does not check"
+
+
+def test_importing_the_verification_roots_loads_no_denied_module() -> None:
+    """The runtime proof of the static rule above: import the roots and read `sys.modules`."""
+    import os
+    import subprocess
+
+    probe = (
+        "import sys, verification.recorder, verification.tools.record_fixtures\n"
+        "print('\\n'.join(sorted(sys.modules)))\n"
+    )
+    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": str(PLATFORM_DIR)}
+    loaded = subprocess.run(  # noqa: S603 (this interpreter, a fixed snippet)
+        [sys.executable, "-c", probe],
+        cwd=PLATFORM_DIR,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    assert [module for module in loaded if _verification_denied(module, None)] == []
+    assert "nautilus_trader" not in {module.split(".")[0] for module in loaded}
+
+
+def test_the_transitive_rule_follows_an_import_chain() -> None:
+    reached = _verification_reach(["verification.recorder"])
+    assert "kernel.venue_http" in reached
+    assert "kernel.venues" in reached
+    assert "kernel.dydx_http" not in reached
+    assert "capture" not in reached
+    assert _verification_reach(["archive.infrastructure.klines_dydx"])["kernel.dydx_http"] == (
+        "archive.infrastructure.klines_dydx"
+    )
+
+
+def test_the_verification_denylist_catches_each_form(tmp_path: Path) -> None:
+    source = tmp_path / "m.py"
+    source.write_text(
+        "from nautilus_trader.core.nautilus_pyo3 import BybitHttpClient\n"
+        "from nautilus_trader.core import nautilus_pyo3\n"
+        "import nautilus_pyo3\n"
+        "from kernel.fold import fold_trades\n"
+        "from kernel import second_snapshot\n"
+        "from capture.domain.live_book import LiveBook\n"
+        "import candles.domain.fold\n"
+        "from views import chart_series\n"
+        "import importlib\n"
+        "importlib.import_module('ranking.domain.metrics')\n"
+        "from kernel.venue_http import bybit_ws_url\n"
+        "from kernel.venues import venue_of\n"
+        "from observability import error_ledger\n"
+        "from kernel.folding import nothing\n"
+    )
+    lines = sorted(
+        int(entry.split(":")[1].split(" ")[0])
+        for entry in _verification_denied_imports("m", source)
+    )
+    assert lines == [1, 2, 3, 4, 5, 6, 7, 8, 10]
+
+
+def test_no_other_context_imports_verification() -> None:
+    importers = sorted(
+        _site(imp)
+        for imp in _IMPORTS
+        if imp.dst_ctx == VERIFICATION
+        and imp.src_ctx not in (VERIFICATION, TESTS)
+        and imp.src not in VERIFICATION_IMPORTERS
+    )
+    assert importers == [], "no context imports verification (Story 31.11 reserves archive's root)"
+    assert not {edge for edge in GRAPH if edge[1] == VERIFICATION}
+
+
+def test_verification_infrastructure_is_imported_only_by_its_composition_roots() -> None:
+    importers = {
+        imp.src
+        for imp in _IMPORTS
+        if imp.dst.startswith("verification.infrastructure")
+        and not imp.src.startswith("verification.infrastructure")
+        and not _is_test_module(imp.src)
+    }
+    assert importers <= VERIFICATION_ROOTS, sorted(importers - VERIFICATION_ROOTS)
+    assert VERIFICATION_ROOTS <= _KNOWN, "a verification composition root naming no module"

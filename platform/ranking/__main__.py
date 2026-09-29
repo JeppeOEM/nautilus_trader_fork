@@ -28,8 +28,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import redis.asyncio as aioredis
+from kernel.dydx_http import DYDX_NETWORKS
 from kernel.venue_http import BYBIT_URLS
-from kernel.venue_http import DYDX_NETWORKS
 from kernel.venue_http import HYPERLIQUID_URLS
 from observability import error_ledger
 

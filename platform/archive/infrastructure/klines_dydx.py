@@ -21,9 +21,9 @@ import urllib.parse
 from datetime import UTC
 from datetime import datetime
 
-from kernel.venue_http import DYDX_NETWORKS
+from kernel.dydx_http import DYDX_NETWORKS
+from kernel.dydx_http import dydx_indexer_url
 from kernel.venue_http import HttpJson
-from kernel.venue_http import dydx_indexer_url
 from kernel.venue_http import get_request
 from kernel.venue_http import http_json
 

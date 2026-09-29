@@ -621,6 +621,150 @@ Known limit: the Rust clients' reconnect replay of held subscriptions is not pac
 bounded by the plan's size); upgrade path: a pacing hook in the Rust client, outside `platform/`
 (FORK-01). Raw measurement output is not committed; re-run the script to refresh these numbers.
 
+
+### 1.15 Reference recordings (`platform/verification/`, Story 31.1)
+
+Not catalog data: the raw wire record of an **independent** client, the source of truth every
+Epic 31 comparator checks the catalog against (DATA-02's "second independent client with zero
+shared code path"). `python3 -m verification.recorder --venue BYBIT|HYPERLIQUID` (compose
+services `reference_recorder_bybit` / `reference_recorder_hyperliquid` of the verify stack,
+`docker-compose.verify.yml`, `make verify-up`) opens its own aiohttp WebSockets and REST polls and
+never reaches `nautilus_pyo3`, `nautilus_trader` or any capture, candles, ranking or views code,
+directly or transitively: its only platform imports are `kernel.venue_http` (URLs; standard library
+only since Story 31.1 moved the pyo3-derived dYdX URLs to `kernel.dydx_http`), `kernel.venues` (id
+parsing) and `observability` (`platform/tests/test_boundaries.py` checks the transitive import
+closure statically and `sys.modules` after an import). It records the venue's collected set: the collector's own `config.toml` (`BYBIT_COLLECTOR_CONFIG` /
+`HYPERLIQUID_COLLECTOR_CONFIG`; its directory is mounted read-only, so a host-side replacement of
+the file is seen, where the collector's single-file mount needs a restart), `instruments` deduped
+in order minus `exclude`, re-read every 30 s (a change reconnects every endpoint with the new set,
+tagged `plan_changed`; an unreadable file, or one with no `instruments` key -- what a read landing
+mid-save sees, the plan store rewriting the file in place -- keeps the last good set, ledgered; at
+start it refuses start, ledgered `verification.recorder.plan`).
+
+Known limits of the reference itself (each also a `Known limit:` in the code):
+- *Plan skew.* The recorder parses only `environment`, `instruments` and `exclude`, more loosely
+  than the collector's loader (which also refuses unknown keys), and the two re-read the file on
+  independent 30 s phases: after an edit the recorded and collected sets can differ for up to
+  ~60 s, and indefinitely for a file only the collector refuses. The `plan_changed` connection
+  lines and `collector:status` date both sides' changes.
+- *Common mode.* Wire symbols/coins come from `kernel.venues` and URLs from `kernel.venue_http`,
+  shared with the collectors, so a bug there misdirects both sides alike; the REST responses name
+  the symbol actually served, which catches it only partly.
+- *Per-endpoint staleness.* The stale-feed watchdog watches all data channels of a socket
+  together, so one topic that silently stops while its siblings flow is not caught by it (a
+  *refused* subscribe is: Bybit `success: false` and Hyperliquid's `error` channel are ledgered at
+  `verification.recorder.venue_error`); it shows up as a gap to the comparators.
+- *Receive-time skew.* `recv_ns` is when the recorder's one event loop takes the message from
+  aiohttp, so a stall of that loop (the repair of a crash-truncated hour file at its first write,
+  the rotation's accounting and prune, compressing a large REST body) stamps every frame queued
+  behind it with the stall's end: normally microseconds, after a crash up to hundreds of
+  milliseconds once. Comparators treat `recv_ns` as an upper bound, never exact arrival time.
+- *Invalid UTF-8.* aiohttp fails a connection on a text frame that is not UTF-8 (close code 1007)
+  before the recorder sees the bytes; the loss is a `close` line with reason `error` and a
+  `verification.recorder.connection` ledger entry, not a filed frame.
+
+**Files.** `<VERIFY_DATA_DIR>/raw/<venue>/<channel>/<YYYY-MM-DDTHH>.jsonl.zst` (`platform/data/
+verification/` in the verify stack; `<venue>` lower case, the hour the UTC hour of the line's own
+timestamp): zstd-compressed JSON lines, written with `pyarrow`'s zstd codec, one frame per writer
+session per file. Read them with `verification.infrastructure.raw_store.iter_records(path)` (or
+`RawFileReader`), which walks the zstd frames itself: a plain `zstd -d` stops at an unfinished
+frame.
+
+**Line kinds** (one JSON object per line; `raw` holds the frame or body *verbatim* as a JSON
+string, so a malformed frame survives byte for byte; `raw_b64` instead for a binary frame or a
+body that is not UTF-8):
+
+```
+{"kind":"frame","recv_ns":1790676385230129394,"endpoint":"linear","raw":"{\"topic\":\"orderbook.50.BTCUSDT\",...}"}
+{"kind":"rest","sent_ns":...,"recv_ns":...,"endpoint":"linear","request":"/v5/market/orderbook?category=linear&symbol=BTCUSDT&limit=50","status":200,"raw":"..."}
+{"kind":"connection","event":"open","ts_ns":...,"endpoint":"linear","reason":"startup","url":"wss://stream.bybit.com/v5/public/linear","subscriptions":["orderbook.50.BTCUSDT",...]}
+{"kind":"connection","event":"close","ts_ns":...,"endpoint":"linear","reason":"server_closed","detail":"close code 1000"}
+{"kind":"connection","event":"error","ts_ns":...,"endpoint":"linear","reason":"connect_failed","error":"ClientConnectorError(...)"}
+```
+
+- `recv_ns` is the local `time.time_ns()` taken the moment aiohttp hands the message over,
+  before any parsing (see *Receive-time skew* above); a REST line's `sent_ns` is taken before the request, its `recv_ns` once the
+  body is read. A failed REST poll is still a line: with `status` (non-2xx) or `"status": null`
+  and `error` (`"error": "cancelled"` for a poll in flight when the recorder stops or the plan
+  drops it), and a response judged a failure carries `refusal` (`HTTP 500`, `body is not JSON`,
+  `body is JSON null` -- Hyperliquid answers some bad requests with 200 and `null` --,
+  `retCode 10001`, `result.list is empty` -- Bybit's 200 for a symbol it does not list).
+- `connection` lines: `open` (reasons `startup`, `reconnect`, `plan_changed`,
+  `forced_reconnect`), `close` (reasons `server_closed`, `error`, `stale_feed`,
+  `plan_changed`, `shutdown`, `forced_reconnect`, `cancelled` -- a session still stuck after the
+  10 s stop grace --, with `detail`) and `error` (`connect_failed`,
+  `transport_error`, with `error`). Each is written to the venue's `connection` channel **and** to
+  every data channel of its endpoint, so any one channel file shows its own gaps (a
+  `forced_reconnect` requested while no connection is up -- mid-connect or in backoff -- ends
+  that one backoff (a venue still down is then retried with backoff again, never in a tight
+  loop) and tags the next `open`; one that loses the race to a real close (`stale_feed`,
+  `server_closed`) keeps the normal backoff and tags the next `open`; neither is dropped; `detail` of a server close is the close frame's own
+  code and reason): frames between
+  a `close` and the next `open` were never received, a recorder gap, never a collector gap.
+
+**Channels** (`verification/domain/subscriptions.py`):
+
+| Venue | Endpoint (socket) | Subscribed | Channels |
+|---|---|---|---|
+| Bybit | `linear` (`wss://stream.bybit.com/v5/public/linear`) | `orderbook.50.S`, `publicTrade.S`, `tickers.S` per symbol, subscribe args chunked to 10 | `linear.orderbook.50`, `linear.publicTrade`, `linear.tickers`, `linear.control` (subscribe and ping replies) |
+| Bybit | `spot` (`.../v5/public/spot`) | `orderbook.50.S`, `publicTrade.S` (no ticker, as capture) | `spot.orderbook.50`, `spot.publicTrade`, `spot.control` |
+| Hyperliquid | `ws` (`wss://api.hyperliquid.xyz/ws`) | `l2Book`, `trades`, `activeAssetCtx` per coin | `l2Book`, `trades`, `activeAssetCtx`, `control` (`subscriptionResponse`, `pong`, `error`) |
+| both | | | `connection`; `unparsed` (not JSON, ledgered); `unknown` (JSON no table names, ledgered) |
+
+REST polls (URLs from `kernel.venue_http`; each poll runs on its own fixed schedule in its own
+task, so a slow one delays no other): Bybit `instruments-info?category=C&symbol=S`,
+`open-interest?category=linear&symbol=S&intervalTime=5min&limit=1` and
+`tickers?category=linear&symbol=S` (both linear only) and `recent-trade?category=C&symbol=S&limit=L`
+every 30 s, `orderbook?category=C&symbol=S&limit=50` every 60 s, per instrument, into
+`<category>.rest.<name>`. **The collector's open interest comes from `tickers`**, not from
+`open-interest`: `capture/venues/bybit/open_interest.py` polls `GET /v5/market/tickers?category=linear`
+(every linear symbol in one response) and reads each row's `openInterest`; the recorder polls the
+same endpoint per symbol (the same row; the category-wide list would add ~300 MB/day), and the
+`open-interest` history endpoint is the venue's second, independent view. `recent-trade`'s `L` is
+the venue maximum per category, linear 1000 and spot 60: a sample of the latest trades for
+spot-checking ids and prices, never a completeness oracle (more than `L` trades can print between
+two polls; the WS `publicTrade` stream is the complete record); Hyperliquid `POST info`
+`{"type":"metaAndAssetCtxs"}` every 30 s and `{"type":"l2Book","coin":C}` every 60 s per coin,
+into `rest.metaAndAssetCtxs` / `rest.l2Book`. A Bybit 200 with `retCode` other than 0, or with an
+empty `result.list`, counts as a failed poll (ledgered); the line is written either way.
+
+**Keepalive and reconnect.** Bybit `{"op":"ping"}` every 20 s, Hyperliquid `{"method":"ping"}`
+every 30 s. 30 s without a *data* frame on every data channel of an endpoint (a ping reply does
+not count) forces a reconnect (`stale_feed`). Reconnects back off 1 s doubling to 60 s (it doubles
+only after a pause actually waited), reset once a connection has stayed up 60 s.
+
+**Flush and crash semantics.** Every open stream is flushed once a second, so a process crash
+loses at most about a second of lines. The reader recovers every flushed line of an unfinished
+last frame and reports the file as truncated (`iter_records` raises `TruncatedTail` after the
+complete lines unless `allow_truncated=True`, which a reader of the hour still being written
+passes). On reopen after a crash the writer first rewrites the file with only its complete lines
+(temp file + `os.replace`, ledgered `verification.recorder.truncated_tail`), then appends a new
+frame. At start the writer also repairs each channel's two newest files (the only ones a crash
+can have left open: the hour then current and a late stream's), so an hour that ended while the
+recorder was down is not left truncated. A tail of zero bytes after the last whole frame (a power
+loss that saved the file's size but not its data) is repaired the same way. A file whose bytes
+cannot be decoded is renamed aside as `<file>.corrupt-<ns>` (ledgered
+`verification.recorder.corrupt_file`) and a fresh file started, so one damaged file never blocks
+its channel; a file that merely cannot be opened now (`EACCES`, `EMFILE`, `EIO`) is left as it is
+and the line ledgered as lost (`write`). After a failed open or write, that (channel, hour) is
+retried at the next once-a-second flush, not per line, and the lines lost meanwhile are counted
+in one `write` entry. A line stamped in an hour already rotated away (a late REST response) goes to one
+late stream per (channel, hour), closed at the next once-a-second flush. A clean stop (SIGTERM)
+closes every connection (`shutdown` lines) and finishes every frame; compose gives the recorders a
+45 s `stop_grace_period` (Docker's default 10 s is shorter than a stop can take).
+Known limit: lines are flushed, not `fsync`ed, so a host power loss can lose more than a second.
+
+**Rotation and retention.** At start and at each UTC hour the old hour's streams are closed, the
+venue's bytes per UTC day are logged, and files of days before the last `VERIFY_RETAIN_DAYS`
+(default 7, today included, 1 to 36500) are deleted -- repair leftovers (`*.repair.tmp`) and
+set-aside `*.corrupt-*` files included, which the byte counts include too. Pruning at start means a
+recorder that keeps restarting still prunes. Measured footprint: `docs/VERIFICATION_REPORT.md`.
+
+**Failures** go to the durable ledger (`data/errors/reference_recorder_<venue>.jsonl`) at the
+`verification.recorder.*` sites of `verification/application/sites.py`: `connect`,
+`connection`, `stale_feed`, `unparsed`, `unknown_frame`, `venue_error`, `rest`, `plan`,
+`truncated_tail`, `corrupt_file`, `write`, `accounting`, `prune`, `crash`.
+
 ---
 
 ## 2. Computed signals / ML features (`platform/kernel/`, `platform/views/`, `platform/ranking/`)

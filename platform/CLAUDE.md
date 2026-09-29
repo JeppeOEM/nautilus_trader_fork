@@ -3,7 +3,7 @@
 These rules govern all code under `platform/`: the contexts (`capture/` with its venue packages
 `capture/venues/{dydx,bybit,hyperliquid}/` -- Story 26.2; the migration's last re-export shims
 were deleted in Story 26.3 --, `kernel/`,
-`observability/`, `candles/`, `archive/`, `views/`, `alerting/`, `research/`, `ranking/`, `bots/`, `collection_control/`), `data_api/` +
+`observability/`, `candles/`, `archive/`, `views/`, `alerting/`, `research/`, `ranking/`, `bots/`, `collection_control/`, `verification/` -- the independent reference side of Epic 31, which never imports the code it checks, Story 31.1), `data_api/` +
 `frontend/` and `bot_tui/`.
 `nautilus_trader` is consumed as a library only — never as a live runtime — in all of
 them. **Exception:** `platform/bots/` (the bots context, `python3 -m bots`; its own context

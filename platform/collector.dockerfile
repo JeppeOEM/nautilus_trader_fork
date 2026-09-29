@@ -29,6 +29,8 @@ COPY platform/research ./research
 COPY platform/ranking ./ranking
 COPY platform/bot_tui ./bot_tui
 COPY platform/data_api ./data_api
+# The independent reference recorders of the verify stack (Story 31.1, docker-compose.verify.yml).
+COPY platform/verification ./verification
 COPY platform/tests ./tests
 
 CMD ["python3", "-m", "capture.venues.dydx"]

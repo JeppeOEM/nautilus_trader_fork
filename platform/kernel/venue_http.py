@@ -16,7 +16,8 @@
 The venue REST transport (DDD spine AD-D3): the venue URL maps, the default `USER_AGENT`, the
 timeout, the stdlib JSON transport and the request builders every venue REST request is built
 with -- the collectors' polls, the reconnect trade backfill (`trade_backfill`, story 22.14) and
-the kline reconciliation (`compare_klines`, story 22.13).
+the kline reconciliation (`compare_klines`, story 22.13) -- plus the venues' public WebSocket URLs
+(`bybit_ws_url`, `hyperliquid_ws_url`, Story 31.1: the verification context's reference recorder).
 
 Invariant: one place holds every venue REST URL, so two contexts can never send the same
 request to two different hosts or with two different encodings; a literal venue URL outside
@@ -25,7 +26,10 @@ in Story 25.2). Every built request is `https` -- the builders take a `url: str`
 visible literal, so the scheme each `# noqa: S310` asserts is checked here instead.
 
 Stdlib `urllib` only: no extra dependency, and the pyo3 HTTP clients parse decimals through
-`f64` (audit D-52), which cannot prove raw-unit equality.
+`f64` (audit D-52), which cannot prove raw-unit equality. This module imports nothing outside the
+standard library -- not even `nautilus_trader` -- so the verification context's independent
+reference recorder can build its URLs here without reaching `nautilus_pyo3` (Story 31.1); the
+dYdX indexer's URLs, which come from the pyo3 bindings, live in `kernel.dydx_http`.
 """
 
 import json
@@ -33,9 +37,6 @@ import urllib.request
 from collections.abc import Callable
 from types import MappingProxyType
 from typing import Any
-
-from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
-from nautilus_trader.core.nautilus_pyo3 import get_dydx_http_url  # type: ignore[attr-defined]
 
 
 BYBIT_URLS = MappingProxyType(
@@ -47,7 +48,21 @@ HYPERLIQUID_URLS = MappingProxyType(
         "testnet": "https://api.hyperliquid-testnet.xyz/info",
     }
 )
-DYDX_NETWORKS = MappingProxyType({"mainnet": DydxNetwork.MAINNET, "testnet": DydxNetwork.TESTNET})
+# Public market-data WebSockets (Story 31.1). Bybit serves one socket per product category
+# (`/v5/public/linear`, `/v5/public/spot`, ...); Hyperliquid one socket for everything.
+BYBIT_WS_URLS = MappingProxyType(
+    {
+        "mainnet": "wss://stream.bybit.com/v5/public",
+        "testnet": "wss://stream-testnet.bybit.com/v5/public",
+    }
+)
+BYBIT_WS_CATEGORIES = frozenset({"linear", "inverse", "spot"})
+HYPERLIQUID_WS_URLS = MappingProxyType(
+    {
+        "mainnet": "wss://api.hyperliquid.xyz/ws",
+        "testnet": "wss://api.hyperliquid-testnet.xyz/ws",
+    }
+)
 USER_AGENT = "nautilus-platform-reconcile/1.0"  # dYdX's indexer rejects urllib's default (403)
 # Bounds each socket operation (connect, each read), not a whole response.
 TIMEOUT_S = 30
@@ -84,8 +99,11 @@ def post_json_request(
     )
 
 
-def _rooted(path_and_query: str) -> str:
-    """Return the path, refusing one without a leading `/` (bare, `v5/...` names another host)."""
+def rooted_path(path_and_query: str) -> str:
+    """
+    Return the path, refusing one without a leading `/` (bare, `v5/...` names another host).
+    Shared with `kernel.dydx_http`, so every venue URL builder applies the one rule.
+    """
     if not path_and_query.startswith("/"):
         raise ValueError(f"venue path must start with '/': {path_and_query!r}")
     return path_and_query
@@ -93,7 +111,7 @@ def _rooted(path_and_query: str) -> str:
 
 def bybit_url(environment: str, path_and_query: str) -> str:
     """Return `https://api.bybit.com` (or testnet) + `path_and_query` (`/v5/...`)."""
-    return f"{BYBIT_URLS[environment]}{_rooted(path_and_query)}"
+    return f"{BYBIT_URLS[environment]}{rooted_path(path_and_query)}"
 
 
 def hyperliquid_info_url(environment: str) -> str:
@@ -101,6 +119,22 @@ def hyperliquid_info_url(environment: str) -> str:
     return HYPERLIQUID_URLS[environment]
 
 
-def dydx_indexer_url(network: DydxNetwork, path_and_query: str) -> str:
-    """Return the dYdX indexer's base for `network` + `path_and_query` (`/v4/...`)."""
-    return f"{get_dydx_http_url(network)}{_rooted(path_and_query)}"
+def _ws_base(urls: MappingProxyType[str, str], environment: str) -> str:
+    """Return the environment's WebSocket base, refusing an unknown environment by name."""
+    if environment not in urls:
+        raise ValueError(f"unknown environment {environment!r}; expected one of {sorted(urls)}")
+    return urls[environment]
+
+
+def bybit_ws_url(environment: str, category: str) -> str:
+    """Return Bybit's public WebSocket for `category` (`linear`/`inverse`/`spot`)."""
+    if category not in BYBIT_WS_CATEGORIES:
+        raise ValueError(
+            f"unknown Bybit WS category {category!r}; expected one of {sorted(BYBIT_WS_CATEGORIES)}"
+        )
+    return f"{_ws_base(BYBIT_WS_URLS, environment)}/{category}"
+
+
+def hyperliquid_ws_url(environment: str) -> str:
+    """Return Hyperliquid's one public WebSocket for the environment."""
+    return _ws_base(HYPERLIQUID_WS_URLS, environment)

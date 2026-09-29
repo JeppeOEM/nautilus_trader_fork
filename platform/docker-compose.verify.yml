@@ -1,0 +1,147 @@
+# The verification stack (Epic 31, Story 31.1): a clean-slate capture next to the live one, plus
+# the two independent reference recorders (`python3 -m verification.recorder`). An override of
+# docker-compose.yml -- the base file is unchanged -- always run as its own compose project:
+#
+#   docker compose -p verify -f docker-compose.yml -f docker-compose.verify.yml ...
+#
+# through `make verify-up` / `verify-down` / `verify-wipe`, which also pass REDIS_PORT,
+# DATA_API_PORT and DOZZLE_PORT explicitly (the Makefile exports the live stack's 6379/9100/8080,
+# which would otherwise win over the defaults below). Every service gets a `verify-` container
+# name and every port its own default (redis 26379, data_api 29100, dozzle 28080), so the stack
+# never collides with a live `platform` project's hard-coded `dydx-redis`/`dydx-data-api`/...
+# containers or its ports. The dYdX `collector` stays behind its `dydx` profile and is never
+# started here (`make verify-up` names its services). The stack reads and writes this checkout's
+# ./data only. tests/test_compose_verify.py pins all of this against the base file.
+
+# YAML anchors do not cross files, so the base's logging policy is restated here; the test holds
+# the two equal.
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "20m"
+    max-file: "20"
+
+services:
+  redis:
+    container_name: verify-redis
+    ports: !override
+      - "127.0.0.1:${REDIS_PORT:-26379}:6379"
+
+  collector:
+    container_name: verify-dydx-collector
+    environment:
+      REDIS_URL: "redis://127.0.0.1:${REDIS_PORT:-26379}"
+
+  bybit_collector:
+    container_name: verify-bybit-collector
+    environment:
+      REDIS_URL: "redis://127.0.0.1:${REDIS_PORT:-26379}"
+
+  hyperliquid_collector:
+    container_name: verify-hyperliquid-collector
+    environment:
+      REDIS_URL: "redis://127.0.0.1:${REDIS_PORT:-26379}"
+
+  archive:
+    container_name: verify-archive
+    environment:
+      REDIS_URL: "redis://127.0.0.1:${REDIS_PORT:-26379}"
+      # Never the live off-site target: `rclone sync` of this clean-slate catalog would delete the
+      # live backup's files. Blank, so `backup_enabled = true` here refuses start (loud), never syncs.
+      RCLONE_REMOTE: ""
+      RCLONE_BUCKET: ""
+
+  ranking_engine:
+    container_name: verify-ranking-engine
+    environment:
+      REDIS_URL: "redis://127.0.0.1:${REDIS_PORT:-26379}"
+
+  data_api:
+    container_name: verify-data-api
+    command: uvicorn data_api.app:app --host 127.0.0.1 --port ${DATA_API_PORT:-29100}
+    environment:
+      REDIS_URL: "redis://127.0.0.1:${REDIS_PORT:-26379}"
+
+  bot_tui:
+    container_name: verify-bot-tui
+    environment:
+      REDIS_URL: "redis://127.0.0.1:${REDIS_PORT:-26379}"
+      DASHBOARD_BASE_URL: "http://127.0.0.1:${DATA_API_PORT:-29100}"
+
+  live-paper:
+    container_name: verify-live-paper
+    environment:
+      REDIS_URL: "redis://127.0.0.1:${REDIS_PORT:-26379}"
+
+  dozzle:
+    container_name: verify-dozzle
+    ports: !override
+      - "127.0.0.1:${DOZZLE_PORT:-28080}:8080"
+
+  # The independent reference recorders: the collector image (it copies verification/), host
+  # networking like the collectors, and a uid of its own -- 1001, in the collectors' group 1000 --
+  # so Story 31.10 can cut the collectors' venue connections by uid without cutting these. The
+  # process sets umask 002 and `make verify-up` makes data/verification and data/errors
+  # group-writable, so the host user (and `make verify-wipe`) can delete what they write. The
+  # venue config is the collector's own file, read-only: the recorded set is the collected set.
+  # Its directory is mounted, not the file: a single-file bind mount keeps the old inode after a
+  # host-side replacement (`git pull`, `sed -i`, a save by rename) and would read it forever. The
+  # collector's own mount is single-file (collection_control's plan store writes the file in
+  # place, which a directory mount would equally allow, but the base file is left unchanged), so
+  # after a replacement `docker compose restart` the collector, as its plan store documents; the
+  # recorder already follows the new file.
+  reference_recorder_bybit:
+    container_name: verify-reference-recorder-bybit
+    build:
+      context: ..
+      dockerfile: platform/collector.dockerfile
+      network: host
+    command: python3 -m verification.recorder --venue BYBIT
+    environment:
+      PYTHONUNBUFFERED: "1"
+      VERIFY_DATA_DIR: "/app/verify_data"
+      VERIFY_RETAIN_DAYS: "${VERIFY_RETAIN_DAYS:-7}"
+      BYBIT_COLLECTOR_CONFIG: "/app/bybit_venue/config.toml"
+      ERROR_LEDGER_DIR: "/app/errors_dir"
+      ERROR_LEDGER_SERVICE: "reference_recorder_bybit"
+    user: "1001:1000"
+    volumes:
+      - ./data/verification:/app/verify_data
+      - ./data/errors:/app/errors_dir
+      - ./capture/venues/bybit:/app/bybit_venue:ro
+    network_mode: host
+    restart: always
+    # Docker's default 10 s before SIGKILL is shorter than a clean stop can take: closing each
+    # socket (up to 5 s) then waiting up to 10 s for every session, a connect attempt in flight
+    # (up to 15 s) cancelled at that bound. A SIGKILL mid-way leaves unfinished zstd frames the
+    # next start must repair. tests/test_compose_verify.py holds this above that sum.
+    stop_grace_period: 45s
+    logging: *default-logging
+
+  reference_recorder_hyperliquid:
+    container_name: verify-reference-recorder-hyperliquid
+    build:
+      context: ..
+      dockerfile: platform/collector.dockerfile
+      network: host
+    command: python3 -m verification.recorder --venue HYPERLIQUID
+    environment:
+      PYTHONUNBUFFERED: "1"
+      VERIFY_DATA_DIR: "/app/verify_data"
+      VERIFY_RETAIN_DAYS: "${VERIFY_RETAIN_DAYS:-7}"
+      HYPERLIQUID_COLLECTOR_CONFIG: "/app/hyperliquid_venue/config.toml"
+      ERROR_LEDGER_DIR: "/app/errors_dir"
+      ERROR_LEDGER_SERVICE: "reference_recorder_hyperliquid"
+    user: "1001:1000"
+    volumes:
+      - ./data/verification:/app/verify_data
+      - ./data/errors:/app/errors_dir
+      - ./capture/venues/hyperliquid:/app/hyperliquid_venue:ro
+    network_mode: host
+    restart: always
+    # Docker's default 10 s before SIGKILL is shorter than a clean stop can take: closing each
+    # socket (up to 5 s) then waiting up to 10 s for every session, a connect attempt in flight
+    # (up to 15 s) cancelled at that bound. A SIGKILL mid-way leaves unfinished zstd frames the
+    # next start must repair. tests/test_compose_verify.py holds this above that sum.
+    stop_grace_period: 45s
+    logging: *default-logging

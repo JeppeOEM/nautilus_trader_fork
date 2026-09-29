@@ -3,7 +3,7 @@ PLATFORM_DIR  := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 COMPOSE    := docker compose -f $(PLATFORM_DIR)docker-compose.yml
 BASE_IMAGE := nautilus-trader-base:1.229.0
 
-.PHONY: nightly consolidate backup-catalog build-candles prune prune-dry build-base build-base-vps up redeploy redeploy-all redeploy-no-paper up-live-paper up-dydx down-dydx build-insecure test test-live-paper bots-churn-check notebooks down logs logs-dash web enable-boot enable-firewall harden-ssh frontend-dev frontend-remote
+.PHONY: verify-up verify-down verify-wipe nightly consolidate backup-catalog build-candles prune prune-dry build-base build-base-vps up redeploy redeploy-all redeploy-no-paper up-live-paper up-dydx down-dydx build-insecure test test-live-paper bots-churn-check notebooks down logs logs-dash web enable-boot enable-firewall harden-ssh frontend-dev frontend-remote
 
 # Personal, gitignored overrides (see .env-example for the documented default).
 -include $(PLATFORM_DIR).env
@@ -189,7 +189,82 @@ build-insecure:
 TEST_SOURCE_MOUNT := -v $(REPO_ROOT):/src:ro -e PLATFORM_SOURCE_DIR=/src/platform
 test:
 	$(COMPOSE) run --rm --no-deps -e HOME=/tmp -e USER=collector $(TEST_SOURCE_MOUNT) collector \
-		python3 -m pytest archive/tests research/tests alerting/tests views/tests candles/tests capture/tests capture/venues/dydx/tests capture/venues/bybit/tests capture/venues/hyperliquid/tests collection_control/tests ranking/tests bot_tui/tests data_api/tests observability/tests kernel/tests tests -q
+		python3 -m pytest archive/tests research/tests alerting/tests views/tests candles/tests capture/tests capture/venues/dydx/tests capture/venues/bybit/tests capture/venues/hyperliquid/tests collection_control/tests ranking/tests bot_tui/tests data_api/tests observability/tests kernel/tests verification/tests tests -q
+
+## The verification stack (Epic 31, Story 31.1): a clean-slate capture of this checkout's data/
+## side by side with a live stack -- the Bybit and Hyperliquid collectors, archive, ranking_engine,
+## data_api, redis and dozzle, plus the two independent reference recorders
+## (`python3 -m verification.recorder`), as compose project `verify` with `verify-*` container
+## names on their own ports (docker-compose.verify.yml; redis 26379, data_api 29100, dozzle
+## 28080, all 127.0.0.1). The ports are passed explicitly because this Makefile exports the live
+## stack's REDIS_PORT/DATA_API_PORT/DOZZLE_PORT. The dYdX `collector` is never started here.
+## `verify-up` first creates every bind-mounted data/ directory as the invoking user (dockerd would
+## create a missing one root-owned) and makes data/verification and data/errors group-writable:
+## the recorders run as uid 1001 in the collectors' group 1000, so it refuses to run for a host
+## user whose primary group is not 1000 (the directories would not be writable by the recorders).
+## It refuses to start while a running container of another compose project bind-mounts this
+## checkout's data/, or while a `verify` project started from another checkout runs (one project
+## name per host: `up`/`down` here would recreate or remove that checkout's stack). It marks this
+## data/ as a verify stack's (`data/.verify-stack`), which `verify-wipe` requires, and refuses a
+## data/ holding anything but the three toml files that is not marked yet (a live checkout's).
+VERIFY_REDIS_PORT ?= 26379
+VERIFY_DATA_API_PORT ?= 29100
+VERIFY_DOZZLE_PORT ?= 28080
+VERIFY_COMPOSE := REDIS_PORT=$(VERIFY_REDIS_PORT) DATA_API_PORT=$(VERIFY_DATA_API_PORT) DOZZLE_PORT=$(VERIFY_DOZZLE_PORT) docker compose -p verify -f $(PLATFORM_DIR)docker-compose.yml -f $(PLATFORM_DIR)docker-compose.verify.yml
+VERIFY_SERVICES := redis bybit_collector hyperliquid_collector archive ranking_engine data_api dozzle reference_recorder_bybit reference_recorder_hyperliquid
+VERIFY_DATA_DIRS := catalog candles errors metrics archive verification
+# `verify-up` marks the data/ it starts on; `verify-wipe` deletes only a marked data/, so a
+# `make verify-wipe` typed in the live checkout (its stack stopped) never deletes live data.
+VERIFY_MARKER := .verify-stack
+# What `verify-wipe` never deletes: the operator's hand-kept preference and plan files, and the mark.
+VERIFY_KEEP := ! -name dydx_config.toml ! -name chart_indicators.toml ! -name screener_columns.toml ! -name $(VERIFY_MARKER)
+# Every guard below reads `docker ps`, whose failure (daemon down, socket permission) prints
+# nothing -- the same as "no container": each verify target checks the daemon answers first.
+VERIFY_DOCKER_UP = docker ps -q >/dev/null || { echo "$@: the docker daemon does not answer; refusing to guess what runs" >&2; exit 1; }
+# This checkout's platform dir as given and with its symlinks resolved: compose labels a project
+# with the path it was given, a bind mount may carry either, so every guard matches both.
+VERIFY_HERE = $(patsubst %/,%,$(PLATFORM_DIR))
+# The checkouts other than this one whose `verify` project has running containers.
+VERIFY_OTHER_CHECKOUTS = docker ps --filter label=com.docker.compose.project=verify --format '{{.Label "com.docker.compose.project.working_dir"}}' | sort -u | grep -vxF -e "$$(realpath $(VERIFY_HERE))" -e "$(VERIFY_HERE)"
+# Running containers that bind-mount this checkout's data/, anything under it or any directory
+# above it (a mount of platform/ or of the repo reaches data/ too), one "<container> <compose
+# project>" per line: a stack of another project writing the same files would corrupt a
+# clean-slate soak, and a wipe under any running writer would delete live files.
+VERIFY_DATA_USERS = for id in $$(docker ps -q); do docker inspect -f '{{.Name}} {{with index .Config.Labels "com.docker.compose.project"}}{{.}}{{else}}-{{end}} {{range .Mounts}}{{.Source}} {{end}}' $$id; done | awk -v real="$$(realpath $(VERIFY_HERE)/data)" -v given="$(VERIFY_HERE)/data" 'function hit(m, d) { return m == d || index(m, d "/") == 1 || index(d, m "/") == 1 } { for (i = 3; i <= NF; i++) if (hit($$i, real) || hit($$i, given)) { print $$1, $$2; break } }'
+# What of data/ is not kept by a wipe: non-empty on a data/ `verify-up` never marked means a live
+# checkout's data, which `verify-up` must never mark (a later wipe would delete it).
+VERIFY_UNMARKED_DATA = [ ! -e $(PLATFORM_DIR)data/$(VERIFY_MARKER) ] && [ -d $(PLATFORM_DIR)data ] && cd $(PLATFORM_DIR)data && find . -mindepth 1 -maxdepth 1 $(VERIFY_KEEP) -print
+verify-up:
+	@$(VERIFY_DOCKER_UP)
+	@unmarked="$$($(VERIFY_UNMARKED_DATA))"; if [ -n "$$unmarked" ]; then echo "verify-up: data/ holds data no verify-up started (no data/$(VERIFY_MARKER)): $$unmarked -- a verify stack starts from an empty data/ in its own checkout" >&2; exit 1; fi
+	@if [ "$$(id -g)" != 1000 ]; then echo "verify-up: the recorders write as group 1000, but your primary group is $$(id -g)" >&2; exit 1; fi
+	@users="$$($(VERIFY_DATA_USERS) | awk '$$2 != "verify"')"; if [ -n "$$users" ]; then echo "verify-up: containers of another project use this checkout's data/: $$users" >&2; exit 1; fi
+	@others="$$($(VERIFY_OTHER_CHECKOUTS))"; if [ -n "$$others" ]; then echo "verify-up: a verify stack of another checkout runs: $$others" >&2; exit 1; fi
+	mkdir -p $(RCLONE_CONFIG_DIR)
+	cd $(PLATFORM_DIR)data && mkdir -p $(VERIFY_DATA_DIRS)
+	chmod g+w $(PLATFORM_DIR)data/verification $(PLATFORM_DIR)data/errors
+	touch $(PLATFORM_DIR)data/$(VERIFY_MARKER)
+	$(VERIFY_COMPOSE) up -d --build $(VERIFY_SERVICES)
+	@echo "verify stack: data_api http://127.0.0.1:$(VERIFY_DATA_API_PORT), dozzle http://127.0.0.1:$(VERIFY_DOZZLE_PORT)"
+
+## Stop and remove the verify stack's containers (its data/ is kept; `verify-wipe` deletes it).
+## Refuses while the running `verify` project is another checkout's.
+verify-down:
+	@$(VERIFY_DOCKER_UP)
+	@others="$$($(VERIFY_OTHER_CHECKOUTS))"; if [ -n "$$others" ]; then echo "verify-down: the running verify stack is another checkout's: $$others" >&2; exit 1; fi
+	$(VERIFY_COMPOSE) down
+
+## Delete this checkout's data/ for a clean-slate soak, keeping only its three toml files. Refuses on
+## a data/ `verify-up` never marked (a live checkout's), while any container of the `verify` project
+## runs (`make verify-down` first) or any running container of any project bind-mounts this data/,
+## and lists every entry it deletes before deleting it.
+verify-wipe:
+	@$(VERIFY_DOCKER_UP)
+	@if [ ! -e $(PLATFORM_DIR)data/$(VERIFY_MARKER) ]; then echo "verify-wipe: this data/ was never started by make verify-up (no data/$(VERIFY_MARKER)); refusing to delete what may be live data" >&2; exit 1; fi
+	@if [ -n "$$(docker ps -q --filter label=com.docker.compose.project=verify)" ]; then echo "verify-wipe: the verify stack is running; run make verify-down first" >&2; exit 1; fi
+	@users="$$($(VERIFY_DATA_USERS))"; if [ -n "$$users" ]; then echo "verify-wipe: running containers use this checkout's data/: $$users" >&2; exit 1; fi
+	@echo "verify-wipe deletes:"; cd $(PLATFORM_DIR)data && find . -mindepth 1 -maxdepth 1 $(VERIFY_KEEP) -print
+	cd $(PLATFORM_DIR)data && find . -mindepth 1 -maxdepth 1 $(VERIFY_KEEP) -exec rm -rf {} +
 
 ## Sync every numbered research notebook pair (Story 27.2): `research/notebooks/<nn>_<name>.py`
 ## (jupytext percent format, the source of truth) <-> its output-free `.ipynb`, whichever was edited
