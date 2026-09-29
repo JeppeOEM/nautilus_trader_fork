@@ -17,15 +17,20 @@
 
 The only module in `archive/` that calls `pq.write_table`, `os.replace` or removes a file or a
 directory (`platform/archive/tests/test_one_deleter_one_rewriter.py` asserts it). Every rewrite is
-temp-then-rename: `<file>.archive.tmp` is written with zstd (`kernel.parquet_compat`), read back,
-and renamed over the file only when its full schema -- Arrow metadata included, e.g.
-`price_precision` (`same_schema`) -- and its row count equal the table's; otherwise the temp is deleted and the
-original stays. The open-day guard is per operation (`archive.application.ports.RewriteMode`):
-a whole-file mutation (a `WHOLE_FILE` rewrite, `write_merged`, `remove_merged_sources`, `delete`)
-refuses a file whose `ts_init` span (its name, `kernel.clocks.CatalogFileSpan`) reaches the current
-UTC day -- capture is its writer; a `KEEP_OPEN_DAY_ROWS` rewrite (the rebuild) may touch such a
-file, but only after proving, against the original, that every row whose `ts_event` lies in the
-open day comes out identical in value and order.
+temp-then-rename: `<file>.archive.tmp` is written with the archive's compact settings
+(`archive.infrastructure.compact_parquet.compact_write_options`, Story 30.1: zstd 16, delta-packed
+timestamps, dictionary leaves, capped row groups with statistics), read back, and renamed over the
+file only when its full schema -- Arrow metadata included, e.g. `price_precision`
+(`same_schema`) --, its row count and every value in order (`_read_back_mismatch`) equal the
+table's; otherwise the temp is deleted and the original stays. The value check is what makes a
+new encoding safe to adopt: a lossy option would fail it before any rename. `encoded_size` writes
+the same way into memory, for a report that must not touch the disk. The open-day guard is per
+operation (`archive.application.ports.RewriteMode`): a whole-file mutation (a `WHOLE_FILE`
+rewrite, `write_merged`, `remove_merged_sources`, `delete`) refuses a file whose `ts_init` span
+(its name, `kernel.clocks.CatalogFileSpan`) reaches the current UTC day -- capture is its
+writer; a `KEEP_OPEN_DAY_ROWS` rewrite (the rebuild) may touch such a file, but only after
+proving, against the original, that every row whose `ts_event` lies in the open day comes out
+identical in value and order.
 
 A merge in `MergeScope.CLOSED_HOUR` (the intraday merge, Story 25.1b) may write and remove files
 of the current UTC day, but only ones lying wholly inside a single hour before the current UTC
@@ -52,7 +57,6 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 from kernel.clocks import NS_PER_DAY
 from kernel.clocks import CatalogFileSpan
-from kernel.parquet_compat import apply_zstd_default
 
 from archive.application.ports import MergeScope
 from archive.application.ports import OpenDayWriteError
@@ -61,6 +65,7 @@ from archive.application.ports import RewriteMode
 from archive.application.ports import RewriteVerifyError
 from archive.application.ports import StagedRewrite
 from archive.domain.intraday import NS_PER_HOUR
+from archive.infrastructure.compact_parquet import compact_write_options
 from nautilus_trader.persistence.catalog.parquet import _timestamps_to_filename
 
 
@@ -103,6 +108,31 @@ def _fsync_dir(directory: Path) -> None:
         os.fsync(fd)
     finally:
         os.close(fd)
+
+
+def _read_back_mismatch(path: Path, table: pa.Table) -> str | None:
+    """
+    Where the file at `path` first differs from `table`'s values, in order (`ChunkedArray.equals`),
+    or None when it holds exactly them; read back one column of one row group at a time: the check
+    never holds a second copy of the table, only its largest column chunk (MEM-01; measured +140 MB
+    peak RSS on a snapshot day for a whole-table read-back).
+
+    Known limit: `equals` counts NaN unequal to itself, so a file holding a NaN would be refused
+    every time (loud, original kept). No catalog writer stores one: a price, size or rate is never
+    NaN, and a missing value is a null. Upgrade path: a NaN-aware per-column comparison if a type
+    ever carries NaN legitimately.
+    """
+    offset = 0
+    with pq.ParquetFile(str(path)) as written:
+        for group in range(written.num_row_groups):
+            rows = written.metadata.row_group(group).num_rows
+            expected = table.slice(offset, rows)
+            for name in table.column_names:
+                column = written.read_row_group(group, columns=[name]).column(0)
+                if not column.equals(expected.column(name)):
+                    return f"column {name!r}, row group {group} (rows {offset}..{offset + rows})"
+            offset += rows
+    return None if offset == table.num_rows else f"{offset} rows read, {table.num_rows} written"
 
 
 def _unlink_if_present(path: Path) -> None:
@@ -253,12 +283,16 @@ class CatalogFiles:
     def _write_verified_tmp(
         self, table: pa.Table, tmp: Path, expected_rows: int, final: Path
     ) -> None:
-        """Write `table` to `tmp` (zstd) and verify its read-back; the temp is gone on failure."""
-        apply_zstd_default()
+        """
+        Write `table` to `tmp` with the compact settings and verify its read-back -- schema, row
+        count, then every value in order; the temp is gone on failure.
+        """
         try:
-            pq.write_table(table, str(tmp))
+            pq.write_table(table, str(tmp), **compact_write_options(table.schema))
             kept = same_schema(pq.read_schema(str(tmp)), table.schema)
             rows = pq.read_metadata(str(tmp)).num_rows
+            # A wrong schema or count already refuses the file: no value read-back for it.
+            mismatch = _read_back_mismatch(tmp, table) if kept and rows == expected_rows else None
             _fsync_file(tmp)
         except BaseException:
             _unlink_if_present(tmp)  # a partial or unverifiable temp never outlives the attempt
@@ -268,6 +302,12 @@ class CatalogFiles:
             raise RewriteVerifyError(
                 f"{final}: rewritten file failed verification (rows {rows}, expected "
                 f"{expected_rows}; schema {'kept' if kept else 'changed'}); original kept"
+            )
+        if mismatch is not None:
+            os.unlink(tmp)
+            raise RewriteVerifyError(
+                f"{final}: rewritten file failed verification (values changed on read-back: "
+                f"{mismatch}); original kept"
             )
 
     def remove_merged_sources(
@@ -316,6 +356,16 @@ class CatalogFiles:
         except OSError:  # a file appeared (or the directory went) since the check: leave it
             return False
         return True
+
+
+def encoded_size(table: pa.Table) -> int:
+    """
+    Return the byte size `table` would have as a file written by `CatalogFiles` (the same compact
+    options), measured in memory: a report-only run projects its savings without writing a file.
+    """
+    sink = pa.BufferOutputStream()
+    pq.write_table(table, sink, **compact_write_options(table.schema))
+    return int(sink.getvalue().size)
 
 
 def write_json_atomic(path: Path, obj: object) -> None:

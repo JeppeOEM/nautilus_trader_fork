@@ -924,3 +924,27 @@ redeploy alone changes no bot's behaviour.
       nothing (`docker compose logs bybit_collector` shows no new command).
 - [ ] The new coin rewrote `platform/capture/venues/bybit/config.toml`: handle the VPS checkout as
       in 29-4's "The commands rewrote the committed files" item.
+
+### 30-1-compact-parquet-encoding-for-consolidated-and-rewritten-files (compact write settings + `archive.tools.recompress`; commit: see `git log --grep 30-1-compact`)
+
+Every archive merge and rewrite now writes `compact_write_options` (zstd 16, delta-packed
+timestamps; `docs/DATA_DICTIONARY.md` §6). New files get it from the next nightly on; the files
+consolidated before the deploy keep the old encoding until this one-off run.
+
+- [ ] `git pull`, then `make up` from `platform/` (rebuilds the collector image the `archive`
+      service runs; no config, env var, compose service or mount changed).
+- [ ] Report first (no lock, nothing written; one level-16 encode per file, so it takes minutes
+      on the whole catalog), in the `archive` service's image and mounts so failures are ledgered
+      as `archive`: `docker compose run --rm --no-deps archive python3 -m
+      archive.tools.recompress --catalog /app/catalog`. Note each type's bytes before -> after.
+- [ ] Outside the `archive` service's nightly and intraday slots (`archive/config.toml`), run it
+      for real: the same command with `--apply` (add `--venue V` / `--type T` to split it into
+      smaller runs). Exit 0 expected; exit 1 means another maintenance run held the lock (rerun
+      later), exit 2 means files failed: each is a `recompress.error` line in
+      `platform/data/errors/archive.jsonl`, left as it was -- investigate before rerunning.
+- [ ] Rerun the report: every closed file must count as "already compact" and 0 remain in scope.
+- [ ] Record the `--apply` run's per-type and total bytes before -> after (and its wall time and
+      peak RSS) in `docs/DATA_INTEGRITY_AUDIT.md` row D-68, and set its status to FIXED.
+- [ ] After the next nightly, check `archive:status`: `consolidate_catalog` exits 0, and
+      `GET /api/errors` shows no new `consolidate.*` or `rebuild.verify` site (the read-back now
+      compares every value, so a refused merge would surface there).
