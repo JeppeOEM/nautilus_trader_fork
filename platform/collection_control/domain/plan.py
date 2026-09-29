@@ -26,6 +26,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
+from kernel.venues import has_venue
+
 from collection_control.domain.liquidity import LiquidityClassification
 
 
@@ -88,38 +90,39 @@ class CollectionPlan:
     Invariants, asserted at construction, so no load, command or reload can produce a plan that
     breaks them (a violation raises `ValueError` naming the ids):
     - ids are unique;
-    - `|collected| <= cap` (dYdX: 30, under its 32-per-channel WS limit; a static plan's cap is its
-      own size);
+    - every collected and excluded id is of the plan's venue (`kernel.venues.has_venue`), so a
+      hand-edited foreign id can never be hot-reloaded into a plan (Story 29.4);
+    - `|collected| <= cap` when the plan has a cap (dYdX: 30, under its 32-per-channel WS limit);
+      `cap` None is an uncapped plan (Bybit and Hyperliquid, operator decision 2026-09-26: the
+      operator picks their coins by hand, Story 29.4), never a large int;
     - `excluded & collected` is empty (`exclude` is the permanent denylist an unpin lands in);
+    - a liquidity threshold requires a cap, since a pin fills the cap's free slots;
     - a pin is admitted only through `pin`, from a USD-volume `LiquidityClassification` made at the
       plan's own `min_liquidity_usd` (OBS-03).
     Commands that could violate them -- `add` past the cap or of a collected id, `pin` from a
-    classification at another threshold, an `exclude` that left the id collected -- are refused
-    (`PlanRejected`) or keep the invariant by construction.
+    classification at another threshold or into a plan with no threshold, an `exclude` that left
+    the id collected -- are refused (`PlanRejected`) or keep the invariant by construction.
     """
 
     venue: str
     instruments: tuple[InstrumentEntry, ...]
-    cap: int
+    cap: int | None
     excluded: frozenset[str] = frozenset()
     # USD 24 h volume at which a market is liquid (the config key `liquidity_min_oi_usd`); None for
-    # a plan that admits no pins (a static plan).
+    # a plan that admits no pins (Bybit's and Hyperliquid's).
     min_liquidity_usd: float | None = None
     # How long a no-longer-collected instrument's data is kept (read by `archive.RetentionPolicy`).
     non_config_retain_hours: float | None = None
 
     def __post_init__(self) -> None:
         ids = [e.id for e in self.instruments]
-        if self.cap < 0:
-            raise ValueError(f"{self.venue} plan cap must be >= 0, got {self.cap}")
         repeated = sorted({iid for iid in ids if ids.count(iid) > 1})
         if repeated:
             raise ValueError(f"{self.venue} plan lists these ids more than once: {repeated}")
-        if len(ids) > self.cap:
-            raise ValueError(
-                f"{self.venue} plan collects {len(ids)} instruments, above its cap of "
-                f"{self.cap}: {ids[self.cap :]} do not fit"
-            )
+        foreign = sorted(i for i in (*ids, *self.excluded) if not has_venue(i, self.venue))
+        if foreign:
+            raise ValueError(f"{self.venue} plan holds ids of another venue: {foreign}")
+        self._check_cap(ids)
         both = sorted(self.excluded & set(ids))
         if both:
             raise ValueError(f"{self.venue} plan both collects and excludes {both}")
@@ -128,6 +131,22 @@ class CollectionPlan:
         ):
             raise ValueError(
                 f"non_config_retain_hours must be >= 0, got {self.non_config_retain_hours}"
+            )
+
+    def _check_cap(self, ids: list[str]) -> None:
+        if self.cap is None:
+            if self.min_liquidity_usd is not None:
+                raise ValueError(
+                    f"{self.venue} plan has a liquidity threshold but no cap: a pin fills the "
+                    "cap's free slots"
+                )
+            return
+        if self.cap < 0:
+            raise ValueError(f"{self.venue} plan cap must be >= 0, got {self.cap}")
+        if len(ids) > self.cap:
+            raise ValueError(
+                f"{self.venue} plan collects {len(ids)} instruments, above its cap of "
+                f"{self.cap}: {ids[self.cap :]} do not fit"
             )
 
     @property
@@ -141,7 +160,10 @@ class CollectionPlan:
         return self.collected
 
     @property
-    def free_slots(self) -> int:
+    def free_slots(self) -> int | None:
+        """Slots left under the cap; None for an uncapped plan (every `add` fits)."""
+        if self.cap is None:
+            return None
         return self.cap - len(self.instruments)
 
     @property
@@ -161,7 +183,8 @@ class CollectionPlan:
         """Collect `iid` (collector:control `start`); lifts it out of `excluded`."""
         if iid in self.collected:
             raise PlanRejected(f"Cannot start {iid}: already collected")
-        if self.free_slots <= 0:
+        free = self.free_slots
+        if free is not None and free <= 0:
             raise PlanRejected(f"Cannot start {iid}: at {self.cap}-instrument cap")
         plan = dataclasses.replace(
             self,
@@ -202,6 +225,8 @@ class CollectionPlan:
                 f"a pin needs a classification at the plan's {self.min_liquidity_usd} USD, "
                 f"got one at {classification.min_volume_usd} USD"
             )
+        # A threshold implies a cap (`_check_cap`), so a plan that reaches here has free slots.
+        free = self.free_slots or 0
         taken = set(self.collected) | self.excluded
         candidates = {
             iid: vol
@@ -210,9 +235,7 @@ class CollectionPlan:
         }
         # Lowest volume dropped first, ties in the venue's order: the rule `classify_liquidity`
         # applies with `max_liquid`, so a pre-capped classification selects the same ids.
-        dropped = sorted(candidates, key=candidates.__getitem__)[
-            : max(0, len(candidates) - self.free_slots)
-        ]
+        dropped = sorted(candidates, key=candidates.__getitem__)[: max(0, len(candidates) - free)]
         top = sorted(set(candidates) - set(dropped))
         plan = dataclasses.replace(
             self, instruments=self.instruments + tuple(InstrumentEntry(id=iid) for iid in top)

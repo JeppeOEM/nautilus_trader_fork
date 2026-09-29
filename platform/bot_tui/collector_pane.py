@@ -82,16 +82,23 @@ def shows_liquidity(venue: str, plan: dict | None) -> bool:
 
 def format_section_header(section: VenueSection, stale: bool) -> str:
     """
-    `<VENUE>: N collected +P pending · cap C` -- P counts the rows marked pending, N the rest;
+    `<VENUE>: N collected +P pending · cap C` -- P counts the rows marked pending, N the rest.
+    An explicit null cap (an uncapped plan: Bybit, Hyperliquid since Story 29.4) reads `· no cap`;
     the cap reads `?` when the aggregate does not state one. `stale` (the aggregate is older
     than the staleness window) prefixes the rows' `~ ` marker.
     """
     pending = sum(1 for row in section.rows if row.get("pending") is True)
     collected = len(section.rows) - pending
-    cap = (section.plan or {}).get("cap")
-    cap_text = str(cap) if isinstance(cap, int) and not isinstance(cap, bool) else "?"
     marker = "~ " if stale else ""
-    return f"{marker}{section.venue}: {collected} collected +{pending} pending · cap {cap_text}"
+    head = f"{marker}{section.venue}: {collected} collected +{pending} pending"
+    return f"{head} · {_cap_text(section.plan or {})}"
+
+
+def _cap_text(plan: dict) -> str:
+    cap = plan.get("cap", "?")
+    if cap is None:
+        return "no cap"
+    return f"cap {cap if isinstance(cap, int) and not isinstance(cap, bool) else '?'}"
 
 
 def _utc_ns_text(ts_ns: object) -> str:

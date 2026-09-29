@@ -139,9 +139,9 @@ GRAPH: frozenset[tuple[str, str]] = frozenset(
 COMPOSITION_ROOTS: dict[str, frozenset[str]] = {
     # The three venue entrypoints open their own `candles_<venue>.db` and hand capture the
     # `SecondSink` adapter plus the retention loop (Story 24.1).
-    # dYdX's also builds collection control's `ControlService`/`StatusPublisher` and their adapters
-    # and hands their loops to capture through `add_loops` (Story 25.4; Story 26.2); Bybit's and
-    # Hyperliquid's build only the `StatusPublisher` over their static plan (Story 29.2).
+    # Each also builds collection control's `ControlService`/`StatusPublisher` and their adapters
+    # and hands their loops to capture through `add_loops` (dYdX: Story 25.4, Story 26.2; Bybit and
+    # Hyperliquid: Story 29.4 -- Story 29.2 wired only their `StatusPublisher`).
     "capture.venues.dydx.__main__": frozenset({CANDLES, COLLECTION_CONTROL}),
     "capture.venues.bybit.__main__": frozenset({CANDLES, COLLECTION_CONTROL}),
     "capture.venues.hyperliquid.__main__": frozenset({CANDLES, COLLECTION_CONTROL}),
@@ -150,9 +150,10 @@ COMPOSITION_ROOTS: dict[str, frozenset[str]] = {
     "capture.venues.dydx.tests.test_candle_feed": frozenset({CANDLES}),
     "capture.venues.bybit.tests.test_candle_wiring": frozenset({CANDLES}),
     "capture.venues.hyperliquid.tests.test_candle_wiring": frozenset({CANDLES}),
-    # ...and the static plans' status wiring, asserted per venue for the same reason (Story 29.2).
-    "capture.venues.bybit.tests.test_status_wiring": frozenset({COLLECTION_CONTROL}),
-    "capture.venues.hyperliquid.tests.test_status_wiring": frozenset({COLLECTION_CONTROL}),
+    # ...and their collection-control wiring, asserted per venue for the same reason (Story 29.2's
+    # status wiring tests, extended to the whole control plane in Story 29.4).
+    "capture.venues.bybit.tests.test_control_wiring": frozenset({COLLECTION_CONTROL}),
+    "capture.venues.hyperliquid.tests.test_control_wiring": frozenset({COLLECTION_CONTROL}),
     # The data_api route tests seed the upstream store through its only writer -- the candle store
     # (`CandleStore`) and ranking's `metrics_store.write` -- so the route under test reads a real
     # store; `data_api` itself reaches neither context (Story 24.2).

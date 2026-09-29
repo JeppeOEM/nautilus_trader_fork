@@ -39,3 +39,10 @@ def test_the_committed_plan_collects_exactly_the_decided_ids() -> None:
         "BTCUSDT-SPOT.BYBIT",
         "ETHUSDT-SPOT.BYBIT",
     )
+
+
+def test_the_committed_plan_is_uncapped_with_no_exclusions() -> None:
+    """Story 29.4: no coin cap on this venue, and `exclude` appears only once a coin is unpinned."""
+    _, plan = load_venue_config(_COMMITTED, VENUE)
+
+    assert (plan.cap, plan.excluded, plan.min_liquidity_usd) == (None, frozenset(), None)

@@ -461,3 +461,28 @@ def test_the_most_recent_apply_is_reported_with_its_time(tmp_path: Path) -> None
     removed = _apply(c, removed=frozenset({_A}))
     assert c.capture_status().last_applied == removed
     assert c.capture_status().last_applied_ns >= status.last_applied_ns
+
+
+def test_a_successful_removal_forgets_the_book_buffers_nothing_and_deletes_no_file(
+    tmp_path: Path,
+) -> None:
+    """Story 29.4 AC 3: a runtime removal (Bybit/Hyperliquid) never touches the archive."""
+    archived = tmp_path / "data" / "trade_tick" / _A / "part-0.parquet"
+    archived.parent.mkdir(parents=True)
+    archived.write_bytes(b"archived before the removal")
+    before = sorted(p for p in tmp_path.rglob("*") if p.is_file())
+    client = _WireClient()
+    c = _collector(tmp_path, client, plan=(_A,))
+    _apply(c, added=frozenset({_A}))
+    c._process_data(_book(_A))
+    applied = _apply(c, removed=frozenset({_A}))
+    assert applied.unsubscribed == {_A}
+    assert client.calls == [f"subscribe {_A}", f"unsubscribe {_A}"]
+    assert c._live_book(_A) is None
+    c._process_data(_book(_A))  # a message already in flight when the unsubscribe landed
+    c._process_data(_trade(_A, 1))
+    assert c._live_book(_A) is None
+    assert c._buffer.get((TradeTick, _A), []) == []
+    assert _sampled(c) == []
+    assert sorted(p for p in tmp_path.rglob("*") if p.is_file()) == before
+    assert archived.read_bytes() == b"archived before the removal"

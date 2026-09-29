@@ -30,8 +30,42 @@ Verified against crates/adapters/hyperliquid (Story 19.4 Task 1) -- independentl
     `sequence=0` and `order_id=0` on every delta and emits Clear + all levels per message,
     so there is no venue sequence to check and nothing to desync. Book correctness is
     covered instead by the time-aligned REST cross-check (`fetch_book_snapshot`, D-64).
-  * subscriptions are one WS request per topic; Hyperliquid documents a per-IP subscription
-    cap (1000) far above one connection's needs, so no throttle here.
+  * subscriptions: the Rust client keeps no reference count (crates/adapters/hyperliquid/src/
+    websocket/client.rs:1077-1660): `trades`/`l2Book` send one Subscribe frame per call (a
+    repeated call sends a duplicate frame) and fail before any state ("Instrument not found")
+    or at the command-channel send. Mark/index/funding/open interest share ONE `activeAssetCtx`
+    frame, sent on the first of the four, and `subscribe_asset_context_data`/
+    `unsubscribe_asset_context_data` update `asset_context_subs` BEFORE their fallible send: a
+    failed first mark subscribe leaves the set non-empty, so a plain retry would send no frame
+    and return Ok. Every channel call therefore goes through one `WireChannels`; the four
+    asset-context calls pass their inverse as `undo`, restoring that set after a failure, while
+    `trades`/`l2Book` pass none. A retry after a partial failure sends only the channels not
+    held, and an unsubscribe releases each held channel once (Story 29.4).
+  * pacing: Hyperliquid documents 2000 sent messages per minute and 1000 subscriptions per IP.
+    Observed live 2026-09-29 (`scripts/measure_ws_limits.py --venue hyperliquid`,
+    docs/DATA_DICTIONARY.md §1.14): one burst of 100 subscribe frames (4 ms) was accepted, and
+    a ramp at 20/s was accepted up to 1000 channels, the 1001st refused ("Cannot subscribe to
+    more than 1000 channels."). Every wire call waits on `HYPERLIQUID_WS_FRAMES_PER_SECOND`, a
+    chosen margin under those observations and the documented rate, not a measured ceiling;
+    pacing per Python call over-counts the shared `activeAssetCtx` frame, the safe direction.
+    Known limit: the Rust client's reconnect replay of its subscriptions is not paced by us. It
+    is bounded only by the plan's size, which has no cap (3 frames per id, 4 with the
+    trades-only twin, up to the 1000-channel budget below), so a large plan replays well past
+    the 100-frame burst observed accepted; upgrade path: a pacing hook in the Rust client
+    (outside `platform/`, FORK-01).
+  * channel budget: `subscribe` refuses (raises) an id whose new wire subscriptions would take
+    this client past `HYPERLIQUID_MAX_WS_CHANNELS`, since the venue rejects the excess only
+    asynchronously and capture would show the id applied. Capture then keeps it `pending` and
+    ledgers `collector.subscribe_failed` on every retry. A venue limit, not a plan cap: the
+    plan stays uncapped. Known limit: only this process's channels are counted, so any other
+    Hyperliquid socket from the same IP (e.g. `live-paper`) shrinks the real budget unseen;
+    upgrade path: a per-IP budget shared across processes (e.g. a Redis counter).
+  * Known limit (apply latency): an id is 6 paced calls (7 with the trades-only twin), about
+    0.7 s at 10/s, all under capture's subscription lock, so a large add delays other commands
+    by that much per id. At start, `CaptureService.run` applies the whole plan before it starts
+    any extra loop, so `collector:status` and `collector:control` wait that long per planned id
+    too (a command published meanwhile is lost, as for a stopped collector); upgrade path: pace
+    per real wire frame (the Rust client would have to report which calls sent one).
 
 Feeds (story 22.14): messages are tagged `MAIN_FEED`, and with `trade_feeds = 2` a second,
 trades-only `HyperliquidWebSocketClient` delivers as `main-trades` (same group). Hyperliquid's
@@ -48,6 +82,7 @@ archive would hold two clocks for one venue.
 """
 
 import asyncio
+import contextlib
 import functools
 import logging
 from collections.abc import Callable
@@ -58,8 +93,12 @@ from kernel.open_interest import OpenInterest
 from capture.application.book_check import BookSnapshot
 from capture.application.feed import MAIN_FEED
 from capture.application.feed import Feed
+from capture.application.feed import OptionalStepFailed
+from capture.application.feed import optional_feed_send
 from capture.application.feed import optional_feed_step
 from capture.application.ports import Ledger
+from capture.application.wire_channels import Send
+from capture.application.wire_channels import WireChannels
 from capture.venues.hyperliquid.book_snapshot import fetch_l2_book
 from nautilus_trader.core import nautilus_pyo3
 from nautilus_trader.model.data import FundingRateUpdate
@@ -70,6 +109,24 @@ from nautilus_trader.model.data import capsule_to_data
 logger = logging.getLogger(__name__)
 
 TRADES_FEED = Feed("main-trades", "main", trades_only=True)
+
+# Wire calls per second across this client's sockets: a chosen margin, not a measured ceiling.
+# Hyperliquid documents 2000 sent messages per minute per IP (~33/s). Observed 2026-09-29
+# (DATA_DICTIONARY §1.14, `scripts/measure_ws_limits.py --venue hyperliquid`): one burst of 100
+# subscribe frames (4 ms) accepted in total, and a 20/s ramp accepted up to 1000 channels. 10/s
+# (600/min) keeps under a third of the documented rate, leaving the rest to the Rust client's
+# unpaced reconnect replay and any other socket from this IP.
+HYPERLIQUID_WS_FRAMES_PER_SECOND = 10.0
+
+# Subscriptions per IP the venue accepts: documented, and observed 2026-09-29 (DATA_DICTIONARY
+# §1.14): a ramp was acked up to 1000 channels and every further one refused with "Cannot
+# subscribe to more than 1000 channels.". Enforced by `HyperliquidClient.subscribe` over what this
+# client holds (a venue limit, not a plan cap).
+HYPERLIQUID_MAX_WS_CHANNELS = 1000
+
+# One wire subscription each; the four asset-context channels of an id share one `activeAssetCtx`.
+_SINGLE_FRAME_CHANNELS = ("trades", "book", "twin-trades")
+_ASSET_CTX_CHANNELS = ("mark", "index", "funding", "open_interest")
 
 _NS_PER_MS = 1_000_000
 
@@ -125,6 +182,7 @@ class HyperliquidClient:
         )
         self._environment = environment
         self._coins: dict[str, str] = {}  # instrument id -> wire coin (the instrument's raw_symbol)
+        self._wire = WireChannels(HYPERLIQUID_WS_FRAMES_PER_SECOND)
 
     def _sockets(self) -> dict[Feed, Any]:
         sockets = {MAIN_FEED: self._ws}
@@ -175,30 +233,96 @@ class HyperliquidClient:
         if failure is not None:
             raise failure
 
-    async def subscribe(self, instrument_id: str) -> None:
+    def _channels(self, instrument_id: str) -> list[tuple[str, Send, Send, bool]]:
+        """
+        Return the id's main-socket channels: (name, subscribe, unsubscribe, undoable). Only the
+        asset-context four change Rust state before their fallible send, so only they are undone.
+        """
         iid = nautilus_pyo3.InstrumentId.from_str(instrument_id)
-        await self._ws.subscribe_trades(iid)
-        await self._ws.subscribe_book(iid)
-        await self._ws.subscribe_mark_prices(iid)
-        await self._ws.subscribe_index_prices(iid)
-        await self._ws.subscribe_funding_rates(iid)
-        await self._ws.subscribe_open_interest(iid)
-        if self._ws_trades is not None:
-            await optional_feed_step(
-                TRADES_FEED, "subscribe", self._ws_trades.subscribe_trades(iid), self._ledger
+        ws = self._ws
+        return [
+            ("trades", lambda: ws.subscribe_trades(iid), lambda: ws.unsubscribe_trades(iid), False),
+            ("book", lambda: ws.subscribe_book(iid), lambda: ws.unsubscribe_book(iid), False),
+            (
+                "mark",
+                lambda: ws.subscribe_mark_prices(iid),
+                lambda: ws.unsubscribe_mark_prices(iid),
+                True,
+            ),
+            (
+                "index",
+                lambda: ws.subscribe_index_prices(iid),
+                lambda: ws.unsubscribe_index_prices(iid),
+                True,
+            ),
+            (
+                "funding",
+                lambda: ws.subscribe_funding_rates(iid),
+                lambda: ws.unsubscribe_funding_rates(iid),
+                True,
+            ),
+            (
+                "open_interest",
+                lambda: ws.subscribe_open_interest(iid),
+                lambda: ws.unsubscribe_open_interest(iid),
+                True,
+            ),
+        ]
+
+    def wire_subscriptions(self) -> int:
+        """Return the venue subscriptions this client holds (`HYPERLIQUID_MAX_WS_CHANNELS` counts)."""
+        held = self._wire.held()
+        singles = sum(1 for name, _ in held if name in _SINGLE_FRAME_CHANNELS)
+        return singles + len({iid for name, iid in held if name in _ASSET_CTX_CHANNELS})
+
+    def _needed_subscriptions(self, instrument_id: str) -> int:
+        names = ["trades", "book"] + (["twin-trades"] if self._ws_trades is not None else [])
+        needed = sum(1 for name in names if not self._wire.is_held((name, instrument_id)))
+        if not any(self._wire.is_held((name, instrument_id)) for name in _ASSET_CTX_CHANNELS):
+            needed += 1
+        return needed
+
+    async def subscribe(self, instrument_id: str) -> None:
+        """
+        Hold every channel of the id not already held: a retry sends only the missing ones.
+        Refused before sending anything when it would pass the venue's channel budget.
+        """
+        held, needed = self.wire_subscriptions(), self._needed_subscriptions(instrument_id)
+        if held + needed > HYPERLIQUID_MAX_WS_CHANNELS:
+            raise RuntimeError(
+                f"{instrument_id} needs {needed} more Hyperliquid subscriptions; {held} held, "
+                f"the venue accepts {HYPERLIQUID_MAX_WS_CHANNELS} channels per IP"
+            )
+        for name, sub, unsub, undoable in self._channels(instrument_id):
+            await self._wire.hold((name, instrument_id), sub, undo=unsub if undoable else None)
+        if self._ws_trades is None:
+            return
+        iid = nautilus_pyo3.InstrumentId.from_str(instrument_id)
+        twin = self._ws_trades
+        # Optional: a failure is ledgered (`collector.trade_feed`), never fatal, and leaves the
+        # channel unheld. The id still counts as applied, so capture's retry loop does not retry
+        # it: only the next `subscribe` of the id does (a re-add, a restart), and meanwhile the
+        # id has one feed.
+        with contextlib.suppress(OptionalStepFailed):
+            await self._wire.hold(
+                ("twin-trades", instrument_id),
+                lambda: optional_feed_send(
+                    TRADES_FEED, "subscribe", twin.subscribe_trades(iid), self._ledger
+                ),
             )
 
     async def unsubscribe(self, instrument_id: str) -> None:
-        iid = nautilus_pyo3.InstrumentId.from_str(instrument_id)
-        await self._ws.unsubscribe_trades(iid)
-        await self._ws.unsubscribe_book(iid)
-        await self._ws.unsubscribe_mark_prices(iid)
-        await self._ws.unsubscribe_index_prices(iid)
-        await self._ws.unsubscribe_funding_rates(iid)
-        await self._ws.unsubscribe_open_interest(iid)
+        """
+        Release every held channel of the id, each once; a failure (the trades-only socket's
+        included, so it never leaks a subscription) raises for capture to ledger and retry.
+        """
+        for name, sub, unsub, undoable in self._channels(instrument_id):
+            await self._wire.release((name, instrument_id), unsub, undo=sub if undoable else None)
         if self._ws_trades is not None:
-            await optional_feed_step(
-                TRADES_FEED, "unsubscribe", self._ws_trades.unsubscribe_trades(iid), self._ledger
+            iid = nautilus_pyo3.InstrumentId.from_str(instrument_id)
+            twin = self._ws_trades
+            await self._wire.release(
+                ("twin-trades", instrument_id), lambda: twin.unsubscribe_trades(iid)
             )
 
     def _handle_message(self, feed: Feed, message: object) -> None:

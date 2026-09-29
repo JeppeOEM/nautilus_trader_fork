@@ -83,9 +83,10 @@ def test_non_positive_threshold_rejected(key: str) -> None:
 
 
 def test_duplicate_instruments_collapsed() -> None:
-    _config, plan = venue_config_from_dict({"instruments": ["A.X", "B.X", "A.X"]}, "BYBIT")
-    assert plan.collected == ("A.X", "B.X")
-    assert plan.cap == 2  # a static plan's cap is its own size
+    ids = ["A.BYBIT", "B.BYBIT", "A.BYBIT"]
+    _config, plan = venue_config_from_dict({"instruments": ids}, "BYBIT")
+    assert plan.collected == ("A.BYBIT", "B.BYBIT")
+    assert plan.cap is None  # Bybit/Hyperliquid plans are uncapped (Story 29.4)
 
 
 def test_instruments_is_the_plans_not_a_core_key() -> None:
@@ -93,11 +94,38 @@ def test_instruments_is_the_plans_not_a_core_key() -> None:
         core_config_from_dict({"instruments": ["A.X"]}, ("mainnet",))
 
 
-def test_hyperliquid_defaults_its_stale_guard_and_takes_no_exclude() -> None:
+def test_hyperliquid_defaults_its_stale_guard() -> None:
     config, _plan = venue_config_from_dict({}, "HYPERLIQUID")
     assert config.stale_book_seconds == 12.0
-    with pytest.raises(ValueError, match="exclude"):
-        venue_config_from_dict({"exclude": ["A.X"]}, "HYPERLIQUID")
+
+
+@pytest.mark.parametrize("venue", ["BYBIT", "HYPERLIQUID"])
+def test_a_flat_plan_reads_an_optional_exclude(venue: str) -> None:
+    a, b = f"A.{venue}", f"B.{venue}"
+    _config, plan = venue_config_from_dict({"instruments": [a], "exclude": [b]}, venue)
+    assert (plan.collected, plan.excluded, plan.cap) == ((a,), {b}, None)
+
+
+@pytest.mark.parametrize("venue", ["BYBIT", "HYPERLIQUID"])
+def test_a_flat_plan_writes_exclude_only_when_non_empty(venue: str) -> None:
+    a = f"A.{venue}"
+    _config, plan = venue_config_from_dict({"instruments": [a]}, venue)
+    assert plan_toml_fields(plan) == {"instruments": [a]}
+    unpinned = plan.unpin(a).plan
+    assert plan_toml_fields(unpinned) == {"instruments": [], "exclude": [a]}
+    assert venue_config_from_dict(plan_toml_fields(unpinned), venue)[1] == unpinned
+
+
+def test_a_flat_plan_refuses_an_id_both_collected_and_excluded() -> None:
+    with pytest.raises(ValueError, match="both collects and excludes"):
+        venue_config_from_dict({"instruments": ["A.BYBIT"], "exclude": ["A.BYBIT"]}, "BYBIT")
+
+
+@pytest.mark.parametrize("key", ["instruments", "exclude"])
+def test_a_hand_edited_id_of_another_venue_is_refused(key: str) -> None:
+    """Story 29.4: a foreign id can never be loaded, nor hot-reloaded, into a venue's plan."""
+    with pytest.raises(ValueError, match="ids of another venue"):
+        venue_config_from_dict({key: ["SOL-USD-PERP.HYPERLIQUID"]}, "BYBIT")
 
 
 _DYDX = """

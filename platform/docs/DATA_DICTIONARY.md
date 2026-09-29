@@ -28,7 +28,9 @@ Nautilus types decoded straight from the Rust adapter; two (`DydxSecondSnapshot`
 PyO3 bindings don't expose the fields another way.
 
 **The collected set** (the committed plans, venue cutover Story 29.3, operator decision
-2026-09-26: BTC/ETH on Bybit, SOL on Hyperliquid; reversible by config):
+2026-09-26: BTC/ETH on Bybit, SOL on Hyperliquid; reversible by config). Since Story 29.4 every
+venue's plan also changes at runtime (`bot_tui`'s `p`/`x`/`:start`, §1.12), which rewrites that
+venue's plan file, so on a running box the file, not this table, is the current set:
 
 | Venue | Instrument ids | Market | What each yields |
 |---|---|---|---|
@@ -388,7 +390,8 @@ service name, via `ERROR_LEDGER_SERVICE`).
 ### 1.12 `collector:status` / `collector:control` (the `collection_control/` context, Story 25.4)
 
 Not market data: every venue's collection plan as `bot_tui`'s Collector pane shows it (Story 6.1;
-every venue since Story 29.2), and dYdX's live control surface. Published language, frozen
+every venue since Story 29.2), and every venue's live control surface (dYdX's since Story 6.1,
+Bybit's and Hyperliquid's since Story 29.4). Published language, frozen
 (AD-D12): fields are only ever appended. The bytes are replay-tested
 (`collection_control/tests/test_status_replay.py` against a pre-move recording,
 `bot_tui/tests/test_collector_status_replay.py` through the TUI's reader, and
@@ -396,9 +399,10 @@ every venue since Story 29.2), and dYdX's live control surface. Published langua
 
 - **`collector:status`** — published by `StatusPublisher` in each collector process (dYdX, Bybit,
   Hyperliquid) at start, then every `liquidity_check_seconds` (dYdX) or
-  `STATIC_PLAN_STATUS_SECONDS` = 1800 s (Bybit, Hyperliquid: a static plan), right after every
-  control action (dYdX), and within 30 s of a row's `pending` state changing (capture's retry
-  applied it) or of a new apply. One `json.dumps` message per planned instrument, in plan order,
+  `PLAN_STATUS_SECONDS` = 1800 s (Bybit, Hyperliquid: a plan with no liquidity refresh; named
+  `STATIC_PLAN_STATUS_SECONDS` before Story 29.4), right after every control action or plan
+  reload that changed the plan (every venue), and within 30 s of a row's `pending` state changing
+  (capture's retry applied it) or of a new apply. One `json.dumps` message per planned instrument, in plan order,
   keys in this order (no `venue`: a reader derives it from the id, SIGNAL-01):
   - `id` — the instrument id;
   - `liquid` — `true` when its USD `volume24H` is at or above the plan's `liquidity_min_oi_usd`
@@ -410,12 +414,15 @@ every venue since Story 29.2), and dYdX's live control surface. Published langua
     it). Absent on an applied instrument, so every pre-25.4 row shape is unchanged.
   Then the venue's plan aggregate, keys in this order (all but `unpinned_ids` appended in
   Story 29.2; an aggregate without `venue` is a pre-29.2 dYdX producer's):
-  - `unpinned_ids` — every `exclude` id, sorted (always `[]` for Bybit and Hyperliquid, which
-    have no `exclude`);
+  - `unpinned_ids` — every `exclude` id, sorted (Bybit and Hyperliquid: their optional `exclude`
+    list, written by an `unpin`, `[]` while they have none);
   - `venue` — the plan's `kernel.venues` code (`DYDX`, `BYBIT`, `HYPERLIQUID`);
-  - `cap` — the plan's cap (dYdX 30; a static plan's cap is its own size);
-  - `accepts_commands` — `true` only when a `ControlService` consumes `collector:control` for this
-    plan (dYdX); `false` for a static plan. Absent (older producer): `true` only for dYdX;
+  - `cap` — the plan's cap: dYdX 30; `null` for an uncapped plan (Bybit and Hyperliquid since
+    Story 29.4, operator decision 2026-09-26: no coin cap; before it a static plan's cap was its
+    own size);
+  - `accepts_commands` — `true` when a `ControlService` consumes `collector:control` for this
+    plan: every venue since Story 29.4 (Bybit and Hyperliquid published `false` from Story 29.2
+    until then). Absent (older producer): `true` only for dYdX;
   - `min_liquidity_usd` — the plan's liquidity threshold (a float), `null` when the plan
     classifies no liquidity (then every row's `liquid` stays `false` and means nothing);
   - `last_apply` — `null` before capture's first `CaptureService.apply`, then
@@ -423,14 +430,26 @@ every venue since Story 29.2), and dYdX's live control surface. Published langua
     most recent apply (startup or command), each id list sorted. It is history: a failed id
     capture's retry has since subscribed loses its row's `pending` while this still lists it.
   And on `stop`/`unpin` a `{"id": ..., "removed": true}` tombstone.
-- **`collector:control`** — `{action, id}` published by `bot_tui`, consumed by dYdX's collector
-  only (it carries no venue, so `bot_tui` sends it only for a plan whose aggregate says
-  `accepts_commands`): `start` (plan `add`), `unpin`
-  (stop and exclude), `stop` (plan `remove`), `pin_top_liquid` (fill the free slots under the
-  30-instrument cap with the top USD-volume liquid ids, never an excluded one). A refused command
-  or an unknown action logs a WARNING and changes nothing. A valid one is saved to
-  `data/dydx_config.toml` (validated through the one loader first), then applied through
-  `CaptureService.apply`, then published.
+- **`collector:control`** — `{action, id, venue}` published by `bot_tui` (only for a plan whose
+  aggregate says `accepts_commands` and is fresh), consumed by every venue's collector.
+  `venue` (the `kernel.venues` code) was appended in Story 29.4 after the existing keys, so the
+  pre-29.4 `{action, id}` bytes stay the payload's prefix (replay-tested against the fixture);
+  each venue's `ControlService` acts only on its own venue's messages, a message **without**
+  `venue` is dYdX's (every sender before 29.4 drove only dYdX), and a non-string `venue` is
+  ledgered `collector.control` and ignored by every venue. Actions: `start` (plan `add`), `unpin`
+  (stop and exclude), `stop` (plan `remove`), `pin_top_liquid` (fill the free slots under dYdX's
+  30-instrument cap with the top USD-volume liquid ids, never an excluded one; refused by Bybit's
+  and Hyperliquid's plans, which have no liquidity threshold: "admits no pins"). A refused command
+  -- including an id of another venue than the receiving plan's -- or an unknown action logs a
+  WARNING and changes nothing. A valid one is saved to the venue's plan file (dYdX
+  `data/dydx_config.toml`; Bybit and Hyperliquid the committed
+  `capture/venues/<venue>/config.toml`, mounted read-write, whose optional `exclude` list is
+  written only when non-empty), validated through the one loader first, then applied through
+  `CaptureService.apply` (a removed id's book is forgotten, its rows stop and its catalog files
+  stay; a failed subscribe is `pending` with one `collector.subscribe_failed` per attempt), then
+  published. Every venue's file is also re-read every 30 s (dYdX `config_reload_seconds`,
+  Bybit/Hyperliquid `PLAN_RELOAD_SECONDS`), so a hand edit is applied without a restart; a file
+  that fails validation is ledgered `collector.config_reload` and the current plan is kept.
 
 ### 1.13 `archive:status` / `archive:control` (the `archive/` context's scheduler, Story 25.1b)
 
@@ -487,6 +506,59 @@ channel names and shape, as for `ranking:control`/`collector:status`
   a bad date, today or a future day are ledgered `archive.control_rejected` and ignored. The 202
   therefore means "received", not "accepted": the run is confirmed only when `archive:status`
   shows it.
+
+### 1.14 WebSocket subscribe limits (Story 29.4)
+
+Not a data type: the measured subscribe limits each client paces under, now that a plan can
+change at runtime. Every Python-side wire call of the Bybit and Hyperliquid clients waits on
+`capture.application.wire_channels.WireChannels`, a monotonic pacer at the venue's constant, and
+holds at most one reference per (channel, id); a failed call runs its inverse (`undo`) to restore
+the Rust client's own bookkeeping (Bybit's topic reference count, Hyperliquid's asset-context
+set), both updated before the failing send, so a retry sends the channel again. Measured from the dev box (Bybit 2026-09-28
+23:59Z, Hyperliquid 2026-09-29 00:02 to 00:05Z) with `PYTHONPATH=. python scripts/measure_ws_limits.py --venue bybit|hyperliquid`, an
+independent aiohttp client (no code shared with the Rust clients), symbols and coins taken live
+from each venue's REST listing. Refresh these numbers from a workstation, never from the VPS: the
+Hyperliquid ramp holds all 1000 channels of its IP while it runs, starving the collector there.
+
+| Venue | Test | Result |
+|---|---|---|
+| Bybit `linear` (886 symbols) | one subscribe request carrying N `publicTrade` topics, N = 10, 11, 20, 50 | all accepted (`success: true`) |
+| Bybit `spot` (530 symbols) | same | N = 10 accepted; N = 11, 20, 50 refused, `ret_msg` "args size >10" |
+| Bybit `linear` / `spot` | one burst of 200 single-topic subscribe requests back to back on one connection (sent in 6.6 / 6.7 ms), then 200 unsubscribes (6.3 ms each) | the burst accepted in total: 200/200 acked `success` both ways, all within 0.42 / 0.39 s (unsubscribe 0.38 / 0.43 s); no close; a ping afterwards answered |
+| Hyperliquid (178 coins) | one burst of 100 `trades`/`l2Book` subscribe frames back to back on one connection (4 ms) | accepted in total: 100/100 `subscriptionResponse`, no `error`, no close |
+| Hyperliquid | a 20/s ramp (under the documented 2000 sent messages/min per IP) through `trades`, `l2Book`, `activeAssetCtx`, `bbo` and three `candle` intervals per coin | 1000 acked; every subscription after the 1000th answered `error` "Cannot subscribe to more than 1000 channels." (15 of 1015 sent); socket kept open |
+
+What these show, and what they do not: the Bybit rows are the total of one 200-request burst,
+not a sustained rate, and the Hyperliquid ramp was one run at 20/s up to the 1000-channel limit.
+Neither measured a per-second ceiling. The pacing constants are chosen margins under those
+observations and under Hyperliquid's documented 2000 sent messages per minute, not measured
+ceilings:
+
+- **`BYBIT_WS_FRAMES_PER_SECOND` = 20** (`capture/venues/bybit/client.py`): Bybit documents no
+  public-stream request rate; 20/s keeps a plan change at a tenth of one clean burst's size per
+  second. The Rust client sends one topic per request, so the spot 10-args limit never applies.
+- **`HYPERLIQUID_WS_FRAMES_PER_SECOND` = 10** (`capture/venues/hyperliquid/client.py`): 600/min,
+  under a third of the documented 2000/min. Pacing is per Python call, so the one
+  `activeAssetCtx` frame that mark, index, funding and open interest share is counted four times,
+  the safe direction.
+- **`HYPERLIQUID_MAX_WS_CHANNELS` = 1000** (same file): the documented and observed per-IP
+  subscription limit. The venue refuses the excess only asynchronously (capture would show the id
+  applied), so `HyperliquidClient.subscribe` counts the subscriptions it holds -- one per
+  `trades`, `l2Book` and trades-only-twin channel, plus one `activeAssetCtx` per id -- and raises
+  before sending anything for an id that would pass it: the id stays `pending` with one
+  `collector.subscribe_failed` per retry. A venue limit, not a plan cap (the plan stays
+  uncapped). Known limit: only this process's channels are counted, so another Hyperliquid socket
+  from the same IP (`live-paper`) shrinks the real budget unseen; upgrade path: a per-IP budget
+  shared across processes.
+
+Known limit (apply latency): every call is paced and holds capture's subscription lock, so an add
+costs about 0.7 s per Hyperliquid coin (7 calls at 10/s with the trades-only twin) and about
+0.15 s per Bybit linear id (3 calls at 20/s), delaying other commands and resyncs by that much
+per id in a large add; upgrade path: batched subscribes in the Rust clients.
+
+Known limit: the Rust clients' reconnect replay of held subscriptions is not paced by us (it is
+bounded by the plan's size); upgrade path: a pacing hook in the Rust client, outside `platform/`
+(FORK-01). Raw measurement output is not committed; re-run the script to refresh these numbers.
 
 ---
 

@@ -21,6 +21,9 @@ _publish_collector_action is monkeypatched to a plain list-append rather than ca
 real, since its first statement schedules a real asyncio task that needs a running loop.
 """
 
+import asyncio
+import time
+
 import pytest
 import urwid
 
@@ -127,6 +130,8 @@ def test_highlighted_collector_id_none_when_empty() -> None:
 def _collector_app_with_one_row(instrument_id: str = "BTC-USD-PERP.DYDX") -> BotTuiApp:
     _reset()
     collector_state._handle_status_message(_status(instrument_id))
+    # A pre-29.2 aggregate (no `venue`: dYdX's): with none cached, every action is refused.
+    collector_state._handle_status_message({"unpinned_ids": []})
     app = BotTuiApp()
     app._switch_view("collector", [])
     app._refresh_collector_body()
@@ -585,3 +590,79 @@ def test_a_confirm_is_refused_when_the_plan_stops_accepting_commands_meanwhile()
     app._submit_collector_confirm()
     assert published == []
     assert "DYDX: static plan" in app._footer_hint.text
+
+
+# -- Story 29.4: Bybit/Hyperliquid take commands, every command carries its venue ----------------
+
+
+def _bybit_live_plan() -> dict:
+    return _plan("BYBIT", cap=None, accepts_commands=True)
+
+
+def test_an_uncapped_commandable_plan_publishes_a_start_with_no_cap_check() -> None:
+    rows = [_status(f"C{i}USDT-LINEAR.BYBIT") for i in range(40)]
+    app = _collector_app(*rows, _bybit_live_plan())
+    assert _texts(app)[0] == "BYBIT: 40 collected +0 pending · no cap"
+    published = _recording_publishes(app)
+    _submit(app, "start SOLUSDT-LINEAR.BYBIT")
+    assert published == [("start", "SOLUSDT-LINEAR.BYBIT")]
+
+
+def test_a_published_action_is_addressed_to_its_ids_venue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _reset()
+    sent: list[tuple[str, str | None, str | None]] = []
+
+    async def _publish(
+        _url: str, action: str, instrument_id: str | None = None, venue: str | None = None
+    ) -> None:
+        sent.append((action, instrument_id, venue))
+
+    monkeypatch.setattr(collector_state, "publish_control", _publish)
+    app = BotTuiApp()
+
+    async def _run() -> None:
+        app._publish_collector_action("start", "SOL-USD-PERP.HYPERLIQUID")
+        app._publish_collector_action("unpin", "BTCUSDT-SPOT.BYBIT")
+        app._publish_collector_action("pin_top_liquid", None)
+        await asyncio.gather(*list(app._background_tasks))
+
+    asyncio.run(_run())
+    assert sent == [
+        ("start", "SOL-USD-PERP.HYPERLIQUID", "HYPERLIQUID"),
+        ("unpin", "BTCUSDT-SPOT.BYBIT", "BYBIT"),
+        ("pin_top_liquid", None, "DYDX"),
+    ]
+
+
+def test_a_plan_whose_status_went_stale_refuses_commands() -> None:
+    app = _collector_app(_status(_BYBIT_ROW), _bybit_live_plan())
+    collector_state._PLAN_RECEIVED_AT["BYBIT"] = time.time() - 3601
+    published = _recording_publishes(app)
+    caption = _submit(app, "start SOLUSDT-LINEAR.BYBIT")
+    assert caption == (
+        "cannot start SOLUSDT-LINEAR.BYBIT: BYBIT: no collector:status for over 60 min "
+        "(collector down?)\n:"
+    )
+    assert published == []
+
+
+def test_a_venue_with_no_aggregate_cached_refuses_commands_even_for_dydx() -> None:
+    """After `make down-dydx`, a TUI started later has no dYdX aggregate: nothing is sent."""
+    app = _collector_app(_status("BTC-USD-PERP.DYDX"))
+    published = _recording_publishes(app)
+    caption = _submit(app, "start SOL-USD-PERP.DYDX")
+    assert caption == (
+        "cannot start SOL-USD-PERP.DYDX: waiting for DYDX plan on collector:status\n:"
+    )
+    assert published == []
+
+
+def test_a_venue_token_no_venue_registers_is_refused_as_unknown() -> None:
+    """A lowercase suffix is not a venue that could still publish: no "waiting for" reason."""
+    app = _collector_app(_bybit_live_plan())
+    published = _recording_publishes(app)
+    caption = _submit(app, "start eth-usd-perp.hyperliquid")
+    assert caption.startswith("cannot start eth-usd-perp.hyperliquid: unknown venue 'hyperliquid'")
+    assert published == []

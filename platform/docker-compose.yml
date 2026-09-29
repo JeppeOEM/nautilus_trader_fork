@@ -121,7 +121,10 @@ services:
       ERROR_LEDGER_SERVICE: "bybit_collector"
     user: "1000:1000"
     volumes:
-      - ./capture/venues/bybit/config.toml:/app/bybit_config.toml:ro
+      # rw: the plan store writes it back -- a collector:control command addressed to this
+      # venue saves the plan here before applying it (Story 29.4). The file is the committed
+      # one, so a runtime command leaves the checkout modified (docs/DEPLOY_CHECKLIST.md).
+      - ./capture/venues/bybit/config.toml:/app/bybit_config.toml:rw
       # Same catalog root as the dYdX collector (Story 19.2): data_api serves both.
       - ./data/catalog:/app/catalog
       - ./data/candles:/app/candles_dir
@@ -148,7 +151,10 @@ services:
       ERROR_LEDGER_SERVICE: "hyperliquid_collector"
     user: "1000:1000"
     volumes:
-      - ./capture/venues/hyperliquid/config.toml:/app/hyperliquid_config.toml:ro
+      # rw: the plan store writes it back -- a collector:control command addressed to this
+      # venue saves the plan here before applying it (Story 29.4). The file is the committed
+      # one, so a runtime command leaves the checkout modified (docs/DEPLOY_CHECKLIST.md).
+      - ./capture/venues/hyperliquid/config.toml:/app/hyperliquid_config.toml:rw
       # Same catalog root as the dYdX collector (Story 19.2): data_api serves both.
       - ./data/catalog:/app/catalog
       - ./data/candles:/app/candles_dir

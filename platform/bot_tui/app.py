@@ -150,12 +150,12 @@ BOT DETAIL
 
 COLLECTOR PANE (:data)
   One section per venue (dYdX, Bybit, Hyperliquid), headed
-  "<VENUE>: N collected +P pending · cap C", then its last apply (what the collector
-  last subscribed, unsubscribed or failed), its rows ("pending" = planned, not yet
-  subscribed) and its "unpinned" line. "~" marks a stale row or section.
-  Only a venue whose plan accepts commands (today: dYdX) can be changed here. On the
-  others (Bybit, Hyperliquid: a static plan) p, x and :start are refused with the
-  reason -- edit that venue's config.toml and restart its collector instead.
+  "<VENUE>: N collected +P pending · cap C" ("· no cap" on Bybit and Hyperliquid), then
+  its last apply (what the collector last subscribed, unsubscribed or failed), its rows
+  ("pending" = planned, not yet subscribed) and its "unpinned" line. "~" marks a stale
+  row or section. Every venue's plan accepts p, x and :start, each command addressed to
+  the id's venue; a venue whose status is over an hour old (collector down?) is refused
+  with the reason. :pintop is dYdX's only.
   Every action here writes straight through to config.toml on the collector -- it's
   the permanent record of what's collected, and it's what the collector re-reads if
   it restarts. Nothing here is temporary or TUI-only. Every currently-collected
@@ -169,7 +169,8 @@ COLLECTOR PANE (:data)
                    exclude it (asks for confirmation)
   :start <ID>      pin a coin by name: adds it if new, or re-adds it if it's in the
                    unpinned/excluded list -- either way it starts collecting,
-                   pinned, immediately (rejected past the venue's cap)
+                   pinned, immediately (rejected past dYdX's cap; Bybit and
+                   Hyperliquid have none)
   :pintop          fill every empty dYdX slot (up to dYdX's cap) with the
                    current top-by-volume coins not already collected, pinned
                    immediately -- never removes or replaces an existing coin, and
@@ -852,8 +853,14 @@ class BotTuiApp:
         # no local pinned/collected flip happens here, the row only reflects the new
         # state once collector:status's next message (published immediately after the
         # collector applies the action -- see collector.py's _publish_status) arrives.
+        # Addressed to the id's venue (Story 29.4); `:pintop` carries no id and pins only dYdX.
+        venue = (
+            collector_state.LEGACY_PLAN_VENUE
+            if instrument_id is None
+            else collector_state.venue_of_row(instrument_id)
+        )
         task = asyncio.ensure_future(
-            collector_state.publish_control(self._redis_url, action, instrument_id)
+            collector_state.publish_control(self._redis_url, action, instrument_id, venue)
         )
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)

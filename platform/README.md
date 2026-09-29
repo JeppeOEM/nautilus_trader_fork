@@ -75,12 +75,13 @@ instruments = [
 ]
 ```
 
-Bybit and Hyperliquid take a plain list of ids and are read once at startup (no hot-reload): edit the file, then `docker compose restart bybit_collector` (or `hyperliquid_collector`). The committed sets are Bybit `BTCUSDT`/`ETHUSDT` linear + spot and Hyperliquid `SOL-USD-PERP.HYPERLIQUID` (`docs/DATA_DICTIONARY.md` §1). They publish that static plan on `collector:status` too (Story 29.2), so `bot_tui`'s Collector pane shows it, read-only:
+Bybit and Hyperliquid take a plain list of ids, with no coin cap, plus an optional `exclude` list (the ids `bot_tui`'s `p` unpinned; written only when non-empty). Their plans hot-reload like dYdX's: an in-place hand edit of `instruments`/`exclude` is picked up within 30 s (`PLAN_RELOAD_SECONDS`), no restart, and `bot_tui`'s `p`/`x`/`:start` change them at runtime (Story 29.4), writing the plan back to the committed `capture/venues/<venue>/config.toml` (mounted read-write; comments are lost, and on the VPS the checkout then shows the file modified: commit it back or restore it before the next `git pull`). Known limit (every venue's plan file, dYdX's `data/dydx_config.toml` included): each is a single-file bind mount, which follows the host file's inode, so anything that *replaces* the file (`git checkout`/`git pull`, `sed -i`, an editor that saves by rename) is never seen by the running collector, and its later command saves land in the orphaned inode and are lost: after such a replacement, `docker compose restart <service>` (upgrade path: a directory mount). The committed sets are Bybit `BTCUSDT`/`ETHUSDT` linear + spot and Hyperliquid `SOL-USD-PERP.HYPERLIQUID` (`docs/DATA_DICTIONARY.md` §1). Each subscribe is paced under the venue's measured WebSocket limit (`docs/DATA_DICTIONARY.md` §1.14):
 
 ```toml
 environment = "mainnet"
 catalog_path = "/app/catalog"
 instruments = ["BTCUSDT-LINEAR.BYBIT", "BTCUSDT-SPOT.BYBIT"]
+exclude = ["ETHUSDT-SPOT.BYBIT"]  # optional: only present once something was unpinned
 ```
 
 Add any dYdX perpetual in `<BASE>-USD-PERP.DYDX` format, any Bybit linear/spot id in `<SYMBOL>-LINEAR.BYBIT`/`<SYMBOL>-SPOT.BYBIT` format, and any Hyperliquid perp in `<BASE>-USD-PERP.HYPERLIQUID` format.
@@ -159,12 +160,12 @@ A keyboard-only control surface for the bots and the collector, with two panes:
   `stop`), Enter opens its detail view (trades, PnL, strategy source `v`, incidents `i`,
   dashboard link `o`).
 - **Collector** (`:data`): one section per venue from `collector:status` (dYdX, Bybit,
-  Hyperliquid), each headed `<VENUE>: N collected +P pending · cap C`, with the plan's last
-  apply, its rows (`pending` = planned, not yet subscribed) and its unpinned ids. On dYdX, `p`
-  unpins, `x` stops collecting (both ask for confirmation), and `:start <ID>` and `:pintop` add
-  coins; every action is written through to the collector's `config.toml`. Bybit and
-  Hyperliquid are shown read-only: their actions are refused with the reason (a static plan:
-  edit `capture/venues/<venue>/config.toml` and restart the collector).
+  Hyperliquid), each headed `<VENUE>: N collected +P pending · cap C` (`· no cap` on Bybit and
+  Hyperliquid), with the plan's last apply, its rows (`pending` = planned, not yet subscribed)
+  and its unpinned ids. On every venue `p` unpins, `x` stops collecting (both ask for
+  confirmation) and `:start <ID>` adds a coin, each addressed to the id's venue; `:pintop` fills
+  dYdX's cap by liquidity (dYdX only). Every action is written through to that venue's plan file;
+  a venue with no status for over an hour refuses actions with the reason (Story 29.4).
 
 `:help` lists every key; `esc` goes back one view, `:q` quits. It reads only `bots:*` and
 `collector:status` and publishes only `bots:control` and `collector:control`. Rankings, the

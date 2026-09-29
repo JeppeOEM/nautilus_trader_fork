@@ -21,7 +21,8 @@ for the control plane's move.
 
 Story 29.2 appends the plan facts to the aggregate (`_AGGREGATE`); the recorded one without them
 still reads as dYdX's. `publish_control` stays byte-identical to its recording
-(`collection_control/tests/fixtures/control_payloads.json`).
+(`collection_control/tests/fixtures/control_payloads.json`), and Story 29.4's `venue` is appended
+after those bytes.
 """
 
 import asyncio
@@ -135,6 +136,34 @@ def test_publish_control_is_byte_identical_to_the_recording(
 
     asyncio.run(_send())
     assert published == recording["published"]
+
+
+def test_publish_control_appends_the_venue_after_the_recorded_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Story 29.4: `venue` is appended last, so the recorded `{action, id}` is the prefix."""
+    recording = json.loads(_CONTROL_FIXTURE.read_text())
+    published: list[str] = []
+
+    class _Client:
+        async def __aenter__(self) -> Self:
+            return self
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
+        async def publish(self, _channel: str, message: str) -> None:
+            published.append(message)
+
+    monkeypatch.setattr(collector_state.aioredis.Redis, "from_url", lambda *_a, **_k: _Client())
+
+    async def _send() -> None:
+        for action, instrument_id in recording["calls"]:
+            await collector_state.publish_control("redis://unused", action, instrument_id, "DYDX")
+
+    asyncio.run(_send())
+    recorded = [message for _channel, message in recording["published"]]
+    assert published == [m.removesuffix("}") + ', "venue": "DYDX"}' for m in recorded]
 
 
 def test_the_inlined_strings_are_the_recording() -> None:

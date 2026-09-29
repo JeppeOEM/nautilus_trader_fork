@@ -1,4 +1,12 @@
 # Bybit collector (Story 19.3). Ids are the Nautilus Bybit adapter's linear ids.
+# Story 29.4: this file is also the venue's live plan. bot_tui's p/x/:start save the plan here
+# (mounted read-write), rewriting it without these comments; commit that change back, or restore
+# the file, before the next `git pull` (docs/DEPLOY_CHECKLIST.md). An in-place hand edit of
+# `instruments` (or the optional `exclude` list an unpin writes) is picked up within 30 s, no
+# restart. Known limit: the file is a single-file bind mount, which follows the inode: anything
+# that replaces the file (`git checkout`/`git pull`, `sed -i`, an editor saving by rename) is
+# never seen by the running collector, and its later saves are lost; after such a replacement run
+# `docker compose restart bybit_collector`. Upgrade path: a directory mount.
 environment = "mainnet"
 catalog_path = "/app/catalog"
 flush_interval_seconds = 60

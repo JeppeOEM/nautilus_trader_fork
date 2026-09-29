@@ -291,3 +291,10 @@ def test_last_apply_line_survives_an_out_of_range_ts_and_a_malformed_value() -> 
     )
     malformed = _plan("BYBIT", last_apply=["not", "a", "dict"])
     assert collector_pane.format_last_apply_line(malformed) == "last apply: ? (malformed)"
+
+
+def test_section_header_reads_no_cap_for_an_explicit_null_cap() -> None:
+    section = collector_pane.VenueSection("BYBIT", [_status("A.BYBIT")], _plan("BYBIT", cap=None))
+    assert collector_pane.format_section_header(section, stale=False) == (
+        "BYBIT: 1 collected +0 pending · no cap"
+    )

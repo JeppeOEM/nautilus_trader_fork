@@ -1652,13 +1652,13 @@ class CaptureService:
         only on a local send failure, so a venue that rejects a subscription asynchronously
         (dYdX's per-connection limit, an unknown market) leaves the id applied, not pending; the
         rejection shows only in the Rust client's log and as the book watchdog's silence. The
-        client's `subscribe`/`unsubscribe` must also be idempotent per channel, because a retry,
-        a re-add of a lingering id and the removal of a pending one repeat them after a partial
-        failure: `DydxClient`'s are (it mirrors the Rust client's per-topic reference and its
-        reconnect replay of a failed subscribe); Bybit's and Hyperliquid's are not, harmless
-        while their plans are static (only the startup subscribe and its retry ever run).
-        Upgrade path: surface the venue's subscribe acknowledgement from the Rust clients
-        (outside this fork's `platform/` boundary) and track per-channel state in every client.
+        client's `subscribe`/`unsubscribe` are idempotent per channel, because a retry, a re-add
+        of a lingering id and the removal of a pending one repeat them after a partial failure:
+        every venue client mirrors its Rust client's own bookkeeping -- `DydxClient` its per-topic
+        reference and reconnect replay of a failed subscribe, Bybit's and Hyperliquid's through
+        `capture.application.wire_channels.WireChannels` (Story 29.4). Upgrade path: surface the
+        venue's subscribe acknowledgement from the Rust clients (outside this fork's `platform/`
+        boundary).
         """
         self._applied.add(iid)
         try:

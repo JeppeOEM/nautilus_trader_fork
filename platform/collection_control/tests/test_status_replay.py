@@ -144,21 +144,21 @@ def test_the_aggregate_only_appends_keys_after_the_recorded_bytes(tmp_path: Path
     }
 
 
-def _static_plan(ids: tuple[str, ...]) -> CollectionPlan:
-    """Bybit's shape through the one loader: a flat list, cap its own size, no threshold."""
+def _flat_plan(ids: tuple[str, ...]) -> CollectionPlan:
+    """Bybit's shape through the one loader: a flat list, uncapped (Story 29.4), no threshold."""
     return CollectionPlan(
         venue="BYBIT",
         instruments=tuple(InstrumentEntry(id=iid) for iid in ids),
-        cap=len(ids),
+        cap=None,
     )
 
 
-def test_a_static_plan_publishes_without_markets_before_its_first_apply(tmp_path: Path) -> None:
+def test_an_uncapped_plan_publishes_without_markets_before_its_first_apply(tmp_path: Path) -> None:
     ids = ("BTCUSDT-LINEAR.BYBIT", "BTCUSDT-SPOT.BYBIT")
-    plan = _static_plan(ids)
+    plan = _flat_plan(ids)
     capture = _capture(tmp_path, {"last_book_update_ns": {}, "trade_backfill": {}}, plan)
     bus = _Bus()
-    publisher = StatusPublisher(capture, bus, None, accepts_commands=False)
+    publisher = StatusPublisher(capture, bus, None, accepts_commands=True)
 
     async def _publish() -> None:
         await publisher.refresh(plan)
@@ -173,8 +173,8 @@ def test_a_static_plan_publishes_without_markets_before_its_first_apply(tmp_path
     assert json.loads(messages[2]) == {
         "unpinned_ids": [],
         "venue": "BYBIT",
-        "cap": 2,
-        "accepts_commands": False,
+        "cap": None,  # uncapped (Story 29.4; a static plan published its own size before)
+        "accepts_commands": True,
         "min_liquidity_usd": None,
         "last_apply": None,
     }
@@ -215,9 +215,9 @@ class _FailingFeed:
 
 def test_last_apply_reports_capture_s_most_recent_apply_sorted(tmp_path: Path) -> None:
     error_ledger.reset()
-    ids = ("CCC-USD-PERP.DYDX", "AAA-USD-PERP.DYDX", "BBB-USD-PERP.DYDX")
-    plan = _static_plan(ids)
-    feed = _FailingFeed({"BBB-USD-PERP.DYDX"})
+    ids = ("CCCUSDT-LINEAR.BYBIT", "AAAUSDT-LINEAR.BYBIT", "BBBUSDT-LINEAR.BYBIT")
+    plan = _flat_plan(ids)
+    feed = _FailingFeed({"BBBUSDT-LINEAR.BYBIT"})
     capture = CaptureService(
         CoreConfig(environment="mainnet", catalog_path=str(tmp_path)),
         lambda _on_data, _ledger: feed,
@@ -231,9 +231,9 @@ def test_last_apply_reports_capture_s_most_recent_apply_sorted(tmp_path: Path) -
     aggregate = json.loads(status_messages(plan, frozenset(), status, accepts_commands=False)[-1])
     assert aggregate["last_apply"] == {
         "ts": status.last_applied_ns,
-        "subscribed": ["AAA-USD-PERP.DYDX", "CCC-USD-PERP.DYDX"],
+        "subscribed": ["AAAUSDT-LINEAR.BYBIT", "CCCUSDT-LINEAR.BYBIT"],
         "unsubscribed": [],
-        "failed": ["BBB-USD-PERP.DYDX"],
+        "failed": ["BBBUSDT-LINEAR.BYBIT"],
     }
 
 
@@ -268,7 +268,7 @@ def test_concurrent_publishes_never_interleave_on_the_bus(tmp_path: Path) -> Non
     # dYdX's status loop and its ControlService publish at the same time; bot_tui drops the
     # rows an aggregate's burst did not republish, so each burst must reach the bus whole.
     ids = ("BTCUSDT-LINEAR.BYBIT", "ETHUSDT-LINEAR.BYBIT", "SOLUSDT-LINEAR.BYBIT")
-    plan = _static_plan(ids)
+    plan = _flat_plan(ids)
     capture = _capture(tmp_path, {"last_book_update_ns": {}, "trade_backfill": {}}, plan)
     bus = _YieldingBus()
     publisher = StatusPublisher(capture, bus, None, accepts_commands=False)

@@ -31,7 +31,14 @@ from capture.domain.feed_group import Feed
 from capture.domain.trade_intake import REST_FEED_NAME
 
 
-__all__ = ["MAIN_FEED", "REST_FEED_NAME", "Feed", "optional_feed_step"]
+__all__ = [
+    "MAIN_FEED",
+    "REST_FEED_NAME",
+    "Feed",
+    "OptionalStepFailed",
+    "optional_feed_send",
+    "optional_feed_step",
+]
 
 
 async def optional_feed_step(feed: Feed, action: str, step: Awaitable[Any], ledger: Ledger) -> bool:
@@ -46,3 +53,17 @@ async def optional_feed_step(feed: Feed, action: str, step: Awaitable[Any], ledg
         ledger(sites.TRADE_FEED, f"{feed.name}: {action} failed", e)
         return False
     return True
+
+
+class OptionalStepFailed(Exception):
+    """
+    A trades-only socket step failed and was already ledgered (`optional_feed_send`). Raised so a
+    wire bookkeeping call (`wire_channels.WireChannels`) does not count the channel held and runs
+    its undo; the client then suppresses it, since that socket's failure is never fatal.
+    """
+
+
+async def optional_feed_send(feed: Feed, action: str, step: Awaitable[Any], ledger: Ledger) -> None:
+    """`optional_feed_step`, raising `OptionalStepFailed` (after the ledger entry) on failure."""
+    if not await optional_feed_step(feed, action, step, ledger):
+        raise OptionalStepFailed(f"{feed.name}: {action} failed")

@@ -15,8 +15,8 @@
 """
 The one venue `config.toml` loader (DDD spine AD-D17): a plain TOML file, read once at startup,
 returned as the capture thresholds (`CoreConfig`, or a venue subclass) plus the venue's
-`CollectionPlan`. Only the plan hot-reloads (dYdX's `collection_control`, through this loader
-again); the thresholds are read once per process start.
+`CollectionPlan`. Only the plan hot-reloads (every venue's `collection_control` reload loop,
+through this loader again, Story 29.4); the thresholds are read once per process start.
 
 Each venue's extra keys, defaults, environment names and plan shape are one `VENUE_SCHEMAS` row;
 every key the row does not name is refused, so a typo can never fall back to a default silently.
@@ -168,11 +168,18 @@ def _dydx(raw: dict[str, Any], plan_raw: dict[str, Any]) -> tuple[CoreConfig, Co
     return config, plan
 
 
-def _static_plan(venue: str, plan_raw: dict[str, Any]) -> CollectionPlan:
-    """Build the plan of a flat id list, deduped in order; its cap is its own size."""
+def _flat_plan(venue: str, plan_raw: dict[str, Any]) -> CollectionPlan:
+    """
+    Build the plan of a flat `instruments` id list, deduped in order, plus the optional flat
+    `exclude` list. Uncapped (`cap` None, operator decision 2026-09-26) and without a liquidity
+    threshold: the operator picks these venues' coins by hand (Story 29.4).
+    """
     ids = tuple(dict.fromkeys(_string_list(plan_raw, "instruments")))
     return CollectionPlan(
-        venue=venue, instruments=tuple(InstrumentEntry(id=iid) for iid in ids), cap=len(ids)
+        venue=venue,
+        instruments=tuple(InstrumentEntry(id=iid) for iid in ids),
+        cap=None,
+        excluded=frozenset(_string_list(plan_raw, "exclude")),
     )
 
 
@@ -180,7 +187,7 @@ def _bybit(raw: dict[str, Any], plan_raw: dict[str, Any]) -> tuple[CoreConfig, C
     poll = _positive_int(raw, "open_interest_poll_seconds", BybitConfig.open_interest_poll_seconds)
     schema = VENUE_SCHEMAS["BYBIT"]
     core = core_config_from_dict(raw, schema.environments, extra_keys=schema.extra_keys)
-    return BybitConfig(**asdict(core), open_interest_poll_seconds=poll), _static_plan(
+    return BybitConfig(**asdict(core), open_interest_poll_seconds=poll), _flat_plan(
         "BYBIT", plan_raw
     )
 
@@ -189,7 +196,7 @@ def _hyperliquid(
     raw: dict[str, Any], plan_raw: dict[str, Any]
 ) -> tuple[CoreConfig, CollectionPlan]:
     core = core_config_from_dict(raw, VENUE_SCHEMAS["HYPERLIQUID"].environments)
-    return core, _static_plan("HYPERLIQUID", plan_raw)
+    return core, _flat_plan("HYPERLIQUID", plan_raw)
 
 
 VENUE_SCHEMAS: Mapping[str, VenueSchema] = MappingProxyType(
@@ -207,7 +214,7 @@ VENUE_SCHEMAS: Mapping[str, VenueSchema] = MappingProxyType(
             environments=("mainnet", "testnet"),
             extra_keys=("open_interest_poll_seconds",),
             defaults=MappingProxyType({}),
-            plan_keys=("instruments",),
+            plan_keys=("instruments", "exclude"),
             build=_bybit,
         ),
         "HYPERLIQUID": VenueSchema(
@@ -215,7 +222,7 @@ VENUE_SCHEMAS: Mapping[str, VenueSchema] = MappingProxyType(
             extra_keys=(),
             # The venue's measured push cadence (`capture.venues.hyperliquid.config`).
             defaults=MappingProxyType({"stale_book_seconds": STALE_BOOK_SECONDS}),
-            plan_keys=("instruments",),
+            plan_keys=("instruments", "exclude"),
             build=_hyperliquid,
         ),
     }
@@ -251,9 +258,14 @@ def plan_toml_fields(plan: CollectionPlan) -> dict[str, Any]:
     """
     Return the writer half of the schema: the plan's keys as `venue_config_from_dict` reads them,
     for `collection_control.infrastructure.plan_store.TomlPlanStore.save` to merge into the file.
+    A flat plan (Bybit, Hyperliquid) writes `exclude` only when non-empty, so a file with no
+    exclusions keeps exactly the key set it was committed with.
     """
     if plan.venue != "DYDX":
-        return {"instruments": list(plan.collected)}
+        flat: dict[str, Any] = {"instruments": list(plan.collected)}
+        if plan.excluded:
+            flat["exclude"] = sorted(plan.excluded)
+        return flat
     fields_: dict[str, Any] = {
         "instruments": [_entry_toml(e) for e in plan.instruments],
         "exclude": sorted(plan.excluded),

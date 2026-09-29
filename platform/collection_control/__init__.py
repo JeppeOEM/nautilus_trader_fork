@@ -25,8 +25,8 @@ stays the only deleter, and reads the plan's retention attributes through `TomlP
 Published language (frozen, AD-D12; fields only ever appended): `collector:status` (one row per
 planned instrument, the per-venue plan aggregate -- `unpinned_ids`, then since Story 29.2 `venue`,
 `cap`, `accepts_commands`, `min_liquidity_usd`, `last_apply` -- and the `removed` tombstone) and
-`collector:control` (`{action, id}` with `start`, `unpin`, `stop`, `pin_top_liquid`), both read and
-written by `bot_tui`.
+`collector:control` (`{action, id}` with `start`, `unpin`, `stop`, `pin_top_liquid`, then since
+Story 29.4 `venue` -- absent means dYdX), both read and written by `bot_tui`.
 
 - `domain/` -- `CollectionPlan` (instruments, exclude, cap, the liquidity threshold and the
   dropped-instrument retention) whose commands `add`/`remove`/`pin`/`unpin`/`exclude`/`reload`
@@ -38,10 +38,10 @@ written by `bot_tui`.
 - `infrastructure/` -- `TomlPlanStore` over the venue `config.toml` through capture's one loader
   (`capture.infrastructure.config`), the Redis bus and channel, and `DydxMarkets` (the indexer's markets).
 
-Every venue publishes status; only dYdX takes control. dYdX's composition root,
-`capture/venues/dydx/__main__.py`'s `build_capture_from_file`, hands the three loops (reload,
-status, control) to the capture service through `add_loops`. Bybit's and Hyperliquid's apply a
-static plan once at start and wire only the status loop over it (Story 29.2), published with
-`accepts_commands` false. No module here holds mutable runtime state: every piece of state lives
-on an instance the composition root builds.
+Every venue publishes status and takes control (Bybit and Hyperliquid since Story 29.4; Story
+29.2 wired only their status loop). Each venue's composition root,
+`capture/venues/<venue>/__main__.py`'s `build_capture_from_file`, hands the three loops (reload,
+status, control) to the capture service through `add_loops`, and each `ControlService` acts only
+on the `collector:control` messages addressed to its venue. No module here holds mutable runtime
+state: every piece of state lives on an instance the composition root builds.
 """

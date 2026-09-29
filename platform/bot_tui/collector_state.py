@@ -22,7 +22,9 @@ message per instrument rather than a single aggregated payload.
 Story 29.2: every venue's collector publishes here, each with its own plan aggregate
 (`unpinned_ids` plus `venue`, `cap`, `accepts_commands`, `min_liquidity_usd`, `last_apply`),
 kept per venue. A row carries no venue: it is derived from the id (SIGNAL-01). Only a plan
-that accepts commands can be driven from here; the rest are shown read-only.
+that accepts commands can be driven from here; the rest are shown read-only. Story 29.4: every
+`collector:control` command carries its venue, and Bybit's and Hyperliquid's plans accept
+commands too.
 """
 
 import asyncio
@@ -32,6 +34,7 @@ import os
 import time
 
 import redis.asyncio as aioredis
+from kernel.venues import VENUE_KINDS
 from kernel.venues import MalformedInstrumentId
 from kernel.venues import venue_of
 
@@ -85,8 +88,8 @@ def _drop_rows_not_republished(venue: str, republished: set[str]) -> None:
     """
     Drop `venue`'s rows not republished since its previous aggregate: every publish sends all of a
     plan's rows and then its aggregate, as one uninterrupted burst (`StatusPublisher.publish`
-    serializes its publishes), so such a row left the plan without a tombstone -- a static plan
-    edited and its collector restarted, or a stop missed while this TUI was down.
+    serializes its publishes), so such a row left the plan without a tombstone -- a plan file
+    edited while its collector was down, or a stop missed while this TUI was down.
     Known limit: a listener that reconnects in the middle of a publish drops the rows it missed
     until the next one (a republish within `STATUS_CHANGE_POLL_SECONDS` of a change, else at the
     full cadence); upgrade path: a per-publish sequence number on every message.
@@ -156,41 +159,58 @@ def collected_count(venue: str) -> int:
     return sum(1 for iid in _LATEST_COLLECTOR_STATUS if venue_of_row(iid) == venue)
 
 
-def command_refusal(venue: str) -> str | None:
+def command_refusal(venue: str, now: float | None = None) -> str | None:
     """
     Return why `venue`'s plan cannot take a `collector:control` command, or None if it can.
 
-    Known limit: `collector:control` carries no venue, so every listening `ControlService` acts on
-    a command. That is safe only while dYdX is the one plan with `accepts_commands` (its
-    `CollectionPlan.add` does not check an id's venue); upgrade path: Story 29.4's venue field on
-    `collector:control`, read by each venue's control loop.
+    Every command carries its venue (Story 29.4), and each venue's collector acts only on its
+    own, so only a plan whose aggregate says `accepts_commands` is driven from here (an aggregate
+    without that key, from a pre-29.2 producer, keeps the pre-story contract: only dYdX). With no
+    aggregate cached at all -- the collector is down, or has not published since this TUI started
+    -- every venue is refused, dYdX included, so nothing is sent to a consumer that may not
+    exist (e.g. after `make down-dydx`). An aggregate older than the staleness window
+    (`_STATUS_STALE_SECONDS`) is refused too.
 
-    `collector:control` carries no venue, so only a plan whose aggregate says
-    `accepts_commands` is driven from here. An aggregate without that key (a pre-29.2
-    producer), or none yet, keeps the pre-story contract: only dYdX accepts commands.
+    Known limit: a collector stopped less than `_STATUS_STALE_SECONDS` ago still gets commands
+    (with no error shown), because a plan's aggregate republishes only every 1800 s
+    (`PLAN_STATUS_SECONDS`/`liquidity_check_seconds`) and the window must outlast that. For the
+    same reason a TUI started between two publishes refuses every command for up to 1800 s,
+    dYdX's too (which, before Story 29.4, it sent blind), until a publish arrives: a command,
+    a reload, a pending row settling or a collector restart publishes at once. Upgrade path for
+    both: a faster aggregate heartbeat, then a window of a few heartbeats (or the last publish
+    kept in a Redis key this TUI reads on connect, `PLAN_STATUS_SECONDS`'s own limit).
     """
     if venue == UNKNOWN_VENUE:
         return "unknown venue: the id has no venue suffix"
+    if venue not in VENUE_KINDS:
+        return f"unknown venue {venue!r}: not one of {', '.join(sorted(VENUE_KINDS))}"
     plan = _LATEST_PLANS.get(venue)
     if plan is None:
-        return (
-            None if venue == LEGACY_PLAN_VENUE else f"waiting for {venue} plan on collector:status"
-        )
+        return f"waiting for {venue} plan on collector:status"
+    if plan_is_stale(venue, now):
+        minutes = _STATUS_STALE_SECONDS / 60
+        return f"{venue}: no collector:status for over {minutes:.0f} min (collector down?)"
     if plan.get("accepts_commands", venue == LEGACY_PLAN_VENUE) is True:
         return None
     return f"{venue}: static plan: edit platform/capture/venues/{venue.lower()}/config.toml"
 
 
-async def publish_control(redis_url: str, action: str, instrument_id: str | None = None) -> None:
+async def publish_control(
+    redis_url: str, action: str, instrument_id: str | None = None, venue: str | None = None
+) -> None:
     """
     Publish a start/unpin/stop/pin_top_liquid request to collector:control.
-    `instrument_id` is omitted for pin_top_liquid, which targets no single id.
+    `instrument_id` is omitted for pin_top_liquid, which targets no single id. `venue` (Story
+    29.4) is appended last, so the pre-29.4 `{action, id}` bytes stay the payload's prefix; each
+    venue's collector acts only on its own venue, and one without it is dYdX's.
     Short-lived per-call connection -- same reasoning as bots_state.publish_control:
     a rare, human-triggered action, not worth a persistent publisher connection.
     """
     payload: dict = {"action": action}
     if instrument_id is not None:
         payload["id"] = instrument_id
+    if venue is not None:
+        payload["venue"] = venue
     try:
         async with aioredis.Redis.from_url(redis_url, decode_responses=True) as client:
             await client.publish("collector:control", json.dumps(payload))

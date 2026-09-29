@@ -24,9 +24,12 @@ from collections.abc import Callable
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
 from observability import error_ledger
 
 from capture.application.feed import Feed
+from capture.application.wire_channels import WireChannels
+from capture.venues.bybit.client import BYBIT_WS_FRAMES_PER_SECOND
 from capture.venues.bybit.client import LINEAR_FEED
 from capture.venues.bybit.client import LINEAR_TRADES_FEED
 from capture.venues.bybit.client import SPOT_FEED
@@ -78,6 +81,8 @@ def _client(trade_feeds: int) -> tuple[BybitClient, list[tuple[object, Feed]], d
         trade_feeds=trade_feeds,
         ledger=error_ledger.record,
     )
+    # Unpaced for speed; the pacing itself is `capture/tests/test_wire_channels.py`'s.
+    client._wire = WireChannels(1e6)
     stubs = {feed: _StubWs() for feed in client.feed_states()}
     client._ws_linear, client._ws_spot = stubs[LINEAR_FEED], stubs[SPOT_FEED]
     if trade_feeds == 2:
@@ -175,3 +180,105 @@ def test_a_failing_trades_only_socket_never_takes_the_primary_down() -> None:
     asyncio.run(client.subscribe(_LINEAR))
     assert ("subscribe_orderbook", _LINEAR) in stubs[LINEAR_FEED].calls
     assert error_ledger.counts() == {"collector.trade_feed": 1}
+    # Undone (the reference the failed call took is dropped) and left unheld for the next retry.
+    assert ("unsubscribe_trades", _LINEAR) in stubs[LINEAR_TRADES_FEED].calls
+    assert not client._wire.is_held(("twin-trades", _LINEAR))
+
+
+def _fail_once(stub: _StubWs, name: str) -> None:
+    """Make `name` raise on its first call only (a failed command-channel send)."""
+    failed: list[bool] = []
+
+    async def call(iid: Any, *_rest: Any) -> None:
+        stub.calls.append((name, str(iid)))
+        if not failed:
+            failed.append(True)
+            raise RuntimeError(f"{name}: command channel closed")
+
+    setattr(stub, name, call)
+
+
+def _wire_calls(stub: _StubWs) -> list[str]:
+    return [name for name, _ in stub.calls if name != "cache_instrument"]
+
+
+def test_the_client_paces_at_the_named_bybit_rate() -> None:
+    client = BybitClient(lambda data, feed: None, ledger=error_ledger.record)
+    assert client._wire._interval == 1 / BYBIT_WS_FRAMES_PER_SECOND
+
+
+def test_a_repeated_subscribe_sends_nothing_new() -> None:
+    client, _, stubs = _client(2)
+    asyncio.run(client.subscribe(_LINEAR))
+    asyncio.run(client.subscribe(_LINEAR))
+    assert _wire_calls(stubs[LINEAR_FEED]) == [
+        "subscribe_trades",
+        "subscribe_orderbook",
+        "subscribe_ticker",
+    ]
+    assert _wire_calls(stubs[LINEAR_TRADES_FEED]) == ["subscribe_trades"]
+
+
+def test_a_failed_subscribe_is_undone_and_the_retry_sends_it_again() -> None:
+    # Bybit's Rust client takes the topic reference before the failing send: the undo (the
+    # inverse unsubscribe) drops it, so the retry's subscribe starts a fresh reference.
+    client, _, stubs = _client(1)
+    _fail_once(stubs[LINEAR_FEED], "subscribe_orderbook")
+    with pytest.raises(RuntimeError, match="command channel closed"):
+        asyncio.run(client.subscribe(_LINEAR))
+    assert not client._wire.is_held(("orderbook", _LINEAR))
+    asyncio.run(client.subscribe(_LINEAR))
+    assert _wire_calls(stubs[LINEAR_FEED]) == [
+        "subscribe_trades",
+        "subscribe_orderbook",
+        "unsubscribe_orderbook",  # the undo
+        "subscribe_orderbook",
+        "subscribe_ticker",
+    ]
+
+
+def test_an_unsubscribe_after_a_partial_failure_releases_each_held_channel_once() -> None:
+    client, _, stubs = _client(1)
+    _fail_once(stubs[LINEAR_FEED], "subscribe_orderbook")
+    with pytest.raises(RuntimeError, match="command channel closed"):
+        asyncio.run(client.subscribe(_LINEAR))
+    asyncio.run(client.unsubscribe(_LINEAR))
+    asyncio.run(client.unsubscribe(_LINEAR))
+    assert _wire_calls(stubs[LINEAR_FEED]) == [
+        "subscribe_trades",
+        "subscribe_orderbook",
+        "unsubscribe_orderbook",  # the undo
+        "unsubscribe_trades",
+    ]
+
+
+def test_a_failed_trades_socket_unsubscribe_raises_and_is_retried() -> None:
+    client, _, stubs = _client(2)
+    asyncio.run(client.subscribe(_LINEAR))
+    _fail_once(stubs[LINEAR_TRADES_FEED], "unsubscribe_trades")
+    with pytest.raises(RuntimeError, match="command channel closed"):
+        asyncio.run(client.unsubscribe(_LINEAR))
+    assert client._wire.is_held(("twin-trades", _LINEAR))
+    asyncio.run(client.unsubscribe(_LINEAR))
+    assert _wire_calls(stubs[LINEAR_TRADES_FEED]) == [
+        "subscribe_trades",
+        "unsubscribe_trades",
+        "subscribe_trades",  # the undo restores the Rust reference the failed call dropped
+        "unsubscribe_trades",
+    ]
+    assert not client._wire.is_held(("twin-trades", _LINEAR))
+
+
+def test_a_resync_resubscribes_the_book_and_keeps_one_reference() -> None:
+    client, _, stubs = _client(1)
+    asyncio.run(client.subscribe(_SPOT))
+    asyncio.run(client.resync_orderbook(_SPOT))
+    asyncio.run(client.unsubscribe(_SPOT))
+    assert _wire_calls(stubs[SPOT_FEED]) == [
+        "subscribe_trades",
+        "subscribe_orderbook",
+        "unsubscribe_orderbook",
+        "subscribe_orderbook",
+        "unsubscribe_trades",
+        "unsubscribe_orderbook",
+    ]

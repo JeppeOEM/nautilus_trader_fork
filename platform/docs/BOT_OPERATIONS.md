@@ -55,14 +55,29 @@ to Bots and `:help` lists every key. Rankings and the ranking-mode switch are we
 
 The Collector pane has one section per venue that publishes `collector:status` (dYdX, Bybit,
 Hyperliquid; Story 29.2), sorted by venue. Each section is headed
-`<VENUE>: N collected +P pending · cap C` (P = planned but not yet subscribed), then shows the
-plan's last apply (what the collector last subscribed, unsubscribed or failed, with its time),
-the rows (`pending` marks a planned id not yet subscribed; a liquidity label only on a plan that
-classifies liquidity, i.e. dYdX) and the venue's `unpinned` line. `~` marks a stale row or a
-stale section. Only dYdX's plan accepts commands: `p`, `x`, `:start <ID>` and `:pintop` work
-there, and on a Bybit or Hyperliquid row (or a `:start` of such an id) they are refused with
-`<VENUE>: static plan: edit platform/capture/venues/<venue>/config.toml` and nothing is sent
-— edit that file and restart the collector instead (runtime control for them is Story 29.4).
+`<VENUE>: N collected +P pending · cap C` (P = planned but not yet subscribed; Bybit and
+Hyperliquid, which have no coin cap, read `· no cap`), then shows the plan's last apply (what the
+collector last subscribed, unsubscribed or failed, with its time), the rows (`pending` marks a
+planned id not yet subscribed; a liquidity label only on a plan that classifies liquidity, i.e.
+dYdX) and the venue's `unpinned` line. `~` marks a stale row or a stale section. Every venue's
+plan accepts commands (Bybit and Hyperliquid since Story 29.4): `p` (unpin: stop and exclude),
+`x` (stop) and `:start <ID>` work on any venue's row or id, each sent on `collector:control`
+addressed to the id's venue, so only that venue's collector acts. `:pintop` is dYdX's only (it
+fills dYdX's cap by liquidity; Bybit's and Hyperliquid's collectors refuse a pin). A command is
+refused before sending, with the reason, when the venue has published no plan since the TUI
+started (`waiting for <VENUE> plan on collector:status`, dYdX included) or its status is stale
+(`<VENUE>: no collector:status for over 60 min (collector down?)`); a collector stopped less
+than an hour ago still receives commands, since plans republish only every 30 min. For the same
+reason a freshly started TUI can wait up to 30 min for a venue's first plan and refuses its
+commands until then (a restart of that collector publishes at once). Hyperliquid
+counts its WebSocket channels against the venue's 1000 per IP: a `:start` past that budget stays
+`pending`, with a `collector.subscribe_failed` ledger entry per retry naming the limit (this
+collector's own channels only; `live-paper` on the same IP shrinks the real budget). On Bybit and Hyperliquid a command
+rewrites the committed `platform/capture/venues/<venue>/config.toml` (its comments are lost; the
+VPS checkout then shows it modified, see `docs/DEPLOY_CHECKLIST.md`), and an in-place hand edit
+of that file is picked up within 30 s without a restart (a replaced file -- `git checkout`,
+`sed -i` -- needs `docker compose restart` of the collector). An `unpin` adds the optional `exclude` list to
+that file; a `:start` of the id removes it again.
 Stopping a *running* bot opens a type-to-confirm prompt (type `stop` + Enter); starting
 has no such guard. `bot_tui` needs `redis` up (`make up` or `make up-live-paper` bring it
 up) but not `live-paper` itself — an offline bot just shows as stale.

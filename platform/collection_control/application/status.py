@@ -23,8 +23,9 @@ Fields are only ever appended:
 - Story 29.2: the aggregate carries, after `unpinned_ids`, the plan's `venue`, `cap`,
   `accepts_commands` (whether `collector:control` drives this plan), `min_liquidity_usd` (null
   when the plan classifies no liquidity) and `last_apply` (capture's most recent apply, null
-  before the first). Every venue publishes it: dYdX from its live plan, Bybit and Hyperliquid
-  from their static plan. A row carries no venue: `bot_tui` derives it from the id (SIGNAL-01).
+  before the first). Every venue publishes it from its live plan. `cap` is null for an uncapped
+  plan (Bybit, Hyperliquid since Story 29.4, which also set their `accepts_commands` true). A row
+  carries no venue: `bot_tui` derives it from the id (SIGNAL-01).
 """
 
 import asyncio
@@ -49,15 +50,16 @@ from collection_control.domain.plan import CollectionPlan
 # than after up to `liquidity_check_seconds` (1800 s). Capture retries every 30 s.
 STATUS_CHANGE_POLL_SECONDS = 30.0
 
-# A static plan (Bybit, Hyperliquid: no control plane) never changes while the process runs, so
-# its full republish only keeps `bot_tui`'s rows fresh -- the same cadence as dYdX's default
-# `liquidity_check_seconds`, which `bot_tui`'s staleness window (3600 s) is sized against. A
-# pending row or a new apply still republishes within `STATUS_CHANGE_POLL_SECONDS`.
+# The full-republish cadence of a plan with no liquidity refresh (Bybit, Hyperliquid): a command or
+# a reload publishes at once itself, so this only keeps `bot_tui`'s rows fresh -- the same cadence
+# as dYdX's default `liquidity_check_seconds`, which `bot_tui`'s staleness window (3600 s) is sized
+# against. A pending row or a new apply still republishes within `STATUS_CHANGE_POLL_SECONDS`.
+# (Named `STATIC_PLAN_STATUS_SECONDS` until Story 29.4 made these plans commandable.)
 # Known limit: Redis pub/sub keeps no history, so a `bot_tui` started between two publishes shows
 # no section for this venue until the next one (up to this long, as for dYdX's
 # `liquidity_check_seconds`); upgrade path: also keep the last publish in a Redis key the TUI
 # reads on connect.
-STATIC_PLAN_STATUS_SECONDS = 1800.0
+PLAN_STATUS_SECONDS = 1800.0
 
 
 def pending_ids(plan: CollectionPlan, status: CaptureStatus) -> frozenset[str]:
@@ -157,7 +159,7 @@ class StatusPublisher:
     the plan's own threshold with its `exclude` (OBS-03), and a planned instrument capture has not
     applied is always marked `pending` -- the status never shows as collected what the feed never
     subscribed (AD-D17). Until the first `refresh`, every row reads `liquid: false`, and a plan
-    without a liquidity threshold (a static plan) is never classified: its rows stay `false`.
+    without a liquidity threshold (Bybit's, Hyperliquid's) is never classified: its rows stay `false`.
 
     `markets` is None only for a plan that classifies nothing; `accepts_commands` is published
     as-is and states whether the composition root wired a `ControlService` for this plan.

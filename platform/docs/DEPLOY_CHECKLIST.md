@@ -596,8 +596,9 @@ its cause (DATA-02); dYdX keeps running until check 6. URLs are the VPS's `data_
    a dYdX id that vanishes from both before it was listed stale fails the check (DATA-01).
    `ranking`'s dYdX volume poll keeps running; a venue with no fresh rows publishes none. In
    `make tui`'s Collector pane, the DYDX section turns stale (`~`) and its actions go nowhere,
-   because no collector consumes `collector:control` any more. Expected: do not pin or start
-   dYdX coins from it. The nightly after this day fails the down day for every `.DYDX` id (see
+   because no collector consumes dYdX's `collector:control` messages any more; once its last
+   status is over an hour old the pane refuses them with the reason (`no collector:status for
+   over 60 min`, Story 29.4). Expected: do not pin or start dYdX coins from it. The nightly after this day fails the down day for every `.DYDX` id (see
    "Partial days" above).
 7. **A fresh boot starts Bybit and Hyperliquid only.** First check that `platform/.env` does not
    set `COMPOSE_PROFILES` to anything containing `dydx` (compose reads it, and it would enable the
@@ -822,3 +823,51 @@ not just restarted.
       `stale_book_seconds` in `capture/venues/hyperliquid/config.toml` were measured on BTC/ETH/PURR.
 - [ ] Later, once §8's retirement check passes, drop `DYDX` from `platform/archive/config.toml`'s
       `venues` (a commit, then `docker compose restart archive`).
+
+### 29-4 Runtime collection control for Bybit and Hyperliquid (commit: this story's)
+
+- [ ] Before redeploying, check the two plan files are writable by the collectors' uid 1000 (their
+      config mounts are `:rw` now, and the plan store rewrites them in place):
+      `stat -c '%u %n' capture/venues/bybit/config.toml capture/venues/hyperliquid/config.toml`
+      prints `1000` for both, else `chown 1000 <file>`. A file uid 1000 cannot write makes every
+      command fail its save (`collector.control` "plan save failed", plan unchanged).
+- [ ] If the `dydx` profile is still up (`docker compose ps collector` lists it), move it onto
+      this image first: `make up-dydx` right after `make redeploy-all`, before any command is
+      sent from a new `bot_tui`. `redeploy-all` builds the image but never restarts `collector`,
+      and a pre-29.4 dYdX collector ignores `venue` and does not check an id's venue, so it
+      would add a `:start SOLUSDT-LINEAR.BYBIT` to `data/dydx_config.toml` as well.
+- [ ] `make redeploy-all` (rebuilds and restarts `bybit_collector` and `hyperliquid_collector`).
+      Expected in `make tui`'s Collector pane within a minute: the BYBIT and HYPERLIQUID headers
+      read `· no cap`, and their `p`/`x`/`:start` are no longer refused as a static plan.
+- [ ] On each venue, `:start` one new coin (e.g. `:start SOLUSDT-LINEAR.BYBIT`, `:start
+      ETH-USD-PERP.HYPERLIQUID`): its row appears `pending`, then turns collected within a few
+      seconds, and the section's last-apply line lists it as subscribed. `GET /api/errors` shows no
+      new `collector.subscribe_failed` or `collector.control` for it.
+- [ ] `x` (stop) that coin on each venue: its row drops from the pane at once, and on the web
+      rankings (filter by Exchange) its row turns stale within about 30 s and is gone an hour later
+      (never hidden early, DATA-01). Its catalog files stay (`ls data/catalog/data/*/<id>*`).
+- [ ] Confirm dYdX ignores the new commands: `docker compose logs collector` (when the `dydx`
+      profile is up) shows no WARNING for the Bybit/Hyperliquid ids.
+- [ ] The commands rewrote the committed files: `git status` on the VPS lists
+      `platform/capture/venues/bybit/config.toml` and `.../hyperliquid/config.toml` modified (their
+      comments are gone). Commit the new plan back from the desktop (copy the ids into the
+      committed file, comments kept, and update `tests/test_committed_config.py` if the decided
+      set changed), then bring the VPS checkout to it (`git checkout -- <file>` then `git pull`,
+      or `git pull` after a commit of the VPS change). Each plan file is a single-file bind
+      mount, which follows the inode: `git checkout`/`git pull`, `sed -i` or an editor that saves
+      by rename *replace* the file, the running collector never sees the new one, and its later
+      command saves land in the orphaned inode and are lost. So after any such replacement run
+      `docker compose restart bybit_collector hyperliquid_collector` (and `collector` for
+      `data/dydx_config.toml`); only an in-place write (`cat new > file`, an editor writing in
+      place) reaches the 30 s hot reload. Do this before every `git pull` on the VPS, which
+      otherwise refuses to overwrite the modified file. A replaced file is owned by whoever ran
+      git, so re-run the uid check of this entry's first item after it (`chown 1000 <file>` if
+      needed), or every later command fails its save.
+- [ ] A Hyperliquid coin that would take the collector past the venue's 1000 channels per IP
+      (`HYPERLIQUID_MAX_WS_CHANNELS`, counting only this collector's own channels) stays `pending`
+      with a `collector.subscribe_failed` ledger entry per retry naming the limit: that is the
+      expected refusal, not a fault. With `live-paper` also on Hyperliquid from the same IP, the
+      real budget is smaller than the collector counts.
+- [ ] Watch the first reconnect of each collector after a larger plan change: the Rust clients
+      replay every held subscription unpaced (a `Known limit:` in both clients). `GET /api/errors`
+      shows no subscribe errors and the pane no lasting `pending` rows afterwards.
