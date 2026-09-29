@@ -95,7 +95,7 @@ delivers the comparator (`python -m verification.<tool> --venue V --day D`).
 | | SOL-USD-PERP.HYPERLIQUID | pending — tool built (Story 31.6); verdict pending Story 31.11 | smoke: 0 | Smoke as above: REST agree 474, between_pushes 8 (REST values no WS frame of the day held: open interest moves on every fill and the WS push samples it) -> validated; exact **4,875**, failing 0; updates stored 4,875, not_stored 0 | as above |
 | | BTCUSDT-SPOT, ETHUSDT-SPOT | n/a (spot has none); smoke: **0 fabricated** under `custom_open_interest`/`funding_rate_update` | | | as above |
 | Instrument definitions | all 5 | pending — tool built (Story 31.6); verdict pending Story 31.11; SOL **DEVIATION** D-106 (`lot_size` 1 is Nautilus's default, not venue-declared, not compared) | smoke: 0 | Smoke as above: each instrument agree **481**, differs 0, before_first_definition 1 (the recorder's first poll preceded the collector's start), no venue change; one stored definition each (the collector's 12:59:21-23Z start). Every field compared: price/size precision, price/size increment, lot size (Bybit), min quantity, multiplier | as above |
-| Catalog integrity and backtest-read parity | all 5 | pending — Story 31.7 | | | |
+| Catalog integrity and backtest-read parity | all 5 | pending — tool built (Story 31.7); verdict pending Story 31.11 (it must run the tool **before** the nightly consolidates D, or the rehearsal reads `not_exercised`, D-116); smoke **OPEN** D-113 (no Nautilus decoder for `IndexPriceUpdate`: every index file `open_failed`), candle **DEVIATION** D-115 (`float_noise`, documented) | smoke: 0 except D-113 (Bybit 434 index files, Hyperliquid 216) | Smoke 2026-09-29 12:59-19:30Z (a hard-linked copy of the restarted soak's catalog and an sqlite `backup` of each candle store taken together at 19:30:08Z; tool at 9626ad42c7 + the Story 31.7 change set). **Structure:** every type one schema class; bad_name, overlap, name_span, unsorted, empty, null_ts, open_count, unknown_type, duplicate_ts_event 0 everywhere; open_failed 0 except `index_price_update` (D-113). Bybit trade files 391 per instrument (BTCUSDT-LINEAR 755,047 rows, ETHUSDT-LINEAR 1,007,872, BTCUSDT-SPOT 357,187, ETHUSDT-SPOT 107,380), snapshots 391 (23,428 / 23,428 / 23,430 / 23,435); Hyperliquid SOL trades 391 files / 30,701, snapshots 391 / 23,436. **Rehearsal:** leaves_failed 0, days_refused 0; Bybit trades 1,564 -> 1,564 -> 4 files, 2,227,486 rows `identical`, snapshots 1,564 -> 4, 93,721 `identical`, index 434 -> 28 -> 2, mark 433 -> 27 -> 2, funding 317 -> 14 -> 2, open interest 88 -> 14 -> 2 `identical`, definitions `not_exercised`; Hyperliquid every data type `identical` (trades 391 -> 1, snapshots 391 -> 1, index 216 -> 11 -> 1, mark 216 -> 10 -> 1, OI 216 -> 12 -> 1, funding 9 -> 8 -> 1). **Parity** (stored = query = received, count and digest, `beyond_margin` 0): BTCUSDT-LINEAR trades 755,047 `4aa620fd…`, snapshots 23,428 `c99e0c92…`; ETHUSDT-LINEAR 1,007,872 `cda6acfd…`, 23,428 `63d7357b…`; BTCUSDT-SPOT 357,187 `2992d293…`, 23,430 `bcf0d6b6…`; ETHUSDT-SPOT 107,380 `bb56447f…`, 23,435 `2b96ce6f…`; SOL 30,701 `4ca12a31…`, 23,436 `92f19f4c…`; read_mismatch 0. **Candles** (all six widths): exact / float_noise, 0 different, undefined_mismatch, missing, extra, unknown_width: BTCUSDT-LINEAR 259 / 252, ETHUSDT-LINEAR 276 / 235, BTCUSDT-SPOT 271 / 237, ETHUSDT-SPOT 253 / 258, SOL 256 / 252 (D-115). Runtime 257 s (Bybit) / 38 s (Hyperliquid); peak RSS 1.56 GB / 0.71 GB | `python3 -m verification.catalog --venue V --day D` (`docs/DATA_DICTIONARY.md` §1.20) |
 | Candles and klines, every timeframe | all 5 | pending — Story 31.8 | | | |
 | Live, backtest and display parity (incl. the bot's signals) | all 5 | pending — Story 31.9 | | | |
 | Fault injection: every loss accounted for | Bybit, Hyperliquid | pending — Story 31.10 | | | |
@@ -133,6 +133,23 @@ which refused Hyperliquid's funding file on `"-9.368E-7"` -- the verifier's read
 (D-108). Every other failing count was 0. Runtime: 6.6 s (Bybit, four instruments), 1.5 s
 (Hyperliquid).
 After the follow-up review's patches (D-111) the smoke was rerun at 18:45Z over the closed hours 12..17: every Bybit value failing count 0 (BTCUSDT mark exact 15,016, index 36,021, funding 147; ETHUSDT 14,706, 35,102, 107; OI agree_state 59 each, the same two partial-day `poll_gaps`), definitions agree 601 each, spot 0 fabricated; Hyperliquid SOL mark exact 4,424, funding 1,411, OI 5,787, failing 0, and index exact 5,054 with **not_stored 1** -- the match-bound edge D-112 (OPEN), not a capture loss. Runtime: 8.1 s (Bybit), 2.1 s (Hyperliquid).
+
+**Catalog smoke (Story 31.7), how it was run.** The soak's first closed day is 2026-09-30 and
+the verify stack was still writing 2026-09-29, so at 19:30:08Z (8 s after a minute's flush, when
+capture's Parquet files and its candle store had both taken the same seconds) every file of the
+plan's five instruments under every type directory was hard-linked into a scratch catalog (5,844
+files in 0.25 s) and each `candles_<venue>.db` was copied with sqlite's online `backup`; then
+`verification.catalog.main([--venue V --day 2026-09-29 --catalog <copy> --candles <copy>
+--scratch-dir <scratch>], clock=<2026-10-01T00:00Z>)` with the committed `config.toml`s and
+`ERROR_LEDGER_DIR` unset. The live catalog and store were never opened for writing. The day is
+partial (12:59:19Z-19:30Z): the copy and the store backup end at the same flush, so the store holds
+no bar the copy lacks -- every candle bucket of every width compared, none `missing` or `extra`;
+the 19:00Z hour and the 16:00Z/1d buckets are partial on both sides alike (`seconds_observed`
+equal). The rehearsal's nightly stage ran as of the clock (D closed); its intraday stage as of
+D's last instant, so it merged the small types' hours the live `archive` service had not merged
+yet. The first development run (a 12:59-15:00Z prototype copy) read every mark file
+`open_failed` through the `files=` PyArrow path -- a verifier edge, fixed (D-114); the one
+remaining failing class is D-113.
 
 ## Reference recorder footprint
 

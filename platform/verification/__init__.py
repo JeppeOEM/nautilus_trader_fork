@@ -42,6 +42,10 @@ so a wrong wire symbol or host there misleads both sides alike (`domain/subscrip
 - `infrastructure/`: the hourly zstd JSONL raw store and the aiohttp adapters; imported only by
   the composition roots.
 - `recorder.py`: the composition root, `python3 -m verification.recorder --venue V`.
+- `subject/` (Story 31.7): the one exception to the invariant -- the code under test
+  (`ParquetDataCatalog`, `BacktestNode`, the archive's consolidation) that the catalog tool,
+  `python3 -m verification.catalog`, must drive; imported only by that root, never by the oracle
+  (`subject/__init__.py` states the rule).
 - `tools/`: operator tools (`record_fixtures`, the test-fixture recorder; `cut_snapshot_fixtures`,
   which cuts the derived-signal tests' real rows from a soak catalog with pyarrow).
 """

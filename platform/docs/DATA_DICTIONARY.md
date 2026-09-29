@@ -1495,6 +1495,147 @@ instrument's reference as Python objects (a busy full Bybit index day is ~180k r
 hour windows carrying the state); the plan is today's; a Hyperliquid receipt difference above 1 s
 or a Bybit poll slower than 2 s reads as a loud false fail.
 
+### 1.20 Catalog integrity and backtest-read parity (`verification.catalog`, Story 31.7)
+
+Not stored data: the check that the catalog is internally consistent over one closed UTC day and
+that every reader -- a bounded `catalog.query`, a `BacktestNode`, the archive's consolidation,
+the candle store -- sees exactly the stored rows. Readers never dedupe, so a duplicate or an
+overlapping file reaches every consumer; D-24 showed a second schema silently dropping columns;
+consolidation used to be checked by row count only; the candle store's bars had never been
+compared with the rows a strategy reads.
+`python3 -m verification.catalog --venue BYBIT|HYPERLIQUID --day D [--json] [--catalog DIR]
+[--raw-dir DIR] [--candles DIR] [--scratch-dir DIR]` (`verification/catalog.py`, the root;
+`verification/application/catalog.py`; `verification/domain/catalog_check.py`, pure;
+`verification/infrastructure/catalog_scan.py`, the oracle's reads; `verification/subject/`, the
+code under test). Exit 0 when every failing count is 0, 1 otherwise or on a refusal, 2 on usage.
+
+**Oracle and subject (DATA-02).** The tool must open every file through `ParquetDataCatalog`, run
+the archive's own consolidation and read the day through a `BacktestNode` -- the readers and
+writers it judges -- so it drives them from one package, `verification.subject`
+(`nautilus_reads.py`, `backtest_probe.py`, `consolidation.py`), the only non-test verification
+code that may import `nautilus_trader`, `kernel.second_snapshot`, `kernel.open_interest` and the
+archive's consolidation. It may import `verification.domain` (both sides hash rows with the one
+digest), is imported only by `verification.catalog`, and reaches no `capture`, `candles`,
+`ranking`, `views`, `research` or `bots` (`tests/test_boundaries.py`: the DATA-02 walk and the
+allowlist walk stop at it; a runtime probe proves the oracle modules load no `nautilus_trader`).
+The oracle reads raw pyarrow and stdlib `sqlite3`, parses file names itself (never
+`kernel.clocks`) and judges candles with the reference fold (`reference_signals.fold_candles`,
+`RefBook.from_stored`) and `signal_compare.at_places`.
+
+**Scope.** The plan's instruments (the venue `config.toml`, as in every tool) and every
+`<catalog>/data/<type>/` directory holding a leaf for one. A leaf's **day files** are those whose
+name span (`YYYY-MM-DDTHH-MM-SS-<9 digits>Z_<same>.parquet`, UTC ns, inclusive `ts_init`) meets
+`[D - M, D + 1 + M)`, `M = READ_MARGIN_NS = 60 s` -- the soak measured `ts_init - ts_event` at
+1.000-1.006 s for Bybit snapshots, 3.000-3.005 s for Hyperliquid's and at most 9.8 s for trades --
+**or** any leaf file whose Parquet row-group statistics of `ts_init` or `ts_event` (the columns
+themselves where a row group has none) meet that window: a lying name is caught as `name_span`,
+and a row with `ts_event` in D arriving after `D + 1 + M` as `beyond_margin` (a row further apart
+than `M` fails), so the margin can never hide a row. Known limit (cost and scope): once the nightly
+has consolidated D - 1 and D + 1, each is one file whose span meets the margin, so it is a day
+file of D too -- structure-checked, opened and rehearsed with D (roughly doubling the run), and a
+defect in it fails D as well, reported under its own file name; upgrade path: judge only a
+neighbour file's rows inside the window and attribute its own classes to its own day.
+
+**Row digest.** Per row, `blake2b(digest_size=16)` over `repr` of each `(column, value)` pair
+sorted by name, values as pyarrow `to_pylist()` gives them (a dictionary column yields its string,
+a `fixed_size_binary[16]` its bytes); a reader's multiset is `(count, sum of the row digests mod
+2**128)`, order-independent, over every column of the stored file. The subject re-encodes what a
+reader returns with `ArrowSerializer.serialize_batch` (the serializer `write_data` uses) and
+projects it to the stored column names; a stored column the encoding lacks is a `read_mismatch`.
+
+**1. Structure** (every class fails the day when non-zero):
+
+| Class | Counts |
+|---|---|
+| `bad_name` | a leaf file whose name does not parse (or names an impossible date, or ends before it starts) |
+| `overlap` | pairs of day files of a leaf whose inclusive name spans intersect, and pairs of a day file and any other file of the leaf whose name span meets it |
+| `name_span` | a file whose name is not `[min, max]` of its `ts_init` (a name lying outside its rows hides them from name-pruned readers) |
+| `unsorted` | a file whose `ts_init` decreases somewhere |
+| `empty`, `null_ts` | a file without rows; a file with a row whose `ts_init` or `ts_event` is null (such a row is never read as a time: it is out of `beyond_margin` and out of the digest's day filter when its `ts_init` is null) |
+| `open_failed` | `ParquetDataCatalog.query(cls, identifiers=[iid], files=[f], start, end)`, over each UTC hour holding one of the file's `ts_init`s, clipped to their `[min, max]` (never its name, so neither a corrupt name nor one stray stamp far from the rest becomes thousands of queries), raises. `files=` always takes Nautilus's PyArrow path, which has no decoder for the Rust-only types; a file of a type the catalog reads through its Rust backend (`MarkPriceUpdate`) is then opened by the same bounded query without `files=` -- what a backtest runs; the window is the file's own span, so only its rows while `overlap` is 0 (audit D-114). `IndexPriceUpdate` decodes on neither path in the pinned Nautilus (§1.5): every index file is `open_failed` (audit D-113, OPEN) |
+| `open_count` | the decoded total differs from the file's rows (a file with no non-null `ts_init` is not opened: `empty`/`null_ts` judge it) |
+| `unknown_type` | a type directory with no Nautilus class (its files are not opened, so never also `open_failed`): the class map is built from Nautilus's data and instrument classes and the two custom types through Nautilus's own `class_to_filename`, never typed by hand |
+| `schemas` > 1 | per type, the signatures of its day files: the ordered (name, Arrow type) list plus the sorted metadata **keys** (the values are per-instrument precision labels, judged by §1.19). Each class is listed with its file count and one path |
+| `duplicate_ts_event` | snapshots: rows beyond the first sharing `(iid, ts_event)` among rows with `ts_event` in D |
+
+**2. Consolidation rehearsal.** The day files are hard-linked (a copy where a link is refused)
+into a `TemporaryDirectory` under `--scratch-dir` (default `<VERIFY_DATA_DIR>/scratch`), keeping
+the `data/<type>/<iid>/` layout; digest per type (`linked`); the archive's own
+`run_closed_hours(writer, scratch, now_ns = D + 1 - 1 ns)` (the intraday merge of the small types'
+closed hours; `intraday`); then `run(writer, scratch, None, None, True, now_ns = the clock)` (the
+nightly consolidation of every closed day, every type; `nightly`), the writer from
+`maintenance(scratch)` clocked at each stage's `now_ns`. A type's digest is recomputed only when
+its files' (name, inode, size, mtime) changed. Verdict per type: `identical` (all three digests
+equal and a file was rewritten), `not_exercised` (no file changed: printed, not failing),
+`different` (fails); the archive's `leaves_failed` and `days_refused` fail too. Known limit:
+intraday merges are rehearsed only while unmerged hours remain (the live `archive` service merges
+the small types hour by hour), and a day the nightly already consolidated reads `not_exercised`
+for every type -- Story 31.11 runs the tool before the nightly consolidates D (audit D-116).
+
+**3. Backtest-read parity** (per plan instrument, `trade_tick` and the snapshot): three legs of the
+rows with `ts_init` in D, by count and digest -- `stored` (the oracle's raw read of the day files),
+`query` (24 hourly `catalog.query(cls, identifiers=[iid], start=h, end=h + 1 h - 1)`) and
+`received` (what a `RecordingActor` receives from a `BacktestNode`: `BacktestDataConfig` for
+`TradeTick` and `"kernel.second_snapshot:DydxSecondSnapshot"` with `client_id` = the venue,
+`start_time`/`end_time` bounding `ts_init` over `[D - M, D + 1 + M)`, a `BacktestVenueConfig`
+as the archive's backtest test, logging bypassed, `dispose_on_completion=False`, the actor loaded
+by `ImportableActorConfig` string path and read back from the engine's trader). Any pair that
+differs is a `read_mismatch` naming the pair. Known limit (audit D-117): the pinned Nautilus cannot stream a
+Python custom type through `chunk_size` (the research runner's same limit), so the day is read
+one-shot per window -- one node per window (the margin before D, each hour, the margin after),
+one run config per instrument, each node disposed before the next. A snapshot with `ts_event` in D
+keeps its trade columns for the fold even when its `ts_init` falls after midnight (23:59:59.5
+sampled at 00:00:02.5 is in D's fold, not in D's digest).
+
+**4. Candle parity.** The store `<--candles>/candles_<venue lowercased>.db` (`--candles`, else
+`CANDLES_DIR`, else `<catalog>/../candles`), opened `mode=ro`: every row of the instrument with
+`t` in D, per stored width `STORE_BAR_SECONDS = (60, 300, 900, 3600, 14400, 86400)` (the widths of
+`candles/domain/fold.py`, §2.5); another width is `unknown_width` (fails). The reference is
+`fold_candles` over the received rows with `ts_event` in D (each `RefBook` built from the trade
+columns with empty book lists: the fold reads only trades). Per bucket, o/h/l/c are
+`at_places(stored, reference, price places)` and v `at_places(..., size places)`, the places being
+the largest precision among the bucket's rows; `seconds_observed` must be int-equal:
+
+| Class | Fails |
+|---|---|
+| `exact` | no |
+| `float_noise` | no: reported apart as a DEVIATION -- the store folds decoded floats (`candles/domain/fold.py` Known limit, audit D-115) |
+| `both_undefined` | no: nothing traded on either side |
+| `different`, `undefined_mismatch`, `missing` (reference only), `extra` (store only) | yes |
+
+Known limit: 1m and 5m bars are pruned after `RETAIN_DAYS` (30 and 90 days), so a day older than
+that reads `missing` at those widths.
+
+**Refusals** (ledgered at `verification.catalog.refused`, exit 1 with the message): a day not
+closed (`DAY_SETTLE_NS` after midnight), a missing catalog, candles directory or store file, an
+unreadable plan, a plan instrument without a stored definition, a day file that vanished,
+appeared or changed during the run ("catalog changed during the check (maintenance ran?)" -- every
+day file -- selected as above, each with its (name, inode, size, mtime) -- is fingerprinted first,
+after the rehearsal (the scratch holds hard links) and at the end, so a same-name rewrite counts
+too; a live collector's new file of a later day is no day file and never refuses the run, nor
+does one caught mid-write: `write_data` writes in place, so a file whose name misses the window and
+whose footer cannot be read is left to its own day's check, which lists it by name), an
+uncreatable scratch directory, a scratch directory inside the catalog root. The candle store's bars of D are read once, at the start. Any
+other exception is a crash, ledgered at the same site and re-raised. The tool is read-only outside
+its scratch directory.
+
+`--json` gives `passed`, `failing`, `venue`, `day`, `catalog`, `candle_store`, `read_margin_ns`,
+`instruments`, `structure` (per type `failing`, `known`, `schemas`, `leaves` with `counts` and
+`examples`, `duplicate_ts_event`), `rehearsal` (`failing`, `leaves_failed`, `days_refused`, per
+type `verdict` and `stages` with files, rows and digest), `parity` (per instrument and type the
+three `legs`, `read_mismatch`, `mismatches`, `beyond_margin`), `candles` (per instrument `rows`,
+`unknown_width`, per width `counts` and `examples`) and `float_noise`.
+
+**Repro** (host, from `platform/`, on the verify stack's data): `VERIFY_DATA_DIR=data/verification
+CATALOG_PATH=data/catalog CANDLES_DIR=data/candles python3 -m verification.catalog --venue BYBIT
+--day YYYY-MM-DD [--json]`. Measured cost (smoke, the soak's 12:59-19:30Z, see
+`docs/VERIFICATION_REPORT.md`): Bybit's four instruments (2,227,486 trades, 93,721 snapshots) 257 s
+and 1.56 GB peak RSS, Hyperliquid 38 s and 0.71 GB. Known limit (runtime, memory): every row is
+digested in Python per `repr` (about 7.5 us a trade row and 60 us a snapshot row per pass, six
+passes at most); peak RSS is up to one hour of every plan instrument's objects in the backtest plus
+the engines, and the archive's own merge of the busiest leaf-day (the code under test); upgrade path: an Arrow-compute hash over
+each column.
+
 ---
 
 ## 2. Computed signals / ML features (`platform/kernel/`, `platform/views/`, `platform/ranking/`)

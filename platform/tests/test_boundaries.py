@@ -50,7 +50,10 @@ the contexts of both ends:
 - `verification/` (the independent reference side, Story 31.1) never imports the code it checks
   (`nautilus_pyo3`, `capture`, `candles`, `ranking`, `views`, `kernel.fold`,
   `kernel.second_snapshot`), no other context imports it, its adapters are imported only by its
-  composition roots, and it holds no module-level mutable runtime state.
+  composition roots, and it holds no module-level mutable runtime state. The one exception is
+  `verification.subject` (Story 31.7): the code under test (Nautilus, the archive's consolidation,
+  the snapshot codec) driven by the catalog tool, imported only by `verification.catalog`, reaching
+  none of the contexts the reference checks, and never reached by the oracle's own walk.
 
 One exemption only: `platform/tests` is cross-cutting and may import anything. The DDD migration
 is finished (Story 26.3 deleted its last re-export shims and, with them, every legacy-module map,
@@ -189,6 +192,9 @@ COMPOSITION_ROOTS: dict[str, frozenset[str]] = {
     # place verification meets the code it checks, as test modules only, each naming its contexts.
     "verification.tests.test_reference_signals": frozenset({CANDLES, VIEWS}),
     "verification.tests.test_reference_series": frozenset({CANDLES, RANKING, RESEARCH, VIEWS}),
+    # The catalog tool's subject (Story 31.7) runs the archive's own intraday and nightly
+    # consolidation on a scratch copy -- the code under test, never the oracle.
+    "verification.subject.consolidation": frozenset({ARCHIVE}),
 }
 
 
@@ -2020,8 +2026,15 @@ VERIFICATION_ROOTS = frozenset(
         "verification.trades",
         "verification.book",
         "verification.derivs",
+        "verification.catalog",
     }
 )
+# Story 31.7's subject package: the code under test, driven (never the reference). Only the catalog
+# tool's root imports it; its own reach avoids every context the reference side checks; and the
+# reference side's walks stop at it.
+SUBJECT = "verification.subject"
+SUBJECT_ROOTS = frozenset({"verification.catalog"})
+SUBJECT_DENIED_CONTEXTS = (CAPTURE, CANDLES, RANKING, VIEWS, RESEARCH, BOTS)
 # The reference signals and their comparison rules (Story 31.3) are written from the dictionary
 # alone, in the standard library only -- not even `kernel`: a reference that imported
 # `kernel.indicators` would agree with production by construction.
@@ -2073,16 +2086,24 @@ def _module_parents(module: str) -> list[str]:
     return [".".join(parts[:cut]) for cut in range(1, len(parts) + 1)]
 
 
-def _verification_reach(roots: list[str]) -> dict[str, str]:
+def _is_subject(module: str) -> bool:
+    return module == SUBJECT or module.startswith(SUBJECT + ".")
+
+
+def _verification_reach(roots: list[str], stop_at_subject: bool = True) -> dict[str, str]:
     """
     Every in-repo module the given modules reach through imports, transitively (parent packages
     included), mapped to the module that first imported it -- what an import of the roots runs.
+    With `stop_at_subject`, the walk neither enters nor follows `verification.subject`: what the
+    code under test reaches is not the reference side's (Story 31.7).
     """
     reached: dict[str, str] = {}
     pending = [(root, root) for root in roots]
     while pending:
         current, via = pending.pop()
         for name in _module_parents(current):
+            if stop_at_subject and _is_subject(name):
+                continue
             if name in _KNOWN and name not in reached:
                 reached[name] = via
                 for ref in imports_of(name, _MODULES[name], _KNOWN):
@@ -2098,7 +2119,7 @@ def test_verification_never_imports_the_code_it_checks() -> None:
     however deep (`kernel.venue_http` is standard library only for this reason) -- is a denied
     module or imports `nautilus_pyo3`.
     """
-    sources = _context_sources(VERIFICATION)
+    sources = [m for m in _context_sources(VERIFICATION) if not _is_subject(m)]
     assert len(sources) > 10, "the verification context's modules were not found"
     reached = _verification_reach(sorted(sources))
     denied_modules = sorted(
@@ -2116,7 +2137,8 @@ def test_verification_never_imports_the_code_it_checks() -> None:
 
 
 def test_verification_reaches_only_its_allowlisted_modules() -> None:
-    reached = _verification_reach(sorted(_context_sources(VERIFICATION)))
+    oracle = [m for m in _context_sources(VERIFICATION) if not _is_subject(m)]
+    reached = _verification_reach(sorted(oracle))
     outside = sorted(
         f"{module} (imported by {via})"
         for module, via in reached.items()
@@ -2209,6 +2231,85 @@ def test_verification_infrastructure_is_imported_only_by_its_composition_roots()
     }
     assert importers <= VERIFICATION_ROOTS, sorted(importers - VERIFICATION_ROOTS)
     assert VERIFICATION_ROOTS <= _KNOWN, "a verification composition root naming no module"
+
+
+def test_the_subject_is_imported_only_by_the_catalog_root() -> None:
+    importers = {
+        imp.src
+        for imp in _IMPORTS
+        if _is_subject(imp.dst) and not _is_subject(imp.src) and not _is_test_module(imp.src)
+    }
+    assert importers <= SUBJECT_ROOTS, sorted(importers - SUBJECT_ROOTS)
+    assert SUBJECT_ROOTS <= _KNOWN, "a subject root naming no module"
+
+
+def _subject_modules() -> list[str]:
+    found = sorted(m for m in _context_sources(VERIFICATION) if _is_subject(m))
+    assert len(found) >= 4, "the verification.subject modules were not found"
+    return found
+
+
+def test_the_subject_reaches_no_context_the_reference_checks() -> None:
+    """
+    Transitively, the subject reaches none of `SUBJECT_DENIED_CONTEXTS`; of `verification` it
+    imports only `verification.domain` (the one digest) and itself; and no subject module names
+    `nautilus_pyo3` itself.
+    """
+    subject = _subject_modules()
+    reached = _verification_reach(subject, stop_at_subject=False)
+    denied = sorted(
+        f"{module} (imported by {via})"
+        for module, via in reached.items()
+        if module.split(".")[0] in SUBJECT_DENIED_CONTEXTS
+    )
+    assert denied == [], "the subject drives Nautilus and the archive, nothing the reference checks"
+    oracle = sorted(
+        f"{module} -> {ref.target}"
+        for module in subject
+        for ref in imports_of(module, _MODULES[module], _KNOWN)
+        if ref.target.startswith(VERIFICATION + ".")
+        and not _is_subject(ref.target)
+        and not (
+            ref.target == "verification.domain" or ref.target.startswith("verification.domain.")
+        )
+    )
+    assert oracle == [], "the subject imports only verification.domain of the oracle"
+    pyo3 = [
+        f"{module}:{ref.line}"
+        for module in subject
+        for ref in imports_of(module, _MODULES[module], _KNOWN)
+        if _PYO3 in f"{ref.target}.{ref.name or ''}".split(".")
+    ]
+    assert pyo3 == []
+
+
+def test_importing_the_oracle_side_loads_no_subject_and_no_nautilus() -> None:
+    """
+    The runtime proof for the whole oracle side: importing every non-test `verification` module but
+    the subject and its one root loads no subject, no denied module and no `nautilus_trader`.
+    """
+    oracle = sorted(
+        m
+        for m in _context_sources(VERIFICATION)
+        if not _is_subject(m) and m not in SUBJECT_ROOTS and not m.endswith("__main__")
+    )
+    assert len(oracle) > 10, "the verification oracle modules were not found"
+    import os
+    import subprocess
+
+    probe = f"import sys, {', '.join(oracle)}\nprint('\\n'.join(sorted(sys.modules)))\n"
+    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": str(PLATFORM_DIR)}
+    loaded = subprocess.run(  # noqa: S603 (this interpreter, a fixed snippet)
+        [sys.executable, "-c", probe],
+        cwd=PLATFORM_DIR,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.split()
+    assert [module for module in loaded if _verification_denied(module, None)] == []
+    assert [module for module in loaded if _is_subject(module)] == []
+    assert "nautilus_trader" not in {module.split(".")[0] for module in loaded}
 
 
 @pytest.mark.parametrize("module", REFERENCE_MODULES)

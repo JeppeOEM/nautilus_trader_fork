@@ -28,6 +28,7 @@ _PREFIXES = (
     "verification.trades.",
     "verification.book.",
     "verification.derivs.",
+    "verification.catalog.",
 )
 
 
