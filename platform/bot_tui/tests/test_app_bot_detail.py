@@ -483,3 +483,51 @@ def test_esc_from_bot_detail_also_stops_tracking_incidents() -> None:
     app._open_bot_detail("bot-01")
     app._handle_bot_detail_key("esc")
     assert bot_incidents_state._TRACKED_BOT_ID is None
+
+
+# --- Story 29.6: the position and exit lines ---
+
+
+def _snapshot_texts(app: BotTuiApp) -> list[str]:
+    body = app._build_bot_detail_body()
+    assert isinstance(body, urwid.ListBox)
+    snapshot_box = body.body[0]
+    assert isinstance(snapshot_box, urwid.LineBox)
+    pile = snapshot_box.original_widget
+    assert isinstance(pile, urwid.Pile)
+    return [widget.text for widget, _options in pile.contents]
+
+
+def test_bot_detail_snapshot_shows_the_position_and_exit_lines() -> None:
+    _reset()
+    status = _status(
+        "bot-01",
+        position_side="long",
+        stop_loss="58900.0",
+        take_profit="61020.5",
+        entry_price="60000.0",
+        mark_price="59980.5",
+        position_qty="0.001",
+        stop_loss_orders=1,
+        take_profit_orders=2,
+        open_orders=3,
+        last_fill_at=None,
+    )
+    bots_state._handle_status_message(status)
+    app = BotTuiApp()
+    app._open_bot_detail("bot-01")
+    texts = _snapshot_texts(app)
+    assert texts[3:] == bots_pane.bot_detail_lines(status, now=0.0)[3:]
+    assert "take profit 61,020.5 (2 orders)" in texts[4]
+    assert "no fills yet" in texts[4]
+
+
+def test_bot_detail_snapshot_of_a_pre_story_message_says_n_a() -> None:
+    _reset()
+    bots_state._handle_status_message(_status("bot-01"))
+    app = BotTuiApp()
+    app._open_bot_detail("bot-01")
+    texts = _snapshot_texts(app)
+    assert len(texts) == 5
+    assert texts[3].startswith("quantity   n/a")
+    assert texts[4].startswith("stop loss  n/a")

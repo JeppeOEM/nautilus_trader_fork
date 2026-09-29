@@ -30,6 +30,9 @@ use that format, so it would answer wrongly for all three (19.6).
 
 Same-asset matching (Story 27.4): `asset_key` reads an id's base, quote class and kind, so the
 same asset on dYdX, Bybit and Hyperliquid is found without research ever splitting an id.
+
+Base symbol (Story 29.1): `base_symbol` reads the coin an id trades (`BTCUSDT-LINEAR.BYBIT` ->
+`BTC`), so the web rankings line the same coin up across exchanges without a second id parse.
 """
 
 from types import MappingProxyType
@@ -50,6 +53,9 @@ USD_QUOTES = frozenset({"USD", "USDC", "USDT"})
 # `ETHBTC`, `BBSOLSOL`) is not read: no guess at where the base ends.
 _BYBIT_QUOTE_SUFFIXES = MappingProxyType({"USDT": "USDT", "USDC": "USDC", "PERP": "USDC"})
 _BYBIT_ASSET_KINDS = MappingProxyType({"LINEAR": "perp", "SPOT": "spot"})
+# The quotes `base_symbol` strips from a Bybit symbol head (Story 29.1), first match wins.
+# Ordered so `USDT`/`USDC` are tried before their `USD` prefix.
+BYBIT_QUOTES = ("USDT", "USDC", "PERP", "USD")
 # Venues whose symbols are exactly `BASE-QUOTE-PERP` (dYdX v4 markets, Hyperliquid perps).
 _DASHED_PERP_VENUES = frozenset({"DYDX", "HYPERLIQUID"})
 
@@ -188,3 +194,38 @@ def same_asset(a: str, b: str) -> bool:
     """Whether both ids have an `AssetKey` and it is the same one (never raises)."""
     key = asset_key(a)
     return key is not None and key == asset_key(b)
+
+
+def _bybit_base(head: str) -> str:
+    """Strip the head's first matching `BYBIT_QUOTES` suffix if a base remains, else keep it."""
+    for quote in BYBIT_QUOTES:
+        if head.endswith(quote) and len(head) > len(quote):
+            return head[: -len(quote)]
+    return head
+
+
+def base_symbol(instrument_id: str) -> str:
+    """
+    Return the base coin the id trades (`MalformedInstrumentId` only for an id with no `.VENUE`
+    suffix; an unlisted quote is never guessed at): Bybit takes the symbol head before its first `-`
+    (`BTCUSDT-25SEP26-LINEAR` -> `BTCUSDT`) minus the first matching `BYBIT_QUOTES` suffix when a
+    non-empty base remains (`1000PEPEUSDT` -> `1000PEPE`), else the head whole (`ETHBTC`);
+    dYdX, Hyperliquid and any unknown venue take the symbol's first `-` segment
+    (`km:US500-USD-PERP` -> `km:US500`).
+
+    Known limit: the head is split by suffix only, so a head whose base or unlisted quote itself
+    ends in a quote name is cut in the wrong place (`ETHBUSD` reads `ETHB`; a base `XUSD` with
+    no quote at all reads `X`), and a quote not in `BYBIT_QUOTES` (`ETHBTC`) returns the head
+    whole rather than a guessed base. A base named with a multiplier (`1000PEPE` on Bybit,
+    `kPEPE` on Hyperliquid) is its own symbol, so those rows do not line up (as `asset_key`);
+    likewise a Hyperliquid HIP-3 dex-prefixed base (`xyz:BTC`) never lines up with `BTC`.
+    A symbol whose first `-` segment is empty (`-LINEAR`) is returned whole, never as `""`.
+    Upgrade path: read the venue's instrument definition, which the catalog stores, and use its
+    `base_currency` instead of parsing the id.
+    """
+    venue = venue_of(instrument_id)
+    symbol = instrument_id.rpartition(".")[0]
+    head = symbol.partition("-")[0]
+    if not head:
+        return symbol
+    return _bybit_base(head) if venue == "BYBIT" else head

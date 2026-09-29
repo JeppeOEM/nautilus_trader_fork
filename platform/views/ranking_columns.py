@@ -19,6 +19,11 @@ entry, in what order, with what label and text formatting. The page's TS mirror
 (`frontend/src/pages/RankingsPage.tsx`) is held to the same `(key, label)` sequence by
 `data_api/tests/test_ranking_columns_mirror.py`.
 
+The page's pinned identity columns -- Rank, Symbol, Exchange and Instrument (Story 29.1) -- are
+not metric columns and are deliberately outside `RANKING_COLS` and the mirror: they read the rank
+entry's `instrument_id`, `venue`, `symbol` and `market` fields, rendered on both tabs, with
+Symbol and Exchange sortable and filterable on the page.
+
 Story 25.1a removed the `color_fn` member and `POSITIVE_COLOR`/`NEGATIVE_COLOR`: their only
 reader was bot_tui's Coins pane (deleted, rankings are web-only), and the web table never
 coloured cells from them.

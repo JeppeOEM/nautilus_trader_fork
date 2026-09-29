@@ -19,13 +19,16 @@ start view: live per-bot PnL/status rows, per-row stale badges, `s` start/stop w
 footer-echo confirmation), a full-screen Bot-detail view (live-snapshot header,
 left/right- (or h/l-) stepped trades blotter + PnL sparkline sourced from Story 4.6's
 bots:history:* keys, `o` dashboard deep-link), a
-Collector pane (Story 6.1: every currently-collected dYdX instrument -- always pinned,
+Collector pane (Story 6.1: every currently-collected instrument -- always pinned,
 there is no "collected but not pinned" state -- with liquid status, `p` to unpin (stop
 + add to config.exclude) and `x` to stop (don't exclude), both behind the same
 type-to-confirm guard as Bots-pane's `s`, `:start <ID>`/`:pintop` command-bar actions to
 pin one coin by name or fill empty slots with the current top-by-volume coins -- all
 published to collector:control, read back via collector:status; since Story 25.1b its last
-line is the nightly archive maintenance, read-only from archive:status), and `esc`/`:q`
+line is the nightly archive maintenance, read-only from archive:status; since Story 29.2
+one section per venue, the actions refused with the reason on a venue whose plan does not
+accept commands; since Story 29.5 a `/` market browser that searches every venue's market names
+from markets:live and adds the focused one with `a`, behind the same guard), and `esc`/`:q`
 navigation.
 
 The TUI is a control surface for bots and the collector only (Story 25.1a, operator
@@ -65,6 +68,8 @@ from bot_tui import bots_pane
 from bot_tui import bots_state
 from bot_tui import collector_pane
 from bot_tui import collector_state
+from bot_tui import market_browser
+from bot_tui import markets_state
 
 
 logger = logging.getLogger(__name__)
@@ -97,7 +102,12 @@ _INCIDENTS_FOOTER_HINT_TEXT = "esc back  :q quit"
 
 # Collector pane's own footer (Story 6.1) -- `:start <ID>`/`:pintop` are command-bar-
 # only (no single key maps cleanly to "type an instrument id"), so only p/x get key hints.
-_COLLECTOR_FOOTER_HINT_TEXT = "p unpin  x stop  : command  esc back  :q quit"
+# `/` opens the market browser (Story 29.5), the key-driven way to find an id to add.
+_COLLECTOR_FOOTER_HINT_TEXT = "p unpin  x stop  / markets  : command  esc back  :q quit"
+
+# The market browser's own footer (Story 29.5). Enter (from the search edit to the results) is
+# implied by the search edit itself, like the Bots pane's Enter.
+_MARKETS_FOOTER_HINT_TEXT = "a add  / search  esc back  :q quit"
 
 # View id -> its footer. Every view has exactly one entry, so an unknown view fails loudly
 # (KeyError) instead of falling back to another view's keys.
@@ -107,15 +117,9 @@ _FOOTER_HINT_TEXTS = {
     "strategy": _STRATEGY_FOOTER_HINT_TEXT,
     "incidents": _INCIDENTS_FOOTER_HINT_TEXT,
     "collector": _COLLECTOR_FOOTER_HINT_TEXT,
+    "markets": _MARKETS_FOOTER_HINT_TEXT,
     "help": _HELP_FOOTER_HINT_TEXT,
 }
-
-# This collector's own operating cap (Story 6.1) -- must match capture/venues/dydx/
-# config.py's DYDX_MAX_COLLECTED_INSTRUMENTS. Duplicated rather than imported: bot_tui
-# and capture are separate module boundaries (platform/CLAUDE.md DESIGN-02),
-# coordinating only via Redis, never by importing each other's internals. This is a
-# client-side check for instant feedback only -- the collector re-validates regardless.
-_MAX_COLLECTED_INSTRUMENTS = 29
 
 # Read-only bind mounts of each strategy's source, one file per strategy class named
 # `<class name>.py` (docker-compose.yml's bot_tui service: `DummyStrategy.py` from
@@ -153,6 +157,13 @@ BOT DETAIL
   esc        back to bots
 
 COLLECTOR PANE (:data)
+  One section per venue (dYdX, Bybit, Hyperliquid), headed
+  "<VENUE>: N collected +P pending · cap C" ("· no cap" on Bybit and Hyperliquid), then
+  its last apply (what the collector last subscribed, unsubscribed or failed), its rows
+  ("pending" = planned, not yet subscribed) and its "unpinned" line. "~" marks a stale
+  row or section. Every venue's plan accepts p, x and :start, each command addressed to
+  the id's venue; a venue whose status is over an hour old (collector down?) is refused
+  with the reason. :pintop is dYdX's only.
   Every action here writes straight through to config.toml on the collector -- it's
   the permanent record of what's collected, and it's what the collector re-reads if
   it restarts. Nothing here is temporary or TUI-only. Every currently-collected
@@ -166,19 +177,44 @@ COLLECTOR PANE (:data)
                    exclude it (asks for confirmation)
   :start <ID>      pin a coin by name: adds it if new, or re-adds it if it's in the
                    unpinned/excluded list -- either way it starts collecting,
-                   pinned, immediately (rejected past the 29-coin cap)
-  :pintop          fill every empty collector slot (up to the 29-coin cap) with the
+                   pinned, immediately (rejected past dYdX's cap; Bybit and
+                   Hyperliquid have none)
+  :pintop          fill every empty dYdX slot (up to dYdX's cap) with the
                    current top-by-volume coins not already collected, pinned
                    immediately -- never removes or replaces an existing coin, and
                    never re-adds a coin you've explicitly unpinned (that only ever
                    happens via :start <ID>)
+  /                open the market browser (below)
   esc              back
 
-  The "unpinned" list at the bottom of this pane is config.exclude as a whole -- it
-  shows any excluded id, whether it got there via p or a hand-edit of config.toml.
+  A venue's "unpinned" line is its config.exclude as a whole -- it shows any
+  excluded id, whether it got there via p or a hand-edit of config.toml.
   The last line is the nightly archive maintenance (archive:status): the last run's
   day, outcome (ok / findings / FAILED with the failing steps) and times, or the
-  running job, and the next run; "~" marks it stale. Run it now from the web UI."""
+  running job, and the next run; "~" marks it stale. Run it now from the web UI.
+  A venue's "last refusal" line is the latest command its collector refused, and why.
+
+MARKET BROWSER (/ from the Collector pane)
+  Every market each venue lists, from markets:live (the ranking engine publishes each
+  venue's names once a minute; names only). Before the first message it reads "waiting
+  for markets:live…". Results are grouped per venue under that venue's Collector header
+  plus "· M matches"; "~" marks a venue whose list is over 3 minutes old, and a venue
+  silent for 15 minutes leaves the browser.
+  /                search: type part of a symbol or id (case-insensitive, live);
+                   empty lists everything
+  enter            from the search to the results (the query is kept)
+  esc              close the search (query kept); on the results, back to Collector
+  j/k, up/down     move selection
+  a                add the highlighted market (type 'add' + enter to confirm). Refused
+                   with the reason, nothing sent, when the venue's plan takes no
+                   commands, the id is already collected or pending, it is excluded
+                   (re-add with :start <ID>), an add is still awaiting its answer, or
+                   dYdX's cap is reached. Bybit and Hyperliquid have no cap.
+  Row markers: collected; pending (in the plan, not yet subscribed -- with the last
+  apply's subscribe failure when it names the id); failed: <reason> (the collector
+  refused your add); excluded (unpinned); pending (your add, awaiting
+  collector:status); no answer from <VENUE> collector (nothing answered within 2 min;
+  a may be pressed again). Only collector:status ever makes a row "collected"."""
 
 _PALETTE = [
     ("stale", "yellow", "default"),
@@ -189,6 +225,9 @@ _PALETTE = [
     # it still reads correctly against any terminal theme (same UX-DR1 "inherit the
     # terminal's own default" discipline the other palette entries already follow).
     ("focus", "default,standout", "default"),
+    # An open position with no stop-loss (Story 29.6): the `sl` cell's `none` text carries the
+    # meaning, this is the extra cue.
+    (bots_pane.WARNING_ATTR, "light red", "default"),
 ]
 
 # Bot-detail's trades-blotter region (Story 4.7) -- a fixed visible height inside a
@@ -261,6 +300,29 @@ def _parse_collector_command(text: str) -> tuple[str, str | None] | None:
     return None
 
 
+def _collector_command_refusal(action: str, instrument_id: str | None) -> str | None:
+    """
+    Return why a `:start <ID>`/`:pintop` must not be published, or None to publish it.
+
+    `:start` targets its id's venue; `:pintop` carries no id and only dYdX's plan can pin by
+    liquidity. The cap check is instant feedback against the venue's published cap (skipped
+    while unknown) -- the collector refuses past its cap regardless.
+    """
+    venue = (
+        collector_state.LEGACY_PLAN_VENUE
+        if instrument_id is None
+        else collector_state.venue_of_row(instrument_id)
+    )
+    target = "pintop" if instrument_id is None else f"{action} {instrument_id}"
+    refusal = collector_state.command_refusal(venue)
+    if refusal is not None:
+        return f"cannot {target}: {refusal}"
+    cap = collector_state.plan_cap(venue)
+    if action == "start" and cap is not None and collector_state.collected_count(venue) >= cap:
+        return f"cannot {target}: at {cap}-instrument cap"
+    return None
+
+
 def _pop_view(current_view: str, stack: list[str]) -> tuple[str, list[str]]:
     """Esc pops back exactly one level; never raises, no-ops at the root (AC4)."""
     if not stack:
@@ -305,6 +367,54 @@ class _SelectableCollectorRow(urwid.Text):
 
     def keypress(self, size: object, key: str) -> str:
         return key
+
+
+class _VimListBox(urwid.ListBox):
+    """A ListBox whose j/k move the selection like down/up, as the market browser's help says."""
+
+    _VIM_KEYS = {"j": "down", "k": "up"}
+
+    def keypress(self, size: tuple[int, int], key: str) -> str | None:  # type: ignore[override]
+        mapped = self._VIM_KEYS.get(key, key)
+        unhandled = super().keypress(size, mapped)
+        return key if unhandled == mapped else unhandled
+
+
+def _focused_collector_id(body: urwid.Widget) -> str | None:
+    """Return the id of the Collector ListBox's focused row; None on a section line or no list."""
+    if not isinstance(body, urwid.ListBox):
+        return None
+    focus_widget = body.focus
+    if not isinstance(focus_widget, urwid.AttrMap):
+        return None
+    row = focus_widget.original_widget
+    if not isinstance(row, _SelectableCollectorRow):
+        return None
+    return row.instrument_id
+
+
+def _keep_focus_on_row(listbox: urwid.ListBox, focused_id: str | None) -> None:
+    """
+    Keep `listbox`'s focus on the row of `focused_id` (the row focused before a refresh) wherever
+    it moved. Once that row is gone, focus lands on whichever row now holds its position. A focus
+    resting on a section line moves onto a row: a fresh ListBox starts on the first header, and a
+    row action would then silently act on nothing. The nearest row at or below the position wins,
+    else the last one above it; no rows, no move. Shared by the Collector pane and the market
+    browser (Story 29.5).
+    """
+    walker = listbox.body
+    for i, widget in enumerate(walker):
+        row = widget.original_widget if isinstance(widget, urwid.AttrMap) else None
+        if isinstance(row, _SelectableCollectorRow) and row.instrument_id == focused_id:
+            listbox.focus_position = i
+            return
+    position = listbox.focus_position
+    if isinstance(walker[position], urwid.AttrMap):
+        return
+    rows = [i for i, w in enumerate(walker) if isinstance(w, urwid.AttrMap)]
+    if rows:
+        below = [i for i in rows if i > position]
+        listbox.focus_position = below[0] if below else rows[-1]
 
 
 class BotTuiApp:
@@ -372,10 +482,29 @@ class BotTuiApp:
         # "the bots page jumps up" -- the same bug already found and fixed once for
         # the Collector pane (Story 6.1); platform/CLAUDE.md now has a standing rule
         # against reintroducing it a third time in a future pane.
+        # Populated, the body is `_bots_listbox` under the column header (Story 29.6), both built
+        # once per shape change: the ListBox inside the Frame is the persistent object whose
+        # walker each tick mutates.
         self._bots_shape: str | None = None
         self._bots_body: urwid.Widget = urwid.Filler(
             urwid.Text(bots_pane.COLD_OPEN_TEXT), valign="top"
         )
+        self._bots_listbox: urwid.ListBox | None = None
+
+        # The market browser (Story 29.5): the same persistent-body/shape contract (TUI-01), plus
+        # `_markets_key`, the inputs its walker was last built from -- about 1,100 rows (Bybit
+        # linear + spot) are rebuilt only when one changes, not on every redraw tick. The query is
+        # kept across searches and visits; `_markets_search_active` while the footer's `/` edit
+        # owns the keyboard.
+        self._markets_shape: str | None = None
+        self._markets_body: urwid.Widget = urwid.Filler(
+            urwid.Text(market_browser.COLD_OPEN_TEXT), valign="top"
+        )
+        self._markets_key: tuple | None = None
+        self._markets_query = ""
+        self._markets_search_active = False
+        self._markets_edit = urwid.Edit("/")
+        urwid.connect_signal(self._markets_edit, "postchange", self._on_markets_query_change)
 
         # The start view's body holds real rows from the first draw, not a cold-open
         # placeholder that only the redraw loop's first tick would replace.
@@ -419,6 +548,10 @@ class BotTuiApp:
             # by the redraw loop while this view is active) ever changes what this holds.
             return self._collector_body
 
+        if self._view == "markets":
+            # Same "never rebuilt here" discipline: only _refresh_markets_body() changes it.
+            return self._markets_body
+
         if self._view != "help":
             raise KeyError(f"unknown view {self._view!r}")
         return urwid.Filler(urwid.Text(_HELP_TEXT), valign="top")
@@ -453,13 +586,14 @@ class BotTuiApp:
             self._build_bot_row_widget(row, bots_state.is_stale(row["bot_id"], now=now), now)
             for row in rows
         ]
-        if self._bots_shape != "rows":
-            self._bots_body = urwid.ListBox(urwid.SimpleListWalker(widgets))
+        if self._bots_shape != "rows" or self._bots_listbox is None:
+            self._bots_listbox = urwid.ListBox(urwid.SimpleListWalker(widgets))
+            self._bots_body = urwid.Frame(
+                self._bots_listbox, header=urwid.Text(bots_pane.bots_header_line())
+            )
             self._bots_shape = "rows"
         else:
-            listbox = self._bots_body
-            assert isinstance(listbox, urwid.ListBox)
-            listbox.body[:] = widgets  # type: ignore[index]
+            self._bots_listbox.body[:] = widgets  # type: ignore[index]
 
     def _refresh_collector_body(self) -> None:
         """
@@ -479,31 +613,28 @@ class BotTuiApp:
         production: this was exactly the reported bug.
         """
         statuses = collector_state._LATEST_COLLECTOR_STATUS
+        plans = collector_state._LATEST_PLANS
         archive_line = collector_pane.format_archive_line(
             archive_state._LATEST_ARCHIVE_STATUS,
             dt.datetime.now(dt.UTC),
             stale=archive_state.is_stale(),
         )
-        if not statuses:
+        if not statuses and not plans:
             self._set_collector_filler(f"{collector_pane.COLD_OPEN_TEXT}\n\n{archive_line}")
             return
 
-        rows = collector_pane.collector_rows(statuses)
-        widgets = [
-            self._build_collector_row_widget(row, collector_state.is_stale(row["id"]))
-            for row in rows
-        ]
-        unpinned_line = collector_pane.format_unpinned_line(collector_state._LATEST_UNPINNED_IDS)
-        if unpinned_line:
-            # Plain, non-selectable urwid.Text -- ListBox never lands focus on it (same
-            # precedent as _SelectableBotRow's docstring), so _highlighted_collector_id
-            # only ever sees a real _SelectableCollectorRow.
+        widgets: list[urwid.Widget] = []
+        for section in collector_pane.venue_sections(statuses, plans):
+            widgets.extend(self._build_collector_section_widgets(section))
             widgets.append(urwid.Text(""))
-            widgets.append(urwid.Text(unpinned_line))
-        # Same non-selectable trailing-Text rule as the unpinned line; always shown, so a
-        # missing archive service reads "no status yet" rather than nothing.
-        widgets.append(urwid.Text(""))
+        # Same non-selectable Text rule as the section lines; always shown, so a missing
+        # archive service reads "no status yet" rather than nothing.
         widgets.append(urwid.Text(archive_line))
+        # Taken before the walker changes: a section line appearing or vanishing above the
+        # focused row shifts every row below it, so focus follows the id, not the position.
+        focused_id = (
+            _focused_collector_id(self._collector_body) if self._collector_shape == "rows" else None
+        )
         if self._collector_shape != "rows":
             self._collector_body = urwid.ListBox(urwid.SimpleListWalker(widgets))
             self._collector_shape = "rows"
@@ -511,6 +642,46 @@ class BotTuiApp:
             listbox = self._collector_body
             assert isinstance(listbox, urwid.ListBox)
             listbox.body[:] = widgets  # type: ignore[index]
+        self._keep_collector_focus_on_a_row(focused_id)
+
+    def _build_collector_section_widgets(
+        self, section: collector_pane.VenueSection
+    ) -> list[urwid.Widget]:
+        """
+        One venue's widgets: the header, the last-apply, last-refusal (Story 29.5) and
+        refusal-reason lines, the rows and the unpinned line. Everything but a row is a plain,
+        non-selectable urwid.Text, so ListBox's own up/down never lands on it (same precedent as
+        _SelectableBotRow's docstring).
+        """
+        venue = section.venue
+        stale_plan = section.plan is not None and collector_state.plan_is_stale(venue)
+        lines = [
+            collector_pane.format_section_header(section, stale_plan),
+            collector_pane.format_last_apply_line(section.plan),
+            collector_pane.format_last_refusal_line(section.plan),
+            collector_state.command_refusal(venue) or "",
+        ]
+        widgets: list[urwid.Widget] = [urwid.Text(line) for line in lines if line]
+        show_liquidity = collector_pane.shows_liquidity(venue, section.plan)
+        for row in section.rows:
+            stale = collector_state.is_stale(row["id"])
+            widgets.append(self._build_collector_row_widget(row, stale, show_liquidity))
+        unpinned = (section.plan or {}).get("unpinned_ids", [])
+        unpinned_line = collector_pane.format_unpinned_line(unpinned)
+        if unpinned_line:
+            widgets.append(urwid.Text(unpinned_line))
+        return widgets
+
+    def _keep_collector_focus_on_a_row(self, focused_id: str | None = None) -> None:
+        """
+        Keep the Collector ListBox's focus on the row of `focused_id` (`_keep_focus_on_row`), so
+        a refresh never silently moves `p`/`x` to another instrument. Once that row is gone (a
+        stop, an unpin, a sweep), focus may land on another venue's row; `p`/`x` still name the
+        id in their confirm prompt.
+        """
+        listbox = self._collector_body
+        assert isinstance(listbox, urwid.ListBox)
+        _keep_focus_on_row(listbox, focused_id)
 
     def _set_collector_filler(self, text: str) -> None:
         if self._collector_shape != "cold_open":
@@ -523,42 +694,222 @@ class BotTuiApp:
         assert isinstance(filler, urwid.Filler)
         filler.original_widget.set_text(text)
 
-    def _build_collector_row_widget(self, row: dict, stale: bool) -> urwid.Widget:
-        markup = collector_pane.format_collector_line(row, stale)
+    def _build_collector_row_widget(
+        self, row: dict, stale: bool, show_liquidity: bool
+    ) -> urwid.Widget:
+        markup = collector_pane.format_collector_line(row, stale, show_liquidity)
         return urwid.AttrMap(
             _SelectableCollectorRow(markup, instrument_id=row["id"]), None, focus_map="focus"
         )
 
+    # --- market browser (Story 29.5) ----------------------------------------------------------
+
+    def _refresh_markets_body(self) -> None:
+        """
+        Rebuild/mutate self._markets_body from markets:live and collector:status, TUI-01's way
+        (cold-open <-> populated swaps the widget; a same-shape update slice-assigns the walker),
+        and only when `_markets_input_key` changed. Focus follows the focused id across a
+        rebuild, as in the Collector pane.
+        """
+        now = time.time()
+        markets = markets_state.live_markets(now)
+        if not markets:
+            self._set_markets_filler(market_browser.COLD_OPEN_TEXT)
+            return
+        query = self._markets_query.strip().casefold()
+        key = (query, self._markets_input_key(markets, now))
+        if self._markets_shape == "rows" and key == self._markets_key:
+            return
+        # A new query starts on its first match: following the old focused id's position would
+        # land `a` on whatever row of whichever venue happens to sit there now.
+        query_changed = self._markets_key is None or self._markets_key[0] != query
+        self._markets_key = key
+        widgets = self._build_markets_widgets(markets, now)
+        focused_id = (
+            _focused_collector_id(self._markets_body) if self._markets_shape == "rows" else None
+        )
+        if self._markets_shape != "rows":
+            self._markets_body = _VimListBox(urwid.SimpleListWalker(widgets))
+            self._markets_shape = "rows"
+        else:
+            listbox = self._markets_body
+            assert isinstance(listbox, urwid.ListBox)
+            listbox.body[:] = widgets  # type: ignore[index]
+        assert isinstance(self._markets_body, urwid.ListBox)
+        if query_changed:
+            self._markets_body.focus_position = 0
+            focused_id = None
+        _keep_focus_on_row(self._markets_body, focused_id)
+
+    def _set_markets_filler(self, text: str) -> None:
+        self._markets_key = None
+        if self._markets_shape != "cold_open":
+            self._markets_body = urwid.Filler(urwid.Text(text), valign="top")
+            self._markets_shape = "cold_open"
+
+    @staticmethod
+    def _markets_input_key(markets: dict[str, list[tuple[str, str]]], now: float) -> tuple:
+        """
+        Everything the browser's rows are built from, bar the query (added by the caller): each
+        venue's list (its receive time) and stale flag, each status row's presence and pending
+        mark, each aggregate (its receive time) and stale flag, each refused add's reason and each
+        sent add with its time-driven no-answer flip.
+        """
+        venues = tuple(markets)
+        timeout = market_browser.ADD_ANSWER_TIMEOUT_SECONDS
+        statuses = collector_state._LATEST_COLLECTOR_STATUS
+        return (
+            tuple(
+                (v, markets_state.received_at(v), markets_state.venue_markets_stale(v, now))
+                for v in venues
+            ),
+            tuple(sorted((iid, row.get("pending") is True) for iid, row in statuses.items())),
+            tuple(sorted(collector_state._PLAN_RECEIVED_AT.items())),
+            tuple(collector_state.plan_is_stale(v, now) for v in venues),
+            tuple(sorted(collector_state._ADD_REFUSALS.items())),
+            tuple(
+                sorted(
+                    (iid, at, now - at > timeout) for iid, at in collector_state.sent_adds().items()
+                )
+            ),
+        )
+
+    def _build_markets_widgets(
+        self, markets: dict[str, list[tuple[str, str]]], now: float
+    ) -> list[urwid.Widget]:
+        sections = {
+            section.venue: section
+            for section in collector_pane.venue_sections(
+                collector_state._LATEST_COLLECTOR_STATUS, collector_state._LATEST_PLANS
+            )
+        }
+        widgets: list[urwid.Widget] = []
+        for group in market_browser.search(markets, self._markets_query):
+            section = sections.get(group.venue) or collector_pane.VenueSection(
+                group.venue, [], None
+            )
+            widgets.extend(self._market_group_widgets(group, section, now))
+            widgets.append(urwid.Text(""))
+        return widgets
+
+    def _market_group_widgets(
+        self, group: market_browser.BrowserGroup, section: collector_pane.VenueSection, now: float
+    ) -> list[urwid.Widget]:
+        """One venue's header (a plain, non-selectable Text) and its selectable result rows."""
+        venue = group.venue
+        plan_stale = section.plan is not None and collector_state.plan_is_stale(venue, now)
+        markets_stale = markets_state.venue_markets_stale(venue, now)
+        header = market_browser.format_group_header(group, section, plan_stale, markets_stale)
+        widgets: list[urwid.Widget] = [urwid.Text(header)]
+        for row in group.rows:
+            marker = market_browser.result_marker(self._market_add_context(row.instrument_id), now)
+            line = market_browser.format_result_line(row, marker, markets_stale)
+            widgets.append(
+                urwid.AttrMap(
+                    _SelectableCollectorRow(line, instrument_id=row.instrument_id),
+                    None,
+                    focus_map="focus",
+                )
+            )
+        return widgets
+
+    @staticmethod
+    def _market_add_context(instrument_id: str) -> market_browser.AddContext:
+        venue = collector_state.venue_of_row(instrument_id)
+        return market_browser.AddContext(
+            instrument_id=instrument_id,
+            venue=venue,
+            status_row=collector_state._LATEST_COLLECTOR_STATUS.get(instrument_id),
+            plan=collector_state._LATEST_PLANS.get(venue),
+            sent_at=collector_state.sent_add_at(instrument_id),
+            refused_reason=collector_state.add_refused_reason(instrument_id),
+        )
+
+    def _market_add_refusal(self, instrument_id: str) -> str | None:
+        """Return why `a` must not add `instrument_id` now (`market_browser.add_refusal`)."""
+        ctx = self._market_add_context(instrument_id)
+        now = time.time()
+        return market_browser.add_refusal(
+            ctx,
+            now,
+            venue_refusal=collector_state.command_refusal(ctx.venue, now),
+            cap=collector_state.plan_cap(ctx.venue),
+            count=collector_state.collected_count(ctx.venue) + self._adds_in_flight(ctx, now),
+        )
+
+    def _adds_in_flight(self, ctx: market_browser.AddContext, now: float) -> int:
+        """Return this TUI's other adds on the id's venue still awaiting their answer."""
+        return sum(
+            1
+            for iid in collector_state.sent_adds()
+            if iid != ctx.instrument_id
+            and collector_state.venue_of_row(iid) == ctx.venue
+            and market_browser.add_awaiting(self._market_add_context(iid), now)
+        )
+
+    def _show_markets(self) -> None:
+        self._refresh_markets_body()
+        self._body.original_widget = self._markets_body
+        self._refresh_breadcrumb()
+
+    def _open_markets_view(self) -> None:
+        """`/` on the Collector pane: push the browser on the view stack and open its search."""
+        self._stack = [*self._stack, self._view]
+        self._view = "markets"
+        self._refresh_footer_hint()
+        self._show_markets()
+        self._frame.focus_position = "body"
+        self._open_markets_search()
+
+    def _open_markets_search(self) -> None:
+        self._markets_search_active = True
+        self._markets_edit.set_edit_text(self._markets_query)
+        self._markets_edit.set_edit_pos(len(self._markets_query))
+        self._frame.footer = self._markets_edit
+        self._frame.focus_position = "footer"
+
+    def _close_markets_search(self) -> None:
+        """Enter or esc in the search edit: back to the results, the query kept."""
+        self._markets_search_active = False
+        # A `cannot add`/`sent:` echo from before the search reopened is no longer current.
+        self._refresh_footer_hint()
+        self._frame.footer = self._footer_hint
+        self._frame.focus_position = "body"
+
+    def _on_markets_query_change(self, _edit: urwid.Edit, _old_text: str) -> None:
+        """Refilter the results at once on every keystroke (the edit's `postchange` signal)."""
+        self._markets_query = self._markets_edit.edit_text
+        if self._view == "markets":
+            self._show_markets()
+
+    def _add_focused_market(self) -> None:
+        """
+        Handle `a` on a result: refuse with the reason in the footer (nothing sent), else open the
+        type-to-confirm guard -- typed word `add`, wire action `start` (`CollectionPlan.add`).
+        """
+        instrument_id = _focused_collector_id(self._body.original_widget)
+        if instrument_id is None:
+            return
+        refusal = self._market_add_refusal(instrument_id)
+        if refusal is not None:
+            self._footer_hint.set_text(f"cannot add {instrument_id}: {refusal}")
+            return
+        self._open_collector_confirm("add", instrument_id)
+
     def _highlighted_collector_id(self) -> str | None:
-        """Mirrors _highlighted_bot_id's read-the-ListBox's-own-focus pattern."""
-        body = self._body.original_widget
-        if not isinstance(body, urwid.ListBox):
-            return None
-        focus_widget = body.focus
-        if focus_widget is None:
-            return None
-        assert isinstance(focus_widget, urwid.AttrMap)
-        row = focus_widget.original_widget
-        assert isinstance(row, _SelectableCollectorRow)
-        return row.instrument_id
+        """
+        Mirrors _highlighted_bot_id's read-the-ListBox's-own-focus pattern; None when the
+        focus rests on a section line rather than an instrument row.
+        """
+        return _focused_collector_id(self._body.original_widget)
 
     def _build_bot_row_widget(self, row: dict, stale: bool, now: float) -> urwid.Widget:
-        # Color applied only to the PnL segment (sign, not magnitude) -- "fixed position +
-        # color, never color alone"; the sign is also always in the text itself via
-        # bots_pane.format_pnl.
-        pnl_value = row["realized_pnl"] + row["unrealized_pnl"]
-        pnl_color = "pnl-pos" if pnl_value >= 0 else "pnl-neg"
-        prefix = "~ " if stale else "  "
-        running_text = "run" if row["running"] else "off"
+        # The markup is bots_pane's own segments -- the same text as format_bot_line, with the
+        # PnL sign and an unprotected position's stop colored ("fixed position + color, never
+        # color alone").
         markup = [
-            prefix,
-            f"{bots_pane.fit(row['bot_id'], bots_pane.BOT_ID_WIDTH)} ",
-            (pnl_color, bots_pane.format_pnl(pnl_value)),
-            f"  {bots_pane.fit(row['symbol'], bots_pane.SYMBOL_WIDTH)} "
-            f"{row['mode']:<5} {running_text:<3} {row['position_side']:<5} "
-            f"{bots_pane.format_exposure(row['net_exposure'])}  "
-            f"up {bots_pane.format_uptime(row['started_at'], now)}  "
-            f"wr {bots_pane.format_win_rate(row['win_rate'])}",
+            (attr, text) if attr is not None else text
+            for attr, text in bots_pane.bot_line_segments(row, stale, now)
         ]
         return urwid.AttrMap(
             _SelectableBotRow(markup, bot_id=row["bot_id"]), None, focus_map="focus"
@@ -567,6 +918,9 @@ class BotTuiApp:
     def _highlighted_bot_id(self) -> str | None:
         """Return the Bots-pane row currently focused, read off the ListBox's own focus."""
         body = self._body.original_widget
+        if isinstance(body, urwid.Frame):
+            # The populated pane: the rows' ListBox under the column header.
+            body = body.body
         if not isinstance(body, urwid.ListBox):
             return None
         focus_widget = body.focus
@@ -615,6 +969,8 @@ class BotTuiApp:
                 [pnl_line[:pnl_start], (pnl_color, pnl_text), pnl_line[pnl_end:]],
             ),
             urwid.Text(lines[2]),
+            # Story 29.6: the position (quantity, entry, mark, open orders) and its exits.
+            *(urwid.Text(line) for line in lines[3:]),
         ]
         snapshot_box = urwid.LineBox(
             urwid.Pile(line_widgets), title=f"{self._bot_detail_bot_id}  snapshot"
@@ -710,6 +1066,13 @@ class BotTuiApp:
             # is the expected healthy state, not staleness.
             self._breadcrumb.set_text(f"Bots > {self._bot_detail_bot_id} > incidents")
             return
+        if self._view == "markets":
+            # Special-cased like bot_detail: a `markets` breadcrumb label would make `:markets` a
+            # command. The query is shown too, since the results stay filtered by it after the
+            # search edit closes.
+            query = self._markets_query.strip()
+            self._breadcrumb.set_text(f"Collector > markets{f'  /{query}' if query else ''}")
+            return
         # Top-level panes: per-row stale markers live in the rows themselves (Bots-pane
         # "~ " prefix, Collector-pane stale marker), so the breadcrumb is the plain label.
         self._breadcrumb.set_text(_BREADCRUMB_LABELS[self._view])
@@ -778,31 +1141,64 @@ class BotTuiApp:
         self._frame.footer = self._footer_hint
         self._frame.focus_position = "body"
 
-    def _publish_collector_action(self, action: str, instrument_id: str | None) -> None:
+    def _publish_collector_action(
+        self, action: str, instrument_id: str | None, add_sent_at: float | None = None
+    ) -> None:
         # Publish-and-wait, never optimistic -- same discipline as _publish_bot_action:
         # no local pinned/collected flip happens here, the row only reflects the new
         # state once collector:status's next message (published immediately after the
         # collector applies the action -- see collector.py's _publish_status) arrives.
+        # Addressed to the id's venue (Story 29.4); `:pintop` carries no id and pins only dYdX.
+        venue = (
+            collector_state.LEGACY_PLAN_VENUE
+            if instrument_id is None
+            else collector_state.venue_of_row(instrument_id)
+        )
         task = asyncio.ensure_future(
-            collector_state.publish_control(self._redis_url, action, instrument_id)
+            collector_state.publish_control(self._redis_url, action, instrument_id, venue)
         )
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
         label = f" {instrument_id}" if instrument_id is not None else ""
         self._footer_hint.set_text(f"sent: {action}{label}")
 
+        def _on_published(done: asyncio.Future) -> None:
+            if done.cancelled() or done.result() is not False:
+                return
+            self._footer_hint.set_text(f"failed to send {action}{label}: Redis publish failed")
+            if instrument_id is not None and add_sent_at is not None:
+                collector_state.forget_sent_add(instrument_id, add_sent_at)
+
+        task.add_done_callback(_on_published)
+
     def _toggle_pin(self) -> None:
         # Every listed row is pinned by definition (Story 6.1) -- p always means unpin.
+        self._confirm_row_action("unpin")
+
+    def _confirm_row_action(self, action: str) -> None:
+        """
+        Open the type-to-confirm guard for `action` on the focused row -- unless its venue's
+        plan cannot take commands, when the footer shows why and nothing opens or publishes.
+        """
         instrument_id = self._highlighted_collector_id()
         if instrument_id is None:
             return
-        self._open_collector_confirm("unpin", instrument_id)
+        refusal = collector_state.command_refusal(collector_state.venue_of_row(instrument_id))
+        if refusal is not None:
+            self._footer_hint.set_text(f"cannot {action} {instrument_id}: {refusal}")
+            return
+        self._open_collector_confirm(action, instrument_id)
 
     # Verb shown in the confirm prompt for each collector action -- "stop" and "unpin"
     # are also the exact word the operator must type, so this only supplies the extra
     # "collecting" stop wants ("stop collecting X?" reads better than "stop X?", which
     # could be misread as stopping something else; unpin needs no such qualifier).
-    _COLLECTOR_CONFIRM_VERBS = {"stop": "stop collecting", "unpin": "unpin"}
+    _COLLECTOR_CONFIRM_VERBS = {"stop": "stop collecting", "unpin": "unpin", "add": "add"}
+
+    # The `collector:control` action a confirmed word sends, where the two differ: the market
+    # browser's `add` is the existing `start` verb (`CollectionPlan.add`, Story 29.5), so the wire
+    # is unchanged.
+    _COLLECTOR_WIRE_ACTIONS = {"add": "start"}
 
     def _open_collector_confirm(self, action: str, instrument_id: str) -> None:
         self._collector_confirm_active = True
@@ -832,7 +1228,9 @@ class BotTuiApp:
     def _submit_collector_confirm(self) -> None:
         action = self._collector_confirm_action
         instrument_id = self._collector_confirm_id
-        assert action is not None and instrument_id is not None  # only while confirm active
+        # Both are set only while the confirm is active.
+        assert action is not None
+        assert instrument_id is not None
         text = self._stop_confirm_edit.edit_text.strip().lower()
         if text != action:
             verb = self._COLLECTOR_CONFIRM_VERBS[action]
@@ -842,7 +1240,24 @@ class BotTuiApp:
             self._stop_confirm_edit.set_edit_text("")
             return
         self._close_collector_confirm()
-        self._publish_collector_action(action, instrument_id)
+        # Re-checked: the venue's aggregate may have withdrawn `accepts_commands` -- or, for an
+        # add, the id been collected or the cap filled -- while the operator was typing.
+        refusal = self._collector_action_refusal(action, instrument_id)
+        if refusal is not None:
+            self._footer_hint.set_text(f"cannot {action} {instrument_id}: {refusal}")
+            return
+        sent_at = None
+        if action == "add":
+            sent_at = time.time()
+            collector_state.record_sent_add(instrument_id, sent_at)
+        self._publish_collector_action(
+            self._COLLECTOR_WIRE_ACTIONS.get(action, action), instrument_id, sent_at
+        )
+
+    def _collector_action_refusal(self, action: str, instrument_id: str) -> str | None:
+        if action == "add":
+            return self._market_add_refusal(instrument_id)
+        return collector_state.command_refusal(collector_state.venue_of_row(instrument_id))
 
     def _handle_command_bar_key(self, key: str) -> None:
         # Extracted from _unhandled_input, same complexity-threshold reasoning as the
@@ -996,13 +1411,9 @@ class BotTuiApp:
         parsed = _parse_collector_command(text)
         if parsed is not None:
             action, instrument_id = parsed
-            if action == "start" and len(collector_state._LATEST_COLLECTOR_STATUS) >= (
-                _MAX_COLLECTED_INSTRUMENTS
-            ):
-                self._command_edit.set_caption(
-                    f"cannot start {instrument_id}: at {_MAX_COLLECTED_INSTRUMENTS}-instrument "
-                    "cap\n:"
-                )
+            refusal = _collector_command_refusal(action, instrument_id)
+            if refusal is not None:
+                self._command_edit.set_caption(f"{refusal}\n:")
                 self._command_edit.set_edit_text("")
                 return
             self._publish_collector_action(action, instrument_id)
@@ -1034,6 +1445,11 @@ class BotTuiApp:
         if self._collector_confirm_active:
             self._handle_collector_confirm_key(key)
             return True
+        if self._markets_search_active:
+            # Printable keys went into the edit; only these reach here.
+            if key in ("enter", "esc"):
+                self._close_markets_search()
+            return True
         return False
 
     def _unhandled_input(self, key: str | tuple[str, int, int, int]) -> bool | None:
@@ -1061,8 +1477,8 @@ class BotTuiApp:
 
     def _handle_global_key(self, key: str) -> None:
         # Any key not handled below is a deliberate no-op -- including the retired
-        # Coins-pane keys (`/`, `m`, space, Enter-to-coin), which went web-only with
-        # Story 25.1a.
+        # Coins-pane keys (`m`, space, Enter-to-coin), which went web-only with Story
+        # 25.1a; `/` is the Collector pane's market browser since Story 29.5.
         if key == "esc":
             new_view, new_stack = _pop_view(self._view, self._stack)
             if new_view != self._view or new_stack != self._stack:
@@ -1071,6 +1487,14 @@ class BotTuiApp:
             self._handle_bots_pane_key(key)
         elif self._view == "collector":
             self._handle_collector_pane_key(key)
+        elif self._view == "markets":
+            self._handle_markets_key(key)
+
+    def _handle_markets_key(self, key: str) -> None:
+        if key == "a":
+            self._add_focused_market()
+        elif key == "/":
+            self._open_markets_search()
 
     def _handle_bots_pane_key(self, key: str) -> None:
         # Extracted from _handle_global_key (Story 4.5) -- same cognitive-complexity-
@@ -1088,9 +1512,9 @@ class BotTuiApp:
         if key == "p":
             self._toggle_pin()
         elif key == "x":
-            instrument_id = self._highlighted_collector_id()
-            if instrument_id is not None:
-                self._open_collector_confirm("stop", instrument_id)
+            self._confirm_row_action("stop")
+        elif key == "/":
+            self._open_markets_view()
 
     def _handle_bot_detail_key(self, key: str) -> None:
         # Extracted from _handle_global_key: keeps each dispatch function under this
@@ -1158,6 +1582,11 @@ class BotTuiApp:
                     self._refresh_collector_body()
                     self._body.original_widget = self._collector_body
                     self._draw_screen()
+                elif self._view == "markets":
+                    # Same persistent ListBox, rebuilt only when its inputs changed (Story 29.5).
+                    self._refresh_markets_body()
+                    self._body.original_widget = self._markets_body
+                    self._draw_screen()
             except Exception:
                 logger.exception("redraw loop iteration failed")
             await asyncio.sleep(_REDRAW_POLL_SECONDS)
@@ -1189,6 +1618,7 @@ class BotTuiApp:
         bots_listener_task = loop.create_task(bots_state._redis_listener(self._redis_url))
         collector_listener_task = loop.create_task(collector_state._redis_listener(self._redis_url))
         archive_listener_task = loop.create_task(archive_state._redis_listener(self._redis_url))
+        markets_listener_task = loop.create_task(markets_state._redis_listener(self._redis_url))
         history_poll_task = loop.create_task(bot_history_state.poll_loop(self._redis_url))
         incidents_poll_task = loop.create_task(bot_incidents_state.poll_loop(self._redis_url))
         redraw_task = loop.create_task(self._redraw_loop())
@@ -1198,6 +1628,7 @@ class BotTuiApp:
             bots_listener_task.cancel()
             collector_listener_task.cancel()
             archive_listener_task.cancel()
+            markets_listener_task.cancel()
             history_poll_task.cancel()
             incidents_poll_task.cancel()
             redraw_task.cancel()

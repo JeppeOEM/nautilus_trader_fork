@@ -26,7 +26,10 @@ branching logic (position side, win-rate) correctly.
 import asyncio
 import contextlib
 import json
+import math
+import time
 from collections.abc import AsyncIterator
+from collections.abc import Callable
 from decimal import Decimal
 
 import pytest
@@ -273,6 +276,70 @@ def test_build_status_closed_trades_survives_a_netting_reopen(store: SqliteFills
     engine.dispose()
 
 
+def test_build_status_appends_the_position_and_exit_fields(store: SqliteFillsStore) -> None:
+    # Story 29.6: a bracket bot's protected long, read while it still runs (streaming leaves it
+    # running, so on_stop has not cancelled the exits yet).
+    engine = _engine()
+    engine.add_data(_quotes_and_deltas(n_seconds=15, levels_per_side=2))
+    strategy = DummyStrategy(
+        _config(
+            trend_buy_threshold=0.49,
+            trend_sell_threshold=0.1,
+            ofi_confirm_threshold=-999_999.0,
+            take_profit_bps=100,
+            stop_loss_bps=100,
+        )
+    )
+    engine.add_strategy(strategy)
+    record_fills(strategy, store)
+    engine.run(streaming=True)
+    try:
+        status = status_of(strategy, store, now=2_000.0)
+        assert list(status)[13:] == [
+            "stop_loss",
+            "take_profit",
+            "entry_price",
+            "mark_price",
+            "position_qty",
+            "stop_loss_orders",
+            "take_profit_orders",
+            "open_orders",
+            "last_fill_at",
+        ]
+        assert status["position_side"] == "long"
+        assert (status["stop_loss"], status["take_profit"]) == ("99.49", "101.51")
+        assert (status["entry_price"], status["mark_price"]) == ("101.00", "100.500")
+        assert status["position_qty"] == "0.001000"
+        assert (status["stop_loss_orders"], status["take_profit_orders"]) == (1, 1)
+        assert status["open_orders"] == 2
+        assert status["last_fill_at"] == store.last_fill_ns("bot-01")
+        assert status["last_fill_at"] is not None
+    finally:
+        engine.end()
+        engine.dispose()
+
+
+def test_build_status_of_a_bot_without_fills_has_no_last_fill(store: SqliteFillsStore) -> None:
+    engine, strategy = _run_strategy(
+        store, trend_buy_threshold=0.999_999, trend_sell_threshold=0.000_001
+    )
+    status = status_of(strategy, store)
+    assert status["last_fill_at"] is None
+    assert (status["stop_loss"], status["entry_price"], status["position_qty"]) == (
+        None,
+        None,
+        None,
+    )
+    assert (status["stop_loss_orders"], status["take_profit_orders"], status["open_orders"]) == (
+        0,
+        0,
+        0,
+    )
+
+    engine.reset()
+    engine.dispose()
+
+
 def test_parse_control_message_matching_bot_id_and_start_action() -> None:
     assert parse_control_message({"bot_id": "bot-01", "action": "start"}, "bot-01") == "start"
 
@@ -389,6 +456,7 @@ class _Runtime:
         self.last_data_ns = last_data_ns
         self.fail_positions = 0
         self.calls: list[str] = []
+        self.order_event: Callable[[], None] | None = None
 
     def positions(self) -> PositionSnapshot:
         if self.fail_positions:
@@ -406,6 +474,9 @@ class _Runtime:
 
     def on_fill(self, handler: object) -> None:
         raise AssertionError("the supervisor never records fills")
+
+    def on_order_event(self, handler: Callable[[], None]) -> None:
+        self.order_event = handler
 
 
 class _Clock:
@@ -716,3 +787,81 @@ def test_a_failed_loop_cancels_its_sibling_before_the_reconnect(store: SqliteFil
 
     assert peak == 1
     assert error_ledger.counts()["bots.redis"] >= 2  # it really did reconnect several times
+
+
+def test_an_order_event_publishes_the_status_before_the_next_heartbeat(
+    store: SqliteFillsStore,
+) -> None:
+    """
+    Story 29.6: a bracket exit can close a position and the strategy re-enter within a second,
+    so the status is published on the bot's own order events, not only every heartbeat.
+    """
+    runtime, bus, clock = _Runtime(), FakeBus(), _Clock(100.0)
+    supervisor = Supervisor(
+        "bot-01",
+        "paper",
+        runtime,
+        store,
+        connect_to(bus),
+        clock=clock.time,
+        clock_ns=clock.time_ns,
+        heartbeat_seconds=3_600.0,
+        min_publish_spacing=0.0,
+        reconnect_seconds=0.0,
+    )
+
+    async def _run_with_one_order_event() -> int:
+        task = asyncio.create_task(supervisor.run())
+        await asyncio.sleep(0.02)
+        published_before = len(bus.published)
+        assert runtime.order_event is not None
+        runtime.order_event()
+        await asyncio.sleep(0.02)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        return published_before
+
+    published_before = asyncio.run(_run_with_one_order_event())
+    assert published_before == 1  # the first heartbeat tick only: the next is an hour away
+    assert len(bus.published) == 2
+
+
+def test_an_order_event_burst_is_coalesced_by_the_publish_spacing(
+    store: SqliteFillsStore,
+) -> None:
+    # A trailing stop emits an OrderUpdated per trail step: a burst of 100 events over ~0.1 s
+    # must not become 100 publishes (each a Cache read and two fills.db queries).
+    runtime, bus, clock = _Runtime(), FakeBus(), _Clock(100.0)
+    supervisor = Supervisor(
+        "bot-01",
+        "paper",
+        runtime,
+        store,
+        connect_to(bus),
+        clock=clock.time,
+        clock_ns=clock.time_ns,
+        heartbeat_seconds=3_600.0,
+        min_publish_spacing=0.05,
+        reconnect_seconds=0.0,
+    )
+
+    async def _run_with_an_event_burst() -> float:
+        task = asyncio.create_task(supervisor.run())
+        await asyncio.sleep(0.01)
+        assert runtime.order_event is not None
+        started = time.monotonic()
+        for _ in range(100):
+            runtime.order_event()
+            await asyncio.sleep(0.001)
+        await asyncio.sleep(0.1)
+        elapsed = time.monotonic() - started
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        return elapsed
+
+    elapsed = asyncio.run(_run_with_an_event_burst())
+    # The first tick, then at most one per 50 ms however long the burst took on this box.
+    assert len(bus.published) >= 2
+    assert len(bus.published) <= 2 + math.ceil(elapsed / 0.05)

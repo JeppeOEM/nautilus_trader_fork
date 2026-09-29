@@ -24,8 +24,30 @@ Verified against crates/adapters/bybit (Story 19.3 Task 1) -- what is NOT ported
     (websocket/parse.rs), a per-instrument constant, so precision labels never drift.
   * open interest is dropped on the linear ticker path (only the option-greeks parse reads
     it) -- so `open_interest.py` polls REST, same as dYdX.
-  * subscriptions are one WS request per topic; Bybit documents no per-second subscribe
-    limit for public topics, so no 2/sec-style cap and no `_MAX_WS_SUBSCRIPTIONS`.
+  * subscriptions are one WS request per topic, reference-counted per topic by the Rust client
+    (crates/adapters/bybit/src/websocket/client.rs:742-840, `subscribe`/`unsubscribe`): the
+    reference is taken (or dropped) before the only fallible step, the command-channel send, so
+    a raised subscribe still holds a reference and a repeated one only raises the count -- one
+    later unsubscribe would then not end the topic. Every channel call therefore goes through
+    one `WireChannels`, each with its inverse as `undo`: a failed subscribe is undone by its
+    unsubscribe (dropping that reference), so a retry sends the topic afresh; an unsubscribe
+    releases each held channel once (Story 29.4).
+  * pacing: Bybit documents no per-second subscribe limit for public streams. Observed live
+    2026-09-28 (`scripts/measure_ws_limits.py --venue bybit`, docs/DATA_DICTIONARY.md §1.14): one
+    burst of 200 single-topic subscribes (sent in 7 ms), then 200 unsubscribes, accepted in
+    total on linear and spot with no refusal and no close -- a burst, not a sustained rate.
+    Every wire call waits on `BYBIT_WS_FRAMES_PER_SECOND`, a chosen margin, not a measured
+    ceiling. Known limit: the Rust client's reconnect replay of held topics is not paced by us.
+    It is bounded only by the plan's size, which has no cap, so a plan of more than about 65
+    linear ids (3 topics each) replays more topics in one burst than the 200 observed accepted;
+    upgrade path: a pacing hook in the Rust client (outside `platform/`, FORK-01).
+  * Known limit (apply latency): a linear id is 3 paced calls (4 with the trades-only twin),
+    about 0.15 s at 20/s, all under capture's subscription lock, so a large add delays other
+    commands and resyncs by that much per id. At start, `CaptureService.run` applies the whole
+    plan before it starts any extra loop, so `collector:status` and `collector:control` wait
+    that long per planned id too (a command published meanwhile is lost, as for a stopped
+    collector); upgrade path: batch several topics per request (Bybit linear accepts at least
+    50 args, spot 10), which needs a batched Rust subscribe.
 
 Feeds (story 22.14): every message is tagged with its socket -- `linear` / `spot`, and with
 `trade_feeds = 2` the trades-only twins `linear-trades` / `spot-trades` (same feed group), whose
@@ -34,6 +56,7 @@ copies the core unions through its trade_id dedup. `feed_states()` exposes each 
 """
 
 import asyncio
+import contextlib
 import functools
 import logging
 from collections.abc import Callable
@@ -41,8 +64,12 @@ from typing import Any
 
 from capture.application.book_check import BookSnapshot
 from capture.application.feed import Feed
+from capture.application.feed import OptionalStepFailed
+from capture.application.feed import optional_feed_send
 from capture.application.feed import optional_feed_step
 from capture.application.ports import Ledger
+from capture.application.wire_channels import Send
+from capture.application.wire_channels import WireChannels
 from capture.venues.bybit.book_snapshot import fetch_orderbook
 from nautilus_trader.core import nautilus_pyo3
 from nautilus_trader.core.nautilus_pyo3 import BybitEnvironment
@@ -57,6 +84,14 @@ logger = logging.getLogger(__name__)
 
 # Bybit linear order books stream depth 1/50/200/1000; 50 comfortably covers BOOK_DEPTH=20.
 ORDERBOOK_DEPTH = 50
+
+# Wire calls per second across this client's sockets: a chosen margin, not a measured ceiling.
+# Observed 2026-09-28 (DATA_DICTIONARY §1.14, `scripts/measure_ws_limits.py --venue bybit`): one
+# burst of 200 single-topic subscribe requests sent back to back (~7 ms), then 200 unsubscribes,
+# all accepted within 0.45 s on `linear` and `spot`, socket still alive -- the total of one burst,
+# not a sustained rate; Bybit documents no public-stream request rate. 20/s keeps a plan change
+# at a tenth of that one burst's size per second.
+BYBIT_WS_FRAMES_PER_SECOND = 20.0
 
 LINEAR_FEED = Feed("linear", "linear")
 SPOT_FEED = Feed("spot", "spot")
@@ -105,6 +140,7 @@ class BybitClient:
         if trade_feeds == 2:
             self._ws_linear_trades = self._new_ws(BybitProductType.LINEAR, environment)
             self._ws_spot_trades = self._new_ws(BybitProductType.SPOT, environment)
+        self._wire = WireChannels(BYBIT_WS_FRAMES_PER_SECOND)
 
     @staticmethod
     def _new_ws(product_type: BybitProductType, environment: BybitEnvironment) -> object:
@@ -186,44 +222,82 @@ class BybitClient:
         if failure is not None:
             raise failure
 
-    async def subscribe(self, instrument_id: str) -> None:
+    def _channels(self, instrument_id: str) -> list[tuple[str, Send, Send]]:
+        """Return the id's channels on its product's socket: (name, subscribe, unsubscribe)."""
         iid = nautilus_pyo3.InstrumentId.from_str(instrument_id)
         ws, product_type = self._ws_for(instrument_id)
-        await ws.subscribe_trades(iid)
-        await ws.subscribe_orderbook(iid, ORDERBOOK_DEPTH)
+        channels: list[tuple[str, Send, Send]] = [
+            ("trades", lambda: ws.subscribe_trades(iid), lambda: ws.unsubscribe_trades(iid)),
+            (
+                "orderbook",
+                lambda: ws.subscribe_orderbook(iid, ORDERBOOK_DEPTH),
+                lambda: ws.unsubscribe_orderbook(iid, ORDERBOOK_DEPTH),
+            ),
+        ]
         if product_type == BybitProductType.LINEAR:
-            await ws.subscribe_ticker(iid)  # mark/index price + funding rate (perp only)
+            # mark/index price + funding rate (perp only)
+            channels.append(
+                ("ticker", lambda: ws.subscribe_ticker(iid), lambda: ws.unsubscribe_ticker(iid))
+            )
+        return channels
+
+    async def subscribe(self, instrument_id: str) -> None:
+        """
+        Hold every channel of the id not already held: a retry sends only the missing ones. Each
+        failed subscribe is undone by its unsubscribe, which drops the Rust topic reference the
+        failed call took, so the retry subscribes it afresh.
+        """
+        for name, sub, unsub in self._channels(instrument_id):
+            await self._wire.hold((name, instrument_id), sub, undo=unsub)
+        product_type = self._product_type(instrument_id)
         trade_ws = self._trade_ws_for(product_type)
-        if trade_ws is not None:
-            await optional_feed_step(
-                _trade_feed(product_type),
-                "subscribe",
-                trade_ws.subscribe_trades(iid),
-                self._ledger,
+        if trade_ws is None:
+            return
+        iid = nautilus_pyo3.InstrumentId.from_str(instrument_id)
+        feed = _trade_feed(product_type)
+        # Optional: a failure is ledgered (`collector.trade_feed`) and undone, never fatal. The id
+        # still counts as applied, so capture's retry loop does not retry it: only the next
+        # `subscribe` of the id does (a re-add, a restart), and meanwhile the id has one feed.
+        with contextlib.suppress(OptionalStepFailed):
+            await self._wire.hold(
+                ("twin-trades", instrument_id),
+                lambda: optional_feed_send(
+                    feed, "subscribe", trade_ws.subscribe_trades(iid), self._ledger
+                ),
+                undo=lambda: trade_ws.unsubscribe_trades(iid),
             )
 
     async def unsubscribe(self, instrument_id: str) -> None:
-        iid = nautilus_pyo3.InstrumentId.from_str(instrument_id)
-        ws, product_type = self._ws_for(instrument_id)
-        await ws.unsubscribe_trades(iid)
-        await ws.unsubscribe_orderbook(iid, ORDERBOOK_DEPTH)
-        if product_type == BybitProductType.LINEAR:
-            await ws.unsubscribe_ticker(iid)
-        trade_ws = self._trade_ws_for(product_type)
+        """
+        Release every held channel of the id, each once. A raised release (the trades-only
+        socket's included) would propagate for capture to ledger and retry, but the Rust
+        `unsubscribe` never raises: it drops the topic reference, then swallows a failed
+        command-channel send (client.rs:834-836), so every release is recorded as done. That is
+        still consistent: the send fails only when the socket's handler task is gone, so nothing
+        streams, and the topic has left the Rust client's set, so no reconnect replays it. The
+        `undo` is kept for the `WireChannels` contract, not because it can run here.
+        """
+        for name, sub, unsub in self._channels(instrument_id):
+            await self._wire.release((name, instrument_id), unsub, undo=sub)
+        trade_ws = self._trade_ws_for(self._product_type(instrument_id))
         if trade_ws is not None:
-            await optional_feed_step(
-                _trade_feed(product_type),
-                "unsubscribe",
-                trade_ws.unsubscribe_trades(iid),
-                self._ledger,
+            iid = nautilus_pyo3.InstrumentId.from_str(instrument_id)
+            await self._wire.release(
+                ("twin-trades", instrument_id),
+                lambda: trade_ws.unsubscribe_trades(iid),
+                undo=lambda: trade_ws.subscribe_trades(iid),
             )
 
     async def resync_orderbook(self, instrument_id: str) -> None:
         """Unsubscribe + resubscribe the book: Bybit answers with a fresh snapshot (Clear + levels)."""
-        iid = nautilus_pyo3.InstrumentId.from_str(instrument_id)
-        ws, _ = self._ws_for(instrument_id)
-        await ws.unsubscribe_orderbook(iid, ORDERBOOK_DEPTH)
-        await ws.subscribe_orderbook(iid, ORDERBOOK_DEPTH)
+        sub, unsub = next(
+            (sub, unsub)
+            for name, sub, unsub in self._channels(instrument_id)
+            if name == "orderbook"
+        )
+        key = ("orderbook", instrument_id)
+        await self._wire.release(key, unsub, undo=sub)
+        await self._wire.hold(key, sub, undo=unsub)
 
     async def fetch_book_snapshot(self, instrument_id: str) -> BookSnapshot:
         """

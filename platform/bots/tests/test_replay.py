@@ -22,6 +22,12 @@ then the `bots:status` string, the four `bots:history` strings (and `all` withou
 balance), the `bots:incidents` string after each transition of a scripted tick sequence, and the
 control decision for each of a fixed message list. The same inputs are replayed here through the
 new API and every string must be identical.
+
+Story 29.6 appended nine fields to `bots:status` after `updated_at` (the wire rule: fields are
+only ever appended): the recorded thirteen-field prefix must still be byte-identical, and the
+appended fields, in their frozen order, are recorded as `status_appended` (the run ends short
+with no bracket exits configured, so both exits are null; `last_fill_at` is the latest seeded
+fill).
 """
 
 import json
@@ -67,6 +73,17 @@ _INSTRUMENT = TestInstrumentProvider.btcusdt_binance()
 _IID = _INSTRUMENT.id
 _TS_START = 1_000_000_000
 _STEP_NS = 1_000_000_000
+_APPENDED_STATUS_KEYS = [
+    "stop_loss",
+    "take_profit",
+    "entry_price",
+    "mark_price",
+    "position_qty",
+    "stop_loss_orders",
+    "take_profit_orders",
+    "open_orders",
+    "last_fill_at",
+]
 
 
 def _delta(
@@ -173,7 +190,14 @@ def test_status_history_and_fill_rows_are_byte_identical(store: SqliteFillsStore
             started_at=_INPUTS["status_started_at"],
             now=_INPUTS["status_now"],
         )
-        assert json.dumps(status) == _FIXTURE["status"]
+        recorded = json.loads(_FIXTURE["status"])
+        keys = list(status)
+        assert keys[: len(recorded)] == list(recorded)
+        prefix = {key: status[key] for key in keys[: len(recorded)]}
+        assert json.dumps(prefix) == _FIXTURE["status"]
+        assert keys[len(recorded) :] == _APPENDED_STATUS_KEYS
+        appended = {key: status[key] for key in _APPENDED_STATUS_KEYS}
+        assert json.dumps(appended) == _FIXTURE["status_appended"]
         runtime = StrategyCacheReader(strategy)
         now_ns = _INPUTS["history_now_ns"]
         history = HistoryPublisher(

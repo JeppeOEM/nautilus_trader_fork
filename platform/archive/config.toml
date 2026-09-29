@@ -13,6 +13,9 @@ nightly_at = "03:07"
 
 # The venues whose nightly saga runs, in this order within each day (a subset of DYDX, BYBIT,
 # HYPERLIQUID). One venue's failure never skips the next venue, the consolidate or the backup.
+# DYDX stays after the venue cutover (Story 29.3) although its collector no longer runs by default:
+# its saga keeps verifying and pruning the archived dYdX days until they age out. Drop it only when
+# docs/DEPLOY_CHECKLIST.md §8's retirement check passes.
 venues = ["DYDX", "BYBIT", "HYPERLIQUID"]
 
 # After downtime, how many missed closed days are caught up (newest first kept, run oldest

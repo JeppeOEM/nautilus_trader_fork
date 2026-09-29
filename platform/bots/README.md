@@ -129,6 +129,42 @@ finds one (that's the point: non-Sandbox execution is a separate file/loader, ne
 field toggle here — see `bots/infrastructure/config.py`'s docstring; the two files build two
 distinct types, `PaperFleet` and `ExecBot`, in `bots/domain/config.py`).
 
+### Bracket exits (paper only)
+
+Two optional per-bot keys give every entry a resting take-profit and/or stop-loss, placed with
+the entry as one order list (`order_factory.bracket` when both are set):
+
+```toml
+[[bots]]
+bot_id = "bot-01"
+instrument_id = "BTC-USD-PERP.DYDX"
+trade_size = "0.001"
+take_profit_bps = 25   # reduce-only LIMIT 0.25% beyond the entry-time mid
+stop_loss_bps = 10     # reduce-only STOP_MARKET 0.10% against it
+```
+
+Each is a whole number of basis points from 1 to 9999 (10000 would put a long's stop or a short's
+take-profit at zero), or absent for no such leg; `0`, a negative, `true`, `1.5` or a quoted
+value fails the load, naming the file. The exit prices come from the last quote's mid in
+`Decimal`, rounded to the instrument's tick *away* from the entry (a take-profit up and a stop
+down for a long), so neither is ever closer than configured. The bot cancels its own resting
+orders one cycle before a reversal's flattening order (which then goes out even if the signal
+has faded by that cycle, so a position whose exits were cancelled is never left holding; it is
+one reduce-only market order sized to the whole open position, re-sent for any unfilled
+remainder until flat, so a partial fill can never flip the bot into an unprotected position),
+whenever it is flat and no entry of its own is still working, and when it is stopped; the
+sibling of a filled leg is cancelled by Nautilus's one-updates-the-other handling. Both legs are *emulated*: the node's `OrderEmulator`
+holds them and releases one to the venue only when a trade reaches it (a live Sandbox rejects
+a reduce-only leg resting at the venue from the entry's own fill, because the fill reaches the
+Cache after the venue checks the leg; see `bots/strategies/exits.py`). `Known limit:` an emulated
+exit protects nothing while the node is down, and a released stop fills at the book. With both
+keys absent the bot trades exactly as before (market orders, exits by reversing). Only the
+paper `[[bots]]` entry takes them: `ExecConfig`
+(`exchange_demo`/`real_money`) refuses them as unknown keys until each venue's support for
+contingent orders is verified (a `Known limit:` in `bots/domain/config.py`). The Bots pane's
+`entry`/`sl`/`tp` columns show them (`docs/BOT_OPERATIONS.md` §1), and `make bots-churn-check`
+proves the chain live on a throwaway fixture (`tests/fixtures/config.churn.toml`).
+
 ### The two non-Sandbox modes
 
 Everything above is paper. There is one other config shape, in its own file, only read

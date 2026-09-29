@@ -478,6 +478,172 @@ checked (and so which collector's ledger explains them) to one venue. It never n
 "Services"/`--fail-on` check -- a site belonging to a different service, e.g.
 `ranking_engine.volume24h`, is still checked under `--venue bybit`.
 
+## 8. Venue cutover: Bybit and Hyperliquid proven, then dYdX stopped (Story 29.3)
+
+Collection moves off dYdX (operator decision 2026-09-26). Bybit keeps `BTCUSDT-LINEAR.BYBIT`,
+`ETHUSDT-LINEAR.BYBIT`, `BTCUSDT-SPOT.BYBIT` and `ETHUSDT-SPOT.BYBIT`; Hyperliquid collects
+`SOL-USD-PERP.HYPERLIQUID` instead of BTC/ETH (both reversible by config:
+`platform/capture/venues/{bybit,hyperliquid}/config.toml`). The dYdX compose service `collector`
+is behind the `dydx` profile: `make up`, `redeploy`, `redeploy-all` and `redeploy-no-paper` never
+start it, `make up-dydx` starts it and `make down-dydx` removes it. Nothing here deletes data.
+The dropped instruments (every `.DYDX` id, and Hyperliquid's BTC/ETH) fall under the nightly's
+normal retention only: their raw trades go once a day is `verified` and older than 7 days, and
+a dYdX coin's opted-in order book deltas once older than its `retain_hours` in the dYdX plan
+(`platform/data/dydx_config.toml`; none: kept). Their 1 s snapshots, mark/index, funding, open
+interest and instrument definitions are the permanent archive and stay, **as long as the dYdX
+plan's `instruments` list is left as it is**. While `DYDX` is in `archive/config.toml`'s `venues`,
+the `DYDX` saga's prune reads that plan: every type except `trade_tick` of a `.DYDX` id the plan
+no longer lists is deleted once older than its `non_config_retain_hours` (`archive/prune_catalog.py`,
+plan retention). So never trim the dYdX plan to "clean up" after the cutover.
+
+**Partial days are expected to fail reconciliation.** `compare_klines` compares our 1 m candles
+with the venue's candles for the whole UTC day, minute for minute, so a day an instrument was
+collected for only part of fails with a `reconcile.kline_mismatch` for every minute it was not
+collected. There are three such days. The redeploy's day D fails for `SOL-USD-PERP.HYPERLIQUID`
+(it starts that day) and for `BTC-USD-PERP.HYPERLIQUID`/`ETH-USD-PERP.HYPERLIQUID` (they stop).
+The day of check 6's `make down-dydx` fails for every `.DYDX` id. For each failed day, confirm
+that its mismatches lie only on the uncollected side of the switch time: the detail is in
+`data/errors/archive.jsonl`, `grep '"reconcile.kline_mismatch"' data/errors/archive.jsonl | grep
+'<id>'`, where each line names the id and the minute. Known limit: a failed day keeps its raw trades
+(the prune reports it `kept <id> <day>: failed` every night and never deletes it). Nothing is
+lost. For the `.DYDX` ids the day needs a decision by hand before `DYDX` retires (see below).
+`HYPERLIQUID` stays in the nightly, so day D's `kept ... failed` lines for
+`BTC-USD-PERP.HYPERLIQUID`/`ETH-USD-PERP.HYPERLIQUID` recur every night and their raw trades stay,
+with no step that clears them. The upgrade path is a collection-window record per instrument that
+the comparison clips to.
+
+Run the checks in order, from `platform/` on the VPS. Stop at the first one that fails and fix
+its cause (DATA-02); dYdX keeps running until check 6. URLs are the VPS's `data_api`
+(`127.0.0.1:9100`; from the desktop, through the `troll-web` tunnel).
+
+1. **Redeploy the new configs, dYdX still running.** Before it, note the time for check 4:
+   `date +%s%N` (the redeploy's `since_ns`). Then `git pull` and `make redeploy-all`.
+   Expected: `docker ps --format '{{.Names}} {{.Status}}' | grep collector` lists
+   `bybit-collector` and `hyperliquid-collector` with a fresh `Up`, and `dydx-collector` still
+   `Up` with its old uptime (`redeploy-all` no longer names it, so it keeps its old image). In
+   Dozzle, `hyperliquid-collector` logs `Started: 1 subscribed` and `bybit-collector`
+   `Started: 4 subscribed`. `redeploy-all` also restarts `live-paper`; run it when no paper bot
+   holds a position you care about.
+2. **Rankings, within 10 minutes.** Open `http://127.0.0.1:9100/`. Expected: the five ids
+   `BTCUSDT-LINEAR.BYBIT`, `ETHUSDT-LINEAR.BYBIT`, `BTCUSDT-SPOT.BYBIT`, `ETHUSDT-SPOT.BYBIT` and
+   `SOL-USD-PERP.HYPERLIQUID` are listed without the market-data-stale marker (⚠), and Vol24h is
+   filled for all five (`ranking`'s Bybit source covers spot too: USD-quoted spot turnover). In the filter panel, the condition
+   `Exchange (venue)` `=` `BYBIT` leaves only the four Bybit rows, and `=` `HYPERLIQUID` only the
+   SOL row (and `=` `DYDX` only dYdX's, which are still fresh). The same from the API:
+
+   ```bash
+   r=$(curl -sf http://127.0.0.1:9100/api/rankings) || echo "rankings not published yet: retry"
+   test -n "$r" && echo "$r" | python3 -c 'import json, sys
+   r = json.load(sys.stdin)
+   for i in r["items"]: print(i["instrument_id"], i.get("volume24h"))
+   print("stale:", r["stale_instrument_ids"])'
+   ```
+
+   Expected: all five ids printed, each followed by a number (never `None`), and none of the
+   five in `stale:`. A 503 before `ranking_engine`'s first message after the redeploy is not a
+   failure; retry after a minute.
+3. **Chart, each of the five.** Open `http://127.0.0.1:9100/chart/<id>` (e.g.
+   `/chart/SOL-USD-PERP.HYPERLIQUID`) at 1 m. Expected: 1 m candles load, and the right-most bar
+   is forming (it moves with the live price and closes on the minute). The REST half, per id:
+   `curl -s "http://127.0.0.1:9100/api/candles/SOL-USD-PERP.HYPERLIQUID?before_ns=$(date +%s%N)&bar_seconds=60&limit=5"`
+   returns non-empty `items`.
+4. **No new collector error site, over one hour.** One hour after the redeploy, with `SINCE` the
+   `date +%s%N` noted in check 1:
+
+   ```bash
+   curl -s "http://127.0.0.1:9100/api/errors?since_ns=$SINCE" | python3 -c 'import json, sys
+   s = json.load(sys.stdin)["services"]
+   for n in ("bybit_collector", "hyperliquid_collector"):
+       print(n, s[n].get("since") if n in s else "MISSING: no ledger file for this service")'
+   ```
+
+   Expected: `{}` for both. `MISSING` fails the check: the service wrote no ledger file at all
+   (DATA-07's `ERROR_LEDGER_DIR` mount), so a clean hour cannot be told from an unrecorded one. Otherwise, each site listed must already have fired in the hour
+   before the redeploy, and its count must be root-caused (DATA-02). To check, run the same
+   command with `since_ns` set to `SINCE` minus 3600000000000. A site's pre-redeploy count is that
+   run's count minus this run's count. A site whose pre-redeploy count is 0 is new, and a new site
+   on either service fails the check.
+5. **The nightly verifies the new set.** The redeploy's own UTC day D is partial for
+   `SOL-USD-PERP.HYPERLIQUID` (collected only from the redeploy), so judge the first full day,
+   D+1, at the 03:07 UTC run of D+2 (the `archive` service runs the `BYBIT` and `HYPERLIQUID`
+   sagas: rebuild, consolidate, candles, reconcile, prune). Expected, with `DAY` = D+1:
+   `docker compose logs archive | grep -E "compare_klines (BYBIT|HYPERLIQUID) $DAY"` prints
+   `instruments pass 4/4` for BYBIT and `instruments pass 1/1` for HYPERLIQUID; and
+
+   ```bash
+   docker compose exec archive python3 -c 'import os, sqlite3, sys
+   for v in ("bybit", "hyperliquid"):
+       path = f"/app/candles_dir/candles_{v}.db"
+       if not os.path.exists(path):
+           print(v, "MISSING: no candle store"); continue
+       db = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+       q = "SELECT instrument_id, status, mismatches FROM verified_days WHERE day = ?"
+       for row in db.execute(q, (sys.argv[1],)): print(v, row)' "$DAY"
+   ```
+
+   prints the five ids, each `pass` with `0` mismatches (`verified_days` in
+   `platform/data/candles/candles_<venue>.db`, the only day status). The ledger is flat for the
+   five: the same `archive` service also runs the `DYDX` saga, so judge by id, not by site count:
+   `grep -E '"reconcile\.(kline_mismatch|not_rebuilt|error)"' data/errors/archive.jsonl | grep
+   "$DAY" | grep -E 'BYBIT|HYPERLIQUID'` prints nothing. Day D itself fails for the three
+   Hyperliquid ids (see "Partial days" above); check its mismatches as described there.
+6. **Only then stop dYdX.** `make down-dydx`. Expected: `docker ps -a --filter
+   name=dydx-collector --format '{{.Names}}'` prints nothing (the container is removed, not only
+   stopped, so a reboot cannot restart it). With the check-2 command: within about 30 s
+   (`ranking/domain/board.py`'s `STALE_NS`) every `.DYDX` id leaves `items` and is listed under
+   `stale:` (the page marks the feed stale instead of showing its last values as live), and
+   after one hour (`RECENTLY_STALE_WINDOW_NS`) it is gone from `stale:` too. Never hidden early:
+   a dYdX id that vanishes from both before it was listed stale fails the check (DATA-01).
+   `ranking`'s dYdX volume poll keeps running; a venue with no fresh rows publishes none. In
+   `make tui`'s Collector pane, the DYDX section turns stale (`~`) and its actions go nowhere,
+   because no collector consumes dYdX's `collector:control` messages any more; once its last
+   status is over an hour old the pane refuses them with the reason (`no collector:status for
+   over 60 min`, Story 29.4). Expected: do not pin or start dYdX coins from it. The nightly after this day fails the down day for every `.DYDX` id (see
+   "Partial days" above).
+7. **A fresh boot starts Bybit and Hyperliquid only.** First check that `platform/.env` does not
+   set `COMPOSE_PROFILES` to anything containing `dydx` (compose reads it, and it would enable the
+   profile for every `make` target): `grep COMPOSE_PROFILES .env` prints nothing or no `dydx`.
+   The same holds for the operator's shell: `env | grep COMPOSE_PROFILES` prints nothing or no
+   `dydx` (an exported variable enables the profile just like `.env`, and overrides it).
+   Then `sudo reboot`. After the reboot, before any `make`, `docker ps --format '{{.Names}}' |
+   grep collector` prints `bybit-collector` and `hyperliquid-collector` (`restart: always`
+   brought them back) and no `dydx-collector`. Then from `platform/` run `make up`. The same
+   command must still print no `dydx-collector`.
+
+Record when done (UTC), in this line: cutover run on `____-__-__`; last dYdX day collected
+`____-__-__` (the UTC day of check 6's `make down-dydx`, itself partial).
+
+**Retiring `DYDX` from the nightly.** `platform/archive/config.toml` keeps `DYDX` in `venues`
+after the cutover. Its saga keeps verifying and pruning the archived dYdX days: the trade
+retention deletes a `trade_tick` day only once it is `verified` and older than 7 days
+(`archive/nightly.py`'s `_TRADE_RETENTION_DAYS`), and the plan retention deletes a coin's
+order book deltas once older than its `retain_hours`. Let `L` be the last dYdX day collected, as
+recorded above, and `R` the largest finite `retain_hours` in the dYdX plan, in whole days rounded
+up (0 when no coin stores deltas with a finite window). Drop `DYDX` from `venues` only when all
+three of these hold:
+
+1. Today (UTC) is more than `max(8, R + 1)` days after `L`, so every dYdX day has passed both
+   retention windows and been judged by the prune (the saga is the only job that prunes `.DYDX`
+   files: once `DYDX` is dropped, whatever is left stays).
+2. The last nightly's `archive` log has no `kept <.DYDX id> <day>: unverified` line. Every such
+   day must first get its `verified_days` row, by a manual `make nightly VENUE=DYDX DAY=<day>`.
+   The command below lists the dYdX days that are not `pass`:
+
+   ```bash
+   test -f data/candles/candles_dydx.db && docker compose exec archive python3 -c 'import sqlite3
+   db = sqlite3.connect("file:/app/candles_dir/candles_dydx.db?mode=ro", uri=True)
+   for row in db.execute("SELECT day, instrument_id, status FROM verified_days"
+                         " WHERE status != ? ORDER BY day", ("pass",)): print(row)' \
+     || echo "no dYdX candle store: nothing was ever verified; do not retire DYDX yet"
+   ```
+
+3. Every `kept <.DYDX id> <day>: failed` line is either the down day `L` (expected, see "Partial
+   days") or a day whose mismatches have been root-caused (DATA-02).
+
+Failed days keep their raw trades, and without the `DYDX` saga nothing revisits them. The files
+stay and nothing is deleted. The drop is a commit, and it also changes
+`tests/test_compose_profiles.py`'s `DYDX` assertion. Then run `docker compose restart archive`.
+
 ## Deferred operator actions
 
 VPS steps a story needed that the operator chose to run later, in one batch at the next deploy
@@ -638,3 +804,123 @@ redeploy alone changes no bot's behaviour.
       and `nautilus_trader`), so also search the `live-paper` log in Dozzle for
       `CandlePatternStrategy` `ERROR`/`WARN` lines: a refused or lost stop, "no stop price", a
       stop "still open while flat", or a `trade_size` refused at start.
+### 29-1 Symbol and Exchange on the web rankings (commit: this story's)
+
+- [ ] On the VPS, pull this commit and run `make redeploy-no-paper` from `platform/`. It rebuilds
+      and restarts `ranking_engine`, which now publishes `symbol` on every `rankings:live` rank
+      entry, and `data_api`, which serves the new rankings page. No collector, config, env var,
+      compose service or bind mount changed.
+- [ ] Open the web rankings page. Every row shows Symbol and Exchange between Rank and Instrument
+      (e.g. `BTC` / `BYBIT · perp`), and clicking Symbol puts the same coin's rows from different
+      exchanges next to each other.
+- [ ] After 10 minutes, `GET /api/errors` is flat against the hour before the deploy (no new site).
+
+### 29-2 Collector pane shows every venue's plan (commit: this story's)
+
+- [ ] On the VPS, pull this commit and run `make redeploy-all` from `platform/` (`capture/`
+      changed, so the three collectors must restart; `redeploy-no-paper` restarts none of them).
+      It rebuilds the collector image, restarts `collector`, `bybit_collector` and
+      `hyperliquid_collector` and rebuilds `bot_tui`: Bybit's and Hyperliquid's collectors now
+      publish their static plan on `collector:status`, and every venue's aggregate gains `venue`,
+      `cap`, `accepts_commands`, `min_liquidity_usd` and `last_apply`. No config key, env var,
+      compose service or bind mount changed. `redeploy-all` also rebuilds and restarts
+      `live-paper`: run it when no paper bot holds a position you care about, or restart only
+      what this story changed: `docker compose up -d --build collector bybit_collector
+      hyperliquid_collector` then `docker compose --profile tui build bot_tui`.
+- [ ] `make tui`, then `:data`. Pub/sub keeps no history, so a section appears only at its
+      collector's next publish: each publishes on startup and then every 30 minutes. Open the TUI
+      within a minute of the restart, or wait up to 30 minutes. Expect three sections, `BYBIT`, `DYDX` and `HYPERLIQUID`, each headed
+      `<VENUE>: N collected +P pending · cap C` with a `last apply` line. On a Bybit row, `p` shows
+      `BYBIT: static plan: edit platform/capture/venues/bybit/config.toml` in the footer and opens
+      no prompt; `p` on a dYdX row still opens the type-to-confirm prompt (`esc` to cancel).
+- [ ] After 10 minutes, `GET /api/errors` is flat against the hour before the deploy (no new
+      `collector.status_loop` site on Bybit or Hyperliquid).
+
+### 29-3 Venue cutover (commit: this story's)
+
+- [ ] Run §8 "Venue cutover" checks 1 to 7 in order: `make redeploy-all` with dYdX still running;
+      the rankings, chart and `GET /api/errors` checks for the five new ids; the nightly marks the
+      first full day `verified` for all five; only then `make down-dydx`, with dYdX's rankings rows
+      ageing out as stale and then gone; a fresh boot plus `make up` starts Bybit and Hyperliquid
+      only.
+- [ ] Record the cutover date and the last dYdX day collected in §8's record line.
+- [ ] For each partial day (day D for the three Hyperliquid ids, the down day for every `.DYDX`
+      id), confirm the failed reconciliation's mismatches lie only on the uncollected side of the
+      switch time (§8 "Partial days").
+- [ ] Include `SOL-USD-PERP.HYPERLIQUID` in the owed >= 3 h Hyperliquid lag run (audit D-63,
+      `python -m archive.tools.measure_lag --venue hyperliquid`): `hold_back_seconds` and
+      `stale_book_seconds` in `capture/venues/hyperliquid/config.toml` were measured on BTC/ETH/PURR.
+- [ ] Later, once §8's retirement check passes, drop `DYDX` from `platform/archive/config.toml`'s
+      `venues` (a commit, then `docker compose restart archive`).
+
+### 29-4 Runtime collection control for Bybit and Hyperliquid (commit: this story's)
+
+- [ ] Before redeploying, check the two plan files are writable by the collectors' uid 1000 (their
+      config mounts are `:rw` now, and the plan store rewrites them in place):
+      `stat -c '%u %n' capture/venues/bybit/config.toml capture/venues/hyperliquid/config.toml`
+      prints `1000` for both, else `chown 1000 <file>`. A file uid 1000 cannot write makes every
+      command fail its save (`collector.control` "plan save failed", plan unchanged).
+- [ ] If the `dydx` profile is still up (`docker compose ps collector` lists it), move it onto
+      this image first: `make up-dydx` right after `make redeploy-all`, before any command is
+      sent from a new `bot_tui`. `redeploy-all` builds the image but never restarts `collector`,
+      and a pre-29.4 dYdX collector ignores `venue` and does not check an id's venue, so it
+      would add a `:start SOLUSDT-LINEAR.BYBIT` to `data/dydx_config.toml` as well.
+- [ ] `make redeploy-all` (rebuilds and restarts `bybit_collector` and `hyperliquid_collector`).
+      Expected in `make tui`'s Collector pane within a minute: the BYBIT and HYPERLIQUID headers
+      read `· no cap`, and their `p`/`x`/`:start` are no longer refused as a static plan.
+- [ ] On each venue, `:start` one new coin (e.g. `:start SOLUSDT-LINEAR.BYBIT`, `:start
+      ETH-USD-PERP.HYPERLIQUID`): its row appears `pending`, then turns collected within a few
+      seconds, and the section's last-apply line lists it as subscribed. `GET /api/errors` shows no
+      new `collector.subscribe_failed` or `collector.control` for it.
+- [ ] `x` (stop) that coin on each venue: its row drops from the pane at once, and on the web
+      rankings (filter by Exchange) its row turns stale within about 30 s and is gone an hour later
+      (never hidden early, DATA-01). Its catalog files stay (`ls data/catalog/data/*/<id>*`).
+- [ ] Confirm dYdX ignores the new commands: `docker compose logs collector` (when the `dydx`
+      profile is up) shows no WARNING for the Bybit/Hyperliquid ids.
+- [ ] The commands rewrote the committed files: `git status` on the VPS lists
+      `platform/capture/venues/bybit/config.toml` and `.../hyperliquid/config.toml` modified (their
+      comments are gone). Commit the new plan back from the desktop (copy the ids into the
+      committed file, comments kept, and update `tests/test_committed_config.py` if the decided
+      set changed), then bring the VPS checkout to it (`git checkout -- <file>` then `git pull`,
+      or `git pull` after a commit of the VPS change). Each plan file is a single-file bind
+      mount, which follows the inode: `git checkout`/`git pull`, `sed -i` or an editor that saves
+      by rename *replace* the file, the running collector never sees the new one, and its later
+      command saves land in the orphaned inode and are lost. So after any such replacement run
+      `docker compose restart bybit_collector hyperliquid_collector` (and `collector` for
+      `data/dydx_config.toml`); only an in-place write (`cat new > file`, an editor writing in
+      place) reaches the 30 s hot reload. Do this before every `git pull` on the VPS, which
+      otherwise refuses to overwrite the modified file. A replaced file is owned by whoever ran
+      git, so re-run the uid check of this entry's first item after it (`chown 1000 <file>` if
+      needed), or every later command fails its save.
+- [ ] A Hyperliquid coin that would take the collector past the venue's 1000 channels per IP
+      (`HYPERLIQUID_MAX_WS_CHANNELS`, counting only this collector's own channels) stays `pending`
+      with a `collector.subscribe_failed` ledger entry per retry naming the limit: that is the
+      expected refusal, not a fault. With `live-paper` also on Hyperliquid from the same IP, the
+      real budget is smaller than the collector counts.
+- [ ] Watch the first reconnect of each collector after a larger plan change: the Rust clients
+      replay every held subscription unpaced (a `Known limit:` in both clients). `GET /api/errors`
+      shows no subscribe errors and the pane no lasting `pending` rows afterwards.
+
+### 29-5 Market browser: search a venue's coins by name and add them (commit: this story's)
+
+- [ ] `make redeploy-all` (rebuilds and restarts `ranking_engine`, which now publishes
+      `markets:live`, and `bybit_collector`/`hyperliquid_collector`, whose aggregates now carry
+      `last_refusal`; it also rebuilds `bot_tui`'s image). If the `dydx` profile is up, `make up-dydx`
+      right after, so dYdX's aggregate carries `last_refusal` too.
+- [ ] Within a minute, `redis-cli subscribe markets:live` shows one message per venue with a fresh
+      volume source (`BYBIT`, `DYDX`, `HYPERLIQUID`), each `{"venue", "ts", "markets": [...]}` with
+      only `instrument_id`/`symbol` per entry. `GET /api/errors` shows no `ranking_engine.markets`.
+- [ ] `make tui`, `:data`, then `/` and type `sol`: every venue's SOL markets are listed, grouped
+      per venue under `<VENUE>: N collected +P pending · no cap · M matches` (dYdX: `· cap 30`), and
+      the ids already collected read `collected`. Before the first message (within a minute of the
+      restart) the browser reads `waiting for markets:live…`.
+- [ ] One add on Bybit: `Enter`, highlight an uncollected `...-LINEAR.BYBIT` id, `a`, type `add` +
+      `Enter`. The footer reads `sent: start <ID>`, the row reads `pending` and then `collected`
+      within a few seconds, the Collector pane's BYBIT header count goes up by one without
+      reopening the TUI, and `GET /api/errors` shows no new `collector.control` or
+      `collector.subscribe_failed` for it. Then `x` that coin on the Collector pane if it is not
+      wanted (its row drops; catalog files stay).
+- [ ] `a` on a `collected` row shows `cannot add <ID>: already collected` in the footer and sends
+      nothing (`docker compose logs bybit_collector` shows no new command).
+- [ ] The new coin rewrote `platform/capture/venues/bybit/config.toml`: handle the VPS checkout as
+      in 29-4's "The commands rewrote the committed files" item.

@@ -1,9 +1,21 @@
 # Bybit collector (Story 19.3). Ids are the Nautilus Bybit adapter's linear ids.
+# Story 29.4: this file is also the venue's live plan. bot_tui's p/x/:start save the plan here
+# (mounted read-write), rewriting it without these comments; commit that change back, or restore
+# the file, before the next `git pull` (docs/DEPLOY_CHECKLIST.md). An in-place hand edit of
+# `instruments` (or the optional `exclude` list an unpin writes) is picked up within 30 s, no
+# restart. Known limit: the file is a single-file bind mount, which follows the inode: anything
+# that replaces the file (`git checkout`/`git pull`, `sed -i`, an editor saving by rename) is
+# never seen by the running collector, and its later saves are lost; after such a replacement run
+# `docker compose restart bybit_collector`. Upgrade path: a directory mount.
 environment = "mainnet"
 catalog_path = "/app/catalog"
 flush_interval_seconds = 60
 open_interest_poll_seconds = 300
 snapshot_interval_seconds = 1.0
+# Both markets of each coin stay collected (Story 29.3, operator decision 2026-09-26: BTC/ETH move
+# here from Hyperliquid). The linear perp carries what spot cannot: mark/index price, funding rate
+# and open interest (the ticker is subscribed for LINEAR only, open_interest.py polls linear ids
+# only). The spot id carries the spot book and spot trades, which the perp's do not replace.
 instruments = ["BTCUSDT-LINEAR.BYBIT", "ETHUSDT-LINEAR.BYBIT",
                "BTCUSDT-SPOT.BYBIT", "ETHUSDT-SPOT.BYBIT"]
 # Story 22.12: a live row is exchange second S, closed at wall S + 1 + hold_back_seconds from the

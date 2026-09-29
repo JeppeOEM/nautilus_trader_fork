@@ -142,6 +142,25 @@ this codebase, so treat this as unverified territory.
 - [ ] Tear down, delete the scratch config, move to the real `config.toml`
       (`[venues.DYDX] environment = "mainnet"`) for the checks below.
 
+## Mechanics check — bracket exits end to end (`make bots-churn-check`)
+
+The fastest proof that the paper chain works on this box, and the check for take-profit/stop-loss
+exits (Story 29.6): one throwaway bot on dYdX `BTC-USD-PERP` mainnet data with Sandbox execution,
+tuned to go long as soon as its indicators initialize (about six minutes) and exit at 5 bps.
+
+- [ ] From the repo root: `make -C platform bots-churn-check` (needs Docker and host Python
+      with redis-py). It builds the `live-paper` image, starts its own Redis on
+      `CHURN_REDIS_PORT` (default 6399) unless one already answers there (its own leftover
+      from an interrupted run is removed first, never reused), runs the image with
+      `bots/tests/fixtures/config.churn.toml` mounted over `/app/bots/config.toml` and a scratch
+      `FILLS_DB_PATH`, and watches `bots:status`.
+- [ ] Exit 0 means it saw, in order within 15 min: a protected long (stop < entry <
+      take-profit, one order of each), flat with no order left behind, and a second protected
+      long with fresh exits. Non-zero names the check that failed and prints the bot's last log
+      lines. Either way the bot container (and a Redis it started) is removed; the captured
+      payloads are in `platform/data/bots_churn_check/payloads.json`.
+- [ ] The fixture is never deployed: it trades on noise by design.
+
 ## First run — mainnet paper (watch it live via dozzle + Redis)
 
 - [ ] `make up-live-paper`, tail dozzle: instrument lookup succeeds, threshold

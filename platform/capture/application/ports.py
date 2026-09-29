@@ -64,7 +64,8 @@ class VenueFeed(Protocol):
     Invariant: every decoded market-data message reaches the service through the `on_data(data,
     feed)` callable the client was built with, from the event loop (`call_soon_threadsafe`), and
     `on_data` only enqueues. All methods are coroutines. `subscribe`/`unsubscribe` are called only
-    by `CaptureService.apply` and its retry loop, and must be idempotent per channel.
+    by `CaptureService.apply` and its retry loop, and must be idempotent per channel and pace every
+    wire call under the venue's measured limit (Bybit, Hyperliquid: `wire_channels.WireChannels`).
 
     Optional capabilities, found by `hasattr`: `subscribe_global()` (venue-wide channels, e.g.
     dYdX markets); `fetch_book_snapshot(iid) -> BookSnapshot` (the aligned REST cross-check,
@@ -201,8 +202,8 @@ class PlanDiff(Protocol):
 @dataclass(frozen=True)
 class PlanChange:
     """
-    Capture's own concrete `PlanDiff`: the initial apply of a plan's ids at `run()`, and the static
-    Bybit/Hyperliquid plans, which have no control plane to produce one.
+    Capture's own concrete `PlanDiff`: the initial apply of a plan's ids at `run()`, before any
+    control plane produces one (every later change arrives as `collection_control`'s `PlanDiff`).
     """
 
     added: frozenset[str] = frozenset()
@@ -235,6 +236,11 @@ class CaptureStatus:
     planned that are still subscribed because their unsubscribe failed (retried) -- they hold venue
     wire slots the plan's cap cannot see. Built by `CaptureService.capture_status()` from its own sets
     at one instant; the counters are copies, so a reader cannot mutate capture's state.
+
+    `last_applied` is the most recent `apply`'s result (startup or command), `None` before the
+    first, and `last_applied_ns` its wall-clock time (0 before the first). It is history, not the
+    live truth: an id it lists as failed may since have been subscribed by the retry loop, which
+    `pending` reflects.
     """
 
     applied: frozenset[str]
@@ -242,3 +248,5 @@ class CaptureStatus:
     last_book_update_ns: Mapping[str, int]
     trade_backfill: Mapping[str, int]
     lingering: frozenset[str] = frozenset()
+    last_applied: Applied | None = None
+    last_applied_ns: int = 0

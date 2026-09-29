@@ -37,6 +37,8 @@ from kernel.indicators import mid_price as calc_mid_price
 from kernel.indicators import spread as calc_spread
 from kernel.indicators import trade_aggregates
 from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.venues import MalformedInstrumentId
+from kernel.venues import base_symbol
 from kernel.venues import market_kind
 from kernel.venues import venue_kind
 from kernel.venues import venue_of
@@ -71,6 +73,10 @@ VOLUME_DELTA_WINDOW: int = 60
 
 # 3 missed slow-loop cycles: past this the cached pct/volatility/price are no longer current.
 SLOW_METRICS_MAX_AGE_NS: int = 3 * 60 * 1_000_000_000
+
+# `venue_markets`'s key for a volume id with no `.VENUE` suffix: no venue's message may carry it,
+# and the engine ledgers every id under it (Story 29.5).
+UNPARSEABLE_VENUE: str = ""
 
 
 class InstrumentMetrics:
@@ -158,6 +164,13 @@ class InstrumentMetrics:
 
 def _value(ind: MultiLevelOFI | MultiLevelOBI) -> float | None:
     return ind.value if ind.initialized else None
+
+
+def _venue_or_unparseable(instrument_id: str) -> str:
+    try:
+        return venue_of(instrument_id)
+    except MalformedInstrumentId:
+        return UNPARSEABLE_VENUE
 
 
 def _fast_volatility(snapshots: list[dict]) -> float | None:
@@ -363,6 +376,23 @@ class RankingBoard:
         self._volume_24h = merged
         return expired
 
+    def venue_markets(self, now_ns: int) -> dict[str, list[str]]:
+        """
+        Return each venue's market ids (sorted), the union of its sources still younger than
+        volume_max_age_ns -- `refresh_volumes`'s own age rule, so `markets:live` lists exactly the
+        markets whose volumes count (Story 29.5). Bybit's linear and spot sources merge under
+        `BYBIT`. A venue with no fresh source is absent, never listed from an expired poll
+        (DATA-01). An id with no `.VENUE` suffix is grouped under `UNPARSEABLE_VENUE`, never
+        dropped here: the board has no ledger, so the engine ledgers it (DATA-07).
+        """
+        by_venue: dict[str, set[str]] = {}
+        for fetched_at_ns, volumes in self._venue_volumes.values():
+            if now_ns - fetched_at_ns > self._volume_max_age_ns:
+                continue
+            for iid in volumes:
+                by_venue.setdefault(_venue_or_unparseable(iid), set()).add(iid)
+        return {venue: sorted(ids) for venue, ids in sorted(by_venue.items())}
+
     def missing_volume_ids(self, now_ns: int) -> list[str]:
         """Fresh instruments with no USD volume: exactly the rows volume mode leaves out."""
         return [
@@ -436,6 +466,7 @@ class RankingBoard:
         row = {
             "instrument_id": iid,
             "venue": (venue := venue_of(iid)),
+            "symbol": base_symbol(iid),
             "venue_kind": venue_kind(venue),
             "market": market_kind(iid),
             "volume24h": reading.value_usd if reading is not None else None,

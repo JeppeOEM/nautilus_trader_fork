@@ -23,7 +23,8 @@ loop cycle over an empty catalog and an empty `metrics.db`; an unknown mode, the
 volatility; one more batch. It holds the burst's digest (so the generator below is proven to be
 the recorded input), the sha256 of every published message, the last message in full and every
 persisted `metrics.db` row. Any change to a published byte, to a publish decision or to a stored
-row fails here.
+row fails here. Story 29.1 added `symbol` to each rank entry (right after `venue`): with it
+stripped, every message still hashes to the recorded bytes, so it is the only difference.
 """
 
 import asyncio
@@ -168,6 +169,38 @@ def _stored_rows(db_path: Path) -> tuple[list[str], list[list]]:
         db.close()
 
 
+# Story 29.1's added field, spelled out (not recomputed with `base_symbol`, which would be circular).
+EXPECTED_SYMBOLS = {
+    "BTC-USD-PERP.DYDX": "BTC",
+    "ETHUSDT-LINEAR.BYBIT": "ETH",
+    "BTCUSDT-SPOT.BYBIT": "BTC",
+    "SOL-USD-PERP.HYPERLIQUID": "SOL",
+    "XRPUSDT-SPOT.BYBIT": "XRP",
+    "DOGE-USD-PERP.DYDX": "DOGE",
+}
+
+
+def _assert_symbol_right_after_venue(message: dict) -> None:
+    """Every rank carries its base symbol, placed right after `venue`."""
+    for rank in message["ranks"]:
+        keys = list(rank)
+        assert keys[keys.index("venue") + 1] == "symbol"
+        assert rank["symbol"] == EXPECTED_SYMBOLS[rank["instrument_id"]]
+
+
+def _without_symbol(message: str) -> str:
+    """
+    Return the message as a pre-29.1 producer published it: `symbol` stripped from each rank and
+    the rest re-serialized exactly as the engine does (`json.dumps`, insertion order kept). Matching the
+    recorded hashes proves every existing field, byte and order is unchanged; the fixture is not
+    re-recorded, which would prove nothing about the existing bytes.
+    """
+    decoded = json.loads(message)
+    for rank in decoded["ranks"]:
+        del rank["symbol"]
+    return json.dumps(decoded)
+
+
 def test_rankings_live_bytes_and_metrics_rows_match_the_pre_move_engine(tmp_path: Path) -> None:
     fixture = json.loads(_FIXTURE.read_text())
     batches = generate_burst()
@@ -185,6 +218,7 @@ def test_rankings_live_bytes_and_metrics_rows_match_the_pre_move_engine(tmp_path
         prices=CatalogPriceHistory(str(tmp_path / "catalog")),
         history=history,
         live=live,
+        markets=_Live(),  # its own channel: nothing it publishes reaches rankings:live
         config=RankingConfig(),
         clock=clock.time_ns,
     )
@@ -193,10 +227,14 @@ def test_rankings_live_bytes_and_metrics_rows_match_the_pre_move_engine(tmp_path
     history.close()
 
     assert hashlib.sha256("\n".join(batches).encode()).hexdigest() == fixture["input_sha256"]
-    assert live.messages[-1] == fixture["final_message"]
-    assert [hashlib.sha256(m.encode()).hexdigest() for m in live.messages] == fixture[
-        "publish_sha256"
-    ]
+    for message in live.messages:
+        # The raw bytes are exactly `json.dumps` of their own decoding, so re-serializing in
+        # `_without_symbol` cannot hide a change to the engine's serialization.
+        assert json.dumps(json.loads(message)) == message
+        _assert_symbol_right_after_venue(json.loads(message))
+    pre_29_1 = [_without_symbol(m) for m in live.messages]
+    assert pre_29_1[-1] == fixture["final_message"]
+    assert [hashlib.sha256(m.encode()).hexdigest() for m in pre_29_1] == fixture["publish_sha256"]
     assert _stored_rows(tmp_path / "metrics.db") == (
         fixture["metrics_columns"],
         fixture["metrics_rows"],

@@ -336,9 +336,11 @@ def _strategy_for(bot: BotConfig | ExecConfig) -> Strategy:
     on a reorder.
     """
     paths = None
+    exits = None  # bracket exits are paper-only (`ExecConfig`'s Known limit): an exec bot has none
     if isinstance(bot, BotConfig):
         check_strategy(bot)  # a directly built BotConfig is checked too, never a bare KeyError
         paths = STRATEGIES[bot.strategy]
+        exits = bot
     if paths is None:
         return DummyStrategy(
             config=DummyStrategyConfig(
@@ -347,6 +349,8 @@ def _strategy_for(bot: BotConfig | ExecConfig) -> Strategy:
                 trend_buy_threshold=bot.trend_buy_threshold,
                 trend_sell_threshold=bot.trend_sell_threshold,
                 ofi_confirm_threshold=bot.ofi_confirm_threshold,
+                take_profit_bps=exits.take_profit_bps if exits is not None else None,
+                stop_loss_bps=exits.stop_loss_bps if exits is not None else None,
                 order_id_tag=bot.bot_id,
             ),
         )

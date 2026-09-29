@@ -13,8 +13,9 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-Ranking's Redis adapters: the `rankings:live` publisher and the `snapshots:raw`/`ranking:control`
-listener (one connection, reconnecting on any non-cancellation error).
+Ranking's Redis adapters: the `rankings:live` publisher (also `markets:live`'s, Story 29.5, on the
+same client) and the `snapshots:raw`/`ranking:control` listener (one connection, reconnecting on
+any non-cancellation error).
 """
 
 import asyncio

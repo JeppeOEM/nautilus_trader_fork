@@ -19,6 +19,11 @@ import asyncio
 from collection_control.application.control import ControlService
 
 
+# The reload cadence of a venue whose config has no `config_reload_seconds` (Bybit, Hyperliquid):
+# dYdX's default for that key, so a hand edit lands within the same time on every venue.
+PLAN_RELOAD_SECONDS = 30.0
+
+
 async def reload_loop(control: ControlService, interval: float) -> None:
     """
     Every `interval` seconds, re-read the plan through the one loader -- sleep first, the plan was

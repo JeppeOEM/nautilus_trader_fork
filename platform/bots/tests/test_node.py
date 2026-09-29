@@ -294,3 +294,29 @@ def test_the_exec_path_hosts_exactly_its_one_bot() -> None:
         assert len(node.trader.strategy_states()) == 1
     finally:
         _dispose(node)
+
+
+def test_a_paper_bots_bracket_exit_keys_reach_its_strategy() -> None:
+    fleet = _paper_config(
+        BotConfig(bot_id="bracketed", take_profit_bps=25, stop_loss_bps=10),
+        BotConfig(bot_id="plain"),
+    )
+    node, hosted = build_node(fleet, _REDIS_URL)
+    try:
+        exits = {
+            bot.bot_id: (strategy.config.take_profit_bps, strategy.config.stop_loss_bps)
+            for bot, strategy in hosted
+        }
+        assert exits == {"bracketed": (25, 10), "plain": (None, None)}
+    finally:
+        _dispose(node)
+
+
+def test_an_exec_bot_never_gets_bracket_exits() -> None:
+    # ExecConfig's Known limit: contingent orders are unverified on real venue exec clients.
+    node, hosted = build_node(_exec_config(bot_id="bot-live"), _REDIS_URL)
+    try:
+        ((_bot, strategy),) = hosted
+        assert (strategy.config.take_profit_bps, strategy.config.stop_loss_bps) == (None, None)
+    finally:
+        _dispose(node)

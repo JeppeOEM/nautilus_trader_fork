@@ -1,4 +1,12 @@
 # Hyperliquid collector (Story 19.4). Ids are the Nautilus Hyperliquid adapter's perp ids.
+# Story 29.4: this file is also the venue's live plan. bot_tui's p/x/:start save the plan here
+# (mounted read-write), rewriting it without these comments; commit that change back, or restore
+# the file, before the next `git pull` (docs/DEPLOY_CHECKLIST.md). An in-place hand edit of
+# `instruments` (or the optional `exclude` list an unpin writes) is picked up within 30 s, no
+# restart. Known limit: the file is a single-file bind mount, which follows the inode: anything
+# that replaces the file (`git checkout`/`git pull`, `sed -i`, an editor saving by rename) is
+# never seen by the running collector, and its later saves are lost; after such a replacement run
+# `docker compose restart hyperliquid_collector`. Upgrade path: a directory mount.
 environment = "mainnet"
 catalog_path = "/app/catalog"
 flush_interval_seconds = 60
@@ -10,7 +18,14 @@ stale_book_seconds = 12.0
 # feed_stale_seconds is left unset: it falls back to stale_book_seconds, and with every
 # instrument pushed on the same ~5.4 s cadence, feed silence and instrument silence are
 # the same 12 s bound here. The two are still reported separately (which one tripped).
-instruments = ["BTC-USD-PERP.HYPERLIQUID", "ETH-USD-PERP.HYPERLIQUID"]
+# The collected set (Story 29.3, operator decision 2026-09-26): Solana is collected on Hyperliquid
+# and BTC/ETH on Bybit, so the two Hyperliquid majors collected until then were dropped. Reversible
+# by config: add an id back here (and to tests/test_committed_config.py, which pins this set); the
+# collector re-reads this file every 30 s (an in-place edit needs no restart, Story 29.4). Their
+# archived days stay: retention ages out only raw trades and deltas. The cadence above and
+# hold_back_seconds below were measured on BTC/ETH/PURR, not SOL; the owed >= 3 h VPS run
+# (audit D-63) covers SOL.
+instruments = ["SOL-USD-PERP.HYPERLIQUID"]
 # Story 22.12: a live row is exchange second S, closed at wall S + 1 + hold_back_seconds from the
 # book/trades stamped inside it (DATA_DICTIONARY.md §1.7). hold_back_seconds = trade p99.9 lag
 # (`python -m archive.tools.measure_lag --venue hyperliquid`) rounded up to 0.5 s. Local dev-box

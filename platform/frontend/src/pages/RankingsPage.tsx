@@ -135,6 +135,98 @@ export interface RankingsLiveMessage {
   stale_instrument_ids: string[];
 }
 
+// Story 29.1: Symbol and Exchange are pinned identity columns (like Rank and Instrument), not
+// RANKING_COLS metrics. Both read published rank-entry fields only -- `symbol` is ranking's
+// kernel.venues.base_symbol, never re-derived from the id here (SIGNAL-01).
+type SortKey = "symbol" | "venue";
+// The pinned columns every tab leads with: Rank, Symbol, Exchange, Instrument.
+const PINNED_COLUMN_COUNT = 4;
+// What each sort compares, in order: an Exchange sort groups a venue's perp and spot rows.
+const SORT_FIELDS: Record<SortKey, readonly string[]> = { symbol: ["symbol"], venue: ["venue", "market"] };
+type SortDirection = "ascending" | "descending";
+interface RowSort {
+  key: SortKey;
+  direction: SortDirection;
+}
+interface RankedRow {
+  row: RankingRow;
+  rank: number;
+}
+
+function textField(row: RankingRow, key: string): string | undefined {
+  const value = row[key];
+  return typeof value === "string" && value !== "" ? value : undefined;
+}
+
+// A header click cycles ascending -> descending -> back to message order (the true rank).
+function nextSort(current: RowSort | null, key: SortKey): RowSort | null {
+  if (current?.key !== key) return { key, direction: "ascending" };
+  return current.direction === "ascending" ? { key, direction: "descending" } : null;
+}
+
+// Case-insensitive like the `=` filter (`km:US500` sorts among the `K`s), exact case as the
+// tie-break so the order never depends on the browser's locale; a missing value sorts last.
+function compareText(left: string | undefined, right: string | undefined, sign: number): number {
+  if (left === right) return 0;
+  if (left === undefined) return 1;
+  if (right === undefined) return -1;
+  const [l, r] = [left.toLowerCase(), right.toLowerCase()];
+  if (l !== r) return (l < r ? -1 : 1) * sign;
+  return (left < right ? -1 : 1) * sign;
+}
+
+// The viewer's explicit sort over the already-narrowed rows. Stable by construction: ties
+// break by ascending message rank in either direction.
+function sortRows(rows: RankedRow[], sort: RowSort | null): RankedRow[] {
+  if (sort === null) return rows;
+  const sign = sort.direction === "ascending" ? 1 : -1;
+  return [...rows].sort((a, b) => {
+    for (const field of SORT_FIELDS[sort.key]) {
+      const order = compareText(textField(a.row, field), textField(b.row, field), sign);
+      if (order !== 0) return order;
+    }
+    return a.rank - b.rank;
+  });
+}
+
+const SORT_ARROWS: Record<SortDirection, string> = { ascending: " ▲", descending: " ▼" };
+
+function SortHeader({
+  label,
+  sortKey,
+  sort,
+  onSort,
+  rowSpan,
+}: {
+  label: string;
+  sortKey: SortKey;
+  sort: RowSort | null;
+  onSort: (key: SortKey) => void;
+  rowSpan: number;
+}) {
+  const direction = sort?.key === sortKey ? sort.direction : undefined;
+  return (
+    <th rowSpan={rowSpan} aria-sort={direction ?? "none"}>
+      <button type="button" className="rankings-sort" onClick={() => onSort(sortKey)}>
+        {label}
+        <span aria-hidden="true">{direction === undefined ? "" : SORT_ARROWS[direction]}</span>
+      </button>
+    </th>
+  );
+}
+
+// The Exchange cell: the venue, with the market kind (perp/spot) as a dim tag -- `BYBIT · spot`.
+function ExchangeCell({ row }: { row: RankingRow }) {
+  const venue = textField(row, "venue");
+  const market = textField(row, "market");
+  return (
+    <td>
+      {venue ?? "—"}
+      {venue !== undefined && market !== undefined && <span className="rankings-market-tag"> · {market}</span>}
+    </td>
+  );
+}
+
 // Story 25.1a: the ranking-mode switch, web-only now (it was the TUI's `m` key). Global and
 // last-write-wins across every viewer, publish-and-wait: the pressed button is whatever mode
 // rankings:live last carried, never flipped locally on click, so it changes only once
@@ -212,13 +304,15 @@ export default function RankingsPage() {
     return () => clearInterval(interval);
   }, []);
 
-  // Which column set renders to the right of the pinned Rank/Instrument columns
+  // Which column set renders to the right of the pinned Rank/Symbol/Exchange/Instrument columns
   // (Story 17.1). Deliberately plain useState, never in the useQuery key or any
   // effect deps -- a tab switch may only change the JSX branch below, never
   // refetch rankings or open a new live-channel subscription (AC #4). The tab
   // bar itself reuses the shared .tabs/.tabbtn pattern from theme.css (the same
   // classes DocsPage's sidebar tabs use) rather than a second tab visual style.
   const [activeTab, setActiveTab] = useState<"performance" | "technicals">("performance");
+  // Story 29.1: the viewer's explicit Symbol/Exchange sort; null is message order (the rank).
+  const [sort, setSort] = useState<RowSort | null>(null);
 
   // Technicals columns (Story 17.5): the screener-wide selection, owned/persisted by the shared
   // IndicatorPicker; header actions below (remove/reorder) save directly and bump `reloadKey`
@@ -265,7 +359,8 @@ export default function RankingsPage() {
   const filterFields: FilterField[] = [
     // Conditions compare the raw value; volume24h is displayed in millions but filtered in USD.
     ...RANKING_COLS.map((col) => ({ key: col.key, label: col.key === "volume24h" ? `${col.label} (raw USD)` : col.label })),
-    { key: "venue", label: "Venue", text: true },
+    { key: "symbol", label: "Symbol", text: true },
+    { key: "venue", label: "Exchange (venue)", text: true },
     { key: "venue_kind", label: "Kind (cex/dex)", text: true },
     { key: "market", label: "Market (perp/spot)", text: true },
     ...groups.flatMap((g) =>
@@ -314,9 +409,9 @@ export default function RankingsPage() {
   }
 
   // Live WS ticks take over from the initial REST seed the moment the first one
-  // arrives -- row order is message order verbatim, never re-sorted client-side
-  // (epics AC3/platform/CLAUDE.md: "no client-side re-sort beyond the active Ranking
-  // Mode already reflected in that order").
+  // arrives -- the default row order is message order verbatim (the active Ranking Mode's
+  // true rank). The only re-sort is the viewer's explicit Symbol/Exchange header choice
+  // (Story 29.1), which never changes a row's shown rank.
   const rows: RankingRow[] = live.latest?.ranks ?? (data?.items as unknown as RankingRow[] | undefined) ?? [];
   const updatedAtNs: number | undefined = live.latest?.updated_at ?? data?.updated_at;
   const staleInstrumentIds = new Set<string>(
@@ -349,7 +444,8 @@ export default function RankingsPage() {
     );
   }
 
-  // Rank is the row's position in the live message, so it stays the true rank when filtered.
+  // Rank is the row's position in the live message, so it stays the true rank when filtered
+  // or sorted.
   // Technicals conditions can't be evaluated until their values are loaded -- skipped (not
   // treated as "no match") so the table isn't blanked, with a visible note below.
   const technicalsPending = technicalsValues === undefined;
@@ -366,11 +462,13 @@ export default function RankingsPage() {
   const venueRows = rows
     .map((row, index) => ({ row, rank: index + 1 }))
     .filter(({ row }) => typeof row.venue !== "string" || !deselectedVenues.has(row.venue));
-  const visibleRows = applyFilters(
-    venueRows,
-    activeFilters,
-    ({ row }, field) => readField(row, field),
+  // Sorting comes last, over what the chips and conditions left, and carries each row's rank.
+  const visibleRows = sortRows(
+    applyFilters(venueRows, activeFilters, ({ row }, field) => readField(row, field)),
+    sort,
   );
+  const pinnedRowSpan = technicalsActive ? 2 : 1;
+  const onSort = (key: SortKey) => setSort((current) => nextSort(current, key));
 
   return (
     <div className="term-box" data-label="Rankings">
@@ -425,11 +523,11 @@ export default function RankingsPage() {
       <table className="rankings-table">
         <thead>
           <tr>
-            <th rowSpan={technicalsActive ? 2 : 1}>Rank</th>
-            <th rowSpan={technicalsActive ? 2 : 1}>Instrument</th>
-            {activeTab === "performance" && <th>Venue</th>}
+            <th rowSpan={pinnedRowSpan}>Rank</th>
+            <SortHeader label="Symbol" sortKey="symbol" sort={sort} onSort={onSort} rowSpan={pinnedRowSpan} />
+            <SortHeader label="Exchange" sortKey="venue" sort={sort} onSort={onSort} rowSpan={pinnedRowSpan} />
+            <th rowSpan={pinnedRowSpan}>Instrument</th>
             {activeTab === "performance" && <th>Kind</th>}
-            {activeTab === "performance" && <th>Market</th>}
             {activeTab === "performance" &&
               RANKING_COLS.map((col) => <th key={col.key}>{col.label}</th>)}
             {technicalsActive &&
@@ -489,10 +587,10 @@ export default function RankingsPage() {
         </thead>
         <tbody>
           {/* No Technicals columns configured yet -- one dim empty-state row spanning the
-              pinned Rank/Instrument pair; add one via the picker below the table. */}
+              pinned Rank/Symbol/Exchange/Instrument columns; add one via the picker below. */}
           {activeTab === "technicals" && technicalsEntries.length === 0 && (
             <tr>
-              <td colSpan={2} className="rankings-empty">
+              <td colSpan={PINNED_COLUMN_COUNT} className="rankings-empty">
                 no columns yet — add one below
               </td>
             </tr>
@@ -515,8 +613,12 @@ export default function RankingsPage() {
                 className="rankings-row"
               >
                 <td>{rank}</td>
+                <td>{textField(row, "symbol") ?? "—"}</td>
+                <ExchangeCell row={row} />
                 <td>
-                  {row.instrument_id}
+                  <span className="rankings-instrument" title={row.instrument_id}>
+                    {row.instrument_id}
+                  </span>
                   {isMessageStale && <span title="rankings feed stale"> ⏱</span>}
                   {marketDataStale && <span title="market data stale"> ⚠</span>}
                   {activeTab === "performance" && (
@@ -535,9 +637,7 @@ export default function RankingsPage() {
                     </button>
                   )}
                 </td>
-                {activeTab === "performance" && <td>{typeof row.venue === "string" ? row.venue : "—"}</td>}
-                {activeTab === "performance" && <td>{typeof row.venue_kind === "string" ? row.venue_kind : "—"}</td>}
-                {activeTab === "performance" && <td>{typeof row.market === "string" ? row.market : "—"}</td>}
+                {activeTab === "performance" && <td>{textField(row, "venue_kind") ?? "—"}</td>}
                 {activeTab === "performance" &&
                   RANKING_COLS.map((col) => <td key={col.key}>{formatCell(col, row[col.key])}</td>)}
                 {technicalsActive &&

@@ -215,9 +215,14 @@ describe("RankingsPage", () => {
     for (const label of PERFORMANCE_COL_LABELS) {
       expect(screen.queryByText(label)).not.toBeInTheDocument();
     }
-    // The pinned columns stay visible regardless of active tab (AC #1).
-    expect(screen.getByText("Rank")).toBeInTheDocument();
-    expect(screen.getByText("Instrument")).toBeInTheDocument();
+    // The pinned columns stay visible, and lead, regardless of active tab (AC #1; Story 29.1).
+    expect(screen.getAllByRole("columnheader").map((th) => th.textContent)).toEqual([
+      "Rank",
+      "Symbol",
+      "Exchange",
+      "Instrument",
+    ]);
+    expect(screen.getByText("no columns yet — add one below")).toHaveAttribute("colspan", "4");
     expect(screen.getByText("BTC-USD-PERP.DYDX")).toBeInTheDocument();
   });
 
@@ -432,7 +437,7 @@ describe("RankingsPage", () => {
       expect(screen.queryByText("NNN-USD-PERP.DYDX")).not.toBeInTheDocument();
     });
 
-    it("shows a Venue column and filters multi-venue rows with `venue = X`, one row per instrument_id", () => {
+    it("shows an Exchange column and filters multi-venue rows with `venue = X`, one row per instrument_id", () => {
       useLiveChannelMock.mockReturnValue({
         latest: liveMessage({
           ranks: [
@@ -445,11 +450,13 @@ describe("RankingsPage", () => {
       });
       renderPage();
 
-      expect(screen.getByRole("columnheader", { name: "Venue" })).toBeInTheDocument();
+      expect(screen.getByRole("columnheader", { name: "Exchange" })).toBeInTheDocument();
+      // The Exchange cell replaced the Performance tab's own Venue/Market columns (Story 29.1).
+      expect(screen.queryByRole("columnheader", { name: "Venue" })).not.toBeInTheDocument();
       expect(within(screen.getByRole("table")).getByText("BYBIT")).toBeInTheDocument();
       expect(screen.getAllByRole("row")).toHaveLength(4); // header + 3 distinct venue-qualified rows
 
-      addFilter("Venue", "=", "bybit");
+      addFilter("Exchange (venue)", "=", "bybit");
 
       expect(screen.getByText("BTCUSDT-LINEAR.BYBIT")).toBeInTheDocument();
       expect(screen.queryByText("BTC-USD-PERP.DYDX")).not.toBeInTheDocument();
@@ -469,7 +476,11 @@ describe("RankingsPage", () => {
       renderPage();
 
       expect(screen.getAllByRole("row")).toHaveLength(3);
-      expect(screen.getByRole("columnheader", { name: "Market" })).toBeInTheDocument();
+      expect(screen.queryByRole("columnheader", { name: "Market" })).not.toBeInTheDocument();
+      // The market kind is the Exchange cell's tag instead.
+      const table = within(screen.getByRole("table"));
+      expect(table.getByText("· spot")).toHaveClass("rankings-market-tag");
+      expect(table.getByText("· perp")).toHaveClass("rankings-market-tag");
 
       addFilter("Market (perp/spot)", "=", "spot");
 
@@ -560,7 +571,7 @@ describe("RankingsPage", () => {
           .slice(1)
           .map((tr) => {
             const cells = within(tr).getAllByRole("cell");
-            return [cells[0].textContent ?? "", (cells[1].textContent ?? "").replace("⏲", "")];
+            return [cells[0].textContent ?? "", (cells[3].textContent ?? "").replace("⏲", "")];
           });
       }
 
@@ -615,7 +626,7 @@ describe("RankingsPage", () => {
       it("composes with a `venue = DYDX` condition and the tab", () => {
         renderPage();
 
-        addFilter("Venue", "=", "dydx");
+        addFilter("Exchange (venue)", "=", "dydx");
         expect(shownRows().map(([, iid]) => iid)).toEqual(["BTC-USD-PERP.DYDX", "ETH-USD-PERP.DYDX"]);
 
         fireEvent.click(chip("DYDX")); // chips AND conditions: nothing left
@@ -680,6 +691,196 @@ describe("RankingsPage", () => {
           setItem.mockRestore();
         }
       });
+    });
+  });
+
+  describe("Symbol and Exchange columns (Story 29.1)", () => {
+    // The AC's message: rank order is Bybit BTC, dYdX ETH, Hyperliquid BTC.
+    const acRanks = [
+      { instrument_id: "BTCUSDT-LINEAR.BYBIT", venue: "BYBIT", symbol: "BTC", market: "perp", price: 1 },
+      { instrument_id: "ETH-USD-PERP.DYDX", venue: "DYDX", symbol: "ETH", market: "perp", price: 2 },
+      { instrument_id: "BTC-USD-PERP.HYPERLIQUID", venue: "HYPERLIQUID", symbol: "BTC", market: "perp", price: 3 },
+    ];
+
+    function showLive(ranks: RankingsLiveMessage["ranks"]): void {
+      useLiveChannelMock.mockReturnValue({ latest: liveMessage({ ranks }), connected: true });
+    }
+
+    // [rank, symbol, exchange venue, instrument_id] per rendered body row.
+    function shownRows(): [string, string, string, string][] {
+      return screen
+        .getAllByRole("row")
+        .slice(1)
+        .map((tr) => {
+          const cells = within(tr).getAllByRole("cell");
+          const exchange = cells[2].firstChild?.textContent ?? "";
+          return [cells[0].textContent ?? "", cells[1].textContent ?? "", exchange, (cells[3].textContent ?? "").replace("⏲", "")];
+        });
+    }
+
+    function header(name: "Symbol" | "Exchange"): HTMLElement {
+      return screen.getByRole("columnheader", { name });
+    }
+
+    function clickHeader(name: "Symbol" | "Exchange"): void {
+      fireEvent.click(within(header(name)).getByRole("button"));
+    }
+
+    function addFilter(fieldLabel: string, value: string) {
+      fireEvent.click(screen.getByRole("button", { name: "Add filter" }));
+      fireEvent.change(screen.getByLabelText("Filter field"), {
+        target: { value: Array.from(screen.getByLabelText<HTMLSelectElement>("Filter field").options).find((o) => o.text === fieldLabel)!.value },
+      });
+      fireEvent.change(screen.getByLabelText("Filter operator"), { target: { value: "=" } });
+      fireEvent.change(screen.getByLabelText("Filter value"), { target: { value } });
+      fireEvent.click(screen.getByRole("button", { name: "Add" }));
+    }
+
+    beforeEach(() => showLive(acRanks));
+
+    it("renders Symbol and Exchange between Rank and Instrument, in message order by default", () => {
+      renderPage();
+
+      const headers = screen.getAllByRole("columnheader").map((th) => th.textContent);
+      expect(headers.slice(0, 5)).toEqual(["Rank", "Symbol", "Exchange", "Instrument", "Kind"]);
+      expect(header("Symbol")).toHaveAttribute("aria-sort", "none");
+      expect(shownRows()).toEqual([
+        ["1", "BTC", "BYBIT", "BTCUSDT-LINEAR.BYBIT"],
+        ["2", "ETH", "DYDX", "ETH-USD-PERP.DYDX"],
+        ["3", "BTC", "HYPERLIQUID", "BTC-USD-PERP.HYPERLIQUID"],
+      ]);
+    });
+
+    it("renders the market as a tag on the Exchange cell, and the full id as the instrument's title", () => {
+      renderPage();
+
+      const exchangeCell = within(screen.getAllByRole("row")[1]).getAllByRole("cell")[2];
+      expect(exchangeCell.textContent).toBe("BYBIT · perp");
+      expect(within(exchangeCell).getByText("· perp")).toHaveClass("rankings-market-tag");
+      const instrument = screen.getByText("BTCUSDT-LINEAR.BYBIT");
+      expect(instrument).toHaveClass("rankings-instrument");
+      expect(instrument).toHaveAttribute("title", "BTCUSDT-LINEAR.BYBIT");
+    });
+
+    it("sorts same-symbol rows on different exchanges adjacent, ties by rank, keeping each message rank", () => {
+      renderPage();
+
+      clickHeader("Symbol");
+
+      expect(header("Symbol")).toHaveAttribute("aria-sort", "ascending");
+      expect(shownRows()).toEqual([
+        ["1", "BTC", "BYBIT", "BTCUSDT-LINEAR.BYBIT"],
+        ["3", "BTC", "HYPERLIQUID", "BTC-USD-PERP.HYPERLIQUID"],
+        ["2", "ETH", "DYDX", "ETH-USD-PERP.DYDX"],
+      ]);
+    });
+
+    it("cycles a header ascending, descending, then back to rank order", () => {
+      renderPage();
+
+      clickHeader("Symbol");
+      clickHeader("Symbol");
+      expect(header("Symbol")).toHaveAttribute("aria-sort", "descending");
+      // Descending by symbol, but ties still ascend by rank.
+      expect(shownRows().map(([rank]) => rank)).toEqual(["2", "1", "3"]);
+
+      clickHeader("Symbol");
+      expect(header("Symbol")).toHaveAttribute("aria-sort", "none");
+      expect(shownRows().map(([rank]) => rank)).toEqual(["1", "2", "3"]);
+    });
+
+    it("sorts by Exchange, and switching headers starts the new one ascending", () => {
+      showLive([...acRanks, { instrument_id: "BTCUSDT-SPOT.BYBIT", venue: "BYBIT", symbol: "BTC", market: "spot", price: 4 }]);
+      renderPage();
+
+      clickHeader("Symbol");
+      clickHeader("Exchange");
+
+      expect(header("Symbol")).toHaveAttribute("aria-sort", "none");
+      expect(header("Exchange")).toHaveAttribute("aria-sort", "ascending");
+      expect(shownRows().map(([rank, , venue]) => [rank, venue])).toEqual([
+        ["1", "BYBIT"],
+        ["4", "BYBIT"],
+        ["2", "DYDX"],
+        ["3", "HYPERLIQUID"],
+      ]);
+    });
+
+    it("renders a missing symbol as — and sorts it last in both directions", () => {
+      const olderProducer = { instrument_id: "SOL-USD-PERP.DYDX", venue: "DYDX", price: 5 };
+      showLive([olderProducer, ...acRanks]);
+      renderPage();
+
+      expect(shownRows()[0]).toEqual(["1", "—", "DYDX", "SOL-USD-PERP.DYDX"]);
+
+      clickHeader("Symbol");
+      expect(shownRows().map(([rank]) => rank)).toEqual(["2", "4", "3", "1"]);
+
+      clickHeader("Symbol");
+      expect(shownRows().map(([rank]) => rank)).toEqual(["3", "2", "4", "1"]);
+    });
+
+    it("groups one exchange's markets together under an Exchange sort, ties by rank", () => {
+      showLive([
+        { instrument_id: "ETHUSDT-SPOT.BYBIT", venue: "BYBIT", symbol: "ETH", market: "spot", price: 1 },
+        { instrument_id: "BTCUSDT-LINEAR.BYBIT", venue: "BYBIT", symbol: "BTC", market: "perp", price: 2 },
+        { instrument_id: "BTCUSDT-SPOT.BYBIT", venue: "BYBIT", symbol: "BTC", market: "spot", price: 3 },
+        { instrument_id: "ETHUSDT-LINEAR.BYBIT", venue: "BYBIT", symbol: "ETH", market: "perp", price: 4 },
+      ]);
+      renderPage();
+
+      clickHeader("Exchange");
+
+      expect(shownRows().map(([rank]) => rank)).toEqual(["2", "4", "1", "3"]);
+    });
+
+    it("sorts symbols case-insensitively, like the `=` filter matches them", () => {
+      showLive([
+        { instrument_id: "SOL-USD-PERP.HYPERLIQUID", venue: "HYPERLIQUID", symbol: "SOL", price: 1 },
+        { instrument_id: "km:US500-USD-PERP.HYPERLIQUID", venue: "HYPERLIQUID", symbol: "km:US500", price: 2 },
+        { instrument_id: "BTC-USD-PERP.HYPERLIQUID", venue: "HYPERLIQUID", symbol: "BTC", price: 3 },
+      ]);
+      renderPage();
+
+      clickHeader("Symbol");
+
+      expect(shownRows().map(([, symbol]) => symbol)).toEqual(["BTC", "km:US500", "SOL"]);
+    });
+
+    it("treats an empty symbol as missing and shows no market tag without a venue", () => {
+      showLive([
+        { instrument_id: "AAA-USD-PERP.DYDX", symbol: "", market: "spot", price: 1 },
+        { instrument_id: "BTC-USD-PERP.DYDX", venue: "DYDX", symbol: "BTC", market: "perp", price: 2 },
+      ]);
+      renderPage();
+
+      expect(shownRows()[0]).toEqual(["1", "—", "—", "AAA-USD-PERP.DYDX"]);
+      expect(within(screen.getAllByRole("row")[1]).getAllByRole("cell")[2].textContent).toBe("—");
+
+      clickHeader("Symbol");
+      expect(shownRows().map(([rank]) => rank)).toEqual(["2", "1"]);
+    });
+
+    it("hides the other venue's rows with an Exchange (venue) filter", () => {
+      renderPage();
+
+      addFilter("Exchange (venue)", "hyperliquid");
+
+      expect(shownRows()).toEqual([["3", "BTC", "HYPERLIQUID", "BTC-USD-PERP.HYPERLIQUID"]]);
+    });
+
+    it("shows both BTC rows and hides the others with `symbol = BTC`, sorted or not", () => {
+      renderPage();
+
+      addFilter("Symbol", "btc");
+      expect(shownRows().map(([, , , iid]) => iid)).toEqual(["BTCUSDT-LINEAR.BYBIT", "BTC-USD-PERP.HYPERLIQUID"]);
+
+      clickHeader("Exchange");
+      clickHeader("Exchange");
+      expect(shownRows().map(([rank, , venue]) => [rank, venue])).toEqual([
+        ["3", "HYPERLIQUID"],
+        ["1", "BYBIT"],
+      ]);
     });
   });
 

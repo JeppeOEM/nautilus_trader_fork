@@ -27,6 +27,7 @@ Running/Stopped state.
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 import time
@@ -47,14 +48,22 @@ from bots.domain.bot import Bot
 logger = logging.getLogger(__name__)
 
 # Published on change + heartbeat (AD-9/AD-10 precedent: ranking's 5 s default). bot_tui marks a
-# bot stale after 3x this with no message.
+# bot stale after 3x this with no message. "On change" is every order event of the bot's own
+# strategy (Story 29.6): a bracket exit can close a position and the strategy re-enter within a
+# second, so a heartbeat alone would rarely ever publish the flat moment in between.
 STATUS_HEARTBEAT_SECONDS = 5.0
+# The least time between two publishes: an event burst (a trailing stop's `OrderUpdated` on every
+# trail step, a scaled exit filling level by level) coalesces into at most 10 publishes a second
+# instead of one Cache read, two fills.db queries and one publish per event on the node's loop.
+MIN_PUBLISH_SPACING_SECONDS = 0.1
 RECONNECT_SECONDS = 2.0
 
 
 def build_status(bot: Bot, runtime: BotRuntime, fills: FillsStore, now: float) -> dict:
     """
-    One `bots:status` payload, field order frozen (AD-10).
+    One `bots:status` payload, field order frozen (AD-10): the published language only ever gains
+    fields appended after `updated_at` (Story 29.6's nine, in this order); an existing field is
+    never renamed, removed or reordered, so the first thirteen stay byte-identical (replay test).
 
     `win_rate` is None (not 0.0) until a round trip has closed: "no trades yet" is not "0% so
     far". `closed_trades`/`win_rate` come from the append-only `fills.db`, never
@@ -77,6 +86,15 @@ def build_status(bot: Bot, runtime: BotRuntime, fills: FillsStore, now: float) -
         "closed_trades": closed_trades,
         "started_at": bot.started_at,
         "updated_at": now,
+        "stop_loss": positions.stop_loss,
+        "take_profit": positions.take_profit,
+        "entry_price": positions.entry_price,
+        "mark_price": positions.mark_price,
+        "position_qty": positions.position_qty,
+        "stop_loss_orders": positions.stop_loss_orders,
+        "take_profit_orders": positions.take_profit_orders,
+        "open_orders": positions.open_orders,
+        "last_fill_at": fills.last_fill_ns(bot.id),
     }
 
 
@@ -115,6 +133,7 @@ class Supervisor:
         clock: Callable[[], float] = time.time,
         clock_ns: Callable[[], int] = time.time_ns,
         heartbeat_seconds: float = STATUS_HEARTBEAT_SECONDS,
+        min_publish_spacing: float = MIN_PUBLISH_SPACING_SECONDS,
         reconnect_seconds: float = RECONNECT_SECONDS,
     ) -> None:
         self._runtime = runtime
@@ -123,11 +142,16 @@ class Supervisor:
         self._clock = clock
         self._clock_ns = clock_ns
         self._heartbeat_seconds = heartbeat_seconds
+        self._min_publish_spacing = min_publish_spacing
         self._reconnect_seconds = reconnect_seconds
         self.bot = Bot(bot_id, mode, started_at=clock())
+        # Set by the strategy's order events; wakes the heartbeat loop before its next tick.
+        self._changed = asyncio.Event()
 
     async def run(self) -> None:
         logger.info("bots:status/control loop starting for bot_id=%s", self.bot.id)
+        # Once per process life, like the seed: the subscription outlives every reconnect.
+        self._runtime.on_order_event(self._changed.set)
         await self.seed()
         while True:
             try:
@@ -222,8 +246,13 @@ class Supervisor:
 
     async def _heartbeat_loop(self, connection: BusConnection) -> None:
         while True:
+            # Cleared before the tick: an order event during it publishes once more right after.
+            self._changed.clear()
             await self.heartbeat_tick(connection)
-            await asyncio.sleep(self._heartbeat_seconds)
+            spacing = min(self._min_publish_spacing, self._heartbeat_seconds)
+            await asyncio.sleep(spacing)
+            with contextlib.suppress(TimeoutError):
+                await asyncio.wait_for(self._changed.wait(), self._heartbeat_seconds - spacing)
 
     async def _control_loop(self, connection: BusConnection) -> None:
         async for data in connection.control_messages():

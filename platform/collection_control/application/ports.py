@@ -16,8 +16,9 @@
 The collection-control context's ports (DDD spine AD-D2/AD-D17): every input and output of
 `ControlService` and `StatusPublisher` crosses one of these, implemented in
 `collection_control.infrastructure` (and, for `Capture`, by capture's `CaptureService`) and wired by
-the composition root, `capture/venues/dydx/__main__.py`'s `build_capture_from_file`. The channel
-names are the published language (frozen by AD-D12).
+the venue composition roots, `capture/venues/<venue>/__main__.py`'s `build_capture_from_file` (every
+venue wires the status publisher; only dYdX the control plane). The channel names are the published
+language (frozen by AD-D12).
 """
 
 from collections.abc import AsyncIterator

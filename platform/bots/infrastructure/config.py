@@ -105,7 +105,13 @@ def _parse_venue(venue: str, raw: dict, path: Path) -> VenuePaperConfig:
 
 # `DummyStrategy`'s tunables, which live on `BotConfig` itself: set on a bot running another
 # strategy they would be silently ignored, so they are refused instead (DATA-07).
-_DUMMY_ONLY_KEYS = ("trend_buy_threshold", "trend_sell_threshold", "ofi_confirm_threshold")
+_DUMMY_ONLY_KEYS = (
+    "trend_buy_threshold",
+    "trend_sell_threshold",
+    "ofi_confirm_threshold",
+    "take_profit_bps",  # Story 29.6: bracket exits are a DummyStrategy feature
+    "stop_loss_bps",
+)
 
 
 def _parse_strategy(raw_bot: dict, path: Path) -> tuple[str, dict]:
@@ -145,6 +151,8 @@ def _parse_bot(raw_bot: dict, path: Path) -> BotConfig:
         starting_balance=raw_bot.get("starting_balance", ""),
         strategy=strategy,
         params=params,
+        take_profit_bps=raw_bot.get("take_profit_bps"),
+        stop_loss_bps=raw_bot.get("stop_loss_bps"),
     )
     _named(path, check_strategy, bot)
     return bot

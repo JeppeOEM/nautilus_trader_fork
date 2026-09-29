@@ -43,6 +43,9 @@ def _fills_store_contract(store: FillsStore) -> None:
     assert store.position_realized_pnls("b2", None) == [-1.0]
     assert store.win_rate_stats("b1") == (1, 1)
     assert store.win_rate_stats("nobody") == (0, 0)
+    # the latest fill of that bot only, None before its first
+    assert store.last_fill_ns("b1") == 3 * _DAY
+    assert store.last_fill_ns("nobody") is None
     assert store.pnl_by_day("b1", None) == [{"period_start": 3 * _DAY, "pnl": 5.0}]
 
 

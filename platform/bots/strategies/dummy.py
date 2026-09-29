@@ -58,6 +58,23 @@ A reversal (e.g. long -> short) is two steps, not one: `_maybe_trade` only ever 
 one `trade_size`-sized market order per call, so flipping a long position first flattens
 it (long -> flat) and only re-enters short on the next signal cycle that still agrees --
 deliberately simple, not a same-tick double-sized reversal order.
+
+Bracket exits (Story 29.6, paper `BotConfig` only): with `take_profit_bps` and/or
+`stop_loss_bps` set, a flat entry is one `OrderList` -- the market entry plus a reduce-only
+LIMIT take-profit and/or STOP_MARKET stop-loss, priced from the last quote's mid (see
+`bots.strategies.exits`). The strategy's own resting orders are cancelled one cycle before a
+reversal's flattening order is sent (so a stop cannot fill while the flatten is in flight), and
+whenever the bot is flat (the backstop that no reduce-only order outlives its position; the
+one-updates-the-other handling already cancels the sibling of a filled leg). Once a reversal
+has cancelled the exits its flatten is sent on the next cycle even if the signal has faded, and
+a flat bot's legs whose entry is still working (accepted, fill not yet applied) are left alone. That
+flatten is one reduce-only market order sized to the open position, re-sent for any remainder
+until flat, so a partial fill never flips the bot into an unprotected position. Both legs are
+emulated by the node's `OrderEmulator` (see `bots.strategies.exits` for why, and its Known
+limit). `on_stop` cancels them too, so a stopped bot's position honestly shows no stop.
+Known limit: a restart does not re-arm the exits of a position it inherits; upgrade path: on
+start, place the protective legs for an open position that has none. With both keys unset the
+trading logic is unchanged; only `on_stop`'s cancel of any resting order applies to every bot.
 """
 
 from decimal import Decimal
@@ -69,6 +86,10 @@ from kernel.indicators import MultiLevelOFI
 from kernel.indicators import OnlineLogisticTrend
 from kernel.indicators import OrderFlowImbalance
 
+from bots.domain.config import MAX_EXIT_BPS
+from bots.strategies.exits import entry_with_exits
+from bots.strategies.exits import exit_prices
+from bots.strategies.exits import make_price
 from nautilus_trader.common.events import TimeEvent
 from nautilus_trader.config import StrategyConfig
 from nautilus_trader.model.data import Bar
@@ -116,6 +137,12 @@ class DummyStrategyConfig(StrategyConfig, frozen=True):
         Book depth `MultiLevelOBI` aggregates over.
     ofi_confirm_threshold : float
         `MultiLevelOFI` must exceed +/- this value in the trend's direction to confirm entry.
+    take_profit_bps : int, optional
+        When set, every entry rests a reduce-only LIMIT take-profit this many basis points
+        beyond the entry-time mid.
+    stop_loss_bps : int, optional
+        When set, every entry rests a reduce-only STOP_MARKET stop-loss this many basis points
+        against the entry-time mid.
     """
 
     instrument_id: InstrumentId
@@ -128,6 +155,8 @@ class DummyStrategyConfig(StrategyConfig, frozen=True):
     ofi_window: int = 20
     obi_levels: int = 10
     ofi_confirm_threshold: float = 0.0
+    take_profit_bps: int | None = None
+    stop_loss_bps: int | None = None
 
 
 class DummyStrategy(Strategy):
@@ -153,6 +182,10 @@ class DummyStrategy(Strategy):
         # timer -- see bots.application.supervise's module docstring for why a Strategy-internal
         # timer is the wrong home for anything that must keep working while stopped.
         self.last_data_ns: int = 0
+        # The side of a reversal whose exits were cancelled, flattened on a later cycle whether
+        # or not the signal still holds, and kept until flat so a partly filled flatten is
+        # finished: a position whose exits are gone is never left holding.
+        self._reversal_side: OrderSide | None = None
 
     def on_start(self) -> None:
         self.instrument = self.cache.instrument(self.config.instrument_id)
@@ -191,6 +224,10 @@ class DummyStrategy(Strategy):
                 self.stop()
                 return
 
+        if not self._exits_valid():
+            self.stop()
+            return
+
         self.subscribe_quote_ticks(self.config.instrument_id)
         self.subscribe_order_book_deltas(self.config.instrument_id, BookType.L2_MBP)
 
@@ -204,6 +241,28 @@ class DummyStrategy(Strategy):
         )
 
         self.log.info(f"DummyStrategy started for {self.config.instrument_id}")
+
+    def _exits_valid(self) -> bool:
+        # The same rule `BotConfig` enforces at load, repeated for a config built directly.
+        for field_name, bps in (
+            ("take_profit_bps", self.config.take_profit_bps),
+            ("stop_loss_bps", self.config.stop_loss_bps),
+        ):
+            if bps is None:
+                continue
+            if isinstance(bps, bool) or not isinstance(bps, int) or not 0 < bps <= MAX_EXIT_BPS:
+                self.log.error(
+                    f"{field_name} ({bps!r}) must be an integer in 1..{MAX_EXIT_BPS}: an exit "
+                    f"10_000 bps below the entry sits at or below zero"
+                )
+                return False
+        return True
+
+    def on_stop(self) -> None:
+        # A stopped bot must not leave resting orders the TUI would still show as protection
+        # it no longer manages (see module docstring).
+        if self._has_resting_orders():
+            self.cancel_all_orders(self.config.instrument_id)
 
     def on_quote_tick(self, tick: QuoteTick) -> None:
         self.last_data_ns = tick.ts_event
@@ -274,9 +333,42 @@ class DummyStrategy(Strategy):
             return
 
         is_flat = self.portfolio.is_flat(self.config.instrument_id)
-        is_long = self.portfolio.is_net_long(self.config.instrument_id)
-        is_short = self.portfolio.is_net_short(self.config.instrument_id)
+        if self._uses_exits:
+            self._trade_with_exits(is_flat)
+            return
+        side = self._wanted_side(is_flat)
+        if side is not None:
+            self._submit(side)
 
+    def _trade_with_exits(self, is_flat: bool) -> None:
+        """
+        One bracket-mode cycle: resting exits are cancelled before a reversal and whenever flat,
+        and the trade waits for the next cycle (see module docstring).
+        """
+        if is_flat:
+            self._reversal_side = None
+            if self._entry_working():
+                return
+            if self._has_resting_orders():
+                self.cancel_all_orders(self.config.instrument_id)
+                return
+            side = self._wanted_side(is_flat)
+            if side is not None:
+                self._enter(side)
+            return
+        side = (
+            self._reversal_side if self._reversal_side is not None else self._wanted_side(is_flat)
+        )
+        if side is None:
+            return
+        self._reversal_side = side
+        if self._has_resting_orders():
+            self.cancel_all_orders(self.config.instrument_id)
+            return
+        self._flatten(side)
+
+    def _wanted_side(self, is_flat: bool) -> OrderSide | None:
+        """Return the side of the one order this cycle's signals call for, None to hold."""
         long_signal = (
             self.trend.value > self.config.trend_buy_threshold
             and self.mlofi.value > self.config.ofi_confirm_threshold
@@ -285,16 +377,94 @@ class DummyStrategy(Strategy):
             self.trend.value < self.config.trend_sell_threshold
             and self.mlofi.value < -self.config.ofi_confirm_threshold
         )
-
         if is_flat:
             if long_signal:
-                self._submit(OrderSide.BUY)
-            elif short_signal:
-                self._submit(OrderSide.SELL)
-        elif is_long and short_signal:
-            self._submit(OrderSide.SELL)
-        elif is_short and long_signal:
-            self._submit(OrderSide.BUY)
+                return OrderSide.BUY
+            return OrderSide.SELL if short_signal else None
+        if self.portfolio.is_net_long(self.config.instrument_id) and short_signal:
+            return OrderSide.SELL
+        if self.portfolio.is_net_short(self.config.instrument_id) and long_signal:
+            return OrderSide.BUY
+        return None
+
+    @property
+    def _uses_exits(self) -> bool:
+        return self.config.take_profit_bps is not None or self.config.stop_loss_bps is not None
+
+    def _has_resting_orders(self) -> bool:
+        instrument_id = self.config.instrument_id
+        return bool(
+            self.cache.orders_open(instrument_id=instrument_id, strategy_id=self.id)
+            or self.cache.orders_emulated(instrument_id=instrument_id, strategy_id=self.id)
+        )
+
+    def _entry_working(self) -> bool:
+        """
+        Whether an entry of this bot is still working while it reads flat: the entry itself is
+        resting, or a leg's parent entry has not closed yet (accepted, fill not yet applied).
+        Its legs are not orphans, and cancelling them would leave the fill unprotected.
+        """
+        instrument_id = self.config.instrument_id
+        for order in (
+            *self.cache.orders_open(instrument_id=instrument_id, strategy_id=self.id),
+            *self.cache.orders_emulated(instrument_id=instrument_id, strategy_id=self.id),
+        ):
+            if not order.is_reduce_only:
+                return True
+            parent = self.cache.order(order.parent_order_id) if order.parent_order_id else None
+            if parent is not None and not parent.is_closed:
+                return True
+        return False
+
+    def _enter(self, side: OrderSide) -> None:
+        assert self.instrument is not None
+        quote = self.cache.quote_tick(self.config.instrument_id)
+        if quote is None:
+            # No mid to price the exits from: an entry without them would be unprotected.
+            return
+        mid = (quote.bid_price.as_decimal() + quote.ask_price.as_decimal()) / 2
+        take_profit, stop_loss = exit_prices(
+            side,
+            mid,
+            self.instrument.price_increment.as_decimal(),
+            self.config.take_profit_bps,
+            self.config.stop_loss_bps,
+        )
+        if any(price is not None and price <= 0 for price in (take_profit, stop_loss)):
+            # Bounded bps keep an exit above zero unless one bps step is below one tick.
+            self.log.error(
+                f"exit at or below zero from mid {mid} (take-profit {take_profit}, stop-loss "
+                f"{stop_loss}): no entry"
+            )
+            return
+        precision = self.instrument.price_precision
+        order_list = entry_with_exits(
+            self.order_factory,
+            self.config.instrument_id,
+            side,
+            self.instrument.make_qty(self.config.trade_size),
+            make_price(take_profit, precision) if take_profit is not None else None,
+            make_price(stop_loss, precision) if stop_loss is not None else None,
+            self.clock.timestamp_ns(),
+        )
+        self.submit_order_list(order_list)
+
+    def _flatten(self, side: OrderSide) -> None:
+        """
+        Close the whole open position with one reduce-only market order. Sized to the position,
+        not `trade_size`: a partly filled flatten's remainder is cancelled on the next cycle
+        (`_reversal_side` holds until flat) and re-sent for what is left, so it can never
+        overshoot into an opposite position that has no exits.
+        """
+        assert self.instrument is not None
+        quantity = abs(self.portfolio.net_position(self.config.instrument_id))
+        order: MarketOrder = self.order_factory.market(
+            instrument_id=self.config.instrument_id,
+            order_side=side,
+            quantity=self.instrument.make_qty(quantity),
+            reduce_only=True,
+        )
+        self.submit_order(order)
 
     def _submit(self, side: OrderSide) -> None:
         assert self.instrument is not None

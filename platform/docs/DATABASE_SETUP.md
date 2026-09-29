@@ -44,11 +44,12 @@ ever back up or migrate.
 |---|---|---|---|
 | `snapshots:raw` | `capture/application/capture_service.py`'s `_second_loop` — every ~1s tick, in **all three** collector containers (dYdX, Bybit, Hyperliquid) | `ranking_engine`, `data_api` | JSON list of `DydxSecondSnapshot` dicts (book top-20 + trade volume/count), one per collected instrument. Each publisher sends only its own venue's instruments, so entries stay disjoint by `instrument_id` — this is the architecture spine's "one producer per (channel, venue)" convention |
 | `rankings:live` | `ranking/` (the `ranking_engine` service; **sole publisher**, AD-9) | `data_api` | JSON: `{mode, updated_at, ranks: [...], stale_instrument_ids: [...]}` — every rank row carries volume/volatility/OFI/OBI/microprice/spread/CVD/price/pct-change fields |
+| `markets:live` | `ranking/` (`RankingEngine.publish_markets`, every 60 s volume cycle; Story 29.5) | `bot_tui` (the Collector pane's `/` market browser) | One message per venue with a fresh volume source: `{"venue", "ts", "markets": [{"instrument_id", "symbol"}]}`, sorted by id — names only, no volume/price/metric (`docs/DATA_DICTIONARY.md` §3.6) |
 | `ranking:control` | `data_api` (`PUT /api/rankings/mode`, the web rankings page's mode control; Story 25.1a) | `ranking_engine` | `{"mode": "volume"\|"volatility"}` |
-| `collector:control` | `bot_tui` | `capture/venues/dydx/__main__.py` | `{"action": "start"\|"unpin"\|"stop"\|"pin_top_liquid", "id": "<instrument_id>"|null}` |
-| `collector:status` | `capture/venues/dydx/__main__.py` | `bot_tui` | Per-instrument `{id, pinned, liquid, last_trade_ts}`, or removal/unpin summaries |
+| `collector:control` | `bot_tui` | `collection_control`'s `ControlService`, in every collector (`capture/venues/{dydx,bybit,hyperliquid}/__main__.py`; Bybit and Hyperliquid since Story 29.4), each acting only on its own venue's messages | `{"action": "start"\|"unpin"\|"stop"\|"pin_top_liquid", "id": "<instrument_id>", "venue": "DYDX"\|"BYBIT"\|"HYPERLIQUID"}` (`id` omitted for `pin_top_liquid`; `venue` appended in Story 29.4, a message without it is dYdX's; `docs/DATA_DICTIONARY.md` §1.12) |
+| `collector:status` | `collection_control`'s `StatusPublisher`, in all three collectors (`capture/venues/{dydx,bybit,hyperliquid}/__main__.py`; Bybit and Hyperliquid since Story 29.2) | `bot_tui` | Per-instrument `{id, liquid, last_trade_ts, trade_backfill[, pending]}`, the per-venue plan aggregate `{unpinned_ids, venue, cap, accepts_commands, min_liquidity_usd, last_apply, last_refusal}` (`last_refusal` appended in Story 29.5), or a `{id, removed}` tombstone (`docs/DATA_DICTIONARY.md` §1.12) |
 | `bots:control` | `bot_tui` | `bots/application/supervise.py` | `{"bot_id": "...", "action": "start"\|"stop"}` |
-| `bots:status` | `bots/application/supervise.py` — every 5s heartbeat | `bot_tui` | `{bot_id, strategy, symbol, running, position_side, net_exposure, realized_pnl, unrealized_pnl, win_rate, closed_trades, ...}` |
+| `bots:status` | `bots/application/supervise.py` — every 5s heartbeat and on each of the bot's order events (Story 29.6) | `bot_tui` | `{bot_id, strategy, symbol, mode, running, position_side, net_exposure, realized_pnl, unrealized_pnl, win_rate, closed_trades, started_at, updated_at, stop_loss, take_profit, entry_price, mark_price, position_qty, stop_loss_orders, take_profit_orders, open_orders, last_fill_at}` — the last nine appended in Story 29.6 (fields are only ever appended): the five price/quantity fields are `str(Price)`/`str(Quantity)` strings or `null` (flat, no such protective order, no mid yet), the three counts ints, `last_fill_at` UNIX ns or `null` (`docs/BOT_OPERATIONS.md` §1) |
 
 ### 1.2 Plain keys (GET/SET, no TTL)
 
@@ -67,9 +68,9 @@ ever back up or migrate.
   `hyperliquid_collector`, i.e. `python3 -m capture.venues.{dydx,bybit,hyperliquid}`, all
   publishing through the shared `capture` context) are the only writers of
   `snapshots:raw` — one producer per venue, each publishing only its own instruments.
-  `collector:status`/`collector:control` stay **dYdX-only**: the dYdX collector is their
-  sole writer and the sole actor on `collector:control` (the other two collectors have
-  no control plane).
+  Each also publishes its own plan on `collector:status` (one aggregate per venue, Story 29.2)
+  and consumes `collector:control`, acting only on the messages addressed to its own venue
+  (Story 29.4; a message without `venue` is dYdX's).
 - **`bots`** (the bots context, `python3 -m bots`; was `live_paper` until Story 25.3) is the sole writer of `bots:status`/`bots:incidents:*`/
   `bots:history:*`, and the sole actor on `bots:control`.
 - **`bot_tui`** never writes status data — it only publishes control messages and
@@ -154,7 +155,11 @@ repeat it.
 
 Easy to mistake for static config, but `platform/data/dydx_config.toml` (bind-mounted over
 `/app/dydx_collector/config.toml`) is actually **mutable,
-persisted runtime state** — the one file the running system rewrites on its own.
+persisted runtime state**, rewritten by the running system on its own. Since Story 29.4 so are
+Bybit's and Hyperliquid's committed `platform/capture/venues/{bybit,hyperliquid}/config.toml`
+(bind-mounted read-write over `/app/{bybit,hyperliquid}_config.toml`): their flat `instruments`
+list plus an optional `exclude` list, written only when non-empty. Being committed files, a
+runtime command leaves the VPS checkout modified (`docs/DEPLOY_CHECKLIST.md`'s 29-4 entry).
 
 - **Owner:** the `collection_control/` context (Story 25.4): `TomlPlanStore`
   (`collection_control/infrastructure/plan_store.py`) loads and saves the plan through the one
@@ -162,19 +167,21 @@ persisted runtime state** — the one file the running system rewrites on its ow
   re-reads the file, replaces only the plan keys, validates the result and rewrites the file in
   place, not a patch — hand-added comments won't survive a control action.
 - **Read:** `collection_control`'s `reload_loop` re-reads it every `config_reload_seconds`
-  (30 s), so a hand-edit of the plan is picked up without a restart (the thresholds are read
+  (30 s; Bybit/Hyperliquid `PLAN_RELOAD_SECONDS`, also 30 s), so a hand-edit of the plan is picked up without a restart (the thresholds are read
   once per start).
-- **Write:** every `collector:control` action (start/unpin/stop/pin_top_liquid)
-  triggers a rewrite.
+- **Write:** every accepted `collector:control` action addressed to that venue
+  (start/unpin/stop, and dYdX's pin_top_liquid) triggers a rewrite.
 - **Content:** network, catalog path, flush/snapshot intervals, liquidity threshold,
   the `instruments` array (`id`, `store_order_book_deltas`, `retain_hours`) and `exclude`
   — the plan (the intent). What capture actually subscribed is the applied set, reported on
   `collector:status` (a planned id not yet applied carries `"pending": true`).
-- **Docker mount:** the only `rw` config mount in `docker-compose.yml` — every other
-  config file (`bots/config.toml` included) is mounted `:ro` and never written
-  back by the running process.
-- `bot_tui` never edits this file directly — it only publishes `collector:control`
-  messages, keeping filesystem access to a single container.
+- **Docker mount:** the three plan files are the only collector config mounts that are `rw` in
+  `docker-compose.yml` (each read-write only in its own collector's container). Outside them,
+  only the preference files the UI saves are `rw` (`chart_indicators.toml`,
+  `screener_columns.toml`, `data_api/alerts.toml`); every other config file (`bots/config.toml`
+  included) is mounted `:ro` and never written back by the running process.
+- `bot_tui` never edits these files directly — it only publishes `collector:control`
+  messages, keeping each file's filesystem access to its one collector container.
 
 ---
 

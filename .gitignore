@@ -187,6 +187,7 @@ bench_data/
 !/platform/data/live_paper/.gitkeep
 /platform/data/errors/
 !/platform/data/errors/.gitkeep
+/platform/data/bots_churn_check/
 nautilus_trader/**/.gitignore
 nautilus_trader/test_kit/mocks/.nautilus/
 nautilus_trader.egg-info

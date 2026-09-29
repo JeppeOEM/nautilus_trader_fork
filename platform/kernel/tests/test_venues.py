@@ -24,6 +24,7 @@ from kernel.venues import USD_QUOTES
 from kernel.venues import AssetKey
 from kernel.venues import MalformedInstrumentId
 from kernel.venues import asset_key
+from kernel.venues import base_symbol
 from kernel.venues import bybit_category
 from kernel.venues import has_venue
 from kernel.venues import market_kind
@@ -177,3 +178,45 @@ def test_the_usd_quote_class_is_the_dollar_and_its_stablecoins() -> None:
 def test_same_asset(a: str, b: str, same: bool) -> None:
     assert same_asset(a, b) is same
     assert same_asset(b, a) is same
+
+
+# Story 29.1's I/O matrix: every real id shape -> the base coin the web rankings line up.
+_BASE_SYMBOLS = [
+    ("BTC-USD-PERP.DYDX", "BTC"),
+    ("BTCUSDT-LINEAR.BYBIT", "BTC"),
+    ("BTCUSDT-SPOT.BYBIT", "BTC"),
+    ("ETHUSDC-SPOT.BYBIT", "ETH"),
+    ("BTCUSD-INVERSE.BYBIT", "BTC"),
+    ("BTCPERP-LINEAR.BYBIT", "BTC"),  # Bybit's USDC perpetual
+    ("1000PEPEUSDT-LINEAR.BYBIT", "1000PEPE"),
+    ("BTCUSDT-25SEP26-LINEAR.BYBIT", "BTC"),  # a dated future
+    ("ETHBTC-SPOT.BYBIT", "ETHBTC"),  # an unlisted quote: the whole head, no guess
+    ("USDT-LINEAR.BYBIT", "USDT"),  # stripping would leave no base: the whole head
+    ("SOL-USD-PERP.HYPERLIQUID", "SOL"),
+    ("HYPE-USDC-SPOT.HYPERLIQUID", "HYPE"),
+    ("km:US500-USD-PERP.HYPERLIQUID", "km:US500"),
+    ("BTC-USD-PERP.NEWVENUE", "BTC"),  # an unknown venue: the first `-` segment
+    ("BTCUSDT.NEWVENUE", "BTCUSDT"),
+    ("-LINEAR.BYBIT", "-LINEAR"),  # an empty first segment: the symbol whole, never ""
+    # Known limit, pinned so a change is deliberate: an unlisted quote that ends in a listed one
+    # is cut in the wrong place (`BUSD` -> `USD` stripped).
+    ("ETHBUSD-SPOT.BYBIT", "ETHB"),
+]
+
+
+@pytest.mark.parametrize(("iid", "base"), _BASE_SYMBOLS)
+def test_base_symbol_reads_every_real_shape(iid: str, base: str) -> None:
+    assert base_symbol(iid) == base
+
+
+@pytest.mark.parametrize("bad", ["BTCUSDT", "", ".BYBIT", "BTCUSDT-LINEAR."])
+def test_base_symbol_malformed_fails_loudly(bad: str) -> None:
+    with pytest.raises(MalformedInstrumentId):
+        base_symbol(bad)
+
+
+@pytest.mark.parametrize(
+    "iid", ["ETHUSDT-SPOT.BYBIT", "ETHUSDC-SPOT.BYBIT", "ETHUSD-INVERSE.BYBIT"]
+)
+def test_bybit_stablecoin_quotes_are_stripped_whole_not_as_their_usd_prefix(iid: str) -> None:
+    assert base_symbol(iid) == "ETH"

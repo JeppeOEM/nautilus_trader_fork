@@ -17,7 +17,7 @@ Rebuild a closed UTC day's second-snapshot trade columns from the raw trade arch
 
 Usage:
     python -m archive.rebuild_seconds --catalog /app/catalog --day 2026-09-20 \\
-        [--instrument BTC-USD-PERP.DYDX ...] [--venue DYDX] [--apply] [--include-open-day] \\
+        [--instrument BTCUSDT-LINEAR.BYBIT ...] [--venue BYBIT] [--apply] [--include-open-day] \\
         [--result-file PATH]
 
 What is rebuilt, and why, is `archive.application.rebuild_day`'s docstring: rows move to their

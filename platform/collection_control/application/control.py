@@ -13,7 +13,7 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-`collector:control` (Story 6.1's published language, frozen by AD-D12): `{action, id}` with
+`collector:control` (Story 6.1's published language, frozen by AD-D12): `{action, id, venue}` with
 
 start          : `CollectionPlan.add` -- collect a new (or unpinned) id, lifting it out of
                  `exclude`; refused when already collected or at the cap.
@@ -23,15 +23,26 @@ stop           : `CollectionPlan.remove` -- stop collecting without excluding.
 pin_top_liquid : `CollectionPlan.pin` -- fill the free slots with the top USD-volume liquid ids
                  that are neither collected nor excluded; never removes or replaces an entry.
 
-A refused command, or an unknown action, logs a WARNING and changes nothing. There is no timer-
-driven reclassification: the collected set changes only on a command or a hand edit of the file
-(`reload`).
+`venue` (the `kernel.venues` token) was appended in Story 29.4, after the existing keys, so an
+`{action, id}` message keeps its bytes as the prefix. Every venue's collector consumes the one
+channel and acts only on its own venue's messages; a message without `venue` is dYdX's (every
+sender before 29.4 drove only dYdX). A non-string `venue`, or one `kernel.venues` does not
+know, is ledgered and ignored; a known other venue is ignored silently.
+
+A refused command -- including an id of another venue than the plan's -- or an unknown action,
+logs a WARNING and changes nothing. Since Story 29.5 a refused command (`PlanRejected`) is also
+recorded as the status aggregate's `last_refusal` and published at once, so `bot_tui` can show why
+an add did not happen; an unknown action is not a plan refusal and is only logged. There is no
+timer-driven reclassification: the collected set changes only on a command or a hand edit of the
+file (`reload`).
 """
 
 import asyncio
 import json
 import logging
 
+from kernel.venues import VENUE_KINDS
+from kernel.venues import has_venue
 from observability import error_ledger
 
 from collection_control.application.ports import Capture
@@ -51,6 +62,10 @@ logger = logging.getLogger(__name__)
 # The wait before re-subscribing to `collector:control` after a lost connection.
 CONTROL_RECONNECT_SECONDS = 2.0
 
+# The venue a message without a `venue` field is addressed to: every sender before Story 29.4
+# (the field's arrival) drove only dYdX's plan.
+LEGACY_CONTROL_VENUE = "DYDX"
+
 
 class ControlService:
     """
@@ -68,7 +83,7 @@ class ControlService:
         store: PlanStore,
         capture: Capture,
         status: StatusPublisher,
-        markets: MarketsSource,
+        markets: MarketsSource | None,
     ) -> None:
         self._plan = plan
         self._store = store
@@ -88,6 +103,9 @@ class ControlService:
                 diff = await self._command(action, iid)
             except PlanRejected as e:
                 logger.warning("%s", e)
+                refused_id = None if action == "pin_top_liquid" else iid
+                self._status.record_refusal(action, refused_id, str(e))
+                await self._publish(frozenset())
                 return
             if diff is None:
                 return
@@ -103,6 +121,8 @@ class ControlService:
             return None
         if not iid:
             raise PlanRejected(f"Cannot {action}: no instrument id given")
+        if not has_venue(iid, self._plan.venue):
+            raise PlanRejected(f"Cannot {action} {iid}: not a {self._plan.venue} instrument")
         diff = command(iid)
         # The plan refuses a full cap itself; this refuses the slots lingering subscriptions hold.
         lingering = self._lingering_over_cap(diff.plan)
@@ -116,29 +136,35 @@ class ControlService:
     def _lingering_over_cap(self, plan: CollectionPlan) -> list[str]:
         """
         Return the ids still subscribed after a failed unsubscribe when, with them, `plan` would
-        hold more wire subscriptions than its cap (else []). A lingering id `plan` collects again
-        takes no extra slot: capture reuses its subscription.
+        hold more wire subscriptions than its cap (else [], always for an uncapped plan). A lingering
+        id `plan` collects again takes no extra slot: capture reuses its subscription.
         """
+        if plan.cap is None:
+            return []
         lingering = self._capture.capture_status().lingering - set(plan.collected)
         if len(plan.collected) + len(lingering) <= plan.cap:
             return []
         return sorted(lingering)
 
-    def _wire_slots(self) -> int:
+    def _wire_slots(self, free_slots: int) -> int:
         """
         Return the plan's free slots minus the ids capture still holds subscribed after a failed
         unsubscribe: the cap guards the venue's per-connection limit, which counts the wire, not
         the plan -- refilling over a lingering subscription would exceed it.
         """
-        return self._plan.free_slots - len(self._capture.capture_status().lingering)
+        return free_slots - len(self._capture.capture_status().lingering)
 
     async def _pin_top_liquid(self) -> PlanDiff | None:
         plan = self._plan
-        slots = self._wire_slots()
-        if slots <= 0:
-            return None  # no fetch: there is nowhere to put a result
+        # Before the slots: an uncapped plan (Bybit, Hyperliquid) has no threshold by the plan's
+        # own invariant, so this refusal is what every pin on it gets.
         if plan.min_liquidity_usd is None:
             raise PlanRejected(f"{plan.venue} plan has no liquidity threshold: it admits no pins")
+        if plan.free_slots is None or self._markets is None:
+            raise RuntimeError(f"{plan.venue} plan has a liquidity threshold but no cap or source")
+        slots = self._wire_slots(plan.free_slots)
+        if slots <= 0:
+            return None  # no fetch: there is nowhere to put a result
         classification = classify_liquidity(
             await self._markets.fetch(),
             plan.min_liquidity_usd,
@@ -232,6 +258,20 @@ class ControlService:
     async def _handle_message(self, message: str) -> None:
         try:
             payload = json.loads(message)
+            venue = payload.get("venue", LEGACY_CONTROL_VENUE)
+            if not isinstance(venue, str):
+                error_ledger.record(
+                    "collector.control", f"collector:control venue is not a string: {message!r}"
+                )
+                return
+            if venue not in VENUE_KINDS:
+                # No collector will ever act on it: a sender's bug, not another consumer's message.
+                error_ledger.record(
+                    "collector.control", f"collector:control unknown venue {venue!r}: {message!r}"
+                )
+                return
+            if venue != self._plan.venue:
+                return  # addressed to another venue's collector
             await self.handle(payload.get("action"), payload.get("id"))
         except Exception as e:
             error_ledger.record(

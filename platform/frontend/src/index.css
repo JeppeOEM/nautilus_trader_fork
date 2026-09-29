@@ -130,6 +130,36 @@ table {
   cursor: pointer;
 }
 
+/* Story 29.1: the Exchange cell's market kind (`BYBIT · spot`) -- small and dim, a tag on the
+   venue rather than a second datum. */
+.rankings-market-tag {
+  color: var(--color-text-dim);
+  font-size: 0.85em;
+}
+
+/* Story 29.1: the full instrument id is long next to Symbol/Exchange; truncated with an
+   ellipsis, the whole id stays in the span's title. */
+.rankings-instrument {
+  display: inline-block;
+  max-width: 16em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+
+/* Story 29.1: sortable Symbol/Exchange headers -- the header text itself is the button. */
+.rankings-sort {
+  padding: 0;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  cursor: pointer;
+}
+
 /* Story 17.6: Rankings filter panel -- chips + inline builder above the tab bar. */
 .filter-panel {
   display: flex;

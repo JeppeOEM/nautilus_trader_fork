@@ -140,3 +140,44 @@ def test_load_reads_the_entries_as_written(adapter: str, tmp_path: Path) -> None
         250_000.0,
         8.0,
     )
+
+
+# -- a flat plan (Bybit, Hyperliquid: Story 29.4) -----------------------------------------------
+
+_FLAT = """# Bybit collector.
+environment = "mainnet"
+catalog_path = "/app/catalog"
+instruments = ["BTCUSDT-LINEAR.BYBIT", "ETHUSDT-SPOT.BYBIT"]
+book_time_source = "venue"
+hold_back_seconds = 0.5
+"""
+
+
+def _flat(tmp_path: Path) -> tuple[TomlPlanStore, Path]:
+    path = tmp_path / "config.toml"
+    path.write_text(_FLAT)
+    return TomlPlanStore(path, "BYBIT"), path
+
+
+def test_a_flat_plan_writes_exclude_only_when_it_has_one(tmp_path: Path) -> None:
+    store, path = _flat(tmp_path)
+    unpinned = store.load().unpin("ETHUSDT-SPOT.BYBIT").plan
+    store.save(unpinned)
+    assert tomllib.loads(path.read_text())["exclude"] == ["ETHUSDT-SPOT.BYBIT"]
+    assert store.load() == unpinned
+
+
+def test_an_emptied_exclude_leaves_the_file_with_its_committed_key_set(tmp_path: Path) -> None:
+    store, path = _flat(tmp_path)
+    committed = list(tomllib.loads(path.read_text()))
+    store.save(store.load().unpin("ETHUSDT-SPOT.BYBIT").plan)
+    store.save(store.load().add("ETHUSDT-SPOT.BYBIT").plan)
+    raw = tomllib.loads(path.read_text())
+    assert list(raw) == committed
+    assert raw["instruments"] == ["BTCUSDT-LINEAR.BYBIT", "ETHUSDT-SPOT.BYBIT"]
+
+
+def test_a_flat_plan_is_uncapped_with_no_threshold(tmp_path: Path) -> None:
+    store, _path = _flat(tmp_path)
+    plan = store.load()
+    assert (plan.cap, plan.min_liquidity_usd) == (None, None)

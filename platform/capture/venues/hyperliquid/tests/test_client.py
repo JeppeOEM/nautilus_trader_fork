@@ -22,10 +22,14 @@ from collections.abc import Awaitable
 from collections.abc import Callable
 from typing import Any
 
+import pytest
 from observability import error_ledger
 
+import capture.venues.hyperliquid.client as hl_client
 from capture.application.feed import MAIN_FEED
 from capture.application.feed import Feed
+from capture.application.wire_channels import WireChannels
+from capture.venues.hyperliquid.client import HYPERLIQUID_WS_FRAMES_PER_SECOND
 from capture.venues.hyperliquid.client import TRADES_FEED
 from capture.venues.hyperliquid.client import HyperliquidClient
 from capture.venues.hyperliquid.client import _at_exact_millis
@@ -71,6 +75,8 @@ def _client(
     client = HyperliquidClient(
         lambda d, f: received.append((d, f)), trade_feeds=trade_feeds, ledger=error_ledger.record
     )
+    # Unpaced for speed; the pacing itself is `capture/tests/test_wire_channels.py`'s.
+    client._wire = WireChannels(1e6)
     main, trades = _StubWs(), _StubWs()
     client._ws = main
     if trade_feeds == 2:
@@ -172,3 +178,127 @@ def test_a_trades_socket_that_cannot_connect_is_dropped_and_ledgered() -> None:
     assert set(client.feed_states()) == {MAIN_FEED}
     assert main.calls[:2] == [("connect", "1"), ("wait_until_active", "30.0")]
     assert error_ledger.counts() == {"collector.trade_feed": 1}
+
+
+_CHANNELS = [
+    "subscribe_trades",
+    "subscribe_book",
+    "subscribe_mark_prices",
+    "subscribe_index_prices",
+    "subscribe_funding_rates",
+    "subscribe_open_interest",
+]
+
+
+def _fail_once(stub: _StubWs, name: str) -> None:
+    """Make `name` raise on its first call only ("Instrument not found" or a closed channel)."""
+    failed: list[bool] = []
+
+    async def call(arg: Any, *_rest: Any) -> None:
+        stub.calls.append((name, str(arg)))
+        if not failed:
+            failed.append(True)
+            raise RuntimeError(f"{name}: command channel closed")
+
+    setattr(stub, name, call)
+
+
+def _wire_calls(stub: _StubWs) -> list[str]:
+    return [name for name, _ in stub.calls if name not in ("connect", "wait_until_active")]
+
+
+def test_the_client_paces_at_the_named_hyperliquid_rate() -> None:
+    client = HyperliquidClient(lambda d, f: None, ledger=error_ledger.record)
+    assert client._wire._interval == 1 / HYPERLIQUID_WS_FRAMES_PER_SECOND
+
+
+def test_a_repeated_subscribe_sends_no_duplicate_frame() -> None:
+    client, _, main, trades = _client(2)
+    asyncio.run(client.subscribe(_IID))
+    asyncio.run(client.subscribe(_IID))
+    assert _wire_calls(main) == _CHANNELS
+    assert _wire_calls(trades) == ["subscribe_trades"]
+
+
+def test_a_failed_trades_subscribe_runs_no_undo_and_the_retry_resends_it() -> None:
+    # `trades` fails before any Rust state: nothing to undo.
+    client, _, main, _ = _client(1)
+    _fail_once(main, "subscribe_trades")
+    with pytest.raises(RuntimeError, match="command channel closed"):
+        asyncio.run(client.subscribe(_IID))
+    asyncio.run(client.subscribe(_IID))
+    assert _wire_calls(main) == ["subscribe_trades", *_CHANNELS]
+
+
+def test_a_failed_asset_context_subscribe_is_undone_so_the_retry_sends_it() -> None:
+    # The Rust client adds the type to `asset_context_subs` before its failing send; without the
+    # undo a retry would find the set non-empty and send no `activeAssetCtx` frame.
+    client, _, main, _ = _client(1)
+    _fail_once(main, "subscribe_mark_prices")
+    with pytest.raises(RuntimeError, match="command channel closed"):
+        asyncio.run(client.subscribe(_IID))
+    assert not client._wire.is_held(("mark", _IID))
+    asyncio.run(client.subscribe(_IID))
+    assert (
+        _wire_calls(main)
+        == [
+            "subscribe_trades",
+            "subscribe_book",
+            "subscribe_mark_prices",
+            "unsubscribe_mark_prices",  # the undo
+            *_CHANNELS[2:],
+        ]
+    )
+
+
+def test_an_unsubscribe_after_a_partial_failure_releases_only_the_held_channels_once() -> None:
+    client, _, main, _ = _client(1)
+    _fail_once(main, "subscribe_book")
+    with pytest.raises(RuntimeError, match="command channel closed"):
+        asyncio.run(client.subscribe(_IID))
+    asyncio.run(client.unsubscribe(_IID))
+    asyncio.run(client.unsubscribe(_IID))
+    assert _wire_calls(main) == ["subscribe_trades", "subscribe_book", "unsubscribe_trades"]
+
+
+def test_a_failed_trades_socket_subscribe_is_retried_by_the_next_subscribe() -> None:
+    error_ledger.reset()
+    client, _, main, trades = _client(2)
+    _fail_once(trades, "subscribe_trades")
+    asyncio.run(client.subscribe(_IID))
+    asyncio.run(client.subscribe(_IID))
+    assert _wire_calls(trades) == ["subscribe_trades", "subscribe_trades"]
+    assert _wire_calls(main) == _CHANNELS
+    assert error_ledger.counts() == {"collector.trade_feed": 1}
+
+
+def test_a_failed_trades_socket_unsubscribe_raises_and_is_retried() -> None:
+    client, _, _, trades = _client(2)
+    asyncio.run(client.subscribe(_IID))
+    _fail_once(trades, "unsubscribe_trades")
+    with pytest.raises(RuntimeError, match="command channel closed"):
+        asyncio.run(client.unsubscribe(_IID))
+    asyncio.run(client.unsubscribe(_IID))
+    assert _wire_calls(trades) == ["subscribe_trades", "unsubscribe_trades", "unsubscribe_trades"]
+
+
+def test_the_channel_budget_counts_one_asset_context_per_id() -> None:
+    client, _, _, _ = _client(2)
+    asyncio.run(client.subscribe(_IID))
+    # trades + book + twin trades + one shared activeAssetCtx
+    assert client.wire_subscriptions() == 4
+
+
+def test_a_subscribe_past_the_venues_channel_budget_is_refused_before_sending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, _, main, _ = _client(1)
+    asyncio.run(client.subscribe(_IID))  # holds 3
+    monkeypatch.setattr(hl_client, "HYPERLIQUID_MAX_WS_CHANNELS", 5)
+    sent = len(main.calls)
+    with pytest.raises(RuntimeError, match="accepts 5 channels per IP"):
+        asyncio.run(client.subscribe("ETH-USD-PERP.HYPERLIQUID"))  # needs 3 more
+    assert len(main.calls) == sent
+    monkeypatch.setattr(hl_client, "HYPERLIQUID_MAX_WS_CHANNELS", 6)
+    asyncio.run(client.subscribe("ETH-USD-PERP.HYPERLIQUID"))
+    assert client.wire_subscriptions() == 6
