@@ -42,7 +42,14 @@ from collection_control.domain.plan import InstrumentEntry
 _FIXTURE = json.loads((Path(__file__).parent / "fixtures" / "status_payloads.json").read_text())
 _MIN_USD = 20_000.0
 _AGGREGATE_INDEX = 3  # the recorded publish: three rows, the aggregate, then the tombstone
-_APPENDED_KEYS = ("venue", "cap", "accepts_commands", "min_liquidity_usd", "last_apply")
+_APPENDED_KEYS = (
+    "venue",
+    "cap",
+    "accepts_commands",
+    "min_liquidity_usd",
+    "last_apply",
+    "last_refusal",  # Story 29.5
+)
 
 
 class _Bus:
@@ -141,6 +148,7 @@ def test_the_aggregate_only_appends_keys_after_the_recorded_bytes(tmp_path: Path
         "accepts_commands": True,
         "min_liquidity_usd": _MIN_USD,
         "last_apply": None,  # the fixture's state marks ids applied without an `apply`
+        "last_refusal": None,  # no command refused since the collector started
     }
 
 
@@ -177,6 +185,7 @@ def test_an_uncapped_plan_publishes_without_markets_before_its_first_apply(tmp_p
         "accepts_commands": True,
         "min_liquidity_usd": None,
         "last_apply": None,
+        "last_refusal": None,
     }
 
 

@@ -77,7 +77,32 @@ rewrites the committed `platform/capture/venues/<venue>/config.toml` (its commen
 VPS checkout then shows it modified, see `docs/DEPLOY_CHECKLIST.md`), and an in-place hand edit
 of that file is picked up within 30 s without a restart (a replaced file -- `git checkout`,
 `sed -i` -- needs `docker compose restart` of the collector). An `unpin` adds the optional `exclude` list to
-that file; a `:start` of the id removes it again.
+that file; a `:start` of the id removes it again. A venue's `last refusal` line (under its last
+apply) is the latest command its collector refused and why (Story 29.5).
+
+**Market browser** (Story 29.5): `/` on the Collector pane opens a searchable list of every market
+each venue offers, from `markets:live` (the ranking engine publishes each venue's names once a
+minute; names only, no volume or price). Before the first message it reads
+`waiting for markets:live…` (up to a minute after the TUI starts). Type part of a symbol or id
+(case-insensitive, trimmed; results refilter on every key, an empty search lists everything);
+`Enter` moves to the results, `Esc` closes the search keeping the query (the breadcrumb shows it),
+`/` reopens it, and `Esc` on the results goes back to the Collector pane. Results are grouped per
+venue under that venue's Collector header plus `· M matches`; a venue whose list is over 3 min old
+shows `~ `, and one silent for 15 min leaves the browser. `a` adds the highlighted market after you
+type `add` + Enter: it sends `start` with the venue on `collector:control`, exactly like
+`:start <ID>`. It is refused before anything is sent, with the reason in the footer, when the
+venue's plan takes no commands (the same reasons as above), the id is `already collected` or
+`already in the plan (pending)`, it is `excluded (unpinned): re-add with :start <ID>`, an add from
+this TUI is still awaiting its answer, or dYdX's `cap reached (30)`; Bybit and Hyperliquid have no
+cap. Each row carries one marker: `collected`; `pending` (in the plan, not yet subscribed -- with
+`· failed: subscribe failed in last apply <UTC>, retrying` when the last apply failed it);
+`failed: <reason>` (the collector refused your add, e.g. the cap filled or another TUI added it
+first); `excluded`; `pending` (your add, waiting for `collector:status`); or
+`no answer from <VENUE> collector` when nothing answered within 2 min (the collector may be down;
+`a` may be pressed again). An add whose publish never reached Redis says so in the footer
+(`failed to send start <ID>: Redis publish failed`) and marks nothing, so `a` may be pressed
+again. Only `collector:status` ever makes a row `collected`.
+
 Stopping a *running* bot opens a type-to-confirm prompt (type `stop` + Enter); starting
 has no such guard. `bot_tui` needs `redis` up (`make up` or `make up-live-paper` bring it
 up) but not `live-paper` itself — an offline bot just shows as stale.

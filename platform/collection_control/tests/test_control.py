@@ -21,6 +21,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -218,12 +219,49 @@ def test_a_refused_command_warns_and_changes_nothing(
     with caplog.at_level(logging.WARNING, logger=control_module.__name__):
         rig.handle(action, iid)
     assert warning in caplog.text
-    assert (rig.control.plan, rig.store.saved, rig.capture.diffs, rig.bus.published) == (
-        plan,
-        [],
-        [],
-        [],
-    )
+    assert (rig.control.plan, rig.store.saved, rig.capture.diffs) == (plan, [], [])
+    # A plan refusal is published as `last_refusal` (Story 29.5); an unknown action is not one.
+    if action == "frobnicate":
+        assert rig.bus.published == []
+        return
+    aggregates = [p for p in rig.payloads() if "unpinned_ids" in p]
+    assert len(aggregates) == 1  # one publish: the rows, then this aggregate last
+    assert rig.payloads()[-1] == aggregates[0]
+    refusal = aggregates[0]["last_refusal"]
+    assert (refusal["action"], refusal["id"]) == (action, iid)
+    assert warning in refusal["reason"]
+
+
+def test_a_refused_start_is_recorded_and_published_at_once() -> None:
+    error_ledger.reset()
+    rig = _Rig(_plan(*(f"C{i}-USD-PERP.DYDX" for i in range(_CAP))))
+    before = time.time_ns()
+    rig.handle("start", "NEW-USD-PERP.DYDX")
+    aggregate = rig.payloads()[-1]
+    refusal = aggregate["last_refusal"]
+    assert list(aggregate)[-2:] == ["last_apply", "last_refusal"]
+    assert list(refusal) == ["ts", "action", "id", "reason"]
+    assert (refusal["action"], refusal["id"]) == ("start", "NEW-USD-PERP.DYDX")
+    assert "at 30-instrument cap" in refusal["reason"]
+    assert before <= refusal["ts"] <= time.time_ns()
+    assert [p.get("id") for p in rig.payloads()[:-1]] == list(rig.control.plan.collected)
+    assert error_ledger.counts() == {}
+
+
+def test_a_refused_pin_top_liquid_is_published_with_a_null_id() -> None:
+    rig = _Rig(_bybit_plan())
+    _route(rig, _message("pin_top_liquid", venue="BYBIT"))
+    refusal = rig.payloads()[-1]["last_refusal"]
+    assert (refusal["action"], refusal["id"]) == ("pin_top_liquid", None)
+    assert "admits no pins" in refusal["reason"]
+
+
+def test_a_later_success_keeps_the_last_refusal_until_the_next_one() -> None:
+    rig = _Rig(_plan("BTC-USD-PERP.DYDX"))
+    rig.handle("start", "BTC-USD-PERP.DYDX")
+    rig.handle("start", "SOL-USD-PERP.DYDX")
+    refusal = rig.payloads()[-1]["last_refusal"]
+    assert (refusal["action"], refusal["id"]) == ("start", "BTC-USD-PERP.DYDX")
 
 
 def test_start_one_below_the_cap_succeeds() -> None:
@@ -477,6 +515,36 @@ def test_the_status_loop_republishes_a_row_a_retry_applied_before_its_next_refre
     asyncio.run(_run())
     rows = [p for p in rig.payloads() if p.get("id") == "A.DYDX"]
     assert [row.get("pending", False) for row in rows] == [True, False]
+
+
+def test_a_refusal_recorded_mid_publish_is_republished_at_the_next_poll() -> None:
+    """
+    `record_refusal` takes no lock: one landing while a burst is on the bus was not in that burst,
+    so it must not count as shown -- else it waits for the 1800 s refresh and the TUI's add reads
+    "no answer" instead of the reason.
+    """
+    rig = _Rig(_plan("A.DYDX"))
+    publish = rig.bus.publish
+
+    async def _refuse_during_first_burst(message: str) -> None:
+        if not rig.bus.published:
+            rig.status.record_refusal("start", "NEW.DYDX", "at 30-instrument cap")
+        await publish(message)
+
+    rig.bus.publish = _refuse_during_first_burst  # type: ignore[method-assign]
+
+    async def _run() -> None:
+        task = asyncio.create_task(rig.status.loop(lambda: rig.control.plan, 999_999, poll=0.01))
+        await asyncio.sleep(0.08)
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    asyncio.run(_run())
+    refusals = [p["last_refusal"] for p in rig.payloads() if "unpinned_ids" in p]
+    assert refusals[0] is None
+    assert refusals[1] is not None
+    assert refusals[1]["id"] == "NEW.DYDX"
 
 
 def test_the_status_loop_publishes_before_its_first_sleep() -> None:

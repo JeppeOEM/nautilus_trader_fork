@@ -69,7 +69,7 @@ def _status(iid: str, **overrides: object) -> dict:
 def _recording_publishes(app: BotTuiApp) -> list[tuple[str, str | None]]:
     """Replace the real publish (it needs a running loop) with a recording list."""
     published: list[tuple[str, str | None]] = []
-    app._publish_collector_action = lambda action, instrument_id: published.append(  # type: ignore[method-assign]
+    app._publish_collector_action = lambda action, instrument_id, *_: published.append(  # type: ignore[method-assign]
         (action, instrument_id)
     )
     return published

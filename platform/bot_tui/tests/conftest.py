@@ -25,6 +25,7 @@ from bot_tui import archive_state
 from bot_tui import bot_history_state
 from bot_tui import bots_state
 from bot_tui import collector_state
+from bot_tui import markets_state
 
 
 @pytest.fixture(autouse=True)
@@ -61,3 +62,14 @@ def _reset_collector_state() -> None:
     collector_state._LATEST_PLANS = {}
     collector_state._PLAN_RECEIVED_AT = {}
     collector_state._REPUBLISHED_SINCE_PLAN = {}
+    collector_state._LAST_REFUSAL = {}
+    collector_state._REFUSAL_RECEIVED_AT = {}
+    collector_state._SENT_ADDS = {}
+    collector_state._ADD_REFUSALS = {}
+
+
+@pytest.fixture(autouse=True)
+def _reset_markets_state() -> None:
+    """Isolate markets_state's per-venue market lists across test files (Story 29.5)."""
+    markets_state._LATEST_MARKETS = {}
+    markets_state._RECEIVED_AT = {}

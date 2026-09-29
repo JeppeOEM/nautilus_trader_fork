@@ -218,6 +218,7 @@ def test_rankings_live_bytes_and_metrics_rows_match_the_pre_move_engine(tmp_path
         prices=CatalogPriceHistory(str(tmp_path / "catalog")),
         history=history,
         live=live,
+        markets=_Live(),  # its own channel: nothing it publishes reaches rankings:live
         config=RankingConfig(),
         clock=clock.time_ns,
     )

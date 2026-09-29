@@ -26,10 +26,15 @@ Fields are only ever appended:
   before the first). Every venue publishes it from its live plan. `cap` is null for an uncapped
   plan (Bybit, Hyperliquid since Story 29.4, which also set their `accepts_commands` true). A row
   carries no venue: `bot_tui` derives it from the id (SIGNAL-01).
+- Story 29.5: the aggregate carries, after `last_apply`, `last_refusal`: the most recent command
+  the plan refused (`PlanRejected`) since the collector started, `{ts, action, id, reason}` (`id`
+  null for `pin_top_liquid`), or null before any. Without it a refused `bot_tui` add would read
+  `pending` until the TUI's own no-answer timeout, with no reason shown.
 """
 
 import asyncio
 import json
+import time
 from collections.abc import Callable
 from collections.abc import Iterable
 
@@ -83,10 +88,16 @@ def last_apply_field(applied: Applied | None, applied_ns: int) -> dict[str, obje
     }
 
 
-def plan_aggregate(plan: CollectionPlan, status: CaptureStatus, accepts_commands: bool) -> str:
+def plan_aggregate(
+    plan: CollectionPlan,
+    status: CaptureStatus,
+    accepts_commands: bool,
+    last_refusal: dict[str, object] | None = None,
+) -> str:
     """
     Return the per-venue aggregate: `unpinned_ids` (every excluded id sorted) first,
-    byte-identical to the pre-29.2 message up to its closing brace, then the appended plan facts.
+    byte-identical to the pre-29.2 message up to its closing brace, then the appended plan facts,
+    `last_refusal` (Story 29.5) last.
     """
     aggregate: dict[str, object] = {
         "unpinned_ids": sorted(plan.excluded),
@@ -95,6 +106,7 @@ def plan_aggregate(plan: CollectionPlan, status: CaptureStatus, accepts_commands
         "accepts_commands": accepts_commands,
         "min_liquidity_usd": plan.min_liquidity_usd,
         "last_apply": last_apply_field(status.last_applied, status.last_applied_ns),
+        "last_refusal": last_refusal,
     }
     return json.dumps(aggregate)
 
@@ -105,6 +117,7 @@ def status_messages(
     status: CaptureStatus,
     *,
     accepts_commands: bool,
+    last_refusal: dict[str, object] | None = None,
 ) -> list[str]:
     """
     Every `collector:status` message for one publish, in order: a row per collected instrument
@@ -124,7 +137,7 @@ def status_messages(
         if iid in pending:
             row["pending"] = True
         messages.append(json.dumps(row))
-    messages.append(plan_aggregate(plan, status, accepts_commands))
+    messages.append(plan_aggregate(plan, status, accepts_commands, last_refusal))
     return messages
 
 
@@ -184,6 +197,20 @@ class StatusPublisher:
         self._publishing = asyncio.Lock()
         # What `_sleep_until_refresh` compares against: the last publish's `_shown_state`.
         self._shown: tuple[tuple[str, ...], frozenset[str], int] | None = None
+        # The aggregate's `last_refusal` (Story 29.5): the latest refused command, None before any.
+        # In memory only, so a restarted collector publishes null again. `_shown_refusal` is the
+        # one the last publish carried: a refusal whose own publish failed is republished within
+        # `STATUS_CHANGE_POLL_SECONDS`, not only at the full refresh.
+        self._last_refusal: dict[str, object] | None = None
+        self._shown_refusal: dict[str, object] | None = None
+
+    def record_refusal(self, action: str | None, iid: str | None, reason: str) -> None:
+        """
+        Remember `ControlService`'s latest refused command for the next publish's `last_refusal`,
+        stamped now (`time.time_ns()`): the TUI orders refusals by its own receive time, so this
+        stamp is shown, never compared across clocks.
+        """
+        self._last_refusal = {"ts": time.time_ns(), "action": action, "id": iid, "reason": reason}
 
     async def refresh(self, plan: CollectionPlan) -> None:
         """
@@ -206,12 +233,21 @@ class StatusPublisher:
         """Publish every row and then the aggregate as one burst no other publish interleaves."""
         async with self._publishing:
             status = self._capture.capture_status()
+            # Read once: `record_refusal` takes no lock, so a refusal recorded during the awaits
+            # below must not be marked shown -- it was never sent, and would otherwise wait for
+            # the full refresh instead of `STATUS_CHANGE_POLL_SECONDS`.
+            refusal = self._last_refusal
             messages = status_messages(
-                plan, self._liquid, status, accepts_commands=self._accepts_commands
+                plan,
+                self._liquid,
+                status,
+                accepts_commands=self._accepts_commands,
+                last_refusal=refusal,
             )
             for message in messages:
                 await self._bus.publish(message)
             self._shown = _shown_state(plan, status)
+            self._shown_refusal = refusal
 
     async def publish_removed(self, ids: Iterable[str]) -> None:
         async with self._publishing:
@@ -255,7 +291,8 @@ class StatusPublisher:
         while (left := deadline - clock.time()) > 0:
             await asyncio.sleep(min(poll, left))
             plan = current()
-            if self._shown != _shown_state(plan, self._capture.capture_status()):
+            shown_changed = self._shown != _shown_state(plan, self._capture.capture_status())
+            if shown_changed or self._shown_refusal is not self._last_refusal:
                 await self._publish_ledgered(plan)
 
     async def _publish_ledgered(self, plan: CollectionPlan) -> None:

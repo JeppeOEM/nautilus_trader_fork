@@ -871,3 +871,27 @@ not just restarted.
 - [ ] Watch the first reconnect of each collector after a larger plan change: the Rust clients
       replay every held subscription unpaced (a `Known limit:` in both clients). `GET /api/errors`
       shows no subscribe errors and the pane no lasting `pending` rows afterwards.
+
+### 29-5 Market browser: search a venue's coins by name and add them (commit: this story's)
+
+- [ ] `make redeploy-all` (rebuilds and restarts `ranking_engine`, which now publishes
+      `markets:live`, and `bybit_collector`/`hyperliquid_collector`, whose aggregates now carry
+      `last_refusal`; it also rebuilds `bot_tui`'s image). If the `dydx` profile is up, `make up-dydx`
+      right after, so dYdX's aggregate carries `last_refusal` too.
+- [ ] Within a minute, `redis-cli subscribe markets:live` shows one message per venue with a fresh
+      volume source (`BYBIT`, `DYDX`, `HYPERLIQUID`), each `{"venue", "ts", "markets": [...]}` with
+      only `instrument_id`/`symbol` per entry. `GET /api/errors` shows no `ranking_engine.markets`.
+- [ ] `make tui`, `:data`, then `/` and type `sol`: every venue's SOL markets are listed, grouped
+      per venue under `<VENUE>: N collected +P pending · no cap · M matches` (dYdX: `· cap 30`), and
+      the ids already collected read `collected`. Before the first message (within a minute of the
+      restart) the browser reads `waiting for markets:live…`.
+- [ ] One add on Bybit: `Enter`, highlight an uncollected `...-LINEAR.BYBIT` id, `a`, type `add` +
+      `Enter`. The footer reads `sent: start <ID>`, the row reads `pending` and then `collected`
+      within a few seconds, the Collector pane's BYBIT header count goes up by one without
+      reopening the TUI, and `GET /api/errors` shows no new `collector.control` or
+      `collector.subscribe_failed` for it. Then `x` that coin on the Collector pane if it is not
+      wanted (its row drops; catalog files stay).
+- [ ] `a` on a `collected` row shows `cannot add <ID>: already collected` in the footer and sends
+      nothing (`docker compose logs bybit_collector` shows no new command).
+- [ ] The new coin rewrote `platform/capture/venues/bybit/config.toml`: handle the VPS checkout as
+      in 29-4's "The commands rewrote the committed files" item.

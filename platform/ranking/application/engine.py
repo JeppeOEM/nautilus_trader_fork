@@ -16,6 +16,11 @@
 `RankingEngine` -- ranking's application service (Story 25.2): the four loops of the ranking
 process (the `snapshots:raw`/`ranking:control` handler, the volume poll, the slow metrics loop and
 the heartbeat), driving one `RankingBoard` through the ports. Constructed by `ranking/__main__.py`.
+
+Story 29.5: every volume cycle also publishes each venue's market names on `markets:live`
+(`publish_markets`, `markets_message`) -- the full market list the volume poll already fetched,
+names only, so `bot_tui`'s market browser can offer every coin a venue lists without a venue REST
+call of its own. It carries no volume, price or other metric (operator decision 2026-09-26).
 """
 
 import asyncio
@@ -27,6 +32,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.venues import MalformedInstrumentId
+from kernel.venues import base_symbol
 from observability import error_ledger
 
 from ranking.application.ports import CONTROL_CHANNEL
@@ -42,6 +49,20 @@ from ranking.domain.values import RankingMode
 logger = logging.getLogger(__name__)
 
 VOLUME_SITE = "ranking_engine.volume24h"  # ledger site names are published language: kept
+# Story 29.5: a `markets:live` message not published, or an id left out of one.
+MARKETS_SITE = "ranking_engine.markets"
+
+
+def markets_message(venue: str, ts: int, ids: Sequence[str]) -> str:
+    """
+    Return one venue's `markets:live` payload: `{"venue", "ts", "markets": [{"instrument_id",
+    "symbol"}]}` in that key order, `markets` sorted by id. `symbol` is `kernel.venues.base_symbol`
+    derived here on publish and stored nowhere (SIGNAL-01). Names only: no volume, price or metric.
+    Raises `MalformedInstrumentId` for an id without a `.VENUE` suffix; the engine leaves those out
+    (ledgered) before calling.
+    """
+    markets = [{"instrument_id": iid, "symbol": base_symbol(iid)} for iid in sorted(ids)]
+    return json.dumps({"venue": venue, "ts": ts, "markets": markets})
 
 
 @dataclass(frozen=True)
@@ -82,6 +103,7 @@ class RankingEngine:
         prices: PriceHistory,
         history: RankingHistory,
         live: LivePublisher,
+        markets: LivePublisher,
         config: RankingConfig,
         clock: Callable[[], int] = time.time_ns,
     ) -> None:
@@ -90,6 +112,7 @@ class RankingEngine:
         self._prices = prices
         self._history = history
         self._live = live
+        self._markets = markets
         self._config = config
         self._clock = clock
         self._publish_lock = asyncio.Lock()
@@ -177,6 +200,38 @@ class RankingEngine:
             error_ledger.record(
                 VOLUME_SITE, f"{iid}: no USD 24h volume from its venue, left out of volume mode"
             )
+        await self.publish_markets(now_ns)
+
+    async def publish_markets(self, now_ns: int) -> None:
+        """
+        Publish one `markets:live` message per venue with a fresh volume source (`venue_markets`),
+        `ts` = this cycle's `now_ns`. Each venue is its own try: a failed publish is ledgered at
+        `MARKETS_SITE` and the other venues' messages still go out; nothing here can stop the
+        volume cycle. A venue left with no nameable id publishes nothing (DATA-01).
+        """
+        for venue, ids in self._board.venue_markets(now_ns).items():
+            nameable = self._nameable_ids(venue, ids)
+            if not nameable:
+                continue
+            try:
+                await self._markets.publish(markets_message(venue, now_ns, nameable))
+            except Exception as exc:
+                error_ledger.record(MARKETS_SITE, f"{venue}: markets:live publish failed", exc)
+
+    @staticmethod
+    def _nameable_ids(venue: str, ids: list[str]) -> list[str]:
+        """Return the ids `base_symbol` can name; each one it cannot is ledgered and left out."""
+        nameable = []
+        for iid in ids:
+            try:
+                base_symbol(iid)
+            except MalformedInstrumentId as exc:
+                error_ledger.record(
+                    MARKETS_SITE, f"{venue or '?'}: {iid!r} has no symbol, left out", exc
+                )
+                continue
+            nameable.append(iid)
+        return nameable
 
     async def _poll(self, source: VolumeSource) -> None:
         """Replace the source's volumes on success; on failure ledger and keep the last good."""

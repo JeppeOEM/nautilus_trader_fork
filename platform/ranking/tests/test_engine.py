@@ -28,8 +28,10 @@ from observability import error_ledger
 
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
+from ranking.application.engine import MARKETS_SITE
 from ranking.application.engine import RankingConfig
 from ranking.application.engine import RankingEngine
+from ranking.application.engine import markets_message
 from ranking.application.ports import CONTROL_CHANNEL
 from ranking.application.ports import SNAPSHOTS_CHANNEL
 from ranking.domain.board import STALE_NS
@@ -74,6 +76,19 @@ class FakeLive:
         self.messages.append(message)
 
 
+class FakeMarkets(FakeLive):
+    """A `markets:live` publisher that records, and raises for each venue listed in `fail`."""
+
+    def __init__(self, fail: frozenset[str] = frozenset()) -> None:
+        super().__init__()
+        self._fail = fail
+
+    async def publish(self, message: str) -> None:
+        if json.loads(message)["venue"] in self._fail:
+            raise ConnectionError("simulated redis outage")
+        await super().publish(message)
+
+
 class FakePrices:
     """A `PriceHistory` counting its reads; `fail` makes every read raise."""
 
@@ -106,6 +121,7 @@ def _engine(
     prices: object | None = None,
     clock: FakeClock | None = None,
     config: RankingConfig | None = None,
+    markets: FakeMarkets | None = None,
 ) -> tuple[RankingEngine, FakeLive, SqliteMetricsStore]:
     clock = clock or FakeClock()
     history = SqliteMetricsStore(":memory:")
@@ -117,6 +133,7 @@ def _engine(
         prices=prices or FakePrices(),  # type: ignore[arg-type]
         history=history,
         live=live,
+        markets=markets or FakeMarkets(),
         config=config or RankingConfig(),
         clock=clock.time_ns,
     )
@@ -314,6 +331,92 @@ def test_an_expired_source_is_ledgered_and_leaves_volume_mode() -> None:
     assert b.current_ranks(clock.ns) == []
     # one entry for the expired source, one for BTC now missing a volume
     assert error_ledger.counts() == {"ranking_engine.volume24h": 2}
+
+
+# --- markets:live (Story 29.5) -----------------------------------------------------------------
+
+
+def _markets_cycle(sources: list[FakeSource], markets: FakeMarkets, clock: FakeClock) -> None:
+    asyncio.run(
+        _engine(board(clock), sources=sources, clock=clock, markets=markets)[0].volume_cycle()
+    )
+
+
+def test_one_markets_message_per_venue_with_bybit_linear_and_spot_merged() -> None:
+    markets = FakeMarkets()
+    sources = [
+        FakeSource("bybit-spot", {"ETHUSDT-SPOT.BYBIT": 1.0, "BTCUSDT-SPOT.BYBIT": 2.0}),
+        FakeSource("dydx", {BTC: 3.0}),
+        FakeSource("bybit-linear", {"SOLUSDT-LINEAR.BYBIT": 4.0}),
+    ]
+    _markets_cycle(sources, markets, FakeClock())
+
+    assert [json.loads(m)["venue"] for m in markets.messages] == ["BYBIT", "DYDX"]
+    assert [m["instrument_id"] for m in json.loads(markets.messages[0])["markets"]] == [
+        "BTCUSDT-SPOT.BYBIT",
+        "ETHUSDT-SPOT.BYBIT",
+        "SOLUSDT-LINEAR.BYBIT",
+    ]
+    assert error_ledger.counts() == {}
+
+
+def test_a_markets_message_has_the_exact_bytes_and_key_order() -> None:
+    markets = FakeMarkets()
+    _markets_cycle([FakeSource("dydx", {"ETH-USD-PERP.DYDX": 1.0, BTC: 2.0})], markets, FakeClock())
+
+    assert markets.messages == [
+        '{"venue": "DYDX", "ts": 1800000000000000000, "markets": ['
+        '{"instrument_id": "BTC-USD-PERP.DYDX", "symbol": "BTC"}, '
+        '{"instrument_id": "ETH-USD-PERP.DYDX", "symbol": "ETH"}]}'
+    ]
+    assert markets.messages == [markets_message("DYDX", NOW_NS, ["ETH-USD-PERP.DYDX", BTC])]
+
+
+def test_an_expired_source_is_left_out_and_a_venue_with_none_publishes_nothing() -> None:
+    clock = FakeClock()
+    b = board(clock)
+    first = [
+        FakeSource("bybit-linear", {"BTCUSDT-LINEAR.BYBIT": 1.0}),
+        FakeSource("bybit-spot", {"BTCUSDT-SPOT.BYBIT": 1.0}),
+        FakeSource("hyperliquid", {"SOL-USD-PERP.HYPERLIQUID": 1.0}),
+    ]
+    asyncio.run(_engine(b, sources=first, clock=clock)[0].volume_cycle())
+    clock.ns += RankingConfig().volume_max_age_ns + SEC_NS
+    markets = FakeMarkets()
+    refreshed = [FakeSource("bybit-spot", {"BTCUSDT-SPOT.BYBIT": 1.0})]
+
+    asyncio.run(_engine(b, sources=refreshed, clock=clock, markets=markets)[0].volume_cycle())
+
+    assert [json.loads(m) for m in markets.messages] == [
+        {
+            "venue": "BYBIT",
+            "ts": clock.ns,
+            "markets": [{"instrument_id": "BTCUSDT-SPOT.BYBIT", "symbol": "BTC"}],
+        }
+    ]
+
+
+def test_a_failed_markets_publish_is_ledgered_and_the_other_venues_still_go_out() -> None:
+    markets = FakeMarkets(fail=frozenset({"BYBIT"}))
+    sources = [
+        FakeSource("bybit-linear", {"BTCUSDT-LINEAR.BYBIT": 1.0}),
+        FakeSource("dydx", {BTC: 1.0}),
+        FakeSource("hyperliquid", {"SOL-USD-PERP.HYPERLIQUID": 1.0}),
+    ]
+    _markets_cycle(sources, markets, FakeClock())
+
+    assert [json.loads(m)["venue"] for m in markets.messages] == ["DYDX", "HYPERLIQUID"]
+    assert error_ledger.counts() == {MARKETS_SITE: 1}
+    assert error_ledger.last_details()[MARKETS_SITE].startswith("BYBIT:")
+
+
+def test_an_id_without_a_venue_is_ledgered_and_left_out_of_every_message() -> None:
+    markets = FakeMarkets()
+    _markets_cycle([FakeSource("dydx", {BTC: 1.0, "NO-SUFFIX": 1.0})], markets, FakeClock())
+
+    assert [m["instrument_id"] for m in json.loads(markets.messages[0])["markets"]] == [BTC]
+    assert len(markets.messages) == 1
+    assert error_ledger.counts() == {MARKETS_SITE: 1}
 
 
 # --- slow loop and backfill --------------------------------------------------------------------

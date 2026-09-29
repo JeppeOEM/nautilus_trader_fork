@@ -28,6 +28,9 @@ Story 29.2 groups the rows into one section per venue (`venue_sections`): a head
 collected/pending counts and the cap, the plan's last apply, then the rows and that venue's
 unpinned line. The venue comes from the id (`collector_state.venue_of_row`), the plan facts from
 that venue's aggregate.
+
+Story 29.5 adds the plan's last refused command under the last apply (`format_last_refusal_line`),
+and exports `ID_WIDTH`/`utc_ns_text` for the market browser's rows (market_browser.py).
 """
 
 import datetime as dt
@@ -42,7 +45,7 @@ COLD_OPEN_TEXT = "waiting for collector:status…"
 
 # Wide enough for the longest ids collected today (`ETH-USD-PERP.HYPERLIQUID`, 24); a longer one
 # is truncated with "…" (TUI-02) rather than pushing its liquidity label out of line.
-_ID_WIDTH = 28
+ID_WIDTH = 28
 
 
 class VenueSection(NamedTuple):
@@ -101,7 +104,7 @@ def _cap_text(plan: dict) -> str:
     return f"cap {cap if isinstance(cap, int) and not isinstance(cap, bool) else '?'}"
 
 
-def _utc_ns_text(ts_ns: object) -> str:
+def utc_ns_text(ts_ns: object) -> str:
     if not isinstance(ts_ns, int) or isinstance(ts_ns, bool) or ts_ns <= 0:
         return "?"
     try:
@@ -132,11 +135,29 @@ def format_last_apply_line(plan: dict | None) -> str:
     failed = _id_list(last_apply.get("failed"))
     failed_ids = f" ({', '.join(failed)})" if failed else ""
     return (
-        f"last apply {_utc_ns_text(last_apply.get('ts'))}: "
+        f"last apply {utc_ns_text(last_apply.get('ts'))}: "
         f"{len(_id_list(last_apply.get('subscribed')))} subscribed, "
         f"{len(_id_list(last_apply.get('unsubscribed')))} unsubscribed, "
         f"{len(failed)} failed{failed_ids}"
     )
+
+
+def format_last_refusal_line(plan: dict | None) -> str:
+    """
+    Return the plan's latest refused command (Story 29.5's `last_refusal`), e.g. `last refusal
+    2026-09-29 12:03:04Z: start SOL-USD-PERP.DYDX: Cannot start ...: at 30-instrument cap`, so a
+    refused `p`, `x`, `:start` or market-browser add shows why wherever it was sent from. Empty
+    string (render nothing) before any refusal, or for an aggregate that predates the field.
+    """
+    refusal = (plan or {}).get("last_refusal")
+    if refusal is None:
+        return ""
+    if not isinstance(refusal, dict):
+        return "last refusal: ? (malformed)"
+    target = " ".join(str(part) for part in (refusal.get("action"), refusal.get("id")) if part)
+    reason = refusal.get("reason")
+    reason_text = reason if isinstance(reason, str) else "?"
+    return f"last refusal {utc_ns_text(refusal.get('ts'))}: {target or '?'}: {reason_text}"
 
 
 def format_collector_line(row: dict, stale: bool, show_liquidity: bool = True) -> str:
@@ -146,7 +167,7 @@ def format_collector_line(row: dict, stale: bool, show_liquidity: bool = True) -
     Used directly by tests and as the source of truth app.py's urwid.Text must match.
     """
     stale_marker = "~ " if stale else "  "
-    line = f"{stale_marker}{fit(row['id'], _ID_WIDTH)}"
+    line = f"{stale_marker}{fit(row['id'], ID_WIDTH)}"
     if show_liquidity:
         liquid_text = "liquid" if row.get("liquid", False) else "illiquid"
         line += f" {liquid_text:<8}"

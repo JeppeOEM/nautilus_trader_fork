@@ -126,6 +126,9 @@ GRAPH: frozenset[tuple[str, str]] = frozenset(
         (DATA_API, ALERTING),
         # No (BOT_TUI, VIEWS): since Story 25.1a bot_tui shows no ranking or market data, only
         # bots:*, collector:status and archive:status (Story 25.1b), so it reads no views model.
+        # Story 29.5's markets:live carries market names only (no volume, price or metric), read
+        # as a published-language literal like collector:status -- still no views edge, and no
+        # ranking import (`BOT_TUI_REDIS_CHANNELS` below).
         # An operator harness drives an interface adapter in-process (e.g. `bench_candles`
         # times `/api/candles` through FastAPI's TestClient), exactly as an HTTP client would.
         (SCRIPTS, DATA_API),
@@ -1670,3 +1673,93 @@ def test_trading_node_rule_catches_each_import_form(tmp_path: Path) -> None:
         "m:5 -> nautilus_trader.live",
         "m:7 -> nautilus_trader.live.node (dynamic)",
     ]
+
+
+# Every Redis channel `bot_tui` subscribes to (Story 29.5): its bots and collector control surface
+# plus the market browser's names-only `markets:live`. A new subscription -- above all a ranking or
+# market-data feed, which Story 25.1a made web-only -- must be added here deliberately.
+BOT_TUI_REDIS_CHANNELS = frozenset(
+    {"bots:status", "collector:status", "archive:status", "markets:live"}
+)
+
+
+def _module_string_constants(tree: ast.Module) -> dict[str, str]:
+    """Return every module-level `NAME = "literal"` (annotated or not) of one module."""
+    constants: dict[str, str] = {}
+    for node in tree.body:
+        targets = node.targets if isinstance(node, ast.Assign) else []
+        if isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        value = node.value if isinstance(node, ast.Assign | ast.AnnAssign) else None
+        literal = value.value if isinstance(value, ast.Constant) else None
+        for target in targets:
+            if isinstance(target, ast.Name) and isinstance(literal, str):
+                constants[target.id] = literal
+    return constants
+
+
+# Every redis-py subscribing call: channels, patterns and shard channels.
+_SUBSCRIBE_CALLS = frozenset({"subscribe", "psubscribe", "ssubscribe"})
+
+
+def _subscribe_args(tree: ast.Module) -> list[ast.expr]:
+    """
+    Return the channel arguments of every `*.subscribe`/`psubscribe`/`ssubscribe(...)` call: each
+    positional argument, and each keyword's name as a literal (redis-py's `subscribe(**{channel:
+    handler})` form); a `**mapping` spread is returned whole, so it reads as unresolved.
+    """
+    args: list[ast.expr] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and getattr(node.func, "attr", None) in _SUBSCRIBE_CALLS:
+            args.extend(node.args)
+            for keyword in node.keywords:
+                args.append(ast.Constant(keyword.arg) if keyword.arg else keyword.value)
+    return args
+
+
+def _subscribed_channels(tree: ast.Module) -> set[str]:
+    """
+    Return the channels of every `*.subscribe(...)` call: string literals, or module-level string
+    constants named bare. Anything else is reported as `<unresolved ...>`, so a channel built at
+    runtime fails the equality below instead of escaping it.
+    """
+    constants = _module_string_constants(tree)
+    channels: set[str] = set()
+    for arg in _subscribe_args(tree):
+        if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
+            channels.add(arg.value)
+        elif isinstance(arg, ast.Name) and arg.id in constants:
+            channels.add(constants[arg.id])
+        else:
+            channels.add(f"<unresolved {ast.unparse(arg)}>")
+    return channels
+
+
+def test_bot_tui_subscribes_to_exactly_its_recorded_channels() -> None:
+    subscribed: set[str] = set()
+    for module, path in _MODULES.items():
+        if _context_of(module) == BOT_TUI and _not_test(module):
+            subscribed |= _subscribed_channels(ast.parse(path.read_text(), filename=str(path)))
+    assert subscribed == BOT_TUI_REDIS_CHANNELS
+
+
+def test_the_channel_scan_resolves_literals_and_module_constants() -> None:
+    tree = ast.parse(
+        'CHANNEL = "a:b"\n'
+        'TYPED: str = "c:d"\n'
+        "async def f(pubsub, name):\n"
+        '    await pubsub.subscribe("e:f", CHANNEL)\n'
+        "    await pubsub.subscribe(TYPED)\n"
+        "    await pubsub.subscribe(name)\n"
+        '    await pubsub.psubscribe("g:*")\n'
+        "    await pubsub.subscribe(h=handler, **extra)\n"
+    )
+    assert _subscribed_channels(tree) == {
+        "a:b",
+        "c:d",
+        "e:f",
+        "g:*",
+        "h",
+        "<unresolved name>",
+        "<unresolved extra>",
+    }

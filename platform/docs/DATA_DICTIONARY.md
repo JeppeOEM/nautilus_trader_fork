@@ -428,7 +428,18 @@ Bybit's and Hyperliquid's since Story 29.4). Published language, frozen
   - `last_apply` — `null` before capture's first `CaptureService.apply`, then
     `{"ts": <wall-clock ns>, "subscribed": [...], "unsubscribed": [...], "failed": [...]}` for the
     most recent apply (startup or command), each id list sorted. It is history: a failed id
-    capture's retry has since subscribed loses its row's `pending` while this still lists it.
+    capture's retry has since subscribed loses its row's `pending` while this still lists it;
+  - `last_refusal` — `null` until the plan refuses a command (`PlanRejected`) after the collector
+    started, then `{"ts": <wall-clock ns, time.time_ns()>, "action": ..., "id": ..., "reason":
+    <the refusal's text>}` for the most recent one (`id` `null` for `pin_top_liquid`). Held in
+    memory only, so a restarted collector publishes `null` again. `bot_tui` shows it under the
+    venue's last apply and, for its own market-browser adds, as the row's `failed: <reason>`: a
+    newly arrived refusal of a `start` naming an add it has outstanding is copied onto that add at
+    once (the field holds one refusal per venue, so a later refusal or a restart's `null` would
+    otherwise replace it), ordered by arrival, never by `ts` (another host's clock). Each refusal
+    is also republished within `STATUS_CHANGE_POLL_SECONDS` if its own publish failed.
+    `[amended 2026-09-29: Story 29.5 -- appended after `last_apply`; every earlier key and byte is
+    unchanged, `collection_control/tests/test_status_replay.py`'s `_APPENDED_KEYS`]`
   And on `stop`/`unpin` a `{"id": ..., "removed": true}` tombstone.
 - **`collector:control`** — `{action, id, venue}` published by `bot_tui` (only for a plan whose
   aggregate says `accepts_commands` and is fresh), consumed by every venue's collector.
@@ -441,7 +452,10 @@ Bybit's and Hyperliquid's since Story 29.4). Published language, frozen
   30-instrument cap with the top USD-volume liquid ids, never an excluded one; refused by Bybit's
   and Hyperliquid's plans, which have no liquidity threshold: "admits no pins"). A refused command
   -- including an id of another venue than the receiving plan's -- or an unknown action logs a
-  WARNING and changes nothing. A valid one is saved to the venue's plan file (dYdX
+  WARNING and changes nothing; a refused command (not an unknown action) is also recorded as the
+  aggregate's `last_refusal` and published at once `[amended 2026-09-29: Story 29.5]`. The
+  market browser's `a` sends the existing `start`, addressed with `venue`: the channel gained no
+  action. A valid one is saved to the venue's plan file (dYdX
   `data/dydx_config.toml`; Bybit and Hyperliquid the committed
   `capture/venues/<venue>/config.toml`, mounted read-write, whose optional `exclude` list is
   written only when non-empty), validated through the one loader first, then applied through
@@ -922,6 +936,41 @@ order and column values unchanged (the web page is the only renderer since Story
 ranking. The ranking's current, only
 confirmed consumer is the human-facing web dashboard's coin-picker UI, not an automated
 trading decision.
+
+### 3.6 The published `markets:live` message (Story 29.5)
+
+`[amended 2026-09-29: Story 29.5 -- new channel]` Not a ranking and not market data: each venue's
+list of market **names**, for `bot_tui`'s Collector-pane market browser (`/`), so the operator
+can find and add a coin without looking its id up elsewhere.
+
+- **Publisher:** `RankingEngine.publish_markets` (`ranking/application/engine.py`), at the end of
+  every volume cycle (`volume_poll_seconds`, 60 s), after `refresh_volumes`. The list is the
+  union of that venue's volume sources (§3.1) still fresh by `refresh_volumes`'s own rule (a
+  source's last good poll younger than `volume_max_age_ns`, 3 missed polls):
+  `RankingBoard.venue_markets`. Bybit's linear and spot sources go in one `BYBIT` message. A venue
+  with no fresh source publishes nothing (DATA-01) -- never an expired list. Because the lists come
+  from the volume sources, they carry what those sources keep: Bybit spot only for USDT/USDC
+  quotes, and never a market whose volume its source could not parse (ledgered at
+  `ranking_engine.volume24h`, left out). `ranking/__main__.py` wires the channel
+  as a second `RedisLivePublisher` on the engine's client.
+- **Shape:** one `json.dumps` message per venue per cycle, keys in this order:
+  `{"venue": "BYBIT", "ts": <the cycle's now_ns>, "markets": [{"instrument_id":
+  "BTCUSDT-LINEAR.BYBIT", "symbol": "BTC"}, ...]}`, `markets` sorted by id. `symbol` is
+  `kernel.venues.base_symbol`, derived on publish and stored nowhere (SIGNAL-01); `venue` is the
+  `kernel.venues` code. Names only: no volume, price or other metric (operator decision
+  2026-09-26), so `bot_tui` reading it re-grows no ranking view (`bot_tui/tests/
+  test_no_rankings_feed.py`).
+- **Failures:** each venue's publish is its own try: a failure is ledgered at
+  `ranking_engine.markets` and the other venues' messages still go out; it never stops the volume
+  cycle. An id `base_symbol` cannot name (no `.VENUE` suffix) is ledgered at the same site and left
+  out.
+- **Reader and freshness:** `bot_tui/markets_state.py` keeps each venue's newest message, validated
+  whole (a `markets` that is not a list, an entry without a string `instrument_id` and `symbol`,
+  or an id of another venue rejects the message with a WARNING, and the last good list is kept).
+  By arrival time, a venue's rows read stale (`~ `) after `MARKETS_STALE_SECONDS` = 180 s (three
+  missed polls) and the venue leaves the browser after `MARKETS_EXPIRE_SECONDS` = 900 s -- never
+  earlier. Redis pub/sub keeps no history, so a TUI started between two cycles waits up to 60 s
+  for the first list ("waiting for markets:live…").
 
 ---
 

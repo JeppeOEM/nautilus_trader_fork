@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 
 from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
+from ranking.application.ports import MARKETS_CHANNEL
 from ranking.application.ports import LivePublisher
 from ranking.application.ports import PriceHistory
 from ranking.application.ports import RankingHistory
@@ -85,3 +86,16 @@ def test_the_redis_publisher_sends_the_message_verbatim_on_rankings_live() -> No
     asyncio.run(live.publish('{"mode": "volume"}'))
 
     assert sent == [("rankings:live", '{"mode": "volume"}')]
+
+
+def test_the_markets_publisher_sends_the_message_verbatim_on_markets_live() -> None:
+    sent: list[tuple[str, str]] = []
+
+    class _Client:
+        async def publish(self, channel: str, message: str) -> None:
+            sent.append((channel, message))
+
+    markets: LivePublisher = RedisLivePublisher(_Client(), MARKETS_CHANNEL)  # type: ignore[arg-type]
+    asyncio.run(markets.publish('{"venue": "BYBIT"}'))
+
+    assert sent == [("markets:live", '{"venue": "BYBIT"}')]

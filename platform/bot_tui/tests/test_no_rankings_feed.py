@@ -21,6 +21,10 @@ how a TUI rankings view would come back. Imports are the other half and are enfo
 structurally, not here: `tests/test_boundaries.py`'s graph has no `(BOT_TUI, VIEWS)` edge, so
 any `views` import from `bot_tui` fails there however it is spelled.
 
+Story 29.5's `markets:live` is allowed: it carries each venue's market names only (no volume,
+price or other metric), for the Collector pane's market browser, and is not a ranking feed.
+`tests/test_boundaries.py`'s `BOT_TUI_REDIS_CHANNELS` records every channel bot_tui subscribes to.
+
 This file is the one exemption, since it has to spell the names out.
 """
 

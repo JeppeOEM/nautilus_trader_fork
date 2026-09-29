@@ -166,9 +166,14 @@ A keyboard-only control surface for the bots and the collector, with two panes:
   confirmation) and `:start <ID>` adds a coin, each addressed to the id's venue; `:pintop` fills
   dYdX's cap by liquidity (dYdX only). Every action is written through to that venue's plan file;
   a venue with no status for over an hour refuses actions with the reason (Story 29.4).
+  `/` opens the market browser (Story 29.5): type part of a coin's symbol or id to search every
+  venue's market names from `markets:live`, then `a` adds the highlighted one (type `add` to
+  confirm); each row shows `collected`, `pending`, `failed: <reason>`, `excluded` or
+  `no answer`.
 
-`:help` lists every key; `esc` goes back one view, `:q` quits. It reads only `bots:*` and
-`collector:status` and publishes only `bots:control` and `collector:control`. Rankings, the
+`:help` lists every key; `esc` goes back one view, `:q` quits. It reads only `bots:*`,
+`collector:status`, `archive:status` and `markets:live` (market names only) and publishes only
+`bots:control` and `collector:control`. Rankings, the
 ranking-mode switch (volume / volatility) and the single-coin view are in the web UI's
 rankings page (its home page, `/`) only (Story 25.1a). Operating the bots: `docs/BOT_OPERATIONS.md`.
 

@@ -30,8 +30,11 @@ sender before 29.4 drove only dYdX). A non-string `venue`, or one `kernel.venues
 know, is ledgered and ignored; a known other venue is ignored silently.
 
 A refused command -- including an id of another venue than the plan's -- or an unknown action,
-logs a WARNING and changes nothing. There is no timer-driven reclassification: the collected set
-changes only on a command or a hand edit of the file (`reload`).
+logs a WARNING and changes nothing. Since Story 29.5 a refused command (`PlanRejected`) is also
+recorded as the status aggregate's `last_refusal` and published at once, so `bot_tui` can show why
+an add did not happen; an unknown action is not a plan refusal and is only logged. There is no
+timer-driven reclassification: the collected set changes only on a command or a hand edit of the
+file (`reload`).
 """
 
 import asyncio
@@ -100,6 +103,9 @@ class ControlService:
                 diff = await self._command(action, iid)
             except PlanRejected as e:
                 logger.warning("%s", e)
+                refused_id = None if action == "pin_top_liquid" else iid
+                self._status.record_refusal(action, refused_id, str(e))
+                await self._publish(frozenset())
                 return
             if diff is None:
                 return

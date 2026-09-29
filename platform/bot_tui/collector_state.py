@@ -25,6 +25,14 @@ kept per venue. A row carries no venue: it is derived from the id (SIGNAL-01). O
 that accepts commands can be driven from here; the rest are shown read-only. Story 29.4: every
 `collector:control` command carries its venue, and Bybit's and Hyperliquid's plans accept
 commands too.
+
+Story 29.5: each aggregate's `last_refusal` (the plan's latest refused command) is kept per venue
+with this TUI's own receive time, set only when it changes; and the market browser's adds sent
+from here are remembered (`record_sent_add`) until their row appears, so a row can read `pending`,
+`failed: <reason>` or `no answer` before -- or instead of -- any `collector:status` row. A new
+refusal of a `start` naming a sent add is copied onto that add (`add_refused_reason`) the moment it
+arrives, because the aggregate holds only one refusal per venue: a second refusal, or a restarted
+collector's null, would otherwise replace the answer before the browser showed it.
 """
 
 import asyncio
@@ -58,6 +66,21 @@ _PLAN_RECEIVED_AT: dict[str, float] = {}
 # correction) can never make a just-republished row look older than the aggregate before it.
 _REPUBLISHED_SINCE_PLAN: dict[str, set[str]] = {}
 
+# Per venue, the aggregate's latest non-null `last_refusal` and when this TUI received it. The time
+# is local and taken only when the refusal differs from the previous one: the browser compares it
+# with its own send time, never with the collector's clock (Story 29.5).
+_LAST_REFUSAL: dict[str, dict] = {}
+_REFUSAL_RECEIVED_AT: dict[str, float] = {}
+
+# The market browser's adds sent from this TUI: id -> local send time, forgotten once the id's row
+# appears (Story 29.5). Human-paced, one entry per add, so it stays tiny.
+_SENT_ADDS: dict[str, float] = {}
+
+# The answer to a sent add when it was a refusal: id -> the refusal's reason, recorded on arrival
+# (`_track_refusal`) and dropped by a re-send or the id's row (Story 29.5). Arrival order is the
+# ordering -- the add was recorded before it was published -- so no clock is compared.
+_ADD_REFUSALS: dict[str, str] = {}
+
 # The venue of an aggregate without `venue`: only dYdX published one before Story 29.2.
 LEGACY_PLAN_VENUE = "DYDX"
 
@@ -82,6 +105,84 @@ def _handle_plan_message(message: dict) -> None:
     _REPUBLISHED_SINCE_PLAN[venue] = set()
     _LATEST_PLANS[venue] = message
     _PLAN_RECEIVED_AT[venue] = time.time()
+    _track_refusal(venue, message.get("last_refusal"))
+
+
+def _track_refusal(venue: str, refusal: object) -> None:
+    """
+    Keep `venue`'s `last_refusal`, stamped with the local receive time when it differs from the
+    one kept (every publish repeats the same refusal). Null -- a collector that has refused nothing
+    since it (re)started, or a pre-29.5 aggregate without the key -- clears it; a value that is not
+    an object is logged and ignored.
+    """
+    if refusal is None:
+        _LAST_REFUSAL.pop(venue, None)
+        _REFUSAL_RECEIVED_AT.pop(venue, None)
+        return
+    if not isinstance(refusal, dict):
+        logger.warning("collector:status last_refusal malformed, ignoring: %r", refusal)
+        return
+    if _LAST_REFUSAL.get(venue) != refusal:
+        _LAST_REFUSAL[venue] = refusal
+        _REFUSAL_RECEIVED_AT[venue] = time.time()
+        _answer_sent_add(refusal)
+
+
+def _answer_sent_add(refusal: dict) -> None:
+    """
+    Record a new refusal as the answer to this TUI's outstanding add of its id -- only a refused
+    `start`, the add's own wire verb, so a refused `stop`/`unpin` of the id never reads as the add
+    failing. Known limit: another sender's refused `start` of the same id, arriving while this
+    TUI's add is outstanding, is taken as this add's answer (the refusal names no sender); upgrade
+    path: a per-command request id echoed in `last_refusal`.
+    """
+    iid = refusal.get("id")
+    if refusal.get("action") == "start" and isinstance(iid, str) and iid in _SENT_ADDS:
+        reason = refusal.get("reason")
+        _ADD_REFUSALS[iid] = reason if isinstance(reason, str) else "?"
+
+
+def latest_refusal(venue: str) -> tuple[dict, float] | None:
+    """Return `venue`'s latest refusal and when this TUI received it, or None."""
+    refusal = _LAST_REFUSAL.get(venue)
+    if refusal is None:
+        return None
+    return refusal, _REFUSAL_RECEIVED_AT[venue]
+
+
+def record_sent_add(instrument_id: str, now: float) -> None:
+    """
+    Remember that this TUI sent an add of `instrument_id` at local time `now`, dropping the answer
+    to an earlier add of it: called before the add is published, so any refusal arriving after
+    this answers the new add.
+    """
+    _SENT_ADDS[instrument_id] = now
+    _ADD_REFUSALS.pop(instrument_id, None)
+
+
+def forget_sent_add(instrument_id: str, sent_at: float) -> None:
+    """
+    Drop the add of `instrument_id` sent at `sent_at` whose publish failed: it never reached a
+    collector, so it must not read `pending` and then "no answer from <VENUE> collector". A later
+    re-send (another `sent_at`) is kept.
+    """
+    if _SENT_ADDS.get(instrument_id) == sent_at:
+        del _SENT_ADDS[instrument_id]
+
+
+def add_refused_reason(instrument_id: str) -> str | None:
+    """Return the reason the collector refused this TUI's outstanding add of the id, or None."""
+    return _ADD_REFUSALS.get(instrument_id)
+
+
+def sent_adds() -> dict[str, float]:
+    """Return every add this TUI sent that no row has answered yet: id -> local send time."""
+    return dict(_SENT_ADDS)
+
+
+def sent_add_at(instrument_id: str) -> float | None:
+    """Return when this TUI last sent an add of `instrument_id` not yet answered by a row."""
+    return _SENT_ADDS.get(instrument_id)
 
 
 def _drop_rows_not_republished(venue: str, republished: set[str]) -> None:
@@ -119,6 +220,9 @@ def _handle_status_message(message: dict) -> None:
     _LATEST_COLLECTOR_STATUS[iid] = message
     _LATEST_RECEIVED_AT[iid] = time.time()
     _REPUBLISHED_SINCE_PLAN.setdefault(venue_of_row(iid), set()).add(iid)
+    # The row answers the add: from here on `collector:status` alone says what the id is.
+    _SENT_ADDS.pop(iid, None)
+    _ADD_REFUSALS.pop(iid, None)
 
 
 def is_stale(instrument_id: str, now: float | None = None) -> bool:
@@ -197,9 +301,10 @@ def command_refusal(venue: str, now: float | None = None) -> str | None:
 
 async def publish_control(
     redis_url: str, action: str, instrument_id: str | None = None, venue: str | None = None
-) -> None:
+) -> bool:
     """
-    Publish a start/unpin/stop/pin_top_liquid request to collector:control.
+    Publish a start/unpin/stop/pin_top_liquid request to collector:control; return whether Redis
+    took it (a failure is logged, and the caller tells the operator).
     `instrument_id` is omitted for pin_top_liquid, which targets no single id. `venue` (Story
     29.4) is appended last, so the pre-29.4 `{action, id}` bytes stay the payload's prefix; each
     venue's collector acts only on its own venue, and one without it is dYdX's.
@@ -216,6 +321,8 @@ async def publish_control(
             await client.publish("collector:control", json.dumps(payload))
     except Exception as exc:
         logger.warning("failed to publish collector:control %s: %s", action, exc)
+        return False
+    return True
 
 
 async def _redis_listener(redis_url: str) -> None:

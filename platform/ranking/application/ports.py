@@ -24,6 +24,8 @@ from typing import Protocol
 SNAPSHOTS_CHANNEL = "snapshots:raw"
 CONTROL_CHANNEL = "ranking:control"
 RANKINGS_CHANNEL = "rankings:live"
+# Story 29.5: every venue's market names (no metric), one message per venue per volume cycle.
+MARKETS_CHANNEL = "markets:live"
 
 
 class VolumeSource(Protocol):
@@ -73,8 +75,9 @@ class RankingHistory(Protocol):
 
 class LivePublisher(Protocol):
     """
-    The `rankings:live` channel. Invariant: `message` is published verbatim -- the engine builds
-    the frozen wire payload, the adapter only transports it.
+    One published channel (`rankings:live`, and since Story 29.5 `markets:live`). Invariant:
+    `message` is published verbatim -- the engine builds the frozen wire payload, the adapter only
+    transports it.
     """
 
     async def publish(self, message: str) -> None: ...

@@ -35,6 +35,7 @@ from observability import error_ledger
 
 from ranking.application.engine import RankingConfig
 from ranking.application.engine import RankingEngine
+from ranking.application.ports import MARKETS_CHANNEL
 from ranking.application.ports import VolumeSource
 from ranking.domain.board import RankingBoard
 from ranking.domain.board import RankingsPublisher
@@ -132,6 +133,7 @@ async def run(settings: Settings) -> None:
                 prices=CatalogPriceHistory(settings.catalog_path),
                 history=history,
                 live=RedisLivePublisher(client),
+                markets=RedisLivePublisher(client, MARKETS_CHANNEL),
                 config=config,
             )
             await asyncio.gather(
