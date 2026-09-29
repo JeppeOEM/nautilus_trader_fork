@@ -27,6 +27,11 @@ Only `query_second_ohlc` and `query_top_of_book` widen the span by `READ_SPAN_MA
 `files_by_day` and `data_file_ranges` take the span as written, as their pre-kernel originals did --
 the rebuild re-reads a whole day, so a row whose `ts_init` lands in the neighbouring file is picked
 up there.
+
+The snapshot readers decode the integer layout (Story 30.2) only through `kernel.second_snapshot`'s
+column decoders (`trade_float_columns`, `top_of_book_units`, `price_of`/`quantity_of`); a
+float-layout file is refused with `LegacySnapshotLayoutError` (`require_integer_layout`), never
+read.
 """
 
 import glob
@@ -35,7 +40,6 @@ from typing import NamedTuple
 
 import numpy as np
 import pyarrow as pa
-import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from kernel.clocks import MAX_TS_INIT_SKEW_NS
@@ -43,17 +47,27 @@ from kernel.clocks import NS_PER_DAY
 from kernel.clocks import NS_PER_MS
 from kernel.clocks import READ_SPAN_MARGIN_NS
 from kernel.clocks import CatalogFileSpan
+from kernel.second_snapshot import OHLC_UNIT_COLUMNS
+from kernel.second_snapshot import PRECISION_COLUMNS
+from kernel.second_snapshot import TOP_OF_BOOK_COLUMNS
+from kernel.second_snapshot import VOLUME_UNIT_COLUMNS
 from kernel.second_snapshot import DydxSecondSnapshot
 from kernel.second_snapshot import SecondOHLC
+from kernel.second_snapshot import price_of
+from kernel.second_snapshot import quantity_of
+from kernel.second_snapshot import require_integer_layout
+from kernel.second_snapshot import top_of_book_units
+from kernel.second_snapshot import trade_float_columns
 from nautilus_trader.model.data import IndexPriceUpdate
 from nautilus_trader.model.objects import FIXED_PRECISION
 from nautilus_trader.model.objects import FIXED_PRECISION_BYTES
 from nautilus_trader.model.objects import Price
+from nautilus_trader.model.objects import Quantity
 from nautilus_trader.persistence.funcs import class_to_filename
 
 
 SNAPSHOT_DIRNAME = class_to_filename(DydxSecondSnapshot)  # "custom_dydx_second_snapshot"
-_OHLC_COLUMNS = SecondOHLC._fields
+_TRADE_READ_COLUMNS = ("ts_event", *PRECISION_COLUMNS, *OHLC_UNIT_COLUMNS, *VOLUME_UNIT_COLUMNS)
 INDEX_PRICE_DIRNAME = class_to_filename(IndexPriceUpdate)  # "index_price_update"
 
 
@@ -98,7 +112,8 @@ def query_second_ohlc(
 ) -> list[SecondOHLC]:
     """
     Per-second OHLC + volume rows in [start_ns, end_ns] (ts_event), read straight from the
-    catalog's Parquet files with only the seven columns candles need.
+    catalog's Parquet files with only the trade columns candles need (plus the two precisions they
+    are decoded at, `trade_float_columns`).
 
     `catalog_stats.query_second_snapshots` deserialises every row's 20-level book into Python
     objects through the catalog decoder -- ~95% of a candle request's time (Story 21.5 profile)
@@ -113,40 +128,46 @@ def query_second_ohlc(
     return rows
 
 
-def _ohlc_rows(path: str, start_ns: int, end_ns: int) -> list[SecondOHLC]:
-    # Files from before the OHLC fields existed lack those columns: they read as None (the
-    # candle path skips a second with no close), never as a crash.
-    names = pq.read_schema(path).names
-    present = [c for c in _OHLC_COLUMNS if c in names]
-    table = pq.read_table(
+def _read_snapshot_columns(path: str, columns: list[str], start_ns: int, end_ns: int) -> pa.Table:
+    """Read the given columns of one integer-layout snapshot file, rows with `ts_event` in the window."""
+    require_integer_layout(pq.read_schema(path), path)
+    return pq.read_table(
         path,
-        columns=present,
+        columns=columns,
         filters=[("ts_event", ">=", start_ns), ("ts_event", "<=", end_ns)],
     )
-    cols = {c: table.column(c).to_pylist() for c in present}
+
+
+def _optional(value: float) -> float | None:
+    return None if np.isnan(value) else float(value)
+
+
+def _ohlc_rows(path: str, start_ns: int, end_ns: int) -> list[SecondOHLC]:
+    table = _read_snapshot_columns(path, list(_TRADE_READ_COLUMNS), start_ns, end_ns)
+    values = trade_float_columns(table)
+    ts = table.column("ts_event").to_pylist()
     return [
         SecondOHLC(
-            *(
-                cols[c][i] if c in cols else (0.0 if c.endswith("volume") else None)
-                for c in _OHLC_COLUMNS
-            )
+            ts[i],
+            *(_optional(values[name][i]) for name in OHLC_UNIT_COLUMNS),
+            *(float(values[name][i]) for name in VOLUME_UNIT_COLUMNS),
         )
         for i in range(table.num_rows)
     ]
 
 
 class TopOfBook(NamedTuple):
-    """Level 0 of one second-snapshot row: what a quote needs, without the 20-level book."""
+    """
+    Level 0 of one second-snapshot row: what a quote needs, without the 20-level book, as exact
+    `Price`/`Quantity` values at the row's stored precisions (`Price.from_raw`, no float step).
+    """
 
     ts_event: int
     ts_init: int
-    bid_price: float
-    bid_size: float
-    ask_price: float
-    ask_size: float
-
-
-_BOOK_COLUMNS = ("bid_prices", "bid_sizes", "ask_prices", "ask_sizes")
+    bid_price: Price
+    bid_size: Quantity
+    ask_price: Price
+    ask_size: Quantity
 
 
 def query_top_of_book(
@@ -170,20 +191,18 @@ def query_top_of_book(
 
 
 def _top_rows(path: str, start_ns: int, end_ns: int) -> list[TopOfBook]:
-    table = pq.read_table(
-        path,
-        columns=["ts_event", "ts_init", *_BOOK_COLUMNS],
-        filters=[("ts_event", ">=", start_ns), ("ts_event", "<=", end_ns)],
-    )
-    # A null or empty list compares to null or False, and `filter` drops both.
-    quotable = pc.and_(
-        pc.greater(pc.list_value_length(table.column("bid_prices")), 0),
-        pc.greater(pc.list_value_length(table.column("ask_prices")), 0),
-    )
-    table = table.filter(quotable)
-    columns: list[pa.ChunkedArray] = [table.column("ts_event"), table.column("ts_init")]
-    columns += [pc.list_element(table.column(name), 0) for name in _BOOK_COLUMNS]
-    return [TopOfBook(*values) for values in zip(*(c.to_pylist() for c in columns), strict=True)]
+    table = _read_snapshot_columns(path, list(TOP_OF_BOOK_COLUMNS), start_ns, end_ns)
+    return [
+        TopOfBook(
+            top.ts_event,
+            top.ts_init,
+            price_of(top.bid_price, top.price_precision),
+            quantity_of(top.bid_size, top.size_precision),
+            price_of(top.ask_price, top.price_precision),
+            quantity_of(top.ask_size, top.size_precision),
+        )
+        for top in top_of_book_units(table)
+    ]
 
 
 class IndexPrice(NamedTuple):
@@ -298,34 +317,25 @@ def second_ohlc_arrays(paths: list[str]) -> dict[str, np.ndarray]:
     """
     Read OHLC + volume columns of the given snapshot files as arrays.
 
-    Keys `ts_ms`, `o`, `h`, `l`, `c`, `v` (NaN = no trade that second); each file opened once. The
-    rebuild's read path: no per-row Python objects, no per-call directory scan.
+    Keys `ts_ms`, `o`, `h`, `l`, `c`, `v` (NaN = no trade that second), decoded from units at each
+    row's precisions (`trade_float_columns`); each file opened once. The rebuild's read path: no
+    per-row Python objects, no per-call directory scan. A float-layout file raises
+    `LegacySnapshotLayoutError`.
     """
-    tables = []
-    for path in paths:
-        pf = pq.ParquetFile(path)
-        present = [c for c in _OHLC_COLUMNS if c in pf.schema_arrow.names]
-        tables.append(pf.read(columns=present))
     out = {k: np.empty(0, dtype=np.float64) for k in ("o", "h", "l", "c", "v")}
     out["ts_ms"] = np.empty(0, dtype=np.int64)
-    if not tables:
+    parts: list[dict[str, np.ndarray]] = []
+    for path in paths:
+        pf = pq.ParquetFile(path)
+        require_integer_layout(pf.schema_arrow, path)
+        table = pf.read(columns=list(_TRADE_READ_COLUMNS))
+        values = trade_float_columns(table)
+        values["ts_event"] = table.column("ts_event").to_numpy().astype(np.int64)
+        parts.append(values)
+    if not parts:
         return out
-    n = sum(t.num_rows for t in tables)
-    ts = np.concatenate([t.column("ts_event").to_numpy() for t in tables]).astype(np.int64)
-    out["ts_ms"] = ts // NS_PER_MS
-
-    def col(name: str, default: float) -> np.ndarray:
-        parts = [
-            t.column(name).to_numpy(zero_copy_only=False).astype(np.float64)
-            if name in t.column_names
-            else np.full(t.num_rows, default)
-            for t in tables
-        ]
-        return np.concatenate(parts) if parts else np.empty(0)
-
-    out["o"], out["h"], out["l"], out["c"] = (
-        col(k, np.nan) for k in ("open_price", "high_price", "low_price", "close_price")
-    )
-    out["v"] = col("buy_volume", 0.0) + col("sell_volume", 0.0)
-    assert len(out["ts_ms"]) == n
+    joined = {k: np.concatenate([p[k] for p in parts]) for k in parts[0]}
+    out["ts_ms"] = joined["ts_event"] // NS_PER_MS
+    out["o"], out["h"], out["l"], out["c"] = (joined[k] for k in OHLC_UNIT_COLUMNS)
+    out["v"] = joined["buy_volume"] + joined["sell_volume"]
     return out

@@ -36,6 +36,7 @@ from alerting.infrastructure.deliverer import NotifyDeliverer
 from alerting.infrastructure.toml_store import AlertStore
 from fastapi.testclient import TestClient
 from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.tests.snapshot_factory import make_snapshot
 from observability import error_ledger
 from views.live_candles import LiveCandleBus
 from views.rankings_bus import QUEUE_MAX as VIEWS_QUEUE_MAX
@@ -232,7 +233,7 @@ def test_routes_reject_invalid_alerts(
 
 
 def _snapshot(ts_ns: int, close: float | None) -> DydxSecondSnapshot:
-    return DydxSecondSnapshot(
+    return make_snapshot(
         instrument_id=InstrumentId.from_str(_IID),
         bid_prices=[1.0],
         bid_sizes=[1.0],

@@ -81,10 +81,11 @@ def find_impossible_snapshots(
 
 
 def _cleared_copy(snap: DydxSecondSnapshot) -> DydxSecondSnapshot:
+    """Return the row with its trade columns emptied (units: 0 volumes and counts, null OHLC)."""
     values = DydxSecondSnapshot.to_dict(snap)
     values.update(
-        buy_volume=0.0,
-        sell_volume=0.0,
+        buy_volume=0,
+        sell_volume=0,
         buy_count=0,
         sell_count=0,
         open_price=None,

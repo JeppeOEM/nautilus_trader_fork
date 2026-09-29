@@ -42,6 +42,7 @@ from decimal import Decimal
 
 from kernel.indicators import MultiLevelOFI
 from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.tests.snapshot_factory import make_snapshot
 
 from nautilus_trader.backtest.engine import BacktestEngine
 from nautilus_trader.backtest.engine import BacktestEngineConfig
@@ -88,7 +89,7 @@ _BOOKS: list[tuple[list[tuple[float, float]], list[tuple[float, float]]]] = [
 
 def _snapshots() -> list[DydxSecondSnapshot]:
     return [
-        DydxSecondSnapshot(
+        make_snapshot(
             instrument_id=_IID,
             bid_prices=[p for p, _ in bids],
             bid_sizes=[s for _, s in bids],

@@ -165,6 +165,7 @@ from capture.domain.verdicts import EmptyTop
 from capture.domain.verdicts import NoBook
 from capture.domain.verdicts import Rejected
 from capture.domain.verdicts import Stale
+from capture.domain.verdicts import Unencodable
 from nautilus_trader.core import nautilus_pyo3
 from nautilus_trader.model.book import OrderBook
 from nautilus_trader.model.data import OrderBookDeltas
@@ -467,6 +468,7 @@ class CaptureService:
 
         self._last_no_book_log_ns: dict[str, int] = {}
         self._last_empty_top_log_ns: dict[str, int] = {}
+        self._last_unencodable_log_ns: dict[str, int] = {}
         self._last_impossible_log_ns: dict[str, int] = {}
         self._book_sequence_errors: defaultdict[str, int] = defaultdict(int)
         self._book_crosscheck_mismatches: defaultdict[str, int] = defaultdict(int)
@@ -967,13 +969,15 @@ class CaptureService:
         """
         if second is not None:
             self._drain_pending_deltas((second + 1) * S_NS)
+        iids = self._instrument_ids()
         result = self._sampler.sample(
-            self._instrument_ids(),
+            iids,
             self._books,
             self._intakes,
             now_ns,
             second,
             self._feeds.feed_dead(now_ns, self._feed_stale_ns),
+            self._precisions(iids),
         )
         for iid, event in result.uncrossed:
             self._log_uncrossed(iid, event, now_ns)
@@ -990,8 +994,21 @@ class CaptureService:
             await self._resync(iid)
         return result.accepted
 
+    def _precisions(self, iids: list[str]) -> dict[str, tuple[int, int]]:
+        """
+        Each collected instrument's definition precisions, the units the snapshot is stored in
+        (Story 30.2); an id without a definition is absent, and the sampler refuses its row.
+        """
+        return {
+            iid: (inst.price_precision, inst.size_precision)
+            for iid in iids
+            if (inst := self._instruments.get(iid)) is not None
+        }
+
     def _report_rejection(self, iid: str, verdict: Rejected, now_ns: int) -> None:
-        if isinstance(verdict, NoBook):
+        if isinstance(verdict, Unencodable):
+            self._report_unencodable(iid, verdict, now_ns)
+        elif isinstance(verdict, NoBook):
             if self._rate_limited(self._last_no_book_log_ns, iid, now_ns):
                 # One per minute: an instrument that never gets a book (not on the venue, or
                 # awaiting a fresh snapshot) must not be a quiet gap (DATA-01) -- the watchdog
@@ -1011,6 +1028,20 @@ class CaptureService:
             self._report_crossed(iid, verdict, now_ns)
         elif isinstance(verdict, Stale):
             logger.warning("Stale book for %s (%s) — skipping snapshot", iid, verdict.detail)
+
+    def _report_unencodable(self, iid: str, verdict: Unencodable, now_ns: int) -> None:
+        """
+        Report a book that passed the gate but whose row cannot be stored exactly (no definition, or a
+        value finer than the definition's precision): the second is skipped, never rounded. Loud
+        and ledgered, one line per instrument per minute while it lasts (DATA-07).
+        """
+        if self._rate_limited(self._last_unencodable_log_ns, iid, now_ns):
+            logger.error("Unencodable snapshot for %s (%s) — skipping", iid, verdict.reason)
+            self._ledger(
+                sites.UNENCODABLE,
+                f"{iid}: second not stored, the row cannot be encoded exactly: {verdict.reason} "
+                "(one line per instrument per minute while it lasts)",
+            )
 
     @staticmethod
     def _rate_limited(last_log: dict[str, int], iid: str, now_ns: int) -> bool:

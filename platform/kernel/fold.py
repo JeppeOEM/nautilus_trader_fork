@@ -20,33 +20,23 @@ can never disagree.
 Exact by construction: volumes are summed as `Quantity.raw` integers and OHLC is chosen by
 comparing `Price.raw` integers. Nautilus stores every raw at one fixed scale whatever the
 precision label, so trades carrying different precisions compare and sum exactly; the result is
-labelled with the highest precision seen. The only float conversion is `snapshot_values()`, at
-the `DydxSecondSnapshot` boundary, once per field of an exact total.
+labelled with the highest precision seen. No float anywhere: `snapshot_units()` turns the exact
+totals into the snapshot's integer units at the instrument definition's precisions, asserted exact
+(`kernel.second_snapshot.units_of`), so a trade finer than the row's precision is refused, never
+rounded.
 
 Seconds -> bars (1 m and wider) is a different fold: `candles.domain.fold.fold_arrays`.
 """
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import NamedTuple
 
+from kernel.second_snapshot import SnapshotTradeUnits
+from kernel.second_snapshot import units_of
 from nautilus_trader.model.data import TradeTick
 from nautilus_trader.model.enums import AggressorSide
 from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
-
-
-class SnapshotTradeValues(NamedTuple):
-    """The eight trade columns of a `DydxSecondSnapshot`, as the snapshot stores them."""
-
-    open_price: float | None
-    high_price: float | None
-    low_price: float | None
-    close_price: float | None
-    buy_volume: float
-    sell_volume: float
-    buy_count: int
-    sell_count: int
 
 
 @dataclass(frozen=True)
@@ -62,22 +52,30 @@ class SecondTradeFields:
     buy_count: int = 0
     sell_count: int = 0
 
-    def snapshot_values(self) -> SnapshotTradeValues:
-        """Return the snapshot's trade columns: the one float conversion (0.0 / None when empty)."""
-        return SnapshotTradeValues(
-            open_price=_as_float(self.open_price),
-            high_price=_as_float(self.high_price),
-            low_price=_as_float(self.low_price),
-            close_price=_as_float(self.close_price),
-            buy_volume=0.0 if self.buy_volume is None else self.buy_volume.as_double(),
-            sell_volume=0.0 if self.sell_volume is None else self.sell_volume.as_double(),
+    def snapshot_units(self, price_precision: int, size_precision: int) -> SnapshotTradeUnits:
+        """
+        Return the snapshot's trade columns in units at the row's precisions (0 volume / None OHLC
+        when empty). A value finer than its precision, or outside int64, raises
+        `SnapshotEncodingError` (`units_of`).
+        """
+        return SnapshotTradeUnits(
+            open_price=_price_units(self.open_price, price_precision),
+            high_price=_price_units(self.high_price, price_precision),
+            low_price=_price_units(self.low_price, price_precision),
+            close_price=_price_units(self.close_price, price_precision),
+            buy_volume=_size_units(self.buy_volume, size_precision),
+            sell_volume=_size_units(self.sell_volume, size_precision),
             buy_count=self.buy_count,
             sell_count=self.sell_count,
         )
 
 
-def _as_float(price: Price | None) -> float | None:
-    return None if price is None else price.as_double()
+def _price_units(price: Price | None, precision: int) -> int | None:
+    return None if price is None else units_of(price.raw, precision)
+
+
+def _size_units(size: Quantity | None, precision: int) -> int:
+    return 0 if size is None else units_of(size.raw, precision)
 
 
 def _sum_sizes(trades: list[TradeTick]) -> Quantity | None:

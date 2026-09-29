@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { fetchSnapshotSeries } from "../api/client";
 import type { SnapshotSeriesPoint } from "../api/schema";
+import { unitsToNumber } from "../lib/units";
 
 // ~15 minutes of 1-second rows -- approximates `dashboard.py`'s own Lines-mode chunk width
 // (`_chunkSpanMs`'s 15-minute/900-row default, retired in Story 15.10). Snapshot
@@ -44,10 +45,18 @@ function toDatum(timeMs: number, value: number | null | undefined): LineDatum {
   return value == null ? { time } : { time, value };
 }
 
+/**
+ * The best bid/ask arrive as exact integer units plus their precision (Story 30.2); they become
+ * plot values only through `lib/units.ts`. A gap row carries nulls, which stay whitespace.
+ */
+function unitsValue(units: number | null | undefined, precision: number | null | undefined): number | null {
+  return units == null || precision == null ? null : unitsToNumber(units, precision);
+}
+
 function toLines(items: SnapshotSeriesPoint[]): SnapshotLinesData {
   return {
-    bid: items.map((i) => toDatum(i.t, i.bid)),
-    ask: items.map((i) => toDatum(i.t, i.ask)),
+    bid: items.map((i) => toDatum(i.t, unitsValue(i.bid_units, i.price_precision))),
+    ask: items.map((i) => toDatum(i.t, unitsValue(i.ask_units, i.price_precision))),
     mid: items.map((i) => toDatum(i.t, i.mid)),
     micro: items.map((i) => toDatum(i.t, i.micro)),
     price: items.map((i) => toDatum(i.t, i.price)),

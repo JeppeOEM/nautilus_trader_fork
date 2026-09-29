@@ -28,6 +28,7 @@ import tempfile
 
 import pytest
 from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.tests.snapshot_factory import make_snapshot
 from observability import error_ledger
 
 from nautilus_trader.model.identifiers import InstrumentId
@@ -48,7 +49,7 @@ def _snapshot(
     ask_prices: list[float],
     ask_sizes: list[float],
 ) -> DydxSecondSnapshot:
-    return DydxSecondSnapshot(
+    return make_snapshot(
         instrument_id=InstrumentId.from_str(_IID),
         bid_prices=bid_prices,
         bid_sizes=bid_sizes,

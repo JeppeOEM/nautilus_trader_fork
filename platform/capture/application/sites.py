@@ -27,6 +27,7 @@ PROCESS = "collector.process"
 UNPLANNED_MESSAGE = "collector.unplanned_message"
 # the gate and the book
 EMPTY_TOP = "collector.empty_top"
+UNENCODABLE = "collector.unencodable"
 CROSSED_BOOK = "collector.crossed_book"
 RESYNC = "collector.resync"
 BOOK_SEQUENCE = "collector.book_sequence"

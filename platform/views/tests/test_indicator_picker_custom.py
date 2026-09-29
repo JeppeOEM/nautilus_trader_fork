@@ -28,7 +28,7 @@ entries (CumulativeVolumeDelta and later additions) live in the same module-leve
 import tempfile
 
 import pytest
-from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.tests.snapshot_factory import make_snapshot
 
 from nautilus_trader.model.data import BookOrder
 from nautilus_trader.model.data import OrderBookDelta
@@ -110,7 +110,7 @@ def _write_snapshots(
     """Write one DydxSecondSnapshot per (buy_volume, sell_volume) pair, 1s apart."""
     step_ns = 1_000_000_000
     snapshots = [
-        DydxSecondSnapshot(
+        make_snapshot(
             instrument_id=InstrumentId.from_str(_IID),
             bid_prices=[100.0],
             bid_sizes=[1.0],

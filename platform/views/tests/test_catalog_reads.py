@@ -18,7 +18,7 @@ import tempfile
 
 from candles.application.forming import bars_from_rows
 from kernel.catalog_files import query_second_ohlc
-from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.tests.snapshot_factory import make_snapshot
 
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
@@ -33,7 +33,7 @@ _OHLC_IID = "BTC-USD.DYDX"
 def _write_ohlc_snapshots(catalog_path: str, base: int, n: int) -> None:
     ParquetDataCatalog(catalog_path).write_data(
         [
-            DydxSecondSnapshot(
+            make_snapshot(
                 instrument_id=InstrumentId.from_str(_OHLC_IID),
                 bid_prices=[99.0],
                 bid_sizes=[1.0],

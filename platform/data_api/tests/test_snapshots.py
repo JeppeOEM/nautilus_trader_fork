@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.tests.snapshot_factory import make_snapshot
 
 import data_api.app as app_module
 import data_api.routes.snapshots as snapshots_routes
@@ -52,7 +52,7 @@ def _write_snapshots(
     entries = sorted(entries, key=lambda e: e[0])
     ParquetDataCatalog(catalog_path).write_data(
         [
-            DydxSecondSnapshot(
+            make_snapshot(
                 instrument_id=InstrumentId.from_str(_IID),
                 bid_prices=[bid],
                 bid_sizes=[1.0],
@@ -152,7 +152,7 @@ def _write_raw(catalog_path: str, ts_ns: int, bids: list[float], asks: list[floa
     """Write one second exactly as given (the `_write_snapshots` helper always writes bid < ask)."""
     ParquetDataCatalog(catalog_path).write_data(
         [
-            DydxSecondSnapshot(
+            make_snapshot(
                 instrument_id=InstrumentId.from_str(_IID),
                 bid_prices=bids,
                 bid_sizes=[1.0] * len(bids),
@@ -190,16 +190,17 @@ def test_crossed_row_written_by_the_gate_is_returned_unchanged(
 
     assert response.status_code == 200
     items = response.json()["items"]
-    assert [(i["t"], i["bid"], i["ask"]) for i in items] == [
-        (crossed_ns // 1_000_000, 105.0, 100.0),  # as written
-        (healthy_ns // 1_000_000, 100.0, 101.0),
+    # The stored integers pass through unchanged (Story 30.2); the frontend formats them.
+    assert [(i["t"], i["bid_units"], i["ask_units"], i["price_precision"]) for i in items] == [
+        (crossed_ns // 1_000_000, 1_050_000, 1_000_000, 4),  # as written
+        (healthy_ns // 1_000_000, 1_000_000, 1_010_000, 4),
     ]
     assert items[0]["mid"] == 102.5
 
     # It counts toward `limit`: a one-row page holds only the newest row, and the crossed row is
     # what the next (older) page returns.
     newest = client.get(f"/api/snapshots/{_IID}?before_ns={_BASE_NS}&limit=1").json()
-    assert [i["bid"] for i in newest["items"]] == [100.0]
+    assert [i["bid_units"] for i in newest["items"]] == [1_000_000]
     assert newest["has_more"] is True
 
 

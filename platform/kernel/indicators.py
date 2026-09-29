@@ -465,7 +465,8 @@ class MultiLevelOFI(Indicator):
 
 # -----------------------------------------------------------------------------------
 # Plain, stateless single-snapshot derivations (SSOT-01, platform/CLAUDE.md) -- pure
-# functions of one DydxSecondSnapshot.to_dict()-shaped dict, no window/history state.
+# functions of one `DydxSecondSnapshot.as_floats()`-shaped dict (the decoded floats; the stored
+# and wire `to_dict()` holds integer units since Story 30.2), no window/history state.
 # Every caller (ranking_engine, data_api via views) must call these rather than
 # reimplementing the formula locally, so two processes fed the same snapshot can never
 # compute a different number for it.
@@ -562,7 +563,7 @@ class DepthProfile:
 
 def snapshot_depth(snapshot: dict, levels: int) -> DepthProfile | None:
     """
-    Return the top `levels` levels of each side of one `DydxSecondSnapshot.to_dict()`-shaped
+    Return the top `levels` levels of each side of one `DydxSecondSnapshot.as_floats()`-shaped
     snapshot; None when either side is empty (like `mid_price`/`spread`). A side holding fewer
     levels keeps what it has -- never padded. `levels` < 1 raises `ValueError`: an empty profile
     has no touch to measure from.

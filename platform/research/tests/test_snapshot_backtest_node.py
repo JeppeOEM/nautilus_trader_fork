@@ -39,7 +39,7 @@ import tempfile
 import time
 from decimal import Decimal
 
-from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.tests.snapshot_factory import make_snapshot
 
 from nautilus_trader.model.currencies import BTC
 from nautilus_trader.model.currencies import USDC
@@ -92,18 +92,20 @@ def test_backtest_snapshot_streams_dydx_second_snapshot_via_backtest_node() -> N
     for i in range(100):
         ts_snap = now_ns - (100 - i) * 1_000_000_000
         snapshots.append(
-            DydxSecondSnapshot(
+            make_snapshot(
                 instrument_id=_IID,
-                bid_prices=[100.0 - j * 0.1 for j in range(10)],
-                bid_sizes=[5.0 + i * 0.5 - j * 0.1 for j in range(10)],
-                ask_prices=[100.1 + j * 0.1 for j in range(10)],
-                ask_sizes=[5.0 - j * 0.1 for j in range(10)],
+                bid_prices=[round(100.0 - j * 0.1, 1) for j in range(10)],
+                bid_sizes=[round(5.0 + i * 0.5 - j * 0.1, 3) for j in range(10)],
+                ask_prices=[round(100.1 + j * 0.1, 1) for j in range(10)],
+                ask_sizes=[round(5.0 - j * 0.1, 3) for j in range(10)],
                 buy_volume=1.0,
                 sell_volume=1.0,
                 buy_count=1,
                 sell_count=1,
                 ts_event=ts_snap,
                 ts_init=ts_snap,
+                price_precision=1,  # the instrument definition's
+                size_precision=3,
             )
         )
         ts_trade = ts_snap + 500_000_000

@@ -35,17 +35,35 @@ def derived_quotes(instrument: Instrument, tops: list[TopOfBook]) -> list[QuoteT
     `query_top_of_book` sorts by `ts_event`, but `ParquetDataCatalog.write_data` refuses rows
     whose `ts_init` decreases, and a writer's `ts_init` may trail `ts_event` by up to
     `kernel.clocks.MAX_TS_INIT_SKEW_NS`, so the two orders can disagree. `ts_init` is also the
-    clock `BacktestNode` replays on, as `catalog.query` ordered them before.
+    clock `BacktestNode` replays on, as `catalog.query` ordered them before. Prices and sizes are
+    the top's exact stored values (`TopOfBook`, `Price.from_raw`), with no float step.
     """
+    ordered = sorted(tops, key=lambda t: t.ts_init)
+    for t in ordered:
+        _require_definition_precision(instrument, t)
     return [
         QuoteTick(
             instrument_id=instrument.id,
-            bid_price=instrument.make_price(t.bid_price),
-            ask_price=instrument.make_price(t.ask_price),
-            bid_size=instrument.make_qty(t.bid_size),
-            ask_size=instrument.make_qty(t.ask_size),
+            bid_price=t.bid_price,
+            ask_price=t.ask_price,
+            bid_size=t.bid_size,
+            ask_size=t.ask_size,
             ts_event=t.ts_event,
             ts_init=t.ts_init,
         )
-        for t in sorted(tops, key=lambda t: t.ts_init)
+        for t in ordered
     ]
+
+
+def _require_definition_precision(instrument: Instrument, top: TopOfBook) -> None:
+    """
+    Refuse a top stored at other precisions than the definition the backtest trades: its exact
+    values are used as stored (Story 30.2), never re-rounded with `make_price`.
+    """
+    stored = (top.bid_price.precision, top.bid_size.precision)
+    defined = (instrument.price_precision, instrument.size_precision)
+    if stored != defined:
+        raise ValueError(
+            f"{instrument.id} snapshot at ts_event {top.ts_event} is stored at price/size "
+            f"precision {stored}, the instrument definition says {defined}"
+        )

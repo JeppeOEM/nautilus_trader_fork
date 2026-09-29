@@ -16,7 +16,7 @@
 
 import tempfile
 
-from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.tests.snapshot_factory import make_snapshot
 
 from nautilus_trader.model.data import MarkPriceUpdate
 from nautilus_trader.model.identifiers import InstrumentId
@@ -31,7 +31,7 @@ _IID = "BTC-USD-PERP.DYDX"
 def _write_snapshot(catalog_path: str, close_price: float | None, ts: int) -> None:
     ParquetDataCatalog(catalog_path).write_data(
         [
-            DydxSecondSnapshot(
+            make_snapshot(
                 instrument_id=InstrumentId.from_str(_IID),
                 bid_prices=[close_price - 1] if close_price else [100.0],
                 bid_sizes=[1.0],

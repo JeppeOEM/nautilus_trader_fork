@@ -24,7 +24,7 @@ from dataclasses import field
 from pathlib import Path
 from typing import Any
 
-from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.tests.snapshot_factory import make_snapshot
 
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
@@ -53,7 +53,7 @@ def _seed(catalog_path: Path) -> None:
     """One snapshot per minute for `_MINUTES` closed minutes, then one in the minute after them."""
     ParquetDataCatalog(str(catalog_path)).write_data(
         [
-            DydxSecondSnapshot(
+            make_snapshot(
                 instrument_id=InstrumentId.from_str(_IID),
                 bid_prices=[99.0],
                 bid_sizes=[1.0],

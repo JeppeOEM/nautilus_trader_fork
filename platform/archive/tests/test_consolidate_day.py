@@ -33,6 +33,7 @@ from candles.infrastructure.sqlite_store import CandleStore
 from kernel.catalog_files import data_file_ranges
 from kernel.catalog_files import query_second_ohlc
 from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.tests.snapshot_factory import make_snapshot
 from observability import error_ledger
 
 from archive.application import consolidate_day
@@ -91,7 +92,7 @@ _DAY0 = 20_000  # a UTC day long ago
 
 
 def _snap(ts: int, price: float) -> DydxSecondSnapshot:
-    return DydxSecondSnapshot(
+    return make_snapshot(
         instrument_id=InstrumentId.from_str(IID),
         bid_prices=[price - 1],
         bid_sizes=[1.0],
@@ -216,7 +217,7 @@ _DAY0_2 = (_DAY0 + 2) * _DAY_NS  # start of "today" in the tests below
 def _venue_snaps(iid: str, timestamps: list[int]) -> list[DydxSecondSnapshot]:
     """Build the one snapshot class every venue's collector writes, for `iid`."""
     return [
-        DydxSecondSnapshot(
+        make_snapshot(
             instrument_id=InstrumentId.from_str(iid),
             bid_prices=[99.0 + i],
             bid_sizes=[1.0],

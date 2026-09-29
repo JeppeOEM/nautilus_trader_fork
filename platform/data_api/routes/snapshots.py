@@ -20,8 +20,9 @@ cursor-pagination shape on a new route (no `bar_seconds` -- snapshots are per-se
 there is no bar/aggregation concept here).
 
 Format + transport only (Story 24.2): the page is `views.chart_series.snapshot_series_page`
-(bid/ask/mid/microprice/CVD-weighted price per archived second, and the gap-marker rendering
-rule). Every second the capture gate wrote is returned as written -- a crossed one included; the
+(best bid/ask as exact integer units with their `price_precision` -- formatted for display only
+by the frontend's `lib/units.ts`, Story 30.2 -- and the derived float mid/microprice/CVD-weighted
+price per archived second, and the gap-marker rendering rule; a gap row is all nulls). Every second the capture gate wrote is returned as written -- a crossed one included; the
 reader-side empty-top and crossed-book skips this route used to apply (the AD-3 deviation) are
 gone. An archived second with an empty side is a malfunction upstream: views ledgers it and this
 route answers 500 naming the instrument and `ts_event`.
@@ -52,8 +53,9 @@ router = APIRouter()
 
 class SnapshotSeriesPoint(BaseModel):
     t: int
-    bid: float | None = None
-    ask: float | None = None
+    bid_units: int | None = None
+    ask_units: int | None = None
+    price_precision: int | None = None
     mid: float | None = None
     micro: float | None = None
     price: float | None = None

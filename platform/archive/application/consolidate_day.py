@@ -241,7 +241,8 @@ def _consolidate_day(
     """
     # Known limit: a refused day stays refused -- every nightly run records it again and exits 1
     # until an operator rewrites that day's odd file(s) to the common schema (as
-    # `archive.tools.normalize_snapshot_schema` does for D-24's OHLC columns). Upgrade path: a
+    # `archive.tools.migrate_snapshot_ints` does for the float-layout snapshot files, D-24's
+    # pre-OHLC ones included). Upgrade path: a
     # per-day re-stamp/split tool for a mid-day precision change (exact `Price.from_raw`, never
     # float), which no venue has produced yet.
     if not _schemas_agree(files):

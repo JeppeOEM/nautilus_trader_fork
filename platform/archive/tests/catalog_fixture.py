@@ -16,9 +16,10 @@ One fixture day of every data type the catalog holds (Story 30.1), written by Na
 `ParquetDataCatalog.write_data` from real Nautilus objects -- the files capture produces, which
 the archive then merges or rewrites. One `write_data` call per type, so each leaf holds one file.
 
-Prices and sizes enter `Price`/`Quantity` from exact decimals (never a float); the snapshot's book
-columns are floats by the current layout, taken as `ticks / 10` (the nearest double, as capture
-stores them). A seeded walk gives the values the variety of a real day.
+Prices and sizes enter `Price`/`Quantity` from exact decimals (never a float); the snapshot is in
+the integer layout (Story 30.2): units at the instrument definition's precisions (`PERP`: price 0.1,
+size 0.001), exactly as capture encodes them. A seeded walk gives the values the variety of a real
+day.
 """
 
 import random
@@ -87,11 +88,12 @@ def _walk(rng: random.Random, n: int, start: int = 600_000) -> list[int]:
     return out
 
 
-def _book_side(rng: random.Random, best: int, step: int) -> tuple[list[float], list[float]]:
+def _book_side(rng: random.Random, best: int, step: int) -> tuple[list[int], list[int]]:
+    """One side's level prices (ticks of 0.1) and sizes (units of 0.001), best first."""
     prices, sizes, level = [], [], best
     for _ in range(_LEVELS):
-        prices.append(level / 10)
-        sizes.append(rng.randint(1, 5_000) / 1_000)
+        prices.append(level)
+        sizes.append(rng.randint(1, 5_000))
         level += step * rng.randint(1, 3)
     return prices, sizes
 
@@ -102,23 +104,25 @@ def snapshots(t0: int, mids: list[int], rng: random.Random) -> list[DydxSecondSn
         bids, bid_sizes = _book_side(rng, mid, -1)
         asks, ask_sizes = _book_side(rng, mid + 1, 1)
         traded = rng.random() < 0.8  # a second without a trade has no OHLC (nulls)
-        close = mid / 10 if traded else None
+        close = mid if traded else None
         ts = t0 + i * SEC + rng.randint(0, 999) * 1_000_000
         rows.append(
             DydxSecondSnapshot(
                 instrument_id=IID,
-                bid_prices=bids,
-                bid_sizes=bid_sizes,
-                ask_prices=asks,
-                ask_sizes=ask_sizes,
-                buy_volume=rng.randint(0, 3_000) / 1_000 if traded else 0.0,
-                sell_volume=rng.randint(0, 3_000) / 1_000 if traded else 0.0,
+                price_precision=PERP.price_precision,
+                size_precision=PERP.size_precision,
+                bid_price_units=bids,
+                bid_size_units=bid_sizes,
+                ask_price_units=asks,
+                ask_size_units=ask_sizes,
+                buy_volume_units=rng.randint(0, 3_000) if traded else 0,
+                sell_volume_units=rng.randint(0, 3_000) if traded else 0,
                 buy_count=rng.randint(0, 40) if traded else 0,
                 sell_count=rng.randint(0, 40) if traded else 0,
-                open_price=close,
-                high_price=close,
-                low_price=close,
-                close_price=close,
+                open_price_units=close,
+                high_price_units=close,
+                low_price_units=close,
+                close_price_units=close,
                 ts_event=ts,
                 ts_init=t0 + (i + 1) * SEC + rng.randint(0, 999) * 1_000_000,  # the close
             )

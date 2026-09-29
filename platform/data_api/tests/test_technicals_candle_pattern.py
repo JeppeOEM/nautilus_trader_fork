@@ -27,6 +27,7 @@ import pytest
 from fastapi.testclient import TestClient
 from kernel.candle_patterns import PatternName
 from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.tests.snapshot_factory import make_snapshot
 from views.rankings_bus import RankingsBus
 
 from data_api import buses
@@ -39,7 +40,10 @@ _MINUTE_NS = 60_000_000_000
 _BULLISH_IID = "BTC-USD-PERP.DYDX"
 _BEARISH_IID = "ETH-USD-PERP.DYDX"
 _NO_DATA_IID = "NEW-USD-PERP.DYDX"
-_FILLER = [(100.0 + (i % 3) * 0.1, 100.6 + (i % 3) * 0.1, 99.4, 100.1) for i in range(38)]
+_FILLER = [
+    (round(100.0 + (i % 3) * 0.1, 1), round(100.6 + (i % 3) * 0.1, 1), 99.4, 100.1)
+    for i in range(38)
+]
 # The last two closed minutes: a bullish engulfing (black then a covering white) ...
 _BULLISH_END = [(100.0, 100.2, 98.9, 99.0), (98.9, 100.6, 98.8, 100.5)]
 # ... and a bearish one (white then a covering black).
@@ -49,7 +53,7 @@ _COLUMN = {"name": "CandlePattern", "params": {"pattern": "ENGULFING"}, "bar_sec
 
 def _snapshot(iid: str, ts: int, ohlc: tuple[float, float, float, float]) -> DydxSecondSnapshot:
     o, h, l, c = ohlc
-    return DydxSecondSnapshot(
+    return make_snapshot(
         instrument_id=InstrumentId.from_str(iid),
         bid_prices=[l],
         bid_sizes=[1.0],

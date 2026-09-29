@@ -31,6 +31,7 @@ from capture.application.config import CoreConfig
 from capture.application.ports import Applied
 from capture.application.ports import PlanChange
 from capture.infrastructure.parquet_writer import ParquetArchiveWriter
+from capture.tests.definition_kit import definitions
 from nautilus_trader.model.data import BookOrder
 from nautilus_trader.model.data import MarkPriceUpdate
 from nautilus_trader.model.data import OrderBookDelta
@@ -75,7 +76,7 @@ class _WireClient:
 
 def _collector(tmp_path: Path, client: _WireClient, plan: tuple[str, ...] = ()) -> CaptureService:
     config = CoreConfig(environment="mainnet", catalog_path=str(tmp_path))
-    return CaptureService(
+    c = CaptureService(
         config,
         lambda _on_data, _ledger: client,
         venue="BYBIT",
@@ -83,6 +84,8 @@ def _collector(tmp_path: Path, client: _WireClient, plan: tuple[str, ...] = ()) 
         archive=ParquetArchiveWriter(config.catalog_path),
         live_stream=None,
     )
+    c._instruments = definitions(_A, _B)  # as `run()`'s `fetch_instruments` leaves them
+    return c
 
 
 def _apply(c: CaptureService, **diff: frozenset[str]) -> Applied:

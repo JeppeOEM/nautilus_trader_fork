@@ -36,6 +36,7 @@ several engines per module and per session are safe (it root-caused the old orde
 from decimal import Decimal
 
 from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.tests.snapshot_factory import make_snapshot
 
 from nautilus_trader.backtest.engine import BacktestEngine
 from nautilus_trader.backtest.engine import BacktestEngineConfig
@@ -66,7 +67,7 @@ _NS_PER_S = 1_000_000_000
 
 
 def _snapshot(ts: int, best_bid_size: float) -> CustomData:
-    snapshot = DydxSecondSnapshot(
+    snapshot = make_snapshot(
         instrument_id=_IID,
         bid_prices=[100.0, 99.0],
         bid_sizes=[best_bid_size, 5.0],

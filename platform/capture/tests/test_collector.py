@@ -50,6 +50,7 @@ from capture.domain.trade_history import Fetched
 from capture.infrastructure.parquet_writer import ParquetArchiveWriter
 from capture.infrastructure.parquet_writer import quarantine_corrupt_parquet
 from capture.tests.catalog_kit import query_second_snapshots
+from capture.tests.definition_kit import definitions
 from nautilus_trader.backtest.node import BacktestNode
 from nautilus_trader.config import BacktestDataConfig
 from nautilus_trader.model.currencies import BTC
@@ -166,6 +167,7 @@ def _collector(
         second_sink=None if sink is _NO_SINK else sink,  # type: ignore[arg-type]
     )
     c._applied.add(iid)  # as `run()`'s initial apply leaves it (no network here)
+    c._instruments = definitions(iid)  # as `run()`'s `fetch_instruments` leaves them
     return c
 
 
@@ -355,6 +357,29 @@ def test_no_book_warning_is_rate_limited(tmp_path: Path, caplog: pytest.LogCaptu
         for offset in (0, _S, 2 * _S, _IMPOSSIBLE_LOG_EVERY_NS):
             assert _tick(c, now + offset) == []
     assert len([r for r in caplog.records if "No book" in r.message]) == 2
+
+
+def test_an_unencodable_second_is_skipped_loudly_once_a_minute(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    """
+    Story 30.2: a book the gate accepts but whose row cannot be stored exactly (here: no instrument
+    definition) writes no row and says so -- an ERROR and a `collector.unencodable` ledger line per
+    instrument per minute, never a guessed precision.
+    """
+    error_ledger.reset()
+    c = _collector(tmp_path)
+    c._instruments = {}
+    c._process_data(_deltas([(100.0, 1.0)], [(100.5, 1.0)]))
+    now = time.time_ns()
+    with caplog.at_level("ERROR", logger="capture.application.capture_service"):
+        for offset in (0, _S, 2 * _S, _IMPOSSIBLE_LOG_EVERY_NS):
+            c._book(_BYBIT).last_update_ns = now + offset
+            c._feeds.last_book_message_ns = now + offset
+            assert _tick(c, now + offset) == []
+    assert len([r for r in caplog.records if "Unencodable snapshot" in r.message]) == 2
+    assert error_ledger.counts() == {"collector.unencodable": 2}
+    assert "no instrument definition" in error_ledger.last_details()["collector.unencodable"]
 
 
 def test_an_empty_top_of_book_is_skipped_loudly_once_a_minute(
@@ -896,6 +921,7 @@ def _day_collector(tmp_path: Path, interval: float = 1.0) -> CaptureService:
         second_sink=_RecordingSink(),
     )
     c._applied.add(_BYBIT)
+    c._instruments = definitions(_BYBIT)
     return c
 
 

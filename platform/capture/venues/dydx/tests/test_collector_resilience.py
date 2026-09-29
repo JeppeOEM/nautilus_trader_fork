@@ -38,6 +38,7 @@ from capture.application.ports import PlanChange
 from capture.domain.policies import LevelTags
 from capture.domain.verdicts import Uncrossed
 from capture.infrastructure.parquet_writer import quarantine_corrupt_parquet
+from capture.tests.definition_kit import definition
 from capture.venues.dydx.__main__ import build_capture
 from capture.venues.dydx.config import DydxConfig
 from capture.venues.dydx.policies import DydxUncrossPolicy
@@ -514,6 +515,7 @@ def _gate(collector: CaptureService) -> list:
     """One pass of the core gate over `_IID` with a live feed (the policies run inside it)."""
     collector._plan_ids.add(_IID)
     collector._applied.add(_IID)
+    collector._instruments = {_IID: definition(_IID, 1, 1)}  # `_side_delta`'s precisions
     now = time.time_ns()
     collector._feeds.last_book_message_ns = now
     return asyncio.run(collector._sample_tick(now))

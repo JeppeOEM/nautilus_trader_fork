@@ -18,6 +18,7 @@ import ast
 import math
 from pathlib import Path
 
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
@@ -27,11 +28,17 @@ from kernel.clocks import NS_PER_DAY
 from kernel.clocks import NS_PER_S
 from kernel.clocks import READ_SPAN_MARGIN_NS
 from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.second_snapshot import LegacySnapshotLayoutError
 from kernel.second_snapshot import SecondOHLC
+from kernel.second_snapshot import price_of
+from kernel.second_snapshot import quantity_of
+from kernel.tests.snapshot_factory import make_snapshot
+from kernel.tests.snapshot_factory import units
 from nautilus_trader.model.data import IndexPriceUpdate
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.objects import Price
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
+from nautilus_trader.persistence.catalog.parquet import _timestamps_to_filename
 
 
 _IID = "ETH-USD-PERP.DYDX"
@@ -39,22 +46,22 @@ _DAY0 = 20_000 * NS_PER_DAY
 
 
 def _snapshot(ts_event: int, ts_init: int, close: float | None) -> DydxSecondSnapshot:
-    return DydxSecondSnapshot(
-        InstrumentId.from_str(_IID),
-        [1.0],
-        [1.0],
-        [2.0],
-        [1.0],
-        1.0 if close else 0.0,
-        0.5 if close else 0.0,
-        1 if close else 0,
-        1 if close else 0,
-        ts_event,
-        ts_init,
-        close,
-        close,
-        close,
-        close,
+    return make_snapshot(
+        _IID,
+        bid_prices=[1.0],
+        bid_sizes=[1.0],
+        ask_prices=[2.0],
+        ask_sizes=[1.0],
+        buy_volume=1.0 if close else 0.0,
+        sell_volume=0.5 if close else 0.0,
+        buy_count=1 if close else 0,
+        sell_count=1 if close else 0,
+        ts_event=ts_event,
+        ts_init=ts_init,
+        open_price=close,
+        high_price=close,
+        low_price=close,
+        close_price=close,
     )
 
 
@@ -131,18 +138,14 @@ def test_second_ohlc_arrays(catalog: str) -> None:
 
 def _book(ts_event: int, bids: list[float], asks: list[float]) -> DydxSecondSnapshot:
     """Build a book row whose sizes are each price's tenth, so every level is traceable."""
-    return DydxSecondSnapshot(
-        InstrumentId.from_str(_IID),
-        bids,
-        [p / 10 for p in bids],
-        asks,
-        [p / 10 for p in asks],
-        0.0,
-        0.0,
-        0,
-        0,
-        ts_event,
-        ts_event + NS_PER_S // 2,
+    return make_snapshot(
+        _IID,
+        bid_prices=bids,
+        bid_sizes=[p / 10 for p in bids],
+        ask_prices=asks,
+        ask_sizes=[p / 10 for p in asks],
+        ts_event=ts_event,
+        ts_init=ts_event + NS_PER_S // 2,
     )
 
 
@@ -169,7 +172,21 @@ def book_catalog(tmp_path: Path) -> str:
 
 
 def _top(ts_event: int, bid: float, ask: float) -> TopOfBook:
-    return TopOfBook(ts_event, ts_event + NS_PER_S // 2, bid, bid / 10, ask, ask / 10)
+    """Return the exact level 0 of a `_book` row (default factory precisions: 4 and 4)."""
+    return TopOfBook(
+        ts_event,
+        ts_event + NS_PER_S // 2,
+        price_of(units(bid, 4), 4),
+        quantity_of(units(bid / 10, 4), 4),
+        price_of(units(ask, 4), 4),
+        quantity_of(units(ask / 10, 4), 4),
+    )
+
+
+def test_top_of_book_values_are_exact_at_the_stored_precision(book_catalog: str) -> None:
+    (top,) = catalog_files.query_top_of_book(book_catalog, _IID, _DAY0, _DAY0)
+    assert (str(top.bid_price), str(top.bid_size)) == ("100.0000", "10.0000")
+    assert top.ask_price.precision == 4
 
 
 def test_query_top_of_book_returns_level_zero_sorted_by_ts_event(book_catalog: str) -> None:
@@ -217,27 +234,41 @@ def test_module_never_writes_or_builds_a_catalog() -> None:
 
 
 def test_the_projected_columns_all_exist_in_the_snapshot_schema() -> None:
-    """
-    `_OHLC_COLUMNS` is `SecondOHLC._fields`, so a field rename would silently project columns the
-    Parquet files do not hold -- and `_ohlc_rows`/`second_ohlc_arrays` substitute `None`/`0.0` for
-    an absent column, turning the whole catalog's candles into nulls with no error.
-    """
+    """A projected column the files do not hold would fail every read: they must all exist."""
     schema_names = set(DydxSecondSnapshot.schema().names)
-    assert set(catalog_files._OHLC_COLUMNS) <= schema_names
+    assert set(catalog_files._TRADE_READ_COLUMNS) <= schema_names
 
 
-def test_the_array_reader_projects_the_same_columns_it_reads() -> None:
-    """`second_ohlc_arrays` names its columns literally; they must be the projected ones."""
-    read_literally = {
-        "ts_event",
-        "open_price",
-        "high_price",
-        "low_price",
-        "close_price",
-        "buy_volume",
-        "sell_volume",
+def _legacy_file(tmp_path: Path) -> Path:
+    """Write a float-layout (pre-30.2) snapshot file: the old schema, no precision columns."""
+    leaf = tmp_path / "data" / catalog_files.SNAPSHOT_DIRNAME / _IID
+    leaf.mkdir(parents=True)
+    path = leaf / _timestamps_to_filename(_DAY0, _DAY0)
+    columns = {
+        "instrument_id": pa.array([_IID]).dictionary_encode(),
+        "bid_prices": pa.array([[1.0]], pa.list_(pa.float64())),
+        "ts_event": pa.array([_DAY0], pa.uint64()),
+        "ts_init": pa.array([_DAY0], pa.uint64()),
+        "open_price": pa.array([1.5]),
+        "buy_volume": pa.array([0.0]),
     }
-    assert read_literally == set(catalog_files._OHLC_COLUMNS)
+    pq.write_table(pa.table(columns), path)
+    return path
+
+
+@pytest.mark.parametrize(
+    "read",
+    [
+        lambda root: catalog_files.query_second_ohlc(root, _IID, 0, 2 * _DAY0),
+        lambda root: catalog_files.query_top_of_book(root, _IID, 0, 2 * _DAY0),
+        lambda root: catalog_files.second_ohlc_arrays(catalog_files.snapshot_files(root, _IID)),
+    ],
+)
+def test_every_projected_reader_refuses_a_float_layout_file(tmp_path: Path, read: object) -> None:
+    path = _legacy_file(tmp_path)
+    with pytest.raises(LegacySnapshotLayoutError, match="migrate_snapshot_ints") as raised:
+        read(str(tmp_path))  # type: ignore[operator]
+    assert str(path) in str(raised.value)
 
 
 def _index_catalog(tmp_path: Path) -> str:

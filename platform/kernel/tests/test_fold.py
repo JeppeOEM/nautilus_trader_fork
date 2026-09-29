@@ -17,8 +17,12 @@
 import random
 from decimal import Decimal
 
+import pytest
+
 from kernel.fold import SecondTradeFields
 from kernel.fold import fold_trades
+from kernel.second_snapshot import SnapshotEncodingError
+from kernel.second_snapshot import SnapshotTradeUnits
 from nautilus_trader.model.data import TradeTick
 from nautilus_trader.model.enums import AggressorSide
 from nautilus_trader.model.identifiers import InstrumentId
@@ -40,16 +44,41 @@ def _trade(price: str, size: str, side: AggressorSide, n: int, ts: int = 0) -> T
 def test_empty_second_is_the_no_trade_contract() -> None:
     fields = fold_trades([])
     assert fields == SecondTradeFields()
-    assert fields.snapshot_values()._asdict() == {
+    assert fields.snapshot_units(2, 3)._asdict() == {
         "open_price": None,
         "high_price": None,
         "low_price": None,
         "close_price": None,
-        "buy_volume": 0.0,
-        "sell_volume": 0.0,
+        "buy_volume": 0,
+        "sell_volume": 0,
         "buy_count": 0,
         "sell_count": 0,
     }
+
+
+def test_snapshot_units_are_the_exact_totals_at_the_row_precisions() -> None:
+    fields = fold_trades(
+        [_trade("100.5", "0.25", _BUY, 1, ts=1), _trade("100.25", "1.5", _SELL, 2, ts=2)]
+    )
+    assert fields.snapshot_units(2, 3) == SnapshotTradeUnits(
+        open_price=10050,
+        high_price=10050,
+        low_price=10025,
+        close_price=10025,
+        buy_volume=250,
+        sell_volume=1500,
+        buy_count=1,
+        sell_count=1,
+    )
+
+
+def test_a_trade_finer_than_the_row_precision_is_refused_never_rounded() -> None:
+    fields = fold_trades([_trade("100.25", "1", _BUY, 1)])
+    with pytest.raises(SnapshotEncodingError, match="not exact at precision 1"):
+        fields.snapshot_units(1, 0)
+    sized = fold_trades([_trade("100", "0.125", _BUY, 1)])
+    with pytest.raises(SnapshotEncodingError):
+        sized.snapshot_units(0, 2)
 
 
 def test_one_trade_is_its_own_ohlc() -> None:

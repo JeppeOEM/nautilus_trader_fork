@@ -169,8 +169,9 @@ export interface ServiceErrorSummary {
 
 export interface SnapshotSeriesPoint {
   t: number;
-  bid?: number | null;
-  ask?: number | null;
+  bid_units?: number | null;
+  ask_units?: number | null;
+  price_precision?: number | null;
   mid?: number | null;
   micro?: number | null;
   price?: number | null;

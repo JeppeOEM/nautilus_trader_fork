@@ -374,7 +374,13 @@ class MyStrategy(Strategy):
 - Need the pre-computed 1s snapshot (top-20 levels + per-second buy/sell volume) instead of
   raw deltas → `subscribe_data(DataType(DydxSecondSnapshot), instrument_id=...)`, handle in
   `on_data` (see `research/strategies/snapshot_strategy.py` and `research/strategies/ofi_strategy.py`). Cheaper than rebuilding an `OrderBook` if you don't
-  need tick-by-tick delta resolution.
+  need tick-by-tick delta resolution. The snapshot is stored as exact integers (Story 30.2):
+  always read it through the kernel decoder, `kernel/second_snapshot.py` -- a catalog `query`,
+  `BacktestDataConfig`, `CatalogFrames.seconds` and `kernel.catalog_files` all decode with it --
+  and use its attributes: `bid_prices`, `buy_volume`, `close_price`, ... are floats decoded once
+  by `unit_float`, `.exact` gives the same values as exact `Price`/`Quantity`, and
+  `price_precision`/`size_precision` are the row's. Never read the Parquet columns yourself: book
+  prices are gap-encoded integers (`docs/DATA_DICTIONARY.md` §1.7).
 
 **Reuse existing signal math** — don't reimplement OFI/OBI/microprice/spread. They're in
 `kernel/indicators.py` (`OrderFlowImbalance`, `MultiLevelOFI`, `MultiLevelOBI`,

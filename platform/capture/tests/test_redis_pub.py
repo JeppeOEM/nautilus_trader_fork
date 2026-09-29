@@ -19,6 +19,7 @@ import json
 from unittest.mock import AsyncMock
 
 from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.tests.snapshot_factory import make_snapshot
 
 from capture.infrastructure.redis_stream import publish_snapshot_batch
 from nautilus_trader.model.identifiers import InstrumentId
@@ -28,7 +29,7 @@ _IID = InstrumentId.from_str("BTCUSDT-LINEAR.BYBIT")
 
 
 def _snap(ts_event: int = 1_000_000_000) -> DydxSecondSnapshot:
-    return DydxSecondSnapshot(
+    return make_snapshot(
         instrument_id=_IID,
         bid_prices=[50000.0],
         bid_sizes=[1.0],

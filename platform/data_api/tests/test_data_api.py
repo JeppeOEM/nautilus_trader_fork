@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.tests.snapshot_factory import make_snapshot
 from ranking.infrastructure.metrics_store import SqliteMetricsStore
 from views import catalog_reads
 from views import chart_series
@@ -46,7 +47,7 @@ def _write_snapshot(
 ) -> None:
     ParquetDataCatalog(catalog_path).write_data(
         [
-            DydxSecondSnapshot(
+            make_snapshot(
                 instrument_id=InstrumentId.from_str(_IID),
                 bid_prices=[bid_price],
                 bid_sizes=[1.0],
@@ -143,20 +144,9 @@ def test_catalog_snapshots_route(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     response = client.get(f"/catalog/snapshots/{_IID}?start_ns=0&end_ns=2000000000")
 
     assert response.status_code == 200
+    # The kernel's wire dicts, integers and precisions passed through (Story 30.2).
     expected = [
-        {
-            "bid_prices": s.bid_prices,
-            "bid_sizes": s.bid_sizes,
-            "ask_prices": s.ask_prices,
-            "ask_sizes": s.ask_sizes,
-            "buy_volume": s.buy_volume,
-            "sell_volume": s.sell_volume,
-            "ts_event": s.ts_event,
-            "open_price": s.open_price,
-            "high_price": s.high_price,
-            "low_price": s.low_price,
-            "close_price": s.close_price,
-        }
+        DydxSecondSnapshot.to_dict(s)
         for s in catalog_reads.query_second_snapshots(catalog_path, _IID, 0, 2_000_000_000)
     ]
     assert response.json() == expected

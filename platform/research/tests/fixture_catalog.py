@@ -267,29 +267,23 @@ def _replayed(trade: TradeTick) -> TradeTick:
 
 
 def _snapshot(spec: _Spec, second: int, trades: list[TradeTick]) -> DydxSecondSnapshot:
+    """Build the row capture would encode: exact levels and the fold, at the definition's precisions."""
     bids, asks = _book(spec, second)
-    folded = fold_trades(trades).snapshot_values()
     ts_event = _second_ns(second) + 500 * NS_PER_MS
     sizes = [
         _size((5 + (i + second) % 11) * 10 ** (spec.size_precision - 1), spec.size_precision)
         for i in range(LEVELS)
     ]
-    return DydxSecondSnapshot(
+    pp, sp = spec.price_precision, spec.size_precision
+    return DydxSecondSnapshot.from_levels(
         InstrumentId.from_str(spec.iid),
-        [_price(t, spec.price_precision).as_double() for t in bids],
-        [q.as_double() for q in sizes],
-        [_price(t, spec.price_precision).as_double() for t in asks],
-        [q.as_double() for q in reversed(sizes)],
-        folded.buy_volume,
-        folded.sell_volume,
-        folded.buy_count,
-        folded.sell_count,
-        ts_event,
-        ts_event + (500 + (second % 5) * 100) * NS_PER_MS,
-        folded.open_price,
-        folded.high_price,
-        folded.low_price,
-        folded.close_price,
+        pp,
+        sp,
+        [(_price(t, pp), q) for t, q in zip(bids, sizes, strict=True)],
+        [(_price(t, pp), q) for t, q in zip(asks, reversed(sizes), strict=True)],
+        fold_trades(trades).snapshot_units(pp, sp),
+        ts_event=ts_event,
+        ts_init=ts_event + (500 + (second % 5) * 100) * NS_PER_MS,
     )
 
 

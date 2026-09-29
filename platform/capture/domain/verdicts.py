@@ -17,8 +17,9 @@ The write gate's verdicts (DDD spine AD-D6): what `LiveBook.snapshot_top` says a
 one sample, and what a `CrossedBookPolicy` says about a crossed one.
 
 Invariant: a sample is written only on `Accepted`; every other verdict names the one reason the
-second was skipped (`NoBook`, `EmptyTop`, `Crossed`, `Stale`), so the application can log and
-ledger it without re-deriving anything. Verdicts exist per sampled instrument per second, never
+second was skipped (`NoBook`, `EmptyTop`, `Crossed`, `Stale`, and -- after the book passed --
+`Unencodable` when the row cannot be stored exactly), so the application can log and ledger it
+without re-deriving anything. Verdicts exist per sampled instrument per second, never
 per message (AD-D5).
 """
 
@@ -85,7 +86,18 @@ class Stale:
     detail: str
 
 
-Rejected = NoBook | EmptyTop | Crossed | Stale
+@dataclass(frozen=True, slots=True)
+class Unencodable:
+    """
+    The book passed every check but its row cannot be stored exactly (Story 30.2): no instrument
+    definition to take the precisions from, or a value `kernel.second_snapshot` refuses (finer than
+    the precision, outside int64, an unsorted level). Never rounded or guessed; `reason` says which.
+    """
+
+    reason: str
+
+
+Rejected = NoBook | EmptyTop | Crossed | Stale | Unencodable
 
 
 @dataclass(frozen=True, slots=True)

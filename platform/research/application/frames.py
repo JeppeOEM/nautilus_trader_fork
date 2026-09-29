@@ -55,6 +55,8 @@ from research.application.ports import window_ns
 # Book levels each `obi_<N>` column sums (`MultiLevelOBI(levels=N)`); 20 is the stored depth.
 OBI_LEVELS = (1, 5, 10, 20)
 _SNAPSHOT_FIELDS = (
+    "price_precision",
+    "size_precision",
     "bid_prices",
     "bid_sizes",
     "ask_prices",
@@ -147,7 +149,8 @@ class CatalogFrames:
 
     def seconds(self, instrument_id: str, *, start: str | int, end: str | int) -> pd.DataFrame:
         """
-        Return the `DydxSecondSnapshot` rows (book lists, folded trades, OHLC) plus `mid`, `spread`,
+        Return the `DydxSecondSnapshot` rows (the row's stored `price_precision`/`size_precision`,
+        then book lists, folded trades and OHLC as the kernel's decoded floats) plus `mid`, `spread`,
         `microprice` (`kernel.indicators`' functions) and `obi_<N>` for `OBI_LEVELS`
         (`MultiLevelOBI`); a derived value is None where its side of the book is empty.
 
@@ -159,9 +162,10 @@ class CatalogFrames:
         indicators = {n: MultiLevelOBI(levels=n) for n in OBI_LEVELS}
         rows = []
         for snapshot in self._query(DydxSecondSnapshot, instrument_id, start, end):
-            # The kernel's stateless functions take the `to_dict()` shape; the frame's own columns
-            # are read as attributes (only `DydxSecondSnapshot` parses its payload, AD-D3).
-            payload = DydxSecondSnapshot.to_dict(snapshot)
+            # The kernel's stateless functions take the decoded float view (`as_floats()`); the
+            # frame's own columns are read as attributes (only `DydxSecondSnapshot` parses its
+            # stored integer layout, AD-D3).
+            payload = snapshot.as_floats()
             row = {name: getattr(snapshot, name) for name in ("ts_event", *_SNAPSHOT_FIELDS)}
             row["mid"] = mid_price(payload)
             row["spread"] = spread(payload)

@@ -22,6 +22,7 @@ from pathlib import Path
 
 import pytest
 from kernel.second_snapshot import DydxSecondSnapshot
+from kernel.tests.snapshot_factory import make_snapshot
 from observability import error_ledger
 
 from nautilus_trader.model.identifiers import InstrumentId
@@ -45,7 +46,7 @@ def _snapshot(
     buy_volume: float = 1.0,
     sell_volume: float = 0.5,
 ) -> DydxSecondSnapshot:
-    return DydxSecondSnapshot(
+    return make_snapshot(
         instrument_id=InstrumentId.from_str(_IID),
         bid_prices=bids,
         bid_sizes=[2.0] * len(bids),
@@ -72,8 +73,10 @@ def test_a_crossed_second_is_priced_exactly_like_any_other() -> None:
     mid = (105.0 + 100.0) / 2
     assert row == {
         "t": _BASE_NS // 1_000_000,
-        "bid": 105.0,
-        "ask": 100.0,
+        # The stored integers and their precision (Story 30.2), not floats: 105.0 and 100.0.
+        "bid_units": 1_050_000,
+        "ask_units": 1_000_000,
+        "price_precision": 4,
         "mid": mid,
         # microprice = (bid * ask_size + ask * bid_size) / (bid_size + ask_size)
         "micro": (105.0 * 1.0 + 100.0 * 2.0) / 3.0,
@@ -84,7 +87,8 @@ def test_a_crossed_second_is_priced_exactly_like_any_other() -> None:
 
 def test_a_touched_second_is_priced_too() -> None:
     (row,) = price_series_rows([_snapshot(_BASE_NS, [100.0], [100.0])])
-    assert (row["bid"], row["ask"], row["mid"], row["price"]) == (100.0, 100.0, 100.0, 100.0)
+    assert (row["bid_units"], row["ask_units"]) == (1_000_000, 1_000_000)
+    assert (row["mid"], row["price"]) == (100.0, 100.0)
 
 
 @pytest.mark.parametrize(("bids", "asks"), [([], [101.0]), ([100.0], []), ([], [])])
@@ -116,11 +120,12 @@ def test_gap_marker_inserted_between_rows_separated_by_more_than_threshold(tmp_p
 
     assert len(items) == 3  # real row, gap marker, real row
     real_first, gap, real_second = items
-    assert real_first["bid"] is not None
-    assert real_second["bid"] is not None
+    assert real_first["bid_units"] is not None
+    assert real_second["bid_units"] is not None
     assert gap["t"] == real_second["t"] - 1
-    assert gap["bid"] is None
-    assert gap["ask"] is None
+    assert gap["bid_units"] is None
+    assert gap["ask_units"] is None
+    assert gap["price_precision"] is None
     assert gap["mid"] is None
     assert gap["micro"] is None
     assert gap["price"] is None
@@ -129,7 +134,7 @@ def test_gap_marker_inserted_between_rows_separated_by_more_than_threshold(tmp_p
 def test_seconds_exactly_at_the_gap_threshold_are_not_broken() -> None:
     first = _snapshot(_BASE_NS, [100.0], [101.0])
     second = _snapshot(_BASE_NS + SNAPSHOT_GAP_THRESHOLD_MS * 1_000_000, [100.0], [101.0])
-    assert [r["bid"] for r in price_series_rows([first, second])] == [100.0, 100.0]
+    assert [r["bid_units"] for r in price_series_rows([first, second])] == [1_000_000] * 2
 
 
 # --- the bar-spaced gap marker: candles, indicator series, indicator values ----------------------

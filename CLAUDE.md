@@ -96,6 +96,15 @@ decode logic directly, so it gets battle-tested networking without the buggy `Da
     combinations: `Price(Decimal("61090.59855"), 16)` silently returns
     `61090.5985500000026624`. Use `Decimal.scaleb()` + `Price.from_raw()`/
     `Quantity.from_raw()` whenever re-stamping at a different precision.
+  - The 1-second snapshot is integer-exact (Story 30.2): `DydxSecondSnapshot` stores and
+    publishes (`snapshots:raw`) every price and size as an integer count of
+    `10^-precision`, taken from `Price.raw`/`Quantity.raw` by exact integer division at the
+    instrument definition's precision (carried per row), book prices gap-encoded;
+    `platform/kernel/second_snapshot.py` is the one encoder/decoder and refuses anything not
+    exact. Floats exist only in a reader's own computation, and the web formats integers in
+    one helper (`platform/frontend/src/lib/units.ts`). Before 30.2, 20.7 % of stored book
+    prices carried float noise (`85891.90000000001`); `archive.tools.migrate_snapshot_ints`
+    rewrites those files.
 
 ### Development philosophy
 
