@@ -21,10 +21,32 @@ Code revision: `55a123a8bb` (Story 31.1). The collector-side code (capture, arch
 | Stack | `make verify-up`: compose project `verify` (`docker-compose.yml` + `docker-compose.verify.yml`) -- `bybit_collector`, `hyperliquid_collector`, `archive`, `ranking_engine`, `data_api` (127.0.0.1:29100), `redis` (127.0.0.1:26379), `dozzle` (127.0.0.1:28080), `reference_recorder_bybit`, `reference_recorder_hyperliquid`; no dYdX collector |
 | Host | the dev box (local Docker), not the VPS |
 | Code revision | the Story 31.1 commit on branch `epic-30` (parent `b37be5775a`); the stack was started from that change set before it was committed, and the recorders were rebuilt from its review revision (see below) |
-| Soak end | running (Story 31.2 stops, wipes and restarts it on the fixed code) |
+| Soak end | ends at Story 31.2's soak restart (stopped and wiped; see below) |
 | Recorder gap | 2026-09-29T10:57:11.44Z to 10:57:19.90Z: both recorders stopped cleanly (SIGTERM, `shutdown` close lines, no truncated file) and were rebuilt with the Story 31.1 review patches (code `55a123a8bb`); the collectors and the rest of the stack kept running. Both `connection` channels carry the gap |
 | Recorder gap 2 | 2026-09-29T11:20:00.77Z to 11:20:02.49Z: both recorders stopped cleanly (`shutdown` close lines) and were recreated with the Story 31.1 follow-up review patches and the config-directory mount (`--no-deps`: the collectors and the rest of the stack kept running), code `2799fb0ae7`. Both `connection` channels carry the gap |
 | Recorder gap 3 | 2026-09-29T11:35:31.61Z to 11:35:33.75Z: both recorders stopped cleanly (`shutdown` close lines) and were recreated with the Story 31.1 third review pass's patches (`--no-deps`, as above), code: the commit that adds this row. Both `connection` channels carry the gap. `verify-archive` still runs with the earlier environment; the override's blanked `RCLONE_REMOTE`/`RCLONE_BUCKET` apply at its next recreation (backup is disabled, so nothing differs meanwhile) |
+
+**Soak restart (Story 31.2).** Story 31.2 changes what the collectors write (arrival-judged stale
+filter, time-bounded and seeded dedup, the coverage record `data/coverage/<venue>.jsonl`), so the
+soak above is stopped and wiped (`make verify-down`, `make verify-wipe` in the checkout that ran
+it) and restarted with `make verify-up` on the fixed code. Every verdict row is computed on data
+from the restarted soak only. Conservation needs a full closed UTC day with an unchanged plan
+after the restart: the collectors' first day has no archived row to anchor a `restart` run
+before each instrument's first verdict (audit D-76).
+
+- Soak restart (Story 31.2): **2026-09-29T12:59:19Z** (`make verify-up` returned; all 9 `verify-*`
+  containers up), from the main checkout `nautilus_trader_fork/platform` (branch `troll`), on the
+  Story 31.2 commit's code (the working tree built into the image at the restart is that
+  commit's code). The Story 31.1 soak in `../nautilus_trader_fork-epic30` was stopped and wiped
+  (`make verify-down`, `make verify-wipe` there) at 12:36Z. A first restart at 12:37:06Z ran the
+  pre-review change set; it was stopped and wiped again at 12:59Z so the soak runs only the
+  reviewed code. Its data is gone and no verdict uses it.
+- Live check at the restart (not a verdict): over the closed window 12:59:51Z-13:01:54Z (start +
+  30 s to now - 180 s, so every trade had been flushed), every reference WS trade id was archived
+  exactly once and nothing extra was archived: BTCUSDT-LINEAR 2608, ETHUSDT-LINEAR 3663,
+  BTCUSDT-SPOT 1779, ETHUSDT-SPOT 465, SOL-USD-PERP.HYPERLIQUID 319. The same check on the
+  12:37 pre-review soak (12:37:38Z-12:42Z) also matched exactly (5231, 7326, 2253, 662, 681).
+- First day conservation can judge: **2026-09-30** (the restart day is partial, audit D-76).
 
 **Instruments recorded** (each recorder reads its collector's own `config.toml`, so the recorded
 set is the collected set):
@@ -48,7 +70,7 @@ delivers the comparator (`python -m verification.<tool> --venue V --day D`).
 
 | Data type | Instrument | Verdict | Unexplained | Numbers | Repro |
 |---|---|---|---|---|---|
-| Drops and conservation (trade ids, rejected seconds) | all 5 | pending — Story 31.2 | | | |
+| Drops and conservation (trade ids, rejected seconds) | all 5 | pending — tool built (Story 31.2); verdict pending the first full clean closed UTC day after the soak restart (Story 31.11 computes it) | | | `python3 -m verification.conservation --venue V --day D` (`docs/DATA_DICTIONARY.md` §1.16) |
 | Derived signals vs reference implementations | all 5 | pending — Story 31.3 | | | |
 | Trades, id by id; per-second trade columns | BTCUSDT-LINEAR | pending — Story 31.4 | | | |
 | | ETHUSDT-LINEAR | pending — Story 31.4 | | | |

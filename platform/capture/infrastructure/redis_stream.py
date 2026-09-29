@@ -21,14 +21,11 @@ gap-encoded book, the same layout as the Parquet row -- never floats (`docs/DATA
 """
 
 import json
-import logging
 import os
 
 import redis.asyncio as aioredis
 from kernel.second_snapshot import DydxSecondSnapshot
 
-
-logger = logging.getLogger(__name__)
 
 CHANNEL = "snapshots:raw"
 
@@ -41,16 +38,14 @@ async def publish_snapshot_batch(redis_client: aioredis.Redis, snapshots: list) 
     """
     Publish a batch of DydxSecondSnapshot objects to Redis channel snapshots:raw.
 
-    Empty batches are silently dropped. Publish failures are logged and swallowed --
-    missing one tick is acceptable per the architecture (the Parquet write is durable).
+    An empty batch publishes nothing. A failed publish raises (Story 31.2): the `CaptureService`
+    ledgers it at `collector.snapshot_publish` and carries on -- the tick's live view is lost, the
+    Parquet write is durable -- so a Redis outage is counted, never a WARNING nobody reads.
     """
     if not snapshots:
         return
     payload = json.dumps([DydxSecondSnapshot.to_dict(s) for s in snapshots])
-    try:
-        await redis_client.publish(CHANNEL, payload)
-    except Exception as e:
-        logger.warning("Redis publish failed: %s", e)
+    await redis_client.publish(CHANNEL, payload)
 
 
 class RedisLiveStream:

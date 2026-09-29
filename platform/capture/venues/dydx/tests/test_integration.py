@@ -25,6 +25,8 @@ import sys
 import tempfile
 from pathlib import Path
 
+from observability import error_ledger
+
 from capture.venues.dydx.__main__ import build_capture
 from capture.venues.dydx.client import DydxClient
 from capture.venues.dydx.config import DydxConfig
@@ -44,7 +46,7 @@ async def main() -> None:
     network = DydxNetwork.MAINNET
 
     # Discover one instrument (avoids the 50 s subscription burst for all ~100)
-    probe = DydxClient(on_data=lambda _: None, network=network)
+    probe = DydxClient(on_data=lambda _: None, network=network, ledger=error_ledger.record)
     all_instruments = await probe.fetch_instruments()
     instrument_id = next(
         (i.id.value for i in all_instruments if "ETH-USD" in i.id.value),

@@ -12,7 +12,7 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
-"""Every recorder ledger site is named once in `verification/application/sites.py` and used."""
+"""Every verification ledger site is named once in `verification/application/sites.py` and used."""
 
 import ast
 from pathlib import Path
@@ -22,7 +22,7 @@ from verification.application import sites
 
 _CONTEXT = Path(__file__).resolve().parents[1]
 _SITES_FILE = _CONTEXT / "application" / "sites.py"
-_PREFIX = "verification.recorder."
+_PREFIXES = ("verification.recorder.", "verification.conservation.")
 
 
 def _production_sources() -> list[Path]:
@@ -36,7 +36,7 @@ def _declared() -> dict[str, str]:
 def test_each_site_is_one_distinct_prefixed_constant() -> None:
     declared = _declared()
     assert declared, "no ledger site declared"
-    assert all(value.startswith(_PREFIX) for value in declared.values())
+    assert all(value.startswith(_PREFIXES) for value in declared.values())
     assert len(set(declared.values())) == len(declared)
 
 
@@ -48,7 +48,7 @@ def test_no_module_spells_a_site_literally() -> None:
         for node in ast.walk(ast.parse(path.read_text()))
         if isinstance(node, ast.Constant)
         and isinstance(node.value, str)
-        and node.value.startswith(_PREFIX)
+        and node.value.startswith(_PREFIXES)
     ]
     assert literal == [], "report through `verification.application.sites` constants"
 

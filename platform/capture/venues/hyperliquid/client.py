@@ -84,7 +84,6 @@ archive would hold two clocks for one venue.
 import asyncio
 import contextlib
 import functools
-import logging
 from collections.abc import Callable
 from typing import Any
 
@@ -96,6 +95,7 @@ from capture.application.feed import Feed
 from capture.application.feed import OptionalStepFailed
 from capture.application.feed import optional_feed_send
 from capture.application.feed import optional_feed_step
+from capture.application.feed import report_unknown_message
 from capture.application.ports import Ledger
 from capture.application.wire_channels import Send
 from capture.application.wire_channels import WireChannels
@@ -105,8 +105,6 @@ from nautilus_trader.model.data import FundingRateUpdate
 from nautilus_trader.model.data import TradeTick
 from nautilus_trader.model.data import capsule_to_data
 
-
-logger = logging.getLogger(__name__)
 
 TRADES_FEED = Feed("main-trades", "main", trades_only=True)
 
@@ -341,4 +339,4 @@ class HyperliquidClient:
         ):
             self._on_data(OpenInterest.from_pyo3(message.data), feed)
         else:
-            logger.debug(f"Ignoring message of type {type(message).__name__}")
+            report_unknown_message(message, self._ledger, feed)

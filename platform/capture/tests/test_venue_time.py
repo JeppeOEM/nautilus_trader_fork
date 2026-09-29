@@ -178,7 +178,7 @@ def test_a_live_copy_of_a_rest_backfilled_trade_folds_into_its_exchange_second(
 ) -> None:
     c = _collector(tmp_path)
     c._process_data(_book(100.0, 102.0, _SEC + 0.1))
-    c._intake(_IID).register("5", "rest")  # the backfill archived it first
+    c._intake(_IID).register("5", "rest", 0)  # the backfill archived it first
     c._process_data(_trade(5, _SEC + 0.99, init_s=_SEC + 1.05))  # in S, arrived in S+1
     assert c._buffer[(TradeTick, _IID)] == []  # never archived twice
     (row,) = _close(c, _SEC)

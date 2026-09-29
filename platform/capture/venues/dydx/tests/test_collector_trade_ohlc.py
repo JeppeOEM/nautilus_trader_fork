@@ -62,10 +62,16 @@ def _collector(tmp_path: Path) -> CaptureService:
 
 
 def _trade(
-    price: float, size: float, side: AggressorSide, trade_id: str, ts: int | None = None
+    price: float,
+    size: float,
+    side: AggressorSide,
+    trade_id: str,
+    ts: int | None = None,
+    received: int | None = None,
 ) -> TradeTick:
     # Stamped at call time, never at import: the collector's stale-trade filter (DATA-06) is
     # relative to the wall clock, and a full suite can take longer than its window to reach here.
+    # `received` is the Rust client's receipt stamp (`ts_init`), the clock the filter judges.
     ts = time.time_ns() if ts is None else ts
     return TradeTick(
         instrument_id=_IID,
@@ -74,7 +80,7 @@ def _trade(
         aggressor_side=side,
         trade_id=TradeId(trade_id),
         ts_event=ts,
-        ts_init=ts,
+        ts_init=ts if received is None else received,
     )
 
 
@@ -162,7 +168,8 @@ def test_historical_trades_from_subscribe_reply_are_dropped(tmp_path: Path) -> N
     collector = _collector(tmp_path)
     iid = str(_IID)
     old = time.time_ns() - 3600 * 1_000_000_000
-    collector._process_data(_trade(100.0, 5.0, AggressorSide.BUYER, "old", ts=old))
+    replayed = _trade(100.0, 5.0, AggressorSide.BUYER, "old", ts=old, received=time.time_ns())
+    collector._process_data(replayed)
 
     assert not collector._intake(iid).live
     assert _second(collector)["buy_volume"] == 0.0

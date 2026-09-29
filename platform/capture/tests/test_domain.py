@@ -31,6 +31,8 @@ from capture.domain.live_book import LiveBook
 from capture.domain.policies import CentralBookCrossPolicy
 from capture.domain.sampler import SecondSampler
 from capture.domain.trade_intake import ACCEPTED
+from capture.domain.trade_intake import ARCHIVE_FEED_NAME
+from capture.domain.trade_intake import DEDUP_HORIZON_NS
 from capture.domain.trade_intake import DUPLICATE_FEED
 from capture.domain.trade_intake import DUPLICATE_FEED_FOLD
 from capture.domain.trade_intake import REPLAY
@@ -244,25 +246,83 @@ def test_arbitration_first_copy_replay_and_other_feed() -> None:
 def test_a_live_copy_of_a_rest_first_copy_is_folded_not_archived() -> None:
     intake = TradeIntake(10)
     trade = _trade(100.0, 1.0, AggressorSide.BUYER, 1)
-    intake.register("1", REST_FEED_NAME)
+    intake.register("1", REST_FEED_NAME, trade.ts_init)
     assert _accept(intake, trade, "main") == DUPLICATE_FEED_FOLD
     # A second live socket's copy (`trade_feeds = 2`) is folded no more: once per trade.
     assert _accept(intake, trade, "trades") == DUPLICATE_FEED
 
 
+def _arrived(n: int, ts_event: int, ts_init: int) -> TradeTick:
+    trade = _trade(100.0, 1.0, AggressorSide.BUYER, n, ts=ts_event)
+    return TradeTick(
+        trade.instrument_id,
+        trade.price,
+        trade.size,
+        trade.aggressor_side,
+        trade.trade_id,
+        ts_event,
+        ts_init,
+    )
+
+
 def test_subscribe_time_history_is_stale_but_a_replay_is_checked_first() -> None:
     intake = TradeIntake(10)
-    old = _trade(100.0, 1.0, AggressorSide.BUYER, 1, ts=_T)
+    old = _arrived(1, _T, _T + 11 * S_NS)  # 11 s old when it arrived: venue replay
+    fresh = _arrived(1, _T, _T)
     assert _accept(intake, old, "main", now=_T + 11 * S_NS) == STALE
-    assert _accept(intake, old, "main", now=_T) == ACCEPTED
+    assert _accept(intake, fresh, "main", now=_T) == ACCEPTED
     assert _accept(intake, old, "main", now=_T + 11 * S_NS) == REPLAY
 
 
-def test_the_window_evicts_in_lockstep() -> None:
+def test_age_is_judged_on_arrival_not_on_a_late_processing_time() -> None:
+    """Story 31.2: a trade 0.2 s old on arrival, processed 15 s later (a backlog), is live."""
+    intake = TradeIntake(10)
+    trade = _arrived(1, _T, _T + S_NS // 5)
+    assert _accept(intake, trade, "main", now=_T + 15 * S_NS) == ACCEPTED
+    assert intake.take_counts().stale == 0
+
+
+def test_a_trade_without_a_receipt_stamp_keeps_the_processing_time_age() -> None:
+    intake = TradeIntake(10)
+    trade = _arrived(1, _T, 0)
+    assert _accept(intake, trade, "main", now=_T + 11 * S_NS) == STALE
+
+
+def test_the_stale_report_carries_the_ts_event_span_and_the_arrival_ages() -> None:
+    intake = TradeIntake(10)
+    _accept(intake, _arrived(1, _T, _T + 30 * S_NS), "main")
+    _accept(intake, _arrived(2, _T + 5 * S_NS, _T + 17 * S_NS), "main")
+    counts = intake.take_counts()
+    assert counts.stale == 2
+    assert counts.stale_span == (_T, _T + 5 * S_NS, 30 * S_NS, 12 * S_NS)
+    assert intake.take_counts().stale_span is None
+
+
+def test_the_window_keeps_an_id_inside_the_horizon_past_its_size() -> None:
     intake = TradeIntake(2)
     for n in (1, 2, 3):
-        intake.register(str(n), "main")
-    assert (intake.first_feed("1"), intake.first_feed("3")) == (None, "main")
+        intake.register(str(n), "main", _T + n * S_NS)
+    assert [intake.first_feed(str(n)) for n in (1, 2, 3)] == ["main", "main", "main"]
+
+
+def test_the_window_evicts_past_the_horizon_and_over_its_size() -> None:
+    intake = TradeIntake(2)
+    for n in (1, 2, 3):
+        intake.register(str(n), "main", _T + n * S_NS)
+    intake.register("4", "main", _T + 2 * S_NS + DEDUP_HORIZON_NS)
+    # 1 is past the horizon: evicted; 2 is not (strictly older is required), 3 neither.
+    assert [intake.first_feed(str(n)) for n in (1, 2, 3, 4)] == [None, "main", "main", "main"]
+    intake.register("5", "main", _T + 4 * S_NS + DEDUP_HORIZON_NS)
+    assert [intake.first_feed(str(n)) for n in (2, 3)] == [None, None]  # back to the size
+    assert list(intake._first) == ["4", "5"]
+
+
+def test_a_seeded_id_is_a_duplicate_feed_never_folded_or_archived() -> None:
+    intake = TradeIntake(10)
+    assert intake.seed([("7", _T - 10 * S_NS), ("8", _T - 5 * S_NS)]) == 2
+    assert intake.first_feed("7") == ARCHIVE_FEED_NAME
+    assert _accept(intake, _arrived(7, _T - 10 * S_NS, _T - 10 * S_NS), "main") == DUPLICATE_FEED
+    assert intake.seed([("8", _T)]) == 0  # already known: kept as it was
 
 
 def test_venue_fold_buckets_late_and_ahead() -> None:
@@ -279,7 +339,7 @@ def test_venue_fold_buckets_late_and_ahead() -> None:
     assert ([len(b) for b in intake.buckets.values()], intake.late, intake.ahead) == ([1], 1, 1)
     intake.close(second, first_close=True)
     assert (intake.buckets, intake.take_counts().pre_start) == ({}, 1)
-    assert intake.take_counts() == (0, 0, 0, 0, 0, 0)
+    assert intake.take_counts() == (0, 0, 0, 0, 0, 0, None)
 
 
 # -- FeedGroup -----------------------------------------------------------------------------------

@@ -23,23 +23,32 @@ where the catalog is opened for writing.
 
 import asyncio
 import shutil
+import threading
 from collections.abc import Iterable
+from collections.abc import Sequence
 from pathlib import Path
 from typing import IO
 
 import pyarrow.parquet as pq
 from kernel.clocks import MAX_TS_INIT_SKEW_NS
+from kernel.clocks import NS_PER_S
+from kernel.clocks import READ_SPAN_MARGIN_NS
 from kernel.clocks import CatalogFileSpan
 from kernel.parquet_compat import apply_zstd_default
 
 from capture.application import sites
 from capture.application.ports import Ledger
 from capture.infrastructure.capture_lock import acquire_capture_lock
+from capture.infrastructure.coverage_file import append_lines
+from capture.infrastructure.coverage_file import coverage_path
+from capture.infrastructure.coverage_file import repair_torn_tail
 from capture.infrastructure.gap_markers import record_gap
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
 
 _QUARANTINE_DIRNAME = "_quarantine"
+_TRADE_DIR = "trade_tick"
+_SNAPSHOT_DIR = "custom_dydx_second_snapshot"
 
 apply_zstd_default()
 
@@ -56,6 +65,13 @@ class ParquetArchiveWriter:
         root.mkdir(parents=True, exist_ok=True)
         self._path = str(root)
         self.catalog = ParquetDataCatalog(self._path)
+        # Coverage appends run in worker threads: a cancelled flush's thread can still be writing
+        # when the final flush appends, so one lock serializes them (whole lines, in order).
+        self._coverage_lock = threading.Lock()
+        # The paths whose tail this process checked, and repaired bytes not yet reported (an
+        # append that failed after its repair reports them on the next success).
+        self._coverage_checked: set[Path] = set()
+        self._coverage_repaired: dict[Path, int] = {}
 
     @property
     def catalog_path(self) -> str:
@@ -79,6 +95,89 @@ class ParquetArchiveWriter:
         self, venue: str, shutting_down: asyncio.Event, ledger: Ledger
     ) -> IO[str] | None:
         return await acquire_capture_lock(self._path, venue, shutting_down, ledger=ledger)
+
+    def recent_trade_ids(
+        self, iid: str, start_ns: int, end_ns: int, ledger: Ledger
+    ) -> list[tuple[str, int]]:
+        """
+        Read only the `trade_id` and `ts_init` columns of the files whose name span (`ts_init`)
+        meets `[start_ns, end_ns]`, and keep the rows inside it (MEM-01: one horizon of ids). A
+        file whose name is not a catalog span, or that vanished or cannot be read, is ledgered
+        (`collector.dedup_seed`) and skipped; the other files still seed.
+        """
+        found: list[tuple[str, int]] = []
+        for path in (Path(self._path) / "data" / _TRADE_DIR / iid).glob("*.parquet"):
+            try:
+                found.extend(_ids_in_span(path, start_ns, end_ns))
+            except (ValueError, OSError) as e:
+                ledger(sites.DEDUP_SEED, f"{iid}: {path.name} skipped by the dedup seed", e)
+        return found
+
+    def last_snapshot_second(self, iid: str) -> int | None:
+        """
+        Return the newest snapshot row's `ts_event // 1 s`, reading the newest file(s) only: the
+        one with the latest name span, plus any other whose span ends within `READ_SPAN_MARGIN_NS`
+        of it (a row's `ts_event` sits at most that far from its `ts_init`, the span's clock).
+        """
+        spans = _spanned_files(self._path, _SNAPSHOT_DIR, iid)
+        if not spans:
+            return None
+        newest_end = max(span.end_ns for span, _ in spans)
+        newest: int | None = None
+        for span, path in spans:
+            if span.end_ns < newest_end - READ_SPAN_MARGIN_NS:
+                continue
+            stamps = pq.read_table(path, columns=["ts_event"]).column("ts_event").to_pylist()
+            if stamps:
+                newest = max(int(max(stamps)), newest or 0)
+        return None if newest is None else newest // NS_PER_S
+
+    def append_coverage(self, venue: str, lines: Sequence[str]) -> int:
+        path = coverage_path(self._path, venue)
+        with self._coverage_lock:
+            if path not in self._coverage_checked:
+                cut = repair_torn_tail(path)
+                self._coverage_repaired[path] = self._coverage_repaired.get(path, 0) + cut
+                self._coverage_checked.add(path)
+            try:
+                append_lines(path, lines)
+            except BaseException:
+                # Its rollback may have failed too and left a fragment: check the tail again first.
+                self._coverage_checked.discard(path)
+                raise
+            return self._coverage_repaired.pop(path, 0)
+
+
+def _ids_in_span(path: Path, start_ns: int, end_ns: int) -> list[tuple[str, int]]:
+    """`(trade_id, ts_init)` of one trade file's rows inside the span; [] when its name misses it."""
+    if not CatalogFileSpan.from_path(path).overlaps(start_ns, end_ns):
+        return []
+    table = pq.read_table(
+        path,
+        columns=["trade_id", "ts_init"],
+        filters=[("ts_init", ">=", start_ns), ("ts_init", "<=", end_ns)],
+    )
+    return list(
+        zip(
+            (str(t) for t in table.column("trade_id").to_pylist()),
+            (int(t) for t in table.column("ts_init").to_pylist()),
+            strict=True,
+        )
+    )
+
+
+def _spanned_files(
+    catalog_path: str, data_dir: str, iid: str
+) -> list[tuple[CatalogFileSpan, Path]]:
+    """
+    One instrument's catalog files of one data type, each with its name's `ts_init` span. A name
+    the catalog did not write raises `ValueError` (the caller ledgers it): only this collector
+    writes its instruments' directories, so such a file is a fault to see, never one to skip.
+    """
+    return [
+        (CatalogFileSpan.from_path(path), path)
+        for path in (Path(catalog_path) / "data" / data_dir / iid).glob("*.parquet")
+    ]
 
 
 def quarantine_corrupt_parquet(

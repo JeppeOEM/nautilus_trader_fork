@@ -81,7 +81,9 @@ def admit_backfill(
     nightly rebuild places them. `ts_init` is `now_ns` because the flush needs every new trade's
     `ts_init` at or after what it already wrote, and live trades may have been flushed while the
     fetch ran; the arrival bound (`MAX_TS_INIT_SKEW_NS`, the rebuild's and prune's window) is
-    checked on that stamp -- an older trade would be invisible to them, so it is refused.
+    checked on that stamp -- an older trade would be invisible to them, so it is refused. Each
+    admitted id is registered at `now_ns` (the fetch), which starts its dedup horizon
+    (`DEDUP_HORIZON_NS`); the returned trades carry the admitted ids for the coverage record.
     """
     archive: list[TradeTick] = []
     newest_refused: int | None = None
@@ -94,7 +96,7 @@ def admit_backfill(
             report.refused += 1
             newest_refused = trade.ts_event  # oldest first: the last one is the newest
             continue
-        intake.register(trade_id, REST_FEED_NAME)
+        intake.register(trade_id, REST_FEED_NAME, now_ns)
         archive.append(restamped(trade, now_ns))
         intake.advance(trade.ts_event)
         intake.backfilled += 1

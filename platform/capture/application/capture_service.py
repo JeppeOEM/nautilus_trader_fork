@@ -36,10 +36,26 @@ operator push a `Notifier`, the candle store a `SecondSink` -- each injected by 
 composition root, `capture/venues/<v>/__main__.py`'s `build_capture`, which also hands the
 service its client as a factory (the client needs the service's `_on_data` and `_ledger`).
 
-Guards (behaviour changes are listed on audit D-66/D-67): stale-trade age filter + bounded trade_id dedup (DATA-06),
-stale-book skip with accumulator discard (DATA-01), crossed-book skip with resync as a fallback
-only (DATA-03), the empty-top rejection (now a rate-limited warning + `collector.empty_top`),
-the `ohlc_outside_book` canary, the `_second_loop` lag canary and the OBS-01 watchdog.
+Guards (behaviour changes are listed on audit D-66/D-67): the stale-trade age filter, judged on
+arrival (`ts_init - ts_event`, Story 31.2: never at processing time, so an ingest backlog cannot
+drop live trades) and ledgered once per flush (`collector.stale_trade`), + the time-bounded
+trade_id dedup seeded from the archive at start (DATA-06), stale-book skip with accumulator
+discard (DATA-01), crossed-book skip with resync as a fallback only (DATA-03), the empty-top
+rejection (a rate-limited warning + `collector.empty_top`), the `ohlc_outside_book` canary
+(`collector.ohlc_outside_book` per occurrence), the `_second_loop` lag canary and the OBS-01
+watchdog. Every site that continues past a failure ledgers it at a `sites` constant (DATA-07):
+a crash (`collector.crash`), a failed live publish (`collector.snapshot_publish`), an unknown
+client message (`collector.unknown_message`), a malformed polled row (the poll's site).
+
+Coverage record (Story 31.2, `capture.domain.coverage`): every sample tick notes, for every plan
+id, a written row, the gate's rejection reason or `not_collected`; the seconds a loop skipped are
+noted explicitly (`catch_up_cap` in venue mode, `missed_tick` in arrival mode, both ledgered
+`collector.skipped_seconds`) and so is the span between an instrument's last archived row and its
+first verdict in this process (`restart`, `collector.restart_gap`). Stale-dropped trades,
+backfilled ids and the windows a backfill could not recover are recorded too. The lines are
+appended (fsync'd) after each flush's catalog writes to `<catalog>/../coverage/<venue>.jsonl`; a
+failed append is ledgered (`collector.coverage_write`) and retried at the next flush, bounded, so
+`python -m verification.conservation` can prove every missing second and trade is explained.
 
 Trades (story 22.13): every accepted `TradeTick` is both kept for the live second (folded once
 per sample by `kernel.fold.fold_trades`) and archived raw to `data/trade_tick/<iid>/` with both
@@ -134,12 +150,19 @@ from capture.application.ports import Notifier
 from capture.application.ports import OnData
 from capture.application.ports import PlanChange
 from capture.application.ports import PlanDiff
+from capture.application.ports import PolledRows
 from capture.application.ports import SecondSink
 from capture.application.ports import VenueFeed
 from capture.application.ports import VenueTradeHistory
 from capture.application.trade_backfill import BACKFILL_LOOKBACK_NS
 from capture.application.trade_backfill import BackfillReport
 from capture.application.trade_backfill import admit_backfill
+from capture.domain import coverage
+from capture.domain.coverage import CoverageLine
+from capture.domain.coverage import SecondCoverage
+from capture.domain.coverage import TradesBackfilled
+from capture.domain.coverage import TradesDropped
+from capture.domain.coverage import TradesUnrecoverable
 from capture.domain.events import BookUncrossed
 from capture.domain.events import SequenceBroken
 from capture.domain.feed_group import MAIN_FEED
@@ -154,10 +177,14 @@ from capture.domain.policies import CapturePolicies
 from capture.domain.policies import CentralBookCrossPolicy
 from capture.domain.sampler import SecondSampler
 from capture.domain.trade_history import BackfillError
+from capture.domain.trade_history import Fetched
 from capture.domain.trade_intake import ACCEPTED
+from capture.domain.trade_intake import ARCHIVE_FEED_NAME
+from capture.domain.trade_intake import DEDUP_HORIZON_NS
 from capture.domain.trade_intake import DUPLICATE_FEED_FOLD
 from capture.domain.trade_intake import REPLAY
 from capture.domain.trade_intake import STALE
+from capture.domain.trade_intake import IntakeCounts
 from capture.domain.trade_intake import TradeIntake
 from capture.domain.verdicts import Crossed
 from capture.domain.verdicts import DroppedLevel
@@ -182,7 +209,15 @@ logger = logging.getLogger(__name__)
 critical_logger = logging.getLogger("capture.critical")
 
 _INGEST_YIELD_EVERY = 64
-_IMPOSSIBLE_LOG_EVERY_NS = 60_000_000_000  # one line per instrument per minute, not per second
+# Coverage lines kept for the next flush after a failed append. Beyond it the oldest are dropped
+# and the loss is ledgered: a disk that refuses writes for hours must not grow memory (MEM-02).
+_COVERAGE_PENDING_MAX = 10_000
+# A poll round's malformed rows named in its one ledger line (the count is always the total): a
+# venue-wide payload change must not write one line of every market.
+_MALFORMED_SHOWN = 10
+# The rate-limited rejection lines (no book, empty top, unencodable): one line per instrument per
+# minute, not per second, while the rejection lasts.
+_REJECTION_LOG_EVERY_NS = 60_000_000_000
 
 # OBS-01: zero book updates across all instruments for 30s+ is a pipeline failure, not a
 # quiet market. Deployed unattended, so this pushes a notification rather than relying on
@@ -215,9 +250,10 @@ _BACKFILL_FETCH_ERRORS = (
 )
 
 # Venue mode: after a stall, at most this many overdue seconds are closed in one wake-up.
-# Known limit: a longer stall (host suspend) leaves the older seconds without a live row; their
-# trades are counted late and placed by the nightly rebuild. Upgrade path: close them from the
-# archive instead of from memory. Kept well under `kernel.clocks.READ_SPAN_MARGIN_NS` (60 s): every
+# Known limit: a longer stall (host suspend) leaves the older seconds without a live row (noted
+# `catch_up_cap` in the coverage record and ledgered `collector.skipped_seconds`); their trades are
+# counted late and placed by the nightly rebuild. Upgrade path: close them from the archive
+# instead of from memory. Kept well under `kernel.clocks.READ_SPAN_MARGIN_NS` (60 s): every
 # caught-up row gets the wake-up's `ts_init`, so its `ts_init` trails its `ts_event` by up to
 # this + 1 + hold_back seconds, and readers only widen file spans by that margin.
 _MAX_CATCH_UP_SECONDS = 30
@@ -295,6 +331,12 @@ _FLUSH_PHASE_S = 2.0
 _CATCH_UP_MAX_NS = 86_400 * 1_000_000_000
 
 
+def _latest(*seconds: int | None) -> int | None:
+    """Return the latest of the known `seconds`, or None when none is known."""
+    known = [second for second in seconds if second is not None]
+    return max(known) if known else None
+
+
 def _seconds_until_next_flush(now: float, interval: float) -> float:
     """Return seconds from `now` (epoch) to the next wall-clock flush; always in (0, interval]."""
     return interval - (now - _FLUSH_PHASE_S) % interval
@@ -326,6 +368,16 @@ def _due_seconds(now_ns: int, hold_back_ns: int, last_closed: int | None) -> ran
     return range(max(first, latest - _MAX_CATCH_UP_SECONDS + 1), latest + 1)
 
 
+def _skipped_seconds(now_ns: int, hold_back_ns: int, last_closed: int | None) -> range:
+    """
+    Return the overdue seconds `_due_seconds` leaves behind after a stall longer than the catch-up
+    cap, oldest first: closed without a row (their coverage reason is `catch_up_cap`).
+    """
+    due = _due_seconds(now_ns, hold_back_ns, last_closed)
+    first = due.start if last_closed is None else last_closed + 1
+    return range(first, max(first, due.start))
+
+
 def _next_close_at(now: float, hold_back_s: float, last_closed: int | None) -> float:
     """Wall time (epoch s) at which the next unclosed exchange second is due; may be <= `now`."""
     second = math.floor(now - hold_back_s) if last_closed is None else last_closed + 1
@@ -342,6 +394,22 @@ _Capture = tuple[int, int, tuple[list, list]]
 
 def _price_text(value: float | None) -> str:
     return "none" if value is None else f"{value:.6f}"
+
+
+def _coverage_reason(verdict: Rejected) -> str:
+    """Return the coverage record's reason for a rejected second (`capture.domain.coverage`)."""
+    if isinstance(verdict, NoBook):
+        return coverage.NO_BOOK
+    if isinstance(verdict, EmptyTop):
+        return coverage.EMPTY_TOP
+    if isinstance(verdict, Crossed):
+        return coverage.CROSSED
+    if isinstance(verdict, Stale):
+        return coverage.STALE
+    if isinstance(verdict, Unencodable):
+        return coverage.UNENCODABLE
+    # A new `Rejected` member must get its own reason, never another's by default.
+    raise TypeError(f"no coverage reason for verdict {verdict!r}")
 
 
 class CaptureService:
@@ -466,10 +534,28 @@ class CaptureService:
         )
         self._last_closed_second: int | None = None
 
+        # The coverage record (Story 31.2): second runs, trade lines not yet appended, the
+        # instruments whose first verdict (and so their restart gap) is settled, and this flush's
+        # rejected seconds per instrument per reason for the one `collector.second_rejected` line.
+        self._coverage = SecondCoverage()
+        self._coverage_trades: list[CoverageLine] = []
+        self._coverage_unwritten: list[str] = []
+        self._verdict_seen: set[str] = set()
+        # Per plan id, its last archived snapshot second (None: none), read by `_prepare_ids` when
+        # the id entered the plan; forgotten with its verdict state when it leaves.
+        self._last_archived: dict[str, int | None] = {}
+        # Per id, the last second this process noted for it (a row or a reason). Kept when the id
+        # leaves the plan: its rows may still sit in the flush buffer, where the disk read of a
+        # re-add cannot see them, so its `restart` run starts after the later of the two.
+        self._last_noted: dict[str, int] = {}
+        # A coverage append a cancelled flush left running in its thread, with its lines: the
+        # next flush (the final one at shutdown) settles it first, so none is lost unledgered.
+        self._coverage_append: tuple[asyncio.Future[int], list[str]] | None = None
+        self._rejected_seconds: defaultdict[str, Counter[str]] = defaultdict(Counter)
+
         self._last_no_book_log_ns: dict[str, int] = {}
         self._last_empty_top_log_ns: dict[str, int] = {}
         self._last_unencodable_log_ns: dict[str, int] = {}
-        self._last_impossible_log_ns: dict[str, int] = {}
         self._book_sequence_errors: defaultdict[str, int] = defaultdict(int)
         self._book_crosscheck_mismatches: defaultdict[str, int] = defaultdict(int)
         # Armed cross-checks only (audit D-64): captures of the live top-20 per applied message,
@@ -689,7 +775,9 @@ class CaptureService:
             self._on_replayed_trade(iid, data, feed, now_ns)
         elif outcome != STALE:
             first = intake.first_feed(trade_id)
-            self._feeds.note_overlap(first or "", feed.name)
+            if first != ARCHIVE_FEED_NAME:
+                # A seeded id is the previous process's trade, not a feed this one arbitrates.
+                self._feeds.note_overlap(first or "", feed.name)
             if outcome == DUPLICATE_FEED_FOLD:
                 # The backfill archived it before this live copy was processed: fold the live
                 # copy (never archived twice), or the live second misses a trade the feed delivered.
@@ -744,12 +832,11 @@ class CaptureService:
         def nonzero(values: Mapping[str, int]) -> dict[str, int]:
             return {iid: n for iid, n in values.items() if n}
 
-        stale = nonzero({iid: c.stale for iid, c in per_intake.items()})
+        self._report_stale(per_intake)
+        self._report_rejected_seconds()
         duplicate = nonzero({iid: c.duplicate for iid, c in per_intake.items()})
         duplicate_feed = nonzero({iid: c.duplicate_feed for iid, c in per_intake.items()})
         before_snapshot = nonzero({iid: c.before_snapshot for iid, c in per_book.items()})
-        if stale:
-            logger.info(f"Dropped subscribe-time trade history: {stale}")
         if duplicate:
             logger.warning(f"Dropped duplicate trades (replayed after reconnect?): {duplicate}")
         if duplicate_feed:
@@ -770,6 +857,45 @@ class CaptureService:
         )
         self._report_trade_sources()
         self._report_unplanned_messages()
+
+    def _report_stale(self, per_intake: Mapping[str, IntakeCounts]) -> None:
+        """
+        One `collector.stale_trade` line per flush naming every instrument that dropped a trade
+        as subscribe-time history (DATA-06), with its count and oldest/youngest arrival age, and a
+        coverage `trades_dropped` line per instrument spanning the dropped trades' `ts_event`.
+        """
+        parts = []
+        for iid, counts in sorted(per_intake.items()):
+            span = counts.stale_span
+            if not counts.stale or span is None:
+                continue
+            parts.append(
+                f"{iid}: {counts.stale} (age oldest {span.oldest_age_ns / NS_PER_S:.3f}s, "
+                f"youngest {span.youngest_age_ns / NS_PER_S:.3f}s)"
+            )
+            self._coverage_trades.append(
+                TradesDropped(iid, coverage.STALE, span.first_ns, span.last_ns, counts.stale)
+            )
+        if parts:
+            self._ledger(
+                sites.STALE_TRADE,
+                f"trades older than stale_trade_seconds={self._config.stale_trade_seconds} on "
+                "arrival, dropped as subscribe-time history (counted in the coverage record): "
+                + "; ".join(parts),
+            )
+
+    def _report_rejected_seconds(self) -> None:
+        """One `collector.second_rejected` line per flush: rejected seconds per instrument/reason."""
+        if not self._rejected_seconds:
+            return
+        summary = {
+            iid: dict(sorted(c.items())) for iid, c in sorted(self._rejected_seconds.items())
+        }
+        self._rejected_seconds.clear()
+        self._ledger(
+            sites.SECOND_REJECTED,
+            f"seconds the write gate rejected (no row, in the coverage record): {summary}",
+        )
 
     def _close_report_cycle(self) -> None:
         """End one flush cycle: report every counter, then drop the books that left the set."""
@@ -838,7 +964,13 @@ class CaptureService:
         """
         Write every buffered batch through the `ArchiveWriter`, each sorted by `ts_init` (stable).
         Unless `final` (shutdown: everything must go), a `TradeTick` batch keeps back its open
-        `ts_init` group (`FlushBatch`'s carry rule).
+        `ts_init` group (`FlushBatch`'s carry rule). Then append the coverage record's lines, after
+        the catalog writes they describe (a second's run and its missing row land in one flush).
+
+        Known limit: a kill between the catalog writes and the coverage append leaves that
+        interval's reason runs unwritten under rows already on disk, and the next process's
+        `restart` run starts after those rows, so the seconds show as unexplained (a loud fail,
+        never a wrong pass). Upgrade path: a durable per-id "noted through" watermark.
         """
         flushed_seconds: dict[str, list[DydxSecondSnapshot]] = {}
         now_ns = time.time_ns()
@@ -853,10 +985,101 @@ class CaptureService:
                 )
                 if key[0] is TradeTick:
                     self._mark_lost_trades(key[1], items, now_ns)
+                elif key[0] is DydxSecondSnapshot:
+                    self._note_lost_rows(key[1], items)
                 continue
             if key[0] is DydxSecondSnapshot:
                 flushed_seconds[key[1]] = items
+        # The sink first: whatever the coverage append does, the flushed seconds reach it.
         self._apply_to_candle_store(flushed_seconds)
+        await self._write_coverage(final)
+
+    def _take_coverage_lines(self) -> list[str]:
+        """Encode every run and trade line noted since the last flush, behind the unwritten ones."""
+        noted: list[CoverageLine] = [*self._coverage.take(), *self._coverage_trades]
+        self._coverage_trades = []
+        return [*self._coverage_unwritten, *(line.to_json_line() for line in noted)]
+
+    async def _write_coverage(self, final: bool = False) -> None:
+        """
+        Append the pending coverage lines (fsync'd, off the event loop). Any failure is ledgered
+        and the lines are kept for the next flush, the newest `_COVERAGE_PENDING_MAX` of them:
+        beyond that the oldest are dropped and how many is ledgered, never silent. The `final`
+        flush has no next one: its failure is ledgered as lines LOST. A torn tail a killed
+        process left in the file is cut back to its last whole line, and ledgered.
+
+        The append is shielded from the flush task's cancellation: a cancelled flush leaves it in
+        `_coverage_append`, and the next flush settles it (its lines kept on failure) before
+        taking new ones, so lines are appended in order and none is lost unledgered.
+        """
+        await self._settle_coverage_append(final=False)
+        lines = self._take_coverage_lines()
+        self._coverage_unwritten = []
+        if not lines:
+            return
+        append = asyncio.ensure_future(
+            asyncio.to_thread(self._archive.append_coverage, self._venue, lines)
+        )
+        self._coverage_append = (append, lines)
+        await self._settle_coverage_append(final)
+
+    async def _settle_coverage_append(self, final: bool) -> None:
+        """Await the coverage append in flight, if any; ledger its failure or repaired tail."""
+        if self._coverage_append is None:
+            return
+        append, lines = self._coverage_append
+        try:
+            # Cancelled (a `BaseException`, so not caught): the append stays in flight for the
+            # next flush to settle.
+            repaired = await asyncio.shield(append)
+        except Exception as e:
+            self._coverage_append = None
+            self._ledger_coverage_failure(lines, final, e)
+            return
+        self._coverage_append = None
+        if repaired:
+            self._ledger(
+                sites.COVERAGE_WRITE,
+                f"torn tail repaired: {repaired} bytes (an unfinished last line a killed process "
+                "left) cut from the coverage record before appending",
+            )
+
+    def _ledger_coverage_failure(self, lines: list[str], final: bool, e: Exception) -> None:
+        if final:
+            self._ledger(
+                sites.COVERAGE_WRITE,
+                f"coverage record append failed at shutdown, {len(lines)} lines LOST: the "
+                "verification report will count their seconds and trades unexplained",
+                e,
+            )
+            return
+        self._ledger(
+            sites.COVERAGE_WRITE,
+            f"coverage record append failed, {len(lines)} lines kept for the next flush",
+            e,
+        )
+        self._keep_unwritten(lines)
+
+    def _keep_unwritten(self, lines: list[str]) -> None:
+        lost = len(lines) - _COVERAGE_PENDING_MAX
+        if lost > 0:
+            self._ledger(
+                sites.COVERAGE_WRITE,
+                f"coverage record: {lost} oldest unwritten lines LOST (more than "
+                f"{_COVERAGE_PENDING_MAX} pending); the verification report will count their "
+                "seconds and trades unexplained",
+            )
+            lines = lines[lost:]
+        self._coverage_unwritten = lines
+
+    def _note_lost_rows(self, iid: str, lost: list[DydxSecondSnapshot]) -> None:
+        """
+        Re-note the seconds of a snapshot batch that failed to write, noted `ROW` at their tick,
+        as `write_failed` runs: the loss is ledgered (`collector.flush_write`) and, appended by
+        this same flush, explained in the coverage record.
+        """
+        for second in sorted({row.ts_event // S_NS for row in lost}):
+            self._coverage.note(iid, second, coverage.WRITE_FAILED)
 
     def _mark_lost_trades(self, iid: str, lost: list[TradeTick], now_ns: int) -> None:
         """
@@ -934,9 +1157,10 @@ class CaptureService:
         now_ns = time.time_ns()
         for iid, mark in self._second_sink.watermarks().items():
             if now_ns - mark > _CATCH_UP_MAX_NS:
-                logger.warning(
-                    f"Candle store for {iid} is more than a day behind: "
-                    "run python -m candles.rebuild"
+                self._ledger(
+                    sites.CANDLE_STORE_BEHIND,
+                    f"candle store for {iid} is more than a day behind the archive (watermark "
+                    f"{mark}): not caught up at start; run python -m candles.rebuild",
                 )
                 continue
             try:
@@ -951,8 +1175,9 @@ class CaptureService:
             await asyncio.sleep(
                 _seconds_until_next_flush(time.time(), self._config.flush_interval_seconds)
             )
-            await self._flush_once()
+            # The report first: its coverage lines (stale trades) go out with this flush.
             self._close_report_cycle()
+            await self._flush_once()
 
     # -- sample ------------------------------------------------------------------------------
 
@@ -962,7 +1187,8 @@ class CaptureService:
         """
         One pass of the single write gate (AD-1): `SecondSampler.sample` judges every collected
         book; each accepted row goes to the catalog buffer and (via the caller) Redis -- same
-        object. Rejections are logged and ledgered here, then every requested resync is executed.
+        object. Rejections are logged and ledgered here, every plan id's verdict is noted in the
+        coverage record, then every requested resync is executed.
 
         `second` (venue mode): the exchange second to close; the held deltas are applied up to
         its end first, and its trade bucket is folded.
@@ -981,18 +1207,71 @@ class CaptureService:
         )
         for iid, event in result.uncrossed:
             self._log_uncrossed(iid, event, now_ns)
+        verdicts = dict.fromkeys(sorted(self._plan_ids - set(iids)), coverage.NOT_COLLECTED)
         for iid, verdict in result.rejected:
             self._report_rejection(iid, verdict, now_ns)
+            verdicts[iid] = _coverage_reason(verdict)
         for snapshot in result.accepted:
             iid = str(snapshot.instrument_id)
             self._buffer[(DydxSecondSnapshot, iid)].append(snapshot)
-            self._check_impossible_ohlc(iid, snapshot, now_ns)
+            self._check_impossible_ohlc(iid, snapshot)
+            verdicts[iid] = coverage.ROW
+        self._note_verdicts(now_ns // S_NS if second is None else second, verdicts)
         if second is not None:
             self._sampler.close_second(self._intakes, second, self._last_closed_second is None)
             self._last_closed_second = second
         for iid in result.resyncs:
             await self._resync(iid)
         return result.accepted
+
+    def _note_verdicts(self, second: int, verdicts: Mapping[str, str]) -> None:
+        """Note each plan id's verdict for `second` in the coverage record (synchronous: the gate)."""
+        self._note_restart_gaps(verdicts.keys(), second)
+        for iid, reason in verdicts.items():
+            self._coverage.note(iid, second, reason)
+            self._last_noted[iid] = second
+            if reason not in (coverage.ROW, coverage.NOT_COLLECTED):
+                self._rejected_seconds[iid][reason] += 1
+
+    def _note_restart_gaps(self, iids: Iterable[str], second: int) -> None:
+        """
+        At an id's first note since it (re)entered the plan (a verdict or a skipped span starting
+        at `second`), the seconds since its last archived row -- read when it entered, by
+        `_prepare_ids`, never inside the gate; or since the last second this process noted for it,
+        when later (a re-added id's rows may not be flushed yet) -- are a `restart` run, ledgered once per call naming
+        every such id and span: what no process wrote. Noted before `second`'s own note, so the
+        runs of one id stay in order and never overlap.
+        """
+        gaps: list[str] = []
+        for iid in sorted(set(iids) - self._verdict_seen):
+            self._verdict_seen.add(iid)
+            last = _latest(self._last_archived.get(iid), self._last_noted.get(iid))
+            if last is not None and last + 1 < second:
+                self._coverage.note_span(iid, last + 1, second - 1, coverage.RESTART)
+                gaps.append(f"{iid} {last + 1}..{second - 1} ({second - 1 - last} s)")
+        if gaps:
+            self._ledger(
+                sites.RESTART_GAP,
+                "seconds between the last archived row and this process's first verdict, no row "
+                f"(coverage `restart`): {'; '.join(gaps)}",
+            )
+
+    def _note_skipped(self, first_s: int, last_s: int, reason: str, why: str) -> None:
+        """
+        Note seconds no sample tick judged (`catch_up_cap`, `missed_tick`) for every plan id, and
+        ledger them once (`collector.skipped_seconds`).
+        """
+        if not self._plan_ids:
+            return  # nothing planned, so nothing was lost
+        self._note_restart_gaps(self._plan_ids, first_s)
+        for iid in sorted(self._plan_ids):
+            self._coverage.note_span(iid, first_s, last_s, reason)
+            self._last_noted[iid] = last_s
+        self._ledger(
+            sites.SKIPPED_SECONDS,
+            f"seconds {first_s}..{last_s} ({last_s - first_s + 1} s) not sampled ({why}): "
+            f"no row for any of {len(self._plan_ids)} planned instruments (coverage `{reason}`)",
+        )
 
     def _precisions(self, iids: list[str]) -> dict[str, tuple[int, int]]:
         """
@@ -1045,7 +1324,7 @@ class CaptureService:
 
     @staticmethod
     def _rate_limited(last_log: dict[str, int], iid: str, now_ns: int) -> bool:
-        if now_ns - last_log.get(iid, 0) < _IMPOSSIBLE_LOG_EVERY_NS:
+        if now_ns - last_log.get(iid, 0) < _REJECTION_LOG_EVERY_NS:
             return False
         last_log[iid] = now_ns
         return True
@@ -1145,21 +1424,32 @@ class CaptureService:
                 level.other_seq,
             )
 
-    def _check_impossible_ohlc(self, iid: str, snapshot: DydxSecondSnapshot, now_ns: int) -> None:
-        if ohlc_outside_book(snapshot) and self._rate_limited(
-            self._last_impossible_log_ns, iid, now_ns
-        ):
-            # Unreachable after the stale/duplicate trade filters; if it fires, an
-            # ingestion bug is writing impossible prices (DATA-02/DATA-06 canary).
-            logger.error(
-                f"IMPOSSIBLE trade OHLC for {iid}: high={snapshot.high_price} "
-                f"low={snapshot.low_price} outside book "
-                f"[{min(snapshot.bid_prices)}, {max(snapshot.ask_prices)}]"
+    def _check_impossible_ohlc(self, iid: str, snapshot: DydxSecondSnapshot) -> None:
+        """
+        DATA-02/DATA-06 canary, never a filter: the row is kept. Unreachable after the stale and
+        duplicate trade filters; if it fires, an ingestion bug is writing impossible prices, so
+        each occurrence is ledgered (the ledger's per-site cap carries a storm as `suppressed`).
+        """
+        if ohlc_outside_book(snapshot):
+            self._ledger(
+                sites.OHLC_OUTSIDE_BOOK,
+                f"IMPOSSIBLE trade OHLC for {iid} at ts_event {snapshot.ts_event}: "
+                f"high={snapshot.high_price} low={snapshot.low_price} outside book "
+                f"[{min(snapshot.bid_prices)}, {max(snapshot.ask_prices)}]",
             )
 
     async def _publish(self, batch: list[DydxSecondSnapshot]) -> None:
-        if self._live_stream is not None:
+        """Publish the live batch; a failure loses the live view only and is ledgered."""
+        if self._live_stream is None:
+            return
+        try:
             await self._live_stream.publish(batch)
+        except Exception as e:
+            self._ledger(
+                sites.SNAPSHOT_PUBLISH,
+                f"live publish of {len(batch)} rows failed (Parquet unaffected)",
+                e,
+            )
 
     async def _second_loop(self) -> None:
         """
@@ -1172,14 +1462,25 @@ class CaptureService:
             await self._venue_second_loop()
             return
         interval = self._config.snapshot_interval_seconds
-        last_tick_s: float | None = None
+        last_tick_ns: int | None = None
         while not self._stop.is_set():
             now = time.time()
+            last_tick_s = None if last_tick_ns is None else last_tick_ns / 1e9
             await asyncio.sleep(_next_sample_at(now, interval, last_tick_s) - now)
             now_ns = time.time_ns()
-            last_tick_s = now_ns / 1e9
+            if last_tick_ns is not None:
+                # Integer seconds: a float epoch rounds up across a second boundary.
+                self._note_missed_ticks(last_tick_ns // S_NS + 1, now_ns // S_NS - 1)
+            last_tick_ns = now_ns
             self._warn_if_late(now_ns)
             await self._publish(await self._sample_tick(now_ns))
+
+    def _note_missed_ticks(self, first_s: int, last_s: int) -> None:
+        """Arrival mode: floor seconds between two ticks that no tick sampled (`missed_tick`)."""
+        if first_s <= last_s:
+            self._note_skipped(
+                first_s, last_s, coverage.MISSED_TICK, "the sample loop woke too late"
+            )
 
     async def _venue_second_loop(self) -> None:
         """
@@ -1198,6 +1499,14 @@ class CaptureService:
             if not due:
                 continue  # woke a hair early
             self._warn_if_late(now_ns)
+            skipped = _skipped_seconds(now_ns, self._hold_back_ns, self._last_closed_second)
+            if skipped:
+                self._note_skipped(
+                    skipped.start,
+                    skipped.stop - 1,
+                    coverage.CATCH_UP_CAP,
+                    f"a stall past the {_MAX_CATCH_UP_SECONDS} s catch-up cap",
+                )
             for second in due:
                 await self._publish(await self._sample_tick(now_ns, second))
             self._check_pending_overflow(now_ns)
@@ -1369,7 +1678,8 @@ class CaptureService:
         mismatch is ledgered at once: same venue, same `time`, so any difference is a finding.
         """
         if self._live_book(iid) is None:
-            logger.debug("Book cross-check skipped for %s: no live book", iid)
+            # Nothing to compare: a missing book is already the sampler's `NoBook` rejection,
+            # ledgered per flush (`collector.second_rejected`) and in the coverage record.
             return
         first = await self._crosscheck_round(iid)
         if first is None:
@@ -1382,8 +1692,10 @@ class CaptureService:
             await asyncio.sleep(_CROSSCHECK_CONFIRM_SECONDS)
             second = await self._crosscheck_round(iid)
             if second is None:
-                logger.warning(
-                    "Book cross-check %s: mismatch unconfirmed, second round not aligned", iid
+                self._ledger(
+                    sites.BOOK_CROSSCHECK_UNCONFIRMED,
+                    f"{iid}: a sequence-aligned mismatch could not be confirmed (the second round "
+                    f"was not aligned), the book stays unverified: " + "; ".join(mismatches[:5]),
                 )
                 return
             confirmed = persistent(mismatches, second[0])
@@ -1493,33 +1805,52 @@ class CaptureService:
         done = 0
         try:
             for iid in instruments:
+                last = request.since.get(iid)
                 try:
-                    await self._backfill_instrument(iid, request.since.get(iid), report)
+                    await self._backfill_instrument(iid, last, report)
                 except Exception as e:  # one instrument's surprise must not cost the others
                     report.errors[iid] = repr(e)
+                    self._note_unrecoverable(iid, coverage.FETCH_FAILED, last, time.time_ns())
                 done += 1
         finally:
             # Always one entry, also when shutdown cancels the fetch mid-way: what was archived
             # so far is buffered (the final flush writes it) and the rest is named, never silent.
             if done < len(instruments):
                 report.reasons = [*report.reasons, f"interrupted after {done} instruments"]
+                self._note_unfetched(instruments[done:], request.since)
             self._ledger(sites.TRADE_BACKFILL, report.message())
+
+    def _note_unfetched(self, iids: Iterable[str], since: Mapping[str, int]) -> None:
+        """
+        Shutdown: the instruments a backfill never fetched are `fetch_failed` windows from their
+        pre-gap baseline to now, noted before the final flush appends them.
+        """
+        now_ns = time.time_ns()
+        for iid in iids:
+            self._note_unrecoverable(iid, coverage.FETCH_FAILED, since.get(iid), now_ns)
 
     async def _backfill_instrument(
         self, iid: str, last: int | None, report: BackfillReport
     ) -> None:
-        """`last`: the instrument's pre-gap baseline from the request (None: no archived trade)."""
+        """
+        `last`: the instrument's pre-gap baseline from the request (None: no archived trade).
+        Every window the backfill could not check goes to the coverage record as
+        `trades_unrecoverable` (`fetch_failed`: from `last` to the fetch; `depth`: from `last` to
+        where the venue's history began).
+        """
         if last is None:
             report.no_baseline += 1  # the rebuild's coverage also starts at the first trade
             return
-        instrument = self._instruments.get(iid)
-        if instrument is None:
-            report.errors[iid] = "no instrument definition from the venue"
-            return
-        if self._trade_history is None:
-            report.errors[iid] = "no VenueTradeHistory injected: nothing can be backfilled"
-            return
         fetch_ns = time.time_ns()
+        instrument = self._instruments.get(iid)
+        if instrument is None or self._trade_history is None:
+            report.errors[iid] = (
+                "no instrument definition from the venue"
+                if instrument is None
+                else "no VenueTradeHistory injected: nothing can be backfilled"
+            )
+            self._note_unrecoverable(iid, coverage.FETCH_FAILED, last, fetch_ns)
+            return
         try:
             fetched = await asyncio.to_thread(
                 self._trade_history.fetch,
@@ -1530,13 +1861,21 @@ class CaptureService:
             )
         except _BACKFILL_FETCH_ERRORS as e:
             report.errors[iid] = repr(e)
+            self._note_unrecoverable(iid, coverage.FETCH_FAILED, last, fetch_ns)
             return
+        self._admit_fetched(iid, last, fetched, fetch_ns, report)
+
+    def _admit_fetched(
+        self, iid: str, last: int, fetched: Fetched, fetch_ns: int, report: BackfillReport
+    ) -> None:
+        """Archive a fetch's unseen trades and name what it could not cover (`depth`)."""
         lost_until = self._apply_backfill(iid, fetched.trades, report) or last
         if not fetched.reached_since:
             # Nothing between `last` and the venue's oldest returned trade could be checked.
             lost_until = max(lost_until, fetched.oldest_ns or fetch_ns)
         if lost_until > last:
             report.unrecoverable[iid] = (lost_until - last) / 1e9
+            self._note_unrecoverable(iid, coverage.DEPTH, last, lost_until)
         if fetched.rejected:
             report.errors[iid] = (
                 f"{len(fetched.rejected)} inexact trade(s) skipped: {fetched.rejected[0]}"
@@ -1552,7 +1891,14 @@ class CaptureService:
         archive, newest_refused = admit_backfill(self._intake(iid), trades, time.time_ns(), report)
         if archive:
             self._buffer[(TradeTick, iid)].extend(archive)
+            ids = tuple(str(trade.trade_id) for trade in archive)
+            self._coverage_trades.append(TradesBackfilled(iid, ids))
         return newest_refused
+
+    def _note_unrecoverable(self, iid: str, reason: str, from_ns: int | None, to_ns: int) -> None:
+        """Record a `ts_event` window no backfill checked (coverage `trades_unrecoverable`)."""
+        if from_ns is not None and to_ns > from_ns:
+            self._coverage_trades.append(TradesUnrecoverable(iid, reason, from_ns, to_ns))
 
     # -- watchdog ------------------------------------------------------------------------------
 
@@ -1644,9 +1990,11 @@ class CaptureService:
                 book = self._books.get(iid)
                 if book is not None:
                     book.forget()
+                self._forget_verdicts(iid)
                 if on_wire:
                     self._applied.add(iid)
                     (unsubscribed if await self._unsubscribe_one(iid) else failed).add(iid)
+            await self._prepare_ids(diff.added - self._last_archived.keys())
             for iid in sorted(diff.added):
                 self._plan_ids.add(iid)
                 (subscribed if await self._subscribe_added(iid) else failed).add(iid)
@@ -1655,6 +2003,55 @@ class CaptureService:
             self._last_applied = applied
             self._last_applied_ns = time.time_ns()
         return applied
+
+    async def _prepare_ids(self, iids: Iterable[str]) -> None:
+        """
+        Before ids enter the plan (the first subscribe included, so before any loop samples):
+        seed each one's dedup window from the archive over the horizon (first feed `archive`),
+        so a venue replay or backfill never archives what an earlier process or an earlier stint
+        in the plan archived; and read its last archived second, the start of the `restart` run
+        its first verdict closes. Both are disk reads, off the event loop and outside the gate.
+        """
+        now_ns = time.time_ns()
+        for iid in sorted(iids):
+            self._last_archived[iid] = await self._last_archived_second(iid)
+            try:
+                ids = await asyncio.to_thread(
+                    self._archive.recent_trade_ids,
+                    iid,
+                    now_ns - DEDUP_HORIZON_NS,
+                    now_ns,
+                    self._ledger,
+                )
+            except Exception as e:
+                self._ledger(
+                    sites.DEDUP_SEED,
+                    f"{iid}: archived trade ids could not be read for the dedup seed; ids an "
+                    "earlier process archived may be archived again",
+                    e,
+                )
+                continue
+            self._intake(iid).seed(ids)
+
+    async def _last_archived_second(self, iid: str) -> int | None:
+        try:
+            return await asyncio.to_thread(self._archive.last_snapshot_second, iid)
+        except Exception as e:  # a read fault must not cost the id its subscription
+            self._ledger(
+                sites.RESTART_GAP,
+                f"{iid}: the last archived second could not be read; a restart gap before its "
+                "first row in this process is not recorded",
+                e,
+            )
+            return None
+
+    def _forget_verdicts(self, iid: str) -> None:
+        """
+        Forget a removed id's verdict state: a re-add reads a fresh restart gap, seeds again.
+        `_last_noted` is kept, so the re-add's gap never overlaps what this process noted.
+        """
+        self._verdict_seen.discard(iid)
+        self._last_archived.pop(iid, None)
 
     async def _subscribe_added(self, iid: str) -> bool:
         if iid in self._applied:
@@ -1785,7 +2182,7 @@ class CaptureService:
 
     async def poll_loop(
         self,
-        fetch: Callable[[], Awaitable[Iterable[Any]]],
+        fetch: Callable[[], Awaitable[PolledRows]],
         every_seconds: float,
         *,
         site: str,
@@ -1793,8 +2190,10 @@ class CaptureService:
         plan_only: bool,
     ) -> None:
         """
-        Every `every_seconds`, buffer what `fetch` returns (Nautilus `Data` rows carrying an
-        `instrument_id`, e.g. a venue's REST open-interest poll) for the next flush. Rows go
+        Every `every_seconds`, buffer the rows `fetch` returns (`PolledRows.rows`: Nautilus `Data`
+        rows carrying an `instrument_id`, e.g. a venue's REST open-interest poll) for the next
+        flush, and ledger its `malformed` rows at `site` in one line per round (with `plan_only`,
+        the planned ids and the rows whose id could not be read). Rows go
         straight into the buffer, never through `_on_data`: REST-polled data must not count as WS
         feed liveness (story 22.5) nor feed a reconnect's silence detection (story 22.14). With
         `plan_only` only the plan's ids are kept -- the plan, not the applied set: polled ticker
@@ -1811,12 +2210,29 @@ class CaptureService:
             await asyncio.sleep(every_seconds)
             try:
                 wanted = set(self._plan_ids) if plan_only else None
-                for item in await fetch():
+                polled = await fetch()
+                for item in polled.rows:
                     iid = str(item.instrument_id)
                     if wanted is None or iid in wanted:
                         self._buffer[(type(item), iid)].append(item)
+                self._report_malformed(polled.malformed, wanted, site)
             except Exception as e:
                 self._ledger(site, failure, e)
+
+    def _report_malformed(
+        self, malformed: list[tuple[str | None, str]], wanted: set[str] | None, site: str
+    ) -> None:
+        named = [
+            f"{iid or '<no id>'}: {reason}"
+            for iid, reason in malformed
+            if wanted is None or iid is None or iid in wanted
+        ]
+        if named:
+            shown = named[:_MALFORMED_SHOWN]
+            more = f" (+{len(named) - len(shown)} more)" if len(named) > len(shown) else ""
+            self._ledger(
+                site, f"{len(named)} polled rows could not be parsed, not archived: {shown}{more}"
+            )
 
     # -- lifecycle ---------------------------------------------------------------------------
 
@@ -1877,8 +2293,8 @@ class CaptureService:
             await asyncio.gather(*tasks, return_exceptions=True)
             self._ledger_abandoned_backfills()
             await self._disconnect()
-            await self._flush_once(final=True)
             self._close_report_cycle()
+            await self._flush_once(final=True)
             if self._live_stream is not None:
                 await self._live_stream.close()
 
@@ -1907,6 +2323,7 @@ class CaptureService:
                 f"feed {feed_name} ({'; '.join(request.reasons)}): abandoned at shutdown, "
                 f"{len(request.since)} instruments not fetched",
             )
+            self._note_unfetched(sorted(request.since), request.since)
 
     def stop(self) -> None:
         self._stop.set()
@@ -1971,8 +2388,10 @@ async def run_forever(
             try:
                 await collector.run()
                 backoff_seconds = 1.0  # clean stop (signal) -- reset for any future crash
-            except Exception:
-                logger.exception(f"Collector crashed, restarting in {backoff_seconds:.0f}s")
+            except Exception as e:
+                collector._ledger(
+                    sites.CRASH, f"collector crashed, restarting in {backoff_seconds:.0f}s", e
+                )
                 await asyncio.sleep(backoff_seconds)
                 backoff_seconds = min(backoff_seconds * 2, 60.0)
             finally:

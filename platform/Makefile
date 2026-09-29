@@ -79,14 +79,15 @@ build-base-vps:
 ## bring-up or when capture/ itself changed -- otherwise use `make redeploy` so
 ## the collector's live WS connection/book state is never disturbed. Starts the `archive`
 ## service too (the nightly maintenance schedule, Story 25.1b; no profile). data/archive (its
-## state) and the rclone config directory are created first, as the invoking user, for the same
+## state), data/coverage (the collectors' coverage record, Story 31.2; they run as uid 1000) and
+## the rclone config directory are created first, as the invoking user, for the same
 ## root-owned-bind-mount reason as `tui`'s mkdir.
 ## Also builds -- never starts -- dYdX's `collector` image: compose tags one image per service, and
 ## `make test`/`nightly`/`consolidate`/`prune`/`build-candles`/`hotpath-baseline` all `run` that
 ## one, so without this build they would run a stale image once `up` stopped naming `collector`.
 ## Built first, so a failed build stops the target before any running service is replaced.
 up:
-	mkdir -p $(PLATFORM_DIR)data/archive $(RCLONE_CONFIG_DIR)
+	mkdir -p $(PLATFORM_DIR)data/archive $(PLATFORM_DIR)data/coverage $(RCLONE_CONFIG_DIR)
 	$(COMPOSE) build collector
 	$(COMPOSE) up -d --build
 	@docker image prune -f
@@ -118,7 +119,7 @@ redeploy:
 ## dYdX container keeps its old image (the image itself is rebuilt, for the maintenance targets
 ## that `run` it, as in `up`). Restart a running dYdX on the new image with `make up-dydx`.
 redeploy-all:
-	mkdir -p $(PLATFORM_DIR)data/archive $(RCLONE_CONFIG_DIR)
+	mkdir -p $(PLATFORM_DIR)data/archive $(PLATFORM_DIR)data/coverage $(RCLONE_CONFIG_DIR)
 	$(COMPOSE) build collector
 	$(COMPOSE) up -d --build bybit_collector hyperliquid_collector archive ranking_engine data_api
 	$(COMPOSE) --profile live-paper up -d --build live-paper
@@ -150,6 +151,7 @@ up-live-paper:
 ## cutover (Story 29.3) -- gated behind the `dydx` compose profile, the same pattern as
 ## `up-live-paper`. Runbook: docs/DEPLOY_CHECKLIST.md §8.
 up-dydx:
+	mkdir -p $(PLATFORM_DIR)data/coverage
 	$(COMPOSE) --profile dydx up -d --build collector
 	@docker image prune -f
 
@@ -212,7 +214,7 @@ VERIFY_DATA_API_PORT ?= 29100
 VERIFY_DOZZLE_PORT ?= 28080
 VERIFY_COMPOSE := REDIS_PORT=$(VERIFY_REDIS_PORT) DATA_API_PORT=$(VERIFY_DATA_API_PORT) DOZZLE_PORT=$(VERIFY_DOZZLE_PORT) docker compose -p verify -f $(PLATFORM_DIR)docker-compose.yml -f $(PLATFORM_DIR)docker-compose.verify.yml
 VERIFY_SERVICES := redis bybit_collector hyperliquid_collector archive ranking_engine data_api dozzle reference_recorder_bybit reference_recorder_hyperliquid
-VERIFY_DATA_DIRS := catalog candles errors metrics archive verification
+VERIFY_DATA_DIRS := catalog candles errors metrics archive verification coverage
 # `verify-up` marks the data/ it starts on; `verify-wipe` deletes only a marked data/, so a
 # `make verify-wipe` typed in the live checkout (its stack stopped) never deletes live data.
 VERIFY_MARKER := .verify-stack

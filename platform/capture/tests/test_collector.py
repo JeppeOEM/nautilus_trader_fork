@@ -37,7 +37,7 @@ from observability import error_ledger
 
 import capture.application.capture_service as collector_mod
 from capture.application.capture_service import _BACKFILL_SETTLE_NS
-from capture.application.capture_service import _IMPOSSIBLE_LOG_EVERY_NS
+from capture.application.capture_service import _REJECTION_LOG_EVERY_NS
 from capture.application.capture_service import _WATCHDOG_REMINDER_NS
 from capture.application.capture_service import _WATCHDOG_STARTUP_GRACE_NS
 from capture.application.capture_service import CaptureService
@@ -47,6 +47,7 @@ from capture.application.feed import MAIN_FEED
 from capture.application.feed import Feed
 from capture.application.trade_backfill import BackfillReport as _BackfillReport
 from capture.domain.trade_history import Fetched
+from capture.domain.trade_intake import DEDUP_HORIZON_NS
 from capture.infrastructure.parquet_writer import ParquetArchiveWriter
 from capture.infrastructure.parquet_writer import quarantine_corrupt_parquet
 from capture.tests.catalog_kit import query_second_snapshots
@@ -354,7 +355,7 @@ def test_no_book_warning_is_rate_limited(tmp_path: Path, caplog: pytest.LogCaptu
     c = _collector(tmp_path)
     now = time.time_ns()
     with caplog.at_level("WARNING", logger="capture.application.capture_service"):
-        for offset in (0, _S, 2 * _S, _IMPOSSIBLE_LOG_EVERY_NS):
+        for offset in (0, _S, 2 * _S, _REJECTION_LOG_EVERY_NS):
             assert _tick(c, now + offset) == []
     assert len([r for r in caplog.records if "No book" in r.message]) == 2
 
@@ -373,7 +374,7 @@ def test_an_unencodable_second_is_skipped_loudly_once_a_minute(
     c._process_data(_deltas([(100.0, 1.0)], [(100.5, 1.0)]))
     now = time.time_ns()
     with caplog.at_level("ERROR", logger="capture.application.capture_service"):
-        for offset in (0, _S, 2 * _S, _IMPOSSIBLE_LOG_EVERY_NS):
+        for offset in (0, _S, 2 * _S, _REJECTION_LOG_EVERY_NS):
             c._book(_BYBIT).last_update_ns = now + offset
             c._feeds.last_book_message_ns = now + offset
             assert _tick(c, now + offset) == []
@@ -396,7 +397,7 @@ def test_an_empty_top_of_book_is_skipped_loudly_once_a_minute(
     c._process_data(_trade(100.0, 0.5, AggressorSide.BUYER, 1))
     now = time.time_ns()
     with caplog.at_level("WARNING", logger="capture.application.capture_service"):
-        for offset in (0, _S, 2 * _S, _IMPOSSIBLE_LOG_EVERY_NS):
+        for offset in (0, _S, 2 * _S, _REJECTION_LOG_EVERY_NS):
             assert _tick(c, now + offset) == []
     assert len([r for r in caplog.records if "Empty top of book" in r.message]) == 2
     assert error_ledger.counts() == {"collector.empty_top": 2}
@@ -443,7 +444,8 @@ def test_stale_book_skipped_and_its_trades_discarded(tmp_path: Path) -> None:
 def test_trade_older_than_stale_trade_seconds_dropped(tmp_path: Path) -> None:
     c = _collector(tmp_path)
     c._process_data(_deltas([(100.0, 1.0)], [(100.5, 1.0)]))
-    c._process_data(_trade(100.0, 0.5, AggressorSide.BUYER, 1, ts=time.time_ns() - 11 * _S))
+    now = time.time_ns()
+    c._process_data(_clocked_trade(1, now - 11 * _S, now))  # 11 s old on arrival: a replay
     (snap,) = _tick(c)
     assert snap.open_price is None
     assert _counts(c, "stale") == {_BYBIT: 1}
@@ -459,14 +461,15 @@ def test_duplicate_trade_id_dropped(tmp_path: Path) -> None:
     assert _counts(c, "duplicate") == {_BYBIT: 1}
 
 
-def test_duplicate_window_evicts_oldest_trade_id(tmp_path: Path) -> None:
+def test_duplicate_window_keeps_every_id_inside_the_horizon(tmp_path: Path) -> None:
+    """Story 31.2: past `seen_trade_ids` an id is still remembered until its horizon passes."""
     c = _collector(tmp_path, seen_trade_ids=2)
     c._process_data(_deltas([(100.0, 1.0)], [(100.5, 1.0)]))
-    for n in (1, 2, 3, 1):  # id 1 was evicted by 3, so its reappearance is a new trade
+    for n in (1, 2, 3, 1):  # id 1 is inside the horizon: its reappearance is a replay
         c._process_data(_trade(100.0, 0.5, AggressorSide.BUYER, n))
     (snap,) = _tick(c)
-    assert snap.buy_count == 4
-    assert _counts(c, "duplicate") == {}
+    assert snap.buy_count == 3
+    assert _counts(c, "duplicate") == {_BYBIT: 1}
 
 
 def test_quarantine_only_touches_this_collectors_instrument_dirs(tmp_path: Path) -> None:
@@ -485,20 +488,20 @@ def test_quarantine_only_touches_this_collectors_instrument_dirs(tmp_path: Path)
     assert error_ledger.counts() == {"collector.corrupt_parquet": 1}
 
 
-def test_ohlc_outside_book_canary_fires_once_per_minute(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-) -> None:
+def test_ohlc_outside_book_canary_is_ledgered_every_occurrence(tmp_path: Path) -> None:
+    """Story 31.2: each impossible row is a `collector.ohlc_outside_book` entry, never muted."""
+    error_ledger.reset()
     c = _collector(tmp_path)
     now = time.time_ns()
-    with caplog.at_level("ERROR", logger="capture.application.capture_service"):
-        for offset in (0, _S, _IMPOSSIBLE_LOG_EVERY_NS):
-            c._process_data(_deltas([(100.0, 1.0)], [(100.5, 1.0)]))
-            c._process_data(_trade(150.0, 0.5, AggressorSide.BUYER, offset))  # impossible price
-            c._book(_BYBIT).last_update_ns = now + offset
-            c._feeds.last_book_message_ns = now + offset
-            (snap,) = _tick(c, now + offset)
-            assert snap.high_price == 150.0  # canary, not a filter (DATA-07)
-    assert len([r for r in caplog.records if "IMPOSSIBLE" in r.message]) == 2
+    for offset in (0, _S, _REJECTION_LOG_EVERY_NS):
+        c._process_data(_deltas([(100.0, 1.0)], [(100.5, 1.0)]))
+        c._process_data(_trade(150.0, 0.5, AggressorSide.BUYER, offset))  # impossible price
+        c._book(_BYBIT).last_update_ns = now + offset
+        c._feeds.last_book_message_ns = now + offset
+        (snap,) = _tick(c, now + offset)
+        assert snap.high_price == 150.0  # canary, not a filter (DATA-07)
+    assert error_ledger.counts() == {"collector.ohlc_outside_book": 3}
+    assert "IMPOSSIBLE" in error_ledger.last_details()["collector.ohlc_outside_book"]
 
 
 def test_flush_feeds_the_second_sink_with_exactly_the_flushed_seconds(tmp_path: Path) -> None:
@@ -742,7 +745,8 @@ def test_accepted_trade_is_folded_live_and_buffered_for_the_archive(tmp_path: Pa
 
 def test_rejected_trades_are_neither_folded_nor_archived(tmp_path: Path) -> None:
     c = _collector(tmp_path)
-    c._process_data(_trade(100.0, 0.5, AggressorSide.BUYER, 1, ts=time.time_ns() - 11 * _S))
+    now = time.time_ns()
+    c._process_data(_clocked_trade(1, now - 11 * _S, now))  # stale on arrival
     c._process_data(_trade(100.0, 0.5, AggressorSide.BUYER, 2))
     c._process_data(_trade(100.0, 0.5, AggressorSide.BUYER, 2))  # duplicate trade_id
     assert [t.trade_id.value for t in c._buffer[(TradeTick, _BYBIT)]] == ["2"]
@@ -1346,7 +1350,7 @@ def test_dual_feed_archives_the_first_copy_and_counts_the_second_as_duplicate_fe
 def test_a_rest_copy_first_then_the_live_copy_is_duplicate_feed(tmp_path: Path) -> None:
     c = _collector(tmp_path)
     trade = _trade(100.0, 0.5, AggressorSide.BUYER, 5)
-    c._intake(_BYBIT).register("5", "rest")
+    c._intake(_BYBIT).register("5", "rest", time.time_ns())
     c._process_data(trade, _LINEAR)
     assert _counts(c, "duplicate_feed") == {_BYBIT: 1}
     assert dict(c._feeds.overlap) == {("rest", "linear"): 1}
@@ -1354,10 +1358,13 @@ def test_a_rest_copy_first_then_the_live_copy_is_duplicate_feed(tmp_path: Path) 
 
 def test_the_dedup_map_stays_bounded_and_evicts_in_lockstep(tmp_path: Path) -> None:
     c = _collector(tmp_path, seen_trade_ids=2)
-    for n in (1, 2, 3):
-        _seed_trade(c, n)
-    assert set(c._intake(_BYBIT)._first) == {"2", "3"}
-    assert list(c._intake(_BYBIT)._order) == ["2", "3"]
+    now = time.time_ns()
+    for n, ts in ((1, now - DEDUP_HORIZON_NS - _S), (2, now - 2 * _S), (3, now - _S)):
+        c._process_data(_clocked_trade(n, ts, ts), _LINEAR)
+    c._process_data(_clocked_trade(4, now, now), _LINEAR)
+    # Over the size and past the horizon: 1 goes; 2 is inside the horizon and stays.
+    assert set(c._intake(_BYBIT)._first) == {"2", "3", "4"}
+    assert list(c._intake(_BYBIT)._order) == ["2", "3", "4"]
 
 
 def _one_sided(c: CaptureService, now: int) -> list[str]:
@@ -1495,7 +1502,7 @@ def test_a_live_copy_after_its_rest_copy_is_folded_live_but_not_archived_again(
     tmp_path: Path,
 ) -> None:
     c = _collector(tmp_path)
-    c._intake(_BYBIT).register("5", "rest")
+    c._intake(_BYBIT).register("5", "rest", time.time_ns())
     trade = _trade(100.0, 0.5, AggressorSide.BUYER, 5)
     c._process_data(trade, _LINEAR)
     assert [t.trade_id.value for t in c._intake(_BYBIT).live] == ["5"]

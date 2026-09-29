@@ -23,8 +23,11 @@ import asyncio
 from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
+from decimal import Decimal
+from decimal import InvalidOperation
 from typing import IO
 from typing import Any
+from typing import NamedTuple
 from typing import Protocol
 
 from kernel.second_snapshot import DydxSecondSnapshot
@@ -131,12 +134,75 @@ class ArchiveWriter(Protocol):
         self, venue: str, shutting_down: asyncio.Event, ledger: Ledger
     ) -> IO[str] | None: ...
 
+    def recent_trade_ids(
+        self, iid: str, start_ns: int, end_ns: int, ledger: Ledger
+    ) -> list[tuple[str, int]]:
+        """
+        Return `(trade_id, ts_init)` of every archived trade of `iid` whose `ts_init` lies in
+        `[start_ns, end_ns]`: the dedup window's seed. Bounded by the span (MEM-01). A file it
+        cannot read is ledgered (`collector.dedup_seed`) and skipped, never fatal to the seed.
+        """
+        ...
+
+    def last_snapshot_second(self, iid: str) -> int | None:
+        """
+        Return the newest archived snapshot second (`ts_event // 1 s`) of `iid`, or None.
+        Reads only the newest file(s), never the instrument's whole history.
+        """
+        ...
+
+    def append_coverage(self, venue: str, lines: Sequence[str]) -> int:
+        """
+        Append the coverage record's lines (`capture.domain.coverage`) durably (fsync'd), in
+        order, serialized across threads. Raises on failure with the file as it was before the
+        call: the service ledgers it and keeps the lines. Returns the bytes of a torn tail (a
+        killed process's unfinished last line) cut before this process's first append -- or
+        before the first append after a failed one, whose rollback may itself have failed -- 0 if
+        none, for the service to ledger; a cut whose append then failed is returned by the next
+        successful one.
+        """
+        ...
+
+
+class PolledRows(NamedTuple):
+    """
+    One REST poll round (`CaptureService.poll_loop`): the rows it parsed and the ones it could not.
+
+    Invariant: a venue row the parser cannot turn into a `Data` row is never dropped silently --
+    it is named in `malformed` as `(instrument id or None when even the id is unreadable,
+    reason)`, and `poll_loop` ledgers them at its site each round (the planned or unidentifiable
+    ones under `plan_only`). The command that could break it is a parser that `continue`s past a
+    row without appending it here.
+    """
+
+    rows: list[Any]
+    malformed: list[tuple[str | None, str]]
+
+
+def finite_decimal(value: object) -> Decimal | None:
+    """
+    Return a polled venue value as an exact finite `Decimal`, or None when it is not one: not a
+    str, an int or a `Decimal` (a `float` is refused too: `Decimal(0.1)` is its binary expansion,
+    and a market value never round-trips through `float`), not numeric text
+    (`InvalidOperation`), or `NaN`/`Infinity` -- a `PolledRows.malformed` row, never archived
+    and never raised.
+    """
+    if isinstance(value, bool) or not isinstance(value, str | int | Decimal):
+        return None
+    try:
+        parsed = Decimal(value)
+    except (InvalidOperation, ValueError):
+        return None
+    return parsed if parsed.is_finite() else None
+
 
 class LiveStream(Protocol):
     """
     The live `snapshots:raw` fan-out (parent spine AD-1). Invariant: it publishes exactly the
     batch the gate accepted, the same objects the archive buffer holds; a failed publish loses
     that tick's live view only (the Parquet write is durable) and never stalls the sampler.
+    `publish` raises on failure; the service ledgers it (`collector.snapshot_publish`) and
+    carries on, so a Redis outage is counted, never a quiet WARNING (DATA-07).
     """
 
     async def publish(self, snapshots: list[DydxSecondSnapshot]) -> None: ...

@@ -18,6 +18,7 @@ import asyncio
 import json
 from unittest.mock import AsyncMock
 
+import pytest
 from kernel.second_snapshot import DydxSecondSnapshot
 from kernel.tests.snapshot_factory import make_snapshot
 
@@ -80,9 +81,9 @@ def test_payload_has_one_element_with_correct_instrument_id() -> None:
     assert parsed[0]["instrument_id"] == _IID.value
 
 
-def test_connection_error_is_caught_silently() -> None:
+def test_a_connection_error_reaches_the_caller_to_ledger() -> None:
+    """Story 31.2: the failure is the service's to ledger (`collector.snapshot_publish`)."""
     redis_client = AsyncMock()
     redis_client.publish.side_effect = ConnectionError("Redis down")
-    snap = _snap()
-    # Must not raise
-    asyncio.run(publish_snapshot_batch(redis_client, [snap]))
+    with pytest.raises(ConnectionError, match="Redis down"):
+        asyncio.run(publish_snapshot_batch(redis_client, [_snap()]))

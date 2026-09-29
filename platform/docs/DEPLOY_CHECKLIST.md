@@ -999,3 +999,38 @@ only then do the readers start again.
       --apply` for it (or let the next nightly's missed-day catch-up do it).
 - [ ] Record the `--apply` run's per-venue and total files, rows, snapped values and bytes before
       -> after in `docs/DATA_INTEGRITY_AUDIT.md` row D-69 and set its status to FIXED.
+
+### 31-2 Every drop counted, ledgered and explainable (commit: the `story 31-2-every-drop-counted-ledgered-and-explainable` commit on `troll`)
+
+The collectors now write the coverage record `<catalog>/../coverage/<venue>.jsonl`
+(`docs/DATA_DICTIONARY.md` §1.16) through a new bind mount, `./data/coverage:/app/coverage`, on
+`collector`, `bybit_collector` and `hyperliquid_collector`. They also judge trade staleness on
+arrival, seed the dedup window from the archive at start, and ledger every site that only logged
+before (audit D-70..D-73). No config key or env var changed. If the directory is missing, Docker
+creates it root-owned: the uid-1000 collectors then cannot append, and every flush ledgers
+`collector.coverage_write` while the lines pile up in memory (bounded at 10 000, then lost).
+
+- [ ] On the VPS, before the redeploy: `mkdir -p platform/data/coverage && sudo chown 1000:1000
+      platform/data/coverage` (`make up` creates the directory, but as the invoking user, so the
+      `chown` is what matters on a box where that user is not uid 1000).
+- [ ] `git pull`, then `make up` from `platform/`. It rebuilds the collector image and recreates
+      `bybit_collector` and `hyperliquid_collector` with the new mount. If dYdX is collected,
+      also run `make up-dydx`, which creates `data/coverage` too and recreates `collector`.
+- [ ] After the first minute: `ls -l platform/data/coverage/` shows `bybit.jsonl` and
+      `hyperliquid.jsonl` (plus `dydx.jsonl` if it runs) owned by 1000. Each start writes a
+      `restart` run per instrument (the seconds since the last archived row), matched by one
+      `collector.restart_gap` ledger line naming each instrument and span. After that the file
+      grows only when a second has no row or a trade is dropped/backfilled: expect a few lines
+      after a restart and near nothing in steady state (`wc -l` over an hour).
+- [ ] Check `GET /api/errors` (or `platform/data/errors/<service>.jsonl`) against the hour before
+      the deploy. `collector.second_rejected` is expected right after start (`no_book` until each
+      book's first snapshot), then only for real rejections. `collector.stale_trade` must be rare
+      (a venue replay at subscribe/reconnect). A steady rate means trades arrive more than
+      `stale_trade_seconds` old and is a finding. `collector.coverage_write`,
+      `collector.crash` and `collector.ohlc_outside_book` must be absent. Investigate any
+      `collector.unknown_message` (its detail names the type), because these messages used to be
+      dropped silently. Do the same for `collector.open_interest_poll` lines naming malformed
+      rows: on dYdX the poll is venue-wide, so every market without an `openInterest` is named
+      each round.
+- [ ] Confirm that `collector.dedup_seed` shows no dedup-seed read failure
+      (`archived trade ids could not be read for the dedup seed`) after the restart.

@@ -13,12 +13,14 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-The reference recorder's error-ledger sites (DATA-07): every failure it survives is recorded at
-one of these through `observability.error_ledger.record`, never a bare log line.
+The verification context's error-ledger sites (DATA-07), the reference recorder's
+(`verification.recorder.*`) and the conservation tool's (`verification.conservation.*`): every
+failure either survives or refuses on is recorded at one of these through
+`observability.error_ledger.record`, never a bare log line.
 
 Invariant: each site is named once, here, and every other verification module reports through
 these constants (`verification/tests/test_sites.py`), so a reader of the durable ledger
-(`data/errors/reference_recorder_<venue>.jsonl`) can count one failure class by one name.
+(`data/errors/<ERROR_LEDGER_SERVICE>.jsonl`) can count one failure class by one name.
 """
 
 # A WebSocket connect attempt failed (DNS, TLS, refused, timeout): an `error` line, then backoff.
@@ -51,3 +53,6 @@ WRITE = "verification.recorder.write"
 PRUNE = "verification.recorder.prune"
 # A recorder loop died of an unexpected exception: the process exits and restarts.
 CRASH = "verification.recorder.crash"
+# The conservation tool refused to run: a missing raw root or catalog, an unreadable plan, a
+# malformed coverage or archive-gap line, a truncated raw file of a closed hour.
+CONSERVATION_REFUSED = "verification.conservation.refused"

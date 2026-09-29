@@ -171,6 +171,41 @@ def iter_records(path: Path, *, allow_truncated: bool = False) -> Iterator[dict[
         raise TruncatedTail(f"{path}: the last zstd frame or line is truncated")
 
 
+class RawReader:
+    """
+    One venue's raw files, read-only, by (channel, hour index) -- the comparators' port onto the
+    store, for one checked UTC day. Invariant: a file of an hour of the day must be whole (a
+    truncated tail raises `TruncatedTail`: a crash the recorder has not repaired yet, whose lost
+    lines no comparator may silently miss). A neighbour hour outside the day (read only to catch
+    lines received across the day's edges, and possibly the hour still being written) may end
+    truncated: its complete lines are read and its file is named by `truncated_neighbours`.
+    """
+
+    def __init__(self, root: Path, venue: str, day_hours: range) -> None:
+        self._root = root
+        self._venue = venue
+        self._day_hours = day_hours
+        self._truncated: dict[str, None] = {}  # insertion-ordered set of file names
+
+    def exists(self, channel: str, hour: int) -> bool:
+        return channel_file(self._root, self._venue, channel, hour).is_file()
+
+    def records(self, channel: str, hour: int) -> Iterator[dict[str, object]]:
+        path = channel_file(self._root, self._venue, channel, hour)
+        if not path.is_file():
+            return
+        reader = RawFileReader(path)
+        for line in reader.lines():
+            yield json.loads(line)
+        if reader.truncated and hour in self._day_hours:
+            raise TruncatedTail(f"{path}: the last zstd frame or line is truncated")
+        if reader.truncated:
+            self._truncated[f"{channel}/{path.name.removesuffix(FILE_SUFFIX)}"] = None
+
+    def truncated_neighbours(self) -> tuple[str, ...]:
+        return tuple(self._truncated)
+
+
 def has_truncated_tail(path: Path) -> bool:
     """Whether a raw file ends in an unfinished zstd frame (header walk only, no decoding)."""
     if not path.exists() or path.stat().st_size == 0:

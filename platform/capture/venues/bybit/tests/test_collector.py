@@ -51,9 +51,19 @@ def test_parse_open_interest() -> None:
             ]
         }
     }
-    (item,) = parse_open_interest(payload, ts=7)
+    polled = parse_open_interest(payload, ts=7)
+    (item,) = polled.rows
     assert str(item.instrument_id) == _IID
     assert item.open_interest == Decimal("1234.5")
+    # Story 31.2: the rows it could not parse are named for the poll to ledger, never skipped.
+    assert [iid for iid, _ in polled.malformed] == ["ETHUSDT-LINEAR.BYBIT", None]
+
+
+def test_a_non_decimal_open_interest_is_malformed_not_raised() -> None:
+    payload = {"result": {"list": [{"symbol": "BTCUSDT", "openInterest": "n/a"}]}}
+    polled = parse_open_interest(payload, ts=7)
+    assert polled.rows == []
+    assert polled.malformed == [(_IID, "openInterest 'n/a' is not a finite decimal")]
 
 
 def test_config_defaults_and_validation(tmp_path: Path) -> None:
@@ -77,7 +87,7 @@ def test_config_defaults_and_validation(tmp_path: Path) -> None:
 
 def test_spot_id_never_in_open_interest() -> None:
     payload = {"result": {"list": [{"symbol": "BTCUSDT", "openInterest": "1"}]}}
-    ids = {str(item.instrument_id) for item in parse_open_interest(payload, ts=1)}
+    ids = {str(item.instrument_id) for item in parse_open_interest(payload, ts=1).rows}
     assert ids == {"BTCUSDT-LINEAR.BYBIT"}
     assert not any("-SPOT" in i for i in ids)
 
@@ -93,3 +103,11 @@ def test_client_routes_by_product_type() -> None:
     assert ws is client._ws_linear and pt == BybitProductType.LINEAR
     with pytest.raises(ValueError, match="unsupported"):
         client._ws_for("BTCUSD-INVERSE.BYBIT")
+
+
+@pytest.mark.parametrize("value", ["NaN", "Infinity", "-inf", {"v": 1}, ["1"], True])
+def test_a_non_finite_or_non_numeric_open_interest_is_malformed(value: object) -> None:
+    payload = {"result": {"list": [{"symbol": "BTCUSDT", "openInterest": value}]}}
+    polled = parse_open_interest(payload, ts=7)
+    assert polled.rows == []
+    assert [iid for iid, _ in polled.malformed] == [_IID]

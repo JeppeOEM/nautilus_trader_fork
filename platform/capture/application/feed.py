@@ -38,7 +38,27 @@ __all__ = [
     "OptionalStepFailed",
     "optional_feed_send",
     "optional_feed_step",
+    "report_unknown_message",
 ]
+
+# How much of an unknown message's repr the ledger line carries: enough to identify it, bounded so
+# a large frame cannot bloat the durable ledger.
+_UNKNOWN_REPR_CHARS = 300
+
+
+def report_unknown_message(message: object, ledger: Ledger, feed: Feed = MAIN_FEED) -> None:
+    """
+    Ledger a client message no branch of the venue's `_handle_message` decodes
+    (`collector.unknown_message`, DATA-07): it is not archived, and a new message type the Rust
+    client starts forwarding (an error object, a new channel) must be seen, never dropped quietly.
+    """
+    text = repr(message)
+    if len(text) > _UNKNOWN_REPR_CHARS:
+        text = text[:_UNKNOWN_REPR_CHARS] + f"... ({len(text)} chars)"
+    ledger(
+        sites.UNKNOWN_MESSAGE,
+        f"{feed.name}: {type(message).__name__} not decoded, not archived: {text}",
+    )
 
 
 async def optional_feed_step(feed: Feed, action: str, step: Awaitable[Any], ledger: Ledger) -> bool:

@@ -101,7 +101,7 @@ def build_capture(
     store = store_from_env(config.catalog_path)
     capture = CaptureService(
         config,
-        lambda on_data, _ledger: DydxClient(on_data=on_data, network=config.network),
+        lambda on_data, ledger: DydxClient(on_data=on_data, network=config.network, ledger=ledger),
         (
             # Raw-WS debug feed (Story 5.1) for the incident reports (INCIDENTS below) -- a
             # permanent feature, not scoped to any one investigation. Rust's file logger only

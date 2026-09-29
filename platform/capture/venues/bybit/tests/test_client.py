@@ -282,3 +282,16 @@ def test_a_resync_resubscribes_the_book_and_keeps_one_reference() -> None:
         "unsubscribe_trades",
         "unsubscribe_orderbook",
     ]
+
+
+def test_an_undecoded_message_is_ledgered_with_its_type_never_dropped_quietly() -> None:
+    """Story 31.2: e.g. a `BybitWebSocketError` the Rust client forwards is seen, not archived."""
+    error_ledger.reset()
+    received: list[object] = []
+    client = BybitClient(lambda data, feed: received.append(data), ledger=error_ledger.record)
+    client._handle_message(LINEAR_FEED, {"op": "subscribe", "success": False, "ret_msg": "x" * 999})
+    assert received == []
+    assert error_ledger.counts() == {"collector.unknown_message": 1}
+    detail = error_ledger.last_details()["collector.unknown_message"]
+    assert detail.startswith("linear: dict not decoded, not archived: {'op': 'subscribe'")
+    assert detail.endswith("chars)")  # the repr is bounded

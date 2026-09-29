@@ -60,6 +60,7 @@ permanent composition-root whitelist below and the non-venue HTTP clients.
 """
 
 import ast
+import itertools
 import re
 import sys
 from pathlib import Path
@@ -586,6 +587,70 @@ def test_the_purity_rule_catches_each_kind() -> None:
         "AsyncFunctionDef at line 2",
         "Await at line 3",
     ]
+
+
+_QUIET_LOG_LEVELS = ("warning", "debug")
+
+
+def _quiet_log_then_leave(tree: ast.Module) -> list[int]:
+    """
+    Lines of a `logger.warning(...)`/`logger.debug(...)` statement whose very next statement in
+    the same block is `continue` or `return`: the log-and-skip shape DATA-07 forbids at a site that
+    drops data (Story 31.2). A ledgered site calls `_ledger`/`ledger` instead.
+    """
+    found = []
+    for node in ast.walk(tree):
+        for field in ("body", "orelse", "finalbody"):
+            block = getattr(node, field, None)
+            if not isinstance(block, list):
+                continue
+            for statement, following in itertools.pairwise(block):
+                if _is_quiet_log(statement) and isinstance(following, ast.Continue | ast.Return):
+                    found.append(statement.lineno)
+    return sorted(found)
+
+
+def _is_quiet_log(statement: ast.stmt) -> bool:
+    return (
+        isinstance(statement, ast.Expr)
+        and isinstance(statement.value, ast.Call)
+        and isinstance(statement.value.func, ast.Attribute)
+        and statement.value.func.attr in _QUIET_LOG_LEVELS
+        and isinstance(statement.value.func.value, ast.Name)
+        and statement.value.func.value.id == "logger"
+    )
+
+
+def test_no_capture_site_logs_quietly_and_skips() -> None:
+    """DATA-07: `logger.warning(...); continue` is not how capture reports a dropping site."""
+    offenders = {
+        module: lines
+        for module, path in _CAPTURE_MODULES.items()
+        if (lines := _quiet_log_then_leave(ast.parse(path.read_text())))
+    }
+    assert offenders == {}, "ledger the site through `CaptureService._ledger` (a `sites` constant)"
+
+
+def test_the_quiet_log_rule_catches_each_form() -> None:
+    tree = ast.parse(
+        "for x in y:\n"
+        "    logger.warning('a')\n"  # 2: then continue
+        "    continue\n"
+        "def f():\n"
+        "    if a:\n"
+        "        logger.debug('b')\n"  # 6: then return
+        "        return\n"
+        "    else:\n"
+        "        logger.warning('c')\n"  # 9: then return None
+        "        return None\n"
+        "    logger.warning('d')\n"  # 11: followed by a ledger call, fine
+        "    ledger('site', 'd')\n"
+        "    logger.error('e')\n"  # 13: ERROR is not the quiet shape
+        "    return\n"
+        "    log.warning('f')\n"  # 15: not the module logger
+        "    return\n"
+    )
+    assert _quiet_log_then_leave(tree) == [2, 6, 9]
 
 
 _SITE_LITERAL = re.compile(r"(collector|archive_gaps)\.[a-z_]+")
@@ -1923,7 +1988,9 @@ VERIFICATION_ALLOWED_MODULES = frozenset(
 # the one exception, `archive`'s nightly composition root (its `verify_day` step).
 VERIFICATION_IMPORTERS: frozenset[str] = frozenset()
 # `verification.infrastructure` (the raw store and the aiohttp adapters) is wired only here.
-VERIFICATION_ROOTS = frozenset({"verification.recorder", "verification.tools.record_fixtures"})
+VERIFICATION_ROOTS = frozenset(
+    {"verification.recorder", "verification.tools.record_fixtures", "verification.conservation"}
+)
 
 
 def _verification_denied(target: str, name: str | None) -> bool:
@@ -2029,6 +2096,7 @@ def test_importing_the_verification_roots_loads_no_denied_module() -> None:
 
     probe = (
         "import sys, verification.recorder, verification.tools.record_fixtures\n"
+        "import verification.conservation\n"
         "print('\\n'.join(sorted(sys.modules)))\n"
     )
     env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": str(PLATFORM_DIR)}

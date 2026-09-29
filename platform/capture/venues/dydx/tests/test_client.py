@@ -26,6 +26,7 @@ from decimal import Decimal
 from typing import Any
 
 import pytest
+from observability import error_ledger
 
 from capture.venues.dydx.client import DydxClient
 from capture.venues.dydx.client import _at_fixed_precision
@@ -187,3 +188,32 @@ if __name__ == "__main__":
     test_value_is_preserved_exactly_across_precisions()
     test_all_results_share_the_same_precision_label()
     print("ok")
+
+
+def _handler_client() -> tuple[DydxClient, list[object]]:
+    """Only the message dispatch: no pyo3 clients are needed to decode a message."""
+    received: list[object] = []
+    client = object.__new__(DydxClient)
+    client._on_data = received.append
+    client._ledger = error_ledger.record
+    return client, received
+
+
+@pytest.mark.parametrize("info_type", ["block_height", "new_instrument_discovered"])
+def test_the_rust_clients_info_dicts_are_ignored_by_name(info_type: str) -> None:
+    error_ledger.reset()
+    client, received = _handler_client()
+    client._handle_message({"type": info_type, "height": 1})
+    assert received == []
+    assert error_ledger.counts() == {}
+
+
+@pytest.mark.parametrize("message", [{"type": "surprise"}, {"no": "type"}, 42])
+def test_any_other_undecoded_message_is_ledgered(message: object) -> None:
+    error_ledger.reset()
+    client, received = _handler_client()
+    client._handle_message(message)
+    assert received == []
+    assert error_ledger.counts() == {"collector.unknown_message": 1}
+    detail = error_ledger.last_details()["collector.unknown_message"]
+    assert f"{type(message).__name__} not decoded" in detail

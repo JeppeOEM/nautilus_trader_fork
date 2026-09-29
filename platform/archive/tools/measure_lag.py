@@ -42,6 +42,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from observability import error_ledger
+
 from nautilus_trader.model.data import TradeTick
 
 
@@ -110,14 +112,20 @@ def _build_client(venue: str, environment: str, on_data: Callable[[object], None
 
         bybit = importlib.import_module("capture.venues.bybit.client")
         env = BybitEnvironment.TESTNET if environment == "testnet" else BybitEnvironment.MAINNET
-        return bybit.BybitClient(on_data=on_data, environment=env)
+        return bybit.BybitClient(on_data=on_data, environment=env, ledger=error_ledger.record)
     if venue == "hyperliquid":
         hyperliquid = importlib.import_module("capture.venues.hyperliquid.client")
-        return hyperliquid.HyperliquidClient(on_data=on_data, environment=environment)
+        return hyperliquid.HyperliquidClient(
+            on_data=on_data, environment=environment, ledger=error_ledger.record
+        )
     from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
 
     dydx = importlib.import_module("capture.venues.dydx.client")
-    return dydx.DydxClient(on_data=on_data, network=DydxNetwork.from_str(environment))  # type: ignore[attr-defined]
+    return dydx.DydxClient(
+        on_data=on_data,
+        network=DydxNetwork.from_str(environment),  # type: ignore[attr-defined]
+        ledger=error_ledger.record,
+    )
 
 
 def _default_instruments(venue: str) -> list[str]:

@@ -29,9 +29,10 @@ integrity here rests on the crossed-book signal (DATA-04 per-level uncrossing) i
 """
 
 import asyncio
-import logging
 from collections.abc import Callable
 
+from capture.application.feed import report_unknown_message
+from capture.application.ports import Ledger
 from nautilus_trader.core import nautilus_pyo3
 from nautilus_trader.core.nautilus_pyo3 import FIXED_PRECISION
 from nautilus_trader.core.nautilus_pyo3 import DydxNetwork
@@ -44,7 +45,13 @@ from nautilus_trader.model.instruments import Instrument
 from nautilus_trader.model.objects import Price
 
 
-logger = logging.getLogger(__name__)
+# The two info dicts the Rust WS client hands the callback (`crates/adapters/dydx/src/python/
+# websocket.rs`), ignored by name because neither is market data: `block_height` is the chain's
+# clock (the indexer's block counter, not a price or a size), and `new_instrument_discovered`
+# announces a market listed after connect, which the Rust client already logs at INFO -- capture
+# picks up a new market only on restart (`CaptureService._listed`'s Known limit). Any other dict
+# is an unknown message and ledgered.
+_INFO_DICT_TYPES = frozenset({"block_height", "new_instrument_discovered"})
 
 # The two per-instrument channels, named as the `{op}_{channel}` wire methods below.
 _TRADES = "trades"
@@ -89,8 +96,11 @@ class DydxClient:
         self,
         on_data: Callable[[object], None],
         network: DydxNetwork = DydxNetwork.MAINNET,
+        *,
+        ledger: Ledger,
     ) -> None:
         self._on_data = on_data
+        self._ledger = ledger  # the collector's: an undecoded message is ledgered there
         self._http = nautilus_pyo3.DydxHttpClient(network=network)  # type: ignore[attr-defined]
         self._ws = nautilus_pyo3.DydxWebSocketClient.new_public(  # type: ignore[attr-defined]
             url=nautilus_pyo3.get_dydx_ws_url(network),  # type: ignore[attr-defined]
@@ -251,5 +261,7 @@ class DydxClient:
             self._on_data(FundingRateUpdate.from_pyo3(message))
         elif isinstance(message, nautilus_pyo3.InstrumentStatus):
             self._on_data(InstrumentStatus.from_pyo3(message))
-        elif not isinstance(message, dict):
-            logger.debug(f"Ignoring message of type {type(message).__name__}")
+        elif isinstance(message, dict) and message.get("type") in _INFO_DICT_TYPES:
+            pass  # see `_INFO_DICT_TYPES`
+        else:
+            report_unknown_message(message, self._ledger)

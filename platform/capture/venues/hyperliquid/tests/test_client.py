@@ -302,3 +302,13 @@ def test_a_subscribe_past_the_venues_channel_budget_is_refused_before_sending(
     monkeypatch.setattr(hl_client, "HYPERLIQUID_MAX_WS_CHANNELS", 6)
     asyncio.run(client.subscribe("ETH-USD-PERP.HYPERLIQUID"))
     assert client.wire_subscriptions() == 6
+
+
+def test_an_undecoded_message_is_ledgered_with_its_type_never_dropped_quietly() -> None:
+    error_ledger.reset()
+    received: list[object] = []
+    client = HyperliquidClient(lambda d, f: received.append(d), ledger=error_ledger.record)
+    client._handle_message(MAIN_FEED, ["not", "a", "known", "type"])
+    assert received == []
+    assert error_ledger.counts() == {"collector.unknown_message": 1}
+    assert "list not decoded" in error_ledger.last_details()["collector.unknown_message"]

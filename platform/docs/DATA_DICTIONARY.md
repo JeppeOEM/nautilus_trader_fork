@@ -9,7 +9,7 @@ Every "error ledger" site named below (`collector.late_trade`, `collector.trade_
 (Story 23.1; formerly `ml_signals.error_ledger`, whose shim Story 24.1 deleted). The sites, their
 names and what they count are unchanged `[re-cited 2026-09-21: Story 23.1]`, with one addition:
 `archive_gaps.inverted_span` counts a gap marker whose `from_ns > to_ns` — a backward wall-clock
-step between a lost trade's arrival and the flush. Since Story 26.1 every capture site is a constant in `capture/application/sites.py` and `CaptureService._ledger` is capture's only `record` call; it added `collector.empty_top` (a book with no best bid or ask: seconds skipped, one WARNING and one ledger line per instrument per minute) `[amended 2026-09-26: Story 26.1]`, and Story 30.2 `collector.unencodable` (a second whose row cannot be stored exactly at the instrument definition's precisions: skipped, one ERROR and one ledger line per instrument per minute). The marker is written as the ordered span and
+step between a lost trade's arrival and the flush. Since Story 26.1 every capture site is a constant in `capture/application/sites.py` and `CaptureService._ledger` is capture's only `record` call; it added `collector.empty_top` (a book with no best bid or ask: seconds skipped, one WARNING and one ledger line per instrument per minute) `[amended 2026-09-26: Story 26.1]`, and Story 30.2 `collector.unencodable` (a second whose row cannot be stored exactly at the instrument definition's precisions: skipped, one ERROR and one ledger line per instrument per minute). Story 31.2 ledgered every site that only logged or skipped before. Per flush: `collector.stale_trade` (§1.1) and `collector.second_rejected` (gate rejections per instrument and reason, `not_collected` excluded). Per event: `collector.skipped_seconds`, `collector.restart_gap` and `collector.coverage_write` (§1.16), `collector.ohlc_outside_book` (every occurrence, the row kept), `collector.snapshot_publish` (a failed `snapshots:raw` publish, Parquet unaffected), `collector.crash` (`run()` raised; restarted with backoff), `collector.unknown_message` (a client message no branch decodes, repr bounded to 300 chars; dYdX's `block_height` and `new_instrument_discovered` dicts are ignored by name), `collector.candle_store_behind` and `collector.book_crosscheck_unconfirmed`. A REST poll's unparseable rows (a missing symbol or `openInterest`, a non-decimal value) go to its own poll site, `collector.open_interest_poll` `[amended 2026-09-29: Story 31.2]`. The marker is written as the ordered span and
 still protects its rows, so the count is the only signal that the clock stepped back
 `[added 2026-09-22: Story 23.2]`.
 
@@ -60,6 +60,41 @@ Its archived days stay in the catalog and the `archive` service keeps verifying 
   by the normal flush, for every trade that passes the DATA-06 guards (stale-age filter,
   `trade_id` dedup) -- the same trades the live second folds. Loads with no conversion
   through `BacktestDataConfig(data_cls=TradeTick, instrument_ids=[...])` (NAUT-03).
+- **Stale filter, judged on arrival** (DATA-06, `capture/domain/trade_intake.py`
+  `TradeIntake.accept`): a first copy whose age *when it arrived*, `ts_init - ts_event`, exceeds
+  `stale_trade_seconds` (default 10 s) is subscribe-time history, counted `stale` and neither
+  archived nor folded. A replay (same id, same feed) is checked first and stays `duplicate`. Age is
+  never judged at processing time: an ingest backlog does not turn a live trade into history. A
+  trade with no receipt stamp (`ts_init == 0`, only a hand-built one) keeps the old
+  processing-time age, `now - ts_event`. Evidence for the change: the committed Bybit
+  `linear.publicTrade` fixture replays into 573 distinct trades (187 BTCUSDT, 386 ETHUSDT),
+  received 0.10–0.24 s after venue time. Processed after a 15 s ingest stall, the old rule drops
+  all 573 and the arrival rule archives all 573 (`platform/tests/test_stale_trade_burst.py`).
+  Each flush writes one `collector.stale_trade` ledger line naming every instrument that dropped
+  a trade, with its count and oldest/youngest arrival age. It also writes one coverage
+  `trades_dropped` line per such instrument, spanning the dropped trades' `ts_event` (§1.16). The
+  INFO line "Dropped subscribe-time trade history" is gone `[amended 2026-09-29: Story 31.2]`.
+- **Dedup window, time-bounded and seeded** (DATA-06, MEM-02): an id is evicted only while the
+  window holds more than `seen_trade_ids` ids **and** that id was registered more than
+  `DEDUP_HORIZON_NS` (= `MAX_TS_INIT_SKEW_NS` 300 s + `READ_SPAN_MARGIN_NS` 60 s = 6 min) before
+  the newest registration. The registration time is the arrival `ts_init` for a live copy, the
+  fetch time for a REST backfill copy and the archived `ts_init` for a seeded id. No copy that
+  could still be archived arrives after the horizon: a live copy older than
+  `stale_trade_seconds` on arrival is stale, and a backfill admits nothing older than
+  `MAX_TS_INIT_SKEW_NS`. So a count-bounded window can no longer evict an id and then archive it
+  a second time. Registration times are kept as one mark per registration second, not one per
+  id, to hold the hot-path allocation budget (`tests/test_hotpath.py`), so eviction is at most
+  1 s late and never early. At `run()`, before the first subscribe, each plan id's window is seeded from the
+  archive's own trades with `ts_init` in `[now - horizon, now]` (`ParquetArchiveWriter
+  .recent_trade_ids`: only the `trade_id`/`ts_init` columns of the files whose name span meets
+  it). Seeded ids carry the first feed `archive`, so a live or REST copy of an id the previous
+  process archived is a `duplicate_feed`, never archived or folded again, and not counted as a
+  feed-arbitration overlap. Seeding runs in `apply()` for every added id, before it is subscribed. A file whose name is not
+  a catalog span, or that vanishes or cannot be read, is ledgered at `collector.dedup_seed` and
+  skipped; the other files still seed. Known limit (in `trade_intake.py`): within the horizon the
+  window has no count bound. At a sustained 1000 trades/s on one instrument it holds about
+  360 000 ids (~47 MB per instrument, ~84 MB with a second feed; it scales per instrument). Upgrade path: a compact per-feed id encoding, or a bloom-backed tier
+  past `seen_trade_ids` `[amended 2026-09-29: Story 31.2]`.
 - **Flush tie guard:** each flush sorts a batch by `ts_init` and keeps back the group
   sharing its newest `ts_init` while it is under 5 s old (the rest of that WS message may
   still be queued): `write_data` refuses a file whose `ts_init` interval touches an existing
@@ -116,7 +151,13 @@ feed arbitration (cumulative)" gives each feed's first copies, its only-this-fee
 pairwise overlap; a feed whose last trade falls more than 30 s behind its sibling's raises an
 OBS-01 one-sided-outage notification. Other limits: a crash/restart gap is not backfilled
 (`_last_trade_ts` is in memory; D-61), and seconds the stale-book gate skipped during an outage
-have no snapshot row, so their backfilled trades are rebuild orphans.
+have no snapshot row, so their backfilled trades are rebuild orphans. Since Story 31.2 every
+backfill also writes to the coverage record (§1.16): the ids it archived go to a
+`trades_backfilled` line. A window it could not check goes to a `trades_unrecoverable` line:
+`depth` when the venue's history did not reach back to the baseline, `fetch_failed` when the
+fetch raised or had no instrument definition or no `VenueTradeHistory`, or shutdown interrupted
+or abandoned the backfill before its fetch. A `no baseline` backfill
+(no archived trade known in memory) records nothing `[amended 2026-09-29: Story 31.2]`.
 
 ### 1.2 `OrderBookDeltas` (native Nautilus type)
 
@@ -764,6 +805,182 @@ recorder that keeps restarting still prunes. Measured footprint: `docs/VERIFICAT
 `verification.recorder.*` sites of `verification/application/sites.py`: `connect`,
 `connection`, `stale_feed`, `unparsed`, `unknown_frame`, `venue_error`, `rest`, `plan`,
 `truncated_tail`, `corrupt_file`, `write`, `accounting`, `prune`, `crash`.
+
+**Consumers.** The recordings are read by Epic 31's comparators. The first is
+`python3 -m verification.conservation` (Story 31.2, §1.16). It reads only four things: these
+verbatim raw records, the catalog's raw Parquet (through pyarrow), capture's coverage record
+(§1.16) and the archive-gap markers. It never reads through the code it checks.
+
+### 1.16 Capture coverage record (`<catalog>/../coverage/<venue>.jsonl`, Story 31.2)
+
+Not catalog data: capture's durable account of every second it wrote no snapshot row for, and
+every trade it dropped, backfilled or could not recover. It is written so that
+`verification.conservation` can prove that every missing second and trade is *explained*
+(DATA-07). Format and rules: `capture/domain/coverage.py` (pure encoders, `SecondCoverage`),
+`capture/infrastructure/coverage_file.py` (the file) and `CaptureService._note_verdicts` /
+`_write_coverage` (`capture/application/capture_service.py`).
+
+**Where.** `coverage_path(catalog_path, venue)` = the catalog root's *parent* / `coverage` /
+`<venue lower>.jsonl`, next to the catalog rather than inside it, so no catalog reader or
+archive step ever sees it. One file per venue, appended only by that venue's one collector (the
+capture lock guarantees one): `bybit.jsonl`, `hyperliquid.jsonl`, `dydx.jsonl`. In the
+containers `CATALOG_PATH=/app/catalog`, so the file lives in `/app/coverage/`. That path is
+bind-mounted from `./data/coverage` (host `platform/data/coverage/`) on `collector`,
+`bybit_collector` and `hyperliquid_collector`. `make up`, `redeploy-all` and `up-dydx` create the
+directory as the invoking user, because the collectors run as uid 1000. The verify stack wipes
+and recreates it with the rest (`VERIFY_DATA_DIRS`).
+
+**Line kinds** (one JSON object per line, compact separators, exactly these keys):
+
+```
+{"kind":"seconds","instrument_id":"BTCUSDT-LINEAR.BYBIT","reason":"stale","first_s":1759150000,"last_s":1759150004,"count":5}
+{"kind":"trades_dropped","instrument_id":"…","reason":"stale","first_ns":…,"last_ns":…,"count":3}
+{"kind":"trades_backfilled","instrument_id":"…","count":2,"trade_ids":["…","…"]}
+{"kind":"trades_unrecoverable","instrument_id":"…","reason":"depth","from_ns":…,"to_ns":…}
+```
+
+- `seconds`: seconds `first_s..last_s` (inclusive, epoch seconds; `count = last_s - first_s +
+  1`) of one instrument, all without a row, for one `reason`. A second is `ts_event // 1 s`,
+  the same number the archive's snapshot rows carry. In venue mode that is the exchange second
+  being closed; in arrival mode (dYdX) it is the tick's `now // 1 s`.
+- `trades_dropped`: `count` trades of one instrument dropped in one flush cycle, with their
+  `ts_event` inside `first_ns..last_ns`. The only reason is `stale` (§1.1).
+- `trades_backfilled`: the ids a REST backfill archived (§1.1), one line per instrument per
+  backfill. The line carries no time. A Bybit linear backfill of 1000 UUID ids is ~39 KB.
+- `trades_unrecoverable`: a `ts_event` window `from_ns..to_ns` that a backfill could not check.
+  `depth`: the venue's history ended short of the baseline. `fetch_failed`: the fetch raised, or
+  there was no instrument definition or no `VenueTradeHistory`, or shutdown interrupted or
+  abandoned the backfill before it fetched the instrument (then the window ends at shutdown).
+  The window runs from the instrument's last archived trade to the fetch time, or to where the
+  venue's history began.
+
+**Seconds reasons.** At every sample tick each plan id gets exactly one verdict: a row, a
+rejection reason, or `not_collected`.
+
+| Reason | Produced by |
+|---|---|
+| `no_book`, `empty_top`, `crossed`, `stale`, `unencodable` | the write gate's rejection (`capture.domain.verdicts` `NoBook`/`EmptyTop`/`Crossed`/`Stale`/`Unencodable`, via `SecondSampler.sample`) |
+| `not_collected` | a plan id that is not subscribed on the wire (planned, not applied) |
+| `catch_up_cap` | venue mode: the overdue seconds older than the 30 s catch-up cap after a stall (`_skipped_seconds`), for every plan id; ledgered once per stall at `collector.skipped_seconds` |
+| `missed_tick` | arrival mode: floor seconds between two sample ticks that no tick sampled, for every plan id; ledgered at `collector.skipped_seconds` |
+| `write_failed` | a row the gate accepted (noted as a row at its tick) whose catalog write then failed; re-noted by the same flush that ledgers the batch LOST at `collector.flush_write`, so the append that follows carries it |
+| `restart` | at an id's first note in this process (or since it re-entered the plan), the seconds from its last archived row + 1 -- or from the last second this process noted for it + 1, when later (a re-added id's rows may still be in the flush buffer) -- to the second before (`ArchiveWriter.last_snapshot_second`, which reads only the newest snapshot files); ledgered at `collector.restart_gap` naming each id and span. A failed read is ledgered at the same site and no run is noted |
+
+A written row is noted too, but never becomes a line: it only ends the open run. Consecutive
+seconds of one instrument with the same reason extend one run. Any other verdict closes the run.
+At each flush every run, open ones included, is written and forgotten, so a sustained condition
+costs one line per instrument per flush interval. `collector.second_rejected` summarises the
+five gate reasons once per flush, per instrument and reason (`not_collected` is not counted
+there).
+
+**When written.** Once per flush (`flush_interval_seconds`, 60 s on every committed config).
+The report cycle runs first, so this cycle's stale-trade lines go out with this flush. The lines
+are appended after that flush's catalog writes, so a second's run and its missing row land in
+the same flush. They are also written on the final flush of `run()` (a clean stop, and also a
+loop crash, because the final flush sits in `run()`'s `finally`). Order within one append:
+lines left over from a failed write first, then seconds runs, then trade lines.
+
+**Durability and failure.** The append is `open("a")`, write, `flush`, `os.fsync`, done off the
+event loop: the pattern of `gap_markers.record_gap`. A failed append (any exception) is truncated
+back to the file's size before it, ledgered at `collector.coverage_write`, and its lines are kept
+for the next flush. At most the newest 10 000 kept lines are retained (`_COVERAGE_PENDING_MAX`).
+Beyond that the oldest are dropped, and the count is ledgered at the same site: those seconds and
+trades will then show as unexplained. The final flush has no next one, so its failed append is
+ledgered as lines LOST. The append is shielded from the flush task's cancellation: an append a
+cancelled flush left running is settled by the next (at shutdown, the final) flush before it
+takes new lines. A torn tail (an unfinished last line a killed process, or a failed truncate,
+left) is cut back to the last newline before the process's first append and again before the
+first append after a failed one; the cut bytes are ledgered at the same site. Nothing is ever
+skipped silently.
+
+Known limits:
+- *Growth, no rotation or pruning.* Measured line sizes: 126–135 B per `seconds` line, 153 B
+  per `trades_dropped` line, 146 B per `trades_unrecoverable` line and ~39 B per id on a
+  `trades_backfilled` line (Bybit UUIDs). A healthy day writes almost nothing, since rows are not
+  lines. One instrument under a sustained condition (never subscribed, a stale book all day)
+  writes one line per flush: 1440 lines, ~190 KB/day. Worst case, a verdict that flips every
+  second, is 86 400 lines, ~11 MB/day per instrument. Stale drops add at most 1440 lines
+  (~220 KB) per instrument-day. Each Bybit linear backfill can add ~39 KB. The file is never
+  rotated or pruned, and the conservation tool re-reads the whole file on every run (its
+  `trades_backfilled` ids, which carry no time, are all kept in memory). Upgrade path: one file
+  per UTC day (`coverage/<venue>/<YYYY-MM-DD>.jsonl`), pruned with the verification retention,
+  and a time on `trades_backfilled`.
+- *A killed process.* SIGKILL, OOM or power loss loses the in-memory lines of the current flush
+  interval (≤ 60 s). The next process's `restart` run covers those seconds, so they are
+  explained as `restart`, not with the reason the dead process saw. Stale drops noted in that
+  interval are lost, and their trades show as unexplained. A kill that lands after a flush's
+  catalog writes but before its coverage append is worse: the rows are on disk, so the next
+  `restart` run starts after them, and the seconds of that interval that had a reason show as
+  unexplained (the day fails; nothing passes wrongly). Upgrade path: a durable "noted through"
+  watermark per id that the next process starts its `restart` run from.
+- *First data and plan changes.* `restart` needs an archived row. An instrument never archived
+  before (the very first day, or a plan id added at runtime) has no run for the seconds before
+  its first verdict. An id is noted only while it is in the plan. So a day with a plan change,
+  or the collector's first day, cannot reconcile clean.
+
+**Reconciliation: `python3 -m verification.conservation`** (`verification/conservation.py`, the
+root; `verification/application/conservation.py`; `verification/domain/conservation.py`;
+`verification/infrastructure/catalog_reader.py`). For one closed UTC day of one venue
+(`--venue BYBIT|HYPERLIQUID`; there is no dYdX reference), and for every instrument in the
+venue's *current* plan (the collector's `config.toml`, the same file the recorder reads), it
+reconciles the three read-only sources. It reads only the verbatim raw records (§1.15), the
+catalog's raw Parquet through pyarrow (`trade_tick`: `trade_id`, `ts_event`;
+`custom_dydx_second_snapshot`: `ts_event`), `<catalog>/_archive_gaps/<iid>.jsonl` and this
+coverage file. It imports nothing of `capture`, `kernel.second_snapshot`, `kernel.catalog_files`
+or `nautilus_trader`, and parses the two durable files from the formats documented here
+(registered in `tests/test_boundaries.py`'s `VERIFICATION_ROOTS` and runtime probe). A malformed
+coverage or marker line is refused (file:line), never skipped.
+
+- **Trades** (partitioned by the trade's own venue-time hour on both sides; hour H reads the raw
+  files of H-1..H+1, because the raw store files lines by receive hour). The columns are:
+  - `seen`: reference ids with venue time in the day, from WS `publicTrade`/`trades` frames and
+    Bybit `recent-trade` polls (status 200, no `refusal`).
+  - `rest_only`: ids seen only by REST.
+  - `archived`: seen and in the archive.
+  - `backfilled`: archived and on a `trades_backfilled` line.
+  - `ledgered_unrecoverable`: not archived, but covered by a `trades_dropped` range, a
+    `trades_unrecoverable` window, or an archive-gap marker (a `ts_init` span, widened 60 s below).
+    A `trades_dropped` window, and a marker with `count` > 0, explains at most its recorded
+    `count` missing trades; the excess stays unexplained. Missing trades are taken in time
+    order, each spending the covering window with room that ends first. Known limit: `trades_unrecoverable`
+    windows and count-0 (`quarantined`) markers carry no count and stay uncapped. Known limit:
+    a `write_failed` marker of a REST-backfilled batch spans the batch's `ts_init` (the flush
+    time the backfill restamped), while its trades' venue time can be minutes to hours earlier,
+    so those lost trades show as unexplained (the day fails loudly on a loss capture ledgered).
+    Upgrade path: markers that also carry the batch's `ts_event` span.
+  - `unexplained`: the rest of the not-archived ids.
+  - `archived_not_seen`, `archived_twice` (ids stored more than once in the day).
+- **Seconds**: `expected` (86 400), `rows` (seconds with at least one row), explained per reason,
+  `unexplained`, `duplicate_rows`, `row_and_reason` (a row *and* a run), `multiple_reasons`
+  (two runs cover it; legitimate across a restart, and the earliest-starting run explains it).
+- **Verdict**: an instrument passes only with `unexplained` (trades and seconds),
+  `archived_twice`, `duplicate_rows` and `row_and_reason` all 0, and the day passes only with the
+  coverage file present and no raw reference hour of the day missing (a missing hour would make
+  the trade side vacuous). `archived_not_seen` and `multiple_reasons` are reported but do not
+  fail it; the neighbour hours outside the day may be missing or truncated
+  (`truncated_neighbour_files`). A day is refused ("day not closed") until 2 h after it ends (`DAY_SETTLE_NS`): its
+  last seconds' rows and runs reach disk at the next flush, a backfill of a late reconnect
+  settles after that, and the neighbour hour file closes an hour after midnight.
+- **Output**: a text table by default. `--json` prints `passed`, `venue`, `day`,
+  `coverage_file`, `coverage_present`, `missing_raw_files` and `instruments`. Each instrument has
+  `instrument_id`, `passed`, `trades` {`seen`, `rest_only`, `archived`, `backfilled`,
+  `ledgered_unrecoverable`, `unexplained`, `archived_not_seen`, `archived_twice`,
+  `examples_unexplained`} and `seconds` {`expected`, `rows`, `explained_by_reason`,
+  `unexplained`, `duplicate_rows`, `row_and_reason`, `multiple_reasons`,
+  `examples_unexplained`}. Up to 5 examples are listed per instrument.
+- **Exit codes**: 0 = every instrument passes, 1 = any fails, 2 = usage error (argparse). A
+  refusal exits with status 1 and its message, ledgered at `verification.conservation.refused`.
+  Refusals are: no raw root or catalog, an unreadable plan, a malformed coverage/marker/trade
+  line, or a truncated raw file of an hour that has ended.
+- **Repro** (host, from `platform/`, on the verify stack's data):
+  `VERIFY_DATA_DIR=data/verification CATALOG_PATH=data/catalog python3 -m
+  verification.conservation --venue BYBIT --day YYYY-MM-DD [--json]` (or `--raw-dir`/`--catalog`;
+  `BYBIT_COLLECTOR_CONFIG`/`HYPERLIQUID_COLLECTOR_CONFIG` override the plan file).
+- Known limits (each a `Known limit:` in `verification/application/conservation.py`). Memory is
+  one instrument-day of archived ids in Arrow plus one hour of Python id sets, and every raw file
+  is decoded up to three times per instrument that shares it. A trade first received two or more
+  hours after its venue time (only a quiet-market `recent-trade` poll can reach that far) is not
+  counted as seen. The plan is today's, not the one in force on the day.
 
 ---
 

@@ -29,6 +29,7 @@ from observability import error_ledger
 
 from capture.application import sites
 from capture.application.capture_service import CaptureService
+from capture.application.ports import PolledRows
 from capture.tests.test_collector import _BYBIT
 from capture.tests.test_collector import _collector
 from nautilus_trader.model.identifiers import InstrumentId
@@ -46,12 +47,17 @@ def _oi(iid: str) -> OpenInterest:
     )
 
 
-def _one_round(c: CaptureService, fetch: Callable[[], list[OpenInterest]], plan_only: bool) -> None:
+def _one_round(
+    c: CaptureService,
+    fetch: Callable[[], list[OpenInterest]],
+    plan_only: bool,
+    malformed: list[tuple[str | None, str]] | None = None,
+) -> None:
     """Run the loop for one poll: the fetch stops the service, so the loop exits after it."""
 
-    async def fetch_once() -> list[OpenInterest]:
+    async def fetch_once() -> PolledRows:
         c.stop()
-        return fetch()
+        return PolledRows(fetch(), malformed or [])
 
     asyncio.run(
         c.poll_loop(
@@ -101,13 +107,13 @@ def test_the_loop_polls_again_after_a_failed_round(tmp_path: Path) -> None:
     c = _collector(tmp_path)
     rounds = 0
 
-    async def fail_then_succeed() -> list[OpenInterest]:
+    async def fail_then_succeed() -> PolledRows:
         nonlocal rounds
         rounds += 1
         if rounds == 1:
             raise ConnectionError("indexer down")
         c.stop()
-        return [_oi(_BYBIT)]
+        return PolledRows([_oi(_BYBIT)], [])
 
     asyncio.run(
         c.poll_loop(
@@ -121,6 +127,47 @@ def test_the_loop_polls_again_after_a_failed_round(tmp_path: Path) -> None:
     assert rounds == 2
     assert error_ledger.counts() == {"collector.open_interest_poll": 1}
     assert _buffered(c) == [_BYBIT]
+
+
+def test_malformed_rows_of_planned_or_unknown_ids_are_ledgered_in_one_line(tmp_path: Path) -> None:
+    """Story 31.2: a row the parser could not read is ledgered at the poll's site, not skipped."""
+    error_ledger.reset()
+    c = _collector(tmp_path)
+    malformed = [(_BYBIT, "no openInterest"), (_OTHER, "no openInterest"), (None, "no symbol")]
+    _one_round(c, lambda: [_oi(_BYBIT)], plan_only=True, malformed=malformed)
+    assert _buffered(c) == [_BYBIT]  # the other rows are kept
+    assert error_ledger.counts() == {"collector.open_interest_poll": 1}
+    detail = error_ledger.last_details()["collector.open_interest_poll"]
+    assert "2 polled rows could not be parsed" in detail
+    assert f"{_BYBIT}: no openInterest" in detail
+    assert "<no id>: no symbol" in detail
+    assert _OTHER not in detail  # not planned: the venue-wide poll's other markets
+
+
+def test_a_venue_wide_poll_ledgers_every_malformed_row(tmp_path: Path) -> None:
+    error_ledger.reset()
+    c = _collector(tmp_path)
+    _one_round(c, list, plan_only=False, malformed=[(_OTHER, "bad value")])
+    assert f"{_OTHER}: bad value" in error_ledger.last_details()["collector.open_interest_poll"]
+
+
+def test_the_malformed_line_names_ten_rows_and_counts_them_all(tmp_path: Path) -> None:
+    error_ledger.reset()
+    c = _collector(tmp_path)
+    malformed: list[tuple[str | None, str]] = [(f"X{n}-LINEAR.BYBIT", "bad") for n in range(15)]
+    _one_round(c, list, plan_only=False, malformed=malformed)
+    detail = error_ledger.last_details()["collector.open_interest_poll"]
+    assert detail.startswith("15 polled rows could not be parsed")
+    assert "X9-LINEAR.BYBIT" in detail
+    assert "X10-LINEAR.BYBIT" not in detail
+    assert detail.endswith("(+5 more)")
+
+
+def test_a_clean_round_ledgers_nothing(tmp_path: Path) -> None:
+    error_ledger.reset()
+    c = _collector(tmp_path)
+    _one_round(c, lambda: [_oi(_BYBIT)], plan_only=True)
+    assert error_ledger.counts() == {}
 
 
 def test_loops_are_added_only_before_run(tmp_path: Path) -> None:

@@ -98,6 +98,8 @@ services:
       - ./data/incident_reports:/app/incident_reports
       # Story 23.3: durable per-service error ledger, survives restarts/rebuilds/Redis loss.
       - ./data/errors:/app/errors_dir
+      # The coverage record (Story 31.2): `<catalog>/../coverage/<venue>.jsonl`, next to the catalog.
+      - ./data/coverage:/app/coverage
     network_mode: host
     restart: always
     logging: *default-logging
@@ -129,6 +131,8 @@ services:
       - ./data/catalog:/app/catalog
       - ./data/candles:/app/candles_dir
       - ./data/errors:/app/errors_dir
+      # The coverage record (Story 31.2): `<catalog>/../coverage/<venue>.jsonl`, next to the catalog.
+      - ./data/coverage:/app/coverage
     network_mode: host
     restart: always
     logging: *default-logging
@@ -159,6 +163,8 @@ services:
       - ./data/catalog:/app/catalog
       - ./data/candles:/app/candles_dir
       - ./data/errors:/app/errors_dir
+      # The coverage record (Story 31.2): `<catalog>/../coverage/<venue>.jsonl`, next to the catalog.
+      - ./data/coverage:/app/coverage
     network_mode: host
     restart: always
     logging: *default-logging

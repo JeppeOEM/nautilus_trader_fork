@@ -20,13 +20,14 @@ Stdlib only, same as `capture.venues.dydx.open_interest`.
 
 import asyncio
 import time
-from decimal import Decimal
 
 from kernel.open_interest import OpenInterest
 from kernel.venue_http import bybit_url
 from kernel.venue_http import get_request
 from kernel.venue_http import http_json
 
+from capture.application.ports import PolledRows
+from capture.application.ports import finite_decimal
 from nautilus_trader.model.identifiers import InstrumentId
 
 
@@ -38,20 +39,35 @@ def _fetch_tickers_json(environment: str) -> dict:
     return http_json(get_request(url, _USER_AGENT))
 
 
-async def fetch_open_interest(environment: str) -> list[OpenInterest]:
+async def fetch_open_interest(environment: str) -> PolledRows:
     tickers_json = await asyncio.to_thread(_fetch_tickers_json, environment)
     return parse_open_interest(tickers_json, ts=time.time_ns())
 
 
-def parse_open_interest(tickers_json: dict, ts: int) -> list[OpenInterest]:
-    # The Nautilus Bybit adapter's linear ids are "{symbol}-LINEAR.BYBIT".
-    return [
-        OpenInterest(
-            instrument_id=InstrumentId.from_str(f"{row['symbol']}-LINEAR.BYBIT"),
-            open_interest=Decimal(row["openInterest"]),
-            ts_event=ts,
-            ts_init=ts,
+def parse_open_interest(tickers_json: dict, ts: int) -> PolledRows:
+    """
+    Every linear ticker row as an `OpenInterest`; a row without a symbol or an `openInterest`, or
+    whose value is not a decimal, is named in `malformed` (the poll ledgers it), never skipped.
+    """
+    rows: list[OpenInterest] = []
+    malformed: list[tuple[str | None, str]] = []
+    for row in tickers_json.get("result", {}).get("list", []):
+        # The Nautilus Bybit adapter's linear ids are "{symbol}-LINEAR.BYBIT".
+        iid = f"{row['symbol']}-LINEAR.BYBIT" if row.get("symbol") else None
+        value = row.get("openInterest")
+        if iid is None or not value:
+            malformed.append((iid, f"no symbol or openInterest in {row!r:.200}"))
+            continue
+        open_interest = finite_decimal(value)
+        if open_interest is None:
+            malformed.append((iid, f"openInterest {value!r:.80} is not a finite decimal"))
+            continue
+        rows.append(
+            OpenInterest(
+                instrument_id=InstrumentId.from_str(iid),
+                open_interest=open_interest,
+                ts_event=ts,
+                ts_init=ts,
+            )
         )
-        for row in tickers_json.get("result", {}).get("list", [])
-        if row.get("symbol") and row.get("openInterest")
-    ]
+    return PolledRows(rows, malformed)

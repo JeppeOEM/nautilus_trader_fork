@@ -627,7 +627,14 @@ class DydxSecondSnapshot(Data):
         """
         Parse one stored/wire row, strictly: every key present, every unit an int (not a float,
         not a bool), gaps positive. A row without precisions is a float-layout row and raises
-        `LegacySnapshotLayoutError` naming the migration -- there is no float fallback.
+        `LegacySnapshotLayoutError` naming the migration -- there is no float fallback. A missing
+        key raises `KeyError`: no field has a default here.
+
+        Known limit: the one legitimate absence, a pre-OHLC file (written before the trade
+        OHLC columns existed), gets its defaults from `archive.tools.migrate_snapshot_ints`,
+        which rewrites such a file before any reader sees it -- readers refuse the legacy layout
+        rather than default a field. Upgrade path: none needed while that migration is the only
+        producer of such rows; a future column is added the same way (migrate, then read).
         """
         if values.get("price_precision") is None or values.get("size_precision") is None:
             raise LegacySnapshotLayoutError(

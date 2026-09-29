@@ -205,6 +205,23 @@ def test_a_row_without_precisions_is_a_legacy_row_naming_the_migration() -> None
         DydxSecondSnapshot.from_dict({**row, "price_precision": None})
 
 
+_WIRE_KEYS = tuple(wire(bid_prices=[1.0], bid_sizes=[1.0]))
+
+
+@pytest.mark.parametrize("key", _WIRE_KEYS)
+def test_every_field_is_required_on_decode(key: str) -> None:
+    """Story 31.2: `from_dict` defaults nothing -- a pre-OHLC file is migrated before any read."""
+    row = wire(bid_prices=[1.0], bid_sizes=[1.0])
+    missing = {k: v for k, v in row.items() if k != key}
+    with pytest.raises((KeyError, LegacySnapshotLayoutError)):
+        DydxSecondSnapshot.from_dict(missing)
+
+
+def test_the_required_fields_are_the_whole_wire_row() -> None:
+    """The parametrization above covers every key the encoder writes."""
+    assert set(_WIRE_KEYS) == set(DydxSecondSnapshot.to_dict(_snapshot()))
+
+
 @pytest.mark.parametrize(
     ("key", "value"),
     [
