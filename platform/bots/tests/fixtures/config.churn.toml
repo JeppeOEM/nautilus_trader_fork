@@ -1,0 +1,30 @@
+# mechanics fixture, never deployed: `make bots-churn-check` (Story 29.6) only, never a strategy.
+#
+# One paper bot on dYdX BTC-USD-PERP mainnet market data with Sandbox execution, tuned only to
+# churn: trend_buy_threshold = 0.0 is below any trend probability and ofi_confirm_threshold = -1e9
+# below any MultiLevelOFI, so it goes long on the first cycle after its indicators initialize
+# (about six minutes of 1-minute bars) and re-enters after every exit; trend_sell_threshold = -1.0
+# can never fire, so a position only ever ends at one of its exits. take_profit_bps = 5 and
+# stop_loss_bps = 5 put both exits 0.05% from the entry-time mid, so each position exits within
+# minutes. The check proves the whole chain live: a protected long on bots:status (both exits,
+# entry, mark, quantity, one order of each kind, stop < entry < take-profit), then flat with no
+# order left behind, then a second protected long with fresh exits. trade_size = "0.0001" is the
+# instrument's size increment: the Sandbox matches market orders (an entry, or an exit the
+# OrderEmulator releases) against top-of-book only (L1_MBP), dYdX BTC-USD often rests 0.0001
+# dust levels on top, and a partly filled market order's remainder was seen left open (0.0002 of
+# a 0.001 entry, 0.0001 of a 0.001 take-profit), so a larger size can leave an entry or an exit
+# half done.
+log_level = "INFO"
+
+[venues.DYDX]
+environment = "mainnet"
+
+[[bots]]
+bot_id = "churn-01"
+instrument_id = "BTC-USD-PERP.DYDX"
+trade_size = "0.0001"
+trend_buy_threshold = 0.0
+trend_sell_threshold = -1.0
+ofi_confirm_threshold = -1e9
+take_profit_bps = 5
+stop_loss_bps = 5

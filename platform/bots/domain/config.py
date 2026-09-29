@@ -88,6 +88,20 @@ def venue_rules(venue: str) -> VenueRules:
     return VENUE_RULES[venue]
 
 
+# An exit 10_000 basis points (100%) or more below the entry -- a long's stop-loss, a short's
+# take-profit -- sits at or below zero, so neither key may reach it.
+MAX_EXIT_BPS = 9_999
+
+
+def _check_bps(name: str, value: object, maximum: int) -> None:
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{name} must be a positive integer (basis points), got {value!r}")
+    if value > maximum:
+        raise ValueError(f"{name} must be at most {maximum}, got {value!r}")
+
+
 @dataclass(frozen=True)
 class BotConfig:
     """
@@ -97,6 +111,11 @@ class BotConfig:
     `kernel.performance_metrics.equity_returns`) -- NOT this bot's real simulated balance, since
     every bot on one venue draws from that venue's single shared pool (Nautilus allows one exec
     client per venue per node). Left empty it defaults to 10_000 of the venue's paper currency.
+
+    `take_profit_bps`/`stop_loss_bps` (Story 29.6) give the bot's entries bracket exits; each is
+    None (no such leg) or a positive int (a `bool` is refused although Python counts it as one),
+    and at most `MAX_EXIT_BPS`: a long's stop or a short's take-profit 10_000 bps or more away
+    would sit at or below zero.
     """
 
     bot_id: str
@@ -106,8 +125,12 @@ class BotConfig:
     trend_sell_threshold: float = 0.4
     ofi_confirm_threshold: float = 0.0
     starting_balance: str = ""
+    take_profit_bps: int | None = None
+    stop_loss_bps: int | None = None
 
     def __post_init__(self) -> None:
+        _check_bps("take_profit_bps", self.take_profit_bps, MAX_EXIT_BPS)
+        _check_bps("stop_loss_bps", self.stop_loss_bps, MAX_EXIT_BPS)
         rules = venue_rules(venue_of(self.instrument_id))
         if not self.starting_balance:
             object.__setattr__(self, "starting_balance", f"10_000 {rules.paper_quote_currency}")
@@ -148,6 +171,12 @@ class ExecConfig:
     """
     The one-bot, explicitly-pathed file behind `LIVE_PAPER_REAL_MONEY_CONFIG`. Credentials are
     never fields here -- the venue's Rust client reads the env-var pair its environment selects.
+
+    Known limit: no `take_profit_bps`/`stop_loss_bps` here (Story 29.6 gave them to the paper
+    `BotConfig` only): whether each venue's exec client accepts Nautilus's contingent order lists
+    (OTO entry, OUO reduce-only legs) is unverified, and a bracket a venue half-rejects would
+    leave a real position unprotected. Upgrade path: verify contingent-order support per venue
+    on its `exchange_demo` account, then add the two keys here and forward them in `build_node`.
     """
 
     mode: str

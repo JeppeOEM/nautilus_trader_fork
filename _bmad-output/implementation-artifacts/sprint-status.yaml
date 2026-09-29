@@ -346,7 +346,7 @@ development_status:
   29-3-venue-cutover-bybit-hyperliquid-proven-then-dydx-stopped: done
   29-4-runtime-collection-control-bybit-hyperliquid: done
   29-5-market-browser-search-by-name-and-add-in-collector-pane: done
-  29-6-bots-pane-take-profit-stop-loss-and-position-details: ready-for-dev
+  29-6-bots-pane-take-profit-stop-loss-and-position-details: done
   epic-29-retrospective: optional
 
   epic-30: backlog

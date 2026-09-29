@@ -44,12 +44,29 @@ def incidents_key(bot_id: str) -> str:
 
 @dataclass(frozen=True)
 class PositionSnapshot:
-    """One bot's own position figures, read scoped to its strategy (never instrument-wide)."""
+    """
+    One bot's own position figures, read scoped to its strategy (never instrument-wide), in one
+    Cache read per heartbeat so the exits, the entry and the mark always describe the same moment.
+
+    The five price/quantity fields are `str(Price)`/`str(Quantity)` (the instrument's own
+    precision, never through `float`) or None when they do not apply: flat, no protective order of
+    that kind, no mid yet. `stop_loss`/`take_profit` are the protective order nearest the mid (the
+    entry price when there is no mid); the counts are every protective order of that kind;
+    `open_orders` is every open or emulated order of the bot, protective or not (Story 29.6).
+    """
 
     position_side: str  # "flat" | "long" | "short"
     net_exposure: float
     realized_pnl: float
     unrealized_pnl: float
+    entry_price: str | None = None
+    mark_price: str | None = None
+    position_qty: str | None = None
+    stop_loss: str | None = None
+    take_profit: str | None = None
+    stop_loss_orders: int = 0
+    take_profit_orders: int = 0
+    open_orders: int = 0
 
 
 class BotRuntime(Protocol):
@@ -82,6 +99,10 @@ class BotRuntime(Protocol):
 
     def on_fill(self, handler: Callable[[OrderFilled, Position | None], None]) -> None: ...
 
+    def on_order_event(self, handler: Callable[[], None]) -> None:
+        """Call `handler` after each of this strategy's order events (its position may change)."""
+        ...
+
 
 class FillsStore(Protocol):
     """
@@ -100,6 +121,10 @@ class FillsStore(Protocol):
     def position_realized_pnls(self, bot_id: str, cutoff_ns: int | None) -> list[float]: ...
 
     def win_rate_stats(self, bot_id: str) -> tuple[int, int]: ...
+
+    def last_fill_ns(self, bot_id: str) -> int | None:
+        """UNIX nanoseconds of the bot's latest fill, None before its first."""
+        ...
 
     def pnl_by_day(self, bot_id: str, cutoff_ns: int | None) -> list[dict]: ...
 

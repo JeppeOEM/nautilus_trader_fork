@@ -34,11 +34,19 @@ wire contract from bots:status, so these take a `dict | None` history entry dire
 rather than the `row: dict` shape every function above takes) plus next_range() and
 dashboard_bot_url(), the pure logic behind the `t`/`o` keys app.py wires in, and
 osc52_copy_sequence(), the clipboard fallback `o` writes the URL through.
+
+Story 29.6 adds the `entry`/`sl`/`tp` columns and a column header: `BOTS_COLUMNS` is the one
+column-width source, `bot_line_segments` builds a row as (attr, text) segments over it,
+`format_bot_line` joins their texts and `bots_header_line` puts each label at its column's
+start, so the header, the plain row and app.py's colored row can never drift apart. The price
+fields arrive as `str(Price)` strings and are only reformatted as `Decimal`, never `float`.
 """
 
 import base64
 from datetime import UTC
 from datetime import datetime
+from decimal import Decimal
+from decimal import InvalidOperation
 
 
 COLD_OPEN_TEXT = "waiting for bots:status…"
@@ -49,6 +57,42 @@ COLD_OPEN_TEXT = "waiting for bots:status…"
 # docstring for why plain f-string `:<N` padding alone isn't sufficient here.
 BOT_ID_WIDTH = 12
 SYMBOL_WIDTH = 20
+# format_pnl/format_exposure's own widths.
+PNL_WIDTH = 10
+EXPOSURE_WIDTH = 10
+# A price string has no fixed length ("0.00001234", "105,234.5"); an exit adds its signed
+# distance from mark ("-1.8%", "+12.3%").
+PRICE_WIDTH = 11
+DISTANCE_WIDTH = 6
+EXIT_WIDTH = PRICE_WIDTH + 1 + DISTANCE_WIDTH
+# "999h59m" and "100%": the widest uptime under 1_000 hours and the widest win rate.
+UPTIME_WIDTH = 7
+WIN_RATE_WIDTH = 4
+
+# The Bots-pane row, column by column: (header label, width including the gap after it). The one
+# source of every column's start, for the rows and for the header.
+BOTS_COLUMNS: tuple[tuple[str, int], ...] = (
+    ("", 2),  # the stale marker
+    ("bot", BOT_ID_WIDTH + 1),
+    ("pnl", PNL_WIDTH + 2),
+    ("symbol", SYMBOL_WIDTH + 1),
+    ("mode", 6),
+    ("run", 4),
+    ("side", 6),
+    ("exposure", EXPOSURE_WIDTH + 2),
+    ("entry", PRICE_WIDTH + 2),
+    ("sl", EXIT_WIDTH + 2),
+    ("tp", EXIT_WIDTH + 2),
+    ("up", len("up ") + UPTIME_WIDTH + 2),
+    ("wr", len("wr ") + WIN_RATE_WIDTH),
+)
+# The terminal width one Bots-pane row needs (docs/BOT_OPERATIONS.md states it): narrower, and
+# urwid wraps every row onto a second line.
+BOTS_PANE_MIN_WIDTH = sum(width for _label, width in BOTS_COLUMNS)
+
+# The attr app.py's palette colors an unprotected position's `sl` cell with.
+WARNING_ATTR = "warning"
+NOT_AVAILABLE_TEXT = "n/a"
 
 
 def fit(text: str, width: int) -> str:
@@ -140,24 +184,120 @@ def format_win_rate(win_rate: float | None) -> str:
     return f"{win_rate:.0%}"
 
 
+type Segment = tuple[str | None, str]
+
+
+def _decimal(text: str) -> Decimal | None:
+    """Return a wire price string as a finite `Decimal`, None when it is not one (never raises)."""
+    try:
+        value = Decimal(text)
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return value if value.is_finite() else None
+
+
+def format_price(text: str) -> str:
+    """
+    Return a `str(Price)` with thousands separators at its own precision ("58,900.0"), in
+    fixed-point notation however small ("0.0000001234", never "1.234E-7"); `n/a` for a value
+    that is not a number, so one malformed message cannot take the pane down.
+    """
+    value = _decimal(text)
+    return format(value, ",f") if value is not None else NOT_AVAILABLE_TEXT
+
+
+def format_distance(price: str, mark: str | None) -> str:
+    """Signed percent distance of `price` from `mark`, e.g. "-1.8%"; blank without a mark."""
+    price_value = _decimal(price)
+    mark_value = _decimal(mark) if mark is not None else None
+    if price_value is None or mark_value is None or mark_value == 0:
+        return ""
+    distance = (price_value - mark_value) / mark_value * 100
+    # One decimal fits DISTANCE_WIDTH up to "+99.9%"; at 100% or more whole percents do, so the
+    # cell's digits are never cut.
+    return f"{distance:+.1f}%" if abs(distance) < Decimal("99.95") else f"{distance:+.0f}%"
+
+
+def has_exit_fields(row: dict) -> bool:
+    """Return False for a `bots:status` message from a producer that predates Story 29.6."""
+    return "stop_loss" in row
+
+
+def _pad(segments: list[Segment], width: int) -> list[Segment]:
+    used = sum(len(text) for _attr, text in segments)
+    return [*segments, (None, " " * (width - used))] if used < width else segments
+
+
+def _entry_cell(row: dict) -> list[Segment]:
+    if not has_exit_fields(row):
+        return [(None, NOT_AVAILABLE_TEXT)]
+    if row["position_side"] == "flat":
+        return []
+    entry = row["entry_price"]
+    text = format_price(entry) if entry is not None else NOT_AVAILABLE_TEXT
+    return [(None, fit(text, PRICE_WIDTH))]
+
+
+def _exit_cell(row: dict, kind: str) -> list[Segment]:
+    """
+    Return the `sl`/`tp` cell: `n/a` (older producer), blank (flat), `none` (no such order -- in the
+    warning attr for a missing stop), `armed` (an order whose price is not set yet, e.g. a
+    trailing stop), else the price and its distance from mark.
+    """
+    if not has_exit_fields(row):
+        return [(None, NOT_AVAILABLE_TEXT)]
+    if row["position_side"] == "flat":
+        return []
+    if not row[f"{kind}_orders"]:
+        return [(WARNING_ATTR if kind == "stop_loss" else None, "none")]
+    price = row[kind]
+    if price is None:
+        return [(None, "armed")]
+    distance = format_distance(price, row["mark_price"])
+    return [(None, f"{fit(format_price(price), PRICE_WIDTH)} {fit(distance, DISTANCE_WIDTH)}")]
+
+
+def bot_line_segments(row: dict, stale: bool, now: float) -> list[Segment]:
+    """
+    One Bots-pane row as (attr, text) segments, each column exactly its `BOTS_COLUMNS` width.
+    Only the PnL (by sign) and an unprotected position's `none` stop carry an attr -- "fixed
+    position + color, never color alone": the text always carries the meaning.
+    """
+    pnl = row["realized_pnl"] + row["unrealized_pnl"]
+    cells: list[list[Segment]] = [
+        [(None, "~ " if stale else "")],
+        [(None, fit(row["bot_id"], BOT_ID_WIDTH))],
+        [("pnl-pos" if pnl >= 0 else "pnl-neg", fit(format_pnl(pnl), PNL_WIDTH))],
+        [(None, fit(row["symbol"], SYMBOL_WIDTH))],
+        [(None, f"{row['mode']:<5}")],
+        [(None, "run" if row["running"] else "off")],
+        [(None, f"{row['position_side']:<5}")],
+        [(None, fit(format_exposure(row["net_exposure"]), EXPOSURE_WIDTH))],
+        _entry_cell(row),
+        _exit_cell(row, "stop_loss"),
+        _exit_cell(row, "take_profit"),
+        [(None, f"up {fit(format_uptime(row['started_at'], now), UPTIME_WIDTH)}")],
+        [(None, f"wr {fit(format_win_rate(row['win_rate']), WIN_RATE_WIDTH)}")],
+    ]
+    segments: list[Segment] = []
+    for cell, (_label, width) in zip(cells, BOTS_COLUMNS, strict=True):
+        segments += _pad(cell, width)
+    return segments
+
+
 def format_bot_line(row: dict, stale: bool, now: float) -> str:
     """
     One full plain-text row -- bot_id, PnL (realized + unrealized), symbol, mode,
-    running/stopped, position side, net exposure, uptime, win-rate (Story 4.4, AC1).
-    Used directly by tests and as the source of truth app.py's colored urwid.Text
-    markup must match field-for-field.
+    running/stopped, position side, net exposure, entry, stop-loss, take-profit, uptime,
+    win-rate (Story 4.4, AC1; Story 29.6). The text of `bot_line_segments`, which app.py
+    colors: the two can never disagree.
     """
-    stale_marker = "~ " if stale else "  "
-    pnl_text = format_pnl(row["realized_pnl"] + row["unrealized_pnl"])
-    uptime_text = format_uptime(row["started_at"], now)
-    win_rate_text = format_win_rate(row["win_rate"])
-    running_text = "run" if row["running"] else "off"
-    return (
-        f"{stale_marker}{fit(row['bot_id'], BOT_ID_WIDTH)} {pnl_text}  "
-        f"{fit(row['symbol'], SYMBOL_WIDTH)} "
-        f"{row['mode']:<5} {running_text} {row['position_side']:<5} "
-        f"{format_exposure(row['net_exposure'])}  up {uptime_text}  wr {win_rate_text}"
-    )
+    return "".join(text for _attr, text in bot_line_segments(row, stale, now))
+
+
+def bots_header_line() -> str:
+    """Return the Bots pane's column header, each label where its column starts in every row."""
+    return "".join(fit(label, width) for label, width in BOTS_COLUMNS)
 
 
 def format_win_rate_detail(win_rate: float | None, closed_trades: int) -> str:
@@ -174,11 +314,13 @@ def format_win_rate_detail(win_rate: float | None, closed_trades: int) -> str:
 
 def bot_detail_lines(row: dict, now: float) -> list[str]:
     """
-    Bot-detail's live-snapshot-header region, as three plain-text lines matching the
+    Bot-detail's live-snapshot-header region, as plain-text lines matching the
     UX mockup's two-column field pairing (mockups/key-bot-detail.html):
     line 1 = strategy/symbol + mode, line 2 = PnL + position, line 3 = uptime +
-    win-rate. app.py lays these out in urwid.Columns and colors the PnL segment --
-    this function only produces the text (Story 4.5, AC1).
+    win-rate (Story 4.5, AC1); line 4 = quantity, entry, mark and open orders, line 5 =
+    stop-loss and take-profit with their order counts and the time since the last fill
+    (Story 29.6). app.py lays these out and colors the PnL segment -- this function only
+    produces the text.
     """
     pnl_text = format_pnl(row["realized_pnl"] + row["unrealized_pnl"])
     uptime_text = format_uptime(row["started_at"], now)
@@ -188,6 +330,44 @@ def bot_detail_lines(row: dict, now: float) -> list[str]:
         f"pnl        {pnl_text}                              "
         f"position  {row['position_side']} {format_exposure(row['net_exposure']).strip()}",
         f"uptime     {uptime_text}                                win rate  {win_rate_text}",
+        *_position_detail_lines(row, now),
+    ]
+
+
+def _detail_price(text: str | None) -> str:
+    return format_price(text) if text is not None else "-"
+
+
+def _detail_exit(row: dict, kind: str) -> str:
+    if row["position_side"] == "flat":
+        return "-"
+    count = row[f"{kind}_orders"]
+    if not count:
+        return "none"
+    price = row[kind]
+    text = format_price(price) if price is not None else "armed"
+    return f"{text} ({count} order{'s' if count != 1 else ''})"
+
+
+def _position_detail_lines(row: dict, now: float) -> list[str]:
+    if not has_exit_fields(row):
+        return [
+            f"quantity   {NOT_AVAILABLE_TEXT}   entry {NOT_AVAILABLE_TEXT}   "
+            f"mark {NOT_AVAILABLE_TEXT}   open orders {NOT_AVAILABLE_TEXT}",
+            f"stop loss  {NOT_AVAILABLE_TEXT}   take profit {NOT_AVAILABLE_TEXT}   "
+            f"last fill {NOT_AVAILABLE_TEXT}",
+        ]
+    last_fill_at = row["last_fill_at"]
+    last_fill = (
+        f"{format_uptime(last_fill_at / 1e9, now)} ago"
+        if last_fill_at is not None
+        else "no fills yet"
+    )
+    return [
+        f"quantity   {row['position_qty'] or '-'}   entry {_detail_price(row['entry_price'])}   "
+        f"mark {_detail_price(row['mark_price'])}   open orders {row['open_orders']}",
+        f"stop loss  {_detail_exit(row, 'stop_loss')}   "
+        f"take profit {_detail_exit(row, 'take_profit')}   last fill {last_fill}",
     ]
 
 

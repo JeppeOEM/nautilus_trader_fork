@@ -103,6 +103,39 @@ first); `excluded`; `pending` (your add, waiting for `collector:status`); or
 (`failed to send start <ID>: Redis publish failed`) and marks nothing, so `a` may be pressed
 again. Only `collector:status` ever makes a row `collected`.
 
+**Bots pane columns** (Story 29.6). A one-line header names every column:
+`bot`, `pnl`, `symbol`, `mode`, `run`, `side`, `exposure`, `entry`, `sl`, `tp`, `up`, `wr`.
+`entry` is the position's average open price; `sl` and `tp` are the stop-loss and take-profit
+nearest the mark, each followed by its signed distance from the mark (`58,900.0    -1.8%`).
+Prices keep the instrument's own precision with thousands separators; a price too long for its
+11-character cell is cut with `…`. The three cells read:
+
+- blank when the bot is flat;
+- `none` in `sl` (in the warning colour, light red) when the bot holds a position with **no
+  stop-loss**: the one row to look for. `none` in `tp` (no colour) is a position without a
+  take-profit;
+- `armed` when a protective order rests but has no price yet (a trailing stop before its trigger
+  is calculated);
+- `n/a` in all three when the bot's process predates these fields (an older `live-paper` image):
+  the TUI never makes up a value.
+
+The distance is blank while the bot has no mark (no quote yet). A protective order is classified
+by the order itself, whatever strategy placed it: a reduce-only order on the side that closes the
+position, a stop type (`STOP_MARKET`, `STOP_LIMIT`, `TRAILING_STOP_*`, at its trigger, so a
+trailing stop follows the trail) is a stop-loss, a `LIMIT` (at its price) or an if-touched order
+(at its trigger) a take-profit. An order the `OrderEmulator` holds counts too; a non-reduce-only
+order is an entry order and never protection. Bot-detail's snapshot adds two lines: quantity,
+entry, mark and open orders (every open or emulated order of the bot); then the stop-loss and
+take-profit with how many of each rest (scaled exits show the nearest and the count) and the time
+since the bot's last fill (`… ago`, or `no fills yet`).
+
+The Bots pane needs a terminal at least 148 columns wide (`bot_tui/bots_pane.py`'s
+`BOTS_PANE_MIN_WIDTH`): narrower, each row wraps onto a second line.
+
+A stopped bot cancels its own resting orders, so a position it still holds shows `sl none` in the
+warning colour: the truth, not a hidden risk (stopping never flattens). Known limit: a restarted
+bot does not re-place the exits of a position it inherits.
+
 Stopping a *running* bot opens a type-to-confirm prompt (type `stop` + Enter); starting
 has no such guard. `bot_tui` needs `redis` up (`make up` or `make up-live-paper` bring it
 up) but not `live-paper` itself — an offline bot just shows as stale.
@@ -124,8 +157,37 @@ last 50 kept), so it survives a `bot_tui` restart.
 **Watch it:**
 ```bash
 docker compose -f platform/docker-compose.yml logs -f live-paper   # or make web -> Dozzle
-docker exec dydx-redis redis-cli SUBSCRIBE bots:status          # heartbeat every 5s
+docker exec dydx-redis redis-cli SUBSCRIBE bots:status          # every 5s + on each order event
 ```
+
+**`bots:status` fields.** One JSON message per bot, published every 5 s and again on each of the
+bot's own order events (a bracket exit can close a position and the bot re-enter within a
+second, so the flat moment in between would otherwise rarely be seen). Fields, in order:
+`bot_id`, `strategy`, `symbol`, `mode`, `running`, `position_side`, `net_exposure`,
+`realized_pnl`, `unrealized_pnl`, `win_rate`, `closed_trades`, `started_at`, `updated_at`, then
+(Story 29.6, appended so older readers are unaffected) `stop_loss`, `take_profit`,
+`entry_price`, `mark_price`, `position_qty` (strings from `str(Price)`/`str(Quantity)` at the
+instrument's precision, never floats; `null` when flat, when no such protective order rests, or
+before the first mid), `stop_loss_orders`, `take_profit_orders` (how many rest), `open_orders`
+(every open or emulated order of the bot, protective or not, flat or not) and `last_fill_at`
+(UNIX ns of the bot's latest fill in `fills.db`, `null` before its first).
+
+**Bracket exits and the churn check.** A paper bot gets a resting take-profit and/or stop-loss
+per entry from `take_profit_bps`/`stop_loss_bps` in its `[[bots]]` entry (`bots/README.md`);
+both legs are emulated by the node's `OrderEmulator` (released to the venue only when a trade
+reaches them; `bots/strategies/exits.py` explains why and states the Known limit), and
+`make bots-churn-check` proves the whole chain live in about ten minutes. It runs the
+`live-paper` image once with `bots/tests/fixtures/config.churn.toml` (one bot, `churn-01`, on
+dYdX `BTC-USD-PERP` mainnet data with Sandbox execution, tuned to go long at once and exit at
+5 bps; a mechanics fixture, never deployed), a scratch `fills.db` and its own Redis on
+`CHURN_REDIS_PORT` (default 6399, started only when nothing answers there; one the script left
+behind in an interrupted run is removed first, never reused), and watches
+`bots:status` for: (1) a long with both exits, entry, mark and quantity, one order of each kind
+and stop < entry < take-profit; (2) flat with no exits, `closed_trades` above (1)'s and no order
+left open; (3) a second protected long with fresh exits. It exits 0 when all three are seen
+within 15 min, else non-zero naming the check that failed, removes the bot container either
+way (and a Redis it started), and writes the captured payloads to
+`data/bots_churn_check/payloads.json` (`CHURN_OUT` overrides).
 
 ---
 

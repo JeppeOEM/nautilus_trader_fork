@@ -227,6 +227,9 @@ _PALETTE = [
     # it still reads correctly against any terminal theme (same UX-DR1 "inherit the
     # terminal's own default" discipline the other palette entries already follow).
     ("focus", "default,standout", "default"),
+    # An open position with no stop-loss (Story 29.6): the `sl` cell's `none` text carries the
+    # meaning, this is the extra cue.
+    (bots_pane.WARNING_ATTR, "light red", "default"),
 ]
 
 # Bot-detail's trades-blotter region (Story 4.7) -- a fixed visible height inside a
@@ -481,10 +484,14 @@ class BotTuiApp:
         # "the bots page jumps up" -- the same bug already found and fixed once for
         # the Collector pane (Story 6.1); platform/CLAUDE.md now has a standing rule
         # against reintroducing it a third time in a future pane.
+        # Populated, the body is `_bots_listbox` under the column header (Story 29.6), both built
+        # once per shape change: the ListBox inside the Frame is the persistent object whose
+        # walker each tick mutates.
         self._bots_shape: str | None = None
         self._bots_body: urwid.Widget = urwid.Filler(
             urwid.Text(bots_pane.COLD_OPEN_TEXT), valign="top"
         )
+        self._bots_listbox: urwid.ListBox | None = None
 
         # The market browser (Story 29.5): the same persistent-body/shape contract (TUI-01), plus
         # `_markets_key`, the inputs its walker was last built from -- about 1,100 rows (Bybit
@@ -581,13 +588,14 @@ class BotTuiApp:
             self._build_bot_row_widget(row, bots_state.is_stale(row["bot_id"], now=now), now)
             for row in rows
         ]
-        if self._bots_shape != "rows":
-            self._bots_body = urwid.ListBox(urwid.SimpleListWalker(widgets))
+        if self._bots_shape != "rows" or self._bots_listbox is None:
+            self._bots_listbox = urwid.ListBox(urwid.SimpleListWalker(widgets))
+            self._bots_body = urwid.Frame(
+                self._bots_listbox, header=urwid.Text(bots_pane.bots_header_line())
+            )
             self._bots_shape = "rows"
         else:
-            listbox = self._bots_body
-            assert isinstance(listbox, urwid.ListBox)
-            listbox.body[:] = widgets  # type: ignore[index]
+            self._bots_listbox.body[:] = widgets  # type: ignore[index]
 
     def _refresh_collector_body(self) -> None:
         """
@@ -898,22 +906,12 @@ class BotTuiApp:
         return _focused_collector_id(self._body.original_widget)
 
     def _build_bot_row_widget(self, row: dict, stale: bool, now: float) -> urwid.Widget:
-        # Color applied only to the PnL segment (sign, not magnitude) -- "fixed position +
-        # color, never color alone"; the sign is also always in the text itself via
-        # bots_pane.format_pnl.
-        pnl_value = row["realized_pnl"] + row["unrealized_pnl"]
-        pnl_color = "pnl-pos" if pnl_value >= 0 else "pnl-neg"
-        prefix = "~ " if stale else "  "
-        running_text = "run" if row["running"] else "off"
+        # The markup is bots_pane's own segments -- the same text as format_bot_line, with the
+        # PnL sign and an unprotected position's stop colored ("fixed position + color, never
+        # color alone").
         markup = [
-            prefix,
-            f"{bots_pane.fit(row['bot_id'], bots_pane.BOT_ID_WIDTH)} ",
-            (pnl_color, bots_pane.format_pnl(pnl_value)),
-            f"  {bots_pane.fit(row['symbol'], bots_pane.SYMBOL_WIDTH)} "
-            f"{row['mode']:<5} {running_text:<3} {row['position_side']:<5} "
-            f"{bots_pane.format_exposure(row['net_exposure'])}  "
-            f"up {bots_pane.format_uptime(row['started_at'], now)}  "
-            f"wr {bots_pane.format_win_rate(row['win_rate'])}",
+            (attr, text) if attr is not None else text
+            for attr, text in bots_pane.bot_line_segments(row, stale, now)
         ]
         return urwid.AttrMap(
             _SelectableBotRow(markup, bot_id=row["bot_id"]), None, focus_map="focus"
@@ -922,6 +920,9 @@ class BotTuiApp:
     def _highlighted_bot_id(self) -> str | None:
         """Return the Bots-pane row currently focused, read off the ListBox's own focus."""
         body = self._body.original_widget
+        if isinstance(body, urwid.Frame):
+            # The populated pane: the rows' ListBox under the column header.
+            body = body.body
         if not isinstance(body, urwid.ListBox):
             return None
         focus_widget = body.focus
@@ -970,6 +971,8 @@ class BotTuiApp:
                 [pnl_line[:pnl_start], (pnl_color, pnl_text), pnl_line[pnl_end:]],
             ),
             urwid.Text(lines[2]),
+            # Story 29.6: the position (quantity, entry, mark, open orders) and its exits.
+            *(urwid.Text(line) for line in lines[3:]),
         ]
         snapshot_box = urwid.LineBox(
             urwid.Pile(line_widgets), title=f"{self._bot_detail_bot_id}  snapshot"

@@ -116,6 +116,8 @@ def _parse_bot(raw_bot: dict, path: Path) -> BotConfig:
         trend_sell_threshold=raw_bot.get("trend_sell_threshold", 0.4),
         ofi_confirm_threshold=raw_bot.get("ofi_confirm_threshold", 0.0),
         starting_balance=raw_bot.get("starting_balance", ""),
+        take_profit_bps=raw_bot.get("take_profit_bps"),
+        stop_loss_bps=raw_bot.get("stop_loss_bps"),
     )
 
 

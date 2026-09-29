@@ -182,6 +182,11 @@ class SqliteFillsStore:
         closed_trades, wins = rows[0]
         return closed_trades, wins or 0
 
+    def last_fill_ns(self, bot_id: str) -> int | None:
+        """UNIX nanoseconds of the bot's latest fill (served by `idx_bot_ts`), None before any."""
+        rows = self._query("SELECT MAX(ts) FROM fills WHERE bot_id = ?", (bot_id,))
+        return rows[0][0]
+
     def pnl_by_day(self, bot_id: str, cutoff_ns: int | None) -> list[dict]:
         """Net realized PnL per UTC day (only reducing fills carry a non-NULL `realized_pnl`)."""
         rows = self._query(

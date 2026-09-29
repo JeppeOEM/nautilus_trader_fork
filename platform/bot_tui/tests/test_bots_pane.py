@@ -17,6 +17,10 @@ Tests for bot_tui.bots_pane -- Story 4.4, AC1/AC2, and Story 4.5, AC1 (Bot-detai
 snapshot-header formatting). Pure-logic only, no urwid/I/O.
 """
 
+from pathlib import Path
+
+import pytest
+
 from bot_tui import bots_pane
 
 
@@ -155,10 +159,11 @@ def test_format_win_rate_detail_zero_is_a_real_value_not_n_a() -> None:
     assert bots_pane.format_win_rate_detail(0.0, closed_trades=0) == "0% (0 trades)"
 
 
-def test_bot_detail_lines_returns_three_lines() -> None:
+def test_bot_detail_lines_returns_five_lines() -> None:
+    # Story 29.6 added the position line and the exits line to the original three.
     row = _status("bot-03", strategy="microprice_rev", symbol="SOL-USD-PERP.DYDX")
     lines = bots_pane.bot_detail_lines(row, now=1_005.0)
-    assert len(lines) == 3
+    assert len(lines) == 5
 
 
 def test_bot_detail_lines_combines_strategy_and_symbol() -> None:
@@ -372,3 +377,195 @@ def test_format_incident_line_closed_incident_shows_fixed_duration() -> None:
 def test_osc52_copy_sequence_wraps_base64_payload_in_escape_codes() -> None:
     seq = bots_pane.osc52_copy_sequence("hello")
     assert seq == "\x1b]52;c;aGVsbG8=\x07"
+
+
+# --- Story 29.6: entry / sl / tp columns, the header, the position detail lines -----------------
+
+
+def _protected(**overrides: object) -> dict:
+    """Return a long with both exits resting, as a post-Story-29.6 producer publishes it."""
+    fields = {
+        "stop_loss": "58900.0",
+        "take_profit": "61020.5",
+        "entry_price": "60000.0",
+        "mark_price": "59980.5",
+        "position_qty": "0.001",
+        "stop_loss_orders": 1,
+        "take_profit_orders": 1,
+        "open_orders": 2,
+        "last_fill_at": 900_000_000_000,
+    }
+    fields.update(overrides)
+    bot_id = str(fields.pop("bot_id", "bot-01"))
+    return _status(bot_id, **fields)
+
+
+def _cells(row: dict) -> dict[str, str]:
+    """Each column's text in a formatted row, cut at the header's column starts."""
+    line = bots_pane.format_bot_line(row, stale=False, now=5_000.0)
+    cells: dict[str, str] = {}
+    start = 0
+    for label, width in bots_pane.BOTS_COLUMNS:
+        cells[label] = line[start : start + width].strip()
+        start += width
+    return cells
+
+
+def test_a_protected_long_shows_entry_and_both_exits_with_their_distance_from_mark() -> None:
+    cells = _cells(_protected())
+    assert cells["entry"] == "60,000.0"
+    # (58900.0 - 59980.5) / 59980.5 = -1.80%; (61020.5 - 59980.5) / 59980.5 = +1.73%
+    assert cells["sl"] == "58,900.0    -1.8%"
+    assert cells["tp"] == "61,020.5    +1.7%"
+
+
+def test_an_unprotected_position_shows_none_in_the_warning_attr() -> None:
+    row = _protected(stop_loss=None, stop_loss_orders=0)
+    assert _cells(row)["sl"] == "none"
+    segments = bots_pane.bot_line_segments(row, stale=False, now=5_000.0)
+    assert (bots_pane.WARNING_ATTR, "none") in segments
+
+
+def test_a_missing_take_profit_is_none_without_the_warning() -> None:
+    row = _protected(take_profit=None, take_profit_orders=0)
+    assert _cells(row)["tp"] == "none"
+    segments = bots_pane.bot_line_segments(row, stale=False, now=5_000.0)
+    assert [attr for attr, _text in segments if attr == bots_pane.WARNING_ATTR] == []
+
+
+def test_a_counted_but_unpriced_stop_is_armed() -> None:
+    assert _cells(_protected(stop_loss=None))["sl"] == "armed"
+
+
+def test_a_flat_bot_shows_blank_exit_cells() -> None:
+    cells = _cells(
+        _protected(position_side="flat", stop_loss=None, take_profit=None, entry_price=None)
+    )
+    assert (cells["entry"], cells["sl"], cells["tp"]) == ("", "", "")
+
+
+def test_a_pre_story_message_shows_n_a_never_a_fabricated_value() -> None:
+    cells = _cells(_status("bot-01"))
+    assert (cells["entry"], cells["sl"], cells["tp"]) == ("n/a", "n/a", "n/a")
+
+
+def test_no_mark_leaves_the_distance_blank() -> None:
+    cells = _cells(_protected(mark_price=None))
+    assert cells["sl"] == "58,900.0"
+    assert cells["tp"] == "61,020.5"
+
+
+def test_format_price_keeps_the_instruments_precision_with_separators() -> None:
+    assert bots_pane.format_price("58900.0") == "58,900.0"
+    assert bots_pane.format_price("0.00001234") == "0.00001234"
+    assert bots_pane.format_price("105234.50") == "105,234.50"
+
+
+def test_format_price_never_switches_to_scientific_notation() -> None:
+    assert bots_pane.format_price("0.0000001234") == "0.0000001234"
+    assert bots_pane.format_price("0.00000001") == "0.00000001"
+
+
+@pytest.mark.parametrize("text", ["garbage", "NaN", "Infinity", ""])
+def test_a_malformed_price_renders_n_a_instead_of_raising(text: str) -> None:
+    assert bots_pane.format_price(text) == "n/a"
+    assert bots_pane.format_distance(text, "100") == ""
+    assert bots_pane.format_distance("100", text) == ""
+
+
+def test_format_distance_is_signed_to_one_decimal() -> None:
+    assert bots_pane.format_distance("101", "100") == "+1.0%"
+    assert bots_pane.format_distance("98.2", "100") == "-1.8%"
+    assert bots_pane.format_distance("100", None) == ""
+
+
+def test_format_distance_of_100_percent_or_more_fits_its_cell() -> None:
+    assert bots_pane.format_distance("199.9", "100") == "+99.9%"
+    assert bots_pane.format_distance("199.96", "100") == "+100%"
+    assert bots_pane.format_distance("350", "100") == "+250%"
+    assert bots_pane.format_distance("0.01", "100") == "-100%"
+    assert all(
+        len(bots_pane.format_distance(price, "100")) <= bots_pane.DISTANCE_WIDTH
+        for price in ("199.94", "199.96", "999", "0.01")
+    )
+
+
+def test_header_labels_start_where_their_columns_start() -> None:
+    # A long bot_id and a long price must not push any column out of line with the header.
+    header = bots_pane.bots_header_line()
+    row = _protected(
+        bot_id="a-much-too-long-bot-identifier",
+        entry_price="123456789.123456",
+        stop_loss="123456000.000001",
+        take_profit="123457000.999999",
+        mark_price="123456789.5",
+    )
+    line = bots_pane.format_bot_line(row, stale=False, now=5_000.0)
+    assert len(line) == len(header) == bots_pane.BOTS_PANE_MIN_WIDTH
+    start = 0
+    for label, width in bots_pane.BOTS_COLUMNS:
+        if label:
+            assert header[start : start + len(label)] == label
+            assert header[start - 1] == " "
+        start += width
+    starts = {label: header.index(f" {label} ") + 1 for label in ("entry", "sl", "tp")}
+    assert line[starts["entry"] :].startswith("123,456,78…")
+    assert line[starts["sl"] :].startswith("123,456,00…")
+    assert line[starts["tp"] :].startswith("123,457,00…")
+
+
+def test_every_row_shape_is_exactly_the_minimum_width() -> None:
+    rows = [
+        _protected(),
+        _protected(stop_loss=None, stop_loss_orders=0),
+        _protected(position_side="flat"),
+        _status("bot-01"),
+        _protected(win_rate=1.0, started_at=0.0),
+    ]
+    for row in rows:
+        for stale in (False, True):
+            line = bots_pane.format_bot_line(row, stale=stale, now=999 * 3_600.0 + 3_599.0)
+            assert len(line) == bots_pane.BOTS_PANE_MIN_WIDTH
+
+
+def test_detail_lines_show_the_position_and_its_exits() -> None:
+    lines = bots_pane.bot_detail_lines(_protected(), now=1_000.0)
+    assert lines[3] == "quantity   0.001   entry 60,000.0   mark 59,980.5   open orders 2"
+    assert lines[4] == (
+        "stop loss  58,900.0 (1 order)   take profit 61,020.5 (1 order)   last fill 1m40s ago"
+    )
+
+
+def test_detail_lines_count_scaled_exits_and_a_missing_stop() -> None:
+    row = _protected(stop_loss=None, stop_loss_orders=0, take_profit_orders=2, last_fill_at=None)
+    assert bots_pane.bot_detail_lines(row, now=1_000.0)[4] == (
+        "stop loss  none   take profit 61,020.5 (2 orders)   last fill no fills yet"
+    )
+
+
+def test_detail_lines_of_a_flat_bot() -> None:
+    row = _protected(
+        position_side="flat",
+        entry_price=None,
+        mark_price=None,
+        position_qty=None,
+        stop_loss=None,
+        take_profit=None,
+        stop_loss_orders=0,
+        take_profit_orders=0,
+        open_orders=0,
+    )
+    lines = bots_pane.bot_detail_lines(row, now=1_000.0)
+    assert lines[3] == "quantity   -   entry -   mark -   open orders 0"
+    assert lines[4] == "stop loss  -   take profit -   last fill 1m40s ago"
+
+
+def test_detail_lines_of_a_pre_story_message_are_n_a() -> None:
+    lines = bots_pane.bot_detail_lines(_status("bot-01"), now=1_000.0)
+    assert lines[3] == "quantity   n/a   entry n/a   mark n/a   open orders n/a"
+    assert lines[4] == "stop loss  n/a   take profit n/a   last fill n/a"
+
+
+def test_bot_operations_doc_states_the_bots_pane_minimum_width() -> None:
+    doc = (Path(__file__).resolve().parents[2] / "docs" / "BOT_OPERATIONS.md").read_text()
+    assert f"at least {bots_pane.BOTS_PANE_MIN_WIDTH} columns" in doc

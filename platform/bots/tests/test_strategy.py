@@ -30,18 +30,28 @@ fed for Microprice/OrderFlowImbalance, without needing a separate TradeTick stre
 
 from decimal import Decimal
 
+import pytest
+
+from bots.infrastructure.cache_reader import own_open_orders
 from bots.strategies.dummy import DummyStrategy
 from bots.strategies.dummy import DummyStrategyConfig
+from bots.tests.test_replay import _INPUTS as _REVERSING_INPUTS
+from bots.tests.test_replay import _data as _reversing_data
 from nautilus_trader.backtest.engine import BacktestEngine
 from nautilus_trader.backtest.engine import BacktestEngineConfig
 from nautilus_trader.config import LoggingConfig
 from nautilus_trader.model.data import BookOrder
 from nautilus_trader.model.data import OrderBookDelta
+from nautilus_trader.model.data import QuoteTick
 from nautilus_trader.model.enums import AccountType
 from nautilus_trader.model.enums import BookAction
 from nautilus_trader.model.enums import BookType
 from nautilus_trader.model.enums import OmsType
 from nautilus_trader.model.enums import OrderSide
+from nautilus_trader.model.enums import OrderStatus
+from nautilus_trader.model.enums import OrderType
+from nautilus_trader.model.events import OrderEvent
+from nautilus_trader.model.events import OrderFilled
 from nautilus_trader.model.objects import Money
 from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
@@ -236,6 +246,314 @@ def test_dummy_strategy_thin_book_does_not_crash() -> None:
     strategy = DummyStrategy(_config())
     engine.add_strategy(strategy)
     engine.run()  # must not raise
+
+    engine.reset()
+    engine.dispose()
+
+
+# --- Story 29.6: bracket exits -------------------------------------------------------------------
+
+_ALWAYS_LONG = {
+    "trend_buy_threshold": 0.49,
+    "trend_sell_threshold": 0.1,
+    "ofi_confirm_threshold": -999_999.0,
+}
+
+
+def _bracket_run(**overrides: object) -> tuple[BacktestEngine, DummyStrategy]:
+    """Run to the end of the data but leave the strategy running (no on_stop cancel yet)."""
+    engine = _engine()
+    engine.add_data(_quotes_and_deltas(n_seconds=15, levels_per_side=2))
+    strategy = DummyStrategy(_config(**{**_ALWAYS_LONG, **overrides}))
+    engine.add_strategy(strategy)
+    engine.run(streaming=True)
+    return engine, strategy
+
+
+def _close(engine: BacktestEngine) -> None:
+    engine.end()
+    engine.dispose()
+
+
+def test_first_bracket_entry_rests_one_stop_loss_and_one_take_profit() -> None:
+    # The book never moves (bid 100.00 / ask 101.00, mid 100.5): 100 bps each side of the mid is
+    # 101.505 up to the take-profit's 101.51 and 99.495 down to the stop's 99.49.
+    engine, strategy = _bracket_run(take_profit_bps=100, stop_loss_bps=100)
+    try:
+        resting = own_open_orders(strategy)
+        by_type = {order.order_type: order for order in resting}
+        assert len(resting) == 2
+        assert set(by_type) == {OrderType.STOP_MARKET, OrderType.LIMIT}
+        assert str(by_type[OrderType.STOP_MARKET].trigger_price) == "99.49"
+        assert str(by_type[OrderType.LIMIT].price) == "101.51"
+        assert all(order.is_reduce_only and order.side == OrderSide.SELL for order in resting)
+        # Held by the OrderEmulator until the market reaches them (bots.strategies.exits).
+        assert all(order.is_emulated for order in resting)
+        assert strategy.portfolio.is_net_long(_IID)
+        # One entry only: the bot holds its protected long.
+        assert len(engine.cache.orders(strategy_id=strategy.id)) == 3
+    finally:
+        _close(engine)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected_type"),
+    [
+        ({"take_profit_bps": 100}, OrderType.LIMIT),
+        ({"stop_loss_bps": 100}, OrderType.STOP_MARKET),
+    ],
+)
+def test_one_configured_leg_rests_alone(overrides: dict, expected_type: OrderType) -> None:
+    engine, strategy = _bracket_run(**overrides)
+    try:
+        resting = own_open_orders(strategy)
+        assert [order.order_type for order in resting] == [expected_type]
+        assert resting[0].is_reduce_only
+    finally:
+        _close(engine)
+
+
+def test_stopping_the_bot_cancels_its_resting_exits() -> None:
+    engine, strategy = _bracket_run(take_profit_bps=100, stop_loss_bps=100)
+    try:
+        engine.end()  # stops the strategy: on_stop cancels what it rests
+        assert own_open_orders(strategy) == []
+        statuses = {
+            order.order_type: order.status
+            for order in engine.cache.orders(strategy_id=strategy.id)
+            if order.is_reduce_only
+        }
+        assert statuses == {
+            OrderType.STOP_MARKET: OrderStatus.CANCELED,
+            OrderType.LIMIT: OrderStatus.CANCELED,
+        }
+    finally:
+        engine.dispose()
+
+
+def test_a_reversal_leaves_no_orphaned_exit() -> None:
+    # The replay fixture's triangular mid flips the trend signal back and forth; the exits sit
+    # 50% away so none of them ever fills and every position change is a signal reversal.
+    engine = _engine()
+    engine.add_data(_reversing_data())
+    strategy = DummyStrategy(
+        _config(
+            trend_buy_threshold=_REVERSING_INPUTS["trend_buy_threshold"],
+            trend_sell_threshold=_REVERSING_INPUTS["trend_sell_threshold"],
+            ofi_confirm_threshold=-999_999.0,
+            take_profit_bps=5_000,
+            stop_loss_bps=5_000,
+        )
+    )
+    engine.add_strategy(strategy)
+    open_at_flatten: list[int] = []
+
+    def _on_event(event: OrderEvent) -> None:
+        if isinstance(event, OrderFilled) and strategy.portfolio.is_flat(_IID):
+            open_at_flatten.append(len(own_open_orders(strategy)))
+
+    strategy.msgbus.subscribe(topic=f"events.order.{strategy.id}", handler=_on_event)
+    engine.run(streaming=True)
+    try:
+        assert len(open_at_flatten) >= 2, "expected the data to reverse the bot at least twice"
+        assert open_at_flatten == [0] * len(open_at_flatten)
+        resting = own_open_orders(strategy)
+        # The final position is protected by exactly its own two legs, nothing older.
+        assert sorted(order.order_type for order in resting) == [
+            OrderType.LIMIT,
+            OrderType.STOP_MARKET,
+        ]
+    finally:
+        _close(engine)
+
+
+def test_a_reversal_whose_signal_fades_still_flattens() -> None:
+    # A reversal cancels the exits one cycle before its flatten: if the signal is gone by then,
+    # the flatten must still go out, or the long would sit with no stop at all.
+    engine, strategy = _bracket_run(take_profit_bps=100, stop_loss_bps=100)
+    try:
+        assert strategy.portfolio.is_net_long(_IID)
+        signals = iter([OrderSide.SELL, None])
+        strategy._wanted_side = lambda is_flat: next(signals)
+        strategy._trade_with_exits(is_flat=False)
+        assert own_open_orders(strategy) == [], "the reversal cancels the resting exits first"
+        strategy._trade_with_exits(is_flat=False)
+        flattens = [
+            order
+            for order in engine.cache.orders(strategy_id=strategy.id)
+            if order.side == OrderSide.SELL and order.order_type == OrderType.MARKET
+        ]
+        assert len(flattens) == 1
+        assert flattens[0].is_reduce_only
+    finally:
+        _close(engine)
+
+
+def _more_quotes(first_second: int, n_seconds: int) -> list[QuoteTick]:
+    """Quotes on the same unmoving book, continuing after `_quotes_and_deltas`' data."""
+    return [
+        TestDataStubs.quote_tick(
+            instrument=_INSTRUMENT,
+            bid_price=100.0,
+            ask_price=101.0,
+            bid_size=100.0,
+            ask_size=10.0,
+            ts_event=_TS_START + second * _STEP_NS,
+            ts_init=_TS_START + second * _STEP_NS,
+        )
+        for second in range(first_second, first_second + n_seconds)
+    ]
+
+
+def test_a_reversal_flattens_the_whole_position_not_trade_size() -> None:
+    # A position that is not `trade_size` (here grown to twice it; a partly filled flatten leaves
+    # the same mismatch) must be closed exactly: a `trade_size` flatten would leave part of the
+    # position without exits, or overshoot into an opposite one that has none.
+    engine, strategy = _bracket_run(take_profit_bps=100, stop_loss_bps=100)
+    try:
+        add = strategy.order_factory.market(
+            instrument_id=_IID,
+            order_side=OrderSide.BUY,
+            quantity=_INSTRUMENT.make_qty(Decimal("0.001")),
+        )
+        strategy.submit_order(add)
+        engine.add_data(_more_quotes(16, 1))
+        engine.run(streaming=True)
+        assert strategy.portfolio.net_position(_IID) == Decimal("0.002")
+        signals = iter([OrderSide.SELL])
+        strategy._wanted_side = lambda is_flat: next(signals, None)
+        strategy._trade_with_exits(is_flat=False)  # cancels the exits
+        strategy._trade_with_exits(is_flat=False)  # sends the flatten
+        engine.add_data(_more_quotes(17, 3))
+        engine.run(streaming=True)
+        flattens = [
+            order
+            for order in engine.cache.orders(strategy_id=strategy.id)
+            if order.side == OrderSide.SELL and order.order_type == OrderType.MARKET
+        ]
+        assert [(str(order.quantity), order.is_reduce_only) for order in flattens] == [
+            ("0.002000", True)
+        ]
+        assert strategy.portfolio.is_flat(_IID)
+    finally:
+        _close(engine)
+
+
+def test_a_flat_bot_keeps_the_legs_of_an_entry_still_working() -> None:
+    # Right after the entry list is sent the bot still reads flat and its legs already rest in
+    # the emulator: they belong to a working entry, not to a closed position.
+    engine, strategy = _bracket_run(
+        take_profit_bps=100, stop_loss_bps=100, trend_buy_threshold=2.0, trend_sell_threshold=-1.0
+    )
+    try:
+        assert strategy.portfolio.is_flat(_IID), "thresholds out of reach: no entry of its own"
+        strategy._enter(OrderSide.BUY)
+        legs = [
+            order for order in engine.cache.orders(strategy_id=strategy.id) if order.is_reduce_only
+        ]
+        assert len(legs) == 2, "the entry list's legs rest before its fill is applied"
+        cancels: list[object] = []
+        strategy.cancel_all_orders = lambda *args, **kwargs: cancels.append(args)
+        strategy._trade_with_exits(is_flat=True)
+        assert cancels == []
+    finally:
+        _close(engine)
+
+
+def _with_trades_at_mid(data: list) -> list:
+    """Add a trade at each quote's mid: the emulated exits trigger on the last trade price."""
+    with_trades: list = []
+    for item in data:
+        with_trades.append(item)
+        if isinstance(item, QuoteTick):
+            mid = (item.bid_price.as_double() + item.ask_price.as_double()) / 2
+            with_trades.append(
+                TestDataStubs.trade_tick(
+                    instrument=_INSTRUMENT,
+                    price=mid,
+                    trade_id=str(len(with_trades)),
+                    ts_event=item.ts_event,
+                    ts_init=item.ts_init,
+                )
+            )
+    return with_trades
+
+
+def test_a_filled_exit_leaves_no_orphan_into_the_next_position() -> None:
+    # Exits 1 bp away on a market that moves 20.0: positions end at a stop or take-profit, and the
+    # OUO sibling cancel (or the flat-with-orders guard) clears the other leg before re-entry.
+    engine = _engine()
+    engine.add_data(_with_trades_at_mid(_reversing_data()))
+    strategy = DummyStrategy(
+        _config(
+            trend_buy_threshold=_REVERSING_INPUTS["trend_buy_threshold"],
+            trend_sell_threshold=_REVERSING_INPUTS["trend_sell_threshold"],
+            ofi_confirm_threshold=-999_999.0,
+            take_profit_bps=1,
+            stop_loss_bps=1,
+        )
+    )
+    engine.add_strategy(strategy)
+    open_at_entry: list[int] = []
+
+    def _on_event(event: OrderEvent) -> None:
+        if not isinstance(event, OrderFilled):
+            return
+        order = engine.cache.order(event.client_order_id)
+        if order is not None and "ENTRY" in (order.tags or []):
+            # The entry's own legs are emulated the moment it fills; anything else is an orphan.
+            orphans = [
+                resting
+                for resting in own_open_orders(strategy)
+                if resting.parent_order_id != order.client_order_id
+            ]
+            open_at_entry.append(len(orphans))
+
+    strategy.msgbus.subscribe(topic=f"events.order.{strategy.id}", handler=_on_event)
+    engine.run(streaming=True)
+    try:
+        exits_filled = [
+            order
+            for order in engine.cache.orders(strategy_id=strategy.id)
+            if order.is_reduce_only and order.status == OrderStatus.FILLED
+        ]
+        assert len(exits_filled) >= 2, "expected exits to fill"
+        assert len(open_at_entry) >= 2
+        assert open_at_entry == [0] * len(open_at_entry)
+        # Whatever rests at the end belongs to the last entry: flat leaves nothing behind.
+        entries = [
+            order
+            for order in engine.cache.orders(strategy_id=strategy.id)
+            if "ENTRY" in (order.tags or [])
+        ]
+        last_entry = max(entries, key=lambda order: order.ts_init)
+        resting = own_open_orders(strategy)
+        assert all(order.parent_order_id == last_entry.client_order_id for order in resting)
+        if strategy.portfolio.is_flat(_IID):
+            assert resting == []
+    finally:
+        _close(engine)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"take_profit_bps": 0},
+        {"stop_loss_bps": -5},
+        {"stop_loss_bps": 10_000},
+        {"take_profit_bps": 10_000},
+        {"stop_loss_bps": True},
+    ],
+)
+def test_dummy_strategy_stops_on_invalid_bps(overrides: dict) -> None:
+    engine = _engine()
+    engine.add_data(_quotes_and_deltas(n_seconds=5, levels_per_side=2))
+    strategy = DummyStrategy(_config(**{**_ALWAYS_LONG, **overrides}))
+    engine.add_strategy(strategy)
+    engine.run()  # must not raise -- on_start calls self.stop()
+
+    assert not strategy.microprice.initialized, "no data should ever reach a stopped strategy"
+    assert engine.trader.generate_order_fills_report().empty
 
     engine.reset()
     engine.dispose()

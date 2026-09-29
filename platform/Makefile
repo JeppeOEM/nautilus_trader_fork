@@ -3,7 +3,7 @@ PLATFORM_DIR  := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
 COMPOSE    := docker compose -f $(PLATFORM_DIR)docker-compose.yml
 BASE_IMAGE := nautilus-trader-base:1.229.0
 
-.PHONY: nightly consolidate backup-catalog build-candles prune prune-dry build-base build-base-vps up redeploy redeploy-all redeploy-no-paper up-live-paper up-dydx down-dydx build-insecure test test-live-paper notebooks down logs logs-dash web enable-boot enable-firewall harden-ssh frontend-dev frontend-remote
+.PHONY: nightly consolidate backup-catalog build-candles prune prune-dry build-base build-base-vps up redeploy redeploy-all redeploy-no-paper up-live-paper up-dydx down-dydx build-insecure test test-live-paper bots-churn-check notebooks down logs logs-dash web enable-boot enable-firewall harden-ssh frontend-dev frontend-remote
 
 # Personal, gitignored overrides (see .env-example for the documented default).
 -include $(PLATFORM_DIR).env
@@ -301,6 +301,14 @@ test-live-paper:
 		python3 -m pytest bots/tests observability/tests kernel/tests tests --ignore=tests/test_hotpath.py --ignore=tests/test_capture_archive_handoff.py \
 		--deselect bots/tests/test_node.py::test_build_node_configures_redis_backed_cache \
 		--deselect bots/tests/test_node.py::test_build_node_passes_redis_credentials_and_ssl_from_url -q
+
+## Prove the bots' bracket-exit chain live (Story 29.6): one throwaway paper bot
+## (bots/tests/fixtures/config.churn.toml, dYdX BTC mainnet data, Sandbox execution) must show a
+## protected long, a clean flat and a second protected long on bots:status within 15 min. Uses
+## its own Redis on CHURN_REDIS_PORT (default 6399), started only if none answers; the bot
+## container is removed either way. Needs Docker and host python3 with redis-py.
+bots-churn-check:
+	bash $(PLATFORM_DIR)bots/tests/churn_check.sh
 
 ## Stop containers (catalog data is preserved)
 down:

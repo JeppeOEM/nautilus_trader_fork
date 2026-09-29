@@ -260,6 +260,8 @@ def build_node(fleet: PaperFleet | ExecBot, redis_url: str) -> tuple[TradingNode
 
     hosted: list[HostedBot] = []
     for bot in fleet.bots:
+        # Bracket exits are paper-only (see `ExecConfig`'s Known limit): an exec bot has none.
+        exits = bot if isinstance(bot, BotConfig) else None
         strategy = DummyStrategy(
             config=DummyStrategyConfig(
                 instrument_id=InstrumentId.from_str(bot.instrument_id),
@@ -267,6 +269,8 @@ def build_node(fleet: PaperFleet | ExecBot, redis_url: str) -> tuple[TradingNode
                 trend_buy_threshold=bot.trend_buy_threshold,
                 trend_sell_threshold=bot.trend_sell_threshold,
                 ofi_confirm_threshold=bot.ofi_confirm_threshold,
+                take_profit_bps=exits.take_profit_bps if exits is not None else None,
+                stop_loss_bps=exits.stop_loss_bps if exits is not None else None,
                 # Pinned to bot_id, never Trader.add_strategy()'s insertion-order default
                 # (AD-11): an auto-assigned tag would make a bot's Cache/Redis/fills.db identity
                 # depend on config list order, silently reassigning history on a reorder.

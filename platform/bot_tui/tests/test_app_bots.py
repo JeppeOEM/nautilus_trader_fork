@@ -22,6 +22,11 @@ loop -- tests below monkeypatch `_publish_bot_action` instead. Real keypress-tri
 start/stop is covered by the manual smoke check.
 """
 
+import time
+
+import urwid
+
+from bot_tui import bots_pane
 from bot_tui import bots_state
 from bot_tui.app import BotTuiApp
 from bot_tui.app import _SelectableBotRow
@@ -52,6 +57,12 @@ def _status(bot_id: str, **overrides: object) -> dict:
     return base
 
 
+def _listbox(app: BotTuiApp) -> urwid.ListBox:
+    """Return the populated Bots pane's persistent rows ListBox (under the column header)."""
+    assert app._bots_listbox is not None
+    return app._bots_listbox
+
+
 def _bots_app_with_one_row(bot_id: str = "bot-01", **overrides: object) -> BotTuiApp:
     _reset()
     bots_state._handle_status_message(_status(bot_id, **overrides))
@@ -75,7 +86,7 @@ def test_populated_bots_pane_has_one_row_per_bot() -> None:
     bots_state._handle_status_message(_status("bot-02"))
     app = BotTuiApp()
     app._refresh_bots_body()
-    assert len(app._bots_body.body) == 2
+    assert len(_listbox(app).body) == 2
 
 
 def test_rows_sorted_by_bot_id_and_selectable() -> None:
@@ -84,7 +95,7 @@ def test_rows_sorted_by_bot_id_and_selectable() -> None:
     bots_state._handle_status_message(_status("bot-01"))
     app = BotTuiApp()
     app._refresh_bots_body()
-    body = app._bots_body
+    body = _listbox(app)
     assert isinstance(body.body[0].original_widget, _SelectableBotRow)
     assert body.body[0].original_widget.bot_id == "bot-01"
     assert body.body[1].original_widget.bot_id == "bot-02"
@@ -108,13 +119,15 @@ def test_refresh_bots_body_preserves_scroll_position_across_repeated_ticks() -> 
     app._refresh_bots_body()
     app._body.original_widget = app._bots_body
     body_before = app._bots_body
-    app._bots_body.focus_position = 2  # scroll to the last row
+    listbox_before = _listbox(app)
+    _listbox(app).focus_position = 2  # scroll to the last row
 
     # Simulate several more redraw ticks with unchanged status data.
     app._refresh_bots_body()
     app._refresh_bots_body()
 
     assert app._bots_body is body_before
+    assert app._bots_listbox is listbox_before
     assert app._highlighted_bot_id() == "bot-03"
 
 
@@ -127,8 +140,7 @@ def test_highlighted_bot_id_reads_listbox_focus() -> None:
     app._refresh_bots_body()
     app._body.original_widget = app._bots_body
     assert app._highlighted_bot_id() == "bot-01"
-    body = app._body.original_widget
-    body.focus_position = 1
+    _listbox(app).focus_position = 1
     assert app._highlighted_bot_id() == "bot-02"
 
 
@@ -146,7 +158,7 @@ def test_stale_row_has_marker_fresh_row_does_not() -> None:
     bots_state._LATEST_STATUSES["bot-stale"] = _status("bot-stale")
     app = BotTuiApp()
     app._refresh_bots_body()
-    body = app._bots_body
+    body = _listbox(app)
     rows = {widget.original_widget.bot_id: widget.original_widget.text for widget in body.body}
     assert rows["bot-stale"].startswith("~")
     assert not rows["bot-fresh"].startswith("~")
@@ -157,7 +169,7 @@ def test_stopped_bot_row_shows_off() -> None:
     bots_state._handle_status_message(_status("bot-01", running=False))
     app = BotTuiApp()
     app._refresh_bots_body()
-    assert "off" in app._bots_body.body[0].original_widget.text
+    assert "off" in _listbox(app).body[0].original_widget.text
 
 
 def test_bots_pane_footer_hint_switches_on_entry() -> None:
@@ -260,3 +272,80 @@ def test_stop_confirm_intercepts_keys_via_unhandled_input() -> None:
 
     assert app._stop_confirm_active is False
     assert published == [("bot-01", "stop")]
+
+
+# --- Story 29.6: header, entry/sl/tp columns, minimum width ---
+
+
+def _protected_status(bot_id: str, **overrides: object) -> dict:
+    fields = {
+        "position_side": "long",
+        "stop_loss": "58900.0",
+        "take_profit": "61020.5",
+        "entry_price": "60000.0",
+        "mark_price": "59980.5",
+        "position_qty": "0.001",
+        "stop_loss_orders": 1,
+        "take_profit_orders": 1,
+        "open_orders": 2,
+        "last_fill_at": None,
+    }
+    fields.update(overrides)
+    return _status(bot_id, **fields)
+
+
+def test_the_populated_pane_has_the_column_header_above_its_rows() -> None:
+    app = _bots_app_with_one_row()
+    body = app._bots_body
+    assert isinstance(body, urwid.Frame)
+    assert body.header.text == bots_pane.bots_header_line()
+    assert body.body is app._bots_listbox
+    assert body.focus_position == "body"
+
+
+def test_the_row_markup_is_the_formatted_line() -> None:
+    _reset()
+    status = _protected_status("bot-01")
+    bots_state._handle_status_message(status)
+    app = BotTuiApp()
+    app._refresh_bots_body()
+    row = _listbox(app).body[0].original_widget
+    expected = bots_pane.format_bot_line(status, stale=False, now=time.time())
+    # Up to the uptime column: the wall clock may tick between the two renders.
+    up_column = bots_pane.bots_header_line().index(" up ") + 1
+    assert len(row.text) == len(expected)
+    assert row.text[:up_column] == expected[:up_column]
+
+
+def test_an_unprotected_row_colors_its_none_stop_as_a_warning() -> None:
+    _reset()
+    bots_state._handle_status_message(
+        _protected_status("bot-01", stop_loss=None, stop_loss_orders=0)
+    )
+    app = BotTuiApp()
+    app._refresh_bots_body()
+    row = _listbox(app).body[0].original_widget
+    text, attributes = row.get_text()
+    offset = 0
+    colored = []
+    for attr, length in attributes:
+        if attr == bots_pane.WARNING_ATTR:
+            colored.append(text[offset : offset + length])
+        offset += length
+    assert colored == ["none"]
+
+
+def test_a_row_renders_on_one_line_at_the_minimum_width() -> None:
+    _reset()
+    bots_state._handle_status_message(
+        _protected_status("a-much-too-long-bot-identifier", win_rate=1.0, started_at=0.0)
+    )
+    app = BotTuiApp()
+    app._refresh_bots_body()
+    row = _listbox(app).body[0]
+    header = app._bots_body.header
+    width = bots_pane.BOTS_PANE_MIN_WIDTH
+    assert row.rows((width,)) == 1
+    assert header.rows((width,)) == 1
+    # The minimum is tight: one column fewer and the row wraps.
+    assert row.rows((width - 1,)) == 2

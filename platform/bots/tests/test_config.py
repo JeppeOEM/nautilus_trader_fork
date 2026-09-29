@@ -368,3 +368,62 @@ def test_bot_on_an_unsupported_venue_fails_at_load_naming_the_venue(tmp_path) ->
     )
     with pytest.raises(ValueError, match="unsupported venue 'KRAKEN'"):
         load_paper_config(path)
+
+
+# --- Story 29.6: bracket-exit keys ---------------------------------------------------------------
+
+
+def test_bot_reads_the_bracket_exit_keys(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        "config.toml",
+        f"{_ONE_BOT}take_profit_bps = 25\nstop_loss_bps = 10\n",
+    )
+    bot = load_paper_config(path).bots[0]
+    assert (bot.take_profit_bps, bot.stop_loss_bps) == (25, 10)
+
+
+def test_bracket_exit_keys_default_to_none(tmp_path: Path) -> None:
+    bot = load_paper_config(_write(tmp_path, "config.toml", _ONE_BOT)).bots[0]
+    assert (bot.take_profit_bps, bot.stop_loss_bps) == (None, None)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "take_profit_bps = 0",
+        "take_profit_bps = -5",
+        "stop_loss_bps = true",
+        "stop_loss_bps = 1.5",
+        'take_profit_bps = "5"',
+        "stop_loss_bps = 10000",
+        "take_profit_bps = 10000",
+    ],
+)
+def test_invalid_bracket_exit_keys_fail_at_load_naming_the_file(tmp_path: Path, line: str) -> None:
+    path = _write(tmp_path, "config.toml", f"{_ONE_BOT}{line}\n")
+    with pytest.raises(ValueError, match=str(path)):
+        load_paper_config(path)
+
+
+def test_the_exec_config_has_no_bracket_exit_keys(tmp_path: Path) -> None:
+    path = _write(
+        tmp_path,
+        "demo.toml",
+        'mode = "exchange_demo"\nenvironment = "testnet"\ntake_profit_bps = 5\n',
+    )
+    with pytest.raises(ValueError, match="unknown key"):
+        load_real_money_config(path)
+
+
+def test_the_committed_configs_parse() -> None:
+    bots_dir = Path(__file__).resolve().parent.parent
+    default = load_paper_config(bots_dir / "config.toml")
+    assert all(bot.take_profit_bps is None for bot in default.bots)
+    churn = load_paper_config(bots_dir / "tests" / "fixtures" / "config.churn.toml")
+    (bot,) = churn.bots
+    assert (bot.bot_id, bot.instrument_id) == ("churn-01", "BTC-USD-PERP.DYDX")
+    assert (bot.take_profit_bps, bot.stop_loss_bps) == (5, 5)
+    assert (bot.trend_buy_threshold, bot.trend_sell_threshold) == (0.0, -1.0)
+    assert bot.ofi_confirm_threshold == -1e9
+    assert churn.venue_config("DYDX").environment == "mainnet"
