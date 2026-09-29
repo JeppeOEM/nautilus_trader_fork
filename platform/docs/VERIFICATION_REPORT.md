@@ -82,16 +82,19 @@ delivers the comparator (`python -m verification.<tool> --venue V --day D`).
 | | BTCUSDT-SPOT | pending — as above; smoke **DEVIATION** D-102 (OPEN) | smoke: 2 seconds (D-102), 5 `missing_row` (D-76) | Smoke as above: REST agree_key 31, agree_bracket 116, between_pushes 33, unaligned 1, failing 0 -> validated; replay 377,663 frames, u_breaks 0, zero_level 0 (spot `u` strictly +1, D-98); exact 10,832/10,834, **content_differs 2** (15:42:06-07Z: capture applied 32 spot book messages after their second closed, D-102) | as above |
 | | ETHUSDT-SPOT | pending — as above; smoke **DEVIATION** D-102 (OPEN) | smoke: 2 seconds (D-102), 5 `missing_row` (D-76) | Smoke as above: REST agree_key 25, agree_bracket 112, between_pushes 43, unaligned 1, failing 0 -> validated; replay 294,165 frames, u_breaks 0, zero_level 0; exact 10,832/10,834, **content_differs 2** (15:42:06-07Z, 29 late messages, D-102) | as above |
 | | SOL-USD-PERP.HYPERLIQUID | pending — as above; smoke **DEVIATION** D-101 (OPEN) | smoke: 2 seconds (D-101) | Smoke as above: REST agree_key 14 (all 14 key matches equal), between_pushes 166, unaligned 1, failing 0 -> validated; replay 2,016 `l2Book`, time_regress 0, subscribe_replies 2 (the recorder's startup and its 15:58:34Z reconnect, D-101); exact 10,825/10,827, **content_differs 2** (15:51:55-56Z: capture's own resubscribe reply after the venue expired its connection at 15:51:54.7Z, D-101) | as above |
-| Mark and index price | BTCUSDT-LINEAR, ETHUSDT-LINEAR | pending — Story 31.6 | | | |
-| | SOL-USD-PERP.HYPERLIQUID | pending — Story 31.6 | | | |
-| | BTCUSDT-SPOT, ETHUSDT-SPOT | n/a (spot has none) | | | |
-| Funding rate | BTCUSDT-LINEAR, ETHUSDT-LINEAR | pending — Story 31.6 | | | |
-| | SOL-USD-PERP.HYPERLIQUID | pending — Story 31.6 | | | |
-| | BTCUSDT-SPOT, ETHUSDT-SPOT | n/a (spot has none) | | | |
-| Open interest | BTCUSDT-LINEAR, ETHUSDT-LINEAR | pending — Story 31.6 | | | |
-| | SOL-USD-PERP.HYPERLIQUID | pending — Story 31.6 | | | |
-| | BTCUSDT-SPOT, ETHUSDT-SPOT | n/a (spot has none) | | | |
-| Instrument definitions | all 5 | pending — Story 31.6 | | | |
+| Mark and index price | BTCUSDT-LINEAR | pending — tool built (Story 31.6); verdict pending Story 31.11 | smoke: 0 | Smoke 2026-09-29, raw 12:59:19Z-17:00Z (restarted soak; tool at 1d8204ee09 + the Story 31.6 change set). **Mark:** REST agree_key 481, unaligned 1 (before the recorder's first snapshot) -> validated; rows exact **12,253**, value_mismatch/unmatched/off_grid/ts_rule/duplicate 0; every frame carrying `markPrice` stored (updates stored 12,253, not_stored 0); label 2 = definition; the other rows are `reference_unavailable` (after 17:00:05Z, beyond the closed raw hours, and the collector's startup row inside the recorder's startup gap with no recorded frame of its key; it grows with the live catalog: 4,254 at the 18:30Z rerun). **Index:** REST agree_key 481, unaligned 1; exact **30,354**, failing 0; updates stored 30,354, not_stored 0; label 2 | `python3 -m verification.derivs --venue V --day D` (`docs/DATA_DICTIONARY.md` §1.19) |
+| | ETHUSDT-LINEAR | pending — tool built (Story 31.6); verdict pending Story 31.11 | smoke: 0 | Smoke as above. **Mark:** REST agree_key 480, agree_bracket 1, unaligned 1; exact **12,169**, failing 0; updates stored 12,169, not_stored 0; label 2. **Index:** REST agree_key 476, agree_bracket 5, unaligned 1; exact **29,421**, failing 0; updates stored 29,421, not_stored 0; label 2 | as above |
+| | SOL-USD-PERP.HYPERLIQUID | pending — tool built (Story 31.6); verdict pending Story 31.11 | smoke: 0 | Smoke as above. **Mark:** REST agree 482 -> validated; exact **3,628** + agree_state 1 (every change of the `markPx` string, the adapter's filter; the agree_state row is the collector's startup row, equal to a recorded frame but not a change), failing 0; updates stored 3,628, not_stored 0; label 4 = definition; `ts_event == ts_init` on every row. **Index (`oraclePx`):** REST agree 482; exact **4,085** + agree_state 1, failing 0; updates stored 4,085, not_stored 0; label 4. The 18:45Z rerun over hour 17 too: **not_stored 1** (17:50:52Z, 117.525), a false fail of the 1 s match bound: capture stored the value +1,048 ms after the recorder's receipt, one push later (D-112, OPEN) | as above |
+| | BTCUSDT-SPOT, ETHUSDT-SPOT | n/a (spot has none); smoke: **0 fabricated** rows under `mark_price_update`/`index_price_update` for either spot id | | | as above |
+| Funding rate | BTCUSDT-LINEAR | pending — tool built (Story 31.6); verdict pending Story 31.11; **DEVIATION** D-103 (null `interval`/`next_funding_ns` on delta rows, documented), D-104 (`next_time_only`, Known limit) | smoke: 0 | Smoke as above: REST agree_key 481, unaligned 1; exact **99** + the collector's startup row (its 100th: `reference_unavailable` at 18:30Z, `agree_state` at the 18:45Z rerun), failing 0 (the whole triple compared: rate, interval, next time); updates stored 99, unchanged 0, next_time_only 0, not_stored 0 | as above |
+| | ETHUSDT-LINEAR | as above | smoke: 0 | Smoke as above: REST agree_key 481, unaligned 1; exact **62** + the collector's startup row (its 63rd, as BTCUSDT's), failing 0; updates stored 62, next_time_only 0, not_stored 0 | as above |
+| | SOL-USD-PERP.HYPERLIQUID | pending — tool built (Story 31.6); verdict pending Story 31.11; D-108 (scientific-notation text, documented) | smoke: 0 | Smoke as above: REST agree 482; exact **1,411** + agree_state 1, failing 0 (`interval` 60, `next_funding_ns` null on every row); updates stored 1,411, not_stored 0 | as above |
+| | BTCUSDT-SPOT, ETHUSDT-SPOT | n/a (spot has none); smoke: **0 fabricated** | | | as above |
+| Open interest | BTCUSDT-LINEAR | pending — tool built (Story 31.6); verdict pending Story 31.11; **DEVIATION** D-105 (`ts_event` is the poll's local clock, documented) | smoke: 0 (the 2 `poll_gaps` are the partial day: 00:00Z-13:04:26Z before the soak's first poll, D-76, and 17:55Z-24:00Z after the run; the tool counts them failing, so the smoke exits 1) | Smoke as above: REST agree_key 481, unaligned 1 (REST `openInterest` = the WS state at the response's `time` in every aligned poll); rows agree_state **48** of 48 judged (each equal to the WS state within 2 s before `ts_event`), unmatched 0, ts_rule 0; period 300 s, rows 300.4-301.2 s apart inside the soak | as above |
+| | ETHUSDT-LINEAR | as above | smoke: 0 (2 partial-day `poll_gaps`, as above) | Smoke as above: REST agree_key 481, unaligned 1; agree_state **48** of 48, failing 0 | as above |
+| | SOL-USD-PERP.HYPERLIQUID | pending — tool built (Story 31.6); verdict pending Story 31.11 | smoke: 0 | Smoke as above: REST agree 474, between_pushes 8 (REST values no WS frame of the day held: open interest moves on every fill and the WS push samples it) -> validated; exact **4,875**, failing 0; updates stored 4,875, not_stored 0 | as above |
+| | BTCUSDT-SPOT, ETHUSDT-SPOT | n/a (spot has none); smoke: **0 fabricated** under `custom_open_interest`/`funding_rate_update` | | | as above |
+| Instrument definitions | all 5 | pending — tool built (Story 31.6); verdict pending Story 31.11; SOL **DEVIATION** D-106 (`lot_size` 1 is Nautilus's default, not venue-declared, not compared) | smoke: 0 | Smoke as above: each instrument agree **481**, differs 0, before_first_definition 1 (the recorder's first poll preceded the collector's start), no venue change; one stored definition each (the collector's 12:59:21-23Z start). Every field compared: price/size precision, price/size increment, lot size (Bybit), min quantity, multiplier | as above |
 | Catalog integrity and backtest-read parity | all 5 | pending — Story 31.7 | | | |
 | Candles and klines, every timeframe | all 5 | pending — Story 31.8 | | | |
 | Live, backtest and display parity (incl. the bot's signals) | all 5 | pending — Story 31.9 | | | |
@@ -114,6 +117,22 @@ files of hours 00-11 and 16-23 missing, and Bybit's coverage record absent (D-92
 16:00Z are `reference_unavailable` (no raw to close them). `collector.book_sequence` ledger
 entries in `data/errors/bybit_collector.jsonl` over the window: 0. Runtime: 95 s (Bybit, four
 instruments), 4 s (Hyperliquid).
+
+**Derivs smoke (Story 31.6), how it was run.** `verification.derivs.main([--venue V --day
+2026-09-29 --raw-dir <copy> --catalog data/catalog], clock=<2026-10-01T00:00Z>)` with
+`BYBIT_COLLECTOR_CONFIG`/`HYPERLIQUID_COLLECTOR_CONFIG` the committed `config.toml`s
+(`open_interest_poll_seconds` 300) and `ERROR_LEDGER_DIR` a scratch directory, read-only against
+the running stack at ~18:05Z and, after the Story 31.6 review patches, again at 18:30Z (the numbers above are the rerun's), with the raw root a directory of symlinks to the recorder's closed
+hour files 12..16 only (the hour-17 file was still being written). The day is partial, so its
+verdict fails on the inputs by design: 76 (Bybit) / 38 (Hyperliquid) raw files of hours 00-11 and
+17-23 missing, and Bybit's open interest has two `poll_gaps` at the day's edges (before the soak's
+first poll, D-76, and after the run). Rows after 16:59:55Z are `reference_unavailable` (the unread hour 17, widened 5 s) unless a
+recorded frame inside that margin judges them; so is a collector startup row inside the
+recorder's own startup gap that no recorded frame matches. The only ledger lines at `verification.derivs.refused` are from the first development run,
+which refused Hyperliquid's funding file on `"-9.368E-7"` -- the verifier's reader, since fixed
+(D-108). Every other failing count was 0. Runtime: 6.6 s (Bybit, four instruments), 1.5 s
+(Hyperliquid).
+After the follow-up review's patches (D-111) the smoke was rerun at 18:45Z over the closed hours 12..17: every Bybit value failing count 0 (BTCUSDT mark exact 15,016, index 36,021, funding 147; ETHUSDT 14,706, 35,102, 107; OI agree_state 59 each, the same two partial-day `poll_gaps`), definitions agree 601 each, spot 0 fabricated; Hyperliquid SOL mark exact 4,424, funding 1,411, OI 5,787, failing 0, and index exact 5,054 with **not_stored 1** -- the match-bound edge D-112 (OPEN), not a capture loss. Runtime: 8.1 s (Bybit), 2.1 s (Hyperliquid).
 
 ## Reference recorder footprint
 

@@ -15,7 +15,8 @@
 """
 The verification context's error-ledger sites (DATA-07), the reference recorder's
 (`verification.recorder.*`), the conservation tool's (`verification.conservation.*`), the
-trades tool's (`verification.trades.*`) and the book tool's (`verification.book.*`): every
+trades tool's (`verification.trades.*`), the book tool's (`verification.book.*`) and the derivs
+tool's (`verification.derivs.*`): every
 failure either survives or refuses on is recorded at one of these through
 `observability.error_ledger.record`, never a bare log line.
 
@@ -62,3 +63,7 @@ CONSERVATION_REFUSED = "verification.conservation.refused"
 # crashed on any other exception (the detail says `crashed`; the exception is then re-raised).
 TRADES_REFUSED = "verification.trades.refused"
 BOOK_REFUSED = "verification.book.refused"
+# The derivs tool refused to run: the book tool's refusals, plus a mark/index file without its
+# `price_precision` label, a stored value that is not decimal text, a null value or clock, an
+# unreadable `open_interest_poll_seconds`; or it crashed (the detail says `crashed`; re-raised).
+DERIVS_REFUSED = "verification.derivs.refused"

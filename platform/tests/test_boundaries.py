@@ -1995,6 +1995,9 @@ VERIFICATION_DENIED_MODULES = (
     VIEWS,
     "kernel.fold",
     "kernel.second_snapshot",
+    # Story 31.6: the derivs tool reads the stored open interest and catalog files raw.
+    "kernel.open_interest",
+    "kernel.catalog_files",
 )
 _PYO3 = "nautilus_pyo3"
 # The allowlist behind the denylist: the only in-repo modules outside `verification` a non-test
@@ -2016,6 +2019,7 @@ VERIFICATION_ROOTS = frozenset(
         "verification.conservation",
         "verification.trades",
         "verification.book",
+        "verification.derivs",
     }
 )
 # The reference signals and their comparison rules (Story 31.3) are written from the dictionary
@@ -2131,7 +2135,7 @@ def test_importing_the_verification_roots_loads_no_denied_module() -> None:
     probe = (
         "import sys, verification.recorder, verification.tools.record_fixtures\n"
         "import verification.conservation, verification.tools.cut_snapshot_fixtures\n"
-        "import verification.trades, verification.book\n"
+        "import verification.trades, verification.book, verification.derivs\n"
         "print('\\n'.join(sorted(sys.modules)))\n"
     )
     env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": str(PLATFORM_DIR)}

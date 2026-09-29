@@ -255,6 +255,21 @@ Hyperliquid only** (dYdX bars are derived from its 1 s archive instead).
   `ParquetDataCatalog` refuses to merge. See `platform/CLAUDE.md` NAUT-01.
 - **Cadence:** event-driven, all subscribed + monitored instruments (markets channel
   covers everything, not just liquid/pinned).
+- **Bybit and Hyperliquid** (the bullets above are dYdX's) `[amended 2026-09-29: Story 31.6]`, proven by `verification.derivs`
+  (§1.19):
+  - **Bybit** (linear only; `capture/venues/bybit/client.py` subscribes `tickers.<symbol>` for
+    `LINEAR`): one row per ticker frame carrying `markPrice` -- Bybit sends a field in a `delta`
+    frame only when it changed, so this is change-driven too. `ts_event` = the frame's `ts` (whole
+    ms), `ts_init` = the adapter's receipt. Precision: the instrument's `price_precision` (Bybit
+    publishes at its tick, no re-stamping); label measured `2` on BTCUSDT/ETHUSDT.
+  - **Hyperliquid** (`subscribe_mark_prices`): one row per change of the `activeAssetCtx`
+    `markPx` wire string (the adapter's per-coin string cache,
+    `crates/adapters/hyperliquid/src/websocket/handler.rs:868-970`); a push that repeats the value
+    stores nothing. The wire carries no time: `ts_event == ts_init`, the adapter's receive clock.
+    Label = the instrument's `price_precision` (`6 - szDecimals`, `4` for SOL).
+  - **Change-only storage (audit D-107):** a quiet second has no row, so a reader wanting the
+    value at time t forward-fills the last row at or before t; a gap in rows is not a gap in
+    data (compare the coverage record, §1.16, for when the collector was absent).
 
 ### 1.5 `IndexPriceUpdate` (native Nautilus type)
 
@@ -265,6 +280,10 @@ Hyperliquid only** (dYdX bars are derived from its 1 s archive instead).
   no such data type), so the one reader is `kernel.catalog_files.query_index_prices` (column
   projection, `Price.from_raw` at the file's `price_precision`), used by
   `research.application.frames.CatalogFrames.mark_index` `[amended 2026-09-28: Story 27.1]`.
+- **Bybit and Hyperliquid** `[amended 2026-09-29: Story 31.6]`: as §1.4 with Bybit's `indexPrice` (one row per ticker frame
+  carrying it; the busiest stream collected, ~7.6k rows an hour on BTCUSDT) and Hyperliquid's
+  `oraclePx` (one row per change of its wire string, `ts_event == ts_init`). Same `ts_event`
+  rules, same labels, same forward-fill rule (D-107).
 
 ### 1.6 `FundingRateUpdate` (native Nautilus type)
 
@@ -274,6 +293,27 @@ Hyperliquid only** (dYdX bars are derived from its 1 s archive instead).
 - **Downstream use:** research only: `research.application.frames.CatalogFrames.funding`
   reads it (time-bounded `catalog.query`) for notebooks; no file in `views/` or `ranking/`
   reads `FundingRateUpdate` `[amended 2026-09-28: Story 27.1 -- was "none found ... dead data"]`.
+- **Bybit** `[amended 2026-09-29: Story 31.6]`: from the linear ticker. The adapter keeps a per-symbol `funding_cache`
+  (`crates/adapters/bybit/src/python/websocket.rs:1549-1570`) of the last `fundingRate` and
+  `nextFundingTime` *strings*; a frame carrying either one that differs from the cached string
+  yields one row, parsed from that frame alone. So:
+  - `ts_event` = the frame's `ts` (whole ms);
+  - `interval` = `fundingIntervalHour` x 60 and `next_funding_ns` = `nextFundingTime` x 10^6 **only
+    when the frame carries them** -- a delta frame carries only what changed, so almost every row
+    has both **null** (the soak, 12:59-17:00Z: of BTCUSDT's 100 rows only the collector's startup
+    snapshot row carries `interval`, and only it and the 16:00Z settlement frame carry
+    `next_funding_ns` -- 99 and 98 null; ETHUSDT 62 and 61 null of 63). Null means "not in this frame", not "none": a reader
+    takes the interval and the next funding time from the last row that carried them (audit D-103);
+  - a frame whose `nextFundingTime` changed but which carries no `fundingRate` is dropped:
+    the parse needs the rate, fails, and the adapter only `log::debug!`s it. Its new next time
+    reaches the catalog only with the next rate change (`next_time_only`, a Known limit, audit
+    D-104; measured 0 such frames on the soak).
+- **Hyperliquid** `[amended 2026-09-29: Story 31.6]`: one row per change of the `activeAssetCtx` `funding` wire string;
+  `interval` 60 (hourly funding, venue docs), `next_funding_ns` null, `ts_event == ts_init`.
+- **Stored text** `[amended 2026-09-29: Story 31.6]`: `rate` is JSON-quoted decimal text written by `rust_decimal`, which uses
+  scientific notation for small magnitudes (`"-9.368E-7"` for Hyperliquid's wire
+  `-0.0000009368`; 1 of 1,684 stored rates on the soak). The value is exact; a reader must parse
+  it as a `Decimal` (or accept the exponent form), never assume plain digits (audit D-108).
 
 ### 1.7 `DydxSecondSnapshot` (custom `Data` type, `kernel/second_snapshot.py`)
 
@@ -434,6 +474,21 @@ Moved from `collector_core/` to the shared kernel in Story 23.2; class name (hen
   for notebooks) `[amended 2026-09-28: Story 27.1]`; none in `views/`/`ranking/` — only the
   *volume*-based liquidity classification (a separate, parallel computation in the same module)
   is used live. Not wired into any live signal or ranking.
+- **Bybit** `[amended 2026-09-29: Story 31.6]`: dropped by the bindings on the linear ticker path, so polled over REST
+  (`capture/venues/bybit/open_interest.py`, the category-wide `/v5/market/tickers?category=linear`
+  `openInterest`) every `open_interest_poll_seconds` (committed `config.toml`: 300; the loader's
+  default when the key is absent is `BybitConfig.open_interest_poll_seconds = 300`,
+  `capture/venues/bybit/config.py:36`). One row per poll per linear id, whether the value changed
+  or not. **`ts_event == ts_init` = the collector's `time.time_ns()` after the response
+  (`open_interest.py:44`), a local wall clock, never a venue time** (audit D-105): the value is
+  the venue's state when Bybit answered, up to the poll's latency before `ts_event` (measured
+  <= 623 ms). Linear only: `-LINEAR.BYBIT` ids are built from the response, spot has none.
+- **Hyperliquid** `[amended 2026-09-29: Story 31.6]`: forwarded over the WebSocket (`subscribe_open_interest`), one row per
+  change of the `activeAssetCtx` `openInterest` wire string, stored verbatim as decimal text
+  (e.g. `5558985.1799999969`, the venue's own float artefact, kept exactly), `ts_event ==
+  ts_init`. Change-only: forward-fill (D-107).
+- **Stored text** `[amended 2026-09-29: Story 31.6]`: `open_interest` is `str(Decimal)`, which may use scientific notation for
+  small or large magnitudes; parse it as a `Decimal`.
 
 ### 1.9 `InstrumentStatus` (native Nautilus type)
 
@@ -448,6 +503,19 @@ Moved from `collector_core/` to the shared kernel in Story 23.2; class name (hen
   (`collector.py`). Not a recurring stream — defines the instrument
   universe/precision metadata the catalog needs to interpret every other type
   correctly.
+- **Bybit and Hyperliquid** `[amended 2026-09-29: Story 31.6]`: written once per collector start by `CaptureService.run`
+  (`self._archive.write_instruments(converted)`) into `crypto_perpetual/<iid>/` (perps) or
+  `currency_pair/<iid>/` (Bybit spot), `ts_event == ts_init` = that start. A venue change during a
+  run (a new tick size) is not written until the next start; `verification.derivs` then reports
+  every later venue poll `differs` and the change as a `venue_change` (§1.19). The adapters map:
+  - Bybit linear (`instruments-info`): `price_increment` = `tickSize`, `price_precision` = its
+    written decimals (`0.10` -> 2, equal to `priceScale`), `size_increment` = `lot_size` =
+    `qtyStep` (its decimals the `size_precision`), `min_quantity` = `minOrderQty`, `multiplier` 1;
+  - Bybit spot: the same with `basePrecision` for `qtyStep`;
+  - Hyperliquid perp (`meta.universe`): `size_precision` = `szDecimals`, `price_precision` =
+    `max(0, 6 - szDecimals)`, increments 10^-precision, no `min_quantity`, `multiplier` 1, and
+    **`lot_size` 1: Nautilus's default, not a venue value** (the venue declares none; its minimum
+    order is a notional). Never read `lot_size` as Hyperliquid's (audit D-106).
 
 ### 1.11 Error ledger (`platform/data/errors/<service>.jsonl`, story 23.3)
 
@@ -1258,6 +1326,174 @@ read them, not only `passed`. A receipt difference above 500 ms reads as `bounda
 loud false fail). A capture-side
 Hyperliquid resubscribe gives capture a subscribe reply the recorder never sees, and the rows up
 to the next broadcast push are `content_differs` (audit D-101, OPEN).
+
+### 1.19 Mark, index, funding, open interest and instrument definitions proven (`verification.derivs`, Story 31.6)
+
+Not stored data: the check that every stored mark/index price, funding rate and open-interest row
+(§1.4-1.6, §1.8) is the venue's, that every venue update the collector should store was stored,
+and that every stored instrument definition (§1.10) is what the venue declares.
+`python3 -m verification.derivs --venue BYBIT|HYPERLIQUID --day D [--json] [--raw-dir DIR]
+[--catalog DIR]` (`verification/derivs.py`, the root; `verification/application/derivs.py`;
+`verification/domain/derivs_check.py` and `verification/domain/instrument_check.py`, pure; the
+reader `verification/infrastructure/derivs_reader.py`). It imports nothing of `capture`,
+`kernel.open_interest`, `kernel.catalog_files`, `nautilus_pyo3` or `nautilus_trader`
+(`tests/test_boundaries.py`, a registered root). It reuses conservation's raw reader, closed-day
+rule, plan, coverage record and missing-hour rule, the trades tool's `recorder_gaps` and Parquet
+pruning (`catalog_reader.read_window`) and its exact fixed-point decode (`trade_check.fixed_raw` /
+`decode_fixed` / `whole_at`).
+
+**Inputs, decoded exactly.**
+- Reference (the recorder's verbatim frames, §1.15; the day's hours plus the hour before, for the
+  state at 00:00, and the hour after). Bybit: `linear.tickers` frames of the instrument's topic; a
+  field present in a frame (`markPrice`, `indexPrice`, `fundingRate`, `nextFundingTime`,
+  `fundingIntervalHour`, `openInterest`) is an update keyed by the frame's `ts` ms x 10^6 -- what
+  the adapter stamps as `ts_event`. A field's **state** at t is its last update keyed at or before
+  t, unknown when that update's frame was *received* before the channel's last reset at or before
+  t (a connection line, or an hour without a file); receipt, not key, is compared with the reset
+  because both are local clocks (the soak's startup snapshot carried `ts` 12:59:20.283 and
+  arrived at 12:59:21.26, after its `open` line at 12:59:21.07). Hyperliquid: `activeAssetCtx`
+  frames of the coin, keyed by `recv_ns` (the wire has no time); an update of a field is a frame
+  whose wire string differs from the previous frame's. Wire values are ASCII decimal text (a
+  leading `-` for funding), never exponents. A ticker frame without `ts`/`data.symbol` or naming
+  another symbol than its topic, or a context without `data.coin`/`data.ctx`, is refused.
+- REST: Bybit `linear.rest.tickers` polls (`result.list[0].symbol` must be the requested one),
+  placed by the response's `time`; Hyperliquid `rest.metaAndAssetCtxs`, the context at the
+  universe index whose `name` is the coin. Definitions: Bybit `<category>.rest.instruments-info`,
+  Hyperliquid's `meta.universe` entry.
+- Stored rows (`derivs_reader`, raw pyarrow): mark/index `value` (`binary(16)` at 10^16) with each
+  file's `price_precision` label; funding `rate` (JSON-quoted decimal text, exact scientific
+  notation accepted, §1.6), `interval`, `next_funding_ns`; `open_interest` (decimal text);
+  definition numerics (decimal strings). Every value a `Decimal` or an int, never a float.
+
+**Expected ratio** (printed beside each type's counts):
+
+| Venue and stream | Stored rows |
+|---|---|
+| Bybit mark, index | one per frame carrying the field |
+| Bybit funding | one per frame whose `fundingRate` or `nextFundingTime` string differs from the last seen (the adapter's `funding_cache`); a frame changing only `nextFundingTime` without a rate is `next_time_only`, not written (Known limit, D-104) |
+| Hyperliquid, every type | one per change of the wire string |
+| Bybit open interest | one per `open_interest_poll_seconds` (the venue config's; 300 when absent, the collector's default) |
+
+**`ts_event` rules** (a break is `ts_rule`): Bybit mark, index, funding: the venue frame `ts`, whole
+milliseconds; Bybit open interest: `ts_event == ts_init`, the collector's clock after the poll
+response (§1.8); Hyperliquid, every type: `ts_event == ts_init`, the adapter's receive clock.
+
+**Stored-row classes** (per type; failing ones fail the instrument):
+
+| Class | Condition | Fails |
+|---|---|---|
+| `exact` | Bybit: an unconsumed reference update of the row's own key with an equal value (a multiset per key). Hyperliquid: the earliest unconsumed update of equal value received within `HL_MATCH_BOUND_NS` of the row's `ts_init` | no |
+| `agree_state` | Bybit: no same-key update, equal to the state at its key (a stored null component -- a funding field the frame did not carry -- agrees with any state). Hyperliquid: equal to any frame received within the bound. Bybit open interest (always this class when it agrees): equal to the state at some venue time in `[ts_event - OI_POLL_WINDOW_NS, ts_event]`. Covers the collector's own reconnect snapshot. A known component that differs is `unmatched` | no |
+| `value_mismatch` | Bybit: a same-key update of another value (example: key, stored, reference) | yes |
+| `unmatched` | nothing agrees | yes |
+| `reference_unavailable` | nothing recorded to compare with: the row's time lies in a recorder gap (connection gaps and unrecorded hours, each widened by 5 s) and no recorded frame of its key (Bybit), equal frame within the bound (Hyperliquid) or agreeing state in the window (open interest) exists; or the state is unknown; or (Bybit funding) the rate agrees but a component the row stores -- a restart snapshot row's `interval`/`next_funding_ns` -- has no known state since the last reset. A recorded frame is always compared first, gap or not | no |
+| `off_grid` | the fixed raw is not whole at its file's `price_precision` | yes |
+| `ts_rule` | the type's `ts_event` rule is broken | yes |
+| `duplicate` | a second row of the type with the same `(ts_event, value)` | yes |
+
+**Reference-update classes** (every update keyed in the day; Bybit open interest uses poll
+coverage instead):
+
+| Class | Condition | Fails |
+|---|---|---|
+| `stored` | a row consumed it (`exact`) | no |
+| `unchanged` | Bybit funding: an equal repeat of both strings | no |
+| `next_time_only` | see the expected ratio | no |
+| `reference_unavailable` | the update lies in a recorder gap: after a recorder reconnect its first frame is that connection's own snapshot, which capture's connection never received | no |
+| `not_stored_explained` | its second lies in a coverage `seconds` run whose reason is in `FEED_LOSS_REASONS` = {`restart`, `stale`, `no_book`, `not_collected`} -- the reasons meaning capture's feed was absent (no process, a dead socket, no subscription yet, not subscribed); the others judge a second of a live feed | no |
+| `not_stored` | otherwise | yes |
+
+**Bybit open-interest poll coverage:** the day expects `86400 / period` polls; a spacing between
+consecutive rows over 3/2 of the period (from 00:00 to the first row and from the last row to
+24:00 included) is a `poll_gap`. It is explained (not failing) only when, with every `restart`
+coverage run's span subtracted from it, no uncovered stretch of it still exceeds 3/2 of the period.
+
+**Funding values:** `rate` as an exact `Decimal`; Bybit `interval` = `fundingIntervalHour` x 60 and
+`next_funding_ns` = `nextFundingTime` x 10^6 when the frame carries them, else null; Hyperliquid
+`interval` 60 and `next_funding_ns` null. The whole triple is the compared value.
+
+**Precision labels:** every mark/index file with rows in the day must carry `price_precision`
+metadata (else refused by name); more than one label per instrument-type-day fails; a file whose
+label differs from the `price_precision` of any definition in force over the file's first to last
+row (`ts_init`) fails (`label_vs_definition`). Funding and open interest have none ("none: stored as decimal text").
+
+**REST validation (reported first).** Bybit, per type's field against the WS state at the
+response's `time`: `agree_key` (equal), `agree_bracket` (equal to the update just before or just
+after -- a neighbour in a recorder gap, or separated from the poll's time by a reset, by the same
+receipt-vs-reset rule as the state, is not used), `between_pushes` (neither), `unaligned` (state unknown, or in a recorder gap), `failed`.
+Hyperliquid: `agree` (equal to a frame received in `[sent_ns - 1 s, recv_ns + 1 s]`),
+`between_pushes`, `unaligned` (in a recorder gap), `failed`. A type's reference is `unvalidated`
+-- failing -- when polls were judged and none agreed, or rows exist and no poll was judged.
+Why `between_pushes` is not failing: Hyperliquid's REST serves open-interest states the WS never
+pushes (the smoke: 8 of 482 SOL polls held a value no frame of the day held; open interest moves
+on every fill).
+
+**Hyperliquid across midnight.** A row (capture's receipt) and its update (the recorder's) carry
+different clocks, so an update received at 00:00:00.020 can have its row at 23:59:59.980. The
+rows are read `HL_MATCH_BOUND_NS` beyond the day on both sides; the rows outside the day only
+consume their updates and are never counted or classified.
+
+**Venue oddities are counted, never refused.** A REST poll with a status other than 200, a
+recorder `refusal`/`error`, a Bybit `retCode` other than 0, an empty `result.list` or an item of
+another symbol, a Hyperliquid answer without the coin (or with contexts not matching the
+universe), a field that is not decimal text, or a definition entry without its documented fields
+is a `failed` poll (for that type, or for the definitions). A malformed `activeAssetCtx` frame of
+another coin is skipped before the strict parse. An empty-string ticker field (Bybit's
+`fundingRate: ""` on a dated future) is no value: the adapter's parse fails on it and writes
+nothing, while its `funding_cache` still takes the string, which the emulation follows. Only the
+recorder's own lines are refused (a missing `recv_ns`, an unknown line kind, a frame of the coin
+without `data.coin`/`data.ctx`), and so is a WS frame *of the checked instrument* whose watched
+field is present but not decimal text (a `null` `markPx`, say): that frame is the reference
+itself, so the day cannot be judged without it -- loud, never skipped. A Bybit id of a category
+the recorder does not record (inverse) is refused too. Dated Bybit futures' definitions are read from `crypto_future/`.
+
+**Instrument definitions** (`instrument_check`, from the venue docs; §1.10 for the mapping): every
+good venue poll of the day is judged against the stored definition in force (the latest row with
+`ts_init` at or before its receipt): `agree`, `differs` (fails; field, stored, venue),
+`before_first_definition`, `failed`. No stored definition at all fails (`no_definition`), as does a
+day with no poll judged. A change between consecutive venue polls is listed as a `venue_change`
+with the stored definitions' `ts_init`s, which show whether capture wrote it (only at a start).
+Hyperliquid `lot_size` is shown `not_venue_declared (stored 1: Nautilus default)` and not compared
+(D-106). Increments compare as `Decimal` values, precisions as ints.
+
+**Spot (Bybit).** Every `-SPOT.BYBIT` id directory under `mark_price_update`, `index_price_update`,
+`funding_rate_update` and `custom_open_interest` (plan ids always listed, "0 rows"): rows with
+`ts_event` in the day are `fabricated` and fail the day.
+
+**Bounds** (time alignment only, never a value tolerance): `HL_MATCH_BOUND_NS` = 1 s (stored
+`ts_init - recv_ns` measured p1 -57 ms to max 437 ms; push cadence median 1.02 s, min 196 ms; the follow-up smoke found one row at +1,048 ms, a push later than the recorder's, which reads a false `not_stored` -- audit D-112, OPEN);
+`OI_POLL_WINDOW_NS` = 2 s (the measured maximum needed was 623 ms over 96 rows; median WS
+open-interest update interval 8.7 s). Recorder gaps and unrecorded hours are widened 5 s each way
+(`RECORDER_GAP_MARGIN_NS`): the store files a line by receipt, so a frame keyed in an hour's last
+instants can sit in the next hour's file (the smoke: a BTCUSDT mark `ts` 16:59:59.984Z filed in the
+unread 17:00Z hour).
+
+**Verdict and exit.** An instrument passes with every type passing (no failing row or update
+count, one label equal to the definition's, no unexplained poll gap, a validated reference) and its
+definitions passing. The day passes when every instrument does, no spot row is fabricated, the
+coverage record exists and no raw hour of `linear.tickers`, `linear.rest.tickers`,
+`<category>.rest.instruments-info` (Bybit) or `activeAssetCtx`, `rest.metaAndAssetCtxs`
+(Hyperliquid) is missing. Exit 0 pass, 1 fail, 2 usage. Refusals exit 1 with their message,
+ledgered at `verification.derivs.refused`: the book tool's (a day not closed, no raw root or
+catalog, an unreadable plan, a malformed line, a truncated raw file of an hour of the day), a
+mark/index file without its label, a stored value that is not decimal text, a null value or clock,
+an unreadable `open_interest_poll_seconds`. Any other exception is a crash, ledgered at the same
+site and re-raised. `--json` gives `passed`, `venue`, `day`, `bounds_ns`,
+`open_interest_poll_seconds`, `coverage_file`, `coverage_present`, `missing_raw_files`,
+`truncated_neighbour_files`, per instrument `types` (each `kind`, `passed`, `reference`, `ratio`,
+`ts_rule`, `rest`, `rows`, `row_classes`, `updates`, `coverage`, `labels`, `label_vs_definition`,
+`examples`) and `definitions` (`passed`, `polls`, `differs`, `venue_changes`,
+`definitions_ts_init`, `not_declared`, `no_definition`), and `spot` (`rows`, `fabricated`).
+
+**Repro** (host, from `platform/`, on the verify stack's data): `VERIFY_DATA_DIR=data/verification
+CATALOG_PATH=data/catalog python3 -m verification.derivs --venue BYBIT --day YYYY-MM-DD [--json]`.
+Measured cost (smoke, 12:59-17:00Z of raw): 6.6 s for Bybit's four instruments, 1.5 s for
+Hyperliquid; 12:59-18:00Z: 8.1 s and 2.1 s. Results: `docs/VERIFICATION_REPORT.md`.
+
+Known limits (each a `Known limit:` in the code): memory is one instrument-type-day of rows and the
+instrument's reference as Python objects (a busy full Bybit index day is ~180k rows, ~55 MB; upgrade path:
+hour windows carrying the state); the plan is today's; a Hyperliquid receipt difference above 1 s
+or a Bybit poll slower than 2 s reads as a loud false fail.
 
 ---
 
