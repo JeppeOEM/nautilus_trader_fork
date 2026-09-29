@@ -1553,15 +1553,24 @@ def test_no_module_outside_the_kernel_indexes_a_snapshot_payload_by_key() -> Non
 
 
 # The stored snapshot layout (Story 30.2) -- `bid_prices`/`ask_prices` as the best price plus gaps
-# -- is decoded only by `kernel.second_snapshot`; the one other module that reads the raw columns
-# is the migration that writes them. A module holding a Parquet reader (`pyarrow`, or pandas'
-# `read_parquet`) and naming either column reads the gap layout itself. Known limit: numpy alone
+# -- is decoded only by `kernel.second_snapshot`; the other modules that read the raw columns are
+# the migration that writes them and the book oracle's own reader (below). A module holding a
+# Parquet reader (`pyarrow`, or pandas' `read_parquet`) and naming either column reads the gap
+# layout itself. Known limit: numpy alone
 # does not count -- `kernel.indicators` and research's frames name the same keys for the decoded
 # float view (`as_floats()`, absolute prices), which is the point of keeping the names; a module
 # that reads Parquet through numpy only would slip past. Upgrade path: track the `DydxSecondSnapshot`
 # column reads by data flow instead of by module.
 _GAP_LAYOUT_COLUMNS = frozenset({"bid_prices", "ask_prices"})
-_GAP_LAYOUT_READERS = frozenset({"kernel.second_snapshot", "archive.tools.migrate_snapshot_ints"})
+# Plus the book tool's own reader (Story 31.5): the oracle must decode independently, so it decodes
+# the gap layout from the published rule rather than through the kernel it checks.
+_GAP_LAYOUT_READERS = frozenset(
+    {
+        "kernel.second_snapshot",
+        "archive.tools.migrate_snapshot_ints",
+        "verification.infrastructure.snapshot_book",
+    }
+)
 
 
 def _reads_parquet(tree: ast.AST) -> bool:
@@ -1605,13 +1614,14 @@ def test_the_gap_layout_rule_sees_parquet_readers_naming_the_columns() -> None:
     assert (_reads_parquet(pandas), _names_gap_columns(pandas)) == (True, [2])
 
 
-def test_only_the_kernel_and_the_migration_read_the_gap_encoded_book_columns() -> None:
+def test_only_the_kernel_the_migration_and_the_oracle_read_the_gap_encoded_book_columns() -> None:
     readers = _gap_layout_readers()
     assert set(readers) <= _GAP_LAYOUT_READERS, (
         "decode the snapshot's gap-encoded book prices only through kernel.second_snapshot "
-        f"(Story 30.2): {sorted(set(readers) - _GAP_LAYOUT_READERS)}"
+        "(Story 30.2; the book oracle's reader is the one independent decoder, Story 31.5): "
+        f"{sorted(set(readers) - _GAP_LAYOUT_READERS)}"
     )
-    assert set(readers) == _GAP_LAYOUT_READERS  # both still read them: the rule is not vacuous
+    assert set(readers) == _GAP_LAYOUT_READERS  # all still read them: the rule is not vacuous
 
 
 # --- ranking, bots and collection control: no module-level runtime state (spine AD-D10, Stories
@@ -2005,6 +2015,7 @@ VERIFICATION_ROOTS = frozenset(
         "verification.tools.cut_snapshot_fixtures",
         "verification.conservation",
         "verification.trades",
+        "verification.book",
     }
 )
 # The reference signals and their comparison rules (Story 31.3) are written from the dictionary
@@ -2120,7 +2131,7 @@ def test_importing_the_verification_roots_loads_no_denied_module() -> None:
     probe = (
         "import sys, verification.recorder, verification.tools.record_fixtures\n"
         "import verification.conservation, verification.tools.cut_snapshot_fixtures\n"
-        "import verification.trades\n"
+        "import verification.trades, verification.book\n"
         "print('\\n'.join(sorted(sys.modules)))\n"
     )
     env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": str(PLATFORM_DIR)}

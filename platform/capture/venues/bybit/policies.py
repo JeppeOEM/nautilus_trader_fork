@@ -22,11 +22,21 @@ was measured contiguous in a healthy stream: raw capture 2026-09-20 (`scripts/ca
 exactly +1**, zero gaps and zero regressions (DATA_INTEGRITY_AUDIT.md D-41). So a regress
 (`u` <= previous: replayed or reordered) or a gap (`u` skips: lost) means the local book can no
 longer be trusted: the core drops the message and the book, ledgers `collector.book_sequence`
-and resyncs (DATA-03 fallback; a rising count is an open incident). That capture covers one
-instrument and one topic; Bybit **spot** is unmeasured, so a spot break is an open DATA-02
-question. Known limit (DATA-08): a message with zero levels carries no `u` and is not checked,
-and the baseline is not advanced by it, so the next message can read as a one-message gap on a
-healthy stream -- open, not measured.
+and resyncs (DATA-03 fallback; a rising count is an open incident). Story 31.5 measured it on
+every collected topic, spot included (the recorder's `orderbook.50` delta frames, 2026-09-29
+12:59:19-16:12Z: linear BTC/ETH 481,524 / 507,908, spot BTC/ETH 403,606 / 312,005, 0 `u` breaks,
+0 zero-level deltas; spot `u` also steps exactly +1), so a spot break is lost or reordered messages too
+(audit D-98).
+
+Zero levels (DATA-08, audit D-96): a zero-level *delta* never reaches Python -- the adapter's
+`OrderBookDeltas::new_checked` refuses an empty vector (`crates/model/src/data/deltas.rs`) and
+the Bybit client only `log::error!`s the failure (`crates/adapters/bybit/src/python/websocket.rs`)
+-- so its `u` is missing here and the next delta reads as a gap: a `collector.book_sequence`
+entry and a resync for a message that carried no change. Known limit: that false break cannot be
+fixed on this side of the bindings (FORK-01); it is loud, never silent, and measured 0 times on
+the wire (above). Upgrade path: the adapter forwards a zero-level delta as an empty-but-sequenced
+message. A zero-level *snapshot* arrives as a lone `Clear` (no `u` to read) and still
+re-baselines (`LiveBook._check_sequence`).
 """
 
 from capture.domain.policies import SequenceVerdict

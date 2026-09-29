@@ -175,6 +175,15 @@ class LiveBook:
         """Run the canary: a gap or regress drops the book and queues a resync (DATA-08)."""
         key = canary.message_key(deltas)
         if key is None:
+            if is_snapshot:
+                # A snapshot always re-baselines, even one carrying no level (Bybit's adapter
+                # emits a lone `Clear` for a zero-level snapshot, `crates/adapters/bybit/src/
+                # websocket/parse.rs:259`, so no `u` can be read): the old baseline would read
+                # the next delta as a gap on a healthy stream (DATA-08, audit D-96). With none, the next message sets it (`sequence_verdict`: "ok").
+                # Known limit: that next delta is therefore unjudged -- no baseline, exactly as
+                # after a connect or a resync. Upgrade path: the adapter carries the snapshot's
+                # `u` on its `Clear`, so the snapshot itself sets the baseline.
+                self.last_u = None
             return None
         verdict = canary.verdict(self.last_u, key, is_snapshot)
         if verdict == "gap" or verdict == "regress":

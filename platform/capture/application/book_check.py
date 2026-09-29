@@ -75,9 +75,14 @@ def top_levels_mismatch(
     Each message starts with a stable "<kind> <price>:" head (values follow the colon), so a
     caller can tell whether the *same* level is still wrong on a later comparison.
 
-    Only the first `min(len(live), len(rest), depth)` live levels are judged, so a REST book
-    shorter than `depth` is not a mismatch. Up to `price_tolerance_levels` live prices may be
-    absent from REST (one level inserted/removed between the two samples shifts the tail).
+    Only the first `min(len(live), len(rest), depth)` levels of each side are judged, so a REST
+    book shorter than `depth` is not a mismatch. The check is symmetric: a judged live price absent
+    from REST is `absent from REST`, and a judged REST price absent from live is `absent from live`
+    -- a level the live book lost below the best (Story 31.5: before it, a live side one level
+    short of a shallow REST book read as agreeing). The tolerance applies per direction, the same
+    count each way: up to `price_tolerance_levels` live prices may be absent from REST, and
+    separately up to as many REST prices from live (one level inserted/removed between the two
+    samples shifts the tail).
     """
     live, rest = live[:depth], rest[:depth]
     if not live or not rest:
@@ -89,11 +94,15 @@ def top_levels_mismatch(
         out.append(f"best price: live={live[0][0]} rest={rest[0][0]}")
     rest_sizes = {_key(p): s for p, s in rest}
     judged = live[: min(len(live), len(rest))]
-    missing = [p for p, _ in judged if _key(p) not in rest_sizes]
-    if len(missing) > price_tolerance_levels:
-        out.extend(
-            f"absent from REST {price}: live level not in REST top {depth}" for price in missing
-        )
+    out += _absent(
+        judged, rest, price_tolerance_levels, f"from REST {{}}: live level not in REST top {depth}"
+    )
+    out += _absent(
+        rest[: len(judged)],
+        live,
+        price_tolerance_levels,
+        f"from live {{}}: REST level not in live top {depth}",
+    )
     for price, size in judged:
         rest_size = rest_sizes.get(_key(price))
         if rest_size is not None and abs(size - rest_size) > size_rel_tolerance * max(
@@ -101,6 +110,15 @@ def top_levels_mismatch(
         ):
             out.append(f"size at {price}: live={size} rest={rest_size}")
     return out
+
+
+def _absent(judged: list[Level], other: list[Level], tolerance: int, template: str) -> list[str]:
+    """`absent <template>` per judged price missing from `other`, when more than `tolerance`."""
+    present = {_key(price) for price, _ in other}
+    missing = [price for price, _ in judged if _key(price) not in present]
+    if len(missing) <= tolerance:
+        return []
+    return [f"absent {template.format(price)}" for price in missing]
 
 
 def persistent(first: list[str], second: list[str]) -> list[str]:

@@ -104,7 +104,12 @@ def _row_groups(parquet: pq.ParquetFile, path: Path, start_ns: int, end_ns: int)
     return kept
 
 
-def _read_window(path: Path, columns: list[str], start_ns: int, end_ns: int) -> pa.Table | None:
+def read_window(path: Path, columns: list[str], start_ns: int, end_ns: int) -> pa.Table | None:
+    """
+    Read `columns` of one file's rows with `ts_event` in `[start_ns, end_ns)`, skipping the row
+    groups whose statistics lie wholly outside it; None when every row group is skipped. A row
+    without `ts_event` is refused (`ValueError`), never filtered out unseen.
+    """
     parquet = pq.ParquetFile(path)
     try:
         groups = _row_groups(parquet, path, start_ns, end_ns)
@@ -113,6 +118,8 @@ def _read_window(path: Path, columns: list[str], start_ns: int, end_ns: int) -> 
         table = parquet.read_row_groups(groups, columns=columns)
     finally:
         parquet.close()
+    if table[_TS_EVENT].null_count:
+        raise ValueError(f"{path}: a row without `ts_event`")
     ts = table[_TS_EVENT].to_numpy()
     return table.filter(pa.array((ts >= start_ns) & (ts < end_ns)))
 
@@ -122,7 +129,7 @@ def read_day(
 ) -> pa.Table:
     """Every row of one instrument's data type with `ts_event` in `window`, those columns only."""
     files = sorted((catalog / "data" / data_dir / instrument_id).glob("*.parquet"))
-    tables = [t for p in files if (t := _read_window(p, columns, *window)) is not None]
+    tables = [t for p in files if (t := read_window(p, columns, *window)) is not None]
     if not tables:
         return _empty(columns)
     return pa.concat_tables(tables, promote_options="permissive")
@@ -144,7 +151,7 @@ def read_snapshot_rows(
     rows: list[dict[str, object]] = []
     for path in files:
         columns = pq.read_schema(path).names
-        table = _read_window(path, columns, *window)
+        table = read_window(path, columns, *window)
         if table is not None:
             rows += table.to_pylist()
     return sorted(rows, key=lambda row: int(str(row[_TS_EVENT])))
@@ -196,7 +203,7 @@ def _file_precisions(path: Path) -> tuple[int, int]:
 
 
 def _trade_values_window(path: Path, window: tuple[int, int]) -> pa.Table | None:
-    table = _read_window(path, list(_TRADE_VALUES), *window)
+    table = read_window(path, list(_TRADE_VALUES), *window)
     if table is None:
         return None
     price_precision, size_precision = _file_precisions(path)

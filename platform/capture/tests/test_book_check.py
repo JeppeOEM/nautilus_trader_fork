@@ -72,6 +72,23 @@ def test_rest_shorter_than_depth_is_not_a_mismatch() -> None:
     assert top_levels_mismatch(_BIDS, _BIDS[:2]) == []
 
 
+def test_a_level_live_lost_below_the_best_is_absent_from_live() -> None:
+    """The blind spot Story 31.5 closed: live is one level short of a shallow REST book."""
+    live = [(100.0, 1.0), (99.0, 3.0)]  # 99.5 lost
+    assert top_levels_mismatch(live, _BIDS, price_tolerance_levels=0) == [
+        "absent from live 99.5: REST level not in live top 20"
+    ]
+
+
+def test_absent_levels_are_tolerated_per_direction_the_same_count_each_way() -> None:
+    live = [(100.0, 1.0), (99.4, 2.0), (99.0, 3.0)]  # one price differs from REST each way
+    assert top_levels_mismatch(live, _BIDS, price_tolerance_levels=1) == []
+    assert top_levels_mismatch(live, _BIDS, price_tolerance_levels=0) == [
+        "absent from REST 99.4: live level not in REST top 20",
+        "absent from live 99.5: REST level not in live top 20",
+    ]
+
+
 def test_one_side_empty_is_a_mismatch() -> None:
     assert top_levels_mismatch(_BIDS, []) == ["one side empty: live=3 rest=0"]
     assert top_levels_mismatch([], []) == []

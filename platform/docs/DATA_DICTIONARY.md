@@ -284,7 +284,9 @@ with its class name (the catalog directory `custom_dydx_second_snapshot` derives
 Story 30.2 its book and trade fields are **exact integers** (the layout below), in Parquet and in
 the `snapshots:raw` payload alike: `kernel/second_snapshot.py` is the one encoder/decoder of that
 layout, `DydxSecondSnapshot.from_dict` the one parser of a stored row or a `snapshots:raw` entry,
-and no other module reads the gap-encoded book columns (`platform/tests/test_boundaries.py`). The
+and no other module reads the gap-encoded book columns (`platform/tests/test_boundaries.py`) except
+the migration that writes them and the book oracle's own independent decoder
+(`verification/infrastructure/snapshot_book.py`, §1.18) `[amended 2026-09-29: Story 31.5]`. The
 trade columns are read without the book by `kernel.catalog_files.query_second_ohlc` as
 `SecondOHLC` rows (decoded floats), level 0 by `query_top_of_book` as exact `Price`/`Quantity`.
 
@@ -1120,6 +1122,142 @@ missing and one extra id (both failing), not a `mismatch_ts_event`. A trade capt
 while only the recorder was disconnected, or before a recorder that started mid-day, is
 `extra_unexplained` (a loud false fail; upgrade path: a second recorder connection per endpoint).
 `first_ts_event` reads one footer per trade file of the instrument.
+
+### 1.18 The stored book proven against an independently rebuilt book (`verification.book`, Story 31.5)
+
+Not stored data: the check that every second's stored top-20 book (§1.7) is the venue's book at
+that second. `python3 -m verification.book --venue BYBIT|HYPERLIQUID --day D [--json] [--raw-dir
+DIR] [--catalog DIR]` (`verification/book.py`, the root; `verification/application/book.py`;
+`verification/domain/reference_book.py`, pure; the row reader
+`verification/infrastructure/snapshot_book.py`). It imports nothing of `capture`,
+`kernel.second_snapshot`, `nautilus_pyo3` or `nautilus_trader` (`tests/test_boundaries.py`, a
+registered root; `snapshot_book` is the one `verification` module in `_GAP_LAYOUT_READERS`: the
+oracle must decode independently). It reuses conservation's raw reader, closed-day rule, plan,
+wire index, coverage record (`collect_coverage`) and missing-hour rule, and the trades tool's
+Parquet pruning (`catalog_reader.read_window`).
+
+**Inputs, decoded exactly.**
+- Reference book: the recorder's WS book frames (§1.15), Bybit `<category>.orderbook.50`, Hyperliquid
+  `l2Book`, in arrival (file) order. Levels are the wire's decimal strings as `Decimal` (anything but
+  ASCII digits with an optional fraction is a malformed line); size 0 deletes. Bybit is keyed by
+  topic and `data.s` (they must agree); a frame without `ts`, `data.u`, `data.seq` or a `type` of
+  `snapshot`/`delta`, or an `l2Book` without `time`/`levels`, is refused (the measured shape the
+  replay relies on). Venue time: Bybit's frame `ts`, Hyperliquid's `data.time` (ms x 10^6), exactly
+  what the adapters stamp as `ts_event` (`crates/adapters/bybit/src/websocket/parse.rs:238`).
+- Stored rows: `custom_dydx_second_snapshot` read raw with pyarrow: `price_precision`/`size_precision`
+  per row, `bid_prices`/`ask_prices` decoded from `[best, gap, ...]` (bids subtract each gap, asks add
+  it; a gap that is not strictly positive is refused), sizes in units; every value a Python `int`. A
+  file without `price_precision` is the float layout and is refused by name, with a pointer to
+  `python3 -m archive.tools.migrate_snapshot_ints`. The integer layout is exact (Epic 30.2), so the
+  float-noise class of the earlier float layout is retired, not measured.
+- REST polls: the recorder's `<category>.rest.orderbook` (`limit=50`) and `rest.l2Book` polls,
+  attributed by the requested symbol/coin (a response naming another is refused).
+
+**The replay.** Bybit: a `snapshot` re-baselines (clear, then add); a `delta` applies only if
+`u == last_u + 1`, else `u_breaks` += 1 and the book is unavailable until the next snapshot (deltas
+meanwhile count `awaiting_snapshot`); a delta with empty `b` and `a` counts `zero_level_messages`
+and still advances `u`. Hyperliquid: every `l2Book` replaces the book; a `time` below the previous
+one counts `time_regress` (counted for Bybit's `ts` too). A connection line (`open`, `close`,
+`error`, the same lines `recorder_gaps` reads) makes the book unavailable until the next snapshot
+(Bybit) or until the message **after** the next one (Hyperliquid: the first `l2Book` after a
+subscribe is that connection's own reply, off the broadcast cadence -- the soak's recorder
+reconnect at 15:58:34Z got one at 513.642 s between broadcast pushes at 511.408 and 516.930 s that
+capture, still connected, never received -- so it re-baselines the reference but is not judged;
+`subscribe_replies`). A raw hour with no file inside the replay (the look-back or the day) breaks
+the book exactly as a connection line does (Bybit waits for a snapshot, Hyperliquid as after a
+reconnect), so no second of an unrecorded hour is ever closed against the book from before it.
+**Replay start:** Bybit looks back over the raw hours before the day (while
+their files exist) for the latest hour whose last replay event is the topic's `snapshot` or a
+connection line, and replays forward from that hour; Hyperliquid looks back one hour. A connection
+line is replayed, never skipped, so a Hyperliquid reconnect just before midnight still marks the
+day's first `l2Book` as the recorder's own subscribe reply. Without either, the seconds before the
+day's first baseline are `reference_unavailable`. The `replay` counters count only messages whose venue
+time lies in the day (never the look-back or the hour after it).
+
+**Close rule (DATA-01).** `ref(S)` = the top 20 per side after every message with venue time
+`< (S+1)` s, taken when the first message beyond S arrives; `ref-(S)` = the same without that last
+included message (the book keeps the message's undo -- the previous size of each price it touched,
+or the replaced sides of a baseline -- never a copy); `ref+(S)` = `ref(S)` plus the first message
+excluded. Units = `Decimal.scaleb(precision)` at the row's own precisions, `Inexact` trapped. When
+the stream ends (no later message proves the second closed) the remaining seconds are unavailable.
+
+**REST agreement (reported first, per instrument).** A Bybit poll is placed by `result.seq` among
+the reference messages (`data.seq`); REST `u` is a different counter from WS `u` (the soak: ~29M
+against ~192M), never used. A Hyperliquid poll is placed by `time`. Each good poll compares the top
+20 per side exactly:
+
+| Class | Condition | Fails |
+|---|---|---|
+| `agree_key` | a message has the poll's key and the books are equal | no |
+| `disagree_key` | a message has the poll's key and the books differ | yes |
+| `agree_bracket` | no key match; equal to the state just before or just after the poll's place | no |
+| `between_pushes` | no key match; equal to neither (the venue's engine moved inside one push) | no |
+| `unaligned` | the reference is unavailable at the poll's place (before the first baseline, after a break, after the last message) | no |
+| `failed` | status not 200, a recorder `refusal`, or Bybit `retCode` not 0 | no |
+| `persistent_disagreement` | a level contradicted (REST size equal to neither bracket state; or a reference level inside REST's price span that REST lacks) by two consecutive `between_pushes` polls, with the same REST value, and no reference message touched that price in between | yes |
+
+Why `between_pushes` exists: over 2026-09-29 13:00-16:00Z (180 polls per Bybit instrument; the
+smoke's window 12:59:19-16:00Z holds 181, the extra one `unaligned` before the first snapshot) 58 polls
+matched a WS `seq` exactly and none disagreed; 460 equalled a bracketing state and 202 caught an
+intermediate engine state (levels change several times inside one 20 ms push). A lost reference
+message instead persists across polls, which `persistent_disagreement` catches without any
+tolerance. On Hyperliquid every push replaces the book, so every price counts as touched between
+two polls and `persistent_disagreement` practically cannot fire: its validation rests on exact
+`time` key matches (14 of 181 polls in the smoke, all equal). The reference is `invalid` with any
+`disagree_key` or `persistent_disagreement`, and `unvalidated` when the day holds no reference book
+message at all ("no reference data") or no poll agreed (`agree_key` + `agree_bracket` = 0) while
+polls were judged or rows exist; either fails the instrument whatever the rows say.
+
+**Second classes** (one per UTC second of the day, per plan instrument):
+
+| Class | Condition | Fails |
+|---|---|---|
+| `exact` | row == `ref(S)` | no |
+| `boundary_late` | row == `ref-(S)`, and the omitted message's recorder `recv_ns` >= the row's `ts_init` - `LATE_ARRIVAL_MARGIN_NS` (500 ms: it bounds only the difference between the two connections' receipts of one message, measured |capture `ts_init` - recorder `recv_ns`| <= 394 ms over ~800k trades, Story 31.4; a message capture got more than Bybit's 0.5 s hold-back before the close it must have applied) | no |
+| `boundary_unexplained` | row == `ref-(S)`, the omitted message arrived earlier | yes |
+| `boundary_early` | row == `ref+(S)`: it holds a message from after its second (a DATA-01 violation) | yes |
+| `content_differs` | any other difference; per side the first differing level index and its kind: `missing` (the row lacks the reference's level), `extra` (the row holds one the reference lacks), `size`, `price` | yes |
+| `off_grid` | `ref(S)` is not a whole number of units at the row's precisions | yes |
+| `duplicate_row` | more than one row in the second | yes |
+| `missing_row` | reference available, no row, no coverage `seconds` run covers it | yes |
+| `missing_row_explained` | as `missing_row`, but a coverage `seconds` run covers it | no |
+| `reference_unavailable` | a row exists, the reference is unavailable | no |
+| not judged | no row and no reference | -- |
+
+**Verdict and exit.** An instrument passes with every failing REST and second count at 0, a
+`validated` reference, and -- when rows exist -- at least one second verified (`exact`, a boundary
+class, `content_differs` or `off_grid`; otherwise "nothing verified"). The day passes when every
+instrument does, the coverage record exists and no raw book hour (WS or REST) of the day is missing.
+Exit 0 pass, 1 fail, 2 usage. Refusals exit 1 with their message, ledgered at
+`verification.book.refused`: a day not closed, no raw root or catalog, an unreadable plan, a
+malformed line, a truncated raw file of an hour of the day, a float-layout snapshot file, a
+non-positive stored gap, a row without its precisions or with unpaired sizes, a value the exact
+decode cannot hold. Any other exception is a crash, ledgered at the same site and re-raised.
+`--json` gives `passed`, `venue`, `day`, `layout`, `coverage_file`, `coverage_present`,
+`missing_raw_files`, `truncated_neighbour_files` and per instrument `reference`, `rest` (all seven
+classes), `rest_examples`, `replay` (`messages`, `baselines`, `u_breaks`, `zero_level_messages`,
+`time_regress`, `awaiting_snapshot`, `subscribe_replies`), `rows`, `verified_seconds`, `seconds`
+(all ten classes), `levels` (`"<side> <kind>"` counts of `content_differs`) and up to 5 failing
+`examples` `[second, class, [details]]`.
+
+**Repro** (host, from `platform/`, on the verify stack's data): `VERIFY_DATA_DIR=data/verification
+CATALOG_PATH=data/catalog python3 -m verification.book --venue BYBIT --day YYYY-MM-DD [--json]`.
+Measured cost: ~95 s of one core for Bybit's four instruments over 3 h of soak (~1.6M frames, each
+instrument decoding only its own topic's frames), so ~13 min per full Bybit day; Hyperliquid ~4 s.
+Results: `docs/VERIFICATION_REPORT.md`.
+
+Known limits (each a `Known limit:` in the code). The Bybit replay starts at the recorder
+connection's latest snapshot, so its cost grows with the connection's age, up to
+`VERIFY_RETAIN_DAYS` (upgrade path: an end-of-day reference checkpoint, continuity-checked by `u`).
+Memory is one instrument-day of the book columns in Arrow (~60 MB) plus one hour of rows and one
+book. The plan is today's. A connection line makes the not-yet-closed seconds before it
+`reference_unavailable` (fewer verified seconds, never a false verdict). More generally a `u`
+break, a recorder gap or an unrecorded hour shrinks the verified set without failing the day: the
+report's `reference_unavailable` and `verified_seconds` are the trace, and Story 31.11's verdict must
+read them, not only `passed`. A receipt difference above 500 ms reads as `boundary_unexplained` (a
+loud false fail). A capture-side
+Hyperliquid resubscribe gives capture a subscribe reply the recorder never sees, and the rows up
+to the next broadcast push are `content_differs` (audit D-101, OPEN).
 
 ---
 

@@ -53,10 +53,17 @@ from capture.tests.test_collector import _BYBIT
 from capture.tests.test_collector import _adds
 from capture.tests.test_collector import _deltas
 from capture.tests.test_collector import _trade
+from capture.venues.bybit.policies import BybitSequenceCanary
+from nautilus_trader.model.data import BookOrder
 from nautilus_trader.model.data import OrderBookDelta
+from nautilus_trader.model.data import OrderBookDeltas
 from nautilus_trader.model.data import TradeTick
 from nautilus_trader.model.enums import AggressorSide
+from nautilus_trader.model.enums import BookAction
 from nautilus_trader.model.enums import OrderSide
+from nautilus_trader.model.identifiers import InstrumentId
+from nautilus_trader.model.objects import Price
+from nautilus_trader.model.objects import Quantity
 
 
 _T = 1_790_000_000 * S_NS
@@ -177,6 +184,33 @@ def test_a_fresh_snapshot_settles_a_queued_resync() -> None:
     book.apply(_deltas([(100.0, 1.0)], [(101.0, 1.0)], ts=_T + 1), _T + 1)
     assert book.book is not None
     assert book.resync_pending is False  # the baseline the resync asked for has arrived
+
+
+def _u_message(u: int, snapshot: bool, levels: bool = True) -> OrderBookDeltas:
+    """Build a Bybit-shaped message: `u` as every level's order id (a snapshot leads with Clear)."""
+    inst = InstrumentId.from_str(_BYBIT)
+    deltas = [OrderBookDelta.clear(inst, 0, _T, _T)] if snapshot else []
+    action = BookAction.ADD if snapshot else BookAction.UPDATE
+    for side, price in ((OrderSide.BUY, "100.00"), (OrderSide.SELL, "100.50")) if levels else ():
+        order = BookOrder(side, Price.from_str(price), Quantity.from_str("1.000"), u)
+        deltas.append(OrderBookDelta(inst, action, order, 0, 0, _T, _T))
+    return OrderBookDeltas(inst, deltas)
+
+
+def test_a_snapshot_without_levels_still_rebaselines_the_sequence() -> None:
+    """
+    A zero-level snapshot reaches Python as a lone `Clear` (no `u` to read). It must still drop
+    the old baseline: the venue's next delta continues the *new* snapshot's `u`, which read against
+    the old one is a false gap, a ledgered `collector.book_sequence` and a forced resync (D-96).
+    """
+    book = LiveBook(canary=BybitSequenceCanary())
+    assert book.apply(_u_message(100, snapshot=True), _T) is None
+    assert book.apply(_u_message(101, snapshot=False), _T) is None
+    assert book.last_u == 101
+    assert book.apply(_u_message(0, snapshot=True, levels=False), _T) is None
+    assert book.last_u is None  # re-baselined: nothing to judge the next message against
+    assert book.apply(_u_message(5000, snapshot=False), _T) is None  # not a gap
+    assert (book.last_u, book.resync_pending) == (5000, False)
 
 
 def test_forget_leaves_nothing_of_a_removed_instrument() -> None:

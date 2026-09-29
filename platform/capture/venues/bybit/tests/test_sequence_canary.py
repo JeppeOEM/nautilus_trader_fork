@@ -122,11 +122,11 @@ def test_restart_snapshot_rebaselines(tmp_path: Path, monkeypatch: pytest.Monkey
     assert c._book(_IID).last_u == 1
 
 
-def test_a_zero_level_message_carries_no_u_and_leaves_the_baseline() -> None:
+def test_a_zero_level_message_carries_no_u() -> None:
     """
-    A message with no level (the adapter's `total_levels == 0` branch) has no `u`: the canary is
-    not asked, so the baseline stays where it was (DATA-08's documented, still-open no-verdict
-    case: the next message is judged against the older `u`).
+    A message with no level has no `u` to read. Only a snapshot can reach Python that way (a lone
+    `Clear`; a zero-level delta is refused by the adapter's `new_checked`), and a snapshot always
+    re-baselines (`capture/tests/test_domain.py`, audit D-96).
     """
     inst = InstrumentId.from_str(_IID)
     ts = time.time_ns()

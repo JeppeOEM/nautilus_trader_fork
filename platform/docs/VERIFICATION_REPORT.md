@@ -77,11 +77,11 @@ delivers the comparator (`python -m verification.<tool> --venue V --day D`).
 | | BTCUSDT-SPOT | pending — as above; smoke **DEVIATION** D-91 (OPEN) | smoke: 8 ids, 3 seconds (all D-91) | Smoke as above: seen 131,534, matched 131,534, missing/extra/duplicated 0, **mismatch_price 8** (sub-tick prints stored rounded, D-91), other mismatches 0; seconds exact 7,197, **off_grid 3** (the same prints); latency −296 / −2 / 4 / 120 ms; NO_AGGRESSOR 0 | as above |
 | | ETHUSDT-SPOT | pending — as above | smoke: 0 | Smoke as above: seen 29,429, matched 29,429, all failing counts 0; seconds exact 7,200/7,200; latency −271 / −1 / 7 / 52 ms; NO_AGGRESSOR 0 | as above |
 | | SOL-USD-PERP.HYPERLIQUID | pending — as above | smoke: 0 | Smoke as above: seen 11,464, matched 11,464, all failing counts 0; seconds exact 7,200/7,200; latency −154 / 21 / 280 / 394 ms; NO_AGGRESSOR 0 | as above |
-| Stored book (1 s snapshot) vs rebuilt reference book | BTCUSDT-LINEAR | pending — Story 31.5 | | | |
-| | ETHUSDT-LINEAR | pending — Story 31.5 | | | |
-| | BTCUSDT-SPOT | pending — Story 31.5 | | | |
-| | ETHUSDT-SPOT | pending — Story 31.5 | | | |
-| | SOL-USD-PERP.HYPERLIQUID | pending — Story 31.5 | | | |
+| Book top-20 vs rebuilt book | BTCUSDT-LINEAR | pending — tool built (Story 31.5); verdict pending Story 31.11 | smoke: 0 (the 4 `missing_row` are the soak's first seconds, D-76; the tool still counts them failing, so the smoke exits 1) | Smoke 2026-09-29 12:59:19Z-16:00Z (restarted soak; tool at 46ba96b7bc + the Story 31.5 change set): REST agree_key 0, agree_bracket 124, between_pushes 56, unaligned 1, disagree_key 0, persistent_disagreement 0 -> reference validated; replay 452,507 frames, 1 snapshot, u_breaks 0, zero_level_messages 0; seconds exact **10,834/10,834** verified, missing_row 4 (12:59:21-24Z, before capture's first row: D-76), reference_unavailable 4,202 at the review rerun (rows after 16:00Z, beyond the closed raw hours; it grows with the live catalog); boundary_late 0 at the 500 ms margin. Frame counts here are all book frames of the instrument in 12:59:19-16:00Z (the delta-only counts over 12:59:19-16:12Z are in D-96/D-98); the 181 polls are 12:59:19-16:00Z | `python3 -m verification.book --venue V --day D` (`docs/DATA_DICTIONARY.md` §1.18) |
+| | ETHUSDT-LINEAR | pending — as above | smoke: 0 (5 `missing_row`, D-76; failing in the tool, exit 1) | Smoke as above: REST agree_key 2, agree_bracket 108, between_pushes 70, unaligned 1, failing 0 -> validated; replay 478,062 frames, u_breaks 0, zero_level 0; exact **10,834/10,834**, missing_row 5 (12:59:20-24Z, D-76) | as above |
+| | BTCUSDT-SPOT | pending — as above; smoke **DEVIATION** D-102 (OPEN) | smoke: 2 seconds (D-102), 5 `missing_row` (D-76) | Smoke as above: REST agree_key 31, agree_bracket 116, between_pushes 33, unaligned 1, failing 0 -> validated; replay 377,663 frames, u_breaks 0, zero_level 0 (spot `u` strictly +1, D-98); exact 10,832/10,834, **content_differs 2** (15:42:06-07Z: capture applied 32 spot book messages after their second closed, D-102) | as above |
+| | ETHUSDT-SPOT | pending — as above; smoke **DEVIATION** D-102 (OPEN) | smoke: 2 seconds (D-102), 5 `missing_row` (D-76) | Smoke as above: REST agree_key 25, agree_bracket 112, between_pushes 43, unaligned 1, failing 0 -> validated; replay 294,165 frames, u_breaks 0, zero_level 0; exact 10,832/10,834, **content_differs 2** (15:42:06-07Z, 29 late messages, D-102) | as above |
+| | SOL-USD-PERP.HYPERLIQUID | pending — as above; smoke **DEVIATION** D-101 (OPEN) | smoke: 2 seconds (D-101) | Smoke as above: REST agree_key 14 (all 14 key matches equal), between_pushes 166, unaligned 1, failing 0 -> validated; replay 2,016 `l2Book`, time_regress 0, subscribe_replies 2 (the recorder's startup and its 15:58:34Z reconnect, D-101); exact 10,825/10,827, **content_differs 2** (15:51:55-56Z: capture's own resubscribe reply after the venue expired its connection at 15:51:54.7Z, D-101) | as above |
 | Mark and index price | BTCUSDT-LINEAR, ETHUSDT-LINEAR | pending — Story 31.6 | | | |
 | | SOL-USD-PERP.HYPERLIQUID | pending — Story 31.6 | | | |
 | | BTCUSDT-SPOT, ETHUSDT-SPOT | n/a (spot has none) | | | |
@@ -104,6 +104,16 @@ the running stack, `--stage live`. Hour 12 (the soak began 12:59:19Z) and hour 1
 written) were excluded: their edges are boundary artefacts, not findings. The Bybit day would
 also fail on its coverage record, which does not exist yet (D-92); the smoke reports it as
 MISSING. `main` over the whole day refuses it, as it must (the hour 15 raw file is still open).
+
+**Book smoke (Story 31.5), how it was run.** `verification.book.main([--venue V --day
+2026-09-29 --raw-dir <copy> --catalog data/catalog], clock=<2026-10-01T00:00Z>)`, read-only against
+the running stack, with the raw root a directory of symlinks to the recorder's closed hour files
+12..15 only (the hour-16 file was still being written and would be refused as truncated). The day
+is partial, so its verdict fails on the inputs by design: 80 (Bybit) / 40 (Hyperliquid) raw book
+files of hours 00-11 and 16-23 missing, and Bybit's coverage record absent (D-92); the rows after
+16:00Z are `reference_unavailable` (no raw to close them). `collector.book_sequence` ledger
+entries in `data/errors/bybit_collector.jsonl` over the window: 0. Runtime: 95 s (Bybit, four
+instruments), 4 s (Hyperliquid).
 
 ## Reference recorder footprint
 
