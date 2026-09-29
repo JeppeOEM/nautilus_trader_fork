@@ -85,6 +85,7 @@ from nautilus_trader.test_kit.stubs import (
 from nautilus_trader.trading.config import StrategyFactory
 from research.application.backtest_runner import NodeRunner
 from research.application.patterns import CONDITIONS as SCANNER_CONDITIONS
+from research.application.ports import DEFAULT_LATENCY_MS
 from research.application.ports import RunSpec
 from research.strategies.candle_pattern_strategy import _DIRECTIONS
 from research.strategies.candle_pattern_strategy import CONDITIONS
@@ -263,9 +264,10 @@ def test_a_planted_hammer_enters_at_its_close_and_exits_after_exit_bars(catalog:
 
     (trade,) = above.trades.trades
     assert trade.side == "LONG"
-    # Submitted in on_bar of the closed hammer bar: filled at that bar's close stamp, the first
-    # instant after it -- never inside the hammer bar (no look-ahead).
-    assert trade.entry_ts == _close_stamp(_HAMMER_MINUTE)
+    # Submitted in on_bar of the closed hammer bar, so never inside it (no look-ahead), and filled
+    # by the first trade after the order's latency (under 1 s): the next bar's opening trade, 1 s in.
+    assert spec.latency_ms == DEFAULT_LATENCY_MS < 1_000
+    assert trade.entry_ts == _close_stamp(_HAMMER_MINUTE) + NS_PER_S
     assert trade.exit_ts == trade.entry_ts + _EXIT_BARS * _MINUTE
 
     assert below.trades.trades == ()

@@ -42,6 +42,14 @@ from research.domain.trades import TradeLedger
 _BARS_DATA = re.compile(r"bars:[1-9][0-9]*-(MILLISECOND|SECOND|MINUTE|HOUR|DAY|WEEK|MONTH)")
 # Keys the runner sets on every strategy config itself.
 RESERVED_PARAMS = frozenset({"instrument_id", "order_id_tag", "bar_type"})
+# The fixed time from a strategy's decision to the simulated exchange receiving the command, for
+# every order command (submit, modify, cancel) of a run. 300 ms is an order sent from a box outside
+# the venue's cloud region (operator's choice, 2026-09-29). Market-data delay is not part of it: the
+# replay already runs on `ts_init`, the receive clock.
+# Known limit: one rigid value, no jitter, the same for every venue; upgrade path: set it from the
+# VPS-measured order round trip per venue, and for jitter a `LatencyModel` drawing from that
+# measured distribution.
+DEFAULT_LATENCY_MS = 300
 
 
 def window_ns(start: str | int, end: str | int) -> tuple[int, int]:
@@ -63,7 +71,14 @@ class RunSpec:
     `data` kind of `"seconds"` (`DydxSecondSnapshot` + quotes derived from their top of book),
     `"trades"` (`TradeTick`) or `"bars:<step>-<aggregation>"` (`TradeTick` aggregated by Nautilus
     into `<iid>-<step>-<aggregation>-LAST-INTERNAL` bars, injected as the strategy's `bar_type`);
-    a positive int starting balance; a window whose end is after its start; `params` never sets a key the runner owns (`RESERVED_PARAMS`).
+    a positive int starting balance; a non-negative int `latency_ms`; a window whose end is after
+    its start; `params` never sets a key the runner owns (`RESERVED_PARAMS`).
+    `latency_ms` delays every order command by that fixed time (Nautilus's `LatencyModel`), so an
+    order fills against the market as it is when the command arrives, not as the strategy saw it;
+    0 runs without a latency model (the fill is at the very quote the decision was made on). On the
+    `"seconds"` kind the market moves only once a second, so any value from 1 to 1000 fills at the
+    next second's top of book (the simulated exchange applies a timestamp's quote before it
+    releases the commands due by then).
     `start`/`end` bound every read (MEM-01) and follow Nautilus's parsing (ISO string, naive = UTC,
     or int ns). The runner bounds the replay on `ts_init` (the clock a backtest replays on,
     `BacktestDataConfig`), while `MarketFrames` windows on `ts_event`, so a frame read over the
@@ -81,6 +96,7 @@ class RunSpec:
     params: Mapping[str, object] = field(default_factory=dict)
     starting_balance: int = 10_000
     data: str = "seconds"
+    latency_ms: int = DEFAULT_LATENCY_MS
 
     def __post_init__(self) -> None:
         if isinstance(self.instrument_ids, str):
@@ -103,6 +119,9 @@ class RunSpec:
         balance = self.starting_balance
         if isinstance(balance, bool) or not isinstance(balance, int) or balance <= 0:
             raise ValueError(f"starting_balance must be a positive int, got {balance!r}")
+        latency = self.latency_ms
+        if isinstance(latency, bool) or not isinstance(latency, int) or latency < 0:
+            raise ValueError(f"latency_ms must be a non-negative int, got {latency!r}")
         window_ns(self.start, self.end)
         check_params(self.params)
         object.__setattr__(self, "instrument_ids", tuple(self.instrument_ids))

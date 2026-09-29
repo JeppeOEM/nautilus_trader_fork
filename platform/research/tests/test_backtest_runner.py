@@ -16,7 +16,8 @@
 `research.application.backtest_runner.NodeRunner` over a real `BacktestNode` and a synthetic
 catalog spanning two UTC days, built with `ParquetDataCatalog.write_data()` (Story 27.1, TEST-03):
 `OFIStrategy` by string path, a single run, a two-point sweep attributed by config id, and a
-`trades` run whose id is recomputed from its `BacktestRunConfig`.
+`trades` run whose id is recomputed from its `BacktestRunConfig`, and the fixed order latency
+(`RunSpec.latency_ms`) proven by the price a probe's order fills at.
 
 The session-wide engine in `conftest.py` keeps the Rust logger alive across these node constructions.
 """
@@ -33,17 +34,20 @@ from kernel.performance_metrics import all_metrics
 from kernel.second_snapshot import DydxSecondSnapshot
 
 from nautilus_trader.config import StrategyConfig
+from nautilus_trader.core.data import Data
 from nautilus_trader.core.uuid import UUID4
 from nautilus_trader.model.currencies import BTC
 from nautilus_trader.model.currencies import USDC
 from nautilus_trader.model.data import Bar
 from nautilus_trader.model.data import BarType
+from nautilus_trader.model.data import DataType
 from nautilus_trader.model.data import QuoteTick
 from nautilus_trader.model.data import TradeTick
 from nautilus_trader.model.enums import AccountType
 from nautilus_trader.model.enums import AggressorSide
 from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.events import AccountState
+from nautilus_trader.model.events import OrderFilled
 from nautilus_trader.model.identifiers import AccountId
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.model.identifiers import Symbol
@@ -60,6 +64,7 @@ from research.application.backtest_runner import NodeRunner
 from research.application.backtest_runner import build_run_config
 from research.application.backtest_runner import equity_from_account
 from research.application.backtest_runner import ledger_from_positions
+from research.application.ports import DEFAULT_LATENCY_MS
 from research.application.ports import RunResult
 from research.application.ports import RunSpec
 from research.domain.equity import EquityCurve
@@ -270,6 +275,9 @@ def test_spec_invariants(catalog: str) -> None:
     for balance in (True, 0, 10_000.0):
         with pytest.raises(ValueError, match="positive int"):
             _spec(catalog, starting_balance=balance)
+    for latency in (-1, True, 300.0):
+        with pytest.raises(ValueError, match="latency_ms must be"):
+            _spec(catalog, latency_ms=latency)
 
 
 def _positions_report(pnl: str, commissions: list[str]) -> pd.DataFrame:
@@ -389,3 +397,98 @@ def test_a_bars_run_delivers_internal_bars_to_the_strategy(catalog: str) -> None
     (trade,) = result.trades.trades
     assert trade.side == "LONG"
     assert trade.exit_ts - trade.entry_ts == 60 * NS_PER_S
+
+
+def test_the_venue_gets_the_spec_latency_and_zero_means_no_model(catalog: str) -> None:
+    instrument = ParquetDataCatalog(catalog).instruments(instrument_ids=[str(_IID)])
+    assert _spec(catalog).latency_ms == DEFAULT_LATENCY_MS
+    (venue,) = build_run_config(_spec(catalog), instrument, dict(_PARAMS), "/quotes").venues
+    assert venue.latency_model is not None
+    assert venue.latency_model.config == {"base_latency_nanos": DEFAULT_LATENCY_MS * 1_000_000}
+    (venue,) = build_run_config(
+        _spec(catalog, latency_ms=0), instrument, dict(_PARAMS), "/quotes"
+    ).venues
+    assert venue.latency_model is None
+
+
+# One snapshot a second whose ask steps up by exactly 1.0 each second (ask of second i = 100.1 + i),
+# so an order's fill price names the second whose book it filled against.
+_LATENCY_START = _DAY0 + 12 * 3_600 * NS_PER_S
+_LATENCY_SECONDS = 10
+
+
+def _stepped_snapshot(i: int) -> DydxSecondSnapshot:
+    ts = _LATENCY_START + i * NS_PER_S
+    bid = 100.0 + i
+    return DydxSecondSnapshot(
+        _IID, [bid], [5.0], [round(bid + 0.1, 1)], [5.0], 0.0, 0.0, 0, 0, ts, ts
+    )
+
+
+@pytest.fixture(scope="module")
+def stepped_catalog(tmp_path_factory: pytest.TempPathFactory) -> str:
+    root = tmp_path_factory.mktemp("stepped_catalog")
+    catalog = ParquetDataCatalog(str(root))
+    catalog.write_data([_instrument()])
+    catalog.write_data([_stepped_snapshot(i) for i in range(_LATENCY_SECONDS)])
+    return str(root)
+
+
+# The probe's fills, `(ts_event, last_px)`: the node builds the strategy itself and a run's result
+# carries no fill prices, so the probe records into this module list, which each run clears first.
+_FILLS: list[tuple[int, float]] = []
+
+
+class BuyOnceConfig(StrategyConfig, frozen=True):
+    instrument_id: InstrumentId
+
+
+class BuyOnce(Strategy):
+    """Sends one market buy on the first snapshot it sees, then only records its fill."""
+
+    def __init__(self, config: BuyOnceConfig) -> None:
+        super().__init__(config)
+        self._sent = False
+
+    def on_start(self) -> None:
+        self.subscribe_data(DataType(DydxSecondSnapshot), instrument_id=self.config.instrument_id)
+
+    def on_data(self, data: Data) -> None:
+        if self._sent or not isinstance(data, DydxSecondSnapshot):
+            return
+        self._sent = True
+        order = self.order_factory.market(
+            self.config.instrument_id, OrderSide.BUY, Quantity.from_str("0.010")
+        )
+        self.submit_order(order)
+
+    def on_order_filled(self, event: OrderFilled) -> None:
+        _FILLS.append((event.ts_event, event.last_px.as_double()))
+
+
+@pytest.mark.parametrize(
+    ("latency_ms", "filled_second"),
+    [
+        (0, 0),  # no model: the quote the decision was made on
+        (1, 1),  # any latency inside the second: the next second's top of book
+        (300, 1),
+        (1_000, 1),  # due exactly at the next quote, which is applied first
+        (1_500, 2),  # past it: the quote after that
+    ],
+)
+def test_an_order_fills_at_the_top_of_book_after_its_latency(
+    stepped_catalog: str, latency_ms: int, filled_second: int
+) -> None:
+    spec = _spec(
+        stepped_catalog,
+        start=_LATENCY_START,
+        end=_LATENCY_START + _LATENCY_SECONDS * NS_PER_S,
+        strategy_path=f"{__name__}:BuyOnce",
+        config_path=f"{__name__}:BuyOnceConfig",
+        params={},
+        latency_ms=latency_ms,
+    )
+    _FILLS.clear()
+    NodeRunner().run(spec)
+    expected_ask = _stepped_snapshot(filled_second).ask_prices[0]
+    assert _FILLS == [(_LATENCY_START + filled_second * NS_PER_S, expected_ask)]

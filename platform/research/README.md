@@ -219,6 +219,9 @@ spec = RunSpec(
     data="seconds",   # DydxSecondSnapshot + quotes derived from its top of book
                       # "trades" = TradeTick; "bars:1-MINUTE" = TradeTick aggregated by Nautilus
                       # into <iid>-1-MINUTE-LAST-INTERNAL, injected as the strategy's `bar_type`
+    latency_ms=300,   # the default: every order command reaches the simulated exchange 300 ms after
+                      # it is sent and fills against the market then; 0 = fill at the quote the
+                      # decision was made on. On "seconds" any 1..1000 fills at the next second.
 )
 runner = NodeRunner()
 result = runner.run(spec)

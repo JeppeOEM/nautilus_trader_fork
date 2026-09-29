@@ -47,8 +47,10 @@ import numpy as np
 import pandas as pd
 from kernel.catalog_files import query_top_of_book
 from kernel.clocks import MAX_TS_INIT_SKEW_NS
+from kernel.clocks import NS_PER_MS
 from kernel.second_snapshot import DydxSecondSnapshot
 
+from nautilus_trader.backtest.config import ImportableLatencyModelConfig
 from nautilus_trader.backtest.engine import BacktestEngineConfig
 from nautilus_trader.backtest.node import BacktestDataConfig
 from nautilus_trader.backtest.node import BacktestNode
@@ -162,6 +164,17 @@ def _data_configs(spec: RunSpec, quotes_dir: str) -> list[BacktestDataConfig]:
     return configs
 
 
+def _latency_model(latency_ms: int) -> ImportableLatencyModelConfig | None:
+    """The fixed order latency `RunSpec.latency_ms` names; None (no model) for 0."""
+    if latency_ms == 0:
+        return None
+    return ImportableLatencyModelConfig(
+        latency_model_path="nautilus_trader.backtest.models:LatencyModel",
+        config_path="nautilus_trader.backtest.config:LatencyModelConfig",
+        config={"base_latency_nanos": latency_ms * NS_PER_MS},
+    )
+
+
 def build_run_config(
     spec: RunSpec,
     instruments: list[Instrument],
@@ -171,7 +184,8 @@ def build_run_config(
     """
     One `BacktestRunConfig`: one strategy per instrument (`order_id_tag` = its position, so the
     strategy ids differ), `params` plus the runner-owned keys, a NETTING/MARGIN venue in the
-    settlement currency, and the data `spec.data` names, all bounded by the spec's window.
+    settlement currency with `spec.latency_ms` on every order command, and the data `spec.data`
+    names, all bounded by the spec's window.
     """
     check_params(params)
     strategies = []
@@ -202,6 +216,7 @@ def build_run_config(
                 account_type=AccountType.MARGIN,
                 base_currency=currency,
                 starting_balances=[f"{spec.starting_balance} {currency}"],
+                latency_model=_latency_model(spec.latency_ms),
             ),
         ],
         data=_data_configs(spec, quotes_dir),

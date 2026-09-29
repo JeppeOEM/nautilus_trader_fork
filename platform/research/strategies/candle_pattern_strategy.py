@@ -77,9 +77,11 @@ Known limit: the trend filter is direction-independent -- `above` gates shorts t
 scanner's `filter_hits` is, and the two must agree for a scanner hit to be the backtest's entry;
 upgrade path: a per-direction condition added to both at once (scanner and strategy).
 
-Known limit: a backtest has only trade ticks, so fills come from trades. An entry fills at the
-pattern bar's last trade (its close, stamped at the bar's close), not at the first trade of the
-next bar. A stop triggers only when a trade moves the matching engine's side it watches
+Known limit: a backtest has only trade ticks, so fills come from trades. Through `NodeRunner` every
+order reaches the simulated exchange `RunSpec.latency_ms` after it is sent, so an entry fills at the
+first trade after the pattern bar's close plus that latency; with no latency (`latency_ms=0`, or a
+bare `BacktestEngine` without a latency model) it fills at the pattern bar's last trade, stamped at
+the bar's close. A stop triggers only when a trade moves the matching engine's side it watches
 (Nautilus's `trade_execution`: a seller-aggressor trade at or below a long's stop), and fills at
 that trade's price, so a gap through the stop fills at the gap price. Live, the Sandbox fills
 against the subscribed quotes; upgrade path: replay the collector's quotes as well
