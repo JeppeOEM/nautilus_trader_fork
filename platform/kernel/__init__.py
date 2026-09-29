@@ -20,7 +20,8 @@ Invariant: one copy. `DydxSecondSnapshot`/`SecondOHLC`/`OpenInterest` (`second_s
 `open_interest`), the trades -> second fold (`fold`), the pure indicators (`indicators`,
 `performance_metrics`), the only `InstrumentId` parser (`venues`), the two clocks and the one
 skew bound `MAX_TS_INIT_SKEW_NS` (`clocks`), the archive-gap marker format (`archive_markers`),
-the venue REST transport (`venue_http`), the read-only catalog file helpers (`catalog_files`) and
+the venue REST transport (`venue_http`, standard library only; the dYdX indexer's pyo3-derived
+URLs in `dydx_http`), the read-only catalog file helpers (`catalog_files`) and
 the one zstd `write_table` patch (`parquet_compat`) -- and nothing else.
 
 The kernel imports no context (not even `observability`), holds no module-level mutable state,

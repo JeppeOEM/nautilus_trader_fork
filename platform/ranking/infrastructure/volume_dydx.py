@@ -19,7 +19,7 @@ indexer's `perpetualMarkets` `volume24H`, requested through `kernel.venue_http`.
 
 import asyncio
 
-from kernel.venue_http import dydx_indexer_url
+from kernel.dydx_http import dydx_indexer_url
 from kernel.venue_http import get_request
 from kernel.venue_http import http_json
 from observability import error_ledger

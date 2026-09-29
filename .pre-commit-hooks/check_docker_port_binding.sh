@@ -41,7 +41,7 @@ for file in "${COMPOSE_FILES[@]}"; do
     function indent(s,   t) { t = s; sub(/[^ \t].*/, "", t); return length(t) }
     {
       line = $0
-      if (line ~ /^[ \t]*ports:[ \t]*(#.*)?$/) {
+      if (line ~ /^[ \t]*ports:[ \t]*(![A-Za-z]+[ \t]*)?(#.*)?$/) {
         in_ports = 1
         ports_indent = indent(line)
         next
