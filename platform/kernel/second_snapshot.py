@@ -556,10 +556,13 @@ class DydxSecondSnapshot(Data):
     def as_floats(self) -> dict[str, object]:
         """
         Return the float view `kernel.indicators`' stateless functions take (absolute level prices, best
-        first; the decoded floats computed in `__init__`). Never published or stored: the wire and
-        the file carry `to_dict`'s integers.
+        first; the decoded floats computed in `__init__`), plus the row's two precisions (Story
+        31.3: `spread` rounds its difference to `price_precision`). Never published or stored: the
+        wire and the file carry `to_dict`'s integers.
         """
         return {
+            "price_precision": self.price_precision,
+            "size_precision": self.size_precision,
             "bid_prices": self.bid_prices,
             "bid_sizes": self.bid_sizes,
             "ask_prices": self.ask_prices,

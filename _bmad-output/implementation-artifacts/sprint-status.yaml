@@ -352,7 +352,7 @@ development_status:
   epic-31: backlog
   31-1-verification-context-reference-recorder-and-clean-slate-stack: done
   31-2-every-drop-counted-ledgered-and-explainable: done
-  31-3-derived-signals-against-independent-reference-implementations: ready-for-dev
+  31-3-derived-signals-against-independent-reference-implementations: done
   31-4-trades-proven-id-by-id-against-the-venue: ready-for-dev
   31-5-stored-book-proven-against-an-independently-rebuilt-book: ready-for-dev
   31-6-mark-index-funding-open-interest-and-instruments-proven: ready-for-dev

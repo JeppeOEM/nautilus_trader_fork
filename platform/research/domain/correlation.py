@@ -94,6 +94,10 @@ def align(series_by_id: Mapping[str, ReturnSeries]) -> AlignedReturns:
 
 # A side whose standard deviation is at most this fraction of max(1, |mean|) is constant: float
 # rounding of a constant series (`[0.1, 0.1, 0.1]`) must not produce a spurious correlation.
+# Known limit (DATA_DICTIONARY §2.12, audit D-89): a near-constant but unequal series (std under this
+# bound) is undefined here although its Pearson is defined; the reference treats only an exactly
+# constant side as undefined. Upgrade path: test constancy exactly (all values equal) and compute
+# the correlation in a compensated sum so rounding cannot fake a spread.
 _ZERO_VARIANCE_RTOL = 1e-12
 
 

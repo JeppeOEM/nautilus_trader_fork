@@ -64,8 +64,8 @@ const PERFORMANCE_COL_LABELS = [
   "24h %",
   "1w %",
   "1m %",
-  "Vol(catalog)",
-  "Vol Score",
+  "Vol 24h σ (trade closes)",
+  "Vol 1h σ (mids)",
   "Vol24h",
 ];
 

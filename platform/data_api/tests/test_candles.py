@@ -282,11 +282,15 @@ def test_large_limit_and_bar_seconds_combination_does_not_blow_the_query_span(
 def test_weekly_bar_seconds_is_not_clamped_down_to_a_day(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The timeframe selector offers 1W; a 1D-only clamp silently returned daily bars."""
+    """
+    The timeframe selector offers 1W; a 1D-only clamp silently returned daily bars. A week starts
+    on Monday 00:00 UTC (Story 31.3; the epoch, a Thursday, anchored it before).
+    """
     catalog_path = str(tmp_path / "catalog")
     day_ns = 86_400_000_000_000
     week_ns = 7 * day_ns
-    week_start = _BASE_NS // week_ns * week_ns
+    monday_ns = 4 * day_ns  # 1970-01-05, the first Monday after the epoch
+    week_start = (_BASE_NS - monday_ns) // week_ns * week_ns + monday_ns
     # one snapshot on each of 3 consecutive days of the same week -> exactly one weekly bar
     _write_snapshots(catalog_path, [(week_start + i * day_ns, 100.0 + i) for i in range(3)])
     client = _client(catalog_path, monkeypatch)

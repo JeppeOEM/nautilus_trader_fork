@@ -31,6 +31,18 @@ generated (its digest still proves the input) and each entry is re-encoded exact
 3 size decimals -- the digits the generator rounds to -- before it is replayed. The kernel decodes
 `units / 10**p` to the nearest double of each decimal, i.e. to the very float the pre-move engine
 read, so every published byte and stored row must still match the recording.
+
+Story 31.3 changed exactly one field, deliberately: `spread` (each rank entry's and each stored
+row's) is now `kernel.indicators.spread`'s double nearest the exact difference -- the plain float
+subtraction of two decoded prices cancelled digits (1e-9 off for a one-tick spread). The fixture is
+not re-recorded. The test runs the burst twice: once with the pre-31.3 spread (a plain float
+difference, `_pre_31_3_spread`) patched into the board, which must still hash to the recording --
+so no other byte moved -- and once as shipped, which must equal those bytes with every `spread`
+rounded to the burst's 6 price decimals and nothing else changed (`_spread_rounded`). The story's
+other ranking changes (`cvd` None on an empty window, `price` never the slow-loop close, the 300 s
+pct bound, the 24 h volatility window, the bounded nearest row) do not arise in this burst: every
+row is two-sided and fed, its 30 s spacing never shortens a pct base past 300 s, and it spans
+under 2 h.
 """
 
 import asyncio
@@ -40,12 +52,14 @@ import random
 import sqlite3
 from pathlib import Path
 
+import pytest
 from kernel.tests.snapshot_factory import wire
 
 from ranking.application.engine import RankingConfig
 from ranking.application.engine import RankingEngine
 from ranking.application.ports import CONTROL_CHANNEL
 from ranking.application.ports import SNAPSHOTS_CHANNEL
+from ranking.domain import board as board_module
 from ranking.domain.board import RankingBoard
 from ranking.domain.board import RankingsPublisher
 from ranking.infrastructure.catalog_prices import CatalogPriceHistory
@@ -228,8 +242,23 @@ def _without_symbol(message: str) -> str:
     return json.dumps(decoded)
 
 
-def test_rankings_live_bytes_and_metrics_rows_match_the_pre_move_engine(tmp_path: Path) -> None:
-    fixture = json.loads(_FIXTURE.read_text())
+def _pre_31_3_spread(snapshot: dict) -> float | None:
+    """Compute the spread every recorded byte was computed with: the plain float difference."""
+    if not snapshot["bid_prices"] or not snapshot["ask_prices"]:
+        return None
+    return snapshot["ask_prices"][0] - snapshot["bid_prices"][0]
+
+
+def _spread_rounded(message: str) -> str:
+    """Return a pre-31.3 message with each rank's `spread` rounded as `kernel.indicators` now does."""
+    decoded = json.loads(message)
+    for rank in decoded["ranks"]:
+        if rank["spread"] is not None:
+            rank["spread"] = round(rank["spread"], PRICE_PRECISION)
+    return json.dumps(decoded)
+
+
+def _run_burst(db_path: Path, catalog_path: Path) -> list[str]:
     batches = generate_burst()
     clock = FakeClock(WALL0_NS)
     board = RankingBoard(
@@ -237,32 +266,63 @@ def test_rankings_live_bytes_and_metrics_rows_match_the_pre_move_engine(tmp_path
         volatility_lookback_seconds=3600,
         volume_max_age_ns=RankingConfig().volume_max_age_ns,
     )
-    history = SqliteMetricsStore(str(tmp_path / "metrics.db"))
+    history = SqliteMetricsStore(str(db_path))
     live = _Live()
     engine = RankingEngine(
         board,
         volume_sources=[_Source(name, volumes) for name, volumes in VOLUMES.items()],
-        prices=CatalogPriceHistory(str(tmp_path / "catalog")),
+        prices=CatalogPriceHistory(str(catalog_path)),
         history=history,
         live=live,
         markets=_Live(),  # its own channel: nothing it publishes reaches rankings:live
         config=RankingConfig(),
         clock=clock.time_ns,
     )
-
     asyncio.run(_replay(engine, clock, [as_integer_wire(b) for b in batches]))
     history.close()
+    return live.messages
 
-    assert hashlib.sha256("\n".join(batches).encode()).hexdigest() == fixture["input_sha256"]
-    for message in live.messages:
+
+def test_rankings_live_bytes_and_metrics_rows_match_the_pre_move_engine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture = json.loads(_FIXTURE.read_text())
+    assert (
+        hashlib.sha256("\n".join(generate_burst()).encode()).hexdigest() == fixture["input_sha256"]
+    )
+    with monkeypatch.context() as patched:
+        patched.setattr(board_module, "calc_spread", _pre_31_3_spread)
+        messages = _run_burst(tmp_path / "pre.db", tmp_path / "catalog")
+
+    for message in messages:
         # The raw bytes are exactly `json.dumps` of their own decoding, so re-serializing in
         # `_without_symbol` cannot hide a change to the engine's serialization.
         assert json.dumps(json.loads(message)) == message
         _assert_symbol_right_after_venue(json.loads(message))
-    pre_29_1 = [_without_symbol(m) for m in live.messages]
+    pre_29_1 = [_without_symbol(m) for m in messages]
     assert pre_29_1[-1] == fixture["final_message"]
     assert [hashlib.sha256(m.encode()).hexdigest() for m in pre_29_1] == fixture["publish_sha256"]
-    assert _stored_rows(tmp_path / "metrics.db") == (
+    assert _stored_rows(tmp_path / "pre.db") == (
         fixture["metrics_columns"],
         fixture["metrics_rows"],
     )
+
+
+def test_story_31_3_changed_only_the_spread_rounding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """As shipped: the pre-31.3 bytes (proven above) with every `spread` rounded, nothing else."""
+    with monkeypatch.context() as patched:
+        patched.setattr(board_module, "calc_spread", _pre_31_3_spread)
+        before = _run_burst(tmp_path / "pre.db", tmp_path / "catalog")
+    after = _run_burst(tmp_path / "now.db", tmp_path / "catalog")
+
+    assert after == [_spread_rounded(m) for m in before]
+    assert after != before  # the rounding did change bytes: the comparison is not vacuous
+    columns, rows = _stored_rows(tmp_path / "pre.db")
+    spread = columns.index("spread")
+    rounded = [
+        [round(v, PRICE_PRECISION) if i == spread and v is not None else v for i, v in enumerate(r)]
+        for r in rows
+    ]
+    assert _stored_rows(tmp_path / "now.db") == (columns, rounded)

@@ -184,6 +184,11 @@ COMPOSITION_ROOTS: dict[str, frozenset[str]] = {
     # imports `collection_control.domain` only. Everything else in capture sees the plan as ids and
     # the `capture.application.ports.PlanDiff` protocol.
     "capture.infrastructure.config": frozenset({COLLECTION_CONTROL}),
+    # The derived-signal comparators (Story 31.3) import the production functions they compare with
+    # the independent reference (`verification.domain.reference_signals`, stdlib only): the one
+    # place verification meets the code it checks, as test modules only, each naming its contexts.
+    "verification.tests.test_reference_signals": frozenset({CANDLES, VIEWS}),
+    "verification.tests.test_reference_series": frozenset({CANDLES, RANKING, RESEARCH, VIEWS}),
 }
 
 
@@ -1416,6 +1421,9 @@ VIEWS_QUERY_SERVICES: dict[str, frozenset[str]] = {
     ),
     "candles.application.forming": frozenset({"forming_bar", "bars_from_rows"}),
     "candles.domain.candle": frozenset({"Candle", "is_valid_candle"}),
+    # The one bucket rule (Story 31.3): the chart's forming bar, per-bar replay and picker buckets
+    # use the fold's own `bucket_start_ms`, so a 1W pane starts on Monday like its candles.
+    "candles.domain.fold": frozenset({"bucket_start_ms"}),
     "ranking.application.queries": frozenset({"history", "nearest"}),
 }
 # Packages views never imports (AD-D2): the interfaces and capture.
@@ -1966,8 +1974,10 @@ def test_the_channel_scan_resolves_literals_and_module_constants() -> None:
 
 # DATA-02's "second independent client with zero shared code path": what no non-test
 # `verification` module may import, directly or by module path (`nautilus_pyo3` under any parent).
-# It may import `kernel.venue_http`, `kernel.venues` and `observability`. Its tests may import
-# production code: comparing it with the reference is their job (Story 31.3).
+# It may import `kernel.venue_http`, `kernel.venues` and `observability`. Its tests are judged like
+# any module: `kernel`/`observability` freely, and another context only from a test module declared
+# in `COMPOSITION_ROOTS` for exactly that context -- the Story 31.3 comparators, whose job is to
+# compare production code with the reference.
 VERIFICATION_DENIED_MODULES = (
     CAPTURE,
     CANDLES,
@@ -1989,7 +1999,19 @@ VERIFICATION_ALLOWED_MODULES = frozenset(
 VERIFICATION_IMPORTERS: frozenset[str] = frozenset()
 # `verification.infrastructure` (the raw store and the aiohttp adapters) is wired only here.
 VERIFICATION_ROOTS = frozenset(
-    {"verification.recorder", "verification.tools.record_fixtures", "verification.conservation"}
+    {
+        "verification.recorder",
+        "verification.tools.record_fixtures",
+        "verification.tools.cut_snapshot_fixtures",
+        "verification.conservation",
+    }
+)
+# The reference signals and their comparison rules (Story 31.3) are written from the dictionary
+# alone, in the standard library only -- not even `kernel`: a reference that imported
+# `kernel.indicators` would agree with production by construction.
+REFERENCE_MODULES = ("verification.domain.reference_signals", "verification.domain.signal_compare")
+_REFERENCE_STDLIB = frozenset(
+    {"bisect", "collections", "dataclasses", "decimal", "enum", "math", "statistics", "typing"}
 )
 
 
@@ -2096,7 +2118,7 @@ def test_importing_the_verification_roots_loads_no_denied_module() -> None:
 
     probe = (
         "import sys, verification.recorder, verification.tools.record_fixtures\n"
-        "import verification.conservation\n"
+        "import verification.conservation, verification.tools.cut_snapshot_fixtures\n"
         "print('\\n'.join(sorted(sys.modules)))\n"
     )
     env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": str(PLATFORM_DIR)}
@@ -2170,3 +2192,10 @@ def test_verification_infrastructure_is_imported_only_by_its_composition_roots()
     }
     assert importers <= VERIFICATION_ROOTS, sorted(importers - VERIFICATION_ROOTS)
     assert VERIFICATION_ROOTS <= _KNOWN, "a verification composition root naming no module"
+
+
+@pytest.mark.parametrize("module", REFERENCE_MODULES)
+def test_the_reference_signals_import_the_standard_library_only(module: str) -> None:
+    """Story 31.3: the reference imports no in-repo module and nothing outside its stdlib list."""
+    imported = {ref.target.split(".")[0] for ref in imports_of(module, _MODULES[module], _KNOWN)}
+    assert imported <= _REFERENCE_STDLIB, sorted(imported - _REFERENCE_STDLIB)

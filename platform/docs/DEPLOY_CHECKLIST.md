@@ -1034,3 +1034,22 @@ creates it root-owned: the uid-1000 collectors then cannot append, and every flu
       each round.
 - [ ] Confirm that `collector.dedup_seed` shows no dedup-seed read failure
       (`archived trade ids could not be read for the dedup seed`) after the restart.
+
+### 31-3 Derived signals against independent reference implementations (commit: the `feat(31-3)` commits on `troll`)
+
+Changes what `ranking_engine` publishes and stores (`price` is the mid or null, `cvd` null on an
+empty window, `spread` rounded to the row's precision, `pct_1h`/`pct_24h` null when a gap would
+shorten them, `volatility` over 24 h, no mark-price backfill), what `data_api` serves (1W panes on
+Monday-anchored 1W buckets, `micro` null when undefined, `/api/metrics/nearest` bounded at 120 s,
+1W forming bars on Monday, the picker's custom-indicator replay capped at 7 days) and the
+web labels/docs (audit D-77..D-90). No config key, env var,
+schema or mount changed.
+
+- [ ] `git pull`, then from `platform/` rebuild and recreate `ranking_engine` and `data_api`
+      (`docker compose up -d --build ranking_engine data_api`); `data_api`'s image rebuild also
+      rebuilds the frontend (its Node build stage).
+- [ ] After the first minute: the rankings page shows "Vol 24h σ (trade closes)" and "Vol 1h σ
+      (mids)" headers; a coin with no two-sided book yet shows "—" for Price and CVD, never 0 or a
+      trade close; `GET /api/errors` shows no new `ranking_engine.*` or `views.*` site.
+- [ ] On the chart, switch to 1W: the bars and the indicator panes start on Mondays (00:00 UTC)
+      and share one time axis.

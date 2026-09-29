@@ -36,6 +36,7 @@ import numpy as np
 import numpy.typing as npt
 import pandas as pd
 from kernel.clocks import NS_PER_S
+from kernel.indicators import OFI_GAP_NS
 from kernel.indicators import MultiLevelOFI
 from kernel.indicators import RollingZScore
 from kernel.indicators import cumulative_depth
@@ -55,7 +56,6 @@ from research.domain.microstructure import price_impact
 from research.domain.microstructure import realised_volatility
 from research.domain.microstructure import volatility_signature
 from research.domain.returns import ReturnSeries
-from research.strategies.ofi_strategy import MAX_GAP_NS
 from research.strategies.ofi_strategy import OFIStrategyConfig
 
 
@@ -71,6 +71,9 @@ SIGNATURE_INTERVALS_S = (1, 2, 5, 10, 15, 30, 60, 120, 300, 600, 900, 1800, 3600
 # Trailing 1 s returns in each rolling realised-volatility point (5 minutes).
 RV_WINDOW = 300
 # A microprice this close to the mid (in ulps of the mid) is the mid, rounded differently.
+# Known limit (DATA_DICTIONARY §2.12, audit D-89): a genuine lean this small (2.5e-12 on a 13 437 mid)
+# reads flat too -- two independently rounded floats cannot tell it from rounding. Upgrade path:
+# judge the lean on the exact decimals (`DydxSecondSnapshot.exact`) instead of the floats.
 _ROUNDING_ULPS = 4
 # Quantile bins of the binned scatters (microprice edge, price impact).
 BINS = 10
@@ -298,7 +301,8 @@ def ofi_readings(seconds: pd.DataFrame, config: OFIStrategyConfig) -> pd.DataFra
     """
     Replay `MultiLevelOFI` over the rows exactly as `OFIStrategy.on_data` does: every two-sided
     row in `ts_event` order (crossed ones included), `usd_notional=True`, the config's
-    `ofi_levels`/`ofi_window`, and `clear_prev_state()` after a gap over `MAX_GAP_NS`. Returns the
+    `ofi_levels`/`ofi_window`, and `clear_prev_state()` after a gap over
+    `kernel.indicators.OFI_GAP_NS` (the one gap rule, Story 31.3). Returns the
     rows with `ofi` (the raw windowed OFI) and `ofi_z` (`RollingZScore` over the config's
     `ofi_zscore_window`, the formula `MultiLevelOFI(zscore_window=...)` delegates to, so it equals
     the strategy's own value). A row that only sets the baseline (the first, or the first after
@@ -320,7 +324,7 @@ def ofi_readings(seconds: pd.DataFrame, config: OFIStrategyConfig) -> pd.DataFra
     for position, (ts, bid_p, bid_s, ask_p, ask_s) in enumerate(zip(*columns, strict=True)):
         if not len(bid_p) or not len(ask_p):
             continue
-        gap = last_ts is not None and ts - last_ts > MAX_GAP_NS
+        gap = last_ts is not None and ts - last_ts > OFI_GAP_NS
         if gap:
             ofi.clear_prev_state()
         baseline = last_ts is None or gap

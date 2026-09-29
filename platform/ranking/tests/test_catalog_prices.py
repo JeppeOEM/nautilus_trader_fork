@@ -76,8 +76,10 @@ def test_series_skips_seconds_with_no_trade() -> None:
     assert series == [(1_000_000_000, 100.0)]
 
 
-def test_series_falls_back_to_mark_price_when_no_trades_exist() -> None:
+def test_a_window_without_a_trade_is_an_empty_series_even_with_mark_prices() -> None:
+    """Story 31.3: mark prices are a different quantity; they never stand in for trade closes."""
     with tempfile.TemporaryDirectory() as tmp:
+        _write_snapshot(tmp, close_price=None, ts=1_000_000_000)
         ParquetDataCatalog(tmp).write_data(
             [
                 MarkPriceUpdate(
@@ -89,4 +91,4 @@ def test_series_falls_back_to_mark_price_when_no_trades_exist() -> None:
             ]
         )
         series = CatalogPriceHistory(tmp).series(_IID, start_ns=0)
-    assert series == [(1_000_000_000, 50.0)]
+    assert series == []

@@ -315,3 +315,26 @@ def test_market_field_next_to_venue(
     client = _client(str(tmp_path / "cat"), monkeypatch)
     body = client.get(_url(_BASE_NS, limit=3, bar_seconds=60).replace(_IID, iid)).json()
     assert (body["venue"], body["market"]) == ("BYBIT", market)
+
+
+def test_weekly_panes_are_monday_anchored_weekly_buckets_not_clamped_to_a_day(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Story 31.3: `bar_seconds=604800` computes the pane on 1W buckets, 604800 s apart and starting
+    Monday 00:00 UTC like the 1W candles -- before, the route clamped it to 1D silently.
+    """
+    day_ns = 86_400_000_000_000
+    week_ns = 7 * day_ns
+    monday_ns = (_BASE_NS - 4 * day_ns) // week_ns * week_ns + 4 * day_ns  # epoch + 4 d: Monday
+    catalog_path = str(tmp_path / "catalog")
+    sunday = [(monday_ns - day_ns + i * 1_000_000_000, 100.0 + i) for i in range(3)]
+    monday = [(monday_ns + 3_600_000_000_000 + i * 1_000_000_000, 110.0 + i) for i in range(3)]
+    _write_book_snapshots(catalog_path, sunday + monday)
+    client = _client(catalog_path, monkeypatch)
+
+    response = client.get(_url(monday_ns + 2 * day_ns, limit=10, bar_seconds=604_800))
+
+    assert response.status_code == 200
+    stamps = [item["t"] for item in response.json()["items"]]
+    assert stamps == [(monday_ns - week_ns) // 1_000_000, monday_ns // 1_000_000]

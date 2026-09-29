@@ -279,6 +279,9 @@ def oi_changes(
     for iid, frame in oi_by_id.items():
         last = bucket_last(frame, "open_interest", bucket_s, start_ns, end_ns)
         values = last.to_numpy(dtype="float64")
+        # Known limit (DATA_DICTIONARY §2.12, audit D-89): an OI of 0 is NaN, so a real drop *to* 0
+        # (a defined -100 % change) reads undefined too, not only the change *from* 0. Upgrade
+        # path: keep the -100 % and leave only the change from a non-positive base undefined.
         positive = np.where(np.isfinite(values) & (values > 0), values, math.nan)
         series[iid] = ReturnSeries.from_prices(
             positive.tolist(), _index_ns(last.index).tolist(), bucket_s

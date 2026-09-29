@@ -478,7 +478,9 @@ def test_slow_loop_backfills_from_the_catalog_and_persists_rank_and_volume(tmp_p
     row = history.nearest(BTC, NOW_NS)
     assert row is not None
     assert (row["price"], row["rank"], row["volume24h"]) == (100.0, 1, 50_000_000.0)
-    assert b.current_ranks(NOW_NS)[0]["price"] == 100.0  # the slow cache feeds the rank entry
+    # The rank entry's `price` is the live mid only (Story 31.3): no book fed yet, so None --
+    # the slow loop's trade close never stands in for it.
+    assert b.current_ranks(NOW_NS)[0]["price"] is None
 
 
 def test_backfill_reads_each_instrument_exactly_once_across_cycles() -> None:

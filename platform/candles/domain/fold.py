@@ -53,6 +53,10 @@ BAR_SECONDS = (60, 300, 900, 3600, 14400, 86400)
 RETAIN_DAYS: Mapping[int, int] = MappingProxyType({60: 30, 300: 90})
 
 DAY_MS = 86_400_000
+WEEK_SECONDS = 604_800
+# 1970-01-01 (the epoch) was a Thursday; the first Monday 00:00 UTC is 4 days later. Weekly buckets
+# start there -- the venues' weekly klines and the frontend's week both start on Monday.
+MONDAY_ANCHOR_MS = 4 * DAY_MS
 
 # `bucket = ts_ms // (bar * 1000)` is numpy int64 arithmetic, so a `bar` whose millisecond form
 # does not fit int64 raises `OverflowError: Python int too large to convert to C long` from inside
@@ -70,6 +74,22 @@ def check_bars(bars: Sequence[int]) -> None:
             raise ValueError(f"bar_seconds must be positive, got {bar}")
         if bar > MAX_BAR_SECONDS:
             raise ValueError(f"bar_seconds exceeds the int64 bucket limit: {bar}")
+
+
+def bucket_start_ms[T: (int, np.ndarray)](ts_ms: T, bar_seconds: int) -> T:
+    """
+    Return the start (ms) of the `bar_seconds`-wide bucket each `ts_ms` falls in: the one bucket rule
+    of every candle, forming bar and bar-spaced pane in `platform/` (Story 31.3). An int or an
+    int64 array.
+
+    A width that divides a day is aligned to UTC midnight (the epoch); 604800 s (1W) starts on
+    Monday 00:00 UTC. Known limit: any other width that does not divide a day is epoch-aligned --
+    none is offered today (`domain.candle.TIMEFRAMES` holds day divisors and 1W only); upgrade
+    path: give such a width its own documented anchor here before offering it.
+    """
+    bar_ms = bar_seconds * 1000
+    anchor = MONDAY_ANCHOR_MS if bar_seconds == WEEK_SECONDS else 0
+    return (ts_ms - anchor) // bar_ms * bar_ms + anchor  # type: ignore[return-value]
 
 
 def fold_rows(
@@ -143,8 +163,7 @@ def fold_arrays(
     traded = ~np.isnan(c)
     acc: dict[tuple[int, int], list] = {}
     for bar in bars:
-        bar_ms = bar * 1000
-        bucket = ts_ms // bar_ms * bar_ms
+        bucket = bucket_start_ms(ts_ms, bar)
         keys, counts = np.unique(bucket, return_counts=True)
         for k, n in zip(keys.tolist(), counts.tolist(), strict=True):
             acc[(bar, k)] = [None, None, None, None, 0.0, n]

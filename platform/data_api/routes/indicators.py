@@ -57,7 +57,13 @@ CHART_INDICATOR_CONFIG_PATH: str = os.environ.get(
 # themselves come from `views.chart_series.candle_page`, so this route can never disagree with the
 # chart.
 _MAX_INDICATOR_VALUES_LIMIT = 500
-_MAX_BAR_SECONDS = 86_400
+# 1W, the candles route's own bound: a 1W pane is computed on 1W buckets (Monday-anchored, like its
+# candles), never silently on 1D ones (Story 31.3). The candles come from `candle_page` (store, then
+# 7-day-bounded archive reads), and the custom indicators' raw-second/delta replay window is capped
+# at `chart_series.MAX_QUERY_SPAN_SECONDS` back from the page's end (`indicator_values_page`): bars
+# before that cap carry None for a custom indicator. Known limit: a 1W page therefore has one custom
+# value (its last bar), a 1D page seven; upgrade path: a stored per-bar aggregate of the inputs.
+_MAX_BAR_SECONDS = 604_800
 
 # Unlike limit/bar_seconds, `entries` has no natural client-side bound -- the picker only
 # ever sends its own configured list, but the query param is untrusted input like any

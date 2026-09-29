@@ -79,11 +79,23 @@ def _history_rows(db: sqlite3.Connection, instrument_id: str, days: int) -> list
     return [dict(zip(keys, r, strict=True)) for r in rows]
 
 
+# How far from the asked time a stored row may lie and still be "the nearest" (Story 31.3): two
+# write intervals (`db_write_interval_seconds`, 60 s). A farther row describes another time, so
+# the answer is None, exactly as for an instrument with no rows -- never a stale row passed off as
+# the value at `ts`.
+NEAREST_TOLERANCE_S = 120
+_INT64_MIN, _INT64_MAX = -(2**63), 2**63 - 1
+
+
 def _nearest_row(db: sqlite3.Connection, instrument_id: str, ts: int) -> dict | None:
+    tolerance_ns = NEAREST_TOLERANCE_S * 1_000_000_000
+    # SQLite binds int64 only: a `ts` near or past either end (a client's `ts_ns`) must not overflow.
+    ts = max(min(ts, _INT64_MAX), _INT64_MIN)
+    low, high = max(ts - tolerance_ns, _INT64_MIN), min(ts + tolerance_ns, _INT64_MAX)
     row = db.execute(
         f"SELECT ts, {', '.join(COLS)} FROM snapshots WHERE instrument_id=? "  # noqa: S608
-        "ORDER BY ABS(ts - ?) LIMIT 1",
-        (instrument_id, ts),
+        "AND ts BETWEEN ? AND ? ORDER BY ABS(ts - ?) LIMIT 1",
+        (instrument_id, low, high, ts),
     ).fetchone()
     if row is None:
         return None
@@ -171,7 +183,10 @@ class SqliteMetricsStore:
             return _history_rows(self._conn(), instrument_id, days)
 
     def nearest(self, instrument_id: str, ts: int) -> dict | None:
-        """Snapshot for instrument_id with ts closest to `ts` (ns). None if never stored."""
+        """
+        Snapshot for instrument_id with ts closest to `ts` (ns), within `NEAREST_TOLERANCE_S`.
+        None if never stored or no row lies that close.
+        """
         with self._lock:
             return _nearest_row(self._conn(), instrument_id, ts)
 

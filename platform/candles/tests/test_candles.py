@@ -26,6 +26,7 @@ fold, so no path folds raw trades straight into a wide bar any more.
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 from kernel.catalog_files import query_second_ohlc
 from kernel.clocks import READ_SPAN_MARGIN_NS
@@ -38,6 +39,7 @@ from candles.application.forming import forming_bar
 from candles.application.queries import candle_dicts_for_window
 from candles.domain.candle import is_valid_candle
 from candles.domain.fold import MAX_BAR_SECONDS
+from candles.domain.fold import bucket_start_ms
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
@@ -295,3 +297,53 @@ def test_query_second_ohlc_refuses_a_float_layout_file(tmp_path: Path) -> None:
     )
     with pytest.raises(LegacySnapshotLayoutError, match="migrate_snapshot_ints"):
         query_second_ohlc(str(tmp_path), IID, ts - 1, ts + 1)
+
+
+_MONDAY_2024_01_01_MS = 1_704_067_200_000  # 2024-01-01 00:00 UTC, a Monday
+_DAY_MS = 86_400_000
+
+
+def test_a_week_bucket_starts_on_monday_utc_and_a_day_divisor_on_utc_midnight() -> None:
+    """Story 31.3: 1W is Monday-anchored (the epoch is a Thursday); day divisors stay epoch-aligned."""
+    wednesday_noon = _MONDAY_2024_01_01_MS + 2 * _DAY_MS + _DAY_MS // 2
+    sunday_last_ms = _MONDAY_2024_01_01_MS - 1
+    assert bucket_start_ms(wednesday_noon, 604_800) == _MONDAY_2024_01_01_MS
+    assert bucket_start_ms(_MONDAY_2024_01_01_MS, 604_800) == _MONDAY_2024_01_01_MS
+    assert bucket_start_ms(sunday_last_ms, 604_800) == _MONDAY_2024_01_01_MS - 7 * _DAY_MS
+    assert bucket_start_ms(wednesday_noon, 86_400) == _MONDAY_2024_01_01_MS + 2 * _DAY_MS
+    stamps = np.array([wednesday_noon, sunday_last_ms], dtype=np.int64)
+    assert bucket_start_ms(stamps, 604_800).tolist() == [
+        _MONDAY_2024_01_01_MS,
+        _MONDAY_2024_01_01_MS - 7 * _DAY_MS,
+    ]
+
+
+def test_the_weekly_fold_groups_monday_to_sunday() -> None:
+    rows = [
+        make_snapshot(
+            ts_event=(_MONDAY_2024_01_01_MS - _DAY_MS) * 1_000_000,
+            close_price=1.0,
+            open_price=1.0,
+            high_price=1.0,
+            low_price=1.0,
+        ),
+        make_snapshot(
+            ts_event=_MONDAY_2024_01_01_MS * 1_000_000,
+            close_price=2.0,
+            open_price=2.0,
+            high_price=2.0,
+            low_price=2.0,
+        ),
+        make_snapshot(
+            ts_event=(_MONDAY_2024_01_01_MS + 6 * _DAY_MS) * 1_000_000,
+            close_price=3.0,
+            open_price=3.0,
+            high_price=3.0,
+            low_price=3.0,
+        ),
+    ]
+    bars = bars_from_rows(rows, 604_800)
+    assert [(b["t"], b["o"], b["c"]) for b in bars] == [
+        (_MONDAY_2024_01_01_MS - 7 * _DAY_MS, 1.0, 1.0),
+        (_MONDAY_2024_01_01_MS, 2.0, 3.0),
+    ]

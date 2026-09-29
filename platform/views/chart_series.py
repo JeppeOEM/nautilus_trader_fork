@@ -55,7 +55,9 @@ from typing import TYPE_CHECKING
 from candles.application import queries
 from candles.domain.candle import Candle
 from candles.domain.candle import is_valid_candle
+from candles.domain.fold import bucket_start_ms
 from kernel import catalog_files
+from kernel.indicators import OFI_GAP_NS
 from kernel.indicators import DepthProfile
 from kernel.indicators import MultiLevelOBI
 from kernel.indicators import MultiLevelOFI
@@ -396,8 +398,9 @@ def build_footprint(
     period_seconds: int,
     bands_per_candle: int = 4,
 ) -> list[FootprintCell]:
-    period_ns = period_seconds * 1_000_000_000
-    candle_by_bucket = {candle.ts_open // period_ns: candle for candle in candles}
+    candle_by_bucket = {
+        bucket_start_ms(candle.ts_open // 1_000_000, period_seconds): candle for candle in candles
+    }
     cells: dict[tuple[int, int], FootprintCell] = {}
 
     bid_levels: dict[float, float] = {}
@@ -424,7 +427,7 @@ def build_footprint(
         if change == 0.0:
             continue
 
-        candle = candle_by_bucket.get(delta.ts_event // period_ns)
+        candle = candle_by_bucket.get(bucket_start_ms(delta.ts_event // 1_000_000, period_seconds))
         if candle is None or candle.high == candle.low:
             continue
         if not (candle.low <= price <= candle.high):
@@ -509,7 +512,6 @@ def compute_chart_series(
 
     for s in sorted(snapshots, key=lambda s: s.ts_event):
         _require_top(s)
-        bid_p, ask_p = s.bid_prices[0], s.ask_prices[0]
         t = s.ts_event / 1e9
 
         book_sides = s.as_floats()
@@ -517,7 +519,9 @@ def compute_chart_series(
         if micro_value is not None:
             series["microprice"].append({"time": t, "value": micro_value})
 
-        series["spread"].append({"time": t, "value": ask_p - bid_p})
+        # `kernel.indicators.spread`, the one spread (SSOT-01): rounded at the row's precision, so a
+        # one-tick spread is not the ~1e-9-off float difference of two decoded prices (D-88).
+        series["spread"].append({"time": t, "value": calc_spread(book_sides)})
 
         profile = snapshot_depth(book_sides, _LEVELS)
         if profile is None:  # unreachable: `_require_top` raised on an empty side
@@ -620,7 +624,8 @@ def price_series_rows(snapshots: Sequence[DydxSecondSnapshot]) -> list[dict]:
     """
     Build `{t, bid_units, ask_units, price_precision, mid, micro, price}` rows from time-ordered
     snapshots, one per second, with a gap row (`_gap_row`, `t = later - 1`, every value null)
-    between two seconds more than `SNAPSHOT_GAP_THRESHOLD_MS` apart.
+    between two seconds more than `SNAPSHOT_GAP_THRESHOLD_MS` apart. `micro` is null for a second
+    whose microprice is undefined (both top sizes zero): no mid stands in for it (Story 31.3).
 
     The best bid/ask travel as the stored exact integers and their precision (Story 30.2: values a
     machine moves stay integers; the frontend's `lib/units.ts` formats them for display). `mid`,
@@ -649,8 +654,8 @@ def price_series_rows(snapshots: Sequence[DydxSecondSnapshot]) -> list[dict]:
             rows.append(_gap_row(curr_ts_ms - 1))
         prev_ts_ms = curr_ts_ms
         mid = (bp + ap) / 2
-        micro_value = calc_microprice(s.as_floats())
-        micro = micro_value if micro_value is not None else mid
+        # None when undefined (zero top sizes): never the mid passed off as a microprice (DATA-01).
+        micro = calc_microprice(s.as_floats())
         tv = s.buy_volume + s.sell_volume
         if tv > 0:
             price = mid + ((s.buy_volume - s.sell_volume) / tv) * (ap - bp) * 0.5
@@ -894,32 +899,40 @@ def _indicator_series_window_start_ns(before_ns: int, limit: int, bar_seconds: i
     return before_ns - span_seconds * 1_000_000_000
 
 
-def _replay_bucket_samples(
+def replay_bucket_samples(
     snapshots: Sequence[DydxSecondSnapshot], bar_seconds: int
 ) -> dict[int, dict]:
     """
     Replay `MultiLevelOFI`/`MultiLevelOBI` in chronological order over every queried
     snapshot, and compute stateless `microprice`/`spread` per snapshot -- keeping the
-    last-computed value per `bar_seconds`-wide bucket (`ts_event // (bar_seconds *
-    1_000_000_000)`), same bucket-sampling technique `indicator_picker`'s
-    `_ofi_bucket_samples` uses, adapted from delta-driven to snapshot-driven input.
+    last-computed value per `bar_seconds`-wide bucket (`candles.domain.fold.bucket_start_ms`, the
+    one bucket rule: a 1W pane starts on Monday like its candles), same bucket-sampling technique
+    `indicator_picker`'s `_ofi_bucket_samples` uses, adapted from delta-driven to snapshot-driven
+    input.
 
-    A page's OFI/OBI replay starts fresh at that page's own window start -- it cannot
-    carry state across pages, since pages are fetched independently and out of full-
-    history order (same explicit per-page-reset scope choice the CVD replay already
-    documents). OFI's first snapshot in this window only seeds its `_prev_*` state and
-    yields no value -- only record `ofi` once `.initialized` is True.
+    A `ts_event` step over `kernel.indicators.OFI_GAP_NS` clears OFI's previous book first
+    (`clear_prev_state`), so a post-gap book is never diffed against the pre-gap one -- the one
+    gap rule every OFI replay shares (Story 31.3). A page's OFI/OBI replay starts fresh at that
+    page's own window start -- it cannot carry state across pages, since pages are fetched
+    independently and out of full-history order (same explicit per-page-reset scope choice the CVD
+    replay already documents). OFI's first snapshot in this window only seeds its `_prev_*` state
+    and yields no value -- only record `ofi` once `.initialized` is True.
 
     A second with an empty side is not an error here: its microprice/spread are honestly `None`
     (`kernel.indicators` returns no value without a top), pinned by
     `data_api/tests/test_indicator_series.py`'s thin-book test -- nothing is skipped or invented.
+    Known limit (§2.3): `MultiLevelOBI` keeps its previous value on a second whose top-10 sizes
+    total zero, so that bucket shows the last defined OBI; upgrade path: publish None there.
     """
-    bar_ns = bar_seconds * 1_000_000_000
     ofi = MultiLevelOFI(levels=10, window=50)
     obi = MultiLevelOBI(levels=10)
     buckets: dict[int, dict] = {}
+    last_ts: int | None = None
 
     for snapshot in sorted(snapshots, key=lambda s: s.ts_event):
+        if last_ts is not None and snapshot.ts_event - last_ts > OFI_GAP_NS:
+            ofi.clear_prev_state()
+        last_ts = snapshot.ts_event
         ofi.update_raw(
             snapshot.bid_prices,
             snapshot.bid_sizes,
@@ -928,9 +941,9 @@ def _replay_bucket_samples(
         )
         obi.update_raw(snapshot.bid_sizes, snapshot.ask_sizes)
         snapshot_dict = snapshot.as_floats()
-        bucket = snapshot.ts_event // bar_ns
+        bucket = bucket_start_ms(snapshot.ts_event // 1_000_000, bar_seconds)
         buckets[bucket] = {
-            "t": bucket * bar_seconds * 1000,
+            "t": bucket,
             "ofi": ofi.value if ofi.initialized else None,
             "obi": obi.value if obi.initialized else None,
             "microprice": calc_microprice(snapshot_dict),
@@ -951,7 +964,7 @@ def indicator_series_page(
 
     def fetch(start_ns: int, end_ns: int) -> list[dict]:
         snapshots = query_second_snapshots(catalog_path, instrument_id, start_ns, end_ns)
-        buckets = _replay_bucket_samples(snapshots, bar_seconds)
+        buckets = replay_bucket_samples(snapshots, bar_seconds)
         return [p for _, p in sorted(buckets.items()) if p["t"] < before_ms]
 
     ranges = catalog_files.data_file_ranges(catalog_path, instrument_id)
@@ -1012,11 +1025,18 @@ def indicator_values_page(
         raise CandleReadError(str(exc)) from exc
     if not kept:
         return [], False, {}
+    end_ms = kept[-1]["t"] + bar_seconds * 1000
     window = indicator_picker.ReplayWindow(
         instrument_id=instrument_id,
         bar_seconds=bar_seconds,
-        start_ms=kept[0]["t"],
-        end_ms=kept[-1]["t"] + bar_seconds * 1000,
+        # MEM-01: the custom replays read raw seconds/deltas over this window, so it is capped at
+        # `MAX_QUERY_SPAN_SECONDS` back from the end (500 1W bars would be ~10 years). A bar before
+        # the cap has no input read, so its custom value is None -- a gap, never a fabricated one.
+        # Known limit: at 1D only the last 7 bars, and at 1W only the last bar, carry a custom value
+        # (CVD, cancel pressure, delta OFI); upgrade path: a stored per-bar aggregate of these
+        # inputs (like the candle store), read instead of replaying raw rows.
+        start_ms=max(kept[0]["t"], end_ms - MAX_QUERY_SPAN_SECONDS * 1000),
+        end_ms=end_ms,
     )
     by_time, errors = indicator_picker.values_by_time(kept, entries, window)
     rows = [{"t": t, "values": values} for t, values in sorted(by_time.items())]

@@ -33,10 +33,15 @@ Known limit (common mode): `kernel.venues` and `kernel.venue_http` are shared wi
 so a wrong wire symbol or host there misleads both sides alike (`domain/subscriptions.py`).
 
 - `domain/`: the recording plan (a venue `config.toml` read as data) and the pure subscription,
-  REST-poll and frame-classification tables; no I/O.
+  REST-poll and frame-classification tables; no I/O. Also the reference signals (Story 31.3,
+  `reference_signals.py`: every derived value re-implemented from `docs/DATA_DICTIONARY.md` in
+  stdlib `Decimal`, importing nothing of the platform) and their comparison rules
+  (`signal_compare.py`). Only the comparator tests (`tests/test_reference_*.py`, declared
+  composition roots in `platform/tests/test_boundaries.py`) import the production code they compare.
 - `application/`: the ports, the ledger sites and the recorder's supervision loops.
 - `infrastructure/`: the hourly zstd JSONL raw store and the aiohttp adapters; imported only by
   the composition roots.
 - `recorder.py`: the composition root, `python3 -m verification.recorder --venue V`.
-- `tools/`: operator tools (`record_fixtures`, the test-fixture recorder).
+- `tools/`: operator tools (`record_fixtures`, the test-fixture recorder; `cut_snapshot_fixtures`,
+  which cuts the derived-signal tests' real rows from a soak catalog with pyarrow).
 """

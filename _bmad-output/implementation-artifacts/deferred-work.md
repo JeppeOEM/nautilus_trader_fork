@@ -791,3 +791,11 @@ Discarded by operator: locking/atomic TOML writes; `bot_tui` malformed-message h
 - source_spec: `_bmad-output/implementation-artifacts/spec-30-1-compact-parquet-encoding-for-consolidated-and-rewritten-files.md`
   summary: `archive.repair_catalog --apply` writes its replacement snapshot files through Nautilus's `write_data` without `kernel.parquet_compat.apply_zstd_default()` ever running in that process, so they land snappy-compressed, contrary to `parquet_compat`'s "the writers make it zstd" contract.
   evidence: `archive/application/repair.py:148` calls `catalog.write_data([cleared])`; neither `repair.py` nor `archive/repair_catalog.py` imports or calls `apply_zstd_default` (only `capture/infrastructure/parquet_writer.py` and `archive/application/backfill_bars.py` do), and before Story 30.1 the only other call sat inside `CatalogFiles`' rewrite, which the repair path never reaches before its `write_data`. Pre-existing; such a file stays snappy until a consolidation merge or an `archive.tools.recompress --apply` run re-encodes it.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-31-3-derived-signals-against-independent-reference-implementations.md`
+  summary: The "Price" label means the slow loop's trade close on the history page (metrics.db `price`) but the live mid on the rankings page.
+  evidence: `ranking/application/engine.py` slow pass persists the `price_stats_from_series` trade close, while `RankingBoard.fast_metrics` publishes `price` = mid (DATA_DICTIONARY §3.3/§3.4). The mismatch was already there before Story 31.3; the 31.3 review surfaced it.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-31-3-derived-signals-against-independent-reference-implementations.md`
+  summary: `research/tests/test_backtest_runner.py::test_an_order_fills_at_the_top_of_book_after_its_latency` (5 parametrizations) errors with `TypeError: DydxSecondSnapshot.__init__() missing 2 required positional arguments`: its fixture builder at `:427` still calls the pre-Story-30.2 constructor.
+  evidence: the same `DydxSecondSnapshot(` call is at line 426 of the baseline revision 5e324bbb8e, and the 5 errors show in both 31.3 review passes' full pytest runs, so the fixture was never updated for 30.2's precision arguments. It is pre-existing and not caused by 31.3.

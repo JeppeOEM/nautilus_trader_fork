@@ -74,11 +74,12 @@ from research.domain.report import MetricReport
 
 _IID = InstrumentId(Symbol("BTC-USD-PERP"), Venue("DYDX"))
 _DAY0 = 19_700 * NS_PER_DAY
-# 20:00 on day 0 to 04:00 on day 1: two UTC days, sampled every 5 s -- OFIStrategy treats a hole
-# over 5 s as a reconnect, so a coarser cadence would never let its OFI build.
+# 20:00 on day 0 to 04:00 on day 1: two UTC days, sampled every 3 s -- OFIStrategy treats a hole
+# over `kernel.indicators.OFI_GAP_NS` (3 s since Story 31.3, 5 s before) as a reconnect, so a
+# coarser cadence would never let its OFI build.
 _START = _DAY0 + 20 * 3_600 * NS_PER_S
 _END = _DAY0 + NS_PER_DAY + 4 * 3_600 * NS_PER_S
-_STEP = 5 * NS_PER_S
+_STEP = 3 * NS_PER_S
 _S = "research.strategies.ofi_strategy:"
 _PARAMS = {
     "warmup_seconds": 0,

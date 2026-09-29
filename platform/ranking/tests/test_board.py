@@ -325,7 +325,8 @@ def test_rank_rows_carry_the_live_tick_fields_from_ingested_snapshots() -> None:
     assert row["avg_trade_size"] == 1.5  # (5.0 + 1.0) / (3 + 1)
 
 
-def test_rank_rows_fall_back_to_the_slow_metrics_price_pct_and_volatility() -> None:
+def test_rank_rows_take_pct_and_volatility_from_the_slow_metrics_but_never_the_price() -> None:
+    """Story 31.3: `price` is the live mid or None -- a slow-loop trade close never stands in."""
     b = board()
     b.ingest(snap(BTC, bid=None, ask=None, ts_event=NOW_NS - SEC_NS, close_price=99.0), NOW_NS)
     set_volumes(b, {BTC: 1.0}, NOW_NS)
@@ -333,10 +334,41 @@ def test_rank_rows_fall_back_to_the_slow_metrics_price_pct_and_volatility() -> N
 
     row = b.current_ranks(NOW_NS)[0]
 
-    assert row["price"] == 99.0  # no live book yet: the slow cache's price
+    assert row["price"] is None  # no live book yet: no mid, and no substitute for it
     assert row["pct_1w"] == pytest.approx(10.0)
     assert row["pct_1m"] is None  # not enough history -- never 0
     assert row["pct_1h"] is None
+
+
+def test_an_empty_rolling_window_publishes_no_cvd_rather_than_zero() -> None:
+    """Story 31.3: with no snapshot held there is no flow to report -- None, never a 0.0 CVD."""
+    b = board()
+    b.ingest(snap(BTC, bid=None, ask=None, ts_event=NOW_NS - SEC_NS), NOW_NS)  # feeds no window
+    set_volumes(b, {BTC: 1.0}, NOW_NS)
+
+    row = b.current_ranks(NOW_NS)[0]
+
+    assert (row["cvd"], row["volume_delta"], row["avg_trade_size"]) == (None, None, None)
+    assert (row["buy_count"], row["sell_count"]) == (0, 0)  # the empty sums
+
+
+def test_volatility_mode_sorts_an_unscored_row_as_zero_known_limit() -> None:
+    """
+    Pinned Known limit (`RankingBoard`'s docstring, DATA_DICTIONARY §3.3): a row whose
+    `volatility_score` is None sorts as 0 -- after every positive score, before a negative one
+    (none exists: a standard deviation is never negative) -- and still publishes None.
+    """
+    b = board()
+    eth = "ETH-USD-PERP.DYDX"
+    for k, bid in enumerate((100.0, 101.0, 100.5, 102.0)):
+        b.ingest(snap(eth, bid, bid + 2.0, ts_event=NOW_NS - (4 - k) * SEC_NS), NOW_NS)
+    b.ingest(snap(BTC, ts_event=NOW_NS - SEC_NS), NOW_NS)  # one mid: no score
+    b.switch_mode(RankingMode.VOLATILITY)
+
+    ranks = b.current_ranks(NOW_NS)
+
+    assert [r["instrument_id"] for r in ranks] == [eth, BTC]
+    assert ranks[1]["volatility_score"] is None
 
 
 def test_rank_rows_drop_stale_slow_metrics() -> None:

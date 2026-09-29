@@ -45,6 +45,7 @@ from typing import Protocol
 
 import redis.asyncio as aioredis
 from candles.application.forming import forming_bar
+from candles.domain.fold import bucket_start_ms
 from kernel.catalog_files import query_second_ohlc
 from kernel.second_snapshot import DydxSecondSnapshot
 from kernel.second_snapshot import SecondOHLC
@@ -104,6 +105,11 @@ class BarObserver(Protocol):
     def on_bar(self, instrument_id: str, bar_seconds: int, bar: dict, ts_ns: int) -> None:
         """Receive the forming bar just published for one watched pair."""
         ...
+
+
+def _bucket_of(ts_ns: int, bar_seconds: int) -> int:
+    """Return the bucket start (ms) of a ns stamp (`candles.domain.fold.bucket_start_ms`)."""
+    return bucket_start_ms(ts_ns // 1_000_000, bar_seconds)
 
 
 def _second_row(snapshot: DydxSecondSnapshot) -> SecondOHLC:
@@ -317,9 +323,8 @@ class LiveCandleBus:
         if key in self._seeded or key not in self._listeners:
             return
         self._seeded.add(key)
-        bucket_ns = bar_seconds * 1_000_000_000
         now_ns = time.time_ns()
-        start_ns = now_ns // bucket_ns * bucket_ns
+        start_ns = _bucket_of(now_ns, bar_seconds) * 1_000_000
         try:
             rows = await asyncio.to_thread(
                 _catalog_rows_for_seed,
@@ -342,11 +347,12 @@ class LiveCandleBus:
         buffer = self._buffers.setdefault(key, [])
         # Live ticks own their bucket: if one rolled over while the read ran, only rows of that
         # same bucket may be prepended, never the previous bucket's.
-        target = (buffer[0].ts_event if buffer else start_ns) // bucket_ns
+        target = _bucket_of(buffer[0].ts_event if buffer else start_ns, bar_seconds)
         older = [
             r
             for r in rows
-            if r.ts_event // bucket_ns == target and (not buffer or r.ts_event < buffer[0].ts_event)
+            if _bucket_of(r.ts_event, bar_seconds) == target
+            and (not buffer or r.ts_event < buffer[0].ts_event)
         ]
         self._buffers[key] = older + buffer
         if self._buffers[key]:
@@ -402,8 +408,9 @@ class LiveCandleBus:
         buffer = self._buffers.setdefault(key, [])
         if buffer and row.ts_event <= buffer[-1].ts_event:
             return  # out-of-order/duplicate (e.g. around a Redis reconnect) -- never fold in
-        bucket_ns = bar_seconds * 1_000_000_000
-        if buffer and buffer[-1].ts_event // bucket_ns != row.ts_event // bucket_ns:
+        if buffer and _bucket_of(buffer[-1].ts_event, bar_seconds) != _bucket_of(
+            row.ts_event, bar_seconds
+        ):
             buffer = [row]  # bucket boundary crossed -- previous bar's last publish stands
             self._buffers[key] = buffer
         else:

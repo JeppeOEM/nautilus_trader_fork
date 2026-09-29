@@ -100,8 +100,8 @@ const RANKING_COLS: RankingColumn[] = [
   { key: "pct_24h", label: "24h %", format: (v) => fmtPercent(v as number) },
   { key: "pct_1w", label: "1w %", format: (v) => fmtPercent(v as number) },
   { key: "pct_1m", label: "1m %", format: (v) => fmtPercent(v as number) },
-  { key: "volatility", label: "Vol(catalog)", format: (v) => fmtFixed(v as number, 6) },
-  { key: "volatility_score", label: "Vol Score", format: (v) => fmtFixed(v as number, 6) },
+  { key: "volatility", label: "Vol 24h σ (trade closes)", format: (v) => fmtFixed(v as number, 6) },
+  { key: "volatility_score", label: "Vol 1h σ (mids)", format: (v) => fmtFixed(v as number, 6) },
   { key: "volume24h", label: "Vol24h", format: (v) => fmtMillions(v as number) },
 ];
 

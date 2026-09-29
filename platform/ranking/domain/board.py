@@ -30,6 +30,7 @@ from collections import deque
 from collections.abc import Callable
 from collections.abc import Mapping
 
+from kernel.indicators import OFI_GAP_NS
 from kernel.indicators import MultiLevelOBI
 from kernel.indicators import MultiLevelOFI
 from kernel.indicators import microprice as calc_microprice
@@ -58,10 +59,6 @@ STALE_NS: int = 30_000_000_000
 # state is aged out (`age_out`), so an instrument that stopped being collected does not hold
 # memory (MEM-02) or keep writing its last values to metrics.db (DATA-01) forever.
 RECENTLY_STALE_WINDOW_NS: int = 3_600_000_000_000  # 1 hour
-
-# Gap threshold before an OFI tracker's previous-tick state is dropped rather than diffed
-# against a stale pre-gap book.
-OFI_GAP_NS: int = 3_000_000_000
 
 # Rolling window of decoded snapshots per instrument: cvd/avg_trade_size and the fast volatility.
 ROLLING_WINDOW: int = 300
@@ -118,16 +115,16 @@ class InstrumentMetrics:
         """
         Return the live-tick fields of a rank entry: a pure read of the trackers and the rolling window.
 
-        "volume_delta" is buy-sell volume summed over the last VOLUME_DELTA_WINDOW snapshots.
+        "volume_delta" is buy-sell volume summed over the last VOLUME_DELTA_WINDOW snapshots. With
+        no snapshot held yet, `cvd` and `volume_delta` are None -- an empty window has no flow to
+        report, never a measured zero (Story 31.3) -- and the counts are the empty sums, 0.
         """
         snapshots = list(self.rolling)
         latest = snapshots[-1] if snapshots else None
-        buy_vol, sell_vol, buy_cnt, sell_cnt = (
-            trade_aggregates(snapshots) if snapshots else (0.0, 0.0, 0, 0)
-        )
+        buy_vol, sell_vol, buy_cnt, sell_cnt = trade_aggregates(snapshots)
         total_cnt = buy_cnt + sell_cnt
         recent = snapshots[-VOLUME_DELTA_WINDOW:]
-        recent_buy, recent_sell, _, _ = trade_aggregates(recent) if recent else (0.0, 0.0, 0, 0)
+        recent_buy, recent_sell, _, _ = trade_aggregates(recent)
         mid = calc_mid_price(latest) if latest is not None else None
         microprice_value = calc_microprice(latest) if latest is not None else None
         return {
@@ -143,7 +140,7 @@ class InstrumentMetrics:
                 microprice_value - mid if microprice_value is not None and mid is not None else None
             ),
             "spread": calc_spread(latest) if latest is not None else None,
-            "cvd": buy_vol - sell_vol,
+            "cvd": (buy_vol - sell_vol) if snapshots else None,
             "volume_delta": (recent_buy - recent_sell) if snapshots else None,
             "buy_count": buy_cnt,
             "sell_count": sell_cnt,
@@ -479,8 +476,8 @@ class RankingBoard:
             "pct_1m": slow.get("pct_1m"),
             "volatility": slow.get("volatility"),
         }
-        if row["price"] is None:  # no fresh snapshot yet: the last catalog-derived price
-            row["price"] = slow.get("price")
+        # `price` is the live mid or None: a trade close from the slow loop is a different quantity
+        # (§3.3), so it never stands in for a missing mid (Story 31.3 deleted that fallback).
         return row
 
     def ranks_by_iid(self, now_ns: int) -> dict[str, int]:

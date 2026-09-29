@@ -41,7 +41,12 @@ from data_api.settings import CATALOG_PATH
 
 # This route's own clamps (MEM-01 extended to this route, independently of candles.py's values).
 _MAX_INDICATOR_SERIES_LIMIT = 500
-_MAX_BAR_SECONDS = 86_400
+# 1W, the candles route's own bound (Story 31.3: was a silent clamp to 1D). The replay's raw-second
+# read is capped at `chart_series.MAX_QUERY_SPAN_SECONDS` (7 days) whatever the bar size. Known limit:
+# a 1W pane therefore holds at most two Monday-anchored buckets per page, the older one computed from
+# only the days inside the read; upgrade path: a stored per-bar OFI/OBI series (like the candle
+# store), paged like candles instead of replayed from raw seconds.
+_MAX_BAR_SECONDS = 604_800
 
 router = APIRouter()
 

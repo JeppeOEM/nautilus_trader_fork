@@ -17,6 +17,7 @@
 import numpy as np
 import pytest
 
+from ranking.domain.metrics import PCT_MAX_SHORTFALL_NS
 from ranking.domain.metrics import pct_change_from
 from ranking.domain.metrics import price_stats_from_series
 
@@ -76,3 +77,23 @@ def test_pct_change_from_is_signed_percent_and_none_without_history() -> None:
     assert pct_change_from(110.0, None) is None
     assert pct_change_from(None, 100.0) is None
     assert pct_change_from(110.0, 0.0) is None
+
+
+def test_pct_change_is_none_when_a_gap_would_shorten_the_horizon() -> None:
+    """Story 31.3: the base may lie at most PCT_MAX_SHORTFALL_NS past the cutoff, never further."""
+    base = 200 * _1H_NS
+    cutoff = base - _1H_NS
+    inside = [(cutoff - _1H_NS, 90.0), (cutoff + PCT_MAX_SHORTFALL_NS, 100.0), (base, 110.0)]
+    outside = [(cutoff - _1H_NS, 90.0), (cutoff + PCT_MAX_SHORTFALL_NS + 1, 100.0), (base, 110.0)]
+    assert price_stats_from_series(inside)["pct_change_1h"] == pytest.approx(10.0)
+    assert price_stats_from_series(outside)["pct_change_1h"] is None
+
+
+def test_volatility_covers_the_last_24_hours_only() -> None:
+    """Story 31.3: the series is kept 25h, the published `volatility` is the 24h its label names."""
+    base = 30 * _24H_NS
+    old = [(base - 25 * _1H_NS, 50.0), (base - 24 * _1H_NS - 1, 400.0)]  # out of the window
+    recent = [(base - 2 * _1H_NS, 100.0), (base - _1H_NS, 110.0), (base, 121.0)]
+    returns = [0.1, 121.0 / 110.0 - 1.0]
+    result = price_stats_from_series(old + recent)
+    assert result["volatility"] == pytest.approx(float(np.std(returns)))

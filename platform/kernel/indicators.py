@@ -48,6 +48,15 @@ from nautilus_trader.model.data import Bar
 from nautilus_trader.model.data import QuoteTick
 
 
+# The one OFI gap rule (Story 31.3): when consecutive snapshots' `ts_event`s differ by strictly more
+# than this, the caller clears the OFI tracker's previous book (`MultiLevelOFI.clear_prev_state`)
+# before the next update, so a post-gap book is never diffed against a stale pre-gap one. 3 s: the
+# live ranking's published and documented value (DATA_DICTIONARY §2.2; research used 5 s before).
+# Every OFI replay imports it -- `ranking`, `views.chart_series`, the research OFI/snapshot
+# strategies and `research.application.microstructure` -- none keeps a threshold of its own.
+OFI_GAP_NS: int = 3_000_000_000
+
+
 class OnlineLogisticTrend(Indicator):
     """
     Online (incremental) logistic regression predicting P(next bar's return > 0).
@@ -281,6 +290,9 @@ class RollingZScore(Indicator):
         # A zero std with unequal readings is possible too (their squared deviations underflow,
         # e.g. [0.0, 1e-170]): still flat, never a division by zero.
         std = float(arr.std())
+        # Known limit (DATA_DICTIONARY §2.2, audit D-89): an undefined z-score (under 2 readings,
+        # or a flat window) is published as 0.0, indistinguishable from "at the mean". Upgrade
+        # path: publish None (a gap) and let every reader show it.
         if len(arr) < 2 or arr.max() == arr.min() or std == 0.0:
             self.value = 0.0
         else:
@@ -319,6 +331,9 @@ class MultiLevelOBI(Indicator):
         bid = sum(bid_sizes[: self.levels])
         ask = sum(ask_sizes[: self.levels])
         total = bid + ask
+        # Known limit (DATA_DICTIONARY §2.3, audit D-89): a zero total is undefined, but the
+        # previous value is kept, so a stateful reader publishes the last defined OBI for that
+        # second. Upgrade path: set the value to None (and callers publish a gap).
         if total == 0.0:
             return
         self.value = bid / total
@@ -497,12 +512,24 @@ def microprice(snapshot: dict) -> float | None:
 
 
 def spread(snapshot: dict) -> float | None:
-    """ask_prices[0] - bid_prices[0]; None if either side is empty (thin/no book)."""
+    """
+    ask_prices[0] - bid_prices[0]; None if either side is empty (thin/no book).
+
+    Rounded to the row's `price_precision` when the dict carries it (`as_floats()` does, Story
+    31.3): both prices are exact at that precision, so their difference is too, but subtracting two
+    decoded doubles cancels most of their digits -- a one-tick 0.000001 spread at 8.578755 came out
+    1.0000000010279564e-06, 1e-9 off, and every ratio of it (spread in ticks or bps) inherited the
+    error. Rounding returns the double nearest the exact difference: the subtraction's error (about
+    2 ulp of the price) stays far under half a unit for any price under 2e15 units (BTC is 8.4e6).
+    A dict without the precision (a hand-built one) gets the plain difference.
+    """
     bid_prices = snapshot["bid_prices"]
     ask_prices = snapshot["ask_prices"]
     if not bid_prices or not ask_prices:
         return None
-    return ask_prices[0] - bid_prices[0]
+    difference = ask_prices[0] - bid_prices[0]
+    precision = snapshot.get("price_precision")
+    return difference if precision is None else round(difference, precision)
 
 
 def mid_price(snapshot: dict) -> float | None:
@@ -593,6 +620,9 @@ def cumulative_depth(profile: DepthProfile) -> tuple[list[float], list[float]]:
 
 # A level exactly on an edge (BTC 100 000 with a 10 tick is 1 bp) computes as edge +- a few ulps;
 # this relative slack keeps it on one side of the edge in every snapshot instead of flapping.
+# Known limit (DATA_DICTIONARY §2.12): a level genuinely within 1e-9 past an edge counts as on it
+# (the exact reference counts such a case as EDGE_SLACK). Upgrade path: compare exact unit
+# distances (`DydxSecondSnapshot.exact`) instead of floats, with no slack.
 _BPS_EDGE_SLACK = 1e-9
 
 

@@ -309,7 +309,8 @@ trade columns are read without the book by `kernel.catalog_files.query_second_oh
   attribute names as floats computed once by `unit_float` = `float(units) / 10.0**precision`
   (`bid_prices`, `buy_volume`, `close_price`, ...), the integers (`bid_price_units`, ...), and
   exact `Price`/`Quantity` values (`.exact`); `as_floats()` is the dict `kernel.indicators`' pure
-  functions take. The web formats units only in `frontend/src/lib/units.ts` (exact, string-based).
+  functions take (the decoded floats plus the row's two precisions, Story 31.3: `spread` rounds its
+  difference to `price_precision`, §2.1). The web formats units only in `frontend/src/lib/units.ts` (exact, string-based).
 
   **The `snapshots:raw` payload** is the same row: a JSON list of `DydxSecondSnapshot.to_dict()`
   results -- the integers, both precisions and the gap-encoded book -- published by
@@ -335,9 +336,9 @@ trade columns are read without the book by `kernel.catalog_files.query_second_oh
     re-derived from the raw archive (§1.1) on exchange time by `rebuild_seconds` (§6);
     book columns and timestamps are never touched. `candles.domain.fold.fold_arrays`
     combines these across multiple seconds for coarser candles (§2.5);
-    `ranking/infrastructure/catalog_prices.py` (the ranking price backfill) reads `close_price` as its primary
-    price source (falling back to `MarkPriceUpdate` only when no snapshot ever
-    recorded a trade for that instrument).
+    `ranking/infrastructure/catalog_prices.py` (the ranking price backfill) reads `close_price` as its only
+    price source: a window with no trade is an empty series, never mark prices (Story 31.3 deleted
+    that fallback, which mixed a second quantity into the trade-close series).
   - `ts_event`, `ts_init`
 - **Clocks per venue** (`CoreConfig.book_time_source`, story 22.12):
 
@@ -1003,11 +1004,17 @@ of prior calls:
 
 | Function | Formula | Raw fields used |
 |---|---|---|
-| `microprice(snapshot)` | `(bid_prices[0]*ask_sizes[0] + ask_prices[0]*bid_sizes[0]) / (bid_sizes[0]+ask_sizes[0])` | `bid_prices[0]`, `bid_sizes[0]`, `ask_prices[0]`, `ask_sizes[0]` |
-| `spread(snapshot)` | `ask_prices[0] - bid_prices[0]` | `bid_prices[0]`, `ask_prices[0]` |
+| `microprice(snapshot)` | `(bid_prices[0]*ask_sizes[0] + ask_prices[0]*bid_sizes[0]) / (bid_sizes[0]+ask_sizes[0])`; None on an empty side or when both top sizes are 0 (undefined, never the mid) | `bid_prices[0]`, `bid_sizes[0]`, `ask_prices[0]`, `ask_sizes[0]` |
+| `spread(snapshot)` | `ask_prices[0] - bid_prices[0]`, as written (negative when crossed), rounded to the row's `price_precision` (Story 31.3: the float difference of two decoded prices cancels digits -- a one-tick 0.000001 spread at 8.578755 came out 1.0000000010279564e-06 -- so the double nearest the exact difference is returned) | `bid_prices[0]`, `ask_prices[0]` |
 | `mid_price(snapshot)` | `(bid_prices[0] + ask_prices[0]) / 2` | `bid_prices[0]`, `ask_prices[0]` |
 | `volume_delta(snapshot)` | `buy_volume - sell_volume` | `buy_volume`, `sell_volume` |
 | `trade_aggregates(snapshots)` | sums `buy_volume`/`sell_volume`/`buy_count`/`sell_count` across a list — feeds CVD and `avg_trade_size` downstream | all four trade fields |
+
+Every value is a float of the exact decimal it stands for: `mid` is exact at p+1 places, `spread`
+at p, `volume_delta`/CVD at s (p, s: the row's precisions), and each is within float noise of that
+decimal (§2.13 counts the noise; `spread` is the nearest double exactly). An empty side makes
+`mid`/`spread`/`microprice` None; nothing substitutes for them (no mid for a missing microprice in
+the chart, §2.7).
 
 `Microprice` (`indicators.py`) is also available as a stateful `Indicator`
 class fed one tick at a time (`update_raw`/`handle_quote_tick`) — used where a class
@@ -1034,11 +1041,56 @@ that side. `contribution = bid_term - ask_term`, summed over a rolling window.
   (§3): three raw variants at levels 3/5/10 (window 300, no z-score) plus one
   z-scored variant at level 10 (window 50, z-score window 3600).
 
+**The rule, stated in full (Story 31.3; the reference is `verification/domain/reference_signals.py`'s
+`ofi_step`/`rolling_ofi`/`rolling_ofi_z`).** Source: Cont, Kukanov and Stoikov (2014), "The Price
+Impact of Order Book Events" (level 0), summed over the top levels as in Xu, Gould and Howison
+(2019), "Multi-Level Order-Flow Imbalance in a Limit Order Book".
+
+- **Levels.** Level i of the top `levels` counts only when it exists in the current and the previous
+  bid *and* ask lists: `n = min(levels, |bid|, |ask|, |prev_bid|, |prev_ask|)`. A thinner side never
+  biases the sum one way; an empty side makes the contribution 0.
+- **Terms.** Bid: a higher price adds the new size, an equal price adds `size - prev_size`, a lower
+  price subtracts `prev_size` (a withdrawal). Ask: a lower price adds the new size, equal adds the
+  change, a higher one subtracts `prev_size`. `contribution = sum(bid_term - ask_term)`.
+- **USD notional.** A price-up (improved) or unchanged term is valued at the *current* level price; a
+  withdrawal at the *previous* price, where that size actually rested.
+- **Rolling value.** The sum of the last `window` contributions. The first row, and the first row
+  after a gap, is a baseline: it adds no contribution and only becomes the previous book; the
+  value it reads is the unchanged window (None until a first contribution exists). The window
+  keeps contributions from before a gap.
+- **Gap rule, one threshold everywhere.** `kernel.indicators.OFI_GAP_NS` = 3 s: when consecutive fed
+  rows' `ts_event`s differ by strictly more, the caller clears the tracker's previous book
+  (`clear_prev_state`) before the update. Every OFI replay applies it: `ranking` (live), the chart's
+  per-bar replay (`views.chart_series.replay_bucket_samples`), `OFIStrategy`, `SnapshotStrategy` and
+  `research.application.microstructure.ofi_readings`. Before Story 31.3 research used 5 s, the chart
+  replay and `SnapshotStrategy` none. `DummyStrategy` (the paper bot, `bots/strategies/dummy.py`)
+  and its gap handling are decided with the operator in Story 31.9, not here.
+- **One-sided rows differ by reader (not unified).** The ranking's OFI trackers, `OFIStrategy`,
+  `SnapshotStrategy` and `ofi_readings` skip a row with an empty side: it is not fed, so the next
+  two-sided row diffs against the last two-sided one. The chart's per-bar replay feeds it: its
+  contribution is 0 (the level rule above) and it becomes the previous book, so the next two-sided
+  row contributes 0 as well. The reference (`rolling_ofi`) follows the rule as written, the chart's
+  way. Known limit; upgrade path: one shared feed policy in `kernel.indicators`.
+- **Z-score.** `(x - mean) / std` of each reading against the last `zscore_window` readings, one
+  reading per contribution (a baseline adds none and keeps the last z-score), population standard
+  deviation (ddof=0). **Known limit:** undefined (fewer than 2 readings, or all equal) is published
+  as 0.0 by `RollingZScore`, not None; pinned by
+  `verification/tests/test_reference_signals.py::test_the_z_scored_ofi_matches_the_reference_with_zero_when_undefined_pinned`.
+  Upgrade path: publish None and let each reader show a gap.
+
 ### 2.3 Order Book Imbalance (OBI)
 
 `MultiLevelOBI` (`indicators.py`): `sum(bid_sizes[:levels]) / (sum(bid_sizes[:levels]) + sum(ask_sizes[:levels]))`.
 1.0 = all depth on the bid side, 0.5 = balanced, 0.0 = all ask. `ranking_engine` runs
-three instances per instrument at levels 3/5/10.
+three instances per instrument at levels 3/5/10, fed only two-sided books. A reader that feeds a
+one-sided book -- the chart's per-bar replay (`views.chart_series.replay_bucket_samples`), which
+skips nothing -- gets the formula as written: 0.0 or 1.0.
+
+**Known limit (zero total):** when the top `levels` sizes total 0 the value is undefined, but
+`MultiLevelOBI` keeps its previous value (`.initialized` stays as it was), so a stateful reader --
+the ranking's `obi_N`, the chart's per-bar OBI -- publishes the last defined OBI for that second.
+Pinned by `verification/tests/test_reference_signals.py::test_multilevel_obi_keeps_its_previous_value_on_a_zero_total_known_limit`;
+upgrade path: publish None there.
 
 ### 2.4 Footprint / order-book flow (`views/chart_series.py`'s `build_footprint`, was `ml_signals/footprint.py`)
 
@@ -1079,6 +1131,24 @@ Three readers, all over that one fold, so they cannot disagree:
   end_ns, bar_seconds, snapshot_rows_fn)`: the same fold over raw 1 s rows read from Parquet, for
   history older than the store's first bucket. Each dict carries `source: "raw_1s"`.
 
+**The bucket rule (Story 31.3).** Every bucket in `platform/` -- the fold, the forming bar
+(`views.live_candles`), the chart's per-bar replay and footprint, the picker's custom-indicator
+buckets -- is `candles.domain.fold.bucket_start_ms(ts_ms, bar_seconds)`: a width that divides a day
+starts at UTC midnight (epoch-aligned); **1W (604800 s) starts on Monday 00:00 UTC**, like the
+venues' weekly klines and the frontend's week (the epoch, 1970-01-01, was a Thursday, which is
+where 1W buckets started before). Known limit: any other width that does not divide a day would be
+epoch-aligned; none is offered (`TIMEFRAMES` holds day divisors and 1W only). The indicator panes
+(`/api/indicator-series`, `/api/coin/{id}/indicator-values`) accept `bar_seconds` up to 604800, so a
+1W pane is computed on 1W buckets -- before, both routes clamped it silently to 86400. Every raw
+read stays capped at 7 days (`chart_series.MAX_QUERY_SPAN_SECONDS`). **Known limit:** so a 1W
+OFI/OBI pane page holds at most two buckets (the older one computed from only the days inside the
+read), and the picker's custom indicators (CVD, cancel pressure, delta OFI) carry a value only on
+the last 7 1D bars or the last 1W bar of a page (§2.7); upgrade path: stored per-bar aggregates,
+paged like the candle store, instead of raw-row replays. Known limit (research):
+`ReturnSeries.resample` keys buckets by `ts // period` (its invariant: every stamp a multiple of the
+period), so a 604800 s resample there is epoch-(Thursday-)anchored; upgrade path: an anchored grid
+in `ReturnSeries`.
+
 `candles.domain.candle.is_valid_candle` is the shape guard every served candle passes
 (`l <= min(o,c) <= max(o,c) <= h`, `v >= 0`, all finite); a violator is a bug upstream, failed
 loudly as a 500 and counted (`candles.invalid_candle`), never clamped (DATA-07).
@@ -1100,9 +1170,15 @@ A second, independent set of L2-derived features, computed by replaying raw
 
 The chart page's pages are `views.chart_series` read models (Story 24.2): `candle_page` (the
 candle store, then the archive's seconds -> bars fold), `snapshot_series_page`/`price_series_rows`
-(Lines mode: bid, ask, mid, `kernel.indicators.microprice`, and the CVD-weighted price
-`mid + ((buy_volume - sell_volume) / (buy_volume + sell_volume)) * (ask - bid) / 2`),
-`indicator_series_page` (per-bar OFI/OBI replay, microprice, spread) and `indicator_values_page`
+(Lines mode: bid, ask, mid, `kernel.indicators.microprice` -- null when undefined, never the mid
+(Story 31.3) -- and the CVD-weighted price
+`mid + ((buy_volume - sell_volume) / (buy_volume + sell_volume)) * (ask - bid) / 2`, the mid when
+nothing traded),
+`indicator_series_page` (per-bar OFI/OBI replay, microprice, spread: `replay_bucket_samples`,
+the last value per bucket, the §2.2 gap rule and §2.5 bucket rule, OBI's zero-total Known limit of
+§2.3) and `indicator_values_page` (whose custom indicators replay raw seconds/deltas over a window
+capped at `MAX_QUERY_SPAN_SECONDS`, 7 days, back from the page's end: an older bar of a long 1W/1D
+page carries None for them, MEM-01)
 (the picker's indicators over the chart's own candles, via `views.indicator_picker`). Every
 archived second is priced as written -- a crossed second (`bid >= ask`) included: today's gate
 never writes one (`SecondSampler` rejects it as `Crossed`, Story 26.1), so one in the archive predates that
@@ -1115,7 +1191,7 @@ fails the request (500) and counts `views.snapshot_without_top`. Gap rows are th
 `compute_chart_series` (the legacy `/catalog/chart-series` endpoint's backend) reads the window's
 archived 1s snapshots (`views.catalog_reads.query_second_snapshots`, `DydxSecondSnapshot` rows)
 and emits one point per second for `microprice` (`kernel.indicators.microprice`), `spread`
-(best ask - best bid, as written), `imbalance` (aggregate top-10-level book imbalance),
+(`kernel.indicators.spread`: best ask - best bid as written, rounded at the row's precision, §2.1), `imbalance` (aggregate top-10-level book imbalance),
 `mid_imbalance` (mean of levels 2-3), and `bid_depth`/`ask_depth` (top-10-level size sums).
 It does not replay `OrderBookDelta`s or `TradeTick`s. An empty-top second raises
 `EmptyTopOfBook` like the pages above. Entirely a read-time computation — nothing here is
@@ -1162,6 +1238,16 @@ i.e. every column this file defines maps 1:1 to a field `ranking_engine` publish
 computation. The same module also holds the Technicals tab's per-coin
 values (`technicals_values`, Story 24.2): each column's latest value through the chart's own
 indicator dispatch over the chart's own candles -- no indicator or ranking math of its own.
+
+**Units and names (Story 31.3).** Values are published and shown in their raw units -- nothing
+normalises them, server- or client-side: `cvd` and `volume_delta` are base-token units (buy minus
+sell size), `spread` and `microprice_lean` price units (quote per base token), `price` is the mid. The
+three volatilities carry labels that name their window and input: `volatility` is **"Vol 24h σ
+(trade closes)"**, `volatility_score` **"Vol 1h σ (mids)"**; `volatility_fast` (the coin page only,
+last 300 mids) is the third (§3.2). The Docs page used to say CVD/spread were converted by
+`usdFromTokens`/`bpsFromPriceUnits` helpers that never existed;
+`data_api/tests/test_frontend_named_helpers.py` now fails any helper the frontend names as code
+without defining it.
 
 The page's pinned identity columns are not part of `RANKING_COLS` and not in the mirror: Rank
 (the row's position in the message), Symbol (the rank entry's `symbol`), Exchange (`venue`, with
@@ -1294,6 +1380,87 @@ reaches research only over HTTP (§2.9).
   (`kernel.candle_patterns.CandlePatternSet`); forward returns and the hit rate
   (`research.domain.events.forward_returns`/`hit_rate`).
 
+**Known limits pinned by Story 31.3** (each held by a test in
+`verification/tests/test_reference_series.py` or the named one, against the reference of §2.13):
+
+- `microstructure.microprice_edge` reads a predictor within 4 ulps of the mid (`_ROUNDING_ULPS`) as
+  0 (flat): with equal top sizes the two kernel floats round apart, but a genuine lean that small
+  (2.5e-12 on a 13 437 mid) reads flat too
+  (`test_microprice_edge_reads_a_lean_within_four_ulps_of_the_mid_as_flat_known_limit`). Upgrade
+  path: judge the lean on the exact decimals.
+- `aligned.oi_changes` makes an open interest of 0 or less NaN, so a real drop *to* 0 (a -100 %
+  change) is undefined too, not only the change *from* 0
+  (`test_oi_changes_read_a_move_to_zero_as_undefined_known_limit`,
+  `research/tests/test_aligned.py::test_oi_changes_are_relative_and_undefined_from_zero`).
+- `correlation._pearson` treats a side as constant when its std is at most `1e-12 * max(1, |mean|)`;
+  the reference treats only an *exactly* constant side as undefined. A near-constant but
+  unequal series (std under that bound) is NaN in production and defined in the reference; the
+  comparisons use exact constants only.
+- `kernel.indicators.depth_within_bps` counts a level within `1e-9` relative of an edge as on it
+  (`_BPS_EDGE_SLACK`), so a float distance a few ulps past an exact edge does not flap. The
+  reference is exact (no slack); a disagreement explained only by levels inside that slack is
+  counted as its own class, EDGE_SLACK (§2.13), anything else DIFFERENT
+  (`verification/tests/test_reference_signals.py::test_a_level_exactly_on_an_edge_differs_only_by_the_pinned_edge_slack`).
+  NaN beyond the deepest stored level is the rule (the snapshot does not say whether the book
+  ended there).
+
+### 2.13 Reference signals (Story 31.3)
+
+`verification/domain/reference_signals.py` re-implements every derived value above from this
+dictionary's text only, in exact `Decimal` (floats only for the z-score, Pearson and lead-lag),
+importing the standard library only (`tests/test_boundaries.py::test_the_reference_signals_import_the_standard_library_only`),
+and decodes the stored rows itself (§1.7), so the two decoders are compared too.
+`verification/tests/test_reference_signals.py` and `test_reference_series.py` compare every
+production function with it on seeded generators (`verification/tests/signal_cases.py`: 0-50
+levels, empty sides, zero tops, crossed books, precisions 0..8, gaps under/at/over 3 s, duplicate
+seconds, week boundaries, NaN gaps), on 300 real rows per soak instrument
+(`verification/tests/fixtures/snapshots/`, cut by `python3 -m verification.tools.cut_snapshot_fixtures`)
+and on hand-computed golden cases. Each comparator has a planted defect it must catch (OBI with bid
+and ask swapped, OFI one level short, a fold taking the first close, a ddof-swapped reference, a pct
+taking the latest point as its base, a picker fed opens).
+
+Verdict classes (`verification/domain/signal_compare.py`):
+
+| Class | Meaning | Pass? |
+|---|---|---|
+| `EXACT` | the production float is the double nearest the reference value | yes |
+| `FLOAT_NOISE` | a value exact at known places quantizes (half-even) to the reference there, but is not its nearest double (`85891.90000000001`) -- reported, never absorbed | yes |
+| `WITHIN_TOL` | a division/statistical output within the relative tolerance, not the nearest double | yes |
+| `BOTH_UNDEFINED` | both None/NaN (an empty side, a zero total, too few points) | yes |
+| `EDGE_SLACK` | a depth sum that differs from the exact reference only through levels within production's 1e-9 relative edge slack (§2.12's pinned Known limit) | yes, counted |
+| `WITHIN_ULPS` | the microprice lean (`microprice - mid`, a cancelling difference) off the reference by more than 1e-9 of itself but within 8 ulps of the mid (`signal_compare.LEAN_ULPS`) | yes, counted |
+| `DIFFERENT` | anything else | **no** |
+| `UNDEFINED_MISMATCH` | one side defined, the other not | **no** |
+
+Tolerances, never widened to make a case pass:
+
+| Values | Rule |
+|---|---|
+| `mid` | exact at p+1 places |
+| `spread`, OHLC | exact at p places |
+| CVD, `volume_delta`, depth sums, count OFI, candle volume, `trade_flow` CVD | exact at s places |
+| bucket starts, `seconds_observed`, lags, decoded integers | equal |
+| microprice, OBI, `avg_trade_size`, pct changes, basis, `funding_per_hour`, USD-notional OFI, z-score, the three stdevs, returns, Pearson, rolling Pearson, lead-lag, spread in ticks/bps, the picker's SMA/EMA | relative 1e-9, absolute 1e-12 |
+| `microprice_lean` | as above, else within 8 ulps of the mid (WITHIN_ULPS) |
+| an infinite production value | always DIFFERENT; a float reference is read as its shortest repr |
+
+Why these bounds (`verification/domain/signal_compare.py` states the same budget): each input is
+the float64 decode of an exact stored decimal (0.5 ulp, 1.1e-16 relative), and a sum or mean over
+at most 3600 terms adds under ~1e-12 relative, so a ratio of products and sums (microprice, OBI,
+USD OFI, z-score) lands within ~1e-12: 1e-9 is a 1000x margin. A *difference of two decoded prices*
+over a price (a return, a pct change, a stdev of returns) is the case the relative bound does not
+cover: its absolute error is ~2 decode errors (2.2e-16) whatever the move, so relative to a small
+move it grows as price/move -- a one-unit move on the soak's largest stored price, BTCUSDT linear at
+8.4e6 units (p=2), is a 1.2e-7 return carrying up to ~1.9e-9 relative, past 1e-9, but only
+~2.2e-16 absolute (~2.2e-14 as a pct). The absolute floor 1e-12 covers that with a 100x margin and
+a reference of exactly 0. A basis in bps of two nearly equal prices would exceed the floor
+(2.2e-12) and is judged relative only. The microprice lean has its own class (WITHIN_ULPS) because
+both operands are of the price's magnitude. The one place a decode error broke these bounds -- a
+spread divided into ticks or bps (`research.application.microstructure.spread_frame`, 1.03e-9 on a
+one-tick spread at 8.578755) -- was fixed at its source (`kernel.indicators.spread` rounds, §2.1),
+not tolerated. Run with `pytest -s` to print every signal's counts; the numbers are
+in `docs/VERIFICATION_REPORT.md`.
+
 ---
 
 ## 3. Ranking engine (`platform/ranking/`, the `ranking_engine` service)
@@ -1333,8 +1500,9 @@ time / window contents / float accumulation order.
   bounded at 45 s as a whole (`RankingConfig.volume_fetch_timeout_s`), on top of the kernel's
   per-socket-operation timeout.
 - **Parquet catalog** — read **once per instrument** (a lazy backfill of the in-memory 25 h
-  price series, `ranking/infrastructure/catalog_prices.py` over `kernel.catalog_files`, falling
-  back to mark prices when the window holds no trade), never re-read; `price`/`pct_1h`/`pct_24h`/
+  price series of trade closes, `ranking/infrastructure/catalog_prices.py` over
+  `kernel.catalog_files`; a window with no trade is an empty series -- Story 31.3 deleted the
+  mark-price fallback), never re-read; `price`/`pct_1h`/`pct_24h`/
   `volatility` come from that series every minute.
 - **`ranking:control`** — a Redis control channel that switches the active ranking
   mode between `"volume"` (default) and `"volatility"`. Global and last-write-wins.
@@ -1355,24 +1523,25 @@ time / window contents / float accumulation order.
 `RankingBoard.ingest` (`ranking/domain/board.py`) feeds every incoming snapshot into the
 instrument's `InstrumentMetrics` -- long-lived per-instrument indicator instances:
 
-- **`VolatilityTracker`** (`ranking/domain/volatility.py`) — a *fourth*, deliberately separate
-  volatility computation from the other three in this codebase (the module's own
-  docstring calls this out explicitly, `volatility.py`): cross-sectional stdev
-  of consecutive mid-price percentage returns over an age-based (not fixed-length)
-  rolling window, default 3600s. Age-based eviction specifically because a
+- **`VolatilityTracker`** (`ranking/domain/volatility.py`) → `volatility_score`, labelled **"Vol 1h
+  σ (mids)"**: the sample standard deviation (ddof=1, `statistics.stdev`) of consecutive mid-price
+  percentage returns over an age-based (not fixed-length) window -- every mid with
+  `ts_event >= latest - 3600 s`, both ends kept -- None under two returns. Age-based eviction specifically because a
   fixed-length deque would silently shrink its effective time span if the snapshot
   rate varies.
 - **`MultiLevelOFI(levels=10, window=50, zscore_window=3600)`** → `ofi_10_z`
 - **`MultiLevelOFI(levels=n, window=300)` for n in (3, 5, 10)** → `ofi_3`, `ofi_5`,
   `ofi_10` (raw, unscored)
 - **`MultiLevelOBI(levels=n)` for n in (3, 5, 10)** → `obi_3`, `obi_5`, `obi_10`
-- A 300-entry rolling window of snapshot dicts (`DydxSecondSnapshot.to_dict`) per instrument (`InstrumentMetrics.rolling`) —
-  feeds `trade_aggregates` (§2.1) for CVD/`avg_trade_size`, and a fast 300-tick
-  `statistics.stdev` of mid-price returns (`volatility_fast`) — a *fifth*, separate
-  volatility number, distinct from both `VolatilityTracker`'s and the catalog-derived
-  one, by explicit design (`board.py`).
-- A reconnect-gap guard (`OFI_GAP_NS = 3s`) clears OFI trackers' previous-tick state
-  after a gap, so a stale pre-gap price never gets diffed against a fresh one.
+- A 300-entry rolling window of decoded snapshot dicts (`DydxSecondSnapshot.as_floats()`) per instrument (`InstrumentMetrics.rolling`) —
+  feeds `trade_aggregates` (§2.1) for CVD/`avg_trade_size`, and `volatility_fast`: the sample
+  standard deviation (ddof=1) of the pct returns of the last 300 mids. Only a two-sided book with a
+  positive mid enters the window or any tracker.
+- **The three volatilities**, named by what they measure (Story 31.3): `volatility` = 24 h of trade
+  closes, ddof=0 (§3.3); `volatility_score` = 1 h of mids, ddof=1; `volatility_fast` = the last 300
+  mids, ddof=1.
+- The reconnect-gap guard is the one rule of §2.2 (`kernel.indicators.OFI_GAP_NS` = 3 s, strict `>`
+  on `ts_event`), so a stale pre-gap price never gets diffed against a fresh one.
 
 ### 3.3 The published `rankings:live` message
 
@@ -1396,11 +1565,27 @@ dropped, `RankingBoard.age_out`, Story 25.2). Each row combines:
 - Live-tick fields from §3.2's indicators (`InstrumentMetrics.fast_metrics`):
   `ofi_10_z`, `ofi_3/5/10`, `obi_3/5/10`, `microprice`, `microprice_lean`
   (`microprice - mid`), `spread`, `cvd` (`buy_vol - sell_vol` from the rolling
-  window), `volume_delta` (`buy_volume - sell_volume` over the last 60 snapshots),
-  `buy_count`/`sell_count`, `avg_trade_size`, `volatility_fast`, `price` (mid).
+  window; None while the window holds no snapshot, never 0), `volume_delta` (`buy_volume -
+  sell_volume` over the last 60 snapshots; None likewise), `buy_count`/`sell_count` (the empty
+  sums, 0), `avg_trade_size` (None at zero trades), `volatility_fast`, `price` (the live mid, or
+  None with no two-sided book yet -- Story 31.3 deleted the fallback to the slow loop's trade
+  close, a different quantity).
 - Slow fields folded in from the last slow-loop pass (at most 3 minutes old, else null): `pct_1h`,
   `pct_24h`, `pct_1w`, `pct_1m`, `volatility` (the formula `ranking/domain/metrics.py`'s
-  `price_stats_from_series`, the only one in `platform/`).
+  `price_stats_from_series`, the only one in `platform/`), all over trade closes:
+  - `pct_1h`/`pct_24h` = `(latest - base) / base * 100`, `base` the first close at or after
+    `latest_ts - H`; None when the series does not reach back to that cutoff, and (Story 31.3)
+    when `base` lies more than `PCT_MAX_SHORTFALL_NS` = 300 s past it -- a gap at the cutoff would
+    otherwise shorten the horizon silently. **Known limit:** a quiet market with no trade within
+    300 s after the cutoff (an illiquid spot pair) reads None although the price at the cutoff is
+    known; upgrade path: an as-of base, the last close at or before the cutoff, bounded.
+  - `pct_1w`/`pct_1m` = `pct_change_from(price, base)`, `base` the newest `metrics.db` price at or
+    before `now - 7/30 days` and within 1 h of it (`price_near_days_ago`); None otherwise or at a
+    base of 0.
+  - `volatility`, labelled **"Vol 24h σ (trade closes)"**: population standard deviation (ddof=0)
+    of consecutive close pct returns over the closes within 24 h of the latest (the series is
+    kept 25 h as a backfill margin; Story 31.3 cut the stdev to the 24 h its label names); None
+    under two returns.
 - `volume24h` and `volatility_score` — always both present regardless of active mode.
   `volume24h` is the venue's own USD 24 h volume (Story 22.10) and is `null` when that
   venue has no current volume for the instrument; such a row is left out of volume mode
@@ -1413,7 +1598,10 @@ dropped, `RankingBoard.age_out`, Story 25.2). Each row combines:
   instruments purely by 24-hour USD volume**; switching mode re-sorts the identical
   row set by the cross-sectional volatility stdev instead. No other field in the row
   affects sort order — OFI/OBI/CVD/etc. are informational columns on the ranked row,
-  not ranking inputs themselves.
+  not ranking inputs themselves. **Known limit:** volatility mode sorts a row whose
+  `volatility_score` is None (under two returns) as 0, i.e. last, while publishing None; pinned by
+  `ranking/tests/test_board.py::test_volatility_mode_sorts_an_unscored_row_as_zero_known_limit`.
+  Upgrade path: sort None rows after every scored row explicitly.
 
 Published to Redis channel `rankings:live` whenever a representative subset of fields
 changes (`RankingsPublisher._ranks_key`: instrument_id, rank, `ofi_10_z`, `spread`,
@@ -1427,7 +1615,11 @@ Every `db_write_interval_seconds` (60s), `RankingEngine.slow_loop_once` merges t
 `SqliteMetricsStore`, the store's only writer; other processes read it through
 `ranking.application.queries` (`history`/`nearest`, read-only connections), columns: `price`, `pct_1h`, `pct_24h`, `pct_1w`, `pct_1m`,
 `volatility`, `ofi`, `microprice`, `spread`, `rank`, `volume24h` — a 31-day rolling
-history used by the dashboard's per-coin history page. Note this stored `ofi` column
+history used by the dashboard's per-coin history page. Its `price` column is the slow loop's
+latest trade close (the `pct_1w`/`pct_1m` base), not the rank entry's live mid. `nearest(ts)`
+(`/api/metrics/nearest/{symbol}`) returns the row closest to `ts` only within
+`NEAREST_TOLERANCE_S` = 120 s (two write intervals); a farther row is another time, so the answer is
+None -- as for no rows -- never a stale row (Story 31.3). Note this stored `ofi` column
 is the live raw `ofi_5` (`InstrumentMetrics.book_metrics`, the same tracker the rank entry
 reads -- SSOT-02), not the z-scored `ofi_10_z` the live ranking table leads with.
 
@@ -1492,7 +1684,7 @@ can find and add a coin without looking its id up elsewhere.
 | `DydxSecondSnapshot.close_price` (25h lookback; `TradeTick` pre-cutover) | `ranking.domain.metrics.price_stats_from_series()` → `pct_change_1h/24h`, catalog `volatility` | `pct_1h`, `pct_24h`, `volatility` | over the in-memory `PriceSeriesStore` (fed live, backfilled once per instrument from the catalog), refreshed every 60s by the ranking slow loop. `pct_1w`/`pct_1m` come from `metrics_store`'s persisted prices (`price_near_days_ago`), `None` until 7/30 days of history exist |
 | dYdX indexer `volume24H`, Bybit v5 tickers `turnover24h` (linear; spot USDT/USDC-quoted only), Hyperliquid `metaAndAssetCtxs` `dayNtlVlm` (independent polls in `ranking/infrastructure/volume_*`) | — (used as-is, USD) | `volume24h` | **this is the sort key when mode = `"volume"` (default)**; an instrument with no volume is absent from that mode and counted at `ranking_engine.volume24h` |
 | `OrderBookDeltas` | `book_features.py`, `chart_data.py`, `footprint.py` | *not present* | chart-page-only; never reaches `ranking_engine` |
-| `MarkPriceUpdate` / `IndexPriceUpdate` | — | *not present* | `ranking` backfills prices from marks; research notebook frames (`CatalogFrames.mark_index`, Story 27.1) |
+| `MarkPriceUpdate` / `IndexPriceUpdate` | — | *not present* | research notebook frames only (`CatalogFrames.mark_index`, Story 27.1); `ranking` no longer backfills prices from marks (Story 31.3) |
 | `FundingRateUpdate` | — | *not present* | research notebook frames only (`CatalogFrames.funding`, Story 27.1) |
 | `InstrumentStatus` | — | *not present* | stored, no downstream reader found |
 | `OpenInterest` (stored) | — | *not present* | research notebook frames only (`CatalogFrames.open_interest`, Story 27.1) — only the *parallel* `volume24H`-based liquidity classification (not this field) affects anything live |

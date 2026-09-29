@@ -24,6 +24,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from kernel.clocks import NS_PER_S
+from kernel.indicators import OFI_GAP_NS
 from kernel.indicators import MultiLevelOFI
 from kernel.indicators import microprice
 from kernel.indicators import mid_price
@@ -35,7 +36,6 @@ from research.application import microstructure
 from research.application.frames import OBI_LEVELS
 from research.application.frames import CatalogFrames
 from research.application.ports import window_ns
-from research.strategies.ofi_strategy import MAX_GAP_NS
 from research.strategies.ofi_strategy import OFIStrategyConfig
 from research.tests.fixture_catalog import CROSSED_SECOND
 from research.tests.fixture_catalog import DATA_START_NS
@@ -147,7 +147,7 @@ def _strategy_replay(fixture: FixturePaths, iid: str) -> list[float]:
     for snapshot in frames.objects(DydxSecondSnapshot, iid, start=start, end=end):
         if not snapshot.bid_prices or not snapshot.ask_prices:
             continue
-        reset = last_ts is not None and snapshot.ts_event - last_ts > MAX_GAP_NS
+        reset = last_ts is not None and snapshot.ts_event - last_ts > OFI_GAP_NS
         if reset:
             ofi.clear_prev_state()
         first = last_ts is None

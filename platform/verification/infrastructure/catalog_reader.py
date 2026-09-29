@@ -22,7 +22,8 @@ coverage record (`<catalog>/../coverage/<venue>.jsonl`) and the archive-gap mark
 
 Layout read (Nautilus's own, written by `ParquetDataCatalog.write_data`):
 `<catalog>/data/trade_tick/<iid>/*.parquet` (columns `trade_id`, `ts_event` read) and
-`<catalog>/data/custom_dydx_second_snapshot/<iid>/*.parquet` (`ts_event` read). A file or row
+`<catalog>/data/custom_dydx_second_snapshot/<iid>/*.parquet` (`ts_event` read; every column for
+Story 31.3's fixture cutter, `read_snapshot_rows`). A file or row
 group is skipped only by its own `ts_event` statistics lying wholly outside the window --
 independent of the file name, which spans `ts_init`; one without statistics is read.
 """
@@ -85,6 +86,37 @@ def read_day(
         fields = {"trade_id": pa.string(), _TS_EVENT: pa.uint64()}
         return pa.table({name: pa.array([], fields[name]) for name in columns})
     return pa.concat_tables(tables, promote_options="permissive")
+
+
+def read_snapshot_rows(
+    catalog: Path, instrument_id: str, window: tuple[int, int]
+) -> list[dict[str, object]]:
+    """
+    Every stored second-snapshot row of one instrument with `ts_event` in `window`, all columns, as
+    plain Python values (the stored integers untouched), in `ts_event` order (Story 31.3's
+    fixture cutter).
+    """
+    files = sorted((catalog / "data" / SNAPSHOT_DIR / instrument_id).glob("*.parquet"))
+    rows: list[dict[str, object]] = []
+    for path in files:
+        columns = pq.read_schema(path).names
+        table = _read_window(path, columns, *window)
+        if table is not None:
+            rows += table.to_pylist()
+    return sorted(rows, key=lambda row: int(str(row[_TS_EVENT])))
+
+
+def first_snapshot_ts(catalog: Path, instrument_id: str) -> int | None:
+    """
+    Return the earliest stored second-snapshot `ts_event` of an instrument (None without a file): the
+    minimum of the first file only (files are named by their `ts_init` span, so the name-sorted
+    first file holds the earliest rows; one file's column is read, never the whole history).
+    """
+    files = sorted((catalog / "data" / SNAPSHOT_DIR / instrument_id).glob("*.parquet"))
+    if not files:
+        return None
+    stamps = pq.read_table(files[0], columns=[_TS_EVENT])[_TS_EVENT].to_numpy()
+    return int(stamps.min()) if len(stamps) else None
 
 
 class ArrowArchivedTrades:

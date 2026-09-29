@@ -23,6 +23,7 @@ from kernel.indicators import mid_price
 from kernel.indicators import spread
 from kernel.indicators import trade_aggregates
 from kernel.indicators import volume_delta
+from kernel.tests.snapshot_factory import make_snapshot
 
 
 def test_uptrend_converges_above_half() -> None:
@@ -162,6 +163,21 @@ def _snap(
 
 def test_spread_is_ask_minus_bid() -> None:
     assert spread(_snap(bid_prices=[100.0], ask_prices=[101.0])) == 1.0
+
+
+def test_spread_of_a_decoded_row_is_the_double_nearest_the_exact_difference() -> None:
+    """Story 31.3: the float difference cancels (1.0000000010279564e-06); the row's precision fixes it."""
+    row = make_snapshot(
+        bid_prices=["8.578755"],
+        bid_sizes=[1],
+        ask_prices=["8.578756"],
+        ask_sizes=[1],
+        price_precision=6,
+        size_precision=0,
+    )
+    floats = row.as_floats()
+    assert floats["ask_prices"][0] - floats["bid_prices"][0] != 1e-06  # the cancellation
+    assert spread(floats) == 1e-06
 
 
 def test_spread_none_on_thin_book() -> None:

@@ -26,6 +26,7 @@ from pathlib import Path
 
 import pytest
 
+from ranking.infrastructure.metrics_store import NEAREST_TOLERANCE_S
 from ranking.infrastructure.metrics_store import SqliteMetricsStore
 from ranking.infrastructure.metrics_store import _read_only
 from ranking.infrastructure.metrics_store import read_history
@@ -206,6 +207,28 @@ def test_nearest_returns_closest_row(tmp_path: Path) -> None:
     assert (earlier["rank"], later["rank"]) == (2, 1)
 
 
+def test_nearest_is_bounded_by_the_tolerance(tmp_path: Path) -> None:
+    """Story 31.3: a row more than NEAREST_TOLERANCE_S away is another time -- None, as for none."""
+    path = str(tmp_path / "metrics.db")
+    store = _store(path)
+    edge_ns = NEAREST_TOLERANCE_S * 1_000_000_000
+    store.write([_row(_NOW, rank=1)])
+    assert store.nearest("BTC-USD-PERP.DYDX", _NOW + edge_ns) is not None
+    assert store.nearest("BTC-USD-PERP.DYDX", _NOW - edge_ns) is not None
+    assert store.nearest("BTC-USD-PERP.DYDX", _NOW + edge_ns + 1) is None
+    assert read_nearest(path, "BTC-USD-PERP.DYDX", _NOW - edge_ns - 1) is None
+
+
+def test_nearest_at_the_int64_edges_is_none_not_an_overflow(tmp_path: Path) -> None:
+    """Review P12: `ts +- tolerance` is clamped to int64, SQLite's only integer binding."""
+    store = _store(str(tmp_path / "metrics.db"))
+    store.write([_row(_NOW, rank=1)])
+    assert store.nearest("BTC-USD-PERP.DYDX", 2**63 - 1) is None
+    assert store.nearest("BTC-USD-PERP.DYDX", -(2**63)) is None
+    assert store.nearest("BTC-USD-PERP.DYDX", 2**64) is None
+    assert store.nearest("BTC-USD-PERP.DYDX", -(2**64)) is None
+
+
 def test_nearest_returns_none_for_unknown_instrument(tmp_path: Path) -> None:
     path = str(tmp_path / "metrics.db")
     store = _store(path)
@@ -249,16 +272,18 @@ def test_price_near_days_ago_returns_price_at_or_before_target_per_instrument(
     path = str(tmp_path / "metrics.db")
     store = _store(path)
     week = 7 * _DAY_NS
+    # The store reads its own clock: stamp from *now*, not the import-time `_NOW` -- a suite that
+    # reaches this test more than 60 s after collection would otherwise move the target past the
+    # "after target" row (Story 31.3's longer comparator tests made that happen).
+    now = time.time_ns()
     store.write(
         [
-            _row(_NOW - week - 60 * 1_000_000_000, "BTC-USD-PERP.DYDX", price=90.0),
+            _row(now - week - 60 * 1_000_000_000, "BTC-USD-PERP.DYDX", price=90.0),
             _row(
-                _NOW - week - 10 * 1_000_000_000, "BTC-USD-PERP.DYDX", price=100.0
+                now - week - 10 * 1_000_000_000, "BTC-USD-PERP.DYDX", price=100.0
             ),  # closest before
-            _row(
-                _NOW - week + 60 * 1_000_000_000, "BTC-USD-PERP.DYDX", price=110.0
-            ),  # after target
-            _row(_NOW - week - 5 * 1_000_000_000, "ETH-USD-PERP.DYDX", price=7.0),
+            _row(now - week + 60 * 1_000_000_000, "BTC-USD-PERP.DYDX", price=110.0),  # after target
+            _row(now - week - 5 * 1_000_000_000, "ETH-USD-PERP.DYDX", price=7.0),
         ],
     )
 

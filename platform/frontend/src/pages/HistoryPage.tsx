@@ -18,7 +18,7 @@ const METRIC_COLUMNS: { key: MetricColumnKey; label: string }[] = [
   { key: "pct_24h", label: "24h %" },
   { key: "pct_1w", label: "1w %" },
   { key: "pct_1m", label: "1m %" },
-  { key: "volatility", label: "Volatility" },
+  { key: "volatility", label: "Vol 24h σ (trade closes)" },
   { key: "ofi", label: "OFI" },
   { key: "microprice", label: "Microprice" },
   { key: "spread", label: "Spread" },

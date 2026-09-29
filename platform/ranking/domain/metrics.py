@@ -24,13 +24,32 @@ them (SSOT-02); `platform/tests/test_boundaries.py` fails a second definition.
 import numpy as np
 
 
+_NS_PER_HOUR = 3_600 * 1_000_000_000
+
+# The most the base point of `pct_change_1h`/`pct_change_24h` may lie past its cutoff (Story 31.3):
+# a gap straddling the cutoff would otherwise make the first point after it the base, silently
+# shortening the horizon (a "1h" change over 40 minutes). 300 s: five slow-loop cycles, far above
+# the 1 s cadence of a trading instrument, well under 1h; past it the change is None, never shorter.
+# Known limit: a quiet market with no trade within 300 s after the cutoff (an illiquid spot pair)
+# gives None although the price at the cutoff is known -- it is the last close before it. Upgrade
+# path: an as-of base, the last close at or before the cutoff, bounded by a staleness limit.
+PCT_MAX_SHORTFALL_NS = 300 * 1_000_000_000
+
+# `volatility` is the 24h figure its label names ("Vol 24h sigma (trade closes)"): the series is kept
+# for 25h (`price_series.PRICE_LOOKBACK_HOURS`, the backfill margin), so the window is cut here.
+VOLATILITY_WINDOW_NS = 24 * _NS_PER_HOUR
+
+
 def price_stats_from_series(series: list[tuple[int, float]]) -> dict:
     """
     Latest price, pct change over the last 1h/24h, and return volatility (stdev), computed from an
-    already-fetched ascending (ts_event, price) series.
+    already-fetched ascending (ts_event, price) series of trade closes.
 
     `pct_change_1h`/`pct_change_24h` are None when the series doesn't yet span that long -- no
-    extrapolation from partial history.
+    extrapolation from partial history -- and when the first point at or after the cutoff lies
+    more than `PCT_MAX_SHORTFALL_NS` past it (a gap there would shorten the horizon).
+    `volatility` is the population standard deviation (ddof=0) of consecutive pct returns over the
+    points within `VOLATILITY_WINDOW_NS` (24h) of the latest; None under two returns.
     """
     if not series:
         return {"price": None, "pct_change_1h": None, "pct_change_24h": None, "volatility": None}
@@ -39,14 +58,18 @@ def price_stats_from_series(series: list[tuple[int, float]]) -> dict:
     px = np.array([p for _, p in series])
     latest_ts, latest_px = ts[-1], px[-1]
 
-    def _pct_change(hours: float) -> float | None:
-        cutoff = latest_ts - int(hours * 3_600 * 1e9)
+    def _pct_change(hours: int) -> float | None:
+        cutoff = latest_ts - hours * _NS_PER_HOUR
         if ts[0] > cutoff:
             return None  # not enough history collected yet
-        base_px = px[np.searchsorted(ts, cutoff)]
+        base = np.searchsorted(ts, cutoff)
+        if ts[base] - cutoff > PCT_MAX_SHORTFALL_NS:
+            return None  # a gap at the cutoff: the horizon would be shorter than named
+        base_px = px[base]
         return float((latest_px - base_px) / base_px * 100.0)
 
-    returns = np.diff(px) / px[:-1]
+    recent = px[ts >= latest_ts - VOLATILITY_WINDOW_NS]
+    returns = np.diff(recent) / recent[:-1]
     volatility = float(np.std(returns)) if len(returns) > 1 else None
 
     return {

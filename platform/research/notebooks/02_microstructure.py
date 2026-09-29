@@ -171,7 +171,7 @@ totals.show()
 # (`kernel.indicators.MultiLevelOBI`, `obi_<N>` of `CatalogFrames.seconds`); order-flow imbalance
 # (`kernel.indicators.MultiLevelOFI`) replayed over consecutive seconds exactly as
 # `OFIStrategy.on_data` does (its `ofi_levels`/`ofi_window`, USD notional, every two-sided row,
-# the previous book cleared after a gap over `MAX_GAP_NS`; `microstructure.ofi_replay`); and the
+# the previous book cleared after a gap over `OFI_GAP_NS`; `microstructure.ofi_replay`); and the
 # z-scores of both over the strategy's `ofi_zscore_window` (`kernel.indicators.RollingZScore`, the
 # formula `MultiLevelOFI` itself uses). The dashed lines are the strategy's `±ofi_threshold`; the
 # shaded span is its `warmup_seconds` from the first two-sided row, when it evaluates nothing

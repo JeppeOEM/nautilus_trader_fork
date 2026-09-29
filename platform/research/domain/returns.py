@@ -177,6 +177,10 @@ class ReturnSeries:
             )
         if len(self) == 0:
             return ReturnSeries(np.empty(0), np.empty(0, dtype=np.int64), period_seconds)
+        # Known limit (DATA_DICTIONARY §2.5, audit D-89): buckets are `ts // period` (the series'
+        # invariant: every stamp a multiple of its period), so a 604800 s resample starts weeks on
+        # the epoch's Thursday, not Monday like the candles. Upgrade path: an anchored grid
+        # (`candles.domain.fold.bucket_start_ms`'s rule) with the invariant stated per anchor.
         keys = self.ts_ns // new_ns
         starts = np.flatnonzero(np.r_[True, np.diff(keys) != 0])
         compounded = np.multiply.reduceat(1.0 + self.values, starts) - 1.0

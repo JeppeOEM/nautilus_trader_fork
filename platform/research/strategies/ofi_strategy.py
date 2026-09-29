@@ -28,6 +28,7 @@ Exits: OFI crosses zero back (`exit_on_zero`), or trend flips against the positi
 from collections import deque
 from decimal import Decimal
 
+from kernel.indicators import OFI_GAP_NS
 from kernel.indicators import MultiLevelOFI
 from kernel.second_snapshot import DydxSecondSnapshot
 
@@ -43,10 +44,6 @@ from nautilus_trader.trading.strategy import Strategy
 
 _NS_PER_S = 1_000_000_000
 _MINUTE_NS = 60 * _NS_PER_S
-# A hole in the 1s feed (collector restart / WS resubscribe) makes the next OFI delta compare
-# against a stale book, so treat it as a fresh start rather than a huge fake imbalance. Public
-# because `research.application.microstructure.ofi_replay` mirrors this replay (Story 27.3).
-MAX_GAP_NS = 5 * _NS_PER_S
 
 
 class OFIStrategyConfig(StrategyConfig, frozen=True):
@@ -132,7 +129,10 @@ class OFIStrategy(Strategy):
         if not isinstance(data, DydxSecondSnapshot) or not data.bid_prices or not data.ask_prices:
             return
         ts = data.ts_event
-        if self._last_ts is not None and ts - self._last_ts > MAX_GAP_NS:
+        # A hole in the 1s feed (collector restart / WS resubscribe) makes the next OFI delta
+        # compare against a stale book: clear it first, at the one platform-wide threshold
+        # (`kernel.indicators.OFI_GAP_NS`, 3 s since Story 31.3 -- this strategy used 5 s).
+        if self._last_ts is not None and ts - self._last_ts > OFI_GAP_NS:
             self._ofi.clear_prev_state()
         self._last_ts = ts
         self._first_ts = self._first_ts or ts

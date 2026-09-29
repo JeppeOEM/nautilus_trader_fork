@@ -60,6 +60,7 @@ from typing import Any
 from typing import Literal
 from typing import Protocol
 
+from candles.domain.fold import bucket_start_ms
 from kernel.candle_patterns import CandlePattern
 from kernel.candle_patterns import PatternName
 from kernel.candle_patterns import Thresholds
@@ -498,6 +499,14 @@ def custom_catalog_json() -> dict[str, Any]:
     }
 
 
+def _bucket_ns(ts_ns: int, bar_seconds: int) -> int:
+    """
+    Return the start (ns) of the bucket a stamp falls in, keyed like the candles' `t * 1_000_000`:
+    `candles.domain.fold.bucket_start_ms`, the one bucket rule (a 1W bucket starts on Monday).
+    """
+    return bucket_start_ms(ts_ns // 1_000_000, bar_seconds) * 1_000_000
+
+
 def _second_snapshots(window: ReplayWindow) -> list[dict]:
     """Fetch this window's DydxSecondSnapshot rows from the catalog, as plain dicts."""
     snapshots = query_second_snapshots(
@@ -548,10 +557,9 @@ def _cvd_replay(
     """
     if window.start_ms is None or window.end_ms is None:
         return {"value": [None] * len(candles)}
-    bar_ns = window.bar_seconds * 1_000_000_000
     buckets: dict[int, list[dict]] = defaultdict(list)
     for row in _second_snapshots(window):
-        buckets[(row["ts_event"] // bar_ns) * bar_ns].append(row)
+        buckets[_bucket_ns(row["ts_event"], window.bar_seconds)].append(row)
     running_total = 0.0
     values: list[float | None] = []
     for candle in candles:
@@ -632,7 +640,6 @@ def _cancel_pressure_replay(
 
     book = OrderBook(InstrumentId.from_str(window.instrument_id), BookType.L2_MBP)
     tracker = CancellationTracker(window=params["window"])
-    bar_ns = window.bar_seconds * 1_000_000_000
     # None value = explicit reset (a CLEAR happened in this bucket); absent key = no event at
     # all in this bucket (an ordinary gap, still eligible for bounded forward-fill).
     bucket_samples: dict[int, tuple[float, float] | None] = {}
@@ -643,7 +650,7 @@ def _cancel_pressure_replay(
         best_ask_p = best_ask.as_double() if best_ask else None
         tracker.update(delta, best_bid_p, best_ask_p)
         book.apply_delta(delta)
-        bucket = (delta.ts_event // bar_ns) * bar_ns
+        bucket = _bucket_ns(delta.ts_event, window.bar_seconds)
         if delta.action == BookAction.CLEAR:
             bucket_samples[bucket] = None
             continue
@@ -694,7 +701,6 @@ def _ofi_bucket_samples(window: ReplayWindow, ofi_window: int) -> dict[int, floa
 
     book = OrderBook(InstrumentId.from_str(window.instrument_id), BookType.L2_MBP)
     ofi = OrderFlowImbalance(window=ofi_window)
-    bar_ns = window.bar_seconds * 1_000_000_000
     bucket_samples: dict[int, float] = {}
     for delta in _order_book_deltas(window):
         book.apply_delta(delta)
@@ -710,7 +716,7 @@ def _ofi_bucket_samples(window: ReplayWindow, ofi_window: int) -> dict[int, floa
         )
         if not ofi.initialized:
             continue
-        bucket = (delta.ts_event // bar_ns) * bar_ns
+        bucket = _bucket_ns(delta.ts_event, window.bar_seconds)
         bucket_samples[bucket] = ofi.value
     return bucket_samples
 

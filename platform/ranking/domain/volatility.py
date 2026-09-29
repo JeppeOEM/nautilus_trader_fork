@@ -17,8 +17,10 @@ Cross-sectional volatility tracker (Story 1.8 / FR16) -- a per-instrument rollin
 mid-price/return buffer with a configurable age-based lookback, default 3600s (1h).
 
 This is a purpose-built volatility computation, distinct from the other two the ranking
-publishes (`ranking.domain.metrics.price_stats_from_series`' 25h np.std -- the `volatility`
-field -- and `RankingBoard`'s live 300-entry `volatility_fast`). Do not consolidate them --
+publishes (`ranking.domain.metrics.price_stats_from_series`' 24h population stdev of trade-close
+returns -- the `volatility` field, "Vol 24h sigma (trade closes)" -- and `RankingBoard`'s live
+300-mid sample stdev `volatility_fast`). This one is `volatility_score`, "Vol 1h sigma (mids)": the
+sample stdev (ddof=1) of mid returns over the last hour (Story 31.3 named all three). Do not consolidate them --
 see Story 1.8's Dev Notes for why that's explicit scope creep. Moved into the ranking context in
 Story 25.2.
 

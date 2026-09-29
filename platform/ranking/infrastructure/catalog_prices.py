@@ -17,16 +17,13 @@ The `PriceHistory` adapter: one instrument's archived per-second close prices, f
 price-series backfill (moved from the catalog-stats module in Story 25.2).
 
 Close prices are read through `kernel.catalog_files.query_second_ohlc` (a column projection of the
-second-snapshot files, no 20-level book decode). An instrument with no trade in the window falls
-back to its mark prices, read through the catalog (`MarkPriceUpdate` is a Nautilus data type the
-kernel's read helpers do not project).
+second-snapshot files, no 20-level book decode). Only trade closes: a window in which the
+instrument never traded is an empty series (its pct/volatility stay None), never mark prices
+passed off as trades -- Story 31.3 deleted that fallback, which mixed a second quantity into the
+trade-close series (and so into `pct_1h`/`pct_24h`/`volatility`).
 """
 
 from kernel.catalog_files import query_second_ohlc
-from observability import error_ledger
-
-from nautilus_trader.model.data import MarkPriceUpdate
-from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
 
 # No upper bound: the series runs up to the newest archived second.
@@ -37,8 +34,8 @@ class CatalogPriceHistory:
     """
     `PriceHistory` over the Parquet catalog (read-only).
 
-    Invariant: a second with no trade (close_price None) contributes nothing, never a zero price;
-    the mark-price fallback applies only when the window holds no trade at all.
+    Invariant: the series holds trade closes only -- a second with no trade (close_price None)
+    contributes nothing, never a zero price or another price kind.
     """
 
     def __init__(self, catalog_path: str) -> None:
@@ -46,21 +43,4 @@ class CatalogPriceHistory:
 
     def series(self, instrument_id: str, start_ns: int) -> list[tuple[int, float]]:
         rows = query_second_ohlc(self._catalog_path, instrument_id, start_ns, _OPEN_END_NS)
-        trades = sorted((r.ts_event, r.close_price) for r in rows if r.close_price is not None)
-        if trades:
-            return trades
-        return self._mark_prices(instrument_id, start_ns)
-
-    def _mark_prices(self, instrument_id: str, start_ns: int) -> list[tuple[int, float]]:
-        catalog = ParquetDataCatalog(self._catalog_path)
-        try:
-            marks = catalog.query(MarkPriceUpdate, identifiers=[instrument_id], start=start_ns)
-        except (NotImplementedError, RuntimeError) as exc:
-            error_ledger.record(
-                # Published ledger site name, kept from the deleted catalog-stats module.
-                "catalog_stats.mark_prices",
-                f"{instrument_id} mark_price_update unreadable",
-                exc,
-            )
-            return []
-        return sorted((m.ts_event, m.value.as_double()) for m in marks)
+        return sorted((r.ts_event, r.close_price) for r in rows if r.close_price is not None)

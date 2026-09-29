@@ -23,6 +23,7 @@ cross. Deliberately minimal: this story is about backtest infrastructure, not si
 
 from decimal import Decimal
 
+from kernel.indicators import OFI_GAP_NS
 from kernel.indicators import MultiLevelOFI
 from kernel.second_snapshot import DydxSecondSnapshot
 
@@ -70,6 +71,7 @@ class SnapshotStrategy(Strategy):
         super().__init__(config)
         self.instrument: Instrument | None = None
         self._ofi = MultiLevelOFI(levels=config.ofi_levels, window=config.ofi_window)
+        self._last_ts: int | None = None
 
     def on_start(self) -> None:
         self.instrument = self.cache.instrument(self.config.instrument_id)
@@ -94,9 +96,16 @@ class SnapshotStrategy(Strategy):
         )
 
     def on_data(self, data: Data) -> None:
-        if not isinstance(data, DydxSecondSnapshot):
+        # A one-sided row is skipped whole, exactly as `OFIStrategy.on_data` does: it neither feeds
+        # OFI nor moves the gap clock (Review P14 of Story 31.3).
+        if not isinstance(data, DydxSecondSnapshot) or not data.bid_prices or not data.ask_prices:
             return
 
+        # The one OFI gap rule (Story 31.3): past `OFI_GAP_NS` the previous book is stale, so it
+        # is cleared rather than diffed against (this strategy had no gap rule before).
+        if self._last_ts is not None and data.ts_event - self._last_ts > OFI_GAP_NS:
+            self._ofi.clear_prev_state()
+        self._last_ts = data.ts_event
         self._ofi.update_raw(data.bid_prices, data.bid_sizes, data.ask_prices, data.ask_sizes)
         if not self._ofi.initialized:
             return

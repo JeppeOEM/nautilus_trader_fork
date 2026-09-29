@@ -59,20 +59,18 @@ from views import indicator_picker
 # (Story 25.1a's spec keeps the 3-tuple). Upgrade path: replace it with a declarative spec
 # (kind + decimals + sign) that both sides read and the mirror test compares, or serve the column
 # metadata to the page over `/api/rankings` so there is no mirror at all.
-# Unit contract for direct consumers of /api/rankings and /data/live/{id}: "cvd" and
-# "volume_delta" are raw base-asset-token deltas, "spread"/"microprice_lean" are raw
-# price-unit deltas -- neither is scaled by price server-side. The rankings/coin-detail
-# HTML pages normalize these client-side (see the inline JS's usdFromTokens/
-# bpsFromPriceUnits) using each row's own "price" field; a script hitting the JSON
-# endpoints directly must do the same multiplication/division itself to get comparable
-# USD/bps units.
+# Unit contract for direct consumers of /api/rankings and /data/live/{id} (Story 31.3: stated as
+# they are -- nothing normalises them anywhere, server- or client-side): "cvd" and "volume_delta"
+# are raw base-token units (buy minus sell size), "spread" and "microprice_lean" raw price units
+# (quote currency per base token). A reader wanting USD or bps must scale by the row's own "price"
+# (the mid) itself.
 #
-# "Vol(catalog)" is deliberately disambiguated from the coin-detail page's other two
-# volatility figures -- "volatility_fast" (live-tick, ~300s) and "volatility_score"
-# (VolatilityTracker's cross-sectional rank, 3600s) -- rather than a bare "Vol", which
-# used to collide with those on the same row/page. "catalog" matches the label already
-# used for this same field on the web coin-detail page -- same field, same name, everywhere
-# it appears.
+# The three volatilities are three different numbers and their labels say which (Story 31.3):
+# "volatility" is the population stdev of trade-close pct returns over the last 24 h
+# (`ranking.domain.metrics.price_stats_from_series`), "volatility_score" the sample stdev of
+# mid pct returns over the last hour (`ranking.domain.volatility.VolatilityTracker`, the
+# volatility-mode sort key), and "volatility_fast" (coin page only, not a column here) the sample
+# stdev of mid pct returns over the last 300 snapshots.
 RANKING_COLS: list[tuple[str, str, Callable[[Any], str]]] = [
     ("ofi_10_z", "OFI10z", lambda v: f"{v:+.2f}"),
     ("obi_10", "OBI10", lambda v: f"{v:.3f}"),
@@ -86,8 +84,8 @@ RANKING_COLS: list[tuple[str, str, Callable[[Any], str]]] = [
     ("pct_24h", "24h %", lambda v: f"{v:+.2f}%"),
     ("pct_1w", "1w %", lambda v: f"{v:+.2f}%"),
     ("pct_1m", "1m %", lambda v: f"{v:+.2f}%"),
-    ("volatility", "Vol(catalog)", lambda v: f"{v:.6f}"),
-    ("volatility_score", "Vol Score", lambda v: f"{v:.6f}" if v is not None else "—"),
+    ("volatility", "Vol 24h \u03c3 (trade closes)", lambda v: f"{v:.6f}"),
+    ("volatility_score", "Vol 1h \u03c3 (mids)", lambda v: f"{v:.6f}" if v is not None else "—"),
     ("volume24h", "Vol24h", lambda v: f"{v / 1e6:.3f}M"),
 ]
 
