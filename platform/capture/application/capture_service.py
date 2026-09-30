@@ -73,6 +73,13 @@ Two clocks per mode (story 22.12, `CoreConfig.book_time_source`):
     counted (`collector.late_trade`) but never folded live -- the nightly rebuild places it. The
     row's `ts_event` is S + 0.5 s and `ts_init` is when it was actually sampled.
 
+Hot-path figures (Story 28.1, audit D-07/D-10/D-136): every periodic flush logs one `hotpath:`
+INFO line and publishes one `capture:hotpath` record (`LiveStream.publish_hotpath`, a failure
+ledgered `collector.hotpath_publish`) with the window's length, peak ingest-queue depth, messages
+processed, sample-loop wakes and wake lag (max, nearest-rank p99) and catalog write times
+(`capture.application.hotpath_metrics`, `docs/DATA_DICTIONARY.md` §1.23). The final flush of a
+stop or a crash reports its partial window too.
+
 `on_data(data, feed)` is O(1): it only enqueues, `_ingest_loop` does the real work, tagging each
 message with the connection (`Feed`) it came on (a one-connection client may omit it: `MAIN_FEED`).
 
@@ -109,6 +116,7 @@ so data_api serves every venue's ids with zero per-route code.
 import asyncio
 import functools
 import http.client
+import itertools
 import json
 import logging
 import math
@@ -120,6 +128,7 @@ from collections.abc import Awaitable
 from collections.abc import Callable
 from collections.abc import Iterable
 from collections.abc import Mapping
+from time import perf_counter_ns
 from typing import Any
 from typing import ClassVar
 
@@ -141,6 +150,7 @@ from capture.application.book_check import BookSnapshot
 from capture.application.book_check import persistent
 from capture.application.book_check import top_levels_mismatch
 from capture.application.config import CoreConfig
+from capture.application.hotpath_metrics import HotPathWindow
 from capture.application.ports import Applied
 from capture.application.ports import ArchiveWriter
 from capture.application.ports import CaptureStatus
@@ -498,9 +508,20 @@ class CaptureService:
         self._listed: frozenset[str] | None = None
 
         self._buffer = FlushBatch()
-        # Unbounded: a real overflow would mean the process can't keep up with the
-        # exchange at all -- revisit with a maxsize + drop policy only if observed.
+        # Unbounded: a real overflow would mean the process can't keep up with the exchange at
+        # all. No maxsize or drop policy (DATA-05): its peak depth per flush is measured instead
+        # (`queue_depth_max`, Story 28.1), and a backlog is fixed at its cost, never dropped.
         self._ingest_queue: asyncio.Queue[Any] = asyncio.Queue()
+        # The hot-path figures reported once per periodic flush (Story 28.1, audit D-07/D-10):
+        # the queue's peak depth and the messages processed, sampled in `_process_data`, and the
+        # window of sample-loop wake lags and catalog write times. The tally is an
+        # `itertools.count` so it lives in C: an int attribute rebinds a fresh heap int on every
+        # increment past 256, and the last one outlives every burst (tests/test_hotpath.py's
+        # retained-allocation budget).
+        self._queue_depth_max = 0
+        self._processed = itertools.count()
+        self._hotpath = HotPathWindow()
+        self._hotpath_since_ns = perf_counter_ns()
         self._stop = asyncio.Event()
         # Built once `_on_data` (the ingest queue) and `_ledger` can serve a call, so a client that
         # replays cached state from its constructor enqueues instead of hitting a half-built
@@ -723,6 +744,11 @@ class CaptureService:
                 await asyncio.sleep(0)
 
     def _process_data(self, data: Any, feed: Feed = MAIN_FEED) -> None:
+        # Hot-path figures (Story 28.1): the backlog behind this message and one more processed;
+        # `max` rather than an `if`, which would push this method past the complexity limit (the
+        # `if` saves ~40 ns, less than the method call a split would add back).
+        self._queue_depth_max = max(self._queue_depth_max, self._ingest_queue.qsize())
+        next(self._processed)
         now_ns = time.time_ns()
         # Feed liveness runs on arrival (the Rust client's `ts_init` at receipt), not on when the
         # ingest loop gets to the message: a queue backlog or loop stall is not a silent socket.
@@ -978,7 +1004,7 @@ class CaptureService:
         for key, items in batches:
             try:
                 # Real disk I/O -- off the event loop so _second_loop isn't stalled.
-                await asyncio.to_thread(self._archive.write, items)
+                elapsed_ns = await asyncio.to_thread(self._timed_write, items)
             except Exception as e:
                 self._ledger(
                     sites.FLUSH_WRITE, f"failed to write {key}, {len(items)} items LOST", e
@@ -988,11 +1014,21 @@ class CaptureService:
                 elif key[0] is DydxSecondSnapshot:
                     self._note_lost_rows(key[1], items)
                 continue
+            self._hotpath.note_write(elapsed_ns)
             if key[0] is DydxSecondSnapshot:
                 flushed_seconds[key[1]] = items
         # The sink first: whatever the coverage append does, the flushed seconds reach it.
         self._apply_to_candle_store(flushed_seconds)
         await self._write_coverage(final)
+
+    def _timed_write(self, items: list[Any]) -> int:
+        """
+        Write one batch through the `ArchiveWriter` and return its wall time in ns. Runs in the
+        worker thread, so the figure is the write itself, not the wait for a thread.
+        """
+        started_ns = perf_counter_ns()
+        self._archive.write(items)
+        return perf_counter_ns() - started_ns
 
     def _take_coverage_lines(self) -> list[str]:
         """Encode every run and trade line noted since the last flush, behind the unwritten ones."""
@@ -1177,7 +1213,45 @@ class CaptureService:
             )
             # The report first: its coverage lines (stale trades) go out with this flush.
             self._close_report_cycle()
-            await self._flush_once()
+            try:
+                await self._flush_once()
+            except asyncio.CancelledError:
+                raise  # a stop: `run()`'s final report covers this window, once
+            except Exception:
+                # The window that led up to a failure is the one worth seeing, and it must not
+                # run on into the next report.
+                await self._report_hotpath()
+                raise
+            await self._report_hotpath()
+
+    async def _report_hotpath(self) -> None:
+        """
+        Report the flush window's hot-path figures (Story 28.1): one `hotpath:` INFO line and,
+        with a live stream, one `capture:hotpath` record. Every counter restarts from zero. A
+        failed publish is ledgered (`collector.hotpath_publish`) and never leaves the flush loop.
+        The queue is also sampled here: an ingest loop starved for the whole window never runs
+        `_process_data`, and its backlog must still show.
+
+        """
+        now_ns = perf_counter_ns()
+        depth_max = max(self._queue_depth_max, self._ingest_queue.qsize())
+        report = self._hotpath.take(
+            now_ns - self._hotpath_since_ns, depth_max, next(self._processed)
+        )
+        self._hotpath_since_ns = now_ns
+        self._queue_depth_max = 0
+        self._processed = itertools.count()
+        logger.info("hotpath: %s", report.log_text())
+        if self._live_stream is None:
+            return
+        try:
+            await self._live_stream.publish_hotpath(self._venue, report.to_dict())
+        except Exception as e:
+            self._ledger(
+                sites.HOTPATH_PUBLISH,
+                f"hot-path metrics publish failed ({report.log_text()}; Parquet unaffected)",
+                e,
+            )
 
     # -- sample ------------------------------------------------------------------------------
 
@@ -1466,13 +1540,15 @@ class CaptureService:
         while not self._stop.is_set():
             now = time.time()
             last_tick_s = None if last_tick_ns is None else last_tick_ns / 1e9
-            await asyncio.sleep(_next_sample_at(now, interval, last_tick_s) - now)
+            sample_at = _next_sample_at(now, interval, last_tick_s)
+            await asyncio.sleep(sample_at - now)
             now_ns = time.time_ns()
             if last_tick_ns is not None:
                 # Integer seconds: a float epoch rounds up across a second boundary.
                 self._note_missed_ticks(last_tick_ns // S_NS + 1, now_ns // S_NS - 1)
             last_tick_ns = now_ns
             self._warn_if_late(now_ns)
+            self._note_wake(now_ns, round(sample_at * NS_PER_S))
             await self._publish(await self._sample_tick(now_ns))
 
     def _note_missed_ticks(self, first_s: int, last_s: int) -> None:
@@ -1491,14 +1567,14 @@ class CaptureService:
         hold_back_s = self._config.hold_back_seconds
         while not self._stop.is_set():
             now = time.time()
-            await asyncio.sleep(
-                max(0.0, _next_close_at(now, hold_back_s, self._last_closed_second) - now)
-            )
+            close_at = _next_close_at(now, hold_back_s, self._last_closed_second)
+            await asyncio.sleep(max(0.0, close_at - now))
             now_ns = time.time_ns()
             due = _due_seconds(now_ns, self._hold_back_ns, self._last_closed_second)
             if not due:
-                continue  # woke a hair early
+                continue  # woke a hair early: not a wake the lag figures count
             self._warn_if_late(now_ns)
+            self._note_wake(now_ns, round(close_at * NS_PER_S))
             skipped = _skipped_seconds(now_ns, self._hold_back_ns, self._last_closed_second)
             if skipped:
                 self._note_skipped(
@@ -1528,6 +1604,21 @@ class CaptureService:
                     self._config.snapshot_interval_seconds,
                 )
         self._last_second_loop_tick_ns = now_ns
+
+    def _note_wake(self, now_ns: int, target_ns: int) -> None:
+        """
+        Record one sample-loop wake's lag for the flush's hot-path figures (Story 28.1): how far
+        past the time the loop slept toward it woke, never negative (an early wake is 0).
+
+        Known limit: both ends are wall-clock (the targets are epoch seconds), so a forward NTP
+        step during the sleep reads as lag and a backward one clamps to 0; and in arrival mode
+        the target is recomputed after the previous tick's own work, so a stall inside
+        `_sample_tick`/`_publish` shows as `missed_tick` coverage and the tick-to-tick canary,
+        not as lag (venue mode's `_next_close_at` can lie in the past, so there it does).
+        Upgrade path: a monotonic deadline kept alongside the wall target, and a fixed schedule
+        in arrival mode.
+        """
+        self._hotpath.note_lag(max(0, now_ns - target_ns))
 
     # -- REST book cross-check (story 22.5, audit D-64) ----------------------------------------
 
@@ -2294,9 +2385,17 @@ class CaptureService:
             self._ledger_abandoned_backfills()
             await self._disconnect()
             self._close_report_cycle()
-            await self._flush_once(final=True)
-            if self._live_stream is not None:
-                await self._live_stream.close()
+            try:
+                try:
+                    await self._flush_once(final=True)
+                finally:
+                    # The partial window before a stop or a crash: the one a restart is
+                    # explained by.
+                    await self._report_hotpath()
+            finally:
+                # Even when a second cancellation lands in the report's publish.
+                if self._live_stream is not None:
+                    await self._live_stream.close()
 
     async def _connect(self, instruments: list) -> None:
         """

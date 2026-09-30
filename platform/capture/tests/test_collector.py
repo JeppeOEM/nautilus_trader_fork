@@ -1603,3 +1603,256 @@ def test_a_failed_connect_closes_what_did_connect_and_re_raises(tmp_path: Path) 
     with pytest.raises(OSError, match="second socket refused"):
         asyncio.run(c._connect([]))
     assert client.closed
+
+
+# -- the hot-path figures (Story 28.1) ------------------------------------------------------------
+
+
+class _HotpathStream:
+    """A `LiveStream` recording each `capture:hotpath` record; `failing` raises (Redis down)."""
+
+    def __init__(self, failing: bool = False) -> None:
+        self.records: list[tuple[str, dict]] = []
+        self._failing = failing
+
+    async def publish(self, snapshots: list) -> None:
+        return None
+
+    async def publish_hotpath(self, venue: str, report: dict) -> None:
+        if self._failing:
+            raise ConnectionError("redis down")
+        self.records.append((venue, report))
+
+    async def close(self) -> None:
+        return None
+
+
+class _FailingWrites:
+    """Wraps a real archive writer; every batch write raises, everything else goes through."""
+
+    def __init__(self, inner: object) -> None:
+        self._inner = inner
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._inner, name)
+
+    def write(self, items: list) -> None:
+        raise OSError("disk full")
+
+
+def _report(c: CaptureService, stream: _HotpathStream | None = None) -> None:
+    c._live_stream = stream
+    asyncio.run(c._report_hotpath())
+
+
+def test_process_data_samples_the_queue_depth_and_counts_every_message(tmp_path: Path) -> None:
+    c = _collector(tmp_path)
+    for n in range(3):
+        c._ingest_queue.put_nowait((n, MAIN_FEED))  # a backlog behind the processed messages
+    c._process_data(_deltas([(100.0, 1.0)], [(100.5, 1.0)]))
+    c._ingest_queue.get_nowait()
+    c._process_data(_trade(100.0, 0.5, AggressorSide.BUYER, 1))
+    stream = _HotpathStream()
+    _report(c, stream)
+    ((venue, record),) = stream.records
+    assert venue == "BYBIT"
+    assert (record["queue_depth_max"], record["messages_processed"]) == (3, 2)
+
+
+def test_an_idle_window_reports_zeros_and_no_write(tmp_path: Path) -> None:
+    c = _collector(tmp_path)
+    stream = _HotpathStream()
+    _report(c, stream)
+    ((_, record),) = stream.records
+    assert record.pop("window_s") >= 0
+    assert record == {
+        "queue_depth_max": 0,
+        "messages_processed": 0,
+        "wakes": 0,
+        "lag_max_ms": None,
+        "lag_p99_ms": None,
+        "writes": 0,
+        "write_data_ms": None,
+        "write_data_max_ms": None,
+    }
+
+
+def test_a_backlog_behind_a_starved_ingest_loop_is_still_reported(tmp_path: Path) -> None:
+    """No `_process_data` ran in the window (the loop was starved): the report samples the queue."""
+    c = _collector(tmp_path)
+    for n in range(5):
+        c._ingest_queue.put_nowait((n, MAIN_FEED))
+    stream = _HotpathStream()
+    _report(c, stream)
+    ((_, record),) = stream.records
+    assert (record["queue_depth_max"], record["messages_processed"]) == (5, 0)
+
+
+def test_a_flush_that_raises_still_reports_its_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    c = _collector(tmp_path)
+    stream = _HotpathStream()
+    c._live_stream = stream
+    c._process_data(_deltas([(100.0, 1.0)], [(100.5, 1.0)]))
+
+    async def no_wait(_seconds: float) -> None:
+        return None
+
+    async def failing_flush(final: bool = False) -> None:
+        raise OSError("coverage disk full")
+
+    monkeypatch.setattr(collector_mod.asyncio, "sleep", no_wait)
+    monkeypatch.setattr(c, "_flush_once", failing_flush)
+    with pytest.raises(OSError, match="coverage disk full"):
+        asyncio.run(c._flush_loop())
+    ((_, record),) = stream.records
+    assert record["messages_processed"] == 1
+
+
+def test_a_flush_cancelled_by_a_stop_leaves_the_window_to_the_final_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One record per stop: `run()`'s final report covers the window, the flush loop adds none."""
+    c = _collector(tmp_path)
+    stream = _HotpathStream()
+    c._live_stream = stream
+
+    async def no_wait(_seconds: float) -> None:
+        return None
+
+    async def cancelled_flush(final: bool = False) -> None:
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(collector_mod.asyncio, "sleep", no_wait)
+    monkeypatch.setattr(c, "_flush_once", cancelled_flush)
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(c._flush_loop())
+    assert stream.records == []
+
+
+def test_the_live_stream_closes_even_when_the_final_report_is_cancelled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    closed: list[bool] = []
+
+    class _CancelledReport(_HotpathStream):
+        async def publish_hotpath(self, venue: str, report: dict) -> None:
+            raise asyncio.CancelledError  # a second cancellation mid-publish
+
+        async def close(self) -> None:
+            closed.append(True)
+
+    monkeypatch.setattr(collector_mod, "instruments_from_pyo3", lambda pyo3: [])
+    c = _collector(tmp_path, client=_LifecycleClient([]))
+    c._applied.clear()  # `run()` applies the plan itself
+    c._live_stream = _CancelledReport()
+    c._stop.set()
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(c.run())
+    assert closed == [True]
+
+
+def test_the_counters_restart_from_zero_after_each_report(tmp_path: Path) -> None:
+    c = _collector(tmp_path)
+    c._ingest_queue.put_nowait((0, MAIN_FEED))
+    c._process_data(_deltas([(100.0, 1.0)], [(100.5, 1.0)]))
+    c._note_wake(5 * _S, 4 * _S)
+    stream = _HotpathStream()
+    _report(c, stream)
+    c._ingest_queue.get_nowait()  # the backlog drained: the report samples the queue too
+    _report(c, stream)
+    first, second = (record for _, record in stream.records)
+    assert (first["messages_processed"], first["queue_depth_max"], first["wakes"]) == (1, 1, 1)
+    assert (second["messages_processed"], second["queue_depth_max"], second["wakes"]) == (0, 0, 0)
+
+
+def test_one_hotpath_info_line_per_report_even_without_a_live_stream(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    c = _collector(tmp_path)
+    with caplog.at_level(logging.INFO, logger=collector_mod.logger.name):
+        _report(c, None)
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("hotpath:")]
+    assert len(lines) == 1
+    assert lines[0].startswith("hotpath: window_s=")
+    assert lines[0].endswith(
+        " queue_depth_max=0 messages_processed=0 wakes=0 lag_max_ms=None lag_p99_ms=None "
+        "writes=0 write_data_ms=None write_data_max_ms=None"
+    )
+
+
+def test_a_failed_hotpath_publish_is_ledgered_once_and_the_next_one_goes_out(
+    tmp_path: Path,
+) -> None:
+    error_ledger.reset()
+    c = _collector(tmp_path)
+    _report(c, _HotpathStream(failing=True))
+    assert error_ledger.counts() == {"collector.hotpath_publish": 1}
+    stream = _HotpathStream()
+    _report(c, stream)
+    assert len(stream.records) == 1
+    assert error_ledger.counts() == {"collector.hotpath_publish": 1}
+
+
+def test_note_wake_records_the_lag_past_its_target_and_clamps_an_early_wake(
+    tmp_path: Path,
+) -> None:
+    c = _collector(tmp_path)
+    c._note_wake(10 * _S + 3_200_000_000, 10 * _S)
+    c._note_wake(10 * _S - 1_000, 10 * _S)  # woke before its target: 0, never negative
+    report = c._hotpath.take(0, 0, 0)
+    assert (report.wakes, report.lag_max_ms, report.lag_p99_ms) == (2, 3200.0, 3200.0)
+    c._note_wake(10 * _S - 1_000, 10 * _S)
+    assert c._hotpath.take(0, 0, 0).lag_max_ms == 0.0
+
+
+def test_a_successful_catalog_write_sets_write_data_ms(tmp_path: Path) -> None:
+    c = _collector(tmp_path)
+    now = time.time_ns()
+    c._process_data(_deltas([(100.0, 1.0)], [(100.5, 1.0)], ts=now))
+    _tick(c, now)
+    asyncio.run(c._flush_once())
+    report = c._hotpath.take(0, 0, 0)
+    assert report.writes >= 1
+    assert report.write_data_ms is not None
+    assert report.write_data_max_ms is not None
+    assert 0 < report.write_data_ms <= report.write_data_max_ms
+
+
+def test_a_failed_catalog_write_does_not_set_write_data_ms(tmp_path: Path) -> None:
+    error_ledger.reset()
+    c = _collector(tmp_path)
+    c._archive = _FailingWrites(c._archive)  # type: ignore[assignment]
+    now = time.time_ns()
+    c._process_data(_deltas([(100.0, 1.0)], [(100.5, 1.0)], ts=now))
+    _tick(c, now)
+    asyncio.run(c._flush_once())
+    report = c._hotpath.take(0, 0, 0)
+    assert (report.writes, report.write_data_ms, report.write_data_max_ms) == (0, None, None)
+    assert error_ledger.counts()["collector.flush_write"] == 1
+
+
+def test_a_late_arrival_wake_is_measured_and_the_canary_still_fires(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    c = _collector(tmp_path)
+    second = 1_790_000_000
+    target_ns = second * _S + 500_000_000  # arrival mode samples at mid-second
+    woke_ns = target_ns + 3_200_000_000
+    c._last_second_loop_tick_ns = target_ns - _S  # the previous tick, on schedule
+    monkeypatch.setattr(
+        collector_mod,
+        "time",
+        SimpleNamespace(time=lambda: second + 0.2, time_ns=lambda: woke_ns),
+    )
+
+    async def one_iteration(_seconds: float) -> None:
+        c.stop()
+
+    monkeypatch.setattr(collector_mod.asyncio, "sleep", one_iteration)
+    with caplog.at_level(logging.WARNING, logger=collector_mod.logger.name):
+        asyncio.run(c._second_loop())
+    report = c._hotpath.take(0, 0, 0)
+    assert (report.wakes, report.lag_max_ms) == (1, 3200.0)
+    assert any("_second_loop tick arrived 3.2s late" in r.getMessage() for r in caplog.records)

@@ -21,11 +21,13 @@ with the second, as `_venue_second_loop` does.
 import asyncio
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from kernel.second_snapshot import DydxSecondSnapshot
 from observability import error_ledger
 
+import capture.application.capture_service as capture_mod
 from capture.application.capture_service import CaptureService
 from capture.application.capture_service import _due_seconds
 from capture.application.capture_service import _next_close_at
@@ -367,3 +369,41 @@ def test_snapshot_queries_window_on_ts_event_not_sampling_time(tmp_path: Path) -
     asyncio.run(c._flush_once(final=True))
     rows = query_second_snapshots(str(tmp_path), _IID, _at(_SEC + 1), _at(_SEC + 2))
     assert [r.ts_event for r in rows] == [_at(_SEC + 1.5)]
+
+
+# -- the sample loop's wake lag (Story 28.1) ------------------------------------------------------
+
+
+def _one_venue_wake(c: CaptureService, monkeypatch: pytest.MonkeyPatch, wall_s: float) -> None:
+    """Run one `_venue_second_loop` iteration on a wall clock pinned at `wall_s`."""
+    wall = _at(wall_s)
+    monkeypatch.setattr(
+        capture_mod, "time", SimpleNamespace(time_ns=lambda: wall, time=lambda: wall / _S)
+    )
+
+    async def one_iteration(_seconds: float) -> None:
+        c.stop()
+
+    monkeypatch.setattr(capture_mod.asyncio, "sleep", one_iteration)
+    asyncio.run(c._venue_second_loop())
+
+
+def test_a_venue_wake_records_its_lag_past_the_close_it_slept_toward(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    c = _collector(tmp_path)
+    c._last_closed_second = _SEC  # the next close is due at wall _SEC + 2 (no hold-back)
+    _one_venue_wake(c, monkeypatch, _SEC + 2.25)
+    report = c._hotpath.take(0, 0, 0)
+    assert (report.wakes, report.lag_max_ms, report.lag_p99_ms) == (1, 250.0, 250.0)
+    assert c._last_closed_second == _SEC + 1
+
+
+def test_an_early_venue_wake_with_nothing_due_records_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    c = _collector(tmp_path)
+    c._last_closed_second = _SEC
+    _one_venue_wake(c, monkeypatch, _SEC + 1.9)
+    assert c._hotpath.take(0, 0, 0).wakes == 0
+    assert c._last_closed_second == _SEC

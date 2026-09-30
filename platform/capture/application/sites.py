@@ -55,6 +55,8 @@ CANDLE_STORE_CATCH_UP = "collector.candle_store_catch_up"
 NO_SECOND_SINK = "collector.no_second_sink"
 CANDLE_STORE_BEHIND = "collector.candle_store_behind"
 SNAPSHOT_PUBLISH = "collector.snapshot_publish"
+# the per-flush hot-path record on `capture:hotpath` (Story 28.1)
+HOTPATH_PUBLISH = "collector.hotpath_publish"
 # the archive adapter
 CORRUPT_PARQUET = "collector.corrupt_parquet"
 CAPTURE_LOCK_WAIT = "collector.capture_lock_wait"

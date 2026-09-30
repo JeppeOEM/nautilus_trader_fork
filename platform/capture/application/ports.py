@@ -198,14 +198,22 @@ def finite_decimal(value: object) -> Decimal | None:
 
 class LiveStream(Protocol):
     """
-    The live `snapshots:raw` fan-out (parent spine AD-1). Invariant: it publishes exactly the
-    batch the gate accepted, the same objects the archive buffer holds; a failed publish loses
+    Capture's live Redis output: the `snapshots:raw` fan-out (parent spine AD-1) and the
+    per-flush `capture:hotpath` record. Invariant: `publish` sends exactly the batch the gate
+    accepted, the same objects the archive buffer holds; a failed publish loses
     that tick's live view only (the Parquet write is durable) and never stalls the sampler.
     `publish` raises on failure; the service ledgers it (`collector.snapshot_publish`) and
     carries on, so a Redis outage is counted, never a quiet WARNING (DATA-07).
+
+    Since Story 28.1 it also carries capture's own per-flush hot-path figures:
+    `publish_hotpath(venue, report)` sends one flush window's `HotPathReport.to_dict()` (queue
+    depth, messages, sample-loop lag, write time; `docs/DATA_DICTIONARY.md` §1.23). It raises on
+    failure too; the service ledgers it (`collector.hotpath_publish`), never touching Parquet.
     """
 
     async def publish(self, snapshots: list[DydxSecondSnapshot]) -> None: ...
+
+    async def publish_hotpath(self, venue: str, report: dict[str, Any]) -> None: ...
 
     async def close(self) -> None: ...
 
