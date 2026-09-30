@@ -268,9 +268,12 @@ class RankingEngine:
         self._board.age_out(now_ns)
         await self._backfill_new_instruments(now_ns)
         price_1w, price_1m = await self._prices_days_ago()
-        rows = self._board.slow_rows(now_ns, price_1w, price_1m)
+        # Stamped when the board is read, not when the cycle began: a batch ingested during the
+        # awaits above is in the row, so the earlier stamp would predate its own state (Story 31.9).
+        read_ns = self._clock()
+        rows = self._board.slow_rows(read_ns, price_1w, price_1m)
         if rows:
-            persisted = self._board.with_ranks(rows, now_ns)
+            persisted = self._board.with_ranks(rows, read_ns)
             await asyncio.to_thread(self._history.write, persisted)
 
     async def _backfill_new_instruments(self, now_ns: int) -> None:

@@ -1,0 +1,63 @@
+# The Story 31.9 parity fleet -- the verify stack's `live-paper` only (docker-compose.verify.yml
+# mounts this file over /app/bots/config.toml; the live stack never reads it).
+#
+# One DummyStrategy bot per instrument the verify collectors record (capture/venues/bybit and
+# capture/venues/hyperliquid config.toml), on mainnet market data, so every bot's per-cycle signal
+# log (BOT_SIGNAL_LOG_DIR, bots/strategies/signal_log.py) can be replayed from the verify catalog
+# by `python3 -m bots.signal_replay` and compared by `python3 -m verification.bot_parity`.
+#
+# Paper only: this loader builds Sandbox execution clients, with no key or wallet anywhere, so no
+# order ever reaches a venue. trade_size is each instrument's smallest sensible lot -- the fills
+# are simulated and only prove the `action` column, not a PnL. Thresholds are the strategy's
+# defaults, spelled out so the replay reads the same values from this file.
+log_level = "INFO"
+
+[venues.BYBIT]
+environment = "mainnet"
+starting_balances = ["100_000 USDT"]
+account_type = "MARGIN"
+
+[venues.HYPERLIQUID]
+environment = "mainnet"
+starting_balances = ["100_000 USDC"]
+account_type = "MARGIN"
+
+[[bots]]
+bot_id = "verify-bybit-btcusdt-linear"
+instrument_id = "BTCUSDT-LINEAR.BYBIT"
+trade_size = "0.001"
+trend_buy_threshold = 0.6
+trend_sell_threshold = 0.4
+ofi_confirm_threshold = 0.0
+
+[[bots]]
+bot_id = "verify-bybit-ethusdt-linear"
+instrument_id = "ETHUSDT-LINEAR.BYBIT"
+trade_size = "0.01"
+trend_buy_threshold = 0.6
+trend_sell_threshold = 0.4
+ofi_confirm_threshold = 0.0
+
+[[bots]]
+bot_id = "verify-bybit-btcusdt-spot"
+instrument_id = "BTCUSDT-SPOT.BYBIT"
+trade_size = "0.001"
+trend_buy_threshold = 0.6
+trend_sell_threshold = 0.4
+ofi_confirm_threshold = 0.0
+
+[[bots]]
+bot_id = "verify-bybit-ethusdt-spot"
+instrument_id = "ETHUSDT-SPOT.BYBIT"
+trade_size = "0.01"
+trend_buy_threshold = 0.6
+trend_sell_threshold = 0.4
+ofi_confirm_threshold = 0.0
+
+[[bots]]
+bot_id = "verify-hyperliquid-sol-usd-perp"
+instrument_id = "SOL-USD-PERP.HYPERLIQUID"
+trade_size = "0.1"
+trend_buy_threshold = 0.6
+trend_sell_threshold = 0.4
+ofi_confirm_threshold = 0.0

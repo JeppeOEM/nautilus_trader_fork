@@ -75,6 +75,26 @@ limit). `on_stop` cancels them too, so a stopped bot's position honestly shows n
 Known limit: a restart does not re-arm the exits of a position it inherits; upgrade path: on
 start, place the protective legs for an open position that has none. With both keys unset the
 trading logic is unchanged; only `on_stop`'s cancel of any resting order applies to every bot.
+
+Signal log (Story 31.9, opt-in): with `signal_log_path` set, every decision cycle (each 1 s book
+timer event and each bar) appends one JSON line through `bots.strategies.signal_log` -- the inputs
+exactly as the indicators were fed, every indicator value, the `signal_of` decision and the side
+submitted -- and the 1 s timer is started at the very nanosecond the `start` record carries, so a
+catalog replay (`bots.signal_replay`) fires its cycles on the same timestamps. Unset (the default),
+nothing is written and the strategy behaves exactly as without it. Known limit: see
+`bots.strategies.signal_log` (one file per bot growing for the run; upgrade path hourly rotation).
+
+Known limit (audit D-82, decision deferred to the operator by Story 31.9): the book this strategy
+reads is ungated -- no stale-book, crossed-book or gap check before `MultiLevelOBI`/`MultiLevelOFI`
+are fed -- and `MultiLevelOFI` is never `clear_prev_state()`-ed across a gap longer than
+`kernel.indicators.OFI_GAP_NS`, unlike `SnapshotStrategy`, `OFIStrategy` and the ranking engine,
+so a contribution can span a gap and a stale or crossed book is traded on. Measured divergence
+(Story 31.9, audit D-129, `verification.bot_parity` over the verify fleet's 66.5 min against its
+catalog replay): 0 `gap` cycles and 0 decision disagreements on all 5 bots, so none observed in
+that window (every decision was `none`/`not_ready`). The trading behaviour is left unchanged until
+the operator decides (`docs/DEPLOY_CHECKLIST.md`, deferred operator actions "31-9").
+Upgrade path: skip (and log) a stale, crossed or gapped book, and `clear_prev_state()` the OFI when
+consecutive fed books are more than `OFI_GAP_NS` apart.
 """
 
 from decimal import Decimal
@@ -90,6 +110,12 @@ from bots.domain.config import MAX_EXIT_BPS
 from bots.strategies.exits import entry_with_exits
 from bots.strategies.exits import exit_prices
 from bots.strategies.exits import make_price
+from bots.strategies.signal_log import SIGNAL_LONG
+from bots.strategies.signal_log import SIGNAL_SHORT
+from bots.strategies.signal_log import SKIP_NO_BOOK
+from bots.strategies.signal_log import SKIP_ONE_SIDED
+from bots.strategies.signal_log import SignalLog
+from bots.strategies.signal_log import signal_of
 from nautilus_trader.common.events import TimeEvent
 from nautilus_trader.config import StrategyConfig
 from nautilus_trader.model.data import Bar
@@ -143,6 +169,9 @@ class DummyStrategyConfig(StrategyConfig, frozen=True):
     stop_loss_bps : int, optional
         When set, every entry rests a reduce-only STOP_MARKET stop-loss this many basis points
         against the entry-time mid.
+    signal_log_path : str, optional
+        When set, one JSON line per decision cycle is appended to this file
+        (`bots.strategies.signal_log`); None (the default) writes nothing.
     """
 
     instrument_id: InstrumentId
@@ -157,6 +186,7 @@ class DummyStrategyConfig(StrategyConfig, frozen=True):
     ofi_confirm_threshold: float = 0.0
     take_profit_bps: int | None = None
     stop_loss_bps: int | None = None
+    signal_log_path: str | None = None
 
 
 class DummyStrategy(Strategy):
@@ -186,6 +216,9 @@ class DummyStrategy(Strategy):
         # or not the signal still holds, and kept until flat so a partly filled flatten is
         # finished: a position whose exits are gone is never left holding.
         self._reversal_side: OrderSide | None = None
+        # The opt-in signal log (None when off) and the side submitted in the current cycle.
+        self._signal_log: SignalLog | None = None
+        self._cycle_action: OrderSide | None = None
 
     def on_start(self) -> None:
         self.instrument = self.cache.instrument(self.config.instrument_id)
@@ -237,6 +270,7 @@ class DummyStrategy(Strategy):
         self.clock.set_timer(
             name=_BOOK_SNAPSHOT_TIMER,
             interval=pd.Timedelta(seconds=_BOOK_SNAPSHOT_INTERVAL_SECONDS),
+            start_time=self._open_signal_log(),
             callback=self.on_timer,
         )
 
@@ -258,11 +292,46 @@ class DummyStrategy(Strategy):
                 return False
         return True
 
+    def _open_signal_log(self) -> pd.Timestamp | None:
+        """
+        Open the signal log and write its `start` record, returning the timer's start time (the
+        record's `ts_ns`, so every cycle lands on start + k s); None, the timer's default, when off.
+        """
+        if self.config.signal_log_path is None:
+            return None
+        # Whole microseconds: the live clock's timers fire on microsecond ticks (a start of
+        # ...519479442 ns fires at ...520519479000), so an unrounded start would put every live
+        # cycle a few hundred ns off start + k s and the replay could never pair them exactly.
+        start_ns = self.clock.timestamp_ns() // 1_000 * 1_000
+        self._signal_log = SignalLog(self.config.signal_log_path)
+        config = self.config
+        self._signal_log.write(
+            {
+                "kind": "start",
+                "bot_id": config.order_id_tag,
+                "instrument_id": str(config.instrument_id),
+                "ts_ns": start_ns,
+                "trade_size": str(config.trade_size),
+                "bar_spec": config.bar_spec,
+                "trend_lookback": config.trend_lookback,
+                "trend_buy_threshold": config.trend_buy_threshold,
+                "trend_sell_threshold": config.trend_sell_threshold,
+                "ofi_levels": config.ofi_levels,
+                "ofi_window": config.ofi_window,
+                "obi_levels": config.obi_levels,
+                "ofi_confirm_threshold": config.ofi_confirm_threshold,
+            },
+        )
+        return pd.Timestamp(start_ns, tz="UTC")
+
     def on_stop(self) -> None:
         # A stopped bot must not leave resting orders the TUI would still show as protection
         # it no longer manages (see module docstring).
         if self._has_resting_orders():
             self.cancel_all_orders(self.config.instrument_id)
+        if self._signal_log is not None:
+            self._signal_log.close()
+            self._signal_log = None
 
     def on_quote_tick(self, tick: QuoteTick) -> None:
         self.last_data_ns = tick.ts_event
@@ -290,14 +359,19 @@ class DummyStrategy(Strategy):
     def on_timer(self, event: TimeEvent) -> None:
         if event.name != _BOOK_SNAPSHOT_TIMER:
             return
+        # Reset first: a skipped cycle submits nothing, and must not log the last cycle's side.
+        self._cycle_action = None
 
         book = self.cache.order_book(self.config.instrument_id)
         if book is None:
+            self._log_cycle("book_skipped", event.ts_event, {"reason": SKIP_NO_BOOK})
             return
 
         bids = book.bids()
         asks = book.asks()
         if not bids or not asks:
+            skipped = {"book_ts_ns": book.ts_last, "reason": SKIP_ONE_SIDED}
+            self._log_cycle("book_skipped", event.ts_event, skipped)
             return
 
         bid_prices = [level.price.as_double() for level in bids]
@@ -314,12 +388,63 @@ class DummyStrategy(Strategy):
             self.publish_signal(name="mlofi", value=self.mlofi.value, ts_event=event.ts_event)
 
         self._maybe_trade()
+        if self._signal_log is not None:
+            fed = {
+                "book_ts_ns": book.ts_last,
+                "bids": self._top_levels(bid_prices, bid_sizes),
+                "asks": self._top_levels(ask_prices, ask_sizes),
+            }
+            self._log_cycle("book", event.ts_event, fed)
+
+    def _top_levels(self, prices: list[float], sizes: list[float]) -> list[list[float]]:
+        """Return the top `max(ofi_levels, obi_levels)` fed levels as [price, size] pairs."""
+        levels = max(self.config.ofi_levels, self.config.obi_levels)
+        return [[price, size] for price, size in zip(prices[:levels], sizes[:levels], strict=True)]
 
     def on_bar(self, bar: Bar) -> None:
-        self.trend.update_raw(bar.close.as_double())
+        self._cycle_action = None
+        close = bar.close.as_double()
+        self.trend.update_raw(close)
         if self.trend.initialized:
             self.publish_signal(name="trend", value=self.trend.value, ts_event=bar.ts_event)
         self._maybe_trade()
+        self._log_cycle("bar", bar.ts_event, {"bar": {"ts_event": bar.ts_event, "close": close}})
+
+    def _log_cycle(self, kind: str, ts_ns: int, fields: dict[str, object]) -> None:
+        """Append one decision cycle's record to the signal log; nothing when the log is off."""
+        if self._signal_log is None:
+            return
+        values = {
+            name: indicator.value if indicator.initialized else None
+            for name, indicator in (
+                ("microprice", self.microprice),
+                ("ofi", self.ofi),
+                ("obi", self.obi),
+                ("mlofi", self.mlofi),
+                ("trend", self.trend),
+            )
+        }
+        record: dict[str, object] = {
+            "kind": kind,
+            "bot_id": self.config.order_id_tag,
+            "instrument_id": str(self.config.instrument_id),
+            "ts_ns": ts_ns,
+            **fields,
+            **values,
+            "signal": self._signal(values["trend"], values["mlofi"]),
+            "action": self._cycle_action.name if self._cycle_action is not None else None,
+        }
+        self._signal_log.write(record)
+
+    def _signal(self, trend: float | None, mlofi: float | None) -> str:
+        config = self.config
+        return signal_of(
+            trend,
+            mlofi,
+            config.trend_buy_threshold,
+            config.trend_sell_threshold,
+            config.ofi_confirm_threshold,
+        )
 
     def _maybe_trade(self) -> None:
         if not (self.trend.initialized and self.mlofi.initialized):
@@ -369,14 +494,9 @@ class DummyStrategy(Strategy):
 
     def _wanted_side(self, is_flat: bool) -> OrderSide | None:
         """Return the side of the one order this cycle's signals call for, None to hold."""
-        long_signal = (
-            self.trend.value > self.config.trend_buy_threshold
-            and self.mlofi.value > self.config.ofi_confirm_threshold
-        )
-        short_signal = (
-            self.trend.value < self.config.trend_sell_threshold
-            and self.mlofi.value < -self.config.ofi_confirm_threshold
-        )
+        signal = self._signal(self.trend.value, self.mlofi.value)
+        long_signal = signal == SIGNAL_LONG
+        short_signal = signal == SIGNAL_SHORT
         if is_flat:
             if long_signal:
                 return OrderSide.BUY
@@ -448,6 +568,7 @@ class DummyStrategy(Strategy):
             self.clock.timestamp_ns(),
         )
         self.submit_order_list(order_list)
+        self._cycle_action = side
 
     def _flatten(self, side: OrderSide) -> None:
         """
@@ -465,6 +586,7 @@ class DummyStrategy(Strategy):
             reduce_only=True,
         )
         self.submit_order(order)
+        self._cycle_action = side
 
     def _submit(self, side: OrderSide) -> None:
         assert self.instrument is not None
@@ -474,3 +596,4 @@ class DummyStrategy(Strategy):
             quantity=self.instrument.make_qty(self.config.trade_size),
         )
         self.submit_order(order)
+        self._cycle_action = side

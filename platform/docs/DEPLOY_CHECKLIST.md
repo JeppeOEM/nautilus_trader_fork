@@ -1053,3 +1053,72 @@ schema or mount changed.
       trade close; `GET /api/errors` shows no new `ranking_engine.*` or `views.*` site.
 - [ ] On the chart, switch to 1W: the bars and the indicator panes start on Mondays (00:00 UTC)
       and share one time axis.
+
+### 31-9 Live, backtest and display parity, incl. the bot's signals (commit: this story's)
+
+Changes what `ranking_engine` stamps (`metrics.db` `ts` is taken when the board is read, D-130) and
+how `data_api` computes `/api/snapshots` `mid` (`kernel.indicators.mid_price`, bit-equal, D-131);
+adds the opt-in bot signal log (`BOT_SIGNAL_LOG_DIR`, unset on the live stack: nothing changes
+there), the verify paper fleet and the `bots.signal_replay` / `verification.bot_parity` tools. No
+config key, schema or mount of the production stack changed.
+
+- [ ] On the VPS, `git pull`, then from `platform/` rebuild and recreate `ranking_engine` and
+      `data_api` (`docker compose up -d --build ranking_engine data_api`). Check `GET /api/errors`
+      shows no new `ranking_engine.*` or `views.*` site after the first minute.
+- [ ] Verify stack (dev box), before Story 31.11's runs: rebuild and recreate only the verify
+      `ranking_engine` and `data_api` (`REDIS_PORT=26379 DATA_API_PORT=29100 DOZZLE_PORT=28080
+      docker compose -p verify -f docker-compose.yml -f docker-compose.verify.yml up -d --build
+      --no-deps ranking_engine data_api`; never the collectors or recorders). Their images date from
+      2026-09-29 12:59, before Stories 31.2/31.3/31.9, so the SSOT live variant still accounts the
+      old `slow_loop_reads_its_clock_first` stamping and unrounded spreads. Then re-run
+      `VERIFY_STACK=1 CATALOG_PATH=data/catalog python3 -m pytest -o addopts="" --rootdir=.
+      verification/tests/test_ssot_trace.py` and, if it passes with no pre-D-130 row, delete the
+      accounted row (it is kept only while the old image runs).
+- [ ] **Decide: Bybit bot quotes and spot book (audit D-133, D-134, OPEN, FORK-01).** With the
+      depth-50 book and quotes subscribed together (`DummyStrategy` does), the pinned Nautilus Bybit
+      data client builds every quote from each book message's first entries, not the best level
+      (live microprice a median 46.1 / 17.0 / 69.1 / 17.8 ticks from the book mid on BTCUSDT-LINEAR /
+      ETHUSDT-LINEAR / BTCUSDT-SPOT / ETHUSDT-SPOT; Hyperliquid 0.5), and on spot it also replays the
+      depth-1 quote stream into the book (10 levels a side on only 1.7 % / 1.6 % of spot cycles).
+      The Sandbox fills on those quotes. Options: (1) upgrade Nautilus to a release whose Bybit
+      handler emits quotes only from the quote topic and books only from the book topic (check the
+      changelog; report upstream if none) -- **recommended**, together with D-113 below and the Sandbox
+      stale-trade limit D-132;
+      (2) run Bybit bots without the book-delta subscription until then (changes what
+      `DummyStrategy` computes, so it is your call); (3) keep Bybit bots out of any paper or live
+      evaluation. Until one is taken, no Bybit dummy-bot result is trustworthy. Record the choice in
+      D-133/D-134.
+- [ ] **Decide: `DummyStrategy` gating and OFI reset (audit D-129; D-82's deferred half).** It feeds
+      an ungated book (no stale, crossed or gap check) and never `clear_prev_state()`s its OFI across
+      a gap over `OFI_GAP_NS`. Measured over the verify fleet's 66.5 min against its catalog replay
+      (`verification.bot_parity`, 5 bots, 3,988 book cycles each): 0 `gap` cycles, 0
+      `book_skipped`, 0 decision disagreements, 0 unexplained apart from D-135's one replay-input
+      cycle per bot (a replay-side conversion defect, not gating) -- no divergence observed, but no entry
+      fired on either side in that window (every decision `none`/`not_ready`). Options: (1) adopt the
+      upgrade path in `bots/strategies/dummy.py`'s `Known limit:` (skip and log a stale, crossed or
+      gapped book; reset the OFI when consecutive fed books are more than `OFI_GAP_NS` apart, as
+      `SnapshotStrategy`) -- **recommended**, so live, backtest and the ranking agree by construction;
+      (2) keep it as the documented Known limit. Record the choice in D-129.
+- [ ] **Decide: `IndexPriceUpdate` has no Nautilus catalog decoder (audit D-113, OPEN).** A stored
+      index price never reaches a backtest, a bounded `catalog.query` or `BacktestDataConfig`
+      (`verification.catalog` reads every index file `open_failed`). Options: (1) upgrade Nautilus to
+      a release that decodes `IndexPriceUpdate` (the same upgrade as D-133) -- then the catalog
+      verdict's `open_failed` must read 0; (2) accept it as a documented Known limit: index prices are
+      read only through `kernel.catalog_files.query_index_prices`, never by a backtest. Record the
+      choice in D-113; Story 31.11 records the verdict.
+- [ ] **Decide: the bot replay's per-row delta order (audit D-135, OPEN).** `ParquetDataCatalog`'s
+      `ORDER BY ts_init` returns one stored row's 41 equal-`ts_init` deltas unordered where they
+      straddle a row-group boundary, so that replay book misses a level (1 of 3,988 cycles per bot
+      on the 2026-09-30 run; `verification.bot_parity` fails it as `replay_input`). The fix changes
+      the Story 31.9 conversion contract (`ts_event = ts_init =` the row's `ts_init`, `CLEAR` + every
+      level). Options: (1) stamp a row's deltas `ts_init + i` ns, `CLEAR` first -- **recommended**
+      (smallest change, the book completes 40 ns after the row's `ts_init`); (2) order-independent
+      deltas (update/add every stored level, delete the previous row's levels not in this one);
+      (3) wait for an upstream stable tie-break (FORK-01). Record the choice in D-135, then re-run
+      `bots.signal_replay` and `verification.bot_parity` on the kept logs: `replay_input` must be 0.
+- [ ] The verify `live-paper` now mounts only `data/verification/bot_signals/live` (not the whole
+      `data/verification`, the recorders'); `make verify-up` creates it. On the next start of the
+      fleet, recreate the container (`--no-deps live-paper`) so the new mount applies.
+- [ ] Leave `verify-live-paper` stopped until needed (Story 31.9 stopped it at 2026-09-30 07:50:27Z
+      after its 66.5 min run). It is in `VERIFY_SERVICES`, so the next `make verify-up` restarts it
+      and its signal logs keep growing (~86 MB per bot-day, the Known limit of the signal log).

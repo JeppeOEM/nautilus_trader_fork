@@ -101,7 +101,7 @@ delivers the comparator (`python -m verification.<tool> --venue V --day D`).
 | | BTCUSDT-SPOT | pending — as above; smoke **OPEN** D-127 (D-91) | smoke: 55 buckets `ref_different` (D-127: 22 off-grid seconds of sub-tick prints, D-91), plus the partial day (46,765 seconds, D-128) | Smoke as above: rows 27,758; `catch_up_cap` 11,876, `stale` 1; `trades_unobserved` `catch_up_cap` 1, `unexplained` 60; buckets as BTCUSDT-LINEAR; catalog fold and served classes 0 failing on every width (float_noise 219 / 34 / 13 / 2 / 1 / 0 / 15 / 3 / 7); reference **ref_different** 15 / 10 / 6 / 4 / 2 / 1 / 7 / 5 / 5 (D-127), `ref_recorder_gap` 1 per width to 1h and at 10m-45m (17:28:35-37Z, inside the recorder's own 17:28:30-42Z reconnect), `ref_explained` 1 per width to 15m and at 10m/30m (18:00:31-32Z, `trades_unrecoverable:depth`, D-125); `week_open`. Old data_api: `partial_mismatch` 48 / 17 / 11. **Klines:** 1,440, 461 matched (32.0 %), 976 / 0 / 3 (12:59, 20:42 edges; 18:00, D-125); in the soak 461/464 (99.4 %) | as above |
 | | ETHUSDT-SPOT | pending — as above | smoke: 0 inside the soak (46,765 seconds, D-128) | Smoke as above: rows 27,758; `catch_up_cap` 11,876, `stale` 1; `trades_unobserved` `stale` 1 (D-124), `unexplained` 64; every failing class 0 on every width (float_noise 208 / 38 / 8 / 3 / 2 / 0 / 18 / 8 / 5); `ref_explained` 1 per width (18:00:31-32Z, D-125); `week_open`. Old data_api: `partial_mismatch` 48 / 17 / 11. **Klines:** 1,440, 460 matched (31.9 %), 976 / 0 / 4 (12:59, 20:42 edges; 18:00, D-125; 18:44, D-124); in the soak 460/464 (99.1 %) | as above |
 | | SOL-USD-PERP.HYPERLIQUID | pending — as above; klines **OPEN** D-126 | smoke: 0 inside the soak (46,762 unexplained seconds -- before the soak and 12:59:19-21Z before capture's first book -- and 15 missing raw files, D-128) | Smoke as above: rows 27,759; `catch_up_cap` 11,878, `no_book` 1; `trades_unobserved` `catch_up_cap` 2, `no_book` 1, `unexplained` 31 (the WS `trades` subscribe snapshot, before capture's first row); buckets 1m 463/1/976 (20:42Z observed two seconds without a trade), the rest as Bybit's; every failing class 0 on every width (float_noise 229 / 43 / 11 / 1 / 0 / 0 / 18 / 7 / 3); reference exact on every traded bucket; `week_open`. Old data_api: `partial_mismatch` 48 / 17 / 11. **Klines:** 1,440, 460 matched (31.9 %), 977 / 0 / 3 (12:59 edge; 13:10, 15:27 sweep extremes, D-126); in the soak 460/464 (99.1 %) | as above |
-| Live, backtest and display parity (incl. the bot's signals) | all 5 | pending — Story 31.9 | | | |
+| Live, backtest and display parity (incl. the bot's signals) | all 5 | pending — tools built (Story 31.9); verdict pending Story 31.11; replay conversion **OPEN** D-135 (the catalog reader reorders one snapshot row's equal-`ts_init` deltas across a Parquet row-group boundary, so that one replay book misses a level: `replay_input` 1 per bot, bot_parity exits 1); the Bybit bot result is **not a parity proof** while D-133/D-134 are OPEN (the live inputs are wrong at the adapter, and the comparator can only classify, not correct, them); Bybit bot inputs **OPEN** D-133 (every live quote built from a depth-50 book message's first entries) and D-134 (spot: the depth-1 quote stream replayed into the book), both in the pinned adapter (FORK-01), which the comparator files as `quote_cadence`/`book_source`; `DummyStrategy` gating D-129 and D-113 (index decoder) operator decisions owed; D-132 (Sandbox stale trades, documented); fixed in code (undeployed): D-130 (`metrics.db` ts), D-131 (`/api/snapshots` mid) | bot_parity **FAIL, 5 unexplained** after the review patches (Bybit 4 bots, Hyperliquid 1: each exactly 1 `replay_input` `levels`, the same cycle 07:00:05.75Z, D-135 OPEN; every other count 0: truncated 0, live_only / replay_only 0, cold_start 0, gap 0, microprice-evidence failures 0) -- Bybit: classified, **not proven** (D-133/D-134); SSOT trace 0 DIFFERENT (fixture), 0 differed (live); OFI parity 0 mismatch | **Bot signals** (verify paper fleet 2026-09-30 06:43:49.754-07:50:17.754Z, 66.5 min, one dummy bot per instrument, 3,988 book cycles + 67 bars paired per bot, every cycle paired, `book_skipped` 0 both sides; exact-equal share / max abs diff; classes): BTCUSDT-LINEAR microprice 0.00 % / 49.93, ofi 0.00 % / 293.99, obi 0.35 % / 0.926, mlofi 0.02 % / 555.2, trend 13.79 % / 2.9e-11 (cycles `book_source` 3,821, `book_timing` 158, `quote_cadence` 76; trend `bar_source` 61, `carried_state` 3,435); ETHUSDT-LINEAR 0.00 % / 2.550, 0.00 % / 3,967.9, 0.44 % / 0.986, 0.02 % / 3,109.8, 100 % (cycles 3,816 / 157 / 82); BTCUSDT-SPOT 0.44 % / 59.71, 0.00 % / 23.97, 0.00 % / 0.789, 0.02 % / 18.60, 100 % (cycles `book_source` 3,988, `quote_cadence` 67); ETHUSDT-SPOT 1.58 % / 2.239, 0.00 % / 579.7, 0.00 % / 0.901, 0.02 % / 1,219.6, 100 % (3,988 / 67); SOL-USD-PERP.HYPERLIQUID 0.02 % / 0.1648, 0.00 % / 22,492, 56.30 % / 0.389, 28.01 % / 92,513, 39.36 % / 3.7e-9 (cycles `book_timing` 1,733, `quote_cadence` 2,312, `book_source` 10; trend `bar_source` 61, `carried_state` 2,398). **Replay input** (new, every replay timer cycle against the stored row active at T by `ts_init`): levels equal on 3,987 of 3,988 cycles per bot, the replay's microprice equal to its fed top's (`REL_TOL`) on 3,988 of 3,988, so every `quote_cadence` above now carries that evidence; the one mismatch per bot is D-135. Decision disagreements **0**, action disagreements 0 on every bot, but no entry fired on either side (every decision `none` 3,740 / `not_ready` 315: the trend stayed inside [0.4, 0.6]), so the decision rule's `long`/`short` branches are not yet exercised. Replay 16.5 s / 718 MiB peak RSS (all 5); comparator 5.9 s / 230 MiB (Bybit), 2.5 s / 211 MiB (Hyperliquid); re-run after the review patches (a fresh replay segment, same logs and catalog): replay 16.5 s / 724 MiB, comparator 7.9 s / 220 MiB (Bybit), 2.7 s / 212 MiB (Hyperliquid), every exact-equal share and class count above unchanged. **Display chain (SSOT trace)**: fixture 24 tests (20 run, 4 live skipped), no DIFFERENT field; `/api/snapshots` mid bit-equal to `kernel.indicators.mid_price` on all 600 fixture rows. Live (`VERIFY_STACK=1`, 24 passed, ~125 s): `rankings:live` stateless fields 182 matched the newest batch, 108 the batch before (in flight), 10 instruments not yet seen twice, **0 differed**; 15 traced rows reached the catalog integer-for-integer after 25-35 s; `/api/rankings` == bus; the newest `metrics.db` rows matched `rankings:live` around them for all 5 instruments (the old image, D-130). The verify data_api/ranking images were built 2026-09-29 12:59 (before 31.2/31.3): spreads unrounded, passing as float noise. **OFI backtest parity**: fixture 4 runs (BTC, SOL x z-window 300/20): 299 exact vs `ofi_readings`, 1 carried baseline, 0 mismatch; max rel diff vs the reference 1.3e-14..8.4e-14. Soak 2026-09-29 (rows 12:59:23-20:42:03Z only, D-128; catalog read-only): BTCUSDT-LINEAR 27,751 rows, 27,749 exact, 2 carried; BTCUSDT-SPOT 27,758 / 27,757 / 1; ETHUSDT-LINEAR 27,751 / 27,749 / 2; ETHUSDT-SPOT 27,758 / 27,757 / 1; SOL 27,759 / 27,758 / 1; 0 mismatch; max rel diff 2.5e-12 / 1.3e-12 / 1.7e-12 / 7.5e-12 / 5.3e-13; `ts_init` order == `ts_event` order everywhere; 126 s, 1.16 GB peak RSS (the linears' second carried baseline is a 7 s gap at 19:06:28Z) | `python3 -m bots.signal_replay ...` + `python3 -m verification.bot_parity --venue V --live-dir D --replay-dir D`; `VERIFY_STACK=1 ... test_ssot_trace.py`; `VERIFY_SOAK_CATALOG=... VERIFY_SOAK_DAY=... test_ofi_parity.py` (`docs/DATA_DICTIONARY.md` §1.22) |
 | Fault injection: every loss accounted for | Bybit, Hyperliquid | pending — Story 31.10 | | | |
 
 **Trades smoke (Story 31.4), how it was run.** The soak's first closed day is 2026-09-30, so the
@@ -208,6 +208,59 @@ bar equals the fold of the venue's trades while the venue's kline leaves out the
 multi-level sweep (D-126, OPEN). The scratch scripts and their output are not kept; the commands are
 the tool's own functions (`verification.application.candles._reference`, `_causes`,
 `verification.domain.trade_check.merge_reference`) over the same inputs.
+
+**Parity smoke (Story 31.9), how it was run.** The paper fleet (`bots/config.verify.toml`, one
+`dummy` bot per verify instrument, signal logs on) was built and started with `--no-deps` next to
+the running verify stack (collectors and recorders untouched); every bot's latest `start` is
+2026-09-30T06:43:49.754Z. After 66.5 min it was stopped (`docker stop verify-live-paper` at
+07:50:27Z; it stays stopped: it is in `VERIFY_SERVICES`, so the next `make verify-up` restarts it),
+and after 3 minutes (the collectors' 60 s flush past the window) from `platform/`:
+`/usr/bin/time -v python3 -m bots.signal_replay --config bots/config.verify.toml --catalog
+data/catalog --live-log data/verification/bot_signals/live --out
+data/verification/bot_signals/replay` (the catalog only read) and `python3 -m
+verification.bot_parity --venue BYBIT|HYPERLIQUID --catalog data/catalog --live-dir
+data/verification/bot_signals/live --replay-dir data/verification/bot_signals/replay [--json]`
+(both exited 0, 0 unexplained, before the review patches). A preliminary run over the first 28 min
+gave the same classes. **Re-run after the Story 31.9 review patches** (same live logs, catalog
+still only read; the replay appended a fresh segment to `data/verification/bot_signals/replay`,
+checked to start after the file's previous end and to reach the window end, and the comparator read
+it): both venues exit **1**, one `replay_input` `levels` per bot and nothing else failing. Every
+bot's mismatch is the same cycle (07:00:05.754Z, the row of 07:00:04Z sampled at 07:00:05.501Z):
+the replay's book lacks the row's fifth ask level (BTCUSDT-LINEAR 82949.7, SOL 118.09, ...). Root
+cause, proven on the derived catalog (D-135): the throwaway file holds the row's 41 deltas in
+order (`CLEAR` first), but they straddle a Parquet row-group boundary (5,000 rows; the row starts at
+delta 39,975 of each bot's identical-geometry file) and `ParquetDataCatalog.query`'s `ORDER BY
+ts_init` returns equal-`ts_init` rows unordered across it: the fifth ask's `ADD` comes back before
+the `CLEAR`, which then wipes it. The comparator's new replay-input check is what caught it; before
+the patches this cycle paired as an ordinary fed-levels difference. **Bybit
+verdict:** the four Bybit bots' classes are a classification, **not a parity proof**: while D-133
+and D-134 are OPEN the live side's quotes and (on spot) book are wrong at the pinned adapter, so
+"0 other unexplained" there means only that every difference has a named class, not that live and
+backtest agree on correct inputs. **What
+the classes mean here:** on Hyperliquid the live book equals a stored row within `[T-5 s, T+1 s]`
+on 99.8 % of cycles (`book_timing`, or equal outright: the replay sees the same book about 1 + `hold_back` s later)
+and quotes (`bbo`) move between rows (`quote_cadence`). On Bybit linear the live book at T is the
+venue's own book at T -- checked against the reference recorder's rebuilt `orderbook.50` book
+(a scratch script over `verification.domain.reference_book`, outside the tool): 99.6 % (BTCUSDT) /
+99.0 % (ETHUSDT) of cycles at the recorder's last receipt at or before T, 99.9 % within 100 ms --
+while a row holds the book at the exchange second's end, so `book_source` is the sampling instant
+(the live timer's phase, .754 s), not a different source. On Bybit spot it is not: the live book
+is the venue's on only 11.2 % / 20.9 % of cycles and has 10 levels a side on 1.7 % / 1.6 % (D-134),
+and on every Bybit bot the live quotes are the adapter's first-entry quotes (D-133: the live
+microprice sits a median 46.1 / 17.0 / 69.1 / 17.8 ticks from its own book's mid, Hyperliquid 0.5;
+a simulation of the adapter's rule over the recorder's frames reproduces it on 99.3 % / 98.5 % of
+linear cycles). So the Bybit rows above measure a live-side adapter defect as much as live/backtest
+parity, and the comparator cannot tell: D-133's follow-up adds a live-input-vs-venue check. The
+`bar_source` cycles are one bar each on BTCUSDT-LINEAR (06:53Z) and SOL (07:10Z), both closes
+decided by which process received a boundary trade first (bar membership is by arrival on both
+sides): the collector received the BTCUSDT trade at 83020.1 (`ts_event` 06:52:59.896Z) at
+59.998 s, before the bar closed, the live node after it (live close 83020.2, replay 83020.1); the
+SOL trade at 117.97 (`ts_event` 07:09:59.632Z) reached the collector at 07:10:00.087Z, after the
+close, and the live node before it (live 117.97, replay 117.96). The SGD trend then carries a
+< 4e-9 difference (`carried_state`). The Sandbox's `Skipping stale trade` stream during the run is D-132. The SSOT
+live variant (`VERIFY_STACK=1 CATALOG_PATH=data/catalog python3 -m pytest -o addopts=""
+--rootdir=. verification/tests/test_ssot_trace.py`) ran against the same stack; the OFI soak
+variant with `VERIFY_SOAK_CATALOG=data/catalog VERIFY_SOAK_DAY=2026-09-29`, read-only.
 
 ## Reference recorder footprint
 

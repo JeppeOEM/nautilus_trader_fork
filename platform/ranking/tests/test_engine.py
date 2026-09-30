@@ -495,6 +495,34 @@ def test_backfill_reads_each_instrument_exactly_once_across_cycles() -> None:
     assert prices.calls == [BTC]
 
 
+class _SlowPrices(FakePrices):
+    """A backfill read during which `seconds` of wall clock pass, as a real catalog read may."""
+
+    def __init__(self, clock: FakeClock, seconds: int) -> None:
+        super().__init__()
+        self._clock = clock
+        self._seconds = seconds
+
+    def series(self, instrument_id: str, start_ns: int) -> list[tuple[int, float]]:
+        self._clock.ns += self._seconds * SEC_NS
+        return super().series(instrument_id, start_ns)
+
+
+def test_a_slow_row_is_stamped_when_the_board_is_read_not_when_the_cycle_began() -> None:
+    # Story 31.9's SSOT trace: a batch ingested during the cycle's awaits is in the row, so a
+    # stamp taken before them would date the row before its own state.
+    clock = FakeClock()
+    b = board(clock)
+    mark_fresh(b, BTC, NOW_NS)
+    engine, _, history = _engine(b, prices=_SlowPrices(clock, seconds=7), clock=clock)
+
+    asyncio.run(engine.slow_loop_once())
+
+    row = history.nearest(BTC, NOW_NS)
+    assert row is not None
+    assert row["ts"] == NOW_NS + 7 * SEC_NS
+
+
 def test_a_failed_backfill_is_ledgered_and_never_retried() -> None:
     b = board()
     mark_fresh(b, BTC, NOW_NS)

@@ -68,10 +68,22 @@ services:
       REDIS_URL: "redis://127.0.0.1:${REDIS_PORT:-26379}"
       DASHBOARD_BASE_URL: "http://127.0.0.1:${DATA_API_PORT:-29100}"
 
+  # The Story 31.9 parity fleet: one paper DummyStrategy bot per verify instrument
+  # (bots/config.verify.toml, mounted over the base's bots/config.toml -- compose merges volumes by
+  # container path, so this entry replaces that one and the base's other mounts are kept), each
+  # writing its per-cycle signal log under data/verification/bot_signals/live for
+  # `bots.signal_replay` and `verification.bot_parity`. Only that directory is mounted: the rest of
+  # data/verification is the reference recorders' (DATA-02: the checked side never reaches the
+  # reference's files). It runs as the base's 1000:1000; `make verify-up` creates the directory as
+  # the invoking user first (dockerd would create a missing one root-owned).
   live-paper:
     container_name: verify-live-paper
     environment:
       REDIS_URL: "redis://127.0.0.1:${REDIS_PORT:-26379}"
+      BOT_SIGNAL_LOG_DIR: "/app/verify_data/bot_signals/live"
+    volumes:
+      - ./bots/config.verify.toml:/app/bots/config.toml:ro
+      - ./data/verification/bot_signals/live:/app/verify_data/bot_signals/live
 
   dozzle:
     container_name: verify-dozzle

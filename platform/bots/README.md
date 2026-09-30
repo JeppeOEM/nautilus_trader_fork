@@ -210,6 +210,64 @@ This builds the image (if needed) and starts the `live-paper` container in the
 background. It is **not** part of plain `make up` — it's gated behind the `live-paper`
 Compose profile so it's never started by accident.
 
+### Signal log (`BOT_SIGNAL_LOG_DIR`, Story 31.9)
+
+Set `BOT_SIGNAL_LOG_DIR` in the `live-paper` environment and every paper `dummy` bot appends one JSON
+line per decision cycle (each 1 s book timer event and each bar) to
+`<BOT_SIGNAL_LOG_DIR>/<bot_id>.jsonl` (`bots/strategies/signal_log.py`). Other strategies and
+the real-money exec bot write none, and `config.toml` has no key for it. Unset (the default, and the live stack's setting),
+nothing is written and the strategy behaves exactly as without it.
+
+Kinds: `start` (one per strategy start: `ts_ns` is the clock at start, in whole microseconds, plus
+the thresholds, levels, windows and `bar_spec`; the 1 s timer starts at that very nanosecond),
+`book` (`book_ts_ns` = the book's `ts_last`, `bids`/`asks` = the top
+`max(ofi_levels, obi_levels)` levels as fed, `[price, size]`), `book_skipped` (`reason`
+`no_book` or `one_sided`) and `bar` (`bar: {ts_event, close}`). Every cycle also carries
+`microprice`, `ofi`, `obi`, `mlofi`, `trend` (null until initialized), `signal`
+(`long`/`short`/`none`/`not_ready`, `signal_log.signal_of`) and `action` (`BUY`/`SELL` submitted
+this cycle, or null). A restart appends a new `start`: a file holds one segment per run.
+
+Known limit: one file per bot, growing for the whole run (about 1 KB per cycle, ~86 MB per bot
+per day); upgrade path hourly rotation. Turn it on only for a bounded run.
+
+### The verify parity fleet (`bots/config.verify.toml`, Story 31.9)
+
+The verify stack (`make verify-up`, `docker-compose.verify.yml`) runs `live-paper` as
+`verify-live-paper` with `bots/config.verify.toml` mounted over `/app/bots/config.toml`: one
+paper `dummy` bot per instrument the verify collectors record (`BTCUSDT-LINEAR`,
+`ETHUSDT-LINEAR`, `BTCUSDT-SPOT`, `ETHUSDT-SPOT` on Bybit, `SOL-USD-PERP` on Hyperliquid),
+mainnet data, Sandbox execution. Its signal logs land in
+`data/verification/bot_signals/live/` (the only part of `data/verification` it mounts: the rest is
+the reference recorders'), the input of `python3 -m bots.signal_replay` and
+`python3 -m verification.bot_parity`. To (re)start only the fleet next to a running verify stack,
+without recreating its collectors or recorders:
+
+```bash
+cd platform
+REDIS_PORT=26379 DATA_API_PORT=29100 DOZZLE_PORT=28080 \
+  docker compose -p verify -f docker-compose.yml -f docker-compose.verify.yml \
+  --profile live-paper up -d --build --no-deps live-paper
+```
+
+After a run of at least an hour, stop the fleet (`docker stop verify-live-paper`), wait about
+three minutes so the collectors' 60 s flush has passed the window, then replay every dummy bot's
+latest live segment through a `BacktestNode` over the catalog (read-only; derived book and quote
+data go to a throwaway catalog) and compare the two logs cycle by cycle:
+
+```bash
+cd platform
+python3 -m bots.signal_replay --config bots/config.verify.toml --catalog data/catalog \
+  --live-log data/verification/bot_signals/live --out data/verification/bot_signals/replay
+python3 -m verification.bot_parity --venue BYBIT --catalog data/catalog \
+  --live-dir data/verification/bot_signals/live --replay-dir data/verification/bot_signals/replay
+```
+
+`--bot BOT_ID` limits the replay to some bots, `--start`/`--end` (ISO) narrow the window (the
+start is snapped onto the live 1 s grid, never before the live start). A re-run appends a new
+segment (the replay checks its run wrote a fresh one reaching the window end); the comparator reads
+the latest. A bot's refusal is ledgered at `bots.signal_replay.refused` and the next bot still
+runs (exit 1). Both are described in `docs/DATA_DICTIONARY.md` §1.22.
+
 ---
 
 ## Watch it
@@ -227,10 +285,29 @@ What a healthy startup looks like, in order:
 4. `DummyStrategy: RUNNING` / `TradingNode: RUNNING`.
 5. `[CMD]--> Subscribe...` lines for quotes/order book/bars.
 
-A burst of `OrderMatchingEngine(DYDX): Skipping stale trade` warnings right at startup
-is normal — the sandbox exchange backfills recent historical trades to seed its book and
-correctly discards ones older than the live book state. It stops once the backfill
-drains.
+`OrderMatchingEngine(<VENUE>): Skipping stale trade` (and, rarely, `stale quote`) warnings are
+**not** a startup-only burst: on Bybit they run all the time (measured on the verify fleet
+2026-09-30 06:43:49-07:50:17Z: about 150 per minute per liquid instrument, 13.4-24.8 % of each
+Bybit instrument's trades, plus a few dozen stale quotes; Hyperliquid 12 trades). They are a Known
+limit, audit D-132: the Sandbox's
+`L1_MBP` matching engine skips a trade whose `ts_event` is older than its book's `ts_last`, and
+the Bybit adapter stamps quotes with the message's publish time `ts` but trades with their
+match time `T`, 1-4 ms earlier, so a trade that arrives after the quote reflecting it is judged
+stale. A skipped trade moves neither the Sandbox's L1 book nor its last price and triggers no
+trade execution. Every order a dummy bot sends the venue is a MARKET order (the exits are emulated
+on the node's own trade feed, which is not filtered, and released as market orders,
+`bots/strategies/exits.py`), so no resting order misses a fill: a market order fills at the latest
+quote instead of at a trade print that followed it by 1-4 ms, and a skipped quote (rare) leaves the
+book at the previous trade's print until the next quote. Nothing is lost from the archive or the
+bot's own data: the collectors do not use this engine. Upgrade path in D-132.
+
+**Bybit quotes and spot books are wrong for a bot that subscribes both** (audit D-133, D-134,
+OPEN, FORK-01): with the depth-50 book and quotes subscribed together, as `DummyStrategy` does,
+the pinned adapter builds a quote from every book message's first entries (not the best level),
+and on spot it also replays the depth-1 quote stream into the book. The Sandbox fills on those
+quotes, so no Bybit dummy-bot paper result is trustworthy until the operator's decision in
+`docs/DEPLOY_CHECKLIST.md` "31-9" is taken. Hyperliquid measured unaffected; dYdX's handler was not
+examined.
 
 **Status heartbeat** (published every 5s):
 ```bash

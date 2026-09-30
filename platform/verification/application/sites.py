@@ -16,8 +16,8 @@
 The verification context's error-ledger sites (DATA-07), the reference recorder's
 (`verification.recorder.*`), the conservation tool's (`verification.conservation.*`), the
 trades tool's (`verification.trades.*`), the book tool's (`verification.book.*`), the derivs
-tool's (`verification.derivs.*`), the catalog tool's (`verification.catalog.*`) and the candles
-tool's (`verification.candles.*`): every
+tool's (`verification.derivs.*`), the catalog tool's (`verification.catalog.*`), the candles
+tool's (`verification.candles.*`) and the bot parity tool's (`verification.bot_parity.*`): every
 failure either survives or refuses on is recorded at one of these through
 `observability.error_ledger.record`, never a bare log line.
 
@@ -78,3 +78,9 @@ CATALOG_REFUSED = "verification.catalog.refused"
 # unreachable or answering non-200 or a malformed page, a file that vanished mid-run; or it crashed
 # (the detail says `crashed`; the exception is then re-raised).
 CANDLES_REFUSED = "verification.candles.refused"
+# The bot parity tool refused to run: a missing log directory, catalog or coverage record, no log
+# of a venue bot, a bot without its replay log, a malformed record, a replay whose `start` differs
+# from the live one, a catalog not yet flushed past a bot's window, a stored row the book decoder
+# refuses (or a float-layout file), a file that vanished mid-run; or it crashed (the detail says
+# `crashed`; the exception is then re-raised).
+BOT_PARITY_REFUSED = "verification.bot_parity.refused"

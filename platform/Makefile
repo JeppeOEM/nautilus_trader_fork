@@ -213,8 +213,8 @@ VERIFY_REDIS_PORT ?= 26379
 VERIFY_DATA_API_PORT ?= 29100
 VERIFY_DOZZLE_PORT ?= 28080
 VERIFY_COMPOSE := REDIS_PORT=$(VERIFY_REDIS_PORT) DATA_API_PORT=$(VERIFY_DATA_API_PORT) DOZZLE_PORT=$(VERIFY_DOZZLE_PORT) docker compose -p verify -f $(PLATFORM_DIR)docker-compose.yml -f $(PLATFORM_DIR)docker-compose.verify.yml
-VERIFY_SERVICES := redis bybit_collector hyperliquid_collector archive ranking_engine data_api dozzle reference_recorder_bybit reference_recorder_hyperliquid
-VERIFY_DATA_DIRS := catalog candles errors metrics archive verification coverage
+VERIFY_SERVICES := redis bybit_collector hyperliquid_collector archive ranking_engine data_api dozzle reference_recorder_bybit reference_recorder_hyperliquid live-paper
+VERIFY_DATA_DIRS := catalog candles errors metrics archive verification verification/bot_signals/live coverage live_paper
 # `verify-up` marks the data/ it starts on; `verify-wipe` deletes only a marked data/, so a
 # `make verify-wipe` typed in the live checkout (its stack stopped) never deletes live data.
 VERIFY_MARKER := .verify-stack

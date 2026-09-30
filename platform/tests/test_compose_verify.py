@@ -64,6 +64,7 @@ _VERIFY_SERVICES = {
     "ranking_engine",
     "data_api",
     "dozzle",
+    "live-paper",
     *_RECORDERS,
 }
 
@@ -410,6 +411,30 @@ def test_the_verify_targets_run_the_verify_project_on_the_verify_ports(target: s
     assert variables["VERIFY_REDIS_PORT"] == "26379"
 
 
+def test_the_verify_paper_fleet_logs_its_signals_into_the_verification_dir() -> None:
+    """
+    Story 31.9: `live-paper` runs the parity fleet file over the base's config mount (compose merges
+    volumes by container path, so the same target replaces the base's entry) and writes its signal
+    logs into data/verification/bot_signals/live -- only that directory is mounted, never the rest
+    of data/verification, which the reference recorders own (DATA-02).
+    """
+    override = _services(_yaml(_OVERRIDE))["live-paper"]
+    base = _services(_yaml(_BASE))["live-paper"]
+    assert override["container_name"] == "verify-live-paper"
+    assert override["environment"] == {
+        "REDIS_URL": "redis://127.0.0.1:${REDIS_PORT:-26379}",
+        "BOT_SIGNAL_LOG_DIR": "/app/verify_data/bot_signals/live",
+    }
+    assert override["volumes"] == [
+        "./bots/config.verify.toml:/app/bots/config.toml:ro",
+        "./data/verification/bot_signals/live:/app/verify_data/bot_signals/live",
+    ]
+    targets = {volume.split(":")[1]: volume.split(":")[0] for volume in base["volumes"]}
+    assert targets["/app/bots/config.toml"] == "./bots/config.toml"
+    assert "/app/verify_data" not in targets
+    assert (PLATFORM_DIR / "bots" / "config.verify.toml").is_file()
+
+
 def test_verify_up_starts_exactly_the_verify_services_and_never_dydx() -> None:
     (tokens,) = _verify_compose_lines("verify-up")
     started = tokens[tokens.index("--build") + 1 :]
@@ -423,7 +448,7 @@ def test_verify_up_creates_every_bind_mounted_data_dir_first() -> None:
     recipe = [_expand(line, variables) for line in recipes["verify-up"]]
     override, base = _services(_yaml(_OVERRIDE)), _services(_yaml(_BASE))
     mounted = {
-        volume.split(":")[0].removeprefix("./data/").split("/")[0]
+        volume.split(":")[0].removeprefix("./data/")
         for name in _VERIFY_SERVICES
         for volume in base.get(name, {}).get("volumes", []) + override[name].get("volumes", [])
         if volume.startswith("./data/") and volume.split(":")[0].count(".toml") == 0

@@ -469,6 +469,8 @@ def test_the_dummy_only_keys_are_every_dummy_tunable_on_botconfig() -> None:
         DummyStrategyConfig.__struct_fields__
     )
     assert set(_DUMMY_ONLY_KEYS) == tunables - shared
+
+
 # --- Story 29.6: bracket-exit keys ---------------------------------------------------------------
 
 
@@ -526,3 +528,23 @@ def test_the_committed_configs_parse() -> None:
     assert (bot.trend_buy_threshold, bot.trend_sell_threshold) == (0.0, -1.0)
     assert bot.ofi_confirm_threshold == -1e9
     assert churn.venue_config("DYDX").environment == "mainnet"
+
+
+def test_the_verify_parity_fleet_is_one_paper_dummy_bot_per_verify_instrument() -> None:
+    """
+    Story 31.9: `bots/config.verify.toml` loads with the real loader and names exactly the
+    instruments the verify collectors record, one `dummy` bot each (spot included).
+    """
+    platform = Path(__file__).resolve().parents[2]
+    fleet = load_paper_config(platform / "bots" / "config.verify.toml")
+    collected: set[str] = set()
+    for venue in ("bybit", "hyperliquid"):
+        with (platform / "capture" / "venues" / venue / "config.toml").open("rb") as f:
+            collected |= set(tomllib.load(f)["instruments"])
+    instruments = [bot.instrument_id for bot in fleet.config.bots]
+    assert sorted(instruments) == sorted(collected)
+    assert {bot.strategy for bot in fleet.config.bots} == {"dummy"}
+    assert {name: venue.environment for name, venue in fleet.config.venues.items()} == {
+        "BYBIT": "mainnet",
+        "HYPERLIQUID": "mainnet",
+    }

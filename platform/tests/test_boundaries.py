@@ -199,6 +199,13 @@ COMPOSITION_ROOTS: dict[str, frozenset[str]] = {
     # `candles.application.rebuild` and serves it through the real `data_api` route as the tool's
     # `fetch`: the code under test, driven from a test module only.
     "verification.tests.test_candles": frozenset({CANDLES, DATA_API}),
+    # The display-chain trace (Story 31.9, AC1) drives the real `RankingEngine` and `metrics.db`
+    # writer, seeds the real `views.rankings_bus.RankingsBus` and serves every hop through the
+    # real `data_api` routes: the code under test, driven from a test module only.
+    "verification.tests.test_ssot_trace": frozenset({DATA_API, RANKING, VIEWS}),
+    # The OFI parity test (Story 31.9, AC3) runs research's `OFIStrategy` in a `BacktestNode` and
+    # its `ofi_readings` replay, both compared with the reference.
+    "verification.tests.test_ofi_parity": frozenset({RESEARCH}),
 }
 
 
@@ -916,6 +923,7 @@ KERNEL_MODULES = frozenset(
         "parquet_compat",
         "performance_metrics",
         "second_snapshot",
+        "snapshot_book",
         "venue_http",
         "venues",
     }
@@ -2033,6 +2041,7 @@ VERIFICATION_ROOTS = frozenset(
         "verification.derivs",
         "verification.catalog",
         "verification.candles",
+        "verification.bot_parity",
     }
 )
 # Story 31.7's subject package: the code under test, driven (never the reference). Only the catalog
@@ -2164,7 +2173,7 @@ def test_importing_the_verification_roots_loads_no_denied_module() -> None:
         "import sys, verification.recorder, verification.tools.record_fixtures\n"
         "import verification.conservation, verification.tools.cut_snapshot_fixtures\n"
         "import verification.trades, verification.book, verification.derivs\n"
-        "import verification.candles\n"
+        "import verification.candles, verification.bot_parity\n"
         "print('\\n'.join(sorted(sys.modules)))\n"
     )
     env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": str(PLATFORM_DIR)}

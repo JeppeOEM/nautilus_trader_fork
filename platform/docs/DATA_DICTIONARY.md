@@ -1760,6 +1760,226 @@ tool runs is judged as served at that moment (a loud difference, never a silent 
 
 ---
 
+### 1.22 Live, backtest and display parity, incl. the bot's own signals (`verification.bot_parity`, Story 31.9)
+
+Not stored data: three proofs that the value a screen shows, the value a bot acts on and the value
+a backtest computes are the same, or differ only by a named, measured mechanism.
+`docs/VERIFICATION_REPORT.md` (row "Live, backtest and display parity") holds the numbers.
+
+**1. The signal log (`bots/strategies/signal_log.py`, opt-in).** `DummyStrategyConfig.signal_log_path`
+(None by default: nothing written, trading unchanged); the host sets it to
+`<BOT_SIGNAL_LOG_DIR>/<bot_id>.jsonl` for paper `dummy` bots only -- the real-money exec bot writes
+none (`BotConfig` and its TOML are unchanged).
+One JSON line per decision cycle (every 1 s timer event and every bar), floats in `json`'s
+shortest repr (the exact double fed; NaN written `NaN`, never dropped):
+
+| Field | Meaning |
+|---|---|
+| `kind` | `start` (one per `on_start`), `book`, `book_skipped` or `bar` |
+| `bot_id`, `instrument_id` | the bot (its `order_id_tag`) and its instrument |
+| `ts_ns` | `start`: the clock at start, truncated to whole microseconds (below); otherwise the event's `ts_event` (the timer event's, the bar's) |
+| `start` only | `trade_size`, `bar_spec`, `trend_lookback`, `trend_buy_threshold`, `trend_sell_threshold`, `ofi_levels`, `ofi_window`, `obi_levels`, `ofi_confirm_threshold` |
+| `book_ts_ns` | `book`: the book's `ts_last` (optional on `book_skipped`) |
+| `bids` / `asks` | `book`: the top `max(ofi_levels, obi_levels)` levels exactly as the indicators were fed, `[price, size]` floats (`Price.as_double()`, so `83062.59999999999` for 83062.6) |
+| `reason` | `book_skipped`: `no_book` or `one_sided` (a skipped second is visible, DATA-07) |
+| `bar` | `bar`: `{ts_event, close}` |
+| `microprice`, `ofi`, `obi`, `mlofi`, `trend` | the indicator values, null while not initialized |
+| `signal` | `long`/`short`/`none`/`not_ready`: `signal_log.signal_of(trend, mlofi, thresholds)`, the one statement of the entry rule (`_wanted_side` decides from it) |
+| `action` | the side (`BUY`/`SELL`) of the order submitted this cycle, or null (reset at the top of every timer event and bar, so a skipped cycle never carries an earlier cycle's side) |
+
+A restart appends a new `start`: a file holds one run segment per start, and every reader takes
+the latest. Known limit (start): the live clock's timers fire on whole microseconds (a start of
+`...519479442` ns fires at `...520519479000`), so the strategy truncates its start to whole
+microseconds and starts its 1 s timer at exactly that `ts_ns`; the few hundred ns lost are before
+the first cycle and change nothing it computes. Known limit (size): one file per bot growing for
+the run, about 1 KB per cycle (~86 MB per bot-day); upgrade path hourly rotation.
+
+**2. The verify fleet and its replay.** `bots/config.verify.toml`: one paper `dummy` bot per verify
+instrument (Bybit `BTCUSDT-LINEAR`, `ETHUSDT-LINEAR`, `BTCUSDT-SPOT`, `ETHUSDT-SPOT`; Hyperliquid
+`SOL-USD-PERP`), mainnet data, Sandbox execution only. `docker-compose.verify.yml`'s `live-paper`
+mounts it over `/app/bots/config.toml`, sets `BOT_SIGNAL_LOG_DIR=/app/verify_data/bot_signals/live`
+and mounts only `./data/verification/bot_signals/live` there (the rest of `data/verification` is the
+reference recorders', DATA-02; `make verify-up` creates the directory first); it is in the
+`Makefile`'s `VERIFY_SERVICES`.
+
+`python3 -m bots.signal_replay --config F --catalog P --live-log DIR --out DIR [--start ISO]
+[--end ISO] [--bot BOT_ID ...]` runs one `BacktestNode` per dummy bot of F (the strategy by string
+path, the bot's thresholds, sizing and exits, `signal_log_path=<out>/<bot_id>.jsonl`):
+- **Clock and window.** `start` is the live log's latest `start` record's `ts_ns` exactly, so the
+  replay's 1 s timer fires on the same `start + k s` nanoseconds and cycles pair by equal `ts_ns`,
+  never by nearest match; `end` is the segment's last record (`--start` is snapped up onto that
+  grid and never before the live start, `--end` taken as given). The live `start` record's
+  instrument, thresholds and sizing must equal F's (else refused). The live log is read like the
+  comparator reads it: an unterminated last line is held back, a malformed complete line refused.
+- **Its own output is checked.** The run must append a fresh segment (a `start` after the file's
+  size before the run, so an older segment never passes for it) that starts at the window start and
+  whose last record reaches the window end within 1 s.
+- **Data.** The catalog's instrument definition in force at the window start (the latest with
+  `ts_init <= start`; refused when none) and `TradeTick`s (the `LAST-INTERNAL` trend bars
+  aggregate from the same trades), plus, per stored snapshot row, one `OrderBookDeltas` (`CLEAR`
+  and every stored level, `F_SNAPSHOT`, the last `F_LAST`) and one `QuoteTick` (the row's top), both
+  from `kernel/snapshot_book.py` (the one conversion; research's per-row quote derivation,
+  `research.application.quotes`, builds through its `top_quote`, SSOT-01) and both stamped
+  `ts_event = ts_init =` the row's `ts_init`: the moment the row could first be known, the clock
+  backtests replay on (§1.7). Prices and sizes come from the stored integers
+  (`Price.from_raw`), never a float. The derived data goes to a throwaway catalog; the source is
+  read one hour at a time (MEM-01), never written.
+- **Venue.** Configured as the fleet's Sandbox client (the venue's account type and starting
+  balances, NETTING, `L1_MBP`, leverage 1), but it does not fill as the live Sandbox does. Known
+  limit: the backtest's `L1_MBP` matching engine skips a trade older than its book's last update,
+  and the derived quotes/deltas are stamped at the row's `ts_init` (at or after `S + 1 + hold_back`
+  s) while trades keep the venue's `ts_event`, so most replay trades are skipped for fill
+  simulation and a market order fills at the derived quote; fills, positions and so `action` differ
+  by construction (hence informational). Upgrade path: replay the trades on the book's clock, or
+  derive the book from the raw archive at venue time.
+- **Cold start.** No warm-up, as live; but the replay holds no book until the first stored row
+  after `start` (about 1 + `hold_back` s), so its first cycles may be `book_skipped`, explained
+  below (`cold_start`).
+
+Exit 0 when every selected bot replayed, 1 on any refusal, 2 on usage. Each bot runs on its own: a
+refusal (a missing or malformed log, a mismatched config, no definition or rows, an engine error, a
+run that wrote no fresh aligned segment reaching the end) is ledgered at
+`bots.signal_replay.refused` (its own `job_service` ledger, `bots.signal_replay` unless `ERROR_LEDGER_SERVICE` names a parent) and the next
+bot still runs. Known limits (chunking,
+the engine log bypassed) are in the module docstring.
+
+**3. The comparator.** `python3 -m verification.bot_parity --venue BYBIT|HYPERLIQUID --live-dir D
+--replay-dir D [--catalog P] [--json]` (`verification/bot_parity.py`, the root;
+`verification/application/bot_parity.py`; `verification/domain/bot_parity.py`, pure;
+`verification/infrastructure/signal_logs.py`). Oracle side (DATA-02): stdlib plus verification's
+own raw readers; it imports no `bots`, `kernel.indicators` or `nautilus_trader` (the runtime probe
+in `tests/test_boundaries.py`). The logs are read as JSON text (an unterminated last line is a
+write in flight, left for the next run); the stored rows raw, decoded by the oracle's own book
+decoder; the coverage record `<catalog>/../coverage/<venue>.jsonl` for gap reasons.
+
+Pairing: the latest segment of each side, their `start` records equal but for `ts_ns`, the
+replay's on the live grid (`live start + k s`, k >= 0; a `--start` override pairs from it, and the
+live cycles before it stay visible as memory the replay never had, `carried_state`); `book` and
+`book_skipped` share the timer's group, `bar` its own; equal `ts_ns` over `(replay start, min(last
+live, last replay)]`. When one side's last cycle falls over one timer interval (1 s) short of the
+other's, the longer side's cycles past it are counted `truncated`, which fails: a cut-short side
+never passes as a shorter window. **Equality is exact** (a null
+equals a null, a NaN a NaN, nothing rounded). The one grid rule: a logged level equals a stored
+level iff each float, at its exact binary value rounded half-even to the row's precision, is the
+stored integer (`grid_units`: `as_double()` is a few ulp off its grid value, never half a step).
+
+Per signal (`microprice`, `ofi`, `obi`, `mlofi`, `trend`): paired count, exact-equal share, max
+absolute difference; each non-equal paired signal gets exactly one class, first match wins:
+
+| Class | Meaning | Fails |
+|---|---|---|
+| `gap` | a second in `[T-3 s, T)` has no stored row and the coverage record names why (`gap_reasons`) | no |
+| `book_timing` | the fed levels differ, and the live top-N equals a stored row's top-N at a second in `[T-5 s, T+1 s]` | no |
+| `book_source` | the fed levels differ and the live top-N equals no stored row in that window | no |
+| `quote_cadence` | `microprice`/`ofi` only: the live side updates on every quote, the replay once per stored row -- and only when the replay's microprice equals its active row's top's (below); `ofi` is fed the same quotes, so it rests on that evidence | no |
+| `bar_source` | `trend` only: the bars' `{ts_event, close}` up to T differ | no |
+| `carried_state` | inputs equal this cycle but different within the indicator's memory (`mlofi`: `ofi_window` + 1 cycles; `trend`: every bar of the segment, an online SGD model, deliberately not `trend_lookback`) | no |
+| `unexplained` | none of the above, or a missing second without a coverage reason | **yes** |
+
+`trend` is fed by bars alone, so only `bar_source`/`carried_state`/`unexplained` apply to it. A
+cycle's own class is `unexplained` if any signal or its decision is, else its earliest class. A
+`signal` disagreement is attributed to its diverging input's class (`trend`, `mlofi`), `unexplained`
+when both are equal; `action` disagreements are informational (fills differ by construction). A
+cycle on one side only is `live_only`/`replay_only`: a replay book the live side skipped at the same
+T carries the live skip's own reason (`book_skipped:<reason>`); a live book the replay skipped is
+explained only by the replay's `cold_start` (`no_book` before the first stored row with `ts_init` at
+or after the replay start) or a coverage-explained `gap`; anything else, a replay skip mid-window
+included, is `unexplained`.
+
+**The replay's own input (`replay_input`, fails).** Every replay timer cycle is checked against the
+catalog, whatever the live side logged: its fed levels must equal the stored row active at T by
+`ts_init` (the latest with `start <= ts_init <= T`; `grid_units`' exact rule), its microprice that
+row's top's (`reference_microprice`, `reference_signals.microprice`'s formula over the row's
+integers, within `signal_compare.REL_TOL`), and a skip means no row was active. Reasons: `levels`,
+`microprice`, `no_row`, `skipped_with_row`. This is what fails a broken snapshot conversion even
+when both logs agree (it found D-135).
+
+Exit 0 iff nothing fails (`unexplained`, `replay_input`, `truncated` all 0); 1 otherwise or on a
+refusal (ledgered `verification.bot_parity.refused`: a missing directory, catalog or coverage
+record, a bot without its replay, a bot logging more levels a side than the stored rows of its
+window hold, a log whose venue cannot be told, a catalog not flushed past a bot's window -- no
+stored row in the minute after it --, a malformed record of this venue's logs, `start` records
+differing but for `ts_ns` or a replay start off the live grid); 2 on usage. Each live log's venue
+is read leniently from its `start` record first, so another venue's malformed log never refuses
+this venue's run.
+
+**What the classes do not see (audit D-133, D-134).** A class names *where* two sides differ, not
+which side is right. On Bybit the live side's inputs are themselves wrong: the pinned adapter
+builds every Bybit quote from the first entries of each depth-50 book message (D-133) and on spot
+also replays the depth-1 quote stream into the book (D-134), and both surface here only as
+`quote_cadence` / `book_source`. Measured against the reference recorder (§1.15) outside this tool;
+the upgrade path is a live-vs-venue input check (`quote_source`) in this tool, D-133. So on Bybit
+a run with nothing else failing is a classification, **not a parity proof**, while D-133/D-134 are
+OPEN: the replay's input is checked against the catalog, the live side's against nothing.
+
+**4. The display chain, traced (`verification/tests/test_ssot_trace.py`, AC1).** One stored second
+followed along six hops: catalog row -> `snapshots:raw` -> `RankingBoard` -> `rankings:live` ->
+`metrics.db` -> the `data_api` responses (`/api/rankings`, `/api/metrics/history`,
+`/api/snapshots`). Fixture variant (always runs, in `make test`): the committed real rows (Bybit
+BTCUSDT linear, Hyperliquid SOL, 300 each) published as `snapshots:raw` JSON through a real
+`RankingEngine` (in-memory ports, a real tmp `metrics.db`), served by the real routes (TestClient)
+and a tmp `write_data` catalog. Per field and per hop: the stored integers equal the payload
+integers; stateless fields equal the reference (`verification.domain.reference_signals`, 31.3's
+tolerances); windowed and stateful fields equal it over the rows so far; `metrics.db` equals the
+board's state at write time; the API equals the store and the bus exactly. Every key a hop emits is
+compared or names a row of the test's `ACCOUNTED` table, so a new field fails until traced:
+
+| Accounted row | Hop | Field | Why it differs |
+|---|---|---|---|
+| `metrics_price_is_trade_close` | board -> metrics.db | `price` | the last trade close (§3.3), not the live mid `rankings:live` calls `price` |
+| `metrics_ts_is_wall_clock` | board -> metrics.db | `ts` | the engine's wall clock when the slow loop read the board (D-130), not a row's `ts_event` |
+| `rankings_live_has_no_ts_event` | board -> rankings:live | `updated_at` | the engine's wall clock at build; no entry names the `ts_event` it reflects |
+| `spread_rounded_to_price_precision` | board -> rankings:live, metrics.db | `spread` | rounded to the row's price precision (31.3); judged `at_places(p)` |
+| `float_decode` | snapshots:raw -> board | every derived value | `units / 10^p` decoded to the nearest double; `FLOAT_NOISE` reported apart |
+| `snapshots_mid_is_kernel_mid_price` | catalog -> /api/snapshots | `mid` | `kernel.indicators.mid_price` (inline until Story 31.9, D-131): compared with the kernel function (bit-equal) and the reference, every row |
+| `api_rankings_renames_ranks` | rankings:live -> /api/rankings | `ranks` | served as `items`, every entry byte-for-byte |
+| `metrics_ofi_is_ofi_5` | board -> metrics.db | `ofi` | the rank entry's `ofi_5` under its historical name |
+| `metrics_rank_is_real` | board -> metrics.db | `rank` | a REAL column: 1 reads back 1.0 |
+| `metrics_api_row_has_no_instrument_id` | metrics.db -> /api/metrics/history | `instrument_id` | the path names it |
+| `undefined_z_published_as_zero` | board -> rankings:live | `ofi_10_z` | an undefined z-score is published 0.0 (§2.2, D-89): `pinned_zero` |
+| `obi_carried_on_zero_total` | board -> rankings:live | `obi_3/5/10` | a zero-total OBI keeps the last value (§2.3, D-89): `carried` |
+| `snapshots_t_is_milliseconds` | catalog -> /api/snapshots | `t` | `ts_event // 10^6`, truncated |
+| `volume24h_from_the_volume_poll` | volume source -> rankings:live, metrics.db | `volume24h` | the venue's 24 h USD volume poll |
+| `slow_fields_from_the_last_slow_loop` | metrics.db -> rankings:live | `pct_*`, `volatility` | copied from the last slow-loop row |
+| `in_flight_publish` (live only) | snapshots:raw -> rankings:live | stateless fields | a message published while the engine handles the previous batch reflects that batch: matched to the newest or the one before, counted apart |
+| `slow_loop_reads_its_clock_first` (live only) | board -> metrics.db | `ofi`/`microprice`/`spread` | the deployed image stamps `ts` before its awaits (fixed in code, D-130, undeployed): matched at/before `ts` or within 2 s after |
+
+Live variant (`VERIFY_STACK=1`, a module-level `skipif`, else skipped): subscribes to the verify
+Redis (`127.0.0.1:26379`) `snapshots:raw` and `rankings:live`; checks each `rankings:live` row's
+stateless fields against the last batch before it; finds the traced rows in `CATALOG_PATH` after
+the flush (bounded, <= 150 s); checks `/api/rankings` against the latest bus message and the newest
+`metrics.db` row against the last `rankings:live` at or before its `ts`.
+
+**5. `OFIStrategy`'s backtest z-score (`verification/tests/test_ofi_parity.py`, AC3).** A recording
+subclass of `OFIStrategy`, run by a real `BacktestNode` over a `write_data` catalog, appends
+`(ts_event, ts_init, value, initialized)` after every `on_data`. Against
+`research.application.microstructure.ofi_readings`: **exactly equal** on every row with a reading;
+a row without one (NaN: the first row, the baseline after a gap over `OFI_GAP_NS`, a one-sided row)
+is the pinned class `carried` (the strategy keeps the previous value, 0.0 before the first). Against
+the independent reference `rolling_ofi_z(..., usd=True, ...)`: within `signal_compare.REL_TOL`; an
+undefined z-score (under 2 readings, a flat window) published 0.0 is `pinned_zero`. Row order by
+`ts_init` must equal order by `ts_event`, else the test fails. Fixture variant: both fixtures at the
+defaults (10 levels, window 20, z-window 300) and z-window 20. Soak variant: `VERIFY_SOAK_CATALOG`
++ `VERIFY_SOAK_DAY`, every stored instrument's day at the defaults, the catalog only read.
+
+**Repro** (host, from `platform/`, on the verify stack's data): stop the fleet after at least an
+hour (`docker stop verify-live-paper`), wait ~3 minutes for the collectors' 60 s flush, then
+`python3 -m bots.signal_replay --config bots/config.verify.toml --catalog data/catalog --live-log
+data/verification/bot_signals/live --out data/verification/bot_signals/replay` and
+`python3 -m verification.bot_parity --venue BYBIT|HYPERLIQUID --catalog data/catalog --live-dir
+data/verification/bot_signals/live --replay-dir data/verification/bot_signals/replay [--json]`;
+`VERIFY_STACK=1 CATALOG_PATH=data/catalog python3 -m pytest -o addopts="" --rootdir=.
+verification/tests/test_ssot_trace.py`; `VERIFY_SOAK_CATALOG=data/catalog VERIFY_SOAK_DAY=YYYY-MM-DD
+python3 -m pytest -o addopts="" --rootdir=. verification/tests/test_ofi_parity.py`.
+Measured cost (2026-09-30, 66.5 min of 5 bots, `docs/VERIFICATION_REPORT.md`): the replay 16.5 s
+wall and 718 MiB peak RSS for all five (about 3 s per bot-hour); the comparator 5.9 s / 230 MiB
+(Bybit, 4 bots) and 2.5 s / 211 MiB (Hyperliquid), 7.9 s / 220 MiB and 2.7 s / 212 MiB with the
+replay-input check; result after the review patches: 1 `replay_input` `levels` per bot (D-135),
+nothing else failing, the Bybit classes not a parity proof while D-133/D-134 are OPEN; the SSOT live variant ~125 s; the OFI soak
+variant 126 s / 1.16 GB over the 2026-09-29 soak day.
+
+---
+
 ## 2. Computed signals / ML features (`platform/kernel/`, `platform/views/`, `platform/ranking/`)
 
 Everything here is computed **on read** from the raw types in §1 — nothing in this

@@ -125,6 +125,23 @@ def test_a_touched_second_is_priced_too() -> None:
     assert (row["mid"], row["price"]) == (100.0, 100.0)
 
 
+def test_the_served_mid_is_the_kernels_mid_price_not_an_inline_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """SSOT-01 (audit D-131): `mid` comes from `kernel.indicators.mid_price`, the one statement of it."""
+    seen: list[dict] = []
+
+    def recording_mid(snapshot: dict) -> float | None:
+        seen.append(snapshot)
+        return 12.5
+
+    monkeypatch.setattr(chart_series, "calc_mid_price", recording_mid)
+    (row,) = price_series_rows([_snapshot(_BASE_NS, [100.0], [101.0])])
+
+    assert row["mid"] == 12.5
+    assert [(s["bid_prices"][0], s["ask_prices"][0]) for s in seen] == [(100.0, 101.0)]
+
+
 @pytest.mark.parametrize(("bids", "asks"), [([], [101.0]), ([100.0], []), ([], [])])
 def test_an_empty_top_of_book_is_ledgered_and_raised_never_skipped(
     bids: list[float], asks: list[float]

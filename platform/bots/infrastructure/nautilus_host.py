@@ -44,8 +44,13 @@ Known limit: an `ExecBot` (`real_money`/`exchange_demo`) always runs `DummyStrat
 `ExecConfig` has no `strategy`/`params` keys, so a strategy reaches real signing only after it has
 run as a paper bot. Upgrade path: the same two keys on `ExecConfig` and its loader, checked by
 `check_strategy`, once a paper-proven strategy is promoted.
+
+`BOT_SIGNAL_LOG_DIR` (Story 31.9): when set, every `DummyStrategy` this host builds writes its
+per-cycle signal log to `<dir>/<bot_id>.jsonl` (`bots.strategies.signal_log`); other strategies
+have no such log. Unset, nothing is written.
 """
 
+import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
@@ -101,6 +106,8 @@ from nautilus_trader.trading.strategy import Strategy
 # One fixed id for the whole node (AD-11): per-bot addressing lives entirely in bot_id /
 # StrategyId (order_id_tag), never in trader_id.
 TRADER_ID = "LIVE-PAPER-001"
+# The env var naming the directory of the opt-in DummyStrategy signal logs (see the docstring).
+SIGNAL_LOG_DIR_ENV = "BOT_SIGNAL_LOG_DIR"
 
 type HostedBot = tuple[BotConfig | ExecConfig, Strategy]
 
@@ -351,11 +358,25 @@ def _strategy_for(bot: BotConfig | ExecConfig) -> Strategy:
                 ofi_confirm_threshold=bot.ofi_confirm_threshold,
                 take_profit_bps=exits.take_profit_bps if exits is not None else None,
                 stop_loss_bps=exits.stop_loss_bps if exits is not None else None,
+                # The signal log is the paper fleet's parity instrument (Story 31.9): an exec
+                # bot never writes one.
+                signal_log_path=_signal_log_path(bot.bot_id) if exits is not None else None,
                 order_id_tag=bot.bot_id,
             ),
         )
     assert isinstance(bot, BotConfig)  # an ExecConfig has no paths (see the module's Known limit)
     return _importable_strategy(bot, *paths)
+
+
+def _signal_log_path(bot_id: str) -> str | None:
+    """
+    `<BOT_SIGNAL_LOG_DIR>/<bot_id>.jsonl` when the env var is set, else None (no log): the
+    `DummyStrategy` signal log is opt-in per process, never a `BotConfig`/TOML key (Story 31.9).
+    """
+    directory = os.environ.get(SIGNAL_LOG_DIR_ENV)
+    if not directory:
+        return None
+    return os.path.join(directory, f"{bot_id}.jsonl")
 
 
 def _importable_strategy(bot: BotConfig, strategy_path: str, config_path: str) -> Strategy:

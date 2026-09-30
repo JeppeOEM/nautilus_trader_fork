@@ -62,6 +62,7 @@ from kernel.indicators import DepthProfile
 from kernel.indicators import MultiLevelOBI
 from kernel.indicators import MultiLevelOFI
 from kernel.indicators import microprice as calc_microprice
+from kernel.indicators import mid_price as calc_mid_price
 from kernel.indicators import snapshot_depth
 from kernel.indicators import spread as calc_spread
 from kernel.second_snapshot import DydxSecondSnapshot
@@ -291,12 +292,10 @@ class CancellationTracker:
         delta_size = delta.order.size.as_double()
         action_str = "add" if delta.action == BookAction.ADD else "delete"
 
-        if delta.order.side == OrderSide.BUY and best_bid_price is not None:
-            if delta_price == best_bid_price:
-                self._events.append(("bid", action_str, delta_size))
-        elif delta.order.side == OrderSide.SELL and best_ask_price is not None:
-            if delta_price == best_ask_price:
-                self._events.append(("ask", action_str, delta_size))
+        if delta.order.side == OrderSide.BUY and delta_price == best_bid_price:
+            self._events.append(("bid", action_str, delta_size))
+        elif delta.order.side == OrderSide.SELL and delta_price == best_ask_price:
+            self._events.append(("ask", action_str, delta_size))
 
     def rate(self) -> CancelRate:
         def _pressure(side: str) -> float:
@@ -653,9 +652,12 @@ def price_series_rows(snapshots: Sequence[DydxSecondSnapshot]) -> list[dict]:
         if prev_ts_ms is not None and (curr_ts_ms - prev_ts_ms) > SNAPSHOT_GAP_THRESHOLD_MS:
             rows.append(_gap_row(curr_ts_ms - 1))
         prev_ts_ms = curr_ts_ms
-        mid = (bp + ap) / 2
+        floats = s.as_floats()
+        # The kernel's one mid (SSOT-01, audit D-131), never a second inline copy of it.
+        mid = calc_mid_price(floats)
+        assert mid is not None  # _require_top above refused an empty side
         # None when undefined (zero top sizes): never the mid passed off as a microprice (DATA-01).
-        micro = calc_microprice(s.as_floats())
+        micro = calc_microprice(floats)
         tv = s.buy_volume + s.sell_volume
         if tv > 0:
             price = mid + ((s.buy_volume - s.sell_volume) / tv) * (ap - bp) * 0.5
