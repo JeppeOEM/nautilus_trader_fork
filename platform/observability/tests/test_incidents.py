@@ -118,6 +118,24 @@ def test_report_has_header_and_evidence(tmp_path: Path) -> None:
     assert "--- Raw WS evidence (BTC-USD, 1 messages) ---\n" + _raw_line(_T, "BTC-USD") in content
 
 
+def test_report_without_the_raw_sink_says_so_and_scans_nothing(tmp_path: Path) -> None:
+    """
+    `raw_log_enabled=False` (the process runs without the raw sink): the report is still written
+    for the warning, but it never claims evidence -- not even lines a previous run with the sink
+    on left behind in the directory -- and names the switch instead.
+    """
+    config = _config(tmp_path, raw_log_enabled=False)
+    config.raw_log_dir.mkdir()
+    (config.raw_log_dir / "raw_debug_1.log").write_text(_raw_line(_T, "BTC-USD"))
+    writer = incidents.IncidentReportWriter(config)
+    path = writer.write("crossed_book", _IID, "WARNING", "sim.collector", "Crossed book for X", _T)
+    content = Path(path).read_text()
+    assert "Type: crossed_book\n" in content
+    assert incidents.RAW_LOG_DISABLED_LINE in content
+    assert "Raw WS evidence" not in content
+    assert _raw_line(_T, "BTC-USD") not in content
+
+
 def test_report_name_is_one_plain_filesystem_component(tmp_path: Path) -> None:
     """`reason`/`instrument_id` come from a log line: never a path, never a rejected character."""
     config = _config(tmp_path)

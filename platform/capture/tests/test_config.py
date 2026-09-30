@@ -209,3 +209,24 @@ def test_trade_feeds_outside_one_or_two_fails_closed(value: int) -> None:
 def test_trade_feeds_must_be_an_integer(value: object) -> None:
     with pytest.raises(ValueError, match="trade_feeds must be the integer"):
         core_config_from_dict({"trade_feeds": value}, ("mainnet",))
+
+
+def test_dydx_ws_raw_sink_is_off_unless_the_plan_says_true(tmp_path: Path) -> None:
+    """The raw WS sink is a plan-file switch, off by default (operator decision 2026-09-30)."""
+    path = tmp_path / "c.toml"
+    path.write_text(_DYDX)
+    config, _ = load_venue_config(path, "DYDX")
+    assert isinstance(config, DydxConfig)
+    assert config.ws_raw_sink is False
+    path.write_text("ws_raw_sink = true\n" + _DYDX)  # top level, above the tables
+    config, _ = load_venue_config(path, "DYDX")
+    assert isinstance(config, DydxConfig)
+    assert config.ws_raw_sink is True
+
+
+@pytest.mark.parametrize("value", ["1", '"true"', "1.0"])
+def test_dydx_ws_raw_sink_must_be_a_boolean(tmp_path: Path, value: str) -> None:
+    path = tmp_path / "c.toml"
+    path.write_text(f"ws_raw_sink = {value}\n" + _DYDX)
+    with pytest.raises(ValueError, match="ws_raw_sink must be true or false"):
+        load_venue_config(path, "DYDX")

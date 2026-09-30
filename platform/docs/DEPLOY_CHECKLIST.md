@@ -488,6 +488,14 @@ Collection moves off dYdX (operator decision 2026-09-26). Bybit keeps `BTCUSDT-L
 `platform/capture/venues/{bybit,hyperliquid}/config.toml`). The dYdX compose service `collector`
 is behind the `dydx` profile: `make up`, `redeploy`, `redeploy-all` and `redeploy-no-paper` never
 start it, `make up-dydx` starts it and `make down-dydx` removes it. Nothing here deletes data.
+Since 2026-09-30 the dYdX collector starts **without** its Rust `[WS_RAW]` raw-frame file sink
+(`DydxConfig.ws_raw_sink`, default `false`): the sink formatted and wrote every WebSocket frame
+inside the collector process (~1 MB/s at 25 markets), and its only reader is the incident
+reports' 12 s raw window. `make up-dydx` therefore comes up lean; an incident report written
+while it is off says "Raw WS sink disabled" instead of attaching evidence. To get the window back
+for an investigation, add `ws_raw_sink = true` to `platform/data/dydx_config.toml` and restart the
+collector (`make up-dydx`); remove the line and restart to switch it off again. The key is read
+once at process start, not by the 30 s plan reload.
 The dropped instruments (every `.DYDX` id, and Hyperliquid's BTC/ETH) fall under the nightly's
 normal retention only: their raw trades go once a day is `verified` and older than 7 days, and
 a dYdX coin's opted-in order book deltas once older than its `retain_hours` in the dYdX plan

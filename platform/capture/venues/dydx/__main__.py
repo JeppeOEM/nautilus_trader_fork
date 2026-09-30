@@ -31,6 +31,7 @@ nightly `archive.prune_catalog`'s (Story 25.1).
 """
 
 import asyncio
+import dataclasses
 import functools
 import logging
 import os
@@ -39,6 +40,7 @@ from collections.abc import Awaitable
 from collections.abc import Callable
 from collections.abc import Iterable
 from pathlib import Path
+from typing import Any
 
 from candles.application.prune import loop as candle_prune_loop
 from candles.application.sink import CandleSink
@@ -58,6 +60,7 @@ from capture.application import sites
 from capture.application.capture_service import CaptureService
 from capture.application.capture_service import run_forever
 from capture.domain.policies import CapturePolicies
+from capture.infrastructure.config import load_toml
 from capture.infrastructure.config import load_venue_config
 from capture.infrastructure.parquet_writer import ParquetArchiveWriter
 from capture.infrastructure.redis_stream import RedisLiveStream
@@ -103,11 +106,19 @@ def build_capture(
         config,
         lambda on_data, ledger: DydxClient(on_data=on_data, network=config.network, ledger=ledger),
         (
-            # Raw-WS debug feed (Story 5.1) for the incident reports (INCIDENTS below) -- a
-            # permanent feature, not scoped to any one investigation. Rust's file logger only
-            # flushes its BufWriter to disk on an explicit Sync event -- without this, [WS_RAW]
-            # lines sit in memory forever.
-            functools.partial(incidents.raw_log_flush_loop, nautilus_pyo3.logging_sync_to_disk),
+            *(
+                # Raw-WS debug feed (Story 5.1) for the incident reports (INCIDENTS below), only
+                # when the sink is on (`ws_raw_sink`): Rust's file logger only flushes its
+                # BufWriter to disk on an explicit Sync event -- without this, [WS_RAW] lines sit
+                # in memory forever. With the sink off there is nothing to flush, so no loop.
+                (
+                    functools.partial(
+                        incidents.raw_log_flush_loop, nautilus_pyo3.logging_sync_to_disk
+                    ),
+                )
+                if config.ws_raw_sink
+                else ()
+            ),
             candle_prune_loop(store),
         ),
         venue=VENUE,
@@ -195,13 +206,90 @@ def build_capture_from_file(config_path: Path = CONFIG_PATH) -> CaptureService:
     )
 
 
+def ws_raw_sink_enabled(config_path: Path = CONFIG_PATH) -> bool:
+    """
+    Read the plan file's `ws_raw_sink` switch once, before the Rust logger exists. Only this key
+    is read here: the full validation (and its restart-and-quarantine handling) stays with
+    `build_capture_from_file` per attempt, so a broken or missing plan file is not a crash in
+    `main()` but a warning and the default (off), and the real error is reported where it always
+    was. A value that is not `true`/`false` is the same typo the loader refuses, reported the
+    same way and left off.
+    """
+    try:
+        value = load_toml(config_path).get("ws_raw_sink", DydxConfig.ws_raw_sink)
+    except Exception as e:  # any read/parse failure: the loader reports it properly per attempt
+        logging.getLogger(__name__).warning(
+            "ws_raw_sink: could not read %s (%s); the raw WS sink stays off", config_path, e
+        )
+        return False
+    if type(value) is not bool:
+        logging.getLogger(__name__).warning(
+            "ws_raw_sink must be true or false, got %r; the raw WS sink stays off", value
+        )
+        return False
+    return value
+
+
+def rust_logging_kwargs(ws_raw_sink: bool) -> dict[str, Any]:
+    """
+    Return the `nautilus_pyo3.init_logging` arguments for this process: WARNING+ to stdout always,
+    and the `[WS_RAW]` DEBUG file sink only when `ws_raw_sink` is on. Pure, so a test can assert the
+    exact sink shape without initialising the Rust logger.
+    """
+    kwargs: dict[str, Any] = {"level_stdout": nautilus_pyo3.LogLevel.WARNING}
+    if not ws_raw_sink:
+        return kwargs
+    kwargs.update(
+        # Raw-WS debug feed (Story 5.1), not scoped to any one investigation -- feeds the
+        # incident-report subsystem. DEBUG+ goes to a file, not stdout -- component_levels/
+        # log_components_only can only make Logger's filtering MORE restrictive than the global
+        # stdout/fileout level, never less (see Logger::enabled() in
+        # crates/common/src/logging/logger.rs), so there is no way to raise just handler.rs's
+        # [WS_RAW] debug! line above stdout=WARNING without a separate, permissive file sink.
+        level_file=nautilus_pyo3.LogLevel.DEBUG,
+        directory=str(INCIDENTS.raw_log_dir),
+        file_name=INCIDENTS.raw_log_name,
+        # Bounded rolling buffer, not a growing archive: [WS_RAW] is ~1MB/s. IncidentHandler
+        # auto-snapshots the relevant INCIDENTS.lookback_ns (10s) + a INCIDENTS.lookahead_s (2s)
+        # window into a permanent incident report the moment something WARNING+ worthy happens
+        # -- this buffer only needs to outlast that ~12s window by a safety margin, not a human
+        # noticing and checking manually (that was the old, much larger 500MB-nominal design
+        # this replaces). 20MB x 1 backup is ~40MB nominal / ~40s -- over 3x the required window.
+        #
+        # Smaller than the old 250MB x 2 (~750MB nominal, and the underlying trigger for a
+        # disk-full incident on nifelheim once restarts orphaned old rotations -- see
+        # prune_stale_raw_logs). Rotating every ~20s at 20MB does mean nautilus_trader's file
+        # writer's unconditional `eprintln!("Rotated log file...")` on every rotation
+        # (crates/common/src/logging/writer.rs's rotate_file(), not routed through the `log`
+        # crate, so log level can't silence it) fires more often -- purely docker-logs noise
+        # nothing in this codebase reads (scan_raw_window globs every rotated file, never
+        # depends on which one is "current"), traded deliberately for a much smaller worst-case
+        # disk footprint.
+        file_rotate=(20_000_000, 1),
+    )
+    return kwargs
+
+
 async def main() -> None:
 
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s"
     )
+    ws_raw_sink = ws_raw_sink_enabled()
+    # Off by default since 2026-09-30 (see `DydxConfig.ws_raw_sink`): the sink formats and writes
+    # every WebSocket frame inside this process, the one always-on per-message cost the fleet
+    # does not need while dYdX is opt-in. Stale rotations are pruned either way: a previous run
+    # with the sink on must not leave its files behind.
     incidents.prune_stale_raw_logs(INCIDENTS)
-    logging.getLogger().addHandler(incidents.IncidentHandler(INCIDENTS))
+    incident_config = dataclasses.replace(INCIDENTS, raw_log_enabled=ws_raw_sink)
+    logging.getLogger().addHandler(incidents.IncidentHandler(incident_config))
+    logging.getLogger(__name__).info(
+        "ws_raw_sink=%s: incident reports %s (set `ws_raw_sink = true` in %s and restart to %s)",
+        ws_raw_sink,
+        "carry the raw WS window" if ws_raw_sink else "carry no raw WS window",
+        CONFIG_PATH,
+        "keep it" if ws_raw_sink else "get it back",
+    )
     # Rust's `log` crate is a no-op until a logger is installed -- without this, any
     # `log::warn!`/`log::error!` inside the Rust WS client (including the exact path that
     # reports a failed `call_soon_threadsafe` scheduling, i.e. a delta silently never
@@ -220,39 +308,11 @@ async def main() -> None:
     _log_guard = nautilus_pyo3.init_logging(
         trader_id=nautilus_pyo3.TraderId("COLLECTOR-001"),
         instance_id=nautilus_pyo3.UUID4(),
-        level_stdout=nautilus_pyo3.LogLevel.WARNING,
-        # Permanent raw-WS debug feed (Story 5.1), not scoped to any one investigation --
-        # feeds the incident-report subsystem below. DEBUG+ goes to a file, not stdout --
-        # component_levels/log_components_only can only make Logger's filtering MORE
-        # restrictive than the global stdout/fileout level, never less (see
-        # Logger::enabled() in crates/common/src/logging/logger.rs), so there is no way
-        # to raise just handler.rs's [WS_RAW] debug! line above stdout=WARNING without a
-        # separate, permissive file sink.
-        level_file=nautilus_pyo3.LogLevel.DEBUG,
-        directory=str(INCIDENTS.raw_log_dir),
-        file_name=INCIDENTS.raw_log_name,
-        # Bounded rolling buffer, not a growing archive: [WS_RAW] is ~1MB/s. IncidentHandler
-        # (above) auto-snapshots the relevant INCIDENTS.lookback_ns (10s) + a
-        # INCIDENTS.lookahead_s (2s) window into a permanent incident report the
-        # moment something WARNING+ worthy happens -- this buffer only needs to outlast that
-        # ~12s window by a safety margin, not a human noticing and checking manually (that
-        # was the old, much larger 500MB-nominal design this replaces). 20MB x 1 backup is
-        # ~40MB nominal / ~40s -- over 3x the required window.
-        #
-        # Smaller than the old 250MB x 2 (~750MB nominal, and the underlying trigger for a
-        # disk-full incident on nifelheim once restarts orphaned old rotations -- see
-        # prune_stale_raw_logs). Rotating every ~20s at 20MB does mean nautilus_trader's
-        # file writer's unconditional `eprintln!("Rotated log file...")` on every rotation
-        # (crates/common/src/logging/writer.rs's rotate_file(), not routed through the
-        # `log` crate, so log level can't silence it) fires more often -- purely docker-logs
-        # noise nothing in this codebase reads (scan_raw_window globs every rotated
-        # file, never depends on which one is "current"), traded deliberately for a much
-        # smaller worst-case disk footprint.
-        file_rotate=(20_000_000, 1),
+        **rust_logging_kwargs(ws_raw_sink),
     )
 
     # run_forever owns the restart loop, signal handling and per-process quarantine; it
-    # must not install a second Rust logger over the WS_RAW file sink above.
+    # must not install a second Rust logger over the one initialised above.
     await run_forever(build_capture_from_file, init_rust_logging=False)
 
 
