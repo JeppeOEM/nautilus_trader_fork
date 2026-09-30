@@ -23,6 +23,7 @@ are exit codes, and its `ProcessPoolExecutor` must fork from a process of its ow
 the multi-threaded pytest process is a `DeprecationWarning`, which TEST-04 makes a failure).
 """
 
+import json
 import os
 import subprocess
 import sys
@@ -165,3 +166,49 @@ def test_a_venue_filter_keeps_only_that_venues_ids(catalog: str, tmp_path: Path)
 def test_day_cannot_be_combined_with_a_range(catalog: str, tmp_path: Path) -> None:
     argv = ["--catalog", catalog, "--db", str(tmp_path / "c.db"), "--day", _DAY, "--start", _DAY]
     assert _run(argv) == 2  # argparse's usage error
+
+
+def test_a_rebuild_opens_its_own_durable_ledger(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Story 31.8: the nightly saga runs this as a child process that never opened a durable ledger,
+    so its failures reached stdout only. It ledgers under `archive.candles_rebuild`, never the
+    scheduler's own `archive.jsonl` (whose since-restart window a child's start would reset).
+    """
+    errors = tmp_path / "errors"
+    monkeypatch.setenv("ERROR_LEDGER_DIR", str(errors))
+    monkeypatch.setenv("ERROR_LEDGER_SERVICE", "archive")  # the scheduler's, inherited
+    (tmp_path / "empty").mkdir()
+    argv = ["--catalog", str(tmp_path / "empty"), "--db", str(tmp_path / "c.db"), "--day", _DAY]
+
+    assert _run(argv) == 0  # an existing catalog with nothing to rebuild: the cheapest real run
+
+    lines = (errors / "archive.candles_rebuild.jsonl").read_text().splitlines()
+    assert [json.loads(line)["site"] for line in lines] == ["process_start"]
+    assert not (errors / "archive.jsonl").exists()
+
+
+def test_a_missing_catalog_is_refused_not_an_empty_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    A catalog root that does not exist (a wrong mount, a typo) once listed as "no instruments" and
+    exited 0 over nothing, creating an empty store. It is refused at the archive tools' site, exit
+    1, and no store is created (audit D-123).
+    """
+    errors = tmp_path / "errors"
+    monkeypatch.setenv("ERROR_LEDGER_DIR", str(errors))
+    monkeypatch.setenv("ERROR_LEDGER_SERVICE", "archive")
+    db = tmp_path / "c.db"
+    argv = ["--catalog", str(tmp_path / "absent"), "--db", str(db), "--day", _DAY]
+
+    assert _run(argv) == 1
+
+    lines = [
+        json.loads(line)
+        for line in (errors / "archive.candles_rebuild.jsonl").read_text().splitlines()
+    ]
+    assert [line["site"] for line in lines] == ["process_start", "archive.catalog_missing"]
+    assert "candles_rebuild" in lines[1]["detail"]
+    assert not db.exists()

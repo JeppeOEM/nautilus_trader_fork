@@ -340,3 +340,64 @@ def test_an_unreadable_ledger_file_is_also_counted_by_service_summary(tmp_path: 
     assert summary == {"last_start_ns": None, "since_start": {}, "since": None}
     assert error_ledger.counts() == {error_ledger.READ_FAILED_SITE: 1}
     error_ledger.reset()
+
+
+def test_a_dotted_service_name_from_the_environment_is_clamped_loudly_not_a_job(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    error_ledger.reset()
+    monkeypatch.setenv("ERROR_LEDGER_DIR", str(tmp_path))
+    monkeypatch.setenv("ERROR_LEDGER_SERVICE", "bybit.collector")
+    try:
+        with caplog.at_level(logging.WARNING, logger=error_ledger.logger.name):
+            assert error_ledger.start() is True
+
+        (line,) = _lines(tmp_path / "bybit_collector.jsonl")
+        assert line["service"] == "bybit_collector"
+        assert not error_ledger.is_job_service(line["service"])
+        assert "job separator" in caplog.text
+        assert not (tmp_path / "bybit.collector.jsonl").exists()
+    finally:
+        error_ledger.reset()
+
+
+def test_a_job_service_name_passed_explicitly_keeps_its_separator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    error_ledger.reset()
+    monkeypatch.setenv("ERROR_LEDGER_DIR", str(tmp_path))
+    monkeypatch.setenv("ERROR_LEDGER_SERVICE", "archive")
+    try:
+        assert error_ledger.start(service=error_ledger.job_service("nightly", "archive"))
+
+        assert _lines(tmp_path / "archive.nightly.jsonl")[0]["site"] == "process_start"
+    finally:
+        error_ledger.reset()
+
+
+def test_a_job_under_a_dotted_inherited_parent_names_the_clamped_parent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `start()` clamps the parent's own file to `bybit_collector`; its jobs must name the same
+    # parent, never a `bybit.collector.*` a reader cannot pair with it.
+    monkeypatch.setenv("ERROR_LEDGER_SERVICE", "bybit.collector")
+
+    assert error_ledger.job_service("verify_book", "verification") == "bybit_collector.verify_book"
+
+
+def test_each_venues_run_of_a_job_has_its_own_ledger(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The scheduler runs every venue's nightly back to back: one shared file would let the second
+    # venue's `process_start` hide the first venue's findings from `/api/errors`' `since_start`.
+    monkeypatch.setenv("ERROR_LEDGER_SERVICE", "archive")
+
+    bybit = error_ledger.job_service("compare_klines", "archive", "BYBIT")
+    hyperliquid = error_ledger.job_service("compare_klines", "archive", "HYPERLIQUID")
+
+    assert (bybit, hyperliquid) == (
+        "archive.compare_klines_bybit",
+        "archive.compare_klines_hyperliquid",
+    )
+    assert error_ledger.job_service("consolidate_catalog", "archive") == (
+        "archive.consolidate_catalog"
+    )
+    assert error_ledger.is_job_service(bybit)

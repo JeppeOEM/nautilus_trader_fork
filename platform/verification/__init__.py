@@ -46,6 +46,9 @@ so a wrong wire symbol or host there misleads both sides alike (`domain/subscrip
   (`ParquetDataCatalog`, `BacktestNode`, the archive's consolidation) that the catalog tool,
   `python3 -m verification.catalog`, must drive; imported only by that root, never by the oracle
   (`subject/__init__.py` states the rule).
+- `candles.py` (Story 31.8): the candles tool, `python3 -m verification.candles`; it reads the bars
+  the chart is served only as the local data_api's HTTP response
+  (`infrastructure/served_candles.py`), never through `views`, `candles` or `data_api` code.
 - `tools/`: operator tools (`record_fixtures`, the test-fixture recorder; `cut_snapshot_fixtures`,
   which cuts the derived-signal tests' real rows from a soak catalog with pyarrow).
 """

@@ -357,7 +357,7 @@ development_status:
   31-5-stored-book-proven-against-an-independently-rebuilt-book: done
   31-6-mark-index-funding-open-interest-and-instruments-proven: done
   31-7-catalog-integrity-and-backtest-read-parity: done
-  31-8-candles-and-klines-on-every-timeframe-with-pass-rates: ready-for-dev
+  31-8-candles-and-klines-on-every-timeframe-with-pass-rates: done
   31-9-live-backtest-and-display-parity-including-bot-signals: ready-for-dev
   31-10-fault-injection-proves-every-loss-is-accounted-for: ready-for-dev
   31-11-verification-run-report-and-permanent-nightly-gate: ready-for-dev

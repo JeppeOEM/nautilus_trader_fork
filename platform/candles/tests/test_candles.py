@@ -219,6 +219,26 @@ def test_candle_dicts_for_window_serves_raw_seconds_with_a_source_tag() -> None:
     assert (c["o"], c["c"], c["source"]) == (100.0, 101.0, "raw_1s")
 
 
+def test_a_raw_1s_bar_is_partial_exactly_when_observed_under_90_percent() -> None:
+    """
+    Story 31.8: a bar folded from raw seconds carries `partial` like a stored one, from the fold's
+    `seconds_observed` -- an untraded second still counts as observed. 54 of 60 is 90 %, not
+    partial; 53 is.
+    """
+    whole = [_snap(s * _SECOND, 100.0 if s == 0 else None) for s in range(54)]
+    under = [_snap((60 + s) * _SECOND, 101.0 if s == 0 else None) for s in range(53)]
+    rows = whole + under
+    bars = candle_dicts_for_window(IID, 0, 120 * _SECOND, 60, lambda _i, _a, _b: rows)
+    assert [(c["t"], c["partial"]) for c in bars] == [(0, False), (60_000, True)]
+
+
+def test_the_forming_bar_payload_carries_no_partial_flag() -> None:
+    """The `/ws/live` forming bar `{t,o,h,l,c,v}` is frozen: the flag is the read path's only."""
+    bar = forming_bar([_snap(_SECOND, 100.0)], 60)
+    assert bar is not None
+    assert list(bar) == ["t", "o", "h", "l", "c", "v"]
+
+
 def test_is_valid_candle_rejects_inverted_negative_and_nonfinite() -> None:
     ok = {"o": 10.0, "h": 12.0, "l": 9.0, "c": 11.0, "v": 0.0}
     assert is_valid_candle(ok)

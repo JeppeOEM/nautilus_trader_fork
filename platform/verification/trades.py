@@ -129,7 +129,9 @@ def main(argv: list[str] | None = None, clock: Callable[[], int] = time.time_ns)
     fixed one.
     """
     args = _parser().parse_args(argv)
-    error_ledger.start()
+    error_ledger.start(
+        service=error_ledger.job_service("verify_trades", "verification", args.venue)
+    )
     subject = f"{args.venue} {args.day}"
     try:
         report = run(args, os.environ, clock())

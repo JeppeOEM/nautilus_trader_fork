@@ -26,12 +26,20 @@ with the collector stopped (it would otherwise lose seconds the collector applie
 not flushed yet). Reads only the OHLC + volume columns (`query_second_ohlc`), one day at a time (MEM-01).
 `--day D` is `--start D --end D` (the nightly job's form, after `rebuild_seconds` rewrote D's trade
 columns); `--venue V` keeps only instrument ids ending in `.V`.
+
+A `--catalog` that is not an existing directory is a wrong mount or a typo, never an empty catalog:
+listed, it would read as "no instruments" and exit 0 over nothing (DATA-07). It is refused at the
+archive tools' one site, `archive.catalog_missing`, naming this tool, exit 1, before the store is
+opened (audit D-123). An existing catalog without snapshots is a real "nothing to rebuild" (exit 0).
 """
 
 import argparse
 import logging
 import os
 from concurrent.futures import ProcessPoolExecutor
+from pathlib import Path
+
+from observability import error_ledger
 
 from candles.application.rebuild import DAY_NS
 from candles.application.rebuild import all_instruments
@@ -43,6 +51,11 @@ from candles.infrastructure.sqlite_store import CandleStore
 
 
 logger = logging.getLogger(__name__)
+
+# The archive tools' one missing-catalog site (`archive.application.catalog_check`), restated: this
+# context never imports `archive` (`tests/test_boundaries.py`), but the nightly step it runs as
+# refuses a missing catalog at the same site as its siblings.
+CATALOG_MISSING_SITE = "archive.catalog_missing"
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -82,14 +95,31 @@ def _jobs(args: argparse.Namespace) -> list[tuple[str, str, str, int, int, bool]
     return jobs
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     parser = _parser()
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if args.day and (args.start or args.end):
         parser.error("--day cannot be combined with --start/--end")
     if args.day:
         args.start = args.end = args.day
     logging.basicConfig(level=logging.INFO)
+    # Its own durable file (Story 31.8): the nightly saga's `build_candles` step runs this as a
+    # child process, whose ledger lines once reached stdout only.
+    # Known limit: the sink is opened here, before the ProcessPoolExecutor forks, so every worker
+    # inherits it and counts its own size toward rotation. Each process appends whole lines, so no
+    # line is torn, but one process's rotation can leave another still writing to the renamed
+    # backup, and the per-site write cap is per process. The nightly runs `--workers 1`, so only
+    # one process writes at a time there; a manual multi-worker run can split a run's lines across
+    # the live file and a backup. Upgrade path: a per-worker sink opened in a pool initializer (its
+    # own job name), or one writer fed by the workers through a queue.
+    error_ledger.start(service=error_ledger.job_service("candles_rebuild", "archive", args.venue))
+    if not Path(args.catalog).is_dir():
+        error_ledger.record(
+            CATALOG_MISSING_SITE,
+            f"candles_rebuild: catalog {args.catalog} does not exist or is not a directory "
+            "(wrong mount?); nothing done",
+        )
+        raise SystemExit(1)
 
     CandleStore(args.db).close()  # create the schema once, before workers race for it
     jobs = _jobs(args)

@@ -94,6 +94,18 @@ def directory(value: str | None, name: str) -> Path:
     return path
 
 
+def candle_store(args: argparse.Namespace, environ: Mapping[str, str], catalog: Path) -> Path:
+    """Return the venue's candle store file; `Refused` when its directory or the file is absent."""
+    candles = directory(
+        args.candles or environ.get("CANDLES_DIR") or str(catalog.parent / "candles"),
+        "the candles directory (CANDLES_DIR)",
+    )
+    store = candles / f"candles_{args.venue.lower()}.db"
+    if not store.is_file():
+        raise Refused(f"candle store {store} does not exist")
+    return store
+
+
 def _inputs(args: argparse.Namespace, environ: Mapping[str, str]) -> Inputs:
     raw_root = directory(args.raw_dir or environ.get("VERIFY_DATA_DIR"), "VERIFY_DATA_DIR")
     directory(str(venue_dir(raw_root, args.venue)), "the raw venue directory")
@@ -145,7 +157,9 @@ def main(argv: list[str] | None = None, clock: Callable[[], int] = time.time_ns)
     `clock` (epoch ns) decides whether the day is closed; tests pass a fixed one.
     """
     args = _parser().parse_args(argv)
-    error_ledger.start()
+    error_ledger.start(
+        service=error_ledger.job_service("verify_conservation", "verification", args.venue)
+    )
     try:
         report = run(args, os.environ, clock())
     except Refused as exc:

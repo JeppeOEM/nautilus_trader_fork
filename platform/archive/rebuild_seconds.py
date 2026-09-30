@@ -134,6 +134,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.result_file and not args.venue:
         parser.error("--result-file is one venue-day's proof: it needs --venue")
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+    # Its own durable file (Story 31.8): a child of the nightly saga, whose ledger lines once
+    # reached stdout only.
+    error_ledger.start(service=error_ledger.job_service("rebuild_seconds", "archive", args.venue))
     started = time.monotonic()
     day_start_ns = parse_date_ns(args.day)
     if _open_day_refused(args, day_start_ns):

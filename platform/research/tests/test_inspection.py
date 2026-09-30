@@ -490,6 +490,17 @@ def test_ledger_counts_fold_the_carry_and_leave_restarts_apart(tmp_path: Path) -
     assert ledger.restarts.to_dict("records") == [{"service": "collector", "restarts": 1}]
 
 
+def test_a_nightly_job_ledgers_starts_count_as_runs_not_restarts(tmp_path: Path) -> None:
+    (tmp_path / "archive.jsonl").write_text(_line(_at(1), "process_start") + "\n")
+    job = [_line(_at(2), "process_start"), _line(_at(30), "process_start")]
+    (tmp_path / "archive.compare_klines.jsonl").write_text("\n".join(job) + "\n")
+
+    ledger = inspection.ledger_window(str(tmp_path), _at(0), _at(60))
+
+    assert ledger.restarts.to_dict("records") == [{"service": "archive", "restarts": 1}]
+    assert ledger.runs.to_dict("records") == [{"service": "archive.compare_klines", "runs": 2}]
+
+
 # --- metadata over the fixture archive -------------------------------------------------------
 
 

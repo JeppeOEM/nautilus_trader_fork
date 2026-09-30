@@ -91,3 +91,18 @@ def test_has_older_data_reads_the_oldest_file_start() -> None:
     assert has_older_data([(10, 20), (30, 40)], 11)
     assert not has_older_data([(10, 20)], 10)
     assert not has_older_data([], 10)
+
+
+def test_fetch_page_aligns_the_first_end_and_every_gap_jump_end() -> None:
+    ranges = [(0, 130), (1_000, 1_100)]
+    calls: list[tuple[int, int]] = []
+
+    def fetch(start_ns: int, end_ns: int) -> list[int]:
+        calls.append((start_ns, end_ns))
+        return [start_ns] if start_ns < 100 else []
+
+    def up_to_hundreds(ns: int) -> int:
+        return -(-ns // 100) * 100
+
+    assert fetch_page(fetch, ranges, 1_050, 200, align_end=up_to_hundreds) == [0]
+    assert calls == [(900, 1_100), (0, 200)]  # file 1 ends at 130: the jump rounds up to 200

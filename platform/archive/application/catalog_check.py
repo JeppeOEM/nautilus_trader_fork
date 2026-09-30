@@ -28,13 +28,17 @@ from observability import error_ledger
 
 logger = logging.getLogger(__name__)
 
+# `candles.rebuild` restates it (the candles context never imports `archive`); pinned equal by
+# `archive/tests/test_step_ledgers.py`.
+CATALOG_MISSING_SITE = "archive.catalog_missing"
+
 
 def catalog_missing(tool: str, catalog: str | Path) -> bool:
     """Return True (ledgered) when `catalog` is not an existing directory; the tool exits 1."""
     if Path(catalog).is_dir():
         return False
     error_ledger.record(
-        "archive.catalog_missing",
+        CATALOG_MISSING_SITE,
         f"{tool}: catalog {catalog} does not exist or is not a directory (wrong mount?); "
         "nothing done",
     )

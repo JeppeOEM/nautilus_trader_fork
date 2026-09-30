@@ -171,7 +171,7 @@ class _Subject:
     runs: Intervals
 
 
-def _channel_gaps(channel: TradeChannel, hours: range, reference: ReferenceRecords) -> Intervals:
+def channel_gaps(channel: TradeChannel, hours: range, reference: ReferenceRecords) -> Intervals:
     """Return a WS trade channel's recorder gaps, from its own files of the window and its neighbours."""
     read = range(hours.start - 1, hours.stop + 1)
     lines = (record for hour in read for record in reference.records(channel.name, hour))
@@ -288,7 +288,7 @@ def check_hours(
         raise ValueError(f"hours {hours} are not a window of {day}")
     coverage = collect_coverage(inputs.coverage.entries(), plan.instruments, day_start_ns(day))
     channels = trade_channels(plan)
-    gaps = {c.name: _channel_gaps(c, hours, inputs.reference) for c in channels if not c.rest}
+    gaps = {c.name: channel_gaps(c, hours, inputs.reference) for c in channels if not c.rest}
     run = _Run(plan.venue, stage, hours, channels, wire_index(plan), gaps, inputs)
     reports = tuple(_instrument(iid, coverage[iid], run) for iid in plan.instruments)
     return TradesDayReport(

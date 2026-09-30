@@ -16,7 +16,8 @@
 The verification context's error-ledger sites (DATA-07), the reference recorder's
 (`verification.recorder.*`), the conservation tool's (`verification.conservation.*`), the
 trades tool's (`verification.trades.*`), the book tool's (`verification.book.*`), the derivs
-tool's (`verification.derivs.*`) and the catalog tool's (`verification.catalog.*`): every
+tool's (`verification.derivs.*`), the catalog tool's (`verification.catalog.*`) and the candles
+tool's (`verification.candles.*`): every
 failure either survives or refuses on is recorded at one of these through
 `observability.error_ledger.record`, never a bare log line.
 
@@ -72,3 +73,8 @@ DERIVS_REFUSED = "verification.derivs.refused"
 # or appeared mid-run ("catalog changed during the check (maintenance ran?)"), an uncreatable
 # scratch directory; or it crashed (the detail says `crashed`; the exception is then re-raised).
 CATALOG_REFUSED = "verification.catalog.refused"
+# The candles tool refused to run: a day not closed, a missing catalog, candles directory, store
+# file, raw directory or coverage record, an unreadable plan, a malformed line, the data_api
+# unreachable or answering non-200 or a malformed page, a file that vanished mid-run; or it crashed
+# (the detail says `crashed`; the exception is then re-raised).
+CANDLES_REFUSED = "verification.candles.refused"

@@ -195,6 +195,10 @@ COMPOSITION_ROOTS: dict[str, frozenset[str]] = {
     # The catalog tool's subject (Story 31.7) runs the archive's own intraday and nightly
     # consolidation on a scratch copy -- the code under test, never the oracle.
     "verification.subject.consolidation": frozenset({ARCHIVE}),
+    # The candles tool's end-to-end test (Story 31.8) builds its store with the real
+    # `candles.application.rebuild` and serves it through the real `data_api` route as the tool's
+    # `fetch`: the code under test, driven from a test module only.
+    "verification.tests.test_candles": frozenset({CANDLES, DATA_API}),
 }
 
 
@@ -1154,6 +1158,7 @@ NON_VENUE_HTTP_CLIENTS: dict[str, str] = {
     "research.rank_history": "the local data_api HTTP API",
     "research.application.ranking_history": "the local data_api HTTP API (Story 27.1)",
     "research.watchlist": "the local data_api HTTP API",
+    "verification.infrastructure.served_candles": "the local data_api HTTP API (Story 31.8)",
 }
 _VENUE_URL = re.compile(r"https?://[^\s\"']*(?:dydx|bybit|hyperliquid)", re.IGNORECASE)
 
@@ -2027,6 +2032,7 @@ VERIFICATION_ROOTS = frozenset(
         "verification.book",
         "verification.derivs",
         "verification.catalog",
+        "verification.candles",
     }
 )
 # Story 31.7's subject package: the code under test, driven (never the reference). Only the catalog
@@ -2158,6 +2164,7 @@ def test_importing_the_verification_roots_loads_no_denied_module() -> None:
         "import sys, verification.recorder, verification.tools.record_fixtures\n"
         "import verification.conservation, verification.tools.cut_snapshot_fixtures\n"
         "import verification.trades, verification.book, verification.derivs\n"
+        "import verification.candles\n"
         "print('\\n'.join(sorted(sys.modules)))\n"
     )
     env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": str(PLATFORM_DIR)}

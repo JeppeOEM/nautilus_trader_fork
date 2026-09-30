@@ -39,6 +39,7 @@ import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from verification.domain.catalog_check import TradeRow
 from verification.domain.conservation import NS_PER_HOUR
 from verification.domain.conservation import NS_PER_S
 from verification.domain.conservation import CoverageEntry
@@ -332,6 +333,16 @@ class ParquetArchive:
             pa.concat_tables(tables, promote_options="permissive") if tables else _empty(columns)
         )
         return ArrowTradeValues(table, first_trade_ts(self._catalog, instrument_id))
+
+    def trade_rows(self, instrument_id: str, start_ns: int, end_ns: int) -> list[TradeRow]:
+        """
+        Every snapshot row with `ts_event` in the window, as the candle fold's input (its trade
+        columns and precisions, integer units untouched), in `ts_event` order (Story 31.8).
+        """
+        window = (start_ns, end_ns)
+        table = read_day(self._catalog, SNAPSHOT_DIR, instrument_id, TradeRow.columns(), window)
+        rows = [TradeRow.of(row) for row in table.to_pylist()]
+        return sorted(rows, key=lambda row: row.ts_event)
 
     def snapshot_trade_rows(
         self, instrument_id: str, start_ns: int, end_ns: int

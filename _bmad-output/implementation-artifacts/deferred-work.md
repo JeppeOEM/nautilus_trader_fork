@@ -807,3 +807,7 @@ Discarded by operator: locking/atomic TOML writes; `bot_tui` malformed-message h
 - source_spec: `_bmad-output/implementation-artifacts/spec-31-4-trades-proven-id-by-id-against-the-venue.md`
   summary: A collector that has never written a coverage line has no `coverage/<venue>.jsonl`, so `verification.conservation` and `verification.trades` fail a clean day as "coverage record MISSING" (audit D-92, OPEN). Capture should create and fsync the file at start.
   evidence: `CaptureService._write_coverage` returns on an empty flush (`if not lines: return`). On the soak, `data/coverage/bybit.jsonl` was still absent at 15:16Z, 2 h 17 min into a clean Bybit run. This blocks a passing Bybit verdict in Story 31.11.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-31-8-candles-and-klines-on-every-timeframe-with-pass-rates.md`
+  summary: Every `verification.*` day tool reports PASS (exit 0) over nothing when the venue's plan is an explicit `instruments = []`: nothing refuses an empty plan, which is the "exit 0 over nothing" shape DATA-07/D-123 refuses elsewhere.
+  evidence: `verification/domain/plan_file.py` accepts `instruments = []` as "a plan that records nothing", and `plan_of` (`verification/conservation.py:120`) returns it unchanged. `conservation`, `trades`, `book`, `derivs`, `catalog` and the new `candles` then iterate zero instruments and print a passing verdict. This is a cross-tool pattern from 31.2 onwards, not new in 31.8, so it needs one shared refusal in `plan_of`.

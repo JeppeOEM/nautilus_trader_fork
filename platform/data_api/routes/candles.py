@@ -59,8 +59,9 @@ class CandleItem(BaseModel):
     l: float | None = None
     c: float | None = None
     v: float | None = None
-    # Rollup-sourced bucket observed for < 90% of its span (collector gaps, D-15): its
-    # high/low/volume are understated. Absent (None) on raw-1s candles and gap markers.
+    # Bucket observed for < 90% of its span (collector gaps, D-15): its high/low/volume are
+    # understated. Set on every candle, stored or folded from raw 1s at read time (Story 31.8);
+    # absent (None) on gap markers only.
     partial: bool | None = None
 
 

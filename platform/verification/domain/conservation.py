@@ -650,30 +650,34 @@ class SecondCounts:
     examples_unexplained: tuple[int, ...]
 
 
-def _reasons(day_start_s: int, runs: Sequence[SecondsRun]) -> tuple[dict[int, str], int]:
-    reasons: dict[int, str] = {}
+def reasons(day_start_s: int, runs: Sequence[SecondsRun]) -> tuple[dict[int, str], int]:
+    """
+    Map every second of the day a `seconds` run covers to its reason (the earliest-starting run's,
+    ties by reason), and count the seconds two runs cover.
+    """
+    found: dict[int, str] = {}
     doubled: set[int] = set()
     for run in sorted(runs, key=lambda r: (r.first_s, r.reason)):
         low = max(run.first_s, day_start_s)
         high = min(run.last_s, day_start_s + SECONDS_PER_DAY - 1)
         for second in range(low, high + 1):
-            if second in reasons:
+            if second in found:
                 doubled.add(second)
             else:
-                reasons[second] = run.reason
-    return reasons, len(doubled)
+                found[second] = run.reason
+    return found, len(doubled)
 
 
 def tally_seconds(
     day_start_s: int, rows: Mapping[int, int], runs: Sequence[SecondsRun]
 ) -> SecondCounts:
     """Account every second of the day: `rows` maps a second to its row count."""
-    reasons, multiple = _reasons(day_start_s, runs)
+    by_second, multiple = reasons(day_start_s, runs)
     explained: dict[str, int] = {}
     with_row = duplicate = both = 0
     unexplained: list[int] = []
     for second in range(day_start_s, day_start_s + SECONDS_PER_DAY):
-        count, reason = rows.get(second, 0), reasons.get(second)
+        count, reason = rows.get(second, 0), by_second.get(second)
         if count:
             with_row, duplicate = with_row + 1, duplicate + (count > 1)
             both += reason is not None

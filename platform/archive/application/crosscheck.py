@@ -25,8 +25,9 @@ its logic.
 Default window: the last 24 hours ending now (UTC). Default `--fail-on`:
 `collector.book_crosscheck`, `collector.book_sequence`, `collector.pending_deltas`.
 
-Per service (every venue's collector, `ranking_engine`, `data_api`, `live-paper`, `bot_tui`;
-`--venue` never narrows this -- a `--fail-on` site belonging to a service other than the named
+Per service (every venue's collector, `ranking_engine`, `data_api`, `live-paper`, `bot_tui`,
+`archive` and each of its one-shot nightly jobs, `archive.<step>[_<venue>]`, whose starts print
+as `runs`; `--venue` never narrows this -- a `--fail-on` site belonging to a service other than the named
 venue's own collector, e.g. `ranking_engine.volume24h` with `--venue bybit`, must still be
 checked): restarts (`process_start` lines) and per-site counts in the window, suppressed carries
 folded in (DATA-07).
@@ -357,14 +358,17 @@ def _fail_on_totals(report: Report, fail_on: tuple[str, ...]) -> dict[str, int]:
     Each `--fail-on` site's count summed across every service in the report.
 
     `process_start` is not an ordinary site -- `error_ledger.site_counts()` excludes it, so it
-    is counted here from each service's `restarts` instead. Naming it in `--fail-on` is how the
+    is counted here from each service's `restarts` instead, a one-shot job's excepted
+    (`error_ledger.is_job_service`: its `process_start` lines are runs). Naming it in `--fail-on` is how the
     operator makes a crash-loop fail the run: without it, 40 OOM-kills explain every gap they
     caused as `restart` and the day still exits 0 (DATA-07).
     """
     totals: dict[str, int] = dict.fromkeys(fail_on, 0)
     restarts_fail = error_ledger.PROCESS_START_SITE in totals
     for svc in report.services:
-        if restarts_fail:
+        # A one-shot job's `process_start` is one run of it (every night's nightly steps), not a
+        # restart (Story 31.8): counted, the token would fail every day.
+        if restarts_fail and not error_ledger.is_job_service(svc.service):
             totals[error_ledger.PROCESS_START_SITE] += svc.restarts
         for site, count in svc.site_counts.items():
             if site in totals:
@@ -377,7 +381,8 @@ def _print_services(report: Report) -> None:
     if not report.services:
         print("  (no ledger files found)")
     for svc in report.services:
-        print(f"  {svc.service}: restarts={svc.restarts}")
+        starts = "runs" if error_ledger.is_job_service(svc.service) else "restarts"
+        print(f"  {svc.service}: {starts}={svc.restarts}")
         for site, count in sorted(svc.site_counts.items()):
             print(f"    {site}: {count}")
 

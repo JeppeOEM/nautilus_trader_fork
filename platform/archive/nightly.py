@@ -201,6 +201,9 @@ def main(argv: list[str] | None = None, runner: StepRunner = subprocess_runner) 
     )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+    # A manual `make nightly` is its own process too (the scheduler runs the chain in-process):
+    # its own durable file, so its refusals are not stdout-only (Story 31.8).
+    error_ledger.start(service=error_ledger.job_service("nightly", "archive", args.venue))
     day = day_text(parse_date_ns(args.day))  # the canonical YYYY-MM-DD every step and proof uses
     if catalog_missing("nightly", args.catalog):
         return 1

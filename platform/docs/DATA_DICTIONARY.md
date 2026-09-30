@@ -1636,6 +1636,128 @@ passes at most); peak RSS is up to one hour of every plan instrument's objects i
 the engines, and the archive's own merge of the busiest leaf-day (the code under test); upgrade path: an Arrow-compute hash over
 each column.
 
+### 1.21 Candles and klines on every timeframe (`verification.candles`, Story 31.8)
+
+Not stored data: the check that every candle the chart can show -- the six stored widths and the
+four folded at read time -- equals the market over one closed UTC day. Story 31.7 (§1.20) compared
+the stored widths with a fold of the rows a backtest receives; nothing compared them with the
+venue's own trades, nothing checked the read-time widths (10m, 30m, 45m, 1W: they exist only as
+`data_api` responses), and nothing told an untraded bucket from missing data or checked
+`seconds_observed`/`partial` against the coverage record (§1.16).
+`python3 -m verification.candles --venue BYBIT|HYPERLIQUID --day D [--json] [--catalog DIR]
+[--raw-dir DIR] [--candles DIR] [--data-api URL] [--no-served]` (`verification/candles.py`, the
+root; `verification/application/candles.py`, the ports and orchestration;
+`verification/domain/candle_check.py`, pure; `verification/infrastructure/served_candles.py`, the
+HTTP pager). Exit 0 when every failing count is 0, 1 otherwise or on a refusal, 2 on usage.
+
+**Sources, all read-only (DATA-02: the tool imports no `candles`, `views`, `data_api`, `capture`,
+`kernel.fold`, `kernel.second_snapshot`, `nautilus_trader` or `verification.subject`):**
+- the catalog's snapshot rows with `ts_event` in D, read raw with pyarrow (`read_day`, the trade
+  columns and precisions in integer units);
+- the candle store `candles_<venue lowercased>.db` (`--candles`, else `CANDLES_DIR`, else
+  `<catalog>/../candles`), opened `mode=ro`;
+- the served bars: `GET <data-api>/api/candles/{iid}?before_ns&limit&bar_seconds` over stdlib
+  `urllib` (`--data-api`, else `VERIFY_DATA_API_URL`, else `http://127.0.0.1:29100`, the verify
+  stack's loopback data_api, SEC-01) -- the read-time widths never exist at rest, so the response
+  the chart receives is the only production artifact to check (`tests/test_boundaries.py`'s
+  `NON_VENUE_HTTP_CLIENTS`: "the local data_api HTTP API");
+- the reference recorder's raw trades (§1.15, `VERIFY_DATA_DIR`, every copy of an id merged:
+  `channel_trades`, `merge_reference`), read one venue hour at a time (files H-1..H+1);
+- the coverage record `<catalog>/../coverage/<venue>.jsonl` and the archive-gap markers.
+
+**Per plan instrument, per width, per bucket of D.** The day grid is `86400 / w` buckets for each
+of the nine widths dividing a day (`DAY_BAR_SECONDS`): the six stored `(60, 300, 900, 3600, 14400,
+86400)` and the three read-time folds `(600, 1800, 2700)`. The fourth read-time width, 1W
+(`READ_TIME_BAR_SECONDS = (600, 1800, 2700, 604800)`), spans seven days and is judged separately
+(below). All restated from §2.5 and the route, never imported. Every bucket starts at the reference
+`bucket_start` (day divisors at UTC midnight, 1W on Monday).
+
+| Class | Meaning | Fails |
+|---|---|---|
+| `traded` / `untraded` / `no_data` | the bucket has a row with a trade / rows but no trade / no row | no (reported) |
+| seconds `unexplained` | a second of D with no row and no coverage `seconds` run naming it (the others are counted per reason: `stale`, `no_book`, `catch_up_cap`, ...) | yes |
+| catalog fold (stored widths) | 31.7's `judge_width` over the stored bars read raw: `exact`, `float_noise`, `both_undefined` / `different`, `undefined_mismatch`, `missing`, `extra`; `seconds_observed` int-equal | as §1.20 |
+| served `exact` / `float_noise` | o/h/l/c/v of the served bar `at_places` the bucket's price/size places vs the catalog fold | no (`float_noise` reported apart, D-115) |
+| `served_differs` | a served value outside its places | yes |
+| `served_missing` / `served_extra` | a traded bucket not served / a served bucket that did not trade | yes |
+| `partial_ok` / `partial_mismatch` | the served `partial` equals `seconds_observed < 0.9 x width` over the bucket's rows (`PARTIAL_OBSERVED_FRACTION`, judged as the exact fraction 9/10) / absent or not | `partial_mismatch` |
+| reference `exact` / `both_undefined` | the masked reference fold equals the catalog fold | no |
+| `ref_recorder_gap` | every differing second lies in a recorder gap of one of the instrument's WS trade channels (the reference itself was blind) | no |
+| `ref_explained` | every differing second lies in a coverage trade window (`trades_dropped`, `trades_unrecoverable`) or an archive-gap marker span (live values kept) | no |
+| `ref_different` | a differing second none of those explains (a second the reference cannot fold at the row's precision -- `off_grid` -- always differs) | yes |
+| `unknown_width` | a stored row of a width the store does not keep | yes |
+
+The **reference** is the fold (`fold_second`, at that second's row precisions) of the reference
+trades whose venue time lies in each second **that has a row**; a second without a row can never
+hold its trades in any bar, so its reference trades are counted per coverage reason as
+`trades_unobserved` (informational: the bar understates them by design, and the second itself
+must be explained above). The reference is compared with the catalog fold; the stored and served
+bars are each proven equal to that same fold, so by transitivity each equals the masked reference
+exactly when the catalog fold does.
+
+Known limit (per-second cause, not per trade): a differing second inside a coverage trade window
+or an archive-gap marker is `ref_explained` whatever the difference -- a window's `cap` (the count
+of trades its writer recorded) is not spent here, and an *extra* catalog trade in the window reads
+the same as a missing one. Both are proven per trade id by `verification.trades` (31.4), which
+spends each capped window's budget (`Explanations`) and fails an archive-only id, so this tool
+relies on that verdict for the same day. Upgrade path: carry the per-second trade-count difference
+into the cause and spend the window's `cap` here too, and class a catalog-only surplus
+`ref_different` (`verification/domain/candle_check.py` `Causes`) `[amended 2026-09-30: Story 31.8
+follow-up review]`.
+
+**Served paging.** Per day-grid width, pages of `limit = min(SERVED_PAGE_LIMIT, buckets in D)` (the
+route's cap of 500, restated), the first from `before_ns` = the next midnight (D's `end_ns`, D+1
+00:00 UTC), each next one from the oldest bar's `t`, back until a page reaches D's start or
+`has_more` is false (an empty page with `has_more` true is refused); items with `o` null (gap rows) are ignored; a page that is not the documented shape, is not
+strictly ascending before its cursor, or is non-200 is refused.
+
+**1W.** The Monday-anchored bucket holding D is judged only once its week is closed (`week end +
+DAY_SETTLE_NS <= now`), else `week_open` (not failing). Its reference is the catalog fold of the
+week's seven days, read and folded one day at a time (MEM-01). The served bar is fetched twice: an
+aligned page (`before_ns` = the week's end) and a chart-like page (`before_ns` = the week's end + 1
+day, when that is not after now; else `not_fetched`), which must either leave the week out
+(`omitted`) or serve it whole -- a bar folded from part of the week is `served_differs` (audit
+D-118). The chart-like page is a **regression probe** for D-118, not a second proof: the fixed
+route rounds that cursor up to the next week's end and reads one whole week, so when the next week
+has data it serves that week only and the judged week is `omitted` (accepted, not failing); it
+serves the judged week, whole, only when the next week is empty and the gap jump lands on it. The
+pre-fix route read `[cursor - 7 days, cursor]` and folded the judged week from its last six days,
+which the probe fails (`served_differs`). It has not yet run against the old image (the soak's only
+week is open); both outcomes are pinned by `verification/tests/test_candles.py`
+(`test_a_chart_page_that_serves_only_the_next_week_is_omitted_and_passes`,
+`test_a_truncated_week_planted_beside_the_next_week_is_served_differs`). Known limit: the week's bar is proven against the reference only transitively, through
+each day's 1d reference verdict; upgrade path: a `--week` mode folding the week's masked reference.
+
+**Refusals** (ledgered at `verification.candles.refused`, exit 1 with the message): a day not
+closed (`DAY_SETTLE_NS` = 2 h after midnight), a missing catalog, candles directory, store file,
+raw directory or coverage record, an unreadable plan, a malformed line, a truncated raw file of the
+day, the data_api unreachable or answering non-200 or with a malformed page, a file vanishing
+mid-run. Any other exception is a crash, ledgered at the same site and re-raised. A missing raw
+reference file of the day is counted failing (`missing_raw_files`), as in §1.16. With
+`--no-served` the served bars are not checked: the report says `served: not checked` and the
+verdict is `PROVISIONAL`, never `PASS` (exit 0 when nothing else failed, so it stays scriptable);
+Story 31.11 runs it with the served checks on.
+
+`--json` gives `verdict` (`PASS`/`FAIL`/`PROVISIONAL`), `passed`, `provisional`, `failing`, `venue`,
+`day`, `served`, `data_api`, `candle_store`, `coverage_file`, `missing_raw_files`,
+`truncated_neighbour_files` and per instrument `rows`, `seconds` (`expected`, `rows`,
+`explained_by_reason`, `unexplained`, examples), `trades_unobserved`, `unknown_width`, per width
+`buckets`, `catalog`, `served`, `reference`, `examples`, and `week` (`status`, `kind`, `served`).
+
+**Repro** (host, from `platform/`, on the verify stack's data, read-only):
+`CATALOG_PATH=data/catalog VERIFY_DATA_DIR=data/verification CANDLES_DIR=data/candles
+BYBIT_COLLECTOR_CONFIG=capture/venues/bybit/config.toml
+HYPERLIQUID_COLLECTOR_CONFIG=capture/venues/hyperliquid/config.toml python3 -m verification.candles
+--venue BYBIT --day YYYY-MM-DD [--json] [--data-api http://127.0.0.1:<port>]`. Measured cost
+(smoke, 2026-09-29, the soak's 12:59:19-20:42Z, see `docs/VERIFICATION_REPORT.md`): Bybit's four
+instruments 300 s and 519 MiB peak RSS, Hyperliquid 5 s and 194 MiB, served checks included. Known
+limit (runtime): every width folds both books over the whole day, and every raw trade file is
+decoded up to three times (its own hour and each neighbour's) per instrument of its channel, which
+is where Bybit's time goes; upgrade path: one decode per raw file shared by every instrument of its
+channel, as conservation's. Known limit (plan): the instruments are the venue config's current
+plan, as in the other tools. Known limit (a live data_api): a bar the nightly rebuilds while the
+tool runs is judged as served at that moment (a loud difference, never a silent pass).
+
 ---
 
 ## 2. Computed signals / ML features (`platform/kernel/`, `platform/views/`, `platform/ranking/`)
@@ -1782,7 +1904,26 @@ Three readers, all over that one fold, so they cannot disagree:
   on the candle the chart draws, whether or not a chart is open.
 - **The archive-side read** — `candles.application.queries.candle_dicts_for_window(iid, start_ns,
   end_ns, bar_seconds, snapshot_rows_fn)`: the same fold over raw 1 s rows read from Parquet, for
-  history older than the store's first bucket. Each dict carries `source: "raw_1s"`.
+  history older than the store's first bucket, and the only source of the read-time widths (10m,
+  30m, 45m, 1W). Each dict carries `source: "raw_1s"` and, since Story 31.8, `partial` by the same
+  `is_partial(seconds_observed, bar_seconds)` rule as a stored bar (before, a read-time bar carried
+  no flag at all, so an understated bucket looked whole: audit D-119); the `/ws/live` forming-bar
+  payload is unchanged. `views.chart_series`'s Parquet page (`_parquet_page`) queries
+  **bucket-aligned** windows: every window -- the first and each gap jump of
+  `views.catalog_reads.fetch_page` -- ends on a bucket boundary (`before_ns` rounded up, by the
+  bucket rule below; a gap jump to the last row + 1 ns, so a file whose last row opens a bucket
+  keeps it) and spans a whole number of buckets (the span `limit x width x 3`, capped at
+  `MAX_QUERY_SPAN_SECONDS` = 7 days, rounded down to whole buckets and never below one), so no
+  served bar is folded from only its later seconds. No read reaches `before_ns`: the bucket holding
+  the cursor is folded from its seconds before `before_ns` only (no look-ahead for a historical
+  cursor) and is marked `partial` when that is under 90 % of its span; on the chart's first page
+  the cursor is now, so that bucket is the forming one. The page's filter `t < before_ms` is
+  unchanged. Before, a 1W page always folded the week
+  its 7-day window started in from only the days it reached, with no marker (audit D-118). Known
+  limit: a 1W page from Parquet holds at most one week per request (the cap is one week), so the
+  chart pages a 1W history back one bar at a time; upgrade path: compose the read-time widths from
+  stored bars. `verification.candles` (§1.21) proves every served bar of a day against the catalog
+  fold, the venue's trades and the coverage record `[amended 2026-09-30: Story 31.8]`.
 
 **The bucket rule (Story 31.3).** Every bucket in `platform/` -- the fold, the forming bar
 (`views.live_candles`), the chart's per-bar replay and footprint, the picker's custom-indicator
@@ -1795,7 +1936,8 @@ epoch-aligned; none is offered (`TIMEFRAMES` holds day divisors and 1W only). Th
 1W pane is computed on 1W buckets -- before, both routes clamped it silently to 86400. Every raw
 read stays capped at 7 days (`chart_series.MAX_QUERY_SPAN_SECONDS`). **Known limit:** so a 1W
 OFI/OBI pane page holds at most two buckets (the older one computed from only the days inside the
-read), and the picker's custom indicators (CVD, cancel pressure, delta OFI) carry a value only on
+read -- the OFI/OBI replay, `indicator_series_page`, still queries unaligned windows: audit D-122,
+OPEN), and the picker's custom indicators (CVD, cancel pressure, delta OFI) carry a value only on
 the last 7 1D bars or the last 1W bar of a page (§2.7); upgrade path: stored per-bar aggregates,
 paged like the candle store, instead of raw-row replays. Known limit (research):
 `ReturnSeries.resample` keys buckets by `ts // period` (its invariant: every stamp a multiple of the
@@ -2488,6 +2630,30 @@ at the first failure:
 
 One summary line per venue (per-step outcome and seconds, peak child RSS, the run id). The
 first-run measurements still owed are in `docs/DEPLOY_CHECKLIST.md`.
+
+**Each step ledgers durably, in its own file (Story 31.8).** Every step entrypoint's `main()` --
+`archive.rebuild_seconds`, `archive.consolidate_catalog`, `candles.rebuild`,
+`archive.compare_klines`, `archive.prune_catalog`, and `archive.nightly` itself for a manual
+`make nightly` -- calls `error_ledger.start(service=job_service(<step>, "archive", args.venue))`,
+writing `<ERROR_LEDGER_DIR>/<parent>.<step>_<venue>.jsonl` for one venue's run, else
+`<parent>.<step>.jsonl` (`<parent>` = the inherited `ERROR_LEDGER_SERVICE`, a `.` in it clamped
+to `_` as `start()` clamps it, else `archive`): e.g. `archive.rebuild_seconds_bybit.jsonl`,
+`archive.candles_rebuild_bybit.jsonl`, `archive.compare_klines_hyperliquid.jsonl`,
+`archive.nightly_bybit.jsonl`, and the scheduler's catalog-wide `archive.consolidate_catalog.jsonl`.
+The venue is part of the name because the scheduler runs every venue's saga back to back: in one
+shared `archive.compare_klines.jsonl`, the second venue's `process_start` would hide the first
+venue's mismatches from `/api/errors`' `since_start` (the latest run's errors only). The one-shot
+verification tools ledger the same way, `<parent>.verify_<tool>_<venue>.jsonl` (`<parent>` else
+`verification`). Before, the child processes never started the durable ledger, so every
+`reconcile.kline_mismatch` reached stdout (`docker logs verify-archive`) only: the verify stack's
+`archive.jsonl` held 3 lines against 4,901 mismatches of 2026-09-29 (audit D-120). A separate
+file per step keeps a child's `process_start` from resetting the scheduler's since-restart window
+(`service_summary`). `archive.crosscheck_errors` treats a dotted service as a one-shot job
+(`error_ledger.is_job_service`): its `process_start` lines print as `runs`, not `restarts`, and never
+count toward `--fail-on process_start` (every night's steps would otherwise fail the window). A
+`--catalog` that does not exist is refused by `candles.rebuild` too (`archive.catalog_missing`,
+exit 1), as by every archive tool -- it used to list "no instruments" and exit 0 when run
+standalone (audit D-123) `[amended 2026-09-30: Story 31.8]`.
 
 **Scheduled by the `archive` service, not cron (Story 25.1b).** `python3 -m archive.scheduler`
 (compose service `archive`) runs this saga for every venue, then `consolidate_catalog`, then the

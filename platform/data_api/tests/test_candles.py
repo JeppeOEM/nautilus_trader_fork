@@ -317,6 +317,31 @@ def test_one_second_bars_return_one_candle_per_snapshot(
     assert [i["c"] for i in resp.json()["items"]] == [100.0, 101.0, 102.0, 103.0, 104.0]
 
 
+def test_a_raw_1s_candle_carries_partial_from_its_observed_seconds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Story 31.8: a candle the Parquet path folds at read time is flagged `partial` when its bucket
+    was observed for under 90 % of its span, exactly like a stored one -- it used to carry none.
+    """
+    catalog_path = str(tmp_path / "catalog")
+    minute = 60_000_000_000
+    whole = [(_BASE_NS + s * 1_000_000_000, 100.0) for s in range(54)]  # 54/60 = 90 %
+    under = [(_BASE_NS + minute + s * 1_000_000_000, 101.0) for s in range(53)]
+    _write_snapshots(catalog_path, whole + under)
+    client = _client(catalog_path, monkeypatch)
+
+    resp = client.get(
+        f"/api/candles/{_IID}?before_ns={_BASE_NS + 2 * minute}&limit=10&bar_seconds=60"
+    )
+
+    items = resp.json()["items"]
+    assert [(i["t"], i["partial"]) for i in items] == [
+        (_BASE_NS // 1_000_000, False),
+        ((_BASE_NS + minute) // 1_000_000, True),
+    ]
+
+
 def test_venue_field_and_malformed_id_400(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     client = _client(tmp_path, monkeypatch)
     ok = client.get(f"/api/candles/{_IID}?before_ns={_BASE_NS}&limit=3&bar_seconds=60")

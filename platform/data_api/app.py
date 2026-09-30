@@ -177,6 +177,10 @@ def errors(since_ns: int | None = None) -> ErrorsResponse:
     other process's durable ledger (story 23.3), read back from `ERROR_LEDGER_DIR` -- so a
     collector's failure is visible here too, not only in its own container's log. Empty means
     none since start; the frontend's error bar polls this so a malfunction cannot go unseen.
+    For a one-shot job's ledger (`error_ledger.is_job_service`, e.g. the nightly's
+    `archive.<step>_<venue>`), every run writes a `process_start`, so its `since_start` is the
+    latest run's errors only (one file per venue, so one venue's run never hides another's); the
+    full history stays in its file (`?since_ns=` reads further back).
     """
     services = {
         name: ServiceErrorSummary(

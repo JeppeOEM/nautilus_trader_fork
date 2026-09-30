@@ -766,12 +766,35 @@ def _catalog_plus_recent(
     return rows + [r for r in tail if r.ts_event not in have]
 
 
-def _candle_window_start_ns(before_ns: int, limit: int, bar_seconds: int) -> int:
+def _candle_window_span_ns(limit: int, bar_seconds: int) -> int:
+    """
+    Return the archive query window's span: `limit * bar_seconds * _CANDLE_WINDOW_MULTIPLIER` (at
+    least `_MIN_CANDLE_WINDOW_SECONDS` below 1m), capped at `MAX_QUERY_SPAN_SECONDS`, then rounded
+    down to whole buckets and never below one (Story 31.8). A window that starts inside a bucket
+    folds that bucket from only its later seconds and serves it with no marker, so the span is
+    always a whole number of buckets. One bucket wins over the cap: a bucket can only be read
+    whole, and the route clamps `bar_seconds` to 1W, which equals the cap.
+
+    Known limit: a 1W page from Parquet therefore holds at most one week per request (the cap is
+    one week), so the chart pages a 1W history back one bar at a time; upgrade path: compose the
+    read-time widths (10m, 30m, 45m, 1W) from stored bars instead of raw seconds.
+    """
     span_seconds = limit * bar_seconds * _CANDLE_WINDOW_MULTIPLIER
     if bar_seconds < 60:
         span_seconds = max(span_seconds, _MIN_CANDLE_WINDOW_SECONDS)
     span_seconds = min(span_seconds, MAX_QUERY_SPAN_SECONDS)
-    return before_ns - span_seconds * 1_000_000_000
+    return max(1, span_seconds // bar_seconds) * bar_seconds * 1_000_000_000
+
+
+def _bucket_end_ns(ts_ns: int, bar_seconds: int) -> int:
+    """
+    `ts_ns` rounded up to a bucket boundary (itself when it is one), by the one bucket rule
+    (`candles.domain.fold.bucket_start_ms`: a 1W bucket starts on Monday).
+    """
+    ceil_ms = -(-ts_ns // 1_000_000)
+    start_ms = bucket_start_ms(ceil_ms, bar_seconds)
+    end_ms = start_ms if start_ms == ceil_ms else start_ms + bar_seconds * 1000
+    return end_ms * 1_000_000
 
 
 def _checked(instrument_id: str, bar_seconds: int, c: dict) -> dict:
@@ -795,17 +818,28 @@ def _parquet_page(
     """
     One page straight from the Parquet archive (slow: reads a window of tiny files). Serves
     history the candle store does not hold (older than its first day, or pruned).
+
+    Every query window -- the first and each gap jump -- starts on a bucket boundary (Story 31.8):
+    its end is rounded up to a bucket boundary and its span is whole buckets, so no served bar is
+    folded from only its *later* seconds. No read ever reaches `before_ns` itself: the bucket
+    holding the cursor is folded from its seconds before `before_ns` only, never from later ones
+    (no look-ahead for a historical cursor), and carries `partial` by the counted
+    `seconds_observed` rule when that is under 90 % of its span. On the chart's first page
+    `before_ns` is now, so that is the forming bucket as observed so far.
     """
     before_ms = before_ns // 1_000_000
     rows_fn = partial(_catalog_plus_recent, catalog_path, recent_rows)
 
     def fetch(start_ns: int, end_ns: int) -> list[dict]:
+        # The readers' windows are inclusive; a row stamped exactly at `end_ns` opens the next
+        # bucket, which this window must not serve as a one-second bar, and a row at or after
+        # `before_ns` lies past the cursor, which no page may fold (look-ahead).
         return [
             c
             for c in queries.candle_dicts_for_window(
                 instrument_id,
                 start_ns,
-                end_ns,
+                min(end_ns, before_ns) - 1,
                 bar_seconds,
                 snapshot_rows_fn=rows_fn,
             )
@@ -813,8 +847,9 @@ def _parquet_page(
         ]
 
     ranges = catalog_files.data_file_ranges(catalog_path, instrument_id)
-    span_ns = before_ns - _candle_window_start_ns(before_ns, limit, bar_seconds)
-    kept = fetch_page(fetch, ranges, before_ns, span_ns)[-limit:]
+    span_ns = _candle_window_span_ns(limit, bar_seconds)
+    align = partial(_bucket_end_ns, bar_seconds=bar_seconds)
+    kept = fetch_page(fetch, ranges, before_ns, span_ns, align_end=align)[-limit:]
     return kept, bool(kept) and has_older_data(ranges, kept[0]["t"] * 1_000_000)
 
 

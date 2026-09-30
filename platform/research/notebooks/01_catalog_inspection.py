@@ -184,15 +184,17 @@ lags.show()
 #
 # The durable error ledger (Story 23.3, `observability.error_ledger`) over the same window: every
 # site where our code rejected or dropped something and carried on, per service, with the
-# suppressed carry folded in, and each service's restarts. `absent` means no ledger directory,
-# `empty` a ledger with nothing in the window -- a quiet window, not a missing one -- and
-# `unreadable` a ledger file that could not be read (the counts are then a floor).
+# suppressed carry folded in, each service's restarts, and each one-shot job's runs (the nightly's
+# `archive.<step>_<venue>`, whose every run writes a `process_start`; Story 31.8). `absent` means
+# no ledger directory, `empty` a ledger with nothing in the window -- a quiet window, not a missing
+# one -- and `unreadable` a ledger file that could not be read (the counts are then a floor).
 
 # %%
 ledger = inspection.ledger_window(params.errors_dir, start_ns, end_ns)
 print("ledger:", ledger.state)
 print(ledger.counts.to_string())
 print(ledger.restarts.to_string())
+print(ledger.runs.to_string())
 
 # %% [markdown]
 # ## 8. Summary
@@ -204,4 +206,13 @@ print(ledger.restarts.to_string())
 # %%
 overview = inspection.summary(params.instruments, gaps, days, agreement, sanity, precision)
 print(overview.to_string())
-print("ledger:", ledger.state, "| sites:", len(ledger.counts), "| restarts:", len(ledger.restarts))
+print(
+    "ledger:",
+    ledger.state,
+    "| sites:",
+    len(ledger.counts),
+    "| restarts:",
+    len(ledger.restarts),
+    "| job runs:",
+    len(ledger.runs),
+)

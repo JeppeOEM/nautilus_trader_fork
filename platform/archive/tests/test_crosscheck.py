@@ -307,6 +307,29 @@ def test_process_start_in_fail_on_passes_when_there_was_no_restart(
     assert crosscheck.exit_code(report, ("process_start",)) == 0
 
 
+def test_a_nightly_jobs_run_is_not_a_restart_but_its_sites_still_fail(
+    catalog_path: Path, errors_dir: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """
+    Story 31.8: each nightly step ledgers under `archive.<step>`, one `process_start` per run.
+    Counted as restarts, `--fail-on process_start` would fail every night.
+    """
+    _write_snapshots(catalog_path, list(range(61)))
+    _write_started_before_the_window(errors_dir)
+    job = [
+        {"ts_ns": _DAY0 + 5 * _NS_PER_S, "site": "process_start"},
+        {"ts_ns": _DAY0 + 6 * _NS_PER_S, "site": "reconcile.kline_mismatch"},
+    ]
+    _write_ledger(errors_dir, "archive.compare_klines", job)
+    report = crosscheck.build_report(
+        str(catalog_path), str(errors_dir), _WINDOW_START, _WINDOW_END, venue=None
+    )
+    assert crosscheck.exit_code(report, ("process_start",)) == 0
+    assert crosscheck.exit_code(report, ("reconcile.kline_mismatch",)) == 1
+    crosscheck.print_report(report, ("process_start",))
+    assert "archive.compare_klines: runs=1" in capsys.readouterr().out
+
+
 def test_a_mid_gap_entry_does_not_explain_a_gap_longer_than_twice_the_skew(
     catalog_path: Path, errors_dir: Path
 ) -> None:

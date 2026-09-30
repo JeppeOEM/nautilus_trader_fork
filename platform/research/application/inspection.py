@@ -111,6 +111,7 @@ TRADE_COLUMNS = SnapshotTradeUnits._fields
 PRECISION_COLUMNS = ("stream", "files", "labels", "instrument_precision", "uniform")
 LEDGER_COUNT_COLUMNS = ("service", "site", "count")
 LEDGER_RESTART_COLUMNS = ("service", "restarts")
+LEDGER_RUN_COLUMNS = ("service", "runs")
 LEDGER_ABSENT = "absent"
 LEDGER_EMPTY = "empty"
 LEDGER_UNREADABLE = "unreadable"
@@ -613,12 +614,16 @@ class LedgerWindow:
     missing from the counts, so they are a floor, not a total), `empty` when it holds no line in
     the window, else `records`; `counts` are per service and site with the suppressed carry
     folded in and `process_start` excluded (`site_counts`), and `restarts` counts each service's
-    `process_start` lines, so a quiet window is told apart from a restarted one.
+    `process_start` lines, so a quiet window is told apart from a restarted one. A one-shot job's
+    ledger (`error_ledger.is_job_service`, the nightly's `archive.<step>`) writes one
+    `process_start` per run, so its starts are `runs`, never `restarts` (as
+    `archive.crosscheck_errors` prints them).
     """
 
     state: str
     counts: pd.DataFrame
     restarts: pd.DataFrame
+    runs: pd.DataFrame
 
 
 def _read_failures() -> int:
@@ -637,13 +642,16 @@ def ledger_window(errors_dir: str, start_ns: int, end_ns: int) -> LedgerWindow:
     """
     counts: list[dict] = []
     restarts: list[dict] = []
+    runs: list[dict] = []
     seen_any = False
     failures_before = _read_failures()
     for service in services(errors_dir):
         records = list(iter_records(errors_dir, service, since_ns=start_ns, until_ns=end_ns - 1))
         seen_any = seen_any or bool(records)
         starts = sum(1 for rec in records if rec["site"] == PROCESS_START_SITE)
-        if starts:
+        if starts and error_ledger.is_job_service(service):
+            runs.append({"service": service, "runs": starts})
+        elif starts:
             restarts.append({"service": service, "restarts": starts})
         counts += [
             {"service": service, "site": site, "count": n}
@@ -659,6 +667,7 @@ def ledger_window(errors_dir: str, start_ns: int, end_ns: int) -> LedgerWindow:
         state,
         pd.DataFrame(counts, columns=list(LEDGER_COUNT_COLUMNS)),
         pd.DataFrame(restarts, columns=list(LEDGER_RESTART_COLUMNS)),
+        pd.DataFrame(runs, columns=list(LEDGER_RUN_COLUMNS)),
     )
 
 

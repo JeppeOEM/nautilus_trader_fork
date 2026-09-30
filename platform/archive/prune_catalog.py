@@ -217,6 +217,9 @@ def main(argv: list[str] | None = None) -> int:
     """CLI entry point; returns the exit code (0 done, 2 findings, 1 run-level failure)."""
     args = _validated(_parser(), argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+    # Its own durable file (Story 31.8): a child of the nightly saga, whose ledger lines once
+    # reached stdout only.
+    error_ledger.start(service=error_ledger.job_service("prune_catalog", "archive", args.venue))
     if catalog_missing("prune", args.catalog):
         return 1
     try:

@@ -30,8 +30,8 @@ from pathlib import Path
 
 from kernel.second_snapshot import SecondRow
 
-from candles.application.forming import bars_from_rows
 from candles.domain.candle import is_partial
+from candles.domain.fold import fold_rows
 from candles.infrastructure.sqlite_store import connect_ro
 from candles.infrastructure.sqlite_store import db_path_for_venue
 from candles.infrastructure.sqlite_store import verified_status as _store_verified_status
@@ -152,10 +152,26 @@ def candle_dicts_for_window(
     """
     Candles for [start_ns, end_ns] folded from the raw 1s rows -- the slow, archive-side path.
 
-    Charts read the store (`window`); this serves only history the store does not hold. Same fold,
-    so the two sources agree bar for bar. Every dict carries `source`.
+    Charts read the store (`window`); this serves only history the store does not hold. Same fold
+    (`fold_rows`, the one `bars_from_rows` wraps), so the two sources agree bar for bar, and each
+    bar carries `partial` from the same counted `seconds_observed` rule as a stored bar (Story
+    31.8: a read-time 10m/30m/45m/1W bar, or history older than the store, used to carry none, so
+    an understated bucket looked whole). It reads the fold directly rather than
+    `bars_from_rows`, whose `{t,o,h,l,c,v}` shape is the frozen `/ws/live` forming-bar payload.
+    Every dict carries `source`.
     """
+    folded = fold_rows(snapshot_rows_fn(iid, start_ns, end_ns), bars=(bar_seconds,))
     return [
-        {**c, "source": "raw_1s"}
-        for c in bars_from_rows(snapshot_rows_fn(iid, start_ns, end_ns), bar_seconds)
+        {
+            "t": t,
+            "o": o,
+            "h": h,
+            "l": low,
+            "c": c,
+            "v": v,
+            "partial": is_partial(observed, bar_seconds),
+            "source": "raw_1s",
+        }
+        for (_bar, t), (o, h, low, c, v, observed) in sorted(folded.items())
+        if o is not None
     ]

@@ -156,6 +156,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+    # Its own durable file (Story 31.8): every `reconcile.kline_mismatch` of D-51 reached stdout
+    # only while this child of the nightly saga never opened one.
+    error_ledger.start(service=error_ledger.job_service("compare_klines", "archive", args.venue))
     day_ms = parse_date_ns(args.day) // _MS_NS
     if day_ms + DAY_MS > time.time() * 1000:
         error_ledger.record("reconcile.error", f"{args.day} is not a closed UTC day")

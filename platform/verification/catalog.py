@@ -67,6 +67,7 @@ from verification.application.catalog import report_json
 from verification.application.conservation import DAY_SETTLE_NS
 from verification.application.conservation import is_closed
 from verification.conservation import Refused
+from verification.conservation import candle_store
 from verification.conservation import directory
 from verification.conservation import plan_of
 from verification.domain.catalog_check import CatalogDayReport
@@ -79,18 +80,6 @@ from verification.subject.consolidation import Rehearsals
 from verification.subject.consolidation import WriterFactory
 from verification.subject.consolidation import maintenance_writer
 from verification.subject.nautilus_reads import NautilusReads
-
-
-def candle_store(args: argparse.Namespace, environ: Mapping[str, str], catalog: Path) -> Path:
-    """Return the venue's candle store file; `Refused` when its directory or the file is absent."""
-    candles = directory(
-        args.candles or environ.get("CANDLES_DIR") or str(catalog.parent / "candles"),
-        "the candles directory (CANDLES_DIR)",
-    )
-    store = candles / f"candles_{args.venue.lower()}.db"
-    if not store.is_file():
-        raise Refused(f"candle store {store} does not exist")
-    return store
 
 
 def scratch_dir(args: argparse.Namespace, environ: Mapping[str, str], catalog: Path) -> Path:
@@ -176,7 +165,9 @@ def main(
     rehearsal's catalog writer (the archive's own, or a planted one in a test).
     """
     args = _parser().parse_args(argv)
-    error_ledger.start()
+    error_ledger.start(
+        service=error_ledger.job_service("verify_catalog", "verification", args.venue)
+    )
     subject = f"{args.venue} {args.day}"
     try:
         report = run(args, os.environ, clock(), writer)

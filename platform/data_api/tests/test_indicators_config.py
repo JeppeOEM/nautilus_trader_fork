@@ -384,7 +384,12 @@ def test_indicator_values_at_1w_are_computed_on_monday_anchored_weekly_candles(
 ) -> None:
     """
     Story 31.3: a 1W pane replays over 1W candles (604800 s apart, Monday 00:00 UTC) -- the route
-    clamped `bar_seconds` to 86400 before, computing the 1W pane on daily bars.
+    clamped `bar_seconds` to 86400 before, computing the 1W pane on daily bars. The Sunday and the
+    Tuesday rows fall in two weeks, which an epoch (Thursday) anchor would have merged.
+
+    Story 31.8: a 1W page from Parquet holds one whole week per request (the query span is capped
+    at one week and never starts inside a bucket), so the previous week is the second page -- the
+    first page used to fold it from only the days after Thursday, here its Sunday alone.
     """
     day_ns = 86_400_000_000_000
     week_ns = 7 * day_ns
@@ -393,10 +398,16 @@ def test_indicator_values_at_1w_are_computed_on_monday_anchored_weekly_candles(
     _write_snapshots(catalog_path, [(monday_ns - day_ns, 100.0), (monday_ns + day_ns, 110.0)])
     client = _client(tmp_path, monkeypatch, catalog_path=catalog_path)
     spec = json.dumps([{"name": "SimpleMovingAverage", "params": {"period": 1}}])
-    query = {"before_ns": monday_ns + 3 * day_ns, "limit": 5, "bar_seconds": 604_800}
 
-    body = client.get(f"/api/coin/{_IID}/indicator-values", params={**query, "entries": spec})
+    def page(before_ns: int) -> dict:
+        query = {"before_ns": before_ns, "limit": 5, "bar_seconds": 604_800, "entries": spec}
+        body = client.get(f"/api/coin/{_IID}/indicator-values", params=query)
+        assert body.status_code == 200
+        return body.json()
 
-    assert body.status_code == 200
-    stamps = [item["t"] for item in body.json()["items"]]
-    assert stamps == [(monday_ns - week_ns) // 1_000_000, monday_ns // 1_000_000]
+    first = page(monday_ns + 3 * day_ns)
+    older = page(first["items"][0]["t"] * 1_000_000)
+
+    assert [item["t"] for item in first["items"]] == [monday_ns // 1_000_000]
+    assert first["has_more"]
+    assert [item["t"] for item in older["items"]] == [(monday_ns - week_ns) // 1_000_000]

@@ -69,18 +69,39 @@ def has_older_data(ranges: list[tuple[int, int]], ns: int) -> bool:
     return bool(ranges) and ranges[0][0] < ns
 
 
+def _unaligned(ns: int) -> int:
+    return ns
+
+
 def fetch_page[T](
     fetch: Callable[[int, int], list[T]],
     ranges: list[tuple[int, int]],
     before_ns: int,
     span_ns: int,
+    align_end: Callable[[int], int] = _unaligned,
 ) -> list[T]:
     """
     First non-empty `fetch(start_ns, end_ns)` walking back from `before_ns` in `span_ns`
     windows, jumping over gaps straight to the last data before each empty window. `[]` only
     when nothing older exists at all.
+
+    `align_end` maps every window end -- the first (`before_ns`) and each gap-jump target -- to
+    the end the window actually uses; a bar page passes "up to the next bucket boundary" so that,
+    with a `span_ns` of whole buckets, no window starts or ends inside a bucket (Story 31.8). It
+    must never move an end past a later bucket boundary than the one at or above its input, or a
+    gap jump could fail to progress: `align_end(x) <= start_ns` holds for every `x <= start_ns`
+    exactly when `start_ns` is itself a fixed point, which a whole-bucket span from an aligned
+    end guarantees. The default keeps the end as given (the per-second pages).
+
+    An aligned page's `fetch` reads `[start_ns, end_ns)`: a row stamped on the boundary opens the
+    next bucket. `data_file_ranges` ends are the *inclusive* last `ts_event`, so an aligned gap
+    jump targets `last + 1`: a file whose last row lies exactly on a boundary `B` would otherwise
+    align to `B` itself, and its row at `B` -- bucket `B` as far as that file holds it -- would
+    never be read. The default pages' `fetch` is inclusive at both ends, so they jump to `last`
+    exactly as before.
     """
-    end_ns = before_ns
+    past_last = 0 if align_end is _unaligned else 1
+    end_ns = align_end(before_ns)
     while True:
         start_ns = end_ns - span_ns
         result = fetch(start_ns, end_ns)
@@ -89,4 +110,5 @@ def fetch_page[T](
         older_ends = [end for start, end in ranges if start < start_ns]
         if not older_ends:
             return []
-        end_ns = min(max(older_ends), start_ns)  # min(): always progress, even mid-file
+        # min(): always progress, even mid-file
+        end_ns = align_end(min(max(older_ends) + past_last, start_ns))

@@ -43,6 +43,8 @@ import logging
 import time
 from pathlib import Path
 
+from observability import error_ledger
+
 from archive.application.catalog_check import catalog_missing
 from archive.application.consolidate_day import RunStats
 from archive.application.consolidate_day import run
@@ -102,6 +104,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.closed_hours and (args.days is not None or args.data_type):
         parser.error("--closed-hours takes neither --days nor --data-type")
     logging.basicConfig(level=logging.INFO, format="%(message)s")
+    # Its own durable file (Story 31.8): a child of the nightly saga and the intraday run, whose
+    # ledger lines once reached stdout only.
+    error_ledger.start(
+        service=error_ledger.job_service("consolidate_catalog", "archive", args.venue)
+    )
     if catalog_missing("consolidate", args.catalog):
         return 1
     stats = _run(args)

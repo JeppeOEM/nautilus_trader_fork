@@ -31,7 +31,8 @@ failures survive container restarts, image rebuilds and Redis loss (Redis has no
 
 `start()` (called once by each process entrypoint -- `capture.application.capture_service.run_forever`,
 `ranking.__main__.main`, `data_api.app`'s lifespan, `bots.__main__.main`,
-`bot_tui.app.main`) writes a `{"site": "process_start", ...}` line carrying the pid and, when
+`bot_tui.app.main`, `archive.scheduler.main`, and each nightly step's `main()` under its own
+`job_service` name, Story 31.8) writes a `{"site": "process_start", ...}` line carrying the pid and, when
 `ERROR_LEDGER_REVISION` is exported, the code revision, so a reader can tell a zero-error window
 from a restarted one even when nothing ever failed. `detail` is truncated to `_MAX_DETAIL_CHARS`
 in the file only (the ERROR log line keeps it whole).
@@ -280,6 +281,12 @@ def start(service: str | None = None) -> bool:
     Called once per process by the entrypoint. Returns False (and stays in-memory only) when
     `ERROR_LEDGER_DIR` is unset; a second call is a no-op. `service` defaults to
     `ERROR_LEDGER_SERVICE`, then the process name.
+
+    A dot (`JOB_SEPARATOR`) means a one-shot job only when `job_service` built the name and it is
+    passed as `service`. A name taken from the environment or the process name that holds one is
+    a long-running service misnamed: honoured, its restarts would read as job runs and hide from
+    `archive.crosscheck_errors --fail-on process_start`, so the separator is replaced with `_` and
+    the clamp logged loudly (like `_env_int`), never a crash at boot.
     """
     global _sink
     directory = os.environ.get("ERROR_LEDGER_DIR")
@@ -288,7 +295,7 @@ def start(service: str | None = None) -> bool:
     with _lock:
         if _sink is not None:
             return True
-        name = service or os.environ.get("ERROR_LEDGER_SERVICE") or Path(sys.argv[0]).stem
+        name = service or _service_from_env()
         _sink = _FileSink(
             Path(directory) / f"{name}.jsonl",
             name,
@@ -308,6 +315,51 @@ def start(service: str | None = None) -> bool:
         _count_write_failure(sink)
     logger.info("error ledger: durable sink at %s", sink.path)
     return True
+
+
+def _service_from_env() -> str:
+    """`ERROR_LEDGER_SERVICE`, else the process name, never holding `JOB_SEPARATOR` (see `start`)."""
+    name = os.environ.get("ERROR_LEDGER_SERVICE") or Path(sys.argv[0]).stem
+    if JOB_SEPARATOR not in name:
+        return name
+    clamped = name.replace(JOB_SEPARATOR, "_")
+    logger.warning(
+        "error ledger: service name %r holds the job separator %r, which only job_service() may "
+        "write; ledgering as %r",
+        name,
+        JOB_SEPARATOR,
+        clamped,
+    )
+    return clamped
+
+
+# A one-shot job a long-running service spawns as its own process (the `archive` scheduler's nightly
+# steps, Story 31.8) ledgers under `<parent>.<job>`: its own file, so its `process_start` never
+# resets the parent's since-restart window (`service_summary`), and a reader can tell a job's
+# per-run `process_start` from a service restart (`is_job_service`). No compose service name
+# holds this separator, and `start()` clamps one taken from the environment (`_service_from_env`).
+JOB_SEPARATOR = "."
+
+
+def job_service(job: str, default_parent: str, venue: str | None = None) -> str:
+    """
+    Return the ledger service name of one run of `job`: `ERROR_LEDGER_SERVICE` (the spawning
+    service's, inherited by the child; a `JOB_SEPARATOR` in it clamped to `_` exactly as `start()`
+    clamps it), else `default_parent`, then `JOB_SEPARATOR` and `job`, suffixed `_<venue>` when the
+    run is one venue's.
+
+    The venue suffix keeps each venue's run in its own file: the scheduler runs every venue's
+    nightly back to back, and one shared `archive.compare_klines` would let the second venue's
+    `process_start` hide the first venue's findings from `/api/errors`' `since_start`.
+    """
+    parent = (os.environ.get("ERROR_LEDGER_SERVICE") or default_parent).replace(JOB_SEPARATOR, "_")
+    name = f"{job}_{venue.lower()}" if venue else job
+    return f"{parent}{JOB_SEPARATOR}{name.replace(JOB_SEPARATOR, '_')}"
+
+
+def is_job_service(service: str) -> bool:
+    """Whether `service` is a one-shot job's ledger (`job_service`): each `process_start` is a run."""
+    return JOB_SEPARATOR in service
 
 
 def record(site: str, detail: str = "", exc: BaseException | None = None) -> None:

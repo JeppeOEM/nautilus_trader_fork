@@ -96,7 +96,11 @@ delivers the comparator (`python -m verification.<tool> --venue V --day D`).
 | | BTCUSDT-SPOT, ETHUSDT-SPOT | n/a (spot has none); smoke: **0 fabricated** under `custom_open_interest`/`funding_rate_update` | | | as above |
 | Instrument definitions | all 5 | pending — tool built (Story 31.6); verdict pending Story 31.11; SOL **DEVIATION** D-106 (`lot_size` 1 is Nautilus's default, not venue-declared, not compared) | smoke: 0 | Smoke as above: each instrument agree **481**, differs 0, before_first_definition 1 (the recorder's first poll preceded the collector's start), no venue change; one stored definition each (the collector's 12:59:21-23Z start). Every field compared: price/size precision, price/size increment, lot size (Bybit), min quantity, multiplier | as above |
 | Catalog integrity and backtest-read parity | all 5 | pending — tool built (Story 31.7); verdict pending Story 31.11 (it must run the tool **before** the nightly consolidates D, or the rehearsal reads `not_exercised`, D-116); smoke **OPEN** D-113 (no Nautilus decoder for `IndexPriceUpdate`: every index file `open_failed`), candle **DEVIATION** D-115 (`float_noise`, documented) | smoke: 0 except D-113 (Bybit 434 index files, Hyperliquid 216) | Smoke 2026-09-29 12:59-19:30Z (a hard-linked copy of the restarted soak's catalog and an sqlite `backup` of each candle store taken together at 19:30:08Z; tool at 9626ad42c7 + the Story 31.7 change set). **Structure:** every type one schema class; bad_name, overlap, name_span, unsorted, empty, null_ts, open_count, unknown_type, duplicate_ts_event 0 everywhere; open_failed 0 except `index_price_update` (D-113). Bybit trade files 391 per instrument (BTCUSDT-LINEAR 755,047 rows, ETHUSDT-LINEAR 1,007,872, BTCUSDT-SPOT 357,187, ETHUSDT-SPOT 107,380), snapshots 391 (23,428 / 23,428 / 23,430 / 23,435); Hyperliquid SOL trades 391 files / 30,701, snapshots 391 / 23,436. **Rehearsal:** leaves_failed 0, days_refused 0; Bybit trades 1,564 -> 1,564 -> 4 files, 2,227,486 rows `identical`, snapshots 1,564 -> 4, 93,721 `identical`, index 434 -> 28 -> 2, mark 433 -> 27 -> 2, funding 317 -> 14 -> 2, open interest 88 -> 14 -> 2 `identical`, definitions `not_exercised`; Hyperliquid every data type `identical` (trades 391 -> 1, snapshots 391 -> 1, index 216 -> 11 -> 1, mark 216 -> 10 -> 1, OI 216 -> 12 -> 1, funding 9 -> 8 -> 1). **Parity** (stored = query = received, count and digest, `beyond_margin` 0): BTCUSDT-LINEAR trades 755,047 `4aa620fd…`, snapshots 23,428 `c99e0c92…`; ETHUSDT-LINEAR 1,007,872 `cda6acfd…`, 23,428 `63d7357b…`; BTCUSDT-SPOT 357,187 `2992d293…`, 23,430 `bcf0d6b6…`; ETHUSDT-SPOT 107,380 `bb56447f…`, 23,435 `2b96ce6f…`; SOL 30,701 `4ca12a31…`, 23,436 `92f19f4c…`; read_mismatch 0. **Candles** (all six widths): exact / float_noise, 0 different, undefined_mismatch, missing, extra, unknown_width: BTCUSDT-LINEAR 259 / 252, ETHUSDT-LINEAR 276 / 235, BTCUSDT-SPOT 271 / 237, ETHUSDT-SPOT 253 / 258, SOL 256 / 252 (D-115). Runtime 257 s (Bybit) / 38 s (Hyperliquid); peak RSS 1.56 GB / 0.71 GB | `python3 -m verification.catalog --venue V --day D` (`docs/DATA_DICTIONARY.md` §1.20) |
-| Candles and klines, every timeframe | all 5 | pending — Story 31.8 | | | |
+| Candles and klines, every timeframe | BTCUSDT-LINEAR | pending — tool built (Story 31.8); verdict pending Story 31.11; klines **OPEN** D-51 (D-124) | smoke: 0 inside the soak (the 46,765 unexplained seconds -- 00:00-12:59:18Z before the soak plus 12:59:19-24Z before capture's first row -- and the day's 60 missing raw files are the partial day, D-128; the tool counts them failing, so the smoke exits 1) | Smoke 2026-09-29, raw 12:59:19Z-20:42:04Z (then the host suspend, D-128); tool at `04ef9b081e` + the Story 31.8 change set; served bars from a data_api run from the same tree. Rows 27,751; seconds explained `catch_up_cap` 11,876 (the suspend), `stale` 8; `trades_unobserved` `stale` 69 (D-124), `unexplained` 1,023 (the recorder's first REST `recent-trade` page and WS trades before 12:59:25Z, all before capture's first row). per width traded/untraded/no_data: 1m 464/0/976, 5m 94/0/194, 15m 32/0/64, 1h 9/0/15, 4h 3/0/3, 1d 1/0/0, 10m 48/0/96, 30m 17/0/31, 45m 11/0/21. Every width: catalog fold 0 different/undefined_mismatch/missing/extra, unknown_width 0; served 0 served_differs/missing/extra, partial_ok on every traded bucket (float_noise 224 / 32 / 11 / 4 / 2 / 0 / 15 / 3 / 3, D-115); reference exact on every traded bucket. 1W (week of 2026-09-28) `week_open`. Old data_api (127.0.0.1:29100, pre-fix image): `partial_mismatch` 48 / 17 / 11 at 10m / 30m / 45m (flag absent, D-119), everything else identical. **Klines:** 1,440 compared, 459 matched (31.9 %), ours missing 976 (outside the soak), theirs missing 0, both-sided 5 (12:59, 20:42 soak edges; 18:44, 19:06, 19:07 stale-gate orphans, D-124); in the soak 459/464 (98.9 %) | `python3 -m verification.candles --venue V --day D` (`docs/DATA_DICTIONARY.md` §1.21); klines: `verified_days` + `archive.<step>` ledgers (§6) |
+| | ETHUSDT-LINEAR | as above | smoke: 0 inside the soak (46,765 unexplained seconds and 60 missing raw files, D-128) | Smoke as above: rows 27,751; `catch_up_cap` 11,876, `stale` 8; `trades_unobserved` `stale` 100 (D-124), `unexplained` 1,024 (before capture's first row); buckets as BTCUSDT-LINEAR; every failing class 0 on every width (float_noise 233 / 32 / 12 / 0 / 0 / 1 / 14 / 8 / 3); `week_open`. Old data_api: `partial_mismatch` 48 / 17 / 11. **Klines:** 1,440, 459 matched (31.9 %), 976 / 0 / 5 (12:59, 20:42 edges; 18:44, 19:06, 19:07, D-124); in the soak 459/464 (98.9 %) | as above |
+| | BTCUSDT-SPOT | pending — as above; smoke **OPEN** D-127 (D-91) | smoke: 55 buckets `ref_different` (D-127: 22 off-grid seconds of sub-tick prints, D-91), plus the partial day (46,765 seconds, D-128) | Smoke as above: rows 27,758; `catch_up_cap` 11,876, `stale` 1; `trades_unobserved` `catch_up_cap` 1, `unexplained` 60; buckets as BTCUSDT-LINEAR; catalog fold and served classes 0 failing on every width (float_noise 219 / 34 / 13 / 2 / 1 / 0 / 15 / 3 / 7); reference **ref_different** 15 / 10 / 6 / 4 / 2 / 1 / 7 / 5 / 5 (D-127), `ref_recorder_gap` 1 per width to 1h and at 10m-45m (17:28:35-37Z, inside the recorder's own 17:28:30-42Z reconnect), `ref_explained` 1 per width to 15m and at 10m/30m (18:00:31-32Z, `trades_unrecoverable:depth`, D-125); `week_open`. Old data_api: `partial_mismatch` 48 / 17 / 11. **Klines:** 1,440, 461 matched (32.0 %), 976 / 0 / 3 (12:59, 20:42 edges; 18:00, D-125); in the soak 461/464 (99.4 %) | as above |
+| | ETHUSDT-SPOT | pending — as above | smoke: 0 inside the soak (46,765 seconds, D-128) | Smoke as above: rows 27,758; `catch_up_cap` 11,876, `stale` 1; `trades_unobserved` `stale` 1 (D-124), `unexplained` 64; every failing class 0 on every width (float_noise 208 / 38 / 8 / 3 / 2 / 0 / 18 / 8 / 5); `ref_explained` 1 per width (18:00:31-32Z, D-125); `week_open`. Old data_api: `partial_mismatch` 48 / 17 / 11. **Klines:** 1,440, 460 matched (31.9 %), 976 / 0 / 4 (12:59, 20:42 edges; 18:00, D-125; 18:44, D-124); in the soak 460/464 (99.1 %) | as above |
+| | SOL-USD-PERP.HYPERLIQUID | pending — as above; klines **OPEN** D-126 | smoke: 0 inside the soak (46,762 unexplained seconds -- before the soak and 12:59:19-21Z before capture's first book -- and 15 missing raw files, D-128) | Smoke as above: rows 27,759; `catch_up_cap` 11,878, `no_book` 1; `trades_unobserved` `catch_up_cap` 2, `no_book` 1, `unexplained` 31 (the WS `trades` subscribe snapshot, before capture's first row); buckets 1m 463/1/976 (20:42Z observed two seconds without a trade), the rest as Bybit's; every failing class 0 on every width (float_noise 229 / 43 / 11 / 1 / 0 / 0 / 18 / 7 / 3); reference exact on every traded bucket; `week_open`. Old data_api: `partial_mismatch` 48 / 17 / 11. **Klines:** 1,440, 460 matched (31.9 %), 977 / 0 / 3 (12:59 edge; 13:10, 15:27 sweep extremes, D-126); in the soak 460/464 (99.1 %) | as above |
 | Live, backtest and display parity (incl. the bot's signals) | all 5 | pending — Story 31.9 | | | |
 | Fault injection: every loss accounted for | Bybit, Hyperliquid | pending — Story 31.10 | | | |
 
@@ -150,6 +154,60 @@ D's last instant, so it merged the small types' hours the live `archive` service
 yet. The first development run (a 12:59-15:00Z prototype copy) read every mark file
 `open_failed` through the `files=` PyArrow path -- a verifier edge, fixed (D-114); the one
 remaining failing class is D-113.
+
+
+**Candles smoke (Story 31.8), how it was run.** From 05:21Z on 2026-09-30 (2026-09-29
+closed and the nightly's rebuild, consolidation, candle rebuild and reconcile done at 04:39-04:41Z),
+from `platform/`, read-only against the live verify data -- nothing copied, nothing written:
+`CATALOG_PATH=data/catalog VERIFY_DATA_DIR=data/verification CANDLES_DIR=data/candles
+BYBIT_COLLECTOR_CONFIG=capture/venues/bybit/config.toml
+HYPERLIQUID_COLLECTOR_CONFIG=capture/venues/hyperliquid/config.toml ERROR_LEDGER_DIR=<scratch>
+/usr/bin/time -v python3 -m verification.candles --venue V --day 2026-09-29 --json`, twice per
+venue: (a) against the verify stack's own data_api (`127.0.0.1:29100`, the default), whose image
+predates this story, and (b) with `--data-api http://127.0.0.1:29199`, a data_api started from the
+Story 31.8 working tree (`python3 -m uvicorn data_api.app:app --host 127.0.0.1 --port 29199` with
+`CATALOG_PATH=data/catalog CANDLES_DB_DIR=data/candles`, the store opened `mode=ro`,
+`ERROR_LEDGER_DIR`/`METRICS_DB_PATH`/`ALERTS_PATH` in a scratch directory and `REDIS_URL` pointing at
+no server -- the candle route needs no Redis; the buses only logged reconnects). The verify
+collectors, recorders and data_api were never stopped or restarted. The numbers above are run (b);
+(a) differs only by `partial_mismatch` 48 / 17 / 11 per instrument at 10m / 30m / 45m (D-119). The
+day is partial (soak from 12:59:19Z; host suspended ~20:42:04Z-04:39Z, D-128), so every run exits 1
+on the partial day's unexplained seconds and missing raw files by design; inside the soak every
+failing count is 0 except BTCUSDT-SPOT's sub-tick prints (D-127 / D-91). The week of 2026-09-28 is
+open, so every 1W check is `week_open` (the truncated-week fix, D-118, is pinned by tests only so
+far). Runtime and peak RSS (run b): Bybit 300 s / 519 MiB, Hyperliquid 5.0 s / 194 MiB (run a:
+297 s / 518 MiB and 4.9 s / 194 MiB); Bybit's time is the raw decode (a served-free rerun of the
+per-instrument reference took 291 s).
+
+**Kline pass rates (D-51), 2026-09-29.** From the verify stack's nightly of 2026-09-30 04:40Z
+(`archive.compare_klines --rebuilt-by`, run ids `139d6c022a9342f6b228dd4143d32a18` Bybit and
+`44579e9811b54ef8b245bbd74d8c813e` Hyperliquid): `verified_days` (`status`, `mismatches`) and the
+4,901 `reconcile.kline_mismatch` lines of `docker logs verify-archive` (the steps ledgered to stdout
+only, D-120). Soak window 12:59:19Z-20:42:04Z; minutes compared = the union of traded minutes.
+
+| Instrument | Compared | Matched | Pass rate (day) | Ours missing | Theirs missing | Both-sided | In the soak (12:59-20:42) | Both-sided minutes and cause |
+|---|---|---|---|---|---|---|---|---|
+| BTCUSDT-LINEAR | 1,440 | 459 | 31.9 % | 976 | 0 | 5 | 459/464 (98.9 %) | 12:59, 20:42 soak edges; 18:44, 19:06, 19:07 stale-gate orphans (D-124) |
+| ETHUSDT-LINEAR | 1,440 | 459 | 31.9 % | 976 | 0 | 5 | 459/464 (98.9 %) | as BTCUSDT-LINEAR |
+| BTCUSDT-SPOT | 1,440 | 461 | 32.0 % | 976 | 0 | 3 | 461/464 (99.4 %) | 12:59, 20:42 edges; 18:00 spot socket closed by the venue, REST depth (D-125) |
+| ETHUSDT-SPOT | 1,440 | 460 | 31.9 % | 976 | 0 | 4 | 460/464 (99.1 %) | 12:59, 20:42 edges; 18:00 (D-125); 18:44 (D-124) |
+| SOL-USD-PERP.HYPERLIQUID | 1,440 | 460 | 31.9 % | 977 | 0 | 3 | 460/464 (99.1 %) | 12:59 edge; 13:10, 15:27 sweep extremes (D-126) |
+| **BYBIT** | 5,760 | 1,839 | 31.9 %, instruments pass 0/4 | 3,904 | 0 | 17 | 1,839/1,856 (99.1 %) | |
+| **HYPERLIQUID** | 1,440 | 460 | 31.9 %, 0/1 | 977 | 0 | 3 | 460/464 (99.1 %) | |
+
+Every ours-missing minute is outside the soak (00:00-12:58 and 20:43-23:59; Hyperliquid's 977th is
+20:42, whose two observed seconds held no trade). Each both-sided minute was checked against the
+recorder's merged trades of the minute (the tool's own `channel_trades`/`merge_reference`), our
+stored 1m bar, the catalog seconds, the coverage record and the venue kline re-fetched on
+2026-09-30 (Bybit `/v5/market/kline` interval 1, Hyperliquid `candleSnapshot` 1m): in every Bybit
+minute the venue kline equals the recorder's fold of the whole minute exactly, and our bar differs
+from it by exactly the trades of the seconds named (the stale-rejected seconds' trades, which have
+no row, D-124; the 18:00:31-32Z trades the spot reconnect could not backfill, D-125; the seconds
+before capture's first row or after the suspend at the edges). In the two Hyperliquid minutes our
+bar equals the fold of the venue's trades while the venue's kline leaves out the last level of a
+multi-level sweep (D-126, OPEN). The scratch scripts and their output are not kept; the commands are
+the tool's own functions (`verification.application.candles._reference`, `_causes`,
+`verification.domain.trade_check.merge_reference`) over the same inputs.
 
 ## Reference recorder footprint
 

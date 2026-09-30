@@ -265,7 +265,7 @@
     "/api/errors": {
       "get": {
         "summary": "Errors",
-        "description": "Every failure this process carried on past (`observability.error_ledger`). `counts`/`last`\nare this process's own in-memory tallies, unchanged since Story 23.1; `services` is every\nother process's durable ledger (story 23.3), read back from `ERROR_LEDGER_DIR` -- so a\ncollector's failure is visible here too, not only in its own container's log. Empty means\nnone since start; the frontend's error bar polls this so a malfunction cannot go unseen.",
+        "description": "Every failure this process carried on past (`observability.error_ledger`). `counts`/`last`\nare this process's own in-memory tallies, unchanged since Story 23.1; `services` is every\nother process's durable ledger (story 23.3), read back from `ERROR_LEDGER_DIR` -- so a\ncollector's failure is visible here too, not only in its own container's log. Empty means\nnone since start; the frontend's error bar polls this so a malfunction cannot go unseen.\nFor a one-shot job's ledger (`error_ledger.is_job_service`, e.g. the nightly's\n`archive.<step>_<venue>`), every run writes a `process_start`, so its `since_start` is the\nlatest run's errors only (one file per venue, so one venue's run never hides another's); the\nfull history stays in its file (`?since_ns=` reads further back).",
         "operationId": "errors_api_errors_get",
         "parameters": [
           {

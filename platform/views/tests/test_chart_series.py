@@ -196,14 +196,29 @@ def test_bar_gap_rule_leaves_contiguous_rows_and_page_edges_alone() -> None:
 
 def test_archive_fallback_window_is_capped_for_every_bar_size() -> None:
     week_ns = 7 * 86_400 * 1_000_000_000
-    assert chart_series._candle_window_start_ns(0, 120, 3600) == -week_ns
-    assert (
-        chart_series._candle_window_start_ns(0, 120, 86_400) == -week_ns
-    )  # no wider tier without rollups
+    assert chart_series._candle_window_span_ns(120, 3600) == week_ns
+    assert chart_series._candle_window_span_ns(120, 86_400) == week_ns  # no wider tier
 
 
 def test_sub_minute_bars_look_back_at_least_an_hour() -> None:
-    assert chart_series._candle_window_start_ns(0, 120, 1) == -3600 * 1_000_000_000
+    assert chart_series._candle_window_span_ns(120, 1) == 3600 * 1_000_000_000
+
+
+@pytest.mark.parametrize("bar_seconds", [1, 5, 60, 600, 1800, 2700, 3600, 86_400, 604_800])
+@pytest.mark.parametrize("limit", [1, 2, 120, 500])
+def test_the_archive_window_is_whole_buckets_within_the_cap(bar_seconds: int, limit: int) -> None:
+    span_seconds = chart_series._candle_window_span_ns(limit, bar_seconds) // 1_000_000_000
+    assert span_seconds % bar_seconds == 0
+    assert bar_seconds <= span_seconds <= chart_series.MAX_QUERY_SPAN_SECONDS
+
+
+def test_a_window_end_rounds_up_to_the_bucket_boundary_and_keeps_a_boundary() -> None:
+    monday_ns = 4 * 86_400 * 1_000_000_000  # 1970-01-05, a 1W bucket start
+    week_ns = 7 * 86_400 * 1_000_000_000
+    assert chart_series._bucket_end_ns(monday_ns, 604_800) == monday_ns
+    assert chart_series._bucket_end_ns(monday_ns + 1, 604_800) == monday_ns + week_ns
+    assert chart_series._bucket_end_ns(monday_ns - 1, 604_800) == monday_ns
+    assert chart_series._bucket_end_ns(2700_000_000_001, 2700) == 5400_000_000_000
 
 
 def test_the_custom_indicator_replay_window_is_capped_at_the_query_span(
