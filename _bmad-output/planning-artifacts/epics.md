@@ -3711,3 +3711,95 @@ So that `_second_loop` stalls stop recurring, live data stays fresh, and no late
 **Given** `tests/fixtures/hotpath_baseline.json` and the DDD spine
 **When** the code fixes are merged
 **Then** `make hotpath-baseline` is re-run on the same CPU the current baseline names and the lower figures are committed as the new baseline (so Epic 26's and later refactors are held to the improved cost, not the old one), `docs/DATA_INTEGRITY_AUDIT.md` D-65 records the before/after per-message allocation and wall-time figures per venue, and the DDD spine's Deferred section gains one entry: "Capture in Rust: a `platform/capture_rs` binary over `nautilus-adapters`/`nautilus-model`/`nautilus-persistence`, no Python object per message; upgrade path once the Python budget from Epic 28 is exhausted; Go is not an option (no Nautilus bindings)"
+
+## Epic 32: Chart honesty and cleanup: gaps drawn to length, panes that grow the page, indicator settings on the legend, and the classic light chart
+
+Frontend epic, added 2026-09-30 from the operator's review of the chart page. Today a multi-hour collection gap looks like one missing candle: `views/chart_series.py`'s `with_gap_markers` (`:548`) emits exactly one gap row per hole, the five frontend page-seam sites (`useCandles.ts` `loadPage` and `mergeByTime`, `useIndicatorSeries.ts`, `useSnapshotSeries.ts`, `usePickerIndicatorValues.ts`) add one whitespace point each, and lightweight-charts gives every point one slot, so a 6-hour hole on a 1m chart is as wide as a 1-minute one. Surveyed facts the stories build on: the chart is created at a fixed `height: 500` with no `autoSize`, and every added pane shares that height, so the price pane shrinks with each indicator; volume is not an overlay but a pane hard-wired first in `ChartPage.tsx`'s `panes` (`DEFAULT_PANE_IDS = ["volume"]`), with no toggle; indicator parameters are edited only in the `IndicatorEntryRow` list rendered below the chart, persisted per coin through `PUT /api/coin/{iid}/indicators`; the legend is a 12 px `pointer-events: none` block; the app has one fixed dark VGA identity (Story 15.9) and the chart reads `--color-*` tokens from `document.documentElement` once at mount; the left-rail Cursor button is not a no-op (it disarms the armed tool and is the only mode in which drawings and profile edges are editable), so it stays. Operator decisions (2026-09-30): a gap is drawn as one placeholder bar per missing bar, in a colour nothing else uses; volume is toggled from the Indicators menu; a new pane grows the page instead of shrinking the others; the chart gets TradingView's classic white palette; legend names get larger with a gear that opens that indicator's settings. Rules: AD-F6 (a gap is never interpolated or filled with a fabricated value: whitespace stays whitespace and every consumer that skips it keeps skipping it), DATA-07 (a gap is shown loudly, never hidden), SSOT-02 (one edit path for indicator parameters), DESIGN-03 (delete the redundant list below the chart), TEST-04, MR4, no new dependency (icons are inline SVG). Verification for every story: `cd platform/frontend && npm test && npm run lint && npm run build`; Story 32.1 also `python3 -m pytest views/tests data_api/tests -q` from `platform/` (no Rust build needed). The epic runs on branch `epic-32` in its own worktree in parallel with Epics 31 and 28 and is merged by hand; it touches only `platform/frontend/`, `platform/views/chart_series.py` and its tests, `data_api/tests`, `docs/`, `platform/CLAUDE.md` and the planning artefacts. Order: 32.1 → 32.2 → 32.3 → 32.4.
+
+### Story 32.1: Every gap drawn to its real length, in a colour nothing else uses, on every chart
+
+As the platform operator,
+I want a hole in the data to take as many bar slots on the chart as bars are missing, each slot painted in one dedicated gap colour with the hole's duration written next to it,
+So that a five-minute outage reads as five missing bars and a six-hour one as six hours, on the candles, the volume pane, every indicator pane and Lines mode alike, and nothing ever looks like a normal chart with one bar missing.
+
+**Acceptance Criteria:**
+
+**Given** `views/chart_series.py`'s `with_gap_markers` (bars: candles, indicator series and indicator values share it) and Lines mode's `_gap_row` path (`SNAPSHOT_GAP_THRESHOLD_MS = 2500`)
+**When** two consecutive kept rows are more than one interval apart
+**Then** one gap row (all values `None`, schema unchanged) is emitted for every missing interval, at `earlier + k * interval_ms` for `k = 1 .. missing`, so a hole of `n` missing bars yields exactly `n` rows and a Lines-mode hole one row per missing second; the run is capped by one named constant `MAX_GAP_ROWS_PER_GAP` (default 720, i.e. 12 hours of 1m bars or 12 minutes of seconds) whose `Known limit:` comment names the ceiling and the upgrade path (a gap row carrying `span_ms`, drawn as one wide band); a hole longer than the cap emits exactly the cap's rows contiguous from the hole's start and the next real row follows, so the frontend can tell the hole is compressed from the distance between the last gap row and the next real row; the three bar endpoints return identical gap times for one window (test), so every pane's slots stay aligned; `views/tests/test_chart_series.py` (`:159,194,205`) and `data_api/tests/test_indicator_series.py` (`:236`) are updated from one-row-per-hole to one-row-per-interval, with new cases for the cap, a two-bar hole, Lines mode and the module docstring rewritten
+
+**Given** the five frontend page-seam sites named in the epic preamble
+**When** a hole straddles a page cursor or a live-refetch seam
+**Then** each site builds its seam through one shared helper `frontend/src/lib/gaps.ts` (`gapRun(afterExclusive, beforeExclusive, stepSeconds, cap)` returning the whitespace times) with the same cap value mirrored as a named constant and asserted by a test on each side; the affected tests (`useCandles.test.ts:125,179`, `useSnapshotSeries.test.ts:137,171`, `usePickerIndicatorValues.test.ts`, a new `useIndicatorSeries.test.ts`) assert the full run, and the "2 s snapshot spacing is not a gap" case still passes; a scroll-back refill still fires when the loaded left edge is a run of gap slots (`REFILL_MARGIN_BARS` counts logical slots; test)
+
+**Given** AD-F6 and the consumers that skip whitespace (`lib/volumeProfile.ts`, `lib/sessionProfile.ts`, `MeasurementPrimitive.ts`, `legend.ts`, `useReplay.ts`, `HistoryPage.tsx`, alert evaluation)
+**When** the story ships
+**Then** a gap slot is still native whitespace data (`{ time }`): no fabricated OHLC, value or volume, so every profile, measurement, replay step, legend value and alert keeps ignoring it (their existing tests pass unchanged and one new test per consumer feeds a long gap run); the visual comes from a new `components/chart/primitives/GapPrimitive.ts` (same family as `VerticalMarkerPrimitive`) attached to the candlestick series, the volume series, every indicator pane series and the Lines-mode series, which paints each whitespace slot in its pane as one placeholder bar of a dedicated colour token `--chart-gap` (defined in `theme.css`, used by nothing else; hatched or translucent so the grid stays visible), one candle-width wide at the current bar spacing and never narrower than 1 px, full pane height; the first slot of every run carries a label in the price pane, "no data · 5m" (seconds/minutes/hours/days formatted by one helper), and a compressed run reads "no data · 3d 4h (compressed)"; with the crosshair over a gap slot, the status bar and the legend show "no data · <duration>" in place of the "—" values
+
+**Given** MR4
+**When** the story is merged
+**Then** the DocsPage chart section (`pages/docs/kbData.ts`) documents how a gap is drawn and what the cap means, `platform/CLAUDE.md`'s text that describes one marker per gap (if any) is amended, and `spec-21-x-candlestick-chart-correctness.md`'s backlog entry for gap visibility (if present) is closed with this story's key
+
+### Story 32.2: Panes grow the page instead of shrinking each other, and volume is an Indicators-menu entry with a toggle
+
+As the platform operator,
+I want every pane I add to make the chart taller so I scroll the page, never smaller candles, and volume to be one more entry in the Indicators menu that I can switch off,
+So that the price pane keeps its size no matter how many histograms I stack under it.
+
+**Acceptance Criteria:**
+
+**Given** `LightweightChart.tsx`'s `createChart(container, { height: 500 })`, the width-only `ResizeObserver` and the pane registry effect that calls `chart.addPane()` per non-overlay pane
+**When** a non-overlay pane is added or removed
+**Then** the chart's total height becomes the price pane's height (one named constant, 500 px kept) plus one default height per extra pane (named constants: 120 px for volume, 160 px for any other histogram or line pane), applied through `chart.applyOptions({ height })` and per-pane `setStretchFactor` (or `setHeight` where lightweight-charts 5.2.1 offers it) so the price pane and every existing pane keep their current pixel size when another is added or removed; a divider the operator dragged keeps its size across a later add/remove (§A8.2 "resize a pane" still works); the page scrolls (no `overflow: hidden` or fixed-height ancestor between the chart and `body`; `frontend/scripts/chart-layout.test.mjs` pins this); Fit, Latest, legend placement, crosshair sync, the replay marker and every primitive behave as before (existing `LightweightChart.test.tsx` pane tests pass, new ones assert the height arithmetic for add, remove and re-add)
+
+**Given** `ChartPage.tsx`'s hard-wired volume pane (`DEFAULT_PANE_IDS = ["volume"]`, always first in `panes`) and the Indicators dialog (`IndicatorPicker.tsx`)
+**When** the story ships
+**Then** "Volume" is the first entry of the Indicators dialog (pinned above the catalog categories, no params), added and removed like any indicator, on by default, its on/off state persisted per instrument in `localStorage` under `chart-volume:{iid}` next to `chart-timeframe:{iid}` (a per-viewer convenience, not server config); when off, the volume pane is absent from `panes` and the registry diff removes it, while `fullVolume` is still fetched and still feeds FRVP/VRVP/SVP and the measurement tool (tests: profiles unchanged with volume off), and the live `series.update("volume")` path is a no-op instead of an error; when on again, the pane comes back first, under the price pane; the stale "overlay" wording in the comments at `ChartPage.tsx:47` and `:260` is corrected (volume is a pane, an overlay is `placement: "overlay"`)
+
+**Given** `ChartPage.test.tsx:279` ("shows only candles + a volume pane by default")
+**When** the tests run
+**Then** it is updated for the toggle, with new cases: switching volume off removes the pane and persists, a reload restores the persisted state, and the dialog lists Volume first
+
+### Story 32.3: The legend is the indicator's control surface: larger type, a gear that opens its settings, and removal in place
+
+As the platform operator,
+I want each indicator's name on the chart to be easy to read and to carry a small gear I click to change that indicator's parameters where it is drawn, as on TradingView,
+So that I never scroll below the chart to find the row that belongs to a pane.
+
+**Acceptance Criteria:**
+
+**Given** `components/chart/legend.ts` (`renderLegends`, one `div.chart-legend` per pane, `pointer-events: none`, 12 px) and `index.css:341-362`
+**When** the story ships
+**Then** the legend font size is one token `--legend-font-size` set to 14 px (title in `--chart-text`, values in their line colour), and each legend row has, after the values, a gear button and a × button drawn as inline SVG (no icon library), visible on hover or focus and keyboard reachable (`aria-label` "Settings for <name>" / "Remove <name>"); pointer events are enabled on the row only, so a drag or wheel anywhere else on the pane still pans and zooms (test on the CSS rule); the Volume row (Story 32.2) gets × only
+
+**Given** the gear
+**When** it is clicked
+**Then** a popover anchored to that row opens with that indicator's parameters as inputs (text inputs, or a `<select>` for catalog `choices`), pre-filled with the current values, plus Apply and Cancel; the input validation and coercion are `paramCoercion.ts`'s `isValidParamText`/`coerceParamValue` and the row UI is `IndicatorEntryRow`'s logic moved into one shared component, not a second copy (SSOT-02); Apply persists through the existing `PUT /api/coin/{iid}/indicators` and refetches values exactly as the old list did, a duplicate instance is refused as today, Esc or a click outside closes without changes; × removes the indicator through the same persist path
+
+**Given** DESIGN-03 and the `<div id="indicators">` entry list below the chart (`IndicatorPicker.tsx`'s `IndicatorEntryRow` list, inline `<select>` and Add button)
+**When** the popover covers edit and remove and the dialog covers add
+**Then** the list below the chart is deleted, the Indicators dialog stays the one add path, and `ChartPage.test.tsx`'s indicator tests (`:417-456`) move to the dialog and the popover: opens with current params, Apply persists and refetches, invalid input is refused, × removes, nothing renders under the chart
+
+**Given** the left-rail Cursor button, which the survey found to be the disarm and the only mode with editable drawings (`ChartPage.tsx` `selectTool`, `drawEditable`)
+**When** the story ships
+**Then** it is kept and its role made visible: it shows the active state whenever no drawing tool is armed (including after Esc and after a tool completes) and its tooltip reads "Select / edit drawings (Esc)"; `ChartPage.test.tsx:174-215` gains the two active-state cases
+
+### Story 32.4: The classic light chart: TradingView's palette inside the dark terminal app
+
+As the platform operator,
+I want the chart area to have TradingView's classic white background and colours,
+So that candles, gaps, indicators and drawings read the way I am used to, while the rest of the app keeps its terminal identity.
+
+**Acceptance Criteria:**
+
+**Given** `theme.css`'s single dark VGA palette and `paneColors.ts`'s `cssVar` reading `--color-*` from `document.documentElement` once at mount
+**When** the story ships
+**Then** a chart token set lives in `theme.css` scoped to `.chart-workspace`: `--chart-bg #ffffff`, `--chart-grid #f0f3fa`, `--chart-text #131722`, `--chart-text-dim #787b86`, `--chart-border #e0e3eb`, `--chart-up #26a69a`, `--chart-down #ef5350`, `--chart-crosshair #9598a1`, `--chart-volume-up`/`--chart-volume-down` (the up/down colours at ~50 % alpha), `--chart-gap` (Story 32.1's token, moved here and re-chosen for white), `--chart-marker`, `--chart-drawing` and an eight-colour pane palette legible on white (`#2962ff`, `#f23645`, `#089981`, `#ff9800`, `#9c27b0`, `#00bcd4`, `#795548`, `#131722`); `cssVar` reads them from the chart container element, and everything the chart draws (background, text, font, grid, scale borders, crosshair, candles, volume, gap bars and labels, legend, replay marker, measurement, trendline and horizontal-line colours, volume-profile fills, candle-pattern markers) takes its colour from these tokens and nothing else (a grep test over `components/chart/` and `pages/ChartPage.tsx` fails a `--color-*` or `--vga-*` read and any hard-coded colour literal); the toolbar, rankings, history, alerts and docs pages keep the VGA dark identity untouched; the font stays `--font-terminal`
+
+**Given** the "no theme toggle" decision (`ChartPage.test.tsx:380`, `index.css:2-6`, `theme.css:9-16`, spec `spec-multi-exchange-screener-chart.md` §A8.1 slot 10)
+**When** the story ships
+**Then** there is still no toggle; those comments and the spec note are updated to state that the chart area alone is light by operator decision (2026-09-30), and the DocsPage chart section says the same
+
+**Given** legibility on white
+**When** the tests run
+**Then** a vitest test parses the chart tokens out of `theme.css` and asserts a contrast ratio of at least 3:1 against `--chart-bg` for text, each pane palette colour, up, down, gap, marker and drawing colours (WCAG 2.1 graphics threshold), and the legend's dark-background `text-shadow` is replaced by a light halo so names stay readable over candles
