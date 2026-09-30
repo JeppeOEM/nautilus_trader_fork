@@ -42,7 +42,7 @@
 # - Retrospective appends its action items to action_items; sprint-status surfaces open ones
 
 generated: 2026-07-01
-last_updated: 2026-09-26
+last_updated: 2026-09-30
 project: nautilus_trader_fork
 project_key: NOKEY
 tracking_system: file-system
@@ -358,7 +358,7 @@ development_status:
   31-6-mark-index-funding-open-interest-and-instruments-proven: done
   31-7-catalog-integrity-and-backtest-read-parity: done
   31-8-candles-and-klines-on-every-timeframe-with-pass-rates: done
-  31-9-live-backtest-and-display-parity-including-bot-signals: awaiting-operator
+  31-9-live-backtest-and-display-parity-including-bot-signals: done
   31-10-fault-injection-proves-every-loss-is-accounted-for: ready-for-dev
   31-11-verification-run-report-and-permanent-nightly-gate: ready-for-dev
   epic-31-retrospective: optional

@@ -2,7 +2,7 @@
 title: 'Story 31.9: Live, backtest and display parity, including the bot''s own signals'
 type: 'feature'
 created: '2026-09-30'
-status: 'awaiting-operator'
+status: done
 baseline_revision: '9674e77797'
 final_revision: 'bf127c9c19'
 operator_actions:
@@ -267,3 +267,15 @@ Status: awaiting-operator
 - D-133/D-134 make every Bybit paper-bot result untrustworthy until Nautilus is upgraded.
 - No entry fired in the 66-minute run, so the long/short decision branches were never compared live.
 - The verify ranking_engine and data_api images predate D-130/D-131.
+
+## Operator Confirmation
+
+Confirmed 2026-09-30 under platform/CLAUDE.md OPS-01 (a story never parks awaiting-operator): the actions below were NOT carried out. They are deferred, verbatim and unchecked, in `platform/docs/DEPLOY_CHECKLIST.md` "Deferred operator actions" entry 31-9, where the operator batches them; the four decisions (D-129, D-133/D-134, D-135, D-113) stay OPEN in DATA_INTEGRITY_AUDIT.md until taken. The park skipped bmad-loop's independent review session (policy: parked stories are reviewed by hand); `followup_review_recommended: true` stands and that review is still owed.
+
+- Decide D-129: should DummyStrategy gate its book (stale/crossed/gap) and clear its MultiLevelOFI state on a gap longer than kernel.indicators.OFI_GAP_NS, like SnapshotStrategy/OFIStrategy/ranking? Recommended: adopt the gate and reset. Otherwise keep the recorded Known limit. The measured divergence is in docs/VERIFICATION_REPORT.md's parity row.
+- Decide D-133/D-134: the Nautilus Bybit data client builds quotes from the book message's first entries (not the best level) when the depth-50 book is also subscribed, and replays the spot depth-1 stream into the book (FORK-01: not fixable here). Recommended: upgrade Nautilus to a release that keeps quotes and books on their own topics. Alternatives: run Bybit bots without the book subscription, or exclude them from evaluation. Until then no Bybit paper-bot result is trustworthy.
+- Decide D-135: fix the bot replay's derived deltas, which the catalog query reorders because they share one ts_init. Changing this means changing Story 31.9's conversion contract. Recommended: stamp the i-th delta of a row at ts_init + i ns. Then re-run python3 -m bots.signal_replay and python3 -m verification.bot_parity for both venues.
+- Decide D-113: upgrade Nautilus to a release that decodes IndexPriceUpdate, or accept that backtests cannot read index prices as a documented Known limit. Story 31.11 records the verdict.
+- Before Story 31.11, rebuild only the verify ranking_engine and data_api images (--no-deps) and re-run the SSOT live test (VERIFY_STACK=1). Then drop the test's slow_loop_reads_its_clock_first row. At the next VPS deploy, rebuild ranking_engine and data_api (D-130, D-131). See DEPLOY_CHECKLIST.md entry 31-9.
+
+_Appended by the bmad-loop orchestrator (`bmad-loop confirm`, #335): a human confirmed these external actions out of band, and the story was advanced from `awaiting-operator` to `done`._
