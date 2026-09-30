@@ -19,9 +19,13 @@ exact integer layout (Story 30.2).
 `SecondRow` is the one name capture and candles share for a duck-typed second: both shapes that
 cross the `SecondSink` port must satisfy it. The layout tests prove the encoder refuses every value
 it cannot hold exactly, the decoder is strict, and encode -> Parquet -> decode (and the Redis JSON
-route) returns identical `Price`/`Quantity` values over a seeded generator of books.
+route) returns identical `Price`/`Quantity` values over a seeded generator of books. The columnar
+batch encoder (Story 28.2) is proven equal to the dict path: the same table, byte-identical Parquet
+files through `ParquetDataCatalog`, the same refusals.
 """
 
+import functools
+import hashlib
 import json
 import random
 from pathlib import Path
@@ -33,6 +37,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from kernel.second_snapshot import INT64_MAX
+from kernel.second_snapshot import INT64_MIN
 from kernel.second_snapshot import DydxSecondSnapshot
 from kernel.second_snapshot import LegacySnapshotLayoutError
 from kernel.second_snapshot import SecondOHLC
@@ -42,6 +47,7 @@ from kernel.second_snapshot import SnapshotEncodingError
 from kernel.second_snapshot import SnapshotTradeUnits
 from kernel.second_snapshot import decode_book_prices
 from kernel.second_snapshot import encode_book_prices
+from kernel.second_snapshot import snapshots_to_record_batch
 from kernel.second_snapshot import unit_float
 from kernel.second_snapshot import unit_floats
 from kernel.second_snapshot import units_of
@@ -54,6 +60,8 @@ from nautilus_trader.model.objects import QUANTITY_MAX
 from nautilus_trader.model.objects import Price
 from nautilus_trader.model.objects import Quantity
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
+from nautilus_trader.serialization.arrow import serializer
+from nautilus_trader.serialization.arrow.serializer import ArrowSerializer
 from nautilus_trader.serialization.arrow.serializer import make_dict_deserializer
 from nautilus_trader.serialization.arrow.serializer import make_dict_serializer
 
@@ -430,3 +438,153 @@ def test_a_size_whose_units_exceed_int64_is_refused() -> None:
             ts_event=0,
             ts_init=0,
         )
+
+
+# -- the columnar batch encoder (Story 28.2) --------------------------------------------------------
+
+_BATCH_IDS = ("BTC-USD-PERP.DYDX", "ETHUSDT-LINEAR.BYBIT", "SOL-USD-PERP.HYPERLIQUID")
+
+
+def _batch_row(n: int, iid: str) -> DydxSecondSnapshot:
+    """Row `n` of `iid`: depth 0..20 a side (an empty side included), alternating set/None OHLC."""
+    bids, asks = n % 21, (n * 7) % 21
+    traded = n % 2 == 0
+    price = 50_000 + n if traded else None
+    return DydxSecondSnapshot(
+        InstrumentId.from_str(iid),
+        price_precision=1 + n % 3,
+        size_precision=n % 5,
+        bid_price_units=[49_990 - 3 * k for k in range(bids)],
+        bid_size_units=[k * n for k in range(bids)],
+        ask_price_units=[50_010 + 2 * k for k in range(asks)],
+        ask_size_units=[k + n for k in range(asks)],
+        buy_volume_units=7 * n if traded else 0,
+        sell_volume_units=INT64_MAX if n == 5 else 0,
+        buy_count=2**32 - 1 if n == 3 else n,
+        sell_count=n % 4,
+        ts_event=n * 1_000_000_000 + 500_000_000,
+        ts_init=n * 1_000_000_000 + 1_200_000_000,
+        open_price_units=price,
+        high_price_units=None if price is None else price + 9,
+        low_price_units=None if price is None else INT64_MIN,
+        close_price_units=price,
+    )
+
+
+def _batch_rows() -> list[DydxSecondSnapshot]:
+    """Several instruments interleaved, as a flush hands them over (ts_init ascending per id)."""
+    return [_batch_row(n, iid) for n in range(40) for iid in _BATCH_IDS]
+
+
+def _dict_path_table(rows: list[DydxSecondSnapshot]) -> pa.Table:
+    """Build what `serialize_batch` built before Story 28.2: one `to_dict` batch per row."""
+    batches = [ArrowSerializer.serialize(row, DydxSecondSnapshot) for row in rows]
+    return pa.Table.from_batches(batches, schema=batches[0].schema)
+
+
+@pytest.mark.parametrize("source", ["fixture", "generated"])
+def test_the_batch_encoder_builds_the_dict_paths_table(source: str) -> None:
+    rng = random.Random(28_2)  # noqa: S311 -- a deterministic generator, not cryptography
+    rows = (
+        _batch_rows() if source == "fixture" else [_generated(rng, i) for i in range(_ITERATIONS)]
+    )
+    batch = snapshots_to_record_batch(rows)
+    reference = _dict_path_table(rows)
+    assert batch.schema.equals(reference.schema, check_metadata=True)
+    # Equal values; the dict path's one-entry dictionary per row chunk is unified by combining.
+    assert pa.Table.from_batches([batch]).combine_chunks().equals(reference.combine_chunks())
+
+
+def test_serialize_batch_takes_the_registered_batch_encoder() -> None:
+    table = ArrowSerializer.serialize_batch(_batch_rows(), DydxSecondSnapshot)
+    assert table.num_rows == len(_batch_rows())
+    assert table.column("instrument_id").num_chunks == 1  # one batch, not one per row
+
+
+def _write_catalog(root: Path, rows: list[DydxSecondSnapshot]) -> dict[str, str]:
+    """Write `rows` through a fresh `ParquetDataCatalog`; return each file's sha256 by path."""
+    ParquetDataCatalog(str(root)).write_data(rows)
+    files = sorted(p for p in root.rglob("*.parquet"))
+    return {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest() for p in files}
+
+
+@pytest.mark.parametrize("compression", [None, "zstd"])
+def test_the_batch_encoder_writes_byte_identical_parquet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, compression: str | None
+) -> None:
+    """`None`: this process's `pq.write_table` default; `zstd`: what capture's writer sets."""
+    if compression is not None:
+        monkeypatch.setattr(
+            pq, "write_table", functools.partial(pq.write_table, compression=compression)
+        )
+    rows = _batch_rows()
+    columnar = _write_catalog(tmp_path / "columnar", rows)
+    monkeypatch.delitem(serializer._ARROW_BATCH_ENCODERS, DydxSecondSnapshot)  # the dict path
+    reference = _write_catalog(tmp_path / "dict", rows)
+    assert len(columnar) == len(_BATCH_IDS)
+    assert columnar == reference
+
+
+def test_the_batch_encoded_files_decode_to_the_rows(tmp_path: Path) -> None:
+    rows = _batch_rows()
+    _write_catalog(tmp_path, rows)
+    decoded = [
+        row
+        for path in sorted(tmp_path.rglob("*.parquet"))
+        for row in ArrowSerializer.deserialize(DydxSecondSnapshot, pq.read_table(path))
+    ]
+    by_id = sorted(rows, key=lambda r: (r.instrument_id.value, r.ts_init))
+    assert [DydxSecondSnapshot.to_dict(r) for r in decoded] == [
+        DydxSecondSnapshot.to_dict(r) for r in by_id
+    ]
+
+
+def test_an_empty_batch_is_the_schema_with_no_rows() -> None:
+    batch = snapshots_to_record_batch([])
+    assert batch.num_rows == 0
+    assert batch.schema.equals(DydxSecondSnapshot.schema(), check_metadata=True)
+
+
+def _mutated(**attributes: object) -> DydxSecondSnapshot:
+    """Return a valid row, attributes overwritten after `__init__`'s checks (what the encoder sees)."""
+    row = _batch_row(4, _IID)
+    for name, value in attributes.items():
+        setattr(row, name, value)
+    return row
+
+
+@pytest.mark.parametrize(
+    ("attributes", "match"),
+    [
+        ({"buy_count": 2**32}, "fit its column"),
+        ({"sell_volume_units": INT64_MAX + 1}, "fit its column"),
+        ({"price_precision": 256}, "fit its column"),
+        ({"size_precision": -1}, "fit its column"),
+        ({"bid_price_units": [1, 2]}, "non-positive gap"),
+        ({"bid_price_units": [INT64_MAX, INT64_MIN]}, "outside int64"),
+        ({"ask_price_units": [INT64_MAX, INT64_MIN]}, "non-positive gap"),
+    ],
+)
+def test_the_batch_encoder_refuses_what_the_dict_path_refuses(
+    attributes: dict[str, object], match: str
+) -> None:
+    row = _mutated(**attributes)
+    with pytest.raises(SnapshotEncodingError, match=match):
+        snapshots_to_record_batch([_batch_row(2, _IID), row])
+    # The dict path refuses too: by raising, or by Nautilus's `dicts_to_record_batch` returning
+    # no batch at all (it prints the error), never by encoding the value.
+    try:
+        refused = make_dict_serializer(DydxSecondSnapshot.schema())([row]) is None
+    except SnapshotEncodingError:
+        refused = True
+    assert refused
+
+
+def test_the_batch_encoder_refuses_more_instruments_than_the_dictionary_index_holds() -> None:
+    """129 distinct ids widen pyarrow's int8 dictionary index; the schema's int8 refuses it, named."""
+    rows = [_batch_row(1, f"C{n}-USD-PERP.DYDX") for n in range(129)]
+    assert snapshots_to_record_batch(rows[:128]).num_rows == 128
+    with pytest.raises(SnapshotEncodingError, match="fit its column"):
+        snapshots_to_record_batch(rows)
+    # The dict path refuses the same batch (Nautilus prints the error and returns no batch).
+    assert make_dict_serializer(DydxSecondSnapshot.schema())(rows) is None

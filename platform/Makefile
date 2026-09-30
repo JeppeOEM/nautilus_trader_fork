@@ -276,19 +276,23 @@ verify-wipe:
 notebooks:
 	cd $(REPO_ROOT) && uv run jupytext --sync $(PLATFORM_DIR)research/notebooks/[0-9]*_*.py
 
-## Record the capture hot path's cost baseline (tests/fixtures/hotpath_baseline.json, audit D-65,
-## spine AD-D5) into the checkout: the one place the source tree is mounted writable, because
-## `make test` mounts it read-only and a baseline recorded into the image's copy would vanish with
-## the container. Only in a change that deliberately re-baselines (a changed burst, a Python or
-## nautilus_trader bump, or a reviewed per-message cost increase stated on audit row D-65),
-## never to make `make test` pass; the test's allocation checks say why.
+## Record the capture hot path's cost baselines (audit D-65, spine AD-D5) into the checkout:
+## tests/fixtures/hotpath_baseline.json (the `default` burst) and hotpath_baseline_scale.json (the
+## `scale` burst, 30 instruments a venue, 200-level books; Story 28.2). The checkout is the one
+## place the source tree is mounted writable, because `make test` mounts it read-only and a
+## baseline recorded into the image's copy would vanish with the container. Only in a change that
+## deliberately re-baselines (a changed burst, a Python or nautilus_trader bump, a reviewed
+## per-message cost increase stated on audit row D-65, or a cost reduction locked in), never to
+## make `make test` pass; the test's allocation checks say why.
 ## Measures the collector image, so build it from this checkout first (`make up`, which builds it).
-HOTPATH_BASELINE := $(PLATFORM_DIR)tests/fixtures/hotpath_baseline.json
+HOTPATH_BASELINES := $(PLATFORM_DIR)tests/fixtures/hotpath_baseline.json $(PLATFORM_DIR)tests/fixtures/hotpath_baseline_scale.json
 hotpath-baseline:
-	rm -f $(HOTPATH_BASELINE)
+	rm -f $(HOTPATH_BASELINES)
 	$(COMPOSE) run --rm --no-deps -e HOME=/tmp -e USER=collector -v $(REPO_ROOT):/src -e PLATFORM_SOURCE_DIR=/src/platform collector \
 		python3 -m pytest tests/test_hotpath.py -q
-	@test -f $(HOTPATH_BASELINE) && echo "recorded $(HOTPATH_BASELINE)" || { echo "hotpath-baseline: nothing was recorded" >&2; exit 1; }
+	@for f in $(HOTPATH_BASELINES); do \
+		test -f $$f && echo "recorded $$f" || { echo "hotpath-baseline: $$f was not recorded" >&2; exit 1; }; \
+	done
 
 ## Merge yesterday's (and any older closed day's) minute-sized Parquet files into one file per
 ## (data type, instrument) for every venue -- audit D-36: without this the catalog grows ~1,440

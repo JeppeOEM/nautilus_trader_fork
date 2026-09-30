@@ -86,7 +86,7 @@ def test_polled_rows_are_never_ws_feed_liveness(tmp_path: Path) -> None:
     c = _collector(tmp_path)
     _one_round(c, lambda: [_oi(_BYBIT)], plan_only=False)
     assert c._feeds.last_ns == {}
-    assert c._ingest_queue.empty()
+    assert c._ingest_backlog() == 0  # no row went through the queue (the stop sentinel is not one)
 
 
 def test_a_failed_round_is_ledgered(tmp_path: Path) -> None:

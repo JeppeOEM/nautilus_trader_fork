@@ -22,6 +22,9 @@ class_to_filename` derives the catalog directory `custom_dydx_second_snapshot` f
 and `to_dict`/`from_dict` are both the Parquet row (`make_dict_serializer`/`make_dict_deserializer`)
 and the `snapshots:raw` JSON wire format: `from_dict` is the only parser of either, and this
 module is the only place that knows the gap layout below (`platform/tests/test_boundaries.py`).
+A list of rows is encoded column-wise by `snapshots_to_record_batch` (Story 28.2, the registered
+`batch_encoder` `write_data` takes): the same values as `to_dict`, byte-identical Parquet files,
+the same refusals, without a dict per row.
 
 The layout -- every stored price and size is an exact integer, never a float:
 
@@ -72,6 +75,7 @@ second's book (shared by capture's live canary and archive's `repair_catalog`).
 from collections.abc import Mapping
 from collections.abc import Sequence
 from dataclasses import dataclass
+from itertools import chain
 from itertools import pairwise
 from typing import Literal
 from typing import NamedTuple
@@ -753,9 +757,110 @@ def top_of_book_units(table: pa.Table) -> list[TopOfBookUnits]:
     return [TopOfBookUnits(*values) for values in zip(*columns, strict=True)]
 
 
+# -- the columnar batch encoder (Story 28.2): the flush's path into `write_data` ------------------
+
+# The Python-to-Arrow conversion's refusals of a value outside its column type (a count past
+# uint32, units past int64, a precision past uint8, a non-numeric value): the dict path's
+# `pa.RecordBatch.from_pylist` raises the same ones, and Nautilus's `dicts_to_record_batch` prints
+# and swallows them into a `None` batch; here they are raised, named. A float is not refused by
+# either path (pyarrow truncates it into an int column): `__init__` refuses non-int units, so only a
+# row mutated after construction could carry one.
+_CONVERSION_ERRORS = (pa.ArrowInvalid, pa.ArrowTypeError, OverflowError, TypeError)
+
+
+def _snapshot_columns(rows: Sequence[DydxSecondSnapshot]) -> dict[str, list | pa.Array]:
+    """Return every stored column of `rows`: the values `to_dict` stores per row, column-wise."""
+    return {
+        "instrument_id": [r.instrument_id.value for r in rows],
+        "price_precision": [r.price_precision for r in rows],
+        "size_precision": [r.size_precision for r in rows],
+        "bid_prices": _book_price_column([r.bid_price_units for r in rows], "bid"),
+        "bid_sizes": [r.bid_size_units for r in rows],
+        "ask_prices": _book_price_column([r.ask_price_units for r in rows], "ask"),
+        "ask_sizes": [r.ask_size_units for r in rows],
+        "buy_volume": [r.buy_volume_units for r in rows],
+        "sell_volume": [r.sell_volume_units for r in rows],
+        "buy_count": [r.buy_count for r in rows],
+        "sell_count": [r.sell_count for r in rows],
+        "open_price": [r.open_price_units for r in rows],
+        "high_price": [r.high_price_units for r in rows],
+        "low_price": [r.low_price_units for r in rows],
+        "close_price": [r.close_price_units for r in rows],
+        "ts_event": [r.ts_event for r in rows],
+        "ts_init": [r.ts_init for r in rows],
+    }
+
+
+def _book_price_column(units: list[list[int]], side: Side) -> pa.ListArray:
+    """
+    `encode_book_prices` over a whole column at once: the levels of every row flattened into one
+    int64 array (the conversion refuses a non-int or out-of-int64 unit), gaps taken in numpy. When
+    any row would be refused, the column is re-encoded row by row through `encode_book_prices`,
+    which raises naming the offending pair -- the vectorised path never decides a refusal itself.
+    """
+    offsets = np.zeros(len(units) + 1, dtype=np.int32)
+    np.cumsum([len(row) for row in units], out=offsets[1:])
+    flat = pa.array(list(chain.from_iterable(units)), type=pa.int64()).to_numpy()
+    encoded = _gap_encoded(flat, offsets, side)
+    if encoded is None:
+        return pa.array([encode_book_prices(row, side) for row in units], pa.list_(pa.int64()))
+    return pa.ListArray.from_arrays(pa.array(offsets), pa.array(encoded, type=pa.int64()))
+
+
+def _gap_encoded(flat: np.ndarray, offsets: np.ndarray, side: Side) -> np.ndarray | None:
+    """
+    Return the flattened `[best, gap, ...]` layout of every row, or None when a gap inside a row
+    is not strictly positive. Ordered levels bound each true gap to 1..2^64-1, so an int64 gap
+    that wrapped past `INT64_MAX` reads as non-positive here: overflow is caught by the same test.
+    """
+    if flat.size < 2:
+        return flat
+    starts = np.zeros(flat.size, dtype=bool)
+    starts[offsets[:-1][np.diff(offsets) > 0]] = True
+    inner = ~starts[1:]  # position i+1 continues the row of position i
+    above, level = flat[:-1], flat[1:]
+    ordered = above > level if side == "bid" else level > above
+    gaps = above - level if side == "bid" else level - above
+    if not (ordered[inner].all() and (gaps[inner] > 0).all()):
+        return None
+    encoded = flat.copy()
+    encoded[1:][inner] = gaps[inner]
+    return encoded
+
+
+def snapshots_to_record_batch(rows: Sequence[DydxSecondSnapshot]) -> pa.RecordBatch:
+    """
+    Encode a batch of snapshots as one `RecordBatch`: one `pa.array` per schema column, in schema
+    order and type, holding exactly the values `to_dict` stores (the same gap layout, the same
+    units). Registered as the type's `batch_encoder`, so `ParquetDataCatalog.write_data` encodes a
+    flush in one pass instead of one dict and one single-row batch per row; the Parquet files are
+    byte-identical to the dict path's (`kernel/tests/test_second_snapshot.py`).
+
+    Invariant: never returns `None` and never a partial batch. Every value the dict path refuses
+    raises `SnapshotEncodingError`: a non-positive book gap (`encode_book_prices`) and every value
+    outside its column type (the conversion's own error, chained).
+    """
+    schema = DydxSecondSnapshot.schema()
+    try:
+        columns = _snapshot_columns(rows)
+        arrays = [_as_array(columns[field.name], field.type) for field in schema]
+        # Inside the try: more distinct instrument ids than the int8 dictionary index holds widen
+        # the index to int16, and only the schema check here refuses that.
+        return pa.RecordBatch.from_arrays(arrays, schema=schema)
+    except _CONVERSION_ERRORS as e:
+        raise SnapshotEncodingError(f"a snapshot value does not fit its column: {e}") from e
+
+
+def _as_array(column: list | pa.Array, column_type: pa.DataType) -> pa.Array:
+    return column if isinstance(column, pa.Array) else pa.array(column, type=column_type)
+
+
+# `encoder` (one row, `to_dict`) stays for Nautilus's single-object `serialize`; a list goes
+# through `batch_encoder` (`ArrowSerializer.serialize_batch` prefers it).
 register_arrow(
     data_cls=DydxSecondSnapshot,
     schema=DydxSecondSnapshot.schema(),
     encoder=make_dict_serializer(schema=DydxSecondSnapshot.schema()),
     decoder=make_dict_deserializer(DydxSecondSnapshot),
+    batch_encoder=snapshots_to_record_batch,
 )

@@ -36,6 +36,7 @@ from kernel.second_snapshot import SecondRow
 from observability import error_ledger
 
 import capture.application.capture_service as collector_mod
+from capture.application import sites
 from capture.application.capture_service import _BACKFILL_SETTLE_NS
 from capture.application.capture_service import _REJECTION_LOG_EVERY_NS
 from capture.application.capture_service import _WATCHDOG_REMINDER_NS
@@ -686,7 +687,7 @@ def test_the_catch_up_runs_before_the_first_subscribe(
     monkeypatch.setattr(collector_mod, "instruments_from_pyo3", lambda pyo3: [])
     c = _collector(tmp_path, client=_LifecycleClient(events), second_sink=_OrderingSink())
     c._applied.clear()  # `run()` applies the plan itself
-    c._stop.set()  # run() reaches the loops, sees the stop and unwinds
+    c.stop()  # run() reaches the loops, sees the stop and unwinds
     asyncio.run(c.run())
 
     assert events == ["connect", "catch_up", f"subscribe {_BYBIT}", "disconnect"]
@@ -1677,6 +1678,88 @@ def test_an_idle_window_reports_zeros_and_no_write(tmp_path: Path) -> None:
     }
 
 
+# -- the ingest hand-off (Story 28.2): a plain `get()` and a stop sentinel -------------------------
+
+
+def _recording_ingest(c: CaptureService, monkeypatch: pytest.MonkeyPatch) -> list[object]:
+    """Replace `_process_data` with a recorder; a message `"bad"` raises inside it."""
+    processed: list[object] = []
+
+    def process(data: object, feed: Feed = MAIN_FEED) -> None:
+        if data == "bad":
+            raise ValueError("simulated malformed message")
+        processed.append(data)
+
+    monkeypatch.setattr(c, "_process_data", process)
+    return processed
+
+
+def test_a_stop_ends_an_idle_ingest_loop_at_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    c = _collector(tmp_path)
+    _recording_ingest(c, monkeypatch)
+
+    async def scenario() -> None:
+        task = asyncio.create_task(c._ingest_loop())
+        await asyncio.sleep(0.01)  # parked in `get()` on the empty queue
+        c.stop()
+        # Well inside the old 1 s poll, which parked ~0.99 s here; no wall-clock assertion, which
+        # a loaded box would fail on noise alone.
+        await asyncio.wait_for(task, timeout=0.5)
+
+    asyncio.run(scenario())
+    assert c._ingest_backlog() == 0
+
+
+def test_a_stop_behind_a_backlog_processes_it_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    An ingest loop left running processes every message queued before the stop (an error
+    ledgered as today), then returns. `run()` does not wait for this (`stop()`'s Known limit).
+    """
+    error_ledger.reset()
+    c = _collector(tmp_path)
+    processed = _recording_ingest(c, monkeypatch)
+    messages = [*range(100), "bad", *range(100, 200)]  # past two `_INGEST_YIELD_EVERY` yields
+    for message in messages:
+        c._on_data(message)
+    c.stop()
+    assert c._ingest_backlog() == len(messages)  # the sentinel is not a message
+
+    asyncio.run(asyncio.wait_for(c._ingest_loop(), timeout=1.0))
+
+    assert processed == [m for m in messages if m != "bad"]
+    assert error_ledger.counts() == {sites.PROCESS: 1}
+    assert c._ingest_queue.empty()
+
+
+def test_a_second_stop_is_harmless(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    c = _collector(tmp_path)
+    processed = _recording_ingest(c, monkeypatch)
+    c._on_data(1)
+    c.stop()
+    c.stop()
+    assert c._ingest_queue.qsize() == 2  # one message, one sentinel
+
+    asyncio.run(asyncio.wait_for(c._ingest_loop(), timeout=1.0))
+
+    assert processed == [1]
+    assert (c._ingest_queue.qsize(), c._ingest_backlog()) == (0, 0)
+
+
+def test_a_stop_before_run_unwinds_it(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`run()` started after `stop()` reaches its loops, unwinds and disconnects."""
+    monkeypatch.setattr(collector_mod, "instruments_from_pyo3", lambda pyo3: [])
+    events: list[str] = []
+    c = _collector(tmp_path, client=_LifecycleClient(events))
+    c._applied.clear()  # `run()` applies the plan itself
+    c.stop()
+    asyncio.run(asyncio.wait_for(c.run(), timeout=5.0))
+    assert events[-1] == "disconnect"
+
+
 def test_a_backlog_behind_a_starved_ingest_loop_is_still_reported(tmp_path: Path) -> None:
     """No `_process_data` ran in the window (the loop was starved): the report samples the queue."""
     c = _collector(tmp_path)
@@ -1747,7 +1830,7 @@ def test_the_live_stream_closes_even_when_the_final_report_is_cancelled(
     c = _collector(tmp_path, client=_LifecycleClient([]))
     c._applied.clear()  # `run()` applies the plan itself
     c._live_stream = _CancelledReport()
-    c._stop.set()
+    c.stop()
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(c.run())
     assert closed == [True]

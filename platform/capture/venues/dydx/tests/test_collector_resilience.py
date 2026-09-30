@@ -98,10 +98,8 @@ async def test_ingest_loop_isolates_bad_message(tmp_path: Path, monkeypatch) -> 
 
     loop_task = asyncio.create_task(collector._ingest_loop())
     await asyncio.sleep(0.05)
-    collector._stop.set()
-    # _ingest_loop's internal queue.get() has its own 1.0s recheck timeout (see its
-    # implementation) -- give the outer wait comfortable room past that.
-    await asyncio.wait_for(loop_task, timeout=2.0)
+    collector.stop()  # queues the stop sentinel: the loop returns without any poll interval
+    await asyncio.wait_for(loop_task, timeout=1.0)
 
     assert processed == [good_message]
 
@@ -427,7 +425,7 @@ async def test_crossed_book_resolution_is_logged_with_before_after_prices(
     with caplog.at_level(logging.INFO):
         loop_task = asyncio.create_task(collector._second_loop())
         await asyncio.sleep(0.05)
-        collector._stop.set()
+        collector.stop()
         await asyncio.wait_for(loop_task, timeout=1.0)
 
     resolved = [r for r in caplog.records if "resolved after" in r.getMessage()]
@@ -455,7 +453,7 @@ async def test_crossed_book_within_grace_window_does_not_escalate(tmp_path: Path
     with caplog.at_level(logging.CRITICAL, logger="capture.critical"):
         loop_task = asyncio.create_task(collector._second_loop())
         await asyncio.sleep(0.05)
-        collector._stop.set()
+        collector.stop()
         await asyncio.wait_for(loop_task, timeout=1.0)
 
     assert [r for r in caplog.records if r.name == "capture.critical"] == []
@@ -489,7 +487,7 @@ async def test_crossed_book_past_grace_window_escalates_critical(tmp_path: Path,
     with caplog.at_level(logging.CRITICAL, logger="capture.critical"):
         loop_task = asyncio.create_task(collector._second_loop())
         await asyncio.sleep(0.05)
-        collector._stop.set()
+        collector.stop()
         await asyncio.wait_for(loop_task, timeout=1.0)
 
     critical_records = [r for r in caplog.records if r.name == "capture.critical"]

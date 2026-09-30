@@ -219,6 +219,10 @@ logger = logging.getLogger(__name__)
 critical_logger = logging.getLogger("capture.critical")
 
 _INGEST_YIELD_EVERY = 64
+# Queued by `stop()` behind every message: an `_ingest_loop` left running processes the backlog
+# ahead of it and returns when it reaches it, and an idle loop wakes at once. It replaced a 1 s `wait_for` around
+# every `get()`, whose timer handle and cancellation scope were paid per message (Story 28.2).
+_INGEST_STOP = object()
 # Coverage lines kept for the next flush after a failed append. Beyond it the oldest are dropped
 # and the loss is ledgered: a disk that refuses writes for hours must not grow memory (MEM-02).
 _COVERAGE_PENDING_MAX = 10_000
@@ -523,6 +527,7 @@ class CaptureService:
         self._hotpath = HotPathWindow()
         self._hotpath_since_ns = perf_counter_ns()
         self._stop = asyncio.Event()
+        self._ingest_stop_queued = False  # `_INGEST_STOP` waits in the queue (never a backlog)
         # Built once `_on_data` (the ingest queue) and `_ledger` can serve a call, so a client that
         # replays cached state from its constructor enqueues instead of hitting a half-built
         # service; the policies below read its capabilities. `Any`: the optional capabilities
@@ -728,13 +733,17 @@ class CaptureService:
             self._ledger(sites.ENQUEUE, f"failed to enqueue {type(data).__name__}, DROPPED", e)
 
     async def _ingest_loop(self) -> None:
-        # Yields every _INGEST_YIELD_EVERY messages so a burst can't starve _second_loop.
+        # A plain `get()`: `stop()` queues `_INGEST_STOP` behind the backlog, so noticing the stop
+        # needs no timeout per message. Yields every _INGEST_YIELD_EVERY messages so a burst can't
+        # starve _second_loop.
+        queue = self._ingest_queue
         processed = 0
-        while not self._stop.is_set():
-            try:
-                data, feed = await asyncio.wait_for(self._ingest_queue.get(), timeout=1.0)
-            except TimeoutError:
-                continue
+        while True:
+            item = await queue.get()
+            if item is _INGEST_STOP:
+                self._ingest_stop_queued = False
+                return
+            data, feed = item
             try:
                 self._process_data(data, feed)
             except Exception as e:
@@ -747,6 +756,9 @@ class CaptureService:
         # Hot-path figures (Story 28.1): the backlog behind this message and one more processed;
         # `max` rather than an `if`, which would push this method past the complexity limit (the
         # `if` saves ~40 ns, less than the method call a split would add back).
+        # Known limit: after `stop()` this raw `qsize()` also counts the queued stop sentinel, so
+        # the shutdown window's depth can read one high (the report's own sample and the flush use
+        # `_ingest_backlog`). Upgrade path: subtract `_ingest_stop_queued` here (~10 ns/message).
         self._queue_depth_max = max(self._queue_depth_max, self._ingest_queue.qsize())
         next(self._processed)
         now_ns = time.time_ns()
@@ -1000,7 +1012,7 @@ class CaptureService:
         """
         flushed_seconds: dict[str, list[DydxSecondSnapshot]] = {}
         now_ns = time.time_ns()
-        batches = self._buffer.take(now_ns, final, not self._ingest_queue.empty())
+        batches = self._buffer.take(now_ns, final, self._ingest_backlog() > 0)
         for key, items in batches:
             try:
                 # Real disk I/O -- off the event loop so _second_loop isn't stalled.
@@ -1234,7 +1246,7 @@ class CaptureService:
 
         """
         now_ns = perf_counter_ns()
-        depth_max = max(self._queue_depth_max, self._ingest_queue.qsize())
+        depth_max = max(self._queue_depth_max, self._ingest_backlog())
         report = self._hotpath.take(
             now_ns - self._hotpath_since_ns, depth_max, next(self._processed)
         )
@@ -2425,7 +2437,27 @@ class CaptureService:
             self._note_unfetched(sorted(request.since), request.since)
 
     def stop(self) -> None:
+        """
+        Ask `run()` to unwind: the one place `_stop` is set. The stop sentinel goes behind every
+        queued message, so an `_ingest_loop` left running processes what it holds and returns at
+        the sentinel, and an idle one wakes at once. A second call queues nothing.
+
+        Known limit: `run()` itself does not wait for that drain. It cancels every loop as soon as
+        `_stop` is set, so a backlog still queued at shutdown (at most what arrived since the
+        ingest loop last yielded, `_INGEST_YIELD_EVERY` messages apart, plus what the client
+        pushes before `_disconnect`) is abandoned unprocessed and unledgered, exactly as under the
+        1 s poll this replaced. Upgrade path: await the ingest task to its sentinel (bounded)
+        before cancelling the others, and ledger `_ingest_backlog()` if the bound is hit.
+        """
+        if self._stop.is_set():
+            return
         self._stop.set()
+        self._ingest_queue.put_nowait(_INGEST_STOP)
+        self._ingest_stop_queued = True
+
+    def _ingest_backlog(self) -> int:
+        """Return the messages waiting in the ingest queue (a queued stop sentinel is not one)."""
+        return self._ingest_queue.qsize() - self._ingest_stop_queued
 
 
 async def run_forever(

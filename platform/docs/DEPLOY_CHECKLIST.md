@@ -1221,3 +1221,24 @@ archive format changed. The VPS profile below fills audit D-136; Story 28.2 does
 - [ ] Update audit D-136 (`docs/DATA_INTEGRITY_AUDIT.md`) with the README's path, the ranking and
       the contention verdict, and add the VPS `lag_max_ms`/`lag_p99_ms` to D-10.
 - [ ] Note: Story 28.2 does not wait for this entry; it cites the profile only if it exists.
+
+### 28-2-capture-python-overhead-removed-baseline-lowered (commit: this story's)
+
+Rebuilds the collector image (new capture and kernel code: the columnar `DydxSecondSnapshot` flush
+encoder and the ingest hand-off without a per-message `wait_for`). No config key, schema, mount or
+archive format changed: the Parquet files are byte-identical (audit D-65, Story 28.2). uvloop was
+measured and not kept (its per-callback handle raised the scale burst's queued peak above the
+baseline), so the collectors still run asyncio's default loop and there is no `event loop:` line to
+look for.
+
+- [ ] Before redeploying, note each collector's `write_data_max_ms` from its `hotpath:` Dozzle
+      lines over an hour (or `redis-cli GET capture:hotpath:<venue>`), with `uptime` alongside.
+- [ ] On the VPS, `git pull`, then rebuild and redeploy the collectors (`make redeploy-all`; dYdX
+      only if it is deployed, `make up-dydx`). Check each collector logs `Started:` and writes
+      `custom_dydx_second_snapshot` files at the next minute.
+- [ ] Over the hour after the redeploy, compare `capture:hotpath` `write_data_max_ms` and
+      `lag_max_ms` against the figures noted before; expect the write to fall several-fold (the
+      dev box: 304 -> 49 ms for 30 instruments). Record both sets in audit D-65's Story 28.2 record.
+- [ ] When D-136's VPS profile lands (entry `28-1-capture-hotpath-metrics-cpu-priority-and-vps-profile`),
+      re-check its README's ranking against the dev-box figures in D-65 and replace the projection's
+      "x 3, assumed" with the profile's measured dev-box-to-VPS ratio.

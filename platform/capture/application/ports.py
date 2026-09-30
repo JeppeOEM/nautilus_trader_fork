@@ -112,9 +112,11 @@ class ArchiveWriter(Protocol):
 
     Invariant: every catalog write goes through `ParquetDataCatalog.write_data` (NAUT-02), so the
     schema and partitioning are Nautilus's own; a batch whose write raised is reported to the caller
-    (which marks the gap), never retried silently. The only module naming the batch encoder, so a
-    columnar encoder can replace it without touching a caller (Epic 28). Synchronous methods run
-    off the event loop where they do disk I/O on the hot path (`write`).
+    (which marks the gap), never retried silently. The batch encoder is not named here: since
+    Story 28.2 the columnar `kernel.second_snapshot.snapshots_to_record_batch` is registered with
+    the kernel type itself (`register_arrow(..., batch_encoder=)`), so `write_data` takes it and no
+    caller changed. Synchronous methods run off the event loop where they do disk I/O on the hot
+    path (`write`).
     """
 
     @property

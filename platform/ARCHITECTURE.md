@@ -658,9 +658,12 @@ read-only checkout mount (Story 23.1): `test_boundaries.py` maps every module to
 context and fails any import outside the AD-D2 graph or any `_private` import across contexts,
 except the legacy edges it lists with the story that retires each (expired from
 `sprint-status.yaml`); `test_images.py` fails when a dockerfile's `COPY` set misses a package an
-entrypoint imports; `test_hotpath.py` replays a 30-instrument burst through
-`CaptureService._process_data` against `tests/fixtures/hotpath_baseline.json` (AD-D5; the baseline is
-recorded into the checkout by `make hotpath-baseline` only, and a missing one fails `make test`).
+entrypoint imports; `test_hotpath.py` replays two bursts -- `default` (30 instruments, 20 levels)
+and `scale` (90 instruments, 200 levels; Story 28.2) -- through `CaptureService._process_data` and
+through the queue (`_on_data` -> `_ingest_loop`), and times the flush encode, against
+`tests/fixtures/hotpath_baseline.json` and `hotpath_baseline_scale.json` (AD-D5, audit D-65; the
+baselines are recorded into the checkout by `make hotpath-baseline` only, and a missing one fails
+`make test`).
 
 ## What's genuinely not finished
 
