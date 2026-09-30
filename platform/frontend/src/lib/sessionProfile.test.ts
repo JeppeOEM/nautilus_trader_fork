@@ -2,6 +2,7 @@ import type { Time } from "lightweight-charts";
 import { describe, expect, it } from "vitest";
 
 import type { ChartDatum, VolumeDatum } from "../hooks/useCandles";
+import { gapRun } from "./gaps";
 import {
   buildSessionProfiles,
   periodStart,
@@ -66,6 +67,15 @@ describe("buildSessionProfiles (Story 18.8)", () => {
   const volume = [D1, D1 + 60, D2, D2 + 60, D3, D3 + 60].map((t) => vol(t, 5));
   const build = (over: { candles?: ChartDatum[]; volume?: VolumeDatum[]; count?: number; from?: number | null } = {}, cache: SessionProfileCache = new Map()) =>
     buildSessionProfiles(over.candles ?? candles, over.volume ?? volume, "daily", over.count ?? 5, settings, cache, over.from ?? null);
+
+  it("ignores a 720-slot gap run: the sessions equal the run-free input's (Story 32.1)", () => {
+    const slots = gapRun(D1 + 60, D2, 60).map((time) => ({ time: time as Time }));
+    const holedCandles: ChartDatum[] = [...candles.slice(0, 2), ...slots, ...candles.slice(2)];
+    const holedVolume: VolumeDatum[] = [...volume.slice(0, 2), ...slots, ...volume.slice(2)];
+
+    expect(slots).toHaveLength(720);
+    expect(build({ candles: holedCandles, volume: holedVolume })).toEqual(build());
+  });
 
   it("produces one independent profile per calendar day, oldest first (AC #1/#4)", () => {
     const entries = build();

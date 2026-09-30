@@ -5,6 +5,7 @@ import type { CreatePriceLineOptions, Time } from "lightweight-charts";
 
 import type { ChartMode, DrawingSpec, IndicatorPaneSpec, PriceLineSpec, VolumeProfileSpec } from "./LightweightChart";
 import { TrendlinePrimitive } from "./primitives/TrendlinePrimitive";
+import { GapPrimitive } from "./primitives/GapPrimitive";
 
 const addSeriesMock = vi.fn();
 const seriesUpdateMock = vi.fn();
@@ -32,6 +33,11 @@ const coordinateToPriceMock = vi.fn();
 // Story 18.2: the host series' primitive API and the time scale's x<->time conversions.
 const attachPrimitiveMock = vi.fn();
 const detachPrimitiveMock = vi.fn();
+// Story 32.1: every price host and every non-overlay pane carries a GapPrimitive for its whole
+// life, so its attach/detach calls are recorded apart (with the host series) -- the drawing,
+// marker, measurement and profile assertions above keep counting only their own primitives.
+const gapAttachMock = vi.fn();
+const gapDetachMock = vi.fn();
 const coordinateToTimeMock = vi.fn();
 const timeToCoordinateMock = vi.fn();
 const fitContentMock = vi.fn();
@@ -68,7 +74,7 @@ function makeSeriesMock(initialColor: string | undefined) {
   const applyOptions = vi.fn((opts: { color?: string }) => {
     if (opts.color !== undefined) color = opts.color;
   });
-  return {
+  const series = {
     setData: setDataMock,
     update: seriesUpdateMock,
     applyOptions,
@@ -77,9 +83,10 @@ function makeSeriesMock(initialColor: string | undefined) {
     removePriceLine: removePriceLineMock,
     priceToCoordinate: priceToCoordinateMock,
     coordinateToPrice: coordinateToPriceMock,
-    attachPrimitive: attachPrimitiveMock,
-    detachPrimitive: detachPrimitiveMock,
+    attachPrimitive: (p: unknown) => (p instanceof GapPrimitive ? gapAttachMock(p, series) : attachPrimitiveMock(p)),
+    detachPrimitive: (p: unknown) => (p instanceof GapPrimitive ? gapDetachMock(p, series) : detachPrimitiveMock(p)),
   };
+  return series;
 }
 
 // A real IPriceLine's `.options()`/`.applyOptions()` round-trip, same rationale as
@@ -190,6 +197,8 @@ beforeEach(() => {
   removePriceLineMock.mockReset();
   attachPrimitiveMock.mockReset();
   detachPrimitiveMock.mockReset();
+  gapAttachMock.mockReset();
+  gapDetachMock.mockReset();
   coordinateToTimeMock.mockReset().mockReturnValue(null);
   fitContentMock.mockReset();
   scrollToRealTimeMock.mockReset();
@@ -1167,5 +1176,134 @@ describe("view commands and crosshair toggle (Story 18.10)", () => {
     expect(crosshairCalls()).toHaveLength(2);
     expect(crosshairCalls()[1].vertLine.visible).toBe(true);
     expect(crosshairCalls().every((c) => !("mode" in c))).toBe(true);
+  });
+});
+
+describe("gap painting (Story 32.1)", () => {
+  const bar = (n: number) => ({ time: n as Time, open: 1, high: 2, low: 1, close: 1 });
+  // One real bar, a 3-bar hole, one real bar: slots at 120, 180, 240.
+  const holed = [bar(60), { time: 120 as Time }, { time: 180 as Time }, { time: 240 as Time }, bar(300)];
+  const gapsAttached = () => gapAttachMock.mock.calls.map(([primitive, host]) => ({ primitive: primitive as GapPrimitive, host }));
+  const candleSeries = () => addSeriesMock.mock.results[0].value;
+
+  it("attaches one labelled gap painter to the candle series and pushes the price series' runs to it", () => {
+    const setRuns = vi.spyOn(GapPrimitive.prototype, "setRuns");
+    const { rerender } = render(<LightweightChart data={[bar(60), bar(120)]} onChartApi={() => {}} />);
+
+    expect(gapsAttached()).toHaveLength(1);
+    expect(gapsAttached()[0].host).toBe(candleSeries());
+    expect(setRuns).toHaveBeenLastCalledWith([]);
+
+    rerender(<LightweightChart data={holed as never} onChartApi={() => {}} />);
+
+    expect(gapsAttached()).toHaveLength(1); // same painter, fresh runs
+    expect(setRuns).toHaveBeenLastCalledWith([{ times: [120, 180, 240], durationSeconds: 180, compressed: false }]);
+    setRuns.mockRestore();
+  });
+
+  it("closes a trailing run at the forming live bar, so a capped hole reads its real length", () => {
+    const setRuns = vi.spyOn(GapPrimitive.prototype, "setRuns");
+    const slots = Array.from({ length: 720 }, (_, k) => ({ time: (60 + (k + 1) * 60) as Time }));
+    const liveAt = 60 + 3 * 86_400;
+    render(
+      <LightweightChart
+        data={[bar(60), ...slots] as never}
+        liveBar={{ time: liveAt as Time, open: 1, high: 2, low: 1, close: 1, volume: 1 } as never}
+        onChartApi={() => {}}
+      />,
+    );
+
+    const [run] = setRuns.mock.lastCall![0];
+    expect(run).toMatchObject({ durationSeconds: 3 * 86_400 - 60, compressed: true });
+    setRuns.mockRestore();
+  });
+
+  it("gives every non-overlay pane exactly one painter, on its first series, with the price runs; overlays none", () => {
+    const setRuns = vi.spyOn(GapPrimitive.prototype, "setRuns");
+    const indicatorData = [{ time: 60 as Time }, { time: 120 as Time, value: 3 }]; // warm-up whitespace, not a gap
+    render(
+      <LightweightChart
+        data={holed as never}
+        onChartApi={() => {}}
+        panes={[
+          makePaneSpec("volume", { kind: "Histogram" }),
+          makePaneSpec("macd.line", { group: "macd", data: indicatorData }),
+          makePaneSpec("macd.signal", { group: "macd", data: indicatorData }),
+          makePaneSpec("sma", { placement: "overlay", data: indicatorData }),
+        ]}
+      />,
+    );
+
+    const hosts = gapsAttached().map((g) => g.host);
+    const [candles, volume, macdLine] = addSeriesMock.mock.results.map((r) => r.value);
+    expect(hosts).toEqual([volume, macdLine, candles]);
+    for (const { primitive } of gapsAttached()) {
+      expect(setRuns.mock.calls.filter((_, i) => setRuns.mock.contexts[i] === primitive).at(-1)).toEqual([
+        [{ times: [120, 180, 240], durationSeconds: 180, compressed: false }],
+      ]);
+    }
+    setRuns.mockRestore();
+  });
+
+  it("moves a pane's painter to a sibling when its host series goes, and detaches it with the pane", () => {
+    const line = makePaneSpec("macd.line", { group: "macd" });
+    const signal = makePaneSpec("macd.signal", { group: "macd" });
+    const { rerender } = render(<LightweightChart data={holed as never} onChartApi={() => {}} panes={[line, signal]} />);
+    const [, lineSeries, signalSeries] = addSeriesMock.mock.results.map((r) => r.value);
+    const first = gapsAttached().find((g) => g.host === lineSeries)!.primitive;
+
+    rerender(<LightweightChart data={holed as never} onChartApi={() => {}} panes={[signal]} />);
+    expect(gapDetachMock).toHaveBeenCalledWith(first, lineSeries);
+    expect(gapsAttached().filter((g) => g.host === signalSeries)).toHaveLength(1);
+
+    const second = gapsAttached().find((g) => g.host === signalSeries)!.primitive;
+    rerender(<LightweightChart data={holed as never} onChartApi={() => {}} panes={[]} />);
+    expect(gapDetachMock).toHaveBeenCalledWith(second, signalSeries);
+    expect(removePaneMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("moves the labelled painter to the first Lines series on a mode flip, detaching it from the candles", () => {
+    const lines = { bid: [], ask: [], mid: [], micro: [], price: [] };
+    const { rerender } = render(<LightweightChart data={holed as never} linesData={lines} onChartApi={() => {}} />);
+    const [{ primitive: candlePainter }] = gapsAttached();
+
+    rerender(<LightweightChart mode="lines" data={holed as never} linesData={lines} onChartApi={() => {}} />);
+
+    expect(gapDetachMock).toHaveBeenCalledWith(candlePainter, candleSeries());
+    const bidSeries = addSeriesMock.mock.results[1].value; // LINE_SERIES_IDS order: bid first
+    expect(gapsAttached().at(-1)!.host).toBe(bidSeries);
+  });
+
+  it("reads Lines-mode runs from the Lines series, one slot per missing second", () => {
+    const setRuns = vi.spyOn(GapPrimitive.prototype, "setRuns");
+    const v = (t: number) => ({ time: t as Time, value: 1 });
+    const bid = [v(0), { time: 1 as Time }, { time: 2 as Time }, { time: 3 as Time }, { time: 4 as Time }, v(5)];
+    const lines = { bid, ask: bid, mid: bid, micro: bid, price: bid };
+
+    render(<LightweightChart mode="lines" data={[]} linesData={lines} onChartApi={() => {}} />);
+
+    expect(setRuns).toHaveBeenLastCalledWith([{ times: [1, 2, 3, 4], durationSeconds: 4, compressed: false }]);
+    setRuns.mockRestore();
+  });
+
+  it("shows 'no data · <duration>' in the legend when the crosshair is over a gap slot", () => {
+    const paneEl = document.createElement("div");
+    const base = createChartMock.getMockImplementation()!;
+    createChartMock.mockImplementation((...args: unknown[]) => ({
+      ...base(...args),
+      panes: () => [{ paneIndex: () => 0, getHTMLElement: () => paneEl }],
+    }));
+    render(
+      <LightweightChart
+        data={holed as never}
+        onChartApi={() => {}}
+        panes={[makePaneSpec("sma", { placement: "overlay", groupLabel: "SMA (5)", data: [{ time: 60 as Time, value: 1 }] })]}
+      />,
+    );
+    const legendHandler = subscribeCrosshairMoveMock.mock.calls.at(-1)![0];
+
+    act(() => legendHandler({ time: 180, seriesData: new Map() }));
+
+    expect(paneEl.querySelector(".chart-legend-row")?.textContent).toBe("SMA (5)no data · 3m");
   });
 });

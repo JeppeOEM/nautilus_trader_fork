@@ -69,6 +69,6 @@ Frontend:
   1–3 s before a minute boundary lands in the next minute (BTC 20:00 candle where the indexer has
   0 trades), and trades during a WS outage are lost because the replay cannot be placed.
 - `config.py` default `snapshot_interval_seconds=0.5` vs `config.toml` 1.0 (affects rollup `seconds_observed`).
-- 1s: time-linear axis (whitespace per missing bucket) + per-bucket empty heartbeat on the live channel.
+- 1s: ~~time-linear axis (whitespace per missing bucket)~~ closed by story `32-1-every-gap-drawn-to-its-real-length-in-a-distinct-colour-on-every-chart` (one whitespace slot per missing interval, capped at `MAX_GAP_ROWS_PER_GAP`); still open: per-bucket empty heartbeat on the live channel.
 - `partial` rollup bars are drawn like complete ones; browser-vs-server clock for the history cursor;
   `catalog_stats` filename parsing unguarded; `_recent` not trimmed for a silent instrument (bounded).

@@ -2,6 +2,7 @@ import type { Time } from "lightweight-charts";
 import { describe, expect, it } from "vitest";
 
 import type { ChartDatum, VolumeDatum } from "../../../hooks/useCandles";
+import { gapRun } from "../../../lib/gaps";
 import { computeMeasurement, formatMeasurement } from "./MeasurementPrimitive";
 
 const t = (n: number): Time => n as Time;
@@ -23,6 +24,20 @@ describe("computeMeasurement (Story 18.3)", () => {
     expect(m.priceDelta).toBe(10);
     expect(m.priceDeltaPct).toBe(10);
     expect(m.bars).toBe(3); // 60, 120, 240 -- the 180 whitespace entry is not a bar
+  });
+
+  it("counts and sums nothing for a 720-slot gap run: equal to the run-free input (Story 32.1)", () => {
+    const slots = gapRun(60, 86_400, 60).map((n) => ({ time: t(n) }));
+    const plainCandles = [candle(60), candle(86_400)];
+    const plainVolume: VolumeDatum[] = [{ time: t(60), value: 10 }, { time: t(86_400), value: 20 }];
+    const start = { time: t(60), price: 100 };
+    const end = { time: t(86_400), price: 90 };
+
+    const holed = computeMeasurement(start, end, [plainCandles[0], ...slots, plainCandles[1]], [plainVolume[0], ...slots, plainVolume[1]]);
+
+    expect(slots).toHaveLength(720);
+    expect(holed).toEqual(computeMeasurement(start, end, plainCandles, plainVolume));
+    expect(holed.bars).toBe(2);
   });
 
   it("sums volume over the range, skipping gap entries", () => {

@@ -131,7 +131,7 @@ describe("useSnapshotSeries", () => {
 
     await waitFor(() => expect(result.current.bid).toHaveLength(2));
     expect(fetchSnapshotSeriesMock).toHaveBeenLastCalledWith("BTC-USD-PERP.DYDX", 61_000 * 1_000_000, 900);
-    expect(result.current.bid[0].time).toBe(60); // prepended: 60_000ms -> 60s
+    expect(result.current.bid.map((d) => d.time)).toEqual([60, 61]); // prepended, no seam slot
   });
 
   it("does not insert a seam-gap marker for a 2s page-boundary gap (below the 2.5s backend threshold)", async () => {
@@ -153,6 +153,44 @@ describe("useSnapshotSeries", () => {
 
     await waitFor(() => expect(result.current.bid).toHaveLength(2));
     expect("value" in result.current.bid[0]).toBe(true); // no injected null gap-marker row
+    expect(result.current.bid.map((d) => d.time)).toEqual([61, 63]);
+  });
+
+  it("fills a page-boundary hole past the 2.5s threshold with one whitespace slot per missing second", async () => {
+    fetchSnapshotSeriesMock.mockResolvedValueOnce(
+      page([{ t: 65_000, bid_units: 10, ask_units: 20, price_precision: 1, mid: 1.5, micro: 1.5, price: 1.5 }], true),
+    );
+    const chart = fakeChart();
+    const { result } = renderHook(() => useSnapshotSeries("BTC-USD-PERP.DYDX", chart.api, true));
+    await waitFor(() => expect(result.current.bid).toHaveLength(1));
+
+    fetchSnapshotSeriesMock.mockResolvedValueOnce(
+      page([{ t: 60_000, bid_units: 20, ask_units: 30, price_precision: 1, mid: 2.5, micro: 2.5, price: 2.5 }], false),
+    );
+    chart.fire({ from: 5 as LogicalRange["from"], to: 50 as LogicalRange["to"] });
+
+    await waitFor(() => expect(result.current.bid).toHaveLength(6));
+    for (const series of [result.current.bid, result.current.ask, result.current.mid, result.current.micro, result.current.price]) {
+      expect(series.map((d) => d.time)).toEqual([60, 61, 62, 63, 64, 65]);
+      expect(series.slice(1, 5)).toEqual([{ time: 61 }, { time: 62 }, { time: 63 }, { time: 64 }]);
+    }
+  });
+
+  it("builds a seam over arrival-timed (fractional) seconds in integer ms, exactly as the backend does", async () => {
+    fetchSnapshotSeriesMock.mockResolvedValueOnce(
+      page([{ t: 63_123, bid_units: 10, ask_units: 20, price_precision: 1, mid: 1.5, micro: 1.5, price: 1.5 }], true),
+    );
+    const chart = fakeChart();
+    const { result } = renderHook(() => useSnapshotSeries("BTC-USD-PERP.DYDX", chart.api, true));
+    await waitFor(() => expect(result.current.bid).toHaveLength(1));
+
+    fetchSnapshotSeriesMock.mockResolvedValueOnce(
+      page([{ t: 60_123, bid_units: 20, ask_units: 30, price_precision: 1, mid: 2.5, micro: 2.5, price: 2.5 }], false),
+    );
+    chart.fire({ from: 5 as LogicalRange["from"], to: 50 as LogicalRange["to"] });
+
+    await waitFor(() => expect(result.current.bid).toHaveLength(4));
+    expect(result.current.bid.map((d) => d.time)).toEqual([60_123 / 1000, 61_123 / 1000, 62_123 / 1000, 63_123 / 1000]);
   });
 
   it("stops issuing further requests once has_more is false", async () => {

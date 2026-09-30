@@ -2,6 +2,7 @@ import { act, renderHook } from "@testing-library/react";
 import type { Time } from "lightweight-charts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { gapRun } from "../lib/gaps";
 import type { ChartDatum } from "./useCandles";
 import { REPLAY_BASE_MS, REPLAY_SPEEDS, stepBarTime, useReplay } from "./useReplay";
 
@@ -20,6 +21,42 @@ describe("stepBarTime (Story 18.4)", () => {
     expect(stepBarTime(CANDLES, 60, -1)).toBeNull();
     // a time absent from the data still steps to the nearest bar, not "end"
     expect(stepBarTime(CANDLES, 130, 1)).toBe(240);
+  });
+});
+
+describe("replay across a long gap run (Story 32.1)", () => {
+  // 60, [720 whitespace slots 120 .. 43_260], 86_400: the run is stepped over, never onto.
+  const slots = gapRun(60, 86_400, 60).map((time): ChartDatum => ({ time: time as Time }));
+  const HOLED: ChartDatum[] = [bar(60), ...slots, bar(86_400)];
+
+  it("steps from the last bar before the run straight to the first bar after it, both ways", () => {
+    expect(slots).toHaveLength(720);
+    expect(stepBarTime(HOLED, 60, 1)).toBe(86_400);
+    expect(stepBarTime(HOLED, 86_400, -1)).toBe(60);
+    expect(stepBarTime(HOLED, 600, 1)).toBe(86_400); // from inside the run
+  });
+
+  it("step and playback never land on a gap slot, and a gap slot cannot be picked", () => {
+    const { result } = renderHook(() => useReplay(HOLED));
+    act(() => result.current.startPicking());
+    let ok = true;
+    act(() => {
+      ok = result.current.pick(120);
+    });
+    expect(ok).toBe(false);
+    act(() => {
+      result.current.pick(60);
+    });
+
+    act(() => result.current.step(1));
+    expect(result.current.displayed.at(-1)?.time).toBe(86_400);
+    act(() => result.current.step(-1));
+    expect(result.current.displayed.at(-1)?.time).toBe(60);
+
+    act(() => result.current.togglePlay());
+    act(() => vi.advanceTimersByTime(REPLAY_BASE_MS));
+    expect(result.current.displayed.at(-1)?.time).toBe(86_400);
+    expect(result.current.isPlaying).toBe(false); // newest bar reached in one tick
   });
 });
 

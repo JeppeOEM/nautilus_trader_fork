@@ -1,6 +1,7 @@
 import type { IChartApi, MouseEventParams, Time } from "lightweight-charts";
 import { describe, expect, it } from "vitest";
 
+import { findGapRuns, gapRun, gapRunsBySlot } from "../../lib/gaps";
 import { formatLegendValue, type LegendSeries, renderLegends } from "./legend";
 
 // Real DOM elements stand in for the library's pane cells; the chart/series objects are the
@@ -94,5 +95,36 @@ describe("renderLegends", () => {
 
     renderLegends(chart, [], null);
     expect(rows(els[1])).toHaveLength(0);
+  });
+
+  it("reads 'no data · <duration>' on every row when the crosshair is over a gap slot (Story 32.1)", () => {
+    const { chart, els } = makeChart(2);
+    const series = { id: "s" } as unknown as LegendSeries["series"];
+    const overlay = makeItem({ pane: null, group: "EMA", groupLabel: "EMA (8)", data: [{ time: 0 as Time, value: 1 }] });
+    const item = makeItem({ pane: paneRef(chart, 1) as never, series, data: [{ time: 0 as Time, value: 10 }] });
+    const price = [{ time: 0, open: 1 }, ...gapRun(0, 360, 60).map((time) => ({ time })), { time: 360, open: 1 }];
+    const gaps = gapRunsBySlot(findGapRuns(price, (d) => "open" in d));
+
+    renderLegends(chart, [overlay, item], { time: 180 as Time, seriesData: new Map() } as unknown as MouseEventParams<Time>, gaps);
+    expect(text(rows(els[0])[0])).toEqual(["EMA (8)", "no data · 5m"]);
+    expect(text(rows(els[1])[0])).toEqual(["G", "no data · 5m"]);
+
+    renderLegends(chart, [item], hover([[series, 12.5]]), gaps); // a real slot still reads its value
+    expect(text(rows(els[1])[0])).toEqual(["G", "12.5"]);
+  });
+
+  it("the latest value skips a long trailing gap run (720 whitespace slots)", () => {
+    const { chart, els } = makeChart(2);
+    const run = gapRun(60, 1e9, 60).map((time) => ({ time: time as Time }));
+    const base = [{ time: 0 as Time, value: 7 }, { time: 60 as Time, value: 8 }];
+    const item = makeItem({ pane: paneRef(chart, 1) as never, data: [...base, ...run] });
+
+    renderLegends(chart, [item], null);
+    const withRun = text(rows(els[1])[0]);
+    renderLegends(chart, [makeItem({ pane: paneRef(chart, 1) as never, data: base })], null);
+
+    expect(run).toHaveLength(720);
+    expect(withRun).toEqual(text(rows(els[1])[0]));
+    expect(withRun).toEqual(["G", "8"]);
   });
 });

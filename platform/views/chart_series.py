@@ -32,10 +32,12 @@ indicator_series,indicators}.py`, bodies verbatim unless noted):
   `CancellationTracker`, ...), `compute_chart_series` and `build_footprint`.
 
 Two rendering rules, and nothing else, change what is drawn: `with_gap_markers` (one
-`{"t": earlier + bar_ms}` row wherever two kept bars are more than a bar apart, shared by candles,
-indicator series and indicator values so panes on one time axis break in the same place) and the
-Lines-mode gap marker (one all-`None` row at `later - 1` where two seconds are more than
-`SNAPSHOT_GAP_THRESHOLD_MS` apart -- DATA-01's honest break). The reader never re-validates the
+`{"t": earlier + k * bar_ms}` row per missing bar wherever two kept bars are more than a bar
+apart, shared by candles, indicator series and indicator values so panes on one time axis break in
+the same place) and the Lines-mode gap run (one all-`None` row per missing second where two seconds
+are more than `SNAPSHOT_GAP_THRESHOLD_MS` apart -- DATA-01's honest break). Both place their rows
+with `_gap_times`, so a hole takes as many chart slots as it has missing intervals, capped at
+`MAX_GAP_ROWS_PER_GAP` per hole (Story 32.1). The reader never re-validates the
 capture gate: a crossed second is priced like any other, and an empty top of book, which the gate
 never writes, is ledgered and raised (`EmptyTopOfBook`), never skipped (DATA-07). This removed the
 AD-3 deviation the parent spine tracked (`routes/snapshots.py`'s two reader-side skips).
@@ -545,13 +547,33 @@ def compute_chart_series(
 # =============================================================================================
 
 
+# Known limit: a hole emits at most this many gap rows (Story 32.1), so a page carries at most
+# (limit - 1) * MAX_GAP_ROWS_PER_GAP gap rows (720 slots = 12 h at 1m, 12 min in Lines mode). A
+# longer hole is compressed to exactly this many rows, contiguous from its start; the frontend
+# (`lib/gaps.ts`, which mirrors this value) detects the compression from the spacing between the
+# last gap row and the next real row and labels it. Upgrade path: one gap row carrying `span_ms`,
+# drawn as one wide band, so a hole of any length costs one row.
+MAX_GAP_ROWS_PER_GAP = 720
+
+
+def _gap_times(earlier_ms: int, later_ms: int, interval_ms: int) -> list[int]:
+    """
+    Return the gap slot times between two real rows: `earlier_ms + k * interval_ms`, k = 1, 2, ...
+    while the time is strictly before `later_ms`, one per missing interval, capped at the first
+    `MAX_GAP_ROWS_PER_GAP` (contiguous from the hole's start).
+    """
+    stop = min(later_ms, earlier_ms + (MAX_GAP_ROWS_PER_GAP + 1) * interval_ms)
+    return list(range(earlier_ms + interval_ms, stop, interval_ms))
+
+
 def with_gap_markers(rows: list[dict], bar_seconds: int) -> list[dict]:
     """
-    Insert one explicit gap row `{"t": earlier + bar_ms}` wherever two consecutive kept rows' `t`
-    (ms) differ by more than one `bar_seconds` interval (AD-F6) -- `t` is placed immediately after
-    the earlier row so lightweight-charts' whitespace data renders the break starting right where
-    real data stops, not at the next row's own time. One rule for candles, indicator series and
-    indicator values, because those panes share one time axis and must break in the same place.
+    Insert one explicit gap row `{"t": g}` per missing bar wherever two consecutive kept rows' `t`
+    (ms) differ by more than one `bar_seconds` interval (AD-F6): `g` runs `earlier + k * bar_ms`
+    (`_gap_times`, capped at `MAX_GAP_ROWS_PER_GAP`), so lightweight-charts' whitespace data
+    renders the break starting right where real data stops and as wide as the hole really is.
+    One rule for candles, indicator series and indicator values, because those panes share one
+    time axis and must break in the same place.
 
     A gap between two *pages* is not seen here (only gaps strictly inside `rows`): that seam is the
     frontend's own check across two pages (`useCandles.ts`).
@@ -560,7 +582,7 @@ def with_gap_markers(rows: list[dict], bar_seconds: int) -> list[dict]:
     out: list[dict] = []
     for i, row in enumerate(rows):
         if i > 0 and row["t"] - rows[i - 1]["t"] > bar_ms:
-            out.append({"t": rows[i - 1]["t"] + bar_ms})
+            out.extend({"t": g} for g in _gap_times(rows[i - 1]["t"], row["t"], bar_ms))
         out.append(row)
     return out
 
@@ -622,8 +644,9 @@ def _require_top(snapshot: DydxSecondSnapshot) -> None:
 def price_series_rows(snapshots: Sequence[DydxSecondSnapshot]) -> list[dict]:
     """
     Build `{t, bid_units, ask_units, price_precision, mid, micro, price}` rows from time-ordered
-    snapshots, one per second, with a gap row (`_gap_row`, `t = later - 1`, every value null)
-    between two seconds more than `SNAPSHOT_GAP_THRESHOLD_MS` apart. `micro` is null for a second
+    snapshots, one per second, with one gap row (`_gap_row`, every value null) per missing second
+    (`_gap_times` at 1000 ms, capped at `MAX_GAP_ROWS_PER_GAP`) between two seconds more than
+    `SNAPSHOT_GAP_THRESHOLD_MS` apart; 2 s spacing is not a gap. `micro` is null for a second
     whose microprice is undefined (both top sizes zero): no mid stands in for it (Story 31.3).
 
     The best bid/ask travel as the stored exact integers and their precision (Story 30.2: values a
@@ -650,7 +673,7 @@ def price_series_rows(snapshots: Sequence[DydxSecondSnapshot]) -> list[dict]:
         bp, ap = s.bid_prices[0], s.ask_prices[0]
         curr_ts_ms = s.ts_event // 1_000_000
         if prev_ts_ms is not None and (curr_ts_ms - prev_ts_ms) > SNAPSHOT_GAP_THRESHOLD_MS:
-            rows.append(_gap_row(curr_ts_ms - 1))
+            rows.extend(_gap_row(g) for g in _gap_times(prev_ts_ms, curr_ts_ms, 1000))
         prev_ts_ms = curr_ts_ms
         floats = s.as_floats()
         # The kernel's one mid (SSOT-01, audit D-131), never a second inline copy of it.
@@ -690,8 +713,8 @@ def _take_last_n_real_rows(rows: list[dict], limit: int) -> list[dict]:
     markers into the kept slice second), adapted for `price_series_rows`' shape, which
     already interleaves markers with real rows in one pass.
 
-    Slicing at a real row's own index (never mid-window) also means any gap marker sitting
-    immediately before the new earliest-kept real row is naturally dropped -- the same
+    Slicing at a real row's own index (never mid-window) also means any gap run sitting
+    immediately before the new earliest-kept real row is naturally dropped whole -- the same
     "no boundary gap at the very edge of a page" behavior `with_gap_markers` has (it only
     checks gaps strictly inside its own rows; a page-boundary gap is instead the frontend's
     own seam check across two pages, see `useCandles.ts`).
@@ -709,13 +732,18 @@ def snapshot_series_page(
     """
     One Lines-mode page: `(rows oldest-first, has_more)` for the `limit` archived seconds before
     `before_ns`, gap rows included (never counted toward `limit`). Raises `EmptyTopOfBook`.
+
+    The snapshots are cut at `before` *before* rows are built, so a page always ends on a real
+    row: filtering rows afterwards would keep the gap run whose closing real second was the
+    cursor itself.
     """
     before_ms = before_ns // 1_000_000
 
     def fetch(start_ns: int, end_ns: int) -> list[dict]:
         snapshots = query_second_snapshots(catalog_path, instrument_id, start_ns, end_ns)
-        rows = price_series_rows(sorted(snapshots, key=lambda s: s.ts_event))
-        return _take_last_n_real_rows([r for r in rows if r["t"] < before_ms], limit)
+        kept = [s for s in snapshots if s.ts_event // 1_000_000 < before_ms]
+        rows = price_series_rows(sorted(kept, key=lambda s: s.ts_event))
+        return _take_last_n_real_rows(rows, limit)
 
     ranges = catalog_files.data_file_ranges(catalog_path, instrument_id)
     span_ns = before_ns - _snapshot_window_start_ns(before_ns, limit)

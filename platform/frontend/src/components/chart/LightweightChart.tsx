@@ -13,13 +13,14 @@ import {
   type Time,
   type WhitespaceData,
 } from "lightweight-charts";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { ChartDatum, VolumeDatum } from "../../hooks/useCandles";
 import type { LiveBar } from "../../hooks/useLiveCandle";
 import type { IndicatorDatum } from "../../hooks/useIndicatorSeries";
 import type { SnapshotLinesData } from "../../hooks/useSnapshotSeries";
-import { type LegendSeries, renderLegends } from "./legend";
+import { type GapRun, MAX_GAP_ROWS_PER_GAP, findGapRuns, gapRunsBySlot } from "../../lib/gaps";
+import { type GapLookup, type LegendSeries, renderLegends } from "./legend";
 import { assignPaneColor, cssVar } from "./paneColors";
 import {
   MeasurementPrimitive,
@@ -29,6 +30,7 @@ import {
 import { attachRangeDrag } from "./rangeDrag";
 import { VolumeProfilePrimitive, type VolumeProfileRenderSpec } from "./primitives/VolumeProfilePrimitive";
 import { VerticalMarkerPrimitive } from "./primitives/VerticalMarkerPrimitive";
+import { GapPrimitive } from "./primitives/GapPrimitive";
 import { TrendlinePrimitive, type TrendlineAnchor } from "./primitives/TrendlinePrimitive";
 
 export type PaneSeriesKind = "Line" | "Histogram";
@@ -220,6 +222,9 @@ interface PaneEntry {
    * `panes` is rebuilt by the caller's own `useMemo` on every candle/indicator page
    * fetch, not just the one series that actually changed. */
   lastData: IndicatorDatum[];
+  /** Story 32.1: the pane's one gap painter, held by exactly one entry of each non-overlay
+   * pane (one per pane, so translucent fills never stack); null on every other entry. */
+  gap: GapPrimitive | null;
 }
 
 function setSeriesData(series: AnySeriesApi, data: IndicatorDatum[]): void {
@@ -230,6 +235,25 @@ function setSeriesData(series: AnySeriesApi, data: IndicatorDatum[]): void {
 }
 
 type MainLineSeriesApi = ISeriesApi<"Line", Time>;
+
+// Story 32.1: the dedicated gap colour -- a chart-only token no other code reads.
+function gapColor(): string {
+  return cssVar("--chart-gap", "#ff9100");
+}
+
+// Gap runs come from the price series only -- the candles, or in Lines mode the first line
+// (bid, null exactly on a gap row) -- never from an indicator's own whitespace: warm-up is
+// not a gap (Story 32.1). The forming live bar (drawn with `update()`, not in `data`) closes a
+// trailing run, so a hole over the cap up to it still reads its real length and "(compressed)".
+function priceGapRuns(
+  mode: ChartMode,
+  data: ChartDatum[],
+  linesData: SnapshotLinesData | undefined,
+  liveTime: number | undefined,
+): GapRun[] {
+  if (mode === "candles") return findGapRuns(data, (d) => "open" in d, MAX_GAP_ROWS_PER_GAP, liveTime);
+  return findGapRuns(linesData?.bid ?? [], (d) => "value" in d);
+}
 
 // Story 18.1: one fixed width for every tool-drawn price line -- no per-line width in
 // PriceLineSpec until a drawing tool actually needs one (YAGNI).
@@ -361,6 +385,16 @@ export default function LightweightChart({
   // live update(), whichever is later. lightweight-charts throws on an update() older than
   // its last point, so the live effect checks against this and every setData() resets it.
   const lastPaintedTimeRef = useRef<number | null>(null);
+  // Story 32.1: every gap slot of the price series, painted on the price pane (labelled, on
+  // its host series) and on every non-overlay pane (unlabelled, PaneEntry.gap) alike, and
+  // looked up by slot time for the legend's crosshair readout.
+  const liveTime = liveBar ? (liveBar.time as unknown as number) : undefined;
+  const gapRuns = useMemo(() => priceGapRuns(mode, data, linesData, liveTime), [mode, data, linesData, liveTime]);
+  const gapRunsRef = useRef(gapRuns);
+  gapRunsRef.current = gapRuns;
+  const gapLookupRef = useRef<GapLookup>(new Map());
+  gapLookupRef.current = useMemo(() => gapRunsBySlot(gapRuns), [gapRuns]);
+  const priceGapRef = useRef<{ host: ISeriesApi<"Candlestick"> | MainLineSeriesApi; primitive: GapPrimitive } | null>(null);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -439,6 +473,8 @@ export default function LightweightChart({
       chartRef.current = null;
       seriesRef.current = null;
       lineSeriesRef.current = null;
+      // The gap primitives die with the chart below (chart.remove()), like the panes.
+      priceGapRef.current = null;
       panes.clear();
       // Story 18.1: the price lines die with the chart here, same as the panes -- the
       // registry must not outlive the series instances it holds lines on.
@@ -471,6 +507,13 @@ export default function LightweightChart({
     drawingRegistryRef.current.clear();
     profileRegistryRef.current.clear();
     markerRef.current = null;
+    // Story 32.1: the price gap painter is detached from the old host while that series still
+    // exists; the [gapRuns, mode] effect below attaches a fresh one to the new host.
+    const priceGap = priceGapRef.current;
+    if (priceGap) {
+      priceGap.host.detachPrimitive(priceGap.primitive);
+      priceGapRef.current = null;
+    }
 
     if (mode === "candles") {
       if (lineSeriesRef.current) {
@@ -591,6 +634,9 @@ export default function LightweightChart({
     for (const [id, entry] of [...registry]) {
       if (specsById.has(id)) continue;
       registry.delete(id);
+      // A pane's gap painter goes with its host series; a pane that stays gets a new one on a
+      // sibling below.
+      if (entry.gap) entry.series.detachPrimitive(entry.gap);
       const groupStillUsed = [...registry.values()].some((e) => e.pane === entry.pane);
       if (entry.pane && !groupStillUsed) chart.removePane(entry.pane.paneIndex());
       else chart.removeSeries(entry.series);
@@ -613,7 +659,7 @@ export default function LightweightChart({
           { color: spec.color },
           pane ? pane.paneIndex() : 0,
         ) as AnySeriesApi;
-        entry = { pane, group, spec, series, lastData: spec.data };
+        entry = { pane, group, spec, series, lastData: spec.data, gap: null };
         registry.set(spec.id, entry);
         setSeriesData(entry.series, spec.data);
         continue;
@@ -626,6 +672,15 @@ export default function LightweightChart({
         setSeriesData(entry.series, spec.data);
         entry.lastData = spec.data;
       }
+    }
+
+    // Story 32.1: exactly one gap painter per non-overlay pane (volume and indicator panes),
+    // on the first of its series still registered.
+    for (const entry of registry.values()) {
+      if (!entry.pane || [...registry.values()].some((e) => e.pane === entry.pane && e.gap)) continue;
+      entry.gap = new GapPrimitive(gapColor(), { label: false });
+      entry.series.attachPrimitive(entry.gap);
+      entry.gap.setRuns(gapRunsRef.current);
     }
 
     // Legend rows follow the registry's order (= add order = stacking order).
@@ -643,12 +698,31 @@ export default function LightweightChart({
     let frame = 0;
     let tries = 30;
     const draw = (): void => {
-      if (renderLegends(chart, legendItemsRef.current, null) || tries-- <= 0) return;
+      if (renderLegends(chart, legendItemsRef.current, null, gapLookupRef.current) || tries-- <= 0) return;
       frame = requestAnimationFrame(draw);
     };
     draw();
     return () => cancelAnimationFrame(frame);
   }, [panes]);
+
+  useEffect(() => {
+    // Story 32.1: the price pane's labelled gap painter lives on the current host series (the
+    // candlestick series, or the first Lines series), attached once per host; every data
+    // change pushes the fresh runs to it and to each non-overlay pane's painter.
+    const host = mode === "candles" ? seriesRef.current : (lineSeriesRef.current?.bid ?? null);
+    if (!host) return;
+    let priceGap = priceGapRef.current;
+    if (priceGap?.host !== host) {
+      priceGap = {
+        host,
+        primitive: new GapPrimitive(gapColor(), { label: true, fontFamily: cssVar("--font-terminal", "monospace") }),
+      };
+      host.attachPrimitive(priceGap.primitive);
+      priceGapRef.current = priceGap;
+    }
+    priceGap.primitive.setRuns(gapRuns);
+    for (const entry of panesRef.current.values()) entry.gap?.setRuns(gapRuns);
+  }, [gapRuns, mode]);
 
   useEffect(() => {
     // Story 15.5's live edge: paints the already-aggregated forming bar `useLiveCandle`
@@ -1009,7 +1083,7 @@ export default function LightweightChart({
     const chart = chartRef.current;
     if (!chart) return;
     const handle = (param: MouseEventParams): void => {
-      renderLegends(chart, legendItemsRef.current, param);
+      renderLegends(chart, legendItemsRef.current, param, gapLookupRef.current);
     };
     chart.subscribeCrosshairMove(handle);
     return () => chart.unsubscribeCrosshairMove(handle);

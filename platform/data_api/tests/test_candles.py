@@ -180,16 +180,14 @@ def test_gap_marker_inserted_between_candles_separated_by_more_than_one_bar(
 
     assert response.status_code == 200
     items = response.json()["items"]
-    assert len(items) == 3  # real candle, gap marker, real candle
-    real_first, gap, real_second = items
+    # Candles at -5m and -2m: one gap row per missing bar (-4m, -3m), Story 32.1.
+    assert len(items) == 4
+    real_first, *gaps, real_second = items
     assert real_first["c"] is not None
     assert real_second["c"] is not None
-    assert gap["t"] == real_first["t"] + 60_000
-    assert gap["o"] is None
-    assert gap["h"] is None
-    assert gap["l"] is None
-    assert gap["c"] is None
-    assert gap["v"] is None
+    assert [g["t"] for g in gaps] == [real_first["t"] + 60_000, real_first["t"] + 120_000]
+    for gap in gaps:
+        assert [gap[k] for k in ("o", "h", "l", "c", "v")] == [None] * 5
 
 
 def test_limit_far_above_max_never_returns_more_than_max_candles_limit(

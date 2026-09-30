@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { fetchIndicatorValues } from "../api/client";
 import type { IndicatorConfigEntry, IndicatorValuesItem } from "../api/schema";
+import { gapRun } from "../lib/gaps";
 
 // Mirrors useCandles.ts/useIndicatorSeries.ts's own constants exactly -- co-paging (AD-F3)
 // depends on every chart-history hook sharing the identical before_ns/limit/bar_seconds
@@ -94,14 +95,15 @@ export function usePickerIndicatorValues(
           earliestMsRef.current = response.items[0].t;
           hasMoreOlderRef.current = response.has_more;
           if (prepend && itemsRef.current.length > 0) {
-            // Same page-boundary seam-gap check as useCandles'/useIndicatorSeries' own
-            // loadPage -- a real collection gap can straddle exactly the page cursor,
-            // which each page's own gap-marker insertion can't see on its own.
-            const barMs = barSeconds * 1000;
+            // Same page-boundary seam run as useCandles'/useIndicatorSeries' own loadPage --
+            // a real collection gap can straddle exactly the page cursor, which each page's
+            // own gap rows can't see: one empty-values item per missing bar (Story 32.1).
+            // The wire is ms; the run is built in chart seconds so every seam shares one helper.
             const newestMs = response.items[response.items.length - 1].t;
             const boundaryMs = itemsRef.current[0].t;
-            const seam: IndicatorValuesItem[] =
-              newestMs + barMs < boundaryMs ? [{ t: newestMs + barMs, values: {} }] : [];
+            const seam: IndicatorValuesItem[] = gapRun(newestMs / 1000, boundaryMs / 1000, barSeconds).map(
+              (t) => ({ t: Math.round(t * 1000), values: {} }),
+            );
             itemsRef.current = [...response.items, ...seam, ...itemsRef.current];
           } else {
             itemsRef.current = response.items;

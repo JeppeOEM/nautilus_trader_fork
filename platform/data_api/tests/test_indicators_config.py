@@ -32,6 +32,7 @@ from views.preferences import save_chart_indicators as save_config
 
 import data_api.app as app_module
 import data_api.routes.candles as candles_routes
+import data_api.routes.indicator_series as indicator_series_routes
 import data_api.routes.indicators as indicators_routes
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
@@ -411,3 +412,31 @@ def test_indicator_values_at_1w_are_computed_on_monday_anchored_weekly_candles(
     assert [item["t"] for item in first["items"]] == [monday_ns // 1_000_000]
     assert first["has_more"]
     assert [item["t"] for item in older["items"]] == [(monday_ns - week_ns) // 1_000_000]
+
+
+def test_candles_indicator_series_and_indicator_values_break_at_identical_gap_times(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Story 32.1: one collection outage (no snapshots and so no trades for three minutes) is broken
+    by the same one-row-per-missing-bar run on every pane sharing the chart's time axis.
+    """
+    catalog_path = str(tmp_path / "cat")
+    minutes = [-10, -9, -8, -7, -3, -2, -1]  # the collector was down across -6, -5 and -4
+    _write_snapshots(catalog_path, [(_BASE_NS + m * 60_000_000_000, 100.0 - m) for m in minutes])
+    client = _client(tmp_path, monkeypatch, catalog_path=catalog_path)
+    monkeypatch.setattr(indicator_series_routes, "CATALOG_PATH", catalog_path)
+    page = {"before_ns": _BASE_NS, "limit": 20, "bar_seconds": 60}
+    spec = json.dumps([{"name": "RelativeStrengthIndex", "params": {"period": 2}}])
+
+    candles = client.get(f"/api/candles/{_IID}", params=page).json()["items"]
+    series = client.get(f"/api/indicator-series/{_IID}", params=page).json()["items"]
+    values = client.get(
+        f"/api/coin/{_IID}/indicator-values", params={**page, "entries": spec}
+    ).json()["items"]
+
+    expected = [(_BASE_NS // 1_000_000) + m * 60_000 for m in (-6, -5, -4)]
+    assert [c["t"] for c in candles if c["c"] is None] == expected
+    assert [r["t"] for r in series if r["obi"] is None] == expected
+    assert [v["t"] for v in values if not v["values"]] == expected

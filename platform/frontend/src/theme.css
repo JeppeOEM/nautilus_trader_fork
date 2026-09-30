@@ -75,6 +75,15 @@
   --color-tag-static: var(--vga-dark-gray);
 }
 
+/* Chart-only tokens (Story 32.1) -- read by chart code alone, outside the 16-colour VGA set
+   and the semantic layer above. Story 32.4 moves this block under `.chart-workspace` (the
+   classic light chart) and re-chooses the values for a white background. */
+:root {
+  /* The gap placeholder bars and their "no data" labels (GapPrimitive); used by nothing
+     else, so a gap can never be mistaken for any other mark on the chart. */
+  --chart-gap: #ff9100;
+}
+
 @font-face {
   font-family: "AcPlus IBM VGA 9x16";
   src: url("/fonts/AcPlus_IBM_VGA_9x16.ttf") format("truetype");

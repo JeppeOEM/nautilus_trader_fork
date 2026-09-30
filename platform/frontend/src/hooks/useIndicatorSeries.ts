@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { fetchIndicatorSeries } from "../api/client";
 import type { IndicatorSeriesPoint } from "../api/schema";
+import { gapRun } from "../lib/gaps";
 
 // Mirrors useCandles.ts's own constants exactly -- co-paging (AD-F3/Story 15.4 AC #5)
 // depends on both hooks using the identical INITIAL_LIMIT/BAR_SECONDS/REFILL_MARGIN_BARS
@@ -73,15 +74,15 @@ export function useIndicatorSeries(
           const mapped = toResult(response.items);
           setResult((prev) => {
             if (!prepend || prev.ofi.length === 0) return mapped;
-            // Same page-boundary seam-gap check as useCandles' loadPage -- a gap can
-            // straddle exactly the page cursor, which each page's own gap-marker
-            // insertion can't see (it only looks inside its own queried range).
-            const newestTime = mapped.ofi[mapped.ofi.length - 1].time as UTCTimestamp;
-            const boundaryTime = prev.ofi[0].time as UTCTimestamp;
-            const seamGap = newestTime + BAR_SECONDS < boundaryTime;
-            const seamTime = (newestTime + BAR_SECONDS) as UTCTimestamp;
-            const combine = (a: IndicatorDatum[], b: IndicatorDatum[]): IndicatorDatum[] =>
-              seamGap ? [...a, { time: seamTime }, ...b] : [...a, ...b];
+            // Same page-boundary seam run as useCandles' loadPage -- a gap can straddle
+            // exactly the page cursor, which each page's own gap rows can't see (they only
+            // fill inside its own queried range): one whitespace slot per missing bar.
+            const newestTime = mapped.ofi[mapped.ofi.length - 1].time as number;
+            const boundaryTime = prev.ofi[0].time as number;
+            const seam: IndicatorDatum[] = gapRun(newestTime, boundaryTime, BAR_SECONDS).map((t) => ({
+              time: t as UTCTimestamp,
+            }));
+            const combine = (a: IndicatorDatum[], b: IndicatorDatum[]): IndicatorDatum[] => [...a, ...seam, ...b];
             return {
               ofi: combine(mapped.ofi, prev.ofi),
               obi: combine(mapped.obi, prev.obi),
