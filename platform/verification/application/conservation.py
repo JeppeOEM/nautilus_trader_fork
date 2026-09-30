@@ -13,8 +13,14 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-The conservation tool's ports and orchestration (Story 31.2): one venue's closed UTC day, one
-instrument at a time, one hour at a time (`verification.domain.conservation` holds the rules).
+The conservation tool's ports and orchestration (Story 31.2): one venue's closed UTC day -- or,
+since Story 31.10, one settled window of whole seconds `[start, end)` (`conserve_window`, which
+`conserve` is over the day) -- one instrument at a time, one hour at a time
+(`verification.domain.conservation` holds the rules).
+
+A window counts the trades whose venue time lies in it, on both sides, and the seconds in it; the
+coverage runs and windows that touch it are kept and a run is clipped to it; the raw hours read
+are those it touches plus their neighbours (`channel_trades`).
 
 Trades are partitioned by their own venue time on both sides -- the reference's `T`/`time`, the
 archive's `ts_event` -- so a trade whose venue time and archived `ts_event` disagree about the
@@ -155,8 +161,12 @@ def day_start_ns(day: date) -> int:
     return int(datetime.combine(day, time(), UTC).timestamp()) * NS_PER_S
 
 
-def _overlaps_day(entry: SecondsRun | TradeWindow, start_ns: int) -> bool:
-    end_ns = start_ns + SECONDS_PER_DAY * NS_PER_S
+def day_end_ns(start_ns: int) -> int:
+    """Return the end (exclusive) of the UTC day starting at `start_ns`."""
+    return start_ns + SECONDS_PER_DAY * NS_PER_S
+
+
+def _overlaps(entry: SecondsRun | TradeWindow, start_ns: int, end_ns: int) -> bool:
     if isinstance(entry, SecondsRun):
         low, high = entry.first_s * NS_PER_S, entry.last_s * NS_PER_S
     else:
@@ -169,14 +179,14 @@ def _file_entry(
     runs: dict[str, list[SecondsRun]],
     windows: dict[str, list[TradeWindow]],
     backfilled: dict[str, set[str]],
-    start_ns: int,
+    span: tuple[int, int],
 ) -> None:
     iid = entry.instrument_id
     if iid not in runs:
         return  # another instrument's line: not this report's subject
     if isinstance(entry, Backfilled):
         backfilled[iid].update(entry.trade_ids)
-    elif not _overlaps_day(entry, start_ns):
+    elif not _overlaps(entry, *span):
         return
     elif isinstance(entry, SecondsRun):
         runs[iid].append(entry)
@@ -185,18 +195,29 @@ def _file_entry(
 
 
 def collect_coverage(
-    entries: Iterable[CoverageEntry], instruments: Iterable[str], start_ns: int
+    entries: Iterable[CoverageEntry],
+    instruments: Iterable[str],
+    start_ns: int,
+    end_ns: int | None = None,
 ) -> dict[str, InstrumentCoverage]:
     """
-    Group the coverage lines of the plan's instruments, keeping runs and windows that touch the
-    day. Known limit: backfilled ids carry no time, so every one of an instrument's is kept (the
-    coverage file's whole history). Upgrade path: a time on the `trades_backfilled` line.
+    Group the coverage lines of the plan's instruments, keeping runs and windows that touch
+    `[start_ns, end_ns)` (the day from `start_ns` when `end_ns` is None). Known limit: backfilled
+    ids carry no time, so every one of an instrument's is kept (the coverage file's whole
+    history). Upgrade path: a time on the `trades_backfilled` line.
+
+    Known limit (a window's capped budgets): a `trades_dropped` range or counted marker that only
+    partly overlaps a window keeps its whole `count`, so it can explain up to that many missing
+    trades inside the window although some of the drops it counted lay outside -- the same
+    limit a day has at midnight. Upgrade path: capture writes a drop range per second, so a
+    range never straddles a window's edge by more than one second.
     """
+    span = (start_ns, day_end_ns(start_ns) if end_ns is None else end_ns)
     runs: dict[str, list[SecondsRun]] = {iid: [] for iid in instruments}
     windows: dict[str, list[TradeWindow]] = {iid: [] for iid in runs}
     backfilled: dict[str, set[str]] = {iid: set() for iid in runs}
     for entry in entries:
-        _file_entry(entry, runs, windows, backfilled, start_ns)
+        _file_entry(entry, runs, windows, backfilled, span)
     return {
         iid: InstrumentCoverage(tuple(runs[iid]), tuple(windows[iid]), frozenset(backfilled[iid]))
         for iid in runs
@@ -205,10 +226,11 @@ def collect_coverage(
 
 @dataclass(frozen=True)
 class _Day:
-    """What every instrument of one run shares."""
+    """What every instrument of one run shares: its span `[start_ns, end_ns)` among it."""
 
     venue: str
     start_ns: int
+    end_ns: int
     channels: tuple[TradeChannel, ...]
     index: Mapping[tuple[str, str], str]
     inputs: Inputs
@@ -231,6 +253,12 @@ def channel_trades(
             yield from reference_trades(venue, channel, record, index)
 
 
+def _counted(trade: ReferenceTrade, instrument_id: str, hour: int, day: _Day) -> bool:
+    """Whether a reference trade is the instrument's, of venue hour `hour` and in the span."""
+    in_span = day.start_ns <= trade.ts_ns < day.end_ns
+    return trade.instrument_id == instrument_id and trade.ts_ns // NS_PER_HOUR == hour and in_span
+
+
 def _reference_hour(
     instrument_id: str, hour: int, channels: Iterable[TradeChannel], day: _Day
 ) -> ReferenceHour:
@@ -238,7 +266,7 @@ def _reference_hour(
     ws_ids: set[str] = set()
     for channel in channels:
         for trade in channel_trades(day.venue, channel, hour, day.inputs.reference, day.index):
-            if trade.instrument_id == instrument_id and trade.ts_ns // NS_PER_HOUR == hour:
+            if _counted(trade, instrument_id, hour, day):
                 times.setdefault(trade.trade_id, trade.ts_ns)
                 if not trade.via_rest:
                     ws_ids.add(trade.trade_id)
@@ -246,15 +274,13 @@ def _reference_hour(
 
 
 def _trade_counts(instrument_id: str, coverage: InstrumentCoverage, day: _Day) -> TradeCounts:
-    end_ns = day.start_ns + SECONDS_PER_DAY * NS_PER_S
     markers = tuple(day.inputs.coverage.gap_markers(instrument_id))
     explanations = Explanations.of((*coverage.windows, *markers))
-    archived = day.inputs.archive.trades(instrument_id, day.start_ns, end_ns)
+    archived = day.inputs.archive.trades(instrument_id, day.start_ns, day.end_ns)
     category = instrument_category(day.venue, instrument_id)
     channels = [channel for channel in day.channels if channel.category == category]
-    first_hour = day.start_ns // NS_PER_HOUR
     counts = TradeCounts()
-    for hour in range(first_hour, first_hour + HOURS_PER_DAY):
+    for hour in window_hours(day.start_ns, day.end_ns):
         reference = _reference_hour(instrument_id, hour, channels, day)
         hour_counts, explanations = tally_trades(
             reference, archived.hour(hour), coverage.backfilled, explanations
@@ -267,9 +293,10 @@ def _instrument_report(
     instrument_id: str, coverage: InstrumentCoverage, day: _Day
 ) -> InstrumentReport:
     trades = _trade_counts(instrument_id, coverage, day)
-    end_ns = day.start_ns + SECONDS_PER_DAY * NS_PER_S
-    rows = day.inputs.archive.second_rows(instrument_id, day.start_ns, end_ns)
-    seconds = tally_seconds(day.start_ns // NS_PER_S, rows, coverage.runs)
+    rows = day.inputs.archive.second_rows(instrument_id, day.start_ns, day.end_ns)
+    seconds = tally_seconds(
+        day.start_ns // NS_PER_S, rows, coverage.runs, end_s=day.end_ns // NS_PER_S
+    )
     return InstrumentReport(instrument_id, trades, seconds)
 
 
@@ -290,10 +317,17 @@ def missing_raw(
     )
 
 
+def window_hours(start_ns: int, end_ns: int) -> range:
+    """Return the UTC hour indexes a non-empty span `[start_ns, end_ns)` touches."""
+    return range(start_ns // NS_PER_HOUR, (end_ns - 1) // NS_PER_HOUR + 1)
+
+
 def day_hours(day: date) -> range:
     """Return the UTC hour indexes of `day`."""
-    first_hour = day_start_ns(day) // NS_PER_HOUR
-    return range(first_hour, first_hour + HOURS_PER_DAY)
+    start_ns = day_start_ns(day)
+    hours = window_hours(start_ns, day_end_ns(start_ns))
+    assert len(hours) == HOURS_PER_DAY  # a UTC day has no leap hour
+    return hours
 
 
 # How long after a day ends its archive and coverage record are complete: capture writes a
@@ -316,26 +350,72 @@ def is_closed(day: date, now_ns: int) -> bool:
     return day_start_ns(day) + SECONDS_PER_DAY * NS_PER_S + DAY_SETTLE_NS <= now_ns
 
 
-def conserve(plan: RecordingPlan, day: date, inputs: Inputs) -> DayReport:
-    """Reconcile every plan instrument's day against the reference and the durable records."""
-    start_ns = day_start_ns(day)
-    coverage = collect_coverage(inputs.coverage.entries(), plan.instruments, start_ns)
-    shared = _Day(plan.venue, start_ns, trade_channels(plan), wire_index(plan), inputs)
+# How long after a window ends its archive and coverage record are complete (Story 31.10): the
+# window's last second is written at the next flush (every 60 s, at second :02), a backfill of a
+# reconnect or restart inside it settles and fetches after that, and the flush after the backfill
+# writes what it fetched -- 10 min covers a flush, the settle and one more flush with room. The
+# window's last touched hour must also have ended, so its raw hour file is whole
+# (`window_settled`). Restated, not imported, like `DAY_SETTLE_NS`.
+# Known limit: a fixed margin, the same as the day's. Upgrade path: the same "flushed through"
+# second in the coverage record.
+WINDOW_SETTLE_NS = 10 * 60 * NS_PER_S
+
+
+def window_settled(start_ns: int, end_ns: int, now_ns: int) -> bool:
+    """
+    Whether `[start_ns, end_ns)` can be judged: its last touched UTC hour has ended (the raw
+    store's file of it is complete) and `WINDOW_SETTLE_NS` has passed since its end.
+    """
+    last_hour_end = window_hours(start_ns, end_ns).stop * NS_PER_HOUR
+    return max(last_hour_end, end_ns + WINDOW_SETTLE_NS) <= now_ns
+
+
+def iso_second(ts_ns: int) -> str:
+    """`2026-09-30T10:00:00Z`: a whole-second instant as the window's JSON spells it."""
+    return datetime.fromtimestamp(ts_ns // NS_PER_S, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _reconcile(plan: RecordingPlan, span: tuple[int, int], inputs: Inputs, label: str) -> DayReport:
+    """Reconcile a span of whole seconds: the one reconciliation the day and the window share."""
+    start_ns, end_ns = span
+    coverage = collect_coverage(inputs.coverage.entries(), plan.instruments, start_ns, end_ns)
+    shared = _Day(plan.venue, start_ns, end_ns, trade_channels(plan), wire_index(plan), inputs)
     reports = tuple(_instrument_report(iid, coverage[iid], shared) for iid in plan.instruments)
+    hours = window_hours(start_ns, end_ns)
     return DayReport(
         venue=plan.venue,
-        day=day.isoformat(),
+        day=label,
         coverage_file=inputs.coverage.path,
         coverage_present=inputs.coverage.present(),
-        missing_raw_files=missing_raw(shared.channels, day_hours(day), inputs.reference),
+        missing_raw_files=missing_raw(shared.channels, hours, inputs.reference),
         truncated_neighbour_files=inputs.reference.truncated_neighbours(),
         instruments=reports,
     )
 
 
+def conserve(plan: RecordingPlan, day: date, inputs: Inputs) -> DayReport:
+    """Reconcile every plan instrument's day against the reference and the durable records."""
+    start_ns = day_start_ns(day)
+    return _reconcile(plan, (start_ns, day_end_ns(start_ns)), inputs, day.isoformat())
+
+
+def conserve_window(plan: RecordingPlan, start_ns: int, end_ns: int, inputs: Inputs) -> DayReport:
+    """
+    Reconcile every plan instrument over `[start_ns, end_ns)`, whole seconds (`ValueError`
+    otherwise): the day's rules, with the report labelled and bounded by the window.
+    """
+    if start_ns % NS_PER_S or end_ns % NS_PER_S or end_ns <= start_ns:
+        raise ValueError(f"window [{start_ns}, {end_ns}) is not a non-empty span of whole seconds")
+    start, end = iso_second(start_ns), iso_second(end_ns)
+    report = _reconcile(plan, (start_ns, end_ns), inputs, f"{start}/{end}")
+    return replace(report, start=start, end=end)
+
+
 def report_json(report: DayReport) -> dict[str, Any]:
     """Return the report as JSON-ready data, each instrument's and the day's `passed` included."""
     body = asdict(report)
+    if report.start is None:  # a day's report keeps its Story 31.2 shape
+        del body["start"], body["end"]
     for entry, instrument in zip(body["instruments"], report.instruments, strict=True):
         entry["passed"] = instrument.passed
     return {"passed": report.passed, **body}

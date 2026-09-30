@@ -134,13 +134,12 @@ class ArchiveWriter(Protocol):
         self, venue: str, shutting_down: asyncio.Event, ledger: Ledger
     ) -> IO[str] | None: ...
 
-    def recent_trade_ids(
-        self, iid: str, start_ns: int, end_ns: int, ledger: Ledger
-    ) -> list[tuple[str, int]]:
+    def recent_trades(self, iid: str, start_ns: int, end_ns: int, ledger: Ledger) -> "RecentTrades":
         """
         Return `(trade_id, ts_init)` of every archived trade of `iid` whose `ts_init` lies in
-        `[start_ns, end_ns]`: the dedup window's seed. Bounded by the span (MEM-01). A file it
-        cannot read is ledgered (`collector.dedup_seed`) and skipped, never fatal to the seed.
+        `[start_ns, end_ns]` -- the dedup window's seed -- and the newest `ts_event` among them,
+        the restart backfill's baseline (D-61). Bounded by the span (MEM-01). A file it cannot
+        read is ledgered (`collector.dedup_seed`) and skipped, never fatal to the seed.
         """
         ...
 
@@ -162,6 +161,16 @@ class ArchiveWriter(Protocol):
         successful one.
         """
         ...
+
+
+class RecentTrades(NamedTuple):
+    """
+    The archive's trades of one instrument over the dedup horizon: `(trade_id, ts_init)` pairs,
+    and the newest `ts_event` among them (None: no archived trade in the horizon).
+    """
+
+    ids: list[tuple[str, int]]
+    newest_ts_event: int | None
 
 
 class PolledRows(NamedTuple):

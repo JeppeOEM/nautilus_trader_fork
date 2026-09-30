@@ -2042,6 +2042,7 @@ VERIFICATION_ROOTS = frozenset(
         "verification.catalog",
         "verification.candles",
         "verification.bot_parity",
+        "verification.chaos",
     }
 )
 # Story 31.7's subject package: the code under test, driven (never the reference). Only the catalog
@@ -2173,7 +2174,7 @@ def test_importing_the_verification_roots_loads_no_denied_module() -> None:
         "import sys, verification.recorder, verification.tools.record_fixtures\n"
         "import verification.conservation, verification.tools.cut_snapshot_fixtures\n"
         "import verification.trades, verification.book, verification.derivs\n"
-        "import verification.candles, verification.bot_parity\n"
+        "import verification.candles, verification.bot_parity, verification.chaos\n"
         "print('\\n'.join(sorted(sys.modules)))\n"
     )
     env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "PYTHONPATH": str(PLATFORM_DIR)}

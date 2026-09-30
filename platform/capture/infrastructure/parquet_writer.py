@@ -38,6 +38,7 @@ from kernel.parquet_compat import apply_zstd_default
 
 from capture.application import sites
 from capture.application.ports import Ledger
+from capture.application.ports import RecentTrades
 from capture.infrastructure.capture_lock import acquire_capture_lock
 from capture.infrastructure.coverage_file import append_lines
 from capture.infrastructure.coverage_file import coverage_path
@@ -96,22 +97,26 @@ class ParquetArchiveWriter:
     ) -> IO[str] | None:
         return await acquire_capture_lock(self._path, venue, shutting_down, ledger=ledger)
 
-    def recent_trade_ids(
-        self, iid: str, start_ns: int, end_ns: int, ledger: Ledger
-    ) -> list[tuple[str, int]]:
+    def recent_trades(self, iid: str, start_ns: int, end_ns: int, ledger: Ledger) -> RecentTrades:
         """
-        Read only the `trade_id` and `ts_init` columns of the files whose name span (`ts_init`)
-        meets `[start_ns, end_ns]`, and keep the rows inside it (MEM-01: one horizon of ids). A
-        file whose name is not a catalog span, or that vanished or cannot be read, is ledgered
+        Read only the `trade_id`, `ts_init` and `ts_event` columns of the files whose name span
+        (`ts_init`) meets `[start_ns, end_ns]`, and keep the rows inside it (MEM-01: one horizon
+        of ids): the ids with their `ts_init`, and the newest `ts_event` of those rows. A file
+        whose name is not a catalog span, or that vanished or cannot be read, is ledgered
         (`collector.dedup_seed`) and skipped; the other files still seed.
         """
         found: list[tuple[str, int]] = []
+        newest: int | None = None
         for path in (Path(self._path) / "data" / _TRADE_DIR / iid).glob("*.parquet"):
             try:
-                found.extend(_ids_in_span(path, start_ns, end_ns))
+                ids, file_newest = _trades_in_span(path, start_ns, end_ns)
             except (ValueError, OSError) as e:
                 ledger(sites.DEDUP_SEED, f"{iid}: {path.name} skipped by the dedup seed", e)
-        return found
+                continue
+            found.extend(ids)
+            if file_newest is not None and (newest is None or file_newest > newest):
+                newest = file_newest
+        return RecentTrades(found, newest)
 
     def last_snapshot_second(self, iid: str) -> int | None:
         """
@@ -148,22 +153,29 @@ class ParquetArchiveWriter:
             return self._coverage_repaired.pop(path, 0)
 
 
-def _ids_in_span(path: Path, start_ns: int, end_ns: int) -> list[tuple[str, int]]:
-    """`(trade_id, ts_init)` of one trade file's rows inside the span; [] when its name misses it."""
+def _trades_in_span(
+    path: Path, start_ns: int, end_ns: int
+) -> tuple[list[tuple[str, int]], int | None]:
+    """
+    Return `(trade_id, ts_init)` of one trade file's rows with `ts_init` inside the span, and the
+    newest `ts_event` of those rows; ([], None) when the file's name misses the span.
+    """
     if not CatalogFileSpan.from_path(path).overlaps(start_ns, end_ns):
-        return []
+        return [], None
     table = pq.read_table(
         path,
-        columns=["trade_id", "ts_init"],
+        columns=["trade_id", "ts_init", "ts_event"],
         filters=[("ts_init", ">=", start_ns), ("ts_init", "<=", end_ns)],
     )
-    return list(
+    stamps = table.column("ts_event").to_pylist()
+    ids = list(
         zip(
             (str(t) for t in table.column("trade_id").to_pylist()),
             (int(t) for t in table.column("ts_init").to_pylist()),
             strict=True,
         )
     )
+    return ids, (int(max(stamps)) if stamps else None)
 
 
 def _spanned_files(

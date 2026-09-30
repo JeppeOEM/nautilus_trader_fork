@@ -89,8 +89,20 @@ into one `TradeIntake`, whose window remembers the first copy's feed (`duplicate
 `duplicate_feed`); per-feed arbitration is logged each flush and a feed 30 s behind its group's
 sibling raises an OBS-01 one-sided-outage notification.
 
-Known limit: a crash or restart gap is not backfilled, because `TradeIntake.last_trade_ts` lives in
-memory. Upgrade path: seed it from the newest archived trade per instrument at startup.
+A crash or restart gap is backfilled too (D-61, Story 31.10): `_prepare_ids` seeds each
+instrument's `TradeIntake.last_trade_ts` from the newest archived trade's `ts_event` over the dedup
+horizon, and after the first `apply` of `run()` each seeded instrument's first message on a feed
+schedules that feed's backfill (reason `restart: archived baseline`) from the seed -- so the
+trades a killed process held unflushed or the downtime missed are fetched, or noted
+`trades_unrecoverable` (`depth`, `fetch_failed`). The first message is the seam because a feed
+learns its instruments from messages (`FeedGroup.instruments`), none of which has arrived at
+`apply`; instruments of one feed within the settle coalesce into its one request.
+Known limit: the seed reads only the dedup horizon (`DEDUP_HORIZON_NS`, 6 min, MEM-01), so a
+process down longer than that -- or an instrument with no trade archived in it -- has no baseline
+and gets no restart backfill (a later reconnect backfill counts it `no baseline`), so the gap's
+trades stay unexplained (a loud conservation failure, never a silent one). Upgrade path: fall
+back to the newest archived trade file's own newest `ts_event` (one file, as
+`last_snapshot_second` reads), whose gap older than `MAX_TS_INIT_SKEW_NS` is then noted `depth`.
 Known limit: seconds the stale-book gate skipped during an outage have no snapshot row, so their
 backfilled trades are rebuild orphans and those minutes can still mismatch the venue's klines.
 Known limit: a backfill never archives a trade older than `MAX_TS_INIT_SKEW_NS` (the rebuild's and
@@ -234,6 +246,8 @@ _ONE_SIDED_NS: int = 30_000_000_000
 # so one reconnect gets one backfill.
 _BACKFILL_SETTLE_NS: int = 3_000_000_000
 _BACKFILL_POLL_SECONDS: float = 0.5
+# The reason a restart backfill carries on its `collector.trade_backfill` entry (D-61).
+RESTART_BACKFILL_REASON = "restart: archived baseline"
 # Faster than the Rust clients' 250 ms minimum reconnect delay, so an inactive spell is seen.
 _FEED_STATE_POLL_SECONDS: float = 0.1
 _FEED_STATE_ERROR_EVERY_NS: int = 60_000_000_000
@@ -548,6 +562,10 @@ class CaptureService:
         # leaves the plan: its rows may still sit in the flush buffer, where the disk read of a
         # re-add cannot see them, so its `restart` run starts after the later of the two.
         self._last_noted: dict[str, int] = {}
+        # Per id, the archived baseline its restart backfill starts from (D-61): filled after the
+        # first `apply` of `run()` from the seeds `_prepare_ids` read, taken at the id's first
+        # message on a feed (`_schedule_restart_backfill`), dropped if it leaves the plan first.
+        self._restart_baselines: dict[str, int] = {}
         # A coverage append a cancelled flush left running in its thread, with its lines: the
         # next flush (the final one at shutdown) settles it first, so none is lost unledgered.
         self._coverage_append: tuple[asyncio.Future[int], list[str]] | None = None
@@ -735,7 +753,7 @@ class CaptureService:
             if not self._is_collected(iid):
                 self._unplanned_messages[iid] += 1
                 return
-            self._feeds.instruments[feed.name].add(iid)
+            self._note_book_feed(feed.name, iid, now_ns)
             if iid in self._crosscheck_arrivals:  # armed: REST is fetched right after a push
                 self._crosscheck_arrivals[iid] += 1
                 self._crosscheck_events[iid].set()
@@ -761,6 +779,8 @@ class CaptureService:
         self, iid: str, data: TradeTick, feed: Feed, now_ns: int, arrival_ns: int
     ) -> None:
         self._feeds.note_trade(feed.name, iid, arrival_ns)
+        if self._restart_baselines:  # before `accept` can advance the baseline past the gap
+            self._schedule_restart_backfill(feed.name, iid, now_ns)
         intake = self._intakes.get(iid) or self._intake(iid)
         trade_id = str(data.trade_id)
         outcome = intake.accept(data, trade_id, feed.name, now_ns, self._stale_trade_ns)
@@ -1764,6 +1784,35 @@ class CaptureService:
                 f"Reconnect detected on feed {feed_name} ({reason}): trade backfill scheduled"
             )
 
+    def _arm_restart_backfill(self, subscribed: Iterable[str]) -> None:
+        """
+        After the first `apply` (D-61): every id it added -- subscribed, or failed and retried
+        later -- with an archived baseline gets a restart backfill from it, scheduled at its first
+        message on a feed. Nothing has been ingested yet (the loops start after), so each
+        `last_trade_ts` is still exactly its seed.
+        """
+        for iid in subscribed:
+            intake = self._intakes.get(iid)
+            if intake is not None and intake.last_trade_ts is not None:
+                self._restart_baselines[iid] = intake.last_trade_ts
+
+    def _schedule_restart_backfill(self, feed_name: str, iid: str, now_ns: int) -> None:
+        """
+        Schedule an armed id's restart backfill at its first message on a feed: that feed now
+        carries it (`FeedGroup.instruments` is taught by messages), so the backfill joins the
+        feed's one request, from the archived baseline -- the trades between the last archived
+        one and this process's first.
+        """
+        since = self._restart_baselines.pop(iid, None)
+        if since is not None:
+            self._schedule_backfill(feed_name, now_ns, RESTART_BACKFILL_REASON, {iid: since})
+
+    def _note_book_feed(self, feed_name: str, iid: str, now_ns: int) -> None:
+        """Teach the feed a book message's instrument; the first may start a restart backfill."""
+        self._feeds.instruments[feed_name].add(iid)
+        if self._restart_baselines:
+            self._schedule_restart_backfill(feed_name, iid, now_ns)
+
     def _poll_feed_states(self, now_ns: int) -> None:
         """One `feed_states()` poll: an inactive -> active transition is a reconnect."""
         try:
@@ -2009,15 +2058,17 @@ class CaptureService:
         Before ids enter the plan (the first subscribe included, so before any loop samples):
         seed each one's dedup window from the archive over the horizon (first feed `archive`),
         so a venue replay or backfill never archives what an earlier process or an earlier stint
-        in the plan archived; and read its last archived second, the start of the `restart` run
-        its first verdict closes. Both are disk reads, off the event loop and outside the gate.
+        in the plan archived, and seed its `last_trade_ts` with the newest archived `ts_event`
+        there, the restart backfill's baseline (D-61); and read its last archived second, the
+        start of the `restart` run its first verdict closes. Both are disk reads, off the event
+        loop and outside the gate.
         """
         now_ns = time.time_ns()
         for iid in sorted(iids):
             self._last_archived[iid] = await self._last_archived_second(iid)
             try:
-                ids = await asyncio.to_thread(
-                    self._archive.recent_trade_ids,
+                recent = await asyncio.to_thread(
+                    self._archive.recent_trades,
                     iid,
                     now_ns - DEDUP_HORIZON_NS,
                     now_ns,
@@ -2026,12 +2077,16 @@ class CaptureService:
             except Exception as e:
                 self._ledger(
                     sites.DEDUP_SEED,
-                    f"{iid}: archived trade ids could not be read for the dedup seed; ids an "
-                    "earlier process archived may be archived again",
+                    f"{iid}: archived trades could not be read for the dedup seed; ids an "
+                    "earlier process archived may be archived again, and a restart gap has no "
+                    "backfill baseline",
                     e,
                 )
                 continue
-            self._intake(iid).seed(ids)
+            intake = self._intake(iid)
+            intake.seed(recent.ids)
+            if recent.newest_ts_event is not None:
+                intake.advance(recent.newest_ts_event)
 
     async def _last_archived_second(self, iid: str) -> int | None:
         try:
@@ -2052,6 +2107,7 @@ class CaptureService:
         """
         self._verdict_seen.discard(iid)
         self._last_archived.pop(iid, None)
+        self._restart_baselines.pop(iid, None)
 
     async def _subscribe_added(self, iid: str) -> bool:
         if iid in self._applied:
@@ -2258,6 +2314,8 @@ class CaptureService:
             PlanChange(added=frozenset(self._plan_ids), store_deltas=self._store_deltas())
         )
         logger.info(f"Started: {len(applied.subscribed)} subscribed")
+        # A failed subscribe is retried (`_subscription_retry_loop`): its gap is the restart's too.
+        self._arm_restart_backfill(applied.subscribed | applied.failed)
 
         loops: tuple[Callable[[], Awaitable[None]], ...] = (
             self._ingest_loop,

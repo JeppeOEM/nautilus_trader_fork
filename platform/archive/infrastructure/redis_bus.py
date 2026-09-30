@@ -22,6 +22,7 @@ import logging
 from collections.abc import AsyncIterator
 
 import redis.asyncio as aioredis
+from redis.exceptions import ConnectionError as RedisConnectionError
 
 from archive.application.scheduler import CONTROL_CHANNEL
 from archive.application.scheduler import STATUS_CHANNEL
@@ -35,6 +36,20 @@ class RedisStatusBus:
     `StatusBus` over one lazily opened client. Invariant: each message crosses verbatim on
     `archive:status`. Bounded socket timeouts: a black-holed Redis fails the publish (ledgered by
     the caller) instead of stalling the loop that also runs the jobs.
+
+    A `ConnectionError` is retried once, on a fresh connection (audit D-136, found on
+    `collection_control`'s bus of the same pattern): a Redis restart between two publishes leaves
+    the idle pooled connection closed by the server, and `Redis.from_url` gives pool connections
+    no retry, so the next publish failed on the dead socket although Redis was back. redis-py
+    disconnects the failed connection, so the retry reconnects; a Redis still down fails it too
+    (ledgered by the caller). A timeout is not retried. A message delivered twice is harmless:
+    each one is the whole status.
+
+    The mechanism is pinned from the 31.10 collectors' tracebacks (redis-py 8.1.0 in the image):
+    the publish failed on the write, in `send_packed_command` -> `StreamWriter.drain`, which
+    raised `ConnectionResetError('Connection lost')` because the transport had already seen the
+    server go away. The pool's checkout check reads, it does not write, so it passed the dead
+    connection, and pool connections carry `Retry(retries=0)`, so nothing retried it.
     """
 
     def __init__(self, url: str) -> None:
@@ -46,7 +61,10 @@ class RedisStatusBus:
             self._client = aioredis.Redis.from_url(
                 self._url, socket_connect_timeout=1.0, socket_timeout=1.0, decode_responses=True
             )
-        await self._client.publish(STATUS_CHANNEL, message)
+        try:
+            await self._client.publish(STATUS_CHANNEL, message)
+        except RedisConnectionError:
+            await self._client.publish(STATUS_CHANNEL, message)
 
     async def aclose(self) -> None:
         if self._client is not None:

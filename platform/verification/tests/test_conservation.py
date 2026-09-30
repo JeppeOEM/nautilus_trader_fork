@@ -23,7 +23,9 @@ import json
 from collections.abc import Iterable
 from collections.abc import Mapping
 from collections.abc import Sequence
+from datetime import UTC
 from datetime import date
+from datetime import datetime
 from decimal import Decimal
 from itertools import pairwise
 from pathlib import Path
@@ -42,6 +44,7 @@ from nautilus_trader.model.objects import Quantity
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 from verification import conservation
 from verification.application.conservation import DAY_SETTLE_NS
+from verification.application.conservation import WINDOW_SETTLE_NS
 from verification.application.conservation import day_start_ns
 from verification.domain.conservation import GAP_MARKER_MARGIN_NS
 from verification.domain.conservation import Explanations
@@ -662,3 +665,148 @@ def test_a_wire_trade_keeps_its_exact_decimal_values_side_and_order() -> None:
     assert (trade.price, trade.size) == (Decimal("84034.30"), Decimal("0.001"))
     assert (trade.side, trade.side_token) == (1, "Buy")
     assert trade.order == (_A[1], _A[1] + 100 * _MS, 0)
+
+
+# Story 31.10's window mode. `_W0` is 10:00:00 of the day: trade A (10:00:00.500) lies in its
+# first second, and the two snapshot rows (`_ROW_SECONDS`) in its first two seconds.
+_W0 = _S0 + 36_000
+
+
+def _iso(second: int) -> str:
+    return datetime.fromtimestamp(second, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _run_window(
+    capsys: pytest.CaptureFixture[str], first_s: int, end_s: int, now_ns: int = _NOW
+) -> tuple[int, dict[str, Any]]:
+    argv = ["--venue", "BYBIT", "--start", _iso(first_s), "--end", _iso(end_s), "--json"]
+    status = _main(argv, now_ns=now_ns)
+    return status, json.loads(capsys.readouterr().out)
+
+
+def test_a_clean_window_counts_only_its_own_trades_and_seconds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _bybit_day(tmp_path, monkeypatch)
+    status, report = _run_window(capsys, _W0, _W0 + 5)
+    trades, seconds = _only(report)["trades"], _only(report)["seconds"]
+    assert status == 0
+    assert (report["start"], report["end"]) == ("2026-09-29T10:00:00Z", "2026-09-29T10:00:05Z")
+    assert (trades["seen"], trades["archived"], trades["unexplained"]) == (1, 1, 0)
+    assert (seconds["expected"], seconds["rows"]) == (5, 2)
+    assert seconds["explained_by_reason"] == {"not_collected": 3}  # the day-long runs, clipped
+
+
+def test_a_planted_rowless_reasonless_second_in_a_window_is_unexplained(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    runs = _clean_runs(_BTC, (*_ROW_SECONDS, _W0 + 3))  # leaves 10:00:03 without a run
+    _bybit_day(tmp_path, monkeypatch, coverage=runs)
+    status, report = _run_window(capsys, _W0, _W0 + 5)
+    seconds = _only(report)["seconds"]
+    assert status == 1
+    assert (seconds["unexplained"], seconds["examples_unexplained"]) == (1, [_W0 + 3])
+
+
+def test_an_unexplained_second_just_before_the_window_is_not_counted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    runs = _clean_runs(_BTC, (_W0 - 1, *_ROW_SECONDS))  # 09:59:59 has neither row nor run
+    _bybit_day(tmp_path, monkeypatch, coverage=runs)
+    status, report = _run_window(capsys, _W0, _W0 + 5)
+    assert status == 0
+    assert _only(report)["seconds"]["unexplained"] == 0
+
+
+def test_a_missing_trade_outside_the_window_is_not_counted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A (10:00:00.5) is not archived: unexplained in a window holding it, absent from the next."""
+    _bybit_day(tmp_path, monkeypatch, archived=(_B, _C))
+    status, report = _run_window(capsys, _W0 + 1, _W0 + 5)
+    assert (status, _only(report)["trades"]["seen"]) == (0, 0)
+    status, report = _run_window(capsys, _W0, _W0 + 5)
+    assert (status, _only(report)["trades"]["unexplained"]) == (1, 1)
+
+
+@pytest.mark.parametrize(("first_s", "end_s", "seen"), [(0, 5, 1), (-5, 0, 0)])
+def test_a_trade_on_the_window_edge_counts_at_the_start_not_the_end(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    first_s: int,
+    end_s: int,
+    seen: int,
+) -> None:
+    """C's venue time is exactly 09:30:00.000: in `[09:30:00, ...)`, not in `[..., 09:30:00)`."""
+    _bybit_day(tmp_path, monkeypatch)
+    c_second = _C[1] // _NS
+    status, report = _run_window(capsys, c_second + first_s, c_second + end_s)
+    assert status == 0
+    assert _only(report)["trades"]["seen"] == seen
+
+
+@pytest.mark.parametrize(
+    "now_ns",
+    [
+        (_W0 + 5) * _NS + WINDOW_SETTLE_NS - 1,  # not settled after its end
+        (_W0 + 1800) * _NS,  # settled, but its hour (10:00) is still being recorded
+        (_W0 + 3600) * _NS - 1,
+    ],
+)
+def test_an_unsettled_window_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, now_ns: int
+) -> None:
+    _bybit_day(tmp_path, monkeypatch)
+    argv = ["--venue", "BYBIT", "--start", _iso(_W0), "--end", _iso(_W0 + 5)]
+    with pytest.raises(SystemExit, match="window not settled"):
+        _main(argv, now_ns=now_ns)
+
+
+def test_a_window_is_judged_once_its_hour_ended_and_it_settled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _bybit_day(tmp_path, monkeypatch)
+    status, _ = _run_window(capsys, _W0, _W0 + 5, now_ns=(_W0 + 3600) * _NS)
+    assert status == 0
+
+
+def test_a_day_report_is_unchanged_by_the_window_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _bybit_day(tmp_path, monkeypatch)
+    _, report = _run(capsys)
+    assert "start" not in report
+    assert "end" not in report
+    assert report["day"] == "2026-09-29"
+    assert _only(report)["seconds"]["expected"] == 86_400
+
+
+def test_a_window_reads_the_missing_raw_hours_it_touches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _bybit_day(tmp_path, monkeypatch)
+    channel_file(tmp_path / "verify", "BYBIT", "linear.publicTrade", hour_of(_D0) + 3).unlink()
+    status, _ = _run_window(capsys, _W0, _W0 + 5)  # hour 03 is not touched
+    assert status == 0
+    channel_file(tmp_path / "verify", "BYBIT", "linear.publicTrade", hour_of(_D0) + 10).unlink()
+    status, report = _run_window(capsys, _W0, _W0 + 5)
+    assert status == 1
+    assert report["missing_raw_files"] == ["linear.publicTrade/2026-09-29T10"]
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        ["--start", "2026-09-29T10:00:00Z"],  # no --end
+        ["--start", "2026-09-29T10:00:00.5Z", "--end", "2026-09-29T10:00:05Z"],
+        ["--start", "2026-09-29T10:00:00+02:00", "--end", "2026-09-29T10:00:05Z"],
+        ["--start", "2026-09-29T10:00:05Z", "--end", "2026-09-29T10:00:05Z"],
+        ["--day", "2026-09-29", "--start", "2026-09-29T10:00:00Z"],
+        ["--day", "2026-09-29", "--end", "2026-09-29T10:00:00Z"],
+    ],
+)
+def test_a_bad_window_is_a_usage_error(extra: list[str]) -> None:
+    with pytest.raises(SystemExit) as raised:
+        _main(["--venue", "BYBIT", *extra])
+    assert raised.value.code == 2

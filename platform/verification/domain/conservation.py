@@ -650,16 +650,21 @@ class SecondCounts:
     examples_unexplained: tuple[int, ...]
 
 
-def reasons(day_start_s: int, runs: Sequence[SecondsRun]) -> tuple[dict[int, str], int]:
+def reasons(
+    day_start_s: int, runs: Sequence[SecondsRun], end_s: int | None = None
+) -> tuple[dict[int, str], int]:
     """
-    Map every second of the day a `seconds` run covers to its reason (the earliest-starting run's,
-    ties by reason), and count the seconds two runs cover.
+    Map every second of `[day_start_s, end_s)` (the day from `day_start_s` when `end_s` is None) a
+    `seconds` run covers to its reason (the earliest-starting run's, ties by reason), and count
+    the seconds two runs cover. A run is clipped to the span: its seconds outside it are not
+    counted.
     """
+    last_s = (day_start_s + SECONDS_PER_DAY if end_s is None else end_s) - 1
     found: dict[int, str] = {}
     doubled: set[int] = set()
     for run in sorted(runs, key=lambda r: (r.first_s, r.reason)):
         low = max(run.first_s, day_start_s)
-        high = min(run.last_s, day_start_s + SECONDS_PER_DAY - 1)
+        high = min(run.last_s, last_s)
         for second in range(low, high + 1):
             if second in found:
                 doubled.add(second)
@@ -669,14 +674,21 @@ def reasons(day_start_s: int, runs: Sequence[SecondsRun]) -> tuple[dict[int, str
 
 
 def tally_seconds(
-    day_start_s: int, rows: Mapping[int, int], runs: Sequence[SecondsRun]
+    day_start_s: int,
+    rows: Mapping[int, int],
+    runs: Sequence[SecondsRun],
+    end_s: int | None = None,
 ) -> SecondCounts:
-    """Account every second of the day: `rows` maps a second to its row count."""
-    by_second, multiple = reasons(day_start_s, runs)
+    """
+    Account every second of `[day_start_s, end_s)` (the day from `day_start_s` when `end_s` is
+    None, Story 31.10's window otherwise): `rows` maps a second to its row count.
+    """
+    stop_s = day_start_s + SECONDS_PER_DAY if end_s is None else end_s
+    by_second, multiple = reasons(day_start_s, runs, stop_s)
     explained: dict[str, int] = {}
     with_row = duplicate = both = 0
     unexplained: list[int] = []
-    for second in range(day_start_s, day_start_s + SECONDS_PER_DAY):
+    for second in range(day_start_s, stop_s):
         count, reason = rows.get(second, 0), by_second.get(second)
         if count:
             with_row, duplicate = with_row + 1, duplicate + (count > 1)
@@ -686,7 +698,7 @@ def tally_seconds(
         else:
             unexplained.append(second)
     return SecondCounts(
-        expected=SECONDS_PER_DAY,
+        expected=stop_s - day_start_s,
         rows=with_row,
         explained_by_reason=dict(sorted(explained.items())),
         unexplained=len(unexplained),
@@ -719,7 +731,8 @@ class InstrumentReport:
 @dataclass(frozen=True)
 class DayReport:
     """
-    A venue's day: every plan instrument's report, and what the inputs lacked. It passes only when
+    A venue's day -- or a window of whole seconds `[start, end)`, labelled `day` too (Story
+    31.10) -- every plan instrument's report, and what the inputs lacked. It passes only when
     every instrument does, the coverage record exists (without it nothing is explained) and no
     raw reference hour of the day itself is missing (a missing hour makes the trade side vacuous).
     The neighbour hours outside the day may be missing, or end truncated
@@ -733,6 +746,8 @@ class DayReport:
     missing_raw_files: tuple[str, ...]
     truncated_neighbour_files: tuple[str, ...]
     instruments: tuple[InstrumentReport, ...]
+    start: str | None = None  # a window's own bounds (Story 31.10); None for a whole day
+    end: str | None = None
 
     @property
     def passed(self) -> bool:

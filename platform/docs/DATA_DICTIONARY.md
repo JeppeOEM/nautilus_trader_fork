@@ -1978,6 +1978,84 @@ replay-input check; result after the review patches: 1 `replay_input` `levels` p
 nothing else failing, the Bybit classes not a parity proof while D-133/D-134 are OPEN; the SSOT live variant ~125 s; the OFI soak
 variant 126 s / 1.16 GB over the 2026-09-29 soak day.
 
+
+### 1.23 Fault injection: every loss accounted for (`verification.chaos`, Story 31.10)
+
+Not stored data: the production failures injected on purpose on the verify stack, each judged by
+the windowed `verification.conservation` (§1.16) against an expected-outcome table.
+`docs/VERIFICATION_REPORT.md` (row "Fault injection") holds the numbers.
+
+**Windowed conservation.** `python3 -m verification.conservation --venue V --start ISO --end ISO`
+(UTC whole seconds, `[start, end)`, exclusive with `--day`) runs the day's rules over one window:
+trades counted when their venue time is in the window (both sides), seconds in `[start_s, end_s)`,
+coverage runs clipped to it, the raw hours it touches plus their neighbours read. A window is
+refused until its last touched hour has ended and `end + 10 min` (a flush, the backfill settle, one
+more flush) has passed. The day output is unchanged; the JSON carries `start`/`end`.
+
+**The tool.** `python3 -m verification.chaos --scenario S --venue BYBIT|HYPERLIQUID` injects one
+scenario on the verify stack and always undoes it (`finally`; a failed undo is ledgered and exits
+1); `--evaluate --venue V` judges every settled scenario. Refusals are ledgered at
+`verification.chaos.refused` (exit 1, no fault applied): no `data/.verify-stack` marker, a target
+container not `verify-*`, an open scenario (a `start` line without its `end`), fewer than 6 min
+since the last `end` (the judged windows' 270 s of margins never overlap), and `network_cut`
+without `sudo -n` or while another uid-1000 venue client runs (a collector of another compose
+project, or a `live-paper` bot of any: stop `verify-live-paper` first). An interrupt (Ctrl-C,
+SIGTERM, SIGHUP) ends the fault, undoes it and writes the `end` line, ledgered at
+`verification.chaos.fault_failed` with whether the undo held; later signals are ignored until the
+tool exits, so a second one never cuts the undo short. Usage errors exit 2.
+
+| Scenario | Fault |
+|---|---|
+| `sigkill_flush` | `docker kill -s KILL` at :02.25 of a minute (inside the collector's :02 flush), then `docker start` |
+| `graceful_restart` | `docker restart` (SIGTERM: the final flush writes everything) |
+| `pause_15s` / `pause_45s` | `docker pause`, 15 / 45 s, `docker unpause` (under / past the 30 s catch-up cap) |
+| `network_cut` | 60 s of `sudo -n iptables`/`ip6tables -w -I OUTPUT -m owner --uid-owner 1000 -d <venue host IPs> -j DROP` (comment `verify-chaos`; the recorders run as uid 1001 and keep recording), rules deleted (`-D`) after |
+| `catalog_readonly` | `chmod a-w` on this venue's leaf directories from :55 to :10 of the next minute (exactly one :02 flush), exact prior modes restored |
+| `redis_stop` | `docker stop verify-redis`, 60 s, `docker start`; judged for both venues |
+| `deploy` | the verify collectors' `up -d --no-deps --build`, logged so Story 31.11 can exclude its window; never judged |
+
+**The scenario log** `<VERIFY_DATA_DIR>/chaos/scenarios.jsonl` (appended, fsynced): a `start` line
+before the fault and an `end` line after its undo, each with `event`, `scenario`, `venues`,
+`target`, `fault_start_ns`, `fault_end_ns` (end only) and `commands` (`argv`, `returncode`,
+`output`; end only). A line is parsed exactly or refused.
+
+**Evaluation.** Each settled scenario over `[fault_start - 90 s, fault_end + 180 s)`: the windowed
+conservation counts, seconds explained per reason, the collector ledger sites seen in the window
+(`<ERROR_LEDGER_DIR>/<venue>_collector.jsonl`), and backfilled and unrecoverable trade counts,
+matched against the table below (`verification/domain/chaos.py`, pure; its values restated from
+capture are pinned against capture's own by `tests/test_chaos_contract.py`). Unsettled scenarios
+are listed pending and never pass. Exit 0 iff at least one scenario was evaluated and every one
+has 0 unexplained trades and seconds, 0 `archived_twice`/`duplicate_rows`/`row_and_reason`, and
+matches its row.
+
+| Scenario | Required second reasons | Forbidden | Required ledger sites | Trades | Why (capture code) |
+|---|---|---|---|---|---|
+| `sigkill_flush` | `restart` | `write_failed` | `collector.restart_gap`, `collector.trade_backfill` | | the buffer dies; the next process notes `restart` from its last archived second and, seeded from the archive (D-61), backfills from the newest archived trade |
+| `graceful_restart` | `restart` | `write_failed` | as above | | the final flush writes everything; only the downtime is lost |
+| `pause_15s` | | `restart`, `catch_up_cap`, `write_failed` | `collector.stale_trade`, `collector.trade_backfill` | | frames buffered in the socket arrive late: trades older than 10 s are dropped stale, the feed's silence schedules a backfill; 15 s is under the 30 s catch-up cap |
+| `pause_45s` | `catch_up_cap` | `restart`, `write_failed` | `collector.skipped_seconds`, `collector.stale_trade`, `collector.trade_backfill` | | as above, but past the cap: the older seconds are noted `catch_up_cap` |
+| `network_cut` | `stale` | `restart`, `write_failed` | `collector.trade_backfill` | Bybit backfilled > 0; Hyperliquid unrecoverable > 0 | no delta for 60 s: the gate rejects the seconds `stale`; Bybit's REST depth covers the minute, Hyperliquid's `recentTrades` holds 10 trades (D-48) |
+| `catalog_readonly` | `write_failed` | `restart` | `collector.flush_write` | | `write_data` raises: the batch is ledgered LOST, its trades marked an archive gap, its seconds `write_failed` (D-137) |
+| `redis_stop` | | `restart`, `write_failed`, `catch_up_cap` | `collector.snapshot_publish` | | only the live publish fails; Parquet and the loops are untouched |
+
+A row changes only with its root cause written next to it, never to fit an observation.
+
+**The restart backfill (D-61, capture).** At `_prepare_ids` each instrument's
+`TradeIntake.last_trade_ts` is seeded from the newest archived trade's `ts_event` inside the dedup
+horizon (6 min, a bounded read; a failure is ledgered `collector.dedup_seed`). After the first
+`apply`, every id it added (subscribed, or failed and retried later) with a seed gets exactly one
+restart backfill from that seed, reason `restart: archived baseline`, joined to the request of
+the feed its first message (trade or book) arrives on -- one ledgered `collector.trade_backfill`
+per feed request, naming its instruments; what
+the venue's REST depth cannot reach is noted `trades_unrecoverable` `depth` (or `fetch_failed`).
+`Known limit:` a process down longer than the horizon has no seed, so its gap stays unexplained
+(loud); upgrade path in `capture_service.py`'s module docstring.
+
+**Repro** (host, from `platform/`, verify stack up): `VERIFY_DATA_DIR=data/verification
+CATALOG_PATH=data/catalog ERROR_LEDGER_DIR=data/errors python3 -m verification.chaos --scenario S
+--venue V`, then, after the window settles, the same with `--evaluate --venue V [--json]`.
+
+Measured (2026-09-30, verify stack, `docs/VERIFICATION_REPORT.md`): every agent-run scenario passes on both venues (0 unexplained trades and seconds, each matching its row); `network_cut` is owed (sudo, DEPLOY_CHECKLIST 31-10); a failed flush's loss is explained but avoidable (D-137, OPEN). Evaluating 9 windows costs 291 s / 184 MB (Bybit, 4 instruments; about 30 s per window) and 4.8 s / 147 MB (Hyperliquid).
 ---
 
 ## 2. Computed signals / ML features (`platform/kernel/`, `platform/views/`, `platform/ranking/`)

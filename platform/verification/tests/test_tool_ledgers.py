@@ -32,6 +32,7 @@ from observability import error_ledger
 from verification import book
 from verification import candles
 from verification import catalog
+from verification import chaos
 from verification import conservation
 from verification import derivs
 from verification import trades
@@ -41,11 +42,14 @@ _ROOTS: dict[str, Callable[[list[str]], int]] = {
     "book": book.main,
     "candles": candles.main,
     "catalog": catalog.main,
+    "chaos": chaos.main,
     "conservation": conservation.main,
     "derivs": derivs.main,
     "trades": trades.main,
 }
 _FUTURE_DAY = ["--venue", "BYBIT", "--day", "2099-01-05"]  # never closed: the cheapest refusal
+# The chaos tool judges no day: its cheapest refusal is an evaluation without a raw root.
+_ARGV = {"trades": [*_FUTURE_DAY, "--stage", "live"], "chaos": ["--evaluate", "--venue", "BYBIT"]}
 
 
 @pytest.fixture
@@ -53,6 +57,7 @@ def errors_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path
     error_ledger.reset()
     monkeypatch.setenv("ERROR_LEDGER_DIR", str(tmp_path / "errors"))
     monkeypatch.setenv("ERROR_LEDGER_SERVICE", "bybit_collector")  # a docker exec's inheritance
+    monkeypatch.delenv("VERIFY_DATA_DIR", raising=False)
     yield tmp_path / "errors"
     error_ledger.reset()
 
@@ -61,7 +66,7 @@ def errors_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path
 def test_each_tool_ledgers_under_its_own_job_never_the_inherited_service(
     tool: str, errors_dir: Path
 ) -> None:
-    argv = [*_FUTURE_DAY, "--stage", "live"] if tool == "trades" else _FUTURE_DAY
+    argv = _ARGV.get(tool, _FUTURE_DAY)
     with pytest.raises(SystemExit) as refused:
         _ROOTS[tool](argv)
 

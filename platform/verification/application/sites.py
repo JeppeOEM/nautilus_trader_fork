@@ -17,7 +17,8 @@ The verification context's error-ledger sites (DATA-07), the reference recorder'
 (`verification.recorder.*`), the conservation tool's (`verification.conservation.*`), the
 trades tool's (`verification.trades.*`), the book tool's (`verification.book.*`), the derivs
 tool's (`verification.derivs.*`), the catalog tool's (`verification.catalog.*`), the candles
-tool's (`verification.candles.*`) and the bot parity tool's (`verification.bot_parity.*`): every
+tool's (`verification.candles.*`), the bot parity tool's (`verification.bot_parity.*`) and the
+fault injection tool's (`verification.chaos.*`): every
 failure either survives or refuses on is recorded at one of these through
 `observability.error_ledger.record`, never a bare log line.
 
@@ -84,3 +85,15 @@ CANDLES_REFUSED = "verification.candles.refused"
 # refuses (or a float-layout file), a file that vanished mid-run; or it crashed (the detail says
 # `crashed`; the exception is then re-raised).
 BOT_PARITY_REFUSED = "verification.bot_parity.refused"
+# The fault injection tool refused to act: no `data/.verify-stack` beside the catalog or the raw
+# root, a target container not named `verify-*` or not in compose project `verify`, the scenario
+# log's last run still open or ended less than the spacing ago, `sudo -n` not permitted for a
+# network cut, no address or catalog leaf to fault, a malformed scenario or coverage line, a
+# window's input unreadable; or it crashed (the detail says `crashed`; the exception is re-raised).
+CHAOS_REFUSED = "verification.chaos.refused"
+# A fault command did not return 0 (the scenario may not have been injected as logged), the
+# run was interrupted (its fault ended early; the detail says whether the undo held), or its
+# `end` line could not be written after the undo (the run stays open in the log).
+CHAOS_FAULT_FAILED = "verification.chaos.fault_failed"
+# An undo command did not return 0: the fault may still be in place -- check the target by hand.
+CHAOS_UNDO_FAILED = "verification.chaos.undo_failed"

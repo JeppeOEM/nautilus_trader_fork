@@ -1122,3 +1122,37 @@ config key, schema or mount of the production stack changed.
 - [ ] Leave `verify-live-paper` stopped until needed (Story 31.9 stopped it at 2026-09-30 07:50:27Z
       after its 66.5 min run). It is in `VERIFY_SERVICES`, so the next `make verify-up` restarts it
       and its signal logs keep growing (~86 MB per bot-day, the Known limit of the signal log).
+
+### 31-10 Fault injection: every loss accounted for (commit: this story's)
+
+Changes what the collectors do after a restart (each instrument's trade baseline is seeded from the
+archive and the restart gap is backfilled, `restart: archived baseline`, D-61) and how the
+collectors' and the archive's status buses publish after a Redis restart (one retry on a
+`ConnectionError`, D-136); adds `verification.chaos` and the windowed `verification.conservation`
+(`--start/--end`). No config key, schema or mount of the production stack changed.
+
+- [ ] **`network_cut` on the verify stack (needs sudo; the agent has none).** From `platform/`, with
+      the verify stack up and the recorders recording: `sudo -v` first (the tool uses `sudo -n` and
+      refuses otherwise, inserting nothing) and `docker stop verify-live-paper` (a uid-1000 venue
+      client the rule would cut too; the tool refuses while it runs), then `VERIFY_DATA_DIR=data/verification
+      CATALOG_PATH=data/catalog ERROR_LEDGER_DIR=data/errors python3 -m verification.chaos
+      --scenario network_cut --venue BYBIT`, wait 6 min, the same with `--venue HYPERLIQUID`. After
+      the next full hour plus 10 min, run `--evaluate --venue BYBIT` and `--evaluate --venue
+      HYPERLIQUID`: exit 0 expected (Bybit `backfilled` > 0, Hyperliquid `unrecoverable` > 0, D-48).
+      Check afterwards that `sudo iptables -S OUTPUT | grep verify-chaos` (and `ip6tables`) prints
+      nothing. A mismatch is a finding: register it in DATA_INTEGRITY_AUDIT.md.
+- [ ] On the VPS, `git pull`, then from `platform/` rebuild and recreate the collectors and the
+      archive (`docker compose up -d --build bybit_collector hyperliquid_collector archive`). Check
+      `GET /api/errors` after the first minute: each collector ledgers one `collector.restart_gap`
+      and one `collector.trade_backfill` per feed request with reason `restart: archived
+      baseline` (Bybit: `linear` and `spot`; each instrument backfilled once), and no
+      `collector.dedup_seed`.
+- [ ] **Decide D-137 (OPEN): a failed catalog flush discards a batch it could still write.** One
+      failed :02 flush cost 1,542 Bybit trades and ~60 s of rows per instrument on the verify stack
+      (ledgered and explained, never silent). Recommended: a follow-up story that keeps a failed
+      batch and retries it at the next flush, bounded by the buffer's memory cap, noting
+      `write_failed` only for what is finally dropped. Alternative: keep today's behaviour as a
+      documented `Known limit:`.
+- [ ] Story 31.11: exclude every window in `data/verification/chaos/scenarios.jsonl` from the clean
+      soak (2026-09-30 09:50:48-11:05:25Z, 16:29:07-16:50:02Z and 17:06:48-17:07:48Z, each plus its 90 s / 180 s
+      margins), and the verify stack's own stop 11:23-16:00Z (not a scenario: the run was stopped).

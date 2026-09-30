@@ -23,6 +23,7 @@ import asyncio
 import json
 import os
 import threading
+import time
 from collections.abc import Sequence
 from pathlib import Path
 from types import SimpleNamespace
@@ -60,6 +61,7 @@ from capture.tests.test_collector import _collector
 from capture.tests.test_collector import _deltas
 from capture.tests.test_collector import _FakeFetch
 from capture.tests.test_collector import _fetched
+from capture.tests.test_collector import _LifecycleClient
 from capture.tests.test_collector import _rest
 from capture.tests.test_collector import _seed_trade
 from capture.tests.test_collector import _tick
@@ -209,10 +211,11 @@ def test_the_seed_reads_only_the_horizon(tmp_path: Path) -> None:
     old = now - capture_mod.DEDUP_HORIZON_NS - 60 * _S
     _archive_trade(catalog, _clocked_trade(1, old, old))
     _archive_trade(catalog, _clocked_trade(2, now - _S, now - _S))
-    ids = _collector(catalog)._archive.recent_trade_ids(
+    recent = _collector(catalog)._archive.recent_trades(
         _BYBIT, now - capture_mod.DEDUP_HORIZON_NS, now, error_ledger.record
     )
-    assert ids == [("2", now - _S)]
+    assert recent.ids == [("2", now - _S)]
+    assert recent.newest_ts_event == now - _S  # the older trade is outside the horizon too
 
 
 def test_an_unreadable_trade_file_is_ledgered_and_the_others_still_seed(tmp_path: Path) -> None:
@@ -416,7 +419,7 @@ class _NoReadsInTheGate:
         self.armed = False
 
     def __getattr__(self, name: str) -> object:
-        if self.armed and name in ("last_snapshot_second", "recent_trade_ids"):
+        if self.armed and name in ("last_snapshot_second", "recent_trades"):
             raise AssertionError(f"{name} read inside the write gate")
         return getattr(self._inner, name)
 
@@ -527,6 +530,145 @@ def test_a_backfill_abandoned_at_shutdown_records_its_windows(tmp_path: Path) ->
     assert error_ledger.counts() == {"collector.trade_backfill": 1}
     windows = [(w.instrument_id, w.reason, w.from_ns) for w in c._coverage_trades]  # type: ignore[union-attr]
     assert windows == [(iid, coverage.FETCH_FAILED, since[iid]) for iid in (_BYBIT, _SPOT_ID)]
+
+
+# -- the restart backfill (D-61, Story 31.10) ------------------------------------------------------
+
+
+def test_a_restart_seeds_the_backfill_baseline_from_the_newest_archived_ts_event(
+    tmp_path: Path,
+) -> None:
+    catalog = tmp_path / "catalog"
+    now = _collector(catalog)._watchdog_started_ns
+    newest = _clocked_trade(2, now - 10 * _S, now - 10 * _S)
+    _archive_trade(catalog, _clocked_trade(1, now - 20 * _S, now - 20 * _S))
+    _archive_trade(catalog, newest)
+    _archive_trade(catalog, _clocked_trade(3, now - 30 * _S, now - 5 * _S))  # a late backfill
+    c = _collector(catalog)  # a new process
+    asyncio.run(c._prepare_ids([_BYBIT]))
+    assert c._intake(_BYBIT).last_trade_ts == newest.ts_event  # by venue time, not by arrival
+
+
+def _restarted(tmp_path: Path) -> tuple[CaptureService, TradeTick]:
+    """Return a new process over a catalog of one archived trade, after its first `apply`."""
+    catalog = tmp_path / "catalog"
+    now = _collector(catalog)._watchdog_started_ns
+    archived = _clocked_trade(7, now - 10 * _S, now - 10 * _S)
+    _archive_trade(catalog, archived)
+    c = _two_instrument_collector(catalog)
+    asyncio.run(c._prepare_ids([_BYBIT, _SPOT_ID]))
+    c._arm_restart_backfill([_BYBIT, _SPOT_ID])  # as `run()` does after its first `apply`
+    return c, archived
+
+
+def test_the_first_book_message_schedules_the_restart_backfill_from_the_baseline(
+    tmp_path: Path,
+) -> None:
+    c, archived = _restarted(tmp_path)
+    assert c._restart_baselines == {_BYBIT: archived.ts_event}  # the spot id archived nothing
+    c._process_data(_deltas([(100.0, 1.0)], [(100.5, 1.0)]), _LINEAR)
+    request = c._feeds.requests["linear"]
+    assert request.reasons == [capture_mod.RESTART_BACKFILL_REASON]
+    assert request.since == {_BYBIT: archived.ts_event}
+    assert c._restart_baselines == {}  # once per instrument
+
+
+def test_the_first_trade_schedules_it_before_the_trade_advances_the_baseline(
+    tmp_path: Path,
+) -> None:
+    c, archived = _restarted(tmp_path)
+    live = _seed_trade(c, 8)
+    assert c._feeds.requests["linear"].since == {_BYBIT: archived.ts_event}
+    assert c._intake(_BYBIT).last_trade_ts == live.ts_event
+
+
+def test_the_restart_backfill_fetches_since_the_baseline_and_notes_the_depth_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    error_ledger.reset()
+    c, archived = _restarted(tmp_path)
+    oldest = archived.ts_event + 4 * _S  # the venue's history starts after the baseline
+    fetch = _FakeFetch({_BYBIT: _fetched([_rest(9, oldest)], reached=False)})
+    monkeypatch.setattr(c, "_trade_history", fetch)
+    c._process_data(_deltas([(100.0, 1.0)], [(100.5, 1.0)]), _LINEAR)
+    asyncio.run(c._run_due_backfills(time.time_ns() + capture_mod._BACKFILL_SETTLE_NS))
+    assert [call[:2] for call in fetch.calls] == [(_BYBIT, archived.ts_event - 5 * _S)]
+    assert c._coverage_trades == [
+        TradesBackfilled(_BYBIT, ("9",)),
+        TradesUnrecoverable(_BYBIT, coverage.DEPTH, archived.ts_event, oldest),
+    ]
+    assert "restart: archived baseline" in error_ledger.last_details()["collector.trade_backfill"]
+
+
+class _UnreadableTrades:
+    """Wraps a real archive writer; reading its recent trades fails."""
+
+    def __init__(self, inner: object) -> None:
+        self._inner = inner
+
+    def recent_trades(self, *args: object) -> object:
+        raise OSError("catalog unreadable")
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._inner, name)
+
+
+def test_an_unreadable_archive_is_ledgered_and_leaves_no_baseline(tmp_path: Path) -> None:
+    error_ledger.reset()
+    c = _two_instrument_collector(tmp_path / "catalog")
+    c._archive = _UnreadableTrades(c._archive)  # type: ignore[assignment]
+    asyncio.run(c._prepare_ids([_BYBIT]))
+    c._arm_restart_backfill([_BYBIT])
+    assert error_ledger.counts() == {"collector.dedup_seed": 1}
+    assert "no backfill baseline" in error_ledger.last_details()["collector.dedup_seed"]
+    assert c._restart_baselines == {}
+
+
+def test_an_id_leaving_the_plan_before_its_first_message_drops_its_baseline(
+    tmp_path: Path,
+) -> None:
+    c, _ = _restarted(tmp_path)
+    c._forget_verdicts(_BYBIT)
+    c._process_data(_deltas([(100.0, 1.0)], [(100.5, 1.0)]), _LINEAR)
+    assert c._feeds.requests == {}
+
+
+def test_run_arms_the_restart_backfill_after_its_first_apply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    catalog = tmp_path / "catalog"
+    now = _collector(catalog)._watchdog_started_ns
+    archived = _clocked_trade(7, now - 10 * _S, now - 10 * _S)
+    _archive_trade(catalog, archived)
+    monkeypatch.setattr(capture_mod, "instruments_from_pyo3", lambda pyo3: [])
+    c = _collector(catalog, client=_LifecycleClient([]))
+    c._applied.clear()  # `run()` applies the plan itself
+    c._stop.set()  # run() reaches the loops, sees the stop and unwinds
+    asyncio.run(c.run())
+    assert c._restart_baselines == {_BYBIT: archived.ts_event}  # armed; no message came
+
+
+class _FailingSubscribe(_LifecycleClient):
+    async def subscribe(self, iid: str) -> None:
+        raise ConnectionError("subscribe refused")
+
+
+def test_run_arms_an_id_whose_first_subscribe_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The retry loop subscribes it later: its first message then backfills the restart gap."""
+    catalog = tmp_path / "catalog"
+    now = _collector(catalog)._watchdog_started_ns
+    archived = _clocked_trade(7, now - 10 * _S, now - 10 * _S)
+    _archive_trade(catalog, archived)
+    monkeypatch.setattr(capture_mod, "instruments_from_pyo3", lambda pyo3: [])
+    c = _collector(catalog, client=_FailingSubscribe([]))
+    c._applied.clear()
+    c._stop.set()
+    asyncio.run(c.run())
+    assert c._last_applied is not None
+    assert c._last_applied.failed == frozenset({_BYBIT})
+    assert c._restart_baselines == {_BYBIT: archived.ts_event}
 
 
 # -- the coverage write -----------------------------------------------------------------------------
