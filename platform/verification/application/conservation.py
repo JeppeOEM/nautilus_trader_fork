@@ -412,12 +412,16 @@ def conserve_window(plan: RecordingPlan, start_ns: int, end_ns: int, inputs: Inp
 
 
 def report_json(report: DayReport) -> dict[str, Any]:
-    """Return the report as JSON-ready data, each instrument's and the day's `passed` included."""
+    """
+    Return the report as JSON-ready data, each instrument's and the day's `passed` included, and
+    each instrument's `failing` count (Story 31.11: the day verdict reads it, never re-derives it).
+    """
     body = asdict(report)
     if report.start is None:  # a day's report keeps its Story 31.2 shape
         del body["start"], body["end"]
     for entry, instrument in zip(body["instruments"], report.instruments, strict=True):
         entry["passed"] = instrument.passed
+        entry["failing"] = instrument.failing
     return {"passed": report.passed, **body}
 
 

@@ -227,6 +227,7 @@ def test_a_clean_day_explains_everything(
     trades, seconds = _only(report)["trades"], _only(report)["seconds"]
     assert status == 0
     assert report["passed"] is True
+    assert (_only(report)["passed"], _only(report)["failing"]) == (True, 0)
     assert (trades["seen"], trades["archived"], trades["unexplained"]) == (3, 3, 0)
     assert (trades["archived_not_seen"], trades["archived_twice"]) == (0, 0)
     assert seconds["rows"] == 2
@@ -254,6 +255,8 @@ def test_a_deleted_archived_trade_is_unexplained(
     trades = _only(report)["trades"]
     assert status == 1
     assert (trades["unexplained"], trades["examples_unexplained"]) == (1, ["exec-A"])
+    # Story 31.11: the day verdict reads this count; `passed` is exactly `failing == 0`.
+    assert (_only(report)["passed"], _only(report)["failing"]) == (False, 1)
 
 
 def test_a_trade_received_in_the_next_hour_is_counted_in_its_own(

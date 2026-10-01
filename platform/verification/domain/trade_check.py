@@ -717,8 +717,12 @@ class InstrumentTrades:
     latency: LatencyHistogram
 
     @property
+    def failing(self) -> int:
+        return self.ids.failing + self.seconds.failing
+
+    @property
     def passed(self) -> bool:
-        return self.ids.failing == 0 and self.seconds.failing == 0
+        return self.failing == 0
 
 
 @dataclass(frozen=True)

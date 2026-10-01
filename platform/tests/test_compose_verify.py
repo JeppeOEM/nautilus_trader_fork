@@ -536,6 +536,49 @@ def test_the_verify_archive_can_never_sync_to_the_live_backup_target() -> None:
         assert archive[variable] == ""
 
 
+def test_the_verify_archive_runs_verify_day_over_the_recorders_data() -> None:
+    """
+    Story 31.11: the verify stack's nightly `verify_day` step reads the recorders' raw files
+    read-only, writes only its scratch, reads the coverage record beside the catalog, the venue
+    plans the recorders read, and the verify data_api on its loopback port.
+    """
+    base = _services(_yaml(_BASE))["archive"]
+    archive = _services(_yaml(_OVERRIDE))["archive"]
+    environment = archive["environment"]
+    assert environment["VERIFY_DATA_DIR"] == "/app/verify_data"
+    assert environment["VERIFY_DATA_API_URL"] == "http://127.0.0.1:${DATA_API_PORT:-29100}"
+    assert archive["volumes"] == [
+        "./data/verification/raw:/app/verify_data/raw:ro",
+        "./data/verification/scratch:/app/verify_data/scratch",
+        "./data/coverage:/app/coverage:ro",
+        "./capture/venues/bybit:/app/bybit_venue:ro",
+        "./capture/venues/hyperliquid:/app/hyperliquid_venue:ro",
+    ]
+    # The tools read `<catalog>/../coverage`: the base's catalog mount decides where that is.
+    base_targets = {volume.split(":")[1]: volume.split(":")[0] for volume in base["volumes"]}
+    assert base["environment"]["CATALOG_PATH"] == "/app/catalog"
+    assert base_targets["/app/catalog"] == "./data/catalog"
+    # Compose merges volumes by container path: none of these may replace a base mount.
+    assert not {volume.split(":")[1] for volume in archive["volumes"]} & set(base_targets)
+    # The same plan files the recorders read, through the same directory mounts.
+    for name, (venue, _, config_env) in _RECORDERS.items():
+        recorder = _services(_yaml(_OVERRIDE))[name]
+        assert environment[config_env] == recorder["environment"][config_env]
+        mount = f"/app/{venue.lower()}_venue"
+        (source,) = [v.split(":")[0] for v in recorder["volumes"] if f":{mount}:" in v]
+        assert f"{source}:{mount}:ro" in archive["volumes"]
+    assert "archive" in _copied_packages()
+    assert "verification" in _copied_packages()
+
+
+def test_verify_up_makes_a_raw_dir_it_created_writable_by_the_recorders() -> None:
+    variables, recipes = _makefile()
+    recipe = [_expand(line, variables) for line in recipes["verify-up"]]
+    (raw,) = [line for line in recipe if "data/verification/raw" in line]
+    assert raw.startswith("find data/verification/raw -maxdepth 0 -user")
+    assert raw.endswith("-exec chmod g+w {} +")
+
+
 @pytest.mark.parametrize("target", ["verify-up", "verify-down", "verify-wipe"])
 def test_every_verify_target_checks_the_docker_daemon_answers_first(target: str) -> None:
     variables, recipes = _makefile()

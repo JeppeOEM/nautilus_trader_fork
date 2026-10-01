@@ -212,14 +212,14 @@ ACCOUNTED: tuple[Accounted, ...] = (
         "one before it, counted apart",
     ),
     Accounted(
-        "slow_loop_reads_its_clock_first",
+        "board_changed_before_its_publish",
         "board -> metrics.db (live stack)",
-        "ofi/microprice/spread",
-        "the slow loop took `ts` before it awaited its reads, so a batch ingested in between is in "
-        "the row: matched to the last message at/before `ts` or one within 2 s after it. Fixed in "
-        "code (audit D-130: `ts` is now stamped when the board is read, "
-        "`ranking/tests/test_engine.py`), undeployed: the verify ranking image predates it, so the "
-        "row stays while that image runs",
+        "ofi/microprice/spread/rank/volume24h",
+        "the slow loop read the board after a change no message carried yet: a batch whose publish "
+        "waits on the publish lock, or a volume refresh, which publishes nothing itself (the next "
+        "batch or heartbeat does). Matched to the first message after `ts`; after a volume refresh "
+        "alone, `volume24h`/`rank` from that message and the book columns from the last at/before "
+        "it. Counted apart (D-130: `ts` itself is stamped when the board is read)",
     ),
 )
 _ACCOUNTED_NAMES = frozenset(a.name for a in ACCOUNTED)
@@ -632,7 +632,7 @@ def test_every_emitted_key_is_compared_or_accounted(trace: _Trace) -> None:
     named = {rule.split(":", 1)[1] for rule in rules if rule.startswith("accounted:")}
     assert named <= _ACCOUNTED_NAMES, "a key names no accounted row"
     assert len(_ACCOUNTED_NAMES) == len(ACCOUNTED), "accounted rows are named uniquely"
-    live_only = {"in_flight_publish", "slow_loop_reads_its_clock_first", "float_decode"}
+    live_only = {"in_flight_publish", "board_changed_before_its_publish", "float_decode"}
     assert _ACCOUNTED_NAMES - named == live_only, "an accounted row no key uses"
 
 
@@ -737,7 +737,6 @@ _API = "http://127.0.0.1:29100"
 _CATALOG_WAIT_S = 150
 _LISTEN_S = 30
 _METRICS_WAIT_S = 90
-_SLOW_LOOP_SLACK_NS = 2 * NS_PER_S
 
 
 class _Bus:
@@ -913,23 +912,52 @@ _FAST_DB = ("ofi", "microprice", "spread", "rank", "volume24h")
 _SLOW_DB = ("pct_1h", "pct_24h", "pct_1w", "pct_1m", "volatility")
 
 
+_VOLUME_DB = ("rank", "volume24h")
+_BOOK_DB = tuple(c for c in _FAST_DB if c not in _VOLUME_DB)
+
+
+def _matches(entry: dict[str, Any] | None, row: dict[str, Any], columns: tuple[str, ...]) -> bool:
+    return entry is not None and _db_view(entry, columns) == {c: row[c] for c in columns}
+
+
 def _judge_metrics_row(row: dict[str, Any], messages: list[dict[str, Any]], iid: str) -> str:
     """
-    Return which message the row's board-state columns equal (accounted:
-    `slow_loop_reads_its_clock_first`); its slow columns must reach a later message.
+    Return which message the row's board-state columns equal: the last at or before its `ts`
+    (D-130: `ts` is stamped when the board is read), else the first after it (accounted:
+    `board_changed_before_its_publish`). Its slow columns must reach a later message.
     """
     ts = row["ts"]
-    at_or_before = _rank_at(messages, iid, lambda t: t <= ts)[-1:]
-    just_after = _rank_at(messages, iid, lambda t: ts < t <= ts + _SLOW_LOOP_SLACK_NS)
+    at_or_before = _rank_at(messages, iid, lambda t: t <= ts)
+    before = at_or_before[-1] if at_or_before else None
     after = _rank_at(messages, iid, lambda t: t > ts)
-    slow = {c: row[c] for c in _SLOW_DB}
-    assert any(_db_view(e, _SLOW_DB) == slow for e in after), f"{iid}: {row}"
-    fast = {c: row[c] for c in _FAST_DB}
-    if any(_db_view(e, _FAST_DB) == fast for e in at_or_before):
+    assert any(_matches(e, row, _SLOW_DB) for e in after), f"{iid}: {row}"
+    if _matches(before, row, _FAST_DB):
         return "at_or_before"
-    matching = [e for e in just_after if _db_view(e, _FAST_DB) == fast]
-    assert matching, f"{iid}: {row}"
-    return f"just_after (+{(matching[0]['updated_at'] - ts) / 1e6:.0f} ms)"
+    first = after[0] if after else None
+    if _matches(first, row, _FAST_DB):
+        return "first_after"
+    volume_only = _matches(before, row, _BOOK_DB) and _matches(first, row, _VOLUME_DB)
+    assert volume_only, f"{iid}: {row}; last at/before: {before}; first after: {first}"
+    return "first_after (volume refresh)"
+
+
+def _message(updated_at: int, ofi: float, volume: float) -> dict[str, Any]:
+    rank = {"instrument_id": "X", "ofi_5": ofi, "microprice": 1.0, "spread": 0.1, "rank": 1}
+    rank |= {"volume24h": volume, "pct_1h": 0.0, "pct_24h": 0.0, "pct_1w": 0.0, "pct_1m": 0.0}
+    return {"updated_at": updated_at, "ranks": [{**rank, "volatility": 0.0}]}
+
+
+def _row(ts: int, message: dict[str, Any]) -> dict[str, Any]:
+    return {"ts": ts, **{col: message["ranks"][0][_DB_FROM_RANK[col]] for col in _DB_FROM_RANK}}
+
+
+def test_a_metrics_row_matching_only_a_later_publish_is_never_accounted() -> None:
+    """Planted defect: the accounted row admits the first message after `ts`, never a later one."""
+    messages = [_message(10, 1.0, 5.0), _message(20, 2.0, 5.0), _message(30, 3.0, 5.0)]
+    assert _judge_metrics_row(_row(15, messages[0]), messages, "X") == "at_or_before"
+    assert _judge_metrics_row(_row(15, messages[1]), messages, "X") == "first_after"
+    with pytest.raises(AssertionError):
+        _judge_metrics_row(_row(15, messages[2]), messages, "X")  # stamped two publishes late
 
 
 @LIVE

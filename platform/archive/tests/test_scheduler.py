@@ -34,6 +34,7 @@ from archive.application.nightly import Step
 from archive.application.scheduler import JOB_ERROR_EXIT
 from archive.application.scheduler import LOCK_TIMEOUT_EXIT
 from archive.application.scheduler import MAX_QUEUED_RUNS
+from archive.application.scheduler import VERIFICATION_DAYS_KEPT
 from archive.application.scheduler import ArchiveScheduler
 from archive.application.scheduler import Chains
 from archive.application.scheduler import RunRecord
@@ -41,6 +42,7 @@ from archive.application.scheduler import SchedulerConfig
 from archive.application.scheduler import SchedulerState
 from archive.application.scheduler import StepRecord
 from archive.application.scheduler import parse_run_now
+from archive.application.scheduler import state_from_json
 from archive.application.scheduler import state_to_json
 from archive.domain.schedule import Schedule
 from archive.infrastructure.maintenance_lock import maintenance
@@ -71,21 +73,38 @@ class _Clock:
 
 
 class _Runner:
-    """Records each step's argv; exits 1 for a step whose argv after the job name is in `fail`."""
+    """
+    Records each step's argv; exits 1 for a step whose argv after the job name is in `fail`. A
+    `verify_day` step writes its verdict file as `archive.verify_day` does and exits `verify_code`.
+    """
 
     def __init__(self, fail: frozenset[tuple[str, ...]] = frozenset()) -> None:
         self.fail = fail
+        self.verify_code = 0
         self.ran: list[tuple[str, ...]] = []
 
     def __call__(self, argv: list[str]) -> int:
         self.ran.append(tuple(argv))
+        if argv[0] == "nightly" and argv[3] == "verify_day":
+            verdict = {"venue": argv[1], "day": argv[2], **_verdict(argv[1])}
+            Path(argv[4]).write_text(json.dumps(verdict))
+            return self.verify_code
         return 1 if tuple(argv[1:]) in self.fail else 0
 
 
-def _chains(backup_enabled: bool = True) -> Chains:
+def _verdict(venue: str) -> dict[str, Any]:
+    return {"verification": "findings", "checked_at": "2026-09-26T03:30:00Z", "types": {venue: {}}}
+
+
+def _chains(backup_enabled: bool = True, verify: bool = False) -> Chains:
     def nightly(venue: str, day: str, result_file: str) -> list[Step]:
         assert result_file.endswith("rebuild_result.json")
-        return [Step(name, ["nightly", venue, day, name]) for name in _NIGHTLY_STEPS]
+        chain = [Step(name, ["nightly", venue, day, name]) for name in _NIGHTLY_STEPS]
+        if verify:
+            verdict_file = str(Path(result_file).with_name("verify_result.json"))
+            argv = ["nightly", venue, day, "verify_day", verdict_file]
+            chain.append(Step("verify_day", argv, verdict_file=verdict_file))
+        return chain
 
     return Chains(
         nightly=nightly,
@@ -156,6 +175,7 @@ class _Rig:
         cap: int = 7,
         lock_wait_minutes: int = 60,
         backup_enabled: bool = True,
+        verify: bool = False,
     ) -> None:
         error_ledger.reset()
         self.clock = _Clock(now)
@@ -173,7 +193,7 @@ class _Rig:
         )
         self.scheduler = ArchiveScheduler(
             config,
-            _chains(backup_enabled),
+            _chains(backup_enabled, verify),
             self.runner,
             self.lock,
             self.store,
@@ -238,8 +258,10 @@ def test_status_is_published_after_every_step_in_the_wire_shape() -> None:
         "last_run",
         "last_intraday",
         "backup",
+        "verification_days",
     ]
     assert final["backup"] == "enabled"
+    assert final["verification_days"] == {}  # these chains have no verify_day step
     assert final["running"] is None
     assert final["next_run"] == "2026-09-27T03:07:00Z"
     assert final["next_intraday"] == "2026-09-26T04:07:00Z"
@@ -629,7 +651,8 @@ def test_the_json_state_store_round_trips_and_refuses_a_corrupt_file(tmp_path: P
             StepRecord(None, "backup_catalog", 1, 2.0),
         ],
     )
-    state = SchedulerState(_day(-1), {"BYBIT": _day(-2)}, run, None)
+    verdicts = {"BYBIT": {"2026-09-25": {"verification": "no reference data", "reason": "r"}}}
+    state = SchedulerState(_day(-1), {"BYBIT": _day(-2)}, run, None, verdicts)
     store.save(state)
     assert store.load() == state
     assert not list(store.path.parent.glob("*.tmp"))
@@ -648,3 +671,69 @@ def test_the_lock_probe_sees_a_holder_and_never_keeps_the_lock(tmp_path: Path) -
         assert not maintenance_free(tmp_path)
     assert maintenance_free(tmp_path)
     assert maintenance_free(tmp_path / "absent")
+
+
+# --- verification_days (Story 31.11) -------------------------------------------------------------
+
+
+def test_each_venue_days_verdict_is_kept_persisted_and_published() -> None:
+    rig = _Rig(_at(_D, 3, 7), _state(_day(-2), _day(-2)), verify=True)
+    rig.runner.verify_code = 2  # findings
+    rig.tick()
+    expected = {venue: {"2026-09-25": _verdict(venue)} for venue in _VENUES}
+    assert rig.scheduler.state.verification_days == expected
+    assert rig.store.saved[-1]["verification_days"] == expected
+    assert rig.bus.messages[-1]["verification_days"] == expected
+
+
+def test_verify_day_findings_never_hold_a_watermark() -> None:
+    rig = _Rig(_at(_D, 3, 7), _state(_day(-2), _day(-2)), verify=True)
+    rig.runner.verify_code = 2
+    rig.tick()
+    assert rig.scheduler.state.last_success_day == {venue: _day(-1) for venue in _VENUES}
+    last = rig.bus.messages[-1]["last_run"]["steps"]
+    assert [s["exit"] for s in last if s["name"] == "verify_day"] == [2, 2, 2]
+
+
+def test_only_the_newest_days_are_kept_per_venue() -> None:
+    rig = _Rig(_at(_D, 14, 0), _state(_day(-16), _day(-16)), cap=20, verify=True)
+    rig.tick()  # 15 missed days, oldest first
+    kept = rig.scheduler.state.verification_days
+    assert set(kept) == set(_VENUES)
+    for days in kept.values():
+        assert len(days) == VERIFICATION_DAYS_KEPT == 14
+        assert min(days) == _day(-14).isoformat()  # the 15th, oldest day was dropped
+        assert max(days) == _day(-1).isoformat()
+
+
+def test_a_rerun_day_replaces_its_verdict() -> None:
+    rig = _Rig(_at(_D, 14, 0), _state(_day(-1), _day(-1)), verify=True)
+    days = {"BYBIT": {"2026-09-24": {"verification": "result unreadable"}}}
+    rig.scheduler.state.verification_days.update(days)
+    rig.scheduler.handle_control('{"command": "run_now", "day": "2026-09-24"}')
+    rig.tick()
+    assert rig.scheduler.state.verification_days["BYBIT"] == {"2026-09-24": _verdict("BYBIT")}
+
+
+def test_a_state_written_before_the_key_loads_without_verdicts(tmp_path: Path) -> None:
+    store = JsonStateStore(tmp_path)
+    old: dict[str, Any] = {"last_run_day": "2026-09-25", "venues": {}}
+    old.update(last_run=None, last_intraday=None)
+    store.path.write_text(json.dumps(old))
+    loaded = store.load()
+    assert loaded is not None
+    assert loaded.verification_days == {}
+
+
+@pytest.mark.parametrize(
+    "record",
+    [{"BYBIT": {"x": {}}}, {"BYBIT": {"2026-09-25": "verified"}}, {"BYBIT": []}, ["BYBIT"]],
+)
+def test_a_malformed_verdict_record_is_dropped_and_the_watermarks_kept(record: Any) -> None:
+    error_ledger.reset()
+    body: dict[str, Any] = {"last_run_day": "2026-09-25", "venues": {}}
+    body["verification_days"] = record
+    state = state_from_json(body)
+    assert state.last_run_day == dt.date(2026, 9, 25)
+    assert state.verification_days == {}
+    assert error_ledger.counts()["archive.state_unreadable"] == 1

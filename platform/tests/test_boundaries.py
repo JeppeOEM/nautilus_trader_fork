@@ -206,6 +206,9 @@ COMPOSITION_ROOTS: dict[str, frozenset[str]] = {
     # The OFI parity test (Story 31.9, AC3) runs research's `OFIStrategy` in a `BacktestNode` and
     # its `ofi_readings` replay, both compared with the reference.
     "verification.tests.test_ofi_parity": frozenset({RESEARCH}),
+    # The nightly saga's `verify_day` step (Story 31.11) reduces the verifiers' reports with the
+    # pure `verification.domain.verdict`; the tools themselves run as child processes (MEM-01).
+    "archive.verify_day": frozenset({VERIFICATION}),
 }
 
 
@@ -2026,9 +2029,10 @@ _PYO3 = "nautilus_pyo3"
 VERIFICATION_ALLOWED_MODULES = frozenset(
     {"kernel", "kernel.venue_http", "kernel.venues", "observability", "observability.error_ledger"}
 )
-# The modules of other contexts allowed to import `verification`: none yet. Story 31.11 reserves
-# the one exception, `archive`'s nightly composition root (its `verify_day` step).
-VERIFICATION_IMPORTERS: frozenset[str] = frozenset()
+# The modules of other contexts allowed to import `verification`: the one exception, `archive`'s
+# `verify_day` composition root (Story 31.11), the nightly saga's last step. It imports only the
+# pure `verification.domain.verdict` and reaches every tool through its command line.
+VERIFICATION_IMPORTERS: frozenset[str] = frozenset({"archive.verify_day"})
 # `verification.infrastructure` (the raw store and the aiohttp adapters) is wired only here.
 VERIFICATION_ROOTS = frozenset(
     {

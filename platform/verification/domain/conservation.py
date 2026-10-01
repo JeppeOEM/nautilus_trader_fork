@@ -711,21 +711,28 @@ def tally_seconds(
 
 @dataclass(frozen=True)
 class InstrumentReport:
-    """One instrument's day: it passes only with nothing unexplained, twice or doubled."""
+    """
+    One instrument's day: it passes only with nothing unexplained, twice or doubled -- `failing`,
+    the sum of those five counts, is 0.
+    """
 
     instrument_id: str
     trades: TradeCounts
     seconds: SecondCounts
 
     @property
-    def passed(self) -> bool:
-        return not (
+    def failing(self) -> int:
+        return (
             self.trades.unexplained
-            or self.trades.archived_twice
-            or self.seconds.unexplained
-            or self.seconds.duplicate_rows
-            or self.seconds.row_and_reason
+            + self.trades.archived_twice
+            + self.seconds.unexplained
+            + self.seconds.duplicate_rows
+            + self.seconds.row_and_reason
         )
+
+    @property
+    def passed(self) -> bool:
+        return self.failing == 0
 
 
 @dataclass(frozen=True)

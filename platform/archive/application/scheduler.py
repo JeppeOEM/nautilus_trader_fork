@@ -45,9 +45,14 @@ State (`StateStore`, `state.json`) is a scheduler cursor, never a data verdict (
   failure never becomes a tight retry loop;
 - per venue, `last_success_day` is the last day of an unbroken run of no-FAILED sagas, so the next
   night's run retries a failed day;
-- `last_run` and `last_intraday` are republished on start.
+- `last_run` and `last_intraday` are republished on start;
+- `verification_days` (Story 31.11) keeps, per venue, the newest `VERIFICATION_DAYS_KEPT` day
+  verdicts of the saga's `verify_day` step, as `archive:status` publishes them: an informational
+  verdict record of the independent verifiers, never a gate -- no watermark, retry or prune
+  decision reads it.
 
-Reconcile and prune never read it. `verified_days` stays the only day status.
+Reconcile and prune never read it. `verified_days` stays the only gating day status (AD-D9 as
+amended by Story 31.11).
 
 Known limits:
 - The lock wait is a probe, not a held lock: a manual `make nightly` can take the lock between the
@@ -110,6 +115,9 @@ LOCK_TIMEOUT_EXIT = 124
 # A job that raised (not a step that failed: e.g. /tmp full for the saga's scratch directory) is
 # recorded as one failed step with this exit code.
 JOB_ERROR_EXIT = 1
+# How many day verdicts `verification_days` keeps per venue (the newest by day): two weeks of
+# nightly runs, small enough to publish with every status.
+VERIFICATION_DAYS_KEPT = 14
 # A bound on queued `run_now` days: each is a full run of every venue, so a flood of distinct days
 # would keep the box busy for days. Past it a request is rejected (ledgered).
 MAX_QUEUED_RUNS = 8
@@ -142,7 +150,7 @@ class JobRunner(Protocol):
     exits (MEM-01).
     """
 
-    def __call__(self, argv: list[str]) -> int: ...
+    def __call__(self, argv: list[str], /) -> int: ...
 
 
 class LockProbe(Protocol):
@@ -303,14 +311,17 @@ def run_from_json(body: Any) -> RunRecord:
 @dataclass
 class SchedulerState:
     """
-    The scheduler cursor (`state.json`). Invariant: never a data verdict -- nothing outside this
-    service reads it; `verified_days` is the only day status (AD-D9).
+    The scheduler cursor (`state.json`). Invariant: never a gating data verdict -- nothing outside
+    this service reads it; `verified_days` is the only day status that gates anything (AD-D9).
+    `verification_days` (venue -> day `YYYY-MM-DD` -> the `verify_day` step's verdict, Story 31.11)
+    is an informational record, published on `archive:status`, which no scheduling decision reads.
     """
 
     last_run_day: dt.date | None = None
     last_success_day: dict[str, dt.date] = field(default_factory=dict)
     last_run: RunRecord | None = None
     last_intraday: RunRecord | None = None
+    verification_days: dict[str, dict[str, dict[str, Any]]] = field(default_factory=dict)
 
 
 def state_to_json(state: SchedulerState) -> dict[str, Any]:
@@ -322,7 +333,41 @@ def state_to_json(state: SchedulerState) -> dict[str, Any]:
         },
         "last_run": state.last_run.to_json() if state.last_run else None,
         "last_intraday": state.last_intraday.to_json() if state.last_intraday else None,
+        "verification_days": _verification_days_json(state.verification_days),
     }
+
+
+def _verification_days_json(
+    days: Mapping[str, Mapping[str, dict[str, Any]]],
+) -> dict[str, dict[str, dict[str, Any]]]:
+    """Every venue's verdicts, venues and days in order (the persisted and published form)."""
+    return {venue: dict(sorted(days[venue].items())) for venue in sorted(days)}
+
+
+def _parsed_verification_days(body: Any) -> dict[str, dict[str, dict[str, Any]]]:
+    parsed: dict[str, dict[str, dict[str, Any]]] = {}
+    for venue, days in body.items():
+        parsed[str(venue)] = {}
+        for day, verdict in days.items():
+            if not isinstance(verdict, dict):
+                raise ValueError(f"not a day verdict: {verdict!r}")
+            parsed[str(venue)][dt.date.fromisoformat(day).isoformat()] = verdict
+    return parsed
+
+
+def _verification_days_from_json(body: Any) -> dict[str, dict[str, dict[str, Any]]]:
+    """
+    Parse persisted verdicts (a state written before Story 31.11 has none: empty). A malformed
+    record is dropped and ledgered, never a reason to reject the state: it is informational, and
+    rejecting it would lose the watermarks that do gate runs.
+    """
+    if body is None:
+        return {}
+    try:
+        return _parsed_verification_days(body)
+    except (AttributeError, TypeError, ValueError) as exc:
+        error_ledger.record("archive.state_unreadable", f"verification_days dropped: {exc!r}", exc)
+        return {}
 
 
 def state_from_json(body: Any) -> SchedulerState:
@@ -339,6 +384,7 @@ def state_from_json(body: Any) -> SchedulerState:
             last_intraday=(
                 run_from_json(body["last_intraday"]) if body.get("last_intraday") else None
             ),
+            verification_days=_verification_days_from_json(body.get("verification_days")),
         )
     except (KeyError, TypeError, ValueError, AttributeError) as e:
         raise ValueError(f"not a scheduler state: {e!r}") from e
@@ -632,7 +678,7 @@ class ArchiveScheduler:
         loop = asyncio.get_running_loop()
 
         def on_step(result: StepResult) -> None:
-            loop.call_soon_threadsafe(self._step_done, run, venue, result)
+            loop.call_soon_threadsafe(self._step_done, run, venue, result, day)
 
         saga_id = run_id or uuid.uuid4().hex
         try:
@@ -705,9 +751,20 @@ class ArchiveScheduler:
         failed = [s.name for s in run.steps if s.exit not in (0, 2)]
         logger.info("archive %s run %s finished; failed steps: %s", run.kind, run.run_id, failed)
 
-    def _step_done(self, run: RunRecord, venue: str | None, result: StepResult) -> None:
+    def _step_done(
+        self, run: RunRecord, venue: str | None, result: StepResult, day: dt.date | None = None
+    ) -> None:
         run.steps.append(StepRecord(venue, result.name, result.code, round(result.seconds, 3)))
+        if result.verification is not None and venue is not None and day is not None:
+            self._keep_verification(venue, day, result.verification)
         self._notify()
+
+    def _keep_verification(self, venue: str, day: dt.date, verdict: dict[str, Any]) -> None:
+        """Record a day's verdict (a re-run replaces it); keep the newest days only."""
+        days = self._state.verification_days.setdefault(venue, {})
+        days[day.isoformat()] = verdict
+        for oldest in sorted(days)[:-VERIFICATION_DAYS_KEPT]:
+            del days[oldest]
 
     def _commit(self) -> None:
         """Persist the cursor (a failed write is ledgered; the next run retries) and publish."""
@@ -785,6 +842,8 @@ class ArchiveScheduler:
             "last_run": last_run.to_json() if last_run else None,
             "last_intraday": last_intraday.to_json() if last_intraday else None,
             "backup": "enabled" if self._config.backup_enabled else "disabled",
+            # Last, so the earlier keys keep their published order (Story 31.11).
+            "verification_days": _verification_days_json(self._state.verification_days),
         }
 
     def _notify(self) -> None:

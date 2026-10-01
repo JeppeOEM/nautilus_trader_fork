@@ -24,6 +24,7 @@ from pathlib import Path
 import pytest
 from observability import error_ledger
 
+from archive.application.nightly import Step
 from archive.application.nightly import StepResult
 from archive.application.nightly import run_steps
 from archive.nightly import main
@@ -61,10 +62,15 @@ def _option(argv: list[str], flag: str) -> str | None:
     return argv[argv.index(flag) + 1] if flag in argv else None
 
 
+_VERDICT = {"verification": "no reference data", "reason": "VERIFY_DATA_DIR is not set"}
+
+
 class _FakeRunner:
     """
     Exit codes by step name; records each step's argv. The rebuild step writes its result file as
-    `archive.rebuild_seconds` does (refusing `refused`), unless `result` overrides its content.
+    `archive.rebuild_seconds` does (refusing `refused`), unless `result` overrides its content;
+    the verify_day step writes its verdict as `archive.verify_day` does, unless `verdict`
+    overrides its content.
     """
 
     def __init__(
@@ -72,10 +78,12 @@ class _FakeRunner:
         codes: dict[str, int] | None = None,
         refused: tuple[str, ...] = (),
         result: str | None = None,
+        verdict: str | None = None,
     ) -> None:
         self.codes = codes or {}
         self.refused = list(refused)
         self.result = result
+        self.verdict = verdict
         self.argv: dict[str, list[str]] = {}
 
     @property
@@ -86,8 +94,11 @@ class _FakeRunner:
         name = _MODULE_TO_STEP[argv[2]]
         self.argv[name] = argv
         result_file = _option(argv, "--result-file")
-        if result_file is not None and self.result != "missing":
-            venue, day = _option(argv, "--venue"), _option(argv, "--day")
+        venue, day = _option(argv, "--venue"), _option(argv, "--day")
+        if name == "verify_day" and result_file is not None and self.verdict != "missing":
+            verdict = {"venue": venue, "day": day, **_VERDICT}
+            Path(result_file).write_text(self.verdict or json.dumps(verdict))
+        elif result_file is not None and self.result != "missing":
             body = {"venue": venue, "day": day, "rebuilt": ["A"], "refused": self.refused}
             Path(result_file).write_text(self.result or json.dumps(body))
         return self.codes.get(name, 0)
@@ -99,6 +110,7 @@ _ORDER = [
     "build_candles",
     "compare_klines",
     "prune_catalog",
+    "verify_day",
 ]
 
 
@@ -114,6 +126,7 @@ def test_steps_are_the_documented_chain_as_subprocess_modules() -> None:
         "candles.rebuild",
         "archive.compare_klines",
         "archive.prune_catalog",
+        "archive.verify_day",
     ]
     assert chain[0].argv[3:] == [
         "--catalog",
@@ -139,6 +152,21 @@ def test_steps_are_the_documented_chain_as_subprocess_modules() -> None:
         "--venue",
         "BYBIT",
     ]
+    # Last, after the prune it must never gate, its verdict beside the rebuild's result.
+    assert chain[5].argv[3:] == [
+        "--catalog",
+        "/c",
+        "--candles-dir",
+        "/cd",
+        "--venue",
+        "BYBIT",
+        "--day",
+        "2026-09-20",
+        "--result-file",
+        "/scratch/verify_result.json",
+    ]
+    assert chain[5].verdict_file == "/scratch/verify_result.json"
+    assert [s.name for s in chain if s.verdict_file] == ["verify_day"]
 
 
 def test_all_steps_run_in_order_and_exit_zero(tmp_path: Path) -> None:
@@ -260,6 +288,51 @@ def test_compare_error_stops_before_prune(tmp_path: Path) -> None:
     assert runner.ran == _ORDER[:4]
 
 
+def _chain(tmp_path: Path) -> list[Step]:
+    return steps("/c", "/cd", "BYBIT", "2026-09-20", str(tmp_path / "rebuild_result.json"))
+
+
+def test_the_verify_days_verdict_reaches_its_step_result(tmp_path: Path) -> None:
+    error_ledger.reset()
+    results = run_steps(_chain(tmp_path), _FakeRunner(), "run", "BYBIT", "2026-09-20")
+    assert [r.verification for r in results] == [None] * 5 + [_VERDICT]
+    assert error_ledger.counts() == {}
+
+
+@pytest.mark.parametrize(
+    "verdict",
+    [
+        "missing",
+        "{not json",
+        "[]",
+        '{"venue": "BYBIT", "day": "2026-09-20"}',  # no verdict
+        '{"venue": "DYDX", "day": "2026-09-20", "verification": "verified"}',
+    ],
+)
+def test_an_unreadable_verdict_is_ledgered_and_changes_no_exit_code(
+    tmp_path: Path, verdict: str
+) -> None:
+    error_ledger.reset()
+    results = run_steps(_chain(tmp_path), _FakeRunner(verdict=verdict), "r", "BYBIT", "2026-09-20")
+    assert (results[-1].name, results[-1].code) == ("verify_day", 0)
+    assert results[-1].verification == {"verification": "result unreadable"}
+    assert error_ledger.counts() == {"nightly.verify_day": 1}
+
+
+def test_verify_day_findings_end_the_saga_as_findings_after_everything_ran(tmp_path: Path) -> None:
+    error_ledger.reset()
+    runner = _FakeRunner({"verify_day": 2})
+    assert main(_args(tmp_path), runner) == 2
+    assert runner.ran == _ORDER
+    assert error_ledger.counts() == {"nightly.verify_day": 1}
+
+
+def test_a_failed_step_stops_the_saga_before_verify_day(tmp_path: Path) -> None:
+    runner = _FakeRunner({"prune_catalog": 1})
+    assert main(_args(tmp_path), runner) == 1
+    assert "verify_day" not in runner.ran
+
+
 def test_the_rebuilt_list_reaches_the_reconcile_as_rebuilt(tmp_path: Path) -> None:
     runner = _FakeRunner()  # its result file names "A" rebuilt
     assert main(_args(tmp_path), runner) == 0
@@ -295,4 +368,4 @@ def test_on_step_is_called_once_per_step_in_order(tmp_path: Path) -> None:
     seen: list[str] = []
     chain = steps("/c", "/cd", "BYBIT", "2026-09-20", str(tmp_path / "r.json"))
     run_steps(chain, runner, "run", "BYBIT", "2026-09-20", lambda r: seen.append(r.outcome()))
-    assert seen == ["ok", "ok", "ok", "findings", "ok"]
+    assert seen == ["ok", "ok", "ok", "findings", "ok", "ok"]

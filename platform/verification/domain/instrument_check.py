@@ -225,6 +225,11 @@ class DefinitionReport:
         return self.polls.get(AGREE, 0) + self.polls.get(DIFFERS, 0)
 
     @property
+    def failing(self) -> int:
+        """The `differs` polls, plus 1 when no definition is stored (nothing verified is not one)."""
+        return self.polls.get(DIFFERS, 0) + int(self.no_definition)
+
+    @property
     def passed(self) -> bool:
         return not self.no_definition and not self.polls.get(DIFFERS, 0) and self.verified > 0
 

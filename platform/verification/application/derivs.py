@@ -649,6 +649,7 @@ def _type_json(report: TypeReport) -> dict[str, Any]:
     return {
         "kind": report.kind,
         "passed": report.passed,
+        "failing": report.failing,
         "reference": report.reference,
         "ratio": report.ratio,
         "ts_rule": report.ts_rule,
@@ -674,6 +675,7 @@ def _type_json(report: TypeReport) -> dict[str, Any]:
 def _definitions_json(report: DefinitionReport) -> dict[str, Any]:
     return {
         "passed": report.passed,
+        "failing": report.failing,
         "polls": dict(report.polls),
         "differs": list(report.differs),
         "venue_changes": list(report.venue_changes),
@@ -699,6 +701,7 @@ def report_json(report: DerivsDayReport) -> dict[str, Any]:
             {
                 "instrument_id": r.instrument_id,
                 "passed": r.passed,
+                "failing": r.failing,
                 "types": [_type_json(t) for t in r.types],
                 "definitions": _definitions_json(r.definitions),
             }

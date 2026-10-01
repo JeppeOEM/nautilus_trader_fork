@@ -655,7 +655,10 @@ channel names and shape, as for `ranking:control`/`collector:status`
   - `backup` — `"enabled"` or `"disabled"`: whether the scheduler's full runs end in the off-site
     backup (`backup_enabled` in `archive/config.toml`, committed `false`). `"disabled"` means the
     catalog has no copy off the host (audit D-33) and no run carries a `backup_catalog` step
-    `[amended 2026-09-26: Story 26.1b -- new key]`.
+    `[amended 2026-09-26: Story 26.1b -- new key]`;
+  - `verification_days` — `{venue: {day: verdict}}`, the nightly `verify_day` step's verdicts,
+    the newest 14 days per venue, last in the object (§1.24, §6); `{}` until the first verdict.
+    Informational: nothing gates on it `[amended 2026-10-01: Story 31.11 -- new key]`.
 
   `kind` is one of `nightly`, `catch_up`, `run_now`, `intraday`; `day` is the run's (first) UTC
   day and `days` every day it covers (a catch-up runs several, oldest first); `started`/`finished`
@@ -1942,7 +1945,7 @@ compared or names a row of the test's `ACCOUNTED` table, so a new field fails un
 | `volume24h_from_the_volume_poll` | volume source -> rankings:live, metrics.db | `volume24h` | the venue's 24 h USD volume poll |
 | `slow_fields_from_the_last_slow_loop` | metrics.db -> rankings:live | `pct_*`, `volatility` | copied from the last slow-loop row |
 | `in_flight_publish` (live only) | snapshots:raw -> rankings:live | stateless fields | a message published while the engine handles the previous batch reflects that batch: matched to the newest or the one before, counted apart |
-| `slow_loop_reads_its_clock_first` (live only) | board -> metrics.db | `ofi`/`microprice`/`spread` | the deployed image stamps `ts` before its awaits (fixed in code, D-130, undeployed): matched at/before `ts` or within 2 s after |
+| `board_changed_before_its_publish` (live only) | board -> metrics.db | `ofi`/`microprice`/`spread`/`rank`/`volume24h` | the slow loop read the board after a change no message carried yet (a batch waiting on the publish lock; a volume refresh, which publishes nothing itself): matched to the first message after `ts`, after a volume refresh alone `volume24h`/`rank` from it and the book columns from the last at/before; counted apart (D-130) `[amended 2026-10-01: Story 31.11]` |
 
 Live variant (`VERIFY_STACK=1`, a module-level `skipif`, else skipped): subscribes to the verify
 Redis (`127.0.0.1:26379`) `snapshots:raw` and `rankings:live`; checks each `rankings:live` row's
@@ -2056,6 +2059,109 @@ CATALOG_PATH=data/catalog ERROR_LEDGER_DIR=data/errors python3 -m verification.c
 --venue V`, then, after the window settles, the same with `--evaluate --venue V [--json]`.
 
 Measured (2026-09-30, verify stack, `docs/VERIFICATION_REPORT.md`): every agent-run scenario passes on both venues (0 unexplained trades and seconds, each matching its row); `network_cut` is owed (sudo, DEPLOY_CHECKLIST 31-10); a failed flush's loss is explained but avoidable (D-137, OPEN). Evaluating 9 windows costs 291 s / 184 MB (Bybit, 4 instruments; about 30 s per window) and 4.8 s / 147 MB (Hyperliquid).
+
+### 1.24 The verification context as a whole, and the permanent nightly gate (Story 31.11)
+
+Not stored market data: what Epic 31's `verification/` context is, how its verdicts are
+classed, and where each piece is documented. `docs/VERIFICATION_REPORT.md` holds the verdicts.
+
+**The pieces.**
+
+| Piece | What it judges | Documented |
+|---|---|---|
+| Reference recorder (`python3 -m verification.recorder`, compose `reference_recorder_<venue>`) | nothing itself: every raw frame and REST response, verbatim, with its local receive time, from a client sharing no code with capture | §1.15 |
+| Coverage record (`<catalog>/../coverage/<venue>.jsonl`, written by capture) | why a second has no row, and why a trade is missing (dropped, unrecoverable) | §1.16 |
+| `verification.conservation` (`--day`, or `--start/--end`) | every reference trade id archived or explained; every second a row or a reason, never both | §1.16, §1.23 |
+| `verification.trades` | every archived trade's fields, and every second's trade fold | §1.17 |
+| `verification.book` | the stored top-20 book against a book rebuilt from the recorder's frames | §1.18 |
+| `verification.derivs` | mark, index, funding, open interest and instrument definitions | §1.19 |
+| `verification.catalog` | file structure, consolidation rehearsal, backtest-read parity, candle fold | §1.20 |
+| `verification.candles` | stored, served and reference candles on every width; kline pass rates | §1.21 |
+| `verification.bot_parity` | a dummy bot's live signal log against its catalog replay | §1.22 |
+| `verification.chaos` | injected production failures, each judged by windowed conservation | §1.23 |
+| `archive.verify_day` (the nightly step) | the six day tools above, reduced to one verdict per type | this section, §6 |
+
+**Verdict classes.** A verdict states its window, its numbers, the code revision and a repro.
+- `VERIFIED`: 0 unexplained in the window. Explained losses are allowed and are named.
+- `DEVIATION`: a residue with a known mechanism, registered in `docs/DATA_INTEGRITY_AUDIT.md`.
+- `OPEN`: a residue or decision still unexplained, also registered there.
+
+A partial day is never VERIFIED without its window. Each tool exits 0 only when every failing
+count is 0. So a day with missing raw hours, or with seconds before capture's first row, fails by
+design and is classified rather than excused (D-76, D-128).
+
+**The step (`archive.verify_day`).** The last step of the nightly saga, after `prune_catalog`
+(§6):
+
+```
+python -m archive.verify_day --catalog C --candles-dir X --venue V --day D --result-file F [--reports-dir DIR]
+```
+
+- **Environment:** `VERIFY_DATA_DIR`, the recorders' root; `VERIFY_DATA_API_URL`, optional, the
+  data_api whose served bars the candles tool checks; and what each tool reads itself (the venue
+  configs, the ledger), inherited by every child.
+- **Gate:** no reference data when any of these holds:
+  - the venue is not BYBIT or HYPERLIQUID;
+  - `VERIFY_DATA_DIR` is unset;
+  - no `<root>/raw/<venue>/*/<D>T*.jsonl.zst` exists.
+
+  The step then writes `{"venue", "day", "verification": "no reference data", "reason"}`, logs
+  one INFO line, ledgers nothing and exits 0. This is the production stack's case.
+- **Otherwise the tools run in order:** `conservation`, `trades` (`--stage rebuilt`), `book`,
+  `derivs`, `catalog` (`--candles X --scratch-dir <root>/scratch/verify_day`) and `candles`
+  (`--candles X` with `--data-api URL`, or `--no-served`: a provisional run the reduction never
+  passes).
+  - Each tool runs as its own child (MEM-01: up to ~1.6 GB peak each), bounded by
+    `TOOL_TIMEOUT_S` = 50 min.
+  - Each child's `--json` report is reduced by the pure `verification.domain.verdict.summarise`.
+- **What a reduction yields:**
+  - `pass` only on exit 0 with `passed: true`, at least one instrument judged, none failing, and
+    a top-level `failing` of 0 where the report has one (catalog, candles). Candles also need the
+    served bars `checked`. A report judging no instrument (an empty plan, a wrong mount) checked
+    nothing and is `fail`.
+  - Any other report is `fail`.
+  - No parseable report, a malformed one, or a child killed at the timeout is `refused`.
+  - Every count is read from the report, never re-derived (SSOT-01). Each tool's `report_json`
+    carries a per-instrument `failing` taken from its own domain.
+- **The day verdict** is `verified` only when all six types pass, else `findings`. The result is
+  `{"venue", "day", "verification", "checked_at", "types": {tool: {"verdict", "failing", "inputs_missing", "reason", "instruments": {iid: {"passed", "failing"}}}}}`.
+- **Ledgering:** each non-passed type is one `archive.verify_day` entry naming the tool, the
+  verdict, the failing count, the failing instruments and the missing raw files. The step's own
+  file is `archive.verify_day_<venue>.jsonl`.
+- **Exit codes:** 0 when verified or no reference data, 2 otherwise, never 1. A crash in the step
+  is ledgered at the same site and gives `"verification": "error"`, exit 2.
+- **`--reports-dir`** (a by-hand run) also keeps each tool's full report there as `<tool>.json`.
+- **Boundaries:** the step imports only `verification.domain.verdict`. It is
+  `tests/test_boundaries.py`'s one `VERIFICATION_IMPORTERS` entry and an `archive` composition
+  root.
+
+`Known limit:` the step runs after consolidation, so the catalog tool's rehearsal reports
+`not_exercised` for D (D-116, not failing). Upgrade path: a catalog step of its own before
+`consolidate_catalog`.
+
+**`verification_days`.** The scheduler keeps each step result's verdict per venue and day:
+- in `state.json`, the newest 14 days per venue;
+- published as `archive:status` `verification_days` (§1.13).
+
+It is an informational record of the independent verifiers. No watermark, retry or prune decision
+reads it, and `verified_days` stays the only gating day status (AD-D9 amended).
+
+**The verify stack wiring** (`docker-compose.verify.yml`, the `archive` service only; the base
+file is unchanged, so production gets `no reference data`):
+- `VERIFY_DATA_DIR=/app/verify_data` and `VERIFY_DATA_API_URL=http://127.0.0.1:${DATA_API_PORT}`;
+- the two venue config directories, mounted read-only;
+- `./data/verification/raw` read-only, `./data/verification/scratch` read-write, and
+  `./data/coverage` read-only.
+
+`make verify-up` creates `verification/raw` and `verification/scratch`.
+
+**Measured** (dev box, 8 cores, the first nightly with the step, 2026-10-01 for 2026-09-30):
+- Bybit (4 instruments): 1,640.7 s, peak child RSS 1,534 MB.
+- Hyperliquid (SOL): 61.2 s.
+- dYdX: `no reference data` in 1.8 s.
+
+The collectors lost no second to the step's load.
+
 ---
 
 ## 2. Computed signals / ML features (`platform/kernel/`, `platform/views/`, `platform/ranking/`)
@@ -2909,7 +3015,10 @@ at the first failure:
    (`rebuild.open_day`, exit 1).
 2. `consolidate_catalog --apply --venue --days 2` -- one file per recent closed day and data type.
 3. `python -m candles.rebuild --day --venue --workers 1` -- refolds the day into
-   `candles_<venue>.db` (the nightly step is still named `build_candles`).
+   `candles_<venue>.db` (the nightly step is still named `build_candles`). Only the days of the
+   range are rebuilt: a snapshot file crossing the day's midnight feeds the day, never a rebuild of
+   the day before from that one file, which used to empty D-1's bars (audit D-145)
+   `[amended 2026-10-01: Story 31.11]`.
 4. `compare_klines --rebuilt-by <run id> --rebuilt <iid> ... [--not-rebuilt <iid> ...]` -- every
    traded minute
    against the venue's own 1 m klines (`archive.infrastructure.klines_<venue>`), exact integer
@@ -2925,6 +3034,16 @@ at the first failure:
    (the chain continues), 1 = run-level failure (stops). `--kline-source catalog` never writes
    `verified_days`.
 5. `prune_catalog --apply [--dydx-plan]` -- the retention rules above (§5).
+6. `archive.verify_day --result-file <saga temp>/verify_result.json` -- the permanent
+   verification gate (Story 31.11, §1.24): the six independent verifiers over the closed day,
+   each its own child process, reduced to one verdict per data type. It is last, so it can never
+   gate pruning or a later step. It exits 0 (`verified`, or `no reference data` on a stack
+   without recorders -- production) or 2 (`findings`), never 1, so it can never fail the saga or
+   hold a watermark. The saga reads the result file into the step's result for the scheduler's
+   `verification_days`; an unusable file is `{"verification": "result unreadable"}` plus a
+   `nightly.verify_day` ledger entry, the step's exit unchanged. `Known limit:` an earlier FAILED
+   step stops the saga before it, so that venue-day gets no verdict until the retry (its absence
+   from `verification_days` shows it).
 
 One summary line per venue (per-step outcome and seconds, peak child RSS, the run id). The
 first-run measurements still owed are in `docs/DEPLOY_CHECKLIST.md`.
@@ -2966,10 +3085,16 @@ through `CatalogFiles.write_json_atomic`:
   failure is retried the next night, never in a tight loop);
 - per venue, `last_success_day` — the last day of an unbroken run of days with no FAILED saga
   (drives which days the next run covers: a failed day is run again, up to `catch_up_max_days`);
-- `last_run` / `last_intraday` — the last finished runs, republished on start.
+- `last_run` / `last_intraday` — the last finished runs, republished on start;
+- `verification_days` (Story 31.11) — per venue, day `YYYY-MM-DD` -> the `verify_day` step's
+  verdict (`verification`, `checked_at`, `types`), the newest `VERIFICATION_DAYS_KEPT` = 14 days
+  per venue (a re-run day replaces its verdict), published as `archive:status`
+  `verification_days` (§1.13, §1.24). A state written before the key loads with none.
 
-It is a scheduling cursor, **not a data verdict**: reconcile and prune never read it, and
-`verified_days` stays the only per-day status. An unreadable or corrupt file is ledgered
+It is a scheduling cursor, **not a gating data verdict**: reconcile and prune never read it, and
+`verified_days` stays the only per-day status that gates anything (AD-D9 as amended by Story
+31.11). `verification_days` is an informational record of the independent verifiers: no
+watermark, retry or prune decision reads it. An unreadable or corrupt file is ledgered
 `archive.state_unreadable` and treated as no state: every slot already past counts as handled,
 so the first run is the next slot and targets that slot's yesterday only
 `[amended 2026-09-26: Story 25.1b -- the scheduler replaces the host cron line]`.

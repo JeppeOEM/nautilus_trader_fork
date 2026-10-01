@@ -35,6 +35,7 @@ from archive import consolidate_catalog
 from archive import nightly
 from archive import prune_catalog
 from archive import rebuild_seconds
+from archive import verify_day
 from archive.application import catalog_check
 
 
@@ -118,3 +119,24 @@ def test_each_venues_run_of_a_step_keeps_its_own_ledger(tmp_path: Path, errors_d
         ledger = errors_dir / f"archive.compare_klines_{venue}.jsonl"
         assert _sites(ledger) == ["process_start", "archive.catalog_missing"]
     assert not (errors_dir / "archive.compare_klines.jsonl").exists()
+
+
+def test_verify_day_opens_its_own_durable_ledger_per_venue(
+    tmp_path: Path, errors_dir: Path
+) -> None:
+    # It never exits 1, so it has no missing-catalog refusal: a tool that answers nothing is its
+    # cheapest ledgered path (one `archive.verify_day` entry per refused type).
+    root = tmp_path / "verify_data"
+    (root / "raw" / "bybit" / "publicTrade").mkdir(parents=True)
+    (root / "raw" / "bybit" / "publicTrade" / f"{_CLOSED_DAY}T00.jsonl.zst").write_bytes(b"")
+    argv = ["--catalog", _missing(tmp_path), "--candles-dir", "c", "--venue", "BYBIT"]
+    argv += ["--day", _CLOSED_DAY, "--result-file", str(tmp_path / "verify_result.json")]
+
+    code = verify_day.main(
+        argv, lambda argv, timeout_s: (1, ""), environ={"VERIFY_DATA_DIR": str(root)}
+    )
+
+    assert code == 2
+    sites = _sites(errors_dir / "archive.verify_day_bybit.jsonl")
+    assert sites == ["process_start", *["archive.verify_day"] * len(verify_day.TOOLS)]
+    assert not (errors_dir / "archive.jsonl").exists()

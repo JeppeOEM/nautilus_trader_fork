@@ -95,7 +95,11 @@ def data_file_ranges(catalog_path: str, instrument_id: str) -> list[tuple[int, i
 def files_by_day(catalog_path: str, iid: str, start_ns: int, end_ns: int) -> dict[int, list[str]]:
     """
     UTC day index -> that day's snapshot files, from one directory listing. A file whose span
-    crosses midnight is listed under both days; the rebuild filters rows by timestamp.
+    crosses midnight is listed under both days; the rebuild filters rows by timestamp. A day's list
+    is whole only when [start_ns, end_ns] covers that whole day: a day outside it can appear here
+    through a file crossing the range's first or last midnight, with that one file only, and a day
+    the range covers in part lists only its files overlapping the range. A caller must never
+    rebuild or judge a day from a partial list (audit D-145): it lists over whole days.
     """
     days: dict[int, list[str]] = {}
     for path in snapshot_files(catalog_path, iid):

@@ -303,6 +303,7 @@ def test_a_clean_day_passes_with_every_second_exact_and_rest_agreeing(
 ) -> None:
     status, instrument = _day(tmp_path, monkeypatch, capsys, _Scenario())
     assert (status, instrument["passed"], instrument["reference"]) == (0, True, VALIDATED)
+    assert instrument["failing"] == 0
     assert _nonzero(instrument["seconds"]) == {"exact": 8}
     assert _nonzero(instrument["rest"]) == {AGREE_KEY: 1}
     assert _nonzero(instrument["replay"]) == {"messages": 12, "baselines": 1}
@@ -341,6 +342,7 @@ def test_a_planted_book_defect_is_content_differs_and_fails(
     assert status == 1
     assert _nonzero(instrument["seconds"]) == {"exact": 7, "content_differs": 1}
     assert instrument["examples"] == [[_S, "content_differs", details]]
+    assert (instrument["passed"], instrument["failing"]) == (False, 1)  # Story 31.11's count
 
 
 def _late(recv_lag_ms: int) -> tuple[_Msg, ...]:

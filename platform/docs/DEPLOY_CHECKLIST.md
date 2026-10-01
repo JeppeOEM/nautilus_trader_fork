@@ -1065,7 +1065,7 @@ config key, schema or mount of the production stack changed.
 - [ ] On the VPS, `git pull`, then from `platform/` rebuild and recreate `ranking_engine` and
       `data_api` (`docker compose up -d --build ranking_engine data_api`). Check `GET /api/errors`
       shows no new `ranking_engine.*` or `views.*` site after the first minute.
-- [ ] Verify stack (dev box), before Story 31.11's runs: rebuild and recreate only the verify
+- [x] Verify stack (dev box), before Story 31.11's runs: rebuild and recreate only the verify
       `ranking_engine` and `data_api` (`REDIS_PORT=26379 DATA_API_PORT=29100 DOZZLE_PORT=28080
       docker compose -p verify -f docker-compose.yml -f docker-compose.verify.yml up -d --build
       --no-deps ranking_engine data_api`; never the collectors or recorders). Their images date from
@@ -1074,6 +1074,11 @@ config key, schema or mount of the production stack changed.
       `VERIFY_STACK=1 CATALOG_PATH=data/catalog python3 -m pytest -o addopts="" --rootdir=.
       verification/tests/test_ssot_trace.py` and, if it passes with no pre-D-130 row, delete the
       accounted row (it is kept only while the old image runs).
+      **Done by Story 31.11** (rebuilt 2026-09-30 19:04Z, not logged, and again 2026-10-01
+      15:47:50Z, a `deploy` line in `data/verification/chaos/scenarios.jsonl`; neither touched a
+      collector or recorder): the row is deleted, the live
+      variant passes, and the publish-timing residue it surfaced is the accounted
+      `board_changed_before_its_publish` (audit D-130).
 - [ ] **Decide: Bybit bot quotes and spot book (audit D-133, D-134, OPEN, FORK-01).** With the
       depth-50 book and quotes subscribed together (`DummyStrategy` does), the pinned Nautilus Bybit
       data client builds every quote from each book message's first entries, not the best level
@@ -1156,3 +1161,91 @@ collectors' and the archive's status buses publish after a Redis restart (one re
 - [ ] Story 31.11: exclude every window in `data/verification/chaos/scenarios.jsonl` from the clean
       soak (2026-09-30 09:50:48-11:05:25Z, 16:29:07-16:50:02Z and 17:06:48-17:07:48Z, each plus its 90 s / 180 s
       margins), and the verify stack's own stop 11:23-16:00Z (not a scenario: the run was stopped).
+
+### 31-11 The verification run, the report and the permanent nightly gate (commit: this story's -- `git log --grep 31-11-verification-run`)
+
+What this story changes:
+- **The nightly saga gains a last step, `archive.verify_day`** (`docs/DATA_DICTIONARY.md` §1.24,
+  §6). It is in the `archive` image.
+- **The archive scheduler persists and publishes `verification_days`** (`state.json`,
+  `archive:status`). An old `state.json` loads with none.
+- **Production impact: none.** The production compose file is unchanged, so on the VPS the step
+  finds no `VERIFY_DATA_DIR` and records `no reference data`, exit 0, for every venue. It runs no
+  verifier, ledgers nothing, and touches no pruning or watermark.
+- **Verify stack:** only `docker-compose.verify.yml` gives the `archive` service the recorders'
+  data, the coverage record, the venue configs and the loopback data_api. `make verify-up` creates
+  `verification/raw` and `verification/scratch`.
+
+- [ ] **VPS rollout of Epic 31's capture, archive and display fixes.** On the VPS, `git pull`, then
+      from `platform/`:
+      `docker compose up -d --build bybit_collector hyperliquid_collector archive ranking_engine data_api`.
+      This one rebuild covers 31-2 (coverage record, stale filter, dedup seed: do 31-2's
+      `mkdir`/`chown` of `data/coverage` first), 31-3 (`ranking_engine`/`data_api`), 31-5 (D-96
+      zero-level snapshot re-baseline, D-97 the REST cross-check's missing-level direction:
+      collectors), 31-8 (D-118 1W, D-119 the served `partial` flag, D-120 the nightly steps'
+      durable ledgers, D-123: `archive`/`data_api`), 31-9 (D-130, D-131) and 31-10 (D-61 restart
+      backfill, D-136 status retry). Run each of those entries' checks after the first minute. The
+      next nightly's summary line ends `verify_day ok`, and `archive:status` shows
+      `"verification_days": {"DYDX": {...: {"verification": "no reference data", ...}}, ...}`.
+- [ ] **Rebuild each venue's candle store on the VPS after that rollout (audit D-145).** Until the
+      new `archive` image runs, every nightly `build_candles --day D` rebuilt D-1 from the one
+      snapshot file crossing D's midnight, so a closed day older than the newest one can hold only
+      its last minute of bars. After the rollout above, from `platform/`, for each of `bybit` and
+      `hyperliquid` (and `dydx` if its collector ran):
+      `docker compose exec archive python3 -m candles.rebuild --catalog /app/catalog --db /app/candles_dir/candles_<venue>.db --venue <VENUE> --workers 1`
+      (the whole catalog span; today is skipped by the tool). Check: for an instrument, the 1d bar
+      of each closed day has `seconds_observed` near 86,400 (`sqlite3 data/candles/candles_<venue>.db
+      "select date(t/1000,'unixepoch'), seconds_observed from candles where bar_seconds=86400"`).
+- [ ] **Decide where the reference recorders run (audit D-138).** Measured on the dev box:
+      - **Recorders:** Bybit 71-83 MiB and 4-5.5 % of one core; Hyperliquid 53-62 MiB and
+        0.1-0.3 %.
+      - **Raw disk:** Bybit ~840 MB/day (70.2 MB over 2026-09-30 17:00-19:00Z), Hyperliquid
+        ~40 MB/day. At `VERIFY_RETAIN_DAYS` = 7 that is ~5.9 GB + 0.3 GB.
+      - **The nightly `verify_day`:** Bybit 1,640.7 s at a peak child RSS of 1,534 MB (on 8
+        cores), Hyperliquid 61 s.
+
+      nifelheim has 2 vCPU and 3.7 GB, is already oversubscribed, and has OOM-restarted its own
+      services. Options:
+      1. **Recommended: recorders on the desktop.** Keep the verify stack (recorders, collectors,
+         `verify_day`) on the desktop. It proves the code the VPS runs, on the same venues and
+         instruments, but not the VPS's own catalog. The production nightly stays `no reference
+         data`.
+      2. **Recorders on the VPS, `verify_day` on the desktop.** The recorders are cheap on the VPS
+         (~140 MiB, ~6 % of a core, ~6 GB disk). Each closed day's raw files, catalog day and
+         coverage are synced to the desktop, and `verify_day` runs there against the production
+         data. This needs a sync job no story has built yet.
+      3. **Both on the VPS.** Not recommended: a 1.5 GB child on a 3.7 GB host next to the
+         collectors risks exactly the OOM DATA-07 forbids.
+
+      Record the choice in D-138.
+- [ ] **Keep the verify host awake for a full clean day (audit D-138; needs sudo).** The dev box
+      suspended overnight three times in two days, so no full clean UTC day exists yet.
+      - Before the next soak day, run `sudo systemctl mask sleep.target suspend.target
+        hibernate.target hybrid-sleep.target` (undo with `unmask`), or disable automatic suspend
+        in the desktop's power settings.
+      - Leave the verify stack untouched for one whole UTC day: no chaos run, no redeploy, no
+        `make verify-down`.
+- [ ] **Read the first full clean day's verdict and close D-138.** After the nightly of the first
+      such day (2026-10-02 at the earliest: 2026-10-01 lost 06:08-15:35Z to a machine shutdown; the
+      scheduler runs at 03:07Z):
+      1. Run `python3 -c "import json; print(json.dumps(json.load(open('data/archive/state.json'))['verification_days'], indent=1))"`,
+         or `GET /api/archive/status`.
+      2. For each venue-day that is not `verified`, rerun
+         `docker exec verify-archive python3 -m archive.verify_day --catalog /app/catalog
+         --candles-dir /app/candles_dir --venue V --day D --result-file
+         /app/verify_data/scratch/verify_V_D.json --reports-dir
+         /app/verify_data/scratch/reports-D/V` to get each tool's full report.
+      3. Classify every failing count as `docs/VERIFICATION_REPORT.md` does.
+      4. Fill the report's "Full day" column and set D-138 to CLOSED with the day.
+      5. Expect `findings` while D-91, D-102/D-141, D-140, D-112, D-113, D-143 and D-144 are open,
+         even on a clean day: each fails its tool by design.
+- [ ] **The 31-9 decisions are still owed** (D-113, D-129, D-133/D-134, D-135). They are shown OPEN
+      in `docs/VERIFICATION_REPORT.md` with the recommended options of entry 31-9 above. No verdict
+      waits on them.
+- [ ] **Decide the new OPEN rows' follow-ups:**
+      - D-139: capture forces a reconnect of a silent feed. Recommended as a follow-up story: it
+        cost 6-16 min of seconds at the 2026-09-30 restart.
+      - D-140: store capture's Hyperliquid push `time`, then re-measure.
+      - D-141: a durable late-book-message count, then size `hold_back_seconds`.
+      - D-143 and D-144: verifier follow-ups. Each needs a planted-defect test; never loosen the
+        pass rule without one.

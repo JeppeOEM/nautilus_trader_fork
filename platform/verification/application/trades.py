@@ -314,6 +314,7 @@ def _instrument_json(report: InstrumentTrades) -> dict[str, Any]:
     return {
         "instrument_id": report.instrument_id,
         "passed": report.passed,
+        "failing": report.failing,
         "ids": asdict(report.ids),
         "seconds": {"classes": classes, "examples": [list(e) for e in report.seconds.examples]},
         "latency_ms": report.latency.summary(),

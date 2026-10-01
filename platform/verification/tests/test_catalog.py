@@ -425,6 +425,8 @@ def test_a_clean_day_passes_with_every_count_zero_and_every_reader_agreeing(
     assert len({leg["digest"] for leg in snapshots["legs"].values()}) == 1
     trades = _parity(report, "trade_tick")
     assert {leg["rows"] for leg in trades["legs"].values()} == {(_MINUTES - 1) * 60}
+    entries = [*report["parity"], *report["candles"]]
+    assert {entry["failing"] for entry in entries} == {0}  # Story 31.11: the per-entry counts
     assert _candle_counts(report) == {EXACT: 7, BOTH_UNDEFINED: 1}  # 3 minutes + 5 wider buckets
 
 
@@ -635,6 +637,7 @@ def test_a_row_further_than_the_margin_from_its_ts_event_is_beyond_margin(
     status, report = _run(capsys)
     assert status == 1
     assert _parity(report, "trade_tick")["beyond_margin"] == 1
+    assert _parity(report, "trade_tick")["failing"] == 1  # Story 31.11: the per-entry count
 
 
 @pytest.mark.usefixtures("nautilus_log_guard")

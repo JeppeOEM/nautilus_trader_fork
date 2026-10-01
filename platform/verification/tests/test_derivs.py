@@ -455,6 +455,7 @@ def test_a_clean_bybit_day_passes_with_every_row_and_update_accounted_for(
 ) -> None:
     status, report = _bybit_day(tmp_path, monkeypatch, capsys, _Bybit())
     assert (status, report["passed"]) == (0, True)
+    assert all(i["failing"] == 0 and i["passed"] for i in report["instruments"])
     types = _types(report, _BTC)
     # The recorder's startup snapshot lies outside its gap, so every frame is a judged update.
     assert _nonzero(types["mark"]["row_classes"]) == {EXACT: 7}
@@ -483,6 +484,11 @@ def test_a_planted_mark_one_tick_off_is_a_value_mismatch_and_fails(
     mark = _types(report, _BTC)["mark"]
     assert status == 1
     assert _nonzero(mark["row_classes"]) == {EXACT: 6, VALUE_MISMATCH: 1}
+    # Story 31.11: the instrument's count is its types' (and definitions') own failing counts.
+    (btc,) = [i for i in report["instruments"] if i["instrument_id"] == _BTC]
+    counts = [*(t["failing"] for t in btc["types"]), btc["definitions"]["failing"]]
+    assert (btc["passed"], btc["failing"]) == (False, sum(counts))
+    assert btc["failing"] >= 1
     assert mark["updates"]["not_stored"] == 1  # the frame's own value was never stored
     assert mark["examples"][0].startswith(f"value_mismatch@{_at(1000)}: stored 84000.31")
 

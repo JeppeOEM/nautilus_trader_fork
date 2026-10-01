@@ -26,6 +26,16 @@ next one starts -- MEM-01; the job never runs inside a collector):
     rebuild_seconds --apply --result-file -> consolidate_catalog --apply --days 2 -> build_candles
         (`python -m candles.rebuild`) --day --workers 1 -> compare_klines --rebuilt-by RUN_ID
         -> prune_catalog --apply --trade-retention-days 7 [--dydx-plan]
+        -> verify_day --result-file <saga scratch>/verify_result.json
+
+`verify_day` (Story 31.11, `archive.verify_day`) runs the independent verifiers over the day and
+writes its verdict for the scheduler's `verification_days`. It is last so it can never gate the
+pruning or any later step, and it exits 0 or 2, never 1, so it can never fail the saga or hold the
+watermark; without reference recorders (`VERIFY_DATA_DIR` unset, as in production) it is
+`"no reference data"`, exit 0. Known limit: an earlier FAILED step stops the saga before it, so
+that venue-day gets no verdict that night (its absence from `verification_days` shows it) until
+the retry after the failure is fixed. Upgrade path: run it after a failure too, as a step of its
+own in the scheduler's chains.
 
 The saga itself -- findings vs failures, the rebuild proof carried from the rebuild to the
 reconcile, the `nightly.<step>` ledger entries -- is `archive.application.nightly`'s docstring.
@@ -75,6 +85,7 @@ from archive.domain.reconciliation import VENUES
 logger = logging.getLogger(__name__)
 
 _TRADE_RETENTION_DAYS = 7
+VERDICT_FILE = "verify_result.json"
 
 
 def steps(
@@ -93,6 +104,8 @@ def steps(
     """
     db = db_path_for_venue(candles_dir, venue)
     plan = ["--dydx-plan", dydx_plan] if venue == "DYDX" and dydx_plan else []
+    # Beside the rebuild's result, in the saga's own scratch directory: transport, never persisted.
+    verdict_file = str(Path(result_file).with_name(VERDICT_FILE))
 
     def module(dotted: str, *args: str) -> list[str]:
         """Build one step's argv from a full dotted path (the chain spans two contexts)."""
@@ -174,6 +187,23 @@ def steps(
                 venue,
                 *plan,
             ),
+        ),
+        Step(
+            "verify_day",
+            module(
+                "archive.verify_day",
+                "--catalog",
+                catalog,
+                "--candles-dir",
+                candles_dir,
+                "--venue",
+                venue,
+                "--day",
+                day,
+                "--result-file",
+                verdict_file,
+            ),
+            verdict_file=verdict_file,
         ),
     ]
 

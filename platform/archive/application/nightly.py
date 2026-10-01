@@ -31,6 +31,13 @@ rebuilt (an allowlist: an instrument in neither list is not judged). A missing o
 consolidating anything). Why a file: the steps stay subprocesses (MEM-01 -- each step's memory is
 returned to the OS before the next starts), so the proof crosses the process boundary once, as
 inter-process transport; it is never persisted.
+
+The verdict (Story 31.11): the `verify_day` step writes its result file (`verdict_file`: `{"venue",
+"day", "verification", ...}`, `archive.verify_day`), which the saga reads into that step's
+`StepResult.verification` for the `archive` scheduler's `verification_days` -- an informational
+record, never a gate: an unusable file gives `{"verification": "result unreadable"}` and a
+`nightly.verify_day` ledger entry and leaves the step's exit code as it was, and the step is the
+chain's last, so nothing after it depends on it.
 """
 
 import json
@@ -39,6 +46,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from typing import TypeGuard
 
 from observability import error_ledger
@@ -50,6 +58,7 @@ logger = logging.getLogger(__name__)
 
 FINDINGS = 2
 _RESULT_FAILED = 1  # the exit code a rebuild step gets when its result file is unusable
+RESULT_UNREADABLE = "result unreadable"
 
 
 @dataclass(frozen=True)
@@ -58,23 +67,29 @@ class Step:
     One nightly step: its name (the ledger suffix), its command line and its role in the saga.
 
     `result_file` marks the rebuild step (the saga reads its proof there); `needs_proof` the
-    reconcile step (the saga appends that proof to its argv).
+    reconcile step (the saga appends that proof to its argv); `verdict_file` the verification step
+    (the saga reads its day verdict there, Story 31.11).
     """
 
     name: str
     argv: list[str]
     result_file: str | None = None
     needs_proof: bool = False
+    verdict_file: str | None = None
 
 
 @dataclass
 class StepResult:
-    """How one step ended; the rebuild step's also carries the run's `RebuildProof`."""
+    """
+    How one step ended; the rebuild step's also carries the run's `RebuildProof`, the verification
+    step's its day verdict (`read_verification_result`, without its venue and day).
+    """
 
     name: str
     code: int
     seconds: float
     proof: RebuildProof | None = None
+    verification: dict[str, Any] | None = None
 
     def outcome(self) -> str:
         if self.code == 0:
@@ -105,6 +120,22 @@ def read_rebuild_result(path: str, run_id: str, venue: str, day: str) -> Rebuild
     return RebuildProof(run_id, venue, day, frozenset(result["rebuilt"]), frozenset(refused))
 
 
+def read_verification_result(path: str, venue: str, day: str) -> dict[str, Any]:
+    """
+    Parse the verification step's result file into its day verdict, without the `venue` and `day`
+    it was checked against; `ValueError` when unusable.
+    """
+    try:
+        result = json.loads(Path(path).read_text())
+    except (OSError, json.JSONDecodeError) as e:
+        raise ValueError(f"verification result {path} unreadable: {e!r}") from e
+    if not isinstance(result, dict) or not isinstance(result.get("verification"), str):
+        raise ValueError(f"verification result {path} is not a verdict: {result!r}")
+    if (result.get("venue"), result.get("day")) != (venue, day):
+        raise ValueError(f"verification result {path} is for another venue-day: {result!r}")
+    return {key: value for key, value in result.items() if key not in ("venue", "day")}
+
+
 def _argv(step: Step, proof: RebuildProof | None) -> list[str]:
     if not step.needs_proof or proof is None:
         return step.argv
@@ -122,6 +153,17 @@ def _read_proof(step: Step, result: StepResult, run_id: str, venue: str, day: st
     except ValueError as e:
         logger.error("nightly %s: %s", step.name, e)
         result.code = _RESULT_FAILED
+
+
+def _read_verdict(step: Step, result: StepResult, venue: str, day: str) -> None:
+    """Carry the verification step's verdict into its result; never changes the step's code."""
+    if step.verdict_file is None:
+        return
+    try:
+        result.verification = read_verification_result(step.verdict_file, venue, day)
+    except ValueError as e:
+        error_ledger.record(f"nightly.{step.name}", f"{venue} {day}: {e}")
+        result.verification = {"verification": RESULT_UNREADABLE}
 
 
 def run_steps(
@@ -146,6 +188,7 @@ def run_steps(
         code = runner(_argv(step, proof))
         result = StepResult(step.name, code, time.monotonic() - started)
         _read_proof(step, result, run_id, venue, day)
+        _read_verdict(step, result, venue, day)
         proof = result.proof or proof
         results.append(result)
         if on_step is not None:

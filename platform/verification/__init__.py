@@ -24,8 +24,9 @@ venues' wire JSON itself, with `aiohttp`, `json`, `pyarrow`'s zstd codec and the
 and takes only venue URLs (`kernel.venue_http`), instrument-id parsing (`kernel.venues`) and the
 error ledger (`observability`) from the rest of the platform, all three standard-library only (the
 dYdX indexer URLs, which come from the pyo3 bindings, live apart in `kernel.dydx_http`). Importing
-the recorder loads no `nautilus_trader` module at all. No other context imports `verification`
-(Story 31.11 reserves the one exception, `archive`'s nightly composition root).
+the recorder loads no `nautilus_trader` module at all. No other context imports `verification`,
+with one exception: `archive.verify_day`, the nightly saga's last step (Story 31.11), imports the
+pure `domain/verdict.py` and reaches every tool through its command line.
 `platform/tests/test_boundaries.py` enforces both directions, statically over the transitive import
 closure and at runtime over `sys.modules`.
 

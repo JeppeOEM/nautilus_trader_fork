@@ -1058,11 +1058,19 @@ class TypeReport:
 
 @dataclass(frozen=True)
 class InstrumentDerivs:
-    """One plan instrument: its types (none for spot) and its definition verdicts."""
+    """
+    One plan instrument: its types (none for spot) and its definition verdicts. `failing` sums
+    their failing counts; `passed` also needs each reference validated and a definition verified,
+    which no count carries.
+    """
 
     instrument_id: str
     types: tuple[TypeReport, ...]
     definitions: DefinitionReport
+
+    @property
+    def failing(self) -> int:
+        return sum(report.failing for report in self.types) + self.definitions.failing
 
     @property
     def passed(self) -> bool:

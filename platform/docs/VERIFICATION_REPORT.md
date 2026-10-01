@@ -63,10 +63,174 @@ edit of `capture/venues/hyperliquid/config.toml`, which both the collector and t
 up within 30 s when the file is written in place (after a replacement -- `git pull`, `sed -i` --
 restart the collector; the recorder mounts the directory and follows the new file).
 
-## Verdicts
+## Verdicts (Story 31.11)
 
-Every row is `pending` until its story runs. Repro commands are filled in by the story that
-delivers the comparator (`python -m verification.<tool> --venue V --day D`).
+> **Precondition unmet: no full clean closed UTC day exists yet.** The epic asked for one full
+> closed UTC day of soak with an unchanged plan. As of 2026-10-01 there is none (audit **D-138**,
+> OPEN):
+> - 2026-09-29 ran only 12:59:19Z-20:42:04Z, then the dev box suspended (D-128).
+> - 2026-09-30 was recorded only 04:39:15Z-20:15:40Z. Inside that it carries the 31.10 chaos
+>   windows (09:50:48-11:05:25Z, 16:29:07-16:50:02Z, 17:06:48-17:07:48Z, each with its 90 s / 180 s
+>   margins), the stack stop 11:23:05-16:00:12Z, host stalls 19:22-19:37Z and two more host
+>   suspends (19:37:54-20:02:19Z and 20:15:40Z-2026-10-01 04:46:52Z).
+> - 2026-10-01 lost 06:08Z to about 15:35Z: the machine was shut down and the whole verify stack
+>   restarted at boot. So 2026-10-02 is the first day that can be clean.
+>
+> So every verdict below is **windowed**, and each row names its window:
+> - **W29**: 2026-09-29 12:59:19Z-20:42:04Z. The day-level runs of `archive.verify_day`,
+>   classified per second; the conservation window is 13:00-20:42Z.
+> - **W30**: 2026-09-30's clean conservation windows: 05:00-09:49, 11:09-11:22, 16:02-16:27,
+>   16:54-17:05, 17:11-19:00 and 19:00-20:02Z. For the other tools, the first nightly
+>   `verify_day` of 2026-09-30 was classified over 05:00-09:49, 11:09-11:22, 16:07-16:27 (Bybit)
+>   or 16:17-16:27 (Hyperliquid), 16:54-17:05 and 17:11-19:22Z.
+>
+> The **full-day verdict** is left to the nightly `verify_day` step. DEPLOY_CHECKLIST 31-11 reads
+> `verification_days` for the first full clean day and fills the "Full day" column, which closes
+> D-138. A partial day is never called VERIFIED without its window.
+
+**Verdict classes.**
+- **VERIFIED:** 0 unexplained inside the window. Explained losses are allowed and are named,
+  because they are accounted for.
+- **DEVIATION:** a residue with a known mechanism and an audit row.
+- **OPEN:** a residue whose mechanism is not proven, or a decision still owed.
+
+Every failing count outside the window is classified as a partial-day artefact: before the soak,
+before capture's first row (D-76), a missing raw hour, an excluded period, or a suspend (D-128).
+No such count is ignored.
+
+**Revisions.**
+- **Data:** the 2026-09-29 data was captured by collectors at `5e324bbb8e` (Story 31.2).
+- **2026-09-30 before 16:29:07Z:** the 31.10 round-1 change set (09:50:48Z on).
+- **2026-09-30 from 16:29:07Z:** the 31.10 final code (`557e50a285`).
+- **Tools:** every tool ran at `557e50a285` plus this story's change set (the `verify-archive`
+  image, built 2026-09-30 19:07Z). The verify `data_api` and `ranking_engine` images were rebuilt
+  from the same tree at 19:04Z, the owed 31-9 item. Those two redeploys are not in the scenario
+  log; neither touched a collector or a recorder.
+- **Re-run, 2026-10-01** (Story 31.11's final tree, `557e50a285` plus the change set). The verify
+  `data_api`, `ranking_engine` and `archive` images were rebuilt and recreated with `--no-deps` at
+  15:47:50-15:48:03Z, and `archive` again at 16:11:48Z with the D-145 fix. Each redeploy is a
+  `deploy` line in `data/verification/chaos/scenarios.jsonl`. Then:
+  - every W30 conservation window and the W29 window (R-win) gave identical reports, except that
+    `truncated_neighbour_files` is now empty (hour 19 of 2026-09-30 was still open at the first
+    run);
+  - `verify_day` for 2026-09-29 (R-day) reproduced every count and every per-instrument figure of
+    the first run on both venues, after the D-145 repair below. The only differences are not
+    failing: one more stored definition `ts_init` (the 15:36Z restart), and the rehearsal digest
+    of Bybit's snapshot leaf, whose set includes the midnight-crossing file that the 2026-09-30
+    rebuild rewrote (the day's parity digests are unchanged).
+  - **D-145, found by this re-run.** Before the repair, the 2026-09-29 `candles` and `catalog`
+    candle checks had gone from 0 to 602-603 failing buckets per instrument. The 2026-09-30
+    nightly's `build_candles --day 2026-09-30` had rebuilt 2026-09-29 from the one snapshot file
+    crossing its midnight, leaving that day only its 20:41-20:42Z bars. Fixed in
+    `candles/application/rebuild.py`, and the verify stores rebuilt for 2026-09-29. The VPS needs
+    the same store rebuild (DEPLOY_CHECKLIST 31-11).
+
+**Repro.** All commands run from `platform/` with
+`VERIFY_DATA_DIR=data/verification CATALOG_PATH=data/catalog BYBIT_COLLECTOR_CONFIG=capture/venues/bybit/config.toml HYPERLIQUID_COLLECTOR_CONFIG=capture/venues/hyperliquid/config.toml`.
+- **R-day:** one venue-day, all six tools, each tool's full report kept:
+  `docker exec verify-archive python3 -m archive.verify_day --catalog /app/catalog --candles-dir /app/candles_dir --venue V --day D --result-file /app/verify_data/scratch/verify_V_D.json --reports-dir /app/verify_data/scratch/reports-D/V`
+- **R-win:** one conservation window:
+  `python3 -m verification.conservation --venue V --start S --end E --json`
+
+| Data type | Instrument | Verdict | W29 (2026-09-29) | W30 (2026-09-30) | Full day |
+|---|---|---|---|---|---|
+| Drops and conservation (every trade id, every second) | BTCUSDT-LINEAR | **VERIFIED** (windowed) | 13:00-20:42Z: seen = archived 807,787; seconds 27,712 rows + 8 `stale` of 27,720; backfilled 38; **unexplained 0**. Day: 47,788 failing = 46,765 s + 1,023 ids, all before capture's first row 12:59:24Z | 6 windows: seen 513,946, archived 506,122, backfilled 3,604, `ledgered_unrecoverable` 7,824 (D-139 silent feed 16:00-16:07Z, the suspend); seconds 28,163 rows + `stale` 931 + `catch_up_cap` 1,446 of 30,540; **unexplained 0** | pending (D-138) |
+| | ETHUSDT-LINEAR | **VERIFIED** (windowed) | seen = archived 1,081,448; rows 27,712 + 8 `stale`; backfilled 11; unexplained 0. Day: 47,789 = 46,765 + 1,024, all before 12:59:24Z | seen 541,888, archived 534,974, backfilled 4,022, unrecoverable 6,914; rows 28,163 + 931 + 1,446; unexplained 0 | pending |
+| | BTCUSDT-SPOT | **VERIFIED** (windowed) | seen 388,949, archived 388,888; rows 27,719 + 1 `stale`; unrecoverable 61 (D-125, 18:00:31Z); 41 `archived_not_seen` (the recorder's own 17:28:35-37Z reconnect, D-143); unexplained 0. Day: 46,825 = 46,765 + 60, all before 12:59:24Z | seen 292,544, archived 284,269, backfilled 279, unrecoverable 8,275; rows 28,143 + 951 + 1,446; unexplained 0 | pending |
+| | ETHUSDT-SPOT | **VERIFIED** (windowed) | seen 119,490, archived 119,476; rows 27,719 + 1; backfilled 40, unrecoverable 14 (D-125); unexplained 0. Day: 46,829 = 46,765 + 64, all before 12:59:24Z | seen 73,632, archived 72,263, backfilled 407, unrecoverable 1,369; rows 28,143 + 951 + 1,446; unexplained 0 | pending |
+| | SOL-USD-PERP.HYPERLIQUID | **VERIFIED** (windowed) | seen = archived 33,569; rows 27,720 of 27,720; unexplained 0. Day: 46,765 = 46,762 s + 3 ids, all before capture's first row 12:59:21Z (the WS subscribe snapshot) | seen 32,920, archived 31,963, backfilled 8, unrecoverable 957 (D-139: 16:00-16:17Z); rows 28,029 + `stale` 1,063 + `catch_up_cap` 1,448; unexplained 0 | pending |
+| Derived signals vs reference implementations | all 5 | **VERIFIED** (Story 31.3; fixture rows of the restarted soak) | unchanged: see the smoke table's row | | n/a (no day input) |
+| Trades id-by-id + second fold (`--stage rebuilt`) | BTCUSDT-LINEAR | **VERIFIED** (windowed) | matched 808,317 of 809,340 seen; seconds exact 27,751; every mismatch class 0. Day: 1,082 failing = 1,023 ids + 59 `missing_row`, all 12:57:54-12:59:22Z, before the first row | 0 in the clean windows. Day: 2,258 = restart edge 15:59-16:00:17Z (1,177) + the 19:36Z host stall (1,080) | pending |
+| | ETHUSDT-LINEAR | **VERIFIED** (windowed) | matched 1,082,397 of 1,083,421; exact 27,751; 0. Day: 1,078 = 1,024 + 54, hour 12 | 0. Day: 1,492 = restart edge 1,283 + stall 207 | pending |
+| | BTCUSDT-SPOT | **DEVIATION D-91** (OPEN) + verifier edge **D-143** (OPEN) | matched 389,284 of 389,405; exact 27,731; **`mismatch_price` 32 + `off_grid` 22 s** (sub-tick prints stored rounded, D-91); **`extra_unexplained` 41 + `archive_differs` 3 s** at 17:28:35-37Z (captured live while the recorder was disconnected, D-143); 61 `missing_explained` + 2 `explained_loss` (D-125). Day: 162 = 64 before the first row + 98 above | **6 = D-91** (06:14:37, 16:19:04, 19:17:18Z). Day: 373, the rest at the restart edge, the stall, the 20:03Z resume and chaos | pending |
+| | ETHUSDT-SPOT | **VERIFIED** (windowed) | matched 119,706 of 119,784; exact 27,756; 14 `missing_explained` + 2 `explained_loss` (D-125); 0. Day: 80, hour 12 | 0. Day: 182 = edge 93 + stall 63 + resume 26 | pending |
+| | SOL-USD-PERP.HYPERLIQUID | **VERIFIED** (windowed), verifier edge **D-143** on W30 | matched 33,602 of 33,629; exact 27,759; 24 `missing_explained` (`stale`); 0. Day: 23, before 12:59:20Z | **16 = D-143** (15 extras + 1 second at 07:41:01.8-03.4Z, the recorder's own "Expired" reconnect). Day: 151, the rest at the stall and the 20:02Z resume | pending |
+| Book top-20 vs rebuilt book | BTCUSDT-LINEAR | **DEVIATION D-102 / D-141** (OPEN) | exact 27,703 of 27,751; REST failing 0 (agree_key 0, agree_bracket 351, between_pushes 111) so the reference is validated; `u_breaks` 0; **42 `content_differs`**. Each one is a book message applied after its second closed, clustered at 17:35:46, 18:39-18:44, 19:06-19:07, 19:17, 19:40Z. In ~40 % of them the recorder also received it late (D-141). 11 of the 42 hold a frozen book inside a capture-only feed stall (D-142). Day: 46 = 42 + 4 `missing_row` before the first row | **1** (17:33:06-07Z, both recorder streams paused 1.3-1.5 s: D-141). Day: 60, the rest in excluded periods | pending |
+| | ETHUSDT-LINEAR | **DEVIATION D-102 / D-141** (OPEN) | exact 27,701 of 27,751; REST 3 / 330 / 129; 46 `content_differs`, as BTCUSDT-LINEAR. Day: 51 = 46 + 5 | **1** (17:33:06Z, D-141). Day: 60 | pending |
+| | BTCUSDT-SPOT | **DEVIATION D-102 / D-141** (OPEN) | exact 27,699 of 27,758; REST 100 / 295 / 67; 55, including 15:42:06-07Z (the original D-102) and 18:00:31Z (D-125). Day: 60 = 55 + 5 | **2** (17:33:06-07Z). Day: 53 | pending |
+| | ETHUSDT-SPOT | **DEVIATION D-102 / D-141** (OPEN) | exact 27,701 of 27,758; REST 69 / 316 / 77; 53 + 1 `boundary_early`. Day: 59 = 54 + 5 | **2**. Day: 51 | pending |
+| | SOL-USD-PERP.HYPERLIQUID | **OPEN D-140** + DEVIATION D-101 | exact 27,402 of 27,759; REST agree_key 53, between_pushes 409, disagree 0. **337 s in 61 one-push runs, 16:02:00-18:54:22Z** (best prices equal, level sizes differ between the two connections, D-140); 8 s at capture's resubscribe replies 15:51:55-56Z and 18:51:04-09Z (D-101); 1 at 19:07:16Z (host stall) | **235** (one run at 07:34:47-50Z, then about 45 one-push runs 16:54-19:14Z, D-140). Day: 362 | pending |
+| Mark price | BTCUSDT-LINEAR | **VERIFIED** (windowed) | exact 22,001 (+1 agree_state); failing 0; REST agree_key 925 | 0 in the windows. Day: 112, all in excluded periods | pending |
+| | ETHUSDT-LINEAR | **VERIFIED** (windowed) | exact 21,075; failing 0 | 0. Day: 87 | pending |
+| | SOL-USD-PERP.HYPERLIQUID | **DEVIATION D-112** (OPEN) | exact 6,445; **5 failing**: each value was stored 1.05-2.95 s from the recorder's receipt, so it fails the 1 s match bound (19:06:34-19:07:19Z, the host stall). No value lost | 0. Day: 58 | pending |
+| Index price | BTCUSDT-LINEAR | **VERIFIED** (windowed); read **OPEN D-113** | exact 49,276; failing 0. The catalog cannot read it back: see the catalog row | 0. Day: 201 | pending |
+| | ETHUSDT-LINEAR | as above | exact 48,781; failing 0 | 0. Day: 206 | pending |
+| | SOL-USD-PERP.HYPERLIQUID | **DEVIATION D-112** (OPEN); read OPEN D-113 | exact 7,510; **8 failing** (117.525 at 17:50:52Z, 118.975 at 18:39:37-38Z, the 19:06-19:07Z stall); each value stored 1.05-2.95 s off | 0. Day: 73 | pending |
+| Funding rate | BTCUSDT-LINEAR | **VERIFIED** (windowed); D-103/D-104 documented | exact 235; failing 0 | 0. Day: 1 | pending |
+| | ETHUSDT-LINEAR | as above | exact 201; failing 0 | 0. Day: 4 | pending |
+| | SOL-USD-PERP.HYPERLIQUID | **VERIFIED** (windowed); D-108 documented | exact 1,781; failing 0 | 0. Day: 39 | pending |
+| Open interest | BTCUSDT-LINEAR | **VERIFIED** (windowed); D-105 documented | agree_state 92 of 92; failing 0. Day: 2 `poll_gaps` at the day's edges (00:00-13:04:26Z, 20:40:26-24:00Z) | 0. Day: 3 `poll_gaps` (00:00-04:42, 19:28-20:03, 20:13-24:00Z: the suspends) | pending |
+| | ETHUSDT-LINEAR | as above | agree_state 92 of 92; failing 0. Day: 2 edge gaps | 0. Day: 3 gaps | pending |
+| | SOL-USD-PERP.HYPERLIQUID | **DEVIATION D-112** (OPEN) | **9 failing**, the same 19:06-19:07Z timing class (5626185.10 stored +2.35 s) | **1** (OI 5664889.82: reference 17:49:09.541Z, stored 17:49:10.632Z, +1.09 s). Day: 89 | pending |
+| Mark, index, funding, open interest | BTCUSDT-SPOT, ETHUSDT-SPOT | **VERIFIED** n/a | 0 fabricated rows | 0 fabricated | pending |
+| Instrument definitions | all 5 | **VERIFIED** (windowed); D-106 documented | agree 925, differs 0 on every instrument | 0 | pending |
+| Catalog integrity and backtest-read parity | BTCUSDT-LINEAR | **OPEN D-113** (index read) + verifier edge **D-144** (OPEN) | structure 0 failing except 2 index files `open_failed` (D-113); parity: trades 808,317 (`45d309a2`) and snapshots 27,751 (`012b35b0`) stored = query = received; candle fold exact 330, float_noise 273 (D-115), 0 different; rehearsal `not_exercised` (D-116: the step runs after consolidation) | **602 `beyond_margin`**: exactly the trades with `ts_init - ts_event` > 60 s, all reconnect backfills (04:37:12-04:38:19Z, archived 04:39:20Z at the resume). The three legs are digest-identical, so the data is right (D-144) | pending |
+| | ETHUSDT-LINEAR | as above | D-113 2 files; 1,082,397 (`5224bf6d`) / 27,751 (`b52d340d`); fold 325 / 278 | **605** (527 resume backfill + 78 from the 16:06:47Z silent-feed backfill, D-144) | pending |
+| | BTCUSDT-SPOT | **VERIFIED** (windowed) | 389,325 (`3fe11e91`) / 27,758 (`4825ef01`); fold 334 / 269; failing 0 | 0 | pending |
+| | ETHUSDT-SPOT | **VERIFIED** (windowed) | 119,706 (`e03afed3`) / 27,758 (`5bd30533`); fold 344 / 259; failing 0 | 0 | pending |
+| | SOL-USD-PERP.HYPERLIQUID | **OPEN D-113** (index read) | 2 index files `open_failed`; 33,602 (`4c08b6a4`) / 27,759 (`b29601f5`); fold 318 / 284 + 1 `both_undefined` | D-113 (2 files) | pending |
+| Candles, every timeframe (stored, served, reference) | BTCUSDT-LINEAR | **VERIFIED** (windowed); klines OPEN D-51 | 0 failing inside the soak. Fold and served 0 failing on every width; **`partial_mismatch` 0** (the rebuilt data_api serves the D-119 fix; the 31.8 smoke's old image had 48 / 17 / 11); reference exact on every traded bucket. Day: 46,765 = 46,759 before the soak + 6 before the first row | 0 in the windows. Day: 9 `ref_different` buckets from the 16:00Z restart edge and the 19:2x stall | pending |
+| | ETHUSDT-LINEAR | as above | 0 inside the soak (as above) | 0. Day: 9 | pending |
+| | BTCUSDT-SPOT | **DEVIATION D-127 / D-91** (OPEN) | **`ref_different` 55** (15 / 10 / 6 / 4 / 2 / 1 / 7 / 5 / 5 at 1m / 5m / 15m / 1h / 4h / 1d / 10m / 30m / 45m: the 22 sub-tick seconds); `ref_recorder_gap` 17:28:35-37Z and `ref_explained` 18:00:31Z (D-125) do not fail | D-91 / D-127 seconds 06:14:37, 16:19:04, 19:17:18Z; 16:07:36Z is the end of the D-139 `trades_unrecoverable` window. Day: 42 | pending |
+| | ETHUSDT-SPOT | **VERIFIED** (windowed) | 0; `ref_explained` 18:00:31Z (D-125) | 0. Day: 9 | pending |
+| | SOL-USD-PERP.HYPERLIQUID | **VERIFIED** (windowed); klines OPEN D-126 | 0 inside the soak. Day: 46,762 = 46,759 + 3 | 0 (07:41:02Z is `ref_recorder_gap`). Day: 9 | pending |
+| Live, backtest and display parity (incl. the bot's signals) | all 5 | **OPEN** D-135 (replay order), D-133/D-134 (Bybit bot inputs), D-129 (gating), D-113 | unchanged since Story 31.9: see the smoke table's row | | n/a (the 31.9 fleet run) |
+| Fault injection: every loss accounted for | Bybit, Hyperliquid | **VERIFIED** for 18 judged windows; `network_cut` not run (sudo, DEPLOY_CHECKLIST 31-10); **OPEN** D-137 | | 9 windows per venue, 0 unexplained (Story 31.10) | n/a |
+
+**What the windowed verdicts say.** Inside the windows, every trade the venue sent is either
+archived or accounted for: conservation finds 0 unexplained on all 5 instruments over about
+13.9 h of 2026-09-29 and 2026-09-30. Every archived trade and every second's trade fold equals the
+venue's, except BTCUSDT-SPOT's sub-tick prints (D-91). Mark, index, funding, open interest and
+definitions equal the venue on both Bybit linears. On Hyperliquid the only residue is the 1 s match
+bound (D-112).
+
+The stored book is the open front:
+- **Bybit:** about 45 seconds a day per instrument hold a book that misses messages delivered late,
+  often late to both clients (D-102/D-141).
+- **Hyperliquid:** about 2-6 % of seconds hold `l2Book` level sizes that differ from the other
+  connection's (D-140).
+
+**Explained losses inside W30 that the conservation pass does not excuse.** At the 16:00Z stack
+start, capture's first WS connections stayed silent for 373.7 s (Bybit linear; spot until
+about 16:07:36Z) and 989.6 s (Hyperliquid), while the recorders' own watchdogs reconnected after
+30 s. Capture never forces a reconnect of a silent feed, so those seconds have no row and those
+trades are `unrecoverable` (D-139, OPEN).
+
+**OPEN decisions carried from Story 31.9** (DEPLOY_CHECKLIST 31-9; none blocks a verdict above,
+each recorded with its recommended option):
+- **D-113**, `IndexPriceUpdate` has no catalog decoder. Recommended: (1) upgrade Nautilus to a
+  release that decodes it, the same upgrade as D-133. The catalog row's `open_failed` must then
+  read 0. Meanwhile index prices are read only through `kernel.catalog_files.query_index_prices`.
+- **D-129**, `DummyStrategy` gating and OFI reset. Recommended: (1) adopt the Known limit's
+  upgrade path (skip and log a stale, crossed or gapped book; reset the OFI past `OFI_GAP_NS`).
+- **D-133 / D-134**, Bybit bot quotes and spot book from the pinned adapter. Recommended: (1)
+  upgrade Nautilus to a release whose Bybit handler keeps the quote and book topics apart,
+  together with D-113 and D-132. Until then no Bybit dummy-bot result is trustworthy.
+- **D-135**, the bot replay's per-row delta order. Recommended: (1) stamp a row's deltas
+  `ts_init + i` ns, `CLEAR` first, then re-run `bots.signal_replay` and `verification.bot_parity`.
+
+**The permanent gate.** From this story on, every nightly saga ends with `verify_day`
+(`docs/DATA_DICTIONARY.md` §1.24). On a stack with reference recorders it runs the six tools over
+the closed day and keeps one verdict per type in `archive:status` `verification_days`; every
+non-passed type is ledgered at `archive.verify_day`.
+
+The first nightly to run it was the verify stack's, at 2026-10-01 04:47-05:18Z, for 2026-09-30.
+Its results:
+- **Bybit:** `findings` (conservation 2,696, trades 4,305, book 224, derivs 617, catalog 1,211,
+  candles 113; 44 missing raw hours). Run time 1,640.7 s, peak child RSS 1,534 MB.
+- **Hyperliquid:** `findings` (2 / 151 / 362 / 260 / 2 / 20; 11 missing hours). Run time 61.2 s.
+- **DYDX:** `no reference data`, exit 0.
+
+Every one of those counts is classified in the W30 column above. The watermarks advanced to
+2026-09-30 and no step failed (`failed steps: []`). Pruning ran before the step, so it was not
+held. The collectors lost no second to the step's load on the dev box: the only `stale` runs after
+the resume are 04:47-04:48Z, before the nightly started.
+
+## Story smokes (31.2-31.10): the evidence behind each tool
+
+Each row is the tool's first run, as the story that delivered it ran it, on a partial window.
+The verdicts are the section above. Repro commands are each tool's own
+(`python -m verification.<tool> --venue V --day D`).
 
 | Data type | Instrument | Verdict | Unexplained | Numbers | Repro |
 |---|---|---|---|---|---|

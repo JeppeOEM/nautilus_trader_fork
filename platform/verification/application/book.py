@@ -337,6 +337,7 @@ def _instrument_json(report: InstrumentBook) -> dict[str, Any]:
     return {
         "instrument_id": report.instrument_id,
         "passed": report.passed,
+        "failing": report.failing,
         "reference": report.reference,
         "rest": dict(report.rest),
         "rest_examples": list(report.rest_examples),

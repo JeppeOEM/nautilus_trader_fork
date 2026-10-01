@@ -577,6 +577,7 @@ def _parity_json(report: ParityReport) -> dict[str, Any]:
     return {
         "instrument_id": report.instrument_id,
         "data_type": report.data_type,
+        "failing": report.failing,
         "legs": {
             name: {**_digest_json(leg.digest), "missing_columns": list(leg.missing_columns)}
             for name, leg in report.legs.items()
@@ -590,6 +591,7 @@ def _parity_json(report: ParityReport) -> dict[str, Any]:
 def _candles_json(report: CandleReport) -> dict[str, Any]:
     return {
         "instrument_id": report.instrument_id,
+        "failing": report.failing,
         "rows": report.rows,
         UNKNOWN_WIDTH: report.unknown_width,
         "widths": {

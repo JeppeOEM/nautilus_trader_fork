@@ -38,10 +38,8 @@ _SEC = 1_000_000_000
 _DAY_NS = 86_400 * _SEC
 
 
-def _seed(path: Path) -> list[DydxSecondSnapshot]:
-    """200 traded seconds straddling a UTC midnight long ago, so two day chunks are crossed."""
-    start = 3 * _DAY_NS - 90 * _SEC
-    snaps = [
+def _snapshots(start: int, count: int) -> list[DydxSecondSnapshot]:
+    return [
         make_snapshot(
             instrument_id=InstrumentId.from_str(IID),
             bid_prices=[100.0 + i - 1],
@@ -59,8 +57,13 @@ def _seed(path: Path) -> list[DydxSecondSnapshot]:
             ts_event=start + i * _SEC,
             ts_init=start + i * _SEC,
         )
-        for i in range(200)
+        for i in range(count)
     ]
+
+
+def _seed(path: Path) -> list[DydxSecondSnapshot]:
+    """200 traded seconds straddling a UTC midnight long ago, so two day chunks are crossed."""
+    snaps = _snapshots(3 * _DAY_NS - 90 * _SEC, 200)
     ParquetDataCatalog(str(path)).write_data(snaps)
     return snaps
 
@@ -98,3 +101,89 @@ def test_venue_instruments_filters_on_the_id_suffix() -> None:
     assert venue_instruments(ids, "BYBIT") == ["BTCUSDT-LINEAR.BYBIT"]
     assert venue_instruments(ids, "DYDX") == ["BTC-USD-PERP.DYDX"]
     assert venue_instruments(ids, None) == ids
+
+
+def _bars(db_path: str) -> dict[int, list[tuple]]:
+    store = CandleStore(db_path)
+    try:
+        return {
+            bar: [
+                (c["t"], c["o"], c["h"], c["l"], c["c"], c["seconds_observed"])
+                for c in queries.window(store.connection, IID, bar, 1 << 62, 1000)
+            ]
+            for bar in BAR_SECONDS
+        }
+    finally:
+        store.close()
+
+
+def test_a_day_rebuild_leaves_the_day_before_whole_when_a_file_crosses_its_midnight(
+    tmp_path: Path,
+) -> None:
+    """
+    Audit D-145: a file crossing the range's first midnight is listed under the day before too;
+    rebuilding that day from it alone emptied every other bar of that day.
+    """
+    catalog = ParquetDataCatalog(str(tmp_path / "cat"))
+    midnight = 3 * _DAY_NS
+    catalog.write_data(_snapshots(midnight - 300 * _SEC, 240))  # day 2, wholly before midnight
+    catalog.write_data(_snapshots(midnight - 60 * _SEC, 120))  # the file crossing midnight
+    db_path = str(tmp_path / "candles.db")
+    end = midnight + _DAY_NS - 1  # inclusive, as `candles.rebuild` passes it
+    rebuild_instrument(db_path, str(tmp_path / "cat"), IID, midnight - _DAY_NS, end)
+    before = _bars(db_path)
+    assert sum(c[5] for c in before[60] if c[0] < midnight // 1_000_000) == 300
+
+    applied = rebuild_instrument(
+        db_path, str(tmp_path / "cat"), IID, midnight, midnight + _DAY_NS - 1
+    )
+
+    assert _bars(db_path) == before
+    assert applied == 60  # day 3's seconds only
+
+
+def test_a_day_rebuild_leaves_the_day_after_whole_when_a_file_crosses_its_last_midnight(
+    tmp_path: Path,
+) -> None:
+    """Audit D-145, the range's other end: the day after is listed with the crossing file only."""
+    catalog = ParquetDataCatalog(str(tmp_path / "cat"))
+    midnight = 3 * _DAY_NS
+    catalog.write_data(_snapshots(midnight - 60 * _SEC, 120))  # the file crossing midnight
+    catalog.write_data(_snapshots(midnight + 300 * _SEC, 240))  # day 3, wholly after midnight
+    db_path = str(tmp_path / "candles.db")
+    rebuild_instrument(
+        db_path, str(tmp_path / "cat"), IID, midnight - _DAY_NS, midnight + _DAY_NS - 1
+    )
+    before = _bars(db_path)
+    assert sum(c[5] for c in before[60] if c[0] >= midnight // 1_000_000) == 300
+
+    applied = rebuild_instrument(
+        db_path, str(tmp_path / "cat"), IID, midnight - _DAY_NS, midnight - 1
+    )
+
+    assert _bars(db_path) == before
+    assert applied == 60  # day 2's seconds only
+
+
+def test_a_rebuild_of_a_range_inside_one_day_rebuilds_that_day_from_all_its_files(
+    tmp_path: Path,
+) -> None:
+    """
+    Audit D-145, a range not on midnights (`repair_instrument`'s flagged rows): the day is rebuilt
+    whole, so it must be read whole, not from its files overlapping the range alone.
+    """
+    catalog = ParquetDataCatalog(str(tmp_path / "cat"))
+    midnight = 3 * _DAY_NS
+    catalog.write_data(_snapshots(midnight + 600 * _SEC, 240))  # outside the range below
+    catalog.write_data(_snapshots(midnight + 3_600 * _SEC, 120))  # the range's own file
+    db_path = str(tmp_path / "candles.db")
+    rebuild_instrument(db_path, str(tmp_path / "cat"), IID, midnight, midnight + _DAY_NS - 1)
+    before = _bars(db_path)
+    assert sum(c[5] for c in before[60]) == 360
+
+    applied = rebuild_instrument(
+        db_path, str(tmp_path / "cat"), IID, midnight + 3_610 * _SEC, midnight + 3_620 * _SEC
+    )
+
+    assert _bars(db_path) == before
+    assert applied == 360  # the whole day, both files

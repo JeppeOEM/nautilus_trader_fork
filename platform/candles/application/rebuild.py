@@ -75,11 +75,24 @@ def rebuild_instrument(
     """
     Rebuild one instrument day by day (MEM-01: one day of columns in memory at a time). Opens its
     own store so it can run in a worker process. Returns the number of seconds applied.
+
+    Every day [start_ns, end_ns] touches is rebuilt whole, so its files are listed over the whole
+    day, never over the range alone: `files_by_day` lists a day's files only where they overlap
+    the window, and a rebuild replaces the whole day's bars with what it is given. A range not on
+    midnights (`repair_instrument`'s flagged rows) would otherwise rebuild its days from their
+    files inside it only. A file crossing the window's first or last midnight is also listed under
+    the day outside it, with that one file only, so that day is skipped: rebuilding it would
+    replace its bars with the few seconds the crossing file holds (audit D-145: a nightly
+    `--day D` emptied D-1).
     """
     store = CandleStore(db_path)
     seconds = 0
+    first_day, last_day = start_ns // DAY_NS, end_ns // DAY_NS
+    window = (first_day * DAY_NS, (last_day + 1) * DAY_NS - 1)
     try:
-        for day, paths in sorted(files_by_day(catalog_path, iid, start_ns, end_ns).items()):
+        for day, paths in sorted(files_by_day(catalog_path, iid, *window).items()):
+            if not first_day <= day <= last_day:
+                continue
             cols = second_ohlc_arrays(paths)
             seconds += store.rebuild_day(iid, cols, day * DAY_MS, allow_open_day)
     finally:

@@ -310,6 +310,7 @@ def test_a_clean_day_passes_with_every_id_matched_and_every_second_exact(
 ) -> None:
     status, report, ids, seconds = _day(tmp_path, monkeypatch, capsys, _Scenario(), stage)
     assert (status, report["passed"], report["provisional"]) == (0, True, stage == "live")
+    assert (_only(report)["passed"], _only(report)["failing"]) == (True, 0)
     assert _nonzero(ids) == {"seen": 4, "matched": 4}
     assert seconds == {"exact": 3}
     latency = _only(report)["latency_ms"]
@@ -334,10 +335,12 @@ def test_an_archived_size_one_unit_off_is_a_size_mismatch(
     bigger = replace(_T4, size="0.002")
     row = replace(_ROW_S2, sell_volume=2)
     scenario = _Scenario(archived=(_T1, _T2, _T3, bigger), rows={_S1: _ROW_S1, _S2: row})
-    status, _, ids, seconds = _day(tmp_path, monkeypatch, capsys, scenario)
+    status, report, ids, seconds = _day(tmp_path, monkeypatch, capsys, scenario)
     assert status == 1
     assert _nonzero(ids) == {"seen": 4, "matched": 4, "mismatch_size": 1}
     assert seconds == {"exact": 1, "archive_differs": 1}
+    # Story 31.11: the failing id plus the failing second, the count the day verdict reads.
+    assert (_only(report)["passed"], _only(report)["failing"]) == (False, 2)
 
 
 def test_a_ts_event_moved_into_the_next_second_fails_both_seconds(

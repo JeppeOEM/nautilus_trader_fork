@@ -42,6 +42,14 @@ services:
     environment:
       REDIS_URL: "redis://127.0.0.1:${REDIS_PORT:-26379}"
 
+  # The nightly saga's `verify_day` step (Story 31.11) runs the six verifiers here, as children of
+  # the scheduler: they read the recorders' raw files (read-only: the checked side never writes the
+  # reference, DATA-02), the coverage record at `<catalog>/../coverage` (/app/coverage), the venue
+  # plans (the collectors' own files, directory mounts as the recorders'), and the verify stack's
+  # loopback data_api for the served candles (host networking, SEC-01). The catalog tool's
+  # rehearsal writes only under verification/scratch. Compose merges `volumes` by container path,
+  # so these entries add to the base's mounts. Without VERIFY_DATA_DIR (the live stack) the step
+  # is "no reference data", exit 0.
   archive:
     container_name: verify-archive
     environment:
@@ -50,6 +58,16 @@ services:
       # live backup's files. Blank, so `backup_enabled = true` here refuses start (loud), never syncs.
       RCLONE_REMOTE: ""
       RCLONE_BUCKET: ""
+      VERIFY_DATA_DIR: "/app/verify_data"
+      VERIFY_DATA_API_URL: "http://127.0.0.1:${DATA_API_PORT:-29100}"
+      BYBIT_COLLECTOR_CONFIG: "/app/bybit_venue/config.toml"
+      HYPERLIQUID_COLLECTOR_CONFIG: "/app/hyperliquid_venue/config.toml"
+    volumes:
+      - ./data/verification/raw:/app/verify_data/raw:ro
+      - ./data/verification/scratch:/app/verify_data/scratch
+      - ./data/coverage:/app/coverage:ro
+      - ./capture/venues/bybit:/app/bybit_venue:ro
+      - ./capture/venues/hyperliquid:/app/hyperliquid_venue:ro
 
   ranking_engine:
     container_name: verify-ranking-engine
