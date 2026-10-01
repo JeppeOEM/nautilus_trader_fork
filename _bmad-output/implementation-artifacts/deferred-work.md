@@ -847,3 +847,22 @@ Discarded by operator: locking/atomic TOML writes; `bot_tui` malformed-message h
 - source_spec: `_bmad-output/implementation-artifacts/spec-32-5-fibonacci-retracement-and-long-short-position-tools-every-drawing-stays-on-the-chart.md`
   summary: One corrupt instrument table in `chart_drawings.toml` makes GET and PUT fail for every coin.
   evidence: `load_chart_drawings` validates all tables; fail-loud was intended but blast radius is the whole file.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-32-6-chart-layout-restored-on-return-and-default-setup-for-a-new-coin.md`
+  summary: One malformed coin table in `chart_layouts.toml` makes every coin's layout GET/PUT return 500; isolate per-coin failures.
+  evidence: `load_chart_layouts` raises on the first bad table and every route loads the whole file.
+- source_spec: `_bmad-output/implementation-artifacts/spec-32-6-chart-layout-restored-on-return-and-default-setup-for-a-new-coin.md`
+  summary: A failed layout GET draws no chart at all instead of falling back to the built-in layout with a visible warning.
+  evidence: `ChartForCoin` renders only an alert and retries every 5 s until the layout loads.
+- source_spec: `_bmad-output/implementation-artifacts/spec-32-6-chart-layout-restored-on-return-and-default-setup-for-a-new-coin.md`
+  summary: `pane_heights` accumulates ids of removed indicators and never prunes them.
+  evidence: `handlePaneHeights` merges into the previous map without removing ids no longer present.
+- source_spec: `_bmad-output/implementation-artifacts/spec-32-6-chart-layout-restored-on-return-and-default-setup-for-a-new-coin.md`
+  summary: A corrupt `chart_indicators.toml` (a server-side condition) is answered 400 "invalid indicator config payload" by the indicators PUT, while the layout routes answer the same condition 500.
+  evidence: `data_api/routes/indicators.py` `_store_entries` maps `KeyError`/`TypeError` from `load_chart_indicators` to 400; `data_api/routes/layout.py` `_file_errors` maps them to 500.
+- source_spec: `_bmad-output/implementation-artifacts/spec-32-6-chart-layout-restored-on-return-and-default-setup-for-a-new-coin.md`
+  summary: A `[default]` indicator later dropped from the catalog makes the first-open GET of every coin without an indicator list a 500, so no new coin draws a chart until the default is re-saved.
+  evidence: `data_api/routes/layout.py` `_write_template_indicators` revalidates the template on every seed and maps a stale entry to 500 (`test_an_invalid_default_indicator_fails_the_seed_loudly_and_writes_nothing`).
+- source_spec: `_bmad-output/implementation-artifacts/spec-32-6-chart-layout-restored-on-return-and-default-setup-for-a-new-coin.md`
+  summary: The session volume profile's session count and the Periodic-vs-Session preset are not in the layout's field list, so a Periodic profile on "daily" comes back as the Session Volume Profile and the count resets to 5.
+  evidence: `pages/ChartPage.tsx` `initialSessionConfig` derives the preset from `session`/`hd` and sets `sessionCount: DEFAULT_SESSION_COUNT`; the spec's enumerated `volume_profile` keys have no field for either.

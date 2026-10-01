@@ -2,6 +2,7 @@
 // pipeline's output is actually consumed, not just generated and ignored (Story 15.1 AC #3).
 import type { Drawing } from "../lib/drawings";
 import { parseDrawings } from "../lib/drawings";
+import { type ChartLayout, layoutForSave } from "../lib/chartLayout";
 import type {
   AlertCreate,
   AlertResponse,
@@ -334,4 +335,49 @@ export async function saveCoinDrawings(
     const body = await res.json().catch(() => ({}));
     throw new HttpError(res.status, `PUT /api/coin/${instrumentId}/drawings failed: ${res.status} ${JSON.stringify(body)}`);
   }
+}
+
+// Story 32.6: this coin's chart layout, one server-side resource per instrument. The OpenAPI schema
+// types the body as a free-form object, so the raw layout comes back unparsed: the caller runs it
+// through `normalizeLayout` (stale values fall back, never a blank chart). The GET seeds a coin
+// opened for the first time from the default template (`seeded`).
+export async function fetchCoinLayout(instrumentId: string): Promise<{ layout: unknown; seeded: boolean }> {
+  const res = await fetch(`/api/coin/${encodeURIComponent(instrumentId)}/layout`);
+  if (!res.ok) throw new HttpError(res.status, `GET /api/coin/${instrumentId}/layout failed: ${res.status}`);
+  const body = (await res.json()) as { layout?: unknown; seeded?: unknown };
+  return { layout: body.layout, seeded: body.seeded === true };
+}
+
+async function failLayoutRequest(method: string, path: string, res: Response): Promise<never> {
+  const body = await res.json().catch(() => ({}));
+  throw new HttpError(res.status, `${method} ${path} failed: ${res.status} ${JSON.stringify(body)}`);
+}
+
+// Replaces this coin's whole layout. `unloading` asks for `keepalive`, as `saveCoinDrawings` does
+// (a layout is a few hundred bytes, far under the browser's keepalive cap).
+export async function saveCoinLayout(instrumentId: string, layout: ChartLayout, unloading = false): Promise<void> {
+  const path = `/api/coin/${encodeURIComponent(instrumentId)}/layout`;
+  const res = await fetch(path, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ layout: layoutForSave(layout) }),
+    keepalive: unloading,
+  });
+  if (!res.ok) await failLayoutRequest("PUT", path, res);
+}
+
+// Makes this coin's saved layout and indicator list the template every newly opened coin starts from.
+export async function saveLayoutAsDefault(instrumentId: string): Promise<void> {
+  const path = `/api/coin/${encodeURIComponent(instrumentId)}/layout/save-as-default`;
+  const res = await fetch(path, { method: "POST" });
+  if (!res.ok) await failLayoutRequest("POST", path, res);
+}
+
+// Replaces this coin's layout and indicator list with the template; drawings are untouched.
+// Returns the raw layout the server now holds for the coin.
+export async function resetLayoutToDefault(instrumentId: string): Promise<unknown> {
+  const path = `/api/coin/${encodeURIComponent(instrumentId)}/layout/reset-to-default`;
+  const res = await fetch(path, { method: "POST" });
+  if (!res.ok) await failLayoutRequest("POST", path, res);
+  return ((await res.json()) as { layout?: unknown }).layout;
 }

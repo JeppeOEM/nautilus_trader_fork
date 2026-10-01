@@ -46,6 +46,9 @@ const coordinateToTimeMock = vi.fn();
 const timeToCoordinateMock = vi.fn();
 const fitContentMock = vi.fn();
 const scrollToRealTimeMock = vi.fn();
+// Story 32.6: the visible-range subscription, shared so a test can fire the handler.
+const subscribeRangeMock = vi.fn();
+const unsubscribeRangeMock = vi.fn();
 
 // One shared counter so each chart.addPane() call gets its own, stable, ever-increasing
 // index -- mirrors the real library's paneIndex() behaviour closely enough for the
@@ -141,7 +144,7 @@ vi.mock("lightweight-charts", () => ({
   createChart: (...args: unknown[]) => createChartMock(...args),
 }));
 
-const { default: LightweightChart, INDICATOR_PANE_PX, PRICE_PANE_PX, VOLUME_PANE_PX } = await import("./LightweightChart");
+const { default: LightweightChart, INDICATOR_PANE_PX, PRICE_PANE_PX, VOLUME_PANE_PX, VISIBLE_BARS_DEBOUNCE_MS } = await import("./LightweightChart");
 
 // Story 15.9: the candlestick series' fallback color literals (LightweightChart.tsx's
 // `cssVar(name, fallback)` calls) resolve deterministically under jsdom, since no
@@ -202,6 +205,11 @@ type ChartTestProps = {
   onDrawingSettings?: (id: string) => void;
   fibActive?: boolean;
   onFibPlace?: (a: { time: Time; price: number }, b: { time: Time; price: number }) => void;
+  panes?: IndicatorPaneSpec[];
+  initialPaneHeights?: Record<string, number>;
+  onPaneHeights?: (heights: Record<string, number>) => void;
+  initialVisibleBars?: number;
+  onVisibleBars?: (bars: number) => void;
 };
 
 function chartElement(props: ChartTestProps) {
@@ -238,6 +246,8 @@ beforeEach(() => {
   coordinateToTimeMock.mockReset().mockReturnValue(null);
   fitContentMock.mockReset();
   scrollToRealTimeMock.mockReset();
+  subscribeRangeMock.mockReset();
+  unsubscribeRangeMock.mockReset();
   timeToCoordinateMock.mockReset().mockImplementation((t: number) => t);
   // Identity defaults: a spec at price P sits at y=P, and a clicked/dragged y of Y
   // reads back as price Y -- individual tests override these when they need
@@ -266,8 +276,8 @@ beforeEach(() => {
       coordinateToLogical: (x: number) => x / 10,
       fitContent: fitContentMock,
       scrollToRealTime: scrollToRealTimeMock,
-      subscribeVisibleLogicalRangeChange: vi.fn(),
-      unsubscribeVisibleLogicalRangeChange: vi.fn(),
+      subscribeVisibleLogicalRangeChange: subscribeRangeMock,
+      unsubscribeVisibleLogicalRangeChange: unsubscribeRangeMock,
     }),
   }));
 });
@@ -1922,5 +1932,150 @@ describe("Fibonacci placement drag (Story 32.5)", () => {
     fireEvent.mouseDown(container.firstElementChild!, { clientX: 10, clientY: 100, button: 0 });
     fireEvent.mouseMove(window, { buttons: 1, clientX: 60, clientY: 130 });
     expect(attachPrimitiveMock).not.toHaveBeenCalled();
+  });
+});
+
+describe("LightweightChart layout restore and reports (Story 32.6)", () => {
+  const bars = (n: number) => Array.from({ length: n }, (_, i) => ({ time: (1000 + i) as never, open: 1, high: 2, low: 0.5, close: 1.5 }));
+  const volumeSpec = () => makePaneSpec("volume", { kind: "Histogram" });
+  const rsiSpec = () => makePaneSpec("RSI");
+  const fireRange = (from: number, to: number) =>
+    act(() => {
+      (subscribeRangeMock.mock.calls[0][0] as (r: { from: number; to: number } | null) => void)({ from, to });
+    });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("pins the saved heights (price included) instead of the defaults when the axis is not measured yet", () => {
+    timeScaleHeightMock.mockReturnValue(0);
+    render(chartElement({ panes: [volumeSpec(), rsiSpec()], initialPaneHeights: { price: 420, volume: 90, RSI: 220 } }));
+
+    expect(pricePaneMock.setStretchFactor).toHaveBeenLastCalledWith(420);
+    expect(addedPane(0).setStretchFactor).toHaveBeenLastCalledWith(90);
+    expect(addedPane(1).setStretchFactor).toHaveBeenLastCalledWith(220);
+  });
+
+  it("uses a pane's own measured height over the saved one once the axis is known", () => {
+    const { rerender } = render(chartElement({ panes: [volumeSpec()], initialPaneHeights: { volume: 90 } }));
+    pricePaneMock.getHeight.mockReturnValue(400);
+    addedPane(0).getHeight.mockReturnValue(200); // dragged
+
+    rerender(chartElement({ panes: [volumeSpec(), rsiSpec()], initialPaneHeights: { volume: 90 } }));
+
+    expect(addedPane(0).setStretchFactor).toHaveBeenLastCalledWith(200);
+  });
+
+  it("reports the heights after a press that moved a divider, and nothing for a press that moved none", () => {
+    const onPaneHeights = vi.fn();
+    const { container } = render(chartElement({ panes: [volumeSpec()], onPaneHeights }));
+    const chartBox = container.firstElementChild as HTMLElement; // the element the chart is created in
+    pricePaneMock.getHeight.mockReturnValue(500);
+    addedPane(0).getHeight.mockReturnValue(120);
+
+    fireEvent.pointerDown(chartBox);
+    fireEvent.pointerUp(window);
+    expect(onPaneHeights).not.toHaveBeenCalled();
+
+    fireEvent.pointerDown(chartBox);
+    pricePaneMock.getHeight.mockReturnValue(460);
+    addedPane(0).getHeight.mockReturnValue(160); // the divider was dragged up
+    fireEvent.pointerUp(window);
+    expect(onPaneHeights).toHaveBeenCalledTimes(1);
+    expect(onPaneHeights).toHaveBeenCalledWith({ price: 460, volume: 160 });
+  });
+
+  it("never reports a height change it made itself (a pane added with no press)", () => {
+    const onPaneHeights = vi.fn();
+    const { rerender } = render(chartElement({ panes: [volumeSpec()], onPaneHeights }));
+    pricePaneMock.getHeight.mockReturnValue(500);
+    addedPane(0).getHeight.mockReturnValue(120);
+
+    rerender(chartElement({ panes: [volumeSpec(), rsiSpec()], onPaneHeights }));
+    fireEvent.pointerUp(window);
+
+    expect(onPaneHeights).not.toHaveBeenCalled();
+  });
+
+  it("shows the saved number of bars with the latest at the right, once, when the first candles arrive", () => {
+    const { rerender } = render(chartElement({ data: [], initialVisibleBars: 80 }));
+    expect(setVisibleLogicalRangeMock).not.toHaveBeenCalled(); // nothing to zoom on yet
+
+    rerender(chartElement({ data: bars(300), initialVisibleBars: 80 }));
+    expect(setVisibleLogicalRangeMock).toHaveBeenCalledTimes(1);
+    expect(setVisibleLogicalRangeMock).toHaveBeenCalledWith({ from: 299 - 80 + 0.5, to: 299.5 });
+
+    rerender(chartElement({ data: bars(301), initialVisibleBars: 80 }));
+    expect(setVisibleLogicalRangeMock).toHaveBeenCalledTimes(1); // not again on later data
+  });
+
+  it("reports a zoom once per burst, after the quiet period, and never the restore itself", () => {
+    vi.useFakeTimers();
+    const onVisibleBars = vi.fn();
+    render(chartElement({ data: bars(300), initialVisibleBars: 80, onVisibleBars }));
+
+    fireRange(219.5, 299.5); // the library echoing our own restore: 80 bars
+    act(() => void vi.advanceTimersByTime(VISIBLE_BARS_DEBOUNCE_MS * 2));
+    expect(onVisibleBars).not.toHaveBeenCalled();
+
+    for (const width of [90, 100, 110, 120, 130]) {
+      fireRange(299.5 - width, 299.5);
+      act(() => void vi.advanceTimersByTime(50));
+    }
+    expect(onVisibleBars).not.toHaveBeenCalled();
+    act(() => void vi.advanceTimersByTime(VISIBLE_BARS_DEBOUNCE_MS));
+    expect(onVisibleBars).toHaveBeenCalledTimes(1);
+    expect(onVisibleBars).toHaveBeenCalledWith(130);
+  });
+
+  it("stays silent before the saved zoom was applied, so the library's own first fit cannot overwrite it", () => {
+    vi.useFakeTimers();
+    const onVisibleBars = vi.fn();
+    render(chartElement({ data: [], initialVisibleBars: 80, onVisibleBars }));
+
+    fireRange(0, 200);
+    act(() => void vi.advanceTimersByTime(VISIBLE_BARS_DEBOUNCE_MS * 2));
+
+    expect(onVisibleBars).not.toHaveBeenCalled();
+  });
+
+  it("reports a zoom still pending when the chart goes away (a timeframe change)", () => {
+    vi.useFakeTimers();
+    const onVisibleBars = vi.fn();
+    const { unmount } = render(chartElement({ data: bars(300), initialVisibleBars: 80, onVisibleBars }));
+    fireRange(179.5, 299.5);
+
+    unmount();
+
+    expect(onVisibleBars).toHaveBeenCalledWith(120);
+  });
+
+  it("reports a zoom still pending when the page is left (pagehide)", () => {
+    vi.useFakeTimers();
+    const onVisibleBars = vi.fn();
+    render(chartElement({ data: bars(300), initialVisibleBars: 80, onVisibleBars }));
+    fireRange(179.5, 299.5);
+
+    act(() => {
+      window.dispatchEvent(new Event("pagehide"));
+    });
+
+    expect(onVisibleBars).toHaveBeenCalledTimes(1);
+    expect(onVisibleBars).toHaveBeenCalledWith(120);
+    act(() => void vi.advanceTimersByTime(VISIBLE_BARS_DEBOUNCE_MS * 2));
+    expect(onVisibleBars).toHaveBeenCalledTimes(1); // the debounce timer was cleared
+  });
+
+  it("does not report in Lines mode (its axis is not bars)", () => {
+    vi.useFakeTimers();
+    const onVisibleBars = vi.fn();
+    render(chartElement({ mode: "lines", data: bars(300), initialVisibleBars: 80, onVisibleBars }));
+
+    fireRange(0, 200);
+    act(() => void vi.advanceTimersByTime(VISIBLE_BARS_DEBOUNCE_MS * 2));
+
+    expect(onVisibleBars).not.toHaveBeenCalled();
+    expect(setVisibleLogicalRangeMock).not.toHaveBeenCalled();
   });
 });

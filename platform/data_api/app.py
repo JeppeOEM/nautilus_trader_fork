@@ -56,6 +56,7 @@ from data_api.routes import candles as candles_routes
 from data_api.routes import drawings as drawings_routes
 from data_api.routes import indicator_series as indicator_series_routes
 from data_api.routes import indicators as indicators_routes
+from data_api.routes import layout as layout_routes
 from data_api.routes import metrics as metrics_routes
 from data_api.routes import rankings as rankings_routes
 from data_api.routes import snapshots as snapshots_routes
@@ -214,6 +215,7 @@ app.include_router(candles_routes.router)
 app.include_router(indicator_series_routes.router)
 app.include_router(drawings_routes.router)
 app.include_router(indicators_routes.router)
+app.include_router(layout_routes.router)
 app.include_router(snapshots_routes.router)
 app.include_router(metrics_routes.router)
 app.include_router(live_ws.router)

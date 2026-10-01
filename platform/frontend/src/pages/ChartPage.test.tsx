@@ -17,7 +17,23 @@ const drawingsApi = vi.hoisted(() => ({
   server: [] as unknown[],
   save: vi.fn().mockResolvedValue(undefined),
 }));
+// Story 32.6: the layout resource. `server` is what GET answers per instrument (absent = the built-in
+// layout); `get` answers through a thenable that settles synchronously, so a page renders ready
+// inside `render`'s own act exactly as it did before the layout had to load first. The tests that
+// look at the loading state hand `get` a real promise instead.
+const layoutApi = vi.hoisted(() => ({
+  server: {} as Record<string, unknown>,
+  get: vi.fn(),
+  save: vi.fn(),
+  saveDefault: vi.fn(),
+  reset: vi.fn(),
+}));
+const route = vi.hoisted(() => ({ iid: "BTC-USD-PERP.DYDX" }));
 vi.mock("../api/client", () => ({
+  fetchCoinLayout: (...args: unknown[]) => layoutApi.get(...args),
+  saveCoinLayout: (...args: unknown[]) => layoutApi.save(...args),
+  saveLayoutAsDefault: (...args: unknown[]) => layoutApi.saveDefault(...args),
+  resetLayoutToDefault: (...args: unknown[]) => layoutApi.reset(...args),
   fetchCoinDrawings: vi.fn(() => Promise.resolve(drawingsApi.server)),
   saveCoinDrawings: (...args: unknown[]) => drawingsApi.save(...args),
   fetchCoinIndicatorConfig: vi.fn().mockResolvedValue([]),
@@ -115,7 +131,7 @@ vi.mock("../hooks/usePickerIndicatorValues", () => {
 
 vi.mock("react-router", async (importOriginal) => {
   const actual = await importOriginal<typeof import("react-router")>();
-  return { ...actual, useParams: () => ({ iid: "BTC-USD-PERP.DYDX" }) };
+  return { ...actual, useParams: () => ({ iid: route.iid }) };
 });
 
 // The subset of LightweightChart's props this page test asserts on. The stub records
@@ -139,6 +155,10 @@ interface ChartStubProps {
     configurable?: boolean;
   }[];
   onLegendAction?: (action: "hide" | "settings" | "remove", group: string) => void;
+  initialPaneHeights?: Record<string, number>;
+  onPaneHeights?: (heights: Record<string, number>) => void;
+  initialVisibleBars?: number;
+  onVisibleBars?: (bars: number) => void;
   priceLines?: PriceLineSpec[];
   onPriceClick?: (price: number) => void;
   onPriceLineDrag?: (id: string, price: number) => void;
@@ -186,6 +206,32 @@ const render = (ui: ReactElement) =>
 const { default: ChartPage } = await import("./ChartPage");
 const { fetchCoinIndicatorConfig } = await import("../api/client");
 const { SAVE_DEBOUNCE_MS, SAVE_RETRY_MS } = await import("../hooks/useChartDrawings");
+const { BUILT_IN_LAYOUT } = await import("../lib/chartLayout");
+type ChartLayout = import("../lib/chartLayout").ChartLayout;
+
+const IID = "BTC-USD-PERP.DYDX";
+const layoutOf = (patch: Partial<ChartLayout> = {}): ChartLayout => ({ ...BUILT_IN_LAYOUT, ...patch });
+// A promise-like that has already settled: `.then` runs its callback at once, so the layout GET lands
+// while the page renders instead of a microtask later.
+function settled<T>(value: T): PromiseLike<T> & { catch: () => unknown } {
+  const thenable = {
+    then: (onOk?: (v: T) => unknown) => {
+      onOk?.(value);
+      return thenable;
+    },
+    catch: () => thenable,
+  };
+  return thenable as unknown as PromiseLike<T> & { catch: () => unknown };
+}
+/** The layout the page last saved for `iid` (the argument of its latest PUT). */
+function lastSaved(iid = IID): ChartLayout {
+  const calls = layoutApi.save.mock.calls.filter((c) => c[0] === iid);
+  return calls[calls.length - 1][1] as ChartLayout;
+}
+const flushSave = () =>
+  act(async () => {
+    await vi.advanceTimersByTimeAsync(SAVE_DEBOUNCE_MS + 1);
+  });
 // The tools that save a drawing are off until the coin's drawings have loaded (Story 32.5): a test
 // that clicks one renders through this, which lets the (mocked) GET settle first.
 async function renderReady(ui: ReactElement): Promise<ReturnType<typeof render>> {
@@ -214,6 +260,14 @@ beforeEach(() => {
   mocks.venueMarket = null;
   mocks.precision = { price: 2, size: 3 };
   drawingsApi.server = [];
+  route.iid = IID;
+  layoutApi.server = {};
+  layoutApi.get.mockReset().mockImplementation((iid: string) =>
+    settled({ layout: layoutApi.server[iid] ?? layoutOf(), seeded: layoutApi.server[iid] === undefined }),
+  );
+  layoutApi.save.mockReset().mockResolvedValue(undefined);
+  layoutApi.saveDefault.mockReset().mockResolvedValue(undefined);
+  layoutApi.reset.mockReset().mockResolvedValue(layoutOf());
   drawingsApi.save.mockReset().mockResolvedValue(undefined);
   mocks.liveBar = null;
   mocks.session = { candles: [], volume: [], completeFrom: null };
@@ -606,14 +660,16 @@ describe("ChartPage toolbars and timeframe (spec A8.1)", () => {
     expect([last(hooks.candlesBar), last(hooks.liveBar), last(hooks.pickerBar)]).toEqual([14400, 14400, 14400]);
   });
 
-  it("remembers the timeframe per coin across a remount", () => {
+  it("remembers the timeframe per coin across a remount, through the server's layout", () => {
     const first = render(page());
     fireEvent.click(screen.getByRole("button", { name: "Timeframe 1D" }));
-    first.unmount();
+    first.unmount(); // flushes the pending save
+    layoutApi.server[IID] = lastSaved();
 
+    hooks.candlesBar = [];
     render(page());
     expect(screen.getByRole("button", { name: "Timeframe 1D" })).toHaveAttribute("aria-pressed", "true");
-    expect(last(hooks.candlesBar)).toBe(86400);
+    expect(hooks.candlesBar.every((bar) => bar === 86400)).toBe(true); // the first request already used it
   });
 
   // Story 32.4 (2026-09-30): still no toggle. The chart area alone is light, by operator decision,
@@ -629,6 +685,7 @@ describe("ChartPage toolbars and timeframe (spec A8.1)", () => {
       "Candles",
       "Lines",
       "Indicators",
+      "Layout",
       "Alert",
       "Fit",
       "Latest",
@@ -700,7 +757,6 @@ describe("ChartPage indicators dialog (spec A4.1)", () => {
 });
 
 describe("ChartPage volume toggle (Story 32.2)", () => {
-  const VOLUME_KEY = "chart-volume:BTC-USD-PERP.DYDX";
   const paneIds = () => (lastChartProps.current?.panes ?? []).map((p) => p.id);
   async function openDialog(): Promise<HTMLElement> {
     render(page());
@@ -719,24 +775,25 @@ describe("ChartPage volume toggle (Story 32.2)", () => {
     expect(toggle.compareDocumentPosition(categories) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
-  it("removes the volume pane when switched off and stores 'off' under chart-volume:{iid}", async () => {
+  it("removes the volume pane when switched off and saves volume: false in the coin's layout", async () => {
     const dialog = await openDialog();
 
     fireEvent.click(within(dialog).getByRole("checkbox", { name: "Volume" }));
 
     expect(paneIds()).toEqual([]);
-    expect(localStorage.getItem(VOLUME_KEY)).toBe("off");
+    cleanup(); // flushes the pending save
+    expect(lastSaved().volume).toBe(false);
   });
 
   it("restores the off state on reload", () => {
-    localStorage.setItem(VOLUME_KEY, "off");
+    layoutApi.server[IID] = layoutOf({ volume: false });
     render(page());
 
     expect(paneIds()).toEqual([]);
   });
 
   it("puts volume first, before every indicator pane, when switched back on", async () => {
-    localStorage.setItem(VOLUME_KEY, "off");
+    layoutApi.server[IID] = layoutOf({ volume: false });
     picker.values = { "RelativeStrengthIndex_period=14.value": [] };
     const dialog = await openDialog();
     expect(paneIds()).toEqual(["RelativeStrengthIndex_period=14.value"]);
@@ -744,7 +801,8 @@ describe("ChartPage volume toggle (Story 32.2)", () => {
     fireEvent.click(within(dialog).getByRole("checkbox", { name: "Volume" }));
 
     expect(paneIds()).toEqual(["volume", "RelativeStrengthIndex_period=14.value"]);
-    expect(localStorage.getItem(VOLUME_KEY)).toBe("on");
+    cleanup();
+    expect(lastSaved().volume).toBe(true);
   });
 
   it("shows volume again after hide (eye) then off then on in the Indicators dialog", async () => {
@@ -759,7 +817,7 @@ describe("ChartPage volume toggle (Story 32.2)", () => {
   });
 
   it("keeps the choice across a timeframe change", async () => {
-    localStorage.setItem(VOLUME_KEY, "off");
+    layoutApi.server[IID] = layoutOf({ volume: false });
     render(page());
 
     fireEvent.click(screen.getByRole("button", { name: "Timeframe 5m" }));
@@ -782,14 +840,14 @@ describe("ChartPage volume toggle (Story 32.2)", () => {
     const withPane = totalWith();
     on.unmount();
 
-    localStorage.setItem(VOLUME_KEY, "off");
+    layoutApi.server[IID] = layoutOf({ volume: false });
     render(page());
     expect(paneIds()).toEqual([]);
 
     expect(totalWith()).toBe(withPane);
   });
 
-  it("defaults to on and logs one console.error when localStorage throws", () => {
+  it("still renders, with volume on and nothing imported, when localStorage is blocked", () => {
     const errors = vi.spyOn(console, "error").mockImplementation(() => {});
     const getItem = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
       throw new Error("blocked");
@@ -798,7 +856,7 @@ describe("ChartPage volume toggle (Story 32.2)", () => {
       render(page());
 
       expect(paneIds()).toEqual(["volume"]);
-      expect(errors.mock.calls.filter((c) => String(c[0]).startsWith("chart-volume"))).toHaveLength(1);
+      expect(errors).not.toHaveBeenCalled();
     } finally {
       getItem.mockRestore();
       errors.mockRestore();
@@ -1597,7 +1655,8 @@ describe("ChartPage legend controls (Story 32.3)", () => {
 
     legend("remove", "volume");
     expect(lastChartProps.current!.panes!.map((p) => p.id)).toEqual([]);
-    expect(localStorage.getItem("chart-volume:BTC-USD-PERP.DYDX")).toBe("off");
+    cleanup();
+    expect(lastSaved().volume).toBe(false);
     expect(saveConfigMock).not.toHaveBeenCalled();
   });
 
@@ -2192,5 +2251,298 @@ describe("drawing settings and failed saves (Story 32.5 review)", () => {
     );
     await renderReady(page());
     expect(lastChartProps.current?.priceLines?.map((l) => l.price)).toEqual([5, 6]);
+  });
+});
+
+describe("ChartPage layout that comes back as it was left (Story 32.6)", () => {
+  const SAVED = layoutOf({
+    bar_seconds: 3600,
+    mode: "lines",
+    volume: false,
+    crosshair: false,
+    pane_heights: { "RelativeStrengthIndex_period=14": 220 }, // keyed by instance id, as the chart reports
+    visible_bars: 80,
+  });
+  const openLayoutMenu = () => fireEvent.click(screen.getByRole("button", { name: "Layout" }));
+  const httpError = (status: number) => Object.assign(new Error(`HTTP ${status}`), { status });
+
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.restoreAllMocks();
+  });
+
+  it("restores every saved field before the first candle request (return to coin)", () => {
+    layoutApi.server[IID] = SAVED;
+    render(page());
+
+    expect(hooks.candlesBar.length).toBeGreaterThan(0);
+    expect(hooks.candlesBar.every((bar) => bar === 3600)).toBe(true);
+    expect(screen.getByRole("button", { name: "Timeframe 1H" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "Lines" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Crosshair toggle" })).toHaveAttribute("aria-pressed", "false");
+    expect(lastChartProps.current!.panes!.map((p) => p.id)).toEqual([]); // volume off
+    expect(lastChartProps.current!.initialPaneHeights).toEqual({ "RelativeStrengthIndex_period=14": 220 });
+    expect(lastChartProps.current!.initialVisibleBars).toBe(80);
+  });
+
+  it("draws nothing and requests no candles until the layout has loaded", async () => {
+    let answer: (value: unknown) => void = () => {};
+    layoutApi.get.mockReturnValueOnce(new Promise((resolve) => (answer = resolve)));
+    render(page());
+
+    expect(screen.getByText(/Loading the layout/)).toBeInTheDocument();
+    expect(screen.queryByTestId("chart-stub")).toBeNull();
+    expect(hooks.candlesBar).toEqual([]);
+
+    await act(async () => answer({ layout: SAVED, seeded: false }));
+    expect(screen.getByTestId("chart-stub")).toBeInTheDocument();
+    expect(hooks.candlesBar.every((bar) => bar === 3600)).toBe(true);
+  });
+
+  it("says so, and draws no chart, when the layout cannot be loaded", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    layoutApi.get.mockRejectedValueOnce(httpError(500));
+    render(page());
+    await act(async () => {});
+
+    expect(screen.getByRole("alert")).toHaveTextContent(/layout of BTC-USD-PERP.DYDX could not be loaded/);
+    expect(screen.queryByTestId("chart-stub")).toBeNull();
+  });
+
+  it("falls back to 1m with ONE console.error for a stale timeframe, and saves the corrected layout", async () => {
+    vi.useFakeTimers();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    layoutApi.server[IID] = { ...layoutOf(), bar_seconds: 30 };
+    render(page());
+
+    expect(screen.getByRole("button", { name: "Timeframe 1m" })).toHaveAttribute("aria-pressed", "true");
+    expect(errors.mock.calls.filter((c) => String(c[0]).startsWith("chart layout"))).toHaveLength(1);
+    await flushSave();
+    expect(lastSaved().bar_seconds).toBe(60);
+  });
+
+  it("sends one PUT for a burst of five zoom changes", async () => {
+    vi.useFakeTimers();
+    render(page());
+    for (const bars of [90, 91, 92, 93, 94]) {
+      act(() => lastChartProps.current!.onVisibleBars!(bars));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60);
+      });
+    }
+    await flushSave();
+
+    expect(layoutApi.save).toHaveBeenCalledTimes(1);
+    expect(lastSaved().visible_bars).toBe(94);
+  });
+
+  it("saves the timeframe, mode, crosshair, volume and dragged pane heights as they change", async () => {
+    vi.useFakeTimers();
+    render(page());
+    fireEvent.click(screen.getByRole("button", { name: "Timeframe 15m" }));
+    fireEvent.click(screen.getByRole("button", { name: "Lines" }));
+    fireEvent.click(screen.getByRole("button", { name: "Crosshair toggle" }));
+    act(() => lastChartProps.current!.onPaneHeights!({ price: 480, volume: 150 }));
+    await flushSave();
+
+    expect(lastSaved()).toMatchObject({
+      bar_seconds: 900,
+      mode: "lines",
+      crosshair: false,
+      pane_heights: { price: 480, volume: 150 },
+    });
+    act(() => lastChartProps.current!.onPaneHeights!({ volume: 170 }));
+    await flushSave();
+    expect(lastSaved().pane_heights).toEqual({ price: 480, volume: 170 });
+  });
+
+  it("saves a placed fixed-range profile (kind, rows, value area, anchors) and restores it", async () => {
+    vi.useFakeTimers();
+    const bars = [1, 2, 3, 4, 5].map((t) => ({ time: t, open: t, high: t + 1, low: t, close: t + 1 }));
+    mocks.candles = bars;
+    mocks.volume = bars.map((b) => ({ time: b.time, value: 10 }));
+    const first = render(page());
+    fireEvent.click(screen.getByRole("button", { name: "Fixed range volume profile tool" }));
+    act(() => lastChartProps.current!.onRangeSelect!({ time: 2, price: 1 }, { time: 4, price: 2 }));
+    await flushSave();
+
+    expect(lastSaved().volume_profile).toMatchObject({ kind: "fixed", rows: 24, value_area_pct: 70, start: 2, end: 4 });
+    first.unmount();
+    layoutApi.server[IID] = lastSaved();
+
+    render(page());
+    expect(lastChartProps.current!.volumeProfiles).toHaveLength(1);
+    expect(lastChartProps.current!.volumeProfiles![0].profile.totalVolume).toBeCloseTo(30);
+    expect(lastChartProps.current!.volumeProfiles![0].edges).toEqual({ startTime: 2, endTime: 4 });
+  });
+
+  it("drops a saved height whose indicator is gone with the next drag, keeping volume's", async () => {
+    vi.useFakeTimers();
+    layoutApi.server[IID] = layoutOf({ pane_heights: { volume: 150, "Gone_period=3": 90 } });
+    render(page());
+    act(() => lastChartProps.current!.onPaneHeights!({ price: 480 }));
+    await flushSave();
+
+    expect(lastSaved().pane_heights).toEqual({ price: 480, volume: 150 });
+  });
+
+  it("profiles a restored fixed range once a later candle load reaches it", () => {
+    const bar = (t: number) => ({ time: t, open: t, high: t + 1, low: t, close: t + 1 });
+    layoutApi.server[IID] = layoutOf({
+      volume_profile: { ...BUILT_IN_LAYOUT.volume_profile, kind: "fixed", start: 2, end: 4 },
+    });
+    const load = (bars: ReturnType<typeof bar>[]): void => {
+      mocks.candles = bars;
+      mocks.volume = bars.map((b) => ({ time: b.time, value: 10 }));
+    };
+    load([bar(8), bar(9)]); // the first window does not reach the range
+    const { rerender } = render(page());
+    expect(lastChartProps.current!.volumeProfiles![0].profile.totalVolume).toBe(0);
+
+    load([2, 3, 4, 8, 9].map(bar)); // scrolled back
+    rerender(page());
+    expect(lastChartProps.current!.volumeProfiles![0].profile.totalVolume).toBeCloseTo(30);
+  });
+
+  it("restores a saved visible-range profile with its row count and value area", () => {
+    layoutApi.server[IID] = layoutOf({
+      volume_profile: { ...BUILT_IN_LAYOUT.volume_profile, kind: "visible", rows: 48, value_area_pct: 60 },
+    });
+    render(page());
+
+    expect(screen.getByRole("button", { name: "Remove visible range volume profile" })).toBeInTheDocument();
+  });
+
+  it("restores a saved session profile and saves its period", async () => {
+    vi.useFakeTimers();
+    layoutApi.server[IID] = layoutOf({
+      volume_profile: { ...BUILT_IN_LAYOUT.volume_profile, kind: "session", session: "weekly", rows: 24 },
+    });
+    render(page());
+
+    expect(mocks.sessionArgs).toMatchObject({ enabled: true, barSeconds: 300 }); // the weekly period's fetch
+    await flushSave();
+    expect(layoutApi.save).not.toHaveBeenCalled(); // what was restored is not saved back
+  });
+
+  it("imports the old chart-timeframe / chart-volume keys once, then removes them", async () => {
+    vi.useFakeTimers();
+    localStorage.setItem(`chart-timeframe:${IID}`, "300");
+    localStorage.setItem(`chart-volume:${IID}`, "off");
+    render(page());
+
+    expect(screen.getByRole("button", { name: "Timeframe 5m" })).toHaveAttribute("aria-pressed", "true");
+    expect(lastChartProps.current!.panes!.map((p) => p.id)).toEqual([]);
+    expect(localStorage.getItem(`chart-timeframe:${IID}`)).not.toBeNull(); // not before the save landed
+    await flushSave();
+
+    expect(lastSaved()).toMatchObject({ bar_seconds: 300, volume: false });
+    expect(localStorage.getItem(`chart-timeframe:${IID}`)).toBeNull();
+    expect(localStorage.getItem(`chart-volume:${IID}`)).toBeNull();
+    cleanup();
+    layoutApi.server[IID] = lastSaved();
+    layoutApi.save.mockClear();
+    render(page()); // a second open imports nothing and saves nothing
+    await flushSave();
+    expect(layoutApi.save).not.toHaveBeenCalled();
+  });
+
+  it("keeps a second coin's layout apart from the first coin's edits", () => {
+    const first = render(page());
+    fireEvent.click(screen.getByRole("button", { name: "Timeframe 4H" }));
+    first.unmount();
+    expect(lastSaved(IID).bar_seconds).toBe(14400);
+
+    route.iid = "ETH-USD-PERP.DYDX";
+    layoutApi.server["ETH-USD-PERP.DYDX"] = layoutOf({ bar_seconds: 300 });
+    layoutApi.save.mockClear();
+    const second = render(page());
+    expect(screen.getByRole("button", { name: "Timeframe 5m" })).toHaveAttribute("aria-pressed", "true");
+    fireEvent.click(screen.getByRole("button", { name: "Crosshair toggle" }));
+    second.unmount();
+
+    expect(layoutApi.save.mock.calls.map((c) => c[0])).toEqual(["ETH-USD-PERP.DYDX"]);
+    expect(layoutApi.get.mock.calls.map((c) => c[0])).toEqual([IID, "ETH-USD-PERP.DYDX"]);
+  });
+
+  it("shows a refused save as an alert", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    layoutApi.save.mockRejectedValue(httpError(422));
+    render(page());
+    fireEvent.click(screen.getByRole("button", { name: "Crosshair toggle" }));
+    await flushSave();
+
+    expect(screen.getByRole("alert")).toHaveTextContent(/layout was refused by the server \(HTTP 422\)/);
+  });
+
+  describe("the Layout menu", () => {
+    it("Save as default asks first, naming what it overwrites, then saves a pending edit before the template", async () => {
+      vi.useFakeTimers();
+      const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+      render(page());
+      fireEvent.click(screen.getByRole("button", { name: "Crosshair toggle" })); // a pending edit
+      openLayoutMenu();
+      fireEvent.click(screen.getByRole("menuitem", { name: "Save as default" }));
+      await act(async () => {});
+
+      expect(confirm.mock.calls[0][0]).toMatch(/overwrites the current default/);
+      expect(layoutApi.saveDefault).toHaveBeenCalledWith(IID);
+      expect(layoutApi.save.mock.invocationCallOrder[0]).toBeLessThan(layoutApi.saveDefault.mock.invocationCallOrder[0]);
+      expect(screen.queryByRole("menuitem")).toBeNull(); // the menu closed
+    });
+
+    it("does nothing when the confirm is declined", async () => {
+      vi.spyOn(window, "confirm").mockReturnValue(false);
+      render(page());
+      openLayoutMenu();
+      fireEvent.click(screen.getByRole("menuitem", { name: "Save as default" }));
+      openLayoutMenu();
+      fireEvent.click(screen.getByRole("menuitem", { name: "Reset to default" }));
+      await act(async () => {});
+
+      expect(layoutApi.saveDefault).not.toHaveBeenCalled();
+      expect(layoutApi.reset).not.toHaveBeenCalled();
+    });
+
+    it("Reset to default replaces the layout and indicators, reloads the picker and keeps the drawings", async () => {
+      const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+      layoutApi.server[IID] = SAVED;
+      layoutApi.reset.mockResolvedValue(layoutOf({ bar_seconds: 900, volume: true, crosshair: true }));
+      drawingsApi.server = [{ kind: "hline", id: "hline-1", price: 5 }];
+      await renderReady(page());
+      const pickerLoads = vi.mocked(fetchCoinIndicatorConfig).mock.calls.length;
+      drawingsApi.save.mockClear();
+
+      openLayoutMenu();
+      fireEvent.click(screen.getByRole("menuitem", { name: "Reset to default" }));
+      await act(async () => {});
+
+      expect(confirm.mock.calls[0][0]).toMatch(/Its drawings are kept/);
+      expect(screen.getByRole("button", { name: "Timeframe 15m" })).toHaveAttribute("aria-pressed", "true");
+      expect(lastChartProps.current!.panes!.map((p) => p.id)).toEqual(["volume"]);
+      expect(lastChartProps.current!.priceLines).toHaveLength(1); // drawings untouched
+      expect(vi.mocked(fetchCoinIndicatorConfig).mock.calls.length).toBeGreaterThan(pickerLoads);
+      expect(drawingsApi.save).not.toHaveBeenCalled();
+      expect(layoutApi.save).not.toHaveBeenCalled(); // the reset layout is the server's, not saved back
+    });
+
+    it("shows a failed Save as default or Reset as an alert", async () => {
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      vi.spyOn(window, "confirm").mockReturnValue(true);
+      layoutApi.saveDefault.mockRejectedValue(httpError(404));
+      layoutApi.reset.mockRejectedValue(httpError(500));
+      render(page());
+
+      openLayoutMenu();
+      fireEvent.click(screen.getByRole("menuitem", { name: "Save as default" }));
+      await act(async () => {});
+      expect(screen.getByRole("alert")).toHaveTextContent(/could not be saved as the default/);
+
+      openLayoutMenu();
+      fireEvent.click(screen.getByRole("menuitem", { name: "Reset to default" }));
+      await act(async () => {});
+      expect(screen.getByRole("alert")).toHaveTextContent(/could not be reset to the default/);
+    });
   });
 });

@@ -54,9 +54,10 @@ import { DEFAULT_SOURCE, entryId, splitSeriesKey } from "../lib/indicatorId";
 import { outputStyle } from "../lib/indicatorStyle";
 import { assignPaneColor } from "../components/chart/paneColors";
 import type { IndicatorCatalogEntry, IndicatorConfigEntry } from "../api/schema";
-import { BAR_SECONDS, useCandles } from "../hooks/useCandles";
+import { useCandles } from "../hooks/useCandles";
 import { TIMEFRAMES } from "../timeframes";
-import { loadVolumeOn, saveVolumeOn } from "../lib/chartVolume";
+import { type ChartLayout, type VolumeProfileLayout } from "../lib/chartLayout";
+import { useChartLayout } from "../hooks/useChartLayout";
 import { useReplay } from "../hooks/useReplay";
 import { useSessionCandles } from "../hooks/useSessionCandles";
 import { useVisibleRange } from "../hooks/useVisibleRange";
@@ -70,18 +71,31 @@ import { useSnapshotSeries } from "../hooks/useSnapshotSeries";
 // price pane (spec §A1), before indicator panes; the Indicators dialog toggles it (Story 32.2).
 const DEFAULT_PANE_IDS = ["volume"];
 
+// Story 32.6: the saved volume profile -> the page's profile state, and back. The layout holds ONE
+// profile (`kind`); the page can show a visible-range, a fixed-range and a session profile at once.
+// Known limit: only one is saved, the highest of session > fixed (the first placed range, with its
+// anchors) > visible; the others are not restored. Upgrade path: a list of profiles in the layout
+// table (Story 32.7 adds auto-anchored and TPO settings to this table).
+const EMPTY_PROFILE: VolumeProfile = { rows: [], poc: 0, vah: 0, val: 0, totalVolume: 0 };
 
-function timeframeStorageKey(instrumentId: string): string {
-  return `chart-timeframe:${instrumentId}`;
+function profileSettings(vp: VolumeProfileLayout): typeof DEFAULT_VOLUME_PROFILE_SETTINGS {
+  return { ...DEFAULT_VOLUME_PROFILE_SETTINGS, rowCount: vp.rows, valueAreaPercent: vp.value_area_pct };
 }
 
-function loadTimeframe(instrumentId: string): number {
-  try {
-    const saved = Number(localStorage.getItem(timeframeStorageKey(instrumentId)));
-    return TIMEFRAMES.some((t) => t.seconds === saved) ? saved : BAR_SECONDS;
-  } catch {
-    return BAR_SECONDS;
-  }
+function initialSessionConfig(vp: VolumeProfileLayout): SessionConfig | null {
+  if (vp.kind !== "session") return null;
+  const period = vp.session as SessionPeriod; // checked against SESSION_PERIODS by normalizeLayout
+  const preset: SessionPreset = vp.hd ? "svp-hd" : period === "daily" ? "svp" : "pvp";
+  const settings = { ...profileSettings(vp), sessionCount: DEFAULT_SESSION_COUNT };
+  return { preset, period, settings, sinceSeconds: sessionSince(period, settings.sessionCount) };
+}
+
+/** The row count and value-area percent as the resource stores them (the inputs allow more). */
+function storable(settings: { rowCount: number; valueAreaPercent: number }): { rows: number; value_area_pct: number } {
+  return {
+    rows: Math.min(500, Math.max(2, Math.round(settings.rowCount))),
+    value_area_pct: Math.min(100, Math.max(1, settings.valueAreaPercent)),
+  };
 }
 
 // `key` is "{indicator_id}.{output_attr}" and indicator_id starts with the catalog name.
@@ -229,6 +243,12 @@ interface ChartInnerProps {
   volumeOn: boolean;
   onVolumeChange: (on: boolean) => void;
   onTimeframeChange: (seconds: number) => void;
+  /** Story 32.6: the coin's saved layout. Only its initial values seed this component (it is remounted
+   * on a timeframe change and on Reset to default); every later change goes up through `onLayout`. */
+  layout: ChartLayout;
+  onLayout: (change: (prev: ChartLayout) => ChartLayout) => void;
+  onSaveAsDefault: () => void;
+  onResetToDefault: () => void;
 }
 
 function ChartInner({
@@ -240,13 +260,25 @@ function ChartInner({
   volumeOn,
   onVolumeChange,
   onTimeframeChange,
+  layout,
+  onLayout,
+  onSaveAsDefault,
+  onResetToDefault,
 }: ChartInnerProps) {
   const [chart, setChart] = useState<IChartApi | null>(null);
+  const patchLayout = useCallback(
+    (patch: Partial<ChartLayout>): void => onLayout((prev) => ({ ...prev, ...patch })),
+    [onLayout],
+  );
+  const [layoutMenuOpen, setLayoutMenuOpen] = useState(false);
+  // The saved layout's values this component starts from (read once; later saves never re-seed it).
+  const [initialLayout] = useState(layout);
   // Story 15.7: Candles/Lines toggle (AC #1) -- `dashboard.py`'s own #btn-candles/
   // #btn-lines pair, carried forward. Only one of useCandles/useSnapshotSeries is ever
   // `enabled` at a time (Task 2): the disabled one issues no requests but keeps whatever
   // it already loaded, so toggling back doesn't re-fetch from scratch.
-  const [mode, setMode] = useState<ChartMode>("candles");
+  const [mode, setMode] = useState<ChartMode>(initialLayout.mode);
+  useEffect(() => patchLayout({ mode }), [mode, patchLayout]);
   // Story 18.1 (AC #1): which drawing tool is armed; "cursor" is the do-nothing
   // default. The placed lines' own state lives HERE too, not inside LightweightChart
   // -- that component stays a pure function of its props (AD-F4), this page owns the
@@ -271,24 +303,36 @@ function ChartInner({
       }),
     [allDrawings],
   );
-  const [crosshairOn, setCrosshairOn] = useState(true);
+  const [crosshairOn, setCrosshairOn] = useState(initialLayout.crosshair);
+  useEffect(() => patchLayout({ crosshair: crosshairOn }), [crosshairOn, patchLayout]);
   const [indicatorDialogOpen, setIndicatorDialogOpen] = useState(false);
   const [alertDialogOpen, setAlertDialogOpen] = useState(false);
   const [catalog, setCatalog] = useState<Record<string, IndicatorCatalogEntry>>({});
   // Story 18.2: the trendline's first click, held until the second click completes it
   // (or Esc / a tool change discards it); `drawings` is the placed set.
   const [pendingAnchor, setPendingAnchor] = useState<TrendlineAnchor | null>(null);
-  const [frvps, setFrvps] = useState<FrvpEntry[]>([]);
-  const [frvpSettings, setFrvpSettings] = useState(DEFAULT_VOLUME_PROFILE_SETTINGS);
+  const savedProfile = initialLayout.volume_profile;
+  // A saved fixed range comes back with an empty profile that the first loaded candles fill (below).
+  const [frvps, setFrvps] = useState<FrvpEntry[]>(() =>
+    savedProfile.kind === "fixed" && savedProfile.start !== null && savedProfile.end !== null
+      ? [{ id: "frvp-1", startTime: savedProfile.start, endTime: savedProfile.end, profile: EMPTY_PROFILE }]
+      : [],
+  );
+  const [frvpSettings, setFrvpSettings] = useState(() =>
+    savedProfile.kind === "fixed" ? profileSettings(savedProfile) : DEFAULT_VOLUME_PROFILE_SETTINGS,
+  );
+  const frvpHydratedRef = useRef(frvps.length === 0);
   const [edgeGhost, setEdgeGhost] = useState<EdgeGhost | null>(null);
-  const nextFrvpIdRef = useRef(1);
+  const nextFrvpIdRef = useRef(frvps.length + 1);
   // Story 18.7: the single visible-range profile ("always recompute", unlike FRVP above).
-  const [vrvpActive, setVrvpActive] = useState(false);
+  const [vrvpActive, setVrvpActive] = useState(savedProfile.kind === "visible");
   // Story 18.8: the single session-profile slot (SVP / SVP HD presets). `sinceSeconds` is
   // fixed when the config is set (an event handler), so render stays pure.
-  const [sessionCfg, setSessionCfg] = useState<SessionConfig | null>(null);
+  const [sessionCfg, setSessionCfg] = useState<SessionConfig | null>(() => initialSessionConfig(savedProfile));
   const [sessionCache] = useState<SessionProfileCache>(() => new Map());
-  const [vrvpSettings, setVrvpSettings] = useState(DEFAULT_VOLUME_PROFILE_SETTINGS);
+  const [vrvpSettings, setVrvpSettings] = useState(() =>
+    savedProfile.kind === "visible" ? profileSettings(savedProfile) : DEFAULT_VOLUME_PROFILE_SETTINGS,
+  );
   const {
     candles,
     volume: fullVolume,
@@ -369,8 +413,8 @@ function ChartInner({
   // is fetched regardless, for the profiles and the measurement tool); picker entries
   // follow, one series per `{indicator_id}.{output_attr}` key, placed by the catalog's `panel`.
   // Story 32.3: the eye of the Volume row only hides it (collapses its pane); the state is not
-  // persisted. Known limit: a timeframe change remounts this component and shows it again.
-  // Upgrade path: Story 32.6's per-coin layout resource.
+  // persisted (it is not a field of Story 32.6's layout). Known limit: a timeframe change remounts
+  // this component and shows it again. Upgrade path: a `volume_hidden` field in the layout table.
   const [volumeHidden, setVolumeHidden] = useState(false);
   // Switching volume off also clears the eye, so switching it back on shows it (not collapsed).
   const changeVolumeOn = useCallback(
@@ -381,6 +425,9 @@ function ChartInner({
     [onVolumeChange],
   );
   const entriesById = useMemo(() => new Map(pickerEntries.map((e) => [entryId(e), e] as const)), [pickerEntries]);
+  // The coin's indicator instance ids: the pane ids a saved height may still belong to.
+  const paneIdsRef = useRef<ReadonlySet<string>>(new Set());
+  paneIdsRef.current = new Set(entriesById.keys());
   const panes = useMemo<IndicatorPaneSpec[]>(
     () => [
       ...(volumeOn
@@ -739,6 +786,64 @@ function ChartInner({
       cfg ? { ...cfg, settings, sinceSeconds: sessionSince(cfg.period, settings.sessionCount) } : cfg,
     );
 
+  // Story 32.6: a restored fixed range is profiled once the candles it needs are loaded. A range
+  // outside the loaded window stays empty (drawn as nothing, removable) rather than dropped, so the
+  // saved layout is not rewritten behind the operator's back, and is profiled again on every candle
+  // load (a scroll-back) until it has rows.
+  useEffect(() => {
+    if (frvpHydratedRef.current || candles.length === 0 || fullVolume.length === 0) return;
+    const filled = (f: FrvpEntry): boolean => f.profile.rows.length > 0;
+    if (frvps.every(filled)) {
+      frvpHydratedRef.current = true;
+      return;
+    }
+    setFrvps((all) => {
+      const next = all.map((f) =>
+        filled(f) ? f : { ...f, profile: buildRangeProfile(candles, fullVolume, f.startTime, f.endTime, frvpSettings) },
+      );
+      // Unchanged unless a range gained rows: an empty recompute must not re-render (and re-run this).
+      return next.some((f, i) => f !== all[i] && filled(f)) ? next : all;
+    });
+  }, [candles, fullVolume, frvpSettings, frvps]);
+
+  // Story 32.6: the volume-profile state, reported as the layout's one profile (see the Known limit
+  // at `EMPTY_PROFILE`). The saved layout's own table is the base, so an inactive kind keeps its values.
+  const savedProfileRef = useRef(layout.volume_profile);
+  savedProfileRef.current = layout.volume_profile;
+  const sessionKey = sessionCfg ? `${sessionCfg.preset}|${sessionCfg.period}|${sessionCfg.settings.rowCount}|${sessionCfg.settings.valueAreaPercent}` : "";
+  const firstFrvp = frvps[0];
+  useEffect(() => {
+    const base = savedProfileRef.current;
+    let next: VolumeProfileLayout;
+    if (sessionCfg) {
+      next = { ...base, ...storable(sessionCfg.settings), kind: "session", session: sessionCfg.period, hd: sessionCfg.preset === "svp-hd", start: null, end: null };
+    } else if (firstFrvp) {
+      next = { ...base, ...storable(frvpSettings), kind: "fixed", start: Math.round(firstFrvp.startTime), end: Math.round(firstFrvp.endTime) };
+    } else if (vrvpActive) {
+      next = { ...base, ...storable(vrvpSettings), kind: "visible", start: null, end: null };
+    } else {
+      next = { ...base, kind: "off", start: null, end: null };
+    }
+    patchLayout({ volume_profile: next });
+    // `sessionCfg` is keyed by what is saved from it: its `sinceSeconds` changes on every period tick.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionKey, firstFrvp?.startTime, firstFrvp?.endTime, frvpSettings, vrvpActive, vrvpSettings, patchLayout]);
+
+  // Story 32.6: dragged pane heights and the zoom, merged into the layout as the chart reports them.
+  // A saved height whose indicator is no longer on the coin is dropped with the next drag, so the
+  // table never outgrows the panes that can exist (`price`, `volume`, one per indicator instance).
+  const handlePaneHeights = useCallback(
+    (heights: Record<string, number>): void =>
+      onLayout((prev) => {
+        const kept = Object.entries(prev.pane_heights).filter(
+          ([id]) => id === "price" || id === "volume" || paneIdsRef.current.has(id),
+        );
+        return { ...prev, pane_heights: { ...Object.fromEntries(kept), ...heights } };
+      }),
+    [onLayout],
+  );
+  const handleVisibleBars = useCallback((bars: number): void => patchLayout({ visible_bars: bars }), [patchLayout]);
+
   const allVolumeProfiles = useMemo<VolumeProfileSpec[]>(
     () =>
       vrvpProfile
@@ -905,6 +1010,39 @@ function ChartInner({
           <button type="button" onClick={() => setIndicatorDialogOpen(true)}>
             Indicators
           </button>
+          {/* Story 32.6: the coin's layout is saved as the default new coins start from, or reset to it. */}
+          <button
+            type="button"
+            aria-haspopup="menu"
+            aria-expanded={layoutMenuOpen}
+            onClick={() => setLayoutMenuOpen((open) => !open)}
+          >
+            Layout
+          </button>
+          {layoutMenuOpen && (
+            <span role="menu" aria-label="Layout">
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setLayoutMenuOpen(false);
+                  onSaveAsDefault();
+                }}
+              >
+                Save as default
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setLayoutMenuOpen(false);
+                  onResetToDefault();
+                }}
+              >
+                Reset to default
+              </button>
+            </span>
+          )}
           <button type="button" onClick={() => setAlertDialogOpen(true)}>
             Alert
           </button>
@@ -1007,6 +1145,10 @@ function ChartInner({
             onMeasureEnd={handleMeasureEnd}
             onPriceLineDrag={handlePriceLineDrag}
             onLegendAction={handleLegendAction}
+            initialPaneHeights={initialLayout.pane_heights}
+            onPaneHeights={handlePaneHeights}
+            initialVisibleBars={initialLayout.visible_bars}
+            onVisibleBars={handleVisibleBars}
             // Story 18.4: the real-time forming bar would reveal "future" price action.
             liveBar={replay.mode === "active" ? null : liveBar}
             markerTime={replay.markerTime}
@@ -1124,50 +1266,95 @@ export default function ChartPage() {
 }
 
 function ChartForCoin({ instrumentId }: { instrumentId: string }) {
-  const [barSeconds, setBarSeconds] = useState(() => loadTimeframe(instrumentId));
+  // Story 32.6: the coin's saved layout (timeframe, volume, mode, crosshair, pane heights, zoom, volume
+  // profile) is loaded BEFORE the chart mounts, so its first candle request already uses the saved
+  // timeframe. Held here, not in ChartInner (remounted on every timeframe change).
+  const layoutStore = useChartLayout(instrumentId);
+  const { layout, update: updateLayout } = layoutStore;
 
-  // Held here, not in ChartInner (remounted on every timeframe change): the drawings, so they stay
-  // in place across the remount instead of reloading, and the instrument's decimals from the first
-  // candles response, so a remounted chart labels from its first paint.
+  // Held here for the same reason: the drawings, so they stay in place across the remount instead of
+  // reloading, and the instrument's decimals from the first candles response, so a remounted chart
+  // labels from its first paint.
   const drawingStore = useChartDrawings(instrumentId);
   const [precision, setPrecision] = useState<InstrumentPrecision | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
 
-  // Held here, not in ChartInner: that is remounted on every timeframe change.
-  const [volumeOn, setVolumeOn] = useState(() => loadVolumeOn(instrumentId));
   const changeVolume = useCallback(
-    (on: boolean): void => {
-      setVolumeOn(on);
-      saveVolumeOn(instrumentId, on);
-    },
-    [instrumentId],
+    (on: boolean): void => updateLayout((prev) => ({ ...prev, volume: on })),
+    [updateLayout],
   );
-
   const changeTimeframe = useCallback(
-    (seconds: number): void => {
-      setBarSeconds(seconds);
-      try {
-        localStorage.setItem(timeframeStorageKey(instrumentId), String(seconds));
-      } catch {
-        // storage blocked: the choice just won't survive a reload
-      }
-    },
-    [instrumentId],
+    (seconds: number): void => updateLayout((prev) => ({ ...prev, bar_seconds: seconds })),
+    [updateLayout],
   );
 
-  // Keyed by instrument AND bar size: a fresh LightweightChart + useCandles set per
+  const { saveAsDefault, resetToDefault } = layoutStore;
+  const handleSaveAsDefault = useCallback((): void => {
+    // The confirm names what is overwritten: every coin opened for the first time starts from it.
+    const ok = window.confirm(
+      `Save ${instrumentId}'s layout and indicators as the default? This overwrites the current default that every coin opened for the first time starts from. Drawings are not part of it.`,
+    );
+    if (!ok) return;
+    setActionError(null);
+    saveAsDefault().catch((err: unknown) => {
+      console.error(`ChartPage: save as default failed for ${instrumentId}`, err);
+      setActionError("The layout could not be saved as the default (see the error bar).");
+    });
+  }, [instrumentId, saveAsDefault]);
+  const handleResetToDefault = useCallback((): void => {
+    const ok = window.confirm(
+      `Reset ${instrumentId} to the default layout? This replaces its layout and indicators with the default. Its drawings are kept.`,
+    );
+    if (!ok) return;
+    setActionError(null);
+    resetToDefault().catch((err: unknown) => {
+      console.error(`ChartPage: reset to default failed for ${instrumentId}`, err);
+      setActionError("The layout could not be reset to the default (see the error bar).");
+    });
+  }, [instrumentId, resetToDefault]);
+
+  if (layout === null) {
+    return layoutStore.status === "failed" ? (
+      <p role="alert" className="chart-load-error">
+        The layout of {instrumentId} could not be loaded, so the chart is not drawn (see the error bar). A server or network failure is retried every few seconds.
+      </p>
+    ) : (
+      <p>Loading the layout of {instrumentId}...</p>
+    );
+  }
+
+  // Keyed by instrument, bar size AND reset: a fresh LightweightChart + useCandles set per
   // (coin, timeframe), rather than trying to re-point one long-lived chart instance (see
   // LightweightChart's own docstring -- lightweight-charts has no supported API for that).
   return (
-    <ChartInner
-      key={`${instrumentId}:${barSeconds}`}
-      instrumentId={instrumentId}
-      drawingStore={drawingStore}
-      heldPrecision={precision}
-      onPrecision={setPrecision}
-      barSeconds={barSeconds}
-      volumeOn={volumeOn}
-      onVolumeChange={changeVolume}
-      onTimeframeChange={changeTimeframe}
-    />
+    <>
+      <ChartInner
+        // `revision` is bumped by Reset to default in the same render as the reset layout: ChartInner
+        // remounts once and re-reads every field (and its picker refetches the reset indicator list).
+        key={`${instrumentId}:${layout.bar_seconds}:${layoutStore.revision}`}
+        instrumentId={instrumentId}
+        drawingStore={drawingStore}
+        heldPrecision={precision}
+        onPrecision={setPrecision}
+        barSeconds={layout.bar_seconds}
+        volumeOn={layout.volume}
+        onVolumeChange={changeVolume}
+        onTimeframeChange={changeTimeframe}
+        layout={layout}
+        onLayout={updateLayout}
+        onSaveAsDefault={handleSaveAsDefault}
+        onResetToDefault={handleResetToDefault}
+      />
+      {layoutStore.saveError !== null && (
+        <p role="alert" className="chart-load-error">
+          {layoutStore.saveError}
+        </p>
+      )}
+      {actionError !== null && (
+        <p role="alert" className="chart-load-error">
+          {actionError}
+        </p>
+      )}
+    </>
   );
 }

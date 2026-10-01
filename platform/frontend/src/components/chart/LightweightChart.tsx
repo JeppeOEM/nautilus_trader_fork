@@ -9,6 +9,7 @@ import {
   LineStyle,
   type ISeriesApi,
   type LineWidth,
+  type LogicalRange,
   type LineData,
   type MouseEventParams,
   type Time,
@@ -268,7 +269,23 @@ interface LightweightChartProps {
   /** Story 32.3: a legend eye / gear / x was pressed; `group` is the indicator instance id (the
    * spec's `group`) or "volume". The page persists the change; this component only reports. */
   onLegendAction?: (action: LegendAction, group: string) => void;
+  /** Story 32.6: the pane heights (px, by pane group id; "price" for the main pane) a saved layout
+   * restores. Read once at mount, then kept as the last known heights. */
+  initialPaneHeights?: Record<string, number>;
+  /** Story 32.6: the operator released the pointer after a press that changed a pane's height (a
+   * divider drag): the heights of every pane then, by the same ids. Never fired for a relayout this
+   * component did itself (a pane added or removed). */
+  onPaneHeights?: (heights: Record<string, number>) => void;
+  /** Story 32.6: how many bars to show, the latest at the right edge, applied once when the first
+   * candles of the Candles mode arrive. The zoom only, never an absolute scroll position. */
+  initialVisibleBars?: number;
+  /** Story 32.6: the visible bar count after a zoom, debounced; silent until `initialVisibleBars`
+   * was applied (the library's own first fit must not overwrite the saved zoom) and in Lines mode. */
+  onVisibleBars?: (bars: number) => void;
 }
+
+/** Quiet period after the last visible-range event before the zoom is reported. */
+export const VISIBLE_BARS_DEBOUNCE_MS = 300;
 
 type AnySeriesApi = ISeriesApi<"Line", Time> | ISeriesApi<"Histogram", Time>;
 
@@ -360,6 +377,18 @@ function snapshotPaneHeights(
   return { price: price > 0 ? price : null, panes };
 }
 
+/** Every laid-out pane's current pixel height by group id ("price" for the main pane). */
+function currentPaneHeights(chart: IChartApi, registry: Map<string, PaneEntry>): Record<string, number> {
+  const out: Record<string, number> = {};
+  const price = chart.panes()[0]?.getHeight() ?? 0;
+  if (price > 0) out.price = Math.round(price);
+  for (const entry of registry.values()) {
+    const px = entry.pane?.getHeight() ?? 0;
+    if (entry.pane && px > 0) out[entry.group] = Math.round(px);
+  }
+  return out;
+}
+
 /**
  * Pins every pane to its pixel size and resizes the chart to their sum. The library splits the
  * chart by stretch factor, so a stretch factor equal to the pane's px, with a chart height of
@@ -373,8 +402,11 @@ function layoutPaneHeights(
   before: ReturnType<typeof snapshotPaneHeights>,
   priceKnown: boolean,
   remembered: Map<string, number>,
+  known: Map<string, number>,
 ): boolean {
-  const pricePx = priceKnown ? (before.price ?? PRICE_PANE_PX) : PRICE_PANE_PX;
+  // `known`: the heights a saved layout restored or the operator last dragged to (Story 32.6). It
+  // ranks below a pane's own measured height and a collapsed pane's remembered one, above the default.
+  const pricePx = priceKnown ? (before.price ?? known.get("price") ?? PRICE_PANE_PX) : (known.get("price") ?? PRICE_PANE_PX);
   chart.panes()[0]?.setStretchFactor(pricePx);
   let total = pricePx;
   const seen = new Set<IPaneApi<Time>>();
@@ -386,7 +418,7 @@ function layoutPaneHeights(
     // height is short by its share of the axis: only the defaults are trustworthy then.
     // A pane the legend eye collapsed comes back at the height it had (Story 32.3); that height
     // was measured, so it is trusted even before the axis was.
-    const px = (priceKnown ? before.panes.get(entry.pane) : undefined) ?? remembered.get(entry.group) ?? fallback;
+    const px = (priceKnown ? before.panes.get(entry.pane) : undefined) ?? remembered.get(entry.group) ?? known.get(entry.group) ?? fallback;
     remembered.delete(entry.group);
     entry.pane.setStretchFactor(px);
     total += px;
@@ -515,6 +547,10 @@ export default function LightweightChart({
   onProfileEdgeCommit,
   liveBar,
   onLegendAction,
+  initialPaneHeights,
+  onPaneHeights,
+  initialVisibleBars,
+  onVisibleBars,
 }: LightweightChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -526,6 +562,17 @@ export default function LightweightChart({
   const legendItemsRef = useRef<LegendSeries[]>([]);
   // Story 32.3: the px height of each pane the legend eye collapsed, by group, until it is shown.
   const collapsedHeightsRef = useRef<Map<string, number>>(new Map());
+  // Story 32.6: last known pane heights by group id ("price" included): the saved layout's at mount,
+  // then whatever the operator dragged to. A ref read at mount, so a later prop change re-pins nothing.
+  const knownHeightsRef = useRef<Map<string, number>>(new Map(Object.entries(initialPaneHeights ?? {})));
+  const paneHeightsCallbackRef = useRef(onPaneHeights);
+  paneHeightsCallbackRef.current = onPaneHeights;
+  const visibleBarsCallbackRef = useRef(onVisibleBars);
+  visibleBarsCallbackRef.current = onVisibleBars;
+  // Whether the saved zoom was applied (reports are held back until then) and the count last known.
+  const visibleBarsReadyRef = useRef(false);
+  const lastVisibleBarsRef = useRef<number | null>(null);
+  const initialVisibleBarsRef = useRef(initialVisibleBars);
   const legendActionRef = useRef(onLegendAction);
   legendActionRef.current = onLegendAction;
   const handleLegendAction = useCallback(
@@ -656,6 +703,7 @@ export default function LightweightChart({
             snapshotPaneHeights(chart, registry),
             false,
             collapsedHeightsRef.current,
+            knownHeightsRef.current,
           );
         }
       });
@@ -696,6 +744,87 @@ export default function LightweightChart({
     // series creation itself lives in the `[mode]` effect below, not here, so it can run
     // again on a Candles<->Lines toggle without a second createChart() call.
     // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Story 32.6: a divider drag, as the operator's own pointer press. lightweight-charts 5.2.1 fires no
+  // event for it, so heights are read at pointer-down and again at pointer-up (every pane, so a
+  // press that did not move a divider reports nothing); the layout this component pins itself
+  // (a pane added or removed) happens outside a press and is never reported.
+  //
+  // Known limit: a pane added or removed by a data refresh while the pointer is down is reported as
+  // if dragged (the heights reported are the real ones, so only the saved layout gains them).
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    let before: Record<string, number> | null = null;
+    const onDown = (): void => {
+      const chart = chartRef.current;
+      before = chart ? currentPaneHeights(chart, panesRef.current) : null;
+    };
+    const onUp = (): void => {
+      const start = before;
+      before = null;
+      const chart = chartRef.current;
+      if (!start || !chart) return;
+      const now = currentPaneHeights(chart, panesRef.current);
+      if (!Object.keys(now).some((id) => id in start && Math.abs(now[id] - start[id]) >= 1)) return;
+      for (const [id, px] of Object.entries(now)) knownHeightsRef.current.set(id, px);
+      paneHeightsCallbackRef.current?.(now);
+    };
+    // A press the browser cancels (a touch turned into a scroll, a lost pointer) moved no divider:
+    // forgetting it keeps a later, unrelated pointerup from reporting a relayout as a drag.
+    const onCancel = (): void => {
+      before = null;
+    };
+    container.addEventListener("pointerdown", onDown);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onCancel);
+    return () => {
+      container.removeEventListener("pointerdown", onDown);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onCancel);
+    };
+  }, []);
+
+  // Story 32.6: the zoom, reported once per burst. Silent until the saved zoom was applied (the data
+  // effect below) and while the candlestick series is absent (Lines mode's axis is snapshot seconds,
+  // not bars). Known limit: a window resize changes how many bars fit and is reported as a zoom.
+  useEffect(() => {
+    const chart = chartRef.current;
+    if (!chart) return;
+    const timeScale = chart.timeScale();
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    let pending: number | null = null;
+    const report = (): void => {
+      timer = null;
+      if (pending === null) return;
+      const bars = pending;
+      pending = null;
+      lastVisibleBarsRef.current = bars;
+      visibleBarsCallbackRef.current?.(bars);
+    };
+    const handler = (range: LogicalRange | null): void => {
+      if (!range || !visibleBarsReadyRef.current || seriesRef.current === null) return;
+      const bars = Math.round(range.to - range.from);
+      if (timer !== null) clearTimeout(timer);
+      timer = null;
+      pending = bars >= 1 && bars !== lastVisibleBarsRef.current ? bars : null;
+      if (pending !== null) timer = setTimeout(report, VISIBLE_BARS_DEBOUNCE_MS);
+    };
+    // A zoom made just before the chart goes away (a timeframe change, navigation) or the page
+    // is left is reported at once rather than lost with the debounce timer.
+    const flush = (): void => {
+      if (timer === null) return;
+      clearTimeout(timer);
+      report();
+    };
+    timeScale.subscribeVisibleLogicalRangeChange(handler);
+    window.addEventListener("pagehide", flush);
+    return () => {
+      timeScale.unsubscribeVisibleLogicalRangeChange(handler);
+      window.removeEventListener("pagehide", flush);
+      flush();
+    };
   }, []);
 
   useEffect(() => {
@@ -803,6 +932,18 @@ export default function LightweightChart({
         from: rangeBeforeUpdate.from + addedAtFront,
         to: rangeBeforeUpdate.to + addedAtFront,
       });
+    }
+
+    // Story 32.6: the saved zoom, once, with the first candles: that many bars, the latest at the
+    // right edge. From here on, zoom changes are reported (see the subscription above).
+    if (!visibleBarsReadyRef.current && data.length > 0 && chart) {
+      visibleBarsReadyRef.current = true;
+      const bars = initialVisibleBarsRef.current;
+      if (bars !== undefined && bars > 0) {
+        const last = data.length - 1;
+        chart.timeScale().setVisibleLogicalRange({ from: last - bars + 0.5, to: last + 0.5 });
+        lastVisibleBarsRef.current = bars;
+      }
     }
   }, [data, mode]);
 
@@ -923,7 +1064,14 @@ export default function LightweightChart({
       }
     }
     if (panesChanged || !laidOutRef.current) {
-      laidOutRef.current = layoutPaneHeights(chart, registry, heightsBefore, laidOutRef.current, collapsedHeightsRef.current);
+      laidOutRef.current = layoutPaneHeights(
+        chart,
+        registry,
+        heightsBefore,
+        laidOutRef.current,
+        collapsedHeightsRef.current,
+        knownHeightsRef.current,
+      );
     }
 
     // Story 32.1: exactly one gap painter per non-overlay pane (volume and indicator panes),

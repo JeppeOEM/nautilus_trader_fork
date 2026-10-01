@@ -29,6 +29,7 @@ read candles exactly as the chart does), builds the response models and maps fai
 
 import json
 import logging
+import threading
 import tomllib
 from collections.abc import Sequence
 from pathlib import Path
@@ -37,6 +38,7 @@ from typing import Any
 from fastapi import APIRouter
 from fastapi import HTTPException
 from fastapi import Request
+from fastapi.concurrency import run_in_threadpool
 from kernel.venues import market_kind
 from kernel.venues import venue_of
 from pydantic import BaseModel
@@ -67,6 +69,11 @@ _MAX_BAR_SECONDS = 604_800
 # config (MEM-01 extended to this route's own request shape).
 _MAX_INDICATOR_VALUES_ENTRIES = 50
 
+# Serializes every read-modify-write of the preference files that more than one route writes
+# (`chart_indicators.toml`: this PUT and the layout route's seed/reset), so two requests in the one
+# `data_api` process never lose each other's update. Known limit: in-process only, not across
+# processes. Upgrade path: a file lock (`fcntl.flock`) on a sibling lock file.
+PREFERENCES_LOCK = threading.Lock()
 _log = logging.getLogger(__name__)
 router = APIRouter()
 
@@ -194,6 +201,51 @@ def _check_sources(entries: Sequence[indicator_picker.IndicatorRequest]) -> None
             raise HTTPException(status_code=422, detail=f"invalid source: {exc}") from exc
 
 
+def check_indicator_entries(entries: Sequence[preferences.IndicatorEntry]) -> None:
+    """
+    Apply the one validation every writer of an indicator list shares (the PUT here, the layout
+    route's seed and reset): names must be in the merged catalog (400) and each source one its
+    indicator can take (422).
+    """
+    unknown = [e.name for e in entries if e.name not in indicator_picker.merged_catalog()]
+    if unknown:
+        raise HTTPException(status_code=400, detail=f"unknown indicator(s): {unknown}")
+    _check_sources(entries)
+
+
+def validate_indicator_payload(payload: Any) -> list[preferences.IndicatorEntry]:
+    """Parse and validate a raw JSON entry list (400 malformed or unknown name, 422 bad source)."""
+    try:
+        entries = [_parse_config_entry(e) for e in payload]
+    except (KeyError, TypeError, AttributeError) as exc:
+        raise HTTPException(
+            status_code=400, detail=f"invalid indicator config payload: {exc}"
+        ) from exc
+    check_indicator_entries(entries)
+    return entries
+
+
+def _store_entries(instrument_id: str, entries: list[preferences.IndicatorEntry]) -> None:
+    path = Path(CHART_INDICATOR_CONFIG_PATH)
+    with PREFERENCES_LOCK:
+        try:
+            config = preferences.load_chart_indicators(path)
+        except (tomllib.TOMLDecodeError, UnicodeDecodeError, KeyError, TypeError) as exc:
+            raise HTTPException(
+                status_code=400, detail=f"invalid indicator config payload: {exc}"
+            ) from exc
+        config[instrument_id] = entries
+        try:
+            preferences.save_chart_indicators(config, path)
+        except OSError as exc:
+            # Distinct from the client-input branch above (400): the payload was fine, the
+            # write itself failed (e.g. the docker-mounted file isn't actually writable) --
+            # a server-side condition, never a silent/opaque failure (DATA-02).
+            raise HTTPException(
+                status_code=500, detail=f"failed to write chart_indicators.toml: {exc}"
+            ) from exc
+
+
 @router.put("/api/coin/{instrument_id}/indicators")
 async def put_coin_indicator_config(instrument_id: str, request: Request) -> dict[str, bool]:
     """
@@ -206,36 +258,15 @@ async def put_coin_indicator_config(instrument_id: str, request: Request) -> dic
     handler's contract exactly (DATA-02: never a silent/opaque failure for a client-input
     problem).
     """
-    path = Path(CHART_INDICATOR_CONFIG_PATH)
     try:
         payload = await request.json()
-        entries = [_parse_config_entry(e) for e in payload]
-        config = preferences.load_chart_indicators(path)
-        config[instrument_id] = entries
-    except (
-        json.JSONDecodeError,
-        KeyError,
-        TypeError,
-        AttributeError,
-        tomllib.TOMLDecodeError,
-        UnicodeDecodeError,
-    ) as exc:
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
         raise HTTPException(
             status_code=400, detail=f"invalid indicator config payload: {exc}"
         ) from exc
-    unknown = [e.name for e in entries if e.name not in indicator_picker.merged_catalog()]
-    if unknown:
-        raise HTTPException(status_code=400, detail=f"unknown indicator(s): {unknown}")
-    _check_sources(entries)
-    try:
-        preferences.save_chart_indicators(config, path)
-    except OSError as exc:
-        # Distinct from the client-input branch above (400): the payload was fine, the
-        # write itself failed (e.g. the docker-mounted file isn't actually writable) --
-        # a server-side condition, never a silent/opaque failure (DATA-02).
-        raise HTTPException(
-            status_code=500, detail=f"failed to write chart_indicators.toml: {exc}"
-        ) from exc
+    entries = validate_indicator_payload(payload)
+    # Blocking file I/O under a threading lock: off the event loop.
+    await run_in_threadpool(_store_entries, instrument_id, entries)
     return {"ok": True}
 
 

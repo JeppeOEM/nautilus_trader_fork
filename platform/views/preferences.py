@@ -15,7 +15,8 @@
 """
 The UI preference files, and their one loader/saver each (Story 24.2 merged
 the `chart_indicator_config` and `screener_columns_config` modules here, bodies verbatim; Story 32.5
-added `chart_drawings.toml`). All three live in one directory (`CHART_PREFERENCES_DIR`, Story 32.5):
+added `chart_drawings.toml`, Story 32.6 `chart_layouts.toml`). All four live in one directory
+(`CHART_PREFERENCES_DIR`, Story 32.5):
 
 - `chart_indicators.toml`: per-instrument chart indicator
   selections (Story 10.5), a table keyed by instrument_id, each holding a list of
@@ -31,13 +32,31 @@ added `chart_drawings.toml`). All three live in one directory (`CHART_PREFERENCE
   `trendline`, `fib`, `position`) -- `load_chart_drawings`/`save_chart_drawings`. Each item is
   checked by `validate_drawing`, which names the offending field (`DrawingError`): a malformed
   item is refused, never dropped, so a saved drawing is never silently lost on a round trip.
+- `chart_layouts.toml`: per-instrument chart layout (Story 32.6), a table per instrument id holding
+  `v = 1` and the fields below, plus one reserved `[default]` table (the template a coin opened for
+  the first time is seeded from) with the same fields and a `default_indicators` array of indicator
+  entry tables (the `chart_indicators.toml` shape) -- `load_chart_layouts`/`save_chart_layouts`.
+  `default` can never be an instrument id (every id is `SYMBOL.VENUE`). Fields (`validate_layout`,
+  which names the offending key, `LayoutError`): `bar_seconds` (one of `LAYOUT_BAR_SECONDS`, the
+  frontend's TIMEFRAMES), `mode` (`candles`|`lines`), `volume` and `crosshair` (bool),
+  `pane_heights` (pane id, at most `MAX_PANE_ID_LENGTH` characters -> height, an integer of
+  1..10000 px; written on a divider drag, for the panes on screen then),
+  `visible_bars` (a finite number in (0, 100000], the zoom; never a scroll position) and
+  `volume_profile`, a table of `kind` (`off`|`visible`|`fixed`|`session`), `rows` (integer 2..500),
+  `value_area_pct` (number in (0, 100]), `session` (one of `PROFILE_SESSIONS`, the frontend's
+  SESSION_PERIODS), `hd` (bool) and the fixed range's anchors `start`/`end` (integers, UTC
+  seconds, both required and in order when `kind = "fixed"`; omitted on disk when unset, `None`
+  in memory). Unknown keys are refused, never dropped. Coin tables are loaded tolerantly for
+  `bar_seconds` and `mode` only (a value outside the supported set is returned as stored, so a
+  timeframe retired later never fails the GET; the frontend falls back with one `console.error`),
+  while the PUT validation and the `[default]` table stay strict. Drawings are never part of it.
 - `screener_columns.toml`: the screener-wide Technicals column
   selection (Story 17.5), one flat top-level `columns` array of
   `{name, params, category, bar_seconds}` tables in display order, applied to every row of the
   Rankings table -- `load_screener_columns`/`save_screener_columns`.
 
-Both are tomllib to read, tomli_w to write, and a full rewrite (not a patch). Key sets frozen
-(AD-D12): both files are bind-mounted and hand-editable, so a renamed or dropped key would silently
+All are tomllib to read, tomli_w to write, and a full rewrite (not a patch). Key sets frozen
+(AD-D12): these files are bind-mounted and hand-editable, so a renamed or dropped key would silently
 lose a saved selection on the next deploy; `views/tests/test_preferences.py` pins the written text.
 The freeze forbids renaming or dropping a key, not adding an optional one with a default: every
 existing file stays loadable. The screener's `columns` entries never carry the three new keys
@@ -457,4 +476,259 @@ def save_chart_drawings(config: dict[str, list[dict[str, Any]]], path: Path) -> 
         for instrument_id, items in config.items()
         if items
     }
+    _write_atomic(path, tomli_w.dumps(raw).encode())
+
+
+# -- chart layouts ----------------------------------------------------------------------------------
+
+# `chart_layouts.toml` (Story 32.6). `LAYOUT_BAR_SECONDS` mirrors the frontend's `timeframes.ts`
+# TIMEFRAMES (1m 5m 15m 1H 4H 1D 1W; `test_bar_seconds_mirror_the_frontend` pins the pair); the
+# candles route accepts any size, so this is the layout's own closed set.
+LAYOUT_VERSION = 1
+LAYOUT_DEFAULT_KEY = "default"
+LAYOUT_BAR_SECONDS = (60, 300, 900, 3600, 14400, 86400, 604800)
+LAYOUT_MODES = ("candles", "lines")
+PROFILE_KINDS = ("off", "visible", "fixed", "session")
+MAX_PANE_HEIGHT_PX = 10_000
+# A pane id is an indicator instance id (`indicator_id`: the catalog name plus every parameter, and
+# `:source`), which reaches ~160 characters for `CandlePattern`; the cap only bounds a hostile key.
+MAX_PANE_ID_LENGTH = 512
+MAX_VISIBLE_BARS = 100_000
+MIN_PROFILE_ROWS = 2
+MAX_PROFILE_ROWS = 500
+_LAYOUT_KEYS = frozenset(
+    {"bar_seconds", "mode", "volume", "crosshair", "pane_heights", "visible_bars", "volume_profile"}
+)
+_PROFILE_KEYS = frozenset({"kind", "rows", "value_area_pct", "session", "hd", "start", "end"})
+_PROFILE_ANCHORS = ("start", "end")
+
+# Mirrors the frontend's `SESSION_PERIODS` (the volume profile's session length); a change there
+# must change this tuple too (`test_session_periods_mirror_the_frontend` pins the pair). Story 32.7
+# adds auto-anchored and TPO settings to the `volume_profile` table.
+PROFILE_SESSIONS = ("4h", "daily", "weekly", "monthly")
+BUILTIN_DEFAULT_LAYOUT: dict[str, Any] = {
+    "bar_seconds": 60,
+    "mode": "candles",
+    "volume": True,
+    "crosshair": True,
+    "pane_heights": {},
+    "visible_bars": 120,
+    "volume_profile": {
+        "kind": "off",
+        "rows": 24,
+        "value_area_pct": 70,
+        "session": "daily",
+        "hd": False,
+        "start": None,
+        "end": None,
+    },
+}
+
+
+class LayoutError(ValueError):
+    """A layout (or the layouts file) that is not storable; `key` names what is wrong."""
+
+    def __init__(self, key: str, message: str) -> None:
+        super().__init__(f"{key}: {message}")
+        self.key = key
+        self.reason = message
+
+
+@dataclass
+class ChartLayouts:
+    """The whole `chart_layouts.toml`: a layout per instrument id plus the optional template."""
+
+    layouts: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # `None` = nothing saved as default yet (the built-in layout applies, no indicators).
+    default: dict[str, Any] | None = None
+    default_indicators: list[IndicatorEntry] = field(default_factory=list)
+
+
+def _layout_int(key: str, value: Any, low: int, high: int) -> None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise LayoutError(key, "must be an integer")
+    if value < low or value > high:
+        raise LayoutError(key, f"must be between {low} and {high}")
+
+
+def _check_profile_scalars(profile: dict[str, Any]) -> None:
+    if profile["kind"] not in PROFILE_KINDS:
+        raise LayoutError("volume_profile.kind", f"must be one of {list(PROFILE_KINDS)}")
+    _layout_int("volume_profile.rows", profile["rows"], MIN_PROFILE_ROWS, MAX_PROFILE_ROWS)
+    pct = profile["value_area_pct"]
+    if not _is_number(pct) or not 0 < pct <= 100:
+        raise LayoutError("volume_profile.value_area_pct", "must be a number above 0 up to 100")
+    if profile["session"] not in PROFILE_SESSIONS:
+        raise LayoutError("volume_profile.session", f"must be one of {list(PROFILE_SESSIONS)}")
+    if not isinstance(profile["hd"], bool):
+        raise LayoutError("volume_profile.hd", "must be a boolean")
+
+
+def _check_profile_anchor(key: str, value: Any) -> None:
+    if value is None:
+        return
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise LayoutError(f"volume_profile.{key}", "must be an integer (UTC seconds) or null")
+    if value < 0 or value > MAX_DRAWING_TIME:
+        raise LayoutError(f"volume_profile.{key}", f"must be between 0 and {MAX_DRAWING_TIME}")
+
+
+def _validate_profile(profile: Any) -> dict[str, Any]:
+    if not isinstance(profile, dict):
+        raise LayoutError("volume_profile", "must be an object")
+    _check_keys(profile, _PROFILE_KEYS - set(_PROFILE_ANCHORS), _PROFILE_KEYS, "volume_profile.")
+    _check_profile_scalars(profile)
+    out = {key: profile[key] for key in _PROFILE_KEYS - set(_PROFILE_ANCHORS)}
+    for key in _PROFILE_ANCHORS:
+        _check_profile_anchor(key, profile.get(key))
+        out[key] = profile.get(key)
+    # A fixed range needs both anchors, in order: the client would otherwise draw nothing and fall
+    # back on every open (the server is the authority, never more permissive than the reader).
+    if out["kind"] == "fixed" and (
+        out["start"] is None or out["end"] is None or out["start"] > out["end"]
+    ):
+        raise LayoutError("volume_profile.start", "a fixed range needs start <= end, both set")
+    return out
+
+
+def _check_keys(
+    table: dict[str, Any],
+    required: frozenset[str] | set[str],
+    allowed: frozenset[str],
+    prefix: str = "",
+) -> None:
+    """Refuse the first key outside `allowed`, then the first of `required` that is missing."""
+    unknown = min(set(table) - allowed, default=None)
+    if unknown is not None:
+        raise LayoutError(f"{prefix}{unknown}", "is not a field here")
+    missing = min(set(required) - set(table), default=None)
+    if missing is not None:
+        raise LayoutError(f"{prefix}{missing}", "is required")
+
+
+def _check_timeframe_and_mode(layout: dict[str, Any], *, tolerant: bool) -> None:
+    bar_seconds = layout["bar_seconds"]
+    if tolerant:
+        _layout_int("bar_seconds", bar_seconds, 1, 10**9)
+        if not isinstance(layout["mode"], str):
+            raise LayoutError("mode", "must be a string")
+        return
+    if isinstance(bar_seconds, bool) or bar_seconds not in LAYOUT_BAR_SECONDS:
+        raise LayoutError("bar_seconds", f"must be one of {list(LAYOUT_BAR_SECONDS)}")
+    if layout["mode"] not in LAYOUT_MODES:
+        raise LayoutError("mode", f"must be one of {list(LAYOUT_MODES)}")
+
+
+def _check_pane_heights(heights: Any) -> None:
+    if not isinstance(heights, dict):
+        raise LayoutError("pane_heights", "must be an object of pane id -> pixels")
+    for pane, px in heights.items():
+        if not isinstance(pane, str) or not 1 <= len(pane) <= MAX_PANE_ID_LENGTH:
+            raise LayoutError(
+                "pane_heights", f"a pane id must be a string of 1..{MAX_PANE_ID_LENGTH} characters"
+            )
+        _layout_int(f"pane_heights.{pane}", px, 1, MAX_PANE_HEIGHT_PX)
+
+
+def validate_layout(layout: Any, *, tolerant: bool = False) -> dict[str, Any]:
+    """
+    Return a normalized copy of `layout` (the optional fixed-range anchors always present, `None`
+    when unset), else raise `LayoutError` naming the key. Strict by design (DATA-07): an unknown or
+    missing key or a wrong type is refused rather than dropped or defaulted.
+
+    `tolerant=True` is for coin tables read back from disk: a `bar_seconds` outside
+    `LAYOUT_BAR_SECONDS` (any positive integer) or a `mode` outside `LAYOUT_MODES` (any string) is
+    kept as stored, so a timeframe retired after the save never makes the GET fail; the client falls
+    back to its built-in value for that field and says so. The PUT and the `[default]` table are
+    always strict.
+    """
+    if not isinstance(layout, dict):
+        raise LayoutError("layout", "must be an object")
+    _check_keys(layout, _LAYOUT_KEYS, _LAYOUT_KEYS)
+    _check_timeframe_and_mode(layout, tolerant=tolerant)
+    for key in ("volume", "crosshair"):
+        if not isinstance(layout[key], bool):
+            raise LayoutError(key, "must be a boolean")
+    _check_pane_heights(layout["pane_heights"])
+    bars = layout["visible_bars"]
+    if not _is_number(bars) or not 0 < bars <= MAX_VISIBLE_BARS:
+        raise LayoutError("visible_bars", f"must be a number above 0 up to {MAX_VISIBLE_BARS}")
+    return {
+        "bar_seconds": layout["bar_seconds"],
+        "mode": layout["mode"],
+        "volume": layout["volume"],
+        "crosshair": layout["crosshair"],
+        "pane_heights": dict(layout["pane_heights"]),
+        "visible_bars": bars,
+        "volume_profile": _validate_profile(layout["volume_profile"]),
+    }
+
+
+def _layout_table(layout: dict[str, Any]) -> dict[str, Any]:
+    """Return a validated layout as its TOML table: `v` first, unset anchors omitted (no null)."""
+    table: dict[str, Any] = {"v": LAYOUT_VERSION, **layout}
+    table["volume_profile"] = {k: v for k, v in layout["volume_profile"].items() if v is not None}
+    return table
+
+
+def _read_layout_table(name: str, table: Any, *, tolerant: bool, extra: frozenset[str]) -> Any:
+    if not isinstance(table, dict) or table.get("v") != LAYOUT_VERSION:
+        raise LayoutError(name, f"is not a v = {LAYOUT_VERSION} layout table")
+    body = {k: v for k, v in table.items() if k != "v" and k not in extra}
+    try:
+        return validate_layout(body, tolerant=tolerant)
+    except LayoutError as exc:
+        raise LayoutError(f"{name}.{exc.key}", exc.reason) from exc
+
+
+def load_chart_layouts(path: Path) -> ChartLayouts:
+    """
+    Load every coin's layout and the `[default]` template. A missing or empty file is an empty
+    `ChartLayouts`; an empty `[default]` table means no template. A malformed table raises
+    `LayoutError` (the file is hand-editable and a layout is never silently reset); coin tables are
+    tolerant of a stale `bar_seconds`/`mode`, see `validate_layout`.
+    """
+    if not path.exists():
+        return ChartLayouts()
+    with path.open("rb") as f:
+        raw = tomllib.load(f)
+    out = ChartLayouts()
+    for name, table in raw.items():
+        if name != LAYOUT_DEFAULT_KEY:
+            out.layouts[name] = _read_layout_table(name, table, tolerant=True, extra=frozenset())
+            continue
+        if not isinstance(table, dict):
+            raise LayoutError(name, "must be a table")
+        if not table:
+            continue
+        out.default = _read_layout_table(
+            name, table, tolerant=False, extra=frozenset({"default_indicators"})
+        )
+        entries = table.get("default_indicators", [])
+        if not isinstance(entries, list) or not all(
+            isinstance(e, dict) and {"name", "category"} <= set(e) for e in entries
+        ):
+            raise LayoutError(
+                "default.default_indicators", "must be a list of {name, category, ...} tables"
+            )
+        out.default_indicators = [_load_indicator_entry(name, e) for e in entries]
+    return out
+
+
+def save_chart_layouts(config: ChartLayouts, path: Path) -> None:
+    """
+    Persist `config` as TOML, a full rewrite, validated and serialized before the file is touched
+    and published atomically (`_write_atomic`). `default` is not a legal instrument id. Without a
+    default, no `[default]` table is written (its indicators are then dropped, there is no template
+    for them to belong to).
+    """
+    raw: dict[str, Any] = {}
+    for instrument_id, layout in config.layouts.items():
+        if instrument_id == LAYOUT_DEFAULT_KEY:
+            raise LayoutError(instrument_id, "is reserved for the default template")
+        raw[instrument_id] = _layout_table(validate_layout(layout, tolerant=True))
+    if config.default is not None:
+        table = _layout_table(validate_layout(config.default))
+        table["default_indicators"] = [_indicator_table(e) for e in config.default_indicators]
+        raw[LAYOUT_DEFAULT_KEY] = table
     _write_atomic(path, tomli_w.dumps(raw).encode())

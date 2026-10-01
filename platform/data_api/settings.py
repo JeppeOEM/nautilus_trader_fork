@@ -33,10 +33,10 @@ ERROR_LEDGER_DIR: str = os.environ.get(
 )
 
 # The one directory holding the UI preference files (Story 32.5): `chart_indicators.toml`,
-# `screener_columns.toml` and `chart_drawings.toml`, mounted as a directory (`./data/preferences/`)
-# so a new preference file needs no new mount. The two per-file path variables it replaced would be
-# silently ignored by a stale compose file (the files would then be written inside the container
-# and lost on the next recreate), so they refuse to start instead.
+# `screener_columns.toml`, `chart_drawings.toml` and `chart_layouts.toml`, mounted as a directory
+# (`./data/preferences/`) so a new preference file needs no new mount. The two per-file path
+# variables it replaced would be silently ignored by a stale compose file (the files would then be
+# written inside the container and lost on the next recreate), so they refuse to start instead.
 _REMOVED_PATH_VARS = {
     "CHART_INDICATOR_CONFIG_PATH": "chart_indicators.toml",
     "SCREENER_COLUMNS_CONFIG_PATH": "screener_columns.toml",
@@ -53,6 +53,7 @@ CHART_PREFERENCES_DIR: str = os.environ.get("CHART_PREFERENCES_DIR", "/app/prefe
 CHART_INDICATOR_CONFIG_PATH: str = str(Path(CHART_PREFERENCES_DIR) / "chart_indicators.toml")
 SCREENER_COLUMNS_CONFIG_PATH: str = str(Path(CHART_PREFERENCES_DIR) / "screener_columns.toml")
 CHART_DRAWINGS_PATH: str = str(Path(CHART_PREFERENCES_DIR) / "chart_drawings.toml")
+CHART_LAYOUTS_PATH: str = str(Path(CHART_PREFERENCES_DIR) / "chart_layouts.toml")
 
 
 def candles_db_path(venue: str) -> str:

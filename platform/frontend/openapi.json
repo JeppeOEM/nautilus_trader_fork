@@ -1011,6 +1011,172 @@
         }
       }
     },
+    "/api/coin/{instrument_id}/layout": {
+      "get": {
+        "summary": "Get Coin Layout",
+        "description": "Return this coin's layout, seeding it from the default on its first open.",
+        "operationId": "get_coin_layout_api_coin__instrument_id__layout_get",
+        "parameters": [
+          {
+            "name": "instrument_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Instrument Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Get Coin Layout Api Coin  Instrument Id  Layout Get"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "summary": "Put Coin Layout",
+        "description": "Replace this coin's layout with the body's `{\"layout\": {...}}` (every field required; the\nindicator list and drawings are other resources). Invalid JSON is a 400, a layout that is not\nstorable a 422 naming the key; nothing is written unless it passes, and no other coin changes.",
+        "operationId": "put_coin_layout_api_coin__instrument_id__layout_put",
+        "parameters": [
+          {
+            "name": "instrument_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Instrument Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Put Coin Layout Api Coin  Instrument Id  Layout Put"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/coin/{instrument_id}/layout/save-as-default": {
+      "post": {
+        "summary": "Save Coin Layout As Default",
+        "description": "Make this coin's layout and current indicator list the `[default]` template.",
+        "operationId": "save_coin_layout_as_default_api_coin__instrument_id__layout_save_as_default_post",
+        "parameters": [
+          {
+            "name": "instrument_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Instrument Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Save Coin Layout As Default Api Coin  Instrument Id  Layout Save As Default Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/coin/{instrument_id}/layout/reset-to-default": {
+      "post": {
+        "summary": "Reset Coin Layout To Default",
+        "description": "Replace this coin's layout and indicator list with the template; drawings are untouched.",
+        "operationId": "reset_coin_layout_to_default_api_coin__instrument_id__layout_reset_to_default_post",
+        "parameters": [
+          {
+            "name": "instrument_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Instrument Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": true,
+                  "title": "Response Reset Coin Layout To Default Api Coin  Instrument Id  Layout Reset To Default Post"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/snapshots/{instrument_id}": {
       "get": {
         "summary": "Get Snapshots",

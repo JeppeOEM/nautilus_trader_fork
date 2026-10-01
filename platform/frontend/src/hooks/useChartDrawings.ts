@@ -31,7 +31,7 @@ function removeLegacyHlines(instrumentId: string): void {
 }
 
 /** An HTTP status carried by a failed request (`HttpError`), read without importing the class. */
-function httpStatus(err: unknown): number | null {
+export function httpStatus(err: unknown): number | null {
   const status = (err as { status?: unknown } | null)?.status;
   return typeof status === "number" ? status : null;
 }

@@ -125,7 +125,8 @@ def test_a_malformed_instrument_id_is_a_400(
 
 def _settings_run(env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     code = (
-        "import data_api.settings as s; print(s.CHART_INDICATOR_CONFIG_PATH, s.CHART_DRAWINGS_PATH)"
+        "import data_api.settings as s; "
+        "print(s.CHART_INDICATOR_CONFIG_PATH, s.CHART_DRAWINGS_PATH, s.CHART_LAYOUTS_PATH)"
     )
     return subprocess.run(  # noqa: S603
         [sys.executable, "-c", code], env=env, capture_output=True, text=True, check=False
@@ -137,11 +138,12 @@ def _base_env() -> dict[str, str]:
     return {k: v for k, v in os.environ.items() if k not in drop}
 
 
-def test_all_three_preference_paths_derive_from_the_one_directory() -> None:
+def test_all_the_preference_paths_derive_from_the_one_directory() -> None:
     run = _settings_run({**_base_env(), "CHART_PREFERENCES_DIR": "/somewhere/prefs"})
     assert run.stdout.split() == [
         "/somewhere/prefs/chart_indicators.toml",
         "/somewhere/prefs/chart_drawings.toml",
+        "/somewhere/prefs/chart_layouts.toml",
     ]
 
 

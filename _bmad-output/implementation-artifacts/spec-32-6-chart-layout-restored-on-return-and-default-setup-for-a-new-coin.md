@@ -2,7 +2,9 @@
 title: 'Story 32.6: A coin''s chart comes back exactly as it was left, and a new coin opens with your default setup'
 type: 'feature'
 created: '2026-09-30'
-status: 'draft'
+status: 'done'
+baseline_revision: '4386b0fe9681a2be3f0fbcb25c69f7462c5c5279'
+final_revision: '827d05c2011c045c4572b1e3793d9958d2634182'
 review_loop_iteration: 0
 followup_review_recommended: false
 context:
@@ -62,12 +64,23 @@ warnings: []
 
 ## Code Map
 
-Filled at plan time from the live code (continuity from the 32.5 spec). Expected anchors: `platform/frontend/src/pages/ChartPage.tsx` (timeframe and volume storage helpers, `mode`, `crosshairOn`, profile state, toolbar clusters), `hooks/useVisibleRange.ts` (visible bars), `components/chart/LightweightChart.tsx` (pane heights from 32.2, divider drag), `api/client.ts`/`schema.ts`, `platform/views/preferences.py`, `platform/data_api/routes/indicators.py` (route pattern), `platform/data_api/settings.py` (`CHART_PREFERENCES_DIR`), `platform/data/preferences/` (tracked TOML files), `pages/docs/kbData.ts`, `platform/CLAUDE.md` SSOT section, tests: `ChartPage.test.tsx`, `views/tests/test_preferences.py`, `data_api/tests`.
+Verified against the live code at plan time (32.5 is merged; the preferences directory exists).
+
+- Backend pattern to copy: `platform/views/preferences.py` (`load_chart_drawings`/`save_chart_drawings`/`validate_drawing`/`DrawingError`, `_write_atomic`; docstring lines 18-39), `platform/data_api/routes/drawings.py` (GET 500 on corrupt, PUT 400 bad JSON / 422 naming the field, `_path()` read per call), registered in `data_api/app.py` next to `indicators_routes`; `data_api/settings.py` gains `CHART_LAYOUTS_PATH`; `data/preferences/` gains a tracked `chart_layouts.toml`; no new mount (check `docker-compose.verify.yml`).
+- Default indicators: `data_api/routes/indicators.py` PUT (`_parse_config_entry`, catalog + `_check_sources`) is factored into one shared helper so seeding/reset validate identically; `save_chart_indicators` writes the coin's list.
+- Frontend: `api/client.ts` (`fetchCoinDrawings`/`saveCoinDrawings` pattern), `api/schema.ts`, `hooks/useChartDrawings.ts` (template: 600 ms debounce, never PUT before first GET, flush on unmount/pagehide, `saveError` rendered as `role="alert"`), `lib/chartVolume.ts` (legacy volume key; deleted), `pages/ChartPage.tsx` (`ChartForCoin` owns `barSeconds`/`volumeOn` and remounts `ChartInner` on timeframe change, so layout state lives in `ChartForCoin`; `ChartInner` holds `mode`, `crosshairOn`, `frvpSettings`, `vrvpSettings`, `sessionCfg`), `components/chart/LightweightChart.tsx` (`layoutPaneHeights`, `remembered`/`collapsedHeightsRef`; needs `initialPaneHeights` + `onPaneHeights` props), `components/IndicatorPicker.tsx` (refetches on `reloadKey`; Reset bumps it).
+- Tests: `views/tests/test_chart_drawings.py` and `data_api/tests/test_drawings.py` (style), `data_api/tests/test_settings.py` (path derivation), `pages/ChartPage.test.tsx` (hoisted `vi.mock("../api/client")`, add `fetchCoinLayout`/`saveCoinLayout`), `components/chart/chartTheme.test.ts` (glob + `stripComments` grep pattern).
+- Docs: `views/preferences.py` docstring, `pages/docs/kbData.ts` chart group, `platform/CLAUDE.md` SSOT-06.
 
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] Planned at dev time per the Code Map, ordered: preferences loader/saver + route + tests; `useChartLayout` hook with restore-before-fetch, debounce and the one-time import; wire every field; default template + Layout menu; grep test; docs.
+- [x] `platform/views/preferences.py` -- `load_chart_layouts`/`save_chart_layouts`/`validate_layout` (`LayoutError` naming the key; `v = 1`; `[default]` with `default_indicators`), atomic write; `views/tests/test_chart_layouts.py`.
+- [x] `platform/data_api/settings.py`, `routes/layout.py`, `app.py`, `data/preferences/chart_layouts.toml` -- `GET`/`PUT /api/coin/{iid}/layout` plus default endpoints (seed on first GET, save-as-default, reset); shared indicator-entry validation helper; `data_api/tests/test_layout.py`, `test_settings.py`.
+- [x] `frontend/src/api/{client,schema}.ts`, `hooks/useChartLayout.ts` -- restore before first fetch, debounced save, one-time import and removal of `chart-timeframe`/`chart-volume`, fallback with one `console.error`.
+- [x] `ChartPage.tsx`, `LightweightChart.tsx`, `IndicatorPicker.tsx` -- wire every field (timeframe, mode, volume, crosshair, pane heights, visible bars, profile settings), Layout menu (Save as default / Reset to default with confirms), delete `lib/chartVolume.ts`.
+- [x] Tests: `ChartPage.test.tsx` matrix rows, grep test failing any `localStorage` read of a `chart-` key over `pages/ChartPage.tsx` and `hooks/`.
+- [x] Docs: `preferences.py` docstring, `kbData.ts`, `platform/CLAUDE.md` SSOT-06.
 
 **Acceptance Criteria:**
 - Given a coin whose chart the operator set up, when the coin is opened again from any browser, then every listed field is as it was left and the chart shows live data at the remembered zoom.
@@ -79,3 +92,82 @@ Filled at plan time from the live code (continuity from the 32.5 spec). Expected
 **Commands:**
 - `cd platform/frontend && npm test && npm run lint && npm run build` -- expected: all pass, no new warnings.
 - `cd platform && python3 -m pytest views/tests data_api/tests -q` -- expected: pass, except the known pre-existing failures listed in memory `reference_platform_tests_no_rust_build`.
+
+## Review Triage Log
+
+### 2026-10-01 — Review pass
+- intent_gap: 0
+- bad_spec: 0
+- patch: 7: (high 1, medium 5, low 1)
+- defer: 3
+- reject: 8
+- addressed_findings:
+  - `[high]` `[patch]` Seeding on first GET wiped a pre-existing coin's indicator list; now seeds indicators only when the coin has none.
+  - `[medium]` `[patch]` Built-in session "day" not in the closed set; now "daily", validated server-side with a mirror test against the frontend list.
+  - `[medium]` `[patch]` Indicators PUT bypassed the layout lock; one shared `PREFERENCES_LOCK`.
+  - `[medium]` `[patch]` Blocking I/O in async handlers; moved to threadpool.
+  - `[medium]` `[patch]` Save-as-default stored an unvalidated indicator list; validated first.
+  - `[medium]` `[patch]` Fragile error-string slicing and KeyError/TypeError mapped to "corrupt"; `.reason` attribute, narrowed handler.
+  - `[low]` `[patch]` Save-as-default during a running reset now refused.
+
+### 2026-10-01 — Review pass
+- intent_gap: 0
+- bad_spec: 0
+- patch: 14: (high 1, medium 6, low 7)
+- defer: 1
+- reject: 10
+- addressed_findings:
+  - `[high]` `[patch]` Pane ids were capped at 64 characters, but 11 of 38 catalog indicator ids are longer (MACD 100, CandlePattern 156), so one divider drag made the coin's layout unsaveable for good (every PUT a 422, held until the next edit); cap raised to `MAX_PANE_ID_LENGTH = 512`, tested with the real CandlePattern id.
+  - `[medium]` `[patch]` Saved pane heights of removed indicators were never pruned; the next drag now keeps only `price`, `volume` and the coin's current indicator instance ids.
+  - `[medium]` `[patch]` A stale `[default]` indicator made the first GET 500 even for a coin whose own indicator list it would not touch; `keep_existing` is now checked before the template is validated.
+  - `[medium]` `[patch]` `_file_errors` did not map `KeyError`/`TypeError` from a malformed `chart_indicators.toml`, so seed/reset failed with an opaque 500; now a 500 with a detail.
+  - `[medium]` `[patch]` The server accepted `kind = "fixed"` without both anchors or with `start > end`, which the client then falls back on every open; now a 422 naming `volume_profile.start`.
+  - `[medium]` `[patch]` The legacy `chart-timeframe`/`chart-volume` keys overrode a layout already on the server (saved from another browser); they are now applied only on a seeded (first) open and otherwise just removed.
+  - `[medium]` `[patch]` A restored fixed range outside the first loaded window stayed empty for good (hydrated once); it is now re-profiled on every candle load until it has rows, as the docs already said.
+  - `[low]` `[patch]` Reset to default bumped the chart key in a separate update from the reset layout; the hook now returns a `revision` bumped in the same render.
+  - `[low]` `[patch]` A cancelled pointer press left the drag baseline set; `pointercancel` now clears it.
+  - `[low]` `[patch]` `LAYOUT_BAR_SECONDS` had no mirror test against `timeframes.ts`; added.
+  - `[low]` `[patch]` A missing `pane_heights` was defaulted without being reported as a fallback; the `session` type comment contradicted the server.
+  - `[low]` `[patch]` The failed-load alert promised a retry that a 4xx never gets; reworded.
+  - `[low]` `[patch]` The restore test keyed `pane_heights` by a series key, not the instance id the chart reports.
+  - `[low]` `[patch]` New lines over 100 characters (docstrings/comments, one test string) wrapped.
+
+### 2026-10-01 — Review pass
+- intent_gap: 0
+- bad_spec: 0
+- patch: 3: (high 0, medium 2, low 1)
+- defer: 2
+- reject: 13
+- addressed_findings:
+  - `[medium]` `[patch]` A change reported after the hook's own flush was lost: React runs a deleted tree's cleanups parent-first, so a zoom the chart reported from its unmount cleanup hit an unmounted hook, and `pagehide` did not drain the chart's 300 ms zoom debounce; `latestRef` also lagged a commit behind (an effect). `update` now writes `latestRef` synchronously and, once the hook is unmounted or the page is hiding, saves at once (keepalive while hiding, reset on `pageshow`); the chart flushes a pending zoom on `pagehide`.
+  - `[medium]` `[patch]` A GET (or reset/PUT) for any well-formed id with no instrument definition created permanent tables in `chart_layouts.toml` and `chart_indicators.toml`; a table is now only created for an id the catalog defines (404 otherwise, nothing written), checked outside the lock and only when the coin has no table.
+  - `[low]` `[patch]` `sameLayout` and the saved-state check compared `JSON.stringify` output, so the same `pane_heights` in another key order counted as a change and sent a PUT; both now use `layoutKey` (keys sorted).
+
+## Auto Run Result
+
+**Summary:** Second follow-up review of Story 32.6 (per-coin server-side chart layout, `[default]` template, Layout menu, one-time legacy key import). This pass fixed 3 findings. The main one: a zoom or edit made just before leaving the chart or closing the tab could be lost, because the chart reports it after the layout hook has already flushed.
+
+**Files (this pass):**
+- `platform/frontend/src/hooks/useChartLayout.ts`: `update` writes `latestRef` synchronously and saves at once after unmount or `pagehide`. Also adds a `pageshow` reset.
+- `platform/frontend/src/components/chart/LightweightChart.tsx`: flushes a pending zoom report on `pagehide`.
+- `platform/frontend/src/lib/chartLayout.ts`: `layoutKey`, a key-order-independent comparison.
+- `platform/data_api/routes/layout.py`: 404 and no write for an id with no instrument definition.
+- Tests: `hooks/useChartLayout.test.ts` (+3, one adjusted for `pageshow`), `components/chart/LightweightChart.test.tsx` (+1), `data_api/tests/test_layout.py` (+1, fixture stubs the catalog lookup).
+
+**Review:** 3 patches applied (medium 2, low 1). 2 deferred:
+- A stale `[default]` indicator blocks every new coin's first open.
+- The session count and Periodic preset are not in the layout's field list.
+
+13 rejected. These were spec-conformant behaviour (Save as default copies the coin's fixed range, pane heights and zoom), already-ledgered items (one-bad-table blast radius, indicators PUT 400 vs 500), unreachable inputs (anchors over 1e11, pane ids over 512 characters, heights over 10000 px) and cosmetic issues.
+
+**Verification:**
+- Frontend: `npm test` passed (vitest 692, node 7). `npm run lint` shows 3 warnings, all pre-existing and unchanged. `npm run build` is ok.
+- Backend: `python3 -m pytest views/tests data_api/tests -q` gave 538 passed and 9 failed. The 9 are the known Redis-dependent `test_archive`/`test_rankings*` tests.
+- `ruff check` and `ruff format` are clean on the touched Python files.
+- The 4 new frontend tests were confirmed to fail against the pre-fix code.
+
+**Residual risks:**
+- The `pagehide` path is still untested in a real browser. It relies on the chart's listener firing after the hook's, which holds because the chart mounts after the layout has loaded.
+- A first open now reads the catalog once per coin (only when the coin has no table).
+- Divider drag and the restored zoom are also still untested in a real browser.
+
