@@ -174,7 +174,7 @@ warnings: ['oversized']
   - `[low]` `[patch]` p99 boundary off by one in `HotPathReport` and DATA_DICTIONARY ("from 101 wakes" / "up to 100") -> "from 100 wakes" / "up to 99"; parametrized boundary test at 99 and 100 wakes.
   - `[low]` `[patch]` a stop that cancelled `_flush_loop` mid-flush emitted two records (loop `finally` plus `run()`'s final report) -> the loop reports on success or `Exception` only, re-raising `CancelledError`; test added.
   - `[low]` `[patch]` a second cancellation during the final report's publish skipped `_live_stream.close()` -> close moved into an outer `finally` in `run()`; test added.
-  - `[low]` `[patch]` wake lag is wall-clock (an NTP step reads as lag) -> `Known limit:` with upgrade path in `_note_wake` and DATA_DICTIONARY §1.23.
+  - `[low]` `[patch]` wake lag is wall-clock (an NTP step reads as lag) -> `Known limit:` with upgrade path in `_note_wake` and DATA_DICTIONARY §1.25.
   - `[low]` `[patch]` arrival mode's target is recomputed after the tick's own work, so a stall inside `_sample_tick`/`_publish` shows as `missed_tick`, not lag (venue mode counts it) -> same `Known limit:` documents the asymmetry.
   - `[low]` `[patch]` `HotPathWindow`'s "bounded by the window" invariant fails while a flush hangs -> `Known limit:` with upgrade path in its docstring.
   - `[low]` `[patch]` docs disagreed with code: the site list said "once per failed periodic flush" (the final report also publishes), D-146 omitted `window_s`/`writes`/`write_data_max_ms` -> both corrected.

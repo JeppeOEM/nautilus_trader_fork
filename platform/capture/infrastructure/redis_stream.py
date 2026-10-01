@@ -21,7 +21,7 @@ gap-encoded book, the same layout as the Parquet row -- never floats (`docs/DATA
 
 Since Story 28.1 the same client also carries capture's per-flush hot-path figures: one pipeline
 of `PUBLISH capture:hotpath <json>` and `SET capture:hotpath:<venue> <json>` (the latest record,
-pull-readable with `redis-cli GET`; `docs/DATA_DICTIONARY.md` §1.23).
+pull-readable with `redis-cli GET`; `docs/DATA_DICTIONARY.md` §1.25).
 """
 
 import json

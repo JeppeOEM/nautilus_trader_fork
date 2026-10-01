@@ -218,7 +218,7 @@ class LiveStream(Protocol):
 
     Since Story 28.1 it also carries capture's own per-flush hot-path figures:
     `publish_hotpath(venue, report)` sends one flush window's `HotPathReport.to_dict()` (queue
-    depth, messages, sample-loop lag, write time; `docs/DATA_DICTIONARY.md` §1.23). It raises on
+    depth, messages, sample-loop lag, write time; `docs/DATA_DICTIONARY.md` §1.25). It raises on
     failure too; the service ledgers it (`collector.hotpath_publish`), never touching Parquet.
     """
 
