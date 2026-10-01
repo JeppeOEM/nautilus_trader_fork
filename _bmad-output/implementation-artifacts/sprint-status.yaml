@@ -364,8 +364,8 @@ development_status:
   epic-31-retrospective: optional
 
   epic-28: backlog
-  28-1-capture-hotpath-metrics-cpu-priority-and-vps-profile: ready-for-dev
-  28-2-capture-python-overhead-removed-baseline-lowered: ready-for-dev
+  28-1-capture-hotpath-metrics-cpu-priority-and-vps-profile: done
+  28-2-capture-python-overhead-removed-baseline-lowered: done
   epic-28-retrospective: optional
 
 action_items:

@@ -9,7 +9,7 @@ Every "error ledger" site named below (`collector.late_trade`, `collector.trade_
 (Story 23.1; formerly `ml_signals.error_ledger`, whose shim Story 24.1 deleted). The sites, their
 names and what they count are unchanged `[re-cited 2026-09-21: Story 23.1]`, with one addition:
 `archive_gaps.inverted_span` counts a gap marker whose `from_ns > to_ns` — a backward wall-clock
-step between a lost trade's arrival and the flush. Since Story 26.1 every capture site is a constant in `capture/application/sites.py` and `CaptureService._ledger` is capture's only `record` call; it added `collector.empty_top` (a book with no best bid or ask: seconds skipped, one WARNING and one ledger line per instrument per minute) `[amended 2026-09-26: Story 26.1]`, and Story 30.2 `collector.unencodable` (a second whose row cannot be stored exactly at the instrument definition's precisions: skipped, one ERROR and one ledger line per instrument per minute). Story 31.2 ledgered every site that only logged or skipped before. Per flush: `collector.stale_trade` (§1.1) and `collector.second_rejected` (gate rejections per instrument and reason, `not_collected` excluded). Per event: `collector.skipped_seconds`, `collector.restart_gap` and `collector.coverage_write` (§1.16), `collector.ohlc_outside_book` (every occurrence, the row kept), `collector.snapshot_publish` (a failed `snapshots:raw` publish, Parquet unaffected), `collector.crash` (`run()` raised; restarted with backoff), `collector.unknown_message` (a client message no branch decodes, repr bounded to 300 chars; dYdX's `block_height` and `new_instrument_discovered` dicts are ignored by name), `collector.candle_store_behind` and `collector.book_crosscheck_unconfirmed`. A REST poll's unparseable rows (a missing symbol or `openInterest`, a non-decimal value) go to its own poll site, `collector.open_interest_poll` `[amended 2026-09-29: Story 31.2]`. The marker is written as the ordered span and
+step between a lost trade's arrival and the flush. Since Story 26.1 every capture site is a constant in `capture/application/sites.py` and `CaptureService._ledger` is capture's only `record` call; it added `collector.empty_top` (a book with no best bid or ask: seconds skipped, one WARNING and one ledger line per instrument per minute) `[amended 2026-09-26: Story 26.1]`, and Story 30.2 `collector.unencodable` (a second whose row cannot be stored exactly at the instrument definition's precisions: skipped, one ERROR and one ledger line per instrument per minute). Story 31.2 ledgered every site that only logged or skipped before. Per flush: `collector.stale_trade` (§1.1) and `collector.second_rejected` (gate rejections per instrument and reason, `not_collected` excluded). Per event: `collector.skipped_seconds`, `collector.restart_gap` and `collector.coverage_write` (§1.16), `collector.ohlc_outside_book` (every occurrence, the row kept), `collector.snapshot_publish` (a failed `snapshots:raw` publish, Parquet unaffected), `collector.crash` (`run()` raised; restarted with backoff), `collector.unknown_message` (a client message no branch decodes, repr bounded to 300 chars; dYdX's `block_height` and `new_instrument_discovered` dicts are ignored by name), `collector.candle_store_behind` and `collector.book_crosscheck_unconfirmed`. A REST poll's unparseable rows (a missing symbol or `openInterest`, a non-decimal value) go to its own poll site, `collector.open_interest_poll` `[amended 2026-09-29: Story 31.2]`. Story 28.1 added one per-flush site, `collector.hotpath_publish` (a failed `capture:hotpath` publish of the flush's hot-path figures, §1.23: once per failed publish, after a periodic flush or the final flush of a stop or crash, Parquet unaffected) `[amended 2026-09-30: Story 28.1]`. The marker is written as the ordered span and
 still protects its rows, so the count is the only signal that the clock stepped back
 `[added 2026-09-22: Story 23.2]`.
 
@@ -2161,6 +2161,68 @@ file is unchanged, so production gets `no reference data`):
 - dYdX: `no reference data` in 1.8 s.
 
 The collectors lost no second to the step's load.
+
+### 1.25 `capture:hotpath` / `capture:hotpath:<venue>` (capture's hot-path figures, Story 28.1)
+
+Not market data: each collector's own cost figures, so a `_second_loop` stall (audit D-10) or an
+ingest-queue backlog (D-07) can be told apart from host contention (D-146)
+`[amended 2026-09-30: Story 28.1 -- new channel and key]`.
+
+- **Producer:** `CaptureService._report_hotpath` (`capture/application/capture_service.py`), right
+  after each **periodic** flush (`_flush_loop`, every `flush_interval_seconds`, 60 s by default, at
+  :02 past the boundary), also when that flush raised, and once more after the final flush of a
+  stop or a crash (its partial window). The figures are kept by
+  `capture.application.hotpath_metrics.HotPathWindow` and restart from zero after every report.
+  The same figures go to the collector's log as one INFO line,
+  `hotpath: window_s=60.001 queue_depth_max=37 messages_processed=500 wakes=60 lag_max_ms=3200.0
+  lag_p99_ms=3200.0 writes=3 write_data_ms=4.5 write_data_max_ms=12.0` (Dozzle), with or without
+  Redis.
+- **Carrier:** `RedisLiveStream.publish_hotpath` (`capture/infrastructure/redis_stream.py`) sends
+  one pipeline (no MULTI) on the collector's existing Redis client: `PUBLISH capture:hotpath <json>`
+  and `SET capture:hotpath:<venue> <json>`, `<venue>` the lower-case `kernel.venues` token
+  (`bybit`, `hyperliquid`, `dydx`). The key holds the latest record (no TTL: a stale `ts` shows a
+  collector that stopped reporting). A failed publish is ledgered `collector.hotpath_publish` and
+  the next flush publishes normally.
+- **Payload** (one `json.dumps` object, keys in this order):
+  - `venue` — the `kernel.venues` token (`BYBIT`);
+  - `ts` — wall-clock ns at publish (the same name `collector:status` uses);
+  - `window_s` — seconds (3 decimals, monotonic clock) since the previous report: the span every
+    count below covers (the first window starts at service construction);
+  - `queue_depth_max` — the largest `_ingest_queue.qsize()` seen by `_process_data` in the window
+    or at the report itself (messages still queued behind the one being processed; 0 when idle).
+    A sample, not a continuous peak: a backlog that builds and drains between two processed
+    messages is not seen, but one that is still there at the report always is;
+  - `messages_processed` — messages handed to `_process_data` in the window (every type, planned or
+    not, including one that then failed and was ledgered `collector.process`);
+  - `wakes` — sample-loop wakes counted: one per `_second_loop` wake (arrival mode) or per
+    `_venue_second_loop` wake that closed at least one second (venue mode; an early wake with
+    nothing due counts nothing);
+  - `lag_max_ms`, `lag_p99_ms` — milliseconds (3 decimals) between each counted wake and the wall
+    time the loop slept toward (`_next_sample_at` in arrival mode, `_next_close_at` in venue mode),
+    clamped at 0; max and nearest-rank 99th percentile (`ceil(0.99 n)`-th smallest), `null` with no
+    wake in the window. At the default 60 s flush a window holds ~60 wakes, and the nearest-rank
+    p99 of up to 99 samples is their maximum, so the two are equal there; they part only from 100
+    wakes on (a longer `flush_interval_seconds`). Not the `_second_loop tick arrived ... late`
+    canary (that measures tick to tick against the interval, WARNING above 2 s; unchanged).
+    Known limit: both ends are wall-clock, so an NTP step reads as lag (forward) or clamps to 0
+    (backward); and in arrival mode the target is recomputed after the previous tick's own work,
+    so a stall inside the sample tick itself shows as `missed_tick` coverage (§1.16) and the canary,
+    not as lag (venue mode counts it). Upgrade path: a monotonic deadline and a fixed arrival
+    schedule (`CaptureService._note_wake`);
+  - `writes` — successful `ArchiveWriter.write` calls in the window (one per `(type, instrument)`
+    batch; a flush writes several);
+  - `write_data_ms`, `write_data_max_ms` — milliseconds (3 decimals) of the window's last and of
+    its slowest successful `ArchiveWriter.write` call (`ParquetDataCatalog.write_data` of one
+    batch), timed with `perf_counter_ns` inside the worker thread; `null` when no batch was
+    written. A failed write never counts (it is `collector.flush_write`).
+- **Consumers:** none yet -- read it with `redis-cli GET capture:hotpath:bybit` or
+  `redis-cli SUBSCRIBE capture:hotpath` (`docs/DEPLOY_CHECKLIST.md` §7). No HTTP endpoint serves it.
+- **Deviation, recorded:** the epic asked for these figures "on the existing per-flush Redis
+  channel the dashboard reads"; no such channel exists. Capture publishes only `snapshots:raw`
+  (every second); `collector:status` (§1.12) is collection control's frozen, replay-tested
+  contract on a 30 s/1800 s cadence, and `/api/errors` reads ledger files. A dedicated channel
+  plus a latest-value key on capture's own Redis client gives the same visibility without an
+  endpoint and without coupling to another context's contract.
 
 ---
 

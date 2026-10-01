@@ -77,6 +77,11 @@ class IncidentConfig:
     raw_log_name: str
     report_dir: Path
     rules: tuple[IncidentRule, ...] = ()
+    # False when the process runs without the raw log sink (a venue entrypoint's `ws_raw_sink`
+    # plan switch, off by default since 2026-09-30): the report is still written for the warning
+    # itself, but scans nothing and says why, instead of claiming "0 messages" of evidence that
+    # was never recorded.
+    raw_log_enabled: bool = True
     # One ongoing incident logs a fresh WARNING every tick while it persists; without the
     # debounce it would produce one report per tick.
     debounce_ns: int = 10_000_000_000
@@ -96,6 +101,12 @@ class IncidentConfig:
             raise ValueError(f"iid_pattern must define the named groups {sorted(missing)}")
         if "{ticker}" not in self.evidence_needle:
             raise ValueError("evidence_needle must be a str.format template using {ticker}")
+
+
+RAW_LOG_DISABLED_LINE = (
+    "--- Raw WS sink disabled in this process (`ws_raw_sink = false`); no raw WS evidence "
+    "recorded ---\n"
+)
 
 
 def classify_incident(config: IncidentConfig, message: str) -> tuple[str, str | None]:
@@ -235,7 +246,7 @@ class IncidentReportWriter:
         end_ns = trigger_ns + int(config.lookahead_s * 1e9)
         lines = (
             scan_raw_window(config, ticker, trigger_ns - config.lookback_ns, end_ns)
-            if ticker
+            if ticker and config.raw_log_enabled
             else []
         )
         path = config.report_dir / report_name(incident_type, iid, trigger_ns)
@@ -247,7 +258,9 @@ class IncidentReportWriter:
             f.write(f"Type: {incident_type}\n")
             f.write(f"Instrument: {iid or '-'}\n")
             f.write(f"Message: {message}\n\n")
-            if ticker:
+            if ticker and not config.raw_log_enabled:
+                f.write(RAW_LOG_DISABLED_LINE)
+            elif ticker:
                 f.write(f"--- Raw WS evidence ({ticker}, {len(lines)} messages) ---\n")
                 f.writelines(lines)
             else:

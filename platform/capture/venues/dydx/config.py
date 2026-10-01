@@ -59,6 +59,14 @@ class DydxConfig(CoreConfig):
     open_interest_poll_seconds: int = 300
     config_reload_seconds: int = 30
     liquidity_check_seconds: int = 1800
+    # The Rust `[WS_RAW]` debug file sink (Story 5.1's raw-frame evidence for incident reports;
+    # every WebSocket frame formatted and written inside the collector process, ~1 MB/s at 25
+    # markets). Off by default since 2026-09-30 (operator decision: dYdX is opt-in since Story
+    # 29.3 and the sink is the one always-on per-message cost the fleet does not need). Read once
+    # at process start, so a change needs a collector restart. Known limit: while off, an incident
+    # report carries no raw WS window (the report says so); set `ws_raw_sink = true` in the plan
+    # file to get the window back for an investigation.
+    ws_raw_sink: bool = False
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "environment", str(self.network))

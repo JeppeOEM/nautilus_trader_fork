@@ -1,0 +1,37 @@
+{
+  "messages": 9390,
+  "direct": {
+    "retained_blocks_per_message": 0.7105,
+    "retained_bytes_per_message": 89.0739,
+    "peak_bytes_per_message": 110.7514,
+    "ns_per_message": 4346
+  },
+  "queued": {
+    "retained_blocks_per_message": 1.1663,
+    "retained_bytes_per_message": 113.4922,
+    "peak_bytes_per_message": 141.1889,
+    "ns_per_message": 7390
+  },
+  "flush": {
+    "rows": 1800,
+    "encode_ms": 8.64,
+    "write_ms": 49.16
+  },
+  "book_path": {
+    "per_message_ns": 479,
+    "reads_per_second_ns": 3992810,
+    "core_share_pct_at_1500": 0.471
+  },
+  "host": {
+    "cpu": "11th Gen Intel(R) Core(TM) i7-11370H @ 3.30GHz | 8 cpus | x86_64",
+    "python": "3.13.13"
+  },
+  "recorded": "2026-09-30T19:06:33+00:00",
+  "burst": {
+    "instruments": 90,
+    "deltas_per_instrument": 50,
+    "book_levels": 200,
+    "repetitions": 3,
+    "flush_rows": 1800
+  }
+}

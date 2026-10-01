@@ -141,6 +141,10 @@ def _dydx(raw: dict[str, Any], plan_raw: dict[str, Any]) -> tuple[CoreConfig, Co
     if network not in networks:
         raise ValueError(f"network must be one of {networks}, got {network!r}")
     extra = {key: raw.pop(key) for key in _DYDX_POSITIVE_INTS if key in raw}
+    ws_raw_sink = raw.pop("ws_raw_sink", DydxConfig.ws_raw_sink)
+    if type(ws_raw_sink) is not bool:
+        # Strict, like `store_order_book_deltas`: a TOML `1` or `"true"` is a typo, not a switch.
+        raise ValueError(f"ws_raw_sink must be true or false, got {ws_raw_sink!r}")
     core = core_config_from_dict({**raw, "environment": network}, networks)
     if core.trade_feeds != 1:
         # `DydxClient` opens one socket: a second trade feed would be accepted and never opened.
@@ -151,6 +155,7 @@ def _dydx(raw: dict[str, Any], plan_raw: dict[str, Any]) -> tuple[CoreConfig, Co
         open_interest_poll_seconds=_positive_int(extra, "open_interest_poll_seconds", 300),
         config_reload_seconds=_positive_int(extra, "config_reload_seconds", 30),
         liquidity_check_seconds=_positive_int(extra, "liquidity_check_seconds", 1800),
+        ws_raw_sink=ws_raw_sink,
     )
     entries = plan_raw.get("instruments", [])
     if not isinstance(entries, list):
@@ -203,7 +208,7 @@ VENUE_SCHEMAS: Mapping[str, VenueSchema] = MappingProxyType(
     {
         "DYDX": VenueSchema(
             environments=("mainnet", "testnet"),  # the `network` key's values
-            extra_keys=("network", *_DYDX_POSITIVE_INTS),
+            extra_keys=("network", "ws_raw_sink", *_DYDX_POSITIVE_INTS),
             defaults=MappingProxyType(
                 {"liquidity_min_oi_usd": 20_000.0, "non_config_retain_hours": 4.0}
             ),

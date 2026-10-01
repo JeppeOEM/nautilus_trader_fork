@@ -18,16 +18,23 @@ Moved out of `capture.application.capture_service` in Story 26.1. The payload is
 dict (`DydxSecondSnapshot.to_dict`): since Story 30.2 exact integer units, both precisions and the
 gap-encoded book, the same layout as the Parquet row -- never floats (`docs/DATA_DICTIONARY.md`
 §1.7).
+
+Since Story 28.1 the same client also carries capture's per-flush hot-path figures: one pipeline
+of `PUBLISH capture:hotpath <json>` and `SET capture:hotpath:<venue> <json>` (the latest record,
+pull-readable with `redis-cli GET`; `docs/DATA_DICTIONARY.md` §1.23).
 """
 
 import json
 import os
+import time
+from typing import Any
 
 import redis.asyncio as aioredis
 from kernel.second_snapshot import DydxSecondSnapshot
 
 
 CHANNEL = "snapshots:raw"
+HOTPATH_CHANNEL = "capture:hotpath"
 
 
 def redis_url_from_env() -> str:
@@ -48,6 +55,16 @@ async def publish_snapshot_batch(redis_client: aioredis.Redis, snapshots: list) 
     await redis_client.publish(CHANNEL, payload)
 
 
+def hotpath_key(venue: str) -> str:
+    """Return the latest-record key of `venue`'s hot-path figures: `capture:hotpath:<venue>`."""
+    return f"{HOTPATH_CHANNEL}:{venue.lower()}"
+
+
+def hotpath_payload(venue: str, report: dict[str, Any], ts_ns: int) -> str:
+    """Return the `capture:hotpath` JSON: the venue, the publish time `ts` (ns), the figures."""
+    return json.dumps({"venue": venue, "ts": ts_ns, **report})
+
+
 class RedisLiveStream:
     """
     The live fan-out (see `capture.application.ports.LiveStream`). Bounded socket timeouts: a
@@ -60,14 +77,29 @@ class RedisLiveStream:
         self._url = url
         self._client: aioredis.Redis | None = None
 
-    async def publish(self, snapshots: list[DydxSecondSnapshot]) -> None:
-        if not snapshots:
-            return
+    def _redis(self) -> aioredis.Redis:
         if self._client is None:
             self._client = aioredis.Redis.from_url(
                 self._url, socket_connect_timeout=1.0, socket_timeout=1.0
             )
-        await publish_snapshot_batch(self._client, snapshots)
+        return self._client
+
+    async def publish(self, snapshots: list[DydxSecondSnapshot]) -> None:
+        if not snapshots:
+            return
+        await publish_snapshot_batch(self._redis(), snapshots)
+
+    async def publish_hotpath(self, venue: str, report: dict[str, Any]) -> None:
+        """
+        Publish one flush window's figures and keep them as the venue's latest record, in one
+        round trip (no MULTI: the two commands need not be atomic). Raises on failure: the service
+        ledgers it at `collector.hotpath_publish`.
+        """
+        payload = hotpath_payload(venue, report, time.time_ns())
+        pipe = self._redis().pipeline(transaction=False)
+        pipe.publish(HOTPATH_CHANNEL, payload)
+        pipe.set(hotpath_key(venue), payload)
+        await pipe.execute()
 
     async def close(self) -> None:
         if self._client is not None:

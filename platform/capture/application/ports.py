@@ -112,9 +112,11 @@ class ArchiveWriter(Protocol):
 
     Invariant: every catalog write goes through `ParquetDataCatalog.write_data` (NAUT-02), so the
     schema and partitioning are Nautilus's own; a batch whose write raised is reported to the caller
-    (which marks the gap), never retried silently. The only module naming the batch encoder, so a
-    columnar encoder can replace it without touching a caller (Epic 28). Synchronous methods run
-    off the event loop where they do disk I/O on the hot path (`write`).
+    (which marks the gap), never retried silently. The batch encoder is not named here: since
+    Story 28.2 the columnar `kernel.second_snapshot.snapshots_to_record_batch` is registered with
+    the kernel type itself (`register_arrow(..., batch_encoder=)`), so `write_data` takes it and no
+    caller changed. Synchronous methods run off the event loop where they do disk I/O on the hot
+    path (`write`).
     """
 
     @property
@@ -207,14 +209,22 @@ def finite_decimal(value: object) -> Decimal | None:
 
 class LiveStream(Protocol):
     """
-    The live `snapshots:raw` fan-out (parent spine AD-1). Invariant: it publishes exactly the
-    batch the gate accepted, the same objects the archive buffer holds; a failed publish loses
+    Capture's live Redis output: the `snapshots:raw` fan-out (parent spine AD-1) and the
+    per-flush `capture:hotpath` record. Invariant: `publish` sends exactly the batch the gate
+    accepted, the same objects the archive buffer holds; a failed publish loses
     that tick's live view only (the Parquet write is durable) and never stalls the sampler.
     `publish` raises on failure; the service ledgers it (`collector.snapshot_publish`) and
     carries on, so a Redis outage is counted, never a quiet WARNING (DATA-07).
+
+    Since Story 28.1 it also carries capture's own per-flush hot-path figures:
+    `publish_hotpath(venue, report)` sends one flush window's `HotPathReport.to_dict()` (queue
+    depth, messages, sample-loop lag, write time; `docs/DATA_DICTIONARY.md` §1.23). It raises on
+    failure too; the service ledgers it (`collector.hotpath_publish`), never touching Parquet.
     """
 
     async def publish(self, snapshots: list[DydxSecondSnapshot]) -> None: ...
+
+    async def publish_hotpath(self, venue: str, report: dict[str, Any]) -> None: ...
 
     async def close(self) -> None: ...
 

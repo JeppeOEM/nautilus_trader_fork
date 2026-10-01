@@ -480,6 +480,69 @@ checked (and so which collector's ledger explains them) to one venue. It never n
 "Services"/`--fail-on` check -- a site belonging to a different service, e.g.
 `ranking_engine.volume24h`, is still checked under `--venue bybit`.
 
+## 7. Capture CPU budget (Story 28.1)
+
+Story 28.1 gives the collectors CPU priority and a memory ceiling in `docker-compose.yml`, and
+makes each collector report its own hot-path figures once per periodic flush. What changed:
+`cpu_shares: 1024` on `collector`, `bybit_collector` and `hyperliquid_collector`; `cpu_shares: 256`
+on `archive`, `ranking_engine`, `data_api`, `bot_tui`, `live-paper` and `dozzle`; `redis` keeps the
+default 1024 (it is on capture's publish path). There is no `cpus:` cap anywhere: the weights only
+act while the cores are contended, and nothing is limited on an idle box. Each collector has a
+`mem_limit` of its measured peak x 1.5 (`bybit_collector` 362m, `hyperliquid_collector` 248m,
+`collector` 1690m; the evidence is the comment above each one). `tests/test_compose_cpu_budget.py`
+pins all of it.
+
+Known limit: the memory limits are sized for today's plans (Bybit 4 instruments, Hyperliquid 1,
+dYdX ~25), and `collector:control` can grow a plan at runtime without a redeploy. Rough scaling is
+~16 MiB per Bybit instrument, so the Bybit limit is reached at about 11 instruments; past it the
+collector is OOM-killed and `restart: always` restarts it, a visible gap with `OOMKilled=true`.
+Upgrade path: re-measure (`docker stats --no-stream` and the container's
+`/sys/fs/cgroup/memory.peak`, x 1.5) and raise `mem_limit` **before** growing a plan; Story 28.2's
+scale burst gives per-instrument figures.
+
+**Redeploy, in this order** (from `platform/`):
+
+1. `make build-base` only if `nautilus_trader` core or its dependencies changed since the last base
+   build (this story changes neither), then `docker compose build collector` (the collector image
+   carries the new capture code).
+2. The collectors first, so capture is back before anything else restarts:
+   `docker compose up -d bybit_collector hyperliquid_collector` (and `make up-dydx` only where the
+   dYdX collector runs). `up -d` recreates each container whose `cpu_shares`/`mem_limit` changed.
+3. Then the batch services: `docker compose up -d archive ranking_engine data_api dozzle`, plus
+   `docker compose --profile live-paper up -d live-paper` where the paper fleet runs. `bot_tui`
+   picks up its weight at its next `make tui`.
+4. Confirm the weights and limits took: `docker inspect -f '{{.Name}} {{.HostConfig.CpuShares}}
+   {{.HostConfig.Memory}} {{.HostConfig.MemorySwap}}' $(docker compose ps -q)` (collectors `1024` and their limit in bytes,
+   batch services `256`, redis `0` = the default 1024; a collector's `MemorySwap` equals its
+   `Memory`, i.e. no swap).
+
+**Acceptance check (one hour after the redeploy):**
+
+- `uptime`: the 1-, 5- and 15-minute load averages stay at or below the number of cores
+  (`nproc`) over the hour.
+- Dozzle, each collector over the same hour: zero `_second_loop tick arrived ... late` lines.
+- OOM: `docker inspect -f '{{.Name}} OOMKilled={{.State.OOMKilled}} restarts={{.RestartCount}}'
+  bybit-collector hyperliquid-collector` (and `dydx-collector` where it runs) prints
+  `OOMKilled=false` for each. A `true` means that collector outgrew its `mem_limit`: raise it from
+  a fresh measurement (the Known limit in `docker-compose.yml`), never live with the restarts
+  (DATA-07).
+- Rollback, if a collector OOM-loops on its new limit during the hour: raise that service's
+  `mem_limit` and `memswap_limit` together in `docker-compose.yml` (or remove both lines) and
+  `docker compose up -d <service>`; capture resumes with a coverage `restart` run, no data is
+  deleted. The `cpu_shares` weights never need a rollback: they only act under contention.
+
+**Reading the hot-path figures** (`docs/DATA_DICTIONARY.md` §1.25): every collector logs one
+`hotpath: window_s=... queue_depth_max=... messages_processed=... wakes=... lag_max_ms=...
+lag_p99_ms=... writes=... write_data_ms=... write_data_max_ms=...` INFO line per periodic flush
+(every 60 s, at :02) in Dozzle, and keeps the
+latest record in Redis: `docker exec dydx-redis redis-cli GET capture:hotpath:bybit` (or
+`:hyperliquid`, `:dydx`); `docker exec -it dydx-redis redis-cli SUBSCRIBE capture:hotpath`
+streams every venue's. A rising `queue_depth_max` is an ingest backlog (audit D-07), a
+`lag_max_ms` in the seconds a stalled sample loop (D-10), a `write_data_max_ms` near the flush
+interval a slow catalog write (the slowest batch; `write_data_ms` is the last one); a stale `ts` in the key is a collector that stopped reporting.
+`collector.hotpath_publish` in `GET /api/errors` means the record could not be published (the log
+line is still written, Parquet is unaffected).
+
 ## 8. Venue cutover: Bybit and Hyperliquid proven, then dYdX stopped (Story 29.3)
 
 Collection moves off dYdX (operator decision 2026-09-26). Bybit keeps `BTCUSDT-LINEAR.BYBIT`,
@@ -488,6 +551,14 @@ Collection moves off dYdX (operator decision 2026-09-26). Bybit keeps `BTCUSDT-L
 `platform/capture/venues/{bybit,hyperliquid}/config.toml`). The dYdX compose service `collector`
 is behind the `dydx` profile: `make up`, `redeploy`, `redeploy-all` and `redeploy-no-paper` never
 start it, `make up-dydx` starts it and `make down-dydx` removes it. Nothing here deletes data.
+Since 2026-09-30 the dYdX collector starts **without** its Rust `[WS_RAW]` raw-frame file sink
+(`DydxConfig.ws_raw_sink`, default `false`): the sink formatted and wrote every WebSocket frame
+inside the collector process (~1 MB/s at 25 markets), and its only reader is the incident
+reports' 12 s raw window. `make up-dydx` therefore comes up lean; an incident report written
+while it is off says "Raw WS sink disabled" instead of attaching evidence. To get the window back
+for an investigation, add `ws_raw_sink = true` to `platform/data/dydx_config.toml` and restart the
+collector (`make up-dydx`); remove the line and restart to switch it off again. The key is read
+once at process start, not by the 30 s plan reload.
 The dropped instruments (every `.DYDX` id, and Hyperliquid's BTC/ETH) fall under the nightly's
 normal retention only: their raw trades go once a day is `verified` and older than 7 days, and
 a dYdX coin's opted-in order book deltas once older than its `retain_hours` in the dYdX plan
@@ -1249,3 +1320,52 @@ What this story changes:
       - D-141: a durable late-book-message count, then size `hold_back_seconds`.
       - D-143 and D-144: verifier follow-ups. Each needs a planted-defect test; never loosen the
         pass rule without one.
+
+### 28-1-capture-hotpath-metrics-cpu-priority-and-vps-profile (commit: this story's)
+
+Rebuilds the collector image (new capture code: the per-flush hot-path figures) and applies the
+compose CPU weights and collector memory limits (section 7). No config key, schema, mount or
+archive format changed. The VPS profile below fills audit D-146; Story 28.2 does not wait for it
+(it cites the profile only if it exists).
+
+- [ ] On the VPS, `git pull`, then run section 7's redeploy in its order (collectors first, then the
+      batch services) and its weight/limit `docker inspect` check.
+- [ ] Section 7's one-hour acceptance check: `uptime` load at or below `nproc` over the hour, zero
+      `_second_loop tick arrived ... late` lines in Dozzle, `OOMKilled=false` for every collector.
+      Note each collector's `hotpath:` figures from the hour (or
+      `redis-cli GET capture:hotpath:<venue>`).
+- [ ] Profile every running collector for 5 minutes (host tool, never a project dependency):
+      `sudo py-spy record --pid <pid> --duration 300 --format speedscope -o <venue>.speedscope.json`,
+      with `<pid>` from `docker inspect -f '{{.State.Pid}}' <container>`. In the same 5 minutes
+      record `uptime`, `free -h` and `docker stats --no-stream`.
+- [ ] When Dozzle shows a `_second_loop tick arrived ... late` line, take
+      `sudo py-spy dump --pid <pid>` of that collector at once (repeat a few times while it is late),
+      with `uptime` and `docker stats --no-stream` alongside.
+- [ ] Commit everything under `platform/.planning/debug/capture-profile-2026-<MM-DD>/` with a
+      `README.md` that ranks each venue's top-10 self-time frames as (a) our Python, (b) Nautilus
+      Cython/Rust or (c) interpreter/asyncio, and states whether the box was contended during the
+      profile (load vs cores, the batch services' CPU in `docker stats`).
+- [ ] Update audit D-146 (`docs/DATA_INTEGRITY_AUDIT.md`) with the README's path, the ranking and
+      the contention verdict, and add the VPS `lag_max_ms`/`lag_p99_ms` to D-10.
+- [ ] Note: Story 28.2 does not wait for this entry; it cites the profile only if it exists.
+
+### 28-2-capture-python-overhead-removed-baseline-lowered (commit: this story's)
+
+Rebuilds the collector image (new capture and kernel code: the columnar `DydxSecondSnapshot` flush
+encoder and the ingest hand-off without a per-message `wait_for`). No config key, schema, mount or
+archive format changed: the Parquet files are byte-identical (audit D-65, Story 28.2). uvloop was
+measured and not kept (its per-callback handle raised the scale burst's queued peak above the
+baseline), so the collectors still run asyncio's default loop and there is no `event loop:` line to
+look for.
+
+- [ ] Before redeploying, note each collector's `write_data_max_ms` from its `hotpath:` Dozzle
+      lines over an hour (or `redis-cli GET capture:hotpath:<venue>`), with `uptime` alongside.
+- [ ] On the VPS, `git pull`, then rebuild and redeploy the collectors (`make redeploy-all`; dYdX
+      only if it is deployed, `make up-dydx`). Check each collector logs `Started:` and writes
+      `custom_dydx_second_snapshot` files at the next minute.
+- [ ] Over the hour after the redeploy, compare `capture:hotpath` `write_data_max_ms` and
+      `lag_max_ms` against the figures noted before; expect the write to fall several-fold (the
+      dev box: 304 -> 49 ms for 30 instruments). Record both sets in audit D-65's Story 28.2 record.
+- [ ] When D-146's VPS profile lands (entry `28-1-capture-hotpath-metrics-cpu-priority-and-vps-profile`),
+      re-check its README's ranking against the dev-box figures in D-65 and replace the projection's
+      "x 3, assumed" with the profile's measured dev-box-to-VPS ratio.
