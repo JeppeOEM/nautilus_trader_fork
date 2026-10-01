@@ -38,6 +38,7 @@ import { assignPaneColor } from "../components/chart/paneColors";
 import type { IndicatorCatalogEntry, IndicatorConfigEntry } from "../api/schema";
 import { BAR_SECONDS, useCandles } from "../hooks/useCandles";
 import { TIMEFRAMES } from "../timeframes";
+import { loadVolumeOn, saveVolumeOn } from "../lib/chartVolume";
 import { useReplay } from "../hooks/useReplay";
 import { useSessionCandles } from "../hooks/useSessionCandles";
 import { useVisibleRange } from "../hooks/useVisibleRange";
@@ -45,9 +46,10 @@ import { useLiveCandle } from "../hooks/useLiveCandle";
 import { usePickerIndicatorValues } from "../hooks/usePickerIndicatorValues";
 import { useSnapshotSeries } from "../hooks/useSnapshotSeries";
 
-// The default chart is candles + a volume overlay only; every other indicator is added
+// The default chart is candles + a volume pane only; every other indicator is added
 // from the picker (persisted per coin server-side) and placed by its catalog `panel`.
-// Volume is its own pane right under the price pane (spec §A1), before indicator panes.
+// Volume is a pane (not an overlay: an overlay is `placement: "overlay"`), right under the
+// price pane (spec §A1), before indicator panes; the Indicators dialog toggles it (Story 32.2).
 const DEFAULT_PANE_IDS = ["volume"];
 
 
@@ -170,10 +172,12 @@ interface EdgeGhost {
 interface ChartInnerProps {
   instrumentId: string;
   barSeconds: number;
+  volumeOn: boolean;
+  onVolumeChange: (on: boolean) => void;
   onTimeframeChange: (seconds: number) => void;
 }
 
-function ChartInner({ instrumentId, barSeconds, onTimeframeChange }: ChartInnerProps) {
+function ChartInner({ instrumentId, barSeconds, volumeOn, onVolumeChange, onTimeframeChange }: ChartInnerProps) {
   const [chart, setChart] = useState<IChartApi | null>(null);
   // Story 15.7: Candles/Lines toggle (AC #1) -- `dashboard.py`'s own #btn-candles/
   // #btn-lines pair, carried forward. Only one of useCandles/useSnapshotSeries is ever
@@ -268,17 +272,22 @@ function ChartInner({ instrumentId, barSeconds, onTimeframeChange }: ChartInnerP
 
   // Declarative pane set fed into LightweightChart's own registry (AD-F4) -- this
   // component never calls chart.addPane()/addSeries() itself. Default is just the volume
-  // overlay (derived from useCandles' own `v` field); picker entries follow, one series per
-  // `{indicator_id}.{output_attr}` key, placed by the catalog's `panel`.
+  // pane (derived from useCandles' own `v` field; absent when toggled off -- `fullVolume`
+  // is fetched regardless, for the profiles and the measurement tool); picker entries
+  // follow, one series per `{indicator_id}.{output_attr}` key, placed by the catalog's `panel`.
   const panes = useMemo<IndicatorPaneSpec[]>(
     () => [
-      {
-        id: "volume",
-        kind: "Histogram",
-        data: volume,
-        color: assignPaneColor("volume", DEFAULT_PANE_IDS),
-        groupLabel: "Volume",
-      },
+      ...(volumeOn
+        ? [
+            {
+              id: "volume",
+              kind: "Histogram" as const,
+              data: volume,
+              color: assignPaneColor("volume", DEFAULT_PANE_IDS),
+              groupLabel: "Volume",
+            },
+          ]
+        : []),
       ...pickerSeriesKeys.map((key) => {
         const panel = panelForKey(key, catalog);
         const name = catalogNameForKey(key, catalog) ?? key;
@@ -298,7 +307,7 @@ function ChartInner({ instrumentId, barSeconds, onTimeframeChange }: ChartInnerP
         };
       }),
     ],
-    [volume, pickerSeriesKeys, pickerValues, catalog, pickerEntries, cutoffTime],
+    [volumeOn, volume, pickerSeriesKeys, pickerValues, catalog, pickerEntries, cutoffTime],
   );
 
   useEffect(() => {
@@ -821,6 +830,8 @@ function ChartInner({ instrumentId, barSeconds, onTimeframeChange }: ChartInnerP
         dialogOpen={indicatorDialogOpen}
         onDialogClose={() => setIndicatorDialogOpen(false)}
         multiInstance
+        volumeOn={volumeOn}
+        onVolumeChange={onVolumeChange}
       />
       </div>
     </div>
@@ -835,6 +846,16 @@ export default function ChartPage() {
 
 function ChartForCoin({ instrumentId }: { instrumentId: string }) {
   const [barSeconds, setBarSeconds] = useState(() => loadTimeframe(instrumentId));
+
+  // Held here, not in ChartInner: that is remounted on every timeframe change.
+  const [volumeOn, setVolumeOn] = useState(() => loadVolumeOn(instrumentId));
+  const changeVolume = useCallback(
+    (on: boolean): void => {
+      setVolumeOn(on);
+      saveVolumeOn(instrumentId, on);
+    },
+    [instrumentId],
+  );
 
   const changeTimeframe = useCallback(
     (seconds: number): void => {
@@ -856,6 +877,8 @@ function ChartForCoin({ instrumentId }: { instrumentId: string }) {
       key={`${instrumentId}:${barSeconds}`}
       instrumentId={instrumentId}
       barSeconds={barSeconds}
+      volumeOn={volumeOn}
+      onVolumeChange={changeVolume}
       onTimeframeChange={changeTimeframe}
     />
   );

@@ -63,7 +63,28 @@ function makePaneMock() {
     getSeries: vi.fn(() => []),
     setStretchFactor: vi.fn(),
     getStretchFactor: vi.fn(() => 1),
+    // Story 32.2: 0 = "not laid out yet"; a test sets the px the library would report.
+    getHeight: vi.fn(() => 0),
+    moveTo: vi.fn(),
   };
+}
+
+// Story 32.2: the price pane (index 0) and the time axis the library reserves inside the chart.
+const pricePaneMock = {
+  paneIndex: () => 0,
+  getHTMLElement: () => document.createElement("div"),
+  setStretchFactor: vi.fn(),
+  getHeight: vi.fn(() => 0),
+};
+const TIME_AXIS_PX = 28;
+const timeScaleHeightMock = vi.fn(() => TIME_AXIS_PX);
+type PaneMock = ReturnType<typeof makePaneMock>;
+function addedPane(n: number): PaneMock {
+  return addPaneMock.mock.results[n].value as PaneMock;
+}
+function lastChartHeight(): number | undefined {
+  const calls = applyOptionsMock.mock.calls.filter((c) => (c[0] as { height?: number }).height !== undefined);
+  return (calls[calls.length - 1]?.[0] as { height: number } | undefined)?.height;
 }
 
 // A real ISeriesApi's `.options().color`/`.applyOptions({color})` round-trip, so the
@@ -115,7 +136,7 @@ vi.mock("lightweight-charts", () => ({
   createChart: (...args: unknown[]) => createChartMock(...args),
 }));
 
-const { default: LightweightChart } = await import("./LightweightChart");
+const { default: LightweightChart, INDICATOR_PANE_PX, PRICE_PANE_PX, VOLUME_PANE_PX } = await import("./LightweightChart");
 
 // Story 15.9: the candlestick series' fallback color literals (LightweightChart.tsx's
 // `cssVar(name, fallback)` calls) resolve deterministically under jsdom, since no
@@ -179,6 +200,9 @@ function chartElement(props: ChartTestProps) {
 
 beforeEach(() => {
   nextPaneIndex = 1;
+  pricePaneMock.setStretchFactor.mockReset();
+  pricePaneMock.getHeight.mockReset().mockReturnValue(0);
+  timeScaleHeightMock.mockReset().mockReturnValue(TIME_AXIS_PX);
   setDataMock.mockReset();
   seriesUpdateMock.mockReset();
   addSeriesMock
@@ -217,12 +241,13 @@ beforeEach(() => {
     remove: removeMock,
     addPane: addPaneMock,
     removePane: removePaneMock,
-    panes: () => [{ paneIndex: () => 0, getHTMLElement: () => document.createElement("div") }],
+    panes: () => [pricePaneMock],
     subscribeClick: subscribeClickMock,
     unsubscribeClick: unsubscribeClickMock,
     subscribeCrosshairMove: subscribeCrosshairMoveMock,
     unsubscribeCrosshairMove: unsubscribeCrosshairMoveMock,
     timeScale: () => ({
+      height: timeScaleHeightMock,
       getVisibleLogicalRange: getVisibleLogicalRangeMock,
       setVisibleLogicalRange: setVisibleLogicalRangeMock,
       coordinateToTime: coordinateToTimeMock,
@@ -296,6 +321,119 @@ describe("LightweightChart", () => {
 
     expect(onChartApi).toHaveBeenCalledTimes(2);
     expect(onChartApi.mock.calls[1][0]).toBeNull();
+  });
+
+  describe("pane heights grow the page (Story 32.2)", () => {
+    const volumeSpec = () => makePaneSpec("volume", { kind: "Histogram" });
+    const rsiSpec = () => makePaneSpec("RSI");
+    const element = (panes: IndicatorPaneSpec[]) => (
+      <LightweightChart data={[]} onChartApi={() => {}} panes={panes} />
+    );
+    // Σ pane px + one 1 px separator per extra pane + the time axis the library reserves.
+    const total = (extras: number[]) =>
+      PRICE_PANE_PX + extras.reduce((a, b) => a + b, 0) + extras.length + TIME_AXIS_PX;
+
+    it("sizes the default chart to the price pane plus the volume pane", () => {
+      render(element([volumeSpec()]));
+
+      expect(lastChartHeight()).toBe(total([VOLUME_PANE_PX]));
+      expect(addedPane(0).setStretchFactor).toHaveBeenLastCalledWith(VOLUME_PANE_PX);
+      expect(pricePaneMock.setStretchFactor).toHaveBeenLastCalledWith(PRICE_PANE_PX);
+    });
+
+    it("adds a pane's default px to the height and leaves price and volume at their px, then removes it again", () => {
+      const { rerender } = render(element([volumeSpec()]));
+      // The library reports what the first layout produced.
+      pricePaneMock.getHeight.mockReturnValue(PRICE_PANE_PX);
+      addedPane(0).getHeight.mockReturnValue(VOLUME_PANE_PX);
+
+      rerender(element([volumeSpec(), rsiSpec()]));
+      expect(lastChartHeight()).toBe(total([VOLUME_PANE_PX, INDICATOR_PANE_PX]));
+      expect(addedPane(1).setStretchFactor).toHaveBeenLastCalledWith(INDICATOR_PANE_PX);
+      expect(addedPane(0).setStretchFactor).toHaveBeenLastCalledWith(VOLUME_PANE_PX);
+      expect(pricePaneMock.setStretchFactor).toHaveBeenLastCalledWith(PRICE_PANE_PX);
+
+      rerender(element([volumeSpec()]));
+      expect(lastChartHeight()).toBe(total([VOLUME_PANE_PX]));
+    });
+
+    it("keeps a divider the operator dragged when another pane is added", () => {
+      const { rerender } = render(element([volumeSpec()]));
+      pricePaneMock.getHeight.mockReturnValue(PRICE_PANE_PX);
+      addedPane(0).getHeight.mockReturnValue(200); // dragged from 120
+
+      rerender(element([volumeSpec(), makePaneSpec("MACD")]));
+
+      expect(addedPane(0).setStretchFactor).toHaveBeenLastCalledWith(200);
+      expect(lastChartHeight()).toBe(total([200, INDICATOR_PANE_PX]));
+    });
+
+    it("draws no volume pane when it is off, and the chart is the price pane alone", () => {
+      render(element([]));
+
+      expect(addPaneMock).not.toHaveBeenCalled();
+      expect(lastChartHeight()).toBe(total([]));
+    });
+
+    it("returns volume as the first pane under price when switched back on", () => {
+      const { rerender } = render(element([rsiSpec()]));
+      rerender(element([volumeSpec(), rsiSpec()]));
+
+      // The volume pane is the second one created, so it must be moved up to index 1.
+      expect(addedPane(1).moveTo).toHaveBeenCalledWith(1);
+    });
+
+    it("paints a live bar with the volume pane off: the candle updates, the volume update is a no-op", () => {
+      const bar = { time: 60 as never, open: 5, high: 50, low: 1, close: 6 };
+      const live = (volume: number) => (
+        <LightweightChart
+          data={[bar]}
+          onChartApi={() => {}}
+          panes={[]}
+          liveBar={{ ...bar, close: 7, volume }}
+        />
+      );
+      const { rerender } = render(live(1));
+      rerender(live(42));
+
+      expect(seriesUpdateMock).toHaveBeenCalledWith({ time: 60, open: 5, high: 50, low: 1, close: 7 });
+      expect(seriesUpdateMock).not.toHaveBeenCalledWith({ time: 60, value: 42 });
+    });
+
+    it("trusts the panes' own heights only once the time axis was measured", () => {
+      timeScaleHeightMock.mockReturnValue(0);
+      const { rerender } = render(element([volumeSpec()]));
+      // Pre-paint: the library's price pane is shorter than the 500 px budget (axis taken out).
+      pricePaneMock.getHeight.mockReturnValue(PRICE_PANE_PX - TIME_AXIS_PX);
+
+      rerender(element([volumeSpec(), rsiSpec()]));
+
+      expect(pricePaneMock.setStretchFactor).toHaveBeenLastCalledWith(PRICE_PANE_PX);
+    });
+
+    it("gives every extra pane its default, not its axis-less pre-paint height, until the axis is measured", () => {
+      timeScaleHeightMock.mockReturnValue(0);
+      const { rerender } = render(element([volumeSpec()]));
+      // Pre-paint: the library squeezed the volume pane by its share of the unmeasured axis.
+      addedPane(0).getHeight.mockReturnValue(VOLUME_PANE_PX - 5);
+
+      rerender(element([volumeSpec(), rsiSpec()]));
+
+      expect(addedPane(0).setStretchFactor).toHaveBeenLastCalledWith(VOLUME_PANE_PX);
+    });
+
+    it("leaves the heights alone on a data-only refresh, so a divider being dragged is not re-pinned", () => {
+      const { rerender } = render(element([volumeSpec()]));
+      const heightCalls = () =>
+        applyOptionsMock.mock.calls.filter((c) => (c[0] as { height?: number }).height !== undefined).length;
+      const before = heightCalls();
+      addedPane(0).setStretchFactor.mockClear();
+
+      rerender(element([makePaneSpec("volume", { kind: "Histogram", data: [{ time: 60 as never, value: 1 }] })]));
+
+      expect(heightCalls()).toBe(before);
+      expect(addedPane(0).setStretchFactor).not.toHaveBeenCalled();
+    });
   });
 
   it("adds a pane by id via chart.addPane() + chart.addSeries(definition, options, paneIndex)", () => {
@@ -1293,7 +1431,7 @@ describe("gap painting (Story 32.1)", () => {
     const base = createChartMock.getMockImplementation()!;
     createChartMock.mockImplementation((...args: unknown[]) => ({
       ...base(...args),
-      panes: () => [{ paneIndex: () => 0, getHTMLElement: () => paneEl }],
+      panes: () => [{ ...pricePaneMock, getHTMLElement: () => paneEl }],
     }));
     render(
       <LightweightChart

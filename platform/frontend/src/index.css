@@ -319,6 +319,16 @@ table {
   padding: 7px 10px;
 }
 
+.indicator-dialog-pinned {
+  padding: 4px 0;
+}
+
+.indicator-dialog-pinned label {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
 .indicator-dialog-results {
   list-style: none;
   margin: 0;

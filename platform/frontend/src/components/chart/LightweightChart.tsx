@@ -237,6 +237,66 @@ function setSeriesData(series: AnySeriesApi, data: IndicatorDatum[]): void {
 
 type MainLineSeriesApi = ISeriesApi<"Line", Time>;
 
+// Story 32.2: pane heights in px. The chart's total height is the price pane plus one entry per
+// extra pane, so adding a pane grows the page (the operator scrolls) instead of squeezing the
+// price pane; only the width follows the container.
+export const PRICE_PANE_PX = 500;
+export const VOLUME_PANE_PX = 120;
+export const INDICATOR_PANE_PX = 160;
+// Known limit: the page height is 500 + 120 + 160 per extra pane with no cap, by design (the
+// operator scrolls, Story 32.2). Upgrade path: a max-panes warning in the Indicators dialog.
+const VOLUME_PANE_ID = "volume";
+
+/** Current pixel height of every pane a registry entry sits on, read BEFORE the registry
+ * mutates (adding or removing a pane makes the library re-split the old total). Index 0 of the
+ * result is the price pane; `null` means "not laid out yet, use the default". */
+function snapshotPaneHeights(
+  chart: IChartApi,
+  registry: Map<string, PaneEntry>,
+): { price: number | null; panes: Map<IPaneApi<Time>, number> } {
+  const panes = new Map<IPaneApi<Time>, number>();
+  for (const entry of registry.values()) {
+    const px = entry.pane?.getHeight() ?? 0;
+    if (entry.pane && px > 0) panes.set(entry.pane, px);
+  }
+  const price = chart.panes()[0]?.getHeight() ?? 0;
+  return { price: price > 0 ? price : null, panes };
+}
+
+/**
+ * Pins every pane to its pixel size and resizes the chart to their sum. The library splits the
+ * chart by stretch factor, so a stretch factor equal to the pane's px, with a chart height of
+ * exactly Σ px + its own chrome (1 px separators, the time axis), gives each pane exactly that
+ * many px -- an existing pane (a divider the operator dragged included) keeps its size and only
+ * the total changes. `setHeight` is not used: it takes the difference from the other panes.
+ */
+function layoutPaneHeights(
+  chart: IChartApi,
+  registry: Map<string, PaneEntry>,
+  before: ReturnType<typeof snapshotPaneHeights>,
+  priceKnown: boolean,
+): boolean {
+  const pricePx = priceKnown ? (before.price ?? PRICE_PANE_PX) : PRICE_PANE_PX;
+  chart.panes()[0]?.setStretchFactor(pricePx);
+  let total = pricePx;
+  const seen = new Set<IPaneApi<Time>>();
+  for (const entry of registry.values()) {
+    if (!entry.pane || seen.has(entry.pane)) continue;
+    seen.add(entry.pane);
+    const fallback = entry.group === VOLUME_PANE_ID ? VOLUME_PANE_PX : INDICATOR_PANE_PX;
+    // Before the axis was measured the library split an axis-less total, so every pane's own
+    // height is short by its share of the axis: only the defaults are trustworthy then.
+    const px = (priceKnown ? before.panes.get(entry.pane) : undefined) ?? fallback;
+    entry.pane.setStretchFactor(px);
+    total += px;
+  }
+  const axisPx = chart.timeScale().height();
+  chart.applyOptions({ height: Math.round(total + seen.size + axisPx) });
+  // Only an applied height that included the measured time axis makes the panes' own heights
+  // trustworthy as the next sync's baseline.
+  return axisPx > 0;
+}
+
 // Story 32.1: the dedicated gap colour -- a chart-only token no other code reads.
 function gapColor(): string {
   return chartVar("--chart-gap");
@@ -395,6 +455,9 @@ export default function LightweightChart({
   gapRunsRef.current = gapRuns;
   const gapLookupRef = useRef<GapLookup>(new Map());
   gapLookupRef.current = useMemo(() => gapRunsBySlot(gapRuns), [gapRuns]);
+  // False until a layout has sized the chart with the time axis measured: before that the price
+  // pane's own height is not the 500 px budget (the library took the axis out of the initial 500).
+  const laidOutRef = useRef(false);
   const priceGapRef = useRef<{ host: ISeriesApi<"Candlestick"> | MainLineSeriesApi; primitive: GapPrimitive } | null>(null);
 
   useEffect(() => {
@@ -405,9 +468,10 @@ export default function LightweightChart({
     // background/text/grid/crosshair is explicitly set from the semantic tokens so the
     // chart itself doesn't stay the one non-conforming element on an otherwise-restyled
     // page.
+    laidOutRef.current = false; // a fresh chart's price pane has not been laid out yet
     const chart = createChart(container, {
       width: container.clientWidth,
-      height: 500,
+      height: PRICE_PANE_PX,
       layout: {
         background: { color: chartVar("--chart-bg") },
         textColor: chartVar("--chart-text"),
@@ -454,7 +518,20 @@ export default function LightweightChart({
     let resizeFrame = 0;
     const handleResize = () => {
       cancelAnimationFrame(resizeFrame);
-      resizeFrame = requestAnimationFrame(() => chart.applyOptions({ width: container.clientWidth }));
+      resizeFrame = requestAnimationFrame(() => {
+        chart.applyOptions({ width: container.clientWidth });
+        // The first pane sync can run before the time axis is measured; the observer's first
+        // delivery follows layout, so it completes that layout with the axis known.
+        if (!laidOutRef.current) {
+          const registry = panesRef.current;
+          laidOutRef.current = layoutPaneHeights(
+            chart,
+            registry,
+            snapshotPaneHeights(chart, registry),
+            false,
+          );
+        }
+      });
     };
     // ResizeObserver, not window "resize": catches layout-only reflows and a container that
     // was hidden (clientWidth 0) at mount. Fires once on observe, so it also does the first sync.
@@ -629,6 +706,10 @@ export default function LightweightChart({
     if (!chart) return;
     const registry = panesRef.current;
     const specsById = new Map(panes.map((spec) => [spec.id, spec] as const));
+    const heightsBefore = snapshotPaneHeights(chart, registry);
+    // Heights are re-pinned only when the pane set or its order changes: a data-only refresh
+    // re-laying out would fight a divider the operator is dragging at that moment.
+    let panesChanged = false;
 
     // Remove ids no longer present first -- never touches timeScale/visible range, just
     // `chart.removePane()` (AC #4). A shared pane goes only with its group's last series.
@@ -639,8 +720,10 @@ export default function LightweightChart({
       // sibling below.
       if (entry.gap) entry.series.detachPrimitive(entry.gap);
       const groupStillUsed = [...registry.values()].some((e) => e.pane === entry.pane);
-      if (entry.pane && !groupStillUsed) chart.removePane(entry.pane.paneIndex());
-      else chart.removeSeries(entry.series);
+      if (entry.pane && !groupStillUsed) {
+        chart.removePane(entry.pane.paneIndex());
+        panesChanged = true;
+      } else chart.removeSeries(entry.series);
     }
 
     // Add new ids / update data+color for ids that stayed -- again, no visible-range
@@ -651,9 +734,11 @@ export default function LightweightChart({
         const group = spec.group ?? spec.id;
         const overlay = spec.placement === "overlay";
         // The group's existing pane (a sibling output already added), else a new one.
-        const pane = overlay
-          ? null
-          : ([...registry.values()].find((e) => e.group === group && e.pane)?.pane ?? chart.addPane());
+        let pane = overlay ? null : ([...registry.values()].find((e) => e.group === group && e.pane)?.pane ?? null);
+        if (!overlay && !pane) {
+          pane = chart.addPane();
+          panesChanged = true;
+        }
         const definition = spec.kind === "Line" ? LineSeries : HistogramSeries;
         const series = chart.addSeries(
           definition,
@@ -673,6 +758,22 @@ export default function LightweightChart({
         setSeriesData(entry.series, spec.data);
         entry.lastData = spec.data;
       }
+    }
+
+    // Panes stack in the panes prop's order, so a volume pane switched back on (created after
+    // the indicator panes) moves up to sit first under the price pane. paneIndex() is live.
+    const stacked = new Set<IPaneApi<Time>>();
+    for (const spec of panes) {
+      const pane = registry.get(spec.id)?.pane;
+      if (!pane || stacked.has(pane)) continue;
+      stacked.add(pane);
+      if (pane.paneIndex() !== stacked.size) {
+        pane.moveTo(stacked.size);
+        panesChanged = true;
+      }
+    }
+    if (panesChanged || !laidOutRef.current) {
+      laidOutRef.current = layoutPaneHeights(chart, registry, heightsBefore, laidOutRef.current);
     }
 
     // Story 32.1: exactly one gap painter per non-overlay pane (volume and indicator panes),

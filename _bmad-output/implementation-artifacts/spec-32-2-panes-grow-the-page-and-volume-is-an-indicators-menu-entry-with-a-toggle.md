@@ -2,7 +2,9 @@
 title: 'Story 32.2: Panes grow the page instead of shrinking each other, and volume is an Indicators-menu entry with a toggle'
 type: 'feature'
 created: '2026-09-30'
-status: 'draft'
+status: 'done'
+final_revision: 'e1ec264c8a4ee165ede13d560355b450dfeaf988'
+baseline_revision: 'a47f3c5f6127ef3b3adcaea6b2647148e8b01048'
 review_loop_iteration: 0
 followup_review_recommended: false
 context:
@@ -59,12 +61,22 @@ warnings: []
 
 ## Code Map
 
-Filled at plan time from the live code (Story 32.1's Code Map is the continuity input). Expected anchors: `platform/frontend/src/components/chart/LightweightChart.tsx` (`createChart` height, the width-only `ResizeObserver`, the pane registry effect that calls `chart.addPane()`), `platform/frontend/src/pages/ChartPage.tsx` (`DEFAULT_PANE_IDS`, the `panes` builder, the timeframe `localStorage` helpers to mirror), `platform/frontend/src/components/chart/IndicatorPicker.tsx` (the dialog), `platform/frontend/src/index.css` and `frontend/scripts/chart-layout.test.mjs`, `ChartPage.test.tsx` ("shows only candles + a volume pane by default"), `LightweightChart.test.tsx` pane tests.
+- `platform/frontend/src/components/chart/LightweightChart.tsx` -- `createChart` at :408 (`height: 500`), `handleResize` :452-461 (width only), pane registry effect :627-707 (`addPane`/`removePane`, volume is the spec id `"volume"`), live volume update :728-755 (already `?.` no-op), `PaneEntry` :215, `panesRef` :362.
+- `platform/frontend/src/pages/ChartPage.tsx` -- `DEFAULT_PANE_IDS` :51 and "overlay" comments :48-50, :270; `timeframeStorageKey`/`loadTimeframe` :54-59 (mirror for volume); `panes` useMemo :273-301; `fullVolume` :212 (feeds profiles :392, :414); `<IndicatorPicker>` :816-825.
+- `platform/frontend/src/components/chart/IndicatorPicker.tsx` -- dialog ~:332, results list; owns no chart state, so a volume row needs new props (`volumeOn`, `onVolumeChange`).
+- `platform/frontend/scripts/chart-layout.test.mjs` reads `src/index.css`; `.chart-workspace` (:206), `.term-box` (theme.css:128) set no overflow/height.
+- lightweight-charts 5.2.1 `IPaneApi`: `getHeight`, `setHeight`, `getStretchFactor`, `setStretchFactor` all exist.
+- Tests: `ChartPage.test.tsx:287` and :614; `LightweightChart.test.tsx` mock `makePaneMock()` :55 lacks `getHeight`/`setHeight` (extend it).
 
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] Planned at dev time per the Code Map; one task per file, ordered: height arithmetic and tests, CSS/layout test, volume entry in the dialog with its storage helper, `ChartPage` wiring and comment fix, tests for every matrix row.
+- [x] `platform/frontend/src/components/chart/LightweightChart.tsx` -- add `PRICE_PANE_PX`, `VOLUME_PANE_PX`, `INDICATOR_PANE_PX`; after each pane registry change pin every existing pane to its current `getHeight()` via `setHeight`, give the new pane its default, apply total height via `chart.applyOptions({ height })`; resize observer keeps width only.
+- [x] `platform/frontend/src/components/chart/LightweightChart.test.tsx` -- extend the pane mock; tests for the add/remove/dragged-divider/volume-off/live-no-op matrix rows.
+- [x] `platform/frontend/scripts/chart-layout.test.mjs` (+ CSS if needed) -- assert no `overflow: hidden`/fixed height on chart ancestors.
+- [x] `platform/frontend/src/pages/ChartPage.tsx` -- volume storage helper (`chart-volume:{iid}`, try/catch, default on, one `console.error`), conditional volume pane first, fix "overlay" comments, pass props to the picker.
+- [x] `platform/frontend/src/components/chart/IndicatorPicker.tsx` -- pinned "Volume" row above catalog categories with toggle.
+- [x] `ChartPage.test.tsx`, `IndicatorPicker` tests -- default on, off persisted and restored on reload, storage blocked, `fullVolume` still feeds profiles.
 
 **Acceptance Criteria:**
 - Given any number of non-overlay panes, when one is added or removed, then the chart height equals the price pane plus the sum of the extra panes and no existing pane changes its pixel size.
@@ -75,3 +87,38 @@ Filled at plan time from the live code (Story 32.1's Code Map is the continuity 
 
 **Commands:**
 - `cd platform/frontend && npm test && npm run lint && npm run build` -- expected: all pass, no new warnings.
+
+## Review Triage Log
+
+### 2026-10-01 — Review pass
+- intent_gap: 0
+- bad_spec: 0
+- patch: 4: (high 0, medium 2, low 2)
+- defer: 0
+- reject: 12
+- addressed_findings:
+  - `[medium]` `[patch]` `laidOutRef` stale across chart recreation: reset when the chart is created.
+  - `[medium]` `[patch]` first layout could run before the time axis was measured and never correct: the resize observer's first frame now completes the layout.
+  - `[low]` `[patch]` Volume checkbox ignored the picker's `disabled`: now honours it.
+  - `[low]` `[patch]` unbounded page height undocumented: `Known limit:` comment added.
+
+
+### 2026-10-01 — Review pass (follow-up)
+- intent_gap: 0
+- bad_spec: 0
+- patch: 4: (high 0, medium 2, low 2)
+- defer: 0
+- reject: 13
+- addressed_findings:
+  - `[medium]` `[patch]` before the time axis was measured, extra panes were pinned at their axis-less pre-paint height (volume ~115 px instead of 120): defaults are used for every pane until the axis is known; test added.
+  - `[medium]` `[patch]` every data-only `panes` refresh re-pinned all stretch factors and re-applied the height, fighting a divider mid-drag: layout now runs only when a pane is added, removed or moved (or the first layout is still incomplete); test added.
+  - `[low]` `[patch]` `IndicatorPicker` rendered an uncheckable Volume box if `onVolumeChange` came without `volumeOn`: the row now needs both.
+  - `[low]` `[patch]` `chart-layout.test.mjs` missed `overflow: auto/scroll` and `max-height` on chart ancestors: guard widened.
+
+## Auto Run Result
+
+- Summary: follow-up review of Story 32.2 (pane heights computed from the pane set, volume as a pinned, per-instrument Indicators-dialog toggle). Four review patches applied.
+- Files: `LightweightChart.tsx` (axis-less heights ignored before first measured layout; relayout only on pane-set change), `LightweightChart.test.tsx` (two tests), `IndicatorPicker.tsx` (Volume row needs both props), `scripts/chart-layout.test.mjs` (wider ancestor guard).
+- Review: 4 patches applied, 0 deferred, 13 rejected (e.g. 1 px separator assumption verified in lightweight-charts 5.2.1 source, StrictMode dev double-log, volume drag size reset on re-toggle is the spec'd default).
+- Verification: `npm test` (447 vitest + 7 node tests pass), `npm run lint` (the same 3 pre-existing warnings, none new), `npm run build` pass.
+- Residual risk: stretch-factor sizing is still verified against a mock, not a real browser layout.

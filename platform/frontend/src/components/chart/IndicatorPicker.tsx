@@ -28,6 +28,10 @@ interface IndicatorPickerProps {
   /** Allow the same indicator several times with different params (RSI(14) + RSI(21)). Off by
    * default: the Technicals tab's filter fields are keyed by indicator name alone. */
   multiInstance?: boolean;
+  /** Story 32.2: volume is the dialog's pinned first entry (no params, no catalog row), so its
+   * state lives with the caller. The row shows only when both are given (not the Technicals tab). */
+  volumeOn?: boolean;
+  onVolumeChange?: (on: boolean) => void;
 }
 
 function hasInstance(
@@ -65,6 +69,8 @@ export default function IndicatorPicker({
   dialogOpen = false,
   onDialogClose,
   multiInstance = false,
+  volumeOn,
+  onVolumeChange,
 }: IndicatorPickerProps) {
   const [catalog, setCatalog] = useState<Record<string, IndicatorCatalogEntry>>({});
   const [entries, setEntries] = useState<IndicatorConfigEntry[]>([]);
@@ -169,6 +175,8 @@ export default function IndicatorPicker({
           )}
           disabled={disabled}
           onAdd={addByName}
+          volumeOn={volumeOn}
+          onVolumeChange={onVolumeChange}
         />
       )}
       <h3>Indicators</h3>
@@ -297,6 +305,8 @@ function IndicatorDialog({
   addedNames,
   disabled,
   onAdd,
+  volumeOn,
+  onVolumeChange,
 }: {
   open: boolean;
   onClose: () => void;
@@ -304,6 +314,8 @@ function IndicatorDialog({
   addedNames: string[];
   disabled: boolean;
   onAdd: (name: string) => void;
+  volumeOn?: boolean;
+  onVolumeChange?: (on: boolean) => void;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   const [query, setQuery] = useState("");
@@ -342,6 +354,19 @@ function IndicatorDialog({
           &times;
         </button>
       </div>
+      {onVolumeChange && volumeOn !== undefined && (
+        <div className="indicator-dialog-pinned">
+          <label>
+            <input
+              type="checkbox"
+              checked={volumeOn}
+              disabled={disabled}
+              onChange={(e) => onVolumeChange(e.target.checked)}
+            />
+            <span>Volume</span>
+          </label>
+        </div>
+      )}
       <div className="indicator-dialog-cats" role="group" aria-label="Category">
         {(["all", "overlay", "oscillator"] as const).map((c) => (
           <button

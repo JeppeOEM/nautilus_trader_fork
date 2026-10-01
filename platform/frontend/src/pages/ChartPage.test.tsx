@@ -465,6 +465,102 @@ describe("ChartPage indicators dialog (spec A4.1)", () => {
   });
 });
 
+describe("ChartPage volume toggle (Story 32.2)", () => {
+  const VOLUME_KEY = "chart-volume:BTC-USD-PERP.DYDX";
+  const paneIds = () => (lastChartProps.current?.panes ?? []).map((p) => p.id);
+  async function openDialog(): Promise<HTMLElement> {
+    render(page());
+    await act(async () => {}); // catalog load
+    fireEvent.click(within(screen.getByRole("toolbar", { name: "Chart controls" })).getByRole("button", { name: "Indicators" }));
+    return screen.getByRole("dialog", { name: "Indicators" });
+  }
+
+  it("pins Volume above the categories, on by default, without a params editor", async () => {
+    const dialog = await openDialog();
+
+    const toggle = within(dialog).getByRole("checkbox", { name: "Volume" });
+    expect(toggle).toBeChecked();
+    expect(paneIds()).toEqual(["volume"]);
+    const categories = within(dialog).getByRole("group", { name: "Category" });
+    expect(toggle.compareDocumentPosition(categories) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it("removes the volume pane when switched off and stores 'off' under chart-volume:{iid}", async () => {
+    const dialog = await openDialog();
+
+    fireEvent.click(within(dialog).getByRole("checkbox", { name: "Volume" }));
+
+    expect(paneIds()).toEqual([]);
+    expect(localStorage.getItem(VOLUME_KEY)).toBe("off");
+  });
+
+  it("restores the off state on reload", () => {
+    localStorage.setItem(VOLUME_KEY, "off");
+    render(page());
+
+    expect(paneIds()).toEqual([]);
+  });
+
+  it("puts volume first, before every indicator pane, when switched back on", async () => {
+    localStorage.setItem(VOLUME_KEY, "off");
+    picker.values = { "RelativeStrengthIndex_period=14.value": [] };
+    const dialog = await openDialog();
+    expect(paneIds()).toEqual(["RelativeStrengthIndex_period=14.value"]);
+
+    fireEvent.click(within(dialog).getByRole("checkbox", { name: "Volume" }));
+
+    expect(paneIds()).toEqual(["volume", "RelativeStrengthIndex_period=14.value"]);
+    expect(localStorage.getItem(VOLUME_KEY)).toBe("on");
+  });
+
+  it("keeps the choice across a timeframe change", async () => {
+    localStorage.setItem(VOLUME_KEY, "off");
+    render(page());
+
+    fireEvent.click(screen.getByRole("button", { name: "Timeframe 5m" }));
+
+    expect(paneIds()).toEqual([]);
+  });
+
+  it("still feeds the fetched volume to the profiles with the pane off", () => {
+    const bars = [1, 2, 3, 4, 5].map((t) => ({ time: t, open: t, high: t + 1, low: t, close: t + 1 }));
+    mocks.candles = bars;
+    mocks.volume = bars.map((b) => ({ time: b.time, value: 10 }));
+    const totalWith = (): number => {
+      fireEvent.click(screen.getByRole("button", { name: "Fixed range volume profile tool" }));
+      act(() => {
+        lastChartProps.current!.onRangeSelect!({ time: 2, price: 1 }, { time: 4, price: 2 });
+      });
+      return lastChartProps.current!.volumeProfiles![0].profile.totalVolume;
+    };
+    const on = render(page());
+    const withPane = totalWith();
+    on.unmount();
+
+    localStorage.setItem(VOLUME_KEY, "off");
+    render(page());
+    expect(paneIds()).toEqual([]);
+
+    expect(totalWith()).toBe(withPane);
+  });
+
+  it("defaults to on and logs one console.error when localStorage throws", () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const getItem = vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
+      throw new Error("blocked");
+    });
+    try {
+      render(page());
+
+      expect(paneIds()).toEqual(["volume"]);
+      expect(errors.mock.calls.filter((c) => String(c[0]).startsWith("chart-volume"))).toHaveLength(1);
+    } finally {
+      getItem.mockRestore();
+      errors.mockRestore();
+    }
+  });
+});
+
 describe("ChartPage trendline tool (Story 18.2)", () => {
   const arm = () => fireEvent.click(screen.getByRole("button", { name: "Trendline tool" }));
   const click = (time: number, price: number) =>
