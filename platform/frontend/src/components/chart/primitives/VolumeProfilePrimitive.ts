@@ -9,6 +9,7 @@ import type {
 } from "lightweight-charts";
 
 import type { VolumeProfile } from "../../../lib/volumeProfile";
+import { chartVar } from "../chartTheme";
 
 // Transitive fancy-canvas type, derived rather than imported (not a direct dependency).
 type CanvasRenderingTarget2D = Parameters<IPrimitivePaneRenderer["draw"]>[0];
@@ -114,7 +115,8 @@ export function layoutProfile(
 // Rows shorter than this (px) lose their 1px gap when `respondsToZoom` is set.
 const ZOOM_GAP_MIN_ROW_PX = 3;
 
-const POC_COLOR = "#ffff55";
+// Story 32.4: the point-of-control line reads the chart token at draw time.
+const pocColor = (): string => chartVar("--chart-poc");
 const VA_ALPHA = 0.12;
 
 // Story 18.5 (AC #2): one primitive for every Volume Profile variant. Row y-spans are
@@ -224,7 +226,7 @@ export class VolumeProfilePrimitive implements ISeriesPrimitive<Time> {
             context.fillStyle = spec.downColor;
             context.fillRect(r.downX * hr, r.y * vr, r.downW * hr, h);
             if (spec.showPoc && r.isPoc) {
-              context.strokeStyle = POC_COLOR;
+              context.strokeStyle = pocColor();
               context.lineWidth = 2 * hr;
               context.strokeRect(Math.min(r.upX, r.downX) * hr, r.y * vr, (r.upW + r.downW) * hr, h);
             }

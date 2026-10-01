@@ -1,34 +1,26 @@
+import { chartPalette } from "./chartTheme";
+
 // Story 15.9: final pane-color-slot assignment (Story 15.4 AC #7). Values come
-// from the 16-color VGA/ANSI token set declared in theme.css -- read at call time
-// via `cssVar` (not at module load) so it always reflects whatever the stylesheet
-// currently has applied, and works whether or not the stylesheet has loaded yet
-// (falls back to the same literal value baked into theme.css).
+// from the chart tokens declared in theme.css (Story 32.4) -- read at call time (not at
+// module load) so it always reflects whatever the stylesheet currently has applied, and
+// works whether or not the stylesheet has loaded yet (falls back to the same literal value
+// baked into theme.css).
 
 /** Reads a CSS custom property off :root, falling back to `fallback` when unset
- * (e.g. under jsdom in tests, where no stylesheet is ever loaded). Shared with
- * LightweightChart.tsx so there is exactly one place that knows how to resolve a
- * design token into a literal color string a canvas API can use. */
+ * (e.g. under jsdom in tests, where no stylesheet is ever loaded). For the page's
+ * semantic colour tokens (MetricTile on the history page); chart drawing code reads
+ * its own `--chart-*` tokens through chartTheme.ts's `chartVar` instead (Story 32.4). */
 export function cssVar(name: string, fallback: string): string {
   if (typeof document === "undefined") return fallback;
   const value = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
   return value || fallback;
 }
 
-// Eight bright/high-contrast VGA tones, chosen for legibility against the
-// terminal's black chart background -- deliberately skips black/dark-gray/the
-// non-"light" red/green/cyan/magenta/blue (too low-contrast on black to read as a
-// chart line). Order matters: it's also the color-slot order.
+// Story 32.4: the eight pane colours are the chart's own `--chart-pane-*` tokens (TradingView's
+// palette, legible on the white chart), resolved through chartTheme.ts. Order matters: it is also
+// the colour-slot order.
 function palette(): string[] {
-  return [
-    cssVar("--vga-light-cyan", "#55ffff"),
-    cssVar("--vga-light-green", "#55ff55"),
-    cssVar("--vga-light-red", "#ff5555"),
-    cssVar("--vga-yellow", "#ffff55"),
-    cssVar("--vga-light-magenta", "#ff55ff"),
-    cssVar("--vga-light-blue", "#5555ff"),
-    cssVar("--vga-brown", "#aa5500"),
-    cssVar("--vga-white", "#ffffff"),
-  ];
+  return chartPalette();
 }
 
 /**

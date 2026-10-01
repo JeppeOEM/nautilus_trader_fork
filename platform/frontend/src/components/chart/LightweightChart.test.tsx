@@ -1,4 +1,5 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { CHART_TOKENS } from "./chartTheme";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { CreatePriceLineOptions, Time } from "lightweight-charts";
@@ -123,14 +124,15 @@ const { default: LightweightChart } = await import("./LightweightChart");
 // scrambles or drops the token-derived up/down colors, the entire point of the AC #4
 // chart-theming change.
 const EXPECTED_CANDLESTICK_OPTIONS = {
-  upColor: "#55ff55",
-  downColor: "#ff5555",
-  borderUpColor: "#55ff55",
-  borderDownColor: "#ff5555",
-  wickUpColor: "#55ff55",
-  wickDownColor: "#ff5555",
-  borderColor: "#555555",
-  wickColor: "#555555",
+  // Story 32.4: the chart's own light-palette tokens (jsdom has no stylesheet, so the fallbacks).
+  upColor: CHART_TOKENS["--chart-up"],
+  downColor: CHART_TOKENS["--chart-down"],
+  borderUpColor: CHART_TOKENS["--chart-up"],
+  borderDownColor: CHART_TOKENS["--chart-down"],
+  wickUpColor: CHART_TOKENS["--chart-up"],
+  wickDownColor: CHART_TOKENS["--chart-down"],
+  borderColor: CHART_TOKENS["--chart-text-dim"],
+  wickColor: CHART_TOKENS["--chart-text-dim"],
 };
 
 function makePaneSpec(id: string, overrides: Partial<IndicatorPaneSpec> = {}): IndicatorPaneSpec {

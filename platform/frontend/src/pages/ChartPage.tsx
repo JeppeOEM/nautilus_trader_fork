@@ -33,7 +33,8 @@ import {
   type SessionProfileCache,
   type SessionProfileSettings,
 } from "../lib/sessionProfile";
-import { assignPaneColor, cssVar } from "../components/chart/paneColors";
+import { chartVar } from "../components/chart/chartTheme";
+import { assignPaneColor } from "../components/chart/paneColors";
 import type { IndicatorCatalogEntry, IndicatorConfigEntry } from "../api/schema";
 import { BAR_SECONDS, useCandles } from "../hooks/useCandles";
 import { TIMEFRAMES } from "../timeframes";
@@ -347,7 +348,7 @@ function ChartInner({ instrumentId, barSeconds, onTimeframeChange }: ChartInnerP
       const id = `hline-${nextPriceLineIdRef.current++}`;
       setPriceLines((lines) => [
         ...lines,
-        { id, price, color: cssVar("--color-active", "#55ffff") },
+        { id, price, color: chartVar("--chart-drawing") },
       ]);
       setActiveTool("cursor");
     },
@@ -374,7 +375,7 @@ function ChartInner({ instrumentId, barSeconds, onTimeframeChange }: ChartInnerP
       const id = `trendline-${nextDrawingIdRef.current++}`;
       setDrawings((all) => [
         ...all,
-        { id, kind: "trendline", anchors: [pendingAnchor, point], color: cssVar("--color-active", "#55ffff") },
+        { id, kind: "trendline", anchors: [pendingAnchor, point], color: chartVar("--chart-drawing") },
       ]);
       setPendingAnchor(null);
       setActiveTool("cursor");

@@ -2,7 +2,8 @@
 title: 'Story 32.4: The classic light chart: TradingView''s palette inside the dark terminal app'
 type: 'feature'
 created: '2026-09-30'
-status: 'draft'
+status: 'done'
+baseline_revision: '8e6335d9cc'
 review_loop_iteration: 0
 followup_review_recommended: false
 context:
@@ -69,3 +70,38 @@ Filled at plan time from the live code (continuity from the 32.3 spec). Expected
 
 **Commands:**
 - `cd platform/frontend && npm test && npm run lint && npm run build` -- expected: all pass, no new warnings.
+
+## Quick-dev record (2026-10-01)
+
+Built by the operator's request as a quick-dev on branch `epic-32` (not through a bmad-loop
+dev/review cycle): "32.4 dont need a story its just a quick change of colors on the chart".
+
+**Shipped**
+- `theme.css`: the `--chart-*` token set scoped to `.chart-workspace` (bg, grid, text, text-dim,
+  border, crosshair, crosshair-label-bg, up, down, gap, marker, drawing, poc, pane-1..8), replacing
+  Story 32.1's root-level `--chart-gap`; the "no toggle" comments in theme.css, index.css,
+  `ChartPage.test.tsx` and spec §A8.1 now state that the chart area alone is light by operator
+  decision (2026-09-30).
+- `components/chart/chartTheme.ts`: the one fallback table, `chartVar` reading from the chart
+  container (`.chart-workspace`, root fallback), `chartPalette`.
+- Every chart colour read rewired to it: `LightweightChart.tsx` (layout, grid, crosshair, scale
+  borders, candles, replay marker, measurement, trendline preview, drawing menu), `paneColors.ts`
+  (the eight pane slots), `VolumeProfilePrimitive.ts` (point of control), `pages/ChartPage.tsx`
+  (new horizontal lines and trendlines). `index.css`: the legend inside `.chart-workspace` reads
+  in the chart text colour with a light halo.
+- `chartTheme.test.ts`: the fallback table equals theme.css; every drawn token reads >= 3:1
+  against `--chart-bg` (WCAG 2.1 graphics); the gap colour is unique; `chartVar` scoping; and a
+  guard that the chart drawing files (LightweightChart, legend, paneColors, ChartPage, every
+  primitive) contain no `--color-*`/`--vga-*` read and no colour literal.
+
+**Values that differ from TradingView's, and why:** `--chart-up` #25a399 (TradingView's #26a69a
+measures 2.998:1 on white), pane slot 4 #b26a00 (their #ff9800: 2.2:1), pane slot 6 #00838f (their
+#00bcd4: 2.3:1). Gap #d84315, marker #455a64, poc #1b5e20, drawing #2962ff.
+
+**Not done, deliberately (quick-dev scope):** `--chart-volume-up/--chart-volume-down` are not
+declared: the volume pane is one histogram coloured by its pane slot today (`assignPaneColor`),
+so per-bar up/down tokens would be dead config until Story 32.2 reshapes the volume pane; the
+DocsPage has no chart section to update. `MetricTile` (history page) keeps the dark identity.
+
+**Verification:** `tsc -p tsconfig.app.json --noEmit` clean; oxlint clean on the new files;
+`vitest run` 431 passed (30 files); `npm run test:codegen` passed.

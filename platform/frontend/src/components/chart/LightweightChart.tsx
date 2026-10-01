@@ -21,6 +21,7 @@ import type { IndicatorDatum } from "../../hooks/useIndicatorSeries";
 import type { SnapshotLinesData } from "../../hooks/useSnapshotSeries";
 import { type GapRun, MAX_GAP_ROWS_PER_GAP, findGapRuns, gapRunsBySlot } from "../../lib/gaps";
 import { type GapLookup, type LegendSeries, renderLegends } from "./legend";
+import { chartVar } from "./chartTheme";
 import { assignPaneColor, cssVar } from "./paneColors";
 import {
   MeasurementPrimitive,
@@ -238,7 +239,7 @@ type MainLineSeriesApi = ISeriesApi<"Line", Time>;
 
 // Story 32.1: the dedicated gap colour -- a chart-only token no other code reads.
 function gapColor(): string {
-  return cssVar("--chart-gap", "#ff9100");
+  return chartVar("--chart-gap");
 }
 
 // Gap runs come from the price series only -- the candles, or in Lines mode the first line
@@ -408,29 +409,29 @@ export default function LightweightChart({
       width: container.clientWidth,
       height: 500,
       layout: {
-        background: { color: cssVar("--color-bg", "#000000") },
-        textColor: cssVar("--color-text", "#aaaaaa"),
+        background: { color: chartVar("--chart-bg") },
+        textColor: chartVar("--chart-text"),
         fontFamily: cssVar("--font-terminal", "monospace"),
       },
       grid: {
-        vertLines: { color: cssVar("--color-border", "#555555") },
-        horzLines: { color: cssVar("--color-border", "#555555") },
+        vertLines: { color: chartVar("--chart-grid") },
+        horzLines: { color: chartVar("--chart-grid") },
       },
       crosshair: {
         vertLine: {
-          color: cssVar("--color-active", "#55ffff"),
-          labelBackgroundColor: cssVar("--color-active-bg", "#0000aa"),
+          color: chartVar("--chart-crosshair"),
+          labelBackgroundColor: chartVar("--chart-crosshair-label-bg"),
         },
         horzLine: {
-          color: cssVar("--color-active", "#55ffff"),
-          labelBackgroundColor: cssVar("--color-active-bg", "#0000aa"),
+          color: chartVar("--chart-crosshair"),
+          labelBackgroundColor: chartVar("--chart-crosshair-label-bg"),
         },
       },
       // Both scales default to a non-token gray border line (library default
-      // '#2B2B43') -- override explicitly, same as grid/crosshair above.
-      rightPriceScale: { borderColor: cssVar("--color-border", "#555555") },
+      // a dark navy) -- override explicitly, same as grid/crosshair above.
+      rightPriceScale: { borderColor: chartVar("--chart-border") },
       // Intraday bars are unreadable without clock labels -- the library default shows dates only.
-      timeScale: { borderColor: cssVar("--color-border", "#555555"), timeVisible: true },
+      timeScale: { borderColor: chartVar("--chart-border"), timeVisible: true },
     });
     chartRef.current = chart;
     onChartApi(chart);
@@ -522,11 +523,11 @@ export default function LightweightChart({
         prevLinesLengthRef.current = 0;
       }
       if (!seriesRef.current) {
-        // Up/down candle colors explicitly from the semantic tokens (AC #4/#1) --
-        // lightweight-charts' own default green/red is not VGA-derived.
-        const up = cssVar("--color-up", "#55ff55");
-        const down = cssVar("--color-down", "#ff5555");
-        const dim = cssVar("--color-text-dim", "#555555");
+        // Up/down candle colours explicitly from the chart tokens (Story 32.4) --
+        // lightweight-charts' own defaults are never relied on.
+        const up = chartVar("--chart-up");
+        const down = chartVar("--chart-down");
+        const dim = chartVar("--chart-text-dim");
         seriesRef.current = chart.addSeries(CandlestickSeries, {
           upColor: up,
           downColor: down,
@@ -536,7 +537,7 @@ export default function LightweightChart({
           wickDownColor: down,
           // The base borderColor/wickColor fields (as opposed to the Up/Down
           // variants above) are vestigial fallbacks whose library defaults
-          // (`#378658`/`#737375`) are otherwise never overridden -- set
+          // are otherwise never overridden -- set
           // explicitly so nothing non-token-derived can ever render.
           borderColor: dim,
           wickColor: dim,
@@ -863,7 +864,7 @@ export default function LightweightChart({
       markerRef.current.setTime(markerTime);
       return;
     }
-    markerRef.current = new VerticalMarkerPrimitive(markerTime, cssVar("--color-warn", "#ffff55"));
+    markerRef.current = new VerticalMarkerPrimitive(markerTime, chartVar("--chart-marker"));
     host.attachPrimitive(markerRef.current);
   }, [markerTime, mode]);
 
@@ -880,7 +881,7 @@ export default function LightweightChart({
     const host = seriesRef.current;
     if (!container || !chart || !host || !rangeSelectActive || mode !== "candles") return;
 
-    const preview = new MeasurementPrimitive(cssVar("--color-active", "#55ffff"));
+    const preview = new MeasurementPrimitive(chartVar("--chart-drawing"));
     let attached = false;
     const stopDrag = attachRangeDrag(container, chart, host, {
       onMove: (start, end) => {
@@ -990,7 +991,7 @@ export default function LightweightChart({
     const host = seriesRef.current;
     if (!container || !chart || !host || !measureActive || mode !== "candles") return;
 
-    const primitive = new MeasurementPrimitive(cssVar("--color-active", "#55ffff"));
+    const primitive = new MeasurementPrimitive(chartVar("--chart-drawing"));
     let attached = false;
 
     const stopDrag = attachRangeDrag(container, chart, host, {
@@ -1167,13 +1168,13 @@ export default function LightweightChart({
     const chart = chartRef.current;
     const host = seriesRef.current ?? lineSeriesRef.current?.price;
     if (!chart || !host || !pendingAnchor) return;
-    const preview = new TrendlinePrimitive([pendingAnchor, pendingAnchor], cssVar("--color-active", "#55ffff"));
+    const preview = new TrendlinePrimitive([pendingAnchor, pendingAnchor], chartVar("--chart-drawing"));
     host.attachPrimitive(preview);
     previewRef.current = preview;
     const move = (param: MouseEventParams): void => {
       const price = param.point ? host.coordinateToPrice(param.point.y) : null;
       const time = param.point ? (param.time ?? chart.timeScale().coordinateToTime(param.point.x)) : null;
-      if (price !== null && time !== null) preview.update([pendingAnchor, { time, price }], cssVar("--color-active", "#55ffff"));
+      if (price !== null && time !== null) preview.update([pendingAnchor, { time, price }], chartVar("--chart-drawing"));
     };
     chart.subscribeCrosshairMove(move);
     return () => {
@@ -1184,7 +1185,7 @@ export default function LightweightChart({
   }, [pendingAnchor, mode]);
 
   const menuSpec = menu ? (priceLines.find((l) => l.id === menu.id) ?? drawings.find((d) => d.id === menu.id)) : undefined;
-  const menuColor = /^#[0-9a-f]{6}$/i.test(menuSpec?.color ?? "") ? menuSpec!.color : "#55ffff";
+  const menuColor = /^#[0-9a-f]{6}$/i.test(menuSpec?.color ?? "") ? menuSpec!.color : chartVar("--chart-drawing");
   return (
     <>
       <div ref={containerRef} />
@@ -1194,8 +1195,8 @@ export default function LightweightChart({
           aria-label="Drawing options"
           style={{
             position: "fixed", left: menu.x + 8, top: menu.y + 8, zIndex: 1000, display: "flex", gap: 8,
-            alignItems: "center", padding: 6, background: cssVar("--color-bg", "#000"),
-            border: `1px solid ${cssVar("--color-text-dim", "#555")}`,
+            alignItems: "center", padding: 6, background: chartVar("--chart-bg"),
+            border: `1px solid ${chartVar("--chart-border")}`,
           }}
         >
           <input

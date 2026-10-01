@@ -7,7 +7,10 @@
       (unlikely, but cheap to keep possible) touches only this file.
 
    This is one fixed visual identity, not a light/dark toggle -- deliberately no
-   `prefers-color-scheme` branch (Task 1 Dev Note). */
+   `prefers-color-scheme` branch (Task 1 Dev Note). The one exception is the chart
+   area: by operator decision (2026-09-30, Story 32.4) `.chart-workspace` below carries
+   TradingView's classic light palette as its own `--chart-*` tokens, read by chart code
+   alone; there is still no toggle, and every other page keeps the VGA identity. */
 
 :root {
   /* Tells the browser to render native UI chrome (scrollbars, the popup list a
@@ -75,13 +78,35 @@
   --color-tag-static: var(--vga-dark-gray);
 }
 
-/* Chart-only tokens (Story 32.1) -- read by chart code alone, outside the 16-colour VGA set
-   and the semantic layer above. Story 32.4 moves this block under `.chart-workspace` (the
-   classic light chart) and re-chooses the values for a white background. */
-:root {
-  /* The gap placeholder bars and their "no data" labels (GapPrimitive); used by nothing
-     else, so a gap can never be mistaken for any other mark on the chart. */
-  --chart-gap: #ff9100;
+/* Chart-only tokens (Story 32.1, re-chosen for white in Story 32.4): the classic light chart.
+   Scoped to `.chart-workspace` (ChartPage's chart container), read by chart code alone through
+   `components/chart/chartTheme.ts`'s `chartVar`, outside the 16-colour VGA set and the semantic
+   layer above. Every value drawn as a line, bar, label or marker reads at least 3:1 against
+   `--chart-bg` (WCAG 2.1 graphics floor; chartTheme.test.ts measures it), which is why three of
+   TradingView's own colours are nudged. Not a toggle: the chart area is light, the rest of the
+   app is not (operator decision 2026-09-30). */
+.chart-workspace {
+  --chart-bg: #ffffff; /* the canvas: TradingView's classic white */
+  --chart-grid: #f0f3fa; /* grid lines */
+  --chart-text: #131722; /* scale labels, legend titles, gap labels */
+  --chart-text-dim: #787b86; /* secondary text, the candle series' vestigial border/wick fallbacks */
+  --chart-border: #e0e3eb; /* price- and time-scale borders */
+  --chart-crosshair: #9598a1; /* crosshair lines */
+  --chart-crosshair-label-bg: #131722; /* crosshair axis labels (lightweight-charts picks the label text colour for contrast) */
+  --chart-up: #25a399; /* up candles, bars and profile fills (TradingView's #26a69a reads 2.998:1 on white, one step darker clears the 3:1 floor) */
+  --chart-down: #ef5350; /* down candles, bars and profile fills */
+  --chart-gap: #d84315; /* Story 32.1's gap placeholder bars and their labels: used by nothing else, so a gap can never be mistaken for any other mark (was #ff9100 on black) */
+  --chart-marker: #455a64; /* the replay vertical marker */
+  --chart-drawing: #2962ff; /* new trendlines, horizontal lines, measurements and the drawing menu's default */
+  --chart-poc: #1b5e20; /* the volume profile's point-of-control line */
+  --chart-pane-1: #2962ff; /* indicator slot 1 (TradingView blue) */
+  --chart-pane-2: #f23645; /* indicator slot 2 */
+  --chart-pane-3: #089981; /* indicator slot 3 */
+  --chart-pane-4: #b26a00; /* indicator slot 4 (amber: TradingView's #ff9800 reads 2.2:1 on white, under the 3:1 floor) */
+  --chart-pane-5: #9c27b0; /* indicator slot 5 */
+  --chart-pane-6: #00838f; /* indicator slot 6 (teal: TradingView's #00bcd4 reads 2.3:1 on white) */
+  --chart-pane-7: #795548; /* indicator slot 7 */
+  --chart-pane-8: #131722; /* indicator slot 8 */
 }
 
 @font-face {
