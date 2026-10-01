@@ -1,11 +1,16 @@
 import type { IChartApi, IPaneApi, ISeriesApi, MouseEventParams, Time } from "lightweight-charts";
 
 import type { IndicatorDatum } from "../../hooks/useIndicatorSeries";
+import { type GapRun, gapLabel } from "../../lib/gaps";
 
 // Spec §A4.1's chart legend: a text strip at the top-left of whichever pane an indicator
 // lives in -- overlays stack in the price pane's corner, a non-overlay indicator heads its
 // own pane. Each output's value is drawn in that output's line color, following the
-// crosshair (latest value when the cursor is off the chart).
+// crosshair (latest value when the cursor is off the chart). Over a gap slot (Story 32.1) every
+// value reads "no data · <duration>" instead of "—": the legend is the chart's crosshair readout.
+
+/** Slot time (chart seconds) -> the gap run it belongs to, from the price series. */
+export type GapLookup = ReadonlyMap<number, GapRun>;
 
 export interface LegendSeries {
   /** Outputs of one indicator share a group -- one legend row, one pane. */
@@ -49,7 +54,16 @@ function legendContainer(paneEl: HTMLElement): HTMLElement {
   return el;
 }
 
-function legendRow(groupLabel: string, members: LegendSeries[], param: MouseEventParams<Time> | null): HTMLElement {
+function gapAt(param: MouseEventParams<Time> | null, gaps: GapLookup | undefined): GapRun | undefined {
+  return param?.time === undefined ? undefined : gaps?.get(param.time as number);
+}
+
+function legendRow(
+  groupLabel: string,
+  members: LegendSeries[],
+  param: MouseEventParams<Time> | null,
+  gap: GapRun | undefined,
+): HTMLElement {
   const row = document.createElement("div");
   row.className = "chart-legend-row";
   const title = document.createElement("span");
@@ -61,7 +75,7 @@ function legendRow(groupLabel: string, members: LegendSeries[], param: MouseEven
     value.className = "chart-legend-value";
     value.style.color = member.color;
     value.title = member.outputLabel;
-    value.textContent = formatLegendValue(valueAt(member, param));
+    value.textContent = gap ? gapLabel(gap) : formatLegendValue(valueAt(member, param));
     row.appendChild(value);
   }
   return row;
@@ -72,8 +86,14 @@ function legendRow(groupLabel: string, members: LegendSeries[], param: MouseEven
  * Returns false if some pane has no DOM element yet -- the library creates a freshly added
  * pane's element lazily, at its next paint -- so the caller can retry on the next frame.
  */
-export function renderLegends(chart: IChartApi, items: LegendSeries[], param: MouseEventParams<Time> | null): boolean {
+export function renderLegends(
+  chart: IChartApi,
+  items: LegendSeries[],
+  param: MouseEventParams<Time> | null,
+  gaps?: GapLookup,
+): boolean {
   let allRendered = true;
+  const gap = gapAt(param, gaps);
   chart.panes().forEach((pane, index) => {
     const paneEl = pane.getHTMLElement();
     if (!paneEl) {
@@ -89,7 +109,7 @@ export function renderLegends(chart: IChartApi, items: LegendSeries[], param: Mo
       if (owner !== index) continue;
       groups.set(item.group, [...(groups.get(item.group) ?? []), item]);
     }
-    for (const [, members] of groups) container.appendChild(legendRow(members[0].groupLabel, members, param));
+    for (const [, members] of groups) container.appendChild(legendRow(members[0].groupLabel, members, param, gap));
   });
   return allRendered;
 }

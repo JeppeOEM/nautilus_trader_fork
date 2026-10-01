@@ -11,6 +11,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { HttpError, fetchCandles } from "../api/client";
 import type { CandleItem } from "../api/schema";
+import { gapRun } from "../lib/gaps";
 import type { LiveBar } from "./useLiveCandle";
 
 // Mirrors dashboard.py:206's old defaults (_CANDLE_VISIBLE_BARS=120,
@@ -20,6 +21,8 @@ const INITIAL_LIMIT = 120;
 // Exported so useLiveCandle.ts (Story 15.5) can subscribe to the same bar size instead
 // of duplicating the literal -- the two paths must never silently drift apart.
 export const BAR_SECONDS = 60;
+// Counted in logical slots, gap slots included (Story 32.1): a loaded left edge made of a
+// long whitespace run still triggers the scroll-back refill.
 const REFILL_MARGIN_BARS = 20;
 // A failed page fetch (backend restarting, SSH tunnel hiccup, proxy 502) is retried
 // forever with capped backoff -- the initial page runs once per mount, so without a retry
@@ -72,23 +75,44 @@ function toVolumeDatum(item: CandleItem): VolumeDatum {
 }
 
 /**
- * Upsert `incoming` into `prev` by time (incoming wins on a clash), ascending. Serves both the
+ * Upsert `incoming` into `prev` by time (incoming wins on a clash, except that a whitespace slot never
+ * replaces a real bar), ascending. Serves both the
  * newest-page refetch after a socket drop and the promotion of a closed live bar into history,
  * so a later setData() can never wipe bars the chart already showed. A hole between prev's last
- * bar and incoming's first (socket down longer than one page) gets one whitespace seam marker --
- * the same honesty rule the prepend seam applies at the older edge (AD-F6).
+ * bar and incoming's first (socket down longer than one page) gets one whitespace slot per
+ * missing bar (Story 32.1, capped by `gapRun`) -- the same honesty rule the prepend seam applies
+ * at the older edge (AD-F6). A slot already present in `prev` is left as it is.
  */
 export function mergeByTime<T extends { time: Time }>(prev: T[], incoming: T[], barSeconds: number): T[] {
   if (incoming.length === 0) return prev;
   const byTime = new Map<number, T>();
   for (const d of prev) byTime.set(d.time as number, d);
-  const prevLast = prev.length > 0 ? (prev[prev.length - 1].time as number) : null;
-  const seam = prevLast === null ? null : prevLast + barSeconds;
-  if (seam !== null && (incoming[0].time as number) > seam && !byTime.has(seam)) {
-    byTime.set(seam, { time: seam as UTCTimestamp } as unknown as T);
+  // The run starts at prev's last *real* point, not its last slot: prev may already end on the
+  // run `openGapTo` opened, and stepping on from that run's last slot would chain a second
+  // capped run behind it (twice the cap, unlike the backend's one run per hole).
+  const prevLastReal = lastRealTime(prev);
+  if (prevLastReal !== undefined) {
+    for (const time of gapRun(prevLastReal, incoming[0].time as number, barSeconds)) {
+      if (!byTime.has(time)) byTime.set(time, { time: time as UTCTimestamp } as unknown as T);
+    }
   }
-  for (const d of incoming) byTime.set(d.time as number, d);
+  // An incoming whitespace slot never replaces a real bar the chart already holds: a refetched
+  // page read before a promoted live bar was persisted must not blank that bar out.
+  for (const d of incoming) {
+    if (isRealPoint(d) || !byTime.has(d.time as number)) byTime.set(d.time as number, d);
+  }
   return [...byTime.values()].sort((a, b) => (a.time as number) - (b.time as number));
+}
+
+function isRealPoint(d: object): boolean {
+  return "open" in d || "value" in d;
+}
+
+function lastRealTime(points: readonly { time: Time }[]): number | undefined {
+  for (let i = points.length - 1; i >= 0; i--) {
+    if (isRealPoint(points[i])) return points[i].time as number;
+  }
+  return undefined;
 }
 
 interface CandlesState {
@@ -112,6 +136,10 @@ export interface UseCandlesResult {
   refreshNewest: () => Promise<void>;
   /** Promote a closed live bar into history state. */
   appendBar: (bar: LiveBar) => void;
+  /** Open the whitespace run up to a forming live bar's `time` when it starts more than one
+   * bar after history's newest point, so the hole shows while the bar forms, not only once it
+   * closes (Story 32.1). */
+  openGapTo: (time: Time) => void;
 }
 
 /**
@@ -189,26 +217,19 @@ export function useCandles(
               return { candles: mappedCandles, volume: mappedVolume };
             }
             // A gap can straddle exactly the page boundary (the cursor point) -- each
-            // page's own gap-marker insertion (AC #5) only sees gaps inside its own
-            // queried range, so this seam needs its own check: if the newest incoming
-            // (older) candle and the previously-earliest-loaded candle are more than
-            // one bar apart, insert a marker at the seam too (AD-F6 applies just as
-            // much to a boundary gap as an in-page one).
+            // page's own gap rows (AC #5) only fill gaps inside its own queried range, so
+            // this seam needs its own run: one whitespace slot per bar missing between the
+            // newest incoming (older) candle and the previously-earliest-loaded one (AD-F6
+            // applies just as much to a boundary gap as an in-page one; Story 32.1).
             // Every ChartDatum here is built by toChartDatum() above, so .time is
             // always a UTCTimestamp (never lightweight-charts' BusinessDay/string Time
             // variants).
-            const newestTime = mappedCandles[mappedCandles.length - 1].time as UTCTimestamp;
-            const boundaryTime = prev.candles[0].time as UTCTimestamp;
-            if (newestTime + barSeconds < boundaryTime) {
-              const seamTime = (newestTime + barSeconds) as UTCTimestamp;
-              return {
-                candles: [...mappedCandles, { time: seamTime }, ...prev.candles],
-                volume: [...mappedVolume, { time: seamTime }, ...prev.volume],
-              };
-            }
+            const newestTime = mappedCandles[mappedCandles.length - 1].time as number;
+            const boundaryTime = prev.candles[0].time as number;
+            const seam = gapRun(newestTime, boundaryTime, barSeconds).map((t) => ({ time: t as UTCTimestamp }));
             return {
-              candles: [...mappedCandles, ...prev.candles],
-              volume: [...mappedVolume, ...prev.volume],
+              candles: [...mappedCandles, ...seam, ...prev.candles],
+              volume: [...mappedVolume, ...seam, ...prev.volume],
             };
           });
         })
@@ -265,6 +286,23 @@ export function useCandles(
     [barSeconds],
   );
 
+  const openGapTo = useCallback(
+    (time: Time): void => {
+      setState((prev) => {
+        const lastReal = lastRealTime(prev.candles);
+        if (lastReal === undefined) return prev;
+        // Idempotent: the run is always stepped from the last real bar, and only the slots past
+        // what history already ends on are appended, so a repeat call never chains a second run.
+        const last = prev.candles[prev.candles.length - 1].time as number;
+        const run = gapRun(lastReal, time as number, barSeconds).filter((t) => t > last);
+        if (run.length === 0) return prev;
+        const slots = run.map((t) => ({ time: t as UTCTimestamp }));
+        return { candles: [...prev.candles, ...slots], volume: [...prev.volume, ...slots] };
+      });
+    },
+    [barSeconds],
+  );
+
   useEffect(
     () => () => {
       unmountedRef.current = true;
@@ -292,5 +330,5 @@ export function useCandles(
     return () => timeScale.unsubscribeVisibleLogicalRangeChange(handler);
   }, [chart, loadPage, enabled]);
 
-  return { ...state, venueMarket, loadFailed: loadError !== null, loadError, refreshNewest, appendBar };
+  return { ...state, venueMarket, loadFailed: loadError !== null, loadError, refreshNewest, appendBar, openGapTo };
 }

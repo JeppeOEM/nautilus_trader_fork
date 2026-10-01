@@ -505,6 +505,30 @@ def test_untraded_second_starting_a_bucket_is_neither_published_nor_observed() -
     assert observer.seen == []
 
 
+def test_a_capture_hole_never_reaches_the_observer_as_a_gap_row() -> None:
+    """
+    Story 32.1: gap rows are a chart page's whitespace only. After a six-hour capture hole the
+    alert feed (`on_bar`) still sees real bars alone, each with a numeric close.
+    """
+    bus = LiveCandleBus(_NO_CATALOG)
+    observer = _RecordingObserver(frozenset({(_IID, _BAR_SECONDS)}))
+    bus.attach(observer)
+    hole_ns = 6 * 3_600 * 1_000_000_000
+    before = _snapshot(_BASE_NS, 100.0)
+    after = [_snapshot(_BASE_NS + hole_ns + k * 1_000_000_000, 101.0 + k) for k in range(2)]
+
+    bus.handle_batch(_batch(before))
+    bus.handle_batch(_batch(*after))
+
+    bars = [bar for _iid, _bs, bar, _ts in observer.seen]
+    assert [bar["t"] for bar in bars] == [
+        _BASE_NS // 1_000_000,
+        (_BASE_NS + hole_ns) // 1_000_000,
+        (_BASE_NS + hole_ns) // 1_000_000,
+    ]
+    assert all(isinstance(bar["c"], float) for bar in bars)
+
+
 def test_unwatched_pair_buffer_is_pruned_on_the_next_batch() -> None:
     bus = LiveCandleBus(_NO_CATALOG)
     observer = _RecordingObserver(frozenset({(_IID, _BAR_SECONDS)}))

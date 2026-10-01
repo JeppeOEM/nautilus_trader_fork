@@ -248,15 +248,17 @@ def test_gap_marker_inserted_between_points_separated_by_more_than_one_bar(
     )
     assert response.status_code == 200
     items = response.json()["items"]
-    assert len(items) == 3
-    real_first, gap, real_second = items
+    # Bars at -5m and -2m: one gap row per missing bar (-4m, -3m), Story 32.1.
+    assert len(items) == 4
+    real_first, *gaps, real_second = items
     assert real_first["obi"] is not None
     assert real_second["obi"] is not None
-    assert gap["t"] == real_first["t"] + 60_000
-    assert gap["ofi"] is None
-    assert gap["obi"] is None
-    assert gap["microprice"] is None
-    assert gap["spread"] is None
+    assert [g["t"] for g in gaps] == [real_first["t"] + 60_000, real_first["t"] + 120_000]
+    for gap in gaps:
+        assert gap["ofi"] is None
+        assert gap["obi"] is None
+        assert gap["microprice"] is None
+        assert gap["spread"] is None
 
 
 def test_limit_far_above_max_never_returns_more_than_max_indicator_series_limit(

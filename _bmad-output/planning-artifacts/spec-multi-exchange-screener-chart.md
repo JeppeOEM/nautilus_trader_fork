@@ -595,6 +595,9 @@ four clusters in the same order: [symbol+timeframe] [chart type]
 > for real if multi-timeframe viewing is wanted — nothing today provides
 > it; and drop slot 10 (theme toggle) as inapplicable, since this project
 > has deliberately chosen not to have one.
+> (Story 32.4, 2026-09-30: the chart area alone carries TradingView's classic light
+> palette as `.chart-workspace` tokens, by operator decision; still no toggle, and the
+> rest of the app stays dark.)
 
 **Left toolbar**, top to bottom, in this order:
 1. Cursor (default/select mode)

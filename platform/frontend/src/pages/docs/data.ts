@@ -319,6 +319,7 @@ export const KB_GROUPS: KbGroup[] = [
   { id: "start", name: "Start Here" },
   { id: "ops", name: "Setup & Operations" },
   { id: "data", name: "Data & Storage" },
+  { id: "chart", name: "Chart" },
   { id: "backtest", name: "Backtesting & Strategies" },
   { id: "postmortem", name: "Postmortems" },
   { id: "fixed", name: "Fixed & Resolved" },

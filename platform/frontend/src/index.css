@@ -1,6 +1,8 @@
 /* Story 15.9: base reset + the one fixed terminal/ANSI visual identity, sourced
    entirely from theme.css's tokens. No `prefers-color-scheme` branch anywhere --
-   this is a single fixed look, not a light/dark toggle (Task 1 Dev Note). (The
+   this is a single fixed look, not a light/dark toggle (Task 1 Dev Note); the chart
+   area alone is light, by operator decision (Story 32.4, `.chart-workspace` tokens in
+   theme.css). (The
    `color-scheme: dark` declared in theme.css is a different, unrelated property --
    it only tells the browser to render native UI chrome dark, it does not opt into
    any light/dark switching.) */
@@ -349,6 +351,13 @@ table {
   font-size: 12px;
   text-shadow: 0 0 3px var(--color-bg), 0 0 3px var(--color-bg);
   pointer-events: none;
+}
+
+/* Story 32.4: on the light chart the legend reads in the chart's own text colour, with a light
+   halo instead of the page-background shadow, so names stay readable over candles. */
+.chart-workspace .chart-legend {
+  color: var(--chart-text);
+  text-shadow: 0 0 3px var(--chart-bg), 0 0 3px var(--chart-bg);
 }
 
 .chart-legend-row {

@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { fetchSnapshotSeries } from "../api/client";
 import type { SnapshotSeriesPoint } from "../api/schema";
+import { gapRun } from "../lib/gaps";
 import { unitsToNumber } from "../lib/units";
 
 // ~15 minutes of 1-second rows -- approximates `dashboard.py`'s own Lines-mode chunk width
@@ -18,9 +19,9 @@ const REFILL_MARGIN_ROWS = 150;
 // `setCoinMode` treating "no explicit historical range" as "fetch the live window".
 const LIVE_EDGE_THRESHOLD_SECONDS = 30;
 
-// Matches the backend's `_SNAPSHOT_GAP_THRESHOLD_MS` (data_api/routes/snapshots.py)
-// exactly, in seconds -- the page-boundary seam check below must use the same threshold
-// the backend's own gap-marker insertion inside a single page uses, or a normal ~1-2.4s
+// Matches the backend's `SNAPSHOT_GAP_THRESHOLD_MS` (views/chart_series.py) exactly, in
+// seconds -- the page-boundary seam check below must use the same threshold the backend's
+// own gap-row insertion inside a single page uses, or a normal ~1-2.4s
 // inter-snapshot spacing that happens to straddle a page cursor would render a false gap
 // that the same spacing mid-page never would (AC #4 requires identical discipline).
 const SEAM_GAP_THRESHOLD_SECONDS = 2.5;
@@ -102,16 +103,21 @@ export function useSnapshotSeries(
           const mapped = toLines(response.items);
           setLines((prev) => {
             if (!prepend || prev.bid.length === 0) return mapped;
-            // Same page-boundary seam-gap check useCandles'/useIndicatorSeries' loadPage
-            // already apply: a gap can straddle exactly the page cursor, which each
-            // page's own gap-marker insertion (inside `_price_series_rows`) can't see --
-            // it only looks inside its own queried range.
-            const newestTime = mapped.bid[mapped.bid.length - 1].time as UTCTimestamp;
-            const boundaryTime = prev.bid[0].time as UTCTimestamp;
-            const seamGap = newestTime + SEAM_GAP_THRESHOLD_SECONDS < boundaryTime;
-            const seamTime = (newestTime + 1) as UTCTimestamp;
-            const combine = (a: LineDatum[], b: LineDatum[]): LineDatum[] =>
-              seamGap ? [...a, { time: seamTime }, ...b] : [...a, ...b];
+            // Same page-boundary seam run useCandles'/useIndicatorSeries' loadPage already
+            // build: a gap can straddle exactly the page cursor, which each page's own gap
+            // rows (inside `price_series_rows`) can't see -- they only fill inside its own
+            // queried range. Past the threshold, one whitespace slot per missing second, as
+            // the backend does in-page (Story 32.1).
+            // Built in integer ms, exactly as the backend's `_gap_times` does: stepping a
+            // fractional seconds value (arrival-timed rows) could land a few ulps short of the
+            // boundary and add one stray slot next to the real row.
+            const newestMs = Math.round((mapped.bid[mapped.bid.length - 1].time as number) * 1000);
+            const boundaryMs = Math.round((prev.bid[0].time as number) * 1000);
+            const seam: LineDatum[] =
+              newestMs + SEAM_GAP_THRESHOLD_SECONDS * 1000 < boundaryMs
+                ? gapRun(newestMs, boundaryMs, 1000).map((t) => ({ time: (t / 1000) as UTCTimestamp }))
+                : [];
+            const combine = (a: LineDatum[], b: LineDatum[]): LineDatum[] => [...a, ...seam, ...b];
             return {
               bid: combine(mapped.bid, prev.bid),
               ask: combine(mapped.ask, prev.ask),

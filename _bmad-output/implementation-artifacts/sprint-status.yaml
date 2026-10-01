@@ -1,5 +1,5 @@
 # generated: 2026-07-01
-# last_updated: 2026-09-25 (Epic 23 done: 23.2 kernel shared kernel + 23.3 durable error ledger merged from stalled bmad-loop story branches, superseding their earlier ready-for-dev status)
+# last_updated: 2026-09-30 (Epic 32 chart honesty and cleanup added, runs on branch epic-32) (Epic 23 done: 23.2 kernel shared kernel + 23.3 durable error ledger merged from stalled bmad-loop story branches, superseding their earlier ready-for-dev status)
 # project: nautilus_trader_fork
 # project_key: NOKEY
 # tracking_system: file-system
@@ -367,6 +367,17 @@ development_status:
   28-1-capture-hotpath-metrics-cpu-priority-and-vps-profile: done
   28-2-capture-python-overhead-removed-baseline-lowered: done
   epic-28-retrospective: optional
+
+  epic-32: backlog
+  32-1-every-gap-drawn-to-its-real-length-in-a-distinct-colour-on-every-chart: done
+  32-2-panes-grow-the-page-and-volume-is-an-indicators-menu-entry-with-a-toggle: ready-for-dev
+  32-3-legend-is-the-indicator-control-surface-larger-type-gear-settings-remove-in-place: ready-for-dev
+  32-4-classic-light-chart-tradingview-palette-inside-the-dark-terminal-app: done
+  32-5-fibonacci-retracement-and-long-short-position-tools-every-drawing-stays-on-the-chart: ready-for-dev
+  32-6-chart-layout-restored-on-return-and-default-setup-for-a-new-coin: ready-for-dev
+  32-7-remaining-tradingview-profiles-auto-anchored-anchored-vp-anchored-vwap-and-tpo: ready-for-dev
+  32-8-volume-footprint-bars-from-the-raw-trade-archive-toggled-from-the-indicators-menu: ready-for-dev
+  epic-32-retrospective: optional
 
 action_items:
   - epic: 1

@@ -24,4 +24,15 @@ describe("DocsPage", () => {
     expect(screen.getByText("Module map")).toBeInTheDocument();
     expect(document.querySelector("figure.diagram svg")).not.toBeNull();
   });
+
+  it("documents how a chart gap is drawn and what the cap means (Story 32.1)", () => {
+    render(
+      <MemoryRouter initialEntries={["/docs/kb/chart-gaps"]}>
+        <DocsPage />
+      </MemoryRouter>,
+    );
+    expect(screen.getByRole("heading", { name: "Gaps: How Missing Data Is Drawn" })).toBeInTheDocument();
+    expect(screen.getByText(/at most/).textContent).toMatch(/720 slots/);
+    expect(screen.getAllByText(/\(compressed\)/).length).toBeGreaterThan(0);
+  });
 });

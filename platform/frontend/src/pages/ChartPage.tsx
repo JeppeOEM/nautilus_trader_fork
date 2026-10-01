@@ -33,7 +33,8 @@ import {
   type SessionProfileCache,
   type SessionProfileSettings,
 } from "../lib/sessionProfile";
-import { assignPaneColor, cssVar } from "../components/chart/paneColors";
+import { chartVar } from "../components/chart/chartTheme";
+import { assignPaneColor } from "../components/chart/paneColors";
 import type { IndicatorCatalogEntry, IndicatorConfigEntry } from "../api/schema";
 import { BAR_SECONDS, useCandles } from "../hooks/useCandles";
 import { TIMEFRAMES } from "../timeframes";
@@ -208,7 +209,7 @@ function ChartInner({ instrumentId, barSeconds, onTimeframeChange }: ChartInnerP
   const [sessionCfg, setSessionCfg] = useState<SessionConfig | null>(null);
   const [sessionCache] = useState<SessionProfileCache>(() => new Map());
   const [vrvpSettings, setVrvpSettings] = useState(DEFAULT_VOLUME_PROFILE_SETTINGS);
-  const { candles, volume: fullVolume, venueMarket, loadFailed, loadError, refreshNewest, appendBar } = useCandles(
+  const { candles, volume: fullVolume, venueMarket, loadFailed, loadError, refreshNewest, appendBar, openGapTo } = useCandles(
     instrumentId, chart, mode === "candles", barSeconds,
   );
   // Story 18.4: replay only trims the NEWEST end of the loaded candles for display
@@ -228,6 +229,15 @@ function ChartInner({ instrumentId, barSeconds, onTimeframeChange }: ChartInnerP
   // bars closed while the socket was down exist only on the server, so a reconnect refetches
   // the newest page and merges it in.
   const liveBar = useLiveCandle(instrumentId, barSeconds, { onReconnect: refreshNewest, onBarClosed: appendBar });
+  // Story 32.1: a forming bar that starts more than one bar after history's newest point
+  // (the collector came back after a hole) opens the gap run at once, not when it closes.
+  // `historyLoaded` re-runs it once the first page lands: the socket may seed the forming bar
+  // before REST returns, and openGapTo is a no-op (and idempotent) until history exists.
+  const liveTime = liveBar?.time;
+  const historyLoaded = candles.length > 0;
+  useEffect(() => {
+    if (liveTime !== undefined && historyLoaded) openGapTo(liveTime);
+  }, [liveTime, historyLoaded, openGapTo]);
 
   // Story 15.6: the picker's persisted selection for this coin -- IndicatorPicker owns
   // the GET (initial load)/PUT (every add/remove/param-apply) round trip and reports the
@@ -338,7 +348,7 @@ function ChartInner({ instrumentId, barSeconds, onTimeframeChange }: ChartInnerP
       const id = `hline-${nextPriceLineIdRef.current++}`;
       setPriceLines((lines) => [
         ...lines,
-        { id, price, color: cssVar("--color-active", "#55ffff") },
+        { id, price, color: chartVar("--chart-drawing") },
       ]);
       setActiveTool("cursor");
     },
@@ -365,7 +375,7 @@ function ChartInner({ instrumentId, barSeconds, onTimeframeChange }: ChartInnerP
       const id = `trendline-${nextDrawingIdRef.current++}`;
       setDrawings((all) => [
         ...all,
-        { id, kind: "trendline", anchors: [pendingAnchor, point], color: cssVar("--color-active", "#55ffff") },
+        { id, kind: "trendline", anchors: [pendingAnchor, point], color: chartVar("--chart-drawing") },
       ]);
       setPendingAnchor(null);
       setActiveTool("cursor");

@@ -29,6 +29,7 @@ from observability import error_ledger
 from nautilus_trader.model.identifiers import InstrumentId
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 from views import chart_series
+from views.chart_series import MAX_GAP_ROWS_PER_GAP
 from views.chart_series import SNAPSHOT_GAP_THRESHOLD_MS
 from views.chart_series import EmptyTopOfBook
 from views.chart_series import price_series_rows
@@ -156,7 +157,11 @@ def test_an_empty_top_of_book_is_ledgered_and_raised_never_skipped(
     assert error_ledger.counts() == {"views.snapshot_without_top": 1}
 
 
-def test_gap_marker_inserted_between_rows_separated_by_more_than_threshold(tmp_path: Path) -> None:
+def _null_price_fields(row: dict) -> list[object]:
+    return [row[k] for k in ("bid_units", "ask_units", "price_precision", "mid", "micro", "price")]
+
+
+def test_a_lines_hole_is_one_gap_row_per_missing_second(tmp_path: Path) -> None:
     """Moved from `data_api/tests/test_snapshots.py` with the rule itself (Story 24.2)."""
     catalog_path = str(tmp_path / "catalog")
     # limit=10 -> main query window span = 10 * the 2x multiplier = 20s -- both rows below must
@@ -169,17 +174,32 @@ def test_gap_marker_inserted_between_rows_separated_by_more_than_threshold(tmp_p
 
     items, _has_more = snapshot_series_page(catalog_path, _IID, _BASE_NS, 10)
 
-    assert len(items) == 3  # real row, gap marker, real row
-    real_first, gap, real_second = items
+    earlier_ms = earlier_ns // 1_000_000
+    assert [r["t"] for r in items] == [earlier_ms + k * 1000 for k in range(4)]
+    real_first, gap_one, gap_two, real_second = items
     assert real_first["bid_units"] is not None
     assert real_second["bid_units"] is not None
-    assert gap["t"] == real_second["t"] - 1
-    assert gap["bid_units"] is None
-    assert gap["ask_units"] is None
-    assert gap["price_precision"] is None
-    assert gap["mid"] is None
-    assert gap["micro"] is None
-    assert gap["price"] is None
+    for gap in (gap_one, gap_two):
+        assert _null_price_fields(gap) == [None] * 6
+
+
+def test_a_five_second_lines_hole_emits_rows_at_every_missing_second() -> None:
+    first = _snapshot(_BASE_NS, [100.0], [101.0])
+    second = _snapshot(_BASE_NS + 5_000_000_000, [100.0], [101.0])
+    base_ms = _BASE_NS // 1_000_000
+
+    rows = price_series_rows([first, second])
+
+    assert [r["t"] - base_ms for r in rows] == [0, 1000, 2000, 3000, 4000, 5000]
+    assert all(_null_price_fields(r) == [None] * 6 for r in rows[1:-1])
+    assert rows[0]["bid_units"] is not None
+    assert rows[-1]["bid_units"] is not None
+
+
+def test_two_second_lines_spacing_is_not_a_gap() -> None:
+    first = _snapshot(_BASE_NS, [100.0], [101.0])
+    second = _snapshot(_BASE_NS + 2_000_000_000, [100.0], [101.0])
+    assert [r["bid_units"] for r in price_series_rows([first, second])] == [1_000_000] * 2
 
 
 def test_seconds_exactly_at_the_gap_threshold_are_not_broken() -> None:
@@ -188,17 +208,61 @@ def test_seconds_exactly_at_the_gap_threshold_are_not_broken() -> None:
     assert [r["bid_units"] for r in price_series_rows([first, second])] == [1_000_000] * 2
 
 
+def test_a_lines_page_whose_cursor_follows_a_hole_ends_on_a_real_row(tmp_path: Path) -> None:
+    catalog_path = str(tmp_path / "catalog")
+    real_ns = _BASE_NS - 5_000_000_000  # 5 s of hole between it and the cursor second
+    ParquetDataCatalog(catalog_path).write_data(
+        [_snapshot(real_ns, [100.0], [101.0]), _snapshot(_BASE_NS, [105.0], [106.0])]
+    )
+
+    items, _has_more = snapshot_series_page(catalog_path, _IID, _BASE_NS, 10)
+
+    # The cursor second closes the hole but is not on this page, so neither is its gap run.
+    assert [r["t"] for r in items] == [real_ns // 1_000_000]
+    assert items[-1]["bid_units"] is not None
+
+
 # --- the bar-spaced gap marker: candles, indicator series, indicator values ----------------------
 
 
-def test_bar_gap_marker_sits_one_bar_after_the_earlier_row() -> None:
+def test_the_gap_row_cap_is_720() -> None:
+    assert MAX_GAP_ROWS_PER_GAP == 720
+
+
+def test_a_two_bar_hole_is_two_gap_rows_one_per_missing_bar() -> None:
     rows = [{"t": 0, "c": 1.0}, {"t": 60_000, "c": 2.0}, {"t": 240_000, "c": 3.0}]
 
     assert with_gap_markers(rows, 60) == [
         {"t": 0, "c": 1.0},
         {"t": 60_000, "c": 2.0},
         {"t": 120_000},  # the break starts right where real data stops
+        {"t": 180_000},  # ... and is as wide as the hole
         {"t": 240_000, "c": 3.0},
+    ]
+
+
+def test_a_hole_over_the_cap_is_the_cap_contiguous_from_its_start() -> None:
+    day_ms = 86_400_000
+    rows = [{"t": 0, "c": 1.0}, {"t": day_ms, "c": 2.0}]
+
+    out = with_gap_markers(rows, 60)
+
+    assert out[0] == rows[0]
+    assert out[1:-1] == [{"t": k * 60_000} for k in range(1, MAX_GAP_ROWS_PER_GAP + 1)]
+    assert out[-2] == {"t": 43_200_000}
+    assert out[-1] == rows[1]
+
+
+def test_a_lines_hole_over_the_cap_is_capped_too() -> None:
+    first = _snapshot(_BASE_NS, [100.0], [101.0])
+    second = _snapshot(_BASE_NS + 3_600_000_000_000, [100.0], [101.0])  # an hour later
+
+    rows = price_series_rows([first, second])
+
+    assert len(rows) == MAX_GAP_ROWS_PER_GAP + 2
+    base_ms = _BASE_NS // 1_000_000
+    assert [r["t"] - base_ms for r in rows[1:-1]] == [
+        k * 1000 for k in range(1, MAX_GAP_ROWS_PER_GAP + 1)
     ]
 
 

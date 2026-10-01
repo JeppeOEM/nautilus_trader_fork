@@ -1,4 +1,5 @@
 import { act, cleanup, fireEvent, render as rtlRender, screen, within } from "@testing-library/react";
+import { CHART_TOKENS } from "../components/chart/chartTheme";
 import type { ReactElement } from "react";
 import { MemoryRouter } from "react-router";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -31,6 +32,7 @@ const hooks = vi.hoisted(() => ({
   candlesBar: [] as number[],
   liveBar: [] as number[],
   pickerBar: [] as number[],
+  openGapTo: [] as number[],
 }));
 // Stable references (a fresh array per render would churn useReplay's memo) that the
 // replay tests swap in.
@@ -47,7 +49,12 @@ vi.mock("../hooks/useCandles", () => ({
   BAR_SECONDS: 60,
   useCandles: (_iid: string, _chart: unknown, _enabled: boolean, bar: number) => {
     hooks.candlesBar.push(bar);
-    return { candles: mocks.candles, volume: mocks.volume, venueMarket: mocks.venueMarket };
+    return {
+      candles: mocks.candles,
+      volume: mocks.volume,
+      venueMarket: mocks.venueMarket,
+      openGapTo: (time: number) => hooks.openGapTo.push(time),
+    };
   },
 }));
 
@@ -147,6 +154,7 @@ beforeEach(() => {
   hooks.candlesBar = [];
   hooks.liveBar = [];
   hooks.pickerBar = [];
+  hooks.openGapTo = [];
   localStorage.clear();
   mocks.candles = [];
   mocks.volume = [];
@@ -195,7 +203,7 @@ describe("ChartPage drawing tools (Story 18.1)", () => {
       lastChartProps.current!.onPriceClick!(61000.5);
     });
 
-    expect(lastChartProps.current!.priceLines).toEqual([{ id: "hline-1", price: 61000.5, color: "#55ffff" }]);
+    expect(lastChartProps.current!.priceLines).toEqual([{ id: "hline-1", price: 61000.5, color: CHART_TOKENS["--chart-drawing"] }]);
     expect(screen.getByRole("button", { name: "Horizontal line tool" })).toHaveAttribute("aria-pressed", "false");
 
     // Single-click-and-done: the tool disarmed itself, so a further click adds nothing.
@@ -247,7 +255,7 @@ describe("ChartPage drawing tools (Story 18.1)", () => {
       lastChartProps.current!.onPriceLineDrag!("hline-1", 61500.25);
     });
 
-    expect(lastChartProps.current!.priceLines).toEqual([{ id: "hline-1", price: 61500.25, color: "#55ffff" }]);
+    expect(lastChartProps.current!.priceLines).toEqual([{ id: "hline-1", price: 61500.25, color: CHART_TOKENS["--chart-drawing"] }]);
   });
 
   it("gives each placed line its own counter id, and a drag updates only its own spec", () => {
@@ -269,8 +277,8 @@ describe("ChartPage drawing tools (Story 18.1)", () => {
     });
 
     expect(lastChartProps.current!.priceLines).toEqual([
-      { id: "hline-1", price: 61000.5, color: "#55ffff" },
-      { id: "hline-2", price: 63000, color: "#55ffff" },
+      { id: "hline-1", price: 61000.5, color: CHART_TOKENS["--chart-drawing"] },
+      { id: "hline-2", price: 63000, color: CHART_TOKENS["--chart-drawing"] },
     ]);
   });
 });
@@ -377,6 +385,8 @@ describe("ChartPage toolbars and timeframe (spec A8.1)", () => {
     expect(last(hooks.candlesBar)).toBe(86400);
   });
 
+  // Story 32.4 (2026-09-30): still no toggle. The chart area alone is light, by operator decision,
+  // through the `.chart-workspace` tokens in theme.css; the rest of the app keeps the VGA identity.
   it("orders the top toolbar [symbol+timeframe] [chart type] [indicators+fit+latest], with no theme toggle", () => {
     render(page());
 
@@ -478,7 +488,7 @@ describe("ChartPage trendline tool (Story 18.2)", () => {
           { time: 100, price: 10 },
           { time: 200, price: 20 },
         ],
-        color: "#55ffff",
+        color: CHART_TOKENS["--chart-drawing"],
       },
     ]);
     expect(screen.getByRole("button", { name: "Cursor tool" })).toHaveAttribute("aria-pressed", "true");
@@ -570,6 +580,20 @@ describe("ChartPage bar replay (Story 18.4)", () => {
   beforeEach(() => {
     mocks.candles = bars;
     mocks.liveBar = { time: 360, open: 1, high: 1, low: 1, close: 1 };
+  });
+
+  it("opens the gap run up to the forming live bar (Story 32.1)", () => {
+    render(<ChartPage />);
+    expect(hooks.openGapTo).toContain(360);
+  });
+
+  it("opens the gap run once history lands when the live bar arrived first (Story 32.1)", () => {
+    mocks.candles = [];
+    const { rerender } = render(<ChartPage />);
+    expect(hooks.openGapTo).toEqual([]);
+    mocks.candles = bars;
+    rerender(<ChartPage />);
+    expect(hooks.openGapTo).toContain(360);
   });
 
   it("picks a start bar, hides later bars, marks it and suppresses the live bar (AC #1/#2)", () => {

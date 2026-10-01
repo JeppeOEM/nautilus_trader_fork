@@ -2,6 +2,7 @@ import type { Time } from "lightweight-charts";
 import { describe, expect, it } from "vitest";
 
 import type { ChartDatum, VolumeDatum } from "../hooks/useCandles";
+import { gapRun } from "./gaps";
 import { buildRangeProfile, buildVolumeProfile, joinCandlesWithVolume, type ProfileCandle } from "./volumeProfile";
 
 const c = (open: number, high: number, low: number, close: number, volume: number): ProfileCandle => ({
@@ -160,5 +161,21 @@ describe("buildRangeProfile (Story 18.6)", () => {
 
   it("is empty when the range holds no candles", () => {
     expect(buildRangeProfile(candles, volume, 10, 20, settings).rows).toEqual([]);
+  });
+
+  it("ignores a 720-slot gap run inside the range: no slot is counted (Story 32.1)", () => {
+    const real = (n: number) => ({ time: t(n), open: n, high: n + 1, low: n, close: n + 1 });
+    const slots = gapRun(60, 1e9, 60).map((n) => ({ time: t(n) }));
+    const end = slots[slots.length - 1].time as number;
+    const plainCandles: ChartDatum[] = [real(60), real(end + 60)];
+    const plainVolume: VolumeDatum[] = [{ time: t(60), value: 5 }, { time: t(end + 60), value: 7 }];
+    const holedCandles: ChartDatum[] = [plainCandles[0], ...slots, plainCandles[1]];
+    const holedVolume: VolumeDatum[] = [plainVolume[0], ...slots, plainVolume[1]];
+
+    expect(slots).toHaveLength(720);
+    expect(joinCandlesWithVolume(holedCandles, holedVolume)).toEqual(joinCandlesWithVolume(plainCandles, plainVolume));
+    expect(buildRangeProfile(holedCandles, holedVolume, 0, end + 60, settings)).toEqual(
+      buildRangeProfile(plainCandles, plainVolume, 0, end + 60, settings),
+    );
   });
 });
