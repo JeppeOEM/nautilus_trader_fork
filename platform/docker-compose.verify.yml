@@ -12,6 +12,12 @@
 # containers or its ports. The dYdX `collector` stays behind its `dydx` profile and is never
 # started here (`make verify-up` names its services). The stack reads and writes this checkout's
 # ./data only. tests/test_compose_verify.py pins all of this against the base file.
+#
+# This stack is a dev-box tool, never deployed to the VPS: production runs the base file alone,
+# has no recorder and its nightly `archive.verify_day` stops at `no reference data`. Its cost is
+# linear in the venue configs' instrument count (~200 MB/day of raw files and ~7 min of
+# `verify_day` per Bybit instrument, memory flat), so keep those configs to a handful of
+# representative instruments (docs/DATA_DICTIONARY.md section 1.24).
 
 # YAML anchors do not cross files, so the base's logging policy is restated here; the test holds
 # the two equal.

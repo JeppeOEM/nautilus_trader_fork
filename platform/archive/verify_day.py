@@ -69,6 +69,15 @@ that are retention, not bad data. Upgrade path: skip with a distinct status past
 Known limit: the step runs on every venue-day of a catch-up too, up to six `TOOL_TIMEOUT_S` each
 (a full Bybit day measured ~27 min), all under the maintenance lock, so a long catch-up on a stack
 with recorders runs correspondingly longer. Upgrade path: a per-run verification budget.
+
+Where it runs: with reference data, this is a dev-box tool (the verify stack, `make verify-up`),
+never a VPS service -- production has no `VERIFY_DATA_DIR` and stops at `no reference data`.
+Known limit: wall time is linear in the plan's instrument count, ~7 min per Bybit instrument
+(27 min for 4), because each tool judges one instrument at a time and the tools run in sequence;
+memory stays flat (~1.5 GB peak, one instrument's working set) and cores do not help. One tool
+passes `TOOL_TIMEOUT_S` at about 7 Bybit instruments, the scheduler's `step_timeout_minutes`
+(360) at about 50, so the verify stack's plan stays small (`docs/DATA_DICTIONARY.md` §1.24).
+Upgrade path: a per-instrument worker pool in the tools, with memory as workers x one instrument.
 """
 
 import argparse

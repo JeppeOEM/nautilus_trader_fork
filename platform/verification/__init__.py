@@ -33,6 +33,15 @@ closure and at runtime over `sys.modules`.
 Known limit (common mode): `kernel.venues` and `kernel.venue_http` are shared with the collectors,
 so a wrong wire symbol or host there misleads both sides alike (`domain/subscriptions.py`).
 
+Where it runs: this context is a dev-box tool. The recorders and every tool run in the verify
+stack (`make verify-up`, `docker-compose.verify.yml`, its own checkout and `data/`) on the
+desktop, never on the VPS: production has no recorder and its nightly `archive.verify_day` stops
+at `no reference data`. Known limit: recorder disk and CPU, and every tool's wall time, are linear
+in the plan's instrument count (~200 MB/day and ~7 min of `verify_day` per Bybit instrument,
+memory flat), and the recorded set is by invariant the stack's collector plan
+(`domain/plan_file.py`), so the verify stack's venue configs stay at a handful of representative
+instruments (`docs/DATA_DICTIONARY.md` §1.24).
+
 - `domain/`: the recording plan (a venue `config.toml` read as data) and the pure subscription,
   REST-poll and frame-classification tables; no I/O. Also the reference signals (Story 31.3,
   `reference_signals.py`: every derived value re-implemented from `docs/DATA_DICTIONARY.md` in

@@ -1246,6 +1246,24 @@ What this story changes:
 - **Verify stack:** only `docker-compose.verify.yml` gives the `archive` service the recorders'
   data, the coverage record, the venue configs and the loopback data_api. `make verify-up` creates
   `verification/raw` and `verification/scratch`.
+- **Where it runs: the verify stack (the reference recorders, the `verify-` collectors and
+  `verify_day`) is a dev-box tool, not a production service.** Nothing of it is deployed to the
+  VPS: the production compose file never sets `VERIFY_DATA_DIR`, so production's nightly records
+  `no reference data` and stops. It runs on the desktop (`make verify-up`, its own checkout and
+  `data/`), where every verdict in `docs/VERIFICATION_REPORT.md` was produced.
+  `Known limit:` its cost is linear in the plan's instrument count. Measured on 4 Bybit + 1
+  Hyperliquid instruments: the recorder ~1.2 % of a core and ~200 MB/day of raw files per Bybit
+  instrument (RAM flat, ~80 MiB); `verify_day` ~7 min of wall time per Bybit instrument (RAM
+  flat, ~1.5 GB peak: each tool judges one instrument at a time, in its own child). The six
+  tools and their instruments run strictly in sequence, so more cores do not help. One tool
+  passes `TOOL_TIMEOUT_S` (50 min) at about 7 Bybit instruments, and the nightly's
+  `step_timeout_minutes` (360) is passed at about 50; past either the day is `refused`, never
+  judged. The recorded set is, by invariant, the verify stack's collector plan
+  (`verification/domain/plan_file.py`), so keep that stack's venue configs to a handful of
+  representative instruments. Upgrade path: a per-instrument worker pool in the tools (memory
+  then scales as workers x one instrument's working set) and a per-run verification budget.
+  Why never the VPS: a 1.5 GB child next to the collectors on a 3.7 GB host is the OOM DATA-07
+  forbids, and a multi-hour step holds the maintenance lock.
 
 - [ ] **VPS rollout of Epic 31's capture, archive and display fixes.** On the VPS, `git pull`, then
       from `platform/`:

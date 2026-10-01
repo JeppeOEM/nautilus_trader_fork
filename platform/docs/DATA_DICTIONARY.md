@@ -2162,6 +2162,21 @@ file is unchanged, so production gets `no reference data`):
 
 The collectors lost no second to the step's load.
 
+**Where it runs, and how it scales.** The verify stack (recorders, `verify-` collectors,
+`verify_day` with reference data) is a dev-box tool, run from its own checkout with
+`make verify-up`; it is never deployed to the VPS, whose nightly stops at `no reference data`.
+`Known limit:` cost is linear in the plan's instrument count, from the measurements above (4
+Bybit + 1 Hyperliquid instruments): the recorder ~1.2 % of a core and ~200 MB/day of raw files
+per Bybit instrument, RAM flat at ~80 MiB; `verify_day` ~7 min of wall time per Bybit
+instrument, RAM flat at ~1.5 GB peak because every tool judges one instrument at a time, in its
+own child, and the tools and their instruments run strictly in sequence (cores do not help). One
+tool passes `TOOL_TIMEOUT_S` (50 min) at about 7 Bybit instruments; the nightly's
+`step_timeout_minutes` (360) at about 50. Past either the day is `refused`. The recorded set is
+by invariant the verify stack's own collector plan (`verification/domain/plan_file.py`), so that
+stack's venue configs stay at a handful of representative instruments. Upgrade path: a
+per-instrument worker pool in the tools, and a per-run verification budget
+(`docs/DEPLOY_CHECKLIST.md` entry 31-11, D-138).
+
 ### 1.25 `capture:hotpath` / `capture:hotpath:<venue>` (capture's hot-path figures, Story 28.1)
 
 Not market data: each collector's own cost figures, so a `_second_loop` stall (audit D-10) or an

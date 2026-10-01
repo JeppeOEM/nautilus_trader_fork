@@ -10,6 +10,13 @@ WebSocket frame and REST response verbatim with its local receive time
 `docs/DATA_INTEGRITY_AUDIT.md`) or `OPEN` (not explained yet, registered with a follow-up story).
 "Unexplained" must be 0 for `VERIFIED`. dYdX is out of scope.
 
+**Where this runs.** Every verdict here comes from the verify stack on the dev box
+(`make verify-up`, its own checkout). The recorders and `verify_day` with reference data are a
+dev-box tool, never deployed to the VPS, whose nightly stops at `no reference data`. Their cost
+is linear in the plan's instrument count (~200 MB/day of raw files and ~7 min of `verify_day`
+per Bybit instrument, memory flat), so the stack's plan stays small (`docs/DATA_DICTIONARY.md`
+§1.24, `docs/DEPLOY_CHECKLIST.md` entry 31-11).
+
 ## Soak
 
 Code revision: `55a123a8bb` (Story 31.1). The collector-side code (capture, archive, ranking, data_api) the soak runs is the same at `b37be5775a` and `55a123a8bb`: the only change Story 31.1 made to it is the move of the dYdX URL helpers to `kernel/dydx_http.py`, which the Bybit and Hyperliquid services never import, so either revision reproduces the collectors. The recorders' code is not one revision: each recorder interval below names the commit that reproduces its bytes -- 10:20:27Z to 10:57:11Z the story's uncommitted first change set (no commit reproduces it exactly), 10:57:19Z to 11:20:00Z `55a123a8bb`, 11:20:02Z to 11:35:31Z `2799fb0ae7`, from 11:35:33Z the third review pass's commit (the one that adds the "Recorder gap 3" row). A comparator run cites the interval its window falls in.
