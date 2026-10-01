@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { coerceParamValue, isValidParamText } from "./paramCoercion";
+import { coerceParams, coerceParamValue, invalidParamKeys, isValidParamText, rawFromParams } from "./paramCoercion";
 
 describe("coerceParamValue", () => {
   it("keeps a numeric default when the field is cleared, instead of coercing to 0", () => {
@@ -56,5 +56,26 @@ describe("isValidParamText", () => {
 
   it("without choices, a string param stays free text", () => {
     expect(isValidParamText("ENGULFING", "anything")).toBe(true);
+  });
+});
+
+describe("param draft helpers (shared by the settings modal and the Technicals row)", () => {
+  const params = { period: 14, smooth: true, kind: "ema" };
+
+  it("starts every field from its saved value as text", () => {
+    expect(rawFromParams(params)).toEqual({ period: "14", smooth: "true", kind: "ema" });
+  });
+
+  it("names the fields whose text is not a valid replacement, enum members included", () => {
+    expect(invalidParamKeys(params, { period: "abc", smooth: "maybe", kind: "x" }, {})).toEqual(["period", "smooth"]);
+    expect(invalidParamKeys(params, rawFromParams(params), { kind: ["sma", "wma"] })).toEqual(["kind"]);
+  });
+
+  it("coerces every field back to its saved type", () => {
+    expect(coerceParams(params, { period: "21", smooth: "FALSE", kind: "sma" })).toEqual({
+      period: 21,
+      smooth: false,
+      kind: "sma",
+    });
   });
 });

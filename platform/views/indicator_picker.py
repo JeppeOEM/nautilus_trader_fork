@@ -340,28 +340,89 @@ INDICATOR_CATALOG: dict[str, IndicatorSpec] = {
 }
 
 
+# Price sources a close-fed indicator can be computed on (Story 32.3). `close` is the default and
+# the only one that existed before; the others are derived per candle, never stored.
+PRICE_SOURCES: tuple[str, ...] = ("close", "open", "high", "low", "hl2", "hlc3", "ohlc4")
+DEFAULT_SOURCE = "close"
+_SOURCE_FIELDS: dict[str, tuple[str, ...]] = {
+    "close": ("c",),
+    "open": ("o",),
+    "high": ("h",),
+    "low": ("l",),
+    "hl2": ("h", "l"),
+    "hlc3": ("h", "l", "c"),
+    "ohlc4": ("o", "h", "l", "c"),
+}
+
+
+def source_price(candle: dict, source: str) -> float | None:
+    """
+    One candle's price under `source`: a plain field, or `hl2 = (h+l)/2`,
+    `hlc3 = (h+l+c)/3`, `ohlc4 = (o+h+l+c)/4`. Computed per candle on every replay, never stored.
+    Reads only the keys the source needs. A candle missing a needed component (None) is a real gap:
+    returns None, never a fabricated value (DATA-01); `replay_native` maps it to None outputs.
+    """
+    fields = _SOURCE_FIELDS.get(source)
+    if fields is None:
+        raise ValueError(f"unknown source {source!r} (choose one of {list(PRICE_SOURCES)})")
+    values = [candle[k] for k in fields]
+    if any(v is None for v in values):
+        return None
+    return sum(values) / len(values)
+
+
+def is_source_selectable(spec: IndicatorSpec) -> bool:
+    """
+    Only an indicator fed exactly the close has a price input to choose. One fed `high`/`low`/
+    `volume` (or several fields) keeps its fixed input -- a source there would be fabricated.
+    """
+    return spec.feed == ("close",)
+
+
+def check_source(name: str, source: str) -> None:
+    """
+    Raise `ValueError` naming `source` unless it is `close` (always allowed) or a known source on
+    a native, close-fed indicator. The one rule behind the routes' 422 and the replay's refusal.
+    """
+    if source == DEFAULT_SOURCE:
+        return
+    if source not in PRICE_SOURCES:
+        raise ValueError(f"unknown source {source!r} (choose one of {list(PRICE_SOURCES)})")
+    spec = INDICATOR_CATALOG.get(name)
+    if spec is None or not is_source_selectable(spec):
+        raise ValueError(f"source {source!r} is not selectable for indicator {name!r}")
+
+
 # Field lookup: candle-side key each `feed` name maps to. VWAP's "timestamp" is handled
 # specially in replay_native (converted from the candle's "t", not looked up directly).
 _FEED_FIELD = {"open": "o", "high": "h", "low": "l", "close": "c", "volume": "v", "price": "c"}
 
 
 def replay_native(
-    candles: list[dict], name: str, params: dict[str, Any]
+    candles: list[dict], name: str, params: dict[str, Any], source: str = DEFAULT_SOURCE
 ) -> dict[str, list[float | None]]:
     """
     Instantiate `name` from `INDICATOR_CATALOG` with `params`, replay it over `candles`
     in order, and return each registered output attribute as a list aligned 1:1 with
-    `candles`. A candle before `indicator.initialized` becomes True maps to None.
+    `candles`. A candle before `indicator.initialized` becomes True maps to None. `source` picks
+    the price a close-fed indicator reads (`check_source` refuses it anywhere else).
     """
     if name not in INDICATOR_CATALOG:
         raise ValueError(f"Unknown indicator: {name!r}")
+    check_source(name, source)
     spec = INDICATOR_CATALOG[name]
     resolved = _resolve_enum_params(spec, params)
     indicator = spec.cls(**resolved)
 
     out: dict[str, list[float | None]] = {attr: [] for attr in spec.outputs}
     for candle in candles:
-        indicator.update_raw(*_feed_values(spec, candle))
+        feed = _feed_values(spec, candle, source)
+        if any(v is None for v in feed):
+            # A gap candle (a source component is None): no update, unknown output (DATA-01).
+            for attr in spec.outputs:
+                out[attr].append(None)
+            continue
+        indicator.update_raw(*feed)
         initialized = indicator.initialized
         for attr in spec.outputs:
             out[attr].append(float(getattr(indicator, attr)) if initialized else None)
@@ -394,7 +455,11 @@ def _resolve_enum_params(spec: IndicatorSpec, params: dict[str, Any]) -> dict[st
     return merged
 
 
-def _feed_values(spec: IndicatorSpec, candle: dict) -> tuple[Any, ...]:
+def _feed_values(
+    spec: IndicatorSpec, candle: dict, source: str = DEFAULT_SOURCE
+) -> tuple[Any, ...]:
+    if is_source_selectable(spec):
+        return (source_price(candle, source),)
     values: list[Any] = []
     for field_name in spec.feed:
         if field_name == "timestamp":
@@ -419,6 +484,7 @@ def native_catalog_json() -> dict[str, Any]:
             "params": spec.params,
             "panel": spec.panel,
             "choices": {key: _choices(enum) for key, enum in spec.enum_params.items()},
+            "source_selectable": is_source_selectable(spec),
         }
         for name, spec in INDICATOR_CATALOG.items()
     }
@@ -771,13 +837,16 @@ CUSTOM_INDICATOR_CATALOG["OrderFlowImbalance"] = CustomIndicatorSpec(
 
 
 class IndicatorRequest(Protocol):
-    """One requested indicator: a catalog name and its params."""
+    """One requested indicator: a catalog name, its params and its price source."""
 
     @property
     def name(self) -> str: ...
 
     @property
     def params(self) -> dict[str, Any]: ...
+
+    @property
+    def source(self) -> str: ...
 
 
 def merged_catalog() -> dict[str, dict]:
@@ -802,18 +871,25 @@ def merged_catalog() -> dict[str, dict]:
     return merged
 
 
-def indicator_id(name: str, params: dict[str, Any]) -> str:
+def indicator_id(name: str, params: dict[str, Any], source: str = DEFAULT_SOURCE) -> str:
     """
     Return the series key of one configured indicator -- the registry key `LightweightChart.tsx`'s pane
-    `Map` expects (AD-F4), and the prefix of every `values_by_time` series key.
+    `Map` expects (AD-F4), and the prefix of every `values_by_time` series key. The source is part
+    of the id only when it is not `close`, so every id that existed before sources is unchanged and
+    SMA(20) on close and on hl2 are two series (`SimpleMovingAverage_period=20:hl2`).
     """
-    if not params:
-        return name
-    return name + "_" + ",".join(f"{k}={v}" for k, v in sorted(params.items()))
+    base = (
+        name if not params else name + "_" + ",".join(f"{k}={v}" for k, v in sorted(params.items()))
+    )
+    return base if source == DEFAULT_SOURCE else f"{base}:{source}"
 
 
 def replay_entry(
-    candles: list[dict], name: str, params: dict[str, Any], window: ReplayWindow
+    candles: list[dict],
+    name: str,
+    params: dict[str, Any],
+    window: ReplayWindow,
+    source: str = DEFAULT_SOURCE,
 ) -> dict[str, list[float | None]]:
     """
     Dispatch one requested indicator: native catalog first, then custom (via `ReplayWindow`) --
@@ -830,8 +906,9 @@ def replay_entry(
     if in_native and in_custom:
         raise ValueError(f"Indicator name registered in both catalogs: {name!r}")
     if in_native:
-        return replay_native(candles, name, params)
+        return replay_native(candles, name, params, source)
     if in_custom:
+        check_source(name, source)  # a custom indicator keeps its fixed input: non-close refuses
         return replay_custom(candles, name, params, window)
     raise ValueError(f"Unknown indicator: {name}")
 
@@ -850,9 +927,9 @@ def values_by_time(
     by_time: dict[int, dict[str, float | None]] = {c["t"]: {} for c in candles}
     errors: dict[str, str] = {}
     for entry in entries:
-        series_id = indicator_id(entry.name, entry.params)
+        series_id = indicator_id(entry.name, entry.params, entry.source)
         try:
-            outputs = replay_entry(candles, entry.name, entry.params, window)
+            outputs = replay_entry(candles, entry.name, entry.params, window, entry.source)
         except Exception as exc:
             # Broad by design (DATA-02): params are untrusted and every current and future
             # indicator's replay may raise something different (e.g. period=0).

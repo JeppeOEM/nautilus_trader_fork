@@ -358,7 +358,10 @@ table {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  font-size: 12px;
+  /* Each row only as wide as its own content: a row takes pointer events, so a row stretched to
+     the widest one would block the pan, zoom and crosshair over empty chart. */
+  align-items: flex-start;
+  font-size: var(--legend-font-size, 14px);
   text-shadow: 0 0 3px var(--color-bg), 0 0 3px var(--color-bg);
   pointer-events: none;
 }
@@ -370,9 +373,77 @@ table {
   text-shadow: 0 0 3px var(--chart-bg), 0 0 3px var(--chart-bg);
 }
 
+/* Story 32.3: only the row takes pointer events (so its buttons work); the strip around it stays
+   click-through, and a drag or wheel anywhere else on the pane still pans and zooms. */
 .chart-legend-row {
   display: flex;
+  align-items: center;
   gap: 8px;
+  pointer-events: auto;
+}
+
+/* A hidden indicator keeps its row: dimmed values, the crossed eye on its button. */
+.chart-legend-row--hidden .chart-legend-title,
+.chart-legend-row--hidden .chart-legend-value {
+  opacity: 0.45;
+}
+
+.chart-legend-actions {
+  display: inline-flex;
+  gap: 2px;
+  opacity: 0;
+}
+
+/* Visible on hover or keyboard focus, never display:none, so the buttons stay tab-reachable. */
+.chart-legend-row:hover .chart-legend-actions,
+.chart-legend-row:focus-within .chart-legend-actions {
+  opacity: 1;
+}
+
+/* No hover on a touch screen: always shown, so a tap never lands on an x it cannot see. */
+@media (hover: none) {
+  .chart-legend-actions {
+    opacity: 1;
+  }
+}
+
+.chart-legend-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--chart-text-dim);
+  cursor: pointer;
+}
+
+.chart-legend-btn:hover,
+.chart-legend-btn:focus-visible {
+  color: var(--chart-text);
+  border-color: var(--chart-border);
+}
+
+/* The padding sits on the body, not the dialog: a click on the dialog's own padding would read as
+   a backdrop click (target === the dialog) and close it with the drafts. */
+.indicator-settings {
+  min-width: 320px;
+  padding: 0;
+}
+
+.indicator-settings-body {
+  padding: 12px;
+}
+
+.indicator-settings-output {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.indicator-settings-footer {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
 }
 
 .chart-legend-title {

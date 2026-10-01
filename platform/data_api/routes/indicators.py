@@ -28,8 +28,10 @@ read candles exactly as the chart does), builds the response models and maps fai
 """
 
 import json
+import logging
 import os
 import tomllib
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -71,6 +73,7 @@ _MAX_BAR_SECONDS = 604_800
 # config (MEM-01 extended to this route's own request shape).
 _MAX_INDICATOR_VALUES_ENTRIES = 50
 
+_log = logging.getLogger(__name__)
 router = APIRouter()
 
 
@@ -85,6 +88,8 @@ class IndicatorCatalogEntry(BaseModel):
     category: str
     # Enum param -> its allowed member names (the picker's dropdown); `{}` for custom entries.
     choices: dict[str, list[str]] = {}
+    # True only for a native indicator fed exactly the close: the legend's Source select (32.3).
+    source_selectable: bool = False
 
 
 @router.get("/api/indicators/catalog")
@@ -100,10 +105,21 @@ def get_indicators_catalog() -> dict[str, IndicatorCatalogEntry]:
 # ---------------------------------------------------------------------------------------------
 
 
-class IndicatorConfigEntry(BaseModel):
+class PickerEntry(BaseModel):
+    """The three keys every persisted selection has; the screener's columns stop here."""
+
     name: str
     params: dict[str, Any] = {}
     category: str
+
+
+class IndicatorConfigEntry(PickerEntry):
+    # Price a close-fed indicator reads; part of its series id unless `close`.
+    source: str = "close"
+    # The legend's eye: a hidden indicator stays configured but is not drawn.
+    hidden: bool = False
+    # Output label -> {color, line_width, line_style, ...}; `{}` = the pane palette default.
+    style: dict[str, dict[str, Any]] = {}
 
 
 @router.get("/api/coin/{instrument_id}/indicators")
@@ -122,8 +138,66 @@ def get_coin_indicator_config(instrument_id: str) -> list[IndicatorConfigEntry]:
         ) from exc
     entries = config.get(instrument_id, [])
     return [
-        IndicatorConfigEntry(name=e.name, params=e.params, category=e.category) for e in entries
+        IndicatorConfigEntry(
+            name=e.name,
+            params=e.params,
+            category=e.category,
+            source=_servable_source(instrument_id, e),
+            hidden=e.hidden,
+            style=e.style,
+        )
+        for e in entries
     ]
+
+
+def _servable_source(instrument_id: str, entry: preferences.IndicatorEntry) -> str:
+    """
+    Return the entry's source, or `close` with one warning when its indicator cannot take it (a
+    hand-edit, or an indicator that stopped being close-fed). Served as is, it would make the
+    client's values request a 422 and blank every pane of the coin, and every later save a 422
+    too -- the same "wrong value -> default + warning" rule the loader applies to a wrong type.
+    """
+    try:
+        indicator_picker.check_source(entry.name, entry.source)
+    except ValueError as exc:
+        _log.warning(
+            "chart_indicators.toml: %s entry %r: %s; serving source 'close'",
+            instrument_id,
+            entry.name,
+            exc,
+        )
+        return indicator_picker.DEFAULT_SOURCE
+    return entry.source
+
+
+def _parse_config_entry(e: dict[str, Any]) -> preferences.IndicatorEntry:
+    """
+    One PUT body entry. A wrong type for `source`/`hidden`/`style` is a `TypeError` (the route's
+    400); TOML cannot hold `null` and JSON cannot hold `NaN`, so style leaves must be strings,
+    integers, booleans or finite floats (`preferences.is_valid_style`, the loader's rule too).
+    """
+    source, hidden, style = e.get("source", "close"), e.get("hidden", False), e.get("style", {})
+    if not isinstance(source, str) or not isinstance(hidden, bool):
+        raise TypeError("source must be a string and hidden a boolean")
+    if not preferences.is_valid_style(style):
+        raise TypeError("style must be an object of per-output objects of finite scalar values")
+    return preferences.IndicatorEntry(
+        name=e["name"],
+        params=e.get("params", {}),
+        category=e["category"],
+        source=source,
+        hidden=hidden,
+        style=style,
+    )
+
+
+def _check_sources(entries: Sequence[indicator_picker.IndicatorRequest]) -> None:
+    """Raise a 422 naming `source` for any entry whose source its indicator cannot take."""
+    for entry in entries:
+        try:
+            indicator_picker.check_source(entry.name, entry.source)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=f"invalid source: {exc}") from exc
 
 
 @router.put("/api/coin/{instrument_id}/indicators")
@@ -141,14 +215,7 @@ async def put_coin_indicator_config(instrument_id: str, request: Request) -> dic
     path = Path(CHART_INDICATOR_CONFIG_PATH)
     try:
         payload = await request.json()
-        entries = [
-            preferences.IndicatorEntry(
-                name=e["name"],
-                params=e.get("params", {}),
-                category=e["category"],
-            )
-            for e in payload
-        ]
+        entries = [_parse_config_entry(e) for e in payload]
         config = preferences.load_chart_indicators(path)
         config[instrument_id] = entries
     except (
@@ -165,6 +232,7 @@ async def put_coin_indicator_config(instrument_id: str, request: Request) -> dic
     unknown = [e.name for e in entries if e.name not in indicator_picker.merged_catalog()]
     if unknown:
         raise HTTPException(status_code=400, detail=f"unknown indicator(s): {unknown}")
+    _check_sources(entries)
     try:
         preferences.save_chart_indicators(config, path)
     except OSError as exc:
@@ -185,11 +253,12 @@ async def put_coin_indicator_config(instrument_id: str, request: Request) -> dic
 class IndicatorValueRequestEntry(BaseModel):
     name: str
     params: dict[str, Any] = {}
+    source: str = "close"
 
 
 class IndicatorValuesItem(BaseModel):
     t: int
-    # Keyed by f"{indicator_id(name, params)}.{output_attr}" -- a gap-marker row (AD-F6) is
+    # Keyed by f"{indicator_id(name, params, source)}.{output_attr}" -- a gap-marker row (AD-F6) is
     # represented as an item with an empty `values` dict, the same "row present, no data"
     # shape candles.py/indicator_series.py use for their own gap markers.
     values: dict[str, float | None] = {}
@@ -198,8 +267,9 @@ class IndicatorValuesItem(BaseModel):
 class IndicatorValuesResponse(BaseModel):
     items: list[IndicatorValuesItem]
     has_more: bool
-    # `indicator_picker.indicator_id(name, params)` -> message, for entries whose replay failed. The other
-    # entries' values are still served; one bad/stale entry must not blank every pane.
+    # `indicator_picker.indicator_id(name, params, source)` -> message, for entries whose replay
+    # failed. The other entries' values are still served; one bad/stale entry must not blank every
+    # pane.
     errors: dict[str, str] = {}
     venue: str
     market: str
@@ -236,7 +306,7 @@ def get_indicator_values(
     """
     Bounded candle window (mirrors `candles.py`'s window/limit/bar_seconds contract), then
     per-requested-name `indicator_picker.replay_entry` dispatch, results keyed by
-    `indicator_picker.indicator_id(name, params)` (AD-F2/AD-F3).
+    `indicator_picker.indicator_id(name, params, source)` (AD-F2/AD-F3).
 
     Re-derives its own bounded window server-side rather than accepting client-supplied
     candles in the request body (Design Notes: DESIGN-01) -- always a bounded *historical*
@@ -252,6 +322,7 @@ def get_indicator_values(
     limit = max(1, min(limit, _MAX_INDICATOR_VALUES_LIMIT))
     bar_seconds = max(1, min(bar_seconds, _MAX_BAR_SECONDS))
     parsed_entries = _parse_entries(entries, IndicatorValueRequestEntry)
+    _check_sources(parsed_entries)
 
     try:
         rows, has_more, errors = chart_series.indicator_values_page(

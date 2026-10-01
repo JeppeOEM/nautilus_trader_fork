@@ -157,4 +157,56 @@ describe("usePickerIndicatorValues", () => {
       [{ name: "SimpleMovingAverage", params: {} }],
     );
   });
+
+  // Story 32.3: only what changes the values is a request; hiding and restyling are drawn from
+  // the data already in state.
+  describe("request key (Story 32.3)", () => {
+    const sma = (extra: Partial<IndicatorConfigEntry> = {}): IndicatorConfigEntry => ({
+      name: "SimpleMovingAverage",
+      params: { period: 20 },
+      category: "native",
+      ...extra,
+    });
+    const smaValues = page([{ t: 60_000, values: { "SimpleMovingAverage_period=20.value": 1 } }], false);
+
+    it("sends a non-default source with its entry, and omits the default close", async () => {
+      fetchIndicatorValuesMock.mockResolvedValue(smaValues);
+      const { result } = renderHook(() =>
+        usePickerIndicatorValues("BTC-USD-PERP.DYDX", null, [sma(), sma({ source: "hl2" }), sma({ source: "close", params: { period: 5 } })]),
+      );
+
+      await waitFor(() => expect(Object.keys(result.current)).toHaveLength(1));
+      expect(fetchIndicatorValuesMock.mock.calls[0][4]).toEqual([
+        { name: "SimpleMovingAverage", params: { period: 20 } },
+        { name: "SimpleMovingAverage", params: { period: 20 }, source: "hl2" },
+        { name: "SimpleMovingAverage", params: { period: 5 } },
+      ]);
+    });
+
+    it("refetches when the source changes", async () => {
+      fetchIndicatorValuesMock.mockResolvedValue(smaValues);
+      const { rerender } = renderHook(({ e }) => usePickerIndicatorValues("BTC-USD-PERP.DYDX", null, e), {
+        initialProps: { e: [sma()] },
+      });
+      await waitFor(() => expect(fetchIndicatorValuesMock).toHaveBeenCalledTimes(1));
+
+      rerender({ e: [sma({ source: "hl2" })] });
+
+      await waitFor(() => expect(fetchIndicatorValuesMock).toHaveBeenCalledTimes(2));
+    });
+
+    it("does not refetch when only hidden or style changes (new entry objects, same request)", async () => {
+      fetchIndicatorValuesMock.mockResolvedValue(smaValues);
+      const { rerender } = renderHook(({ e }) => usePickerIndicatorValues("BTC-USD-PERP.DYDX", null, e), {
+        initialProps: { e: [sma()] },
+      });
+      await waitFor(() => expect(fetchIndicatorValuesMock).toHaveBeenCalledTimes(1));
+
+      rerender({ e: [sma({ hidden: true })] });
+      rerender({ e: [sma({ hidden: false, style: { value: { line_width: 3, line_style: "dashed", color: "#112233" } } })] });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(fetchIndicatorValuesMock).toHaveBeenCalledTimes(1);
+    });
+  });
 });

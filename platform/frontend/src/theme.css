@@ -86,6 +86,7 @@
    TradingView's own colours are nudged. Not a toggle: the chart area is light, the rest of the
    app is not (operator decision 2026-09-30). */
 .chart-workspace {
+  --legend-font-size: 14px; /* Story 32.3: the one legend type size (names, values, buttons); was 12px */
   --chart-bg: #ffffff; /* the canvas: TradingView's classic white */
   --chart-grid: #f0f3fa; /* grid lines */
   --chart-text: #131722; /* scale labels, legend titles, gap labels */

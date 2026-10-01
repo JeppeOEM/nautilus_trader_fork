@@ -854,7 +854,7 @@
     "/api/coin/{instrument_id}/indicator-values": {
       "get": {
         "summary": "Get Indicator Values",
-        "description": "Bounded candle window (mirrors `candles.py`'s window/limit/bar_seconds contract), then\nper-requested-name `indicator_picker.replay_entry` dispatch, results keyed by\n`indicator_picker.indicator_id(name, params)` (AD-F2/AD-F3).\n\nRe-derives its own bounded window server-side rather than accepting client-supplied\ncandles in the request body (Design Notes: DESIGN-01) -- always a bounded *historical*\nreplay of `[start_ns, before_ns)`, mirroring `indicator_series.py`'s own purely-historical\nscroll-back model; the candlestick's live edge has its own sanctioned path (AD-F7) that\nthis route does not duplicate.\n\nA custom indicator whose instrument never opted into raw-delta capture returns `None` for\nevery point (pre-existing custom-indicator behavior, reused unchanged) -- not an\nerror (I/O matrix: \"Values route returns None per-point for an uncaptured custom\nindicator, not an error\").",
+        "description": "Bounded candle window (mirrors `candles.py`'s window/limit/bar_seconds contract), then\nper-requested-name `indicator_picker.replay_entry` dispatch, results keyed by\n`indicator_picker.indicator_id(name, params, source)` (AD-F2/AD-F3).\n\nRe-derives its own bounded window server-side rather than accepting client-supplied\ncandles in the request body (Design Notes: DESIGN-01) -- always a bounded *historical*\nreplay of `[start_ns, before_ns)`, mirroring `indicator_series.py`'s own purely-historical\nscroll-back model; the candlestick's live edge has its own sanctioned path (AD-F7) that\nthis route does not duplicate.\n\nA custom indicator whose instrument never opted into raw-delta capture returns `None` for\nevery point (pre-existing custom-indicator behavior, reused unchanged) -- not an\nerror (I/O matrix: \"Values route returns None per-point for an uncaptured custom\nindicator, not an error\").",
         "operationId": "get_indicator_values_api_coin__instrument_id__indicator_values_get",
         "parameters": [
           {
@@ -1679,6 +1679,11 @@
             "type": "object",
             "title": "Choices",
             "default": {}
+          },
+          "source_selectable": {
+            "type": "boolean",
+            "title": "Source Selectable",
+            "default": false
           }
         },
         "type": "object",
@@ -1704,6 +1709,25 @@
           "category": {
             "type": "string",
             "title": "Category"
+          },
+          "source": {
+            "type": "string",
+            "title": "Source",
+            "default": "close"
+          },
+          "hidden": {
+            "type": "boolean",
+            "title": "Hidden",
+            "default": false
+          },
+          "style": {
+            "additionalProperties": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "object",
+            "title": "Style",
+            "default": {}
           }
         },
         "type": "object",

@@ -1,5 +1,9 @@
+/// <reference types="node" />
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { IChartApi, MouseEventParams, Time } from "lightweight-charts";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { findGapRuns, gapRun, gapRunsBySlot } from "../../lib/gaps";
 import { formatLegendValue, type LegendSeries, renderLegends } from "./legend";
@@ -126,5 +130,152 @@ describe("renderLegends", () => {
     expect(run).toHaveLength(720);
     expect(withRun).toEqual(text(rows(els[1])[0]));
     expect(withRun).toEqual(["G", "8"]);
+  });
+});
+
+// Story 32.3: the row is the control surface. Each button is inline SVG with an aria-label, and
+// one delegated click handler per legend reports (action, group).
+describe("legend controls (Story 32.3)", () => {
+  const buttons = (row: Element) => [...row.querySelectorAll("button")].map((b) => b.getAttribute("aria-label"));
+
+  it("gives every row Hide, Settings and Remove buttons labelled with its title, as inline SVG", () => {
+    const { chart, els } = makeChart(1);
+    renderLegends(chart, [makeItem({ pane: null, groupLabel: "SMA (20)" })], null, undefined, () => {});
+
+    const [row] = rows(els[0]);
+    expect(buttons(row)).toEqual(["Hide SMA (20)", "Settings for SMA (20)", "Remove SMA (20)"]);
+    expect([...row.querySelectorAll("button")].every((b) => b.querySelector("svg path") !== null)).toBe(true);
+    expect(row.querySelector("button")?.getAttribute("type")).toBe("button"); // keyboard reachable, never a submit
+  });
+
+  it("gives the Volume row (configurable: false) the eye and the x only", () => {
+    const { chart, els } = makeChart(1);
+    renderLegends(chart, [makeItem({ pane: null, groupLabel: "Volume", configurable: false })], null, undefined, () => {});
+
+    expect(buttons(rows(els[0])[0])).toEqual(["Hide Volume", "Remove Volume"]);
+  });
+
+  it("draws no buttons on a row no configured entry owns (actionable: false)", () => {
+    const { chart, els } = makeChart(1);
+    renderLegends(chart, [makeItem({ pane: null, actionable: false })], null, undefined, () => {});
+
+    expect(rows(els[0])).toHaveLength(1);
+    expect(els[0].querySelectorAll("button")).toHaveLength(0);
+  });
+
+  it("draws no buttons without an action handler, so the plain readout is unchanged", () => {
+    const { chart, els } = makeChart(1);
+    renderLegends(chart, [makeItem({ pane: null })], null);
+
+    expect(els[0].querySelectorAll("button")).toHaveLength(0);
+  });
+
+  it("reports the action and the row's group on a click", () => {
+    const { chart, els } = makeChart(1);
+    const onAction = vi.fn();
+    renderLegends(chart, [makeItem({ pane: null, group: "RSI_period=14", groupLabel: "RSI (14)" })], null, undefined, onAction);
+
+    els[0].querySelector<HTMLElement>('button[aria-label="Settings for RSI (14)"]')!.click();
+    els[0].querySelector<HTMLElement>('button[aria-label="Hide RSI (14)"] svg')!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    els[0].querySelector<HTMLElement>('button[aria-label="Remove RSI (14)"]')!.click();
+
+    expect(onAction.mock.calls).toEqual([
+      ["settings", "RSI_period=14"],
+      ["hide", "RSI_period=14"],
+      ["remove", "RSI_period=14"],
+    ]);
+  });
+
+  it("keeps one handler per legend across re-renders (no stacked clicks)", () => {
+    const { chart, els } = makeChart(1);
+    const onAction = vi.fn();
+    const item = makeItem({ pane: null, groupLabel: "G" });
+    for (let i = 0; i < 3; i++) renderLegends(chart, [item], null, undefined, onAction);
+
+    els[0].querySelector<HTMLElement>('button[aria-label="Remove G"]')!.click();
+
+    expect(onAction).toHaveBeenCalledTimes(1);
+  });
+
+  it("a hidden row is dimmed, offers 'Show', and reads its latest value instead of following the crosshair", () => {
+    const { chart, els } = makeChart(1);
+    const series = { id: "s" } as unknown as LegendSeries["series"];
+    const item = makeItem({ pane: null, series, hidden: true, groupLabel: "G", data: [{ time: 1 as Time, value: 10 }, { time: 2 as Time, value: 20 }] });
+
+    renderLegends(chart, [item], hover([[series, 12.5]]), undefined, () => {});
+
+    const [row] = rows(els[0]);
+    expect(row.classList.contains("chart-legend-row--hidden")).toBe(true);
+    expect(buttons(row)[0]).toBe("Show G");
+    expect(text(row).slice(0, 2)).toEqual(["G", "20"]);
+  });
+
+  it("keeps a collapsed pane's row (series null) on the price pane's legend, crossed", () => {
+    const { chart, els } = makeChart(2);
+    const item = makeItem({ pane: null, series: null, hidden: true, groupLabel: "RSI (14)", data: [{ time: 1 as Time, value: 55 }] });
+
+    renderLegends(chart, [item], null, undefined, () => {});
+
+    expect(rows(els[0])).toHaveLength(1);
+    expect(rows(els[1])).toHaveLength(0);
+    expect(text(rows(els[0])[0]).slice(0, 2)).toEqual(["RSI (14)", "55"]);
+  });
+
+  it("updates values in place while the row is unchanged, so a button under the pointer survives", () => {
+    const { chart, els } = makeChart(1);
+    const series = { id: "s" } as unknown as LegendSeries["series"];
+    const item = makeItem({ pane: null, series, groupLabel: "G", data: [{ time: 1 as Time, value: 1 }] });
+    renderLegends(chart, [item], hover([[series, 5]]), undefined, () => {});
+    const button = els[0].querySelector("button")!;
+
+    renderLegends(chart, [item], hover([[series, 6]]), undefined, () => {});
+
+    expect(els[0].querySelector("button")).toBe(button);
+    expect(text(rows(els[0])[0]).slice(0, 2)).toEqual(["G", "6"]);
+
+    renderLegends(chart, [{ ...item, hidden: true }], null, undefined, () => {}); // structure changed: rebuilt
+    expect(els[0].querySelector("button")).not.toBe(button);
+  });
+});
+
+// The legend strip itself stays click-through; only the row takes pointer events, so a drag or a
+// wheel anywhere else on the pane still pans and zooms (Story 32.3). A CSS rule, so the test reads
+// the stylesheet's text (vitest hands `.css?raw` back empty; Node's fs is the honest reader).
+describe("legend CSS (Story 32.3)", () => {
+  const css = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "..", "index.css"), "utf8");
+  const theme = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "..", "theme.css"), "utf8");
+  const rule = (selector: string): string => {
+    const found = new RegExp(`(?:^|\\n)${selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*\\{([^}]*)\\}`).exec(css);
+    if (!found) throw new Error(`index.css has no ${selector} rule`);
+    return found[1];
+  };
+
+  it("keeps the legend strip click-through and gives only the row pointer events", () => {
+    expect(rule(".chart-legend")).toMatch(/pointer-events:\s*none/);
+    expect(rule(".chart-legend-row")).toMatch(/pointer-events:\s*auto/);
+  });
+
+  it("sizes each row to its own content, so a short row leaves no dead strip beside it", () => {
+    expect(rule(".chart-legend")).toMatch(/align-items:\s*flex-start/);
+  });
+
+  it("puts the settings modal's padding on its body, so a click there is not a backdrop click", () => {
+    expect(rule(".indicator-settings")).toMatch(/padding:\s*0/);
+    expect(rule(".indicator-settings-body")).toMatch(/padding:\s*12px/);
+  });
+
+  it("sizes the legend from the one --legend-font-size token (14px)", () => {
+    expect(theme).toMatch(/--legend-font-size:\s*14px/);
+    expect(rule(".chart-legend")).toMatch(/font-size:\s*var\(--legend-font-size/);
+  });
+
+  it("shows the buttons on hover or focus without removing them from the tab order", () => {
+    expect(rule(".chart-legend-actions")).toMatch(/opacity:\s*0/);
+    expect(rule(".chart-legend-actions")).not.toMatch(/display:\s*none/);
+    expect(css).toMatch(/\.chart-legend-row:focus-within \.chart-legend-actions/);
+  });
+
+  it("always shows the buttons on a screen without hover, so a tap never hits an unseen x", () => {
+    expect(css).toMatch(/@media \(hover: none\)\s*\{\s*\.chart-legend-actions\s*\{\s*opacity:\s*1;/);
   });
 });

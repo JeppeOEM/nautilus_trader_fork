@@ -25,7 +25,9 @@ from kernel.candle_patterns import PatternName
 
 import nautilus_trader.indicators as nt_indicators
 from views.indicator_picker import INDICATOR_CATALOG
+from views.indicator_picker import PRICE_SOURCES
 from views.indicator_picker import _resolve_enum_params
+from views.indicator_picker import indicator_id
 from views.indicator_picker import merged_catalog
 from views.indicator_picker import native_catalog_json
 from views.indicator_picker import replay_native as replay_indicator
@@ -193,6 +195,85 @@ def test_the_merged_catalog_carries_the_choices_as_native() -> None:
     entry = merged_catalog()["CandlePattern"]
     assert entry["category"] == "native"
     assert len(entry["choices"]["pattern"]) == len(PatternName)
+
+
+def _sources_candles() -> list[dict]:
+    return [_candle(i * 60_000, 10.0 + i, 14.0 + i, 8.0 + i, 12.0 + i) for i in range(3)]
+
+
+def test_sma_source_maths_per_candle() -> None:
+    candles = _sources_candles()  # candle 0: o=10 h=14 l=8 c=12
+    expected_first = {
+        "close": 12.0,
+        "open": 10.0,
+        "high": 14.0,
+        "low": 8.0,
+        "hl2": (14.0 + 8.0) / 2,
+        "hlc3": (14.0 + 8.0 + 12.0) / 3,
+        "ohlc4": (10.0 + 14.0 + 8.0 + 12.0) / 4,
+    }
+    assert set(expected_first) == set(PRICE_SOURCES)
+    for source, first in expected_first.items():
+        result = replay_indicator(candles, "SimpleMovingAverage", {"period": 1}, source)
+        assert result["value"][0] == pytest.approx(first), source
+        # every candle shifts by +1 on all four fields, so every source shifts by +1
+        assert result["value"][2] == pytest.approx(first + 2), source
+
+
+def test_default_source_replay_equals_close() -> None:
+    candles = _sources_candles()
+    assert replay_indicator(candles, "SimpleMovingAverage", {"period": 2}) == replay_indicator(
+        candles, "SimpleMovingAverage", {"period": 2}, "close"
+    )
+
+
+def test_replay_refuses_unknown_source_and_a_source_on_a_fixed_input_indicator() -> None:
+    candles = _sources_candles()
+    with pytest.raises(ValueError, match="source"):
+        replay_indicator(candles, "SimpleMovingAverage", {"period": 2}, "vwap")
+    with pytest.raises(ValueError, match="source"):
+        replay_indicator(candles, "AverageTrueRange", {"period": 2}, "hl2")
+
+
+def test_source_selectable_is_exactly_the_close_only_feeds() -> None:
+    catalog = native_catalog_json()
+    for name, spec in INDICATOR_CATALOG.items():
+        assert catalog[name]["source_selectable"] is (spec.feed == ("close",)), name
+    assert catalog["SimpleMovingAverage"]["source_selectable"] is True
+    assert catalog["AverageTrueRange"]["source_selectable"] is False
+
+
+def test_every_catalog_default_id_is_byte_identical_and_a_source_makes_a_new_id() -> None:
+    for name, spec in INDICATOR_CATALOG.items():
+        legacy = (
+            name
+            if not spec.params
+            else name + "_" + ",".join(f"{k}={v}" for k, v in sorted(spec.params.items()))
+        )
+        assert indicator_id(name, spec.params) == legacy
+        assert indicator_id(name, spec.params, "close") == legacy
+        assert indicator_id(name, spec.params, "hl2") == legacy + ":hl2"
+    assert indicator_id("OrderFlowImbalance", {}) == "OrderFlowImbalance"
+
+
+def test_close_source_works_on_a_candle_carrying_only_c() -> None:
+    candles = [{"t": i * 60_000, "c": 10.0 + i} for i in range(3)]
+    assert replay_indicator(candles, "SimpleMovingAverage", {"period": 1})["value"] == [
+        10.0,
+        11.0,
+        12.0,
+    ]
+
+
+def test_a_composite_source_on_a_candle_with_a_none_component_is_a_gap_not_a_typeerror() -> None:
+    candles = _sources_candles()
+    candles[1] = {**candles[1], "h": None}
+    for source in ("hl2", "hlc3", "ohlc4"):
+        out = replay_indicator(candles, "SimpleMovingAverage", {"period": 1}, source)["value"]
+        assert out[1] is None, source
+        assert out[0] is not None and out[2] is not None, source
+    # a source that does not need the missing field is unaffected
+    assert replay_indicator(candles, "SimpleMovingAverage", {"period": 1}, "low")["value"][1] == 9.0
 
 
 if __name__ == "__main__":

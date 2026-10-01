@@ -28,3 +28,23 @@ export function coerceParamValue(previous: unknown, raw: string): unknown {
   if (typeof previous === "string") return raw;
   return previous; // structured (object/array/null) default -- no safe string->value coercion
 }
+
+/** The text a param input starts from: each saved param as its own string (the one
+ * `String(v)` rule every param editor shares, `ParamInputs.tsx` and the Technicals row alike). */
+export function rawFromParams(params: Record<string, unknown>): Record<string, string> {
+  return Object.fromEntries(Object.entries(params).map(([k, v]) => [k, String(v)]));
+}
+
+/** The param keys whose current text `isValidParamText` refuses -- shown, never silently reverted. */
+export function invalidParamKeys(
+  params: Record<string, unknown>,
+  raw: Record<string, string>,
+  choices: Record<string, string[]>,
+): string[] {
+  return Object.keys(params).filter((k) => !isValidParamText(params[k], raw[k] ?? "", choices[k]));
+}
+
+/** Every param's text coerced back to the type of its saved value (call only when none is invalid). */
+export function coerceParams(params: Record<string, unknown>, raw: Record<string, string>): Record<string, unknown> {
+  return Object.fromEntries(Object.keys(params).map((k) => [k, coerceParamValue(params[k], raw[k] ?? "")]));
+}

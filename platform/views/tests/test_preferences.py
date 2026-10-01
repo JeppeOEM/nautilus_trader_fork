@@ -91,6 +91,8 @@ def test_screener_columns_file_text_round_trips_byte_identical(tmp_path: Path) -
     save_screener_columns(loaded, path)
 
     assert path.read_text() == _SCREENER_COLUMNS_TEXT
+    # Positional on purpose: the chart entry's Story 32.3 keys are keyword-only, so a column's
+    # fourth field is still its bar size.
     assert loaded[1] == ColumnEntry("AverageTrueRange", {}, "native", 3600)
 
 
@@ -142,3 +144,75 @@ def test_save_config_is_a_full_rewrite_not_a_patch(tmp_path: Path) -> None:
     round_tripped = load_config(path)
     assert "BTC-USD-PERP.DYDX" not in round_tripped
     assert "ETH-USD-PERP.DYDX" in round_tripped
+
+
+def test_pre_story_32_3_chart_file_loads_with_defaults_and_saves_back_unchanged(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "chart_indicators.toml"
+    path.write_text(_CHART_INDICATORS_TEXT)
+
+    entry = load_chart_indicators(path)["BTC-USD-PERP.DYDX"][0]
+
+    assert (entry.source, entry.hidden, entry.style) == ("close", False, {})
+
+
+def test_source_hidden_and_style_round_trip_and_are_written_only_when_not_default(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "chart_indicators.toml"
+    style = {"value": {"color": "#00ff00", "line_width": 2, "line_style": "dotted"}}
+    config = {
+        "BTC-USD-PERP.DYDX": [
+            IndicatorEntry(
+                "SimpleMovingAverage",
+                {"period": 20},
+                "native",
+                source="hl2",
+                hidden=True,
+                style=style,
+            ),
+            IndicatorEntry("SimpleMovingAverage", {"period": 20}, "native"),
+        ]
+    }
+
+    save_chart_indicators(config, path)
+
+    assert load_chart_indicators(path) == config
+    text = path.read_text()
+    assert text.count("source") == 1
+    assert text.count("hidden") == 1
+
+
+def test_wrong_typed_source_hidden_style_fall_back_to_defaults_with_one_warning_each(
+    tmp_path: Path, caplog
+) -> None:
+    path = tmp_path / "chart_indicators.toml"
+    path.write_text(
+        '[["BTC-USD-PERP.DYDX"]]\nname = "SimpleMovingAverage"\ncategory = "native"\n'
+        'source = 5\nhidden = "yes"\nstyle = { value = 3 }\n'
+    )
+
+    with caplog.at_level("WARNING", logger="views.preferences"):
+        entry = load_chart_indicators(path)["BTC-USD-PERP.DYDX"][0]
+
+    assert (entry.source, entry.hidden, entry.style) == ("close", False, {})
+    assert len([r for r in caplog.records if r.levelname == "WARNING"]) == 3
+
+
+def test_a_style_the_put_route_would_refuse_falls_back_to_the_default_on_load(
+    tmp_path: Path, caplog
+) -> None:
+    # A nested table or a non-finite float would load, then make every save of the coin a 400
+    # (the client echoes the entry back) or its GET a 500 (JSON has no NaN): one rule for both.
+    path = tmp_path / "chart_indicators.toml"
+    for style in ("{ value = { color = { r = 1 } } }", "{ value = { line_width = nan } }"):
+        path.write_text(
+            '[["BTC-USD-PERP.DYDX"]]\nname = "SimpleMovingAverage"\ncategory = "native"\n'
+            f"style = {style}\n"
+        )
+        caplog.clear()
+        with caplog.at_level("WARNING", logger="views.preferences"):
+            entry = load_chart_indicators(path)["BTC-USD-PERP.DYDX"][0]
+        assert entry.style == {}, style
+        assert len(caplog.records) == 1, style

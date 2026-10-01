@@ -91,16 +91,18 @@ function lastChartHeight(): number | undefined {
 // component's own read-current-color-before-reapplying check (LightweightChart.tsx) has
 // something real to read -- each call site (candlestick or an indicator pane) gets its
 // own closed-over color, not one shared across every series in the test.
-function makeSeriesMock(initialColor: string | undefined) {
-  let color = initialColor;
-  const applyOptions = vi.fn((opts: { color?: string }) => {
-    if (opts.color !== undefined) color = opts.color;
+function makeSeriesMock(initial: Record<string, unknown> | undefined) {
+  // Every option the component creates a series with or applies later round-trips, so its
+  // read-current-options-before-reapplying checks (colour, visible, lineWidth, lineStyle) see them.
+  const state: Record<string, unknown> = { ...initial };
+  const applyOptions = vi.fn((opts: Record<string, unknown>) => {
+    Object.assign(state, opts);
   });
   const series = {
     setData: setDataMock,
     update: seriesUpdateMock,
     applyOptions,
-    options: vi.fn(() => ({ color })),
+    options: vi.fn(() => ({ ...state })),
     createPriceLine: createPriceLineMock,
     removePriceLine: removePriceLineMock,
     priceToCoordinate: priceToCoordinateMock,
@@ -132,7 +134,7 @@ vi.mock("lightweight-charts", () => ({
   CandlestickSeries: "CandlestickSeries-sentinel",
   LineSeries: "LineSeries-sentinel",
   HistogramSeries: "HistogramSeries-sentinel",
-  LineStyle: { Solid: 0 },
+  LineStyle: { Solid: 0, Dotted: 1, Dashed: 2 },
   createChart: (...args: unknown[]) => createChartMock(...args),
 }));
 
@@ -207,7 +209,7 @@ beforeEach(() => {
   seriesUpdateMock.mockReset();
   addSeriesMock
     .mockReset()
-    .mockImplementation((_definition: unknown, options?: { color?: string }) => makeSeriesMock(options?.color));
+    .mockImplementation((_definition: unknown, options?: Record<string, unknown>) => makeSeriesMock(options));
   applyOptionsMock.mockReset();
   removeMock.mockReset();
   removeSeriesMock.mockReset();
@@ -447,7 +449,13 @@ describe("LightweightChart", () => {
     // not pane.addSeries(). Asserting paneIndex 1 here (not just "whatever was passed
     // through") proves the indicator pane never collides with the candlestick's pane 0.
     expect(addSeriesMock).toHaveBeenCalledTimes(2);
-    expect(addSeriesMock).toHaveBeenNthCalledWith(2, "LineSeries-sentinel", { color: "#2962ff" }, 1);
+    // A line series always gets the library's default width and style when the spec states none.
+    expect(addSeriesMock).toHaveBeenNthCalledWith(
+      2,
+      "LineSeries-sentinel",
+      { color: "#2962ff", lineWidth: 3, lineStyle: 0 },
+      1,
+    );
   });
 
   it("draws an overlay inside the price pane (index 0) with no new pane, and removes just its series", () => {
@@ -455,7 +463,12 @@ describe("LightweightChart", () => {
     const { rerender } = render(<LightweightChart data={[]} onChartApi={() => {}} panes={overlay} />);
 
     expect(addPaneMock).not.toHaveBeenCalled();
-    expect(addSeriesMock).toHaveBeenNthCalledWith(2, "LineSeries-sentinel", { color: "#2962ff" }, 0);
+    expect(addSeriesMock).toHaveBeenNthCalledWith(
+      2,
+      "LineSeries-sentinel",
+      { color: "#2962ff", lineWidth: 3, lineStyle: 0 },
+      0,
+    );
 
     rerender(<LightweightChart data={[]} onChartApi={() => {}} panes={[]} />);
     expect(removeSeriesMock).toHaveBeenCalledTimes(1);
@@ -1445,5 +1458,196 @@ describe("gap painting (Story 32.1)", () => {
     act(() => legendHandler({ time: 180, seriesData: new Map() }));
 
     expect(paneEl.querySelector(".chart-legend-row")?.textContent).toBe("SMA (5)no data · 3m");
+  });
+});
+
+// Story 32.3: what the legend's eye and the settings modal's Style do to the chart.
+describe("LightweightChart indicator visibility and style (Story 32.3)", () => {
+  const NO_DATA: never[] = []; // one reference: an inline [] would re-run the candles' own setData each render
+  const element = (panes: IndicatorPaneSpec[]) => <LightweightChart data={NO_DATA} onChartApi={() => {}} panes={panes} />;
+  // The price pane's DOM element, attached so the legend rendered into it can be queried.
+  const attachedPricePane = (): HTMLElement => {
+    const paneEl = document.createElement("div");
+    document.body.appendChild(paneEl);
+    const base = createChartMock.getMockImplementation()!;
+    createChartMock.mockImplementation((...args: unknown[]) => ({
+      ...base(...args),
+      panes: () => [{ ...pricePaneMock, getHTMLElement: () => paneEl }],
+    }));
+    return paneEl;
+  };
+  const overlay = (over: Partial<IndicatorPaneSpec> = {}) =>
+    makePaneSpec("SMA.value", { placement: "overlay", group: "SMA", ...over });
+  const rsi = (over: Partial<IndicatorPaneSpec> = {}) => makePaneSpec("RSI.value", { group: "RSI", ...over });
+  const volume = () => makePaneSpec("volume", { kind: "Histogram", group: "volume" });
+  const total = (extras: number[]) => PRICE_PANE_PX + extras.reduce((a, b) => a + b, 0) + extras.length + TIME_AXIS_PX;
+  const seriesOf = (n: number) => addSeriesMock.mock.results[n].value as ReturnType<typeof makeSeriesMock>;
+
+  it("hides an overlay in place: every series goes visible: false, no pane is touched, the data stays", () => {
+    const data = [{ time: 1 as never, value: 5 }];
+    const { rerender } = render(element([overlay({ data })]));
+    const setDataCalls = setDataMock.mock.calls.length;
+
+    rerender(element([overlay({ data, hidden: true })]));
+
+    expect(seriesOf(1).applyOptions).toHaveBeenCalledWith({ visible: false });
+    expect(removePaneMock).not.toHaveBeenCalled();
+    expect(addPaneMock).not.toHaveBeenCalled();
+    expect(removeSeriesMock).not.toHaveBeenCalled();
+    expect(setDataMock.mock.calls.length).toBe(setDataCalls); // no refetch, no repaint of data
+
+    rerender(element([overlay({ data })]));
+    expect(seriesOf(1).applyOptions).toHaveBeenLastCalledWith({ visible: true });
+  });
+
+  it("creates an overlay that is already hidden with visible: false", () => {
+    render(element([overlay({ hidden: true })]));
+
+    expect(addSeriesMock.mock.calls[1][1]).toMatchObject({ visible: false });
+  });
+
+  it("collapses a hidden pane indicator: the pane is removed and the page shrinks by its height", () => {
+    const { rerender } = render(element([volume(), rsi()]));
+    pricePaneMock.getHeight.mockReturnValue(PRICE_PANE_PX);
+    addedPane(0).getHeight.mockReturnValue(VOLUME_PANE_PX);
+    addedPane(1).getHeight.mockReturnValue(INDICATOR_PANE_PX);
+    expect(lastChartHeight()).toBe(total([VOLUME_PANE_PX, INDICATOR_PANE_PX]));
+
+    rerender(element([volume(), rsi({ hidden: true })]));
+
+    expect(removePaneMock).toHaveBeenCalledTimes(1);
+    expect(removePaneMock).toHaveBeenCalledWith(2);
+    expect(lastChartHeight()).toBe(total([VOLUME_PANE_PX])); // down by 160 + its separator
+    expect(total([VOLUME_PANE_PX, INDICATOR_PANE_PX]) - total([VOLUME_PANE_PX])).toBe(INDICATOR_PANE_PX + 1);
+  });
+
+  it("re-adds a shown pane at its former index and height, with the same data and no extra fetch", () => {
+    const data = [{ time: 1 as never, value: 5 }];
+    const { rerender } = render(element([volume(), rsi({ data }), makePaneSpec("MACD.value", { group: "MACD" })]));
+    pricePaneMock.getHeight.mockReturnValue(PRICE_PANE_PX);
+    addedPane(0).getHeight.mockReturnValue(VOLUME_PANE_PX);
+    addedPane(1).getHeight.mockReturnValue(240); // the operator dragged RSI to 240
+    addedPane(2).getHeight.mockReturnValue(INDICATOR_PANE_PX);
+    rerender(element([volume(), rsi({ data, hidden: true }), makePaneSpec("MACD.value", { group: "MACD" })]));
+    // Re-snapshot as the library would after the collapse: MACD is now the pane at index 2.
+    addedPane(2).getHeight.mockReturnValue(INDICATOR_PANE_PX);
+    addPaneMock.mockClear();
+    setDataMock.mockClear();
+
+    rerender(element([volume(), rsi({ data }), makePaneSpec("MACD.value", { group: "MACD" })]));
+
+    expect(addPaneMock).toHaveBeenCalledTimes(1);
+    const restored = addedPane(0);
+    expect(restored.moveTo).toHaveBeenCalledWith(2); // volume 1, RSI 2, MACD after it
+    expect(restored.setStretchFactor).toHaveBeenLastCalledWith(240);
+    expect(setDataMock).toHaveBeenCalledWith(data); // the data in state is painted again, none refetched
+  });
+
+  it("keeps a hidden pane indicator's data in the legend row (series null, hidden) on the price pane", () => {
+    const paneEl = attachedPricePane();
+    render(element([rsi({ hidden: true, groupLabel: "RSI (14)", data: [{ time: 1 as never, value: 55 }] })]));
+
+    // No pane or series exists for it...
+    expect(addPaneMock).not.toHaveBeenCalled();
+    expect(addSeriesMock).toHaveBeenCalledTimes(1); // only the candles
+    // ...but its row is on the price pane's legend.
+    expect(paneEl.querySelector(".chart-legend-row--hidden")?.textContent).toContain("RSI (14)");
+  });
+
+  it("applies a style-only change with applyOptions: no new series, no pane change, no setData", () => {
+    const data = [{ time: 1 as never, value: 5 }]; // one reference, as the page keeps it
+    const { rerender } = render(element([overlay({ data })]));
+    setDataMock.mockClear();
+
+    rerender(element([overlay({ data, lineWidth: 2, lineStyle: "dashed", color: "#abcdef" })]));
+
+    expect(seriesOf(1).applyOptions).toHaveBeenCalledWith({ color: "#abcdef", lineWidth: 2, lineStyle: 2 });
+    expect(addSeriesMock).toHaveBeenCalledTimes(2);
+    expect(removeSeriesMock).not.toHaveBeenCalled();
+    expect(setDataMock).not.toHaveBeenCalled();
+
+    rerender(element([overlay({ data, lineWidth: 2, lineStyle: "dotted", color: "#abcdef" })]));
+    expect(seriesOf(1).applyOptions).toHaveBeenLastCalledWith({ lineStyle: 1 });
+
+    // A width and style the entry no longer stores (cleared, or a failed save rolled back) go back
+    // to the library default rather than sticking.
+    rerender(element([overlay({ data, color: "#abcdef" })]));
+    expect(seriesOf(1).applyOptions).toHaveBeenLastCalledWith({ lineWidth: 3, lineStyle: 0 });
+  });
+
+  it("creates a series with its stored width and style", () => {
+    render(element([overlay({ lineWidth: 2, lineStyle: "dotted" })]));
+
+    expect(addSeriesMock.mock.calls[1][1]).toMatchObject({ lineWidth: 2, lineStyle: 1 });
+  });
+
+  it("paints a histogram's bars by sign in its up and down colours, without touching the data in state", () => {
+    const data = [{ time: 1 as never, value: 5 }, { time: 2 as never, value: -3 }, { time: 3 as never }];
+    render(element([makePaneSpec("H.value", { kind: "Histogram", data, upColor: "#00ff00", downColor: "#ff0000" })]));
+
+    expect(setDataMock).toHaveBeenLastCalledWith([
+      { time: 1, value: 5, color: "#00ff00" },
+      { time: 2, value: -3, color: "#ff0000" },
+      { time: 3 },
+    ]);
+    expect(data[0]).toEqual({ time: 1, value: 5 });
+  });
+
+  it("repaints the histogram when only its up/down colours change", () => {
+    const data = [{ time: 1 as never, value: 5 }];
+    const spec = (up: string) => makePaneSpec("H.value", { kind: "Histogram", data, upColor: up, downColor: "#ff0000" });
+    const { rerender } = render(element([spec("#00ff00")]));
+
+    rerender(element([spec("#0000ff")]));
+
+    expect(setDataMock).toHaveBeenLastCalledWith([{ time: 1, value: 5, color: "#0000ff" }]);
+  });
+
+  it("clamps a stored line width to 1..4 and draws an unknown line style as the default solid", () => {
+    render(element([overlay({ lineWidth: 9, lineStyle: "wavy" as never })]));
+
+    const options = addSeriesMock.mock.calls[1][1] as Record<string, unknown>;
+    expect(options.lineWidth).toBe(4);
+    expect(options.lineStyle).toBe(0);
+  });
+
+  it("gives a histogram bar with a null or NaN value no colour", () => {
+    const data = [{ time: 1 as never, value: null as never }, { time: 2 as never, value: Number.NaN }];
+    render(element([makePaneSpec("H.value", { kind: "Histogram", data, upColor: "#00ff00", downColor: "#ff0000" })]));
+
+    const painted = setDataMock.mock.calls.at(-1)![0] as Record<string, unknown>[];
+    expect(painted.every((d) => !("color" in d))).toBe(true);
+  });
+
+  it("forgets a collapsed height once its indicator is removed, so a re-add gets the default", () => {
+    const { rerender } = render(element([volume(), rsi()]));
+    pricePaneMock.getHeight.mockReturnValue(PRICE_PANE_PX);
+    addedPane(0).getHeight.mockReturnValue(VOLUME_PANE_PX);
+    addedPane(1).getHeight.mockReturnValue(240);
+    rerender(element([volume(), rsi({ hidden: true })]));
+    rerender(element([volume()])); // removed outright while collapsed
+    addPaneMock.mockClear();
+
+    rerender(element([volume(), rsi()]));
+
+    expect(addedPane(0).setStretchFactor).toHaveBeenLastCalledWith(INDICATOR_PANE_PX);
+  });
+
+  it("reports a legend button press as (action, group)", () => {
+    const onLegendAction = vi.fn();
+    const paneEl = attachedPricePane();
+    render(
+      <LightweightChart
+        data={[]}
+        onChartApi={() => {}}
+        panes={[overlay({ groupLabel: "SMA (20)" })]}
+        onLegendAction={onLegendAction}
+      />,
+    );
+
+    (paneEl.querySelector('button[aria-label="Remove SMA (20)"]') as HTMLElement).click();
+    (paneEl.querySelector('button[aria-label="Settings for SMA (20)"]') as HTMLElement).click();
+
+    expect(onLegendAction.mock.calls).toEqual([["remove", "SMA"], ["settings", "SMA"]]);
   });
 });

@@ -16,6 +16,10 @@ period_alpha_fast = 2
 period_alpha_slow = 30
 price_type = "LAST"
 
+["SOL-USD-PERP.HYPERLIQUID".style.value]
+line_style = "dashed"
+line_width = 2
+
 [["SOL-USD-PERP.HYPERLIQUID"]]
 name = "BollingerBands"
 category = "native"
@@ -24,21 +28,6 @@ category = "native"
 period = 20
 k = 2
 ma_type = "SIMPLE"
-
-[["SOL-USD-PERP.HYPERLIQUID"]]
-name = "RelativeStrengthIndex"
-category = "native"
-
-["SOL-USD-PERP.HYPERLIQUID".params]
-period = 14
-
-[["SOL-USD-PERP.HYPERLIQUID"]]
-name = "CommodityChannelIndex"
-category = "native"
-
-["SOL-USD-PERP.HYPERLIQUID".params]
-period = 20
-scalar = 0.015
 
 [["SOL-USD-PERP.HYPERLIQUID"]]
 name = "KeltnerChannel"

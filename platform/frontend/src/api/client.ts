@@ -198,7 +198,7 @@ export async function fetchIndicatorValues(
   beforeNs: number,
   limit: number,
   barSeconds: number,
-  entries: { name: string; params: Record<string, unknown> }[],
+  entries: { name: string; params: Record<string, unknown>; source?: string }[],
 ): Promise<IndicatorValuesResponse> {
   const params = new URLSearchParams({
     before_ns: String(beforeNs),

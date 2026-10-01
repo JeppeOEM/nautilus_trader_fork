@@ -173,3 +173,16 @@ def test_an_unknown_pattern_is_a_bad_request(
     response = client.get("/api/rankings/technicals-values", params={"entries": json.dumps([bad])})
 
     assert response.status_code == 400
+
+
+def test_a_bad_source_on_technicals_values_is_a_422(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed(tmp_path)
+    _rank(monkeypatch, _BULLISH_IID)
+    client = _client(tmp_path, monkeypatch)
+    bad = {**_COLUMN, "source": "hl2"}  # CandlePattern is not close-fed: no source to choose
+
+    response = client.get("/api/rankings/technicals-values", params={"entries": json.dumps([bad])})
+
+    assert response.status_code == 422

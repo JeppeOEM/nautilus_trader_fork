@@ -42,6 +42,7 @@ _MINUTES = 30
 class _Entry:
     name: str
     params: dict[str, Any] = field(default_factory=dict)
+    source: str = "close"
     bar_seconds: int = 60
 
 

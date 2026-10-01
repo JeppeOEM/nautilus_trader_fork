@@ -91,12 +91,16 @@ export interface IndicatorCatalogEntry {
   panel: string;
   category: string;
   choices?: Record<string, string[]>;
+  source_selectable?: boolean;
 }
 
 export interface IndicatorConfigEntry {
   name: string;
   params?: Record<string, unknown>;
   category: string;
+  source?: string;
+  hidden?: boolean;
+  style?: Record<string, Record<string, unknown>>;
 }
 
 export interface IndicatorSeriesPoint {

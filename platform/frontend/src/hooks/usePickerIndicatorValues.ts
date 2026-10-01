@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchIndicatorValues } from "../api/client";
 import type { IndicatorConfigEntry, IndicatorValuesItem } from "../api/schema";
 import { gapRun } from "../lib/gaps";
+import { DEFAULT_SOURCE } from "../lib/indicatorId";
 
 // Mirrors useCandles.ts/useIndicatorSeries.ts's own constants exactly -- co-paging (AD-F3)
 // depends on every chart-history hook sharing the identical before_ns/limit/bar_seconds
@@ -11,6 +12,15 @@ import { gapRun } from "../lib/gaps";
 const INITIAL_LIMIT = 120;
 const DEFAULT_BAR_SECONDS = 60;
 const REFILL_MARGIN_BARS = 20;
+
+// Only what changes the VALUES is part of the request (and so of the key): name, params and a
+// non-default source. `hidden` and `style` never refetch (Story 32.3: hiding and restyling are
+// drawn from the data already in state). `source` is omitted for `close`, the default.
+const toRequest = (e: IndicatorConfigEntry) => ({
+  name: e.name,
+  params: e.params ?? {},
+  ...(e.source && e.source !== DEFAULT_SOURCE ? { source: e.source } : {}),
+});
 
 export type PickerDatum = LineData<Time> | WhitespaceData<Time>;
 
@@ -68,12 +78,9 @@ export function usePickerIndicatorValues(
 
   // Entries compared by value, not by array identity -- ChartPage/IndicatorPicker may
   // rebuild the `entries` array on every render even when its content hasn't changed.
-  const entriesKey = useMemo(
-    () => JSON.stringify(entries.map((e) => ({ name: e.name, params: e.params ?? {} }))),
-    [entries],
-  );
+  const entriesKey = useMemo(() => JSON.stringify(entries.map(toRequest)), [entries]);
   const requestEntries = useMemo(
-    () => entries.map((e) => ({ name: e.name, params: e.params ?? {} })),
+    () => entries.map(toRequest),
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [entriesKey],
   );

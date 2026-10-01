@@ -1,8 +1,19 @@
-import { useEffect, useRef, useState } from "react";
+import { type Ref, useEffect, useImperativeHandle, useRef, useState } from "react";
 
 import { fetchIndicatorCatalog } from "../../api/client";
 import type { IndicatorCatalogEntry, IndicatorConfigEntry } from "../../api/schema";
-import { coerceParamValue, isValidParamText } from "./paramCoercion";
+import { DEFAULT_SOURCE, entryId, indicatorId } from "../../lib/indicatorId";
+import IndicatorSettingsDialog, { type SettingsOutput, type SettingsPatch } from "./IndicatorSettingsDialog";
+import ParamInputs from "./ParamInputs";
+import { coerceParams, invalidParamKeys, rawFromParams } from "./paramCoercion";
+
+/** What the chart's legend buttons drive (Story 32.3): each acts on one configured instance, by
+ * its `indicatorId`, and persists through the same path as an add. */
+export interface IndicatorPickerHandle {
+  toggleHidden: (id: string) => void;
+  remove: (id: string) => void;
+  openSettings: (id: string) => void;
+}
 
 interface IndicatorPickerProps {
   /** Where the selection lives: the chart page wraps its per-coin GET/PUT here, the
@@ -25,6 +36,9 @@ interface IndicatorPickerProps {
    * "Indicators" button. Omitted (Technicals tab) = no dialog, just the select+Add below. */
   dialogOpen?: boolean;
   onDialogClose?: () => void;
+  /** Show the select + Add + list below (the Technicals tab, its only editing surface). The chart
+   * page sets it false: it adds through the dialog and edits from the legend. */
+  showEntryList?: boolean;
   /** Allow the same indicator several times with different params (RSI(14) + RSI(21)). Off by
    * default: the Technicals tab's filter fields are keyed by indicator name alone. */
   multiInstance?: boolean;
@@ -32,6 +46,11 @@ interface IndicatorPickerProps {
    * state lives with the caller. The row shows only when both are given (not the Technicals tab). */
   volumeOn?: boolean;
   onVolumeChange?: (on: boolean) => void;
+  /** The legend's eye/gear/x land here (chart page only). */
+  ref?: Ref<IndicatorPickerHandle>;
+  /** The settings modal's title (the legend title) and Style rows for one instance id. */
+  titleFor?: (entry: IndicatorConfigEntry) => string;
+  outputsFor?: (id: string) => SettingsOutput[];
 }
 
 function hasInstance(
@@ -39,10 +58,11 @@ function hasInstance(
   name: string,
   params: Record<string, unknown>,
   multiInstance: boolean,
+  source: string = DEFAULT_SOURCE,
 ): boolean {
-  return entries.some(
-    (e) => e.name === name && (!multiInstance || JSON.stringify(e.params ?? {}) === JSON.stringify(params)),
-  );
+  // Same instance = same id, the series key both would draw under (key order never matters).
+  const id = indicatorId(name, params, source);
+  return entries.some((e) => e.name === name && (!multiInstance || entryId(e) === id));
 }
 
 function defaultParamsFor(catalogEntry: IndicatorCatalogEntry): Record<string, unknown> {
@@ -68,14 +88,52 @@ export default function IndicatorPicker({
   onEntriesChange,
   dialogOpen = false,
   onDialogClose,
+  showEntryList = true,
   multiInstance = false,
   volumeOn,
   onVolumeChange,
+  ref,
+  titleFor,
+  outputsFor,
 }: IndicatorPickerProps) {
   const [catalog, setCatalog] = useState<Record<string, IndicatorCatalogEntry>>({});
   const [entries, setEntries] = useState<IndicatorConfigEntry[]>([]);
+  // The latest list, updated the moment it changes (not on the next render): the legend's handlers
+  // are called back to back, and each must build on the previous one's result, not a stale render.
+  const entriesRef = useRef<IndicatorConfigEntry[]>([]);
+  function applyEntries(next: IndicatorConfigEntry[]): void {
+    entriesRef.current = next;
+    setEntries(next);
+  }
+  // Each entry object's identity, stable across optimistic edits and rollbacks: a patched copy
+  // inherits its original's (`patched`), and a rollback restores the very objects it replaced.
+  const identities = useRef(new WeakMap<IndicatorConfigEntry, number>());
+  const lastIdentity = useRef(0);
+  function identityOf(entry: IndicatorConfigEntry): number {
+    let identity = identities.current.get(entry);
+    if (identity === undefined) {
+      identity = ++lastIdentity.current;
+      identities.current.set(entry, identity);
+    }
+    return identity;
+  }
+  function patched(entry: IndicatorConfigEntry, patch: Partial<IndicatorConfigEntry>): IndicatorConfigEntry {
+    const next = { ...entry, ...patch };
+    identities.current.set(next, identityOf(entry));
+    return next;
+  }
+  const indexOfIdentity = (identity: number): number =>
+    entriesRef.current.findIndex((e) => identityOf(e) === identity);
   const [selectedName, setSelectedName] = useState("");
   const [error, setError] = useState<string | null>(null);
+  // The entry the settings modal edits, by identity, not by id or position: an Apply changes the
+  // entry's id (params, source) the moment it is applied optimistically, and a failed save's
+  // rollback can shift positions (a remove put back). The modal stays mounted -- with its drafts --
+  // until the save lands or fails. `outputs` is the Style rows as drawn when it opened: the
+  // optimistic id has no series yet. `open` remounts it per opening.
+  const [settings, setSettings] = useState<{ identity: number; open: number; outputs: SettingsOutput[] } | null>(
+    null,
+  );
   // Guards the initial-load GET below against clobbering a newer, already-persisted local
   // change: if the user adds/removes/applies an indicator before that GET resolves, its
   // response is a stale snapshot -- applying it would silently revert the visible picker
@@ -101,10 +159,11 @@ export default function IndicatorPicker({
   useEffect(() => {
     let cancelled = false;
     hasLocalChangeRef.current = false;
+    setSettings(null); // another coin's list
     fetchConfig()
       .then((result) => {
         if (cancelled || hasLocalChangeRef.current) return;
-        setEntries(result);
+        applyEntries(result);
         onEntriesChange(result);
       })
       .catch((err: unknown) => console.error("IndicatorPicker: failed to load config", err));
@@ -116,24 +175,28 @@ export default function IndicatorPicker({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [reloadKey]);
 
-  function persist(next: IndicatorConfigEntry[]): void {
+  // Resolves to null once saved, or to the save's error message after the rollback.
+  function persist(next: IndicatorConfigEntry[]): Promise<string | null> {
     // Applied optimistically (before the PUT resolves) so a rapid second Add/Remove/Apply
     // builds its own `next` from this call's result, not a stale pre-request snapshot --
     // without this, two overlapping persist() calls each compute `next` from the same old
     // `entries`, and whichever PUT response lands last silently discards the other's
     // change. Rolled back to `previous` on failure.
-    const previous = entries;
-    setEntries(next);
+    const previous = entriesRef.current;
+    applyEntries(next);
     setError(null);
-    saveConfig(next)
+    return saveConfig(next)
       .then(() => {
         hasLocalChangeRef.current = true;
         onEntriesChange(next);
+        return null;
       })
       .catch((err: unknown) => {
         console.error("IndicatorPicker: failed to save config", err);
-        setEntries(previous);
-        setError(err instanceof Error ? err.message : String(err));
+        applyEntries(previous);
+        const message = err instanceof Error ? err.message : String(err);
+        setError(message);
+        return message;
       });
   }
 
@@ -141,8 +204,9 @@ export default function IndicatorPicker({
     const catalogEntry = catalog[name];
     if (!catalogEntry) return;
     const params = defaultParamsFor(catalogEntry);
-    if (hasInstance(entries, name, params, multiInstance)) return; // already added
-    persist([...entries, { name, params, category: catalogEntry.category }]);
+    const current = entriesRef.current;
+    if (hasInstance(current, name, params, multiInstance)) return; // already added
+    void persist([...current, { name, params, category: catalogEntry.category }]);
   }
 
   function handleAdd(): void {
@@ -150,17 +214,69 @@ export default function IndicatorPicker({
   }
 
   function handleRemove(index: number): void {
-    persist(entries.filter((_, i) => i !== index));
+    void persist(entriesRef.current.filter((_, i) => i !== index));
+  }
+
+  // Merges `patch` into one entry. Resolves to the refusal message (a duplicate instance) or the
+  // save's error, or to null once the change is persisted.
+  function handleApply(index: number, patch: Partial<SettingsPatch>): Promise<string | null> {
+    const current = entriesRef.current;
+    const entry = current[index];
+    const others = current.filter((_, i) => i !== index);
+    if (
+      hasInstance(
+        others,
+        entry.name,
+        patch.params ?? entry.params ?? {},
+        multiInstance,
+        patch.source ?? entry.source ?? DEFAULT_SOURCE,
+      )
+    ) {
+      // Two identical instances would share one series key and draw on top of each other.
+      const message = multiInstance
+        ? `${entry.name} with those params and source is already added`
+        : `${entry.name} is already added`;
+      setError(message);
+      return Promise.resolve(message);
+    }
+    return persist(current.map((e, i) => (i === index ? patched(e, patch) : e)));
   }
 
   function handleApplyParams(index: number, params: Record<string, unknown>): void {
-    const others = entries.filter((_, i) => i !== index);
-    if (hasInstance(others, entries[index].name, params, multiInstance)) {
-      // Two identical instances would share one series key and draw on top of each other.
-      setError(`${entries[index].name} with those params is already added`);
-      return;
-    }
-    persist(entries.map((e, i) => (i === index ? { ...e, params } : e)));
+    void handleApply(index, { params });
+  }
+
+  const indexOfId = (id: string): number => entriesRef.current.findIndex((e) => entryId(e) === id);
+  useImperativeHandle(ref, () => ({
+    toggleHidden: (id) => {
+      const index = indexOfId(id);
+      if (index !== -1) {
+        void persist(entriesRef.current.map((e, i) => (i === index ? patched(e, { hidden: !e.hidden }) : e)));
+      }
+    },
+    remove: (id) => {
+      const index = indexOfId(id);
+      if (index !== -1) handleRemove(index);
+    },
+    openSettings: (id) => {
+      const index = indexOfId(id);
+      if (index === -1) return;
+      const identity = identityOf(entriesRef.current[index]);
+      const outputs = outputsFor?.(id) ?? [];
+      setSettings((s) => ({ identity, open: (s?.open ?? 0) + 1, outputs }));
+    },
+  }));
+
+  // -1 once its entry is gone (removed, or a rolled-back add): the modal closes.
+  const settingsIndex = settings === null ? -1 : entries.findIndex((e) => identityOf(e) === settings.identity);
+  // Resolved at call time, against the latest list, never a render's position.
+  function applySettings(identity: number, patch: Partial<SettingsPatch>): Promise<string | null> {
+    const index = indexOfIdentity(identity);
+    return index === -1 ? Promise.resolve("This indicator was removed") : handleApply(index, patch);
+  }
+  function removeSettings(identity: number): void {
+    const index = indexOfIdentity(identity);
+    if (index !== -1) handleRemove(index);
   }
 
   return (
@@ -179,32 +295,52 @@ export default function IndicatorPicker({
           onVolumeChange={onVolumeChange}
         />
       )}
-      <h3>Indicators</h3>
       {error && <p style={{ color: "var(--color-danger)" }}>{error}</p>}
-      <div>
-        <select value={selectedName} onChange={(e) => setSelectedName(e.target.value)}>
-          {Object.entries(catalog).map(([name, entry]) => (
-            <option key={name} value={name}>
-              {name} ({entry.category})
-            </option>
-          ))}
-        </select>
-        <button type="button" onClick={handleAdd} disabled={!selectedName || disabled}>
-          Add
-        </button>
-      </div>
-      <ul>
-        {entries.map((entry, index) => (
-          <IndicatorEntryRow
-            key={`${entry.name}:${JSON.stringify(entry.params)}`}
-            entry={entry}
-            choices={catalog[entry.name]?.choices ?? {}}
-            disabled={disabled}
-            onRemove={() => handleRemove(index)}
-            onApplyParams={(params) => handleApplyParams(index, params)}
-          />
-        ))}
-      </ul>
+      {settings !== null && settingsIndex !== -1 && (
+        <IndicatorSettingsDialog
+          key={settings.open}
+          title={titleFor ? titleFor(entries[settingsIndex]) : entries[settingsIndex].name}
+          entry={entries[settingsIndex]}
+          catalogEntry={catalog[entries[settingsIndex].name]}
+          outputs={settings.outputs}
+          disabled={disabled}
+          onApply={(patch) => applySettings(settings.identity, patch)}
+          onRemove={() => removeSettings(settings.identity)}
+          onClose={() => setSettings(null)}
+        />
+      )}
+      {/* The chart page adds through the dialog above and edits/hides/removes from the legend
+          (Story 32.3, DESIGN-03: one add path). The Technicals tab has neither, so its list,
+          select and Add stay -- its only editing surface. */}
+      {showEntryList && (
+        <>
+          <h3>Indicators</h3>
+          <div>
+            <select value={selectedName} onChange={(e) => setSelectedName(e.target.value)}>
+              {Object.entries(catalog).map(([name, entry]) => (
+                <option key={name} value={name}>
+                  {name} ({entry.category})
+                </option>
+              ))}
+            </select>
+            <button type="button" onClick={handleAdd} disabled={!selectedName || disabled}>
+              Add
+            </button>
+          </div>
+          <ul>
+            {entries.map((entry, index) => (
+              <IndicatorEntryRow
+                key={`${entry.name}:${JSON.stringify(entry.params)}`}
+                entry={entry}
+                choices={catalog[entry.name]?.choices ?? {}}
+                disabled={disabled}
+                onRemove={() => handleRemove(index)}
+                onApplyParams={(params) => handleApplyParams(index, params)}
+              />
+            ))}
+          </ul>
+        </>
+      )}
     </div>
   );
 }
@@ -226,59 +362,26 @@ function IndicatorEntryRow({
   // Lazy-initialized from this entry's own persisted params; not re-synced from props on
   // every render -- this row is the sole writer of its own entry's params (via
   // onApplyParams -> persist -> onEntriesChange), so `entry.params` never changes out
-  // from under an already-mounted row for reasons other than this row's own edit, which
-  // already agrees with `draft` (avoids an effect-driven setState re-render loop).
+  // from under an already-mounted row for reasons other than this row's own edit.
   const params = entry.params ?? {};
-  const [raw, setRaw] = useState<Record<string, string>>(() =>
-    Object.fromEntries(Object.entries(params).map(([k, v]) => [k, String(v)])),
-  );
-  // Invalid text is shown, not silently reverted -- coerceParamValue alone would keep the
-  // prior value and leave the field looking like it ignored the keystroke.
-  const invalidKeys = Object.keys(params).filter(
-    (k) => !isValidParamText(params[k], raw[k] ?? "", choices[k]),
-  );
-  const onEdit = (key: string, value: string) => setRaw((prev) => ({ ...prev, [key]: value }));
+  const [raw, setRaw] = useState(() => rawFromParams(params));
+  const invalidKeys = invalidParamKeys(params, raw, choices);
 
   return (
     <li>
       <span>{entry.name}</span>
-      {Object.keys(params).map((key) => (
-        <label key={key}>
-          {key}:
-          {choices[key] ? (
-            <select
-              value={raw[key] ?? ""}
-              aria-invalid={invalidKeys.includes(key)}
-              onChange={(e) => onEdit(key, e.target.value)}
-            >
-              {/* A saved value the catalog no longer offers stays visible (and invalid), never
-                  silently replaced by the first option. */}
-              {!choices[key].includes(raw[key] ?? "") && <option value={raw[key] ?? ""}>{raw[key]}</option>}
-              {choices[key].map((choice) => (
-                <option key={choice} value={choice}>
-                  {choice}
-                </option>
-              ))}
-            </select>
-          ) : (
-            <input
-              value={raw[key] ?? ""}
-              aria-invalid={invalidKeys.includes(key)}
-              onChange={(e) => onEdit(key, e.target.value)}
-            />
-          )}
-        </label>
-      ))}
-      {invalidKeys.length > 0 && <span role="alert">Invalid value for {invalidKeys.join(", ")}</span>}
+      <ParamInputs
+        params={params}
+        raw={raw}
+        choices={choices}
+        invalidKeys={invalidKeys}
+        onEdit={(key, value) => setRaw((prev) => ({ ...prev, [key]: value }))}
+      />
       {Object.keys(params).length > 0 && (
         <button
           type="button"
           disabled={disabled || invalidKeys.length > 0}
-          onClick={() =>
-            onApplyParams(
-              Object.fromEntries(Object.keys(params).map((k) => [k, coerceParamValue(params[k], raw[k] ?? "")])),
-            )
-          }
+          onClick={() => onApplyParams(coerceParams(params, raw))}
         >
           Apply
         </button>

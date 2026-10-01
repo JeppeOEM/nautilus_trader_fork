@@ -16,7 +16,7 @@ vi.mock("../api/client", () => ({
   saveCoinIndicatorConfig: saveConfigMock,
   // IndicatorPicker (rendered by ChartPage) fetches the catalog on mount.
   fetchIndicatorCatalog: vi.fn().mockResolvedValue({
-    SimpleMovingAverage: { params: {}, panel: "overlay", category: "native" },
+    SimpleMovingAverage: { params: {}, panel: "overlay", category: "native", source_selectable: true },
     RelativeStrengthIndex: { params: {}, panel: "oscillator", category: "native" },
     CancelPressure: { params: {}, panel: "histogram", category: "custom" },
     CandlePattern: {
@@ -82,11 +82,23 @@ vi.mock("../hooks/useLiveCandle", () => ({
 // loop the page into React's too-many-re-renders guard.
 // The first render sees the real hook's initial empty state; later renders see `values`,
 // so ChartPage's identity-change detection fires exactly like a real data arrival.
-const picker = vi.hoisted(() => ({ values: {} as Record<string, never[]>, calls: 0 }));
+const picker = vi.hoisted(() => ({
+  values: {} as Record<string, never[]>,
+  calls: 0,
+  // The page's `onErrors` callback, so a test can report a per-entry replay failure.
+  onErrors: undefined as ((errors: Record<string, string>) => void) | undefined,
+}));
 vi.mock("../hooks/usePickerIndicatorValues", () => {
   const initial = {};
-  return { usePickerIndicatorValues: (_i: string, _c: unknown, _e: unknown, bar: number) => {
+  return { usePickerIndicatorValues: (
+    _i: string,
+    _c: unknown,
+    _e: unknown,
+    bar: number,
+    onErrors?: (errors: Record<string, string>) => void,
+  ) => {
     hooks.pickerBar.push(bar);
+    picker.onErrors = onErrors;
     return picker.calls++ === 0 ? initial : picker.values;
   } };
 });
@@ -100,7 +112,23 @@ vi.mock("react-router", async (importOriginal) => {
 // the latest props object ChartPage handed it -- every claim below is about what
 // ChartPage FEEDS the chart component, never about LightweightChart's internals.
 interface ChartStubProps {
-  panes?: { id: string; kind: string; data: { time: number }[]; placement?: string; group?: string; groupLabel?: string; outputLabel?: string }[];
+  panes?: {
+    id: string;
+    kind: string;
+    data: { time: number }[];
+    placement?: string;
+    group?: string;
+    groupLabel?: string;
+    outputLabel?: string;
+    hidden?: boolean;
+    color?: string;
+    lineWidth?: number;
+    lineStyle?: string;
+    upColor?: string;
+    downColor?: string;
+    configurable?: boolean;
+  }[];
+  onLegendAction?: (action: "hide" | "settings" | "remove", group: string) => void;
   priceLines?: PriceLineSpec[];
   onPriceClick?: (price: number) => void;
   onPriceLineDrag?: (id: string, price: number) => void;
@@ -302,11 +330,13 @@ describe("ChartPage default layout and per-coin persistence", () => {
     expect(byId["SimpleMovingAverage_period=20.value"]).toMatchObject({ kind: "Line", placement: "overlay" });
     expect(byId["RelativeStrengthIndex_period=14.value"]).toMatchObject({ kind: "Line", placement: "pane" });
     expect(byId["CancelPressure_window=200.value"]).toMatchObject({ kind: "Histogram", placement: "pane" });
-    // legend info: grouped by indicator, titled with its name, tooltip = output attr
+    // legend info: grouped by instance, titled with its name, tooltip = output attr. No saved entry
+    // owns these series, so their rows are a plain readout (no buttons acting on nothing).
     expect(byId["RelativeStrengthIndex_period=14.value"]).toMatchObject({
-      group: "RelativeStrengthIndex",
+      group: "RelativeStrengthIndex_period=14",
       groupLabel: "RelativeStrengthIndex",
       outputLabel: "value",
+      actionable: false,
     });
     expect(lastChartProps.current?.panes?.find((p) => p.id === "volume")).toMatchObject({ groupLabel: "Volume" });
   });
@@ -318,24 +348,36 @@ describe("ChartPage default layout and per-coin persistence", () => {
     render(page());
     await act(async () => {}); // catalog + saved config
 
-    const select = screen.getByLabelText<HTMLSelectElement>(/pattern/);
+    // The below-chart list is gone (Story 32.3): the legend's gear opens the same editor as a modal.
+    const id = "CandlePattern_pattern=ENGULFING,trend_bars=3";
+    expect(lastChartProps.current!.panes!.find((p) => p.id === `${id}.value`)).toMatchObject({
+      group: id,
+      actionable: true,
+    });
+    act(() => lastChartProps.current!.onLegendAction!("settings", id));
+    const dialog = screen.getByRole("dialog", { name: "CandlePattern (ENGULFING, 3)" });
+    const select = within(dialog).getByLabelText<HTMLSelectElement>(/pattern/);
     expect(select.tagName).toBe("SELECT");
     expect(Array.from(select.options).map((o) => o.value)).toEqual(["DOJI", "HAMMER", "ENGULFING"]);
     expect(select.value).toBe("ENGULFING");
-    expect(screen.getByLabelText(/trend_bars/).tagName).toBe("INPUT"); // no choices: a text field
+    expect(within(dialog).getByLabelText(/trend_bars/).tagName).toBe("INPUT"); // no choices: a text field
 
     fireEvent.change(select, { target: { value: "HAMMER" } });
-    fireEvent.click(screen.getByRole("button", { name: "Apply" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
     await act(async () => {});
 
     expect(saveConfigMock).toHaveBeenCalledWith("BTC-USD-PERP.DYDX", [
-      { ...entry, params: { pattern: "HAMMER", trend_bars: 3 } },
+      expect.objectContaining({ ...entry, params: { pattern: "HAMMER", trend_bars: 3 } }),
     ]);
     const byId = Object.fromEntries((lastChartProps.current?.panes ?? []).map((p) => [p.id, p]));
     expect(byId["CandlePattern_pattern=ENGULFING,trend_bars=3.value"]).toMatchObject({
       kind: "Histogram",
       placement: "pane",
-      group: "CandlePattern",
+      // After Apply the values mock still keys the old params, so no entry owns the series any
+      // more: it keeps its own instance group, with no buttons (the real hook refetches under the
+      // new key).
+      group: id,
+      actionable: false,
     });
   });
 
@@ -511,6 +553,17 @@ describe("ChartPage volume toggle (Story 32.2)", () => {
 
     expect(paneIds()).toEqual(["volume", "RelativeStrengthIndex_period=14.value"]);
     expect(localStorage.getItem(VOLUME_KEY)).toBe("on");
+  });
+
+  it("shows volume again after hide (eye) then off then on in the Indicators dialog", async () => {
+    const dialog = await openDialog();
+    act(() => lastChartProps.current!.onLegendAction!("hide", "volume"));
+    expect(lastChartProps.current!.panes!.find((p) => p.id === "volume")!.hidden).toBe(true);
+
+    fireEvent.click(within(dialog).getByRole("checkbox", { name: "Volume" })); // off
+    fireEvent.click(within(dialog).getByRole("checkbox", { name: "Volume" })); // on
+
+    expect(lastChartProps.current!.panes!.find((p) => p.id === "volume")!.hidden).toBeFalsy();
   });
 
   it("keeps the choice across a timeframe change", async () => {
@@ -1217,5 +1270,382 @@ describe("cross-story: drawing tools during replay (Story 18.4 AC #5, verified e
 
     expect(screen.getByRole("group", { name: "Replay controls" })).toBeInTheDocument();
     expect(lastChartProps.current!.drawings).toHaveLength(0);
+  });
+});
+
+// Story 32.3: the legend is the indicator's control surface. LightweightChart is a stub here, so
+// the legend's eye / gear / x arrive as `onLegendAction` calls, exactly as the real one reports.
+describe("ChartPage legend controls (Story 32.3)", () => {
+  const SMA_ID = "SimpleMovingAverage_period=20";
+  const SMA = { name: "SimpleMovingAverage", params: { period: 20 }, category: "native" };
+  const RSI = { name: "RelativeStrengthIndex", params: { period: 14 }, category: "native" };
+  const paneOf = (id: string) => lastChartProps.current!.panes!.find((p) => p.id === id)!;
+  const legend = (action: "hide" | "settings" | "remove", group: string) =>
+    act(() => lastChartProps.current!.onLegendAction!(action, group));
+
+  async function mountWith(entries: object[], values: Record<string, never[]>): Promise<void> {
+    vi.mocked(fetchCoinIndicatorConfig).mockResolvedValueOnce(entries as never);
+    picker.values = values;
+    render(page());
+    await act(async () => {}); // catalog + saved config
+  }
+
+  it("the Cursor button says what it does, and is active again after a Trend tool completes", () => {
+    render(page());
+    const cursor = screen.getByRole("button", { name: "Cursor tool" });
+    expect(cursor).toHaveAttribute("title", "Select / edit drawings (Esc)");
+
+    fireEvent.click(screen.getByRole("button", { name: "Trendline tool" }));
+    expect(cursor).toHaveAttribute("aria-pressed", "false");
+    act(() => lastChartProps.current!.onPointClick!({ time: 1, price: 1 }));
+    act(() => lastChartProps.current!.onPointClick!({ time: 2, price: 2 }));
+
+    expect(lastChartProps.current!.drawings).toHaveLength(1);
+    expect(cursor).toHaveAttribute("aria-pressed", "true");
+    expect(lastChartProps.current).toMatchObject({ drawEditable: true });
+  });
+
+  it("has no indicator list, select or Add below the chart, and keeps the div#indicators anchor", async () => {
+    await mountWith([SMA], { [`${SMA_ID}.value`]: [] });
+
+    expect(screen.queryByRole("button", { name: "Add" })).toBeNull();
+    expect(screen.queryByRole("heading", { name: "Indicators" })).toBeNull();
+    expect(document.querySelector("div#indicators")).not.toBeNull();
+    expect(document.querySelector("div#indicators")?.contains(screen.getByRole("heading", { name: "Chart overlays" }))).toBe(true);
+  });
+
+  it("titles the legend row per instance: RSI(14) and RSI(21) are two rows, each with its own params", async () => {
+    const rsi21 = { ...RSI, params: { period: 21 } };
+    await mountWith([RSI, rsi21], {
+      "RelativeStrengthIndex_period=14.value": [],
+      "RelativeStrengthIndex_period=21.value": [],
+    });
+
+    const rows = lastChartProps.current!.panes!.filter((p) => p.id !== "volume").map((p) => [p.group, p.groupLabel]);
+    expect(rows).toEqual([
+      ["RelativeStrengthIndex_period=14", "RelativeStrengthIndex (14)"],
+      ["RelativeStrengthIndex_period=21", "RelativeStrengthIndex (21)"],
+    ]);
+  });
+
+  it("hides an overlay in place: persists hidden: true, flags the spec, and shows it again with hidden: false", async () => {
+    await mountWith([SMA], { [`${SMA_ID}.value`]: [] });
+    expect(paneOf(`${SMA_ID}.value`).hidden).toBe(false);
+
+    legend("hide", SMA_ID);
+    await act(async () => {});
+    expect(saveConfigMock).toHaveBeenLastCalledWith("BTC-USD-PERP.DYDX", [{ ...SMA, hidden: true }]);
+    expect(paneOf(`${SMA_ID}.value`)).toMatchObject({ hidden: true, placement: "overlay" });
+
+    legend("hide", SMA_ID);
+    await act(async () => {});
+    expect(saveConfigMock).toHaveBeenLastCalledWith("BTC-USD-PERP.DYDX", [{ ...SMA, hidden: false }]);
+    expect(paneOf(`${SMA_ID}.value`).hidden).toBe(false);
+  });
+
+  it("hides a pane indicator by flagging its spec (the chart collapses the pane), data kept in the spec", async () => {
+    await mountWith([RSI], { "RelativeStrengthIndex_period=14.value": [] });
+
+    legend("hide", "RelativeStrengthIndex_period=14");
+    await act(async () => {});
+
+    expect(paneOf("RelativeStrengthIndex_period=14.value")).toMatchObject({ hidden: true, placement: "pane" });
+  });
+
+  it("two legend toggles in the same tick both land: the second builds on the first", async () => {
+    await mountWith([SMA, RSI], { [`${SMA_ID}.value`]: [] });
+
+    act(() => {
+      lastChartProps.current!.onLegendAction!("hide", SMA_ID);
+      lastChartProps.current!.onLegendAction!("hide", "RelativeStrengthIndex_period=14");
+    });
+    await act(async () => {});
+
+    expect(saveConfigMock).toHaveBeenLastCalledWith("BTC-USD-PERP.DYDX", [
+      { ...SMA, hidden: true },
+      { ...RSI, hidden: true },
+    ]);
+  });
+
+  it("closes the settings modal on a backdrop click only when the press began on the backdrop", async () => {
+    await mountWith([SMA], { [`${SMA_ID}.value`]: [] });
+    legend("settings", SMA_ID);
+    const dialog = screen.getByRole("dialog", { name: "SimpleMovingAverage (20)" });
+
+    // A text-selection drag: pressed inside the content, released on the backdrop.
+    fireEvent.mouseDown(within(dialog).getByRole("heading", { name: "SimpleMovingAverage (20)" }));
+    fireEvent.click(dialog);
+    expect(screen.queryByRole("dialog", { name: "SimpleMovingAverage (20)" })).not.toBeNull();
+
+    fireEvent.mouseDown(dialog);
+    fireEvent.click(dialog);
+    expect(screen.queryByRole("dialog", { name: "SimpleMovingAverage (20)" })).toBeNull();
+  });
+
+  it("removes an indicator from its legend x through the same persist path as an add", async () => {
+    await mountWith([SMA, RSI], { [`${SMA_ID}.value`]: [] });
+
+    legend("remove", SMA_ID);
+    await act(async () => {});
+
+    expect(saveConfigMock).toHaveBeenLastCalledWith("BTC-USD-PERP.DYDX", [RSI]);
+  });
+
+  it("gives Volume an eye (hide, no save) and an x (the Indicators toggle) but no settings", () => {
+    render(page());
+    expect(paneOf("volume")).toMatchObject({ configurable: false, hidden: false });
+
+    legend("hide", "volume");
+    expect(paneOf("volume").hidden).toBe(true);
+    legend("hide", "volume");
+    expect(paneOf("volume").hidden).toBe(false);
+
+    legend("settings", "volume"); // there is no gear: nothing opens
+    expect(screen.queryByRole("dialog", { name: /Volume/ })).toBeNull();
+
+    legend("remove", "volume");
+    expect(lastChartProps.current!.panes!.map((p) => p.id)).toEqual([]);
+    expect(localStorage.getItem("chart-volume:BTC-USD-PERP.DYDX")).toBe("off");
+    expect(saveConfigMock).not.toHaveBeenCalled();
+  });
+
+  it("opens the settings modal titled with the legend title: period input, Source select (close), one style output", async () => {
+    await mountWith([SMA], { [`${SMA_ID}.value`]: [] });
+
+    legend("settings", SMA_ID);
+
+    const dialog = screen.getByRole("dialog", { name: "SimpleMovingAverage (20)" });
+    expect(within(dialog).getByLabelText(/period/)).toHaveValue("20");
+    const source = within(dialog).getByLabelText<HTMLSelectElement>("Source:");
+    expect(source.value).toBe("close");
+    expect(Array.from(source.options).map((o) => o.value)).toEqual(["close", "open", "high", "low", "hl2", "hlc3", "ohlc4"]);
+    expect(within(dialog).getAllByRole("group")).toHaveLength(1); // one output: "value"
+    expect(within(dialog).getByRole("group", { name: "value" })).toBeInTheDocument();
+    // The library's default width, which is what the chart draws while the entry stores none.
+    expect(within(dialog).getByLabelText("value width")).toHaveValue("3");
+    expect(within(dialog).getByLabelText("value line style")).toHaveValue("solid");
+  });
+
+  it("offers no Source for an indicator the catalog does not mark source_selectable", async () => {
+    const pressure = { name: "CancelPressure", params: {}, category: "custom" };
+    await mountWith([pressure], { "CancelPressure.value": [] });
+
+    legend("settings", "CancelPressure");
+
+    const dialog = screen.getByRole("dialog", { name: "CancelPressure" });
+    expect(within(dialog).queryByLabelText("Source:")).toBeNull();
+    expect(within(dialog).getByRole("group", { name: "value" })).toBeInTheDocument();
+  });
+
+  it("Source -> hl2 persists a new instance id (...:hl2) next to SMA(20) on close: two rows", async () => {
+    await mountWith([SMA], { [`${SMA_ID}.value`]: [] });
+    legend("settings", SMA_ID);
+    const dialog = screen.getByRole("dialog", { name: "SimpleMovingAverage (20)" });
+
+    fireEvent.change(within(dialog).getByLabelText("Source:"), { target: { value: "hl2" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+    await act(async () => {});
+
+    expect(saveConfigMock).toHaveBeenLastCalledWith("BTC-USD-PERP.DYDX", [
+      expect.objectContaining({ ...SMA, source: "hl2" }),
+    ]);
+    // The same params on close can now be added again: it is a different instance.
+    picker.values = { [`${SMA_ID}:hl2.value`]: [], [`${SMA_ID}.value`]: [] };
+    legend("settings", `${SMA_ID}:hl2`);
+    expect(screen.getByRole("dialog", { name: "SimpleMovingAverage (20, hl2)" })).toBeInTheDocument();
+  });
+
+  it("refuses a duplicate (same name, params and source), shows the message and keeps the modal open", async () => {
+    const sma50 = { ...SMA, params: { period: 50 } };
+    await mountWith([SMA, sma50], { [`${SMA_ID}.value`]: [] });
+    legend("settings", "SimpleMovingAverage_period=50");
+    const dialog = screen.getByRole("dialog", { name: "SimpleMovingAverage (50)" });
+    saveConfigMock.mockClear();
+
+    fireEvent.change(within(dialog).getByLabelText(/period/), { target: { value: "20" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+    await act(async () => {});
+
+    expect(saveConfigMock).not.toHaveBeenCalled();
+    expect(within(dialog).getByRole("alert")).toHaveTextContent("SimpleMovingAverage with those params and source is already added");
+  });
+
+  it("keeps the modal open with the save's error when the PUT fails, and closes it once a save lands", async () => {
+    await mountWith([SMA], { [`${SMA_ID}.value`]: [] });
+    legend("settings", SMA_ID);
+    const dialog = screen.getByRole("dialog", { name: "SimpleMovingAverage (20)" });
+    saveConfigMock.mockRejectedValueOnce(new Error("invalid source: nope"));
+
+    fireEvent.change(within(dialog).getByLabelText(/period/), { target: { value: "30" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+    await act(async () => {});
+
+    expect(screen.getByRole("dialog", { name: "SimpleMovingAverage (20)" })).toBeInTheDocument();
+    expect(within(dialog).getByRole("alert")).toHaveTextContent("invalid source: nope");
+    expect(within(dialog).getByLabelText(/period/)).toHaveValue("30"); // the draft survives
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+    await act(async () => {});
+    expect(screen.queryByRole("dialog", { name: "SimpleMovingAverage (20)" })).toBeNull();
+  });
+
+  it("keeps the modal on its own entry when a failed remove's rollback shifts the positions", async () => {
+    const sma50 = { ...SMA, params: { period: 50 } };
+    await mountWith([SMA, sma50], { [`${SMA_ID}.value`]: [], "SimpleMovingAverage_period=50.value": [] });
+    let failRemove: (err: Error) => void = () => {};
+    saveConfigMock.mockImplementationOnce(() => new Promise((_, reject) => (failRemove = reject)));
+
+    legend("remove", SMA_ID); // optimistic: SMA(50) moves to position 0
+    legend("settings", "SimpleMovingAverage_period=50");
+    await act(async () => failRemove(new Error("disk full"))); // SMA(20) is put back at position 0
+
+    const dialog = screen.getByRole("dialog", { name: "SimpleMovingAverage (50)" });
+    expect(within(dialog).getByLabelText(/period/)).toHaveValue("50");
+    fireEvent.change(within(dialog).getByLabelText(/period/), { target: { value: "60" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+    await act(async () => {});
+    expect(saveConfigMock).toHaveBeenLastCalledWith("BTC-USD-PERP.DYDX", [
+      SMA,
+      expect.objectContaining({ ...sma50, params: { period: 60 } }),
+    ]);
+  });
+
+  it("disables Remove while an Apply is in flight", async () => {
+    await mountWith([SMA], { [`${SMA_ID}.value`]: [] });
+    legend("settings", SMA_ID);
+    const dialog = screen.getByRole("dialog", { name: "SimpleMovingAverage (20)" });
+    let landSave: (value: unknown) => void = () => {};
+    saveConfigMock.mockImplementationOnce(() => new Promise((resolve) => (landSave = resolve)));
+
+    fireEvent.change(within(dialog).getByLabelText(/period/), { target: { value: "30" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+    expect(within(dialog).getByRole("button", { name: "Remove" })).toBeDisabled();
+
+    await act(async () => landSave({ ok: true }));
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("refuses a duplicate whose params differ only in key order: they would share one id", async () => {
+    const first = { ...SMA, params: { k: 2, period: 20 } };
+    const second = { ...SMA, params: { period: 30, k: 2 } };
+    await mountWith([first, second], { "SimpleMovingAverage_k=2,period=30.value": [] });
+    legend("settings", "SimpleMovingAverage_k=2,period=30");
+    const dialog = screen.getByRole("dialog", { name: "SimpleMovingAverage (30, 2)" });
+    saveConfigMock.mockClear();
+
+    fireEvent.change(within(dialog).getByLabelText(/period/), { target: { value: "20" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+    await act(async () => {});
+
+    expect(saveConfigMock).not.toHaveBeenCalled();
+    expect(within(dialog).getByRole("alert")).toHaveTextContent("already added");
+  });
+
+  it("seeds a histogram's up and down colours with the palette colour it is drawn in", async () => {
+    const pressure = { name: "CancelPressure", params: { window: 200 }, category: "custom" };
+    const id = "CancelPressure_window=200";
+    await mountWith([pressure], { [`${id}.value`]: [] });
+
+    legend("settings", id);
+
+    const dialog = screen.getByRole("dialog", { name: "CancelPressure (200)" });
+    const drawn = (paneOf(`${id}.value`).color ?? "").toLowerCase();
+    expect(within(dialog).getByLabelText<HTMLInputElement>("value up colour").value).toBe(drawn);
+    expect(within(dialog).getByLabelText<HTMLInputElement>("value down colour").value).toBe(drawn);
+  });
+
+  it("offers settings and remove on a failed instance's alert: it draws no series, so it has no legend row", async () => {
+    await mountWith([SMA], {});
+    act(() => picker.onErrors?.({ [SMA_ID]: "period must be positive" }));
+    saveConfigMock.mockClear();
+
+    fireEvent.click(screen.getByRole("button", { name: `Settings for ${SMA_ID}` }));
+    expect(screen.getByRole("dialog", { name: "SimpleMovingAverage (20)" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    fireEvent.click(screen.getByRole("button", { name: `Remove ${SMA_ID}` }));
+    await act(async () => {});
+    expect(saveConfigMock).toHaveBeenLastCalledWith("BTC-USD-PERP.DYDX", []);
+  });
+
+  it("disables Apply and flags the field for invalid parameter text", async () => {
+    await mountWith([SMA], { [`${SMA_ID}.value`]: [] });
+    legend("settings", SMA_ID);
+    const dialog = screen.getByRole("dialog", { name: "SimpleMovingAverage (20)" });
+
+    fireEvent.change(within(dialog).getByLabelText(/period/), { target: { value: "abc" } });
+
+    expect(within(dialog).getByRole("button", { name: "Apply" })).toBeDisabled();
+    expect(within(dialog).getByLabelText(/period/)).toHaveAttribute("aria-invalid", "true");
+    expect(within(dialog).getByRole("alert")).toHaveTextContent("Invalid value for period");
+  });
+
+  it("a style-only Apply persists style, changes no value-request field, and restyles the spec", async () => {
+    await mountWith([SMA], { [`${SMA_ID}.value`]: [] });
+    legend("settings", SMA_ID);
+    const dialog = screen.getByRole("dialog", { name: "SimpleMovingAverage (20)" });
+
+    fireEvent.change(within(dialog).getByLabelText("value width"), { target: { value: "3" } });
+    fireEvent.change(within(dialog).getByLabelText("value line style"), { target: { value: "dashed" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+    await act(async () => {});
+
+    expect(saveConfigMock).toHaveBeenLastCalledWith("BTC-USD-PERP.DYDX", [
+      expect.objectContaining({ ...SMA, source: "close", style: { value: { line_width: 3, line_style: "dashed" } } }),
+    ]);
+    expect(paneOf(`${SMA_ID}.value`)).toMatchObject({ lineWidth: 3, lineStyle: "dashed" });
+    expect(screen.queryByRole("dialog", { name: "SimpleMovingAverage (20)" })).toBeNull();
+  });
+
+  it("a stored colour wins over the palette slot, and a histogram output gets up/down colours", async () => {
+    const pattern = { name: "CandlePattern", params: { pattern: "DOJI", trend_bars: 3 }, category: "native", style: { value: { up_color: "#00ff00", down_color: "#ff0000" } } };
+    const sma = { ...SMA, style: { value: { color: "#123456" } } };
+    await mountWith([sma, pattern], { [`${SMA_ID}.value`]: [], "CandlePattern_pattern=DOJI,trend_bars=3.value": [] });
+
+    expect(paneOf(`${SMA_ID}.value`).color).toBe("#123456");
+    expect(paneOf("CandlePattern_pattern=DOJI,trend_bars=3.value")).toMatchObject({ upColor: "#00ff00", downColor: "#ff0000" });
+    legend("settings", "CandlePattern_pattern=DOJI,trend_bars=3");
+    const dialog = screen.getByRole("dialog", { name: /CandlePattern/ });
+    expect(within(dialog).getByLabelText("value up colour")).toHaveValue("#00ff00");
+    expect(within(dialog).getByLabelText("value down colour")).toHaveValue("#ff0000");
+  });
+
+  it("Cancel, Esc and a backdrop click close the modal with no save", async () => {
+    await mountWith([SMA], { [`${SMA_ID}.value`]: [] });
+    const open = () => {
+      legend("settings", SMA_ID);
+      return screen.getByRole("dialog", { name: "SimpleMovingAverage (20)" });
+    };
+    saveConfigMock.mockClear();
+
+    fireEvent.click(within(open()).getByRole("button", { name: "Cancel" }));
+    expect(screen.queryByRole("dialog", { name: "SimpleMovingAverage (20)" })).toBeNull();
+
+    fireEvent(open(), new Event("close")); // Esc: the native dialog's close event
+    expect(screen.queryByRole("dialog", { name: "SimpleMovingAverage (20)" })).toBeNull();
+
+    const backdrop = open();
+    fireEvent.mouseDown(backdrop); // press and release both on the <dialog> itself: the backdrop
+    fireEvent.click(backdrop);
+    expect(screen.queryByRole("dialog", { name: "SimpleMovingAverage (20)" })).toBeNull();
+
+    expect(saveConfigMock).not.toHaveBeenCalled();
+  });
+
+  it("Remove in the modal removes through the same persist path", async () => {
+    await mountWith([SMA, RSI], { [`${SMA_ID}.value`]: [] });
+    legend("settings", SMA_ID);
+
+    fireEvent.click(within(screen.getByRole("dialog", { name: "SimpleMovingAverage (20)" })).getByRole("button", { name: "Remove" }));
+    await act(async () => {});
+
+    expect(saveConfigMock).toHaveBeenLastCalledWith("BTC-USD-PERP.DYDX", [RSI]);
+    expect(screen.queryByRole("dialog", { name: "SimpleMovingAverage (20)" })).toBeNull();
+  });
+
+  it("loads a pre-story entry (no source/hidden/style) with the defaults", async () => {
+    await mountWith([SMA], { [`${SMA_ID}.value`]: [] });
+
+    expect(paneOf(`${SMA_ID}.value`)).toMatchObject({ hidden: false, lineWidth: undefined, lineStyle: undefined, group: SMA_ID });
   });
 });

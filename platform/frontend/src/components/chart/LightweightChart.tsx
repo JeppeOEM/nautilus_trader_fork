@@ -8,19 +8,21 @@ import {
   type IPriceLine,
   LineStyle,
   type ISeriesApi,
+  type LineWidth,
   type LineData,
   type MouseEventParams,
   type Time,
   type WhitespaceData,
 } from "lightweight-charts";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import type { ChartDatum, VolumeDatum } from "../../hooks/useCandles";
 import type { LiveBar } from "../../hooks/useLiveCandle";
 import type { IndicatorDatum } from "../../hooks/useIndicatorSeries";
 import type { SnapshotLinesData } from "../../hooks/useSnapshotSeries";
 import { type GapRun, MAX_GAP_ROWS_PER_GAP, findGapRuns, gapRunsBySlot } from "../../lib/gaps";
-import { type GapLookup, type LegendSeries, renderLegends } from "./legend";
+import { type GapLookup, type LegendAction, type LegendSeries, renderLegends } from "./legend";
+import { DEFAULT_LINE_STYLE, DEFAULT_LINE_WIDTH, type LineStyleName } from "../../lib/indicatorStyle";
 import { chartVar } from "./chartTheme";
 import { assignPaneColor, cssVar } from "./paneColors";
 import {
@@ -69,6 +71,22 @@ export interface IndicatorPaneSpec {
   groupLabel?: string;
   /** Legend tooltip for this series' value, e.g. "value" / "signal". */
   outputLabel?: string;
+  /** Story 32.3, the legend eye. An overlay's series is hidden in place (`visible: false`); a pane
+   * indicator's pane is collapsed -- removed from the chart, the page shrinking by its height --
+   * and re-added at its former position and height when shown. The spec (and its data) stays in
+   * this array either way, so showing refetches nothing. */
+  hidden?: boolean;
+  /** False for Volume: its legend row gets the eye and the x but no settings gear. */
+  configurable?: boolean;
+  /** False for a series no configured entry owns (stale values between an Apply and its refetch):
+   * its legend row is a plain readout, with no buttons that could act on nothing. Default true. */
+  actionable?: boolean;
+  /** Story 32.3 style, from the indicator entry; absent = the library default (3 px, solid). */
+  lineWidth?: number;
+  lineStyle?: LineStyleName;
+  /** A histogram output's colours for value >= 0 and < 0; absent = the one `color`. */
+  upColor?: string;
+  downColor?: string;
 }
 
 // Story 18.1: a tool-drawn horizontal price line (AC #2). `id` is the caller's stable
@@ -208,6 +226,9 @@ interface LightweightChartProps {
    * before the live socket's first message, or synchronously reset on instrument/bar-size
    * change) and is a no-op, not a clear of the last-drawn bar. */
   liveBar?: LiveBar | null;
+  /** Story 32.3: a legend eye / gear / x was pressed; `group` is the indicator instance id (the
+   * spec's `group`) or "volume". The page persists the change; this component only reports. */
+  onLegendAction?: (action: LegendAction, group: string) => void;
 }
 
 type AnySeriesApi = ISeriesApi<"Line", Time> | ISeriesApi<"Histogram", Time>;
@@ -226,6 +247,43 @@ interface PaneEntry {
   /** Story 32.1: the pane's one gap painter, held by exactly one entry of each non-overlay
    * pane (one per pane, so translucent fills never stack); null on every other entry. */
   gap: GapPrimitive | null;
+  /** `upColor|downColor` last painted into the histogram's per-point colours. */
+  lastUpDown: string;
+}
+
+// Story 32.3: the library's `LineStyle` for each persisted style name (Solid 0, Dotted 1, Dashed 2).
+const LINE_STYLE_OF: Record<LineStyleName, LineStyle> = {
+  solid: LineStyle.Solid,
+  dotted: LineStyle.Dotted,
+  dashed: LineStyle.Dashed,
+};
+
+/** What a line series is drawn with beyond its colour. Always both fields, the library default
+ * where the spec states none, so a width or style the entry no longer stores (cleared, or a failed
+ * save rolled back) goes back to the default instead of sticking. */
+function lineOptions(spec: IndicatorPaneSpec): { lineWidth?: LineWidth; lineStyle?: LineStyle } {
+  if (spec.kind !== "Line") return {};
+  // The width comes from a hand-editable file: clamp to the library's 1..4 integers, and ignore a
+  // style name that is not one of ours rather than hand the library `undefined`.
+  const width =
+    typeof spec.lineWidth === "number" && Number.isFinite(spec.lineWidth)
+      ? Math.min(4, Math.max(1, Math.round(spec.lineWidth)))
+      : DEFAULT_LINE_WIDTH;
+  const style = (spec.lineStyle && LINE_STYLE_OF[spec.lineStyle]) ?? LINE_STYLE_OF[DEFAULT_LINE_STYLE];
+  return { lineWidth: width as LineWidth, lineStyle: style };
+}
+
+const upDownKey = (spec: IndicatorPaneSpec): string =>
+  spec.kind === "Histogram" ? `${spec.upColor ?? ""}|${spec.downColor ?? ""}` : "";
+
+/** A histogram with up/down colours paints each bar by its sign; the data in state is untouched. */
+function paintedData(spec: IndicatorPaneSpec): IndicatorDatum[] {
+  if (spec.kind !== "Histogram" || (!spec.upColor && !spec.downColor)) return spec.data;
+  return spec.data.map((d) => {
+    // A null / NaN value is a gap, not a positive bar: no colour (never "up").
+    if (!("value" in d) || typeof d.value !== "number" || Number.isNaN(d.value)) return d;
+    return { ...d, color: d.value >= 0 ? (spec.upColor ?? spec.color) : (spec.downColor ?? spec.color) };
+  });
 }
 
 function setSeriesData(series: AnySeriesApi, data: IndicatorDatum[]): void {
@@ -275,6 +333,7 @@ function layoutPaneHeights(
   registry: Map<string, PaneEntry>,
   before: ReturnType<typeof snapshotPaneHeights>,
   priceKnown: boolean,
+  remembered: Map<string, number>,
 ): boolean {
   const pricePx = priceKnown ? (before.price ?? PRICE_PANE_PX) : PRICE_PANE_PX;
   chart.panes()[0]?.setStretchFactor(pricePx);
@@ -286,7 +345,10 @@ function layoutPaneHeights(
     const fallback = entry.group === VOLUME_PANE_ID ? VOLUME_PANE_PX : INDICATOR_PANE_PX;
     // Before the axis was measured the library split an axis-less total, so every pane's own
     // height is short by its share of the axis: only the defaults are trustworthy then.
-    const px = (priceKnown ? before.panes.get(entry.pane) : undefined) ?? fallback;
+    // A pane the legend eye collapsed comes back at the height it had (Story 32.3); that height
+    // was measured, so it is trusted even before the axis was.
+    const px = (priceKnown ? before.panes.get(entry.pane) : undefined) ?? remembered.get(entry.group) ?? fallback;
+    remembered.delete(entry.group);
     entry.pane.setStretchFactor(px);
     total += px;
   }
@@ -412,6 +474,7 @@ export default function LightweightChart({
   onProfileEdgeDrag,
   onProfileEdgeCommit,
   liveBar,
+  onLegendAction,
 }: LightweightChartProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -421,6 +484,14 @@ export default function LightweightChart({
   const prevLinesLengthRef = useRef(0);
   const panesRef = useRef<Map<string, PaneEntry>>(new Map());
   const legendItemsRef = useRef<LegendSeries[]>([]);
+  // Story 32.3: the px height of each pane the legend eye collapsed, by group, until it is shown.
+  const collapsedHeightsRef = useRef<Map<string, number>>(new Map());
+  const legendActionRef = useRef(onLegendAction);
+  legendActionRef.current = onLegendAction;
+  const handleLegendAction = useCallback(
+    (action: LegendAction, group: string): void => legendActionRef.current?.(action, group),
+    [],
+  );
   // Story 18.1: price-line registry + drag bookkeeping. `lastCrosshairRef` holds the
   // library's latest crosshair param (cleared when the mouse leaves the chart, so
   // stale data can never start a drag); `dragIdRef` the id being dragged; the click
@@ -529,6 +600,7 @@ export default function LightweightChart({
             registry,
             snapshotPaneHeights(chart, registry),
             false,
+            collapsedHeightsRef.current,
           );
         }
       });
@@ -538,6 +610,7 @@ export default function LightweightChart({
     const resizeObserver = new ResizeObserver(handleResize);
     resizeObserver.observe(container);
     const panes = panesRef.current;
+    const collapsedHeights = collapsedHeightsRef.current;
     // Captured to a local for the cleanup below, same as `panes` -- reading
     // `.current` inside a cleanup is what the react-hooks/exhaustive-deps lint flags.
     const priceLineRegistry = priceLineRegistryRef.current;
@@ -554,6 +627,7 @@ export default function LightweightChart({
       // The gap primitives die with the chart below (chart.remove()), like the panes.
       priceGapRef.current = null;
       panes.clear();
+      collapsedHeights.clear();
       // Story 18.1: the price lines die with the chart here, same as the panes -- the
       // registry must not outlive the series instances it holds lines on.
       priceLineRegistry.clear();
@@ -705,7 +779,10 @@ export default function LightweightChart({
     const chart = chartRef.current;
     if (!chart) return;
     const registry = panesRef.current;
-    const specsById = new Map(panes.map((spec) => [spec.id, spec] as const));
+    // A hidden pane indicator is collapsed: its spec stays in `panes` (data and legend row) but no
+    // pane or series exists for it. A hidden overlay is still drawn by the library, invisibly.
+    const placed = panes.filter((spec) => !(spec.hidden && spec.placement !== "overlay"));
+    const specsById = new Map(placed.map((spec) => [spec.id, spec] as const));
     const heightsBefore = snapshotPaneHeights(chart, registry);
     // Heights are re-pinned only when the pane set or its order changes: a data-only refresh
     // re-laying out would fight a divider the operator is dragging at that moment.
@@ -721,14 +798,24 @@ export default function LightweightChart({
       if (entry.gap) entry.series.detachPrimitive(entry.gap);
       const groupStillUsed = [...registry.values()].some((e) => e.pane === entry.pane);
       if (entry.pane && !groupStillUsed) {
+        // Collapsed by the eye (its spec is still in `panes`): remember the height it had.
+        const px = heightsBefore.panes.get(entry.pane);
+        if (px && panes.some((spec) => spec.id === id)) collapsedHeightsRef.current.set(entry.group, px);
         chart.removePane(entry.pane.paneIndex());
         panesChanged = true;
       } else chart.removeSeries(entry.series);
     }
 
+    // A remembered collapsed height outlives only its indicator: once no pane spec carries the
+    // group (removed, not just hidden) the entry would otherwise leak and mis-size a later re-add.
+    const liveGroups = new Set(panes.map((spec) => spec.group ?? spec.id));
+    for (const group of [...collapsedHeightsRef.current.keys()]) {
+      if (!liveGroups.has(group)) collapsedHeightsRef.current.delete(group);
+    }
+
     // Add new ids / update data+color for ids that stayed -- again, no visible-range
     // call anywhere in this branch.
-    for (const spec of panes) {
+    for (const spec of placed) {
       let entry = registry.get(spec.id);
       if (!entry) {
         const group = spec.group ?? spec.id;
@@ -742,28 +829,36 @@ export default function LightweightChart({
         const definition = spec.kind === "Line" ? LineSeries : HistogramSeries;
         const series = chart.addSeries(
           definition,
-          { color: spec.color },
+          { color: spec.color, ...lineOptions(spec), ...(spec.hidden ? { visible: false } : {}) },
           pane ? pane.paneIndex() : 0,
         ) as AnySeriesApi;
-        entry = { pane, group, spec, series, lastData: spec.data, gap: null };
+        entry = { pane, group, spec, series, lastData: spec.data, gap: null, lastUpDown: upDownKey(spec) };
         registry.set(spec.id, entry);
-        setSeriesData(entry.series, spec.data);
+        setSeriesData(entry.series, paintedData(spec));
         continue;
       }
       entry.spec = spec;
-      if (entry.series.options().color !== spec.color) {
-        entry.series.applyOptions({ color: spec.color });
-      }
-      if (entry.lastData !== spec.data) {
-        setSeriesData(entry.series, spec.data);
+      const options = entry.series.options() as { color?: string; visible?: boolean; lineWidth?: number; lineStyle?: LineStyle };
+      const changes: { color?: string; visible?: boolean; lineWidth?: LineWidth; lineStyle?: LineStyle } = {};
+      if (options.color !== spec.color) changes.color = spec.color;
+      if ((options.visible ?? true) === !!spec.hidden) changes.visible = !spec.hidden;
+      const wanted = lineOptions(spec);
+      if (wanted.lineWidth !== undefined && options.lineWidth !== wanted.lineWidth) changes.lineWidth = wanted.lineWidth;
+      if (wanted.lineStyle !== undefined && options.lineStyle !== wanted.lineStyle) changes.lineStyle = wanted.lineStyle;
+      if (Object.keys(changes).length > 0) entry.series.applyOptions(changes);
+      const colorKey = upDownKey(spec);
+      if (entry.lastData !== spec.data || entry.lastUpDown !== colorKey) {
+        setSeriesData(entry.series, paintedData(spec));
         entry.lastData = spec.data;
+        entry.lastUpDown = colorKey;
       }
     }
 
     // Panes stack in the panes prop's order, so a volume pane switched back on (created after
-    // the indicator panes) moves up to sit first under the price pane. paneIndex() is live.
+    // the indicator panes) moves up to sit first under the price pane, and a pane the eye brings
+    // back returns to its old place among the others. paneIndex() is live.
     const stacked = new Set<IPaneApi<Time>>();
-    for (const spec of panes) {
+    for (const spec of placed) {
       const pane = registry.get(spec.id)?.pane;
       if (!pane || stacked.has(pane)) continue;
       stacked.add(pane);
@@ -773,7 +868,7 @@ export default function LightweightChart({
       }
     }
     if (panesChanged || !laidOutRef.current) {
-      laidOutRef.current = layoutPaneHeights(chart, registry, heightsBefore, laidOutRef.current);
+      laidOutRef.current = layoutPaneHeights(chart, registry, heightsBefore, laidOutRef.current, collapsedHeightsRef.current);
     }
 
     // Story 32.1: exactly one gap painter per non-overlay pane (volume and indicator panes),
@@ -785,27 +880,34 @@ export default function LightweightChart({
       entry.gap.setRuns(gapRunsRef.current);
     }
 
-    // Legend rows follow the registry's order (= add order = stacking order).
-    legendItemsRef.current = [...registry.values()].map((e): LegendSeries => ({
-      group: e.group,
-      groupLabel: e.spec.groupLabel ?? e.spec.id,
-      outputLabel: e.spec.outputLabel ?? e.spec.id,
-      color: e.spec.color,
-      series: e.series,
-      data: e.spec.data,
-      pane: e.pane,
-    }));
+    // Legend rows follow the panes prop's order (= stacking order), including a collapsed
+    // indicator, whose row is kept -- crossed -- on the price pane's legend (`pane: null`).
+    legendItemsRef.current = panes.map((spec): LegendSeries => {
+      const e = registry.get(spec.id);
+      return {
+        group: spec.group ?? spec.id,
+        groupLabel: spec.groupLabel ?? spec.id,
+        outputLabel: spec.outputLabel ?? spec.id,
+        color: spec.color,
+        series: e?.series ?? null,
+        data: spec.data,
+        pane: e?.pane ?? null,
+        hidden: spec.hidden === true,
+        configurable: spec.configurable !== false,
+        actionable: spec.actionable !== false,
+      };
+    });
     // A new pane's element only exists after the library's next paint: retry per frame
     // (bounded) until every pane has one.
     let frame = 0;
     let tries = 30;
     const draw = (): void => {
-      if (renderLegends(chart, legendItemsRef.current, null, gapLookupRef.current) || tries-- <= 0) return;
+      if (renderLegends(chart, legendItemsRef.current, null, gapLookupRef.current, handleLegendAction) || tries-- <= 0) return;
       frame = requestAnimationFrame(draw);
     };
     draw();
     return () => cancelAnimationFrame(frame);
-  }, [panes]);
+  }, [panes, handleLegendAction]);
 
   useEffect(() => {
     // Story 32.1: the price pane's labelled gap painter lives on the current host series (the
@@ -1185,11 +1287,11 @@ export default function LightweightChart({
     const chart = chartRef.current;
     if (!chart) return;
     const handle = (param: MouseEventParams): void => {
-      renderLegends(chart, legendItemsRef.current, param, gapLookupRef.current);
+      renderLegends(chart, legendItemsRef.current, param, gapLookupRef.current, handleLegendAction);
     };
     chart.subscribeCrosshairMove(handle);
     return () => chart.unsubscribeCrosshairMove(handle);
-  }, [mode]);
+  }, [mode, handleLegendAction]);
 
   useEffect(() => {
     // Story 18.1 (AC #3): the drag's start/end. Capture phase so a line grab runs

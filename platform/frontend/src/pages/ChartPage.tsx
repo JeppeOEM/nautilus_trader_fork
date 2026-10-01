@@ -4,7 +4,9 @@ import { Link, useParams } from "react-router";
 
 import { fetchCoinIndicatorConfig, fetchIndicatorCatalog, saveCoinIndicatorConfig } from "../api/client";
 import AlertDialog from "../components/chart/AlertDialog";
-import IndicatorPicker from "../components/chart/IndicatorPicker";
+import IndicatorPicker, { type IndicatorPickerHandle } from "../components/chart/IndicatorPicker";
+import type { SettingsOutput } from "../components/chart/IndicatorSettingsDialog";
+import type { LegendAction } from "../components/chart/legend";
 import LightweightChart, {
   type ChartMode,
   type DrawingSpec,
@@ -34,6 +36,8 @@ import {
   type SessionProfileSettings,
 } from "../lib/sessionProfile";
 import { chartVar } from "../components/chart/chartTheme";
+import { DEFAULT_SOURCE, entryId, splitSeriesKey } from "../lib/indicatorId";
+import { outputStyle } from "../lib/indicatorStyle";
 import { assignPaneColor } from "../components/chart/paneColors";
 import type { IndicatorCatalogEntry, IndicatorConfigEntry } from "../api/schema";
 import { BAR_SECONDS, useCandles } from "../hooks/useCandles";
@@ -86,7 +90,7 @@ function loadPriceLines(instrumentId: string): PriceLineSpec[] {
 // Longest name wins so a name that prefixes another can't claim its keys.
 function catalogNameForKey(key: string, catalog: Record<string, IndicatorCatalogEntry>): string | undefined {
   return Object.keys(catalog)
-    .filter((n) => key === n || key.startsWith(`${n}_`) || key.startsWith(`${n}.`))
+    .filter((n) => key === n || key.startsWith(`${n}_`) || key.startsWith(`${n}.`) || key.startsWith(`${n}:`))
     .sort((x, y) => y.length - x.length)[0];
 }
 
@@ -95,10 +99,13 @@ function panelForKey(key: string, catalog: Record<string, IndicatorCatalogEntry>
   return name ? catalog[name].panel : "oscillator";
 }
 
-// Legend title, TradingView-style: name plus its params, e.g. "RelativeStrengthIndex (14)".
-function legendTitle(name: string, entries: IndicatorConfigEntry[]): string {
-  const params = Object.values(entries.find((e) => e.name === name)?.params ?? {});
-  return params.length ? `${name} (${params.join(", ")})` : name;
+// Legend title, TradingView-style: name plus its params and, when it is not the close, its
+// source, e.g. "RelativeStrengthIndex (14)" or "SimpleMovingAverage (20, hl2)". Per instance:
+// RSI(14) and RSI(21) are two titles.
+function legendTitle(entry: IndicatorConfigEntry): string {
+  const parts: unknown[] = Object.values(entry.params ?? {});
+  if (entry.source && entry.source !== DEFAULT_SOURCE) parts.push(entry.source);
+  return parts.length ? `${entry.name} (${parts.join(", ")})` : entry.name;
 }
 
 // Story 18.1 (AC #1): the chart's drawing-tool state -- "cursor" is the inert default.
@@ -109,6 +116,8 @@ interface ChartToolDef {
   id: ChartTool;
   label: string;
   ariaLabel: string;
+  /** Hover tooltip, where the label alone does not say what the button does. */
+  title?: string;
   /** No meaning in Lines mode (no single main series to attach to -- spec Task 2's
    * MVP scope decision): disables the button there and disarms an armed tool (see the
    * mode-guard effect in ChartInner). */
@@ -122,7 +131,14 @@ interface ChartToolDef {
 // The crosshair toggle is not an exclusive tool (it is a view option), so it is rendered
 // between the clusters rather than living in this list.
 const SELECT_TOOLS: readonly ChartToolDef[] = [
-  { id: "cursor", label: "Cursor", ariaLabel: "Cursor tool", candlesOnly: false },
+  {
+    id: "cursor",
+    label: "Cursor",
+    ariaLabel: "Cursor tool",
+    // The disarm, and the one mode in which drawings can be edited (Story 32.3).
+    title: "Select / edit drawings (Esc)",
+    candlesOnly: false,
+  },
 ];
 const DRAWING_TOOLS: readonly ChartToolDef[] = [
   { id: "trendline", label: "Trend", ariaLabel: "Trendline tool", candlesOnly: false },
@@ -275,6 +291,19 @@ function ChartInner({ instrumentId, barSeconds, volumeOn, onVolumeChange, onTime
   // pane (derived from useCandles' own `v` field; absent when toggled off -- `fullVolume`
   // is fetched regardless, for the profiles and the measurement tool); picker entries
   // follow, one series per `{indicator_id}.{output_attr}` key, placed by the catalog's `panel`.
+  // Story 32.3: the eye of the Volume row only hides it (collapses its pane); the state is not
+  // persisted. Known limit: a timeframe change remounts this component and shows it again.
+  // Upgrade path: Story 32.6's per-coin layout resource.
+  const [volumeHidden, setVolumeHidden] = useState(false);
+  // Switching volume off also clears the eye, so switching it back on shows it (not collapsed).
+  const changeVolumeOn = useCallback(
+    (on: boolean): void => {
+      if (!on) setVolumeHidden(false);
+      onVolumeChange(on);
+    },
+    [onVolumeChange],
+  );
+  const entriesById = useMemo(() => new Map(pickerEntries.map((e) => [entryId(e), e] as const)), [pickerEntries]);
   const panes = useMemo<IndicatorPaneSpec[]>(
     () => [
       ...(volumeOn
@@ -285,30 +314,79 @@ function ChartInner({ instrumentId, barSeconds, volumeOn, onVolumeChange, onTime
               data: volume,
               color: assignPaneColor("volume", DEFAULT_PANE_IDS),
               groupLabel: "Volume",
+              hidden: volumeHidden,
+              configurable: false,
             },
           ]
         : []),
       ...pickerSeriesKeys.map((key) => {
         const panel = panelForKey(key, catalog);
-        const name = catalogNameForKey(key, catalog) ?? key;
+        const { id: instanceId, output } = splitSeriesKey(key);
+        const entry = entriesById.get(instanceId);
+        const name = entry?.name ?? catalogNameForKey(key, catalog) ?? key;
+        const style = outputStyle(entry, output);
         return {
           id: key,
-          group: name,
-          groupLabel: legendTitle(name, pickerEntries),
-          outputLabel: key.slice(key.lastIndexOf(".") + 1),
+          // One legend row, one pane per instance (RSI(14) and RSI(21) are two), even for stale
+          // values no entry owns any more -- those get no buttons (the picker finds no entry).
+          group: instanceId,
+          groupLabel: entry ? legendTitle(entry) : name,
+          outputLabel: output,
           // Known limit: pattern hits are ±100 histogram spikes, not on-candle markers. Upgrade
           // path: lightweight-charts `createSeriesMarkers`. (Story 27.7's `CandlePattern` is a
           // "histogram" catalog entry like any other: no special case here.)
           kind: panel === "histogram" ? ("Histogram" as const) : ("Line" as const),
           data: trimAfter(pickerValues[key], cutoffTime),
-          // Combined with DEFAULT_PANE_IDS so a picker series never lands on volume's slot.
-          color: assignPaneColor(key, [...DEFAULT_PANE_IDS, ...pickerSeriesKeys]),
+          // Combined with DEFAULT_PANE_IDS so a picker series never lands on volume's slot. A
+          // colour the entry stores wins over the palette slot.
+          color: style.color ?? assignPaneColor(key, [...DEFAULT_PANE_IDS, ...pickerSeriesKeys]),
           placement: panel === "overlay" ? ("overlay" as const) : ("pane" as const),
+          hidden: entry?.hidden === true,
+          actionable: entry !== undefined,
+          lineWidth: style.line_width,
+          lineStyle: style.line_style,
+          upColor: style.up_color,
+          downColor: style.down_color,
         };
       }),
     ],
-    [volumeOn, volume, pickerSeriesKeys, pickerValues, catalog, pickerEntries, cutoffTime],
+    [volumeOn, volumeHidden, volume, pickerSeriesKeys, pickerValues, catalog, entriesById, cutoffTime],
   );
+
+  // The legend's eye / gear / x. Picker indicators go through the picker's own persist path (the
+  // same one an add uses); Volume is page state (eye) and the Indicators dialog's toggle (x).
+  const pickerRef = useRef<IndicatorPickerHandle>(null);
+  const handleLegendAction = useCallback(
+    (action: LegendAction, group: string): void => {
+      if (group === "volume") {
+        if (action === "hide") setVolumeHidden((h) => !h);
+        else if (action === "remove") {
+          changeVolumeOn(false);
+        }
+        return;
+      }
+      const picker = pickerRef.current;
+      if (action === "hide") picker?.toggleHidden(group);
+      else if (action === "settings") picker?.openSettings(group);
+      else picker?.remove(group);
+    },
+    [changeVolumeOn],
+  );
+  // Seeded with what the chart draws while the entry stores nothing: the palette colour, which a
+  // histogram also paints both signs with (and the side whose colour is not set keeps).
+  const settingsOutputs = (id: string): SettingsOutput[] =>
+    pickerSeriesKeys
+      .filter((key) => splitSeriesKey(key).id === id)
+      .map((key) => {
+        const palette = assignPaneColor(key, [...DEFAULT_PANE_IDS, ...pickerSeriesKeys]);
+        return {
+          label: splitSeriesKey(key).output,
+          kind: panelForKey(key, catalog) === "histogram" ? "Histogram" : "Line",
+          defaultColor: palette,
+          defaultUpColor: palette,
+          defaultDownColor: palette,
+        };
+      });
 
   useEffect(() => {
     chart?.applyOptions({ crosshair: { mode: crosshairOn ? CrosshairMode.Normal : CrosshairMode.Hidden } });
@@ -605,6 +683,7 @@ function ChartInner({ instrumentId, barSeconds, volumeOn, onVolumeChange, onTime
       aria-pressed={activeTool === tool.id}
       aria-label={tool.ariaLabel}
       data-tool={tool.id}
+      title={tool.title}
       disabled={mode === "lines" && tool.candlesOnly}
       onClick={() => selectTool(tool.id)}
     >
@@ -765,6 +844,7 @@ function ChartInner({ instrumentId, barSeconds, volumeOn, onVolumeChange, onTime
             volume={volume}
             onMeasureEnd={handleMeasureEnd}
             onPriceLineDrag={handlePriceLineDrag}
+            onLegendAction={handleLegendAction}
             // Story 18.4: the real-time forming bar would reveal "future" price action.
             liveBar={replay.mode === "active" ? null : liveBar}
             markerTime={replay.markerTime}
@@ -774,6 +854,19 @@ function ChartInner({ instrumentId, barSeconds, volumeOn, onVolumeChange, onTime
       {Object.entries(indicatorErrors).map(([id, message]) => (
         <p key={id} role="alert" className="chart-load-error">
           Indicator {id} failed: {message}
+          {/* A failed instance draws no series, so it has no legend row: its settings and remove
+              live here, or it could not be fixed or removed from the chart page. */}
+          {entriesById.has(id) && (
+            <>
+              {" "}
+              <button type="button" aria-label={`Settings for ${id}`} onClick={() => pickerRef.current?.openSettings(id)}>
+                Settings
+              </button>{" "}
+              <button type="button" aria-label={`Remove ${id}`} onClick={() => pickerRef.current?.remove(id)}>
+                Remove
+              </button>
+            </>
+          )}
         </p>
       ))}
       {frvps.length > 0 && (
@@ -823,6 +916,10 @@ function ChartInner({ instrumentId, barSeconds, volumeOn, onVolumeChange, onTime
         priceLines={priceLines}
       />
       <IndicatorPicker
+        ref={pickerRef}
+        showEntryList={false}
+        titleFor={legendTitle}
+        outputsFor={settingsOutputs}
         fetchConfig={() => fetchCoinIndicatorConfig(instrumentId)}
         saveConfig={(entries) => saveCoinIndicatorConfig(instrumentId, entries)}
         reloadKey={instrumentId}
@@ -831,7 +928,7 @@ function ChartInner({ instrumentId, barSeconds, volumeOn, onVolumeChange, onTime
         onDialogClose={() => setIndicatorDialogOpen(false)}
         multiInstance
         volumeOn={volumeOn}
-        onVolumeChange={onVolumeChange}
+        onVolumeChange={changeVolumeOn}
       />
       </div>
     </div>

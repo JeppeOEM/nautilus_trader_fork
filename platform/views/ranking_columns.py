@@ -134,6 +134,9 @@ class TechnicalsEntry(Protocol):
     def params(self) -> dict[str, Any]: ...
 
     @property
+    def source(self) -> str: ...
+
+    @property
     def bar_seconds(self) -> int: ...
 
 
@@ -255,7 +258,7 @@ def _latest_of_group(
     latest = by_time[candles[-1]["t"]]
     keyed: dict[str, float | None] = {}
     for index, entry in group:
-        prefix = indicator_picker.indicator_id(entry.name, entry.params) + "."
+        prefix = indicator_picker.indicator_id(entry.name, entry.params, entry.source) + "."
         keyed.update(
             {
                 f"{index}.{k.removeprefix(prefix)}": v

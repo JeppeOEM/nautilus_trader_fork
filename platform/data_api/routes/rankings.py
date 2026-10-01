@@ -175,7 +175,7 @@ _TECHNICALS_CACHE_TTL_S = 90.0
 _technicals_cache: dict[str, tuple[float, dict[str, dict[str, float | None]]]] = {}
 
 
-class TechnicalsColumn(_indicators.IndicatorConfigEntry):
+class TechnicalsColumn(_indicators.PickerEntry):
     """A per-coin picker entry plus the bar size it is computed on."""
 
     bar_seconds: int = preferences.DEFAULT_BAR_SECONDS
@@ -268,6 +268,7 @@ def get_technicals_values(entries: str) -> TechnicalsValuesResponse:
     viewers ever load the box.
     """
     parsed = _indicators._parse_entries(entries, TechnicalsRequestEntry)
+    _indicators._check_sources(parsed)
     if any(e.bar_seconds not in _TECHNICALS_BAR_SIZES for e in parsed):
         raise HTTPException(
             status_code=400, detail=f"bar_seconds must be one of {_TECHNICALS_BAR_SIZES}"

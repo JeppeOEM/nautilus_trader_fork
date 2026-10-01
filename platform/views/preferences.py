@@ -18,7 +18,11 @@ the `chart_indicator_config` and `screener_columns_config` modules here, bodies 
 
 - `chart_indicators.toml` (`CHART_INDICATOR_CONFIG_PATH`): per-instrument chart indicator
   selections (Story 10.5), a table keyed by instrument_id, each holding a list of
-  `{name, params, category}` entries -- `load_chart_indicators`/`save_chart_indicators`. `id` is
+  `{name, params, category}` entries -- `load_chart_indicators`/`save_chart_indicators`. Story 32.3
+  added three optional keys to an entry: `source` (the price a close-fed indicator reads, default
+  `"close"`), `hidden` (the legend's eye, default `false`) and `style` (a table per output label of
+  `color`/`line_width`/`line_style`, default empty = the pane palette). They are written only when
+  not default, so a file saved before them loads unchanged and saves back byte-identical. `id` is
   never persisted: it is a client-side sequence counter for the multi-instance picker UI,
   regenerated fresh on every load.
 - `screener_columns.toml` (`SCREENER_COLUMNS_CONFIG_PATH`): the screener-wide Technicals column
@@ -29,11 +33,17 @@ the `chart_indicator_config` and `screener_columns_config` modules here, bodies 
 Both are tomllib to read, tomli_w to write, and a full rewrite (not a patch). Key sets frozen
 (AD-D12): both files are bind-mounted and hand-editable, so a renamed or dropped key would silently
 lose a saved selection on the next deploy; `views/tests/test_preferences.py` pins the written text.
+The freeze forbids renaming or dropping a key, not adding an optional one with a default: every
+existing file stays loadable. The screener's `columns` entries never carry the three new keys
+(`save_screener_columns` writes its own four).
 The paths themselves are the interface's (env vars read in `data_api`), passed in.
 """
 
+import logging
+import math
 import tomllib
 from dataclasses import dataclass
+from dataclasses import field
 from pathlib import Path
 from typing import Any
 
@@ -42,12 +52,19 @@ import tomli_w
 
 DEFAULT_BAR_SECONDS = 3600
 
+_log = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True)
 class IndicatorEntry:
     name: str
     params: dict[str, Any]
     category: str
+    # Keyword-only: `ColumnEntry`'s fourth positional field stays `bar_seconds`.
+    source: str = field(default="close", kw_only=True)
+    hidden: bool = field(default=False, kw_only=True)
+    # Output label -> {color, line_width, line_style, ...}; empty = the pane palette default.
+    style: dict[str, dict[str, Any]] = field(default_factory=dict, kw_only=True)
 
 
 @dataclass(frozen=True)
@@ -73,12 +90,81 @@ def load_chart_indicators(path: Path) -> dict[str, list[IndicatorEntry]]:
     with path.open("rb") as f:
         raw = tomllib.load(f)
     return {
-        instrument_id: [
-            IndicatorEntry(name=e["name"], params=e.get("params", {}), category=e["category"])
-            for e in entries
-        ]
+        instrument_id: [_load_indicator_entry(instrument_id, e) for e in entries]
         for instrument_id, entries in raw.items()
     }
+
+
+def is_valid_style(style: Any) -> bool:
+    """
+    Return True for a `style` value both the file and the API accept: a table per output label of
+    string, integer, boolean or finite float leaves. One rule for the loader and the PUT route, so
+    an entry the loader keeps is always one the client can save back (a nested table or a `nan`
+    is neither).
+    """
+    if not isinstance(style, dict):
+        return False
+    for output_style in style.values():
+        if not isinstance(output_style, dict):
+            return False
+        for value in output_style.values():
+            if not isinstance(value, str | int | float | bool):
+                return False
+            if isinstance(value, float) and not math.isfinite(value):
+                return False
+    return True
+
+
+def _typed_or_default(instrument_id: str, e: dict[str, Any], key: str, default: Any) -> Any:
+    """
+    `e[key]` if it has the type of `default` (a dict must hold only dicts), else `default` with one
+    warning: the file is hand-editable, a wrong type must not reach the replay or the client.
+    """
+    value = e.get(key, default)
+    ok = isinstance(value, type(default))
+    if ok and key == "style":
+        ok = is_valid_style(value)
+    if not ok:
+        _log.warning(
+            "chart_indicators.toml: %s entry %r has a non-%s %r; using the default %r",
+            instrument_id,
+            e.get("name"),
+            type(default).__name__,
+            key,
+            default,
+        )
+        return default
+    return value
+
+
+def _load_indicator_entry(instrument_id: str, e: dict[str, Any]) -> IndicatorEntry:
+    return IndicatorEntry(
+        name=e["name"],
+        params=e.get("params", {}),
+        category=e["category"],
+        source=_typed_or_default(instrument_id, e, "source", "close"),
+        hidden=_typed_or_default(instrument_id, e, "hidden", False),
+        style=_typed_or_default(instrument_id, e, "style", {}),
+    )
+
+
+def _indicator_table(entry: IndicatorEntry) -> dict[str, Any]:
+    """
+    One entry as its TOML table: the three Story 32.3 keys only when not default, so a
+    pre-story file round-trips byte-identical (AD-D12) and a default entry stays as small as before.
+    """
+    table: dict[str, Any] = {
+        "name": entry.name,
+        "params": entry.params,
+        "category": entry.category,
+    }
+    if entry.source != "close":
+        table["source"] = entry.source
+    if entry.hidden:
+        table["hidden"] = True
+    if entry.style:
+        table["style"] = entry.style
+    return table
 
 
 def save_chart_indicators(config: dict[str, list[IndicatorEntry]], path: Path) -> None:
@@ -91,9 +177,7 @@ def save_chart_indicators(config: dict[str, list[IndicatorEntry]], path: Path) -
     (see its docstring); revisit only if it becomes a real complaint.
     """
     raw = {
-        instrument_id: [
-            {"name": e.name, "params": e.params, "category": e.category} for e in entries
-        ]
+        instrument_id: [_indicator_table(e) for e in entries]
         for instrument_id, entries in config.items()
     }
     with path.open("wb") as f:
