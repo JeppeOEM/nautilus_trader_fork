@@ -73,7 +73,7 @@ Two clocks per mode (story 22.12, `CoreConfig.book_time_source`):
     counted (`collector.late_trade`) but never folded live -- the nightly rebuild places it. The
     row's `ts_event` is S + 0.5 s and `ts_init` is when it was actually sampled.
 
-Hot-path figures (Story 28.1, audit D-07/D-10/D-136): every periodic flush logs one `hotpath:`
+Hot-path figures (Story 28.1, audit D-07/D-10/D-146): every periodic flush logs one `hotpath:`
 INFO line and publishes one `capture:hotpath` record (`LiveStream.publish_hotpath`, a failure
 ledgered `collector.hotpath_publish`) with the window's length, peak ingest-queue depth, messages
 processed, sample-loop wakes and wake lag (max, nearest-rank p99) and catalog write times

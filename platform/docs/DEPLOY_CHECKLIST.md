@@ -1198,7 +1198,7 @@ config key, schema or mount of the production stack changed.
 
 Rebuilds the collector image (new capture code: the per-flush hot-path figures) and applies the
 compose CPU weights and collector memory limits (section 7). No config key, schema, mount or
-archive format changed. The VPS profile below fills audit D-136; Story 28.2 does not wait for it
+archive format changed. The VPS profile below fills audit D-146; Story 28.2 does not wait for it
 (it cites the profile only if it exists).
 
 - [ ] On the VPS, `git pull`, then run section 7's redeploy in its order (collectors first, then the
@@ -1218,7 +1218,7 @@ archive format changed. The VPS profile below fills audit D-136; Story 28.2 does
       `README.md` that ranks each venue's top-10 self-time frames as (a) our Python, (b) Nautilus
       Cython/Rust or (c) interpreter/asyncio, and states whether the box was contended during the
       profile (load vs cores, the batch services' CPU in `docker stats`).
-- [ ] Update audit D-136 (`docs/DATA_INTEGRITY_AUDIT.md`) with the README's path, the ranking and
+- [ ] Update audit D-146 (`docs/DATA_INTEGRITY_AUDIT.md`) with the README's path, the ranking and
       the contention verdict, and add the VPS `lag_max_ms`/`lag_p99_ms` to D-10.
 - [ ] Note: Story 28.2 does not wait for this entry; it cites the profile only if it exists.
 
@@ -1239,6 +1239,6 @@ look for.
 - [ ] Over the hour after the redeploy, compare `capture:hotpath` `write_data_max_ms` and
       `lag_max_ms` against the figures noted before; expect the write to fall several-fold (the
       dev box: 304 -> 49 ms for 30 instruments). Record both sets in audit D-65's Story 28.2 record.
-- [ ] When D-136's VPS profile lands (entry `28-1-capture-hotpath-metrics-cpu-priority-and-vps-profile`),
+- [ ] When D-146's VPS profile lands (entry `28-1-capture-hotpath-metrics-cpu-priority-and-vps-profile`),
       re-check its README's ranking against the dev-box figures in D-65 and replace the projection's
       "x 3, assumed" with the profile's measured dev-box-to-VPS ratio.

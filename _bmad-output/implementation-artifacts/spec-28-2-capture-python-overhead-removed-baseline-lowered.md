@@ -97,7 +97,7 @@ warnings: ['oversized']
 - `platform/capture/domain/sampler.py` -- `SecondSampler`, `_exact_level`.
 - Each venue's `client.py` runs `capsule_to_data`: dydx :237, bybit :312, hyperliquid :330.
 - Docs:
-  - `platform/docs/DATA_INTEGRITY_AUDIT.md` D-65 :202 and D-136 :302 (28.1's VPS-profile row; the epic's "D-66" is D-136);
+  - `platform/docs/DATA_INTEGRITY_AUDIT.md` D-65 :202 and D-146 :302 (28.1's VPS-profile row; the epic's "D-66" is D-146);
   - `platform/docs/DEPLOY_CHECKLIST.md` "Deferred operator actions" :720, where the 28-1 entry sits at :1197;
   - `platform/CLAUDE.md` "Adding a venue" :93, whose step 5 quotes `asyncio.run(run_forever(...))`;
   - `_bmad-output/planning-artifacts/architecture/architecture-ddd-platform-2026-09-21/ARCHITECTURE-SPINE.md` `## Deferred` :508.
@@ -171,17 +171,17 @@ warnings: ['oversized']
     - before/after per fix and per venue for both bursts (direct, queued, flush, book_path);
     - the new baselines;
     - the 1× per-fix rule and the 2× test gate;
-    - the projected cost of one collector at 30 instruments on one VPS vCPU (dev-box figure × 3, assumed, marked as such, because D-136's profile is absent);
+    - the projected cost of one collector at 30 instruments on one VPS vCPU (dev-box figure × 3, assumed, marked as such, because D-146's profile is absent);
     - the fix-4 outcome;
     - any reverted fix with its figure.
-  - D-136 is noted as still open and not cited.
+  - D-146 is noted as still open and not cited.
   - Spine `## Deferred` gains the epic's verbatim "Capture in Rust" entry.
   - `platform/CLAUDE.md` "Adding a venue" gains the line: a venue's expected messages/s per instrument is checked against the `scale` burst's per-message figure before deploying.
   - `platform/docs/DEPLOY_CHECKLIST.md` "Deferred operator actions" gets a `### 28-2-capture-python-overhead-removed-baseline-lowered (commit: <closing sha or "this story's">)` entry with checkboxes for:
     - rebuilding and redeploying the collectors;
     - confirming `event loop: uvloop 0.22.1` in Dozzle for each collector;
     - comparing `capture:hotpath` `write_data_max_ms` before and after;
-    - when D-136's profile lands, re-checking the dev-box ranking and replacing "× 3, assumed".
+    - when D-146's profile lands, re-checking the dev-box ranking and replacing "× 3, assumed".
 
 **Acceptance Criteria:**
 - Given the final tree, when `python3 -m pytest -o addopts="" --rootdir=. tests/test_hotpath.py` runs from `platform/`, then both bursts pass against the committed, lowered baselines, and every allocation figure is ≤ its Commit 1 value.
@@ -304,7 +304,7 @@ Baselines were re-recorded lower on the final tree, on the same CPU and Python. 
   - `_bmad-output/planning-artifacts/architecture/architecture-ddd-platform-2026-09-21/ARCHITECTURE-SPINE.md`: the "Capture in Rust" Deferred entry.
 - Epic context: `_bmad-output/implementation-artifacts/epic-28-context.md`, recompiled from the current `epics.md` (operator note), not from `28-prior-attempt`.
 
-**VPS profile.** 28.1's profile (audit D-136) does not exist yet, so it is not cited. The projection uses "× 3, assumed": about 9.0 % → 4.8 % of one VPS vCPU for one collector at 30 instruments. The deferred entry stays.
+**VPS profile.** 28.1's profile (audit D-146) does not exist yet, so it is not cited. The projection uses "× 3, assumed": about 9.0 % → 4.8 % of one VPS vCPU for one collector at 30 instruments. The deferred entry stays.
 
 **Review.**
 - 9 patches applied (3 medium, 6 low), 1 deferred (the shutdown backlog drain/ledger, which predates this story), 9 rejected.

@@ -13,7 +13,7 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-The capture hot path's per-flush figures (Story 28.1, audit D-07/D-10/D-136): the window's
+The capture hot path's per-flush figures (Story 28.1, audit D-07/D-10/D-146): the window's
 length, the ingest queue's peak depth, the messages processed, the sample loop's wake-up lag (max
 and nearest-rank p99) and the catalog writes (count, the last one's wall time and the slowest's).
 `CaptureService` feeds the window and reports it once per periodic flush (a `hotpath:` INFO

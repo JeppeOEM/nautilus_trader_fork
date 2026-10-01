@@ -1981,7 +1981,7 @@ variant 126 s / 1.16 GB over the 2026-09-29 soak day.
 ### 1.23 `capture:hotpath` / `capture:hotpath:<venue>` (capture's hot-path figures, Story 28.1)
 
 Not market data: each collector's own cost figures, so a `_second_loop` stall (audit D-10) or an
-ingest-queue backlog (D-07) can be told apart from host contention (D-136)
+ingest-queue backlog (D-07) can be told apart from host contention (D-146)
 `[amended 2026-09-30: Story 28.1 -- new channel and key]`.
 
 - **Producer:** `CaptureService._report_hotpath` (`capture/application/capture_service.py`), right

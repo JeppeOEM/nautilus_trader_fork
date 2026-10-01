@@ -119,8 +119,8 @@ warnings: ['oversized']
 - [x] `platform/docs/DATA_INTEGRITY_AUDIT.md`:
   - D-07: strike "Needs a queue-depth metric first" in `~~…~~`, citing Story 28.1's `queue_depth_max` and §1.x; the status stays OPEN (measured, no policy);
   - D-10: add the lag max/p99 figures;
-  - new row D-136: the "VPS capture profile (Story 28.1)" is OPEN, with the planned README path, and is filled by the deferred entry;
-  - note in D-136 that the epic text's "D-66" was already taken.
+  - new row D-146: the "VPS capture profile (Story 28.1)" is OPEN, with the planned README path, and is filled by the deferred entry;
+  - note in D-146 that the epic text's "D-66" was already taken.
 - [x] `platform/docs/DEPLOY_CHECKLIST.md`:
   - new `## 7. Capture CPU budget (Story 28.1)` before §8, covering:
     - redeploy order: `make build` if needed, then `docker compose up -d` recreating the collectors first, then the batch services;
@@ -131,14 +131,14 @@ warnings: ['oversized']
     - the §7 redeploy and checks;
     - one `py-spy record --pid <pid> --duration 300 --format speedscope` per running collector, plus `py-spy dump` during a logged late tick, alongside `uptime`, `free -h` and `docker stats --no-stream`;
     - committing them under `platform/.planning/debug/capture-profile-2026-<date>/` with a README that ranks the top-10 self-time frames per venue as (a) our Python, (b) Nautilus Cython/Rust, or (c) interpreter/asyncio, and states whether the box was contended;
-    - updating D-136;
+    - updating D-146;
     - a note that 28.2 does not wait for this.
 
 **Acceptance Criteria:**
 - Given a running collector, when a periodic flush completes, then exactly one `hotpath:` INFO line and one `capture:hotpath` publish plus `SET` carry the six figures (depth max, processed, lag max, lag p99, wakes, last write ms), and the counters restart from zero.
 - Given the unchanged baseline file, when `python3 -m pytest tests/test_hotpath.py` runs, then all its tests pass.
 - Given `docker-compose.yml`, when parsed, then the collectors have weight 1024 and a `mem_limit`, the batch services 256, and there is no `cpus`/`deploy`; each `mem_limit` has its evidence comment.
-- Given the docs, when read, then DATA_DICTIONARY names the channel and key, D-07's clause is struck with a citation, D-136 exists, §7 exists, and the deferred entry exists under this story's key.
+- Given the docs, when read, then DATA_DICTIONARY names the channel and key, D-07's clause is struck with a citation, D-146 exists, §7 exists, and the deferred entry exists under this story's key.
 
 ## Spec Change Log
 
@@ -177,7 +177,7 @@ warnings: ['oversized']
   - `[low]` `[patch]` wake lag is wall-clock (an NTP step reads as lag) -> `Known limit:` with upgrade path in `_note_wake` and DATA_DICTIONARY §1.23.
   - `[low]` `[patch]` arrival mode's target is recomputed after the tick's own work, so a stall inside `_sample_tick`/`_publish` shows as `missed_tick`, not lag (venue mode counts it) -> same `Known limit:` documents the asymmetry.
   - `[low]` `[patch]` `HotPathWindow`'s "bounded by the window" invariant fails while a flush hangs -> `Known limit:` with upgrade path in its docstring.
-  - `[low]` `[patch]` docs disagreed with code: the site list said "once per failed periodic flush" (the final report also publishes), D-136 omitted `window_s`/`writes`/`write_data_max_ms` -> both corrected.
+  - `[low]` `[patch]` docs disagreed with code: the site list said "once per failed periodic flush" (the final report also publishes), D-146 omitted `window_s`/`writes`/`write_data_max_ms` -> both corrected.
   - `[low]` `[patch]` `hotpath_metrics.py` module docstring line at 130 columns -> reflowed to 100.
 
 ## Design Notes
@@ -219,7 +219,7 @@ warnings: ['oversized']
 - `platform/capture/tests/test_collector.py`: tests for the cancelled-flush and cancelled-final-report paths.
 - `platform/capture/tests/test_hotpath_metrics.py`: p99 boundary test at 99 and 100 wakes.
 - `platform/docs/DATA_DICTIONARY.md`: site-list cadence for `collector.hotpath_publish`, p99 boundary, lag `Known limit:`.
-- `platform/docs/DATA_INTEGRITY_AUDIT.md`: D-136 lists every published figure.
+- `platform/docs/DATA_INTEGRITY_AUDIT.md`: D-146 lists every published figure.
 
 **Review.** 8 patches applied (all low), 0 deferred, 18 rejected (mostly spec-mandated choices already recorded as `Known limit:`s or triaged in the previous pass: mem_limit sizing and OOM on plan growth, the new channel instead of a dashboard feed, p99 redundancy at 60 wakes, the per-message cost). No bad_spec or intent_gap.
 
