@@ -11,6 +11,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { HttpError, fetchCandles } from "../api/client";
 import type { CandleItem } from "../api/schema";
+import type { InstrumentPrecision } from "../lib/drawings";
 import { gapRun } from "../lib/gaps";
 import type { LiveBar } from "./useLiveCandle";
 
@@ -129,6 +130,10 @@ export interface UseCandlesResult {
   loadFailed: boolean;
   /** `{venue, market}` from the newest candles response (e.g. BYBIT/spot), `null` until loaded. */
   venueMarket: { venue: string; market: string } | null;
+  /** The catalog definition's price/size decimals from the first candles response, `null` until it
+   * arrives (an instrument with no definition answers 404, so it stays `null` and no label is
+   * ever printed at a guessed precision). */
+  precision: InstrumentPrecision | null;
   /** Operator-facing reason while `loadFailed`, else `null`. */
   loadError: string | null;
   /** Refetch the newest page and merge it in -- after a `/ws/live` reconnect, the bars that
@@ -168,6 +173,7 @@ export function useCandles(
 ): UseCandlesResult {
   const [state, setState] = useState<CandlesState>(EMPTY_STATE);
   const [venueMarket, setVenueMarket] = useState<UseCandlesResult["venueMarket"]>(null);
+  const [precision, setPrecision] = useState<InstrumentPrecision | null>(null);
   const hasMoreOlderRef = useRef(true);
   const loadingRef = useRef(false);
   const earliestMsRef = useRef<number | null>(null);
@@ -196,6 +202,12 @@ export function useCandles(
       return fetchCandles(instrumentId, beforeNs, INITIAL_LIMIT, barSeconds)
         .then((response) => {
           attemptRef.current = 0;
+          // Carried by every answer, empty ones too. Only a changed value is a new state.
+          setPrecision((prev) =>
+            prev?.price === response.price_precision && prev.size === response.size_precision
+              ? prev
+              : { price: response.price_precision, size: response.size_precision },
+          );
           if (response.items.length === 0) {
             if (prepend) {
               hasMoreOlderRef.current = false;
@@ -330,5 +342,5 @@ export function useCandles(
     return () => timeScale.unsubscribeVisibleLogicalRangeChange(handler);
   }, [chart, loadPage, enabled]);
 
-  return { ...state, venueMarket, loadFailed: loadError !== null, loadError, refreshNewest, appendBar, openGapTo };
+  return { ...state, venueMarket, precision, loadFailed: loadError !== null, loadError, refreshNewest, appendBar, openGapTo };
 }

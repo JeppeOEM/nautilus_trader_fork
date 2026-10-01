@@ -835,3 +835,15 @@ Discarded by operator: locking/atomic TOML writes; `bot_tui` malformed-message h
 - source_spec: `_bmad-output/implementation-artifacts/spec-32-3-legend-is-the-indicator-control-surface-larger-type-gear-settings-remove-in-place.md`
   summary: Nothing server-side refuses two chart indicator entries with the same `indicator_id`: `PUT /api/coin/{iid}/indicators` stores duplicates, and the GET's unservable-source fallback to `close` can turn a hand-edited `SMA(20) close` + `SMA(20) <bad source>` pair into two identical entries that the next save writes back.
   evidence: `put_coin_indicator_config` (`platform/data_api/routes/indicators.py`) checks names and sources only; duplicates are refused only client-side (`IndicatorPicker.hasInstance`); `_servable_source` rewrites the source without checking for a collision. Two entries with one id share one series key, so the legend acts on the first only. Refusing duplicates in the PUT needs a decision on files that already hold them (they would make every save of that coin a 400). Trigger is a hand edit only.
+- source_spec: `_bmad-output/implementation-artifacts/spec-32-5-fibonacci-retracement-and-long-short-position-tools-every-drawing-stays-on-the-chart.md`
+  summary: `GET /api/candles/{iid}` reads the catalog's instrument definition on every request (including scroll-back pages) and 404s when absent.
+  evidence: `routes/candles.py` calls `instrument_precision` per request; Known limit comment names the per-instrument cache upgrade path.
+- source_spec: `_bmad-output/implementation-artifacts/spec-32-5-fibonacci-retracement-and-long-short-position-tools-every-drawing-stays-on-the-chart.md`
+  summary: Drawings PUT is a whole-list overwrite without a version, so two browsers editing one coin lose edits (last write wins).
+  evidence: `routes/drawings.py`; Known limit comment names version field + 409 + merge as the upgrade.
+- source_spec: `_bmad-output/implementation-artifacts/spec-32-5-fibonacci-retracement-and-long-short-position-tools-every-drawing-stays-on-the-chart.md`
+  summary: Drawing colours resolved from the theme at creation are saved as literals, so they do not follow later theme changes and the Fib context-menu colour picker overwrites per-level colours.
+  evidence: `ChartPage.tsx` creation handlers persist resolved colours; `LightweightChart.tsx` menu colour uses `menuSpec.color`.
+- source_spec: `_bmad-output/implementation-artifacts/spec-32-5-fibonacci-retracement-and-long-short-position-tools-every-drawing-stays-on-the-chart.md`
+  summary: One corrupt instrument table in `chart_drawings.toml` makes GET and PUT fail for every coin.
+  evidence: `load_chart_drawings` validates all tables; fail-loud was intended but blast radius is the whole file.

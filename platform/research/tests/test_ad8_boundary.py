@@ -20,7 +20,7 @@ DataEngine (that usage is confined to platform/bots). Checks for the literal sub
 "import Strategy" rather than bare "Strategy", since backtest_dydx.py/backtest_ofi.py legitimately
 reference strategies via `ImportableStrategyConfig`/`strategy_path="..."` string paths (AD-6's
 mandated pattern) -- a bare "Strategy" substring check would false-positive on
-`ImportableStrategyConfig` and on docstring/string mentions of `LogisticTrendStrategy`/
+`ImportableStrategyConfig` and on docstring/string mentions of `IndicatorSignalStrategy`/
 `OFIStrategy`, none of which import the `Strategy` class itself.
 
 Also includes backtest_snapshot.py even though AD-8's spine text doesn't name it explicitly --

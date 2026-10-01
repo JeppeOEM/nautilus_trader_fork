@@ -15,15 +15,27 @@
 """`views.catalog_reads`: the whole-row second read, and the cursor-paging helpers."""
 
 import tempfile
+from decimal import Decimal
+from pathlib import Path
 
+import pytest
 from candles.application.forming import bars_from_rows
 from kernel.catalog_files import query_second_ohlc
 from kernel.tests.snapshot_factory import make_snapshot
 
+from nautilus_trader.model.currencies import BTC
+from nautilus_trader.model.currencies import USDT
 from nautilus_trader.model.identifiers import InstrumentId
+from nautilus_trader.model.identifiers import Symbol
+from nautilus_trader.model.instruments import CryptoPerpetual
+from nautilus_trader.model.objects import Price
+from nautilus_trader.model.objects import Quantity
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
+from views.catalog_reads import InstrumentPrecision
+from views.catalog_reads import NoInstrumentDefinition
 from views.catalog_reads import fetch_page
 from views.catalog_reads import has_older_data
+from views.catalog_reads import instrument_precision
 from views.catalog_reads import query_second_snapshots
 
 
@@ -106,3 +118,47 @@ def test_fetch_page_aligns_the_first_end_and_every_gap_jump_end() -> None:
 
     assert fetch_page(fetch, ranges, 1_050, 200, align_end=up_to_hundreds) == [0]
     assert calls == [(900, 1_100), (0, 200)]  # file 1 ends at 130: the jump rounds up to 200
+
+
+def _definition(
+    iid: str, price_precision: int, size_precision: int, ts_init: int = 0
+) -> CryptoPerpetual:
+    return CryptoPerpetual(
+        instrument_id=InstrumentId.from_str(iid),
+        raw_symbol=Symbol(iid.split(".")[0]),
+        base_currency=BTC,
+        quote_currency=USDT,
+        settlement_currency=USDT,
+        is_inverse=False,
+        price_precision=price_precision,
+        price_increment=Price.from_str(f"{Decimal(1).scaleb(-price_precision):f}"),
+        size_precision=size_precision,
+        size_increment=Quantity.from_str(f"{Decimal(1).scaleb(-size_precision):f}"),
+        ts_event=ts_init,
+        ts_init=ts_init,
+    )
+
+
+def test_instrument_precision_reads_the_definitions_own_decimals(tmp_path: Path) -> None:
+    catalog = ParquetDataCatalog(str(tmp_path))
+    catalog.write_data(
+        [_definition("BTC-USD-PERP.DYDX", 2, 3), _definition("PEPE-USD-PERP.DYDX", 6, 0)]
+    )
+    assert instrument_precision(str(tmp_path), "BTC-USD-PERP.DYDX") == InstrumentPrecision(2, 3)
+    assert instrument_precision(str(tmp_path), "PEPE-USD-PERP.DYDX") == InstrumentPrecision(6, 0)
+
+
+def test_instrument_precision_uses_the_latest_definition(tmp_path: Path) -> None:
+    ParquetDataCatalog(str(tmp_path)).write_data(
+        [
+            _definition("BTC-USD-PERP.DYDX", 2, 3, ts_init=1),
+            _definition("BTC-USD-PERP.DYDX", 1, 4, ts_init=2),
+        ]
+    )
+    assert instrument_precision(str(tmp_path), "BTC-USD-PERP.DYDX") == InstrumentPrecision(1, 4)
+
+
+def test_instrument_precision_without_a_definition_names_the_id(tmp_path: Path) -> None:
+    ParquetDataCatalog(str(tmp_path)).write_data([_definition("BTC-USD-PERP.DYDX", 2, 3)])
+    with pytest.raises(NoInstrumentDefinition, match=r"ETH-USD-PERP\.DYDX"):
+        instrument_precision(str(tmp_path), "ETH-USD-PERP.DYDX")

@@ -35,7 +35,13 @@ import data_api.app as app_module
 import data_api.routes.candles as candles_routes
 import data_api.routes.indicator_series as indicator_series_routes
 import data_api.routes.indicators as indicators_routes
+from nautilus_trader.model.currencies import BTC
+from nautilus_trader.model.currencies import USDT
 from nautilus_trader.model.identifiers import InstrumentId
+from nautilus_trader.model.identifiers import Symbol
+from nautilus_trader.model.instruments import CryptoPerpetual
+from nautilus_trader.model.objects import Price
+from nautilus_trader.model.objects import Quantity
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
 
@@ -62,6 +68,27 @@ def _client(
     )  # indicator-values reads candles via this route
     monkeypatch.setattr(candles_routes, "CANDLES_DB_DIR", f"{catalog}-no-candle-store-dir")
     return TestClient(app_module.app)
+
+
+def _define_instrument(catalog_path: str) -> None:
+    ParquetDataCatalog(catalog_path).write_data(
+        [
+            CryptoPerpetual(
+                instrument_id=InstrumentId.from_str(_IID),
+                raw_symbol=Symbol("BTC-USD"),
+                base_currency=BTC,
+                quote_currency=USDT,
+                settlement_currency=USDT,
+                is_inverse=False,
+                price_precision=2,
+                price_increment=Price(0.01, 2),
+                size_precision=3,
+                size_increment=Quantity(0.001, 3),
+                ts_event=0,
+                ts_init=0,
+            )
+        ]
+    )
 
 
 def _write_snapshots(catalog_path: str, entries: list[tuple[int, float]]) -> None:
@@ -428,6 +455,7 @@ def test_candles_indicator_series_and_indicator_values_break_at_identical_gap_ti
     catalog_path = str(tmp_path / "cat")
     minutes = [-10, -9, -8, -7, -3, -2, -1]  # the collector was down across -6, -5 and -4
     _write_snapshots(catalog_path, [(_BASE_NS + m * 60_000_000_000, 100.0 - m) for m in minutes])
+    _define_instrument(catalog_path)  # the candles route labels at the definition's precision
     client = _client(tmp_path, monkeypatch, catalog_path=catalog_path)
     monkeypatch.setattr(indicator_series_routes, "CATALOG_PATH", catalog_path)
     page = {"before_ns": _BASE_NS, "limit": 20, "bar_seconds": 60}

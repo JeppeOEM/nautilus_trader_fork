@@ -34,7 +34,6 @@ mode only once `rankings:live` carries it (publish-and-wait, last write wins).
 
 import json
 import logging
-import os
 import time
 import tomllib
 from pathlib import Path
@@ -56,6 +55,7 @@ from data_api.routes import indicators as _indicators
 from data_api.settings import CANDLES_DB_DIR
 from data_api.settings import CATALOG_PATH
 from data_api.settings import REDIS_URL
+from data_api.settings import SCREENER_COLUMNS_CONFIG_PATH
 
 
 router = APIRouter()
@@ -162,10 +162,6 @@ async def put_ranking_mode(body: RankingModeRequest) -> RankingModeResponse:
 # ---------------------------------------------------------------------------------------------
 # Story 17.5: Technicals tab -- screener-wide column selection + bulk per-instrument values
 # ---------------------------------------------------------------------------------------------
-
-SCREENER_COLUMNS_CONFIG_PATH: str = os.environ.get(
-    "SCREENER_COLUMNS_CONFIG_PATH", "platform/data/screener_columns.toml"
-)
 
 # The column timeframes the UI offers; anything else is a 400, not a silent fallback.
 _TECHNICALS_BAR_SIZES = (60, 300, 900, 3600, 14400, 86400)

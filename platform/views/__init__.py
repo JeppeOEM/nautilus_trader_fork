@@ -24,7 +24,7 @@ values), `coin_detail` (the single-coin page's metrics.db history and archived-s
 `chart_series` (every chart series and page: candles, Lines-mode snapshots, indicator series and
 values, footprint, book features, and the gap-marker rendering rules),
 `indicator_picker` (the native + custom indicator catalogs and their replay dispatch),
-`preferences` (the one loader/saver of `chart_indicators.toml` and `screener_columns.toml`),
+`preferences` (the one loader/saver of `chart_indicators.toml`, `screener_columns.toml` and `chart_drawings.toml`),
 `catalog_reads` (the catalog series read and the cursor-paging helpers), `live_candles` (the live
 forming-bar fan-out and the `BarObserver` port) and `rankings_bus` (the `rankings:live` relay).
 

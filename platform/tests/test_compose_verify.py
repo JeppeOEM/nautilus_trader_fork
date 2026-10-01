@@ -448,7 +448,7 @@ def test_verify_up_creates_every_bind_mounted_data_dir_first() -> None:
     recipe = [_expand(line, variables) for line in recipes["verify-up"]]
     override, base = _services(_yaml(_OVERRIDE)), _services(_yaml(_BASE))
     mounted = {
-        volume.split(":")[0].removeprefix("./data/")
+        volume.split(":")[0].removeprefix("./data/").rstrip("/")
         for name in _VERIFY_SERVICES
         for volume in base.get(name, {}).get("volumes", []) + override[name].get("volumes", [])
         if volume.startswith("./data/") and volume.split(":")[0].count(".toml") == 0
@@ -462,12 +462,12 @@ def test_verify_up_creates_every_bind_mounted_data_dir_first() -> None:
     assert "data/errors" in writable
 
 
-def test_verify_wipe_refuses_a_running_stack_and_keeps_the_three_toml_files() -> None:
+def test_verify_wipe_refuses_a_running_stack_and_keeps_the_plan_and_preferences() -> None:
     variables, recipes = _makefile()
     recipe = " ".join(_expand(line, variables) for line in recipes["verify-wipe"])
     assert "com.docker.compose.project=verify" in recipe
     assert "exit 1" in recipe
-    for kept in ("dydx_config.toml", "chart_indicators.toml", "screener_columns.toml"):
+    for kept in ("dydx_config.toml", "preferences"):
         assert f"! -name {kept}" in recipe
     assert "-print" in recipe, "it lists what it deletes"
 

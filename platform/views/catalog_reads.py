@@ -22,11 +22,39 @@ Moved verbatim from the catalog-stats module and `data_api/routes/paging.py` (St
 """
 
 from collections.abc import Callable
+from dataclasses import dataclass
 
 from kernel.clocks import READ_SPAN_MARGIN_NS
 from kernel.second_snapshot import DydxSecondSnapshot
 
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
+
+
+@dataclass(frozen=True)
+class InstrumentPrecision:
+    """The decimal places a venue instrument's prices and sizes are quoted at."""
+
+    price_precision: int
+    size_precision: int
+
+
+class NoInstrumentDefinition(LookupError):
+    """The catalog holds no instrument definition for the id: no precision may be assumed."""
+
+
+def instrument_precision(catalog_path: str, instrument_id: str) -> InstrumentPrecision:
+    """
+    Return the catalog's own `price_precision`/`size_precision` for `instrument_id` (the latest stored
+    definition by `ts_init`), so a chart label is never printed at a guessed precision (DATA-01).
+
+    Never derived from a value's digit count and never defaulted: an id without a definition
+    raises `NoInstrumentDefinition` naming it.
+    """
+    found = ParquetDataCatalog(catalog_path).instruments(instrument_ids=[instrument_id])
+    if not found:
+        raise NoInstrumentDefinition(f"{instrument_id}: no instrument definition in the catalog")
+    latest = max(found, key=lambda i: i.ts_init)
+    return InstrumentPrecision(latest.price_precision, latest.size_precision)
 
 
 def query_second_snapshots(

@@ -38,6 +38,7 @@ upgrade path: set `BacktestRunConfig.chunk_size` once the custom type streams th
 backend session.
 """
 
+import logging
 import tempfile
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -50,6 +51,9 @@ from kernel.clocks import MAX_TS_INIT_SKEW_NS
 from kernel.clocks import NS_PER_MS
 from kernel.second_snapshot import DydxSecondSnapshot
 
+import nautilus_trader.analysis as nautilus_analysis
+from nautilus_trader.backtest.config import ImportableFeeModelConfig
+from nautilus_trader.backtest.config import ImportableFillModelConfig
 from nautilus_trader.backtest.config import ImportableLatencyModelConfig
 from nautilus_trader.backtest.engine import BacktestEngineConfig
 from nautilus_trader.backtest.node import BacktestDataConfig
@@ -59,6 +63,7 @@ from nautilus_trader.backtest.node import BacktestVenueConfig
 from nautilus_trader.backtest.results import BacktestResult
 from nautilus_trader.config import ImportableStrategyConfig
 from nautilus_trader.config import LoggingConfig
+from nautilus_trader.execution.config import ImportableExecAlgorithmConfig
 from nautilus_trader.model.data import QuoteTick
 from nautilus_trader.model.data import TradeTick
 from nautilus_trader.model.enums import AccountType
@@ -70,6 +75,9 @@ from nautilus_trader.model.instruments import Instrument
 from nautilus_trader.model.objects import Money
 from nautilus_trader.model.objects import Quantity
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
+from research.application.ports import FEE_MODELS
+from research.application.ports import FILL_MODELS
+from research.application.ports import LATENCY_KEYS
 from research.application.ports import RunResult
 from research.application.ports import RunSpec
 from research.application.ports import check_params
@@ -79,6 +87,26 @@ from research.domain.equity import EquityCurve
 from research.domain.report import MetricReport
 from research.domain.trades import ClosedTrade
 from research.domain.trades import TradeLedger
+
+
+logger = logging.getLogger(__name__)
+
+# The statistics `PortfolioAnalyzer` does not register by default (`portfolio.pyx`), registered on
+# every engine's analyzer between `node.build()` and `node.run()`; names of `nautilus_trader.analysis`.
+# Known limit: Nautilus before 1.229.0 (the pinned version) lacks the five benchmark-relative ones
+# (Alpha, BetaRatio, InformationRatio, TrackingError, TreynorRatio); they are then absent from
+# `nautilus_stats` (one warning per run), never faked. Upgrade path: none needed once every
+# environment runs the pinned version.
+EXTRA_STATISTICS = (
+    "CAGR",
+    "Alpha",
+    "BetaRatio",
+    "CalmarRatio",
+    "InformationRatio",
+    "MaxDrawdown",
+    "TrackingError",
+    "TreynorRatio",
+)
 
 
 def _instruments(spec: RunSpec) -> list[Instrument]:
@@ -98,6 +126,11 @@ def _instruments(spec: RunSpec) -> list[Instrument]:
         # Known limit: one starting balance per run; upgrade path: one balance per currency.
         raise ValueError(f"one settlement currency per run, got {sorted(currencies)}")
     return instruments
+
+
+def settlement_currency(spec: RunSpec) -> str:
+    """Return the one settlement currency of `spec`'s instruments (a fee model's money unit)."""
+    return str(_instruments(spec)[0].settlement_currency)
 
 
 def write_derived_quotes(spec: RunSpec, instruments: list[Instrument], directory: str) -> None:
@@ -164,15 +197,59 @@ def _data_configs(spec: RunSpec, quotes_dir: str) -> list[BacktestDataConfig]:
     return configs
 
 
-def _latency_model(latency_ms: int) -> ImportableLatencyModelConfig | None:
-    """The fixed order latency `RunSpec.latency_ms` names; None (no model) for 0."""
-    if latency_ms == 0:
+def _latency_model(spec: RunSpec) -> ImportableLatencyModelConfig | None:
+    """
+    Return the order latency of `spec`: its `latency` fields when set (omitted ones are 0 -- the shortcut's
+    1 s `LatencyModelConfig` default would otherwise leak in), else the fixed `latency_ms` on every
+    command; None (no model) for `latency_ms=0`.
+    """
+    if spec.latency is not None:
+        config: dict[str, int] = {key: spec.latency.get(key, 0) for key in LATENCY_KEYS}
+    elif spec.latency_ms == 0:
         return None
+    else:
+        config = {"base_latency_nanos": spec.latency_ms * NS_PER_MS}
     return ImportableLatencyModelConfig(
         latency_model_path="nautilus_trader.backtest.models:LatencyModel",
         config_path="nautilus_trader.backtest.config:LatencyModelConfig",
-        config={"base_latency_nanos": latency_ms * NS_PER_MS},
+        config=config,
     )
+
+
+def _fill_model(spec: RunSpec) -> ImportableFillModelConfig | None:
+    """Return the importable fill model `spec.fill_model` names; None for the venue default."""
+    if spec.fill_model is None:
+        return None
+    model_path, config_path = FILL_MODELS[str(spec.fill_model["name"])]
+    config = {key: value for key, value in spec.fill_model.items() if key != "name"}
+    return ImportableFillModelConfig(
+        fill_model_path=model_path, config_path=config_path, config=config
+    )
+
+
+def _fee_model(spec: RunSpec) -> ImportableFeeModelConfig | None:
+    """Return the importable fee model `spec.fee_model` names; None for the venue default."""
+    if spec.fee_model is None:
+        return None
+    model_path, config_path, _, _ = FEE_MODELS[str(spec.fee_model["name"])]
+    config = {key: value for key, value in spec.fee_model.items() if key != "name"}
+    return ImportableFeeModelConfig(
+        fee_model_path=model_path, config_path=config_path, config=config
+    )
+
+
+def _exec_algorithms(spec: RunSpec) -> list[ImportableExecAlgorithmConfig]:
+    """
+    One importable config per `spec.exec_algorithms` path: the config class is the algorithm's
+    own name plus `Config` in the same module (`twap:TWAPExecAlgorithm` -> `twap:TWAPExecAlgorithmConfig`),
+    built with its defaults.
+    """
+    return [
+        ImportableExecAlgorithmConfig(
+            exec_algorithm_path=path, config_path=f"{path}Config", config={}
+        )
+        for path in spec.exec_algorithms
+    ]
 
 
 def build_run_config(
@@ -184,8 +261,8 @@ def build_run_config(
     """
     One `BacktestRunConfig`: one strategy per instrument (`order_id_tag` = its position, so the
     strategy ids differ), `params` plus the runner-owned keys, a NETTING/MARGIN venue in the
-    settlement currency with `spec.latency_ms` on every order command, and the data `spec.data`
-    names, all bounded by the spec's window.
+    settlement currency with the spec's latency, fill model and fee model, its exec algorithms on
+    the engine, and the data `spec.data` names, all bounded by the spec's window.
     """
     check_params(params)
     strategies = []
@@ -208,6 +285,7 @@ def build_run_config(
             # process, as `research/tests/conftest.py` keeps its guard alive).
             logging=LoggingConfig(bypass_logging=True),
             strategies=strategies,
+            exec_algorithms=_exec_algorithms(spec),
         ),
         venues=[
             BacktestVenueConfig(
@@ -216,7 +294,9 @@ def build_run_config(
                 account_type=AccountType.MARGIN,
                 base_currency=currency,
                 starting_balances=[f"{spec.starting_balance} {currency}"],
-                latency_model=_latency_model(spec.latency_ms),
+                latency_model=_latency_model(spec),
+                fill_model=_fill_model(spec),
+                fee_model=_fee_model(spec),
             ),
         ],
         data=_data_configs(spec, quotes_dir),
@@ -305,6 +385,24 @@ def equity_from_account(
     return EquityCurve(np.array(ts, dtype=np.int64), np.array(values), starting_balance)
 
 
+_WARNED_MISSING = False
+
+
+def register_statistics(node: BacktestNode) -> None:
+    """Register `EXTRA_STATISTICS` on every built engine's analyzer (before `node.run()`)."""
+    global _WARNED_MISSING
+    missing = [name for name in EXTRA_STATISTICS if not hasattr(nautilus_analysis, name)]
+    if missing and not _WARNED_MISSING:
+        _WARNED_MISSING = True  # once per process: a sweep builds many nodes
+        logger.warning(
+            f"nautilus_trader.analysis has no {missing}: not registered (see EXTRA_STATISTICS)"
+        )
+    for engine in node.get_engines():
+        for name in EXTRA_STATISTICS:
+            if name not in missing:
+                engine.portfolio.analyzer.register_statistic(getattr(nautilus_analysis, name)())
+
+
 class NodeRunner:
     """
     `BacktestRunner` over `BacktestNode`.
@@ -344,6 +442,8 @@ class NodeRunner:
                 positions[config.id] = position
             node = BacktestNode(configs=[config for config, _ in planned.values()])
             try:
+                node.build()
+                register_statistics(node)
                 by_id = {result.run_config_id: result for result in node.run()}
                 return [
                     self._result(node, spec, config_id, params, by_id.get(config_id))
@@ -383,9 +483,15 @@ class NodeRunner:
             trades=trades,
             metrics=MetricReport.from_ledger(trades, balance),
             pnl_by_day=trades.pnl_by_day(),
-            nautilus_stats={"pnls": result.stats_pnls, "returns": result.stats_returns},
+            nautilus_stats={
+                "pnls": result.stats_pnls,
+                "returns": result.stats_returns,
+                "general": engine.portfolio.analyzer.get_performance_stats_general(),
+            },
             iterations=result.iterations,
             wall_seconds=_wall_seconds(result),
+            orders=engine.trader.generate_orders_report(),
+            fills=engine.trader.generate_order_fills_report(),
         )
 
 

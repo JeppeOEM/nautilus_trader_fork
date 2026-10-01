@@ -1,5 +1,7 @@
 // Thin typed fetch helper over the generated OpenAPI schema (AD-F5) -- proves the codegen
 // pipeline's output is actually consumed, not just generated and ignored (Story 15.1 AC #3).
+import type { Drawing } from "../lib/drawings";
+import { parseDrawings } from "../lib/drawings";
 import type {
   AlertCreate,
   AlertResponse,
@@ -8,6 +10,7 @@ import type {
   ArchiveStatusResponse,
   ArchiveStep,
   CandlesResponse,
+  DrawingsResponse,
   HealthResponse,
   IndicatorCatalogEntry,
   IndicatorConfigEntry,
@@ -294,4 +297,41 @@ export async function runArchiveNow(day: string | null): Promise<ArchiveRunRespo
     throw new HttpError(res.status, `POST /api/archive/run failed: ${res.status} ${detail}`);
   }
   return (await res.json()) as ArchiveRunResponse;
+}
+
+// Story 32.5: this coin's drawings (horizontal lines, trendlines, Fibonacci, positions), one
+// server-side resource so they follow the operator to another browser. `[]` when nothing has
+// been drawn yet (not an error).
+export async function fetchCoinDrawings(instrumentId: string): Promise<Drawing[]> {
+  const res = await fetch(`/api/coin/${encodeURIComponent(instrumentId)}/drawings`);
+  if (!res.ok) throw new HttpError(res.status, `GET /api/coin/${instrumentId}/drawings failed: ${res.status}`);
+  const body = (await res.json()) as DrawingsResponse;
+  return parseDrawings(body.items);
+}
+
+/** The browser's cap on a `keepalive` request body (the Fetch spec's 64 KiB in-flight quota). */
+export const KEEPALIVE_MAX_BYTES = 65_536;
+
+// Story 32.5: replaces this coin's whole drawing list. `unloading` (a save started as the page goes
+// away) asks for `keepalive`, so the request outlives the page; an ordinary save never does, so the
+// browser's keepalive cap can't refuse it.
+// Known limit: a body past `KEEPALIVE_MAX_BYTES` is sent without keepalive even on unload, so the
+// browser may cancel it as the page goes (the server keeps the previous list). Upgrade path: chunk
+// the list per drawing (a PUT per item) so every unload save fits the cap.
+export async function saveCoinDrawings(
+  instrumentId: string,
+  items: readonly Drawing[],
+  unloading = false,
+): Promise<void> {
+  const body = JSON.stringify({ items });
+  const res = await fetch(`/api/coin/${encodeURIComponent(instrumentId)}/drawings`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body,
+    keepalive: unloading && new TextEncoder().encode(body).length <= KEEPALIVE_MAX_BYTES,
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new HttpError(res.status, `PUT /api/coin/${instrumentId}/drawings failed: ${res.status} ${JSON.stringify(body)}`);
+  }
 }

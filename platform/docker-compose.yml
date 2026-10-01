@@ -7,13 +7,6 @@ x-logging: &default-logging
     max-size: "20m"
     max-file: "20"
 
-# data_api's picker PUT (Story 15.6) is the one `rw` writer of this host file; kept as an
-# anchor so the path/mount is defined in one place. A views preference store, so it lives under
-# data/ with the other durable stores (moved there from a package directory in Story 25.2).
-x-chart-indicator-config-path: &chart-indicator-config-path "/app/preferences/chart_indicators.toml"
-x-chart-indicator-config-mount: &chart-indicator-config-mount
-  ./data/chart_indicators.toml:/app/preferences/chart_indicators.toml:rw
-
 # CPU priority under contention (proposed 2026-09-26, applied by Story 28.1).
 # nifelheim is 2 vCPU / 3.7 GB (`.planning/debug/nifelheim-resource-exhaustion-2026-09-12.md`):
 # the load average reached 10.85 on 2 cores, dydx-collector alone sat at ~105 % CPU, and its
@@ -309,8 +302,7 @@ services:
       CATALOG_PATH: "/app/catalog"
       METRICS_DB_PATH: "/app/metrics_dir/metrics.db"
       CANDLES_DB_DIR: "/app/candles_dir"
-      CHART_INDICATOR_CONFIG_PATH: *chart-indicator-config-path
-      SCREENER_COLUMNS_CONFIG_PATH: "/app/preferences/screener_columns.toml"
+      CHART_PREFERENCES_DIR: "/app/preferences"
       ALERTS_PATH: "/app/data_api/alerts.toml"
       TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN:-}"
       TELEGRAM_CHAT_ID: "${TELEGRAM_CHAT_ID:-}"
@@ -326,13 +318,12 @@ services:
       - ./data/errors:/app/errors_dir
       # rw: saved alerts (Story 20.1) -- host file must exist (committed empty), same reason.
       - ./data_api/alerts.toml:/app/data_api/alerts.toml:rw
-      # rw: the Technicals tab's screener-wide column list (Story 17.5). The host file must
-      # exist (committed empty) or Docker would create a directory at this path.
-      - ./data/screener_columns.toml:/app/preferences/screener_columns.toml:rw
-      # rw (not ro): the picker's PUT /api/coin/{iid}/indicators (Story 15.6) writes this
-      # file back on every add/remove/param-apply change -- the one `rw` mount
-      # of this file.
-      - *chart-indicator-config-mount
+      # rw: the UI's preference files (chart_indicators.toml, screener_columns.toml,
+      # chart_drawings.toml), one mounted directory instead of one bind mount per file, so a new
+      # preference file needs no new mount (Story 32.5). data_api's PUT routes are the only
+      # writers. The directory (and the committed files in it) must exist on the host, or Docker
+      # would create it root-owned and uid 1000 could not write.
+      - ./data/preferences/:/app/preferences/:rw
     network_mode: host
     restart: always
     logging: *default-logging

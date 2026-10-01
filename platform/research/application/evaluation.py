@@ -328,6 +328,60 @@ def trade_frame(ledger: TradeLedger) -> pd.DataFrame:
     )
 
 
+def _report_frame(report: pd.DataFrame) -> pd.DataFrame:
+    """
+    Return an engine report with every `ts_*` column a UTC timestamp (NaT where unset), indexed by
+    `ts` (its `ts_init`, the order's creation / the fill's own `ts_init`) and sorted on it.
+    """
+    frame = report.reset_index()
+    for column in [c for c in frame.columns if str(c).startswith("ts_")]:
+        values = pd.to_numeric(frame[column], errors="coerce")
+        frame[column] = pd.to_datetime(values, unit="ns", utc=True)
+    if "ts_init" not in frame.columns:
+        return frame
+    return frame.set_index(frame["ts_init"].rename("ts")).sort_index(kind="stable")
+
+
+def orders_frame(result: RunResult) -> pd.DataFrame:
+    """
+    Return the run's orders, exactly the engine's `generate_orders_report()` (one row per order,
+    every column kept) with its `ts_*` columns as UTC timestamps and a `ts` index; empty when the
+    strategy sent none.
+    """
+    return _report_frame(result.orders)
+
+
+def fills_frame(result: RunResult) -> pd.DataFrame:
+    """
+    Return the run's fills, exactly the engine's `generate_order_fills_report()` (one row per
+    order that filled, with its `avg_px`, `slippage` and `commissions`) with its `ts_*` columns as
+    UTC timestamps and a `ts` index; empty when nothing filled.
+    """
+    return _report_frame(result.fills)
+
+
+def nautilus_stats_frame(result: RunResult) -> pd.DataFrame:
+    """
+    Return one row per Nautilus statistic across `pnls` (one group per currency), `returns` and
+    `general`: `group`, `statistic`, `value`. An undefined value is NaN, never 0.
+    """
+    rows: list[tuple[str, str, float]] = []
+    for group, stats in result.nautilus_stats.items():
+        scoped = (
+            {f"{group}[{k}]": v for k, v in stats.items()} if group == "pnls" else {group: stats}
+        )
+        for name, values in scoped.items():
+            rows += [(name, stat, _stat_value(value)) for stat, value in values.items()]
+    return pd.DataFrame(rows, columns=["group", "statistic", "value"])
+
+
+def _stat_value(value: object) -> float:
+    """Return a Nautilus statistic as a float; None or a non-number is NaN."""
+    return (
+        float(value) if isinstance(value, int | float) and not isinstance(value, bool) else math.nan
+    )
+
+
 def no_trades_note(ledger: TradeLedger) -> str | None:
     """Return the sentence printed instead of empty trade distributions and trade list."""
     if len(ledger):

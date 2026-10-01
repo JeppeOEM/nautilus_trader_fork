@@ -323,7 +323,7 @@ the old signals package and the dYdX collector's notebooks]`.
   `strategies/snapshot_backtest.py` (behind `backtest_ofi.py` and `run_backtest.py`) seeds the
   simulated exchange's quotes from `kernel.catalog_files.query_top_of_book` into a throwaway
   catalog.
-- **`strategies/example_strategy.py` / `strategies/ofi_strategy.py` / `strategies/snapshot_strategy.py`** — backtest-only
+- **`strategies/indicator_signal_strategy.py` / `strategies/ma_cross_strategy.py` / `strategies/ofi_strategy.py` / `strategies/snapshot_strategy.py`** — backtest-only
   reference strategies, referenced via `ImportableStrategyConfig` by string path
   (`research.strategies.<module>:<Class>`).
 - **`strategies/candle_pattern_strategy.py` / `strategies/backtest_candle_pattern.py`** — the

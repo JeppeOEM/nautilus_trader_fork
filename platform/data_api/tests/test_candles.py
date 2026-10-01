@@ -14,6 +14,7 @@
 # -------------------------------------------------------------------------------------------------
 """Story 15.3: `GET /api/candles/{instrument_id}` -- real ParquetDataCatalog, real DydxSecondSnapshot."""
 
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -25,7 +26,13 @@ from views import chart_series
 
 import data_api.app as app_module
 import data_api.routes.candles as candles_routes
+from nautilus_trader.model.currencies import BTC
+from nautilus_trader.model.currencies import USDT
 from nautilus_trader.model.identifiers import InstrumentId
+from nautilus_trader.model.identifiers import Symbol
+from nautilus_trader.model.instruments import CryptoPerpetual
+from nautilus_trader.model.objects import Price
+from nautilus_trader.model.objects import Quantity
 from nautilus_trader.persistence.catalog import ParquetDataCatalog
 
 
@@ -56,7 +63,33 @@ def _second(sec: int, price: float) -> SecondOHLC:
     )
 
 
-def _client(catalog_path: str, monkeypatch: pytest.MonkeyPatch) -> TestClient:
+def _define(
+    catalog_path: str | Path, iid: str, price_precision: int = 2, size_precision: int = 3
+) -> None:
+    """Write the instrument definition the route reads its label precision from."""
+    ParquetDataCatalog(str(catalog_path)).write_data(
+        [
+            CryptoPerpetual(
+                instrument_id=InstrumentId.from_str(iid),
+                raw_symbol=Symbol(iid.split(".")[0]),
+                base_currency=BTC,
+                quote_currency=USDT,
+                settlement_currency=USDT,
+                is_inverse=False,
+                price_precision=price_precision,
+                price_increment=Price.from_str(f"{Decimal(1).scaleb(-price_precision):f}"),
+                size_precision=size_precision,
+                size_increment=Quantity.from_str(f"{Decimal(1).scaleb(-size_precision):f}"),
+                ts_event=0,
+                ts_init=0,
+            )
+        ]
+    )
+
+
+def _client(catalog_path: str | Path, monkeypatch: pytest.MonkeyPatch) -> TestClient:
+    _define(catalog_path, _IID)
+    catalog_path = str(catalog_path)
     monkeypatch.setattr(candles_routes, "CATALOG_PATH", catalog_path)
     # No candle store unless a test builds one: these tests exercise the Parquet path.
     monkeypatch.setattr(candles_routes, "CANDLES_DB_DIR", f"{catalog_path}-no-candle-store-dir")
@@ -426,11 +459,29 @@ def test_market_field_next_to_venue(
     iid: str,
     market: str,
 ) -> None:
-    body = (
-        _client(str(tmp_path / "cat"), monkeypatch)
-        .get(
-            f"/api/candles/{iid}?before_ns={_BASE_NS}&limit=3&bar_seconds=60",
-        )
-        .json()
-    )
+    client = _client(str(tmp_path / "cat"), monkeypatch)
+    _define(tmp_path / "cat", iid)
+    body = client.get(
+        f"/api/candles/{iid}?before_ns={_BASE_NS}&limit=3&bar_seconds=60",
+    ).json()
     assert (body["venue"], body["market"]) == ("BYBIT", market)
+
+
+@pytest.mark.parametrize(("price_precision", "size_precision"), [(2, 3), (6, 1)])
+def test_response_carries_the_catalog_definitions_precision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, price_precision: int, size_precision: int
+) -> None:
+    client = _client(tmp_path / "cat", monkeypatch)
+    _define(tmp_path / "cat", "ABC-USD-PERP.DYDX", price_precision, size_precision)
+    url = f"/api/candles/ABC-USD-PERP.DYDX?before_ns={_BASE_NS}&limit=3&bar_seconds=60"
+    body = client.get(url).json()
+    assert (body["price_precision"], body["size_precision"]) == (price_precision, size_precision)
+
+
+def test_an_instrument_without_a_definition_is_a_404_naming_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _client(tmp_path / "cat", monkeypatch)
+    resp = client.get(f"/api/candles/NOPE-USD-PERP.DYDX?before_ns={_BASE_NS}&limit=3")
+    assert resp.status_code == 404
+    assert "NOPE-USD-PERP.DYDX" in resp.json()["detail"]

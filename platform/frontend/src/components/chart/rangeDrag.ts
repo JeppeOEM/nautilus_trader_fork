@@ -20,7 +20,7 @@ export interface RangeDragHandlers {
 export function attachRangeDrag(
   container: HTMLElement,
   chart: IChartApi,
-  host: ISeriesApi<"Candlestick">,
+  host: ISeriesApi<"Candlestick" | "Line">,
   handlers: RangeDragHandlers,
 ): () => void {
   let start: TrendlineAnchor | null = null;

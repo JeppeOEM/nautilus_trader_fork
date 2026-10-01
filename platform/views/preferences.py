@@ -13,10 +13,11 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-The two UI preference files, and their one loader/saver each (Story 24.2 merged
-the `chart_indicator_config` and `screener_columns_config` modules here, bodies verbatim):
+The UI preference files, and their one loader/saver each (Story 24.2 merged
+the `chart_indicator_config` and `screener_columns_config` modules here, bodies verbatim; Story 32.5
+added `chart_drawings.toml`). All three live in one directory (`CHART_PREFERENCES_DIR`, Story 32.5):
 
-- `chart_indicators.toml` (`CHART_INDICATOR_CONFIG_PATH`): per-instrument chart indicator
+- `chart_indicators.toml`: per-instrument chart indicator
   selections (Story 10.5), a table keyed by instrument_id, each holding a list of
   `{name, params, category}` entries -- `load_chart_indicators`/`save_chart_indicators`. Story 32.3
   added three optional keys to an entry: `source` (the price a close-fed indicator reads, default
@@ -25,7 +26,12 @@ the `chart_indicator_config` and `screener_columns_config` modules here, bodies 
   not default, so a file saved before them loads unchanged and saves back byte-identical. `id` is
   never persisted: it is a client-side sequence counter for the multi-instance picker UI,
   regenerated fresh on every load.
-- `screener_columns.toml` (`SCREENER_COLUMNS_CONFIG_PATH`): the screener-wide Technicals column
+- `chart_drawings.toml`: per-instrument chart drawings (Story 32.5), a table per instrument id
+  holding `v = 1` and an `items` array of tables, each tagged with a `kind` (`hline`,
+  `trendline`, `fib`, `position`) -- `load_chart_drawings`/`save_chart_drawings`. Each item is
+  checked by `validate_drawing`, which names the offending field (`DrawingError`): a malformed
+  item is refused, never dropped, so a saved drawing is never silently lost on a round trip.
+- `screener_columns.toml`: the screener-wide Technicals column
   selection (Story 17.5), one flat top-level `columns` array of
   `{name, params, category, bar_seconds}` tables in display order, applied to every row of the
   Rankings table -- `load_screener_columns`/`save_screener_columns`.
@@ -41,6 +47,7 @@ The paths themselves are the interface's (env vars read in `data_api`), passed i
 
 import logging
 import math
+import os
 import tomllib
 from dataclasses import dataclass
 from dataclasses import field
@@ -51,6 +58,13 @@ import tomli_w
 
 
 DEFAULT_BAR_SECONDS = 3600
+
+# `chart_drawings.toml` (Story 32.5): the table layout version and the closed set of item kinds.
+DRAWINGS_VERSION = 1
+DRAWING_KINDS = ("hline", "trendline", "fib", "position")
+FIB_LABEL_SIDES = ("left", "right")
+POSITION_SIDES = ("long", "short")
+MAX_DRAWING_LINE_WIDTH = 4
 
 _log = logging.getLogger(__name__)
 
@@ -180,8 +194,7 @@ def save_chart_indicators(config: dict[str, list[IndicatorEntry]], path: Path) -
         instrument_id: [_indicator_table(e) for e in entries]
         for instrument_id, entries in config.items()
     }
-    with path.open("wb") as f:
-        tomli_w.dump(raw, f)
+    _write_atomic(path, tomli_w.dumps(raw).encode())
 
 
 def load_screener_columns(path: Path) -> list[ColumnEntry]:
@@ -213,6 +226,235 @@ def save_screener_columns(entries: list[ColumnEntry], path: Path) -> None:
             for e in entries
         ]
     }
-    # Serialize first: a bad value must fail before the file is truncated. (Not a temp-file
-    # rename -- the docker single-file bind mount can't be renamed over.)
-    path.write_bytes(tomli_w.dumps(raw).encode())
+    _write_atomic(path, tomli_w.dumps(raw).encode())
+
+
+def _write_atomic(path: Path, data: bytes) -> None:
+    """
+    Publish `data` as `path`'s whole content: a sibling temp file, fsynced, renamed over the target
+    (the preference files share one mounted directory since Story 32.5, so a rename works where
+    the old single-file bind mounts could not). A crash or a failed write never leaves a truncated
+    file, and the caller serializes before calling, so a bad value fails before anything is written.
+    """
+    temp = path.with_name(f".{path.name}.tmp")
+    try:
+        with temp.open("wb") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())  # the bytes are on disk before the rename publishes them
+        os.replace(temp, path)
+    except BaseException:
+        temp.unlink(missing_ok=True)
+        raise
+
+
+# -- chart drawings ---------------------------------------------------------------------------------
+
+
+# Sane bounds: a position wider than this is not a drawing; a time past this is not UTC seconds
+# (year 2286 is 10**10; 2**62 would still fit a signed 64-bit, so this is well inside it).
+MAX_DRAWING_WIDTH_BARS = 10_000
+MAX_DRAWING_TIME = 10**11
+
+
+class DrawingError(ValueError):
+    """A drawing item (or the item list) that is not storable; `field` names what is wrong."""
+
+    def __init__(self, field_name: str, message: str) -> None:
+        super().__init__(f"{field_name}: {message}")
+        self.field = field_name
+
+
+def _is_number(value: Any) -> bool:
+    return isinstance(value, int | float) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _require_number(item: dict[str, Any], key: str, *, positive: bool = False) -> None:
+    if key not in item:
+        raise DrawingError(key, "is required")
+    if not _is_number(item[key]):
+        raise DrawingError(key, "must be a finite number")
+    if positive and item[key] <= 0:
+        raise DrawingError(key, "must be greater than zero")
+
+
+def _require_int(item: dict[str, Any], key: str, low: int, high: int | None = None) -> None:
+    value = item.get(key)
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise DrawingError(key, "must be an integer")
+    if value < low or (high is not None and value > high):
+        raise DrawingError(
+            key, f"must be at least {low}" + (f" and at most {high}" if high is not None else "")
+        )
+
+
+def _check_time(value: Any, field_name: str) -> None:
+    """Check a UTC-seconds time: an integer in `[0, MAX_DRAWING_TIME]` (far below int64)."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise DrawingError(field_name, "time must be an integer (UTC seconds)")
+    if value < 0 or value > MAX_DRAWING_TIME:
+        raise DrawingError(field_name, f"time must be between 0 and {MAX_DRAWING_TIME}")
+
+
+def _check_anchors(item: dict[str, Any]) -> None:
+    """`anchors` is exactly two `{time, price}` points: UTC seconds (an integer) and a price."""
+    anchors = item.get("anchors")
+    if not isinstance(anchors, list) or len(anchors) != 2:
+        raise DrawingError("anchors", "must be a list of exactly two {time, price} points")
+    for anchor in anchors:
+        if not isinstance(anchor, dict) or set(anchor) != {"time", "price"}:
+            raise DrawingError("anchors", "each point must be exactly {time, price}")
+        _check_time(anchor["time"], "anchors")
+        if not _is_number(anchor["price"]):
+            raise DrawingError("anchors", "price must be a finite number")
+
+
+def _check_fib_options(item: dict[str, Any]) -> None:
+    """Every fib option is required (the client types them required): nothing is defaulted."""
+    for key in ("levels", "extend_right", "label_side", "line_width"):
+        if key not in item:
+            raise DrawingError(key, "is required")
+    _check_fib_levels(item["levels"])
+    if not isinstance(item["extend_right"], bool):
+        raise DrawingError("extend_right", "must be a boolean")
+    if item["label_side"] not in FIB_LABEL_SIDES:
+        raise DrawingError("label_side", f"must be one of {list(FIB_LABEL_SIDES)}")
+    _require_int(item, "line_width", 1, MAX_DRAWING_LINE_WIDTH)
+
+
+def _check_fib_levels(levels: Any) -> None:
+    """Check a fib's levels: `{ratio, enabled, color}` each, a ratio of at least 0, none twice."""
+    if not isinstance(levels, list):
+        raise DrawingError("levels", "must be a list of {ratio, enabled, color}")
+    ratios: set[float] = set()
+    for level in levels:
+        if not isinstance(level, dict) or set(level) != {"ratio", "enabled", "color"}:
+            raise DrawingError("levels", "each level must be exactly {ratio, enabled, color}")
+        if not _is_number(level["ratio"]) or level["ratio"] < 0:
+            raise DrawingError("levels", "ratio must be a finite number of at least 0")
+        if not isinstance(level["enabled"], bool) or not isinstance(level["color"], str):
+            raise DrawingError("levels", "enabled must be a boolean and color a string")
+        if level["ratio"] in ratios:
+            raise DrawingError("levels", f"ratio {level['ratio']} appears twice")
+        ratios.add(level["ratio"])
+
+
+def _check_position(item: dict[str, Any]) -> None:
+    """
+    Check a position: entry, stop and target are ordered by its side, a long has `stop < entry <
+    target`, a short `target < entry < stop`, so a target or stop dragged past the entry is never
+    stored. `account` and `risk_pct` come as a pair or not at all (the optional size).
+    """
+    if item.get("side") not in POSITION_SIDES:
+        raise DrawingError("side", f"must be one of {list(POSITION_SIDES)}")
+    _check_time(item.get("time"), "time")
+    for key in ("entry", "stop", "target"):
+        _require_number(item, key, positive=True)
+    _require_int(item, "width_bars", 1, MAX_DRAWING_WIDTH_BARS)
+    entry, stop, target = item["entry"], item["stop"], item["target"]
+    ordered = stop < entry < target if item["side"] == "long" else target < entry < stop
+    if not ordered:
+        raise DrawingError("entry", f"a {item['side']} needs its stop and target on opposite sides")
+    for key in ("account", "risk_pct"):
+        if key in item:
+            _require_number(item, key, positive=True)
+    if ("account" in item) != ("risk_pct" in item):
+        raise DrawingError("risk_pct", "account and risk_pct are set together or not at all")
+
+
+# Per kind: the keys beyond `kind`/`id`/`color` it may carry; any other key is refused.
+_DRAWING_KEYS: dict[str, frozenset[str]] = {
+    "hline": frozenset({"price"}),
+    "trendline": frozenset({"anchors"}),
+    "fib": frozenset({"anchors", "levels", "extend_right", "label_side", "line_width"}),
+    "position": frozenset(
+        {"side", "time", "entry", "stop", "target", "width_bars", "account", "risk_pct"}
+    ),
+}
+
+
+def validate_drawing(item: Any) -> dict[str, Any]:
+    """
+    Return `item` unchanged when it is a storable drawing, else raise `DrawingError` naming the
+    field. Strict by design (DATA-07): an unknown key or a wrong type is refused rather than
+    dropped, so what the client saved is exactly what a reload returns.
+    """
+    if not isinstance(item, dict):
+        raise DrawingError("items", "each drawing must be an object")
+    kind = item.get("kind")
+    if kind not in DRAWING_KINDS:
+        raise DrawingError("kind", f"must be one of {list(DRAWING_KINDS)}")
+    if not isinstance(item.get("id"), str) or not item["id"]:
+        raise DrawingError("id", "must be a non-empty string")
+    if "color" in item and not isinstance(item["color"], str):
+        raise DrawingError("color", "must be a string")
+    unknown = set(item) - {"kind", "id", "color"} - _DRAWING_KEYS[kind]
+    if unknown:
+        raise DrawingError(sorted(unknown)[0], f"is not a field of a {kind}")
+    if kind == "hline":
+        _require_number(item, "price", positive=True)
+    elif kind == "trendline":
+        _check_anchors(item)
+    elif kind == "fib":
+        _check_anchors(item)
+        _check_fib_options(item)
+    else:
+        _check_position(item)
+    return item
+
+
+def validate_drawings(items: Any) -> list[dict[str, Any]]:
+    """Validate a whole item list (`DrawingError` naming `items` or the item's field)."""
+    if not isinstance(items, list):
+        raise DrawingError("items", "must be a list of drawings")
+    seen: set[str] = set()
+    for index, item in enumerate(items):
+        try:
+            validate_drawing(item)
+            if item["id"] in seen:
+                raise DrawingError("id", f"{item['id']!r} appears twice")
+        except DrawingError as exc:
+            raise DrawingError(f"items[{index}].{exc.field}", str(exc).split(": ", 1)[1]) from exc
+        seen.add(item["id"])
+    return items
+
+
+def load_chart_drawings(path: Path) -> dict[str, list[dict[str, Any]]]:
+    """
+    Load every instrument's drawings. A missing or empty file (nothing drawn yet) is `{}`; a table
+    of another version or a malformed item raises `DrawingError` -- the file is hand-editable and
+    a drawing is never silently skipped.
+    """
+    if not path.exists():
+        return {}
+    with path.open("rb") as f:
+        raw = tomllib.load(f)
+    out: dict[str, list[dict[str, Any]]] = {}
+    for instrument_id, table in raw.items():
+        # Exactly `v` and `items` (a save never writes an instrument without drawings): a missing
+        # list or a stray key is refused, never defaulted or dropped by the next rewrite.
+        if (
+            not isinstance(table, dict)
+            or table.get("v") != DRAWINGS_VERSION
+            or set(table) != {"v", "items"}
+        ):
+            raise DrawingError(
+                instrument_id,
+                f"is not a v = {DRAWINGS_VERSION} drawings table (exactly `v` and `items`)",
+            )
+        out[instrument_id] = validate_drawings(table["items"])
+    return out
+
+
+def save_chart_drawings(config: dict[str, list[dict[str, Any]]], path: Path) -> None:
+    """
+    Persist `config` as TOML, a full rewrite. Validates first and serializes before touching the
+    file, then writes a sibling temp file and renames it over the target, so a crash or a bad value
+    never leaves a truncated file. An instrument with no drawings left is dropped from the file.
+    """
+    raw = {
+        instrument_id: {"v": DRAWINGS_VERSION, "items": validate_drawings(items)}
+        for instrument_id, items in config.items()
+        if items
+    }
+    _write_atomic(path, tomli_w.dumps(raw).encode())

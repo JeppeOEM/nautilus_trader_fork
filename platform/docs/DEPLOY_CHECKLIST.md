@@ -151,8 +151,9 @@ service names, env vars, container paths and the catalog layout are identical.
 One-off, on `nifelheim`, the first deploy that contains Story 25.2. `ml_signals/` was deleted,
 so the two web-UI preference files it held (`chart_indicators.toml`, `screener_columns.toml`,
 both rewritten by `data_api` from the UI) moved to `platform/data/` and are mounted at
-`/app/preferences/` (`CHART_INDICATOR_CONFIG_PATH`/`SCREENER_COLUMNS_CONFIG_PATH` keep their
-names; key sets unchanged). The ranking process now runs as `python3 -m ranking` (same compose
+`/app/preferences/` (`CHART_INDICATOR_CONFIG_PATH`/`SCREENER_COLUMNS_CONFIG_PATH` kept their
+names; key sets unchanged) -- since Story 32.5 those two paths are one mounted directory,
+`./data/preferences/` -> `/app/preferences/`, see the Deferred operator actions entry `32-5`. The ranking process now runs as `python3 -m ranking` (same compose
 service `ranking_engine`, same env vars, same `metrics.db`).
 
 1. Keep the live selections before pulling: the UI has rewritten the tracked files in place, so
@@ -1387,3 +1388,29 @@ look for.
 - [ ] When D-146's VPS profile lands (entry `28-1-capture-hotpath-metrics-cpu-priority-and-vps-profile`),
       re-check its README's ranking against the dev-box figures in D-65 and replace the projection's
       "x 3, assumed" with the profile's measured dev-box-to-VPS ratio.
+
+### 32-5 preferences directory and server-side chart drawings (commit: this story's)
+
+`chart_indicators.toml` and `screener_columns.toml` moved to `platform/data/preferences/` (`git mv`)
+and `docker-compose.yml` now mounts that one directory at `/app/preferences/` instead of one bind
+mount per file; `chart_drawings.toml` (new, committed empty) joins them. `data_api` derives all
+three paths from `CHART_PREFERENCES_DIR` and refuses to start while the removed
+`CHART_INDICATOR_CONFIG_PATH`/`SCREENER_COLUMNS_CONFIG_PATH` are set. `GET /api/candles/{iid}`
+now answers 404 for an instrument with no definition in the catalog and carries its
+`price_precision`/`size_precision`.
+
+- [ ] On the VPS, stop the writer first so no UI save lands between the copy and the pull:
+      `cd ~/nautilus_trader_fork/platform && docker compose stop data_api`.
+- [ ] Keep the live files: `cp data/chart_indicators.toml data/screener_columns.toml /tmp/`, then
+      `git checkout -- data/chart_indicators.toml data/screener_columns.toml` (the UI rewrote the
+      tracked copies in place, so the pull would refuse them) and `git pull`.
+- [ ] Put them in the new directory: `cp /tmp/chart_indicators.toml /tmp/screener_columns.toml
+      data/preferences/` (this overwrites the committed copies; `chart_drawings.toml` stays as
+      pulled), then `rm -f data/chart_indicators.toml data/screener_columns.toml`.
+- [ ] Check the host's compose environment does not set `CHART_INDICATOR_CONFIG_PATH` or
+      `SCREENER_COLUMNS_CONFIG_PATH` anywhere (`platform/.env`, an override file): `data_api`
+      refuses to start naming `CHART_PREFERENCES_DIR` if it does.
+- [ ] `make up`, then check: a coin's saved indicators and the Technicals columns are still there,
+      a horizontal line drawn in the browser before the deploy appears once (it is imported from
+      that browser's `localStorage` on the first load) and survives a reload in another browser,
+      and `GET /api/candles/<a collected id>` carries both precision fields.

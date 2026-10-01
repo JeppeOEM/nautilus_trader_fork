@@ -22,7 +22,10 @@ exact text each writer produces, recorded from the pre-move writers
 at `f879c11ca3`), so a key rename or a serialisation change fails here, not on a deployed file.
 """
 
+from collections.abc import Callable
 from pathlib import Path
+
+import pytest
 
 from views.preferences import DEFAULT_BAR_SECONDS
 from views.preferences import ColumnEntry
@@ -216,3 +219,32 @@ def test_a_style_the_put_route_would_refuse_falls_back_to_the_default_on_load(
             entry = load_chart_indicators(path)["BTC-USD-PERP.DYDX"][0]
         assert entry.style == {}, style
         assert len(caplog.records) == 1, style
+
+
+def _save_indicators(path: Path, name: str) -> None:
+    save_chart_indicators(
+        {"BTC-USD-PERP.DYDX": [IndicatorEntry(name=name, params={}, category="custom")]}, path
+    )
+
+
+def _save_columns(path: Path, name: str) -> None:
+    save_screener_columns([ColumnEntry(name=name, params={}, category="custom")], path)
+
+
+@pytest.mark.parametrize("save", [_save_indicators, _save_columns])
+def test_a_failed_save_leaves_the_old_file_and_no_temp_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, save: Callable[[Path, str], None]
+) -> None:
+    # Story 32.5: one mounted directory, so both files are written by temp file + rename too.
+    path = tmp_path / "prefs.toml"
+    save(path, "OFI")
+    before = path.read_text()
+
+    def boom(*_args: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr("views.preferences.os.replace", boom)
+    with pytest.raises(OSError, match="disk full"):
+        save(path, "OBI")
+    assert path.read_text() == before
+    assert [p.name for p in tmp_path.iterdir()] == ["prefs.toml"]

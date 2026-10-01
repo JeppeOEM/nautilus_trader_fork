@@ -13,8 +13,12 @@
 #  limitations under the License.
 # -------------------------------------------------------------------------------------------------
 """
-Backtest LogisticTrendStrategy against locally collected dYdX catalog data, across every
+Backtest `IndicatorSignalStrategy` (signal `logistic_trend`) against locally collected dYdX catalog data, across every
 coin in the live Watchlist (or an explicit coin-set) in a single call.
+
+The exit rule is new: the deleted `LogisticTrendStrategy` only entered when flat and never exited,
+while `IndicatorSignalStrategy` closes on the opposite signal and re-enters, so runs saved before
+this change are not comparable with runs made now.
 
 Uses BacktestNode + BacktestDataConfig so the catalog is streamed in chunks
 rather than loaded fully into RAM — the catalog grows continuously, so this
@@ -97,14 +101,18 @@ def _build_run_config(
             logging=LoggingConfig(log_level="ERROR"),
             strategies=[
                 ImportableStrategyConfig(
-                    strategy_path="research.strategies.example_strategy:LogisticTrendStrategy",
-                    config_path="research.strategies.example_strategy:LogisticTrendConfig",
+                    strategy_path=(
+                        "research.strategies.indicator_signal_strategy:IndicatorSignalStrategy"
+                    ),
+                    config_path=(
+                        "research.strategies.indicator_signal_strategy:IndicatorSignalStrategyConfig"
+                    ),
                     config={
                         "instrument_id": str(instrument.id),
                         "bar_type": f"{instrument.id}-{bar_interval}-LAST-INTERNAL",
                         "trade_size": Decimal("0.01"),
-                        "buy_threshold": buy_threshold,
-                        "sell_threshold": sell_threshold,
+                        "signal": "logistic_trend",
+                        "signal_params": {"buy": buy_threshold, "sell": sell_threshold},
                     },
                 ),
             ],

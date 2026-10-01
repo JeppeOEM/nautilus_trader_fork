@@ -18,7 +18,7 @@ backtestable via BacktestNode. Feeds MultiLevelOFI directly from the snapshot's 
 lists -- no OrderBook reconstruction needed, since DydxSecondSnapshot already carries the
 top-20 bid/ask levels per second -- and enters/exits on an order-flow-imbalance threshold
 cross. Deliberately minimal: this story is about backtest infrastructure, not signal quality
-(mirrors example_strategy.py/ofi_strategy.py's own minimal-but-real scope).
+(mirrors indicator_signal_strategy.py/ofi_strategy.py's own minimal-but-real scope).
 """
 
 from decimal import Decimal

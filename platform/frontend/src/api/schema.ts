@@ -74,6 +74,12 @@ export interface CandlesResponse {
   has_more: boolean;
   venue: string;
   market: string;
+  price_precision: number;
+  size_precision: number;
+}
+
+export interface DrawingsResponse {
+  items: Record<string, unknown>[];
 }
 
 export interface ErrorsResponse {

@@ -46,7 +46,7 @@ imports per AD-4):
 Trading logic is a single, deliberately minimal combination: OnlineLogisticTrend's
 trend probability crossing a threshold, confirmed by MultiLevelOFI's direction
 agreeing -- mirroring the single-signal threshold-cross pattern already established
-in example_strategy.py/snapshot_strategy.py, not ofi_strategy.py's full multi-gate
+in indicator_signal_strategy.py/snapshot_strategy.py, not ofi_strategy.py's full multi-gate
 design (cancellation pressure, cumulative delta, mid-layer confirmation), which stays
 backtest-only. Microprice, OrderFlowImbalance (top-of-book), and MultiLevelOBI are
 computed, fed, and published (`publish_signal`) on every update for operational

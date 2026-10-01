@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { decodeBookPrices, formatUnits, MAX_PRECISION, unitsToNumber } from "./units";
+import { decodeBookPrices, formatDecimal, formatUnits, MAX_PRECISION, roundToPrecision, unitsToNumber } from "./units";
 
 describe("formatUnits (Story 30.2)", () => {
   it("moves the decimal point in the integer's own digits", () => {
@@ -90,5 +90,33 @@ describe("decodeBookPrices", () => {
 
   it("refuses a level beyond the safe integers", () => {
     expect(() => decodeBookPrices([Number.MAX_SAFE_INTEGER, 1], "ask")).toThrow(RangeError);
+  });
+});
+
+describe("formatDecimal and roundToPrecision (Story 32.5)", () => {
+  it("prints a derived float at exactly the instrument's decimals, with no float noise", () => {
+    expect(formatDecimal(90 + 10 * 0.236, 2)).toBe("92.36"); // 92.36000000000001
+    expect(formatDecimal(0.1 + 0.2, 6)).toBe("0.300000");
+    expect(formatDecimal(100, 0)).toBe("100");
+    expect(formatDecimal(-0.4, 0)).toBe("0");
+    expect(formatDecimal(-1.5, 2)).toBe("-1.50");
+  });
+
+  it("rounds to the grid as a number", () => {
+    expect(roundToPrecision(61090.598549999, 5)).toBe(61090.59855);
+    expect(roundToPrecision(101.005, 2)).toBe(101.01);
+  });
+
+  it("rounds a decimal half-tick up as written, and a negative half away from zero", () => {
+    // 1.005 * 100 is 100.49999999999999 in binary: Math.round alone would print "1.00".
+    expect(formatDecimal(1.005, 2)).toBe("1.01");
+    expect(roundToPrecision(1.005, 2)).toBe(1.01);
+    expect(formatDecimal(-2.5, 0)).toBe("-3");
+    expect(formatDecimal(-0.004, 2)).toBe("0.00");
+  });
+
+  it("refuses a non-finite value and a value whose units are not a safe integer", () => {
+    expect(() => formatDecimal(Number.NaN, 2)).toThrow(RangeError);
+    expect(() => formatDecimal(1e20, 2)).toThrow(RangeError);
   });
 });

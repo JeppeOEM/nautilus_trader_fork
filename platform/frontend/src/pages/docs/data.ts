@@ -297,7 +297,7 @@ export const INDICATORS: Indicator[] = [
   {
     id: "logistic_trend", group: "chart", name: "OnlineLogisticTrend", cadence: "static", window: "online, one SGD step per bar",
     owner: "strategy-only — fed manually by a Strategy subclass",
-    shownIn: ["Backtest / live bot strategies only (research/strategies/example_strategy.py)"],
+    shownIn: ["Backtest / live bot strategies only (research/strategies/indicator_signal_strategy.py, signal logistic_trend)"],
     tagline: "Online (incremental) logistic regression predicting P(next bar's return > 0) from the last N bar-to-bar returns.",
     formula: "z = weights · features + bias\nP(up) = 1 / (1 + e⁻ᶻ)\neach new bar: one SGD step trains on the PREVIOUS prediction now that the true outcome is known, then predicts the next probability",
     notes: [

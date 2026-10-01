@@ -47,6 +47,37 @@ export function formatUnits(units: Units, precision: number): string {
   return negative ? `-${text}` : text;
 }
 
+/**
+ * A float computed in the browser (a Fibonacci level, a position's target, a percentage) as its
+ * decimal string at `precision`, through the same integer path as every stored price: the value
+ * is rounded once to whole `10^-precision` units, then `formatUnits` moves the point. Never
+ * `toFixed` (binary-float artefacts such as `1.005 -> "1.00"`) and never a longer digit string,
+ * so a label carries exactly the instrument's decimals and no float noise (`92.36000000000001`).
+ * A value too large for its units to be a safe integer throws (a RangeError), never a rounded lie.
+ */
+export function formatDecimal(value: number, precision: number): string {
+  checkPrecision(precision);
+  if (!Number.isFinite(value)) throw new RangeError(`${value} is not a finite number`);
+  return formatUnits(roundUnits(value, precision), precision);
+}
+
+/** `value` rounded to the nearest `10^-precision` (the instrument's price/size grid), as a number. */
+export function roundToPrecision(value: number, precision: number): number {
+  return unitsToNumber(roundUnits(value, precision), precision);
+}
+
+/**
+ * `value` in whole `10^-precision` units, half away from zero. The scaled product is first cut to
+ * 15 significant digits (all a double carries exactly), so a decimal half-tick that binary floats
+ * land just below (`1.005 * 100 = 100.49999999999999`) still rounds up as written (`101`), and a
+ * negative half mirrors a positive one (`-2.5 -> -3`, not `Math.round`'s `-2`).
+ */
+function roundUnits(value: number, precision: number): number {
+  const scaled = Number((Math.abs(value) * 10 ** precision).toPrecision(15));
+  const units = Math.round(scaled);
+  return value < 0 && units !== 0 ? -units : units;
+}
+
 /** Integer units as a number for display or plotting, through the exact string. */
 export function unitsToNumber(units: Units, precision: number): number {
   return Number(formatUnits(units, precision));

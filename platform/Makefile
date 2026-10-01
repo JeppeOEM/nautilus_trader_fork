@@ -216,12 +216,12 @@ VERIFY_COMPOSE := REDIS_PORT=$(VERIFY_REDIS_PORT) DATA_API_PORT=$(VERIFY_DATA_AP
 VERIFY_SERVICES := redis bybit_collector hyperliquid_collector archive ranking_engine data_api dozzle reference_recorder_bybit reference_recorder_hyperliquid live-paper
 # verification/raw and verification/scratch: the verify `archive` mounts them (its nightly
 # `verify_day` step, Story 31.11); created here so dockerd never creates them root-owned.
-VERIFY_DATA_DIRS := catalog candles errors metrics archive verification verification/raw verification/scratch verification/bot_signals/live coverage live_paper
+VERIFY_DATA_DIRS := preferences catalog candles errors metrics archive verification verification/raw verification/scratch verification/bot_signals/live coverage live_paper
 # `verify-up` marks the data/ it starts on; `verify-wipe` deletes only a marked data/, so a
 # `make verify-wipe` typed in the live checkout (its stack stopped) never deletes live data.
 VERIFY_MARKER := .verify-stack
 # What `verify-wipe` never deletes: the operator's hand-kept preference and plan files, and the mark.
-VERIFY_KEEP := ! -name dydx_config.toml ! -name chart_indicators.toml ! -name screener_columns.toml ! -name $(VERIFY_MARKER)
+VERIFY_KEEP := ! -name dydx_config.toml ! -name preferences ! -name $(VERIFY_MARKER)
 # Every guard below reads `docker ps`, whose failure (daemon down, socket permission) prints
 # nothing -- the same as "no container": each verify target checks the daemon answers first.
 VERIFY_DOCKER_UP = docker ps -q >/dev/null || { echo "$@: the docker daemon does not answer; refusing to guess what runs" >&2; exit 1; }

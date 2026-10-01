@@ -121,6 +121,62 @@ NOTEBOOK_ENV: dict[str, dict[str, str]] = {
 }
 
 
+# Every indicator and strategy size shrunk to fit ten one-minute bars (07 and 08 share it; a key a
+# notebook does not read is ignored): short periods, Ichimoku 2/3/4 displaced by one bar, a narrow
+# Keltner channel, RSI and fuzzy-candle thresholds the fixture's bars reach, and a TWAP that
+# finishes inside one bar.
+_FIXTURE_PERIODS = {
+    "period": 3,
+    "period_k": 3,
+    "period_d": 2,
+    "fast": 2,
+    "slow": 3,
+    "signal": 2,
+    "k": 0.5,
+    "k_multiplier": 0.2,
+    "atr_period": 3,
+    "atr_multiple": 1.0,
+    "rsi_period": 3,
+    "rsi_buy": 0.5,
+    "rsi_sell": 0.5,
+    "twap_horizon_secs": 6.0,
+    "twap_interval_secs": 3.0,
+    "Swings.period": 2,
+    "IchimokuCloud.tenkan": 2,
+    "IchimokuCloud.kijun": 3,
+    "IchimokuCloud.senkou": 4,
+    "IchimokuCloud.displacement": 1,
+    "Signal.rsi.low": 0.49,
+    "Signal.rsi.high": 0.51,
+    "Signal.fuzzy_candle.period": 3,
+    "Signal.fuzzy_candle.min_size": 1,
+}
+NOTEBOOK_ENV.update(
+    {
+        # Every indicator of the catalog replayed over the ten 1 m bars (a venue-timed instrument
+        # clear of the dYdX outage) with the sizes above, and the snapshot indicators over their
+        # 600 s with small windows.
+        "07_indicator_atlas.py": {
+            "START": _iso(DATA_START_NS),
+            "END": _iso(DATA_END_NS),
+            "NOTEBOOK_INSTRUMENT": json.dumps("BTC-USD-PERP.HYPERLIQUID"),
+            "NOTEBOOK_PERIODS": json.dumps(_FIXTURE_PERIODS),
+            "NOTEBOOK_OBI_LEVELS": json.dumps(5),
+            "NOTEBOOK_OFI_WINDOW": json.dumps(5),
+        },
+        # The thirteen gallery strategies on the same ten minute bars with the sizes above, then
+        # the first one across every execution model.
+        "08_strategy_gallery.py": {
+            "START": _iso(DATA_START_NS),
+            "END": _iso(DATA_END_NS),
+            "NOTEBOOK_INSTRUMENT": json.dumps("BTC-USD-PERP.HYPERLIQUID"),
+            "NOTEBOOK_PERIODS": json.dumps(_FIXTURE_PERIODS),
+            "NOTEBOOK_DATA": json.dumps("bars:1-MINUTE"),
+        },
+    }
+)
+
+
 def _numbered() -> list[Path]:
     return sorted(NOTEBOOKS_DIR.glob("[0-9]*_*.py"))
 

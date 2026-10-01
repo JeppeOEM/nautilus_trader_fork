@@ -35,7 +35,21 @@ import {
   type SessionProfileCache,
   type SessionProfileSettings,
 } from "../lib/sessionProfile";
-import { chartVar } from "../components/chart/chartTheme";
+import { chartVar, fibLevelColor } from "../components/chart/chartTheme";
+import DrawingSettingsDialog from "../components/chart/DrawingSettingsDialog";
+import {
+  type Drawing,
+  type DragPoint,
+  type InstrumentPrecision,
+  type PositionSide,
+  applyHandleDrag,
+  defaultFibLevels,
+  nextDrawingId,
+  newPosition,
+  storedTime,
+} from "../lib/drawings";
+import { roundToPrecision } from "../lib/units";
+import { type ChartDrawings, useChartDrawings } from "../hooks/useChartDrawings";
 import { DEFAULT_SOURCE, entryId, splitSeriesKey } from "../lib/indicatorId";
 import { outputStyle } from "../lib/indicatorStyle";
 import { assignPaneColor } from "../components/chart/paneColors";
@@ -70,22 +84,6 @@ function loadTimeframe(instrumentId: string): number {
   }
 }
 
-function hlineStorageKey(instrumentId: string): string {
-  return `chart-hlines:${instrumentId}`;
-}
-
-// Drawn lines persist per coin in this browser (localStorage may throw/be blocked --
-// then the chart just starts empty). Known limit: browser-local; move server-side beside
-// the indicator config if lines must follow the user across browsers.
-function loadPriceLines(instrumentId: string): PriceLineSpec[] {
-  try {
-    const parsed: unknown = JSON.parse(localStorage.getItem(hlineStorageKey(instrumentId)) ?? "[]");
-    return Array.isArray(parsed) ? (parsed as PriceLineSpec[]) : [];
-  } catch {
-    return [];
-  }
-}
-
 // `key` is "{indicator_id}.{output_attr}" and indicator_id starts with the catalog name.
 // Longest name wins so a name that prefixes another can't claim its keys.
 function catalogNameForKey(key: string, catalog: Record<string, IndicatorCatalogEntry>): string | undefined {
@@ -110,7 +108,7 @@ function legendTitle(entry: IndicatorConfigEntry): string {
 
 // Story 18.1 (AC #1): the chart's drawing-tool state -- "cursor" is the inert default.
 // Stories 18.2/18.3 extend this union with their tools, never a second state variable.
-export type ChartTool = "cursor" | "hline" | "trendline" | "measure" | "frvp";
+export type ChartTool = "cursor" | "hline" | "trendline" | "fib" | "long" | "short" | "measure" | "frvp";
 
 interface ChartToolDef {
   id: ChartTool;
@@ -122,6 +120,12 @@ interface ChartToolDef {
    * MVP scope decision): disables the button there and disarms an armed tool (see the
    * mode-guard effect in ChartInner). */
   candlesOnly: boolean;
+  /** Places a drawing that is saved with the coin: off until the coin's drawings have loaded (a
+   * placement before then would be overwritten by the load, or overwrite the server's list). */
+  placesDrawing?: boolean;
+  /** Labels its prices at the instrument's precision: off until the first candles response has
+   * carried it, never at a guessed one. */
+  needsPrecision?: boolean;
 }
 
 // The left tool rail's tools, as data -- Stories 18.2/18.3 append entries here and
@@ -141,8 +145,35 @@ const SELECT_TOOLS: readonly ChartToolDef[] = [
   },
 ];
 const DRAWING_TOOLS: readonly ChartToolDef[] = [
-  { id: "trendline", label: "Trend", ariaLabel: "Trendline tool", candlesOnly: false },
-  { id: "hline", label: "HLine", ariaLabel: "Horizontal line tool", candlesOnly: true },
+  { id: "trendline", label: "Trend", ariaLabel: "Trendline tool", candlesOnly: false, placesDrawing: true },
+  { id: "hline", label: "HLine", ariaLabel: "Horizontal line tool", candlesOnly: true, placesDrawing: true },
+  {
+    id: "fib",
+    label: "Fib",
+    ariaLabel: "Fibonacci retracement tool",
+    title: "Fibonacci retracement: drag from anchor A to anchor B",
+    candlesOnly: false,
+    placesDrawing: true,
+    needsPrecision: true,
+  },
+  {
+    id: "long",
+    label: "Long",
+    ariaLabel: "Long position tool",
+    title: "Long position: click the entry price",
+    candlesOnly: false,
+    placesDrawing: true,
+    needsPrecision: true,
+  },
+  {
+    id: "short",
+    label: "Short",
+    ariaLabel: "Short position tool",
+    title: "Short position: click the entry price",
+    candlesOnly: false,
+    placesDrawing: true,
+    needsPrecision: true,
+  },
   { id: "measure", label: "Measure", ariaLabel: "Measurement tool", candlesOnly: true },
   { id: "frvp", label: "FRVP", ariaLabel: "Fixed range volume profile tool", candlesOnly: true },
 ];
@@ -185,15 +216,31 @@ interface EdgeGhost {
   time: number;
 }
 
+const NO_BARS = (): number | null => null;
+
 interface ChartInnerProps {
   instrumentId: string;
+  /** The coin's drawings, held by the page above this component: a timeframe change remounts it. */
+  drawingStore: ChartDrawings;
+  /** The instrument's decimals once any candles response has carried them, else `null`. */
+  heldPrecision: InstrumentPrecision | null;
+  onPrecision: (precision: InstrumentPrecision) => void;
   barSeconds: number;
   volumeOn: boolean;
   onVolumeChange: (on: boolean) => void;
   onTimeframeChange: (seconds: number) => void;
 }
 
-function ChartInner({ instrumentId, barSeconds, volumeOn, onVolumeChange, onTimeframeChange }: ChartInnerProps) {
+function ChartInner({
+  instrumentId,
+  drawingStore,
+  heldPrecision,
+  onPrecision,
+  barSeconds,
+  volumeOn,
+  onVolumeChange,
+  onTimeframeChange,
+}: ChartInnerProps) {
   const [chart, setChart] = useState<IChartApi | null>(null);
   // Story 15.7: Candles/Lines toggle (AC #1) -- `dashboard.py`'s own #btn-candles/
   // #btn-lines pair, carried forward. Only one of useCandles/useSnapshotSeries is ever
@@ -205,9 +252,24 @@ function ChartInner({ instrumentId, barSeconds, volumeOn, onVolumeChange, onTime
   // -- that component stays a pure function of its props (AD-F4), this page owns the
   // data. Deterministic counter ids (no uuid) keep specs stable and diffable.
   const [activeTool, setActiveTool] = useState<ChartTool>("cursor");
-  const [priceLines, setPriceLines] = useState<PriceLineSpec[]>(() => loadPriceLines(instrumentId));
-  const nextPriceLineIdRef = useRef(
-    priceLines.reduce((max, l) => Math.max(max, Number(l.id.replace("hline-", "")) || 0), 0) + 1,
+  // Story 32.5: every drawing (horizontal lines, trendlines, Fibonacci, positions) is one list in
+  // one server-side resource, restored on mount and saved on change by `useChartDrawings`.
+  const { drawings: allDrawings, setDrawings: setAllDrawings, status: drawingsStatus, saveError: drawingsSaveError } = drawingStore;
+  const [settingsId, setSettingsId] = useState<string | null>(null);
+  const priceLines = useMemo<PriceLineSpec[]>(
+    () =>
+      allDrawings.flatMap((d) =>
+        d.kind === "hline" ? [{ id: d.id, price: d.price, color: d.color ?? chartVar("--chart-drawing") }] : [],
+      ),
+    [allDrawings],
+  );
+  const drawings = useMemo<DrawingSpec[]>(
+    () =>
+      allDrawings.flatMap((d): DrawingSpec[] => {
+        if (d.kind === "hline") return [];
+        return [d.kind === "trendline" ? { ...d, color: d.color ?? chartVar("--chart-drawing") } : d];
+      }),
+    [allDrawings],
   );
   const [crosshairOn, setCrosshairOn] = useState(true);
   const [indicatorDialogOpen, setIndicatorDialogOpen] = useState(false);
@@ -216,8 +278,6 @@ function ChartInner({ instrumentId, barSeconds, volumeOn, onVolumeChange, onTime
   // Story 18.2: the trendline's first click, held until the second click completes it
   // (or Esc / a tool change discards it); `drawings` is the placed set.
   const [pendingAnchor, setPendingAnchor] = useState<TrendlineAnchor | null>(null);
-  const [drawings, setDrawings] = useState<DrawingSpec[]>([]);
-  const nextDrawingIdRef = useRef(1);
   const [frvps, setFrvps] = useState<FrvpEntry[]>([]);
   const [frvpSettings, setFrvpSettings] = useState(DEFAULT_VOLUME_PROFILE_SETTINGS);
   const [edgeGhost, setEdgeGhost] = useState<EdgeGhost | null>(null);
@@ -229,9 +289,26 @@ function ChartInner({ instrumentId, barSeconds, volumeOn, onVolumeChange, onTime
   const [sessionCfg, setSessionCfg] = useState<SessionConfig | null>(null);
   const [sessionCache] = useState<SessionProfileCache>(() => new Map());
   const [vrvpSettings, setVrvpSettings] = useState(DEFAULT_VOLUME_PROFILE_SETTINGS);
-  const { candles, volume: fullVolume, venueMarket, loadFailed, loadError, refreshNewest, appendBar, openGapTo } = useCandles(
-    instrumentId, chart, mode === "candles", barSeconds,
-  );
+  const {
+    candles,
+    volume: fullVolume,
+    venueMarket,
+    precision: candlesPrecision,
+    loadFailed,
+    loadError,
+    refreshNewest,
+    appendBar,
+    openGapTo,
+  } = useCandles(instrumentId, chart, mode === "candles", barSeconds);
+  // The page above keeps the first response's precision across a timeframe remount.
+  const precision = candlesPrecision ?? heldPrecision;
+  useEffect(() => {
+    if (candlesPrecision) onPrecision(candlesPrecision);
+  }, [candlesPrecision, onPrecision]);
+  const precisionRef = useRef(precision);
+  useEffect(() => {
+    precisionRef.current = precision;
+  }, [precision]);
   // Story 18.4: replay only trims the NEWEST end of the loaded candles for display
   // (`replay.displayed`); useCandles and its older-history refill are untouched.
   const replay = useReplay(candles);
@@ -399,14 +476,6 @@ function ChartInner({ instrumentId, barSeconds, volumeOn, onVolumeChange, onTime
   }, []);
 
   useEffect(() => {
-    try {
-      localStorage.setItem(hlineStorageKey(instrumentId), JSON.stringify(priceLines));
-    } catch {
-      // storage blocked: lines just won't survive a reload
-    }
-  }, [instrumentId, priceLines]);
-
-  useEffect(() => {
     // Story 18.1 (AC #5): Esc cancels the active tool from anywhere on the page, not
     // just from a focused chart -- an armed tool with no in-chart escape is exactly
     // the stranded state this prevents. Runs regardless of the current tool: Esc in
@@ -426,20 +495,28 @@ function ChartInner({ instrumentId, barSeconds, volumeOn, onVolumeChange, onTime
   // tear down and re-attach their subscriptions on every render of this page -- the
   // drag machinery specifically must not be resubscribed mid-drag by an unrelated
   // re-render.
+  const roundPrice = useCallback((price: number): number => {
+    const places = precisionRef.current?.price;
+    return places === undefined ? price : roundToPrecision(price, places);
+  }, []);
+
   const handlePriceClick = useCallback(
     (price: number): void => {
       // Story 18.1 (AC #2): single-click-and-done -- only an armed hline tool places
       // a line, and the placement itself disarms it (the tool's interaction model,
       // not a persistent multi-click mode).
       if (activeTool !== "hline") return;
-      const id = `hline-${nextPriceLineIdRef.current++}`;
-      setPriceLines((lines) => [
-        ...lines,
-        { id, price, color: chartVar("--chart-drawing") },
+      // The resource stores only a price above zero: a click at or below it places nothing (the
+      // tool stays armed) rather than a line that would make every save of the coin a 422.
+      const placed = roundPrice(price);
+      if (!(placed > 0)) return;
+      setAllDrawings((all) => [
+        ...all,
+        { kind: "hline", id: nextDrawingId(all, "hline"), price: placed, color: chartVar("--chart-drawing") },
       ]);
       setActiveTool("cursor");
     },
-    [activeTool],
+    [activeTool, roundPrice, setAllDrawings],
   );
 
   const handlePointClick = useCallback(
@@ -453,21 +530,67 @@ function ChartInner({ instrumentId, barSeconds, volumeOn, onVolumeChange, onTime
         pickReplayBar(point.time as number);
         return;
       }
+      if (activeTool === "long" || activeTool === "short") {
+        // Story 32.5: one click places a position at the clicked price on the clicked bar. Its
+        // prices sit on the instrument's grid, so the tool is off until that precision is known.
+        const places = precisionRef.current?.price;
+        if (places === undefined) return;
+        const side: PositionSide = activeTool;
+        setAllDrawings((all) => [
+          ...all,
+          newPosition(nextDrawingId(all, "position"), side, point.time as number, point.price, places),
+        ]);
+        setActiveTool("cursor");
+        return;
+      }
       if (activeTool !== "trendline") return;
       if (!pendingAnchor) {
         setPendingAnchor(point);
         return;
       }
       if (pendingAnchor.time === point.time && pendingAnchor.price === point.price) return;
-      const id = `trendline-${nextDrawingIdRef.current++}`;
-      setDrawings((all) => [
+      setAllDrawings((all) => [
         ...all,
-        { id, kind: "trendline", anchors: [pendingAnchor, point], color: chartVar("--chart-drawing") },
+        {
+          kind: "trendline",
+          id: nextDrawingId(all, "trendline"),
+          anchors: [
+            { time: storedTime(pendingAnchor.time as number), price: roundPrice(pendingAnchor.price) },
+            { time: storedTime(point.time as number), price: roundPrice(point.price) },
+          ],
+          color: chartVar("--chart-drawing"),
+        },
       ]);
       setPendingAnchor(null);
       setActiveTool("cursor");
     },
-    [activeTool, pendingAnchor, replayMode, pickReplayBar],
+    [activeTool, pendingAnchor, replayMode, pickReplayBar, roundPrice, setAllDrawings],
+  );
+
+  // Story 32.5: the Fibonacci drag's release. Anchor A is the press, B the release; a drag whose
+  // two prices are one price on the grid (a horizontal drag, or one under half a tick) would draw
+  // every level on one line and is ignored (the tool stays armed).
+  const handleFibPlace = useCallback(
+    (a: TrendlineAnchor, b: TrendlineAnchor): void => {
+      if (roundPrice(a.price) === roundPrice(b.price)) return;
+      setAllDrawings((all) => [
+        ...all,
+        {
+          kind: "fib",
+          id: nextDrawingId(all, "fib"),
+          anchors: [
+            { time: storedTime(a.time as number), price: roundPrice(a.price) },
+            { time: storedTime(b.time as number), price: roundPrice(b.price) },
+          ],
+          levels: defaultFibLevels(fibLevelColor),
+          extend_right: true,
+          label_side: "left",
+          line_width: 1,
+        },
+      ]);
+      setActiveTool("cursor");
+    },
+    [roundPrice, setAllDrawings],
   );
 
   // Story 18.6 (AC #2): one calculation per confirmed range, over the FULL loaded data so the
@@ -655,24 +778,54 @@ function ChartInner({ instrumentId, barSeconds, volumeOn, onVolumeChange, onTime
     replay.startPicking();
   };
 
-  const handleDrawingColor = useCallback((id: string, color: string): void => {
-    if (id.startsWith("hline-")) setPriceLines((all) => all.map((l) => (l.id === id ? { ...l, color } : l)));
-    else setDrawings((all) => all.map((d) => (d.id === id ? { ...d, color } : d)));
-  }, []);
-
-  const handleDrawingDelete = useCallback((id: string): void => {
-    if (id.startsWith("hline-")) setPriceLines((all) => all.filter((l) => l.id !== id));
-    else setDrawings((all) => all.filter((d) => d.id !== id));
-  }, []);
-
-  const handlePriceLineDrag = useCallback(
-    (id: string, price: number): void => {
-      // Story 18.1 (AC #3): LightweightChart only reports the drag (it never mutates
-      // this state); the setState updater form needs no closure state, so this stays
-      // identity-stable for the component's whole lifetime.
-      setPriceLines((lines) => lines.map((line) => (line.id === id ? { ...line, price } : line)));
+  const handleDrawingColor = useCallback(
+    (id: string, color: string): void => {
+      // A Fibonacci has a colour per level: the menu's one colour recolours them all.
+      setAllDrawings((all) =>
+        all.map((d) =>
+          d.id !== id ? d : d.kind === "fib" ? { ...d, color, levels: d.levels.map((l) => ({ ...l, color })) } : { ...d, color },
+        ),
+      );
     },
-    [],
+    [setAllDrawings],
+  );
+
+  const handleDrawingDelete = useCallback(
+    (id: string): void => {
+      // A deleted drawing's settings dialog closes with it: a dangling id would reopen the dialog
+      // when the counter reuses it. (The list only changes through these handlers.)
+      setSettingsId((open) => (open === id ? null : open));
+      setAllDrawings((all) => all.filter((d) => d.id !== id));
+    },
+    [setAllDrawings],
+  );
+
+  const applyDrag = useCallback(
+    (id: string, handle: string, point: DragPoint): void => {
+      // Story 18.1 (AC #3) / 32.5: LightweightChart only reports the drag (it never mutates this
+      // state); `applyHandleDrag` decides what the pointer means for each kind, and the updater
+      // form needs no closure state, so these callbacks stay identity-stable.
+      setAllDrawings((all) =>
+        all.map((d) => (d.id === id ? applyHandleDrag(d, handle, point, precisionRef.current?.price ?? null) : d)),
+      );
+    },
+    [setAllDrawings],
+  );
+  const handlePriceLineDrag = useCallback(
+    (id: string, price: number): void => applyDrag(id, "price", { price, time: null, barsSince: NO_BARS }),
+    [applyDrag],
+  );
+
+  const settingsDrawing = allDrawings.find((d) => d.id === settingsId);
+  const requestSettings = useCallback((id: string): void => {
+    // No dialog without the instrument's precision (its fields are labelled and rounded by it):
+    // the request is dropped, not parked to pop open when the precision arrives.
+    if (precisionRef.current === null) return;
+    setSettingsId(id);
+  }, []);
+  const applyDrawing = useCallback(
+    (next: Drawing): void => setAllDrawings((all) => all.map((d) => (d.id === next.id ? next : d))),
+    [setAllDrawings],
   );
 
   const renderTool = (tool: ChartToolDef) => (
@@ -684,7 +837,11 @@ function ChartInner({ instrumentId, barSeconds, volumeOn, onVolumeChange, onTime
       aria-label={tool.ariaLabel}
       data-tool={tool.id}
       title={tool.title}
-      disabled={mode === "lines" && tool.candlesOnly}
+      disabled={
+        (mode === "lines" && tool.candlesOnly) ||
+        (tool.placesDrawing === true && drawingsStatus !== "ready") ||
+        (tool.needsPrecision === true && precision === null)
+      }
       onClick={() => selectTool(tool.id)}
     >
       {tool.label}
@@ -833,6 +990,11 @@ function ChartInner({ instrumentId, barSeconds, volumeOn, onVolumeChange, onTime
             drawEditable={activeTool === "cursor" && replayMode !== "picking"}
             onDrawingColor={handleDrawingColor}
             onDrawingDelete={handleDrawingDelete}
+            onDrawingSettings={requestSettings}
+            precision={precision}
+            onDrawingDrag={applyDrag}
+            fibActive={activeTool === "fib"}
+            onFibPlace={handleFibPlace}
             onPointClick={handlePointClick}
             volumeProfiles={chartVolumeProfiles}
             rangeSelectActive={activeTool === "frvp"}
@@ -851,6 +1013,26 @@ function ChartInner({ instrumentId, barSeconds, volumeOn, onVolumeChange, onTime
           />
         </div>
       </div>
+      {drawingsStatus === "failed" && (
+        <p role="alert" className="chart-load-error">
+          Drawings could not be loaded, so the drawing tools are off (see the error bar). The load is retried every few seconds; the tools come back once it succeeds.
+        </p>
+      )}
+      {drawingsSaveError !== null && (
+        <p role="alert" className="chart-load-error">
+          {drawingsSaveError}
+        </p>
+      )}
+      {settingsDrawing && settingsDrawing.kind !== "hline" && settingsDrawing.kind !== "trendline" && precision && (
+        <DrawingSettingsDialog
+          key={settingsDrawing.id}
+          drawing={settingsDrawing}
+          precision={precision}
+          onApply={applyDrawing}
+          onRemove={() => handleDrawingDelete(settingsDrawing.id)}
+          onClose={() => setSettingsId(null)}
+        />
+      )}
       {Object.entries(indicatorErrors).map(([id, message]) => (
         <p key={id} role="alert" className="chart-load-error">
           Indicator {id} failed: {message}
@@ -944,6 +1126,12 @@ export default function ChartPage() {
 function ChartForCoin({ instrumentId }: { instrumentId: string }) {
   const [barSeconds, setBarSeconds] = useState(() => loadTimeframe(instrumentId));
 
+  // Held here, not in ChartInner (remounted on every timeframe change): the drawings, so they stay
+  // in place across the remount instead of reloading, and the instrument's decimals from the first
+  // candles response, so a remounted chart labels from its first paint.
+  const drawingStore = useChartDrawings(instrumentId);
+  const [precision, setPrecision] = useState<InstrumentPrecision | null>(null);
+
   // Held here, not in ChartInner: that is remounted on every timeframe change.
   const [volumeOn, setVolumeOn] = useState(() => loadVolumeOn(instrumentId));
   const changeVolume = useCallback(
@@ -973,6 +1161,9 @@ function ChartForCoin({ instrumentId }: { instrumentId: string }) {
     <ChartInner
       key={`${instrumentId}:${barSeconds}`}
       instrumentId={instrumentId}
+      drawingStore={drawingStore}
+      heldPrecision={precision}
+      onPrecision={setPrecision}
       barSeconds={barSeconds}
       volumeOn={volumeOn}
       onVolumeChange={changeVolume}

@@ -4,8 +4,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { CreatePriceLineOptions, Time } from "lightweight-charts";
 
-import type { ChartMode, DrawingSpec, IndicatorPaneSpec, PriceLineSpec, VolumeProfileSpec } from "./LightweightChart";
+import type { ChartMode, DrawingSpec, IndicatorPaneSpec, PriceLineSpec, TrendlineSpec, VolumeProfileSpec } from "./LightweightChart";
 import { TrendlinePrimitive } from "./primitives/TrendlinePrimitive";
+import { FibPrimitive } from "./primitives/FibPrimitive";
+import { PositionPrimitive } from "./primitives/PositionPrimitive";
+import { type DragPoint, type FibDrawing, type PositionDrawing, defaultFibLevels, newPosition } from "../../lib/drawings";
 import { GapPrimitive } from "./primitives/GapPrimitive";
 
 const addSeriesMock = vi.fn();
@@ -194,6 +197,11 @@ type ChartTestProps = {
   onProfileEdgeDrag?: (id: string, edge: "start" | "end", time: Time) => void;
   onProfileEdgeCommit?: (id: string, edge: "start" | "end", time: Time) => void;
   onPointClick?: (point: { time: Time; price: number }) => void;
+  precision?: { price: number; size: number } | null;
+  onDrawingDrag?: (id: string, handle: string, point: DragPoint) => void;
+  onDrawingSettings?: (id: string) => void;
+  fibActive?: boolean;
+  onFibPlace?: (a: { time: Time; price: number }, b: { time: Time; price: number }) => void;
 };
 
 function chartElement(props: ChartTestProps) {
@@ -254,6 +262,8 @@ beforeEach(() => {
       setVisibleLogicalRange: setVisibleLogicalRangeMock,
       coordinateToTime: coordinateToTimeMock,
       timeToCoordinate: timeToCoordinateMock,
+      logicalToCoordinate: (i: number) => i * 10,
+      coordinateToLogical: (x: number) => x / 10,
       fitContent: fitContentMock,
       scrollToRealTime: scrollToRealTimeMock,
       subscribeVisibleLogicalRangeChange: vi.fn(),
@@ -818,6 +828,24 @@ describe("LightweightChart", () => {
       expect(onPriceLineDrag).toHaveBeenCalledTimes(1);
     });
 
+    it("never starts a drag from a right or middle press over a hovered line (Story 32.5)", () => {
+      const onPriceLineDrag = vi.fn();
+      const { container } = render(
+        chartElement({ priceLines: [makePriceLineSpec("hline-1")], onPriceLineDrag }),
+      );
+      const crosshairHandler = subscribeCrosshairMoveMock.mock.calls[0][0];
+      const candleSeries = addSeriesMock.mock.results[0].value;
+      const hover = { objectKind: "custom-price-line", series: candleSeries };
+
+      for (const button of [2, 1]) {
+        crosshairHandler({ point: { x: 10, y: 100 }, paneIndex: 0, hoveredInfo: hover });
+        fireEvent.mouseDown(container.firstElementChild!, { button });
+        crosshairHandler({ point: { x: 12, y: 150 }, paneIndex: 0 });
+      }
+
+      expect(onPriceLineDrag).not.toHaveBeenCalled();
+    });
+
     it("never starts a drag when the mousedown is not over one of the series' price lines", () => {
       const onPriceLineDrag = vi.fn();
       const { container } = render(
@@ -908,13 +936,13 @@ describe("LightweightChart", () => {
   });
 });
 
-function makeTrendlineSpec(id: string, overrides: Partial<DrawingSpec> = {}): DrawingSpec {
+function makeTrendlineSpec(id: string, overrides: Partial<TrendlineSpec> = {}): TrendlineSpec {
   return {
     id,
     kind: "trendline",
     anchors: [
-      { time: 100 as Time, price: 10 },
-      { time: 200 as Time, price: 20 },
+      { time: 100, price: 10 },
+      { time: 200, price: 20 },
     ],
     color: "#123456",
     ...overrides,
@@ -947,10 +975,10 @@ describe("drawings registry (Story 18.2)", () => {
     const { rerender } = render(chartElement({ drawings: [makeTrendlineSpec("trendline-1")] }));
     const primitive = attachPrimitiveMock.mock.calls[0][0] as TrendlinePrimitive;
     const updateSpy = vi.spyOn(primitive, "update");
-    const moved: DrawingSpec = makeTrendlineSpec("trendline-1", {
+    const moved = makeTrendlineSpec("trendline-1", {
       anchors: [
-        { time: 100 as Time, price: 11 },
-        { time: 200 as Time, price: 21 },
+        { time: 100, price: 11 },
+        { time: 200, price: 21 },
       ],
     });
 
@@ -1649,5 +1677,250 @@ describe("LightweightChart indicator visibility and style (Story 32.3)", () => {
     (paneEl.querySelector('button[aria-label="Settings for SMA (20)"]') as HTMLElement).click();
 
     expect(onLegendAction.mock.calls).toEqual([["remove", "SMA"], ["settings", "SMA"]]);
+  });
+});
+
+// Story 32.5: Fibonacci and position drawings in the one registry, and the one grab for every handle.
+describe("Fibonacci and position drawings (Story 32.5)", () => {
+  const bar = (n: number) => ({ time: n as Time, open: 1, high: 2, low: 1, close: 1 });
+  const bars = [bar(100), bar(200), bar(300), bar(400)];
+  const fibSpec = (id = "fib-1", overrides: Partial<FibDrawing> = {}): FibDrawing => ({
+    kind: "fib",
+    id,
+    anchors: [
+      { time: 100, price: 100 },
+      { time: 300, price: 90 },
+    ],
+    levels: defaultFibLevels(() => "#123456"),
+    extend_right: true,
+    label_side: "left",
+    line_width: 1,
+    ...overrides,
+  });
+  const positionSpec = (id = "position-1"): PositionDrawing => newPosition(id, "long", 200, 100, 2);
+
+  /** Give an attached primitive the geometry the real library would (the mock never calls attached()). */
+  function attachGeometry(primitive: FibPrimitive | PositionPrimitive | TrendlinePrimitive): void {
+    primitive.attached({
+      chart: { timeScale: () => ({ timeToCoordinate: (t: number) => t, logicalToCoordinate: (i: number) => i * 10 }) },
+      series: { priceToCoordinate: (p: number) => p },
+      requestUpdate: vi.fn(),
+    } as never);
+    primitive.updateAllViews();
+  }
+
+  it("attaches one primitive of the right class per drawing, and updates a changed one in place", () => {
+    const fib = fibSpec();
+    const { rerender } = render(chartElement({ drawings: [fib, positionSpec()], precision: { price: 2, size: 3 }, data: bars }));
+
+    expect(attachPrimitiveMock.mock.calls.map((c) => c[0].constructor)).toEqual([FibPrimitive, PositionPrimitive]);
+    const primitive = attachPrimitiveMock.mock.calls[0][0] as FibPrimitive;
+    const updateSpy = vi.spyOn(primitive, "update");
+
+    const edited = { ...fib, line_width: 3 };
+    rerender(chartElement({ drawings: [edited, positionSpec()], precision: { price: 2, size: 3 }, data: bars }));
+
+    expect(updateSpy).toHaveBeenCalledWith(edited, 2);
+    expect(attachPrimitiveMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("detaches a removed drawing, and re-attaches all of them on the new host after a mode flip", () => {
+    const { rerender } = render(chartElement({ drawings: [fibSpec("fib-1"), fibSpec("fib-2")], data: bars }));
+    const first = attachPrimitiveMock.mock.calls[0][0];
+    rerender(chartElement({ drawings: [fibSpec("fib-2")], data: bars }));
+    expect(detachPrimitiveMock).toHaveBeenCalledWith(first);
+    attachPrimitiveMock.mockClear();
+    rerender(chartElement({ drawings: [fibSpec("fib-2")], data: bars, mode: "lines" }));
+    expect(attachPrimitiveMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows handles only while drawings are editable (the Cursor tool)", () => {
+    const { rerender } = render(chartElement({ drawings: [fibSpec()], data: bars, drawEditable: true }));
+    const primitive = attachPrimitiveMock.mock.calls[0][0] as FibPrimitive;
+    const spy = vi.spyOn(primitive, "setHandlesVisible");
+    rerender(chartElement({ drawings: [fibSpec()], data: bars, drawEditable: false }));
+    expect(spy).toHaveBeenLastCalledWith(false);
+  });
+
+  it("grabs an anchor handle in Cursor mode and reports the pointer's bar time and price until mouseup", () => {
+    const onDrawingDrag = vi.fn();
+    const spec = fibSpec();
+    const { container } = render(chartElement({ drawings: [spec], data: bars, drawEditable: true, onDrawingDrag }));
+    attachGeometry(attachPrimitiveMock.mock.calls[0][0]);
+    const crosshair = subscribeCrosshairMoveMock.mock.calls[0][0];
+
+    crosshair({ point: { x: 102, y: 101 }, paneIndex: 0 }); // on anchor A at (100, 100)
+    fireEvent.mouseDown(container.firstElementChild!);
+    crosshair({ point: { x: 260, y: 95 }, paneIndex: 0, logical: 1.4 }); // pointer between bars 2 and 3
+
+    expect(onDrawingDrag).toHaveBeenCalledTimes(1);
+    const [id, handle, point] = onDrawingDrag.mock.calls[0] as [string, string, DragPoint];
+    expect([id, handle, point.price, point.time]).toEqual(["fib-1", "a", 95, 200]);
+    expect(point.barsSince(100)).toBe(1); // logical 1.4 rounds to bar 1; bar 100 is index 0
+
+    fireEvent.mouseUp(window);
+    crosshair({ point: { x: 270, y: 96 }, paneIndex: 0, logical: 1.6 });
+    expect(onDrawingDrag).toHaveBeenCalledTimes(1);
+  });
+
+  it("grabs a position's target handle with the same mechanism", () => {
+    const onDrawingDrag = vi.fn();
+    const { container } = render(chartElement({ drawings: [positionSpec()], data: bars, drawEditable: true, onDrawingDrag }));
+    attachGeometry(attachPrimitiveMock.mock.calls[0][0]);
+    const crosshair = subscribeCrosshairMoveMock.mock.calls[0][0];
+
+    crosshair({ point: { x: 408, y: 102 }, paneIndex: 0 }); // the target handle: right edge x 410, price 102
+    fireEvent.mouseDown(container.firstElementChild!);
+    crosshair({ point: { x: 408, y: 104 }, paneIndex: 0, logical: 40 });
+
+    expect(onDrawingDrag.mock.calls[0].slice(0, 2)).toEqual(["position-1", "target"]);
+  });
+
+  it("grabs a trendline's anchor too", () => {
+    const onDrawingDrag = vi.fn();
+    const { container } = render(
+      chartElement({ drawings: [makeTrendlineSpec("trendline-1")], data: bars, drawEditable: true, onDrawingDrag }),
+    );
+    attachGeometry(attachPrimitiveMock.mock.calls[0][0]);
+    const crosshair = subscribeCrosshairMoveMock.mock.calls[0][0];
+
+    crosshair({ point: { x: 200, y: 21 }, paneIndex: 0 }); // anchor B at (200, 20)
+    fireEvent.mouseDown(container.firstElementChild!);
+    crosshair({ point: { x: 250, y: 30 }, paneIndex: 0, logical: 1 });
+
+    expect(onDrawingDrag.mock.calls[0].slice(0, 2)).toEqual(["trendline-1", "b"]);
+  });
+
+  it("does not grab a handle outside Cursor mode (a placement tool owns the mouse), and never in another pane", () => {
+    const onDrawingDrag = vi.fn();
+    const { container, rerender } = render(chartElement({ drawings: [fibSpec()], data: bars, drawEditable: false, onDrawingDrag }));
+    attachGeometry(attachPrimitiveMock.mock.calls[0][0]);
+    const crosshair = subscribeCrosshairMoveMock.mock.calls[0][0];
+    crosshair({ point: { x: 102, y: 101 }, paneIndex: 0 });
+    fireEvent.mouseDown(container.firstElementChild!);
+    crosshair({ point: { x: 150, y: 95 }, paneIndex: 0, logical: 1 });
+    expect(onDrawingDrag).not.toHaveBeenCalled();
+
+    rerender(chartElement({ drawings: [fibSpec()], data: bars, drawEditable: true, onDrawingDrag }));
+    const again = subscribeCrosshairMoveMock.mock.calls.at(-1)![0];
+    again({ point: { x: 102, y: 101 }, paneIndex: 1 }); // the same pixels, but in an indicator pane
+    fireEvent.mouseDown(container.firstElementChild!);
+    again({ point: { x: 150, y: 95 }, paneIndex: 1, logical: 1 });
+    expect(onDrawingDrag).not.toHaveBeenCalled();
+  });
+
+  it("swallows the chart click that ends a handle drag, so it places nothing", () => {
+    const onDrawingDrag = vi.fn();
+    const onPointClick = vi.fn();
+    const { container } = render(chartElement({ drawings: [fibSpec()], data: bars, drawEditable: true, onDrawingDrag, onPointClick }));
+    attachGeometry(attachPrimitiveMock.mock.calls[0][0]);
+    const crosshair = subscribeCrosshairMoveMock.mock.calls[0][0];
+    const click = subscribeClickMock.mock.calls.at(-1)![0];
+
+    crosshair({ point: { x: 102, y: 101 }, paneIndex: 0 });
+    fireEvent.mouseDown(container.firstElementChild!);
+    crosshair({ point: { x: 150, y: 95 }, paneIndex: 0, logical: 1 });
+    fireEvent.mouseUp(window);
+    click({ point: { x: 150, y: 95 } });
+    expect(onPointClick).not.toHaveBeenCalled(); // the click that ends a drag places nothing
+  });
+
+  it("offers Settings... in the menu for a Fibonacci and a position, not for a trendline or a horizontal line", () => {
+    const onDrawingSettings = vi.fn();
+    const hit = (x: number, y: number) => {
+      const click = subscribeClickMock.mock.calls.at(-1)![0];
+      act(() => click({ point: { x, y }, sourceEvent: { clientX: 5, clientY: 5 } }));
+    };
+    render(
+      chartElement({
+        drawings: [fibSpec(), makeTrendlineSpec("trendline-1", { anchors: [{ time: 100, price: 500 }, { time: 300, price: 520 }] })],
+        priceLines: [makePriceLineSpec("hline-1", { price: 700 })],
+        data: bars,
+        drawEditable: true,
+        onDrawingSettings,
+        onDrawingColor: () => {},
+      }),
+    );
+    for (const call of attachPrimitiveMock.mock.calls) attachGeometry(call[0]);
+
+    hit(200, 95); // the fib's 0.5 level (y 95) in the gap between its anchors
+    fireEvent.click(screen.getByText("Settings…"));
+    expect(onDrawingSettings).toHaveBeenCalledWith("fib-1");
+
+    hit(200, 510); // the trendline
+    expect(screen.getByRole("menu")).toBeInTheDocument();
+    expect(screen.queryByText("Settings…")).toBeNull();
+
+    hit(500, 700); // the horizontal line
+    expect(screen.queryByText("Settings…")).toBeNull();
+  });
+
+  it("snaps a drawing placed after the newest loaded bar back to that bar", () => {
+    render(chartElement({ drawings: [{ ...positionSpec(), time: 400 }], data: bars.slice(0, 3) }));
+    const primitive = attachPrimitiveMock.mock.calls[0][0] as PositionPrimitive;
+    attachGeometry(primitive);
+    expect(primitive.screen()?.left).toBe(20); // index 2, the newest loaded bar
+  });
+
+  it("includes the forming live bar among the bars drawings snap to", () => {
+    render(
+      <LightweightChart
+        data={bars.slice(0, 3)}
+        onChartApi={() => {}}
+        drawings={[{ ...positionSpec(), time: 400 }]}
+        liveBar={{ time: 400 as Time, open: 1, high: 2, low: 1, close: 1, volume: 1 } as never}
+      />,
+    );
+    const primitive = attachPrimitiveMock.mock.calls[0][0] as PositionPrimitive;
+    attachGeometry(primitive);
+    expect(primitive.screen()?.left).toBe(30); // index 3, the forming bar
+  });
+});
+
+describe("Fibonacci placement drag (Story 32.5)", () => {
+  beforeEach(() => {
+    coordinateToTimeMock.mockImplementation((x: number) => x);
+  });
+
+  it("previews the retracement while dragging and reports exactly one (A, B) on release", () => {
+    const onFibPlace = vi.fn();
+    const { container } = render(chartElement({ fibActive: true, onFibPlace, precision: { price: 2, size: 3 } }));
+    const target = container.firstElementChild!;
+
+    fireEvent.mouseDown(target, { clientX: 10, clientY: 100, button: 0 });
+    expect(attachPrimitiveMock).not.toHaveBeenCalled();
+    fireEvent.mouseMove(window, { buttons: 1, clientX: 50, clientY: 90 });
+    fireEvent.mouseMove(window, { buttons: 1, clientX: 60, clientY: 80 });
+    expect(attachPrimitiveMock).toHaveBeenCalledTimes(1);
+    expect(attachPrimitiveMock.mock.calls[0][0]).toBeInstanceOf(FibPrimitive);
+    expect(onFibPlace).not.toHaveBeenCalled();
+    fireEvent.mouseUp(window);
+
+    expect(onFibPlace).toHaveBeenCalledTimes(1);
+    expect(onFibPlace).toHaveBeenCalledWith({ time: 10, price: 100 }, { time: 60, price: 80 });
+    expect(detachPrimitiveMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports nothing for a click without a drag, and cancels with no residue on Esc (fibActive off)", () => {
+    const onFibPlace = vi.fn();
+    const { container, rerender } = render(chartElement({ fibActive: true, onFibPlace }));
+    const target = container.firstElementChild!;
+
+    fireEvent.mouseDown(target, { clientX: 10, clientY: 100, button: 0 });
+    fireEvent.mouseUp(window);
+    expect(onFibPlace).not.toHaveBeenCalled();
+
+    fireEvent.mouseDown(target, { clientX: 10, clientY: 100, button: 0 });
+    fireEvent.mouseMove(window, { buttons: 1, clientX: 60, clientY: 130 });
+    rerender(chartElement({ fibActive: false, onFibPlace }));
+    expect(detachPrimitiveMock).toHaveBeenCalledTimes(1);
+    expect(onFibPlace).not.toHaveBeenCalled();
+  });
+
+  it("does nothing while the Fibonacci tool is not armed", () => {
+    const { container } = render(chartElement({}));
+    fireEvent.mouseDown(container.firstElementChild!, { clientX: 10, clientY: 100, button: 0 });
+    fireEvent.mouseMove(window, { buttons: 1, clientX: 60, clientY: 130 });
+    expect(attachPrimitiveMock).not.toHaveBeenCalled();
   });
 });

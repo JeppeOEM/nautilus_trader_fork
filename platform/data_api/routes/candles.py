@@ -33,6 +33,8 @@ from kernel.venues import market_kind
 from kernel.venues import venue_of
 from pydantic import BaseModel
 from views import chart_series
+from views.catalog_reads import NoInstrumentDefinition
+from views.catalog_reads import instrument_precision
 
 from data_api import buses
 from data_api.settings import CANDLES_DB_DIR
@@ -70,6 +72,10 @@ class CandlesResponse(BaseModel):
     has_more: bool
     venue: str
     market: str
+    # The catalog instrument definition's own decimals (never derived from a value): every chart
+    # label formats at these (Story 32.5).
+    price_precision: int
+    size_precision: int
 
 
 @router.get("/api/candles/{instrument_id}")
@@ -81,6 +87,15 @@ def get_candles(
 ) -> CandlesResponse:
     limit = max(1, min(limit, _MAX_CANDLES_LIMIT))
     bar_seconds = max(1, min(bar_seconds, _MAX_BAR_SECONDS))
+    venue_of(instrument_id)  # a malformed id is a 400 (the app's ValueError handler), not a 404
+    # Known limit: the instrument definition is read from the catalog on every candles request, to
+    # label prices at its precision. Upgrade path: a per-instrument cache invalidated when a newer
+    # definition is written (the capture service's definition refresh), so a request reads memory.
+    try:
+        precision = instrument_precision(CATALOG_PATH, instrument_id)
+    except NoInstrumentDefinition as exc:
+        # No definition: no precision to label prices at, and none is guessed (DATA-01).
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     try:
         kept, has_more = chart_series.candle_page(
             instrument_id,
@@ -101,10 +116,14 @@ def get_candles(
             has_more=False,
             venue=venue_of(instrument_id),
             market=market_kind(instrument_id),
+            price_precision=precision.price_precision,
+            size_precision=precision.size_precision,
         )
     return CandlesResponse(
         items=[CandleItem(**row) for row in chart_series.with_gap_markers(kept, bar_seconds)],
         has_more=has_more,
         venue=venue_of(instrument_id),
         market=market_kind(instrument_id),
+        price_precision=precision.price_precision,
+        size_precision=precision.size_precision,
     )

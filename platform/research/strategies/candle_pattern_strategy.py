@@ -105,7 +105,6 @@ venue (mark the unknown ones closed) and let `_ensure_stop` place a live stop.
 
 import math
 from decimal import Decimal
-from decimal import InvalidOperation
 from types import MappingProxyType
 
 from kernel.candle_patterns import BEARISH
@@ -118,8 +117,6 @@ from nautilus_trader.config import StrategyConfig
 from nautilus_trader.indicators import AverageTrueRange
 from nautilus_trader.indicators import ExponentialMovingAverage
 from nautilus_trader.model.data import Bar
-from nautilus_trader.model.data import BarAggregation
-from nautilus_trader.model.data import BarType
 from nautilus_trader.model.data import QuoteTick
 from nautilus_trader.model.enums import OrderSide
 from nautilus_trader.model.enums import OrderStatus
@@ -141,6 +138,11 @@ from nautilus_trader.model.objects import Price
 from nautilus_trader.model.orders import Order
 from nautilus_trader.model.position import Position
 from nautilus_trader.trading.strategy import Strategy
+from research.strategies._bars import BarSequence
+from research.strategies._bars import check_count
+from research.strategies._bars import check_trade_size
+from research.strategies._bars import resolve_bar_type
+from research.strategies._bars import size_problem
 
 
 # The scanner's filter vocabulary, restated: a strategy module imports only `kernel` and
@@ -221,20 +223,6 @@ class CandlePatternStrategyConfig(StrategyConfig, frozen=True, forbid_unknown_fi
     allow_short: bool = True
 
 
-def _resolve_bar_type(config: CandlePatternStrategyConfig) -> BarType:
-    """Return the config's bar type, or `ValueError` if it is not a time bar of its instrument."""
-    text = config.bar_type or f"{config.instrument_id}-1-MINUTE-LAST-INTERNAL"
-    bar_type = BarType.from_str(text)
-    if bar_type.instrument_id != config.instrument_id:
-        raise ValueError(f"bar_type {text!r} is not of instrument {config.instrument_id}")
-    if not bar_type.spec.is_time_aggregated():
-        raise ValueError(f"bar_type {text!r} must be time-aggregated (a hole is a time gap)")
-    if bar_type.spec.aggregation in (BarAggregation.MONTH, BarAggregation.YEAR):
-        # Nautilus gives them a nominal 30/365-day step: every 31-day month would read as a hole.
-        raise ValueError(f"bar_type {text!r} has no fixed step (a hole is a gap over one step)")
-    return bar_type
-
-
 def _pattern_names(names: tuple[str, ...], direction: int, field: str) -> tuple[PatternName, ...]:
     """Return `names` as `PatternName`s (each once), each able to fire in `direction`."""
     if isinstance(names, str):
@@ -260,46 +248,17 @@ def _check_numbers(config: CandlePatternStrategyConfig) -> None:
         condition = config.trend_condition
         raise ValueError(f"trend_condition must be one of {CONDITIONS}, not {condition!r}")
     for name in ("exit_bars", "trend_ema_period", "atr_period"):
-        _check_count(name, getattr(config, name))
+        check_count(name, getattr(config, name))
     multiple = config.stop_atr_multiple
     if not (math.isfinite(multiple) and multiple > 0):
         raise ValueError(f"stop_atr_multiple must be finite and > 0, was {multiple}")
-    _check_trade_size(config.trade_size)
+    check_trade_size(config.trade_size)
     if not config.long_patterns and not (config.allow_short and config.short_patterns):
         raise ValueError("no pattern can open a position: set long_patterns or short_patterns")
 
 
-def _check_count(name: str, value: int) -> None:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise ValueError(f"{name} must be an int >= 1, was {value!r}")
-
-
-def _check_trade_size(trade_size: Decimal) -> None:
-    try:
-        size = Decimal(trade_size)
-    except (InvalidOperation, TypeError, ValueError) as exc:
-        raise ValueError(f"trade_size must be a decimal number, was {trade_size!r}") from exc
-    # `is_finite` first: comparing a Decimal NaN raises `InvalidOperation`, not `ValueError`.
-    if not (size.is_finite() and size > 0):
-        raise ValueError(f"trade_size must be finite and > 0, was {trade_size}")
-
-
 def _is_stop(order: Order) -> bool:
     return order.order_type == OrderType.STOP_MARKET and order.is_reduce_only
-
-
-def _size_problem(size: Decimal, instrument: Instrument) -> str | None:
-    """Return why `size` cannot be traded on `instrument` as given; None if it can."""
-    increment = instrument.size_increment.as_decimal()
-    if size % increment != 0:
-        # `make_qty` would round it, silently trading another amount (DATA-07).
-        return f"is not a multiple of {instrument.id}'s size_increment {increment}"
-    low, high = instrument.min_quantity, instrument.max_quantity
-    if low is not None and size < low.as_decimal():
-        return f"is below {instrument.id}'s min_quantity {low}"
-    if high is not None and size > high.as_decimal():
-        return f"is above {instrument.id}'s max_quantity {high}"
-    return None
 
 
 class CandlePatternStrategy(Strategy):
@@ -318,11 +277,11 @@ class CandlePatternStrategy(Strategy):
 
     def __init__(self, config: CandlePatternStrategyConfig) -> None:
         super().__init__(config)
-        self._bar_type = _resolve_bar_type(config)
+        self._bar_type = resolve_bar_type(config.instrument_id, config.bar_type)
         self._long = _pattern_names(config.long_patterns, BULLISH, "long_patterns")
         self._short = _pattern_names(config.short_patterns, BEARISH, "short_patterns")
         _check_numbers(config)
-        self._step_ns = int(self._bar_type.spec.timedelta.value)
+        self._sequence = BarSequence(int(self._bar_type.spec.timedelta.value))
         self._detectors = {
             name: CandlePattern(name) for name in dict.fromkeys((*self._long, *self._short))
         }
@@ -331,7 +290,6 @@ class CandlePatternStrategy(Strategy):
         self.instrument: Instrument | None = None
         # ts of the last market data seen, read by the bots' heartbeat (`StrategyCacheReader`).
         self.last_data_ns: int = 0
-        self._last_bar_ns: int | None = None
         # Stop failures (rejected, denied, cancelled, expired) since the venue last accepted one of
         # our stops: the second closes the position instead of placing the stop again. A count,
         # not a timestamp -- live, every event carries its own wall-clock `ts_event`.
@@ -364,7 +322,7 @@ class CandlePatternStrategy(Strategy):
         Return whether `trade_size` is on the instrument's size grid and inside its quantity
         limits; otherwise every entry would be rounded or denied, bar after bar.
         """
-        problem = _size_problem(Decimal(self.config.trade_size), instrument)
+        problem = size_problem(Decimal(self.config.trade_size), instrument)
         if problem is not None:
             self.log.error(f"trade_size {self.config.trade_size} {problem}")
             return False
@@ -375,10 +333,14 @@ class CandlePatternStrategy(Strategy):
 
     def on_bar(self, bar: Bar) -> None:
         self.last_data_ns = max(self.last_data_ns, bar.ts_event)
-        if not self._in_order(bar):
+        if not self._sequence.in_order(bar):
+            self.log.warning(
+                f"{bar.bar_type}: bar at {bar.ts_event} is not after "
+                f"{self._sequence.last_ns}, skipped"
+            )
             return
         traded = bar.volume.raw > 0
-        if self._is_hole(bar.ts_event) or not traded:
+        if self._sequence.is_hole(bar) or not traded:
             self._reset_signals()
         if traded:
             self._feed(bar)
@@ -387,19 +349,6 @@ class CandlePatternStrategy(Strategy):
             self._manage(position, bar)
         elif self._is_idle() and traded:
             self._maybe_enter(bar)
-
-    def _in_order(self, bar: Bar) -> bool:
-        """Return False, with a warning, for a bar not after the previous one (duplicate, late)."""
-        last = self._last_bar_ns
-        if last is None or bar.ts_event > last:
-            return True
-        self.log.warning(f"{bar.bar_type}: bar at {bar.ts_event} is not after {last}, skipped")
-        return False
-
-    def _is_hole(self, ts_event: int) -> bool:
-        """Record `ts_event` as the last bar's; True if it is over one step after the previous."""
-        last, self._last_bar_ns = self._last_bar_ns, ts_event
-        return last is not None and ts_event - last > self._step_ns
 
     def _feed(self, bar: Bar) -> None:
         for detector in self._detectors.values():
@@ -447,7 +396,7 @@ class CandlePatternStrategy(Strategy):
 
     def _bars_held(self, position: Position, bar: Bar) -> int:
         """Return the bar closes since the position opened (a fill just after a close counts it)."""
-        return -(-(bar.ts_event - position.ts_opened) // self._step_ns)
+        return -(-(bar.ts_event - position.ts_opened) // self._sequence.step_ns)
 
     def _manage(self, position: Position, bar: Bar) -> None:
         if self._closing():
@@ -633,7 +582,7 @@ class CandlePatternStrategy(Strategy):
         self._reset_signals()
         self.instrument = None
         self.last_data_ns = 0
-        self._last_bar_ns = None
+        self._sequence.last_ns = None
         self._entry_distance = None
         self._clear_stop_state()
 

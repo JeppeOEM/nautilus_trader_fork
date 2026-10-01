@@ -743,6 +743,88 @@
         }
       }
     },
+    "/api/coin/{instrument_id}/drawings": {
+      "get": {
+        "summary": "Get Coin Drawings",
+        "description": "Return this instrument's saved drawings; none saved yet is `[]`, not an error.",
+        "operationId": "get_coin_drawings_api_coin__instrument_id__drawings_get",
+        "parameters": [
+          {
+            "name": "instrument_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Instrument Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DrawingsResponse"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "summary": "Put Coin Drawings",
+        "description": "Replace this instrument's drawings with the body's `{\"items\": [...]}`.\n\nInvalid JSON is a 400; a body or item that is not a storable drawing is a 422 whose detail\nnames the field (`items[2].anchors: ...`). Nothing is written unless every item passes.",
+        "operationId": "put_coin_drawings_api_coin__instrument_id__drawings_put",
+        "parameters": [
+          {
+            "name": "instrument_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Instrument Id"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "additionalProperties": {
+                    "type": "boolean"
+                  },
+                  "title": "Response Put Coin Drawings Api Coin  Instrument Id  Drawings Put"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/api/indicators/catalog": {
       "get": {
         "summary": "Get Indicators Catalog",
@@ -1585,6 +1667,14 @@
           "market": {
             "type": "string",
             "title": "Market"
+          },
+          "price_precision": {
+            "type": "integer",
+            "title": "Price Precision"
+          },
+          "size_precision": {
+            "type": "integer",
+            "title": "Size Precision"
           }
         },
         "type": "object",
@@ -1592,9 +1682,28 @@
           "items",
           "has_more",
           "venue",
-          "market"
+          "market",
+          "price_precision",
+          "size_precision"
         ],
         "title": "CandlesResponse"
+      },
+      "DrawingsResponse": {
+        "properties": {
+          "items": {
+            "items": {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            "type": "array",
+            "title": "Items"
+          }
+        },
+        "type": "object",
+        "required": [
+          "items"
+        ],
+        "title": "DrawingsResponse"
       },
       "ErrorsResponse": {
         "properties": {

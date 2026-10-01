@@ -259,7 +259,9 @@ def _walk(top: Path, directory: Path) -> Iterator[Path]:
             if path.name not in _WALK_SKIP_DIRS or nested_docs:
                 yield from _walk(top, path)
             elif path == top / "data":
+                # The committed configs, and the committed preference files (Story 32.5).
                 yield from sorted(path.glob("*.toml"))
+                yield from sorted((path / "preferences").glob("*.toml"))
         elif path.suffix in _WALK_SUFFIXES or path.name in _WALK_NAMES:
             yield path
 

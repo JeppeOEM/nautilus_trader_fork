@@ -51,6 +51,64 @@ RESERVED_PARAMS = frozenset({"instrument_id", "order_id_tag", "bar_type"})
 # measured distribution.
 DEFAULT_LATENCY_MS = 300
 
+_BACKTEST_MODELS = "nautilus_trader.backtest.models"
+_FILL_CONFIG = "nautilus_trader.backtest.config:FillModelConfig"
+# Every fill model's name -> (class path, config class path). The three models whose own `__init__`
+# takes no `config` (`FillModelFactory` would raise `TypeError`) go through the thin subclasses of
+# `research.application.fill_adapters`, which accept the same `FillModelConfig`.
+FILL_MODELS: Mapping[str, tuple[str, str]] = MappingProxyType(
+    {
+        "fill": (f"{_BACKTEST_MODELS}:FillModel", _FILL_CONFIG),
+        "best_price": (f"{_BACKTEST_MODELS}:BestPriceFillModel", _FILL_CONFIG),
+        "one_tick_slippage": (f"{_BACKTEST_MODELS}:OneTickSlippageFillModel", _FILL_CONFIG),
+        "two_tier": (f"{_BACKTEST_MODELS}:TwoTierFillModel", _FILL_CONFIG),
+        "three_tier": (f"{_BACKTEST_MODELS}:ThreeTierFillModel", _FILL_CONFIG),
+        "probabilistic": (f"{_BACKTEST_MODELS}:ProbabilisticFillModel", _FILL_CONFIG),
+        "size_aware": (f"{_BACKTEST_MODELS}:SizeAwareFillModel", _FILL_CONFIG),
+        "limit_order_partial": (f"{_BACKTEST_MODELS}:LimitOrderPartialFillModel", _FILL_CONFIG),
+        "market_hours": ("research.application.fill_adapters:MarketHoursFillModel", _FILL_CONFIG),
+        "volume_sensitive": (
+            "research.application.fill_adapters:VolumeSensitiveFillModel",
+            _FILL_CONFIG,
+        ),
+        "competition_aware": (
+            "research.application.fill_adapters:CompetitionAwareFillModel",
+            _FILL_CONFIG,
+        ),
+    }
+)
+FILL_KEYS = frozenset({"prob_fill_on_limit", "prob_slippage", "random_seed"})
+_FEE_CONFIGS = "nautilus_trader.backtest.config"
+# Every fee model's name -> (class path, config class path, allowed keys, required keys).
+FEE_MODELS: Mapping[str, tuple[str, str, frozenset[str], frozenset[str]]] = MappingProxyType(
+    {
+        "maker_taker": (
+            f"{_BACKTEST_MODELS}:MakerTakerFeeModel",
+            f"{_FEE_CONFIGS}:MakerTakerFeeModelConfig",
+            frozenset(),
+            frozenset(),
+        ),
+        "fixed": (
+            f"{_BACKTEST_MODELS}:FixedFeeModel",
+            f"{_FEE_CONFIGS}:FixedFeeModelConfig",
+            frozenset({"commission", "charge_commission_once"}),
+            frozenset({"commission"}),
+        ),
+        "per_contract": (
+            f"{_BACKTEST_MODELS}:PerContractFeeModel",
+            f"{_FEE_CONFIGS}:PerContractFeeModelConfig",
+            frozenset({"commission"}),
+            frozenset({"commission"}),
+        ),
+    }
+)
+LATENCY_KEYS = (
+    "base_latency_nanos",
+    "insert_latency_nanos",
+    "update_latency_nanos",
+    "cancel_latency_nanos",
+)
+
 
 def window_ns(start: str | int, end: str | int) -> tuple[int, int]:
     """Parse a window exactly as `ParquetDataCatalog.query` does (naive = UTC, int = ns)."""
@@ -73,6 +131,12 @@ class RunSpec:
     into `<iid>-<step>-<aggregation>-LAST-INTERNAL` bars, injected as the strategy's `bar_type`);
     a positive int starting balance; a non-negative int `latency_ms`; a window whose end is after
     its start; `params` never sets a key the runner owns (`RESERVED_PARAMS`).
+    Execution models (all optional, None = the venue's defaults): `fill_model`
+    (`{"name": <FILL_MODELS key>, **prob_fill_on_limit/prob_slippage/random_seed}`), `fee_model`
+    (`{"name": <FEE_MODELS key>, **that model's keys}`), `latency` (any of `LATENCY_KEYS`, non-
+    negative ints in ns; replaces the `latency_ms` shortcut) and `exec_algorithms`
+    (`"module:Class"` paths of `ExecAlgorithm`s, each with the `<Class>Config` beside it); a name,
+    key or value outside those tables raises at construction, naming the valid ones.
     `latency_ms` delays every order command by that fixed time (Nautilus's `LatencyModel`), so an
     order fills against the market as it is when the command arrives, not as the strategy saw it;
     0 runs without a latency model (the fill is at the very quote the decision was made on). On the
@@ -97,6 +161,10 @@ class RunSpec:
     starting_balance: int = 10_000
     data: str = "seconds"
     latency_ms: int = DEFAULT_LATENCY_MS
+    fill_model: Mapping[str, object] | None = None
+    fee_model: Mapping[str, object] | None = None
+    latency: Mapping[str, int] | None = None
+    exec_algorithms: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if isinstance(self.instrument_ids, str):
@@ -124,8 +192,14 @@ class RunSpec:
             raise ValueError(f"latency_ms must be a non-negative int, got {latency!r}")
         window_ns(self.start, self.end)
         check_params(self.params)
+        check_execution_models(self)
         object.__setattr__(self, "instrument_ids", tuple(self.instrument_ids))
         object.__setattr__(self, "params", MappingProxyType(dict(self.params)))
+        for name in ("fill_model", "fee_model", "latency"):
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(self, name, MappingProxyType(dict(value)))
+        object.__setattr__(self, "exec_algorithms", tuple(self.exec_algorithms))
 
     @property
     def venue(self) -> str:
@@ -141,6 +215,76 @@ def check_params(params: Mapping[str, object]) -> None:
     reserved = RESERVED_PARAMS & set(params)
     if reserved:
         raise ValueError(f"params may not set {sorted(reserved)}: the runner sets them")
+
+
+def _model_name(field_name: str, model: Mapping[str, object], table: Mapping[str, object]) -> str:
+    name = model.get("name")
+    if not isinstance(name, str) or name not in table:
+        raise ValueError(f"{field_name}.name must be one of {sorted(table)}, got {name!r}")
+    return name
+
+
+def _check_keys(
+    field_name: str, model: Mapping[str, object], allowed: frozenset[str], required: frozenset[str]
+) -> None:
+    unknown = set(model) - allowed - {"name"}
+    if unknown:
+        raise ValueError(f"{field_name}: unknown keys {sorted(unknown)}; valid: {sorted(allowed)}")
+    missing = required - set(model)
+    if missing:
+        raise ValueError(f"{field_name}: missing required keys {sorted(missing)}")
+
+
+def _check_fill_model(model: Mapping[str, object]) -> None:
+    _model_name("fill_model", model, FILL_MODELS)
+    _check_keys("fill_model", model, FILL_KEYS, frozenset())
+    for key in ("prob_fill_on_limit", "prob_slippage"):
+        value = model.get(key, 0.0)
+        if isinstance(value, bool) or not isinstance(value, int | float) or not 0 <= value <= 1:
+            raise ValueError(f"fill_model.{key} must be a number in [0, 1], got {value!r}")
+    seed = model.get("random_seed")
+    if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int)):
+        raise ValueError(f"fill_model.random_seed must be an int or None, got {seed!r}")
+
+
+def _check_fee_model(model: Mapping[str, object]) -> None:
+    name = _model_name("fee_model", model, FEE_MODELS)
+    _, _, allowed, required = FEE_MODELS[name]
+    _check_keys("fee_model", model, allowed, required)
+    commission = model.get("commission")
+    if commission is not None and not (
+        isinstance(commission, str) and len(commission.split()) == 2
+    ):
+        raise ValueError(
+            f"fee_model.commission must be a money string like '0.5 USDC', got {commission!r}"
+        )
+
+
+def _check_latency(latency: Mapping[str, int]) -> None:
+    unknown = set(latency) - set(LATENCY_KEYS)
+    if unknown:
+        raise ValueError(f"latency: unknown keys {sorted(unknown)}; valid: {list(LATENCY_KEYS)}")
+    for key, value in latency.items():
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"latency.{key} must be a non-negative int (ns), got {value!r}")
+
+
+def check_execution_models(spec: RunSpec) -> None:
+    """Validate a spec's fill/fee/latency/exec-algorithm fields against the closed tables."""
+    if spec.fill_model is not None:
+        _check_fill_model(spec.fill_model)
+    if spec.fee_model is not None:
+        _check_fee_model(spec.fee_model)
+    if spec.latency is not None:
+        _check_latency(spec.latency)
+    if isinstance(spec.exec_algorithms, str):
+        raise ValueError(
+            f"exec_algorithms must be a tuple of paths, not the str {spec.exec_algorithms!r}"
+        )
+    for path in spec.exec_algorithms:
+        module, _, cls = str(path).partition(":")
+        if not module or not cls:
+            raise ValueError(f"exec_algorithms entry must be 'module:Class', got {path!r}")
 
 
 @dataclass(frozen=True, eq=False)
@@ -161,7 +305,12 @@ class RunResult:
     `metrics.max_drawdown` (daily realized returns) is a third, coarser view; upgrade path: sample
     `portfolio.net_exposures`/`unrealized_pnls` on a timer in the engine and add them per event;
     `nautilus_stats` is Nautilus's own `{"pnls": stats_pnls, "returns": stats_returns}` for
-    cross-checking; `wall_seconds` is the engine's run time (data loading excluded).
+    cross-checking (`pnls`, `returns` and `general`; `general` holds only `Long Ratio`. The eight
+    upstream statistics the portfolio does not register by default, added by the runner -- CAGR,
+    Alpha, BetaRatio, CalmarRatio, InformationRatio, MaxDrawdown, TrackingError, TreynorRatio --
+    land in `returns`, e.g. `CAGR (252 days)`, `Calmar Ratio (252 days)`, `Max Drawdown`); `orders` / `fills` are the engine's own `generate_orders_report()` /
+    `generate_order_fills_report()` frames (possibly empty); `wall_seconds` is the engine's run
+    time (data loading excluded).
     """
 
     config_id: str
@@ -173,6 +322,8 @@ class RunResult:
     nautilus_stats: dict
     iterations: int
     wall_seconds: float
+    orders: pd.DataFrame = field(default_factory=pd.DataFrame)
+    fills: pd.DataFrame = field(default_factory=pd.DataFrame)
 
     def pnl_by_hour_of_day(self) -> dict[int, float]:
         """

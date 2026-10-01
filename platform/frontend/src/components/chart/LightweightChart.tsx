@@ -23,7 +23,7 @@ import type { SnapshotLinesData } from "../../hooks/useSnapshotSeries";
 import { type GapRun, MAX_GAP_ROWS_PER_GAP, findGapRuns, gapRunsBySlot } from "../../lib/gaps";
 import { type GapLookup, type LegendAction, type LegendSeries, renderLegends } from "./legend";
 import { DEFAULT_LINE_STYLE, DEFAULT_LINE_WIDTH, type LineStyleName } from "../../lib/indicatorStyle";
-import { chartVar } from "./chartTheme";
+import { chartVar, fibLevelColor } from "./chartTheme";
 import { assignPaneColor, cssVar } from "./paneColors";
 import {
   MeasurementPrimitive,
@@ -35,6 +35,17 @@ import { VolumeProfilePrimitive, type VolumeProfileRenderSpec } from "./primitiv
 import { VerticalMarkerPrimitive } from "./primitives/VerticalMarkerPrimitive";
 import { GapPrimitive } from "./primitives/GapPrimitive";
 import { TrendlinePrimitive, type TrendlineAnchor } from "./primitives/TrendlinePrimitive";
+import { FibPrimitive } from "./primitives/FibPrimitive";
+import { PositionPrimitive } from "./primitives/PositionPrimitive";
+import { BarGrid, type DrawingPrimitive } from "./primitives/drawingPrimitive";
+import {
+  type Anchor,
+  type DragPoint,
+  type FibDrawing,
+  type InstrumentPrecision,
+  type PositionDrawing,
+  defaultFibLevels,
+} from "../../lib/drawings";
 
 export type PaneSeriesKind = "Line" | "Histogram";
 
@@ -105,10 +116,23 @@ export interface PriceLineSpec {
 export interface TrendlineSpec {
   id: string;
   kind: "trendline";
-  anchors: [TrendlineAnchor, TrendlineAnchor];
+  anchors: [Anchor, Anchor];
   color: string;
 }
-export type DrawingSpec = TrendlineSpec;
+// Story 32.5: the Fibonacci retracement and the Long/Short position are the same kind of drawing
+// (anchors in time + price, a series primitive); their specs are `lib/drawings.ts`'s own types.
+export type DrawingSpec = TrendlineSpec | FibDrawing | PositionDrawing;
+type DrawingPrimitiveOf = TrendlinePrimitive | FibPrimitive | PositionPrimitive;
+interface DrawingEntry {
+  kind: DrawingSpec["kind"];
+  primitive: DrawingPrimitiveOf;
+}
+
+/** What the pointer grabbed: a drawing and the named handle of it (null: only its body). */
+interface GrabTarget {
+  id: string;
+  handle: string | null;
+}
 
 // Story 18.5: a Volume Profile placed on the main pane; `id` is the caller's stable key.
 export interface VolumeProfileSpec extends VolumeProfileRenderSpec {
@@ -186,6 +210,21 @@ interface LightweightChartProps {
   /** Edit-menu actions; `id` is a `PriceLineSpec` or `DrawingSpec` id. */
   onDrawingColor?: (id: string, color: string) => void;
   onDrawingDelete?: (id: string) => void;
+  /** Story 32.5: the menu's "Settings..." entry, shown for the kinds that have a modal (Fibonacci,
+   * position). */
+  onDrawingSettings?: (id: string) => void;
+  /** Story 32.5: the instrument's price/size decimals (the catalog definition's, from the candles
+   * response); `null` until known, and then no drawing prints a label. */
+  precision?: InstrumentPrecision | null;
+  /** Story 32.5: a live drag of a drawing's handle (an anchor, a position's target / stop / entry /
+   * right edge), reported on every move with the pointer's bar time and price; this component
+   * never changes the spec itself. Horizontal lines keep `onPriceLineDrag`. */
+  onDrawingDrag?: (id: string, handle: string, point: DragPoint) => void;
+  /** Story 32.5: while true, a click-drag draws a live Fibonacci preview (anchor A at the press,
+   * B at the pointer) instead of panning, and release reports exactly one `onFibPlace(a, b)`; a
+   * click without a drag reports nothing. Esc / disarm cancels with no residue. */
+  fibActive?: boolean;
+  onFibPlace?: (a: TrendlineAnchor, b: TrendlineAnchor) => void;
   /** Story 18.3: while true (candles mode only), a click-drag on the chart draws a
    * transient measurement rectangle + label (a `MeasurementPrimitive` owned entirely by
    * this component -- never in `drawings`) instead of panning; release removes it and
@@ -388,53 +427,49 @@ const PRICE_LINE_WIDTH = 1;
 const PRICE_LINE_GRAB_TOLERANCE_PX = 5;
 
 /**
- * Story 18.1 (AC #3): the price-line id a mousedown just grabbed, or `null`. Only a
- * crosshair param the library itself reported as hovering a custom price line owned by
- * the main series qualifies, and the nearest registry line within the grab tolerance
- * wins -- `hoveredInfo` carries no line identity, so this y-coordinate hit-test against
- * the specs is what recovers it.
+ * The one hit-test of every drawing (Stories 18.1/18.2, unified by 32.5): what is under `point`.
+ * A handle beats a body: the nearest handle of any registered drawing (an anchor, a position's
+ * target / stop / entry / right edge) or, when `hlineReachable`, the nearest horizontal price
+ * line (handle `"price"`, within the library's own price-line radius); only without a handle does
+ * the nearest drawing body count. `primitives` false leaves the primitive drawings out (a grab
+ * outside the Cursor tool), `bodies` false asks for handles alone (a grab starts only on one).
+ * `hlineReachable` is the caller's call: a grab asks the library whether the pointer is over a
+ * price line, the edit menu does not need to.
  */
-function findGrabbedPriceLineId(
-  specs: PriceLineSpec[],
-  series: ISeriesApi<"Candlestick">,
-  param: MouseEventParams,
-): string | null {
-  const point = param.point;
-  if (!point) return null;
-  const info = param.hoveredInfo;
-  if (info?.objectKind !== "custom-price-line" || info.series !== series) return null;
-  let grabbedId: string | null = null;
-  let bestDistance = PRICE_LINE_GRAB_TOLERANCE_PX;
-  for (const spec of specs) {
-    const lineY = series.priceToCoordinate(spec.price);
-    if (lineY === null) continue;
-    const distance = Math.abs(point.y - lineY);
-    if (distance <= bestDistance) {
-      bestDistance = distance;
-      grabbedId = spec.id;
-    }
-  }
-  return grabbedId;
-}
-
-/** The id of the trendline or price line under a click, or `null`. */
-function findClickedDrawingId(
+function findDrawingHit(
   point: { x: number; y: number },
   series: ISeriesApi<"Candlestick"> | null,
-  drawings: Map<string, TrendlinePrimitive>,
+  drawings: Map<string, DrawingEntry>,
   specs: PriceLineSpec[],
-): string | null {
-  let bestId: string | null = null;
-  let best = PRICE_LINE_GRAB_TOLERANCE_PX + 1;
-  for (const [id, primitive] of drawings) {
-    const d = primitive.distanceTo(point.x, point.y);
-    if (d !== null && d < best) [best, bestId] = [d, id];
+  options: { hlineReachable: boolean; primitives: boolean; bodies: boolean },
+): GrabTarget | null {
+  let handleHit: (GrabTarget & { distance: number }) | null = null;
+  let bodyHit: (GrabTarget & { distance: number }) | null = null;
+  for (const [id, entry] of options.primitives ? drawings : []) {
+    const hit = (entry.primitive as DrawingPrimitive).hit(point.x, point.y);
+    if (!hit) continue;
+    if (hit.handle !== null) {
+      if (handleHit === null || hit.distance < handleHit.distance) handleHit = { id, handle: hit.handle, distance: hit.distance };
+    } else if (bodyHit === null || hit.distance < bodyHit.distance) {
+      bodyHit = { id, handle: null, distance: hit.distance };
+    }
   }
-  for (const spec of series ? specs : []) {
+  for (const spec of options.hlineReachable ? specs : []) {
     const y = series?.priceToCoordinate(spec.price);
-    if (y != null && Math.abs(point.y - y) < best) [best, bestId] = [Math.abs(point.y - y), spec.id];
+    if (y === null || y === undefined) continue;
+    const distance = Math.abs(point.y - y);
+    if (distance <= PRICE_LINE_GRAB_TOLERANCE_PX && (handleHit === null || distance < handleHit.distance)) {
+      handleHit = { id: spec.id, handle: "price", distance };
+    }
   }
-  return bestId;
+  const best = handleHit ?? (options.bodies ? bodyHit : null);
+  return best && { id: best.id, handle: best.handle };
+}
+
+/** Whether the library's crosshair param says the pointer is over one of the main series' price lines. */
+function overPriceLine(param: MouseEventParams, series: ISeriesApi<"Candlestick"> | null): boolean {
+  const info = param.hoveredInfo;
+  return series !== null && info?.objectKind === "custom-price-line" && info.series === series;
 }
 
 /**
@@ -460,6 +495,11 @@ export default function LightweightChart({
   drawEditable = false,
   onDrawingColor,
   onDrawingDelete,
+  onDrawingSettings,
+  precision = null,
+  onDrawingDrag,
+  fibActive = false,
+  onFibPlace,
   onPointClick,
   measureActive = false,
   volume = [],
@@ -499,20 +539,24 @@ export default function LightweightChart({
   // would otherwise have followed it (see the mousedown effect below).
   const priceLineRegistryRef = useRef<Map<string, IPriceLine>>(new Map());
   const lastCrosshairRef = useRef<MouseEventParams | null>(null);
-  const dragIdRef = useRef<string | null>(null);
+  const dragIdRef = useRef<GrabTarget | null>(null);
   const suppressNextClickRef = useRef(false);
   const dragMovedRef = useRef(false);
   const previewRef = useRef<TrendlinePrimitive | null>(null);
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null);
-  const editRef = useRef({ priceLines, drawEditable });
-  editRef.current = { priceLines, drawEditable };
+  const editRef = useRef({ priceLines, drawEditable, onDrawingDrag });
+  editRef.current = { priceLines, drawEditable, onDrawingDrag };
   const measureDataRef = useRef<{ data: ChartDatum[]; volume: VolumeDatum[] }>({ data, volume });
   const profileRegistryRef = useRef<Map<string, VolumeProfilePrimitive>>(new Map());
   // Latest-callback/latest-specs refs: the drag effects below must not re-subscribe (and
   // lose an in-flight drag) whenever the caller re-renders with fresh closures or specs.
   const latestRef = useRef({ volumeProfiles, onRangeSelect, onProfileEdgeDrag, onProfileEdgeCommit });
   const markerRef = useRef<VerticalMarkerPrimitive | null>(null);
-  const drawingRegistryRef = useRef<Map<string, TrendlinePrimitive>>(new Map());
+  const drawingRegistryRef = useRef<Map<string, DrawingEntry>>(new Map());
+  // Story 32.5: the bar times every drawing primitive snaps its anchors to (one grid per chart).
+  const gridRef = useRef(new BarGrid());
+  const precisionRef = useRef(precision);
+  precisionRef.current = precision;
   // Newest time painted on the candlestick series -- the last setData() point or the last
   // live update(), whichever is later. lightweight-charts throws on an update() older than
   // its last point, so the live effect checks against this and every setData() resets it.
@@ -526,6 +570,17 @@ export default function LightweightChart({
   gapRunsRef.current = gapRuns;
   const gapLookupRef = useRef<GapLookup>(new Map());
   gapLookupRef.current = useMemo(() => gapRunsBySlot(gapRuns), [gapRuns]);
+  // Story 32.5: every slot of the price series (gap whitespace included, plus the forming live bar
+  // drawn with `update()`), so a drawing anchored between two bars sits on the earlier one.
+  const barTimes = useMemo(() => {
+    const source: readonly { time: Time }[] = mode === "candles" ? data : (linesData?.bid ?? []);
+    const times = source.map((d) => d.time as number);
+    if (mode === "candles" && liveTime !== undefined && (times.length === 0 || liveTime > times[times.length - 1])) {
+      times.push(liveTime);
+    }
+    return times;
+  }, [mode, data, linesData, liveTime]);
+  gridRef.current.set(barTimes);
   // False until a layout has sized the chart with the time axis measured: before that the price
   // pane's own height is not the 500 px budget (the library took the axis out of the initial 500).
   const laidOutRef = useRef(false);
@@ -1220,31 +1275,96 @@ export default function LightweightChart({
   }, [measureActive, onMeasureEnd, mode]);
 
   useEffect(() => {
+    // Story 32.5: the Fibonacci tool, on the same range-drag plumbing as the measurement: a live
+    // preview (the default levels between the press and the pointer) attached lazily on the first
+    // move, and on release exactly one `onFibPlace(a, b)`. A click without a drag shows and reports
+    // nothing and leaves the tool armed; Esc / disarm runs the cleanup, which removes the preview.
+    const container = containerRef.current;
+    const chart = chartRef.current;
+    const host = seriesRef.current ?? lineSeriesRef.current?.price;
+    if (!container || !chart || !host || !fibActive) return;
+
+    let preview: FibPrimitive | null = null;
+    const stopDrag = attachRangeDrag(container, chart, host, {
+      onMove: (start, end) => {
+        const shape: FibDrawing = {
+          kind: "fib",
+          id: "fib-preview",
+          anchors: [
+            { time: start.time as number, price: start.price },
+            { time: end.time as number, price: end.price },
+          ],
+          levels: defaultFibLevels(fibLevelColor), // as placed (ChartPage's handleFibPlace): the preview is the drawing
+          extend_right: true,
+          label_side: "left",
+          line_width: 1,
+        };
+        if (!preview) {
+          preview = new FibPrimitive(shape, precisionRef.current?.price ?? null, gridRef.current);
+          host.attachPrimitive(preview);
+        } else {
+          preview.update(shape, precisionRef.current?.price ?? null);
+        }
+      },
+      onRelease: (last) => {
+        if (!last || !preview) return;
+        host.detachPrimitive(preview);
+        preview = null;
+        onFibPlace?.(last.start, last.end);
+      },
+    });
+    return () => {
+      stopDrag();
+      if (preview) host.detachPrimitive(preview);
+    };
+  }, [fibActive, onFibPlace, mode]);
+
+  useEffect(() => {
     // Story 18.2 (AC #4): the drawings prop's registry-diff effect -- same per-id
-    // add/update/remove discipline as priceLines, never a visible-range call.
+    // add/update/remove discipline as priceLines, never a visible-range call. Story 32.5: one
+    // registry for every kind (trendline, Fibonacci, position), each its own primitive on the
+    // main-pane host; a changed kind under one id replaces the primitive.
     const host = seriesRef.current ?? lineSeriesRef.current?.price;
     if (!host) return;
     const registry = drawingRegistryRef.current;
     const specsById = new Map(drawings.map((spec) => [spec.id, spec] as const));
+    const grid = gridRef.current;
 
-    for (const [id, primitive] of [...registry]) {
-      if (!specsById.has(id)) {
-        host.detachPrimitive(primitive);
+    for (const [id, entry] of [...registry]) {
+      if (specsById.get(id)?.kind !== entry.kind) {
+        host.detachPrimitive(entry.primitive);
         registry.delete(id);
       }
     }
 
     for (const spec of drawings) {
-      const primitive = registry.get(spec.id);
-      if (primitive) {
-        primitive.update(spec.anchors, spec.color);
+      const entry = registry.get(spec.id);
+      if (entry) {
+        if (spec.kind === "trendline") (entry.primitive as TrendlinePrimitive).update(spec.anchors, spec.color);
+        else if (spec.kind === "fib") (entry.primitive as FibPrimitive).update(spec, precision?.price ?? null);
+        else (entry.primitive as PositionPrimitive).update(spec, precision);
         continue;
       }
-      const created = new TrendlinePrimitive(spec.anchors, spec.color);
+      const created: DrawingPrimitiveOf =
+        spec.kind === "trendline"
+          ? new TrendlinePrimitive(spec.anchors, spec.color, grid)
+          : spec.kind === "fib"
+            ? new FibPrimitive(spec, precision?.price ?? null, grid)
+            : new PositionPrimitive(spec, precision, grid);
+      created.setHandlesVisible(editRef.current.drawEditable);
       host.attachPrimitive(created);
-      registry.set(spec.id, created);
+      registry.set(spec.id, { kind: spec.kind, primitive: created });
     }
-  }, [drawings, mode]);
+  }, [drawings, mode, precision]);
+
+  useEffect(() => {
+    // Story 32.5: handles are drawn only while drawings are editable (the Cursor tool), and every
+    // primitive repaints when the bars it snaps to change (a page prepended, a timeframe's data).
+    for (const { primitive } of drawingRegistryRef.current.values()) {
+      primitive.setHandlesVisible(drawEditable);
+      primitive.refresh();
+    }
+  }, [drawEditable, barTimes, drawings, mode]);
 
   useEffect(() => {
     // Story 18.1 (AC #3): the one crosshairMove subscription serves both halves of the
@@ -1255,7 +1375,9 @@ export default function LightweightChart({
     // conversion in the same space, pane offsets included. `paneIndex === 0` guards
     // against y-converting from an indicator sub-pane.
     const chart = chartRef.current;
-    if (!chart || !onPriceLineDrag || mode !== "candles") return;
+    // Story 32.5: a handle drag of a primitive drawing works in both modes; the price-line drag
+    // (a native line on the candlestick series) stays Candles-only.
+    if (!chart || (!onDrawingDrag && !(onPriceLineDrag && mode === "candles"))) return;
     // A drag can never carry over from a previous subscription lifetime (e.g. a
     // candles->lines->candles flip while the button was somehow still held) -- a fresh
     // subscription starts dragless.
@@ -1263,13 +1385,27 @@ export default function LightweightChart({
 
     const handleCrosshairMove = (param: MouseEventParams): void => {
       lastCrosshairRef.current = param.point ? param : null;
-      const draggedId = dragIdRef.current;
-      if (draggedId === null) return;
+      const dragged = dragIdRef.current;
+      if (dragged === null) return;
       if (!param.point || param.paneIndex !== 0) return;
-      const price = seriesRef.current?.coordinateToPrice(param.point.y);
+      const host = seriesRef.current ?? lineSeriesRef.current?.price;
+      const price = host?.coordinateToPrice(param.point.y);
       if (price === null || price === undefined) return;
       dragMovedRef.current = true;
-      onPriceLineDrag(draggedId, price);
+      if (dragged.handle === "price") {
+        onPriceLineDrag?.(dragged.id, price);
+        return;
+      }
+      const grid = gridRef.current;
+      const logical = param.logical ?? chart.timeScale().coordinateToLogical(param.point.x);
+      onDrawingDrag?.(dragged.id, dragged.handle ?? "", {
+        price,
+        time: logical === null ? null : grid.timeAtLogical(logical),
+        barsSince: (time) => {
+          const from = grid.indexOf(time);
+          return from === null || logical === null ? null : Math.round(logical) - from;
+        },
+      });
     };
 
     chart.subscribeCrosshairMove(handleCrosshairMove);
@@ -1279,7 +1415,7 @@ export default function LightweightChart({
       // this lifetime must never be able to start a drag in the next one.
       lastCrosshairRef.current = null;
     };
-  }, [onPriceLineDrag, mode]);
+  }, [onPriceLineDrag, onDrawingDrag, mode]);
 
   useEffect(() => {
     // Legend values follow the crosshair; off-chart (time undefined) they fall back to the
@@ -1300,13 +1436,32 @@ export default function LightweightChart({
     // window-level mouseup (not container-level: the drag can end with the cursor
     // outside the chart) is what always ends it.
     const container = containerRef.current;
-    if (!container || !onPriceLineDrag || mode !== "candles") return;
+    if (!container || (!onDrawingDrag && !(onPriceLineDrag && mode === "candles"))) return;
 
     const handleMouseDown = (event: MouseEvent): void => {
+      // Only the primary button grabs: a right press (the drawing's context menu) or a middle one
+      // must never start a drag that moves and saves the drawing.
+      if (event.button !== 0) {
+        dragIdRef.current = null;
+        return;
+      }
       const series = seriesRef.current;
       const param = lastCrosshairRef.current;
-      const grabbedId = series && param ? findGrabbedPriceLineId(priceLines, series, param) : null;
-      dragIdRef.current = grabbedId;
+      // Story 32.5: the one grab for every drawing. A price line is grabbable with any tool (the
+      // library reports the hover); a primitive's handle only in Cursor mode, so a placement
+      // tool's own drag is never stolen. Only the price pane carries drawings.
+      const grabbed =
+        param?.point && (param.paneIndex === undefined || param.paneIndex === 0)
+          ? findDrawingHit(param.point, series, drawingRegistryRef.current, priceLines, {
+              // Not while the Fibonacci tool is armed: its drag (a sibling capture listener, which
+              // stopPropagation can't stop) would also start, moving the line and placing a fib.
+              hlineReachable: mode === "candles" && !fibActive && !!onPriceLineDrag && overPriceLine(param, series),
+              primitives: !!onDrawingDrag && editRef.current.drawEditable,
+              bodies: false,
+            })
+          : null;
+      dragIdRef.current = grabbed;
+      const grabbedId = grabbed?.id ?? null;
       dragMovedRef.current = false;
       // A grab whose release happens outside the chart never fires a chart click, so
       // the suppression flag would otherwise swallow the NEXT real click -- every
@@ -1330,7 +1485,7 @@ export default function LightweightChart({
       container.removeEventListener("mousedown", handleMouseDown, true);
       window.removeEventListener("mouseup", handleMouseUp);
     };
-  }, [priceLines, onPriceLineDrag, mode]);
+  }, [priceLines, onPriceLineDrag, onDrawingDrag, mode, fibActive]);
 
   useEffect(() => {
     // Story 18.1/18.2: click reporting. `onPriceClick` is candles-only; `onPointClick`
@@ -1347,7 +1502,11 @@ export default function LightweightChart({
       }
       if (!param.point) return;
       if (editRef.current.drawEditable) {
-        const hitId = findClickedDrawingId(param.point, seriesRef.current, drawingRegistryRef.current, editRef.current.priceLines);
+        const hitId = findDrawingHit(param.point, seriesRef.current, drawingRegistryRef.current, editRef.current.priceLines, {
+          hlineReachable: true,
+          primitives: true,
+          bodies: true,
+        })?.id;
         const ev = param.sourceEvent;
         setMenu(hitId && ev ? { id: hitId, x: ev.clientX, y: ev.clientY } : null);
       }
@@ -1388,6 +1547,7 @@ export default function LightweightChart({
   }, [pendingAnchor, mode]);
 
   const menuSpec = menu ? (priceLines.find((l) => l.id === menu.id) ?? drawings.find((d) => d.id === menu.id)) : undefined;
+  const menuHasSettings = !!menuSpec && "kind" in menuSpec && (menuSpec.kind === "fib" || menuSpec.kind === "position");
   const menuColor = /^#[0-9a-f]{6}$/i.test(menuSpec?.color ?? "") ? menuSpec!.color : chartVar("--chart-drawing");
   return (
     <>
@@ -1408,6 +1568,18 @@ export default function LightweightChart({
             value={menuColor}
             onChange={(e) => onDrawingColor?.(menu.id, e.target.value)}
           />
+          {menuHasSettings && onDrawingSettings && (
+            <button
+              type="button"
+              className="tabbtn"
+              onClick={() => {
+                onDrawingSettings(menu.id);
+                setMenu(null);
+              }}
+            >
+              Settings…
+            </button>
+          )}
           <button
             type="button"
             className="tabbtn"

@@ -27,7 +27,7 @@ everywhere -- FR10 is conditional on actual usage, not a coverage mandate): Orde
 has both a backtest Strategy consumer (ofi_strategy.py) and a direct-replay consumer
 (metrics_computer.py/chart_data.py), but no research-notebook demo yet. Microprice has the
 direct-replay consumer and the research notebook, but no backtest Strategy consumer yet.
-OnlineLogisticTrend is only consumed by a backtest Strategy (example_strategy.py).
+OnlineLogisticTrend is only consumed by a backtest Strategy (indicator_signal_strategy.py, signal `logistic_trend`).
 MultiLevelOBI/MultiLevelOFI were then consumed only by the web dashboard's live monitor loop
 (retired in Story 15.10); today `ranking_engine`, `data_api`'s indicator series, `bots` and
 the snapshot/OFI strategies consume them. This is an honest note, not a gap to close here.

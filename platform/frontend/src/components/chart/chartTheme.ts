@@ -64,3 +64,23 @@ export function chartVar(name: ChartToken): string {
 export function chartPalette(): string[] {
   return CHART_PANE_TOKENS.map((token) => chartVar(token));
 }
+
+// Story 32.5: each Fibonacci ratio's default colour, a chart token resolved when the drawing is made.
+const FIB_LEVEL_TOKENS: Record<number, ChartToken> = {
+  0: "--chart-text-dim",
+  0.236: "--chart-pane-2",
+  0.382: "--chart-pane-4",
+  0.5: "--chart-pane-3",
+  0.618: "--chart-pane-6",
+  0.786: "--chart-pane-5",
+  1: "--chart-text-dim",
+  1.272: "--chart-pane-7",
+  1.618: "--chart-pane-1",
+  2.618: "--chart-pane-8",
+  4.236: "--chart-pane-2",
+};
+
+/** A Fibonacci ratio's default colour, for the placed drawing and its drag preview alike. */
+export function fibLevelColor(ratio: number): string {
+  return chartVar(FIB_LEVEL_TOKENS[ratio] ?? "--chart-drawing");
+}

@@ -198,7 +198,7 @@ This is the research path — a `Strategy` subclass run by `BacktestNode` agains
 collector's own Parquet catalog, referenced by string path so parameter sweeps and
 symbol/date changes never require touching the strategy file.
 
-**Minimal shape** (see `research/strategies/example_strategy.py` for the full working
+**Minimal shape** (see `research/strategies/indicator_signal_strategy.py` for a full working
 version):
 
 ```python

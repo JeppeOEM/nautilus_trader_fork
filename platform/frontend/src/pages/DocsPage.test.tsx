@@ -35,4 +35,15 @@ describe("DocsPage", () => {
     expect(screen.getByText(/at most/).textContent).toMatch(/720 slots/);
     expect(screen.getAllByText(/\(compressed\)/).length).toBeGreaterThan(0);
   });
+
+  it("documents the drawing tools and where drawings are saved (Story 32.5)", () => {
+    render(
+      <MemoryRouter initialEntries={["/docs/kb/chart-drawings"]}>
+        <DocsPage />
+      </MemoryRouter>,
+    );
+    expect(screen.getByRole("heading", { name: /Drawings: Fibonacci, Long\/Short/ })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Where it is saved" })).toBeInTheDocument();
+    expect(screen.getAllByText(/chart_drawings\.toml/).length).toBeGreaterThan(0);
+  });
 });

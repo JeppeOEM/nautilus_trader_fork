@@ -32,6 +32,28 @@ ERROR_LEDGER_DIR: str = os.environ.get(
     "ERROR_LEDGER_DIR", str(Path(CATALOG_PATH).parent / "errors")
 )
 
+# The one directory holding the UI preference files (Story 32.5): `chart_indicators.toml`,
+# `screener_columns.toml` and `chart_drawings.toml`, mounted as a directory (`./data/preferences/`)
+# so a new preference file needs no new mount. The two per-file path variables it replaced would be
+# silently ignored by a stale compose file (the files would then be written inside the container
+# and lost on the next recreate), so they refuse to start instead.
+_REMOVED_PATH_VARS = {
+    "CHART_INDICATOR_CONFIG_PATH": "chart_indicators.toml",
+    "SCREENER_COLUMNS_CONFIG_PATH": "screener_columns.toml",
+}
+for _var, _name in _REMOVED_PATH_VARS.items():
+    if _var in os.environ:
+        raise RuntimeError(
+            f"{_var} was removed: set CHART_PREFERENCES_DIR to the directory holding {_name}, "
+            "chart_indicators.toml, screener_columns.toml and chart_drawings.toml "
+            "(docker-compose.yml mounts ./data/preferences/ at /app/preferences)"
+        )
+
+CHART_PREFERENCES_DIR: str = os.environ.get("CHART_PREFERENCES_DIR", "/app/preferences")
+CHART_INDICATOR_CONFIG_PATH: str = str(Path(CHART_PREFERENCES_DIR) / "chart_indicators.toml")
+SCREENER_COLUMNS_CONFIG_PATH: str = str(Path(CHART_PREFERENCES_DIR) / "screener_columns.toml")
+CHART_DRAWINGS_PATH: str = str(Path(CHART_PREFERENCES_DIR) / "chart_drawings.toml")
+
 
 def candles_db_path(venue: str) -> str:
     """One store file per venue (each venue's collector is its single writer)."""

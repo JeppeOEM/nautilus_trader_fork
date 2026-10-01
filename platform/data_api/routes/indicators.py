@@ -29,7 +29,6 @@ read candles exactly as the chart does), builds the response models and maps fai
 
 import json
 import logging
-import os
 import tomllib
 from collections.abc import Sequence
 from pathlib import Path
@@ -47,13 +46,8 @@ from views import preferences
 
 from data_api import buses
 from data_api.routes import candles as _candles
+from data_api.settings import CHART_INDICATOR_CONFIG_PATH
 
-
-# Default mirrors dashboard.py:85-88 exactly (same env var name, same default path).
-CHART_INDICATOR_CONFIG_PATH: str = os.environ.get(
-    "CHART_INDICATOR_CONFIG_PATH",
-    "platform/data/chart_indicators.toml",
-)
 
 # Own clamps (MEM-01 extended to this route, independently of candles.py's values). The candles
 # themselves come from `views.chart_series.candle_page`, so this route can never disagree with the

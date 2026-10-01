@@ -11,7 +11,15 @@ import type { PriceLineSpec } from "../components/chart/LightweightChart";
 // LightweightChart's chart internals are each covered by their own test files --
 // here they are all shallow-mocked so the only real code under test is ChartPage.tsx.
 const saveConfigMock = vi.hoisted(() => vi.fn().mockResolvedValue({ ok: true }));
+// Story 32.5: the drawings resource. `drawings.server` is what GET answers, `saveDrawingsMock` records
+// every PUT (the page persists on every change, debounced).
+const drawingsApi = vi.hoisted(() => ({
+  server: [] as unknown[],
+  save: vi.fn().mockResolvedValue(undefined),
+}));
 vi.mock("../api/client", () => ({
+  fetchCoinDrawings: vi.fn(() => Promise.resolve(drawingsApi.server)),
+  saveCoinDrawings: (...args: unknown[]) => drawingsApi.save(...args),
   fetchCoinIndicatorConfig: vi.fn().mockResolvedValue([]),
   saveCoinIndicatorConfig: saveConfigMock,
   // IndicatorPicker (rendered by ChartPage) fetches the catalog on mount.
@@ -40,6 +48,7 @@ const mocks = vi.hoisted(() => ({
   candles: [] as unknown[],
   volume: [] as unknown[],
   venueMarket: null as { venue: string; market: string } | null,
+  precision: { price: 2, size: 3 } as { price: number; size: number } | null,
   liveBar: null as unknown,
   session: { candles: [] as unknown[], volume: [] as unknown[], completeFrom: null as number | null },
   sessionArgs: { enabled: false, sinceSeconds: 0, barSeconds: 0 },
@@ -53,6 +62,7 @@ vi.mock("../hooks/useCandles", () => ({
       candles: mocks.candles,
       volume: mocks.volume,
       venueMarket: mocks.venueMarket,
+      precision: mocks.precision,
       openGapTo: (time: number) => hooks.openGapTo.push(time),
     };
   },
@@ -132,7 +142,14 @@ interface ChartStubProps {
   priceLines?: PriceLineSpec[];
   onPriceClick?: (price: number) => void;
   onPriceLineDrag?: (id: string, price: number) => void;
-  drawings?: { id: string; kind: string; anchors: unknown[] }[];
+  drawings?: ({ id: string; kind: string; anchors: unknown[] } & Record<string, unknown>)[];
+  precision?: { price: number; size: number } | null;
+  fibActive?: boolean;
+  onFibPlace?: (a: { time: number; price: number }, b: { time: number; price: number }) => void;
+  onDrawingDrag?: (id: string, handle: string, point: { price: number; time: number | null; barsSince: (t: number) => number | null }) => void;
+  onDrawingSettings?: (id: string) => void;
+  onDrawingDelete?: (id: string) => void;
+  onDrawingColor?: (id: string, color: string) => void;
   onPointClick?: (point: { time: number; price: number }) => void;
   measureActive?: boolean;
   onMeasureEnd?: () => void;
@@ -168,6 +185,14 @@ const render = (ui: ReactElement) =>
 // Imported after the mocks above so ChartPage picks up the mocked client/hooks/chart.
 const { default: ChartPage } = await import("./ChartPage");
 const { fetchCoinIndicatorConfig } = await import("../api/client");
+const { SAVE_DEBOUNCE_MS, SAVE_RETRY_MS } = await import("../hooks/useChartDrawings");
+// The tools that save a drawing are off until the coin's drawings have loaded (Story 32.5): a test
+// that clicks one renders through this, which lets the (mocked) GET settle first.
+async function renderReady(ui: ReactElement): Promise<ReturnType<typeof render>> {
+  const rendered = render(ui);
+  await act(async () => {});
+  return rendered;
+}
 const page = () => (
   <MemoryRouter>
     <ChartPage />
@@ -187,6 +212,9 @@ beforeEach(() => {
   mocks.candles = [];
   mocks.volume = [];
   mocks.venueMarket = null;
+  mocks.precision = { price: 2, size: 3 };
+  drawingsApi.server = [];
+  drawingsApi.save.mockReset().mockResolvedValue(undefined);
   mocks.liveBar = null;
   mocks.session = { candles: [], volume: [], completeFrom: null };
 });
@@ -208,8 +236,8 @@ describe("ChartPage venue badge (Story 22.4)", () => {
 });
 
 describe("ChartPage drawing tools (Story 18.1)", () => {
-  it("has cursor active by default and arms the hline tool on click (AC #1)", () => {
-    render(page());
+  it("has cursor active by default and arms the hline tool on click (AC #1)", async () => {
+    await renderReady(page());
 
     expect(screen.getByTestId("chart-stub")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Cursor tool" })).toHaveAttribute("aria-pressed", "true");
@@ -221,8 +249,8 @@ describe("ChartPage drawing tools (Story 18.1)", () => {
     expect(screen.getByRole("button", { name: "Cursor tool" })).toHaveAttribute("aria-pressed", "false");
   });
 
-  it("places exactly one line from an armed hline's chart click, then disarms (AC #2)", () => {
-    render(page());
+  it("places exactly one line from an armed hline's chart click, then disarms (AC #2)", async () => {
+    await renderReady(page());
     fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
 
     // act(): the handler's state updates must flush before the assertions read the
@@ -252,8 +280,8 @@ describe("ChartPage drawing tools (Story 18.1)", () => {
     expect(screen.getByRole("button", { name: "Horizontal line tool" })).toHaveAttribute("aria-pressed", "false");
   });
 
-  it("disables the hline button in Lines mode and re-enables it back in Candles", () => {
-    render(page());
+  it("disables the hline button in Lines mode and re-enables it back in Candles", async () => {
+    await renderReady(page());
 
     fireEvent.click(screen.getByRole("button", { name: "Lines" }));
     expect(screen.getByRole("button", { name: "Horizontal line tool" })).toBeDisabled();
@@ -272,8 +300,8 @@ describe("ChartPage drawing tools (Story 18.1)", () => {
     expect(screen.getByRole("button", { name: "Horizontal line tool" })).toHaveAttribute("aria-pressed", "false");
   });
 
-  it("updates the dragged line's price in the priceLines prop (AC #3)", () => {
-    render(page());
+  it("updates the dragged line's price in the priceLines prop (AC #3)", async () => {
+    await renderReady(page());
     fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
     act(() => {
       lastChartProps.current!.onPriceClick!(61000.5);
@@ -286,8 +314,8 @@ describe("ChartPage drawing tools (Story 18.1)", () => {
     expect(lastChartProps.current!.priceLines).toEqual([{ id: "hline-1", price: 61500.25, color: CHART_TOKENS["--chart-drawing"] }]);
   });
 
-  it("gives each placed line its own counter id, and a drag updates only its own spec", () => {
-    render(page());
+  it("gives each placed line its own counter id, and a drag updates only its own spec", async () => {
+    await renderReady(page());
     fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
     act(() => {
       lastChartProps.current!.onPriceClick!(61000.5);
@@ -381,20 +409,181 @@ describe("ChartPage default layout and per-coin persistence", () => {
     });
   });
 
-  it("persists placed horizontal lines per coin across a remount", () => {
-    const first = render(page());
+  it("saves placed and dragged lines through the drawings resource (one PUT per burst) and restores them on a remount", async () => {
+    vi.useFakeTimers();
+    try {
+      const first = await renderReady(page());
+      fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
+      act(() => lastChartProps.current?.onPriceClick?.(123.5));
+      // A drag changes the line on every mouse move: still one save once the burst ends.
+      act(() => lastChartProps.current?.onPriceLineDrag?.("hline-1", 128));
+      act(() => lastChartProps.current?.onPriceLineDrag?.("hline-1", 130));
+      expect(drawingsApi.save).not.toHaveBeenCalled();
+      await act(async () => {
+        vi.advanceTimersByTime(SAVE_DEBOUNCE_MS + 1);
+      });
+      expect(drawingsApi.save).toHaveBeenCalledTimes(1);
+      expect(drawingsApi.save).toHaveBeenCalledWith(
+        "BTC-USD-PERP.DYDX",
+        [{ kind: "hline", id: "hline-1", price: 130, color: CHART_TOKENS["--chart-drawing"] }],
+        false, // an ordinary save: no keepalive (its 64 KiB cap is for an unload only)
+      );
+      const saved = drawingsApi.save.mock.calls[0][1] as unknown[];
+      first.unmount();
+
+      drawingsApi.server = saved;
+      await renderReady(page());
+      expect(lastChartProps.current?.priceLines).toEqual([expect.objectContaining({ id: "hline-1", price: 130 })]);
+
+      // a second placement continues the counter instead of colliding with the restored id
+      fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
+      act(() => lastChartProps.current?.onPriceClick?.(99));
+      expect(lastChartProps.current?.priceLines?.map((l) => l.id)).toEqual(["hline-1", "hline-2"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("flushes a save still pending when the chart goes away", async () => {
+    const view = await renderReady(page());
     fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
     act(() => lastChartProps.current?.onPriceClick?.(123.5));
-    act(() => lastChartProps.current?.onPriceLineDrag?.("hline-1", 130));
-    first.unmount();
+    view.unmount();
+    expect(drawingsApi.save).toHaveBeenCalledTimes(1);
+    expect(drawingsApi.save.mock.calls[0][2]).toBe(false); // the page lives on: no keepalive needed
+  });
 
-    render(page());
-    expect(lastChartProps.current?.priceLines).toEqual([expect.objectContaining({ id: "hline-1", price: 130 })]);
+  it("an unmount during an in-flight save sends the newer list after it lands, in order", async () => {
+    vi.useFakeTimers();
+    try {
+      let land: () => void = () => {};
+      drawingsApi.save.mockImplementationOnce(() => new Promise<void>((resolve) => (land = resolve)));
+      const view = await renderReady(page());
+      fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
+      act(() => lastChartProps.current?.onPriceClick?.(123.5));
+      await act(async () => {
+        vi.advanceTimersByTime(SAVE_DEBOUNCE_MS + 1);
+      });
+      expect(drawingsApi.save).toHaveBeenCalledTimes(1); // in flight
+      act(() => lastChartProps.current?.onPriceLineDrag?.("hline-1", 130));
+      view.unmount();
+      // Not raced against the one in flight (the older could land last and win).
+      expect(drawingsApi.save).toHaveBeenCalledTimes(1);
+      await act(async () => land());
+      expect(drawingsApi.save).toHaveBeenCalledTimes(2);
+      expect(drawingsApi.save.mock.calls[1][1]).toEqual([expect.objectContaining({ id: "hline-1", price: 130 })]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 
-    // a second placement continues the counter instead of colliding with the restored id
-    fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
-    act(() => lastChartProps.current?.onPriceClick?.(99));
-    expect(lastChartProps.current?.priceLines?.map((l) => l.id)).toEqual(["hline-1", "hline-2"]);
+  it("on pagehide sends the latest list even while an earlier save is still in flight", async () => {
+    vi.useFakeTimers();
+    try {
+      let land: () => void = () => {};
+      drawingsApi.save.mockImplementationOnce(() => new Promise<void>((resolve) => (land = resolve)));
+      await renderReady(page());
+      fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
+      act(() => lastChartProps.current?.onPriceClick?.(123.5));
+      await act(async () => {
+        vi.advanceTimersByTime(SAVE_DEBOUNCE_MS + 1);
+      });
+      expect(drawingsApi.save).toHaveBeenCalledTimes(1); // in flight
+      act(() => lastChartProps.current?.onPriceLineDrag?.("hline-1", 130));
+      act(() => {
+        window.dispatchEvent(new Event("pagehide"));
+      });
+      expect(drawingsApi.save).toHaveBeenCalledTimes(2);
+      expect(drawingsApi.save.mock.calls[1][1]).toEqual([expect.objectContaining({ id: "hline-1", price: 130 })]);
+      expect(drawingsApi.save.mock.calls[1][2]).toBe(true);
+      await act(async () => land());
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("imports the browser's old horizontal lines once, and removes the key after the first save that has them", async () => {
+    vi.useFakeTimers();
+    try {
+      localStorage.setItem("chart-hlines:BTC-USD-PERP.DYDX", JSON.stringify([{ id: "hline-1", price: 61000.5, color: "#112233" }]));
+      await renderReady(page());
+      expect(lastChartProps.current?.priceLines).toEqual([{ id: "hline-1", price: 61000.5, color: "#112233" }]);
+      expect(localStorage.getItem("chart-hlines:BTC-USD-PERP.DYDX")).not.toBeNull(); // not before it is saved
+      await act(async () => {
+        vi.advanceTimersByTime(SAVE_DEBOUNCE_MS + 1);
+      });
+      expect(drawingsApi.save).toHaveBeenCalledWith(
+        "BTC-USD-PERP.DYDX",
+        [{ kind: "hline", id: "hline-1", price: 61000.5, color: "#112233" }],
+        false,
+      );
+      expect(localStorage.getItem("chart-hlines:BTC-USD-PERP.DYDX")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("skips an old line at a price the server already holds, so a repeated import cannot duplicate", async () => {
+    drawingsApi.server = [{ kind: "hline", id: "hline-1", price: 61000.5 }];
+    localStorage.setItem("chart-hlines:BTC-USD-PERP.DYDX", JSON.stringify([{ id: "hline-1", price: 61000.5 }]));
+    await renderReady(page());
+    expect(lastChartProps.current?.priceLines).toHaveLength(1);
+    expect(localStorage.getItem("chart-hlines:BTC-USD-PERP.DYDX")).toBeNull();
+    expect(drawingsApi.save).not.toHaveBeenCalled();
+  });
+
+  it("keeps the drawing tools off, and saves nothing, when the drawings could not be loaded", async () => {
+    const { fetchCoinDrawings } = await import("../api/client");
+    vi.mocked(fetchCoinDrawings).mockRejectedValueOnce(new Error("GET failed"));
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const view = await renderReady(page());
+    expect(screen.getByRole("alert")).toHaveTextContent("Drawings could not be loaded");
+    for (const name of ["Trendline tool", "Horizontal line tool", "Fibonacci retracement tool", "Long position tool"]) {
+      expect(screen.getByRole("button", { name })).toBeDisabled();
+    }
+    view.unmount();
+    expect(drawingsApi.save).not.toHaveBeenCalled();
+    expect(errors).toHaveBeenCalled();
+    errors.mockRestore();
+  });
+
+  it("does not retry a load the server refused (4xx): it would fail identically", async () => {
+    vi.useFakeTimers();
+    const { fetchCoinDrawings } = await import("../api/client");
+    vi.mocked(fetchCoinDrawings).mockClear();
+    vi.mocked(fetchCoinDrawings).mockRejectedValueOnce(Object.assign(new Error("GET failed: 400"), { status: 400 }));
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await renderReady(page());
+      await act(async () => {
+        vi.advanceTimersByTime(SAVE_RETRY_MS * 4);
+      });
+      expect(fetchCoinDrawings).toHaveBeenCalledTimes(1);
+      expect(screen.getByText(/Drawings could not be loaded/)).toBeInTheDocument();
+    } finally {
+      errors.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("retries a failed load every SAVE_RETRY_MS, so a transient error doesn't leave the chart without drawings", async () => {
+    vi.useFakeTimers();
+    const { fetchCoinDrawings } = await import("../api/client");
+    vi.mocked(fetchCoinDrawings).mockRejectedValueOnce(new Error("GET failed: 502"));
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      drawingsApi.server = [{ kind: "hline", id: "hline-1", price: 130 }];
+      await renderReady(page());
+      expect(screen.getByRole("button", { name: "Horizontal line tool" })).toBeDisabled();
+      await act(async () => {
+        vi.advanceTimersByTime(SAVE_RETRY_MS + 1);
+      });
+      expect(screen.getByRole("button", { name: "Horizontal line tool" })).toBeEnabled();
+      expect(lastChartProps.current?.priceLines).toEqual([expect.objectContaining({ id: "hline-1", price: 130 })]);
+    } finally {
+      errors.mockRestore();
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -449,8 +638,8 @@ describe("ChartPage toolbars and timeframe (spec A8.1)", () => {
     expect(screen.getByRole("heading", { level: 1 })).toHaveTextContent("BTC-USD-PERP.DYDX");
   });
 
-  it("orders the left toolbar cursor, crosshair | horizontal line", () => {
-    render(page());
+  it("orders the left toolbar cursor, crosshair | horizontal line", async () => {
+    await renderReady(page());
 
     const names = within(screen.getByRole("toolbar", { name: "Chart tools" }))
       .getAllByRole("button")
@@ -460,6 +649,9 @@ describe("ChartPage toolbars and timeframe (spec A8.1)", () => {
       "Crosshair toggle",
       "Trendline tool",
       "Horizontal line tool",
+      "Fibonacci retracement tool",
+      "Long position tool",
+      "Short position tool",
       "Measurement tool",
       "Fixed range volume profile tool",
     ]);
@@ -621,8 +813,8 @@ describe("ChartPage trendline tool (Story 18.2)", () => {
       lastChartProps.current!.onPointClick!({ time, price });
     });
 
-  it("creates a trendline from two clicks, then disarms (AC #1/#2)", () => {
-    render(<ChartPage />);
+  it("creates a trendline from two clicks, then disarms (AC #1/#2)", async () => {
+    await renderReady(<ChartPage />);
     arm();
 
     click(100, 10);
@@ -652,8 +844,8 @@ describe("ChartPage trendline tool (Story 18.2)", () => {
     expect(lastChartProps.current!.drawings).toEqual([]);
   });
 
-  it("cancels an in-progress line on Escape without creating a drawing (AC #5)", () => {
-    render(<ChartPage />);
+  it("cancels an in-progress line on Escape without creating a drawing (AC #5)", async () => {
+    await renderReady(<ChartPage />);
     arm();
     click(100, 10);
 
@@ -667,8 +859,8 @@ describe("ChartPage trendline tool (Story 18.2)", () => {
     expect(lastChartProps.current!.drawings![0].anchors[0]).toEqual({ time: 200, price: 20 });
   });
 
-  it("discards a pending first point when another tool is selected", () => {
-    render(<ChartPage />);
+  it("discards a pending first point when another tool is selected", async () => {
+    await renderReady(<ChartPage />);
     arm();
     click(100, 10);
 
@@ -680,8 +872,8 @@ describe("ChartPage trendline tool (Story 18.2)", () => {
     expect(lastChartProps.current!.drawings![0].anchors[0]).toEqual({ time: 200, price: 20 });
   });
 
-  it("works in Lines mode too", () => {
-    render(<ChartPage />);
+  it("works in Lines mode too", async () => {
+    await renderReady(<ChartPage />);
     fireEvent.click(screen.getByRole("button", { name: "Lines" }));
 
     expect(screen.getByRole("button", { name: "Trendline tool" })).toBeEnabled();
@@ -814,8 +1006,8 @@ describe("ChartPage bar replay (Story 18.4)", () => {
     expect(lastChartProps.current!.markerTime).toBe(240);
   });
 
-  it("does not place a trendline point from the click that picks the start bar", () => {
-    render(<ChartPage />);
+  it("does not place a trendline point from the click that picks the start bar", async () => {
+    await renderReady(<ChartPage />);
     fireEvent.click(screen.getByRole("button", { name: "Replay" }));
 
     pickBar(120);
@@ -938,8 +1130,8 @@ describe("ChartPage fixed range volume profile (Story 18.6)", () => {
     expect(lastChartProps.current!.volumeProfiles![0].profile.totalVolume).toBeCloseTo(50);
   });
 
-  it("only lets edges be grabbed while the cursor tool is active", () => {
-    render(<ChartPage />);
+  it("only lets edges be grabbed while the cursor tool is active", async () => {
+    await renderReady(<ChartPage />);
     expect(lastChartProps.current!.profileEdgesEditable).toBe(true);
 
     fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
@@ -1238,8 +1430,8 @@ describe("cross-story: drawing tools during replay (Story 18.4 AC #5, verified e
     mocks.volume = bars.map((b) => ({ time: b.time, value: 10 }));
   });
 
-  it("places a trendline and a horizontal line while a replay is active, and they survive stepping", () => {
-    render(<ChartPage />);
+  it("places a trendline and a horizontal line while a replay is active, and they survive stepping", async () => {
+    await renderReady(<ChartPage />);
     fireEvent.click(screen.getByRole("button", { name: "Replay" }));
     point(3, 1);
     expect(lastChartProps.current!.data).toHaveLength(3);
@@ -1290,8 +1482,8 @@ describe("ChartPage legend controls (Story 32.3)", () => {
     await act(async () => {}); // catalog + saved config
   }
 
-  it("the Cursor button says what it does, and is active again after a Trend tool completes", () => {
-    render(page());
+  it("the Cursor button says what it does, and is active again after a Trend tool completes", async () => {
+    await renderReady(page());
     const cursor = screen.getByRole("button", { name: "Cursor tool" });
     expect(cursor).toHaveAttribute("title", "Select / edit drawings (Esc)");
 
@@ -1647,5 +1839,358 @@ describe("ChartPage legend controls (Story 32.3)", () => {
     await mountWith([SMA], { [`${SMA_ID}.value`]: [] });
 
     expect(paneOf(`${SMA_ID}.value`)).toMatchObject({ hidden: false, lineWidth: undefined, lineStyle: undefined, group: SMA_ID });
+  });
+});
+
+describe("ChartPage Fibonacci and position tools (Story 32.5)", () => {
+  const drag = (price: number, time: number | null = null, barsSince = (): number | null => null) => ({ price, time, barsSince });
+  const armTool = (name: string): void => {
+    fireEvent.click(screen.getByRole("button", { name }));
+  };
+  const drawings = (): ChartStubProps["drawings"] => lastChartProps.current!.drawings;
+
+  it("arms the Fibonacci tool for a drag, and Esc cancels it with nothing placed", async () => {
+    await renderReady(page());
+    armTool("Fibonacci retracement tool");
+    expect(lastChartProps.current!.fibActive).toBe(true);
+
+    fireEvent.keyDown(window, { key: "Escape" });
+
+    expect(lastChartProps.current!.fibActive).toBe(false);
+    expect(drawings()).toEqual([]);
+  });
+
+  it("places a Fibonacci from a drag (A at the press, B at the release) with the default levels, then selects Cursor", async () => {
+    await renderReady(page());
+    armTool("Fibonacci retracement tool");
+
+    act(() => lastChartProps.current!.onFibPlace!({ time: 100, price: 100.004 }, { time: 200, price: 90 }));
+
+    const [fib] = drawings()!;
+    expect(fib).toMatchObject({
+      id: "fib-1",
+      kind: "fib",
+      anchors: [
+        { time: 100, price: 100 },
+        { time: 200, price: 90 },
+      ],
+      extend_right: true,
+      label_side: "left",
+      line_width: 1,
+    });
+    const levels = fib.levels as { ratio: number; enabled: boolean }[];
+    expect(levels.filter((l) => l.enabled).map((l) => l.ratio)).toEqual([0, 0.236, 0.382, 0.5, 0.618, 0.786, 1]);
+    expect(levels.filter((l) => !l.enabled).map((l) => l.ratio)).toEqual([1.272, 1.618, 2.618, 4.236]);
+    expect(screen.getByRole("button", { name: "Cursor tool" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("ignores a Fibonacci drag that ends where it began and keeps the tool armed", async () => {
+    await renderReady(page());
+    armTool("Fibonacci retracement tool");
+    act(() => lastChartProps.current!.onFibPlace!({ time: 100, price: 100 }, { time: 100, price: 100 }));
+    expect(drawings()).toEqual([]);
+    expect(lastChartProps.current!.fibActive).toBe(true);
+  });
+
+  it("ignores a flat Fibonacci drag (one price on the grid) whatever its times", async () => {
+    await renderReady(page());
+    armTool("Fibonacci retracement tool");
+    act(() => lastChartProps.current!.onFibPlace!({ time: 100, price: 100 }, { time: 200, price: 100.004 }));
+    expect(drawings()).toEqual([]);
+    expect(lastChartProps.current!.fibActive).toBe(true);
+  });
+
+  it("places no horizontal line at or below zero (the resource would refuse every save)", async () => {
+    await renderReady(page());
+    armTool("Horizontal line tool");
+    act(() => lastChartProps.current?.onPriceClick?.(0.004));
+    act(() => lastChartProps.current?.onPriceClick?.(-3));
+    expect(drawings()).toEqual([]);
+  });
+
+  it("places a Long by one click: stop 1 % below, target 2 x the stop distance above", async () => {
+    await renderReady(page());
+    armTool("Long position tool");
+
+    act(() => lastChartProps.current!.onPointClick!({ time: 100, price: 100 }));
+
+    expect(drawings()![0]).toMatchObject({ id: "position-1", kind: "position", side: "long", time: 100, entry: 100, stop: 99, target: 102, width_bars: 40 });
+    expect(screen.getByRole("button", { name: "Cursor tool" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("places a Short as the mirror: stop above, target below", async () => {
+    await renderReady(page());
+    armTool("Short position tool");
+    act(() => lastChartProps.current!.onPointClick!({ time: 100, price: 100 }));
+    expect(drawings()![0]).toMatchObject({ side: "short", entry: 100, stop: 101, target: 98 });
+  });
+
+  it("snaps a placed position's prices to the precision the candles carried (6 decimals here)", async () => {
+    mocks.precision = { price: 6, size: 0 };
+    await renderReady(page());
+    armTool("Long position tool");
+    act(() => lastChartProps.current!.onPointClick!({ time: 100, price: 0.1234561234 }));
+    expect(drawings()![0]).toMatchObject({ entry: 0.123456, stop: 0.122221, target: 0.125926 });
+  });
+
+  it("keeps the Fibonacci and position tools off until the instrument's precision is known", async () => {
+    mocks.precision = null;
+    await renderReady(page());
+    for (const name of ["Fibonacci retracement tool", "Long position tool", "Short position tool"]) {
+      expect(screen.getByRole("button", { name })).toBeDisabled();
+    }
+    expect(screen.getByRole("button", { name: "Trendline tool" })).toBeEnabled();
+    expect(lastChartProps.current!.precision).toBeNull();
+  });
+
+  it("hands the chart the precision it labels with", async () => {
+    await renderReady(page());
+    expect(lastChartProps.current!.precision).toEqual({ price: 2, size: 3 });
+  });
+
+  async function withLong() {
+    await renderReady(page());
+    armTool("Long position tool");
+    act(() => lastChartProps.current!.onPointClick!({ time: 100, price: 100 }));
+  }
+
+  it("moves a dragged target and refuses one dragged past the entry (it stops one tick above)", async () => {
+    await withLong();
+    act(() => lastChartProps.current!.onDrawingDrag!("position-1", "target", drag(103)));
+    expect(drawings()![0]).toMatchObject({ target: 103 });
+    act(() => lastChartProps.current!.onDrawingDrag!("position-1", "target", drag(95)));
+    expect(drawings()![0]).toMatchObject({ target: 100.01 });
+  });
+
+  it("moves the whole box with the entry handle and sets the width from the right handle", async () => {
+    await withLong();
+    act(() => lastChartProps.current!.onDrawingDrag!("position-1", "entry", drag(110, 500)));
+    expect(drawings()![0]).toMatchObject({ time: 500, entry: 110, stop: 109, target: 112 });
+    act(() => lastChartProps.current!.onDrawingDrag!("position-1", "right", drag(110, 900, () => 25)));
+    expect(drawings()![0]).toMatchObject({ width_bars: 25 });
+  });
+
+  it("moves a Fibonacci anchor with its handle", async () => {
+    await renderReady(page());
+    armTool("Fibonacci retracement tool");
+    act(() => lastChartProps.current!.onFibPlace!({ time: 100, price: 100 }, { time: 200, price: 90 }));
+    act(() => lastChartProps.current!.onDrawingDrag!("fib-1", "b", drag(88.5, 300)));
+    expect(drawings()![0].anchors).toEqual([
+      { time: 100, price: 100 },
+      { time: 300, price: 88.5 },
+    ]);
+  });
+
+  it("opens the position settings modal and saves the entry, stop, target, width and the optional size", async () => {
+    await withLong();
+    act(() => lastChartProps.current!.onDrawingSettings!("position-1"));
+    const dialog = screen.getByRole("dialog", { name: "Position settings" });
+    expect(within(dialog).getByLabelText("Entry")).toHaveValue("100.00"); // at the instrument precision
+
+    fireEvent.change(within(dialog).getByLabelText("Target"), { target: { value: "104" } });
+    fireEvent.change(within(dialog).getByLabelText("Account size"), { target: { value: "10000" } });
+    fireEvent.change(within(dialog).getByLabelText("Risk %"), { target: { value: "1" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+
+    expect(drawings()![0]).toMatchObject({ entry: 100, stop: 99, target: 104, account: 10000, risk_pct: 1 });
+    expect(screen.queryByRole("dialog", { name: "Position settings" })).toBeNull();
+  });
+
+  it("refuses a position whose target sits on the wrong side, or a lone account size, and keeps the modal open", async () => {
+    await withLong();
+    act(() => lastChartProps.current!.onDrawingSettings!("position-1"));
+    const dialog = screen.getByRole("dialog", { name: "Position settings" });
+
+    fireEvent.change(within(dialog).getByLabelText("Target"), { target: { value: "98" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+    expect(within(dialog).getByRole("alert")).toHaveTextContent("A long needs stop < entry < target");
+
+    fireEvent.change(within(dialog).getByLabelText("Target"), { target: { value: "102" } });
+    fireEvent.change(within(dialog).getByLabelText("Account size"), { target: { value: "500" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+    expect(within(dialog).getByRole("alert")).toHaveTextContent("Risk %");
+    expect(drawings()![0]).toMatchObject({ target: 102 });
+    expect(drawings()![0]).not.toHaveProperty("account");
+  });
+
+  it("opens the Fibonacci settings: a level off, a colour, extend right, label side and width", async () => {
+    await renderReady(page());
+    armTool("Fibonacci retracement tool");
+    act(() => lastChartProps.current!.onFibPlace!({ time: 100, price: 100 }, { time: 200, price: 90 }));
+    act(() => lastChartProps.current!.onDrawingSettings!("fib-1"));
+    const dialog = screen.getByRole("dialog", { name: "Fibonacci settings" });
+
+    fireEvent.click(within(dialog).getByLabelText("0.5 on"));
+    fireEvent.click(within(dialog).getByLabelText("1.618 on"));
+    fireEvent.change(within(dialog).getByLabelText("0.618 colour"), { target: { value: "#123456" } });
+    fireEvent.click(within(dialog).getByLabelText("Extend levels to the right"));
+    fireEvent.change(within(dialog).getByLabelText("Labels:"), { target: { value: "right" } });
+    fireEvent.change(within(dialog).getByLabelText("Width:"), { target: { value: "3" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Apply" }));
+
+    const fib = drawings()![0];
+    const levels = fib.levels as { ratio: number; enabled: boolean; color: string }[];
+    expect(levels.find((l) => l.ratio === 0.5)?.enabled).toBe(false);
+    expect(levels.find((l) => l.ratio === 1.618)?.enabled).toBe(true);
+    expect(levels.find((l) => l.ratio === 0.618)?.color).toBe("#123456");
+    expect(fib).toMatchObject({ extend_right: false, label_side: "right", line_width: 3 });
+  });
+
+  it("closes a settings modal on Cancel without a change, and removes the drawing on Remove", async () => {
+    await withLong();
+    act(() => lastChartProps.current!.onDrawingSettings!("position-1"));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(drawings()).toHaveLength(1);
+
+    act(() => lastChartProps.current!.onDrawingSettings!("position-1"));
+    fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+    expect(drawings()).toEqual([]);
+  });
+
+  it("recolours every level of a Fibonacci from the context menu's one colour", async () => {
+    await renderReady(page());
+    armTool("Fibonacci retracement tool");
+    act(() => lastChartProps.current!.onFibPlace!({ time: 100, price: 100 }, { time: 200, price: 90 }));
+    act(() => lastChartProps.current!.onDrawingColor!("fib-1", "#abcdef"));
+    const levels = drawings()![0].levels as { color: string }[];
+    expect(new Set(levels.map((l) => l.color))).toEqual(new Set(["#abcdef"]));
+  });
+
+  it("keeps every drawing in place across a timeframe change, without loading them again", async () => {
+    const { fetchCoinDrawings } = await import("../api/client");
+    vi.mocked(fetchCoinDrawings).mockClear();
+    await withLong();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Timeframe 1H" }));
+    });
+    expect(drawings()).toEqual([expect.objectContaining({ id: "position-1", entry: 100 })]);
+    expect(fetchCoinDrawings).toHaveBeenCalledTimes(1);
+  });
+
+  it("restores a Fibonacci and a position from the server, as another browser would see them", async () => {
+    drawingsApi.server = [
+      {
+        kind: "fib",
+        id: "fib-1",
+        anchors: [
+          { time: 100, price: 100 },
+          { time: 200, price: 90 },
+        ],
+        levels: [{ ratio: 0.5, enabled: true, color: "#123456" }],
+        extend_right: true,
+        label_side: "left",
+        line_width: 1,
+      },
+      { kind: "position", id: "position-2", side: "long", time: 100, entry: 100, stop: 99, target: 102, width_bars: 40 },
+    ];
+    await renderReady(page());
+    expect(drawings()!.map((d) => d.id)).toEqual(["fib-1", "position-2"]);
+  });
+});
+
+describe("drawing settings and failed saves (Story 32.5 review)", () => {
+  const placeLong = (): void => {
+    fireEvent.click(screen.getByRole("button", { name: "Long position tool" }));
+    act(() => lastChartProps.current!.onPointClick!({ time: 100, price: 100 }));
+  };
+
+  it("closes the settings dialog when its drawing is deleted, and an id reused later does not reopen it", async () => {
+    await renderReady(page());
+    placeLong();
+    act(() => lastChartProps.current!.onDrawingSettings!("position-1"));
+    expect(screen.getByRole("dialog", { name: "Position settings" })).toBeInTheDocument();
+    act(() => lastChartProps.current!.onDrawingDelete!("position-1"));
+    expect(screen.queryByRole("dialog", { name: "Position settings" })).toBeNull();
+    placeLong(); // the counter reuses position-1
+    expect(screen.queryByRole("dialog", { name: "Position settings" })).toBeNull();
+  });
+
+  it("drops a settings request made before the instrument's precision is known, instead of parking it", async () => {
+    drawingsApi.server = [
+      { kind: "position", id: "position-1", side: "long", time: 100, entry: 100, stop: 99, target: 102, width_bars: 40 },
+    ];
+    mocks.precision = null;
+    const view = await renderReady(page());
+    act(() => lastChartProps.current!.onDrawingSettings!("position-1"));
+    mocks.precision = { price: 2, size: 3 };
+    view.rerender(page());
+    expect(screen.queryByRole("dialog", { name: "Position settings" })).toBeNull();
+  });
+
+  it("a refused save (422) is shown, not retried, and is tried again by the next edit", async () => {
+    vi.useFakeTimers();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      drawingsApi.save.mockRejectedValue(Object.assign(new Error("PUT failed: 422"), { status: 422 }));
+      await renderReady(page());
+      fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
+      act(() => lastChartProps.current?.onPriceClick?.(123.5));
+      await act(async () => {
+        vi.advanceTimersByTime(SAVE_DEBOUNCE_MS + 1);
+      });
+      expect(screen.getByRole("alert")).toHaveTextContent("refused by the server (HTTP 422)");
+      await act(async () => {
+        vi.advanceTimersByTime(SAVE_RETRY_MS * 4);
+      });
+      expect(drawingsApi.save).toHaveBeenCalledTimes(1);
+
+      drawingsApi.save.mockResolvedValue(undefined);
+      act(() => lastChartProps.current?.onPriceLineDrag?.("hline-1", 130));
+      await act(async () => {
+        vi.advanceTimersByTime(SAVE_DEBOUNCE_MS + 1);
+      });
+      expect(drawingsApi.save).toHaveBeenCalledTimes(2);
+      expect(screen.queryByRole("alert")).toBeNull();
+    } finally {
+      errors.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("a failed save (5xx) is shown and retried every SAVE_RETRY_MS until it lands", async () => {
+    vi.useFakeTimers();
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      drawingsApi.save.mockRejectedValueOnce(Object.assign(new Error("PUT failed: 500"), { status: 500 }));
+      await renderReady(page());
+      fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
+      act(() => lastChartProps.current?.onPriceClick?.(123.5));
+      await act(async () => {
+        vi.advanceTimersByTime(SAVE_DEBOUNCE_MS + 1);
+      });
+      expect(screen.getByRole("alert")).toHaveTextContent("could not be saved");
+      expect(drawingsApi.save).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        vi.advanceTimersByTime(SAVE_RETRY_MS + 1);
+      });
+      expect(drawingsApi.save).toHaveBeenCalledTimes(2);
+      expect(screen.queryByRole("alert")).toBeNull();
+    } finally {
+      errors.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("a save that fails after unmount is not re-flushed (no tight PUT loop)", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    drawingsApi.save.mockRejectedValue(new Error("network down"));
+    const view = await renderReady(page());
+    fireEvent.click(screen.getByRole("button", { name: "Horizontal line tool" }));
+    act(() => lastChartProps.current?.onPriceClick?.(123.5));
+    view.unmount(); // flushes once
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    });
+    expect(drawingsApi.save).toHaveBeenCalledTimes(1);
+    errors.mockRestore();
+  });
+
+  it("imports two old lines at the same price once", async () => {
+    localStorage.setItem(
+      "chart-hlines:BTC-USD-PERP.DYDX",
+      JSON.stringify([{ id: "a", price: 5 }, { id: "b", price: 5 }, { id: "c", price: 6 }]),
+    );
+    await renderReady(page());
+    expect(lastChartProps.current?.priceLines?.map((l) => l.price)).toEqual([5, 6]);
   });
 });

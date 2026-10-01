@@ -605,10 +605,23 @@ four clusters in the same order: [symbol+timeframe] [chart type]
 3. *(group boundary)*
 4. Line (trendline) tool
 5. Horizontal line tool
-6. Measurement tool
+6. Fibonacci retracement tool (click-drag from anchor A to anchor B)
+7. Long position tool (one click)
+8. Short position tool (one click)
+9. Measurement tool
+10. Fixed range volume profile tool
 
-Same principle: cursor/crosshair are one cluster, the three drawing tools
+Same principle: cursor/crosshair are one cluster, the drawing tools
 are the second cluster, in that relative order top-to-bottom.
+(Story 32.5, 2026-10-01: items 6-8 added. Every drawing -- horizontal lines,
+trendlines, Fibonacci, positions -- is one server-side resource per coin
+(`GET`/`PUT /api/coin/{iid}/drawings`, `chart_drawings.toml`), so it follows the
+operator to another browser. In Cursor mode every drawing's handles (a trendline's
+and a Fibonacci's two anchors; a position's entry, target, stop and right edge)
+are draggable through one hit-test, the context menu offers colour, delete and,
+for Fibonacci and positions, Settings...; Esc cancels a placement in progress and
+Cursor is selected after one. Every printed price is formatted at the catalog
+definition's `price_precision`, carried on the candles response.)
 
 **Legend** (§A4.1): top-left corner of whichever pane an indicator lives in
 — i.e. above/over the candles for an overlay indicator, at the top of its

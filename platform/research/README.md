@@ -2,7 +2,7 @@
 
 The one page for the research context (`platform/research/`): the notebook index, the recipes for
 a new notebook, metric or candlestick pattern, how to launch Jupyter locally, and the backtest and
-strategy how-to (moved in from `BACKTESTING.md` in Story 27.9; that file is now a redirect stub).
+strategy how-to (moved in from the former `BACKTESTING.md` in Story 27.9; the redirect stub is deleted).
 
 Every notebook holds no analysis logic of its own: each number comes from `research.domain`'s
 values or `research.application`'s ports and services, every market-data read is bounded by
@@ -24,6 +24,8 @@ functions every number comes from; *fixture run time* is its test run against th
 | `04_backtest_evaluation` | One strategy's backtest: equity, drawdowns, metrics, trade breakdowns, a sweep and a walk-forward | through `NodeRunner` (`data="seconds"`): instrument definitions and `DydxSecondSnapshot` (quotes derived from its top of book); `TradeTick` for `data="trades"`/`"bars:..."` runs | `research.application.backtest_runner.NodeRunner`; `research.application.evaluation` (`metric_grid`, `top_runs`); `research.application.walk_forward` (`walk_forward`, `concat_equity`); `research.domain` (`MetricReport` = `kernel.performance_metrics.all_metrics`, `EquityCurve`, `ReturnSeries.rolling_sharpe`, `TradeLedger`) | 2.9 s |
 | `05_monte_carlo` | How robust one run is: bootstraps, risk of ruin, Sharpe interval, deflated Sharpe | as `04` | `research.domain.monte_carlo` (`bootstrap_trades`, `block_bootstrap_returns`, `risk_of_ruin`, `sharpe_confidence_interval`, `deflated_sharpe`); `research.application.robustness.deflated_check`; `NodeRunner`; `MetricReport` | 1.6 s |
 | `06_candlestick_scanner` | The 22 candlestick patterns over the collected instruments, with forward returns and hit rates | the candle store's bars only (`t`, `o`, `h`, `l`, `c`, `seconds_observed`) | `kernel.candle_patterns.CandlePatternSet`; `research.application.patterns` (`scan_grids`, `ema_values` over Nautilus's `ExponentialMovingAverage`); `research.domain.events` (`forward_returns`, `hit_rate`) | 0.1 s |
+| `07_indicator_atlas` | Every bar indicator of `nautilus_trader.indicators` replayed over one instrument's stored bars and drawn, plus the snapshot indicators over the 1 s frames | the candle store's bars (`t`, `o`, `h`, `l`, `c`, `v`, `partial`); `DydxSecondSnapshot` (decoded top levels) | `research.application.indicator_atlas` (`catalog`, `replay`, `fuzzy_frame`, `swing_points`, `snapshot_indicators`) over the 36 Nautilus indicator classes (8 moving averages, 8 momentum, 8 trend, 7 volatility, 4 volume, `FuzzyCandlesticks`; `nautilus_trader.indicators.__all__` also exports the base classes, the factory, the enums and `SpreadAnalyzer`, which is quote-only and excluded) and `kernel.indicators` (`Microprice`, `OrderFlowImbalance`, `MultiLevelOFI`, `MultiLevelOBI`) | 1.8 s |
+| `08_strategy_gallery` | Thirteen strategies (five upstream examples, `MACrossStrategy`, `IndicatorSignalStrategy`) as a leaderboard with overlaid equity, and one repeated across every fill, fee and latency model | through `NodeRunner` (`data="bars:1-MINUTE"`): instrument definitions and `TradeTick` | `research.application.gallery` (`default_specs`, `run_specs`, `leaderboard`, `equity_frame`, `execution_axes`, `axis_table`, `slippage_by_axis`); `NodeRunner`; `MetricReport` | 1.3 s |
 
 Re-measure the run times (from `platform/`, on the host):
 
@@ -42,6 +44,8 @@ python3 -m pytest -o addopts="" --rootdir=. research/tests/test_notebooks.py \
 | `notebooks/04_backtest_evaluation` | One strategy (by string path, default `OFIStrategy`) on one instrument over a window, through `BacktestRunner` (`NodeRunner`): the equity with its underwater series and every drawdown episode, the `MetricReport` table (exactly `kernel.performance_metrics.all_metrics`), a rolling Sharpe (`ReturnSeries.rolling_sharpe`, or a sentence when the curve is shorter than the window), the realized-PnL and holding-time distributions, PnL by UTC hour and weekday of exit, the trade list; a two-parameter sweep as a heatmap with the top runs, grid size and runtime; and a walk-forward: `N` consecutive in-sample/out-of-sample folds, each fold's pick on the in-sample metric, the joined out-of-sample equity (a stated convention, not one continuous run) against the single run and the out-of-sample metrics beside the in-sample ones. Every number from `research.application.evaluation`, `research.application.walk_forward` and `research.domain`; no cell sums or averages. The one way to evaluate a strategy interactively ("Backtesting & Strategy Development" below). |
 | `notebooks/05_monte_carlo` | How robust one strategy run is (04's strategy and parameters, through `BacktestRunner`): the trade-order bootstrap (the closed trades resampled with replacement) as an equity fan with the observed path, terminal-wealth and path max-drawdown histograms with the observed values marked; the same for a stationary block bootstrap of the equity's returns (autocorrelation kept) and how the two differ; risk of ruin at three equity floors; the Sharpe ratio's bootstrap confidence interval; and, with `SWEEP`, the deflated Sharpe of the grid's best point with a verdict sentence. Every figure's title states its seed and path count; an empty ledger, an undefined Sharpe or `SWEEP=False` prints a sentence instead of a figure. Every number from `research.domain.monte_carlo` and `research.application.robustness`. |
 | `notebooks/06_candlestick_scanner` | The 22 candlestick patterns of `kernel.candle_patterns` (the same detector the chart picker, the screener's Technicals columns and a strategy use; no TA-Lib) over `INSTRUMENTS` at every `TIMEFRAMES` size the candle store keeps (another size is skipped with a line, never resampled): each timeframe's bars on the complete bucket grid with its holes counted, one hits table tagged by instrument, timeframe, pattern and direction, narrowed by an EMA condition (`above`/`below`/`any` against Nautilus's `ExponentialMovingAverage`) and a pattern filter, a plotly candlestick chart centred on hit `HIT_INDEX` with the EMA and the hit marked, and the research output: forward returns at `HORIZONS` bars and the hit rate, mean and count per timeframe, pattern and direction. The pattern set and the EMA restart after every gap, and a forward return across a gap or past `END` is blank. Every number from `research.application.patterns` and `research.domain.events`; an empty filter prints a sentence instead of a chart. |
+| `notebooks/07_indicator_atlas` | Every bar indicator of `nautilus_trader.indicators` (all eight moving averages, momentum, trend, volatility, volume and the fuzzy candlesticks; the doc's section 1) replayed over `INSTRUMENT`'s `BAR_SECONDS` bars on the complete bucket grid and drawn: a candlestick with the moving averages, the bands and channels, and Ichimoku / regression / VWAP, one pane per oscillator, trend, volatility and volume indicator, the fuzzy-candle vector as a heatmap, the swing highs and lows as markers, and the snapshot indicators (microprice, order flow and book imbalance, `kernel.indicators`) over the 1 s frames. `PERIODS` overrides any size; an indicator is reset at every hole and draws nothing until initialized again. Every series from `research.application.indicator_atlas`; no cell computes an indicator. |
+| `notebooks/08_strategy_gallery` | Thirteen backtests through `BacktestRunner` on one instrument and window: `EMACross`, `EMACrossLongOnly`, `EMACrossBracket`, `BBMeanReversion` and `EMACrossTWAP` (Nautilus examples by string path), three `MACrossStrategy` runs and five `IndicatorSignalStrategy` runs, as a leaderboard (every `MetricReport` field, trades, orders, fills, run time and an `error` column: a failed spec keeps its row) and an overlaid equity chart; then `AXIS_SPEC` repeated across the 11 fill models, 3 fee models and three latency settings, with the fill-price difference to the baseline per setting. A reading guide says how to copy a row into `04_backtest_evaluation`. Every number from `research.application.gallery` and `RunResult`. |
 
 No legacy notebook remains: `candlestick_pattern_scanner.ipynb` was deleted in Story 27.7
 (`backtest.ipynb` in Story 27.5).
@@ -170,6 +174,12 @@ Governing rules: `platform/CLAUDE.md` NAUT-03 (BacktestNode + BacktestDataConfig
 custom engine) and DESIGN-02 (strategies never import collector internals — depend on
 shared data types only).
 
+**Before building anything, look it up:** `docs/NAUTILUS_INDICATOR_BACKTEST_CATALOG.md` maps every
+`nautilus_trader.indicators` class, every upstream example strategy and every backtest pattern of
+the upstream docs to how it runs here (a `RunSpec` field, a string path, a family strategy or a
+reasoned exclusion), with the follow-ups. `07_indicator_atlas` shows the indicators, and
+`08_strategy_gallery` runs a spread of strategies and the execution models side by side.
+
 ---
 
 ### Run from a notebook
@@ -222,6 +232,13 @@ spec = RunSpec(
     latency_ms=300,   # the default: every order command reaches the simulated exchange 300 ms after
                       # it is sent and fills against the market then; 0 = fill at the quote the
                       # decision was made on. On "seconds" any 1..1000 fills at the next second.
+    # Execution models, all optional (None = the venue's defaults); a name or key outside the
+    # closed tables raises at construction, naming the valid ones:
+    fill_model={"name": "probabilistic", "prob_fill_on_limit": 0.2, "prob_slippage": 0.5,
+                "random_seed": 42},      # ports.FILL_MODELS: 11 names
+    fee_model={"name": "fixed", "commission": "0.50 USDC"},   # ports.FEE_MODELS: 3 names
+    latency={"insert_latency_nanos": 300_000_000},   # replaces latency_ms; ports.LATENCY_KEYS
+    exec_algorithms=("nautilus_trader.examples.algorithms.twap:TWAPExecAlgorithm",),
 )
 runner = NodeRunner()
 result = runner.run(spec)
@@ -241,7 +258,11 @@ balance `total` after each of the account's own events, in event order, includin
 still open at the end -- so it can differ from `metrics`, which cover closed trades only), `trades` (every closed position of the positions report, NETTING
 snapshots included; a position still open at the end is not a trade), `metrics`, `pnl_by_day`,
 Nautilus's own `nautilus_stats` (`stats_pnls`/`stats_returns`, for cross-checking),
-`iterations` and `wall_seconds`. The runner reads each engine's reports before disposing the node
+`iterations`, `wall_seconds` and `orders` / `fills` (the engine's own order and order-fill reports; `evaluation.orders_frame`,
+`fills_frame` and `nautilus_stats_frame` format them). `nautilus_stats["returns"]` holds the portfolio analyzer's return statistics with CAGR,
+Alpha, BetaRatio, CalmarRatio, InformationRatio, MaxDrawdown, TrackingError and TreynorRatio added by the runner (Nautilus does not register
+them by default). Known limit: Alpha, BetaRatio, InformationRatio, TrackingError and TreynorRatio exist only in the pinned
+`nautilus_trader` 1.229; the host's 1.228 prints a warning that they are not registered and the run goes on without them. The runner reads each engine's reports before disposing the node
 (`dispose_on_completion=False`), which is why they are not empty the way `backtest_dydx.py`'s
 docstring found them after `run()`. A config Nautilus returns no result for raises -- never a
 silent gap. The runner's `Known limit:`s (one venue and one settlement currency per run; a sweep
@@ -263,7 +284,7 @@ statistic.
 
 ```bash
 # from the repo root (default catalog path is platform/data/catalog)
-PYTHONPATH=platform python -m research.strategies.backtest_dydx       # LogisticTrendStrategy on internally-aggregated Bars
+PYTHONPATH=platform python -m research.strategies.backtest_dydx       # IndicatorSignalStrategy (logistic_trend) on internally-aggregated Bars
 PYTHONPATH=platform python -m research.strategies.backtest_snapshot   # SnapshotStrategy on raw 1s DydxSecondSnapshot
 PYTHONPATH=platform python -m research.strategies.backtest_ofi        # OFIStrategy on 1s DydxSecondSnapshot, quotes from level 0
 PYTHONPATH=platform python -m research.strategies.backtest_candle_pattern   # CandlePatternStrategy on 1-minute bars from trade ticks
@@ -290,6 +311,14 @@ tuning knobs — e.g. `backtest_dydx.run(symbols=["BTC-USD-PERP.DYDX"], bar_inte
 | Raw 1s book snapshots | `DydxSecondSnapshot` | `research/strategies/backtest_snapshot.py` |
 | Raw 1s book snapshots, fills at the snapshot's best bid/ask | `DydxSecondSnapshot` + `QuoteTick` derived by `kernel.catalog_files.query_top_of_book` | `research/strategies/backtest_ofi.py` (via `research/strategies/snapshot_backtest.py`) |
 | Bars from trades, pattern entries | `TradeTick` → internal `Bar`, through `NodeRunner` (`data="trades"`) | `research/strategies/backtest_candle_pattern.py` (`CandlePatternStrategy`, Story 27.8; also the second worked example in `04_backtest_evaluation`, and a paper bot with `strategy = "candle_pattern"`, `bots/README.md`) |
+| Every Nautilus indicator, one at a time | bars (`data="bars:1-MINUTE"`) | `IndicatorSignalStrategy` (`signal`, `signal_params`, `filter`, `exit`, `allow_short`; 25 signals, one per bar indicator), shown in `08_strategy_gallery` |
+| Two moving averages crossing, any of the eight types, with an ATR stop or a trailing ATR stop | bars | `MACrossStrategy` (`ma_type`, `fast_period`, `slow_period`, `exit`, `atr_multiple`) |
+| A Nautilus example strategy as-is (`EMACross*`, `BBMeanReversion`, `EMACrossTWAP`) | bars | its string path (`nautilus_trader.examples.strategies.<file>:<Class>`), `data="bars:1-MINUTE"`, `params={"trade_size": "0.01", ...}`; `08_strategy_gallery` |
+
+`docs/NAUTILUS_INDICATOR_BACKTEST_CATALOG.md` is the lookup for the rest: every `nautilus_trader.indicators`
+class (constructor, `update_raw` inputs, outputs, how it is reached here), the 17 upstream example strategies
+with the `RunSpec` that runs each (or why not), and every backtest pattern of the upstream docs mapped to a
+`RunSpec` field or the NAUT-03 exclusion. Read it before writing anything: Nautilus probably has it.
 
 Don't write a new backtest runner from scratch — copy the closest match above and swap
 the `strategy_path`/`config_path`/`data=[...]` list.
@@ -297,6 +326,14 @@ the `strategy_path`/`config_path`/`data=[...]` list.
 ---
 
 ### Build a strategy
+
+Two parameterised families already cover most indicator ideas without new code:
+`research.strategies.indicator_signal_strategy:IndicatorSignalStrategy` (`signal` picks one of 25
+Nautilus or kernel indicators, `filter` gates entries on `vhf` or `volatility_ratio`, `exit` is the
+opposite signal or `bars:<n>`) and `research.strategies.ma_cross_strategy:MACrossStrategy` (any of the
+eight `MovingAverageType`s, exit on the opposite cross, an ATR stop or a trailing ATR stop); both are
+config-only, so a sweep over `signal`, `ma_type` or their parameters is `04_backtest_evaluation`'s
+`GRID`. Write a new strategy only when neither fits.
 
 A strategy is a `StrategyConfig` + `Strategy` pair, referenced by string path
 (`ImportableStrategyConfig`) — never imported directly into the backtest runner. This is
@@ -351,7 +388,7 @@ class MyStrategy(Strategy):
         self.submit_order(order)
 ```
 
-**Conventions used by every strategy here** (`research/strategies/example_strategy.py`,
+**Conventions used by every strategy here** (`research/strategies/indicator_signal_strategy.py`,
 `research/strategies/ofi_strategy.py`, `research/strategies/snapshot_strategy.py`):
 - `frozen=True` on the config class.
 - `on_start`: look up `self.instrument` via `self.cache.instrument(...)`, `self.stop()` and
